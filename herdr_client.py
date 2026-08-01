@@ -152,6 +152,46 @@ def pane_read(session: str, pane_id: str, lines: int = 100, is_agent: bool = Fal
         return {"available": True, "error": str(e), "output": ""}
 
 
+def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, Any]:
+    """取 agent 最近会话的摘要(@ 引用会话用)。
+
+    读 agent read 输出,过滤掉 TUI 装饰行(边框/状态栏/空行),
+    只保留对话内容(用户消息 ›、agent 回复 •、普通输出行),截取尾部 max_lines 行。
+    """
+    if not is_available():
+        return {"available": False}
+    try:
+        out = _run(["--session", session, "agent", "read", pane_id], timeout=8)
+    except RuntimeError as e:
+        return {"available": True, "error": str(e), "summary": ""}
+    # 过滤 TUI 噪声:边框字符、纯空行、状态栏、超长装饰线
+    noise_prefixes = (
+        "─", "═", "│", "╭", "╰", "╮", "╯", "•  └",  # 边框
+        "  gpt-", "  context:", "  yolo", "  K3",   # 状态栏
+        "Token usage", "Tip:", "Use /",             # 启动提示
+    )
+    kept = []
+    for line in out.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if any(s.startswith(p) for p in noise_prefixes):
+            continue
+        # 跳过纯装饰长横线
+        if set(s) <= {"─", "═", " ", "│"} and len(s) > 20:
+            continue
+        kept.append(line.rstrip())
+    # 取尾部
+    summary_lines = kept[-max_lines:] if len(kept) > max_lines else kept
+    return {
+        "available": True,
+        "session": session,
+        "pane_id": pane_id,
+        "summary": "\n".join(summary_lines),
+        "line_count": len(summary_lines),
+    }
+
+
 def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> dict[str, Any]:
     """往 pane 发送。
 

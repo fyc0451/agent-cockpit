@@ -235,8 +235,9 @@ header .spacer{flex:1}
       <button class="icon" onclick="closeTerm()">✕</button>
     </div>
     <div class="term-out" id="termOut">加载中…</div>
-    <div class="term-in">
-      <input id="termInput" placeholder="输入指令,回车发送…(@路径引用文件/图片)" onkeydown="if(event.key==='Enter')termSend()">
+    <div class="term-in" style="position:relative;flex-wrap:wrap">
+      <input id="termInput" style="flex:1;min-width:160px" placeholder="输入指令,回车发送…(@引用agent会话 / @路径引用文件)" oninput="onTermInput(event)" onkeydown="onTermKeydown(event)">
+      <div id="mentionPopover" class="hidden" style="position:absolute;bottom:100%;left:0;margin-bottom:4px;background:var(--bg3);border:1px solid var(--bd2);border-radius:8px;box-shadow:0 -4px 16px rgba(0,0,0,.4);max-height:240px;overflow:auto;z-index:10;min-width:220px"></div>
       <label class="icon" style="cursor:pointer;font-size:18px" title="上传截图/文件并插入@路径">📎<input type="file" id="termUpload" accept="image/*" multiple style="display:none" onchange="termUploadFiles(this)"></label>
       <select id="termMode" style="width:auto"><option value="prompt">prompt(agent)</option><option value="send">执行(shell)</option><option value="keys">按键(keys)</option></select>
       <button class="primary" onclick="termSend()">发送</button>
@@ -402,6 +403,74 @@ async function termUploadFiles(input){
   input.value=''; // 允许重复选同一文件
   inp.focus();
 }
+
+// ============ @ 引用会话(借鉴 Tutti) ============
+// 输入框打 @ 且前面是空格/行首 → 弹其他 agent 列表 → 选中取摘要拼进 prompt
+let MENTION_ACTIVE=false, MENTION_AGENT_LIST=[];
+function onTermInput(e){
+  const inp=e.target, v=inp.value, pos=inp.selectionStart;
+  // 找光标前最近的 @
+  const before=v.slice(0,pos);
+  const atIdx=before.lastIndexOf('@');
+  if(atIdx<0){hideMention();return}
+  // @ 必须在行首或前面是空白(避免匹配邮箱/路径里的 @)
+  const charBefore=atIdx>0?before[atIdx-1]:' ';
+  if(!/[\s\n]/.test(charBefore)){hideMention();return}
+  // @ 后到光标的文本(过滤词)
+  const query=before.slice(atIdx+1);
+  if(query.includes('\n')||query.length>20){hideMention();return}
+  MENTION_ACTIVE=true;
+  showMention(query);
+}
+function showMention(query){
+  const pop=document.getElementById('mentionPopover');
+  // 候选:BOARD 里除当前 agent 外的所有 agent
+  const cur=CURRENT_TERM?.paneId;
+  const cands=(BOARD?.panes||[]).filter(p=>p.agent&&p.pane_id!==cur);
+  const q=query.toLowerCase();
+  const filtered=q?cands.filter(p=>(p.agent+' '+p.session+' '+p.pane_id).toLowerCase().includes(q)):cands;
+  if(!filtered.length){hideMention();return}
+  pop.innerHTML=filtered.map((p,i)=>`
+    <div class="mention-item" onclick="pickMention('${esc(p.session)}','${esc(p.pane_id)}','${esc(p.agent)}')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border-bottom:1px solid var(--bd)">
+      <span class="agent-icon ${esc(p.agent)}" style="width:22px;height:22px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+      <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span>
+    </div>`).join('');
+  pop.classList.remove('hidden');
+  pop._filtered=filtered;
+}
+function hideMention(){MENTION_ACTIVE=false;document.getElementById('mentionPopover').classList.add('hidden')}
+async function pickMention(session,paneId,agent){
+  hideMention();
+  const inp=document.getElementById('termInput');
+  // 删掉输入框里的 @query
+  const v=inp.value, pos=inp.selectionStart;
+  const before=v.slice(0,pos), after=v.slice(pos);
+  const atIdx=before.lastIndexOf('@');
+  inp.value=before.slice(0,atIdx);
+  inp.disabled=true; toast('读取 '+agent+' 会话…');
+  try{
+    const d=await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/summary?max_lines=30`);
+    const summary=(d.summary||'').trim();
+    if(!summary){toast(agent+' 无可用会话');inp.disabled=false;inp.focus();return}
+    // 拼成引用块,插入输入框
+    const block=`参考 [${agent} @ ${session}] 的最近会话:\n\`\`\`\n${summary}\n\`\`\`\n\n`;
+    inp.value=inp.value+(inp.value?' ':'')+block;
+    toast('已插入 '+agent+' 的会话摘要('+d.line_count+'行)');
+  }catch(e){toast('读取失败: '+e)}
+  inp.disabled=false;
+  after.split('').forEach(()=>{}); // 保留 after(通常为空)
+  inp.value+=after;
+  inp.focus();
+  // 光标移到引用块之后
+  const np=inp.value.length-after.length;
+  inp.setSelectionRange(np,np);
+}
+function onTermKeydown(e){
+  if(e.key==='Enter'){termSend();return}
+  if(MENTION_ACTIVE&&(e.key==='Escape')){hideMention();e.preventDefault()}
+}
+// 点击输入框外关闭浮层
+document.addEventListener('click',e=>{if(MENTION_ACTIVE&&!e.target.closest('#termInput')&&!e.target.closest('#mentionPopover'))hideMention()});
 
 // ============ 终端里的消息(嵌入 agent 卡片通讯) ============
 async function loadAgentMsgsForTerm(agent,session){

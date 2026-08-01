@@ -272,6 +272,12 @@ def api_herdr_pane(session: str, pane_id: str, lines: int = 80, is_agent: bool =
     return herdr_client.pane_read(session, pane_id, lines, is_agent)
 
 
+@app.get("/api/herdr/pane/{session}/{pane_id}/summary")
+def api_herdr_pane_summary(session: str, pane_id: str, max_lines: int = 30):
+    """取 agent 会话摘要(@ 引用会话用)。"""
+    return herdr_client.pane_summary(session, pane_id, max_lines)
+
+
 @app.post("/api/herdr/pane/{session}/{pane_id}/send")
 def api_herdr_pane_send(session: str, pane_id: str, req: PaneSendReq):
     """往 pane 发指令(send-keys 或 prompt)。"""
