@@ -645,21 +645,57 @@ async function termNew(cwd){
     termMount(r.id);
   }catch(e){toast('创建终端失败: '+e)}
 }
-function termSwitch(id){if(id){TERM_ID=id;termMount(id)}}
+function termSwitchOld_removed(){/* 已合并到下面的 termSwitch */}
 // 终端 tab 上传:上传文件 → 把 @路径 作为击键写入 xterm(等于在终端打字)
+let UPLOADED_REFS=[]; // 上传的文件路径,等用户选 pane 后发送
 async function termTabUploadFiles(input){
-  const files=input.files;if(!files.length||!TERM_WS||!XTERM)return;
+  const files=input.files;if(!files.length)return;
+  UPLOADED_REFS=[];
   for(const f of files){
     const fd=new FormData();fd.append('file',f);
     try{
       const r=await api('/api/upload',{method:'POST',body:fd});
-      // 把 @路径 作为击键发进终端(codex 会识别 @ 引用)
-      const ref='@'+r.path+' ';
-      TERM_WS.send(ref);
-      toast('已上传并插入: '+r.filename);
+      UPLOADED_REFS.push('@'+r.path+' ');
+      toast('已上传: '+r.filename);
     }catch(e){toast('上传失败: '+e)}
   }
   input.value='';
+  if(!UPLOADED_REFS.length)return;
+  // 弹选择器:发给当前终端 还是 某个 agent pane
+  const m=document.getElementById('collabModal');
+  document.querySelector('#collabModal h3').textContent='附件发给谁?';
+  document.querySelector('#collabModal .muted').innerHTML='选目标,文件路径('+UPLOADED_REFS.length+'个)会插入那里';
+  // 选项1:当前终端
+  let html=`<div onclick="sendUploadToCurrent()" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--accent);border-radius:8px;margin-bottom:6px">
+    <span style="font-size:18px">🖥</span><span><b>当前终端</b> <span class="muted">(你正在看的这个)</span></span></div>`;
+  // 选项2+:各 agent pane(通过 herdr prompt 发)
+  for(const p of (BOARD?.panes||[])){
+    if(!p.agent)continue;
+    html+=`<div onclick="sendUploadToPane('${esc(p.session)}','${esc(p.pane_id)}','${esc(p.agent)}')" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
+      <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+      <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span></div>`;
+  }
+  document.getElementById('collabList').innerHTML=html;
+  m.classList.add('show');
+}
+function sendUploadToCurrent(){
+  closeCollab();
+  if(TERM_WS&&TERM_WS.readyState===1){
+    TERM_WS.send(UPLOADED_REFS.join(''));
+    toast('已插入当前终端');
+    XTERM&&XTERM.focus();
+  }else{toast('当前终端未连接')}
+  UPLOADED_REFS=[];
+}
+async function sendUploadToPane(session,paneId,agent){
+  closeCollab();
+  const refs=UPLOADED_REFS.join(' ');
+  UPLOADED_REFS=[];
+  toast('发给 '+agent+'...');
+  try{
+    await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:refs,mode:'prompt'})});
+    toast('✅ 已发给 '+agent);
+  }catch(e){toast('发送失败: '+e)}
 }
 // @协作:弹 agent 列表 → 选一个 → 查身份 → 身份信息作为击键写入 xterm
 function termPickCollab(){
@@ -735,83 +771,97 @@ async function termInsertCollab(session,paneId,agent){
 }
 async function termClose(){
   if(!TERM_ID)return;
+  const inst=TERM_INSTANCES[TERM_ID];
   try{await api('/api/term/'+TERM_ID,{method:'DELETE'})}catch(e){}
   TERMS=TERMS.filter(t=>t!==TERM_ID);
+  if(inst){
+    if(inst.ws)inst.ws.close();
+    if(inst.xterm)inst.xterm.dispose();
+    if(inst.el)inst.el.remove();
+    delete TERM_INSTANCES[TERM_ID];
+  }
+  TERM_ID=TERMS[0]||null;
   const sel=document.getElementById('termSelect');
   sel.innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
-  if(TERM_WS){TERM_WS.close();TERM_WS=null}
-  if(XTERM){XTERM.dispose();XTERM=null}
-  TERM_ID=TERMS[0]||null;
-  if(TERM_ID)termMount(TERM_ID);
-  else document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>';
+  if(TERM_ID)showTermInstance(TERM_ID);
+  else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
+}
+// 多终端保活:每个终端一个独立容器元素,切换时隐藏/显示(不销毁)
+let TERM_INSTANCES={}; // {term_id: {xterm, fit, ws, el}}
+function showTermInstance(id){
+  // 隐藏所有,显示选中的
+  for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
+    if(inst.el)inst.el.style.display=(tid===id)?'block':'none';
+  }
+  const inst=TERM_INSTANCES[id];
+  if(inst){XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;setTimeout(()=>{try{inst.xterm.focus()}catch(e){}},50)}
+}
+function termSwitch(id){
+  if(!id)return;
+  TERM_ID=id;
+  if(TERM_INSTANCES[id]){showTermInstance(id)}
+  else{termMount(id)}
 }
 function termMount(id){
   const c=document.getElementById('termContainer');
-  c.innerHTML='';
   if(typeof Terminal==='undefined'){c.innerHTML='<div class="empty" style="color:#c00;padding:20px">xterm.js 加载失败(CDN 不可达?)</div>';return}
-  XTERM=new Terminal({cursorBlink:true,fontSize:13,theme:{background:'#000',foreground:'#e8e8e8'},scrollback:5000});
-  FIT=new FitAddon.FitAddon();
-  XTERM.loadAddon(FIT);
-  XTERM.open(c);
-  // 安全 fit:fit 后再 cols-1,防止最右一列被容器边缘/滚动条裁切
+  // 为这个终端创建独立子容器(不销毁其他终端)
+  const el=document.createElement('div');
+  el.style.cssText='width:100%;height:100%;display:block';
+  // 清掉 empty 提示
+  const empty=c.querySelector('.empty');if(empty)empty.remove();
+  c.appendChild(el);
+  const xterm=new Terminal({cursorBlink:true,fontSize:13,theme:{background:'#000',foreground:'#e8e8e8'},scrollback:5000});
+  const fit=new FitAddon.FitAddon();
+  xterm.loadAddon(fit);
+  xterm.open(el);
+  XTERM=xterm;FIT=fit;
+  // 隐藏其他终端的容器
+  for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
+    if(inst.el&&tid!==id)inst.el.style.display='none';
+  }
+  // 安全 fit
   const safeFit=()=>{
     try{
-      FIT.fit();
-      // fit 偶尔会多算 1 列(小数取整 + padding 误差),手动减 1 留安全边距
-      const d=FIT.proposeDimensions();
-      if(d&&d.cols>10){XTERM.resize(d.cols-1,d.rows)}
+      fit.fit();
+      const d=fit.proposeDimensions();
+      if(d&&d.cols>10){xterm.resize(d.cols-1,d.rows)}
     }catch(e){}
   };
   safeFit();
-  if(TERM_WS){TERM_WS.close()}
-  const cols=XTERM.cols,rows=XTERM.rows;
-  TERM_WS=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
-  TERM_WS.binaryType='arraybuffer';
-  TERM_WS.onopen=()=>{
-    TERM_WS.send(JSON.stringify({type:'resize',cols,rows}));
-    XTERM.focus();
+  if(TERM_WS){try{TERM_WS.close()}catch(e){}}
+  const cols=xterm.cols,rows=xterm.rows;
+  const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{ws.send(JSON.stringify({type:'resize',cols,rows}));xterm.focus()};
+  ws.onmessage=ev=>{
+    if(typeof ev.data==='string')xterm.write(ev.data);
+    else xterm.write(new Uint8Array(ev.data));
   };
-  TERM_WS.onmessage=ev=>{
-    if(typeof ev.data==='string')XTERM.write(ev.data);
-    else XTERM.write(new Uint8Array(ev.data));
-  };
-  TERM_WS.onclose=()=>{if(XTERM)XTERM.write('\r\n\x1b[33m[连接已断开]\x1b[0m\r\n')};
-  TERM_WS.onerror=()=>{if(XTERM)XTERM.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')};
-  XTERM.onData(d=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(d)});
-  XTERM.onResize(({cols,rows})=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(JSON.stringify({type:'resize',cols,rows}))});
+  ws.onclose=()=>{if(xterm)xterm.write('\r\n\x1b[33m[连接已断开]\x1b[0m\r\n')};
+  ws.onerror=()=>{if(xterm)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')};
+  xterm.onData(d=>{if(ws&&ws.readyState===1)ws.send(d)});
+  xterm.onResize(({cols,rows})=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'resize',cols,rows}))});
   window.addEventListener('resize',()=>safeFit());
-  // ── 粘贴/复制支持 ──
-  // 1. 右键粘贴(桌面+手机都好用):阻止默认菜单,读剪贴板写入终端
-  c.addEventListener('contextmenu',e=>{
+  TERM_WS=ws;
+  // 保存实例
+  TERM_INSTANCES[id]={xterm,fit,ws,el};
+  // 粘贴/复制(绑定到这个 xterm 的容器)
+  el.addEventListener('contextmenu',e=>{
     e.preventDefault();
-    navigator.clipboard.readText().then(t=>{
-      if(t&&TERM_WS&&TERM_WS.readyState===1){
-        // bracketed paste 协议:包一层转义序列,终端程序识别为粘贴(不触发快捷键)
-        TERM_WS.send('\x1b[200~'+t+'\x1b[201~');
-      }
-    }).catch(()=>{});
+    navigator.clipboard.readText().then(t=>{if(t&&ws.readyState===1){ws.send('\x1b[200~'+t+'\x1b[201~')}}).catch(()=>{});
   });
-  // 2. Cmd+V(Mac)/Ctrl+V(其他)粘贴
-  c.addEventListener('keydown',e=>{
+  el.addEventListener('keydown',e=>{
     if((e.metaKey||e.ctrlKey)&&e.key==='v'){
       e.preventDefault();
-      navigator.clipboard.readText().then(t=>{
-        if(t&&TERM_WS&&TERM_WS.readyState===1){TERM_WS.send('\x1b[200~'+t+'\x1b[201~')}
-      }).catch(()=>{});
+      navigator.clipboard.readText().then(t=>{if(t&&ws.readyState===1){ws.send('\x1b[200~'+t+'\x1b[201~')}}).catch(()=>{});
     }
-    // Ctrl+Shift+C / Cmd+C 复制选中文本(xterm 自带选中,这里写剪贴板)
     if((e.metaKey||(e.ctrlKey&&e.shiftKey))&&e.key==='c'){
-      const sel=XTERM.getSelection();
+      const sel=xterm.getSelection();
       if(sel){e.preventDefault();navigator.clipboard.writeText(sel).catch(()=>{})}
     }
   });
-  // 3. 选中后自动复制(松开鼠标时)
-  c.addEventListener('mouseup',()=>{
-    setTimeout(()=>{
-      const sel=XTERM.getSelection();
-      if(sel){navigator.clipboard.writeText(sel).catch(()=>{})}
-    },10);
-  });
+  el.addEventListener('mouseup',()=>{setTimeout(()=>{const sel=xterm.getSelection();if(sel){navigator.clipboard.writeText(sel).catch(()=>{})}},10)});
 }
 
 // ============ 会话管理(session + agent 重启) ============
