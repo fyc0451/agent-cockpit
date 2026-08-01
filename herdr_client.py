@@ -23,6 +23,48 @@ HERDR_BIN = _HERDR_ENV or shutil.which("herdr") or str(Path.home() / ".local" / 
 _HERDR_DIR = str(Path(HERDR_BIN).parent) if HERDR_BIN else ""
 
 
+def _find_agent_bin(name: str) -> str:
+    """探测 agent 二进制完整路径(shutil.which → 已知安装路径 fallback)。"""
+    found = shutil.which(name)
+    if found:
+        return found
+    home = Path.home()
+    paths = {
+        "codex": [home / ".npm-global" / "bin" / "codex"],
+        "kimi": [home / ".kimi-code" / "bin" / "kimi"],
+        "claude": [home / ".npm-global" / "bin" / "claude"],
+        "qoder": [home / ".qodersec" / "bin" / "qodersec"],
+        "qodercli": [home / ".qodersec" / "bin" / "qodersec"],
+        "qodercn": [home / ".qodersec" / "bin" / "qodersec"],
+        "grok": [home / ".grok" / "downloads" / "grok-linux-x86_64"],
+        "opencode": [home / ".opencode" / "bin" / "opencode"],
+    }
+    for p in paths.get(name, []):
+        if p.is_file():
+            return str(p)
+    return name  # 最后兜底用裸名
+
+
+# agent 类型 → 启动命令构造器
+def _agent_cmd(agent: str, workdir: str) -> str:
+    """构造 agent 启动命令(完整路径 + shlex 安全)。"""
+    import shlex
+    wdb = shlex.quote(workdir)
+    bins = {
+        "codex": lambda b: f"{shlex.quote(b)} -C {wdb}",
+        "kimi": lambda b: f"{shlex.quote(b)}",
+        "claude": lambda b: f"{shlex.quote(b)}",  # claude 默认用 cwd
+        "qoder": lambda b: f"{shlex.quote(b)}",
+        "qodercli": lambda b: f"{shlex.quote(b)}",
+        "qodercn": lambda b: f"{shlex.quote(b)}",
+        "grok": lambda b: f"{shlex.quote(b)}",
+        "opencode": lambda b: f"{shlex.quote(b)}",
+    }
+    bin_path = _find_agent_bin(agent)
+    builder = bins.get(agent, bins["codex"])
+    return builder(bin_path)
+
+
 def is_available() -> bool:
     return bool(HERDR_BIN) and Path(HERDR_BIN).is_file()
 
@@ -234,17 +276,8 @@ def start_agent(
     if existing:
         return {"available": True, "pane_id": existing["pane_id"], "agent": agent,
                 "reused": True, "msg": f"{agent} pane 已存在({existing['pane_id']}),跳过"}
-    # 构造 agent 启动命令(用完整路径,herdr pane 的 PATH 可能没有这些命令)
-    import shlex
-    codex_bin = shutil.which("codex") or str(Path.home() / ".npm-global" / "bin" / "codex")
-    kimi_bin = shutil.which("kimi") or str(Path.home() / ".kimi-code" / "bin" / "kimi")
-    qoder_bin = shutil.which("qoder") or "qoder"
-    agent_cmds = {
-        "codex": f"{shlex.quote(codex_bin)} -C {shlex.quote(workdir)}",
-        "kimi": f"{shlex.quote(kimi_bin)}",
-        "qodercli": f"{shlex.quote(qoder_bin)}",
-    }
-    cmd_str = agent_cmds.get(agent, agent_cmds["codex"])
+    # 构造 agent 启动命令(用 _agent_cmd 统一处理完整路径)
+    cmd_str = _agent_cmd(agent, workdir)
     try:
         # 用 pane split 开新 pane(herdr 没有 new-window,用 pane split --cwd)
         split_out = _run(
@@ -309,19 +342,14 @@ def restart_pane(
         p = next((x for x in snap.get("panes", []) if x.get("pane_id") == pane_id), {})
         workdir = workdir or p.get("cwd", str(Path.home()))
         agent = agent or p.get("agent") or "codex"
-        # 4. 构造启动命令(用完整路径,herdr pane PATH 可能找不到)
+        # 4. 构造启动命令(用 _agent_cmd 统一处理所有 agent 类型)
         import shlex
-        codex_bin = shutil.which("codex") or str(Path.home() / ".npm-global" / "bin" / "codex")
-        kimi_bin = shutil.which("kimi") or str(Path.home() / ".kimi-code" / "bin" / "kimi")
-        qoder_bin = shutil.which("qoder") or "qoder"
-        agent_bins = {"codex": codex_bin, "kimi": kimi_bin, "qodercli": qoder_bin}
-        abin = shlex.quote(agent_bins.get(agent, codex_bin))
         if agent == "codex" and resume:
-            cmd_str = f'cd {shlex.quote(workdir)} && {abin} resume --last'
-        elif agent == "codex":
-            cmd_str = f'cd {shlex.quote(workdir)} && {abin}'
+            codex_bin = shlex.quote(_find_agent_bin("codex"))
+            cmd_str = f'cd {shlex.quote(workdir)} && {codex_bin} resume --last'
         else:
-            cmd_str = f'cd {shlex.quote(workdir)} && {abin}'
+            base = _agent_cmd(agent, workdir)
+            cmd_str = f'cd {shlex.quote(workdir)} && {base}'
         # 5. 用 pane run 启动命令(比 send-text+Enter 可靠,不会被 agent TUI 当 prompt)
         # pane run 发命令+回车,语义是"在 pane 里执行命令"
         import shlex
