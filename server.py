@@ -347,16 +347,16 @@ def api_herdr_session_delete(name: str):
 
 @app.post("/api/herdr/session/{name}/init-mail")
 def api_herdr_session_init_mail(name: str):
-    """给 session 的项目目录注册全套 agent-mail 身份(一键初始化通信)。
+    """给 session 的项目目录注册全套 agent-mail 身份,并通知各 agent pane 它们的身份。
 
-    取 session 的第一个 agent pane 的 cwd 作为 project_key,跑 am-init-project。
+    流程:取 session cwd → am-init-project 注册 → 遍历 agent pane,
+    给每个发一条身份告知 prompt(让它知道自己的花名 + 怎么收发消息)。
     """
     import subprocess
     snap = herdr_client.snapshot()
     sess = next((s for s in snap.get("sessions", []) if s.get("session") == name), None)
     if not sess:
         raise HTTPException(404, f"session 不存在: {name}")
-    # 取第一个有 cwd 的 pane
     cwd = ""
     for p in sess.get("panes", []):
         cwd = p.get("cwd") or ""
@@ -366,14 +366,33 @@ def api_herdr_session_init_mail(name: str):
         raise HTTPException(400, "该 session 无 cwd,无法注册")
     init_script = str(Path.home() / "agent-mail-tools" / "am-init-project")
     try:
-        r = subprocess.run(
-            [init_script], cwd=cwd, capture_output=True, text=True, timeout=60,
-        )
+        r = subprocess.run([init_script], cwd=cwd, capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return {"ok": False, "project": cwd, "error": r.stderr[-300:] or "am-init-project 失败"}
+        # 注册成功后,通知各 agent pane 它们的身份
+        notified = []
+        for p in sess.get("panes", []):
+            agent_type = p.get("agent")
+            pane_id = p.get("pane_id")
+            if not agent_type or not pane_id:
+                continue
+            # agent 类型 → 身份花名(codex→codex-main)
+            name_map = {"codex": "codex-main", "kimi": "kimi-main",
+                        "qodercli": "qodercn-main", "opencode": "opencode-main"}
+            my_name = name_map.get(agent_type, f"{agent_type}-main")
+            hint = (
+                "[agent-mail 身份告知] 你的邮箱身份已注册:花名={name},项目={proj}。"
+                "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
+                "--to <对方花名> --subject \"...\" --body \"...\";"
+                "收消息: mail-recv --agent {ag} --instance main --project \"{proj}\" --unread。"
+                "发信后对方 pane 会自动收到通知。"
+            ).format(name=my_name, proj=cwd, ag=agent_type)
+            herdr_client.pane_send(name, pane_id, hint, "prompt")
+            notified.append(f"{agent_type}({pane_id})→{my_name}")
         return {
-            "ok": r.returncode == 0,
-            "project": cwd,
-            "output": r.stdout[-500:] if r.stdout else "",
-            "error": r.stderr[-300:] if r.stderr else "",
+            "ok": True, "project": cwd,
+            "notified": notified,
+            "output": r.stdout[-300:] if r.stdout else "",
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
