@@ -239,23 +239,34 @@ def start_agent(
         "qodercli": f"{shlex.quote(qoder_bin)}",
     }
     cmd_str = agent_cmds.get(agent, agent_cmds["codex"])
-    # 用 herdr 新建 pane 并执行。不同 herdr 版本命令不同,这里用 send-keys 兜底:
-    # 先创建新 window,再在其中启动 agent
     try:
-        # new-window(herdr 兼容 tmux 语法)
-        _run(["new-window", "-c", workdir, "--session", session], timeout=5)
-        # 取最新 pane
-        snap = _snapshot_session(session)
-        panes = snap.get("panes", [])
-        if not panes:
-            return {"available": True, "error": "新建 window 后找不到 pane"}
-        # 取最新(按 id 排序最大的)
-        latest = sorted(panes, key=lambda p: p.get("pane_id", ""))[-1]
-        pid = latest.get("pane_id")
-        # 用 pane run 启动 agent(比 send-keys 可靠)
-        import shlex
-        _run(["--session", session, "pane", "run", pid] + shlex.split(cmd_str), timeout=8)
-        return {"available": True, "pane_id": pid, "agent": agent, "cmd": cmd_str}
+        # 用 pane split 开新 pane(herdr 没有 new-window,用 pane split --cwd)
+        split_out = _run(
+            ["--session", session, "pane", "split", "--current",
+             "--direction", "right", "--no-focus", "--cwd", workdir],
+            timeout=5,
+        )
+        # 从 split 返回的 JSON 取新 pane_id
+        new_pid = None
+        for line in split_out.splitlines():
+            if line.startswith("data:"):
+                try:
+                    sd = json.loads(line[5:].strip())
+                    new_pid = sd.get("result", {}).get("pane", {}).get("pane_id")
+                except (ValueError, json.JSONDecodeError):
+                    pass
+                break
+        if not new_pid:
+            # fallback:取 snapshot 里 id 最大的 pane
+            snap = _snapshot_session(session)
+            panes = snap.get("panes", [])
+            if panes:
+                new_pid = sorted(panes, key=lambda p: p.get("pane_id", ""))[-1].get("pane_id")
+        if not new_pid:
+            return {"available": True, "error": "split 后找不到新 pane"}
+        # 用 pane run 启动 agent(完整路径 + shlex 安全分割)
+        _run(["--session", session, "pane", "run", new_pid] + shlex.split(cmd_str), timeout=8)
+        return {"available": True, "pane_id": new_pid, "agent": agent, "cmd": cmd_str}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
 
