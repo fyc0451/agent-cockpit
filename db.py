@@ -173,19 +173,16 @@ def identity_by_cwd(cwd: str, program: str) -> dict[str, Any] | None:
     """按工作目录 + program 类型查 agent-mail 身份(@ 注入协作者信息用)。
 
     herdr agent 的 cwd → project_key(human_key),program(codex/kimi/...)→ agent。
-    返回 {name, project_key, human_key, program, model} 供前端注入 prompt。
+    program 值不统一(新注册 codex/kimi,老项目 codex-cli/kimi-work),用 LIKE 模糊匹配。
     """
-    # program 映射:herdr 的 agent 名 → SQLite 的 program 字段
-    prog_map = {
-        "codex": "codex-cli", "kimi": "kimi-work", "qodercli": "qoder-cn",
-        "qoder": "qoder-cn", "opencode": "opencode", "zcode": "zcode",
-        "claude": "claude",
-    }
-    db_program = prog_map.get(program, program)
+    # 把 program 规范化为基础名(codex-cli → codex),用于 LIKE 匹配
+    base = program.replace("-cli", "").replace("-work", "").replace("-cn", "").replace("cli", "")
+    # LIKE 匹配多种格式:codex / codex-cli / codex-cli 等
     return _one(
         "SELECT a.name, a.program, a.model, p.human_key "
         "FROM agents a JOIN projects p ON p.id = a.project_id "
-        "WHERE p.human_key = ? AND a.program = ? AND a.retired_at IS NULL "
+        "WHERE p.human_key = ? AND (a.program = ? OR a.program LIKE ? OR a.program LIKE ?) "
+        "AND a.retired_at IS NULL "
         "ORDER BY a.inception_ts DESC LIMIT 1",
-        (cwd, db_program),
+        (cwd, program, f"{base}%", f"%{base}"),
     )
