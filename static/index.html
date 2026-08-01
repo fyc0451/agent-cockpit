@@ -239,7 +239,7 @@ header .spacer{flex:1}
       <button class="sm danger" onclick="termClose()">✕ 关闭</button>
       <span class="muted" style="font-size:11px;margin-left:auto">真 PTY:Esc中断 / 方向键选择 / vim / Tab补全 / 斜杠命令</span>
     </div>
-    <div id="termContainer" style="flex:1;background:#000;padding:6px;overflow:hidden"></div>
+    <div id="termContainer" style="flex:1;background:#000;padding:6px 14px 6px 6px;overflow:hidden"></div>
   </section>
 
   <!-- 会话管理(session + agent pane,可重启) -->
@@ -693,7 +693,16 @@ function termMount(id){
   FIT=new FitAddon.FitAddon();
   XTERM.loadAddon(FIT);
   XTERM.open(c);
-  try{FIT.fit()}catch(e){}
+  // 安全 fit:fit 后再 cols-1,防止最右一列被容器边缘/滚动条裁切
+  const safeFit=()=>{
+    try{
+      FIT.fit();
+      // fit 偶尔会多算 1 列(小数取整 + padding 误差),手动减 1 留安全边距
+      const d=FIT.proposeDimensions();
+      if(d&&d.cols>10){XTERM.resize(d.cols-1,d.rows)}
+    }catch(e){}
+  };
+  safeFit();
   if(TERM_WS){TERM_WS.close()}
   const cols=XTERM.cols,rows=XTERM.rows;
   TERM_WS=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
@@ -710,7 +719,7 @@ function termMount(id){
   TERM_WS.onerror=()=>{if(XTERM)XTERM.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')};
   XTERM.onData(d=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(d)});
   XTERM.onResize(({cols,rows})=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(JSON.stringify({type:'resize',cols,rows}))});
-  window.addEventListener('resize',()=>{try{if(FIT)FIT.fit()}catch(e){}});
+  window.addEventListener('resize',()=>safeFit());
 }
 
 // ============ 会话管理(session + agent 重启) ============
