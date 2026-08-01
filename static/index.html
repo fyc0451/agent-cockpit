@@ -763,6 +763,38 @@ function termMount(id){
   XTERM.onData(d=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(d)});
   XTERM.onResize(({cols,rows})=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(JSON.stringify({type:'resize',cols,rows}))});
   window.addEventListener('resize',()=>safeFit());
+  // ── 粘贴/复制支持 ──
+  // 1. 右键粘贴(桌面+手机都好用):阻止默认菜单,读剪贴板写入终端
+  c.addEventListener('contextmenu',e=>{
+    e.preventDefault();
+    navigator.clipboard.readText().then(t=>{
+      if(t&&TERM_WS&&TERM_WS.readyState===1){
+        // bracketed paste 协议:包一层转义序列,终端程序识别为粘贴(不触发快捷键)
+        TERM_WS.send('\x1b[200~'+t+'\x1b[201~');
+      }
+    }).catch(()=>{});
+  });
+  // 2. Cmd+V(Mac)/Ctrl+V(其他)粘贴
+  c.addEventListener('keydown',e=>{
+    if((e.metaKey||e.ctrlKey)&&e.key==='v'){
+      e.preventDefault();
+      navigator.clipboard.readText().then(t=>{
+        if(t&&TERM_WS&&TERM_WS.readyState===1){TERM_WS.send('\x1b[200~'+t+'\x1b[201~')}
+      }).catch(()=>{});
+    }
+    // Ctrl+Shift+C / Cmd+C 复制选中文本(xterm 自带选中,这里写剪贴板)
+    if((e.metaKey||(e.ctrlKey&&e.shiftKey))&&e.key==='c'){
+      const sel=XTERM.getSelection();
+      if(sel){e.preventDefault();navigator.clipboard.writeText(sel).catch(()=>{})}
+    }
+  });
+  // 3. 选中后自动复制(松开鼠标时)
+  c.addEventListener('mouseup',()=>{
+    setTimeout(()=>{
+      const sel=XTERM.getSelection();
+      if(sel){navigator.clipboard.writeText(sel).catch(()=>{})}
+    },10);
+  });
 }
 
 // ============ 会话管理(session + agent 重启) ============
