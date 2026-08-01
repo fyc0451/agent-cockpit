@@ -251,7 +251,7 @@ header .spacer{flex:1}
     </div>
     <div class="term-out" id="termOut">加载中…</div>
     <div class="term-in" style="position:relative;flex-wrap:wrap">
-      <input id="termInput" style="flex:1;min-width:160px" placeholder="输入指令,回车发送…(@派任务给其他agent / @路径引用文件)" oninput="onTermInput(event)" onkeydown="onTermKeydown(event)">
+      <input id="termInput" style="flex:1;min-width:160px" placeholder="给当前 agent 的指令…(@标注协作者 / @路径引用文件)" oninput="onTermInput(event)" onkeydown="onTermKeydown(event)">
       <div id="mentionPopover" class="hidden" style="position:absolute;bottom:100%;left:0;margin-bottom:4px;background:var(--bg3);border:1px solid var(--bd2);border-radius:8px;box-shadow:0 -4px 16px rgba(0,0,0,.4);max-height:240px;overflow:auto;z-index:10;min-width:220px"></div>
       <label class="icon" style="cursor:pointer;font-size:18px" title="上传截图/文件并插入@路径">📎<input type="file" id="termUpload" accept="image/*" multiple style="display:none" onchange="termUploadFiles(this)"></label>
       <select id="termMode" style="width:auto"><option value="prompt">prompt(agent)</option><option value="send">执行(shell)</option><option value="keys">按键(keys)</option></select>
@@ -273,20 +273,6 @@ header .spacer{flex:1}
       <div class="field"><label>正文</label><textarea id="mmBody" rows="3"></textarea></div>
       <button class="primary" onclick="mmReply()">发送</button>
     </div>
-  </div>
-</div>
-
-<!-- 派任务模态(@ 派任务给 agent) -->
-<div class="modal-bg" id="dispatchModal" onclick="if(event.target===this)closeDispatch()">
-  <div class="modal">
-    <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <h3 id="dmTitle">派任务</h3>
-      <button class="icon" onclick="closeDispatch()">✕</button>
-    </div>
-    <div class="field"><label>派给</label><input id="dmTarget" readonly></div>
-    <div class="field"><label>任务描述(会作为 prompt 直接发给该 agent)</label><textarea id="dmTask" rows="4" placeholder="请复核 codex 在 hr-ready 的改动..."></textarea></div>
-    <button class="primary" onclick="dispatchSend()">发送任务</button>
-    <div id="dmResult" class="muted" style="margin-top:8px;font-size:12px"></div>
   </div>
 </div>
 
@@ -469,43 +455,35 @@ function showMention(query){
   pop._filtered=filtered;
 }
 function hideMention(){MENTION_ACTIVE=false;document.getElementById('mentionPopover').classList.add('hidden')}
-// @ 派任务:选 agent → 弹派任务框 → herdr prompt 直接发给目标 pane
-let DISPATCH_TARGET=null;
+// @ 注入协作者信息:选 agent → 把它的 agent-mail 身份信息注入当前 prompt
+// 用法:你给当前 agent 发指令 "@kimi 帮我复核",@kimi 被替换成身份信息,
+// 当前 agent 就知道有个 kimi 可通过 mail 联系,自己决定怎么协作
 async function pickMention(session,paneId,agent){
   hideMention();
-  // 清掉输入框里的 @query
   const inp=document.getElementById('termInput');
+  // 记住 @ 在输入框的位置,后面替换它
   const v=inp.value, pos=inp.selectionStart;
   const atIdx=v.slice(0,pos).lastIndexOf('@');
-  if(atIdx>=0){inp.value=v.slice(0,atIdx)+v.slice(pos)}
-  inp.focus();
-  // 弹派任务框
-  DISPATCH_TARGET={session,paneId,agent};
-  document.getElementById('dmTitle').textContent='派任务给 '+agent+' ('+session+')';
-  document.getElementById('dmTarget').value=agent+' @ '+session;
-  // 预填:把当前输入框已有内容作为任务草稿(如果有)
-  document.getElementById('dmTask').value=inp.value.trim()||'';
-  document.getElementById('dmResult').textContent='';
-  inp.value='';
-  document.getElementById('dispatchModal').classList.add('show');
-  setTimeout(()=>document.getElementById('dmTask').focus(),100);
-}
-function closeDispatch(){document.getElementById('dispatchModal').classList.remove('show');DISPATCH_TARGET=null}
-async function dispatchSend(){
-  if(!DISPATCH_TARGET)return;
-  const task=document.getElementById('dmTask').value.trim();
-  if(!task){toast('请写任务描述');return}
-  const t=DISPATCH_TARGET;
-  const r=document.getElementById('dmResult');
-  r.textContent='发送中…';
+  const before=v.slice(0,atIdx), after=v.slice(pos);
+  inp.disabled=true; toast('查 '+agent+' 身份…');
   try{
-    const res=await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:task,mode:'prompt'})});
-    if(res.error){r.innerHTML='<span style="color:var(--err)">失败: '+esc(res.error)+'</span>';return}
-    r.innerHTML='<span style="color:var(--done)">✓ 已派给 '+esc(t.agent)+' (prompt 已送达该 pane)</span>';
-    toast('任务已派给 '+t.agent);
-    document.getElementById('dmTask').value='';
-    setTimeout(closeDispatch,1500);
-  }catch(e){r.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>'}
+    const d=await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/identity`);
+    let tag;
+    if(d.found){
+      // 注入身份信息块:让当前 agent 知道这个协作者怎么联系
+      tag=`[@${agent}: 花名=${d.name}, 项目=${d.project_key}, 可用 mail-send --to ${d.name} --project "${d.project_key}" 联系它]`;
+      toast('已注入 '+agent+' 身份('+d.name+')');
+    }else{
+      // 没注册身份:退化成简单标注
+      tag=`[@${agent} @ ${session}]`;
+      toast(agent+' 未注册邮箱身份,仅标注',3000);
+    }
+    inp.value=before+tag+after;
+    inp.disabled=false;
+    // 光标放到 tag 后,继续写指令
+    const np=(before+tag).length;
+    inp.focus();inp.setSelectionRange(np,np);
+  }catch(e){toast('查询失败: '+e);inp.disabled=false;inp.value=before+'@'+agent+after;inp.focus()}
 }
 function onTermKeydown(e){
   if(e.key==='Enter'){termSend();return}

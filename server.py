@@ -275,8 +275,39 @@ def api_herdr_pane(session: str, pane_id: str, lines: int = 80, is_agent: bool =
 
 @app.get("/api/herdr/pane/{session}/{pane_id}/summary")
 def api_herdr_pane_summary(session: str, pane_id: str, max_lines: int = 30):
-    """取 agent 会话摘要(@ 引用会话用)。"""
+    """取 agent 会话摘要。"""
     return herdr_client.pane_summary(session, pane_id, max_lines)
+
+
+@app.get("/api/herdr/pane/{session}/{pane_id}/identity")
+def api_herdr_pane_identity(session: str, pane_id: str):
+    """查 herdr agent 对应的 agent-mail 身份(@ 注入协作者信息用)。
+
+    用 pane 的 cwd + agent 类型,反查 agent-mail 身份(花名/项目)。
+    """
+    # 先从 snapshot 拿这个 pane 的 cwd 和 agent 类型
+    snap = herdr_client.snapshot()
+    pane = next((p for p in snap.get("panes", [])
+                 if p.get("session") == session and p.get("pane_id") == pane_id), None)
+    if not pane:
+        raise HTTPException(404, "pane 不存在")
+    cwd = pane.get("cwd", "")
+    agent_type = pane.get("agent") or ""
+    if not cwd or not agent_type:
+        return {"found": False, "reason": "pane 无 cwd 或 agent 类型"}
+    ident = db.identity_by_cwd(cwd, agent_type)
+    if not ident:
+        return {"found": False, "reason": f"未注册身份(cwd={cwd}, program={agent_type})"}
+    return {
+        "found": True,
+        "name": ident["name"],
+        "program": ident["program"],
+        "model": ident.get("model", ""),
+        "project_key": ident["human_key"],
+        "session": session,
+        "cwd": cwd,
+        "mail_hint": f'可通过 ~/agent-mail-tools/mail-send --to {ident["name"]} --project "{ident["human_key"]}" 联系',
+    }
 
 
 @app.post("/api/herdr/pane/{session}/{pane_id}/send")

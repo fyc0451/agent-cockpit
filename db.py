@@ -167,3 +167,25 @@ def agent_by_name(project_id: int, name: str) -> dict[str, Any] | None:
         "SELECT * FROM agents WHERE project_id = ? AND name = ? AND retired_at IS NULL",
         (project_id, name),
     )
+
+
+def identity_by_cwd(cwd: str, program: str) -> dict[str, Any] | None:
+    """按工作目录 + program 类型查 agent-mail 身份(@ 注入协作者信息用)。
+
+    herdr agent 的 cwd → project_key(human_key),program(codex/kimi/...)→ agent。
+    返回 {name, project_key, human_key, program, model} 供前端注入 prompt。
+    """
+    # program 映射:herdr 的 agent 名 → SQLite 的 program 字段
+    prog_map = {
+        "codex": "codex-cli", "kimi": "kimi-work", "qodercli": "qoder-cn",
+        "qoder": "qoder-cn", "opencode": "opencode", "zcode": "zcode",
+        "claude": "claude",
+    }
+    db_program = prog_map.get(program, program)
+    return _one(
+        "SELECT a.name, a.program, a.model, p.human_key "
+        "FROM agents a JOIN projects p ON p.id = a.project_id "
+        "WHERE p.human_key = ? AND a.program = ? AND a.retired_at IS NULL "
+        "ORDER BY a.inception_ts DESC LIMIT 1",
+        (cwd, db_program),
+    )
