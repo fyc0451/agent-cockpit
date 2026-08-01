@@ -830,7 +830,7 @@ async function loadSessionsView(){
           <b style="font-size:14px">${esc(s.name)}</b>
           <span class="tag ${running?'run':'idle'}">${esc(s.status)}</span>
           <span class="muted" style="font-size:11px;flex:1">${esc(s.directory)}</span>
-          ${running?`<button class="sm danger" onclick="stopSession('${esc(s.name)}')">■ 停止</button>`:`<button class="sm" onclick="deleteSession('${esc(s.name)}')" title="删除已停止的 session">🗑 删除</button>`}
+          ${running?`<button class="sm" onclick="initSessionMail('${esc(s.name)}')" title="给该项目注册全套 agent-mail 身份(一键开通通信)">📧 初始化通信</button><button class="sm danger" onclick="stopSession('${esc(s.name)}')">■ 停止</button>`:`<button class="sm" onclick="deleteSession('${esc(s.name)}')" title="删除已停止的 session">🗑 删除</button>`}
         </div>
         ${agentHtml}
       </div>`;
@@ -853,6 +853,14 @@ async function stopSession(name){
 async function deleteSession(name){
   if(!confirm('确认删除 session '+name+'?不可恢复'))return;
   try{await api(`/api/herdr/session/${encodeURIComponent(name)}`,{method:'DELETE'});toast('已删除 '+name);loadSessionsView()}catch(e){toast(e)}
+}
+async function initSessionMail(name){
+  toast('正在初始化 '+name+' 的通信身份...');
+  try{
+    const r=await api(`/api/herdr/session/${encodeURIComponent(name)}/init-mail`,{method:'POST'});
+    if(r.ok){toast('✅ 通信已初始化: '+r.project);loadSessionsView()}
+    else{toast('初始化失败: '+(r.error||r.detail||'未知'))}
+  }catch(e){toast('初始化失败: '+e)}
 }
 
 // ============ 文件 ============

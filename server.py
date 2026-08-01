@@ -345,6 +345,40 @@ def api_herdr_session_delete(name: str):
     return herdr_client.delete_session(name)
 
 
+@app.post("/api/herdr/session/{name}/init-mail")
+def api_herdr_session_init_mail(name: str):
+    """给 session 的项目目录注册全套 agent-mail 身份(一键初始化通信)。
+
+    取 session 的第一个 agent pane 的 cwd 作为 project_key,跑 am-init-project。
+    """
+    import subprocess
+    snap = herdr_client.snapshot()
+    sess = next((s for s in snap.get("sessions", []) if s.get("session") == name), None)
+    if not sess:
+        raise HTTPException(404, f"session 不存在: {name}")
+    # 取第一个有 cwd 的 pane
+    cwd = ""
+    for p in sess.get("panes", []):
+        cwd = p.get("cwd") or ""
+        if cwd:
+            break
+    if not cwd:
+        raise HTTPException(400, "该 session 无 cwd,无法注册")
+    init_script = str(Path.home() / "agent-mail-tools" / "am-init-project")
+    try:
+        r = subprocess.run(
+            [init_script], cwd=cwd, capture_output=True, text=True, timeout=60,
+        )
+        return {
+            "ok": r.returncode == 0,
+            "project": cwd,
+            "output": r.stdout[-500:] if r.stdout else "",
+            "error": r.stderr[-300:] if r.stderr else "",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── Web 终端(PTY,完整交互:斜杠/Esc/vim) ─────────────────────
 
 @app.post("/api/term")
