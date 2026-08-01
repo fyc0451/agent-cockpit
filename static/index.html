@@ -236,8 +236,9 @@ header .spacer{flex:1}
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端">📎上传<input type="file" id="termTabUpload" accept="image/*" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)">@协作</button>
+      <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
       <button class="sm danger" onclick="termClose()">✕ 关闭</button>
-      <span class="muted" style="font-size:11px;margin-left:auto">真 PTY:Esc中断 / 方向键选择 / vim / Tab补全 / 斜杠命令</span>
+      <span class="muted" style="font-size:11px;margin-left:auto">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
     </div>
     <div id="termContainer" style="flex:1;background:#000;padding:6px 14px 6px 6px;overflow:hidden"></div>
   </section>
@@ -656,6 +657,48 @@ function termPickCollab(){
   document.getElementById('collabModal').classList.add('show');
 }
 function closeCollab(){document.getElementById('collabModal').classList.remove('show')}
+// 在 web 终端里 attach 到 herdr session(进入多 pane 分屏视图,同时看多个 agent)
+async function termAttachHerdr(){
+  // 弹 session 选择器(复用 collabModal)
+  if(!BOARD){toast('看板数据未加载');return}
+  // 取所有 running session
+  const sessions={};
+  for(const p of (BOARD.panes||[])){sessions[p.session]=(sessions[p.session]||0)+(p.agent?1:0)}
+  const running=Object.keys(sessions);
+  if(!running.length){toast('无可用 session');return}
+  const m=document.getElementById('collabModal');
+  document.querySelector('#collabModal h3').textContent='attach herdr session';
+  document.querySelector('#collabModal .muted').innerHTML='选一个 session,在终端里进入 herdr 多 pane 分屏视图(Ctrl-b 切 pane,d 脱离)';
+  document.getElementById('collabList').innerHTML=running.map(s=>`
+    <div onclick="doAttachHerdr('${esc(s)}')" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
+      <span style="font-size:18px">🖥</span>
+      <span><b>${esc(s)}</b> <span class="muted">(${sessions[s]} agent pane)</span></span>
+    </div>`).join('');
+  m.classList.add('show');
+}
+async function doAttachHerdr(session){
+  closeCollab();
+  // 切到终端 tab,创建新终端
+  document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
+  document.getElementById('view-term').classList.add('active');
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
+  document.getElementById('launchBar').classList.add('hidden');
+  if(TERM_WS){try{TERM_WS.close()}catch(e){};TERM_WS=null}
+  try{
+    const r=await api('/api/term',{method:'POST'});
+    TERMS.push(r.id);TERM_ID=r.id;
+    document.getElementById('termSelect').innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
+    document.getElementById('termSelect').value=r.id;
+    termMount(r.id);
+    // 等 WS 连上,发 herdr attach 命令
+    setTimeout(()=>{
+      if(TERM_WS&&TERM_WS.readyState===1){
+        TERM_WS.send('herdr --session '+session+'\r');
+        toast('已进入 herdr/'+session+' (Ctrl-b 切 pane)');
+      }
+    },500);
+  }catch(e){toast('创建终端失败: '+e)}
+}
 async function termInsertCollab(session,paneId,agent){
   closeCollab();
   if(!TERM_WS||!XTERM)return;
