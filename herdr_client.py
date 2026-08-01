@@ -277,9 +277,12 @@ def restart_pane(
         # 再发一次确保退到 shell(agent 可能需要两次 C-c)
         _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
         time.sleep(1)
-        # 2. 清空当前输入行(防有残留):Ctrl+U 清行
-        _run(["--session", session, "pane", "send-keys", pane_id, "C-u"], timeout=3)
-        time.sleep(0.3)
+        # 2. 清空当前输入行(防有残留):Ctrl+U 清行(herdr 可能不支持,失败忽略)
+        try:
+            _run(["--session", session, "pane", "send-keys", pane_id, "C-u"], timeout=3)
+            time.sleep(0.3)
+        except RuntimeError:
+            pass
         # 3. 从 snapshot 拿 cwd 和 agent 类型
         snap = _snapshot_session(session)
         p = next((x for x in snap.get("panes", []) if x.get("pane_id") == pane_id), {})
