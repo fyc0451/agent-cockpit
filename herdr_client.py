@@ -248,9 +248,9 @@ def start_agent(
         # 取最新(按 id 排序最大的)
         latest = sorted(panes, key=lambda p: p.get("pane_id", ""))[-1]
         pid = latest.get("pane_id")
-        # 在其中启动 agent
-        _run(["pane", "send-keys", "--pane", pid, "--session", session, cmd_str], timeout=5)
-        _run(["pane", "send-keys", "--pane", pid, "--session", session, "Enter"], timeout=5)
+        # 用 pane run 启动 agent(比 send-keys 可靠)
+        import shlex
+        _run(["--session", session, "pane", "run", pid] + shlex.split(cmd_str), timeout=8)
         return {"available": True, "pane_id": pid, "agent": agent, "cmd": cmd_str}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
@@ -296,10 +296,10 @@ def restart_pane(
             cmd_str = f'cd {workdir} && codex'
         else:
             cmd_str = f'cd {workdir} && {agent_bin}'
-        # 5. send-text 注入命令 + Enter 启动
-        _run(["--session", session, "pane", "send-text", pane_id, cmd_str], timeout=5)
-        time.sleep(0.3)
-        _run(["--session", session, "pane", "send-keys", pane_id, "Enter"], timeout=5)
+        # 5. 用 pane run 启动命令(比 send-text+Enter 可靠,不会被 agent TUI 当 prompt)
+        # pane run 发命令+回车,语义是"在 pane 里执行命令"
+        import shlex
+        _run(["--session", session, "pane", "run", pane_id] + shlex.split(cmd_str), timeout=8)
         return {
             "available": True, "restarted": True, "pane_id": pane_id,
             "agent": agent, "cmd": cmd_str, "resume": resume,
