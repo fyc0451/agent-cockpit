@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Agent Dashboard</title>
+<style>
+:root{
+  --bg:#0d0f14; --bg2:#151921; --bg3:#1d2330; --bg4:#262d3d;
+  --fg:#e8ecf3; --fg2:#a8b2c2; --fg3:#6a7488;
+  --accent:#5b9cff; --accent2:#8b6fff;
+  --need:#f59e0b; --work:#3b82f6; --done:#10b981; --idle:#6a7488;
+  --bd:#252b38; --bd2:#323a4a;
+  --term-bg:#07090d; --term-fg:#c8d3e0;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+:root.light{
+  --bg:#f4f6fa; --bg2:#ffffff; --bg3:#eef1f6; --bg4:#e2e7ef;
+  --fg:#1a2030; --fg2:#525c70; --fg3:#8a93a5;
+  --accent:#2563eb; --accent2:#7c3aed;
+  --need:#d97706; --work:#2563eb; --done:#059669; --idle:#94a3b8;
+  --bd:#dde3ec; --bd2:#cdd5e0;
+  --term-bg:#1e2330; --term-fg:#d4dbe6;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}
+button{cursor:pointer;font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(--bd2);border-radius:7px;padding:7px 12px;transition:.12s;white-space:nowrap}
+button:hover{background:var(--bg4);border-color:var(--accent)}
+button:active{transform:scale(.97)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button.primary:hover{background:#4a89f0}
+button.icon{padding:6px 9px;background:transparent;border-color:transparent;font-size:16px}
+input,select,textarea{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--bd2);border-radius:7px;padding:7px 9px;width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+textarea{font-family:var(--mono);resize:vertical}
+pre,.mono{font-family:var(--mono)}
+.muted{color:var(--fg3)} .fg2{color:var(--fg2)}
+
+/* 头部 */
+.app{display:flex;flex-direction:column;height:100vh}
+header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--bd)}
+header .logo{font-weight:700;font-size:15px;white-space:nowrap;display:flex;align-items:center;gap:6px}
+header nav{display:flex;gap:2px}
+header nav button{background:transparent;border:none;padding:6px 11px;color:var(--fg2);border-radius:6px;font-size:13px}
+header nav button.active{background:var(--bg4);color:var(--fg)}
+header .spacer{flex:1}
+.stat-pill{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--fg2);background:var(--bg3);padding:3px 9px;border-radius:12px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--done)}
+.dot.off{background:var(--fg3)}
+
+/* 看板 */
+.board-wrap{flex:1;overflow:auto;padding:12px}
+.board{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;min-height:100%;align-content:start}
+.col{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;display:flex;flex-direction:column;min-height:200px}
+.col-head{padding:10px 12px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--bg2);border-radius:11px 11px 0 0;z-index:1}
+.col-head .cc{background:var(--bg4);border-radius:10px;padding:1px 8px;font-size:11px;min-width:20px;text-align:center}
+.col-need .col-head{color:var(--need)} .col-work .col-head{color:var(--work)}
+.col-done .col-head{color:var(--done)} .col-idle .col-head{color:var(--idle)}
+.col-body{padding:8px;display:flex;flex-direction:column;gap:8px;overflow:visible}
+
+/* agent 卡片 */
+.card{background:var(--bg3);border:1px solid var(--bd2);border-radius:9px;padding:10px;cursor:pointer;transition:.12s;border-left:3px solid var(--idle)}
+.card:hover{border-color:var(--accent);transform:translateY(-1px)}
+.card.need{border-left-color:var(--need)} .card.work{border-left-color:var(--work)}
+.card.done{border-left-color:var(--done)} .card.idle{border-left-color:var(--idle)}
+.card.unknown{border-left-color:var(--fg3);opacity:.7}
+.card-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.agent-icon{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0}
+.agent-icon.codex{background:#0f1729;color:#4a9eff}
+.agent-icon.kimi{background:#291a0f;color:#f59e0b}
+.agent-icon.qodercli,.agent-icon.qoder{background:#0f291a;color:#34d399}
+.agent-icon.claude{background:#291a0f;color:#ff9558}
+.agent-icon.none{background:var(--bg4);color:var(--fg3)}
+.card-name{font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-badge{background:var(--need);color:#fff;border-radius:9px;padding:0 6px;font-size:10px;font-weight:700;min-width:16px;text-align:center;line-height:16px;height:16px}
+.card-meta{font-size:11px;color:var(--fg3);margin-bottom:5px}
+.card-prev{font-family:var(--mono);font-size:11px;color:var(--fg2);background:var(--bg);border-radius:6px;padding:6px 7px;max-height:60px;overflow:hidden;line-height:1.4;white-space:pre-wrap;word-break:break-word;position:relative}
+.card-prev.fade::after{content:"";position:absolute;bottom:0;left:0;right:0;height:16px;background:linear-gradient(transparent,var(--bg3))}
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.status-dot.need{background:var(--need);box-shadow:0 0 6px var(--need)}
+.status-dot.work{background:var(--work);box-shadow:0 0 6px var(--work);animation:pulse 1.5s infinite}
+.status-dot.done{background:var(--done)} .status-dot.idle{background:var(--idle)}
+.status-dot.unknown{background:var(--fg3)}
+@keyframes pulse{50%{opacity:.4}}
+
+/* 启动栏 */
+.launch-bar{background:var(--bg2);border-top:1px solid var(--bd);padding:8px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.launch-bar select,.launch-bar input{width:auto;min-width:120px}
+.launch-bar .lbl{font-size:12px;color:var(--fg3);margin-right:2px}
+
+/* view 切换 */
+.view{display:none;flex:1;overflow:hidden;flex-direction:column}
+.view.active{display:flex}
+
+/* 文件 view */
+.files-view{flex-direction:column}
+.files-body{flex:1;display:grid;grid-template-columns:280px 1fr;gap:10px;padding:10px;overflow:hidden}
+.file-tree{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:auto}
+.ft-item{padding:5px 10px;border-radius:6px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;white-space:nowrap}
+.ft-item:hover{background:var(--bg3)}
+.ft-bc{font-family:var(--mono);font-size:11px;color:var(--fg3);padding:6px 4px;word-break:break-all}
+.editor-area{display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:hidden}
+.editor-area textarea{flex:1;border:none;border-radius:0;background:var(--bg);font-size:13px;tab-size:2}
+.editor-bar{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:12px}
+.editor-bar .ep{flex:1;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 消息 view */
+.msgs-view{flex-direction:column;overflow:hidden}
+.msgs-body{flex:1;display:grid;grid-template-columns:240px 1fr;gap:10px;padding:10px;overflow:hidden}
+.sidebar{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:8px;overflow:auto}
+.agent-item{padding:7px 9px;border-radius:7px;display:flex;align-items:center;gap:7px;margin-bottom:3px;font-size:13px}
+.agent-item:hover{background:var(--bg3)}
+.agent-item .an{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msgs-list{overflow:auto;padding-right:4px}
+.msg{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:10px;margin-bottom:8px}
+.msg .mh{display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px;gap:6px;flex-wrap:wrap}
+.msg .ms{font-weight:600;font-size:13px}
+.msg .mb{font-family:var(--mono);font-size:12px;color:var(--fg2);white-space:pre-wrap;word-break:break-word}
+.tag{background:var(--bg4);border-radius:5px;padding:1px 6px;font-size:10px;color:var(--fg2)}
+.compose{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:10px;margin-top:6px}
+.field{margin-bottom:8px}
+.field label{display:block;font-size:11px;color:var(--fg2);margin-bottom:3px}
+
+/* 终端抽屉 */
+.drawer-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;z-index:50}
+.drawer-bg.show{display:flex;align-items:flex-end;justify-content:center;padding:10px}
+.drawer{background:var(--bg2);border:1px solid var(--bd2);border-radius:13px;width:100%;max-width:900px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden}
+.drawer-head{padding:10px 14px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px}
+.drawer-head .dt{flex:1;font-weight:600;font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.term-out{flex:1;background:var(--term-bg);border-radius:0;padding:12px;font-family:var(--mono);font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;overflow:auto;color:var(--term-fg);min-height:180px}
+.term-in{display:flex;gap:7px;padding:8px;border-top:1px solid var(--bd)}
+.term-in input{font-family:var(--mono)}
+
+/* 消息抽屉(卡片点消息) */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:60;padding:14px}
+.modal-bg.show{display:flex}
+.modal{background:var(--bg2);border:1px solid var(--bd2);border-radius:13px;padding:16px;max-width:560px;width:100%;max-height:85vh;overflow:auto}
+.modal h3{font-size:15px;margin-bottom:10px}
+
+.toast{position:fixed;bottom:64px;left:50%;transform:translateX(-50%);background:var(--bg4);border:1px solid var(--bd2);border-radius:9px;padding:9px 16px;z-index:200;opacity:0;transition:.3s;pointer-events:none;font-size:13px}
+.toast.show{opacity:1}
+.empty{color:var(--fg3);text-align:center;padding:40px 20px;font-size:13px}
+.hidden{display:none!important}
+
+@media(max-width:860px){
+  .board{grid-template-columns:repeat(2,1fr)}
+  .msgs-body,.files-body{grid-template-columns:1fr}
+  .sidebar,.file-tree{max-height:25vh}
+}
+@media(max-width:560px){
+  .board{grid-template-columns:1fr}
+  header nav button{padding:5px 7px;font-size:12px}
+  header .logo{font-size:13px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo">⚙️ Agent Fleet</div>
+    <nav id="nav">
+      <button data-view="board" class="active">看板</button>
+      <button data-view="msgs">消息</button>
+      <button data-view="files">文件</button>
+    </nav>
+    <div class="spacer"></div>
+    <div class="stat-pill"><span class="dot" id="liveDot"></span><span id="liveText">--</span></div>
+    <div class="stat-pill" id="unreadPill">📬 <span id="unreadN">0</span></div>
+    <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
+    <button class="icon" onclick="refreshBoard()" title="刷新">↻</button>
+  </header>
+
+  <!-- 看板 -->
+  <section id="view-board" class="view active">
+    <div class="board-wrap">
+      <div class="board" id="board">
+        <div class="col col-need"><div class="col-head">⚠ 需要你 <span class="cc" id="cnt-need">0</span></div><div class="col-body" id="col-need"></div></div>
+        <div class="col col-work"><div class="col-head">⚡ 工作中 <span class="cc" id="cnt-work">0</span></div><div class="col-body" id="col-work"></div></div>
+        <div class="col col-done"><div class="col-head">✓ 已完成 <span class="cc" id="cnt-done">0</span></div><div class="col-body" id="col-done"></div></div>
+        <div class="col col-idle"><div class="col-head">○ 空闲 <span class="cc" id="cnt-idle">0</span></div><div class="col-body" id="col-idle"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 启动栏(看板下方) -->
+  <div class="launch-bar" id="launchBar">
+    <span class="lbl">🚀 启动</span>
+    <select id="lnSession"></select>
+    <select id="lnAgent">
+      <option value="codex">codex</option>
+      <option value="kimi">kimi</option>
+      <option value="qodercli">qoder</option>
+    </select>
+    <input id="lnWorkdir" placeholder="工作目录 如 /home/fyc/hr-ready" style="flex:1;min-width:160px">
+    <button class="primary" onclick="startAgent()">+ 新建 agent</button>
+    <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
+  </div>
+
+  <!-- 消息 -->
+  <section id="view-msgs" class="view msgs-view">
+    <div class="msgs-body">
+      <div class="sidebar">
+        <div class="muted" style="font-size:11px;padding:3px 5px 6px">项目 / AGENTS</div>
+        <div id="projAgentList"></div>
+      </div>
+      <div class="msgs-list">
+        <div class="row" style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+          <select id="msgProj" onchange="loadProjectMsgs()" style="width:auto;min-width:180px"></select>
+          <button class="icon" onclick="loadProjectMsgs()">↻</button>
+        </div>
+        <div id="msgList"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 文件 -->
+  <section id="view-files" class="view files-view">
+    <div class="files-body">
+      <div class="file-tree" id="fileTree"></div>
+      <div class="editor-area" id="editorArea">
+        <div class="empty" style="display:flex;align-items:center;justify-content:center;height:100%">选择左侧文件</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- 终端抽屉 -->
+<div class="drawer-bg" id="termDrawer" onclick="if(event.target===this)closeTerm()">
+  <div class="drawer">
+    <div class="drawer-head">
+      <span class="status-dot" id="tdDot"></span>
+      <span class="dt" id="tdTitle">终端</span>
+      <button class="icon" onclick="refreshTerm()" title="刷新输出">↻</button>
+      <button class="icon" onclick="closeTerm()">✕</button>
+    </div>
+    <div class="term-out" id="termOut">加载中…</div>
+    <div class="term-in">
+      <input id="termInput" placeholder="输入指令,回车发送…(@路径引用文件/图片)" onkeydown="if(event.key==='Enter')termSend()">
+      <label class="icon" style="cursor:pointer;font-size:18px" title="上传截图/文件并插入@路径">📎<input type="file" id="termUpload" accept="image/*" multiple style="display:none" onchange="termUploadFiles(this)"></label>
+      <select id="termMode" style="width:auto"><option value="prompt">prompt(agent)</option><option value="send">执行(shell)</option><option value="keys">按键(keys)</option></select>
+      <button class="primary" onclick="termSend()">发送</button>
+    </div>
+  </div>
+</div>
+
+<!-- 消息抽屉(卡片里点消息) -->
+<div class="modal-bg" id="msgModal" onclick="if(event.target===this)closeMsg()">
+  <div class="modal">
+    <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h3 id="mmTitle">消息</h3>
+      <button class="icon" onclick="closeMsg()">✕</button>
+    </div>
+    <div id="mmList"></div>
+    <div class="compose" style="margin-top:10px">
+      <div class="field"><label>回复给</label><input id="mmTo" readonly></div>
+      <div class="field"><label>正文</label><textarea id="mmBody" rows="3"></textarea></div>
+      <button class="primary" onclick="mmReply()">发送</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============ 状态 ============
+let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null;
+let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
+const api=(u,o)=>fetch(u,o).then(r=>r.ok?r.json():r.text().then(t=>{try{const e=JSON.parse(t);throw e.detail||t}catch(_){throw t}}).catch(()=>{throw r.statusText}));
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),ms)}
+function showView(v){
+  document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
+  document.getElementById('view-'+v).classList.add('active');
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+  document.getElementById('launchBar').classList.toggle('hidden',v!=='board');
+  if(v==='board')refreshBoard();
+  if(v==='msgs')loadProjList();
+  if(v==='files')loadFileTree();
+}
+document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>showView(b.dataset.view));
+function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
+const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',gemini:'💎',grok:'✖️'};
+
+// ============ 看板 ============
+async function refreshBoard(){
+  try{
+    const d=await api('/api/herdr/snapshot');
+    BOARD=d;
+    renderBoard(d);
+  }catch(e){
+    document.getElementById('boardInfo').textContent='加载失败';
+    toast('看板加载失败: '+e);
+  }
+}
+
+function classify(status,agent){
+  // unknown 且无 agent → idle(普通终端)
+  if(!agent)return 'idle';
+  if(status==='blocked'||status==='unknown'&&(agent))return status==='blocked'?'need':'unknown';
+  const m={blocked:'need',working:'work',done:'done',idle:'idle',unknown:'idle'};
+  return m[status]||'idle';
+}
+
+function renderBoard(d){
+  if(!d.available){
+    document.getElementById('boardInfo').textContent='herdr 不可用';
+    ['need','work','done','idle'].forEach(c=>document.getElementById('col-'+c).innerHTML='<div class="empty">—</div>');
+    return;
+  }
+  const panes=d.panes||[];
+  const cols={need:[],work:[],done:[],idle:[]};
+  // 只显示真正的 coding agent(agent 字段非空),过滤掉普通 shell 终端
+  const agents=panes.filter(p=>p.agent);
+  for(const p of agents){
+    const cls=classify(p.agent_status,p.agent);
+    (cols[cls]||cols.idle).push(p);
+  }
+  // 渲染每列
+  for(const [k,list] of Object.entries(cols)){
+    document.getElementById('cnt-'+k).textContent=list.length;
+    document.getElementById('col-'+k).innerHTML=list.length?list.map(cardHtml).join(''):'<div class="empty" style="padding:20px">—</div>';
+  }
+  const agentN=agents.length;
+  document.getElementById('boardInfo').textContent=`${d.sessions?.length||0} session · ${agentN} agent`;
+  document.getElementById('liveText').textContent=agentN+' agents';
+  document.getElementById('liveDot').classList.toggle('off',agentN===0);
+}
+
+function cardHtml(p){
+  const ag=p.agent||'none';
+  const cls=classify(p.agent_status,p.agent);
+  const emoji=AGENT_EMOJI[ag]||'⬜';
+  const stMap={need:'需要你',work:'运行中',done:'完成',idle:'空闲',unknown:'未知'};
+  return `<div class="card ${cls}" onclick="openTerm('${esc(p.session)}','${esc(p.pane_id)}','${esc(ag)}')">
+    <div class="card-top">
+      <div class="agent-icon ${ag}">${emoji}</div>
+      <div class="card-name">${esc(p.agent||p.terminal_title||p.pane_id)}</div>
+      <span class="status-dot ${cls}"></span>
+    </div>
+    <div class="card-meta">${esc(p.session)} · ${esc(p.cwd_name||p.cwd||'')} · ${stMap[cls]}</div>
+  </div>`;
+}
+
+// ============ 终端抽屉 ============
+let TERM_TIMER=null;
+async function openTerm(session,paneId,agent){
+  CURRENT_TERM={session,paneId,agent,isAgent:!!agent};
+  document.getElementById('termDrawer').classList.add('show');
+  document.getElementById('tdTitle').textContent=(agent||'终端')+' @ '+session+'/'+paneId;
+  document.getElementById('tdDot').className='status-dot '+(BOARD?.panes?.find(p=>p.pane_id===paneId&&p.session===session)||{})?.agent_status;
+  // agent 默认 prompt 模式,普通终端默认 send(执行 shell 命令)
+  document.getElementById('termMode').value=agent?'prompt':'send';
+  document.getElementById('termMode').disabled=false;
+  await refreshTerm();
+  // 打开时每 3 秒自动刷新输出(看 agent 实时进展)
+  if(TERM_TIMER)clearInterval(TERM_TIMER);
+  TERM_TIMER=setInterval(()=>{if(CURRENT_TERM)refreshTerm()},3000);
+}
+function closeTerm(){
+  document.getElementById('termDrawer').classList.remove('show');
+  if(TERM_TIMER){clearInterval(TERM_TIMER);TERM_TIMER=null}
+  CURRENT_TERM=null;
+}
+async function refreshTerm(){
+  if(!CURRENT_TERM)return;
+  try{
+    const t=CURRENT_TERM;
+    const d=await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}?lines=80&is_agent=${t.isAgent}`);
+    const out=document.getElementById('termOut');
+    out.textContent=d.output||d.error||'(空)';
+    out.scrollTop=out.scrollHeight;
+    document.getElementById('tdDot').className='status-dot '+((BOARD?.panes||[]).find(p=>p.pane_id===t.paneId&&p.session===t.session)||{}).agent_status;
+  }catch(e){document.getElementById('termOut').textContent='读取失败: '+e}
+}
+async function termSend(){
+  if(!CURRENT_TERM)return;
+  const text=document.getElementById('termInput').value.trim();if(!text)return;
+  const mode=document.getElementById('termMode').value;
+  try{
+    await api(`/api/herdr/pane/${encodeURIComponent(CURRENT_TERM.session)}/${encodeURIComponent(CURRENT_TERM.paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
+    document.getElementById('termInput').value='';
+    setTimeout(refreshTerm,800);
+  }catch(e){toast('发送失败: '+e)}
+}
+// 终端里上传截图/文件,自动插入 @路径(对 agent 模式)或裸路径(对 shell)
+async function termUploadFiles(input){
+  const files=input.files;if(!files.length||!CURRENT_TERM)return;
+  const mode=document.getElementById('termMode').value;
+  const inp=document.getElementById('termInput');
+  const isAgent=mode==='prompt';
+  for(const f of files){
+    const fd=new FormData();fd.append('file',f);
+    try{
+      const r=await api('/api/upload',{method:'POST',body:fd});
+      // agent 用 @路径 引用(codex 支持),shell 用裸路径
+      const ref=(isAgent?'@':'')+r.path;
+      inp.value=(inp.value?inp.value+' ':'')+ref;
+      toast('已上传: '+r.filename+(isAgent?' (@引用)':''));
+    }catch(e){toast('上传失败: '+e)}
+  }
+  input.value=''; // 允许重复选同一文件
+  inp.focus();
+}
+
+// ============ 终端里的消息(嵌入 agent 卡片通讯) ============
+async function loadAgentMsgsForTerm(agent,session){
+  // 简化:暂用全局消息,后续可按 agent 过滤
+  // 这里给消息按钮入口
+}
+function openMsg(agent){
+  CURRENT_MSG_AGENT=agent;
+  document.getElementById('msgModal').classList.add('show');
+  document.getElementById('mmTitle').textContent='与 '+agent+' 的消息';
+  document.getElementById('mmTo').value=agent||'';
+  // TODO: 按 agent 过滤消息
+}
+
+// ============ 启动 agent ============
+async function loadSessions(){
+  try{
+    const d=await api('/api/herdr/sessions');
+    const sel=document.getElementById('lnSession');
+    const running=(d.sessions||[]).filter(s=>s.status==='running');
+    sel.innerHTML=(d.sessions||[]).map(s=>`<option value="${esc(s.name)}" ${s.status==='running'?'':'disabled'}>${esc(s.name)}${s.status==='running'?'':' (停)'}</option>`).join('');
+  }catch(e){}
+}
+async function startAgent(){
+  const session=document.getElementById('lnSession').value;
+  const agent=document.getElementById('lnAgent').value;
+  const workdir=document.getElementById('lnWorkdir').value.trim();
+  if(!session){toast('选一个 session');return}
+  if(!workdir){toast('填工作目录');return}
+  try{
+    const r=await api('/api/herdr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agent})});
+    if(r.error)toast('启动: '+r.error);else{toast('已启动 '+agent+' @ '+session);setTimeout(refreshBoard,1500)}
+  }catch(e){toast('启动失败: '+e)}
+}
+
+// ============ 消息 view ============
+async function loadProjList(){
+  try{
+    const d=await api('/api/overview');
+    const sel=document.getElementById('msgProj');
+    if(!sel.options.length)d.projects.forEach(p=>sel.add(new Option(p.slug,p.slug)));
+    loadProjectMsgs();
+  }catch(e){toast('加载失败: '+e)}
+}
+async function loadProjectMsgs(){
+  const slug=document.getElementById('msgProj').value;if(!slug)return;
+  try{
+    const d=await api('/api/projects/'+encodeURIComponent(slug));
+    CURRENT_PROJ=d.project;
+    document.getElementById('projAgentList').innerHTML=d.agents.map(a=>`
+      <div class="agent-item" onclick="document.getElementById('cmpTo').value='${esc(a.name)}'">
+        <span class="agent-icon ${esc(a.program||'none')}" style="width:22px;height:22px;font-size:11px">${AGENT_EMOJI[(a.program||'').replace('-cli','').replace('-work','').replace('-cn','')]||'⬜'}</span>
+        <span class="an">${esc(a.name)}${a.unread?` <span class="card-badge">${a.unread}</span>`:''}</span>
+      </div>`).join('')||'<div class="muted">无 agent</div>';
+    document.getElementById('msgList').innerHTML=d.messages.map(m=>`
+      <div class="msg">
+        <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${m.importance||'normal'}</span></div>
+        <span class="muted">#${m.id} ${fmtTime(m.created_ts)}</span></div>
+        <div class="muted" style="font-size:11px;margin-bottom:5px"><b>${esc(m.sender_name||'?')}</b> → ${(m.recipients||[]).map(r=>esc(r.name)).join(', ')}</div>
+        ${m.body_md?`<div class="mb">${esc(m.body_md)}</div>`:''}
+        ${(m.recipients||[]).some(r=>!r.read_ts)?`<button class="icon" onclick="ackMsg(${d.project.id},'${esc((m.recipients.find(r=>!r.read_ts)||{}).name||'')}',${m.id})" style="font-size:11px">✓已读</button>`:''}
+      </div>`).join('')+`
+      <div class="compose"><div class="muted" style="font-size:11px;margin-bottom:6px">✉️ 写消息</div>
+      <div class="field"><label>发件人</label><select id="cmpFrom">${d.agents.map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>收件人(逗号分隔)</label><input id="cmpTo"></div>
+      <div class="field"><label>主题</label><input id="cmpSubject"></div>
+      <div class="field"><label>正文</label><textarea id="cmpBody" rows="3"></textarea></div>
+      <button class="primary" onclick="sendMsg()">发送</button></div>`;
+  }catch(e){toast('加载失败: '+e)}
+}
+async function sendMsg(){
+  try{await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:CURRENT_PROJ.id,sender_name:document.getElementById('cmpFrom').value,to:document.getElementById('cmpTo').value.split(',').map(s=>s.trim()).filter(Boolean),subject:document.getElementById('cmpSubject').value,body:document.getElementById('cmpBody').value})});
+    toast('已发送 ✓');loadProjectMsgs()}catch(e){toast('发送失败: '+e)}
+}
+async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
+
+// ============ 文件 ============
+async function loadFileTree(){
+  try{
+    if(!FILE_CWD){const r=await api('/api/files/roots');FILE_CWD=r.roots[0]}
+    const d=await api('/api/files?path='+encodeURIComponent(FILE_CWD));
+    FILE_CWD=d.path;
+    const tree=document.getElementById('fileTree');
+    tree.innerHTML=`<div class="ft-bc">${esc(d.path)}</div>`+d.entries.map(e=>`
+      <div class="ft-item" onclick="${e.type==='dir'?`fileCd('${esc(e.name)}')`:`fileOpen('${esc(d.path)}','${esc(e.name)}')`}">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</div>`).join('');
+  }catch(e){toast('列目录失败: '+e)}
+}
+function fileCd(n){FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
+function fileUp(){FILE_CWD=FILE_CWD.split('/').slice(0,-1).join('/')||'/';loadFileTree()}
+async function fileOpen(dir,name){
+  const path=dir.endsWith('/')?dir+name:dir+'/'+name;
+  try{
+    const d=await api('/api/files/read?path='+encodeURIComponent(path));
+    if(d.binary){toast('二进制文件');return}
+    FILE_PATH=d.path;FILE_ORIG=d.text;
+    document.getElementById('editorArea').innerHTML=`
+      <div class="editor-bar"><span class="ep">${esc(d.path)}</span><span class="muted">${d.size}B</span><button class="primary" style="width:auto" onclick="fileSave()">💾</button></div>
+      <textarea id="fileEditor" spellcheck="false">${esc(d.text)}</textarea>`;
+  }catch(e){toast('打开失败: '+e)}
+}
+async function fileSave(){const c=document.getElementById('fileEditor').value;if(c===FILE_ORIG){toast('无改动');return}try{await api('/api/files/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:FILE_PATH,content:c})});FILE_ORIG=c;toast('已保存 ✓')}catch(e){toast('保存失败: '+e)}}
+
+function closeMsg(){document.getElementById('msgModal').classList.remove('show')}
+async function mmReply(){/* TODO */}
+
+// ============ SSE ============
+function connectSSE(){
+  if(SSE)SSE.close();
+  SSE=new EventSource('/api/events');
+  SSE.addEventListener('unread',e=>{document.getElementById('unreadN').textContent=JSON.parse(e.data).count});
+  SSE.addEventListener('board',e=>{const d=JSON.parse(e.data);BOARD=d;renderBoard(d)});
+  SSE.onerror=()=>{document.getElementById('liveDot').classList.add('off');setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)};
+}
+
+// ============ 主题切换 ============
+function toggleTheme(){
+  const r=document.documentElement;
+  const light=r.classList.toggle('light');
+  document.getElementById('themeBtn').textContent=light?'☀️':'🌙';
+  try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+}
+(function(){try{if(localStorage.getItem('dash-theme')==='light'){document.documentElement.classList.add('light');document.getElementById('themeBtn').textContent='☀️'}}catch(e){}})();
+
+// ============ init ============
+connectSSE();loadSessions();refreshBoard();
+</script>
+</body>
+</html>

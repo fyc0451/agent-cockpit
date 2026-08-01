@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Mail Dashboard (FastAPI :8790)
+After=network.target agent-mail.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mcp_agent_mail/dashboard
+ExecStart=%h/mcp_agent_mail/.venv/bin/python server.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
