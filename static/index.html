@@ -373,18 +373,27 @@ function cardHtml(p){
 
 // ============ 终端抽屉 ============
 let TERM_TIMER=null;
+// 点卡片:打开真终端(xterm),自动 cd 到该 agent 的工作目录
+// 这样 /resume /model 等所有交互命令都能用(真 PTY)
 async function openTerm(session,paneId,agent){
-  CURRENT_TERM={session,paneId,agent,isAgent:!!agent};
-  document.getElementById('termDrawer').classList.add('show');
-  document.getElementById('tdTitle').textContent=(agent||'终端')+' @ '+session+'/'+paneId;
-  document.getElementById('tdDot').className='status-dot '+(BOARD?.panes?.find(p=>p.pane_id===paneId&&p.session===session)||{})?.agent_status;
-  // agent 默认 prompt 模式,普通终端默认 send(执行 shell 命令)
-  document.getElementById('termMode').value=agent?'prompt':'send';
-  document.getElementById('termMode').disabled=false;
-  await refreshTerm();
-  // 打开时每 3 秒自动刷新输出(看 agent 实时进展)
-  if(TERM_TIMER)clearInterval(TERM_TIMER);
-  TERM_TIMER=setInterval(()=>{if(CURRENT_TERM)refreshTerm()},3000);
+  // 从 BOARD 找该 pane 的 cwd
+  const pane=(BOARD?.panes||[]).find(p=>p.pane_id===paneId&&p.session===session);
+  const cwd=pane?.cwd||'';
+  // 切到终端 tab
+  showView('term');
+  // 创建一个带 cwd 的终端(自动 cd 到那)
+  await termNew(cwd);
+  // 等 xterm 挂载完,给个提示
+  setTimeout(()=>{
+    if(XTERM){
+      if(agent==='codex'){
+        XTERM.write('\x1b[36m# 已 cd 到 '+cwd+'\r\n# 启动 codex: codex  (恢复历史: codex resume --last)\r\n# 或直接用 /resume /model 等命令\r\n\x1b[0m');
+      }else if(agent){
+        XTERM.write('\x1b[36m# 已 cd 到 '+cwd+'\r\n# 启动 '+agent+': '+agent+'\r\n\x1b[0m');
+      }
+      XTERM.focus();
+    }
+  },400);
 }
 function closeTerm(){
   document.getElementById('termDrawer').classList.remove('show');
@@ -583,9 +592,10 @@ async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',head
 let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[];
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 function termEnsure(){if(!TERM_ID)termNew()}
-async function termNew(){
+async function termNew(cwd){
   try{
-    const r=await api('/api/term',{method:'POST'});
+    const url='/api/term'+(cwd?('?cwd='+encodeURIComponent(cwd)):'');
+    const r=await api(url,{method:'POST'});
     TERMS.push(r.id);TERM_ID=r.id;
     const sel=document.getElementById('termSelect');
     sel.innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
