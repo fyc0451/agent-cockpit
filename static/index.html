@@ -234,8 +234,9 @@ header .spacer{flex:1}
     <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)">
       <button class="primary sm" onclick="termNew()">+ 新终端</button>
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
+      <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端">📎上传<input type="file" id="termTabUpload" accept="image/*" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm danger" onclick="termClose()">✕ 关闭</button>
-      <span class="muted" style="font-size:11px;margin-left:auto">真 PTY:支持 Esc 中断 / 方向键选择 / vim / Tab 补全 / 斜杠命令</span>
+      <span class="muted" style="font-size:11px;margin-left:auto">真 PTY:Esc中断 / 方向键选择 / vim / Tab补全 / 斜杠命令</span>
     </div>
     <div id="termContainer" style="flex:1;background:#000;padding:6px;overflow:hidden"></div>
   </section>
@@ -614,6 +615,21 @@ async function termNew(cwd){
   }catch(e){toast('创建终端失败: '+e)}
 }
 function termSwitch(id){if(id){TERM_ID=id;termMount(id)}}
+// 终端 tab 上传:上传文件 → 把 @路径 作为击键写入 xterm(等于在终端打字)
+async function termTabUploadFiles(input){
+  const files=input.files;if(!files.length||!TERM_WS||!XTERM)return;
+  for(const f of files){
+    const fd=new FormData();fd.append('file',f);
+    try{
+      const r=await api('/api/upload',{method:'POST',body:fd});
+      // 把 @路径 作为击键发进终端(codex 会识别 @ 引用)
+      const ref='@'+r.path+' ';
+      TERM_WS.send(ref);
+      toast('已上传并插入: '+r.filename);
+    }catch(e){toast('上传失败: '+e)}
+  }
+  input.value='';
+}
 async function termClose(){
   if(!TERM_ID)return;
   try{await api('/api/term/'+TERM_ID,{method:'DELETE'})}catch(e){}
