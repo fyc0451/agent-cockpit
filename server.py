@@ -425,6 +425,36 @@ def api_setup_workspace(req: SetupWorkspaceReq):
     }
 
 
+@app.post("/api/herdr/pane/{session}/{pane_id}/tell-identity")
+def api_herdr_pane_tell_identity(session: str, pane_id: str):
+    """手动给单个 pane 发身份告知(适用于手动在 herdr 里开的新 pane)。"""
+    snap = herdr_client.snapshot()
+    p = next((x for s in snap.get("sessions", [])
+              if s.get("session") == session
+              for x in s.get("panes", []) if x.get("pane_id") == pane_id), None)
+    if not p:
+        raise HTTPException(404, "pane 不存在")
+    cwd = p.get("cwd") or ""
+    agent_type = p.get("agent") or ""
+    if not agent_type:
+        raise HTTPException(400, "该 pane 不是 agent(herdr 未检测到),请等 agent 启动后再试")
+    if not cwd:
+        raise HTTPException(400, "该 pane 无 cwd")
+    name_map = {"codex": "codex-main", "kimi": "kimi-main", "claude": "claude-main",
+                "qodercli": "qodercn-main", "qoder": "qodercn-main", "qodercn": "qodercn-main",
+                "grok": "grok-main", "opencode": "opencode-main"}
+    my_name = name_map.get(agent_type, f"{agent_type}-main")
+    hint = (
+        "[agent-mail 身份告知] 花名={name},项目={proj}。"
+        "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
+        "--to <花名> --subject \"...\" --body \"...\";"
+        "收消息: mail-recv --agent {ag} --instance main --project \"{proj}\" --unread。"
+    ).format(name=my_name, proj=cwd, ag=agent_type)
+    result = herdr_client.pane_send(session, pane_id, hint, "prompt")
+    return {"ok": "error" not in result, "pane_id": pane_id, "agent": agent_type,
+            "name": my_name, "result": result}
+
+
 @app.post("/api/herdr/session/{name}/init-mail")
 def api_herdr_session_init_mail(name: str):
     """给 session 的项目目录注册全套 agent-mail 身份,并通知各 agent pane 它们的身份。

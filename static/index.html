@@ -894,6 +894,7 @@ async function loadSessionsView(){
           </div>
           <button class="sm" onclick="restartPane('${esc(s.name)}','${esc(p.pane_id)}',false)" title="干净重启(丢上下文)">⟳ 重启</button>
           <button class="sm" onclick="restartPane('${esc(s.name)}','${esc(p.pane_id)}',true)" title="恢复历史会话重启">↩ resume</button>
+          <button class="sm" onclick="tellIdentity('${esc(s.name)}','${esc(p.pane_id)}')" title="给这个 pane 发身份告知(手动开的 pane 用)">📧 身份</button>
           <button class="icon" onclick="openTerm('${esc(s.name)}','${esc(p.pane_id)}','${esc(p.agent)}')" title="查看终端">🖥</button>
         </div>`).join(''):'<div class="muted" style="font-size:12px;padding:6px 0">无 agent pane</div>';
       return `<div class="card">
@@ -917,6 +918,14 @@ async function restartPane(session,paneId,resume){
     if(r.error)toast('重启失败: '+r.error);
     else{toast('已重启 '+r.agent+(resume?' (resume)':''));setTimeout(loadSessionsView,2000)}
   }catch(e){toast('重启失败: '+e)}
+}
+async function tellIdentity(session,paneId){
+  toast('发送身份告知...');
+  try{
+    const r=await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/tell-identity`,{method:'POST'});
+    if(r.ok)toast('✅ 已告知 '+r.name);
+    else toast(r.detail||'失败');
+  }catch(e){toast('失败: '+e)}
 }
 async function stopSession(name){
   if(!confirm('确认停止 session '+name+'?pane 保留,可再 attach'))return;
