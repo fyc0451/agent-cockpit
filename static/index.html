@@ -471,7 +471,7 @@ async function pickMention(session,paneId,agent){
     let tag;
     if(d.found){
       // 注入身份信息块:让当前 agent 知道这个协作者怎么联系
-      tag=`[@${agent}: 花名=${d.name}, 项目=${d.project_key}, 可用 mail-send --to ${d.name} --project "${d.project_key}" 联系它]`;
+      tag=`[@${agent}=${d.name}: ${d.mail_hint}]`;
       toast('已注入 '+agent+' 身份('+d.name+')');
     }else{
       // 没注册身份:退化成简单标注

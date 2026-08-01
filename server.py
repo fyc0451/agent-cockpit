@@ -306,7 +306,12 @@ def api_herdr_pane_identity(session: str, pane_id: str):
         "project_key": ident["human_key"],
         "session": session,
         "cwd": cwd,
-        "mail_hint": f'可通过 ~/agent-mail-tools/mail-send --to {ident["name"]} --project "{ident["human_key"]}" 联系',
+        "mail_hint": (
+            f'协作者 {ident["name"]} 已接入 agent-mail。'
+            f'发消息: mail-send --agent <你的类型> --instance main --project "{ident["human_key"]}" '
+            f'--to {ident["name"]} --subject "..." --body "..." '
+            f'(mail-send 已在 PATH 中,需在项目目录 {ident["human_key"]} 下执行)'
+        ),
     }
 
 
