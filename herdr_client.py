@@ -263,31 +263,39 @@ def restart_pane(
     """重启 pane 里的 agent(Ctrl+C 退出 + 重新启动)。
 
     场景:agent 卡死 / thread 损坏 / 想用新 PATH。
-    resume=True 时尝试 codex resume 恢复历史会话(否则干净新会话)。
+    resume=True 时尝试 codex resume --last 恢复历史会话。
     """
     if not is_available():
         return {"available": False}
+    import time
     try:
-        import time
-        # 1. Ctrl+C 退出当前 agent(多发几次确保退到 shell)
-        for _ in range(3):
-            _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
+        # 1. 先 Esc(取消任何 TUI 子模式/输入),再 Ctrl+C 退出 agent
+        _run(["--session", session, "pane", "send-keys", pane_id, "Escape"], timeout=3)
+        time.sleep(0.5)
+        _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
+        time.sleep(1.5)
+        # 再发一次确保退到 shell(agent 可能需要两次 C-c)
+        _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
         time.sleep(1)
-        # 2. 从 snapshot 拿 cwd 和 agent 类型
+        # 2. 清空当前输入行(防有残留):Ctrl+U 清行
+        _run(["--session", session, "pane", "send-keys", pane_id, "C-u"], timeout=3)
+        time.sleep(0.3)
+        # 3. 从 snapshot 拿 cwd 和 agent 类型
         snap = _snapshot_session(session)
         p = next((x for x in snap.get("panes", []) if x.get("pane_id") == pane_id), {})
         workdir = workdir or p.get("cwd", str(Path.home()))
         agent = agent or p.get("agent") or "codex"
-        # 3. 构造启动命令
-        agent_cmds = {
-            "codex": f"codex -C {workdir}",
-            "kimi": "kimi-code",
-            "qodercli": "qoder",
-        }
-        base = agent_cmds.get(agent, agent_cmds["codex"])
-        cmd_str = f"{base} resume --last" if (resume and agent == "codex") else base
-        # 4. send-text 启动 + Enter
+        # 4. 构造启动命令(cd 到工作目录再启动,比 -C 更可靠)
+        agent_bin = {"codex": "codex", "kimi": "kimi-code", "qodercli": "qoder"}.get(agent, "codex")
+        if agent == "codex" and resume:
+            cmd_str = f'cd {workdir} && codex resume --last'
+        elif agent == "codex":
+            cmd_str = f'cd {workdir} && codex'
+        else:
+            cmd_str = f'cd {workdir} && {agent_bin}'
+        # 5. send-text 注入命令 + Enter 启动
         _run(["--session", session, "pane", "send-text", pane_id, cmd_str], timeout=5)
+        time.sleep(0.3)
         _run(["--session", session, "pane", "send-keys", pane_id, "Enter"], timeout=5)
         return {
             "available": True, "restarted": True, "pane_id": pane_id,
