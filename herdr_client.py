@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -52,7 +53,6 @@ def _find_agent_bin(name: str) -> str:
 # agent 类型 → 启动命令构造器
 def _agent_cmd(agent: str, workdir: str) -> str:
     """构造 agent 启动命令(完整路径 + shlex 安全)。"""
-    import shlex
     wdb = shlex.quote(workdir)
     bins = {
         "codex": lambda b: f"{shlex.quote(b)} -C {wdb}",
@@ -347,7 +347,6 @@ def restart_pane(
         workdir = workdir or p.get("cwd", str(Path.home()))
         agent = agent or p.get("agent") or "codex"
         # 4. 构造启动命令(用 _agent_cmd 统一处理所有 agent 类型)
-        import shlex
         if agent == "codex" and resume:
             codex_bin = shlex.quote(_find_agent_bin("codex"))
             cmd_str = f'cd {shlex.quote(workdir)} && {codex_bin} resume --last'
@@ -356,7 +355,6 @@ def restart_pane(
             cmd_str = f'cd {shlex.quote(workdir)} && {base}'
         # 5. 用 pane run 启动命令(比 send-text+Enter 可靠,不会被 agent TUI 当 prompt)
         # pane run 发命令+回车,语义是"在 pane 里执行命令"
-        import shlex
         _run(["--session", session, "pane", "run", pane_id] + shlex.split(cmd_str), timeout=8)
         return {
             "available": True, "restarted": True, "pane_id": pane_id,
