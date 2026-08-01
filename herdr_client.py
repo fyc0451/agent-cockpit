@@ -29,18 +29,22 @@ def _find_agent_bin(name: str) -> str:
     if found:
         return found
     home = Path.home()
+    # qoderclicn 用 glob 匹配最新版本目录(版本号会变)
+    qoder_dir = home / ".qoder-cn" / "bin" / "qoderclicn"
+    qoder_bins = sorted(qoder_dir.glob("qoderclicn-*"), reverse=True) if qoder_dir.is_dir() else []
+    qoder_path = str(qoder_bins[0]) if qoder_bins else "qoderclicn"
     paths = {
         "codex": [home / ".npm-global" / "bin" / "codex"],
         "kimi": [home / ".kimi-code" / "bin" / "kimi"],
         "claude": [home / ".npm-global" / "bin" / "claude"],
-        "qoder": [home / ".qodersec" / "bin" / "qodersec"],
-        "qodercli": [home / ".qodersec" / "bin" / "qodersec"],
-        "qodercn": [home / ".qodersec" / "bin" / "qodersec"],
+        "qoder": [qoder_path],
+        "qodercli": [qoder_path],
+        "qodercn": [qoder_path],
         "grok": [home / ".grok" / "downloads" / "grok-linux-x86_64"],
         "opencode": [home / ".opencode" / "bin" / "opencode"],
     }
     for p in paths.get(name, []):
-        if p.is_file():
+        if p and Path(p).is_file():
             return str(p)
     return name  # 最后兜底用裸名
 
