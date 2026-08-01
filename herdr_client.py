@@ -228,6 +228,12 @@ def start_agent(
     """
     if not is_available():
         return {"available": False}
+    # 去重:如果 session 里已有该 agent 类型的 pane,不重复创建
+    snap = _snapshot_session(session)
+    existing = next((p for p in snap.get("panes", []) if p.get("agent") == agent), None)
+    if existing:
+        return {"available": True, "pane_id": existing["pane_id"], "agent": agent,
+                "reused": True, "msg": f"{agent} pane 已存在({existing['pane_id']}),跳过"}
     # 构造 agent 启动命令(用完整路径,herdr pane 的 PATH 可能没有这些命令)
     import shlex
     codex_bin = shutil.which("codex") or str(Path.home() / ".npm-global" / "bin" / "codex")
