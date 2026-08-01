@@ -228,11 +228,15 @@ def start_agent(
     """
     if not is_available():
         return {"available": False}
-    # 构造 agent 启动命令
+    # 构造 agent 启动命令(用完整路径,herdr pane 的 PATH 可能没有这些命令)
+    import shlex
+    codex_bin = shutil.which("codex") or str(Path.home() / ".npm-global" / "bin" / "codex")
+    kimi_bin = shutil.which("kimi") or str(Path.home() / ".kimi-code" / "bin" / "kimi")
+    qoder_bin = shutil.which("qoder") or "qoder"
     agent_cmds = {
-        "codex": f"codex -C {workdir}",
-        "kimi": f"kimi-code",
-        "qodercli": f"qoder",
+        "codex": f"{shlex.quote(codex_bin)} -C {shlex.quote(workdir)}",
+        "kimi": f"{shlex.quote(kimi_bin)}",
+        "qodercli": f"{shlex.quote(qoder_bin)}",
     }
     cmd_str = agent_cmds.get(agent, agent_cmds["codex"])
     # 用 herdr 新建 pane 并执行。不同 herdr 版本命令不同,这里用 send-keys 兜底:
@@ -288,14 +292,19 @@ def restart_pane(
         p = next((x for x in snap.get("panes", []) if x.get("pane_id") == pane_id), {})
         workdir = workdir or p.get("cwd", str(Path.home()))
         agent = agent or p.get("agent") or "codex"
-        # 4. 构造启动命令(cd 到工作目录再启动,比 -C 更可靠)
-        agent_bin = {"codex": "codex", "kimi": "kimi-code", "qodercli": "qoder"}.get(agent, "codex")
+        # 4. 构造启动命令(用完整路径,herdr pane PATH 可能找不到)
+        import shlex
+        codex_bin = shutil.which("codex") or str(Path.home() / ".npm-global" / "bin" / "codex")
+        kimi_bin = shutil.which("kimi") or str(Path.home() / ".kimi-code" / "bin" / "kimi")
+        qoder_bin = shutil.which("qoder") or "qoder"
+        agent_bins = {"codex": codex_bin, "kimi": kimi_bin, "qodercli": qoder_bin}
+        abin = shlex.quote(agent_bins.get(agent, codex_bin))
         if agent == "codex" and resume:
-            cmd_str = f'cd {workdir} && codex resume --last'
+            cmd_str = f'cd {shlex.quote(workdir)} && {abin} resume --last'
         elif agent == "codex":
-            cmd_str = f'cd {workdir} && codex'
+            cmd_str = f'cd {shlex.quote(workdir)} && {abin}'
         else:
-            cmd_str = f'cd {workdir} && {agent_bin}'
+            cmd_str = f'cd {shlex.quote(workdir)} && {abin}'
         # 5. 用 pane run 启动命令(比 send-text+Enter 可靠,不会被 agent TUI 当 prompt)
         # pane run 发命令+回车,语义是"在 pane 里执行命令"
         import shlex
