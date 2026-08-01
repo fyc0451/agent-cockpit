@@ -154,6 +154,9 @@ header .spacer{flex:1}
   header .logo{font-size:13px}
 }
 </style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 </head>
 <body>
 <div class="app">
@@ -161,6 +164,7 @@ header .spacer{flex:1}
     <div class="logo">⚙️ Agent Fleet</div>
     <nav id="nav">
       <button data-view="board" class="active">看板</button>
+      <button data-view="term">终端</button>
       <button data-view="msgs">消息</button>
       <button data-view="files">文件</button>
     </nav>
@@ -223,6 +227,17 @@ header .spacer{flex:1}
       </div>
     </div>
   </section>
+
+  <!-- 终端(真 PTY,xterm.js) -->
+  <section id="view-term" class="view" style="flex-direction:column">
+    <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)">
+      <button class="primary sm" onclick="termNew()">+ 新终端</button>
+      <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
+      <button class="sm danger" onclick="termClose()">✕ 关闭</button>
+      <span class="muted" style="font-size:11px;margin-left:auto">真 PTY:支持 Esc 中断 / 方向键选择 / vim / Tab 补全 / 斜杠命令</span>
+    </div>
+    <div id="termContainer" style="flex:1;background:#000;padding:6px;overflow:hidden"></div>
+  </section>
 </div>
 
 <!-- 终端抽屉 -->
@@ -278,6 +293,7 @@ function showView(v){
   if(v==='board')refreshBoard();
   if(v==='msgs')loadProjList();
   if(v==='files')loadFileTree();
+  if(v==='term')termEnsure();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>showView(b.dataset.view));
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
@@ -547,6 +563,61 @@ async function sendMsg(){
 }
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
+// ============ Web 终端(xterm.js + PTY) ============
+let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[];
+const WS_PROTO=location.protocol==='https:'?'wss':'ws';
+function termEnsure(){if(!TERM_ID)termNew()}
+async function termNew(){
+  try{
+    const r=await api('/api/term',{method:'POST'});
+    TERMS.push(r.id);TERM_ID=r.id;
+    const sel=document.getElementById('termSelect');
+    sel.innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
+    sel.value=r.id;
+    termMount(r.id);
+  }catch(e){toast('创建终端失败: '+e)}
+}
+function termSwitch(id){if(id){TERM_ID=id;termMount(id)}}
+async function termClose(){
+  if(!TERM_ID)return;
+  try{await api('/api/term/'+TERM_ID,{method:'DELETE'})}catch(e){}
+  TERMS=TERMS.filter(t=>t!==TERM_ID);
+  const sel=document.getElementById('termSelect');
+  sel.innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
+  if(TERM_WS){TERM_WS.close();TERM_WS=null}
+  if(XTERM){XTERM.dispose();XTERM=null}
+  TERM_ID=TERMS[0]||null;
+  if(TERM_ID)termMount(TERM_ID);
+  else document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>';
+}
+function termMount(id){
+  const c=document.getElementById('termContainer');
+  c.innerHTML='';
+  if(typeof Terminal==='undefined'){c.innerHTML='<div class="empty" style="color:#c00;padding:20px">xterm.js 加载失败(CDN 不可达?)</div>';return}
+  XTERM=new Terminal({cursorBlink:true,fontSize:13,theme:{background:'#000',foreground:'#e8e8e8'},scrollback:5000});
+  FIT=new FitAddon.FitAddon();
+  XTERM.loadAddon(FIT);
+  XTERM.open(c);
+  try{FIT.fit()}catch(e){}
+  if(TERM_WS){TERM_WS.close()}
+  const cols=XTERM.cols,rows=XTERM.rows;
+  TERM_WS=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
+  TERM_WS.binaryType='arraybuffer';
+  TERM_WS.onopen=()=>{
+    TERM_WS.send(JSON.stringify({type:'resize',cols,rows}));
+    XTERM.focus();
+  };
+  TERM_WS.onmessage=ev=>{
+    if(typeof ev.data==='string')XTERM.write(ev.data);
+    else XTERM.write(new Uint8Array(ev.data));
+  };
+  TERM_WS.onclose=()=>{if(XTERM)XTERM.write('\r\n\x1b[33m[连接已断开]\x1b[0m\r\n')};
+  TERM_WS.onerror=()=>{if(XTERM)XTERM.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')};
+  XTERM.onData(d=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(d)});
+  XTERM.onResize(({cols,rows})=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(JSON.stringify({type:'resize',cols,rows}))});
+  window.addEventListener('resize',()=>{try{if(FIT)FIT.fit()}catch(e){}});
+}
+
 // ============ 文件 ============
 async function loadFileTree(){
   try{
@@ -554,10 +625,23 @@ async function loadFileTree(){
     const d=await api('/api/files?path='+encodeURIComponent(FILE_CWD));
     FILE_CWD=d.path;
     const tree=document.getElementById('fileTree');
-    tree.innerHTML=`<div class="ft-bc">${esc(d.path)}</div>`+d.entries.map(e=>`
+    // 面包屑:可点击的路径段
+    const parts=d.path.split('/').filter(Boolean);
+    let bc='<div class="ft-bc">';
+    let acc='';
+    parts.forEach((p,i)=>{
+      acc+='/'+p;
+      const isLast=i===parts.length-1;
+      bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" onclick="fileGoto('${esc(acc)}')">${i===0?'':'/'}${esc(p)}</span>`;
+    });
+    bc+='</div>';
+    // 上级目录按钮(除非已是根)
+    const upBtn=d.path!=='/'?`<div class="ft-item" onclick="fileUp()">📁 <span class="muted">‥ (上级)</span></div>`:'';
+    tree.innerHTML=bc+upBtn+d.entries.map(e=>`
       <div class="ft-item" onclick="${e.type==='dir'?`fileCd('${esc(e.name)}')`:`fileOpen('${esc(d.path)}','${esc(e.name)}')`}">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
 }
+function fileGoto(p){FILE_CWD=p;loadFileTree()}
 function fileCd(n){FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
 function fileUp(){FILE_CWD=FILE_CWD.split('/').slice(0,-1).join('/')||'/';loadFileTree()}
 async function fileOpen(dir,name){

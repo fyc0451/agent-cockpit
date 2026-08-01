@@ -42,43 +42,18 @@ BINARY_EXT = {
     ".node", ".wasm",
 }
 
-# 白名单根目录,首次调用时初始化
-_allowed_roots: list[Path] | None = None
+# 访问根:整个 home 目录(私人内网工具,放开浏览)
+_HOME = Path.home().resolve()
 
 
 def _load_roots() -> list[Path]:
-    """加载允许访问的根目录。"""
-    global _allowed_roots
-    if _allowed_roots is not None:
-        return _allowed_roots
-    home = Path.home()
-    roots = [
-        home / "dashboard-uploads",
-        home / "agent-mail-tools",
-        home / "dashboard-data",
-    ]
-    # 从 SQLite 项目表加载项目目录
-    try:
-        import sqlite3
-        db_path = home / "mcp_agent_mail" / "storage.sqlite3"
-        if db_path.is_file():
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            for (hk,) in con.execute(
-                "SELECT human_key FROM projects WHERE archived_at IS NULL"
-            ).fetchall():
-                if hk:
-                    roots.append(Path(hk))
-            con.close()
-    except Exception:
-        pass
-    _allowed_roots = [r.resolve() for r in roots if r.exists()]
-    return _allowed_roots
+    """允许访问的根目录:整个 home。"""
+    return [_HOME]
 
 
 def reset_roots() -> None:
-    """重置白名单缓存(新增项目后调用)。"""
-    global _allowed_roots
-    _allowed_roots = None
+    """重置根缓存(现在单根 home,空操作,保留接口兼容)。"""
+    pass
 
 
 def _resolve(rel: str) -> Path:

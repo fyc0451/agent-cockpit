@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, UploadFile, HTTPException, Request
+from fastapi import FastAPI, UploadFile, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -23,6 +23,7 @@ import herdr_client
 import tasks
 import uploads
 import files
+import terminal
 from pydantic import BaseModel
 
 app = FastAPI(title="Agent Mail Dashboard")
@@ -288,6 +289,82 @@ def api_herdr_pane_send(session: str, pane_id: str, req: PaneSendReq):
 def api_herdr_start(req: StartAgentReq):
     """在 session 里启动一个 agent pane。"""
     return herdr_client.start_agent(req.session, req.workdir, req.agent, req.model)
+
+
+# ── Web 终端(PTY,完整交互:斜杠/Esc/vim) ─────────────────────
+
+@app.post("/api/term")
+def api_term_create(cwd: str | None = None, cols: int = 80, rows: int = 24):
+    """创建一个新终端会话(PTY bash)。"""
+    try:
+        return terminal.create_term(cwd, cols, rows)
+    except Exception as e:
+        raise HTTPException(500, f"创建终端失败: {e}")
+
+
+@app.get("/api/term")
+def api_term_list():
+    """列出所有终端会话。"""
+    return {"terms": terminal.list_terms()}
+
+
+@app.delete("/api/term/{term_id}")
+def api_term_kill(term_id: str):
+    """关闭终端。"""
+    terminal.kill_term(term_id)
+    return {"ok": True}
+
+
+@app.websocket("/api/term/{term_id}")
+async def api_term_ws(websocket: WebSocket, term_id: str):
+    """终端 WebSocket 双向桥接:浏览器↔PTY。"""
+    await websocket.accept()
+    # 会话存在性校验
+    terms_now = {t["id"] for t in terminal.list_terms()}
+    if term_id not in terms_now:
+        await websocket.send_text("\r\n[终端会话不存在,已关闭]\r\n")
+        await websocket.close()
+        return
+    pump_task = None
+    try:
+        # 输出转发任务:PTY → WebSocket
+        async def pump_out():
+            while True:
+                data = await asyncio.to_thread(terminal.read_output, term_id, 0.15)
+                if data:
+                    await websocket.send_bytes(data)
+                elif not terminal.is_alive(term_id):
+                    await websocket.send_text("\r\n[进程已退出]\r\n")
+                    break
+                await asyncio.sleep(0.02)
+        pump_task = asyncio.create_task(pump_out())
+        # 主循环:接收浏览器输入
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            text = msg.get("text")
+            if text:
+                if text.startswith("{"):
+                    try:
+                        ctrl = json.loads(text)
+                        if ctrl.get("type") == "resize":
+                            terminal.resize_term(term_id, ctrl.get("cols", 80), ctrl.get("rows", 24))
+                        continue
+                    except json.JSONDecodeError:
+                        pass
+                terminal.write_term(term_id, text)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        if pump_task:
+            pump_task.cancel()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ── SSE 实时推送(看板状态变化) ────────────────────────────────
