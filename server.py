@@ -371,13 +371,13 @@ def api_setup_workspace(req: SetupWorkspaceReq):
             time.sleep(0.5)
             # 在 PTY 里跑 herdr --session <name>(创建 + detach)
             terminal.write_term(t["id"], f"herdr --session {req.session}\r")
-            time.sleep(3)  # 等 herdr 启动并创建 session
-            # detach:发 Ctrl-b d(herdr detach 序列)
+            time.sleep(4)  # 等 herdr server 完全启动并创建 session
+            # detach:发 Ctrl-b d(herdr detach 序列),让 client 脱离但 session server 继续跑
             terminal.write_term(t["id"], "\x02d")  # Ctrl-b + d
-            time.sleep(1)
-            terminal.kill_term(t["id"])
+            time.sleep(2)  # 等 detach 完成,session server 稳定
+            # 注意:不 kill PTY!herdr client detach 后 PTY 回到 shell,
+            # session server 是独立进程会继续跑。kill PTY 可能连带杀 server。
             session_created = True
-            time.sleep(1)  # 等 session 注册
         except Exception as e:
             return {"ok": False, "error": f"创建 session 失败: {e}"}
     results = []
