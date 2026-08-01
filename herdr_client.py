@@ -265,7 +265,8 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
 
 
 def start_agent(
-    session: str, workdir: str, agent: str = "codex", model: str | None = None
+    session: str, workdir: str, agent: str = "codex", model: str | None = None,
+    layout: str = "right",
 ) -> dict[str, Any]:
     """在指定 session 里启动一个 agent pane(新建 window/pane 跑 agent)。
 
@@ -283,22 +284,38 @@ def start_agent(
     # 构造 agent 启动命令(用 _agent_cmd 统一处理完整路径)
     cmd_str = _agent_cmd(agent, workdir)
     try:
-        # 用 pane split 开新 pane(herdr 没有 new-window,用 pane split --cwd)
-        split_out = _run(
-            ["--session", session, "pane", "split", "--current",
-             "--direction", "right", "--no-focus", "--cwd", workdir],
-            timeout=5,
-        )
-        # 从 split 返回的 JSON 取新 pane_id
+        # 根据 layout 开新 pane:right/down 用 split,tab 用 tab create
         new_pid = None
-        for line in split_out.splitlines():
-            if line.startswith("data:"):
-                try:
-                    sd = json.loads(line[5:].strip())
-                    new_pid = sd.get("result", {}).get("pane", {}).get("pane_id")
-                except (ValueError, json.JSONDecodeError):
-                    pass
-                break
+        if layout == "tab":
+            # 多页:每个 agent 一个新 tab
+            tab_out = _run(
+                ["--session", session, "tab", "create", "--cwd", workdir],
+                timeout=5,
+            )
+            for line in tab_out.splitlines():
+                if line.startswith("data:"):
+                    try:
+                        td = json.loads(line[5:].strip())
+                        new_pid = td.get("result", {}).get("tab", {}).get("focused_pane_id")
+                    except (ValueError, json.JSONDecodeError):
+                        pass
+                    break
+        else:
+            # 分屏:right(水平/左右)或 down(垂直/上下)
+            direction = "right" if layout in ("right", "horizontal") else "down"
+            split_out = _run(
+                ["--session", session, "pane", "split", "--current",
+                 "--direction", direction, "--no-focus", "--cwd", workdir],
+                timeout=5,
+            )
+            for line in split_out.splitlines():
+                if line.startswith("data:"):
+                    try:
+                        sd = json.loads(line[5:].strip())
+                        new_pid = sd.get("result", {}).get("pane", {}).get("pane_id")
+                    except (ValueError, json.JSONDecodeError):
+                        pass
+                    break
         if not new_pid:
             # fallback:取 snapshot 里 id 最大的 pane
             snap = _snapshot_session(session)
@@ -306,7 +323,7 @@ def start_agent(
             if panes:
                 new_pid = sorted(panes, key=lambda p: p.get("pane_id", ""))[-1].get("pane_id")
         if not new_pid:
-            return {"available": True, "error": "split 后找不到新 pane"}
+            return {"available": True, "error": "split/tab 后找不到新 pane"}
         # 用 pane run 启动 agent(完整路径 + shlex 安全分割)
         _run(["--session", session, "pane", "run", new_pid] + shlex.split(cmd_str), timeout=8)
         return {"available": True, "pane_id": new_pid, "agent": agent, "cmd": cmd_str}

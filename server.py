@@ -79,6 +79,7 @@ class SetupWorkspaceReq(BaseModel):
     session: str
     workdir: str
     agents: list[str] = ["codex"]  # 要开的 agent 列表,如 ["codex","kimi"]
+    layout: str = "right"  # right(水平/左右) | down(垂直/上下) | tab(多页/不分割)
 
 
 # ── 数据/通信路由 ───────────────────────────────────────────────
@@ -383,7 +384,7 @@ def api_setup_workspace(req: SetupWorkspaceReq):
     results = []
     # 1. 为每个 agent 开 pane + 启动
     for agent_type in req.agents:
-        r = herdr_client.start_agent(req.session, req.workdir, agent_type)
+        r = herdr_client.start_agent(req.session, req.workdir, agent_type, layout=req.layout)
         results.append({"agent": agent_type, "start": r})
         time.sleep(2)  # 等 agent 启动
     # 2. 注册身份(am-init-project)
