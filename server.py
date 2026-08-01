@@ -354,12 +354,32 @@ def api_herdr_session_delete(name: str):
 
 @app.post("/api/herdr/setup-workspace")
 def api_setup_workspace(req: SetupWorkspaceReq):
-    """一键工作区初始化:为每个 agent split pane + 启动 → 注册身份 → 通知各 pane。
+    """一键工作区初始化:自动建 session → split pane + 启动 → 注册身份 → 通知。
 
-    流程:对每个 agent → herdr pane split + pane run 启动 → am-init-project 注册 → 通知。
+    如果 session 不存在,通过 PTY 自动创建(herdr 需要 TTY 才能 attach/创建)。
     """
     import subprocess
     import time
+    # 0. 检查 session 是否存在,不存在则自动创建
+    sessions = herdr_client.list_sessions()
+    existing = {s["name"] for s in sessions}
+    session_created = False
+    if req.session not in existing:
+        # 用 PTY 终端创建 session(herdr --session 需要 TTY)
+        try:
+            t = terminal.create_term(req.workdir)
+            time.sleep(0.5)
+            # 在 PTY 里跑 herdr --session <name>(创建 + detach)
+            terminal.write_term(t["id"], f"herdr --session {req.session}\r")
+            time.sleep(3)  # 等 herdr 启动并创建 session
+            # detach:发 Ctrl-b d(herdr detach 序列)
+            terminal.write_term(t["id"], "\x02d")  # Ctrl-b + d
+            time.sleep(1)
+            terminal.kill_term(t["id"])
+            session_created = True
+            time.sleep(1)  # 等 session 注册
+        except Exception as e:
+            return {"ok": False, "error": f"创建 session 失败: {e}"}
     results = []
     # 1. 为每个 agent 开 pane + 启动
     for agent_type in req.agents:
@@ -398,6 +418,7 @@ def api_setup_workspace(req: SetupWorkspaceReq):
             notified.append(f"{atype}→{my_name}")
     return {
         "ok": reg_ok, "session": req.session, "workdir": req.workdir,
+        "session_created": session_created,
         "started": [r["agent"] for r in results], "registered": reg_ok,
         "notified": notified,
     }
