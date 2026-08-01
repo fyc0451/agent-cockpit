@@ -379,21 +379,31 @@ async function openTerm(session,paneId,agent){
   // 从 BOARD 找该 pane 的 cwd
   const pane=(BOARD?.panes||[]).find(p=>p.pane_id===paneId&&p.session===session);
   const cwd=pane?.cwd||'';
-  // 切到终端 tab
-  showView('term');
-  // 创建一个带 cwd 的终端(自动 cd 到那)
-  await termNew(cwd);
-  // 等 xterm 挂载完,给个提示
-  setTimeout(()=>{
-    if(XTERM){
-      if(agent==='codex'){
-        XTERM.write('\x1b[36m# 已 cd 到 '+cwd+'\r\n# 启动 codex: codex  (恢复历史: codex resume --last)\r\n# 或直接用 /resume /model 等命令\r\n\x1b[0m');
-      }else if(agent){
-        XTERM.write('\x1b[36m# 已 cd 到 '+cwd+'\r\n# 启动 '+agent+': '+agent+'\r\n\x1b[0m');
+  // 切到终端 tab(直接切,不触发 termEnsure 避免重复创建)
+  document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
+  document.getElementById('view-term').classList.add('active');
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
+  document.getElementById('launchBar').classList.add('hidden');
+  // 关掉旧终端的 WS(避免累积),创建一个带 cwd 的新终端
+  if(TERM_WS){try{TERM_WS.close()}catch(e){};TERM_WS=null}
+  // 创建带 cwd 的终端
+  try{
+    const r=await api('/api/term'+(cwd?('?cwd='+encodeURIComponent(cwd)):''),{method:'POST'});
+    TERMS.push(r.id);TERM_ID=r.id;
+    const sel=document.getElementById('termSelect');
+    sel.innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
+    sel.value=r.id;
+    termMount(r.id);
+    // 提示
+    setTimeout(()=>{
+      if(XTERM&&agent){
+        const hint=agent==='codex'
+          ?'\x1b[36m# 已 cd 到 '+cwd+'\r\n# 启动: codex  (恢复历史: codex resume --last)\r\n\x1b[0m'
+          :'\x1b[36m# 已 cd 到 '+cwd+'\r\n# 启动: '+agent+'\r\n\x1b[0m';
+        XTERM.write(hint);XTERM.focus();
       }
-      XTERM.focus();
-    }
-  },400);
+    },500);
+  }catch(e){toast('创建终端失败: '+e)}
 }
 function closeTerm(){
   document.getElementById('termDrawer').classList.remove('show');
