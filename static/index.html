@@ -245,10 +245,11 @@ header .spacer{flex:1}
 
   <!-- 会话管理(session + agent pane,可重启) -->
   <section id="view-sessions" class="view" style="flex-direction:column">
-    <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)">
+    <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
       <h3 style="font-size:14px">herdr sessions & agents</h3>
+      <button class="primary sm" onclick="showSetupModal()">+ 一键工作区</button>
       <button class="sm" onclick="loadSessionsView()">↻ 刷新</button>
-      <span class="muted" style="font-size:11px;margin-left:auto">重启 agent 会用上新 PATH;resume 恢复历史上下文</span>
+      <span class="muted" style="font-size:11px;margin-left:auto">一键工作区:split pane + 启动 agent + 注册身份 + 通知,一次全完</span>
     </div>
     <div id="sessionsList" style="flex:1;overflow:auto;padding:10px"></div>
   </section>
@@ -299,6 +300,22 @@ header .spacer{flex:1}
     </div>
     <div class="muted" style="font-size:12px;margin-bottom:10px">选一个 agent,它的身份信息会插入终端,当前 agent 就知道怎么联系它</div>
     <div id="collabList"></div>
+  </div>
+</div>
+
+<!-- 一键工作区(setup-workspace) -->
+<div class="modal-bg" id="setupModal" onclick="if(event.target===this)closeSetup()">
+  <div class="modal" style="max-width:480px">
+    <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="font-size:15px">一键工作区</h3>
+      <button class="icon" onclick="closeSetup()">✕</button>
+    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:10px">自动:split pane → 启动 agent → 注册身份 → 通知各 pane。前提:session 已用 hteam 建好</div>
+    <div class="field"><label>session 名(hteam 建好的)</label><input id="suSession" placeholder="如 tts 或 my-project"></div>
+    <div class="field"><label>工作目录(项目绝对路径)</label><input id="suWorkdir" placeholder="如 /home/fyc/my-project"></div>
+    <div class="field"><label>要开的 agent(逗号分隔)</label><input id="suAgents" value="codex,kimi" placeholder="codex,kimi,qodercn"></div>
+    <button class="primary" onclick="doSetupWorkspace()" style="width:100%">▶ 启动工作区</button>
+    <div id="suResult" style="margin-top:10px;font-size:12px"></div>
   </div>
 </div>
 
@@ -861,6 +878,27 @@ async function initSessionMail(name){
     if(r.ok){toast('✅ 通信已初始化: '+r.project);loadSessionsView()}
     else{toast('初始化失败: '+(r.error||r.detail||'未知'))}
   }catch(e){toast('初始化失败: '+e)}
+}
+// 一键工作区:split + 启动 agent + 注册身份 + 通知
+function showSetupModal(){document.getElementById('setupModal').classList.add('show')}
+function closeSetup(){document.getElementById('setupModal').classList.remove('show')}
+async function doSetupWorkspace(){
+  const session=document.getElementById('suSession').value.trim();
+  const workdir=document.getElementById('suWorkdir').value.trim();
+  const agents=document.getElementById('suAgents').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(!session||!workdir||!agents.length){toast('填完整');return}
+  const res=document.getElementById('suResult');
+  res.innerHTML='<span style="color:var(--fg2)">正在创建(split+启动+注册+通知,约30秒)...</span>';
+  try{
+    const r=await api('/api/herdr/setup-workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agents})});
+    if(r.ok){
+      res.innerHTML='<span style="color:var(--done)">✅ 完成</span><br>启动: '+r.started.join(', ')+'<br>注册: '+(r.registered?'✅':'❌')+'<br>通知: '+(r.notified||[]).join(', ');
+      toast('工作区就绪 ✓');
+      setTimeout(()=>{closeSetup();loadSessionsView()},2000);
+    }else{
+      res.innerHTML='<span style="color:var(--err)">部分失败</span><br>启动: '+(r.started||[]).join(', ')+'<br>注册: '+(r.registered?'✅':'❌');
+    }
+  }catch(e){res.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>'}
 }
 
 // ============ 文件 ============

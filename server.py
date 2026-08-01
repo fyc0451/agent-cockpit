@@ -74,6 +74,13 @@ class StartAgentReq(BaseModel):
     model: str | None = None
 
 
+class SetupWorkspaceReq(BaseModel):
+    """一键工作区初始化:split pane + 启动 agent + 注册身份 + 通知。"""
+    session: str
+    workdir: str
+    agents: list[str] = ["codex"]  # 要开的 agent 列表,如 ["codex","kimi"]
+
+
 # ── 数据/通信路由 ───────────────────────────────────────────────
 
 @app.get("/api/overview")
@@ -343,6 +350,57 @@ def api_herdr_session_stop(name: str):
 def api_herdr_session_delete(name: str):
     """删除已停止的 herdr session。"""
     return herdr_client.delete_session(name)
+
+
+@app.post("/api/herdr/setup-workspace")
+def api_setup_workspace(req: SetupWorkspaceReq):
+    """一键工作区初始化:为每个 agent split pane + 启动 → 注册身份 → 通知各 pane。
+
+    流程:对每个 agent → herdr pane split + pane run 启动 → am-init-project 注册 → 通知。
+    """
+    import subprocess
+    import time
+    results = []
+    # 1. 为每个 agent 开 pane + 启动
+    for agent_type in req.agents:
+        r = herdr_client.start_agent(req.session, req.workdir, agent_type)
+        results.append({"agent": agent_type, "start": r})
+        time.sleep(2)  # 等 agent 启动
+    # 2. 注册身份(am-init-project)
+    init_script = str(Path.home() / "agent-mail-tools" / "am-init-project")
+    reg_ok = False
+    try:
+        r = subprocess.run([init_script], cwd=req.workdir, capture_output=True, text=True, timeout=60)
+        reg_ok = r.returncode == 0
+    except Exception as e:
+        pass
+    # 3. 通知各 agent pane 它们的身份
+    time.sleep(2)
+    snap = herdr_client.snapshot()
+    sess = next((s for s in snap.get("sessions", []) if s.get("session") == req.session), None)
+    notified = []
+    if sess:
+        name_map = {"codex": "codex-main", "kimi": "kimi-main",
+                    "qodercli": "qodercn-main", "opencode": "opencode-main"}
+        for p in sess.get("panes", []):
+            atype = p.get("agent")
+            pid = p.get("pane_id")
+            if not atype or not pid:
+                continue
+            my_name = name_map.get(atype, f"{atype}-main")
+            hint = (
+                "[agent-mail 身份告知] 花名={name},项目={proj}。"
+                "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
+                "--to <花名> --subject \"...\" --body \"...\";"
+                "收消息: mail-recv --agent {ag} --instance main --project \"{proj}\" --unread。"
+            ).format(name=my_name, proj=req.workdir, ag=atype)
+            herdr_client.pane_send(req.session, pid, hint, "prompt")
+            notified.append(f"{atype}→{my_name}")
+    return {
+        "ok": reg_ok, "session": req.session, "workdir": req.workdir,
+        "started": [r["agent"] for r in results], "registered": reg_ok,
+        "notified": notified,
+    }
 
 
 @app.post("/api/herdr/session/{name}/init-mail")
