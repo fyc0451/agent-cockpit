@@ -165,6 +165,7 @@ header .spacer{flex:1}
     <nav id="nav">
       <button data-view="board" class="active">看板</button>
       <button data-view="term">终端</button>
+      <button data-view="sessions">会话</button>
       <button data-view="msgs">消息</button>
       <button data-view="files">文件</button>
     </nav>
@@ -238,6 +239,16 @@ header .spacer{flex:1}
     </div>
     <div id="termContainer" style="flex:1;background:#000;padding:6px;overflow:hidden"></div>
   </section>
+
+  <!-- 会话管理(session + agent pane,可重启) -->
+  <section id="view-sessions" class="view" style="flex-direction:column">
+    <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)">
+      <h3 style="font-size:14px">herdr sessions & agents</h3>
+      <button class="sm" onclick="loadSessionsView()">↻ 刷新</button>
+      <span class="muted" style="font-size:11px;margin-left:auto">重启 agent 会用上新 PATH;resume 恢复历史上下文</span>
+    </div>
+    <div id="sessionsList" style="flex:1;overflow:auto;padding:10px"></div>
+  </section>
 </div>
 
 <!-- 终端抽屉 -->
@@ -294,6 +305,7 @@ function showView(v){
   if(v==='msgs')loadProjList();
   if(v==='files')loadFileTree();
   if(v==='term')termEnsure();
+  if(v==='sessions')loadSessionsView();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>showView(b.dataset.view));
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
@@ -620,6 +632,64 @@ function termMount(id){
   XTERM.onData(d=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(d)});
   XTERM.onResize(({cols,rows})=>{if(TERM_WS&&TERM_WS.readyState===1)TERM_WS.send(JSON.stringify({type:'resize',cols,rows}))});
   window.addEventListener('resize',()=>{try{if(FIT)FIT.fit()}catch(e){}});
+}
+
+// ============ 会话管理(session + agent 重启) ============
+async function loadSessionsView(){
+  const el=document.getElementById('sessionsList');
+  el.innerHTML='<div class="muted">加载中…</div>';
+  try{
+    const [sess,snap]=await Promise.all([
+      api('/api/herdr/sessions'),
+      api('/api/herdr/snapshot')
+    ]);
+    const agentsBySess={};
+    for(const p of (snap.panes||[])){if(p.agent){
+      (agentsBySess[p.session]=agentsBySess[p.session]||[]).push(p);
+    }}
+    el.innerHTML=(sess.sessions||[]).map(s=>{
+      const running=s.status==='running';
+      const agents=agentsBySess[s.name]||[];
+      const agentHtml=agents.length?agents.map(p=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg3);border-radius:8px;margin-top:6px">
+          <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+          <div style="flex:1">
+            <div style="font-size:13px">${esc(p.agent)} <span class="muted">${esc(p.pane_id)}</span></div>
+            <div class="muted" style="font-size:11px">${esc(p.cwd_name||p.cwd||'')} · ${esc(p.agent_status)}</div>
+          </div>
+          <button class="sm" onclick="restartPane('${esc(s.name)}','${esc(p.pane_id)}',false)" title="干净重启(丢上下文)">⟳ 重启</button>
+          <button class="sm" onclick="restartPane('${esc(s.name)}','${esc(p.pane_id)}',true)" title="恢复历史会话重启">↩ resume</button>
+          <button class="icon" onclick="openTerm('${esc(s.name)}','${esc(p.pane_id)}','${esc(p.agent)}')" title="查看终端">🖥</button>
+        </div>`).join(''):'<div class="muted" style="font-size:12px;padding:6px 0">无 agent pane</div>';
+      return `<div class="card">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="status-dot ${running?'work':'idle'}"></span>
+          <b style="font-size:14px">${esc(s.name)}</b>
+          <span class="tag ${running?'run':'idle'}">${esc(s.status)}</span>
+          <span class="muted" style="font-size:11px;flex:1">${esc(s.directory)}</span>
+          ${running?`<button class="sm danger" onclick="stopSession('${esc(s.name)}')">■ 停止</button>`:`<button class="sm" onclick="deleteSession('${esc(s.name)}')" title="删除已停止的 session">🗑 删除</button>`}
+        </div>
+        ${agentHtml}
+      </div>`;
+    }).join('')||'<div class="muted">无 session</div>';
+  }catch(e){el.innerHTML='<div style="color:var(--err)">加载失败: '+esc(e)+'</div>'}
+}
+async function restartPane(session,paneId,resume){
+  if(!confirm(resume?'确认 resume 恢复历史会话重启?(Ctrl+C + codex resume --last)':'确认干净重启?(Ctrl+C + 重新启动,丢上下文)'))return;
+  toast('重启中…');
+  try{
+    const r=await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/restart?resume=${resume}`,{method:'POST'});
+    if(r.error)toast('重启失败: '+r.error);
+    else{toast('已重启 '+r.agent+(resume?' (resume)':''));setTimeout(loadSessionsView,2000)}
+  }catch(e){toast('重启失败: '+e)}
+}
+async function stopSession(name){
+  if(!confirm('确认停止 session '+name+'?pane 保留,可再 attach'))return;
+  try{await api(`/api/herdr/session/${encodeURIComponent(name)}/stop`,{method:'POST'});toast('已停止 '+name);loadSessionsView()}catch(e){toast(e)}
+}
+async function deleteSession(name){
+  if(!confirm('确认删除 session '+name+'?不可恢复'))return;
+  try{await api(`/api/herdr/session/${encodeURIComponent(name)}`,{method:'DELETE'});toast('已删除 '+name);loadSessionsView()}catch(e){toast(e)}
 }
 
 // ============ 文件 ============

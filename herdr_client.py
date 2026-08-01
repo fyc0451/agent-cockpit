@@ -254,3 +254,66 @@ def start_agent(
         return {"available": True, "pane_id": pid, "agent": agent, "cmd": cmd_str}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
+
+
+def restart_pane(
+    session: str, pane_id: str, agent: str | None = None,
+    workdir: str | None = None, resume: bool = False,
+) -> dict[str, Any]:
+    """重启 pane 里的 agent(Ctrl+C 退出 + 重新启动)。
+
+    场景:agent 卡死 / thread 损坏 / 想用新 PATH。
+    resume=True 时尝试 codex resume 恢复历史会话(否则干净新会话)。
+    """
+    if not is_available():
+        return {"available": False}
+    try:
+        import time
+        # 1. Ctrl+C 退出当前 agent(多发几次确保退到 shell)
+        for _ in range(3):
+            _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
+        time.sleep(1)
+        # 2. 从 snapshot 拿 cwd 和 agent 类型
+        snap = _snapshot_session(session)
+        p = next((x for x in snap.get("panes", []) if x.get("pane_id") == pane_id), {})
+        workdir = workdir or p.get("cwd", str(Path.home()))
+        agent = agent or p.get("agent") or "codex"
+        # 3. 构造启动命令
+        agent_cmds = {
+            "codex": f"codex -C {workdir}",
+            "kimi": "kimi-code",
+            "qodercli": "qoder",
+        }
+        base = agent_cmds.get(agent, agent_cmds["codex"])
+        cmd_str = f"{base} resume --last" if (resume and agent == "codex") else base
+        # 4. send-text 启动 + Enter
+        _run(["--session", session, "pane", "send-text", pane_id, cmd_str], timeout=5)
+        _run(["--session", session, "pane", "send-keys", pane_id, "Enter"], timeout=5)
+        return {
+            "available": True, "restarted": True, "pane_id": pane_id,
+            "agent": agent, "cmd": cmd_str, "resume": resume,
+        }
+    except RuntimeError as e:
+        return {"available": True, "error": str(e)}
+
+
+def stop_session(session: str) -> dict[str, Any]:
+    """停止一个 herdr session。"""
+    if not is_available():
+        return {"available": False}
+    try:
+        _run(["session", "stop", session], timeout=10)
+        return {"available": True, "stopped": session}
+    except RuntimeError as e:
+        return {"available": True, "error": str(e)}
+
+
+def delete_session(session: str) -> dict[str, Any]:
+    """删除一个已停止的 session。"""
+    if not is_available():
+        return {"available": False}
+    try:
+        _run(["session", "delete", session], timeout=10)
+        return {"available": True, "deleted": session}
+    except RuntimeError as e:
+        return {"available": True, "error": str(e)}

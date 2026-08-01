@@ -327,6 +327,24 @@ def api_herdr_start(req: StartAgentReq):
     return herdr_client.start_agent(req.session, req.workdir, req.agent, req.model)
 
 
+@app.post("/api/herdr/pane/{session}/{pane_id}/restart")
+def api_herdr_pane_restart(session: str, pane_id: str, resume: bool = False):
+    """重启 pane 里的 agent(Ctrl+C + 重新启动)。resume=true 尝试恢复历史。"""
+    return herdr_client.restart_pane(session, pane_id, resume=resume)
+
+
+@app.post("/api/herdr/session/{name}/stop")
+def api_herdr_session_stop(name: str):
+    """停止 herdr session。"""
+    return herdr_client.stop_session(name)
+
+
+@app.delete("/api/herdr/session/{name}")
+def api_herdr_session_delete(name: str):
+    """删除已停止的 herdr session。"""
+    return herdr_client.delete_session(name)
+
+
 # ── Web 终端(PTY,完整交互:斜杠/Esc/vim) ─────────────────────
 
 @app.post("/api/term")
