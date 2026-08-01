@@ -235,6 +235,7 @@ header .spacer{flex:1}
       <button class="primary sm" onclick="termNew()">+ 新终端</button>
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端">📎上传<input type="file" id="termTabUpload" accept="image/*" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
+      <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)">@协作</button>
       <button class="sm danger" onclick="termClose()">✕ 关闭</button>
       <span class="muted" style="font-size:11px;margin-left:auto">真 PTY:Esc中断 / 方向键选择 / vim / Tab补全 / 斜杠命令</span>
     </div>
@@ -285,6 +286,18 @@ header .spacer{flex:1}
       <div class="field"><label>正文</label><textarea id="mmBody" rows="3"></textarea></div>
       <button class="primary" onclick="mmReply()">发送</button>
     </div>
+  </div>
+</div>
+
+<!-- 协作者选择(终端 tab 的 @协作 按钮) -->
+<div class="modal-bg" id="collabModal" onclick="if(event.target===this)closeCollab()">
+  <div class="modal" style="max-width:420px">
+    <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h3 style="font-size:15px">选择协作者</h3>
+      <button class="icon" onclick="closeCollab()">✕</button>
+    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:10px">选一个 agent,它的身份信息会插入终端,当前 agent 就知道怎么联系它</div>
+    <div id="collabList"></div>
   </div>
 </div>
 
@@ -629,6 +642,36 @@ async function termTabUploadFiles(input){
     }catch(e){toast('上传失败: '+e)}
   }
   input.value='';
+}
+// @协作:弹 agent 列表 → 选一个 → 查身份 → 身份信息作为击键写入 xterm
+function termPickCollab(){
+  if(!TERM_WS||!XTERM){toast('请先打开一个终端');return}
+  const cands=(BOARD?.panes||[]).filter(p=>p.agent);
+  if(!cands.length){toast('无可用 agent');return}
+  document.getElementById('collabList').innerHTML=cands.map(p=>`
+    <div class="mention-item" onclick="termInsertCollab('${esc(p.session)}','${esc(p.pane_id)}','${esc(p.agent)}')" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
+      <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+      <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span>
+    </div>`).join('');
+  document.getElementById('collabModal').classList.add('show');
+}
+function closeCollab(){document.getElementById('collabModal').classList.remove('show')}
+async function termInsertCollab(session,paneId,agent){
+  closeCollab();
+  if(!TERM_WS||!XTERM)return;
+  toast('查 '+agent+' 身份…');
+  try{
+    const d=await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/identity`);
+    let ref;
+    if(d.found){
+      ref=`[@${agent}=${d.name}: ${d.mail_hint}] `;
+    }else{
+      ref=`[@${agent} @ ${session}] `;
+    }
+    TERM_WS.send(ref);  // 作为击键写入终端
+    toast('已插入 '+agent+' 协作信息');
+    XTERM.focus();
+  }catch(e){toast('查询失败: '+e)}
 }
 async function termClose(){
   if(!TERM_ID)return;
