@@ -19,8 +19,8 @@ def _con() -> sqlite3.Connection:
     if _conn is None:
         if not DB_PATH.is_file():
             raise RuntimeError(f"找不到 hub 数据库: {DB_PATH}")
-        # mode=ro 只读;immutable 不可用(WAL 需要读 -wal 文件)。
-        _conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        # mode=ro 只读;check_same_thread=False 允许跨线程(只读安全)
+        _conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
     return _conn
 
