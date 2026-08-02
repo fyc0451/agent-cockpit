@@ -73,8 +73,11 @@ def test_herdr_osc52_clipboard_bridge_and_http_fallback():
     assert "document.execCommand('copy')" in js
     assert "window.isSecureContext" in js
     assert 'data-action="hfPaste"' in js
-    assert HTML.count("同步剪贴板") >= 2
-    assert "粘贴服务" in HTML
+    assert HTML.count("📋 复制到 Mac") >= 2
+    assert "📋 填入输入框" in HTML
+    assert "HTTP 下请点" not in js
+    assert "同步剪贴板" not in HTML
+    assert "粘贴服务" not in HTML
 
 
 def test_open_term_opens_drawer_reading_herdr_pane():
