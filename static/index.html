@@ -576,14 +576,15 @@ function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*100
 const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',gemini:'💎',grok:'✖️'};
 
 // ============ Attention Inbox ============
-const ATTENTION_ICON={pane_blocked:'🙋',task_failed:'❌',task_review:'🧾',mail_unread:'📬'};
-const ATTENTION_ACTION={pane_blocked:'去回复',task_failed:'看错误',task_review:'审 diff',mail_unread:'读消息'};
+const ATTENTION_ICON={pane_blocked:'🙋',task_failed:'❌',task_review:'🧾'};
+const ATTENTION_ACTION={pane_blocked:'去回复',task_failed:'看错误',task_review:'审 diff'};
 async function loadAttention(payload){
   try{
     const d=payload||await api('/api/attention');
     ATTENTION=d;CAPABILITIES=d.capabilities||{};
     document.getElementById('attentionN').textContent=d.count||0;
-    document.getElementById('attentionInfo').textContent=(d.count||0)+' 项';
+    const unread=Math.max(0,Number(d.mail_unread)||0);
+    document.getElementById('attentionInfo').textContent=(d.count||0)+' 项需处理'+(unread?' · '+unread+' 条未读消息':'');
     renderAttention(d);
   }catch(e){document.getElementById('attentionList').textContent='待办加载失败: '+e}
 }
@@ -591,13 +592,16 @@ function renderAttention(d){
   const box=document.getElementById('attentionList');
   const mail=d.capabilities&&d.capabilities.agent_mail;
   const note=mail&&mail.available===false?`<div class="capability-note">Agent Mail 未启用：${esc(mail.reason||'消息能力已自动隐藏')}。Herdr、终端、文件和任务仍可正常使用。</div>`:'';
+  const unread=Math.max(0,Number(d.mail_unread)||0);
+  const mailNote=unread?`<div class="capability-note">📬 ${unread} 条 Agent Mail 未读，不计入待办。<button class="sm" data-action="openMessages">去消息查看</button></div>`:'';
   const items=d.items||[];
-  box.innerHTML=note+(items.length?items.map((item,i)=>`
+  const actions=items.length?items.map((item,i)=>`
     <div class="attention-card" data-action="openAttention" data-index="${i}">
       <div class="attention-icon">${ATTENTION_ICON[item.kind]||'🔔'}</div>
       <div class="attention-copy"><div class="attention-title">${esc(item.title)}</div><div class="attention-detail">${esc(item.detail||'')}</div></div>
       <div class="attention-action">${ATTENTION_ACTION[item.kind]||'查看'} ›</div>
-    </div>`).join(''):'<div class="empty">当前没有需要你处理的事项</div>');
+    </div>`).join(''):'<div class="empty">当前没有需要你处理的事项</div>';
+  box.innerHTML=note+actions+mailNote;
 }
 function replaceAttentionHash(item){
   if(item&&typeof item.url==='string'&&item.url.startsWith('/#/attention/'))history.replaceState(null,'',item.url);
@@ -1712,7 +1716,8 @@ function bindDelegation(){
     if(it.dataset.action==='openFlow')enterHerdrFlow(it.dataset.session,it.dataset.pane);
     else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
   on('#attentionList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
-    if(it.dataset.action==='openAttention')openAttention(parseInt(it.dataset.index))});
+    if(it.dataset.action==='openAttention')openAttention(parseInt(it.dataset.index));
+    else if(it.dataset.action==='openMessages')showView('msgs')});
   on('#hfBody',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='hfSend')hfSend(it.dataset.pane);
     else if(it.dataset.action==='hfToggle')hfToggle(it.dataset.pane);

@@ -65,28 +65,19 @@ def test_build_attention_combines_panes_tasks_and_optional_mail(monkeypatch):
     )
     monkeypatch.setattr(
         server.db,
-        "unread_messages",
-        lambda limit=50: [
-            {
-                "id": 42,
-                "project_slug": "demo-project",
-                "subject": "Review this",
-                "sender_name": "kimi-main",
-                "created_ts": 30,
-                "recipients": "codex-main",
-            }
-        ],
+        "global_unread_count",
+        lambda: 1,
     )
 
     result = server._build_attention(snapshot)
 
     by_kind = {item["kind"]: item for item in result["items"]}
-    assert result["count"] == 4
-    assert set(by_kind) == {"pane_blocked", "task_failed", "task_review", "mail_unread"}
+    assert result["count"] == 3
+    assert result["mail_unread"] == 1
+    assert set(by_kind) == {"pane_blocked", "task_failed", "task_review"}
     assert by_kind["pane_blocked"]["url"] == "/#/attention/pane/demo/w1%3Ap2"
     assert by_kind["task_failed"]["url"] == "/#/attention/task/failed1"
     assert by_kind["task_review"]["target"]["task_id"] == "review1"
-    assert by_kind["mail_unread"]["url"] == "/#/attention/mail/demo-project/42"
     assert result["capabilities"]["agent_mail"]["available"] is True
 
 
@@ -99,8 +90,8 @@ def test_build_attention_degrades_when_agent_mail_is_missing(monkeypatch):
     )
     monkeypatch.setattr(
         server.db,
-        "unread_messages",
-        lambda limit=50: (_ for _ in ()).throw(AssertionError("must not query mail DB")),
+        "global_unread_count",
+        lambda: (_ for _ in ()).throw(AssertionError("must not query mail DB")),
     )
 
     result = server._build_attention({"available": True, "panes": []})
@@ -205,7 +196,7 @@ def test_attention_keeps_mail_readable_when_hub_is_down(monkeypatch):
     monkeypatch.setattr(
         server.db, "status", lambda: {"available": True, "reason": None}
     )
-    monkeypatch.setattr(server.db, "unread_messages", lambda limit=50: [])
+    monkeypatch.setattr(server.db, "global_unread_count", lambda: 0)
     monkeypatch.setattr(
         server.hub_client,
         "status",

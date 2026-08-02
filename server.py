@@ -383,10 +383,10 @@ def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
         })
 
     mail_status = _agent_mail_status()
-    mail_rows: list[dict[str, Any]] = []
+    mail_unread = 0
     if mail_status["available"]:
         try:
-            mail_rows = db.unread_messages(100)
+            mail_unread = db.global_unread_count()
         except Exception as exc:
             logger.exception("attention Agent Mail query failed")
             mail_status = {
@@ -396,27 +396,6 @@ def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "write_available": False,
                 "write_reason": f"Agent Mail 查询失败: {exc}",
             }
-    for message in mail_rows:
-        message_id = str(message.get("id") or "")
-        slug = str(message.get("project_slug") or "")
-        sender = str(message.get("sender_name") or "未知发件人")
-        items.append({
-            "id": f"mail:{message_id}",
-            "kind": "mail_unread",
-            "priority": 80,
-            "title": str(message.get("subject") or "未读 Agent Mail"),
-            "detail": f"{sender} · {slug}",
-            "created_ts": message.get("created_ts"),
-            "target": {
-                "view": "msgs",
-                "project_slug": slug,
-                "message_id": message_id,
-            },
-            "url": (
-                f"/#/attention/mail/{quote(slug, safe='')}/"
-                f"{quote(message_id, safe='')}"
-            ),
-        })
     items.sort(
         key=lambda item: (
             item["priority"],
@@ -429,7 +408,7 @@ def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "items": items,
         "count": len(items),
-        "mail_unread": len(mail_rows),
+        "mail_unread": mail_unread,
         "capabilities": {"agent_mail": mail_status},
     }
 
