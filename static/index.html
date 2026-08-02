@@ -10,6 +10,7 @@
   --fg:#e8ecf3; --fg2:#a8b2c2; --fg3:#6a7488;
   --accent:#5b9cff; --accent2:#8b6fff;
   --need:#f59e0b; --work:#3b82f6; --done:#10b981; --idle:#6a7488;
+  --err:#ef4444;
   --bd:#252b38; --bd2:#323a4a;
   --term-bg:#07090d; --term-fg:#c8d3e0;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
@@ -31,6 +32,8 @@ button:active{transform:scale(.97)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 button.primary:hover{background:#4a89f0}
 button.icon{padding:6px 9px;background:transparent;border-color:transparent;font-size:16px}
+button.sm{font-size:12px;padding:4px 9px}
+button.danger{color:#fff;background:var(--err);border-color:var(--err)}
 input,select,textarea{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--bd2);border-radius:7px;padding:7px 9px;width:100%}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 textarea{font-family:var(--mono);resize:vertical}
@@ -38,7 +41,7 @@ pre,.mono{font-family:var(--mono)}
 .muted{color:var(--fg3)} .fg2{color:var(--fg2)}
 
 /* 头部 */
-.app{display:flex;flex-direction:column;height:100vh}
+.app{display:flex;flex-direction:column;height:100vh;height:100dvh}
 header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--bd)}
 header .logo{font-weight:700;font-size:15px;white-space:nowrap;display:flex;align-items:center;gap:6px}
 header nav{display:flex;gap:2px}
@@ -131,6 +134,20 @@ header .spacer{flex:1}
 .term-out{flex:1;background:var(--term-bg);border-radius:0;padding:12px;font-family:var(--mono);font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;overflow:auto;color:var(--term-fg);min-height:180px}
 .term-in{display:flex;gap:7px;padding:8px;border-top:1px solid var(--bd)}
 .term-in input{font-family:var(--mono)}
+.pane-switch{display:flex;align-items:center;gap:5px;min-width:240px}
+.pane-switch select{min-width:140px}
+.term-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)}
+.term-help{font-size:11px;margin-left:auto}
+
+/* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
+.hf-body{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
+.hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex-direction:column;overflow:hidden}
+.hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap}
+.hf-pane-head .pn{flex:1;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hf-out{background:var(--term-bg);color:var(--term-fg);font-family:var(--mono);font-size:12px;line-height:1.5;padding:10px 12px;white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:28vh;min-height:100px;user-select:text;-webkit-user-select:text}
+.hf-in{display:flex;gap:7px;padding:8px;border-top:1px solid var(--bd);flex-wrap:wrap}
+.hf-in input{flex:1;min-width:140px;font-family:var(--mono)}
+.hf-in select{width:auto}
 
 /* 消息抽屉(卡片点消息) */
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:60;padding:14px}
@@ -150,13 +167,45 @@ header .spacer{flex:1}
 }
 @media(max-width:560px){
   .board{grid-template-columns:1fr}
-  header nav button{padding:5px 7px;font-size:12px}
+  header{padding:6px 8px;gap:4px;flex-wrap:wrap}
   header .logo{font-size:13px}
+  header .spacer{display:none}
+  header nav{order:3;width:100%;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px}
+  header nav button{padding:5px 2px;font-size:11px;min-width:0}
+  #liveText{display:none}
+  .stat-pill{padding:3px 6px}
+  .board-wrap{padding:8px}
+  .msgs-body,.files-body{padding:6px;gap:6px;min-height:0}
+  .msgs-list,.editor-area{min-height:0}
+  .launch-bar{padding:6px 8px;gap:5px;max-height:42dvh;overflow:auto}
+  .launch-bar .lbl,#boardInfo{display:none}
+  .launch-bar select{flex:1;min-width:0}
+  .launch-bar input{order:2;flex-basis:100%;min-width:0!important}
+  .launch-bar button{order:3;flex:1}
+  .term-toolbar{flex-wrap:wrap;padding:6px;gap:5px}
+  .term-toolbar #termSelect{flex:1;min-width:120px!important}
+  .term-help{display:none}
+  #termContainer{padding:3px!important}
+  .drawer-bg.show{padding:0}
+  .drawer{height:100dvh;max-height:100dvh;max-width:none;border-radius:0;border-left:0;border-right:0}
+  .drawer-head{padding:7px 8px;gap:5px;flex-wrap:wrap}
+  .drawer-head .dt{font-size:12px}
+  .pane-switch{order:2;width:100%;min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr) auto}
+  .pane-switch select{min-width:0}
+  .term-out{min-height:0;padding:8px;font-size:11px}
+  .term-in{padding:6px;gap:5px}
+  .term-in input{flex-basis:100%;min-width:0!important}
+  .modal-bg{padding:0;align-items:flex-end}
+  .modal{max-height:92dvh;border-radius:13px 13px 0 0}
+  #sessionsList{padding:6px!important}
+  #sessionsList .card>div{flex-wrap:wrap}
+  #sessionsList .card button{flex:0 1 auto}
+  .toast{max-width:calc(100vw - 16px);width:max-content;white-space:normal;word-break:break-word;text-align:center}
 }
 </style>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP" crossorigin="anonymous">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js" integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js" integrity="sha384-iF+jqbuti4XlB64clWgFWYEscb+UnSRv3VgVikGYZu+otNFnSHr7y7NcKfBnGizn" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="app">
@@ -165,6 +214,7 @@ header .spacer{flex:1}
     <nav id="nav">
       <button data-view="board" class="active">看板</button>
       <button data-view="term">终端</button>
+      <button data-view="herdrflow">流</button>
       <button data-view="sessions">会话</button>
       <button data-view="msgs">消息</button>
       <button data-view="files">文件</button>
@@ -231,16 +281,28 @@ header .spacer{flex:1}
 
   <!-- 终端(真 PTY,xterm.js) -->
   <section id="view-term" class="view" style="flex-direction:column">
-    <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)">
+    <div class="term-toolbar">
       <button class="primary sm" onclick="termNew()">+ 新终端</button>
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端">📎上传<input type="file" id="termTabUpload" accept="image/*" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
+      <button class="sm" onclick="enterHerdrFlow()" title="只读 pane 流视图(手机可滚屏/复制,输入框直接发指令)">📜 流视图</button>
       <button class="sm danger" onclick="termClose()">✕ 关闭</button>
-      <span class="muted" style="font-size:11px;margin-left:auto">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
+      <span class="muted term-help">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
     </div>
     <div id="termContainer" style="flex:1;background:#000;padding:6px 14px 6px 6px;overflow:hidden"></div>
+  </section>
+
+  <!-- herdr 流视图(只读 pane 流 + 输入框发指令,手机可滚屏/复制) -->
+  <section id="view-herdrflow" class="view" style="flex-direction:column">
+    <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
+      <select id="hfSession" onchange="hfLoad()" style="width:auto;min-width:140px"></select>
+      <button class="sm" onclick="hfLoad()">↻ 刷新</button>
+      <button class="sm" onclick="hfTakeover()" title="在终端里 attach 到当前 session(xterm TUI,桌面端推荐)">🖥 接管 TUI</button>
+      <span class="muted" style="font-size:11px;margin-left:auto">只读流:可滚屏/长按复制 · 输入框直接发指令</span>
+    </div>
+    <div class="hf-body" id="hfBody"><div class="empty">加载中…</div></div>
   </section>
 
   <!-- 会话管理(session + agent pane,可重启) -->
@@ -261,6 +323,11 @@ header .spacer{flex:1}
     <div class="drawer-head">
       <span class="status-dot" id="tdDot"></span>
       <span class="dt" id="tdTitle">终端</span>
+      <div class="pane-switch" id="paneSwitch" hidden>
+        <button class="icon" onclick="stepDrawerPane(-1)" title="上一个 pane">‹</button>
+        <select id="paneSelect" onchange="switchDrawerPane(this.value)" aria-label="切换 pane"></select>
+        <button class="icon" onclick="stepDrawerPane(1)" title="下一个 pane">›</button>
+      </div>
       <button class="icon" onclick="refreshTerm()" title="刷新输出">↻</button>
       <button class="icon" onclick="closeTerm()">✕</button>
     </div>
@@ -328,10 +395,14 @@ header .spacer{flex:1}
 
 <script>
 // ============ 状态 ============
-let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null;
+let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null, FILE_ENTRIES=[];
 let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
-const api=(u,o)=>fetch(u,o).then(r=>r.ok?r.json():r.text().then(t=>{try{const e=JSON.parse(t);throw e.detail||t}catch(_){throw t}}).catch(()=>{throw r.statusText}));
-const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
+// 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// session 名白名单(与后端一致),doAttachHerdr 拼进发给 PTY 的 shell 命令前必须先过
+const SESSION_NAME_RE=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const validSessionName=s=>typeof s==='string'&&SESSION_NAME_RE.test(s);
 function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),ms)}
 function showView(v){
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
@@ -343,6 +414,7 @@ function showView(v){
   if(v==='files')loadFileTree();
   if(v==='term')termEnsure();
   if(v==='sessions')loadSessionsView();
+  if(v==='herdrflow')hfStart();else hfStop();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>showView(b.dataset.view));
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
@@ -391,6 +463,7 @@ function renderBoard(d){
   document.getElementById('boardInfo').textContent=`${d.sessions?.length||0} session · ${agentN} agent`;
   document.getElementById('liveText').textContent=agentN+' agents';
   document.getElementById('liveDot').classList.toggle('off',agentN===0);
+  if(CURRENT_TERM)syncPaneSelect();
 }
 
 function cardHtml(p){
@@ -398,10 +471,11 @@ function cardHtml(p){
   const cls=classify(p.agent_status,p.agent);
   const emoji=AGENT_EMOJI[ag]||'⬜';
   const stMap={need:'需要你',work:'运行中',done:'完成',idle:'空闲',unknown:'未知'};
-  return `<div class="card ${cls}" onclick="openTerm('${esc(p.session)}','${esc(p.pane_id)}','${esc(ag)}')">
+  return `<div class="card ${cls}" data-action="openFlow" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">
     <div class="card-top">
-      <div class="agent-icon ${ag}">${emoji}</div>
+      <div class="agent-icon ${esc(ag)}">${emoji}</div>
       <div class="card-name">${esc(p.agent||p.terminal_title||p.pane_id)}</div>
+      <button class="icon" style="padding:2px 6px;font-size:13px" title="接管 TUI(xterm)" data-action="openTerm" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">🖥</button>
       <span class="status-dot ${cls}"></span>
     </div>
     <div class="card-meta">${esc(p.session)} · ${esc(p.cwd_name||p.cwd||'')} · ${stMap[cls]}</div>
@@ -410,52 +484,77 @@ function cardHtml(p){
 
 // ============ 终端抽屉 ============
 let TERM_TIMER=null;
-// 点卡片:打开真终端(xterm),自动 cd 到该 agent 的工作目录
-// 这样 /resume /model 等所有交互命令都能用(真 PTY)
+const isCompactScreen=()=>window.matchMedia('(max-width:560px)').matches;
+function drawerPanes(){
+  if(!CURRENT_TERM)return[];
+  return (BOARD?.panes||[]).filter(p=>p.session===CURRENT_TERM.session&&p.pane_id);
+}
+function syncPaneSelect(){
+  if(!CURRENT_TERM)return;
+  const sel=document.getElementById('paneSelect');
+  const wrap=document.getElementById('paneSwitch');
+  const panes=drawerPanes();
+  if(!panes.some(p=>p.pane_id===CURRENT_TERM.paneId)){
+    panes.unshift({pane_id:CURRENT_TERM.paneId,agent:CURRENT_TERM.agent||''});
+  }
+  sel.replaceChildren(...panes.map(p=>new Option(
+    (p.agent||'shell')+' · '+p.pane_id+(p.focused?' · 当前':''),p.pane_id
+  )));
+  sel.value=CURRENT_TERM.paneId;
+  wrap.hidden=panes.length<2;
+}
+function updateDrawerHead(){
+  if(!CURRENT_TERM)return;
+  document.getElementById('tdTitle').textContent=(CURRENT_TERM.agent||'终端')+' · '+CURRENT_TERM.session+' / '+CURRENT_TERM.paneId;
+  const pane=(BOARD?.panes||[]).find(p=>p.pane_id===CURRENT_TERM.paneId&&p.session===CURRENT_TERM.session)||{};
+  document.getElementById('tdDot').className='status-dot '+classify(pane.agent_status,pane.agent);
+}
+function switchDrawerPane(paneId){
+  if(!CURRENT_TERM||!paneId||paneId===CURRENT_TERM.paneId)return;
+  const pane=drawerPanes().find(p=>p.pane_id===paneId);
+  CURRENT_TERM.paneId=paneId;
+  CURRENT_TERM.agent=pane?.agent||'';
+  CURRENT_TERM.isAgent=!!pane?.agent;
+  document.getElementById('termMode').value=CURRENT_TERM.isAgent?'prompt':'send';
+  document.getElementById('termOut').textContent='加载中…';
+  updateDrawerHead();syncPaneSelect();refreshTerm();
+}
+function stepDrawerPane(delta){
+  const sel=document.getElementById('paneSelect');
+  if(sel.options.length<2)return;
+  const next=(sel.selectedIndex+delta+sel.options.length)%sel.options.length;
+  switchDrawerPane(sel.options[next].value);
+}
+// 点 agent 卡片:打开终端抽屉,读取并往该 herdr pane 发指令(不新建独立 PTY)。
+// 新建独立 shell 仍由"终端"tab 的 termNew 负责。
 async function openTerm(session,paneId,agent){
-  // 从 BOARD 找该 pane 的 cwd
-  const pane=(BOARD?.panes||[]).find(p=>p.pane_id===paneId&&p.session===session);
-  const cwd=pane?.cwd||'';
-  // 切到终端 tab(直接切,不触发 termEnsure 避免重复创建)
-  document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
-  document.getElementById('view-term').classList.add('active');
-  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
-  document.getElementById('launchBar').classList.add('hidden');
-  // 关掉旧终端的 WS(避免累积),创建一个带 cwd 的新终端
-  if(TERM_WS){try{TERM_WS.close()}catch(e){};TERM_WS=null}
-  // 创建带 cwd 的终端
-  try{
-    const r=await api('/api/term'+(cwd?('?cwd='+encodeURIComponent(cwd)):''),{method:'POST'});
-    TERMS.push(r.id);TERM_ID=r.id;
-    const sel=document.getElementById('termSelect');
-    sel.innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
-    sel.value=r.id;
-    termMount(r.id);
-    // 提示
-    setTimeout(()=>{
-      if(XTERM&&agent){
-        const hint=agent==='codex'
-          ?'\x1b[36m# 已 cd 到 '+cwd+'\r\n# 启动: codex  (恢复历史: codex resume --last)\r\n\x1b[0m'
-          :'\x1b[36m# 已 cd 到 '+cwd+'\r\n# 启动: '+agent+'\r\n\x1b[0m';
-        XTERM.write(hint);XTERM.focus();
-      }
-    },500);
-  }catch(e){toast('创建终端失败: '+e)}
+  if(!session||!paneId){toast('无效的 pane');return}
+  CURRENT_TERM={session,paneId,agent:agent||'',isAgent:!!agent};
+  document.getElementById('termMode').value=CURRENT_TERM.isAgent?'prompt':'send';
+  updateDrawerHead();syncPaneSelect();
+  document.getElementById('termOut').textContent='加载中…';
+  document.getElementById('termDrawer').classList.add('show');
+  if(TERM_TIMER){clearInterval(TERM_TIMER);TERM_TIMER=null}
+  TERM_TIMER=setInterval(refreshTerm,2500);
+  refreshTerm();
+  setTimeout(()=>{try{document.getElementById('termInput').focus()}catch(e){}},50);
 }
 function closeTerm(){
   document.getElementById('termDrawer').classList.remove('show');
   if(TERM_TIMER){clearInterval(TERM_TIMER);TERM_TIMER=null}
+  document.getElementById('paneSwitch').hidden=true;
   CURRENT_TERM=null;
 }
 async function refreshTerm(){
   if(!CURRENT_TERM)return;
   try{
-    const t=CURRENT_TERM;
+    const t={...CURRENT_TERM};
     const d=await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}?lines=80&is_agent=${t.isAgent}`);
+    if(!CURRENT_TERM||CURRENT_TERM.session!==t.session||CURRENT_TERM.paneId!==t.paneId)return;
     const out=document.getElementById('termOut');
     out.textContent=d.output||d.error||'(空)';
     out.scrollTop=out.scrollHeight;
-    document.getElementById('tdDot').className='status-dot '+((BOARD?.panes||[]).find(p=>p.pane_id===t.paneId&&p.session===t.session)||{}).agent_status;
+    updateDrawerHead();
   }catch(e){document.getElementById('termOut').textContent='读取失败: '+e}
 }
 async function termSend(){
@@ -515,7 +614,7 @@ function showMention(query){
   const filtered=q?cands.filter(p=>(p.agent+' '+p.session+' '+p.pane_id).toLowerCase().includes(q)):cands;
   if(!filtered.length){hideMention();return}
   pop.innerHTML=filtered.map((p,i)=>`
-    <div class="mention-item" onclick="pickMention('${esc(p.session)}','${esc(p.pane_id)}','${esc(p.agent)}')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border-bottom:1px solid var(--bd)">
+    <div class="mention-item" data-action="pickMention" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border-bottom:1px solid var(--bd)">
       <span class="agent-icon ${esc(p.agent)}" style="width:22px;height:22px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
       <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span>
     </div>`).join('');
@@ -609,17 +708,17 @@ async function loadProjectMsgs(){
     const d=await api('/api/projects/'+encodeURIComponent(slug));
     CURRENT_PROJ=d.project;
     document.getElementById('projAgentList').innerHTML=d.agents.map(a=>`
-      <div class="agent-item" onclick="document.getElementById('cmpTo').value='${esc(a.name)}'">
+      <div class="agent-item" data-action="pickRecipient" data-name="${esc(a.name)}">
         <span class="agent-icon ${esc(a.program||'none')}" style="width:22px;height:22px;font-size:11px">${AGENT_EMOJI[(a.program||'').replace('-cli','').replace('-work','').replace('-cn','')]||'⬜'}</span>
-        <span class="an">${esc(a.name)}${a.unread?` <span class="card-badge">${a.unread}</span>`:''}</span>
+        <span class="an">${esc(a.name)}${a.unread?` <span class="card-badge">${esc(a.unread)}</span>`:''}</span>
       </div>`).join('')||'<div class="muted">无 agent</div>';
     document.getElementById('msgList').innerHTML=d.messages.map(m=>`
       <div class="msg">
-        <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${m.importance||'normal'}</span></div>
-        <span class="muted">#${m.id} ${fmtTime(m.created_ts)}</span></div>
+        <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${esc(m.importance||'normal')}</span></div>
+        <span class="muted">#${esc(m.id)} ${esc(fmtTime(m.created_ts))}</span></div>
         <div class="muted" style="font-size:11px;margin-bottom:5px"><b>${esc(m.sender_name||'?')}</b> → ${(m.recipients||[]).map(r=>esc(r.name)).join(', ')}</div>
         ${m.body_md?`<div class="mb">${esc(m.body_md)}</div>`:''}
-        ${(m.recipients||[]).some(r=>!r.read_ts)?`<button class="icon" onclick="ackMsg(${d.project.id},'${esc((m.recipients.find(r=>!r.read_ts)||{}).name||'')}',${m.id})" style="font-size:11px">✓已读</button>`:''}
+        ${(m.recipients||[]).some(r=>!r.read_ts)?`<button class="icon" data-action="ack" data-pid="${esc(d.project.id)}" data-mid="${esc(m.id)}" data-name="${esc((m.recipients.find(r=>!r.read_ts)||{}).name||'')}" style="font-size:11px">✓已读</button>`:''}
       </div>`).join('')+`
       <div class="compose"><div class="muted" style="font-size:11px;margin-bottom:6px">✉️ 写消息</div>
       <div class="field"><label>发件人</label><select id="cmpFrom">${d.agents.map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}</select></div>
@@ -671,12 +770,12 @@ async function termTabUploadFiles(input){
   document.querySelector('#collabModal h3').textContent='附件发给谁?';
   document.querySelector('#collabModal .muted').innerHTML='选目标,文件路径('+UPLOADED_REFS.length+'个)会插入那里';
   // 选项1:当前终端
-  let html=`<div onclick="sendUploadToCurrent()" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--accent);border-radius:8px;margin-bottom:6px">
+  let html=`<div data-action="uploadCurrent" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--accent);border-radius:8px;margin-bottom:6px">
     <span style="font-size:18px">🖥</span><span><b>当前终端</b> <span class="muted">(你正在看的这个)</span></span></div>`;
   // 选项2+:各 agent pane(通过 herdr prompt 发)
   for(const p of (BOARD?.panes||[])){
     if(!p.agent)continue;
-    html+=`<div onclick="sendUploadToPane('${esc(p.session)}','${esc(p.pane_id)}','${esc(p.agent)}')" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
+    html+=`<div data-action="uploadPane" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
       <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
       <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span></div>`;
   }
@@ -708,7 +807,7 @@ function termPickCollab(){
   const cands=(BOARD?.panes||[]).filter(p=>p.agent);
   if(!cands.length){toast('无可用 agent');return}
   document.getElementById('collabList').innerHTML=cands.map(p=>`
-    <div class="mention-item" onclick="termInsertCollab('${esc(p.session)}','${esc(p.pane_id)}','${esc(p.agent)}')" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
+    <div class="mention-item" data-action="collab" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
       <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
       <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span>
     </div>`).join('');
@@ -726,22 +825,32 @@ async function termAttachHerdr(){
   if(!running.length){toast('无可用 session');return}
   const m=document.getElementById('collabModal');
   document.querySelector('#collabModal h3').textContent='attach herdr session';
-  document.querySelector('#collabModal .muted').innerHTML='选一个 session,在终端里进入 herdr 多 pane 分屏视图(Ctrl-b 切 pane,d 脱离)';
+  document.querySelector('#collabModal .muted').textContent=isCompactScreen()
+    ?'选一个 session，在顶部选择器里触屏切换 pane'
+    :'选一个 session,在终端里进入 herdr 多 pane 分屏视图(Ctrl-b 切 pane,d 脱离)';
   document.getElementById('collabList').innerHTML=running.map(s=>`
-    <div onclick="doAttachHerdr('${esc(s)}')" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
+    <div data-action="attach" data-session="${esc(s)}" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
       <span style="font-size:18px">🖥</span>
       <span><b>${esc(s)}</b> <span class="muted">(${sessions[s]} agent pane)</span></span>
     </div>`).join('');
   m.classList.add('show');
 }
 async function doAttachHerdr(session){
+  if(!validSessionName(session)){toast('非法 session 名,拒绝 attach');return}
   closeCollab();
+  if(isCompactScreen()){
+    const panes=(BOARD?.panes||[]).filter(p=>p.session===session&&p.pane_id)
+      .sort((a,b)=>Number(!!b.agent)-Number(!!a.agent));
+    if(!panes.length){toast('该 session 暂无 pane');return}
+    openTerm(session,panes[0].pane_id,panes[0].agent||'');
+    toast('可用顶部选择器切换 pane');
+    return;
+  }
   // 切到终端 tab,创建新终端
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
   document.getElementById('launchBar').classList.add('hidden');
-  if(TERM_WS){try{TERM_WS.close()}catch(e){};TERM_WS=null}
   try{
     const r=await api('/api/term',{method:'POST'});
     TERMS.push(r.id);TERM_ID=r.id;
@@ -756,6 +865,101 @@ async function doAttachHerdr(session){
       }
     },500);
   }catch(e){toast('创建终端失败: '+e)}
+}
+
+// ============ herdr 流视图(只读 pane 流 + 输入框发指令) ============
+// 手机端默认入口:HTML 渲染 pane 输出,天然支持滚屏/长按选择/复制;
+// 输入框直接调 /api/herdr/pane/.../send 发指令,无需进 TUI。
+let HF_TIMER=null, HF_SESSION=null, HF_FOCUS_PANE=null;
+function enterHerdrFlow(session,paneId){
+  HF_SESSION=session||null;
+  HF_FOCUS_PANE=paneId||null;
+  showView('herdrflow');
+}
+async function hfStart(){
+  // BOARD 未加载时先拉一次 snapshot(直接点"流"导航进来看板数据还没到的场景)
+  if(!BOARD){try{BOARD=await api('/api/herdr/snapshot')}catch(e){}}
+  // 填充 session 选择器:有 agent pane 的 session 排前面(避免默认选中空的 default)
+  const panes=BOARD?.panes||[];
+  const agentSess=[...new Set(panes.filter(p=>p.agent).map(p=>p.session))];
+  const otherSess=[...new Set(panes.filter(p=>!p.agent).map(p=>p.session))].filter(s=>!agentSess.includes(s));
+  const sessions=[...agentSess,...otherSess];
+  const sel=document.getElementById('hfSession');
+  sel.innerHTML=sessions.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  if(HF_SESSION&&sessions.includes(HF_SESSION))sel.value=HF_SESSION;
+  else if(sessions.length){sel.value=sessions[0];HF_SESSION=sessions[0]}
+  hfLoad();
+  if(HF_TIMER)clearInterval(HF_TIMER);
+  HF_TIMER=setInterval(hfRefreshAll,3000);
+}
+function hfStop(){if(HF_TIMER){clearInterval(HF_TIMER);HF_TIMER=null}}
+function hfLoad(){
+  HF_SESSION=document.getElementById('hfSession').value||HF_SESSION;
+  hfRender();
+  hfRefreshAll();
+}
+function hfRender(){
+  const body=document.getElementById('hfBody');
+  const panes=(BOARD?.panes||[]).filter(p=>p.session===HF_SESSION&&p.agent);
+  if(!panes.length){body.innerHTML='<div class="empty">该 session 无 agent pane</div>';return}
+  body.innerHTML=panes.map(p=>{
+    const cls=classify(p.agent_status,p.agent);
+    return `<div class="hf-pane" id="hf-${esc(p.pane_id)}">
+      <div class="hf-pane-head">
+        <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+        <span class="pn">${esc(p.agent)} <span class="muted">${esc(p.pane_id)}</span></span>
+        <span class="status-dot ${cls}"></span>
+        <span class="muted" style="font-size:11px">${esc(p.cwd_name||p.cwd||'')}</span>
+      </div>
+      <pre class="hf-out" id="hf-out-${esc(p.pane_id)}">加载中…</pre>
+      <div class="hf-in">
+        <input id="hf-in-${esc(p.pane_id)}" placeholder="给 ${esc(p.agent)} 发指令…" data-action="hfSendEnter" data-pane="${esc(p.pane_id)}">
+        <select id="hf-mode-${esc(p.pane_id)}"><option value="prompt">prompt</option><option value="send">send</option></select>
+        <button class="primary sm" data-action="hfSend" data-pane="${esc(p.pane_id)}">发送</button>
+      </div>
+    </div>`;
+  }).join('');
+  // 定位到入口 pane(看板卡片点进来时)
+  if(HF_FOCUS_PANE){
+    const el=document.getElementById('hf-'+HF_FOCUS_PANE);
+    if(el)setTimeout(()=>el.scrollIntoView({block:'start'}),50);
+    HF_FOCUS_PANE=null;
+  }
+}
+async function hfRefreshAll(){
+  const session=HF_SESSION;
+  const panes=(BOARD?.panes||[]).filter(p=>p.session===session&&p.agent);
+  for(const p of panes){
+    const out=document.getElementById('hf-out-'+p.pane_id);
+    if(!out)continue;
+    try{
+      const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=80&is_agent=true`);
+      if(HF_SESSION!==session||!out.isConnected)return;
+      const next=d.output||d.error||'(空)';
+      if(out.textContent===next)continue;
+      const selection=window.getSelection();
+      if(selection&&!selection.isCollapsed&&out.contains(selection.anchorNode))continue;
+      // textContent 防 ANSI 转义注入;保留滚动位置(用户上翻时不打断)
+      const atBottom=out.scrollHeight-out.scrollTop-out.clientHeight<30;
+      out.textContent=next;
+      if(atBottom)out.scrollTop=out.scrollHeight;
+    }catch(e){if(HF_SESSION===session&&out.isConnected)out.textContent='读取失败: '+e}
+  }
+}
+async function hfSend(paneId){
+  const inp=document.getElementById('hf-in-'+paneId);
+  const mode=document.getElementById('hf-mode-'+paneId).value;
+  const text=inp.value.trim();if(!text)return;
+  try{
+    await api(`/api/herdr/pane/${encodeURIComponent(HF_SESSION)}/${encodeURIComponent(paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
+    inp.value='';
+    setTimeout(hfRefreshAll,800);
+  }catch(e){toast('发送失败: '+e)}
+}
+function hfTakeover(){
+  // 切到 xterm TUI attach(桌面端完整交互)
+  if(!HF_SESSION){toast('无 session');return}
+  doAttachHerdr(HF_SESSION);
 }
 async function termInsertCollab(session,paneId,agent){
   closeCollab();
@@ -793,13 +997,32 @@ async function termClose(){
 }
 // 多终端保活:每个终端一个独立容器元素,切换时隐藏/显示(不销毁)
 let TERM_INSTANCES={}; // {term_id: {xterm, fit, ws, el}}
+function safeFitOf(fit,xterm){try{fit.fit()}catch(e){}}
+// 为某终端建立一条独立 WS(重连时复用,不触碰其它实例的 WS)
+function openTermWS(id,xterm){
+  const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}try{xterm.focus()}catch(e){}};
+  ws.onmessage=ev=>{try{if(typeof ev.data==='string')xterm.write(ev.data);else xterm.write(new Uint8Array(ev.data))}catch(e){}};
+  ws.onclose=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[33m[连接已断开,切回将自动重连]\x1b[0m\r\n')}catch(e){}};
+  ws.onerror=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')}catch(e){}};
+  return ws;
+}
 function showTermInstance(id){
   // 隐藏所有,显示选中的
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el)inst.el.style.display=(tid===id)?'block':'none';
   }
   const inst=TERM_INSTANCES[id];
-  if(inst){XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;setTimeout(()=>{try{inst.xterm.focus()}catch(e){}},50)}
+  if(!inst)return;
+  // 切回死连接(CLOSING/CLOSED)→ 自动重连;每实例独立 WS,新建时不互相关闭
+  if(!inst.ws||inst.ws.readyState>=2){
+    try{if(!inst.xterm._disposed)inst.xterm.write('\r\n\x1b[36m[重连中…]\x1b[0m\r\n')}catch(e){}
+    inst.ws=openTermWS(id,inst.xterm);
+  }
+  XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;
+  safeFitOf(inst.fit,inst.xterm);
+  setTimeout(()=>{try{inst.xterm.focus()}catch(e){}},50);
 }
 function termSwitch(id){
   if(!id)return;
@@ -820,53 +1043,17 @@ function termMount(id){
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
-  XTERM=xterm;FIT=fit;
   // 隐藏其他终端的容器
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
-  // 安全 fit
-  const safeFit=()=>{
-    try{
-      fit.fit();
-      const d=fit.proposeDimensions();
-      if(d&&d.cols>10){xterm.resize(d.cols-1,d.rows)}
-    }catch(e){}
-  };
-  safeFit();
-  if(TERM_WS){try{TERM_WS.close()}catch(e){}}
-  const cols=xterm.cols,rows=xterm.rows;
-  const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
-  ws.binaryType='arraybuffer';
-  ws.onopen=()=>{ws.send(JSON.stringify({type:'resize',cols,rows}));xterm.focus()};
-  ws.onmessage=ev=>{
-    if(typeof ev.data==='string')xterm.write(ev.data);
-    else xterm.write(new Uint8Array(ev.data));
-  };
-  ws.onclose=()=>{if(xterm)xterm.write('\r\n\x1b[33m[连接已断开]\x1b[0m\r\n')};
-  ws.onerror=()=>{if(xterm)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')};
-  xterm.onData(d=>{if(ws&&ws.readyState===1)ws.send(d)});
-  xterm.onResize(({cols,rows})=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'resize',cols,rows}))});
-  window.addEventListener('resize',()=>safeFit());
-  TERM_WS=ws;
-  // 保存实例
-  TERM_INSTANCES[id]={xterm,fit,ws,el};
-  // 粘贴/复制(绑定到这个 xterm 的容器)
-  el.addEventListener('contextmenu',e=>{
-    e.preventDefault();
-    navigator.clipboard.readText().then(t=>{if(t&&ws.readyState===1){ws.send('\x1b[200~'+t+'\x1b[201~')}}).catch(()=>{});
-  });
-  el.addEventListener('keydown',e=>{
-    if((e.metaKey||e.ctrlKey)&&e.key==='v'){
-      e.preventDefault();
-      navigator.clipboard.readText().then(t=>{if(t&&ws.readyState===1){ws.send('\x1b[200~'+t+'\x1b[201~')}}).catch(()=>{});
-    }
-    if((e.metaKey||(e.ctrlKey&&e.shiftKey))&&e.key==='c'){
-      const sel=xterm.getSelection();
-      if(sel){e.preventDefault();navigator.clipboard.writeText(sel).catch(()=>{})}
-    }
-  });
-  el.addEventListener('mouseup',()=>{setTimeout(()=>{const sel=xterm.getSelection();if(sel){navigator.clipboard.writeText(sel).catch(()=>{})}},10)});
+  TERM_INSTANCES[id]={xterm,fit,ws:null,el};
+  // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
+  xterm.onData(d=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(d)});
+  xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
+  TERM_INSTANCES[id].ws=openTermWS(id,xterm);
+  XTERM=xterm;FIT=fit;
+  TERM_INSTANCES[id].ws&&showTermInstance(id);
 }
 
 // ============ 会话管理(session + agent 重启) ============
@@ -892,10 +1079,10 @@ async function loadSessionsView(){
             <div style="font-size:13px">${esc(p.agent)} <span class="muted">${esc(p.pane_id)}</span></div>
             <div class="muted" style="font-size:11px">${esc(p.cwd_name||p.cwd||'')} · ${esc(p.agent_status)}</div>
           </div>
-          <button class="sm" onclick="restartPane('${esc(s.name)}','${esc(p.pane_id)}',false)" title="干净重启(丢上下文)">⟳ 重启</button>
-          <button class="sm" onclick="restartPane('${esc(s.name)}','${esc(p.pane_id)}',true)" title="恢复历史会话重启">↩ resume</button>
-          <button class="sm" onclick="tellIdentity('${esc(s.name)}','${esc(p.pane_id)}')" title="给这个 pane 发身份告知(手动开的 pane 用)">📧 身份</button>
-          <button class="icon" onclick="openTerm('${esc(s.name)}','${esc(p.pane_id)}','${esc(p.agent)}')" title="查看终端">🖥</button>
+          <button class="sm" data-action="restartPane" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" data-resume="0" title="干净重启(丢上下文)">⟳ 重启</button>
+          <button class="sm" data-action="restartPane" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" data-resume="1" title="恢复历史会话重启">↩ resume</button>
+          <button class="sm" data-action="tellIdentity" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" title="给这个 pane 发身份告知(手动开的 pane 用)">📧 身份</button>
+          <button class="icon" data-action="openTerm" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" title="查看终端">🖥</button>
         </div>`).join(''):'<div class="muted" style="font-size:12px;padding:6px 0">无 agent pane</div>';
       return `<div class="card">
         <div style="display:flex;align-items:center;gap:8px">
@@ -903,7 +1090,7 @@ async function loadSessionsView(){
           <b style="font-size:14px">${esc(s.name)}</b>
           <span class="tag ${running?'run':'idle'}">${esc(s.status)}</span>
           <span class="muted" style="font-size:11px;flex:1">${esc(s.directory)}</span>
-          ${running?`<button class="sm" onclick="initSessionMail('${esc(s.name)}')" title="给该项目注册全套 agent-mail 身份(一键开通通信)">📧 初始化通信</button><button class="sm danger" onclick="stopSession('${esc(s.name)}')">■ 停止</button>`:`<button class="sm" onclick="deleteSession('${esc(s.name)}')" title="删除已停止的 session">🗑 删除</button>`}
+          ${running?`<button class="sm" data-action="initSessionMail" data-session="${esc(s.name)}" title="给该项目注册全套 agent-mail 身份(一键开通通信)">📧 初始化通信</button><button class="sm danger" data-action="stopSession" data-session="${esc(s.name)}">■ 停止</button>`:`<button class="sm" data-action="deleteSession" data-session="${esc(s.name)}" title="删除已停止的 session">🗑 删除</button>`}
         </div>
         ${agentHtml}
       </div>`;
@@ -957,11 +1144,11 @@ async function doSetupWorkspace(){
   try{
     const r=await api('/api/herdr/setup-workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agents,layout})});
     if(r.ok){
-      res.innerHTML='<span style="color:var(--done)">✅ 完成</span><br>启动: '+r.started.join(', ')+'<br>注册: '+(r.registered?'✅':'❌')+'<br>通知: '+(r.notified||[]).join(', ');
+      res.innerHTML='<span style="color:var(--done)">✅ 完成</span><br>启动: '+r.started.map(esc).join(', ')+'<br>注册: '+(r.registered?'✅':'❌')+'<br>通知: '+(r.notified||[]).map(esc).join(', ');
       toast('工作区就绪 ✓');
       setTimeout(()=>{closeSetup();loadSessionsView()},2000);
     }else{
-      res.innerHTML='<span style="color:var(--err)">部分失败</span><br>启动: '+(r.started||[]).join(', ')+'<br>注册: '+(r.registered?'✅':'❌');
+      res.innerHTML='<span style="color:var(--err)">部分失败</span><br>启动: '+(r.started||[]).map(esc).join(', ')+'<br>注册: '+(r.registered?'✅':'❌');
     }
   }catch(e){res.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>'}
 }
@@ -972,6 +1159,7 @@ async function loadFileTree(){
     if(!FILE_CWD){const r=await api('/api/files/roots');FILE_CWD=r.roots[0]}
     const d=await api('/api/files?path='+encodeURIComponent(FILE_CWD));
     FILE_CWD=d.path;
+    FILE_ENTRIES=d.entries;
     const tree=document.getElementById('fileTree');
     // 面包屑:可点击的路径段
     const parts=d.path.split('/').filter(Boolean);
@@ -980,28 +1168,40 @@ async function loadFileTree(){
     parts.forEach((p,i)=>{
       acc+='/'+p;
       const isLast=i===parts.length-1;
-      bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" onclick="fileGoto('${esc(acc)}')">${i===0?'':'/'}${esc(p)}</span>`;
+      bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(acc)}">${i===0?'':'/'}${esc(p)}</span>`;
     });
     bc+='</div>';
     // 上级目录按钮(除非已是根)
-    const upBtn=d.path!=='/'?`<div class="ft-item" onclick="fileUp()">📁 <span class="muted">‥ (上级)</span></div>`:'';
-    tree.innerHTML=bc+upBtn+d.entries.map(e=>`
-      <div class="ft-item" onclick="${e.type==='dir'?`fileCd('${esc(e.name)}')`:`fileOpen('${esc(d.path)}','${esc(e.name)}')`}">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</div>`).join('');
+    const upBtn=d.path!=='/'?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">‥ (上级)</span></div>`:'';
+    tree.innerHTML=bc+upBtn+d.entries.map((e,i)=>`
+      <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
 }
 function fileGoto(p){FILE_CWD=p;loadFileTree()}
 function fileCd(n){FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
 function fileUp(){FILE_CWD=FILE_CWD.split('/').slice(0,-1).join('/')||'/';loadFileTree()}
+function fileDownloadEntry(i){
+  const e=FILE_ENTRIES[i];if(!e||e.type!=='file')return;
+  FILE_PATH=FILE_CWD.endsWith('/')?FILE_CWD+e.name:FILE_CWD+'/'+e.name;
+  fileDownload();
+}
 async function fileOpen(dir,name){
   const path=dir.endsWith('/')?dir+name:dir+'/'+name;
   try{
     const d=await api('/api/files/read?path='+encodeURIComponent(path));
-    if(d.binary){toast('二进制文件');return}
+    if(d.binary){FILE_PATH=d.path;fileDownload();return}
     FILE_PATH=d.path;FILE_ORIG=d.text;
     document.getElementById('editorArea').innerHTML=`
-      <div class="editor-bar"><span class="ep">${esc(d.path)}</span><span class="muted">${d.size}B</span><button class="primary" style="width:auto" onclick="fileSave()">💾</button></div>
+      <div class="editor-bar"><span class="ep">${esc(d.path)}</span><span class="muted">${d.size}B</span><button style="width:auto" onclick="fileDownload()">⬇️ 下载</button><button class="primary" style="width:auto" onclick="fileSave()">💾</button></div>
       <textarea id="fileEditor" spellcheck="false">${esc(d.text)}</textarea>`;
   }catch(e){toast('打开失败: '+e)}
+}
+function fileDownload(){
+  if(!FILE_PATH){toast('未选择文件');return}
+  const a=document.createElement('a');
+  a.href='/api/files/download?path='+encodeURIComponent(FILE_PATH);
+  a.download='';document.body.appendChild(a);a.click();a.remove();
+  toast('开始下载');
 }
 async function fileSave(){const c=document.getElementById('fileEditor').value;if(c===FILE_ORIG){toast('无改动');return}try{await api('/api/files/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:FILE_PATH,content:c})});FILE_ORIG=c;toast('已保存 ✓')}catch(e){toast('保存失败: '+e)}}
 
@@ -1011,7 +1211,7 @@ async function mmReply(){/* TODO */}
 // ============ SSE ============
 function connectSSE(){
   if(SSE)SSE.close();
-  SSE=new EventSource('/api/events');
+  SSE=new EventSource('/api/events',{withCredentials:true});
   SSE.addEventListener('unread',e=>{document.getElementById('unreadN').textContent=JSON.parse(e.data).count});
   SSE.addEventListener('board',e=>{const d=JSON.parse(e.data);BOARD=d;renderBoard(d)});
   SSE.onerror=()=>{document.getElementById('liveDot').classList.add('off');setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)};
@@ -1026,8 +1226,81 @@ function toggleTheme(){
 }
 (function(){try{if(localStorage.getItem('dash-theme')==='light'){document.documentElement.classList.add('light');document.getElementById('themeBtn').textContent='☀️'}}catch(e){}})();
 
+// ============ 认证契约 ============
+// 启动先 GET /api/auth/status -> {required,authenticated};未认证用 prompt 取 token,
+// POST /api/auth/login {token};成功后 cookie 自动供 fetch/EventSource/WebSocket 使用。
+// 端点不存在 / required=false / 已认证 → 直接放行(兼容无认证部署)。
+async function authStatus(){
+  try{const r=await fetch('/api/auth/status',{credentials:'include'});return r.ok?await r.json():null}
+  catch(e){return null}
+}
+async function ensureAuth(){
+  const st=await authStatus();
+  if(!st||st.required===false||st.authenticated===true)return true;
+  for(let i=0;i<3;i++){
+    const token=(window.prompt('访问此驾驶舱需要 token:')||'').trim();
+    if(!token)return false;
+    try{
+      const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({token})});
+      if(r.ok)return true;
+      toast('token 无效 ('+r.status+'),重试');
+    }catch(e){toast('登录请求失败,重试')}
+  }
+  return false;
+}
+
+// ============ 事件委托(不可信值经 data-* 传递,不进内联 handler) ============
+function bindDelegation(){
+  const on=(sel,fn)=>{const el=document.querySelector(sel);if(el)el.addEventListener('click',fn)};
+  on('#board',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    if(it.dataset.action==='openFlow')enterHerdrFlow(it.dataset.session,it.dataset.pane);
+    else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
+  on('#hfBody',e=>{const it=e.target.closest('[data-action="hfSend"]');if(it)hfSend(it.dataset.pane)});
+  const hfBodyEl=document.querySelector('#hfBody');
+  if(hfBodyEl)hfBodyEl.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){const it=e.target.closest('[data-action="hfSendEnter"]');if(it)hfSend(it.dataset.pane)}
+  });
+  on('#mentionPopover',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    if(it.dataset.action==='pickMention')pickMention(it.dataset.session,it.dataset.pane,it.dataset.agent)});
+  on('#projAgentList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    if(it.dataset.action==='pickRecipient')document.getElementById('cmpTo').value=it.dataset.name});
+  on('#msgList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    if(it.dataset.action==='ack')ackMsg(parseInt(it.dataset.pid),it.dataset.name,parseInt(it.dataset.mid))});
+  on('#collabList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    const a=it.dataset.action,s=it.dataset.session,p=it.dataset.pane,g=it.dataset.agent;
+    if(a==='uploadCurrent')sendUploadToCurrent();
+    else if(a==='uploadPane')sendUploadToPane(s,p,g);
+    else if(a==='collab')termInsertCollab(s,p,g);
+    else if(a==='attach')doAttachHerdr(s)});
+  on('#sessionsList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    const a=it.dataset.action,s=it.dataset.session,p=it.dataset.pane,g=it.dataset.agent;
+    if(a==='restartPane')restartPane(s,p,it.dataset.resume==='1');
+    else if(a==='tellIdentity')tellIdentity(s,p);
+    else if(a==='openTerm')openTerm(s,p,g);
+    else if(a==='initSessionMail')initSessionMail(s);
+    else if(a==='stopSession')stopSession(s);
+    else if(a==='deleteSession')deleteSession(s)});
+  on('#fileTree',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    const a=it.dataset.action;
+    if(a==='fileGoto')fileGoto(it.dataset.path);
+    else if(a==='fileUp')fileUp();
+    else if(a==='fileCd')fileCd(it.dataset.name);
+    else if(a==='fileOpen')fileOpen(it.dataset.path,it.dataset.name);
+    else if(a==='fileDownloadEntry')fileDownloadEntry(parseInt(it.dataset.idx))});
+  // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)
+  const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM)};
+  window.addEventListener('resize',fitVisibleTerm);
+  if(window.visualViewport)window.visualViewport.addEventListener('resize',fitVisibleTerm);
+}
+
 // ============ init ============
-connectSSE();loadSessions();refreshBoard();
+async function init(){
+  bindDelegation();
+  const ok=await ensureAuth();
+  if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
+  connectSSE();loadSessions();refreshBoard();
+}
+init();
 </script>
 </body>
 </html>
