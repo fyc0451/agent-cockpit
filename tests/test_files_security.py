@@ -3,8 +3,10 @@ import os
 import stat
 
 import pytest
+from fastapi.testclient import TestClient
 
 import files
+import server
 
 
 @pytest.fixture(autouse=True)
@@ -189,3 +191,73 @@ def test_delete_parent_symlink_escape_rejected(tmp_path):
     with pytest.raises(ValueError):
         files.delete_file(str(linkdir / "victim.txt"))
     assert (outside_dir / "victim.txt").is_file()
+
+
+# ── 文件名搜索 ──────────────────────────────────────────────────
+
+def test_search_files_recursively_by_name(tmp_path):
+    root = _mkdirs(tmp_path / "dashboard-data")
+    nested = _mkdirs(root / "nested")
+    (root / "Alpha.txt").write_text("a")
+    (nested / "my-alpha.py").write_text("b")
+    _mkdirs(root / "alpha-dir")
+    (nested / "other.txt").write_text("c")
+
+    result = files.search_files(str(root), "ALPHA")
+
+    assert result["path"] == str(root.resolve())
+    assert result["query"] == "ALPHA"
+    assert result["truncated"] is False
+    assert {(r["relative"], r["type"]) for r in result["results"]} == {
+        ("Alpha.txt", "file"),
+        ("alpha-dir", "dir"),
+        ("nested/my-alpha.py", "file"),
+    }
+
+
+def test_search_files_respects_limits_and_skips_internal_dirs(tmp_path):
+    root = _mkdirs(tmp_path / "dashboard-data")
+    for name in ("match-a.txt", "match-b.txt", "match-c.txt"):
+        (root / name).write_text(name)
+    hidden = _mkdirs(root / ".git")
+    (hidden / "match-secret.txt").write_text("secret")
+    outside = _mkdirs(tmp_path / "outside")
+    (outside / "match-outside.txt").write_text("secret")
+    (root / "match-link").symlink_to(outside)
+
+    result = files.search_files(str(root), "match", limit=2)
+
+    assert len(result["results"]) == 2
+    assert result["truncated"] is True
+    assert all(".git" not in r["relative"] for r in result["results"])
+    assert all("match-link" not in r["relative"] for r in result["results"])
+    assert files.search_files(str(root), "outside")["results"] == []
+
+
+def test_search_files_rejects_invalid_scope_and_query(tmp_path):
+    allowed = _mkdirs(tmp_path / "dashboard-data")
+    outside = _mkdirs(tmp_path / "outside")
+
+    with pytest.raises(ValueError, match="关键词"):
+        files.search_files(str(allowed), "   ")
+    with pytest.raises(ValueError, match="过长"):
+        files.search_files(str(allowed), "x" * 129)
+    with pytest.raises(ValueError, match="允许范围"):
+        files.search_files(str(outside), "x")
+    with pytest.raises(ValueError, match="范围"):
+        files.search_files(str(allowed), "x", limit=0)
+
+
+def test_search_endpoint_returns_authenticated_results(tmp_path, monkeypatch):
+    root = _mkdirs(tmp_path / "dashboard-data")
+    (root / "needle.txt").write_text("found")
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+
+    response = TestClient(server.app).get(
+        "/api/files/search",
+        params={"path": str(root), "q": "needle"},
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["relative"] == "needle.txt"

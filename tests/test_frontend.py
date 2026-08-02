@@ -9,6 +9,7 @@
   - 多终端每实例独立 WS、切回死连接重连、resize 监听不累积
   - 对接 /api/auth/status + /api/auth/login 认证契约
   - herdr 流视图可滚动复制、默认卡片入口与轮询竞态保护
+  - 文件管理按名称递归搜索、结果打开/下载与移动端布局
 """
 import re
 from pathlib import Path
@@ -56,8 +57,24 @@ def test_uses_data_action_and_event_delegation():
 
 
 def test_clipboard_paste_blocking_removed():
-    # 移除了 navigator.clipboard.readText/writeText 对 paste 的拦截,改由原生/xterm 处理
-    assert "navigator.clipboard" not in HTML
+    # 不主动读取/劫持 Mac 剪贴板；原生 Command+V 继续由浏览器/xterm 处理。
+    assert "navigator.clipboard.readText" not in HTML
+    assert "e.preventDefault();navigator.clipboard" not in HTML
+
+
+def test_herdr_osc52_clipboard_bridge_and_http_fallback():
+    js = _inline_js()
+    assert "SERVICE_CLIPBOARD" in js
+    assert "registerOscHandler(52,handleOsc52)" in js
+    assert "function handleOsc52(data)" in js
+    assert "function syncServiceClipboard()" in js
+    assert "function pasteServiceClipboard(input)" in js
+    assert "navigator.clipboard.writeText" in js
+    assert "document.execCommand('copy')" in js
+    assert "window.isSecureContext" in js
+    assert 'data-action="hfPaste"' in js
+    assert HTML.count("同步剪贴板") >= 2
+    assert "粘贴服务" in HTML
 
 
 def test_open_term_opens_drawer_reading_herdr_pane():
@@ -182,3 +199,16 @@ def test_herdr_flow_preserves_selection_and_ignores_stale_refresh():
     assert "out.innerHTML=d.output" not in js
     assert "encodeURIComponent(p.session)" in js
     assert "encodeURIComponent(p.pane_id)" in js
+
+
+def test_file_manager_search_ui_and_actions_wired():
+    js = _inline_js()
+    assert 'id="fileSearchInput"' in HTML
+    assert 'id="fileSearchInfo"' in HTML
+    assert "/api/files/search" in js
+    assert "function fileSearch()" in js
+    assert "function fileSearchOpen(i)" in js
+    assert "function fileSearchDownload(i)" in js
+    assert 'data-action="fileSearchOpen"' in js
+    assert 'data-action="fileSearchDownload"' in js
+    assert ".file-search{" in HTML

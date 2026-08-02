@@ -98,6 +98,10 @@ header .spacer{flex:1}
 
 /* 文件 view */
 .files-view{flex-direction:column}
+.file-search{display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap}
+.file-search input{flex:1;min-width:180px}
+.file-search button{width:auto}
+.file-search-info{font-size:11px;color:var(--fg3);margin-left:auto}
 .files-body{flex:1;display:grid;grid-template-columns:280px 1fr;gap:10px;padding:10px;overflow:hidden}
 .file-tree{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:auto}
 .ft-item{padding:5px 10px;border-radius:6px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;white-space:nowrap}
@@ -184,6 +188,10 @@ header .spacer{flex:1}
   .board-wrap{padding:8px}
   .msgs-body,.files-body{padding:6px;gap:6px;min-height:0}
   .msgs-list,.editor-area{min-height:0}
+  .file-search{padding:6px;gap:5px}
+  .file-search input{flex-basis:100%;min-width:0}
+  .file-search button{flex:1}
+  .file-search-info{flex-basis:100%;margin-left:0}
   .launch-bar{padding:6px 8px;gap:5px;max-height:42dvh;overflow:auto}
   .launch-bar .lbl,#boardInfo{display:none}
   .launch-bar select{flex:1;min-width:0}
@@ -278,6 +286,12 @@ header .spacer{flex:1}
 
   <!-- 文件 -->
   <section id="view-files" class="view files-view">
+    <div class="file-search">
+      <input type="search" id="fileSearchInput" placeholder="搜索当前目录及子目录中的文件名" onkeydown="if(event.key==='Enter')fileSearch()">
+      <button class="primary sm" onclick="fileSearch()">搜索</button>
+      <button class="sm" onclick="fileSearchClear()">清除</button>
+      <span class="file-search-info" id="fileSearchInfo"></span>
+    </div>
     <div class="files-body">
       <div class="file-tree" id="fileTree"></div>
       <div class="editor-area" id="editorArea">
@@ -295,6 +309,7 @@ header .spacer{flex:1}
       <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
       <button class="sm" onclick="enterHerdrFlow()" title="只读 pane 流视图(手机可滚屏/复制,输入框直接发指令)">📜 流视图</button>
+      <button class="sm" onclick="syncServiceClipboard()" title="把 Herdr 复制的内容同步到当前电脑剪贴板，之后可 Command+V">📋 同步剪贴板</button>
       <button class="sm danger" onclick="termClose()">✕ 关闭</button>
       <span class="muted term-help">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
     </div>
@@ -307,6 +322,7 @@ header .spacer{flex:1}
       <select id="hfSession" onchange="hfLoad()" style="width:auto;min-width:140px"></select>
       <button class="sm" onclick="hfLoad()">↻ 刷新</button>
       <button class="sm" onclick="hfTakeover()" title="在终端里 attach 到当前 session(xterm TUI,桌面端推荐)">🖥 接管 TUI</button>
+      <button class="sm" onclick="syncServiceClipboard()" title="把 Herdr 复制的内容同步到当前电脑剪贴板，之后可 Command+V">📋 同步剪贴板</button>
       <span class="muted" style="font-size:11px;margin-left:auto">只读流:可滚屏/长按复制 · 输入框直接发指令</span>
     </div>
     <div class="hf-body" id="hfBody"><div class="empty">加载中…</div></div>
@@ -344,6 +360,7 @@ header .spacer{flex:1}
       <div id="mentionPopover" class="hidden" style="position:absolute;bottom:100%;left:0;margin-bottom:4px;background:var(--bg3);border:1px solid var(--bd2);border-radius:8px;box-shadow:0 -4px 16px rgba(0,0,0,.4);max-height:240px;overflow:auto;z-index:10;min-width:220px"></div>
       <label class="icon" style="cursor:pointer;font-size:18px" title="上传截图/文件并插入@路径">📎<input type="file" id="termUpload" accept="image/*" multiple style="display:none" onchange="termUploadFiles(this)"></label>
       <select id="termMode" style="width:auto"><option value="prompt">prompt(agent)</option><option value="send">执行(shell)</option><option value="keys">按键(keys)</option></select>
+      <button class="sm" onclick="pasteServiceClipboard(document.getElementById('termInput'))" title="把 Herdr 服务剪贴板直接插入输入框">📋 粘贴服务</button>
       <button class="primary" onclick="termSend()">发送</button>
     </div>
   </div>
@@ -404,6 +421,7 @@ header .spacer{flex:1}
 // ============ 状态 ============
 let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null, FILE_ENTRIES=[];
 let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
+let SERVICE_CLIPBOARD='';
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -411,6 +429,59 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const SESSION_NAME_RE=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const validSessionName=s=>typeof s==='string'&&SESSION_NAME_RE.test(s);
 function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),ms)}
+
+function decodeOsc52(data){
+  const split=data.indexOf(';');
+  if(split<0)return null;
+  const encoded=data.slice(split+1);
+  if(!encoded||encoded==='?'||encoded.length>1400000)return null;
+  try{
+    const binary=atob(encoded);
+    if(binary.length>1000000)return null;
+    const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  }catch(e){return null}
+}
+function handleOsc52(data){
+  const text=decodeOsc52(data);
+  if(!text)return true;
+  SERVICE_CLIPBOARD=text;
+  if(window.isSecureContext&&navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text)
+      .then(()=>toast('Herdr 已同步到本机剪贴板'))
+      .catch(()=>toast('Herdr 已保存到服务剪贴板，请点「同步剪贴板」'));
+  }else{
+    toast('Herdr 已复制；HTTP 下请点「同步剪贴板」后再 Command+V',3500);
+  }
+  return true;
+}
+async function writeBrowserClipboard(text){
+  if(window.isSecureContext&&navigator.clipboard&&navigator.clipboard.writeText){
+    try{await navigator.clipboard.writeText(text);return true}catch(e){}
+  }
+  const active=document.activeElement;
+  const area=document.createElement('textarea');
+  area.value=text;area.readOnly=true;
+  area.style.cssText='position:fixed;left:-9999px;top:0;opacity:0';
+  document.body.appendChild(area);area.select();
+  let ok=false;try{ok=document.execCommand('copy')}catch(e){}
+  area.remove();try{active&&active.focus()}catch(e){}
+  return ok;
+}
+async function syncServiceClipboard(){
+  if(!SERVICE_CLIPBOARD){toast('服务剪贴板为空，请先在 Herdr 中复制');return}
+  const ok=await writeBrowserClipboard(SERVICE_CLIPBOARD);
+  toast(ok?'已同步到本机剪贴板，可 Command+V':'浏览器拒绝写剪贴板，请用「粘贴服务」按钮');
+}
+function pasteServiceClipboard(input){
+  if(!SERVICE_CLIPBOARD){toast('服务剪贴板为空，请先在 Herdr 中复制');return}
+  if(!input)return;
+  const start=input.selectionStart??input.value.length;
+  const end=input.selectionEnd??start;
+  input.setRangeText(SERVICE_CLIPBOARD,start,end,'end');
+  input.dispatchEvent(new Event('input',{bubbles:true}));
+  input.focus();
+}
 function showView(v){
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-'+v).classList.add('active');
@@ -924,6 +995,7 @@ function hfRender(){
         <input id="hf-in-${esc(p.pane_id)}" placeholder="给 ${esc(p.agent)} 发指令…" data-action="hfSendEnter" data-pane="${esc(p.pane_id)}">
         <label class="icon" style="cursor:pointer;font-size:17px" title="上传图片/文件,插入@路径">📎<input type="file" accept="image/*" multiple style="display:none" data-action="hfUpload" data-pane="${esc(p.pane_id)}"></label>
         <select id="hf-mode-${esc(p.pane_id)}"><option value="prompt">prompt</option><option value="send">send</option></select>
+        <button class="sm" data-action="hfPaste" data-pane="${esc(p.pane_id)}" title="把 Herdr 服务剪贴板直接插入输入框">📋 粘贴服务</button>
         <button class="primary sm" data-action="hfSend" data-pane="${esc(p.pane_id)}">发送</button>
       </div>
     </div>`;
@@ -1086,6 +1158,7 @@ function termMount(id){
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
+  xterm.parser.registerOscHandler(52,handleOsc52);
   // 隐藏其他终端的容器
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
@@ -1203,6 +1276,7 @@ async function loadFileTree(){
     const d=await api('/api/files?path='+encodeURIComponent(FILE_CWD));
     FILE_CWD=d.path;
     FILE_ENTRIES=d.entries;
+    document.getElementById('fileSearchInfo').textContent='';
     const tree=document.getElementById('fileTree');
     // 面包屑:可点击的路径段
     const parts=d.path.split('/').filter(Boolean);
@@ -1220,6 +1294,40 @@ async function loadFileTree(){
       <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
 }
+async function fileSearch(){
+  const input=document.getElementById('fileSearchInput');
+  const q=input.value.trim();
+  if(!q){fileSearchClear();return}
+  try{
+    if(!FILE_CWD){const r=await api('/api/files/roots');FILE_CWD=r.roots[0]}
+    const base=FILE_CWD;
+    const d=await api('/api/files/search?path='+encodeURIComponent(base)+'&q='+encodeURIComponent(q));
+    if(input.value.trim()!==q||FILE_CWD!==base)return;
+    FILE_ENTRIES=d.results||[];
+    document.getElementById('fileSearchInfo').textContent=`${FILE_ENTRIES.length} 项${d.truncated?' · 结果已截断':''}`;
+    const tree=document.getElementById('fileTree');
+    tree.innerHTML=`<div class="ft-bc">🔎 ${esc(d.query)} · ${esc(d.path)}</div>`+
+      (FILE_ENTRIES.length?FILE_ENTRIES.map((e,i)=>`
+        <div class="ft-item" data-action="fileSearchOpen" data-idx="${i}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.relative)}</span>${e.type==='file'?`<button class="icon" data-action="fileSearchDownload" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join(''):'<div class="empty">没有匹配结果</div>');
+  }catch(e){toast('搜索失败: '+e)}
+}
+function fileSearchClear(){
+  document.getElementById('fileSearchInput').value='';
+  document.getElementById('fileSearchInfo').textContent='';
+  loadFileTree();
+}
+function fileSearchOpen(i){
+  const e=FILE_ENTRIES[i];if(!e)return;
+  if(e.type==='dir'){
+    FILE_CWD=e.path;
+    document.getElementById('fileSearchInput').value='';
+    loadFileTree();
+  }else fileOpenPath(e.path);
+}
+function fileSearchDownload(i){
+  const e=FILE_ENTRIES[i];if(!e||e.type!=='file')return;
+  FILE_PATH=e.path;fileDownload();
+}
 function fileGoto(p){FILE_CWD=p;loadFileTree()}
 function fileCd(n){FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
 function fileUp(){FILE_CWD=FILE_CWD.split('/').slice(0,-1).join('/')||'/';loadFileTree()}
@@ -1228,8 +1336,11 @@ function fileDownloadEntry(i){
   FILE_PATH=FILE_CWD.endsWith('/')?FILE_CWD+e.name:FILE_CWD+'/'+e.name;
   fileDownload();
 }
-async function fileOpen(dir,name){
+function fileOpen(dir,name){
   const path=dir.endsWith('/')?dir+name:dir+'/'+name;
+  return fileOpenPath(path);
+}
+async function fileOpenPath(path){
   try{
     const d=await api('/api/files/read?path='+encodeURIComponent(path));
     if(d.binary){FILE_PATH=d.path;fileDownload();return}
@@ -1300,7 +1411,8 @@ function bindDelegation(){
     else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
   on('#hfBody',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='hfSend')hfSend(it.dataset.pane);
-    else if(it.dataset.action==='hfToggle')hfToggle(it.dataset.pane)});
+    else if(it.dataset.action==='hfToggle')hfToggle(it.dataset.pane);
+    else if(it.dataset.action==='hfPaste')pasteServiceClipboard(document.getElementById('hf-in-'+it.dataset.pane))});
   const hfBodyEl=document.querySelector('#hfBody');
   if(hfBodyEl)hfBodyEl.addEventListener('keydown',e=>{
     if(e.key==='Enter'){const it=e.target.closest('[data-action="hfSendEnter"]');if(it)hfSend(it.dataset.pane)}
@@ -1334,7 +1446,9 @@ function bindDelegation(){
     else if(a==='fileUp')fileUp();
     else if(a==='fileCd')fileCd(it.dataset.name);
     else if(a==='fileOpen')fileOpen(it.dataset.path,it.dataset.name);
-    else if(a==='fileDownloadEntry')fileDownloadEntry(parseInt(it.dataset.idx))});
+    else if(a==='fileDownloadEntry')fileDownloadEntry(parseInt(it.dataset.idx));
+    else if(a==='fileSearchOpen')fileSearchOpen(parseInt(it.dataset.idx));
+    else if(a==='fileSearchDownload')fileSearchDownload(parseInt(it.dataset.idx))});
   // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)
   const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM)};
   window.addEventListener('resize',fitVisibleTerm);

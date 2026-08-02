@@ -353,6 +353,15 @@ def api_files_list(path: str = ""):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/files/search")
+def api_files_search(path: str, q: str, limit: int = 100):
+    """在指定白名单目录及其子目录中按文件名搜索。"""
+    try:
+        return files.search_files(path, q, limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/files/read")
 def api_files_read(path: str):
     """读文件内容。"""

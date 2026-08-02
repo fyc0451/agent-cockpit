@@ -21,6 +21,9 @@ from typing import Any
 
 # 最大可编辑文件大小(防止加载巨大文件拖垮前端)
 MAX_EDIT_SIZE = 2 * 1024 * 1024  # 2MB
+MAX_SEARCH_RESULTS = 200
+MAX_SEARCH_ENTRIES = 20_000
+SEARCH_SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
 # 文本编辑白名单后缀(二进制不开放编辑,只读可放宽)
 TEXT_EXT = {
     ".txt", ".md", ".markdown", ".rst",
@@ -162,6 +165,90 @@ def list_dir(rel: str) -> dict[str, Any]:
     except PermissionError:
         raise ValueError(f"无权限: {path}")
     return {"path": str(path), "entries": entries}
+
+
+def search_files(rel: str, query: str, limit: int = 100) -> dict[str, Any]:
+    """在白名单目录内递归按名称搜索文件和目录。"""
+    query = query.strip()
+    if not query:
+        raise ValueError("搜索关键词为空")
+    if len(query) > 128:
+        raise ValueError("搜索关键词过长(最多 128 字符)")
+    if not 1 <= limit <= MAX_SEARCH_RESULTS:
+        raise ValueError(f"搜索结果范围必须为 1-{MAX_SEARCH_RESULTS}")
+
+    root = _resolve(rel)
+    if not root.is_dir():
+        raise ValueError(f"搜索范围不是目录: {root}")
+
+    needle = query.casefold()
+    results: list[dict[str, Any]] = []
+    scanned = 0
+    truncated = False
+    stop = False
+
+    for current, dirs, names in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        dirs[:] = sorted(
+            (
+                name for name in dirs
+                if name not in SEARCH_SKIP_DIRS
+                and not (current_path / name).is_symlink()
+            ),
+            key=str.casefold,
+        )
+        names.sort(key=str.casefold)
+
+        entries = ([(name, "dir") for name in dirs]
+                   + [(name, "file") for name in names])
+        for name, kind in entries:
+            item = current_path / name
+            if item.is_symlink():
+                continue
+            scanned += 1
+            if scanned > MAX_SEARCH_ENTRIES:
+                truncated = True
+                stop = True
+                break
+            if needle not in name.casefold():
+                continue
+            try:
+                if kind == "dir":
+                    if not item.is_dir():
+                        continue
+                    size = 0
+                    modifiable = False
+                else:
+                    if not item.is_file():
+                        continue
+                    st = item.stat()
+                    size = st.st_size
+                    modifiable = _is_text(item) and size <= MAX_EDIT_SIZE
+            except OSError:
+                continue
+            results.append({
+                "name": name,
+                "path": str(item),
+                "relative": str(item.relative_to(root)),
+                "type": kind,
+                "size": size,
+                "modifiable": modifiable,
+                "ext": item.suffix.lower().lstrip("."),
+            })
+            if len(results) > limit:
+                results.pop()
+                truncated = True
+                stop = True
+                break
+        if stop:
+            break
+
+    return {
+        "path": str(root),
+        "query": query,
+        "results": results,
+        "truncated": truncated,
+    }
 
 
 def _info_file(path: Path) -> dict[str, Any]:
