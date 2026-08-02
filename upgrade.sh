@@ -33,7 +33,8 @@ sed "s|%h/agent-cockpit|$INSTALL_DIR|g" \
   "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
 
 if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
-  systemctl --user restart agent-cockpit.service
+  systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true
+  systemctl --user enable --now agent-cockpit.service
   echo "升级完成，Agent Cockpit 已重启。Herdr session 不受影响。"
 else
   echo "代码和依赖已升级；请手动重启 Agent Cockpit。" >&2

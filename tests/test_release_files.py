@@ -28,6 +28,13 @@ def test_readme_and_ci_have_no_release_placeholders():
     assert "timeout-minutes:" in workflow
 
 
+def test_installers_migrate_legacy_service_name():
+    for name in ("install.sh", "upgrade.sh"):
+        script = (ROOT / name).read_text()
+        assert "disable --now agent-mail-dashboard.service" in script
+        assert "enable --now agent-cockpit.service" in script
+
+
 def test_installer_rejects_unsafe_custom_path(tmp_path):
     installer = tmp_path / "install.sh"
     installer.write_text((ROOT / "install.sh").read_text())

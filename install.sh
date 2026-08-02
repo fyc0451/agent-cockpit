@@ -54,6 +54,7 @@ if command -v loginctl >/dev/null 2>&1; then
 fi
 
 if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
+  systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true
   systemctl --user enable --now agent-cockpit.service
   echo "Agent Cockpit 已启动: http://127.0.0.1:8790"
 else
