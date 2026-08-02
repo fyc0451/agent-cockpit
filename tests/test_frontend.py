@@ -207,17 +207,36 @@ def test_mobile_connections_and_focused_input_recover():
     assert "scrollIntoView({block:'nearest'})" in js
 
 
-def test_h5_can_switch_herdr_panes_without_keyboard_shortcuts():
+def test_h5_drawer_can_switch_herdr_panes_without_keyboard_shortcuts():
     js = _inline_js()
     assert 'id="paneSelect"' in HTML
     assert "function syncPaneSelect()" in js
     assert "function switchDrawerPane(paneId)" in js
     assert "function stepDrawerPane(delta)" in js
-    # H5 点击 herdr 直接进入 pane 抽屉，顶部 select/前后按钮切换，不依赖 Ctrl-b。
-    assert "isCompactScreen()" in js
-    assert "openTerm(session,panes[0].pane_id" in js
     # 切换时旧 pane 的慢响应不能覆盖新 pane 内容。
     assert "CURRENT_TERM.paneId!==t.paneId" in js
+
+
+def test_h5_takeover_opens_real_tui_with_touch_keys():
+    js = _inline_js()
+    takeover = js.split("async function doAttachHerdr(session){", 1)[1].split(
+        "// ============ herdr 流视图", 1
+    )[0]
+    # “接管 TUI”在手机上也必须创建 PTY 并执行 herdr attach，不能降级成普通 pane 抽屉。
+    assert "openTerm(" not in takeover
+    assert "hfStop();" in takeover
+    assert "document.getElementById('view-term').classList.add('active')" in takeover
+    assert "api('/api/term?label='+encodeURIComponent(session)" in takeover
+    assert "queueTermInput(r.id,'herdr --session '+session+'\\r'" in takeover
+    # 手机软键盘缺少终端控制键，TUI 页面必须提供触屏按键。
+    assert 'class="term-keys"' in HTML
+    assert "function termKey(name)" in js
+    assert "ArrowUp:'\\x1b[A'" in js
+    assert "Enter:'\\r'" in js
+    assert "CtrlC:'\\x03'" in js
+    assert "CtrlB:'\\x02'" in js
+    for key in ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Tab", "Escape", "CtrlC", "CtrlB"]:
+        assert f'onclick="termKey(\'{key}\')"' in HTML
 
 
 def test_terminal_drawer_keeps_main_navigation_visible_and_clickable():

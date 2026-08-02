@@ -164,6 +164,8 @@ header .spacer{flex:1}
 .pane-switch select{min-width:140px}
 .term-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)}
 .term-help{font-size:11px;margin-left:auto}
+.term-keys{display:none;gap:5px;padding:5px 6px;overflow-x:auto;background:var(--bg2);border-bottom:1px solid var(--bd);flex-shrink:0}
+.term-keys button{flex:0 0 auto;min-width:38px;padding:5px 8px;font-family:var(--mono);font-size:12px}
 .board-wrap,.file-tree,.sidebar,.msgs-list,.term-out,.hf-body,.modal{overscroll-behavior:contain}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
@@ -228,6 +230,7 @@ header .spacer{flex:1}
   .launch-bar button{order:3;flex:1}
   .term-toolbar{flex-wrap:wrap;padding:6px;gap:5px}
   .term-toolbar #termSelect{flex:1;min-width:120px!important}
+  .term-keys{display:flex}
   .term-help{display:none}
   #termContainer{padding:3px!important}
   .drawer-bg.show{inset:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);padding:0}
@@ -351,10 +354,21 @@ header .spacer{flex:1}
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端">📎上传<input type="file" id="termTabUpload" accept="image/*" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
-      <button class="sm" onclick="enterHerdrFlow()" title="只读 pane 流视图(手机可滚屏/复制,输入框直接发指令)">📜 流视图</button>
+      <button class="sm" onclick="enterHerdrFlow()" title="退出 TUI，返回可滚屏/复制的 pane 流视图">📜 返回流视图</button>
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进 Mac 系统剪贴板">📋 复制到 Mac</button>
       <button class="sm danger" onclick="termClose()">✕ 关闭</button>
       <span class="muted term-help">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
+    </div>
+    <div class="term-keys" aria-label="终端交互按键">
+      <button onclick="termKey('ArrowUp')" title="方向键上">↑</button>
+      <button onclick="termKey('ArrowDown')" title="方向键下">↓</button>
+      <button onclick="termKey('ArrowLeft')" title="方向键左">←</button>
+      <button onclick="termKey('ArrowRight')" title="方向键右">→</button>
+      <button onclick="termKey('Enter')">Enter</button>
+      <button onclick="termKey('Tab')">Tab</button>
+      <button onclick="termKey('Escape')">Esc</button>
+      <button onclick="termKey('CtrlC')">Ctrl-C</button>
+      <button onclick="termKey('CtrlB')" title="Herdr 前缀键，点后再点方向键切换 pane">Ctrl-B</button>
     </div>
     <div id="termContainer" style="flex:1;background:#000;padding:6px 14px 6px 6px;overflow:hidden"></div>
   </section>
@@ -364,7 +378,7 @@ header .spacer{flex:1}
     <div id="hfToolbar" style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
       <select id="hfSession" onchange="hfLoad()" style="width:auto;min-width:140px"></select>
       <button class="sm" onclick="hfLoad()">↻ 刷新</button>
-      <button class="sm" onclick="hfTakeover()" title="在终端里 attach 到当前 session(xterm TUI,桌面端推荐)">🖥 接管 TUI</button>
+      <button class="sm" onclick="hfTakeover()" title="需要方向键、确认菜单等终端交互时使用">🖥 接管 TUI</button>
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进 Mac 系统剪贴板">📋 复制到 Mac</button>
       <span class="muted" style="font-size:11px;margin-left:auto">复制到 Mac：供其他应用 Command+V · 填入输入框：直接发给 agent</span>
     </div>
@@ -1033,6 +1047,13 @@ async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',head
 // ============ Web 终端(xterm.js + PTY) ============
 let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={};
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
+const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',CtrlC:'\x03',CtrlB:'\x02'};
+function termKey(name){
+  const seq=TERM_KEY_SEQ[name];
+  if(!seq||!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
+  queueTermInput(TERM_ID,seq);
+  XTERM&&XTERM.focus();
+}
 function termEnsure(){if(!TERM_ID)termNew()}
 function termLabel(id){return TERM_LABELS[id]||('终端 '+id.slice(0,8))}
 function renderTermOptions(){
@@ -1126,7 +1147,7 @@ async function termAttachHerdr(){
   const m=document.getElementById('collabModal');
   document.querySelector('#collabModal h3').textContent='attach herdr session';
   document.querySelector('#collabModal .muted').textContent=isCompactScreen()
-    ?'选一个 session，在顶部选择器里触屏切换 pane'
+    ?'选一个 session 进入真实 TUI；用屏幕按键操作，Ctrl-B 后点方向键切换 pane'
     :'选一个 session,在终端里进入 herdr 多 pane 分屏视图(Ctrl-b 切 pane,d 脱离)';
   document.getElementById('collabList').innerHTML=running.map(s=>`
     <div data-action="attach" data-session="${esc(s)}" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
@@ -1138,14 +1159,7 @@ async function termAttachHerdr(){
 async function doAttachHerdr(session){
   if(!validSessionName(session)){toast('非法 session 名,拒绝 attach');return}
   closeCollab();
-  if(isCompactScreen()){
-    const panes=(BOARD?.panes||[]).filter(p=>p.session===session&&p.pane_id)
-      .sort((a,b)=>Number(!!b.agent)-Number(!!a.agent));
-    if(!panes.length){toast('该 session 暂无 pane');return}
-    openTerm(session,panes[0].pane_id,panes[0].agent||'');
-    toast('可用顶部选择器切换 pane');
-    return;
-  }
+  hfStop();
   // 切到终端 tab,创建新终端
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-term').classList.add('active');
