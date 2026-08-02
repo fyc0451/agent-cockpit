@@ -169,19 +169,25 @@ header .spacer{flex:1}
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
 .hf-body{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
 .hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex-direction:column;overflow:hidden}
-.hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap;cursor:pointer}
+.hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap}
 .hf-pane-head .pn{flex:1;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hf-out{background:var(--term-bg);color:var(--term-fg);font-family:var(--mono);font-size:12px;line-height:1.5;padding:10px 12px;white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:32vh;min-height:120px;user-select:text;-webkit-user-select:text}
 .hf-in{display:flex;gap:7px;padding:8px;border-top:1px solid var(--bd);flex-wrap:wrap}
 .hf-in input{flex:1;min-width:140px;font-family:var(--mono)}
 .hf-in select{width:auto}
-.hf-expand{margin-left:auto;font-size:12px;color:var(--fg3)}
-/* 全屏单 pane 模式:body 只显示一个 pane,输出区占满 */
+.hf-expand{margin-left:auto;font-size:12px;color:var(--fg2);padding:4px 8px}
+.hf-exit{display:none}
+/* 全屏单 pane 模式:隐藏页面 chrome,选中的 pane 覆盖整个可视区 */
+.app.hf-immersive{padding:0}
+.app.hf-immersive>header{display:none}
+.app.hf-immersive #view-herdrflow{position:fixed;inset:0;z-index:120;display:flex;background:var(--bg);padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left)}
+.app.hf-immersive #hfToolbar{display:none}
 .hf-body.hf-full{overflow:hidden;padding:0;gap:0}
 .hf-body.hf-full .hf-pane{display:none}
 .hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;border:none;border-radius:0}
 .hf-body.hf-full .hf-pane.hf-focus .hf-out{max-height:none;min-height:0;flex:1;font-size:13px}
-.hf-body.hf-full .hf-pane.hf-focus .hf-pane-head{cursor:default}
+.hf-body.hf-full .hf-pane.hf-focus .hf-enter{display:none}
+.hf-body.hf-full .hf-pane.hf-focus .hf-exit{display:inline}
 
 /* 消息抽屉(卡片点消息) */
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:60;padding:calc(14px + var(--safe-top)) calc(14px + var(--safe-right)) calc(14px + var(--safe-bottom)) calc(14px + var(--safe-left));overscroll-behavior:none}
@@ -355,7 +361,7 @@ header .spacer{flex:1}
 
   <!-- herdr 流视图(只读 pane 流 + 输入框发指令,手机可滚屏/复制) -->
   <section id="view-herdrflow" class="view" style="flex-direction:column">
-    <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
+    <div id="hfToolbar" style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
       <select id="hfSession" onchange="hfLoad()" style="width:auto;min-width:140px"></select>
       <button class="sm" onclick="hfLoad()">↻ 刷新</button>
       <button class="sm" onclick="hfTakeover()" title="在终端里 attach 到当前 session(xterm TUI,桌面端推荐)">🖥 接管 TUI</button>
@@ -1179,7 +1185,7 @@ async function hfStart(){
   if(HF_TIMER)clearInterval(HF_TIMER);
   HF_TIMER=setInterval(hfRefreshAll,3000);
 }
-function hfStop(){if(HF_TIMER){clearInterval(HF_TIMER);HF_TIMER=null}}
+function hfStop(){if(HF_TIMER){clearInterval(HF_TIMER);HF_TIMER=null}hfExitFullscreen()}
 function hfLoad(){
   HF_SESSION=document.getElementById('hfSession').value||HF_SESSION;
   hfRender();
@@ -1192,12 +1198,12 @@ function hfRender(){
   body.innerHTML=panes.map(p=>{
     const cls=classify(p.agent_status,p.agent);
     return `<div class="hf-pane" id="hf-${esc(p.pane_id)}">
-      <div class="hf-pane-head" data-action="hfToggle" data-pane="${esc(p.pane_id)}" title="点击放大/还原">
+      <div class="hf-pane-head">
         <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
         <span class="pn">${esc(p.agent)} <span class="muted">${esc(p.pane_id)}</span></span>
         <span class="status-dot ${cls}"></span>
         <span class="muted" style="font-size:11px">${esc(p.cwd_name||p.cwd||'')}</span>
-        <span class="hf-expand">⤢</span>
+        <button class="icon hf-expand" data-action="hfToggle" data-pane="${esc(p.pane_id)}" title="让这个工作区占满整个屏幕"><span class="hf-enter">⛶ 全屏</span><span class="hf-exit">退出全屏</span></button>
       </div>
       <pre class="hf-out" id="hf-out-${esc(p.pane_id)}">加载中…</pre>
       <div class="hf-in">
@@ -1262,20 +1268,35 @@ async function hfUpload(paneId,input){
   input.value=''; // 允许重复选同一文件
   inp.focus();
 }
-function hfToggle(paneId){
-  // 点击卡片头:全屏看单个 pane(输出区占满,可滚屏/复制),再点还原
+async function hfToggle(paneId){
+  // 视觉沉浸模式始终可用;浏览器允许时再进入原生全屏以隐藏地址栏。
   const body=document.getElementById('hfBody');
   const pane=document.getElementById('hf-'+paneId);
+  const app=document.querySelector('.app');
   if(!body||!pane)return;
   const isFull=body.classList.contains('hf-full')&&pane.classList.contains('hf-focus');
-  body.classList.remove('hf-full');
-  body.querySelectorAll('.hf-pane').forEach(x=>x.classList.remove('hf-focus'));
-  if(!isFull){
-    body.classList.add('hf-full');
-    pane.classList.add('hf-focus');
-    // 全屏后滚到底,看最新输出
-    const out=document.getElementById('hf-out-'+paneId);
-    if(out)out.scrollTop=out.scrollHeight;
+  if(isFull){hfExitFullscreen();return}
+  hfExitFullscreen(false);
+  app.classList.add('hf-immersive');
+  body.classList.add('hf-full');
+  pane.classList.add('hf-focus');
+  const out=document.getElementById('hf-out-'+paneId);
+  if(out)out.scrollTop=out.scrollHeight;
+  if(document.documentElement.requestFullscreen&&!document.fullscreenElement){
+    try{await document.documentElement.requestFullscreen()}catch(e){}
+  }
+}
+function hfExitFullscreen(exitNative=true){
+  const body=document.getElementById('hfBody');
+  const app=document.querySelector('.app');
+  const wasFull=!!(body?.classList.contains('hf-full')||app?.classList.contains('hf-immersive'));
+  if(body){
+    body.classList.remove('hf-full');
+    body.querySelectorAll('.hf-pane').forEach(x=>x.classList.remove('hf-focus'));
+  }
+  if(app)app.classList.remove('hf-immersive');
+  if(wasFull&&exitNative&&document.fullscreenElement&&document.exitFullscreen){
+    document.exitFullscreen().catch(()=>{});
   }
 }
 function hfTakeover(){
@@ -1723,6 +1744,8 @@ function bindDelegation(){
   window.addEventListener('resize',fitVisibleTerm);
   if(window.visualViewport)window.visualViewport.addEventListener('resize',fitVisibleTerm);
   document.addEventListener('focusin',keepFocusedControlVisible);
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')hfExitFullscreen()});
+  document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)hfExitFullscreen(false)});
 }
 
 // ============ init ============

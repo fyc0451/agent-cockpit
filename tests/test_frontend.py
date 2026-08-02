@@ -240,6 +240,20 @@ def test_herdr_flow_is_mobile_friendly_default_card_view():
     assert "function hfStop()" in js
 
 
+def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
+    js = _inline_js()
+    assert ".app.hf-immersive #view-herdrflow{" in HTML
+    assert "position:fixed;inset:0" in HTML
+    assert ".app.hf-immersive #hfToolbar{display:none}" in HTML
+    assert 'class="hf-enter">⛶ 全屏' in HTML
+    assert 'class="hf-exit">退出全屏' in HTML
+    assert "app.classList.add('hf-immersive')" in js
+    assert "requestFullscreen" in js
+    assert "function hfExitFullscreen(" in js
+    assert "if(e.key==='Escape')hfExitFullscreen()" in js
+    assert "document.addEventListener('fullscreenchange'" in js
+
+
 def test_herdr_flow_preserves_selection_and_ignores_stale_refresh():
     js = _inline_js()
     assert "HF_SESSION!==session||!out.isConnected" in js
