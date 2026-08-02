@@ -1,10 +1,10 @@
 [Unit]
-Description=Agent Mail Dashboard (FastAPI :8790)
+Description=Agent Cockpit (FastAPI :8790)
 After=network.target agent-mail.service
 
 [Service]
 Type=simple
-# Cockpit 会启动独立的 Herdr server/agent；发布时只替换主进程，保留 session。
+# Cockpit 会启动独立的 Herdr server/agent；发布时只替换主进程，保留 Herdr session。
 KillMode=process
 WorkingDirectory=%h/agent-cockpit
 ExecStart=%h/agent-cockpit/.venv/bin/python server.py
@@ -16,4 +16,5 @@ NoNewPrivileges=true
 UMask=0077
 
 [Install]
+# 若要在用户登出后继续运行，请先执行: loginctl enable-linger $USER
 WantedBy=default.target

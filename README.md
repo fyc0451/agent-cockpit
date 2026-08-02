@@ -3,7 +3,7 @@
 > A web-based control cockpit for CLI coding agents running under [herdr](https://herdr.dev).
 > See every agent's status at a glance, drop into a live terminal, send prompts, upload screenshots, and orchestrate your fleet — from any browser, including your phone.
 
-Inspired by [Orca](https://onorca.dev)'s Agent Dashboard, but built as a lightweight single-binary web app that plugs into your existing herdr sessions and an [agent-mail](https://github.com/) hub.
+Inspired by [Orca](https://onorca.dev)'s Agent Dashboard, but built as a lightweight web app that plugs into your existing Herdr sessions and an [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub.
 
 ## What it does
 
@@ -36,15 +36,25 @@ It deploys **on the same machine as herdr + the agent-mail hub**, reading everyt
 | Dependency | Why |
 | --- | --- |
 | [herdr](https://herdr.dev) | The agent sessions this cockpit visualizes and controls |
-| [agent-mail](https://github.com/) hub (`:8765`) | Provides the SQLite DB (read) + MCP write API |
+| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub (`:8765`) | Provides the SQLite DB (read) + MCP write API |
 | `codex` CLI (authenticated) | For background `codex exec` tasks |
 | Python 3.12+ | Runtime |
 
-## Quick start
+## One-command install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.sh | bash
+```
+
+The installer clones to `~/agent-cockpit`, creates a virtual environment, installs
+dependencies, and enables `agent-cockpit.service` when a systemd user bus is
+available. Run `~/agent-cockpit/doctor.sh` if startup fails.
+
+## Manual install
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR/agent-cockpit.git
+git clone https://github.com/fyc0451/agent-cockpit.git
 cd agent-cockpit
 
 # 2. Install the pinned dependencies
@@ -58,8 +68,11 @@ python -m venv .venv
 
 To access the cockpit from another LAN/VPN device, copy `.env.example` to `.env`,
 set `COCKPIT_HOST=0.0.0.0`, and set `COCKPIT_TOKEN` to a random value. The server
-refuses a non-loopback bind without a token. Prefer HTTPS or Tailscale Serve so
-browser clipboard APIs and credentials are protected in transit.
+refuses a non-loopback bind without a token.
+
+> **Security warning:** use HTTPS or Tailscale Serve for remote access. Plain HTTP
+> exposes the login session cookie to anyone able to observe the local network.
+> Do not expose Agent Cockpit directly to the public Internet.
 
 The systemd unit loads `.env` automatically. For a manual launch, load it first:
 
@@ -76,15 +89,28 @@ even if the Python process itself only listens on `127.0.0.1`.
 ## Deploy as a systemd service
 
 ```bash
+# Keep the user service running after logout (may require administrator policy)
+loginctl enable-linger "$USER"
+
 # Copy the unit file
-cp agent-mail-dashboard.service ~/.config/systemd/user/agent-cockpit.service
+cp agent-cockpit.service ~/.config/systemd/user/agent-cockpit.service
 # Edit paths to match your setup, then:
 systemctl --user daemon-reload
 systemctl --user enable --now agent-cockpit
 systemctl --user status agent-cockpit
 ```
 
-See `agent-mail-dashboard.service` for the unit template.
+See `agent-cockpit.service` for the unit template. `KillMode=process` preserves
+independent Herdr sessions when the cockpit is restarted; browser-created PTYs may
+still disconnect and should not be treated as persistent jobs.
+
+## Upgrade, diagnostics, and uninstall
+
+```bash
+./upgrade.sh       # refuses to overwrite local tracked changes
+./doctor.sh        # checks Python, dependencies, Herdr, Agent Mail, auth, and service
+./uninstall.sh     # removes only the user service; code, config, and data are preserved
+```
 
 ## Configuration
 
@@ -115,7 +141,11 @@ agent-cockpit/
 ├── hub_client.py          MCP write proxy (send_message / ack)
 ├── uploads.py             File/screenshot upload sink
 ├── static/index.html      Single-file frontend (kanban + terminal + tabs)
-└── agent-mail-dashboard.service   systemd unit template
+├── tests/                 Regression and security tests
+├── install.sh             One-command installer
+├── upgrade.sh             Safe fast-forward updater
+├── doctor.sh              Environment diagnostics
+└── agent-cockpit.service  systemd user unit template
 ```
 
 ## Why a cockpit and not a CLI?
@@ -126,7 +156,14 @@ CLI agents (codex, kimi, qoder) are powerful but blind to each other. herdr puts
 
 - **GUI agents (e.g. ZCode Desktop) can't join the board** — this cockpit drives *terminal* CLI agents under herdr. GUI apps have no programmatic control surface.
 - **Shared-token auth** — suitable for a trusted personal LAN/VPN. It is not a multi-user authorization system; keep the service behind a firewall or private overlay network.
+- **Transport security** — HTTP does not protect the session cookie. Use HTTPS or Tailscale Serve outside a fully trusted personal network.
 - **Reads the hub's SQLite directly** — never writes to it; all writes go through the hub's MCP API to preserve single-writer semantics.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development instructions and
+[SECURITY.md](SECURITY.md) for private vulnerability reporting and the deployment
+threat model. Community participation follows [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
