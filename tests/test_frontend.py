@@ -267,7 +267,8 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     assert 'class="hf-enter">⛶ 全屏' in HTML
     assert 'class="hf-exit">退出全屏' in HTML
     assert "app.classList.add('hf-immersive')" in js
-    assert "requestFullscreen" in js
+    # 不进原生全屏(Android Chrome 会弹系统提示),只保留退出兜底
+    assert "requestFullscreen()" not in js
     assert "function hfExitFullscreen(" in js
     assert "if(e.key==='Escape')hfExitFullscreen()" in js
     assert "document.addEventListener('fullscreenchange'" in js

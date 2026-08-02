@@ -1152,7 +1152,10 @@ def web_manifest():
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # no-cache:手机端浏览器常启发式缓存首页,新功能(如上传类型放开)必须能及时下发
+    return FileResponse(
+        STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"}
+    )
 
 
 @app.get("/health")

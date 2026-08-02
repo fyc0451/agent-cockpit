@@ -13,13 +13,7 @@ from pathlib import Path
 from typing import Any
 
 UPLOAD_DIR = Path.home() / "dashboard-uploads"
-MAX_SIZE = 20 * 1024 * 1024  # 20MB
-ALLOWED_EXT = {
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
-    ".pdf", ".txt", ".md", ".json", ".csv", ".log",
-    ".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp",
-    ".zip", ".tar", ".gz",
-}
+MAX_SIZE = 100 * 1024 * 1024  # 100MB(wav/视频等音视频文件较大)
 
 
 class UploadTooLarge(ValueError):
@@ -27,11 +21,11 @@ class UploadTooLarge(ValueError):
 
 
 def _safe_name(filename: str) -> str:
+    """清洗文件名(去路径分隔/不可打印字符)。不限扩展名,所有格式放开。"""
     name = filename.replace("\\", "/").rsplit("/", 1)[-1]
     name = "".join(c if c.isprintable() and c not in "/\\" else "_" for c in name).strip()
-    ext = Path(name).suffix.lower()
-    if not name or ext not in ALLOWED_EXT:
-        raise ValueError(f"不支持的文件类型: {ext or '(无扩展名)'}")
+    if not name:
+        raise ValueError("文件名为空")
     return name
 
 

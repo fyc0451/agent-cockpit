@@ -351,7 +351,7 @@ header .spacer{flex:1}
     <div class="term-toolbar">
       <button class="primary sm" onclick="termNew()">+ 新终端</button>
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
-      <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端">📎上传<input type="file" id="termTabUpload" accept="image/*" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
+      <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端">📎上传<input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
       <button class="sm" onclick="enterHerdrFlow()" title="退出 TUI，返回可滚屏/复制的 pane 流视图">📜 返回流视图</button>
@@ -415,7 +415,7 @@ header .spacer{flex:1}
     <div class="term-in" style="position:relative;flex-wrap:wrap">
       <input id="termInput" style="flex:1;min-width:160px" placeholder="给当前 agent 的指令…(@标注协作者 / @路径引用文件)" oninput="onTermInput(event)" onkeydown="onTermKeydown(event)">
       <div id="mentionPopover" class="hidden" style="position:absolute;bottom:100%;left:0;margin-bottom:4px;background:var(--bg3);border:1px solid var(--bd2);border-radius:8px;box-shadow:0 -4px 16px rgba(0,0,0,.4);max-height:240px;overflow:auto;z-index:10;min-width:220px"></div>
-      <label class="icon" style="cursor:pointer;font-size:18px" title="上传截图/文件并插入@路径">📎<input type="file" id="termUpload" accept="image/*" multiple style="display:none" onchange="termUploadFiles(this)"></label>
+      <label class="icon" style="cursor:pointer;font-size:18px" title="上传截图/文件并插入@路径">📎<input type="file" id="termUpload" multiple style="display:none" onchange="termUploadFiles(this)"></label>
       <select id="termMode" style="width:auto"><option value="prompt">prompt(agent)</option><option value="send">执行(shell)</option><option value="keys">按键(keys)</option></select>
       <button class="sm" onclick="pasteServiceClipboard(document.getElementById('termInput'))" title="把刚才在 Herdr TUI 里复制的文字填入当前输入框">📋 填入输入框</button>
       <button class="primary" onclick="termSend()">发送</button>
@@ -1222,7 +1222,7 @@ function hfRender(){
       <pre class="hf-out" id="hf-out-${esc(p.pane_id)}">加载中…</pre>
       <div class="hf-in">
         <input id="hf-in-${esc(p.pane_id)}" placeholder="给 ${esc(p.agent)} 发指令…" data-action="hfSendEnter" data-pane="${esc(p.pane_id)}">
-        <label class="icon" style="cursor:pointer;font-size:17px" title="上传图片/文件,插入@路径">📎<input type="file" accept="image/*" multiple style="display:none" data-action="hfUpload" data-pane="${esc(p.pane_id)}"></label>
+        <label class="icon" style="cursor:pointer;font-size:17px" title="上传图片/文件,插入@路径">📎<input type="file" multiple style="display:none" data-action="hfUpload" data-pane="${esc(p.pane_id)}"></label>
         <select id="hf-mode-${esc(p.pane_id)}"><option value="prompt">prompt</option><option value="send">send</option></select>
         <button class="sm" data-action="hfPaste" data-pane="${esc(p.pane_id)}" title="把刚才在 Herdr TUI 里复制的文字填入这个 pane 的输入框">📋 填入输入框</button>
         <button class="primary sm" data-action="hfSend" data-pane="${esc(p.pane_id)}">发送</button>
@@ -1283,7 +1283,8 @@ async function hfUpload(paneId,input){
   inp.focus();
 }
 async function hfToggle(paneId){
-  // 视觉沉浸模式始终可用;浏览器允许时再进入原生全屏以隐藏地址栏。
+  // 只用视觉沉浸模式(hf-immersive 占满可视区),不调原生 Fullscreen API:
+  // Android Chrome 进入原生全屏必弹「退出全屏模式」系统提示,无法被页面屏蔽。
   const body=document.getElementById('hfBody');
   const pane=document.getElementById('hf-'+paneId);
   const app=document.querySelector('.app');
@@ -1296,9 +1297,8 @@ async function hfToggle(paneId){
   pane.classList.add('hf-focus');
   const out=document.getElementById('hf-out-'+paneId);
   if(out)out.scrollTop=out.scrollHeight;
-  if(document.documentElement.requestFullscreen&&!document.fullscreenElement){
-    try{await document.documentElement.requestFullscreen()}catch(e){}
-  }
+  // 不再进原生全屏:Android Chrome 每次都会弹「退出全屏模式」系统提示,
+  // 视觉沉浸模式(hf-immersive)已占满可视区,体验一致且无打扰。
 }
 function hfExitFullscreen(exitNative=true){
   const body=document.getElementById('hfBody');

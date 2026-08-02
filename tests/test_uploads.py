@@ -34,11 +34,13 @@ def test_streaming_upload_removes_partial_file_when_too_large(tmp_path, monkeypa
     assert list(tmp_path.iterdir()) == []
 
 
-def test_upload_requires_allowed_extension(tmp_path, monkeypatch):
+def test_upload_allows_any_extension(tmp_path, monkeypatch):
+    """所有格式放开:wav、无扩展名等任意文件都可上传。"""
     monkeypatch.setattr(uploads, "UPLOAD_DIR", tmp_path)
 
-    with pytest.raises(ValueError):
-        asyncio.run(uploads.save_upload_file("no-extension", AsyncReader(b"hello")))
+    for name in ("audio.wav", "no-extension", "archive.apk", "视频.mp4"):
+        result = asyncio.run(uploads.save_upload_file(name, AsyncReader(b"hello")))
+        assert result["size"] == 5
 
 
 def test_upload_runs_disk_sync_in_worker_thread(tmp_path, monkeypatch):
