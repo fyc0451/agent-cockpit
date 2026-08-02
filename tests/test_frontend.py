@@ -160,12 +160,33 @@ def test_attach_herdr_validates_session_name():
 def test_h5_layout_uses_visible_dynamic_viewport():
     # 手机浏览器地址栏/键盘会改变可视高度；页面与全屏抽屉必须跟随 dvh。
     assert "height:100dvh" in HTML
-    assert ".drawer-bg.show{padding:0}" in HTML
-    assert ".drawer{height:100dvh;max-height:100dvh" in HTML
+    assert ".drawer-bg.show{inset:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);padding:0}" in HTML
+    assert ".drawer{height:100%;max-height:100%" in HTML
     # 顶部导航与终端工具栏在窄屏必须换行，不能被 body overflow:hidden 裁掉。
     assert "header nav{order:3;width:100%" in HTML
     assert ".term-toolbar{flex-wrap:wrap" in HTML
     assert "visualViewport" in HTML
+
+
+def test_h5_safe_area_and_overlay_scroll_are_contained():
+    assert "viewport-fit=cover" in HTML
+    assert "--safe-top:env(safe-area-inset-top,0px)" in HTML
+    assert "padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left)" in HTML
+    assert "bottom:calc(64px + var(--safe-bottom))" in HTML
+    assert "overscroll-behavior:none" in HTML
+    assert "overscroll-behavior:contain" in HTML
+
+
+def test_mobile_connections_and_focused_input_recover():
+    js = _inline_js()
+    assert "document.addEventListener('visibilitychange'" in js
+    assert "document.visibilityState==='visible'" in js
+    assert "connectSSE();refreshBoard()" in js
+    assert "function scheduleTermReconnect(id)" in js
+    assert "reconnectDelay" in js
+    assert "Math.min(delay*2,10000)" in js
+    assert "function keepFocusedControlVisible()" in js
+    assert "scrollIntoView({block:'nearest'})" in js
 
 
 def test_h5_can_switch_herdr_panes_without_keyboard_shortcuts():

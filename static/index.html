@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Agent Dashboard</title>
 <style>
 :root{
@@ -14,6 +14,10 @@
   --bd:#252b38; --bd2:#323a4a;
   --term-bg:#07090d; --term-fg:#c8d3e0;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --safe-top:env(safe-area-inset-top,0px);
+  --safe-right:env(safe-area-inset-right,0px);
+  --safe-bottom:env(safe-area-inset-bottom,0px);
+  --safe-left:env(safe-area-inset-left,0px);
 }
 :root.light{
   --bg:#f4f6fa; --bg2:#ffffff; --bg3:#eef1f6; --bg4:#e2e7ef;
@@ -24,7 +28,7 @@
   --term-bg:#1e2330; --term-fg:#d4dbe6;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
+html,body{height:100%;overscroll-behavior:none}
 body{background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}
 button{cursor:pointer;font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(--bd2);border-radius:7px;padding:7px 12px;transition:.12s;white-space:nowrap}
 button:hover{background:var(--bg4);border-color:var(--accent)}
@@ -41,7 +45,7 @@ pre,.mono{font-family:var(--mono)}
 .muted{color:var(--fg3)} .fg2{color:var(--fg2)}
 
 /* 头部 */
-.app{display:flex;flex-direction:column;height:100vh;height:100dvh}
+.app{display:flex;flex-direction:column;height:100vh;height:100dvh;padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left)}
 header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--bd)}
 header .logo{font-weight:700;font-size:15px;white-space:nowrap;display:flex;align-items:center;gap:6px}
 header nav{display:flex;gap:2px}
@@ -131,7 +135,7 @@ header .spacer{flex:1}
 
 /* 终端抽屉 */
 .drawer-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;z-index:50}
-.drawer-bg.show{display:flex;align-items:flex-end;justify-content:center;padding:10px}
+.drawer-bg.show{display:flex;align-items:flex-end;justify-content:center;padding:calc(10px + var(--safe-top)) calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left))}
 .drawer{background:var(--bg2);border:1px solid var(--bd2);border-radius:13px;width:100%;max-width:900px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden}
 .drawer-head{padding:10px 14px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px}
 .drawer-head .dt{flex:1;font-weight:600;font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -142,6 +146,7 @@ header .spacer{flex:1}
 .pane-switch select{min-width:140px}
 .term-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)}
 .term-help{font-size:11px;margin-left:auto}
+.board-wrap,.file-tree,.sidebar,.msgs-list,.term-out,.hf-body,.modal{overscroll-behavior:contain}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
 .hf-body{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
@@ -161,12 +166,12 @@ header .spacer{flex:1}
 .hf-body.hf-full .hf-pane.hf-focus .hf-pane-head{cursor:default}
 
 /* 消息抽屉(卡片点消息) */
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:60;padding:14px}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:60;padding:calc(14px + var(--safe-top)) calc(14px + var(--safe-right)) calc(14px + var(--safe-bottom)) calc(14px + var(--safe-left));overscroll-behavior:none}
 .modal-bg.show{display:flex}
 .modal{background:var(--bg2);border:1px solid var(--bd2);border-radius:13px;padding:16px;max-width:560px;width:100%;max-height:85vh;overflow:auto}
 .modal h3{font-size:15px;margin-bottom:10px}
 
-.toast{position:fixed;bottom:64px;left:50%;transform:translateX(-50%);background:var(--bg4);border:1px solid var(--bd2);border-radius:9px;padding:9px 16px;z-index:200;opacity:0;transition:.3s;pointer-events:none;font-size:13px}
+.toast{position:fixed;bottom:calc(64px + var(--safe-bottom));left:50%;transform:translateX(-50%);background:var(--bg4);border:1px solid var(--bd2);border-radius:9px;padding:9px 16px;z-index:200;opacity:0;transition:.3s;pointer-events:none;font-size:13px}
 .toast.show{opacity:1}
 .empty{color:var(--fg3);text-align:center;padding:40px 20px;font-size:13px}
 .hidden{display:none!important}
@@ -201,8 +206,8 @@ header .spacer{flex:1}
   .term-toolbar #termSelect{flex:1;min-width:120px!important}
   .term-help{display:none}
   #termContainer{padding:3px!important}
-  .drawer-bg.show{padding:0}
-  .drawer{height:100dvh;max-height:100dvh;max-width:none;border-radius:0;border-left:0;border-right:0}
+  .drawer-bg.show{inset:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);padding:0}
+  .drawer{height:100%;max-height:100%;max-width:none;border-radius:0;border-left:0;border-right:0}
   .drawer-head{padding:7px 8px;gap:5px;flex-wrap:wrap}
   .drawer-head .dt{font-size:12px}
   .pane-switch{order:2;width:100%;min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr) auto}
@@ -210,7 +215,7 @@ header .spacer{flex:1}
   .term-out{min-height:0;padding:8px;font-size:11px}
   .term-in{padding:6px;gap:5px}
   .term-in input{flex-basis:100%;min-width:0!important}
-  .modal-bg{padding:0;align-items:flex-end}
+  .modal-bg{inset:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);padding:0;align-items:flex-end}
   .modal{max-height:92dvh;border-radius:13px 13px 0 0}
   #sessionsList{padding:6px!important}
   #sessionsList .card>div{flex-wrap:wrap}
@@ -1106,6 +1111,8 @@ async function termClose(){
   try{await api('/api/term/'+TERM_ID,{method:'DELETE'})}catch(e){}
   TERMS=TERMS.filter(t=>t!==TERM_ID);
   if(inst){
+    inst.closing=true;
+    if(inst.reconnectTimer)clearTimeout(inst.reconnectTimer);
     if(inst.ws)inst.ws.close();
     if(inst.xterm)inst.xterm.dispose();
     if(inst.el)inst.el.remove();
@@ -1118,15 +1125,28 @@ async function termClose(){
   else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
 }
 // 多终端保活:每个终端一个独立容器元素,切换时隐藏/显示(不销毁)
-let TERM_INSTANCES={}; // {term_id: {xterm, fit, ws, el}}
+let TERM_INSTANCES={}; // {term_id: {xterm, fit, ws, el, reconnectDelay, reconnectTimer, closing}}
 function safeFitOf(fit,xterm){try{fit.fit()}catch(e){}}
+function scheduleTermReconnect(id){
+  const inst=TERM_INSTANCES[id];
+  if(!inst||inst.closing||inst.xterm._disposed||inst.reconnectTimer)return;
+  const delay=inst.reconnectDelay||1000;
+  inst.reconnectDelay=Math.min(delay*2,10000);
+  inst.reconnectTimer=setTimeout(()=>{
+    const current=TERM_INSTANCES[id];
+    if(!current)return;
+    current.reconnectTimer=null;
+    if(current.closing||current.xterm._disposed||current.ws?.readyState<2)return;
+    current.ws=openTermWS(id,current.xterm);
+  },delay);
+}
 // 为某终端建立一条独立 WS(重连时复用,不触碰其它实例的 WS)
 function openTermWS(id,xterm){
   const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}try{xterm.focus()}catch(e){}};
+  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}try{xterm.focus()}catch(e){}};
   ws.onmessage=ev=>{try{if(typeof ev.data==='string')xterm.write(ev.data);else xterm.write(new Uint8Array(ev.data))}catch(e){}};
-  ws.onclose=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[33m[连接已断开,切回将自动重连]\x1b[0m\r\n')}catch(e){}};
+  ws.onclose=ev=>{try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请新建终端]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(ev.code!==1008&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
   ws.onerror=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')}catch(e){}};
   return ws;
 }
@@ -1139,6 +1159,7 @@ function showTermInstance(id){
   if(!inst)return;
   // 切回死连接(CLOSING/CLOSED)→ 自动重连;每实例独立 WS,新建时不互相关闭
   if(!inst.ws||inst.ws.readyState>=2){
+    if(inst.reconnectTimer){clearTimeout(inst.reconnectTimer);inst.reconnectTimer=null}
     try{if(!inst.xterm._disposed)inst.xterm.write('\r\n\x1b[36m[重连中…]\x1b[0m\r\n')}catch(e){}
     inst.ws=openTermWS(id,inst.xterm);
   }
@@ -1170,7 +1191,7 @@ function termMount(id){
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
-  TERM_INSTANCES[id]={xterm,fit,ws:null,el};
+  TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   xterm.onData(d=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(d)});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
@@ -1378,6 +1399,13 @@ function connectSSE(){
   SSE.onerror=()=>{document.getElementById('liveDot').classList.add('off');setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)};
 }
 
+function keepFocusedControlVisible(){
+  if(!isCompactScreen())return;
+  const el=document.activeElement;
+  if(!el||!el.matches('input,textarea'))return;
+  setTimeout(()=>{if(document.activeElement===el)el.scrollIntoView({block:'nearest'})},80);
+}
+
 // ============ 主题切换 ============
 function toggleTheme(){
   const r=document.documentElement;
@@ -1457,9 +1485,10 @@ function bindDelegation(){
     else if(a==='fileSearchOpen')fileSearchOpen(parseInt(it.dataset.idx));
     else if(a==='fileSearchDownload')fileSearchDownload(parseInt(it.dataset.idx))});
   // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)
-  const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM)};
+  const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM);keepFocusedControlVisible()};
   window.addEventListener('resize',fitVisibleTerm);
   if(window.visualViewport)window.visualViewport.addEventListener('resize',fitVisibleTerm);
+  document.addEventListener('focusin',keepFocusedControlVisible);
 }
 
 // ============ init ============
@@ -1467,6 +1496,9 @@ async function init(){
   bindDelegation();
   const ok=await ensureAuth();
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible'){connectSSE();refreshBoard()}
+  });
   connectSSE();loadSessions();refreshBoard();
 }
 init();
