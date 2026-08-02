@@ -4,11 +4,16 @@ After=network.target agent-mail.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/mcp_agent_mail/dashboard
-ExecStart=%h/mcp_agent_mail/.venv/bin/python server.py
+# Cockpit 会启动独立的 Herdr server/agent；发布时只替换主进程，保留 session。
+KillMode=process
+WorkingDirectory=%h/agent-cockpit
+ExecStart=%h/agent-cockpit/.venv/bin/python server.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/agent-cockpit/.env
+NoNewPrivileges=true
+UMask=0077
 
 [Install]
 WantedBy=default.target

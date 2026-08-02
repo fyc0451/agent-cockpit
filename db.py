@@ -169,20 +169,35 @@ def agent_by_name(project_id: int, name: str) -> dict[str, Any] | None:
     )
 
 
+_PROGRAM_ALIASES = {
+    "codex": ("codex", "codex-cli"),
+    "codex-cli": ("codex-cli", "codex"),
+    "kimi": ("kimi", "kimi-work"),
+    "kimi-work": ("kimi-work", "kimi"),
+    "qoder": ("qoder", "qodercli", "qodercn", "qoder-cli", "qoder-cn"),
+    "qodercli": ("qodercli", "qodercn", "qoder-cn", "qoder", "qoder-cli"),
+    "qodercn": ("qodercn", "qoder-cn", "qodercli", "qoder", "qoder-cli"),
+    "qoder-cli": ("qoder-cli", "qodercli", "qodercn", "qoder-cn", "qoder"),
+    "qoder-cn": ("qoder-cn", "qodercn", "qodercli", "qoder", "qoder-cli"),
+}
+
+
 def identity_by_cwd(cwd: str, program: str) -> dict[str, Any] | None:
     """按工作目录 + program 类型查 agent-mail 身份(@ 注入协作者信息用)。
 
     herdr agent 的 cwd → project_key(human_key),program(codex/kimi/...)→ agent。
-    program 值不统一(新注册 codex/kimi,老项目 codex-cli/kimi-work),用 LIKE 模糊匹配。
+    program 值不统一(新注册 codex/kimi,老项目 codex-cli/kimi-work),
+    只在已知别名集合中精确匹配,避免 LIKE 误命中不相关 agent。
     """
-    # 把 program 规范化为基础名(codex-cli → codex),用于 LIKE 匹配
-    base = program.replace("-cli", "").replace("-work", "").replace("-cn", "").replace("cli", "")
-    # LIKE 匹配多种格式:codex / codex-cli / codex-cli 等
+    normalized = program.strip().lower()
+    candidates = _PROGRAM_ALIASES.get(normalized, (normalized,))
+    placeholders = ", ".join("?" for _ in candidates)
     return _one(
         "SELECT a.name, a.program, a.model, p.human_key "
         "FROM agents a JOIN projects p ON p.id = a.project_id "
-        "WHERE p.human_key = ? AND (a.program = ? OR a.program LIKE ? OR a.program LIKE ?) "
+        f"WHERE p.human_key = ? AND a.program IN ({placeholders}) "
         "AND a.retired_at IS NULL "
-        "ORDER BY a.inception_ts DESC LIMIT 1",
-        (cwd, program, f"{base}%", f"%{base}"),
+        "ORDER BY CASE WHEN a.program = ? THEN 0 ELSE 1 END, "
+        "a.inception_ts DESC LIMIT 1",
+        (cwd, *candidates, normalized),
     )

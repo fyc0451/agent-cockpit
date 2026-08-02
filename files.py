@@ -1,19 +1,21 @@
 """files.py — 文件浏览与编辑。
 
-安全模型:基于「允许的根目录」白名单。只有白名单内的路径可浏览/读/写,
-防止无认证的内网 dashboard 暴露整个文件系统。
+安全模型:基于「允许的根目录」显式白名单。只有白名单内的路径可浏览/读/写/删,
+防止内网 dashboard 暴露整个文件系统(尤其 ~/.ssh、~/.agent-mail 等敏感目录)。
 
-允许的根目录(可按需扩展):
-  - 所有已注册项目的 human_key(SQLite 里的项目路径)
+允许的根目录:
+  - 本项目(dashboard)目录
+  - agent-mail DB 已注册且实际存在的项目 human_key
   - ~/dashboard-uploads/(上传文件区)
-  - ~/agent-mail-tools/
   - ~/dashboard-data/
-路径必须解析后落在某个白名单根下,否则拒绝。
+  - ~/agent-mail-tools/
+路径必须解析后落在某个白名单根下,否则拒绝;空路径直接拒绝。
 """
 from __future__ import annotations
 
 import os
-import shutil
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -42,30 +44,63 @@ BINARY_EXT = {
     ".node", ".wasm",
 }
 
-# 访问根:整个 home 目录(私人内网工具,放开浏览)
+# 访问根白名单的构成:本项目目录 + home 下固定子目录 + DB 注册项目
 _HOME = Path.home().resolve()
+_PROJECT_DIR = Path(__file__).resolve().parent
+_HOME_SUBDIRS = ("dashboard-uploads", "dashboard-data", "agent-mail-tools")
+
+
+def _registered_project_roots() -> list[Path]:
+    """agent-mail DB 已注册且实际存在的项目目录。"""
+    try:
+        import db  # 延迟导入,避免模块级依赖/循环
+        projects = db.list_projects()
+    except Exception:
+        return []
+    roots = []
+    for row in projects:
+        key = row.get("human_key")
+        if not key:
+            continue
+        try:
+            p = Path(key).expanduser().resolve()
+        except OSError:
+            continue
+        if p.is_dir():
+            roots.append(p)
+    return roots
 
 
 def _load_roots() -> list[Path]:
-    """允许访问的根目录:整个 home。"""
-    return [_HOME]
+    """允许访问的根目录(显式白名单,去重后返回)。"""
+    roots: list[Path] = [_PROJECT_DIR]
+    for name in _HOME_SUBDIRS:
+        roots.append((_HOME / name).resolve(strict=False))
+    roots.extend(_registered_project_roots())
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for r in roots:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
 
 
 def reset_roots() -> None:
-    """重置根缓存(现在单根 home,空操作,保留接口兼容)。"""
+    """重置根缓存(根列表现由 _load_roots 实时计算,空操作,保留接口兼容)。"""
     pass
 
 
 def _resolve(rel: str) -> Path:
     """把相对/绝对路径解析并校验落在白名单内,否则抛 ValueError。"""
-    # 支持以项目 slug 或绝对路径定位;这里只接受绝对路径或 ~/ 相对
+    if not rel or not rel.strip():
+        raise ValueError("路径为空")
+    # 支持绝对路径或 ~/ 相对;相对路径基于 home
     path = Path(rel).expanduser()
     if not path.is_absolute():
-        # 相对路径基于 home
-        path = Path.home() / rel
+        path = _HOME / rel
     path = path.resolve(strict=False)
-    roots = _load_roots()
-    for root in roots:
+    for root in _load_roots():
         try:
             path.relative_to(root)
             return path
@@ -158,8 +193,19 @@ def read_file(rel: str) -> dict[str, Any]:
     return {"path": str(path), "binary": True, "size": st.st_size, "modifiable": False}
 
 
+def download_path(rel: str) -> Path:
+    """返回校验后的下载文件路径。"""
+    path = _resolve(rel)
+    if not path.is_file():
+        raise ValueError(f"不是文件: {path}")
+    return path
+
+
 def write_file(rel: str, content: str, create: bool = False) -> dict[str, Any]:
-    """写文本文件(覆盖)。create=True 时允许新建。"""
+    """写文本文件(覆盖)。create=True 时允许新建。
+
+    原子写:同目录唯一临时文件 + fsync + os.replace,并保留原文件 mode。
+    """
     path = _resolve(rel)
     if not create and not path.exists():
         raise ValueError(f"文件不存在(未传 create): {path}")
@@ -167,26 +213,77 @@ def write_file(rel: str, content: str, create: bool = False) -> dict[str, Any]:
         raise ValueError(f"不是文件: {path}")
     if path.exists() and not _is_text(path):
         raise ValueError("二进制文件不允许编辑")
-    if len(content.encode("utf-8")) > MAX_EDIT_SIZE:
+    data = content.encode("utf-8")
+    if len(data) > MAX_EDIT_SIZE:
         raise ValueError(f"内容超过 {MAX_EDIT_SIZE} 字节限制")
     path.parent.mkdir(parents=True, exist_ok=True)
-    # 原子写:先写临时文件再 rename
-    tmp = path.with_suffix(path.suffix + ".dash-tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".dash-tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     st = path.stat()
     return {"path": str(path), "size": st.st_size, "ok": True}
 
 
+def _resolve_for_delete(rel: str) -> Path:
+    """删除专用解析:只 resolve 父目录,保留最后一段。
+
+    与 _resolve 不同,最后一段不做 dereference——若 entry 是 symlink,
+    删的是 link 本身而非目标;父目录中的 symlink 仍全部解析,
+    父路径 symlink 逃逸(指向白名单外)照样拒绝。
+    """
+    if not rel or not rel.strip():
+        raise ValueError("路径为空")
+    path = Path(rel).expanduser()
+    if not path.is_absolute():
+        path = _HOME / rel
+    parent = path.parent.resolve(strict=False)
+    candidate = parent / path.name
+    for root in _load_roots():
+        if candidate == root:
+            # 是允许根本身:放行给 delete_file 的根检查,报专门的错误
+            return candidate
+        try:
+            parent.relative_to(root)
+            return candidate
+        except ValueError:
+            continue
+    raise ValueError(f"路径不在允许范围内: {path}")
+
+
 def delete_file(rel: str) -> dict[str, Any]:
-    """删除文件或空目录(谨慎,仅白名单内)。"""
-    path = _resolve(rel)
-    if path.is_file():
+    """删除文件/symlink/空目录(谨慎,仅白名单内)。
+
+    禁止删除任一允许的根目录。symlink 只 unlink link 本身,
+    绝不触碰目标(无论目标在白名单内还是外)。
+    """
+    path = _resolve_for_delete(rel)
+    for root in _load_roots():
+        if path == root:
+            raise ValueError(f"不允许删除根目录: {path}")
+    if path.is_symlink() or path.is_file():
         path.unlink()
         return {"deleted": str(path), "type": "file"}
     if path.is_dir():
         # 只允许删空目录,防误删
-        shutil.rmtree(path)
+        try:
+            path.rmdir()
+        except OSError as e:
+            raise ValueError(f"目录非空或不可删除: {path} ({e.strerror or e})")
         return {"deleted": str(path), "type": "dir"}
     raise ValueError(f"无法删除: {path}")
 

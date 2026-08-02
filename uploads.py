@@ -5,8 +5,11 @@
 """
 from __future__ import annotations
 
+import os
+import secrets
 import time
 from pathlib import Path
+from typing import Any
 
 UPLOAD_DIR = Path.home() / "dashboard-uploads"
 MAX_SIZE = 20 * 1024 * 1024  # 20MB
@@ -18,24 +21,43 @@ ALLOWED_EXT = {
 }
 
 
-def save_upload(filename: str, data: bytes) -> dict:
-    """落盘上传文件,返回 {id, path, filename, size}。"""
-    if len(data) > MAX_SIZE:
-        raise ValueError(f"文件过大: {len(data)} bytes > {MAX_SIZE}")
-    ext = Path(filename).suffix.lower()
-    if ext and ext not in ALLOWED_EXT:
-        raise ValueError(f"不支持的文件类型: {ext}")
+class UploadTooLarge(ValueError):
+    pass
+
+
+def _safe_name(filename: str) -> str:
+    name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(c if c.isprintable() and c not in "/\\" else "_" for c in name).strip()
+    ext = Path(name).suffix.lower()
+    if not name or ext not in ALLOWED_EXT:
+        raise ValueError(f"不支持的文件类型: {ext or '(无扩展名)'}")
+    return name
+
+
+async def save_upload_file(filename: str, source: Any) -> dict:
+    """分块保存上传文件,返回 {id, path, filename, size}。"""
+    safe_name = _safe_name(filename)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    # 时间戳前缀防重名 + 保留原名
-    safe_name = filename.replace("/", "_").replace("\\", "_")
     stamp = int(time.time() * 1000)
-    dest = UPLOAD_DIR / f"{stamp}-{safe_name}"
-    dest.write_bytes(data)
+    dest = UPLOAD_DIR / f"{stamp}-{secrets.token_hex(4)}-{safe_name}"
+    size = 0
+    try:
+        with dest.open("xb") as out:
+            while chunk := await source.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_SIZE:
+                    raise UploadTooLarge(f"文件过大: {size} bytes > {MAX_SIZE}")
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
     return {
         "id": dest.stem,
         "path": str(dest),
         "filename": safe_name,
-        "size": len(data),
+        "size": size,
     }
 
 

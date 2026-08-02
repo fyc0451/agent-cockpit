@@ -6,11 +6,19 @@ Mac/手机浏览器通过内网访问(默认 :8790)。
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import ipaddress
 import json
+import logging
 import os
+import re
+import shlex
 import time
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, UploadFile, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -26,8 +34,127 @@ import files
 import terminal
 from pydantic import BaseModel
 
-app = FastAPI(title="Agent Mail Dashboard")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global _poller_task
+    _poller_task = asyncio.create_task(_poll_live_state())
+    try:
+        yield
+    finally:
+        _poller_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _poller_task
+        _poller_task = None
+
+
+app = FastAPI(title="Agent Mail Dashboard", lifespan=lifespan)
 STATIC_DIR = Path(__file__).parent / "static"
+COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
+AUTH_COOKIE = "cockpit_session"
+PUBLIC_PATHS = {"/", "/health", "/api/auth/status", "/api/auth/login"}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+logger = logging.getLogger("agent-cockpit")
+SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+PANE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$")
+VALID_AGENTS = {"codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode"}
+VALID_LAYOUTS = {"right", "horizontal", "down", "vertical", "tab"}
+VALID_PANE_SEND_MODES = {"send", "prompt", "keys"}
+
+
+def _is_loopback(host: str | None) -> bool:
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _session_value() -> str:
+    if not COCKPIT_TOKEN:
+        return ""
+    return hmac.new(
+        COCKPIT_TOKEN.encode("utf-8"), b"agent-cockpit-session", hashlib.sha256
+    ).hexdigest()
+
+
+def _valid_bearer(value: str | None) -> bool:
+    if not COCKPIT_TOKEN or not value or not value.startswith("Bearer "):
+        return False
+    return hmac.compare_digest(value[7:], COCKPIT_TOKEN)
+
+
+def _valid_cookie(value: str | None) -> bool:
+    expected = _session_value()
+    return bool(expected and value and hmac.compare_digest(value, expected))
+
+
+def _request_authenticated(request: Request) -> bool:
+    if not COCKPIT_TOKEN:
+        return _is_loopback(request.client.host if request.client else None)
+    return _valid_bearer(request.headers.get("authorization")) or _valid_cookie(
+        request.cookies.get(AUTH_COOKIE)
+    )
+
+
+def _websocket_authenticated(websocket: WebSocket) -> bool:
+    if not COCKPIT_TOKEN:
+        return _is_loopback(websocket.client.host if websocket.client else None)
+    return _valid_cookie(websocket.cookies.get(AUTH_COOKIE))
+
+
+def _same_origin(origin: str | None, host: str | None) -> bool:
+    if not origin or not host:
+        return False
+    try:
+        return urlsplit(origin).netloc.lower() == host.lower()
+    except ValueError:
+        return False
+
+
+def _validate_bind(host: str) -> None:
+    if not _is_loopback(host) and not COCKPIT_TOKEN:
+        raise RuntimeError("非本机监听必须设置 COCKPIT_TOKEN")
+
+
+def _validate_session_name(name: str) -> None:
+    if not SESSION_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "session 名仅允许字母、数字、下划线和连字符")
+
+
+def _validate_pane_id(pane_id: str) -> None:
+    if not PANE_ID_RE.fullmatch(pane_id):
+        raise HTTPException(400, "pane id 格式无效")
+
+
+def _identity_name(cwd: str, agent_type: str) -> str:
+    ident = db.identity_by_cwd(cwd, agent_type)
+    return ident["name"] if ident else f"{agent_type}-main"
+
+
+@app.middleware("http")
+async def protect_api(request: Request, call_next):
+    path = request.url.path
+    protected = path.startswith("/api/") or path in {"/docs", "/redoc", "/openapi.json"}
+    if not protected or path in PUBLIC_PATHS:
+        return await call_next(request)
+    if not _request_authenticated(request):
+        status = 401 if COCKPIT_TOKEN else 403
+        detail = "未认证" if COCKPIT_TOKEN else "未设置 COCKPIT_TOKEN 时仅允许本机访问"
+        return JSONResponse(
+            {"detail": detail}, status_code=status,
+            headers={"WWW-Authenticate": "Bearer"} if status == 401 else None,
+        )
+    cookie_auth = _valid_cookie(request.cookies.get(AUTH_COOKIE))
+    if request.method not in SAFE_METHODS and cookie_auth and not _valid_bearer(
+        request.headers.get("authorization")
+    ):
+        if not _same_origin(request.headers.get("origin"), request.headers.get("host")):
+            return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
+    return await call_next(request)
 
 
 # ── 请求模型 ────────────────────────────────────────────────────
@@ -80,6 +207,44 @@ class SetupWorkspaceReq(BaseModel):
     workdir: str
     agents: list[str] = ["codex"]  # 要开的 agent 列表,如 ["codex","kimi"]
     layout: str = "right"  # right(水平/左右) | down(垂直/上下) | tab(多页/不分割)
+
+
+class LoginReq(BaseModel):
+    token: str
+
+
+# ── 认证 ─────────────────────────────────────────────────────────
+
+@app.get("/api/auth/status")
+def api_auth_status(request: Request):
+    return {
+        "required": bool(COCKPIT_TOKEN),
+        "authenticated": _request_authenticated(request),
+        "local_only": not bool(COCKPIT_TOKEN),
+    }
+
+
+@app.post("/api/auth/login")
+def api_auth_login(req: LoginReq, request: Request):
+    if not COCKPIT_TOKEN:
+        if not _is_loopback(request.client.host if request.client else None):
+            raise HTTPException(403, "未设置 COCKPIT_TOKEN 时仅允许本机访问")
+        return {"ok": True, "required": False}
+    if not hmac.compare_digest(req.token, COCKPIT_TOKEN):
+        raise HTTPException(401, "令牌错误")
+    response = JSONResponse({"ok": True, "required": True})
+    response.set_cookie(
+        AUTH_COOKIE, _session_value(), httponly=True,
+        secure=request.url.scheme == "https", samesite="strict", path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(AUTH_COOKIE, path="/")
+    return response
 
 
 # ── 数据/通信路由 ───────────────────────────────────────────────
@@ -158,9 +323,10 @@ def api_ack(req: AckReq):
 @app.post("/api/upload")
 async def api_upload(file: UploadFile):
     """上传文件/图片,落盘返回路径(供 codex -i 或附件用)。"""
-    data = await file.read()
     try:
-        return uploads.save_upload(file.filename or "upload.bin", data)
+        return await uploads.save_upload_file(file.filename or "upload.bin", file)
+    except uploads.UploadTooLarge as e:
+        raise HTTPException(413, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -192,6 +358,16 @@ def api_files_read(path: str):
     """读文件内容。"""
     try:
         return files.read_file(path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/files/download")
+def api_files_download(path: str):
+    """下载单个文件。"""
+    try:
+        target = files.download_path(path)
+        return FileResponse(target, filename=target.name)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -278,12 +454,16 @@ def api_herdr_snapshot():
 @app.get("/api/herdr/pane/{session}/{pane_id}")
 def api_herdr_pane(session: str, pane_id: str, lines: int = 80, is_agent: bool = False):
     """读 pane 终端输出(live)。agent pane 用 agent read。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
     return herdr_client.pane_read(session, pane_id, lines, is_agent)
 
 
 @app.get("/api/herdr/pane/{session}/{pane_id}/summary")
 def api_herdr_pane_summary(session: str, pane_id: str, max_lines: int = 30):
     """取 agent 会话摘要。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
     return herdr_client.pane_summary(session, pane_id, max_lines)
 
 
@@ -293,6 +473,8 @@ def api_herdr_pane_identity(session: str, pane_id: str):
 
     用 pane 的 cwd + agent 类型,反查 agent-mail 身份(花名/项目)。
     """
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
     # 先从 snapshot 拿这个 pane 的 cwd 和 agent 类型
     snap = herdr_client.snapshot()
     pane = next((p for p in snap.get("panes", [])
@@ -326,30 +508,41 @@ def api_herdr_pane_identity(session: str, pane_id: str):
 @app.post("/api/herdr/pane/{session}/{pane_id}/send")
 def api_herdr_pane_send(session: str, pane_id: str, req: PaneSendReq):
     """往 pane 发指令(send-keys 或 prompt)。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
+    if req.mode not in VALID_PANE_SEND_MODES:
+        raise HTTPException(400, f"不支持的发送模式: {req.mode}")
     return herdr_client.pane_send(session, pane_id, req.text, req.mode)
 
 
 @app.post("/api/herdr/start")
 def api_herdr_start(req: StartAgentReq):
     """在 session 里启动一个 agent pane。"""
+    _validate_session_name(req.session)
+    if req.agent not in VALID_AGENTS:
+        raise HTTPException(400, f"不支持的 agent: {req.agent}")
     return herdr_client.start_agent(req.session, req.workdir, req.agent, req.model)
 
 
 @app.post("/api/herdr/pane/{session}/{pane_id}/restart")
 def api_herdr_pane_restart(session: str, pane_id: str, resume: bool = False):
     """重启 pane 里的 agent(Ctrl+C + 重新启动)。resume=true 尝试恢复历史。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
     return herdr_client.restart_pane(session, pane_id, resume=resume)
 
 
 @app.post("/api/herdr/session/{name}/stop")
 def api_herdr_session_stop(name: str):
     """停止 herdr session。"""
+    _validate_session_name(name)
     return herdr_client.stop_session(name)
 
 
 @app.delete("/api/herdr/session/{name}")
 def api_herdr_session_delete(name: str):
     """删除已停止的 herdr session。"""
+    _validate_session_name(name)
     return herdr_client.delete_session(name)
 
 
@@ -361,6 +554,13 @@ def api_setup_workspace(req: SetupWorkspaceReq):
     """
     import subprocess
     import time
+    _validate_session_name(req.session)
+    if not req.agents or any(agent not in VALID_AGENTS for agent in req.agents):
+        raise HTTPException(400, "agents 包含不支持的类型")
+    if req.layout not in VALID_LAYOUTS:
+        raise HTTPException(400, f"不支持的布局: {req.layout}")
+    if not Path(req.workdir).expanduser().resolve().is_dir():
+        raise HTTPException(400, "工作目录不存在")
     # 0. 检查 session 是否存在,不存在则自动创建
     sessions = herdr_client.list_sessions()
     existing = {s["name"] for s in sessions}
@@ -371,7 +571,7 @@ def api_setup_workspace(req: SetupWorkspaceReq):
             t = terminal.create_term(req.workdir)
             time.sleep(0.5)
             # 在 PTY 里跑 herdr --session <name>(创建 + detach)
-            terminal.write_term(t["id"], f"herdr --session {req.session}\r")
+            terminal.write_term(t["id"], f"herdr --session {shlex.quote(req.session)}\r")
             time.sleep(4)  # 等 herdr server 完全启动并创建 session
             # detach:发 Ctrl-b d(herdr detach 序列),让 client 脱离但 session server 继续跑
             terminal.write_term(t["id"], "\x02d")  # Ctrl-b + d
@@ -401,14 +601,12 @@ def api_setup_workspace(req: SetupWorkspaceReq):
     sess = next((s for s in snap.get("sessions", []) if s.get("session") == req.session), None)
     notified = []
     if sess:
-        name_map = {"codex": "codex-main", "kimi": "kimi-main",
-                    "qodercli": "qodercn-main", "opencode": "opencode-main"}
         for p in sess.get("panes", []):
             atype = p.get("agent")
             pid = p.get("pane_id")
             if not atype or not pid:
                 continue
-            my_name = name_map.get(atype, f"{atype}-main")
+            my_name = _identity_name(req.workdir, atype)
             hint = (
                 "[agent-mail 身份告知] 花名={name},项目={proj}。"
                 "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
@@ -428,6 +626,8 @@ def api_setup_workspace(req: SetupWorkspaceReq):
 @app.post("/api/herdr/pane/{session}/{pane_id}/tell-identity")
 def api_herdr_pane_tell_identity(session: str, pane_id: str):
     """手动给单个 pane 发身份告知(适用于手动在 herdr 里开的新 pane)。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
     snap = herdr_client.snapshot()
     p = next((x for s in snap.get("sessions", [])
               if s.get("session") == session
@@ -440,10 +640,7 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
         raise HTTPException(400, "该 pane 不是 agent(herdr 未检测到),请等 agent 启动后再试")
     if not cwd:
         raise HTTPException(400, "该 pane 无 cwd")
-    name_map = {"codex": "codex-main", "kimi": "kimi-main", "claude": "claude-main",
-                "qodercli": "qodercn-main", "qoder": "qodercn-main", "qodercn": "qodercn-main",
-                "grok": "grok-main", "opencode": "opencode-main"}
-    my_name = name_map.get(agent_type, f"{agent_type}-main")
+    my_name = _identity_name(cwd, agent_type)
     hint = (
         "[agent-mail 身份告知] 花名={name},项目={proj}。"
         "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
@@ -463,6 +660,7 @@ def api_herdr_session_init_mail(name: str):
     给每个发一条身份告知 prompt(让它知道自己的花名 + 怎么收发消息)。
     """
     import subprocess
+    _validate_session_name(name)
     snap = herdr_client.snapshot()
     sess = next((s for s in snap.get("sessions", []) if s.get("session") == name), None)
     if not sess:
@@ -486,10 +684,7 @@ def api_herdr_session_init_mail(name: str):
             pane_id = p.get("pane_id")
             if not agent_type or not pane_id:
                 continue
-            # agent 类型 → 身份花名(codex→codex-main)
-            name_map = {"codex": "codex-main", "kimi": "kimi-main",
-                        "qodercli": "qodercn-main", "opencode": "opencode-main"}
-            my_name = name_map.get(agent_type, f"{agent_type}-main")
+            my_name = _identity_name(cwd, agent_type)
             hint = (
                 "[agent-mail 身份告知] 你的邮箱身份已注册:花名={name},项目={proj}。"
                 "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
@@ -515,6 +710,10 @@ def api_term_create(cwd: str | None = None, cols: int = 80, rows: int = 24):
     """创建一个新终端会话(PTY bash)。"""
     try:
         return terminal.create_term(cwd, cols, rows)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(429, str(e))
     except Exception as e:
         raise HTTPException(500, f"创建终端失败: {e}")
 
@@ -535,6 +734,11 @@ def api_term_kill(term_id: str):
 @app.websocket("/api/term/{term_id}")
 async def api_term_ws(websocket: WebSocket, term_id: str):
     """终端 WebSocket 双向桥接:浏览器↔PTY。"""
+    if not _websocket_authenticated(websocket) or not _same_origin(
+        websocket.headers.get("origin"), websocket.headers.get("host")
+    ):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     # 会话存在性校验
     terms_now = {t["id"] for t in terminal.list_terms()}
@@ -551,6 +755,9 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                 if data:
                     await websocket.send_bytes(data)
                 elif not terminal.is_alive(term_id):
+                    tail = await asyncio.to_thread(terminal.drain_output, term_id, 0.05)
+                    if tail:
+                        await websocket.send_bytes(tail)
                     await websocket.send_text("\r\n[进程已退出]\r\n")
                     break
                 await asyncio.sleep(0.02)
@@ -565,60 +772,87 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                 if text.startswith("{"):
                     try:
                         ctrl = json.loads(text)
-                        if ctrl.get("type") == "resize":
+                        if isinstance(ctrl, dict) and ctrl.get("type") == "resize":
                             terminal.resize_term(term_id, ctrl.get("cols", 80), ctrl.get("rows", 24))
-                        continue
+                            continue
                     except json.JSONDecodeError:
                         pass
-                terminal.write_term(term_id, text)
+                try:
+                    await asyncio.to_thread(terminal.write_term, term_id, text)
+                except (TimeoutError, OSError) as e:
+                    logger.warning("terminal input write failed %s: %s", term_id, e)
+                    await websocket.send_text(f"\r\n[输入未完整写入: {e}]\r\n")
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        logger.exception("terminal websocket failed: %s", term_id)
     finally:
         if pump_task:
             pump_task.cancel()
-        try:
+            with suppress(asyncio.CancelledError):
+                await pump_task
+        with suppress(Exception):
             await websocket.close()
-        except Exception:
-            pass
 
 
 # ── SSE 实时推送(看板状态变化) ────────────────────────────────
 
-@app.get("/api/events")
-async def api_events(request: Request):
-    """轮询 SQLite + herdr 看板,有变化推 SSE。"""
-    last_unread = -1
-    last_herdr_sig = ""
+_live_state: dict[str, Any] = {"revision": 0, "unread": None, "snapshot": None}
+_poller_task: asyncio.Task | None = None
 
-    async def event_gen():
-        nonlocal last_unread, last_herdr_sig
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                events = []
-                unread = db.global_unread_count()
-                if unread != last_unread:
-                    events.append({"event": "unread", "data": json.dumps({"count": unread})})
-                    last_unread = unread
-                # herdr 看板签名:pane+status 的指纹,变了就推
-                if herdr_client.is_available():
-                    snap = herdr_client.snapshot()
-                    sig = json.dumps([
+
+async def _poll_live_state() -> None:
+    global _live_state
+    last_sig = ""
+    while True:
+        try:
+            unread, snap = await asyncio.gather(
+                asyncio.to_thread(db.global_unread_count),
+                asyncio.to_thread(herdr_client.snapshot),
+            )
+            sig = json.dumps(
+                {
+                    "unread": unread,
+                    "panes": [
                         (p.get("session"), p.get("pane_id"), p.get("agent"),
                          p.get("agent_status"), p.get("revision"))
                         for p in snap.get("panes", [])
-                    ], ensure_ascii=False)
-                    if sig != last_herdr_sig:
-                        events.append({"event": "board", "data": json.dumps(snap, ensure_ascii=False)})
-                        last_herdr_sig = sig
-                for e in events:
-                    yield e
-            except Exception:
-                pass
-            await asyncio.sleep(4)
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            if sig != last_sig:
+                _live_state = {
+                    "revision": _live_state["revision"] + 1,
+                    "unread": unread,
+                    "snapshot": snap,
+                }
+                last_sig = sig
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("live state poll failed")
+        await asyncio.sleep(4)
+
+
+@app.get("/api/events")
+async def api_events(request: Request):
+    """把共享轮询缓存中的变化推送给浏览器。"""
+    last_revision = -1
+
+    async def event_gen():
+        nonlocal last_revision
+        while not await request.is_disconnected():
+            state = _live_state
+            if state["revision"] != last_revision and state["unread"] is not None:
+                yield {"event": "unread", "data": json.dumps({"count": state["unread"]})}
+                if state["snapshot"] is not None:
+                    yield {
+                        "event": "board",
+                        "data": json.dumps(state["snapshot"], ensure_ascii=False),
+                    }
+                last_revision = state["revision"]
+            await asyncio.sleep(1)
 
     return EventSourceResponse(event_gen())
 
@@ -646,6 +880,7 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    host = os.environ.get("COCKPIT_HOST", "0.0.0.0")
+    host = os.environ.get("COCKPIT_HOST", "127.0.0.1")
     port = int(os.environ.get("COCKPIT_PORT", "8790"))
+    _validate_bind(host)
     uvicorn.run(app, host=host, port=port, log_level="info")

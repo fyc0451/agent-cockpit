@@ -43,6 +43,24 @@ def _next_id() -> int:
     return _id_counter[0]
 
 
+def _response_data(raw: str) -> str:
+    """从 SSE 响应取第一条事件的完整 data；普通 JSON 原样返回。"""
+    parts: list[str] = []
+    saw_data = False
+    for line in raw.splitlines():
+        if not line:
+            if parts:
+                break
+            continue
+        if line.startswith("data:"):
+            value = line[5:]
+            if value.startswith(" "):
+                value = value[1:]
+            parts.append(value)
+            saw_data = True
+    return "\n".join(parts) if saw_data else raw
+
+
 def _call(method: str, params: dict[str, Any]) -> Any:
     """发起一次 JSON-RPC 调用,解析 SSE 响应返回 result。"""
     headers = {**_headers, "Authorization": f"Bearer {TOKEN}"}
@@ -50,13 +68,7 @@ def _call(method: str, params: dict[str, Any]) -> Any:
     with httpx.Client(timeout=30) as client:
         resp = client.post(f"{HUB}/mcp/", json=payload, headers=headers)
         resp.raise_for_status()
-    raw = resp.text
-    # hub 响应是 SSE,data: <json>
-    for line in raw.splitlines():
-        if line.startswith("data:"):
-            raw = line[5:].strip()
-            break
-    data = json.loads(raw)
+    data = json.loads(_response_data(resp.text))
     if "error" in data:
         raise RuntimeError(f"hub MCP error: {data['error']}")
     return data.get("result")

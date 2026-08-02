@@ -11,7 +11,7 @@ Inspired by [Orca](https://onorca.dev)'s Agent Dashboard, but built as a lightwe
 - **Live terminal** — click any agent card to open its terminal output; send prompts, run shell commands, or send special keys.
 - **Screenshot → agent** — upload an image, it auto-inserts as `@/path` so codex picks it up (`Viewed Image`).
 - **Agent messaging** — built on agent-mail: send/read messages between agents, ack unread.
-- **File browser + editor** — browse and edit project files in a sandboxed whitelist.
+- **File browser + editor** — browse, edit, and download project files in a sandboxed whitelist.
 - **codex tasks** — kick off background `codex exec` jobs, watch output stream, review diffs, apply/stash changes.
 - **Mobile-friendly** — responsive single-file frontend, camera upload, touch-friendly.
 - **Dark / light theme** — toggle in the header, remembered across sessions.
@@ -47,14 +47,31 @@ It deploys **on the same machine as herdr + the agent-mail hub**, reading everyt
 git clone https://github.com/YOUR/agent-cockpit.git
 cd agent-cockpit
 
-# 2. Use the hub's venv (zero new deps — it already has fastapi/uvicorn/etc.)
-#    Or create your own: python -m venv .venv && .venv/bin/pip install fastapi uvicorn ...
-export PYTHONPATH=.
+# 2. Install the pinned dependencies
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
 
-# 3. Run
-python server.py
+# 3. Run locally (authentication is optional on loopback)
+.venv/bin/python server.py
 # → http://localhost:8790
 ```
+
+To access the cockpit from another LAN/VPN device, copy `.env.example` to `.env`,
+set `COCKPIT_HOST=0.0.0.0`, and set `COCKPIT_TOKEN` to a random value. The server
+refuses a non-loopback bind without a token. Prefer HTTPS or Tailscale Serve so
+browser clipboard APIs and credentials are protected in transit.
+
+The systemd unit loads `.env` automatically. For a manual launch, load it first:
+
+```bash
+set -a
+source .env
+set +a
+.venv/bin/python server.py
+```
+
+Set `COCKPIT_TOKEN` when a reverse proxy or Tailscale Serve exposes the service too,
+even if the Python process itself only listens on `127.0.0.1`.
 
 ## Deploy as a systemd service
 
@@ -71,16 +88,20 @@ See `agent-mail-dashboard.service` for the unit template.
 
 ## Configuration
 
-All optional, via environment variables (see `.env.example`):
+Configuration is read from environment variables (see `.env.example`):
 
 | Var | Default | Description |
 | --- | --- | --- |
-| `COCKPIT_HOST` | `0.0.0.0` | Bind address |
+| `COCKPIT_HOST` | `127.0.0.1` | Bind address |
 | `COCKPIT_PORT` | `8790` | Port |
+| `COCKPIT_TOKEN` | empty | Shared login token; required for non-loopback binds |
 | `HERDR_BIN` | auto-detected | Path to herdr binary |
 | `CODEX_BIN` | auto-detected | Path to codex binary |
 
 The hub token is read from `~/.agent-mail/client.env` automatically — never hardcode it.
+
+Run the test suite with `.venv/bin/pip install -r requirements-dev.txt` followed by
+`.venv/bin/pytest -q`.
 
 ## Project structure
 
@@ -104,7 +125,7 @@ CLI agents (codex, kimi, qoder) are powerful but blind to each other. herdr puts
 ## Limitations
 
 - **GUI agents (e.g. ZCode Desktop) can't join the board** — this cockpit drives *terminal* CLI agents under herdr. GUI apps have no programmatic control surface.
-- **No auth** — designed for trusted LAN/VPN access only. Bind to `127.0.0.1` if you need isolation.
+- **Shared-token auth** — suitable for a trusted personal LAN/VPN. It is not a multi-user authorization system; keep the service behind a firewall or private overlay network.
 - **Reads the hub's SQLite directly** — never writes to it; all writes go through the hub's MCP API to preserve single-writer semantics.
 
 ## License
