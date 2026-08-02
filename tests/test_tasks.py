@@ -964,6 +964,43 @@ def test_cleanup_clears_db_run_workdir(temp_data, git_repo):
 
 # ── cherry-pick --abort 失败处理 ────────────────────────────────
 
+def test_cherry_pick_failure_restores_worktree_for_retry(
+    task_with_worktree, monkeypatch
+):
+    """cherry-pick 失败后恢复 staged diff，重试不得把已提交改动当成空 diff。"""
+    tid = task_with_worktree["id"]
+    wt = task_with_worktree["run_workdir"]
+    source = task_with_worktree["source"]
+    (wt / "retry.txt").write_text("must survive")
+    preview = tasks.task_diff(tid)
+
+    original_git = tasks._git
+    fail_once = True
+
+    def mock_git(args, cwd, **kwargs):
+        nonlocal fail_once
+        if len(args) >= 2 and args[0] == "cherry-pick" and args[1] == "--abort":
+            result = MagicMock(returncode=0, stdout="", stderr="")
+            return result
+        if len(args) >= 2 and args[0] == "cherry-pick" and fail_once:
+            fail_once = False
+            result = MagicMock(returncode=1, stdout="", stderr="conflict")
+            return result
+        return original_git(args, cwd, **kwargs)
+
+    monkeypatch.setattr(tasks, "_git", mock_git)
+    with pytest.raises(ValueError, match="cherry-pick"):
+        tasks.task_apply(tid, "apply")
+
+    # 失败后仍是原 base，且原预览 diff 可直接重试。
+    assert original_git(["rev-parse", "HEAD"], wt).stdout.strip() == task_with_worktree["base_sha"]
+    assert tasks.task_diff(tid)["preview_hash"] == preview["preview_hash"]
+
+    result = tasks.task_apply(tid, "apply")
+    assert result["action"] == "apply"
+    assert (source / "retry.txt").read_text() == "must survive"
+
+
 def test_cherry_pick_abort_failure_reports_manual_intervention(
     task_with_worktree, monkeypatch
 ):
@@ -998,6 +1035,41 @@ def test_cherry_pick_abort_failure_reports_manual_intervention(
     monkeypatch.setattr(tasks, "_git", mock_git)
     with pytest.raises(ValueError, match="人工处理"):
         tasks.task_apply(tid, "apply")
+
+
+def test_cherry_pick_timeout_aborts_and_restores_worktree(
+    task_with_worktree, monkeypatch
+):
+    """cherry-pick 超时也必须 abort，并恢复 staged diff 供重试。"""
+    tid = task_with_worktree["id"]
+    wt = task_with_worktree["run_workdir"]
+    base_sha = task_with_worktree["base_sha"]
+    (wt / "new.txt").write_text("content")
+    tasks.task_diff(tid)
+
+    original_git = tasks._git
+    calls: list[list[str]] = []
+
+    def mock_git(args, cwd, **kwargs):
+        calls.append(list(args))
+        if len(args) >= 2 and args[0] == "cherry-pick" and args[1] != "--abort":
+            raise ValueError("git cherry-pick 超时(>60s)")
+        if args == ["cherry-pick", "--abort"]:
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+        return original_git(args, cwd, **kwargs)
+
+    monkeypatch.setattr(tasks, "_git", mock_git)
+
+    with pytest.raises(ValueError, match="超时"):
+        tasks.task_apply(tid, "apply")
+
+    assert ["cherry-pick", "--abort"] in calls
+    assert tasks._git_ok(["rev-parse", "HEAD"], wt)[1] == base_sha
+    assert "new.txt" in tasks._git(["diff", "--cached", "--name-only"], wt).stdout
 
 
 # ── _run_codex 子进程清理 ───────────────────────────────────────
@@ -1091,6 +1163,114 @@ def test_ensure_proc_terminated_kills_on_terminate_timeout():
     tasks._ensure_proc_terminated(proc)
     proc.terminate.assert_called_once()
     proc.kill.assert_called_once()
+
+
+def test_get_task_uses_persisted_tail_after_buffer_reclaimed(temp_data):
+    """完成任务的内存缓冲回收后仍能从 DB 返回最后输出。"""
+    now = time.time()
+    with tasks._db() as con:
+        con.execute(
+            "INSERT INTO tasks (id, workdir, prompt, status, created_ts, output_tail) "
+            "VALUES ('tail_task_01', '/tmp/fake', 'test', 'done', ?, ?)",
+            (now, "line one\nline two"),
+        )
+        con.commit()
+
+    task = tasks.get_task("tail_task_01")
+
+    assert task is not None
+    assert task["output"] == ["line one", "line two"]
+
+
+def test_run_codex_reclaims_completed_output_buffer(temp_data, monkeypatch):
+    """worker 完成后持久化 tail 并释放对应内存缓冲。"""
+    task_id = "reclaim_task"
+    now = time.time()
+    with tasks._db() as con:
+        con.execute(
+            "INSERT INTO tasks (id, workdir, prompt, status, created_ts) "
+            "VALUES (?, '/tmp/fake', 'test', 'pending', ?)",
+            (task_id, now),
+        )
+        con.commit()
+    tasks._output_buffers[task_id] = []
+
+    proc = MagicMock()
+    proc.pid = 12345
+    proc.stdout = iter(["last line\n"])
+    proc.stdin = None
+    proc.returncode = 0
+    proc.poll.return_value = 0
+    proc.wait.return_value = 0
+    monkeypatch.setattr(tasks.subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    tasks._run_codex(task_id, "/tmp/fake", "test", [], None)
+
+    assert task_id not in tasks._output_buffers
+    task = tasks.get_task(task_id)
+    assert task is not None
+    assert task["output"] == ["last line"]
+
+
+def test_run_codex_uses_bounded_process_wait(temp_data, monkeypatch):
+    """stdout 关闭后进程不退出时进入已有 terminate 清理路径。"""
+    task_id = "wait_timeout"
+    now = time.time()
+    with tasks._db() as con:
+        con.execute(
+            "INSERT INTO tasks (id, workdir, prompt, status, created_ts) "
+            "VALUES (?, '/tmp/fake', 'test', 'pending', ?)",
+            (task_id, now),
+        )
+        con.commit()
+    tasks._output_buffers[task_id] = []
+
+    proc = MagicMock()
+    proc.pid = 12345
+    proc.stdout = iter([])
+    proc.stdin = None
+    proc.returncode = None
+    proc.poll.return_value = None
+    proc.wait.side_effect = [
+        subprocess.TimeoutExpired(cmd="codex", timeout=5),
+        0,
+    ]
+    monkeypatch.setattr(tasks.subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    tasks._run_codex(task_id, "/tmp/fake", "test", [], None)
+
+    assert proc.wait.call_args_list[0].kwargs == {"timeout": 5}
+    proc.terminate.assert_called_once()
+    task = tasks.get_task(task_id)
+    assert task is not None
+    assert task["status"] == "failed"
+
+
+def test_run_codex_reports_missing_stdout_explicitly(temp_data, monkeypatch):
+    """Popen 未提供 stdout 时返回稳定错误，不依赖可被优化掉的 assert。"""
+    task_id = "missing_stdout"
+    now = time.time()
+    with tasks._db() as con:
+        con.execute(
+            "INSERT INTO tasks (id, workdir, prompt, status, created_ts) "
+            "VALUES (?, '/tmp/fake', 'test', 'pending', ?)",
+            (task_id, now),
+        )
+        con.commit()
+    tasks._output_buffers[task_id] = []
+
+    proc = MagicMock()
+    proc.pid = 12345
+    proc.stdout = None
+    proc.stdin = None
+    proc.poll.return_value = 0
+    monkeypatch.setattr(tasks.subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    tasks._run_codex(task_id, "/tmp/fake", "test", [], None)
+
+    task = tasks.get_task(task_id)
+    assert task is not None
+    assert any("RuntimeError" in line and "stdout" in line for line in task["output"])
 
 
 # ── 并发：discard/diff/apply 同源互斥 ───────────────────────────

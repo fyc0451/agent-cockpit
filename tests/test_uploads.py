@@ -39,3 +39,18 @@ def test_upload_requires_allowed_extension(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError):
         asyncio.run(uploads.save_upload_file("no-extension", AsyncReader(b"hello")))
+
+
+def test_upload_runs_disk_sync_in_worker_thread(tmp_path, monkeypatch):
+    monkeypatch.setattr(uploads, "UPLOAD_DIR", tmp_path)
+    threaded_functions = []
+
+    async def fake_to_thread(func, *args):
+        threaded_functions.append(func)
+        return func(*args)
+
+    monkeypatch.setattr(uploads.asyncio, "to_thread", fake_to_thread)
+
+    asyncio.run(uploads.save_upload_file("example.txt", AsyncReader(b"hello")))
+
+    assert uploads.os.fsync in threaded_functions

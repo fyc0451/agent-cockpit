@@ -108,9 +108,12 @@ def _git(
     args: list[str], cwd: Path, *, text: bool = True, timeout: int = 30
 ) -> subprocess.CompletedProcess:
     """执行 git 命令,返回 CompletedProcess。"""
-    return subprocess.run(
-        ["git"] + args, cwd=str(cwd), capture_output=True, text=text, timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            ["git"] + args, cwd=str(cwd), capture_output=True, text=text, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ValueError(f"git {' '.join(args)} 超时(>{timeout}s)") from e
 
 
 def _git_ok(args: list[str], cwd: Path) -> tuple[bool, str]:
@@ -308,9 +311,10 @@ def list_tasks(limit: int = 50) -> list[dict[str, Any]]:
         ).fetchall()
         out = [dict(r) for r in rows]
     # 附上内存缓冲的实时输出长度
-    for t in out:
-        buf = _output_buffers.get(t["id"], [])
-        t["output_lines"] = len(buf)
+    with _tasks_lock:
+        for t in out:
+            buf = _output_buffers.get(t["id"], [])
+            t["output_lines"] = len(buf)
     return out
 
 
@@ -320,7 +324,9 @@ def get_task(task_id: str) -> dict[str, Any] | None:
         if not row:
             return None
         t = dict(row)
-    t["output"] = list(_output_buffers.get(task_id, []))
+    with _tasks_lock:
+        buf = _output_buffers.get(task_id)
+        t["output"] = list(buf) if buf is not None else (t.get("output_tail") or "").splitlines()
     return t
 
 
@@ -354,7 +360,8 @@ def start_task(
                  str(run_workdir), prompt, json.dumps(validated_images), model, now),
             )
             con.commit()
-        _output_buffers[task_id] = []
+        with _tasks_lock:
+            _output_buffers[task_id] = []
 
         thread = threading.Thread(
             target=_run_codex,
@@ -371,7 +378,8 @@ def start_task(
             _delete_task(task_id)
         except Exception:
             pass
-        _output_buffers.pop(task_id, None)
+        with _tasks_lock:
+            _output_buffers.pop(task_id, None)
         raise
 
     return {
@@ -450,10 +458,11 @@ def _run_codex(
                 proc.stdin.close()
             except BrokenPipeError:
                 pass
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            raise RuntimeError("codex stdout pipe unavailable")
         for line in proc.stdout:
             _emit(line.rstrip("\n"))
-        proc.wait()
+        proc.wait(timeout=5)
         exit_code = proc.returncode
     except FileNotFoundError:
         _emit(f"[ERROR] codex 未找到: {CODEX_BIN}")
@@ -475,6 +484,8 @@ def _run_codex(
             (status, exit_code, finished, tail, task_id),
         )
         con.commit()
+    with _tasks_lock:
+        _output_buffers.pop(task_id, None)
 
 
 def task_diff(task_id: str) -> dict[str, Any]:
@@ -668,18 +679,42 @@ def _apply_to_source(
             raise ValueError("无法获取 worktree 提交 SHA")
 
         # 10. Cherry-pick 到源仓库(安全应用)
-        r = _git(["cherry-pick", commit_sha], source, timeout=60)
-        if r.returncode != 0:
+        try:
+            r = _git(["cherry-pick", commit_sha], source, timeout=60)
+            cherry_pick_error = r.stderr.strip()
+        except ValueError as e:
+            r = None
+            cherry_pick_error = str(e)
+        if r is None or r.returncode != 0:
             # 失败:尝试 abort cherry-pick,不影响源工作区
-            abort_r = _git(["cherry-pick", "--abort"], source, timeout=30)
+            try:
+                abort_r = _git(["cherry-pick", "--abort"], source, timeout=30)
+            except ValueError as e:
+                raise ValueError(
+                    f"cherry-pick 失败且 --abort 超时,源仓库需人工处理: {e}"
+                ) from e
             if abort_r.returncode != 0:
                 raise ValueError(
                     f"cherry-pick 失败且 --abort 也失败,"
                     f"源仓库需人工处理: "
-                    f"cherry-pick error={r.stderr.strip()}, "
+                    f"cherry-pick error={cherry_pick_error}, "
                     f"abort error={abort_r.stderr.strip()}"
                 )
-            raise ValueError(f"应用到源仓库失败(cherry-pick): {r.stderr.strip()}")
+            # worktree 的提交尚未进入源仓库。回到原 base 并保留 staged diff，
+            # 让用户可以原样重试；否则下一次预览会看到空 diff 并可能误删 worktree。
+            try:
+                reset_r = _git(["reset", "--soft", base_sha], current_rw_path, timeout=30)
+            except ValueError as e:
+                raise ValueError(
+                    f"cherry-pick 已 abort,但恢复 worktree 失败；提交 {commit_sha} 仍保留在 "
+                    f"{current_rw_path}: {e}"
+                ) from e
+            if reset_r.returncode != 0:
+                raise ValueError(
+                    f"cherry-pick 已 abort,但恢复 worktree 失败；提交 {commit_sha} 仍保留在 "
+                    f"{current_rw_path}: {reset_r.stderr.strip()}"
+                )
+            raise ValueError(f"应用到源仓库失败(cherry-pick): {cherry_pick_error}")
 
         # 11. 清理 worktree
         _remove_worktree(source, current_rw_path)

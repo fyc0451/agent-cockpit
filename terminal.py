@@ -38,6 +38,9 @@ from typing import Any
 # 终端会话池:term_id -> {master_fd, pid, alive, lock, created_ts, last_active}
 _terms: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
+# pty.fork 先创建 master fd 再返回父进程；串行化 fork→FD_CLOEXEC，
+# 避免并发创建时另一个 shell 在标记前继承该 master fd。
+_fork_lock = threading.Lock()
 
 SHELL = os.environ.get("SHELL", "/bin/bash")
 HOME = os.path.expanduser("~")
@@ -106,16 +109,22 @@ def create_term(
         raise RuntimeError(f"活跃终端数已达上限 {MAX_TERMS}")
 
     # pty.fork:子进程返回 0,父进程返回 master_fd + pid
-    pid, master_fd = pty.fork()
-    if pid == 0:
-        # ── 子进程:exec bash ──
+    with _fork_lock:
+        pid, master_fd = pty.fork()
+        if pid == 0:
+            # ── 子进程:exec bash ──
+            try:
+                os.chdir(workdir)
+            except OSError:
+                os.chdir(HOME)
+            os.environ["TERM"] = "xterm-256color"
+            os.execv(SHELL, [SHELL, "-l"])
+            os._exit(127)  # execv 失败才到这
         try:
-            os.chdir(workdir)
+            os.set_inheritable(master_fd, False)
         except OSError:
-            os.chdir(HOME)
-        os.environ["TERM"] = "xterm-256color"
-        os.execv(SHELL, [SHELL, "-l"])
-        os._exit(127)  # execv 失败才到这
+            _kill_child(pid, master_fd)
+            raise
     # ── 父进程 ──
     try:
         # 设非阻塞,便于 select 轮询

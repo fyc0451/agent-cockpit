@@ -69,6 +69,11 @@ def _agent_cmd(agent: str, workdir: str) -> str:
     return builder(bin_path)
 
 
+def _pane_sort_key(pane_id: str) -> tuple[Any, ...]:
+    """按 pane id 中的数字自然排序:w1:p9 < w1:p10。"""
+    return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", pane_id))
+
+
 def is_available() -> bool:
     return bool(HERDR_BIN) and Path(HERDR_BIN).is_file()
 
@@ -84,6 +89,8 @@ def _run(args: list[str], timeout: int = 10) -> str:
         )
     except FileNotFoundError:
         raise RuntimeError(f"herdr 未找到: {HERDR_BIN}")
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"herdr {' '.join(args)} 超时(>{timeout}s)") from e
     if r.returncode != 0:
         raise RuntimeError(f"herdr {' '.join(args)} 失败: {r.stderr.strip()[:200]}")
     return r.stdout
@@ -321,7 +328,9 @@ def start_agent(
             snap = _snapshot_session(session)
             panes = snap.get("panes", [])
             if panes:
-                new_pid = sorted(panes, key=lambda p: p.get("pane_id", ""))[-1].get("pane_id")
+                new_pid = sorted(
+                    panes, key=lambda p: _pane_sort_key(str(p.get("pane_id") or ""))
+                )[-1].get("pane_id")
         if not new_pid:
             return {"available": True, "error": "split/tab 后找不到新 pane"}
         # 用 pane run 启动 agent(完整路径 + shlex 安全分割)

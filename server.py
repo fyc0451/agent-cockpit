@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, UploadFile, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -118,6 +118,11 @@ def _same_origin(origin: str | None, host: str | None) -> bool:
 def _validate_bind(host: str) -> None:
     if not _is_loopback(host) and not COCKPIT_TOKEN:
         raise RuntimeError("非本机监听必须设置 COCKPIT_TOKEN")
+    if not _is_loopback(host):
+        logger.warning(
+            "非回环监听必须使用 HTTPS 或 Tailscale Serve；"
+            "明文 HTTP 会暴露可重放的登录 cookie"
+        )
 
 
 def _validate_session_name(name: str) -> None:
@@ -461,7 +466,12 @@ def api_herdr_snapshot():
 
 
 @app.get("/api/herdr/pane/{session}/{pane_id}")
-def api_herdr_pane(session: str, pane_id: str, lines: int = 80, is_agent: bool = False):
+def api_herdr_pane(
+    session: str,
+    pane_id: str,
+    lines: int = Query(80, ge=1, le=1000),
+    is_agent: bool = False,
+):
     """读 pane 终端输出(live)。agent pane 用 agent read。"""
     _validate_session_name(session)
     _validate_pane_id(pane_id)
@@ -469,7 +479,11 @@ def api_herdr_pane(session: str, pane_id: str, lines: int = 80, is_agent: bool =
 
 
 @app.get("/api/herdr/pane/{session}/{pane_id}/summary")
-def api_herdr_pane_summary(session: str, pane_id: str, max_lines: int = 30):
+def api_herdr_pane_summary(
+    session: str,
+    pane_id: str,
+    max_lines: int = Query(30, ge=1, le=200),
+):
     """取 agent 会话摘要。"""
     _validate_session_name(session)
     _validate_pane_id(pane_id)

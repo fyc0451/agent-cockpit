@@ -54,6 +54,13 @@ def test_create_stores_safe_display_label():
             terminal.create_term(label=label)
 
 
+def test_create_marks_master_fd_close_on_exec():
+    tid = _create()
+    with terminal._lock:
+        master_fd = terminal._terms[tid]["master_fd"]
+    assert os.get_inheritable(master_fd) is False
+
+
 def test_create_enforces_max_terms(monkeypatch):
     monkeypatch.setattr(terminal, "MAX_TERMS", 1)
     _create()

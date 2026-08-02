@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 import time
@@ -47,9 +48,9 @@ async def save_upload_file(filename: str, source: Any) -> dict:
                 size += len(chunk)
                 if size > MAX_SIZE:
                     raise UploadTooLarge(f"文件过大: {size} bytes > {MAX_SIZE}")
-                out.write(chunk)
-            out.flush()
-            os.fsync(out.fileno())
+                await asyncio.to_thread(out.write, chunk)
+            await asyncio.to_thread(out.flush)
+            await asyncio.to_thread(os.fsync, out.fileno())
     except Exception:
         dest.unlink(missing_ok=True)
         raise

@@ -267,7 +267,7 @@ header .spacer{flex:1}
       <option value="kimi">kimi</option>
       <option value="qodercli">qoder</option>
     </select>
-    <input id="lnWorkdir" placeholder="工作目录 如 /home/fyc/hr-ready" style="flex:1;min-width:160px">
+    <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" style="flex:1;min-width:160px">
     <button class="primary" onclick="startAgent()">+ 新建 agent</button>
     <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
   </div>
@@ -408,7 +408,7 @@ header .spacer{flex:1}
     </div>
     <div class="muted" style="font-size:12px;margin-bottom:10px">全自动:建 session(if absent)→ split pane → 启动 agent → 注册身份 → 通知。一步到位</div>
     <div class="field"><label>session 名(hteam 建好的)</label><input id="suSession" placeholder="如 tts 或 my-project"></div>
-    <div class="field"><label>工作目录(项目绝对路径)</label><input id="suWorkdir" placeholder="如 /home/fyc/my-project"></div>
+    <div class="field"><label>工作目录(项目绝对路径)</label><input id="suWorkdir" placeholder="如 /home/you/my-project"></div>
     <div class="field"><label>要开的 agent(逗号分隔:codex/kimi/claude/qoder/grok/opencode)</label><input id="suAgents" value="codex,kimi" placeholder="codex,kimi,claude,qoder,grok"></div>
     <div class="field"><label>布局(多 agent 怎么排列)</label><select id="suLayout">
       <option value="right">水平分屏(左右排列)</option>
@@ -952,13 +952,7 @@ async function doAttachHerdr(session){
     TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;
     renderTermOptions();
     termMount(r.id);
-    // 等 WS 连上,发 herdr attach 命令
-    setTimeout(()=>{
-      if(TERM_WS&&TERM_WS.readyState===1){
-        TERM_WS.send('herdr --session '+session+'\r');
-        toast('已进入 herdr/'+session+' (Ctrl-b 切 pane)');
-      }
-    },500);
+    queueTermInput(r.id,'herdr --session '+session+'\r','已进入 herdr/'+session+' (Ctrl-b 切 pane)');
   }catch(e){toast('创建终端失败: '+e)}
 }
 
@@ -1130,6 +1124,20 @@ async function termClose(){
 // 多终端保活:每个终端一个独立容器元素,切换时隐藏/显示(不销毁)
 let TERM_INSTANCES={}; // {term_id: {xterm, fit, ws, el, reconnectDelay, reconnectTimer, closing}}
 function safeFitOf(fit,xterm){try{fit.fit()}catch(e){}}
+function flushTermInput(id,ws){
+  const inst=TERM_INSTANCES[id];
+  if(!inst||inst.ws!==ws||ws?.readyState!==1||!inst.pendingInput)return;
+  try{
+    ws.send(inst.pendingInput);inst.pendingInput='';
+    if(inst.pendingNotice){toast(inst.pendingNotice);inst.pendingNotice=''}
+  }catch(e){}
+}
+function queueTermInput(id,data,notice){
+  const inst=TERM_INSTANCES[id];if(!inst)return;
+  inst.pendingInput=(inst.pendingInput||'')+data;
+  if(notice)inst.pendingNotice=notice;
+  flushTermInput(id,inst.ws);
+}
 function scheduleTermReconnect(id){
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.closing||inst.xterm._disposed||inst.reconnectTimer)return;
@@ -1147,7 +1155,7 @@ function scheduleTermReconnect(id){
 function openTermWS(id,xterm){
   const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}try{xterm.focus()}catch(e){}};
+  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);try{xterm.focus()}catch(e){}};
   ws.onmessage=ev=>{try{if(typeof ev.data==='string')xterm.write(ev.data);else xterm.write(new Uint8Array(ev.data))}catch(e){}};
   ws.onclose=ev=>{try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请新建终端]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(ev.code!==1008&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
   ws.onerror=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')}catch(e){}};
@@ -1194,7 +1202,7 @@ function termMount(id){
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
-  TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false};
+  TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:''};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   xterm.onData(d=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(d)});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});

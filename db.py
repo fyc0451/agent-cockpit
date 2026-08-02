@@ -5,29 +5,35 @@ WAL 模式下只读连接可安全并发,不阻塞 hub 写入。绝不写这个�
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
 DB_PATH = Path.home() / "mcp_agent_mail" / "storage.sqlite3"
 # 复用同一连接(线程内);只读 URI,每次查询用独立游标。
 _conn: sqlite3.Connection | None = None
+_conn_lock = threading.RLock()
 
 
 def _con() -> sqlite3.Connection:
     """打开(并缓存)一个只读 SQLite 连接。"""
     global _conn
-    if _conn is None:
-        if not DB_PATH.is_file():
-            raise RuntimeError(f"找不到 hub 数据库: {DB_PATH}")
-        # mode=ro 只读;check_same_thread=False 允许跨线程(只读安全)
-        _conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-    return _conn
+    with _conn_lock:
+        if _conn is None:
+            if not DB_PATH.is_file():
+                raise RuntimeError(f"找不到 hub 数据库: {DB_PATH}")
+            # 同一只读连接跨 FastAPI worker 线程复用；查询由 _conn_lock 串行化。
+            _conn = sqlite3.connect(
+                f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False
+            )
+            _conn.row_factory = sqlite3.Row
+        return _conn
 
 
 def _rows(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
     """执行查询,返回 dict 列表。"""
-    return [dict(r) for r in _con().execute(sql, params).fetchall()]
+    with _conn_lock:
+        return [dict(r) for r in _con().execute(sql, params).fetchall()]
 
 
 def _one(sql: str, params: tuple = ()) -> dict[str, Any] | None:

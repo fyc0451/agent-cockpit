@@ -167,6 +167,14 @@ def test_attach_herdr_validates_session_name():
     assert "if(!validSessionName(session))" in HTML
 
 
+def test_attach_herdr_waits_for_its_websocket():
+    js = _inline_js()
+    assert "function queueTermInput(id,data,notice)" in js
+    assert "flushTermInput(id,ws)" in js
+    assert "queueTermInput(r.id,'herdr --session '+session+'\\r'" in js
+    assert "// 等 WS 连上,发 herdr attach 命令\n    setTimeout" not in js
+
+
 def test_h5_layout_uses_visible_dynamic_viewport():
     # 手机浏览器地址栏/键盘会改变可视高度；页面与全屏抽屉必须跟随 dvh。
     assert "height:100dvh" in HTML

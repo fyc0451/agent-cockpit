@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 import pytest
 
@@ -65,3 +66,52 @@ def test_server_identity_name_uses_registered_identity(monkeypatch):
     )
 
     assert server._identity_name("/project", "claude") == "GentleCompass"
+
+
+def test_db_queries_serialize_shared_connection(monkeypatch):
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    overlap = threading.Event()
+    state_lock = threading.Lock()
+    errors = []
+
+    class FakeCursor:
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        active = 0
+
+        def execute(self, *_args):
+            with state_lock:
+                self.active += 1
+                first = self.active == 1
+                if self.active > 1:
+                    overlap.set()
+            if first:
+                first_entered.set()
+                release_first.wait(1)
+            with state_lock:
+                self.active -= 1
+            return FakeCursor()
+
+    monkeypatch.setattr(db, "_conn", FakeConnection())
+
+    def query():
+        try:
+            db._rows("SELECT 1")
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    first = threading.Thread(target=query)
+    second = threading.Thread(target=query)
+    first.start()
+    assert first_entered.wait(1)
+    second.start()
+    overlap.wait(0.2)
+    release_first.set()
+    first.join(1)
+    second.join(1)
+
+    assert not errors
+    assert not overlap.is_set()

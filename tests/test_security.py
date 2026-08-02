@@ -86,6 +86,14 @@ def test_non_loopback_bind_requires_token(monkeypatch):
     server._validate_bind("127.0.0.1")
 
 
+def test_non_loopback_bind_warns_about_plain_http(monkeypatch, caplog):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+
+    server._validate_bind("0.0.0.0")
+
+    assert "HTTPS" in caplog.text
+
+
 def test_setup_workspace_rejects_shell_metacharacters(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     response = TestClient(server.app).post(
@@ -125,6 +133,25 @@ def test_herdr_pane_send_rejects_unknown_mode(monkeypatch):
     )
 
     assert response.status_code == 400
+
+
+def test_herdr_read_routes_reject_unbounded_line_counts(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    headers = {"authorization": "Bearer secret"}
+
+    assert client.get(
+        "/api/herdr/pane/demo/w1:p1?lines=0", headers=headers
+    ).status_code == 422
+    assert client.get(
+        "/api/herdr/pane/demo/w1:p1?lines=1001", headers=headers
+    ).status_code == 422
+    assert client.get(
+        "/api/herdr/pane/demo/w1:p1/summary?max_lines=0", headers=headers
+    ).status_code == 422
+    assert client.get(
+        "/api/herdr/pane/demo/w1:p1/summary?max_lines=201", headers=headers
+    ).status_code == 422
 
 
 def test_terminal_create_maps_validation_and_limit_errors(monkeypatch):
