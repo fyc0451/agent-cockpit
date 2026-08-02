@@ -43,6 +43,17 @@ def test_create_rejects_invalid_dims():
             terminal.create_term(cols=cols, rows=rows)
 
 
+def test_create_stores_safe_display_label():
+    result = terminal.create_term(label=" agent-cockpit ")
+    assert result["label"] == "agent-cockpit"
+    listed = next(t for t in terminal.list_terms() if t["id"] == result["id"])
+    assert listed["label"] == "agent-cockpit"
+
+    for label in ("", " ", "x" * 65, "bad\nname", "bad\x7fname"):
+        with pytest.raises(ValueError, match="名称"):
+            terminal.create_term(label=label)
+
+
 def test_create_enforces_max_terms(monkeypatch):
     monkeypatch.setattr(terminal, "MAX_TERMS", 1)
     _create()

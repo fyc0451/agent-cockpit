@@ -715,10 +715,15 @@ def api_herdr_session_init_mail(name: str):
 # ── Web 终端(PTY,完整交互:斜杠/Esc/vim) ─────────────────────
 
 @app.post("/api/term")
-def api_term_create(cwd: str | None = None, cols: int = 80, rows: int = 24):
+def api_term_create(
+    cwd: str | None = None,
+    cols: int = 80,
+    rows: int = 24,
+    label: str | None = None,
+):
     """创建一个新终端会话(PTY bash)。"""
     try:
-        return terminal.create_term(cwd, cols, rows)
+        return terminal.create_term(cwd, cols, rows, label)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError as e:

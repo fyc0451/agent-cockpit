@@ -68,6 +68,15 @@ def _valid_dims(cols: Any, rows: Any) -> tuple[int, int]:
     return c, r
 
 
+def _valid_label(label: Any) -> str | None:
+    if label is None:
+        return None
+    value = str(label).strip()
+    if not value or len(value) > 64 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("终端名称必须为 1-64 个可见字符")
+    return value
+
+
 def _get(term_id: str) -> dict[str, Any] | None:
     with _lock:
         return _terms.get(term_id)
@@ -78,12 +87,18 @@ def _active_count() -> int:
         return sum(1 for t in _terms.values() if t.get("alive"))
 
 
-def create_term(cwd: str | None = None, cols: int = 80, rows: int = 24) -> dict[str, Any]:
-    """创建一个新终端会话。返回 {id, pid}。
+def create_term(
+    cwd: str | None = None,
+    cols: int = 80,
+    rows: int = 24,
+    label: str | None = None,
+) -> dict[str, Any]:
+    """创建一个新终端会话。返回 {id, pid, label}。
 
     尺寸非法抛 ValueError;活跃终端达上限抛 RuntimeError。
     """
     cols, rows = _valid_dims(cols, rows)
+    label = _valid_label(label)
     workdir = cwd or HOME
     # 顺路回收空闲/已死终端,再检查上限
     sweep_idle()
@@ -121,12 +136,12 @@ def create_term(cwd: str | None = None, cols: int = 80, rows: int = 24) -> dict[
             _terms[term_id] = {
                 "master_fd": master_fd, "pid": pid, "alive": True,
                 "lock": threading.Lock(), "created_ts": now, "last_active": now,
-                "dead_ts": None,
+                "dead_ts": None, "label": label,
             }
     if over:
         _kill_child(pid, master_fd)
         raise RuntimeError(f"活跃终端数已达上限 {MAX_TERMS}")
-    return {"id": term_id, "pid": pid}
+    return {"id": term_id, "pid": pid, "label": label}
 
 
 def _kill_child(pid: int, master_fd: int) -> None:
@@ -351,6 +366,7 @@ def list_terms() -> list[dict[str, Any]]:
             {
                 "id": tid, "pid": t["pid"], "alive": t.get("alive", False),
                 "idle": round(now - t.get("last_active", now), 1),
+                "label": t.get("label"),
             }
             for tid, t in _terms.items()
         ]

@@ -107,6 +107,16 @@ def test_multi_terminal_keeps_ws_per_instance_and_reconnects():
     assert HTML.count("window.addEventListener('resize'") == 1
 
 
+def test_terminal_selector_uses_herdr_session_name():
+    js = _inline_js()
+    assert "TERM_LABELS={}" in js
+    assert "function renderTermOptions()" in js
+    assert "function termLabel(id)" in js
+    assert "label='+encodeURIComponent(session)" in js
+    assert "TERM_LABELS[r.id]=r.label||session" in js
+    assert "TERM_LABELS[r.id]=r.label||''" in js
+
+
 def test_auth_contract_wired():
     js = _inline_js()
     assert "/api/auth/status" in js

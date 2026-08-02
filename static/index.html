@@ -827,17 +827,21 @@ async function sendMsg(){
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
 // ============ Web 终端(xterm.js + PTY) ============
-let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[];
+let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={};
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 function termEnsure(){if(!TERM_ID)termNew()}
+function termLabel(id){return TERM_LABELS[id]||('终端 '+id.slice(0,8))}
+function renderTermOptions(){
+  const sel=document.getElementById('termSelect');
+  sel.innerHTML=TERMS.map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
+  if(TERM_ID)sel.value=TERM_ID;
+}
 async function termNew(cwd){
   try{
     const url='/api/term'+(cwd?('?cwd='+encodeURIComponent(cwd)):'');
     const r=await api(url,{method:'POST'});
-    TERMS.push(r.id);TERM_ID=r.id;
-    const sel=document.getElementById('termSelect');
-    sel.innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
-    sel.value=r.id;
+    TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||'';
+    renderTermOptions();
     termMount(r.id);
   }catch(e){toast('创建终端失败: '+e)}
 }
@@ -944,10 +948,9 @@ async function doAttachHerdr(session){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
   document.getElementById('launchBar').classList.add('hidden');
   try{
-    const r=await api('/api/term',{method:'POST'});
-    TERMS.push(r.id);TERM_ID=r.id;
-    document.getElementById('termSelect').innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
-    document.getElementById('termSelect').value=r.id;
+    const r=await api('/api/term?label='+encodeURIComponent(session),{method:'POST'});
+    TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;
+    renderTermOptions();
     termMount(r.id);
     // 等 WS 连上,发 herdr attach 命令
     setTimeout(()=>{
@@ -1110,6 +1113,7 @@ async function termClose(){
   const inst=TERM_INSTANCES[TERM_ID];
   try{await api('/api/term/'+TERM_ID,{method:'DELETE'})}catch(e){}
   TERMS=TERMS.filter(t=>t!==TERM_ID);
+  delete TERM_LABELS[TERM_ID];
   if(inst){
     inst.closing=true;
     if(inst.reconnectTimer)clearTimeout(inst.reconnectTimer);
@@ -1119,8 +1123,7 @@ async function termClose(){
     delete TERM_INSTANCES[TERM_ID];
   }
   TERM_ID=TERMS[0]||null;
-  const sel=document.getElementById('termSelect');
-  sel.innerHTML=TERMS.map(t=>`<option value="${t}">${t.slice(0,8)}</option>`).join('');
+  renderTermOptions();
   if(TERM_ID)showTermInstance(TERM_ID);
   else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
 }
