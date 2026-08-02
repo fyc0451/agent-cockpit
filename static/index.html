@@ -623,6 +623,14 @@ function closeTerm(){
   document.getElementById('paneSwitch').hidden=true;
   CURRENT_TERM=null;
 }
+function updatePaneOutput(out,next){
+  if(out.textContent===next)return false;
+  const follow=out.scrollHeight-out.scrollTop-out.clientHeight<=2;
+  const top=out.scrollTop;
+  out.textContent=next;
+  out.scrollTop=follow?out.scrollHeight:top;
+  return true;
+}
 async function refreshTerm(){
   if(!CURRENT_TERM)return;
   try{
@@ -630,8 +638,9 @@ async function refreshTerm(){
     const d=await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}?lines=80&is_agent=${t.isAgent}`);
     if(!CURRENT_TERM||CURRENT_TERM.session!==t.session||CURRENT_TERM.paneId!==t.paneId)return;
     const out=document.getElementById('termOut');
-    out.textContent=d.output||d.error||'(空)';
-    out.scrollTop=out.scrollHeight;
+    const next=d.output||d.error||'(空)';
+    const selection=window.getSelection();
+    if(!selection||selection.isCollapsed||!out.contains(selection.anchorNode))updatePaneOutput(out,next);
     updateDrawerHead();
   }catch(e){document.getElementById('termOut').textContent='读取失败: '+e}
 }
@@ -1020,10 +1029,8 @@ async function hfRefreshAll(){
       if(out.textContent===next)continue;
       const selection=window.getSelection();
       if(selection&&!selection.isCollapsed&&out.contains(selection.anchorNode))continue;
-      // textContent 防 ANSI 转义注入;保留滚动位置(用户上翻时不打断)
-      const atBottom=out.scrollHeight-out.scrollTop-out.clientHeight<30;
-      out.textContent=next;
-      if(atBottom)out.scrollTop=out.scrollHeight;
+      // textContent 防 ANSI 转义注入;用户上翻时保留位置,原本在底部时继续跟随。
+      updatePaneOutput(out,next);
     }catch(e){if(HF_SESSION===session&&out.isConnected)out.textContent='读取失败: '+e}
   }
 }

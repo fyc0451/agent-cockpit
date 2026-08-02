@@ -198,7 +198,11 @@ def test_herdr_flow_preserves_selection_and_ignores_stale_refresh():
     assert "HF_SESSION!==session||!out.isConnected" in js
     assert "out.textContent===next" in js
     assert "out.contains(selection.anchorNode)" in js
-    assert "out.textContent=next" in js
+    assert "function updatePaneOutput(out,next)" in js
+    assert "out.scrollHeight-out.scrollTop-out.clientHeight<=2" in js
+    assert "const top=out.scrollTop" in js
+    assert "out.scrollTop=follow?out.scrollHeight:top" in js
+    assert js.count("updatePaneOutput(out,next)") >= 2
     assert "out.innerHTML=d.output" not in js
     assert "encodeURIComponent(p.session)" in js
     assert "encodeURIComponent(p.pane_id)" in js
