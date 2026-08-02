@@ -142,12 +142,19 @@ header .spacer{flex:1}
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
 .hf-body{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
 .hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex-direction:column;overflow:hidden}
-.hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap}
+.hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap;cursor:pointer}
 .hf-pane-head .pn{flex:1;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.hf-out{background:var(--term-bg);color:var(--term-fg);font-family:var(--mono);font-size:12px;line-height:1.5;padding:10px 12px;white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:28vh;min-height:100px;user-select:text;-webkit-user-select:text}
+.hf-out{background:var(--term-bg);color:var(--term-fg);font-family:var(--mono);font-size:12px;line-height:1.5;padding:10px 12px;white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:32vh;min-height:120px;user-select:text;-webkit-user-select:text}
 .hf-in{display:flex;gap:7px;padding:8px;border-top:1px solid var(--bd);flex-wrap:wrap}
 .hf-in input{flex:1;min-width:140px;font-family:var(--mono)}
 .hf-in select{width:auto}
+.hf-expand{margin-left:auto;font-size:12px;color:var(--fg3)}
+/* 全屏单 pane 模式:body 只显示一个 pane,输出区占满 */
+.hf-body.hf-full{overflow:hidden;padding:0;gap:0}
+.hf-body.hf-full .hf-pane{display:none}
+.hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;border:none;border-radius:0}
+.hf-body.hf-full .hf-pane.hf-focus .hf-out{max-height:none;min-height:0;flex:1;font-size:13px}
+.hf-body.hf-full .hf-pane.hf-focus .hf-pane-head{cursor:default}
 
 /* 消息抽屉(卡片点消息) */
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:60;padding:14px}
@@ -905,15 +912,17 @@ function hfRender(){
   body.innerHTML=panes.map(p=>{
     const cls=classify(p.agent_status,p.agent);
     return `<div class="hf-pane" id="hf-${esc(p.pane_id)}">
-      <div class="hf-pane-head">
+      <div class="hf-pane-head" data-action="hfToggle" data-pane="${esc(p.pane_id)}" title="点击放大/还原">
         <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
         <span class="pn">${esc(p.agent)} <span class="muted">${esc(p.pane_id)}</span></span>
         <span class="status-dot ${cls}"></span>
         <span class="muted" style="font-size:11px">${esc(p.cwd_name||p.cwd||'')}</span>
+        <span class="hf-expand">⤢</span>
       </div>
       <pre class="hf-out" id="hf-out-${esc(p.pane_id)}">加载中…</pre>
       <div class="hf-in">
         <input id="hf-in-${esc(p.pane_id)}" placeholder="给 ${esc(p.agent)} 发指令…" data-action="hfSendEnter" data-pane="${esc(p.pane_id)}">
+        <label class="icon" style="cursor:pointer;font-size:17px" title="上传图片/文件,插入@路径">📎<input type="file" accept="image/*" multiple style="display:none" data-action="hfUpload" data-pane="${esc(p.pane_id)}"></label>
         <select id="hf-mode-${esc(p.pane_id)}"><option value="prompt">prompt</option><option value="send">send</option></select>
         <button class="primary sm" data-action="hfSend" data-pane="${esc(p.pane_id)}">发送</button>
       </div>
@@ -955,6 +964,40 @@ async function hfSend(paneId){
     inp.value='';
     setTimeout(hfRefreshAll,800);
   }catch(e){toast('发送失败: '+e)}
+}
+// 上传图片/文件,把 @路径(prompt)或裸路径(send)插入该 pane 的输入框
+async function hfUpload(paneId,input){
+  const files=input.files;if(!files.length)return;
+  const inp=document.getElementById('hf-in-'+paneId);
+  const mode=document.getElementById('hf-mode-'+paneId).value;
+  const isAgent=mode==='prompt';
+  for(const f of files){
+    const fd=new FormData();fd.append('file',f);
+    try{
+      const r=await api('/api/upload',{method:'POST',body:fd});
+      const ref=(isAgent?'@':'')+r.path;
+      inp.value=(inp.value?inp.value+' ':'')+ref;
+      toast('已上传: '+r.filename+(isAgent?' (@引用)':''));
+    }catch(e){toast('上传失败: '+e)}
+  }
+  input.value=''; // 允许重复选同一文件
+  inp.focus();
+}
+function hfToggle(paneId){
+  // 点击卡片头:全屏看单个 pane(输出区占满,可滚屏/复制),再点还原
+  const body=document.getElementById('hfBody');
+  const pane=document.getElementById('hf-'+paneId);
+  if(!body||!pane)return;
+  const isFull=body.classList.contains('hf-full')&&pane.classList.contains('hf-focus');
+  body.classList.remove('hf-full');
+  body.querySelectorAll('.hf-pane').forEach(x=>x.classList.remove('hf-focus'));
+  if(!isFull){
+    body.classList.add('hf-full');
+    pane.classList.add('hf-focus');
+    // 全屏后滚到底,看最新输出
+    const out=document.getElementById('hf-out-'+paneId);
+    if(out)out.scrollTop=out.scrollHeight;
+  }
 }
 function hfTakeover(){
   // 切到 xterm TUI attach(桌面端完整交互)
@@ -1255,10 +1298,15 @@ function bindDelegation(){
   on('#board',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='openFlow')enterHerdrFlow(it.dataset.session,it.dataset.pane);
     else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
-  on('#hfBody',e=>{const it=e.target.closest('[data-action="hfSend"]');if(it)hfSend(it.dataset.pane)});
+  on('#hfBody',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    if(it.dataset.action==='hfSend')hfSend(it.dataset.pane);
+    else if(it.dataset.action==='hfToggle')hfToggle(it.dataset.pane)});
   const hfBodyEl=document.querySelector('#hfBody');
   if(hfBodyEl)hfBodyEl.addEventListener('keydown',e=>{
     if(e.key==='Enter'){const it=e.target.closest('[data-action="hfSendEnter"]');if(it)hfSend(it.dataset.pane)}
+  });
+  if(hfBodyEl)hfBodyEl.addEventListener('change',e=>{
+    const it=e.target.closest('[data-action="hfUpload"]');if(it)hfUpload(it.dataset.pane,it)
   });
   on('#mentionPopover',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='pickMention')pickMention(it.dataset.session,it.dataset.pane,it.dataset.agent)});
