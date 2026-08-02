@@ -18,7 +18,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -32,6 +32,7 @@ import tasks
 import uploads
 import files
 import terminal
+import web_push
 from pydantic import BaseModel
 
 
@@ -48,7 +49,7 @@ async def lifespan(_: FastAPI):
         _poller_task = None
 
 
-app = FastAPI(title="Agent Mail Dashboard", lifespan=lifespan)
+app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
 STATIC_DIR = Path(__file__).parent / "static"
 COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
 AUTH_COOKIE = "cockpit_session"
@@ -60,6 +61,7 @@ PANE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$")
 VALID_AGENTS = {"codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode"}
 VALID_LAYOUTS = {"right", "horizontal", "down", "vertical", "tab"}
 VALID_PANE_SEND_MODES = {"send", "prompt", "keys"}
+AGENT_MAIL_INIT_SCRIPT = Path.home() / "agent-mail-tools" / "am-init-project"
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -136,8 +138,30 @@ def _validate_pane_id(pane_id: str) -> None:
 
 
 def _identity_name(cwd: str, agent_type: str) -> str:
-    ident = db.identity_by_cwd(cwd, agent_type)
+    try:
+        ident = db.identity_by_cwd(cwd, agent_type)
+    except Exception:
+        ident = None
     return ident["name"] if ident else f"{agent_type}-main"
+
+
+def _agent_mail_status() -> dict[str, Any]:
+    read_status = db.status()
+    if not read_status["available"]:
+        return {
+            **read_status,
+            "read_available": False,
+            "write_available": False,
+            "write_reason": read_status["reason"],
+        }
+    write_status = hub_client.status()
+    return {
+        "available": True,
+        "reason": None,
+        "read_available": True,
+        "write_available": write_status["available"],
+        "write_reason": write_status["reason"],
+    }
 
 
 @app.middleware("http")
@@ -218,6 +242,17 @@ class LoginReq(BaseModel):
     token: str
 
 
+class PushKeysReq(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class PushSubscriptionReq(BaseModel):
+    endpoint: str
+    expirationTime: int | None = None
+    keys: PushKeysReq
+
+
 # ── 认证 ─────────────────────────────────────────────────────────
 
 @app.get("/api/auth/status")
@@ -257,15 +292,35 @@ def api_auth_logout():
 @app.get("/api/overview")
 def api_overview():
     """全局总览:项目列表 + 未读 + 统计。"""
-    try:
-        return db.overview()
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    mail_status = _agent_mail_status()
+    if mail_status["available"]:
+        try:
+            result = db.overview()
+            result["agent_mail"] = mail_status
+            return result
+        except Exception as exc:
+            mail_status = {
+                "available": False,
+                "reason": f"Agent Mail 查询失败: {exc}",
+                "read_available": False,
+                "write_available": False,
+                "write_reason": f"Agent Mail 查询失败: {exc}",
+            }
+    return {
+        "projects": [],
+        "total_unread": 0,
+        "total_projects": 0,
+        "total_agents": 0,
+        "agent_mail": mail_status,
+    }
 
 
 @app.get("/api/projects/{slug}")
 def api_project(slug: str):
     """项目详情:agent 列表 + 消息流。"""
+    mail_status = _agent_mail_status()
+    if not mail_status["available"]:
+        raise HTTPException(503, mail_status["reason"])
     proj = db.project_by_slug(slug)
     if not proj:
         raise HTTPException(404, f"项目不存在: {slug}")
@@ -273,12 +328,150 @@ def api_project(slug: str):
         "project": proj,
         "agents": db.list_agents(proj["id"]),
         "messages": db.recent_messages(proj["id"]),
+        "agent_mail": mail_status,
     }
+
+
+def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """聚合所有需要用户介入的对象，不让可选能力拖垮核心看板。"""
+    items: list[dict[str, Any]] = []
+    for pane in snapshot.get("panes", []):
+        if pane.get("agent") and pane.get("agent_status") == "blocked":
+            session = str(pane.get("session") or "")
+            pane_id = str(pane.get("pane_id") or "")
+            items.append({
+                "id": f"pane:{session}:{pane_id}",
+                "kind": "pane_blocked",
+                "priority": 100,
+                "title": f"{pane['agent']} 等待你",
+                "detail": " · ".join(
+                    part for part in (session, pane.get("cwd_name") or "") if part
+                ),
+                "created_ts": None,
+                "target": {
+                    "view": "herdrflow",
+                    "session": session,
+                    "pane_id": pane_id,
+                },
+                "url": (
+                    f"/#/attention/pane/{quote(session, safe='')}/"
+                    f"{quote(pane_id, safe='')}"
+                ),
+            })
+
+    try:
+        task_rows = tasks.list_tasks(100)
+    except Exception:
+        logger.exception("attention task query failed")
+        task_rows = []
+    for task in task_rows:
+        status = task.get("status")
+        if not task.get("run_workdir") or status not in ("done", "failed"):
+            continue
+        task_id = str(task.get("id") or "")
+        kind = "task_failed" if status == "failed" else "task_review"
+        source_name = Path(str(task.get("workdir") or "")).name or "项目"
+        items.append({
+            "id": f"task:{task_id}:{status}",
+            "kind": kind,
+            "priority": 90 if status == "failed" else 70,
+            "title": "后台任务失败" if status == "failed" else "代码改动待审",
+            "detail": f"{source_name} · {'执行失败' if status == 'failed' else '隔离改动等待审查'}",
+            "created_ts": task.get("created_ts"),
+            "target": {"view": "attention", "task_id": task_id},
+            "url": f"/#/attention/task/{quote(task_id, safe='')}",
+        })
+
+    mail_status = _agent_mail_status()
+    mail_rows: list[dict[str, Any]] = []
+    if mail_status["available"]:
+        try:
+            mail_rows = db.unread_messages(100)
+        except Exception as exc:
+            logger.exception("attention Agent Mail query failed")
+            mail_status = {
+                "available": False,
+                "reason": f"Agent Mail 查询失败: {exc}",
+                "read_available": False,
+                "write_available": False,
+                "write_reason": f"Agent Mail 查询失败: {exc}",
+            }
+    for message in mail_rows:
+        message_id = str(message.get("id") or "")
+        slug = str(message.get("project_slug") or "")
+        sender = str(message.get("sender_name") or "未知发件人")
+        items.append({
+            "id": f"mail:{message_id}",
+            "kind": "mail_unread",
+            "priority": 80,
+            "title": str(message.get("subject") or "未读 Agent Mail"),
+            "detail": f"{sender} · {slug}",
+            "created_ts": message.get("created_ts"),
+            "target": {
+                "view": "msgs",
+                "project_slug": slug,
+                "message_id": message_id,
+            },
+            "url": (
+                f"/#/attention/mail/{quote(slug, safe='')}/"
+                f"{quote(message_id, safe='')}"
+            ),
+        })
+    items.sort(
+        key=lambda item: (
+            item["priority"],
+            float(item["created_ts"])
+            if isinstance(item.get("created_ts"), (int, float))
+            else 0,
+        ),
+        reverse=True,
+    )
+    return {
+        "items": items,
+        "count": len(items),
+        "mail_unread": len(mail_rows),
+        "capabilities": {"agent_mail": mail_status},
+    }
+
+
+def _attention_changes(
+    previous: set[str] | None, items: list[dict[str, Any]]
+) -> tuple[set[str], list[dict[str, Any]]]:
+    current = {str(item["id"]) for item in items}
+    if previous is None:
+        return current, []
+    return current, [item for item in items if item["id"] not in previous]
+
+
+@app.get("/api/attention")
+def api_attention():
+    return _build_attention(herdr_client.snapshot())
+
+
+@app.get("/api/push/config")
+def api_push_config():
+    return web_push.public_config()
+
+
+@app.post("/api/push/subscriptions")
+def api_push_subscribe(req: PushSubscriptionReq):
+    try:
+        return web_push.save_subscription(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.delete("/api/push/subscriptions")
+def api_push_unsubscribe(endpoint: str):
+    return {"ok": web_push.delete_subscription(endpoint)}
 
 
 @app.post("/api/send")
 def api_send(req: SendMessageReq):
     """以某 agent 身份发消息(走 hub MCP 保证一致性)。"""
+    mail_status = _agent_mail_status()
+    if not mail_status["write_available"]:
+        raise HTTPException(503, mail_status["write_reason"])
     proj = db.project_by_id(req.project_id)
     if not proj:
         raise HTTPException(404, "项目不存在")
@@ -305,6 +498,9 @@ def api_send(req: SendMessageReq):
 @app.post("/api/ack")
 def api_ack(req: AckReq):
     """标记消息已读。"""
+    mail_status = _agent_mail_status()
+    if not mail_status["write_available"]:
+        raise HTTPException(503, mail_status["write_reason"])
     proj = db.project_by_id(req.project_id)
     if not proj:
         raise HTTPException(404, "项目不存在")
@@ -508,9 +704,15 @@ def api_herdr_pane_identity(session: str, pane_id: str):
     agent_type = pane.get("agent") or ""
     if not cwd or not agent_type:
         return {"found": False, "reason": "pane 无 cwd 或 agent 类型"}
-    ident = db.identity_by_cwd(cwd, agent_type)
+    try:
+        ident = db.identity_by_cwd(cwd, agent_type)
+    except Exception:
+        ident = None
     if not ident:
-        return {"found": False, "reason": f"未注册身份(cwd={cwd}, program={agent_type})"}
+        return {
+            "found": False,
+            "reason": "Agent Mail 不可用或该 pane 尚未注册身份",
+        }
     return {
         "found": True,
         "name": ident["name"],
@@ -611,18 +813,33 @@ def api_setup_workspace(req: SetupWorkspaceReq):
         results.append({"agent": agent_type, "start": r})
         time.sleep(2)  # 等 agent 启动
     # 2. 注册身份(am-init-project)
-    init_script = str(Path.home() / "agent-mail-tools" / "am-init-project")
     reg_ok = False
-    try:
-        r = subprocess.run([init_script], cwd=req.workdir, capture_output=True, text=True, timeout=60)
-        reg_ok = r.returncode == 0
-    except Exception as e:
-        pass
-    # 3. 通知各 agent pane 它们的身份
-    time.sleep(2)
-    snap = herdr_client.snapshot()
-    sess = next((s for s in snap.get("sessions", []) if s.get("session") == req.session), None)
+    mail_status: dict[str, Any]
+    if not AGENT_MAIL_INIT_SCRIPT.is_file():
+        mail_status = {"available": False, "reason": "Agent Mail 未安装，已跳过身份注册"}
+    else:
+        try:
+            r = subprocess.run(
+                [str(AGENT_MAIL_INIT_SCRIPT)], cwd=req.workdir,
+                capture_output=True, text=True, timeout=60,
+            )
+            reg_ok = r.returncode == 0
+            mail_status = {
+                "available": reg_ok,
+                "reason": None if reg_ok else (r.stderr[-300:] or "am-init-project 失败"),
+            }
+        except Exception as exc:
+            mail_status = {"available": False, "reason": str(exc)}
+    # 3. Agent Mail 注册成功后才查询身份并通知 pane。
     notified = []
+    sess = None
+    if reg_ok:
+        time.sleep(2)
+        snap = herdr_client.snapshot()
+        sess = next(
+            (s for s in snap.get("sessions", []) if s.get("session") == req.session),
+            None,
+        )
     if sess:
         for p in sess.get("panes", []):
             atype = p.get("agent")
@@ -638,11 +855,16 @@ def api_setup_workspace(req: SetupWorkspaceReq):
             ).format(name=my_name, proj=req.workdir, ag=atype)
             herdr_client.pane_send(req.session, pid, hint, "prompt")
             notified.append(f"{atype}→{my_name}")
+    start_ok = all(
+        result["start"].get("available", True) is not False
+        and "error" not in result["start"]
+        for result in results
+    )
     return {
-        "ok": reg_ok, "session": req.session, "workdir": req.workdir,
+        "ok": start_ok, "session": req.session, "workdir": req.workdir,
         "session_created": session_created,
         "started": [r["agent"] for r in results], "registered": reg_ok,
-        "notified": notified,
+        "notified": notified, "agent_mail": mail_status,
     }
 
 
@@ -663,6 +885,9 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
         raise HTTPException(400, "该 pane 不是 agent(herdr 未检测到),请等 agent 启动后再试")
     if not cwd:
         raise HTTPException(400, "该 pane 无 cwd")
+    mail_status = db.status()
+    if not mail_status["available"]:
+        return {"ok": False, "unavailable": True, "error": mail_status["reason"]}
     my_name = _identity_name(cwd, agent_type)
     hint = (
         "[agent-mail 身份告知] 花名={name},项目={proj}。"
@@ -695,9 +920,13 @@ def api_herdr_session_init_mail(name: str):
             break
     if not cwd:
         raise HTTPException(400, "该 session 无 cwd,无法注册")
-    init_script = str(Path.home() / "agent-mail-tools" / "am-init-project")
+    if not AGENT_MAIL_INIT_SCRIPT.is_file():
+        return {"ok": False, "unavailable": True, "error": "Agent Mail 未安装"}
     try:
-        r = subprocess.run([init_script], cwd=cwd, capture_output=True, text=True, timeout=60)
+        r = subprocess.run(
+            [str(AGENT_MAIL_INIT_SCRIPT)], cwd=cwd,
+            capture_output=True, text=True, timeout=60,
+        )
         if r.returncode != 0:
             return {"ok": False, "project": cwd, "error": r.stderr[-300:] or "am-init-project 失败"}
         # 注册成功后,通知各 agent pane 它们的身份
@@ -825,22 +1054,34 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
 
 # ── SSE 实时推送(看板状态变化) ────────────────────────────────
 
-_live_state: dict[str, Any] = {"revision": 0, "unread": None, "snapshot": None}
+_live_state: dict[str, Any] = {
+    "revision": 0,
+    "unread": None,
+    "snapshot": None,
+    "attention": None,
+}
 _poller_task: asyncio.Task | None = None
 
 
 async def _poll_live_state() -> None:
     global _live_state
     last_sig = ""
+    attention_ids: set[str] | None = None
     while True:
         try:
-            unread, snap = await asyncio.gather(
-                asyncio.to_thread(db.global_unread_count),
-                asyncio.to_thread(herdr_client.snapshot),
+            snap = await asyncio.to_thread(herdr_client.snapshot)
+            attention = await asyncio.to_thread(_build_attention, snap)
+            attention_ids, new_items = _attention_changes(
+                attention_ids, attention["items"]
             )
+            if new_items:
+                await asyncio.to_thread(web_push.notify, new_items)
+            unread = attention["mail_unread"]
             sig = json.dumps(
                 {
                     "unread": unread,
+                    "attention": attention["items"],
+                    "capabilities": attention["capabilities"],
                     "panes": [
                         (p.get("session"), p.get("pane_id"), p.get("agent"),
                          p.get("agent_status"), p.get("revision"))
@@ -854,6 +1095,7 @@ async def _poll_live_state() -> None:
                     "revision": _live_state["revision"] + 1,
                     "unread": unread,
                     "snapshot": snap,
+                    "attention": attention,
                 }
                 last_sig = sig
         except asyncio.CancelledError:
@@ -879,6 +1121,11 @@ async def api_events(request: Request):
                         "event": "board",
                         "data": json.dumps(state["snapshot"], ensure_ascii=False),
                     }
+                if state["attention"] is not None:
+                    yield {
+                        "event": "attention",
+                        "data": json.dumps(state["attention"], ensure_ascii=False),
+                    }
                 last_revision = state["revision"]
             await asyncio.sleep(1)
 
@@ -890,6 +1137,11 @@ async def api_events(request: Request):
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(STATIC_DIR / "sw.js", media_type="application/javascript")
+
+
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")
@@ -897,12 +1149,15 @@ def index():
 
 @app.get("/health")
 def health():
+    mail_status = _agent_mail_status()
+    push_status = web_push.public_config()
     return {
         "status": "ok",
         "ts": time.time(),
-        "db": db.DB_PATH.is_file(),
+        "db": mail_status["available"],
         "herdr": herdr_client.is_available(),
-        "hub": True,
+        "hub": mail_status["write_available"],
+        "push": push_status["available"],
     }
 
 

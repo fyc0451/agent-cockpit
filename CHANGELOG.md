@@ -12,6 +12,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Mobile Herdr flow view with scroll-preserving refresh and pane input.
 - Shared-token authentication for remote access and a loopback-only safe default.
 - Install, upgrade, uninstall, and environment-diagnostic scripts.
+- Unified Attention Inbox for blocked panes, failed tasks, pending diffs, and unread messages.
+- Opt-in Web Push notifications with pane/task/message deep links.
+
+### Changed
+
+- Agent Mail is optional; missing databases hide messaging, while Hub outages leave messages read-only.
 
 ### Security
 

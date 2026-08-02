@@ -71,3 +71,19 @@ def test_doctor_rejects_export_syntax_not_supported_by_systemd(tmp_path):
     )
 
     assert ".env 不能使用 export" in result.stdout
+
+
+def test_agent_mail_is_documented_and_diagnosed_as_optional():
+    readme = (ROOT / "README.md").read_text()
+    doctor = (ROOT / "doctor.sh").read_text()
+
+    assert "Agent Mail" in readme and "optional" in readme.lower()
+    assert 'warn "缺少 ~/mcp_agent_mail/storage.sqlite3' in doctor
+    assert 'fail "缺少 ~/mcp_agent_mail/storage.sqlite3' not in doctor
+
+
+def test_web_push_runtime_dependency_and_worker_are_packaged():
+    requirements = (ROOT / "requirements.txt").read_text()
+
+    assert "pywebpush==" in requirements
+    assert (ROOT / "static" / "sw.js").is_file()

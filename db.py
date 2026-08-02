@@ -41,6 +41,17 @@ def _one(sql: str, params: tuple = ()) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def status() -> dict[str, Any]:
+    """Agent Mail 是否可用；调用方据此只降级消息能力。"""
+    if not DB_PATH.is_file():
+        return {"available": False, "reason": f"Agent Mail 数据库不存在: {DB_PATH}"}
+    try:
+        _one("SELECT 1 AS ok")
+    except Exception as exc:
+        return {"available": False, "reason": f"Agent Mail 数据库不可读: {exc}"}
+    return {"available": True, "reason": None}
+
+
 # ── 全局聚合 ────────────────────────────────────────────────────
 
 def list_projects() -> list[dict[str, Any]]:
@@ -87,6 +98,23 @@ def global_unread_count() -> int:
         "WHERE mr.read_ts IS NULL AND a.retired_at IS NULL"
     )
     return r["n"] if r else 0
+
+
+def unread_messages(limit: int = 50) -> list[dict[str, Any]]:
+    """跨项目聚合未读消息，供 Attention Inbox 使用。"""
+    return _rows(
+        "SELECT m.id, p.slug AS project_slug, m.subject, m.importance, "
+        "m.created_ts, sa.name AS sender_name, "
+        "GROUP_CONCAT(DISTINCT ra.name) AS recipients "
+        "FROM messages m "
+        "JOIN projects p ON p.id = m.project_id "
+        "LEFT JOIN agents sa ON sa.id = m.sender_id "
+        "JOIN message_recipients mr ON mr.message_id = m.id AND mr.read_ts IS NULL "
+        "JOIN agents ra ON ra.id = mr.agent_id AND ra.retired_at IS NULL "
+        "WHERE p.archived_at IS NULL "
+        "GROUP BY m.id, p.id ORDER BY m.created_ts DESC LIMIT ?",
+        (limit,),
+    )
 
 
 def overview() -> dict[str, Any]:

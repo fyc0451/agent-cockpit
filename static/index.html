@@ -133,6 +133,21 @@ header .spacer{flex:1}
 .field{margin-bottom:8px}
 .field label{display:block;font-size:11px;color:var(--fg2);margin-bottom:3px}
 
+/* Attention Inbox */
+.attention-view{overflow:hidden}
+.attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
+.attention-toolbar .spacer{flex:1}
+.attention-list{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
+.attention-card{display:flex;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--bd);border-left:3px solid var(--need);border-radius:9px;padding:10px;cursor:pointer}
+.attention-card:hover{border-color:var(--accent)}
+.attention-icon{font-size:20px;width:28px;text-align:center;flex-shrink:0}
+.attention-copy{flex:1;min-width:0}
+.attention-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attention-detail{font-size:11px;color:var(--fg3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attention-action{font-size:11px;color:var(--accent);white-space:nowrap}
+.capability-note{padding:8px 10px;border:1px solid var(--bd);background:var(--bg3);border-radius:8px;color:var(--fg2);font-size:12px}
+.attention-output{max-height:55vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:var(--term-bg);color:var(--term-fg);border-radius:7px;padding:10px;font:12px/1.5 var(--mono)}
+
 /* 终端抽屉 */
 .drawer-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;z-index:50}
 .drawer-bg.show{display:flex;align-items:flex-end;justify-content:center;padding:calc(10px + var(--safe-top)) calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left))}
@@ -186,7 +201,7 @@ header .spacer{flex:1}
   header{padding:6px 8px;gap:4px;flex-wrap:wrap}
   header .logo{font-size:13px}
   header .spacer{display:none}
-  header nav{order:3;width:100%;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px}
+  header nav{order:3;width:100%;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}
   header nav button{padding:5px 2px;font-size:11px;min-width:0}
   #liveText{display:none}
   .stat-pill{padding:3px 6px}
@@ -233,6 +248,7 @@ header .spacer{flex:1}
     <div class="logo">⚙️ Agent Fleet</div>
     <nav id="nav">
       <button data-view="board" class="active">看板</button>
+      <button data-view="attention">待办</button>
       <button data-view="term">终端</button>
       <button data-view="herdrflow">流</button>
       <button data-view="sessions">会话</button>
@@ -241,7 +257,7 @@ header .spacer{flex:1}
     </nav>
     <div class="spacer"></div>
     <div class="stat-pill"><span class="dot" id="liveDot"></span><span id="liveText">--</span></div>
-    <div class="stat-pill" id="unreadPill">📬 <span id="unreadN">0</span></div>
+    <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="需要你处理的事项">🔔 <span id="attentionN">0</span></div>
     <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
     <button class="icon" onclick="refreshBoard()" title="刷新">↻</button>
   </header>
@@ -256,6 +272,19 @@ header .spacer{flex:1}
         <div class="col col-idle"><div class="col-head">○ 空闲 <span class="cc" id="cnt-idle">0</span></div><div class="col-body" id="col-idle"></div></div>
       </div>
     </div>
+  </section>
+
+  <!-- 统一 Attention Inbox -->
+  <section id="view-attention" class="view attention-view">
+    <div class="attention-toolbar">
+      <b>需要你处理</b>
+      <span class="muted" id="attentionInfo" style="font-size:11px"></span>
+      <span class="spacer"></span>
+      <span class="muted" id="pushStatus" style="font-size:11px"></span>
+      <button class="sm" id="pushBtn" onclick="setupPush()">开启浏览器通知</button>
+      <button class="icon" onclick="loadAttention()" title="刷新">↻</button>
+    </div>
+    <div class="attention-list" id="attentionList"><div class="empty">加载中…</div></div>
   </section>
 
   <!-- 启动栏(看板下方) -->
@@ -339,7 +368,7 @@ header .spacer{flex:1}
       <h3 style="font-size:14px">herdr sessions & agents</h3>
       <button class="primary sm" onclick="showSetupModal()">+ 一键工作区</button>
       <button class="sm" onclick="loadSessionsView()">↻ 刷新</button>
-      <span class="muted" style="font-size:11px;margin-left:auto">一键工作区:split pane + 启动 agent + 注册身份 + 通知,一次全完</span>
+      <span class="muted" style="font-size:11px;margin-left:auto">一键工作区：split pane + 启动 agent；Agent Mail 可选</span>
     </div>
     <div id="sessionsList" style="flex:1;overflow:auto;padding:10px"></div>
   </section>
@@ -387,6 +416,22 @@ header .spacer{flex:1}
   </div>
 </div>
 
+<!-- Attention 任务详情 -->
+<div class="modal-bg" id="attentionModal" onclick="if(event.target===this)closeAttentionModal()">
+  <div class="modal" style="max-width:760px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <h3 id="attentionModalTitle" style="margin:0;flex:1">任务详情</h3>
+      <button class="icon" onclick="closeAttentionModal()">✕</button>
+    </div>
+    <div class="muted" id="attentionModalMeta" style="font-size:11px;margin-bottom:8px"></div>
+    <pre class="attention-output" id="attentionModalBody">加载中…</pre>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
+      <button class="sm danger" id="attentionDiscardBtn" onclick="attentionTaskAction('stash')">丢弃隔离改动</button>
+      <button class="sm primary" id="attentionApplyBtn" onclick="attentionTaskAction('apply')">应用到源仓库</button>
+    </div>
+  </div>
+</div>
+
 <!-- 协作者选择(终端 tab 的 @协作 按钮) -->
 <div class="modal-bg" id="collabModal" onclick="if(event.target===this)closeCollab()">
   <div class="modal" style="max-width:420px">
@@ -406,7 +451,7 @@ header .spacer{flex:1}
       <h3 style="font-size:15px">一键工作区</h3>
       <button class="icon" onclick="closeSetup()">✕</button>
     </div>
-    <div class="muted" style="font-size:12px;margin-bottom:10px">全自动:建 session(if absent)→ split pane → 启动 agent → 注册身份 → 通知。一步到位</div>
+    <div class="muted" style="font-size:12px;margin-bottom:10px">全自动：建 session → split pane → 启动 agent；已安装 Agent Mail 时再注册身份并通知。</div>
     <div class="field"><label>session 名(hteam 建好的)</label><input id="suSession" placeholder="如 tts 或 my-project"></div>
     <div class="field"><label>工作目录(项目绝对路径)</label><input id="suWorkdir" placeholder="如 /home/you/my-project"></div>
     <div class="field"><label>要开的 agent(逗号分隔:codex/kimi/claude/qoder/grok/opencode)</label><input id="suAgents" value="codex,kimi" placeholder="codex,kimi,claude,qoder,grok"></div>
@@ -424,8 +469,9 @@ header .spacer{flex:1}
 
 <script>
 // ============ 状态 ============
-let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null, FILE_ENTRIES=[];
+let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null, FILE_ENTRIES=[], FILE_ROOTS=null;
 let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
+let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=null;
 let SERVICE_CLIPBOARD='';
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
@@ -493,6 +539,7 @@ function showView(v){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
   document.getElementById('launchBar').classList.toggle('hidden',v!=='board');
   if(v==='board')refreshBoard();
+  if(v==='attention')loadAttention();
   if(v==='msgs')loadProjList();
   if(v==='files')loadFileTree();
   if(v==='term')termEnsure();
@@ -502,6 +549,126 @@ function showView(v){
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>showView(b.dataset.view));
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
 const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',gemini:'💎',grok:'✖️'};
+
+// ============ Attention Inbox ============
+const ATTENTION_ICON={pane_blocked:'🙋',task_failed:'❌',task_review:'🧾',mail_unread:'📬'};
+const ATTENTION_ACTION={pane_blocked:'去回复',task_failed:'看错误',task_review:'审 diff',mail_unread:'读消息'};
+async function loadAttention(payload){
+  try{
+    const d=payload||await api('/api/attention');
+    ATTENTION=d;CAPABILITIES=d.capabilities||{};
+    document.getElementById('attentionN').textContent=d.count||0;
+    document.getElementById('attentionInfo').textContent=(d.count||0)+' 项';
+    renderAttention(d);
+  }catch(e){document.getElementById('attentionList').textContent='待办加载失败: '+e}
+}
+function renderAttention(d){
+  const box=document.getElementById('attentionList');
+  const mail=d.capabilities&&d.capabilities.agent_mail;
+  const note=mail&&mail.available===false?`<div class="capability-note">Agent Mail 未启用：${esc(mail.reason||'消息能力已自动隐藏')}。Herdr、终端、文件和任务仍可正常使用。</div>`:'';
+  const items=d.items||[];
+  box.innerHTML=note+(items.length?items.map((item,i)=>`
+    <div class="attention-card" data-action="openAttention" data-index="${i}">
+      <div class="attention-icon">${ATTENTION_ICON[item.kind]||'🔔'}</div>
+      <div class="attention-copy"><div class="attention-title">${esc(item.title)}</div><div class="attention-detail">${esc(item.detail||'')}</div></div>
+      <div class="attention-action">${ATTENTION_ACTION[item.kind]||'查看'} ›</div>
+    </div>`).join(''):'<div class="empty">当前没有需要你处理的事项</div>');
+}
+function replaceAttentionHash(item){
+  if(item&&typeof item.url==='string'&&item.url.startsWith('/#/attention/'))history.replaceState(null,'',item.url);
+}
+async function openAttention(i,updateHash=true){
+  const item=ATTENTION&&(ATTENTION.items||[])[i];if(!item)return;
+  if(updateHash)replaceAttentionHash(item);
+  const t=item.target||{};
+  if(item.kind==='pane_blocked')enterHerdrFlow(t.session,t.pane_id);
+  else if(item.kind==='task_failed'||item.kind==='task_review')openTaskAttention(t.task_id);
+  else if(item.kind==='mail_unread')openMailAttention(t.project_slug,t.message_id);
+}
+async function openTaskAttention(taskId){
+  if(!taskId)return;
+  showView('attention');ATTENTION_TASK_ID=taskId;
+  const modal=document.getElementById('attentionModal');modal.classList.add('show');
+  document.getElementById('attentionModalTitle').textContent='任务 '+taskId;
+  document.getElementById('attentionModalMeta').textContent='加载中…';
+  document.getElementById('attentionModalBody').textContent='加载中…';
+  document.getElementById('attentionApplyBtn').classList.add('hidden');
+  document.getElementById('attentionDiscardBtn').classList.add('hidden');
+  try{
+    const task=await api('/api/tasks/'+encodeURIComponent(taskId));
+    document.getElementById('attentionModalMeta').textContent=(task.workdir||'')+' · '+task.status;
+    let content=(task.output||[]).join('\n')||task.output_tail||'(没有输出)';
+    if(task.status==='done'&&task.run_workdir){
+      const diff=await api('/api/tasks/'+encodeURIComponent(taskId)+'/diff');
+      content=diff.diff||'(没有代码改动，应用后会清理隔离 worktree)';
+      document.getElementById('attentionApplyBtn').classList.remove('hidden');
+    }
+    if(task.run_workdir)document.getElementById('attentionDiscardBtn').classList.remove('hidden');
+    document.getElementById('attentionModalBody').textContent=content;
+  }catch(e){document.getElementById('attentionModalBody').textContent='加载失败: '+e}
+}
+function closeAttentionModal(){document.getElementById('attentionModal').classList.remove('show');ATTENTION_TASK_ID=null}
+async function attentionTaskAction(action){
+  if(!ATTENTION_TASK_ID)return;
+  const label=action==='apply'?'应用':'丢弃';
+  if(!window.confirm('确认'+label+'这个任务的隔离改动？'))return;
+  try{
+    const r=await api('/api/tasks/'+encodeURIComponent(ATTENTION_TASK_ID)+'/apply?action='+encodeURIComponent(action),{method:'POST'});
+    toast(label+'完成: '+(r.result||r.action||'ok'));closeAttentionModal();history.replaceState(null,'','/#/attention');loadAttention();
+  }catch(e){toast(label+'失败: '+e,4500)}
+}
+async function openMailAttention(slug,messageId){
+  showView('msgs');await loadProjList(slug,messageId);
+}
+async function handleAttentionHash(){
+  if(!location.hash.startsWith('#/attention/'))return;
+  let parts;try{parts=location.hash.split('/').slice(2).map(decodeURIComponent)}catch(e){return}
+  const [kind,a,b]=parts;
+  if(kind==='pane'&&validSessionName(a)&&b)enterHerdrFlow(a,b);
+  else if(kind==='task'&&a)openTaskAttention(a);
+  else if(kind==='mail'&&a&&b)openMailAttention(a,b);
+}
+
+function vapidKeyBytes(value){
+  const padding='='.repeat((4-value.length%4)%4);
+  const raw=atob((value+padding).replace(/-/g,'+').replace(/_/g,'/'));
+  return Uint8Array.from(raw,c=>c.charCodeAt(0));
+}
+async function refreshPushStatus(){
+  const status=document.getElementById('pushStatus'),btn=document.getElementById('pushBtn');
+  if(!window.isSecureContext||!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)){
+    status.textContent='通知需要 HTTPS';btn.disabled=true;return;
+  }
+  try{
+    const cfg=await api('/api/push/config');
+    if(!cfg.available){status.textContent=cfg.reason||'通知不可用';btn.disabled=true;return}
+    const reg=await navigator.serviceWorker.register('/sw.js');
+    const sub=await reg.pushManager.getSubscription();
+    PUSH_SUBSCRIPTION=sub;
+    status.textContent=sub?'通知已开启':'通知未开启';btn.textContent=sub?'关闭浏览器通知':'开启浏览器通知';btn.disabled=false;
+  }catch(e){status.textContent='通知状态获取失败'}
+}
+async function setupPush(){
+  if(PUSH_SUBSCRIPTION){
+    try{
+      await api('/api/push/subscriptions?endpoint='+encodeURIComponent(PUSH_SUBSCRIPTION.endpoint),{method:'DELETE'});
+      await PUSH_SUBSCRIPTION.unsubscribe();PUSH_SUBSCRIPTION=null;toast('浏览器通知已关闭');refreshPushStatus();
+    }catch(e){toast('关闭通知失败: '+e)}
+    return;
+  }
+  if(Notification.permission!=='granted'){
+    const permission=await Notification.requestPermission();
+    if(permission!=='granted'){toast('你没有允许浏览器通知');return}
+  }
+  try{
+    const cfg=await api('/api/push/config');if(!cfg.available)throw cfg.reason||'服务端通知不可用';
+    const reg=await navigator.serviceWorker.register('/sw.js');
+    let sub=await reg.pushManager.getSubscription();
+    if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:vapidKeyBytes(cfg.public_key)});
+    await api('/api/push/subscriptions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sub.toJSON())});
+    PUSH_SUBSCRIPTION=sub;toast('浏览器通知已开启');refreshPushStatus();
+  }catch(e){toast('开启通知失败: '+e,4500)}
+}
 
 // ============ 看板 ============
 async function refreshBoard(){
@@ -786,38 +953,54 @@ async function startAgent(){
 }
 
 // ============ 消息 view ============
-async function loadProjList(){
+async function loadProjList(preferredSlug,focusMessageId){
   try{
     const d=await api('/api/overview');
+    CAPABILITIES.agent_mail=d.agent_mail||CAPABILITIES.agent_mail;
     const sel=document.getElementById('msgProj');
+    if(d.agent_mail&&d.agent_mail.available===false){
+      sel.innerHTML='';sel.disabled=true;
+      document.getElementById('projAgentList').innerHTML='<div class="muted" style="padding:8px">Agent Mail 未启用</div>';
+      const list=document.getElementById('msgList');list.innerHTML='<div class="empty"><b>消息能力已自动降级</b><div id="mailUnavailableReason" class="muted" style="margin-top:6px"></div></div>';
+      document.getElementById('mailUnavailableReason').textContent=d.agent_mail.reason||'安装 Agent Mail 后自动恢复';
+      return;
+    }
+    sel.disabled=false;
     if(!sel.options.length)d.projects.forEach(p=>sel.add(new Option(p.slug,p.slug)));
-    loadProjectMsgs();
+    if(preferredSlug&&[...sel.options].some(o=>o.value===preferredSlug))sel.value=preferredSlug;
+    await loadProjectMsgs(focusMessageId);
   }catch(e){toast('加载失败: '+e)}
 }
-async function loadProjectMsgs(){
+async function loadProjectMsgs(focusMessageId){
   const slug=document.getElementById('msgProj').value;if(!slug)return;
   try{
     const d=await api('/api/projects/'+encodeURIComponent(slug));
     CURRENT_PROJ=d.project;
+    CAPABILITIES.agent_mail=d.agent_mail||CAPABILITIES.agent_mail;
+    const writeEnabled=!d.agent_mail||d.agent_mail.write_available!==false;
     document.getElementById('projAgentList').innerHTML=d.agents.map(a=>`
       <div class="agent-item" data-action="pickRecipient" data-name="${esc(a.name)}">
         <span class="agent-icon ${esc(a.program||'none')}" style="width:22px;height:22px;font-size:11px">${AGENT_EMOJI[(a.program||'').replace('-cli','').replace('-work','').replace('-cn','')]||'⬜'}</span>
         <span class="an">${esc(a.name)}${a.unread?` <span class="card-badge">${esc(a.unread)}</span>`:''}</span>
       </div>`).join('')||'<div class="muted">无 agent</div>';
     document.getElementById('msgList').innerHTML=d.messages.map(m=>`
-      <div class="msg">
+      <div class="msg" data-message-id="${esc(m.id)}">
         <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${esc(m.importance||'normal')}</span></div>
         <span class="muted">#${esc(m.id)} ${esc(fmtTime(m.created_ts))}</span></div>
         <div class="muted" style="font-size:11px;margin-bottom:5px"><b>${esc(m.sender_name||'?')}</b> → ${(m.recipients||[]).map(r=>esc(r.name)).join(', ')}</div>
         ${m.body_md?`<div class="mb">${esc(m.body_md)}</div>`:''}
-        ${(m.recipients||[]).some(r=>!r.read_ts)?`<button class="icon" data-action="ack" data-pid="${esc(d.project.id)}" data-mid="${esc(m.id)}" data-name="${esc((m.recipients.find(r=>!r.read_ts)||{}).name||'')}" style="font-size:11px">✓已读</button>`:''}
+        ${writeEnabled&&(m.recipients||[]).some(r=>!r.read_ts)?`<button class="icon" data-action="ack" data-pid="${esc(d.project.id)}" data-mid="${esc(m.id)}" data-name="${esc((m.recipients.find(r=>!r.read_ts)||{}).name||'')}" style="font-size:11px">✓已读</button>`:''}
       </div>`).join('')+`
-      <div class="compose"><div class="muted" style="font-size:11px;margin-bottom:6px">✉️ 写消息</div>
+      ${writeEnabled?`<div class="compose"><div class="muted" style="font-size:11px;margin-bottom:6px">✉️ 写消息</div>
       <div class="field"><label>发件人</label><select id="cmpFrom">${d.agents.map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}</select></div>
       <div class="field"><label>收件人(逗号分隔)</label><input id="cmpTo"></div>
       <div class="field"><label>主题</label><input id="cmpSubject"></div>
       <div class="field"><label>正文</label><textarea id="cmpBody" rows="3"></textarea></div>
-      <button class="primary" onclick="sendMsg()">发送</button></div>`;
+      <button class="primary" onclick="sendMsg()">发送</button></div>`:`<div class="capability-note">Agent Mail Hub 当前不可用，消息暂时只读：${esc(d.agent_mail?.write_reason||'连接失败')}</div>`}`;
+    if(focusMessageId){
+      const target=[...document.querySelectorAll('#msgList [data-message-id]')].find(el=>el.dataset.messageId===String(focusMessageId));
+      if(target)target.scrollIntoView({block:'center'});
+    }
   }catch(e){toast('加载失败: '+e)}
 }
 async function sendMsg(){
@@ -1224,6 +1407,7 @@ async function loadSessionsView(){
     for(const p of (snap.panes||[])){if(p.agent){
       (agentsBySess[p.session]=agentsBySess[p.session]||[]).push(p);
     }}
+    const mailEnabled=CAPABILITIES.agent_mail?.available!==false&&CAPABILITIES.agent_mail?.write_available!==false;
     el.innerHTML=(sess.sessions||[]).map(s=>{
       const running=s.status==='running';
       const agents=agentsBySess[s.name]||[];
@@ -1236,7 +1420,7 @@ async function loadSessionsView(){
           </div>
           <button class="sm" data-action="restartPane" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" data-resume="0" title="干净重启(丢上下文)">⟳ 重启</button>
           <button class="sm" data-action="restartPane" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" data-resume="1" title="恢复历史会话重启">↩ resume</button>
-          <button class="sm" data-action="tellIdentity" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" title="给这个 pane 发身份告知(手动开的 pane 用)">📧 身份</button>
+          ${mailEnabled?`<button class="sm" data-action="tellIdentity" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" title="给这个 pane 发身份告知(手动开的 pane 用)">📧 身份</button>`:''}
           <button class="icon" data-action="openTerm" data-session="${esc(s.name)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" title="查看终端">🖥</button>
         </div>`).join(''):'<div class="muted" style="font-size:12px;padding:6px 0">无 agent pane</div>';
       return `<div class="card">
@@ -1245,7 +1429,7 @@ async function loadSessionsView(){
           <b style="font-size:14px">${esc(s.name)}</b>
           <span class="tag ${running?'run':'idle'}">${esc(s.status)}</span>
           <span class="muted" style="font-size:11px;flex:1">${esc(s.directory)}</span>
-          ${running?`<button class="sm" data-action="initSessionMail" data-session="${esc(s.name)}" title="给该项目注册全套 agent-mail 身份(一键开通通信)">📧 初始化通信</button><button class="sm danger" data-action="stopSession" data-session="${esc(s.name)}">■ 停止</button>`:`<button class="sm" data-action="deleteSession" data-session="${esc(s.name)}" title="删除已停止的 session">🗑 删除</button>`}
+          ${running?`${mailEnabled?`<button class="sm" data-action="initSessionMail" data-session="${esc(s.name)}" title="给该项目注册全套 agent-mail 身份(一键开通通信)">📧 初始化通信</button>`:''}<button class="sm danger" data-action="stopSession" data-session="${esc(s.name)}">■ 停止</button>`:`<button class="sm" data-action="deleteSession" data-session="${esc(s.name)}" title="删除已停止的 session">🗑 删除</button>`}
         </div>
         ${agentHtml}
       </div>`;
@@ -1295,11 +1479,14 @@ async function doSetupWorkspace(){
   const layout=document.getElementById('suLayout').value;
   if(!session||!workdir||!agents.length){toast('填完整');return}
   const res=document.getElementById('suResult');
-  res.innerHTML='<span style="color:var(--fg2)">正在创建(split+启动+注册+通知,约30秒)...</span>';
+  res.innerHTML='<span style="color:var(--fg2)">正在创建 session 并启动 agent（约30秒）...</span>';
   try{
     const r=await api('/api/herdr/setup-workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agents,layout})});
     if(r.ok){
-      res.innerHTML='<span style="color:var(--done)">✅ 完成</span><br>启动: '+r.started.map(esc).join(', ')+'<br>注册: '+(r.registered?'✅':'❌')+'<br>通知: '+(r.notified||[]).map(esc).join(', ');
+      const mail=r.agent_mail||{};
+      const mailText=r.registered?'已注册':(mail.available===false?'未启用，已跳过':'未注册');
+      const notified=(r.notified||[]).map(esc).join(', ');
+      res.innerHTML='<span style="color:var(--done)">✅ 工作区就绪</span><br>启动: '+r.started.map(esc).join(', ')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'');
       toast('工作区就绪 ✓');
       setTimeout(()=>{closeSetup();loadSessionsView()},2000);
     }else{
@@ -1311,24 +1498,38 @@ async function doSetupWorkspace(){
 // ============ 文件 ============
 async function loadFileTree(){
   try{
-    if(!FILE_CWD){const r=await api('/api/files/roots');FILE_CWD=r.roots[0]}
+    if(!FILE_ROOTS){const r=await api('/api/files/roots');FILE_ROOTS=r.roots||[]}
+    if(!FILE_CWD)FILE_CWD=FILE_ROOTS[0]||'/';
     const d=await api('/api/files?path='+encodeURIComponent(FILE_CWD));
     FILE_CWD=d.path;
     FILE_ENTRIES=d.entries;
     document.getElementById('fileSearchInfo').textContent='';
     const tree=document.getElementById('fileTree');
-    // 面包屑:可点击的路径段
-    const parts=d.path.split('/').filter(Boolean);
+    // 当前命中的白名单根(最长前缀);根以上的路径段后端会拒绝,不展示
+    const root=FILE_ROOTS.filter(r=>d.path===r||d.path.startsWith(r+'/')).sort((a,b)=>b.length-a.length)[0]||d.path;
+    // 面包屑:从白名单根开始,可点击跳转
+    const rel=d.path.slice(root.length);
+    const parts=rel.split('/').filter(Boolean);
+    const rootLabel=root.split('/').filter(Boolean).pop()||'/';
     let bc='<div class="ft-bc">';
-    let acc='';
+    bc+=`<span style="cursor:pointer;color:${parts.length?'var(--fg3)':'var(--accent)'}" data-action="fileGoto" data-path="${esc(root)}">${esc(rootLabel)}</span>`;
+    let acc=root;
     parts.forEach((p,i)=>{
       acc+='/'+p;
       const isLast=i===parts.length-1;
-      bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(acc)}">${i===0?'':'/'}${esc(p)}</span>`;
+      bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(acc)}">/${esc(p)}</span>`;
     });
     bc+='</div>';
-    // 上级目录按钮(除非已是根)
-    const upBtn=d.path!=='/'?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">‥ (上级)</span></div>`:'';
+    // 多个白名单根时给一排根切换入口(后端不放行根以上的目录)
+    if(FILE_ROOTS.length>1){
+      bc+='<div class="ft-bc">'+FILE_ROOTS.map(r=>{
+        const on=r===root;
+        const label=r.split('/').filter(Boolean).pop()||r;
+        return `<span style="cursor:pointer;color:${on?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(r)}">${on?'●':'○'} ${esc(label)}</span>`;
+      }).join(' ')+'</div>';
+    }
+    // 上级目录按钮(到白名单根为止,再往上后端会拒绝)
+    const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">‥ (上级)</span></div>`:'';
     tree.innerHTML=bc+upBtn+d.entries.map((e,i)=>`
       <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
@@ -1369,7 +1570,12 @@ function fileSearchDownload(i){
 }
 function fileGoto(p){FILE_CWD=p;loadFileTree()}
 function fileCd(n){FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
-function fileUp(){FILE_CWD=FILE_CWD.split('/').slice(0,-1).join('/')||'/';loadFileTree()}
+function fileUp(){
+  // 到白名单根为止:再往上后端会拒绝(整 home 已不放行)
+  if((FILE_ROOTS||[]).includes(FILE_CWD)){toast('已是可访问的根目录,可点上方根名切换');return}
+  FILE_CWD=FILE_CWD.split('/').slice(0,-1).join('/')||'/';
+  loadFileTree();
+}
 function fileDownloadEntry(i){
   const e=FILE_ENTRIES[i];if(!e||e.type!=='file')return;
   FILE_PATH=FILE_CWD.endsWith('/')?FILE_CWD+e.name:FILE_CWD+'/'+e.name;
@@ -1405,8 +1611,8 @@ async function mmReply(){/* TODO */}
 function connectSSE(){
   if(SSE)SSE.close();
   SSE=new EventSource('/api/events',{withCredentials:true});
-  SSE.addEventListener('unread',e=>{document.getElementById('unreadN').textContent=JSON.parse(e.data).count});
   SSE.addEventListener('board',e=>{const d=JSON.parse(e.data);BOARD=d;renderBoard(d)});
+  SSE.addEventListener('attention',e=>loadAttention(JSON.parse(e.data)));
   SSE.onerror=()=>{document.getElementById('liveDot').classList.add('off');setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)};
 }
 
@@ -1455,6 +1661,8 @@ function bindDelegation(){
   on('#board',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='openFlow')enterHerdrFlow(it.dataset.session,it.dataset.pane);
     else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
+  on('#attentionList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    if(it.dataset.action==='openAttention')openAttention(parseInt(it.dataset.index))});
   on('#hfBody',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='hfSend')hfSend(it.dataset.pane);
     else if(it.dataset.action==='hfToggle')hfToggle(it.dataset.pane);
@@ -1508,9 +1716,9 @@ async function init(){
   const ok=await ensureAuth();
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
   document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='visible'){connectSSE();refreshBoard()}
+    if(document.visibilityState==='visible'){connectSSE();refreshBoard();loadAttention()}
   });
-  connectSSE();loadSessions();refreshBoard();
+  connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();
 }
 init();
 </script>

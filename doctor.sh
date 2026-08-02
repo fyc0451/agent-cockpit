@@ -43,7 +43,7 @@ fi
 command -v git >/dev/null 2>&1 && ok "git 可用" || fail "未找到 git"
 
 if [[ -x "$INSTALL_DIR/.venv/bin/python" ]] && \
-   "$INSTALL_DIR/.venv/bin/python" -c 'import fastapi, httpx, sse_starlette, uvicorn' >/dev/null 2>&1; then
+   "$INSTALL_DIR/.venv/bin/python" -c 'import fastapi, httpx, pywebpush, sse_starlette, uvicorn' >/dev/null 2>&1; then
   ok "Python 虚拟环境和运行依赖可用"
 else
   fail "虚拟环境或依赖缺失；运行 ./install.sh"
@@ -65,7 +65,7 @@ fi
 
 [[ -f "$HOME/mcp_agent_mail/storage.sqlite3" ]] \
   && ok "Agent Mail 数据库存在" \
-  || fail "缺少 ~/mcp_agent_mail/storage.sqlite3"
+  || warn "缺少 ~/mcp_agent_mail/storage.sqlite3；消息能力会自动隐藏"
 [[ -f "$HOME/.agent-mail/client.env" ]] \
   && ok "Agent Mail 客户端配置存在" \
   || warn "缺少 ~/.agent-mail/client.env；发信/确认功能可能不可用"

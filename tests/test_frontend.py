@@ -258,3 +258,17 @@ def test_file_manager_search_ui_and_actions_wired():
     assert 'data-action="fileSearchOpen"' in js
     assert 'data-action="fileSearchDownload"' in js
     assert ".file-search{" in HTML
+
+
+def test_file_manager_navigation_stops_at_allowed_roots():
+    js = _inline_js()
+    assert "FILE_ROOTS=null" in js
+    assert "FILE_ROOTS=r.roots||[]" in js
+    assert "FILE_ROOTS.filter(r=>d.path===r||d.path.startsWith(r+'/'))" in js
+    assert "if((FILE_ROOTS||[]).includes(FILE_CWD))" in js
+
+
+def test_agent_mail_hub_failure_becomes_read_only_ui():
+    js = _inline_js()
+    assert "write_available!==false" in js
+    assert "Agent Mail Hub 当前不可用，消息暂时只读" in js

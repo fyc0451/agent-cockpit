@@ -3,7 +3,7 @@
 > A web-based control cockpit for CLI coding agents running under [herdr](https://herdr.dev).
 > See every agent's status at a glance, drop into a live terminal, send prompts, upload screenshots, and orchestrate your fleet — from any browser, including your phone.
 
-Inspired by [Orca](https://onorca.dev)'s Agent Dashboard, but built as a lightweight web app that plugs into your existing Herdr sessions and an [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub.
+Inspired by [Orca](https://onorca.dev)'s Agent Dashboard, but built as a lightweight web app that plugs into your existing Herdr sessions. [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) integration is optional.
 
 ## What it does
 
@@ -11,6 +11,8 @@ Inspired by [Orca](https://onorca.dev)'s Agent Dashboard, but built as a lightwe
 - **Live terminal** — click any agent card to open its terminal output; send prompts, run shell commands, or send special keys.
 - **Screenshot → agent** — upload an image, it auto-inserts as `@/path` so codex picks it up (`Viewed Image`).
 - **Agent messaging** — built on agent-mail: send/read messages between agents, ack unread.
+- **Attention Inbox** — blocked agents, failed background tasks, pending diffs, and optional Agent Mail unread in one actionable queue.
+- **Web Push** — opt in from the Inbox and jump from a notification straight to the pane, task, or message that needs you.
 - **File browser + editor** — browse, edit, and download project files in a sandboxed whitelist.
 - **codex tasks** — kick off background `codex exec` jobs, watch output stream, review diffs, apply/stash changes.
 - **Mobile-friendly** — responsive single-file frontend, camera upload, touch-friendly.
@@ -23,20 +25,20 @@ Browser (Mac / phone)
     │  LAN / VPN (:8790)
     ▼
 Agent Cockpit (FastAPI, same host as herdr + hub)
-    ├── reads  ~/mcp_agent_mail/storage.sqlite3  (read-only, WAL)
-    ├── writes via hub MCP at 127.0.0.1:8765      (send / ack)
+    ├── optionally reads Agent Mail SQLite         (read-only, WAL)
+    ├── optionally writes via Agent Mail hub MCP   (send / ack)
     ├── reads  herdr sockets (all sessions)       (pane status / output)
     └── pushes diffs to the browser over SSE
 ```
 
-It deploys **on the same machine as herdr + the agent-mail hub**, reading everything locally for zero-latency access. Your Mac and phone are just browser clients.
+It deploys **on the same machine as herdr**, reading everything locally for zero-latency access. Your Mac and phone are just browser clients. If Agent Mail is absent, only the message views are hidden; if its Hub is temporarily down, existing messages remain readable while send/ack becomes read-only. The board, terminals, files, tasks, Inbox, and push notifications continue to work in either case.
 
 ## Prerequisites
 
 | Dependency | Why |
 | --- | --- |
 | [herdr](https://herdr.dev) | The agent sessions this cockpit visualizes and controls |
-| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub (`:8765`) | Provides the SQLite DB (read) + MCP write API |
+| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub (`:8765`) (optional) | Adds cross-agent messages to the Inbox and message view |
 | `codex` CLI (authenticated) | For background `codex exec` tasks |
 | Python 3.12+ | Runtime |
 
@@ -73,6 +75,12 @@ refuses a non-loopback bind without a token.
 > **Security warning:** use HTTPS or Tailscale Serve for remote access. Plain HTTP
 > exposes the login session cookie to anyone able to observe the local network.
 > Do not expose Agent Cockpit directly to the public Internet.
+
+Browser push and service workers require a secure context. Use `https://` (for
+example Tailscale Serve) when opening the cockpit from a Mac or phone; browsers
+also treat `http://localhost` as secure for local testing. Open **待办** and click
+**开启浏览器通知**. The server generates a VAPID key once under
+`~/dashboard-data/`; it never enters the repository.
 
 The systemd unit loads `.env` automatically. For a manual launch, load it first:
 
@@ -123,6 +131,8 @@ Configuration is read from environment variables (see `.env.example`):
 | `COCKPIT_TOKEN` | empty | Shared login token; required for non-loopback binds |
 | `HERDR_BIN` | auto-detected | Path to herdr binary |
 | `CODEX_BIN` | auto-detected | Path to codex binary |
+| `COCKPIT_VAPID_SUBJECT` | `mailto:agent-cockpit@localhost` | Web Push VAPID contact claim |
+| `COCKPIT_VAPID_PRIVATE_KEY` / `PUBLIC_KEY` | auto-generated | Optional fixed VAPID key pair for multi-instance deployments |
 
 The hub token is read from `~/.agent-mail/client.env` automatically — never hardcode it.
 
@@ -139,8 +149,10 @@ agent-cockpit/
 ├── tasks.py               codex exec task runner + diff/apply
 ├── files.py               Sandboxed file browser/editor
 ├── hub_client.py          MCP write proxy (send_message / ack)
+├── web_push.py            VAPID keys, subscriptions, and push delivery
 ├── uploads.py             File/screenshot upload sink
-├── static/index.html      Single-file frontend (kanban + terminal + tabs)
+├── static/index.html      Single-file frontend (kanban + Inbox + terminal + tabs)
+├── static/sw.js           Web Push service worker and deep-link handler
 ├── tests/                 Regression and security tests
 ├── install.sh             One-command installer
 ├── upgrade.sh             Safe fast-forward updater
@@ -157,7 +169,7 @@ CLI agents (codex, kimi, qoder) are powerful but blind to each other. herdr puts
 - **GUI agents (e.g. ZCode Desktop) can't join the board** — this cockpit drives *terminal* CLI agents under herdr. GUI apps have no programmatic control surface.
 - **Shared-token auth** — suitable for a trusted personal LAN/VPN. It is not a multi-user authorization system; keep the service behind a firewall or private overlay network.
 - **Transport security** — HTTP does not protect the session cookie. Use HTTPS or Tailscale Serve outside a fully trusted personal network.
-- **Reads the hub's SQLite directly** — never writes to it; all writes go through the hub's MCP API to preserve single-writer semantics.
+- **Optional Agent Mail integration** — when installed, Cockpit reads its SQLite directly but never writes it; all writes go through the hub MCP API. Missing or unavailable Agent Mail automatically degrades only message-related features.
 
 ## Contributing and security
 
