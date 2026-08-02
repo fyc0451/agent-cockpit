@@ -116,6 +116,10 @@ def test_push_routes_expose_config_and_store_subscription(monkeypatch):
     worker = client.get("/sw.js")
     assert worker.status_code == 200
     assert "application/javascript" in worker.headers["content-type"]
+    manifest = client.get("/manifest.webmanifest")
+    assert manifest.status_code == 200
+    assert manifest.json()["scope"] == "/"
+    assert manifest.json()["display"] == "standalone"
 
 
 def test_service_worker_and_frontend_wire_push_and_deep_links():
@@ -124,11 +128,13 @@ def test_service_worker_and_frontend_wire_push_and_deep_links():
 
     assert 'data-view="attention"' in html
     assert 'id="view-attention"' in html
+    assert 'rel="manifest" href="/manifest.webmanifest"' in html
     assert "/api/attention" in html
     assert "/api/push/config" in html
     assert "/api/push/subscriptions" in html
     assert "PUSH_SUBSCRIPTION.unsubscribe()" in html
     assert "Notification.requestPermission" in html
+    assert "iPhone 请先在 Safari 中“添加到主屏幕”" in html
     assert "navigator.serviceWorker.register('/sw.js')" in html
     assert "location.hash" in html
     assert "#/attention/" in html

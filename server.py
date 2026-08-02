@@ -1142,6 +1142,14 @@ def service_worker():
     return FileResponse(STATIC_DIR / "sw.js", media_type="application/javascript")
 
 
+@app.get("/manifest.webmanifest")
+def web_manifest():
+    return FileResponse(
+        STATIC_DIR / "manifest.webmanifest",
+        media_type="application/manifest+json",
+    )
+
+
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")

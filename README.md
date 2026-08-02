@@ -82,6 +82,10 @@ also treat `http://localhost` as secure for local testing. Open **待办** and c
 **开启浏览器通知**. The server generates a VAPID key once under
 `~/dashboard-data/`; it never enters the repository.
 
+On iPhone/iPad, first open the HTTPS site in Safari, choose **Share → Add to Home
+Screen**, then launch that Home Screen app and enable notifications from **待办**.
+iOS does not allow Web Push permission from a normal Safari tab.
+
 The systemd unit loads `.env` automatically. For a manual launch, load it first:
 
 ```bash
@@ -153,6 +157,7 @@ agent-cockpit/
 ├── uploads.py             File/screenshot upload sink
 ├── static/index.html      Single-file frontend (kanban + Inbox + terminal + tabs)
 ├── static/sw.js           Web Push service worker and deep-link handler
+├── static/manifest.webmanifest  Root-scope installable Web App metadata
 ├── tests/                 Regression and security tests
 ├── install.sh             One-command installer
 ├── upgrade.sh             Safe fast-forward updater

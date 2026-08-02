@@ -14,6 +14,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Install, upgrade, uninstall, and environment-diagnostic scripts.
 - Unified Attention Inbox for blocked panes, failed tasks, pending diffs, and unread messages.
 - Opt-in Web Push notifications with pane/task/message deep links.
+- Root-scope Web App manifest and iPhone Home Screen guidance for mobile push.
 
 ### Changed
 

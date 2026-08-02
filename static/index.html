@@ -3,7 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#151921">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Agent Dashboard</title>
+<link rel="manifest" href="/manifest.webmanifest">
 <style>
 :root{
   --bg:#0d0f14; --bg2:#151921; --bg3:#1d2330; --bg4:#262d3d;
@@ -534,6 +537,8 @@ function pasteServiceClipboard(input){
   input.focus();
 }
 function showView(v){
+  const drawer=document.getElementById('termDrawer');
+  if(drawer&&drawer.classList.contains('show'))closeTerm();
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-'+v).classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
@@ -636,6 +641,9 @@ function vapidKeyBytes(value){
 }
 async function refreshPushStatus(){
   const status=document.getElementById('pushStatus'),btn=document.getElementById('pushBtn');
+  const ios=/iPad|iPhone|iPod/.test(navigator.userAgent);
+  const standalone=window.matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
+  if(ios&&!standalone){status.textContent='iPhone 请先在 Safari 中“添加到主屏幕”';btn.disabled=true;return}
   if(!window.isSecureContext||!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)){
     status.textContent='通知需要 HTTPS';btn.disabled=true;return;
   }
@@ -783,14 +791,21 @@ async function openTerm(session,paneId,agent){
   document.getElementById('termMode').value=CURRENT_TERM.isAgent?'prompt':'send';
   updateDrawerHead();syncPaneSelect();
   document.getElementById('termOut').textContent='加载中…';
+  positionDrawerBelowHeader();
   document.getElementById('termDrawer').classList.add('show');
   if(TERM_TIMER){clearInterval(TERM_TIMER);TERM_TIMER=null}
   TERM_TIMER=setInterval(refreshTerm,2500);
   refreshTerm();
   setTimeout(()=>{try{document.getElementById('termInput').focus()}catch(e){}},50);
 }
+function positionDrawerBelowHeader(){
+  const header=document.querySelector('header');
+  const drawer=document.getElementById('termDrawer');
+  if(header&&drawer)drawer.style.top=Math.max(0,header.getBoundingClientRect().bottom)+'px';
+}
 function closeTerm(){
-  document.getElementById('termDrawer').classList.remove('show');
+  const drawer=document.getElementById('termDrawer');
+  drawer.classList.remove('show');drawer.style.top='';
   if(TERM_TIMER){clearInterval(TERM_TIMER);TERM_TIMER=null}
   document.getElementById('paneSwitch').hidden=true;
   CURRENT_TERM=null;
@@ -1704,7 +1719,7 @@ function bindDelegation(){
     else if(a==='fileSearchOpen')fileSearchOpen(parseInt(it.dataset.idx));
     else if(a==='fileSearchDownload')fileSearchDownload(parseInt(it.dataset.idx))});
   // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)
-  const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM);keepFocusedControlVisible()};
+  const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(CURRENT_TERM)positionDrawerBelowHeader();keepFocusedControlVisible()};
   window.addEventListener('resize',fitVisibleTerm);
   if(window.visualViewport)window.visualViewport.addEventListener('resize',fitVisibleTerm);
   document.addEventListener('focusin',keepFocusedControlVisible);

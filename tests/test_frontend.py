@@ -220,6 +220,14 @@ def test_h5_can_switch_herdr_panes_without_keyboard_shortcuts():
     assert "CURRENT_TERM.paneId!==t.paneId" in js
 
 
+def test_terminal_drawer_keeps_main_navigation_visible_and_clickable():
+    js = _inline_js()
+    assert "function positionDrawerBelowHeader()" in js
+    assert "header.getBoundingClientRect().bottom" in js
+    assert "drawer.style.top=" in js
+    assert "if(drawer&&drawer.classList.contains('show'))closeTerm()" in js
+
+
 def test_herdr_flow_is_mobile_friendly_default_card_view():
     js = _inline_js()
     assert 'data-view="herdrflow"' in HTML

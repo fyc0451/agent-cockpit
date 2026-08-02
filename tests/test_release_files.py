@@ -87,3 +87,4 @@ def test_web_push_runtime_dependency_and_worker_are_packaged():
 
     assert "pywebpush==" in requirements
     assert (ROOT / "static" / "sw.js").is_file()
+    assert (ROOT / "static" / "manifest.webmanifest").is_file()
