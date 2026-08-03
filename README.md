@@ -1,10 +1,19 @@
 # Agent Cockpit
 
+[![test](https://github.com/fyc0451/agent-cockpit/actions/workflows/test.yml/badge.svg)](https://github.com/fyc0451/agent-cockpit/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+
 > 跑在浏览器里的 CLI 编码 agent 驾驶舱:配合 [herdr](https://herdr.dev) 使用,
 > 一眼看清每个 agent 的状态,随时接管终端、发指令、传截图、跨 agent 协作——
 > 电脑和手机浏览器都能用。
 
 [English](README.en.md) | [日本語](README.ja.md)
+
+<p align="center">
+  <img src="docs/screenshots/board-desktop.png" alt="看板(桌面端)" width="74%">
+  <img src="docs/screenshots/board-mobile.png" alt="看板(手机端)" width="22%">
+</p>
 
 灵感来自 [Orca](https://onorca.dev) 的 Agent Dashboard,但做成轻量 Web 应用,
 直接插进你现有的 herdr 会话。[Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail)

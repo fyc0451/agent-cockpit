@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-03
+
 ### Added
 
 - Web cockpit for Herdr panes, Agent Mail, files, uploads, terminals, and Codex tasks.
@@ -15,6 +17,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Unified Attention Inbox for blocked panes, failed tasks, pending diffs, and unread messages.
 - Opt-in Web Push notifications with pane/task/message deep links.
 - Root-scope Web App manifest and iPhone Home Screen guidance for mobile push.
+- Trilingual UI (中文/English/日本語) with dark/light theme; light mode auto-inverts explicit dark ANSI colors painted by TUIs.
+- Settings page: per-directory default agent, enabled agents, runtime limits, terminal font size, and an environment self-check (`/api/env-check`).
+- First-run onboarding: board empty-state guide straight into the one-click workspace.
+- Trilingual READMEs (中文 default, English, 日本語) with screenshots.
 
 ### Changed
 

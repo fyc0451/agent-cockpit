@@ -1,10 +1,19 @@
 # Agent Cockpit
 
+[![test](https://github.com/fyc0451/agent-cockpit/actions/workflows/test.yml/badge.svg)](https://github.com/fyc0451/agent-cockpit/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+
 > A web-based control cockpit for CLI coding agents running under [herdr](https://herdr.dev).
 > See every agent's status at a glance, drop into a live terminal, send prompts,
 > upload screenshots, and orchestrate your fleet — from any browser, including your phone.
 
 [中文](README.md) | [日本語](README.ja.md)
+
+<p align="center">
+  <img src="docs/screenshots/board-desktop.png" alt="Board (desktop)" width="74%">
+  <img src="docs/screenshots/board-mobile.png" alt="Board (phone)" width="22%">
+</p>
 
 Inspired by [Orca](https://onorca.dev)'s Agent Dashboard, but built as a lightweight
 web app that plugs into your existing Herdr sessions.

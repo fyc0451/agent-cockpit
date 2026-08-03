@@ -1,10 +1,19 @@
 # Agent Cockpit
 
+[![test](https://github.com/fyc0451/agent-cockpit/actions/workflows/test.yml/badge.svg)](https://github.com/fyc0451/agent-cockpit/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+
 > [herdr](https://herdr.dev) 上で動く CLI コーディング agent のための、ブラウザ版コントロールコクピット。
 > すべての agent の状態を一目で把握し、ライブ端末への接続、プロンプト送信、
 > スクリーンショットのアップロード、fleet のオーケストレーションを——PC とスマホのブラウザから。
 
 [中文](README.md) | [English](README.en.md)
+
+<p align="center">
+  <img src="docs/screenshots/board-desktop.png" alt="ボード(PC)" width="74%">
+  <img src="docs/screenshots/board-mobile.png" alt="ボード(スマホ)" width="22%">
+</p>
 
 [Orca](https://onorca.dev) の Agent Dashboard に着想を得た、既存の Herdr セッションに
 そのまま接続できる軽量 Web アプリです。
