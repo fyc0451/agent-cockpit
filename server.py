@@ -767,29 +767,63 @@ def api_setup_workspace(req: SetupWorkspaceReq):
         raise HTTPException(400, "工作目录不存在")
     # 0. 检查 session 是否存在,不存在则自动创建
     sessions = herdr_client.list_sessions()
-    existing = {s["name"] for s in sessions}
-    session_created = False
-    if req.session not in existing:
+    states = {s["name"]: s.get("status") for s in sessions}
+    session_created = req.session not in states
+    session_started = states.get(req.session) == "running"
+    if not session_started:
         # 用 PTY 终端创建 session(herdr --session 需要 TTY)
         try:
             t = terminal.create_term(req.workdir)
             time.sleep(0.5)
             # 在 PTY 里跑 herdr --session <name>(创建 + detach)
-            terminal.write_term(t["id"], f"herdr --session {shlex.quote(req.session)}\r")
-            time.sleep(4)  # 等 herdr server 完全启动并创建 session
+            terminal.write_term(
+                t["id"],
+                f"{shlex.quote(herdr_client.HERDR_BIN)} --session {shlex.quote(req.session)}\r",
+            )
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if any(
+                    s["name"] == req.session and s.get("status") == "running"
+                    for s in herdr_client.list_sessions()
+                ):
+                    session_started = True
+                    break
+                time.sleep(0.25)
+            if not session_started:
+                return {
+                    "ok": False,
+                    "error": f"启动 session 超时: {req.session}",
+                    "session": req.session,
+                    "session_created": session_created,
+                    "session_started": False,
+                }
             # detach:发 Ctrl-b d(herdr detach 序列),让 client 脱离但 session server 继续跑
             terminal.write_term(t["id"], "\x02d")  # Ctrl-b + d
-            time.sleep(2)  # 等 detach 完成,session server 稳定
+            time.sleep(0.5)  # 等 detach 完成,session server 稳定
             # 注意:不 kill PTY!herdr client detach 后 PTY 回到 shell,
             # session server 是独立进程会继续跑。kill PTY 可能连带杀 server。
-            session_created = True
         except Exception as e:
-            return {"ok": False, "error": f"创建 session 失败: {e}"}
+            return {
+                "ok": False,
+                "error": f"启动 session 失败: {e}",
+                "session": req.session,
+                "session_created": session_created,
+                "session_started": False,
+            }
     results = []
+    started = []
+    failed = []
     # 1. 为每个 agent 开 pane + 启动
     for agent_type in req.agents:
         r = herdr_client.start_agent(req.session, req.workdir, agent_type, layout=req.layout)
         results.append({"agent": agent_type, "start": r})
+        error = r.get("error")
+        if r.get("available", True) is False:
+            error = error or "Herdr 不可用"
+        if error:
+            failed.append({"agent": agent_type, "error": error})
+        else:
+            started.append(agent_type)
         time.sleep(2)  # 等 agent 启动
     # 2. 注册身份(am-init-project)
     reg_ok = False
@@ -834,15 +868,10 @@ def api_setup_workspace(req: SetupWorkspaceReq):
             ).format(name=my_name, proj=req.workdir, ag=atype)
             herdr_client.pane_send(req.session, pid, hint, "prompt")
             notified.append(f"{atype}→{my_name}")
-    start_ok = all(
-        result["start"].get("available", True) is not False
-        and "error" not in result["start"]
-        for result in results
-    )
     return {
-        "ok": start_ok, "session": req.session, "workdir": req.workdir,
-        "session_created": session_created,
-        "started": [r["agent"] for r in results], "registered": reg_ok,
+        "ok": not failed, "session": req.session, "workdir": req.workdir,
+        "session_created": session_created, "session_started": session_started,
+        "started": started, "failed": failed, "results": results, "registered": reg_ok,
         "notified": notified, "agent_mail": mail_status,
     }
 

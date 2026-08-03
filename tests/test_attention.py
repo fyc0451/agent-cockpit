@@ -257,3 +257,89 @@ def test_setup_workspace_succeeds_without_agent_mail(monkeypatch, tmp_path):
     assert response.json()["agent_mail"]["available"] is False
     assert response.json()["notified"] == []
     assert sent == []
+
+
+def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    session_states = iter([
+        [{"name": "demo", "status": "stopped"}],
+        [{"name": "demo", "status": "running"}],
+    ])
+    monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: next(session_states))
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda *args, **kwargs: {"available": True, "pane_id": "w1:p2"},
+    )
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"sessions": []})
+    created = []
+    writes = []
+    monkeypatch.setattr(
+        server.terminal,
+        "create_term",
+        lambda cwd: created.append(cwd) or {"id": "term1"},
+    )
+    monkeypatch.setattr(
+        server.terminal,
+        "write_term",
+        lambda term_id, data: writes.append((term_id, data)),
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={"session": "demo", "workdir": str(tmp_path), "agents": ["codex"]},
+    )
+
+    body = response.json()
+    assert body["ok"] is True
+    assert body["session_created"] is False
+    assert body["session_started"] is True
+    assert body["started"] == ["codex"]
+    assert body["failed"] == []
+    assert created == [str(tmp_path)]
+    assert writes[0] == (
+        "term1",
+        f"{server.herdr_client.HERDR_BIN} --session demo\r",
+    )
+    assert writes[-1] == ("term1", "\x02d")
+
+
+def test_setup_workspace_returns_per_agent_failures(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [{"name": "demo", "status": "running"}],
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda session, workdir, agent, **kwargs: (
+            {"available": True, "pane_id": "w1:p2"}
+            if agent == "codex"
+            else {"available": True, "error": "opencode 启动失败"}
+        ),
+    )
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"sessions": []})
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo",
+            "workdir": str(tmp_path),
+            "agents": ["codex", "opencode"],
+        },
+    )
+
+    body = response.json()
+    assert body["ok"] is False
+    assert body["started"] == ["codex"]
+    assert body["failed"] == [
+        {"agent": "opencode", "error": "opencode 启动失败"}
+    ]

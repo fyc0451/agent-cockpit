@@ -239,6 +239,22 @@ def test_h5_takeover_opens_real_tui_with_touch_keys():
         assert f'onclick="termKey(\'{key}\')"' in HTML
 
 
+def test_mobile_terminal_has_expandable_computer_keyboard():
+    js = _inline_js()
+    assert 'id="termKeys"' in HTML
+    assert "function toggleTermKeyboard()" in js
+    assert "function toggleTermModifier(name)" in js
+    assert "function applyTermModifiers(data,name)" in js
+    assert "Home:'\\x1b[H'" in js
+    assert "PageUp:'\\x1b[5~'" in js
+    assert "F12:'\\x1b[24~'" in js
+    for key in ["Home", "End", "PageUp", "PageDown", "Delete", "F1", "F12"]:
+        assert f'onclick="termKey(\'{key}\')"' in HTML
+    for modifier in ["ctrl", "alt", "shift"]:
+        assert f'onclick="toggleTermModifier(\'{modifier}\')"' in HTML
+    assert "applyTermModifiers(d)" in js
+
+
 def test_terminal_drawer_keeps_main_navigation_visible_and_clickable():
     js = _inline_js()
     assert "function positionDrawerBelowHeader()" in js
@@ -308,6 +324,15 @@ def test_file_manager_navigation_stops_at_allowed_roots():
     assert "FILE_ROOTS=r.roots||[]" in js
     assert "FILE_ROOTS.filter(r=>d.path===r||d.path.startsWith(r+'/'))" in js
     assert "if((FILE_ROOTS||[]).includes(FILE_CWD))" in js
+
+
+def test_file_manager_explains_roots_search_and_actions():
+    js = _inline_js()
+    assert 'class="file-guide"' in HTML
+    assert "可访问位置" in HTML
+    assert "当前目录和子目录" in HTML
+    assert "function fileRootLabel(" in js
+    assert "可访问位置：" in js
 
 
 def test_agent_mail_hub_failure_becomes_read_only_ui():
