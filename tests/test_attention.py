@@ -736,6 +736,59 @@ def test_setup_workspace_reuses_matching_agent_without_reinjecting(monkeypatch, 
     assert sent == []
 
 
+def test_setup_workspace_rejects_reused_agent_with_unknown_or_different_cwd(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [{"name": "demo", "status": "running", "directory": str(tmp_path)}],
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+    client = TestClient(server.app)
+    other = tmp_path / "other"
+    other.mkdir()
+
+    for existing_cwd in (None, str(other)):
+        result = {
+            "available": True,
+            "pane_id": "w1:p2",
+            "agent": "codex",
+            "reused": True,
+        }
+        if existing_cwd:
+            result["cwd"] = existing_cwd
+        monkeypatch.setattr(server.herdr_client, "start_agent", lambda *_, **__: result)
+
+        response = client.post(
+            "/api/herdr/setup-workspace",
+            headers={"authorization": "Bearer secret"},
+            json={
+                "session": "demo",
+                "workdir": str(tmp_path),
+                "mode": "custom",
+                "participants": [{
+                    "id": "lead", "agent": "codex", "role": "lead",
+                    "task": "修复启动",
+                }],
+            },
+        )
+
+        body = response.json()
+        assert body["ok"] is False
+        assert body["idempotent"] is False
+        assert body["started"] == []
+        assert body["reused"] == []
+        assert body["failed"] == [{
+            "agent": "codex",
+            "error": "session 中已存在 codex，无法应用新的工作目录",
+        }]
+        assert body["notified"] == []
+
+
 def test_prepare_workspace_resumes_old_branch_and_warns_after_prune(tmp_path):
     repo = tmp_path / "demo"
     repo.mkdir()
