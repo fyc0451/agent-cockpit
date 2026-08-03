@@ -2162,9 +2162,10 @@ async function doSetupWorkspace(){
       setTimeout(()=>{closeSetup();loadSessionsView()},3500);
     }else{
       const failed=(r.failed||[]).map(x=>esc(x.agent)+': '+esc(x.error)).join('<br>');
+      const terminalOutput=r.terminal_output?'<br>终端输出: <code>'+esc(r.terminal_output)+'</code>':'';
       const onboarding=r.code==='herdr_onboarding_required'
         ?`<br><button class="primary sm" data-action="setupHerdrOnboarding" data-command="${esc(r.herdr_command||'herdr')}" style="margin-top:8px">打开终端配置 Herdr</button>`:'';
-      res.innerHTML='<span style="color:var(--err)">启动失败</span>'+(r.error?'<br>'+esc(r.error):'')+onboarding+'<br>已启动: '+((r.started||[]).map(esc).join(', ')||'无')+(failed?'<br>失败原因:<br>'+failed:'');
+      res.innerHTML='<span style="color:var(--err)">启动失败</span>'+(r.error?'<br>'+esc(r.error):'')+terminalOutput+onboarding+'<br>已启动: '+((r.started||[]).map(esc).join(', ')||'无')+(failed?'<br>失败原因:<br>'+failed:'');
     }
   }catch(e){res.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>'}
   finally{SETUP_SUBMITTING=false;renderSetupPreview()}

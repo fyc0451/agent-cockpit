@@ -333,6 +333,11 @@ def test_setup_workspace_timeout_reports_herdr_state_and_cleans_terminal(
     monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: [])
     monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
     monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
+    monkeypatch.setattr(
+        server,
+        "_start_pty_drainer",
+        lambda term_id, output: (output.extend(b"\x1b[31mfatal startup\x1b[0m\r\n") or (None, None)),
+    )
     killed = []
     monkeypatch.setattr(server.terminal, "kill_term", lambda term_id: killed.append(term_id))
 
@@ -360,7 +365,37 @@ def test_setup_workspace_timeout_reports_herdr_state_and_cleans_terminal(
     assert body["started"] == []
     assert "启动 session 超时(20秒): demo" in body["error"]
     assert "herdr 状态: 未出现在 session 列表" in body["error"]
+    assert body["terminal_output"] == "fatal startup"
     assert killed == ["term1"]
+
+
+def test_hidden_pty_drainer_continuously_reads_and_bounds_output(monkeypatch):
+    drained = threading.Event()
+    chunks = iter([
+        b"x" * (server.SESSION_BOOTSTRAP_OUTPUT_LIMIT + 100),
+        b"\x1b[31mfatal\x1b[0m\r\n",
+        b"",
+    ])
+
+    def read_output(term_id, timeout):
+        assert term_id == "term1"
+        try:
+            data = next(chunks)
+        except StopIteration:
+            return b""
+        if b"fatal" in data:
+            drained.set()
+        return data
+
+    monkeypatch.setattr(server.terminal, "read_output", read_output)
+    output = bytearray()
+    stop, thread = server._start_pty_drainer("term1", output)
+
+    assert drained.wait(1)
+    server._stop_pty_drainer(stop, thread)
+
+    assert len(output) <= server.SESSION_BOOTSTRAP_OUTPUT_LIMIT
+    assert server._pty_output_tail(output).endswith("fatal")
 
 
 def test_setup_workspace_rejects_missing_herdr_before_creating_terminal(

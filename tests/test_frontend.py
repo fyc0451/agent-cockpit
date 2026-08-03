@@ -158,6 +158,7 @@ def test_setup_workspace_output_escaped():
     # r.started/r.notified 来自后端响应,经 map(esc) 后再 join
     assert "r.started.map(esc).join" in HTML
     assert "(r.notified||[]).map(esc).join" in HTML
+    assert "esc(r.terminal_output)" in HTML
 
 
 def test_setup_workspace_supports_roles_tasks_and_automatic_worktrees():

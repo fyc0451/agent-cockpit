@@ -68,6 +68,7 @@ VALID_WORKSPACE_ROLES = {"lead", "developer", "reviewer", "researcher"}
 VALID_WORKSPACE_STRATEGIES = {"auto", "shared", "isolated"}
 VALID_PANE_SEND_MODES = {"send", "prompt", "keys"}
 SESSION_START_TIMEOUT = 20.0
+SESSION_BOOTSTRAP_OUTPUT_LIMIT = 16 * 1024
 AGENT_MAIL_INIT_SCRIPT = Path.home() / "agent-mail-tools" / "am-init-project"
 _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
@@ -1111,6 +1112,47 @@ def _workspace_briefing(req: SetupWorkspaceReq, plan: dict[str, Any], plans: lis
     return "\n".join(lines)
 
 
+def _start_pty_drainer(term_id: str, output: bytearray):
+    """持续排空隐藏 PTY，避免登录 shell/TUI 输出反压阻塞输入命令。"""
+    stop = threading.Event()
+
+    def drain():
+        while not stop.is_set():
+            data = terminal.read_output(term_id, 0.1)
+            if not data:
+                stop.wait(0.02)
+                continue
+            output.extend(data)
+            overflow = len(output) - SESSION_BOOTSTRAP_OUTPUT_LIMIT
+            if overflow > 0:
+                del output[:overflow]
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def _stop_pty_drainer(stop: threading.Event | None, thread: threading.Thread | None):
+    if stop is None or thread is None:
+        return
+    stop.set()
+    thread.join(timeout=0.5)
+
+
+def _pty_output_tail(output: bytearray) -> str:
+    """把有限 PTY 尾输出转换为可展示诊断，去掉 ANSI/控制字符。"""
+    text = output.decode("utf-8", "replace")
+    text = re.sub(
+        r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])",
+        "",
+        text,
+    )
+    text = "".join(ch if ch in "\n\t" or ord(ch) >= 32 else " " for ch in text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[-1000:]
+
+
 @app.post("/api/herdr/inspect-workspace")
 def api_inspect_workspace(req: InspectWorkspaceReq):
     """探测创建页需要的 Git 能力，不修改工作目录。"""
@@ -1173,8 +1215,12 @@ def _setup_workspace(req: SetupWorkspaceReq):
     if not session_started:
         # 用 PTY 终端创建 session(herdr --session 需要 TTY)
         t = None
+        drain_stop = None
+        drain_thread = None
+        pty_output = bytearray()
         try:
             t = terminal.create_term(req.workdir)
+            drain_stop, drain_thread = _start_pty_drainer(t["id"], pty_output)
             time.sleep(0.5)
             # 在 PTY 里跑 herdr --session <name>(创建 + detach)
             terminal.write_term(
@@ -1195,6 +1241,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
                     (s for s in herdr_client.list_sessions() if s["name"] == req.session),
                     None,
                 )
+                _stop_pty_drainer(drain_stop, drain_thread)
                 terminal.kill_term(t["id"])
                 return {
                     "ok": False,
@@ -1207,13 +1254,16 @@ def _setup_workspace(req: SetupWorkspaceReq):
                     "session_created": session_created,
                     "session_started": False,
                     "started": [],
+                    "terminal_output": _pty_output_tail(pty_output),
                 }
             # detach:发 Ctrl-b d(herdr detach 序列),让 client 脱离但 session server 继续跑
             terminal.write_term(t["id"], "\x02d")  # Ctrl-b + d
             time.sleep(0.5)  # 等 detach 完成,session server 稳定
+            _stop_pty_drainer(drain_stop, drain_thread)
             # 注意:不 kill PTY!herdr client detach 后 PTY 回到 shell,
             # session server 是独立进程会继续跑。kill PTY 可能连带杀 server。
         except Exception as e:
+            _stop_pty_drainer(drain_stop, drain_thread)
             if t is not None and not session_started:
                 terminal.kill_term(t["id"])
             return {
@@ -1223,6 +1273,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 "session_created": session_created,
                 "session_started": False,
                 "started": [],
+                "terminal_output": _pty_output_tail(pty_output),
             }
     results = []
     started = []
