@@ -75,7 +75,7 @@ def _pane_sort_key(pane_id: str) -> tuple[Any, ...]:
 
 
 def is_available() -> bool:
-    return bool(HERDR_BIN) and Path(HERDR_BIN).is_file()
+    return bool(HERDR_BIN) and Path(HERDR_BIN).is_file() and os.access(HERDR_BIN, os.X_OK)
 
 
 def _run(args: list[str], timeout: int = 10) -> str:
@@ -101,9 +101,28 @@ def list_sessions() -> list[dict[str, Any]]:
     if not is_available():
         return []
     try:
-        out = _run(["session", "list"], timeout=8)
-    except RuntimeError:
-        return []
+        out = _run(["session", "list", "--json"], timeout=8)
+        data = json.loads(out)
+        rows = data.get("sessions", [])
+        if not isinstance(rows, list):
+            raise ValueError("sessions 不是列表")
+        return [
+            {
+                "name": str(row.get("name", "")),
+                "status": "running" if row.get("running") else "stopped",
+                "directory": str(row.get("session_dir", "")),
+                "socket": str(row.get("socket_path", "")),
+            }
+            for row in rows
+            if isinstance(row, dict) and row.get("name")
+        ]
+    except (RuntimeError, ValueError, json.JSONDecodeError):
+        # 兼容尚未支持 --json 的旧版 herdr；新版使用稳定 JSON，避免表格
+        # 列宽、路径空格或展示格式变化导致 running session 被误判为缺失。
+        try:
+            out = _run(["session", "list"], timeout=8)
+        except RuntimeError:
+            return []
     sessions = []
     for line in out.splitlines():
         # 解析表格行:name status directory socket

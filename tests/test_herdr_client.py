@@ -5,6 +5,46 @@ from unittest.mock import call
 import herdr_client
 
 
+def test_list_sessions_prefers_stable_json_output(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        return (
+            '{"sessions":[{"name":"demo","running":true,'
+            '"session_dir":"/tmp/a project","socket_path":"/tmp/demo.sock"}]}'
+        )
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    assert herdr_client.list_sessions() == [{
+        "name": "demo",
+        "status": "running",
+        "directory": "/tmp/a project",
+        "socket": "/tmp/demo.sock",
+    }]
+    assert calls == [call(["session", "list", "--json"], timeout=8)]
+
+
+def test_list_sessions_falls_back_for_old_herdr(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+
+    def fake_run(args, timeout=10):
+        if args[-1] == "--json":
+            raise RuntimeError("unknown option --json")
+        return "name status directory socket\ndemo running /tmp/demo /tmp/demo.sock\n"
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    assert herdr_client.list_sessions() == [{
+        "name": "demo",
+        "status": "running",
+        "directory": "/tmp/demo",
+        "socket": "/tmp/demo.sock",
+    }]
+
+
 def test_start_agent_fallback_selects_highest_numeric_pane(monkeypatch):
     """fallback 应把 w1:p10 视为比 w1:p9 更新，而不是按字符串排序。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)

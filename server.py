@@ -67,6 +67,7 @@ VALID_COLLAB_MODES = {"quick", "develop_review", "parallel", "custom"}
 VALID_WORKSPACE_ROLES = {"lead", "developer", "reviewer", "researcher"}
 VALID_WORKSPACE_STRATEGIES = {"auto", "shared", "isolated"}
 VALID_PANE_SEND_MODES = {"send", "prompt", "keys"}
+SESSION_START_TIMEOUT = 20.0
 AGENT_MAIL_INIT_SCRIPT = Path.home() / "agent-mail-tools" / "am-init-project"
 _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
@@ -1138,6 +1139,14 @@ def _setup_workspace(req: SetupWorkspaceReq):
         raise HTTPException(400, f"不支持的布局: {req.layout}")
     if not Path(req.workdir).expanduser().resolve().is_dir():
         raise HTTPException(400, "工作目录不存在")
+    if not herdr_client.is_available():
+        return {
+            "ok": False,
+            "error": f"herdr 未安装或不可执行: {herdr_client.HERDR_BIN}",
+            "session": req.session,
+            "session_started": False,
+            "started": [],
+        }
     plans, warnings = _prepare_workspace(req)
     # 0. 检查 session 是否存在,不存在则自动创建
     sessions = herdr_client.list_sessions()
@@ -1146,6 +1155,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
     session_started = states.get(req.session) == "running"
     if not session_started:
         # 用 PTY 终端创建 session(herdr --session 需要 TTY)
+        t = None
         try:
             t = terminal.create_term(req.workdir)
             time.sleep(0.5)
@@ -1154,7 +1164,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 t["id"],
                 f"{shlex.quote(herdr_client.HERDR_BIN)} --session {shlex.quote(req.session)}\r",
             )
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + SESSION_START_TIMEOUT
             while time.monotonic() < deadline:
                 if any(
                     s["name"] == req.session and s.get("status") == "running"
@@ -1164,12 +1174,22 @@ def _setup_workspace(req: SetupWorkspaceReq):
                     break
                 time.sleep(0.25)
             if not session_started:
+                latest = next(
+                    (s for s in herdr_client.list_sessions() if s["name"] == req.session),
+                    None,
+                )
+                terminal.kill_term(t["id"])
                 return {
                     "ok": False,
-                    "error": f"启动 session 超时: {req.session}",
+                    "error": (
+                        f"启动 session 超时({SESSION_START_TIMEOUT:g}秒): {req.session}；"
+                        f"herdr 状态: {(latest or {}).get('status', '未出现在 session 列表')}。"
+                        "请在设置 → 环境自检确认 herdr，或运行 ./doctor.sh"
+                    ),
                     "session": req.session,
                     "session_created": session_created,
                     "session_started": False,
+                    "started": [],
                 }
             # detach:发 Ctrl-b d(herdr detach 序列),让 client 脱离但 session server 继续跑
             terminal.write_term(t["id"], "\x02d")  # Ctrl-b + d
@@ -1177,12 +1197,15 @@ def _setup_workspace(req: SetupWorkspaceReq):
             # 注意:不 kill PTY!herdr client detach 后 PTY 回到 shell,
             # session server 是独立进程会继续跑。kill PTY 可能连带杀 server。
         except Exception as e:
+            if t is not None and not session_started:
+                terminal.kill_term(t["id"])
             return {
                 "ok": False,
                 "error": f"启动 session 失败: {e}",
                 "session": req.session,
                 "session_created": session_created,
                 "session_started": False,
+                "started": [],
             }
     results = []
     started = []

@@ -230,6 +230,7 @@ def test_attention_keeps_mail_readable_when_hub_is_down(monkeypatch):
 
 def test_setup_workspace_succeeds_without_agent_mail(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
     monkeypatch.setattr(
         server.herdr_client,
@@ -275,6 +276,7 @@ def test_setup_workspace_succeeds_without_agent_mail(monkeypatch, tmp_path):
 
 def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
     session_states = iter([
         [{"name": "demo", "status": "stopped"}],
@@ -321,8 +323,74 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     assert writes[-1] == ("term1", "\x02d")
 
 
+def test_setup_workspace_timeout_reports_herdr_state_and_cleans_terminal(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: [])
+    monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
+    monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
+    killed = []
+    monkeypatch.setattr(server.terminal, "kill_term", lambda term_id: killed.append(term_id))
+
+    class FakeTime:
+        values = iter([0.0, server.SESSION_START_TIMEOUT + 1])
+
+        @classmethod
+        def monotonic(cls):
+            return next(cls.values)
+
+        @staticmethod
+        def sleep(_):
+            pass
+
+    monkeypatch.setattr(server, "time", FakeTime)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={"session": "demo", "workdir": str(tmp_path), "agents": ["codex"]},
+    )
+
+    body = response.json()
+    assert body["ok"] is False
+    assert body["started"] == []
+    assert "启动 session 超时(20秒): demo" in body["error"]
+    assert "herdr 状态: 未出现在 session 列表" in body["error"]
+    assert killed == ["term1"]
+
+
+def test_setup_workspace_rejects_missing_herdr_before_creating_terminal(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: False)
+    monkeypatch.setattr(server.herdr_client, "HERDR_BIN", "/missing/herdr")
+    monkeypatch.setattr(
+        server.terminal,
+        "create_term",
+        lambda *_: (_ for _ in ()).throw(AssertionError("不应创建终端")),
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={"session": "demo", "workdir": str(tmp_path), "agents": ["codex"]},
+    )
+
+    assert response.json() == {
+        "ok": False,
+        "error": "herdr 未安装或不可执行: /missing/herdr",
+        "session": "demo",
+        "session_started": False,
+        "started": [],
+    }
+
+
 def test_setup_workspace_returns_per_agent_failures(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
     monkeypatch.setattr(
         server.herdr_client,
@@ -414,6 +482,7 @@ def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
 
 def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
     monkeypatch.setattr(
         server.herdr_client, "list_sessions",
