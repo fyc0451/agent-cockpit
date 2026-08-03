@@ -425,3 +425,17 @@ def test_settings_js_functions_exist():
                "setAddDirAgent", "applyEnabledAgents", "launchPreselectAgent"):
         assert f"function {fn}(" in HTML
     assert "'/api/settings'" in HTML
+
+
+# ── 顶部导航与终端工具栏折叠 ────────────────────────────────────
+
+def test_nav_and_toolbar_collapsible():
+    assert 'class="icon nav-toggle"' in HTML
+    assert 'class="icon tb-toggle"' in HTML
+    assert "function toggleNav()" in HTML
+    assert "function toggleTermToolbar()" in HTML
+    assert "header nav.open{display:grid}" in HTML
+    assert ".term-toolbar.collapsed>*:not(.tb-toggle){display:none}" in HTML
+    # 窄屏默认收起工具栏;点导航项后自动收起菜单
+    assert "window.innerWidth<=860" in HTML
+    assert "window.innerWidth<=560" in HTML

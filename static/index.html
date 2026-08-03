@@ -55,6 +55,7 @@ header nav{display:flex;gap:2px}
 header nav button{background:transparent;border:none;padding:6px 11px;color:var(--fg2);border-radius:6px;font-size:13px}
 header nav button.active{background:var(--bg4);color:var(--fg)}
 header .spacer{flex:1}
+.nav-toggle{display:none}
 .stat-pill{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--fg2);background:var(--bg3);padding:3px 9px;border-radius:12px}
 .set-card{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin-bottom:12px}
 .set-card h3{font-size:14px;margin-bottom:8px}
@@ -177,6 +178,9 @@ header .spacer{flex:1}
 .pane-switch{display:flex;align-items:center;gap:5px;min-width:240px}
 .pane-switch select{min-width:140px}
 .term-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)}
+.term-toolbar .tb-toggle{margin-left:auto;padding:3px 8px;color:var(--fg3)}
+.term-toolbar.collapsed{padding:2px 8px;gap:4px}
+.term-toolbar.collapsed>*:not(.tb-toggle){display:none}
 .term-help{font-size:11px;margin-left:auto}
 .term-keys{display:none;gap:5px;padding:5px 6px;overflow-x:auto;background:var(--bg2);border-bottom:1px solid var(--bd);flex-shrink:0}
 .term-keys button{flex:0 0 auto;min-width:38px;padding:5px 8px;font-family:var(--mono);font-size:12px}
@@ -236,7 +240,9 @@ header .spacer{flex:1}
   header{padding:6px 8px;gap:4px;flex-wrap:wrap}
   header .logo{font-size:13px}
   header .spacer{display:none}
-  header nav{order:3;width:100%;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}
+  .nav-toggle{display:block}
+  header nav{order:3;width:100%;display:none;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}
+  header nav.open{display:grid}
   header nav button{padding:5px 2px;font-size:11px;min-width:0}
   #liveText{display:none}
   .stat-pill{padding:3px 6px}
@@ -282,6 +288,7 @@ header .spacer{flex:1}
 <div class="app">
   <header>
     <div class="logo">⚙️ Agent Fleet</div>
+    <button class="icon nav-toggle" onclick="toggleNav()" data-i18n-title="nav.menu" title="菜单">☰</button>
     <nav id="nav">
       <button data-view="board" class="active" data-i18n="nav.board">看板</button>
       <button data-view="attention" data-i18n="nav.attention">待办</button>
@@ -388,6 +395,7 @@ header .spacer{flex:1}
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
       <button class="sm danger" onclick="termClose()" data-i18n="term.close">✕ 关闭</button>
       <span class="muted term-help" data-i18n="term.help">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
+      <button class="icon tb-toggle" onclick="toggleTermToolbar()" data-i18n-title="term.tbcollapse" title="收起工具栏">▴</button>
     </div>
     <div class="term-keys" id="termKeys" aria-label="手机电脑键盘">
       <button id="termKeyboardToggle" onclick="toggleTermKeyboard()" title="展开电脑键盘">⌨ 电脑键盘</button>
@@ -619,13 +627,13 @@ function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent
 // JS 动态文案用 t('key','中文原文') 内联回退,保证源码中文不丢(测试可锚)。
 const I18N={
 en:{
-'nav.board':'Board','nav.attention':'Inbox','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
+'nav.menu':'Menu','nav.board':'Board','nav.attention':'Inbox','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
 'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
 'attention.title':'Needs your attention','attention.push':'Enable notifications','common.refresh':'Refresh','common.loading':'Loading…',
 'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
-'term.new':'+ New terminal','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…',
+'term.new':'+ New terminal','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…',
 'hf.takeover':'🖥 Take over TUI','hf.hint':'Copy: paste elsewhere · Fill input: send straight to agent','hf.empty':'No agent pane in this session','hf.send':'Send','hf.paste':'📋 Fill input','hf.full':'⛶ Full','hf.exit':'Exit',
 'sessions.setup':'+ Quick workspace','sessions.hint':'Quick workspace: split pane + start agent; Agent Mail optional',
 'roots.system':'System','roots.projects':'Registered projects','roots.custom':'Custom','files.rootlimit':'Already at an accessible root — tap a root name above to switch','files.rmroot':'Remove from accessible locations (directory is not deleted)','files.remove':'Remove',
@@ -634,13 +642,13 @@ en:{
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
 ja:{
-'nav.board':'ボード','nav.attention':'対応','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
+'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'対応','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
 'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
 'attention.title':'対応が必要です','attention.push':'通知を有効化','common.refresh':'更新','common.loading':'読み込み中…',
 'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
-'term.new':'+ 新規ターミナル','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…',
+'term.new':'+ 新規ターミナル','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…',
 'hf.takeover':'🖥 TUI 接管','hf.hint':'コピー: 他アプリで貼り付け · 入力欄へ: agent に直接送信','hf.empty':'このセッションに agent pane なし','hf.send':'送信','hf.paste':'📋 入力欄へ','hf.full':'⛶ 全画面','hf.exit':'退出',
 'sessions.setup':'+ ワンクリックワークスペース','sessions.hint':'ワンクリック: pane 分割 + agent 起動;Agent Mail は任意',
 'roots.system':'システム','roots.projects':'登録プロジェクト','roots.custom':'カスタム','files.rootlimit':'アクセス可能なルートです。上のルート名で切り替えられます','files.rmroot':'アクセス可能場所から削除(ディレクトリ自体は削除されません)','files.remove':'削除',
@@ -656,6 +664,28 @@ function applyLang(){
   document.querySelectorAll('[data-i18n-title]').forEach(el=>{const v=I18N[LANG]?.[el.dataset.i18nTitle];if(v!==undefined)el.title=v});
   document.documentElement.lang=LANG==='zh'?'zh-CN':LANG;
 }
+function toggleNav(){
+  const nav=document.getElementById('nav');if(!nav)return;
+  const open=nav.classList.toggle('open');
+  try{localStorage.setItem('nav-open',open?'1':'0')}catch(e){}
+}
+function toggleTermToolbar(){
+  const tb=document.querySelector('.term-toolbar');if(!tb)return;
+  const collapsed=tb.classList.toggle('collapsed');
+  tb.querySelector('.tb-toggle').textContent=collapsed?'▾':'▴';
+  try{localStorage.setItem('term-toolbar-collapsed',collapsed?'1':'0')}catch(e){}
+}
+(function restoreCollapses(){
+  try{
+    if(localStorage.getItem('nav-open')==='1')document.getElementById('nav').classList.add('open');
+    const tb=document.querySelector('.term-toolbar');
+    const stored=localStorage.getItem('term-toolbar-collapsed');
+    // 窄屏默认收起工具栏(可在 localStorage 覆盖)
+    const collapsed=stored===null?window.innerWidth<=860:stored==='1';
+    if(tb&&collapsed){tb.classList.add('collapsed');tb.querySelector('.tb-toggle').textContent='▾'}
+  }catch(e){}
+})();
+
 function setLang(l){LANG=l;localStorage.setItem('cockpit-lang',l);applyLang();const active=document.querySelector('#nav button.active');if(active)showView(active.dataset.view)}
 
 // ============ 设置 ============
@@ -826,7 +856,7 @@ function showView(v){
   if(v==='settings'){applyLang();renderSettings()}
   if(v==='herdrflow')hfStart();else hfStop();
 }
-document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>showView(b.dataset.view));
+document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(window.innerWidth<=560)document.getElementById('nav').classList.remove('open')});
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
 const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',gemini:'💎',grok:'✖️'};
 
@@ -2046,8 +2076,9 @@ function termTheme(){
   // 明亮主题给终端配浅底深字 + 高对比 ANSI;黑暗保持原样
   if(document.documentElement.classList.contains('light')){
     return {background:'#fafbfc',foreground:'#1a2030',cursor:'#2563eb',selectionBackground:'#d0d8e8',
-      black:'#1a2030',red:'#c0392b',green:'#1e8449',yellow:'#b9770e',blue:'#2563eb',magenta:'#7c3aed',cyan:'#0e7490',white:'#e8e8e8',
-      brightBlack:'#6b7280',brightRed:'#e74c3c',brightGreen:'#27ae60',brightYellow:'#d4ac0d',brightBlue:'#4a89f0',brightMagenta:'#9b59b6',brightCyan:'#17a2b8',brightWhite:'#ffffff'};
+      black:'#1a2030',red:'#c0392b',green:'#1e8449',yellow:'#b9770e',blue:'#2563eb',magenta:'#7c3aed',cyan:'#0e7490',
+      white:'#3f4756',brightWhite:'#111827',
+      brightBlack:'#6b7280',brightRed:'#e74c3c',brightGreen:'#27ae60',brightYellow:'#d4ac0d',brightBlue:'#4a89f0',brightMagenta:'#9b59b6',brightCyan:'#17a2b8'};
   }
   return {background:'#000000',foreground:'#e8e8e8'};
 }
