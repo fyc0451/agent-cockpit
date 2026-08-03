@@ -1556,7 +1556,12 @@ async function hfStart(){
 }
 function hfStop(){if(HF_TIMER){clearInterval(HF_TIMER);HF_TIMER=null}hfExitFullscreen()}
 function hfLoad(){
-  HF_SESSION=document.getElementById('hfSession').value||HF_SESSION;
+  const nextSession=document.getElementById('hfSession').value||HF_SESSION;
+  if(nextSession!==HF_SESSION){
+    hfExitFullscreen(false);
+    HF_FOCUS_PANE=null;
+  }
+  HF_SESSION=nextSession;
   hfRender();
   hfRefreshAll();
 }

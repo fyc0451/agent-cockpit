@@ -305,6 +305,17 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     assert "document.addEventListener('fullscreenchange'" in js
 
 
+def test_herdr_flow_session_switch_exits_fullscreen_before_render():
+    js = _inline_js()
+    load = js.split("function hfLoad(){", 1)[1].split("function hfRender(){", 1)[0]
+    assert "const nextSession=" in load
+    assert "if(nextSession!==HF_SESSION)" in load
+    assert "hfExitFullscreen(false)" in load
+    assert "HF_FOCUS_PANE=null" in load
+    assert load.index("hfExitFullscreen(false)") < load.index("HF_SESSION=nextSession")
+    assert load.index("HF_SESSION=nextSession") < load.index("hfRender()")
+
+
 def test_herdr_flow_preserves_selection_and_ignores_stale_refresh():
     js = _inline_js()
     assert "HF_SESSION!==session||!out.isConnected" in js
