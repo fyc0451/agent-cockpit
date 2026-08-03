@@ -543,6 +543,23 @@ async def api_settings_put(request: Request):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/env-check")
+def api_env_check():
+    """环境自检:herdr / 各 agent 可执行文件 / Agent Mail 是否就绪(设置页展示)。"""
+    herdr_ok = herdr_client.is_available()
+    agents = {}
+    for name in settings.KNOWN_AGENTS:
+        path = herdr_client._find_agent_bin(name)
+        # _find_agent_bin 找不到时兜底返回裸名,用"仍是裸名"判断未安装
+        installed = path != name and Path(path).is_file()
+        agents[name] = {"installed": installed, "path": path if installed else ""}
+    return {
+        "herdr": {"installed": herdr_ok, "path": herdr_client.HERDR_BIN if herdr_ok else ""},
+        "agents": agents,
+        "agent_mail": _agent_mail_status(),
+    }
+
+
 # ── 文件浏览/编辑路由 ──────────────────────────────────────────
 
 @app.get("/api/files/roots")

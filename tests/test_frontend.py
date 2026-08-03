@@ -450,3 +450,19 @@ def test_nav_and_toolbar_collapsible():
     # 窄屏默认收起工具栏;点导航项后自动收起菜单
     assert "window.innerWidth<=860" in HTML
     assert "window.innerWidth<=560" in HTML
+
+
+# ── 终端字体大小设置(本机偏好) ──────────────────────────────────
+
+def test_terminal_font_size_setting():
+    # 设置页滑块 + 当前值显示
+    assert 'id="setTermFont"' in HTML
+    assert 'id="setTermFontVal"' in HTML
+    assert 'data-i18n="set.termfont"' in HTML
+    # 读写与即时应用逻辑
+    assert "function termFontSize()" in HTML
+    assert "function setTermFont(" in HTML
+    assert "term-font-size" in HTML
+    # 新建终端不再硬编码 13,改用本机偏好
+    assert "fontSize:termFontSize()" in HTML
+    assert "fontSize:13" not in HTML
