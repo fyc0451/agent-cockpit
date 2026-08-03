@@ -290,36 +290,27 @@ def test_mobile_terminal_has_expandable_computer_keyboard():
     assert "applyTermModifiers(d)" in js
 
 
-def test_mobile_terminal_keyboard_has_visible_focused_input_and_send_feedback():
+def test_mobile_terminal_uses_xterm_native_input_without_proxy_field():
     js = _inline_js()
-    assert "interactive-widget=resizes-content" in HTML
-    assert 'id="termMobileInputBar"' in HTML
-    assert 'id="termKeyboardInput"' in HTML
-    assert 'id="termKeyboardStatus"' in HTML
+    assert "interactive-widget=resizes-content" not in HTML
+    assert 'id="termMobileInputBar"' not in HTML
+    assert 'id="termKeyboardInput"' not in HTML
+    assert 'id="termKeyboardStatus"' not in HTML
     assert "(any-pointer:coarse)" in HTML
-    assert HTML.index('id="termContainer"') < HTML.index('id="termMobileInputBar"')
-    assert "function focusTermKeyboardInput()" in js
-    assert "input.focus({preventScroll:true})" in js
-    assert "input.scrollIntoView({block:'nearest'})" in js
-    assert "function positionTermMobileInput()" in js
-    assert "window.innerHeight-vv.height-vv.offsetTop" in js
-    assert "window.visualViewport.addEventListener('scroll',fitVisibleTerm)" in js
-    assert "function termSendVisibleInput()" in js
-    assert "queueTermInput(TERM_ID,payload)" in js
-    assert "已发送：" in js
-    assert ".term-mobile-input{" in HTML
-    assert ".xterm-viewport" in HTML
+    assert "function termSendVisibleInput()" not in js
+    assert "xterm.onData(d=>" in js
+    assert "XTERM&&XTERM.focus()" in js
+    assert "const touch=window.matchMedia('(any-pointer:coarse)').matches" in js
 
 
-def test_mobile_terminal_supports_single_finger_scrollback():
+def test_terminal_fit_never_resizes_pty_from_hidden_view():
     js = _inline_js()
-    assert "function enableTermTouchScroll(el,xterm)" in js
-    assert "enableTermTouchScroll(el,xterm)" in js
-    assert "xterm.scrollLines(lines)" in js
-    assert "new WheelEvent('wheel'" in js
-    assert "el.addEventListener('touchmove'" in js
-    assert "{passive:false}" in js
-    assert "touch-action:none!important" in HTML
+    fit = js.split("function safeFitOf(fit,xterm){", 1)[1].split("function ", 1)[0]
+    assert "view?.classList.contains('active')" in fit
+    assert "el.getBoundingClientRect()" in fit
+    assert fit.index("view?.classList.contains('active')") < fit.index("fit.fit()")
+    assert "function enableTermTouchScroll(el,xterm)" not in js
+    assert "#termContainer .xterm-viewport{touch-action:pan-y!important" in HTML
 
 
 def test_terminal_drawer_keeps_main_navigation_visible_and_clickable():

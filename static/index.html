@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#151921">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Agent Cockpit</title>
@@ -187,16 +187,11 @@ header .spacer{flex:1}
 .term-keys{display:none;gap:5px;padding:5px 6px;overflow-x:auto;background:var(--bg2);border-bottom:1px solid var(--bd);flex-shrink:0}
 .term-keys button{flex:0 0 auto;min-width:38px;padding:5px 8px;font-family:var(--mono);font-size:12px}
 .term-keys .term-key-extra{display:none}
-.term-keys.expanded{display:flex;flex-wrap:wrap;overflow-y:auto;max-height:46dvh;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.term-keys.expanded{flex-wrap:wrap;overflow-y:auto;max-height:46dvh;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .term-keys.expanded .term-key-extra{display:block}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
-.term-mobile-input{display:none;position:relative;z-index:4;align-items:center;gap:5px;padding:5px 6px;background:var(--bg2);border-top:1px solid var(--bd);flex-shrink:0}
-.term-mobile-input input{flex:1;min-width:0;font-family:var(--mono);padding:6px 8px}
-.term-mobile-input button{padding:5px 8px}
-.term-mobile-input .term-key-status{display:none;position:absolute;left:6px;right:6px;bottom:calc(100% + 2px);padding:2px 6px;border-radius:5px;background:var(--bg4);font-size:10px;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none}
-.term-mobile-input:focus-within .term-key-status{display:block}
 #termContainer{min-height:0}
-#termContainer .xterm,#termContainer .xterm-viewport{touch-action:none!important;overscroll-behavior:contain}
+#termContainer .xterm-viewport{touch-action:pan-y!important;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .board-wrap,.file-tree,.sidebar,.msgs-list,.term-out,.hf-body,.modal{overscroll-behavior:contain}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
@@ -262,8 +257,8 @@ header .spacer{flex:1}
   .msgs-body,.files-body{grid-template-columns:1fr}
   .sidebar,.file-tree{max-height:25vh}
 }
-@media(max-width:560px),(any-pointer:coarse){
-  .term-mobile-input{display:flex}
+@media(any-pointer:coarse){
+  .term-keys{display:flex}
 }
 @media(max-width:560px){
   .board{grid-template-columns:1fr}
@@ -290,6 +285,7 @@ header .spacer{flex:1}
   .launch-bar button{order:3;flex:1}
   .term-toolbar{flex-wrap:wrap;padding:6px;gap:5px}
   .term-toolbar #termSelect{flex:1;min-width:120px!important}
+  .term-keys{display:flex}
   .term-help{display:none}
   #termContainer{padding:3px!important}
   .drawer-bg.show{inset:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);padding:0}
@@ -431,6 +427,7 @@ header .spacer{flex:1}
       <button class="icon tb-toggle" onclick="toggleTermToolbar()" data-i18n-title="term.tbcollapse" title="收起工具栏">▴</button>
     </div>
     <div class="term-keys" id="termKeys" aria-label="手机电脑键盘">
+      <button id="termKeyboardToggle" onclick="toggleTermKeyboard()" title="展开更多按键" aria-expanded="false">⌨ 更多按键</button>
       <button onclick="termKey('ArrowUp')" title="方向键上">↑</button>
       <button onclick="termKey('ArrowDown')" title="方向键下">↓</button>
       <button onclick="termKey('ArrowLeft')" title="方向键左">←</button>
@@ -466,12 +463,6 @@ header .spacer{flex:1}
       <button class="term-key-extra" onclick="termKey('F12')">F12</button>
     </div>
     <div id="termContainer" style="flex:1;background:var(--term-bg);padding:6px 14px 6px 6px;overflow:hidden"></div>
-    <div class="term-mobile-input" id="termMobileInputBar">
-      <button id="termKeyboardToggle" onclick="toggleTermKeyboard()" title="展开电脑键盘" aria-expanded="false">⌨</button>
-      <input id="termKeyboardInput" type="text" placeholder="在这里输入，内容可见" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" oninput="updateTermKeyboardStatus()" onkeydown="if(event.key==='Enter'){event.preventDefault();termSendVisibleInput()}">
-      <button class="primary" onclick="termSendVisibleInput()">发送 ↵</button>
-      <span class="term-key-status" id="termKeyboardStatus" aria-live="polite">输入内容会先显示在这里，再发送到终端</span>
-    </div>
   </section>
 
   <!-- herdr 流视图(只读 pane 流 + 输入框发指令,手机可滚屏/复制) -->
@@ -751,8 +742,9 @@ function toggleTermToolbar(){
     if(localStorage.getItem('nav-open')==='1')document.getElementById('nav').classList.add('open');
     const tb=document.querySelector('.term-toolbar');
     const stored=localStorage.getItem('term-toolbar-collapsed');
-    // 窄屏默认收起工具栏(可在 localStorage 覆盖)
-    const collapsed=stored===null?window.innerWidth<=860:stored==='1';
+    // 触屏设备进入终端时默认保持紧凑；本次页面内仍可手动展开。
+    const touch=window.matchMedia('(any-pointer:coarse)').matches;
+    const collapsed=touch||stored==='1'||(stored===null&&window.innerWidth<=860);
     if(tb&&collapsed){tb.classList.add('collapsed');tb.querySelector('.tb-toggle').textContent='▾'}
   }catch(e){}
 })();
@@ -1454,36 +1446,15 @@ const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
 const TERM_MODIFIERS={ctrl:false,alt:false,shift:false};
 function termKeyboardExpanded(){return document.getElementById('termKeys').classList.contains('expanded')}
-function isTouchTerminal(){return window.matchMedia('(any-pointer:coarse)').matches||isCompactScreen()}
-function setTermKeyboardStatus(text){document.getElementById('termKeyboardStatus').textContent=text}
-function updateTermKeyboardStatus(){
-  const n=document.getElementById('termKeyboardInput').value.length;
-  setTermKeyboardStatus(n?`待发送 ${n} 个字符`:'输入内容会先显示在这里，再发送到终端');
-}
-function focusTermKeyboardInput(){
-  const input=document.getElementById('termKeyboardInput');
-  input.focus({preventScroll:true});
-  setTimeout(()=>{if(document.activeElement===input)input.scrollIntoView({block:'nearest'})},50);
-}
-function positionTermMobileInput(){
-  const view=document.getElementById('view-term');
-  const input=document.getElementById('termKeyboardInput');
-  const vv=window.visualViewport;
-  let inset=0;
-  if(vv&&document.activeElement===input){
-    inset=Math.max(0,window.innerHeight-vv.height-vv.offsetTop);
-    if(inset<80)inset=0;
-  }
-  view.style.paddingBottom=inset?Math.round(inset)+'px':'';
-}
 function toggleTermKeyboard(){
   const keys=document.getElementById('termKeys');
   const expanded=keys.classList.toggle('expanded');
   const button=document.getElementById('termKeyboardToggle');
   button.classList.toggle('active',expanded);
   button.setAttribute('aria-expanded',String(expanded));
-  button.title=expanded?'收起电脑键盘':'展开电脑键盘';
-  focusTermKeyboardInput();
+  button.textContent=expanded?'⌨ 收起':'⌨ 更多按键';
+  button.title=expanded?'收起更多按键':'展开更多按键';
+  XTERM&&XTERM.focus();
 }
 function renderTermModifiers(){
   document.querySelectorAll('[data-term-modifier]').forEach(btn=>btn.classList.toggle('active',TERM_MODIFIERS[btn.dataset.termModifier]));
@@ -1492,7 +1463,7 @@ function toggleTermModifier(name){
   if(!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
   TERM_MODIFIERS[name]=!TERM_MODIFIERS[name];
   renderTermModifiers();
-  focusTermKeyboardInput();
+  XTERM&&XTERM.focus();
 }
 function applyTermModifiers(data,name){
   if(!TERM_MODIFIERS.ctrl&&!TERM_MODIFIERS.alt&&!TERM_MODIFIERS.shift)return data;
@@ -1513,29 +1484,11 @@ function applyTermModifiers(data,name){
   renderTermModifiers();
   return out;
 }
-function termSendVisibleInput(){
-  const input=document.getElementById('termKeyboardInput');
-  const value=input.value;
-  const inst=TERM_INSTANCES[TERM_ID];
-  if(!TERM_ID||!inst){setTermKeyboardStatus('终端尚未连接，请先新建终端');return}
-  if(!value){setTermKeyboardStatus('请先输入内容');focusTermKeyboardInput();return}
-  const modified=TERM_MODIFIERS.ctrl||TERM_MODIFIERS.alt||TERM_MODIFIERS.shift;
-  if(modified&&Array.from(value).length!==1){setTermKeyboardStatus('组合键一次只能发送 1 个字符');focusTermKeyboardInput();return}
-  const payload=modified?applyTermModifiers(value):value+'\r';
-  const connected=inst.ws&&inst.ws.readyState===1;
-  queueTermInput(TERM_ID,payload);
-  input.value='';
-  const preview=value.length>36?value.slice(0,36)+'…':value;
-  setTermKeyboardStatus((connected?'已发送：':'连接恢复后发送：')+preview);
-  try{inst.xterm.scrollToBottom()}catch(e){}
-  focusTermKeyboardInput();
-}
 function termKey(name){
   const seq=TERM_KEY_SEQ[name];
   if(!seq||!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
-  if(name==='Enter'&&termKeyboardExpanded()&&document.getElementById('termKeyboardInput').value){termSendVisibleInput();return}
   queueTermInput(TERM_ID,applyTermModifiers(seq,name));
-  focusTermKeyboardInput();
+  XTERM&&XTERM.focus();
 }
 function termEnsure(){if(!TERM_ID)termNew()}
 function termLabel(id){return TERM_LABELS[id]||('终端 '+id.slice(0,8))}
@@ -1847,7 +1800,15 @@ async function termClose(){
 }
 // 多终端保活:每个终端一个独立容器元素,切换时隐藏/显示(不销毁)
 let TERM_INSTANCES={}; // {term_id: {xterm, fit, ws, el, reconnectDelay, reconnectTimer, closing}}
-function safeFitOf(fit,xterm){try{fit.fit()}catch(e){}}
+function safeFitOf(fit,xterm){
+  const view=document.getElementById('view-term');
+  const el=xterm?.element;
+  // FitAddon 会把隐藏容器算成接近 0 列，并通过 onResize 污染正在运行的 PTY。
+  if(!view?.classList.contains('active')||!el?.isConnected)return false;
+  const rect=el.getBoundingClientRect();
+  if(rect.width<2||rect.height<2)return false;
+  try{fit.fit();return true}catch(e){return false}
+}
 function flushTermInput(id,ws){
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.ws!==ws||ws?.readyState!==1||!inst.pendingInput)return;
@@ -1861,32 +1822,6 @@ function queueTermInput(id,data,notice){
   inst.pendingInput=(inst.pendingInput||'')+data;
   if(notice)inst.pendingNotice=notice;
   flushTermInput(id,inst.ws);
-}
-function enableTermTouchScroll(el,xterm){
-  let lastY=null,remainder=0;
-  const finish=()=>{lastY=null;remainder=0};
-  el.addEventListener('touchstart',e=>{
-    if(e.touches.length!==1){finish();return}
-    lastY=e.touches[0].clientY;remainder=0;
-  },{passive:true});
-  el.addEventListener('touchmove',e=>{
-    if(lastY===null||e.touches.length!==1)return;
-    const y=e.touches[0].clientY;
-    remainder+=lastY-y;lastY=y;
-    const screen=el.querySelector('.xterm-screen');
-    const rowHeight=Math.max(12,(screen?.getBoundingClientRect().height||xterm.rows*18)/Math.max(1,xterm.rows));
-    const lines=remainder>0?Math.floor(remainder/rowHeight):Math.ceil(remainder/rowHeight);
-    if(!lines)return;
-    remainder-=lines*rowHeight;
-    if(xterm.buffer?.active?.type==='alternate'&&screen&&typeof WheelEvent==='function'){
-      const wheel=new WheelEvent('wheel',{deltaY:lines*rowHeight,deltaMode:0,bubbles:true,cancelable:true});
-      screen.dispatchEvent(wheel);
-      if(!wheel.defaultPrevented)xterm.scrollLines(lines);
-    }else{xterm.scrollLines(lines)}
-    e.preventDefault();
-  },{passive:false});
-  el.addEventListener('touchend',finish,{passive:true});
-  el.addEventListener('touchcancel',finish,{passive:true});
 }
 function scheduleTermReconnect(id){
   const inst=TERM_INSTANCES[id];
@@ -1905,7 +1840,7 @@ function scheduleTermReconnect(id){
 function openTermWS(id,xterm){
   const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);if(id===TERM_ID){try{if(termKeyboardExpanded())focusTermKeyboardInput();else xterm.focus()}catch(e){}}};
+  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
   ws.onmessage=ev=>{try{
     const light=document.documentElement.classList.contains('light');
     if(light){
@@ -1937,7 +1872,7 @@ function showTermInstance(id){
   }
   XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;
   safeFitOf(inst.fit,inst.xterm);
-  setTimeout(()=>{try{if(termKeyboardExpanded())focusTermKeyboardInput();else inst.xterm.focus()}catch(e){}},50);
+  setTimeout(()=>{try{if(document.getElementById('view-term')?.classList.contains('active'))inst.xterm.focus()}catch(e){}},50);
 }
 function termSwitch(id){
   if(!id)return;
@@ -1958,7 +1893,6 @@ function termMount(id){
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
-  enableTermTouchScroll(el,xterm);
   xterm.parser.registerOscHandler(52,handleOsc52);
   // 隐藏其他终端的容器
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
@@ -2422,7 +2356,7 @@ function connectSSE(){
 }
 
 function keepFocusedControlVisible(){
-  if(!isCompactScreen()&&!isTouchTerminal())return;
+  if(!isCompactScreen())return;
   const el=document.activeElement;
   if(!el||!el.matches('input,textarea'))return;
   setTimeout(()=>{if(document.activeElement===el)el.scrollIntoView({block:'nearest'})},80);
@@ -2616,12 +2550,9 @@ function bindDelegation(){
     else if(a==='fileSearchOpen')fileSearchOpen(parseInt(it.dataset.idx));
     else if(a==='fileSearchDownload')fileSearchDownload(parseInt(it.dataset.idx))});
   // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)
-  const fitVisibleTerm=()=>{positionTermMobileInput();if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(CURRENT_TERM)positionDrawerBelowHeader();keepFocusedControlVisible()};
+  const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(CURRENT_TERM)positionDrawerBelowHeader();keepFocusedControlVisible()};
   window.addEventListener('resize',fitVisibleTerm);
-  if(window.visualViewport){window.visualViewport.addEventListener('resize',fitVisibleTerm);window.visualViewport.addEventListener('scroll',fitVisibleTerm)}
-  const termKeyboardInput=document.getElementById('termKeyboardInput');
-  termKeyboardInput.addEventListener('focus',()=>setTimeout(fitVisibleTerm,50));
-  termKeyboardInput.addEventListener('blur',()=>setTimeout(fitVisibleTerm,50));
+  if(window.visualViewport)window.visualViewport.addEventListener('resize',fitVisibleTerm);
   document.addEventListener('focusin',keepFocusedControlVisible);
   document.addEventListener('keydown',e=>{if(e.key==='Escape')hfExitFullscreen()});
   document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)hfExitFullscreen(false)});
