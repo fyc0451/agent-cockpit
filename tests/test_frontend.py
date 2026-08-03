@@ -612,11 +612,14 @@ def test_nav_and_toolbar_collapsible():
 def test_h5_foldable_responsive_first_batch():
     """第一批 H5/折叠屏响应式修复的静态回归断言。"""
     js = _inline_js()
-    # 放开缩放(保留 viewport-fit);双击缩放改由 touch-action 压制
+    # 放开缩放(保留 viewport-fit)，且不得在 body 全局限制终端触屏手势
     assert "user-scalable=no" not in HTML
     assert "maximum-scale" not in HTML
     assert "width=device-width, initial-scale=1, viewport-fit=cover" in HTML
-    assert "touch-action:manipulation" in HTML
+    body_rule = re.search(r"(?m)^body\{[^}]*\}", HTML)
+    assert body_rule
+    assert "touch-action:" not in body_rule.group()
+    assert "#termContainer .xterm.enable-mouse-events{touch-action:none" in HTML
     # 移动端/触屏输入框 >=16px,避免 iOS focus 自动缩放
     assert "@media(max-width:900px),(any-pointer:coarse)" in HTML
     assert "input,select,textarea,.set-card input,.set-card select{font-size:16px}" in HTML
