@@ -1,3 +1,4 @@
+import time
 from unittest.mock import call
 
 import herdr_client
@@ -49,3 +50,81 @@ def test_start_agent_reports_missing_executable_before_split(monkeypatch):
     result = herdr_client.start_agent("demo", "/tmp/project", "qoder")
 
     assert result == {"available": True, "error": "qoder 未安装或不在 PATH"}
+
+
+def test_restart_pane_preserves_detected_agent(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: {
+            "panes": [{
+                "pane_id": "w1:p5",
+                "agent": "opencode",
+                "cwd": "/tmp/project",
+            }],
+        },
+    )
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        herdr_client,
+        "_agent_cmd",
+        lambda agent, workdir: f"{agent} {workdir}",
+    )
+    calls = []
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["agent"] == "opencode"
+    assert result["previous_agent"] == "opencode"
+    assert call(
+        [
+            "--session", "demo", "pane", "run", "w1:p5",
+            "cd", "/tmp/project", "&&", "opencode", "/tmp/project",
+        ],
+        timeout=8,
+    ) in calls
+
+
+def test_restart_pane_rejects_unknown_pane_before_sending_keys(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: {"panes": []})
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("pane 未确认前不应发送按键")
+        ),
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result == {"available": True, "error": "找不到 pane: w1:p5"}
+
+
+def test_restart_pane_rejects_unidentified_agent_before_sending_keys(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: {"panes": [{"pane_id": "w1:p5", "agent": None}]},
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("agent 未确认前不应发送按键")
+        ),
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result == {
+        "available": True,
+        "error": "无法识别 pane w1:p5 的 agent，已取消重启",
+    }

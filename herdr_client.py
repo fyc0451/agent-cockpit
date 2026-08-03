@@ -356,7 +356,28 @@ def restart_pane(
         return {"available": False}
     import time
     try:
-        # 1. 先 Esc(取消任何 TUI 子模式/输入),再 Ctrl+C 退出 agent
+        # 1. 在发送退出按键前确认 pane 和 agent，避免检测丢失后误启 Codex。
+        snap = _snapshot_session(session)
+        p = next(
+            (x for x in snap.get("panes", []) if x.get("pane_id") == pane_id),
+            None,
+        )
+        if p is None:
+            return {"available": True, "error": f"找不到 pane: {pane_id}"}
+        previous_agent = p.get("agent")
+        agent = agent or previous_agent
+        if not agent:
+            return {
+                "available": True,
+                "error": f"无法识别 pane {pane_id} 的 agent，已取消重启",
+            }
+        if agent not in {
+            "codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode",
+        }:
+            return {"available": True, "error": f"不支持的 agent: {agent}"}
+        workdir = workdir or p.get("cwd") or str(Path.home())
+
+        # 2. 先 Esc(取消任何 TUI 子模式/输入),再 Ctrl+C 退出 agent
         _run(["--session", session, "pane", "send-keys", pane_id, "Escape"], timeout=3)
         time.sleep(0.5)
         _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
@@ -364,17 +385,12 @@ def restart_pane(
         # 再发一次确保退到 shell(agent 可能需要两次 C-c)
         _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
         time.sleep(1)
-        # 2. 清空当前输入行(防有残留):Ctrl+U 清行(herdr 可能不支持,失败忽略)
+        # 3. 清空当前输入行(防有残留):Ctrl+U 清行(herdr 可能不支持,失败忽略)
         try:
             _run(["--session", session, "pane", "send-keys", pane_id, "C-u"], timeout=3)
             time.sleep(0.3)
         except RuntimeError:
             pass
-        # 3. 从 snapshot 拿 cwd 和 agent 类型
-        snap = _snapshot_session(session)
-        p = next((x for x in snap.get("panes", []) if x.get("pane_id") == pane_id), {})
-        workdir = workdir or p.get("cwd", str(Path.home()))
-        agent = agent or p.get("agent") or "codex"
         # 4. 构造启动命令(用 _agent_cmd 统一处理所有 agent 类型)
         if agent == "codex" and resume:
             codex_bin = shlex.quote(_find_agent_bin("codex"))
@@ -387,7 +403,8 @@ def restart_pane(
         _run(["--session", session, "pane", "run", pane_id] + shlex.split(cmd_str), timeout=8)
         return {
             "available": True, "restarted": True, "pane_id": pane_id,
-            "agent": agent, "cmd": cmd_str, "resume": resume,
+            "agent": agent, "previous_agent": previous_agent,
+            "cmd": cmd_str, "resume": resume,
         }
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
