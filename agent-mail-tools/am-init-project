@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# 为一个 canonical 项目路径注册 Cockpit 支持的 Agent Mail 身份。
+set -u
+
+TOOLS_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REGISTER="$TOOLS_DIR/am-register"
+[[ -x "$REGISTER" ]] || { echo "错误：找不到 $REGISTER" >&2; exit 1; }
+
+AGENTS=(
+  "codex|codex-cli|gpt-5"
+  "kimi|kimi-work|kimi"
+  "claude|claude-code|unknown"
+  "qodercn|qoder-cn|unknown"
+  "opencode|opencode|unknown"
+  "grok|grok|unknown"
+)
+
+PROJECT="$PWD"
+INSTANCE="main"
+ONLY=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project) PROJECT="$2"; shift 2 ;;
+    --instance) INSTANCE="$2"; shift 2 ;;
+    --only) ONLY="$2"; shift 2 ;;
+    -h|--help)
+      echo "用法: am-init-project [--project /path] [--instance main] [--only codex,kimi]"
+      exit 0 ;;
+    *) echo "未知参数：$1" >&2; exit 1 ;;
+  esac
+done
+
+PROJECT="$(CDPATH= cd -- "$PROJECT" 2>/dev/null && pwd)" || {
+  echo "错误：项目目录不存在：$PROJECT" >&2
+  exit 1
+}
+echo "项目：$PROJECT"
+echo "实例：$INSTANCE"
+echo "----------------------------------------"
+
+ok=0
+skip=0
+fail=0
+for entry in "${AGENTS[@]}"; do
+  IFS='|' read -r agent program model <<< "$entry"
+  if [[ -n "$ONLY" ]]; then
+    case ",$ONLY," in
+      *",$agent,"*) ;;
+      *) continue ;;
+    esac
+  fi
+  if output=$("$REGISTER" \
+      --agent "$agent" --instance "$INSTANCE" --project "$PROJECT" \
+      --program "$program" --model "$model" 2>&1); then
+    if [[ "$output" == *"已注册（复用）"* ]]; then
+      name="$(printf '%s\n' "$output" | sed -n 's/^已注册（复用）: \([^ ]*\).*/\1/p' | head -n 1)"
+      printf "  %-10s ↻ 复用 %s\n" "$agent" "${name:-?}"
+      skip=$((skip + 1))
+    else
+      name="$(printf '%s\n' "$output" | sed -n 's/^注册成功: \([^ ]*\).*/\1/p' | head -n 1)"
+      printf "  %-10s ✓ 注册 %s\n" "$agent" "${name:-?}"
+      ok=$((ok + 1))
+    fi
+  else
+    printf "  %-10s ✗ 失败\n" "$agent"
+    printf '%s\n' "$output" | head -n 2 | sed 's/^/      /'
+    fail=$((fail + 1))
+  fi
+done
+
+echo "----------------------------------------"
+echo "完成：新注册 $ok / 复用 $skip / 失败 $fail"
+echo "收信：mail-recv --agent <agent> --instance $INSTANCE --project \"$PROJECT\""
+echo "发信：mail-send --agent <agent> --instance $INSTANCE --project \"$PROJECT\" --to <花名> --subject ... --body ..."
+[[ "$fail" -gt 0 ]] && exit 1
+exit 0

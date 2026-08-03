@@ -222,6 +222,8 @@ _PROGRAM_ALIASES = {
     "codex-cli": ("codex-cli", "codex"),
     "kimi": ("kimi", "kimi-work"),
     "kimi-work": ("kimi-work", "kimi"),
+    "claude": ("claude", "claude-code"),
+    "claude-code": ("claude-code", "claude"),
     "qoder": ("qoder", "qodercli", "qodercn", "qoder-cli", "qoder-cn"),
     "qodercli": ("qodercli", "qodercn", "qoder-cn", "qoder", "qoder-cli"),
     "qodercn": ("qodercn", "qoder-cn", "qodercli", "qoder", "qoder-cli"),

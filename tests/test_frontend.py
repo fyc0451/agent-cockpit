@@ -186,6 +186,12 @@ def test_setup_workspace_supports_roles_tasks_and_automatic_worktrees():
     assert "当前目录不是 Git 仓库" in js
 
 
+def test_old_session_mail_project_can_be_selected_in_ui():
+    assert "/mail-project" in HTML
+    assert "needs_selection" in HTML
+    assert "window.prompt" in HTML
+
+
 def test_setup_workspace_handles_herdr_onboarding_in_visible_terminal():
     js = _inline_js()
     assert "herdr_onboarding_required" in js

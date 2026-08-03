@@ -71,7 +71,8 @@ curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.
 インストーラは `~/agent-cockpit` にクローンし、仮想環境の作成と依存の
 インストールを行い、Linux では `agent-cockpit.service`、macOS では
 LaunchAgent を登録します。起動に失敗したら `~/agent-cockpit/doctor.sh` を
-実行してください。
+実行してください。同梱の Agent Mail 補助コマンドは `~/.local/bin` に安全に
+リンクされ、既存の通常ファイルやユーザー独自のシンボリックリンクは上書きしません。
 
 ### 手動インストール
 
@@ -172,6 +173,9 @@ set -a; source .env; set +a
 - **+ ワンクリックワークスペース**:セッション作成 → pane 分割 → agent 起動を
   自動化。Agent Mail があれば identity 登録と通知も行います。**📧 通信初期化**で
   セッション内の全 agent の agent-mail identity を一括登録できます。
+- 各セッションは 1 つの Agent Mail プロジェクトを永続化します。同じ clone の
+  linked worktree は main worktree に統合し、曖昧な旧セッションは最初の pane cwd
+  から推測せず、選択を求めます。
 
 ### メッセージ
 
@@ -226,6 +230,8 @@ Agent Mail DB は新しい `~/.local/share/mcp_agent_mail/` と従来の
 `~/dashboard-data/` に一度だけ生成され、
 リポジトリには入りません。ユーザー設定は `~/dashboard-data/settings.json` に、
 端末フォントサイズなどのデバイス固有の設定はブラウザの localStorage に保存されます。
+通信プロジェクトの紐付けは `~/dashboard-data/mail-projects.json` に保存され、identity
+token は含みません。
 
 ## アップグレード、診断、アンインストール
 

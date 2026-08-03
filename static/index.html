@@ -2016,10 +2016,24 @@ async function deleteSession(name){
   try{await api(`/api/herdr/session/${encodeURIComponent(name)}`,{method:'DELETE'});toast('已删除 '+name);loadSessionsView()}catch(e){toast(e)}
 }
 async function initSessionMail(name){
-  toast('正在初始化 '+name+' 的通信身份...');
   try{
-    const r=await api(`/api/herdr/session/${encodeURIComponent(name)}/init-mail`,{method:'POST'});
+    const base=`/api/herdr/session/${encodeURIComponent(name)}`;
+    const state=await api(base+'/mail-project');
+    const candidates=state.candidates||[];
+    const choices=candidates.map((item,i)=>`${i+1}. ${item.human_key}`).join('\n');
+    const message=state.bound
+      ?`当前通信项目：\n${state.project}\n\n直接确定保持；输入另一绝对路径可显式重新绑定。`
+      :`该 session 尚未绑定通信项目。${choices?'\n\n已注册候选：\n'+choices:''}\n\n请输入候选序号或项目绝对路径：`;
+    const raw=window.prompt(message,state.project||state.suggested_project||'');
+    if(raw===null)return;
+    let project=raw.trim();
+    if(/^\d+$/.test(project)&&candidates[Number(project)-1])project=candidates[Number(project)-1].human_key;
+    if(!project){toast('未选择通信项目');return}
+    toast('正在初始化 '+name+' 的通信身份...');
+    const body={project,replace:Boolean(state.bound&&project!==state.project)};
+    const r=await api(base+'/init-mail',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(r.ok){toast('✅ 通信已初始化: '+r.project);loadSessionsView()}
+    else if(r.needs_selection){toast('请选择通信项目后重试')}
     else{toast('初始化失败: '+(r.error||r.detail||'未知'))}
   }catch(e){toast('初始化失败: '+e)}
 }

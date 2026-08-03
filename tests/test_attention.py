@@ -195,14 +195,14 @@ def test_overview_degrades_when_agent_mail_query_breaks(monkeypatch):
     assert "查询失败" in response.json()["agent_mail"]["reason"]
 
 
-def test_identity_lookup_falls_back_without_agent_mail(monkeypatch):
+def test_identity_lookup_does_not_fabricate_without_agent_mail(monkeypatch):
     monkeypatch.setattr(
         server.db,
         "identity_by_cwd",
         lambda *_: (_ for _ in ()).throw(RuntimeError("missing DB")),
     )
 
-    assert server._identity_name("/project", "codex") == "codex-main"
+    assert server._identity_name("/project", "codex") is None
 
 
 def test_attention_keeps_mail_readable_when_hub_is_down(monkeypatch):

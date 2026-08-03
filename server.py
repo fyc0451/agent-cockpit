@@ -33,6 +33,7 @@ import herdr_client
 import tasks
 import uploads
 import files
+import mail_projects
 import terminal
 import web_push
 import settings
@@ -67,9 +68,22 @@ VALID_COLLAB_MODES = {"quick", "develop_review", "parallel", "custom"}
 VALID_WORKSPACE_ROLES = {"lead", "developer", "reviewer", "researcher"}
 VALID_WORKSPACE_STRATEGIES = {"auto", "shared", "isolated"}
 VALID_PANE_SEND_MODES = {"send", "prompt", "keys"}
+MAIL_AGENT_NAMES = {
+    "codex-cli": "codex",
+    "kimi-work": "kimi",
+    "claude-code": "claude",
+    "qoder": "qodercn",
+    "qodercli": "qodercn",
+    "qodercn": "qodercn",
+    "qoder-cn": "qodercn",
+}
 SESSION_START_TIMEOUT = 20.0
 SESSION_BOOTSTRAP_OUTPUT_LIMIT = 16 * 1024
-AGENT_MAIL_INIT_SCRIPT = Path.home() / "agent-mail-tools" / "am-init-project"
+ROOT_DIR = Path(__file__).resolve().parent
+AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
+AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
+MAIL_SEND_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-send"
+MAIL_RECV_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-recv"
 _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
 
@@ -148,44 +162,48 @@ def _validate_pane_id(pane_id: str) -> None:
 
 
 def _identity_record(cwd: str, agent_type: str) -> dict[str, Any] | None:
-    """按 pane cwd 查身份；worktree cwd 查不到时回退主 worktree。"""
+    """只按已确定的 Agent Mail human key 查真实身份。"""
     try:
-        ident = db.identity_by_cwd(cwd, agent_type)
+        return db.identity_by_cwd(cwd, agent_type)
     except Exception:
-        ident = None
-    if ident:
-        return ident
-    try:
-        listed = _git(Path(cwd), "worktree", "list", "--porcelain")
-    except (ValueError, OSError):
         return None
-    worktrees = [
-        Path(line.removeprefix("worktree ")).resolve()
-        for line in listed.splitlines() if line.startswith("worktree ")
-    ]
-    resolved_cwd = Path(cwd).resolve()
-    current_root = max(
-        (root for root in worktrees if resolved_cwd == root or root in resolved_cwd.parents),
-        key=lambda root: len(root.parts),
-        default=resolved_cwd,
-    )
-    relative = resolved_cwd.relative_to(current_root)
-    for root in worktrees:
-        candidate = (root / relative).resolve()
-        if candidate == resolved_cwd:
-            continue
-        try:
-            ident = db.identity_by_cwd(str(candidate), agent_type)
-        except Exception:
-            ident = None
-        if ident:
-            return ident
-    return None
 
 
-def _identity_name(cwd: str, agent_type: str) -> str:
+def _identity_name(cwd: str, agent_type: str) -> str | None:
     ident = _identity_record(cwd, agent_type)
-    return ident["name"] if ident else f"{agent_type}-main"
+    return ident["name"] if ident else None
+
+
+def _identity_hint(
+    name: str, project: str, agent_type: str, *, roster: str = "", registered: bool = False,
+) -> str:
+    send = shlex.quote(str(MAIL_SEND_SCRIPT))
+    recv = shlex.quote(str(MAIL_RECV_SCRIPT))
+    project_arg = shlex.quote(project)
+    mail_agent = MAIL_AGENT_NAMES.get(agent_type, agent_type)
+    prefix = (
+        "[agent-mail 身份告知] 你的邮箱身份已注册:"
+        if registered else "[agent-mail 身份告知] "
+    )
+    hint = (
+        f"{prefix}花名={name},项目={project}。"
+        f"发消息: {send} --agent {mail_agent} --instance main --project {project_arg} "
+        "--to <花名> --subject \"...\" --body \"...\";"
+        f"收消息: {recv} --agent {mail_agent} --instance main --project {project_arg} --unread。"
+    )
+    if roster:
+        hint += f"协作者身份: {roster}。"
+    return hint
+
+
+def _collaborator_hint(name: str, project: str) -> str:
+    send = shlex.quote(str(MAIL_SEND_SCRIPT))
+    project_arg = shlex.quote(project)
+    return (
+        f"协作者 {name} 已接入 agent-mail。"
+        f"发消息: {send} --agent <你的类型> --instance main --project {project_arg} "
+        f"--to {name} --subject \"...\" --body \"...\""
+    )
 
 
 def _agent_mail_status() -> dict[str, Any]:
@@ -299,6 +317,11 @@ class SetupWorkspaceReq(BaseModel):
 
 class InspectWorkspaceReq(BaseModel):
     workdir: str
+
+
+class MailProjectReq(BaseModel):
+    project: str | None = None
+    replace: bool = False
 
 
 class LoginReq(BaseModel):
@@ -794,7 +817,7 @@ def api_herdr_pane_summary(
 def api_herdr_pane_identity(session: str, pane_id: str):
     """查 herdr agent 对应的 agent-mail 身份(@ 注入协作者信息用)。
 
-    用 pane 的 cwd + agent 类型,反查 agent-mail 身份(花名/项目)。
+    用 session 绑定的 canonical human key + agent 类型反查真实身份。
     """
     _validate_session_name(session)
     _validate_pane_id(pane_id)
@@ -808,26 +831,35 @@ def api_herdr_pane_identity(session: str, pane_id: str):
     agent_type = pane.get("agent") or ""
     if not cwd or not agent_type:
         return {"found": False, "reason": "pane 无 cwd 或 agent 类型"}
-    ident = _identity_record(cwd, agent_type)
+    mail_status = db.status()
+    if not mail_status["available"]:
+        return {"found": False, "unavailable": True, "reason": mail_status["reason"]}
+    state = _mail_project_state(session)
+    if not state["bound"]:
+        return {
+            "found": False,
+            "needs_project": True,
+            "reason": "该 session 尚未选择 Agent Mail 通信项目",
+            **state,
+        }
+    project = state["project"]
+    ident = _identity_record(project, agent_type)
     if not ident:
         return {
             "found": False,
-            "reason": "Agent Mail 不可用或该 pane 尚未注册身份",
+            "needs_registration": True,
+            "reason": "该通信项目下没有此 agent 的有效身份（未注册或已 retired）",
+            "project": project,
         }
     return {
         "found": True,
         "name": ident["name"],
         "program": ident["program"],
         "model": ident.get("model", ""),
-        "project_key": ident["human_key"],
+        "project_key": project,
         "session": session,
         "cwd": cwd,
-        "mail_hint": (
-            f'协作者 {ident["name"]} 已接入 agent-mail。'
-            f'发消息: mail-send --agent <你的类型> --instance main --project "{ident["human_key"]}" '
-            f'--to {ident["name"]} --subject "..." --body "..." '
-            f'(mail-send 已在 PATH 中,需在项目目录 {ident["human_key"]} 下执行)'
-        ),
+        "mail_hint": _collaborator_hint(ident["name"], project),
     }
 
 
@@ -869,7 +901,10 @@ def api_herdr_session_stop(name: str):
 def api_herdr_session_delete(name: str):
     """删除已停止的 herdr session。"""
     _validate_session_name(name)
-    return herdr_client.delete_session(name)
+    result = herdr_client.delete_session(name)
+    if result.get("deleted"):
+        mail_projects.unbind(name)
+    return result
 
 
 def _git(workdir: Path, *args: str) -> str:
@@ -892,6 +927,217 @@ def _git_root(workdir: Path) -> Path | None:
         return Path(_git(workdir, "rev-parse", "--show-toplevel")).resolve()
     except ValueError:
         return None
+
+
+def _git_common_dir(workdir: Path) -> Path | None:
+    if not workdir.is_dir():
+        return None
+    try:
+        raw = _git(
+            workdir, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        return Path(raw).resolve()
+    except ValueError:
+        try:
+            raw = _git(workdir, "rev-parse", "--git-common-dir")
+            path = Path(raw)
+            return (path if path.is_absolute() else workdir / path).resolve()
+        except ValueError:
+            return None
+
+
+def _canonical_mail_project(workdir: Path) -> str:
+    """同一 clone 的 linked worktree 统一映射到主 worktree root。"""
+    resolved = workdir.expanduser().resolve()
+    common_dir = _git_common_dir(resolved)
+    if common_dir is None:
+        return str(resolved)
+    if common_dir.name == ".git" and common_dir.parent.is_dir():
+        return str(common_dir.parent.resolve())
+    try:
+        listed = _git(resolved, "worktree", "list", "--porcelain")
+    except ValueError:
+        root = _git_root(resolved)
+        return str(root or resolved)
+    first = next(
+        (
+            Path(line.removeprefix("worktree ")).resolve()
+            for line in listed.splitlines()
+            if line.startswith("worktree ")
+        ),
+        None,
+    )
+    return str(first or _git_root(resolved) or resolved)
+
+
+def _session_record(name: str) -> dict[str, Any]:
+    record = next(
+        (item for item in herdr_client.list_sessions() if item.get("name") == name),
+        None,
+    )
+    if not record:
+        raise HTTPException(404, f"session 不存在: {name}")
+    session_dir = record.get("directory") or ""
+    if not session_dir:
+        raise HTTPException(409, f"session {name} 缺少 session_dir，无法安全绑定通信项目")
+    return record
+
+
+def _same_mail_project_family(project: str, session_path: str) -> bool:
+    candidate = Path(project).expanduser()
+    source = Path(session_path).expanduser()
+    if not candidate.is_absolute() or not source.is_absolute():
+        return False
+    candidate = candidate.resolve()
+    source = source.resolve()
+    candidate_common = _git_common_dir(candidate)
+    source_common = _git_common_dir(source)
+    if candidate_common is not None or source_common is not None:
+        return (
+            candidate_common is not None
+            and source_common is not None
+            and candidate_common == source_common
+        )
+    return candidate == source
+
+
+def _session_pane_paths(name: str) -> list[str]:
+    snap = herdr_client.snapshot()
+    sess = next(
+        (item for item in snap.get("sessions", []) if item.get("session") == name),
+        None,
+    )
+    panes = sess.get("panes", []) if sess else [
+        pane for pane in snap.get("panes", []) if pane.get("session") == name
+    ]
+    return [pane["cwd"] for pane in panes if pane.get("cwd")]
+
+
+def _mail_project_candidates(
+    name: str, session_dir: str, pane_paths: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    status = db.status()
+    if not status["available"]:
+        return []
+    paths = [session_dir, *(pane_paths if pane_paths is not None else _session_pane_paths(name))]
+    try:
+        projects = db.list_projects()
+    except Exception:
+        return []
+    candidates = []
+    seen = set()
+    for project in projects:
+        human_key = project.get("human_key") or ""
+        if not human_key or human_key in seen:
+            continue
+        if any(_same_mail_project_family(human_key, path) for path in paths):
+            candidates.append(project)
+            seen.add(human_key)
+    return candidates
+
+
+def _mail_project_suggestion(pane_paths: list[str]) -> str:
+    """只有所有带 cwd 的 pane 指向同一项目时才给出预填建议。"""
+    projects = {
+        _canonical_mail_project(Path(path))
+        for path in pane_paths
+        if Path(path).expanduser().is_dir()
+    }
+    return next(iter(projects)) if len(projects) == 1 else ""
+
+
+def _mail_project_state(name: str) -> dict[str, Any]:
+    record = _session_record(name)
+    session_dir = str(Path(record["directory"]).expanduser().resolve())
+    project = mail_projects.get(name, session_dir)
+    binding_invalidated = False
+    if project and db.status()["available"]:
+        try:
+            active_projects = {item["human_key"] for item in db.list_projects()}
+        except Exception:
+            active_projects = None
+        if active_projects is not None and (
+            project not in active_projects or not Path(project).is_dir()
+        ):
+            mail_projects.unbind(name, session_dir)
+            project = None
+            binding_invalidated = True
+    if project:
+        return {
+            "session": name,
+            "session_dir": session_dir,
+            "bound": True,
+            "project": project,
+            "candidates": [],
+            "needs_selection": False,
+            "suggested_project": project,
+            "migrated": False,
+            "binding_invalidated": False,
+        }
+    pane_paths = _session_pane_paths(name)
+    candidates = _mail_project_candidates(name, session_dir, pane_paths)
+    if len(candidates) == 1:
+        migrated = True
+        try:
+            project = mail_projects.bind(
+                name, session_dir, candidates[0]["human_key"]
+            )
+        except ValueError:
+            project = mail_projects.get(name, session_dir)
+            if not project:
+                raise
+            migrated = False
+        return {
+            "session": name,
+            "session_dir": session_dir,
+            "bound": True,
+            "project": project,
+            "candidates": candidates,
+            "needs_selection": False,
+            "suggested_project": project,
+            "migrated": migrated,
+            "binding_invalidated": binding_invalidated,
+        }
+    return {
+        "session": name,
+        "session_dir": session_dir,
+        "bound": False,
+        "project": None,
+        "candidates": candidates,
+        "needs_selection": True,
+        "suggested_project": _mail_project_suggestion(pane_paths) if not candidates else "",
+        "migrated": False,
+        "binding_invalidated": binding_invalidated,
+    }
+
+
+def _bind_mail_project(
+    name: str, project: str, *, replace: bool = False,
+) -> tuple[str, str]:
+    record = _session_record(name)
+    session_dir = str(Path(record["directory"]).expanduser().resolve())
+    selected = Path(project).expanduser()
+    if not selected.is_absolute():
+        raise HTTPException(400, "Agent Mail 项目必须是绝对路径")
+    selected = selected.resolve()
+    if not selected.is_dir():
+        raise HTTPException(400, f"Agent Mail 项目目录不存在: {selected}")
+    candidates = _mail_project_candidates(name, session_dir)
+    candidate = next(
+        (
+            item["human_key"] for item in candidates
+            if Path(item["human_key"]).expanduser().resolve() == selected
+        ),
+        None,
+    )
+    project_key = candidate or _canonical_mail_project(selected)
+    try:
+        project_key = mail_projects.bind(
+            name, session_dir, project_key, replace=replace
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return project_key, session_dir
 
 
 def _ensure_worktree(
@@ -1192,8 +1438,23 @@ def _setup_workspace(req: SetupWorkspaceReq):
     # 0. 检查 session 是否存在,不存在则自动创建
     sessions = herdr_client.list_sessions()
     states = {s["name"]: s.get("status") for s in sessions}
+    active_session_record = next(
+        (s for s in sessions if s.get("name") == req.session), None
+    )
     session_created = req.session not in states
     session_started = states.get(req.session) == "running"
+    canonical_project = _canonical_mail_project(Path(req.workdir))
+    initial_session_dir = (
+        (active_session_record or {}).get("directory")
+        or str(Path(req.workdir).expanduser().resolve())
+    )
+    existing_project = mail_projects.get(req.session, initial_session_dir)
+    if existing_project and existing_project != canonical_project:
+        raise HTTPException(
+            409,
+            f"session {req.session} 已绑定通信项目 {existing_project}；"
+            "如需更换，请在会话页显式重新绑定",
+        )
     if not session_started and herdr_client.onboarding_required():
         return {
             "ok": False,
@@ -1230,11 +1491,17 @@ def _setup_workspace(req: SetupWorkspaceReq):
             )
             deadline = time.monotonic() + SESSION_START_TIMEOUT
             while time.monotonic() < deadline:
-                if any(
-                    s["name"] == req.session and s.get("status") == "running"
-                    for s in herdr_client.list_sessions()
-                ):
+                current_sessions = herdr_client.list_sessions()
+                running_record = next(
+                    (
+                        s for s in current_sessions
+                        if s["name"] == req.session and s.get("status") == "running"
+                    ),
+                    None,
+                )
+                if running_record:
                     session_started = True
+                    active_session_record = running_record
                     break
                 time.sleep(0.25)
             if not session_started:
@@ -1282,6 +1549,18 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 "started": [],
                 "terminal_output": _pty_output_tail(pty_output),
             }
+    session_dir = (
+        (active_session_record or {}).get("directory")
+        or str(Path(req.workdir).expanduser().resolve())
+    )
+    mail_binding_ok = True
+    try:
+        mail_projects.bind(req.session, session_dir, canonical_project)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        mail_binding_ok = False
+        warnings.append(f"通信项目绑定保存失败({mail_projects.STATE_PATH}): {exc}")
     results = []
     started = []
     failed = []
@@ -1333,18 +1612,22 @@ def _setup_workspace(req: SetupWorkspaceReq):
     # 3. 注册身份(am-init-project)
     reg_ok = False
     mail_status: dict[str, Any]
-    if not AGENT_MAIL_INIT_SCRIPT.is_file():
+    if not mail_binding_ok:
+        mail_status = {"available": False, "reason": "通信项目绑定未保存，已跳过身份注册"}
+    elif not AGENT_MAIL_INIT_SCRIPT.is_file():
         mail_status = {"available": False, "reason": "Agent Mail 未安装，已跳过身份注册"}
     else:
         try:
             r = subprocess.run(
-                [str(AGENT_MAIL_INIT_SCRIPT)], cwd=req.workdir,
+                [str(AGENT_MAIL_INIT_SCRIPT), "--project", canonical_project],
+                cwd=canonical_project,
                 capture_output=True, text=True, timeout=60,
             )
             reg_ok = r.returncode == 0
+            registration_error = (r.stderr or r.stdout)[-300:]
             mail_status = {
                 "available": reg_ok,
-                "reason": None if reg_ok else (r.stderr[-300:] or "am-init-project 失败"),
+                "reason": None if reg_ok else (registration_error or "am-init-project 失败"),
             }
         except Exception as exc:
             mail_status = {"available": False, "reason": str(exc)}
@@ -1359,23 +1642,26 @@ def _setup_workspace(req: SetupWorkspaceReq):
             None,
         )
     if sess:
-        roster = "；".join(
-            f"{plan['agent']}={_identity_name(req.workdir, plan['agent'])}"
+        identities = {
+            plan["agent"]: _identity_name(canonical_project, plan["agent"])
             for plan in plans
+        }
+        roster = "；".join(
+            f"{agent}={identity}"
+            for agent, identity in identities.items() if identity
         )
         for p in sess.get("panes", []):
             atype = p.get("agent")
             pid = p.get("pane_id")
             if not atype or not pid:
                 continue
-            my_name = _identity_name(req.workdir, atype)
-            hint = (
-                "[agent-mail 身份告知] 花名={name},项目={proj}。"
-                "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
-                "--to <花名> --subject \"...\" --body \"...\";"
-                "收消息: mail-recv --agent {ag} --instance main --project \"{proj}\" --unread。"
-                "协作者身份: {roster}。"
-            ).format(name=my_name, proj=req.workdir, ag=atype, roster=roster)
+            my_name = _identity_name(canonical_project, atype)
+            if not my_name:
+                warnings.append(f"{atype} 身份未注册或已 retired，未发送身份告知")
+                continue
+            hint = _identity_hint(
+                my_name, canonical_project, atype, roster=roster
+            )
             herdr_client.pane_send(req.session, pid, hint, "prompt")
             notified.append(f"{atype}→{my_name}")
     return {
@@ -1384,7 +1670,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         "started": started, "failed": failed, "results": results, "registered": reg_ok,
         "notified": notified, "briefed": briefed, "agent_mail": mail_status,
         "mode": req.mode, "workspaces": plans, "warnings": warnings,
-        "closed_panes": closed_panes,
+        "closed_panes": closed_panes, "mail_project": canonical_project,
     }
 
 
@@ -1408,9 +1694,19 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
     _validate_session_name(session)
     _validate_pane_id(pane_id)
     snap = herdr_client.snapshot()
-    p = next((x for s in snap.get("sessions", [])
-              if s.get("session") == session
-              for x in s.get("panes", []) if x.get("pane_id") == pane_id), None)
+    p = next(
+        (
+            x for s in snap.get("sessions", []) if s.get("session") == session
+            for x in s.get("panes", []) if x.get("pane_id") == pane_id
+        ),
+        None,
+    ) or next(
+        (
+            x for x in snap.get("panes", [])
+            if x.get("session") == session and x.get("pane_id") == pane_id
+        ),
+        None,
+    )
     if not p:
         raise HTTPException(404, "pane 不存在")
     cwd = p.get("cwd") or ""
@@ -1422,67 +1718,85 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
     mail_status = db.status()
     if not mail_status["available"]:
         return {"ok": False, "unavailable": True, "error": mail_status["reason"]}
-    my_name = _identity_name(cwd, agent_type)
-    hint = (
-        "[agent-mail 身份告知] 花名={name},项目={proj}。"
-        "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
-        "--to <花名> --subject \"...\" --body \"...\";"
-        "收消息: mail-recv --agent {ag} --instance main --project \"{proj}\" --unread。"
-    ).format(name=my_name, proj=cwd, ag=agent_type)
+    state = _mail_project_state(session)
+    if not state["bound"]:
+        return {
+            "ok": False,
+            "code": "mail_project_required",
+            "error": "请先为该 session 选择通信项目",
+            **state,
+        }
+    project = state["project"]
+    my_name = _identity_name(project, agent_type)
+    if not my_name:
+        return {
+            "ok": False,
+            "needs_registration": True,
+            "project": project,
+            "error": "该通信项目下没有此 agent 的有效身份（未注册或已 retired）",
+        }
+    hint = _identity_hint(my_name, project, agent_type)
     result = herdr_client.pane_send(session, pane_id, hint, "prompt")
     return {"ok": "error" not in result, "pane_id": pane_id, "agent": agent_type,
-            "name": my_name, "result": result}
+            "name": my_name, "project": project, "result": result}
+
+
+@app.get("/api/herdr/session/{name}/mail-project")
+def api_herdr_session_mail_project(name: str):
+    """查询 session 的 canonical Agent Mail 项目和旧数据候选。"""
+    _validate_session_name(name)
+    return _mail_project_state(name)
 
 
 @app.post("/api/herdr/session/{name}/init-mail")
-def api_herdr_session_init_mail(name: str):
-    """给 session 的项目目录注册全套 agent-mail 身份,并通知各 agent pane 它们的身份。
-
-    流程:取 session cwd → am-init-project 注册 → 遍历 agent pane,
-    给每个发一条身份告知 prompt(让它知道自己的花名 + 怎么收发消息)。
-    """
-    import subprocess
+def api_herdr_session_init_mail(name: str, req: MailProjectReq | None = None):
+    """用 session 已绑定的 human key 注册身份并通知 agent pane。"""
     _validate_session_name(name)
+    if req and req.project:
+        project, _ = _bind_mail_project(name, req.project, replace=req.replace)
+    else:
+        state = _mail_project_state(name)
+        if not state["bound"]:
+            return {
+                "ok": False,
+                "code": "mail_project_required",
+                "error": "请选择该 session 使用的 Agent Mail 通信项目",
+                **state,
+            }
+        project = state["project"]
     snap = herdr_client.snapshot()
     sess = next((s for s in snap.get("sessions", []) if s.get("session") == name), None)
     if not sess:
         raise HTTPException(404, f"session 不存在: {name}")
-    cwd = ""
-    for p in sess.get("panes", []):
-        cwd = p.get("cwd") or ""
-        if cwd:
-            break
-    if not cwd:
-        raise HTTPException(400, "该 session 无 cwd,无法注册")
     if not AGENT_MAIL_INIT_SCRIPT.is_file():
         return {"ok": False, "unavailable": True, "error": "Agent Mail 未安装"}
     try:
         r = subprocess.run(
-            [str(AGENT_MAIL_INIT_SCRIPT)], cwd=cwd,
+            [str(AGENT_MAIL_INIT_SCRIPT), "--project", project], cwd=project,
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:
-            return {"ok": False, "project": cwd, "error": r.stderr[-300:] or "am-init-project 失败"}
+            detail = (r.stderr or r.stdout)[-300:]
+            return {"ok": False, "project": project, "error": detail or "am-init-project 失败"}
         # 注册成功后,通知各 agent pane 它们的身份
         notified = []
+        missing_identities = []
         for p in sess.get("panes", []):
             agent_type = p.get("agent")
             pane_id = p.get("pane_id")
             if not agent_type or not pane_id:
                 continue
-            my_name = _identity_name(cwd, agent_type)
-            hint = (
-                "[agent-mail 身份告知] 你的邮箱身份已注册:花名={name},项目={proj}。"
-                "发消息: mail-send --agent {ag} --instance main --project \"{proj}\" "
-                "--to <对方花名> --subject \"...\" --body \"...\";"
-                "收消息: mail-recv --agent {ag} --instance main --project \"{proj}\" --unread。"
-                "发信后对方 pane 会自动收到通知。"
-            ).format(name=my_name, proj=cwd, ag=agent_type)
+            my_name = _identity_name(project, agent_type)
+            if not my_name:
+                missing_identities.append(agent_type)
+                continue
+            hint = _identity_hint(my_name, project, agent_type, registered=True)
             herdr_client.pane_send(name, pane_id, hint, "prompt")
             notified.append(f"{agent_type}({pane_id})→{my_name}")
         return {
-            "ok": True, "project": cwd,
+            "ok": True, "project": project,
             "notified": notified,
+            "missing_identities": missing_identities,
             "output": r.stdout[-300:] if r.stdout else "",
         }
     except Exception as e:

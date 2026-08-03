@@ -5,7 +5,10 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ("install.sh", "upgrade.sh", "uninstall.sh", "doctor.sh", "launchd.sh")
+SCRIPTS = (
+    "install.sh", "upgrade.sh", "uninstall.sh", "doctor.sh", "launchd.sh",
+    "install-agent-mail-tools.sh",
+)
 DOCS = ("SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "CHANGELOG.md")
 
 
@@ -173,6 +176,56 @@ def test_agent_mail_is_documented_and_diagnosed_as_optional():
     assert "XDG_DATA_HOME" in doctor
     assert 'warn "缺少 Agent Mail 数据库' in doctor
     assert 'fail "缺少 Agent Mail 数据库' not in doctor
+
+
+def test_agent_mail_helpers_are_packaged_and_safely_linked():
+    tools = ROOT / "agent-mail-tools"
+    for name in ("am-register", "am-init-project", "mail-send", "mail-recv"):
+        path = tools / name
+        assert path.is_file(), f"missing Agent Mail helper: {name}"
+        assert path.stat().st_mode & 0o111, f"Agent Mail helper is not executable: {name}"
+    assert (tools / "am_common.py").is_file()
+    for name in ("install.sh", "upgrade.sh"):
+        script = (ROOT / name).read_text()
+        assert '"$INSTALL_DIR/install-agent-mail-tools.sh" "$INSTALL_DIR"' in script
+    linker = (ROOT / "install-agent-mail-tools.sh").read_text()
+    assert '[[ -f "$target" && ! -L "$target" ]]' in linker
+
+
+def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path):
+    install_dir = tmp_path / "install"
+    tools = install_dir / "agent-mail-tools"
+    tools.mkdir(parents=True)
+    for name in ("am-register", "am-init-project", "mail-send", "mail-recv"):
+        path = tools / name
+        path.write_text("#!/usr/bin/env bash\n")
+        path.chmod(0o755)
+    home = tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    legacy_dir = home / "agent-mail-tools"
+    custom_dir = tmp_path / "custom"
+    bin_dir.mkdir(parents=True)
+    legacy_dir.mkdir(parents=True)
+    custom_dir.mkdir()
+    ordinary = bin_dir / "mail-send"
+    ordinary.write_text("keep\n")
+    custom = custom_dir / "mail-recv"
+    custom.write_text("custom\n")
+    (bin_dir / "mail-recv").symlink_to(custom)
+    legacy = legacy_dir / "am-init-project"
+    legacy.write_text("legacy\n")
+    (bin_dir / "am-init-project").symlink_to(legacy)
+
+    result = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env={**os.environ, "HOME": str(home)}, text=True, capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert ordinary.read_text() == "keep\n"
+    assert (bin_dir / "mail-recv").resolve() == custom
+    assert (bin_dir / "am-init-project").resolve() == tools / "am-init-project"
+    assert (bin_dir / "am-register").resolve() == tools / "am-register"
 
 
 def test_doctor_detects_pending_herdr_onboarding():

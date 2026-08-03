@@ -70,7 +70,9 @@ curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.
 
 The installer clones to `~/agent-cockpit`, creates a virtual environment, installs
 dependencies, and registers `agent-cockpit.service` on Linux or a LaunchAgent on
-macOS. Run `~/agent-cockpit/doctor.sh` if startup fails.
+macOS. Bundled Agent Mail helpers are safely linked into `~/.local/bin`; existing
+regular files and custom symlinks are preserved. Run `~/agent-cockpit/doctor.sh` if
+startup fails.
 
 ### Manual install
 
@@ -168,6 +170,9 @@ set -a; source .env; set +a
 - **+ Quick workspace**: automatically creates the session → splits panes → starts
   agents; with Agent Mail installed it also registers identities and notifies them,
   and **📧 Init mail** registers a full set of agent-mail identities in one click.
+- Each session persists one Agent Mail project. Linked worktrees from the same clone
+  resolve to the main worktree; ambiguous legacy sessions ask you to choose instead
+  of guessing from the first pane cwd.
 
 ### Messages
 
@@ -218,7 +223,8 @@ location and the legacy `~/mcp_agent_mail/` location. The hub token is read from
 `~/.agent-mail/client.env` automatically — never hardcode it.
 VAPID keys are generated once under `~/dashboard-data/`; they never enter the repository.
 User settings live in `~/dashboard-data/settings.json`; per-device preferences like
-terminal font size live in the browser's localStorage.
+terminal font size live in the browser's localStorage. Session-to-mail-project bindings
+live in `~/dashboard-data/mail-projects.json` and contain no identity tokens.
 
 ## Upgrade, diagnostics, and uninstall
 

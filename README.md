@@ -68,7 +68,8 @@ curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.
 
 安装器会克隆到 `~/agent-cockpit`、建虚拟环境、装依赖，并在 Linux 注册
 `agent-cockpit.service`，在 macOS 注册 LaunchAgent。启动失败先跑
-`~/agent-cockpit/doctor.sh`。
+`~/agent-cockpit/doctor.sh`。仓库内附带的 Agent Mail 辅助命令会安全链接到
+`~/.local/bin`；已有普通文件或用户自定义软链不会被覆盖。
 
 ### 手动安装
 
@@ -155,6 +156,9 @@ set -a; source .env; set +a
 - 列出所有 herdr session:干净重启 / resume 重启 pane、停止、删除已停止会话。
 - **+ 一键工作区**:自动 建 session → 分屏 → 启动 agents;装了 Agent Mail 时
   还会注册身份并通知,另有 **📧 初始化通信** 一键开通 session 内全部 agent 身份。
+- 每个 session 会持久化唯一的 Agent Mail 通信项目。同一 Git clone 的独立 worktree
+  自动归到主 worktree；旧 session 只有一个已注册候选时自动迁移，零个或多个候选
+  会在初始化通信时要求选择，不再用第一个 pane 的 cwd 猜测。
 
 ### 消息
 
@@ -198,7 +202,8 @@ Agent Mail 数据库会依次探测新版 `~/.local/share/mcp_agent_mail/` 和�
 `~/mcp_agent_mail/`。hub token 自动从 `~/.agent-mail/client.env` 读取,不要硬编码。
 VAPID 密钥首次生成于 `~/dashboard-data/`,不会进入仓库。
 用户设置存在 `~/dashboard-data/settings.json`,终端字体等本机偏好存在浏览器
-localStorage。
+localStorage。session 的 Agent Mail 通信项目绑定存在
+`~/dashboard-data/mail-projects.json`，只含 session、目录和项目路径，不含身份 Token。
 
 ## 升级、诊断、卸载
 

@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Bundled Agent Mail helper commands, including Claude registration, with safe
+  `~/.local/bin` links during install and upgrade.
+
+### Fixed
+
+- Persist one canonical Agent Mail human key per Herdr session, unify linked Git
+  worktrees under their main worktree, and require explicit selection for ambiguous
+  legacy sessions instead of guessing from pane cwd.
+- Stop fabricating `<agent>-main` identities and route pane notifications through the
+  persisted session binding while preserving Agent Mail as an optional dependency.
+
 ## [0.1.0] - 2026-08-03
 
 ### Added

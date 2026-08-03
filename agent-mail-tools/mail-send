@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""发送 Agent Mail 消息，并安全通知唯一匹配的 Herdr pane。"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, TOOLS_DIR)
+from am_common import load_identity, mcp_call, mcp_tool  # noqa: E402
+
+
+HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
+MAIL_RECV_BIN = os.path.join(TOOLS_DIR, "mail-recv")
+MAIL_PROJECTS_PATH = os.path.expanduser("~/dashboard-data/mail-projects.json")
+PROG_TO_AGENT = {
+    "codex-cli": "codex", "codex": "codex",
+    "kimi-work": "kimi", "kimi": "kimi",
+    "qoder-cn": "qodercn", "qodercli": "qodercn", "qodercn": "qodercn",
+    "claude": "claude", "claude-code": "claude",
+    "grok": "grok", "opencode": "opencode",
+}
+
+
+def _agent_mail_db_path() -> str:
+    configured = os.environ.get("AGENT_MAIL_DB_PATH")
+    if configured:
+        return os.path.expanduser(configured)
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    new = os.path.join(data_home, "mcp_agent_mail", "storage.sqlite3")
+    legacy = os.path.expanduser("~/mcp_agent_mail/storage.sqlite3")
+    return next((path for path in (new, legacy) if os.path.isfile(path)), new)
+
+
+def _program_by_name(name: str, project_key: str) -> str:
+    import sqlite3
+
+    database = _agent_mail_db_path()
+    if not os.path.isfile(database):
+        return ""
+    try:
+        con = sqlite3.connect("file:" + database + "?mode=ro", uri=True)
+        row = con.execute(
+            "SELECT program FROM agents a JOIN projects p ON p.id=a.project_id "
+            "WHERE a.name=? AND p.human_key=? AND a.retired_at IS NULL LIMIT 1",
+            (name, project_key),
+        ).fetchone()
+        con.close()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+def _load_bindings() -> dict:
+    try:
+        with open(MAIL_PROJECTS_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    sessions = data.get("sessions") if isinstance(data, dict) else None
+    return sessions if isinstance(sessions, dict) else {}
+
+
+def _session_rows(env: dict) -> list[dict]:
+    try:
+        result = subprocess.run(
+            [HERDR_BIN, "session", "list", "--json"],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+        data = json.loads(result.stdout)
+        return [
+            {
+                "name": str(row.get("name", "")),
+                "running": bool(row.get("running")),
+                "directory": str(row.get("session_dir", "")),
+            }
+            for row in data.get("sessions", []) if isinstance(row, dict) and row.get("name")
+        ]
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            [HERDR_BIN, "session", "list"],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+    except Exception:
+        return []
+    rows = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[0] != "name":
+            rows.append({
+                "name": parts[0],
+                "running": parts[1] == "running",
+                "directory": " ".join(parts[2:-1]),
+            })
+    return rows
+
+
+def _session_mail_project(bindings: dict, session: dict) -> str | None:
+    entry = bindings.get(session["name"])
+    if not isinstance(entry, dict):
+        return None
+    session_dir = session.get("directory") or ""
+    if not session_dir:
+        return None
+    if (
+        os.path.realpath(os.path.expanduser(str(entry.get("session_dir", ""))))
+        != os.path.realpath(os.path.expanduser(session_dir))
+    ):
+        return None
+    project = entry.get("project")
+    return project if isinstance(project, str) and project else None
+
+
+def _session_bound_to(bindings: dict, session: dict, project_key: str) -> bool:
+    project = _session_mail_project(bindings, session)
+    return bool(project) and (
+        os.path.realpath(os.path.expanduser(project))
+        == os.path.realpath(os.path.expanduser(project_key))
+    )
+
+
+def _select_notify_targets(candidates: list[tuple], project_key: str) -> list[tuple]:
+    """绑定或 cwd 命中的 pane 仍须全局唯一；无命中时仅允许全局唯一兜底。"""
+    matches = []
+    eligible = []
+    for candidate in candidates:
+        session, pane_id, cwd = candidate[:3]
+        bound = bool(candidate[3]) if len(candidate) > 3 else False
+        has_binding = bool(candidate[4]) if len(candidate) > 4 else False
+        if has_binding and not bound:
+            continue
+        eligible.append(candidate)
+        exact = bool(cwd) and (
+            os.path.realpath(os.path.expanduser(cwd))
+            == os.path.realpath(os.path.expanduser(project_key))
+        )
+        if exact or bound:
+            matches.append((session, pane_id, cwd, exact))
+    if len(matches) == 1:
+        return matches
+    if not matches and len(eligible) == 1:
+        session, pane_id, cwd = eligible[0][:3]
+        return [(session, pane_id, cwd, False)]
+    return []
+
+
+def _notify_text(
+    msg_id: int, subject: str, agent_type: str, project_key: str,
+    cwd: str, is_exact: bool,
+) -> str:
+    head = f"[agent-mail 通知] 你收到新消息 #{msg_id} 「{(subject or '')[:50]}」"
+    command = (
+        f"{shlex.quote(MAIL_RECV_BIN)} --agent {agent_type} --instance main "
+        f"--project {shlex.quote(project_key)} --unread"
+    )
+    if is_exact:
+        return f"{head},用 {command} 查看并处理。"
+    return (
+        f"{head}。注意:当前 pane cwd={cwd} 与消息项目 {project_key} 不同,"
+        f"请用 {command} 查看并处理。"
+    )
+
+
+def _notify_pane(
+    recipient_program: str, msg_id: int, subject: str, project_key: str = "",
+) -> None:
+    if not os.path.isfile(HERDR_BIN) or not project_key:
+        return
+    agent_type = PROG_TO_AGENT.get(recipient_program)
+    if not agent_type:
+        return
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(HERDR_BIN) + ":" + env.get("PATH", "")
+    bindings = _load_bindings()
+    sessions = [row for row in _session_rows(env) if row.get("running")]
+    candidates = []
+    for session in sessions:
+        try:
+            result = subprocess.run(
+                [HERDR_BIN, "--session", session["name"], "api", "snapshot"],
+                capture_output=True, text=True, timeout=5, env=env,
+            )
+            raw = result.stdout
+            for line in raw.splitlines():
+                if line.startswith("data:"):
+                    raw = line[5:].strip()
+                    break
+            panes = json.loads(raw).get("result", {}).get("snapshot", {}).get("panes", [])
+            bound_project = _session_mail_project(bindings, session)
+            bound = bool(bound_project) and os.path.realpath(
+                os.path.expanduser(bound_project)
+            ) == os.path.realpath(os.path.expanduser(project_key))
+            for pane in panes:
+                if pane.get("agent") != agent_type or not pane.get("pane_id"):
+                    continue
+                cwd = pane.get("cwd") or pane.get("foreground_cwd") or ""
+                candidates.append((
+                    session["name"], pane["pane_id"], cwd, bound, bool(bound_project)
+                ))
+        except Exception:
+            continue
+    for session, pane_id, cwd, is_exact in _select_notify_targets(candidates, project_key):
+        note = _notify_text(msg_id, subject, agent_type, project_key, cwd, is_exact)
+        try:
+            subprocess.run(
+                [HERDR_BIN, "--session", session, "agent", "prompt", pane_id, note],
+                capture_output=True, text=True, timeout=8, env=env,
+            )
+        except Exception:
+            pass
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--instance", default="default")
+    parser.add_argument("--project", default=os.getcwd())
+    parser.add_argument("--to", required=True)
+    parser.add_argument("--subject", required=True)
+    parser.add_argument("--body", default="")
+    parser.add_argument("--thread", default="")
+    parser.add_argument("--importance", default="normal", choices=["low", "normal", "high", "urgent"])
+    parser.add_argument("--ack", action="store_true")
+    parser.add_argument("--no-notify", action="store_true")
+    args = parser.parse_args()
+
+    body = args.body
+    if not body and not sys.stdin.isatty():
+        body = sys.stdin.read()
+    if not body.strip():
+        raise SystemExit("error: 正文为空（--body 或 stdin 管道）")
+    identity, hub, token = load_identity(args.agent, args.instance, args.project)
+    mcp_call(hub, token, "initialize", {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "mail-send", "version": "1.0"},
+    })
+    recipients = [item.strip() for item in args.to.split(",") if item.strip()]
+    result = mcp_tool(hub, token, "send_message", {
+        "project_key": identity["project_key"],
+        "sender_name": identity["name"],
+        "sender_token": identity["registration_token"],
+        "to": recipients,
+        "subject": args.subject,
+        "body_md": body,
+        "thread_id": args.thread or None,
+        "importance": args.importance,
+        "ack_required": args.ack,
+        "auto_contact_if_blocked": True,
+    })
+    deliveries = result.get("deliveries") or []
+    for delivery in deliveries:
+        payload = delivery.get("payload", {})
+        message_id = payload.get("id")
+        print(f"sent: #{message_id} -> {args.to}  [{payload.get('thread_id') or '-'}]")
+        if args.no_notify:
+            continue
+        project_key = identity["project_key"]
+        for recipient in payload.get("to") or []:
+            program = _program_by_name(recipient, project_key)
+            if program:
+                _notify_pane(program, message_id, args.subject, project_key)
+    if not deliveries:
+        print(json.dumps(result, ensure_ascii=False)[:300])
+
+
+if __name__ == "__main__":
+    main()

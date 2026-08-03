@@ -31,6 +31,7 @@ PY
 "$PYTHON_BIN" -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
 "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+"$INSTALL_DIR/install-agent-mail-tools.sh" "$INSTALL_DIR"
 
 if [[ ! -f "$INSTALL_DIR/.env" ]]; then
   if [[ ! -f "$INSTALL_DIR/.env.example" ]]; then

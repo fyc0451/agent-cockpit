@@ -58,6 +58,14 @@ def test_identity_accepts_known_legacy_alias(identity_db):
     assert db.identity_by_cwd("/project", "kimi")["name"] == "legacy"
 
 
+def test_identity_accepts_claude_code_program(identity_db):
+    identity_db.execute(
+        "INSERT INTO agents VALUES (1, 1, 'claude-main', 'claude-code', '', 1, NULL)"
+    )
+
+    assert db.identity_by_cwd("/project", "claude")["name"] == "claude-main"
+
+
 def test_server_identity_name_uses_registered_identity(monkeypatch):
     monkeypatch.setattr(
         server.db,
@@ -68,7 +76,7 @@ def test_server_identity_name_uses_registered_identity(monkeypatch):
     assert server._identity_name("/project", "claude") == "GentleCompass"
 
 
-def test_server_identity_falls_back_to_main_worktree(monkeypatch):
+def test_server_identity_does_not_guess_a_main_worktree(monkeypatch):
     seen = []
     monkeypatch.setattr(
         server.db,
@@ -78,17 +86,11 @@ def test_server_identity_falls_back_to_main_worktree(monkeypatch):
             if cwd == "/project" else None
         ),
     )
-    monkeypatch.setattr(
-        server,
-        "_git",
-        lambda cwd, *args: "worktree /project\nHEAD abc\n\nworktree /tmp/review\nHEAD def",
-    )
-
-    assert server._identity_name("/tmp/review", "codex") == "codex-main"
-    assert seen == ["/tmp/review", "/project"]
+    assert server._identity_name("/tmp/review", "codex") is None
+    assert seen == ["/tmp/review"]
 
 
-def test_server_identity_preserves_nested_path_across_worktrees(monkeypatch):
+def test_server_identity_uses_only_the_given_canonical_key(monkeypatch):
     seen = []
     monkeypatch.setattr(
         server.db,
@@ -97,14 +99,8 @@ def test_server_identity_preserves_nested_path_across_worktrees(monkeypatch):
             {"name": "codex-main"} if cwd == "/project/apps/api" else None
         ),
     )
-    monkeypatch.setattr(
-        server,
-        "_git",
-        lambda cwd, *args: "worktree /project\nHEAD abc\n\nworktree /tmp/review\nHEAD def",
-    )
-
-    assert server._identity_name("/tmp/review/apps/api", "codex") == "codex-main"
-    assert seen == ["/tmp/review/apps/api", "/project/apps/api"]
+    assert server._identity_name("/tmp/review/apps/api", "codex") is None
+    assert seen == ["/tmp/review/apps/api"]
 
 
 def test_agent_mail_db_prefers_new_xdg_install_path(monkeypatch, tmp_path):

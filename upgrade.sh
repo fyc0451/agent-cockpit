@@ -25,6 +25,7 @@ if [[ ! -x "$INSTALL_DIR/.venv/bin/pip" ]]; then
 fi
 git -C "$INSTALL_DIR" pull --ff-only
 "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+"$INSTALL_DIR/install-agent-mail-tools.sh" "$INSTALL_DIR"
 
 if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
   UNIT_DIR="$HOME/.config/systemd/user"

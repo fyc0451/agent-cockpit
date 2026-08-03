@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""用本机持久化身份读取 Agent Mail 收件箱。"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from am_common import load_identity, mcp_call, mcp_tool  # noqa: E402
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--instance", default="default")
+    parser.add_argument("--project", default=os.getcwd())
+    parser.add_argument("--ack", action="store_true")
+    parser.add_argument("--unread", action="store_true")
+    parser.add_argument("--limit", type=int, default=20)
+    args = parser.parse_args()
+
+    identity, hub, token = load_identity(args.agent, args.instance, args.project)
+    mcp_call(hub, token, "initialize", {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "mail-recv", "version": "1.0"},
+    })
+    inbox = mcp_tool(hub, token, "fetch_inbox", {
+        "project_key": identity["project_key"],
+        "agent_name": identity["name"],
+        "registration_token": identity["registration_token"],
+        "limit": args.limit,
+        "unread_only": args.unread,
+        "include_bodies": True,
+    })
+    messages = inbox if isinstance(inbox, list) else (inbox.get("messages") or [])
+    if not messages:
+        print("(no messages)")
+        return
+
+    for message in messages:
+        timestamp = message.get("created_ts") or message.get("created_at") or 0
+        try:
+            stamp = time.strftime("%m-%d %H:%M", time.localtime(float(timestamp)))
+        except (TypeError, ValueError):
+            stamp = str(timestamp)
+        print(
+            f"--- #{message.get('id')} [{message.get('thread_id') or '-'}] "
+            f"{message.get('from')} @ {stamp}  ({message.get('importance')})"
+        )
+        print(f"    subject: {message.get('subject')}")
+        body = (message.get("body_md") or "").strip()
+        if body:
+            print("    " + body.replace("\n", "\n    "))
+        print()
+
+    if args.ack:
+        acked = 0
+        for message in messages:
+            try:
+                mcp_tool(hub, token, "acknowledge_message", {
+                    "project_key": identity["project_key"],
+                    "agent_name": identity["name"],
+                    "registration_token": identity["registration_token"],
+                    "message_id": message["id"],
+                })
+                acked += 1
+            except SystemExit:
+                pass
+        print(f"(acked: {acked})")
+
+
+if __name__ == "__main__":
+    main()
