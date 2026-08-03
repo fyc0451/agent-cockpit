@@ -382,6 +382,18 @@ def test_herdr_flow_preserves_selection_and_ignores_stale_refresh():
     assert "out.scrollHeight-out.scrollTop-out.clientHeight<=2" in js
     assert "const top=out.scrollTop" in js
     assert "out.scrollTop=follow?out.scrollHeight:top" in js
+
+
+def test_herdr_flow_entry_from_term_defaults_to_current_term():
+    # 终端视图切到流视图(工具栏按钮或导航「流」)时,默认选中当前终端的 session/pane
+    js = _inline_js()
+    enter = js.split("function enterHerdrFlow(session,paneId){", 1)[1].split("}", 1)[0]
+    assert "if(!session&&CURRENT_TERM)" in enter
+    assert "session=CURRENT_TERM.session" in enter
+    assert "paneId=paneId||CURRENT_TERM.paneId" in enter
+    show = js.split("function showView(v){", 1)[1].split("function ", 1)[0]
+    assert "prevView==='term'&&CURRENT_TERM" in show
+    assert "HF_SESSION=CURRENT_TERM.session" in show
     assert js.count("updatePaneOutput(out,next)") >= 2
     assert "out.innerHTML=d.output" not in js
     assert "encodeURIComponent(p.session)" in js

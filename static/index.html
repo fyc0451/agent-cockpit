@@ -925,6 +925,7 @@ function pasteServiceClipboard(input){
   input.focus();
 }
 function showView(v){
+  const prevView=document.querySelector('#nav button.active')?.dataset.view;
   const drawer=document.getElementById('termDrawer');
   if(drawer&&drawer.classList.contains('show'))closeTerm();
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
@@ -938,7 +939,11 @@ function showView(v){
   if(v==='term')termEnsure();
   if(v==='sessions')loadSessionsView();
   if(v==='settings'){applyLang();renderSettings()}
-  if(v==='herdrflow')hfStart();else hfStop();
+  if(v==='herdrflow'){
+    // 从终端视图切过来(点导航「流」)时,同样默认选中当前终端对应的 session 并定位 pane
+    if(prevView==='term'&&CURRENT_TERM){HF_SESSION=CURRENT_TERM.session;HF_FOCUS_PANE=CURRENT_TERM.paneId}
+    hfStart();
+  }else hfStop();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(window.innerWidth<=560)document.getElementById('nav').classList.remove('open')});
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
@@ -1658,6 +1663,8 @@ async function doAttachHerdr(session){
 // 输入框直接调 /api/herdr/pane/.../send 发指令,无需进 TUI。
 let HF_TIMER=null, HF_SESSION=null, HF_FOCUS_PANE=null;
 function enterHerdrFlow(session,paneId){
+  // 未显式指定时(终端工具栏「返回流视图」)默认带到当前终端对应的 session/pane
+  if(!session&&CURRENT_TERM){session=CURRENT_TERM.session;paneId=paneId||CURRENT_TERM.paneId}
   HF_SESSION=session||null;
   HF_FOCUS_PANE=paneId||null;
   showView('herdrflow');
@@ -1713,7 +1720,7 @@ function hfRender(){
       </div>
     </div>`;
   }).join('');
-  // 定位到入口 pane(看板卡片点进来时)
+  // 定位到入口 pane(看板卡片/终端视图点进来时)
   if(HF_FOCUS_PANE){
     const el=document.getElementById('hf-'+HF_FOCUS_PANE);
     if(el)setTimeout(()=>el.scrollIntoView({block:'start'}),50);
