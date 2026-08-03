@@ -600,12 +600,39 @@ def test_nav_and_toolbar_collapsible():
     assert "function toggleTermToolbar()" in HTML
     assert "header nav.open{display:grid}" in HTML
     assert ".term-toolbar.collapsed>*:not(.tb-toggle):not(#termKeyboardToggle){display:none}" in HTML
-    # 窄屏默认收起工具栏;点导航项后自动收起菜单
+    # 窄屏默认收起工具栏;点导航项后自动收起菜单(nav 断点统一 900px,CSS 与 matchMedia 同源)
     assert "window.innerWidth<=860" in HTML
-    assert "window.innerWidth<=560" in HTML
+    assert "window.innerWidth<=560" not in HTML
+    assert "@media(max-width:900px)" in HTML
+    assert "matchMedia('(max-width:900px)')" in HTML
 
 
 # ── 终端字体大小设置(本机偏好) ──────────────────────────────────
+
+def test_h5_foldable_responsive_first_batch():
+    """第一批 H5/折叠屏响应式修复的静态回归断言。"""
+    js = _inline_js()
+    # 放开缩放(保留 viewport-fit);双击缩放改由 touch-action 压制
+    assert "user-scalable=no" not in HTML
+    assert "maximum-scale" not in HTML
+    assert "width=device-width, initial-scale=1, viewport-fit=cover" in HTML
+    assert "touch-action:manipulation" in HTML
+    # 移动端/触屏输入框 >=16px,避免 iOS focus 自动缩放
+    assert "@media(max-width:900px),(any-pointer:coarse)" in HTML
+    assert "input,select,textarea,.set-card input,.set-card select{font-size:16px}" in HTML
+    # 看板 auto-fit 自适应列,删掉 860/560 两档硬断点
+    assert "repeat(auto-fit,minmax(220px,1fr))" in HTML
+    assert ".board{grid-template-columns:repeat(2,1fr)}" not in HTML
+    assert ".board{grid-template-columns:1fr}" not in HTML
+    # msgs/files 双栏弹性比例(861px 以上不再被 240/280px 定宽挤占),手机仍单列
+    assert HTML.count("minmax(200px,28%) 1fr") == 2
+    assert ".msgs-body,.files-body{grid-template-columns:1fr}" in HTML
+    # term-toolbar 基础规则即可换行,<=1100px(折叠屏展开)不横向溢出
+    assert re.search(r"\.term-toolbar\{display:flex;flex-wrap:wrap", HTML)
+    # 键盘遮挡判断与宽度解耦,适配 coarse pointer(平板/折叠屏)
+    assert "const isCoarsePointer=()=>window.matchMedia('(any-pointer:coarse)')" in js
+    assert "if(!isCompactScreen()&&!isCoarsePointer())return;" in js
+
 
 def test_terminal_font_size_setting():
     # 设置页滑块 + 当前值显示
