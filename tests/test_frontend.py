@@ -162,6 +162,13 @@ def test_message_fields_escaped():
     assert 'data-mid="${esc(m.id)}"' in HTML
 
 
+def test_board_card_displays_escaped_agent_mail_name():
+    js = _inline_js()
+    card = js.split("function cardHtml(p){", 1)[1].split("// ============ 终端抽屉", 1)[0]
+    assert 'class="card-alias">@${esc(p.mail_name)}' in card
+    assert '@${p.mail_name}' not in card
+
+
 def test_setup_workspace_output_escaped():
     # r.started/r.notified 来自后端响应,经 map(esc) 后再 join
     assert "(r.started||[]).map(esc).join" in HTML

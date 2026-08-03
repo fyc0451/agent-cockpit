@@ -174,6 +174,41 @@ def _identity_name(cwd: str, agent_type: str) -> str | None:
     return ident["name"] if ident else None
 
 
+def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """按 session 的 canonical Agent Mail 项目给看板 pane 补真实花名。"""
+    session_dirs = {
+        str(item.get("session") or ""): str(item.get("directory") or "")
+        for item in snapshot.get("sessions", [])
+        if item.get("session") and item.get("directory")
+    }
+    projects: dict[str, str | None] = {}
+    identities: dict[tuple[str, str], str | None] = {}
+    for pane in snapshot.get("panes", []):
+        session = str(pane.get("session") or "")
+        agent = str(pane.get("agent") or "")
+        session_dir = session_dirs.get(session)
+        if not agent or not session_dir:
+            continue
+        if session not in projects:
+            try:
+                projects[session] = mail_projects.get(session, session_dir)
+            except (OSError, ValueError):
+                projects[session] = None
+        project = projects[session]
+        if not project:
+            continue
+        key = (project, agent)
+        if key not in identities:
+            identities[key] = _identity_name(project, agent)
+        if identities[key]:
+            pane["mail_name"] = identities[key]
+    return snapshot
+
+
+def _board_snapshot() -> dict[str, Any]:
+    return _enrich_board_identities(herdr_client.snapshot())
+
+
 def _identity_hint(
     name: str, project: str, agent_type: str, *, roster: str = "", registered: bool = False,
 ) -> str:
@@ -785,7 +820,7 @@ def api_herdr_sessions():
 @app.get("/api/herdr/snapshot")
 def api_herdr_snapshot():
     """聚合所有 running session 的 pane → 看板卡片数据源。"""
-    return herdr_client.snapshot()
+    return _board_snapshot()
 
 
 @app.get("/api/herdr/pane/{session}/{pane_id}")
@@ -1929,7 +1964,7 @@ async def _poll_live_state() -> None:
     attention_ids: set[str] | None = None
     while True:
         try:
-            snap = await asyncio.to_thread(herdr_client.snapshot)
+            snap = await asyncio.to_thread(_board_snapshot)
             attention = await asyncio.to_thread(_build_attention, snap)
             attention_ids, new_items = _attention_changes(
                 attention_ids, attention["items"]
@@ -1944,7 +1979,7 @@ async def _poll_live_state() -> None:
                     "capabilities": attention["capabilities"],
                     "panes": [
                         (p.get("session"), p.get("pane_id"), p.get("agent"),
-                         p.get("agent_status"), p.get("revision"))
+                         p.get("agent_status"), p.get("revision"), p.get("mail_name"))
                         for p in snap.get("panes", [])
                     ],
                 },

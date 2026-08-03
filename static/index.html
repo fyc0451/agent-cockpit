@@ -91,7 +91,9 @@ header .spacer{flex:1}
 .agent-icon.qodercli,.agent-icon.qoder{background:#0f291a;color:#34d399}
 .agent-icon.claude{background:#291a0f;color:#ff9558}
 .agent-icon.none{background:var(--bg4);color:var(--fg3)}
-.card-name{font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-name{font-weight:600;font-size:13px;line-height:1.25;flex:1;min-width:0;overflow:hidden}
+.card-name-main,.card-alias{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-alias{font-size:10px;font-weight:500;color:var(--accent);margin-top:2px}
 .card-badge{background:var(--need);color:#fff;border-radius:9px;padding:0 6px;font-size:10px;font-weight:700;min-width:16px;text-align:center;line-height:16px;height:16px}
 .card-meta{font-size:11px;color:var(--fg3);margin-bottom:5px}
 .card-prev{font-family:var(--mono);font-size:11px;color:var(--fg2);background:var(--bg);border-radius:6px;padding:6px 7px;max-height:60px;overflow:hidden;line-height:1.4;white-space:pre-wrap;word-break:break-word;position:relative}
@@ -1134,7 +1136,7 @@ function cardHtml(p){
   return `<div class="card ${cls}" data-action="openFlow" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">
     <div class="card-top">
       <div class="agent-icon ${esc(ag)}">${emoji}</div>
-      <div class="card-name">${esc(p.agent||p.terminal_title||p.pane_id)}</div>
+      <div class="card-name"><span class="card-name-main">${esc(p.agent||p.terminal_title||p.pane_id)}</span>${p.mail_name?`<span class="card-alias">@${esc(p.mail_name)}</span>`:''}</div>
       <button class="icon" style="padding:2px 6px;font-size:13px" title="接管 TUI(xterm)" data-action="openTerm" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">🖥</button>
       <span class="status-dot ${cls}"></span>
     </div>
