@@ -34,7 +34,8 @@ jobs:
           PY
           done
       - run: |
-          js_file="$(mktemp)"
+          # node --check 要求可识别的扩展名,临时文件必须带 .js 后缀
+          js_file="$(mktemp --suffix=.js)"
           sed -n '/<script>$/,/^<\/script>$/p' static/index.html | sed '1d;$d' > "$js_file"
           test -s "$js_file"
           node --check "$js_file"
