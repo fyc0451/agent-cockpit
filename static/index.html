@@ -1824,7 +1824,7 @@ function queueTermInput(id,data,notice){
 // xterm 已原生处理普通 scrollback；但 TUI 开启鼠标上报后会跳过内置 touch
 // 处理。这里只在该模式下把单指纵向拖动转换成 wheel 事件交还给 xterm/TUI。
 function enableTermTouchScroll(el,xterm){
-  const sensitivity=2,maxSteps=12;
+  const sensitivity=4,maxSteps=48;
   let lastY=null,remainder=0;
   const finish=()=>{lastY=null;remainder=0};
   el.addEventListener('touchstart',e=>{
@@ -1839,9 +1839,10 @@ function enableTermTouchScroll(el,xterm){
     const rowHeight=Math.max(12,(screen?.getBoundingClientRect().height||xterm.rows*18)/Math.max(1,xterm.rows));
     const lines=remainder>0?Math.floor(remainder/rowHeight):Math.ceil(remainder/rowHeight);
     if(!lines)return;
-    remainder-=lines*rowHeight;
+    // 快滑时一次 move 可能攒很多行;只扣实际派发的部分,余量留到下个事件,不丢距离
+    const direction=Math.sign(lines),steps=Math.min(maxSteps,Math.abs(lines));
+    remainder-=direction*steps*rowHeight;
     if(screen&&typeof WheelEvent==='function'){
-      const direction=Math.sign(lines),steps=Math.min(maxSteps,Math.abs(lines));
       for(let i=0;i<steps;i++){
         const wheel=new WheelEvent('wheel',{deltaY:direction*rowHeight,deltaMode:0,bubbles:true,cancelable:true});
         screen.dispatchEvent(wheel);

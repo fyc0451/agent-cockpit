@@ -328,9 +328,11 @@ def test_terminal_touch_scroll_is_js_driven():
     mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
     assert "enableTermTouchScroll(el,xterm)" in mount
     scroll = js.split("function enableTermTouchScroll(el,xterm){", 1)[1].split("function ", 1)[0]
-    assert "const sensitivity=2,maxSteps=12" in scroll
+    assert "const sensitivity=4,maxSteps=48" in scroll
     assert "xterm.modes?.mouseTrackingMode==='none'" in scroll
     assert "steps=Math.min(maxSteps,Math.abs(lines))" in scroll
+    # 只扣实际派发的行数,快滑不丢滚动距离
+    assert "remainder-=direction*steps*rowHeight" in scroll
     assert "for(let i=0;i<steps;i++)" in scroll
     assert "xterm.scrollLines(direction)" in scroll
     assert "new WheelEvent('wheel'" in scroll
