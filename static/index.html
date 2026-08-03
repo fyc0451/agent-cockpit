@@ -182,16 +182,18 @@ header .spacer{flex:1}
 .term-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)}
 .term-toolbar .tb-toggle{margin-left:auto;padding:3px 8px;color:var(--fg3)}
 .term-toolbar.collapsed{padding:2px 8px;gap:4px}
-.term-toolbar.collapsed>*:not(.tb-toggle){display:none}
+.term-toolbar.collapsed>*:not(.tb-toggle):not(#termKeyboardToggle){display:none}
 .term-help{font-size:11px;margin-left:auto}
 .term-keys{display:none;gap:5px;padding:5px 6px;overflow-x:auto;background:var(--bg2);border-bottom:1px solid var(--bd);flex-shrink:0}
 .term-keys button{flex:0 0 auto;min-width:38px;padding:5px 8px;font-family:var(--mono);font-size:12px}
 .term-keys .term-key-extra{display:none}
-.term-keys.expanded{flex-wrap:wrap;overflow-y:auto;max-height:46dvh;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+/* 按键栏默认不占行,点工具栏 ⌨ 按键才展开(展开入口在工具栏,收起态也保留) */
+.term-keys.expanded{display:flex;flex-wrap:wrap;overflow-y:auto;max-height:46dvh;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .term-keys.expanded .term-key-extra{display:block}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
 #termContainer{min-height:0}
-#termContainer .xterm-viewport{touch-action:pan-y!important;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+/* xterm 自己处理普通 scrollback；TUI 开启鼠标上报时才由下方 JS 接管触摸 */
+#termContainer .xterm.enable-mouse-events{touch-action:none;overscroll-behavior:contain}
 .board-wrap,.file-tree,.sidebar,.msgs-list,.term-out,.hf-body,.modal{overscroll-behavior:contain}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
@@ -257,9 +259,6 @@ header .spacer{flex:1}
   .msgs-body,.files-body{grid-template-columns:1fr}
   .sidebar,.file-tree{max-height:25vh}
 }
-@media(any-pointer:coarse){
-  .term-keys{display:flex}
-}
 @media(max-width:560px){
   .board{grid-template-columns:1fr}
   header{padding:6px 8px;gap:4px;flex-wrap:wrap}
@@ -285,7 +284,6 @@ header .spacer{flex:1}
   .launch-bar button{order:3;flex:1}
   .term-toolbar{flex-wrap:wrap;padding:6px;gap:5px}
   .term-toolbar #termSelect{flex:1;min-width:120px!important}
-  .term-keys{display:flex}
   .term-help{display:none}
   #termContainer{padding:3px!important}
   .drawer-bg.show{inset:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);padding:0}
@@ -424,10 +422,10 @@ header .spacer{flex:1}
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
       <button class="sm danger" onclick="termClose()" data-i18n="term.close">✕ 关闭</button>
       <span class="muted term-help" data-i18n="term.help">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
+      <button class="sm" id="termKeyboardToggle" onclick="toggleTermKeyboard()" title="展开触屏按键" aria-expanded="false">⌨ 按键</button>
       <button class="icon tb-toggle" onclick="toggleTermToolbar()" data-i18n-title="term.tbcollapse" title="收起工具栏">▴</button>
     </div>
     <div class="term-keys" id="termKeys" aria-label="手机电脑键盘">
-      <button id="termKeyboardToggle" onclick="toggleTermKeyboard()" title="展开更多按键" aria-expanded="false">⌨ 更多按键</button>
       <button onclick="termKey('ArrowUp')" title="方向键上">↑</button>
       <button onclick="termKey('ArrowDown')" title="方向键下">↓</button>
       <button onclick="termKey('ArrowLeft')" title="方向键左">←</button>
@@ -1452,8 +1450,8 @@ function toggleTermKeyboard(){
   const button=document.getElementById('termKeyboardToggle');
   button.classList.toggle('active',expanded);
   button.setAttribute('aria-expanded',String(expanded));
-  button.textContent=expanded?'⌨ 收起':'⌨ 更多按键';
-  button.title=expanded?'收起更多按键':'展开更多按键';
+  button.textContent=expanded?'⌨ 收起':'⌨ 按键';
+  button.title=expanded?'收起触屏按键':'展开触屏按键';
   XTERM&&XTERM.focus();
 }
 function renderTermModifiers(){
@@ -1823,6 +1821,38 @@ function queueTermInput(id,data,notice){
   if(notice)inst.pendingNotice=notice;
   flushTermInput(id,inst.ws);
 }
+// xterm 已原生处理普通 scrollback；但 TUI 开启鼠标上报后会跳过内置 touch
+// 处理。这里只在该模式下把单指纵向拖动转换成 wheel 事件交还给 xterm/TUI。
+function enableTermTouchScroll(el,xterm){
+  const sensitivity=2,maxSteps=12;
+  let lastY=null,remainder=0;
+  const finish=()=>{lastY=null;remainder=0};
+  el.addEventListener('touchstart',e=>{
+    if(e.touches.length!==1||xterm.modes?.mouseTrackingMode==='none'){finish();return}
+    lastY=e.touches[0].clientY;remainder=0;
+  },{passive:true});
+  el.addEventListener('touchmove',e=>{
+    if(lastY===null||e.touches.length!==1||xterm.modes?.mouseTrackingMode==='none')return;
+    const y=e.touches[0].clientY;
+    remainder+=(lastY-y)*sensitivity;lastY=y;
+    const screen=el.querySelector('.xterm-screen');
+    const rowHeight=Math.max(12,(screen?.getBoundingClientRect().height||xterm.rows*18)/Math.max(1,xterm.rows));
+    const lines=remainder>0?Math.floor(remainder/rowHeight):Math.ceil(remainder/rowHeight);
+    if(!lines)return;
+    remainder-=lines*rowHeight;
+    if(screen&&typeof WheelEvent==='function'){
+      const direction=Math.sign(lines),steps=Math.min(maxSteps,Math.abs(lines));
+      for(let i=0;i<steps;i++){
+        const wheel=new WheelEvent('wheel',{deltaY:direction*rowHeight,deltaMode:0,bubbles:true,cancelable:true});
+        screen.dispatchEvent(wheel);
+        if(!wheel.defaultPrevented)xterm.scrollLines(direction);
+      }
+    }
+    e.preventDefault();
+  },{passive:false});
+  el.addEventListener('touchend',finish,{passive:true});
+  el.addEventListener('touchcancel',finish,{passive:true});
+}
 function scheduleTermReconnect(id){
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.closing||inst.xterm._disposed||inst.reconnectTimer)return;
@@ -1893,6 +1923,7 @@ function termMount(id){
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
+  enableTermTouchScroll(el,xterm);
   xterm.parser.registerOscHandler(52,handleOsc52);
   // 隐藏其他终端的容器
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){

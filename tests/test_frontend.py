@@ -290,6 +290,14 @@ def test_mobile_terminal_has_expandable_computer_keyboard():
     assert "applyTermModifiers(d)" in js
 
 
+def test_terminal_keyboard_toggle_in_toolbar_and_keys_hidden_by_default():
+    # 按键栏默认隐藏不占行;⌨ 入口挪进工具栏,且工具栏收起态下也保留该入口
+    assert ":not(#termKeyboardToggle)" in HTML
+    assert ".term-keys.expanded{display:flex" in HTML
+    assert ".term-keys{display:flex}" not in HTML
+    assert HTML.index('id="termKeyboardToggle"') < HTML.index('class="term-keys"')
+
+
 def test_mobile_terminal_uses_xterm_native_input_without_proxy_field():
     js = _inline_js()
     assert "interactive-widget=resizes-content" not in HTML
@@ -309,8 +317,24 @@ def test_terminal_fit_never_resizes_pty_from_hidden_view():
     assert "view?.classList.contains('active')" in fit
     assert "el.getBoundingClientRect()" in fit
     assert fit.index("view?.classList.contains('active')") < fit.index("fit.fit()")
-    assert "function enableTermTouchScroll(el,xterm)" not in js
-    assert "#termContainer .xterm-viewport{touch-action:pan-y!important" in HTML
+
+
+def test_terminal_touch_scroll_is_js_driven():
+    # xterm 原生处理普通 scrollback；但应用开启鼠标上报后会跳过内置 touch，
+    # 此时才由 enableTermTouchScroll 把单指拖动换算成 wheel 交给 TUI。
+    js = _inline_js()
+    assert "function enableTermTouchScroll(el,xterm)" in js
+    assert "#termContainer .xterm.enable-mouse-events{touch-action:none" in HTML
+    mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
+    assert "enableTermTouchScroll(el,xterm)" in mount
+    scroll = js.split("function enableTermTouchScroll(el,xterm){", 1)[1].split("function ", 1)[0]
+    assert "const sensitivity=2,maxSteps=12" in scroll
+    assert "xterm.modes?.mouseTrackingMode==='none'" in scroll
+    assert "steps=Math.min(maxSteps,Math.abs(lines))" in scroll
+    assert "for(let i=0;i<steps;i++)" in scroll
+    assert "xterm.scrollLines(direction)" in scroll
+    assert "new WheelEvent('wheel'" in scroll
+    assert "e.preventDefault()" in scroll
 
 
 def test_terminal_drawer_keeps_main_navigation_visible_and_clickable():
@@ -506,7 +530,7 @@ def test_nav_and_toolbar_collapsible():
     assert "function toggleNav()" in HTML
     assert "function toggleTermToolbar()" in HTML
     assert "header nav.open{display:grid}" in HTML
-    assert ".term-toolbar.collapsed>*:not(.tb-toggle){display:none}" in HTML
+    assert ".term-toolbar.collapsed>*:not(.tb-toggle):not(#termKeyboardToggle){display:none}" in HTML
     # 窄屏默认收起工具栏;点导航项后自动收起菜单
     assert "window.innerWidth<=860" in HTML
     assert "window.innerWidth<=560" in HTML
