@@ -450,21 +450,31 @@ def test_herdr_flow_entry_from_term_defaults_to_current_term():
     assert "encodeURIComponent(p.pane_id)" in js
 
 
-def test_herdr_flow_entry_from_term_falls_back_to_attached_session_label():
-    # 终端 tab 里 attach/接管来的 PTY 没有 CURRENT_TERM,按 TERM_LABELS 记的 session 选中
+def test_herdr_flow_entry_from_term_uses_attached_session_identity():
+    # 显示名称和 Herdr session 分开保存，返回流视图不能再拿 label 猜 session。
     js = _inline_js()
     enter = js.split("function enterHerdrFlow(session,paneId){", 1)[1].split("function showView", 1)[0]
-    assert "TERM_LABELS[TERM_ID]" in enter
+    assert "TERM_SESSIONS[TERM_ID]" in enter
     show = js.split("function showView(v){", 1)[1].split("function ", 1)[0]
-    assert "TERM_LABELS[TERM_ID]" in show
+    assert "TERM_SESSIONS[TERM_ID]" in show
+    attach = js.split("async function doAttachHerdr(session){", 1)[1].split("// ============ herdr", 1)[0]
+    assert "TERM_SESSIONS[r.id]=session" in attach
+    assert "delete TERM_SESSIONS[TERM_ID]" in js
 
 
-def test_safe_fit_shaves_one_column_to_avoid_right_clipping():
-    # FitAddon 小数取整偶尔多给 1 列导致最右列被裁;fit 后减 1 列兜底
+def test_safe_fit_waits_for_fonts_and_keeps_right_gutter():
+    # xterm 创建前先加载 Webfont，避免字符测量缓存基于 fallback 字体；fit 后留一列边距。
     js = _inline_js()
     fit = js.split("function safeFitOf(fit,xterm){", 1)[1].split("function ", 1)[0]
-    assert "fit.proposeDimensions()" in fit
-    assert "xterm.resize(d.cols-1,d.rows)" in fit
+    assert "xterm.resize(xterm.cols-1,xterm.rows)" in fit
+    assert "function ensureTermFontLoaded()" in js
+    assert "document.fonts.load" in js
+    term_new = js.split("async function termNew(cwd){", 1)[1].split("function ", 1)[0]
+    assert term_new.index("await ensureTermFontLoaded()") < term_new.index("api(url")
+    attach = js.split("async function doAttachHerdr(session){", 1)[1].split("// ============ herdr", 1)[0]
+    assert attach.index("await ensureTermFontLoaded()") < attach.index("api('/api/term")
+    set_font = js.split("function setTermFont(v,save=true){", 1)[1].split("function ", 1)[0]
+    assert "safeFitOf(inst.fit,inst.xterm)" in set_font
 
 
 def test_file_manager_search_ui_and_actions_wired():

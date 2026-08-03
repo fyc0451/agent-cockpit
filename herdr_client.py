@@ -307,6 +307,30 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
         return {"available": True, "error": str(e)}
 
 
+def _rename_agent_context(
+    session: str, pane: dict[str, Any], agent: str, layout: str,
+) -> None:
+    """把 Herdr 实际展示的 workspace/tab/pane 都改成可辨认名称。"""
+    pane_id = pane.get("pane_id")
+    tab_id = pane.get("tab_id")
+    workspace_id = pane.get("workspace_id")
+    commands = []
+    if pane_id:
+        commands.append(["--session", session, "pane", "rename", pane_id, agent])
+    if tab_id:
+        tab_label = agent if layout == "tab" else session
+        commands.append(["--session", session, "tab", "rename", tab_id, tab_label])
+    if workspace_id:
+        commands.append([
+            "--session", session, "workspace", "rename", workspace_id, session,
+        ])
+    for command in commands:
+        try:
+            _run(command, timeout=5)
+        except RuntimeError:
+            pass
+
+
 def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
     layout: str = "right",
@@ -322,6 +346,7 @@ def start_agent(
     snap = _snapshot_session(session)
     existing = next((p for p in snap.get("panes", []) if p.get("agent") == agent), None)
     if existing:
+        _rename_agent_context(session, existing, agent, layout)
         result = {
             "available": True,
             "pane_id": existing["pane_id"],
@@ -341,6 +366,7 @@ def start_agent(
     try:
         # 根据 layout 开新 pane:right/down 用 split,tab 用 tab create
         new_pid = None
+        new_pane = None
         if layout == "tab":
             # 多页:每个 agent 一个新 tab
             tab_out = _run(
@@ -376,18 +402,20 @@ def start_agent(
             snap = _snapshot_session(session)
             panes = snap.get("panes", [])
             if panes:
-                new_pid = sorted(
+                new_pane = sorted(
                     panes, key=lambda p: _pane_sort_key(str(p.get("pane_id") or ""))
-                )[-1].get("pane_id")
+                )[-1]
+                new_pid = new_pane.get("pane_id")
         if not new_pid:
             return {"available": True, "error": "split/tab 后找不到新 pane"}
         # 用 pane run 启动 agent(完整路径 + shlex 安全分割)
         _run(["--session", session, "pane", "run", new_pid] + shlex.split(cmd_str), timeout=8)
-        # pane 命名成 agent 名(默认是序号,看板/TUI 里分不清);失败不影响启动
-        try:
-            _run(["--session", session, "pane", "rename", new_pid, agent], timeout=5)
-        except RuntimeError:
-            pass
+        if new_pane is None:
+            new_pane = next(
+                (p for p in _snapshot_session(session).get("panes", []) if p.get("pane_id") == new_pid),
+                {"pane_id": new_pid},
+            )
+        _rename_agent_context(session, new_pane, agent, layout)
         return {"available": True, "pane_id": new_pid, "agent": agent, "cmd": cmd_str}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}

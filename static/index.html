@@ -734,6 +734,7 @@ function toggleTermToolbar(){
   const collapsed=tb.classList.toggle('collapsed');
   tb.querySelector('.tb-toggle').textContent=collapsed?'▾':'▴';
   try{localStorage.setItem('term-toolbar-collapsed',collapsed?'1':'0')}catch(e){}
+  setTimeout(()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM)},0);
 }
 (function restoreCollapses(){
   try{
@@ -932,7 +933,7 @@ function showView(v){
   if(v==='herdrflow'){
     // 从终端视图切过来(点导航「流」)时,同样默认选中当前终端对应的 session 并定位 pane
     if(prevView==='term'&&CURRENT_TERM){HF_SESSION=CURRENT_TERM.session;HF_FOCUS_PANE=CURRENT_TERM.paneId}
-    else if(prevView==='term'&&TERM_ID&&TERM_LABELS[TERM_ID]){HF_SESSION=TERM_LABELS[TERM_ID];HF_FOCUS_PANE=null}
+    else if(prevView==='term'&&TERM_ID&&TERM_SESSIONS[TERM_ID]){HF_SESSION=TERM_SESSIONS[TERM_ID];HF_FOCUS_PANE=null}
     hfStart();
   }else hfStop();
 }
@@ -1440,7 +1441,7 @@ async function sendMsg(){
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
 // ============ Web 终端(xterm.js + PTY) ============
-let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={};
+let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_FONT_READY=null;
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
 const TERM_MODIFIERS={ctrl:false,alt:false,shift:false};
@@ -1491,6 +1492,14 @@ function termKey(name){
 }
 function termEnsure(){if(!TERM_ID)termNew()}
 function termLabel(id){return TERM_LABELS[id]||('终端 '+id.slice(0,8))}
+function ensureTermFontLoaded(){
+  if(!document.fonts?.load)return Promise.resolve();
+  if(!TERM_FONT_READY){
+    TERM_FONT_READY=document.fonts.load(`${termFontSize()}px "Cascadia Mono NF"`)
+      .then(()=>document.fonts.ready).catch(()=>{});
+  }
+  return TERM_FONT_READY;
+}
 function renderTermOptions(){
   const sel=document.getElementById('termSelect');
   sel.innerHTML=TERMS.map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
@@ -1498,6 +1507,7 @@ function renderTermOptions(){
 }
 async function termNew(cwd){
   try{
+    await ensureTermFontLoaded();
     const url='/api/term'+(cwd?('?cwd='+encodeURIComponent(cwd)):'');
     const r=await api(url,{method:'POST'});
     TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||'';
@@ -1602,8 +1612,9 @@ async function doAttachHerdr(session){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
   document.getElementById('launchBar').classList.add('hidden');
   try{
+    await ensureTermFontLoaded();
     const r=await api('/api/term?label='+encodeURIComponent(session),{method:'POST'});
-    TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;
+    TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;TERM_SESSIONS[r.id]=session;
     renderTermOptions();
     termMount(r.id);
     queueTermInput(r.id,'herdr --session '+session+'\r','已进入 herdr/'+session+' (Ctrl-b 切 pane)');
@@ -1616,9 +1627,9 @@ async function doAttachHerdr(session){
 let HF_TIMER=null, HF_SESSION=null, HF_FOCUS_PANE=null;
 function enterHerdrFlow(session,paneId){
   // 未显式指定时(终端工具栏「返回流视图」)默认带到当前终端对应的 session/pane:
-  // 卡片抽屉终端看 CURRENT_TERM;终端 tab 里 attach/接管来的 PTY 按 label 记了 session
+  // 卡片抽屉终端看 CURRENT_TERM;attach/接管的 PTY 使用独立 session 映射。
   if(!session&&CURRENT_TERM){session=CURRENT_TERM.session;paneId=paneId||CURRENT_TERM.paneId}
-  if(!session&&TERM_ID&&TERM_LABELS[TERM_ID])session=TERM_LABELS[TERM_ID];
+  if(!session&&TERM_ID&&TERM_SESSIONS[TERM_ID])session=TERM_SESSIONS[TERM_ID];
   HF_SESSION=session||null;
   HF_FOCUS_PANE=paneId||null;
   showView('herdrflow');
@@ -1786,6 +1797,7 @@ async function termClose(){
   try{await api('/api/term/'+TERM_ID,{method:'DELETE'})}catch(e){}
   TERMS=TERMS.filter(t=>t!==TERM_ID);
   delete TERM_LABELS[TERM_ID];
+  delete TERM_SESSIONS[TERM_ID];
   if(inst){
     inst.closing=true;
     if(inst.reconnectTimer)clearTimeout(inst.reconnectTimer);
@@ -1810,9 +1822,8 @@ function safeFitOf(fit,xterm){
   if(rect.width<2||rect.height<2)return false;
   try{
     fit.fit();
-    // FitAddon 小数取整偶尔多给 1 列,最右列会被容器边缘/滚动条裁掉;减 1 列兜底
-    const d=fit.proposeDimensions();
-    if(d&&d.cols>10&&xterm.cols===d.cols)xterm.resize(d.cols-1,d.rows);
+    // 留一列安全边距，避免滚动条、字形 overhang 或小数取整裁掉最右字符。
+    if(xterm.cols>10)xterm.resize(xterm.cols-1,xterm.rows);
     return true
   }catch(e){return false}
 }
@@ -2526,7 +2537,7 @@ function setTermFont(v,save=true){
   const rng=document.getElementById('setTermFont');if(rng&&+rng.value!==v)rng.value=v;
   const val=document.getElementById('setTermFontVal');if(val)val.textContent=v;
   // 已开终端立即生效,改完字号要重新 fit
-  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.fontSize=v;inst.fit.fit()}catch(e){}}
+  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.fontSize=v;safeFitOf(inst.fit,inst.xterm)}catch(e){}}
   if(save)try{localStorage.setItem('term-font-size',String(v))}catch(e){}
 }
 (function(){try{setTermFont(termFontSize(),false)}catch(e){}})();
@@ -2627,6 +2638,7 @@ function bindDelegation(){
 // ============ init ============
 async function init(){
   bindDelegation();
+  ensureTermFontLoaded();
   const ok=await ensureAuth();
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
   applyLang();

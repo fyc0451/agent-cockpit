@@ -76,9 +76,14 @@ def test_start_agent_reuses_existing_pane_with_cwd(monkeypatch):
         herdr_client,
         "_snapshot_session",
         lambda session: {
-            "panes": [{"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project"}],
+            "panes": [{
+                "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+                "agent": "codex", "cwd": "/tmp/project",
+            }],
         },
     )
+    calls = []
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: calls.append(args) or "")
 
     assert herdr_client.start_agent("demo", "/tmp/project", "codex") == {
         "available": True,
@@ -88,6 +93,9 @@ def test_start_agent_reuses_existing_pane_with_cwd(monkeypatch):
         "reused": True,
         "msg": "codex pane 已存在(w1:p2),跳过",
     }
+    assert ["--session", "demo", "pane", "rename", "w1:p2", "codex"] in calls
+    assert ["--session", "demo", "tab", "rename", "w1:t2", "demo"] in calls
+    assert ["--session", "demo", "workspace", "rename", "w1", "demo"] in calls
 
 
 def test_start_agent_fallback_selects_highest_numeric_pane(monkeypatch):
@@ -121,25 +129,30 @@ def test_start_agent_fallback_selects_highest_numeric_pane(monkeypatch):
     ) in calls
 
 
-def test_start_agent_renames_pane_to_agent_name(monkeypatch):
-    """启动成功后把 pane 命名为 agent 名(默认序号难辨认);rename 失败不影响启动。"""
+def test_start_agent_renames_workspace_tab_and_pane(monkeypatch):
+    """tab 布局必须改用户实际看到的三层名称，而不只是 pane label。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "codex")
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
     monkeypatch.setattr(
         herdr_client,
         "_snapshot_session",
-        lambda session: {"panes": [{"pane_id": "w1:p2", "agent": None}]},
+        lambda session: {"panes": [{
+            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+            "agent": None,
+        }]},
     )
     calls = []
     monkeypatch.setattr(
         herdr_client, "_run", lambda args, timeout=10: calls.append(args) or ""
     )
 
-    result = herdr_client.start_agent("demo", "/tmp/project")
+    result = herdr_client.start_agent("demo", "/tmp/project", layout="tab")
 
     assert result["pane_id"] == "w1:p2"
     assert ["--session", "demo", "pane", "rename", "w1:p2", "codex"] in calls
+    assert ["--session", "demo", "tab", "rename", "w1:t2", "codex"] in calls
+    assert ["--session", "demo", "workspace", "rename", "w1", "demo"] in calls
 
 
 def test_start_agent_reports_missing_executable_before_split(monkeypatch):
