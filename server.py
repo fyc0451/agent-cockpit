@@ -1147,12 +1147,29 @@ def _setup_workspace(req: SetupWorkspaceReq):
             "session_started": False,
             "started": [],
         }
-    plans, warnings = _prepare_workspace(req)
     # 0. 检查 session 是否存在,不存在则自动创建
     sessions = herdr_client.list_sessions()
     states = {s["name"]: s.get("status") for s in sessions}
     session_created = req.session not in states
     session_started = states.get(req.session) == "running"
+    if not session_started and herdr_client.onboarding_required():
+        return {
+            "ok": False,
+            "code": "herdr_onboarding_required",
+            "error": (
+                "Herdr 首次配置尚未完成。请打开终端完成配置向导，"
+                "再按 Ctrl-b d 脱离并重新启动工作区"
+            ),
+            "herdr_command": (
+                f"{shlex.quote(herdr_client.HERDR_BIN)} "
+                f"--session {shlex.quote(req.session)}"
+            ),
+            "session": req.session,
+            "session_created": session_created,
+            "session_started": False,
+            "started": [],
+        }
+    plans, warnings = _prepare_workspace(req)
     if not session_started:
         # 用 PTY 终端创建 session(herdr --session 需要 TTY)
         t = None

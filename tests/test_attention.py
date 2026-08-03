@@ -277,6 +277,7 @@ def test_setup_workspace_succeeds_without_agent_mail(monkeypatch, tmp_path):
 def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: False)
     monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
     session_states = iter([
         [{"name": "demo", "status": "stopped"}],
@@ -328,6 +329,7 @@ def test_setup_workspace_timeout_reports_herdr_state_and_cleans_terminal(
 ):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: False)
     monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: [])
     monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
     monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
@@ -383,6 +385,41 @@ def test_setup_workspace_rejects_missing_herdr_before_creating_terminal(
         "ok": False,
         "error": "herdr 未安装或不可执行: /missing/herdr",
         "session": "demo",
+        "session_started": False,
+        "started": [],
+    }
+
+
+def test_setup_workspace_opens_visible_terminal_for_herdr_onboarding(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server.herdr_client, "HERDR_BIN", "/opt/herdr")
+    monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: [])
+    monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: True)
+    monkeypatch.setattr(
+        server.terminal,
+        "create_term",
+        lambda *_: (_ for _ in ()).throw(AssertionError("后台不应启动 onboarding")),
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={"session": "demo", "workdir": str(tmp_path), "agents": ["codex"]},
+    )
+
+    assert response.json() == {
+        "ok": False,
+        "code": "herdr_onboarding_required",
+        "error": (
+            "Herdr 首次配置尚未完成。请打开终端完成配置向导，"
+            "再按 Ctrl-b d 脱离并重新启动工作区"
+        ),
+        "herdr_command": "/opt/herdr --session demo",
+        "session": "demo",
+        "session_created": True,
         "session_started": False,
         "started": [],
     }

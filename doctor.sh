@@ -26,6 +26,7 @@ env_value() {
 }
 
 HERDR_BIN_VALUE="$(env_value HERDR_BIN)"
+HERDR_CONFIG_VALUE="$(env_value HERDR_CONFIG_PATH)"
 CODEX_BIN_VALUE="$(env_value CODEX_BIN)"
 HOST_VALUE="$(env_value COCKPIT_HOST)"
 TOKEN_VALUE="$(env_value COCKPIT_TOKEN)"
@@ -53,6 +54,13 @@ fi
 if command -v herdr >/dev/null 2>&1 || [[ -x "$HOME/.local/bin/herdr" ]] || \
    [[ -n "$HERDR_BIN_VALUE" && -x "$HERDR_BIN_VALUE" ]]; then
   ok "herdr 可用"
+  HERDR_CONFIG_FILE="${HERDR_CONFIG_VALUE:-$HOME/.config/herdr/config.toml}"
+  if [[ -f "$HERDR_CONFIG_FILE" ]] && \
+     grep -Eq '^[[:space:]]*onboarding[[:space:]]*=[[:space:]]*false([[:space:]]*(#.*)?)?$' "$HERDR_CONFIG_FILE"; then
+    ok "herdr 首次配置已完成"
+  else
+    warn "herdr 首次配置未完成；请先运行 herdr 完成向导"
+  fi
 else
   fail "未找到 herdr；也可在 .env 设置 HERDR_BIN"
 fi
@@ -80,7 +88,7 @@ fi
 
 if [[ -f "$ENV_FILE" ]]; then
   ok ".env 存在"
-  if grep -Eq '^[[:space:]]*export[[:space:]]+(COCKPIT_HOST|COCKPIT_TOKEN|HERDR_BIN|CODEX_BIN)=' "$ENV_FILE"; then
+  if grep -Eq '^[[:space:]]*export[[:space:]]+(COCKPIT_HOST|COCKPIT_TOKEN|HERDR_BIN|HERDR_CONFIG_PATH|CODEX_BIN)=' "$ENV_FILE"; then
     fail ".env 不能使用 export；systemd EnvironmentFile 只接受 KEY=VALUE"
   fi
   if [[ -n "$HOST_VALUE" && "$HOST_VALUE" != "127.0.0.1" && \

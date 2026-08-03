@@ -5,6 +5,31 @@ from unittest.mock import call
 import herdr_client
 
 
+def test_onboarding_required_when_config_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERDR_CONFIG_PATH", str(tmp_path / "missing.toml"))
+
+    assert herdr_client.onboarding_required() is True
+
+
+def test_onboarding_completed_only_by_explicit_false(monkeypatch, tmp_path):
+    config = tmp_path / "config.toml"
+    monkeypatch.setenv("HERDR_CONFIG_PATH", str(config))
+    config.write_text('onboarding = false\n[theme]\nname = "terminal"\n')
+
+    assert herdr_client.onboarding_required() is False
+
+    config.write_text('[theme]\nname = "terminal"\n')
+    assert herdr_client.onboarding_required() is True
+
+
+def test_invalid_config_is_not_misreported_as_onboarding(monkeypatch, tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text("invalid = [\n")
+    monkeypatch.setenv("HERDR_CONFIG_PATH", str(config))
+
+    assert herdr_client.onboarding_required() is False
+
+
 def test_list_sessions_prefers_stable_json_output(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []

@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,22 @@ def _pane_sort_key(pane_id: str) -> tuple[Any, ...]:
 
 def is_available() -> bool:
     return bool(HERDR_BIN) and Path(HERDR_BIN).is_file() and os.access(HERDR_BIN, os.X_OK)
+
+
+def onboarding_required() -> bool:
+    """Herdr 首次配置是否尚未完成；配置损坏交给 Herdr 自身报错。"""
+    config_path = Path(
+        os.environ.get("HERDR_CONFIG_PATH", "~/.config/herdr/config.toml")
+    ).expanduser()
+    if not config_path.is_file():
+        return True
+    try:
+        with config_path.open("rb") as f:
+            config = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    # Herdr 默认配置约定：缺少 onboarding 也会显示首次配置向导。
+    return config.get("onboarding") is not False
 
 
 def _run(args: list[str], timeout: int = 10) -> str:

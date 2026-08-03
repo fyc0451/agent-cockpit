@@ -175,6 +175,13 @@ def test_agent_mail_is_documented_and_diagnosed_as_optional():
     assert 'fail "缺少 Agent Mail 数据库' not in doctor
 
 
+def test_doctor_detects_pending_herdr_onboarding():
+    doctor = (ROOT / "doctor.sh").read_text()
+
+    assert "HERDR_CONFIG_PATH" in doctor
+    assert "herdr 首次配置未完成；请先运行 herdr 完成向导" in doctor
+
+
 def test_web_push_runtime_dependency_and_worker_are_packaged():
     requirements = (ROOT / "requirements.txt").read_text()
 

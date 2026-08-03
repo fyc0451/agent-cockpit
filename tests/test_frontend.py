@@ -177,6 +177,15 @@ def test_setup_workspace_supports_roles_tasks_and_automatic_worktrees():
     assert "当前目录不是 Git 仓库" in js
 
 
+def test_setup_workspace_handles_herdr_onboarding_in_visible_terminal():
+    js = _inline_js()
+    assert "herdr_onboarding_required" in js
+    assert "打开终端配置 Herdr" in js
+    assert "async function setupHerdrOnboarding(command)" in js
+    assert "data-command=\"${esc(r.herdr_command||'herdr')}\"" in js
+    assert "setupHerdrOnboarding(it.dataset.command)" in js
+
+
 def test_attach_herdr_validates_session_name():
     # session 拼进发给 PTY 的 shell 命令,先用与后端一致的白名单校验,非法则不写 WS
     assert "/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/" in HTML

@@ -1504,7 +1504,8 @@ async function termNew(cwd){
     TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||'';
     renderTermOptions();
     termMount(r.id);
-  }catch(e){toast('创建终端失败: '+e)}
+    return r.id;
+  }catch(e){toast('创建终端失败: '+e);return null}
 }
 function termSwitchOld_removed(){/* 已合并到下面的 termSwitch */}
 // 终端 tab 上传:上传文件 → 把 @路径 作为击键写入 xterm(等于在终端打字)
@@ -2161,10 +2162,22 @@ async function doSetupWorkspace(){
       setTimeout(()=>{closeSetup();loadSessionsView()},3500);
     }else{
       const failed=(r.failed||[]).map(x=>esc(x.agent)+': '+esc(x.error)).join('<br>');
-      res.innerHTML='<span style="color:var(--err)">启动失败</span>'+(r.error?'<br>'+esc(r.error):'')+'<br>已启动: '+((r.started||[]).map(esc).join(', ')||'无')+(failed?'<br>失败原因:<br>'+failed:'');
+      const onboarding=r.code==='herdr_onboarding_required'
+        ?`<br><button class="primary sm" data-action="setupHerdrOnboarding" data-command="${esc(r.herdr_command||'herdr')}" style="margin-top:8px">打开终端配置 Herdr</button>`:'';
+      res.innerHTML='<span style="color:var(--err)">启动失败</span>'+(r.error?'<br>'+esc(r.error):'')+onboarding+'<br>已启动: '+((r.started||[]).map(esc).join(', ')||'无')+(failed?'<br>失败原因:<br>'+failed:'');
     }
   }catch(e){res.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>'}
   finally{SETUP_SUBMITTING=false;renderSetupPreview()}
+}
+async function setupHerdrOnboarding(command){
+  const workdir=document.getElementById('suWorkdir').value.trim();
+  closeSetup();hfStop();
+  document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
+  document.getElementById('view-term').classList.add('active');
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
+  document.getElementById('launchBar').classList.add('hidden');
+  const id=await termNew(workdir);
+  if(id)queueTermInput(id,(command||'herdr')+'\r','请完成 Herdr 首次配置，完成后按 Ctrl-b d 脱离');
 }
 
 // ============ 文件 ============
@@ -2507,6 +2520,7 @@ function bindDelegation(){
   on('#suModeChoices',e=>{const it=e.target.closest('[data-action="setupMode"]');if(it)setupMode(it.dataset.mode)});
   on('#suAddAgent',e=>{if(e.target.closest('[data-action="setupAdd"]'))setupAddAgent()});
   on('#suAgentsList',e=>{const it=e.target.closest('[data-action="setupRemove"]');if(it)setupRemoveAgent(it.dataset.id)});
+  on('#suResult',e=>{const it=e.target.closest('[data-action="setupHerdrOnboarding"]');if(it)setupHerdrOnboarding(it.dataset.command)});
   const setupList=document.getElementById('suAgentsList');
   if(setupList){
     setupList.addEventListener('change',e=>{const it=e.target.closest('[data-field]');if(it)setupFieldChanged(it)});
