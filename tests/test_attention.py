@@ -324,6 +324,51 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     assert writes[-1] == ("term1", "\x02d")
 
 
+def test_setup_workspace_closes_initial_blank_pane(monkeypatch, tmp_path):
+    """PTY 建 session 会留下 TUI 自带的空白 shell pane,agent 启动后应清掉它(且只清它)。"""
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: False)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    session_states = iter([
+        [],
+        [{"name": "demo", "status": "running"}],
+    ])
+    monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: next(session_states))
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda *args, **kwargs: {"available": True, "pane_id": "w1:p2"},
+    )
+    panes = [
+        {"session": "demo", "pane_id": "w1:p1", "agent": None},
+        {"session": "demo", "pane_id": "w1:p2", "agent": "codex"},
+    ]
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"panes": panes})
+    closed = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "close_pane",
+        lambda session, pane_id: closed.append(pane_id) or {"available": True},
+    )
+    monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
+    monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
+    monkeypatch.setattr(server, "_start_pty_drainer", lambda term_id, output: (None, None))
+    monkeypatch.setattr(server, "_stop_pty_drainer", lambda *_: None)
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={"session": "demo", "workdir": str(tmp_path), "agents": ["codex"]},
+    )
+
+    body = response.json()
+    assert body["ok"] is True
+    assert closed == ["w1:p1"]  # agent pane w1:p2 不被误关
+    assert body["closed_panes"] == ["w1:p1"]
+
+
 def test_setup_workspace_timeout_reports_herdr_state_and_cleans_terminal(
     monkeypatch, tmp_path,
 ):

@@ -1212,6 +1212,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
             "started": [],
         }
     plans, warnings = _prepare_workspace(req)
+    base_pane_ids: list[str] = []
     if not session_started:
         # 用 PTY 终端创建 session(herdr --session 需要 TTY)
         t = None
@@ -1260,6 +1261,12 @@ def _setup_workspace(req: SetupWorkspaceReq):
             terminal.write_term(t["id"], "\x02d")  # Ctrl-b + d
             time.sleep(0.5)  # 等 detach 完成,session server 稳定
             _stop_pty_drainer(drain_stop, drain_thread)
+            # 记录 TUI 建 session 自带的初始 shell pane,agent 启动后清理
+            base_pane_ids = [
+                p.get("pane_id")
+                for p in herdr_client.snapshot().get("panes", [])
+                if p.get("session") == req.session and p.get("pane_id")
+            ]
             # 注意:不 kill PTY!herdr client detach 后 PTY 回到 shell,
             # session server 是独立进程会继续跑。kill PTY 可能连带杀 server。
         except Exception as e:
@@ -1295,6 +1302,20 @@ def _setup_workspace(req: SetupWorkspaceReq):
         else:
             started.append(agent_type)
         time.sleep(2)  # 等 agent 启动
+    # 1.5 清理建 session 时 TUI 自带的空白 shell pane(至少一个 agent 在跑才清,避免空 session)
+    closed_panes = []
+    if base_pane_ids and started:
+        current = {
+            p.get("pane_id"): p
+            for p in herdr_client.snapshot().get("panes", [])
+            if p.get("session") == req.session
+        }
+        for pid in base_pane_ids:
+            pane = current.get(pid)
+            if pane and not pane.get("agent"):
+                r = herdr_client.close_pane(req.session, pid)
+                if r.get("available", True) and not r.get("error"):
+                    closed_panes.append(pid)
     # 2. 新版协作工作区向每个成功启动的 Agent 注入角色和任务。
     briefed = []
     if req.participants is not None:
@@ -1363,6 +1384,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         "started": started, "failed": failed, "results": results, "registered": reg_ok,
         "notified": notified, "briefed": briefed, "agent_mail": mail_status,
         "mode": req.mode, "workspaces": plans, "warnings": warnings,
+        "closed_panes": closed_panes,
     }
 
 

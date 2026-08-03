@@ -417,6 +417,23 @@ def test_herdr_flow_entry_from_term_defaults_to_current_term():
     assert "encodeURIComponent(p.pane_id)" in js
 
 
+def test_herdr_flow_entry_from_term_falls_back_to_attached_session_label():
+    # 终端 tab 里 attach/接管来的 PTY 没有 CURRENT_TERM,按 TERM_LABELS 记的 session 选中
+    js = _inline_js()
+    enter = js.split("function enterHerdrFlow(session,paneId){", 1)[1].split("function showView", 1)[0]
+    assert "TERM_LABELS[TERM_ID]" in enter
+    show = js.split("function showView(v){", 1)[1].split("function ", 1)[0]
+    assert "TERM_LABELS[TERM_ID]" in show
+
+
+def test_safe_fit_shaves_one_column_to_avoid_right_clipping():
+    # FitAddon 小数取整偶尔多给 1 列导致最右列被裁;fit 后减 1 列兜底
+    js = _inline_js()
+    fit = js.split("function safeFitOf(fit,xterm){", 1)[1].split("function ", 1)[0]
+    assert "fit.proposeDimensions()" in fit
+    assert "xterm.resize(d.cols-1,d.rows)" in fit
+
+
 def test_file_manager_search_ui_and_actions_wired():
     js = _inline_js()
     assert 'id="fileSearchInput"' in HTML

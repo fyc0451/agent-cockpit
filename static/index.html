@@ -932,6 +932,7 @@ function showView(v){
   if(v==='herdrflow'){
     // 从终端视图切过来(点导航「流」)时,同样默认选中当前终端对应的 session 并定位 pane
     if(prevView==='term'&&CURRENT_TERM){HF_SESSION=CURRENT_TERM.session;HF_FOCUS_PANE=CURRENT_TERM.paneId}
+    else if(prevView==='term'&&TERM_ID&&TERM_LABELS[TERM_ID]){HF_SESSION=TERM_LABELS[TERM_ID];HF_FOCUS_PANE=null}
     hfStart();
   }else hfStop();
 }
@@ -1614,8 +1615,10 @@ async function doAttachHerdr(session){
 // 输入框直接调 /api/herdr/pane/.../send 发指令,无需进 TUI。
 let HF_TIMER=null, HF_SESSION=null, HF_FOCUS_PANE=null;
 function enterHerdrFlow(session,paneId){
-  // 未显式指定时(终端工具栏「返回流视图」)默认带到当前终端对应的 session/pane
+  // 未显式指定时(终端工具栏「返回流视图」)默认带到当前终端对应的 session/pane:
+  // 卡片抽屉终端看 CURRENT_TERM;终端 tab 里 attach/接管来的 PTY 按 label 记了 session
   if(!session&&CURRENT_TERM){session=CURRENT_TERM.session;paneId=paneId||CURRENT_TERM.paneId}
+  if(!session&&TERM_ID&&TERM_LABELS[TERM_ID])session=TERM_LABELS[TERM_ID];
   HF_SESSION=session||null;
   HF_FOCUS_PANE=paneId||null;
   showView('herdrflow');
@@ -1805,7 +1808,13 @@ function safeFitOf(fit,xterm){
   if(!view?.classList.contains('active')||!el?.isConnected)return false;
   const rect=el.getBoundingClientRect();
   if(rect.width<2||rect.height<2)return false;
-  try{fit.fit();return true}catch(e){return false}
+  try{
+    fit.fit();
+    // FitAddon 小数取整偶尔多给 1 列,最右列会被容器边缘/滚动条裁掉;减 1 列兜底
+    const d=fit.proposeDimensions();
+    if(d&&d.cols>10&&xterm.cols===d.cols)xterm.resize(d.cols-1,d.rows);
+    return true
+  }catch(e){return false}
 }
 function flushTermInput(id,ws){
   const inst=TERM_INSTANCES[id];

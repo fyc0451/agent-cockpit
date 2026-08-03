@@ -101,6 +101,27 @@ def test_start_agent_fallback_selects_highest_numeric_pane(monkeypatch):
     ) in calls
 
 
+def test_start_agent_renames_pane_to_agent_name(monkeypatch):
+    """启动成功后把 pane 命名为 agent 名(默认序号难辨认);rename 失败不影响启动。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "codex")
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: {"panes": [{"pane_id": "w1:p2", "agent": None}]},
+    )
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run", lambda args, timeout=10: calls.append(args) or ""
+    )
+
+    result = herdr_client.start_agent("demo", "/tmp/project")
+
+    assert result["pane_id"] == "w1:p2"
+    assert ["--session", "demo", "pane", "rename", "w1:p2", "codex"] in calls
+
+
 def test_start_agent_reports_missing_executable_before_split(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: {"panes": []})

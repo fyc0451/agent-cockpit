@@ -374,7 +374,23 @@ def start_agent(
             return {"available": True, "error": "split/tab 后找不到新 pane"}
         # 用 pane run 启动 agent(完整路径 + shlex 安全分割)
         _run(["--session", session, "pane", "run", new_pid] + shlex.split(cmd_str), timeout=8)
+        # pane 命名成 agent 名(默认是序号,看板/TUI 里分不清);失败不影响启动
+        try:
+            _run(["--session", session, "pane", "rename", new_pid, agent], timeout=5)
+        except RuntimeError:
+            pass
         return {"available": True, "pane_id": new_pid, "agent": agent, "cmd": cmd_str}
+    except RuntimeError as e:
+        return {"available": True, "error": str(e)}
+
+
+def close_pane(session: str, pane_id: str) -> dict[str, Any]:
+    """关闭 pane(清理一键工作区遗留的空白 shell pane 用)。"""
+    if not is_available():
+        return {"available": False}
+    try:
+        _run(["--session", session, "pane", "close", pane_id], timeout=5)
+        return {"available": True, "closed": pane_id}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
 
