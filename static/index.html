@@ -2052,16 +2052,16 @@ function setupMode(mode){
   SETUP_MODE=mode;
   const known=setupKnownAgents(), first=known[0]||'codex', second=known.find(a=>a!==first);
   if(mode==='quick'){
-    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责当前开发工作')];
+    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','')];
   }else if(mode==='develop_review'){
-    const lead=setupParticipant(first,'lead','完成开发工作并提交可复核的 commit');
+    const lead=setupParticipant(first,'lead','');
     SETUP_PARTICIPANTS=[lead];
-    if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'reviewer','检查需求、代码和测试',lead.id));
+    if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'reviewer','',lead.id));
   }else if(mode==='parallel'){
-    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责模块 A，并协调最终集成')];
-    if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'developer','负责模块 B，提交独立 commit'));
+    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','')];
+    if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'developer',''));
   }else if(!SETUP_PARTICIPANTS.length){
-    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责当前开发工作')];
+    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','')];
   }
   document.querySelectorAll('#suModeChoices [data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));
   renderSetupAgents();
@@ -2089,7 +2089,7 @@ function renderSetupAgents(){
         <button class="icon" data-action="setupRemove" data-id="${esc(p.id)}" title="移除 Agent"${SETUP_PARTICIPANTS.length===1?' disabled':''}>✕</button>
       </div>
       <div class="setup-agent-task">
-        <input data-id="${esc(p.id)}" data-field="task" value="${esc(p.task)}" placeholder="这个 Agent 具体做什么">
+        <input data-id="${esc(p.id)}" data-field="task" value="${esc(p.task)}" placeholder="填写真实任务和验收条件">
         <select data-id="${esc(p.id)}" data-field="workspace" aria-label="工作目录策略">${setupWorkspaceOptions(p.workspace)}</select>
       </div>${review}
     </div>`;
@@ -2116,7 +2116,7 @@ function setupAddAgent(){
   const agent=setupKnownAgents().find(a=>!SETUP_PARTICIPANTS.some(p=>p.agent===a));
   if(!agent){toast('没有更多已启用的 Agent');return}
   SETUP_MODE='custom';
-  SETUP_PARTICIPANTS.push(setupParticipant(agent,'developer','负责一个独立子任务'));
+  SETUP_PARTICIPANTS.push(setupParticipant(agent,'developer',''));
   document.querySelectorAll('#suModeChoices [data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode==='custom'));
   renderSetupAgents();
 }
@@ -2137,7 +2137,7 @@ function setupErrors(){
   if(!session)errors.push('请填写 session 名');else if(!validSessionName(session))errors.push('session 名只能包含字母、数字、_、-');
   if(!SETUP_PARTICIPANTS.length)errors.push('至少添加一个 Agent');
   if(new Set(SETUP_PARTICIPANTS.map(p=>p.agent)).size!==SETUP_PARTICIPANTS.length)errors.push('同一种 Agent 不能重复');
-  if(SETUP_PARTICIPANTS.length>1&&SETUP_PARTICIPANTS.some(p=>!p.task.trim()))errors.push('请填写每个 Agent 的任务');
+  if(SETUP_PARTICIPANTS.some(p=>!p.task.trim()))errors.push('请填写每个 Agent 的真实任务');
   if(SETUP_MODE==='develop_review'&&(!writers.length||!SETUP_PARTICIPANTS.some(p=>p.role==='reviewer')))errors.push('开发 + 复核需要开发者和 Reviewer');
   if(SETUP_MODE==='parallel'&&writers.length<2)errors.push('并行开发至少需要两名写入者');
   if(writers.length>1&&writers.some(p=>p.workspace==='shared'))errors.push('多个并行写入者不能共享目录');
@@ -2209,6 +2209,7 @@ async function doSetupWorkspace(){
   const errors=setupErrors();
   if(errors.length){toast(errors[0]);renderSetupPreview();return}
   SETUP_SUBMITTING=true;renderSetupPreview();
+  let setupSucceeded=false;
   const participants=SETUP_PARTICIPANTS.map(p=>({...p,task:p.task.trim()}));
   const agents=participants.map(p=>p.agent);
   const res=document.getElementById('suResult');
@@ -2217,14 +2218,19 @@ async function doSetupWorkspace(){
     const body={session,workdir,mode:SETUP_MODE,participants,agents,layout};
     const r=await api('/api/herdr/setup-workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(r.ok){
+      setupSucceeded=true;
       const mail=r.agent_mail||{};
       const mailText=r.registered?'已注册':(mail.available===false?'未启用，已跳过':'未注册');
+      const started=(r.started||[]).map(esc).join(', ');
+      const reused=(r.reused||[]).map(esc).join(', ');
       const notified=(r.notified||[]).map(esc).join(', ');
       const workspaces=(r.workspaces||[]).map(w=>`${esc(w.agent)}: ${esc(w.strategy)} · <code>${esc(w.workdir)}</code>`).join('<br>');
       const warnings=(r.warnings||[]).map(w=>'⚠ '+esc(w)).join('<br>');
-      res.innerHTML='<span style="color:var(--done)">✅ 工作区就绪</span><br>启动: '+r.started.map(esc).join(', ')+(workspaces?'<br>'+workspaces:'')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'')+(warnings?'<br><span style="color:var(--need)">'+warnings+'</span>':'');
-      toast('工作区就绪 ✓');
-      setTimeout(()=>{closeSetup();loadSessionsView()},3500);
+      const readyText=r.idempotent?'✅ 工作区已在运行':'✅ 工作区就绪';
+      res.innerHTML='<span style="color:var(--done)">'+readyText+'</span><br>启动: '+(started||'无')+(reused?'<br>复用: '+reused:'')+(workspaces?'<br>'+workspaces:'')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'')+(warnings?'<br><span style="color:var(--need)">'+warnings+'</span>':'');
+      document.getElementById('suStartBtn').textContent='✓ 工作区已启动';
+      toast(r.idempotent?'工作区已在运行':'工作区就绪 ✓');
+      setTimeout(()=>{SETUP_SUBMITTING=false;closeSetup();renderSetupPreview();loadSessionsView()},3500);
     }else{
       const failed=(r.failed||[]).map(x=>esc(x.agent)+': '+esc(x.error)).join('<br>');
       const terminalOutput=r.terminal_output?'<br>终端输出: <code>'+esc(r.terminal_output)+'</code>':'';
@@ -2233,7 +2239,7 @@ async function doSetupWorkspace(){
       res.innerHTML='<span style="color:var(--err)">启动失败</span>'+(r.error?'<br>'+esc(r.error):'')+terminalOutput+onboarding+'<br>已启动: '+((r.started||[]).map(esc).join(', ')||'无')+(failed?'<br>失败原因:<br>'+failed:'');
     }
   }catch(e){res.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>'}
-  finally{SETUP_SUBMITTING=false;renderSetupPreview()}
+  finally{if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}}
 }
 async function setupHerdrOnboarding(command){
   const workdir=document.getElementById('suWorkdir').value.trim();

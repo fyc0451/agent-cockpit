@@ -164,7 +164,7 @@ def test_message_fields_escaped():
 
 def test_setup_workspace_output_escaped():
     # r.started/r.notified 来自后端响应,经 map(esc) 后再 join
-    assert "r.started.map(esc).join" in HTML
+    assert "(r.started||[]).map(esc).join" in HTML
     assert "(r.notified||[]).map(esc).join" in HTML
     assert "esc(r.terminal_output)" in HTML
 
@@ -184,6 +184,30 @@ def test_setup_workspace_supports_roles_tasks_and_automatic_worktrees():
     assert "/api/herdr/inspect-workspace" in js
     assert "SETUP_SUBMITTING" in js
     assert "当前目录不是 Git 仓库" in js
+
+
+def test_setup_workspace_requires_real_tasks_and_keeps_success_locked():
+    js = _inline_js()
+    modes = js.split("function setupMode(mode){", 1)[1].split(
+        "function setupRoleOptions", 1,
+    )[0]
+    errors = js.split("function setupErrors(){", 1)[1].split(
+        "function setupInspectWorkspace", 1,
+    )[0]
+    submit = js.split("async function doSetupWorkspace(){", 1)[1].split(
+        "async function setupHerdrOnboarding", 1,
+    )[0]
+
+    assert "完成开发工作并提交可复核的 commit" not in modes
+    assert "检查需求、代码和测试" not in modes
+    assert "负责模块 A" not in modes
+    assert "setupParticipant(first,'lead','')" in modes
+    assert "SETUP_PARTICIPANTS.some(p=>!p.task.trim())" in errors
+    assert "请填写每个 Agent 的真实任务" in errors
+    assert "SETUP_PARTICIPANTS.length>1&&" not in errors
+    assert "let setupSucceeded=false" in submit
+    assert "setupSucceeded=true" in submit
+    assert "if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}" in submit
 
 
 def test_old_session_mail_project_can_be_selected_in_ui():
