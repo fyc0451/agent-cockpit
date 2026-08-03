@@ -329,7 +329,12 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     js = _inline_js()
     assert ".app.hf-immersive #view-herdrflow{" in HTML
     assert "position:fixed;inset:0" in HTML
+    assert 'id="hfToolbar" class="hf-toolbar"' in HTML
+    assert 'id="hfToolbar" style=' not in HTML
     assert ".app.hf-immersive #hfToolbar{display:none}" in HTML
+    assert ".hf-body.hf-full .hf-pane-head{padding:4px 7px" in HTML
+    assert ".hf-body.hf-full .hf-in{padding:4px;gap:4px;flex-wrap:nowrap}" in HTML
+    assert ".hf-body.hf-full .hf-paste-short{display:inline}" in HTML
     assert "class=\"hf-enter\"" in HTML and "hf.full" in HTML
     assert "class=\"hf-exit\"" in HTML and "hf.exit" in HTML
     assert "app.classList.add('hf-immersive')" in js

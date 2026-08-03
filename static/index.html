@@ -199,6 +199,7 @@ header .spacer{flex:1}
 .board-wrap,.file-tree,.sidebar,.msgs-list,.term-out,.hf-body,.modal{overscroll-behavior:contain}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
+.hf-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap}
 .hf-body{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
 .hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex-direction:column;overflow:hidden}
 .hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap}
@@ -217,7 +218,18 @@ header .spacer{flex:1}
 .hf-body.hf-full{overflow:hidden;padding:0;gap:0}
 .hf-body.hf-full .hf-pane{display:none}
 .hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;border:none;border-radius:0}
+.hf-body.hf-full .hf-pane-head{padding:4px 7px;gap:5px;flex-wrap:nowrap}
+.hf-body.hf-full .hf-pane-head .agent-icon{width:20px!important;height:20px!important;font-size:10px!important}
+.hf-body.hf-full .hf-pane-head>.muted{display:none}
+.hf-body.hf-full .hf-expand{padding:2px 5px}
 .hf-body.hf-full .hf-pane.hf-focus .hf-out{max-height:none;min-height:0;flex:1;font-size:13px}
+.hf-body.hf-full .hf-in{padding:4px;gap:4px;flex-wrap:nowrap}
+.hf-body.hf-full .hf-in input{min-width:0;padding:5px 7px}
+.hf-body.hf-full .hf-in select{padding:5px 6px}
+.hf-body.hf-full .hf-in button{padding:4px 7px}
+.hf-paste-short{display:none}
+.hf-body.hf-full .hf-paste-long{display:none}
+.hf-body.hf-full .hf-paste-short{display:inline}
 .hf-body.hf-full .hf-pane.hf-focus .hf-enter{display:none}
 .hf-body.hf-full .hf-pane.hf-focus .hf-exit{display:inline}
 
@@ -461,7 +473,7 @@ header .spacer{flex:1}
 
   <!-- herdr 流视图(只读 pane 流 + 输入框发指令,手机可滚屏/复制) -->
   <section id="view-herdrflow" class="view" style="flex-direction:column">
-    <div id="hfToolbar" style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
+    <div id="hfToolbar" class="hf-toolbar">
       <select id="hfSession" onchange="hfLoad()" style="width:auto;min-width:140px"></select>
       <button class="sm" onclick="hfLoad()" data-i18n="common.refresh">↻ 刷新</button>
       <button class="sm" onclick="hfTakeover()" title="需要方向键、确认菜单等终端交互时使用" data-i18n="hf.takeover">🖥 接管 TUI</button>
@@ -1680,7 +1692,7 @@ function hfRender(){
         <input id="hf-in-${esc(p.pane_id)}" placeholder="${t('term.input.ph.agent','给 {agent} 发指令…',{agent:esc(p.agent)})}" data-action="hfSendEnter" data-pane="${esc(p.pane_id)}">
         <label class="icon" style="cursor:pointer;font-size:17px" title="上传图片/文件,插入@路径">📎<input type="file" multiple style="display:none" data-action="hfUpload" data-pane="${esc(p.pane_id)}"></label>
         <select id="hf-mode-${esc(p.pane_id)}"><option value="prompt">prompt</option><option value="send">send</option></select>
-        <button class="sm" data-action="hfPaste" data-pane="${esc(p.pane_id)}" title="把刚才在 Herdr TUI 里复制的文字填入这个 pane 的输入框">${t('hf.paste','📋 填入输入框')}</button>
+        <button class="sm" data-action="hfPaste" data-pane="${esc(p.pane_id)}" title="把刚才在 Herdr TUI 里复制的文字填入这个 pane 的输入框"><span class="hf-paste-long">${t('hf.paste','📋 填入输入框')}</span><span class="hf-paste-short">📋</span></button>
         <button class="primary sm" data-action="hfSend" data-pane="${esc(p.pane_id)}">${t('hf.send','发送')}</button>
       </div>
     </div>`;
