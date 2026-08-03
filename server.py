@@ -223,6 +223,10 @@ class WriteFileReq(BaseModel):
     create: bool = False
 
 
+class FileRootReq(BaseModel):
+    path: str
+
+
 class StartAgentReq(BaseModel):
     session: str
     workdir: str
@@ -521,7 +525,30 @@ def api_uploads():
 @app.get("/api/files/roots")
 def api_file_roots():
     """返回允许浏览的根目录列表。"""
-    return {"roots": files.allowed_roots()}
+    groups = files.allowed_root_groups()
+    return {"roots": [path for roots in groups.values() for path in roots], "groups": groups}
+
+
+@app.post("/api/files/roots")
+def api_file_root_add(req: FileRootReq):
+    """持久化添加一个明确的自定义目录。"""
+    try:
+        result = files.add_custom_root(req.path)
+        groups = files.allowed_root_groups()
+        return {**result, "roots": [p for roots in groups.values() for p in roots], "groups": groups}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/files/roots")
+def api_file_root_remove(path: str):
+    """移除自定义目录；系统目录和已注册项目不受影响。"""
+    try:
+        result = files.remove_custom_root(path)
+        groups = files.allowed_root_groups()
+        return {**result, "roots": [p for roots in groups.values() for p in roots], "groups": groups}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/files")

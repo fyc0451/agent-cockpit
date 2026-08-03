@@ -350,6 +350,21 @@ def test_file_manager_explains_roots_search_and_actions():
     assert "可访问位置：" in js
 
 
+def test_file_manager_groups_and_manages_custom_roots():
+    js = _inline_js()
+    assert 'id="fileAddRootBtn"' in HTML
+    assert "FILE_ROOT_GROUPS=null" in js
+    assert "function fileAddRoot()" in js
+    assert "function fileRemoveRoot(path)" in js
+    assert "系统目录" in js
+    assert "已注册项目" in js
+    assert "自定义目录" in js
+    assert 'data-action="fileRemoveRoot"' in js
+    assert "method:'POST'" in js
+    assert "method:'DELETE'" in js
+    assert "a==='fileRemoveRoot')fileRemoveRoot(it.dataset.path)" in js
+
+
 def test_file_manager_can_prefill_workspace_from_current_directory():
     js = _inline_js()
     assert 'id="fileWorkspaceBtn"' in HTML

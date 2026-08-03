@@ -117,6 +117,11 @@ header .spacer{flex:1}
 .ft-item{padding:5px 10px;border-radius:6px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;white-space:nowrap}
 .ft-item:hover{background:var(--bg3)}
 .ft-bc{font-family:var(--mono);font-size:11px;color:var(--fg3);padding:6px 4px;word-break:break-all}
+.ft-root-group{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:4px}
+.ft-root-group-label{flex:0 0 68px;font-size:11px;color:var(--fg3)}
+.ft-root-chip{display:inline-flex;align-items:center;gap:3px;padding:3px 6px;border:1px solid var(--bd);border-radius:6px;cursor:pointer;font:11px var(--mono);word-break:break-all}
+.ft-root-chip.active{color:var(--accent);border-color:var(--accent)}
+.ft-root-chip button{padding:1px 4px;min-width:0;font-size:10px}
 .editor-area{display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:hidden}
 .editor-area textarea{flex:1;border:none;border-radius:0;background:var(--bg);font-size:13px;tab-size:2}
 .editor-bar{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:12px}
@@ -347,6 +352,7 @@ header .spacer{flex:1}
   <section id="view-files" class="view files-view">
     <div class="file-guide">
       <span><b>怎么用：</b>先在“可访问位置”选项目，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，其他文件点 ⬇️ 下载。</span>
+      <button class="sm" id="fileAddRootBtn" onclick="fileAddRoot()" title="添加一个允许浏览的 WSL 目录">＋ 添加目录</button>
       <button class="primary sm" id="fileWorkspaceBtn" onclick="setupWorkspaceFromFiles()" title="用文件列表当前所在目录预填一键工作区">🚀 当前目录建工作区</button>
     </div>
     <div class="file-search">
@@ -539,7 +545,7 @@ header .spacer{flex:1}
 
 <script>
 // ============ 状态 ============
-let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null, FILE_ENTRIES=[], FILE_ROOTS=null;
+let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null, FILE_ENTRIES=[], FILE_ROOTS=null, FILE_ROOT_GROUPS=null;
 let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
 let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=null;
 let SERVICE_CLIPBOARD='';
@@ -1666,7 +1672,7 @@ async function doSetupWorkspace(){
 // ============ 文件 ============
 async function loadFileTree(){
   try{
-    if(!FILE_ROOTS){const r=await api('/api/files/roots');FILE_ROOTS=r.roots||[]}
+    if(!FILE_ROOTS){const r=await api('/api/files/roots');setFileRoots(r)}
     if(!FILE_CWD)FILE_CWD=FILE_ROOTS[0]||'/';
     const d=await api('/api/files?path='+encodeURIComponent(FILE_CWD));
     FILE_CWD=d.path;
@@ -1688,13 +1694,18 @@ async function loadFileTree(){
       bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(acc)}">/${esc(p)}</span>`;
     });
     bc+='</div>';
-    // 多个白名单根时给一排根切换入口(后端不放行根以上的目录)
-    if(FILE_ROOTS.length>1){
-      bc+='<div class="ft-bc">可访问位置：'+FILE_ROOTS.map(r=>{
-        const on=r===root;
-        const label=fileRootLabel(r);
-        return `<span style="cursor:pointer;color:${on?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(r)}">${on?'●':'○'} ${esc(label)}</span>`;
-      }).join(' ')+'</div>';
+    // 按来源分组展示白名单根；只有自定义目录提供移除操作。
+    if(FILE_ROOTS.length){
+      bc+='<div class="ft-bc"><b>可访问位置：</b></div>';
+      const groups=FILE_ROOT_GROUPS||{system:FILE_ROOTS};
+      const labels={system:'系统目录',projects:'已注册项目',custom:'自定义目录'};
+      Object.entries(groups).forEach(([kind,roots])=>{
+        if(!roots.length)return;
+        bc+=`<div class="ft-root-group"><span class="ft-root-group-label">${esc(labels[kind]||kind)}</span>`+roots.map(r=>{
+          const on=r===root;
+          return `<span class="ft-root-chip${on?' active':''}" data-action="fileGoto" data-path="${esc(r)}" title="${esc(r)}">${on?'●':'○'} ${esc(fileRootLabel(r))}${kind==='custom'?` <button data-action="fileRemoveRoot" data-path="${esc(r)}" title="从可访问位置移除，不删除目录">移除</button>`:''}</span>`;
+        }).join('')+'</div>';
+      });
     }
     // 上级目录按钮(到白名单根为止,再往上后端会拒绝)
     const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">‥ (上级)</span></div>`:'';
@@ -1702,7 +1713,28 @@ async function loadFileTree(){
       <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
 }
+function setFileRoots(r){FILE_ROOTS=r.roots||[];FILE_ROOT_GROUPS=r.groups||null}
 function fileRootLabel(path){return path.replace(/^\/home\/[^/]+/,'~')||'/'}
+async function fileAddRoot(){
+  const raw=window.prompt('输入要添加的 WSL 目录\n例如：/home/fyc/github/my-project 或 ~/my-project\n请添加具体目录，不要添加整个 Home。');
+  if(raw===null||!raw.trim())return;
+  try{
+    const r=await api('/api/files/roots',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:raw.trim()})});
+    setFileRoots(r);FILE_CWD=r.path;
+    toast(r.added?'目录已添加':'该目录已经可以访问');
+    loadFileTree();
+  }catch(e){toast('添加目录失败: '+e,4000)}
+}
+async function fileRemoveRoot(path){
+  if(!confirm('从文件管理中移除 '+fileRootLabel(path)+'？\n不会删除磁盘上的目录和文件。'))return;
+  try{
+    const r=await api('/api/files/roots?path='+encodeURIComponent(path),{method:'DELETE'});
+    setFileRoots(r);
+    const stillAllowed=FILE_ROOTS.some(root=>FILE_CWD===root||FILE_CWD?.startsWith(root+'/'));
+    if(!stillAllowed)FILE_CWD=FILE_ROOTS[0]||null;
+    toast('已从可访问位置移除');loadFileTree();
+  }catch(e){toast('移除目录失败: '+e,4000)}
+}
 function workspaceSessionName(path){
   const parts=String(path||'').split('/').filter(Boolean);
   const base=parts[parts.length-1]||'workspace';
@@ -1723,7 +1755,7 @@ async function fileSearch(){
   const q=input.value.trim();
   if(!q){fileSearchClear();return}
   try{
-    if(!FILE_CWD){const r=await api('/api/files/roots');FILE_CWD=r.roots[0]}
+    if(!FILE_CWD){const r=await api('/api/files/roots');setFileRoots(r);FILE_CWD=FILE_ROOTS[0]}
     const base=FILE_CWD;
     const d=await api('/api/files/search?path='+encodeURIComponent(base)+'&q='+encodeURIComponent(q));
     if(input.value.trim()!==q||FILE_CWD!==base)return;
@@ -1883,6 +1915,7 @@ function bindDelegation(){
     const a=it.dataset.action;
     if(a==='fileGoto')fileGoto(it.dataset.path);
     else if(a==='fileUp')fileUp();
+    else if(a==='fileRemoveRoot')fileRemoveRoot(it.dataset.path);
     else if(a==='fileCd')fileCd(it.dataset.name);
     else if(a==='fileOpen')fileOpen(it.dataset.path,it.dataset.name);
     else if(a==='fileDownloadEntry')fileDownloadEntry(parseInt(it.dataset.idx));

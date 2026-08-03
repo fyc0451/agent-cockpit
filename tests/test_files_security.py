@@ -72,11 +72,70 @@ def test_resolve_accepts_registered_project(tmp_path, monkeypatch):
         files._resolve(str(other / "x.py"))
 
 
+def test_custom_root_persists_is_grouped_and_can_be_removed(tmp_path):
+    custom = _mkdirs(tmp_path / "other-project")
+
+    added = files.add_custom_root(str(custom))
+
+    assert added == {"path": str(custom.resolve()), "added": True}
+    assert str(custom.resolve()) in files.allowed_roots()
+    assert files.allowed_root_groups()["custom"] == [str(custom.resolve())]
+    config = tmp_path / ".config" / "agent-cockpit" / "file-roots.json"
+    assert config.is_file()
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+
+    removed = files.remove_custom_root(str(custom))
+
+    assert removed == {"path": str(custom.resolve()), "removed": True}
+    assert files.allowed_root_groups()["custom"] == []
+
+
+def test_custom_root_rejects_broad_or_missing_directories(tmp_path):
+    with pytest.raises(ValueError, match="具体目录"):
+        files.add_custom_root("/")
+    with pytest.raises(ValueError, match="具体目录"):
+        files.add_custom_root(str(tmp_path))
+    with pytest.raises(ValueError, match="不存在"):
+        files.add_custom_root(str(tmp_path / "missing"))
+    sensitive = _mkdirs(tmp_path / ".ssh")
+    with pytest.raises(ValueError, match="敏感"):
+        files.add_custom_root(str(sensitive))
+    with pytest.raises(ValueError, match="系统运行目录"):
+        files.add_custom_root("/proc")
+
+
+def test_only_custom_roots_can_be_removed():
+    with pytest.raises(ValueError, match="不是自定义目录"):
+        files.remove_custom_root(str(files._PROJECT_DIR))
+
+
 def test_read_file_outside_whitelist_rejected(tmp_path):
     secret = tmp_path / ".env"
     secret.write_text("TOKEN=1")
     with pytest.raises(ValueError):
         files.read_file(str(secret))
+
+
+def test_custom_root_api_adds_and_removes_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    custom = _mkdirs(tmp_path / "api-project")
+    client = TestClient(server.app)
+    headers = {"authorization": "Bearer secret"}
+
+    added = client.post(
+        "/api/files/roots", headers=headers, json={"path": str(custom)}
+    )
+
+    assert added.status_code == 200
+    assert added.json()["path"] == str(custom.resolve())
+    assert str(custom.resolve()) in added.json()["groups"]["custom"]
+
+    removed = client.delete(
+        "/api/files/roots", headers=headers, params={"path": str(custom)}
+    )
+
+    assert removed.status_code == 200
+    assert removed.json()["groups"]["custom"] == []
 
 
 # ── 删除保护 ────────────────────────────────────────────────────

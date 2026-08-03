@@ -6,6 +6,7 @@
 允许的根目录:
   - 本项目(dashboard)目录
   - agent-mail DB 已注册且实际存在的项目 human_key
+  - 用户通过文件页显式添加的自定义目录
   - ~/dashboard-uploads/(上传文件区)
   - ~/dashboard-data/
   - ~/agent-mail-tools/
@@ -13,9 +14,11 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +54,15 @@ BINARY_EXT = {
 _HOME = Path.home().resolve()
 _PROJECT_DIR = Path(__file__).resolve().parent
 _HOME_SUBDIRS = ("dashboard-uploads", "dashboard-data", "agent-mail-tools")
+_ROOTS_LOCK = threading.Lock()
+
+
+def _custom_roots_file() -> Path:
+    return _HOME / ".config" / "agent-cockpit" / "file-roots.json"
+
+
+def _system_roots() -> list[Path]:
+    return [_PROJECT_DIR, *((_HOME / name).resolve(strict=False) for name in _HOME_SUBDIRS)]
 
 
 def _registered_project_roots() -> list[Path]:
@@ -74,19 +86,129 @@ def _registered_project_roots() -> list[Path]:
     return roots
 
 
+def _read_custom_roots() -> list[Path]:
+    try:
+        raw = json.loads(_custom_roots_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    roots = []
+    for value in raw:
+        if not isinstance(value, str):
+            continue
+        try:
+            path = Path(value).expanduser().resolve(strict=False)
+        except OSError:
+            continue
+        if path.is_dir() and path not in roots:
+            roots.append(path)
+    return roots
+
+
+def _write_custom_roots(roots: list[Path]) -> None:
+    target = _custom_roots_file()
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".file-roots.", suffix=".tmp", dir=str(target.parent)
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump([str(path) for path in roots], handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def allowed_root_groups() -> dict[str, list[str]]:
+    """按来源返回白名单根；同一路径只出现在优先级最高的一组。"""
+    groups = {
+        "system": _system_roots(),
+        "projects": _registered_project_roots(),
+        "custom": _read_custom_roots(),
+    }
+    seen: set[Path] = set()
+    result: dict[str, list[str]] = {}
+    for name, roots in groups.items():
+        values = []
+        for root in roots:
+            resolved = root.resolve(strict=False)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            values.append(str(resolved))
+        result[name] = values
+    return result
+
+
 def _load_roots() -> list[Path]:
     """允许访问的根目录(显式白名单,去重后返回)。"""
-    roots: list[Path] = [_PROJECT_DIR]
-    for name in _HOME_SUBDIRS:
-        roots.append((_HOME / name).resolve(strict=False))
-    roots.extend(_registered_project_roots())
-    seen: set[Path] = set()
-    out: list[Path] = []
-    for r in roots:
-        if r not in seen:
-            seen.add(r)
-            out.append(r)
-    return out
+    groups = allowed_root_groups()
+    return [Path(path) for paths in groups.values() for path in paths]
+
+
+def _normalize_custom_root(rel: str, *, must_exist: bool) -> Path:
+    if not rel or not rel.strip():
+        raise ValueError("目录路径为空")
+    path = Path(rel.strip()).expanduser()
+    if not path.is_absolute():
+        path = _HOME / path
+    try:
+        path = path.resolve(strict=must_exist)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"目录不存在或无法解析: {path}") from exc
+    if must_exist and not path.is_dir():
+        raise ValueError(f"不是目录: {path}")
+    broad = {Path("/"), _HOME.resolve(), _HOME.parent.resolve()}
+    if path in broad:
+        raise ValueError("请选择具体目录，不能添加 /、/home 或整个用户 Home")
+    blocked = [
+        Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
+        _HOME / ".ssh", _HOME / ".gnupg", _HOME / ".agent-mail",
+        _HOME / ".config" / "agent-cockpit",
+    ]
+    for root in blocked:
+        try:
+            path.relative_to(root.resolve(strict=False))
+        except ValueError:
+            continue
+        raise ValueError(f"敏感或系统运行目录不能添加: {path}")
+    return path
+
+
+def add_custom_root(rel: str) -> dict[str, Any]:
+    path = _normalize_custom_root(rel, must_exist=True)
+    with _ROOTS_LOCK:
+        existing = [*_system_roots(), *_registered_project_roots()]
+        if path in (root.resolve(strict=False) for root in existing):
+            return {"path": str(path), "added": False}
+        custom = _read_custom_roots()
+        if path in custom:
+            return {"path": str(path), "added": False}
+        if len(custom) >= 100:
+            raise ValueError("自定义目录已达上限 100 个")
+        custom.append(path)
+        _write_custom_roots(custom)
+    return {"path": str(path), "added": True}
+
+
+def remove_custom_root(rel: str) -> dict[str, Any]:
+    path = _normalize_custom_root(rel, must_exist=False)
+    with _ROOTS_LOCK:
+        custom = _read_custom_roots()
+        if path not in custom:
+            raise ValueError(f"不是自定义目录，不能移除: {path}")
+        custom.remove(path)
+        _write_custom_roots(custom)
+    return {"path": str(path), "removed": True}
 
 
 def reset_roots() -> None:
