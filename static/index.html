@@ -170,9 +170,15 @@ header .spacer{flex:1}
 .term-keys{display:none;gap:5px;padding:5px 6px;overflow-x:auto;background:var(--bg2);border-bottom:1px solid var(--bd);flex-shrink:0}
 .term-keys button{flex:0 0 auto;min-width:38px;padding:5px 8px;font-family:var(--mono);font-size:12px}
 .term-keys .term-key-extra{display:none}
-.term-keys.expanded{flex-wrap:wrap;overflow-y:auto;max-height:38vh}
+.term-keys.expanded{flex-wrap:wrap;overflow-y:auto;max-height:46dvh;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .term-keys.expanded .term-key-extra{display:block}
+.term-keys.expanded .term-key-input{display:flex}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
+.term-key-input{position:sticky;top:-5px;z-index:2;flex:1 0 100%;align-items:center;gap:5px;flex-wrap:wrap;padding:5px 0;background:var(--bg2)}
+.term-key-input input{flex:1;min-width:150px;font-family:var(--mono)}
+.term-key-status{flex:1 0 100%;font-size:11px;color:var(--fg3);min-height:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#termContainer{min-height:0}
+#termContainer .xterm-viewport{touch-action:pan-y!important;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .board-wrap,.file-tree,.sidebar,.msgs-list,.term-out,.hf-body,.modal{overscroll-behavior:contain}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
@@ -372,6 +378,11 @@ header .spacer{flex:1}
     </div>
     <div class="term-keys" id="termKeys" aria-label="手机电脑键盘">
       <button id="termKeyboardToggle" onclick="toggleTermKeyboard()" title="展开电脑键盘">⌨ 电脑键盘</button>
+      <div class="term-key-input term-key-extra">
+        <input id="termKeyboardInput" type="text" placeholder="在这里输入，内容可见" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" oninput="updateTermKeyboardStatus()" onkeydown="if(event.key==='Enter'){event.preventDefault();termSendVisibleInput()}">
+        <button class="primary" onclick="termSendVisibleInput()">发送 ↵</button>
+        <span class="term-key-status" id="termKeyboardStatus" aria-live="polite">输入内容会先显示在这里，再发送到终端</span>
+      </div>
       <button onclick="termKey('ArrowUp')" title="方向键上">↑</button>
       <button onclick="termKey('ArrowDown')" title="方向键下">↓</button>
       <button onclick="termKey('ArrowLeft')" title="方向键左">←</button>
@@ -1089,10 +1100,24 @@ let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={};
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
 const TERM_MODIFIERS={ctrl:false,alt:false,shift:false};
+function termKeyboardExpanded(){return document.getElementById('termKeys').classList.contains('expanded')}
+function setTermKeyboardStatus(text){document.getElementById('termKeyboardStatus').textContent=text}
+function updateTermKeyboardStatus(){
+  const n=document.getElementById('termKeyboardInput').value.length;
+  setTermKeyboardStatus(n?`待发送 ${n} 个字符`:'输入内容会先显示在这里，再发送到终端');
+}
+function focusTermKeyboardInput(){
+  const input=document.getElementById('termKeyboardInput');
+  if(!termKeyboardExpanded()){XTERM&&XTERM.focus();return}
+  input.focus({preventScroll:true});
+  setTimeout(()=>{if(document.activeElement===input)input.scrollIntoView({block:'nearest'})},50);
+}
 function toggleTermKeyboard(){
   const keys=document.getElementById('termKeys');
   const expanded=keys.classList.toggle('expanded');
   document.getElementById('termKeyboardToggle').textContent=expanded?'⌨ 收起':'⌨ 电脑键盘';
+  if(expanded)focusTermKeyboardInput();
+  else XTERM&&XTERM.focus();
 }
 function renderTermModifiers(){
   document.querySelectorAll('[data-term-modifier]').forEach(btn=>btn.classList.toggle('active',TERM_MODIFIERS[btn.dataset.termModifier]));
@@ -1101,7 +1126,7 @@ function toggleTermModifier(name){
   if(!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
   TERM_MODIFIERS[name]=!TERM_MODIFIERS[name];
   renderTermModifiers();
-  XTERM&&XTERM.focus();
+  focusTermKeyboardInput();
 }
 function applyTermModifiers(data,name){
   if(!TERM_MODIFIERS.ctrl&&!TERM_MODIFIERS.alt&&!TERM_MODIFIERS.shift)return data;
@@ -1122,11 +1147,29 @@ function applyTermModifiers(data,name){
   renderTermModifiers();
   return out;
 }
+function termSendVisibleInput(){
+  const input=document.getElementById('termKeyboardInput');
+  const value=input.value;
+  const inst=TERM_INSTANCES[TERM_ID];
+  if(!TERM_ID||!inst){setTermKeyboardStatus('终端尚未连接，请先新建终端');return}
+  if(!value){setTermKeyboardStatus('请先输入内容');focusTermKeyboardInput();return}
+  const modified=TERM_MODIFIERS.ctrl||TERM_MODIFIERS.alt||TERM_MODIFIERS.shift;
+  if(modified&&Array.from(value).length!==1){setTermKeyboardStatus('组合键一次只能发送 1 个字符');focusTermKeyboardInput();return}
+  const payload=modified?applyTermModifiers(value):value+'\r';
+  const connected=inst.ws&&inst.ws.readyState===1;
+  queueTermInput(TERM_ID,payload);
+  input.value='';
+  const preview=value.length>36?value.slice(0,36)+'…':value;
+  setTermKeyboardStatus((connected?'已发送：':'连接恢复后发送：')+preview);
+  try{inst.xterm.scrollToBottom()}catch(e){}
+  focusTermKeyboardInput();
+}
 function termKey(name){
   const seq=TERM_KEY_SEQ[name];
   if(!seq||!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
+  if(name==='Enter'&&termKeyboardExpanded()&&document.getElementById('termKeyboardInput').value){termSendVisibleInput();return}
   queueTermInput(TERM_ID,applyTermModifiers(seq,name));
-  XTERM&&XTERM.focus();
+  focusTermKeyboardInput();
 }
 function termEnsure(){if(!TERM_ID)termNew()}
 function termLabel(id){return TERM_LABELS[id]||('终端 '+id.slice(0,8))}
@@ -1462,7 +1505,7 @@ function scheduleTermReconnect(id){
 function openTermWS(id,xterm){
   const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);try{xterm.focus()}catch(e){}};
+  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);if(id===TERM_ID){try{if(termKeyboardExpanded())focusTermKeyboardInput();else xterm.focus()}catch(e){}}};
   ws.onmessage=ev=>{try{if(typeof ev.data==='string')xterm.write(ev.data);else xterm.write(new Uint8Array(ev.data))}catch(e){}};
   ws.onclose=ev=>{try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请新建终端]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(ev.code!==1008&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
   ws.onerror=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')}catch(e){}};
@@ -1483,7 +1526,7 @@ function showTermInstance(id){
   }
   XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;
   safeFitOf(inst.fit,inst.xterm);
-  setTimeout(()=>{try{inst.xterm.focus()}catch(e){}},50);
+  setTimeout(()=>{try{if(termKeyboardExpanded())focusTermKeyboardInput();else inst.xterm.focus()}catch(e){}},50);
 }
 function termSwitch(id){
   if(!id)return;

@@ -255,6 +255,21 @@ def test_mobile_terminal_has_expandable_computer_keyboard():
     assert "applyTermModifiers(d)" in js
 
 
+def test_mobile_terminal_keyboard_has_visible_focused_input_and_send_feedback():
+    js = _inline_js()
+    assert 'id="termKeyboardInput"' in HTML
+    assert 'id="termKeyboardStatus"' in HTML
+    assert "function focusTermKeyboardInput()" in js
+    assert "input.focus({preventScroll:true})" in js
+    assert "input.scrollIntoView({block:'nearest'})" in js
+    assert "function termSendVisibleInput()" in js
+    assert "queueTermInput(TERM_ID,payload)" in js
+    assert "已发送：" in js
+    assert ".term-key-input{" in HTML
+    assert "touch-action:pan-y" in HTML
+    assert ".xterm-viewport" in HTML
+
+
 def test_terminal_drawer_keeps_main_navigation_visible_and_clickable():
     js = _inline_js()
     assert "function positionDrawerBelowHeader()" in js
