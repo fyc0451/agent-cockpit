@@ -2011,7 +2011,7 @@ async function loadFileTree(){
 function setFileRoots(r){FILE_ROOTS=r.roots||[];FILE_ROOT_GROUPS=r.groups||null}
 function fileRootLabel(path){return path.replace(/^\/home\/[^/]+/,'~')||'/'}
 async function fileAddRoot(){
-  const raw=window.prompt('输入要添加的 WSL 目录\n例如：/home/fyc/github/my-project 或 ~/my-project\n请添加具体目录，不要添加整个 Home。');
+  const raw=window.prompt('输入要添加的 WSL 目录\n例如：/home/you/github/my-project 或 ~/my-project\n请添加具体目录，不要添加整个 Home。');
   if(raw===null||!raw.trim())return;
   try{
     const r=await api('/api/files/roots',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:raw.trim()})});
