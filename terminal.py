@@ -183,14 +183,18 @@ def _kill_child(pid: int, master_fd: int) -> None:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
-        try:
-            os.waitpid(pid, 0)
-        except (ChildProcessError, OSError):
-            pass
+    # 先关 master fd 再阻塞回收:macOS 的会话首进程退出时要等控制终端
+    # 输出排干,master 开着且无人读时子进程会卡在 exiting 状态,
+    # waitpid 随之永久阻塞(Linux 无此行为)
     try:
         os.close(master_fd)
     except OSError:
         pass
+    if running:
+        try:
+            os.waitpid(pid, 0)
+        except (ChildProcessError, OSError):
+            pass
 
 
 def _set_size(fd: int, cols: int, rows: int) -> None:
@@ -234,32 +238,35 @@ def write_term(term_id: str, data: str) -> None:
         if not t.get("alive"):
             return
         fd = t["master_fd"]
-        while buf:
+    # 写循环不持有 t["lock"]:canonical 模式输入会回显到 master,macOS 的
+    # PTY 缓冲小,写入被回显反压时必须让读端(pump)能并发排干,否则大体积
+    # 写必然等到超时;fd 被并发关闭时 os.write 抛 OSError,由下面兜住
+    while buf:
+        try:
+            n = os.write(fd, buf)
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"write_term 超时({write_timeout}s):"
+                    f"已写入 {total - len(buf)}/{total} 字节,对端未及时消费"
+                )
             try:
-                n = os.write(fd, buf)
-            except BlockingIOError:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"write_term 超时({write_timeout}s):"
-                        f"已写入 {total - len(buf)}/{total} 字节,对端未及时消费"
-                    )
-                try:
-                    select.select([], [fd], [], min(0.1, remaining))
-                except OSError:
-                    raise TimeoutError(
-                        f"write_term 等待可写失败:已写入 {total - len(buf)}/{total} 字节"
-                    )
-                continue
-            except OSError as e:
-                # 非阻塞写之外的 OSError(如 EIO:终端已关闭):
-                # buf 必有剩余,不能静默丢尾,抛可感知异常
-                raise ConnectionError(
-                    f"write_term 失败(终端可能已关闭):"
-                    f"已写入 {total - len(buf)}/{total} 字节: {e}"
-                ) from e
-            buf = buf[n:]
-            t["last_active"] = time.monotonic()
+                select.select([], [fd], [], min(0.1, remaining))
+            except OSError:
+                raise TimeoutError(
+                    f"write_term 等待可写失败:已写入 {total - len(buf)}/{total} 字节"
+                )
+            continue
+        except OSError as e:
+            # 非阻塞写之外的 OSError(如 EIO:终端已关闭):
+            # buf 必有剩余,不能静默丢尾,抛可感知异常
+            raise ConnectionError(
+                f"write_term 失败(终端可能已关闭):"
+                f"已写入 {total - len(buf)}/{total} 字节: {e}"
+            ) from e
+        buf = buf[n:]
+        t["last_active"] = time.monotonic()
 
 
 def _read_fd(t: dict[str, Any], timeout: float) -> bytes:

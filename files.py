@@ -161,14 +161,11 @@ def _normalize_custom_root(rel: str, *, must_exist: bool) -> Path:
     path = Path(rel.strip()).expanduser()
     if not path.is_absolute():
         path = _HOME / path
-    try:
-        path = path.resolve(strict=must_exist)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"目录不存在或无法解析: {path}") from exc
-    if must_exist and not path.is_dir():
-        raise ValueError(f"不是目录: {path}")
+    # 先用非严格解析做名单判断:即使目标不存在(如 macOS 无 /proc),
+    # 宽泛/敏感目录也必须报对应的原因,而不是"不存在"
+    check = path.resolve(strict=False)
     broad = {Path("/"), _HOME.resolve(), _HOME.parent.resolve()}
-    if path in broad:
+    if check in broad:
         raise ValueError("请选择具体目录，不能添加 /、/home 或整个用户 Home")
     blocked = [
         Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
@@ -177,10 +174,16 @@ def _normalize_custom_root(rel: str, *, must_exist: bool) -> Path:
     ]
     for root in blocked:
         try:
-            path.relative_to(root.resolve(strict=False))
+            check.relative_to(root.resolve(strict=False))
         except ValueError:
             continue
-        raise ValueError(f"敏感或系统运行目录不能添加: {path}")
+        raise ValueError(f"敏感或系统运行目录不能添加: {check}")
+    try:
+        path = path.resolve(strict=must_exist)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"目录不存在或无法解析: {path}") from exc
+    if must_exist and not path.is_dir():
+        raise ValueError(f"不是目录: {path}")
     return path
 
 

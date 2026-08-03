@@ -85,16 +85,28 @@ def test_large_write_full_integrity(tmp_path):
     terminal.write_term(tid, f"cat > {target}\n")
     _read_until(tid, b"cat >", 5)
     time.sleep(0.5)  # 等 cat 进入读取态
-    # 每行 < 4096(canonical MAX_CANON),总量超过 PTY 缓冲,触发短写循环
-    payload = "".join(f"{i:05d}" + "x" * 95 + "\n" for i in range(2000))
-    terminal.write_term(tid, payload)   # 不得 TimeoutError
-    terminal.write_term(tid, "\x04")    # Ctrl-D EOF
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if target.exists() and target.stat().st_size >= len(payload):
-            break
-        time.sleep(0.1)
-    assert target.read_text() == payload
+    # 模拟 server pump 持续读走回显:canonical 模式输入会回显到 master,
+    # 没人读时 macOS 的小 PTY 缓冲会反压输入(Linux 缓冲大,不显性)
+    stop = threading.Event()
+    def _drain():
+        while not stop.is_set():
+            terminal.read_output(tid, 0.05)
+    drainer = threading.Thread(target=_drain, daemon=True)
+    drainer.start()
+    try:
+        # 每行 < 4096(canonical MAX_CANON),总量超过 PTY 缓冲,触发短写循环
+        payload = "".join(f"{i:05d}" + "x" * 95 + "\n" for i in range(2000))
+        terminal.write_term(tid, payload)   # 不得 TimeoutError
+        terminal.write_term(tid, "\x04")    # Ctrl-D EOF
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if target.exists() and target.stat().st_size >= len(payload):
+                break
+            time.sleep(0.1)
+        assert target.read_text() == payload
+    finally:
+        stop.set()
+        drainer.join(timeout=2)
 
 
 def test_write_timeout_raises_and_reports(monkeypatch):
