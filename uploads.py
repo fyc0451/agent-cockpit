@@ -13,7 +13,16 @@ from pathlib import Path
 from typing import Any
 
 UPLOAD_DIR = Path.home() / "dashboard-uploads"
-MAX_SIZE = 100 * 1024 * 1024  # 100MB(wav/视频等音视频文件较大)
+MAX_SIZE = 100 * 1024 * 1024  # 100MB(默认值;设置页 upload_max_mb 可覆盖)
+
+
+def _max_size() -> int:
+    """实际上限:设置页 upload_max_mb 优先,常量兜底。"""
+    try:
+        import settings
+        return settings.upload_max_bytes(MAX_SIZE)
+    except Exception:
+        return MAX_SIZE
 
 
 class UploadTooLarge(ValueError):
@@ -36,12 +45,13 @@ async def save_upload_file(filename: str, source: Any) -> dict:
     stamp = int(time.time() * 1000)
     dest = UPLOAD_DIR / f"{stamp}-{secrets.token_hex(4)}-{safe_name}"
     size = 0
+    limit = _max_size()
     try:
         with dest.open("xb") as out:
             while chunk := await source.read(1024 * 1024):
                 size += len(chunk)
-                if size > MAX_SIZE:
-                    raise UploadTooLarge(f"文件过大: {size} bytes > {MAX_SIZE}")
+                if size > limit:
+                    raise UploadTooLarge(f"文件过大: {size} bytes > {limit}")
                 await asyncio.to_thread(out.write, chunk)
             await asyncio.to_thread(out.flush)
             await asyncio.to_thread(os.fsync, out.fileno())

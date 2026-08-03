@@ -23,12 +23,12 @@
   --safe-left:env(safe-area-inset-left,0px);
 }
 :root.light{
-  --bg:#f4f6fa; --bg2:#ffffff; --bg3:#eef1f6; --bg4:#e2e7ef;
-  --fg:#1a2030; --fg2:#525c70; --fg3:#8a93a5;
-  --accent:#2563eb; --accent2:#7c3aed;
-  --need:#d97706; --work:#2563eb; --done:#059669; --idle:#94a3b8;
-  --bd:#dde3ec; --bd2:#cdd5e0;
-  --term-bg:#1e2330; --term-fg:#d4dbe6;
+  --bg:#f4f6fa; --bg2:#ffffff; --bg3:#e8ecf3; --bg4:#dde3ed;
+  --fg:#131a26; --fg2:#3d4657; --fg3:#5d6879;
+  --accent:#1d4ed8; --accent2:#6d28d9;
+  --need:#b45309; --work:#1d4ed8; --done:#047857; --idle:#64748b;
+  --bd:#cdd5e1; --bd2:#b9c3d4;
+  --term-bg:#fafbfc; --term-fg:#1a2030;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overscroll-behavior:none}
@@ -56,6 +56,12 @@ header nav button{background:transparent;border:none;padding:6px 11px;color:var(
 header nav button.active{background:var(--bg4);color:var(--fg)}
 header .spacer{flex:1}
 .stat-pill{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--fg2);background:var(--bg3);padding:3px 9px;border-radius:12px}
+.set-card{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.set-card h3{font-size:14px;margin-bottom:8px}
+.set-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.set-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg2)}
+.set-card input,.set-card select{background:var(--bg3);border:1px solid var(--bd2);border-radius:7px;color:var(--fg);padding:6px 8px;font-size:13px}
+.set-lang-on{background:var(--accent)!important;color:#fff!important}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--done)}
 .dot.off{background:var(--fg3)}
 
@@ -277,29 +283,30 @@ header .spacer{flex:1}
   <header>
     <div class="logo">⚙️ Agent Fleet</div>
     <nav id="nav">
-      <button data-view="board" class="active">看板</button>
-      <button data-view="attention">待办</button>
-      <button data-view="term">终端</button>
-      <button data-view="herdrflow">流</button>
-      <button data-view="sessions">会话</button>
-      <button data-view="msgs">消息</button>
-      <button data-view="files">文件</button>
+      <button data-view="board" class="active" data-i18n="nav.board">看板</button>
+      <button data-view="attention" data-i18n="nav.attention">待办</button>
+      <button data-view="term" data-i18n="nav.term">终端</button>
+      <button data-view="herdrflow" data-i18n="nav.herdrflow">流</button>
+      <button data-view="sessions" data-i18n="nav.sessions">会话</button>
+      <button data-view="msgs" data-i18n="nav.msgs">消息</button>
+      <button data-view="files" data-i18n="nav.files">文件</button>
+      <button data-view="settings" data-i18n="nav.settings">设置</button>
     </nav>
     <div class="spacer"></div>
     <div class="stat-pill"><span class="dot" id="liveDot"></span><span id="liveText">--</span></div>
     <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="需要你处理的事项">🔔 <span id="attentionN">0</span></div>
     <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
-    <button class="icon" onclick="refreshBoard()" title="刷新">↻</button>
+    <button class="icon" onclick="refreshBoard()" title="刷新" data-i18n-title="common.refresh">↻</button>
   </header>
 
   <!-- 看板 -->
   <section id="view-board" class="view active">
     <div class="board-wrap">
       <div class="board" id="board">
-        <div class="col col-need"><div class="col-head">⚠ 需要你 <span class="cc" id="cnt-need">0</span></div><div class="col-body" id="col-need"></div></div>
-        <div class="col col-work"><div class="col-head">⚡ 工作中 <span class="cc" id="cnt-work">0</span></div><div class="col-body" id="col-work"></div></div>
-        <div class="col col-done"><div class="col-head">✓ 已完成 <span class="cc" id="cnt-done">0</span></div><div class="col-body" id="col-done"></div></div>
-        <div class="col col-idle"><div class="col-head">○ 空闲 <span class="cc" id="cnt-idle">0</span></div><div class="col-body" id="col-idle"></div></div>
+        <div class="col col-need"><div class="col-head"><span data-i18n="board.need">⚠ 需要你</span> <span class="cc" id="cnt-need">0</span></div><div class="col-body" id="col-need"></div></div>
+        <div class="col col-work"><div class="col-head"><span data-i18n="board.work">⚡ 工作中</span> <span class="cc" id="cnt-work">0</span></div><div class="col-body" id="col-work"></div></div>
+        <div class="col col-done"><div class="col-head"><span data-i18n="board.done">✓ 已完成</span> <span class="cc" id="cnt-done">0</span></div><div class="col-body" id="col-done"></div></div>
+        <div class="col col-idle"><div class="col-head"><span data-i18n="board.idle">○ 空闲</span> <span class="cc" id="cnt-idle">0</span></div><div class="col-body" id="col-idle"></div></div>
       </div>
     </div>
   </section>
@@ -307,27 +314,27 @@ header .spacer{flex:1}
   <!-- 统一 Attention Inbox -->
   <section id="view-attention" class="view attention-view">
     <div class="attention-toolbar">
-      <b>需要你处理</b>
+      <b data-i18n="attention.title">需要你处理</b>
       <span class="muted" id="attentionInfo" style="font-size:11px"></span>
       <span class="spacer"></span>
       <span class="muted" id="pushStatus" style="font-size:11px"></span>
-      <button class="sm" id="pushBtn" onclick="setupPush()">开启浏览器通知</button>
-      <button class="icon" onclick="loadAttention()" title="刷新">↻</button>
+      <button class="sm" id="pushBtn" onclick="setupPush()" data-i18n="attention.push">开启浏览器通知</button>
+      <button class="icon" onclick="loadAttention()" title="刷新" data-i18n-title="common.refresh">↻</button>
     </div>
-    <div class="attention-list" id="attentionList"><div class="empty">加载中…</div></div>
+    <div class="attention-list" id="attentionList"><div class="empty" data-i18n="common.loading">加载中…</div></div>
   </section>
 
   <!-- 启动栏(看板下方) -->
   <div class="launch-bar" id="launchBar">
-    <span class="lbl">🚀 启动</span>
+    <span class="lbl" data-i18n="launch.label">🚀 启动</span>
     <select id="lnSession"></select>
     <select id="lnAgent">
       <option value="codex">codex</option>
       <option value="kimi">kimi</option>
       <option value="qodercli">qoder</option>
     </select>
-    <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" style="flex:1;min-width:160px">
-    <button class="primary" onclick="startAgent()">+ 新建 agent</button>
+    <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" style="flex:1;min-width:160px">
+    <button class="primary" onclick="startAgent()" data-i18n="launch.start">+ 新建 agent</button>
     <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
   </div>
 
@@ -351,20 +358,20 @@ header .spacer{flex:1}
   <!-- 文件 -->
   <section id="view-files" class="view files-view">
     <div class="file-guide">
-      <span><b>怎么用：</b>先在“可访问位置”选项目，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，其他文件点 ⬇️ 下载。</span>
-      <button class="sm" id="fileAddRootBtn" onclick="fileAddRoot()" title="添加一个允许浏览的 WSL 目录">＋ 添加目录</button>
-      <button class="primary sm" id="fileWorkspaceBtn" onclick="setupWorkspaceFromFiles()" title="用文件列表当前所在目录预填一键工作区">🚀 当前目录建工作区</button>
+      <span data-i18n="files.guide"><b>怎么用：</b>先在“可访问位置”选项目，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，其他文件点 ⬇️ 下载。</span>
+      <button class="sm" id="fileAddRootBtn" onclick="fileAddRoot()" title="添加一个允许浏览的 WSL 目录" data-i18n="files.addroot">＋ 添加目录</button>
+      <button class="primary sm" id="fileWorkspaceBtn" onclick="setupWorkspaceFromFiles()" title="用文件列表当前所在目录预填一键工作区" data-i18n="files.workspace">🚀 当前目录建工作区</button>
     </div>
     <div class="file-search">
-      <input type="search" id="fileSearchInput" placeholder="搜索当前目录及子目录中的文件名" onkeydown="if(event.key==='Enter')fileSearch()">
-      <button class="primary sm" onclick="fileSearch()">搜索</button>
-      <button class="sm" onclick="fileSearchClear()">清除</button>
+      <input type="search" id="fileSearchInput" placeholder="搜索当前目录及子目录中的文件名" data-i18n-ph="files.search.ph" onkeydown="if(event.key==='Enter')fileSearch()">
+      <button class="primary sm" onclick="fileSearch()" data-i18n="files.search">搜索</button>
+      <button class="sm" onclick="fileSearchClear()" data-i18n="files.clear">清除</button>
       <span class="file-search-info" id="fileSearchInfo"></span>
     </div>
     <div class="files-body">
       <div class="file-tree" id="fileTree"></div>
       <div class="editor-area" id="editorArea">
-        <div class="empty" style="display:flex;align-items:center;justify-content:center;height:100%">选择左侧文件</div>
+        <div class="empty" style="display:flex;align-items:center;justify-content:center;height:100%" data-i18n="files.empty">选择左侧文件</div>
       </div>
     </div>
   </section>
@@ -372,15 +379,15 @@ header .spacer{flex:1}
   <!-- 终端(真 PTY,xterm.js) -->
   <section id="view-term" class="view" style="flex-direction:column">
     <div class="term-toolbar">
-      <button class="primary sm" onclick="termNew()">+ 新终端</button>
+      <button class="primary sm" onclick="termNew()" data-i18n="term.new">+ 新终端</button>
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
-      <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端">📎上传<input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
-      <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)">@协作</button>
+      <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端"><span data-i18n="term.upload">📎上传</span><input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
+      <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)" data-i18n="term.collab">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
-      <button class="sm" onclick="enterHerdrFlow()" title="退出 TUI，返回可滚屏/复制的 pane 流视图">📜 返回流视图</button>
-      <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进 Mac 系统剪贴板">📋 复制到 Mac</button>
-      <button class="sm danger" onclick="termClose()">✕ 关闭</button>
-      <span class="muted term-help">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
+      <button class="sm" onclick="enterHerdrFlow()" title="退出 TUI，返回可滚屏/复制的 pane 流视图" data-i18n="term.back">📜 返回流视图</button>
+      <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
+      <button class="sm danger" onclick="termClose()" data-i18n="term.close">✕ 关闭</button>
+      <span class="muted term-help" data-i18n="term.help">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
     </div>
     <div class="term-keys" id="termKeys" aria-label="手机电脑键盘">
       <button id="termKeyboardToggle" onclick="toggleTermKeyboard()" title="展开电脑键盘">⌨ 电脑键盘</button>
@@ -423,30 +430,79 @@ header .spacer{flex:1}
       <button class="term-key-extra" onclick="termKey('F11')">F11</button>
       <button class="term-key-extra" onclick="termKey('F12')">F12</button>
     </div>
-    <div id="termContainer" style="flex:1;background:#000;padding:6px 14px 6px 6px;overflow:hidden"></div>
+    <div id="termContainer" style="flex:1;background:var(--term-bg);padding:6px 14px 6px 6px;overflow:hidden"></div>
   </section>
 
   <!-- herdr 流视图(只读 pane 流 + 输入框发指令,手机可滚屏/复制) -->
   <section id="view-herdrflow" class="view" style="flex-direction:column">
     <div id="hfToolbar" style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
       <select id="hfSession" onchange="hfLoad()" style="width:auto;min-width:140px"></select>
-      <button class="sm" onclick="hfLoad()">↻ 刷新</button>
-      <button class="sm" onclick="hfTakeover()" title="需要方向键、确认菜单等终端交互时使用">🖥 接管 TUI</button>
-      <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进 Mac 系统剪贴板">📋 复制到 Mac</button>
-      <span class="muted" style="font-size:11px;margin-left:auto">复制到 Mac：供其他应用 Command+V · 填入输入框：直接发给 agent</span>
+      <button class="sm" onclick="hfLoad()" data-i18n="common.refresh">↻ 刷新</button>
+      <button class="sm" onclick="hfTakeover()" title="需要方向键、确认菜单等终端交互时使用" data-i18n="hf.takeover">🖥 接管 TUI</button>
+      <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
+      <span class="muted" style="font-size:11px;margin-left:auto" data-i18n="hf.hint">复制到剪贴板：供其他应用粘贴 · 填入输入框：直接发给 agent</span>
     </div>
-    <div class="hf-body" id="hfBody"><div class="empty">加载中…</div></div>
+    <div class="hf-body" id="hfBody"><div class="empty" data-i18n="common.loading">加载中…</div></div>
   </section>
 
   <!-- 会话管理(session + agent pane,可重启) -->
   <section id="view-sessions" class="view" style="flex-direction:column">
     <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
       <h3 style="font-size:14px">herdr sessions & agents</h3>
-      <button class="primary sm" onclick="showSetupModal()">+ 一键工作区</button>
-      <button class="sm" onclick="loadSessionsView()">↻ 刷新</button>
-      <span class="muted" style="font-size:11px;margin-left:auto">一键工作区：split pane + 启动 agent；Agent Mail 可选</span>
+      <button class="primary sm" onclick="showSetupModal()" data-i18n="sessions.setup">+ 一键工作区</button>
+      <button class="sm" onclick="loadSessionsView()" data-i18n="common.refresh">↻ 刷新</button>
+      <span class="muted" style="font-size:11px;margin-left:auto" data-i18n="sessions.hint">一键工作区：split pane + 启动 agent；Agent Mail 可选</span>
     </div>
     <div id="sessionsList" style="flex:1;overflow:auto;padding:10px"></div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="view-settings" class="view" style="flex-direction:column">
+    <div style="flex:1;overflow:auto;padding:14px;max-width:640px;margin:0 auto;width:100%">
+      <div class="set-card">
+        <h3 data-i18n="set.lang">界面语言</h3>
+        <div id="setLangBtns" style="display:flex;gap:8px">
+          <button class="sm" data-lang="zh" onclick="setLang('zh');renderSettings()">中文</button>
+          <button class="sm" data-lang="en" onclick="setLang('en');renderSettings()">English</button>
+          <button class="sm" data-lang="ja" onclick="setLang('ja');renderSettings()">日本語</button>
+        </div>
+        <h3 style="margin-top:12px" data-i18n="set.theme">外观配色</h3>
+        <div style="display:flex;gap:8px">
+          <button class="sm" onclick="setTheme('light')" data-i18n="set.theme.light">☀️ 明亮</button>
+          <button class="sm" onclick="setTheme('dark')" data-i18n="set.theme.dark">🌙 黑暗</button>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:6px" data-i18n="set.theme.hint">明亮模式下终端也会切换为浅色背景。</div>
+      </div>
+      <div class="set-card">
+        <h3 data-i18n="set.dirs">可访问目录</h3>
+        <div class="muted" style="font-size:12px" data-i18n="set.dirs.hint">目录的增删在「文件」页顶部进行。</div>
+        <div id="setRoots" style="margin-top:6px;font-size:12px"></div>
+      </div>
+      <div class="set-card">
+        <h3 data-i18n="set.diragent">每目录默认 agent</h3>
+        <div id="setDirAgents"></div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <input id="setNewDir" data-i18n-ph="set.diragent.ph" placeholder="目录绝对路径" style="flex:1;min-width:0">
+          <select id="setNewDirAgent"></select>
+          <button class="sm" onclick="setAddDirAgent()" data-i18n="set.add">＋ 添加</button>
+        </div>
+      </div>
+      <div class="set-card">
+        <h3 data-i18n="set.enabled">启用的 agent</h3>
+        <div class="muted" style="font-size:12px" data-i18n="set.enabled.hint">启动入口只列出勾选的 agent。</div>
+        <div id="setAgents" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px"></div>
+      </div>
+      <div class="set-card">
+        <h3 data-i18n="set.limits">运行参数</h3>
+        <div class="set-grid">
+          <label><span data-i18n="set.upload_max">上传上限 (MB)</span><input type="number" id="setUploadMax" min="1" max="2048"></label>
+          <label><span data-i18n="set.max_terms">最大终端数</span><input type="number" id="setMaxTerms" min="1" max="64"></label>
+          <label><span data-i18n="set.idle_ttl">终端空闲回收(秒)</span><input type="number" id="setIdleTtl" min="60" max="86400"></label>
+          <label><span data-i18n="set.write_timeout">终端写超时(秒)</span><input type="number" id="setWriteTimeout" min="0.2" max="30" step="0.1"></label>
+        </div>
+      </div>
+      <button class="primary" onclick="saveSettings()" data-i18n="set.save" style="margin:4px 0 20px">保存</button>
+    </div>
   </section>
 </div>
 
@@ -455,7 +511,7 @@ header .spacer{flex:1}
   <div class="drawer">
     <div class="drawer-head">
       <span class="status-dot" id="tdDot"></span>
-      <span class="dt" id="tdTitle">终端</span>
+      <span class="dt" id="tdTitle" data-i18n="drawer.title">终端</span>
       <div class="pane-switch" id="paneSwitch" hidden>
         <button class="icon" onclick="stepDrawerPane(-1)" title="上一个 pane">‹</button>
         <select id="paneSelect" onchange="switchDrawerPane(this.value)" aria-label="切换 pane"></select>
@@ -466,12 +522,12 @@ header .spacer{flex:1}
     </div>
     <div class="term-out" id="termOut">加载中…</div>
     <div class="term-in" style="position:relative;flex-wrap:wrap">
-      <input id="termInput" style="flex:1;min-width:160px" placeholder="给当前 agent 的指令…(@标注协作者 / @路径引用文件)" oninput="onTermInput(event)" onkeydown="onTermKeydown(event)">
+      <input id="termInput" style="flex:1;min-width:160px" placeholder="给当前 agent 的指令…(@标注协作者 / @路径引用文件)" data-i18n-ph="term.input.ph" oninput="onTermInput(event)" onkeydown="onTermKeydown(event)">
       <div id="mentionPopover" class="hidden" style="position:absolute;bottom:100%;left:0;margin-bottom:4px;background:var(--bg3);border:1px solid var(--bd2);border-radius:8px;box-shadow:0 -4px 16px rgba(0,0,0,.4);max-height:240px;overflow:auto;z-index:10;min-width:220px"></div>
       <label class="icon" style="cursor:pointer;font-size:18px" title="上传截图/文件并插入@路径">📎<input type="file" id="termUpload" multiple style="display:none" onchange="termUploadFiles(this)"></label>
       <select id="termMode" style="width:auto"><option value="prompt">prompt(agent)</option><option value="send">执行(shell)</option><option value="keys">按键(keys)</option></select>
       <button class="sm" onclick="pasteServiceClipboard(document.getElementById('termInput'))" title="把刚才在 Herdr TUI 里复制的文字填入当前输入框">📋 填入输入框</button>
-      <button class="primary" onclick="termSend()">发送</button>
+      <button class="primary" onclick="termSend()" data-i18n="hf.send">发送</button>
     </div>
   </div>
 </div>
@@ -487,7 +543,7 @@ header .spacer{flex:1}
     <div class="compose" style="margin-top:10px">
       <div class="field"><label>回复给</label><input id="mmTo" readonly></div>
       <div class="field"><label>正文</label><textarea id="mmBody" rows="3"></textarea></div>
-      <button class="primary" onclick="mmReply()">发送</button>
+      <button class="primary" onclick="mmReply()" data-i18n="hf.send">发送</button>
     </div>
   </div>
 </div>
@@ -557,6 +613,151 @@ const SESSION_NAME_RE=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const validSessionName=s=>typeof s==='string'&&SESSION_NAME_RE.test(s);
 function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),ms)}
 
+// ============ i18n(中/英/日) ============
+// t(key, zhFallback, vars):有翻译用翻译,没有回退中文原文;{var} 插值。
+// HTML 静态文案保留中文 + data-i18n 属性,applyLang() 运行时替换;
+// JS 动态文案用 t('key','中文原文') 内联回退,保证源码中文不丢(测试可锚)。
+const I18N={
+en:{
+'nav.board':'Board','nav.attention':'Inbox','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
+'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
+'attention.title':'Needs your attention','attention.push':'Enable notifications','common.refresh':'Refresh','common.loading':'Loading…',
+'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
+'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
+'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
+'term.new':'+ New terminal','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…',
+'hf.takeover':'🖥 Take over TUI','hf.hint':'Copy: paste elsewhere · Fill input: send straight to agent','hf.empty':'No agent pane in this session','hf.send':'Send','hf.paste':'📋 Fill input','hf.full':'⛶ Full','hf.exit':'Exit',
+'sessions.setup':'+ Quick workspace','sessions.hint':'Quick workspace: split pane + start agent; Agent Mail optional',
+'roots.system':'System','roots.projects':'Registered projects','roots.custom':'Custom','files.rootlimit':'Already at an accessible root — tap a root name above to switch','files.rmroot':'Remove from accessible locations (directory is not deleted)','files.remove':'Remove',
+'drawer.title':'Terminal','drawer.send':'Send',
+'set.lang':'Language','set.dirs':'Accessible directories','set.dirs.hint':'Add/remove directories at the top of the Files page.','set.diragent':'Default agent per directory','set.diragent.dir':'Directory','set.diragent.agent':'Default agent','set.diragent.ph':'Absolute directory path','set.add':'＋ Add','set.enabled':'Enabled agents','set.enabled.hint':'Launch menus only list enabled agents.','set.limits':'Runtime limits','set.upload_max':'Upload limit (MB)','set.max_terms':'Max terminals','set.idle_ttl':'Idle terminal TTL (s)','set.write_timeout':'Terminal write timeout (s)','set.save':'Save','set.saved':'Saved ✓','set.savefail':'Save failed: ','set.dirph':'/abs/path','set.theme':'Appearance','set.theme.light':'☀️ Light','set.theme.dark':'🌙 Dark','set.theme.hint':'The terminal also switches to a light background in light mode.',
+'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
+},
+ja:{
+'nav.board':'ボード','nav.attention':'対応','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
+'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
+'attention.title':'対応が必要です','attention.push':'通知を有効化','common.refresh':'更新','common.loading':'読み込み中…',
+'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
+'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
+'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
+'term.new':'+ 新規ターミナル','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…',
+'hf.takeover':'🖥 TUI 接管','hf.hint':'コピー: 他アプリで貼り付け · 入力欄へ: agent に直接送信','hf.empty':'このセッションに agent pane なし','hf.send':'送信','hf.paste':'📋 入力欄へ','hf.full':'⛶ 全画面','hf.exit':'退出',
+'sessions.setup':'+ ワンクリックワークスペース','sessions.hint':'ワンクリック: pane 分割 + agent 起動;Agent Mail は任意',
+'roots.system':'システム','roots.projects':'登録プロジェクト','roots.custom':'カスタム','files.rootlimit':'アクセス可能なルートです。上のルート名で切り替えられます','files.rmroot':'アクセス可能場所から削除(ディレクトリ自体は削除されません)','files.remove':'削除',
+'drawer.title':'端末','drawer.send':'送信',
+'set.lang':'表示言語','set.dirs':'アクセス可能ディレクトリ','set.dirs.hint':'ディレクトリの追加・削除は「ファイル」ページ上部で行います。','set.diragent':'ディレクトリ別デフォルト agent','set.diragent.dir':'ディレクトリ','set.diragent.agent':'デフォルト agent','set.diragent.ph':'ディレクトリの絶対パス','set.add':'＋ 追加','set.enabled':'有効な agent','set.enabled.hint':'起動メニューには有効な agent のみ表示されます。','set.limits':'実行パラメータ','set.upload_max':'アップロード上限 (MB)','set.max_terms':'最大ターミナル数','set.idle_ttl':'アイドル端末の回収(秒)','set.write_timeout':'端末書き込みタイムアウト(秒)','set.save':'保存','set.saved':'保存しました ✓','set.savefail':'保存に失敗: ','set.dirph':'/abs/path','set.theme':'外観','set.theme.light':'☀️ ライト','set.theme.dark':'🌙 ダーク','set.theme.hint':'ライトモードでは端末も淡色背景になります。',
+'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ',
+}};
+let LANG=localStorage.getItem('cockpit-lang')||'zh';
+function t(key,zh,vars){const m=I18N[LANG];let s=(m&&m[key])??zh??key;if(vars)for(const[k,v]of Object.entries(vars))s=s.replaceAll('{'+k+'}',v);return s}
+function applyLang(){
+  document.querySelectorAll('[data-i18n]').forEach(el=>{const v=I18N[LANG]?.[el.dataset.i18n];if(v!==undefined){if(v.includes('<'))el.innerHTML=v;else el.textContent=v}});
+  document.querySelectorAll('[data-i18n-ph]').forEach(el=>{const v=I18N[LANG]?.[el.dataset.i18nPh];if(v!==undefined)el.placeholder=v});
+  document.querySelectorAll('[data-i18n-title]').forEach(el=>{const v=I18N[LANG]?.[el.dataset.i18nTitle];if(v!==undefined)el.title=v});
+  document.documentElement.lang=LANG==='zh'?'zh-CN':LANG;
+}
+function setLang(l){LANG=l;localStorage.setItem('cockpit-lang',l);applyLang();const active=document.querySelector('#nav button.active');if(active)showView(active.dataset.view)}
+
+// ============ 设置 ============
+let SETTINGS=null, SETTINGS_EDIT=null;
+async function loadSettings(){
+  try{
+    SETTINGS=await api('/api/settings');
+    SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
+    // 设备未选过语言时,用服务端默认语言
+    if(!localStorage.getItem('cockpit-lang')&&SETTINGS.language&&SETTINGS.language!==LANG){
+      LANG=SETTINGS.language;applyLang();
+    }
+    renderSettings();applyEnabledAgents();
+  }catch(e){toast('设置加载失败: '+e)}
+}
+function renderSettings(){
+  if(!SETTINGS_EDIT)return;
+  const S=SETTINGS_EDIT, known=SETTINGS.known_agents||[];
+  // 语言按钮高亮
+  document.querySelectorAll('#setLangBtns button').forEach(b=>b.classList.toggle('set-lang-on',b.dataset.lang===LANG));
+  // 可访问目录(只读展示;增删在文件页)
+  const rootsEl=document.getElementById('setRoots');
+  if(rootsEl){
+    api('/api/files/roots').then(r=>{
+      const labels={system:t('roots.system','系统目录'),projects:t('roots.projects','已注册项目'),custom:t('roots.custom','自定义目录')};
+      rootsEl.innerHTML=Object.entries(r.groups||{}).map(([k,arr])=>
+        arr.length?`<div style="margin:3px 0"><span class="muted">${esc(labels[k]||k)}:</span> ${arr.map(p=>`<code>${esc(p)}</code>`).join(' ')}</div>`:''
+      ).join('')||'<span class="muted">--</span>';
+    }).catch(()=>{});
+  }
+  // 每目录默认 agent
+  const da=S.dir_agents||{};
+  const agentOpts=sel=>known.map(a=>`<option value="${esc(a)}"${a===sel?' selected':''}>${esc(a)}</option>`).join('');
+  document.getElementById('setDirAgents').innerHTML=Object.entries(da).map(([d,a])=>
+    `<div style="display:flex;gap:6px;margin:4px 0;align-items:center"><code style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(d)}</code><select data-dir="${esc(d)}" onchange="SETTINGS_EDIT.dir_agents[this.dataset.dir]=this.value">${agentOpts(a)}</select><button class="icon" onclick="delete SETTINGS_EDIT.dir_agents[this.dataset.dir];renderSettings()">✕</button></div>`
+  ).join('')||`<div class="muted" style="font-size:12px">--</div>`;
+  document.getElementById('setNewDirAgent').innerHTML=agentOpts(known[0]);
+  // 启用 agent
+  document.getElementById('setAgents').innerHTML=known.map(a=>
+    `<label style="display:flex;gap:4px;align-items:center;font-size:13px"><input type="checkbox" data-agent="${esc(a)}"${(S.enabled_agents||[]).includes(a)?' checked':''} onchange="setToggleAgent(this)">${esc(a)}</label>`
+  ).join('');
+  // 运行参数
+  document.getElementById('setUploadMax').value=S.upload_max_mb??100;
+  document.getElementById('setMaxTerms').value=S.term?.max_terms??16;
+  document.getElementById('setIdleTtl').value=S.term?.idle_ttl??1800;
+  document.getElementById('setWriteTimeout').value=S.term?.write_timeout??2;
+}
+function setToggleAgent(cb){
+  const list=SETTINGS_EDIT.enabled_agents||[];
+  if(cb.checked){if(!list.includes(cb.dataset.agent))list.push(cb.dataset.agent)}
+  else{const i=list.indexOf(cb.dataset.agent);if(i>=0)list.splice(i,1)}
+  SETTINGS_EDIT.enabled_agents=list;
+}
+function setAddDirAgent(){
+  const d=document.getElementById('setNewDir').value.trim();
+  const a=document.getElementById('setNewDirAgent').value;
+  if(!d)return;
+  (SETTINGS_EDIT.dir_agents=SETTINGS_EDIT.dir_agents||{})[d]=a;
+  document.getElementById('setNewDir').value='';
+  renderSettings();
+}
+async function saveSettings(){
+  const S=SETTINGS_EDIT;
+  const body={
+    language:LANG,
+    dir_agents:S.dir_agents||{},
+    enabled_agents:S.enabled_agents||[],
+    upload_max_mb:parseInt(document.getElementById('setUploadMax').value)||100,
+    term:{
+      max_terms:parseInt(document.getElementById('setMaxTerms').value)||16,
+      idle_ttl:parseFloat(document.getElementById('setIdleTtl').value)||1800,
+      write_timeout:parseFloat(document.getElementById('setWriteTimeout').value)||2,
+    },
+  };
+  try{
+    SETTINGS=await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
+    toast(t('set.saved','已保存 ✓'));renderSettings();applyEnabledAgents();
+  }catch(e){toast(t('set.savefail','保存失败: ')+e,4000)}
+}
+function applyEnabledAgents(){
+  if(!SETTINGS)return;
+  const enabled=SETTINGS.enabled_agents||[];
+  // 启动栏 agent 下拉只列启用的
+  const ln=document.getElementById('lnAgent');
+  if(ln&&enabled.length){
+    const cur=ln.value;
+    ln.innerHTML=enabled.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
+    ln.value=enabled.includes(cur)?cur:enabled[0];
+  }
+}
+// 启动栏:工作目录命中 dir_agents 时预选默认 agent
+function launchPreselectAgent(){
+  if(!SETTINGS)return;
+  const d=document.getElementById('lnWorkdir').value.trim();
+  const a=(SETTINGS.dir_agents||{})[d];
+  const ln=document.getElementById('lnAgent');
+  if(a&&ln&&(SETTINGS.enabled_agents||[]).includes(a))ln.value=a;
+}
+
+
+
 function decodeOsc52(data){
   const split=data.indexOf(';');
   if(split<0)return null;
@@ -575,10 +776,10 @@ function handleOsc52(data){
   SERVICE_CLIPBOARD=text;
   if(window.isSecureContext&&navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(text)
-      .then(()=>toast('已复制到 Mac 剪贴板，可在其他应用 Command+V'))
-      .catch(()=>toast('文字已暂存在 Herdr，请点击页面顶部「复制到 Mac」'));
+      .then(()=>toast(t('toast.copied','已复制到剪贴板，可在其他应用粘贴')))
+      .catch(()=>toast(t('toast.staged','文字已暂存在 Herdr，请点击页面顶部「复制到剪贴板」')));
   }else{
-    toast('文字已暂存在 Herdr。要粘贴到其他应用，请点击页面顶部「复制到 Mac」',4500);
+    toast(t('toast.staged','文字已暂存在 Herdr，请点击页面顶部「复制到剪贴板」'),4500);
   }
   return true;
 }
@@ -598,7 +799,7 @@ async function writeBrowserClipboard(text){
 async function syncServiceClipboard(){
   if(!SERVICE_CLIPBOARD){toast('还没有可复制的文字，请先在 Herdr TUI 里复制');return}
   const ok=await writeBrowserClipboard(SERVICE_CLIPBOARD);
-  toast(ok?'已复制到 Mac 剪贴板，现在可在其他应用 Command+V':'浏览器无法写入 Mac 剪贴板；可用输入框旁的「填入输入框」');
+  toast(ok?t('toast.copied','已复制到剪贴板，可在其他应用粘贴'):t('toast.noclip','浏览器无法写入剪贴板；可用输入框旁的「填入输入框」'));
 }
 function pasteServiceClipboard(input){
   if(!SERVICE_CLIPBOARD){toast('还没有可填入的文字，请先在 Herdr TUI 里复制');return}
@@ -622,6 +823,7 @@ function showView(v){
   if(v==='files')loadFileTree();
   if(v==='term')termEnsure();
   if(v==='sessions')loadSessionsView();
+  if(v==='settings'){applyLang();renderSettings()}
   if(v==='herdrflow')hfStart();else hfStop();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>showView(b.dataset.view));
@@ -916,7 +1118,7 @@ async function termSend(){
     await api(`/api/herdr/pane/${encodeURIComponent(CURRENT_TERM.session)}/${encodeURIComponent(CURRENT_TERM.paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
     document.getElementById('termInput').value='';
     setTimeout(refreshTerm,800);
-  }catch(e){toast('发送失败: '+e)}
+  }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
 }
 // 终端里上传截图/文件,自动插入 @路径(对 agent 模式)或裸路径(对 shell)
 async function termUploadFiles(input){
@@ -931,8 +1133,8 @@ async function termUploadFiles(input){
       // agent 用 @路径 引用(codex 支持),shell 用裸路径
       const ref=(isAgent?'@':'')+r.path;
       inp.value=(inp.value?inp.value+' ':'')+ref;
-      toast('已上传: '+r.filename+(isAgent?' (@引用)':''));
-    }catch(e){toast('上传失败: '+e)}
+      toast(t('toast.uploaded','已上传: ')+r.filename+(isAgent?' (@引用)':''));
+    }catch(e){toast(t('toast.uploadfail','上传失败: ')+e)}
   }
   input.value=''; // 允许重复选同一文件
   inp.focus();
@@ -1088,7 +1290,7 @@ async function loadProjectMsgs(focusMessageId){
       <div class="field"><label>收件人(逗号分隔)</label><input id="cmpTo"></div>
       <div class="field"><label>主题</label><input id="cmpSubject"></div>
       <div class="field"><label>正文</label><textarea id="cmpBody" rows="3"></textarea></div>
-      <button class="primary" onclick="sendMsg()">发送</button></div>`:`<div class="capability-note">Agent Mail Hub 当前不可用，消息暂时只读：${esc(d.agent_mail?.write_reason||'连接失败')}</div>`}`;
+      <button class="primary" onclick="sendMsg()">${t('hf.send','发送')}</button></div>`:`<div class="capability-note">Agent Mail Hub 当前不可用，消息暂时只读：${esc(d.agent_mail?.write_reason||'连接失败')}</div>`}`;
     if(focusMessageId){
       const target=[...document.querySelectorAll('#msgList [data-message-id]')].find(el=>el.dataset.messageId===String(focusMessageId));
       if(target)target.scrollIntoView({block:'center'});
@@ -1097,7 +1299,7 @@ async function loadProjectMsgs(focusMessageId){
 }
 async function sendMsg(){
   try{await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:CURRENT_PROJ.id,sender_name:document.getElementById('cmpFrom').value,to:document.getElementById('cmpTo').value.split(',').map(s=>s.trim()).filter(Boolean),subject:document.getElementById('cmpSubject').value,body:document.getElementById('cmpBody').value})});
-    toast('已发送 ✓');loadProjectMsgs()}catch(e){toast('发送失败: '+e)}
+    toast(t('toast.sent','已发送 ✓'));loadProjectMsgs()}catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
 }
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
@@ -1204,8 +1406,8 @@ async function termTabUploadFiles(input){
     try{
       const r=await api('/api/upload',{method:'POST',body:fd});
       UPLOADED_REFS.push('@'+r.path+' ');
-      toast('已上传: '+r.filename);
-    }catch(e){toast('上传失败: '+e)}
+      toast(t('toast.uploaded','已上传: ')+r.filename);
+    }catch(e){toast(t('toast.uploadfail','上传失败: ')+e)}
   }
   input.value='';
   if(!UPLOADED_REFS.length)return;
@@ -1243,7 +1445,7 @@ async function sendUploadToPane(session,paneId,agent){
   try{
     await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:refs,mode:'prompt'})});
     toast('✅ 已发给 '+agent);
-  }catch(e){toast('发送失败: '+e)}
+  }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
 }
 // @协作:弹 agent 列表 → 选一个 → 查身份 → 身份信息作为击键写入 xterm
 function termPickCollab(){
@@ -1331,7 +1533,7 @@ function hfLoad(){
 function hfRender(){
   const body=document.getElementById('hfBody');
   const panes=(BOARD?.panes||[]).filter(p=>p.session===HF_SESSION&&p.agent);
-  if(!panes.length){body.innerHTML='<div class="empty">该 session 无 agent pane</div>';return}
+  if(!panes.length){body.innerHTML='<div class="empty">'+t('hf.empty','该 session 无 agent pane')+'</div>';return}
   body.innerHTML=panes.map(p=>{
     const cls=classify(p.agent_status,p.agent);
     return `<div class="hf-pane" id="hf-${esc(p.pane_id)}">
@@ -1340,15 +1542,15 @@ function hfRender(){
         <span class="pn">${esc(p.agent)} <span class="muted">${esc(p.pane_id)}</span></span>
         <span class="status-dot ${cls}"></span>
         <span class="muted" style="font-size:11px">${esc(p.cwd_name||p.cwd||'')}</span>
-        <button class="icon hf-expand" data-action="hfToggle" data-pane="${esc(p.pane_id)}" title="让这个工作区占满整个屏幕"><span class="hf-enter">⛶ 全屏</span><span class="hf-exit">退出全屏</span></button>
+        <button class="icon hf-expand" data-action="hfToggle" data-pane="${esc(p.pane_id)}" title="让这个工作区占满整个屏幕"><span class="hf-enter">${t('hf.full','⛶ 全屏')}</span><span class="hf-exit">${t('hf.exit','退出全屏')}</span></button>
       </div>
       <pre class="hf-out" id="hf-out-${esc(p.pane_id)}">加载中…</pre>
       <div class="hf-in">
-        <input id="hf-in-${esc(p.pane_id)}" placeholder="给 ${esc(p.agent)} 发指令…" data-action="hfSendEnter" data-pane="${esc(p.pane_id)}">
+        <input id="hf-in-${esc(p.pane_id)}" placeholder="${t('term.input.ph.agent','给 {agent} 发指令…',{agent:esc(p.agent)})}" data-action="hfSendEnter" data-pane="${esc(p.pane_id)}">
         <label class="icon" style="cursor:pointer;font-size:17px" title="上传图片/文件,插入@路径">📎<input type="file" multiple style="display:none" data-action="hfUpload" data-pane="${esc(p.pane_id)}"></label>
         <select id="hf-mode-${esc(p.pane_id)}"><option value="prompt">prompt</option><option value="send">send</option></select>
-        <button class="sm" data-action="hfPaste" data-pane="${esc(p.pane_id)}" title="把刚才在 Herdr TUI 里复制的文字填入这个 pane 的输入框">📋 填入输入框</button>
-        <button class="primary sm" data-action="hfSend" data-pane="${esc(p.pane_id)}">发送</button>
+        <button class="sm" data-action="hfPaste" data-pane="${esc(p.pane_id)}" title="把刚才在 Herdr TUI 里复制的文字填入这个 pane 的输入框">${t('hf.paste','📋 填入输入框')}</button>
+        <button class="primary sm" data-action="hfSend" data-pane="${esc(p.pane_id)}">${t('hf.send','发送')}</button>
       </div>
     </div>`;
   }).join('');
@@ -1385,7 +1587,7 @@ async function hfSend(paneId){
     await api(`/api/herdr/pane/${encodeURIComponent(HF_SESSION)}/${encodeURIComponent(paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
     inp.value='';
     setTimeout(hfRefreshAll,800);
-  }catch(e){toast('发送失败: '+e)}
+  }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
 }
 // 上传图片/文件,把 @路径(prompt)或裸路径(send)插入该 pane 的输入框
 async function hfUpload(paneId,input){
@@ -1399,8 +1601,8 @@ async function hfUpload(paneId,input){
       const r=await api('/api/upload',{method:'POST',body:fd});
       const ref=(isAgent?'@':'')+r.path;
       inp.value=(inp.value?inp.value+' ':'')+ref;
-      toast('已上传: '+r.filename+(isAgent?' (@引用)':''));
-    }catch(e){toast('上传失败: '+e)}
+      toast(t('toast.uploaded','已上传: ')+r.filename+(isAgent?' (@引用)':''));
+    }catch(e){toast(t('toast.uploadfail','上传失败: ')+e)}
   }
   input.value=''; // 允许重复选同一文件
   inp.focus();
@@ -1549,7 +1751,7 @@ function termMount(id){
   // 清掉 empty 提示
   const empty=c.querySelector('.empty');if(empty)empty.remove();
   c.appendChild(el);
-  const xterm=new Terminal({cursorBlink:true,fontSize:13,theme:{background:'#000',foreground:'#e8e8e8'},scrollback:5000});
+  const xterm=new Terminal({cursorBlink:true,fontSize:13,theme:termTheme(),scrollback:5000});
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
@@ -1698,17 +1900,17 @@ async function loadFileTree(){
     if(FILE_ROOTS.length){
       bc+='<div class="ft-bc"><b>可访问位置：</b></div>';
       const groups=FILE_ROOT_GROUPS||{system:FILE_ROOTS};
-      const labels={system:'系统目录',projects:'已注册项目',custom:'自定义目录'};
+      const labels={system:t('roots.system','系统目录'),projects:t('roots.projects','已注册项目'),custom:t('roots.custom','自定义目录')};
       Object.entries(groups).forEach(([kind,roots])=>{
         if(!roots.length)return;
         bc+=`<div class="ft-root-group"><span class="ft-root-group-label">${esc(labels[kind]||kind)}</span>`+roots.map(r=>{
           const on=r===root;
-          return `<span class="ft-root-chip${on?' active':''}" data-action="fileGoto" data-path="${esc(r)}" title="${esc(r)}">${on?'●':'○'} ${esc(fileRootLabel(r))}${kind==='custom'?` <button data-action="fileRemoveRoot" data-path="${esc(r)}" title="从可访问位置移除，不删除目录">移除</button>`:''}</span>`;
+          return `<span class="ft-root-chip${on?' active':''}" data-action="fileGoto" data-path="${esc(r)}" title="${esc(r)}">${on?'●':'○'} ${esc(fileRootLabel(r))}${kind==='custom'?` <button data-action="fileRemoveRoot" data-path="${esc(r)}" title="${t('files.rmroot','从可访问位置移除，不删除目录')}">${t('files.remove','移除')}</button>`:''}</span>`;
         }).join('')+'</div>';
       });
     }
     // 上级目录按钮(到白名单根为止,再往上后端会拒绝)
-    const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">‥ (上级)</span></div>`:'';
+    const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">${t('files.uptop','‥ (上级)')}</span></div>`:'';
     tree.innerHTML=bc+upBtn+d.entries.map((e,i)=>`
       <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
@@ -1788,7 +1990,7 @@ function fileGoto(p){FILE_CWD=p;loadFileTree()}
 function fileCd(n){FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
 function fileUp(){
   // 到白名单根为止:再往上后端会拒绝(整 home 已不放行)
-  if((FILE_ROOTS||[]).includes(FILE_CWD)){toast('已是可访问的根目录,可点上方根名切换');return}
+  if((FILE_ROOTS||[]).includes(FILE_CWD)){toast(t('files.rootlimit','已是可访问的根目录,可点上方根名切换'));return}
   FILE_CWD=FILE_CWD.split('/').slice(0,-1).join('/')||'/';
   loadFileTree();
 }
@@ -1840,13 +2042,25 @@ function keepFocusedControlVisible(){
 }
 
 // ============ 主题切换 ============
-function toggleTheme(){
-  const r=document.documentElement;
-  const light=r.classList.toggle('light');
-  document.getElementById('themeBtn').textContent=light?'☀️':'🌙';
-  try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+function termTheme(){
+  // 明亮主题给终端配浅底深字 + 高对比 ANSI;黑暗保持原样
+  if(document.documentElement.classList.contains('light')){
+    return {background:'#fafbfc',foreground:'#1a2030',cursor:'#2563eb',selectionBackground:'#d0d8e8',
+      black:'#1a2030',red:'#c0392b',green:'#1e8449',yellow:'#b9770e',blue:'#2563eb',magenta:'#7c3aed',cyan:'#0e7490',white:'#e8e8e8',
+      brightBlack:'#6b7280',brightRed:'#e74c3c',brightGreen:'#27ae60',brightYellow:'#d4ac0d',brightBlue:'#4a89f0',brightMagenta:'#9b59b6',brightCyan:'#17a2b8',brightWhite:'#ffffff'};
+  }
+  return {background:'#000000',foreground:'#e8e8e8'};
 }
-(function(){try{if(localStorage.getItem('dash-theme')==='light'){document.documentElement.classList.add('light');document.getElementById('themeBtn').textContent='☀️'}}catch(e){}})();
+function setTheme(mode,save=true){
+  const light=mode==='light';
+  document.documentElement.classList.toggle('light',light);
+  const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
+  const th=termTheme();
+  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th}catch(e){}}
+  if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+}
+function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
+(function(){try{setTheme(localStorage.getItem('dash-theme')==='light'?'light':'dark',false)}catch(e){}})();
 
 // ============ 认证契约 ============
 // 启动先 GET /api/auth/status -> {required,authenticated};未认证用 prompt 取 token,
@@ -1935,6 +2149,9 @@ async function init(){
   bindDelegation();
   const ok=await ensureAuth();
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
+  applyLang();
+  loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
+  document.getElementById('lnWorkdir').addEventListener('input',launchPreselectAgent);
   document.addEventListener('visibilitychange',()=>{
     if(document.visibilityState==='visible'){connectSSE();refreshBoard();loadAttention()}
   });

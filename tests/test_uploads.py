@@ -26,7 +26,7 @@ def test_streaming_upload(tmp_path, monkeypatch):
 
 def test_streaming_upload_removes_partial_file_when_too_large(tmp_path, monkeypatch):
     monkeypatch.setattr(uploads, "UPLOAD_DIR", tmp_path)
-    monkeypatch.setattr(uploads, "MAX_SIZE", 4)
+    monkeypatch.setattr(uploads, "_max_size", lambda: 4)
 
     with pytest.raises(uploads.UploadTooLarge):
         asyncio.run(uploads.save_upload_file("example.txt", AsyncReader(b"hello")))

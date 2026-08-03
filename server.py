@@ -33,6 +33,7 @@ import uploads
 import files
 import terminal
 import web_push
+import settings
 from pydantic import BaseModel
 
 
@@ -518,6 +519,28 @@ async def api_upload(file: UploadFile):
 @app.get("/api/uploads")
 def api_uploads():
     return uploads.list_uploads()
+
+
+# ── 设置路由 ────────────────────────────────────────────────────
+
+@app.get("/api/settings")
+def api_settings_get():
+    """读用户配置(附 known agent 类型与语言枚举,供设置页渲染)。"""
+    return {
+        **settings.get(),
+        "known_agents": settings.KNOWN_AGENTS,
+        "languages": settings.LANGUAGES,
+    }
+
+
+@app.put("/api/settings")
+async def api_settings_put(request: Request):
+    """更新用户配置(一层合并)。校验失败 400。"""
+    body = await request.json()
+    try:
+        return settings.update(body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # ── 文件浏览/编辑路由 ──────────────────────────────────────────

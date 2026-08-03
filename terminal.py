@@ -48,14 +48,23 @@ HOME = os.path.expanduser("~")
 # 窗口尺寸合法范围(防 ioctl 异常值/资源消耗)
 MIN_COLS, MAX_COLS = 1, 500
 MIN_ROWS, MAX_ROWS = 1, 300
-# 最大活跃终端数
+# 最大活跃终端数(默认值;设置页 term.max_terms 可覆盖)
 MAX_TERMS = 16
-# 空闲回收阈值(秒):WS 断开后 PTY 保留供重连,超过才回收
+# 空闲回收阈值(秒):WS 断开后 PTY 保留供重连,超过才回收(设置页 term.idle_ttl 可覆盖)
 IDLE_TTL = 1800.0
 # 已退出子进程的回收宽限(秒):留给 server pump drain 尾输出的窗口
 DEAD_GRACE = 60.0
-# 单次写 PTY 的最长等待(对端不消费时抛 TimeoutError)
+# 单次写 PTY 的最长等待(对端不消费时抛 TimeoutError;设置页 term.write_timeout 可覆盖)
 WRITE_TIMEOUT = 2.0
+
+
+def _term_cfg(key: str, default: float) -> float:
+    """读设置页的终端参数;settings 不可用时用模块常量兜底。"""
+    try:
+        import settings
+        return settings.term_setting(key, default)
+    except Exception:
+        return default
 
 
 def _valid_dims(cols: Any, rows: Any) -> tuple[int, int]:
@@ -103,10 +112,11 @@ def create_term(
     cols, rows = _valid_dims(cols, rows)
     label = _valid_label(label)
     workdir = cwd or HOME
+    max_terms = int(_term_cfg("max_terms", MAX_TERMS))
     # 顺路回收空闲/已死终端,再检查上限
     sweep_idle()
-    if _active_count() >= MAX_TERMS:
-        raise RuntimeError(f"活跃终端数已达上限 {MAX_TERMS}")
+    if _active_count() >= max_terms:
+        raise RuntimeError(f"活跃终端数已达上限 {max_terms}")
 
     # pty.fork:子进程返回 0,父进程返回 master_fd + pid
     with _fork_lock:
@@ -138,7 +148,7 @@ def create_term(
     now = time.monotonic()
     with _lock:
         # fork 耗时内可能有并发创建,复查上限
-        if sum(1 for t in _terms.values() if t.get("alive")) >= MAX_TERMS:
+        if sum(1 for t in _terms.values() if t.get("alive")) >= max_terms:
             over = True
         else:
             over = False
@@ -149,7 +159,7 @@ def create_term(
             }
     if over:
         _kill_child(pid, master_fd)
-        raise RuntimeError(f"活跃终端数已达上限 {MAX_TERMS}")
+        raise RuntimeError(f"活跃终端数已达上限 {max_terms}")
     return {"id": term_id, "pid": pid, "label": label}
 
 
@@ -218,7 +228,8 @@ def write_term(term_id: str, data: str) -> None:
         return
     buf = data.encode("utf-8")
     total = len(buf)
-    deadline = time.monotonic() + WRITE_TIMEOUT
+    write_timeout = float(_term_cfg("write_timeout", WRITE_TIMEOUT))
+    deadline = time.monotonic() + write_timeout
     with t["lock"]:
         if not t.get("alive"):
             return
@@ -230,7 +241,7 @@ def write_term(term_id: str, data: str) -> None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
-                        f"write_term 超时({WRITE_TIMEOUT}s):"
+                        f"write_term 超时({write_timeout}s):"
                         f"已写入 {total - len(buf)}/{total} 字节,对端未及时消费"
                     )
                 try:
@@ -338,8 +349,10 @@ def kill_term(term_id: str) -> None:
         _kill_child(t["pid"], t["master_fd"])
 
 
-def sweep_idle(max_idle: float = IDLE_TTL) -> int:
+def sweep_idle(max_idle: float | None = None) -> int:
     """回收终端,返回回收数量。
+
+    max_idle 为 None 时读设置页 term.idle_ttl(默认 IDLE_TTL)。
 
     两类回收对象:
       - 已退出的子进程:每次 sweep 主动 waitpid 探测(不等 WS 调 is_alive),
@@ -348,6 +361,8 @@ def sweep_idle(max_idle: float = IDLE_TTL) -> int:
     不在单次 WS 断开时调用——断开后 PTY 保留,浏览器可重连;
     由 create_term 顺路触发,也可由外部定时任务调用。
     """
+    if max_idle is None:
+        max_idle = float(_term_cfg("idle_ttl", IDLE_TTL))
     now = time.monotonic()
     with _lock:
         items = list(_terms.items())

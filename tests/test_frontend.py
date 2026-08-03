@@ -57,7 +57,7 @@ def test_uses_data_action_and_event_delegation():
 
 
 def test_clipboard_paste_blocking_removed():
-    # 不主动读取/劫持 Mac 剪贴板；原生 Command+V 继续由浏览器/xterm 处理。
+    # 不主动读取/劫持系统剪贴板；原生粘贴继续由浏览器/xterm 处理。
     assert "navigator.clipboard.readText" not in HTML
     assert "e.preventDefault();navigator.clipboard" not in HTML
 
@@ -73,7 +73,7 @@ def test_herdr_osc52_clipboard_bridge_and_http_fallback():
     assert "document.execCommand('copy')" in js
     assert "window.isSecureContext" in js
     assert 'data-action="hfPaste"' in js
-    assert HTML.count("📋 复制到 Mac") >= 2
+    assert HTML.count("📋 复制到剪贴板") >= 2
     assert "📋 填入输入框" in HTML
     assert "HTTP 下请点" not in js
     assert "同步剪贴板" not in HTML
@@ -295,8 +295,8 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     assert ".app.hf-immersive #view-herdrflow{" in HTML
     assert "position:fixed;inset:0" in HTML
     assert ".app.hf-immersive #hfToolbar{display:none}" in HTML
-    assert 'class="hf-enter">⛶ 全屏' in HTML
-    assert 'class="hf-exit">退出全屏' in HTML
+    assert "class=\"hf-enter\"" in HTML and "hf.full" in HTML
+    assert "class=\"hf-exit\"" in HTML and "hf.exit" in HTML
     assert "app.classList.add('hf-immersive')" in js
     # 不进原生全屏(Android Chrome 会弹系统提示),只保留退出兜底
     assert "requestFullscreen()" not in js
@@ -387,3 +387,41 @@ def test_agent_mail_unread_is_not_presented_as_human_attention():
     assert 'data-action="openMessages"' in js
     assert "it.dataset.action==='openMessages'" in js
     assert "showView('msgs')" in js
+
+
+# ── 设置页与 i18n ───────────────────────────────────────────────
+
+def test_settings_view_and_nav_exist():
+    assert '<button data-view="settings"' in HTML
+    assert 'id="view-settings"' in HTML
+    assert 'id="setAgents"' in HTML
+    assert 'id="setDirAgents"' in HTML
+    assert 'id="setUploadMax"' in HTML
+
+
+def test_i18n_en_ja_key_sets_match():
+    import re
+    m = re.search(r"const I18N=\{\s*en:\{([\s\S]*?)\},\s*ja:\{([\s\S]*?)\}\};", HTML)
+    assert m, "I18N dict not found"
+    en, ja = m.group(1), m.group(2)
+    keys_en = set(re.findall(r"'([a-z.]+)':", en))
+    keys_ja = set(re.findall(r"'([a-z.]+)':", ja))
+    assert keys_en == keys_ja, f"en/ja key 不一致: {keys_en ^ keys_ja}"
+    assert len(keys_en) >= 60
+
+
+def test_i18n_framework_and_static_markup():
+    assert "function t(key,zh,vars)" in HTML
+    assert "function applyLang()" in HTML
+    assert 'data-i18n="nav.board"' in HTML
+    assert 'data-i18n="nav.settings"' in HTML
+    assert 'data-i18n-ph="launch.workdir.ph"' in HTML
+    # 中文原文仍作为回退保留在源码中
+    assert "看板" in HTML and "设置" in HTML
+
+
+def test_settings_js_functions_exist():
+    for fn in ("loadSettings", "renderSettings", "saveSettings",
+               "setAddDirAgent", "applyEnabledAgents", "launchPreselectAgent"):
+        assert f"function {fn}(" in HTML
+    assert "'/api/settings'" in HTML
