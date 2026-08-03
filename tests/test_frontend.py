@@ -160,6 +160,23 @@ def test_setup_workspace_output_escaped():
     assert "(r.notified||[]).map(esc).join" in HTML
 
 
+def test_setup_workspace_supports_roles_tasks_and_automatic_worktrees():
+    js = _inline_js()
+    assert 'data-mode="develop_review"' in HTML
+    assert 'data-mode="parallel"' in HTML
+    assert 'id="suGoal"' in HTML
+    assert 'id="suAgentsList"' in HTML
+    assert "SETUP_ROLE_LABELS" in js
+    assert "function renderSetupPreview()" in js
+    assert "participants,agents,layout" in js
+    assert "多个并行写入者不能共享目录" in js
+    assert "固定版本复核目录" in js
+    assert "独立 worktree" in HTML
+    assert "/api/herdr/inspect-workspace" in js
+    assert "SETUP_SUBMITTING" in js
+    assert "当前目录不是 Git 仓库" in js
+
+
 def test_attach_herdr_validates_session_name():
     # session 拼进发给 PTY 的 shell 命令,先用与后端一致的白名单校验,非法则不写 WS
     assert "/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/" in HTML

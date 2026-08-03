@@ -1,6 +1,20 @@
+import subprocess
+import shutil
+import threading
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 import server
+
+
+def _init_git_repo(path):
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
+    (path / "README.md").write_text("demo\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], check=True, capture_output=True)
 
 
 def test_build_attention_combines_panes_tasks_and_optional_mail(monkeypatch):
@@ -343,3 +357,302 @@ def test_setup_workspace_returns_per_agent_failures(monkeypatch, tmp_path):
     assert body["failed"] == [
         {"agent": "opencode", "error": "opencode 启动失败"}
     ]
+
+
+def test_prepare_parallel_workspace_creates_isolated_and_review_worktrees(tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    req = server.SetupWorkspaceReq(
+        session="demo",
+        workdir=str(repo),
+        mode="parallel",
+        goal="并行实现功能",
+        participants=[
+            {"id": "lead", "agent": "codex", "role": "lead", "task": "后端"},
+            {"id": "dev", "agent": "kimi", "role": "developer", "task": "前端"},
+            {
+                "id": "review", "agent": "claude", "role": "reviewer",
+                "task": "复核", "review_target": "lead",
+            },
+        ],
+    )
+
+    plans, warnings = server._prepare_workspace(req)
+
+    assert warnings == []
+    assert [plan["strategy"] for plan in plans] == ["isolated", "isolated", "review"]
+    assert plans[0]["branch"] == "agent-cockpit/demo/1-codex"
+    assert plans[1]["branch"] == "agent-cockpit/demo/2-kimi"
+    assert plans[2]["branch"] is None
+    assert all((Path(plan["workdir"]) / "README.md").is_file() for plan in plans)
+    detached = subprocess.run(
+        ["git", "-C", plans[2]["workdir"], "symbolic-ref", "-q", "HEAD"],
+        capture_output=True,
+    )
+    assert detached.returncode == 1
+
+
+def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
+    req = server.SetupWorkspaceReq(
+        session="demo",
+        workdir=str(tmp_path),
+        mode="parallel",
+        participants=[
+            {"id": "one", "agent": "codex", "role": "lead"},
+            {"id": "two", "agent": "kimi", "role": "developer"},
+        ],
+    )
+
+    try:
+        server._prepare_workspace(req)
+    except server.HTTPException as exc:
+        assert exc.status_code == 400
+        assert "不是 Git 仓库" in exc.detail
+    else:
+        raise AssertionError("非 Git 目录不应启动并行写入者")
+
+
+def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    monkeypatch.setattr(
+        server.herdr_client, "list_sessions",
+        lambda: [{"name": "demo", "status": "running"}],
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "start_agent",
+        lambda session, workdir, agent, **kwargs: {
+            "available": True, "pane_id": "w1:p2" if agent == "codex" else "w1:p3",
+        },
+    )
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"sessions": []})
+    sent = []
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda session, pane, text, mode: sent.append((pane, text, mode)) or {"available": True},
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo",
+            "workdir": str(tmp_path),
+            "mode": "develop_review",
+            "goal": "完成登录功能",
+            "participants": [
+                {"id": "lead", "agent": "codex", "role": "lead", "task": "实现"},
+                {
+                    "id": "review", "agent": "kimi", "role": "reviewer",
+                    "task": "复核", "review_target": "lead",
+                },
+            ],
+        },
+    )
+
+    body = response.json()
+    assert body["ok"] is True
+    assert body["briefed"] == ["codex", "kimi"]
+    assert body["warnings"] == ["当前不是 Git 仓库，所有 Agent 使用原工作目录"]
+    assert "总目标: 完成登录功能" in sent[0][1]
+    assert "你的角色: Reviewer" in sent[1][1]
+    assert "共享工作目录" in sent[1][1]
+    assert "detached worktree" not in sent[1][1]
+
+
+def test_prepare_workspace_resumes_old_branch_and_warns_after_prune(tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    req = server.SetupWorkspaceReq(
+        session="resume",
+        workdir=str(repo),
+        mode="custom",
+        participants=[
+            {
+                "id": "lead", "agent": "codex", "role": "lead",
+                "task": "继续任务", "workspace": "isolated",
+            },
+        ],
+    )
+    first, _ = server._prepare_workspace(req)
+    old_branch_head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", first[0]["branch"]],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    shutil.rmtree(first[0]["worktree"])
+    (repo / "README.md").write_text("new main\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "advance main"],
+        check=True, capture_output=True,
+    )
+
+    resumed, warnings = server._prepare_workspace(req)
+
+    assert resumed[0]["resumed"] is True
+    assert Path(resumed[0]["worktree"]).is_dir()
+    assert subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", resumed[0]["branch"]],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == old_branch_head
+    assert any("恢复" in warning and "新 session" in warning for warning in warnings)
+
+
+def test_prepare_workspace_warns_when_reusing_dirty_worktree(tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    req = server.SetupWorkspaceReq(
+        session="dirty",
+        workdir=str(repo),
+        mode="custom",
+        participants=[
+            {
+                "id": "lead", "agent": "codex", "role": "lead",
+                "workspace": "isolated",
+            },
+        ],
+    )
+    first, _ = server._prepare_workspace(req)
+    (Path(first[0]["workdir"]) / "local.txt").write_text("keep me\n", encoding="utf-8")
+
+    reused, warnings = server._prepare_workspace(req)
+
+    assert reused[0]["reused"] is True
+    assert reused[0]["dirty"] is True
+    assert any("未提交改动" in warning and "原样保留" in warning for warning in warnings)
+
+
+def test_prepare_workspace_rolls_back_new_worktrees_after_partial_failure(monkeypatch, tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    req = server.SetupWorkspaceReq(
+        session="rollback",
+        workdir=str(repo),
+        mode="parallel",
+        participants=[
+            {"id": "one", "agent": "codex", "role": "lead"},
+            {"id": "two", "agent": "kimi", "role": "developer"},
+        ],
+    )
+    real_ensure = server._ensure_worktree
+
+    def fail_second(*args, **kwargs):
+        if kwargs.get("index", args[4] if len(args) > 4 else None) == 1:
+            raise ValueError("second failed")
+        return real_ensure(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_ensure_worktree", fail_second)
+    try:
+        server._prepare_workspace(req)
+    except server.HTTPException as exc:
+        assert "second failed" in exc.detail
+    else:
+        raise AssertionError("第二个 worktree 失败时应终止")
+
+    target = tmp_path / ".demo-cockpit-worktrees" / "rollback" / "1-codex"
+    assert not target.exists()
+    branch = subprocess.run(
+        [
+            "git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+            "refs/heads/agent-cockpit/rollback/1-codex",
+        ],
+    )
+    assert branch.returncode == 1
+
+
+def test_inspect_workspace_reports_git_capabilities(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    non_git = client.post(
+        "/api/herdr/inspect-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={"workdir": str(tmp_path)},
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    git = client.post(
+        "/api/herdr/inspect-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={"workdir": str(repo)},
+    )
+
+    assert non_git.status_code == 200
+    assert non_git.json()["is_git"] is False
+    assert git.status_code == 200
+    assert git.json()["is_git"] is True
+    assert git.json()["dirty"] is False
+
+
+def test_setup_workspace_rejects_concurrent_request_for_same_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    lock = threading.Lock()
+    lock.acquire()
+    with server._SETUP_WORKSPACE_LOCKS_GUARD:
+        server._SETUP_WORKSPACE_LOCKS["busy"] = lock
+    try:
+        response = TestClient(server.app).post(
+            "/api/herdr/setup-workspace",
+            headers={"authorization": "Bearer secret"},
+            json={"session": "busy", "workdir": str(tmp_path)},
+        )
+    finally:
+        lock.release()
+        with server._SETUP_WORKSPACE_LOCKS_GUARD:
+            server._SETUP_WORKSPACE_LOCKS.pop("busy", None)
+
+    assert response.status_code == 409
+    assert "重复提交" in response.json()["detail"]
+
+
+def test_rollback_removes_remounted_worktree_but_keeps_old_branch(monkeypatch, tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    first_req = server.SetupWorkspaceReq(
+        session="keep",
+        workdir=str(repo),
+        mode="custom",
+        participants=[
+            {"id": "one", "agent": "codex", "role": "lead", "workspace": "isolated"},
+        ],
+    )
+    first, _ = server._prepare_workspace(first_req)
+    branch = first[0]["branch"]
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "remove", "--force", first[0]["worktree"]],
+        check=True, capture_output=True,
+    )
+    resume_req = server.SetupWorkspaceReq(
+        session="keep",
+        workdir=str(repo),
+        mode="parallel",
+        participants=[
+            {"id": "one", "agent": "codex", "role": "lead"},
+            {"id": "two", "agent": "kimi", "role": "developer"},
+        ],
+    )
+    real_ensure = server._ensure_worktree
+
+    def fail_second(*args, **kwargs):
+        if kwargs.get("index", args[4] if len(args) > 4 else None) == 1:
+            raise ValueError("second failed")
+        return real_ensure(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_ensure_worktree", fail_second)
+    try:
+        server._prepare_workspace(resume_req)
+    except server.HTTPException:
+        pass
+    else:
+        raise AssertionError("第二个 worktree 失败时应终止")
+
+    assert not Path(first[0]["worktree"]).exists()
+    assert subprocess.run(
+        ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+    ).returncode == 0

@@ -68,6 +68,45 @@ def test_server_identity_name_uses_registered_identity(monkeypatch):
     assert server._identity_name("/project", "claude") == "GentleCompass"
 
 
+def test_server_identity_falls_back_to_main_worktree(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        server.db,
+        "identity_by_cwd",
+        lambda cwd, program: seen.append(cwd) or (
+            {"name": "codex-main", "program": program, "human_key": cwd}
+            if cwd == "/project" else None
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_git",
+        lambda cwd, *args: "worktree /project\nHEAD abc\n\nworktree /tmp/review\nHEAD def",
+    )
+
+    assert server._identity_name("/tmp/review", "codex") == "codex-main"
+    assert seen == ["/tmp/review", "/project"]
+
+
+def test_server_identity_preserves_nested_path_across_worktrees(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        server.db,
+        "identity_by_cwd",
+        lambda cwd, program: seen.append(cwd) or (
+            {"name": "codex-main"} if cwd == "/project/apps/api" else None
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_git",
+        lambda cwd, *args: "worktree /project\nHEAD abc\n\nworktree /tmp/review\nHEAD def",
+    )
+
+    assert server._identity_name("/tmp/review/apps/api", "codex") == "codex-main"
+    assert seen == ["/tmp/review/apps/api", "/project/apps/api"]
+
+
 def test_db_queries_serialize_shared_connection(monkeypatch):
     first_entered = threading.Event()
     release_first = threading.Event()
