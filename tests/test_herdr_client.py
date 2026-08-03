@@ -70,6 +70,26 @@ def test_list_sessions_falls_back_for_old_herdr(monkeypatch):
     }]
 
 
+def test_start_agent_reuses_existing_pane_with_cwd(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: {
+            "panes": [{"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project"}],
+        },
+    )
+
+    assert herdr_client.start_agent("demo", "/tmp/project", "codex") == {
+        "available": True,
+        "pane_id": "w1:p2",
+        "agent": "codex",
+        "cwd": "/tmp/project",
+        "reused": True,
+        "msg": "codex pane 已存在(w1:p2),跳过",
+    }
+
+
 def test_start_agent_fallback_selects_highest_numeric_pane(monkeypatch):
     """fallback 应把 w1:p10 视为比 w1:p9 更新，而不是按字符串排序。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)

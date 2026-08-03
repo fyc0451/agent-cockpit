@@ -322,8 +322,17 @@ def start_agent(
     snap = _snapshot_session(session)
     existing = next((p for p in snap.get("panes", []) if p.get("agent") == agent), None)
     if existing:
-        return {"available": True, "pane_id": existing["pane_id"], "agent": agent,
-                "reused": True, "msg": f"{agent} pane 已存在({existing['pane_id']}),跳过"}
+        result = {
+            "available": True,
+            "pane_id": existing["pane_id"],
+            "agent": agent,
+            "reused": True,
+            "msg": f"{agent} pane 已存在({existing['pane_id']}),跳过",
+        }
+        existing_cwd = existing.get("cwd") or existing.get("foreground_cwd")
+        if existing_cwd:
+            result["cwd"] = existing_cwd
+        return result
     agent_bin = _find_agent_bin(agent)
     if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
         return {"available": True, "error": f"{agent} 未安装或不在 PATH"}

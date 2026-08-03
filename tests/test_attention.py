@@ -583,8 +583,8 @@ def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
         workdir=str(tmp_path),
         mode="parallel",
         participants=[
-            {"id": "one", "agent": "codex", "role": "lead"},
-            {"id": "two", "agent": "kimi", "role": "developer"},
+            {"id": "one", "agent": "codex", "role": "lead", "task": "后端"},
+            {"id": "two", "agent": "kimi", "role": "developer", "task": "前端"},
         ],
     )
 
@@ -595,6 +595,25 @@ def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
         assert "不是 Git 仓库" in exc.detail
     else:
         raise AssertionError("非 Git 目录不应启动并行写入者")
+
+
+def test_prepare_workspace_rejects_blank_participant_task(tmp_path):
+    req = server.SetupWorkspaceReq(
+        session="demo",
+        workdir=str(tmp_path),
+        mode="custom",
+        participants=[
+            {"id": "lead", "agent": "codex", "role": "lead", "task": "   "},
+        ],
+    )
+
+    try:
+        server._prepare_workspace(req)
+    except server.HTTPException as exc:
+        assert exc.status_code == 400
+        assert "真实任务" in exc.detail
+    else:
+        raise AssertionError("协作工作区不应接受空白任务")
 
 
 def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
@@ -647,6 +666,76 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
     assert "detached worktree" not in sent[1][1]
 
 
+def test_setup_workspace_reuses_matching_agent_without_reinjecting(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [{"name": "demo", "status": "running", "directory": str(tmp_path)}],
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda *args, **kwargs: {
+            "available": True,
+            "pane_id": "w1:p2",
+            "agent": "codex",
+            "cwd": str(tmp_path),
+            "reused": True,
+        },
+    )
+    script = tmp_path / "am-init-project"
+    script.write_text("", encoding="utf-8")
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", script)
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "ok", ""),
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "snapshot",
+        lambda: {
+            "sessions": [{
+                "session": "demo",
+                "panes": [{"pane_id": "w1:p2", "agent": "codex"}],
+            }],
+        },
+    )
+    monkeypatch.setattr(server, "_identity_name", lambda *_: "codex-main")
+    sent = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo",
+            "workdir": str(tmp_path),
+            "mode": "custom",
+            "participants": [
+                {"id": "lead", "agent": "codex", "role": "lead", "task": "修复启动"},
+            ],
+        },
+    )
+
+    body = response.json()
+    assert body["ok"] is True
+    assert body["idempotent"] is True
+    assert body["started"] == []
+    assert body["reused"] == ["codex"]
+    assert body["failed"] == []
+    assert body["briefed"] == []
+    assert body["notified"] == []
+    assert sent == []
+
+
 def test_prepare_workspace_resumes_old_branch_and_warns_after_prune(tmp_path):
     repo = tmp_path / "demo"
     repo.mkdir()
@@ -697,7 +786,7 @@ def test_prepare_workspace_warns_when_reusing_dirty_worktree(tmp_path):
         participants=[
             {
                 "id": "lead", "agent": "codex", "role": "lead",
-                "workspace": "isolated",
+                "task": "复用工作区", "workspace": "isolated",
             },
         ],
     )
@@ -720,8 +809,8 @@ def test_prepare_workspace_rolls_back_new_worktrees_after_partial_failure(monkey
         workdir=str(repo),
         mode="parallel",
         participants=[
-            {"id": "one", "agent": "codex", "role": "lead"},
-            {"id": "two", "agent": "kimi", "role": "developer"},
+            {"id": "one", "agent": "codex", "role": "lead", "task": "后端"},
+            {"id": "two", "agent": "kimi", "role": "developer", "task": "前端"},
         ],
     )
     real_ensure = server._ensure_worktree
@@ -804,7 +893,10 @@ def test_rollback_removes_remounted_worktree_but_keeps_old_branch(monkeypatch, t
         workdir=str(repo),
         mode="custom",
         participants=[
-            {"id": "one", "agent": "codex", "role": "lead", "workspace": "isolated"},
+            {
+                "id": "one", "agent": "codex", "role": "lead",
+                "task": "保持旧分支", "workspace": "isolated",
+            },
         ],
     )
     first, _ = server._prepare_workspace(first_req)
@@ -818,8 +910,8 @@ def test_rollback_removes_remounted_worktree_but_keeps_old_branch(monkeypatch, t
         workdir=str(repo),
         mode="parallel",
         participants=[
-            {"id": "one", "agent": "codex", "role": "lead"},
-            {"id": "two", "agent": "kimi", "role": "developer"},
+            {"id": "one", "agent": "codex", "role": "lead", "task": "后端"},
+            {"id": "two", "agent": "kimi", "role": "developer", "task": "前端"},
         ],
     )
     real_ensure = server._ensure_worktree

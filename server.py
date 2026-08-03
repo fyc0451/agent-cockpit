@@ -1238,6 +1238,8 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         raise HTTPException(400, "participants 包含不支持的角色")
     if any(p.workspace not in VALID_WORKSPACE_STRATEGIES for p in participants):
         raise HTTPException(400, "participants 包含不支持的工作目录策略")
+    if not legacy and any(not p.task.strip() for p in participants):
+        raise HTTPException(400, "请填写每个 Agent 的真实任务")
 
     ids = []
     for i, p in enumerate(participants):
@@ -1335,7 +1337,7 @@ def _workspace_briefing(req: SetupWorkspaceReq, plan: dict[str, Any], plans: lis
     lines = [
         "[Agent Cockpit 工作区任务]",
         f"你的角色: {role_labels[plan['role']]}",
-        f"你的任务: {plan['task'] or '按当前指令开展工作'}",
+        f"你的任务: {plan['task']}",
         f"工作目录策略: {plan['strategy']} ({plan['workdir']})",
     ]
     if coworkers:
@@ -1563,6 +1565,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         warnings.append(f"通信项目绑定保存失败({mail_projects.STATE_PATH}): {exc}")
     results = []
     started = []
+    reused = []
     failed = []
     # 1. 为每个 agent 开 pane + 启动
     for plan in plans:
@@ -1573,14 +1576,22 @@ def _setup_workspace(req: SetupWorkspaceReq):
         results.append({"agent": agent_type, "plan": plan, "start": r})
         error = r.get("error")
         if req.participants is not None and r.get("reused"):
-            error = f"session 中已存在 {agent_type}，无法应用新的工作目录"
+            existing_cwd = r.get("cwd")
+            same_workdir = bool(existing_cwd) and (
+                Path(existing_cwd).expanduser().resolve()
+                == Path(plan["workdir"]).expanduser().resolve()
+            )
+            if same_workdir:
+                reused.append(agent_type)
+            else:
+                error = f"session 中已存在 {agent_type}，无法应用新的工作目录"
         if r.get("available", True) is False:
             error = error or "Herdr 不可用"
         if error:
             failed.append({"agent": agent_type, "error": error})
-        else:
+        elif not r.get("reused"):
             started.append(agent_type)
-        time.sleep(2)  # 等 agent 启动
+            time.sleep(2)  # 等新 Agent 启动
     # 1.5 清理建 session 时 TUI 自带的空白 shell pane(至少一个 agent 在跑才清,避免空 session)
     closed_panes = []
     if base_pane_ids and started:
@@ -1653,7 +1664,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         for p in sess.get("panes", []):
             atype = p.get("agent")
             pid = p.get("pane_id")
-            if not atype or not pid:
+            if not atype or atype not in started or not pid:
                 continue
             my_name = _identity_name(canonical_project, atype)
             if not my_name:
@@ -1667,7 +1678,8 @@ def _setup_workspace(req: SetupWorkspaceReq):
     return {
         "ok": not failed, "session": req.session, "workdir": req.workdir,
         "session_created": session_created, "session_started": session_started,
-        "started": started, "failed": failed, "results": results, "registered": reg_ok,
+        "started": started, "reused": reused, "failed": failed, "results": results,
+        "idempotent": bool(reused and not started and not failed), "registered": reg_ok,
         "notified": notified, "briefed": briefed, "agent_mail": mail_status,
         "mode": req.mode, "workspaces": plans, "warnings": warnings,
         "closed_panes": closed_panes, "mail_project": canonical_project,
