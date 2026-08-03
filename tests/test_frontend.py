@@ -292,17 +292,34 @@ def test_mobile_terminal_has_expandable_computer_keyboard():
 
 def test_mobile_terminal_keyboard_has_visible_focused_input_and_send_feedback():
     js = _inline_js()
+    assert "interactive-widget=resizes-content" in HTML
+    assert 'id="termMobileInputBar"' in HTML
     assert 'id="termKeyboardInput"' in HTML
     assert 'id="termKeyboardStatus"' in HTML
+    assert "(any-pointer:coarse)" in HTML
+    assert HTML.index('id="termContainer"') < HTML.index('id="termMobileInputBar"')
     assert "function focusTermKeyboardInput()" in js
     assert "input.focus({preventScroll:true})" in js
     assert "input.scrollIntoView({block:'nearest'})" in js
+    assert "function positionTermMobileInput()" in js
+    assert "window.innerHeight-vv.height-vv.offsetTop" in js
+    assert "window.visualViewport.addEventListener('scroll',fitVisibleTerm)" in js
     assert "function termSendVisibleInput()" in js
     assert "queueTermInput(TERM_ID,payload)" in js
     assert "已发送：" in js
-    assert ".term-key-input{" in HTML
-    assert "touch-action:pan-y" in HTML
+    assert ".term-mobile-input{" in HTML
     assert ".xterm-viewport" in HTML
+
+
+def test_mobile_terminal_supports_single_finger_scrollback():
+    js = _inline_js()
+    assert "function enableTermTouchScroll(el,xterm)" in js
+    assert "enableTermTouchScroll(el,xterm)" in js
+    assert "xterm.scrollLines(lines)" in js
+    assert "new WheelEvent('wheel'" in js
+    assert "el.addEventListener('touchmove'" in js
+    assert "{passive:false}" in js
+    assert "touch-action:none!important" in HTML
 
 
 def test_terminal_drawer_keeps_main_navigation_visible_and_clickable():
