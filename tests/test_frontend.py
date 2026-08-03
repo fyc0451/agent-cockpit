@@ -335,6 +335,16 @@ def test_file_manager_explains_roots_search_and_actions():
     assert "可访问位置：" in js
 
 
+def test_file_manager_can_prefill_workspace_from_current_directory():
+    js = _inline_js()
+    assert 'id="fileWorkspaceBtn"' in HTML
+    assert "function workspaceSessionName(path)" in js
+    assert "async function setupWorkspaceFromFiles()" in js
+    assert "document.getElementById('suWorkdir').value=FILE_CWD" in js
+    assert "document.getElementById('suSession').value=workspaceSessionName(FILE_CWD)" in js
+    assert "showSetupModal()" in js
+
+
 def test_agent_mail_hub_failure_becomes_read_only_ui():
     js = _inline_js()
     assert "write_available!==false" in js

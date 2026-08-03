@@ -109,7 +109,9 @@ header .spacer{flex:1}
 .file-search input{flex:1;min-width:180px}
 .file-search button{width:auto}
 .file-search-info{font-size:11px;color:var(--fg3);margin-left:auto}
-.file-guide{padding:8px 10px;font-size:12px;color:var(--fg2);background:var(--bg3);border-bottom:1px solid var(--bd)}
+.file-guide{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;font-size:12px;color:var(--fg2);background:var(--bg3);border-bottom:1px solid var(--bd)}
+.file-guide span{flex:1;min-width:220px}
+.file-guide button{width:auto;flex:0 0 auto}
 .files-body{flex:1;display:grid;grid-template-columns:280px 1fr;gap:10px;padding:10px;overflow:hidden}
 .file-tree{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:auto}
 .ft-item{padding:5px 10px;border-radius:6px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;white-space:nowrap}
@@ -337,7 +339,10 @@ header .spacer{flex:1}
 
   <!-- 文件 -->
   <section id="view-files" class="view files-view">
-    <div class="file-guide"><b>怎么用：</b>先在“可访问位置”选工作区，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，其他文件点 ⬇️ 下载。</div>
+    <div class="file-guide">
+      <span><b>怎么用：</b>先在“可访问位置”选项目，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，其他文件点 ⬇️ 下载。</span>
+      <button class="primary sm" id="fileWorkspaceBtn" onclick="setupWorkspaceFromFiles()" title="用文件列表当前所在目录预填一键工作区">🚀 当前目录建工作区</button>
+    </div>
     <div class="file-search">
       <input type="search" id="fileSearchInput" placeholder="搜索当前目录及子目录中的文件名" onkeydown="if(event.key==='Enter')fileSearch()">
       <button class="primary sm" onclick="fileSearch()">搜索</button>
@@ -1655,6 +1660,21 @@ async function loadFileTree(){
   }catch(e){toast('列目录失败: '+e)}
 }
 function fileRootLabel(path){return path.replace(/^\/home\/[^/]+/,'~')||'/'}
+function workspaceSessionName(path){
+  const parts=String(path||'').split('/').filter(Boolean);
+  const base=parts[parts.length-1]||'workspace';
+  const atHomeRoot=parts.length===3&&parts[0]==='home';
+  const raw=!atHomeRoot&&parts.length>1?parts[parts.length-2]+'-'+base:base;
+  const name=raw.toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^[-_]+|[-_]+$/g,'').slice(0,64).replace(/[-_]+$/,'');
+  return name||'workspace';
+}
+async function setupWorkspaceFromFiles(){
+  if(!FILE_CWD)await loadFileTree();
+  if(!FILE_CWD){toast('没有可用的项目目录');return}
+  document.getElementById('suWorkdir').value=FILE_CWD;
+  document.getElementById('suSession').value=workspaceSessionName(FILE_CWD);
+  showSetupModal();
+}
 async function fileSearch(){
   const input=document.getElementById('fileSearchInput');
   const q=input.value.trim();
