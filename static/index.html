@@ -664,7 +664,7 @@ let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
 let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=null;
 let SERVICE_CLIPBOARD='';
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
-let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
+let SETUP_SUBMITTING=false, SETUP_CLOSE_TIMER=null, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -2200,7 +2200,12 @@ function showSetupModal(){
   setupInspectWorkspace(document.getElementById('suWorkdir').value.trim());
   document.getElementById('setupModal').classList.add('show');
 }
-function closeSetup(){document.getElementById('setupModal').classList.remove('show')}
+function closeSetup(){
+  if(SETUP_CLOSE_TIMER!==null){
+    clearTimeout(SETUP_CLOSE_TIMER);SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;renderSetupPreview();
+  }
+  document.getElementById('setupModal').classList.remove('show');
+}
 async function doSetupWorkspace(){
   if(SETUP_SUBMITTING)return;
   const session=document.getElementById('suSession').value.trim();
@@ -2230,7 +2235,7 @@ async function doSetupWorkspace(){
       res.innerHTML='<span style="color:var(--done)">'+readyText+'</span><br>启动: '+(started||'无')+(reused?'<br>复用: '+reused:'')+(workspaces?'<br>'+workspaces:'')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'')+(warnings?'<br><span style="color:var(--need)">'+warnings+'</span>':'');
       document.getElementById('suStartBtn').textContent='✓ 工作区已启动';
       toast(r.idempotent?'工作区已在运行':'工作区就绪 ✓');
-      setTimeout(()=>{SETUP_SUBMITTING=false;closeSetup();renderSetupPreview();loadSessionsView()},3500);
+      SETUP_CLOSE_TIMER=setTimeout(()=>{SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;closeSetup();renderSetupPreview();loadSessionsView()},3500);
     }else{
       const failed=(r.failed||[]).map(x=>esc(x.agent)+': '+esc(x.error)).join('<br>');
       const terminalOutput=r.terminal_output?'<br>终端输出: <code>'+esc(r.terminal_output)+'</code>':'';

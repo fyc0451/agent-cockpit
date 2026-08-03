@@ -208,6 +208,9 @@ def test_setup_workspace_requires_real_tasks_and_keeps_success_locked():
     assert "let setupSucceeded=false" in submit
     assert "setupSucceeded=true" in submit
     assert "if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}" in submit
+    assert "SETUP_CLOSE_TIMER=setTimeout" in submit
+    assert "clearTimeout(SETUP_CLOSE_TIMER)" in js
+    assert "SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;renderSetupPreview()" in js
 
 
 def test_old_session_mail_project_can_be_selected_in_ui():
