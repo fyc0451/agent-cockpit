@@ -1,3 +1,4 @@
+import sys
 import time
 from unittest.mock import call
 
@@ -8,6 +9,8 @@ def test_start_agent_fallback_selects_highest_numeric_pane(monkeypatch):
     """fallback 应把 w1:p10 视为比 w1:p9 更新，而不是按字符串排序。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "codex")
+    # 可执行文件探测与宿主机解耦(CI 上没有安装 codex)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
     snapshots = iter([
         {"panes": []},
         {"panes": [
