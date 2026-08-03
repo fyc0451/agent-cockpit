@@ -4,12 +4,26 @@ WAL 模式下只读连接可安全并发,不阻塞 hub 写入。绝不写这个�
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path.home() / "mcp_agent_mail" / "storage.sqlite3"
+def _resolve_db_path() -> Path:
+    """按显式配置、新版 XDG 安装目录、旧目录依次探测 Agent Mail DB。"""
+    configured = os.environ.get("AGENT_MAIL_DB_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    candidates = (
+        data_home / "mcp_agent_mail" / "storage.sqlite3",
+        Path.home() / "mcp_agent_mail" / "storage.sqlite3",
+    )
+    return next((path for path in candidates if path.is_file()), candidates[0])
+
+
+DB_PATH = _resolve_db_path()
 # 复用同一连接(线程内);只读 URI,每次查询用独立游标。
 _conn: sqlite3.Connection | None = None
 _conn_lock = threading.RLock()

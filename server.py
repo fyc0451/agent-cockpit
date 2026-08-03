@@ -292,7 +292,6 @@ class SetupWorkspaceReq(BaseModel):
     agents: list[str] = Field(default_factory=lambda: ["codex"])
     layout: str = "right"  # right(水平/左右) | down(垂直/上下) | tab(多页/不分割)
     mode: str = "quick"
-    goal: str = ""
     participants: list[WorkspaceParticipantReq] | None = None
 
 
@@ -1087,9 +1086,8 @@ def _workspace_briefing(req: SetupWorkspaceReq, plan: dict[str, Any], plans: lis
     coworkers = "、".join(f"{p['agent']}({role_labels[p['role']]})" for p in plans if p["id"] != plan["id"])
     lines = [
         "[Agent Cockpit 工作区任务]",
-        f"总目标: {req.goal.strip() or '未填写，请先向用户确认'}",
         f"你的角色: {role_labels[plan['role']]}",
-        f"你的任务: {plan['task'] or '围绕总目标开展工作'}",
+        f"你的任务: {plan['task'] or '按当前指令开展工作'}",
         f"工作目录策略: {plan['strategy']} ({plan['workdir']})",
     ]
     if coworkers:

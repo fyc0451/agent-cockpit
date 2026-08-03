@@ -29,6 +29,7 @@ HERDR_BIN_VALUE="$(env_value HERDR_BIN)"
 CODEX_BIN_VALUE="$(env_value CODEX_BIN)"
 HOST_VALUE="$(env_value COCKPIT_HOST)"
 TOKEN_VALUE="$(env_value COCKPIT_TOKEN)"
+AGENT_MAIL_DB_VALUE="$(env_value AGENT_MAIL_DB_PATH)"
 
 CHECK_PYTHON="$INSTALL_DIR/.venv/bin/python"
 if [[ ! -x "$CHECK_PYTHON" ]]; then
@@ -63,9 +64,16 @@ else
   warn "未找到 codex；后台 codex task 功能不可用"
 fi
 
-[[ -f "$HOME/mcp_agent_mail/storage.sqlite3" ]] \
-  && ok "Agent Mail 数据库存在" \
-  || warn "缺少 ~/mcp_agent_mail/storage.sqlite3；消息能力会自动隐藏"
+if [[ -n "$AGENT_MAIL_DB_VALUE" ]]; then
+  AGENT_MAIL_DB_PATH="$AGENT_MAIL_DB_VALUE"
+elif [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/mcp_agent_mail/storage.sqlite3" ]]; then
+  AGENT_MAIL_DB_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/mcp_agent_mail/storage.sqlite3"
+else
+  AGENT_MAIL_DB_PATH="$HOME/mcp_agent_mail/storage.sqlite3"
+fi
+[[ -f "$AGENT_MAIL_DB_PATH" ]] \
+  && ok "Agent Mail 数据库存在: $AGENT_MAIL_DB_PATH" \
+  || warn "缺少 Agent Mail 数据库；消息能力会自动隐藏"
 [[ -f "$HOME/.agent-mail/client.env" ]] \
   && ok "Agent Mail 客户端配置存在" \
   || warn "缺少 ~/.agent-mail/client.env；发信/确认功能可能不可用"
@@ -89,8 +97,11 @@ fi
 if command -v systemctl >/dev/null 2>&1 && \
    systemctl --user is-active --quiet agent-cockpit.service 2>/dev/null; then
   ok "agent-cockpit.service 正在运行"
+elif [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1 && \
+     launchctl print "gui/$(id -u)/io.github.fyc0451.agent-cockpit" >/dev/null 2>&1; then
+  ok "Agent Cockpit LaunchAgent 正在运行"
 else
-  warn "agent-cockpit.service 未运行或 systemd user bus 不可用"
+  warn "Agent Cockpit 的 systemd/LaunchAgent 服务未运行"
 fi
 
 printf '\n结果: %d 个错误，%d 个警告。\n' "$FAILURES" "$WARNINGS"

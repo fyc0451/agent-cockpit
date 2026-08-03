@@ -66,8 +66,9 @@ Agent Mail 缺失时只隐藏消息相关视图;hub 暂时挂掉时消息只读,
 curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.sh | bash
 ```
 
-安装器会克隆到 `~/agent-cockpit`、建虚拟环境、装依赖,并在有 systemd user bus 时
-启用 `agent-cockpit.service`。启动失败先跑 `~/agent-cockpit/doctor.sh`。
+安装器会克隆到 `~/agent-cockpit`、建虚拟环境、装依赖，并在 Linux 注册
+`agent-cockpit.service`，在 macOS 注册 LaunchAgent。启动失败先跑
+`~/agent-cockpit/doctor.sh`。
 
 ### 手动安装
 
@@ -189,10 +190,12 @@ set -a; source .env; set +a
 | `COCKPIT_TOKEN` | 空 | 共享登录 token;非回环绑定时必填 |
 | `HERDR_BIN` | 自动探测 | herdr 二进制路径 |
 | `CODEX_BIN` | 自动探测 | codex 二进制路径 |
+| `AGENT_MAIL_DB_PATH` | 自动探测 | Agent Mail `storage.sqlite3` 自定义路径 |
 | `COCKPIT_VAPID_SUBJECT` | `mailto:agent-cockpit@localhost` | Web Push VAPID contact |
 | `COCKPIT_VAPID_PRIVATE_KEY` / `PUBLIC_KEY` | 自动生成 | 多实例部署时可固定 VAPID 密钥对 |
 
-hub token 自动从 `~/.agent-mail/client.env` 读取,不要硬编码。
+Agent Mail 数据库会依次探测新版 `~/.local/share/mcp_agent_mail/` 和旧版
+`~/mcp_agent_mail/`。hub token 自动从 `~/.agent-mail/client.env` 读取,不要硬编码。
 VAPID 密钥首次生成于 `~/dashboard-data/`,不会进入仓库。
 用户设置存在 `~/dashboard-data/settings.json`,终端字体等本机偏好存在浏览器
 localStorage。
@@ -200,7 +203,7 @@ localStorage。
 ## 升级、诊断、卸载
 
 ```bash
-./upgrade.sh       # 有本地改动时拒绝覆盖
+./upgrade.sh       # 有本地改动时拒绝覆盖；升级后自动重启 systemd/LaunchAgent
 ./doctor.sh        # 检查 Python、依赖、herdr、Agent Mail、认证、服务
 ./uninstall.sh     # 只删 user service;代码、配置、数据保留
 ```
@@ -226,7 +229,8 @@ agent-cockpit/
 ├── static/manifest.webmanifest  PWA 元数据
 ├── tests/                 回归与安全测试
 ├── install.sh / upgrade.sh / doctor.sh / uninstall.sh
-└── agent-cockpit.service  systemd user 单元模板
+├── agent-cockpit.service  systemd user 单元模板
+└── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```
 
 ## 为什么是驾驶舱而不是 CLI?

@@ -164,7 +164,7 @@ def test_setup_workspace_supports_roles_tasks_and_automatic_worktrees():
     js = _inline_js()
     assert 'data-mode="develop_review"' in HTML
     assert 'data-mode="parallel"' in HTML
-    assert 'id="suGoal"' in HTML
+    assert 'id="suGoal"' not in HTML
     assert 'id="suAgentsList"' in HTML
     assert "SETUP_ROLE_LABELS" in js
     assert "function renderSetupPreview()" in js

@@ -41,12 +41,6 @@ if [[ ! -f "$INSTALL_DIR/.env" ]]; then
   chmod 600 "$INSTALL_DIR/.env"
 fi
 
-UNIT_DIR="$HOME/.config/systemd/user"
-UNIT_PATH="$UNIT_DIR/agent-cockpit.service"
-mkdir -p "$UNIT_DIR"
-sed "s|%h/agent-cockpit|$INSTALL_DIR|g" \
-  "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
-
 if command -v loginctl >/dev/null 2>&1; then
   if ! loginctl enable-linger "$(id -un)" >/dev/null 2>&1; then
     echo '警告: 无法启用 lingering；用户登出后服务会停止。请手动运行: loginctl enable-linger $USER' >&2
@@ -54,11 +48,20 @@ if command -v loginctl >/dev/null 2>&1; then
 fi
 
 if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
+  UNIT_DIR="$HOME/.config/systemd/user"
+  UNIT_PATH="$UNIT_DIR/agent-cockpit.service"
+  mkdir -p "$UNIT_DIR"
+  sed "s|%h/agent-cockpit|$INSTALL_DIR|g" \
+    "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
+  systemctl --user daemon-reload
   systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true
   systemctl --user enable --now agent-cockpit.service
   echo "Agent Cockpit 已启动: http://127.0.0.1:8790"
+elif [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+  "$INSTALL_DIR/launchd.sh" install
+  echo "Agent Cockpit 已作为 macOS LaunchAgent 启动: http://127.0.0.1:8790"
 else
-  echo "安装完成，但当前环境没有可用的 systemd user bus。" >&2
+  echo "安装完成，但当前环境没有可用的 systemd 或 launchd user service。" >&2
   echo "请运行: $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/server.py" >&2
 fi
 

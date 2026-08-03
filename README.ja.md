@@ -69,8 +69,9 @@ curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.
 ```
 
 インストーラは `~/agent-cockpit` にクローンし、仮想環境の作成と依存の
-インストールを行い、systemd user bus があれば `agent-cockpit.service` を
-有効化します。起動に失敗したら `~/agent-cockpit/doctor.sh` を実行してください。
+インストールを行い、Linux では `agent-cockpit.service`、macOS では
+LaunchAgent を登録します。起動に失敗したら `~/agent-cockpit/doctor.sh` を
+実行してください。
 
 ### 手動インストール
 
@@ -215,18 +216,21 @@ set -a; source .env; set +a
 | `COCKPIT_TOKEN` | 空 | 共有ログイン token。非ループバックバインド時は必須 |
 | `HERDR_BIN` | 自動検出 | herdr バイナリのパス |
 | `CODEX_BIN` | 自動検出 | codex バイナリのパス |
+| `AGENT_MAIL_DB_PATH` | 自動検出 | Agent Mail `storage.sqlite3` のカスタムパス |
 | `COCKPIT_VAPID_SUBJECT` | `mailto:agent-cockpit@localhost` | Web Push VAPID contact claim |
 | `COCKPIT_VAPID_PRIVATE_KEY` / `PUBLIC_KEY` | 自動生成 | マルチインスタンス環境で固定する VAPID キーペア |
 
-hub token は `~/.agent-mail/client.env` から自動で読み取られます。ハードコード
-しないでください。VAPID キーは `~/dashboard-data/` に一度だけ生成され、
+Agent Mail DB は新しい `~/.local/share/mcp_agent_mail/` と従来の
+`~/mcp_agent_mail/` を順に検出します。hub token は `~/.agent-mail/client.env`
+から自動で読み取られます。ハードコードしないでください。VAPID キーは
+`~/dashboard-data/` に一度だけ生成され、
 リポジトリには入りません。ユーザー設定は `~/dashboard-data/settings.json` に、
 端末フォントサイズなどのデバイス固有の設定はブラウザの localStorage に保存されます。
 
 ## アップグレード、診断、アンインストール
 
 ```bash
-./upgrade.sh       # ローカルの追跡済み変更がある場合は上書きを拒否
+./upgrade.sh       # ローカル変更を拒否し、systemd/LaunchAgent を自動再起動
 ./doctor.sh        # Python、依存、herdr、Agent Mail、認証、サービスをチェック
 ./uninstall.sh     # user service のみ削除。コード・設定・データは保持
 ```
@@ -253,7 +257,8 @@ agent-cockpit/
 ├── static/manifest.webmanifest  PWA メタデータ
 ├── tests/                 リグレッション/セキュリティテスト
 ├── install.sh / upgrade.sh / doctor.sh / uninstall.sh
-└── agent-cockpit.service  systemd user ユニットテンプレート
+├── agent-cockpit.service  systemd user ユニットテンプレート
+└── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```
 
 ## なぜ CLI ではなくコクピットなのか?

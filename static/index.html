@@ -622,7 +622,6 @@ header .spacer{flex:1}
     </div>
     <div class="muted" style="font-size:12px;margin-bottom:10px">选择协作方式并说明每个 Agent 做什么；Cockpit 自动安排工作目录、启动 Agent 并发送任务。</div>
     <div class="field"><label>工作目录(项目绝对路径)</label><input id="suWorkdir" placeholder="如 /home/you/my-project"></div>
-    <div class="field"><label>总目标</label><input id="suGoal" placeholder="如：实现登录功能并完成代码复核"></div>
     <label style="font-size:12px;color:var(--fg2)">协作方式</label>
     <div class="setup-modes" id="suModeChoices">
       <button class="setup-mode" data-action="setupMode" data-mode="quick">快速开发<br><span class="muted">1 个 Agent</span></button>
@@ -1987,16 +1986,16 @@ function setupMode(mode){
   SETUP_MODE=mode;
   const known=setupKnownAgents(), first=known[0]||'codex', second=known.find(a=>a!==first);
   if(mode==='quick'){
-    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责完成总目标')];
+    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责当前开发工作')];
   }else if(mode==='develop_review'){
-    const lead=setupParticipant(first,'lead','实现总目标并提交可复核的 commit');
+    const lead=setupParticipant(first,'lead','完成开发工作并提交可复核的 commit');
     SETUP_PARTICIPANTS=[lead];
     if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'reviewer','检查需求、代码和测试',lead.id));
   }else if(mode==='parallel'){
     SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责模块 A，并协调最终集成')];
     if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'developer','负责模块 B，提交独立 commit'));
   }else if(!SETUP_PARTICIPANTS.length){
-    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责完成总目标')];
+    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责当前开发工作')];
   }
   document.querySelectorAll('#suModeChoices [data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));
   renderSetupAgents();
@@ -2070,7 +2069,6 @@ function setupErrors(){
   const session=document.getElementById('suSession').value.trim();
   if(!workdir)errors.push('请填写工作目录');
   if(!session)errors.push('请填写 session 名');else if(!validSessionName(session))errors.push('session 名只能包含字母、数字、_、-');
-  if(!document.getElementById('suGoal').value.trim())errors.push('请填写总目标');
   if(!SETUP_PARTICIPANTS.length)errors.push('至少添加一个 Agent');
   if(new Set(SETUP_PARTICIPANTS.map(p=>p.agent)).size!==SETUP_PARTICIPANTS.length)errors.push('同一种 Agent 不能重复');
   if(SETUP_PARTICIPANTS.length>1&&SETUP_PARTICIPANTS.some(p=>!p.task.trim()))errors.push('请填写每个 Agent 的任务');
@@ -2141,7 +2139,6 @@ async function doSetupWorkspace(){
   if(SETUP_SUBMITTING)return;
   const session=document.getElementById('suSession').value.trim();
   const workdir=document.getElementById('suWorkdir').value.trim();
-  const goal=document.getElementById('suGoal').value.trim();
   const layout=document.getElementById('suLayout').value;
   const errors=setupErrors();
   if(errors.length){toast(errors[0]);renderSetupPreview();return}
@@ -2151,7 +2148,7 @@ async function doSetupWorkspace(){
   const res=document.getElementById('suResult');
   res.innerHTML='<span style="color:var(--fg2)">正在规划工作目录并启动 Agent（约30秒）...</span>';
   try{
-    const body={session,workdir,goal,mode:SETUP_MODE,participants,agents,layout};
+    const body={session,workdir,mode:SETUP_MODE,participants,agents,layout};
     const r=await api('/api/herdr/setup-workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(r.ok){
       const mail=r.agent_mail||{};
@@ -2516,7 +2513,6 @@ function bindDelegation(){
     setupList.addEventListener('input',e=>{const it=e.target.closest('[data-field="task"]');if(it)setupFieldChanged(it)});
   }
   document.getElementById('suWorkdir')?.addEventListener('input',setupWorkdirChanged);
-  document.getElementById('suGoal')?.addEventListener('input',renderSetupPreview);
   document.getElementById('suSession')?.addEventListener('input',setupSessionChanged);
   on('#fileTree',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     const a=it.dataset.action;

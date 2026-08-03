@@ -26,16 +26,19 @@ fi
 git -C "$INSTALL_DIR" pull --ff-only
 "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 
-UNIT_DIR="$HOME/.config/systemd/user"
-UNIT_PATH="$UNIT_DIR/agent-cockpit.service"
-mkdir -p "$UNIT_DIR"
-sed "s|%h/agent-cockpit|$INSTALL_DIR|g" \
-  "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
-
 if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
+  UNIT_DIR="$HOME/.config/systemd/user"
+  UNIT_PATH="$UNIT_DIR/agent-cockpit.service"
+  mkdir -p "$UNIT_DIR"
+  sed "s|%h/agent-cockpit|$INSTALL_DIR|g" \
+    "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
+  systemctl --user daemon-reload
   systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true
   systemctl --user enable --now agent-cockpit.service
   echo "升级完成，Agent Cockpit 已重启。Herdr session 不受影响。"
+elif [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+  "$INSTALL_DIR/launchd.sh" restart
+  echo "升级完成，macOS LaunchAgent 已重启。Herdr session 不受影响。"
 else
   echo "代码和依赖已升级；请手动重启 Agent Cockpit。" >&2
 fi

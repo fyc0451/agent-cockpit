@@ -367,7 +367,6 @@ def test_prepare_parallel_workspace_creates_isolated_and_review_worktrees(tmp_pa
         session="demo",
         workdir=str(repo),
         mode="parallel",
-        goal="并行实现功能",
         participants=[
             {"id": "lead", "agent": "codex", "role": "lead", "task": "后端"},
             {"id": "dev", "agent": "kimi", "role": "developer", "task": "前端"},
@@ -441,7 +440,6 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
             "session": "demo",
             "workdir": str(tmp_path),
             "mode": "develop_review",
-            "goal": "完成登录功能",
             "participants": [
                 {"id": "lead", "agent": "codex", "role": "lead", "task": "实现"},
                 {
@@ -456,7 +454,8 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
     assert body["ok"] is True
     assert body["briefed"] == ["codex", "kimi"]
     assert body["warnings"] == ["当前不是 Git 仓库，所有 Agent 使用原工作目录"]
-    assert "总目标: 完成登录功能" in sent[0][1]
+    assert "总目标" not in sent[0][1]
+    assert "你的任务: 实现" in sent[0][1]
     assert "你的角色: Reviewer" in sent[1][1]
     assert "共享工作目录" in sent[1][1]
     assert "detached worktree" not in sent[1][1]

@@ -69,8 +69,8 @@ curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.
 ```
 
 The installer clones to `~/agent-cockpit`, creates a virtual environment, installs
-dependencies, and enables `agent-cockpit.service` when a systemd user bus is
-available. Run `~/agent-cockpit/doctor.sh` if startup fails.
+dependencies, and registers `agent-cockpit.service` on Linux or a LaunchAgent on
+macOS. Run `~/agent-cockpit/doctor.sh` if startup fails.
 
 ### Manual install
 
@@ -209,10 +209,13 @@ Configuration is read from environment variables (see `.env.example`):
 | `COCKPIT_TOKEN` | empty | Shared login token; required for non-loopback binds |
 | `HERDR_BIN` | auto-detected | Path to herdr binary |
 | `CODEX_BIN` | auto-detected | Path to codex binary |
+| `AGENT_MAIL_DB_PATH` | auto-detected | Custom Agent Mail `storage.sqlite3` path |
 | `COCKPIT_VAPID_SUBJECT` | `mailto:agent-cockpit@localhost` | Web Push VAPID contact claim |
 | `COCKPIT_VAPID_PRIVATE_KEY` / `PUBLIC_KEY` | auto-generated | Optional fixed VAPID key pair for multi-instance deployments |
 
-The hub token is read from `~/.agent-mail/client.env` automatically — never hardcode it.
+The Agent Mail database is detected under the new `~/.local/share/mcp_agent_mail/`
+location and the legacy `~/mcp_agent_mail/` location. The hub token is read from
+`~/.agent-mail/client.env` automatically — never hardcode it.
 VAPID keys are generated once under `~/dashboard-data/`; they never enter the repository.
 User settings live in `~/dashboard-data/settings.json`; per-device preferences like
 terminal font size live in the browser's localStorage.
@@ -220,7 +223,7 @@ terminal font size live in the browser's localStorage.
 ## Upgrade, diagnostics, and uninstall
 
 ```bash
-./upgrade.sh       # refuses to overwrite local tracked changes
+./upgrade.sh       # refuses local tracked changes; restarts systemd/LaunchAgent
 ./doctor.sh        # checks Python, dependencies, Herdr, Agent Mail, auth, and service
 ./uninstall.sh     # removes only the user service; code, config, and data are preserved
 ```
@@ -247,7 +250,8 @@ agent-cockpit/
 ├── static/manifest.webmanifest  Root-scope installable Web App metadata
 ├── tests/                 Regression and security tests
 ├── install.sh / upgrade.sh / doctor.sh / uninstall.sh
-└── agent-cockpit.service  systemd user unit template
+├── agent-cockpit.service  systemd user unit template
+└── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```
 
 ## Why a cockpit and not a CLI?

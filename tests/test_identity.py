@@ -107,6 +107,39 @@ def test_server_identity_preserves_nested_path_across_worktrees(monkeypatch):
     assert seen == ["/tmp/review/apps/api", "/project/apps/api"]
 
 
+def test_agent_mail_db_prefers_new_xdg_install_path(monkeypatch, tmp_path):
+    data_home = tmp_path / "share"
+    new_db = data_home / "mcp_agent_mail" / "storage.sqlite3"
+    legacy_db = tmp_path / "mcp_agent_mail" / "storage.sqlite3"
+    new_db.parent.mkdir(parents=True)
+    legacy_db.parent.mkdir(parents=True)
+    new_db.touch()
+    legacy_db.touch()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.delenv("AGENT_MAIL_DB_PATH", raising=False)
+
+    assert db._resolve_db_path() == new_db
+
+
+def test_agent_mail_db_keeps_legacy_path_compatible(monkeypatch, tmp_path):
+    legacy_db = tmp_path / "mcp_agent_mail" / "storage.sqlite3"
+    legacy_db.parent.mkdir(parents=True)
+    legacy_db.touch()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("AGENT_MAIL_DB_PATH", raising=False)
+
+    assert db._resolve_db_path() == legacy_db
+
+
+def test_agent_mail_db_explicit_path_has_priority(monkeypatch, tmp_path):
+    configured = tmp_path / "custom.sqlite3"
+    monkeypatch.setenv("AGENT_MAIL_DB_PATH", str(configured))
+
+    assert db._resolve_db_path() == configured
+
+
 def test_db_queries_serialize_shared_connection(monkeypatch):
     first_entered = threading.Event()
     release_first = threading.Event()
