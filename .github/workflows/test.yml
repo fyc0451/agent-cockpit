@@ -9,10 +9,12 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -34,8 +36,8 @@ jobs:
           PY
           done
       - run: |
-          # node --check 要求可识别的扩展名,临时文件必须带 .js 后缀
-          js_file="$(mktemp --suffix=.js)"
+          # node --check 要求可识别的扩展名;mktemp 写法兼容 GNU/BSD(macOS 无 --suffix)
+          js_file="$(mktemp -t cockpit-inline-XXXXXX).js"
           sed -n '/<script>$/,/^<\/script>$/p' static/index.html | sed '1d;$d' > "$js_file"
           test -s "$js_file"
           node --check "$js_file"
