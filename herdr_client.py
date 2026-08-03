@@ -288,6 +288,9 @@ def start_agent(
     if existing:
         return {"available": True, "pane_id": existing["pane_id"], "agent": agent,
                 "reused": True, "msg": f"{agent} pane 已存在({existing['pane_id']}),跳过"}
+    agent_bin = _find_agent_bin(agent)
+    if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
+        return {"available": True, "error": f"{agent} 未安装或不在 PATH"}
     # 构造 agent 启动命令(用 _agent_cmd 统一处理完整路径)
     cmd_str = _agent_cmd(agent, workdir)
     try:
