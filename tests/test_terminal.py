@@ -34,6 +34,19 @@ def _read_until(tid: str, needle: bytes, timeout: float = 8.0) -> bytes:
     return out
 
 
+def _wait_dead(tid: str, timeout: float = 8.0) -> bytes:
+    """等子进程退出,返回期间读到的输出。
+
+    等待期间必须像 server pump 一样持续读:macOS 上控制终端输出未排干时,
+    会话首进程会卡在 exiting 状态,waitpid 探测不到退出(Linux 无此问题)。
+    """
+    out = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and terminal.is_alive(tid):
+        out += terminal.read_output(tid, 0.05)
+    return out
+
+
 # ── 参数校验与上限 ──────────────────────────────────────────────
 
 def test_create_rejects_invalid_dims():
@@ -218,9 +231,7 @@ def test_sweep_reaps_exited_children_promptly(monkeypatch):
     monkeypatch.setattr(terminal, "DEAD_GRACE", 0)
     tid = _create()
     terminal.write_term(tid, "exit\n")
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline and terminal.is_alive(tid):
-        time.sleep(0.1)
+    _wait_dead(tid)
     assert not terminal.is_alive(tid)
     # max_idle 很大:存活终端不受影响,但死进程必须被回收
     assert terminal.sweep_idle(max_idle=10 ** 9) >= 1
@@ -241,11 +252,9 @@ def test_drain_reads_tail_after_exit():
     """短命进程:alive=False 后仍能从 master fd 读到最后一屏(直到 EIO)。"""
     tid = _create()
     terminal.write_term(tid, "printf 'tail-marker-xyz'; exit\n")
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline and terminal.is_alive(tid):
-        time.sleep(0.1)
+    out = _wait_dead(tid)  # 泵读等待;读到的头部与 drain 的尾部合并校验
     assert not terminal.is_alive(tid)
-    out = terminal.drain_output(tid)
+    out += terminal.drain_output(tid)
     assert b"tail-marker-xyz" in out
     # 读尽后再读返回空(EIO/EOF)
     assert terminal.read_output(tid, 0.1) == b""
@@ -268,9 +277,7 @@ def test_sweep_grace_counts_from_death_not_last_active():
     with terminal._lock:
         terminal._terms[tid]["last_active"] -= 10 ** 6  # 模拟长期空闲
     terminal.write_term(tid, "exit\n")
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline and terminal.is_alive(tid):
-        time.sleep(0.1)
+    _wait_dead(tid)
     assert not terminal.is_alive(tid)
     # idle_for 巨大但刚退出:DEAD_GRACE 内不得回收(pump 还要 drain)
     assert terminal.sweep_idle(max_idle=10 ** 9) == 0
