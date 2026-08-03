@@ -91,6 +91,14 @@ def test_open_term_opens_drawer_reading_herdr_pane():
     assert "TERM_TIMER=setInterval(refreshTerm" in js
 
 
+def test_pane_output_refresh_only_replaces_changed_text_range():
+    js = _inline_js()
+    assert "function updatePaneOutput(out,next)" in js
+    assert "current.charCodeAt(start)===next.charCodeAt(start)" in js
+    assert "current.charCodeAt(oldEnd-1)===next.charCodeAt(newEnd-1)" in js
+    assert "node.replaceData(start,oldEnd-start,next.slice(start,newEnd))" in js
+
+
 def test_api_preserves_server_detail():
     # 不再把服务端返回的 detail 覆盖成 r.statusText
     assert "throw r.statusText" not in HTML

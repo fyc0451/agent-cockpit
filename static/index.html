@@ -1201,10 +1201,24 @@ function closeTerm(){
   CURRENT_TERM=null;
 }
 function updatePaneOutput(out,next){
-  if(out.textContent===next)return false;
+  const current=out.textContent;
+  if(current===next)return false;
   const follow=out.scrollHeight-out.scrollTop-out.clientHeight<=2;
   const top=out.scrollTop;
-  out.textContent=next;
+  let start=0;
+  const shared=Math.min(current.length,next.length);
+  while(start<shared&&current.charCodeAt(start)===next.charCodeAt(start))start++;
+  let oldEnd=current.length,newEnd=next.length;
+  while(oldEnd>start&&newEnd>start&&current.charCodeAt(oldEnd-1)===next.charCodeAt(newEnd-1)){
+    oldEnd--;newEnd--;
+  }
+  const node=out.firstChild;
+  // pane read 返回完整文本；只替换真正变化的字符区间，避免每轮重建整个终端 DOM。
+  if(node&&node===out.lastChild&&node.nodeType===3){
+    node.replaceData(start,oldEnd-start,next.slice(start,newEnd));
+  }else{
+    out.textContent=next;
+  }
   out.scrollTop=follow?out.scrollHeight:top;
   return true;
 }
