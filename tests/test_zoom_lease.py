@@ -78,6 +78,31 @@ def test_zoom_lease_rejects_existing_manual_zoom_without_unzooming(monkeypatch):
     assert server._release_zoom_lease("demo", "term1")["changed"] is False
 
 
+def test_zoom_lease_does_not_own_manual_zoom_that_wins_after_layout_check(monkeypatch):
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: _term_list("term1"))
+    monkeypatch.setattr(
+        server.herdr_client, "pane_layout", lambda *args: _layout(zoomed=False)
+    )
+    calls = []
+
+    def raced_zoom(session, pane_id, mode):
+        calls.append(mode)
+        return {
+            "available": True, "zoomed": True, "changed": False,
+            "reason": "already_zoomed", "focused_pane_id": pane_id,
+        }
+
+    monkeypatch.setattr(server.herdr_client, "pane_zoom", raced_zoom)
+
+    result = server._acquire_zoom_lease("demo", "term1", now=100)
+
+    assert result["acquired"] is False
+    assert result["reason"] == "already_zoomed"
+    assert server._ZOOM_LEASES == {}
+    assert server._release_zoom_lease("demo", "term1")["changed"] is False
+    assert calls == ["on"]
+
+
 def test_zoom_lease_only_applies_to_horizontal_multi_pane(monkeypatch):
     monkeypatch.setattr(server.terminal, "list_terms", lambda: _term_list("term1"))
     monkeypatch.setattr(

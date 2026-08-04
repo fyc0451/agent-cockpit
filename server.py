@@ -915,6 +915,11 @@ def _acquire_zoom_lease(
                 "owned": False, "reason": "zoom_failed", "session": session,
                 "error": zoom.get("error") or "Herdr zoom 未生效",
             }
+        if not zoom.get("changed"):
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "already_zoomed", "session": session,
+            }
         _ZOOM_LEASES[session] = {
             "owner": owner, "pane_id": zoom.get("focused_pane_id") or pane_id,
             "tab_id": layout.get("tab_id"), "expires_at": current + ZOOM_LEASE_TTL,
@@ -964,6 +969,12 @@ def _renew_zoom_lease(
                     "owned": True, "session": session, "renewed": True,
                     "warning": zoom.get("error") or "暂时无法恢复 zoom",
                     "ttl": ZOOM_LEASE_TTL,
+                }
+            if not zoom.get("changed"):
+                _ZOOM_LEASES.pop(session, None)
+                return {
+                    "available": True, "acquired": False, "owned": False,
+                    "reason": "already_zoomed", "session": session,
                 }
             pane_id = zoom.get("focused_pane_id") or pane_id
         lease["pane_id"] = pane_id
