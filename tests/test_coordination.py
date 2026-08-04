@@ -45,6 +45,49 @@ def _meta(tmp_path, *, sender="codex-main", recipient="kimi-main", intent="block
     return meta
 
 
+def test_connection_retries_locked_first_initialization(tmp_path, monkeypatch):
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    original = coordination._initialize_connection
+    calls = 0
+
+    def locked_once(con):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise coordination.sqlite3.OperationalError("database is locked")
+        original(con)
+
+    monkeypatch.setattr(coordination, "_initialize_connection", locked_once)
+    monkeypatch.setattr(coordination, "CONNECT_RETRY_BASE", 0)
+
+    con = coordination._connect()
+    con.close()
+    assert calls == 2
+
+
+def test_concurrent_first_connections_initialize_one_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def connect():
+        try:
+            barrier.wait()
+            con = coordination._connect()
+            con.execute("SELECT COUNT(*) FROM receipts").fetchone()
+            con.close()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=connect) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+
+
 def test_start_run_is_idempotent_and_changed_task_supersedes_old(tmp_path, monkeypatch):
     first = _run(tmp_path, monkeypatch)
     same = coordination.start_run(

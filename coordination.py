@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -25,6 +26,9 @@ META_SUFFIX = " -->"
 INTENTS = {"info", "action", "review", "blocking", "stop", "redirect"}
 INTERRUPT_INTENTS = {"review", "blocking", "stop", "redirect"}
 NO_RESUME_INTENTS = {"stop", "redirect"}
+CONNECT_RETRIES = 6
+CONNECT_RETRY_BASE = 0.02
+_CONNECT_INIT_LOCK = threading.Lock()
 
 
 def message_timestamp(message: dict[str, Any], default: float = 0.0) -> float:
@@ -41,12 +45,10 @@ def message_timestamp(message: dict[str, Any], default: float = 0.0) -> float:
             return default
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH, timeout=5)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=5000")
-    con.execute("PRAGMA journal_mode=WAL")
+def _initialize_connection(con: sqlite3.Connection) -> None:
+    mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+    if str(mode).lower() != "wal":
+        con.execute("PRAGMA journal_mode=WAL")
     con.executescript(
         """
         CREATE TABLE IF NOT EXISTS runs (
@@ -122,7 +124,28 @@ def _connect() -> sqlite3.Connection:
         except sqlite3.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
-    return con
+
+
+def _connect() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    delay = CONNECT_RETRY_BASE
+    for attempt in range(CONNECT_RETRIES):
+        con = None
+        try:
+            con = sqlite3.connect(DB_PATH, timeout=5)
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA busy_timeout=5000")
+            with _CONNECT_INIT_LOCK:
+                _initialize_connection(con)
+            return con
+        except sqlite3.OperationalError as exc:
+            if con is not None:
+                con.close()
+            if "locked" not in str(exc).lower() or attempt == CONNECT_RETRIES - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("coordination DB 连接重试耗尽")
 
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
