@@ -29,6 +29,18 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 # 期望：401/200 均说明端口可达；再在另一台机用 mail-send 验证真正连通
 ```
 
+**关键：远程写权限（RBAC）**。上游 hub 默认 `HTTP_RBAC_ENABLED=true` 且默认角色 `reader`——**远程来源（非 localhost）只能读**（白名单 `fetch_inbox/whois/search_messages/summarize_thread`），`send_message`/`acknowledge_message`/`ensure_project` 等写操作会返回 **403**（实测验证）。跨机要写必须配置：
+
+```bash
+# ~/mcp_agent_mail/.env 追加后重启 hub
+echo "HTTP_RBAC_ENABLED=false" >> ~/mcp_agent_mail/.env
+systemctl --user restart agent-mail.service
+```
+
+- 该配置是"内网 + 共享 token 断言即信任"的 beta 边界（见整体设计安全章）；per-agent token / JWT writer 角色在 M1b 加固。
+- 本地 `127.0.0.1` 不受影响（`HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED=true`）。
+- 若必须保留 RBAC，需启用 JWT 并给客户端发含 writer 角色的 token（HTTP_RBAC_WRITER_ROLES），M1b 前不建议。
+
 安全：内网部署，不暴露公网；服务器**持有并校验 token**，不存 agent 私钥/凭据；beta 用团队共享 token，per-agent token 见 M1b。
 
 ## 3. 开发者机器侧：client.env 指向服务器
@@ -89,6 +101,8 @@ mail-recv ... --complete <id> --claim-token <token>
 2. 经 B 机 cockpit 的 Web 发消息端点（`server.py:879`，authority=user）发一条消息，落到 team hub，被对机 `mail-recv` 收到（端到端覆盖 `send_message`）。
 
 不验这一条，`hub_client` 即使仍硬编码 localhost，上面的 §5 也会照样通过。
+
+> **本机实测记录（2026-08-04）**：用隔离 HOME 模拟第二台机（client.env 指向内网 `172.17.161.21:8765`，独立 coordination DB，独立注册身份 `macsim-opencode`）完成双向 send/recv/complete/ack；`hub_client.HUB` 正确读取内网 hub 且 `status()` 可达。期间发现并解决上游 RBAC 默认仅本地可写的 403 问题（见上文"远程写权限"）。
 
 ## 6. 回归
 
