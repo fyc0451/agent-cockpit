@@ -37,7 +37,14 @@ def test_installers_migrate_legacy_service_name():
     for name in ("install.sh", "upgrade.sh"):
         script = (ROOT / name).read_text()
         assert "disable --now agent-mail-dashboard.service" in script
-        assert "enable --now agent-cockpit.service" in script
+    # install.sh 是全新安装：服务尚未运行，enable --now 会启动它，语义正确。
+    assert "enable --now agent-cockpit.service" in (ROOT / "install.sh").read_text()
+    # upgrade.sh 升级时服务通常已 active：enable --now 对已运行实例是 no-op，
+    # 不会加载新代码却误报“已重启”。必须 enable 与显式 restart 拆开。
+    upgrade = (ROOT / "upgrade.sh").read_text()
+    assert "enable agent-cockpit.service" in upgrade
+    assert "restart agent-cockpit.service" in upgrade
+    assert "enable --now agent-cockpit.service" not in upgrade
 
 
 def test_installers_manage_macos_launch_agent():
