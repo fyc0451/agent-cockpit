@@ -1868,7 +1868,7 @@ async function hfRefreshAll(){
     const out=document.getElementById('hf-out-'+p.pane_id);
     if(!out)continue;
     try{
-      const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=80&is_agent=true`);
+      const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=300&is_agent=true`);
       if(HF_SESSION!==session||!out.isConnected)return;
       const next=d.output||d.error||'(空)';
       if(out.textContent===next)continue;

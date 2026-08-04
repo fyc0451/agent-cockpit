@@ -70,6 +70,32 @@ def test_list_sessions_falls_back_for_old_herdr(monkeypatch):
     }]
 
 
+def test_pane_read_forwards_line_limit_to_agent_and_plain_panes(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "output",
+    )
+
+    agent = herdr_client.pane_read("demo", "w1:p2", 300, is_agent=True)
+    plain = herdr_client.pane_read("demo", "w1:p3", 300, is_agent=False)
+
+    assert agent["output"] == "output"
+    assert plain["output"] == "output"
+    assert calls == [
+        call(
+            ["--session", "demo", "agent", "read", "w1:p2", "--lines", "300"],
+            timeout=8,
+        ),
+        call(
+            ["--session", "demo", "pane", "read", "w1:p3", "--lines", "300"],
+            timeout=8,
+        ),
+    ]
+
+
 def test_start_agent_reuses_existing_pane_with_cwd(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(

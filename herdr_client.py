@@ -260,7 +260,10 @@ def pane_read(session: str, pane_id: str, lines: int = 100, is_agent: bool = Fal
     try:
         if is_agent:
             # agent read:位置参数 pane_id,--session 全局前置
-            out = _run(["--session", session, "agent", "read", pane_id], timeout=8)
+            out = _run(
+                ["--session", session, "agent", "read", pane_id, "--lines", str(lines)],
+                timeout=8,
+            )
         else:
             out = _run(
                 ["--session", session, "pane", "read", pane_id, "--lines", str(lines)],

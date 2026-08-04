@@ -609,6 +609,15 @@ def test_herdr_flow_is_mobile_friendly_default_card_view():
     assert "function hfStop()" in js
 
 
+def test_herdr_flow_requests_300_lines_per_agent_pane():
+    js = _inline_js()
+    flow = js.split("async function hfRefreshAll(){", 1)[1].split(
+        "async function hfSend", 1
+    )[0]
+
+    assert "?lines=300&is_agent=true" in flow
+
+
 def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     js = _inline_js()
     assert ".app.hf-immersive #view-herdrflow{" in HTML
