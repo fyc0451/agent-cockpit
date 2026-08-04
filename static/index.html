@@ -1665,6 +1665,11 @@ async function restoreTerms(){
   })();
   return TERM_RESTORE_PROMISE;
 }
+async function restoreAllHerdrSessions(){
+  await restoreTerms();
+  const sessions=[...new Set(TERM_SESSION_CATALOG)];
+  for(const session of sessions)await doAttachHerdr(session);
+}
 async function termNew(cwd){
   try{
     await ensureTermFontLoaded();
@@ -1868,7 +1873,7 @@ async function hfRefreshAll(){
     const out=document.getElementById('hf-out-'+p.pane_id);
     if(!out)continue;
     try{
-      const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=80&is_agent=true`);
+      const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=300&is_agent=true`);
       if(HF_SESSION!==session||!out.isConnected)return;
       const next=d.output||d.error||'(空)';
       if(out.textContent===next)continue;
@@ -3002,7 +3007,7 @@ async function init(){
   COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
     for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
   });
-  connectSSE();loadSessions();refreshBoard();await Promise.all([restoreTerms(),loadAttention()]);refreshPushStatus();handleAttentionHash();
+  connectSSE();loadSessions();refreshBoard();await Promise.all([restoreAllHerdrSessions(),loadAttention()]);refreshPushStatus();handleAttentionHash();
 }
 init();
 </script>
