@@ -490,8 +490,117 @@ def api_project(slug: str):
     }
 
 
+SESSION_AGENT_STATUSES = {"working", "blocked", "done", "idle", "unknown"}
+SESSION_STATUS_PRIORITY = {"blocked": 4, "working": 3, "idle": 2, "done": 1, "empty": 0}
+
+
+def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """按运行中的 Herdr session 聚合实时 agent 状态与协作任务。"""
+    observed_ts = time.time()
+    source_sessions = snapshot.get("sessions") or []
+    sessions: dict[str, dict[str, Any]] = {
+        str(item.get("session")): {
+            "session": str(item.get("session")),
+            "directory": str(item.get("directory") or ""),
+            "panes": list(item.get("panes") or []),
+        }
+        for item in source_sessions
+        if item.get("session")
+    }
+    # 兼容测试、旧调用方及 Herdr 返回不完整 session 列表的情况。
+    for pane in snapshot.get("panes", []):
+        session = str(pane.get("session") or "")
+        if not session:
+            continue
+        row = sessions.setdefault(
+            session, {"session": session, "directory": "", "panes": []}
+        )
+        if pane not in row["panes"]:
+            row["panes"].append(pane)
+
+    result: list[dict[str, Any]] = []
+    for session, source in sessions.items():
+        try:
+            run = coordination.run_by_session(session)
+        except Exception:
+            logger.exception("session progress coordination query failed: %s", session)
+            run = None
+        participants = list((run or {}).get("participants") or [])
+        by_pane = {
+            str(item.get("pane_id")): item
+            for item in participants if item.get("pane_id")
+        }
+        by_agent: dict[str, list[dict[str, Any]]] = {}
+        for item in participants:
+            by_agent.setdefault(str(item.get("agent_type") or ""), []).append(item)
+        used_participants: set[str] = set()
+        agents: list[dict[str, Any]] = []
+        for pane in source["panes"]:
+            agent_type = str(pane.get("agent") or "")
+            if not agent_type:
+                continue
+            pane_id = str(pane.get("pane_id") or "")
+            participant = by_pane.get(pane_id)
+            candidates = by_agent.get(agent_type, [])
+            if participant is None and len(candidates) == 1:
+                candidate_id = str(candidates[0].get("participant_id") or "")
+                if candidate_id not in used_participants:
+                    participant = candidates[0]
+            if participant:
+                used_participants.add(str(participant.get("participant_id") or ""))
+            status = str(pane.get("agent_status") or "unknown")
+            if status not in SESSION_AGENT_STATUSES:
+                status = "unknown"
+            agents.append({
+                "agent": agent_type,
+                "mail_name": (
+                    (participant or {}).get("mail_name") or pane.get("mail_name")
+                ),
+                "role": (participant or {}).get("role"),
+                "task": (participant or {}).get("task_text"),
+                "status": status,
+                "pane_id": pane_id,
+                "cwd": str(pane.get("cwd") or ""),
+                "coordination_state": (participant or {}).get("state"),
+                "task_revision": (participant or {}).get("task_revision"),
+            })
+
+        summary = {
+            status: sum(1 for agent in agents if agent["status"] == status)
+            for status in ("working", "blocked", "done", "idle", "unknown")
+        }
+        total = len(agents)
+        if summary["blocked"]:
+            status = "blocked"
+        elif summary["working"]:
+            status = "working"
+        elif summary["idle"] or summary["unknown"]:
+            status = "idle"
+        elif total:
+            status = "done"
+        else:
+            status = "empty"
+        result.append({
+            "session": session,
+            "directory": source["directory"],
+            "status": status,
+            "progress": round(summary["done"] * 100 / total) if total else 0,
+            "summary": summary,
+            "agents": agents,
+            "updated_ts": observed_ts,
+        })
+
+    return sorted(
+        result,
+        key=lambda item: (
+            -SESSION_STATUS_PRIORITY[item["status"]], str(item["session"]).lower()
+        ),
+    )
+
+
 def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """聚合所有需要用户介入的对象，不让可选能力拖垮核心看板。"""
+    """聚合 session 任务进度与需要用户介入的对象。"""
+    sessions = _build_session_progress(snapshot)
     items: list[dict[str, Any]] = []
     for pane in snapshot.get("panes", []):
         if pane.get("agent") and pane.get("agent_status") == "blocked":
@@ -564,6 +673,7 @@ def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
         reverse=True,
     )
     return {
+        "sessions": sessions,
         "items": items,
         "count": len(items),
         "mail_unread": mail_unread,
@@ -582,7 +692,7 @@ def _attention_changes(
 
 @app.get("/api/attention")
 def api_attention():
-    return _build_attention(herdr_client.snapshot())
+    return _build_attention(_board_snapshot())
 
 
 @app.get("/api/push/config")
@@ -2425,6 +2535,23 @@ async def _poll_live_state() -> None:
                     "unread": unread,
                     "attention": attention["items"],
                     "capabilities": attention["capabilities"],
+                    "session_tasks": [
+                        (
+                            session.get("session"), session.get("status"),
+                            session.get("progress"),
+                            [
+                                (
+                                    agent.get("pane_id"), agent.get("mail_name"),
+                                    agent.get("role"), agent.get("task"),
+                                    agent.get("status"),
+                                    agent.get("coordination_state"),
+                                    agent.get("task_revision"),
+                                )
+                                for agent in session.get("agents", [])
+                            ],
+                        )
+                        for session in attention.get("sessions", [])
+                    ],
                     "panes": [
                         (p.get("session"), p.get("pane_id"), p.get("agent"),
                          p.get("agent_status"), p.get("revision"), p.get("mail_name"))

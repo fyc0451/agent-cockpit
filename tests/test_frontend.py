@@ -694,6 +694,27 @@ def test_agent_mail_unread_is_not_presented_as_human_attention():
     assert "showView('msgs')" in js
 
 
+def test_attention_is_a_session_task_board_with_progress_and_agent_details():
+    js = _inline_js()
+    assert ">任务</button>" in HTML
+    assert 'data-i18n="attention.title">任务看板<' in HTML
+    assert "function sessionTaskHtml(session)" in js
+    assert 'class="task-board"' in js
+    assert "完成 ${Number(summary.done)||0}/${total}" in js
+    assert "工作中 ${Number(summary.working)||0}" in js
+    assert "待处理 ${Number(summary.blocked)||0}" in js
+    assert "agent.mail_name?'@'+agent.mail_name:'未注册花名'" in js
+    assert "agent.task||'未记录任务说明'" in js
+    assert 'data-action="openSessionAgent"' in js
+    assert "enterHerdrFlow(it.dataset.session,it.dataset.pane)" in js
+
+
+def test_task_board_uses_single_column_agent_rows_on_narrow_screens():
+    assert ".task-board{grid-template-columns:minmax(0,1fr)" in HTML
+    assert ".task-agent{grid-template-columns:24px minmax(0,1fr) auto" in HTML
+    assert ".task-agent-task{grid-column:2 / 4}" in HTML
+
+
 # ── 设置页与 i18n ───────────────────────────────────────────────
 
 def test_settings_view_and_nav_exist():

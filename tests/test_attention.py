@@ -82,6 +82,34 @@ def test_build_attention_combines_panes_tasks_and_optional_mail(monkeypatch):
         "global_unread_count",
         lambda: 1,
     )
+    monkeypatch.setattr(
+        server.coordination,
+        "run_by_session",
+        lambda session: {
+            "participants": [
+                {
+                    "participant_id": "lead",
+                    "agent_type": "codex",
+                    "mail_name": "codex-main",
+                    "pane_id": "w1:p2",
+                    "role": "lead",
+                    "task_text": "完成任务看板",
+                    "task_revision": 2,
+                    "state": "working",
+                },
+                {
+                    "participant_id": "developer",
+                    "agent_type": "kimi",
+                    "mail_name": "kimi-main",
+                    "pane_id": "w1:p3",
+                    "role": "developer",
+                    "task_text": "补充测试",
+                    "task_revision": 1,
+                    "state": "working",
+                },
+            ]
+        },
+    )
 
     result = server._build_attention(snapshot)
 
@@ -93,6 +121,63 @@ def test_build_attention_combines_panes_tasks_and_optional_mail(monkeypatch):
     assert by_kind["task_failed"]["url"] == "/#/attention/task/failed1"
     assert by_kind["task_review"]["target"]["task_id"] == "review1"
     assert result["capabilities"]["agent_mail"]["available"] is True
+    assert len(result["sessions"]) == 1
+    session = result["sessions"][0]
+    assert session["session"] == "demo"
+    assert session["status"] == "blocked"
+    assert session["progress"] == 0
+    assert session["summary"] == {
+        "working": 1,
+        "blocked": 1,
+        "done": 0,
+        "idle": 0,
+        "unknown": 0,
+    }
+    assert session["agents"][0] == {
+        "agent": "codex",
+        "mail_name": "codex-main",
+        "role": "lead",
+        "task": "完成任务看板",
+        "status": "blocked",
+        "pane_id": "w1:p2",
+        "cwd": "",
+        "coordination_state": "working",
+        "task_revision": 2,
+    }
+
+
+def test_session_progress_keeps_legacy_sessions_without_coordination(monkeypatch):
+    monkeypatch.setattr(server.coordination, "run_by_session", lambda session: None)
+
+    sessions = server._build_session_progress({
+        "sessions": [
+            {
+                "session": "legacy",
+                "directory": "/sessions/legacy",
+                "panes": [
+                    {
+                        "session": "legacy",
+                        "pane_id": "w1:p2",
+                        "agent": "opencode",
+                        "agent_status": "done",
+                        "mail_name": "opencode-main",
+                        "cwd": "/project",
+                    },
+                    {"session": "legacy", "pane_id": "w1:p3", "agent": None},
+                ],
+            },
+            {"session": "terminal-only", "panes": []},
+        ],
+        "panes": [],
+    })
+
+    assert [item["session"] for item in sessions] == ["legacy", "terminal-only"]
+    assert sessions[0]["progress"] == 100
+    assert sessions[0]["status"] == "done"
+    assert sessions[0]["agents"][0]["mail_name"] == "opencode-main"
+    assert sessions[0]["agents"][0]["task"] is None
+    assert sessions[1]["status"] == "empty"
+    assert sessions[1]["agents"] == []
 
 
 def test_build_attention_degrades_when_agent_mail_is_missing(monkeypatch):

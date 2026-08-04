@@ -156,11 +156,42 @@ header .spacer{flex:1}
 .field{margin-bottom:8px}
 .field label{display:block;font-size:11px;color:var(--fg2);margin-bottom:3px}
 
-/* Attention Inbox */
+/* Session 任务看板 + Attention */
 .attention-view{overflow:hidden}
 .attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
 .attention-toolbar .spacer{flex:1}
 .attention-list{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
+.task-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px;align-items:start}
+.task-session{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;overflow:hidden}
+.task-session-head{display:flex;align-items:flex-start;gap:8px;padding:11px 12px 8px}
+.task-session-title{flex:1;min-width:0}
+.task-session-name{font:600 14px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-session-meta{color:var(--fg3);font-size:11px;margin-top:2px}
+.task-state,.task-agent-state{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:10px;font-weight:600;white-space:nowrap;border:1px solid currentColor}
+.task-state-blocked{color:var(--need)}
+.task-state-working{color:var(--work)}
+.task-state-done{color:var(--done)}
+.task-state-idle,.task-state-empty,.task-state-unknown{color:var(--idle)}
+.task-progress{padding:0 12px 10px}
+.task-progress-copy{display:flex;justify-content:space-between;gap:8px;color:var(--fg2);font-size:11px;margin-bottom:5px}
+.task-progress-track{height:6px;border-radius:999px;background:var(--bg4);overflow:hidden}
+.task-progress-fill{height:100%;border-radius:inherit;background:var(--done);min-width:0}
+.task-summary{display:flex;gap:5px;flex-wrap:wrap;padding:0 12px 10px}
+.task-summary span{font-size:10px;color:var(--fg2);background:var(--bg3);border-radius:5px;padding:2px 6px}
+.task-agent-list{border-top:1px solid var(--bd)}
+.task-agent{display:grid;grid-template-columns:28px minmax(110px,.42fr) minmax(130px,1fr) auto;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--bd)}
+.task-agent:last-child{border-bottom:0}
+.task-agent[data-action]{cursor:pointer}
+.task-agent[data-action]:hover{background:var(--bg3)}
+.task-agent-icon{font-size:18px;text-align:center}
+.task-agent-who,.task-agent-task{min-width:0}
+.task-agent-mail{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-agent-type{color:var(--fg3);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-agent-task{color:var(--fg2);font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere}
+.task-agent-empty{color:var(--fg3);font-style:italic}
+.task-session-empty{padding:16px 12px;color:var(--fg3);font-size:12px;text-align:center;border-top:1px solid var(--bd)}
+.attention-section-title{display:flex;align-items:center;gap:7px;margin-top:4px;padding:3px 2px;font-size:12px;color:var(--fg2)}
+.attention-section-title .count{background:var(--bg4);border-radius:999px;padding:0 6px;font-size:10px}
 .attention-card{display:flex;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--bd);border-left:3px solid var(--need);border-radius:9px;padding:10px;cursor:pointer}
 .attention-card:hover{border-color:var(--accent)}
 .attention-icon{font-size:20px;width:28px;text-align:center;flex-shrink:0}
@@ -282,6 +313,12 @@ header .spacer{flex:1}
   #liveText{display:none}
   .stat-pill{padding:3px 6px}
   .board-wrap{padding:8px}
+  .attention-list{padding:7px}
+  .task-board{grid-template-columns:minmax(0,1fr);gap:7px}
+  .task-agent{grid-template-columns:24px minmax(0,1fr) auto;gap:5px 7px;padding:8px 10px}
+  .task-agent-icon{grid-row:1 / 3}
+  .task-agent-task{grid-column:2 / 4}
+  .task-agent-state{grid-column:3;grid-row:1}
   .msgs-body,.files-body{padding:6px;gap:6px;min-height:0}
   .msgs-list,.editor-area{min-height:0}
   .file-search{padding:6px;gap:5px}
@@ -329,7 +366,7 @@ header .spacer{flex:1}
     <button class="icon nav-toggle" onclick="toggleNav()" data-i18n-title="nav.menu" title="菜单">☰</button>
     <nav id="nav">
       <button data-view="board" class="active" data-i18n="nav.board" data-i18n-title="nav.board.t" title="所有 agent 状态总览:需要你 / 工作中 / 完成 / 空闲">看板</button>
-      <button data-view="attention" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="统一待办:被卡住的 agent、失败任务、未读消息">待办</button>
+      <button data-view="attention" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="按 session 查看团队任务、进度和阻塞项">任务</button>
       <button data-view="term" data-i18n="nav.term" data-i18n-title="nav.term.t" title="真终端:接管任意 pane 的 TUI,直接敲命令">终端</button>
       <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="流视图:可滚屏/复制的 pane 输出 + 快速发指令">流</button>
       <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止">会话</button>
@@ -339,7 +376,7 @@ header .spacer{flex:1}
     </nav>
     <div class="spacer"></div>
     <div class="stat-pill"><span class="dot" id="liveDot"></span><span id="liveText">--</span></div>
-    <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="需要你处理的事项">🔔 <span id="attentionN">0</span></div>
+    <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="任务看板与需处理事项">🔔 <span id="attentionN">0</span></div>
     <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
     <button class="icon" onclick="refreshBoard()" title="刷新" data-i18n-title="common.refresh">↻</button>
   </header>
@@ -357,10 +394,10 @@ header .spacer{flex:1}
     </div>
   </section>
 
-  <!-- 统一 Attention Inbox -->
+  <!-- Session 任务看板 -->
   <section id="view-attention" class="view attention-view">
     <div class="attention-toolbar">
-      <b data-i18n="attention.title">需要你处理</b>
+      <b data-i18n="attention.title">任务看板</b>
       <span class="muted" id="attentionInfo" style="font-size:11px"></span>
       <span class="spacer"></span>
       <span class="muted" id="pushStatus" style="font-size:11px"></span>
@@ -691,11 +728,11 @@ function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent
 // JS 动态文案用 t('key','中文原文') 内联回退,保证源码中文不丢(测试可锚)。
 const I18N={
 en:{
-'nav.menu':'Menu','nav.board':'Board','nav.attention':'Inbox','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
-'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Unified inbox: blocked agents, failed tasks, unread mail','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
+'nav.menu':'Menu','nav.board':'Board','nav.attention':'Tasks','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
+'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Tasks and progress grouped by session, including blockers','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
 'board.guide.title':'No running agents yet','board.guide.body':'First time here? Create a workspace in one click (it creates the session and starts the agents); with an existing session, add agents from the launch bar below.','board.guide.btn':'🚀 Create your first workspace','board.guide.noherdr':'herdr is unavailable','board.guide.noherdr.body':'The herdr executable was not found. Check Settings → Environment check for missing components, install them, then refresh.','board.guide.noherdr.btn':'Open environment check','launch.nosession':'No session yet — create a workspace first',
 'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
-'attention.title':'Needs your attention','attention.push':'Enable notifications','common.refresh':'Refresh','common.loading':'Loading…',
+'attention.title':'Task board','attention.push':'Enable notifications','common.refresh':'Refresh','common.loading':'Loading…',
 'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
@@ -710,11 +747,11 @@ en:{
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
 ja:{
-'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'対応','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
-'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'統合受信箱:停止中の agent、失敗タスク、未読メッセージ','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
+'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'タスク','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
+'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'session ごとのタスク、進捗、ブロッカーを表示','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
 'board.guide.title':'実行中の agent はまだありません','board.guide.body':'初めてですか?下のボタンでワークスペースを一発作成(session 作成と agent 起動を自動化)。既存 session には下部の起動バーから agent を追加できます。','board.guide.btn':'🚀 最初のワークスペースを作成','board.guide.noherdr':'herdr が利用できません','board.guide.noherdr.body':'herdr 実行ファイルが見つかりません。「設定 → 環境チェック」で不足コンポーネントを確認し、インストール後に更新してください。','board.guide.noherdr.btn':'環境チェックを開く','launch.nosession':'session がまだありません。先にワークスペースを作成してください',
 'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
-'attention.title':'対応が必要です','attention.push':'通知を有効化','common.refresh':'更新','common.loading':'読み込み中…',
+'attention.title':'タスクボード','attention.push':'通知を有効化','common.refresh':'更新','common.loading':'読み込み中…',
 'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
@@ -952,20 +989,51 @@ function showView(v){
 const NAV_COLLAPSE_MQ=window.matchMedia('(max-width:900px)');// 与 CSS @media(max-width:900px) 同一断点
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(NAV_COLLAPSE_MQ.matches)document.getElementById('nav').classList.remove('open')});
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
-const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',gemini:'💎',grok:'✖️'};
+const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',opencode:'🟣',gemini:'💎',grok:'✖️'};
 
-// ============ Attention Inbox ============
+// ============ Session 任务看板 + Attention ============
 const ATTENTION_ICON={pane_blocked:'🙋',task_failed:'❌',task_review:'🧾'};
 const ATTENTION_ACTION={pane_blocked:'去回复',task_failed:'看错误',task_review:'审 diff'};
+const TASK_STATUS_LABEL={blocked:'待处理',working:'工作中',done:'已完成',idle:'空闲',unknown:'未知',empty:'无 Agent'};
+const TASK_ROLE_LABEL={lead:'负责人',developer:'开发',reviewer:'复核',researcher:'调研'};
+function taskStatusKey(value,total){return total===0?'empty':(Object.prototype.hasOwnProperty.call(TASK_STATUS_LABEL,value)?value:'unknown')}
 async function loadAttention(payload){
   try{
     const d=payload||await api('/api/attention');
     ATTENTION=d;CAPABILITIES=d.capabilities||{};
     document.getElementById('attentionN').textContent=d.count||0;
     const unread=Math.max(0,Number(d.mail_unread)||0);
-    document.getElementById('attentionInfo').textContent=(d.count||0)+' 项需处理'+(unread?' · '+unread+' 条未读消息':'');
+    document.getElementById('attentionInfo').textContent=(d.sessions||[]).length+' 个 session · '+(d.count||0)+' 项需处理'+(unread?' · '+unread+' 条未读消息':'');
     renderAttention(d);
-  }catch(e){document.getElementById('attentionList').textContent='待办加载失败: '+e}
+  }catch(e){document.getElementById('attentionList').textContent='任务看板加载失败: '+e}
+}
+function sessionTaskHtml(session){
+  const agents=session.agents||[],summary=session.summary||{},total=agents.length;
+  const progress=Math.min(100,Math.max(0,Number(session.progress)||0));
+  const state=taskStatusKey(session.status,total);
+  const agentRows=agents.map(agent=>{
+    const agentState=taskStatusKey(agent.status,1);
+    const role=TASK_ROLE_LABEL[agent.role]||agent.role||'未分配角色';
+    const mail=agent.mail_name?'@'+agent.mail_name:'未注册花名';
+    const task=agent.task||'未记录任务说明';
+    const canOpen=validSessionName(session.session)&&agent.pane_id;
+    return `<div class="task-agent"${canOpen?` data-action="openSessionAgent" data-session="${esc(session.session)}" data-pane="${esc(agent.pane_id)}"`:''}>
+      <div class="task-agent-icon">${AGENT_EMOJI[agent.agent]||'🤖'}</div>
+      <div class="task-agent-who"><div class="task-agent-mail">${esc(mail)}</div><div class="task-agent-type">${esc(agent.agent)} · ${esc(role)}</div></div>
+      <div class="task-agent-task${agent.task?'':' task-agent-empty'}">${esc(task)}</div>
+      <div class="task-agent-state task-state-${agentState}">${TASK_STATUS_LABEL[agentState]}</div>
+    </div>`
+  }).join('')||'<div class="task-session-empty">这个 session 当前没有 Agent pane</div>';
+  const unknown=Number(summary.unknown)||0;
+  return `<article class="task-session">
+    <div class="task-session-head">
+      <div class="task-session-title"><div class="task-session-name">${esc(session.session)}</div><div class="task-session-meta">状态采集 ${esc(fmtTime(session.updated_ts))} · ${total} 个 Agent</div></div>
+      <div class="task-state task-state-${state}">${TASK_STATUS_LABEL[state]}</div>
+    </div>
+    <div class="task-progress"><div class="task-progress-copy"><span>完成 ${Number(summary.done)||0}/${total}</span><span>${progress}%</span></div><div class="task-progress-track"><div class="task-progress-fill" style="width:${progress}%"></div></div></div>
+    <div class="task-summary"><span>工作中 ${Number(summary.working)||0}</span><span>待处理 ${Number(summary.blocked)||0}</span><span>已完成 ${Number(summary.done)||0}</span><span>空闲 ${Number(summary.idle)||0}</span>${unknown?`<span>未知 ${unknown}</span>`:''}</div>
+    <div class="task-agent-list">${agentRows}</div>
+  </article>`
 }
 function renderAttention(d){
   const box=document.getElementById('attentionList');
@@ -973,14 +1041,17 @@ function renderAttention(d){
   const note=mail&&mail.available===false?`<div class="capability-note">Agent Mail 未启用：${esc(mail.reason||'消息能力已自动隐藏')}。Herdr、终端、文件和任务仍可正常使用。</div>`:'';
   const unread=Math.max(0,Number(d.mail_unread)||0);
   const mailNote=unread?`<div class="capability-note">📬 ${unread} 条 Agent Mail 未读，不计入待办。<button class="sm" data-action="openMessages">去消息查看</button></div>`:'';
+  const sessions=d.sessions||[];
+  const board=sessions.length?`<div class="task-board">${sessions.map(sessionTaskHtml).join('')}</div>`:'<div class="capability-note">当前没有运行中的 Herdr session</div>';
   const items=d.items||[];
   const actions=items.length?items.map((item,i)=>`
     <div class="attention-card" data-action="openAttention" data-index="${i}">
       <div class="attention-icon">${ATTENTION_ICON[item.kind]||'🔔'}</div>
       <div class="attention-copy"><div class="attention-title">${esc(item.title)}</div><div class="attention-detail">${esc(item.detail||'')}</div></div>
       <div class="attention-action">${ATTENTION_ACTION[item.kind]||'查看'} ›</div>
-    </div>`).join(''):'<div class="empty">当前没有需要你处理的事项</div>';
-  box.innerHTML=note+actions+mailNote;
+    </div>`).join(''):'<div class="capability-note">✓ 当前没有需要你处理的阻塞或代码改动</div>';
+  const actionTitle=`<div class="attention-section-title">需处理事项 <span class="count">${items.length}</span></div>`;
+  box.innerHTML=note+board+actionTitle+actions+mailNote;
 }
 function replaceAttentionHash(item){
   if(item&&typeof item.url==='string'&&item.url.startsWith('/#/attention/'))history.replaceState(null,'',item.url);
@@ -2766,6 +2837,7 @@ function bindDelegation(){
     else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
   on('#attentionList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='openAttention')openAttention(parseInt(it.dataset.index));
+    else if(it.dataset.action==='openSessionAgent')enterHerdrFlow(it.dataset.session,it.dataset.pane);
     else if(it.dataset.action==='openMessages')showView('msgs')});
   on('#hfBody',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='hfSend')hfSend(it.dataset.pane);
