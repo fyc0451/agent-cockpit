@@ -2237,8 +2237,12 @@ function enableTermWebgl(xterm){
   try{
     addon=new WebglAddon.WebglAddon();
     addon.onContextLoss(()=>{
+      // WebGL context 丢失(长时间运行/休眠恢复/标签页后台->前台/GPU 资源回收)后,
+      // 仅 dispose addon 会让 xterm 停在已损坏的 WebGL 帧,后续 write 字符位置错位。
+      // dispose 后必须强制核心 renderer 重绘当前屏,把逻辑 buffer 重新画到回退的 canvas renderer。
       try{addon.dispose()}catch(e){}
       if(xterm._webglAddon===addon)xterm._webglAddon=null;
+      try{xterm.refresh(0,xterm.rows-1)}catch(e){}
     });
     xterm.loadAddon(addon);
     xterm._webglAddon=addon;
