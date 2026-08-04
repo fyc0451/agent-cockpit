@@ -5,6 +5,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _isolate_settings(tmp_path, monkeypatch):
+    import coordination
     import mail_projects
     import settings
     monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
@@ -12,3 +13,4 @@ def _isolate_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "_cache", None)
     monkeypatch.setattr(settings, "_cache_mtime", -1.0)
     monkeypatch.setattr(mail_projects, "STATE_PATH", tmp_path / "mail-projects.json")
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")

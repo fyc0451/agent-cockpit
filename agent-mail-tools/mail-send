@@ -12,7 +12,9 @@ import sys
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS_DIR)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from am_common import load_identity, mcp_call, mcp_tool  # noqa: E402
+import coordination  # noqa: E402
 
 
 HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
@@ -153,23 +155,34 @@ def _select_notify_targets(candidates: list[tuple], project_key: str) -> list[tu
 
 def _notify_text(
     msg_id: int, subject: str, agent_type: str, project_key: str,
-    cwd: str, is_exact: bool,
+    cwd: str, is_exact: bool, intent: str = "info",
 ) -> str:
-    head = f"[agent-mail 通知] 你收到新消息 #{msg_id} 「{(subject or '')[:50]}」"
+    label = "打断请求" if intent in coordination.INTERRUPT_INTENTS else "新消息"
+    head = (
+        f"[agent-mail {label}] 你收到 #{msg_id} 「{(subject or '')[:50]}」"
+        f"，intent={intent}"
+    )
     command = (
         f"{shlex.quote(MAIL_RECV_BIN)} --agent {agent_type} --instance main "
-        f"--project {shlex.quote(project_key)} --unread"
+        f"--project {shlex.quote(project_key)} --unread --message {msg_id}"
     )
+    tail = ""
+    if intent in coordination.INTERRUPT_INTENTS:
+        tail = (
+            "。在当前原子操作安全停手后运行上述命令；基础 checkpoint 会自动保存，"
+            "处理完成后按工具输出完成单消息确认并恢复。"
+        )
     if is_exact:
-        return f"{head},用 {command} 查看并处理。"
+        return f"{head},用 {command} 查看并处理{tail}"
     return (
         f"{head}。注意:当前 pane cwd={cwd} 与消息项目 {project_key} 不同,"
-        f"请用 {command} 查看并处理。"
+        f"请用 {command} 查看并处理{tail}"
     )
 
 
 def _notify_pane(
     recipient_program: str, msg_id: int, subject: str, project_key: str = "",
+    intent: str = "info",
 ) -> None:
     if not os.path.isfile(HERDR_BIN) or not project_key:
         return
@@ -207,7 +220,9 @@ def _notify_pane(
         except Exception:
             continue
     for session, pane_id, cwd, is_exact in _select_notify_targets(candidates, project_key):
-        note = _notify_text(msg_id, subject, agent_type, project_key, cwd, is_exact)
+        note = _notify_text(
+            msg_id, subject, agent_type, project_key, cwd, is_exact, intent
+        )
         try:
             subprocess.run(
                 [HERDR_BIN, "--session", session, "agent", "prompt", pane_id, note],
@@ -227,6 +242,9 @@ def main() -> None:
     parser.add_argument("--body", default="")
     parser.add_argument("--thread", default="")
     parser.add_argument("--importance", default="normal", choices=["low", "normal", "high", "urgent"])
+    parser.add_argument("--intent", default="info", choices=sorted(coordination.INTENTS))
+    parser.add_argument("--supersedes", default="", help="被本消息替代的 message_id，逗号分隔")
+    parser.add_argument("--expires-in", type=float, default=None, help="仅 info/review 可用，单位秒")
     parser.add_argument("--ack", action="store_true")
     parser.add_argument("--no-notify", action="store_true")
     args = parser.parse_args()
@@ -237,12 +255,27 @@ def main() -> None:
     if not body.strip():
         raise SystemExit("error: 正文为空（--body 或 stdin 管道）")
     identity, hub, token = load_identity(args.agent, args.instance, args.project)
+    recipients = [item.strip() for item in args.to.split(",") if item.strip()]
+    try:
+        supersedes = [int(item) for item in args.supersedes.split(",") if item.strip()]
+    except ValueError:
+        raise SystemExit("error: --supersedes 仅接受逗号分隔的整数 message_id")
+    try:
+        meta, warnings = coordination.prepare_metadata(
+            project_key=identity["project_key"], sender=identity["name"],
+            recipients=recipients, intent=args.intent, importance=args.importance,
+            supersedes=supersedes, expires_in=args.expires_in,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    body = coordination.add_metadata(body, meta)
     mcp_call(hub, token, "initialize", {
         "protocolVersion": "2025-03-26",
         "capabilities": {},
         "clientInfo": {"name": "mail-send", "version": "1.0"},
     })
-    recipients = [item.strip() for item in args.to.split(",") if item.strip()]
     result = mcp_tool(hub, token, "send_message", {
         "project_key": identity["project_key"],
         "sender_name": identity["name"],
@@ -260,13 +293,34 @@ def main() -> None:
         payload = delivery.get("payload", {})
         message_id = payload.get("id")
         print(f"sent: #{message_id} -> {args.to}  [{payload.get('thread_id') or '-'}]")
+        if message_id is not None:
+            try:
+                coordination.register_message(
+                    project_key=identity["project_key"], message_id=int(message_id),
+                    sender=identity["name"], meta=meta,
+                )
+            except Exception as exc:
+                print(
+                    f"warning: 消息 #{message_id} 已发送，但本地消费元数据登记失败: {exc}",
+                    file=sys.stderr,
+                )
+                continue
         if args.no_notify:
             continue
         project_key = identity["project_key"]
         for recipient in payload.get("to") or []:
             program = _program_by_name(recipient, project_key)
             if program:
-                _notify_pane(program, message_id, args.subject, project_key)
+                try:
+                    _notify_pane(
+                        program, message_id, args.subject, project_key,
+                        str(meta.get("intent") or "info"),
+                    )
+                except Exception as exc:
+                    print(
+                        f"warning: 消息 #{message_id} 已发送，但通知 {recipient} 失败: {exc}",
+                        file=sys.stderr,
+                    )
     if not deliveries:
         print(json.dumps(result, ensure_ascii=False)[:300])
 

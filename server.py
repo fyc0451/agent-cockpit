@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 import db
+import coordination
 import hub_client
 import herdr_client
 import tasks
@@ -93,7 +94,9 @@ _ZOOM_LEASES: dict[str, dict[str, Any]] = {}
 _ZOOM_LEASES_LOCK = threading.RLock()
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
-    "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报。"
+    "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报；"
+    "收到消息后按 mail-recv 输出先 claim、处理完成再单条 complete/ack；"
+    "普通打断保存 checkpoint 后恢复原任务，停止/转向不恢复。"
 )
 
 
@@ -220,6 +223,7 @@ def _board_snapshot() -> dict[str, Any]:
 
 def _identity_hint(
     name: str, project: str, agent_type: str, *, roster: str = "", registered: bool = False,
+    coordination_context: dict[str, Any] | None = None,
 ) -> str:
     send = shlex.quote(str(MAIL_SEND_SCRIPT))
     recv = shlex.quote(str(MAIL_RECV_SCRIPT))
@@ -237,6 +241,13 @@ def _identity_hint(
     )
     if roster:
         hint += f"协作者身份: {roster}。"
+    if coordination_context:
+        hint += (
+            f"当前协作 run={coordination_context['run_id']},"
+            f"task={coordination_context['participant_id']},"
+            f"revision={coordination_context['task_revision']}。"
+            "工作指令不按固定时间过期；仅 run/task/revision 失效或被 supersede 时作废。"
+        )
     return f"{hint}{MAIL_COORDINATION_GUIDE}"
 
 
@@ -302,6 +313,10 @@ class SendMessageReq(BaseModel):
     thread_id: str | None = None
     importance: str = "normal"
     ack_required: bool = False
+    intent: str = "info"
+    supersedes: list[int] = Field(default_factory=list)
+    expires_in: float | None = None
+    hard: bool = False
 
 
 class AckReq(BaseModel):
@@ -459,10 +474,14 @@ def api_project(slug: str):
     proj = db.project_by_slug(slug)
     if not proj:
         raise HTTPException(404, f"项目不存在: {slug}")
+    messages = [
+        coordination.enrich_message(proj["human_key"], message)
+        for message in db.recent_messages(proj["id"])
+    ]
     return {
         "project": proj,
         "agents": db.list_agents(proj["id"]),
-        "messages": db.recent_messages(proj["id"]),
+        "messages": messages,
         "agent_mail": mail_status,
     }
 
@@ -580,6 +599,64 @@ def api_push_unsubscribe(endpoint: str):
     return {"ok": web_push.delete_subscription(endpoint)}
 
 
+def _delivery_payloads(result: Any) -> list[dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    deliveries = result.get("deliveries") or []
+    return [
+        delivery.get("payload", {})
+        for delivery in deliveries if isinstance(delivery, dict)
+        and isinstance(delivery.get("payload"), dict)
+    ]
+
+
+def _notify_coordination_message(
+    project_key: str, recipient: str, message_id: int, subject: str,
+    meta: dict[str, Any], *, hard: bool,
+) -> dict[str, Any]:
+    context = coordination.active_context(project_key, recipient)
+    if not context or context.get("run_id") != meta.get("run_id"):
+        return {"notified": False, "reason": "recipient_not_in_unique_active_run"}
+    intent = str(meta.get("intent") or "info")
+    checkpoint = None
+    if intent in coordination.INTERRUPT_INTENTS:
+        checkpoint = coordination.request_pause(
+            project_key=project_key, recipient=recipient, message_id=message_id,
+            cwd=str(context["workdir"]), hard=hard,
+        )
+    session = str(context["session"])
+    pane_id = str(context.get("pane_id") or "")
+    if not pane_id:
+        return {"notified": False, "reason": "pane_missing", "checkpoint": checkpoint}
+    if hard:
+        stopped = herdr_client.pane_send(session, pane_id, "C-c", "keys")
+        if stopped.get("available", True) is False or stopped.get("error"):
+            return {
+                "notified": False, "reason": "hard_interrupt_failed",
+                "detail": stopped, "checkpoint": checkpoint,
+            }
+    agent_type = MAIL_AGENT_NAMES.get(
+        str(context["agent_type"]), str(context["agent_type"])
+    )
+    command = (
+        f"{shlex.quote(str(MAIL_RECV_SCRIPT))} --agent {shlex.quote(agent_type)} "
+        f"--instance main --project {shlex.quote(project_key)} --unread "
+        f"--message {message_id}"
+    )
+    note = (
+        f"[Agent Cockpit {'硬中断' if hard else '协作式打断'}] 消息 #{message_id} "
+        f"intent={intent}「{subject[:60]}」。"
+        f"基础 checkpoint 已保存；运行 {command} 领取。"
+        "处理完成后按工具输出单条 complete；普通打断会自动校验 revision 并恢复，"
+        "stop/redirect 不恢复旧任务。"
+    )
+    sent = herdr_client.pane_send(session, pane_id, note, "prompt")
+    return {
+        "notified": not sent.get("error") and sent.get("available", True),
+        "detail": sent, "checkpoint": checkpoint,
+    }
+
+
 @app.post("/api/send")
 def api_send(req: SendMessageReq):
     """以某 agent 身份发消息(走 hub MCP 保证一致性)。"""
@@ -592,19 +669,67 @@ def api_send(req: SendMessageReq):
     sender = db.agent_by_name(req.project_id, req.sender_name)
     if not sender:
         raise HTTPException(404, f"发送身份不存在: {req.sender_name}")
+    if req.hard and req.intent not in coordination.NO_RESUME_INTENTS:
+        raise HTTPException(400, "硬中断仅允许 stop/redirect")
     try:
+        meta, warnings = coordination.prepare_metadata(
+            project_key=proj["human_key"], sender=sender["name"],
+            recipients=req.to, intent=req.intent, importance=req.importance,
+            authority="user", supersedes=req.supersedes,
+            expires_in=req.expires_in,
+        )
+        body = coordination.add_metadata(req.body, meta)
         result = hub_client.send_message(
             project_key=proj["human_key"],
             sender_name=sender["name"],
             sender_token=sender["registration_token"],
             to=req.to,
             subject=req.subject,
-            body_md=req.body,
+            body_md=body,
             thread_id=req.thread_id,
             importance=req.importance,
             ack_required=req.ack_required,
         )
-        return {"ok": True, "result": result}
+        notifications = []
+        for payload in _delivery_payloads(result):
+            message_id = payload.get("id")
+            if message_id is None:
+                continue
+            try:
+                coordination.register_message(
+                    project_key=proj["human_key"], message_id=int(message_id),
+                    sender=sender["name"], meta=meta, trusted_user=True,
+                )
+            except Exception as exc:
+                warnings.append(
+                    f"消息 #{message_id} 已发送，但本地消费元数据登记失败: {exc}"
+                )
+                continue
+            for recipient in payload.get("to") or req.to:
+                try:
+                    notification = _notify_coordination_message(
+                        proj["human_key"], str(recipient), int(message_id),
+                        req.subject, meta, hard=req.hard,
+                    )
+                except Exception as exc:
+                    notification = {
+                        "notified": False, "reason": "notify_failed",
+                        "error": str(exc),
+                    }
+                    warnings.append(
+                        f"消息 #{message_id} 已发送，但通知 {recipient} 失败: {exc}"
+                    )
+                notifications.append({
+                    "recipient": recipient, **notification,
+                })
+        return {
+            "ok": True, "result": result, "coordination": {
+                "meta": meta, "warnings": warnings,
+                "notifications": notifications,
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"发送失败: {e}")
 
@@ -621,6 +746,9 @@ def api_ack(req: AckReq):
     agent = db.agent_by_name(req.project_id, req.agent_name)
     if not agent:
         raise HTTPException(404, f"agent 不存在: {req.agent_name}")
+    coordination.dismiss_message(
+        proj["human_key"], agent["name"], req.message_id
+    )
     try:
         result = hub_client.acknowledge_message(
             project_key=proj["human_key"],
@@ -628,6 +756,7 @@ def api_ack(req: AckReq):
             registration_token=agent["registration_token"],
             message_id=req.message_id,
         )
+        coordination.mark_acked(proj["human_key"], agent["name"], req.message_id)
         return {"ok": True, "result": result}
     except Exception as e:
         raise HTTPException(500, f"ack 失败: {e}")
@@ -1159,7 +1288,10 @@ def api_herdr_pane_restart(session: str, pane_id: str, resume: bool = False):
 def api_herdr_session_stop(name: str):
     """停止 herdr session。"""
     _validate_session_name(name)
-    return herdr_client.stop_session(name)
+    result = herdr_client.stop_session(name)
+    if not result.get("error"):
+        coordination.close_session(name, "stopped")
+    return result
 
 
 @app.delete("/api/herdr/session/{name}")
@@ -1168,8 +1300,18 @@ def api_herdr_session_delete(name: str):
     _validate_session_name(name)
     result = herdr_client.delete_session(name)
     if result.get("deleted"):
+        coordination.close_session(name, "deleted")
         mail_projects.unbind(name)
     return result
+
+
+@app.get("/api/coordination/session/{name}")
+def api_coordination_session(name: str):
+    _validate_session_name(name)
+    run = coordination.run_by_session(name)
+    if not run:
+        raise HTTPException(404, "该 session 尚无协作 run")
+    return run
 
 
 def _git(workdir: Path, *args: str) -> str:
@@ -1596,7 +1738,10 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
     return plans, warnings
 
 
-def _workspace_briefing(req: SetupWorkspaceReq, plan: dict[str, Any], plans: list[dict[str, Any]]) -> str:
+def _workspace_briefing(
+    req: SetupWorkspaceReq, plan: dict[str, Any], plans: list[dict[str, Any]],
+    coordination_context: dict[str, Any] | None = None,
+) -> str:
     role_labels = {"lead": "负责人/开发", "developer": "开发", "reviewer": "Reviewer", "researcher": "调研"}
     coworkers = "、".join(f"{p['agent']}({role_labels[p['role']]})" for p in plans if p["id"] != plan["id"])
     lines = [
@@ -1622,6 +1767,11 @@ def _workspace_briefing(req: SetupWorkspaceReq, plan: dict[str, Any], plans: lis
             )
     elif plan["role"] == "lead":
         lines.append("你负责推进目标、协调协作者并汇总最终结果。")
+    if coordination_context:
+        lines.append(
+            f"协作运行: run={coordination_context['run_id']}, "
+            f"task={plan['id']}, revision=1。"
+        )
     lines.append(MAIL_COORDINATION_GUIDE)
     return "\n".join(lines)
 
@@ -1853,6 +2003,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 error = f"session 中已存在 {agent_type}，无法应用新的工作目录"
         if r.get("available", True) is False:
             error = error or "Herdr 不可用"
+        results[-1]["error"] = error
         if error:
             failed.append({"agent": agent_type, "error": error})
         elif not r.get("reused"):
@@ -1872,15 +2023,40 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 r = herdr_client.close_pane(req.session, pid)
                 if r.get("available", True) and not r.get("error"):
                     closed_panes.append(pid)
+    # 1.75 为本轮协作建立稳定 run/task/revision；相同配置幂等复用。
+    coordination_run = None
+    run_participants = []
+    for result in results:
+        pane_id = result["start"].get("pane_id")
+        if result.get("error") or not pane_id:
+            continue
+        plan = result["plan"]
+        run_participants.append({
+            "id": plan["id"], "agent": plan["agent"], "role": plan["role"],
+            "task": plan["task"], "workdir": plan["workdir"],
+            "pane_id": pane_id,
+            "mail_name": _identity_name(canonical_project, plan["agent"]),
+        })
+    if run_participants:
+        try:
+            coordination_run = coordination.start_run(
+                project_key=canonical_project, session=req.session,
+                session_dir=session_dir, participants=run_participants,
+            )
+        except Exception as exc:
+            warnings.append(f"可靠消息 run 建立失败: {exc}")
     # 2. 新版协作工作区向每个成功启动的 Agent 注入角色和任务。
     briefed = []
     if req.participants is not None:
         for result in results:
             pane_id = result["start"].get("pane_id")
-            if result["agent"] not in started or not pane_id:
+            should_brief = result["agent"] in started
+            if result.get("error") or not should_brief or not pane_id:
                 continue
             plan = result["plan"]
-            briefing = _workspace_briefing(req, plan, plans)
+            briefing = _workspace_briefing(
+                req, plan, plans, coordination_run
+            )
             sent = herdr_client.pane_send(req.session, pane_id, briefing, "prompt")
             if sent.get("available", True) is False or sent.get("error"):
                 warnings.append(f"{plan['agent']} 的任务说明发送失败")
@@ -1936,8 +2112,18 @@ def _setup_workspace(req: SetupWorkspaceReq):
             if not my_name:
                 warnings.append(f"{atype} 身份未注册或已 retired，未发送身份告知")
                 continue
+            plan = next((item for item in plans if item["agent"] == atype), None)
+            context = None
+            if coordination_run and plan:
+                coordination.bind_identity(
+                    coordination_run["run_id"], plan["id"], my_name, pid
+                )
+                context = coordination.run_context(
+                    coordination_run["run_id"], my_name
+                )
             hint = _identity_hint(
-                my_name, canonical_project, atype, roster=roster
+                my_name, canonical_project, atype, roster=roster,
+                coordination_context=context,
             )
             herdr_client.pane_send(req.session, pid, hint, "prompt")
             notified.append(f"{atype}→{my_name}")
@@ -1949,6 +2135,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         "notified": notified, "briefed": briefed, "agent_mail": mail_status,
         "mode": req.mode, "workspaces": plans, "warnings": warnings,
         "closed_panes": closed_panes, "mail_project": canonical_project,
+        "coordination": coordination_run,
     }
 
 
@@ -2198,6 +2385,7 @@ async def _poll_live_state() -> None:
         try:
             await asyncio.to_thread(_expire_zoom_leases)
             snap = await asyncio.to_thread(_board_snapshot)
+            await asyncio.to_thread(coordination.maintain_live_claims, snap)
             attention = await asyncio.to_thread(_build_attention, snap)
             attention_ids, new_items = _attention_changes(
                 attention_ids, attention["items"]

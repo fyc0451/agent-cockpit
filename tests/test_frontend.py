@@ -626,6 +626,20 @@ def test_agent_mail_hub_failure_becomes_read_only_ui():
     assert "Agent Mail Hub 当前不可用，消息暂时只读" in js
 
 
+def test_agent_mail_coordination_controls_and_status_are_visible():
+    js = _inline_js()
+    assert 'id="cmpIntent"' in js
+    assert 'option value="blocking"' in js
+    assert 'option value="stop"' in js
+    assert 'id="cmpImportance"' in js
+    assert 'id="cmpHard"' in js
+    assert "硬中断会取消 Agent 当前在途操作" in js
+    assert "m.coordination?.meta?.intent" in js
+    assert "消费状态:" in js
+    assert "intent:document.getElementById('cmpIntent').value" in js
+    assert "importance:document.getElementById('cmpImportance').value" in js
+
+
 def test_agent_mail_unread_is_not_presented_as_human_attention():
     js = _inline_js()
     assert "条 Agent Mail 未读，不计入待办" in js

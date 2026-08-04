@@ -1431,9 +1431,10 @@ async function loadProjectMsgs(focusMessageId){
       </div>`).join('')||'<div class="muted">无 agent</div>';
     document.getElementById('msgList').innerHTML=d.messages.map(m=>`
       <div class="msg" data-message-id="${esc(m.id)}">
-        <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${esc(m.importance||'normal')}</span></div>
+        <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${esc(m.importance||'normal')}</span>${m.coordination?.meta?.intent?` <span class="tag">${esc(m.coordination.meta.intent)}</span>`:''}</div>
         <span class="muted">#${esc(m.id)} ${esc(fmtTime(m.created_ts))}</span></div>
         <div class="muted" style="font-size:11px;margin-bottom:5px"><b>${esc(m.sender_name||'?')}</b> → ${(m.recipients||[]).map(r=>esc(r.name)).join(', ')}</div>
+        ${Object.keys(m.coordination?.receipts||{}).length?`<div class="muted" style="font-size:11px;margin-bottom:5px">消费状态: ${Object.entries(m.coordination.receipts).map(([name,r])=>`${esc(name)}=${esc(r.state)}`).join(', ')}</div>`:''}
         ${m.body_md?`<div class="mb">${esc(m.body_md)}</div>`:''}
         ${writeEnabled&&(m.recipients||[]).some(r=>!r.read_ts)?`<button class="icon" data-action="ack" data-pid="${esc(d.project.id)}" data-mid="${esc(m.id)}" data-name="${esc((m.recipients.find(r=>!r.read_ts)||{}).name||'')}" style="font-size:11px">✓已读</button>`:''}
       </div>`).join('')+`
@@ -1441,6 +1442,9 @@ async function loadProjectMsgs(focusMessageId){
       <div class="field"><label>发件人</label><select id="cmpFrom">${d.agents.map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}</select></div>
       <div class="field"><label>收件人(逗号分隔)</label><input id="cmpTo"></div>
       <div class="field"><label>主题</label><input id="cmpSubject"></div>
+      <div class="field"><label>消息意图</label><select id="cmpIntent"><option value="info">info · 普通信息</option><option value="action">action · 执行请求</option><option value="review">review · 复核后恢复</option><option value="blocking">blocking · 安全停手处理后恢复</option><option value="stop">stop · 停止且不恢复</option><option value="redirect">redirect · 转向且不恢复</option></select></div>
+      <div class="field"><label>重要性</label><select id="cmpImportance"><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option><option value="low">low</option></select></div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12px"><input id="cmpHard" type="checkbox" style="width:auto">硬中断（仅 stop/redirect；先保存 uncertain checkpoint，再发送 Ctrl-C）</label>
       <div class="field"><label>正文</label><textarea id="cmpBody" rows="3"></textarea></div>
       <button class="primary" onclick="sendMsg()">${t('hf.send','发送')}</button></div>`:`<div class="capability-note">Agent Mail Hub 当前不可用，消息暂时只读：${esc(d.agent_mail?.write_reason||'连接失败')}</div>`}`;
     if(focusMessageId){
@@ -1450,7 +1454,9 @@ async function loadProjectMsgs(focusMessageId){
   }catch(e){toast('加载失败: '+e)}
 }
 async function sendMsg(){
-  try{await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:CURRENT_PROJ.id,sender_name:document.getElementById('cmpFrom').value,to:document.getElementById('cmpTo').value.split(',').map(s=>s.trim()).filter(Boolean),subject:document.getElementById('cmpSubject').value,body:document.getElementById('cmpBody').value})});
+  const hard=document.getElementById('cmpHard').checked;
+  if(hard&&!confirm('硬中断会取消 Agent 当前在途操作；无法恢复隐式推理，确定继续？'))return;
+  try{await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:CURRENT_PROJ.id,sender_name:document.getElementById('cmpFrom').value,to:document.getElementById('cmpTo').value.split(',').map(s=>s.trim()).filter(Boolean),subject:document.getElementById('cmpSubject').value,body:document.getElementById('cmpBody').value,intent:document.getElementById('cmpIntent').value,importance:document.getElementById('cmpImportance').value,hard})});
     toast(t('toast.sent','已发送 ✓'));loadProjectMsgs()}catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
 }
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
