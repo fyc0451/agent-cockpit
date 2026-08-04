@@ -363,41 +363,100 @@ def test_pane_zoom_on_is_idempotent_and_maps_result(monkeypatch):
         "available": True, "session": "demo", "pane_id": "w1:p2",
         "zoomed": True, "changed": False,
         "reason": "already_zoomed", "focused_pane_id": "w1:p2",
+        "tab_id": None, "horizontal_split": False,
     }
     assert calls == [["--session", "demo", "pane", "zoom", "w1:p2", "--on"]]
 
 
-def test_pane_zoom_toggle_without_pane_targets_ui_focus(monkeypatch):
+def test_pane_zoom_defaults_to_on_without_pane_targeting_ui_focus(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     import json as _json
     calls = []
 
     def fake_run(args, timeout=10):
         calls.append(args)
-        return _json.dumps({"result": {"zoomed": False, "zoom_changed": True,
+        return _json.dumps({"result": {"zoomed": True, "zoom_changed": True,
                                        "pane_id": "w1:p1",
-                                       "focused_pane_id": "w1:p1"}})
+                                       "focused_pane_id": "w1:p1",
+                                       "layout": {
+                                           "tab_id": "w1:t1", "workspace_id": "w1",
+                                           "zoomed": True, "focused_pane_id": "w1:p1",
+                                           "area": {"x": 0, "y": 0, "width": 240, "height": 50},
+                                           "panes": [
+                                               {"pane_id": "w1:p1", "focused": True,
+                                                "rect": {"x": 0, "y": 0, "width": 120, "height": 50}},
+                                               {"pane_id": "w1:p2", "focused": False,
+                                                "rect": {"x": 120, "y": 0, "width": 120, "height": 50}},
+                                           ],
+                                           "splits": [],
+                                       }}})
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
 
     result = herdr_client.pane_zoom("demo")
 
-    assert result["zoomed"] is False
+    assert result["zoomed"] is True
     assert result["changed"] is True
     assert result["reason"] is None
-    assert calls == [["--session", "demo", "pane", "zoom", "--toggle"]]
+    assert result["tab_id"] == "w1:t1"
+    assert result["horizontal_split"] is True
+    assert calls == [["--session", "demo", "pane", "zoom", "--on"]]
 
 
-def test_pane_zoom_rejects_invalid_mode_before_running(monkeypatch):
+def test_pane_zoom_rejects_toggle_and_invalid_mode_before_running(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
         herdr_client, "_run",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应执行")),
     )
 
-    assert herdr_client.pane_zoom("demo", mode="yes") == {
-        "available": True, "error": "非法 zoom mode: yes",
+    # 共享状态下 toggle 语义会漂移,显式拒绝
+    assert herdr_client.pane_zoom("demo", mode="toggle") == {
+        "available": True, "error": "非法 zoom mode(仅支持 on/off): toggle",
     }
+    assert herdr_client.pane_zoom("demo", mode="yes") == {
+        "available": True, "error": "非法 zoom mode(仅支持 on/off): yes",
+    }
+
+
+def test_snapshot_session_exposes_slim_layouts(monkeypatch):
+    """snapshot 必须暴露 layouts.zoomed/几何,供 server sidecar 判断共享 zoom 状态。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    import json as _json
+    payload = {
+        "result": {
+            "snapshot": {
+                "panes": [{"pane_id": "w1:p2", "cwd": "/tmp/p"}],
+                "agents": [],
+                "focused_pane_id": "w1:p2",
+                "layouts": [{
+                    "workspace_id": "w1", "tab_id": "w1:t1",
+                    "zoomed": True, "focused_pane_id": "w1:p2",
+                    "area": {"x": 0, "y": 0, "width": 240, "height": 50},
+                    "panes": [
+                        {"pane_id": "w1:p1", "focused": False,
+                         "rect": {"x": 0, "y": 0, "width": 120, "height": 50}},
+                        {"pane_id": "w1:p2", "focused": True,
+                         "rect": {"x": 120, "y": 0, "width": 120, "height": 50}},
+                    ],
+                    "splits": [],
+                }],
+            },
+        },
+    }
+    monkeypatch.setattr(
+        herdr_client, "_run", lambda args, timeout=10: "data: " + _json.dumps(payload)
+    )
+
+    result = herdr_client._snapshot_session("demo")
+
+    assert len(result["layouts"]) == 1
+    layout = result["layouts"][0]
+    assert layout["zoomed"] is True
+    assert layout["tab_id"] == "w1:t1"
+    assert layout["focused_pane_id"] == "w1:p2"
+    assert layout["horizontal_split"] is True
+    assert layout["panes"][1]["x"] == 120
 
 
 def test_pane_zoom_degrades_on_error_and_unavailable(monkeypatch):

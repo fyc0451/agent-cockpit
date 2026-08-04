@@ -154,6 +154,32 @@ def list_sessions() -> list[dict[str, Any]]:
     return sessions
 
 
+def _slim_layout(layout: dict[str, Any]) -> dict[str, Any]:
+    """精简 PaneLayoutSnapshot:zoom 状态 + pane 几何 + 水平分屏判定。"""
+    panes = []
+    for p in layout.get("panes") or []:
+        rect = p.get("rect") or {}
+        panes.append({
+            "pane_id": p.get("pane_id"),
+            "focused": p.get("focused", False),
+            "x": rect.get("x", 0),
+            "y": rect.get("y", 0),
+            "width": rect.get("width", 0),
+            "height": rect.get("height", 0),
+        })
+    ys = [p["y"] for p in panes]
+    return {
+        "tab_id": layout.get("tab_id"),
+        "workspace_id": layout.get("workspace_id"),
+        "zoomed": bool(layout.get("zoomed", False)),
+        "focused_pane_id": layout.get("focused_pane_id"),
+        "panes": panes,
+        # 同一 y 上有 ≥2 个 pane 即左右水平分屏(窄屏需单 pane 聚焦的场景)
+        "horizontal_split": len(panes) > 1 and len(set(ys)) < len(ys),
+        "area": layout.get("area") or {},
+    }
+
+
 def _snapshot_session(session: str) -> dict[str, Any]:
     """取单个 session 的 snapshot,返回精简后的 {panes, agents}。"""
     try:
@@ -198,6 +224,10 @@ def _snapshot_session(session: str) -> dict[str, Any]:
         "panes": slim,
         "agents": snap.get("agents", []),
         "focused_pane_id": snap.get("focused_pane_id"),
+        # 各 tab 的 zoom 状态与几何(窄屏 attach 判断单 pane 聚焦用)
+        "layouts": [
+            _slim_layout(l) for l in snap.get("layouts", []) if isinstance(l, dict)
+        ],
     }
 
 
@@ -318,47 +348,26 @@ def pane_layout(session: str, pane_id: str | None = None) -> dict[str, Any]:
         return {"available": True, "error": "pane layout 输出解析失败"}
     result = data.get("result", data)
     layout = result.get("layout", result)
-    panes_raw = layout.get("panes")
-    if not isinstance(panes_raw, list):
+    if not isinstance(layout.get("panes"), list):
         return {"available": True, "error": "pane layout 输出缺少 panes"}
-    panes = []
-    for p in panes_raw:
-        rect = p.get("rect") or {}
-        panes.append({
-            "pane_id": p.get("pane_id"),
-            "focused": p.get("focused", False),
-            "x": rect.get("x", 0),
-            "y": rect.get("y", 0),
-            "width": rect.get("width", 0),
-            "height": rect.get("height", 0),
-        })
-    ys = [p["y"] for p in panes]
-    return {
-        "available": True,
-        "session": session,
-        "tab_id": layout.get("tab_id"),
-        "workspace_id": layout.get("workspace_id"),
-        "zoomed": bool(layout.get("zoomed", False)),
-        "focused_pane_id": layout.get("focused_pane_id"),
-        "panes": panes,
-        "horizontal_split": len(panes) > 1 and len(set(ys)) < len(ys),
-        "area": layout.get("area") or {},
-    }
+    return {"available": True, "session": session, **_slim_layout(layout)}
 
 
 def pane_zoom(
-    session: str, pane_id: str | None = None, mode: str = "toggle",
+    session: str, pane_id: str | None = None, mode: str = "on",
 ) -> dict[str, Any]:
-    """设置/切换 pane zoom(窄屏 attach 聚焦单 pane、退出还原用)。
+    """显式设置 pane zoom(窄屏 attach 聚焦单 pane、退出还原用)。
 
-    mode=on/off 幂等:已是目标态时 herdr 返回 reason=already_zoomed/
-    already_unzoomed 且 changed=False;toggle 每次翻转。pane_id 省略时
-    作用于 UI 焦点 pane。失败降级返回 {available:True,error},不抛异常。
+    只接受显式 on/off(不用 toggle,避免并发/共享状态下语义漂移):
+    已是目标态时 herdr 返回 reason=already_zoomed/already_unzoomed 且
+    changed=False,幂等。pane_id 省略时作用于 UI 焦点 pane。
+    返回含 tab_id 与 horizontal_split(取自带回的 layout),便于调用方
+    识别并拒绝"用户已手动 zoom"的场景。失败降级 {available,error},不抛异常。
     """
     if not is_available():
         return {"available": False}
-    if mode not in ("on", "off", "toggle"):
-        return {"available": True, "error": f"非法 zoom mode: {mode}"}
+    if mode not in ("on", "off"):
+        return {"available": True, "error": f"非法 zoom mode(仅支持 on/off): {mode}"}
     args = ["--session", session, "pane", "zoom"]
     if pane_id:
         args.append(pane_id)
@@ -374,6 +383,8 @@ def pane_zoom(
     zoom = result.get("zoom", result)
     if "zoomed" not in zoom:
         return {"available": True, "error": "pane zoom 输出缺少 zoomed"}
+    layout = zoom.get("layout")
+    slim = _slim_layout(layout) if isinstance(layout, dict) else {}
     return {
         "available": True,
         "session": session,
@@ -382,6 +393,8 @@ def pane_zoom(
         "changed": bool(zoom.get("zoom_changed", zoom.get("changed", False))),
         "reason": zoom.get("reason"),
         "focused_pane_id": zoom.get("focused_pane_id"),
+        "tab_id": slim.get("tab_id"),
+        "horizontal_split": slim.get("horizontal_split", False),
     }
 
 
