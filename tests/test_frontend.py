@@ -144,14 +144,32 @@ def test_terminal_refresh_restores_live_terms_and_lists_all_running_sessions():
     assert "TERMS.push(id);TERM_LABELS[id]=item.label||''" in restore
     assert "TERM_SESSIONS[id]=item.label" in restore
     assert "TERM_ID=TERMS.find(id=>TERM_SESSIONS[id])||TERMS[0]||null" in restore
-    # 只恢复存活 PTY；没有对应 PTY 的 session 先作为可选项展示，避免刷新即批量新建。
+    # 这里只恢复存活 PTY；自动逐个 attach 由独立流程负责，避免并发重复创建。
     assert "method:'POST'" not in restore
     assert "TERM_SESSION_CATALOG.filter(session=>!attached.has(session))" in options
     assert "${esc(session)} · 打开" in options
     assert "await restoreTerms()" in ensure
     assert "doAttachHerdr(TERM_SESSION_CATALOG[0])" in ensure
     assert "id.startsWith(TERM_SESSION_PREFIX)" in js
-    assert "await Promise.all([restoreTerms(),loadAttention()])" in js
+    assert "await Promise.all([restoreAllHerdrSessions(),loadAttention()])" in js
+
+
+def test_refresh_opens_every_running_herdr_session_once():
+    js = _inline_js()
+    restore_all = js.split("async function restoreAllHerdrSessions(){", 1)[1].split(
+        "async function termNew", 1
+    )[0]
+    attach = js.split("async function doAttachHerdr(session){", 1)[1].split(
+        "// ============ herdr", 1
+    )[0]
+
+    assert "await restoreTerms()" in restore_all
+    assert "[...new Set(TERM_SESSION_CATALOG)]" in restore_all
+    assert "for(const session of sessions)" in restore_all
+    assert "await doAttachHerdr(session)" in restore_all
+    # 已有 session 终端走复用分支，只有缺失时才 POST 新 PTY。
+    assert "TERMS.find(id=>TERM_SESSIONS[id]===session)" in attach
+    assert attach.index("if(existing)") < attach.index("method:'POST'")
 
 
 def test_auth_contract_wired():

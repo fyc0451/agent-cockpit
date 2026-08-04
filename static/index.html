@@ -1665,6 +1665,11 @@ async function restoreTerms(){
   })();
   return TERM_RESTORE_PROMISE;
 }
+async function restoreAllHerdrSessions(){
+  await restoreTerms();
+  const sessions=[...new Set(TERM_SESSION_CATALOG)];
+  for(const session of sessions)await doAttachHerdr(session);
+}
 async function termNew(cwd){
   try{
     await ensureTermFontLoaded();
@@ -3002,7 +3007,7 @@ async function init(){
   COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
     for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
   });
-  connectSSE();loadSessions();refreshBoard();await Promise.all([restoreTerms(),loadAttention()]);refreshPushStatus();handleAttentionHash();
+  connectSSE();loadSessions();refreshBoard();await Promise.all([restoreAllHerdrSessions(),loadAttention()]);refreshPushStatus();handleAttentionHash();
 }
 init();
 </script>
