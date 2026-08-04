@@ -81,6 +81,8 @@ MAIL_AGENT_NAMES = {
 }
 SESSION_START_TIMEOUT = 20.0
 SESSION_BOOTSTRAP_OUTPUT_LIMIT = 16 * 1024
+SESSION_BOOTSTRAP_PANE_COLS = 100
+SESSION_BOOTSTRAP_PANE_ROWS = 30
 ROOT_DIR = Path(__file__).resolve().parent
 AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
@@ -1817,6 +1819,20 @@ def _pty_output_tail(output: bytearray) -> str:
     return text[-1000:]
 
 
+def _workspace_bootstrap_dims(layout: str, agent_count: int) -> tuple[int, int]:
+    """为隐藏 Herdr client 预留 agent 启动尺寸，避免分屏后 TUI 过窄。"""
+    cols = SESSION_BOOTSTRAP_PANE_COLS
+    rows = SESSION_BOOTSTRAP_PANE_ROWS
+    # session 初建的 shell pane 会一直保留到所有 agent 启动完成，因此分屏布局
+    # 必须把它也计入；tab 布局的 pane 不共享同一行/列，无需额外放大。
+    pane_count = max(1, agent_count) + 1
+    if layout in {"right", "horizontal"}:
+        cols = min(terminal.MAX_COLS, cols * pane_count)
+    elif layout in {"down", "vertical"}:
+        rows = min(terminal.MAX_ROWS, rows * pane_count)
+    return cols, rows
+
+
 @app.post("/api/herdr/inspect-workspace")
 def api_inspect_workspace(req: InspectWorkspaceReq):
     """探测创建页需要的 Git 能力，不修改工作目录。"""
@@ -1899,7 +1915,12 @@ def _setup_workspace(req: SetupWorkspaceReq):
         drain_thread = None
         pty_output = bytearray()
         try:
-            t = terminal.create_term(req.workdir)
+            bootstrap_cols, bootstrap_rows = _workspace_bootstrap_dims(
+                req.layout, len(plans),
+            )
+            t = terminal.create_term(
+                req.workdir, cols=bootstrap_cols, rows=bootstrap_rows,
+            )
             drain_stop, drain_thread = _start_pty_drainer(t["id"], pty_output)
             time.sleep(0.5)
             # 在 PTY 里跑 herdr --session <name>(创建 + detach)

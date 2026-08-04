@@ -295,7 +295,7 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server.terminal,
         "create_term",
-        lambda cwd: created.append(cwd) or {"id": "term1"},
+        lambda cwd, **_: created.append(cwd) or {"id": "term1"},
     )
     monkeypatch.setattr(
         server.terminal,
@@ -322,6 +322,67 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
         f"{server.herdr_client.HERDR_BIN} --session demo\r",
     )
     assert writes[-1] == ("term1", "\x02d")
+
+
+def test_setup_workspace_bootstraps_safe_width_before_horizontal_splits(
+    monkeypatch, tmp_path,
+):
+    """三个 agent 启动时不能继续沿用 80 列，避免末端 pane 只有约 27 列。"""
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: False)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    session_states = iter([
+        [],
+        [{"name": "demo", "status": "running"}],
+    ])
+    monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: next(session_states))
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda session, workdir, agent, **kwargs: {
+            "available": True, "pane_id": f"w1:p-{agent}",
+        },
+    )
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"panes": []})
+    created = []
+
+    def create_term(cwd, cols=80, rows=24):
+        created.append((cwd, cols, rows))
+        return {"id": "term1"}
+
+    monkeypatch.setattr(server.terminal, "create_term", create_term)
+    monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
+    monkeypatch.setattr(server, "_start_pty_drainer", lambda *_: (None, None))
+    monkeypatch.setattr(server, "_stop_pty_drainer", lambda *_: None)
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo",
+            "workdir": str(tmp_path),
+            "agents": ["codex", "kimi", "opencode"],
+            "layout": "right",
+        },
+    )
+
+    assert response.json()["ok"] is True
+    # 启动阶段还有一个 Herdr 初始 shell pane，因此为 4 个 pane 各留 100 列。
+    assert created == [(str(tmp_path), 400, 30)]
+
+
+def test_workspace_bootstrap_dimensions_cover_all_layouts_and_caps():
+    assert server._workspace_bootstrap_dims("horizontal", 3) == (400, 30)
+    assert server._workspace_bootstrap_dims("vertical", 3) == (100, 120)
+    assert server._workspace_bootstrap_dims("tab", 3) == (100, 30)
+    assert server._workspace_bootstrap_dims("right", 99) == (
+        server.terminal.MAX_COLS, 30,
+    )
+    assert server._workspace_bootstrap_dims("down", 99) == (
+        100, server.terminal.MAX_ROWS,
+    )
 
 
 def test_setup_workspace_closes_initial_blank_pane(monkeypatch, tmp_path):
@@ -351,7 +412,7 @@ def test_setup_workspace_closes_initial_blank_pane(monkeypatch, tmp_path):
         "close_pane",
         lambda session, pane_id: closed.append(pane_id) or {"available": True},
     )
-    monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
+    monkeypatch.setattr(server.terminal, "create_term", lambda cwd, **_: {"id": "term1"})
     monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
     monkeypatch.setattr(server, "_start_pty_drainer", lambda term_id, output: (None, None))
     monkeypatch.setattr(server, "_stop_pty_drainer", lambda *_: None)
@@ -376,7 +437,7 @@ def test_setup_workspace_timeout_reports_herdr_state_and_cleans_terminal(
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: False)
     monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: [])
-    monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
+    monkeypatch.setattr(server.terminal, "create_term", lambda cwd, **_: {"id": "term1"})
     monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
     monkeypatch.setattr(
         server,
