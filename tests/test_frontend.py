@@ -338,7 +338,7 @@ def test_terminal_keyboard_toggle_in_toolbar_and_keys_hidden_by_default():
     assert HTML.index('id="termKeyboardToggle"') < HTML.index('class="term-keys"')
 
 
-def test_mobile_terminal_uses_xterm_native_input_without_proxy_field():
+def test_mobile_terminal_keeps_native_input_visible_above_soft_keyboard():
     js = _inline_js()
     assert "interactive-widget=resizes-content" not in HTML
     assert 'id="termMobileInputBar"' not in HTML
@@ -349,6 +349,19 @@ def test_mobile_terminal_uses_xterm_native_input_without_proxy_field():
     assert "xterm.onData(d=>" in js
     assert "XTERM&&XTERM.focus()" in js
     assert "const touch=window.matchMedia('(any-pointer:coarse)').matches" in js
+    # 折叠屏展开后 any-pointer 可能按桌面设备报告，maxTouchPoints 仍能识别触屏。
+    assert "navigator.maxTouchPoints>0" in js
+    assert "function positionTermForKeyboard()" in js
+    position = js.split("function positionTermForKeyboard(){", 1)[1].split("function ", 1)[0]
+    assert "view.contains(active)" in position
+    assert "active.matches('input,textarea')" in position
+    assert "vv.offsetTop+vv.height" in position
+    assert "view.getBoundingClientRect().bottom-visibleBottom" in position
+    assert "view.style.paddingBottom=padding" in position
+    assert "if(inset<80)inset=0" in position
+    assert "positionTermForKeyboard();if(FIT&&XTERM)safeFitOf(FIT,XTERM)" in js
+    assert "window.visualViewport.addEventListener('scroll',fitVisibleTerm)" in js
+    assert "document.addEventListener('focusout',()=>setTimeout(fitVisibleTerm,50))" in js
 
 
 def test_terminal_fit_never_resizes_pty_from_hidden_view():
@@ -377,6 +390,13 @@ def test_terminal_touch_scroll_is_js_driven():
     assert "xterm.scrollLines(direction)" in scroll
     assert "new WheelEvent('wheel'" in scroll
     assert "e.preventDefault()" in scroll
+    # 折叠屏展开后的 Pointer Events 回退，且与 Touch Events 去重。
+    assert "el.addEventListener('pointerdown'" in scroll
+    assert "el.addEventListener('pointermove'" in scroll
+    assert "e.pointerType!=='touch'" in scroll
+    assert "touchActive||e.pointerType!=='touch'" in scroll
+    assert "e.pointerId!==activePointer" in scroll
+    assert "el.addEventListener('pointerleave',finishPointer" in scroll
 
 
 def test_terminal_drawer_keeps_main_navigation_visible_and_clickable():
@@ -634,7 +654,7 @@ def test_h5_foldable_responsive_first_batch():
     assert re.search(r"\.term-toolbar\{display:flex;flex-wrap:wrap", HTML)
     # 键盘遮挡判断与宽度解耦,适配 coarse pointer(平板/折叠屏)
     assert "const isCoarsePointer=()=>window.matchMedia('(any-pointer:coarse)')" in js
-    assert "if(!isCompactScreen()&&!isCoarsePointer())return;" in js
+    assert "if(!isTouchTerminal())return;" in js
 
 
 def test_terminal_font_size_setting():

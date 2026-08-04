@@ -1156,6 +1156,7 @@ function cardHtml(p){
 let TERM_TIMER=null;
 const isCompactScreen=()=>window.matchMedia('(max-width:560px)').matches;
 const isCoarsePointer=()=>window.matchMedia('(any-pointer:coarse)').matches;
+const isTouchTerminal=()=>navigator.maxTouchPoints>0||isCoarsePointer()||isCompactScreen();
 function drawerPanes(){
   if(!CURRENT_TERM)return[];
   return (BOARD?.panes||[]).filter(p=>p.session===CURRENT_TERM.session&&p.pane_id);
@@ -1856,15 +1857,11 @@ function queueTermInput(id,data,notice){
 // 处理。这里只在该模式下把单指纵向拖动转换成 wheel 事件交还给 xterm/TUI。
 function enableTermTouchScroll(el,xterm){
   const sensitivity=4,maxSteps=48;
-  let lastY=null,remainder=0;
+  let lastY=null,remainder=0,touchActive=false,activePointer=null;
   const finish=()=>{lastY=null;remainder=0};
-  el.addEventListener('touchstart',e=>{
-    if(e.touches.length!==1||xterm.modes?.mouseTrackingMode==='none'){finish();return}
-    lastY=e.touches[0].clientY;remainder=0;
-  },{passive:true});
-  el.addEventListener('touchmove',e=>{
-    if(lastY===null||e.touches.length!==1||xterm.modes?.mouseTrackingMode==='none')return;
-    const y=e.touches[0].clientY;
+  const begin=y=>{lastY=y;remainder=0};
+  const move=(y,e)=>{
+    if(lastY===null||xterm.modes?.mouseTrackingMode==='none')return;
     remainder+=(lastY-y)*sensitivity;lastY=y;
     const screen=el.querySelector('.xterm-screen');
     const rowHeight=Math.max(12,(screen?.getBoundingClientRect().height||xterm.rows*18)/Math.max(1,xterm.rows));
@@ -1881,9 +1878,37 @@ function enableTermTouchScroll(el,xterm){
       }
     }
     e.preventDefault();
+  };
+  el.addEventListener('touchstart',e=>{
+    touchActive=e.touches.length===1;
+    activePointer=null;
+    if(!touchActive||xterm.modes?.mouseTrackingMode==='none'){finish();return}
+    begin(e.touches[0].clientY);
+  },{passive:true});
+  el.addEventListener('touchmove',e=>{
+    if(lastY===null||e.touches.length!==1||xterm.modes?.mouseTrackingMode==='none')return;
+    move(e.touches[0].clientY,e);
   },{passive:false});
-  el.addEventListener('touchend',finish,{passive:true});
-  el.addEventListener('touchcancel',finish,{passive:true});
+  const finishTouch=()=>{touchActive=false;finish()};
+  el.addEventListener('touchend',finishTouch,{passive:true});
+  el.addEventListener('touchcancel',finishTouch,{passive:true});
+  // 部分折叠屏展开后按桌面设备派发 Pointer Events，不再提供上述 Touch Events。
+  // touchActive 用于浏览器同时派发两套事件时去重，避免一次拖动滚两遍。
+  el.addEventListener('pointerdown',e=>{
+    if(e.pointerType!=='touch'||e.isPrimary===false||touchActive||activePointer!==null||xterm.modes?.mouseTrackingMode==='none')return;
+    activePointer=e.pointerId;begin(e.clientY);
+  },{passive:true});
+  el.addEventListener('pointermove',e=>{
+    if(touchActive||e.pointerType!=='touch'||e.pointerId!==activePointer)return;
+    move(e.clientY,e);
+  },{passive:false});
+  const finishPointer=e=>{
+    if(e.pointerId!==activePointer)return;
+    activePointer=null;finish();
+  };
+  el.addEventListener('pointerup',finishPointer,{passive:true});
+  el.addEventListener('pointercancel',finishPointer,{passive:true});
+  el.addEventListener('pointerleave',finishPointer,{passive:true});
 }
 function scheduleTermReconnect(id){
   const inst=TERM_INSTANCES[id];
@@ -2444,10 +2469,27 @@ function connectSSE(){
 }
 
 function keepFocusedControlVisible(){
-  if(!isCompactScreen()&&!isCoarsePointer())return;
+  if(!isTouchTerminal())return;
   const el=document.activeElement;
   if(!el||!el.matches('input,textarea'))return;
   setTimeout(()=>{if(document.activeElement===el)el.scrollIntoView({block:'nearest'})},80);
+}
+
+function positionTermForKeyboard(){
+  const view=document.getElementById('view-term');
+  const active=document.activeElement;
+  const vv=window.visualViewport;
+  let inset=0;
+  // xterm 的 helper textarea 本身不可见；软键盘覆盖布局视口时，先缩短终端，
+  // 再由 FitAddon 重算行数，TUI 的当前输入行才会出现在键盘上方。
+  if(view?.classList.contains('active')&&isTouchTerminal()&&vv&&active&&view.contains(active)&&active.matches('input,textarea')){
+    const visibleBottom=vv.offsetTop+vv.height;
+    inset=Math.max(0,view.getBoundingClientRect().bottom-visibleBottom);
+    if(inset<80)inset=0;
+  }
+  const padding=inset?Math.round(inset)+'px':'';
+  if(view&&view.style.paddingBottom!==padding)view.style.paddingBottom=padding;
+  return inset;
 }
 
 // ============ 主题切换 ============
@@ -2638,9 +2680,11 @@ function bindDelegation(){
     else if(a==='fileSearchOpen')fileSearchOpen(parseInt(it.dataset.idx));
     else if(a==='fileSearchDownload')fileSearchDownload(parseInt(it.dataset.idx))});
   // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)
-  const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(CURRENT_TERM)positionDrawerBelowHeader();keepFocusedControlVisible()};
+  const fitVisibleTerm=()=>{positionTermForKeyboard();if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(CURRENT_TERM)positionDrawerBelowHeader();keepFocusedControlVisible()};
   window.addEventListener('resize',fitVisibleTerm);
-  if(window.visualViewport)window.visualViewport.addEventListener('resize',fitVisibleTerm);
+  if(window.visualViewport){window.visualViewport.addEventListener('resize',fitVisibleTerm);window.visualViewport.addEventListener('scroll',fitVisibleTerm)}
+  document.addEventListener('focusin',()=>setTimeout(fitVisibleTerm,50));
+  document.addEventListener('focusout',()=>setTimeout(fitVisibleTerm,50));
   document.addEventListener('focusin',keepFocusedControlVisible);
   document.addEventListener('keydown',e=>{if(e.key==='Escape')hfExitFullscreen()});
   document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)hfExitFullscreen(false)});
