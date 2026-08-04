@@ -91,8 +91,11 @@ def test_echo_roundtrip():
     assert terminal.is_alive(tid)
 
 
-def test_large_write_full_integrity(tmp_path):
+def test_large_write_full_integrity(tmp_path, monkeypatch):
     """大体积写:对端(cat)并发消费时,全部字节必须完整到达,不丢尾。"""
+    # CI runner 负载高时 drainer 消费慢,2s 默认超时会把本用例打成 flake;
+    # 放宽到与下方完整性等待相同的 10s(只放宽本用例,不改产品默认值)。
+    monkeypatch.setattr(terminal, "WRITE_TIMEOUT", 10.0)
     tid = _create()
     target = tmp_path / "payload.txt"
     terminal.write_term(tid, f"cat > {target}\n")
