@@ -1498,6 +1498,9 @@ function applyTermModifiers(data,name){
   renderTermModifiers();
   return out;
 }
+// TUI 常开启 DECSET 1004；xterm 会在浏览器失焦/回焦时生成 ESC[O / ESC[I。
+// 转发给 PTY 会让 Herdr/TUI 把普通页面切换误当成终端焦点变化并整屏重绘。
+const isTermFocusReport=data=>data==='\x1b[I'||data==='\x1b[O';
 function termKey(name){
   const seq=TERM_KEY_SEQ[name];
   if(!seq||!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
@@ -2005,7 +2008,7 @@ function termMount(id){
   }
   TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:''};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
-  xterm.onData(d=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(applyTermModifiers(d))});
+  xterm.onData(d=>{if(isTermFocusReport(d))return;const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   TERM_INSTANCES[id].ws=openTermWS(id,xterm);
   XTERM=xterm;FIT=fit;

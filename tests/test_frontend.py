@@ -346,6 +346,14 @@ def test_mobile_terminal_has_expandable_computer_keyboard():
     assert "applyTermModifiers(d)" in js
 
 
+def test_terminal_does_not_forward_browser_focus_reports_to_pty():
+    js = _inline_js()
+    assert "const isTermFocusReport=data=>data==='\\x1b[I'||data==='\\x1b[O'" in js
+    mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
+    assert "xterm.onData(d=>{if(isTermFocusReport(d))return;" in mount
+    assert "w.send(applyTermModifiers(d))" in mount
+
+
 def test_terminal_keyboard_toggle_in_toolbar_and_keys_hidden_by_default():
     # 按键栏默认隐藏不占行;⌨ 入口挪进工具栏,且工具栏收起态下也保留该入口
     assert ":not(#termKeyboardToggle)" in HTML
