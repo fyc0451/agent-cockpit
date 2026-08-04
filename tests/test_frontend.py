@@ -270,24 +270,26 @@ def test_h5_safe_area_and_overlay_scroll_are_contained():
     assert "overscroll-behavior:contain" in HTML
 
 
-def test_mobile_connections_and_focused_input_recover():
+def test_page_focus_only_recovers_closed_connections():
     js = _inline_js()
     assert "document.addEventListener('visibilitychange'" in js
     assert "function recoverPageState()" in js
     recovery = js.split("function recoverPageState(){", 1)[1].split("function ", 1)[0]
     assert "document.visibilityState==='hidden'" in recovery
     assert "now-LAST_PAGE_RECOVERY<300" in recovery
-    assert "connectSSE();refreshBoard();loadAttention()" in recovery
-    assert "loadSessionsView()" in recovery
-    assert "loadProjList()" in recovery
-    assert "loadFileTree()" in recovery
-    assert "hfRefreshAll()" in recovery
+    assert "if(!SSE||SSE.readyState===2)connectSSE()" in recovery
     assert "window.addEventListener('focus',recoverPageState)" in js
     assert "window.addEventListener('pageshow',recoverPageState)" in js
     assert "showTermInstance(TERM_ID)" in recovery
-    assert "inst.ws.readyState===1" in recovery
-    assert "safeFitOf(inst.fit,inst.xterm)" in recovery
-    assert "inst.xterm.focus()" in recovery
+    assert "refreshBoard()" not in recovery
+    assert "loadAttention()" not in recovery
+    assert "loadSessionsView()" not in recovery
+    assert "loadProjList()" not in recovery
+    assert "loadFileTree()" not in recovery
+    assert "hfRefreshAll()" not in recovery
+    assert "safeFitOf(" not in recovery
+    assert ".send(" not in recovery
+    assert ".focus()" not in recovery
     assert "location.reload" not in recovery
     assert "function scheduleTermReconnect(id)" in js
     assert "reconnectDelay" in js

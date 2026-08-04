@@ -2491,22 +2491,13 @@ function recoverPageState(){
   const now=Date.now();
   if(now-LAST_PAGE_RECOVERY<300)return;
   LAST_PAGE_RECOVERY=now;
-  connectSSE();refreshBoard();loadAttention();
+  // 浏览器会自行恢复仍存活的 EventSource/WebSocket。切回页面时不要主动刷新
+  // Herdr 输出或发送 PTY resize（SIGWINCH 会让 TUI 整屏重绘）；只救真正关闭的连接。
+  if(!SSE||SSE.readyState===2)connectSSE();
   const activeView=document.querySelector('#nav button.active')?.dataset.view;
-  if(activeView==='sessions')loadSessionsView();
-  else if(activeView==='msgs')loadProjList();
-  else if(activeView==='files')loadFileTree();
-  else if(activeView==='herdrflow')hfRefreshAll();
-  else if(activeView==='term'&&TERM_ID){
+  if(activeView==='term'&&TERM_ID){
     const inst=TERM_INSTANCES[TERM_ID];
-    if(inst){
-      if(!inst.ws||inst.ws.readyState>=2)showTermInstance(TERM_ID);
-      else if(inst.ws.readyState===1){
-        safeFitOf(inst.fit,inst.xterm);
-        try{inst.ws.send(JSON.stringify({type:'resize',cols:inst.xterm.cols,rows:inst.xterm.rows}))}catch(e){}
-        setTimeout(()=>{try{inst.xterm.focus()}catch(e){}},50);
-      }
-    }
+    if(inst&&(!inst.ws||inst.ws.readyState>=2))showTermInstance(TERM_ID);
   }
 }
 
