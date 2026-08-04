@@ -59,6 +59,8 @@ WRITE_TIMEOUT = 2.0
 # 单次 WebSocket 输出合并上限；macOS PTY 常以约 1 KiB 返回，若逐块转发会把
 # 服务端调度和浏览器重绘放大成明显的逐行加载。
 READ_BURST_MAX = 256 * 1024
+# 新 xterm 在浏览器刷新后需要重放输出才能恢复当前屏幕；每个 PTY 只保留尾部。
+OUTPUT_HISTORY_MAX = 1024 * 1024
 
 
 def _term_cfg(key: str, default: float) -> float:
@@ -159,7 +161,7 @@ def create_term(
                 "master_fd": master_fd, "pid": pid, "alive": True,
                 "lock": threading.Lock(), "write_lock": threading.Lock(),
                 "created_ts": now, "last_active": now,
-                "dead_ts": None, "label": label,
+                "dead_ts": None, "label": label, "output_history": bytearray(),
             }
     if over:
         _kill_child(pid, master_fd)
@@ -277,6 +279,17 @@ def write_term(term_id: str, data: str) -> None:
             t["last_active"] = time.monotonic()
 
 
+def _remember_output(t: dict[str, Any], data: bytes) -> None:
+    if not data:
+        return
+    history = t.setdefault("output_history", bytearray())
+    history.extend(data)
+    if OUTPUT_HISTORY_MAX <= 0:
+        history.clear()
+    elif len(history) > OUTPUT_HISTORY_MAX:
+        del history[:-OUTPUT_HISTORY_MAX]
+
+
 def _read_fd(t: dict[str, Any], timeout: float) -> bytes:
     """在 t['lock'] 内从 master fd 读一次。alive=False 后也允许读(尾输出)。"""
     fd = t["master_fd"]
@@ -285,6 +298,7 @@ def _read_fd(t: dict[str, Any], timeout: float) -> bytes:
         if r:
             data = os.read(fd, 65536)
             t["last_active"] = time.monotonic()
+            _remember_output(t, data)
             return data
     except OSError:  # EIO 等:slave 端已全部关闭
         pass
@@ -301,6 +315,15 @@ def read_output(term_id: str, timeout: float = 0.1) -> bytes:
         return b""
     with t["lock"]:
         return _read_fd(t, timeout)
+
+
+def output_history(term_id: str) -> bytes:
+    """返回浏览器新 xterm 重建屏幕所需的有界尾输出。"""
+    t = _get(term_id)
+    if not t:
+        return b""
+    with t["lock"]:
+        return bytes(t.get("output_history") or b"")
 
 
 def read_available(

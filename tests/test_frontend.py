@@ -411,7 +411,7 @@ def test_narrow_takeover_owns_zoom_with_heartbeat_and_release_fallbacks():
     close = js.split("async function termClose(){", 1)[1].split(
         "// 多终端保活", 1
     )[0]
-    websocket = js.split("function openTermWS(id,xterm){", 1)[1].split(
+    websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
         "function showTermInstance", 1
     )[0]
     assert "TERM_ZOOM={}" in js
@@ -429,6 +429,27 @@ def test_narrow_takeover_owns_zoom_with_heartbeat_and_release_fallbacks():
     assert "window.addEventListener('pagehide',releaseAllTermZoomLeases)" in js
     assert "keepalive:true" in js
     assert "COMPACT_SCREEN_MQ.addEventListener?.('change'" in js
+
+
+def test_fresh_xterm_requests_history_but_socket_reconnect_does_not():
+    js = _inline_js()
+    mount = js.split("function termMount(id){", 1)[1].split(
+        "// ============ 会话管理", 1
+    )[0]
+    show = js.split("function showTermInstance(id){", 1)[1].split(
+        "function termSwitch", 1
+    )[0]
+    reconnect = js.split("function scheduleTermReconnect(id){", 1)[1].split(
+        "// 为某终端建立", 1
+    )[0]
+    websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
+        "function showTermInstance", 1
+    )[0]
+
+    assert "?replay=1" in websocket
+    assert "openTermWS(id,xterm,true)" in mount
+    assert "openTermWS(id,inst.xterm,false)" in show
+    assert "openTermWS(id,current.xterm,false)" in reconnect
 
 
 def test_mobile_terminal_has_expandable_computer_keyboard():

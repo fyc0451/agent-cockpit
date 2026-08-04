@@ -209,3 +209,25 @@ def test_websocket_drains_tail_before_exit_message(monkeypatch):
     ) as websocket:
         assert websocket.receive_bytes() == b"last output"
         assert "进程已退出" in websocket.receive_text()
+
+
+def test_websocket_replays_history_only_for_fresh_xterm(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: [{"id": "term1"}])
+    monkeypatch.setattr(server.terminal, "output_history", lambda term_id: b"screen")
+    monkeypatch.setattr(server.terminal, "read_available", lambda *args: b"")
+    monkeypatch.setattr(server.terminal, "is_alive", lambda *args: False)
+    monkeypatch.setattr(server.terminal, "drain_output", lambda *args: b"tail")
+    client = TestClient(server.app)
+    client.post("/api/auth/login", json={"token": "secret"})
+
+    with client.websocket_connect(
+        "/api/term/term1?replay=1", headers={"origin": "http://testserver"}
+    ) as websocket:
+        assert websocket.receive_bytes() == b"screen"
+        assert websocket.receive_bytes() == b"tail"
+
+    with client.websocket_connect(
+        "/api/term/term1", headers={"origin": "http://testserver"}
+    ) as websocket:
+        assert websocket.receive_bytes() == b"tail"

@@ -159,6 +159,25 @@ def test_read_available_obeys_burst_soft_limit(monkeypatch):
     )
 
 
+def test_output_history_is_bounded_and_keeps_latest_bytes(monkeypatch):
+    monkeypatch.setattr(terminal, "OUTPUT_HISTORY_MAX", 8)
+    state = {"output_history": bytearray()}
+
+    terminal._remember_output(state, b"abcdef")
+    terminal._remember_output(state, b"ghijkl")
+
+    assert bytes(state["output_history"]) == b"efghijkl"
+
+
+def test_read_fd_records_output_for_browser_replay(monkeypatch):
+    state = {"master_fd": 9, "output_history": bytearray()}
+    monkeypatch.setattr(terminal.select, "select", lambda *args: ([9], [], []))
+    monkeypatch.setattr(terminal.os, "read", lambda fd, size: b"current screen")
+
+    assert terminal._read_fd(state, 0) == b"current screen"
+    assert bytes(state["output_history"]) == b"current screen"
+
+
 def test_websocket_pump_uses_bursts_without_per_chunk_sleep():
     source = (Path(__file__).resolve().parents[1] / "server.py").read_text()
     pump = source.split("async def pump_out():", 1)[1].split(

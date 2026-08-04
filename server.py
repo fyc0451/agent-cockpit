@@ -2452,6 +2452,10 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
         return
     pump_task = None
     try:
+        if websocket.query_params.get("replay") == "1":
+            history = await asyncio.to_thread(terminal.output_history, term_id)
+            if history:
+                await websocket.send_bytes(history)
         # 输出转发任务:PTY → WebSocket
         async def pump_out():
             while True:

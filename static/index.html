@@ -2132,12 +2132,13 @@ function scheduleTermReconnect(id){
     if(!current)return;
     current.reconnectTimer=null;
     if(current.closing||current.xterm._disposed||current.ws?.readyState<2)return;
-    current.ws=openTermWS(id,current.xterm);
+    current.ws=openTermWS(id,current.xterm,false);
   },delay);
 }
 // 为某终端建立一条独立 WS(重连时复用,不触碰其它实例的 WS)
-function openTermWS(id,xterm){
-  const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
+function openTermWS(id,xterm,replay){
+  const replayQuery=replay?'?replay=1':'';
+  const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}${replayQuery}`);
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);startTermZoomLease(id);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
   ws.onmessage=ev=>{try{
@@ -2167,7 +2168,7 @@ function showTermInstance(id){
   if(!inst.ws||inst.ws.readyState>=2){
     if(inst.reconnectTimer){clearTimeout(inst.reconnectTimer);inst.reconnectTimer=null}
     try{if(!inst.xterm._disposed)inst.xterm.write('\r\n\x1b[36m[重连中…]\x1b[0m\r\n')}catch(e){}
-    inst.ws=openTermWS(id,inst.xterm);
+    inst.ws=openTermWS(id,inst.xterm,false);
   }
   XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;
   safeFitOf(inst.fit,inst.xterm);
@@ -2221,7 +2222,7 @@ function termMount(id){
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   xterm.onData(d=>{if(isTermFocusReport(d))return;const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
-  TERM_INSTANCES[id].ws=openTermWS(id,xterm);
+  TERM_INSTANCES[id].ws=openTermWS(id,xterm,true);
   XTERM=xterm;FIT=fit;
   TERM_INSTANCES[id].ws&&showTermInstance(id);
 }
