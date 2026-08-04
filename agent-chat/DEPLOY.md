@@ -43,7 +43,8 @@ EOF
 ```
 
 - `mail-send` / `mail-recv` / `am-register` 通过 `am_common.load_client_config()` 读该文件，自动走服务器；
-- cockpit 的写操作（`hub_client.py`）同样读该文件——本次已修复其"硬编码 127.0.0.1"问题，尊重 `client.env` 的 hub 字段；个人模式（hub=127.0.0.1 或未配置）行为不变。
+- cockpit 的写操作（`hub_client.py`）**复用同一解析器**，同样读该文件；个人模式（hub=127.0.0.1 或未配置）行为不变。
+- `hub_client` 在进程启动时求值一次 hub/token：**修改 client.env 后需重启 cockpit** 使写操作生效。
 
 ## 4. 身份注册（花名唯一）
 
@@ -79,6 +80,15 @@ mail-recv ... --complete <id> --claim-token <token>
 - A 发送成功，B 的 `mail-recv --unread` 能读到该消息（跨机投递 ✓）；
 - B claim / complete 走本地 sidecar，且 ack 回服务器（跨机回执 ✓）；
 - B 反向发回 A，A 能读到（双向 ✓）。
+
+### hub_client 路径验收（必做）
+
+上面的 §5 走的是 `am_common`（该路径本就支持远程 hub），**不触发本次改动的 `hub_client`**。必须再验 cockpit 服务端写路径（`server.py` 经 `hub_client.status()/send_message/acknowledge_message`）：
+
+1. 在 B 机调 cockpit 健康/doctor 检查（触发 `hub_client.status()`），确认报告 team hub 可达（最快）；或
+2. 经 B 机 cockpit 的 Web 发消息端点（`server.py:879`，authority=user）发一条消息，落到 team hub，被对机 `mail-recv` 收到（端到端覆盖 `send_message`）。
+
+不验这一条，`hub_client` 即使仍硬编码 localhost，上面的 §5 也会照样通过。
 
 ## 6. 回归
 

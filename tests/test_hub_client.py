@@ -1,18 +1,26 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent.parent / "agent-mail-tools")
+)
+
+import am_common
 import hub_client
 
 
 def _write_client_env(monkeypatch, tmp_path, content: str) -> None:
     env_file = tmp_path / "client.env"
     env_file.write_text(content)
-    monkeypatch.setattr(hub_client, "_CLIENT_ENV", env_file)
+    monkeypatch.setattr(am_common, "CLIENT_ENV", env_file)
 
 
 def test_load_config_defaults_to_localhost_without_client_env(monkeypatch, tmp_path):
     env_file = tmp_path / "client.env"
     assert not env_file.exists()
-    monkeypatch.setattr(hub_client, "_CLIENT_ENV", env_file)
+    monkeypatch.setattr(am_common, "CLIENT_ENV", env_file)
 
-    assert hub_client._load_config() == ("http://127.0.0.1:8765", "")
+    assert am_common.load_client_config() == ("http://127.0.0.1:8765", "")
 
 
 def test_load_config_uses_client_env_hub_for_shared_team_hub(monkeypatch, tmp_path):
@@ -22,13 +30,13 @@ def test_load_config_uses_client_env_hub_for_shared_team_hub(monkeypatch, tmp_pa
         "hub=http://team-server:8765\ntoken=secret123\n",
     )
 
-    assert hub_client._load_config() == ("http://team-server:8765", "secret123")
+    assert am_common.load_client_config() == ("http://team-server:8765", "secret123")
 
 
 def test_load_config_keeps_localhost_when_hub_unset(monkeypatch, tmp_path):
     _write_client_env(monkeypatch, tmp_path, "token=abc\n")
 
-    assert hub_client._load_config() == ("http://127.0.0.1:8765", "abc")
+    assert am_common.load_client_config() == ("http://127.0.0.1:8765", "abc")
 
 
 def test_load_config_ignores_comments_and_empty_hub(monkeypatch, tmp_path):
@@ -38,7 +46,11 @@ def test_load_config_ignores_comments_and_empty_hub(monkeypatch, tmp_path):
         "# hub=http://ignored.example:8765\nhub=\ntoken=xyz\n",
     )
 
-    assert hub_client._load_config() == ("http://127.0.0.1:8765", "xyz")
+    assert am_common.load_client_config() == ("http://127.0.0.1:8765", "xyz")
+
+
+def test_hub_client_reuses_am_common_parser():
+    assert hub_client.load_client_config is am_common.load_client_config
 
 
 def test_response_data_joins_multiline_sse_data():
@@ -86,3 +98,25 @@ def test_status_checks_hub_tcp_port(monkeypatch):
 
     assert hub_client.status()["available"] is True
     assert calls == [(('127.0.0.1', 8765), 1)]
+
+
+def test_status_parses_team_hub_host_port(monkeypatch):
+    monkeypatch.setattr(hub_client, "TOKEN", "configured")
+    monkeypatch.setattr(hub_client, "HUB", "http://team-server:9765")
+    calls = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        hub_client.socket,
+        "create_connection",
+        lambda address, timeout: calls.append((address, timeout)) or Connection(),
+    )
+
+    assert hub_client.status()["available"] is True
+    assert calls == [(('team-server', 9765), 1)]

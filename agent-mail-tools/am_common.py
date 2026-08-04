@@ -22,7 +22,8 @@ def load_client_config() -> tuple[str, str]:
             if "=" in line and not line.strip().startswith("#"):
                 key, _, value = line.partition("=")
                 if key.strip() == "hub":
-                    hub = value.strip()
+                    if value.strip():
+                        hub = value.strip()
                 elif key.strip() == "token":
                     token = value.strip()
     return hub.rstrip("/"), token

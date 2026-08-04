@@ -2,38 +2,26 @@
 
 读操作走 db.py 直读 SQLite;写操作(发消息/ack)走这里调 hub,
 保证事务一致性和 audit log。hub 地址取 ~/.agent-mail/client.env 的 hub
-字段,未配置时默认 127.0.0.1:8765(个人模式)。
+字段(统一由 agent-mail-tools/am_common.load_client_config 解析),
+未配置时默认 127.0.0.1:8765(个人模式)。
 """
 from __future__ import annotations
 
 import json
+import os
 import socket
-from pathlib import Path
+import sys
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
-# 复用 agent-mail-tools 的 client.env 取 hub/token
-_CLIENT_ENV = Path.home() / ".agent-mail" / "client.env"
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-mail-tools")
+)
+from am_common import load_client_config  # noqa: E402
 
-
-def _load_config() -> tuple[str, str]:
-    hub, token = "http://127.0.0.1:8765", ""
-    if _CLIENT_ENV.is_file():
-        for line in _CLIENT_ENV.read_text().splitlines():
-            if "=" in line and not line.strip().startswith("#"):
-                key, _, value = line.partition("=")
-                key, value = key.strip(), value.strip()
-                if key == "hub" and value:
-                    # 团队模式指向服务器 hub；个人模式未配置或为 127.0.0.1 时保持默认
-                    hub = value
-                elif key == "token":
-                    token = value
-    return hub, token
-
-
-HUB, TOKEN = _load_config()
+HUB, TOKEN = load_client_config()
 _headers = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
