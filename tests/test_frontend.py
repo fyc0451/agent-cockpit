@@ -370,6 +370,9 @@ def test_terminal_fit_never_resizes_pty_from_hidden_view():
     assert "view?.classList.contains('active')" in fit
     assert "el.getBoundingClientRect()" in fit
     assert fit.index("view?.classList.contains('active')") < fit.index("fit.fit()")
+    assert "fit.proposeDimensions()" in fit
+    assert "xterm.cols===targetCols&&xterm.rows===dimensions.rows" in fit
+    assert fit.index("xterm.cols===targetCols") < fit.index("fit.fit()")
 
 
 def test_terminal_touch_scroll_is_js_driven():
@@ -396,6 +399,7 @@ def test_terminal_touch_scroll_is_js_driven():
     assert "e.pointerType!=='touch'" in scroll
     assert "touchActive||e.pointerType!=='touch'" in scroll
     assert "e.pointerId!==activePointer" in scroll
+    assert "activePointer!==null" not in scroll
     assert "el.addEventListener('pointerleave',finishPointer" in scroll
 
 

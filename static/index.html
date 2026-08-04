@@ -1833,6 +1833,11 @@ function safeFitOf(fit,xterm){
   const rect=el.getBoundingClientRect();
   if(rect.width<2||rect.height<2)return false;
   try{
+    // FitAddon 会先 fit 到满宽，随后下方再留一列安全边距。若目标尺寸没变，
+    // 直接返回，避免 visualViewport scroll 每帧触发两次 PTY resize。
+    const dimensions=typeof fit.proposeDimensions==='function'?fit.proposeDimensions():null;
+    const targetCols=dimensions?.cols>10?dimensions.cols-1:dimensions?.cols;
+    if(targetCols&&dimensions?.rows&&xterm.cols===targetCols&&xterm.rows===dimensions.rows)return true;
     fit.fit();
     // 留一列安全边距，避免滚动条、字形 overhang 或小数取整裁掉最右字符。
     if(xterm.cols>10)xterm.resize(xterm.cols-1,xterm.rows);
@@ -1895,7 +1900,8 @@ function enableTermTouchScroll(el,xterm){
   // 部分折叠屏展开后按桌面设备派发 Pointer Events，不再提供上述 Touch Events。
   // touchActive 用于浏览器同时派发两套事件时去重，避免一次拖动滚两遍。
   el.addEventListener('pointerdown',e=>{
-    if(e.pointerType!=='touch'||e.isPrimary===false||touchActive||activePointer!==null||xterm.modes?.mouseTrackingMode==='none')return;
+    if(e.pointerType!=='touch'||e.isPrimary===false||touchActive||xterm.modes?.mouseTrackingMode==='none')return;
+    // 新的 primary pointer 可覆盖极端序列中漏掉 pointerup/cancel 的旧状态。
     activePointer=e.pointerId;begin(e.clientY);
   },{passive:true});
   el.addEventListener('pointermove',e=>{
