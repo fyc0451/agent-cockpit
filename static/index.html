@@ -1156,7 +1156,8 @@ function cardHtml(p){
 
 // ============ 终端抽屉 ============
 let TERM_TIMER=null;
-const isCompactScreen=()=>window.matchMedia('(max-width:560px)').matches;
+const COMPACT_SCREEN_MQ=window.matchMedia('(max-width:560px)');
+const isCompactScreen=()=>COMPACT_SCREEN_MQ.matches;
 const isCoarsePointer=()=>window.matchMedia('(any-pointer:coarse)').matches;
 const isTouchTerminal=()=>navigator.maxTouchPoints>0||isCoarsePointer()||isCompactScreen();
 function drawerPanes(){
@@ -1455,7 +1456,7 @@ async function sendMsg(){
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
 // ============ Web 终端(xterm.js + PTY) ============
-let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_FONT_READY=null;
+let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_ZOOM={}, TERM_FONT_READY=null;
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
 const TERM_MODIFIERS={ctrl:false,alt:false,shift:false};
@@ -1628,14 +1629,21 @@ async function doAttachHerdr(session){
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
   document.getElementById('launchBar').classList.add('hidden');
+  let createdId=null;
   try{
     await ensureTermFontLoaded();
     const r=await api('/api/term?label='+encodeURIComponent(session),{method:'POST'});
+    createdId=r.id;
     TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;TERM_SESSIONS[r.id]=session;
     renderTermOptions();
     termMount(r.id);
+    if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败');
+    if(isCompactScreen())await startTermZoomLease(r.id);
     queueTermInput(r.id,'herdr --session '+session+'\r','已进入 herdr/'+session+' (Ctrl-b 切 pane)');
-  }catch(e){toast('创建终端失败: '+e)}
+  }catch(e){
+    if(createdId&&TERMS.includes(createdId)){TERM_ID=createdId;await termClose()}
+    toast('创建终端失败: '+e)
+  }
 }
 
 // ============ herdr 流视图(只读 pane 流 + 输入框发指令) ============
@@ -1808,22 +1816,92 @@ async function termInsertCollab(session,paneId,agent){
     XTERM.focus();
   }catch(e){toast('查询失败: '+e)}
 }
+const TERM_ZOOM_HEARTBEAT=10000;
+function termZoomState(id){
+  const session=TERM_SESSIONS[id];
+  if(!session)return null;
+  if(!TERM_ZOOM[id])TERM_ZOOM[id]={session,owned:false,timer:null,busy:false,lastReason:null,closing:false,suspended:false};
+  return TERM_ZOOM[id];
+}
+async function syncTermZoomLease(id){
+  const state=termZoomState(id);
+  if(!state||state.busy||state.closing||state.suspended||!TERMS.includes(id))return;
+  if(!isCompactScreen()){
+    if(state.owned)await releaseTermZoomLease(id,true);
+    return;
+  }
+  state.busy=true;
+  try{
+    let action=state.owned?'renew':'acquire';
+    const request=()=>api(`/api/herdr/session/${encodeURIComponent(state.session)}/zoom-lease`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({term_id:id,action})
+    });
+    let result=await request();
+    // 页面离开、断网超过 TTL 后服务端会还原；恢复时重新申请，而不是假定仍持有。
+    if(action==='renew'&&!result.acquired){state.owned=false;action='acquire';result=await request()}
+    if(state.closing||state.suspended||!TERMS.includes(id)){
+      if(result.acquired){action='release';await request()}
+      return;
+    }
+    const becameOwner=!state.owned&&result.acquired===true;
+    state.owned=result.acquired===true&&result.owned===true;
+    if(becameOwner)toast('窄屏已自动聚焦单个 pane，关闭终端后恢复分屏');
+    if(!state.owned&&result.reason&&result.reason!==state.lastReason){
+      if(result.reason==='already_zoomed')toast('该 Herdr tab 已手动放大，保持原状态');
+      else if(result.reason==='leased')toast('该 Herdr session 已由另一窄屏终端接管');
+    }
+    state.lastReason=result.reason||null;
+  }catch(e){}finally{state.busy=false}
+}
+async function startTermZoomLease(id){
+  const state=termZoomState(id);if(!state)return;
+  state.suspended=false;
+  if(!state.timer)state.timer=setInterval(()=>syncTermZoomLease(id),TERM_ZOOM_HEARTBEAT);
+  await syncTermZoomLease(id);
+}
+async function releaseTermZoomLease(id,keepTimer=false){
+  const state=TERM_ZOOM[id];if(!state)return;
+  if(!keepTimer){state.closing=true;if(state.timer){clearInterval(state.timer);state.timer=null}}
+  if(!state.owned)return;
+  state.owned=false;
+  try{
+    await api(`/api/herdr/session/${encodeURIComponent(state.session)}/zoom-lease`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({term_id:id,action:'release'})
+    });
+  }catch(e){}
+}
+function releaseAllTermZoomLeases(){
+  for(const [id,state] of Object.entries(TERM_ZOOM)){
+    state.suspended=true;
+    if(!state.owned)continue;
+    state.owned=false;
+    fetch(`/api/herdr/session/${encodeURIComponent(state.session)}/zoom-lease`,{
+      method:'POST',headers:{'Content-Type':'application/json'},keepalive:true,
+      body:JSON.stringify({term_id:id,action:'release'})
+    }).catch(()=>{});
+  }
+}
 async function termClose(){
   if(!TERM_ID)return;
-  const inst=TERM_INSTANCES[TERM_ID];
-  try{await api('/api/term/'+TERM_ID,{method:'DELETE'})}catch(e){}
-  TERMS=TERMS.filter(t=>t!==TERM_ID);
-  delete TERM_LABELS[TERM_ID];
-  delete TERM_SESSIONS[TERM_ID];
+  const id=TERM_ID;
+  const inst=TERM_INSTANCES[id];
+  await releaseTermZoomLease(id);
+  try{await api('/api/term/'+id,{method:'DELETE'})}catch(e){}
+  TERMS=TERMS.filter(t=>t!==id);
+  delete TERM_LABELS[id];
+  delete TERM_SESSIONS[id];
+  delete TERM_ZOOM[id];
   if(inst){
     inst.closing=true;
     if(inst.reconnectTimer)clearTimeout(inst.reconnectTimer);
     if(inst.ws)inst.ws.close();
     if(inst.xterm)inst.xterm.dispose();
     if(inst.el)inst.el.remove();
-    delete TERM_INSTANCES[TERM_ID];
+    delete TERM_INSTANCES[id];
   }
-  TERM_ID=TERMS[0]||null;
+  if(TERM_ID===id)TERM_ID=TERMS[0]||null;
   renderTermOptions();
   if(TERM_ID)showTermInstance(TERM_ID);
   else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
@@ -1947,7 +2025,7 @@ function scheduleTermReconnect(id){
 function openTermWS(id,xterm){
   const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
+  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);syncTermZoomLease(id);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
   ws.onmessage=ev=>{try{
     const light=document.documentElement.classList.contains('light');
     if(light){
@@ -2501,6 +2579,8 @@ function recoverPageState(){
   if(activeView==='term'&&TERM_ID){
     const inst=TERM_INSTANCES[TERM_ID];
     if(inst&&(!inst.ws||inst.ws.readyState>=2))showTermInstance(TERM_ID);
+    const zoom=TERM_ZOOM[TERM_ID];
+    if(zoom){zoom.suspended=false;syncTermZoomLease(TERM_ID)}
   }
 }
 
@@ -2738,6 +2818,10 @@ async function init(){
   document.addEventListener('visibilitychange',recoverPageState);
   window.addEventListener('focus',recoverPageState);
   window.addEventListener('pageshow',recoverPageState);
+  window.addEventListener('pagehide',releaseAllTermZoomLeases);
+  COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
+    for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
+  });
   connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();
 }
 init();

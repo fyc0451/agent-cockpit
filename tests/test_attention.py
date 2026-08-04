@@ -664,6 +664,18 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
     assert "你的角色: Reviewer" in sent[1][1]
     assert "共享工作目录" in sent[1][1]
     assert "detached worktree" not in sent[1][1]
+    for _, briefing, _ in sent:
+        assert "每完成一个里程碑检查一次未读消息" in briefing
+        assert "多封消息按时间顺序处理" in briefing
+        assert "完成当前原子操作并保存状态后立即停手汇报" in briefing
+
+
+def test_agent_mail_identity_hint_includes_safe_message_checkpoint_protocol():
+    hint = server._identity_hint("codex-main", "/tmp/project", "codex")
+
+    assert "每完成一个里程碑检查一次未读消息" in hint
+    assert "多封消息按时间顺序处理" in hint
+    assert "完成当前原子操作并保存状态后立即停手汇报" in hint
 
 
 def test_setup_workspace_reuses_matching_agent_without_reinjecting(monkeypatch, tmp_path):

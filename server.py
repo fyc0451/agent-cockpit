@@ -51,6 +51,7 @@ async def lifespan(_: FastAPI):
         with suppress(asyncio.CancelledError):
             await _poller_task
         _poller_task = None
+        await asyncio.to_thread(_release_all_zoom_leases)
 
 
 app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
@@ -86,6 +87,14 @@ MAIL_SEND_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-send"
 MAIL_RECV_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-recv"
 _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
+ZOOM_LEASE_TTL = 30.0
+ZOOM_LEASE_RETRY = 5.0
+_ZOOM_LEASES: dict[str, dict[str, Any]] = {}
+_ZOOM_LEASES_LOCK = threading.RLock()
+MAIL_COORDINATION_GUIDE = (
+    "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
+    "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报。"
+)
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -228,7 +237,7 @@ def _identity_hint(
     )
     if roster:
         hint += f"协作者身份: {roster}。"
-    return hint
+    return f"{hint}{MAIL_COORDINATION_GUIDE}"
 
 
 def _collaborator_hint(name: str, project: str) -> str:
@@ -311,6 +320,11 @@ class StartTaskReq(BaseModel):
 class PaneSendReq(BaseModel):
     text: str
     mode: str = "send"  # send | prompt
+
+
+class ZoomLeaseReq(BaseModel):
+    term_id: str
+    action: str = "acquire"  # acquire | renew | release
 
 
 class WriteFileReq(BaseModel):
@@ -806,6 +820,198 @@ def api_task_apply(task_id: str, action: str = "apply"):
 
 # ── herdr 路由(多 session 聚合,Orca 式看板数据源) ────────────
 
+def _term_exists(term_id: str) -> bool:
+    return any(term.get("id") == term_id for term in terminal.list_terms())
+
+
+def _zoom_result_ok(result: dict[str, Any], zoomed: bool) -> bool:
+    return (
+        result.get("available", True) is not False
+        and not result.get("error")
+        and result.get("zoomed") is zoomed
+    )
+
+
+def _release_zoom_lease_locked(
+    session: str, lease: dict[str, Any], now: float,
+) -> dict[str, Any]:
+    result = herdr_client.pane_zoom(session, lease.get("pane_id"), mode="off")
+    if _zoom_result_ok(result, False):
+        if _ZOOM_LEASES.get(session) is lease:
+            _ZOOM_LEASES.pop(session, None)
+        return {
+            "available": True, "released": True, "owned": False,
+            "changed": bool(result.get("changed")), "session": session,
+        }
+    lease["expires_at"] = now + ZOOM_LEASE_RETRY
+    return {
+        "available": result.get("available", True), "released": False,
+        "owned": True, "session": session,
+        "error": result.get("error") or "Herdr zoom 还原失败，将自动重试",
+    }
+
+
+def _expire_zoom_leases(now: float | None = None) -> list[dict[str, Any]]:
+    current = time.monotonic() if now is None else now
+    released = []
+    with _ZOOM_LEASES_LOCK:
+        expired = [
+            (session, lease)
+            for session, lease in _ZOOM_LEASES.items()
+            if lease["expires_at"] <= current
+        ]
+        for session, lease in expired:
+            released.append(_release_zoom_lease_locked(session, lease, current))
+    return released
+
+
+def _acquire_zoom_lease(
+    session: str, owner: str, now: float | None = None,
+) -> dict[str, Any]:
+    current = time.monotonic() if now is None else now
+    if not _term_exists(owner):
+        return {
+            "available": True, "acquired": False, "owned": False,
+            "reason": "terminal_missing", "session": session,
+        }
+    with _ZOOM_LEASES_LOCK:
+        _expire_zoom_leases(current)
+        lease = _ZOOM_LEASES.get(session)
+        if lease:
+            if lease["owner"] != owner:
+                return {
+                    "available": True, "acquired": False, "owned": False,
+                    "reason": "leased", "session": session,
+                }
+            return _renew_zoom_lease(session, owner, current)
+
+        layout = herdr_client.pane_layout(session)
+        if layout.get("available", True) is False or layout.get("error"):
+            return {
+                "available": layout.get("available", True), "acquired": False,
+                "owned": False, "reason": "layout_unavailable", "session": session,
+                "error": layout.get("error"),
+            }
+        if layout.get("zoomed"):
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "already_zoomed", "session": session,
+            }
+        if not layout.get("horizontal_split"):
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "not_horizontal", "session": session,
+            }
+        pane_id = layout.get("focused_pane_id")
+        if not pane_id:
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "pane_missing", "session": session,
+            }
+        zoom = herdr_client.pane_zoom(session, pane_id, mode="on")
+        if not _zoom_result_ok(zoom, True):
+            return {
+                "available": zoom.get("available", True), "acquired": False,
+                "owned": False, "reason": "zoom_failed", "session": session,
+                "error": zoom.get("error") or "Herdr zoom 未生效",
+            }
+        _ZOOM_LEASES[session] = {
+            "owner": owner, "pane_id": zoom.get("focused_pane_id") or pane_id,
+            "tab_id": layout.get("tab_id"), "expires_at": current + ZOOM_LEASE_TTL,
+        }
+        return {
+            "available": True, "acquired": True, "owned": True,
+            "changed": bool(zoom.get("changed")), "session": session,
+            "pane_id": _ZOOM_LEASES[session]["pane_id"], "ttl": ZOOM_LEASE_TTL,
+        }
+
+
+def _renew_zoom_lease(
+    session: str, owner: str, now: float | None = None,
+) -> dict[str, Any]:
+    current = time.monotonic() if now is None else now
+    with _ZOOM_LEASES_LOCK:
+        _expire_zoom_leases(current)
+        lease = _ZOOM_LEASES.get(session)
+        if not lease:
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "lease_missing", "session": session,
+            }
+        if lease["owner"] != owner:
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "not_owner", "session": session,
+            }
+        if not _term_exists(owner):
+            released = _release_zoom_lease_locked(session, lease, current)
+            return {**released, "acquired": False, "reason": "terminal_missing"}
+        lease["expires_at"] = current + ZOOM_LEASE_TTL
+        layout = herdr_client.pane_layout(session, lease.get("pane_id"))
+        if layout.get("available", True) is False or layout.get("error"):
+            return {
+                "available": layout.get("available", True), "acquired": True,
+                "owned": True, "session": session, "renewed": True,
+                "warning": layout.get("error") or "暂时无法确认 zoom 状态",
+                "ttl": ZOOM_LEASE_TTL,
+            }
+        pane_id = layout.get("focused_pane_id") or lease["pane_id"]
+        if not layout.get("zoomed"):
+            zoom = herdr_client.pane_zoom(session, pane_id, mode="on")
+            if not _zoom_result_ok(zoom, True):
+                return {
+                    "available": zoom.get("available", True), "acquired": True,
+                    "owned": True, "session": session, "renewed": True,
+                    "warning": zoom.get("error") or "暂时无法恢复 zoom",
+                    "ttl": ZOOM_LEASE_TTL,
+                }
+            pane_id = zoom.get("focused_pane_id") or pane_id
+        lease["pane_id"] = pane_id
+        return {
+            "available": True, "acquired": True, "owned": True,
+            "renewed": True, "session": session, "pane_id": pane_id,
+            "ttl": ZOOM_LEASE_TTL,
+        }
+
+
+def _release_zoom_lease(
+    session: str, owner: str, now: float | None = None,
+) -> dict[str, Any]:
+    current = time.monotonic() if now is None else now
+    with _ZOOM_LEASES_LOCK:
+        lease = _ZOOM_LEASES.get(session)
+        if not lease:
+            return {
+                "available": True, "released": True, "owned": False,
+                "changed": False, "session": session,
+            }
+        if lease["owner"] != owner:
+            return {
+                "available": True, "released": False, "owned": False,
+                "reason": "not_owner", "session": session,
+            }
+        return _release_zoom_lease_locked(session, lease, current)
+
+
+def _release_zoom_leases_for_owner(owner: str) -> None:
+    with _ZOOM_LEASES_LOCK:
+        sessions = [
+            session for session, lease in _ZOOM_LEASES.items()
+            if lease["owner"] == owner
+        ]
+    for session in sessions:
+        _release_zoom_lease(session, owner)
+
+
+def _release_all_zoom_leases() -> None:
+    with _ZOOM_LEASES_LOCK:
+        leases = [
+            (session, lease["owner"])
+            for session, lease in _ZOOM_LEASES.items()
+        ]
+    for session, owner in leases:
+        _release_zoom_lease(session, owner)
+
 @app.get("/api/herdr/status")
 def api_herdr_status():
     return {"available": herdr_client.is_available(), "binary": herdr_client.HERDR_BIN}
@@ -821,6 +1027,19 @@ def api_herdr_sessions():
 def api_herdr_snapshot():
     """聚合所有 running session 的 pane → 看板卡片数据源。"""
     return _board_snapshot()
+
+
+@app.post("/api/herdr/session/{name}/zoom-lease")
+def api_herdr_zoom_lease(name: str, req: ZoomLeaseReq):
+    """窄屏 attach 的 zoom 租约；只还原 Cockpit 自己开启的 zoom。"""
+    _validate_session_name(name)
+    if req.action == "acquire":
+        return _acquire_zoom_lease(name, req.term_id)
+    if req.action == "renew":
+        return _renew_zoom_lease(name, req.term_id)
+    if req.action == "release":
+        return _release_zoom_lease(name, req.term_id)
+    raise HTTPException(400, f"不支持的 zoom lease action: {req.action}")
 
 
 @app.get("/api/herdr/pane/{session}/{pane_id}")
@@ -1392,6 +1611,7 @@ def _workspace_briefing(req: SetupWorkspaceReq, plan: dict[str, Any], plans: lis
             )
     elif plan["role"] == "lead":
         lines.append("你负责推进目标、协调协作者并汇总最终结果。")
+    lines.append(MAIL_COORDINATION_GUIDE)
     return "\n".join(lines)
 
 
@@ -1879,6 +2099,7 @@ def api_term_list():
 @app.delete("/api/term/{term_id}")
 def api_term_kill(term_id: str):
     """关闭终端。"""
+    _release_zoom_leases_for_owner(term_id)
     terminal.kill_term(term_id)
     return {"ok": True}
 
@@ -1964,6 +2185,7 @@ async def _poll_live_state() -> None:
     attention_ids: set[str] | None = None
     while True:
         try:
+            await asyncio.to_thread(_expire_zoom_leases)
             snap = await asyncio.to_thread(_board_snapshot)
             attention = await asyncio.to_thread(_build_attention, snap)
             attention_ids, new_items = _attention_changes(

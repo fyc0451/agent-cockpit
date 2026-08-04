@@ -330,6 +330,33 @@ def test_h5_takeover_opens_real_tui_with_touch_keys():
         assert f'onclick="termKey(\'{key}\')"' in HTML
 
 
+def test_narrow_takeover_owns_zoom_with_heartbeat_and_release_fallbacks():
+    js = _inline_js()
+    takeover = js.split("async function doAttachHerdr(session){", 1)[1].split(
+        "// ============ herdr 流视图", 1
+    )[0]
+    close = js.split("async function termClose(){", 1)[1].split(
+        "// 多终端保活", 1
+    )[0]
+    websocket = js.split("function openTermWS(id,xterm){", 1)[1].split(
+        "function showTermInstance", 1
+    )[0]
+    assert "TERM_ZOOM={}" in js
+    assert "if(isCompactScreen())await startTermZoomLease(r.id)" in takeover
+    assert "if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败')" in takeover
+    assert "await termClose()" in takeover
+    assert "/zoom-lease" in js
+    assert "action=state.owned?'renew':'acquire'" in js
+    assert "TERM_ZOOM_HEARTBEAT=10000" in js
+    assert "setInterval(()=>syncTermZoomLease(id),TERM_ZOOM_HEARTBEAT)" in js
+    assert "syncTermZoomLease(id)" in websocket
+    assert "await releaseTermZoomLease(id)" in close
+    assert close.index("await releaseTermZoomLease(id)") < close.index("api('/api/term/'+id")
+    assert "window.addEventListener('pagehide',releaseAllTermZoomLeases)" in js
+    assert "keepalive:true" in js
+    assert "COMPACT_SCREEN_MQ.addEventListener?.('change'" in js
+
+
 def test_mobile_terminal_has_expandable_computer_keyboard():
     js = _inline_js()
     assert 'id="termKeys"' in HTML
@@ -519,7 +546,7 @@ def test_herdr_flow_entry_from_term_uses_attached_session_identity():
     assert "TERM_SESSIONS[TERM_ID]" in show
     attach = js.split("async function doAttachHerdr(session){", 1)[1].split("// ============ herdr", 1)[0]
     assert "TERM_SESSIONS[r.id]=session" in attach
-    assert "delete TERM_SESSIONS[TERM_ID]" in js
+    assert "delete TERM_SESSIONS[id]" in js
 
 
 def test_safe_fit_waits_for_fonts_and_keeps_right_gutter():
