@@ -1455,6 +1455,8 @@ async function loadSessions(){
     const d=await api('/api/herdr/sessions');
     const sel=document.getElementById('lnSession');
     const running=(d.sessions||[]).filter(s=>s.status==='running');
+    TERM_SESSION_CATALOG=running.filter(s=>validSessionName(s.name)).map(s=>s.name);
+    renderTermOptions();
     sel.innerHTML=(d.sessions||[]).map(s=>`<option value="${esc(s.name)}" ${s.status==='running'?'':'disabled'}>${esc(s.name)}${s.status==='running'?'':' (停)'}</option>`).join('');
   }catch(e){}
 }
@@ -1535,6 +1537,8 @@ async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',head
 
 // ============ Web 终端(xterm.js + PTY) ============
 let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_ZOOM={}, TERM_FONT_READY=null;
+let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
+const TERM_SESSION_PREFIX='session:';
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
 const TERM_MODIFIERS={ctrl:false,alt:false,shift:false};
@@ -1586,7 +1590,12 @@ function termKey(name){
   queueTermInput(TERM_ID,applyTermModifiers(seq,name));
   XTERM&&XTERM.focus();
 }
-function termEnsure(){if(!TERM_ID)termNew()}
+async function termEnsure(){
+  await restoreTerms();
+  if(TERM_ID){termSwitch(TERM_ID);return}
+  if(TERM_SESSION_CATALOG.length){doAttachHerdr(TERM_SESSION_CATALOG[0]);return}
+  termNew();
+}
 function termLabel(id){return TERM_LABELS[id]||('终端 '+id.slice(0,8))}
 function ensureTermFontLoaded(){
   if(!document.fonts?.load)return Promise.resolve();
@@ -1598,8 +1607,33 @@ function ensureTermFontLoaded(){
 }
 function renderTermOptions(){
   const sel=document.getElementById('termSelect');
-  sel.innerHTML=TERMS.map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
+  const attached=new Set(Object.values(TERM_SESSIONS));
+  const terms=TERMS.map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
+  const sessions=TERM_SESSION_CATALOG.filter(session=>!attached.has(session)).map(session=>
+    `<option value="${TERM_SESSION_PREFIX}${esc(session)}">${esc(session)} · 打开</option>`
+  ).join('');
+  sel.innerHTML=terms+sessions;
   if(TERM_ID)sel.value=TERM_ID;
+}
+async function restoreTerms(){
+  if(TERM_RESTORE_PROMISE)return TERM_RESTORE_PROMISE;
+  TERM_RESTORE_PROMISE=(async()=>{
+    try{
+      const [termData,sessionData]=await Promise.all([api('/api/term'),api('/api/herdr/sessions')]);
+      TERM_SESSION_CATALOG=(sessionData.sessions||[])
+        .filter(session=>session.status==='running'&&validSessionName(session.name))
+        .map(session=>session.name);
+      for(const item of (termData.terms||[])){
+        const id=String(item.id||'');
+        if(!id||item.alive===false||TERMS.includes(id))continue;
+        TERMS.push(id);TERM_LABELS[id]=item.label||'';
+        if(item.label&&TERM_SESSION_CATALOG.includes(item.label))TERM_SESSIONS[id]=item.label;
+      }
+      if(!TERM_ID)TERM_ID=TERMS.find(id=>TERM_SESSIONS[id])||TERMS[0]||null;
+      renderTermOptions();
+    }catch(e){TERM_RESTORE_PROMISE=null;renderTermOptions()}
+  })();
+  return TERM_RESTORE_PROMISE;
 }
 async function termNew(cwd){
   try{
@@ -1700,6 +1734,7 @@ async function termAttachHerdr(){
 }
 async function doAttachHerdr(session){
   if(!validSessionName(session)){toast('非法 session 名,拒绝 attach');return}
+  await restoreTerms();
   closeCollab();
   hfStop();
   // 切到终端 tab,创建新终端
@@ -1707,6 +1742,8 @@ async function doAttachHerdr(session){
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
   document.getElementById('launchBar').classList.add('hidden');
+  const existing=TERMS.find(id=>TERM_SESSIONS[id]===session);
+  if(existing){TERM_ID=existing;renderTermOptions();termSwitch(existing);return}
   let createdId=null;
   try{
     await ensureTermFontLoaded();
@@ -2138,6 +2175,7 @@ function showTermInstance(id){
 }
 function termSwitch(id){
   if(!id)return;
+  if(id.startsWith(TERM_SESSION_PREFIX)){doAttachHerdr(id.slice(TERM_SESSION_PREFIX.length));return}
   TERM_ID=id;
   if(TERM_INSTANCES[id]){showTermInstance(id)}
   else{termMount(id)}
@@ -2918,7 +2956,7 @@ async function init(){
   COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
     for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
   });
-  connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();
+  connectSSE();loadSessions();refreshBoard();await Promise.all([restoreTerms(),loadAttention()]);refreshPushStatus();handleAttentionHash();
 }
 init();
 </script>

@@ -127,6 +127,33 @@ def test_terminal_selector_uses_herdr_session_name():
     assert "TERM_LABELS[r.id]=r.label||''" in js
 
 
+def test_terminal_refresh_restores_live_terms_and_lists_all_running_sessions():
+    js = _inline_js()
+    restore = js.split("async function restoreTerms(){", 1)[1].split(
+        "async function termNew", 1
+    )[0]
+    options = js.split("function renderTermOptions(){", 1)[1].split(
+        "async function restoreTerms", 1
+    )[0]
+    ensure = js.split("async function termEnsure(){", 1)[1].split(
+        "function termLabel", 1
+    )[0]
+
+    assert "Promise.all([api('/api/term'),api('/api/herdr/sessions')])" in restore
+    assert "item.alive===false" in restore
+    assert "TERMS.push(id);TERM_LABELS[id]=item.label||''" in restore
+    assert "TERM_SESSIONS[id]=item.label" in restore
+    assert "TERM_ID=TERMS.find(id=>TERM_SESSIONS[id])||TERMS[0]||null" in restore
+    # 只恢复存活 PTY；没有对应 PTY 的 session 先作为可选项展示，避免刷新即批量新建。
+    assert "method:'POST'" not in restore
+    assert "TERM_SESSION_CATALOG.filter(session=>!attached.has(session))" in options
+    assert "${esc(session)} · 打开" in options
+    assert "await restoreTerms()" in ensure
+    assert "doAttachHerdr(TERM_SESSION_CATALOG[0])" in ensure
+    assert "id.startsWith(TERM_SESSION_PREFIX)" in js
+    assert "await Promise.all([restoreTerms(),loadAttention()])" in js
+
+
 def test_auth_contract_wired():
     js = _inline_js()
     assert "/api/auth/status" in js
