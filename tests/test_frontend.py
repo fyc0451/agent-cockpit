@@ -11,6 +11,8 @@
   - herdr 流视图可滚动复制、默认卡片入口与轮询竞态保护
   - 文件管理按名称递归搜索、结果打开/下载与移动端布局
 """
+import base64
+import hashlib
 import re
 from pathlib import Path
 
@@ -142,13 +144,40 @@ def test_download_ui_preserved():
     assert "/api/files/download" in HTML
 
 
-def test_cdn_assets_use_subresource_integrity():
-    # 终端依赖来自 CDN；固定版本仍需 SRI，避免 CDN 内容被替换后取得同源 API 权限
-    for package in ("@xterm/xterm@5.5.0", "@xterm/addon-fit@0.10.0"):
-        tags = [line for line in HTML.splitlines() if package in line]
+def test_terminal_assets_are_self_hosted_with_subresource_integrity():
+    # 终端首屏不应被外部 CDN 阻塞；本地副本仍用 SRI 锁定内容。
+    assets = (
+        "vendor/xterm/xterm.css",
+        "vendor/xterm/xterm.js",
+        "vendor/xterm/addon-fit.js",
+    )
+    assert "cdn.jsdelivr.net" not in HTML
+    for asset in assets:
+        tags = [line for line in HTML.splitlines() if f"/static/{asset}" in line]
         assert tags
         assert all('integrity="sha384-' in line for line in tags)
         assert all('crossorigin="anonymous"' in line for line in tags)
+        asset_path = Path(__file__).resolve().parent.parent / "static" / asset
+        assert asset_path.is_file()
+        digest = base64.b64encode(hashlib.sha384(asset_path.read_bytes()).digest()).decode()
+        assert f'integrity="sha384-{digest}"' in tags[0]
+    for license_name in ("LICENSE.xterm", "LICENSE.addon-fit"):
+        assert (
+            Path(__file__).resolve().parent.parent
+            / "static"
+            / "vendor"
+            / "xterm"
+            / license_name
+        ).is_file()
+    notice = (
+        Path(__file__).resolve().parent.parent
+        / "static"
+        / "vendor"
+        / "xterm"
+        / "README.md"
+    ).read_text()
+    assert "@xterm/xterm` 5.5.0" in notice
+    assert "@xterm/addon-fit` 0.10.0" in notice
 
 
 def test_message_fields_escaped():
