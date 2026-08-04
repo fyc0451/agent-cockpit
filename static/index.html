@@ -195,8 +195,10 @@ header .spacer{flex:1}
 .term-keys.expanded .term-key-extra{display:block}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
 #termContainer{min-height:0}
-/* xterm 自己处理普通 scrollback；TUI 开启鼠标上报时才由下方 JS 接管触摸 */
+/* 普通 scrollback 由 xterm 原生处理；TUI 鼠标上报或 alternate buffer 由下方 JS 接管 */
 #termContainer .xterm.enable-mouse-events{touch-action:none;overscroll-behavior:contain}
+/* xterm 不处理 Pointer Events；alternate buffer 也没有原生 touch scrollback，需合成 wheel */
+#termContainer .xterm.term-touch-scroll{touch-action:none;overscroll-behavior:contain}
 .board-wrap,.file-tree,.sidebar,.msgs-list,.term-out,.hf-body,.modal{overscroll-behavior:contain}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
@@ -1858,15 +1860,24 @@ function queueTermInput(id,data,notice){
   if(notice)inst.pendingNotice=notice;
   flushTermInput(id,inst.ws);
 }
-// xterm 已原生处理普通 scrollback；但 TUI 开启鼠标上报后会跳过内置 touch
-// 处理。这里只在该模式下把单指纵向拖动转换成 wheel 事件交还给 xterm/TUI。
+// xterm 原生处理普通 scrollback；TUI 开启鼠标上报时会跳过内置 touch，
+// alternate buffer 即使未开鼠标上报也没有 touch scrollback。两种情况均把单指拖动
+// 转换成 wheel 交回 xterm：鼠标模式上报给 TUI，alternate 模式转为方向键。
 function enableTermTouchScroll(el,xterm){
   const sensitivity=4,maxSteps=48;
   let lastY=null,remainder=0,touchActive=false,activePointer=null;
+  const isAlternateBuffer=()=>xterm.buffer?.active?.type==='alternate';
+  const needsSyntheticScroll=()=>xterm.modes?.mouseTrackingMode!=='none'||isAlternateBuffer();
+  // xterm 5.5 原生只监听 Touch Events；Pointer-only 触屏的三种 buffer/mouse 状态
+  // 都必须由本桥转换。提前设置 touch-action，避免浏览器在首个 pointermove 时 cancel。
+  const usesPointerEvents=()=>typeof PointerEvent==='function';
+  const syncTouchMode=()=>xterm.element?.classList.toggle('term-touch-scroll',isAlternateBuffer()||usesPointerEvents());
+  syncTouchMode();
+  xterm.buffer?.onBufferChange?.(syncTouchMode);
   const finish=()=>{lastY=null;remainder=0};
   const begin=y=>{lastY=y;remainder=0};
-  const move=(y,e)=>{
-    if(lastY===null||xterm.modes?.mouseTrackingMode==='none')return;
+  const move=(y,e,force=false)=>{
+    if(lastY===null||(!force&&!needsSyntheticScroll()))return;
     remainder+=(lastY-y)*sensitivity;lastY=y;
     const screen=el.querySelector('.xterm-screen');
     const rowHeight=Math.max(12,(screen?.getBoundingClientRect().height||xterm.rows*18)/Math.max(1,xterm.rows));
@@ -1887,11 +1898,11 @@ function enableTermTouchScroll(el,xterm){
   el.addEventListener('touchstart',e=>{
     touchActive=e.touches.length===1;
     activePointer=null;
-    if(!touchActive||xterm.modes?.mouseTrackingMode==='none'){finish();return}
+    if(!touchActive||!needsSyntheticScroll()){finish();return}
     begin(e.touches[0].clientY);
   },{passive:true});
   el.addEventListener('touchmove',e=>{
-    if(lastY===null||e.touches.length!==1||xterm.modes?.mouseTrackingMode==='none')return;
+    if(lastY===null||e.touches.length!==1||!needsSyntheticScroll())return;
     move(e.touches[0].clientY,e);
   },{passive:false});
   const finishTouch=()=>{touchActive=false;finish()};
@@ -1900,13 +1911,13 @@ function enableTermTouchScroll(el,xterm){
   // 部分折叠屏展开后按桌面设备派发 Pointer Events，不再提供上述 Touch Events。
   // touchActive 用于浏览器同时派发两套事件时去重，避免一次拖动滚两遍。
   el.addEventListener('pointerdown',e=>{
-    if(e.pointerType!=='touch'||e.isPrimary===false||touchActive||xterm.modes?.mouseTrackingMode==='none')return;
+    if(e.pointerType!=='touch'||e.isPrimary===false||touchActive)return;
     // 新的 primary pointer 可覆盖极端序列中漏掉 pointerup/cancel 的旧状态。
     activePointer=e.pointerId;begin(e.clientY);
   },{passive:true});
   el.addEventListener('pointermove',e=>{
     if(touchActive||e.pointerType!=='touch'||e.pointerId!==activePointer)return;
-    move(e.clientY,e);
+    move(e.clientY,e,true);
   },{passive:false});
   const finishPointer=e=>{
     if(e.pointerId!==activePointer)return;
@@ -2474,6 +2485,31 @@ function connectSSE(){
   SSE.onerror=()=>{document.getElementById('liveDot').classList.add('off');setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)};
 }
 
+let LAST_PAGE_RECOVERY=0;
+function recoverPageState(){
+  if(document.visibilityState==='hidden')return;
+  const now=Date.now();
+  if(now-LAST_PAGE_RECOVERY<300)return;
+  LAST_PAGE_RECOVERY=now;
+  connectSSE();refreshBoard();loadAttention();
+  const activeView=document.querySelector('#nav button.active')?.dataset.view;
+  if(activeView==='sessions')loadSessionsView();
+  else if(activeView==='msgs')loadProjList();
+  else if(activeView==='files')loadFileTree();
+  else if(activeView==='herdrflow')hfRefreshAll();
+  else if(activeView==='term'&&TERM_ID){
+    const inst=TERM_INSTANCES[TERM_ID];
+    if(inst){
+      if(!inst.ws||inst.ws.readyState>=2)showTermInstance(TERM_ID);
+      else if(inst.ws.readyState===1){
+        safeFitOf(inst.fit,inst.xterm);
+        try{inst.ws.send(JSON.stringify({type:'resize',cols:inst.xterm.cols,rows:inst.xterm.rows}))}catch(e){}
+        setTimeout(()=>{try{inst.xterm.focus()}catch(e){}},50);
+      }
+    }
+  }
+}
+
 function keepFocusedControlVisible(){
   if(!isTouchTerminal())return;
   const el=document.activeElement;
@@ -2705,9 +2741,9 @@ async function init(){
   applyLang();
   loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
   document.getElementById('lnWorkdir').addEventListener('input',launchPreselectAgent);
-  document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='visible'){connectSSE();refreshBoard();loadAttention()}
-  });
+  document.addEventListener('visibilitychange',recoverPageState);
+  window.addEventListener('focus',recoverPageState);
+  window.addEventListener('pageshow',recoverPageState);
   connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();
 }
 init();

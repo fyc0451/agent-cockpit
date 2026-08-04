@@ -273,8 +273,22 @@ def test_h5_safe_area_and_overlay_scroll_are_contained():
 def test_mobile_connections_and_focused_input_recover():
     js = _inline_js()
     assert "document.addEventListener('visibilitychange'" in js
-    assert "document.visibilityState==='visible'" in js
-    assert "connectSSE();refreshBoard()" in js
+    assert "function recoverPageState()" in js
+    recovery = js.split("function recoverPageState(){", 1)[1].split("function ", 1)[0]
+    assert "document.visibilityState==='hidden'" in recovery
+    assert "now-LAST_PAGE_RECOVERY<300" in recovery
+    assert "connectSSE();refreshBoard();loadAttention()" in recovery
+    assert "loadSessionsView()" in recovery
+    assert "loadProjList()" in recovery
+    assert "loadFileTree()" in recovery
+    assert "hfRefreshAll()" in recovery
+    assert "window.addEventListener('focus',recoverPageState)" in js
+    assert "window.addEventListener('pageshow',recoverPageState)" in js
+    assert "showTermInstance(TERM_ID)" in recovery
+    assert "inst.ws.readyState===1" in recovery
+    assert "safeFitOf(inst.fit,inst.xterm)" in recovery
+    assert "inst.xterm.focus()" in recovery
+    assert "location.reload" not in recovery
     assert "function scheduleTermReconnect(id)" in js
     assert "reconnectDelay" in js
     assert "Math.min(delay*2,10000)" in js
@@ -376,8 +390,8 @@ def test_terminal_fit_never_resizes_pty_from_hidden_view():
 
 
 def test_terminal_touch_scroll_is_js_driven():
-    # xterm 原生处理普通 scrollback；但应用开启鼠标上报后会跳过内置 touch，
-    # 此时才由 enableTermTouchScroll 把单指拖动换算成 wheel 交给 TUI。
+    # 普通 scrollback 由 xterm 原生处理；鼠标上报或无 scrollback 的 alternate buffer
+    # 由 enableTermTouchScroll 把单指拖动换算成 wheel 交给 TUI。
     js = _inline_js()
     assert "function enableTermTouchScroll(el,xterm)" in js
     assert "#termContainer .xterm.enable-mouse-events{touch-action:none" in HTML
@@ -385,7 +399,12 @@ def test_terminal_touch_scroll_is_js_driven():
     assert "enableTermTouchScroll(el,xterm)" in mount
     scroll = js.split("function enableTermTouchScroll(el,xterm){", 1)[1].split("function ", 1)[0]
     assert "const sensitivity=4,maxSteps=48" in scroll
-    assert "xterm.modes?.mouseTrackingMode==='none'" in scroll
+    assert "xterm.modes?.mouseTrackingMode!=='none'||isAlternateBuffer()" in scroll
+    assert "xterm.buffer?.active?.type==='alternate'" in scroll
+    assert "xterm.buffer?.onBufferChange?.(syncTouchMode)" in scroll
+    assert "const usesPointerEvents=()=>typeof PointerEvent==='function'" in scroll
+    assert "move(e.clientY,e,true)" in scroll
+    assert "#termContainer .xterm.term-touch-scroll{touch-action:none" in HTML
     assert "steps=Math.min(maxSteps,Math.abs(lines))" in scroll
     # 只扣实际派发的行数,快滑不丢滚动距离
     assert "remainder-=direction*steps*rowHeight" in scroll
