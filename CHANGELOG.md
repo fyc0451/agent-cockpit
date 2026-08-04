@@ -10,6 +10,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Bundled Agent Mail helper commands, including Claude registration, with safe
   `~/.local/bin` links during install and upgrade.
+- Python 3.14 coverage in the Linux and macOS CI matrix.
 
 ### Fixed
 
@@ -18,6 +19,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   legacy sessions instead of guessing from pane cwd.
 - Stop fabricating `<agent>-main` identities and route pane notifications through the
   persisted session binding while preserving Agent Mail as an optional dependency.
+- Serialize complete Web PTY input messages per terminal so reconnecting or concurrent
+  WebSockets cannot interleave bytes, and make the large-input regression wait for an
+  explicit receiver-ready signal instead of depending on login-shell startup timing.
+
+### Security
+
+- Upgrade `python-multipart` to 0.0.31 and pytest to 9.0.3 to include current upstream
+  security fixes.
 
 ## [0.1.0] - 2026-08-03
 

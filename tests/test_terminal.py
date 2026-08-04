@@ -3,7 +3,9 @@
 会真实 fork bash PTY;每个用例结束后统一清理,避免泄漏。
 """
 import os
+import shlex
 import signal
+import sys
 import threading
 import time
 
@@ -45,6 +47,30 @@ def _wait_dead(tid: str, timeout: float = 8.0) -> bytes:
     while time.monotonic() < deadline and terminal.is_alive(tid):
         out += terminal.read_output(tid, 0.05)
     return out
+
+
+def _start_file_receiver(tid: str, target, ready) -> None:
+    """启动确定性 stdin 接收器；ready 出现后才允许发送测试 payload。"""
+    code = (
+        "import pathlib,sys;"
+        f"pathlib.Path({str(ready)!r}).touch();"
+        f"pathlib.Path({str(target)!r}).write_bytes(sys.stdin.buffer.read())"
+    )
+    terminal.write_term(tid, f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}\n")
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and not ready.exists():
+        terminal.read_output(tid, 0.05)
+    assert ready.exists(), "PTY stdin 接收器未及时启动"
+
+
+def _wait_file_size(path, size: int, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.stat().st_size >= size:
+            return
+        time.sleep(0.05)
+    actual = path.stat().st_size if path.exists() else 0
+    raise AssertionError(f"文件未及时写完: {actual}/{size}")
 
 
 # ── 参数校验与上限 ──────────────────────────────────────────────
@@ -92,15 +118,13 @@ def test_echo_roundtrip():
 
 
 def test_large_write_full_integrity(tmp_path, monkeypatch):
-    """大体积写:对端(cat)并发消费时,全部字节必须完整到达,不丢尾。"""
+    """大体积写:接收器并发消费时,全部字节必须完整到达,不丢尾。"""
     # CI runner 负载高时 drainer 消费慢,2s 默认超时会把本用例打成 flake;
     # 放宽到与下方完整性等待相同的 10s(只放宽本用例,不改产品默认值)。
     monkeypatch.setattr(terminal, "WRITE_TIMEOUT", 10.0)
     tid = _create()
     target = tmp_path / "payload.txt"
-    terminal.write_term(tid, f"cat > {target}\n")
-    _read_until(tid, b"cat >", 5)
-    time.sleep(0.5)  # 等 cat 进入读取态
+    _start_file_receiver(tid, target, tmp_path / "receiver-ready")
     # 模拟 server pump 持续读走回显:canonical 模式输入会回显到 master,
     # 没人读时 macOS 的小 PTY 缓冲会反压输入(Linux 缓冲大,不显性)
     stop = threading.Event()
@@ -114,15 +138,51 @@ def test_large_write_full_integrity(tmp_path, monkeypatch):
         payload = "".join(f"{i:05d}" + "x" * 95 + "\n" for i in range(2000))
         terminal.write_term(tid, payload)   # 不得 TimeoutError
         terminal.write_term(tid, "\x04")    # Ctrl-D EOF
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if target.exists() and target.stat().st_size >= len(payload):
-                break
-            time.sleep(0.1)
+        _wait_file_size(target, len(payload))
         assert target.read_text() == payload
     finally:
         stop.set()
         drainer.join(timeout=2)
+
+
+def test_concurrent_writes_preserve_message_boundaries(tmp_path, monkeypatch):
+    """两个 WebSocket/重连并发写同一 PTY 时，每条消息不得字节级交错。"""
+    monkeypatch.setattr(terminal, "WRITE_TIMEOUT", 10.0)
+    tid = _create()
+    target = tmp_path / "concurrent.txt"
+    _start_file_receiver(tid, target, tmp_path / "concurrent-ready")
+
+    real_write = os.write
+
+    def one_byte_at_a_time(fd, data):
+        time.sleep(0.0001)
+        return real_write(fd, data[:1])
+
+    monkeypatch.setattr(os, "write", one_byte_at_a_time)
+    payloads = ("A" * 512 + "\n", "B" * 512 + "\n")
+    barrier = threading.Barrier(3)
+    errors = []
+
+    def writer(payload):
+        try:
+            barrier.wait()
+            terminal.write_term(tid, payload)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(payload,)) for payload in payloads]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(10)
+    assert not errors
+    assert not any(thread.is_alive() for thread in threads)
+
+    terminal.write_term(tid, "\x04")
+    _wait_file_size(target, sum(len(payload) for payload in payloads))
+    data = target.read_text()
+    assert data in (payloads[0] + payloads[1], payloads[1] + payloads[0])
 
 
 def test_write_timeout_raises_and_reports(monkeypatch):
@@ -212,6 +272,44 @@ def test_kill_wins_race_with_concurrent_io():
     for th in threads:
         th.join(5)
     assert not errors
+
+
+def test_kill_waits_for_inflight_write(monkeypatch):
+    """close 必须等完整消息写完，不能让 fd 关闭/复用污染剩余输入。"""
+    tid = _create()
+    real_write = os.write
+    entered = threading.Event()
+    release = threading.Event()
+    errors = []
+
+    def paused_write(fd, data):
+        entered.set()
+        assert release.wait(5)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", paused_write)
+
+    def writer():
+        try:
+            terminal.write_term(tid, "printf x\n")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    write_thread = threading.Thread(target=writer)
+    write_thread.start()
+    assert entered.wait(5)
+    kill_thread = threading.Thread(target=terminal.kill_term, args=(tid,))
+    kill_thread.start()
+    time.sleep(0.05)
+    assert kill_thread.is_alive(), "kill 未等待正在写入的完整消息"
+    release.set()
+    write_thread.join(5)
+    kill_thread.join(5)
+
+    assert not errors
+    assert not write_thread.is_alive()
+    assert not kill_thread.is_alive()
+    assert not terminal.is_alive(tid)
 
 
 # ── 空闲/死进程回收(支持 WS 断开重连) ─────────────────────────

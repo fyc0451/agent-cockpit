@@ -7,8 +7,8 @@ FastAPI WebSocket 双向桥接:浏览器击键→PTY,PTY 输出→浏览器。
 
 生命周期与并发模型:
   - 创建前校验 cols/rows,活跃终端数有上限(MAX_TERMS),防资源耗尽。
-  - 每个会话一把 per-term 锁,read/write/close 都在锁内完成,
-    避免 kill 与 read/write 的 fd 竞态(fd 被关闭/复用后误操作)。
+  - 每个会话用状态锁保护 read/resize/close，再用独立 write_lock 串行完整输入消息；
+    避免双 WebSocket/重连并发写发生字节级交错，同时不阻塞输出泵排干回显。
   - fd 是非阻塞的:读用 select 轮询;写循环处理短写与 BlockingIOError,
     超过 WRITE_TIMEOUT 抛 TimeoutError(调用方可感知丢失,不静默丢尾)。
   - kill 杀整个进程组(pty.fork 的子进程是新 session leader)+ 关 fd
@@ -154,7 +154,8 @@ def create_term(
             over = False
             _terms[term_id] = {
                 "master_fd": master_fd, "pid": pid, "alive": True,
-                "lock": threading.Lock(), "created_ts": now, "last_active": now,
+                "lock": threading.Lock(), "write_lock": threading.Lock(),
+                "created_ts": now, "last_active": now,
                 "dead_ts": None, "label": label,
             }
     if over:
@@ -231,42 +232,46 @@ def write_term(term_id: str, data: str) -> None:
     if not t:
         return
     buf = data.encode("utf-8")
+    if not buf:
+        return
     total = len(buf)
-    write_timeout = float(_term_cfg("write_timeout", WRITE_TIMEOUT))
-    deadline = time.monotonic() + write_timeout
-    with t["lock"]:
-        if not t.get("alive"):
-            return
-        fd = t["master_fd"]
-    # 写循环不持有 t["lock"]:canonical 模式输入会回显到 master,macOS 的
-    # PTY 缓冲小,写入被回显反压时必须让读端(pump)能并发排干,否则大体积
-    # 写必然等到超时;fd 被并发关闭时 os.write 抛 OSError,由下面兜住
-    while buf:
-        try:
-            n = os.write(fd, buf)
-        except BlockingIOError:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"write_term 超时({write_timeout}s):"
-                    f"已写入 {total - len(buf)}/{total} 字节,对端未及时消费"
-                )
+    with t["write_lock"]:
+        write_timeout = float(_term_cfg("write_timeout", WRITE_TIMEOUT))
+        deadline = time.monotonic() + write_timeout
+        with t["lock"]:
+            if not t.get("alive"):
+                return
+            fd = t["master_fd"]
+        # 写循环不持有 t["lock"]:canonical 模式输入会回显到 master,macOS 的
+        # PTY 缓冲小,写入被回显反压时必须让读端(pump)能并发排干,否则大体积
+        # 写必然等到超时;write_lock 只串行写者，不阻塞读端。
+        while buf:
             try:
-                select.select([], [fd], [], min(0.1, remaining))
-            except OSError:
-                raise TimeoutError(
-                    f"write_term 等待可写失败:已写入 {total - len(buf)}/{total} 字节"
-                )
-            continue
-        except OSError as e:
-            # 非阻塞写之外的 OSError(如 EIO:终端已关闭):
-            # buf 必有剩余,不能静默丢尾,抛可感知异常
-            raise ConnectionError(
-                f"write_term 失败(终端可能已关闭):"
-                f"已写入 {total - len(buf)}/{total} 字节: {e}"
-            ) from e
-        buf = buf[n:]
-        t["last_active"] = time.monotonic()
+                n = os.write(fd, buf)
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"write_term 超时({write_timeout}s):"
+                        f"已写入 {total - len(buf)}/{total} 字节,对端未及时消费"
+                    )
+                try:
+                    select.select([], [fd], [], min(0.1, remaining))
+                except OSError:
+                    raise TimeoutError(
+                        f"write_term 等待可写失败:"
+                        f"已写入 {total - len(buf)}/{total} 字节"
+                    )
+                continue
+            except OSError as e:
+                # 非阻塞写之外的 OSError(如 EIO:终端已关闭):
+                # buf 必有剩余,不能静默丢尾,抛可感知异常
+                raise ConnectionError(
+                    f"write_term 失败(终端可能已关闭):"
+                    f"已写入 {total - len(buf)}/{total} 字节: {e}"
+                ) from e
+            buf = buf[n:]
+            t["last_active"] = time.monotonic()
 
 
 def _read_fd(t: dict[str, Any], timeout: float) -> bytes:
@@ -351,9 +356,12 @@ def kill_term(term_id: str) -> None:
         t = _terms.pop(term_id, None)
     if not t:
         return
-    with t["lock"]:
-        t["alive"] = False
-        _kill_child(t["pid"], t["master_fd"])
+    # 与 write_term 相同的锁序:先写锁、后状态锁。close 等当前完整消息写完，
+    # 防止 master fd 在短写循环中途关闭并被系统复用到无关文件。
+    with t["write_lock"]:
+        with t["lock"]:
+            t["alive"] = False
+            _kill_child(t["pid"], t["master_fd"])
 
 
 def sweep_idle(max_idle: float | None = None) -> int:
