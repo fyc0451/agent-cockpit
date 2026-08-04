@@ -281,6 +281,110 @@ def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, A
     }
 
 
+def _parse_data_json(out: str) -> dict[str, Any] | None:
+    """解析 herdr CLI 输出:SSE `data:` 行优先,否则按整体 JSON。失败返回 None。"""
+    raw = out
+    for line in out.splitlines():
+        if line.startswith("data:"):
+            raw = line[5:].strip()
+            break
+    try:
+        data = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def pane_layout(session: str, pane_id: str | None = None) -> dict[str, Any]:
+    """查询 pane 所在 tab 的布局:zoom 状态与 pane 几何。
+
+    窄屏(手机)attach 水平分屏时做单 pane 聚焦判断的依据:
+      zoomed            当前 tab 是否已有 zoom 的 pane(还原/不重复 zoom 用)
+      focused_pane_id   当前焦点 pane(zoom 默认目标)
+      horizontal_split  同一 y 上有 ≥2 个 pane(左右水平分屏)
+    pane_id 省略时查询 UI 焦点 pane 所在 tab。
+    """
+    if not is_available():
+        return {"available": False}
+    args = ["--session", session, "pane", "layout"]
+    if pane_id:
+        args += ["--pane", pane_id]
+    try:
+        out = _run(args, timeout=8)
+    except RuntimeError as e:
+        return {"available": True, "error": str(e)}
+    data = _parse_data_json(out)
+    if not data:
+        return {"available": True, "error": "pane layout 输出解析失败"}
+    result = data.get("result", data)
+    layout = result.get("layout", result)
+    panes_raw = layout.get("panes")
+    if not isinstance(panes_raw, list):
+        return {"available": True, "error": "pane layout 输出缺少 panes"}
+    panes = []
+    for p in panes_raw:
+        rect = p.get("rect") or {}
+        panes.append({
+            "pane_id": p.get("pane_id"),
+            "focused": p.get("focused", False),
+            "x": rect.get("x", 0),
+            "y": rect.get("y", 0),
+            "width": rect.get("width", 0),
+            "height": rect.get("height", 0),
+        })
+    ys = [p["y"] for p in panes]
+    return {
+        "available": True,
+        "session": session,
+        "tab_id": layout.get("tab_id"),
+        "workspace_id": layout.get("workspace_id"),
+        "zoomed": bool(layout.get("zoomed", False)),
+        "focused_pane_id": layout.get("focused_pane_id"),
+        "panes": panes,
+        "horizontal_split": len(panes) > 1 and len(set(ys)) < len(ys),
+        "area": layout.get("area") or {},
+    }
+
+
+def pane_zoom(
+    session: str, pane_id: str | None = None, mode: str = "toggle",
+) -> dict[str, Any]:
+    """设置/切换 pane zoom(窄屏 attach 聚焦单 pane、退出还原用)。
+
+    mode=on/off 幂等:已是目标态时 herdr 返回 reason=already_zoomed/
+    already_unzoomed 且 changed=False;toggle 每次翻转。pane_id 省略时
+    作用于 UI 焦点 pane。失败降级返回 {available:True,error},不抛异常。
+    """
+    if not is_available():
+        return {"available": False}
+    if mode not in ("on", "off", "toggle"):
+        return {"available": True, "error": f"非法 zoom mode: {mode}"}
+    args = ["--session", session, "pane", "zoom"]
+    if pane_id:
+        args.append(pane_id)
+    args.append(f"--{mode}")
+    try:
+        out = _run(args, timeout=8)
+    except RuntimeError as e:
+        return {"available": True, "error": str(e)}
+    data = _parse_data_json(out)
+    if not data:
+        return {"available": True, "error": "pane zoom 输出解析失败"}
+    result = data.get("result", data)
+    zoom = result.get("zoom", result)
+    if "zoomed" not in zoom:
+        return {"available": True, "error": "pane zoom 输出缺少 zoomed"}
+    return {
+        "available": True,
+        "session": session,
+        "pane_id": zoom.get("pane_id"),
+        "zoomed": bool(zoom.get("zoomed")),
+        "changed": bool(zoom.get("zoom_changed", zoom.get("changed", False))),
+        "reason": zoom.get("reason"),
+        "focused_pane_id": zoom.get("focused_pane_id"),
+    }
+
+
 def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> dict[str, Any]:
     """往 pane 发送。
 
