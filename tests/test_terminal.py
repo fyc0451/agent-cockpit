@@ -50,12 +50,22 @@ def _wait_dead(tid: str, timeout: float = 8.0) -> bytes:
 
 
 def _start_file_receiver(tid: str, target, ready) -> None:
-    """启动确定性 stdin 接收器；ready 出现后才允许发送测试 payload。"""
-    code = (
-        "import pathlib,sys;"
-        f"pathlib.Path({str(ready)!r}).touch();"
-        f"pathlib.Path({str(target)!r}).write_bytes(sys.stdin.buffer.read())"
-    )
+    """启动确定性 stdin 接收器；ready 出现后才允许发送测试 payload。
+
+    子进程 exec 可能早于交互 shell 完成 tcsetpgrp；如果在成为前台
+    进程组前立即 read(0)，内核会发 SIGTTIN 将它暂停。因此 ready 必须
+    在 tcgetpgrp 确认前台权后才创建，否则仍存在极小启动竞态。
+    """
+    code = "\n".join((
+        "import os, pathlib, sys, time",
+        "deadline = time.monotonic() + 5",
+        "while os.tcgetpgrp(0) != os.getpgrp():",
+        "    if time.monotonic() >= deadline:",
+        "        raise TimeoutError('receiver did not become foreground')",
+        "    time.sleep(0.001)",
+        f"pathlib.Path({str(ready)!r}).touch()",
+        f"pathlib.Path({str(target)!r}).write_bytes(sys.stdin.buffer.read())",
+    ))
     terminal.write_term(tid, f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}\n")
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline and not ready.exists():

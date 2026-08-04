@@ -21,7 +21,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   persisted session binding while preserving Agent Mail as an optional dependency.
 - Serialize complete Web PTY input messages per terminal so reconnecting or concurrent
   WebSockets cannot interleave bytes, and make the large-input regression wait for an
-  explicit receiver-ready signal instead of depending on login-shell startup timing.
+  explicit foreground receiver-ready signal instead of depending on login-shell job
+  control timing.
 - Serve the pinned xterm.js browser assets locally so terminal page loads no longer
   wait on a slow or unavailable third-party CDN.
 
