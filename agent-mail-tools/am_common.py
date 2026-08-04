@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 CLIENT_ENV = Path.home() / ".agent-mail" / "client.env"
@@ -27,6 +30,79 @@ def load_client_config() -> tuple[str, str]:
                 elif key.strip() == "token":
                     token = value.strip()
     return hub.rstrip("/"), token
+
+
+def normalize_hub_url(value: str) -> str:
+    """校验并规范化 Hub 基础地址；凭据必须继续放在 token 配置中。"""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Hub 地址不能为空")
+    hub = value.strip()
+    if any(char.isspace() for char in hub):
+        raise ValueError("Hub 地址不能包含空白字符")
+    try:
+        parsed = urlsplit(hub)
+        port = parsed.port  # 触发非法端口校验
+    except ValueError as exc:
+        raise ValueError(f"Hub 地址无效: {exc}") from exc
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("Hub 地址只允许 http 或 https")
+    if not parsed.hostname:
+        raise ValueError("Hub 地址必须包含主机名")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Hub 地址不能包含用户名或密码")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Hub 地址不能包含 query 或 fragment")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Hub 端口必须在 1-65535 之间")
+    return hub.rstrip("/")
+
+
+def save_client_hub(value: str) -> str:
+    """原子更新 client.env 的 hub 行，保留 token 与未来扩展配置。"""
+    hub = normalize_hub_url(value)
+    try:
+        original = CLIENT_ENV.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        original = ""
+
+    lines = original.splitlines(keepends=True)
+    found = False
+    updated: list[str] = []
+    for line in lines:
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        if "=" in body and not body.strip().startswith("#"):
+            key, _, _ = body.partition("=")
+            if key.strip() == "hub":
+                updated.append(f"hub={hub}{ending or chr(10)}")
+                found = True
+                continue
+        updated.append(line)
+    content = "".join(updated)
+    if not found:
+        if content and not content.endswith(("\n", "\r")):
+            content += "\n"
+        content += f"hub={hub}\n"
+
+    CLIENT_ENV.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".client.env.", suffix=".tmp", dir=str(CLIENT_ENV.parent)
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, CLIENT_ENV)
+        os.chmod(CLIENT_ENV, 0o600)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return hub
 
 
 def load_identity(agent: str, instance: str, project: str) -> tuple[dict, str, str]:

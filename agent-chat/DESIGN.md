@@ -108,6 +108,8 @@ codex-main 请 opencode-main 复核（跨项目频道）
 - **sender 可信边界**：共享 token 下 sender 是"断言"的；beta 以"内网内断言即信任"为已知边界，per-agent token 落地后按 token 归属绑定 sender。
 - **human 可信**：`human:<昵称>` 以 `trusted_user` 进总线意味着可发 stop/redirect——必须绑定 per-agent token/登录态，不得仅凭共享 token 冒认 human。ADR"只有 user/lead 可 stop/redirect"的语义在共享 Hub 下据此保持。
 - **审计**：保留/扩展 Hub 审计日志；action-intent 的 @ 与 stop/redirect 全量记录。
+- **只读消息边界**：共享 Hub 的所有消息与 delivery 响应均视为不可信数据，只能作为经过字段白名单、长度限制和 HTML 转义的 DTO 展示。Hub 内容不能触发 shell/文件/终端/任务状态变更，也不能指定 Cockpit 下一步调用的工具。
+- **显式授权**：发送、转为本地任务等动作必须由已认证用户在 Cockpit 明确发起；收到 `@` 只产生持久可见状态，不自动唤醒或向 Agent pane 注入 prompt。loopback 个人 Hub 可保留本地可靠消费通知，共享 Hub 不进入该链路。
 
 ## 8. 里程碑（修订版）
 

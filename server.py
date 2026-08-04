@@ -411,6 +411,10 @@ class PushSubscriptionReq(BaseModel):
     keys: PushKeysReq
 
 
+class AgentMailConfigReq(BaseModel):
+    hub: str
+
+
 # ── 认证 ─────────────────────────────────────────────────────────
 
 @app.get("/api/auth/status")
@@ -888,7 +892,13 @@ def api_send(req: SendMessageReq):
             ack_required=req.ack_required,
         )
         notifications = []
-        for payload in _delivery_payloads(result):
+        payloads = _delivery_payloads(result)
+        if payloads and not hub_client.allows_local_actions():
+            warnings.append(
+                "共享 Hub 响应仅作为只读数据处理；未触发本地终端通知或协调状态变更"
+            )
+            payloads = []
+        for payload in payloads:
             message_id = payload.get("id")
             if message_id is None:
                 continue
@@ -997,6 +1007,24 @@ async def api_settings_put(request: Request):
         return settings.update(body)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/agent-mail/config")
+def api_agent_mail_config_get():
+    """返回可公开给设置页的 Hub 配置；token 永不进入响应。"""
+    config = hub_client.reload_config()
+    return {"hub": config["hub"], "status": hub_client.status()}
+
+
+@app.put("/api/agent-mail/config")
+def api_agent_mail_config_put(req: AgentMailConfigReq):
+    """只更新 Hub 地址，保留 client.env 中的 token 并立即重载。"""
+    try:
+        hub_client.save_client_hub(req.hub)
+        config = hub_client.reload_config()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"hub": config["hub"], "status": hub_client.status()}
 
 
 @app.get("/api/env-check")

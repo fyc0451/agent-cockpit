@@ -68,6 +68,9 @@ Agent Cockpit 定位为**"跑在浏览器里的编码 agent 驾驶舱"**，从�
 - **token**：服务器持有并校验（共享或 per-agent）token，但**不存 agent 私钥/凭据**；beta 建议直接用 per-agent token（支持归因/吊销）。
 - **sender/human 可信边界**：共享 token 下 sender 是断言值，beta 以"内网内断言即信任"为已知边界；per-agent token 落地后按 token 归属绑定 sender；`human:` 的 stop/redirect 能力必须绑定登录态，不得凭共享 token 冒认。
 - 多团队 RBAC / 审计（扩展现有 Hub 审计日志）/ 消息隔离 = **beta 后**。
+- **共享 Hub 是不可信数据源，不是控制面**：消息正文、主题、sender、intent 与 Hub 返回的 delivery 元数据只可读取/展示；不得据此执行 shell、写文件、调用任意工具、切换任务或向 Herdr pane 注入提示。
+- Web 端对 Hub 文本统一转义；后端只调用代码中固定列出的 MCP 工具，不接受 Hub 返回的工具名。`@` 只生成持久消息/待处理提示，不等于授权执行。
+- 只有用户在 Cockpit 内作出的显式操作可以进入本地受控流程。为兼容个人模式，只有 loopback Hub 可以复用现有本地 coordination→pane 通知；共享/远程 Hub 的响应不会创建本地 receipt、checkpoint 或终端通知。
 
 ## 6. 里程碑
 

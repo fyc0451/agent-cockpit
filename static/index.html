@@ -583,6 +583,14 @@ header .spacer{flex:1}
         <div id="setAgents" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px"></div>
       </div>
       <div class="set-card">
+        <h3 data-i18n="set.hub">Agent Mail Hub 地址</h3>
+        <input id="setHub" type="url" autocomplete="off" spellcheck="false"
+          placeholder="http://127.0.0.1:8765" style="width:100%"
+          oninput="HUB_CONFIG_EDIT=this.value">
+        <div class="muted" style="font-size:12px;margin-top:6px" data-i18n="set.hub.hint">个人模式填本机地址，团队模式填共享 Hub 地址。Token 不会在页面读取或展示，保存后新地址立即生效。</div>
+        <div id="setHubStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
+      </div>
+      <div class="set-card">
         <h3 data-i18n="set.env">环境自检</h3>
         <div class="muted" style="font-size:12px" data-i18n="set.env.hint">首次使用先确认这些组件已就绪;标 ❌ 的需要先安装。</div>
         <div id="envCheck" style="margin-top:6px;font-size:12px"></div>
@@ -748,6 +756,7 @@ en:{
 'drawer.title':'Terminal','drawer.send':'Send',
 'set.lang':'Language','set.dirs':'Accessible directories','set.dirs.hint':'Add/remove directories at the top of the Files page.','set.diragent':'Default agent per directory','set.diragent.dir':'Directory','set.diragent.agent':'Default agent','set.diragent.ph':'Absolute directory path','set.add':'＋ Add','set.enabled':'Enabled agents','set.enabled.hint':'Launch menus only list enabled agents.','set.limits':'Runtime limits','set.upload_max':'Upload limit (MB)','set.max_terms':'Max terminals','set.idle_ttl':'Idle terminal TTL (s)','set.write_timeout':'Terminal write timeout (s)','set.save':'Save','set.saved':'Saved ✓','set.savefail':'Save failed: ','set.dirph':'/abs/path','set.theme':'Appearance','set.theme.light':'☀️ Light','set.theme.dark':'🌙 Dark','set.theme.hint':'The terminal also switches to a light background in light mode.',
 'set.env':'Environment check','set.env.hint':'On first use, make sure these components are ready; ❌ means install first.','set.env.herdr':'herdr (session backend)','set.env.mail':'Agent Mail (optional, messaging)','set.env.missing':'not installed',
+'set.hub':'Agent Mail Hub address','set.hub.hint':'Use the local address for personal mode or the shared Hub for team mode. The token is never read or shown in this page; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ',
 'set.termfont':'Terminal font size','set.termfont.hint':'Applies to this device only, effective immediately.',
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
@@ -767,6 +776,7 @@ ja:{
 'drawer.title':'端末','drawer.send':'送信',
 'set.lang':'表示言語','set.dirs':'アクセス可能ディレクトリ','set.dirs.hint':'ディレクトリの追加・削除は「ファイル」ページ上部で行います。','set.diragent':'ディレクトリ別デフォルト agent','set.diragent.dir':'ディレクトリ','set.diragent.agent':'デフォルト agent','set.diragent.ph':'ディレクトリの絶対パス','set.add':'＋ 追加','set.enabled':'有効な agent','set.enabled.hint':'起動メニューには有効な agent のみ表示されます。','set.limits':'実行パラメータ','set.upload_max':'アップロード上限 (MB)','set.max_terms':'最大ターミナル数','set.idle_ttl':'アイドル端末の回収(秒)','set.write_timeout':'端末書き込みタイムアウト(秒)','set.save':'保存','set.saved':'保存しました ✓','set.savefail':'保存に失敗: ','set.dirph':'/abs/path','set.theme':'外観','set.theme.light':'☀️ ライト','set.theme.dark':'🌙 ダーク','set.theme.hint':'ライトモードでは端末も淡色背景になります。',
 'set.env':'環境チェック','set.env.hint':'初回利用前にこれらのコンポーネントを確認してください。❌ は要インストールです。','set.env.herdr':'herdr(セッションバックエンド)','set.env.mail':'Agent Mail(任意、メッセージ機能)','set.env.missing':'未インストール',
+'set.hub':'Agent Mail Hub アドレス','set.hub.hint':'個人モードではローカル、チームモードでは共有 Hub のアドレスを指定します。Token は画面に読み込まず表示もしません。保存後すぐに反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ',
 'set.termfont':'端末フォントサイズ','set.termfont.hint':'このデバイスのみに適用され、即時反映されます。',
 'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ',
 }};
@@ -805,11 +815,14 @@ function toggleTermToolbar(){
 function setLang(l){LANG=l;localStorage.setItem('cockpit-lang',l);applyLang();const active=document.querySelector('#nav button.active');if(active)showView(active.dataset.view)}
 
 // ============ 设置 ============
-let SETTINGS=null, SETTINGS_EDIT=null;
+let SETTINGS=null, SETTINGS_EDIT=null, HUB_CONFIG=null, HUB_CONFIG_EDIT='';
 async function loadSettings(){
   try{
-    SETTINGS=await api('/api/settings');
+    [SETTINGS,HUB_CONFIG]=await Promise.all([
+      api('/api/settings'),api('/api/agent-mail/config')
+    ]);
     SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
+    HUB_CONFIG_EDIT=HUB_CONFIG.hub||'';
     // 设备未选过语言时,用服务端默认语言
     if(!localStorage.getItem('cockpit-lang')&&SETTINGS.language&&SETTINGS.language!==LANG){
       LANG=SETTINGS.language;applyLang();
@@ -843,6 +856,15 @@ function renderSettings(){
   document.getElementById('setAgents').innerHTML=known.map(a=>
     `<label style="display:flex;gap:4px;align-items:center;font-size:13px"><input type="checkbox" data-agent="${esc(a)}"${(S.enabled_agents||[]).includes(a)?' checked':''} onchange="setToggleAgent(this)">${esc(a)}</label>`
   ).join('');
+  // Hub 地址独立存放在 ~/.agent-mail/client.env；浏览器只接触地址与连通状态。
+  const hubInput=document.getElementById('setHub');
+  if(hubInput&&document.activeElement!==hubInput)hubInput.value=HUB_CONFIG_EDIT;
+  const hubStatus=document.getElementById('setHubStatus');
+  if(hubStatus&&HUB_CONFIG?.status){
+    hubStatus.textContent=HUB_CONFIG.status.available
+      ?`✅ ${t('set.hub.ok','Hub 可连接')}`
+      :`❌ ${t('set.hub.bad','Hub 不可用: ')}${HUB_CONFIG.status.reason||''}`;
+  }
   // 环境自检(异步,不阻塞设置渲染)
   const envEl=document.getElementById('envCheck');
   if(envEl){
@@ -890,7 +912,10 @@ async function saveSettings(){
     },
   };
   try{
-    SETTINGS=await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    HUB_CONFIG=await api('/api/agent-mail/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hub:HUB_CONFIG_EDIT.trim()})});
+    HUB_CONFIG_EDIT=HUB_CONFIG.hub||'';
+    const saved=await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    SETTINGS={...SETTINGS,...saved};
     SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
     toast(t('set.saved','已保存 ✓'));renderSettings();applyEnabledAgents();
   }catch(e){toast(t('set.savefail','保存失败: ')+e,4000)}

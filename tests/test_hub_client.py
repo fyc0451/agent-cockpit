@@ -1,5 +1,8 @@
+import stat
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(
     0, str(Path(__file__).resolve().parent.parent / "agent-mail-tools")
@@ -49,8 +52,98 @@ def test_load_config_ignores_comments_and_empty_hub(monkeypatch, tmp_path):
     assert am_common.load_client_config() == ("http://127.0.0.1:8765", "xyz")
 
 
+def test_save_client_hub_preserves_token_and_unknown_lines(monkeypatch, tmp_path):
+    _write_client_env(
+        monkeypatch,
+        tmp_path,
+        "# local config\nhub=http://old-host:8765\ntoken=secret123\nfuture=value\n",
+    )
+
+    assert am_common.save_client_hub("https://team.example:9765/") == (
+        "https://team.example:9765"
+    )
+
+    env_file = tmp_path / "client.env"
+    assert env_file.read_text() == (
+        "# local config\nhub=https://team.example:9765\n"
+        "token=secret123\nfuture=value\n"
+    )
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+
+def test_save_client_hub_creates_parent_and_appends_hub(monkeypatch, tmp_path):
+    env_file = tmp_path / "nested" / "client.env"
+    monkeypatch.setattr(am_common, "CLIENT_ENV", env_file)
+
+    am_common.save_client_hub("http://10.0.0.8:8765")
+
+    assert env_file.read_text() == "hub=http://10.0.0.8:8765\n"
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "hub",
+    [
+        "",
+        "team.example:8765",
+        "ftp://team.example:8765",
+        "http://",
+        "http://user:pass@team.example:8765",
+        "http://team.example:8765?token=secret",
+        "http://team.example:8765/#fragment",
+        "http://team.example:99999",
+    ],
+)
+def test_save_client_hub_rejects_unsafe_or_invalid_urls(monkeypatch, tmp_path, hub):
+    env_file = tmp_path / "client.env"
+    env_file.write_text("token=keep-me\n")
+    monkeypatch.setattr(am_common, "CLIENT_ENV", env_file)
+
+    with pytest.raises(ValueError):
+        am_common.save_client_hub(hub)
+
+    assert env_file.read_text() == "token=keep-me\n"
+
+
 def test_hub_client_reuses_am_common_parser():
     assert hub_client.load_client_config is am_common.load_client_config
+
+
+def test_reload_config_updates_live_hub_and_resets_initialization(monkeypatch):
+    monkeypatch.setattr(
+        hub_client,
+        "load_client_config",
+        lambda: ("https://new-hub.example:9765", "new-secret"),
+    )
+    monkeypatch.setattr(hub_client, "HUB", "http://old-hub:8765")
+    monkeypatch.setattr(hub_client, "TOKEN", "old-secret")
+    monkeypatch.setattr(hub_client, "_initialized", True)
+
+    result = hub_client.reload_config()
+
+    assert result == {
+        "hub": "https://new-hub.example:9765",
+        "token_configured": True,
+    }
+    assert hub_client.HUB == "https://new-hub.example:9765"
+    assert hub_client.TOKEN == "new-secret"
+    assert hub_client._initialized is False
+
+
+@pytest.mark.parametrize(
+    "hub,allowed",
+    [
+        ("http://127.0.0.1:8765", True),
+        ("http://[::1]:8765", True),
+        ("http://localhost:8765", True),
+        ("https://team.example:9765", False),
+        ("http://10.0.0.8:8765", False),
+    ],
+)
+def test_only_loopback_hub_can_trigger_local_actions(monkeypatch, hub, allowed):
+    monkeypatch.setattr(hub_client, "HUB", hub)
+
+    assert hub_client.allows_local_actions() is allowed
 
 
 def test_response_data_joins_multiline_sse_data():

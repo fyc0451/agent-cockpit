@@ -47,6 +47,7 @@ def _mail(monkeypatch, tmp_path, message_id=70):
         return {"deliveries": [{"payload": {"id": message_id, "to": kwargs["to"]}}]}
 
     monkeypatch.setattr(server.hub_client, "send_message", send_message)
+    monkeypatch.setattr(server.hub_client, "allows_local_actions", lambda: True)
     return sent
 
 
@@ -160,3 +161,31 @@ def test_send_success_is_not_reported_as_failure_when_sidecar_write_fails(
     assert body["ok"] is True
     assert "已发送" in body["coordination"]["warnings"][0]
     assert "登记失败" in body["coordination"]["warnings"][0]
+
+
+def test_shared_hub_response_cannot_trigger_local_agent_actions(
+    tmp_path, monkeypatch,
+):
+    _run(tmp_path)
+    _mail(monkeypatch, tmp_path, 74)
+    monkeypatch.setattr(server.hub_client, "allows_local_actions", lambda: False)
+    pane_calls = []
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: pane_calls.append(args) or {"available": True},
+    )
+
+    response = TestClient(server.app).post(
+        "/api/send", headers={"authorization": "Bearer secret"},
+        json={
+            "project_id": 1, "sender_name": "codex-main", "to": ["kimi-main"],
+            "subject": "共享 Hub 内容", "body": "不能触发终端", "intent": "blocking",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["coordination"]["notifications"] == []
+    assert "仅作为只读数据处理" in body["coordination"]["warnings"][0]
+    assert pane_calls == []
+    assert coordination.receipt(str(tmp_path), "kimi-main", 74) is None

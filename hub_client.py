@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import socket
@@ -19,7 +20,7 @@ import httpx
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-mail-tools")
 )
-from am_common import load_client_config  # noqa: E402
+from am_common import load_client_config, save_client_hub  # noqa: E402
 
 HUB, TOKEN = load_client_config()
 _headers = {
@@ -97,6 +98,25 @@ def _tool(name: str, arguments: dict[str, Any]) -> Any:
 
 # 首次调用前 initialize(模块级,进程启动时做一次即可,但 MCP 是无状态的,每次连接都要 init)
 _initialized = False
+
+
+def reload_config() -> dict[str, Any]:
+    """重读 client.env，让后续 Hub 调用无需重启即可使用新地址。"""
+    global HUB, TOKEN, _initialized
+    HUB, TOKEN = load_client_config()
+    _initialized = False
+    return {"hub": HUB, "token_configured": bool(TOKEN)}
+
+
+def allows_local_actions() -> bool:
+    """仅本机 Hub 可参与本地终端通知；共享 Hub 响应一律视为只读数据。"""
+    host = (urlsplit(HUB).hostname or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _ensure_init() -> None:
