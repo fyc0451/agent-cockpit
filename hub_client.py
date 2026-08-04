@@ -1,7 +1,8 @@
-"""hub_client.py — 通过 MCP JSON-RPC 调用本机 hub 的写操作。
+"""hub_client.py — 通过 MCP JSON-RPC 调用 hub 的写操作。
 
 读操作走 db.py 直读 SQLite;写操作(发消息/ack)走这里调 hub,
-保证事务一致性和 audit log。hub 在 127.0.0.1:8765。
+保证事务一致性和 audit log。hub 地址取 ~/.agent-mail/client.env 的 hub
+字段,未配置时默认 127.0.0.1:8765(个人模式)。
 """
 from __future__ import annotations
 
@@ -24,12 +25,12 @@ def _load_config() -> tuple[str, str]:
             if "=" in line and not line.strip().startswith("#"):
                 key, _, value = line.partition("=")
                 key, value = key.strip(), value.strip()
-                if key == "hub":
-                    # client.env 里的 hub 可能是 tailscale 地址,本地优先用 127.0.0.1
-                    pass
+                if key == "hub" and value:
+                    # 团队模式指向服务器 hub；个人模式未配置或为 127.0.0.1 时保持默认
+                    hub = value
                 elif key == "token":
                     token = value
-    return "http://127.0.0.1:8765", token
+    return hub, token
 
 
 HUB, TOKEN = _load_config()

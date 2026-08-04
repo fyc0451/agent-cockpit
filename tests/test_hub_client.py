@@ -1,6 +1,46 @@
 import hub_client
 
 
+def _write_client_env(monkeypatch, tmp_path, content: str) -> None:
+    env_file = tmp_path / "client.env"
+    env_file.write_text(content)
+    monkeypatch.setattr(hub_client, "_CLIENT_ENV", env_file)
+
+
+def test_load_config_defaults_to_localhost_without_client_env(monkeypatch, tmp_path):
+    env_file = tmp_path / "client.env"
+    assert not env_file.exists()
+    monkeypatch.setattr(hub_client, "_CLIENT_ENV", env_file)
+
+    assert hub_client._load_config() == ("http://127.0.0.1:8765", "")
+
+
+def test_load_config_uses_client_env_hub_for_shared_team_hub(monkeypatch, tmp_path):
+    _write_client_env(
+        monkeypatch,
+        tmp_path,
+        "hub=http://team-server:8765\ntoken=secret123\n",
+    )
+
+    assert hub_client._load_config() == ("http://team-server:8765", "secret123")
+
+
+def test_load_config_keeps_localhost_when_hub_unset(monkeypatch, tmp_path):
+    _write_client_env(monkeypatch, tmp_path, "token=abc\n")
+
+    assert hub_client._load_config() == ("http://127.0.0.1:8765", "abc")
+
+
+def test_load_config_ignores_comments_and_empty_hub(monkeypatch, tmp_path):
+    _write_client_env(
+        monkeypatch,
+        tmp_path,
+        "# hub=http://ignored.example:8765\nhub=\ntoken=xyz\n",
+    )
+
+    assert hub_client._load_config() == ("http://127.0.0.1:8765", "xyz")
+
+
 def test_response_data_joins_multiline_sse_data():
     raw = 'event: message\ndata: {"jsonrpc":"2.0",\ndata: "result":{"ok":true}}\n\n'
 
