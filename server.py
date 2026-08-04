@@ -83,6 +83,8 @@ SESSION_START_TIMEOUT = 20.0
 SESSION_BOOTSTRAP_OUTPUT_LIMIT = 16 * 1024
 SESSION_BOOTSTRAP_PANE_COLS = 100
 SESSION_BOOTSTRAP_PANE_ROWS = 30
+TERM_READ_WAIT = 0.02
+TERM_READ_BURST = 256 * 1024
 ROOT_DIR = Path(__file__).resolve().parent
 AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
@@ -2343,7 +2345,12 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
         # 输出转发任务:PTY → WebSocket
         async def pump_out():
             while True:
-                data = await asyncio.to_thread(terminal.read_output, term_id, 0.15)
+                data = await asyncio.to_thread(
+                    terminal.read_available,
+                    term_id,
+                    TERM_READ_WAIT,
+                    TERM_READ_BURST,
+                )
                 if data:
                     await websocket.send_bytes(data)
                 elif not terminal.is_alive(term_id):
@@ -2352,7 +2359,6 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                         await websocket.send_bytes(tail)
                     await websocket.send_text("\r\n[进程已退出]\r\n")
                     break
-                await asyncio.sleep(0.02)
         pump_task = asyncio.create_task(pump_out())
         # 主循环:接收浏览器输入
         while True:

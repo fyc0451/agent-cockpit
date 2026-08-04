@@ -320,6 +320,7 @@ header .spacer{flex:1}
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP" crossorigin="anonymous">
 <script src="/static/vendor/xterm/xterm.js" integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/" crossorigin="anonymous"></script>
 <script src="/static/vendor/xterm/addon-fit.js" integrity="sha384-iF+jqbuti4XlB64clWgFWYEscb+UnSRv3VgVikGYZu+otNFnSHr7y7NcKfBnGizn" crossorigin="anonymous"></script>
+<script src="/static/vendor/xterm/addon-webgl.js" integrity="sha384-AkzdQDeATxpW8V7I2EPcwg17qAoLQMjEFHb//1QaAAIyIlbDAHGKno5+huH7RKxq" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="app">
@@ -2070,6 +2071,23 @@ function termSwitch(id){
   if(TERM_INSTANCES[id]){showTermInstance(id)}
   else{termMount(id)}
 }
+function enableTermWebgl(xterm){
+  if(typeof WebglAddon==='undefined'||!WebglAddon.WebglAddon)return null;
+  let addon=null;
+  try{
+    addon=new WebglAddon.WebglAddon();
+    addon.onContextLoss(()=>{
+      try{addon.dispose()}catch(e){}
+      if(xterm._webglAddon===addon)xterm._webglAddon=null;
+    });
+    xterm.loadAddon(addon);
+    xterm._webglAddon=addon;
+    return addon;
+  }catch(e){
+    try{addon?.dispose()}catch(ignore){}
+    return null;
+  }
+}
 function termMount(id){
   const c=document.getElementById('termContainer');
   if(typeof Terminal==='undefined'){c.innerHTML='<div class="empty" style="color:#c00;padding:20px">xterm.js 加载失败(CDN 不可达?)</div>';return}
@@ -2083,13 +2101,14 @@ function termMount(id){
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
+  const webgl=enableTermWebgl(xterm);
   enableTermTouchScroll(el,xterm);
   xterm.parser.registerOscHandler(52,handleOsc52);
   // 隐藏其他终端的容器
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
-  TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:''};
+  TERM_INSTANCES[id]={xterm,fit,webgl,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:''};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   xterm.onData(d=>{if(isTermFocusReport(d))return;const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});

@@ -150,6 +150,7 @@ def test_terminal_assets_are_self_hosted_with_subresource_integrity():
         "vendor/xterm/xterm.css",
         "vendor/xterm/xterm.js",
         "vendor/xterm/addon-fit.js",
+        "vendor/xterm/addon-webgl.js",
     )
     assert "cdn.jsdelivr.net" not in HTML
     for asset in assets:
@@ -161,7 +162,7 @@ def test_terminal_assets_are_self_hosted_with_subresource_integrity():
         assert asset_path.is_file()
         digest = base64.b64encode(hashlib.sha384(asset_path.read_bytes()).digest()).decode()
         assert f'integrity="sha384-{digest}"' in tags[0]
-    for license_name in ("LICENSE.xterm", "LICENSE.addon-fit"):
+    for license_name in ("LICENSE.xterm", "LICENSE.addon-fit", "LICENSE.addon-webgl"):
         assert (
             Path(__file__).resolve().parent.parent
             / "static"
@@ -178,6 +179,22 @@ def test_terminal_assets_are_self_hosted_with_subresource_integrity():
     ).read_text()
     assert "@xterm/xterm` 5.5.0" in notice
     assert "@xterm/addon-fit` 0.10.0" in notice
+    assert "@xterm/addon-webgl` 0.18.0" in notice
+
+
+def test_terminal_prefers_webgl_and_falls_back_on_context_loss():
+    js = _inline_js()
+    mount = js.split("function termMount(id){", 1)[1].split("// ============ 会话管理", 1)[0]
+    webgl = js.split("function enableTermWebgl(xterm){", 1)[1].split(
+        "function termMount", 1
+    )[0]
+
+    assert "new WebglAddon.WebglAddon()" in webgl
+    assert "addon.onContextLoss(()=>{" in webgl
+    assert "addon.dispose()" in webgl
+    assert "return null" in webgl
+    assert mount.index("xterm.open(el)") < mount.index("enableTermWebgl(xterm)")
+    assert "TERM_INSTANCES[id]={xterm,fit,webgl," in mount
 
 
 def test_message_fields_escaped():

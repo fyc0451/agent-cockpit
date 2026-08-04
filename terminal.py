@@ -56,6 +56,9 @@ IDLE_TTL = 1800.0
 DEAD_GRACE = 60.0
 # 单次写 PTY 的最长等待(对端不消费时抛 TimeoutError;设置页 term.write_timeout 可覆盖)
 WRITE_TIMEOUT = 2.0
+# 单次 WebSocket 输出合并上限；macOS PTY 常以约 1 KiB 返回，若逐块转发会把
+# 服务端调度和浏览器重绘放大成明显的逐行加载。
+READ_BURST_MAX = 256 * 1024
 
 
 def _term_cfg(key: str, default: float) -> float:
@@ -298,6 +301,37 @@ def read_output(term_id: str, timeout: float = 0.1) -> bytes:
         return b""
     with t["lock"]:
         return _read_fd(t, timeout)
+
+
+def read_available(
+    term_id: str,
+    timeout: float = 0.02,
+    max_bytes: int = READ_BURST_MAX,
+) -> bytes:
+    """等待第一块输出后，立即合并当前已就绪的数据。
+
+    macOS PTY 即使一次写入很大，也常拆成约 1 KiB 的连续 read。这里仅对第一块
+    使用 timeout，后续用零等待排空并设置软上限，减少 WebSocket 消息和前端
+    xterm.write 次数；全程持状态锁，避免 kill/close 后读取复用 fd。
+    """
+    t = _get(term_id)
+    if not t or max_bytes <= 0:
+        return b""
+    chunks: list[bytes] = []
+    total = 0
+    with t["lock"]:
+        data = _read_fd(t, timeout)
+        if not data:
+            return b""
+        chunks.append(data)
+        total += len(data)
+        while total < max_bytes:
+            data = _read_fd(t, 0)
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+    return b"".join(chunks)
 
 
 def drain_output(term_id: str, timeout: float = 0.5) -> bytes:

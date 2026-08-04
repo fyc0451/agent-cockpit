@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -125,6 +126,49 @@ def test_echo_roundtrip():
     out = _read_until(tid, b"cockpit-42")
     assert b"cockpit-42" in out
     assert terminal.is_alive(tid)
+
+
+def test_read_available_waits_once_and_coalesces_ready_chunks(monkeypatch):
+    """macOS 的连续小块 PTY 输出应合并，不能每块都走一次 WebSocket。"""
+    state = {"lock": threading.Lock()}
+    chunks = iter((b"a" * 1024, b"b" * 1024, b"c" * 1024, b""))
+    timeouts = []
+    monkeypatch.setattr(terminal, "_get", lambda term_id: state)
+
+    def fake_read(current, timeout):
+        assert current is state
+        timeouts.append(timeout)
+        return next(chunks)
+
+    monkeypatch.setattr(terminal, "_read_fd", fake_read)
+
+    data = terminal.read_available("term", timeout=0.02, max_bytes=4096)
+
+    assert data == b"a" * 1024 + b"b" * 1024 + b"c" * 1024
+    assert timeouts == [0.02, 0, 0, 0]
+
+
+def test_read_available_obeys_burst_soft_limit(monkeypatch):
+    state = {"lock": threading.Lock()}
+    chunks = iter((b"a" * 1024, b"b" * 1024, b"c" * 1024))
+    monkeypatch.setattr(terminal, "_get", lambda term_id: state)
+    monkeypatch.setattr(terminal, "_read_fd", lambda current, timeout: next(chunks))
+
+    assert terminal.read_available("term", max_bytes=2048) == (
+        b"a" * 1024 + b"b" * 1024
+    )
+
+
+def test_websocket_pump_uses_bursts_without_per_chunk_sleep():
+    source = (Path(__file__).resolve().parents[1] / "server.py").read_text()
+    pump = source.split("async def pump_out():", 1)[1].split(
+        "pump_task = asyncio.create_task", 1
+    )[0]
+
+    assert "terminal.read_available" in pump
+    assert "TERM_READ_WAIT" in pump
+    assert "TERM_READ_BURST" in pump
+    assert "asyncio.sleep(0.02)" not in pump
 
 
 def test_large_write_full_integrity(tmp_path, monkeypatch):
