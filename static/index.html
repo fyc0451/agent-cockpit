@@ -1638,7 +1638,6 @@ async function doAttachHerdr(session){
     renderTermOptions();
     termMount(r.id);
     if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败');
-    if(isCompactScreen())await startTermZoomLease(r.id);
     queueTermInput(r.id,'herdr --session '+session+'\r','已进入 herdr/'+session+' (Ctrl-b 切 pane)');
   }catch(e){
     if(createdId&&TERMS.includes(createdId)){TERM_ID=createdId;await termClose()}
@@ -2025,7 +2024,7 @@ function scheduleTermReconnect(id){
 function openTermWS(id,xterm){
   const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);syncTermZoomLease(id);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
+  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);startTermZoomLease(id);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
   ws.onmessage=ev=>{try{
     const light=document.documentElement.classList.contains('light');
     if(light){

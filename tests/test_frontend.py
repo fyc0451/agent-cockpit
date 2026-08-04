@@ -342,14 +342,15 @@ def test_narrow_takeover_owns_zoom_with_heartbeat_and_release_fallbacks():
         "function showTermInstance", 1
     )[0]
     assert "TERM_ZOOM={}" in js
-    assert "if(isCompactScreen())await startTermZoomLease(r.id)" in takeover
+    assert "startTermZoomLease(r.id)" not in takeover
     assert "if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败')" in takeover
     assert "await termClose()" in takeover
     assert "/zoom-lease" in js
     assert "action=state.owned?'renew':'acquire'" in js
     assert "TERM_ZOOM_HEARTBEAT=10000" in js
     assert "setInterval(()=>syncTermZoomLease(id),TERM_ZOOM_HEARTBEAT)" in js
-    assert "syncTermZoomLease(id)" in websocket
+    assert "startTermZoomLease(id)" in websocket
+    assert websocket.index("flushTermInput(id,ws)") < websocket.index("startTermZoomLease(id)")
     assert "await releaseTermZoomLease(id)" in close
     assert close.index("await releaseTermZoomLease(id)") < close.index("api('/api/term/'+id")
     assert "window.addEventListener('pagehide',releaseAllTermZoomLeases)" in js
