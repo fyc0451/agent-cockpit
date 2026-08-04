@@ -143,7 +143,60 @@ def test_build_attention_combines_panes_tasks_and_optional_mail(monkeypatch):
         "cwd": "",
         "coordination_state": "working",
         "task_revision": 2,
+        "report": None,
     }
+
+
+def test_refresh_reports_prompts_agents_and_exposes_structured_progress(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.coordination, "DB_PATH", tmp_path / "coordination.sqlite3"
+    )
+    snapshot = {
+        "sessions": [{
+            "session": "demo",
+            "directory": str(tmp_path),
+            "panes": [{
+                "session": "demo", "pane_id": "w1:p2", "agent": "codex",
+                "agent_status": "working", "mail_name": "codex-main",
+            }],
+        }],
+        "panes": [],
+    }
+    monkeypatch.setattr(server, "_board_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.coordination, "run_by_session", lambda session: None)
+    prompts = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_send",
+        lambda session, pane, text, mode: prompts.append(
+            (session, pane, text, mode)
+        ) or {"available": True},
+    )
+
+    response = TestClient(server.app).post(
+        "/api/attention/refresh-reports",
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["requested"] == 1
+    assert len(prompts) == 1
+    assert "非打断状态上报" in prompts[0][2]
+    assert "task-report" in prompts[0][2]
+    report = server.coordination.task_report("demo", "w1:p2")
+    assert report["pending"] is True
+
+    server.coordination.submit_task_report(
+        "demo", "w1:p2", report["request_id"], 60,
+        "完成后端", "继续前端", "", now=200,
+    )
+    sessions = server._build_session_progress(snapshot)
+    shown = sessions[0]["agents"][0]["report"]
+    assert shown["progress"] == 60
+    assert shown["summary"] == "完成后端"
 
 
 def test_session_progress_keeps_legacy_sessions_without_coordination(monkeypatch):

@@ -1,9 +1,40 @@
+import asyncio
 import pytest
 import threading
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import server
+
+
+def test_new_terminal_websocket_cancels_and_supersedes_old_reader():
+    class FakeWebSocket:
+        def __init__(self):
+            self.closed = None
+
+        async def close(self, **kwargs):
+            self.closed = kwargs
+
+    async def exercise():
+        old_ws = FakeWebSocket()
+        new_ws = FakeWebSocket()
+        old_pump = asyncio.create_task(asyncio.Event().wait())
+        await asyncio.sleep(0)
+        old = {"websocket": old_ws, "pump_task": old_pump}
+        server._TERM_WS_CONNECTIONS["term1"] = old
+        try:
+            new = await server._claim_term_websocket("term1", new_ws)
+            assert old_pump.cancelled()
+            assert old_ws.closed["code"] == server.TERM_WS_TAKEN_OVER_CODE
+            assert server._term_websocket_is_current("term1", new)
+            server._release_term_websocket("term1", old)
+            assert server._term_websocket_is_current("term1", new)
+            server._release_term_websocket("term1", new)
+            assert "term1" not in server._TERM_WS_CONNECTIONS
+        finally:
+            server._TERM_WS_CONNECTIONS.pop("term1", None)
+
+    asyncio.run(exercise())
 
 
 def test_api_requires_auth_when_token_configured(monkeypatch):
@@ -76,6 +107,22 @@ def test_websocket_rejects_missing_auth(monkeypatch):
             "/api/term/missing", headers={"origin": "http://testserver"}
         ):
             pass
+
+
+def test_websocket_marks_missing_terminal_as_non_reconnectable(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: [])
+    client = TestClient(server.app)
+    client.post("/api/auth/login", json={"token": "secret"})
+
+    with client.websocket_connect(
+        "/api/term/missing", headers={"origin": "http://testserver"}
+    ) as websocket:
+        assert "终端会话不存在" in websocket.receive_text()
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_text()
+
+    assert closed.value.code == server.TERM_WS_INVALID_CODE
 
 
 def test_non_loopback_bind_requires_token(monkeypatch):

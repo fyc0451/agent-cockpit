@@ -90,12 +90,16 @@ AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
 MAIL_SEND_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-send"
 MAIL_RECV_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-recv"
+TASK_REPORT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "task-report"
 _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
 ZOOM_LEASE_TTL = 30.0
 ZOOM_LEASE_RETRY = 5.0
 _ZOOM_LEASES: dict[str, dict[str, Any]] = {}
 _ZOOM_LEASES_LOCK = threading.RLock()
+TERM_WS_TAKEN_OVER_CODE = 4001
+TERM_WS_INVALID_CODE = 4004
+_TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
     "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报；"
@@ -525,6 +529,11 @@ def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         except Exception:
             logger.exception("session progress coordination query failed: %s", session)
             run = None
+        try:
+            reports = coordination.task_reports(session)
+        except Exception:
+            logger.exception("session task reports query failed: %s", session)
+            reports = {}
         participants = list((run or {}).get("participants") or [])
         by_pane = {
             str(item.get("pane_id")): item
@@ -563,6 +572,7 @@ def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 "cwd": str(pane.get("cwd") or ""),
                 "coordination_state": (participant or {}).get("state"),
                 "task_revision": (participant or {}).get("task_revision"),
+                "report": reports.get(pane_id),
             })
 
         summary = {
@@ -693,6 +703,79 @@ def _attention_changes(
 @app.get("/api/attention")
 def api_attention():
     return _build_attention(_board_snapshot())
+
+
+def _task_report_prompt(
+    session: str, pane_id: str, request_id: str,
+) -> str:
+    command = " ".join([
+        shlex.quote(str(TASK_REPORT_SCRIPT)),
+        "--session", shlex.quote(session),
+        "--pane", shlex.quote(pane_id),
+        "--request-id", shlex.quote(request_id),
+    ])
+    return (
+        "[Agent Cockpit 非打断状态上报] 这不是停止或转向请求。"
+        "请完成当前原子操作，在下一个安全检查点上报一次当前进度，然后继续原任务。"
+        "执行下面的命令，并把示例内容替换为真实信息；progress 使用 0-100 整数，"
+        "没有阻塞时 blocker 传空字符串：\n"
+        f"{command} --progress 50 --summary \"已完成的里程碑\" "
+        "--next \"下一步\" --blocker \"\""
+    )
+
+
+@app.post("/api/attention/refresh-reports")
+def api_attention_refresh_reports():
+    """按用户请求让当前 Agent 在安全检查点提交结构化进度。"""
+    sessions = _build_session_progress(_board_snapshot())
+    requested: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for session_row in sessions:
+        session = str(session_row.get("session") or "")
+        if not SESSION_NAME_RE.fullmatch(session):
+            continue
+        for agent in session_row.get("agents") or []:
+            pane_id = str(agent.get("pane_id") or "")
+            target = (session, pane_id)
+            if not PANE_ID_RE.fullmatch(pane_id) or target in seen:
+                continue
+            seen.add(target)
+            report = coordination.request_task_report(
+                session=session,
+                pane_id=pane_id,
+                agent_type=str(agent.get("agent") or "unknown"),
+                mail_name=agent.get("mail_name"),
+            )
+            request_id = str(report["request_id"])
+            sent = herdr_client.pane_send(
+                session, pane_id,
+                _task_report_prompt(session, pane_id, request_id),
+                "prompt",
+            )
+            error = sent.get("error")
+            if sent.get("available", True) is False:
+                error = error or "Herdr 不可用"
+            row = {
+                "session": session,
+                "pane_id": pane_id,
+                "agent": agent.get("agent"),
+                "mail_name": agent.get("mail_name"),
+            }
+            if error:
+                coordination.fail_task_report_request(
+                    session, pane_id, request_id, str(error)
+                )
+                failed.append({**row, "error": str(error)})
+            else:
+                requested.append(row)
+    return {
+        "ok": not failed,
+        "requested": len(requested),
+        "failed": len(failed),
+        "targets": requested,
+        "failures": failed,
+    }
 
 
 @app.get("/api/push/config")
@@ -2435,6 +2518,38 @@ def api_term_kill(term_id: str):
     return {"ok": True}
 
 
+async def _claim_term_websocket(
+    term_id: str, websocket: WebSocket,
+) -> dict[str, Any]:
+    """最新页面独占 PTY 输出；旧连接立即停泵且不得重新抢占。"""
+    connection: dict[str, Any] = {"websocket": websocket, "pump_task": None}
+    previous = _TERM_WS_CONNECTIONS.get(term_id)
+    _TERM_WS_CONNECTIONS[term_id] = connection
+    if previous:
+        previous_pump = previous.get("pump_task")
+        if previous_pump:
+            previous_pump.cancel()
+            with suppress(asyncio.CancelledError):
+                await previous_pump
+        previous_websocket = previous.get("websocket")
+        if previous_websocket:
+            with suppress(Exception):
+                await previous_websocket.close(
+                    code=TERM_WS_TAKEN_OVER_CODE,
+                    reason="terminal opened by a newer page",
+                )
+    return connection
+
+
+def _term_websocket_is_current(term_id: str, connection: dict[str, Any]) -> bool:
+    return _TERM_WS_CONNECTIONS.get(term_id) is connection
+
+
+def _release_term_websocket(term_id: str, connection: dict[str, Any]) -> None:
+    if _term_websocket_is_current(term_id, connection):
+        _TERM_WS_CONNECTIONS.pop(term_id, None)
+
+
 @app.websocket("/api/term/{term_id}")
 async def api_term_ws(websocket: WebSocket, term_id: str):
     """终端 WebSocket 双向桥接:浏览器↔PTY。"""
@@ -2445,38 +2560,64 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
         return
     await websocket.accept()
     # 会话存在性校验
-    terms_now = {t["id"] for t in terminal.list_terms()}
+    terms_now = {
+        t["id"] for t in terminal.list_terms() if t.get("alive", True)
+    }
     if term_id not in terms_now:
         await websocket.send_text("\r\n[终端会话不存在,已关闭]\r\n")
-        await websocket.close()
+        await websocket.close(
+            code=TERM_WS_INVALID_CODE, reason="terminal session no longer exists"
+        )
         return
+    connection = await _claim_term_websocket(term_id, websocket)
     pump_task = None
     try:
+        if not _term_websocket_is_current(term_id, connection):
+            return
         if websocket.query_params.get("replay") == "1":
             history = await asyncio.to_thread(terminal.output_history, term_id)
+            if not _term_websocket_is_current(term_id, connection):
+                return
             if history:
                 await websocket.send_bytes(history)
         # 输出转发任务:PTY → WebSocket
         async def pump_out():
-            while True:
-                data = await asyncio.to_thread(
-                    terminal.read_available,
-                    term_id,
-                    TERM_READ_WAIT,
-                    TERM_READ_BURST,
-                )
-                if data:
-                    await websocket.send_bytes(data)
-                elif not terminal.is_alive(term_id):
-                    tail = await asyncio.to_thread(terminal.drain_output, term_id, 0.05)
-                    if tail:
-                        await websocket.send_bytes(tail)
-                    await websocket.send_text("\r\n[进程已退出]\r\n")
+            while _term_websocket_is_current(term_id, connection):
+                # asyncio 取消不会停止已启动的 to_thread；接管时必须等旧读完成，
+                # 否则旧线程可能在新页面重放之后抢走一块 PTY 输出。
+                read_task = asyncio.create_task(asyncio.to_thread(
+                    terminal.read_available, term_id, TERM_READ_WAIT, TERM_READ_BURST,
+                ))
+                try:
+                    data = await asyncio.shield(read_task)
+                except asyncio.CancelledError:
+                    with suppress(asyncio.CancelledError):
+                        await read_task
+                    raise
+                try:
+                    if data:
+                        await websocket.send_bytes(data)
+                    elif not terminal.is_alive(term_id):
+                        tail = await asyncio.to_thread(
+                            terminal.drain_output, term_id, 0.05
+                        )
+                        if tail:
+                            await websocket.send_bytes(tail)
+                        await websocket.send_text("\r\n[进程已退出]\r\n")
+                        await websocket.close(
+                            code=TERM_WS_INVALID_CODE,
+                            reason="terminal process exited",
+                        )
+                        break
+                except WebSocketDisconnect:
                     break
         pump_task = asyncio.create_task(pump_out())
+        connection["pump_task"] = pump_task
         # 主循环:接收浏览器输入
-        while True:
+        while _term_websocket_is_current(term_id, connection):
             msg = await websocket.receive()
+            if not _term_websocket_is_current(term_id, connection):
+                break
             if msg.get("type") == "websocket.disconnect":
                 break
             text = msg.get("text")
@@ -2501,8 +2642,9 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
     finally:
         if pump_task:
             pump_task.cancel()
-            with suppress(asyncio.CancelledError):
+            with suppress(asyncio.CancelledError, WebSocketDisconnect):
                 await pump_task
+        _release_term_websocket(term_id, connection)
         with suppress(Exception):
             await websocket.close()
 
@@ -2550,6 +2692,16 @@ async def _poll_live_state() -> None:
                                     agent.get("status"),
                                     agent.get("coordination_state"),
                                     agent.get("task_revision"),
+                                    (
+                                        (agent.get("report") or {}).get("request_id"),
+                                        (agent.get("report") or {}).get("reported_ts"),
+                                        (agent.get("report") or {}).get("progress"),
+                                        (agent.get("report") or {}).get("summary"),
+                                        (agent.get("report") or {}).get("next_step"),
+                                        (agent.get("report") or {}).get("blocker"),
+                                        (agent.get("report") or {}).get("pending"),
+                                        (agent.get("report") or {}).get("request_error"),
+                                    ),
                                 )
                                 for agent in session.get("agents", [])
                             ],

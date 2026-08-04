@@ -28,6 +28,7 @@ INTERRUPT_INTENTS = {"review", "blocking", "stop", "redirect"}
 NO_RESUME_INTENTS = {"stop", "redirect"}
 CONNECT_RETRIES = 6
 CONNECT_RETRY_BASE = 0.02
+TASK_REPORT_TEXT_LIMIT = 2000
 _CONNECT_INIT_LOCK = threading.Lock()
 
 
@@ -113,6 +114,22 @@ def _initialize_connection(con: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS receipts_claims
           ON receipts(state, claim_expires_ts);
+        CREATE TABLE IF NOT EXISTS task_reports (
+          session TEXT NOT NULL,
+          pane_id TEXT NOT NULL,
+          agent_type TEXT NOT NULL,
+          mail_name TEXT,
+          request_id TEXT NOT NULL,
+          requested_ts REAL NOT NULL,
+          request_error TEXT,
+          report_request_id TEXT,
+          progress INTEGER,
+          summary TEXT,
+          next_step TEXT,
+          blocker TEXT,
+          reported_ts REAL,
+          PRIMARY KEY(session, pane_id)
+        );
         """
     )
     columns = {
@@ -988,6 +1005,148 @@ def run_by_session(session: str) -> dict[str, Any] | None:
     if run:
         run["participants"] = run_participants(str(run["run_id"]))
     return run
+
+
+def _task_report_result(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    result = _dict(row)
+    if result:
+        result["pending"] = bool(
+            result.get("request_id")
+            and result.get("request_id") != result.get("report_request_id")
+            and not result.get("request_error")
+        )
+    return result
+
+
+def task_report(session: str, pane_id: str) -> dict[str, Any] | None:
+    with _connect() as con:
+        row = con.execute(
+            "SELECT * FROM task_reports WHERE session=? AND pane_id=?",
+            (session, pane_id),
+        ).fetchone()
+    return _task_report_result(row)
+
+
+def task_reports(session: str) -> dict[str, dict[str, Any]]:
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT * FROM task_reports WHERE session=?", (session,),
+        ).fetchall()
+    return {
+        str(row["pane_id"]): result
+        for row in rows if (result := _task_report_result(row)) is not None
+    }
+
+
+def request_task_report(
+    session: str, pane_id: str, agent_type: str, mail_name: str | None,
+    *, now: float | None = None, request_id: str | None = None,
+) -> dict[str, Any]:
+    """登记最新上报请求；同一 pane 换 Agent 时清掉旧 Agent 的报告。"""
+    current = time.time() if now is None else now
+    request_id = request_id or uuid.uuid4().hex
+    with _connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        previous = con.execute(
+            "SELECT agent_type,mail_name FROM task_reports "
+            "WHERE session=? AND pane_id=?",
+            (session, pane_id),
+        ).fetchone()
+        identity_changed = bool(previous) and (
+            str(previous["agent_type"]) != str(agent_type)
+            or (previous["mail_name"] or None) != (mail_name or None)
+        )
+        if previous:
+            con.execute(
+                "UPDATE task_reports SET agent_type=?,mail_name=?,request_id=?,"
+                "requested_ts=?,request_error=NULL WHERE session=? AND pane_id=?",
+                (agent_type, mail_name, request_id, current, session, pane_id),
+            )
+            if identity_changed:
+                con.execute(
+                    "UPDATE task_reports SET report_request_id=NULL,progress=NULL,"
+                    "summary=NULL,next_step=NULL,blocker=NULL,reported_ts=NULL "
+                    "WHERE session=? AND pane_id=?",
+                    (session, pane_id),
+                )
+        else:
+            con.execute(
+                "INSERT INTO task_reports(session,pane_id,agent_type,mail_name,"
+                "request_id,requested_ts) VALUES(?,?,?,?,?,?)",
+                (session, pane_id, agent_type, mail_name, request_id, current),
+            )
+        row = con.execute(
+            "SELECT * FROM task_reports WHERE session=? AND pane_id=?",
+            (session, pane_id),
+        ).fetchone()
+    result = _task_report_result(row)
+    assert result is not None
+    return result
+
+
+def fail_task_report_request(
+    session: str, pane_id: str, request_id: str, error: str,
+) -> bool:
+    with _connect() as con:
+        changed = con.execute(
+            "UPDATE task_reports SET request_error=? WHERE session=? AND pane_id=? "
+            "AND request_id=?",
+            (str(error)[:TASK_REPORT_TEXT_LIMIT], session, pane_id, request_id),
+        ).rowcount
+    return bool(changed)
+
+
+def _task_report_text(value: Any, field: str, *, required: bool = False) -> str:
+    text = str(value or "").strip()
+    if required and not text:
+        raise ValueError(f"{field} 不能为空")
+    if len(text) > TASK_REPORT_TEXT_LIMIT:
+        raise ValueError(f"{field} 最长 {TASK_REPORT_TEXT_LIMIT} 字符")
+    return text
+
+
+def submit_task_report(
+    session: str, pane_id: str, request_id: str, progress: int,
+    summary: str, next_step: str = "", blocker: str = "",
+    *, now: float | None = None,
+) -> dict[str, Any]:
+    """只接受当前 request_id，防止排队中的旧请求覆盖新进度。"""
+    try:
+        progress = int(progress)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("progress 必须是 0-100 的整数") from exc
+    if not 0 <= progress <= 100:
+        raise ValueError("progress 必须在 0-100 之间")
+    summary = _task_report_text(summary, "summary", required=True)
+    next_step = _task_report_text(next_step, "next_step")
+    blocker = _task_report_text(blocker, "blocker")
+    current = time.time() if now is None else now
+    with _connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT request_id FROM task_reports WHERE session=? AND pane_id=?",
+            (session, pane_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("没有待处理的任务上报请求")
+        if str(row["request_id"]) != str(request_id):
+            raise ValueError("上报请求已过期，请处理最新请求")
+        con.execute(
+            "UPDATE task_reports SET report_request_id=?,progress=?,summary=?,"
+            "next_step=?,blocker=?,reported_ts=?,request_error=NULL "
+            "WHERE session=? AND pane_id=?",
+            (
+                request_id, progress, summary, next_step, blocker, current,
+                session, pane_id,
+            ),
+        )
+        updated = con.execute(
+            "SELECT * FROM task_reports WHERE session=? AND pane_id=?",
+            (session, pane_id),
+        ).fetchone()
+    result = _task_report_result(updated)
+    assert result is not None
+    return result
 
 
 def enrich_message(project_key: str, message: dict[str, Any]) -> dict[str, Any]:

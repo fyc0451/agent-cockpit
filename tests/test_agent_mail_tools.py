@@ -32,6 +32,17 @@ def _load_mail_recv():
     return module
 
 
+def _load_task_report():
+    path = TOOLS / "task-report"
+    loader = importlib.machinery.SourceFileLoader("cockpit_task_report", str(path))
+    spec = importlib.util.spec_from_file_location(
+        "cockpit_task_report", str(path), loader=loader
+    )
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
 def test_bound_session_routes_to_unique_pane_even_when_cwd_differs():
     module = _load_mail_send()
     candidates = [
@@ -172,6 +183,33 @@ def test_packaged_tools_do_not_contain_client_credentials():
 
     assert "100.66.1.5" not in contents
     assert "registration_token=" not in contents
+
+
+def test_task_report_cli_submits_structured_progress(
+    monkeypatch, tmp_path, capsys,
+):
+    import coordination
+
+    module = _load_task_report()
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    coordination.request_task_report(
+        "demo", "w1:p1", "codex", "codex-main",
+        request_id="request-1", now=10,
+    )
+    monkeypatch.setattr(module.sys, "argv", [
+        "task-report", "--session", "demo", "--pane", "w1:p1",
+        "--request-id", "request-1", "--progress", "75",
+        "--summary", "完成实现", "--next", "执行回归", "--blocker", "",
+    ])
+
+    module.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["progress"] == 75
+    saved = coordination.task_report("demo", "w1:p1")
+    assert saved["summary"] == "完成实现"
+    assert saved["next_step"] == "执行回归"
 
 
 def test_mail_recv_ack_failure_keeps_processed_receipt_and_retry_suppresses_body(

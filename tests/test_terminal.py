@@ -412,6 +412,25 @@ def test_sweep_reaps_exited_children_promptly(monkeypatch):
     assert all(t["id"] != tid for t in terminal.list_terms())
 
 
+def test_list_terms_refreshes_cached_child_liveness(monkeypatch):
+    state = {
+        "pid": 4321, "alive": True, "dead_ts": None,
+        "last_active": terminal.time.monotonic(), "label": "demo",
+        "lock": threading.Lock(),
+    }
+    monkeypatch.setattr(terminal.os, "waitpid", lambda pid, flags: (pid, 0))
+    with terminal._lock:
+        terminal._terms["stale"] = state
+    try:
+        listed = terminal.list_terms()
+    finally:
+        with terminal._lock:
+            terminal._terms.pop("stale", None)
+
+    assert listed[0]["id"] == "stale"
+    assert listed[0]["alive"] is False
+
+
 def test_sweep_respects_custom_ttl():
     tid = _create()
     assert terminal.sweep_idle(max_idle=3600) == 0  # 刚创建,不应被回收

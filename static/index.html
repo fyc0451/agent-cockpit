@@ -189,6 +189,10 @@ header .spacer{flex:1}
 .task-agent-type{color:var(--fg3);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .task-agent-task{color:var(--fg2);font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere}
 .task-agent-empty{color:var(--fg3);font-style:italic}
+.task-agent-report{grid-column:2 / -1;min-width:0;padding:7px 8px;border-radius:7px;background:var(--bg3);font-size:11px;line-height:1.45;color:var(--fg2)}
+.task-report-meta{display:flex;gap:7px;align-items:center;flex-wrap:wrap;color:var(--fg3);margin-bottom:3px}
+.task-report-progress{color:var(--accent);font-weight:600}
+.task-report-blocker{color:var(--need)}
 .task-session-empty{padding:16px 12px;color:var(--fg3);font-size:12px;text-align:center;border-top:1px solid var(--bd)}
 .attention-section-title{display:flex;align-items:center;gap:7px;margin-top:4px;padding:3px 2px;font-size:12px;color:var(--fg2)}
 .attention-section-title .count{background:var(--bg4);border-radius:999px;padding:0 6px;font-size:10px}
@@ -402,6 +406,7 @@ header .spacer{flex:1}
       <span class="spacer"></span>
       <span class="muted" id="pushStatus" style="font-size:11px"></span>
       <button class="sm" id="pushBtn" onclick="setupPush()" data-i18n="attention.push">开启浏览器通知</button>
+      <button class="sm" id="taskReportBtn" onclick="refreshTaskReports()" data-i18n="attention.report">请求上报</button>
       <button class="icon" onclick="loadAttention()" title="刷新" data-i18n-title="common.refresh">↻</button>
     </div>
     <div class="attention-list" id="attentionList"><div class="empty" data-i18n="common.loading">加载中…</div></div>
@@ -732,7 +737,7 @@ en:{
 'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Tasks and progress grouped by session, including blockers','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
 'board.guide.title':'No running agents yet','board.guide.body':'First time here? Create a workspace in one click (it creates the session and starts the agents); with an existing session, add agents from the launch bar below.','board.guide.btn':'🚀 Create your first workspace','board.guide.noherdr':'herdr is unavailable','board.guide.noherdr.body':'The herdr executable was not found. Check Settings → Environment check for missing components, install them, then refresh.','board.guide.noherdr.btn':'Open environment check','launch.nosession':'No session yet — create a workspace first',
 'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
-'attention.title':'Task board','attention.push':'Enable notifications','common.refresh':'Refresh','common.loading':'Loading…',
+'attention.title':'Task board','attention.push':'Enable notifications','attention.report':'Request reports','common.refresh':'Refresh','common.loading':'Loading…',
 'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
@@ -751,7 +756,7 @@ ja:{
 'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'session ごとのタスク、進捗、ブロッカーを表示','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
 'board.guide.title':'実行中の agent はまだありません','board.guide.body':'初めてですか?下のボタンでワークスペースを一発作成(session 作成と agent 起動を自動化)。既存 session には下部の起動バーから agent を追加できます。','board.guide.btn':'🚀 最初のワークスペースを作成','board.guide.noherdr':'herdr が利用できません','board.guide.noherdr.body':'herdr 実行ファイルが見つかりません。「設定 → 環境チェック」で不足コンポーネントを確認し、インストール後に更新してください。','board.guide.noherdr.btn':'環境チェックを開く','launch.nosession':'session がまだありません。先にワークスペースを作成してください',
 'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
-'attention.title':'タスクボード','attention.push':'通知を有効化','common.refresh':'更新','common.loading':'読み込み中…',
+'attention.title':'タスクボード','attention.push':'通知を有効化','attention.report':'進捗報告を依頼','common.refresh':'更新','common.loading':'読み込み中…',
 'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
@@ -1007,6 +1012,19 @@ async function loadAttention(payload){
     renderAttention(d);
   }catch(e){document.getElementById('attentionList').textContent='任务看板加载失败: '+e}
 }
+async function refreshTaskReports(){
+  const button=document.getElementById('taskReportBtn');
+  if(!button||button.disabled)return;
+  button.disabled=true;button.textContent='请求中…';
+  try{
+    const result=await api('/api/attention/refresh-reports',{method:'POST'});
+    if(result.requested)toast('已请求 '+result.requested+' 个 Agent 在安全检查点上报');
+    else if(!result.failed)toast('当前没有可请求的 Agent');
+    if(result.failed)toast(result.failed+' 个 Agent 请求发送失败');
+    await loadAttention();
+  }catch(e){toast('请求上报失败: '+e)}
+  finally{button.disabled=false;button.textContent=t('attention.report','请求上报')}
+}
 function sessionTaskHtml(session){
   const agents=session.agents||[],summary=session.summary||{},total=agents.length;
   const progress=Math.min(100,Math.max(0,Number(session.progress)||0));
@@ -1017,11 +1035,23 @@ function sessionTaskHtml(session){
     const mail=agent.mail_name?'@'+agent.mail_name:'未注册花名';
     const task=agent.task||'未记录任务说明';
     const canOpen=validSessionName(session.session)&&agent.pane_id;
+    const report=agent.report||null,reported=report&&report.reported_ts;
+    let reportHtml='';
+    if(report){
+      const pending=report.pending?'<span>等待新上报…</span>':'';
+      const failed=report.request_error?`<span class="task-report-blocker">请求失败：${esc(report.request_error)}</span>`:'';
+      const meta=reported?`<span>上报 ${esc(fmtTime(reported))}</span><span class="task-report-progress">${Math.min(100,Math.max(0,Number(report.progress)||0))}%</span>`:'<span>尚未上报</span>';
+      const summary=reported&&report.summary?`<div>进展：${esc(report.summary)}</div>`:'';
+      const next=reported&&report.next_step?`<div>下一步：${esc(report.next_step)}</div>`:'';
+      const blocker=reported&&report.blocker?`<div class="task-report-blocker">阻塞：${esc(report.blocker)}</div>`:'';
+      reportHtml=`<div class="task-agent-report"><div class="task-report-meta">${meta}${pending}${failed}</div>${summary}${next}${blocker}</div>`;
+    }
     return `<div class="task-agent"${canOpen?` data-action="openSessionAgent" data-session="${esc(session.session)}" data-pane="${esc(agent.pane_id)}"`:''}>
       <div class="task-agent-icon">${AGENT_EMOJI[agent.agent]||'🤖'}</div>
       <div class="task-agent-who"><div class="task-agent-mail">${esc(mail)}</div><div class="task-agent-type">${esc(agent.agent)} · ${esc(role)}</div></div>
       <div class="task-agent-task${agent.task?'':' task-agent-empty'}">${esc(task)}</div>
       <div class="task-agent-state task-state-${agentState}">${TASK_STATUS_LABEL[agentState]}</div>
+      ${reportHtml}
     </div>`
   }).join('')||'<div class="task-session-empty">这个 session 当前没有 Agent pane</div>';
   const unknown=Number(summary.unknown)||0;
@@ -1986,6 +2016,35 @@ async function releaseTermZoomLease(id,keepTimer=false){
     });
   }catch(e){}
 }
+function removeTermInstance(id){
+  const inst=TERM_INSTANCES[id];
+  if(inst){
+    inst.closing=true;
+    if(inst.reconnectTimer)clearTimeout(inst.reconnectTimer);
+    try{inst.ws?.close()}catch(e){}
+    try{inst.xterm?.dispose()}catch(e){}
+    if(inst.el)inst.el.remove();
+    delete TERM_INSTANCES[id];
+  }
+  TERMS=TERMS.filter(t=>t!==id);
+  delete TERM_LABELS[id];
+  delete TERM_SESSIONS[id];
+  delete TERM_ZOOM[id];
+  if(TERM_ID===id)TERM_ID=TERMS[0]||null;
+  renderTermOptions();
+}
+async function recoverInvalidTerm(id){
+  const inst=TERM_INSTANCES[id];
+  if(!inst||inst.closing)return;
+  const session=TERM_SESSIONS[id],wasCurrent=TERM_ID===id;
+  await releaseTermZoomLease(id);
+  removeTermInstance(id);
+  if(wasCurrent&&session&&TERM_SESSION_CATALOG.includes(session)){
+    toast('旧终端已失效，正在重新进入 '+session);
+    doAttachHerdr(session);
+  }else if(TERM_ID)showTermInstance(TERM_ID);
+  else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
+}
 function releaseAllTermZoomLeases(){
   for(const [id,state] of Object.entries(TERM_ZOOM)){
     state.suspended=true;
@@ -2000,23 +2059,9 @@ function releaseAllTermZoomLeases(){
 async function termClose(){
   if(!TERM_ID)return;
   const id=TERM_ID;
-  const inst=TERM_INSTANCES[id];
   await releaseTermZoomLease(id);
   try{await api('/api/term/'+id,{method:'DELETE'})}catch(e){}
-  TERMS=TERMS.filter(t=>t!==id);
-  delete TERM_LABELS[id];
-  delete TERM_SESSIONS[id];
-  delete TERM_ZOOM[id];
-  if(inst){
-    inst.closing=true;
-    if(inst.reconnectTimer)clearTimeout(inst.reconnectTimer);
-    if(inst.ws)inst.ws.close();
-    if(inst.xterm)inst.xterm.dispose();
-    if(inst.el)inst.el.remove();
-    delete TERM_INSTANCES[id];
-  }
-  if(TERM_ID===id)TERM_ID=TERMS[0]||null;
-  renderTermOptions();
+  removeTermInstance(id);
   if(TERM_ID)showTermInstance(TERM_ID);
   else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
 }
@@ -2153,7 +2198,7 @@ function openTermWS(id,xterm,replay){
       if(typeof ev.data==='string')xterm.write(ev.data);else xterm.write(new Uint8Array(ev.data));
     }
   }catch(e){}};
-  ws.onclose=ev=>{try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请新建终端]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(ev.code!==1008&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
+  ws.onclose=ev=>{const taken=ev.code===4001,invalid=ev.code===4004;try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请重新登录]\x1b[0m\r\n':taken?'\r\n\x1b[36m[终端已由更新的页面接管]\x1b[0m\r\n':invalid?'\r\n\x1b[36m[旧终端已失效，正在自动恢复]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(invalid&&inst&&inst.ws===ws&&!inst.closing)setTimeout(()=>recoverInvalidTerm(id),0);else if(ev.code!==1008&&!taken&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
   ws.onerror=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')}catch(e){}};
   return ws;
 }

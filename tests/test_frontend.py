@@ -452,6 +452,41 @@ def test_fresh_xterm_requests_history_but_socket_reconnect_does_not():
     assert "openTermWS(id,current.xterm,false)" in reconnect
 
 
+def test_new_terminal_connection_takes_over_without_old_page_reconnect_loop():
+    js = _inline_js()
+    websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
+        "function showTermInstance", 1
+    )[0]
+
+    assert "ev.code===4001" in websocket
+    assert "终端已由更新的页面接管" in websocket
+    assert "!taken" in websocket
+    assert "ev.code===4004" in websocket
+    assert "recoverInvalidTerm(id)" in websocket
+    recovery = js.split("async function recoverInvalidTerm(id){", 1)[1].split(
+        "function releaseAllTermZoomLeases", 1
+    )[0]
+    assert "removeTermInstance(id)" in recovery
+    assert "doAttachHerdr(session)" in recovery
+    assert "旧终端已失效，正在重新进入" in recovery
+
+
+def test_task_board_requests_and_renders_structured_agent_reports():
+    js = _inline_js()
+    assert 'id="taskReportBtn"' in HTML
+    assert "function refreshTaskReports()" in js
+    assert "/api/attention/refresh-reports" in js
+    assert "result.requested" in js
+    task = js.split("function sessionTaskHtml(session){", 1)[1].split(
+        "function renderAttention", 1
+    )[0]
+    assert "agent.report||null" in task
+    assert "report.summary" in task
+    assert "report.next_step" in task
+    assert "report.blocker" in task
+    assert "report.pending" in task
+
+
 def test_mobile_terminal_has_expandable_computer_keyboard():
     js = _inline_js()
     assert 'id="termKeys"' in HTML

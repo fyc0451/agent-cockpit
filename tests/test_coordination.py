@@ -392,3 +392,67 @@ def test_message_timestamp_accepts_epoch_and_iso8601():
         "created_at": "1970-01-01T00:02:03.500000+00:00",
     }) == 123.5
     assert coordination.message_timestamp({"created_at": "invalid"}, 7) == 7
+
+
+def test_task_report_accepts_only_latest_request_and_keeps_previous_while_pending(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    first = coordination.request_task_report(
+        "demo", "w1:p1", "codex", "codex-main", now=100,
+        request_id="first",
+    )
+    assert first["pending"] is True
+
+    reported = coordination.submit_task_report(
+        "demo", "w1:p1", "first", 40, "完成接口", "补测试", now=101,
+    )
+    assert reported["pending"] is False
+    assert reported["progress"] == 40
+
+    second = coordination.request_task_report(
+        "demo", "w1:p1", "codex", "codex-main", now=102,
+        request_id="second",
+    )
+    assert second["pending"] is True
+    assert second["summary"] == "完成接口"
+    with pytest.raises(ValueError, match="已过期"):
+        coordination.submit_task_report(
+            "demo", "w1:p1", "first", 90, "旧报告", now=103,
+        )
+
+    latest = coordination.submit_task_report(
+        "demo", "w1:p1", "second", 70, "测试通过", "发布", "", now=104,
+    )
+    assert latest["pending"] is False
+    assert latest["summary"] == "测试通过"
+    assert latest["next_step"] == "发布"
+
+
+def test_task_report_rejects_invalid_content_and_clears_reused_pane_identity(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    coordination.request_task_report(
+        "demo", "w1:p1", "codex", "codex-main", request_id="one", now=1,
+    )
+    with pytest.raises(ValueError, match="0-100"):
+        coordination.submit_task_report(
+            "demo", "w1:p1", "one", 101, "错误", now=2,
+        )
+    with pytest.raises(ValueError, match="summary 不能为空"):
+        coordination.submit_task_report(
+            "demo", "w1:p1", "one", 10, "", now=2,
+        )
+    coordination.submit_task_report(
+        "demo", "w1:p1", "one", 100, "旧 Agent 完成", now=2,
+    )
+
+    changed = coordination.request_task_report(
+        "demo", "w1:p1", "opencode", "opencode-main",
+        request_id="two", now=3,
+    )
+    assert changed["agent_type"] == "opencode"
+    assert changed["reported_ts"] is None
+    assert changed["summary"] is None
+    assert changed["pending"] is True

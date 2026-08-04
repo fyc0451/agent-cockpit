@@ -458,11 +458,14 @@ def list_terms() -> list[dict[str, Any]]:
     """列出所有终端会话。"""
     now = time.monotonic()
     with _lock:
-        return [
-            {
-                "id": tid, "pid": t["pid"], "alive": t.get("alive", False),
+        items = list(_terms.items())
+    result = []
+    for tid, t in items:
+        with t["lock"]:
+            alive = _check_alive(t)
+            result.append({
+                "id": tid, "pid": t["pid"], "alive": alive,
                 "idle": round(now - t.get("last_active", now), 1),
                 "label": t.get("label"),
-            }
-            for tid, t in _terms.items()
-        ]
+            })
+    return result
