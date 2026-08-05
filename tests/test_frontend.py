@@ -229,7 +229,6 @@ def test_terminal_assets_are_self_hosted_with_subresource_integrity():
         "vendor/xterm/xterm.css",
         "vendor/xterm/xterm.js",
         "vendor/xterm/addon-fit.js",
-        "vendor/xterm/addon-webgl.js",
     )
     assert "cdn.jsdelivr.net" not in HTML
     for asset in assets:
@@ -261,19 +260,16 @@ def test_terminal_assets_are_self_hosted_with_subresource_integrity():
     assert "@xterm/addon-webgl` 0.18.0" in notice
 
 
-def test_terminal_prefers_webgl_and_falls_back_on_context_loss():
+def test_terminal_uses_stable_default_renderer_without_webgl():
     js = _inline_js()
     mount = js.split("function termMount(id){", 1)[1].split("// ============ 会话管理", 1)[0]
-    webgl = js.split("function enableTermWebgl(xterm){", 1)[1].split(
-        "function termMount", 1
-    )[0]
 
-    assert "new WebglAddon.WebglAddon()" in webgl
-    assert "addon.onContextLoss(()=>{" in webgl
-    assert "addon.dispose()" in webgl
-    assert "return null" in webgl
-    assert mount.index("xterm.open(el)") < mount.index("enableTermWebgl(xterm)")
-    assert "TERM_INSTANCES[id]={xterm,fit,webgl," in mount
+    # WebGL glyph atlas 在 CJK + TUI 高频重绘、标签页恢复后可能损坏，表现为
+    # 字符仍可读但单元格互相覆盖。稳定性优先，使用 xterm 内置 renderer。
+    assert "/static/vendor/xterm/addon-webgl.js" not in HTML
+    assert "enableTermWebgl" not in js
+    assert "WebglAddon" not in js
+    assert "TERM_INSTANCES[id]={xterm,fit,ws:null," in mount
 
 
 def test_message_fields_escaped():
