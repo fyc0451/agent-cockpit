@@ -2356,6 +2356,7 @@ function removeTermInstance(id){
   if(inst){
     inst.closing=true;
     if(inst.reconnectTimer)clearTimeout(inst.reconnectTimer);
+    try{inst.resizeObserver?.disconnect()}catch(e){}
     try{inst.ws?.close()}catch(e){}
     try{inst.xterm?.dispose()}catch(e){}
     if(inst.el)inst.el.remove();
@@ -2588,7 +2589,19 @@ function termMount(id){
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
-  TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:''};
+  TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:'',resizeObserver:null};
+  // 容器尺寸变化不一定伴随 window/visualViewport resize 事件（布局延迟稳定、
+  // 侧边栏开合、缩放恢复、字体加载后重排等），漏一次 refit 终端就会比可见
+  // 区域窄几列，右侧留黑条。ResizeObserver 覆盖所有容器尺寸变化；
+  // safeFitOf 内部已有隐藏/零尺寸守卫和目标尺寸一致的短路，不会刷 PTY resize。
+  if(typeof ResizeObserver!=='undefined'){
+    const ro=new ResizeObserver(()=>{
+      const inst=TERM_INSTANCES[id];
+      if(inst&&!inst.closing)safeFitOf(inst.fit,inst.xterm);
+    });
+    ro.observe(el);
+    TERM_INSTANCES[id].resizeObserver=ro;
+  }
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   xterm.onData(d=>{if(isTermFocusReport(d))return;const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});

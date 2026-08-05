@@ -685,6 +685,26 @@ def test_terminal_first_show_refits_after_browser_layout_settles():
     )
 
 
+def test_terminal_container_size_changes_trigger_refit_via_resize_observer():
+    # 容器尺寸变化不一定伴随 window/visualViewport resize 事件，漏一次 refit
+    # 终端就会比可见区域窄、右侧留黑条。每个终端实例必须挂 ResizeObserver，
+    # 并在销毁时 disconnect。
+    js = _inline_js()
+    mount = js.split("function termMount(id){", 1)[1].split(
+        "// ============ 会话管理", 1
+    )[0]
+    remove = js.split("function removeTermInstance(id){", 1)[1].split(
+        "async function recoverInvalidTerm", 1
+    )[0]
+
+    assert "resizeObserver:null" in mount
+    assert "new ResizeObserver(()=>{" in mount
+    assert "ro.observe(el)" in mount
+    assert "TERM_INSTANCES[id].resizeObserver=ro" in mount
+    assert mount.index("new ResizeObserver") < mount.index("ro.observe(el)")
+    assert "inst.resizeObserver?.disconnect()" in remove
+
+
 def test_terminal_touch_scroll_is_js_driven():
     # 普通 scrollback 由 xterm 原生处理；鼠标上报或无 scrollback 的 alternate buffer
     # 由 enableTermTouchScroll 把单指拖动换算成 wheel 交给 TUI。
