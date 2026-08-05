@@ -1651,9 +1651,8 @@ function termKey(name){
 }
 async function termEnsure(){
   await restoreTerms();
-  if(TERM_ID){termSwitch(TERM_ID);return}
-  if(TERM_SESSION_CATALOG.length){doAttachHerdr(TERM_SESSION_CATALOG[0]);return}
-  termNew();
+  if(TERM_ID&&TERM_INSTANCES[TERM_ID]){showTermInstance(TERM_ID);return}
+  document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">尚未打开终端，请点击上方「🖥 herdr」选择 session</div>';
 }
 function termLabel(id){return TERM_LABELS[id]||('终端 '+id.slice(0,8))}
 function ensureTermFontLoaded(){
@@ -1667,11 +1666,12 @@ function ensureTermFontLoaded(){
 function renderTermOptions(){
   const sel=document.getElementById('termSelect');
   const attached=new Set(Object.values(TERM_SESSIONS));
+  const placeholder=TERM_ID?'':'<option value="">选择终端或 Herdr session…</option>';
   const terms=TERMS.map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
   const sessions=TERM_SESSION_CATALOG.filter(session=>!attached.has(session)).map(session=>
     `<option value="${TERM_SESSION_PREFIX}${esc(session)}">${esc(session)} · 打开</option>`
   ).join('');
-  sel.innerHTML=terms+sessions;
+  sel.innerHTML=placeholder+terms+sessions;
   if(TERM_ID)sel.value=TERM_ID;
 }
 async function restoreTerms(){
@@ -1688,16 +1688,10 @@ async function restoreTerms(){
         TERMS.push(id);TERM_LABELS[id]=item.label||'';
         if(item.label&&TERM_SESSION_CATALOG.includes(item.label))TERM_SESSIONS[id]=item.label;
       }
-      if(!TERM_ID)TERM_ID=TERMS.find(id=>TERM_SESSIONS[id])||TERMS[0]||null;
       renderTermOptions();
     }catch(e){TERM_RESTORE_PROMISE=null;renderTermOptions()}
   })();
   return TERM_RESTORE_PROMISE;
-}
-async function restoreAllHerdrSessions(){
-  await restoreTerms();
-  const sessions=[...new Set(TERM_SESSION_CATALOG)];
-  for(const session of sessions)await doAttachHerdr(session);
 }
 async function termNew(cwd){
   try{
@@ -3040,7 +3034,7 @@ async function init(){
   COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
     for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
   });
-  connectSSE();loadSessions();refreshBoard();await Promise.all([restoreAllHerdrSessions(),loadAttention()]);refreshPushStatus();handleAttentionHash();
+  connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();
 }
 init();
 </script>

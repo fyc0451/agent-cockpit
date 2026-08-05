@@ -145,7 +145,7 @@ def test_terminal_selector_uses_herdr_session_name():
     assert "TERM_LABELS[r.id]=r.label||''" in js
 
 
-def test_terminal_refresh_restores_live_terms_and_lists_all_running_sessions():
+def test_terminal_page_only_catalogs_live_terms_until_explicit_open():
     js = _inline_js()
     restore = js.split("async function restoreTerms(){", 1)[1].split(
         "async function termNew", 1
@@ -161,31 +161,33 @@ def test_terminal_refresh_restores_live_terms_and_lists_all_running_sessions():
     assert "item.alive===false" in restore
     assert "TERMS.push(id);TERM_LABELS[id]=item.label||''" in restore
     assert "TERM_SESSIONS[id]=item.label" in restore
-    assert "TERM_ID=TERMS.find(id=>TERM_SESSIONS[id])||TERMS[0]||null" in restore
-    # 这里只恢复存活 PTY；自动逐个 attach 由独立流程负责，避免并发重复创建。
+    assert "TERM_ID=TERMS.find" not in restore
+    # 进入终端页只读取目录，不挂 WebSocket、不创建/attach PTY。
     assert "method:'POST'" not in restore
     assert "TERM_SESSION_CATALOG.filter(session=>!attached.has(session))" in options
     assert "${esc(session)} · 打开" in options
     assert "await restoreTerms()" in ensure
-    assert "doAttachHerdr(TERM_SESSION_CATALOG[0])" in ensure
+    assert "termSwitch(" not in ensure
+    assert "doAttachHerdr(" not in ensure
+    assert "termNew(" not in ensure
+    assert "showTermInstance(TERM_ID)" in ensure
+    assert "尚未打开终端" in ensure
     assert "id.startsWith(TERM_SESSION_PREFIX)" in js
-    assert "await Promise.all([restoreAllHerdrSessions(),loadAttention()])" in js
+    init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
+    assert "restoreTerms(" not in init
+    assert "restoreAllHerdrSessions" not in js
 
 
-def test_refresh_opens_every_running_herdr_session_once():
+def test_herdr_terminal_attach_requires_explicit_button_or_selection():
     js = _inline_js()
-    restore_all = js.split("async function restoreAllHerdrSessions(){", 1)[1].split(
-        "async function termNew", 1
-    )[0]
     attach = js.split("async function doAttachHerdr(session){", 1)[1].split(
         "// ============ herdr", 1
     )[0]
 
-    assert "await restoreTerms()" in restore_all
-    assert "[...new Set(TERM_SESSION_CATALOG)]" in restore_all
-    assert "for(const session of sessions)" in restore_all
-    assert "await doAttachHerdr(session)" in restore_all
-    # 已有 session 终端走复用分支，只有缺失时才 POST 新 PTY。
+    assert 'onclick="termAttachHerdr()"' in HTML
+    assert "data-action=\"attach\"" in js
+    assert "else if(a==='attach')doAttachHerdr(s)" in js
+    # 显式选择后，已有 session 终端走复用分支，只有缺失时才 POST 新 PTY。
     assert "TERMS.find(id=>TERM_SESSIONS[id]===session)" in attach
     assert attach.index("if(existing)") < attach.index("method:'POST'")
 
