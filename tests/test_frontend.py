@@ -387,6 +387,10 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     assert "const mail=r.agent_mail||{}" in launch
     assert "mail.warning" in launch
     assert "身份 '+mail.name+' 已通知" in launch
+    response = launch.split("if(r.error)", 1)[1]
+    error, success = response.split(";else{", 1)
+    assert "closeLaunchModal();" not in error
+    assert "closeLaunchModal();" in success
 
 
 def test_add_agent_form_opens_from_terminal_toolbar_instead_of_board_footer():

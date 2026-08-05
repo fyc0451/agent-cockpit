@@ -1598,6 +1598,7 @@ async function startAgent(){
       const mail=r.agent_mail||{};
       const mailStatus=mail.notified?(' · 身份 '+mail.name+' 已通知'):(mail.warning?(' · Agent Mail: '+mail.warning):'');
       toast((r.reused?'已复用 ':'已启动 ')+name+' ['+agent+'] @ '+session+(r.workspace?.strategy==='isolated'?' · 独立 worktree':'')+mailStatus,mail.warning?5000:2000);
+      closeLaunchModal();
       setTimeout(async()=>{await refreshBoard();launchRefreshName(true)},1500)
     }
   }catch(e){toast('启动失败: '+e)}
