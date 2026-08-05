@@ -110,8 +110,11 @@ def test_launchd_installer_refuses_unrelated_port_listener(tmp_path):
     )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    calls = tmp_path / "launchctl-calls"
     fake_launchctl = fake_bin / "launchctl"
-    fake_launchctl.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_launchctl.write_text(
+        f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "{calls}"\n'
+    )
     fake_launchctl.chmod(0o755)
     fake_lsof = fake_bin / "lsof"
     fake_lsof.write_text(
@@ -134,6 +137,7 @@ def test_launchd_installer_refuses_unrelated_port_listener(tmp_path):
 
     assert result.returncode != 0
     assert "已被其他进程占用" in result.stderr
+    assert not calls.exists(), "端口预检失败时不得先卸载现有 LaunchAgent"
 
 
 def test_installer_rejects_unsafe_custom_path(tmp_path):

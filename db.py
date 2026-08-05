@@ -99,7 +99,7 @@ def unread_by_agent() -> list[dict[str, Any]]:
         "FROM agents a "
         "JOIN projects p ON p.id = a.project_id "
         "JOIN message_recipients mr ON mr.agent_id = a.id AND mr.read_ts IS NULL "
-        "WHERE a.retired_at IS NULL "
+        "WHERE a.retired_at IS NULL AND p.archived_at IS NULL "
         "GROUP BY a.id HAVING unread > 0"
     )
 
@@ -109,7 +109,9 @@ def global_unread_count() -> int:
     r = _one(
         "SELECT COUNT(*) AS n FROM message_recipients mr "
         "JOIN agents a ON a.id = mr.agent_id "
-        "WHERE mr.read_ts IS NULL AND a.retired_at IS NULL"
+        "JOIN projects p ON p.id = a.project_id "
+        "WHERE mr.read_ts IS NULL AND a.retired_at IS NULL "
+        "AND p.archived_at IS NULL"
     )
     return r["n"] if r else 0
 
@@ -134,12 +136,7 @@ def unread_messages(limit: int = 50) -> list[dict[str, Any]]:
 def overview() -> dict[str, Any]:
     """全局总览:项目列表 + 统计 + 未读。"""
     stats = project_stats()
-    unread = unread_by_agent()
     # 把未读数挂到对应项目上
-    unread_map: dict[int, int] = {}
-    for u in unread:
-        # 通过 agent 反查 project 需要额外信息;用 unread_by_project 补
-        pass
     proj_unread = unread_by_project()
     for s in stats:
         s["unread"] = proj_unread.get(s["id"], 0)
@@ -198,14 +195,24 @@ def recent_messages(project_id: int, limit: int = 50) -> list[dict[str, Any]]:
         "ORDER BY m.created_ts DESC LIMIT ?",
         (project_id, limit),
     )
-    # 批量取收件人
-    for m in msgs:
-        m["recipients"] = _rows(
-            "SELECT a.name, mr.kind, mr.read_ts, mr.ack_ts "
-            "FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id "
-            "WHERE mr.message_id = ?",
-            (m["id"],),
-        )
+    if not msgs:
+        return msgs
+    message_ids = [m["id"] for m in msgs]
+    placeholders = ",".join("?" for _ in message_ids)
+    recipients = _rows(
+        "SELECT mr.message_id, a.name, mr.kind, mr.read_ts, mr.ack_ts "
+        "FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id "
+        f"WHERE mr.message_id IN ({placeholders})",
+        tuple(message_ids),
+    )
+    recipients_by_message: dict[int, list[dict[str, Any]]] = {
+        message_id: [] for message_id in message_ids
+    }
+    for recipient in recipients:
+        message_id = recipient.pop("message_id")
+        recipients_by_message[message_id].append(recipient)
+    for message in msgs:
+        message["recipients"] = recipients_by_message[message["id"]]
     return msgs
 
 

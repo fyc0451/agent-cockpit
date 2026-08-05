@@ -30,7 +30,7 @@ load_runtime_env() {
 }
 
 stop_legacy_listener() {
-  local pid cwd command
+  local mode="${1:-stop}" pid cwd command
   command -v lsof >/dev/null 2>&1 || return 0
   while IFS= read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
@@ -40,6 +40,7 @@ stop_legacy_listener() {
       echo "端口 $COCKPIT_PORT 已被其他进程占用(pid=$pid)，未自动终止。" >&2
       exit 1
     fi
+    [[ "$mode" == "check" ]] && continue
     echo "正在停止旧版 Agent Cockpit(pid=$pid)..."
     kill "$pid"
     for _ in {1..25}; do
@@ -61,6 +62,8 @@ install_service() {
     exit 1
   fi
   load_runtime_env
+  # 先确认端口没有无关进程，再卸载现有服务；失败时保留可用的 LaunchAgent。
+  stop_legacy_listener check
   mkdir -p "$PLIST_DIR"
   sed "s|__INSTALL_DIR__|$INSTALL_DIR|g" "$PLIST_TEMPLATE" > "$PLIST_PATH"
   chmod 600 "$PLIST_PATH"

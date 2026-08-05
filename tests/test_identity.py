@@ -31,6 +31,71 @@ def identity_db(monkeypatch):
     con.close()
 
 
+@pytest.fixture
+def mail_db(monkeypatch):
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.executescript(
+        """
+        CREATE TABLE projects (
+            id INTEGER PRIMARY KEY,
+            slug TEXT,
+            human_key TEXT,
+            created_at REAL,
+            archived_at REAL
+        );
+        CREATE TABLE agents (
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER,
+            name TEXT,
+            program TEXT,
+            model TEXT,
+            task_description TEXT,
+            inception_ts REAL,
+            last_active_ts REAL,
+            contact_policy TEXT,
+            retired_at REAL
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER,
+            thread_id TEXT,
+            topic TEXT,
+            subject TEXT,
+            body_md TEXT,
+            importance TEXT,
+            ack_required INTEGER,
+            created_ts REAL,
+            reply_to INTEGER,
+            sender_id INTEGER
+        );
+        CREATE TABLE message_recipients (
+            message_id INTEGER,
+            agent_id INTEGER,
+            kind TEXT,
+            read_ts REAL,
+            ack_ts REAL
+        );
+        INSERT INTO projects VALUES (1, 'active', '/active', 1, NULL);
+        INSERT INTO projects VALUES (2, 'archived', '/archived', 2, 3);
+        INSERT INTO agents VALUES
+            (1, 1, 'active-agent', 'codex', '', '', 1, 1, 'open', NULL),
+            (2, 2, 'archived-agent', 'codex', '', '', 1, 1, 'open', NULL);
+        INSERT INTO messages VALUES
+            (1, 1, 't1', '', 'one', '', 'normal', 0, 1, NULL, 1),
+            (2, 1, 't2', '', 'two', '', 'normal', 0, 2, NULL, 1),
+            (3, 2, 't3', '', 'archived', '', 'normal', 0, 3, NULL, 2);
+        INSERT INTO message_recipients VALUES
+            (1, 1, 'to', NULL, NULL),
+            (2, 1, 'to', NULL, NULL),
+            (3, 2, 'to', NULL, NULL);
+        """
+    )
+    monkeypatch.setattr(db, "_conn", con)
+    yield con
+    con.close()
+
+
 def test_identity_prefers_exact_program(identity_db):
     identity_db.executescript(
         """
@@ -228,3 +293,47 @@ def test_db_queries_serialize_shared_connection(monkeypatch):
 
     assert not errors
     assert not overlap.is_set()
+
+
+def test_global_unread_excludes_archived_projects(mail_db):
+    assert db.global_unread_count() == 2
+    assert [row["project_slug"] for row in db.unread_by_agent()] == ["active"]
+    assert db.overview()["total_unread"] == 2
+
+
+def test_overview_does_not_run_redundant_agent_unread_query(monkeypatch):
+    monkeypatch.setattr(db, "project_stats", lambda: [])
+    monkeypatch.setattr(db, "unread_by_project", lambda: {})
+    monkeypatch.setattr(db, "global_unread_count", lambda: 0)
+    monkeypatch.setattr(
+        db,
+        "unread_by_agent",
+        lambda: (_ for _ in ()).throw(AssertionError("不应执行冗余查询")),
+    )
+
+    assert db.overview() == {
+        "projects": [],
+        "total_unread": 0,
+        "total_projects": 0,
+        "total_agents": 0,
+    }
+
+
+def test_recent_messages_batches_recipient_query(mail_db, monkeypatch):
+    calls = []
+    original_rows = db._rows
+
+    def tracked_rows(sql, params=()):
+        calls.append((sql, params))
+        return original_rows(sql, params)
+
+    monkeypatch.setattr(db, "_rows", tracked_rows)
+
+    messages = db.recent_messages(1)
+
+    assert [message["id"] for message in messages] == [2, 1]
+    assert [message["recipients"][0]["name"] for message in messages] == [
+        "active-agent",
+        "active-agent",
+    ]
+    assert len(calls) == 2
