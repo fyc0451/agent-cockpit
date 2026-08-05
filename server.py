@@ -2536,10 +2536,19 @@ def api_term_create(
     cols: int = 80,
     rows: int = 24,
     label: str | None = None,
+    replace_existing: bool | None = None,
 ):
     """创建一个新终端会话(PTY bash)。"""
     try:
-        return terminal.create_term(cwd, cols, rows, label)
+        should_replace = (
+            label is not None if replace_existing is None else replace_existing
+        )
+        create = (
+            terminal.replace_labeled_term
+            if should_replace
+            else terminal.create_term
+        )
+        return create(cwd, cols, rows, label)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError as e:
@@ -2608,9 +2617,19 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
         t["id"] for t in terminal.list_terms() if t.get("alive", True)
     }
     if term_id not in terms_now:
-        await websocket.send_text("\r\n[终端会话不存在,已关闭]\r\n")
+        superseded = terminal.was_superseded(term_id)
+        await websocket.send_text(
+            "\r\n[终端已由更新的页面接管]\r\n"
+            if superseded
+            else "\r\n[终端会话不存在,已关闭]\r\n"
+        )
         await websocket.close(
-            code=TERM_WS_INVALID_CODE, reason="terminal session no longer exists"
+            code=TERM_WS_TAKEN_OVER_CODE if superseded else TERM_WS_INVALID_CODE,
+            reason=(
+                "terminal replaced by a newer page"
+                if superseded
+                else "terminal session no longer exists"
+            ),
         )
         return
     connection = await _claim_term_websocket(term_id, websocket)
@@ -2642,6 +2661,12 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                     if data:
                         await websocket.send_bytes(data)
                     elif not terminal.is_alive(term_id):
+                        if terminal.was_superseded(term_id):
+                            await websocket.close(
+                                code=TERM_WS_TAKEN_OVER_CODE,
+                                reason="terminal replaced by a newer page",
+                            )
+                            break
                         tail = await asyncio.to_thread(
                             terminal.drain_output, term_id, 0.05
                         )

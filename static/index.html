@@ -1806,18 +1806,14 @@ async function doAttachHerdr(session){
   document.getElementById('launchBar').classList.add('hidden');
   let createdId=null;
   try{
-    // 页面刷新后旧 PTY 内的 herdr 客户端仍按旧尺寸附着；显式打开同一 session
-    // 时先关闭这些未在本页挂载的旧连接，再由新 PTY 以当前尺寸 attach。
-    const stale=TERMS.filter(id=>TERM_SESSIONS[id]===session&&!TERM_INSTANCES[id]);
-    for(const id of stale){
-      await api('/api/term/'+id,{method:'DELETE'});
-      removeTermInstance(id);
-    }
     const existing=TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id]);
     if(existing){TERM_ID=existing;renderTermOptions();termSwitch(existing);return}
     await ensureTermFontLoaded();
-    const r=await api('/api/term?label='+encodeURIComponent(session),{method:'POST'});
+    // 服务端串行替换同 session 的全部旧 PTY，避免多个浏览器基于各自缓存
+    // 同时删除旧 ID、再各自创建一份。较新的显式打开始终成为唯一实例。
+    const r=await api('/api/term?label='+encodeURIComponent(session)+'&replace_existing=true',{method:'POST'});
     createdId=r.id;
+    for(const id of TERMS.filter(id=>TERM_SESSIONS[id]===session))removeTermInstance(id);
     TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;TERM_SESSIONS[r.id]=session;
     termMount(r.id);
     renderTermOptions();
@@ -2079,8 +2075,7 @@ async function recoverInvalidTerm(id){
   await releaseTermZoomLease(id);
   removeTermInstance(id);
   if(wasCurrent&&session&&TERM_SESSION_CATALOG.includes(session)){
-    toast('旧终端已失效，正在重新进入 '+session);
-    doAttachHerdr(session);
+    toast('该终端已被其他页面替换，请显式打开 '+session);
   }else if(TERM_ID)showTermInstance(TERM_ID);
   else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
 }

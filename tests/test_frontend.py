@@ -182,7 +182,7 @@ def test_terminal_page_only_catalogs_live_terms_until_explicit_open():
     assert "restoreAllHerdrSessions" not in js
 
 
-def test_herdr_terminal_attach_replaces_restored_pty_on_first_explicit_open():
+def test_herdr_terminal_attach_atomically_replaces_restored_pty_on_server():
     js = _inline_js()
     attach = js.split("async function doAttachHerdr(session){", 1)[1].split(
         "// ============ herdr", 1
@@ -194,13 +194,11 @@ def test_herdr_terminal_attach_replaces_restored_pty_on_first_explicit_open():
     assert 'onclick="termAttachHerdr()"' in HTML
     assert "data-action=\"attach\"" in js
     assert "else if(a==='attach')doAttachHerdr(s)" in js
-    # 刷新恢复的旧 attach PTY 可能保留错误 pane 几何；显式点击时必须先删除再新建。
-    assert "TERMS.filter(id=>TERM_SESSIONS[id]===session&&!TERM_INSTANCES[id])" in attach
-    assert "await api('/api/term/'+id,{method:'DELETE'})" in attach
-    assert "removeTermInstance(id)" in attach
+    # 跨浏览器不能各自按缓存删除旧 ID 再创建；服务端必须串行替换同 label PTY。
+    assert "replace_existing=true" in attach
+    assert "await api('/api/term/'+id,{method:'DELETE'})" not in attach
     assert "TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id])" in attach
-    assert attach.index("method:'DELETE'") < attach.index("if(existing)")
-    assert attach.index("method:'DELETE'") < attach.index("method:'POST'")
+    assert "TERMS.filter(id=>TERM_SESSIONS[id]===session)" in attach
     # 新终端挂载完成后再刷新 selector，不能又显示成待打开的 session。
     created = attach.split("const r=await api('/api/term?label='", 1)[1]
     assert created.index("termMount(r.id)") < created.index("renderTermOptions()")
@@ -524,8 +522,8 @@ def test_new_terminal_connection_takes_over_without_old_page_reconnect_loop():
         "function releaseAllTermZoomLeases", 1
     )[0]
     assert "removeTermInstance(id)" in recovery
-    assert "doAttachHerdr(session)" in recovery
-    assert "旧终端已失效，正在重新进入" in recovery
+    assert "doAttachHerdr(session)" not in recovery
+    assert "该终端已被其他页面替换，请显式打开" in recovery
 
 
 def test_task_board_requests_and_renders_structured_agent_reports():

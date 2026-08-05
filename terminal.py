@@ -37,10 +37,16 @@ from typing import Any
 
 # 终端会话池:term_id -> {master_fd, pid, alive, lock, created_ts, last_active}
 _terms: dict[str, dict[str, Any]] = {}
+# 被“较新页面接管”替换的 term_id 临时保留原因，供仍连接旧 ID 的 WebSocket
+# 返回 taken-over 而不是普通失效；否则旧版页面会自动重建并与新页面反复争抢。
+_superseded_terms: dict[str, float] = {}
 _lock = threading.Lock()
 # pty.fork 先创建 master fd 再返回父进程；串行化 fork→FD_CLOEXEC，
 # 避免并发创建时另一个 shell 在标记前继承该 master fd。
 _fork_lock = threading.Lock()
+# 同一 Herdr session 的 Web PTY 由 label 标识。跨浏览器显式打开时必须把
+# “关闭旧 PTY + 创建新 PTY”串行化，否则两个页面会基于各自缓存各建一份。
+_replace_label_lock = threading.Lock()
 
 SHELL = os.environ.get("SHELL", "/bin/bash")
 HOME = os.path.expanduser("~")
@@ -54,6 +60,7 @@ MAX_TERMS = 16
 IDLE_TTL = 1800.0
 # 已退出子进程的回收宽限(秒):留给 server pump drain 尾输出的窗口
 DEAD_GRACE = 60.0
+SUPERSEDED_TTL = 3600.0
 # 单次写 PTY 的最长等待(对端不消费时抛 TimeoutError;设置页 term.write_timeout 可覆盖)
 WRITE_TIMEOUT = 2.0
 # 单次 WebSocket 输出合并上限；macOS PTY 常以约 1 KiB 返回，若逐块转发会把
@@ -170,6 +177,28 @@ def create_term(
         _kill_child(pid, master_fd)
         raise RuntimeError(f"活跃终端数已达上限 {max_terms}")
     return {"id": term_id, "pid": pid, "label": label}
+
+
+def replace_labeled_term(
+    cwd: str | None = None,
+    cols: int = 80,
+    rows: int = 24,
+    label: str | None = None,
+) -> dict[str, Any]:
+    """串行替换同 label 的 PTY，供 Herdr session 显式接管使用。"""
+    normalized = _valid_label(label)
+    if normalized is None:
+        raise ValueError("替换终端必须提供名称")
+    with _replace_label_lock:
+        with _lock:
+            victims = [
+                term_id
+                for term_id, state in _terms.items()
+                if state.get("label") == normalized
+            ]
+        for term_id in victims:
+            kill_term(term_id, superseded=True)
+        return create_term(cwd, cols, rows, normalized)
 
 
 def _kill_child(pid: int, master_fd: int) -> None:
@@ -433,10 +462,12 @@ def is_alive(term_id: str) -> bool:
         return _check_alive(t)
 
 
-def kill_term(term_id: str) -> None:
+def kill_term(term_id: str, *, superseded: bool = False) -> None:
     """关闭终端:杀进程组 + 关 fd + waitpid 回收 + 移出池。"""
     with _lock:
         t = _terms.pop(term_id, None)
+        if t and superseded:
+            _superseded_terms[term_id] = time.monotonic()
     if not t:
         return
     # 与 write_term 相同的锁序:先写锁、后状态锁。close 等当前完整消息写完，
@@ -445,6 +476,19 @@ def kill_term(term_id: str) -> None:
         with t["lock"]:
             t["alive"] = False
             _kill_child(t["pid"], t["master_fd"])
+
+
+def was_superseded(term_id: str) -> bool:
+    """终端是否因同 label 的较新显式打开而被替换。"""
+    now = time.monotonic()
+    with _lock:
+        replaced_at = _superseded_terms.get(term_id)
+        if replaced_at is None:
+            return False
+        if now - replaced_at > SUPERSEDED_TTL:
+            _superseded_terms.pop(term_id, None)
+            return False
+        return True
 
 
 def sweep_idle(max_idle: float | None = None) -> int:
@@ -463,6 +507,13 @@ def sweep_idle(max_idle: float | None = None) -> int:
         max_idle = float(_term_cfg("idle_ttl", IDLE_TTL))
     now = time.monotonic()
     with _lock:
+        expired_superseded = [
+            term_id
+            for term_id, replaced_at in _superseded_terms.items()
+            if now - replaced_at > SUPERSEDED_TTL
+        ]
+        for term_id in expired_superseded:
+            _superseded_terms.pop(term_id, None)
         items = list(_terms.items())
     victims = []
     for tid, t in items:

@@ -146,6 +146,23 @@ def test_websocket_marks_missing_terminal_as_non_reconnectable(monkeypatch):
     assert closed.value.code == server.TERM_WS_INVALID_CODE
 
 
+def test_websocket_marks_replaced_terminal_as_taken_over(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: [])
+    monkeypatch.setattr(server.terminal, "was_superseded", lambda term_id: True)
+    client = TestClient(server.app)
+    client.post("/api/auth/login", json={"token": "secret"})
+
+    with client.websocket_connect(
+        "/api/term/replaced", headers={"origin": "http://testserver"}
+    ) as websocket:
+        assert "更新的页面接管" in websocket.receive_text()
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_text()
+
+    assert closed.value.code == server.TERM_WS_TAKEN_OVER_CODE
+
+
 def test_non_loopback_bind_requires_token(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
     with pytest.raises(RuntimeError):
@@ -236,6 +253,31 @@ def test_terminal_create_maps_validation_and_limit_errors(monkeypatch):
         server.terminal, "create_term", lambda *args: (_ for _ in ()).throw(RuntimeError("limit"))
     )
     assert client.post("/api/term", headers=headers).status_code == 429
+
+
+def test_terminal_create_can_atomically_replace_same_label(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    headers = {"authorization": "Bearer secret"}
+    called = []
+
+    def replace(cwd, cols, rows, label):
+        called.append((cwd, cols, rows, label))
+        return {"id": "replacement", "pid": 123, "label": label}
+
+    monkeypatch.setattr(server.terminal, "replace_labeled_term", replace)
+    response = client.post(
+        "/api/term?label=demo&replace_existing=true", headers=headers
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "replacement"
+    assert called == [(None, 80, 24, "demo")]
+
+    called.clear()
+    response = client.post("/api/term?label=legacy-page", headers=headers)
+    assert response.status_code == 200
+    assert called == [(None, 80, 24, "legacy-page")]
 
 
 def test_websocket_forwards_non_control_json_input(monkeypatch):

@@ -20,6 +20,8 @@ def cleanup_terms():
     yield
     for t in terminal.list_terms():
         terminal.kill_term(t["id"])
+    with terminal._lock:
+        terminal._superseded_terms.clear()
 
 
 def _create(**kw):
@@ -102,6 +104,66 @@ def test_create_stores_safe_display_label():
     for label in ("", " ", "x" * 65, "bad\nname", "bad\x7fname"):
         with pytest.raises(ValueError, match="名称"):
             terminal.create_term(label=label)
+
+
+def test_replace_labeled_term_removes_all_previous_instances():
+    first = terminal.create_term(label="demo")["id"]
+    second = terminal.create_term(label="demo")["id"]
+
+    replacement = terminal.replace_labeled_term(label="demo")
+
+    matching = [t for t in terminal.list_terms() if t["label"] == "demo"]
+    assert [t["id"] for t in matching] == [replacement["id"]]
+    assert terminal.is_alive(first) is False
+    assert terminal.is_alive(second) is False
+    assert terminal.was_superseded(first) is True
+    assert terminal.was_superseded(second) is True
+
+
+def test_concurrent_labeled_replacements_are_serialized(monkeypatch):
+    barrier = threading.Barrier(3)
+    results = []
+    state = {"active": 0, "max_active": 0, "next_id": 0}
+    state_lock = threading.Lock()
+
+    def fake_create(cwd, cols, rows, label):
+        with state_lock:
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+            state["next_id"] += 1
+            term_id = f"term-{state['next_id']}"
+        time.sleep(0.05)
+        with state_lock:
+            state["active"] -= 1
+        return {"id": term_id, "pid": 123, "label": label}
+
+    monkeypatch.setattr(terminal, "create_term", fake_create)
+
+    def replace():
+        barrier.wait()
+        results.append(terminal.replace_labeled_term(label="demo")["id"])
+
+    workers = [threading.Thread(target=replace) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=8)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert sorted(results) == ["term-1", "term-2"]
+    assert state["max_active"] == 1
+
+
+def test_replace_labeled_term_requires_label():
+    with pytest.raises(ValueError, match="名称"):
+        terminal.replace_labeled_term()
+
+
+def test_manual_kill_is_not_marked_as_superseded():
+    term_id = _create(label="demo")
+    terminal.kill_term(term_id)
+    assert terminal.was_superseded(term_id) is False
 
 
 def test_create_marks_master_fd_close_on_exec():
