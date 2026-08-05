@@ -295,7 +295,7 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server.terminal,
         "create_term",
-        lambda cwd: created.append(cwd) or {"id": "term1"},
+        lambda cwd, cols, rows: created.append((cwd, cols, rows)) or {"id": "term1"},
     )
     monkeypatch.setattr(
         server.terminal,
@@ -316,7 +316,9 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     assert body["session_started"] is True
     assert body["started"] == ["codex"]
     assert body["failed"] == []
-    assert created == [str(tmp_path)]
+    assert created == [
+        (str(tmp_path), server.SESSION_BOOTSTRAP_COLS, server.SESSION_BOOTSTRAP_ROWS)
+    ]
     assert writes[0] == (
         "term1",
         f"{server.herdr_client.HERDR_BIN} --session demo\r",
@@ -351,7 +353,9 @@ def test_setup_workspace_closes_initial_blank_pane(monkeypatch, tmp_path):
         "close_pane",
         lambda session, pane_id: closed.append(pane_id) or {"available": True},
     )
-    monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
+    monkeypatch.setattr(
+        server.terminal, "create_term", lambda cwd, cols, rows: {"id": "term1"}
+    )
     monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
     monkeypatch.setattr(server, "_start_pty_drainer", lambda term_id, output: (None, None))
     monkeypatch.setattr(server, "_stop_pty_drainer", lambda *_: None)
@@ -376,7 +380,9 @@ def test_setup_workspace_timeout_reports_herdr_state_and_cleans_terminal(
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: False)
     monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: [])
-    monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
+    monkeypatch.setattr(
+        server.terminal, "create_term", lambda cwd, cols, rows: {"id": "term1"}
+    )
     monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
     monkeypatch.setattr(
         server,

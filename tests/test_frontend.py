@@ -184,6 +184,9 @@ def test_setup_workspace_supports_roles_tasks_and_automatic_worktrees():
     assert "/api/herdr/inspect-workspace" in js
     assert "SETUP_SUBMITTING" in js
     assert "当前目录不是 Git 仓库" in js
+    layout = re.search(r'<select id="suLayout">(.*?)</select>', HTML, re.S)
+    assert layout is not None
+    assert layout.group(1).find('value="tab"') < layout.group(1).find('value="right"')
 
 
 def test_old_session_mail_project_can_be_selected_in_ui():

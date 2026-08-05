@@ -79,6 +79,8 @@ MAIL_AGENT_NAMES = {
 }
 SESSION_START_TIMEOUT = 20.0
 SESSION_BOOTSTRAP_OUTPUT_LIMIT = 16 * 1024
+SESSION_BOOTSTRAP_COLS = 160
+SESSION_BOOTSTRAP_ROWS = 40
 ROOT_DIR = Path(__file__).resolve().parent
 AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
@@ -310,7 +312,7 @@ class SetupWorkspaceReq(BaseModel):
     session: str
     workdir: str
     agents: list[str] = Field(default_factory=lambda: ["codex"])
-    layout: str = "right"  # right(水平/左右) | down(垂直/上下) | tab(多页/不分割)
+    layout: str = "tab"  # tab(多页/不分割) | right(水平/左右) | down(垂直/上下)
     mode: str = "quick"
     participants: list[WorkspaceParticipantReq] | None = None
 
@@ -1481,7 +1483,11 @@ def _setup_workspace(req: SetupWorkspaceReq):
         drain_thread = None
         pty_output = bytearray()
         try:
-            t = terminal.create_term(req.workdir)
+            t = terminal.create_term(
+                req.workdir,
+                cols=SESSION_BOOTSTRAP_COLS,
+                rows=SESSION_BOOTSTRAP_ROWS,
+            )
             drain_stop, drain_thread = _start_pty_drainer(t["id"], pty_output)
             time.sleep(0.5)
             # 在 PTY 里跑 herdr --session <name>(创建 + detach)
