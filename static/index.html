@@ -1354,6 +1354,10 @@ function closeTerm(){
   document.getElementById('paneSwitch').hidden=true;
   CURRENT_TERM=null;
 }
+function paneReadText(d){
+  const body=d.output||d.error||'(空)';
+  return d.degraded&&d.notice?d.notice+'\n\n'+body:body;
+}
 function updatePaneOutput(out,next){
   const current=out.textContent;
   if(current===next)return false;
@@ -1383,7 +1387,7 @@ async function refreshTerm(){
     const d=await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}?lines=80&is_agent=${t.isAgent}`);
     if(!CURRENT_TERM||CURRENT_TERM.session!==t.session||CURRENT_TERM.paneId!==t.paneId)return;
     const out=document.getElementById('termOut');
-    const next=d.output||d.error||'(空)';
+    const next=paneReadText(d);
     const selection=window.getSelection();
     if(!selection||selection.isCollapsed||!out.contains(selection.anchorNode))updatePaneOutput(out,next);
     updateDrawerHead();
@@ -1900,7 +1904,7 @@ async function hfRefreshAll(){
     try{
       const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=300&is_agent=true`);
       if(HF_SESSION!==session||!out.isConnected)return;
-      const next=d.output||d.error||'(空)';
+      const next=paneReadText(d);
       if(out.textContent===next)continue;
       const selection=window.getSelection();
       if(selection&&!selection.isCollapsed&&out.contains(selection.anchorNode))continue;

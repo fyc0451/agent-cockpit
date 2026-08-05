@@ -101,6 +101,24 @@ def test_pane_output_refresh_only_replaces_changed_text_range():
     assert "node.replaceData(start,oldEnd-start,next.slice(start,newEnd))" in js
 
 
+def test_degraded_pane_read_shows_notice_without_rendering_html():
+    js = _inline_js()
+    drawer = js.split("async function refreshTerm(){", 1)[1].split(
+        "async function termSend", 1
+    )[0]
+    flow = js.split("async function hfRefreshAll(){", 1)[1].split(
+        "async function hfSend", 1
+    )[0]
+
+    assert "function paneReadText(d)" in js
+    assert "d.degraded&&d.notice" in js
+    assert "paneReadText(d)" in drawer
+    assert "paneReadText(d)" in flow
+    assert "innerHTML=d.output" not in js
+    assert "updatePaneOutput(out,next)" in drawer
+    assert "updatePaneOutput(out,next)" in flow
+
+
 def test_api_preserves_server_detail():
     # 不再把服务端返回的 detail 覆盖成 r.statusText
     assert "throw r.statusText" not in HTML
