@@ -82,6 +82,34 @@ def test_build_attention_combines_panes_tasks_and_optional_mail(monkeypatch):
         "global_unread_count",
         lambda: 1,
     )
+    monkeypatch.setattr(
+        server.coordination,
+        "run_by_session",
+        lambda session: {
+            "participants": [
+                {
+                    "participant_id": "lead",
+                    "agent_type": "codex",
+                    "mail_name": "codex-main",
+                    "pane_id": "w1:p2",
+                    "role": "lead",
+                    "task_text": "完成任务看板",
+                    "task_revision": 2,
+                    "state": "working",
+                },
+                {
+                    "participant_id": "developer",
+                    "agent_type": "kimi",
+                    "mail_name": "kimi-main",
+                    "pane_id": "w1:p3",
+                    "role": "developer",
+                    "task_text": "补充测试",
+                    "task_revision": 1,
+                    "state": "working",
+                },
+            ]
+        },
+    )
 
     result = server._build_attention(snapshot)
 
@@ -93,6 +121,116 @@ def test_build_attention_combines_panes_tasks_and_optional_mail(monkeypatch):
     assert by_kind["task_failed"]["url"] == "/#/attention/task/failed1"
     assert by_kind["task_review"]["target"]["task_id"] == "review1"
     assert result["capabilities"]["agent_mail"]["available"] is True
+    assert len(result["sessions"]) == 1
+    session = result["sessions"][0]
+    assert session["session"] == "demo"
+    assert session["status"] == "blocked"
+    assert session["progress"] == 0
+    assert session["summary"] == {
+        "working": 1,
+        "blocked": 1,
+        "done": 0,
+        "idle": 0,
+        "unknown": 0,
+    }
+    assert session["agents"][0] == {
+        "agent": "codex",
+        "mail_name": "codex-main",
+        "role": "lead",
+        "task": "完成任务看板",
+        "status": "blocked",
+        "pane_id": "w1:p2",
+        "cwd": "",
+        "coordination_state": "working",
+        "task_revision": 2,
+        "report": None,
+    }
+
+
+def test_refresh_reports_prompts_agents_and_exposes_structured_progress(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.coordination, "DB_PATH", tmp_path / "coordination.sqlite3"
+    )
+    snapshot = {
+        "sessions": [{
+            "session": "demo",
+            "directory": str(tmp_path),
+            "panes": [{
+                "session": "demo", "pane_id": "w1:p2", "agent": "codex",
+                "agent_status": "working", "mail_name": "codex-main",
+            }],
+        }],
+        "panes": [],
+    }
+    monkeypatch.setattr(server, "_board_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.coordination, "run_by_session", lambda session: None)
+    prompts = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_send",
+        lambda session, pane, text, mode: prompts.append(
+            (session, pane, text, mode)
+        ) or {"available": True},
+    )
+
+    response = TestClient(server.app).post(
+        "/api/attention/refresh-reports",
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["requested"] == 1
+    assert len(prompts) == 1
+    assert "非打断状态上报" in prompts[0][2]
+    assert "task-report" in prompts[0][2]
+    report = server.coordination.task_report("demo", "w1:p2")
+    assert report["pending"] is True
+
+    server.coordination.submit_task_report(
+        "demo", "w1:p2", report["request_id"], 60,
+        "完成后端", "继续前端", "", now=200,
+    )
+    sessions = server._build_session_progress(snapshot)
+    shown = sessions[0]["agents"][0]["report"]
+    assert shown["progress"] == 60
+    assert shown["summary"] == "完成后端"
+
+
+def test_session_progress_keeps_legacy_sessions_without_coordination(monkeypatch):
+    monkeypatch.setattr(server.coordination, "run_by_session", lambda session: None)
+
+    sessions = server._build_session_progress({
+        "sessions": [
+            {
+                "session": "legacy",
+                "directory": "/sessions/legacy",
+                "panes": [
+                    {
+                        "session": "legacy",
+                        "pane_id": "w1:p2",
+                        "agent": "opencode",
+                        "agent_status": "done",
+                        "mail_name": "opencode-main",
+                        "cwd": "/project",
+                    },
+                    {"session": "legacy", "pane_id": "w1:p3", "agent": None},
+                ],
+            },
+            {"session": "terminal-only", "panes": []},
+        ],
+        "panes": [],
+    })
+
+    assert [item["session"] for item in sessions] == ["legacy", "terminal-only"]
+    assert sessions[0]["progress"] == 100
+    assert sessions[0]["status"] == "done"
+    assert sessions[0]["agents"][0]["mail_name"] == "opencode-main"
+    assert sessions[0]["agents"][0]["task"] is None
+    assert sessions[1]["status"] == "empty"
+    assert sessions[1]["agents"] == []
 
 
 def test_build_attention_degrades_when_agent_mail_is_missing(monkeypatch):
@@ -295,7 +433,7 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server.terminal,
         "create_term",
-        lambda cwd: created.append(cwd) or {"id": "term1"},
+        lambda cwd, **_: created.append(cwd) or {"id": "term1"},
     )
     monkeypatch.setattr(
         server.terminal,
@@ -322,6 +460,67 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
         f"{server.herdr_client.HERDR_BIN} --session demo\r",
     )
     assert writes[-1] == ("term1", "\x02d")
+
+
+def test_setup_workspace_bootstraps_safe_width_before_horizontal_splits(
+    monkeypatch, tmp_path,
+):
+    """三个 agent 启动时不能继续沿用 80 列，避免末端 pane 只有约 27 列。"""
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: False)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    session_states = iter([
+        [],
+        [{"name": "demo", "status": "running"}],
+    ])
+    monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: next(session_states))
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda session, workdir, agent, **kwargs: {
+            "available": True, "pane_id": f"w1:p-{agent}",
+        },
+    )
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"panes": []})
+    created = []
+
+    def create_term(cwd, cols=80, rows=24):
+        created.append((cwd, cols, rows))
+        return {"id": "term1"}
+
+    monkeypatch.setattr(server.terminal, "create_term", create_term)
+    monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
+    monkeypatch.setattr(server, "_start_pty_drainer", lambda *_: (None, None))
+    monkeypatch.setattr(server, "_stop_pty_drainer", lambda *_: None)
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo",
+            "workdir": str(tmp_path),
+            "agents": ["codex", "kimi", "opencode"],
+            "layout": "right",
+        },
+    )
+
+    assert response.json()["ok"] is True
+    # 启动阶段还有一个 Herdr 初始 shell pane，因此为 4 个 pane 各留 100 列。
+    assert created == [(str(tmp_path), 400, 30)]
+
+
+def test_workspace_bootstrap_dimensions_cover_all_layouts_and_caps():
+    assert server._workspace_bootstrap_dims("horizontal", 3) == (400, 30)
+    assert server._workspace_bootstrap_dims("vertical", 3) == (100, 120)
+    assert server._workspace_bootstrap_dims("tab", 3) == (100, 30)
+    assert server._workspace_bootstrap_dims("right", 99) == (
+        server.terminal.MAX_COLS, 30,
+    )
+    assert server._workspace_bootstrap_dims("down", 99) == (
+        100, server.terminal.MAX_ROWS,
+    )
 
 
 def test_setup_workspace_closes_initial_blank_pane(monkeypatch, tmp_path):
@@ -351,7 +550,7 @@ def test_setup_workspace_closes_initial_blank_pane(monkeypatch, tmp_path):
         "close_pane",
         lambda session, pane_id: closed.append(pane_id) or {"available": True},
     )
-    monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
+    monkeypatch.setattr(server.terminal, "create_term", lambda cwd, **_: {"id": "term1"})
     monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
     monkeypatch.setattr(server, "_start_pty_drainer", lambda term_id, output: (None, None))
     monkeypatch.setattr(server, "_stop_pty_drainer", lambda *_: None)
@@ -376,7 +575,7 @@ def test_setup_workspace_timeout_reports_herdr_state_and_cleans_terminal(
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(server.herdr_client, "onboarding_required", lambda: False)
     monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: [])
-    monkeypatch.setattr(server.terminal, "create_term", lambda cwd: {"id": "term1"})
+    monkeypatch.setattr(server.terminal, "create_term", lambda cwd, **_: {"id": "term1"})
     monkeypatch.setattr(server.terminal, "write_term", lambda *_: None)
     monkeypatch.setattr(
         server,
@@ -583,8 +782,8 @@ def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
         workdir=str(tmp_path),
         mode="parallel",
         participants=[
-            {"id": "one", "agent": "codex", "role": "lead"},
-            {"id": "two", "agent": "kimi", "role": "developer"},
+            {"id": "one", "agent": "codex", "role": "lead", "task": "后端"},
+            {"id": "two", "agent": "kimi", "role": "developer", "task": "前端"},
         ],
     )
 
@@ -595,6 +794,25 @@ def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
         assert "不是 Git 仓库" in exc.detail
     else:
         raise AssertionError("非 Git 目录不应启动并行写入者")
+
+
+def test_prepare_workspace_rejects_blank_participant_task(tmp_path):
+    req = server.SetupWorkspaceReq(
+        session="demo",
+        workdir=str(tmp_path),
+        mode="custom",
+        participants=[
+            {"id": "lead", "agent": "codex", "role": "lead", "task": "   "},
+        ],
+    )
+
+    try:
+        server._prepare_workspace(req)
+    except server.HTTPException as exc:
+        assert exc.status_code == 400
+        assert "真实任务" in exc.detail
+    else:
+        raise AssertionError("协作工作区不应接受空白任务")
 
 
 def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
@@ -645,6 +863,141 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
     assert "你的角色: Reviewer" in sent[1][1]
     assert "共享工作目录" in sent[1][1]
     assert "detached worktree" not in sent[1][1]
+    for _, briefing, _ in sent:
+        assert "每完成一个里程碑检查一次未读消息" in briefing
+        assert "多封消息按时间顺序处理" in briefing
+        assert "完成当前原子操作并保存状态后立即停手汇报" in briefing
+
+
+def test_agent_mail_identity_hint_includes_safe_message_checkpoint_protocol():
+    hint = server._identity_hint("codex-main", "/tmp/project", "codex")
+
+    assert "每完成一个里程碑检查一次未读消息" in hint
+    assert "多封消息按时间顺序处理" in hint
+    assert "完成当前原子操作并保存状态后立即停手汇报" in hint
+
+
+def test_setup_workspace_reuses_matching_agent_without_reinjecting(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [{"name": "demo", "status": "running", "directory": str(tmp_path)}],
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda *args, **kwargs: {
+            "available": True,
+            "pane_id": "w1:p2",
+            "agent": "codex",
+            "cwd": str(tmp_path),
+            "reused": True,
+        },
+    )
+    script = tmp_path / "am-init-project"
+    script.write_text("", encoding="utf-8")
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", script)
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "ok", ""),
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "snapshot",
+        lambda: {
+            "sessions": [{
+                "session": "demo",
+                "panes": [{"pane_id": "w1:p2", "agent": "codex"}],
+            }],
+        },
+    )
+    monkeypatch.setattr(server, "_identity_name", lambda *_: "codex-main")
+    sent = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo",
+            "workdir": str(tmp_path),
+            "mode": "custom",
+            "participants": [
+                {"id": "lead", "agent": "codex", "role": "lead", "task": "修复启动"},
+            ],
+        },
+    )
+
+    body = response.json()
+    assert body["ok"] is True
+    assert body["idempotent"] is True
+    assert body["started"] == []
+    assert body["reused"] == ["codex"]
+    assert body["failed"] == []
+    assert body["briefed"] == []
+    assert body["notified"] == []
+    assert sent == []
+
+
+def test_setup_workspace_rejects_reused_agent_with_unknown_or_different_cwd(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [{"name": "demo", "status": "running", "directory": str(tmp_path)}],
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+    client = TestClient(server.app)
+    other = tmp_path / "other"
+    other.mkdir()
+
+    for existing_cwd in (None, str(other)):
+        result = {
+            "available": True,
+            "pane_id": "w1:p2",
+            "agent": "codex",
+            "reused": True,
+        }
+        if existing_cwd:
+            result["cwd"] = existing_cwd
+        monkeypatch.setattr(server.herdr_client, "start_agent", lambda *_, **__: result)
+
+        response = client.post(
+            "/api/herdr/setup-workspace",
+            headers={"authorization": "Bearer secret"},
+            json={
+                "session": "demo",
+                "workdir": str(tmp_path),
+                "mode": "custom",
+                "participants": [{
+                    "id": "lead", "agent": "codex", "role": "lead",
+                    "task": "修复启动",
+                }],
+            },
+        )
+
+        body = response.json()
+        assert body["ok"] is False
+        assert body["idempotent"] is False
+        assert body["started"] == []
+        assert body["reused"] == []
+        assert body["failed"] == [{
+            "agent": "codex",
+            "error": "session 中已存在 codex，无法应用新的工作目录",
+        }]
+        assert body["notified"] == []
 
 
 def test_prepare_workspace_resumes_old_branch_and_warns_after_prune(tmp_path):
@@ -697,7 +1050,7 @@ def test_prepare_workspace_warns_when_reusing_dirty_worktree(tmp_path):
         participants=[
             {
                 "id": "lead", "agent": "codex", "role": "lead",
-                "workspace": "isolated",
+                "task": "复用工作区", "workspace": "isolated",
             },
         ],
     )
@@ -720,8 +1073,8 @@ def test_prepare_workspace_rolls_back_new_worktrees_after_partial_failure(monkey
         workdir=str(repo),
         mode="parallel",
         participants=[
-            {"id": "one", "agent": "codex", "role": "lead"},
-            {"id": "two", "agent": "kimi", "role": "developer"},
+            {"id": "one", "agent": "codex", "role": "lead", "task": "后端"},
+            {"id": "two", "agent": "kimi", "role": "developer", "task": "前端"},
         ],
     )
     real_ensure = server._ensure_worktree
@@ -804,7 +1157,10 @@ def test_rollback_removes_remounted_worktree_but_keeps_old_branch(monkeypatch, t
         workdir=str(repo),
         mode="custom",
         participants=[
-            {"id": "one", "agent": "codex", "role": "lead", "workspace": "isolated"},
+            {
+                "id": "one", "agent": "codex", "role": "lead",
+                "task": "保持旧分支", "workspace": "isolated",
+            },
         ],
     )
     first, _ = server._prepare_workspace(first_req)
@@ -818,8 +1174,8 @@ def test_rollback_removes_remounted_worktree_but_keeps_old_branch(monkeypatch, t
         workdir=str(repo),
         mode="parallel",
         participants=[
-            {"id": "one", "agent": "codex", "role": "lead"},
-            {"id": "two", "agent": "kimi", "role": "developer"},
+            {"id": "one", "agent": "codex", "role": "lead", "task": "后端"},
+            {"id": "two", "agent": "kimi", "role": "developer", "task": "前端"},
         ],
     )
     real_ensure = server._ensure_worktree

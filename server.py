@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 import db
+import coordination
 import hub_client
 import herdr_client
 import tasks
@@ -51,6 +52,7 @@ async def lifespan(_: FastAPI):
         with suppress(asyncio.CancelledError):
             await _poller_task
         _poller_task = None
+        await asyncio.to_thread(_release_all_zoom_leases)
 
 
 app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
@@ -79,13 +81,31 @@ MAIL_AGENT_NAMES = {
 }
 SESSION_START_TIMEOUT = 20.0
 SESSION_BOOTSTRAP_OUTPUT_LIMIT = 16 * 1024
+SESSION_BOOTSTRAP_PANE_COLS = 100
+SESSION_BOOTSTRAP_PANE_ROWS = 30
+TERM_READ_WAIT = 0.02
+TERM_READ_BURST = 256 * 1024
 ROOT_DIR = Path(__file__).resolve().parent
 AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
 MAIL_SEND_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-send"
 MAIL_RECV_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-recv"
+TASK_REPORT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "task-report"
 _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
+ZOOM_LEASE_TTL = 30.0
+ZOOM_LEASE_RETRY = 5.0
+_ZOOM_LEASES: dict[str, dict[str, Any]] = {}
+_ZOOM_LEASES_LOCK = threading.RLock()
+TERM_WS_TAKEN_OVER_CODE = 4001
+TERM_WS_INVALID_CODE = 4004
+_TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
+MAIL_COORDINATION_GUIDE = (
+    "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
+    "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报；"
+    "收到消息后按 mail-recv 输出先 claim、处理完成再单条 complete/ack；"
+    "普通打断保存 checkpoint 后恢复原任务，停止/转向不恢复。"
+)
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -174,8 +194,44 @@ def _identity_name(cwd: str, agent_type: str) -> str | None:
     return ident["name"] if ident else None
 
 
+def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """按 session 的 canonical Agent Mail 项目给看板 pane 补真实花名。"""
+    session_dirs = {
+        str(item.get("session") or ""): str(item.get("directory") or "")
+        for item in snapshot.get("sessions", [])
+        if item.get("session") and item.get("directory")
+    }
+    projects: dict[str, str | None] = {}
+    identities: dict[tuple[str, str], str | None] = {}
+    for pane in snapshot.get("panes", []):
+        session = str(pane.get("session") or "")
+        agent = str(pane.get("agent") or "")
+        session_dir = session_dirs.get(session)
+        if not agent or not session_dir:
+            continue
+        if session not in projects:
+            try:
+                projects[session] = mail_projects.get(session, session_dir)
+            except (OSError, ValueError):
+                projects[session] = None
+        project = projects[session]
+        if not project:
+            continue
+        key = (project, agent)
+        if key not in identities:
+            identities[key] = _identity_name(project, agent)
+        if identities[key]:
+            pane["mail_name"] = identities[key]
+    return snapshot
+
+
+def _board_snapshot() -> dict[str, Any]:
+    return _enrich_board_identities(herdr_client.snapshot())
+
+
 def _identity_hint(
     name: str, project: str, agent_type: str, *, roster: str = "", registered: bool = False,
+    coordination_context: dict[str, Any] | None = None,
 ) -> str:
     send = shlex.quote(str(MAIL_SEND_SCRIPT))
     recv = shlex.quote(str(MAIL_RECV_SCRIPT))
@@ -193,7 +249,14 @@ def _identity_hint(
     )
     if roster:
         hint += f"协作者身份: {roster}。"
-    return hint
+    if coordination_context:
+        hint += (
+            f"当前协作 run={coordination_context['run_id']},"
+            f"task={coordination_context['participant_id']},"
+            f"revision={coordination_context['task_revision']}。"
+            "工作指令不按固定时间过期；仅 run/task/revision 失效或被 supersede 时作废。"
+        )
+    return f"{hint}{MAIL_COORDINATION_GUIDE}"
 
 
 def _collaborator_hint(name: str, project: str) -> str:
@@ -258,6 +321,10 @@ class SendMessageReq(BaseModel):
     thread_id: str | None = None
     importance: str = "normal"
     ack_required: bool = False
+    intent: str = "info"
+    supersedes: list[int] = Field(default_factory=list)
+    expires_in: float | None = None
+    hard: bool = False
 
 
 class AckReq(BaseModel):
@@ -276,6 +343,11 @@ class StartTaskReq(BaseModel):
 class PaneSendReq(BaseModel):
     text: str
     mode: str = "send"  # send | prompt
+
+
+class ZoomLeaseReq(BaseModel):
+    term_id: str
+    action: str = "acquire"  # acquire | renew | release
 
 
 class WriteFileReq(BaseModel):
@@ -410,16 +482,135 @@ def api_project(slug: str):
     proj = db.project_by_slug(slug)
     if not proj:
         raise HTTPException(404, f"项目不存在: {slug}")
+    messages = [
+        coordination.enrich_message(proj["human_key"], message)
+        for message in db.recent_messages(proj["id"])
+    ]
     return {
         "project": proj,
         "agents": db.list_agents(proj["id"]),
-        "messages": db.recent_messages(proj["id"]),
+        "messages": messages,
         "agent_mail": mail_status,
     }
 
 
+SESSION_AGENT_STATUSES = {"working", "blocked", "done", "idle", "unknown"}
+SESSION_STATUS_PRIORITY = {"blocked": 4, "working": 3, "idle": 2, "done": 1, "empty": 0}
+
+
+def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """按运行中的 Herdr session 聚合实时 agent 状态与协作任务。"""
+    observed_ts = time.time()
+    source_sessions = snapshot.get("sessions") or []
+    sessions: dict[str, dict[str, Any]] = {
+        str(item.get("session")): {
+            "session": str(item.get("session")),
+            "directory": str(item.get("directory") or ""),
+            "panes": list(item.get("panes") or []),
+        }
+        for item in source_sessions
+        if item.get("session")
+    }
+    # 兼容测试、旧调用方及 Herdr 返回不完整 session 列表的情况。
+    for pane in snapshot.get("panes", []):
+        session = str(pane.get("session") or "")
+        if not session:
+            continue
+        row = sessions.setdefault(
+            session, {"session": session, "directory": "", "panes": []}
+        )
+        if pane not in row["panes"]:
+            row["panes"].append(pane)
+
+    result: list[dict[str, Any]] = []
+    for session, source in sessions.items():
+        try:
+            run = coordination.run_by_session(session)
+        except Exception:
+            logger.exception("session progress coordination query failed: %s", session)
+            run = None
+        try:
+            reports = coordination.task_reports(session)
+        except Exception:
+            logger.exception("session task reports query failed: %s", session)
+            reports = {}
+        participants = list((run or {}).get("participants") or [])
+        by_pane = {
+            str(item.get("pane_id")): item
+            for item in participants if item.get("pane_id")
+        }
+        by_agent: dict[str, list[dict[str, Any]]] = {}
+        for item in participants:
+            by_agent.setdefault(str(item.get("agent_type") or ""), []).append(item)
+        used_participants: set[str] = set()
+        agents: list[dict[str, Any]] = []
+        for pane in source["panes"]:
+            agent_type = str(pane.get("agent") or "")
+            if not agent_type:
+                continue
+            pane_id = str(pane.get("pane_id") or "")
+            participant = by_pane.get(pane_id)
+            candidates = by_agent.get(agent_type, [])
+            if participant is None and len(candidates) == 1:
+                candidate_id = str(candidates[0].get("participant_id") or "")
+                if candidate_id not in used_participants:
+                    participant = candidates[0]
+            if participant:
+                used_participants.add(str(participant.get("participant_id") or ""))
+            status = str(pane.get("agent_status") or "unknown")
+            if status not in SESSION_AGENT_STATUSES:
+                status = "unknown"
+            agents.append({
+                "agent": agent_type,
+                "mail_name": (
+                    (participant or {}).get("mail_name") or pane.get("mail_name")
+                ),
+                "role": (participant or {}).get("role"),
+                "task": (participant or {}).get("task_text"),
+                "status": status,
+                "pane_id": pane_id,
+                "cwd": str(pane.get("cwd") or ""),
+                "coordination_state": (participant or {}).get("state"),
+                "task_revision": (participant or {}).get("task_revision"),
+                "report": reports.get(pane_id),
+            })
+
+        summary = {
+            status: sum(1 for agent in agents if agent["status"] == status)
+            for status in ("working", "blocked", "done", "idle", "unknown")
+        }
+        total = len(agents)
+        if summary["blocked"]:
+            status = "blocked"
+        elif summary["working"]:
+            status = "working"
+        elif summary["idle"] or summary["unknown"]:
+            status = "idle"
+        elif total:
+            status = "done"
+        else:
+            status = "empty"
+        result.append({
+            "session": session,
+            "directory": source["directory"],
+            "status": status,
+            "progress": round(summary["done"] * 100 / total) if total else 0,
+            "summary": summary,
+            "agents": agents,
+            "updated_ts": observed_ts,
+        })
+
+    return sorted(
+        result,
+        key=lambda item: (
+            -SESSION_STATUS_PRIORITY[item["status"]], str(item["session"]).lower()
+        ),
+    )
+
+
 def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """聚合所有需要用户介入的对象，不让可选能力拖垮核心看板。"""
+    """聚合 session 任务进度与需要用户介入的对象。"""
+    sessions = _build_session_progress(snapshot)
     items: list[dict[str, Any]] = []
     for pane in snapshot.get("panes", []):
         if pane.get("agent") and pane.get("agent_status") == "blocked":
@@ -492,6 +683,7 @@ def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
         reverse=True,
     )
     return {
+        "sessions": sessions,
         "items": items,
         "count": len(items),
         "mail_unread": mail_unread,
@@ -510,7 +702,80 @@ def _attention_changes(
 
 @app.get("/api/attention")
 def api_attention():
-    return _build_attention(herdr_client.snapshot())
+    return _build_attention(_board_snapshot())
+
+
+def _task_report_prompt(
+    session: str, pane_id: str, request_id: str,
+) -> str:
+    command = " ".join([
+        shlex.quote(str(TASK_REPORT_SCRIPT)),
+        "--session", shlex.quote(session),
+        "--pane", shlex.quote(pane_id),
+        "--request-id", shlex.quote(request_id),
+    ])
+    return (
+        "[Agent Cockpit 非打断状态上报] 这不是停止或转向请求。"
+        "请完成当前原子操作，在下一个安全检查点上报一次当前进度，然后继续原任务。"
+        "执行下面的命令，并把示例内容替换为真实信息；progress 使用 0-100 整数，"
+        "没有阻塞时 blocker 传空字符串：\n"
+        f"{command} --progress 50 --summary \"已完成的里程碑\" "
+        "--next \"下一步\" --blocker \"\""
+    )
+
+
+@app.post("/api/attention/refresh-reports")
+def api_attention_refresh_reports():
+    """按用户请求让当前 Agent 在安全检查点提交结构化进度。"""
+    sessions = _build_session_progress(_board_snapshot())
+    requested: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for session_row in sessions:
+        session = str(session_row.get("session") or "")
+        if not SESSION_NAME_RE.fullmatch(session):
+            continue
+        for agent in session_row.get("agents") or []:
+            pane_id = str(agent.get("pane_id") or "")
+            target = (session, pane_id)
+            if not PANE_ID_RE.fullmatch(pane_id) or target in seen:
+                continue
+            seen.add(target)
+            report = coordination.request_task_report(
+                session=session,
+                pane_id=pane_id,
+                agent_type=str(agent.get("agent") or "unknown"),
+                mail_name=agent.get("mail_name"),
+            )
+            request_id = str(report["request_id"])
+            sent = herdr_client.pane_send(
+                session, pane_id,
+                _task_report_prompt(session, pane_id, request_id),
+                "prompt",
+            )
+            error = sent.get("error")
+            if sent.get("available", True) is False:
+                error = error or "Herdr 不可用"
+            row = {
+                "session": session,
+                "pane_id": pane_id,
+                "agent": agent.get("agent"),
+                "mail_name": agent.get("mail_name"),
+            }
+            if error:
+                coordination.fail_task_report_request(
+                    session, pane_id, request_id, str(error)
+                )
+                failed.append({**row, "error": str(error)})
+            else:
+                requested.append(row)
+    return {
+        "ok": not failed,
+        "requested": len(requested),
+        "failed": len(failed),
+        "targets": requested,
+        "failures": failed,
+    }
 
 
 @app.get("/api/push/config")
@@ -531,6 +796,64 @@ def api_push_unsubscribe(endpoint: str):
     return {"ok": web_push.delete_subscription(endpoint)}
 
 
+def _delivery_payloads(result: Any) -> list[dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    deliveries = result.get("deliveries") or []
+    return [
+        delivery.get("payload", {})
+        for delivery in deliveries if isinstance(delivery, dict)
+        and isinstance(delivery.get("payload"), dict)
+    ]
+
+
+def _notify_coordination_message(
+    project_key: str, recipient: str, message_id: int, subject: str,
+    meta: dict[str, Any], *, hard: bool,
+) -> dict[str, Any]:
+    context = coordination.active_context(project_key, recipient)
+    if not context or context.get("run_id") != meta.get("run_id"):
+        return {"notified": False, "reason": "recipient_not_in_unique_active_run"}
+    intent = str(meta.get("intent") or "info")
+    checkpoint = None
+    if intent in coordination.INTERRUPT_INTENTS:
+        checkpoint = coordination.request_pause(
+            project_key=project_key, recipient=recipient, message_id=message_id,
+            cwd=str(context["workdir"]), hard=hard,
+        )
+    session = str(context["session"])
+    pane_id = str(context.get("pane_id") or "")
+    if not pane_id:
+        return {"notified": False, "reason": "pane_missing", "checkpoint": checkpoint}
+    if hard:
+        stopped = herdr_client.pane_send(session, pane_id, "C-c", "keys")
+        if stopped.get("available", True) is False or stopped.get("error"):
+            return {
+                "notified": False, "reason": "hard_interrupt_failed",
+                "detail": stopped, "checkpoint": checkpoint,
+            }
+    agent_type = MAIL_AGENT_NAMES.get(
+        str(context["agent_type"]), str(context["agent_type"])
+    )
+    command = (
+        f"{shlex.quote(str(MAIL_RECV_SCRIPT))} --agent {shlex.quote(agent_type)} "
+        f"--instance main --project {shlex.quote(project_key)} --unread "
+        f"--message {message_id}"
+    )
+    note = (
+        f"[Agent Cockpit {'硬中断' if hard else '协作式打断'}] 消息 #{message_id} "
+        f"intent={intent}「{subject[:60]}」。"
+        f"基础 checkpoint 已保存；运行 {command} 领取。"
+        "处理完成后按工具输出单条 complete；普通打断会自动校验 revision 并恢复，"
+        "stop/redirect 不恢复旧任务。"
+    )
+    sent = herdr_client.pane_send(session, pane_id, note, "prompt")
+    return {
+        "notified": not sent.get("error") and sent.get("available", True),
+        "detail": sent, "checkpoint": checkpoint,
+    }
+
+
 @app.post("/api/send")
 def api_send(req: SendMessageReq):
     """以某 agent 身份发消息(走 hub MCP 保证一致性)。"""
@@ -543,19 +866,67 @@ def api_send(req: SendMessageReq):
     sender = db.agent_by_name(req.project_id, req.sender_name)
     if not sender:
         raise HTTPException(404, f"发送身份不存在: {req.sender_name}")
+    if req.hard and req.intent not in coordination.NO_RESUME_INTENTS:
+        raise HTTPException(400, "硬中断仅允许 stop/redirect")
     try:
+        meta, warnings = coordination.prepare_metadata(
+            project_key=proj["human_key"], sender=sender["name"],
+            recipients=req.to, intent=req.intent, importance=req.importance,
+            authority="user", supersedes=req.supersedes,
+            expires_in=req.expires_in,
+        )
+        body = coordination.add_metadata(req.body, meta)
         result = hub_client.send_message(
             project_key=proj["human_key"],
             sender_name=sender["name"],
             sender_token=sender["registration_token"],
             to=req.to,
             subject=req.subject,
-            body_md=req.body,
+            body_md=body,
             thread_id=req.thread_id,
             importance=req.importance,
             ack_required=req.ack_required,
         )
-        return {"ok": True, "result": result}
+        notifications = []
+        for payload in _delivery_payloads(result):
+            message_id = payload.get("id")
+            if message_id is None:
+                continue
+            try:
+                coordination.register_message(
+                    project_key=proj["human_key"], message_id=int(message_id),
+                    sender=sender["name"], meta=meta, trusted_user=True,
+                )
+            except Exception as exc:
+                warnings.append(
+                    f"消息 #{message_id} 已发送，但本地消费元数据登记失败: {exc}"
+                )
+                continue
+            for recipient in payload.get("to") or req.to:
+                try:
+                    notification = _notify_coordination_message(
+                        proj["human_key"], str(recipient), int(message_id),
+                        req.subject, meta, hard=req.hard,
+                    )
+                except Exception as exc:
+                    notification = {
+                        "notified": False, "reason": "notify_failed",
+                        "error": str(exc),
+                    }
+                    warnings.append(
+                        f"消息 #{message_id} 已发送，但通知 {recipient} 失败: {exc}"
+                    )
+                notifications.append({
+                    "recipient": recipient, **notification,
+                })
+        return {
+            "ok": True, "result": result, "coordination": {
+                "meta": meta, "warnings": warnings,
+                "notifications": notifications,
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"发送失败: {e}")
 
@@ -572,6 +943,9 @@ def api_ack(req: AckReq):
     agent = db.agent_by_name(req.project_id, req.agent_name)
     if not agent:
         raise HTTPException(404, f"agent 不存在: {req.agent_name}")
+    coordination.dismiss_message(
+        proj["human_key"], agent["name"], req.message_id
+    )
     try:
         result = hub_client.acknowledge_message(
             project_key=proj["human_key"],
@@ -579,6 +953,7 @@ def api_ack(req: AckReq):
             registration_token=agent["registration_token"],
             message_id=req.message_id,
         )
+        coordination.mark_acked(proj["human_key"], agent["name"], req.message_id)
         return {"ok": True, "result": result}
     except Exception as e:
         raise HTTPException(500, f"ack 失败: {e}")
@@ -771,6 +1146,209 @@ def api_task_apply(task_id: str, action: str = "apply"):
 
 # ── herdr 路由(多 session 聚合,Orca 式看板数据源) ────────────
 
+def _term_exists(term_id: str) -> bool:
+    return any(term.get("id") == term_id for term in terminal.list_terms())
+
+
+def _zoom_result_ok(result: dict[str, Any], zoomed: bool) -> bool:
+    return (
+        result.get("available", True) is not False
+        and not result.get("error")
+        and result.get("zoomed") is zoomed
+    )
+
+
+def _release_zoom_lease_locked(
+    session: str, lease: dict[str, Any], now: float,
+) -> dict[str, Any]:
+    result = herdr_client.pane_zoom(session, lease.get("pane_id"), mode="off")
+    if _zoom_result_ok(result, False):
+        if _ZOOM_LEASES.get(session) is lease:
+            _ZOOM_LEASES.pop(session, None)
+        return {
+            "available": True, "released": True, "owned": False,
+            "changed": bool(result.get("changed")), "session": session,
+        }
+    lease["expires_at"] = now + ZOOM_LEASE_RETRY
+    return {
+        "available": result.get("available", True), "released": False,
+        "owned": True, "session": session,
+        "error": result.get("error") or "Herdr zoom 还原失败，将自动重试",
+    }
+
+
+def _expire_zoom_leases(now: float | None = None) -> list[dict[str, Any]]:
+    current = time.monotonic() if now is None else now
+    released = []
+    with _ZOOM_LEASES_LOCK:
+        expired = [
+            (session, lease)
+            for session, lease in _ZOOM_LEASES.items()
+            if lease["expires_at"] <= current
+        ]
+        for session, lease in expired:
+            released.append(_release_zoom_lease_locked(session, lease, current))
+    return released
+
+
+def _acquire_zoom_lease(
+    session: str, owner: str, now: float | None = None,
+) -> dict[str, Any]:
+    current = time.monotonic() if now is None else now
+    if not _term_exists(owner):
+        return {
+            "available": True, "acquired": False, "owned": False,
+            "reason": "terminal_missing", "session": session,
+        }
+    with _ZOOM_LEASES_LOCK:
+        _expire_zoom_leases(current)
+        lease = _ZOOM_LEASES.get(session)
+        if lease:
+            if lease["owner"] != owner:
+                return {
+                    "available": True, "acquired": False, "owned": False,
+                    "reason": "leased", "session": session,
+                }
+            return _renew_zoom_lease(session, owner, current)
+
+        layout = herdr_client.pane_layout(session)
+        if layout.get("available", True) is False or layout.get("error"):
+            return {
+                "available": layout.get("available", True), "acquired": False,
+                "owned": False, "reason": "layout_unavailable", "session": session,
+                "error": layout.get("error"),
+            }
+        if layout.get("zoomed"):
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "already_zoomed", "session": session,
+            }
+        if not layout.get("horizontal_split"):
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "not_horizontal", "session": session,
+            }
+        pane_id = layout.get("focused_pane_id")
+        if not pane_id:
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "pane_missing", "session": session,
+            }
+        zoom = herdr_client.pane_zoom(session, pane_id, mode="on")
+        if not _zoom_result_ok(zoom, True):
+            return {
+                "available": zoom.get("available", True), "acquired": False,
+                "owned": False, "reason": "zoom_failed", "session": session,
+                "error": zoom.get("error") or "Herdr zoom 未生效",
+            }
+        if not zoom.get("changed"):
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "already_zoomed", "session": session,
+            }
+        _ZOOM_LEASES[session] = {
+            "owner": owner, "pane_id": zoom.get("focused_pane_id") or pane_id,
+            "tab_id": layout.get("tab_id"), "expires_at": current + ZOOM_LEASE_TTL,
+        }
+        return {
+            "available": True, "acquired": True, "owned": True,
+            "changed": bool(zoom.get("changed")), "session": session,
+            "pane_id": _ZOOM_LEASES[session]["pane_id"], "ttl": ZOOM_LEASE_TTL,
+        }
+
+
+def _renew_zoom_lease(
+    session: str, owner: str, now: float | None = None,
+) -> dict[str, Any]:
+    current = time.monotonic() if now is None else now
+    with _ZOOM_LEASES_LOCK:
+        _expire_zoom_leases(current)
+        lease = _ZOOM_LEASES.get(session)
+        if not lease:
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "lease_missing", "session": session,
+            }
+        if lease["owner"] != owner:
+            return {
+                "available": True, "acquired": False, "owned": False,
+                "reason": "not_owner", "session": session,
+            }
+        if not _term_exists(owner):
+            released = _release_zoom_lease_locked(session, lease, current)
+            return {**released, "acquired": False, "reason": "terminal_missing"}
+        lease["expires_at"] = current + ZOOM_LEASE_TTL
+        layout = herdr_client.pane_layout(session, lease.get("pane_id"))
+        if layout.get("available", True) is False or layout.get("error"):
+            return {
+                "available": layout.get("available", True), "acquired": True,
+                "owned": True, "session": session, "renewed": True,
+                "warning": layout.get("error") or "暂时无法确认 zoom 状态",
+                "ttl": ZOOM_LEASE_TTL,
+            }
+        pane_id = layout.get("focused_pane_id") or lease["pane_id"]
+        if not layout.get("zoomed"):
+            zoom = herdr_client.pane_zoom(session, pane_id, mode="on")
+            if not _zoom_result_ok(zoom, True):
+                return {
+                    "available": zoom.get("available", True), "acquired": True,
+                    "owned": True, "session": session, "renewed": True,
+                    "warning": zoom.get("error") or "暂时无法恢复 zoom",
+                    "ttl": ZOOM_LEASE_TTL,
+                }
+            if not zoom.get("changed"):
+                _ZOOM_LEASES.pop(session, None)
+                return {
+                    "available": True, "acquired": False, "owned": False,
+                    "reason": "already_zoomed", "session": session,
+                }
+            pane_id = zoom.get("focused_pane_id") or pane_id
+        lease["pane_id"] = pane_id
+        return {
+            "available": True, "acquired": True, "owned": True,
+            "renewed": True, "session": session, "pane_id": pane_id,
+            "ttl": ZOOM_LEASE_TTL,
+        }
+
+
+def _release_zoom_lease(
+    session: str, owner: str, now: float | None = None,
+) -> dict[str, Any]:
+    current = time.monotonic() if now is None else now
+    with _ZOOM_LEASES_LOCK:
+        lease = _ZOOM_LEASES.get(session)
+        if not lease:
+            return {
+                "available": True, "released": True, "owned": False,
+                "changed": False, "session": session,
+            }
+        if lease["owner"] != owner:
+            return {
+                "available": True, "released": False, "owned": False,
+                "reason": "not_owner", "session": session,
+            }
+        return _release_zoom_lease_locked(session, lease, current)
+
+
+def _release_zoom_leases_for_owner(owner: str) -> None:
+    with _ZOOM_LEASES_LOCK:
+        sessions = [
+            session for session, lease in _ZOOM_LEASES.items()
+            if lease["owner"] == owner
+        ]
+    for session in sessions:
+        _release_zoom_lease(session, owner)
+
+
+def _release_all_zoom_leases() -> None:
+    with _ZOOM_LEASES_LOCK:
+        leases = [
+            (session, lease["owner"])
+            for session, lease in _ZOOM_LEASES.items()
+        ]
+    for session, owner in leases:
+        _release_zoom_lease(session, owner)
+
 @app.get("/api/herdr/status")
 def api_herdr_status():
     return {"available": herdr_client.is_available(), "binary": herdr_client.HERDR_BIN}
@@ -785,7 +1363,20 @@ def api_herdr_sessions():
 @app.get("/api/herdr/snapshot")
 def api_herdr_snapshot():
     """聚合所有 running session 的 pane → 看板卡片数据源。"""
-    return herdr_client.snapshot()
+    return _board_snapshot()
+
+
+@app.post("/api/herdr/session/{name}/zoom-lease")
+def api_herdr_zoom_lease(name: str, req: ZoomLeaseReq):
+    """窄屏 attach 的 zoom 租约；只还原 Cockpit 自己开启的 zoom。"""
+    _validate_session_name(name)
+    if req.action == "acquire":
+        return _acquire_zoom_lease(name, req.term_id)
+    if req.action == "renew":
+        return _renew_zoom_lease(name, req.term_id)
+    if req.action == "release":
+        return _release_zoom_lease(name, req.term_id)
+    raise HTTPException(400, f"不支持的 zoom lease action: {req.action}")
 
 
 @app.get("/api/herdr/pane/{session}/{pane_id}")
@@ -894,7 +1485,10 @@ def api_herdr_pane_restart(session: str, pane_id: str, resume: bool = False):
 def api_herdr_session_stop(name: str):
     """停止 herdr session。"""
     _validate_session_name(name)
-    return herdr_client.stop_session(name)
+    result = herdr_client.stop_session(name)
+    if not result.get("error"):
+        coordination.close_session(name, "stopped")
+    return result
 
 
 @app.delete("/api/herdr/session/{name}")
@@ -903,8 +1497,18 @@ def api_herdr_session_delete(name: str):
     _validate_session_name(name)
     result = herdr_client.delete_session(name)
     if result.get("deleted"):
+        coordination.close_session(name, "deleted")
         mail_projects.unbind(name)
     return result
+
+
+@app.get("/api/coordination/session/{name}")
+def api_coordination_session(name: str):
+    _validate_session_name(name)
+    run = coordination.run_by_session(name)
+    if not run:
+        raise HTTPException(404, "该 session 尚无协作 run")
+    return run
 
 
 def _git(workdir: Path, *args: str) -> str:
@@ -1238,6 +1842,8 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         raise HTTPException(400, "participants 包含不支持的角色")
     if any(p.workspace not in VALID_WORKSPACE_STRATEGIES for p in participants):
         raise HTTPException(400, "participants 包含不支持的工作目录策略")
+    if not legacy and any(not p.task.strip() for p in participants):
+        raise HTTPException(400, "请填写每个 Agent 的真实任务")
 
     ids = []
     for i, p in enumerate(participants):
@@ -1329,13 +1935,16 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
     return plans, warnings
 
 
-def _workspace_briefing(req: SetupWorkspaceReq, plan: dict[str, Any], plans: list[dict[str, Any]]) -> str:
+def _workspace_briefing(
+    req: SetupWorkspaceReq, plan: dict[str, Any], plans: list[dict[str, Any]],
+    coordination_context: dict[str, Any] | None = None,
+) -> str:
     role_labels = {"lead": "负责人/开发", "developer": "开发", "reviewer": "Reviewer", "researcher": "调研"}
     coworkers = "、".join(f"{p['agent']}({role_labels[p['role']]})" for p in plans if p["id"] != plan["id"])
     lines = [
         "[Agent Cockpit 工作区任务]",
         f"你的角色: {role_labels[plan['role']]}",
-        f"你的任务: {plan['task'] or '按当前指令开展工作'}",
+        f"你的任务: {plan['task']}",
         f"工作目录策略: {plan['strategy']} ({plan['workdir']})",
     ]
     if coworkers:
@@ -1355,6 +1964,12 @@ def _workspace_briefing(req: SetupWorkspaceReq, plan: dict[str, Any], plans: lis
             )
     elif plan["role"] == "lead":
         lines.append("你负责推进目标、协调协作者并汇总最终结果。")
+    if coordination_context:
+        lines.append(
+            f"协作运行: run={coordination_context['run_id']}, "
+            f"task={plan['id']}, revision=1。"
+        )
+    lines.append(MAIL_COORDINATION_GUIDE)
     return "\n".join(lines)
 
 
@@ -1397,6 +2012,20 @@ def _pty_output_tail(output: bytearray) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text[-1000:]
+
+
+def _workspace_bootstrap_dims(layout: str, agent_count: int) -> tuple[int, int]:
+    """为隐藏 Herdr client 预留 agent 启动尺寸，避免分屏后 TUI 过窄。"""
+    cols = SESSION_BOOTSTRAP_PANE_COLS
+    rows = SESSION_BOOTSTRAP_PANE_ROWS
+    # session 初建的 shell pane 会一直保留到所有 agent 启动完成，因此分屏布局
+    # 必须把它也计入；tab 布局的 pane 不共享同一行/列，无需额外放大。
+    pane_count = max(1, agent_count) + 1
+    if layout in {"right", "horizontal"}:
+        cols = min(terminal.MAX_COLS, cols * pane_count)
+    elif layout in {"down", "vertical"}:
+        rows = min(terminal.MAX_ROWS, rows * pane_count)
+    return cols, rows
 
 
 @app.post("/api/herdr/inspect-workspace")
@@ -1481,7 +2110,12 @@ def _setup_workspace(req: SetupWorkspaceReq):
         drain_thread = None
         pty_output = bytearray()
         try:
-            t = terminal.create_term(req.workdir)
+            bootstrap_cols, bootstrap_rows = _workspace_bootstrap_dims(
+                req.layout, len(plans),
+            )
+            t = terminal.create_term(
+                req.workdir, cols=bootstrap_cols, rows=bootstrap_rows,
+            )
             drain_stop, drain_thread = _start_pty_drainer(t["id"], pty_output)
             time.sleep(0.5)
             # 在 PTY 里跑 herdr --session <name>(创建 + detach)
@@ -1563,6 +2197,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         warnings.append(f"通信项目绑定保存失败({mail_projects.STATE_PATH}): {exc}")
     results = []
     started = []
+    reused = []
     failed = []
     # 1. 为每个 agent 开 pane + 启动
     for plan in plans:
@@ -1573,14 +2208,23 @@ def _setup_workspace(req: SetupWorkspaceReq):
         results.append({"agent": agent_type, "plan": plan, "start": r})
         error = r.get("error")
         if req.participants is not None and r.get("reused"):
-            error = f"session 中已存在 {agent_type}，无法应用新的工作目录"
+            existing_cwd = r.get("cwd")
+            same_workdir = bool(existing_cwd) and (
+                Path(existing_cwd).expanduser().resolve()
+                == Path(plan["workdir"]).expanduser().resolve()
+            )
+            if same_workdir:
+                reused.append(agent_type)
+            else:
+                error = f"session 中已存在 {agent_type}，无法应用新的工作目录"
         if r.get("available", True) is False:
             error = error or "Herdr 不可用"
+        results[-1]["error"] = error
         if error:
             failed.append({"agent": agent_type, "error": error})
-        else:
+        elif not r.get("reused"):
             started.append(agent_type)
-        time.sleep(2)  # 等 agent 启动
+            time.sleep(2)  # 等新 Agent 启动
     # 1.5 清理建 session 时 TUI 自带的空白 shell pane(至少一个 agent 在跑才清,避免空 session)
     closed_panes = []
     if base_pane_ids and started:
@@ -1595,15 +2239,40 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 r = herdr_client.close_pane(req.session, pid)
                 if r.get("available", True) and not r.get("error"):
                     closed_panes.append(pid)
+    # 1.75 为本轮协作建立稳定 run/task/revision；相同配置幂等复用。
+    coordination_run = None
+    run_participants = []
+    for result in results:
+        pane_id = result["start"].get("pane_id")
+        if result.get("error") or not pane_id:
+            continue
+        plan = result["plan"]
+        run_participants.append({
+            "id": plan["id"], "agent": plan["agent"], "role": plan["role"],
+            "task": plan["task"], "workdir": plan["workdir"],
+            "pane_id": pane_id,
+            "mail_name": _identity_name(canonical_project, plan["agent"]),
+        })
+    if run_participants:
+        try:
+            coordination_run = coordination.start_run(
+                project_key=canonical_project, session=req.session,
+                session_dir=session_dir, participants=run_participants,
+            )
+        except Exception as exc:
+            warnings.append(f"可靠消息 run 建立失败: {exc}")
     # 2. 新版协作工作区向每个成功启动的 Agent 注入角色和任务。
     briefed = []
     if req.participants is not None:
         for result in results:
             pane_id = result["start"].get("pane_id")
-            if result["agent"] not in started or not pane_id:
+            should_brief = result["agent"] in started
+            if result.get("error") or not should_brief or not pane_id:
                 continue
             plan = result["plan"]
-            briefing = _workspace_briefing(req, plan, plans)
+            briefing = _workspace_briefing(
+                req, plan, plans, coordination_run
+            )
             sent = herdr_client.pane_send(req.session, pane_id, briefing, "prompt")
             if sent.get("available", True) is False or sent.get("error"):
                 warnings.append(f"{plan['agent']} 的任务说明发送失败")
@@ -1653,24 +2322,36 @@ def _setup_workspace(req: SetupWorkspaceReq):
         for p in sess.get("panes", []):
             atype = p.get("agent")
             pid = p.get("pane_id")
-            if not atype or not pid:
+            if not atype or atype not in started or not pid:
                 continue
             my_name = _identity_name(canonical_project, atype)
             if not my_name:
                 warnings.append(f"{atype} 身份未注册或已 retired，未发送身份告知")
                 continue
+            plan = next((item for item in plans if item["agent"] == atype), None)
+            context = None
+            if coordination_run and plan:
+                coordination.bind_identity(
+                    coordination_run["run_id"], plan["id"], my_name, pid
+                )
+                context = coordination.run_context(
+                    coordination_run["run_id"], my_name
+                )
             hint = _identity_hint(
-                my_name, canonical_project, atype, roster=roster
+                my_name, canonical_project, atype, roster=roster,
+                coordination_context=context,
             )
             herdr_client.pane_send(req.session, pid, hint, "prompt")
             notified.append(f"{atype}→{my_name}")
     return {
         "ok": not failed, "session": req.session, "workdir": req.workdir,
         "session_created": session_created, "session_started": session_started,
-        "started": started, "failed": failed, "results": results, "registered": reg_ok,
+        "started": started, "reused": reused, "failed": failed, "results": results,
+        "idempotent": bool(reused and not started and not failed), "registered": reg_ok,
         "notified": notified, "briefed": briefed, "agent_mail": mail_status,
         "mode": req.mode, "workspaces": plans, "warnings": warnings,
         "closed_panes": closed_panes, "mail_project": canonical_project,
+        "coordination": coordination_run,
     }
 
 
@@ -1832,8 +2513,41 @@ def api_term_list():
 @app.delete("/api/term/{term_id}")
 def api_term_kill(term_id: str):
     """关闭终端。"""
+    _release_zoom_leases_for_owner(term_id)
     terminal.kill_term(term_id)
     return {"ok": True}
+
+
+async def _claim_term_websocket(
+    term_id: str, websocket: WebSocket,
+) -> dict[str, Any]:
+    """最新页面独占 PTY 输出；旧连接立即停泵且不得重新抢占。"""
+    connection: dict[str, Any] = {"websocket": websocket, "pump_task": None}
+    previous = _TERM_WS_CONNECTIONS.get(term_id)
+    _TERM_WS_CONNECTIONS[term_id] = connection
+    if previous:
+        previous_pump = previous.get("pump_task")
+        if previous_pump:
+            previous_pump.cancel()
+            with suppress(asyncio.CancelledError):
+                await previous_pump
+        previous_websocket = previous.get("websocket")
+        if previous_websocket:
+            with suppress(Exception):
+                await previous_websocket.close(
+                    code=TERM_WS_TAKEN_OVER_CODE,
+                    reason="terminal opened by a newer page",
+                )
+    return connection
+
+
+def _term_websocket_is_current(term_id: str, connection: dict[str, Any]) -> bool:
+    return _TERM_WS_CONNECTIONS.get(term_id) is connection
+
+
+def _release_term_websocket(term_id: str, connection: dict[str, Any]) -> None:
+    if _term_websocket_is_current(term_id, connection):
+        _TERM_WS_CONNECTIONS.pop(term_id, None)
 
 
 @app.websocket("/api/term/{term_id}")
@@ -1846,30 +2560,64 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
         return
     await websocket.accept()
     # 会话存在性校验
-    terms_now = {t["id"] for t in terminal.list_terms()}
+    terms_now = {
+        t["id"] for t in terminal.list_terms() if t.get("alive", True)
+    }
     if term_id not in terms_now:
         await websocket.send_text("\r\n[终端会话不存在,已关闭]\r\n")
-        await websocket.close()
+        await websocket.close(
+            code=TERM_WS_INVALID_CODE, reason="terminal session no longer exists"
+        )
         return
+    connection = await _claim_term_websocket(term_id, websocket)
     pump_task = None
     try:
+        if not _term_websocket_is_current(term_id, connection):
+            return
+        if websocket.query_params.get("replay") == "1":
+            history = await asyncio.to_thread(terminal.output_history, term_id)
+            if not _term_websocket_is_current(term_id, connection):
+                return
+            if history:
+                await websocket.send_bytes(history)
         # 输出转发任务:PTY → WebSocket
         async def pump_out():
-            while True:
-                data = await asyncio.to_thread(terminal.read_output, term_id, 0.15)
-                if data:
-                    await websocket.send_bytes(data)
-                elif not terminal.is_alive(term_id):
-                    tail = await asyncio.to_thread(terminal.drain_output, term_id, 0.05)
-                    if tail:
-                        await websocket.send_bytes(tail)
-                    await websocket.send_text("\r\n[进程已退出]\r\n")
+            while _term_websocket_is_current(term_id, connection):
+                # asyncio 取消不会停止已启动的 to_thread；接管时必须等旧读完成，
+                # 否则旧线程可能在新页面重放之后抢走一块 PTY 输出。
+                read_task = asyncio.create_task(asyncio.to_thread(
+                    terminal.read_available, term_id, TERM_READ_WAIT, TERM_READ_BURST,
+                ))
+                try:
+                    data = await asyncio.shield(read_task)
+                except asyncio.CancelledError:
+                    with suppress(asyncio.CancelledError):
+                        await read_task
+                    raise
+                try:
+                    if data:
+                        await websocket.send_bytes(data)
+                    elif not terminal.is_alive(term_id):
+                        tail = await asyncio.to_thread(
+                            terminal.drain_output, term_id, 0.05
+                        )
+                        if tail:
+                            await websocket.send_bytes(tail)
+                        await websocket.send_text("\r\n[进程已退出]\r\n")
+                        await websocket.close(
+                            code=TERM_WS_INVALID_CODE,
+                            reason="terminal process exited",
+                        )
+                        break
+                except WebSocketDisconnect:
                     break
-                await asyncio.sleep(0.02)
         pump_task = asyncio.create_task(pump_out())
+        connection["pump_task"] = pump_task
         # 主循环:接收浏览器输入
-        while True:
+        while _term_websocket_is_current(term_id, connection):
             msg = await websocket.receive()
+            if not _term_websocket_is_current(term_id, connection):
+                break
             if msg.get("type") == "websocket.disconnect":
                 break
             text = msg.get("text")
@@ -1894,8 +2642,9 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
     finally:
         if pump_task:
             pump_task.cancel()
-            with suppress(asyncio.CancelledError):
+            with suppress(asyncio.CancelledError, WebSocketDisconnect):
                 await pump_task
+        _release_term_websocket(term_id, connection)
         with suppress(Exception):
             await websocket.close()
 
@@ -1917,7 +2666,9 @@ async def _poll_live_state() -> None:
     attention_ids: set[str] | None = None
     while True:
         try:
-            snap = await asyncio.to_thread(herdr_client.snapshot)
+            await asyncio.to_thread(_expire_zoom_leases)
+            snap = await asyncio.to_thread(_board_snapshot)
+            await asyncio.to_thread(coordination.maintain_live_claims, snap)
             attention = await asyncio.to_thread(_build_attention, snap)
             attention_ids, new_items = _attention_changes(
                 attention_ids, attention["items"]
@@ -1930,9 +2681,36 @@ async def _poll_live_state() -> None:
                     "unread": unread,
                     "attention": attention["items"],
                     "capabilities": attention["capabilities"],
+                    "session_tasks": [
+                        (
+                            session.get("session"), session.get("status"),
+                            session.get("progress"),
+                            [
+                                (
+                                    agent.get("pane_id"), agent.get("mail_name"),
+                                    agent.get("role"), agent.get("task"),
+                                    agent.get("status"),
+                                    agent.get("coordination_state"),
+                                    agent.get("task_revision"),
+                                    (
+                                        (agent.get("report") or {}).get("request_id"),
+                                        (agent.get("report") or {}).get("reported_ts"),
+                                        (agent.get("report") or {}).get("progress"),
+                                        (agent.get("report") or {}).get("summary"),
+                                        (agent.get("report") or {}).get("next_step"),
+                                        (agent.get("report") or {}).get("blocker"),
+                                        (agent.get("report") or {}).get("pending"),
+                                        (agent.get("report") or {}).get("request_error"),
+                                    ),
+                                )
+                                for agent in session.get("agents", [])
+                            ],
+                        )
+                        for session in attention.get("sessions", [])
+                    ],
                     "panes": [
                         (p.get("session"), p.get("pane_id"), p.get("agent"),
-                         p.get("agent_status"), p.get("revision"))
+                         p.get("agent_status"), p.get("revision"), p.get("mail_name"))
                         for p in snap.get("panes", [])
                     ],
                 },

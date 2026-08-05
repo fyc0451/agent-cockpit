@@ -21,6 +21,28 @@ def _load_mail_send():
     return module
 
 
+def _load_mail_recv():
+    path = TOOLS / "mail-recv"
+    loader = importlib.machinery.SourceFileLoader("cockpit_mail_recv", str(path))
+    spec = importlib.util.spec_from_file_location(
+        "cockpit_mail_recv", str(path), loader=loader
+    )
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _load_task_report():
+    path = TOOLS / "task-report"
+    loader = importlib.machinery.SourceFileLoader("cockpit_task_report", str(path))
+    spec = importlib.util.spec_from_file_location(
+        "cockpit_task_report", str(path), loader=loader
+    )
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
 def test_bound_session_routes_to_unique_pane_even_when_cwd_differs():
     module = _load_mail_send()
     candidates = [
@@ -66,6 +88,18 @@ def test_notification_uses_real_project_and_packaged_receiver():
     assert PROJECT in text
     assert str(TOOLS / "mail-recv") in text
     assert "当前 pane cwd=/worktree" in text
+    assert "--message 7" in text
+
+
+def test_blocking_notification_requires_safe_checkpoint_then_complete():
+    module = _load_mail_send()
+    text = module._notify_text(
+        9, "blocker", "codex", PROJECT, PROJECT, True, "blocking"
+    )
+
+    assert "打断请求" in text
+    assert "安全停手" in text
+    assert "checkpoint" in text
 
 
 def test_session_binding_requires_matching_session_directory(tmp_path):
@@ -149,3 +183,107 @@ def test_packaged_tools_do_not_contain_client_credentials():
 
     assert "100.66.1.5" not in contents
     assert "registration_token=" not in contents
+
+
+def test_task_report_cli_submits_structured_progress(
+    monkeypatch, tmp_path, capsys,
+):
+    import coordination
+
+    module = _load_task_report()
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    coordination.request_task_report(
+        "demo", "w1:p1", "codex", "codex-main",
+        request_id="request-1", now=10,
+    )
+    monkeypatch.setattr(module.sys, "argv", [
+        "task-report", "--session", "demo", "--pane", "w1:p1",
+        "--request-id", "request-1", "--progress", "75",
+        "--summary", "完成实现", "--next", "执行回归", "--blocker", "",
+    ])
+
+    module.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["progress"] == 75
+    saved = coordination.task_report("demo", "w1:p1")
+    assert saved["summary"] == "完成实现"
+    assert saved["next_step"] == "执行回归"
+
+
+def test_mail_recv_ack_failure_keeps_processed_receipt_and_retry_suppresses_body(
+    monkeypatch, tmp_path, capsys,
+):
+    import coordination
+
+    module = _load_mail_recv()
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    (tmp_path / "lead").mkdir()
+    (tmp_path / "dev").mkdir()
+    coordination.start_run(
+        project_key=str(tmp_path), session="demo", session_dir=str(tmp_path),
+        participants=[
+            {
+                "id": "lead", "agent": "codex", "mail_name": "codex-main",
+                "pane_id": "w1:p1", "role": "lead", "task": "实现",
+                "workdir": str(tmp_path / "lead"),
+            },
+            {
+                "id": "dev", "agent": "kimi", "mail_name": "kimi-main",
+                "pane_id": "w1:p2", "role": "developer", "task": "验证",
+                "workdir": str(tmp_path / "dev"),
+            },
+        ], now=100,
+    )
+    meta, _ = coordination.prepare_metadata(
+        project_key=str(tmp_path), sender="codex-main", recipients=["kimi-main"],
+        intent="blocking", now=101,
+    )
+    message = {
+        "id": 41, "from": "codex-main", "subject": "复核",
+        "body_md": coordination.add_metadata("只执行一次", meta),
+        "importance": "high", "created_at": "2026-08-04T06:41:57.890908+00:00",
+    }
+    identity = {
+        "project_key": str(tmp_path), "name": "kimi-main",
+        "registration_token": "test-token",
+    }
+    monkeypatch.setattr(module, "load_identity", lambda *_: (identity, "hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_args, **_kwargs: {})
+    ack_fails = {"value": True}
+
+    def tool(_hub, _token, name, _args):
+        if name == "fetch_inbox":
+            return [message]
+        if name == "acknowledge_message" and ack_fails["value"]:
+            raise SystemExit("offline")
+        return {}
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    base = [
+        "mail-recv", "--agent", "kimi", "--project", str(tmp_path),
+    ]
+    monkeypatch.setattr(module.sys, "argv", [*base, "--unread"])
+    module.main()
+    assert "只执行一次" in capsys.readouterr().out
+
+    claim_token = coordination.receipt(
+        str(tmp_path), "kimi-main", 41
+    )["claim_token"]
+    monkeypatch.setattr(
+        module.sys, "argv",
+        [*base, "--complete", "41", "--claim-token", claim_token],
+    )
+    module.main()
+    completed = capsys.readouterr()
+    assert '"acked": false' in completed.out.lower()
+    assert coordination.receipt(str(tmp_path), "kimi-main", 41)["state"] == "processed"
+
+    ack_fails["value"] = False
+    monkeypatch.setattr(module.sys, "argv", [*base, "--unread"])
+    module.main()
+    retried = capsys.readouterr().out
+    assert "只执行一次" not in retried
+    assert "no actionable messages" in retried
+    assert coordination.receipt(str(tmp_path), "kimi-main", 41)["ack_pending"] == 0

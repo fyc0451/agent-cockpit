@@ -103,6 +103,51 @@ def test_server_identity_uses_only_the_given_canonical_key(monkeypatch):
     assert seen == ["/tmp/review/apps/api"]
 
 
+def test_board_snapshot_adds_identity_from_session_binding(monkeypatch):
+    snapshot = {
+        "sessions": [{"session": "demo", "directory": "/sessions/demo"}],
+        "panes": [
+            {"session": "demo", "pane_id": "w1:p1", "agent": "codex"},
+            {"session": "demo", "pane_id": "w1:p2", "agent": None},
+        ],
+    }
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: snapshot)
+    monkeypatch.setattr(
+        server.mail_projects,
+        "get",
+        lambda session, session_dir: "/project"
+        if (session, session_dir) == ("demo", "/sessions/demo") else None,
+    )
+    seen = []
+    monkeypatch.setattr(
+        server,
+        "_identity_name",
+        lambda project, agent: seen.append((project, agent)) or "codex-main",
+    )
+
+    result = server._board_snapshot()
+
+    assert result["panes"][0]["mail_name"] == "codex-main"
+    assert "mail_name" not in result["panes"][1]
+    assert seen == [("/project", "codex")]
+
+
+def test_board_snapshot_omits_identity_without_binding(monkeypatch):
+    snapshot = {
+        "sessions": [{"session": "demo", "directory": "/sessions/demo"}],
+        "panes": [{"session": "demo", "pane_id": "w1:p1", "agent": "codex"}],
+    }
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
+    monkeypatch.setattr(
+        server,
+        "_identity_name",
+        lambda *_: (_ for _ in ()).throw(AssertionError("无绑定时不能猜花名")),
+    )
+
+    assert "mail_name" not in server._board_snapshot()["panes"][0]
+
+
 def test_agent_mail_db_prefers_new_xdg_install_path(monkeypatch, tmp_path):
     data_home = tmp_path / "share"
     new_db = data_home / "mcp_agent_mail" / "storage.sqlite3"

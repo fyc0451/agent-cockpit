@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#151921">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Agent Cockpit</title>
@@ -34,6 +34,7 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overscroll-behavior:none}
+/* 不在 body 限制 touch-action：终端 TUI 需用 preventDefault 接管触屏拖动并合成 wheel */
 body{background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}
 button{cursor:pointer;font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(--bd2);border-radius:7px;padding:7px 12px;transition:.12s;white-space:nowrap}
 button:hover{background:var(--bg4);border-color:var(--accent)}
@@ -70,7 +71,7 @@ header .spacer{flex:1}
 
 /* 看板 */
 .board-wrap{flex:1;overflow:auto;padding:12px}
-.board{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;min-height:100%;align-content:start}
+.board{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;min-height:100%;align-content:start}
 .col{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;display:flex;flex-direction:column;min-height:200px}
 .col-head{padding:10px 12px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--bg2);border-radius:11px 11px 0 0;z-index:1}
 .col-head .cc{background:var(--bg4);border-radius:10px;padding:1px 8px;font-size:11px;min-width:20px;text-align:center}
@@ -91,7 +92,9 @@ header .spacer{flex:1}
 .agent-icon.qodercli,.agent-icon.qoder{background:#0f291a;color:#34d399}
 .agent-icon.claude{background:#291a0f;color:#ff9558}
 .agent-icon.none{background:var(--bg4);color:var(--fg3)}
-.card-name{font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-name{font-weight:600;font-size:13px;line-height:1.25;flex:1;min-width:0;overflow:hidden}
+.card-name-main,.card-alias{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-alias{font-size:10px;font-weight:500;color:var(--accent);margin-top:2px}
 .card-badge{background:var(--need);color:#fff;border-radius:9px;padding:0 6px;font-size:10px;font-weight:700;min-width:16px;text-align:center;line-height:16px;height:16px}
 .card-meta{font-size:11px;color:var(--fg3);margin-bottom:5px}
 .card-prev{font-family:var(--mono);font-size:11px;color:var(--fg2);background:var(--bg);border-radius:6px;padding:6px 7px;max-height:60px;overflow:hidden;line-height:1.4;white-space:pre-wrap;word-break:break-word;position:relative}
@@ -121,7 +124,7 @@ header .spacer{flex:1}
 .file-guide{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;font-size:12px;color:var(--fg2);background:var(--bg3);border-bottom:1px solid var(--bd)}
 .file-guide span{flex:1;min-width:220px}
 .file-guide button{width:auto;flex:0 0 auto}
-.files-body{flex:1;display:grid;grid-template-columns:280px 1fr;gap:10px;padding:10px;overflow:hidden}
+.files-body{flex:1;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:10px;padding:10px;overflow:hidden}
 .file-tree{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:auto}
 .ft-item{padding:5px 10px;border-radius:6px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;white-space:nowrap}
 .ft-item:hover{background:var(--bg3)}
@@ -138,7 +141,7 @@ header .spacer{flex:1}
 
 /* 消息 view */
 .msgs-view{flex-direction:column;overflow:hidden}
-.msgs-body{flex:1;display:grid;grid-template-columns:240px 1fr;gap:10px;padding:10px;overflow:hidden}
+.msgs-body{flex:1;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:10px;padding:10px;overflow:hidden}
 .sidebar{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:8px;overflow:auto}
 .agent-item{padding:7px 9px;border-radius:7px;display:flex;align-items:center;gap:7px;margin-bottom:3px;font-size:13px}
 .agent-item:hover{background:var(--bg3)}
@@ -153,11 +156,46 @@ header .spacer{flex:1}
 .field{margin-bottom:8px}
 .field label{display:block;font-size:11px;color:var(--fg2);margin-bottom:3px}
 
-/* Attention Inbox */
+/* Session 任务看板 + Attention */
 .attention-view{overflow:hidden}
 .attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
 .attention-toolbar .spacer{flex:1}
 .attention-list{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
+.task-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px;align-items:start}
+.task-session{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;overflow:hidden}
+.task-session-head{display:flex;align-items:flex-start;gap:8px;padding:11px 12px 8px}
+.task-session-title{flex:1;min-width:0}
+.task-session-name{font:600 14px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-session-meta{color:var(--fg3);font-size:11px;margin-top:2px}
+.task-state,.task-agent-state{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:10px;font-weight:600;white-space:nowrap;border:1px solid currentColor}
+.task-state-blocked{color:var(--need)}
+.task-state-working{color:var(--work)}
+.task-state-done{color:var(--done)}
+.task-state-idle,.task-state-empty,.task-state-unknown{color:var(--idle)}
+.task-progress{padding:0 12px 10px}
+.task-progress-copy{display:flex;justify-content:space-between;gap:8px;color:var(--fg2);font-size:11px;margin-bottom:5px}
+.task-progress-track{height:6px;border-radius:999px;background:var(--bg4);overflow:hidden}
+.task-progress-fill{height:100%;border-radius:inherit;background:var(--done);min-width:0}
+.task-summary{display:flex;gap:5px;flex-wrap:wrap;padding:0 12px 10px}
+.task-summary span{font-size:10px;color:var(--fg2);background:var(--bg3);border-radius:5px;padding:2px 6px}
+.task-agent-list{border-top:1px solid var(--bd)}
+.task-agent{display:grid;grid-template-columns:28px minmax(110px,.42fr) minmax(130px,1fr) auto;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--bd)}
+.task-agent:last-child{border-bottom:0}
+.task-agent[data-action]{cursor:pointer}
+.task-agent[data-action]:hover{background:var(--bg3)}
+.task-agent-icon{font-size:18px;text-align:center}
+.task-agent-who,.task-agent-task{min-width:0}
+.task-agent-mail{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-agent-type{color:var(--fg3);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-agent-task{color:var(--fg2);font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere}
+.task-agent-empty{color:var(--fg3);font-style:italic}
+.task-agent-report{grid-column:2 / -1;min-width:0;padding:7px 8px;border-radius:7px;background:var(--bg3);font-size:11px;line-height:1.45;color:var(--fg2)}
+.task-report-meta{display:flex;gap:7px;align-items:center;flex-wrap:wrap;color:var(--fg3);margin-bottom:3px}
+.task-report-progress{color:var(--accent);font-weight:600}
+.task-report-blocker{color:var(--need)}
+.task-session-empty{padding:16px 12px;color:var(--fg3);font-size:12px;text-align:center;border-top:1px solid var(--bd)}
+.attention-section-title{display:flex;align-items:center;gap:7px;margin-top:4px;padding:3px 2px;font-size:12px;color:var(--fg2)}
+.attention-section-title .count{background:var(--bg4);border-radius:999px;padding:0 6px;font-size:10px}
 .attention-card{display:flex;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--bd);border-left:3px solid var(--need);border-radius:9px;padding:10px;cursor:pointer}
 .attention-card:hover{border-color:var(--accent)}
 .attention-icon{font-size:20px;width:28px;text-align:center;flex-shrink:0}
@@ -179,7 +217,7 @@ header .spacer{flex:1}
 .term-in input{font-family:var(--mono)}
 .pane-switch{display:flex;align-items:center;gap:5px;min-width:240px}
 .pane-switch select{min-width:140px}
-.term-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)}
+.term-toolbar{display:flex;flex-wrap:wrap;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2)}
 .term-toolbar .tb-toggle{margin-left:auto;padding:3px 8px;color:var(--fg3)}
 .term-toolbar.collapsed{padding:2px 8px;gap:4px}
 .term-toolbar.collapsed>*:not(.tb-toggle):not(#termKeyboardToggle){display:none}
@@ -192,8 +230,10 @@ header .spacer{flex:1}
 .term-keys.expanded .term-key-extra{display:block}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
 #termContainer{min-height:0}
-/* xterm 自己处理普通 scrollback；TUI 开启鼠标上报时才由下方 JS 接管触摸 */
+/* 普通 scrollback 由 xterm 原生处理；TUI 鼠标上报或 alternate buffer 由下方 JS 接管 */
 #termContainer .xterm.enable-mouse-events{touch-action:none;overscroll-behavior:contain}
+/* xterm 不处理 Pointer Events；alternate buffer 也没有原生 touch scrollback，需合成 wheel */
+#termContainer .xterm.term-touch-scroll{touch-action:none;overscroll-behavior:contain}
 .board-wrap,.file-tree,.sidebar,.msgs-list,.term-out,.hf-body,.modal{overscroll-behavior:contain}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
@@ -254,23 +294,35 @@ header .spacer{flex:1}
 .empty{color:var(--fg3);text-align:center;padding:40px 20px;font-size:13px}
 .hidden{display:none!important}
 
+@media(max-width:900px),(any-pointer:coarse){
+  /* 移动端输入框 >=16px,避免 iOS focus 自动缩放 */
+  input,select,textarea,.set-card input,.set-card select{font-size:16px}
+}
+@media(max-width:900px){
+  /* nav 折叠断点;JS 侧用同一 (max-width:900px) matchMedia(NAV_COLLAPSE_MQ) */
+  header{flex-wrap:wrap}
+  .nav-toggle{display:block}
+  header nav{order:3;width:100%;display:none;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}
+  header nav.open{display:grid}
+}
 @media(max-width:860px){
-  .board{grid-template-columns:repeat(2,1fr)}
   .msgs-body,.files-body{grid-template-columns:1fr}
   .sidebar,.file-tree{max-height:25vh}
 }
 @media(max-width:560px){
-  .board{grid-template-columns:1fr}
-  header{padding:6px 8px;gap:4px;flex-wrap:wrap}
+  header{padding:6px 8px;gap:4px}
   header .logo{font-size:13px}
   header .spacer{display:none}
-  .nav-toggle{display:block}
-  header nav{order:3;width:100%;display:none;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}
-  header nav.open{display:grid}
   header nav button{padding:5px 2px;font-size:11px;min-width:0}
   #liveText{display:none}
   .stat-pill{padding:3px 6px}
   .board-wrap{padding:8px}
+  .attention-list{padding:7px}
+  .task-board{grid-template-columns:minmax(0,1fr);gap:7px}
+  .task-agent{grid-template-columns:24px minmax(0,1fr) auto;gap:5px 7px;padding:8px 10px}
+  .task-agent-icon{grid-row:1 / 3}
+  .task-agent-task{grid-column:2 / 4}
+  .task-agent-state{grid-column:3;grid-row:1}
   .msgs-body,.files-body{padding:6px;gap:6px;min-height:0}
   .msgs-list,.editor-area{min-height:0}
   .file-search{padding:6px;gap:5px}
@@ -306,9 +358,10 @@ header .spacer{flex:1}
   .toast{max-width:calc(100vw - 16px);width:max-content;white-space:normal;word-break:break-word;text-align:center}
 }
 </style>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP" crossorigin="anonymous">
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js" integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js" integrity="sha384-iF+jqbuti4XlB64clWgFWYEscb+UnSRv3VgVikGYZu+otNFnSHr7y7NcKfBnGizn" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css" integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP" crossorigin="anonymous">
+<script src="/static/vendor/xterm/xterm.js" integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/" crossorigin="anonymous"></script>
+<script src="/static/vendor/xterm/addon-fit.js" integrity="sha384-iF+jqbuti4XlB64clWgFWYEscb+UnSRv3VgVikGYZu+otNFnSHr7y7NcKfBnGizn" crossorigin="anonymous"></script>
+<script src="/static/vendor/xterm/addon-webgl.js" integrity="sha384-AkzdQDeATxpW8V7I2EPcwg17qAoLQMjEFHb//1QaAAIyIlbDAHGKno5+huH7RKxq" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="app">
@@ -317,7 +370,7 @@ header .spacer{flex:1}
     <button class="icon nav-toggle" onclick="toggleNav()" data-i18n-title="nav.menu" title="菜单">☰</button>
     <nav id="nav">
       <button data-view="board" class="active" data-i18n="nav.board" data-i18n-title="nav.board.t" title="所有 agent 状态总览:需要你 / 工作中 / 完成 / 空闲">看板</button>
-      <button data-view="attention" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="统一待办:被卡住的 agent、失败任务、未读消息">待办</button>
+      <button data-view="attention" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="按 session 查看团队任务、进度和阻塞项">任务</button>
       <button data-view="term" data-i18n="nav.term" data-i18n-title="nav.term.t" title="真终端:接管任意 pane 的 TUI,直接敲命令">终端</button>
       <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="流视图:可滚屏/复制的 pane 输出 + 快速发指令">流</button>
       <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止">会话</button>
@@ -327,7 +380,7 @@ header .spacer{flex:1}
     </nav>
     <div class="spacer"></div>
     <div class="stat-pill"><span class="dot" id="liveDot"></span><span id="liveText">--</span></div>
-    <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="需要你处理的事项">🔔 <span id="attentionN">0</span></div>
+    <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="任务看板与需处理事项">🔔 <span id="attentionN">0</span></div>
     <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
     <button class="icon" onclick="refreshBoard()" title="刷新" data-i18n-title="common.refresh">↻</button>
   </header>
@@ -345,14 +398,15 @@ header .spacer{flex:1}
     </div>
   </section>
 
-  <!-- 统一 Attention Inbox -->
+  <!-- Session 任务看板 -->
   <section id="view-attention" class="view attention-view">
     <div class="attention-toolbar">
-      <b data-i18n="attention.title">需要你处理</b>
+      <b data-i18n="attention.title">任务看板</b>
       <span class="muted" id="attentionInfo" style="font-size:11px"></span>
       <span class="spacer"></span>
       <span class="muted" id="pushStatus" style="font-size:11px"></span>
       <button class="sm" id="pushBtn" onclick="setupPush()" data-i18n="attention.push">开启浏览器通知</button>
+      <button class="sm" id="taskReportBtn" onclick="refreshTaskReports()" data-i18n="attention.report">请求上报</button>
       <button class="icon" onclick="loadAttention()" title="刷新" data-i18n-title="common.refresh">↻</button>
     </div>
     <div class="attention-list" id="attentionList"><div class="empty" data-i18n="common.loading">加载中…</div></div>
@@ -664,7 +718,7 @@ let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
 let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=null;
 let SERVICE_CLIPBOARD='';
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
-let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
+let SETUP_SUBMITTING=false, SETUP_CLOSE_TIMER=null, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -679,11 +733,11 @@ function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent
 // JS 动态文案用 t('key','中文原文') 内联回退,保证源码中文不丢(测试可锚)。
 const I18N={
 en:{
-'nav.menu':'Menu','nav.board':'Board','nav.attention':'Inbox','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
-'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Unified inbox: blocked agents, failed tasks, unread mail','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
+'nav.menu':'Menu','nav.board':'Board','nav.attention':'Tasks','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
+'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Tasks and progress grouped by session, including blockers','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
 'board.guide.title':'No running agents yet','board.guide.body':'First time here? Create a workspace in one click (it creates the session and starts the agents); with an existing session, add agents from the launch bar below.','board.guide.btn':'🚀 Create your first workspace','board.guide.noherdr':'herdr is unavailable','board.guide.noherdr.body':'The herdr executable was not found. Check Settings → Environment check for missing components, install them, then refresh.','board.guide.noherdr.btn':'Open environment check','launch.nosession':'No session yet — create a workspace first',
 'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
-'attention.title':'Needs your attention','attention.push':'Enable notifications','common.refresh':'Refresh','common.loading':'Loading…',
+'attention.title':'Task board','attention.push':'Enable notifications','attention.report':'Request reports','common.refresh':'Refresh','common.loading':'Loading…',
 'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
@@ -698,11 +752,11 @@ en:{
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
 ja:{
-'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'対応','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
-'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'統合受信箱:停止中の agent、失敗タスク、未読メッセージ','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
+'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'タスク','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
+'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'session ごとのタスク、進捗、ブロッカーを表示','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
 'board.guide.title':'実行中の agent はまだありません','board.guide.body':'初めてですか?下のボタンでワークスペースを一発作成(session 作成と agent 起動を自動化)。既存 session には下部の起動バーから agent を追加できます。','board.guide.btn':'🚀 最初のワークスペースを作成','board.guide.noherdr':'herdr が利用できません','board.guide.noherdr.body':'herdr 実行ファイルが見つかりません。「設定 → 環境チェック」で不足コンポーネントを確認し、インストール後に更新してください。','board.guide.noherdr.btn':'環境チェックを開く','launch.nosession':'session がまだありません。先にワークスペースを作成してください',
 'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
-'attention.title':'対応が必要です','attention.push':'通知を有効化','common.refresh':'更新','common.loading':'読み込み中…',
+'attention.title':'タスクボード','attention.push':'通知を有効化','attention.report':'進捗報告を依頼','common.refresh':'更新','common.loading':'読み込み中…',
 'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
@@ -734,6 +788,7 @@ function toggleTermToolbar(){
   const collapsed=tb.classList.toggle('collapsed');
   tb.querySelector('.tb-toggle').textContent=collapsed?'▾':'▴';
   try{localStorage.setItem('term-toolbar-collapsed',collapsed?'1':'0')}catch(e){}
+  setTimeout(()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM)},0);
 }
 (function restoreCollapses(){
   try{
@@ -932,26 +987,83 @@ function showView(v){
   if(v==='herdrflow'){
     // 从终端视图切过来(点导航「流」)时,同样默认选中当前终端对应的 session 并定位 pane
     if(prevView==='term'&&CURRENT_TERM){HF_SESSION=CURRENT_TERM.session;HF_FOCUS_PANE=CURRENT_TERM.paneId}
-    else if(prevView==='term'&&TERM_ID&&TERM_LABELS[TERM_ID]){HF_SESSION=TERM_LABELS[TERM_ID];HF_FOCUS_PANE=null}
+    else if(prevView==='term'&&TERM_ID&&TERM_SESSIONS[TERM_ID]){HF_SESSION=TERM_SESSIONS[TERM_ID];HF_FOCUS_PANE=null}
     hfStart();
   }else hfStop();
 }
-document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(window.innerWidth<=560)document.getElementById('nav').classList.remove('open')});
+const NAV_COLLAPSE_MQ=window.matchMedia('(max-width:900px)');// 与 CSS @media(max-width:900px) 同一断点
+document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(NAV_COLLAPSE_MQ.matches)document.getElementById('nav').classList.remove('open')});
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
-const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',gemini:'💎',grok:'✖️'};
+const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',opencode:'🟣',gemini:'💎',grok:'✖️'};
 
-// ============ Attention Inbox ============
+// ============ Session 任务看板 + Attention ============
 const ATTENTION_ICON={pane_blocked:'🙋',task_failed:'❌',task_review:'🧾'};
 const ATTENTION_ACTION={pane_blocked:'去回复',task_failed:'看错误',task_review:'审 diff'};
+const TASK_STATUS_LABEL={blocked:'待处理',working:'工作中',done:'已完成',idle:'空闲',unknown:'未知',empty:'无 Agent'};
+const TASK_ROLE_LABEL={lead:'负责人',developer:'开发',reviewer:'复核',researcher:'调研'};
+function taskStatusKey(value,total){return total===0?'empty':(Object.prototype.hasOwnProperty.call(TASK_STATUS_LABEL,value)?value:'unknown')}
 async function loadAttention(payload){
   try{
     const d=payload||await api('/api/attention');
     ATTENTION=d;CAPABILITIES=d.capabilities||{};
     document.getElementById('attentionN').textContent=d.count||0;
     const unread=Math.max(0,Number(d.mail_unread)||0);
-    document.getElementById('attentionInfo').textContent=(d.count||0)+' 项需处理'+(unread?' · '+unread+' 条未读消息':'');
+    document.getElementById('attentionInfo').textContent=(d.sessions||[]).length+' 个 session · '+(d.count||0)+' 项需处理'+(unread?' · '+unread+' 条未读消息':'');
     renderAttention(d);
-  }catch(e){document.getElementById('attentionList').textContent='待办加载失败: '+e}
+  }catch(e){document.getElementById('attentionList').textContent='任务看板加载失败: '+e}
+}
+async function refreshTaskReports(){
+  const button=document.getElementById('taskReportBtn');
+  if(!button||button.disabled)return;
+  button.disabled=true;button.textContent='请求中…';
+  try{
+    const result=await api('/api/attention/refresh-reports',{method:'POST'});
+    if(result.requested)toast('已请求 '+result.requested+' 个 Agent 在安全检查点上报');
+    else if(!result.failed)toast('当前没有可请求的 Agent');
+    if(result.failed)toast(result.failed+' 个 Agent 请求发送失败');
+    await loadAttention();
+  }catch(e){toast('请求上报失败: '+e)}
+  finally{button.disabled=false;button.textContent=t('attention.report','请求上报')}
+}
+function sessionTaskHtml(session){
+  const agents=session.agents||[],summary=session.summary||{},total=agents.length;
+  const progress=Math.min(100,Math.max(0,Number(session.progress)||0));
+  const state=taskStatusKey(session.status,total);
+  const agentRows=agents.map(agent=>{
+    const agentState=taskStatusKey(agent.status,1);
+    const role=TASK_ROLE_LABEL[agent.role]||agent.role||'未分配角色';
+    const mail=agent.mail_name?'@'+agent.mail_name:'未注册花名';
+    const task=agent.task||'未记录任务说明';
+    const canOpen=validSessionName(session.session)&&agent.pane_id;
+    const report=agent.report||null,reported=report&&report.reported_ts;
+    let reportHtml='';
+    if(report){
+      const pending=report.pending?'<span>等待新上报…</span>':'';
+      const failed=report.request_error?`<span class="task-report-blocker">请求失败：${esc(report.request_error)}</span>`:'';
+      const meta=reported?`<span>上报 ${esc(fmtTime(reported))}</span><span class="task-report-progress">${Math.min(100,Math.max(0,Number(report.progress)||0))}%</span>`:'<span>尚未上报</span>';
+      const summary=reported&&report.summary?`<div>进展：${esc(report.summary)}</div>`:'';
+      const next=reported&&report.next_step?`<div>下一步：${esc(report.next_step)}</div>`:'';
+      const blocker=reported&&report.blocker?`<div class="task-report-blocker">阻塞：${esc(report.blocker)}</div>`:'';
+      reportHtml=`<div class="task-agent-report"><div class="task-report-meta">${meta}${pending}${failed}</div>${summary}${next}${blocker}</div>`;
+    }
+    return `<div class="task-agent"${canOpen?` data-action="openSessionAgent" data-session="${esc(session.session)}" data-pane="${esc(agent.pane_id)}"`:''}>
+      <div class="task-agent-icon">${AGENT_EMOJI[agent.agent]||'🤖'}</div>
+      <div class="task-agent-who"><div class="task-agent-mail">${esc(mail)}</div><div class="task-agent-type">${esc(agent.agent)} · ${esc(role)}</div></div>
+      <div class="task-agent-task${agent.task?'':' task-agent-empty'}">${esc(task)}</div>
+      <div class="task-agent-state task-state-${agentState}">${TASK_STATUS_LABEL[agentState]}</div>
+      ${reportHtml}
+    </div>`
+  }).join('')||'<div class="task-session-empty">这个 session 当前没有 Agent pane</div>';
+  const unknown=Number(summary.unknown)||0;
+  return `<article class="task-session">
+    <div class="task-session-head">
+      <div class="task-session-title"><div class="task-session-name">${esc(session.session)}</div><div class="task-session-meta">状态采集 ${esc(fmtTime(session.updated_ts))} · ${total} 个 Agent</div></div>
+      <div class="task-state task-state-${state}">${TASK_STATUS_LABEL[state]}</div>
+    </div>
+    <div class="task-progress"><div class="task-progress-copy"><span>完成 ${Number(summary.done)||0}/${total}</span><span>${progress}%</span></div><div class="task-progress-track"><div class="task-progress-fill" style="width:${progress}%"></div></div></div>
+    <div class="task-summary"><span>工作中 ${Number(summary.working)||0}</span><span>待处理 ${Number(summary.blocked)||0}</span><span>已完成 ${Number(summary.done)||0}</span><span>空闲 ${Number(summary.idle)||0}</span>${unknown?`<span>未知 ${unknown}</span>`:''}</div>
+    <div class="task-agent-list">${agentRows}</div>
+  </article>`
 }
 function renderAttention(d){
   const box=document.getElementById('attentionList');
@@ -959,14 +1071,17 @@ function renderAttention(d){
   const note=mail&&mail.available===false?`<div class="capability-note">Agent Mail 未启用：${esc(mail.reason||'消息能力已自动隐藏')}。Herdr、终端、文件和任务仍可正常使用。</div>`:'';
   const unread=Math.max(0,Number(d.mail_unread)||0);
   const mailNote=unread?`<div class="capability-note">📬 ${unread} 条 Agent Mail 未读，不计入待办。<button class="sm" data-action="openMessages">去消息查看</button></div>`:'';
+  const sessions=d.sessions||[];
+  const board=sessions.length?`<div class="task-board">${sessions.map(sessionTaskHtml).join('')}</div>`:'<div class="capability-note">当前没有运行中的 Herdr session</div>';
   const items=d.items||[];
   const actions=items.length?items.map((item,i)=>`
     <div class="attention-card" data-action="openAttention" data-index="${i}">
       <div class="attention-icon">${ATTENTION_ICON[item.kind]||'🔔'}</div>
       <div class="attention-copy"><div class="attention-title">${esc(item.title)}</div><div class="attention-detail">${esc(item.detail||'')}</div></div>
       <div class="attention-action">${ATTENTION_ACTION[item.kind]||'查看'} ›</div>
-    </div>`).join(''):'<div class="empty">当前没有需要你处理的事项</div>';
-  box.innerHTML=note+actions+mailNote;
+    </div>`).join(''):'<div class="capability-note">✓ 当前没有需要你处理的阻塞或代码改动</div>';
+  const actionTitle=`<div class="attention-section-title">需处理事项 <span class="count">${items.length}</span></div>`;
+  box.innerHTML=note+board+actionTitle+actions+mailNote;
 }
 function replaceAttentionHash(item){
   if(item&&typeof item.url==='string'&&item.url.startsWith('/#/attention/'))history.replaceState(null,'',item.url);
@@ -1133,7 +1248,7 @@ function cardHtml(p){
   return `<div class="card ${cls}" data-action="openFlow" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">
     <div class="card-top">
       <div class="agent-icon ${esc(ag)}">${emoji}</div>
-      <div class="card-name">${esc(p.agent||p.terminal_title||p.pane_id)}</div>
+      <div class="card-name"><span class="card-name-main">${esc(p.agent||p.terminal_title||p.pane_id)}</span>${p.mail_name?`<span class="card-alias">@${esc(p.mail_name)}</span>`:''}</div>
       <button class="icon" style="padding:2px 6px;font-size:13px" title="接管 TUI(xterm)" data-action="openTerm" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">🖥</button>
       <span class="status-dot ${cls}"></span>
     </div>
@@ -1143,7 +1258,10 @@ function cardHtml(p){
 
 // ============ 终端抽屉 ============
 let TERM_TIMER=null;
-const isCompactScreen=()=>window.matchMedia('(max-width:560px)').matches;
+const COMPACT_SCREEN_MQ=window.matchMedia('(max-width:560px)');
+const isCompactScreen=()=>COMPACT_SCREEN_MQ.matches;
+const isCoarsePointer=()=>window.matchMedia('(any-pointer:coarse)').matches;
+const isTouchTerminal=()=>navigator.maxTouchPoints>0||isCoarsePointer()||isCompactScreen();
 function drawerPanes(){
   if(!CURRENT_TERM)return[];
   return (BOARD?.panes||[]).filter(p=>p.session===CURRENT_TERM.session&&p.pane_id);
@@ -1367,6 +1485,8 @@ async function loadSessions(){
     const d=await api('/api/herdr/sessions');
     const sel=document.getElementById('lnSession');
     const running=(d.sessions||[]).filter(s=>s.status==='running');
+    TERM_SESSION_CATALOG=running.filter(s=>validSessionName(s.name)).map(s=>s.name);
+    renderTermOptions();
     sel.innerHTML=(d.sessions||[]).map(s=>`<option value="${esc(s.name)}" ${s.status==='running'?'':'disabled'}>${esc(s.name)}${s.status==='running'?'':' (停)'}</option>`).join('');
   }catch(e){}
 }
@@ -1415,9 +1535,10 @@ async function loadProjectMsgs(focusMessageId){
       </div>`).join('')||'<div class="muted">无 agent</div>';
     document.getElementById('msgList').innerHTML=d.messages.map(m=>`
       <div class="msg" data-message-id="${esc(m.id)}">
-        <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${esc(m.importance||'normal')}</span></div>
+        <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${esc(m.importance||'normal')}</span>${m.coordination?.meta?.intent?` <span class="tag">${esc(m.coordination.meta.intent)}</span>`:''}</div>
         <span class="muted">#${esc(m.id)} ${esc(fmtTime(m.created_ts))}</span></div>
         <div class="muted" style="font-size:11px;margin-bottom:5px"><b>${esc(m.sender_name||'?')}</b> → ${(m.recipients||[]).map(r=>esc(r.name)).join(', ')}</div>
+        ${Object.keys(m.coordination?.receipts||{}).length?`<div class="muted" style="font-size:11px;margin-bottom:5px">消费状态: ${Object.entries(m.coordination.receipts).map(([name,r])=>`${esc(name)}=${esc(r.state)}`).join(', ')}</div>`:''}
         ${m.body_md?`<div class="mb">${esc(m.body_md)}</div>`:''}
         ${writeEnabled&&(m.recipients||[]).some(r=>!r.read_ts)?`<button class="icon" data-action="ack" data-pid="${esc(d.project.id)}" data-mid="${esc(m.id)}" data-name="${esc((m.recipients.find(r=>!r.read_ts)||{}).name||'')}" style="font-size:11px">✓已读</button>`:''}
       </div>`).join('')+`
@@ -1425,6 +1546,9 @@ async function loadProjectMsgs(focusMessageId){
       <div class="field"><label>发件人</label><select id="cmpFrom">${d.agents.map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}</select></div>
       <div class="field"><label>收件人(逗号分隔)</label><input id="cmpTo"></div>
       <div class="field"><label>主题</label><input id="cmpSubject"></div>
+      <div class="field"><label>消息意图</label><select id="cmpIntent"><option value="info">info · 普通信息</option><option value="action">action · 执行请求</option><option value="review">review · 复核后恢复</option><option value="blocking">blocking · 安全停手处理后恢复</option><option value="stop">stop · 停止且不恢复</option><option value="redirect">redirect · 转向且不恢复</option></select></div>
+      <div class="field"><label>重要性</label><select id="cmpImportance"><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option><option value="low">low</option></select></div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12px"><input id="cmpHard" type="checkbox" style="width:auto">硬中断（仅 stop/redirect；先保存 uncertain checkpoint，再发送 Ctrl-C）</label>
       <div class="field"><label>正文</label><textarea id="cmpBody" rows="3"></textarea></div>
       <button class="primary" onclick="sendMsg()">${t('hf.send','发送')}</button></div>`:`<div class="capability-note">Agent Mail Hub 当前不可用，消息暂时只读：${esc(d.agent_mail?.write_reason||'连接失败')}</div>`}`;
     if(focusMessageId){
@@ -1434,13 +1558,17 @@ async function loadProjectMsgs(focusMessageId){
   }catch(e){toast('加载失败: '+e)}
 }
 async function sendMsg(){
-  try{await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:CURRENT_PROJ.id,sender_name:document.getElementById('cmpFrom').value,to:document.getElementById('cmpTo').value.split(',').map(s=>s.trim()).filter(Boolean),subject:document.getElementById('cmpSubject').value,body:document.getElementById('cmpBody').value})});
+  const hard=document.getElementById('cmpHard').checked;
+  if(hard&&!confirm('硬中断会取消 Agent 当前在途操作；无法恢复隐式推理，确定继续？'))return;
+  try{await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:CURRENT_PROJ.id,sender_name:document.getElementById('cmpFrom').value,to:document.getElementById('cmpTo').value.split(',').map(s=>s.trim()).filter(Boolean),subject:document.getElementById('cmpSubject').value,body:document.getElementById('cmpBody').value,intent:document.getElementById('cmpIntent').value,importance:document.getElementById('cmpImportance').value,hard})});
     toast(t('toast.sent','已发送 ✓'));loadProjectMsgs()}catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
 }
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
 // ============ Web 终端(xterm.js + PTY) ============
-let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={};
+let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_ZOOM={}, TERM_FONT_READY=null;
+let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
+const TERM_SESSION_PREFIX='session:';
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
 const TERM_MODIFIERS={ctrl:false,alt:false,shift:false};
@@ -1483,21 +1611,68 @@ function applyTermModifiers(data,name){
   renderTermModifiers();
   return out;
 }
+// TUI 常开启 DECSET 1004；xterm 会在浏览器失焦/回焦时生成 ESC[O / ESC[I。
+// 转发给 PTY 会让 Herdr/TUI 把普通页面切换误当成终端焦点变化并整屏重绘。
+const isTermFocusReport=data=>data==='\x1b[I'||data==='\x1b[O';
 function termKey(name){
   const seq=TERM_KEY_SEQ[name];
   if(!seq||!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
   queueTermInput(TERM_ID,applyTermModifiers(seq,name));
   XTERM&&XTERM.focus();
 }
-function termEnsure(){if(!TERM_ID)termNew()}
+async function termEnsure(){
+  await restoreTerms();
+  if(TERM_ID){termSwitch(TERM_ID);return}
+  if(TERM_SESSION_CATALOG.length){doAttachHerdr(TERM_SESSION_CATALOG[0]);return}
+  termNew();
+}
 function termLabel(id){return TERM_LABELS[id]||('终端 '+id.slice(0,8))}
+function ensureTermFontLoaded(){
+  if(!document.fonts?.load)return Promise.resolve();
+  if(!TERM_FONT_READY){
+    TERM_FONT_READY=document.fonts.load(`${termFontSize()}px "Cascadia Mono NF"`)
+      .then(()=>document.fonts.ready).catch(()=>{});
+  }
+  return TERM_FONT_READY;
+}
 function renderTermOptions(){
   const sel=document.getElementById('termSelect');
-  sel.innerHTML=TERMS.map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
+  const attached=new Set(Object.values(TERM_SESSIONS));
+  const terms=TERMS.map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
+  const sessions=TERM_SESSION_CATALOG.filter(session=>!attached.has(session)).map(session=>
+    `<option value="${TERM_SESSION_PREFIX}${esc(session)}">${esc(session)} · 打开</option>`
+  ).join('');
+  sel.innerHTML=terms+sessions;
   if(TERM_ID)sel.value=TERM_ID;
+}
+async function restoreTerms(){
+  if(TERM_RESTORE_PROMISE)return TERM_RESTORE_PROMISE;
+  TERM_RESTORE_PROMISE=(async()=>{
+    try{
+      const [termData,sessionData]=await Promise.all([api('/api/term'),api('/api/herdr/sessions')]);
+      TERM_SESSION_CATALOG=(sessionData.sessions||[])
+        .filter(session=>session.status==='running'&&validSessionName(session.name))
+        .map(session=>session.name);
+      for(const item of (termData.terms||[])){
+        const id=String(item.id||'');
+        if(!id||item.alive===false||TERMS.includes(id))continue;
+        TERMS.push(id);TERM_LABELS[id]=item.label||'';
+        if(item.label&&TERM_SESSION_CATALOG.includes(item.label))TERM_SESSIONS[id]=item.label;
+      }
+      if(!TERM_ID)TERM_ID=TERMS.find(id=>TERM_SESSIONS[id])||TERMS[0]||null;
+      renderTermOptions();
+    }catch(e){TERM_RESTORE_PROMISE=null;renderTermOptions()}
+  })();
+  return TERM_RESTORE_PROMISE;
+}
+async function restoreAllHerdrSessions(){
+  await restoreTerms();
+  const sessions=[...new Set(TERM_SESSION_CATALOG)];
+  for(const session of sessions)await doAttachHerdr(session);
 }
 async function termNew(cwd){
   try{
+    await ensureTermFontLoaded();
     const url='/api/term'+(cwd?('?cwd='+encodeURIComponent(cwd)):'');
     const r=await api(url,{method:'POST'});
     TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||'';
@@ -1594,6 +1769,7 @@ async function termAttachHerdr(){
 }
 async function doAttachHerdr(session){
   if(!validSessionName(session)){toast('非法 session 名,拒绝 attach');return}
+  await restoreTerms();
   closeCollab();
   hfStop();
   // 切到终端 tab,创建新终端
@@ -1601,13 +1777,22 @@ async function doAttachHerdr(session){
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
   document.getElementById('launchBar').classList.add('hidden');
+  const existing=TERMS.find(id=>TERM_SESSIONS[id]===session);
+  if(existing){TERM_ID=existing;renderTermOptions();termSwitch(existing);return}
+  let createdId=null;
   try{
+    await ensureTermFontLoaded();
     const r=await api('/api/term?label='+encodeURIComponent(session),{method:'POST'});
-    TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;
+    createdId=r.id;
+    TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;TERM_SESSIONS[r.id]=session;
     renderTermOptions();
     termMount(r.id);
+    if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败');
     queueTermInput(r.id,'herdr --session '+session+'\r','已进入 herdr/'+session+' (Ctrl-b 切 pane)');
-  }catch(e){toast('创建终端失败: '+e)}
+  }catch(e){
+    if(createdId&&TERMS.includes(createdId)){TERM_ID=createdId;await termClose()}
+    toast('创建终端失败: '+e)
+  }
 }
 
 // ============ herdr 流视图(只读 pane 流 + 输入框发指令) ============
@@ -1616,9 +1801,9 @@ async function doAttachHerdr(session){
 let HF_TIMER=null, HF_SESSION=null, HF_FOCUS_PANE=null;
 function enterHerdrFlow(session,paneId){
   // 未显式指定时(终端工具栏「返回流视图」)默认带到当前终端对应的 session/pane:
-  // 卡片抽屉终端看 CURRENT_TERM;终端 tab 里 attach/接管来的 PTY 按 label 记了 session
+  // 卡片抽屉终端看 CURRENT_TERM;attach/接管的 PTY 使用独立 session 映射。
   if(!session&&CURRENT_TERM){session=CURRENT_TERM.session;paneId=paneId||CURRENT_TERM.paneId}
-  if(!session&&TERM_ID&&TERM_LABELS[TERM_ID])session=TERM_LABELS[TERM_ID];
+  if(!session&&TERM_ID&&TERM_SESSIONS[TERM_ID])session=TERM_SESSIONS[TERM_ID];
   HF_SESSION=session||null;
   HF_FOCUS_PANE=paneId||null;
   showView('herdrflow');
@@ -1688,7 +1873,7 @@ async function hfRefreshAll(){
     const out=document.getElementById('hf-out-'+p.pane_id);
     if(!out)continue;
     try{
-      const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=80&is_agent=true`);
+      const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=300&is_agent=true`);
       if(HF_SESSION!==session||!out.isConnected)return;
       const next=d.output||d.error||'(空)';
       if(out.textContent===next)continue;
@@ -1780,22 +1965,108 @@ async function termInsertCollab(session,paneId,agent){
     XTERM.focus();
   }catch(e){toast('查询失败: '+e)}
 }
-async function termClose(){
-  if(!TERM_ID)return;
-  const inst=TERM_INSTANCES[TERM_ID];
-  try{await api('/api/term/'+TERM_ID,{method:'DELETE'})}catch(e){}
-  TERMS=TERMS.filter(t=>t!==TERM_ID);
-  delete TERM_LABELS[TERM_ID];
+const TERM_ZOOM_HEARTBEAT=10000;
+function termZoomState(id){
+  const session=TERM_SESSIONS[id];
+  if(!session)return null;
+  if(!TERM_ZOOM[id])TERM_ZOOM[id]={session,owned:false,timer:null,busy:false,lastReason:null,closing:false,suspended:false};
+  return TERM_ZOOM[id];
+}
+async function syncTermZoomLease(id){
+  const state=termZoomState(id);
+  if(!state||state.busy||state.closing||state.suspended||!TERMS.includes(id))return;
+  if(!isCompactScreen()){
+    if(state.owned)await releaseTermZoomLease(id,true);
+    return;
+  }
+  state.busy=true;
+  try{
+    let action=state.owned?'renew':'acquire';
+    const request=()=>api(`/api/herdr/session/${encodeURIComponent(state.session)}/zoom-lease`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({term_id:id,action})
+    });
+    let result=await request();
+    // 页面离开、断网超过 TTL 后服务端会还原；恢复时重新申请，而不是假定仍持有。
+    if(action==='renew'&&!result.acquired){state.owned=false;action='acquire';result=await request()}
+    if(state.closing||state.suspended||!TERMS.includes(id)){
+      if(result.acquired){action='release';await request()}
+      return;
+    }
+    const becameOwner=!state.owned&&result.acquired===true;
+    state.owned=result.acquired===true&&result.owned===true;
+    if(becameOwner)toast('窄屏已自动聚焦单个 pane，关闭终端后恢复分屏');
+    if(!state.owned&&result.reason&&result.reason!==state.lastReason){
+      if(result.reason==='already_zoomed')toast('该 Herdr tab 已手动放大，保持原状态');
+      else if(result.reason==='leased')toast('该 Herdr session 已由另一窄屏终端接管');
+    }
+    state.lastReason=result.reason||null;
+  }catch(e){}finally{state.busy=false}
+}
+async function startTermZoomLease(id){
+  const state=termZoomState(id);if(!state)return;
+  state.suspended=false;
+  if(!state.timer)state.timer=setInterval(()=>syncTermZoomLease(id),TERM_ZOOM_HEARTBEAT);
+  await syncTermZoomLease(id);
+}
+async function releaseTermZoomLease(id,keepTimer=false){
+  const state=TERM_ZOOM[id];if(!state)return;
+  if(!keepTimer){state.closing=true;if(state.timer){clearInterval(state.timer);state.timer=null}}
+  if(!state.owned)return;
+  state.owned=false;
+  try{
+    await api(`/api/herdr/session/${encodeURIComponent(state.session)}/zoom-lease`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({term_id:id,action:'release'})
+    });
+  }catch(e){}
+}
+function removeTermInstance(id){
+  const inst=TERM_INSTANCES[id];
   if(inst){
     inst.closing=true;
     if(inst.reconnectTimer)clearTimeout(inst.reconnectTimer);
-    if(inst.ws)inst.ws.close();
-    if(inst.xterm)inst.xterm.dispose();
+    try{inst.ws?.close()}catch(e){}
+    try{inst.xterm?.dispose()}catch(e){}
     if(inst.el)inst.el.remove();
-    delete TERM_INSTANCES[TERM_ID];
+    delete TERM_INSTANCES[id];
   }
-  TERM_ID=TERMS[0]||null;
+  TERMS=TERMS.filter(t=>t!==id);
+  delete TERM_LABELS[id];
+  delete TERM_SESSIONS[id];
+  delete TERM_ZOOM[id];
+  if(TERM_ID===id)TERM_ID=TERMS[0]||null;
   renderTermOptions();
+}
+async function recoverInvalidTerm(id){
+  const inst=TERM_INSTANCES[id];
+  if(!inst||inst.closing)return;
+  const session=TERM_SESSIONS[id],wasCurrent=TERM_ID===id;
+  await releaseTermZoomLease(id);
+  removeTermInstance(id);
+  if(wasCurrent&&session&&TERM_SESSION_CATALOG.includes(session)){
+    toast('旧终端已失效，正在重新进入 '+session);
+    doAttachHerdr(session);
+  }else if(TERM_ID)showTermInstance(TERM_ID);
+  else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
+}
+function releaseAllTermZoomLeases(){
+  for(const [id,state] of Object.entries(TERM_ZOOM)){
+    state.suspended=true;
+    if(!state.owned)continue;
+    state.owned=false;
+    fetch(`/api/herdr/session/${encodeURIComponent(state.session)}/zoom-lease`,{
+      method:'POST',headers:{'Content-Type':'application/json'},keepalive:true,
+      body:JSON.stringify({term_id:id,action:'release'})
+    }).catch(()=>{});
+  }
+}
+async function termClose(){
+  if(!TERM_ID)return;
+  const id=TERM_ID;
+  await releaseTermZoomLease(id);
+  try{await api('/api/term/'+id,{method:'DELETE'})}catch(e){}
+  removeTermInstance(id);
   if(TERM_ID)showTermInstance(TERM_ID);
   else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
 }
@@ -1809,10 +2080,14 @@ function safeFitOf(fit,xterm){
   const rect=el.getBoundingClientRect();
   if(rect.width<2||rect.height<2)return false;
   try{
+    // FitAddon 会先 fit 到满宽，随后下方再留一列安全边距。若目标尺寸没变，
+    // 直接返回，避免 visualViewport scroll 每帧触发两次 PTY resize。
+    const dimensions=typeof fit.proposeDimensions==='function'?fit.proposeDimensions():null;
+    const targetCols=dimensions?.cols>10?dimensions.cols-1:dimensions?.cols;
+    if(targetCols&&dimensions?.rows&&xterm.cols===targetCols&&xterm.rows===dimensions.rows)return true;
     fit.fit();
-    // FitAddon 小数取整偶尔多给 1 列,最右列会被容器边缘/滚动条裁掉;减 1 列兜底
-    const d=fit.proposeDimensions();
-    if(d&&d.cols>10&&xterm.cols===d.cols)xterm.resize(d.cols-1,d.rows);
+    // 留一列安全边距，避免滚动条、字形 overhang 或小数取整裁掉最右字符。
+    if(xterm.cols>10)xterm.resize(xterm.cols-1,xterm.rows);
     return true
   }catch(e){return false}
 }
@@ -1830,19 +2105,24 @@ function queueTermInput(id,data,notice){
   if(notice)inst.pendingNotice=notice;
   flushTermInput(id,inst.ws);
 }
-// xterm 已原生处理普通 scrollback；但 TUI 开启鼠标上报后会跳过内置 touch
-// 处理。这里只在该模式下把单指纵向拖动转换成 wheel 事件交还给 xterm/TUI。
+// xterm 原生处理普通 scrollback；TUI 开启鼠标上报时会跳过内置 touch，
+// alternate buffer 即使未开鼠标上报也没有 touch scrollback。两种情况均把单指拖动
+// 转换成 wheel 交回 xterm：鼠标模式上报给 TUI，alternate 模式转为方向键。
 function enableTermTouchScroll(el,xterm){
   const sensitivity=4,maxSteps=48;
-  let lastY=null,remainder=0;
+  let lastY=null,remainder=0,touchActive=false,activePointer=null;
+  const isAlternateBuffer=()=>xterm.buffer?.active?.type==='alternate';
+  const needsSyntheticScroll=()=>xterm.modes?.mouseTrackingMode!=='none'||isAlternateBuffer();
+  // xterm 5.5 原生只监听 Touch Events；Pointer-only 触屏的三种 buffer/mouse 状态
+  // 都必须由本桥转换。提前设置 touch-action，避免浏览器在首个 pointermove 时 cancel。
+  const usesPointerEvents=()=>typeof PointerEvent==='function';
+  const syncTouchMode=()=>xterm.element?.classList.toggle('term-touch-scroll',isAlternateBuffer()||usesPointerEvents());
+  syncTouchMode();
+  xterm.buffer?.onBufferChange?.(syncTouchMode);
   const finish=()=>{lastY=null;remainder=0};
-  el.addEventListener('touchstart',e=>{
-    if(e.touches.length!==1||xterm.modes?.mouseTrackingMode==='none'){finish();return}
-    lastY=e.touches[0].clientY;remainder=0;
-  },{passive:true});
-  el.addEventListener('touchmove',e=>{
-    if(lastY===null||e.touches.length!==1||xterm.modes?.mouseTrackingMode==='none')return;
-    const y=e.touches[0].clientY;
+  const begin=y=>{lastY=y;remainder=0};
+  const move=(y,e,force=false)=>{
+    if(lastY===null||(!force&&!needsSyntheticScroll()))return;
     remainder+=(lastY-y)*sensitivity;lastY=y;
     const screen=el.querySelector('.xterm-screen');
     const rowHeight=Math.max(12,(screen?.getBoundingClientRect().height||xterm.rows*18)/Math.max(1,xterm.rows));
@@ -1859,9 +2139,38 @@ function enableTermTouchScroll(el,xterm){
       }
     }
     e.preventDefault();
+  };
+  el.addEventListener('touchstart',e=>{
+    touchActive=e.touches.length===1;
+    activePointer=null;
+    if(!touchActive||!needsSyntheticScroll()){finish();return}
+    begin(e.touches[0].clientY);
+  },{passive:true});
+  el.addEventListener('touchmove',e=>{
+    if(lastY===null||e.touches.length!==1||!needsSyntheticScroll())return;
+    move(e.touches[0].clientY,e);
   },{passive:false});
-  el.addEventListener('touchend',finish,{passive:true});
-  el.addEventListener('touchcancel',finish,{passive:true});
+  const finishTouch=()=>{touchActive=false;finish()};
+  el.addEventListener('touchend',finishTouch,{passive:true});
+  el.addEventListener('touchcancel',finishTouch,{passive:true});
+  // 部分折叠屏展开后按桌面设备派发 Pointer Events，不再提供上述 Touch Events。
+  // touchActive 用于浏览器同时派发两套事件时去重，避免一次拖动滚两遍。
+  el.addEventListener('pointerdown',e=>{
+    if(e.pointerType!=='touch'||e.isPrimary===false||touchActive)return;
+    // 新的 primary pointer 可覆盖极端序列中漏掉 pointerup/cancel 的旧状态。
+    activePointer=e.pointerId;begin(e.clientY);
+  },{passive:true});
+  el.addEventListener('pointermove',e=>{
+    if(touchActive||e.pointerType!=='touch'||e.pointerId!==activePointer)return;
+    move(e.clientY,e,true);
+  },{passive:false});
+  const finishPointer=e=>{
+    if(e.pointerId!==activePointer)return;
+    activePointer=null;finish();
+  };
+  el.addEventListener('pointerup',finishPointer,{passive:true});
+  el.addEventListener('pointercancel',finishPointer,{passive:true});
+  el.addEventListener('pointerleave',finishPointer,{passive:true});
 }
 function scheduleTermReconnect(id){
   const inst=TERM_INSTANCES[id];
@@ -1873,14 +2182,15 @@ function scheduleTermReconnect(id){
     if(!current)return;
     current.reconnectTimer=null;
     if(current.closing||current.xterm._disposed||current.ws?.readyState<2)return;
-    current.ws=openTermWS(id,current.xterm);
+    current.ws=openTermWS(id,current.xterm,false);
   },delay);
 }
 // 为某终端建立一条独立 WS(重连时复用,不触碰其它实例的 WS)
-function openTermWS(id,xterm){
-  const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}`);
+function openTermWS(id,xterm,replay){
+  const replayQuery=replay?'?replay=1':'';
+  const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}${replayQuery}`);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
+  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);startTermZoomLease(id);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
   ws.onmessage=ev=>{try{
     const light=document.documentElement.classList.contains('light');
     if(light){
@@ -1893,7 +2203,7 @@ function openTermWS(id,xterm){
       if(typeof ev.data==='string')xterm.write(ev.data);else xterm.write(new Uint8Array(ev.data));
     }
   }catch(e){}};
-  ws.onclose=ev=>{try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请新建终端]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(ev.code!==1008&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
+  ws.onclose=ev=>{const taken=ev.code===4001,invalid=ev.code===4004;try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请重新登录]\x1b[0m\r\n':taken?'\r\n\x1b[36m[终端已由更新的页面接管]\x1b[0m\r\n':invalid?'\r\n\x1b[36m[旧终端已失效，正在自动恢复]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(invalid&&inst&&inst.ws===ws&&!inst.closing)setTimeout(()=>recoverInvalidTerm(id),0);else if(ev.code!==1008&&!taken&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
   ws.onerror=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')}catch(e){}};
   return ws;
 }
@@ -1908,7 +2218,7 @@ function showTermInstance(id){
   if(!inst.ws||inst.ws.readyState>=2){
     if(inst.reconnectTimer){clearTimeout(inst.reconnectTimer);inst.reconnectTimer=null}
     try{if(!inst.xterm._disposed)inst.xterm.write('\r\n\x1b[36m[重连中…]\x1b[0m\r\n')}catch(e){}
-    inst.ws=openTermWS(id,inst.xterm);
+    inst.ws=openTermWS(id,inst.xterm,false);
   }
   XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;
   safeFitOf(inst.fit,inst.xterm);
@@ -1916,9 +2226,27 @@ function showTermInstance(id){
 }
 function termSwitch(id){
   if(!id)return;
+  if(id.startsWith(TERM_SESSION_PREFIX)){doAttachHerdr(id.slice(TERM_SESSION_PREFIX.length));return}
   TERM_ID=id;
   if(TERM_INSTANCES[id]){showTermInstance(id)}
   else{termMount(id)}
+}
+function enableTermWebgl(xterm){
+  if(typeof WebglAddon==='undefined'||!WebglAddon.WebglAddon)return null;
+  let addon=null;
+  try{
+    addon=new WebglAddon.WebglAddon();
+    addon.onContextLoss(()=>{
+      try{addon.dispose()}catch(e){}
+      if(xterm._webglAddon===addon)xterm._webglAddon=null;
+    });
+    xterm.loadAddon(addon);
+    xterm._webglAddon=addon;
+    return addon;
+  }catch(e){
+    try{addon?.dispose()}catch(ignore){}
+    return null;
+  }
 }
 function termMount(id){
   const c=document.getElementById('termContainer');
@@ -1933,17 +2261,18 @@ function termMount(id){
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
+  const webgl=enableTermWebgl(xterm);
   enableTermTouchScroll(el,xterm);
   xterm.parser.registerOscHandler(52,handleOsc52);
   // 隐藏其他终端的容器
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
-  TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:''};
+  TERM_INSTANCES[id]={xterm,fit,webgl,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:''};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
-  xterm.onData(d=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(applyTermModifiers(d))});
+  xterm.onData(d=>{if(isTermFocusReport(d))return;const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
-  TERM_INSTANCES[id].ws=openTermWS(id,xterm);
+  TERM_INSTANCES[id].ws=openTermWS(id,xterm,true);
   XTERM=xterm;FIT=fit;
   TERM_INSTANCES[id].ws&&showTermInstance(id);
 }
@@ -2052,16 +2381,16 @@ function setupMode(mode){
   SETUP_MODE=mode;
   const known=setupKnownAgents(), first=known[0]||'codex', second=known.find(a=>a!==first);
   if(mode==='quick'){
-    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责当前开发工作')];
+    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','')];
   }else if(mode==='develop_review'){
-    const lead=setupParticipant(first,'lead','完成开发工作并提交可复核的 commit');
+    const lead=setupParticipant(first,'lead','');
     SETUP_PARTICIPANTS=[lead];
-    if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'reviewer','检查需求、代码和测试',lead.id));
+    if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'reviewer','',lead.id));
   }else if(mode==='parallel'){
-    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责模块 A，并协调最终集成')];
-    if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'developer','负责模块 B，提交独立 commit'));
+    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','')];
+    if(second)SETUP_PARTICIPANTS.push(setupParticipant(second,'developer',''));
   }else if(!SETUP_PARTICIPANTS.length){
-    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','负责当前开发工作')];
+    SETUP_PARTICIPANTS=[setupParticipant(first,'lead','')];
   }
   document.querySelectorAll('#suModeChoices [data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));
   renderSetupAgents();
@@ -2089,7 +2418,7 @@ function renderSetupAgents(){
         <button class="icon" data-action="setupRemove" data-id="${esc(p.id)}" title="移除 Agent"${SETUP_PARTICIPANTS.length===1?' disabled':''}>✕</button>
       </div>
       <div class="setup-agent-task">
-        <input data-id="${esc(p.id)}" data-field="task" value="${esc(p.task)}" placeholder="这个 Agent 具体做什么">
+        <input data-id="${esc(p.id)}" data-field="task" value="${esc(p.task)}" placeholder="填写真实任务和验收条件">
         <select data-id="${esc(p.id)}" data-field="workspace" aria-label="工作目录策略">${setupWorkspaceOptions(p.workspace)}</select>
       </div>${review}
     </div>`;
@@ -2116,7 +2445,7 @@ function setupAddAgent(){
   const agent=setupKnownAgents().find(a=>!SETUP_PARTICIPANTS.some(p=>p.agent===a));
   if(!agent){toast('没有更多已启用的 Agent');return}
   SETUP_MODE='custom';
-  SETUP_PARTICIPANTS.push(setupParticipant(agent,'developer','负责一个独立子任务'));
+  SETUP_PARTICIPANTS.push(setupParticipant(agent,'developer',''));
   document.querySelectorAll('#suModeChoices [data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode==='custom'));
   renderSetupAgents();
 }
@@ -2137,7 +2466,7 @@ function setupErrors(){
   if(!session)errors.push('请填写 session 名');else if(!validSessionName(session))errors.push('session 名只能包含字母、数字、_、-');
   if(!SETUP_PARTICIPANTS.length)errors.push('至少添加一个 Agent');
   if(new Set(SETUP_PARTICIPANTS.map(p=>p.agent)).size!==SETUP_PARTICIPANTS.length)errors.push('同一种 Agent 不能重复');
-  if(SETUP_PARTICIPANTS.length>1&&SETUP_PARTICIPANTS.some(p=>!p.task.trim()))errors.push('请填写每个 Agent 的任务');
+  if(SETUP_PARTICIPANTS.some(p=>!p.task.trim()))errors.push('请填写每个 Agent 的真实任务');
   if(SETUP_MODE==='develop_review'&&(!writers.length||!SETUP_PARTICIPANTS.some(p=>p.role==='reviewer')))errors.push('开发 + 复核需要开发者和 Reviewer');
   if(SETUP_MODE==='parallel'&&writers.length<2)errors.push('并行开发至少需要两名写入者');
   if(writers.length>1&&writers.some(p=>p.workspace==='shared'))errors.push('多个并行写入者不能共享目录');
@@ -2200,7 +2529,12 @@ function showSetupModal(){
   setupInspectWorkspace(document.getElementById('suWorkdir').value.trim());
   document.getElementById('setupModal').classList.add('show');
 }
-function closeSetup(){document.getElementById('setupModal').classList.remove('show')}
+function closeSetup(){
+  if(SETUP_CLOSE_TIMER!==null){
+    clearTimeout(SETUP_CLOSE_TIMER);SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;renderSetupPreview();
+  }
+  document.getElementById('setupModal').classList.remove('show');
+}
 async function doSetupWorkspace(){
   if(SETUP_SUBMITTING)return;
   const session=document.getElementById('suSession').value.trim();
@@ -2209,6 +2543,7 @@ async function doSetupWorkspace(){
   const errors=setupErrors();
   if(errors.length){toast(errors[0]);renderSetupPreview();return}
   SETUP_SUBMITTING=true;renderSetupPreview();
+  let setupSucceeded=false;
   const participants=SETUP_PARTICIPANTS.map(p=>({...p,task:p.task.trim()}));
   const agents=participants.map(p=>p.agent);
   const res=document.getElementById('suResult');
@@ -2217,14 +2552,19 @@ async function doSetupWorkspace(){
     const body={session,workdir,mode:SETUP_MODE,participants,agents,layout};
     const r=await api('/api/herdr/setup-workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(r.ok){
+      setupSucceeded=true;
       const mail=r.agent_mail||{};
       const mailText=r.registered?'已注册':(mail.available===false?'未启用，已跳过':'未注册');
+      const started=(r.started||[]).map(esc).join(', ');
+      const reused=(r.reused||[]).map(esc).join(', ');
       const notified=(r.notified||[]).map(esc).join(', ');
       const workspaces=(r.workspaces||[]).map(w=>`${esc(w.agent)}: ${esc(w.strategy)} · <code>${esc(w.workdir)}</code>`).join('<br>');
       const warnings=(r.warnings||[]).map(w=>'⚠ '+esc(w)).join('<br>');
-      res.innerHTML='<span style="color:var(--done)">✅ 工作区就绪</span><br>启动: '+r.started.map(esc).join(', ')+(workspaces?'<br>'+workspaces:'')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'')+(warnings?'<br><span style="color:var(--need)">'+warnings+'</span>':'');
-      toast('工作区就绪 ✓');
-      setTimeout(()=>{closeSetup();loadSessionsView()},3500);
+      const readyText=r.idempotent?'✅ 工作区已在运行':'✅ 工作区就绪';
+      res.innerHTML='<span style="color:var(--done)">'+readyText+'</span><br>启动: '+(started||'无')+(reused?'<br>复用: '+reused:'')+(workspaces?'<br>'+workspaces:'')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'')+(warnings?'<br><span style="color:var(--need)">'+warnings+'</span>':'');
+      document.getElementById('suStartBtn').textContent='✓ 工作区已启动';
+      toast(r.idempotent?'工作区已在运行':'工作区就绪 ✓');
+      SETUP_CLOSE_TIMER=setTimeout(()=>{SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;closeSetup();renderSetupPreview();loadSessionsView()},3500);
     }else{
       const failed=(r.failed||[]).map(x=>esc(x.agent)+': '+esc(x.error)).join('<br>');
       const terminalOutput=r.terminal_output?'<br>终端输出: <code>'+esc(r.terminal_output)+'</code>':'';
@@ -2233,7 +2573,7 @@ async function doSetupWorkspace(){
       res.innerHTML='<span style="color:var(--err)">启动失败</span>'+(r.error?'<br>'+esc(r.error):'')+terminalOutput+onboarding+'<br>已启动: '+((r.started||[]).map(esc).join(', ')||'无')+(failed?'<br>失败原因:<br>'+failed:'');
     }
   }catch(e){res.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>'}
-  finally{SETUP_SUBMITTING=false;renderSetupPreview()}
+  finally{if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}}
 }
 async function setupHerdrOnboarding(command){
   const workdir=document.getElementById('suWorkdir').value.trim();
@@ -2410,11 +2750,46 @@ function connectSSE(){
   SSE.onerror=()=>{document.getElementById('liveDot').classList.add('off');setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)};
 }
 
+let LAST_PAGE_RECOVERY=0;
+function recoverPageState(){
+  if(document.visibilityState==='hidden')return;
+  const now=Date.now();
+  if(now-LAST_PAGE_RECOVERY<300)return;
+  LAST_PAGE_RECOVERY=now;
+  // 浏览器会自行恢复仍存活的 EventSource/WebSocket。切回页面时不要主动刷新
+  // Herdr 输出或发送 PTY resize（SIGWINCH 会让 TUI 整屏重绘）；只救真正关闭的连接。
+  if(!SSE||SSE.readyState===2)connectSSE();
+  const activeView=document.querySelector('#nav button.active')?.dataset.view;
+  if(activeView==='term'&&TERM_ID){
+    const inst=TERM_INSTANCES[TERM_ID];
+    if(inst&&(!inst.ws||inst.ws.readyState>=2))showTermInstance(TERM_ID);
+    const zoom=TERM_ZOOM[TERM_ID];
+    if(zoom){zoom.suspended=false;syncTermZoomLease(TERM_ID)}
+  }
+}
+
 function keepFocusedControlVisible(){
-  if(!isCompactScreen())return;
+  if(!isTouchTerminal())return;
   const el=document.activeElement;
   if(!el||!el.matches('input,textarea'))return;
   setTimeout(()=>{if(document.activeElement===el)el.scrollIntoView({block:'nearest'})},80);
+}
+
+function positionTermForKeyboard(){
+  const view=document.getElementById('view-term');
+  const active=document.activeElement;
+  const vv=window.visualViewport;
+  let inset=0;
+  // xterm 的 helper textarea 本身不可见；软键盘覆盖布局视口时，先缩短终端，
+  // 再由 FitAddon 重算行数，TUI 的当前输入行才会出现在键盘上方。
+  if(view?.classList.contains('active')&&isTouchTerminal()&&vv&&active&&view.contains(active)&&active.matches('input,textarea')){
+    const visibleBottom=vv.offsetTop+vv.height;
+    inset=Math.max(0,view.getBoundingClientRect().bottom-visibleBottom);
+    if(inset<80)inset=0;
+  }
+  const padding=inset?Math.round(inset)+'px':'';
+  if(view&&view.style.paddingBottom!==padding)view.style.paddingBottom=padding;
+  return inset;
 }
 
 // ============ 主题切换 ============
@@ -2515,7 +2890,7 @@ function setTermFont(v,save=true){
   const rng=document.getElementById('setTermFont');if(rng&&+rng.value!==v)rng.value=v;
   const val=document.getElementById('setTermFontVal');if(val)val.textContent=v;
   // 已开终端立即生效,改完字号要重新 fit
-  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.fontSize=v;inst.fit.fit()}catch(e){}}
+  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.fontSize=v;safeFitOf(inst.fit,inst.xterm)}catch(e){}}
   if(save)try{localStorage.setItem('term-font-size',String(v))}catch(e){}
 }
 (function(){try{setTermFont(termFontSize(),false)}catch(e){}})();
@@ -2551,6 +2926,7 @@ function bindDelegation(){
     else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
   on('#attentionList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='openAttention')openAttention(parseInt(it.dataset.index));
+    else if(it.dataset.action==='openSessionAgent')enterHerdrFlow(it.dataset.session,it.dataset.pane);
     else if(it.dataset.action==='openMessages')showView('msgs')});
   on('#hfBody',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='hfSend')hfSend(it.dataset.pane);
@@ -2605,9 +2981,11 @@ function bindDelegation(){
     else if(a==='fileSearchOpen')fileSearchOpen(parseInt(it.dataset.idx));
     else if(a==='fileSearchDownload')fileSearchDownload(parseInt(it.dataset.idx))});
   // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)
-  const fitVisibleTerm=()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(CURRENT_TERM)positionDrawerBelowHeader();keepFocusedControlVisible()};
+  const fitVisibleTerm=()=>{positionTermForKeyboard();if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(CURRENT_TERM)positionDrawerBelowHeader();keepFocusedControlVisible()};
   window.addEventListener('resize',fitVisibleTerm);
-  if(window.visualViewport)window.visualViewport.addEventListener('resize',fitVisibleTerm);
+  if(window.visualViewport){window.visualViewport.addEventListener('resize',fitVisibleTerm);window.visualViewport.addEventListener('scroll',fitVisibleTerm)}
+  document.addEventListener('focusin',()=>setTimeout(fitVisibleTerm,50));
+  document.addEventListener('focusout',()=>setTimeout(fitVisibleTerm,50));
   document.addEventListener('focusin',keepFocusedControlVisible);
   document.addEventListener('keydown',e=>{if(e.key==='Escape')hfExitFullscreen()});
   document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)hfExitFullscreen(false)});
@@ -2616,15 +2994,20 @@ function bindDelegation(){
 // ============ init ============
 async function init(){
   bindDelegation();
+  ensureTermFontLoaded();
   const ok=await ensureAuth();
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
   applyLang();
   loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
   document.getElementById('lnWorkdir').addEventListener('input',launchPreselectAgent);
-  document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='visible'){connectSSE();refreshBoard();loadAttention()}
+  document.addEventListener('visibilitychange',recoverPageState);
+  window.addEventListener('focus',recoverPageState);
+  window.addEventListener('pageshow',recoverPageState);
+  window.addEventListener('pagehide',releaseAllTermZoomLeases);
+  COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
+    for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
   });
-  connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();
+  connectSSE();loadSessions();refreshBoard();await Promise.all([restoreAllHerdrSessions(),loadAttention()]);refreshPushStatus();handleAttentionHash();
 }
 init();
 </script>

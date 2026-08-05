@@ -5,7 +5,7 @@ INSTALL_DIR="${1:-$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
 
-for name in am-register am-init-project mail-send mail-recv; do
+for name in am-register am-init-project mail-send mail-recv task-report; do
   source="$INSTALL_DIR/agent-mail-tools/$name"
   target="$BIN_DIR/$name"
   if [[ ! -x "$source" ]]; then

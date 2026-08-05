@@ -3,9 +3,12 @@
 会真实 fork bash PTY;每个用例结束后统一清理,避免泄漏。
 """
 import os
+import shlex
 import signal
+import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +48,40 @@ def _wait_dead(tid: str, timeout: float = 8.0) -> bytes:
     while time.monotonic() < deadline and terminal.is_alive(tid):
         out += terminal.read_output(tid, 0.05)
     return out
+
+
+def _start_file_receiver(tid: str, target, ready) -> None:
+    """启动确定性 stdin 接收器；ready 出现后才允许发送测试 payload。
+
+    子进程 exec 可能早于交互 shell 完成 tcsetpgrp；如果在成为前台
+    进程组前立即 read(0)，内核会发 SIGTTIN 将它暂停。因此 ready 必须
+    在 tcgetpgrp 确认前台权后才创建，否则仍存在极小启动竞态。
+    """
+    code = "\n".join((
+        "import os, pathlib, sys, time",
+        "deadline = time.monotonic() + 5",
+        "while os.tcgetpgrp(0) != os.getpgrp():",
+        "    if time.monotonic() >= deadline:",
+        "        raise TimeoutError('receiver did not become foreground')",
+        "    time.sleep(0.001)",
+        f"pathlib.Path({str(ready)!r}).touch()",
+        f"pathlib.Path({str(target)!r}).write_bytes(sys.stdin.buffer.read())",
+    ))
+    terminal.write_term(tid, f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}\n")
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and not ready.exists():
+        terminal.read_output(tid, 0.05)
+    assert ready.exists(), "PTY stdin 接收器未及时启动"
+
+
+def _wait_file_size(path, size: int, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.stat().st_size >= size:
+            return
+        time.sleep(0.05)
+    actual = path.stat().st_size if path.exists() else 0
+    raise AssertionError(f"文件未及时写完: {actual}/{size}")
 
 
 # ── 参数校验与上限 ──────────────────────────────────────────────
@@ -91,13 +128,76 @@ def test_echo_roundtrip():
     assert terminal.is_alive(tid)
 
 
-def test_large_write_full_integrity(tmp_path):
-    """大体积写:对端(cat)并发消费时,全部字节必须完整到达,不丢尾。"""
+def test_read_available_waits_once_and_coalesces_ready_chunks(monkeypatch):
+    """macOS 的连续小块 PTY 输出应合并，不能每块都走一次 WebSocket。"""
+    state = {"lock": threading.Lock()}
+    chunks = iter((b"a" * 1024, b"b" * 1024, b"c" * 1024, b""))
+    timeouts = []
+    monkeypatch.setattr(terminal, "_get", lambda term_id: state)
+
+    def fake_read(current, timeout):
+        assert current is state
+        timeouts.append(timeout)
+        return next(chunks)
+
+    monkeypatch.setattr(terminal, "_read_fd", fake_read)
+
+    data = terminal.read_available("term", timeout=0.02, max_bytes=4096)
+
+    assert data == b"a" * 1024 + b"b" * 1024 + b"c" * 1024
+    assert timeouts == [0.02, 0, 0, 0]
+
+
+def test_read_available_obeys_burst_soft_limit(monkeypatch):
+    state = {"lock": threading.Lock()}
+    chunks = iter((b"a" * 1024, b"b" * 1024, b"c" * 1024))
+    monkeypatch.setattr(terminal, "_get", lambda term_id: state)
+    monkeypatch.setattr(terminal, "_read_fd", lambda current, timeout: next(chunks))
+
+    assert terminal.read_available("term", max_bytes=2048) == (
+        b"a" * 1024 + b"b" * 1024
+    )
+
+
+def test_output_history_is_bounded_and_keeps_latest_bytes(monkeypatch):
+    monkeypatch.setattr(terminal, "OUTPUT_HISTORY_MAX", 8)
+    state = {"output_history": bytearray()}
+
+    terminal._remember_output(state, b"abcdef")
+    terminal._remember_output(state, b"ghijkl")
+
+    assert bytes(state["output_history"]) == b"efghijkl"
+
+
+def test_read_fd_records_output_for_browser_replay(monkeypatch):
+    state = {"master_fd": 9, "output_history": bytearray()}
+    monkeypatch.setattr(terminal.select, "select", lambda *args: ([9], [], []))
+    monkeypatch.setattr(terminal.os, "read", lambda fd, size: b"current screen")
+
+    assert terminal._read_fd(state, 0) == b"current screen"
+    assert bytes(state["output_history"]) == b"current screen"
+
+
+def test_websocket_pump_uses_bursts_without_per_chunk_sleep():
+    source = (Path(__file__).resolve().parents[1] / "server.py").read_text()
+    pump = source.split("async def pump_out():", 1)[1].split(
+        "pump_task = asyncio.create_task", 1
+    )[0]
+
+    assert "terminal.read_available" in pump
+    assert "TERM_READ_WAIT" in pump
+    assert "TERM_READ_BURST" in pump
+    assert "asyncio.sleep(0.02)" not in pump
+
+
+def test_large_write_full_integrity(tmp_path, monkeypatch):
+    """大体积写:接收器并发消费时,全部字节必须完整到达,不丢尾。"""
+    # CI runner 负载高时 drainer 消费慢,2s 默认超时会把本用例打成 flake;
+    # 放宽到与下方完整性等待相同的 10s(只放宽本用例,不改产品默认值)。
+    monkeypatch.setattr(terminal, "WRITE_TIMEOUT", 10.0)
     tid = _create()
     target = tmp_path / "payload.txt"
-    terminal.write_term(tid, f"cat > {target}\n")
-    _read_until(tid, b"cat >", 5)
-    time.sleep(0.5)  # 等 cat 进入读取态
+    _start_file_receiver(tid, target, tmp_path / "receiver-ready")
     # 模拟 server pump 持续读走回显:canonical 模式输入会回显到 master,
     # 没人读时 macOS 的小 PTY 缓冲会反压输入(Linux 缓冲大,不显性)
     stop = threading.Event()
@@ -111,15 +211,51 @@ def test_large_write_full_integrity(tmp_path):
         payload = "".join(f"{i:05d}" + "x" * 95 + "\n" for i in range(2000))
         terminal.write_term(tid, payload)   # 不得 TimeoutError
         terminal.write_term(tid, "\x04")    # Ctrl-D EOF
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if target.exists() and target.stat().st_size >= len(payload):
-                break
-            time.sleep(0.1)
+        _wait_file_size(target, len(payload))
         assert target.read_text() == payload
     finally:
         stop.set()
         drainer.join(timeout=2)
+
+
+def test_concurrent_writes_preserve_message_boundaries(tmp_path, monkeypatch):
+    """两个 WebSocket/重连并发写同一 PTY 时，每条消息不得字节级交错。"""
+    monkeypatch.setattr(terminal, "WRITE_TIMEOUT", 10.0)
+    tid = _create()
+    target = tmp_path / "concurrent.txt"
+    _start_file_receiver(tid, target, tmp_path / "concurrent-ready")
+
+    real_write = os.write
+
+    def one_byte_at_a_time(fd, data):
+        time.sleep(0.0001)
+        return real_write(fd, data[:1])
+
+    monkeypatch.setattr(os, "write", one_byte_at_a_time)
+    payloads = ("A" * 512 + "\n", "B" * 512 + "\n")
+    barrier = threading.Barrier(3)
+    errors = []
+
+    def writer(payload):
+        try:
+            barrier.wait()
+            terminal.write_term(tid, payload)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(payload,)) for payload in payloads]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(10)
+    assert not errors
+    assert not any(thread.is_alive() for thread in threads)
+
+    terminal.write_term(tid, "\x04")
+    _wait_file_size(target, sum(len(payload) for payload in payloads))
+    data = target.read_text()
+    assert data in (payloads[0] + payloads[1], payloads[1] + payloads[0])
 
 
 def test_write_timeout_raises_and_reports(monkeypatch):
@@ -211,6 +347,44 @@ def test_kill_wins_race_with_concurrent_io():
     assert not errors
 
 
+def test_kill_waits_for_inflight_write(monkeypatch):
+    """close 必须等完整消息写完，不能让 fd 关闭/复用污染剩余输入。"""
+    tid = _create()
+    real_write = os.write
+    entered = threading.Event()
+    release = threading.Event()
+    errors = []
+
+    def paused_write(fd, data):
+        entered.set()
+        assert release.wait(5)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", paused_write)
+
+    def writer():
+        try:
+            terminal.write_term(tid, "printf x\n")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    write_thread = threading.Thread(target=writer)
+    write_thread.start()
+    assert entered.wait(5)
+    kill_thread = threading.Thread(target=terminal.kill_term, args=(tid,))
+    kill_thread.start()
+    time.sleep(0.05)
+    assert kill_thread.is_alive(), "kill 未等待正在写入的完整消息"
+    release.set()
+    write_thread.join(5)
+    kill_thread.join(5)
+
+    assert not errors
+    assert not write_thread.is_alive()
+    assert not kill_thread.is_alive()
+    assert not terminal.is_alive(tid)
+
+
 # ── 空闲/死进程回收(支持 WS 断开重连) ─────────────────────────
 
 def test_sweep_reaps_idle_but_keeps_fresh():
@@ -236,6 +410,25 @@ def test_sweep_reaps_exited_children_promptly(monkeypatch):
     # max_idle 很大:存活终端不受影响,但死进程必须被回收
     assert terminal.sweep_idle(max_idle=10 ** 9) >= 1
     assert all(t["id"] != tid for t in terminal.list_terms())
+
+
+def test_list_terms_refreshes_cached_child_liveness(monkeypatch):
+    state = {
+        "pid": 4321, "alive": True, "dead_ts": None,
+        "last_active": terminal.time.monotonic(), "label": "demo",
+        "lock": threading.Lock(),
+    }
+    monkeypatch.setattr(terminal.os, "waitpid", lambda pid, flags: (pid, 0))
+    with terminal._lock:
+        terminal._terms["stale"] = state
+    try:
+        listed = terminal.list_terms()
+    finally:
+        with terminal._lock:
+            terminal._terms.pop("stale", None)
+
+    assert listed[0]["id"] == "stale"
+    assert listed[0]["alive"] is False
 
 
 def test_sweep_respects_custom_ttl():

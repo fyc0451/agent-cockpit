@@ -154,6 +154,32 @@ def list_sessions() -> list[dict[str, Any]]:
     return sessions
 
 
+def _slim_layout(layout: dict[str, Any]) -> dict[str, Any]:
+    """精简 PaneLayoutSnapshot:zoom 状态 + pane 几何 + 水平分屏判定。"""
+    panes = []
+    for p in layout.get("panes") or []:
+        rect = p.get("rect") or {}
+        panes.append({
+            "pane_id": p.get("pane_id"),
+            "focused": p.get("focused", False),
+            "x": rect.get("x", 0),
+            "y": rect.get("y", 0),
+            "width": rect.get("width", 0),
+            "height": rect.get("height", 0),
+        })
+    ys = [p["y"] for p in panes]
+    return {
+        "tab_id": layout.get("tab_id"),
+        "workspace_id": layout.get("workspace_id"),
+        "zoomed": bool(layout.get("zoomed", False)),
+        "focused_pane_id": layout.get("focused_pane_id"),
+        "panes": panes,
+        # 同一 y 上有 ≥2 个 pane 即左右水平分屏(窄屏需单 pane 聚焦的场景)
+        "horizontal_split": len(panes) > 1 and len(set(ys)) < len(ys),
+        "area": layout.get("area") or {},
+    }
+
+
 def _snapshot_session(session: str) -> dict[str, Any]:
     """取单个 session 的 snapshot,返回精简后的 {panes, agents}。"""
     try:
@@ -198,6 +224,10 @@ def _snapshot_session(session: str) -> dict[str, Any]:
         "panes": slim,
         "agents": snap.get("agents", []),
         "focused_pane_id": snap.get("focused_pane_id"),
+        # 各 tab 的 zoom 状态与几何(窄屏 attach 判断单 pane 聚焦用)
+        "layouts": [
+            _slim_layout(l) for l in snap.get("layouts", []) if isinstance(l, dict)
+        ],
     }
 
 
@@ -230,7 +260,10 @@ def pane_read(session: str, pane_id: str, lines: int = 100, is_agent: bool = Fal
     try:
         if is_agent:
             # agent read:位置参数 pane_id,--session 全局前置
-            out = _run(["--session", session, "agent", "read", pane_id], timeout=8)
+            out = _run(
+                ["--session", session, "agent", "read", pane_id, "--lines", str(lines)],
+                timeout=8,
+            )
         else:
             out = _run(
                 ["--session", session, "pane", "read", pane_id, "--lines", str(lines)],
@@ -281,6 +314,93 @@ def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, A
     }
 
 
+def _parse_data_json(out: str) -> dict[str, Any] | None:
+    """解析 herdr CLI 输出:SSE `data:` 行优先,否则按整体 JSON。失败返回 None。"""
+    raw = out
+    for line in out.splitlines():
+        if line.startswith("data:"):
+            raw = line[5:].strip()
+            break
+    try:
+        data = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def pane_layout(session: str, pane_id: str | None = None) -> dict[str, Any]:
+    """查询 pane 所在 tab 的布局:zoom 状态与 pane 几何。
+
+    窄屏(手机)attach 水平分屏时做单 pane 聚焦判断的依据:
+      zoomed            当前 tab 是否已有 zoom 的 pane(还原/不重复 zoom 用)
+      focused_pane_id   当前焦点 pane(zoom 默认目标)
+      horizontal_split  同一 y 上有 ≥2 个 pane(左右水平分屏)
+    pane_id 省略时查询 UI 焦点 pane 所在 tab。
+    """
+    if not is_available():
+        return {"available": False}
+    args = ["--session", session, "pane", "layout"]
+    if pane_id:
+        args += ["--pane", pane_id]
+    try:
+        out = _run(args, timeout=8)
+    except RuntimeError as e:
+        return {"available": True, "error": str(e)}
+    data = _parse_data_json(out)
+    if not data:
+        return {"available": True, "error": "pane layout 输出解析失败"}
+    result = data.get("result", data)
+    layout = result.get("layout", result)
+    if not isinstance(layout.get("panes"), list):
+        return {"available": True, "error": "pane layout 输出缺少 panes"}
+    return {"available": True, "session": session, **_slim_layout(layout)}
+
+
+def pane_zoom(
+    session: str, pane_id: str | None = None, mode: str = "on",
+) -> dict[str, Any]:
+    """显式设置 pane zoom(窄屏 attach 聚焦单 pane、退出还原用)。
+
+    只接受显式 on/off(不用 toggle,避免并发/共享状态下语义漂移):
+    已是目标态时 herdr 返回 reason=already_zoomed/already_unzoomed 且
+    changed=False,幂等。pane_id 省略时作用于 UI 焦点 pane。
+    返回含 tab_id 与 horizontal_split(取自带回的 layout),便于调用方
+    识别并拒绝"用户已手动 zoom"的场景。失败降级 {available,error},不抛异常。
+    """
+    if not is_available():
+        return {"available": False}
+    if mode not in ("on", "off"):
+        return {"available": True, "error": f"非法 zoom mode(仅支持 on/off): {mode}"}
+    args = ["--session", session, "pane", "zoom"]
+    if pane_id:
+        args.append(pane_id)
+    args.append(f"--{mode}")
+    try:
+        out = _run(args, timeout=8)
+    except RuntimeError as e:
+        return {"available": True, "error": str(e)}
+    data = _parse_data_json(out)
+    if not data:
+        return {"available": True, "error": "pane zoom 输出解析失败"}
+    result = data.get("result", data)
+    zoom = result.get("zoom", result)
+    if "zoomed" not in zoom:
+        return {"available": True, "error": "pane zoom 输出缺少 zoomed"}
+    layout = zoom.get("layout")
+    slim = _slim_layout(layout) if isinstance(layout, dict) else {}
+    return {
+        "available": True,
+        "session": session,
+        "pane_id": zoom.get("pane_id"),
+        "zoomed": bool(zoom.get("zoomed")),
+        "changed": bool(zoom.get("zoom_changed", zoom.get("changed", False))),
+        "reason": zoom.get("reason"),
+        "focused_pane_id": zoom.get("focused_pane_id"),
+        "tab_id": slim.get("tab_id"),
+        "horizontal_split": slim.get("horizontal_split", False),
+    }
+
+
 def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> dict[str, Any]:
     """往 pane 发送。
 
@@ -307,6 +427,30 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
         return {"available": True, "error": str(e)}
 
 
+def _rename_agent_context(
+    session: str, pane: dict[str, Any], agent: str, layout: str,
+) -> None:
+    """把 Herdr 实际展示的 workspace/tab/pane 都改成可辨认名称。"""
+    pane_id = pane.get("pane_id")
+    tab_id = pane.get("tab_id")
+    workspace_id = pane.get("workspace_id")
+    commands = []
+    if pane_id:
+        commands.append(["--session", session, "pane", "rename", pane_id, agent])
+    if tab_id:
+        tab_label = agent if layout == "tab" else session
+        commands.append(["--session", session, "tab", "rename", tab_id, tab_label])
+    if workspace_id:
+        commands.append([
+            "--session", session, "workspace", "rename", workspace_id, session,
+        ])
+    for command in commands:
+        try:
+            _run(command, timeout=5)
+        except RuntimeError:
+            pass
+
+
 def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
     layout: str = "right",
@@ -322,8 +466,18 @@ def start_agent(
     snap = _snapshot_session(session)
     existing = next((p for p in snap.get("panes", []) if p.get("agent") == agent), None)
     if existing:
-        return {"available": True, "pane_id": existing["pane_id"], "agent": agent,
-                "reused": True, "msg": f"{agent} pane 已存在({existing['pane_id']}),跳过"}
+        _rename_agent_context(session, existing, agent, layout)
+        result = {
+            "available": True,
+            "pane_id": existing["pane_id"],
+            "agent": agent,
+            "reused": True,
+            "msg": f"{agent} pane 已存在({existing['pane_id']}),跳过",
+        }
+        existing_cwd = existing.get("cwd") or existing.get("foreground_cwd")
+        if existing_cwd:
+            result["cwd"] = existing_cwd
+        return result
     agent_bin = _find_agent_bin(agent)
     if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
         return {"available": True, "error": f"{agent} 未安装或不在 PATH"}
@@ -332,6 +486,7 @@ def start_agent(
     try:
         # 根据 layout 开新 pane:right/down 用 split,tab 用 tab create
         new_pid = None
+        new_pane = None
         if layout == "tab":
             # 多页:每个 agent 一个新 tab
             tab_out = _run(
@@ -367,18 +522,20 @@ def start_agent(
             snap = _snapshot_session(session)
             panes = snap.get("panes", [])
             if panes:
-                new_pid = sorted(
+                new_pane = sorted(
                     panes, key=lambda p: _pane_sort_key(str(p.get("pane_id") or ""))
-                )[-1].get("pane_id")
+                )[-1]
+                new_pid = new_pane.get("pane_id")
         if not new_pid:
             return {"available": True, "error": "split/tab 后找不到新 pane"}
         # 用 pane run 启动 agent(完整路径 + shlex 安全分割)
         _run(["--session", session, "pane", "run", new_pid] + shlex.split(cmd_str), timeout=8)
-        # pane 命名成 agent 名(默认是序号,看板/TUI 里分不清);失败不影响启动
-        try:
-            _run(["--session", session, "pane", "rename", new_pid, agent], timeout=5)
-        except RuntimeError:
-            pass
+        if new_pane is None:
+            new_pane = next(
+                (p for p in _snapshot_session(session).get("panes", []) if p.get("pane_id") == new_pid),
+                {"pane_id": new_pid},
+            )
+        _rename_agent_context(session, new_pane, agent, layout)
         return {"available": True, "pane_id": new_pid, "agent": agent, "cmd": cmd_str}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
