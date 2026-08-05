@@ -597,6 +597,23 @@ def test_terminal_fit_never_resizes_pty_from_hidden_view():
     assert fit.index("xterm.cols===targetCols") < fit.index("fit.fit()")
 
 
+def test_terminal_first_show_refits_after_browser_layout_settles():
+    js = _inline_js()
+    show = js.split("function showTermInstance(id){", 1)[1].split(
+        "function termSwitch", 1
+    )[0]
+
+    assert "safeFitOf(inst.fit,inst.xterm)" in show
+    assert "requestAnimationFrame(()=>{" in show
+    assert "const current=TERM_INSTANCES[id]" in show
+    assert "if(!current||current!==inst||TERM_ID!==id)return" in show
+    assert "safeFitOf(current.fit,current.xterm)" in show
+    assert "current.xterm.refresh(0,current.xterm.rows-1)" in show
+    assert show.index("safeFitOf(inst.fit,inst.xterm)") < show.index(
+        "requestAnimationFrame(()=>{"
+    )
+
+
 def test_terminal_touch_scroll_is_js_driven():
     # 普通 scrollback 由 xterm 原生处理；鼠标上报或无 scrollback 的 alternate buffer
     # 由 enableTermTouchScroll 把单指拖动换算成 wheel 交给 TUI。

@@ -2245,6 +2245,15 @@ function showTermInstance(id){
   }
   XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;
   safeFitOf(inst.fit,inst.xterm);
+  // 首次挂载时 flex/WebGL 布局尚未稳定；下一帧按最终尺寸重算并强制重绘，
+  // 避免第一次进入 TUI 错位、必须切换第二次才恢复。
+  requestAnimationFrame(()=>{
+    const current=TERM_INSTANCES[id];
+    if(!current||current!==inst||TERM_ID!==id)return;
+    if(safeFitOf(current.fit,current.xterm)){
+      try{current.xterm.refresh(0,current.xterm.rows-1)}catch(e){}
+    }
+  });
   setTimeout(()=>{try{if(document.getElementById('view-term')?.classList.contains('active'))inst.xterm.focus()}catch(e){}},50);
 }
 function termSwitch(id){
