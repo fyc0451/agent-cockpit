@@ -281,7 +281,7 @@ header .spacer{flex:1}
 .setup-mode.active{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 13%,var(--bg3));color:var(--accent)}
 .setup-agent-list{display:flex;flex-direction:column;gap:8px;margin:7px 0}
 .setup-agent{border:1px solid var(--bd);border-radius:9px;background:var(--bg3);padding:10px}
-.setup-agent-head{display:grid;grid-template-columns:minmax(110px,.8fr) minmax(130px,1fr) auto;gap:7px;align-items:center;margin-bottom:7px}
+.setup-agent-head{display:grid;grid-template-columns:minmax(105px,.7fr) minmax(120px,.9fr) minmax(130px,1fr) auto;gap:7px;align-items:center;margin-bottom:7px}
 .setup-agent-task{display:grid;grid-template-columns:1fr minmax(120px,.38fr);gap:7px}
 .setup-agent-review{margin-top:7px;display:flex;align-items:center;gap:7px;font-size:12px}
 .setup-agent-review select{flex:1}
@@ -332,8 +332,9 @@ header .spacer{flex:1}
   .launch-bar{padding:6px 8px;gap:5px;max-height:42dvh;overflow:auto}
   .launch-bar .lbl,#boardInfo{display:none}
   .launch-bar select{flex:1;min-width:0}
-  .launch-bar input{order:2;flex-basis:100%;min-width:0!important}
-  .launch-bar button{order:3;flex:1}
+  .launch-bar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .launch-bar select,.launch-bar input,.launch-bar button{order:initial;width:100%;max-width:none!important;min-width:0!important}
+  #lnSession,#lnName,#lnWorkdir,.launch-bar button{grid-column:1 / -1}
   .term-toolbar{flex-wrap:wrap;padding:6px;gap:5px}
   .term-toolbar #termSelect{flex:1;min-width:120px!important}
   .term-help{display:none}
@@ -351,7 +352,9 @@ header .spacer{flex:1}
   .modal{max-height:92dvh;border-radius:13px 13px 0 0}
   .setup-modes{grid-template-columns:repeat(2,minmax(0,1fr))}
   .setup-agent-head,.setup-agent-task{grid-template-columns:1fr}
-  .setup-agent-head button{justify-self:end;margin-top:-40px}
+  .setup-agent{position:relative}
+  .setup-agent-head{padding-right:38px}
+  .setup-agent-head button{position:absolute;right:8px;top:8px;margin:0}
   #sessionsList{padding:6px!important}
   #sessionsList .card>div{flex-wrap:wrap}
   #sessionsList .card button{flex:0 1 auto}
@@ -415,13 +418,16 @@ header .spacer{flex:1}
   <!-- 启动栏(看板下方) -->
   <div class="launch-bar" id="launchBar">
     <span class="lbl" data-i18n="launch.label">🚀 启动</span>
-    <select id="lnSession"></select>
-    <select id="lnAgent">
+    <select id="lnSession" onchange="launchSessionChanged(true)"></select>
+    <select id="lnAgent" onchange="launchRefreshName(true)">
       <option value="codex">codex</option>
       <option value="kimi">kimi</option>
       <option value="qodercli">qoder</option>
     </select>
-    <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" style="flex:1;min-width:160px">
+    <input id="lnName" placeholder="实例名称 如 codex-2" aria-label="本地实例名称" oninput="this.dataset.auto='0'" style="max-width:155px">
+    <select id="lnLayout" aria-label="新 pane 位置"><option value="tab">新 tab</option><option value="right">右侧 pane</option><option value="down">下方 pane</option></select>
+    <select id="lnWorkspace" aria-label="工作目录策略"><option value="isolated">独立 worktree</option><option value="shared">共享目录</option></select>
+    <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" oninput="this.dataset.auto='0';launchPreselectAgent()" style="flex:1;min-width:160px">
     <button class="primary" onclick="startAgent()" data-i18n="launch.start">+ 新建 agent</button>
     <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
   </div>
@@ -725,6 +731,7 @@ let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null
 let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
 let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=null;
 let SERVICE_CLIPBOARD='';
+let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_CLOSE_TIMER=null, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
@@ -929,6 +936,7 @@ function applyEnabledAgents(){
     const cur=ln.value;
     ln.innerHTML=enabled.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
     ln.value=enabled.includes(cur)?cur:enabled[0];
+    launchRefreshName(true);
   }
 }
 // 启动栏:工作目录命中 dir_agents 时预选默认 agent
@@ -938,6 +946,19 @@ function launchPreselectAgent(){
   const a=(SETTINGS.dir_agents||{})[d];
   const ln=document.getElementById('lnAgent');
   if(a&&ln&&(SETTINGS.enabled_agents||[]).includes(a))ln.value=a;
+  launchRefreshName(false);
+}
+function launchRefreshName(force=false){
+  const input=document.getElementById('lnName');if(!input)return;
+  if(!force&&input.dataset.auto==='0')return;
+  const session=document.getElementById('lnSession')?.value||'';
+  const agent=document.getElementById('lnAgent')?.value||'codex';
+  const panes=(BOARD?.panes||[]).filter(p=>p.session===session&&p.agent===agent);
+  const used=new Set();let legacy=0;
+  panes.forEach(p=>{const label=String(p.label||'').trim();if(label&&label!==agent)used.add(label.toLowerCase());else legacy++});
+  for(let i=1;i<=legacy;i++)used.add(`${agent}-${i}`.toLowerCase());
+  let index=1,name='';do{name=`${agent}-${index++}`}while(used.has(name.toLowerCase()));
+  input.value=name;input.dataset.auto='1';
 }
 
 
@@ -1213,6 +1234,7 @@ async function refreshBoard(){
     const d=await api('/api/herdr/snapshot');
     BOARD=d;
     renderBoard(d);
+    launchSessionChanged(false);
   }catch(e){
     document.getElementById('boardInfo').textContent='加载失败';
     toast('看板加载失败: '+e);
@@ -1513,21 +1535,41 @@ async function loadSessions(){
   try{
     const d=await api('/api/herdr/sessions');
     const sel=document.getElementById('lnSession');
+    const selected=sel.value;
     const running=(d.sessions||[]).filter(s=>s.status==='running');
     TERM_SESSION_CATALOG=running.filter(s=>validSessionName(s.name)).map(s=>s.name);
+    LAUNCH_SESSION_DIRS=Object.fromEntries(running.map(s=>[s.name,s.directory||'']));
     renderTermOptions();
     sel.innerHTML=(d.sessions||[]).map(s=>`<option value="${esc(s.name)}" ${s.status==='running'?'':'disabled'}>${esc(s.name)}${s.status==='running'?'':' (停)'}</option>`).join('');
+    if(selected&&[...sel.options].some(o=>o.value===selected&&!o.disabled))sel.value=selected;
+    launchSessionChanged(false);
   }catch(e){}
+}
+function launchSessionChanged(forceDir=false){
+  launchRefreshName(forceDir);
+  const input=document.getElementById('lnWorkdir');
+  if(!input||(!forceDir&&input.dataset.auto==='0'))return;
+  const session=document.getElementById('lnSession')?.value||'';
+  const paneDir=(BOARD?.panes||[]).find(p=>p.session===session&&p.agent&&p.cwd)?.cwd||'';
+  const sessionDir=LAUNCH_SESSION_DIRS[session]||'';
+  const workdir=paneDir||(/\/\.config\/herdr\/sessions(?:\/|$)/.test(sessionDir)?'':sessionDir);
+  input.value=workdir;input.dataset.auto='1';launchPreselectAgent();
 }
 async function startAgent(){
   const session=document.getElementById('lnSession').value;
   const agent=document.getElementById('lnAgent').value;
+  const name=document.getElementById('lnName').value.trim();
+  const layout=document.getElementById('lnLayout').value;
+  const workspace=document.getElementById('lnWorkspace').value;
   const workdir=document.getElementById('lnWorkdir').value.trim();
   if(!session){toast(t('launch.nosession','还没有 session,先创建一个工作区'));showSetupModal();return}
   if(!workdir){toast('填工作目录');return}
+  if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name)){toast('实例名称只能包含字母、数字、_、-，最长 32 位');return}
+  const sharedPeers=(BOARD?.panes||[]).filter(p=>p.session===session&&p.cwd===workdir&&p.label!==name);
+  if(workspace==='shared'&&sharedPeers.length&&!confirm(`当前目录已被 ${sharedPeers.length} 个 pane 使用。继续会共享工作目录，并发写入可能冲突；是否继续？`))return;
   try{
-    const r=await api('/api/herdr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agent})});
-    if(r.error)toast('启动: '+r.error);else{toast('已启动 '+agent+' @ '+session);setTimeout(refreshBoard,1500)}
+    const r=await api('/api/herdr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agent,name,layout,workspace})});
+    if(r.error)toast('启动: '+r.error);else{toast((r.reused?'已复用 ':'已启动 ')+name+' ['+agent+'] @ '+session+(r.workspace?.strategy==='isolated'?' · 独立 worktree':''));setTimeout(async()=>{await refreshBoard();launchRefreshName(true)},1500)}
   }catch(e){toast('启动失败: '+e)}
 }
 
@@ -2415,9 +2457,16 @@ function setupKnownAgents(){
   const enabled=SETTINGS?.enabled_agents||known;
   return known.filter(a=>enabled.includes(a));
 }
+function setupNextAgentName(agent,excludeId=null){
+  const used=new Set(SETUP_PARTICIPANTS.filter(p=>p.id!==excludeId).map(p=>String(p.name||'').toLowerCase()));
+  let index=1,name='';
+  do{name=`${agent}-${index++}`}while(used.has(name.toLowerCase()));
+  return name;
+}
 function setupParticipant(agent,role,task,reviewTarget=null){
   SETUP_AGENT_SEQ++;
-  return {id:'agent-'+SETUP_AGENT_SEQ,agent,role,task,workspace:'auto',review_target:reviewTarget};
+  const id='agent-'+SETUP_AGENT_SEQ;
+  return {id,name:setupNextAgentName(agent),agent,role,task,workspace:'auto',review_target:reviewTarget};
 }
 function setupMode(mode){
   SETUP_MODE=mode;
@@ -2452,9 +2501,10 @@ function renderSetupAgents(){
   const el=document.getElementById('suAgentsList');
   el.innerHTML=SETUP_PARTICIPANTS.map(p=>{
     const targets=SETUP_PARTICIPANTS.filter(x=>x.id!==p.id&&['lead','developer'].includes(x.role));
-    const review=p.role==='reviewer'?`<div class="setup-agent-review"><span>复核对象</span><select data-id="${esc(p.id)}" data-field="review_target"><option value="">自动分配</option>${targets.map(x=>`<option value="${esc(x.id)}"${x.id===p.review_target?' selected':''}>${esc(x.agent)} · ${esc(SETUP_ROLE_LABELS[x.role])}</option>`).join('')}</select></div>`:'';
+    const review=p.role==='reviewer'?`<div class="setup-agent-review"><span>复核对象</span><select data-id="${esc(p.id)}" data-field="review_target"><option value="">自动分配</option>${targets.map(x=>`<option value="${esc(x.id)}"${x.id===p.review_target?' selected':''}>${esc(x.name)} · ${esc(x.agent)} · ${esc(SETUP_ROLE_LABELS[x.role])}</option>`).join('')}</select></div>`:'';
     return `<div class="setup-agent">
       <div class="setup-agent-head">
+        <input data-id="${esc(p.id)}" data-field="name" value="${esc(p.name)}" placeholder="实例名称" aria-label="实例名称">
         <select data-id="${esc(p.id)}" data-field="agent" aria-label="Agent">${setupAgentOptions(p.agent)}</select>
         <select data-id="${esc(p.id)}" data-field="role" aria-label="角色">${setupRoleOptions(p.role)}</select>
         <button class="icon" data-action="setupRemove" data-id="${esc(p.id)}" title="移除 Agent"${SETUP_PARTICIPANTS.length===1?' disabled':''}>✕</button>
@@ -2469,12 +2519,10 @@ function renderSetupAgents(){
 }
 function setupFieldChanged(input){
   const p=SETUP_PARTICIPANTS.find(x=>x.id===input.dataset.id);if(!p)return;
-  const old=p[input.dataset.field];
   p[input.dataset.field]=input.value;
-  if(input.dataset.field==='agent'&&SETUP_PARTICIPANTS.some(x=>x.id!==p.id&&x.agent===p.agent)){
-    p.agent=old;toast('同一种 Agent 暂时只能添加一次');renderSetupAgents();return;
+  if(input.dataset.field==='agent'){
+    p.name=setupNextAgentName(p.agent,p.id);renderSetupAgents();return
   }
-  if(input.dataset.field==='agent'){renderSetupAgents();return}
   if(input.dataset.field==='role'){
     p.review_target=p.role==='reviewer'?(SETUP_PARTICIPANTS.find(x=>x.id!==p.id&&['lead','developer'].includes(x.role))?.id||null):null;
     SETUP_MODE='custom';
@@ -2484,8 +2532,9 @@ function setupFieldChanged(input){
   renderSetupPreview();
 }
 function setupAddAgent(){
-  const agent=setupKnownAgents().find(a=>!SETUP_PARTICIPANTS.some(p=>p.agent===a));
-  if(!agent){toast('没有更多已启用的 Agent');return}
+  const known=setupKnownAgents(),last=SETUP_PARTICIPANTS[SETUP_PARTICIPANTS.length-1];
+  const agent=last?.agent||known[0];
+  if(!agent){toast('没有已启用的 Agent');return}
   SETUP_MODE='custom';
   SETUP_PARTICIPANTS.push(setupParticipant(agent,'developer',''));
   document.querySelectorAll('#suModeChoices [data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode==='custom'));
@@ -2507,7 +2556,8 @@ function setupErrors(){
   if(!workdir)errors.push('请填写工作目录');
   if(!session)errors.push('请填写 session 名');else if(!validSessionName(session))errors.push('session 名只能包含字母、数字、_、-');
   if(!SETUP_PARTICIPANTS.length)errors.push('至少添加一个 Agent');
-  if(new Set(SETUP_PARTICIPANTS.map(p=>p.agent)).size!==SETUP_PARTICIPANTS.length)errors.push('同一种 Agent 不能重复');
+  if(SETUP_PARTICIPANTS.some(p=>!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(p.name||'')))errors.push('实例名称只能包含字母、数字、_、-，最长 32 位');
+  if(new Set(SETUP_PARTICIPANTS.map(p=>(p.name||'').toLowerCase())).size!==SETUP_PARTICIPANTS.length)errors.push('实例名称不能重复');
   if(SETUP_PARTICIPANTS.some(p=>!p.task.trim()))errors.push('请填写每个 Agent 的真实任务');
   if(SETUP_MODE==='develop_review'&&(!writers.length||!SETUP_PARTICIPANTS.some(p=>p.role==='reviewer')))errors.push('开发 + 复核需要开发者和 Reviewer');
   if(SETUP_MODE==='parallel'&&writers.length<2)errors.push('并行开发至少需要两名写入者');
@@ -2557,7 +2607,7 @@ function renderSetupPreview(){
     if(p.role==='reviewer'&&strategy==='isolated')strategy='review';
     if(strategy==='review')reviews++;else if(strategy==='isolated')isolated++;else shared++;
     const label=strategy==='review'?'固定版本复核目录':strategy==='isolated'?'独立 worktree':'共享项目目录';
-    return `<div><b>${esc(p.agent)}</b> · ${esc(SETUP_ROLE_LABELS[p.role])} → ${label}</div>`;
+    return `<div><b>${esc(p.name)}</b> <span class="muted">[${esc(p.agent)}]</span> · ${esc(SETUP_ROLE_LABELS[p.role])} → ${label}</div>`;
   }).join('');
   const errors=setupErrors();
   const gitHint=inspect?.dirty?'<div style="color:var(--need)">⚠ 当前 Git 项目有未提交改动；新 worktree 不包含这些改动。</div>':nonGit&&!errors.some(e=>e.includes('不是 Git 仓库'))?'<div class="muted">当前目录不是 Git 仓库，自动改为共享工作目录。</div>':'';
@@ -2597,10 +2647,10 @@ async function doSetupWorkspace(){
       setupSucceeded=true;
       const mail=r.agent_mail||{};
       const mailText=r.registered?'已注册':(mail.available===false?'未启用，已跳过':'未注册');
-      const started=(r.started||[]).map(esc).join(', ');
-      const reused=(r.reused||[]).map(esc).join(', ');
+      const started=(r.started_instances||r.started||[]).map(esc).join(', ');
+      const reused=(r.reused_instances||r.reused||[]).map(esc).join(', ');
       const notified=(r.notified||[]).map(esc).join(', ');
-      const workspaces=(r.workspaces||[]).map(w=>`${esc(w.agent)}: ${esc(w.strategy)} · <code>${esc(w.workdir)}</code>`).join('<br>');
+      const workspaces=(r.workspaces||[]).map(w=>`${esc(w.name||w.agent)} [${esc(w.agent)}]: ${esc(w.strategy)} · <code>${esc(w.workdir)}</code>`).join('<br>');
       const warnings=(r.warnings||[]).map(w=>'⚠ '+esc(w)).join('<br>');
       const readyText=r.idempotent?'✅ 工作区已在运行':'✅ 工作区就绪';
       res.innerHTML='<span style="color:var(--done)">'+readyText+'</span><br>启动: '+(started||'无')+(reused?'<br>复用: '+reused:'')+(workspaces?'<br>'+workspaces:'')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'')+(warnings?'<br><span style="color:var(--need)">'+warnings+'</span>':'');
@@ -2608,7 +2658,7 @@ async function doSetupWorkspace(){
       toast(r.idempotent?'工作区已在运行':'工作区就绪 ✓');
       SETUP_CLOSE_TIMER=setTimeout(()=>{SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;closeSetup();renderSetupPreview();loadSessionsView()},3500);
     }else{
-      const failed=(r.failed||[]).map(x=>esc(x.agent)+': '+esc(x.error)).join('<br>');
+      const failed=(r.failed_instances||r.failed||[]).map(x=>esc(x.name||x.agent)+': '+esc(x.error)).join('<br>');
       const terminalOutput=r.terminal_output?'<br>终端输出: <code>'+esc(r.terminal_output)+'</code>':'';
       const onboarding=r.code==='herdr_onboarding_required'
         ?`<br><button class="primary sm" data-action="setupHerdrOnboarding" data-command="${esc(r.herdr_command||'herdr')}" style="margin-top:8px">打开终端配置 Herdr</button>`:'';
@@ -2787,7 +2837,7 @@ async function mmReply(){/* TODO */}
 function connectSSE(){
   if(SSE)SSE.close();
   SSE=new EventSource('/api/events',{withCredentials:true});
-  SSE.addEventListener('board',e=>{const d=JSON.parse(e.data);BOARD=d;renderBoard(d)});
+  SSE.addEventListener('board',e=>{const d=JSON.parse(e.data);BOARD=d;renderBoard(d);launchSessionChanged(false)});
   SSE.addEventListener('attention',e=>loadAttention(JSON.parse(e.data)));
   SSE.onerror=()=>{document.getElementById('liveDot').classList.add('off');setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)};
 }
@@ -3008,7 +3058,7 @@ function bindDelegation(){
   const setupList=document.getElementById('suAgentsList');
   if(setupList){
     setupList.addEventListener('change',e=>{const it=e.target.closest('[data-field]');if(it)setupFieldChanged(it)});
-    setupList.addEventListener('input',e=>{const it=e.target.closest('[data-field="task"]');if(it)setupFieldChanged(it)});
+    setupList.addEventListener('input',e=>{const it=e.target.closest('[data-field="task"],[data-field="name"]');if(it)setupFieldChanged(it)});
   }
   document.getElementById('suWorkdir')?.addEventListener('input',setupWorkdirChanged);
   document.getElementById('suSession')?.addEventListener('input',setupSessionChanged);
@@ -3041,7 +3091,6 @@ async function init(){
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
   applyLang();
   loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
-  document.getElementById('lnWorkdir').addEventListener('input',launchPreselectAgent);
   document.addEventListener('visibilitychange',recoverPageState);
   window.addEventListener('focus',recoverPageState);
   window.addEventListener('pageshow',recoverPageState);

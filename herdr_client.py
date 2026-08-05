@@ -465,16 +465,20 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
 
 def _rename_agent_context(
     session: str, pane: dict[str, Any], agent: str, layout: str,
+    label: str | None = None,
 ) -> None:
     """把 Herdr 实际展示的 workspace/tab/pane 都改成可辨认名称。"""
     pane_id = pane.get("pane_id")
     tab_id = pane.get("tab_id")
     workspace_id = pane.get("workspace_id")
+    display_name = label or agent
     commands = []
     if pane_id:
-        commands.append(["--session", session, "pane", "rename", pane_id, agent])
+        commands.append([
+            "--session", session, "pane", "rename", pane_id, display_name,
+        ])
     if tab_id:
-        tab_label = agent if layout == "tab" else session
+        tab_label = display_name if layout == "tab" else session
         commands.append(["--session", session, "tab", "rename", tab_id, tab_label])
     if workspace_id:
         commands.append([
@@ -489,7 +493,7 @@ def _rename_agent_context(
 
 def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
-    layout: str = "tab",
+    layout: str = "tab", label: str | None = None,
 ) -> dict[str, Any]:
     """在指定 session 里启动一个 agent pane(新建 window/pane 跑 agent)。
 
@@ -515,15 +519,39 @@ def start_agent(
         except OSError:
             return Path(cwd).expanduser().absolute() == target_dir
 
-    existing = next(
-        (
-            p for p in snap.get("panes", [])
-            if p.get("agent") == agent and matching_cwd(p)
-        ),
-        None,
-    )
+    panes = snap.get("panes", [])
+    matching = [
+        p for p in panes
+        if p.get("agent") == agent and matching_cwd(p)
+    ]
+    if label:
+        existing = next((p for p in matching if p.get("label") == label), None)
+        if existing is None:
+            collision = next(
+                (
+                    p for p in panes
+                    if str(p.get("label") or "").casefold() == label.casefold()
+                ),
+                None,
+            )
+            if collision:
+                return {
+                    "available": True,
+                    "error": f"实例名称已被 pane {collision.get('pane_id')} 使用: {label}",
+                }
+            # 兼容升级前没有实例标签的单 pane：首次使用新 UI 时认领并改名。
+            # 仅自动生成的 `<agent>-1` 可以认领；用户显式填写其他名称时
+            # 语义一定是新实例。多个无标签候选也无法安全区分。
+            legacy = [p for p in matching if p.get("label") in (None, "", agent)]
+            existing = (
+                legacy[0]
+                if label.casefold() == f"{agent}-1".casefold() and len(legacy) == 1
+                else None
+            )
+    else:
+        existing = matching[0] if matching else None
     if existing:
-        _rename_agent_context(session, existing, agent, layout)
+        _rename_agent_context(session, existing, agent, layout, label)
         result = {
             "available": True,
             "pane_id": existing["pane_id"],
@@ -534,6 +562,8 @@ def start_agent(
         existing_cwd = existing.get("cwd") or existing.get("foreground_cwd")
         if existing_cwd:
             result["cwd"] = existing_cwd
+        if label:
+            result["label"] = label
         return result
     agent_bin = _find_agent_bin(agent)
     if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
@@ -631,15 +661,18 @@ def start_agent(
                     # pane 命名成 agent 名，tab/workspace 也改成可辨认名称
                     # (默认是序号,看板/TUI 里分不清);失败不影响启动
                     _rename_agent_context(
-                        session, confirmed_pane, agent, effective_layout
+                        session, confirmed_pane, agent, effective_layout, label
                     )
-                    return {
+                    result = {
                         "available": True,
                         "pane_id": new_pid,
                         "agent": agent,
                         "cmd": cmd_str,
                         "layout": effective_layout,
                     }
+                    if label:
+                        result["label"] = label
+                    return result
                 break
             time.sleep(AGENT_POLL_INTERVAL)
         if saw_agent:

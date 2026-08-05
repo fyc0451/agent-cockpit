@@ -373,11 +373,15 @@ class StartAgentReq(BaseModel):
     workdir: str
     agent: str = "codex"  # codex | kimi | qodercli
     model: str | None = None
+    name: str | None = None  # 工作区内唯一的本地实例名；为空时保留旧版复用语义
+    layout: str = "tab"
+    workspace: str = "shared"  # shared(兼容旧调用) | isolated(新建/复用 worktree)
 
 
 class WorkspaceParticipantReq(BaseModel):
     """协作工作区里的一个 Agent。"""
     id: str = ""
+    name: str = ""  # 当前 Herdr 工作区内唯一的本地实例名
     agent: str
     role: str = "developer"
     task: str = ""
@@ -1508,13 +1512,75 @@ def api_herdr_pane_send(session: str, pane_id: str, req: PaneSendReq):
     return herdr_client.pane_send(session, pane_id, req.text, req.mode)
 
 
-@app.post("/api/herdr/start")
-def api_herdr_start(req: StartAgentReq):
-    """在 session 里启动一个 agent pane。"""
-    _validate_session_name(req.session)
+def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     if req.agent not in VALID_AGENTS:
         raise HTTPException(400, f"不支持的 agent: {req.agent}")
-    return herdr_client.start_agent(req.session, req.workdir, req.agent, req.model)
+    if req.layout not in VALID_LAYOUTS:
+        raise HTTPException(400, f"不支持的布局: {req.layout}")
+    if req.workspace not in {"shared", "isolated"}:
+        raise HTTPException(400, f"不支持的工作目录策略: {req.workspace}")
+    name = req.name.strip() if req.name else None
+    if name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
+        raise HTTPException(400, "实例名称只能包含字母、数字、_、-，最长 32 位")
+    project_dir = Path(req.workdir).expanduser().resolve()
+    workspace: dict[str, Any] = {
+        "strategy": "shared", "workdir": str(project_dir),
+    }
+    git_root = None
+    if req.workspace == "isolated":
+        if not name:
+            raise HTTPException(400, "创建独立 worktree 时必须填写实例名称")
+        git_root, source_dir = _worktree_source(project_dir)
+        if not git_root or not source_dir:
+            raise HTTPException(400, "该目录不是 Git 仓库，不能创建独立 worktree")
+        participant = WorkspaceParticipantReq(
+            id=name, name=name, agent=req.agent, role="developer",
+            task="", workspace="isolated",
+        )
+        try:
+            workspace = _ensure_worktree(
+                git_root, source_dir, req.session, participant, 0,
+                detached=False, slug=name,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, f"创建 {name} worktree 失败: {exc}") from exc
+
+    try:
+        result = herdr_client.start_agent(
+            req.session, workspace["workdir"], req.agent, req.model,
+            layout=req.layout, label=name,
+        )
+    except Exception as exc:
+        cleanup_errors = (
+            _rollback_worktrees(git_root, [workspace])
+            if git_root and workspace.get("created") else []
+        )
+        detail = f"启动 {name or req.agent} 失败: {exc}"
+        if cleanup_errors:
+            detail += "；回滚异常: " + "；".join(cleanup_errors)
+        raise HTTPException(500, detail) from exc
+    result["workspace"] = workspace
+    launch_failed = bool(result.get("error")) or result.get("available", True) is False
+    if launch_failed and git_root and workspace.get("created"):
+        cleanup_errors = _rollback_worktrees(git_root, [workspace])
+        result["worktree_rolled_back"] = not cleanup_errors
+        if cleanup_errors:
+            result["rollback_errors"] = cleanup_errors
+    return result
+
+
+@app.post("/api/herdr/start")
+def api_herdr_start(req: StartAgentReq):
+    """在 session 里串行启动一个 agent pane。"""
+    _validate_session_name(req.session)
+    with _SETUP_WORKSPACE_LOCKS_GUARD:
+        lock = _SETUP_WORKSPACE_LOCKS.setdefault(req.session, threading.Lock())
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, f"session {req.session} 正在变更，请勿重复提交")
+    try:
+        return _start_agent(req)
+    finally:
+        lock.release()
 
 
 @app.post("/api/herdr/pane/{session}/{pane_id}/restart")
@@ -1592,6 +1658,25 @@ def _git_common_dir(workdir: Path) -> Path | None:
             return (path if path.is_absolute() else workdir / path).resolve()
         except ValueError:
             return None
+
+
+def _worktree_source(project_dir: Path) -> tuple[Path | None, Path | None]:
+    """把任意 checkout 中的目录映射回主仓库，避免在 managed worktree 里再嵌套。"""
+    checkout_root = _git_root(project_dir)
+    if not checkout_root:
+        return None, None
+    common_dir = _git_common_dir(project_dir)
+    if common_dir and common_dir.name == ".git":
+        primary_root = common_dir.parent.resolve()
+        try:
+            relative = project_dir.relative_to(checkout_root)
+        except ValueError:
+            relative = None
+        if relative is not None:
+            primary_project_dir = (primary_root / relative).resolve()
+            if primary_project_dir.is_dir():
+                return primary_root, primary_project_dir
+    return checkout_root, project_dir
 
 
 def _canonical_mail_project(workdir: Path) -> str:
@@ -1790,18 +1875,46 @@ def _bind_mail_project(
 
 def _ensure_worktree(
     git_root: Path, project_dir: Path, session: str, participant: WorkspaceParticipantReq,
-    index: int, detached: bool,
+    index: int, detached: bool, slug: str | None = None,
+    legacy_slug: str | None = None,
 ) -> dict[str, Any]:
     """创建或复用 Cockpit 管理的 worktree，返回实际工作目录。"""
-    slug = f"{index + 1}-{participant.agent}"
+    slug = slug or f"{index + 1}-{participant.agent}"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", slug):
+        raise ValueError(f"无效的 worktree 名称: {slug}")
     base = git_root.parent / f".{git_root.name}-cockpit-worktrees" / session
-    target = (base / slug).resolve()
     _git(git_root, "worktree", "prune")
     listed = _git(git_root, "worktree", "list", "--porcelain")
     registered = {
         Path(line.removeprefix("worktree ")).resolve()
         for line in listed.splitlines() if line.startswith("worktree ")
     }
+    target = (base / slug).resolve()
+    named_branch = f"agent-cockpit/{session}/{slug}"
+    named_branch_exists = not detached and subprocess.run(
+        [
+            "git", "-C", str(git_root), "show-ref", "--verify", "--quiet",
+            f"refs/heads/{named_branch}",
+        ],
+        timeout=10,
+    ).returncode == 0
+    if legacy_slug and legacy_slug != slug:
+        legacy_target = (base / legacy_slug).resolve()
+        legacy_branch = f"agent-cockpit/{session}/{legacy_slug}"
+        legacy_branch_exists = not detached and subprocess.run(
+            [
+                "git", "-C", str(git_root), "show-ref", "--verify", "--quiet",
+                f"refs/heads/{legacy_branch}",
+            ],
+            timeout=10,
+        ).returncode == 0
+        if (
+            target not in registered and not target.exists()
+            and not named_branch_exists
+            and (legacy_target in registered or legacy_branch_exists)
+        ):
+            slug = legacy_slug
+            target = legacy_target
     reused = target in registered
     branch = None if detached else f"agent-cockpit/{session}/{slug}"
     branch_exists = bool(branch) and subprocess.run(
@@ -1880,8 +1993,6 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         raise HTTPException(400, "至少选择一个 agent")
     if any(p.agent not in VALID_AGENTS for p in participants):
         raise HTTPException(400, "agents 包含不支持的类型")
-    if len({p.agent for p in participants}) != len(participants):
-        raise HTTPException(400, "同一种 agent 暂时只能添加一次")
     if any(p.role not in VALID_WORKSPACE_ROLES for p in participants):
         raise HTTPException(400, "participants 包含不支持的角色")
     if any(p.workspace not in VALID_WORKSPACE_STRATEGIES for p in participants):
@@ -1890,13 +2001,22 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         raise HTTPException(400, "请填写每个 Agent 的真实任务")
 
     ids = []
+    names = []
+    agent_counts: dict[str, int] = {}
     for i, p in enumerate(participants):
         pid = p.id or f"agent-{i + 1}"
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", pid):
             raise HTTPException(400, f"无效的 participant id: {pid}")
         ids.append(pid)
+        agent_counts[p.agent] = agent_counts.get(p.agent, 0) + 1
+        name = p.name.strip() or f"{p.agent}-{agent_counts[p.agent]}"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
+            raise HTTPException(400, f"无效的实例名称: {name}")
+        names.append(name)
     if len(set(ids)) != len(ids):
         raise HTTPException(400, "participant id 不能重复")
+    if len({name.casefold() for name in names}) != len(names):
+        raise HTTPException(400, "实例名称不能重复")
     roles_by_id = {pid: p.role for p, pid in zip(participants, ids)}
     for p, pid in zip(participants, ids):
         if p.review_target and (p.review_target not in ids or p.review_target == pid):
@@ -1931,7 +2051,7 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
 
     plans = []
     created_workspaces: list[dict[str, Any]] = []
-    for index, (participant, pid) in enumerate(zip(participants, ids)):
+    for index, (participant, pid, name) in enumerate(zip(participants, ids, names)):
         strategy = participant.workspace
         if strategy == "auto":
             if participant.role == "reviewer":
@@ -1950,7 +2070,8 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
             try:
                 workspace = _ensure_worktree(
                     git_root, project_dir, req.session, participant, index,
-                    detached=strategy == "review",
+                    detached=strategy == "review", slug=name,
+                    legacy_slug=f"{index + 1}-{participant.agent}",
                 )
             except ValueError as exc:
                 cleanup_errors = _rollback_worktrees(git_root, created_workspaces)
@@ -1970,6 +2091,7 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
                 )
         plans.append({
             "id": pid,
+            "name": name,
             "agent": participant.agent,
             "role": participant.role,
             "task": participant.task.strip(),
@@ -1984,9 +2106,13 @@ def _workspace_briefing(
     coordination_context: dict[str, Any] | None = None,
 ) -> str:
     role_labels = {"lead": "负责人/开发", "developer": "开发", "reviewer": "Reviewer", "researcher": "调研"}
-    coworkers = "、".join(f"{p['agent']}({role_labels[p['role']]})" for p in plans if p["id"] != plan["id"])
+    coworkers = "、".join(
+        f"{p['name']}[{p['agent']}]({role_labels[p['role']]})"
+        for p in plans if p["id"] != plan["id"]
+    )
     lines = [
         "[Agent Cockpit 工作区任务]",
+        f"你的本地实例: {plan['name']} ({plan['agent']})",
         f"你的角色: {role_labels[plan['role']]}",
         f"你的任务: {plan['task']}",
         f"工作目录策略: {plan['strategy']} ({plan['workdir']})",
@@ -1995,7 +2121,7 @@ def _workspace_briefing(
         lines.append(f"协作者: {coworkers}")
     if plan["role"] == "reviewer":
         target_plan = next((p for p in plans if p["id"] == plan.get("review_target")), None)
-        target = target_plan["agent"] if target_plan else "开发者"
+        target = target_plan["name"] if target_plan else "开发者"
         if plan["strategy"] == "review":
             lines.append(
                 f"复核对象: {target}。等待对方给出 commit SHA，在当前 detached worktree "
@@ -2241,15 +2367,21 @@ def _setup_workspace(req: SetupWorkspaceReq):
         warnings.append(f"通信项目绑定保存失败({mail_projects.STATE_PATH}): {exc}")
     results = []
     started = []
+    started_instances = []
     reused = []
+    reused_instances = []
     failed = []
+    failed_instances = []
     # 1. 为每个 agent 开 pane + 启动
     for plan in plans:
         agent_type = plan["agent"]
         r = herdr_client.start_agent(
             req.session, plan["workdir"], agent_type, layout=req.layout,
+            label=plan["name"],
         )
-        results.append({"agent": agent_type, "plan": plan, "start": r})
+        results.append({
+            "agent": agent_type, "name": plan["name"], "plan": plan, "start": r,
+        })
         error = r.get("error")
         if req.participants is not None and r.get("reused"):
             existing_cwd = r.get("cwd")
@@ -2259,6 +2391,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
             )
             if same_workdir:
                 reused.append(agent_type)
+                reused_instances.append(plan["name"])
             else:
                 error = f"session 中已存在 {agent_type}，无法应用新的工作目录"
         if r.get("available", True) is False:
@@ -2266,8 +2399,10 @@ def _setup_workspace(req: SetupWorkspaceReq):
         results[-1]["error"] = error
         if error:
             failed.append({"agent": agent_type, "error": error})
+            failed_instances.append({"name": plan["name"], "error": error})
         elif not r.get("reused"):
             started.append(agent_type)
+            started_instances.append(plan["name"])
             time.sleep(2)  # 等新 Agent 启动
     # 1.5 清理建 session 时 TUI 自带的空白 shell pane(至少一个 agent 在跑才清,避免空 session)
     closed_panes = []
@@ -2295,7 +2430,12 @@ def _setup_workspace(req: SetupWorkspaceReq):
             "id": plan["id"], "agent": plan["agent"], "role": plan["role"],
             "task": plan["task"], "workdir": plan["workdir"],
             "pane_id": pane_id,
-            "mail_name": _identity_name(canonical_project, plan["agent"]),
+            "local_name": plan["name"],
+            "mail_name": (
+                _identity_name(canonical_project, plan["agent"])
+                if sum(1 for p in plans if p["agent"] == plan["agent"]) == 1
+                else None
+            ),
         })
     if run_participants:
         try:
@@ -2307,10 +2447,11 @@ def _setup_workspace(req: SetupWorkspaceReq):
             warnings.append(f"可靠消息 run 建立失败: {exc}")
     # 2. 新版协作工作区向每个成功启动的 Agent 注入角色和任务。
     briefed = []
+    briefed_instances = []
     if req.participants is not None:
         for result in results:
             pane_id = result["start"].get("pane_id")
-            should_brief = result["agent"] in started
+            should_brief = result["plan"]["name"] in started_instances
             if result.get("error") or not should_brief or not pane_id:
                 continue
             plan = result["plan"]
@@ -2322,6 +2463,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 warnings.append(f"{plan['agent']} 的任务说明发送失败")
             else:
                 briefed.append(plan["agent"])
+                briefed_instances.append(plan["name"])
     # 3. 注册身份(am-init-project)
     reg_ok = False
     mail_status: dict[str, Any]
@@ -2346,35 +2488,40 @@ def _setup_workspace(req: SetupWorkspaceReq):
             mail_status = {"available": False, "reason": str(exc)}
     # 4. Agent Mail 注册成功后才查询身份并通知 pane。
     notified = []
-    sess = None
     if reg_ok:
         time.sleep(2)
-        snap = herdr_client.snapshot()
-        sess = next(
-            (s for s in snap.get("sessions", []) if s.get("session") == req.session),
-            None,
-        )
-    if sess:
+        duplicate_agent_types = {
+            plan["agent"] for plan in plans
+            if sum(1 for item in plans if item["agent"] == plan["agent"]) > 1
+        }
+        if duplicate_agent_types:
+            warnings.append(
+                "同类型多实例仅使用本地实例名，已跳过自动 Agent Mail 身份绑定: "
+                + "、".join(sorted(duplicate_agent_types))
+            )
         identities = {
             plan["agent"]: _identity_name(canonical_project, plan["agent"])
-            for plan in plans
+            for plan in plans if plan["agent"] not in duplicate_agent_types
         }
         roster = "；".join(
             f"{agent}={identity}"
             for agent, identity in identities.items() if identity
         )
-        for p in sess.get("panes", []):
-            atype = p.get("agent")
-            pid = p.get("pane_id")
-            if not atype or atype not in started or not pid:
+        for result in results:
+            plan = result["plan"]
+            atype = plan["agent"]
+            pid = result["start"].get("pane_id")
+            if (
+                result.get("error") or plan["name"] not in started_instances
+                or atype in duplicate_agent_types or not pid
+            ):
                 continue
             my_name = _identity_name(canonical_project, atype)
             if not my_name:
                 warnings.append(f"{atype} 身份未注册或已 retired，未发送身份告知")
                 continue
-            plan = next((item for item in plans if item["agent"] == atype), None)
             context = None
-            if coordination_run and plan:
+            if coordination_run:
                 coordination.bind_identity(
                     coordination_run["run_id"], plan["id"], my_name, pid
                 )
@@ -2390,9 +2537,12 @@ def _setup_workspace(req: SetupWorkspaceReq):
     return {
         "ok": not failed, "session": req.session, "workdir": req.workdir,
         "session_created": session_created, "session_started": session_started,
-        "started": started, "reused": reused, "failed": failed, "results": results,
+        "started": started, "started_instances": started_instances,
+        "reused": reused, "reused_instances": reused_instances,
+        "failed": failed, "failed_instances": failed_instances, "results": results,
         "idempotent": bool(reused and not started and not failed), "registered": reg_ok,
-        "notified": notified, "briefed": briefed, "agent_mail": mail_status,
+        "notified": notified, "briefed": briefed,
+        "briefed_instances": briefed_instances, "agent_mail": mail_status,
         "mode": req.mode, "workspaces": plans, "warnings": warnings,
         "closed_panes": closed_panes, "mail_project": canonical_project,
         "coordination": coordination_run,

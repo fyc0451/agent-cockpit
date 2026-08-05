@@ -220,6 +220,57 @@ def test_herdr_pane_send_rejects_unknown_mode(monkeypatch):
     assert response.status_code == 400
 
 
+def test_start_agent_accepts_unique_local_name_for_same_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {
+            "available": True, "pane_id": "w1:p3", "label": kwargs.get("label"),
+        },
+    )
+    client = TestClient(server.app)
+    headers = {"authorization": "Bearer secret"}
+
+    response = client.post(
+        "/api/herdr/start",
+        headers=headers,
+        json={
+            "session": "demo", "workdir": str(tmp_path), "agent": "codex",
+            "name": "codex-2", "layout": "right",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["label"] == "codex-2"
+    assert calls[0][1] == {"layout": "right", "label": "codex-2"}
+    assert client.post(
+        "/api/herdr/start",
+        headers=headers,
+        json={
+            "session": "demo", "workdir": str(tmp_path), "agent": "codex",
+            "name": "bad name",
+        },
+    ).status_code == 400
+    assert client.post(
+        "/api/herdr/start",
+        headers=headers,
+        json={
+            "session": "demo", "workdir": str(tmp_path), "agent": "codex",
+            "name": "codex-2", "workspace": "unexpected",
+        },
+    ).status_code == 400
+    assert client.post(
+        "/api/herdr/start",
+        headers=headers,
+        json={
+            "session": "demo", "workdir": str(tmp_path), "agent": "codex",
+            "workspace": "isolated",
+        },
+    ).status_code == 400
+
+
 def test_herdr_read_routes_reject_unbounded_line_counts(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     client = TestClient(server.app)

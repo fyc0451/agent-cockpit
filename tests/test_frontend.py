@@ -348,6 +348,39 @@ def test_setup_workspace_requires_real_tasks_and_keeps_success_locked():
     assert "SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;renderSetupPreview()" in js
 
 
+def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
+    js = _inline_js()
+    fields = js.split("function renderSetupAgents(){", 1)[1].split(
+        "function setupFieldChanged", 1,
+    )[0]
+    add = js.split("function setupAddAgent(){", 1)[1].split(
+        "function setupRemoveAgent", 1,
+    )[0]
+    errors = js.split("function setupErrors(){", 1)[1].split(
+        "function setupInspectWorkspace", 1,
+    )[0]
+
+    assert 'data-field="name"' in fields
+    assert "setupNextAgentName" in js
+    assert "find(a=>!SETUP_PARTICIPANTS.some(p=>p.agent===a))" not in add
+    assert "同一种 Agent 不能重复" not in errors
+    assert "实例名称不能重复" in errors
+    assert 'id="lnName"' in HTML
+    assert 'id="lnLayout"' in HTML
+    assert 'id="lnWorkspace"' in HTML
+    assert "function launchSessionChanged" in js
+    assert "LAUNCH_SESSION_DIRS" in js
+    assert "s.directory||''" in js
+    assert "p.session===session&&p.agent&&p.cwd" in js
+    assert "/\\.config\\/herdr\\/sessions" in js
+    launch = js.split("async function startAgent(){", 1)[1].split(
+        "// ============ 消息 view", 1,
+    )[0]
+    assert "JSON.stringify({session,workdir,agent,name,layout,workspace})" in launch
+    assert "workspace==='shared'" in launch
+    assert "共享工作目录，并发写入可能冲突" in launch
+
+
 def test_old_session_mail_project_can_be_selected_in_ui():
     assert "/mail-project" in HTML
     assert "needs_selection" in HTML

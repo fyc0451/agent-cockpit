@@ -765,8 +765,8 @@ def test_prepare_parallel_workspace_creates_isolated_and_review_worktrees(tmp_pa
 
     assert warnings == []
     assert [plan["strategy"] for plan in plans] == ["isolated", "isolated", "review"]
-    assert plans[0]["branch"] == "agent-cockpit/demo/1-codex"
-    assert plans[1]["branch"] == "agent-cockpit/demo/2-kimi"
+    assert plans[0]["branch"] == "agent-cockpit/demo/codex-1"
+    assert plans[1]["branch"] == "agent-cockpit/demo/kimi-1"
     assert plans[2]["branch"] is None
     assert all((Path(plan["workdir"]) / "README.md").is_file() for plan in plans)
     detached = subprocess.run(
@@ -774,6 +774,61 @@ def test_prepare_parallel_workspace_creates_isolated_and_review_worktrees(tmp_pa
         capture_output=True,
     )
     assert detached.returncode == 1
+
+
+def test_prepare_parallel_workspace_allows_two_codex_instances(tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    req = server.SetupWorkspaceReq(
+        session="double-codex",
+        workdir=str(repo),
+        mode="parallel",
+        participants=[
+            {
+                "id": "backend", "name": "codex-backend", "agent": "codex",
+                "role": "lead", "task": "实现后端",
+            },
+            {
+                "id": "frontend", "name": "codex-frontend", "agent": "codex",
+                "role": "developer", "task": "实现前端",
+            },
+        ],
+    )
+
+    plans, warnings = server._prepare_workspace(req)
+
+    assert warnings == []
+    assert [plan["agent"] for plan in plans] == ["codex", "codex"]
+    assert [plan["name"] for plan in plans] == ["codex-backend", "codex-frontend"]
+    assert [plan["strategy"] for plan in plans] == ["isolated", "isolated"]
+    assert plans[0]["workdir"] != plans[1]["workdir"]
+
+
+def test_prepare_workspace_rejects_duplicate_instance_names(tmp_path):
+    req = server.SetupWorkspaceReq(
+        session="duplicate-name",
+        workdir=str(tmp_path),
+        mode="custom",
+        participants=[
+            {
+                "id": "one", "name": "codex-main", "agent": "codex",
+                "role": "researcher", "task": "调研 A",
+            },
+            {
+                "id": "two", "name": "codex-main", "agent": "codex",
+                "role": "researcher", "task": "调研 B",
+            },
+        ],
+    )
+
+    try:
+        server._prepare_workspace(req)
+    except server.HTTPException as exc:
+        assert exc.status_code == 400
+        assert "实例名称不能重复" in exc.detail
+    else:
+        raise AssertionError("同一工作区不应接受重复实例名称")
 
 
 def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
@@ -1092,15 +1147,39 @@ def test_prepare_workspace_rolls_back_new_worktrees_after_partial_failure(monkey
     else:
         raise AssertionError("第二个 worktree 失败时应终止")
 
-    target = tmp_path / ".demo-cockpit-worktrees" / "rollback" / "1-codex"
+    target = tmp_path / ".demo-cockpit-worktrees" / "rollback" / "codex-1"
     assert not target.exists()
     branch = subprocess.run(
         [
             "git", "-C", str(repo), "show-ref", "--verify", "--quiet",
-            "refs/heads/agent-cockpit/rollback/1-codex",
+            "refs/heads/agent-cockpit/rollback/codex-1",
         ],
     )
     assert branch.returncode == 1
+
+
+def test_prepare_workspace_reuses_legacy_index_named_worktree(tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    participant = server.WorkspaceParticipantReq(
+        id="one", agent="codex", role="lead", task="兼容旧工作区",
+        workspace="isolated",
+    )
+    legacy = server._ensure_worktree(
+        repo, repo, "legacy", participant, 0, detached=False,
+    )
+    req = server.SetupWorkspaceReq(
+        session="legacy", workdir=str(repo), mode="custom",
+        participants=[participant],
+    )
+
+    plans, _ = server._prepare_workspace(req)
+
+    assert plans[0]["name"] == "codex-1"
+    assert plans[0]["reused"] is True
+    assert plans[0]["worktree"] == legacy["worktree"]
+    assert plans[0]["branch"] == "agent-cockpit/legacy/1-codex"
 
 
 def test_inspect_workspace_reports_git_capabilities(monkeypatch, tmp_path):
@@ -1125,6 +1204,166 @@ def test_inspect_workspace_reports_git_capabilities(monkeypatch, tmp_path):
     assert git.status_code == 200
     assert git.json()["is_git"] is True
     assert git.json()["dirty"] is False
+
+
+def test_start_agent_can_create_named_isolated_worktree(monkeypatch, tmp_path):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {
+            "available": True, "pane_id": "w1:p3", "label": kwargs.get("label"),
+        },
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(repo), "agent": "codex",
+            "name": "codex-2", "layout": "right", "workspace": "isolated",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workspace"]["strategy"] == "isolated"
+    assert body["workspace"]["branch"] == "agent-cockpit/demo/codex-2"
+    assert Path(body["workspace"]["worktree"]).is_dir()
+    assert calls[0][0][1] == body["workspace"]["workdir"]
+    assert calls[0][1] == {"layout": "right", "label": "codex-2"}
+
+
+def test_start_agent_from_existing_worktree_creates_sibling_at_primary_repo(
+    monkeypatch, tmp_path,
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    first = server._ensure_worktree(
+        repo, repo, "demo",
+        server.WorkspaceParticipantReq(
+            id="one", name="codex-1", agent="codex", task="first",
+        ),
+        0, detached=False, slug="codex-1",
+    )
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.herdr_client, "start_agent",
+        lambda *args, **kwargs: {"available": True, "pane_id": "w1:p3"},
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": first["workdir"], "agent": "codex",
+            "name": "codex-2", "workspace": "isolated",
+        },
+    )
+
+    assert response.status_code == 200
+    expected = tmp_path / ".demo-cockpit-worktrees" / "demo" / "codex-2"
+    assert Path(response.json()["workspace"]["worktree"]) == expected.resolve()
+    assert expected.is_dir()
+
+
+def test_start_agent_rolls_back_new_isolated_worktree_on_launch_failure(
+    monkeypatch, tmp_path,
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.herdr_client, "start_agent",
+        lambda *args, **kwargs: {"available": True, "error": "launch failed"},
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(repo), "agent": "codex",
+            "name": "codex-2", "workspace": "isolated",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] == "launch failed"
+    assert body["worktree_rolled_back"] is True
+    assert not Path(body["workspace"]["worktree"]).exists()
+    assert subprocess.run(
+        [
+            "git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+            "refs/heads/agent-cockpit/demo/codex-2",
+        ],
+    ).returncode == 1
+
+
+def test_start_agent_rolls_back_new_worktree_after_unexpected_exception(
+    monkeypatch, tmp_path,
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.herdr_client, "start_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    response = TestClient(server.app, raise_server_exceptions=False).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(repo), "agent": "codex",
+            "name": "codex-2", "workspace": "isolated",
+        },
+    )
+
+    assert response.status_code == 500
+    target = tmp_path / ".demo-cockpit-worktrees" / "demo" / "codex-2"
+    assert not target.exists()
+    assert subprocess.run(
+        [
+            "git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+            "refs/heads/agent-cockpit/demo/codex-2",
+        ],
+    ).returncode == 1
+
+
+def test_start_agent_rejects_concurrent_session_change(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.herdr_client, "start_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应启动")),
+    )
+    lock = threading.Lock()
+    lock.acquire()
+    with server._SETUP_WORKSPACE_LOCKS_GUARD:
+        server._SETUP_WORKSPACE_LOCKS["busy-agent"] = lock
+    try:
+        response = TestClient(server.app).post(
+            "/api/herdr/start",
+            headers={"authorization": "Bearer secret"},
+            json={
+                "session": "busy-agent", "workdir": str(tmp_path),
+                "agent": "codex", "name": "codex-2",
+            },
+        )
+    finally:
+        lock.release()
+        with server._SETUP_WORKSPACE_LOCKS_GUARD:
+            server._SETUP_WORKSPACE_LOCKS.pop("busy-agent", None)
+
+    assert response.status_code == 409
+    assert "请勿重复提交" in response.json()["detail"]
 
 
 def test_setup_workspace_rejects_concurrent_request_for_same_session(monkeypatch, tmp_path):

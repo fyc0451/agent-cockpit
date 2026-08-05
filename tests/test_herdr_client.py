@@ -333,6 +333,79 @@ def test_start_agent_reuses_only_matching_workdir(monkeypatch):
     assert result["pane_id"] == "w1:p5"
 
 
+def test_start_agent_uses_label_to_create_second_same_type_instance(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "codex")
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": [{
+            "pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project",
+            "label": "codex-1",
+        }]},
+        {"panes": [
+            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project", "label": "codex-1"},
+            {"pane_id": "w1:p3", "agent": None, "cwd": "/tmp/project"},
+        ]},
+        {"panes": [
+            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project", "label": "codex-1"},
+            {"pane_id": "w1:p3", "agent": "codex", "cwd": "/tmp/project"},
+        ]},
+        {"panes": [
+            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project", "label": "codex-1"},
+            {"pane_id": "w1:p3", "agent": "codex", "cwd": "/tmp/project", "label": "codex-2"},
+        ]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p3"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent(
+        "demo", "/tmp/project", "codex", layout="tab", label="codex-2",
+    )
+
+    assert result["pane_id"] == "w1:p3"
+    assert result["label"] == "codex-2"
+    assert result.get("reused") is not True
+    assert call(
+        ["--session", "demo", "pane", "rename", "w1:p3", "codex-2"],
+        timeout=5,
+    ) in calls
+
+
+def test_start_agent_rejects_label_used_by_another_pane(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: {"panes": [{
+            "pane_id": "w1:p2", "agent": "opencode", "cwd": "/tmp/other",
+            "label": "codex-2",
+        }]},
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应创建 pane")),
+    )
+
+    result = herdr_client.start_agent(
+        "demo", "/tmp/project", "codex", label="CODEX-2",
+    )
+
+    assert result == {
+        "available": True,
+        "error": "实例名称已被 pane w1:p2 使用: CODEX-2",
+    }
+
+
 def test_start_agent_reports_missing_executable_before_split(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: {"panes": []})
