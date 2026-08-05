@@ -45,18 +45,9 @@ def _deepcopy_defaults() -> dict[str, Any]:
     return json.loads(json.dumps(DEFAULTS))
 
 
-def get() -> dict[str, Any]:
-    """读配置(缺文件/损坏返回默认值;带 mtime 缓存)。"""
-    global _cache, _cache_mtime
-    try:
-        mtime = SETTINGS_PATH.stat().st_mtime
-    except OSError:
-        with _lock:
-            _cache, _cache_mtime = None, -1.0
-        return _deepcopy_defaults()
-    with _lock:
-        if _cache is not None and mtime == _cache_mtime:
-            return json.loads(json.dumps(_cache))
+def _read_merged() -> dict[str, Any]:
+    """读文件并合并默认值。不持锁:调用方需自行保证并发安全(get 在锁外
+    拼装后统一写缓存,update 在整个 RMW 持锁)。"""
     try:
         data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -69,6 +60,22 @@ def get() -> dict[str, Any]:
             merged[k].update(v)
         elif k in merged:
             merged[k] = v
+    return merged
+
+
+def get() -> dict[str, Any]:
+    """读配置(缺文件/损坏返回默认值;带 mtime 缓存)。"""
+    global _cache, _cache_mtime
+    try:
+        mtime = SETTINGS_PATH.stat().st_mtime
+    except OSError:
+        with _lock:
+            _cache, _cache_mtime = None, -1.0
+        return _deepcopy_defaults()
+    with _lock:
+        if _cache is not None and mtime == _cache_mtime:
+            return json.loads(json.dumps(_cache))
+    merged = _read_merged()
     with _lock:
         _cache, _cache_mtime = json.loads(json.dumps(merged)), mtime
     return merged
@@ -124,42 +131,54 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def update(partial: dict[str, Any]) -> dict[str, Any]:
-    """合并一层更新并落盘,返回生效配置。非法抛 ValueError。"""
+    """合并一层更新并落盘,返回生效配置。非法抛 ValueError。
+
+    并发安全:读-改-写全程持 _lock,避免并发 update 基于同一份旧值互相覆盖
+    丢失更新;落盘前用 _validate 规范化后的值(而非原始输入),保证文件内容
+    与生效配置一致(如 clamp 后的上限、去重后的 agent 列表)。
+    """
     if not isinstance(partial, dict):
         raise ValueError("请求体必须是 JSON 对象")
-    cfg = get()
-    # 稀疏存储:文件只保留显式设置过的键(并入已有 raw),默认值不落盘,
-    # 保持"未显式设置=用模块默认常量"的 live 读取语义。
-    raw = _raw()
-    for k, v in partial.items():
-        if k not in DEFAULTS:
-            raise ValueError(f"未知配置项: {k}")
-        if isinstance(DEFAULTS[k], dict):
-            if not isinstance(v, dict):
-                raise ValueError(f"配置项 {k} 必须是对象")
-            merged = dict(cfg.get(k) or {})
-            merged.update(v)
-            cfg[k] = merged
-            raw[k] = merged
-        else:
-            cfg[k] = v
-            raw[k] = v
-    cfg = _validate(cfg)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=str(DATA_DIR))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(raw, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, SETTINGS_PATH)
-    except BaseException:
+    with _lock:
+        cfg = _read_merged()
+        # 稀疏存储:文件只保留显式设置过的键(并入已有 raw),默认值不落盘,
+        # 保持"未显式设置=用模块默认常量"的 live 读取语义。
+        raw = _raw()
+        for k, v in partial.items():
+            if k not in DEFAULTS:
+                raise ValueError(f"未知配置项: {k}")
+            if isinstance(DEFAULTS[k], dict):
+                if not isinstance(v, dict):
+                    raise ValueError(f"配置项 {k} 必须是对象")
+                merged = dict(cfg.get(k) or {})
+                merged.update(v)
+                cfg[k] = merged
+                raw[k] = merged
+            else:
+                cfg[k] = v
+                raw[k] = v
+        cfg = _validate(cfg)
+        # 用验证/规范化后的生效值回填落盘内容:clamp、去重、路径规范化等
+        # 都体现在 cfg 上,不能把原始输入直接写进文件。
+        for k, v in partial.items():
+            raw[k] = cfg[k]
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=str(DATA_DIR))
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    return cfg
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(raw, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, SETTINGS_PATH)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        # 写后同步缓存,使 get() 的 mtime 缓存命中的是本次生效值
+        _cache, _cache_mtime = json.loads(json.dumps(cfg)), SETTINGS_PATH.stat().st_mtime
+        return cfg
 
 
 # ── 各模块的 live 读取入口 ────────────────────────────────────

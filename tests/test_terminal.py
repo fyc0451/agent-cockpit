@@ -299,3 +299,39 @@ def test_write_oserror_raises_connectionerror(monkeypatch):
     monkeypatch.setattr(os, "write", always_fail)
     with pytest.raises(ConnectionError, match="已写入"):
         terminal.write_term(tid, "z" * 100)
+
+
+def test_write_term_dups_fd_under_lock_and_closes_copy(monkeypatch):
+    """锁外写入必须用锁内 dup 的副本,写完关闭副本,避免 fd 复用误写。
+
+    write_term 在锁内只取 master_fd 引用,锁外另一线程 kill_term 会关 fd,
+    该 fd 号可能被系统复用于新文件,后续 os.write 就写到错误对象上。
+    """
+    tid = _create()
+    with terminal._lock:
+        master_fd = terminal._terms[tid]["master_fd"]
+    dup_fd = os.dup(master_fd)
+
+    dup_calls = []
+    monkeypatch.setattr(os, "dup", lambda source: dup_calls.append(source) or dup_fd)
+    written = []
+    real_write = os.write
+    monkeypatch.setattr(
+        os, "write",
+        lambda fd, data: written.append(fd) or real_write(fd, data),
+    )
+    closed = []
+    real_close = os.close
+    monkeypatch.setattr(
+        os, "close",
+        lambda fd: closed.append(fd) or real_close(fd),
+    )
+
+    terminal.write_term(tid, "echo dup-fd-ok\n")
+    out = _read_until(tid, b"dup-fd-ok")
+    assert b"dup-fd-ok" in out
+    assert dup_calls == [master_fd]
+    assert written and all(fd == dup_fd for fd in written)
+    assert dup_fd in closed
+    # master fd 本身未被关闭(副本关闭不影响它)
+    os.fstat(master_fd)

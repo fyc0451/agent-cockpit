@@ -241,11 +241,19 @@ async def protect_api(request: Request, call_next):
             headers={"WWW-Authenticate": "Bearer"} if status == 401 else None,
         )
     cookie_auth = _valid_cookie(request.cookies.get(AUTH_COOKIE))
-    if request.method not in SAFE_METHODS and cookie_auth and not _valid_bearer(
-        request.headers.get("authorization")
-    ):
-        if not _same_origin(request.headers.get("origin"), request.headers.get("host")):
-            return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
+    if request.method not in SAFE_METHODS:
+        # CSRF 防护:无 Token 模式认证只看 client IP,恶意站点可诱导浏览器
+        # 向 localhost 发跨源写请求;对存在的 Origin 一律要求同源。无 Origin
+        # 的 CLI/curl 不受影响,保留原有行为。
+        origin = request.headers.get("origin")
+        if not COCKPIT_TOKEN:
+            if origin and not _same_origin(origin, request.headers.get("host")):
+                return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
+        elif cookie_auth and not _valid_bearer(
+            request.headers.get("authorization")
+        ):
+            if not _same_origin(origin, request.headers.get("host")):
+                return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
     return await call_next(request)
 
 

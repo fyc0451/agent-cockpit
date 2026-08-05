@@ -35,7 +35,10 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
     "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
   systemctl --user daemon-reload
   systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true
-  systemctl --user enable --now agent-cockpit.service
+  systemctl --user enable agent-cockpit.service
+  # 升级时服务通常已在运行;enable --now 只启动未运行的实例,不会让已运行的
+  # 进程加载新代码,必须显式 restart 才能让本次升级生效。
+  systemctl --user restart agent-cockpit.service
   echo "升级完成，Agent Cockpit 已重启。Herdr session 不受影响。"
 elif [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
   "$INSTALL_DIR/launchd.sh" restart

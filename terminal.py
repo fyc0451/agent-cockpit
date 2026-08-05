@@ -226,6 +226,10 @@ def write_term(term_id: str, data: str) -> None:
     fd 非阻塞:循环处理短写,BlockingIOError 时 select 等待可写。
     超过 WRITE_TIMEOUT 抛 TimeoutError——调用方必须能感知尾部未写入,
     不静默丢数据;server WS 侧用 asyncio.to_thread 调用以免阻塞事件循环。
+
+    并发安全:锁内 dup 一份 fd 副本,锁外写副本,写毕关闭。若直接持有
+    master_fd 引用,另一线程 kill_term 关 fd 后该 fd 号可能被系统复用于
+    新文件,锁外 os.write 就写到了错误对象上;副本杜绝 fd 复用误写。
     """
     t = _get(term_id)
     if not t:
@@ -237,36 +241,42 @@ def write_term(term_id: str, data: str) -> None:
     with t["lock"]:
         if not t.get("alive"):
             return
-        fd = t["master_fd"]
-    # 写循环不持有 t["lock"]:canonical 模式输入会回显到 master,macOS 的
-    # PTY 缓冲小,写入被回显反压时必须让读端(pump)能并发排干,否则大体积
-    # 写必然等到超时;fd 被并发关闭时 os.write 抛 OSError,由下面兜住
-    while buf:
-        try:
-            n = os.write(fd, buf)
-        except BlockingIOError:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"write_term 超时({write_timeout}s):"
-                    f"已写入 {total - len(buf)}/{total} 字节,对端未及时消费"
-                )
+        fd = os.dup(t["master_fd"])
+    try:
+        # 写循环不持有 t["lock"]:canonical 模式输入会回显到 master,macOS 的
+        # PTY 缓冲小,写入被回显反压时必须让读端(pump)能并发排干,否则大体积
+        # 写必然等到超时;fd 被并发关闭时 os.write 抛 OSError,由下面兜住
+        while buf:
             try:
-                select.select([], [fd], [], min(0.1, remaining))
-            except OSError:
-                raise TimeoutError(
-                    f"write_term 等待可写失败:已写入 {total - len(buf)}/{total} 字节"
-                )
-            continue
-        except OSError as e:
-            # 非阻塞写之外的 OSError(如 EIO:终端已关闭):
-            # buf 必有剩余,不能静默丢尾,抛可感知异常
-            raise ConnectionError(
-                f"write_term 失败(终端可能已关闭):"
-                f"已写入 {total - len(buf)}/{total} 字节: {e}"
-            ) from e
-        buf = buf[n:]
-        t["last_active"] = time.monotonic()
+                n = os.write(fd, buf)
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"write_term 超时({write_timeout}s):"
+                        f"已写入 {total - len(buf)}/{total} 字节,对端未及时消费"
+                    )
+                try:
+                    select.select([], [fd], [], min(0.1, remaining))
+                except OSError:
+                    raise TimeoutError(
+                        f"write_term 等待可写失败:已写入 {total - len(buf)}/{total} 字节"
+                    )
+                continue
+            except OSError as e:
+                # 非阻塞写之外的 OSError(如 EIO:终端已关闭):
+                # buf 必有剩余,不能静默丢尾,抛可感知异常
+                raise ConnectionError(
+                    f"write_term 失败(终端可能已关闭):"
+                    f"已写入 {total - len(buf)}/{total} 字节: {e}"
+                ) from e
+            buf = buf[n:]
+            t["last_active"] = time.monotonic()
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _read_fd(t: dict[str, Any], timeout: float) -> bytes:
