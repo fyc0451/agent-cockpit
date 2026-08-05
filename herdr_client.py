@@ -26,13 +26,14 @@ _HERDR_DIR = str(Path(HERDR_BIN).parent) if HERDR_BIN else ""
 PANE_CREATE_TIMEOUT = 3.0
 AGENT_START_TIMEOUT = 10.0
 QODER_AGENT_START_TIMEOUT = 60.0
+QODER_AGENTS = frozenset({"qoder", "qodercli", "qodercn"})
 AGENT_STABLE_SECONDS = 1.5
 AGENT_POLL_INTERVAL = 0.2
 
 
 def _agent_start_timeout(agent: str) -> float:
     """QoderCLI 冷启动较慢，其余 Agent 继续使用默认识别窗口。"""
-    if agent in {"qoder", "qodercli", "qodercn"}:
+    if agent in QODER_AGENTS:
         return QODER_AGENT_START_TIMEOUT
     return AGENT_START_TIMEOUT
 
@@ -638,15 +639,29 @@ def start_agent(
             time.sleep(AGENT_POLL_INTERVAL)
         if not new_pid:
             raise RuntimeError("split/tab 后找不到本次创建的新 pane")
-        # pane run 接收完整命令字符串；拆分后交给 Herdr 重组会破坏引号，并让路径
-        # 中的 shell 元字符在下一层被重新解释。
-        _run(["--session", session, "pane", "run", new_pid, cmd_str], timeout=8)
+        start_timeout = _agent_start_timeout(agent)
+        if agent in QODER_AGENTS:
+            # 后台 tab 中直接 pane run QoderCLI 时，进程虽已就绪，Herdr 偶发不会
+            # 刷新该 pane 的 agent 状态。使用 Herdr 原生 agent start 针对指定 pane
+            # 启动并等待 readiness，与用户在前台 tab 手动启动的识别路径一致。
+            _run(
+                [
+                    "--session", session, "agent", "start", label or agent,
+                    "--kind", "qodercli", "--pane", new_pid,
+                    "--timeout", str(int(start_timeout * 1000)),
+                ],
+                timeout=int(start_timeout) + 5,
+            )
+        else:
+            # pane run 接收完整命令字符串；拆分后交给 Herdr 重组会破坏引号，并让
+            # 路径中的 shell 元字符在下一层被重新解释。
+            _run(["--session", session, "pane", "run", new_pid, cmd_str], timeout=8)
 
-        # pane run 成功只代表命令已发出。等 Herdr 识别到 agent，再经过稳定窗口
-        # 复查，捕获 OpenCode/Bun 这类启动后立即崩溃、只留下空 pane 的情况。
+        # 启动命令成功后仍以 snapshot 为准，再经过稳定窗口复查，捕获
+        # OpenCode/Bun 这类启动后立即崩溃、只留下空 pane 的情况。
         saw_agent = False
         confirmed_pane = None
-        deadline = time.monotonic() + _agent_start_timeout(agent)
+        deadline = time.monotonic() + start_timeout
         while time.monotonic() < deadline:
             current = next(
                 (

@@ -353,14 +353,26 @@ def test_start_agent_allows_qodercli_slow_session_hook(monkeypatch):
     monkeypatch.setattr(herdr_client, "_run", fake_run)
 
     result = herdr_client.start_agent(
-        "demo", "/tmp/project", agent="qodercli", layout="tab",
+        "demo", "/tmp/project", agent="qodercli", layout="tab", label="qoder-2",
     )
 
     assert result["pane_id"] == "w1:p2"
     assert result["agent"] == "qodercli"
+    assert result["label"] == "qoder-2"
     assert clock["now"] >= 41.5
     assert call(
         ["--session", "demo", "pane", "close", "w1:p2"], timeout=5,
+    ) not in calls
+    assert call(
+        [
+            "--session", "demo", "agent", "start", "qoder-2",
+            "--kind", "qodercli", "--pane", "w1:p2", "--timeout", "60000",
+        ],
+        timeout=65,
+    ) in calls
+    assert call(
+        ["--session", "demo", "pane", "run", "w1:p2", "qodercli"],
+        timeout=8,
     ) not in calls
 
 
