@@ -82,6 +82,24 @@ def test_update_persists_validated_values(tmp_settings):
     assert on_disk["enabled_agents"] == ["codex", "kimi"]
 
 
+def test_update_keeps_nested_settings_sparse(tmp_settings):
+    settings.update({"term": {"max_terms": 9999}})
+
+    on_disk = json.loads((tmp_settings / "settings.json").read_text())
+    assert on_disk == {"term": {"max_terms": 64}}
+
+
+def test_update_refreshes_global_cache(monkeypatch):
+    settings.update({"language": "en"})
+    monkeypatch.setattr(
+        settings,
+        "_read_merged",
+        lambda: (_ for _ in ()).throw(AssertionError("写后应命中缓存")),
+    )
+
+    assert settings.get()["language"] == "en"
+
+
 def test_update_serializes_concurrent_read_modify_write(tmp_settings, monkeypatch):
     """并发 update 不得丢失更新:整个 RMW 持锁,后写基于最新落盘值。"""
     import threading

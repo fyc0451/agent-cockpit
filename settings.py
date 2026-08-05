@@ -137,6 +137,7 @@ def update(partial: dict[str, Any]) -> dict[str, Any]:
     丢失更新;落盘前用 _validate 规范化后的值(而非原始输入),保证文件内容
     与生效配置一致(如 clamp 后的上限、去重后的 agent 列表)。
     """
+    global _cache, _cache_mtime
     if not isinstance(partial, dict):
         raise ValueError("请求体必须是 JSON 对象")
     with _lock:
@@ -153,15 +154,17 @@ def update(partial: dict[str, Any]) -> dict[str, Any]:
                 merged = dict(cfg.get(k) or {})
                 merged.update(v)
                 cfg[k] = merged
-                raw[k] = merged
             else:
                 cfg[k] = v
-                raw[k] = v
         cfg = _validate(cfg)
         # 用验证/规范化后的生效值回填落盘内容:clamp、去重、路径规范化等
         # 都体现在 cfg 上,不能把原始输入直接写进文件。
         for k, v in partial.items():
-            raw[k] = cfg[k]
+            if k == "term":
+                stored = raw.get(k) if isinstance(raw.get(k), dict) else {}
+                raw[k] = {**stored, **{name: cfg[k][name] for name in v}}
+            else:
+                raw[k] = cfg[k]
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=str(DATA_DIR))
         try:
