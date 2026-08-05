@@ -302,11 +302,19 @@ async def protect_api(request: Request, call_next):
             headers={"WWW-Authenticate": "Bearer"} if status == 401 else None,
         )
     cookie_auth = _valid_cookie(request.cookies.get(AUTH_COOKIE))
-    if request.method not in SAFE_METHODS and cookie_auth and not _valid_bearer(
-        request.headers.get("authorization")
-    ):
-        if not _same_origin(request.headers.get("origin"), request.headers.get("host")):
-            return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
+    if request.method not in SAFE_METHODS:
+        # CSRF 防护:无 Token 模式认证只看 client IP,恶意站点可诱导浏览器
+        # 向 localhost 发跨源写请求;对存在的 Origin 一律要求同源。无 Origin
+        # 的 CLI/curl 不受影响,保留原有行为。
+        origin = request.headers.get("origin")
+        if not COCKPIT_TOKEN:
+            if origin and not _same_origin(origin, request.headers.get("host")):
+                return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
+        elif cookie_auth and not _valid_bearer(
+            request.headers.get("authorization")
+        ):
+            if not _same_origin(origin, request.headers.get("host")):
+                return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
     return await call_next(request)
 
 
@@ -382,7 +390,7 @@ class SetupWorkspaceReq(BaseModel):
     session: str
     workdir: str
     agents: list[str] = Field(default_factory=lambda: ["codex"])
-    layout: str = "right"  # right(水平/左右) | down(垂直/上下) | tab(多页/不分割)
+    layout: str = "tab"  # tab(多页/不分割) | right(水平/左右) | down(垂直/上下)
     mode: str = "quick"
     participants: list[WorkspaceParticipantReq] | None = None
 
@@ -1162,6 +1170,14 @@ def api_task_diff(task_id: str):
         return tasks.task_diff(task_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def api_task_cancel(task_id: str):
+    try:
+        return tasks.cancel_task(task_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/tasks/{task_id}/apply")

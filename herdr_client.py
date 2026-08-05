@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,10 @@ _HERDR_ENV = os.environ.get("HERDR_BIN")
 HERDR_BIN = _HERDR_ENV or shutil.which("herdr") or str(Path.home() / ".local" / "bin" / "herdr")
 # herdr 所在的额外 PATH(供子进程找到它)
 _HERDR_DIR = str(Path(HERDR_BIN).parent) if HERDR_BIN else ""
+PANE_CREATE_TIMEOUT = 3.0
+AGENT_START_TIMEOUT = 10.0
+AGENT_STABLE_SECONDS = 1.5
+AGENT_POLL_INTERVAL = 0.2
 
 
 def _find_agent_bin(name: str) -> str:
@@ -70,11 +74,6 @@ def _agent_cmd(agent: str, workdir: str) -> str:
     return builder(bin_path)
 
 
-def _pane_sort_key(pane_id: str) -> tuple[Any, ...]:
-    """按 pane id 中的数字自然排序:w1:p9 < w1:p10。"""
-    return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", pane_id))
-
-
 def is_available() -> bool:
     return bool(HERDR_BIN) and Path(HERDR_BIN).is_file() and os.access(HERDR_BIN, os.X_OK)
 
@@ -120,6 +119,8 @@ def list_sessions() -> list[dict[str, Any]]:
     try:
         out = _run(["session", "list", "--json"], timeout=8)
         data = json.loads(out)
+        if not isinstance(data, dict):
+            raise ValueError("session list 不是对象")
         rows = data.get("sessions", [])
         if not isinstance(rows, list):
             raise ValueError("sessions 不是列表")
@@ -197,12 +198,23 @@ def _snapshot_session(session: str) -> dict[str, Any]:
     except (ValueError, json.JSONDecodeError):
         # 可能直接是 JSON-RPC 错误
         return {"session": session, "error": "snapshot parse failed", "panes": []}
+    if not isinstance(data, dict):
+        return {"session": session, "error": "snapshot parse failed", "panes": []}
     if "error" in data:
         return {"session": session, "error": str(data["error"]), "panes": []}
-    snap = data.get("result", {}).get("snapshot", {})
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return {"session": session, "error": "snapshot parse failed", "panes": []}
+    snap = result.get("snapshot")
+    if not isinstance(snap, dict):
+        return {"session": session, "error": "snapshot parse failed", "panes": []}
     panes = snap.get("panes", [])
+    if not isinstance(panes, list):
+        return {"session": session, "error": "snapshot parse failed", "panes": []}
     slim = []
     for p in panes:
+        if not isinstance(p, dict):
+            continue
         cwd = p.get("cwd") or p.get("foreground_cwd") or ""
         slim.append({
             "pane_id": p.get("pane_id"),
@@ -222,7 +234,7 @@ def _snapshot_session(session: str) -> dict[str, Any]:
         "session": session,
         "status": "running",
         "panes": slim,
-        "agents": snap.get("agents", []),
+        "agents": snap.get("agents", []) if isinstance(snap.get("agents", []), list) else [],
         "focused_pane_id": snap.get("focused_pane_id"),
         # 各 tab 的 zoom 状态与几何(窄屏 attach 判断单 pane 聚焦用)
         "layouts": [
@@ -477,7 +489,7 @@ def _rename_agent_context(
 
 def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
-    layout: str = "right",
+    layout: str = "tab",
 ) -> dict[str, Any]:
     """在指定 session 里启动一个 agent pane(新建 window/pane 跑 agent)。
 
@@ -486,9 +498,30 @@ def start_agent(
     """
     if not is_available():
         return {"available": False}
-    # 去重:如果 session 里已有该 agent 类型的 pane,不重复创建
+    # 只复用当前 live snapshot 中 agent 与工作目录都匹配的 pane。仅按 agent
+    # 复用会把新任务静默送进另一个项目；不在 snapshot 中的旧 pane 不视为存活。
     snap = _snapshot_session(session)
-    existing = next((p for p in snap.get("panes", []) if p.get("agent") == agent), None)
+    try:
+        target_dir = Path(workdir).expanduser().resolve()
+    except OSError:
+        target_dir = Path(workdir).expanduser().absolute()
+
+    def matching_cwd(pane: dict[str, Any]) -> bool:
+        cwd = pane.get("cwd")
+        if not cwd:
+            return False
+        try:
+            return Path(cwd).expanduser().resolve() == target_dir
+        except OSError:
+            return Path(cwd).expanduser().absolute() == target_dir
+
+    existing = next(
+        (
+            p for p in snap.get("panes", [])
+            if p.get("agent") == agent and matching_cwd(p)
+        ),
+        None,
+    )
     if existing:
         _rename_agent_context(session, existing, agent, layout)
         result = {
@@ -507,62 +540,125 @@ def start_agent(
         return {"available": True, "error": f"{agent} 未安装或不在 PATH"}
     # 构造 agent 启动命令(用 _agent_cmd 统一处理完整路径)
     cmd_str = _agent_cmd(agent, workdir)
+    before_ids = {
+        str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
+    }
+    # OpenCode/Bun 在窄 split 中可能直接 fatal signal 4；即使调用方仍传旧默认
+    # right，也自动使用独立 tab。其他 agent 尊重显式布局。
+    effective_layout = "tab" if agent == "opencode" else layout
+    new_pid = None
     try:
         # 根据 layout 开新 pane:right/down 用 split,tab 用 tab create
-        new_pid = None
-        new_pane = None
-        if layout == "tab":
+        if effective_layout == "tab":
             # 多页:每个 agent 一个新 tab
-            tab_out = _run(
+            create_out = _run(
                 ["--session", session, "tab", "create", "--cwd", workdir],
                 timeout=5,
             )
-            for line in tab_out.splitlines():
-                if line.startswith("data:"):
-                    try:
-                        td = json.loads(line[5:].strip())
-                        new_pid = td.get("result", {}).get("tab", {}).get("focused_pane_id")
-                    except (ValueError, json.JSONDecodeError):
-                        pass
-                    break
         else:
             # 分屏:right(水平/左右)或 down(垂直/上下)
-            direction = "right" if layout in ("right", "horizontal") else "down"
-            split_out = _run(
+            direction = "right" if effective_layout in ("right", "horizontal") else "down"
+            create_out = _run(
                 ["--session", session, "pane", "split", "--current",
                  "--direction", direction, "--no-focus", "--cwd", workdir],
                 timeout=5,
             )
-            for line in split_out.splitlines():
-                if line.startswith("data:"):
-                    try:
-                        sd = json.loads(line[5:].strip())
-                        new_pid = sd.get("result", {}).get("pane", {}).get("pane_id")
-                    except (ValueError, json.JSONDecodeError):
-                        pass
-                    break
-        if not new_pid:
-            # fallback:取 snapshot 里 id 最大的 pane
-            snap = _snapshot_session(session)
-            panes = snap.get("panes", [])
-            if panes:
-                new_pane = sorted(
-                    panes, key=lambda p: _pane_sort_key(str(p.get("pane_id") or ""))
-                )[-1]
-                new_pid = new_pane.get("pane_id")
-        if not new_pid:
-            return {"available": True, "error": "split/tab 后找不到新 pane"}
-        # 用 pane run 启动 agent(完整路径 + shlex 安全分割)
-        _run(["--session", session, "pane", "run", new_pid] + shlex.split(cmd_str), timeout=8)
-        if new_pane is None:
-            new_pane = next(
-                (p for p in _snapshot_session(session).get("panes", []) if p.get("pane_id") == new_pid),
-                {"pane_id": new_pid},
+
+        reported_pid = None
+        for line in create_out.splitlines():
+            if not line.startswith("data:"):
+                continue
+            try:
+                data = json.loads(line[5:].strip())
+            except (ValueError, json.JSONDecodeError):
+                continue
+            result = data.get("result", {})
+            reported_pid = (
+                result.get("pane", {}).get("pane_id")
+                or result.get("tab", {}).get("focused_pane_id")
             )
-        _rename_agent_context(session, new_pane, agent, layout)
-        return {"available": True, "pane_id": new_pid, "agent": agent, "cmd": cmd_str}
+            break
+
+        # 无论 Herdr 是否返回 id，都用前后 snapshot 验证它确实是本次新增 pane。
+        deadline = time.monotonic() + PANE_CREATE_TIMEOUT
+        while time.monotonic() < deadline:
+            after = _snapshot_session(session)
+            after_ids = {
+                str(p.get("pane_id"))
+                for p in after.get("panes", [])
+                if p.get("pane_id")
+            }
+            created_ids = after_ids - before_ids
+            if reported_pid and str(reported_pid) in created_ids:
+                new_pid = str(reported_pid)
+                break
+            if not reported_pid and len(created_ids) == 1:
+                new_pid = created_ids.pop()
+                break
+            if not reported_pid and len(created_ids) > 1:
+                raise RuntimeError("创建 pane 时同时出现多个新 pane，无法安全识别")
+            time.sleep(AGENT_POLL_INTERVAL)
+        if not new_pid:
+            raise RuntimeError("split/tab 后找不到本次创建的新 pane")
+        # pane run 接收完整命令字符串；拆分后交给 Herdr 重组会破坏引号，并让路径
+        # 中的 shell 元字符在下一层被重新解释。
+        _run(["--session", session, "pane", "run", new_pid, cmd_str], timeout=8)
+
+        # pane run 成功只代表命令已发出。等 Herdr 识别到 agent，再经过稳定窗口
+        # 复查，捕获 OpenCode/Bun 这类启动后立即崩溃、只留下空 pane 的情况。
+        saw_agent = False
+        confirmed_pane = None
+        deadline = time.monotonic() + AGENT_START_TIMEOUT
+        while time.monotonic() < deadline:
+            current = next(
+                (
+                    p for p in _snapshot_session(session).get("panes", [])
+                    if str(p.get("pane_id")) == new_pid
+                ),
+                None,
+            )
+            if current and current.get("agent") == agent:
+                saw_agent = True
+                time.sleep(AGENT_STABLE_SECONDS)
+                confirmed_pane = next(
+                    (
+                        p for p in _snapshot_session(session).get("panes", [])
+                        if str(p.get("pane_id")) == new_pid
+                    ),
+                    None,
+                )
+                if confirmed_pane and confirmed_pane.get("agent") == agent:
+                    # pane 命名成 agent 名，tab/workspace 也改成可辨认名称
+                    # (默认是序号,看板/TUI 里分不清);失败不影响启动
+                    _rename_agent_context(
+                        session, confirmed_pane, agent, effective_layout
+                    )
+                    return {
+                        "available": True,
+                        "pane_id": new_pid,
+                        "agent": agent,
+                        "cmd": cmd_str,
+                        "layout": effective_layout,
+                    }
+                break
+            time.sleep(AGENT_POLL_INTERVAL)
+        if saw_agent:
+            raise RuntimeError(f"{agent} 启动后未能保持运行")
+        raise RuntimeError(f"{agent} 启动超时，Herdr 未识别到运行中的 agent")
     except RuntimeError as e:
-        return {"available": True, "error": str(e)}
+        rolled_back = False
+        if new_pid:
+            try:
+                _run(["--session", session, "pane", "close", new_pid], timeout=5)
+                rolled_back = True
+            except RuntimeError:
+                pass
+        return {
+            "available": True,
+            "error": str(e),
+            "pane_id": new_pid,
+            "rolled_back": rolled_back,
+        }
 
 
 def close_pane(session: str, pane_id: str) -> dict[str, Any]:
@@ -587,7 +683,6 @@ def restart_pane(
     """
     if not is_available():
         return {"available": False}
-    import time
     try:
         # 1. 在发送退出按键前确认 pane 和 agent，避免检测丢失后误启 Codex。
         snap = _snapshot_session(session)
@@ -633,7 +728,7 @@ def restart_pane(
             cmd_str = f'cd {shlex.quote(workdir)} && {base}'
         # 5. 用 pane run 启动命令(比 send-text+Enter 可靠,不会被 agent TUI 当 prompt)
         # pane run 发命令+回车,语义是"在 pane 里执行命令"
-        _run(["--session", session, "pane", "run", pane_id] + shlex.split(cmd_str), timeout=8)
+        _run(["--session", session, "pane", "run", pane_id, cmd_str], timeout=8)
         return {
             "available": True, "restarted": True, "pane_id": pane_id,
             "agent": agent, "previous_agent": previous_agent,

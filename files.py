@@ -398,8 +398,12 @@ def read_file(rel: str) -> dict[str, Any]:
     if st.st_size > 10 * MAX_EDIT_SIZE:
         raise ValueError(f"文件过大({st.st_size} bytes)")
     if _is_text(path):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"文件不是有效的 UTF-8 文本: {path}") from exc
         return {
-            "path": str(path), "text": path.read_text(encoding="utf-8"),
+            "path": str(path), "text": text,
             "size": st.st_size, "binary": False, "modifiable": st.st_size <= MAX_EDIT_SIZE,
         }
     return {"path": str(path), "binary": True, "size": st.st_size, "modifiable": False}

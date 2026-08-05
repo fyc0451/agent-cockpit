@@ -180,21 +180,49 @@ def test_start_agent_reuses_existing_pane_with_cwd(monkeypatch):
         "msg": "codex pane 已存在(w1:p2),跳过",
     }
     assert ["--session", "demo", "pane", "rename", "w1:p2", "codex"] in calls
-    assert ["--session", "demo", "tab", "rename", "w1:t2", "demo"] in calls
+    assert ["--session", "demo", "tab", "rename", "w1:t2", "codex"] in calls
     assert ["--session", "demo", "workspace", "rename", "w1", "demo"] in calls
 
 
-def test_start_agent_fallback_selects_highest_numeric_pane(monkeypatch):
-    """fallback 应把 w1:p10 视为比 w1:p9 更新，而不是按字符串排序。"""
+def test_snapshot_handles_unexpected_json_shapes(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "codex")
+    monkeypatch.setattr(herdr_client, "_run", lambda *args, **kwargs: "[]")
+
+    assert herdr_client._snapshot_session("demo") == {
+        "session": "demo", "error": "snapshot parse failed", "panes": []
+    }
+
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda *args, **kwargs: '{"result":{"snapshot":{"panes":"bad"}}}',
+    )
+    assert herdr_client._snapshot_session("demo") == {
+        "session": "demo", "error": "snapshot parse failed", "panes": []
+    }
+
+
+def test_start_agent_uses_snapshot_delta_and_single_command_argument(monkeypatch):
+    """无创建响应时只能选前后 snapshot 唯一新增 pane，不能猜最大 id。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    command = "'/tmp/agent path/codex' --flag 'a;b'"
+    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: command)
     # 可执行文件探测与宿主机解耦(CI 上没有安装 codex)
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
     snapshots = iter([
-        {"panes": []},
+        {"panes": [{"pane_id": "w1:p9", "agent": None}]},
         {"panes": [
-            {"pane_id": "w1:p10", "agent": None},
             {"pane_id": "w1:p9", "agent": None},
+            {"pane_id": "w1:p2", "agent": None},
+        ]},
+        {"panes": [
+            {"pane_id": "w1:p9", "agent": None},
+            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project"},
+        ]},
+        {"panes": [
+            {"pane_id": "w1:p9", "agent": None},
+            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project"},
         ]},
     ])
     monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
@@ -208,10 +236,15 @@ def test_start_agent_fallback_selects_highest_numeric_pane(monkeypatch):
 
     result = herdr_client.start_agent("demo", "/tmp/project")
 
-    assert result["pane_id"] == "w1:p10"
+    assert result["pane_id"] == "w1:p2"
+    assert result["layout"] == "tab"
     assert call(
-        ["--session", "demo", "pane", "run", "w1:p10", "codex"],
+        ["--session", "demo", "pane", "run", "w1:p2", command],
         timeout=8,
+    ) in calls
+    assert call(
+        ["--session", "demo", "pane", "rename", "w1:p2", "codex"],
+        timeout=5,
     ) in calls
 
 
@@ -220,14 +253,23 @@ def test_start_agent_renames_workspace_tab_and_pane(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "codex")
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
-    monkeypatch.setattr(
-        herdr_client,
-        "_snapshot_session",
-        lambda session: {"panes": [{
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{
             "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
             "agent": None,
         }]},
-    )
+        {"panes": [{
+            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+            "agent": "codex",
+        }]},
+        {"panes": [{
+            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+            "agent": "codex",
+        }]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
     calls = []
     monkeypatch.setattr(
         herdr_client, "_run", lambda args, timeout=10: calls.append(args) or ""
@@ -239,6 +281,56 @@ def test_start_agent_renames_workspace_tab_and_pane(monkeypatch):
     assert ["--session", "demo", "pane", "rename", "w1:p2", "codex"] in calls
     assert ["--session", "demo", "tab", "rename", "w1:t2", "codex"] in calls
     assert ["--session", "demo", "workspace", "rename", "w1", "demo"] in calls
+
+
+def test_start_agent_forces_opencode_to_tab_and_rolls_back_delayed_crash(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "opencode")
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p2", "agent": None}]},
+        {"panes": [{"pane_id": "w1:p2", "agent": "opencode"}]},
+        {"panes": [{"pane_id": "w1:p2", "agent": None}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent(
+        "demo", "/tmp/project", agent="opencode", layout="right"
+    )
+
+    assert result["error"] == "opencode 启动后未能保持运行"
+    assert result["rolled_back"] is True
+    assert not any("split" in c.args[0] for c in calls)
+    assert call(
+        ["--session", "demo", "pane", "close", "w1:p2"], timeout=5
+    ) in calls
+
+
+def test_start_agent_reuses_only_matching_workdir(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: {
+            "panes": [{"pane_id": "w1:p5", "agent": "codex", "cwd": "/tmp/project"}]
+        },
+    )
+    calls = []
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: calls.append(args) or "")
+
+    result = herdr_client.start_agent("demo", "/tmp/project/./", "codex")
+
+    assert result["reused"] is True
+    assert result["pane_id"] == "w1:p5"
 
 
 def test_start_agent_reports_missing_executable_before_split(monkeypatch):
@@ -291,10 +383,7 @@ def test_restart_pane_preserves_detected_agent(monkeypatch):
     assert result["agent"] == "opencode"
     assert result["previous_agent"] == "opencode"
     assert call(
-        [
-            "--session", "demo", "pane", "run", "w1:p5",
-            "cd", "/tmp/project", "&&", "opencode", "/tmp/project",
-        ],
+        ["--session", "demo", "pane", "run", "w1:p5", "cd /tmp/project && opencode /tmp/project"],
         timeout=8,
     ) in calls
 

@@ -4,9 +4,50 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import sys
+import tempfile
 from pathlib import Path
 
-from am_common import REGISTRY_DIR, load_client_config, mcp_call, mcp_tool, slugify
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from am_common import REGISTRY_DIR, load_client_config, mcp_call, mcp_tool, slugify  # noqa: E402
+
+# 用于 registry 文件名的 agent/instance 组件只允许安全字符,
+# 禁止 /、\、..、空格等,防止路径穿越或文件名注入。
+_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _validate_component(name: str, label: str) -> str:
+    if not _COMPONENT_RE.fullmatch(name):
+        raise SystemExit(
+            f"{label} 仅允许字母、数字、下划线、点和连字符"
+            f"(1-64 字符,不能以标点开头): {name!r}"
+        )
+    return name
+
+
+def _atomic_write_identity(path: Path, identity: dict) -> None:
+    """原子写身份文件:mkstemp + fsync + chmod 0600 + os.replace。
+
+    不先写目标再 chmod(中间态可能 0644 暴露 registration_token),也避免
+    写一半中断留下损坏文件;replace 保证读者永远看到完整内容。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".am-register.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(identity, ensure_ascii=False, indent=2) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def main() -> None:
@@ -22,12 +63,10 @@ def main() -> None:
     parser.add_argument("--show", action="store_true")
     args = parser.parse_args()
 
+    agent = _validate_component(args.agent, "agent")
+    instance = _validate_component(args.instance, "instance")
     project_key = str(Path(args.project).resolve())
-    registry_file = (
-        REGISTRY_DIR / slugify(project_key) / f"{args.agent}--{args.instance}.json"
-    )
-    if args.force and registry_file.is_file() and not args.show:
-        registry_file.unlink()
+    registry_file = REGISTRY_DIR / slugify(project_key) / f"{agent}--{instance}.json"
 
     identity = {}
     if registry_file.is_file():
@@ -41,7 +80,7 @@ def main() -> None:
             print(json.dumps(safe, ensure_ascii=False, indent=2))
             return
     elif args.show:
-        raise SystemExit(f"尚未注册: {args.agent}--{args.instance} @ {project_key}")
+        raise SystemExit(f"尚未注册: {agent}--{instance} @ {project_key}")
 
     hub, token = load_client_config()
     if not token:
@@ -52,7 +91,7 @@ def main() -> None:
         "clientInfo": {"name": "am-register", "version": "1.0"},
     })
 
-    if identity:
+    if identity and not args.force:
         try:
             probe = mcp_tool(hub, token, "fetch_inbox", {
                 "project_key": project_key,
@@ -73,7 +112,7 @@ def main() -> None:
     project = mcp_tool(hub, token, "ensure_project", {"human_key": project_key})
     registration = {
         "project_key": project_key,
-        "program": args.program or args.agent,
+        "program": args.program or agent,
         "model": args.model or "unknown",
         "task_description": args.task,
     }
@@ -94,18 +133,16 @@ def main() -> None:
     identity = {
         "project_key": project_key,
         "project_slug": project.get("slug", slugify(project_key)),
-        "agent": args.agent,
-        "instance": args.instance,
+        "agent": agent,
+        "instance": instance,
         "name": registered["name"],
         "registration_token": registered["registration_token"],
         "program": registered.get("program"),
         "model": registered.get("model"),
         "hub": hub,
     }
-    registry_file.parent.mkdir(parents=True, exist_ok=True)
-    registry_file.write_text(json.dumps(identity, ensure_ascii=False, indent=2) + "\n")
-    registry_file.chmod(0o600)
-    print(f"注册成功: {registered['name']}  ({args.agent}--{args.instance} @ {project_key})")
+    _atomic_write_identity(registry_file, identity)
+    print(f"注册成功: {registered['name']}  ({agent}--{instance} @ {project_key})")
     print(f"身份已保存: {registry_file}")
 
 

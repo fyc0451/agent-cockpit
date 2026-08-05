@@ -52,6 +52,27 @@ def test_no_token_allows_loopback_and_rejects_remote_client(monkeypatch):
     assert remote.get("/api/files/roots").status_code == 403
 
 
+def test_no_token_loopback_write_rejects_cross_origin(monkeypatch):
+    """无 Token 模式:loopback 放行但非安全方法必须拒绝跨源 Origin。
+
+    无 Token 时认证只看 client IP,恶意站点可诱导浏览器向 localhost
+    发跨源 POST;必须对存在的 Origin 校验同源,同时保留无 Origin 的 CLI。
+    """
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    client = TestClient(server.app, client=("127.0.0.1", 50000))
+
+    # 无 Origin(CLI/curl)放行
+    assert client.post("/api/auth/logout").status_code == 200
+    # 同源 Origin 放行
+    assert client.post(
+        "/api/auth/logout", headers={"origin": "http://testserver"}
+    ).status_code == 200
+    # 跨源 Origin 拒绝(CSRF 防护)
+    assert client.post(
+        "/api/auth/logout", headers={"origin": "https://evil.example"}
+    ).status_code == 403
+
+
 def test_login_sets_session_cookie(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     client = TestClient(server.app)

@@ -1,6 +1,7 @@
 self.addEventListener('push',event=>{
   let data={};
   try{data=event.data?event.data.json():{}}catch(_){data={}}
+  if(!data||typeof data!=='object'||Array.isArray(data))data={};
   event.waitUntil(self.registration.showNotification(data.title||'Agent Cockpit 需要你',{
     body:data.body||'',
     tag:data.tag||'agent-cockpit',

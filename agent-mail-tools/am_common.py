@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -113,7 +114,12 @@ def load_identity(agent: str, instance: str, project: str) -> tuple[dict, str, s
             f"身份未注册: {registry_file}\n"
             f"先运行: am-register --agent {agent} --instance {instance} --project {project_key}"
         )
-    identity = json.loads(registry_file.read_text())
+    try:
+        identity = json.loads(registry_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"身份文件损坏或不可读: {registry_file}: {exc}") from exc
+    if not isinstance(identity, dict):
+        raise SystemExit(f"身份文件格式错误: {registry_file}")
     if identity.get("project_key") != project_key:
         raise SystemExit(
             f"身份项目不匹配: registry={identity.get('project_key')!r}, request={project_key!r}"
@@ -136,13 +142,35 @@ def mcp_call(hub: str, token: str, method: str, params: dict) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read().decode()
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+    except (urllib.error.URLError, TimeoutError, OSError, UnicodeError) as exc:
+        raise SystemExit(f"MCP 请求失败({method}): {exc}") from exc
+
+    payloads: list[str] = []
+    current: list[str] = []
+    is_sse = False
     for line in raw.splitlines():
         if line.startswith("data:"):
-            raw = line[5:].strip()
-            break
-    return json.loads(raw)
+            is_sse = True
+            current.append(line[5:].lstrip())
+        elif not line and current:
+            payloads.append("\n".join(current))
+            current = []
+    if current:
+        payloads.append("\n".join(current))
+    if not is_sse:
+        payloads = [raw]
+
+    for payload in payloads:
+        try:
+            parsed = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise SystemExit(f"MCP 响应解析失败({method})")
 
 
 def mcp_tool(hub: str, token: str, name: str, args: dict) -> dict | list:
@@ -150,10 +178,14 @@ def mcp_tool(hub: str, token: str, name: str, args: dict) -> dict | list:
     result = mcp_call(
         hub, token, "tools/call", {"name": name, "arguments": clean_args}
     )
+    if not isinstance(result, dict):
+        raise SystemExit(f"tool {name} 返回格式错误")
     if "error" in result:
         raise SystemExit(f"MCP error: {result['error']}")
+    result_body = result.get("result")
+    content = result_body.get("content", []) if isinstance(result_body, dict) else []
     text = "".join(
-        item.get("text", "") for item in result.get("result", {}).get("content", [])
+        item.get("text", "") for item in content if isinstance(item, dict)
     )
     if not text.strip():
         return {}

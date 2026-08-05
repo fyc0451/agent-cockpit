@@ -33,6 +33,8 @@ def temp_data(tmp_path, monkeypatch):
     monkeypatch.setattr(tasks, "TASKS_DB", tmp_path / "tasks.sqlite3")
     monkeypatch.setattr(tasks, "WORKTREE_ROOT", tmp_path / "worktrees")
     tasks._output_buffers.clear()
+    tasks._active_processes.clear()
+    tasks._cancel_requested.clear()
     tasks._init_db()
     return tmp_path
 
@@ -196,6 +198,26 @@ def test_migrate_idempotent(temp_data):
     assert isinstance(tl, list)
 
 
+def test_init_db_marks_interrupted_tasks_failed(temp_data):
+    now = time.time()
+    with tasks._db() as con:
+        for task_id, status in (("pending-old", "pending"), ("running-old", "running")):
+            con.execute(
+                "INSERT INTO tasks (id, workdir, prompt, status, created_ts) "
+                "VALUES (?, '/tmp/fake', 'old task', ?, ?)",
+                (task_id, status, now),
+            )
+        con.commit()
+
+    tasks._init_db()
+
+    for task_id in ("pending-old", "running-old"):
+        task = tasks.get_task(task_id)
+        assert task["status"] == "failed"
+        assert task["exit_code"] == -1
+        assert "服务重启" in task["output_tail"]
+
+
 # ── task_diff ───────────────────────────────────────────────────
 
 def test_task_diff_stages_and_hashes(task_with_worktree):
@@ -238,6 +260,11 @@ def test_task_diff_no_worktree(temp_data):
         con.commit()
     with pytest.raises(ValueError, match="worktree"):
         tasks.task_diff("diffnotest")
+
+
+def test_task_diff_rejects_running_task(running_task_with_worktree):
+    with pytest.raises(ValueError, match="正在运行"):
+        tasks.task_diff(running_task_with_worktree["id"])
 
 
 def test_task_diff_hash_consistent(task_with_worktree):
@@ -297,7 +324,6 @@ def test_apply_requires_completion(running_task_with_worktree):
     tid = running_task_with_worktree["id"]
     wt = running_task_with_worktree["run_workdir"]
     (wt / "file.txt").write_text("content")
-    tasks.task_diff(tid)
     with pytest.raises(ValueError, match="未完成"):
         tasks.task_apply(tid, "apply")
 
@@ -776,6 +802,67 @@ def test_start_task_rejects_bad_image(temp_data, git_repo, monkeypatch):
         )
 
 
+def _insert_worker_task(task_id, workdir):
+    with tasks._db() as con:
+        con.execute(
+            "INSERT INTO tasks (id, workdir, run_workdir, prompt, status, created_ts) "
+            "VALUES (?, ?, ?, 'test', 'pending', ?)",
+            (task_id, str(workdir), str(workdir), time.time()),
+        )
+        con.commit()
+    tasks._output_buffers[task_id] = []
+
+
+def test_run_codex_enforces_total_timeout(temp_data, tmp_path, monkeypatch):
+    script = tmp_path / "slow-codex"
+    script.write_text("#!/bin/sh\nsleep 10\n")
+    script.chmod(0o755)
+    task_id = "timeout-task"
+    _insert_worker_task(task_id, tmp_path)
+    monkeypatch.setattr(tasks, "CODEX_BIN", str(script))
+    monkeypatch.setattr(tasks, "TASK_TIMEOUT_SECONDS", 0.05)
+    started = time.monotonic()
+
+    tasks._run_codex(task_id, str(tmp_path), "prompt", [], None)
+
+    assert time.monotonic() - started < 2
+    task = tasks.get_task(task_id)
+    assert task["status"] == "failed"
+    assert task["exit_code"] == 124
+    assert "超过总时限" in task["output_tail"]
+
+
+def test_cancel_task_terminates_running_process(temp_data, tmp_path, monkeypatch):
+    script = tmp_path / "slow-codex"
+    script.write_text("#!/bin/sh\nsleep 10\n")
+    script.chmod(0o755)
+    task_id = "cancel-task"
+    _insert_worker_task(task_id, tmp_path)
+    monkeypatch.setattr(tasks, "CODEX_BIN", str(script))
+    monkeypatch.setattr(tasks, "TASK_TIMEOUT_SECONDS", 30)
+    worker = threading.Thread(
+        target=tasks._run_codex,
+        args=(task_id, str(tmp_path), "prompt", [], None),
+    )
+    worker.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with tasks._tasks_lock:
+            if task_id in tasks._active_processes:
+                break
+        time.sleep(0.01)
+
+    assert tasks.cancel_task(task_id) == {
+        "id": task_id, "cancel_requested": True
+    }
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    task = tasks.get_task(task_id)
+    assert task["status"] == "cancelled"
+    assert task["exit_code"] == 130
+
+
 # ── _remove_worktree 失败处理 ───────────────────────────────────
 
 def test_remove_worktree_raises_on_residual(temp_data, git_repo, monkeypatch):
@@ -1163,6 +1250,21 @@ def test_ensure_proc_terminated_kills_on_terminate_timeout():
     tasks._ensure_proc_terminated(proc)
     proc.terminate.assert_called_once()
     proc.kill.assert_called_once()
+
+
+def test_ensure_proc_terminated_never_signals_process_group_one(monkeypatch):
+    """无效 PID 1 必须回退到单进程终止，不能变成 kill(-1)。"""
+    proc = MagicMock()
+    proc.pid = 1
+    proc.poll.return_value = None
+    proc.wait.return_value = 0
+    killpg = MagicMock()
+    monkeypatch.setattr(tasks.os, "killpg", killpg)
+
+    tasks._ensure_proc_terminated(proc)
+
+    killpg.assert_not_called()
+    proc.terminate.assert_called_once()
 
 
 def test_get_task_uses_persisted_tail_after_buffer_reclaimed(temp_data):

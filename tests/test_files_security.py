@@ -60,6 +60,15 @@ def test_resolve_accepts_whitelisted_subdirs(tmp_path):
     assert files._resolve("dashboard-uploads/a.txt") == (tmp_path / "dashboard-uploads" / "a.txt").resolve()
 
 
+def test_read_file_reports_invalid_utf8_as_validation_error(tmp_path):
+    directory = _mkdirs(tmp_path / "dashboard-uploads")
+    target = directory / "broken.txt"
+    target.write_bytes(b"valid-prefix\xff")
+
+    with pytest.raises(ValueError, match="UTF-8"):
+        files.read_file(str(target))
+
+
 def test_resolve_accepts_registered_project(tmp_path, monkeypatch):
     proj = _mkdirs(tmp_path / "my-proj")
     f = proj / "x.py"

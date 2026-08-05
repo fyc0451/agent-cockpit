@@ -3,6 +3,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
+import urllib.error
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +45,19 @@ def _load_task_report():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+def _load_tool(name, module_name):
+    path = TOOLS / name
+    loader = importlib.machinery.SourceFileLoader(module_name, str(path))
+    spec = importlib.util.spec_from_file_location(module_name, str(path), loader=loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _load_am_common():
+    return _load_tool("am_common.py", "cockpit_am_common")
 
 
 def test_bound_session_routes_to_unique_pane_even_when_cwd_differs():
@@ -83,10 +100,13 @@ def test_different_session_binding_overrides_matching_pane_cwd():
 
 def test_notification_uses_real_project_and_packaged_receiver():
     module = _load_mail_send()
-    text = module._notify_text(7, "review", "codex", PROJECT, "/worktree", False)
+    text = module._notify_text(
+        7, "review", "codex", "worker-2", PROJECT, "/worktree", False
+    )
 
     assert PROJECT in text
     assert str(TOOLS / "mail-recv") in text
+    assert "--instance worker-2" in text
     assert "当前 pane cwd=/worktree" in text
     assert "--message 7" in text
 
@@ -94,12 +114,85 @@ def test_notification_uses_real_project_and_packaged_receiver():
 def test_blocking_notification_requires_safe_checkpoint_then_complete():
     module = _load_mail_send()
     text = module._notify_text(
-        9, "blocker", "codex", PROJECT, PROJECT, True, "blocking"
+        9, "blocker", "codex", "main", PROJECT, PROJECT, True, "blocking"
     )
 
     assert "打断请求" in text
     assert "安全停手" in text
     assert "checkpoint" in text
+
+
+def test_notification_resolves_registered_instance(tmp_path):
+    module = _load_mail_send()
+    module.REGISTRY_DIR = tmp_path
+    registry = tmp_path / module.slugify(PROJECT)
+    registry.mkdir()
+    (registry / "codex--worker-2.json").write_text(json.dumps({
+        "project_key": PROJECT,
+        "name": "BlueLake",
+        "agent": "codex",
+        "instance": "worker-2",
+    }))
+
+    assert module._notification_identity("BlueLake", PROJECT) == (
+        "codex", "worker-2"
+    )
+
+
+def test_mcp_call_parses_multiline_sse(monkeypatch):
+    module = _load_am_common()
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def read(self):
+            return (
+                b'event: message\n'
+                b'data: {"jsonrpc":"2.0",\n'
+                b'data: "id":1,"result":{"ok":true}}\n\n'
+            )
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+
+    assert module.mcp_call("http://hub", "token", "test", {})["result"] == {"ok": True}
+
+
+def test_mcp_call_reports_network_and_malformed_response(monkeypatch):
+    module = _load_am_common()
+    monkeypatch.setattr(
+        module.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.URLError("down")),
+    )
+    with pytest.raises(SystemExit, match="请求失败"):
+        module.mcp_call("http://hub", "token", "test", {})
+
+    class BadResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def read(self):
+            return b"not-json"
+
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen", lambda *args, **kwargs: BadResponse()
+    )
+    with pytest.raises(SystemExit, match="响应解析失败"):
+        module.mcp_call("http://hub", "token", "test", {})
+
+
+def test_mail_recv_strips_terminal_control_sequences():
+    module = _load_tool("mail-recv", "cockpit_mail_recv")
+    value = "hello\x1b]52;c;c2VjcmV0\x07\nworld\x1b[31m!\x1b[0m\x00"
+
+    assert module._terminal_text(value) == "hello\nworld!"
 
 
 def test_session_binding_requires_matching_session_directory(tmp_path):
@@ -173,6 +266,145 @@ def test_register_does_not_fabricate_agent_main_name():
     assert 'if args.name:' in source
     assert "已有身份无效或已 retired；不会自动覆盖" in source
     assert "--force" in source
+
+
+def _load_am_register():
+    path = TOOLS / "am-register"
+    loader = importlib.machinery.SourceFileLoader("cockpit_am_register", str(path))
+    spec = importlib.util.spec_from_file_location(
+        "cockpit_am_register", str(path), loader=loader
+    )
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def test_register_rejects_unsafe_agent_component(monkeypatch):
+    """agent/instance 直接拼进 registry 路径,必须拒绝路径穿越字符。"""
+    module = _load_am_register()
+    for bad in ("../evil", "a/b", "a\\b", "a b", ".", "-x", ""):
+        with pytest.raises(SystemExit, match="仅允许"):
+            module._validate_component(bad, "agent")
+
+
+def test_register_accepts_safe_component():
+    module = _load_am_register()
+    assert module._validate_component("codex-main", "agent") == "codex-main"
+    assert module._validate_component("qoder-cn.2", "instance") == "qoder-cn.2"
+
+
+def test_register_atomic_write_0600(tmp_path):
+    """身份文件必须原子写且权限 0600,中间态不得暴露 token。"""
+    module = _load_am_register()
+    target = tmp_path / "identity.json"
+    identity = {"name": "demo-main", "registration_token": "secret-token"}
+    module._atomic_write_identity(target, identity)
+
+    assert (target.stat().st_mode & 0o777) == 0o600
+    assert json.loads(target.read_text()) == identity
+    # 目录内不留临时文件
+    assert [p.name for p in tmp_path.iterdir()] == ["identity.json"]
+
+
+def test_register_atomic_write_preserves_existing_on_failure(tmp_path, monkeypatch):
+    """原子写中途失败(如 replace 抛错)不得破坏已存在的旧身份。"""
+    module = _load_am_register()
+    target = tmp_path / "identity.json"
+    old = {"name": "old-main", "registration_token": "old-token"}
+    target.write_text(json.dumps(old))
+    target.chmod(0o600)
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        module._atomic_write_identity(target, {"name": "new"})
+    # 旧身份原样保留
+    assert json.loads(target.read_text()) == old
+    assert (target.stat().st_mode & 0o777) == 0o600
+    # 临时文件被清理
+    assert [p.name for p in tmp_path.iterdir()] == ["identity.json"]
+
+
+def test_register_force_skips_reuse_without_deleting_old(tmp_path, monkeypatch):
+    """--force 不能先删旧身份;注册成功才原子覆盖,失败保留旧身份。"""
+    import sys
+
+    module = _load_am_register()
+    module.REGISTRY_DIR = tmp_path
+    project_key = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    slug = module.slugify(project_key)
+    (tmp_path / slug).mkdir()
+    registry_file = tmp_path / slug / "codex--default.json"
+    old = {"project_key": project_key, "name": "old-main"}
+    registry_file.write_text(json.dumps(old))
+    registry_file.chmod(0o600)
+
+    # force 下直接走新注册;模拟注册成功,验证旧文件被新身份原子覆盖。
+    calls = []
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "tok"))
+    monkeypatch.setattr(
+        module, "mcp_call", lambda *a, **k: calls.append(("call",)) or {}
+    )
+    fake_tool = {
+        "ensure_project": {"slug": "proj", "human_key": project_key},
+        "register_agent": {
+            "name": "new-main", "program": "codex", "model": "m",
+            "registration_token": "new-token",
+        },
+        "set_contact_policy": {"ok": True},
+    }
+    monkeypatch.setattr(
+        module, "mcp_tool",
+        lambda hub, token, name, args: calls.append(("tool", name)) or fake_tool[name],
+    )
+    argv = [
+        "am-register", "--agent", "codex", "--instance", "default",
+        "--project", project_key, "--force",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    module.main()
+
+    assert any(c[0] == "tool" and c[1] == "register_agent" for c in calls)
+    assert json.loads(registry_file.read_text())["name"] == "new-main"
+    assert (registry_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_register_force_failure_keeps_old_identity(tmp_path, monkeypatch):
+    """--force 但重新注册失败(register_agent 抛错):旧身份必须原样保留。"""
+    import sys
+
+    module = _load_am_register()
+    module.REGISTRY_DIR = tmp_path
+    project_key = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    slug = module.slugify(project_key)
+    (tmp_path / slug).mkdir()
+    registry_file = tmp_path / slug / "codex--default.json"
+    old = {"project_key": project_key, "name": "old-main"}
+    registry_file.write_text(json.dumps(old))
+    registry_file.chmod(0o600)
+
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "tok"))
+    monkeypatch.setattr(module, "mcp_call", lambda *a, **k: {})
+    monkeypatch.setattr(
+        module, "mcp_tool",
+        lambda hub, token, name, args: (_ for _ in ()).throw(
+            SystemExit("MCP error: register failed")
+        ),
+    )
+    argv = [
+        "am-register", "--agent", "codex", "--instance", "default",
+        "--project", project_key, "--force",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit):
+        module.main()
+
+    assert json.loads(registry_file.read_text()) == old
+    assert (registry_file.stat().st_mode & 0o777) == 0o600
 
 
 def test_packaged_tools_do_not_contain_client_credentials():

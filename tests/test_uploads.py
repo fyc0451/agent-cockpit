@@ -34,6 +34,24 @@ def test_streaming_upload_removes_partial_file_when_too_large(tmp_path, monkeypa
     assert list(tmp_path.iterdir()) == []
 
 
+def test_streaming_upload_removes_partial_file_when_cancelled(tmp_path, monkeypatch):
+    monkeypatch.setattr(uploads, "UPLOAD_DIR", tmp_path)
+
+    class CancelledReader:
+        calls = 0
+
+        async def read(self, size: int) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return b"partial"
+            raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(uploads.save_upload_file("example.txt", CancelledReader()))
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_upload_allows_any_extension(tmp_path, monkeypatch):
     """所有格式放开:wav、无扩展名等任意文件都可上传。"""
     monkeypatch.setattr(uploads, "UPLOAD_DIR", tmp_path)
@@ -56,3 +74,24 @@ def test_upload_runs_disk_sync_in_worker_thread(tmp_path, monkeypatch):
     asyncio.run(uploads.save_upload_file("example.txt", AsyncReader(b"hello")))
 
     assert uploads.os.fsync in threaded_functions
+
+
+def test_list_uploads_skips_file_deleted_during_listing(tmp_path, monkeypatch):
+    monkeypatch.setattr(uploads, "UPLOAD_DIR", tmp_path)
+    vanished = tmp_path / "vanished.txt"
+    kept = tmp_path / "kept.txt"
+    vanished.write_text("gone")
+    kept.write_text("keep")
+    original_is_file = uploads.Path.is_file
+
+    def delete_after_check(path):
+        result = original_is_file(path)
+        if path == vanished and result:
+            vanished.unlink()
+        return result
+
+    monkeypatch.setattr(uploads.Path, "is_file", delete_after_check)
+
+    result = uploads.list_uploads()
+
+    assert [item["filename"] for item in result] == ["kept.txt"]
