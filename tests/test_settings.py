@@ -281,6 +281,12 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         json={"status": "active"},
     )
     assert response.status_code == 200
+    assert client.get("/api/team/inbox", headers=headers).status_code == 200
+    assert client.post(
+        "/api/team/inbox/mark-read",
+        headers=headers,
+        json={"ids": [11]},
+    ).status_code == 200
     assert calls == [
         ("GET", "/hub/api/projects", "Bearer human.jwt", None),
         (
@@ -288,6 +294,13 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
             "/hub/api/projects/demo/members/7",
             "Bearer human.jwt",
             {"status": "active"},
+        ),
+        ("GET", "/hub/api/inbox", "Bearer human.jwt", None),
+        (
+            "POST",
+            "/hub/api/inbox/mark-read",
+            "Bearer human.jwt",
+            {"ids": [11]},
         ),
     ]
 
@@ -299,6 +312,11 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
     assert client.get(
         "/api/team/projects/demo/../../env-check",
         headers=headers,
+    ).status_code == 404
+    assert client.put(
+        "/api/team/inbox",
+        headers=headers,
+        json={},
     ).status_code == 404
     assert client.get(
         "/api/team/projects",

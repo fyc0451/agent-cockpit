@@ -66,6 +66,8 @@ SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 PANE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$")
 TEAM_API_ROUTES = (
     (re.compile(r"^humans/me$"), {"GET", "PUT"}),
+    (re.compile(r"^inbox$"), {"GET"}),
+    (re.compile(r"^inbox/mark-read$"), {"POST"}),
     (re.compile(r"^projects$"), {"GET", "POST"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/join-requests$"), {"POST"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/membership$"), {"GET", "PATCH"}),

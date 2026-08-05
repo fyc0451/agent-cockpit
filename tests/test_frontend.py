@@ -988,11 +988,15 @@ def test_team_view_covers_project_membership_and_agent_management():
     assert "function teamSetDefault()" in js
     assert "function teamSetOwner(agentId)" in js
     assert "function teamSetMemberStatus(humanId,status)" in js
+    assert "function teamShowInbox()" in js
+    assert "function teamMarkInboxRead(ids)" in js
     assert "'projects','POST'" in js
     assert "/join-requests`,'POST'" in js
     assert "/membership`,'PATCH'" in js
     assert "/members/${humanId}`,'PATCH'" in js
     assert "/agents/${agentId}`,'PATCH'" in js
+    assert "teamApi('inbox')" in js
+    assert "teamApi('inbox/mark-read','POST',{ids})" in js
 
 
 def test_team_human_jwt_is_tab_scoped_and_hub_text_is_escaped():
@@ -1004,6 +1008,12 @@ def test_team_human_jwt_is_tab_scoped_and_hub_text_is_escaped():
     assert "${esc(project.slug)}" in js
     assert "${esc(agent.name)}" in js
     assert "${esc(member.display_name)}" in js
+    assert "${esc(item.subject||'（无主题）')}" in js
+    assert "${esc(item.body_md||'')}" in js
+    assert "${esc(item.project_slug||'unknown')}" in js
+    assert "${esc(item.sender_name||'unknown')}" in js
+    assert "${item.body_md}" not in js
+    assert "${item.sender_name}" not in js
     assert "团队项目、成员、Agent 状态只用于展示与 Hub 元数据更新" in js
 
 
@@ -1013,6 +1023,8 @@ def test_team_refresh_and_mutations_are_serialized():
     assert "if(TEAM.mutating)return" in js
     assert "TEAM.mutating=true" in js
     assert "finally{TEAM.mutating=false}" in js
+    assert "if(TEAM.inboxLoading)return" in js
+    assert "if(TEAM.mutating||!ids.length)return" in js
 
 
 def test_i18n_en_ja_key_sets_match():
