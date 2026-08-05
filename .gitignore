@@ -12,6 +12,8 @@ dashboard-uploads/
 *.sqlite3-shm
 *.sqlite3-wal
 *.log
+.qoder
+analysis/
 
 # 本地配置(含 token,绝不入库)
 .env
