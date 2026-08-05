@@ -74,6 +74,14 @@ def _init_db() -> None:
             )"""
         )
         _migrate_db(con)
+        interrupted = "[ERROR] Agent Cockpit 服务重启，任务进程已中断"
+        con.execute(
+            "UPDATE tasks SET status='failed', exit_code=-1, finished_ts=?, "
+            "output_tail=CASE WHEN output_tail IS NULL OR output_tail='' THEN ? "
+            "ELSE output_tail || char(10) || ? END "
+            "WHERE status IN ('pending', 'running')",
+            (time.time(), interrupted, interrupted),
+        )
         con.commit()
 
 
@@ -497,6 +505,8 @@ def task_diff(task_id: str) -> dict[str, Any]:
     t = get_task(task_id)
     if not t:
         raise ValueError("任务不存在")
+    if t["status"] in ("pending", "running"):
+        raise ValueError(f"任务正在运行中(状态: {t['status']}),禁止预览 diff")
     run_workdir = t.get("run_workdir")
     if not run_workdir or not Path(run_workdir).is_dir():
         raise ValueError("任务 worktree 不存在(可能已被丢弃或未创建)")
@@ -508,6 +518,8 @@ def task_diff(task_id: str) -> dict[str, Any]:
         t = get_task(task_id)
         if not t:
             raise ValueError("任务不存在")
+        if t["status"] in ("pending", "running"):
+            raise ValueError(f"任务正在运行中(状态: {t['status']}),禁止预览 diff")
         run_workdir = t.get("run_workdir")
         if not run_workdir or not Path(run_workdir).is_dir():
             raise ValueError("任务 worktree 不存在(可能已被丢弃或未创建)")

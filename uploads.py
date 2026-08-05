@@ -55,7 +55,7 @@ async def save_upload_file(filename: str, source: Any) -> dict:
                 await asyncio.to_thread(out.write, chunk)
             await asyncio.to_thread(out.flush)
             await asyncio.to_thread(os.fsync, out.fileno())
-    except Exception:
+    except BaseException:
         dest.unlink(missing_ok=True)
         raise
     return {
@@ -71,7 +71,16 @@ def list_uploads(limit: int = 50) -> list[dict]:
     if not UPLOAD_DIR.is_dir():
         return []
     files = sorted(UPLOAD_DIR.iterdir(), key=lambda p: p.name, reverse=True)[:limit]
-    return [
-        {"id": f.stem, "path": str(f), "filename": f.name, "size": f.stat().st_size}
-        for f in files if f.is_file()
-    ]
+    result = []
+    for f in files:
+        try:
+            if not f.is_file():
+                continue
+            size = f.stat().st_size
+        except OSError:
+            # 上传列表与清理/用户删除可并发；消失的条目直接跳过。
+            continue
+        result.append({
+            "id": f.stem, "path": str(f), "filename": f.name, "size": size,
+        })
+    return result

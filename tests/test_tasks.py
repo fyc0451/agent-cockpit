@@ -196,6 +196,26 @@ def test_migrate_idempotent(temp_data):
     assert isinstance(tl, list)
 
 
+def test_init_db_marks_interrupted_tasks_failed(temp_data):
+    now = time.time()
+    with tasks._db() as con:
+        for task_id, status in (("pending-old", "pending"), ("running-old", "running")):
+            con.execute(
+                "INSERT INTO tasks (id, workdir, prompt, status, created_ts) "
+                "VALUES (?, '/tmp/fake', 'old task', ?, ?)",
+                (task_id, status, now),
+            )
+        con.commit()
+
+    tasks._init_db()
+
+    for task_id in ("pending-old", "running-old"):
+        task = tasks.get_task(task_id)
+        assert task["status"] == "failed"
+        assert task["exit_code"] == -1
+        assert "服务重启" in task["output_tail"]
+
+
 # ── task_diff ───────────────────────────────────────────────────
 
 def test_task_diff_stages_and_hashes(task_with_worktree):
@@ -238,6 +258,11 @@ def test_task_diff_no_worktree(temp_data):
         con.commit()
     with pytest.raises(ValueError, match="worktree"):
         tasks.task_diff("diffnotest")
+
+
+def test_task_diff_rejects_running_task(running_task_with_worktree):
+    with pytest.raises(ValueError, match="正在运行"):
+        tasks.task_diff(running_task_with_worktree["id"])
 
 
 def test_task_diff_hash_consistent(task_with_worktree):
@@ -297,7 +322,6 @@ def test_apply_requires_completion(running_task_with_worktree):
     tid = running_task_with_worktree["id"]
     wt = running_task_with_worktree["run_workdir"]
     (wt / "file.txt").write_text("content")
-    tasks.task_diff(tid)
     with pytest.raises(ValueError, match="未完成"):
         tasks.task_apply(tid, "apply")
 

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -16,6 +18,7 @@ KEY_PATH = DATA_DIR / "vapid-private.pem"
 VAPID_SUBJECT = os.environ.get(
     "COCKPIT_VAPID_SUBJECT", "mailto:agent-cockpit@localhost"
 )
+logger = logging.getLogger("agent-cockpit.web-push")
 
 
 def _db() -> sqlite3.Connection:
@@ -105,6 +108,41 @@ def _ensure_private_key() -> tuple[str, str]:
     return str(KEY_PATH), public_key
 
 
+def _public_key_from_private(value: str) -> str:
+    """从 PEM 路径/PEM 正文/32-byte base64url 私钥推导 VAPID 公钥。"""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    if "-----BEGIN" in value:
+        private_key = serialization.load_pem_private_key(value.encode(), password=None)
+    else:
+        path = Path(value).expanduser()
+        try:
+            is_file = len(value) < 4096 and path.is_file()
+        except OSError:
+            is_file = False
+        if is_file:
+            private_key = serialization.load_pem_private_key(path.read_bytes(), password=None)
+        else:
+            padding = "=" * (-len(value) % 4)
+            try:
+                raw = base64.urlsafe_b64decode(value + padding)
+            except ValueError as exc:
+                raise ValueError("VAPID 私钥不是有效的 PEM、路径或 base64url") from exc
+            if len(raw) != 32:
+                raise ValueError("VAPID base64url 私钥必须是 32 bytes")
+            private_key = ec.derive_private_key(int.from_bytes(raw, "big"), ec.SECP256R1())
+    if not isinstance(private_key, ec.EllipticCurvePrivateKey) or not isinstance(
+        private_key.curve, ec.SECP256R1
+    ):
+        raise ValueError("VAPID 私钥必须使用 P-256 曲线")
+    public_bytes = private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    return base64.urlsafe_b64encode(public_bytes).rstrip(b"=").decode("ascii")
+
+
 def config() -> dict[str, Any]:
     private = os.environ.get("COCKPIT_VAPID_PRIVATE_KEY")
     public = os.environ.get("COCKPIT_VAPID_PUBLIC_KEY")
@@ -116,8 +154,14 @@ def config() -> dict[str, Any]:
             }
         try:
             import pywebpush  # noqa: F401
+            derived_public = _public_key_from_private(private)
         except Exception as exc:
             return {"available": False, "reason": f"Web Push 初始化失败: {exc}"}
+        if derived_public != public.rstrip("="):
+            return {
+                "available": False,
+                "reason": "COCKPIT_VAPID_PRIVATE_KEY 与 PUBLIC_KEY 不匹配",
+            }
         return {
             "available": True,
             "private_key": private,
@@ -158,8 +202,11 @@ def notify(items: list[dict[str, Any]]) -> dict[str, int]:
         return result
     push_config = config()
     if not push_config.get("available"):
+        logger.warning("Web Push 不可用: %s", push_config.get("reason", "未知原因"))
         return result
-    for subscription in list_subscriptions():
+
+    def send_subscription(subscription: dict[str, Any]) -> dict[str, int]:
+        counts = {"sent": 0, "removed": 0, "failed": 0}
         for item in items:
             payload = {
                 "title": str(item.get("title") or "Agent Cockpit 需要你"),
@@ -179,12 +226,25 @@ def notify(items: list[dict[str, Any]]) -> dict[str, int]:
                     ttl=120,
                     timeout=10,
                 )
-                result["sent"] += 1
+                counts["sent"] += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 if status in (404, 410):
                     delete_subscription(subscription["endpoint"])
-                    result["removed"] += 1
+                    counts["removed"] += 1
                     break
-                result["failed"] += 1
+                logger.warning(
+                    "Web Push 发送失败(status=%s): %s", status or "unknown", exc
+                )
+                counts["failed"] += 1
+        return counts
+
+    subscriptions = list_subscriptions()
+    workers = min(4, len(subscriptions))
+    if not workers:
+        return result
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        for counts in executor.map(send_subscription, subscriptions):
+            for key in result:
+                result[key] += counts[key]
     return result

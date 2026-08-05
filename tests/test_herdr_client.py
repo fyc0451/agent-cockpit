@@ -70,6 +70,24 @@ def test_list_sessions_falls_back_for_old_herdr(monkeypatch):
     }]
 
 
+def test_snapshot_handles_unexpected_json_shapes(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_run", lambda *args, **kwargs: "[]")
+
+    assert herdr_client._snapshot_session("demo") == {
+        "session": "demo", "error": "snapshot parse failed", "panes": []
+    }
+
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda *args, **kwargs: '{"result":{"snapshot":{"panes":"bad"}}}',
+    )
+    assert herdr_client._snapshot_session("demo") == {
+        "session": "demo", "error": "snapshot parse failed", "panes": []
+    }
+
+
 def test_start_agent_uses_snapshot_delta_and_single_command_argument(monkeypatch):
     """无创建响应时只能选前后 snapshot 唯一新增 pane，不能猜最大 id。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)

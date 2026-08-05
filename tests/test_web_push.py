@@ -51,6 +51,22 @@ def test_config_generates_private_vapid_key_once(tmp_path, monkeypatch):
     assert key_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_config_rejects_mismatched_explicit_vapid_keys(tmp_path, monkeypatch):
+    key_path = tmp_path / "vapid-private.pem"
+    monkeypatch.setattr(web_push, "KEY_PATH", key_path)
+    private, public = web_push._ensure_private_key()
+    monkeypatch.setenv("COCKPIT_VAPID_PRIVATE_KEY", private)
+    monkeypatch.setenv("COCKPIT_VAPID_PUBLIC_KEY", "wrong-public-key")
+
+    mismatch = web_push.config()
+
+    assert mismatch["available"] is False
+    assert "不匹配" in mismatch["reason"]
+
+    monkeypatch.setenv("COCKPIT_VAPID_PUBLIC_KEY", public)
+    assert web_push.config()["available"] is True
+
+
 def test_notify_sends_deep_link_and_removes_gone_subscription(tmp_path, monkeypatch):
     monkeypatch.setattr(web_push, "DB_PATH", tmp_path / "push.sqlite3")
     web_push.save_subscription(_subscription())
@@ -139,5 +155,6 @@ def test_service_worker_and_frontend_wire_push_and_deep_links():
     assert "location.hash" in html
     assert "#/attention/" in html
     assert "self.addEventListener('push'" in worker
+    assert "Array.isArray(data)" in worker
     assert "self.addEventListener('notificationclick'" in worker
     assert "clients.openWindow" in worker

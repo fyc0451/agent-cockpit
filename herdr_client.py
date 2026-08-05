@@ -119,6 +119,8 @@ def list_sessions() -> list[dict[str, Any]]:
     try:
         out = _run(["session", "list", "--json"], timeout=8)
         data = json.loads(out)
+        if not isinstance(data, dict):
+            raise ValueError("session list 不是对象")
         rows = data.get("sessions", [])
         if not isinstance(rows, list):
             raise ValueError("sessions 不是列表")
@@ -170,12 +172,23 @@ def _snapshot_session(session: str) -> dict[str, Any]:
     except (ValueError, json.JSONDecodeError):
         # 可能直接是 JSON-RPC 错误
         return {"session": session, "error": "snapshot parse failed", "panes": []}
+    if not isinstance(data, dict):
+        return {"session": session, "error": "snapshot parse failed", "panes": []}
     if "error" in data:
         return {"session": session, "error": str(data["error"]), "panes": []}
-    snap = data.get("result", {}).get("snapshot", {})
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return {"session": session, "error": "snapshot parse failed", "panes": []}
+    snap = result.get("snapshot")
+    if not isinstance(snap, dict):
+        return {"session": session, "error": "snapshot parse failed", "panes": []}
     panes = snap.get("panes", [])
+    if not isinstance(panes, list):
+        return {"session": session, "error": "snapshot parse failed", "panes": []}
     slim = []
     for p in panes:
+        if not isinstance(p, dict):
+            continue
         cwd = p.get("cwd") or p.get("foreground_cwd") or ""
         slim.append({
             "pane_id": p.get("pane_id"),
@@ -195,7 +208,7 @@ def _snapshot_session(session: str) -> dict[str, Any]:
         "session": session,
         "status": "running",
         "panes": slim,
-        "agents": snap.get("agents", []),
+        "agents": snap.get("agents", []) if isinstance(snap.get("agents", []), list) else [],
         "focused_pane_id": snap.get("focused_pane_id"),
     }
 
