@@ -384,6 +384,9 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     assert "button.disabled=true" in launch
     assert "finally" in launch and "button.disabled=false" in launch
     assert "QoderCLI 首次启动可能约 60 秒" in js
+    assert "const mail=r.agent_mail||{}" in launch
+    assert "mail.warning" in launch
+    assert "身份 '+mail.name+' 已通知" in launch
 
 
 def test_add_agent_form_opens_from_terminal_toolbar_instead_of_board_footer():

@@ -257,6 +257,78 @@ def test_qoder_notification_uses_registered_command_identity():
     assert module.PROG_TO_AGENT["qoder-cn"] == "qodercn"
     assert module.PROG_TO_AGENT["qodercli"] == "qodercn"
     assert module.PROG_TO_AGENT["qodercn"] == "qodercn"
+    assert module._agent_types_match("qodercn", "qodercli") is True
+    assert module._agent_types_match("qodercn", "qoder") is True
+    assert module._agent_types_match("qodercn", "codex") is False
+
+
+def test_qodercn_notification_prompts_qodercli_pane(monkeypatch, tmp_path):
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    session_dir = tmp_path / "session"
+    project = tmp_path / "project"
+    worktree = tmp_path / "worktree"
+    for item in (session_dir, project, worktree):
+        item.mkdir()
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(
+        module, "_session_rows",
+        lambda _: [{"name": "demo", "running": True, "directory": str(session_dir)}],
+    )
+    monkeypatch.setattr(module, "_load_bindings", lambda: {"demo": {
+        "session_dir": str(session_dir), "project": str(project),
+    }})
+    prompts = []
+
+    def run(args, **kwargs):
+        if args[-2:] == ["api", "snapshot"]:
+            return module.subprocess.CompletedProcess(args, 0, json.dumps({
+                "result": {"snapshot": {"panes": [{
+                    "pane_id": "w1:pA", "agent": "qodercli", "cwd": str(worktree),
+                }]}}
+            }), "")
+        if "prompt" in args:
+            prompts.append(args)
+            return module.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    module._notify_pane(
+        "qodercn", "main", 860, "身份通知链确认", str(project)
+    )
+
+    assert len(prompts) == 1
+    assert prompts[0][2:6] == ["demo", "agent", "prompt", "w1:pA"]
+    assert "--agent qodercn" in prompts[0][-1]
+    assert "--message 860" in prompts[0][-1]
+
+
+def test_identity_hook_uses_validated_herdr_session_binding(monkeypatch, tmp_path):
+    module = _load_tool("mail-identity-inject", "cockpit_mail_identity_inject")
+    home = tmp_path / "home"
+    session_dir = home / ".config" / "herdr" / "sessions" / "demo"
+    worktree = tmp_path / "project-worktree"
+    project = tmp_path / "project"
+    for item in (session_dir, worktree, project):
+        item.mkdir(parents=True)
+    state = tmp_path / "mail-projects.json"
+    state.write_text(json.dumps({"sessions": {"demo": {
+        "session_dir": str(session_dir), "project": str(project),
+    }}}))
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: home))
+
+    assert module._canonical_project(
+        str(worktree), "demo", state, str(session_dir / "herdr.sock")
+    ) == str(project.resolve())
+
+    state.write_text(json.dumps({"sessions": {"demo": {
+        "session_dir": str(tmp_path / "wrong"), "project": str(project),
+    }}}))
+    assert module._canonical_project(
+        str(worktree), "demo", state, str(session_dir / "herdr.sock")
+    ) == str(worktree.resolve())
 
 
 def test_register_does_not_fabricate_agent_main_name():

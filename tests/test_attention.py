@@ -1238,6 +1238,161 @@ def test_start_agent_can_create_named_isolated_worktree(monkeypatch, tmp_path):
     assert calls[0][1] == {"layout": "right", "label": "codex-2"}
 
 
+def test_start_agent_registers_and_notifies_unique_qoder_identity(
+    monkeypatch, tmp_path,
+):
+    workdir = tmp_path / "worktree"
+    canonical = tmp_path / "project"
+    workdir.mkdir()
+    canonical.mkdir()
+    init_script = tmp_path / "am-init-project"
+    init_script.touch()
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", init_script)
+    monkeypatch.setattr(
+        server.herdr_client, "start_agent",
+        lambda *args, **kwargs: {"available": True, "pane_id": "w1:pA"},
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "snapshot",
+        lambda: {"panes": [{
+            "session": "demo", "pane_id": "w1:pA", "agent": "qodercli",
+        }]},
+    )
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _: {"bound": True, "project": str(canonical)},
+    )
+    registered = {"value": False}
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda project, agent: (
+            "qodercn-main"
+            if registered["value"] and project == str(canonical) and agent == "qodercli"
+            else None
+        ),
+    )
+    init_calls = []
+
+    def run_init(args, **kwargs):
+        init_calls.append((args, kwargs))
+        registered["value"] = True
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+
+    monkeypatch.setattr(server.subprocess, "run", run_init)
+    sent = []
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(workdir), "agent": "qodercli",
+            "name": "qodercli-1", "workspace": "shared",
+        },
+    )
+
+    assert response.status_code == 200
+    mail = response.json()["agent_mail"]
+    assert mail == {
+        "project": str(canonical), "name": "qodercn-main",
+        "registered": True, "registered_now": True, "notified": True,
+    }
+    assert init_calls[0][0] == [
+        str(init_script), "--project", str(canonical), "--only", "qodercn",
+    ]
+    assert init_calls[0][1]["cwd"] == str(canonical)
+    assert sent[0][0:2] == ("demo", "w1:pA")
+    assert "项目=" + str(canonical) in sent[0][2]
+    assert "--agent qodercn" in sent[0][2]
+
+
+def test_start_agent_keeps_launch_success_when_identity_registration_fails(
+    monkeypatch, tmp_path,
+):
+    workdir = tmp_path / "worktree"
+    canonical = tmp_path / "project"
+    workdir.mkdir()
+    canonical.mkdir()
+    init_script = tmp_path / "am-init-project"
+    init_script.touch()
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", init_script)
+    monkeypatch.setattr(
+        server.herdr_client, "start_agent",
+        lambda *args, **kwargs: {"available": True, "pane_id": "w1:pA"},
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "snapshot",
+        lambda: {"panes": [{
+            "session": "demo", "pane_id": "w1:pA", "agent": "qodercli",
+        }]},
+    )
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _: {"bound": True, "project": str(canonical)},
+    )
+    monkeypatch.setattr(server, "_identity_name", lambda *_: None)
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "", "hub down"),
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(workdir), "agent": "qodercli",
+            "name": "qodercli-1", "workspace": "shared",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" not in body
+    assert body["pane_id"] == "w1:pA"
+    assert body["agent_mail"]["registered"] is False
+    assert "hub down" in body["agent_mail"]["warning"]
+
+
+def test_start_agent_skips_ambiguous_same_type_mail_identity(monkeypatch, tmp_path):
+    workdir = tmp_path / "worktree"
+    workdir.mkdir()
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.herdr_client, "start_agent",
+        lambda *args, **kwargs: {"available": True, "pane_id": "w1:p4"},
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "snapshot",
+        lambda: {"panes": [
+            {"session": "demo", "pane_id": "w1:p2", "agent": "codex"},
+            {"session": "demo", "pane_id": "w1:p4", "agent": "codex"},
+        ]},
+    )
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _: (_ for _ in ()).throw(AssertionError("不应绑定重复类型身份")),
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(workdir), "agent": "codex",
+            "name": "codex-2", "workspace": "shared",
+        },
+    )
+
+    assert response.status_code == 200
+    mail = response.json()["agent_mail"]
+    assert mail["skipped"] == "ambiguous_same_type"
+    assert "同类型多实例" in mail["warning"]
+
+
 def test_start_agent_from_existing_worktree_creates_sibling_at_primary_repo(
     monkeypatch, tmp_path,
 ):

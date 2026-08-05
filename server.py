@@ -1512,6 +1512,79 @@ def api_herdr_pane_send(session: str, pane_id: str, req: PaneSendReq):
     return herdr_client.pane_send(session, pane_id, req.text, req.mode)
 
 
+def _started_agent_mail_identity(
+    session: str, pane_id: str, agent_type: str,
+) -> dict[str, Any]:
+    """为新增的唯一类型 Agent 注册 canonical 身份并发送身份告知。"""
+    base: dict[str, Any] = {
+        "registered": False, "registered_now": False, "notified": False,
+    }
+    mail_agent = MAIL_AGENT_NAMES.get(agent_type, agent_type)
+    try:
+        panes = [
+            pane for pane in herdr_client.snapshot().get("panes", [])
+            if pane.get("session") == session
+            and MAIL_AGENT_NAMES.get(
+                str(pane.get("agent") or ""), str(pane.get("agent") or "")
+            ) == mail_agent
+        ]
+    except Exception as exc:
+        return {**base, "warning": f"无法确认同类型 Agent 数量，已跳过身份绑定: {exc}"}
+    if len(panes) > 1:
+        return {
+            **base, "skipped": "ambiguous_same_type",
+            "warning": "同类型多实例共用邮箱身份会产生通知歧义，已跳过自动绑定",
+        }
+    try:
+        state = _mail_project_state(session)
+    except Exception as exc:
+        return {**base, "warning": f"读取 Agent Mail 通信项目失败: {exc}"}
+    if not state.get("bound") or not state.get("project"):
+        return {**base, "warning": "该 session 尚未绑定 Agent Mail 通信项目"}
+    project = str(state["project"])
+    status = {**base, "project": project}
+    name = _identity_name(project, agent_type)
+    if not name:
+        if not AGENT_MAIL_INIT_SCRIPT.is_file():
+            return {**status, "warning": "Agent Mail 注册工具未安装"}
+        try:
+            registered = subprocess.run(
+                [
+                    str(AGENT_MAIL_INIT_SCRIPT), "--project", project,
+                    "--only", mail_agent,
+                ],
+                cwd=project, capture_output=True, text=True, timeout=60,
+            )
+        except Exception as exc:
+            return {**status, "warning": f"Agent Mail 身份注册失败: {exc}"}
+        if registered.returncode != 0:
+            detail = (registered.stderr or registered.stdout)[-300:].strip()
+            return {
+                **status,
+                "warning": f"Agent Mail 身份注册失败: {detail or 'am-init-project 失败'}",
+            }
+        name = _identity_name(project, agent_type)
+        if not name:
+            return {**status, "warning": "Agent Mail 注册完成但未查到有效身份"}
+        status["registered_now"] = True
+    status.update({"registered": True, "name": name})
+    try:
+        notified = herdr_client.pane_send(
+            session, pane_id,
+            _identity_hint(name, project, agent_type, registered=True), "prompt",
+        )
+    except Exception as exc:
+        return {**status, "warning": f"身份已注册，但告知发送失败: {exc}"}
+    if notified.get("available", True) is False or notified.get("error"):
+        return {
+            **status,
+            "warning": "身份已注册，但告知发送失败: "
+            + str(notified.get("error") or "Herdr 不可用"),
+        }
+    status["notified"] = True
+    return status
+
+
 def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     if req.agent not in VALID_AGENTS:
         raise HTTPException(400, f"不支持的 agent: {req.agent}")
@@ -1566,6 +1639,13 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
         result["worktree_rolled_back"] = not cleanup_errors
         if cleanup_errors:
             result["rollback_errors"] = cleanup_errors
+    if (
+        not launch_failed and not result.get("reused")
+        and isinstance(result.get("pane_id"), str) and result["pane_id"]
+    ):
+        result["agent_mail"] = _started_agent_mail_identity(
+            req.session, result["pane_id"], req.agent
+        )
     return result
 
 

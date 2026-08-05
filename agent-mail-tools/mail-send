@@ -25,10 +25,18 @@ MAIL_PROJECTS_PATH = os.path.expanduser("~/dashboard-data/mail-projects.json")
 PROG_TO_AGENT = {
     "codex-cli": "codex", "codex": "codex",
     "kimi-work": "kimi", "kimi": "kimi",
-    "qoder-cn": "qodercn", "qodercli": "qodercn", "qodercn": "qodercn",
+    "qoder-cn": "qodercn", "qoder": "qodercn",
+    "qodercli": "qodercn", "qodercn": "qodercn",
     "claude": "claude", "claude-code": "claude",
     "grok": "grok", "opencode": "opencode",
 }
+
+
+def _agent_types_match(left: str, right: str) -> bool:
+    """比较 Agent Mail 类型与 Herdr runtime，兼容同一 CLI 的别名。"""
+    if not left or not right:
+        return False
+    return PROG_TO_AGENT.get(left, left) == PROG_TO_AGENT.get(right, right)
 
 
 def _agent_mail_db_path() -> str:
@@ -232,7 +240,10 @@ def _notify_pane(
                 os.path.expanduser(bound_project)
             ) == os.path.realpath(os.path.expanduser(project_key))
             for pane in panes:
-                if pane.get("agent") != agent_type or not pane.get("pane_id"):
+                if (
+                    not _agent_types_match(agent_type, str(pane.get("agent") or ""))
+                    or not pane.get("pane_id")
+                ):
                     continue
                 cwd = pane.get("cwd") or pane.get("foreground_cwd") or ""
                 candidates.append((

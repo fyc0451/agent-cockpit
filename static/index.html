@@ -1594,7 +1594,12 @@ async function startAgent(){
   if(qoderSlow)toast('QoderCLI 首次启动可能约 60 秒，请稍候');
   try{
     const r=await api('/api/herdr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agent,name,layout,workspace})});
-    if(r.error)toast('启动: '+r.error);else{toast((r.reused?'已复用 ':'已启动 ')+name+' ['+agent+'] @ '+session+(r.workspace?.strategy==='isolated'?' · 独立 worktree':''));setTimeout(async()=>{await refreshBoard();launchRefreshName(true)},1500)}
+    if(r.error)toast('启动: '+r.error);else{
+      const mail=r.agent_mail||{};
+      const mailStatus=mail.notified?(' · 身份 '+mail.name+' 已通知'):(mail.warning?(' · Agent Mail: '+mail.warning):'');
+      toast((r.reused?'已复用 ':'已启动 ')+name+' ['+agent+'] @ '+session+(r.workspace?.strategy==='isolated'?' · 独立 worktree':'')+mailStatus,mail.warning?5000:2000);
+      setTimeout(async()=>{await refreshBoard();launchRefreshName(true)},1500)
+    }
   }catch(e){toast('启动失败: '+e)}
   finally{button.disabled=false;button.textContent='+ 新建 agent'}
 }

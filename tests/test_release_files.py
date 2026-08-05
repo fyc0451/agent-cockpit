@@ -191,7 +191,10 @@ def test_agent_mail_is_documented_and_diagnosed_as_optional():
 
 def test_agent_mail_helpers_are_packaged_and_safely_linked():
     tools = ROOT / "agent-mail-tools"
-    for name in ("am-register", "am-init-project", "mail-send", "mail-recv"):
+    for name in (
+        "am-register", "am-init-project", "mail-send", "mail-recv",
+        "mail-identity-inject",
+    ):
         path = tools / name
         assert path.is_file(), f"missing Agent Mail helper: {name}"
         assert path.stat().st_mode & 0o111, f"Agent Mail helper is not executable: {name}"
@@ -201,13 +204,17 @@ def test_agent_mail_helpers_are_packaged_and_safely_linked():
         assert '"$INSTALL_DIR/install-agent-mail-tools.sh" "$INSTALL_DIR"' in script
     linker = (ROOT / "install-agent-mail-tools.sh").read_text()
     assert '[[ -f "$target" && ! -L "$target" ]]' in linker
+    assert "readlink -f" not in linker
 
 
 def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path):
     install_dir = tmp_path / "install"
     tools = install_dir / "agent-mail-tools"
     tools.mkdir(parents=True)
-    for name in ("am-register", "am-init-project", "mail-send", "mail-recv"):
+    for name in (
+        "am-register", "am-init-project", "mail-send", "mail-recv",
+        "mail-identity-inject",
+    ):
         path = tools / name
         path.write_text("#!/usr/bin/env bash\n")
         path.chmod(0o755)
@@ -226,6 +233,16 @@ def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path
     legacy = legacy_dir / "am-init-project"
     legacy.write_text("legacy\n")
     (bin_dir / "am-init-project").symlink_to(legacy)
+    legacy_hook = legacy_dir / "mail-identity-inject"
+    legacy_hook.write_text(
+        "#!/usr/bin/env bash\n# mail-identity-inject — SessionStart hook: legacy\n"
+    )
+    legacy_hook.chmod(0o755)
+    old_install = home / "agent-cockpit" / "agent-mail-tools"
+    old_install.mkdir(parents=True)
+    old_hook = old_install / "mail-identity-inject"
+    old_hook.write_text("legacy hook\n")
+    (bin_dir / "mail-identity-inject").symlink_to(old_hook)
 
     result = subprocess.run(
         [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
@@ -237,6 +254,9 @@ def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path
     assert (bin_dir / "mail-recv").resolve() == custom
     assert (bin_dir / "am-init-project").resolve() == tools / "am-init-project"
     assert (bin_dir / "am-register").resolve() == tools / "am-register"
+    assert (bin_dir / "mail-identity-inject").resolve() == tools / "mail-identity-inject"
+    assert legacy_hook.resolve() == tools / "mail-identity-inject"
+    assert (legacy_dir / "mail-identity-inject.pre-cockpit").is_file()
 
 
 def test_doctor_detects_pending_herdr_onboarding():
