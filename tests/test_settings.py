@@ -124,3 +124,55 @@ def test_settings_routes(monkeypatch):
 
     # 未认证被拒
     assert client.get("/api/settings").status_code == 401
+
+
+def test_agent_mail_config_routes_never_expose_token(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import am_common
+    import server
+
+    env_file = tmp_path / "agent-mail" / "client.env"
+    env_file.parent.mkdir()
+    env_file.write_text(
+        "hub=http://old-hub:8765\ntoken=top-secret\nfuture=value\n"
+    )
+    monkeypatch.setattr(am_common, "CLIENT_ENV", env_file)
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.hub_client,
+        "status",
+        lambda: {"available": True, "reason": None},
+    )
+    client = TestClient(server.app)
+    headers = {"authorization": "Bearer secret"}
+
+    response = client.get("/api/agent-mail/config", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {
+        "hub": "http://old-hub:8765",
+        "status": {"available": True, "reason": None},
+    }
+    assert "top-secret" not in response.text
+    assert "token" not in response.text.lower()
+
+    response = client.put(
+        "/api/agent-mail/config",
+        headers=headers,
+        json={"hub": "https://team.example:9765/"},
+    )
+    assert response.status_code == 200
+    assert response.json()["hub"] == "https://team.example:9765"
+    assert "top-secret" not in response.text
+    assert env_file.read_text() == (
+        "hub=https://team.example:9765\n"
+        "token=top-secret\nfuture=value\n"
+    )
+
+    response = client.put(
+        "/api/agent-mail/config",
+        headers=headers,
+        json={"hub": "file:///etc/passwd"},
+    )
+    assert response.status_code == 400
+    assert "top-secret" not in response.text
+    assert client.get("/api/agent-mail/config").status_code == 401

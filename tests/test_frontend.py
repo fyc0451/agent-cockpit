@@ -101,6 +101,24 @@ def test_pane_output_refresh_only_replaces_changed_text_range():
     assert "node.replaceData(start,oldEnd-start,next.slice(start,newEnd))" in js
 
 
+def test_degraded_pane_read_shows_notice_without_rendering_html():
+    js = _inline_js()
+    drawer = js.split("async function refreshTerm(){", 1)[1].split(
+        "async function termSend", 1
+    )[0]
+    flow = js.split("async function hfRefreshAll(){", 1)[1].split(
+        "async function hfSend", 1
+    )[0]
+
+    assert "function paneReadText(d)" in js
+    assert "d.degraded&&d.notice" in js
+    assert "paneReadText(d)" in drawer
+    assert "paneReadText(d)" in flow
+    assert "innerHTML=d.output" not in js
+    assert "updatePaneOutput(out,next)" in drawer
+    assert "updatePaneOutput(out,next)" in flow
+
+
 def test_api_preserves_server_detail():
     # 不再把服务端返回的 detail 覆盖成 r.statusText
     assert "throw r.statusText" not in HTML
@@ -782,6 +800,14 @@ def test_agent_mail_hub_failure_becomes_read_only_ui():
     assert "Agent Mail Hub 当前不可用，消息暂时只读" in js
 
 
+def test_hub_message_content_is_rendered_as_escaped_text():
+    js = _inline_js()
+    assert "${esc(m.subject||'(无主题)')}" in js
+    assert "${esc(m.body_md)}" in js
+    assert "${m.body_md}" not in js
+    assert "eval(" not in js
+
+
 def test_agent_mail_coordination_controls_and_status_are_visible():
     js = _inline_js()
     assert 'id="cmpIntent"' in js
@@ -833,6 +859,8 @@ def test_settings_view_and_nav_exist():
     assert 'id="setAgents"' in HTML
     assert 'id="setDirAgents"' in HTML
     assert 'id="setUploadMax"' in HTML
+    assert 'id="setHub"' in HTML
+    assert 'id="setHubStatus"' in HTML
 
 
 def test_i18n_en_ja_key_sets_match():
@@ -861,6 +889,7 @@ def test_settings_js_functions_exist():
                "setAddDirAgent", "applyEnabledAgents", "launchPreselectAgent"):
         assert f"function {fn}(" in HTML
     assert "'/api/settings'" in HTML
+    assert "'/api/agent-mail/config'" in HTML
 
 
 # ── 顶部导航与终端工具栏折叠 ────────────────────────────────────

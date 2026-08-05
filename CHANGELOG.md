@@ -8,6 +8,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Team collaboration design docs: overall personal/team dual-mode design and the
+  project channel technical design (方案 Y), plus the M1a deployment guide for a
+  shared hub reachable on the intranet.
+- `hub_client` now honors the `hub` field in `~/.agent-mail/client.env` via the shared
+  `am_common.load_client_config` parser, so cockpit write operations can target a
+  shared team hub while personal mode (`127.0.0.1:8765`) stays the default.
+  **Upgrade note:** this removes the previous force-`localhost` override — before
+  upgrading, review the `hub=` value in `~/.agent-mail/client.env` (a remote or empty
+  value now takes effect); restart cockpit after editing it.
 - Bundled Agent Mail helper commands, including Claude registration, with safe
   `~/.local/bin` links during install and upgrade.
 - Python 3.14 coverage in the Linux and macOS CI matrix.

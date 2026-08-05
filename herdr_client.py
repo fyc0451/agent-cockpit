@@ -271,6 +271,30 @@ def pane_read(session: str, pane_id: str, lines: int = 100, is_agent: bool = Fal
             )
         return {"available": True, "session": session, "pane_id": pane_id, "output": out}
     except RuntimeError as e:
+        if is_agent and "agent_not_idle" in str(e):
+            try:
+                out = _run(
+                    [
+                        "--session", session, "agent", "read", pane_id,
+                        "--source", "visible", "--lines", str(lines),
+                    ],
+                    timeout=8,
+                )
+            except RuntimeError as fallback_error:
+                return {
+                    "available": True,
+                    "error": str(fallback_error),
+                    "output": "",
+                }
+            return {
+                "available": True,
+                "session": session,
+                "pane_id": pane_id,
+                "output": out,
+                "source": "visible",
+                "degraded": True,
+                "notice": "Agent 正在运行，仅显示当前画面；空闲后自动恢复完整历史。",
+            }
         return {"available": True, "error": str(e), "output": ""}
 
 

@@ -35,7 +35,9 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
     "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
   systemctl --user daemon-reload
   systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true
-  systemctl --user enable --now agent-cockpit.service
+  # enable 仅设置开机自启；restart 确保已 active 实例加载新代码，未启动则等价 start。
+  systemctl --user enable agent-cockpit.service
+  systemctl --user restart agent-cockpit.service
   echo "升级完成，Agent Cockpit 已重启。Herdr session 不受影响。"
 elif [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
   "$INSTALL_DIR/launchd.sh" restart

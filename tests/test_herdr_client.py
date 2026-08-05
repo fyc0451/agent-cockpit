@@ -96,6 +96,66 @@ def test_pane_read_forwards_line_limit_to_agent_and_plain_panes(monkeypatch):
     ]
 
 
+def test_pane_read_falls_back_to_visible_when_agent_is_working(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "--source" not in args:
+            raise RuntimeError(
+                'herdr failed: {"error":{"code":"agent_not_idle"}}'
+            )
+        return "current visible screen"
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.pane_read("demo", "w1:p4", 300, is_agent=True)
+
+    assert result == {
+        "available": True,
+        "session": "demo",
+        "pane_id": "w1:p4",
+        "output": "current visible screen",
+        "source": "visible",
+        "degraded": True,
+        "notice": "Agent 正在运行，仅显示当前画面；空闲后自动恢复完整历史。",
+    }
+    assert calls == [
+        call(
+            ["--session", "demo", "agent", "read", "w1:p4", "--lines", "300"],
+            timeout=8,
+        ),
+        call(
+            [
+                "--session", "demo", "agent", "read", "w1:p4",
+                "--source", "visible", "--lines", "300",
+            ],
+            timeout=8,
+        ),
+    ]
+
+
+def test_pane_read_does_not_hide_unrelated_agent_errors(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        raise RuntimeError("herdr failed: pane_not_found")
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.pane_read("demo", "w1:p404", 80, is_agent=True)
+
+    assert result == {
+        "available": True,
+        "error": "herdr failed: pane_not_found",
+        "output": "",
+    }
+    assert len(calls) == 1
+
+
 def test_start_agent_reuses_existing_pane_with_cwd(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(

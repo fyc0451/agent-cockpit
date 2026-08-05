@@ -1,38 +1,28 @@
-"""hub_client.py — 通过 MCP JSON-RPC 调用本机 hub 的写操作。
+"""hub_client.py — 通过 MCP JSON-RPC 调用 hub 的写操作。
 
 读操作走 db.py 直读 SQLite;写操作(发消息/ack)走这里调 hub,
-保证事务一致性和 audit log。hub 在 127.0.0.1:8765。
+保证事务一致性和 audit log。hub 地址取 ~/.agent-mail/client.env 的 hub
+字段(统一由 agent-mail-tools/am_common.load_client_config 解析),
+未配置时默认 127.0.0.1:8765(个人模式)。
 """
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 import socket
-from pathlib import Path
+import sys
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
-# 复用 agent-mail-tools 的 client.env 取 hub/token
-_CLIENT_ENV = Path.home() / ".agent-mail" / "client.env"
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-mail-tools")
+)
+from am_common import load_client_config, save_client_hub  # noqa: E402
 
-
-def _load_config() -> tuple[str, str]:
-    hub, token = "http://127.0.0.1:8765", ""
-    if _CLIENT_ENV.is_file():
-        for line in _CLIENT_ENV.read_text().splitlines():
-            if "=" in line and not line.strip().startswith("#"):
-                key, _, value = line.partition("=")
-                key, value = key.strip(), value.strip()
-                if key == "hub":
-                    # client.env 里的 hub 可能是 tailscale 地址,本地优先用 127.0.0.1
-                    pass
-                elif key == "token":
-                    token = value
-    return "http://127.0.0.1:8765", token
-
-
-HUB, TOKEN = _load_config()
+HUB, TOKEN = load_client_config()
 _headers = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
@@ -108,6 +98,25 @@ def _tool(name: str, arguments: dict[str, Any]) -> Any:
 
 # 首次调用前 initialize(模块级,进程启动时做一次即可,但 MCP 是无状态的,每次连接都要 init)
 _initialized = False
+
+
+def reload_config() -> dict[str, Any]:
+    """重读 client.env，让后续 Hub 调用无需重启即可使用新地址。"""
+    global HUB, TOKEN, _initialized
+    HUB, TOKEN = load_client_config()
+    _initialized = False
+    return {"hub": HUB, "token_configured": bool(TOKEN)}
+
+
+def allows_local_actions() -> bool:
+    """仅本机 Hub 可参与本地终端通知；共享 Hub 响应一律视为只读数据。"""
+    host = (urlsplit(HUB).hostname or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _ensure_init() -> None:
