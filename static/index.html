@@ -110,6 +110,8 @@ header .spacer{flex:1}
 .launch-bar{background:var(--bg2);border-top:1px solid var(--bd);padding:8px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .launch-bar select,.launch-bar input{width:auto;min-width:120px}
 .launch-bar .lbl{font-size:12px;color:var(--fg3);margin-right:2px}
+.launch-modal{max-width:760px}
+.launch-modal .launch-bar{background:transparent;border:0;padding:0}
 
 /* view 切换 */
 .view{display:none;flex:1;overflow:hidden;flex-direction:column}
@@ -335,6 +337,7 @@ header .spacer{flex:1}
   .launch-bar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
   .launch-bar select,.launch-bar input,.launch-bar button{order:initial;width:100%;max-width:none!important;min-width:0!important}
   #lnSession,#lnName,#lnWorkdir,.launch-bar button{grid-column:1 / -1}
+  .launch-modal .launch-bar{max-height:none;overflow:visible;padding:0}
   .term-toolbar{flex-wrap:wrap;padding:6px;gap:5px}
   .term-toolbar #termSelect{flex:1;min-width:120px!important}
   .term-help{display:none}
@@ -415,23 +418,6 @@ header .spacer{flex:1}
     <div class="attention-list" id="attentionList"><div class="empty" data-i18n="common.loading">加载中…</div></div>
   </section>
 
-  <!-- 启动栏(看板下方) -->
-  <div class="launch-bar" id="launchBar">
-    <span class="lbl" data-i18n="launch.label">🚀 启动</span>
-    <select id="lnSession" onchange="launchSessionChanged(true)"></select>
-    <select id="lnAgent" onchange="launchRefreshName(true)">
-      <option value="codex">codex</option>
-      <option value="kimi">kimi</option>
-      <option value="qodercli">qoder</option>
-    </select>
-    <input id="lnName" placeholder="实例名称 如 codex-2" aria-label="本地实例名称" oninput="this.dataset.auto='0'" style="max-width:155px">
-    <select id="lnLayout" aria-label="新 pane 位置"><option value="tab">新 tab</option><option value="right">右侧 pane</option><option value="down">下方 pane</option></select>
-    <select id="lnWorkspace" aria-label="工作目录策略"><option value="isolated">独立 worktree</option><option value="shared">共享目录</option></select>
-    <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" oninput="this.dataset.auto='0';launchPreselectAgent()" style="flex:1;min-width:160px">
-    <button class="primary" id="lnStartBtn" onclick="startAgent()" data-i18n="launch.start">+ 新建 agent</button>
-    <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
-  </div>
-
   <!-- 消息 -->
   <section id="view-msgs" class="view msgs-view">
     <div class="msgs-body">
@@ -474,6 +460,7 @@ header .spacer{flex:1}
   <section id="view-term" class="view" style="flex-direction:column">
     <div class="term-toolbar">
       <button class="primary sm" onclick="termNew()" data-i18n="term.new">+ 新终端</button>
+      <button class="sm" onclick="showLaunchModal()" data-i18n="term.addagent">＋ 添加 Agent</button>
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端"><span data-i18n="term.upload">📎上传</span><input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)" data-i18n="term.collab">@协作</button>
@@ -615,6 +602,34 @@ header .spacer{flex:1}
   </section>
 </div>
 
+<!-- 向已有工作区添加 Agent，仅在终端工具栏按需打开 -->
+<div class="modal-bg" id="launchModal" onclick="if(event.target===this)closeLaunchModal()">
+  <div class="modal launch-modal">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <div style="flex:1;min-width:0">
+        <h3 style="margin:0">向工作区添加 Agent</h3>
+        <div class="muted" style="font-size:11px;margin-top:3px">选择已运行的 session，在新 pane 中启动 Agent。</div>
+      </div>
+      <button class="icon" onclick="closeLaunchModal()">✕</button>
+    </div>
+    <div class="launch-bar" id="launchBar">
+      <span class="lbl" data-i18n="launch.label">🚀 启动</span>
+      <select id="lnSession" onchange="launchSessionChanged(true)"></select>
+      <select id="lnAgent" onchange="launchRefreshName(true)">
+        <option value="codex">codex</option>
+        <option value="kimi">kimi</option>
+        <option value="qodercli">qoder</option>
+      </select>
+      <input id="lnName" placeholder="实例名称 如 codex-2" aria-label="本地实例名称" oninput="this.dataset.auto='0'" style="max-width:155px">
+      <select id="lnLayout" aria-label="新 pane 位置"><option value="tab">新 tab</option><option value="right">右侧 pane</option><option value="down">下方 pane</option></select>
+      <select id="lnWorkspace" aria-label="工作目录策略"><option value="isolated">独立 worktree</option><option value="shared">共享目录</option></select>
+      <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" oninput="this.dataset.auto='0';launchPreselectAgent()" style="flex:1;min-width:160px">
+      <button class="primary" id="lnStartBtn" onclick="startAgent()" data-i18n="launch.start">+ 新建 agent</button>
+      <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
+    </div>
+  </div>
+</div>
+
 <!-- 终端抽屉 -->
 <div class="drawer-bg" id="termDrawer" onclick="if(event.target===this)closeTerm()">
   <div class="drawer">
@@ -750,13 +765,13 @@ const I18N={
 en:{
 'nav.menu':'Menu','nav.board':'Board','nav.attention':'Tasks','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
 'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Tasks and progress grouped by session, including blockers','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
-'board.guide.title':'No running agents yet','board.guide.body':'First time here? Create a workspace in one click (it creates the session and starts the agents); with an existing session, add agents from the launch bar below.','board.guide.btn':'🚀 Create your first workspace','board.guide.noherdr':'herdr is unavailable','board.guide.noherdr.body':'The herdr executable was not found. Check Settings → Environment check for missing components, install them, then refresh.','board.guide.noherdr.btn':'Open environment check','launch.nosession':'No session yet — create a workspace first',
+'board.guide.title':'No running agents yet','board.guide.body':'First time here? Create a workspace in one click (it creates the session and starts the agents); for an existing session, use Add Agent in the Terminal toolbar.','board.guide.btn':'🚀 Create your first workspace','board.guide.noherdr':'herdr is unavailable','board.guide.noherdr.body':'The herdr executable was not found. Check Settings → Environment check for missing components, install them, then refresh.','board.guide.noherdr.btn':'Open environment check','launch.nosession':'No session yet — create a workspace first',
 'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
 'attention.title':'Task board','attention.push':'Enable notifications','attention.report':'Request reports','common.refresh':'Refresh','common.loading':'Loading…',
 'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
-'term.new':'+ New terminal','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…',
+'term.new':'+ New terminal','term.addagent':'＋ Add Agent','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…',
 'hf.takeover':'🖥 Take over TUI','hf.hint':'Copy: paste elsewhere · Fill input: send straight to agent','hf.empty':'No agent pane in this session','hf.send':'Send','hf.paste':'📋 Fill input','hf.full':'⛶ Full','hf.exit':'Exit',
 'sessions.setup':'+ Quick workspace','sessions.hint':'Quick workspace: split pane + start agent; Agent Mail optional',
 'roots.system':'System','roots.projects':'Registered projects','roots.custom':'Custom','files.rootlimit':'Already at an accessible root — tap a root name above to switch','files.rmroot':'Remove from accessible locations (directory is not deleted)','files.remove':'Remove',
@@ -770,13 +785,13 @@ en:{
 ja:{
 'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'タスク','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
 'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'session ごとのタスク、進捗、ブロッカーを表示','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
-'board.guide.title':'実行中の agent はまだありません','board.guide.body':'初めてですか?下のボタンでワークスペースを一発作成(session 作成と agent 起動を自動化)。既存 session には下部の起動バーから agent を追加できます。','board.guide.btn':'🚀 最初のワークスペースを作成','board.guide.noherdr':'herdr が利用できません','board.guide.noherdr.body':'herdr 実行ファイルが見つかりません。「設定 → 環境チェック」で不足コンポーネントを確認し、インストール後に更新してください。','board.guide.noherdr.btn':'環境チェックを開く','launch.nosession':'session がまだありません。先にワークスペースを作成してください',
+'board.guide.title':'実行中の agent はまだありません','board.guide.body':'初めてですか?下のボタンでワークスペースを一発作成(session 作成と agent 起動を自動化)。既存 session には「端末」ツールバーの「Agent 追加」から追加できます。','board.guide.btn':'🚀 最初のワークスペースを作成','board.guide.noherdr':'herdr が利用できません','board.guide.noherdr.body':'herdr 実行ファイルが見つかりません。「設定 → 環境チェック」で不足コンポーネントを確認し、インストール後に更新してください。','board.guide.noherdr.btn':'環境チェックを開く','launch.nosession':'session がまだありません。先にワークスペースを作成してください',
 'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
 'attention.title':'タスクボード','attention.push':'通知を有効化','attention.report':'進捗報告を依頼','common.refresh':'更新','common.loading':'読み込み中…',
 'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
-'term.new':'+ 新規ターミナル','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…',
+'term.new':'+ 新規ターミナル','term.addagent':'＋ Agent 追加','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…',
 'hf.takeover':'🖥 TUI 接管','hf.hint':'コピー: 他アプリで貼り付け · 入力欄へ: agent に直接送信','hf.empty':'このセッションに agent pane なし','hf.send':'送信','hf.paste':'📋 入力欄へ','hf.full':'⛶ 全画面','hf.exit':'退出',
 'sessions.setup':'+ ワンクリックワークスペース','sessions.hint':'ワンクリック: pane 分割 + agent 起動;Agent Mail は任意',
 'roots.system':'システム','roots.projects':'登録プロジェクト','roots.custom':'カスタム','files.rootlimit':'アクセス可能なルートです。上のルート名で切り替えられます','files.rmroot':'アクセス可能場所から削除(ディレクトリ自体は削除されません)','files.remove':'削除',
@@ -1022,7 +1037,6 @@ function showView(v){
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-'+v).classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
-  document.getElementById('launchBar').classList.toggle('hidden',v!=='board');
   if(v==='board')refreshBoard();
   if(v==='attention')loadAttention();
   if(v==='msgs')loadProjList();
@@ -1278,7 +1292,7 @@ function renderBoard(d){
   if(agentN===0){
     // 首次使用引导:直接给出一键工作区入口(它会自动建 session)
     showEmpty(`<div style="font-size:15px;font-weight:600">${esc(t('board.guide.title','还没有运行中的 agent'))}</div>
-      <div class="muted" style="margin:8px auto 14px;max-width:420px">${esc(t('board.guide.body','第一次使用?点下面按钮一键建工作区(自动建 session 并启动 agent);已有 session 时用底部启动栏往里加 agent。'))}</div>
+      <div class="muted" style="margin:8px auto 14px;max-width:420px">${esc(t('board.guide.body','第一次使用?点下面按钮一键建工作区(自动建 session 并启动 agent);已有 session 时到「终端」工具栏点「添加 Agent」。'))}</div>
       <button class="primary" onclick="showSetupModal()">${esc(t('board.guide.btn','🚀 创建第一个工作区'))}</button>`);
   }else{emptyEl.style.display='none';boardEl.style.display=''}
   document.getElementById('boardInfo').textContent=`${d.sessions?.length||0} session · ${agentN} agent`;
@@ -1531,6 +1545,12 @@ function openMsg(agent){
 }
 
 // ============ 启动 agent ============
+async function showLaunchModal(){
+  document.getElementById('launchModal').classList.add('show');
+  await loadSessions();
+  launchSessionChanged(false);
+}
+function closeLaunchModal(){document.getElementById('launchModal').classList.remove('show')}
 async function loadSessions(){
   try{
     const d=await api('/api/herdr/sessions');
@@ -1851,7 +1871,6 @@ async function doAttachHerdr(session){
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
-  document.getElementById('launchBar').classList.add('hidden');
   let createdId=null;
   try{
     const existing=TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id]);
@@ -2680,7 +2699,6 @@ async function setupHerdrOnboarding(command){
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
-  document.getElementById('launchBar').classList.add('hidden');
   const id=await termNew(workdir);
   if(id)queueTermInput(id,(command||'herdr')+'\r','请完成 Herdr 首次配置，完成后按 Ctrl-b d 脱离');
 }

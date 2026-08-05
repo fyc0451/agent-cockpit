@@ -386,6 +386,22 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     assert "QoderCLI 首次启动可能约 60 秒" in js
 
 
+def test_add_agent_form_opens_from_terminal_toolbar_instead_of_board_footer():
+    js = _inline_js()
+    terminal = HTML.split('id="view-term"', 1)[1].split('</section>', 1)[0]
+    launch_modal = HTML.split('id="launchModal"', 1)[1].split('</div>\n</div>', 1)[0]
+
+    assert 'onclick="showLaunchModal()"' in terminal
+    assert '＋ 添加 Agent' in terminal
+    assert 'id="launchBar"' in launch_modal
+    board_area = HTML.split('<!-- 看板 -->', 1)[1].split('<!-- 消息 -->', 1)[0]
+    assert 'id="launchBar"' not in board_area
+    assert "function showLaunchModal()" in js
+    assert "function closeLaunchModal()" in js
+    assert "classList.toggle('hidden',v!=='board')" not in js
+    assert "getElementById('launchBar').classList.add('hidden')" not in js
+
+
 def test_old_session_mail_project_can_be_selected_in_ui():
     assert "/mail-project" in HTML
     assert "needs_selection" in HTML
