@@ -274,6 +274,89 @@ def bind_identity(
         return cur.rowcount == 1
 
 
+def add_participant(
+    *, session: str, participant_id: str, agent: str, pane_id: str,
+    workdir: str, mail_name: str | None = None, role: str = "developer",
+    task: str = "", now: float | None = None,
+) -> dict[str, Any]:
+    """把运行中新增的 pane 纳入当前 run，不打断已有参与者。"""
+    if not all(str(value).strip() for value in (session, participant_id, agent, pane_id, workdir)):
+        raise ValueError("新增参与者缺少 session/id/agent/pane/workdir")
+    current = time.time() if now is None else now
+    resolved_workdir = str(Path(workdir).expanduser().resolve())
+    con = _connect()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        active = con.execute(
+            "SELECT * FROM runs WHERE session=? AND state='active' "
+            "ORDER BY revision DESC LIMIT 1",
+            (session,),
+        ).fetchone()
+        if active is None:
+            con.commit()
+            return {"joined": False, "reused": False, "reason": "no_active_run"}
+        run_id = str(active["run_id"])
+        existing_pane = con.execute(
+            "SELECT * FROM participants WHERE run_id=? AND pane_id=?",
+            (run_id, pane_id),
+        ).fetchone()
+        existing_id = con.execute(
+            "SELECT * FROM participants WHERE run_id=? AND participant_id=?",
+            (run_id, participant_id),
+        ).fetchone()
+        if existing_id is not None and (
+            existing_pane is None
+            or existing_id["participant_id"] != existing_pane["participant_id"]
+        ):
+            raise ValueError(f"参与者 id 已存在: {participant_id}")
+        existing = existing_pane or existing_id
+        if existing is not None:
+            actual_id = str(existing["participant_id"])
+            if str(existing["agent_type"]) != agent:
+                raise ValueError(f"pane {pane_id} 已绑定其他 Agent")
+            con.execute(
+                "UPDATE participants SET mail_name=COALESCE(?,mail_name),workdir=?,"
+                "updated_ts=? WHERE run_id=? AND participant_id=?",
+                (mail_name, resolved_workdir, current, run_id, actual_id),
+            )
+            reused = True
+        else:
+            actual_id = participant_id
+            con.execute(
+                "INSERT INTO participants VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run_id, actual_id, agent, mail_name, pane_id, role, task, 1,
+                    resolved_workdir, "working", current,
+                ),
+            )
+            reused = False
+        rows = con.execute(
+            "SELECT participant_id,agent_type,role,task_text,workdir "
+            "FROM participants WHERE run_id=? ORDER BY participant_id",
+            (run_id,),
+        ).fetchall()
+        digest = _config_hash([
+            {
+                "id": row["participant_id"], "agent": row["agent_type"],
+                "role": row["role"], "task": row["task_text"],
+                "workdir": row["workdir"],
+            }
+            for row in rows
+        ])
+        con.execute("UPDATE runs SET config_hash=? WHERE run_id=?", (digest, run_id))
+        con.commit()
+        return {
+            "joined": True, "reused": reused, "run_id": run_id,
+            "participant_id": actual_id, "project_key": str(active["project_key"]),
+            "run_revision": int(active["revision"]), "task_revision": 1,
+        }
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def run_participants(run_id: str) -> list[dict[str, Any]]:
     with _connect() as con:
         return [

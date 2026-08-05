@@ -1285,6 +1285,13 @@ def test_start_agent_registers_and_notifies_unique_qoder_identity(
         server.herdr_client, "pane_send",
         lambda *args: sent.append(args) or {"available": True},
     )
+    joined = []
+    monkeypatch.setattr(
+        server.coordination, "add_participant",
+        lambda **kwargs: joined.append(kwargs) or {
+            "joined": True, "reused": False, "participant_id": "qodercli-1",
+        },
+    )
 
     response = TestClient(server.app).post(
         "/api/herdr/start",
@@ -1308,6 +1315,12 @@ def test_start_agent_registers_and_notifies_unique_qoder_identity(
     assert sent[0][0:2] == ("demo", "w1:pA")
     assert "项目=" + str(canonical) in sent[0][2]
     assert "--agent qodercn" in sent[0][2]
+    assert joined == [{
+        "session": "demo", "participant_id": "qodercli-1",
+        "agent": "qodercli", "pane_id": "w1:pA", "workdir": str(workdir),
+        "mail_name": "qodercn-main",
+    }]
+    assert response.json()["coordination"]["joined"] is True
 
 
 def test_start_agent_keeps_launch_success_when_identity_registration_fails(

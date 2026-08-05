@@ -106,6 +106,57 @@ def test_start_run_is_idempotent_and_changed_task_supersedes_old(tmp_path, monke
     assert coordination.run_context(first["run_id"], "kimi-main")["state"] == "superseded"
 
 
+def test_add_participant_joins_active_run_and_receives_run_message(tmp_path, monkeypatch):
+    run = _run(tmp_path, monkeypatch)
+    qoder_dir = tmp_path / "qoder"
+    qoder_dir.mkdir()
+
+    added = coordination.add_participant(
+        session="demo", participant_id="qodercli-1", agent="qodercli",
+        mail_name="qodercn-main", pane_id="w1:pA", workdir=str(qoder_dir), now=101,
+    )
+    repeated = coordination.add_participant(
+        session="demo", participant_id="qodercli-1", agent="qodercli",
+        mail_name="qodercn-main", pane_id="w1:pA", workdir=str(qoder_dir), now=102,
+    )
+    meta, warnings = coordination.prepare_metadata(
+        project_key=str(tmp_path), sender="codex-main",
+        recipients=["qodercn-main"], intent="action", now=103,
+    )
+    claimed = coordination.claim_message(
+        project_key=str(tmp_path), recipient="qodercn-main",
+        message=_message(90, coordination.add_metadata("验证", meta), created=104),
+        claimant="qoder", cwd=str(qoder_dir), now=104,
+    )
+
+    assert warnings == []
+    assert added == {
+        "joined": True, "reused": False, "run_id": run["run_id"],
+        "participant_id": "qodercli-1", "project_key": str(tmp_path.resolve()),
+        "run_revision": 1, "task_revision": 1,
+    }
+    assert repeated["reused"] is True
+    assert meta["targets"]["qodercn-main"] == {
+        "task_id": "qodercli-1", "task_revision": 1,
+    }
+    assert claimed["deliver"] is True
+    assert claimed["reason"] is None
+
+
+def test_add_participant_rejects_invalid_or_conflicting_identity(tmp_path, monkeypatch):
+    _run(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="缺少"):
+        coordination.add_participant(
+            session="demo", participant_id="", agent="qodercli",
+            pane_id="w1:pA", workdir=str(tmp_path),
+        )
+    with pytest.raises(ValueError, match="id 已存在"):
+        coordination.add_participant(
+            session="demo", participant_id="lead", agent="codex",
+            pane_id="w1:pA", workdir=str(tmp_path),
+        )
+
+
 def test_duplicate_unread_is_effectively_once_even_when_ack_is_pending(tmp_path, monkeypatch):
     _run(tmp_path, monkeypatch)
     body = coordination.add_metadata("执行", _meta(tmp_path))

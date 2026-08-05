@@ -1646,6 +1646,20 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
         result["agent_mail"] = _started_agent_mail_identity(
             req.session, result["pane_id"], req.agent
         )
+        try:
+            result["coordination"] = coordination.add_participant(
+                session=req.session,
+                participant_id=name or result["pane_id"],
+                agent=req.agent,
+                pane_id=result["pane_id"],
+                workdir=workspace["workdir"],
+                mail_name=result["agent_mail"].get("name"),
+            )
+        except Exception as exc:
+            result["coordination"] = {
+                "joined": False, "reused": False,
+                "reason": f"新增 Agent 未同步到协作 run: {exc}",
+            }
     return result
 
 
