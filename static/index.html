@@ -1665,9 +1665,13 @@ function ensureTermFontLoaded(){
 }
 function renderTermOptions(){
   const sel=document.getElementById('termSelect');
-  const attached=new Set(Object.values(TERM_SESSIONS));
+  // 刷新恢复的 Herdr PTY 可能仍带着旧页面尺寸；未在本页挂载的只保留作
+  // 显式打开时清理，不能伪装成可直接复用的终端。
+  const attached=new Set(Object.entries(TERM_SESSIONS)
+    .filter(([id])=>TERM_INSTANCES[id]).map(([,session])=>session));
   const placeholder=TERM_ID?'':'<option value="">选择终端或 Herdr session…</option>';
-  const terms=TERMS.map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
+  const terms=TERMS.filter(id=>!TERM_SESSIONS[id]||TERM_INSTANCES[id])
+    .map(t=>`<option value="${esc(t)}">${esc(termLabel(t))}</option>`).join('');
   const sessions=TERM_SESSION_CATALOG.filter(session=>!attached.has(session)).map(session=>
     `<option value="${TERM_SESSION_PREFIX}${esc(session)}">${esc(session)} · 打开</option>`
   ).join('');
@@ -1800,16 +1804,23 @@ async function doAttachHerdr(session){
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
   document.getElementById('launchBar').classList.add('hidden');
-  const existing=TERMS.find(id=>TERM_SESSIONS[id]===session);
-  if(existing){TERM_ID=existing;renderTermOptions();termSwitch(existing);return}
   let createdId=null;
   try{
+    // 页面刷新后旧 PTY 内的 herdr 客户端仍按旧尺寸附着；显式打开同一 session
+    // 时先关闭这些未在本页挂载的旧连接，再由新 PTY 以当前尺寸 attach。
+    const stale=TERMS.filter(id=>TERM_SESSIONS[id]===session&&!TERM_INSTANCES[id]);
+    for(const id of stale){
+      await api('/api/term/'+id,{method:'DELETE'});
+      removeTermInstance(id);
+    }
+    const existing=TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id]);
+    if(existing){TERM_ID=existing;renderTermOptions();termSwitch(existing);return}
     await ensureTermFontLoaded();
     const r=await api('/api/term?label='+encodeURIComponent(session),{method:'POST'});
     createdId=r.id;
     TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;TERM_SESSIONS[r.id]=session;
-    renderTermOptions();
     termMount(r.id);
+    renderTermOptions();
     if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败');
     queueTermInput(r.id,'herdr --session '+session+'\r','已进入 herdr/'+session+' (Ctrl-b 切 pane)');
   }catch(e){

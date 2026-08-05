@@ -164,6 +164,10 @@ def test_terminal_page_only_catalogs_live_terms_until_explicit_open():
     assert "TERM_ID=TERMS.find" not in restore
     # 进入终端页只读取目录，不挂 WebSocket、不创建/attach PTY。
     assert "method:'POST'" not in restore
+    # 刷新后恢复的 Herdr attach PTY 不再伪装成可复用终端；列表只给显式打开入口。
+    assert "Object.entries(TERM_SESSIONS)" in options
+    assert ".filter(([id])=>TERM_INSTANCES[id])" in options
+    assert "TERMS.filter(id=>!TERM_SESSIONS[id]||TERM_INSTANCES[id])" in options
     assert "TERM_SESSION_CATALOG.filter(session=>!attached.has(session))" in options
     assert "${esc(session)} · 打开" in options
     assert "await restoreTerms()" in ensure
@@ -178,18 +182,30 @@ def test_terminal_page_only_catalogs_live_terms_until_explicit_open():
     assert "restoreAllHerdrSessions" not in js
 
 
-def test_herdr_terminal_attach_requires_explicit_button_or_selection():
+def test_herdr_terminal_attach_replaces_restored_pty_on_first_explicit_open():
     js = _inline_js()
     attach = js.split("async function doAttachHerdr(session){", 1)[1].split(
         "// ============ herdr", 1
+    )[0]
+    websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
+        "function showTermInstance", 1
     )[0]
 
     assert 'onclick="termAttachHerdr()"' in HTML
     assert "data-action=\"attach\"" in js
     assert "else if(a==='attach')doAttachHerdr(s)" in js
-    # 显式选择后，已有 session 终端走复用分支，只有缺失时才 POST 新 PTY。
-    assert "TERMS.find(id=>TERM_SESSIONS[id]===session)" in attach
-    assert attach.index("if(existing)") < attach.index("method:'POST'")
+    # 刷新恢复的旧 attach PTY 可能保留错误 pane 几何；显式点击时必须先删除再新建。
+    assert "TERMS.filter(id=>TERM_SESSIONS[id]===session&&!TERM_INSTANCES[id])" in attach
+    assert "await api('/api/term/'+id,{method:'DELETE'})" in attach
+    assert "removeTermInstance(id)" in attach
+    assert "TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id])" in attach
+    assert attach.index("method:'DELETE'") < attach.index("if(existing)")
+    assert attach.index("method:'DELETE'") < attach.index("method:'POST'")
+    # 新终端挂载完成后再刷新 selector，不能又显示成待打开的 session。
+    created = attach.split("const r=await api('/api/term?label='", 1)[1]
+    assert created.index("termMount(r.id)") < created.index("renderTermOptions()")
+    # WebSocket 必须先把当前浏览器尺寸送进新 PTY，再执行排队的 herdr attach 命令。
+    assert websocket.index("type:'resize'") < websocket.index("flushTermInput(id,ws)")
 
 
 def test_auth_contract_wired():
@@ -756,7 +772,9 @@ def test_safe_fit_waits_for_fonts_and_keeps_right_gutter():
     term_new = js.split("async function termNew(cwd){", 1)[1].split("function ", 1)[0]
     assert term_new.index("await ensureTermFontLoaded()") < term_new.index("api(url")
     attach = js.split("async function doAttachHerdr(session){", 1)[1].split("// ============ herdr", 1)[0]
-    assert attach.index("await ensureTermFontLoaded()") < attach.index("api('/api/term")
+    assert attach.index("await ensureTermFontLoaded()") < attach.index(
+        "const r=await api('/api/term?label='"
+    )
     set_font = js.split("function setTermFont(v,save=true){", 1)[1].split("function ", 1)[0]
     assert "safeFitOf(inst.fit,inst.xterm)" in set_font
 
