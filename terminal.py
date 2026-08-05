@@ -178,12 +178,17 @@ def _kill_child(pid: int, master_fd: int) -> None:
     先 waitpid(WNOHANG) 确认仍是未退出的子进程才发信号——
     若已退出/已被回收(如 _check_alive),PID/PGID 可能被系统复用,
     此时只关 fd,绝不 kill,防误杀无关进程。
+    PID 必须是大于 1 的原生 int；拒绝 bool/Mock/1，避免 killpg(1)
+    变成 kill(-1) 后误杀当前用户可达的全部进程。
     """
-    try:
-        result, _ = os.waitpid(pid, os.WNOHANG)
-        running = result == 0
-    except ChildProcessError:
-        running = False
+    can_signal_group = type(pid) is int and pid > 1
+    running = False
+    if can_signal_group:
+        try:
+            result, _ = os.waitpid(pid, os.WNOHANG)
+            running = result == 0
+        except ChildProcessError:
+            pass
     if running:
         try:
             os.killpg(pid, signal.SIGKILL)

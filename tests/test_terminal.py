@@ -309,6 +309,26 @@ def test_kill_child_skips_signal_when_already_reaped(monkeypatch):
         os.fstat(fd)
 
 
+@pytest.mark.parametrize("pid", [1, True, None])
+def test_kill_child_rejects_unsafe_pid_without_waiting_or_signalling(monkeypatch, pid):
+    """无效 PID 只关 fd，不能让 killpg(1) 退化成 kill(-1) 误杀进程。"""
+    monkeypatch.setattr(
+        os, "waitpid", lambda *a, **k: (_ for _ in ()).throw(AssertionError("waitpid"))
+    )
+    monkeypatch.setattr(
+        os, "killpg", lambda *a, **k: (_ for _ in ()).throw(AssertionError("killpg"))
+    )
+    monkeypatch.setattr(
+        os, "kill", lambda *a, **k: (_ for _ in ()).throw(AssertionError("kill"))
+    )
+    fd = os.open("/dev/null", os.O_RDONLY)
+
+    terminal._kill_child(pid, fd)
+
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
 def test_kill_child_signals_running_child(monkeypatch):
     """子进程仍在运行(waitpid 返回 0)时,正常 killpg + 等待回收。"""
     calls = []
