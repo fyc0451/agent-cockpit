@@ -64,6 +64,16 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 logger = logging.getLogger("agent-cockpit")
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 PANE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$")
+TEAM_API_ROUTES = (
+    (re.compile(r"^humans/me$"), {"GET", "PUT"}),
+    (re.compile(r"^projects$"), {"GET", "POST"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/join-requests$"), {"POST"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/membership$"), {"GET", "PATCH"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/members$"), {"GET"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/members/[0-9]+$"), {"PATCH"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/agents$"), {"GET"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/agents/[0-9]+$"), {"PATCH"}),
+)
 VALID_AGENTS = {"codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode"}
 VALID_LAYOUTS = {"right", "horizontal", "down", "vertical", "tab"}
 VALID_COLLAB_MODES = {"quick", "develop_review", "parallel", "custom"}
@@ -1037,6 +1047,47 @@ def api_agent_mail_config_put(req: AgentMailConfigReq):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"hub": config["hub"], "status": hub_client.status()}
+
+
+@app.api_route(
+    "/api/team/{route:path}",
+    methods=["GET", "POST", "PUT", "PATCH"],
+)
+async def api_team_proxy(route: str, request: Request):
+    """白名单代理 Hub Human API；返回数据不得触发任何本地执行。"""
+    method = request.method.upper()
+    normalized = route.strip("/")
+    if not any(
+        pattern.fullmatch(normalized) and method in methods
+        for pattern, methods in TEAM_API_ROUTES
+    ):
+        raise HTTPException(404, "不支持的 Hub Human API 路由")
+    authorization = request.headers.get("x-agent-hub-authorization", "")
+    if (
+        not authorization.startswith("Bearer ")
+        or not authorization[7:].strip()
+        or len(authorization) > 8192
+    ):
+        raise HTTPException(401, "需要有效的 Hub Human JWT")
+    payload = None
+    if method != "GET":
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "请求体必须是 JSON 对象") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "请求体必须是 JSON 对象")
+    try:
+        return hub_client.human_api(
+            method,
+            f"/hub/api/{normalized}",
+            authorization,
+            payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
 
 
 @app.get("/api/env-check")

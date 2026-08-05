@@ -20,7 +20,7 @@ import httpx
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-mail-tools")
 )
-from am_common import load_client_config, save_client_hub  # noqa: E402
+from am_common import load_client_config, save_client_hub as save_client_hub  # noqa: E402
 
 HUB, TOKEN = load_client_config()
 _headers = {
@@ -28,6 +28,15 @@ _headers = {
     "Accept": "application/json, text/event-stream",
 }
 _id_counter = [0]
+
+
+class HumanAPIError(RuntimeError):
+    """Hub Human API 返回的可安全透传错误。"""
+
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
 
 
 def status() -> dict[str, Any]:
@@ -117,6 +126,50 @@ def allows_local_actions() -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def human_api(
+    method: str,
+    path: str,
+    authorization: str,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    """调用固定 Hub Human API；JWT 仅随本次请求转发，不保存到磁盘。"""
+    if (
+        not authorization.startswith("Bearer ")
+        or not authorization[7:].strip()
+        or len(authorization) > 8192
+    ):
+        raise ValueError("需要有效的 Hub Human JWT")
+    if not path.startswith("/hub/api/"):
+        raise ValueError("Hub Human API 路径无效")
+    headers = {
+        **_headers,
+        "Authorization": authorization,
+    }
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.request(
+                method,
+                f"{HUB}{path}",
+                json=payload if method != "GET" else None,
+                headers=headers,
+            )
+    except httpx.HTTPError as exc:
+        raise HumanAPIError(502, f"Hub 请求失败: {exc}") from exc
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if response.is_error:
+        detail = data.get("detail") if isinstance(data, dict) else None
+        raise HumanAPIError(
+            response.status_code,
+            str(detail or f"Hub 返回 HTTP {response.status_code}"),
+        )
+    if not isinstance(data, (dict, list)):
+        raise HumanAPIError(502, "Hub 返回了无效的 JSON")
+    return data
 
 
 def _ensure_init() -> None:

@@ -158,6 +158,48 @@ header .spacer{flex:1}
 .field{margin-bottom:8px}
 .field label{display:block;font-size:11px;color:var(--fg2);margin-bottom:3px}
 
+/* 团队 Hub：Human / 项目 / 成员 / Agent 管理，仅展示远端数据 */
+.team-view{overflow:hidden}
+.team-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
+.team-toolbar .spacer{flex:1}
+.team-content{flex:1;overflow:auto;padding:10px}
+.team-login{max-width:560px;margin:7vh auto 0;background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:18px}
+.team-login h2{font-size:17px;margin-bottom:6px}
+.team-login-note,.team-safety{font-size:12px;color:var(--fg2);line-height:1.6}
+.team-login-grid{display:grid;grid-template-columns:1fr;gap:9px;margin:14px 0}
+.team-shell{display:grid;grid-template-columns:minmax(230px,280px) minmax(0,1fr);gap:10px;min-height:100%}
+.team-side,.team-main{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;overflow:hidden}
+.team-side-head,.team-panel-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--bd)}
+.team-side-head h3,.team-panel-head h3{font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.team-project-list{padding:7px}
+.team-project{width:100%;display:block;text-align:left;background:transparent;border-color:transparent;padding:8px 9px;margin-bottom:3px;white-space:normal}
+.team-project.active{background:var(--bg4);border-color:var(--accent)}
+.team-project-name{display:flex;align-items:center;gap:6px;font-weight:600;word-break:break-word}
+.team-project-meta{font-size:10px;color:var(--fg3);margin-top:3px}
+.team-create{border-top:1px solid var(--bd);padding:10px}
+.team-create summary{cursor:pointer;color:var(--accent);font-size:12px;margin-bottom:8px}
+.team-create .field{margin-bottom:7px}
+.team-main{display:flex;flex-direction:column}
+.team-panel-body{padding:12px;display:flex;flex-direction:column;gap:12px}
+.team-status{padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg3);font-size:12px;line-height:1.55}
+.team-status.warn{border-color:color-mix(in srgb,var(--need) 60%,var(--bd));color:var(--need)}
+.team-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.team-stat{padding:9px;border:1px solid var(--bd);border-radius:8px;background:var(--bg3)}
+.team-stat b{display:block;font-size:17px}.team-stat span{font-size:10px;color:var(--fg3)}
+.team-section{border:1px solid var(--bd);border-radius:9px;overflow:hidden}
+.team-section-title{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg3);font-size:12px;font-weight:600}
+.team-section-title span{margin-left:auto;color:var(--fg3);font-size:10px;font-weight:400}
+.team-row{display:grid;grid-template-columns:minmax(110px,1fr) minmax(110px,.8fr) auto;gap:8px;align-items:center;padding:9px 10px;border-top:1px solid var(--bd);font-size:12px}
+.team-row:first-child{border-top:0}
+.team-row-main{min-width:0}.team-row-main b,.team-row-main small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.team-row-main small{color:var(--fg3);font-size:10px;margin-top:2px}
+.team-row-actions{display:flex;gap:5px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.team-row-actions select{width:auto;max-width:155px;font-size:12px;padding:4px 6px}
+.team-badge{display:inline-flex;border-radius:999px;padding:1px 7px;font-size:10px;background:var(--bg4);color:var(--fg2)}
+.team-badge.active{color:var(--done)}.team-badge.invited{color:var(--need)}.team-badge.admin{color:var(--accent)}.team-badge.retired{color:var(--err)}
+.team-inline-form{display:flex;gap:7px;align-items:flex-end;flex-wrap:wrap}
+.team-inline-form .field{flex:1;min-width:150px;margin:0}
+
 /* Session 任务看板 + Attention */
 .attention-view{overflow:hidden}
 .attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
@@ -310,6 +352,8 @@ header .spacer{flex:1}
 @media(max-width:860px){
   .msgs-body,.files-body{grid-template-columns:1fr}
   .sidebar,.file-tree{max-height:25vh}
+  .team-shell{grid-template-columns:1fr}
+  .team-side{max-height:36vh;overflow:auto}
 }
 @media(max-width:560px){
   header{padding:6px 8px;gap:4px}
@@ -326,6 +370,10 @@ header .spacer{flex:1}
   .task-agent-task{grid-column:2 / 4}
   .task-agent-state{grid-column:3;grid-row:1}
   .msgs-body,.files-body{padding:6px;gap:6px;min-height:0}
+  .team-content{padding:6px}
+  .team-row{grid-template-columns:minmax(0,1fr);gap:6px}
+  .team-row-actions{justify-content:flex-start}
+  .team-stats{grid-template-columns:1fr}
   .msgs-list,.editor-area{min-height:0}
   .file-search{padding:6px;gap:5px}
   .file-search input{flex-basis:100%;min-width:0}
@@ -380,6 +428,7 @@ header .spacer{flex:1}
       <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="流视图:可滚屏/复制的 pane 输出 + 快速发指令">流</button>
       <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止">会话</button>
       <button data-view="msgs" data-i18n="nav.msgs" data-i18n-title="nav.msgs.t" title="agent 之间的消息(需安装 Agent Mail)">消息</button>
+      <button data-view="team" data-i18n="nav.team" data-i18n-title="nav.team.t" title="团队项目、成员、默认 Agent 与管理员操作">团队</button>
       <button data-view="files" data-i18n="nav.files" data-i18n-title="nav.files.t" title="浏览/编辑/下载项目文件,也可以从这里建工作区">文件</button>
       <button data-view="settings" data-i18n="nav.settings" data-i18n-title="nav.settings.t" title="语言、主题、agent、目录与环境自检">设置</button>
     </nav>
@@ -432,6 +481,18 @@ header .spacer{flex:1}
         <div id="msgList"></div>
       </div>
     </div>
+  </section>
+
+  <!-- 团队 Hub（不接入本地执行链） -->
+  <section id="view-team" class="view team-view">
+    <div class="team-toolbar">
+      <b data-i18n="team.title">团队中心</b>
+      <span class="muted" id="teamIdentity" style="font-size:11px">未连接 Human 身份</span>
+      <span class="spacer"></span>
+      <button class="sm" id="teamLogoutBtn" onclick="teamDisconnect()" style="display:none">退出 Human 身份</button>
+      <button class="icon" onclick="teamLoad(true)" title="刷新" data-i18n-title="common.refresh">↻</button>
+    </div>
+    <div class="team-content" id="teamContent"><div class="empty" data-i18n="common.loading">加载中…</div></div>
   </section>
 
   <!-- 文件 -->
@@ -748,6 +809,8 @@ let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_CLOSE_TIMER=null, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
+let TEAM={token:'',human:null,projects:[],selected:'',membership:null,agents:[],members:[],loading:false,mutating:false};
+try{TEAM.token=sessionStorage.getItem('cockpit-human-jwt')||'';TEAM.selected=sessionStorage.getItem('cockpit-team-project')||''}catch(e){}
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -762,11 +825,12 @@ function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent
 // JS 动态文案用 t('key','中文原文') 内联回退,保证源码中文不丢(测试可锚)。
 const I18N={
 en:{
-'nav.menu':'Menu','nav.board':'Board','nav.attention':'Tasks','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.files':'Files','nav.settings':'Settings',
-'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Tasks and progress grouped by session, including blockers','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
+'nav.menu':'Menu','nav.board':'Board','nav.attention':'Tasks','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.team':'Team','nav.files':'Files','nav.settings':'Settings',
+'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Tasks and progress grouped by session, including blockers','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.team.t':'Team projects, members, default agents and administration','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
 'board.guide.title':'No running agents yet','board.guide.body':'First time here? Create a workspace in one click (it creates the session and starts the agents); for an existing session, use Add Agent in the Terminal toolbar.','board.guide.btn':'🚀 Create your first workspace','board.guide.noherdr':'herdr is unavailable','board.guide.noherdr.body':'The herdr executable was not found. Check Settings → Environment check for missing components, install them, then refresh.','board.guide.noherdr.btn':'Open environment check','launch.nosession':'No session yet — create a workspace first',
 'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
 'attention.title':'Task board','attention.push':'Enable notifications','attention.report':'Request reports','common.refresh':'Refresh','common.loading':'Loading…',
+'team.title':'Team center',
 'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
@@ -782,11 +846,12 @@ en:{
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
 ja:{
-'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'タスク','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.files':'ファイル','nav.settings':'設定',
-'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'session ごとのタスク、進捗、ブロッカーを表示','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
+'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'タスク','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.team':'チーム','nav.files':'ファイル','nav.settings':'設定',
+'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'session ごとのタスク、進捗、ブロッカーを表示','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.team.t':'チームプロジェクト、メンバー、デフォルト Agent、管理操作','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
 'board.guide.title':'実行中の agent はまだありません','board.guide.body':'初めてですか?下のボタンでワークスペースを一発作成(session 作成と agent 起動を自動化)。既存 session には「端末」ツールバーの「Agent 追加」から追加できます。','board.guide.btn':'🚀 最初のワークスペースを作成','board.guide.noherdr':'herdr が利用できません','board.guide.noherdr.body':'herdr 実行ファイルが見つかりません。「設定 → 環境チェック」で不足コンポーネントを確認し、インストール後に更新してください。','board.guide.noherdr.btn':'環境チェックを開く','launch.nosession':'session がまだありません。先にワークスペースを作成してください',
 'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
 'attention.title':'タスクボード','attention.push':'通知を有効化','attention.report':'進捗報告を依頼','common.refresh':'更新','common.loading':'読み込み中…',
+'team.title':'チームセンター',
 'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
@@ -1029,6 +1094,168 @@ function pasteServiceClipboard(input){
   input.dispatchEvent(new Event('input',{bubbles:true}));
   input.focus();
 }
+
+// ============ 团队 Hub（远端数据不进入 Herdr/任务/本地执行链） ============
+function teamHeaders(json=false){
+  const headers={'X-Agent-Hub-Authorization':'Bearer '+TEAM.token};
+  if(json)headers['Content-Type']='application/json';
+  return headers;
+}
+function teamApi(path,method='GET',body=null){
+  const options={method,headers:teamHeaders(method!=='GET')};
+  if(method!=='GET')options.body=JSON.stringify(body||{});
+  return api('/api/team/'+path,options);
+}
+function teamHandleSeed(){
+  const raw=(TEAM.human?.display_name||'human').toLowerCase().replace(/[^a-z0-9._-]+/g,'-').replace(/^-+|-+$/g,'');
+  return raw||'human';
+}
+function teamLoginHtml(error=''){
+  document.getElementById('teamIdentity').textContent='未连接 Human 身份';
+  document.getElementById('teamLogoutBtn').style.display='none';
+  document.getElementById('teamContent').innerHTML=`<div class="team-login">
+    <h2>连接团队 Human 身份</h2>
+    <p class="team-login-note">使用共享 Hub 签发的 Human JWT。JWT 只保存在当前浏览器标签页的 sessionStorage，关闭标签页即清除，不写入 Cockpit 配置或磁盘。</p>
+    ${error?`<div class="team-status warn" style="margin-top:10px">${esc(error)}</div>`:''}
+    <div class="team-login-grid">
+      <div class="field"><label>显示名称</label><input id="teamDisplayName" autocomplete="name" placeholder="例如 FYC"></div>
+      <div class="field"><label>Human JWT</label><input id="teamJwt" type="password" autocomplete="off" placeholder="Bearer token（无需输入 Bearer 前缀）"></div>
+    </div>
+    <button class="primary" data-action="teamConnect">连接并注册身份</button>
+    <p class="team-safety" style="margin-top:12px">安全边界：团队项目、成员、Agent 状态只用于展示与 Hub 元数据更新；不会启动 pane、shell、worktree 或本地任务。</p>
+  </div>`;
+}
+async function teamConnect(){
+  if(TEAM.mutating)return;
+  const token=document.getElementById('teamJwt')?.value.trim()||'';
+  const displayName=document.getElementById('teamDisplayName')?.value.trim()||'';
+  if(!token||!displayName){toast('请填写显示名称和 Human JWT');return}
+  TEAM.mutating=true;
+  TEAM.token=token;
+  try{
+    TEAM.human=await teamApi('humans/me','PUT',{display_name:displayName});
+    try{sessionStorage.setItem('cockpit-human-jwt',token)}catch(e){}
+    await teamLoad(true);
+    toast('Human 身份已连接');
+  }catch(e){TEAM.token='';TEAM.human=null;try{sessionStorage.removeItem('cockpit-human-jwt')}catch(_){};teamLoginHtml('连接失败：'+e)}finally{TEAM.mutating=false}
+}
+function teamDisconnect(){
+  TEAM={token:'',human:null,projects:[],selected:'',membership:null,agents:[],members:[],loading:false,mutating:false};
+  try{sessionStorage.removeItem('cockpit-human-jwt');sessionStorage.removeItem('cockpit-team-project')}catch(e){}
+  teamLoginHtml();
+}
+function teamProjectStatus(project){
+  const status=project.membership?.status;
+  if(status==='active')return project.membership.role==='admin'?'管理员':'已加入';
+  if(status==='invited')return'审批中';
+  if(status==='removed')return'已移除';
+  return'可申请';
+}
+function teamSelectedProject(){return TEAM.projects.find(p=>p.slug===TEAM.selected)||null}
+async function teamLoadSelection(){
+  TEAM.membership=null;TEAM.agents=[];TEAM.members=[];
+  const project=teamSelectedProject();
+  if(!project||project.membership?.status!=='active')return;
+  const slug=encodeURIComponent(project.slug);
+  const requests=[teamApi(`projects/${slug}/membership`),teamApi(`projects/${slug}/agents`)];
+  if(project.membership.role==='admin')requests.push(teamApi(`projects/${slug}/members`));
+  const result=await Promise.all(requests);
+  TEAM.membership=result[0];TEAM.agents=result[1].agents||[];TEAM.members=result[2]?.members||[];
+}
+async function teamLoad(force=false){
+  if(!TEAM.token){teamLoginHtml();return}
+  if(TEAM.loading)return;
+  TEAM.loading=true;
+  const content=document.getElementById('teamContent');
+  if(force||!TEAM.human)content.innerHTML='<div class="empty">加载团队数据…</div>';
+  try{
+    const [human,projects]=await Promise.all([teamApi('humans/me'),teamApi('projects')]);
+    TEAM.human=human;TEAM.projects=projects.projects||[];
+    if(!TEAM.projects.some(p=>p.slug===TEAM.selected)){
+      TEAM.selected=(TEAM.projects.find(p=>p.membership?.status==='active')||TEAM.projects[0]||{}).slug||'';
+    }
+    try{TEAM.selected?sessionStorage.setItem('cockpit-team-project',TEAM.selected):sessionStorage.removeItem('cockpit-team-project')}catch(e){}
+    await teamLoadSelection();
+    teamRender();
+  }catch(e){teamLoginHtml('团队数据加载失败：'+e)}finally{TEAM.loading=false}
+}
+function teamOwnerName(ownerId){
+  if(ownerId==null)return'未归属';
+  if(ownerId===TEAM.human?.id)return TEAM.human.display_name+'（你）';
+  return TEAM.members.find(m=>m.human_id===ownerId)?.display_name||('Human #'+ownerId);
+}
+function teamOwnerOptions(selected){
+  return `<option value=""${selected==null?' selected':''}>未归属</option>`+TEAM.members.filter(m=>m.status==='active').map(m=>
+    `<option value="${Number(m.human_id)}"${m.human_id===selected?' selected':''}>${esc(m.display_name)} · @${esc(m.mention_handle)}</option>`
+  ).join('');
+}
+function teamAgentRows(project){
+  const admin=project.membership?.role==='admin';
+  if(!TEAM.agents.length)return'<div class="empty">当前项目还没有 Agent 身份</div>';
+  return TEAM.agents.map(agent=>{
+    const canManage=admin||agent.owner_id===TEAM.human?.id;
+    const badge=agent.retired?'<span class="team-badge retired">retired</span>':'<span class="team-badge active">active</span>';
+    const ownerControl=admin?`<select id="teamOwner-${Number(agent.id)}">${teamOwnerOptions(agent.owner_id)}</select><button class="sm" data-action="teamOwner" data-agent-id="${Number(agent.id)}">保存归属</button>`:`<span class="muted">${esc(teamOwnerName(agent.owner_id))}</span>`;
+    const retireControl=canManage?`<button class="sm${agent.retired?'':' danger'}" data-action="teamRetire" data-agent-id="${Number(agent.id)}" data-retired="${agent.retired?'1':'0'}">${agent.retired?'恢复':'停用'}</button>`:'';
+    return `<div class="team-row"><div class="team-row-main"><b>${esc(agent.name)} ${badge}</b><small>${esc(agent.program||'unknown')}${agent.model?' · '+esc(agent.model):''}</small></div><div class="muted">${esc(teamOwnerName(agent.owner_id))}</div><div class="team-row-actions">${ownerControl}${retireControl}</div></div>`;
+  }).join('');
+}
+function teamMemberRows(){
+  if(!TEAM.members.length)return'<div class="empty">暂无成员</div>';
+  return TEAM.members.map(member=>{
+    const self=member.human_id===TEAM.human?.id;
+    const status=`<span class="team-badge ${esc(member.status)}">${esc(member.status)}</span>`;
+    const role=`<span class="team-badge ${esc(member.role)}">${esc(member.role)}</span>`;
+    let actions='<span class="muted">当前身份</span>';
+    if(!self){
+      const roleSelect=`<select id="teamRole-${Number(member.human_id)}"><option value="member"${member.role==='member'?' selected':''}>member</option><option value="admin"${member.role==='admin'?' selected':''}>admin</option></select><button class="sm" data-action="teamRole" data-human-id="${Number(member.human_id)}">保存角色</button>`;
+      if(member.status==='invited')actions=`<button class="primary sm" data-action="teamMemberStatus" data-human-id="${Number(member.human_id)}" data-status="active">批准</button><button class="sm danger" data-action="teamMemberStatus" data-human-id="${Number(member.human_id)}" data-status="removed">拒绝</button>`;
+      else if(member.status==='active')actions=roleSelect+`<button class="sm danger" data-action="teamMemberStatus" data-human-id="${Number(member.human_id)}" data-status="removed">移除</button>`;
+      else actions=`<button class="sm" data-action="teamMemberStatus" data-human-id="${Number(member.human_id)}" data-status="active">恢复</button>`;
+    }
+    return `<div class="team-row"><div class="team-row-main"><b>${esc(member.display_name)} ${self?'<span class="team-badge">你</span>':''}</b><small>@${esc(member.mention_handle)}</small></div><div>${role} ${status}</div><div class="team-row-actions">${actions}</div></div>`;
+  }).join('');
+}
+function teamProjectPanel(project){
+  if(!project)return'<div class="empty">还没有项目。可在左侧创建第一个团队项目。</div>';
+  const membership=project.membership;
+  if(membership?.status!=='active'){
+    const pending=membership?.status==='invited';
+    return `<div class="team-panel-head"><h3>${esc(project.slug)}</h3><span class="team-badge ${pending?'invited':''}">${esc(teamProjectStatus(project))}</span></div><div class="team-panel-body">
+      ${pending?'<div class="team-status warn">加入申请已提交，等待项目管理员审批。</div>':`<div class="team-status">该项目可发现，但你还不是 active 成员。申请只会更新 Hub membership，不会创建本地工作区。</div><div class="team-inline-form"><div class="field"><label>项目内 @花名</label><input id="teamJoinHandle" value="${esc(teamHandleSeed())}" maxlength="128"></div><button class="primary" data-action="teamJoin">申请加入</button></div>`}
+    </div>`;
+  }
+  const owned=TEAM.agents.filter(a=>a.owner_id===TEAM.human?.id&&!a.retired);
+  const defaultOptions='<option value="">不设置（消息进入人工收件箱）</option>'+owned.map(a=>`<option value="${Number(a.id)}"${a.id===TEAM.membership?.default_agent_id?' selected':''}>${esc(a.name)}</option>`).join('');
+  const admin=membership.role==='admin';
+  const activeAgents=TEAM.agents.filter(a=>!a.retired).length;
+  return `<div class="team-panel-head"><h3>${esc(project.slug)}</h3><span class="team-badge ${admin?'admin':'active'}">${admin?'管理员':'成员'}</span></div><div class="team-panel-body">
+    <div class="team-safety">共享 Hub 数据只用于团队界面；切换项目不会切换 Herdr session，也不会自动启动 Agent。</div>
+    <div class="team-stats"><div class="team-stat"><b>${Number(project.active_member_count)||0}</b><span>active 成员</span></div><div class="team-stat"><b>${activeAgents}</b><span>active Agents</span></div><div class="team-stat"><b>${TEAM.membership?.default_agent_id?'1':'0'}</b><span>我的默认 Agent</span></div></div>
+    <div class="team-section"><div class="team-section-title">我的项目身份 <span>本人可修改</span></div><div class="team-row"><div class="team-row-main"><b>${esc(TEAM.human.display_name)}</b><small>@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}</small></div><select id="teamDefaultAgent">${defaultOptions}</select><div class="team-row-actions"><button class="primary sm" data-action="teamDefault">保存默认 Agent</button></div></div></div>
+    <div class="team-section"><div class="team-section-title">项目 Agents <span>owner 可停用；管理员可分配 owner</span></div>${teamAgentRows(project)}</div>
+    ${admin?`<div class="team-section"><div class="team-section-title">管理员 · 成员审批 <span>${TEAM.members.length} 人</span></div>${teamMemberRows()}</div>`:''}
+  </div>`;
+}
+function teamRender(){
+  document.getElementById('teamIdentity').textContent=`${TEAM.human.display_name} · Human #${TEAM.human.id}`;
+  document.getElementById('teamLogoutBtn').style.display='inline-block';
+  const projects=TEAM.projects.map(project=>`<button class="team-project${project.slug===TEAM.selected?' active':''}" data-action="teamProject" data-slug="${esc(project.slug)}"><span class="team-project-name">${esc(project.slug)} <span class="team-badge ${esc(project.membership?.status||'')}">${esc(teamProjectStatus(project))}</span></span><span class="team-project-meta">${Number(project.active_member_count)||0} 位 active 成员</span></button>`).join('')||'<div class="empty">暂无项目</div>';
+  document.getElementById('teamContent').innerHTML=`<div class="team-shell"><aside class="team-side"><div class="team-side-head"><h3>项目</h3><span class="team-badge">${TEAM.projects.length}</span></div><div class="team-project-list">${projects}</div><details class="team-create"><summary>＋ 管理员创建项目（群组）</summary><div class="field"><label>项目标识</label><input id="teamProjectKey" placeholder="例如 agent-cockpit" maxlength="255"></div><div class="field"><label>你的项目内 @花名</label><input id="teamProjectHandle" value="${esc(teamHandleSeed())}" maxlength="128"></div><button class="primary sm" data-action="teamCreate">创建项目</button></details></aside><main class="team-main">${teamProjectPanel(teamSelectedProject())}</main></div>`;
+}
+async function teamSelect(slug){TEAM.selected=slug;try{sessionStorage.setItem('cockpit-team-project',slug)}catch(e){};document.getElementById('teamContent').innerHTML='<div class="empty">加载项目…</div>';try{await teamLoadSelection();teamRender()}catch(e){toast('项目加载失败: '+e,4500);teamRender()}}
+async function teamMutation(success,operation){
+  if(TEAM.mutating)return;
+  TEAM.mutating=true;
+  try{await operation();toast(success);await teamLoad(true)}catch(e){toast(success+'失败: '+e,5000)}finally{TEAM.mutating=false}
+}
+function teamCreateProject(){const key=document.getElementById('teamProjectKey')?.value.trim(),handle=document.getElementById('teamProjectHandle')?.value.trim();if(!key||!handle){toast('请填写项目标识和 @花名');return}teamMutation('项目已创建',async()=>{const p=await teamApi('projects','POST',{human_key:key,mention_handle:handle});TEAM.selected=p.slug})}
+function teamJoin(){const project=teamSelectedProject(),handle=document.getElementById('teamJoinHandle')?.value.trim();if(!project||!handle){toast('请填写项目内 @花名');return}teamMutation('加入申请已提交',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/join-requests`,'POST',{mention_handle:handle}))}
+function teamSetDefault(){const project=teamSelectedProject(),value=document.getElementById('teamDefaultAgent')?.value;if(!project)return;teamMutation('默认 Agent 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/membership`,'PATCH',{default_agent_id:value?Number(value):null}))}
+function teamSetOwner(agentId){const project=teamSelectedProject(),value=document.getElementById('teamOwner-'+agentId)?.value;if(!project)return;teamMutation('Agent owner 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agents/${agentId}`,'PATCH',{owner_id:value?Number(value):null}))}
+function teamSetRetired(agentId,retired){const project=teamSelectedProject(),next=!retired;if(!project)return;if(next&&!window.confirm('停用这个 Agent 身份？历史消息会保留，默认 Agent 引用需先清除。'))return;teamMutation(next?'Agent 已停用':'Agent 已恢复',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agents/${agentId}`,'PATCH',{retired:next}))}
+function teamSetMemberStatus(humanId,status){const project=teamSelectedProject();if(!project)return;if(status==='removed'&&!window.confirm('确认拒绝或移除这个成员？'))return;teamMutation(status==='active'?'成员已批准/恢复':'成员已移除',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/members/${humanId}`,'PATCH',{status}))}
+function teamSetRole(humanId){const project=teamSelectedProject(),role=document.getElementById('teamRole-'+humanId)?.value;if(!project||!role)return;teamMutation('成员角色已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/members/${humanId}`,'PATCH',{role}))}
 function showView(v){
   const prevView=document.querySelector('#nav button.active')?.dataset.view;
   const drawer=document.getElementById('termDrawer');
@@ -1039,6 +1266,7 @@ function showView(v){
   if(v==='board')refreshBoard();
   if(v==='attention')loadAttention();
   if(v==='msgs')loadProjList();
+  if(v==='team')teamLoad();
   if(v==='files')loadFileTree();
   if(v==='term')termEnsure();
   if(v==='sessions')loadSessionsView();
@@ -3045,6 +3273,18 @@ function bindDelegation(){
     if(it.dataset.action==='pickRecipient')document.getElementById('cmpTo').value=it.dataset.name});
   on('#msgList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='ack')ackMsg(parseInt(it.dataset.pid),it.dataset.name,parseInt(it.dataset.mid))});
+  on('#teamContent',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    const action=it.dataset.action;
+    if(action==='teamConnect')teamConnect();
+    else if(action==='teamProject')teamSelect(it.dataset.slug);
+    else if(action==='teamCreate')teamCreateProject();
+    else if(action==='teamJoin')teamJoin();
+    else if(action==='teamDefault')teamSetDefault();
+    else if(action==='teamOwner')teamSetOwner(Number(it.dataset.agentId));
+    else if(action==='teamRetire')teamSetRetired(Number(it.dataset.agentId),it.dataset.retired==='1');
+    else if(action==='teamMemberStatus')teamSetMemberStatus(Number(it.dataset.humanId),it.dataset.status);
+    else if(action==='teamRole')teamSetRole(Number(it.dataset.humanId));
+  });
   on('#collabList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     const a=it.dataset.action,s=it.dataset.session,p=it.dataset.pane,g=it.dataset.agent;
     if(a==='uploadCurrent')sendUploadToCurrent();

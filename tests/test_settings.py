@@ -251,3 +251,56 @@ def test_agent_mail_config_routes_never_expose_token(tmp_path, monkeypatch):
     assert response.status_code == 400
     assert "top-secret" not in response.text
     assert client.get("/api/agent-mail/config").status_code == 401
+
+
+def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
+    from fastapi.testclient import TestClient
+    import server
+
+    calls = []
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_api",
+        lambda method, path, authorization, payload=None: calls.append(
+            (method, path, authorization, payload)
+        ) or {"ok": True},
+    )
+    client = TestClient(server.app)
+    headers = {
+        "authorization": "Bearer secret",
+        "x-agent-hub-authorization": "Bearer human.jwt",
+    }
+
+    response = client.get("/api/team/projects", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    response = client.patch(
+        "/api/team/projects/demo/members/7",
+        headers=headers,
+        json={"status": "active"},
+    )
+    assert response.status_code == 200
+    assert calls == [
+        ("GET", "/hub/api/projects", "Bearer human.jwt", None),
+        (
+            "PATCH",
+            "/hub/api/projects/demo/members/7",
+            "Bearer human.jwt",
+            {"status": "active"},
+        ),
+    ]
+
+    assert client.post(
+        "/api/team/projects/demo/agents",
+        headers=headers,
+        json={},
+    ).status_code == 404
+    assert client.get(
+        "/api/team/projects/demo/../../env-check",
+        headers=headers,
+    ).status_code == 404
+    assert client.get(
+        "/api/team/projects",
+        headers={"authorization": "Bearer secret"},
+    ).status_code == 401

@@ -958,6 +958,43 @@ def test_settings_view_and_nav_exist():
     assert 'id="setHubStatus"' in HTML
 
 
+def test_team_view_covers_project_membership_and_agent_management():
+    js = _inline_js()
+    assert '<button data-view="team"' in HTML
+    assert 'id="view-team"' in HTML
+    assert "function teamConnect()" in js
+    assert "function teamCreateProject()" in js
+    assert "function teamJoin()" in js
+    assert "function teamSetDefault()" in js
+    assert "function teamSetOwner(agentId)" in js
+    assert "function teamSetMemberStatus(humanId,status)" in js
+    assert "'projects','POST'" in js
+    assert "/join-requests`,'POST'" in js
+    assert "/membership`,'PATCH'" in js
+    assert "/members/${humanId}`,'PATCH'" in js
+    assert "/agents/${agentId}`,'PATCH'" in js
+
+
+def test_team_human_jwt_is_tab_scoped_and_hub_text_is_escaped():
+    js = _inline_js()
+    assert "sessionStorage.setItem('cockpit-human-jwt',token)" in js
+    assert "sessionStorage.removeItem('cockpit-human-jwt')" in js
+    assert "localStorage.setItem('cockpit-human-jwt'" not in js
+    assert "'X-Agent-Hub-Authorization':'Bearer '+TEAM.token" in js
+    assert "${esc(project.slug)}" in js
+    assert "${esc(agent.name)}" in js
+    assert "${esc(member.display_name)}" in js
+    assert "团队项目、成员、Agent 状态只用于展示与 Hub 元数据更新" in js
+
+
+def test_team_refresh_and_mutations_are_serialized():
+    js = _inline_js()
+    assert "if(TEAM.loading)return" in js
+    assert "if(TEAM.mutating)return" in js
+    assert "TEAM.mutating=true" in js
+    assert "finally{TEAM.mutating=false}" in js
+
+
 def test_i18n_en_ja_key_sets_match():
     import re
     m = re.search(r"const I18N=\{\s*en:\{([\s\S]*?)\},\s*ja:\{([\s\S]*?)\}\};", HTML)

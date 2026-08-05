@@ -213,3 +213,65 @@ def test_status_parses_team_hub_host_port(monkeypatch):
 
     assert hub_client.status()["available"] is True
     assert calls == [(('team-server', 9765), 1)]
+
+
+def test_human_api_forwards_ephemeral_jwt_to_fixed_hub_path(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"projects": []}
+
+    class Client:
+        def __init__(self, timeout):
+            assert timeout == 30
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, method, url, json, headers):
+            calls.append((method, url, json, headers))
+            return Response()
+
+    monkeypatch.setattr(hub_client, "HUB", "https://team.example:9765")
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+
+    result = hub_client.human_api(
+        "GET", "/hub/api/projects", "Bearer human.jwt"
+    )
+
+    assert result == {"projects": []}
+    assert calls == [
+        (
+            "GET",
+            "https://team.example:9765/hub/api/projects",
+            None,
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "Authorization": "Bearer human.jwt",
+            },
+        )
+    ]
+
+
+def test_human_api_rejects_missing_jwt_and_non_human_path(monkeypatch):
+    monkeypatch.setattr(
+        hub_client.httpx,
+        "Client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not connect")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Human JWT"):
+        hub_client.human_api("GET", "/hub/api/projects", "")
+    with pytest.raises(ValueError, match="路径无效"):
+        hub_client.human_api("GET", "/mcp/", "Bearer human.jwt")
