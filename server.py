@@ -771,6 +771,14 @@ def api_task_diff(task_id: str):
         raise HTTPException(404, str(e))
 
 
+@app.post("/api/tasks/{task_id}/cancel")
+def api_task_cancel(task_id: str):
+    try:
+        return tasks.cancel_task(task_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/tasks/{task_id}/apply")
 def api_task_apply(task_id: str, action: str = "apply"):
     try:

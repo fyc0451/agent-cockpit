@@ -3,6 +3,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
+import urllib.error
 
 import pytest
 
@@ -21,6 +23,19 @@ def _load_mail_send():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+def _load_tool(name, module_name):
+    path = TOOLS / name
+    loader = importlib.machinery.SourceFileLoader(module_name, str(path))
+    spec = importlib.util.spec_from_file_location(module_name, str(path), loader=loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _load_am_common():
+    return _load_tool("am_common.py", "cockpit_am_common")
 
 
 def test_bound_session_routes_to_unique_pane_even_when_cwd_differs():
@@ -63,11 +78,87 @@ def test_different_session_binding_overrides_matching_pane_cwd():
 
 def test_notification_uses_real_project_and_packaged_receiver():
     module = _load_mail_send()
-    text = module._notify_text(7, "review", "codex", PROJECT, "/worktree", False)
+    text = module._notify_text(
+        7, "review", "codex", "worker-2", PROJECT, "/worktree", False
+    )
 
     assert PROJECT in text
     assert str(TOOLS / "mail-recv") in text
+    assert "--instance worker-2" in text
     assert "当前 pane cwd=/worktree" in text
+
+
+def test_notification_resolves_registered_instance(tmp_path):
+    module = _load_mail_send()
+    module.REGISTRY_DIR = tmp_path
+    registry = tmp_path / module.slugify(PROJECT)
+    registry.mkdir()
+    (registry / "codex--worker-2.json").write_text(json.dumps({
+        "project_key": PROJECT,
+        "name": "BlueLake",
+        "agent": "codex",
+        "instance": "worker-2",
+    }))
+
+    assert module._notification_identity("BlueLake", PROJECT) == (
+        "codex", "worker-2"
+    )
+
+
+def test_mcp_call_parses_multiline_sse(monkeypatch):
+    module = _load_am_common()
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def read(self):
+            return (
+                b'event: message\n'
+                b'data: {"jsonrpc":"2.0",\n'
+                b'data: "id":1,"result":{"ok":true}}\n\n'
+            )
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+
+    assert module.mcp_call("http://hub", "token", "test", {})["result"] == {"ok": True}
+
+
+def test_mcp_call_reports_network_and_malformed_response(monkeypatch):
+    module = _load_am_common()
+    monkeypatch.setattr(
+        module.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.URLError("down")),
+    )
+    with pytest.raises(SystemExit, match="请求失败"):
+        module.mcp_call("http://hub", "token", "test", {})
+
+    class BadResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def read(self):
+            return b"not-json"
+
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen", lambda *args, **kwargs: BadResponse()
+    )
+    with pytest.raises(SystemExit, match="响应解析失败"):
+        module.mcp_call("http://hub", "token", "test", {})
+
+
+def test_mail_recv_strips_terminal_control_sequences():
+    module = _load_tool("mail-recv", "cockpit_mail_recv")
+    value = "hello\x1b]52;c;c2VjcmV0\x07\nworld\x1b[31m!\x1b[0m\x00"
+
+    assert module._terminal_text(value) == "hello\nworld!"
 
 
 def test_session_binding_requires_matching_session_directory(tmp_path):

@@ -12,7 +12,9 @@ import sys
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS_DIR)
-from am_common import load_identity, mcp_call, mcp_tool  # noqa: E402
+from am_common import (  # noqa: E402
+    REGISTRY_DIR, load_identity, mcp_call, mcp_tool, slugify,
+)
 
 
 HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
@@ -54,6 +56,27 @@ def _program_by_name(name: str, project_key: str) -> str:
         return row[0] if row else ""
     except Exception:
         return ""
+
+
+def _notification_identity(name: str, project_key: str) -> tuple[str, str] | None:
+    """由本机 registry 解析收件人的真实 CLI agent/instance。"""
+    directory = REGISTRY_DIR / slugify(project_key)
+    if not directory.is_dir():
+        return None
+    for path in sorted(directory.glob("*.json")):
+        try:
+            identity = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if not isinstance(identity, dict) or identity.get("project_key") != project_key:
+            continue
+        if identity.get("name") != name:
+            continue
+        agent = identity.get("agent")
+        instance = identity.get("instance")
+        if isinstance(agent, str) and isinstance(instance, str) and agent and instance:
+            return agent, instance
+    return None
 
 
 def _load_bindings() -> dict:
@@ -152,12 +175,13 @@ def _select_notify_targets(candidates: list[tuple], project_key: str) -> list[tu
 
 
 def _notify_text(
-    msg_id: int, subject: str, agent_type: str, project_key: str,
+    msg_id: int, subject: str, agent_type: str, instance: str, project_key: str,
     cwd: str, is_exact: bool,
 ) -> str:
     head = f"[agent-mail 通知] 你收到新消息 #{msg_id} 「{(subject or '')[:50]}」"
     command = (
-        f"{shlex.quote(MAIL_RECV_BIN)} --agent {agent_type} --instance main "
+        f"{shlex.quote(MAIL_RECV_BIN)} --agent {shlex.quote(agent_type)} "
+        f"--instance {shlex.quote(instance)} "
         f"--project {shlex.quote(project_key)} --unread"
     )
     if is_exact:
@@ -169,12 +193,10 @@ def _notify_text(
 
 
 def _notify_pane(
-    recipient_program: str, msg_id: int, subject: str, project_key: str = "",
+    agent_type: str, instance: str, msg_id: int, subject: str,
+    project_key: str = "",
 ) -> None:
     if not os.path.isfile(HERDR_BIN) or not project_key:
-        return
-    agent_type = PROG_TO_AGENT.get(recipient_program)
-    if not agent_type:
         return
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(HERDR_BIN) + ":" + env.get("PATH", "")
@@ -207,14 +229,25 @@ def _notify_pane(
         except Exception:
             continue
     for session, pane_id, cwd, is_exact in _select_notify_targets(candidates, project_key):
-        note = _notify_text(msg_id, subject, agent_type, project_key, cwd, is_exact)
+        note = _notify_text(
+            msg_id, subject, agent_type, instance, project_key, cwd, is_exact
+        )
         try:
-            subprocess.run(
+            notified = subprocess.run(
                 [HERDR_BIN, "--session", session, "agent", "prompt", pane_id, note],
                 capture_output=True, text=True, timeout=8, env=env,
             )
-        except Exception:
-            pass
+            if notified.returncode != 0:
+                print(
+                    f"warning: Herdr 通知失败({session}/{pane_id}): "
+                    f"{notified.stderr.strip()[:200]}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(
+                f"warning: Herdr 通知异常({session}/{pane_id}): {exc}",
+                file=sys.stderr,
+            )
 
 
 def main() -> None:
@@ -265,8 +298,26 @@ def main() -> None:
         project_key = identity["project_key"]
         for recipient in payload.get("to") or []:
             program = _program_by_name(recipient, project_key)
-            if program:
-                _notify_pane(program, message_id, args.subject, project_key)
+            expected_agent = PROG_TO_AGENT.get(program)
+            cli_identity = _notification_identity(recipient, project_key)
+            if not cli_identity:
+                if program:
+                    print(
+                        f"warning: 找不到 {recipient} 的本机 agent/instance，已跳过通知",
+                        file=sys.stderr,
+                    )
+                continue
+            agent_type, instance = cli_identity
+            if expected_agent and expected_agent != agent_type:
+                print(
+                    f"warning: {recipient} 的 registry agent={agent_type} "
+                    f"与 program={program} 不匹配，已跳过通知",
+                    file=sys.stderr,
+                )
+                continue
+            _notify_pane(
+                agent_type, instance, message_id, args.subject, project_key
+            )
     if not deliveries:
         print(json.dumps(result, ensure_ascii=False)[:300])
 

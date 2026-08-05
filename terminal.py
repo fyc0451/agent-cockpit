@@ -56,6 +56,9 @@ IDLE_TTL = 1800.0
 DEAD_GRACE = 60.0
 # 单次写 PTY 的最长等待(对端不消费时抛 TimeoutError;设置页 term.write_timeout 可覆盖)
 WRITE_TIMEOUT = 2.0
+# 退出后的 PTY 可能仍有后台进程持续写；drain 必须同时限制内存和总时长。
+DRAIN_MAX_BYTES = 1024 * 1024
+DRAIN_MAX_SECONDS = 2.0
 
 
 def _term_cfg(key: str, default: float) -> float:
@@ -314,14 +317,19 @@ def drain_output(term_id: str, timeout: float = 0.5) -> bytes:
     t = _get(term_id)
     if not t:
         return b""
-    chunks: list[bytes] = []
+    output = bytearray()
+    deadline = time.monotonic() + DRAIN_MAX_SECONDS
     with t["lock"]:
-        while True:
-            data = _read_fd(t, timeout)
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            data = _read_fd(t, min(timeout, max(0.0, remaining)))
             if not data:
                 break
-            chunks.append(data)
-    return b"".join(chunks)
+            output.extend(data)
+            overflow = len(output) - DRAIN_MAX_BYTES
+            if overflow > 0:
+                del output[:overflow]
+    return bytes(output)
 
 
 def _check_alive(t: dict[str, Any]) -> bool:

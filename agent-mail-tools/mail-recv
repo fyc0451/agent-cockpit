@@ -4,11 +4,28 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
+import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from am_common import load_identity, mcp_call, mcp_tool  # noqa: E402
+
+
+_ANSI_RE = re.compile(
+    r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])"
+)
+
+
+def _terminal_text(value: object) -> str:
+    """移除 ANSI/OSC 与控制字符，防收件内容操纵终端或剪贴板。"""
+    text = _ANSI_RE.sub("", str(value or ""))
+    return "".join(
+        char
+        for char in text
+        if char in "\n\t" or not unicodedata.category(char).startswith("C")
+    )
 
 
 def main() -> None:
@@ -47,11 +64,13 @@ def main() -> None:
         except (TypeError, ValueError):
             stamp = str(timestamp)
         print(
-            f"--- #{message.get('id')} [{message.get('thread_id') or '-'}] "
-            f"{message.get('from')} @ {stamp}  ({message.get('importance')})"
+            f"--- #{_terminal_text(message.get('id'))} "
+            f"[{_terminal_text(message.get('thread_id') or '-')}] "
+            f"{_terminal_text(message.get('from'))} @ {_terminal_text(stamp)}  "
+            f"({_terminal_text(message.get('importance'))})"
         )
-        print(f"    subject: {message.get('subject')}")
-        body = (message.get("body_md") or "").strip()
+        print(f"    subject: {_terminal_text(message.get('subject'))}")
+        body = _terminal_text(message.get("body_md")).strip()
         if body:
             print("    " + body.replace("\n", "\n    "))
         print()

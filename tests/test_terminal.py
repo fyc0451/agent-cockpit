@@ -260,6 +260,27 @@ def test_drain_reads_tail_after_exit():
     assert terminal.read_output(tid, 0.1) == b""
 
 
+def test_drain_output_is_bounded_when_background_writer_never_closes(monkeypatch):
+    tid = _create()
+    calls = 0
+
+    def endless_output(term, timeout):
+        nonlocal calls
+        calls += 1
+        return b"x" * 65536
+
+    monkeypatch.setattr(terminal, "_read_fd", endless_output)
+    monkeypatch.setattr(terminal, "DRAIN_MAX_SECONDS", 0.01)
+    monkeypatch.setattr(terminal, "DRAIN_MAX_BYTES", 128 * 1024)
+    started = time.monotonic()
+
+    output = terminal.drain_output(tid, timeout=0)
+
+    assert time.monotonic() - started < 0.5
+    assert calls > 1
+    assert len(output) == 128 * 1024
+
+
 def test_resize_ignores_invalid_dims():
     tid = _create()
     terminal.resize_term(tid, -5, 24)   # 不抛异常

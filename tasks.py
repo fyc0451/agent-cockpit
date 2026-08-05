@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -45,6 +46,14 @@ _apply_locks_guard = threading.Lock()
 
 # codex 二进制:优先环境变量,其次 PATH 探测
 CODEX_BIN = os.environ.get("CODEX_BIN") or shutil.which("codex") or "codex"
+try:
+    TASK_TIMEOUT_SECONDS = float(os.environ.get("COCKPIT_TASK_TIMEOUT", "3600"))
+except ValueError:
+    TASK_TIMEOUT_SECONDS = 3600.0
+
+# 只保存本进程启动的子进程；重启后的 pending/running 由 _init_db 标为失败。
+_active_processes: dict[str, subprocess.Popen] = {}
+_cancel_requested: set[str] = set()
 
 
 # ── DB ──────────────────────────────────────────────────────────
@@ -405,16 +414,37 @@ def _ensure_proc_terminated(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
     try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (OSError, AttributeError):
         proc.terminate()
+    try:
         proc.wait(timeout=5)
         return
     except Exception:
         pass
     try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, AttributeError):
         proc.kill()
+    try:
         proc.wait(timeout=5)
     except Exception:
         pass
+
+
+def cancel_task(task_id: str) -> dict[str, Any]:
+    """请求取消 pending/running 任务，并终止其进程组。"""
+    task = get_task(task_id)
+    if not task:
+        raise ValueError("任务不存在")
+    if task["status"] not in ("pending", "running"):
+        raise ValueError(f"任务已结束(状态: {task['status']}),不能取消")
+    with _tasks_lock:
+        _cancel_requested.add(task_id)
+        proc = _active_processes.get(task_id)
+    if proc is not None:
+        _ensure_proc_terminated(proc)
+    return {"id": task_id, "cancel_requested": True}
 
 
 def _run_codex(
@@ -451,39 +481,77 @@ def _run_codex(
 
     exit_code = None
     proc = None
+    timer = None
+    timed_out = threading.Event()
+    with _tasks_lock:
+        cancelled = task_id in _cancel_requested
     try:
-        proc = subprocess.Popen(
-            cmd, cwd=workdir, stdin=subprocess.PIPE if stdin_data else None,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            bufsize=1,  # 行缓冲
-        )
-        with _db() as con:
-            con.execute("UPDATE tasks SET pid=? WHERE id=?", (proc.pid, task_id))
-            con.commit()
-        if stdin_data and proc.stdin:
+        if cancelled:
+            _emit("[CANCELLED] 任务在进程启动前已取消")
+            exit_code = 130
+        else:
             try:
-                proc.stdin.write(stdin_data)
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
-        if proc.stdout is None:
-            raise RuntimeError("codex stdout pipe unavailable")
-        for line in proc.stdout:
-            _emit(line.rstrip("\n"))
-        proc.wait(timeout=5)
-        exit_code = proc.returncode
-    except FileNotFoundError:
-        _emit(f"[ERROR] codex 未找到: {CODEX_BIN}")
-        exit_code = 127
-    except Exception as e:
-        _emit(f"[ERROR] {type(e).__name__}: {e}")
-        exit_code = 1
+                proc = subprocess.Popen(
+                    cmd, cwd=workdir, stdin=subprocess.PIPE if stdin_data else None,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    bufsize=1, start_new_session=True,  # 行缓冲 + 独立进程组供取消
+                )
+                with _tasks_lock:
+                    _active_processes[task_id] = proc
+                    cancelled = task_id in _cancel_requested
+                with _db() as con:
+                    con.execute("UPDATE tasks SET pid=? WHERE id=?", (proc.pid, task_id))
+                    con.commit()
+                if cancelled:
+                    _ensure_proc_terminated(proc)
+                elif TASK_TIMEOUT_SECONDS > 0:
+                    def expire() -> None:
+                        if proc is not None and proc.poll() is None:
+                            timed_out.set()
+                            _emit(
+                                f"[ERROR] 任务超过总时限 "
+                                f"{TASK_TIMEOUT_SECONDS:g} 秒，已终止"
+                            )
+                            _ensure_proc_terminated(proc)
+
+                    timer = threading.Timer(TASK_TIMEOUT_SECONDS, expire)
+                    timer.daemon = True
+                    timer.start()
+                if stdin_data and proc.stdin:
+                    try:
+                        proc.stdin.write(stdin_data)
+                        proc.stdin.close()
+                    except BrokenPipeError:
+                        pass
+                if proc.stdout is None:
+                    raise RuntimeError("codex stdout pipe unavailable")
+                for line in proc.stdout:
+                    _emit(line.rstrip("\n"))
+                proc.wait(timeout=5)
+                exit_code = proc.returncode
+            except FileNotFoundError:
+                _emit(f"[ERROR] codex 未找到: {CODEX_BIN}")
+                exit_code = 127
+            except Exception as e:
+                _emit(f"[ERROR] {type(e).__name__}: {e}")
+                exit_code = 1
     finally:
+        if timer is not None:
+            timer.cancel()
         if proc is not None:
             _ensure_proc_terminated(proc)
+        with _tasks_lock:
+            _active_processes.pop(task_id, None)
+            cancelled = task_id in _cancel_requested
+            _cancel_requested.discard(task_id)
 
     finished = time.time()
-    status = "done" if exit_code == 0 else "failed"
+    if timed_out.is_set():
+        exit_code, status = 124, "failed"
+    elif cancelled:
+        exit_code, status = 130, "cancelled"
+    else:
+        status = "done" if exit_code == 0 else "failed"
     with _tasks_lock:
         tail = "\n".join(_output_buffers.get(task_id, [])[-50:])
     with _db() as con:
