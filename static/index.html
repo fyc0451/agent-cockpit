@@ -428,7 +428,7 @@ header .spacer{flex:1}
     <select id="lnLayout" aria-label="新 pane 位置"><option value="tab">新 tab</option><option value="right">右侧 pane</option><option value="down">下方 pane</option></select>
     <select id="lnWorkspace" aria-label="工作目录策略"><option value="isolated">独立 worktree</option><option value="shared">共享目录</option></select>
     <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" oninput="this.dataset.auto='0';launchPreselectAgent()" style="flex:1;min-width:160px">
-    <button class="primary" onclick="startAgent()" data-i18n="launch.start">+ 新建 agent</button>
+    <button class="primary" id="lnStartBtn" onclick="startAgent()" data-i18n="launch.start">+ 新建 agent</button>
     <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
   </div>
 
@@ -1567,10 +1567,16 @@ async function startAgent(){
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name)){toast('实例名称只能包含字母、数字、_、-，最长 32 位');return}
   const sharedPeers=(BOARD?.panes||[]).filter(p=>p.session===session&&p.cwd===workdir&&p.label!==name);
   if(workspace==='shared'&&sharedPeers.length&&!confirm(`当前目录已被 ${sharedPeers.length} 个 pane 使用。继续会共享工作目录，并发写入可能冲突；是否继续？`))return;
+  const button=document.getElementById('lnStartBtn');
+  const qoderSlow=['qoder','qodercli','qodercn'].includes(agent);
+  button.disabled=true;
+  button.textContent=qoderSlow?'QoderCLI 正在初始化…':'正在启动…';
+  if(qoderSlow)toast('QoderCLI 首次启动可能约 60 秒，请稍候');
   try{
     const r=await api('/api/herdr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agent,name,layout,workspace})});
     if(r.error)toast('启动: '+r.error);else{toast((r.reused?'已复用 ':'已启动 ')+name+' ['+agent+'] @ '+session+(r.workspace?.strategy==='isolated'?' · 独立 worktree':''));setTimeout(async()=>{await refreshBoard();launchRefreshName(true)},1500)}
   }catch(e){toast('启动失败: '+e)}
+  finally{button.disabled=false;button.textContent='+ 新建 agent'}
 }
 
 // ============ 消息 view ============
@@ -2638,8 +2644,9 @@ async function doSetupWorkspace(){
   let setupSucceeded=false;
   const participants=SETUP_PARTICIPANTS.map(p=>({...p,task:p.task.trim()}));
   const agents=participants.map(p=>p.agent);
+  const qoderSlow=participants.some(p=>['qoder','qodercli','qodercn'].includes(p.agent));
   const res=document.getElementById('suResult');
-  res.innerHTML='<span style="color:var(--fg2)">正在规划工作目录并启动 Agent（约30秒）...</span>';
+  res.innerHTML='<span style="color:var(--fg2)">正在规划工作目录并启动 Agent（约30秒）...'+(qoderSlow?' QoderCLI 首次启动可能约 60 秒。':'')+'</span>';
   try{
     const body={session,workdir,mode:SETUP_MODE,participants,agents,layout};
     const r=await api('/api/herdr/setup-workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});

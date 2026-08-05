@@ -315,6 +315,104 @@ def test_start_agent_forces_opencode_to_tab_and_rolls_back_delayed_crash(monkeyp
     ) in calls
 
 
+def test_start_agent_allows_qodercli_slow_session_hook(monkeypatch):
+    """QoderCLI 冷启动可超过 10 秒，不能在 SessionStart hook 前误杀。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "qodercli")
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+
+    clock = {"now": 0.0, "snapshots": 0}
+
+    def monotonic():
+        return clock["now"]
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    def snapshot(session):
+        clock["snapshots"] += 1
+        if clock["snapshots"] == 1:
+            return {"panes": []}
+        agent = "qodercli" if clock["now"] >= 40 else None
+        return {"panes": [{
+            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+            "agent": agent,
+        }]}
+
+    monkeypatch.setattr(herdr_client.time, "monotonic", monotonic)
+    monkeypatch.setattr(herdr_client.time, "sleep", sleep)
+    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent(
+        "demo", "/tmp/project", agent="qodercli", layout="tab",
+    )
+
+    assert result["pane_id"] == "w1:p2"
+    assert result["agent"] == "qodercli"
+    assert clock["now"] >= 41.5
+    assert call(
+        ["--session", "demo", "pane", "close", "w1:p2"], timeout=5,
+    ) not in calls
+
+
+def test_start_agent_rolls_back_qodercli_after_extended_timeout(monkeypatch):
+    """QoderCLI 在专用窗口内仍未注册时，必须关闭本次新建 pane。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "qodercli")
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+
+    clock = {"now": 0.0, "snapshots": 0}
+
+    def snapshot(session):
+        clock["snapshots"] += 1
+        if clock["snapshots"] == 1:
+            return {"panes": []}
+        return {"panes": [{"pane_id": "w1:p2", "agent": None}]}
+
+    monkeypatch.setattr(herdr_client.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        herdr_client.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent(
+        "demo", "/tmp/project", agent="qodercli", layout="tab",
+    )
+
+    assert result["error"] == "qodercli 启动超时，Herdr 未识别到运行中的 agent"
+    assert result["rolled_back"] is True
+    assert clock["now"] >= 60.0
+    assert call(
+        ["--session", "demo", "pane", "close", "w1:p2"], timeout=5,
+    ) in calls
+
+
+def test_qoder_aliases_get_longer_start_timeout_only():
+    assert herdr_client._agent_start_timeout("qoder") == 60.0
+    assert herdr_client._agent_start_timeout("qodercli") == 60.0
+    assert herdr_client._agent_start_timeout("qodercn") == 60.0
+    assert herdr_client._agent_start_timeout("codex") == 10.0
+    assert herdr_client._agent_start_timeout("opencode") == 10.0
+
+
 def test_start_agent_reuses_only_matching_workdir(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(

@@ -379,6 +379,11 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     assert "JSON.stringify({session,workdir,agent,name,layout,workspace})" in launch
     assert "workspace==='shared'" in launch
     assert "共享工作目录，并发写入可能冲突" in launch
+    assert 'id="lnStartBtn"' in HTML
+    assert "QoderCLI 正在初始化" in launch
+    assert "button.disabled=true" in launch
+    assert "finally" in launch and "button.disabled=false" in launch
+    assert "QoderCLI 首次启动可能约 60 秒" in js
 
 
 def test_old_session_mail_project_can_be_selected_in_ui():

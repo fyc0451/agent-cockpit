@@ -25,8 +25,16 @@ HERDR_BIN = _HERDR_ENV or shutil.which("herdr") or str(Path.home() / ".local" / 
 _HERDR_DIR = str(Path(HERDR_BIN).parent) if HERDR_BIN else ""
 PANE_CREATE_TIMEOUT = 3.0
 AGENT_START_TIMEOUT = 10.0
+QODER_AGENT_START_TIMEOUT = 60.0
 AGENT_STABLE_SECONDS = 1.5
 AGENT_POLL_INTERVAL = 0.2
+
+
+def _agent_start_timeout(agent: str) -> float:
+    """QoderCLI 冷启动较慢，其余 Agent 继续使用默认识别窗口。"""
+    if agent in {"qoder", "qodercli", "qodercn"}:
+        return QODER_AGENT_START_TIMEOUT
+    return AGENT_START_TIMEOUT
 
 
 def _find_agent_bin(name: str) -> str:
@@ -638,7 +646,7 @@ def start_agent(
         # 复查，捕获 OpenCode/Bun 这类启动后立即崩溃、只留下空 pane 的情况。
         saw_agent = False
         confirmed_pane = None
-        deadline = time.monotonic() + AGENT_START_TIMEOUT
+        deadline = time.monotonic() + _agent_start_timeout(agent)
         while time.monotonic() < deadline:
             current = next(
                 (
