@@ -350,6 +350,7 @@ header .spacer{flex:1}
 .collab-projects>span{font-size:11px;color:var(--fg3)}
 .collab-projects button{padding:5px 8px;font-size:11px}
 .collab-target{width:100%;display:flex;align-items:center;gap:9px;text-align:left;padding:9px 10px;margin-bottom:6px;background:var(--bg3);border-color:var(--bd);white-space:normal}
+.team-hero{border:1px solid var(--accent);border-radius:10px;padding:10px;background:var(--bg3)}
 .collab-target .main{flex:1;min-width:0}
 .collab-target .main b,.collab-target .main small{display:block;overflow:hidden;text-overflow:ellipsis}
 .collab-target .main small{color:var(--fg3);margin-top:2px}
@@ -1432,13 +1433,18 @@ function teamProjectPanel(project){
   const admin=membership.role==='admin';
   const bindingAdmin=admin||teamIsGlobalAdmin();
   const activeAgents=TEAM.agents.filter(a=>!a.retired).length;
+  // P0: 没有可认领的归属 Agent 时,不给空下拉,改为明确的下一步 hero 区
+  const localCount=(TEAM.localIdentities||[]).length;
+  const identityBlock=owned.length
+    ?`<div class="team-section"><div class="team-section-title">我的项目身份 <span>本人可修改</span></div><div class="team-row"><div class="team-row-main"><b>${esc(TEAM.human.display_name)}</b><small>@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}</small></div><select id="teamDefaultAgent">${defaultOptions}</select><div class="team-row-actions"><button class="primary sm" data-action="teamDefault">保存默认 Agent</button></div></div></div>`
+    :`<div class="team-section team-hero"><div class="team-section-title">下一步:设置你的搭档 Agent <span>团队通过它联系你</span></div><div class="team-status">@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}，你已是本群成员。认领一个本机 Agent 作为搭档后,@你的消息会直接投递给它;否则只能进入人工收件箱。</div>${localCount?'<button class="primary" data-action="teamScrollClaim">选择本机 Agent 作为搭档</button>':'<div class="team-status warn">这台电脑上还没有可认领的 Agent。请先在工作区启动一个 Agent(终端页「＋ 添加 Agent」),再回到这里认领。</div><button class="sm" data-action="teamGotoTerm">去添加 Agent</button>'}</div>`;
   return `<div class="team-panel-head"><h3>${esc(project.name||project.slug)}</h3><span class="team-badge ${admin?'admin':'active'}">${admin?'管理员':'成员'}</span></div><div class="team-panel-body">
     <div class="team-safety">群组标识：${esc(project.slug)}。群组只存在于远程 Hub；切换群组不会读取或切换本机目录、Herdr session，也不会自动启动 Agent。</div>
     <div class="team-stats"><div class="team-stat"><b>${Number(project.active_member_count)||0}</b><span>active 成员</span></div><div class="team-stat"><b>${activeAgents}</b><span>active Agents</span></div><div class="team-stat"><b>${TEAM.membership?.default_agent_id?'1':'0'}</b><span>我的默认 Agent</span></div></div>
-    <div class="team-section"><div class="team-section-title">我的项目身份 <span>本人可修改</span></div><div class="team-row"><div class="team-row-main"><b>${esc(TEAM.human.display_name)}</b><small>@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}</small></div><select id="teamDefaultAgent">${defaultOptions}</select><div class="team-row-actions"><button class="primary sm" data-action="teamDefault">保存默认 Agent</button></div></div></div>
+    ${identityBlock}
     <div class="team-section"><div class="team-section-title">项目 Agents <span>owner 可停用；管理员可分配 owner</span></div>${teamAgentRows(project)}</div>
     <div class="team-section"><div class="team-section-title">Agent 绑定 <span>管理员可绑定/解绑；成员只读</span></div>${teamBindForm(bindingAdmin)}${teamBindingRows(bindingAdmin)}</div>
-    <div class="team-section"><div class="team-section-title">认领本机身份 <span>选择本机注册身份并确认后加入项目 Agents</span></div>${teamLocalIdentityRows()}</div>
+    <div class="team-section" id="teamClaimSection"><div class="team-section-title">认领本机身份 <span>选择本机注册身份并确认后加入项目 Agents</span></div>${teamLocalIdentityRows()}</div>
     ${admin?`<div class="team-section"><div class="team-section-title">管理员 · 成员审批 <span>${TEAM.members.length} 人</span></div>${teamMemberRows()}</div>`:''}
   </div>`;
 }
@@ -1487,7 +1493,12 @@ function teamUpdateModeUi(){
   document.getElementById('teamInboxBtn').classList.toggle('active',TEAM.mode==='inbox');
   document.getElementById('teamAdminBtn').classList.toggle('active',TEAM.mode==='accounts');
   const count=document.getElementById('teamInboxCount');count.textContent=String(inboxUnread);count.style.display=inboxUnread?'inline-flex':'none';
-  const navBadge=document.getElementById('teamNavBadge');if(navBadge){navBadge.textContent=String(inboxUnread);navBadge.style.display=inboxUnread?'inline-flex':'none'}
+  // nav 徽标 = 人工收件箱未读 + 待审批(全局 admin 的账号 pending + 群组 admin 的成员 invited)
+  const pendingAccounts=teamIsGlobalAdmin()?(TEAM.authUsers||[]).filter(u=>u&&u.status==='pending').length:0;
+  const membership=TEAM.membership||teamSelectedProject()?.membership||{};
+  const invitedMembers=membership.role==='admin'?(TEAM.members||[]).filter(m=>m&&m.status==='invited').length:0;
+  const navCount=inboxUnread+pendingAccounts+invitedMembers;
+  const navBadge=document.getElementById('teamNavBadge');if(navBadge){navBadge.textContent=String(navCount);navBadge.style.display=navCount?'inline-flex':'none';navBadge.title=inboxUnread+' 未读消息'+(pendingAccounts?' · '+pendingAccounts+' 账号待批准':'')+(invitedMembers?' · '+invitedMembers+' 加入申请待批准':'')}
 }
 function teamPollStart(){
   teamPollStop();
@@ -1533,10 +1544,22 @@ async function teamShowChat(){TEAM.mode='chat';document.getElementById('teamCont
 async function teamShowInbox(){TEAM.mode='inbox';document.getElementById('teamContent').innerHTML='<div class="empty">加载人工收件箱…</div>';await teamLoadInbox();teamRender()}
 async function teamShowAccounts(){if(!teamIsGlobalAdmin())return;TEAM.mode='accounts';document.getElementById('teamContent').innerHTML='<div class="empty">加载账号…</div>';try{await teamLoadAccounts();teamRender()}catch(e){toast('账号加载失败: '+e,5000);TEAM.mode='projects';teamRender()}}
 async function teamSelect(slug){const keepChat=TEAM.mode==='chat';TEAM.mode=keepChat?'chat':'projects';TEAM.selected=slug;try{sessionStorage.setItem('cockpit-team-project',slug)}catch(e){};document.getElementById('teamContent').innerHTML='<div class="empty">加载项目…</div>';try{await teamLoadSelection();if(keepChat)await teamLoadChat();teamRender();if(keepChat)requestAnimationFrame(teamChatScrollBottom)}catch(e){toast('项目加载失败: '+e,4500);teamRender()}}
+function teamShowError(msg){
+  // P0: 关键失败不再用一闪而过的 toast;在团队页顶部保留持久错误条直到下次成功或手动关闭
+  teamClearError();
+  const bar=document.createElement('div');
+  bar.id='teamErrorBar';
+  bar.className='team-status warn';
+  bar.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:8px';
+  bar.innerHTML=`<span style="flex:1;min-width:0">${esc(msg)}</span><button class="sm" onclick="this.parentElement.remove()">知道了</button>`;
+  const content=document.getElementById('teamContent');
+  content?.prepend(bar);
+}
+function teamClearError(){document.getElementById('teamErrorBar')?.remove()}
 async function teamMutation(success,operation){
   if(TEAM.mutating)return;
   TEAM.mutating=true;
-  try{await operation();toast(success);await teamLoad(true)}catch(e){toast(success+'失败: '+e,5000)}finally{TEAM.mutating=false}
+  try{await operation();teamClearError();toast(success);await teamLoad(true)}catch(e){teamShowError(success+'失败: '+e)}finally{TEAM.mutating=false}
 }
 function teamCreateProject(){const name=document.getElementById('teamProjectName')?.value.trim(),slug=document.getElementById('teamProjectSlug')?.value.trim().toLowerCase(),handle=document.getElementById('teamProjectHandle')?.value.trim();if(!name||!slug||!handle){toast('请填写群组名称、标识和 @花名');return}if(!/^[a-z0-9][a-z0-9_-]{0,127}$/.test(slug)){toast('群组标识只能包含小写字母、数字、下划线和连字符');return}teamMutation('群组已注册',async()=>{const p=await teamApi('projects','POST',{name,slug,mention_handle:handle});TEAM.selected=p.slug})}
 async function teamCreateInvite(){if(TEAM.mutating)return;TEAM.mutating=true;try{const data=await api('/api/team-auth/invitations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expires_in:86400})});TEAM.inviteCode=String(data.invite_code||'');await teamLoadAccounts();teamRender();toast('一次性邀请码已生成')}catch(e){toast('生成邀请码失败: '+e,5000)}finally{TEAM.mutating=false}}
@@ -2459,7 +2482,16 @@ async function teamCollabSend(){
     const delivered=(result.deliveries||[]).filter(item=>item.status==='delivered'||item.status==='delivered_human_inbox'||item.status==='already_delivered').length;
     closeCollab();
     toast(`团队消息已发送 · ${delivered} 个接收目标`,4000);
-  }catch(e){toast('团队消息发送失败: '+e,6000);if(button){button.disabled=false;button.textContent='发送团队消息'}}finally{TEAM_COLLAB_SENDING=false}
+  }catch(e){
+    // P0: 发送失败在面板内保留持久错误(不清空草稿),不再只弹 toast
+    if(button){button.disabled=false;button.textContent='发送团队消息'}
+    document.getElementById('teamCollabError')?.remove();
+    const err=document.createElement('div');
+    err.id='teamCollabError';
+    err.className='team-status warn';
+    err.textContent='团队消息发送失败: '+e+'（内容已保留，可重试）';
+    document.querySelector('.collab-form .collab-actions')?.before(err);
+  }finally{TEAM_COLLAB_SENDING=false}
 }
 function closeCollab(){document.getElementById('collabModal').classList.remove('show');TEAM_COLLAB_TARGET=null}
 // 在 web 终端里 attach 到 herdr session(进入多 pane 分屏视图,同时看多个 agent)
@@ -3707,6 +3739,8 @@ function bindDelegation(){
     else if(action==='teamChatRefresh')teamShowChat();
     else if(action==='teamInboxRead')teamMarkInboxRead([Number(it.dataset.inboxId)]);
     else if(action==='teamInboxReadAll')teamMarkInboxRead(TEAM.inbox.filter(item=>!item.read_ts).map(item=>Number(item.id)).filter(id=>Number.isInteger(id)&&id>0));
+    else if(action==='teamScrollClaim'){document.getElementById('teamClaimSection')?.scrollIntoView({behavior:'smooth',block:'start'})}
+    else if(action==='teamGotoTerm'){document.querySelector('#nav button[data-view="term"]')?.click()}
   });
   on('#collabList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     const a=it.dataset.action,s=it.dataset.session,p=it.dataset.pane,g=it.dataset.agent;

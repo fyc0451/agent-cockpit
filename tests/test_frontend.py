@@ -1447,3 +1447,66 @@ def test_team_local_identity_claim_never_leaks_token_or_side_effects():
     assert "registration_token" not in claim
     for bad in ("openTerm", "doAttachHerdr", "createPane", "worktree", "terminal("):
         assert bad not in claim
+
+
+def test_team_collab_never_hides_members_without_default():
+    # P0-1: @协作面板永远展示群组成员并可点击;无默认 Agent 时以 Human 身份发出
+    # (Hub 84c851d 起后端支持),不再用警告替换整个团队区导致成员"消失"。
+    js = _inline_js()
+    render = js.split("function renderTermCollab(){", 1)[1].split(
+        "async function termPickCollab", 1
+    )[0]
+    assert "TEAM.members.filter(member=>member.status==='active'" in render
+    assert "'以你的 Human 身份发出'" in render
+    assert "data-action=\"teamCollabTarget\"" in render
+    # 不再存在按无默认分支隐藏/只读成员的旧结构
+    assert "请先为 ${esc(project.name||project.slug)} 设置自己的默认 Agent" not in js
+    assert "collab-target readonly" not in render
+
+
+def test_team_identity_empty_state_offers_partner_cta():
+    # P0-2/5: 没有可归属 Agent 时不渲染空默认下拉,改为 hero 下一步引导;
+    # 有可归属 Agent 时保留原下拉。
+    js = _inline_js()
+    assert "team-hero" in HTML
+    assert "下一步:设置你的搭档 Agent" in js
+    assert "data-action=\"teamScrollClaim\"" in js
+    assert "data-action=\"teamGotoTerm\"" in js
+    assert 'id="teamClaimSection"' in js
+    assert "identityBlock" in js
+
+
+def test_team_partner_cta_actions_registered():
+    js = _inline_js()
+    assert "action==='teamScrollClaim'" in js
+    assert "action==='teamGotoTerm'" in js
+    assert "scrollIntoView" in js
+
+
+def test_team_nav_badge_counts_pending_approvals():
+    # P0-3: nav 徽标 = 未读 + 账号 pending(全局 admin) + 成员 invited(群组 admin)
+    js = _inline_js()
+    update = js.split("function teamUpdateModeUi(){", 1)[1].split("function ", 1)[0]
+    assert "pendingAccounts" in update
+    assert "invitedMembers" in update
+    assert "teamIsGlobalAdmin()" in update
+    assert "navCount=inboxUnread+pendingAccounts+invitedMembers" in update
+
+
+def test_team_mutation_failure_uses_persistent_error_bar():
+    # P0-4: mutation 失败展示持久错误条而非瞬态 toast
+    js = _inline_js()
+    assert "function teamShowError(msg){" in js
+    assert "teamErrorBar" in js
+    mutation = js.split("async function teamMutation(", 1)[1].split("function ", 1)[0]
+    assert "teamShowError(" in mutation
+    assert "teamClearError();toast(success)" in mutation
+    assert "toast(success+'失败" not in mutation
+
+
+def test_team_collab_send_failure_keeps_draft_with_inline_error():
+    js = _inline_js()
+    send = js.split("async function teamCollabSend(){", 1)[1].split("function closeCollab", 1)[0]
+    assert "teamCollabError" in send
+    assert "内容已保留，可重试" in send
+    assert "toast('团队消息发送失败" not in send
