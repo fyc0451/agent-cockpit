@@ -333,6 +333,17 @@ header .spacer{flex:1}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:60;padding:calc(14px + var(--safe-top)) calc(14px + var(--safe-right)) calc(14px + var(--safe-bottom)) calc(14px + var(--safe-left));overscroll-behavior:none}
 .modal-bg.show{display:flex}
 .modal{background:var(--bg2);border:1px solid var(--bd2);border-radius:13px;padding:16px;max-width:560px;width:100%;max-height:85vh;overflow:auto}
+.collab-section{border-top:1px solid var(--bd);padding-top:11px;margin-top:11px}
+.collab-section:first-child{border-top:0;padding-top:0;margin-top:0}
+.collab-section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;font-size:12px;color:var(--fg2)}
+.collab-target{width:100%;display:flex;align-items:center;gap:9px;text-align:left;padding:9px 10px;margin-bottom:6px;background:var(--bg3);border-color:var(--bd);white-space:normal}
+.collab-target .main{flex:1;min-width:0}
+.collab-target .main b,.collab-target .main small{display:block;overflow:hidden;text-overflow:ellipsis}
+.collab-target .main small{color:var(--fg3);margin-top:2px}
+.collab-form{border:1px solid var(--bd);border-radius:9px;padding:11px;background:var(--bg3)}
+.collab-form textarea{width:100%;min-height:104px;resize:vertical}
+.collab-context{font:10px/1.5 var(--mono);color:var(--fg3);word-break:break-all;margin:7px 0}
+.collab-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:9px}
 .modal h3{font-size:15px;margin-bottom:10px}
 .setup-modes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:7px 0 13px}
 .setup-mode{padding:9px 6px;text-align:center;font-size:12px;line-height:1.35}
@@ -545,7 +556,7 @@ header .spacer{flex:1}
       <button class="sm" onclick="showLaunchModal()" data-i18n="term.addagent">＋ 添加 Agent</button>
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端"><span data-i18n="term.upload">📎上传</span><input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
-      <button class="sm" onclick="termPickCollab()" title="插入协作者信息(让当前 agent 知道可联系谁)" data-i18n="term.collab">@协作</button>
+      <button class="sm" onclick="termPickCollab()" title="联系本地 Agent 或向当前团队群组发送求助" data-i18n="term.collab">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
       <button class="sm" onclick="enterHerdrFlow()" title="退出 TUI，返回可滚屏/复制的 pane 流视图" data-i18n="term.back">📜 返回流视图</button>
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
@@ -783,12 +794,12 @@ header .spacer{flex:1}
 
 <!-- 协作者选择(终端 tab 的 @协作 按钮) -->
 <div class="modal-bg" id="collabModal" onclick="if(event.target===this)closeCollab()">
-  <div class="modal" style="max-width:420px">
+  <div class="modal" style="max-width:560px">
     <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <h3 style="font-size:15px">选择协作者</h3>
+      <h3 style="font-size:15px">协作与团队求助</h3>
       <button class="icon" onclick="closeCollab()">✕</button>
     </div>
-    <div class="muted" style="font-size:12px;margin-bottom:10px">选一个 agent,它的身份信息会插入终端,当前 agent 就知道怎么联系它</div>
+    <div class="muted" style="font-size:12px;margin-bottom:10px">联系本地 Agent，或通过 Team Hub 向当前群组发送真实消息</div>
     <div id="collabList"></div>
   </div>
 </div>
@@ -843,6 +854,7 @@ let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
 let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
+let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
 try{TEAM.selected=sessionStorage.getItem('cockpit-team-project')||''}catch(e){}
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
@@ -2214,19 +2226,95 @@ async function sendUploadToPane(session,paneId,agent){
     toast('✅ 已发给 '+agent);
   }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
 }
-// @协作:弹 agent 列表 → 选一个 → 查身份 → 身份信息作为击键写入 xterm
-function termPickCollab(){
-  if(!TERM_WS||!XTERM){toast('请先打开一个终端');return}
-  const cands=(BOARD?.panes||[]).filter(p=>p.agent);
-  if(!cands.length){toast('无可用 agent');return}
-  document.getElementById('collabList').innerHTML=cands.map(p=>`
-    <div class="mention-item" data-action="collab" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
-      <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
-      <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span>
-    </div>`).join('');
-  document.getElementById('collabModal').classList.add('show');
+// @协作:本地 Agent 继续注入身份；团队对象通过 Team Hub 发送真实消息。
+function termCollabContext(){
+  const session=CURRENT_TERM?.session||(TERM_ID&&TERM_SESSIONS[TERM_ID])||'';
+  const paneId=CURRENT_TERM?.paneId||'';
+  const pane=paneId?(BOARD?.panes||[]).find(p=>p.session===session&&p.pane_id===paneId)||{}:{};
+  return {session,paneId,agent:CURRENT_TERM?.agent||pane.agent||'',workdir:pane.cwd||''};
 }
-function closeCollab(){document.getElementById('collabModal').classList.remove('show')}
+function teamCollabContextText(context){
+  const lines=[];
+  if(context.session)lines.push(`- Herdr session: ${context.session}`);
+  if(context.paneId)lines.push(`- Pane: ${context.paneId}`);
+  if(context.agent)lines.push(`- Agent: ${context.agent}`);
+  if(context.workdir)lines.push(`- Workdir: ${context.workdir}`);
+  return lines.join('\n');
+}
+function teamCollabDefaultSubject(context){
+  const location=[context.session,context.paneId].filter(Boolean).join(' / ');
+  return '终端求助'+(location?' · '+location:'');
+}
+function renderTermCollab(){
+  const context=termCollabContext();
+  const cands=(BOARD?.panes||[]).filter(p=>p.agent&&!(p.session===context.session&&p.pane_id===context.paneId));
+  const localRows=cands.map(p=>`
+    <button class="collab-target" data-action="collab" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}">
+      <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+      <span class="main"><b>${esc(p.agent)}</b><small>${esc(p.session)} · ${esc(p.pane_id)}</small></span>
+    </button>`).join('')||'<div class="empty">当前没有其他本地 Agent</div>';
+  let teamRows='';
+  const project=teamSelectedProject();
+  if(!TEAM.authenticated){
+    teamRows='<div class="team-status warn">尚未登录 Team Hub。登录后才能向远端团队发消息。</div><button class="sm" data-action="collabOpenTeam">打开团队中心</button>';
+  }else if(!project){
+    teamRows='<div class="team-status warn">尚未选择团队群组。请先在团队中心加入或选择群组。</div><button class="sm" data-action="collabOpenTeam">打开团队中心</button>';
+  }else if(project.membership?.status!=='active'||TEAM.membership?.status!=='active'){
+    teamRows=`<div class="team-status warn">你还不是 ${esc(project.name||project.slug)} 的 active 成员。</div><button class="sm" data-action="collabOpenTeam">查看群组</button>`;
+  }else if(!TEAM.membership.default_agent_id){
+    teamRows=`<div class="team-status warn">请先为 ${esc(project.name||project.slug)} 设置自己的默认 Agent；团队消息必须以该身份发出。</div><button class="sm" data-action="collabOpenTeam">设置默认 Agent</button>`;
+  }else{
+    const members=TEAM.members.filter(member=>member.status==='active'&&member.human_id!==TEAM.human?.id);
+    const sender=TEAM.agents.find(agent=>agent.id===TEAM.membership.default_agent_id);
+    const senderLabel=sender?.name||('Agent #'+TEAM.membership.default_agent_id);
+    const broadcast=members.length?`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="team" data-label="${esc(project.name||project.slug)}"><span style="font-size:20px">👥</span><span class="main"><b>@团队 · ${esc(project.name||project.slug)}</b><small>发给当前群组所有其他 active 成员 · 以 ${esc(senderLabel)} 发出</small></span></button>`:'';
+    const memberRows=members.map(member=>`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="member" data-handle="${esc(member.mention_handle)}" data-label="${esc(member.display_name||member.mention_handle)}"><span style="font-size:20px">👤</span><span class="main"><b>${esc(member.display_name||member.mention_handle)} · @${esc(member.mention_handle)}</b><small>仅联系该成员；无默认 Agent 时进入 Human Inbox</small></span></button>`).join('');
+    teamRows=broadcast+memberRows+(members.length?'':'<div class="muted" style="font-size:11px">当前群组没有其他 active 成员。</div>');
+    if(TEAM_COLLAB_TARGET&&TEAM_COLLAB_TARGET.slug===project.slug){
+      const contextText=teamCollabContextText(context);
+      teamRows+=`<div class="collab-form"><div class="field"><label>收件人</label><b>${esc(TEAM_COLLAB_TARGET.label)}</b></div><div class="field"><label>主题</label><input id="teamCollabSubject" maxlength="512" value="${esc(teamCollabDefaultSubject(context))}"></div><div class="field"><label>求助内容</label><textarea id="teamCollabBody" maxlength="48000" placeholder="说明问题、已尝试的方法和希望团队提供的支持"></textarea></div><div class="collab-context">${esc(contextText||'未识别到 Herdr pane；只发送你填写的内容')}</div><div class="collab-actions"><button class="sm" data-action="teamCollabCancel">取消</button><button class="primary sm" data-action="teamCollabSend">发送团队消息</button></div></div>`;
+    }
+  }
+  document.getElementById('collabList').innerHTML=`<section class="collab-section"><div class="collab-section-title"><b>当前工作区 Agent</b><span>插入 Agent Mail 身份</span></div>${localRows}</section><section class="collab-section"><div class="collab-section-title"><b>Team Hub · 当前群组</b><span>真实投递，不启动对方终端</span></div>${teamRows}</section>`;
+}
+async function termPickCollab(){
+  if(!TERM_WS||!XTERM){toast('请先打开一个终端');return}
+  TEAM_COLLAB_TARGET=null;
+  const modal=document.getElementById('collabModal');
+  document.querySelector('#collabModal h3').textContent='协作与团队求助';
+  document.querySelector('#collabModal .muted').textContent='联系本地 Agent，或通过 Team Hub 向当前群组发送真实消息';
+  document.getElementById('collabList').innerHTML='<div class="empty">加载协作对象…</div>';
+  modal.classList.add('show');
+  await teamLoad(true);
+  if(modal.classList.contains('show'))renderTermCollab();
+}
+function teamCollabPick(kind,handle,label){
+  const project=teamSelectedProject();
+  if(!project)return;
+  TEAM_COLLAB_TARGET={slug:project.slug,handle:kind==='member'?handle:'',label:kind==='member'?'@'+handle+' · '+label:'@团队 · '+label};
+  renderTermCollab();
+  document.getElementById('teamCollabBody')?.focus();
+}
+async function teamCollabSend(){
+  if(TEAM_COLLAB_SENDING||!TEAM_COLLAB_TARGET)return;
+  const subject=document.getElementById('teamCollabSubject')?.value.trim()||'';
+  const message=document.getElementById('teamCollabBody')?.value.trim()||'';
+  if(!subject||!message){toast('请填写主题和求助内容');return}
+  const contextText=teamCollabContextText(termCollabContext());
+  const body_md=message+(contextText?'\n\n---\n终端上下文（由 Cockpit 自动附带）\n'+contextText:'');
+  const payload={subject,body_md,importance:'normal'};
+  if(TEAM_COLLAB_TARGET.handle)payload.mention_handles=[TEAM_COLLAB_TARGET.handle];
+  TEAM_COLLAB_SENDING=true;
+  const button=document.querySelector('[data-action="teamCollabSend"]');
+  if(button){button.disabled=true;button.textContent='发送中…'}
+  try{
+    const result=await teamApi(`projects/${encodeURIComponent(TEAM_COLLAB_TARGET.slug)}/support-requests`,'POST',payload);
+    const delivered=(result.deliveries||[]).filter(item=>item.status==='delivered'||item.status==='delivered_human_inbox'||item.status==='already_delivered').length;
+    closeCollab();
+    toast(`团队消息已发送 · ${delivered} 个接收目标`,4000);
+  }catch(e){toast('团队消息发送失败: '+e,6000);if(button){button.disabled=false;button.textContent='发送团队消息'}}finally{TEAM_COLLAB_SENDING=false}
+}
+function closeCollab(){document.getElementById('collabModal').classList.remove('show');TEAM_COLLAB_TARGET=null}
 // 在 web 终端里 attach 到 herdr session(进入多 pane 分屏视图,同时看多个 agent)
 async function termAttachHerdr(){
   // 弹 session 选择器(复用 collabModal)
@@ -3474,6 +3562,10 @@ function bindDelegation(){
     if(a==='uploadCurrent')sendUploadToCurrent();
     else if(a==='uploadPane')sendUploadToPane(s,p,g);
     else if(a==='collab')termInsertCollab(s,p,g);
+    else if(a==='teamCollabTarget')teamCollabPick(it.dataset.targetKind,it.dataset.handle||'',it.dataset.label||'');
+    else if(a==='teamCollabCancel'){TEAM_COLLAB_TARGET=null;renderTermCollab()}
+    else if(a==='teamCollabSend')teamCollabSend();
+    else if(a==='collabOpenTeam'){closeCollab();showView('team')}
     else if(a==='attach')doAttachHerdr(s)});
   on('#sessionsList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     const a=it.dataset.action,s=it.dataset.session,p=it.dataset.pane,g=it.dataset.agent;

@@ -344,6 +344,16 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         headers=headers,
         json={"ids": [11]},
     ).status_code == 200
+    support_payload = {
+        "subject": "终端求助",
+        "body_md": "请协助排查",
+        "mention_handles": ["bob"],
+    }
+    assert client.post(
+        "/api/team/projects/demo/support-requests",
+        headers=headers,
+        json=support_payload,
+    ).status_code == 200
     assert calls == [
         ("GET", "/hub/api/projects", "Bearer human.jwt", None),
         (
@@ -358,6 +368,12 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
             "/hub/api/inbox/mark-read",
             "Bearer human.jwt",
             {"ids": [11]},
+        ),
+        (
+            "POST",
+            "/hub/api/projects/demo/support-requests",
+            "Bearer human.jwt",
+            support_payload,
         ),
     ]
 

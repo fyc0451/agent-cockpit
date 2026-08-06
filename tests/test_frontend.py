@@ -1033,6 +1033,25 @@ def test_team_view_covers_project_membership_and_agent_management():
     assert "批准账号不会自动加入任何项目群组" in js
 
 
+def test_terminal_collab_supports_real_team_messages_with_context():
+    js = _inline_js()
+    assert "function renderTermCollab()" in js
+    assert "async function teamCollabSend()" in js
+    assert "data-action=\"teamCollabTarget\"" in js
+    assert "@团队 · ${esc(project.name||project.slug)}" in js
+    assert "member.status==='active'" in js
+    assert "member.human_id!==TEAM.human?.id" in js
+    assert "TEAM.membership.default_agent_id" in js
+    assert "support-requests`,'POST',payload" in js
+    assert "payload.mention_handles=[TEAM_COLLAB_TARGET.handle]" in js
+    assert "终端上下文（由 Cockpit 自动附带）" in js
+    assert "- Herdr session:" in js
+    assert "- Pane:" in js
+    assert "- Agent:" in js
+    assert "- Workdir:" in js
+    assert "真实投递，不启动对方终端" in js
+
+
 def test_team_human_jwt_uses_http_only_cookie_and_hub_text_is_escaped():
     js = _inline_js()
     assert "api('/api/team-auth/login'" in js
