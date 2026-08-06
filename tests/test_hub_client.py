@@ -160,6 +160,37 @@ def test_response_data_keeps_plain_json():
     assert hub_client._response_data(raw) == raw
 
 
+def test_mcp_calls_use_stateless_api_mount(monkeypatch):
+    calls = []
+
+    class Response:
+        text = '{"jsonrpc":"2.0","id":1,"result":{}}'
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url, json, headers):
+            calls.append((url, json["method"], headers["Authorization"]))
+            return Response()
+
+    monkeypatch.setattr(hub_client, "HUB", "http://hub")
+    monkeypatch.setattr(hub_client, "TOKEN", "secret")
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+    assert hub_client._call("initialize", {}) == {}
+    assert calls == [("http://hub/api/", "initialize", "Bearer secret")]
+
+
 def test_status_requires_token_without_connecting(monkeypatch):
     monkeypatch.setattr(hub_client, "TOKEN", "")
     monkeypatch.setattr(

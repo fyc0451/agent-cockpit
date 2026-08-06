@@ -133,7 +133,7 @@ def load_identity(agent: str, instance: str, project: str) -> tuple[dict, str, s
 def mcp_call(hub: str, token: str, method: str, params: dict) -> dict:
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     req = urllib.request.Request(
-        f"{hub}/mcp/",
+        f"{hub}/api/",
         data=json.dumps(payload).encode(),
         headers={
             "Content-Type": "application/json",

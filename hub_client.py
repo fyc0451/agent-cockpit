@@ -103,7 +103,7 @@ def _call(method: str, params: dict[str, Any]) -> Any:
     headers = {**_headers, "Authorization": f"Bearer {TOKEN}"}
     payload = {"jsonrpc": "2.0", "id": _next_id(), "method": method, "params": params}
     with httpx.Client(timeout=30) as client:
-        resp = client.post(f"{HUB}/mcp/", json=payload, headers=headers)
+        resp = client.post(f"{HUB}/api/", json=payload, headers=headers)
         resp.raise_for_status()
     data = json.loads(_response_data(resp.text))
     if "error" in data:

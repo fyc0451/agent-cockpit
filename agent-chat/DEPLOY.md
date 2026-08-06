@@ -25,7 +25,7 @@
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" \
-  -H "Authorization: Bearer <token>" http://<服务器>:8765/mcp/
+  -H "Authorization: Bearer <token>" http://<服务器>:8765/api/
 # 期望：401/200 均说明端口可达；再在另一台机用 mail-send 验证真正连通
 ```
 

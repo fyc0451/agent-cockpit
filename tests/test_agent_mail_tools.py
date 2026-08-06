@@ -141,6 +141,7 @@ def test_notification_resolves_registered_instance(tmp_path):
 
 def test_mcp_call_parses_multiline_sse(monkeypatch):
     module = _load_am_common()
+    urls = []
 
     class Response:
         def __enter__(self):
@@ -156,9 +157,14 @@ def test_mcp_call_parses_multiline_sse(monkeypatch):
                 b'data: "id":1,"result":{"ok":true}}\n\n'
             )
 
-    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    def open_request(request, **_kwargs):
+        urls.append(request.full_url)
+        return Response()
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", open_request)
 
     assert module.mcp_call("http://hub", "token", "test", {})["result"] == {"ok": True}
+    assert urls == ["http://hub/api/"]
 
 
 def test_mcp_call_reports_network_and_malformed_response(monkeypatch):
