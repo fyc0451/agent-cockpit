@@ -38,14 +38,16 @@
 浏览器(电脑 / 手机)
     │  局域网 / VPN(:8790)
     ▼
-Agent Cockpit(FastAPI,与 herdr + hub 同机)
-    ├── 只读 Agent Mail SQLite       (WAL 模式)
-    ├── 经 Agent Mail hub MCP 写入   (发消息 / 已读)
+Agent Cockpit(FastAPI,与 herdr 同机)
+    ├── 可选只读本机 Agent Mail SQLite(WAL 模式)
+    ├── 经本机或远程 Agent Mail hub MCP 写入
     ├── 读 herdr socket(所有 session)(pane 状态 / 输出)
     └── 经 SSE 向浏览器推送状态与 diff
 ```
 
-部署在**和 herdr 同一台机器**上,全部本地读取,零延迟;电脑和手机只是浏览器客户端。
+部署在**和 herdr 同一台机器**上;电脑和手机只是浏览器客户端。Agent Mail Hub
+可以部署在同机，也可以使用团队共享的远程服务；远程模式没有本机 SQLite 时，
+本地消息列表会降级，但注册身份、创建工作区和添加 Agent 仍可正常使用。
 Agent Mail 是新建工作区和添加 Agent 的前置条件；hub 暂时挂掉时禁止新增，已有消息只读，
 现有看板、终端、文件、任务、待办和推送仍可查看与操作。
 

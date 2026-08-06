@@ -291,32 +291,25 @@ def _collaborator_hint(name: str, project: str) -> str:
 
 def _agent_mail_status() -> dict[str, Any]:
     read_status = db.status()
-    if not read_status["available"]:
-        return {
-            **read_status,
-            "read_available": False,
-            "write_available": False,
-            "write_reason": read_status["reason"],
-        }
     write_status = hub_client.status()
     return {
-        "available": True,
-        "reason": None,
-        "read_available": True,
+        **read_status,
+        "read_available": read_status["available"],
         "write_available": write_status["available"],
         "write_reason": write_status["reason"],
     }
 
 
 def _agent_mail_requirement() -> dict[str, Any] | None:
-    """新工作区和新 Agent 必须具备可读写的 Agent Mail。"""
+    """新工作区和新 Agent 必须连接可写的 Agent Mail Hub。"""
     status = _agent_mail_status()
-    if status.get("available") is False:
-        reason = status.get("reason") or "Agent Mail 未安装或数据库不可用"
-    elif status.get("write_available") is False:
-        reason = status.get("write_reason") or "Agent Mail Hub 不可写"
-    else:
+    if status.get("write_available") is True:
         return None
+    reason = (
+        status.get("write_reason")
+        or status.get("reason")
+        or "Agent Mail Hub 不可写"
+    )
     return {
         "ok": False,
         "code": "agent_mail_required",
@@ -532,12 +525,14 @@ def api_overview():
             result["agent_mail"] = mail_status
             return result
         except Exception as exc:
+            write_available = mail_status["write_available"]
+            write_reason = mail_status["write_reason"]
             mail_status = {
                 "available": False,
                 "reason": f"Agent Mail 查询失败: {exc}",
                 "read_available": False,
-                "write_available": False,
-                "write_reason": f"Agent Mail 查询失败: {exc}",
+                "write_available": write_available,
+                "write_reason": write_reason,
             }
     return {
         "projects": [],
@@ -741,12 +736,14 @@ def _build_attention(snapshot: dict[str, Any]) -> dict[str, Any]:
             mail_unread = db.global_unread_count()
         except Exception as exc:
             logger.exception("attention Agent Mail query failed")
+            write_available = mail_status["write_available"]
+            write_reason = mail_status["write_reason"]
             mail_status = {
                 "available": False,
                 "reason": f"Agent Mail 查询失败: {exc}",
                 "read_available": False,
-                "write_available": False,
-                "write_reason": f"Agent Mail 查询失败: {exc}",
+                "write_available": write_available,
+                "write_reason": write_reason,
             }
     items.sort(
         key=lambda item: (

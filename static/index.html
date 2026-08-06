@@ -1015,7 +1015,7 @@ function renderSettings(){
       let html=row(r.herdr&&r.herdr.installed,t('set.env.herdr','herdr(session 后端)'),r.herdr&&(r.herdr.installed?r.herdr.path:t('set.env.missing','未安装')));
       html+=Object.entries(r.agents||{}).map(([a,info])=>row(!!info.installed,a,info.installed?info.path:t('set.env.missing','未安装'))).join('');
       const mail=r.agent_mail||{};
-      html+=row(!!mail.available&&mail.write_available!==false,t('set.env.mail','Agent Mail(必需,消息功能)'),mail.available?(mail.write_available===false?(mail.write_reason||'Hub 不可写'):''):(mail.reason||t('set.env.missing','未安装')));
+      html+=row(mail.write_available===true,t('set.env.mail','Agent Mail(必需,消息功能)'),mail.write_available===false?(mail.write_reason||'Hub 不可写'):(mail.read_available===false?(mail.reason||'远程 Hub 可写，本地消息列表不可用'):''));
       envEl.innerHTML=html;
     }).catch(e=>{envEl.innerHTML='<span class="muted">'+esc(String(e))+'</span>'});
   }
@@ -1600,7 +1600,7 @@ function sessionTaskHtml(session){
 function renderAttention(d){
   const box=document.getElementById('attentionList');
   const mail=d.capabilities&&d.capabilities.agent_mail;
-  const note=mail&&(mail.available===false||mail.write_available===false)?`<div class="capability-note">Agent Mail 是必需能力：${esc((mail.available===false?mail.reason:mail.write_reason)||'当前不可用')}。创建工作区和添加 Agent 已禁用。</div>`:'';
+  const note=mail&&mail.write_available===false?`<div class="capability-note">Agent Mail 是必需能力：${esc(mail.write_reason||mail.reason||'当前不可用')}。创建工作区和添加 Agent 已禁用。</div>`:'';
   const unread=Math.max(0,Number(d.mail_unread)||0);
   const mailNote=unread?`<div class="capability-note">📬 ${unread} 条 Agent Mail 未读，不计入待办。<button class="sm" data-action="openMessages">去消息查看</button></div>`:'';
   const sessions=d.sessions||[];
@@ -2088,9 +2088,9 @@ async function loadProjList(preferredSlug,focusMessageId){
     const sel=document.getElementById('msgProj');
     if(d.agent_mail&&d.agent_mail.available===false){
       sel.innerHTML='';sel.disabled=true;
-      document.getElementById('projAgentList').innerHTML='<div class="muted" style="padding:8px">Agent Mail 未启用</div>';
-      const list=document.getElementById('msgList');list.innerHTML='<div class="empty"><b>消息能力已自动降级</b><div id="mailUnavailableReason" class="muted" style="margin-top:6px"></div></div>';
-      document.getElementById('mailUnavailableReason').textContent=d.agent_mail.reason||'安装 Agent Mail 后自动恢复';
+      document.getElementById('projAgentList').innerHTML='<div class="muted" style="padding:8px">本地消息列表不可用</div>';
+      const list=document.getElementById('msgList');list.innerHTML='<div class="empty"><b>本地消息能力已自动降级</b><div id="mailUnavailableReason" class="muted" style="margin-top:6px"></div></div>';
+      document.getElementById('mailUnavailableReason').textContent=(d.agent_mail.reason||'未配置本地 Agent Mail 数据库')+'；远程团队消息请使用「团队」页面';
       return;
     }
     sel.disabled=false;
@@ -2947,7 +2947,7 @@ async function loadSessionsView(){
     for(const p of (snap.panes||[])){if(p.agent){
       (agentsBySess[p.session]=agentsBySess[p.session]||[]).push(p);
     }}
-    const mailEnabled=CAPABILITIES.agent_mail?.available!==false&&CAPABILITIES.agent_mail?.write_available!==false;
+    const mailEnabled=CAPABILITIES.agent_mail?.write_available!==false;
     el.innerHTML=(sess.sessions||[]).map(s=>{
       const running=s.status==='running';
       const agents=agentsBySess[s.name]||[];
@@ -3028,7 +3028,6 @@ const SETUP_ROLE_LABELS={lead:'负责人 / 开发',developer:'开发',reviewer:'
 function agentMailRequirementError(){
   const mail=CAPABILITIES.agent_mail;
   if(!mail)return'';
-  if(mail.available===false)return'Agent Mail 是必需能力：'+(mail.reason||'未安装或数据库不可用');
   if(mail.write_available===false)return'Agent Mail 是必需能力：'+(mail.write_reason||'Hub 不可写');
   return'';
 }

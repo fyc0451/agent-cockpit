@@ -75,3 +75,25 @@ def test_agent_mail_requirement_covers_missing_and_read_only_hub(monkeypatch):
         lambda: {"available": True, "write_available": True},
     )
     assert server._agent_mail_requirement() is None
+
+
+def test_remote_hub_allows_agent_creation_without_local_database(monkeypatch):
+    monkeypatch.setattr(
+        server.db,
+        "status",
+        lambda: {"available": False, "reason": "数据库不存在"},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "status",
+        lambda: {"available": True, "reason": None},
+    )
+
+    assert server._agent_mail_status() == {
+        "available": False,
+        "reason": "数据库不存在",
+        "read_available": False,
+        "write_available": True,
+        "write_reason": None,
+    }
+    assert server._agent_mail_requirement() is None

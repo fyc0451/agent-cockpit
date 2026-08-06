@@ -252,6 +252,11 @@ def test_build_attention_degrades_when_agent_mail_is_missing(monkeypatch):
         "global_unread_count",
         lambda: (_ for _ in ()).throw(AssertionError("must not query mail DB")),
     )
+    monkeypatch.setattr(
+        server.hub_client,
+        "status",
+        lambda: {"available": False, "reason": "Hub 不可连接"},
+    )
 
     result = server._build_attention({"available": True, "panes": []})
 
@@ -261,7 +266,37 @@ def test_build_attention_degrades_when_agent_mail_is_missing(monkeypatch):
         "reason": "未安装 Agent Mail",
         "read_available": False,
         "write_available": False,
-        "write_reason": "未安装 Agent Mail",
+        "write_reason": "Hub 不可连接",
+    }
+
+
+def test_attention_keeps_remote_hub_writable_without_local_database(monkeypatch):
+    monkeypatch.setattr(server.tasks, "list_tasks", lambda limit=50: [])
+    monkeypatch.setattr(
+        server.db,
+        "status",
+        lambda: {"available": False, "reason": "数据库不存在"},
+    )
+    monkeypatch.setattr(
+        server.db,
+        "global_unread_count",
+        lambda: (_ for _ in ()).throw(AssertionError("must not query mail DB")),
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "status",
+        lambda: {"available": True, "reason": None},
+    )
+
+    result = server._build_attention({"available": True, "panes": []})
+
+    assert result["mail_unread"] == 0
+    assert result["capabilities"]["agent_mail"] == {
+        "available": False,
+        "reason": "数据库不存在",
+        "read_available": False,
+        "write_available": True,
+        "write_reason": None,
     }
 
 
@@ -295,6 +330,11 @@ def test_overview_returns_degraded_payload_instead_of_500(monkeypatch):
         "overview",
         lambda: (_ for _ in ()).throw(AssertionError("must not query missing DB")),
     )
+    monkeypatch.setattr(
+        server.hub_client,
+        "status",
+        lambda: {"available": False, "reason": "Hub 不可连接"},
+    )
 
     response = TestClient(server.app).get(
         "/api/overview", headers={"authorization": "Bearer secret"}
@@ -311,7 +351,7 @@ def test_overview_returns_degraded_payload_instead_of_500(monkeypatch):
             "reason": "数据库不存在",
             "read_available": False,
             "write_available": False,
-            "write_reason": "数据库不存在",
+            "write_reason": "Hub 不可连接",
         },
     }
 

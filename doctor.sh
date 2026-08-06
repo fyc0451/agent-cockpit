@@ -72,6 +72,19 @@ else
   warn "未找到 codex；后台 codex task 功能不可用"
 fi
 
+CLIENT_ENV="$HOME/.agent-mail/client.env"
+CLIENT_HUB=""
+REMOTE_AGENT_MAIL_HUB=false
+if [[ -f "$CLIENT_ENV" ]]; then
+  CLIENT_HUB="$(sed -n -E 's/^[[:space:]]*hub=//p' "$CLIENT_ENV" | tail -n 1)"
+  case "$CLIENT_HUB" in
+    http://127.0.0.1|http://127.0.0.1:*|https://127.0.0.1|https://127.0.0.1:*|\
+    http://localhost|http://localhost:*|https://localhost|https://localhost:*|\
+    http://\[::1\]|http://\[::1\]:*|https://\[::1\]|https://\[::1\]:*) ;;
+    http://*|https://*) REMOTE_AGENT_MAIL_HUB=true ;;
+  esac
+fi
+
 if [[ -n "$AGENT_MAIL_DB_VALUE" ]]; then
   AGENT_MAIL_DB_PATH="$AGENT_MAIL_DB_VALUE"
 elif [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/mcp_agent_mail/storage.sqlite3" ]]; then
@@ -79,10 +92,14 @@ elif [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/mcp_agent_mail/storage.sqlite3"
 else
   AGENT_MAIL_DB_PATH="$HOME/mcp_agent_mail/storage.sqlite3"
 fi
-[[ -f "$AGENT_MAIL_DB_PATH" ]] \
-  && ok "Agent Mail 数据库存在: $AGENT_MAIL_DB_PATH" \
-  || fail "缺少 Agent Mail 数据库；创建工作区和添加 Agent 需要 Agent Mail"
-[[ -f "$HOME/.agent-mail/client.env" ]] \
+if [[ -f "$AGENT_MAIL_DB_PATH" ]]; then
+  ok "Agent Mail 数据库存在: $AGENT_MAIL_DB_PATH"
+elif [[ "$REMOTE_AGENT_MAIL_HUB" == true ]]; then
+  warn "远程 Agent Mail Hub 模式；本地消息列表不可用"
+else
+  fail "缺少 Agent Mail 数据库；创建工作区和添加 Agent 需要 Agent Mail"
+fi
+[[ -f "$CLIENT_ENV" ]] \
   && ok "Agent Mail 客户端配置存在" \
   || fail "缺少 ~/.agent-mail/client.env；Agent Mail Hub 必须配置"
 
