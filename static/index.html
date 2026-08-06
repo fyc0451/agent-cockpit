@@ -338,8 +338,6 @@ header .spacer{flex:1}
 .collab-section:first-child{border-top:0;padding-top:0;margin-top:0}
 .collab-section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;font-size:12px;color:var(--fg2)}
 .collab-target{width:100%;display:flex;align-items:center;gap:9px;text-align:left;padding:9px 10px;margin-bottom:6px;background:var(--bg3);border-color:var(--bd);white-space:normal}
-.collab-target.readonly{cursor:default;opacity:.75}
-.collab-target.readonly:hover{border-color:var(--bd)}
 .team-hero{border:1px solid var(--accent);border-radius:10px;padding:10px;background:var(--bg3)}
 .collab-target .main{flex:1;min-width:0}
 .collab-target .main b,.collab-target .main small{display:block;overflow:hidden;text-overflow:ellipsis}
@@ -2371,21 +2369,14 @@ function renderTermCollab(){
     teamRows=`<div class="team-status warn">你还不是 ${esc(project.name||project.slug)} 的 active 成员。</div><button class="sm" data-action="collabOpenTeam">查看群组</button>`;
   }else{
     const members=TEAM.members.filter(member=>member.status==='active'&&member.human_id!==TEAM.human?.id);
-    const memberList=members.map(member=>`<div class="collab-target readonly"><span style="font-size:20px">👤</span><span class="main"><b>${esc(member.display_name||member.mention_handle)} · @${esc(member.mention_handle)}</b><small>无默认 Agent 时进入其 Human Inbox</small></span></div>`).join('');
-    if(!TEAM.membership.default_agent_id){
-      // 无搭档 Agent 不再隐藏成员(避免误以为对方没加入);只禁用发送并给出明确下一步
-      teamRows=`<div class="team-status warn">向团队发送前,需要先设置你的搭档 Agent(认领一个本机 Agent 代表你)。当前群组成员如下,设置后即可在这里直接 @他们。</div><button class="sm primary" data-action="collabOpenTeam">去设置搭档 Agent</button>`;
-      teamRows+=memberList||'<div class="muted" style="font-size:11px">当前群组没有其他 active 成员。</div>';
-    }else{
-      const sender=TEAM.agents.find(agent=>agent.id===TEAM.membership.default_agent_id);
-      const senderLabel=sender?.name||('Agent #'+TEAM.membership.default_agent_id);
-      const broadcast=members.length?`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="team" data-label="${esc(project.name||project.slug)}"><span style="font-size:20px">👥</span><span class="main"><b>@团队 · ${esc(project.name||project.slug)}</b><small>发给当前群组所有其他 active 成员 · 以 ${esc(senderLabel)} 发出</small></span></button>`:'';
-      const memberRows=members.map(member=>`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="member" data-handle="${esc(member.mention_handle)}" data-label="${esc(member.display_name||member.mention_handle)}"><span style="font-size:20px">👤</span><span class="main"><b>${esc(member.display_name||member.mention_handle)} · @${esc(member.mention_handle)}</b><small>仅联系该成员；无默认 Agent 时进入 Human Inbox</small></span></button>`).join('');
-      teamRows=broadcast+memberRows+(members.length?'':'<div class="muted" style="font-size:11px">当前群组没有其他 active 成员。</div>');
-      if(TEAM_COLLAB_TARGET&&TEAM_COLLAB_TARGET.slug===project.slug){
-        const contextText=teamCollabContextText(context);
-        teamRows+=`<div class="collab-form"><div class="field"><label>收件人</label><b>${esc(TEAM_COLLAB_TARGET.label)}</b></div><div class="field"><label>主题</label><input id="teamCollabSubject" maxlength="512" value="${esc(teamCollabDefaultSubject(context))}"></div><div class="field"><label>求助内容</label><textarea id="teamCollabBody" maxlength="48000" placeholder="说明问题、已尝试的方法和希望团队提供的支持"></textarea></div><div class="collab-context">${esc(contextText||'未识别到 Herdr pane；只发送你填写的内容')}</div><div class="collab-actions"><button class="sm" data-action="teamCollabCancel">取消</button><button class="primary sm" data-action="teamCollabSend">发送团队消息</button></div></div>`;
-      }
+    const sender=TEAM.membership.default_agent_id?TEAM.agents.find(agent=>agent.id===TEAM.membership.default_agent_id):null;
+    const senderLabel=sender?`以 ${esc(sender.name)} Agent 发出`:'以你的 Human 身份发出';
+    const broadcast=members.length?`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="team" data-label="${esc(project.name||project.slug)}"><span style="font-size:20px">👥</span><span class="main"><b>@团队 · ${esc(project.name||project.slug)}</b><small>发给当前群组所有其他 active 成员 · ${senderLabel}</small></span></button>`:'';
+    const memberRows=members.map(member=>`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="member" data-handle="${esc(member.mention_handle)}" data-label="${esc(member.display_name||member.mention_handle)}"><span style="font-size:20px">👤</span><span class="main"><b>${esc(member.display_name||member.mention_handle)} · @${esc(member.mention_handle)}</b><small>仅联系该成员；无默认 Agent 时进入 Human Inbox</small></span></button>`).join('');
+    teamRows=broadcast+memberRows+(members.length?'':'<div class="muted" style="font-size:11px">当前群组没有其他 active 成员。</div>');
+    if(TEAM_COLLAB_TARGET&&TEAM_COLLAB_TARGET.slug===project.slug){
+      const contextText=teamCollabContextText(context);
+      teamRows+=`<div class="collab-form"><div class="field"><label>收件人</label><b>${esc(TEAM_COLLAB_TARGET.label)}</b></div><div class="field"><label>主题</label><input id="teamCollabSubject" maxlength="512" value="${esc(teamCollabDefaultSubject(context))}"></div><div class="field"><label>求助内容</label><textarea id="teamCollabBody" maxlength="48000" placeholder="说明问题、已尝试的方法和希望团队提供的支持"></textarea></div><div class="collab-context">${esc(contextText||'未识别到 Herdr pane；只发送你填写的内容')}</div><div class="collab-actions"><button class="sm" data-action="teamCollabCancel">取消</button><button class="primary sm" data-action="teamCollabSend">发送团队消息</button></div></div>`;
     }
   }
   document.getElementById('collabList').innerHTML=`<section class="collab-section"><div class="collab-section-title"><b>当前工作区 Agent</b><span>插入 Agent Mail 身份</span></div>${localRows}</section><section class="collab-section"><div class="collab-section-title"><b>Team Hub · 当前群组</b><span>真实投递，不启动对方终端</span></div>${teamRows}</section>`;

@@ -1429,28 +1429,19 @@ def test_team_local_identity_claim_never_leaks_token_or_side_effects():
         assert bad not in claim
 
 
-def test_team_collab_without_default_shows_members_and_degrades():
-    # P0-1: 无搭档 Agent 时 @协作面板必须展示成员(只读),并给降级提示+去设置 CTA,
-    # 不再用一条警告替换整个团队区导致成员"消失"。
+def test_team_collab_never_hides_members_without_default():
+    # P0-1: @协作面板永远展示群组成员并可点击;无默认 Agent 时以 Human 身份发出
+    # (Hub 84c851d 起后端支持),不再用警告替换整个团队区导致成员"消失"。
     js = _inline_js()
     render = js.split("function renderTermCollab(){", 1)[1].split(
         "async function termPickCollab", 1
     )[0]
-    assert "if(!TEAM.membership.default_agent_id){" in render
-    degrade = render.split("if(!TEAM.membership.default_agent_id){", 1)[1].split(
-        "}else{", 1
-    )[0]
-    assert "memberList" in render and "memberList" in degrade
-    assert "去设置搭档 Agent" in degrade
-    assert "collab-target readonly" in render or "readonly" in degrade
-    # 成员列表在无搭档分支也必须出现
     assert "TEAM.members.filter(member=>member.status==='active'" in render
-    # 不再存在旧的整体替换分支
+    assert "'以你的 Human 身份发出'" in render
+    assert "data-action=\"teamCollabTarget\"" in render
+    # 不再存在按无默认分支隐藏/只读成员的旧结构
     assert "请先为 ${esc(project.name||project.slug)} 设置自己的默认 Agent" not in js
-
-
-def test_team_collab_readonly_target_css_exists():
-    assert ".collab-target.readonly{" in HTML
+    assert "collab-target readonly" not in render
 
 
 def test_team_identity_empty_state_offers_partner_cta():
