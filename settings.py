@@ -5,6 +5,8 @@
   dir_agents     每个目录的默认 agent({目录: agent})
   enabled_agents 启用的 agent 类型(启动入口只列这些)
   upload_max_mb  上传单文件上限(MB)
+  team_hub_url   Team Hub 业务 API 地址
+  human_auth_url Human issuer 地址
   term           终端参数(max_terms/idle_ttl/write_timeout)
 
 (可访问目录由 files.py 的 custom roots 机制管理,见 /api/files/roots,不在此重复。)
@@ -13,12 +15,14 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 DATA_DIR = Path.home() / "dashboard-data"
 SETTINGS_PATH = DATA_DIR / "settings.json"
@@ -32,6 +36,8 @@ DEFAULTS: dict[str, Any] = {
     "dir_agents": {},
     "enabled_agents": list(KNOWN_AGENTS),
     "upload_max_mb": 100,
+    "team_hub_url": "",
+    "human_auth_url": "",
     "term": {"max_terms": 16, "idle_ttl": 1800, "write_timeout": 2.0},
 }
 
@@ -43,6 +49,41 @@ _cache_mtime: float = -1.0
 
 def _deepcopy_defaults() -> dict[str, Any]:
     return json.loads(json.dumps(DEFAULTS))
+
+
+def normalize_service_url(value: Any, label: str, *, allow_empty: bool = False) -> str:
+    """规范化服务端点；远端明文 HTTP 会暴露账号和 JWT，因此只允许 HTTPS。"""
+    if not isinstance(value, str):
+        raise ValueError(f"{label} 地址必须是字符串")
+    endpoint = value.strip().rstrip("/")
+    if not endpoint:
+        if allow_empty:
+            return ""
+        raise ValueError(f"{label} 地址不能为空")
+    if any(char.isspace() for char in endpoint):
+        raise ValueError(f"{label} 地址不能包含空白字符")
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{label} 地址无效: {exc}") from exc
+    host = parsed.hostname or ""
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not 1 <= port <= 65535)
+        or (parsed.scheme == "http" and not loopback)
+    ):
+        raise ValueError(f"{label} 地址必须是本机 HTTP 或 HTTPS")
+    return endpoint
 
 
 def _read_merged() -> dict[str, Any]:
@@ -114,6 +155,13 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         raise ValueError(f"upload_max_mb 必须是整数: {cfg.get('upload_max_mb')!r}")
     cfg["upload_max_mb"] = max(1, min(mb, 2048))
+
+    cfg["team_hub_url"] = normalize_service_url(
+        cfg.get("team_hub_url"), "Team Hub", allow_empty=True,
+    )
+    cfg["human_auth_url"] = normalize_service_url(
+        cfg.get("human_auth_url"), "Human issuer", allow_empty=True,
+    )
 
     term = cfg.get("term")
     if not isinstance(term, dict):

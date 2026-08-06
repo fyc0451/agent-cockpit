@@ -667,11 +667,11 @@ header .spacer{flex:1}
       </div>
       <div class="set-card">
         <h3 data-i18n="set.teamhub">团队 Hub 连接</h3>
-        <div style="display:grid;gap:7px;margin-top:7px;font-size:12px">
-          <div><span class="muted">Team Hub API</span><br><code id="setTeamHub" style="word-break:break-all">--</code></div>
-          <div><span class="muted">Human issuer</span><br><code id="setHumanAuth" style="word-break:break-all">--</code></div>
+        <div style="display:grid;gap:8px;margin-top:7px">
+          <label style="font-size:12px"><span class="muted">Team Hub API</span><input id="setTeamHub" type="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:9765" style="width:100%;margin-top:4px" oninput="TEAM_HUB_CONFIG_EDIT=this.value"></label>
+          <label style="font-size:12px"><span class="muted">Human issuer</span><input id="setHumanAuth" type="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:9766" style="width:100%;margin-top:4px" oninput="HUMAN_AUTH_CONFIG_EDIT=this.value"></label>
         </div>
-        <div class="muted" style="font-size:12px;margin-top:7px" data-i18n="set.teamhub.hint">由服务器管理员通过 TEAM_HUB_URL 和 HUMAN_AUTH_URL 配置；页面只读展示，避免成员误改共享后端。</div>
+        <div class="muted" style="font-size:12px;margin-top:7px" data-i18n="set.teamhub.hint">保存后立即生效并持久化到 Cockpit 设置；SSH 本地转发可填本机 HTTP，远端直连必须使用 HTTPS。</div>
       </div>
       <div class="set-card">
         <h3 data-i18n="set.env">环境自检</h3>
@@ -874,7 +874,7 @@ en:{
 'drawer.title':'Terminal','drawer.send':'Send',
 'set.lang':'Language','set.dirs':'Accessible directories','set.dirs.hint':'Add/remove directories at the top of the Files page.','set.diragent':'Default agent per directory','set.diragent.dir':'Directory','set.diragent.agent':'Default agent','set.diragent.ph':'Absolute directory path','set.add':'＋ Add','set.enabled':'Enabled agents','set.enabled.hint':'Launch menus only list enabled agents.','set.limits':'Runtime limits','set.upload_max':'Upload limit (MB)','set.max_terms':'Max terminals','set.idle_ttl':'Idle terminal TTL (s)','set.write_timeout':'Terminal write timeout (s)','set.cancel':'Cancel','set.cancelled':'Changes cancelled','set.save':'Save','set.saved':'Saved ✓','set.savefail':'Save failed: ','set.dirph':'/abs/path','set.theme':'Appearance','set.theme.light':'☀️ Light','set.theme.dark':'🌙 Dark','set.theme.hint':'The terminal also switches to a light background in light mode.',
 'set.env':'Environment check','set.env.hint':'On first use, make sure these components are ready; ❌ means install first.','set.env.herdr':'herdr (session backend)','set.env.mail':'Agent Mail (required, messaging)','set.env.missing':'not installed',
-'set.hub':'Local Agent Mail Hub address','set.hub.hint':'Controls only local agent collaboration and messages, not the Team Hub. The token is never read or shown; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ','set.teamhub':'Team Hub connection','set.teamhub.hint':'Configured by the server administrator with TEAM_HUB_URL and HUMAN_AUTH_URL. This page is read-only to prevent members from changing the shared backend.',
+'set.hub':'Local Agent Mail Hub address','set.hub.hint':'Controls only local agent collaboration and messages, not the Team Hub. The token is never read or shown; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ','set.teamhub':'Team Hub connection','set.teamhub.hint':'Saved directly in Cockpit settings and applied immediately. Local SSH forwards may use loopback HTTP; direct remote access must use HTTPS.',
 'set.termfont':'Terminal font size','set.termfont.hint':'Applies to this device only, effective immediately.',
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
@@ -895,7 +895,7 @@ ja:{
 'drawer.title':'端末','drawer.send':'送信',
 'set.lang':'表示言語','set.dirs':'アクセス可能ディレクトリ','set.dirs.hint':'ディレクトリの追加・削除は「ファイル」ページ上部で行います。','set.diragent':'ディレクトリ別デフォルト agent','set.diragent.dir':'ディレクトリ','set.diragent.agent':'デフォルト agent','set.diragent.ph':'ディレクトリの絶対パス','set.add':'＋ 追加','set.enabled':'有効な agent','set.enabled.hint':'起動メニューには有効な agent のみ表示されます。','set.limits':'実行パラメータ','set.upload_max':'アップロード上限 (MB)','set.max_terms':'最大ターミナル数','set.idle_ttl':'アイドル端末の回収(秒)','set.write_timeout':'端末書き込みタイムアウト(秒)','set.cancel':'キャンセル','set.cancelled':'変更をキャンセルしました','set.save':'保存','set.saved':'保存しました ✓','set.savefail':'保存に失敗: ','set.dirph':'/abs/path','set.theme':'外観','set.theme.light':'☀️ ライト','set.theme.dark':'🌙 ダーク','set.theme.hint':'ライトモードでは端末も淡色背景になります。',
 'set.env':'環境チェック','set.env.hint':'初回利用前にこれらのコンポーネントを確認してください。❌ は要インストールです。','set.env.herdr':'herdr(セッションバックエンド)','set.env.mail':'Agent Mail(必須、メッセージ機能)','set.env.missing':'未インストール',
-'set.hub':'ローカル Agent Mail Hub アドレス','set.hub.hint':'ローカル agent の連携とメッセージだけを制御し、Team Hub は切り替えません。Token は表示せず、保存後すぐ反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ','set.teamhub':'Team Hub 接続','set.teamhub.hint':'サーバー管理者が TEAM_HUB_URL と HUMAN_AUTH_URL で設定します。メンバーによる共有バックエンドの誤変更を防ぐため、この画面では読み取り専用です。',
+'set.hub':'ローカル Agent Mail Hub アドレス','set.hub.hint':'ローカル agent の連携とメッセージだけを制御し、Team Hub は切り替えません。Token は表示せず、保存後すぐ反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ','set.teamhub':'Team Hub 接続','set.teamhub.hint':'Cockpit 設定に直接保存され、すぐ反映されます。SSH ローカル転送は loopback HTTP、リモート直結は HTTPS を使用してください。',
 'set.termfont':'端末フォントサイズ','set.termfont.hint':'このデバイスのみに適用され、即時反映されます。',
 'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ',
 }};
@@ -934,7 +934,7 @@ function toggleTermToolbar(){
 function setLang(l){LANG=l;localStorage.setItem('cockpit-lang',l);applyLang();const active=document.querySelector('#nav button.active');if(active)showView(active.dataset.view)}
 
 // ============ 设置 ============
-let SETTINGS=null, SETTINGS_EDIT=null, HUB_CONFIG=null, HUB_CONFIG_EDIT='', SETTINGS_SAVED_LANG=LANG;
+let SETTINGS=null, SETTINGS_EDIT=null, HUB_CONFIG=null, HUB_CONFIG_EDIT='', TEAM_HUB_CONFIG_EDIT='', HUMAN_AUTH_CONFIG_EDIT='', SETTINGS_SAVED_LANG=LANG;
 async function loadSettings(){
   try{
     [SETTINGS,HUB_CONFIG]=await Promise.all([
@@ -942,6 +942,8 @@ async function loadSettings(){
     ]);
     SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
     HUB_CONFIG_EDIT=HUB_CONFIG.hub||'';
+    TEAM_HUB_CONFIG_EDIT=HUB_CONFIG.team_hub||'';
+    HUMAN_AUTH_CONFIG_EDIT=HUB_CONFIG.human_auth||'';
     // 设备未选过语言时,用服务端默认语言
     if(!localStorage.getItem('cockpit-lang')&&SETTINGS.language&&SETTINGS.language!==LANG){
       LANG=SETTINGS.language;applyLang();
@@ -987,8 +989,8 @@ function renderSettings(){
   }
   const teamHub=document.getElementById('setTeamHub');
   const humanAuth=document.getElementById('setHumanAuth');
-  if(teamHub)teamHub.textContent=HUB_CONFIG?.team_hub||'--';
-  if(humanAuth)humanAuth.textContent=HUB_CONFIG?.human_auth||'--';
+  if(teamHub&&document.activeElement!==teamHub)teamHub.value=TEAM_HUB_CONFIG_EDIT;
+  if(humanAuth&&document.activeElement!==humanAuth)humanAuth.value=HUMAN_AUTH_CONFIG_EDIT;
   // 环境自检(异步,不阻塞设置渲染)
   const envEl=document.getElementById('envCheck');
   if(envEl){
@@ -1026,6 +1028,8 @@ function cancelSettings(){
   if(!SETTINGS||!HUB_CONFIG)return;
   SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
   HUB_CONFIG_EDIT=HUB_CONFIG.hub||'';
+  TEAM_HUB_CONFIG_EDIT=HUB_CONFIG.team_hub||'';
+  HUMAN_AUTH_CONFIG_EDIT=HUB_CONFIG.human_auth||'';
   LANG=SETTINGS_SAVED_LANG;
   localStorage.setItem('cockpit-lang',LANG);
   document.getElementById('setNewDir').value='';
@@ -1046,8 +1050,10 @@ async function saveSettings(){
     },
   };
   try{
-    HUB_CONFIG=await api('/api/agent-mail/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hub:HUB_CONFIG_EDIT.trim()})});
+    HUB_CONFIG=await api('/api/agent-mail/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hub:HUB_CONFIG_EDIT.trim(),team_hub:TEAM_HUB_CONFIG_EDIT.trim(),human_auth:HUMAN_AUTH_CONFIG_EDIT.trim()})});
     HUB_CONFIG_EDIT=HUB_CONFIG.hub||'';
+    TEAM_HUB_CONFIG_EDIT=HUB_CONFIG.team_hub||'';
+    HUMAN_AUTH_CONFIG_EDIT=HUB_CONFIG.human_auth||'';
     const saved=await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     SETTINGS={...SETTINGS,...saved};
     SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));

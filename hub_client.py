@@ -18,6 +18,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+import settings
+
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-mail-tools")
 )
@@ -51,15 +53,6 @@ class HumanAuthError(RuntimeError):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
-
-
-def _is_loopback_host(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 def status() -> dict[str, Any]:
@@ -152,26 +145,32 @@ def allows_local_actions() -> bool:
 
 
 def _team_hub_url() -> str:
-    base_url = TEAM_HUB_URL or HUB
-    parsed = urlsplit(base_url)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or (parsed.scheme == "http" and not _is_loopback_host(parsed.hostname))
-    ):
-        raise ValueError("Team Hub 地址必须是本机 HTTP 或 HTTPS")
-    return base_url.rstrip("/")
+    configured = settings.get().get("team_hub_url")
+    return settings.normalize_service_url(
+        configured or TEAM_HUB_URL or HUB, "Team Hub",
+    )
+
+
+def _human_auth_url() -> str:
+    configured = settings.get().get("human_auth_url")
+    return settings.normalize_service_url(
+        configured or HUMAN_AUTH_URL or "http://127.0.0.1:8766", "Human issuer",
+    )
+
+
+def normalize_team_config(team_hub: str, human_auth: str) -> dict[str, str]:
+    """校验设置页提交的团队端点，供落盘前一次性完成全部输入校验。"""
+    return {
+        "team_hub_url": settings.normalize_service_url(team_hub, "Team Hub"),
+        "human_auth_url": settings.normalize_service_url(human_auth, "Human issuer"),
+    }
 
 
 def public_team_config() -> dict[str, str]:
     """返回可展示的 Team 端点；不包含 token、Cookie 或任何凭据。"""
     return {
         "team_hub": _team_hub_url(),
-        "human_auth": HUMAN_AUTH_URL,
+        "human_auth": _human_auth_url(),
     }
 
 
@@ -224,21 +223,11 @@ def human_login(username: str, password: str) -> dict[str, Any]:
     """向独立 issuer 登录；凭据只随本次请求转发，不保存。"""
     if not 1 <= len(username) <= 64 or not 1 <= len(password) <= 256:
         raise ValueError("用户名或密码长度无效")
-    parsed = urlsplit(HUMAN_AUTH_URL)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or (parsed.scheme == "http" and not _is_loopback_host(parsed.hostname))
-    ):
-        raise ValueError("Human issuer 地址必须是本机 HTTP 或 HTTPS")
+    base_url = _human_auth_url()
     try:
         with httpx.Client(timeout=10) as client:
             response = client.post(
-                f"{HUMAN_AUTH_URL}/token",
+                f"{base_url}/token",
                 json={"username": username, "password": password},
             )
     except httpx.HTTPError as exc:
@@ -274,17 +263,7 @@ def _human_auth_api(
     authorization: str = "",
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    parsed = urlsplit(HUMAN_AUTH_URL)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or (parsed.scheme == "http" and not _is_loopback_host(parsed.hostname))
-    ):
-        raise ValueError("Human issuer 地址必须是本机 HTTP 或 HTTPS")
+    base_url = _human_auth_url()
     if authorization and (
         not authorization.startswith("Bearer ")
         or not authorization[7:].strip()
@@ -298,7 +277,7 @@ def _human_auth_api(
         with httpx.Client(timeout=10) as client:
             response = client.request(
                 method,
-                f"{HUMAN_AUTH_URL}{path}",
+                f"{base_url}{path}",
                 json=payload if method != "GET" else None,
                 headers=headers,
             )

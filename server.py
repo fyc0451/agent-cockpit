@@ -475,6 +475,8 @@ class PushSubscriptionReq(BaseModel):
 
 class AgentMailConfigReq(BaseModel):
     hub: str
+    team_hub: str | None = None
+    human_auth: str | None = None
 
 
 # ── 认证 ─────────────────────────────────────────────────────────
@@ -1084,9 +1086,18 @@ def api_agent_mail_config_get():
 
 @app.put("/api/agent-mail/config")
 def api_agent_mail_config_put(req: AgentMailConfigReq):
-    """只更新 Hub 地址，保留 client.env 中的 token 并立即重载。"""
+    """保存本地/团队 Hub 地址并立即生效；任何凭据都不经该接口返回。"""
     try:
+        if (req.team_hub is None) != (req.human_auth is None):
+            raise ValueError("Team Hub 与 Human issuer 地址必须同时填写")
+        team_config = None
+        if req.team_hub is not None and req.human_auth is not None:
+            team_config = hub_client.normalize_team_config(
+                req.team_hub, req.human_auth,
+            )
         hub_client.save_client_hub(req.hub)
+        if team_config:
+            settings.update(team_config)
         config = hub_client.reload_config()
     except ValueError as exc:
         raise HTTPException(400, str(exc))

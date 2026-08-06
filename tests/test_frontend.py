@@ -995,6 +995,8 @@ def test_settings_view_and_nav_exist():
     assert 'id="setHubStatus"' in HTML
     assert 'id="setTeamHub"' in HTML
     assert 'id="setHumanAuth"' in HTML
+    assert 'oninput="TEAM_HUB_CONFIG_EDIT=this.value"' in HTML
+    assert 'oninput="HUMAN_AUTH_CONFIG_EDIT=this.value"' in HTML
     assert 'onclick="cancelSettings()"' in HTML
 
 
@@ -1093,6 +1095,11 @@ def test_settings_js_functions_exist():
     assert "'/api/agent-mail/config'" in HTML
     assert "SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS))" in HTML
     assert "HUB_CONFIG_EDIT=HUB_CONFIG.hub||''" in HTML
+    assert "TEAM_HUB_CONFIG_EDIT=HUB_CONFIG.team_hub||''" in HTML
+    assert "HUMAN_AUTH_CONFIG_EDIT=HUB_CONFIG.human_auth||''" in HTML
+    assert "team_hub:TEAM_HUB_CONFIG_EDIT.trim()" in HTML
+    assert "human_auth:HUMAN_AUTH_CONFIG_EDIT.trim()" in HTML
+    assert "TEAM_HUB_URL 和 HUMAN_AUTH_URL 配置" not in HTML
 
 
 # ── 顶部导航与终端工具栏折叠 ────────────────────────────────────

@@ -27,6 +27,8 @@ def test_defaults_when_file_missing():
     assert cfg["language"] == "zh"
     assert cfg["enabled_agents"] == settings.KNOWN_AGENTS
     assert cfg["upload_max_mb"] == 100
+    assert cfg["team_hub_url"] == ""
+    assert cfg["human_auth_url"] == ""
     assert cfg["term"]["max_terms"] == 16
 
 
@@ -68,6 +70,20 @@ def test_update_clamps_numbers():
     out = settings.update({"upload_max_mb": 99999, "term": {"max_terms": 9999}})
     assert out["upload_max_mb"] == 2048
     assert out["term"]["max_terms"] == 64
+
+
+def test_update_validates_team_service_urls():
+    out = settings.update({
+        "team_hub_url": " http://127.0.0.1:9765/ ",
+        "human_auth_url": "https://team.example/human-auth/",
+    })
+    assert out["team_hub_url"] == "http://127.0.0.1:9765"
+    assert out["human_auth_url"] == "https://team.example/human-auth"
+
+    with pytest.raises(ValueError, match="本机 HTTP 或 HTTPS"):
+        settings.update({"team_hub_url": "http://team.example:8765"})
+    with pytest.raises(ValueError, match="不能为空"):
+        settings.normalize_service_url("", "Team Hub")
 
 
 def test_update_persists_validated_values(tmp_settings):
@@ -218,14 +234,8 @@ def test_agent_mail_config_routes_never_expose_token(tmp_path, monkeypatch):
         "status",
         lambda: {"available": True, "reason": None},
     )
-    monkeypatch.setattr(
-        server.hub_client,
-        "public_team_config",
-        lambda: {
-            "team_hub": "http://127.0.0.1:9765",
-            "human_auth": "http://127.0.0.1:9766",
-        },
-    )
+    monkeypatch.setattr(server.hub_client, "TEAM_HUB_URL", "http://127.0.0.1:9765")
+    monkeypatch.setattr(server.hub_client, "HUMAN_AUTH_URL", "http://127.0.0.1:9766")
     client = TestClient(server.app)
     headers = {"authorization": "Bearer secret"}
 
@@ -252,6 +262,40 @@ def test_agent_mail_config_routes_never_expose_token(tmp_path, monkeypatch):
         "hub=https://team.example:9765\n"
         "token=top-secret\nfuture=value\n"
     )
+
+    response = client.put(
+        "/api/agent-mail/config",
+        headers=headers,
+        json={
+            "hub": "https://team.example:9765",
+            "team_hub": "http://127.0.0.1:9775/",
+            "human_auth": "http://127.0.0.1:9776/",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["team_hub"] == "http://127.0.0.1:9775"
+    assert response.json()["human_auth"] == "http://127.0.0.1:9776"
+    assert settings.get()["team_hub_url"] == "http://127.0.0.1:9775"
+    assert settings.get()["human_auth_url"] == "http://127.0.0.1:9776"
+
+    response = client.put(
+        "/api/agent-mail/config",
+        headers=headers,
+        json={"hub": "https://team.example:9765", "team_hub": "https://new.example"},
+    )
+    assert response.status_code == 400
+
+    response = client.put(
+        "/api/agent-mail/config",
+        headers=headers,
+        json={
+            "hub": "https://team.example:9765",
+            "team_hub": "http://remote.example:8765",
+            "human_auth": "https://remote.example/human-auth",
+        },
+    )
+    assert response.status_code == 400
+    assert settings.get()["team_hub_url"] == "http://127.0.0.1:9775"
 
     response = client.put(
         "/api/agent-mail/config",

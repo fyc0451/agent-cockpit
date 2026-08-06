@@ -10,6 +10,7 @@ sys.path.insert(
 
 import am_common
 import hub_client
+import settings
 
 
 def _write_client_env(monkeypatch, tmp_path, content: str) -> None:
@@ -292,6 +293,22 @@ def test_human_api_forwards_ephemeral_jwt_to_fixed_hub_path(monkeypatch):
             },
         )
     ]
+
+
+def test_saved_team_endpoints_override_legacy_environment(monkeypatch):
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "https://legacy.example")
+    monkeypatch.setattr(
+        hub_client, "HUMAN_AUTH_URL", "https://legacy.example/human-auth",
+    )
+    settings.update({
+        "team_hub_url": "http://127.0.0.1:9765",
+        "human_auth_url": "http://127.0.0.1:9766",
+    })
+
+    assert hub_client.public_team_config() == {
+        "team_hub": "http://127.0.0.1:9765",
+        "human_auth": "http://127.0.0.1:9766",
+    }
 
 
 def test_human_api_rejects_missing_jwt_and_non_human_path(monkeypatch):
