@@ -337,6 +337,9 @@ header .spacer{flex:1}
 .collab-section{border-top:1px solid var(--bd);padding-top:11px;margin-top:11px}
 .collab-section:first-child{border-top:0;padding-top:0;margin-top:0}
 .collab-section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;font-size:12px;color:var(--fg2)}
+.collab-projects{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.collab-projects>span{font-size:11px;color:var(--fg3)}
+.collab-projects button{padding:5px 8px;font-size:11px}
 .collab-target{width:100%;display:flex;align-items:center;gap:9px;text-align:left;padding:9px 10px;margin-bottom:6px;background:var(--bg3);border-color:var(--bd);white-space:normal}
 .team-hero{border:1px solid var(--accent);border-radius:10px;padding:10px;background:var(--bg3)}
 .collab-target .main{flex:1;min-width:0}
@@ -2361,6 +2364,8 @@ function renderTermCollab(){
     </button>`).join('')||'<div class="empty">当前没有其他本地 Agent</div>';
   let teamRows='';
   const project=teamSelectedProject();
+  const activeProjects=TEAM.projects.filter(item=>item.membership?.status==='active');
+  const projectSwitcher=activeProjects.length>1?`<div class="collab-projects"><span>发送到群组</span>${activeProjects.map(item=>`<button class="sm${item.slug===TEAM.selected?' active':''}" data-action="teamCollabProject" data-slug="${esc(item.slug)}">${esc(item.name||item.slug)} · ${esc(item.slug)}</button>`).join('')}</div>`:'';
   if(!TEAM.authenticated){
     teamRows='<div class="team-status warn">尚未登录 Team Hub。登录后才能向远端团队发消息。</div><button class="sm" data-action="collabOpenTeam">打开团队中心</button>';
   }else if(!project){
@@ -2379,7 +2384,7 @@ function renderTermCollab(){
       teamRows+=`<div class="collab-form"><div class="field"><label>收件人</label><b>${esc(TEAM_COLLAB_TARGET.label)}</b></div><div class="field"><label>主题</label><input id="teamCollabSubject" maxlength="512" value="${esc(teamCollabDefaultSubject(context))}"></div><div class="field"><label>求助内容</label><textarea id="teamCollabBody" maxlength="48000" placeholder="说明问题、已尝试的方法和希望团队提供的支持"></textarea></div><div class="collab-context">${esc(contextText||'未识别到 Herdr pane；只发送你填写的内容')}</div><div class="collab-actions"><button class="sm" data-action="teamCollabCancel">取消</button><button class="primary sm" data-action="teamCollabSend">发送团队消息</button></div></div>`;
     }
   }
-  document.getElementById('collabList').innerHTML=`<section class="collab-section"><div class="collab-section-title"><b>当前工作区 Agent</b><span>插入 Agent Mail 身份</span></div>${localRows}</section><section class="collab-section"><div class="collab-section-title"><b>Team Hub · 当前群组</b><span>真实投递，不启动对方终端</span></div>${teamRows}</section>`;
+  document.getElementById('collabList').innerHTML=`<section class="collab-section"><div class="collab-section-title"><b>当前工作区 Agent</b><span>插入 Agent Mail 身份</span></div>${localRows}</section><section class="collab-section"><div class="collab-section-title"><b>Team Hub · 当前群组</b><span>真实投递，不启动对方终端</span></div>${projectSwitcher}${teamRows}</section>`;
 }
 async function termPickCollab(){
   if(!TERM_WS||!XTERM){toast('请先打开一个终端');return}
@@ -2398,6 +2403,15 @@ function teamCollabPick(kind,handle,label){
   TEAM_COLLAB_TARGET={slug:project.slug,handle:kind==='member'?handle:'',label:kind==='member'?'@'+handle+' · '+label:'@团队 · '+label};
   renderTermCollab();
   document.getElementById('teamCollabBody')?.focus();
+}
+async function teamCollabSelectProject(slug){
+  if(TEAM.loading||!TEAM.projects.some(project=>project.slug===slug&&project.membership?.status==='active'))return;
+  TEAM.loading=true;TEAM.selected=slug;TEAM_COLLAB_TARGET=null;
+  try{
+    sessionStorage.setItem('cockpit-team-project',slug);
+    document.getElementById('collabList').innerHTML='<div class="empty">加载群组成员…</div>';
+    await teamLoadSelection();
+  }catch(e){toast('群组加载失败: '+e,4500)}finally{TEAM.loading=false;renderTermCollab()}
 }
 async function teamCollabSend(){
   if(TEAM_COLLAB_SENDING||!TEAM_COLLAB_TARGET)return;
@@ -3679,6 +3693,7 @@ function bindDelegation(){
     if(a==='uploadCurrent')sendUploadToCurrent();
     else if(a==='uploadPane')sendUploadToPane(s,p,g);
     else if(a==='collab')termInsertCollab(s,p,g);
+    else if(a==='teamCollabProject')teamCollabSelectProject(it.dataset.slug);
     else if(a==='teamCollabTarget')teamCollabPick(it.dataset.targetKind,it.dataset.handle||'',it.dataset.label||'');
     else if(a==='teamCollabCancel'){TEAM_COLLAB_TARGET=null;renderTermCollab()}
     else if(a==='teamCollabSend')teamCollabSend();
