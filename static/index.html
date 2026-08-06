@@ -1334,7 +1334,7 @@ function teamBindingRows(admin){
   return rows||'<div class="empty">尚未绑定远程 Agent。管理员可从此群组可选 Agent 中选择绑定。</div>';
 }
 function teamBindForm(admin){
-  if(!admin&&!teamIsGlobalAdmin())return'';
+  if(!admin)return'';
   const bound=new Set(TEAM.bindings.filter(b=>b.status==='active').map(b=>Number(b.agent_id)));
   const options=TEAM.candidates.filter(a=>{const id=Number(a.id);return Number.isInteger(id)&&id>0&&!bound.has(id)}).map(a=>`<option value="${Number(a.id)}">${esc(a.name)}${a.project_slug?' · '+esc(a.project_slug):''}${a.program?' · '+esc(a.program):''}</option>`).join('');
   if(!options)return'';
@@ -1382,13 +1382,14 @@ function teamProjectPanel(project){
   const owned=TEAM.agents.filter(a=>a.owner_id===TEAM.human?.id&&!a.retired);
   const defaultOptions='<option value="">不设置（消息进入人工收件箱）</option>'+owned.map(a=>`<option value="${Number(a.id)}"${a.id===TEAM.membership?.default_agent_id?' selected':''}>${esc(a.name)}</option>`).join('');
   const admin=membership.role==='admin';
+  const bindingAdmin=admin||teamIsGlobalAdmin();
   const activeAgents=TEAM.agents.filter(a=>!a.retired).length;
   return `<div class="team-panel-head"><h3>${esc(project.name||project.slug)}</h3><span class="team-badge ${admin?'admin':'active'}">${admin?'管理员':'成员'}</span></div><div class="team-panel-body">
     <div class="team-safety">群组标识：${esc(project.slug)}。群组只存在于远程 Hub；切换群组不会读取或切换本机目录、Herdr session，也不会自动启动 Agent。</div>
     <div class="team-stats"><div class="team-stat"><b>${Number(project.active_member_count)||0}</b><span>active 成员</span></div><div class="team-stat"><b>${activeAgents}</b><span>active Agents</span></div><div class="team-stat"><b>${TEAM.membership?.default_agent_id?'1':'0'}</b><span>我的默认 Agent</span></div></div>
     <div class="team-section"><div class="team-section-title">我的项目身份 <span>本人可修改</span></div><div class="team-row"><div class="team-row-main"><b>${esc(TEAM.human.display_name)}</b><small>@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}</small></div><select id="teamDefaultAgent">${defaultOptions}</select><div class="team-row-actions"><button class="primary sm" data-action="teamDefault">保存默认 Agent</button></div></div></div>
     <div class="team-section"><div class="team-section-title">项目 Agents <span>owner 可停用；管理员可分配 owner</span></div>${teamAgentRows(project)}</div>
-    <div class="team-section"><div class="team-section-title">Agent 绑定 <span>管理员可绑定/解绑；成员只读</span></div>${teamBindForm(admin)}${teamBindingRows(admin)}</div>
+    <div class="team-section"><div class="team-section-title">Agent 绑定 <span>管理员可绑定/解绑；成员只读</span></div>${teamBindForm(bindingAdmin)}${teamBindingRows(bindingAdmin)}</div>
     ${admin?`<div class="team-section"><div class="team-section-title">管理员 · 成员审批 <span>${TEAM.members.length} 人</span></div>${teamMemberRows()}</div>`:''}
   </div>`;
 }

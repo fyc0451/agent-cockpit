@@ -1328,7 +1328,10 @@ def test_team_binding_ui_admin_only_controls():
     assert "const active=binding.status==='active'" in rows
     assert "const unbind=active&&admin&&Number.isInteger(agentId)&&agentId>0" in rows
     form = js.split("function teamBindForm(admin){", 1)[1].split("function ", 1)[0]
-    assert "if(!admin&&!teamIsGlobalAdmin())return''" in form
+    assert "if(!admin)return''" in form
+    panel = js.split("function teamProjectPanel(project){", 1)[1].split("function teamInboxPanel", 1)[0]
+    assert "const bindingAdmin=admin||teamIsGlobalAdmin()" in panel
+    assert "teamBindForm(bindingAdmin)}${teamBindingRows(bindingAdmin)" in panel
     # unbound 历史不计入 bound Set，可重新出现在候选
     assert "filter(b=>b.status==='active')" in form
 
