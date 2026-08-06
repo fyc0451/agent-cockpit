@@ -854,7 +854,7 @@ let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
-let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],candidates:[],bindings:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
+let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],candidates:[],bindings:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',localIdentities:[],mode:'projects',loading:false,inboxLoading:false,mutating:false};
 let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
 let TEAM_POLL_TIMER=null, TEAM_POLL_BACKOFF=30000, TEAM_POLL_FAILURES=0;
 const TEAM_POLL_BACKOFFS=[30000,60000,120000,240000,300000];
@@ -1242,7 +1242,7 @@ async function teamConnect(){
 async function teamDisconnect(){
   teamPollStop();
   try{await api('/api/team-auth/logout',{method:'POST'})}catch(e){}
-  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],candidates:[],bindings:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
+  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],candidates:[],bindings:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',localIdentities:[],mode:'projects',loading:false,inboxLoading:false,mutating:false};
   try{sessionStorage.removeItem('cockpit-team-project')}catch(e){}
   const navBadge=document.getElementById('teamNavBadge');if(navBadge)navBadge.style.display='none';
   teamLoginHtml();
@@ -1288,6 +1288,7 @@ async function teamLoad(force=false){
     const [human,projects]=await Promise.all([teamApi('humans/me'),teamApi('projects')]);
     TEAM.human=human;TEAM.projects=projects.projects||[];
     try{const agents=await teamApi('agents');TEAM.candidates=Array.isArray(agents.agents)?agents.agents:[]}catch(e){TEAM.candidates=[]}
+    try{const local=await api('/api/team-auth/local-identities');TEAM.localIdentities=Array.isArray(local.identities)?local.identities:[]}catch(e){TEAM.localIdentities=[]}
     if(!TEAM.projects.some(p=>p.slug===TEAM.selected)){
       TEAM.selected=(TEAM.projects.find(p=>p.membership?.status==='active')||TEAM.projects[0]||{}).slug||'';
     }
@@ -1340,6 +1341,28 @@ function teamBindForm(admin){
   if(!options)return'';
   return `<div class="team-inline-form"><div class="field"><label>绑定可选 Agent</label><select id="teamBindSelect">${options}</select></div><button class="primary sm" data-action="teamBind">绑定</button></div>`;
 }
+function teamLocalIdentityRows(){
+  const claimed=new Set(TEAM.agents.map(a=>a.name));
+  const candidates=TEAM.localIdentities.filter(i=>i&&typeof i==='object'&&!claimed.has(i.name));
+  if(!candidates.length)return'<div class="empty">没有可认领的本机注册身份。本机 ~/.agent-mail/registry 中与当前 Team Hub 匹配的身份会出现在这里。</div>';
+  return candidates.map(i=>{
+    const identityId=String(i.identity_id||'');
+    if(!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}--[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.json$/.test(identityId))return'';
+    const name=String(i.name||'');
+    const meta=esc(i.program||'unknown')+(i.model?' · '+esc(i.model):'')+(i.project_slug?' · '+esc(i.project_slug):'');
+    if(i.eligible===false){
+      return `<div class="team-row"><div class="team-row-main"><b>${esc(name)}</b><small>${meta}</small></div><div class="team-row-actions"><span class="muted">该身份属于另一 Hub，需先配置 Agent Mail Hub 到当前 Team Hub 并重新注册</span></div></div>`;
+    }
+    return `<div class="team-row"><div class="team-row-main"><b>${esc(name)}</b><small>${meta}</small></div><div class="team-row-actions"><button class="sm primary" data-action="teamClaimIdentity" data-identity-id="${esc(identityId)}">认领</button></div></div>`;
+  }).join('')||'<div class="empty">没有可认领的本机注册身份。</div>';
+}
+function teamClaimIdentity(identityId){
+  const project=teamSelectedProject();
+  if(!project)return;
+  if(!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}--[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.json$/.test(identityId)){toast('身份标识无效');return}
+  if(!window.confirm('确认认领本机身份到当前群组？认领后该身份会出现在项目 Agents 中。'))return;
+  teamMutation('身份已认领',()=>api('/api/team-auth/local-identities/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({identity_id:identityId,project_slug:project.slug})}));
+}
 function teamMemberRows(){
   if(!TEAM.members.length)return'<div class="empty">暂无成员</div>';
   return TEAM.members.map(member=>{
@@ -1390,6 +1413,7 @@ function teamProjectPanel(project){
     <div class="team-section"><div class="team-section-title">我的项目身份 <span>本人可修改</span></div><div class="team-row"><div class="team-row-main"><b>${esc(TEAM.human.display_name)}</b><small>@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}</small></div><select id="teamDefaultAgent">${defaultOptions}</select><div class="team-row-actions"><button class="primary sm" data-action="teamDefault">保存默认 Agent</button></div></div></div>
     <div class="team-section"><div class="team-section-title">项目 Agents <span>owner 可停用；管理员可分配 owner</span></div>${teamAgentRows(project)}</div>
     <div class="team-section"><div class="team-section-title">Agent 绑定 <span>管理员可绑定/解绑；成员只读</span></div>${teamBindForm(bindingAdmin)}${teamBindingRows(bindingAdmin)}</div>
+    <div class="team-section"><div class="team-section-title">认领本机身份 <span>选择本机注册身份并确认后加入项目 Agents</span></div>${teamLocalIdentityRows()}</div>
     ${admin?`<div class="team-section"><div class="team-section-title">管理员 · 成员审批 <span>${TEAM.members.length} 人</span></div>${teamMemberRows()}</div>`:''}
   </div>`;
 }
@@ -3613,6 +3637,7 @@ function bindDelegation(){
     else if(action==='teamRetire')teamSetRetired(Number(it.dataset.agentId),it.dataset.retired==='1');
     else if(action==='teamBind')teamBind();
     else if(action==='teamUnbind')teamUnbind(Number(it.dataset.agentId));
+    else if(action==='teamClaimIdentity')teamClaimIdentity(it.dataset.identityId);
     else if(action==='teamMemberStatus')teamSetMemberStatus(Number(it.dataset.humanId),it.dataset.status);
     else if(action==='teamRole')teamSetRole(Number(it.dataset.humanId));
     else if(action==='teamInboxRead')teamMarkInboxRead([Number(it.dataset.inboxId)]);

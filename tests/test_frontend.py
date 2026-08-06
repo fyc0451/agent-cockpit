@@ -1382,3 +1382,47 @@ def test_team_binding_ui_never_triggers_local_side_effects():
     for part in (rows, form, bind):
         for bad in ("openTerm", "doAttachHerdr", "createPane", "worktree", "terminal("):
             assert bad not in part, f"绑定 UI 触发本地副作用: {bad}"
+
+
+# ── M3e: 本地注册身份选择与安全认领 UI ─────────────────────────
+
+def test_team_local_identity_claim_ui_functions_exist():
+    js = _inline_js()
+    assert "function teamLocalIdentityRows()" in js
+    assert "function teamClaimIdentity(identityId)" in js
+    assert "action==='teamClaimIdentity'" in js
+    assert 'data-action="teamClaimIdentity"' in js
+    assert "认领本机身份" in js
+    assert "该身份属于另一 Hub" in js
+
+
+def test_team_local_identity_claim_escapes_and_validates_identity_id():
+    js = _inline_js()
+    rows = js.split("function teamLocalIdentityRows(){", 1)[1].split("function ", 1)[0]
+    assert "esc(i.program" in rows
+    assert "esc(i.model" in rows
+    assert "esc(i.project_slug" in rows
+    assert "esc(identityId)" in rows
+    assert "i.eligible===false" in rows
+    claim = js.split("function teamClaimIdentity(identityId){", 1)[1].split("function ", 1)[0]
+    assert "teamSelectedProject()" in claim
+    assert "project_slug:project.slug" in claim
+    assert "identity_id:identityId" in claim
+
+
+def test_team_local_identity_claim_uses_current_project_and_confirm():
+    js = _inline_js()
+    claim = js.split("function teamClaimIdentity(identityId){", 1)[1].split("function ", 1)[0]
+    assert "window.confirm" in claim
+    assert "teamMutation('身份已认领'" in claim
+    assert "/api/team-auth/local-identities/claim" in claim
+    rows = js.split("function teamLocalIdentityRows(){", 1)[1].split("function ", 1)[0]
+    assert "if(i.eligible===false)" in rows
+
+
+def test_team_local_identity_claim_never_leaks_token_or_side_effects():
+    js = _inline_js()
+    claim = js.split("function teamClaimIdentity(identityId){", 1)[1].split("function ", 1)[0]
+    assert "registration_token" not in claim
+    for bad in ("openTerm", "doAttachHerdr", "createPane", "worktree", "terminal("):
+        assert bad not in claim

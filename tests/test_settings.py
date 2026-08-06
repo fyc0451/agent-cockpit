@@ -565,3 +565,256 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
         ("users", "Bearer human.jwt"),
         ("status", "Bearer human.jwt", "alice", "active"),
     ]
+
+
+# ── M3e: 本地注册身份选择与安全认领 ────────────────────────────
+
+IDENTITY_ID = "home-fyc-github-agent-cockpit/qodercn--main.json"
+
+
+def _make_registry(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import server
+
+    registry = tmp_path / "registry"
+    project_dir = registry / "home-fyc-github-agent-cockpit"
+    project_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "_REGISTRY_ROOT", registry)
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_profile",
+        lambda _authorization: {"profile": {"username": "fyc"}},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "public_team_config",
+        lambda: {"team_hub": "http://127.0.0.1:8765", "human_auth": "http://127.0.0.1:8766"},
+    )
+    client = TestClient(server.app)
+    client.cookies.set(server.TEAM_AUTH_COOKIE, "human.jwt", path="/api")
+    headers = {"authorization": "Bearer secret"}
+    return server, client, headers, project_dir
+
+
+def _write_identity(path, **overrides):
+    identity = {
+        "project_key": "/home/fyc/github/agent-cockpit",
+        "project_slug": "home-fyc-github-agent-cockpit",
+        "agent": "qodercn",
+        "instance": "main",
+        "name": "qodercn-main",
+        "registration_token": "secret-token-123",
+        "program": "qodercn",
+        "model": "unknown",
+        "hub": "http://127.0.0.1:8765",
+    }
+    identity.update(overrides)
+    path.write_text(json.dumps(identity), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def _claim(client, headers, identity_id=IDENTITY_ID, project_slug="demo"):
+    return client.post(
+        "/api/team-auth/local-identities/claim",
+        headers=headers,
+        json={"identity_id": identity_id, "project_slug": project_slug},
+    )
+
+
+def test_local_identities_lists_only_matching_safe_summaries(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+    # 其他 Hub 的身份返回 eligible=false + hub_mismatch，而不是被静默过滤
+    _write_identity(
+        project_dir / "codex--main.json",
+        name="codex-main",
+        agent="codex",
+        registration_token="other-token",
+        hub="http://10.18.160.11:8765",
+    )
+
+    response = client.get("/api/team-auth/local-identities", headers=headers)
+    assert response.status_code == 200
+    identities = response.json()["identities"]
+    assert [i["name"] for i in identities] == ["codex-main", "qodercn-main"]
+    qodercn = next(i for i in identities if i["name"] == "qodercn-main")
+    codex = next(i for i in identities if i["name"] == "codex-main")
+    assert qodercn["eligible"] is True
+    assert qodercn["identity_id"] == IDENTITY_ID
+    assert codex["eligible"] is False
+    assert codex["reason"] == "hub_mismatch"
+    body = response.text
+    assert "secret-token-123" not in body
+    assert "other-token" not in body
+    assert "registration_token" not in body
+
+
+def test_local_identities_rejects_bad_json_and_broad_permissions(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    (project_dir / "broken--main.json").write_text("{not json", encoding="utf-8")
+    os.chmod(project_dir / "broken--main.json", 0o600)
+    _write_identity(project_dir / "wide--main.json", name="wide-main")
+    os.chmod(project_dir / "wide--main.json", 0o644)
+    # 0700 也不允许（严格 0600）
+    _write_identity(project_dir / "group--main.json", name="group-main")
+    os.chmod(project_dir / "group--main.json", 0o700)
+
+    response = client.get("/api/team-auth/local-identities", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["identities"] == []
+
+
+def test_local_identities_rejects_symlink_escape_and_non_matching_files(
+    tmp_path, monkeypatch
+):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    outside = tmp_path / "outside.json"
+    _write_identity(outside, name="escape-main")
+    (project_dir / "escape--main.json").symlink_to(outside)
+    (project_dir / "not-a-registry.json").write_text("{}", encoding="utf-8")
+    (project_dir / "README.md").write_text("hello", encoding="utf-8")
+    # project_dir 本身是 symlink 也必须拒绝
+    symlink_project = tmp_path / "registry" / "home-fyc-github-agent-cockpit-2"
+    real_project = tmp_path / "real-project"
+    real_project.mkdir()
+    _write_identity(real_project / "kimi--main.json", name="kimi-main")
+    symlink_project.symlink_to(real_project, target_is_directory=True)
+
+    response = client.get("/api/team-auth/local-identities", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["identities"] == []
+
+
+def test_local_identities_requires_team_login(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+    client.cookies.clear()
+
+    response = client.get("/api/team-auth/local-identities", headers=headers)
+    assert response.status_code == 401
+
+
+def test_claim_identity_forwards_token_to_hub_and_never_leaks(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+
+    calls = []
+    monkeypatch.setattr(
+        server.hub_client,
+        "claim_agent",
+        lambda **kwargs: calls.append(kwargs) or {
+            "agent": {"name": kwargs["name"], "id": 7}
+        },
+    )
+
+    response = _claim(client, headers)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "agent": {"name": "qodercn-main", "id": 7}}
+    assert calls[0]["registration_token"] == "secret-token-123"
+    assert calls[0]["program"] == "qodercn"
+    assert calls[0]["project_slug"] == "demo"
+    assert calls[0]["authorization"] == "Bearer human.jwt"
+    assert "project_key" not in calls[0]
+    assert "secret-token-123" not in response.text
+
+
+def test_claim_identity_strips_token_from_hub_result(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+    monkeypatch.setattr(
+        server.hub_client,
+        "claim_agent",
+        lambda **kwargs: {"agent": {"name": "qodercn-main", "registration_token": "leak", "id": 1}},
+    )
+
+    response = _claim(client, headers)
+    assert response.status_code == 200
+    assert "leak" not in response.text
+    assert "registration_token" not in response.text
+    assert response.json()["agent"] == {"name": "qodercn-main", "id": 1}
+
+
+def test_claim_identity_rejects_unknown_or_forged_id(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+    monkeypatch.setattr(
+        server.hub_client,
+        "claim_agent",
+        lambda **kwargs: {"agent": {"name": kwargs["name"], "id": 7}},
+    )
+
+    for identity_id in (
+        "../qodercn-main",
+        "home-fyc-github-agent-cockpit/../x.json",
+        "..",
+        "no-such.json",
+        "home-fyc-github-agent-cockpit/no-such--main.json",
+    ):
+        response = _claim(client, headers, identity_id=identity_id)
+        assert response.status_code in (400, 404), identity_id
+    assert _claim(client, headers).status_code == 200
+
+
+def test_claim_identity_rejects_hub_mismatch_without_migration(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(
+        project_dir / "codex--main.json",
+        name="codex-main",
+        agent="codex",
+        registration_token="other-token",
+        hub="http://10.18.160.11:8765",
+    )
+    called = []
+    monkeypatch.setattr(
+        server.hub_client,
+        "claim_agent",
+        lambda **kwargs: called.append(kwargs) or {"agent": {}},
+    )
+
+    response = _claim(client, headers, identity_id="home-fyc-github-agent-cockpit/codex--main.json")
+    assert response.status_code == 409
+    assert "另一个 Hub" in response.text
+    assert called == []
+    assert "other-token" not in response.text
+
+
+def test_claim_identity_requires_valid_project_slug(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+    called = []
+    monkeypatch.setattr(
+        server.hub_client,
+        "claim_agent",
+        lambda **kwargs: called.append(kwargs) or {"agent": {"name": "x", "id": 1}},
+    )
+
+    response = _claim(client, headers, project_slug="../escape")
+    assert response.status_code == 400
+    assert called == []
+
+
+def test_claim_identity_hub_error_is_forwarded_without_token(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+    monkeypatch.setattr(
+        server.hub_client,
+        "claim_agent",
+        lambda **kwargs: (_ for _ in ()).throw(
+            server.hub_client.HumanAPIError(403, "Hub 拒绝认领")
+        ),
+    )
+
+    response = _claim(client, headers)
+    assert response.status_code == 403
+    assert "Hub 拒绝认领" in response.text
+    assert "secret-token-123" not in response.text
+
+
+def test_claim_identity_requires_team_login(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+    client.cookies.clear()
+
+    response = _claim(client, headers)
+    assert response.status_code == 401

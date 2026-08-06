@@ -1204,6 +1204,198 @@ def _raise_human_auth_error(exc: hub_client.HumanAuthError) -> None:
     raise HTTPException(exc.status_code, exc.detail) from exc
 
 
+_REGISTRY_ROOT = Path.home() / ".agent-mail" / "registry"
+_REGISTRY_DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_REGISTRY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}--[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.json$")
+_REGISTRY_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}--[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.json$"
+)
+_REGISTRY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _registry_identity_id(project_dir_name: str, filename: str) -> str:
+    return f"{project_dir_name}/{filename}"
+
+
+def _registry_scan() -> list[dict[str, Any]]:
+    """安全扫描 registry，返回每条（安全摘要 + identity_id + 完整 identity）。
+
+    内部函数：调用方自行决定暴露哪些字段。跳过权限过宽、坏 JSON、
+    symlink/越界或 owner 不匹配的文件。
+    """
+    root = _REGISTRY_ROOT
+    if not root.is_dir():
+        return []
+    try:
+        resolved_root = root.resolve()
+    except OSError:
+        return []
+    result: list[dict[str, Any]] = []
+    for project_dir in sorted(p for p in resolved_root.iterdir() if p.is_dir()):
+        if not _REGISTRY_DIR_RE.fullmatch(project_dir.name) or project_dir.is_symlink():
+            continue
+        for entry in sorted(project_dir.iterdir()):
+            if not _REGISTRY_FILE_RE.fullmatch(entry.name):
+                continue
+            identity = _read_registry_entry(entry, resolved_root)
+            if identity is None:
+                continue
+            identity["identity_id"] = _registry_identity_id(project_dir.name, entry.name)
+            result.append(identity)
+    return result
+
+
+def _registry_identities() -> list[dict[str, Any]]:
+    """安全读取 ~/.agent-mail/registry 下的身份摘要。
+
+    只返回 name/identity_id/project_slug/hub/program/model 等安全字段，绝不
+    包含 registration_token；跳过权限过宽、坏 JSON、symlink/越界或 owner
+    不匹配的文件。Hub 与当前 Team Hub 不匹配时返回 eligible=false +
+    reason=hub_mismatch，而不是静默过滤，让页面可以明确提示用户。
+    """
+    team_hub = hub_client.public_team_config()["team_hub"]
+    result: list[dict[str, Any]] = []
+    for identity in _registry_scan():
+        summary = {
+            "identity_id": identity["identity_id"],
+            "name": identity["name"],
+            "project_slug": identity.get("project_slug"),
+            "program": identity.get("program"),
+            "model": identity.get("model"),
+            "hub": identity["hub"],
+        }
+        if identity.get("hub") == team_hub:
+            summary["eligible"] = True
+        else:
+            summary["eligible"] = False
+            summary["reason"] = "hub_mismatch"
+        result.append(summary)
+    return result
+
+
+def _read_registry_entry(entry: Path, resolved_root: Path) -> dict[str, Any] | None:
+    """读取单个 registry 文件并校验安全性；返回完整 identity（含 token）。"""
+    try:
+        if entry.is_symlink():
+            return None
+        resolved = entry.resolve(strict=False)
+        resolved.relative_to(resolved_root)
+        if not resolved.is_file():
+            return None
+        stat = resolved.stat()
+        mode = stat.st_mode & 0o777
+        if mode != 0o600:
+            return None
+        if hasattr(os, "geteuid") and stat.st_uid != os.geteuid():
+            return None
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        hub = data.get("hub")
+        if not isinstance(hub, str) or not hub:
+            return None
+        norm_hub = settings.normalize_service_url(hub, "Hub")
+        name = data.get("name")
+        if not isinstance(name, str) or not _REGISTRY_NAME_RE.fullmatch(name):
+            return None
+        token = data.get("registration_token")
+        if not isinstance(token, str) or not token:
+            return None
+        data["name"] = name
+        data["hub"] = norm_hub
+        return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _registry_identity(identity_id: str) -> dict[str, Any] | None:
+    """按 identity_id（project-dir/filename 白名单）返回完整 identity。"""
+    if not _REGISTRY_ID_RE.fullmatch(identity_id):
+        return None
+    project_dir_name, filename = identity_id.split("/", 1)
+    root = _REGISTRY_ROOT
+    if not root.is_dir():
+        return None
+    try:
+        resolved_root = root.resolve()
+    except OSError:
+        return None
+    project_dir = resolved_root / project_dir_name
+    if (
+        not project_dir.is_dir()
+        or project_dir.is_symlink()
+        or not _REGISTRY_DIR_RE.fullmatch(project_dir_name)
+    ):
+        return None
+    entry = project_dir / filename
+    if not _REGISTRY_FILE_RE.fullmatch(entry.name):
+        return None
+    identity = _read_registry_entry(entry, resolved_root)
+    if identity is None:
+        return None
+    identity["identity_id"] = identity_id
+    return identity
+
+
+@app.get("/api/team-auth/local-identities")
+def api_team_local_identities(request: Request):
+    """返回本机 registry 中与当前 Team Hub 匹配的身份安全摘要。"""
+    try:
+        hub_client.human_profile(_team_human_authorization(request))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+    return {"identities": _registry_identities()}
+
+
+class LocalIdentityClaimReq(BaseModel):
+    identity_id: str = Field(..., min_length=1, max_length=256)
+    project_slug: str = Field(..., min_length=1, max_length=128)
+
+
+@app.post("/api/team-auth/local-identities/claim")
+def api_team_local_identity_claim(req: LocalIdentityClaimReq, request: Request):
+    """Cockpit 服务端读取 registration_token 调 Hub claim；前端永不接触 token。"""
+    authorization = _team_human_authorization(request)
+    try:
+        hub_client.human_profile(authorization)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", req.project_slug):
+        raise HTTPException(400, "project_slug 无效")
+    identity = _registry_identity(req.identity_id)
+    if identity is None:
+        raise HTTPException(404, "本地未找到匹配的注册身份")
+    if identity.get("hub") != hub_client.public_team_config()["team_hub"]:
+        raise HTTPException(409, "该身份属于另一个 Hub，请先把 Agent Mail Hub 配置到当前 Team Hub 并重新注册身份")
+    try:
+        result = hub_client.claim_agent(
+            authorization=authorization,
+            project_slug=req.project_slug,
+            name=identity["name"],
+            registration_token=identity["registration_token"],
+            program=identity.get("program") or identity["name"].split("--", 1)[0],
+            model=identity.get("model") or "unknown",
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    agent = result.get("agent") if isinstance(result, dict) else None
+    if not isinstance(agent, dict):
+        raise HTTPException(502, "Hub 认领返回了无效结果")
+    # 显式字段白名单：绝不回显 Hub 原始 dict（可能含 token）
+    safe_agent = {
+        key: agent[key]
+        for key in ("id", "name", "program", "model")
+        if key in agent
+    }
+    return {"ok": True, "agent": safe_agent}
+
+
 @app.get("/api/team-auth/status")
 def api_team_auth_status(request: Request):
     try:
