@@ -202,6 +202,7 @@ header .spacer{flex:1}
 .team-mode-tabs{display:none;gap:5px;align-items:center}
 .team-mode-tabs button.active{color:var(--accent);border-color:var(--accent);background:var(--bg4)}
 .team-mode-count{display:inline-flex;min-width:17px;justify-content:center;margin-left:4px;padding:0 5px;border-radius:999px;background:var(--accent);color:#fff;font-size:9px}
+.nav-badge{display:inline-flex;min-width:16px;justify-content:center;margin-left:3px;padding:0 4px;border-radius:999px;background:var(--accent);color:#fff;font-size:10px;font-weight:600}
 .team-inbox-tools{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--bd);font-size:11px;color:var(--fg2)}
 .team-inbox-tools .spacer{flex:1}
 .team-inbox-list{flex:1;min-height:0;padding:10px;display:flex;flex-direction:column;gap:8px;overflow:auto}
@@ -456,7 +457,7 @@ header .spacer{flex:1}
       <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="流视图:可滚屏/复制的 pane 输出 + 快速发指令">流</button>
       <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止">会话</button>
       <button data-view="msgs" data-i18n="nav.msgs" data-i18n-title="nav.msgs.t" title="agent 之间的消息(需安装 Agent Mail)">消息</button>
-      <button data-view="team" data-i18n="nav.team" data-i18n-title="nav.team.t" title="团队项目、成员、默认 Agent 与管理员操作">团队</button>
+      <button data-view="team" data-i18n="nav.team" data-i18n-title="nav.team.t" title="团队项目、成员、默认 Agent 与管理员操作">团队<span class="nav-badge" id="teamNavBadge" style="display:none">0</span></button>
       <button data-view="files" data-i18n="nav.files" data-i18n-title="nav.files.t" title="浏览/编辑/下载项目文件,也可以从这里建工作区">文件</button>
       <button data-view="settings" data-i18n="nav.settings" data-i18n-title="nav.settings.t" title="语言、主题、agent、目录与环境自检">设置</button>
     </nav>
@@ -855,6 +856,8 @@ let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
 let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
 let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
+let TEAM_POLL_TIMER=null, TEAM_POLL_BACKOFF=30000, TEAM_POLL_FAILURES=0;
+const TEAM_POLL_BACKOFFS=[30000,60000,120000,240000,300000];
 try{TEAM.selected=sessionStorage.getItem('cockpit-team-project')||''}catch(e){}
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
@@ -1237,9 +1240,11 @@ async function teamConnect(){
   }catch(e){TEAM.authenticated=false;TEAM.profile=null;TEAM.human=null;teamLoginHtml('连接失败：'+e)}finally{TEAM.mutating=false}
 }
 async function teamDisconnect(){
+  teamPollStop();
   try{await api('/api/team-auth/logout',{method:'POST'})}catch(e){}
   TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
   try{sessionStorage.removeItem('cockpit-team-project')}catch(e){}
+  const navBadge=document.getElementById('teamNavBadge');if(navBadge)navBadge.style.display='none';
   teamLoginHtml();
 }
 function teamIsGlobalAdmin(){return Array.isArray(TEAM.profile?.roles)&&TEAM.profile.roles.includes('admin')}
@@ -1290,7 +1295,9 @@ async function teamLoad(force=false){
     await teamLoadInbox();
     try{await teamLoadAccounts()}catch(e){TEAM.authUsers=[];toast('账号列表加载失败: '+e,5000)}
     teamRender();
-  }catch(e){TEAM.authenticated=false;TEAM.profile=null;TEAM.human=null;teamLoginHtml(sessionFound?'团队数据加载失败：'+e:'')}finally{TEAM.loading=false}
+    teamUpdateModeUi();
+    teamPollStart();
+  }catch(e){TEAM.authenticated=false;TEAM.profile=null;TEAM.human=null;teamPollStop();const navBadge=document.getElementById('teamNavBadge');if(navBadge)navBadge.style.display='none';teamLoginHtml(sessionFound?'团队数据加载失败：'+e:'')}finally{TEAM.loading=false}
 }
 function teamOwnerName(ownerId){
   if(ownerId==null)return'未归属';
@@ -1381,6 +1388,34 @@ function teamUpdateModeUi(){
   document.getElementById('teamInboxBtn').classList.toggle('active',TEAM.mode==='inbox');
   document.getElementById('teamAdminBtn').classList.toggle('active',TEAM.mode==='accounts');
   const count=document.getElementById('teamInboxCount');count.textContent=String(inboxUnread);count.style.display=inboxUnread?'inline-flex':'none';
+  const navBadge=document.getElementById('teamNavBadge');if(navBadge){navBadge.textContent=String(inboxUnread);navBadge.style.display=inboxUnread?'inline-flex':'none'}
+}
+function teamPollStart(){
+  teamPollStop();
+  TEAM_POLL_BACKOFF=TEAM_POLL_BACKOFFS[0];
+  TEAM_POLL_FAILURES=0;
+  TEAM_POLL_TIMER=setTimeout(teamPollTick,TEAM_POLL_BACKOFF);
+}
+function teamPollStop(){
+  if(TEAM_POLL_TIMER){clearTimeout(TEAM_POLL_TIMER);TEAM_POLL_TIMER=null}
+  TEAM_POLL_BACKOFF=TEAM_POLL_BACKOFFS[0];
+  TEAM_POLL_FAILURES=0;
+}
+async function teamPollTick(){
+  TEAM_POLL_TIMER=null;
+  if(!TEAM.authenticated||!TEAM.human)return;
+  if(document.visibilityState==='hidden'){TEAM_POLL_TIMER=setTimeout(teamPollTick,TEAM_POLL_BACKOFF);return}
+  try{
+    await teamLoadInbox();
+    teamUpdateModeUi();
+    if(TEAM.mode==='inbox')teamRender();
+    TEAM_POLL_FAILURES=0;
+    TEAM_POLL_BACKOFF=TEAM_POLL_BACKOFFS[0];
+  }catch(e){
+    TEAM_POLL_FAILURES++;
+    TEAM_POLL_BACKOFF=TEAM_POLL_BACKOFFS[Math.min(TEAM_POLL_FAILURES,TEAM_POLL_BACKOFFS.length-1)];
+  }
+  TEAM_POLL_TIMER=setTimeout(teamPollTick,TEAM_POLL_BACKOFF);
 }
 function teamRender(){
   document.getElementById('teamIdentity').textContent=`${TEAM.human.display_name} · Human #${TEAM.human.id}`;
@@ -3616,9 +3651,10 @@ async function init(){
   applyLang();
   loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
   document.addEventListener('visibilitychange',recoverPageState);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&TEAM.authenticated&&TEAM.human&&TEAM_POLL_TIMER){clearTimeout(TEAM_POLL_TIMER);TEAM_POLL_TIMER=null;teamPollTick()}});
   window.addEventListener('focus',recoverPageState);
   window.addEventListener('pageshow',recoverPageState);
-  window.addEventListener('pagehide',releaseAllTermZoomLeases);
+  window.addEventListener('pagehide',()=>{releaseAllTermZoomLeases();teamPollStop()});
   COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
     for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
   });

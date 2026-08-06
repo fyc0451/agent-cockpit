@@ -555,7 +555,7 @@ def test_narrow_takeover_owns_zoom_with_heartbeat_and_release_fallbacks():
     assert websocket.index("flushTermInput(id,ws)") < websocket.index("startTermZoomLease(id)")
     assert "await releaseTermZoomLease(id)" in close
     assert close.index("await releaseTermZoomLease(id)") < close.index("api('/api/term/'+id")
-    assert "window.addEventListener('pagehide',releaseAllTermZoomLeases)" in js
+    assert "window.addEventListener('pagehide',()=>{releaseAllTermZoomLeases();teamPollStop()})" in js
     assert "keepalive:true" in js
     assert "COMPACT_SCREEN_MQ.addEventListener?.('change'" in js
 
@@ -1182,3 +1182,78 @@ def test_terminal_font_size_setting():
     # 新建终端不再硬编码 13,改用本机偏好
     assert "fontSize:termFontSize()" in HTML
     assert "fontSize:13" not in HTML
+
+
+# ── M3c: 后台 Inbox 轮询 ──────────────────────────────────────
+
+def test_team_inbox_polling_uses_single_flight_and_exponential_backoff():
+    js = _inline_js()
+    assert "TEAM_POLL_TIMER=null" in js
+    assert "TEAM_POLL_BACKOFFS=[30000,60000,120000,240000,300000]" in js
+    assert "function teamPollStart()" in js
+    assert "function teamPollStop()" in js
+    assert "async function teamPollTick()" in js
+    assert "teamPollStop();" in js
+    poll = js.split("async function teamPollTick(){", 1)[1].split("function ", 1)[0]
+    assert "await teamLoadInbox()" in poll
+    assert "TEAM_POLL_FAILURES=0" in poll
+    assert "TEAM_POLL_BACKOFF=TEAM_POLL_BACKOFFS[0]" in poll
+    assert "TEAM_POLL_FAILURES++" in poll
+    assert "TEAM_POLL_BACKOFFS[Math.min(TEAM_POLL_FAILURES,TEAM_POLL_BACKOFFS.length-1)]" in poll
+
+
+def test_team_inbox_polling_starts_on_login_and_stops_on_disconnect():
+    js = _inline_js()
+    load = js.split("async function teamLoad(force=false){", 1)[1].split("function ", 1)[0]
+    assert "teamPollStart()" in load
+    disconnect = js.split("async function teamDisconnect(){", 1)[1].split("function ", 1)[0]
+    assert "teamPollStop()" in disconnect
+
+
+def test_team_inbox_polling_stops_on_load_failure():
+    js = _inline_js()
+    load = js.split("async function teamLoad(force=false){", 1)[1].split("function ", 1)[0]
+    catch = load.split("}catch(e){", 1)[1]
+    assert "teamPollStop()" in catch
+
+
+def test_team_inbox_polling_skips_hidden_and_refreshes_on_visible():
+    js = _inline_js()
+    poll = js.split("async function teamPollTick(){", 1)[1].split("function ", 1)[0]
+    assert "document.visibilityState==='hidden'" in poll
+    assert "visibilitychange" in js
+    vis_handler = js.split("visibilitychange',()=>{", 1)[1].split("}", 1)[0]
+    assert "!document.hidden" in vis_handler
+    assert "teamPollTick()" in vis_handler
+
+
+def test_team_inbox_polling_stops_on_pagehide():
+    js = _inline_js()
+    assert "pagehide',()=>{releaseAllTermZoomLeases();teamPollStop()}" in js
+
+
+def test_team_inbox_polling_does_not_toast_or_trigger_side_effects():
+    js = _inline_js()
+    poll = js.split("async function teamPollTick(){", 1)[1].split("function ", 1)[0]
+    assert "toast(" not in poll
+    assert "checkpoint" not in poll
+    assert "terminal" not in poll.lower()
+    assert "pane" not in poll.lower()
+    assert "worktree" not in poll.lower()
+    assert "teamMarkInboxRead" not in poll
+
+
+def test_team_nav_badge_element_and_css_exist():
+    assert 'id="teamNavBadge"' in HTML
+    assert ".nav-badge{" in HTML
+    assert "function teamUpdateModeUi()" in HTML
+    js = _inline_js()
+    assert "document.getElementById('teamNavBadge')" in js
+
+
+def test_team_nav_badge_cleared_on_disconnect():
+    js = _inline_js()
+    disconnect = js.split("async function teamDisconnect(){", 1)[1].split("function ", 1)[0]
+    assert "teamNavBadge" in disconnect
+    assert "display='none'" in disconnect
+
