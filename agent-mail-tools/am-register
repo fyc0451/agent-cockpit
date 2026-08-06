@@ -93,6 +93,24 @@ def main() -> None:
 
     if identity and not args.force:
         try:
+            profile = mcp_tool(hub, token, "whois", {
+                "project_key": project_key,
+                "agent_name": identity["name"],
+                "registration_token": identity["registration_token"],
+                "include_recent_commits": False,
+            })
+            if not isinstance(profile, dict):
+                raise SystemExit("whois 返回格式无效，无法确认身份状态")
+            if profile.get("retired_at"):
+                mcp_tool(hub, token, "unretire_agent", {
+                    "project_key": project_key,
+                    "agent_name": identity["name"],
+                    "registration_token": identity["registration_token"],
+                })
+                print(
+                    f"注意：已自动恢复 retired 身份 {identity['name']}",
+                    file=sys.stderr,
+                )
             probe = mcp_tool(hub, token, "fetch_inbox", {
                 "project_key": project_key,
                 "agent_name": identity["name"],
@@ -101,7 +119,7 @@ def main() -> None:
             })
         except SystemExit as exc:
             raise SystemExit(
-                "已有身份无效或已 retired；不会自动覆盖。"
+                "已有身份无效且无法自动恢复；不会覆盖本地 registry。"
                 f"如需重新注册，请显式追加 --force。\n原始错误: {exc}"
             ) from exc
         print(f"已注册（复用）: {identity['name']}  @ {project_key}")

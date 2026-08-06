@@ -342,7 +342,8 @@ def test_register_does_not_fabricate_agent_main_name():
 
     assert 'f"{args.agent}-{args.instance}"' not in source
     assert 'if args.name:' in source
-    assert "已有身份无效或已 retired；不会自动覆盖" in source
+    assert 'mcp_tool(hub, token, "whois"' in source
+    assert 'mcp_tool(hub, token, "unretire_agent"' in source
     assert "--force" in source
 
 
@@ -403,6 +404,101 @@ def test_register_atomic_write_preserves_existing_on_failure(tmp_path, monkeypat
     assert (target.stat().st_mode & 0o777) == 0o600
     # 临时文件被清理
     assert [p.name for p in tmp_path.iterdir()] == ["identity.json"]
+
+
+def test_register_reuse_restores_retired_identity(tmp_path, monkeypatch, capsys):
+    """registry 中的 token 应自动恢复 retired 身份后再复用。"""
+    module = _load_am_register()
+    module.REGISTRY_DIR = tmp_path
+    project = tmp_path / "proj"
+    project.mkdir()
+    registry_dir = tmp_path / module.slugify(str(project))
+    registry_dir.mkdir()
+    registry_file = registry_dir / "codex--default.json"
+    registry_file.write_text(json.dumps({
+        "project_key": str(project),
+        "name": "codex-main",
+        "registration_token": "registration-token",
+    }))
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_args, **_kwargs: {})
+    calls = []
+
+    def tool(_hub, _token, name, args):
+        calls.append((name, args))
+        if name == "whois":
+            return {"name": "codex-main", "retired_at": "2026-08-02T00:00:00Z"}
+        if name == "unretire_agent":
+            return {"status": "active"}
+        if name == "fetch_inbox":
+            return []
+        raise AssertionError(name)
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    monkeypatch.setattr(module.sys, "argv", [
+        "am-register", "--agent", "codex", "--project", str(project),
+    ])
+
+    module.main()
+
+    assert [name for name, _args in calls] == ["whois", "unretire_agent", "fetch_inbox"]
+    assert calls[0][1]["include_recent_commits"] is False
+    captured = capsys.readouterr()
+    assert "已自动恢复 retired 身份 codex-main" in captured.err
+    assert "已注册（复用）: codex-main" in captured.out
+
+
+def test_register_reuse_does_not_unretire_active_identity(tmp_path, monkeypatch):
+    module = _load_am_register()
+    module.REGISTRY_DIR = tmp_path
+    project = tmp_path / "proj"
+    project.mkdir()
+    registry_dir = tmp_path / module.slugify(str(project))
+    registry_dir.mkdir()
+    (registry_dir / "codex--default.json").write_text(json.dumps({
+        "project_key": str(project),
+        "name": "codex-main",
+        "registration_token": "registration-token",
+    }))
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_args, **_kwargs: {})
+    calls = []
+
+    def tool(_hub, _token, name, _args):
+        calls.append(name)
+        return {"name": "codex-main"} if name == "whois" else []
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    monkeypatch.setattr(module.sys, "argv", [
+        "am-register", "--agent", "codex", "--project", str(project),
+    ])
+
+    module.main()
+
+    assert calls == ["whois", "fetch_inbox"]
+
+
+def test_register_reuse_rejects_malformed_whois(tmp_path, monkeypatch):
+    module = _load_am_register()
+    module.REGISTRY_DIR = tmp_path
+    project = tmp_path / "proj"
+    project.mkdir()
+    registry_dir = tmp_path / module.slugify(str(project))
+    registry_dir.mkdir()
+    (registry_dir / "codex--default.json").write_text(json.dumps({
+        "project_key": str(project),
+        "name": "codex-main",
+        "registration_token": "registration-token",
+    }))
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(module, "mcp_tool", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(module.sys, "argv", [
+        "am-register", "--agent", "codex", "--project", str(project),
+    ])
+
+    with pytest.raises(SystemExit, match="无法自动恢复"):
+        module.main()
 
 
 def test_register_force_skips_reuse_without_deleting_old(tmp_path, monkeypatch):
