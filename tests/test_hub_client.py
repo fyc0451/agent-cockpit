@@ -139,6 +139,8 @@ def test_reload_config_updates_live_hub_and_resets_initialization(monkeypatch):
         ("http://localhost:8765", True),
         ("https://team.example:9765", False),
         ("http://10.0.0.8:8765", False),
+        ("http://192.168.1.8:8765", False),
+        ("http://[fd00::8]:8765", False),
     ],
 )
 def test_only_loopback_hub_can_trigger_local_actions(monkeypatch, hub, allowed):

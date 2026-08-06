@@ -23,7 +23,7 @@ operating-system user that runs it. It is intended for one trusted operator, not
 a multi-user authorization system.
 
 - Keep the default `127.0.0.1` bind unless remote access is required.
-- A non-loopback bind requires `COCKPIT_TOKEN`.
+- A non-loopback bind requires `COCKPIT_TOKEN`, including private/LAN addresses.
 - Use HTTPS or Tailscale Serve for remote access. Plain HTTP exposes the login
   session cookie to anyone able to observe local network traffic.
 - Do not expose the service directly to the public Internet.

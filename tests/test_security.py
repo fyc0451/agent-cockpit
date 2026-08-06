@@ -43,13 +43,19 @@ def test_api_requires_auth_when_token_configured(monkeypatch):
     assert response.status_code == 401
 
 
-def test_no_token_allows_loopback_and_rejects_remote_client(monkeypatch):
+def test_no_token_allows_loopback_and_rejects_lan_or_remote_client(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
 
     local = TestClient(server.app, client=("127.0.0.1", 50000))
-    remote = TestClient(server.app, client=("192.0.2.10", 50000))
     assert local.get("/api/files/roots").status_code == 200
-    assert remote.get("/api/files/roots").status_code == 403
+    for host in ("10.18.160.11", "172.16.0.8", "192.168.1.8", "192.0.2.10"):
+        client = TestClient(server.app, client=(host, 50000))
+        response = client.get("/api/files/roots")
+        assert response.status_code == 403
+        assert "COCKPIT_TOKEN" in response.json()["detail"]
+        login = client.post("/api/auth/login", json={"token": ""})
+        assert login.status_code == 403
+        assert "COCKPIT_TOKEN" in login.json()["detail"]
 
 
 def test_no_token_loopback_write_rejects_cross_origin(monkeypatch):
@@ -165,8 +171,9 @@ def test_websocket_marks_replaced_terminal_as_taken_over(monkeypatch):
 
 def test_non_loopback_bind_requires_token(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
-    with pytest.raises(RuntimeError):
-        server._validate_bind("0.0.0.0")
+    for host in ("0.0.0.0", "10.18.160.11", "172.16.0.8", "192.168.1.8"):
+        with pytest.raises(RuntimeError, match="COCKPIT_TOKEN"):
+            server._validate_bind(host)
 
     server._validate_bind("127.0.0.1")
 

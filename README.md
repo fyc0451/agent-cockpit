@@ -84,7 +84,8 @@ python -m venv .venv
 
 要从局域网/VPN 的其他设备访问:复制 `.env.example` 为 `.env`,设
 `COCKPIT_HOST=0.0.0.0` 和一个随机的 `COCKPIT_TOKEN`。没有 token 时服务端拒绝
-绑定非回环地址。
+绑定非回环地址；`10.x`、`172.16–31.x`、`192.168.x` 等私网地址也不会被当作
+免认证的“本机”。
 
 > **安全警告:** 远程访问请用 HTTPS 或 Tailscale Serve。裸 HTTP 会让登录
 > cookie 暴露给同网段的任何人。不要把 Agent Cockpit 直接暴露到公网。

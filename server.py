@@ -120,6 +120,9 @@ MAIL_COORDINATION_GUIDE = (
     "收到消息后按 mail-recv 输出先 claim、处理完成再单条 complete/ack；"
     "普通打断保存 checkpoint 后恢复原任务，停止/转向不恢复。"
 )
+LOCAL_ONLY_AUTH_DETAIL = (
+    "未设置 COCKPIT_TOKEN 时仅允许本机回环访问；局域网访问请配置 COCKPIT_TOKEN"
+)
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -177,7 +180,7 @@ def _same_origin(origin: str | None, host: str | None) -> bool:
 
 def _validate_bind(host: str) -> None:
     if not _is_loopback(host) and not COCKPIT_TOKEN:
-        raise RuntimeError("非本机监听必须设置 COCKPIT_TOKEN")
+        raise RuntimeError("非回环监听（含局域网 IP）必须设置 COCKPIT_TOKEN")
     if not _is_loopback(host):
         logger.warning(
             "非回环监听必须使用 HTTPS 或 Tailscale Serve；"
@@ -327,7 +330,7 @@ async def protect_api(request: Request, call_next):
         return await call_next(request)
     if not _request_authenticated(request):
         status = 401 if COCKPIT_TOKEN else 403
-        detail = "未认证" if COCKPIT_TOKEN else "未设置 COCKPIT_TOKEN 时仅允许本机访问"
+        detail = "未认证" if COCKPIT_TOKEN else LOCAL_ONLY_AUTH_DETAIL
         return JSONResponse(
             {"detail": detail}, status_code=status,
             headers={"WWW-Authenticate": "Bearer"} if status == 401 else None,
@@ -495,7 +498,7 @@ def api_auth_status(request: Request):
 def api_auth_login(req: LoginReq, request: Request):
     if not COCKPIT_TOKEN:
         if not _is_loopback(request.client.host if request.client else None):
-            raise HTTPException(403, "未设置 COCKPIT_TOKEN 时仅允许本机访问")
+            raise HTTPException(403, LOCAL_ONLY_AUTH_DETAIL)
         return {"ok": True, "required": False}
     if not hmac.compare_digest(req.token, COCKPIT_TOKEN):
         raise HTTPException(401, "令牌错误")
