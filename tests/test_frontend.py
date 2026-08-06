@@ -1399,7 +1399,8 @@ def test_team_local_identity_claim_ui_functions_exist():
     assert "action==='teamClaimIdentity'" in js
     assert 'data-action="teamClaimIdentity"' in js
     assert "认领本机身份" in js
-    assert "该身份属于另一 Hub" in js
+    assert "当前没有已连接 Team Hub 的本机 Agent" in js
+    assert "其他 Hub 或历史身份" in js
 
 
 def test_team_local_identity_claim_escapes_and_validates_identity_id():
@@ -1409,7 +1410,8 @@ def test_team_local_identity_claim_escapes_and_validates_identity_id():
     assert "esc(i.model" in rows
     assert "esc(i.project_slug" in rows
     assert "esc(identityId)" in rows
-    assert "i.eligible===false" in rows
+    assert "unclaimed.filter(i=>i.eligible!==false)" in rows
+    assert "unclaimed.length-candidates.length" in rows
     claim = js.split("function teamClaimIdentity(identityId){", 1)[1].split("function ", 1)[0]
     assert "teamSelectedProject()" in claim
     assert "project_slug:project.slug" in claim
@@ -1423,7 +1425,8 @@ def test_team_local_identity_claim_uses_current_project_and_confirm():
     assert "teamMutation('身份已认领'" in claim
     assert "/api/team-auth/local-identities/claim" in claim
     rows = js.split("function teamLocalIdentityRows(){", 1)[1].split("function ", 1)[0]
-    assert "if(i.eligible===false)" in rows
+    assert "已隐藏 ${hidden} 个" in rows
+    assert "该身份属于另一 Hub" not in rows
 
 
 def test_team_local_identity_claim_never_leaks_token_or_side_effects():
@@ -1456,14 +1459,18 @@ def test_team_identity_empty_state_offers_partner_cta():
     assert "team-hero" in HTML
     assert "下一步:设置你的搭档 Agent" in js
     assert "data-action=\"teamScrollClaim\"" in js
+    assert "data-action=\"teamGotoSettings\"" in js
     assert "data-action=\"teamGotoTerm\"" in js
     assert 'id="teamClaimSection"' in js
     assert "identityBlock" in js
+    assert ".filter(i=>i&&i.eligible!==false).length" in js
+    assert ".filter(i=>i&&i.eligible===false).length" in js
 
 
 def test_team_partner_cta_actions_registered():
     js = _inline_js()
     assert "action==='teamScrollClaim'" in js
+    assert "action==='teamGotoSettings'" in js
     assert "action==='teamGotoTerm'" in js
     assert "scrollIntoView" in js
 
