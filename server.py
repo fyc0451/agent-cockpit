@@ -1298,10 +1298,16 @@ def _read_registry_entry(entry: Path, resolved_root: Path) -> dict[str, Any] | N
         name = data.get("name")
         if not isinstance(name, str) or not _REGISTRY_NAME_RE.fullmatch(name):
             return None
+        project_slug = data.get("project_slug")
+        if not isinstance(project_slug, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", project_slug
+        ):
+            return None
         token = data.get("registration_token")
         if not isinstance(token, str) or not token:
             return None
         data["name"] = name
+        data["project_slug"] = project_slug
         data["hub"] = norm_hub
         return data
     except (OSError, ValueError, json.JSONDecodeError):
@@ -1375,15 +1381,15 @@ def api_team_local_identity_claim(req: LocalIdentityClaimReq, request: Request):
         result = hub_client.claim_agent(
             authorization=authorization,
             project_slug=req.project_slug,
-            name=identity["name"],
+            source_project_slug=identity["project_slug"],
+            agent_name=identity["name"],
             registration_token=identity["registration_token"],
-            program=identity.get("program") or identity["name"].split("--", 1)[0],
-            model=identity.get("model") or "unknown",
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except hub_client.HumanAPIError as exc:
-        raise HTTPException(exc.status_code, exc.detail) from exc
+        # 固定安全映射：上游 detail 可能意外包含 token，绝不原样回显。
+        raise HTTPException(exc.status_code, "Hub 认领失败，请稍后重试或检查 Hub 配置") from exc
     agent = result.get("agent") if isinstance(result, dict) else None
     if not isinstance(agent, dict):
         raise HTTPException(502, "Hub 认领返回了无效结果")

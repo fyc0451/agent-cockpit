@@ -704,7 +704,7 @@ def test_claim_identity_forwards_token_to_hub_and_never_leaks(tmp_path, monkeypa
         server.hub_client,
         "claim_agent",
         lambda **kwargs: calls.append(kwargs) or {
-            "agent": {"name": kwargs["name"], "id": 7}
+            "agent": {"name": kwargs["agent_name"], "id": 7}
         },
     )
 
@@ -712,11 +712,31 @@ def test_claim_identity_forwards_token_to_hub_and_never_leaks(tmp_path, monkeypa
     assert response.status_code == 200
     assert response.json() == {"ok": True, "agent": {"name": "qodercn-main", "id": 7}}
     assert calls[0]["registration_token"] == "secret-token-123"
-    assert calls[0]["program"] == "qodercn"
+    assert calls[0]["agent_name"] == "qodercn-main"
     assert calls[0]["project_slug"] == "demo"
+    assert calls[0]["source_project_slug"] == "home-fyc-github-agent-cockpit"
     assert calls[0]["authorization"] == "Bearer human.jwt"
+    assert "program" not in calls[0]
     assert "project_key" not in calls[0]
     assert "secret-token-123" not in response.text
+
+
+def test_claim_identity_rejects_identity_with_invalid_project_slug(
+    tmp_path, monkeypatch
+):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json", project_slug="bad slug!x")
+    called = []
+    monkeypatch.setattr(
+        server.hub_client,
+        "claim_agent",
+        lambda **kwargs: called.append(kwargs) or {"agent": {"name": "x", "id": 1}},
+    )
+
+    response = _claim(client, headers)
+    assert response.status_code == 404
+    assert called == []
+    assert "bad slug" not in response.text
 
 
 def test_claim_identity_strips_token_from_hub_result(tmp_path, monkeypatch):
@@ -741,7 +761,7 @@ def test_claim_identity_rejects_unknown_or_forged_id(tmp_path, monkeypatch):
     monkeypatch.setattr(
         server.hub_client,
         "claim_agent",
-        lambda **kwargs: {"agent": {"name": kwargs["name"], "id": 7}},
+        lambda **kwargs: {"agent": {"name": kwargs["agent_name"], "id": 7}},
     )
 
     for identity_id in (
@@ -794,7 +814,7 @@ def test_claim_identity_requires_valid_project_slug(tmp_path, monkeypatch):
     assert called == []
 
 
-def test_claim_identity_hub_error_is_forwarded_without_token(tmp_path, monkeypatch):
+def test_claim_identity_hub_error_uses_fixed_mapping_without_token(tmp_path, monkeypatch):
     server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
     _write_identity(project_dir / "qodercn--main.json")
     monkeypatch.setattr(
@@ -807,8 +827,30 @@ def test_claim_identity_hub_error_is_forwarded_without_token(tmp_path, monkeypat
 
     response = _claim(client, headers)
     assert response.status_code == 403
-    assert "Hub 拒绝认领" in response.text
+    assert "Hub 拒绝认领" not in response.text
+    assert "Hub 认领失败" in response.text
     assert "secret-token-123" not in response.text
+
+
+def test_claim_identity_hub_detail_with_token_never_leaks(tmp_path, monkeypatch):
+    server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
+    _write_identity(project_dir / "qodercn--main.json")
+    # 故意让上游 detail 包含 registration_token，断言 Cockpit 响应绝不回显
+    monkeypatch.setattr(
+        server.hub_client,
+        "claim_agent",
+        lambda **kwargs: (_ for _ in ()).throw(
+            server.hub_client.HumanAPIError(
+                500, f"上游异常 presented token secret-token-123"
+            )
+        ),
+    )
+
+    response = _claim(client, headers)
+    assert response.status_code == 500
+    assert "secret-token-123" not in response.text
+    assert "上游异常" not in response.text
+    assert "Hub 认领失败" in response.text
 
 
 def test_claim_identity_requires_team_login(tmp_path, monkeypatch):

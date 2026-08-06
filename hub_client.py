@@ -223,15 +223,15 @@ def claim_agent(
     *,
     authorization: str,
     project_slug: str,
-    name: str,
+    source_project_slug: str,
+    agent_name: str,
     registration_token: str,
-    program: str,
-    model: str,
 ) -> dict[str, Any]:
     """用本地注册身份的 registration_token 向 Team Hub 认领 Agent。
 
     转发当前 Human JWT（authorization）；token 只随本次请求转发，不落盘；
-    Cockpit 前端永不接触 token。目标项目用安全 project_slug 标识，
+    Cockpit 前端永不接触 token。目标项目用安全 project_slug（URL 路径），
+    source_project_slug 标识身份所属项目（registry project_slug），
     不发送本机 project_key 路径。
     """
     if (
@@ -240,13 +240,17 @@ def claim_agent(
         or len(authorization) > 8192
     ):
         raise ValueError("需要有效的 Hub Human JWT")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", project_slug):
-        raise ValueError("project_slug 无效")
+    for label, value in (
+        ("project_slug", project_slug),
+        ("source_project_slug", source_project_slug),
+    ):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+            raise ValueError(f"{label} 无效")
     if not isinstance(registration_token, str) or not registration_token:
         raise ValueError("registration_token 无效")
     if len(registration_token) > 4096:
         raise ValueError("registration_token 无效")
-    if not isinstance(name, str) or not 1 <= len(name) <= 128:
+    if not isinstance(agent_name, str) or not 1 <= len(agent_name) <= 128:
         raise ValueError("身份名无效")
     headers = {
         **_headers,
@@ -258,11 +262,9 @@ def claim_agent(
             response = client.post(
                 f"{base_url}/hub/api/projects/{quote(project_slug, safe='')}/agent-claims",
                 json={
-                    "project_slug": project_slug,
-                    "name": name,
+                    "source_project_slug": source_project_slug,
+                    "agent_name": agent_name,
                     "registration_token": registration_token,
-                    "program": program,
-                    "model": model,
                 },
                 headers=headers,
             )
