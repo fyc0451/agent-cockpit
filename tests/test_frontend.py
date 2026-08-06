@@ -1001,9 +1001,12 @@ def test_team_view_covers_project_membership_and_agent_management():
 
 def test_team_human_jwt_is_tab_scoped_and_hub_text_is_escaped():
     js = _inline_js()
+    assert "api('/api/team-auth/login'" in js
+    assert "JSON.stringify({username,password})" in js
     assert "sessionStorage.setItem('cockpit-human-jwt',token)" in js
     assert "sessionStorage.removeItem('cockpit-human-jwt')" in js
     assert "localStorage.setItem('cockpit-human-jwt'" not in js
+    assert "sessionStorage.setItem('cockpit-human-password'" not in js
     assert "'X-Agent-Hub-Authorization':'Bearer '+TEAM.token" in js
     assert "${esc(project.slug)}" in js
     assert "${esc(agent.name)}" in js

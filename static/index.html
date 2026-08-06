@@ -1137,11 +1137,11 @@ function teamLoginHtml(error=''){
   document.getElementById('teamModeTabs').style.display='none';
   document.getElementById('teamContent').innerHTML=`<div class="team-login">
     <h2>连接团队 Human 身份</h2>
-    <p class="team-login-note">使用共享 Hub 签发的 Human JWT。JWT 只保存在当前浏览器标签页的 sessionStorage，关闭标签页即清除，不写入 Cockpit 配置或磁盘。</p>
+    <p class="team-login-note">使用团队 Human 账号登录。登录凭据只转发给独立身份服务；访问令牌只保存在当前浏览器标签页，关闭标签页即清除。</p>
     ${error?`<div class="team-status warn" style="margin-top:10px">${esc(error)}</div>`:''}
     <div class="team-login-grid">
-      <div class="field"><label>显示名称</label><input id="teamDisplayName" autocomplete="name" placeholder="例如 FYC"></div>
-      <div class="field"><label>Human JWT</label><input id="teamJwt" type="password" autocomplete="off" placeholder="Bearer token（无需输入 Bearer 前缀）"></div>
+      <div class="field"><label>账号</label><input id="teamUsername" autocomplete="username" placeholder="例如 fyc"></div>
+      <div class="field"><label>密码</label><input id="teamPassword" type="password" autocomplete="current-password"></div>
     </div>
     <button class="primary" data-action="teamConnect">连接并注册身份</button>
     <p class="team-safety" style="margin-top:12px">安全边界：团队项目、成员、Agent 状态只用于展示与 Hub 元数据更新；不会启动 pane、shell、worktree 或本地任务。</p>
@@ -1149,12 +1149,15 @@ function teamLoginHtml(error=''){
 }
 async function teamConnect(){
   if(TEAM.mutating)return;
-  const token=document.getElementById('teamJwt')?.value.trim()||'';
-  const displayName=document.getElementById('teamDisplayName')?.value.trim()||'';
-  if(!token||!displayName){toast('请填写显示名称和 Human JWT');return}
+  const username=document.getElementById('teamUsername')?.value.trim()||'';
+  const password=document.getElementById('teamPassword')?.value||'';
+  if(!username||!password){toast('请填写账号和密码');return}
   TEAM.mutating=true;
-  TEAM.token=token;
   try{
+    const login=await api('/api/team-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+    const token=String(login.access_token||''),displayName=String(login.profile?.display_name||'').trim();
+    if(!token||!displayName)throw new Error('身份服务返回无效响应');
+    TEAM.token=token;
     TEAM.human=await teamApi('humans/me','PUT',{display_name:displayName});
     try{sessionStorage.setItem('cockpit-human-jwt',token)}catch(e){}
     await teamLoad(true);

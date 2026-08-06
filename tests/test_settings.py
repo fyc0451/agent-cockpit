@@ -322,3 +322,29 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         "/api/team/projects",
         headers={"authorization": "Bearer secret"},
     ).status_code == 401
+
+
+def test_team_auth_login_only_proxies_credentials_to_independent_issuer(monkeypatch):
+    from fastapi.testclient import TestClient
+    import server
+
+    calls = []
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_login",
+        lambda username, password: calls.append((username, password)) or {
+            "access_token": "human.jwt",
+            "token_type": "Bearer",
+            "profile": {"username": username, "display_name": "付彦超"},
+        },
+    )
+    client = TestClient(server.app)
+    response = client.post(
+        "/api/team-auth/login",
+        headers={"authorization": "Bearer secret"},
+        json={"username": "fyc", "password": "local-secret"},
+    )
+    assert response.status_code == 200
+    assert response.json()["access_token"] == "human.jwt"
+    assert calls == [("fyc", "local-secret")]

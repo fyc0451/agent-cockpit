@@ -347,6 +347,11 @@ class SendMessageReq(BaseModel):
     hard: bool = False
 
 
+class HumanLoginReq(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
 class AckReq(BaseModel):
     project_id: int
     agent_name: str
@@ -1089,6 +1094,17 @@ async def api_team_proxy(route: str, request: Request):
     except ValueError as exc:
         raise HTTPException(401, str(exc)) from exc
     except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+
+@app.post("/api/team-auth/login")
+def api_team_auth_login(req: HumanLoginReq):
+    """窄代理独立 issuer；Cockpit 不持有签名密钥或用户密码。"""
+    try:
+        return hub_client.human_login(req.username, req.password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
 
 

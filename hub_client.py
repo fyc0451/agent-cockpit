@@ -23,6 +23,7 @@ sys.path.insert(
 from am_common import load_client_config, save_client_hub as save_client_hub  # noqa: E402
 
 HUB, TOKEN = load_client_config()
+HUMAN_AUTH_URL = os.environ.get("HUMAN_AUTH_URL", "http://127.0.0.1:8766").rstrip("/")
 _headers = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
@@ -37,6 +38,24 @@ class HumanAPIError(RuntimeError):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+
+
+class HumanAuthError(RuntimeError):
+    """独立 Human issuer 返回的安全错误。"""
+
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def status() -> dict[str, Any]:
@@ -169,6 +188,53 @@ def human_api(
         )
     if not isinstance(data, (dict, list)):
         raise HumanAPIError(502, "Hub 返回了无效的 JSON")
+    return data
+
+
+def human_login(username: str, password: str) -> dict[str, Any]:
+    """向独立 issuer 登录；凭据只随本次请求转发，不保存。"""
+    if not 1 <= len(username) <= 64 or not 1 <= len(password) <= 256:
+        raise ValueError("用户名或密码长度无效")
+    parsed = urlsplit(HUMAN_AUTH_URL)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or (parsed.scheme == "http" and not _is_loopback_host(parsed.hostname))
+    ):
+        raise ValueError("Human issuer 地址必须是本机 HTTP 或 HTTPS")
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.post(
+                f"{HUMAN_AUTH_URL}/token",
+                json={"username": username, "password": password},
+            )
+    except httpx.HTTPError as exc:
+        raise HumanAuthError(502, f"Human issuer 请求失败: {exc}") from exc
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if response.is_error:
+        detail = data.get("detail") if isinstance(data, dict) else None
+        raise HumanAuthError(
+            response.status_code,
+            str(detail or f"Human issuer 返回 HTTP {response.status_code}"),
+        )
+    token = data.get("access_token") if isinstance(data, dict) else None
+    profile = data.get("profile") if isinstance(data, dict) else None
+    if (
+        not isinstance(token, str)
+        or not token
+        or len(token) > 8192
+        or not isinstance(profile, dict)
+        or not isinstance(profile.get("display_name"), str)
+        or not profile["display_name"].strip()
+    ):
+        raise HumanAuthError(502, "Human issuer 返回了无效响应")
     return data
 
 

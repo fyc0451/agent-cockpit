@@ -275,3 +275,51 @@ def test_human_api_rejects_missing_jwt_and_non_human_path(monkeypatch):
         hub_client.human_api("GET", "/hub/api/projects", "")
     with pytest.raises(ValueError, match="路径无效"):
         hub_client.human_api("GET", "/mcp/", "Bearer human.jwt")
+
+
+def test_human_login_uses_loopback_issuer_and_validates_response(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+
+        @staticmethod
+        def json():
+            return {
+                "access_token": "human.jwt",
+                "profile": {"username": "fyc", "display_name": "付彦超"},
+            }
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(("timeout", kwargs["timeout"]))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url, json):
+            calls.append((url, json))
+            return Response()
+
+    monkeypatch.setattr(hub_client, "HUMAN_AUTH_URL", "http://127.0.0.1:8766")
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+    result = hub_client.human_login("fyc", "local-secret")
+    assert result["access_token"] == "human.jwt"
+    assert calls == [
+        ("timeout", 10),
+        ("http://127.0.0.1:8766/token", {"username": "fyc", "password": "local-secret"}),
+    ]
+
+
+def test_human_login_rejects_cleartext_remote_issuer(monkeypatch):
+    monkeypatch.setattr(hub_client, "HUMAN_AUTH_URL", "http://team.example:8766")
+    monkeypatch.setattr(
+        hub_client.httpx,
+        "Client",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+    with pytest.raises(ValueError, match="本机 HTTP 或 HTTPS"):
+        hub_client.human_login("fyc", "local-secret")
