@@ -356,6 +356,10 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         headers=headers,
         json=support_payload,
     ).status_code == 200
+    assert client.get(
+        "/api/team/projects/demo/chat/messages",
+        headers=headers,
+    ).status_code == 200
     assert calls == [
         ("GET", "/hub/api/projects", "Bearer human.jwt", None),
         (
@@ -376,6 +380,12 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
             "/hub/api/projects/demo/support-requests",
             "Bearer human.jwt",
             support_payload,
+        ),
+        (
+            "GET",
+            "/hub/api/projects/demo/chat/messages",
+            "Bearer human.jwt",
+            None,
         ),
     ]
 

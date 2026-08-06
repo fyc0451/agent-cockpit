@@ -72,6 +72,7 @@ TEAM_API_ROUTES = (
     (re.compile(r"^projects$"), {"GET", "POST"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/join-requests$"), {"POST"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/membership$"), {"GET", "PATCH"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/chat/messages$"), {"GET"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/support-requests$"), {"POST"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/members$"), {"GET"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/members/[0-9]+$"), {"PATCH"}),

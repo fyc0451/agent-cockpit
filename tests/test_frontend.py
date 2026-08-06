@@ -1057,6 +1057,22 @@ def test_terminal_collab_supports_real_team_messages_with_context():
     assert "真实投递，不启动对方终端" in js
 
 
+def test_team_chat_shares_support_history_and_can_reply():
+    js = _inline_js()
+    assert 'id="teamChatBtn"' in HTML
+    assert "async function teamLoadChat(throwOnError=false)" in js
+    assert "function teamChatPanel()" in js
+    assert "async function teamChatSend()" in js
+    assert "async function teamShowChat()" in js
+    assert "/chat/messages`" in js
+    assert "{subject:'群聊消息',body_md,importance:'normal'}" in js
+    assert "TEAM.mode==='chat'" in js
+    assert "item.sender_human_id" in js
+    assert "${esc(item.sender_name||'unknown')}" in js
+    assert "${esc(item.body_md||'')}" in js
+    assert "所有 active 成员都能查看历史" in js
+
+
 def test_team_human_jwt_uses_http_only_cookie_and_hub_text_is_escaped():
     js = _inline_js()
     assert "api('/api/team-auth/login'" in js
