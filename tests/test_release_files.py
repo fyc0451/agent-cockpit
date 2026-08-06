@@ -83,6 +83,8 @@ def test_agent_mail_launchd_keeps_token_out_of_plist():
 
     assert 'HTTP_BEARER_TOKEN="$(load_token)"' in launcher
     assert 'sqlite+aiosqlite:///$REPO_DIR/storage.sqlite3' in launcher
+    assert '${XDG_STATE_HOME:-$HOME/.local/state}/mcp-agent-mail/mailbox' in launcher
+    assert '$REPO_DIR/mailbox' not in launcher
     assert "HTTP_BEARER_TOKEN" not in plist
     assert "token=" not in plist
     assert "__INSTALL_DIR__/agent-mail-launchd.sh" in plist

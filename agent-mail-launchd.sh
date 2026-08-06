@@ -54,7 +54,7 @@ run_server() {
   export HTTP_PORT=8765
   export HTTP_BEARER_TOKEN="$(load_token)"
   export DATABASE_URL="sqlite+aiosqlite:///$REPO_DIR/storage.sqlite3"
-  export STORAGE_ROOT="${MCP_AGENT_MAIL_STORAGE_ROOT:-$REPO_DIR/mailbox}"
+  export STORAGE_ROOT="${MCP_AGENT_MAIL_STORAGE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/mcp-agent-mail/mailbox}"
   cd "$REPO_DIR"
   exec "$REPO_DIR/.venv/bin/python" -m mcp_agent_mail.cli serve-http
 }
