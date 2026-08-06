@@ -1319,11 +1319,12 @@ def test_team_load_does_not_call_duplicate_team_update_mode_ui():
 
 # ── M3d: Team Agent 选择/绑定/解绑 UI ─────────────────────────
 
-def test_team_state_has_candidates_and_bindings():
-    assert "candidates:[],bindings:[]," in HTML
+def test_team_state_uses_local_identities_not_global_agent_directory():
+    assert "candidates:[]" not in HTML
     js = _inline_js()
-    assert "teamApi('agents')" in js
-    assert "TEAM.candidates=Array.isArray(agents.agents)?agents.agents:[]" in js
+    assert "teamApi('agents')" not in js
+    assert "TEAM.candidates" not in js
+    assert "api('/api/team-auth/local-identities')" in js
     assert "TEAM.bindings=Array.isArray(result[2])?result[2]:(result[2]?.bindings||[])" in js
     assert "teamApi(`projects/${slug}/agent-bindings`)" in js
 
@@ -1331,16 +1332,14 @@ def test_team_state_has_candidates_and_bindings():
 def test_team_binding_ui_functions_and_actions_exist():
     js = _inline_js()
     assert "function teamBindingRows(admin)" in js
-    assert "function teamBindForm(admin)" in js
-    assert "function teamBind()" in js
     assert "function teamUnbind(agentId)" in js
-    assert "action==='teamBind'" in js
     assert "action==='teamUnbind'" in js
-    assert 'data-action="teamBind"' in js
     assert 'data-action="teamUnbind"' in js
     assert "agent-bindings" in js
-    assert 'id="teamBindSelect"' in js
-    assert "管理员可绑定/解绑；成员只读" in js
+    assert "function teamBindForm(admin)" not in js
+    assert "action==='teamBind'" not in js
+    assert 'id="teamBindSelect"' not in js
+    assert "新增 Agent 统一从本机身份认领" in js
 
 
 def test_team_binding_ui_admin_only_controls():
@@ -1348,13 +1347,10 @@ def test_team_binding_ui_admin_only_controls():
     rows = js.split("function teamBindingRows(admin){", 1)[1].split("function ", 1)[0]
     assert "const active=binding.status==='active'" in rows
     assert "const unbind=active&&admin&&Number.isInteger(agentId)&&agentId>0" in rows
-    form = js.split("function teamBindForm(admin){", 1)[1].split("function ", 1)[0]
-    assert "if(!admin)return''" in form
     panel = js.split("function teamProjectPanel(project){", 1)[1].split("function teamInboxPanel", 1)[0]
     assert "const bindingAdmin=admin||teamIsGlobalAdmin()" in panel
-    assert "teamBindForm(bindingAdmin)}${teamBindingRows(bindingAdmin)" in panel
-    # unbound 历史不计入 bound Set，可重新出现在候选
-    assert "filter(b=>b.status==='active')" in form
+    assert "teamBindingRows(bindingAdmin)" in panel
+    assert panel.index('id="teamClaimSection"') < panel.index("绑定记录")
 
 
 def test_team_agent_rows_permissions_for_bound_external():
@@ -1374,22 +1370,12 @@ def test_team_binding_ui_escapes_hub_text_and_force_numeric_ids():
     assert "esc(agent.model||binding.model)" in rows
     assert "Number(binding.agent_id)" in rows
     assert "TEAM.agents.find(a=>Number(a.id)===agentId)" in rows
-    form = js.split("function teamBindForm(admin){", 1)[1].split("function ", 1)[0]
-    assert "esc(a.name)" in form
-    assert "esc(a.project_slug)" in form
-    assert "esc(a.program)" in form
-    assert "Number.isInteger(id)&&id>0" in form
-    bind = js.split("function teamBind(){", 1)[1].split("function ", 1)[0]
-    assert "const agentId=Number(value)" in bind
-    assert "Number.isInteger(agentId)||agentId<=0" in bind
+    assert "TEAM.candidates" not in js
 
 
 def test_team_binding_mutations_use_team_mutation_serialization():
     js = _inline_js()
-    bind = js.split("function teamBind(){", 1)[1].split("function teamUnbind", 1)[0]
     unbind = js.split("function teamUnbind(agentId){", 1)[1].split("function ", 1)[0]
-    assert "teamMutation('Agent 已绑定'" in bind
-    assert "teamApi(`projects/${encodeURIComponent(project.slug)}/agent-bindings`,'POST',{agent_id:agentId})" in bind
     assert "teamMutation('Agent 已解绑'" in unbind
     assert "agent-bindings/${Number(agentId)}`,'DELETE'" in unbind
     assert "window.confirm('确认解绑这个 Agent？" in unbind
@@ -1397,10 +1383,9 @@ def test_team_binding_mutations_use_team_mutation_serialization():
 
 def test_team_binding_ui_never_triggers_local_side_effects():
     js = _inline_js()
-    rows = js.split("function teamBindingRows(admin){", 1)[1].split("function teamBindForm", 1)[0]
-    form = js.split("function teamBindForm(admin){", 1)[1].split("function teamMemberRows", 1)[0]
-    bind = js.split("function teamBind(){", 1)[1].split("function teamUnbind", 1)[0]
-    for part in (rows, form, bind):
+    rows = js.split("function teamBindingRows(admin){", 1)[1].split("function teamLocalIdentityRows", 1)[0]
+    unbind = js.split("function teamUnbind(agentId){", 1)[1].split("function ", 1)[0]
+    for part in (rows, unbind):
         for bad in ("openTerm", "doAttachHerdr", "createPane", "worktree", "terminal("):
             assert bad not in part, f"绑定 UI 触发本地副作用: {bad}"
 
