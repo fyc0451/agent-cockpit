@@ -46,13 +46,20 @@ _lock = threading.Lock()
 _cache: dict[str, Any] | None = None
 _cache_mtime: float = -1.0
 
+_PRIVATE_HTTP_V4 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+_PRIVATE_HTTP_V6 = ipaddress.ip_network("fc00::/7")
+
 
 def _deepcopy_defaults() -> dict[str, Any]:
     return json.loads(json.dumps(DEFAULTS))
 
 
 def normalize_service_url(value: Any, label: str, *, allow_empty: bool = False) -> str:
-    """规范化服务端点；远端明文 HTTP 会暴露账号和 JWT，因此只允许 HTTPS。"""
+    """规范化服务端点；HTTP 仅允许本机或显式的 RFC1918/ULA 私网地址。"""
     if not isinstance(value, str):
         raise ValueError(f"{label} 地址必须是字符串")
     endpoint = value.strip().rstrip("/")
@@ -69,9 +76,15 @@ def normalize_service_url(value: Any, label: str, *, allow_empty: bool = False) 
         raise ValueError(f"{label} 地址无效: {exc}") from exc
     host = parsed.hostname or ""
     try:
-        loopback = ipaddress.ip_address(host).is_loopback
+        address = ipaddress.ip_address(host)
+        private_http = address.is_loopback or (
+            address.version == 4
+            and any(address in network for network in _PRIVATE_HTTP_V4)
+        ) or (
+            address.version == 6 and address in _PRIVATE_HTTP_V6
+        )
     except ValueError:
-        loopback = host.lower() == "localhost"
+        private_http = host.lower() == "localhost"
     if (
         parsed.scheme not in {"http", "https"}
         or not host
@@ -80,9 +93,9 @@ def normalize_service_url(value: Any, label: str, *, allow_empty: bool = False) 
         or parsed.query
         or parsed.fragment
         or (port is not None and not 1 <= port <= 65535)
-        or (parsed.scheme == "http" and not loopback)
+        or (parsed.scheme == "http" and not private_http)
     ):
-        raise ValueError(f"{label} 地址必须是本机 HTTP 或 HTTPS")
+        raise ValueError(f"{label} 地址必须是本机/私网 HTTP 或 HTTPS")
     return endpoint
 
 

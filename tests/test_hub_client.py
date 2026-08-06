@@ -328,8 +328,8 @@ def test_human_api_rejects_missing_jwt_and_non_human_path(monkeypatch):
         hub_client.human_api("GET", "/mcp/", "Bearer human.jwt")
 
 
-def test_human_api_rejects_plain_http_remote_team_hub(monkeypatch):
-    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "http://10.18.160.11:8765")
+def test_human_api_rejects_plain_http_public_team_hub(monkeypatch):
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "http://8.8.8.8:8765")
     monkeypatch.setattr(
         hub_client.httpx,
         "Client",
@@ -338,8 +338,43 @@ def test_human_api_rejects_plain_http_remote_team_hub(monkeypatch):
         ),
     )
 
-    with pytest.raises(ValueError, match="本机 HTTP 或 HTTPS"):
+    with pytest.raises(ValueError, match="本机/私网 HTTP 或 HTTPS"):
         hub_client.human_api("GET", "/hub/api/projects", "Bearer human.jwt")
+
+
+def test_human_api_allows_plain_http_private_team_hub(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+
+        @staticmethod
+        def json():
+            return []
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(("timeout", kwargs["timeout"]))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, method, url, json, headers):
+            calls.append((method, url, json, headers))
+            return Response()
+
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "http://10.18.160.11:8765")
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+
+    assert hub_client.human_api(
+        "GET", "/hub/api/projects", "Bearer human.jwt",
+    ) == []
+    assert calls[1][0:3] == (
+        "GET", "http://10.18.160.11:8765/hub/api/projects", None,
+    )
 
 
 def test_human_login_uses_loopback_issuer_and_validates_response(monkeypatch):
@@ -386,7 +421,7 @@ def test_human_login_rejects_cleartext_remote_issuer(monkeypatch):
         "Client",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not connect")),
     )
-    with pytest.raises(ValueError, match="本机 HTTP 或 HTTPS"):
+    with pytest.raises(ValueError, match="本机/私网 HTTP 或 HTTPS"):
         hub_client.human_login("fyc", "local-secret")
 
 

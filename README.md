@@ -182,7 +182,7 @@ set -a; source .env; set +a
 - **每目录默认 agent**:「添加 Agent」表单填工作目录时自动预选对应 agent。
 - **启用的 agent**:启动菜单只列勾选的类型。
 - **团队 Hub 连接**:直接填写 Team Hub API 与 Human issuer，保存后持久化并立即生效；
-  不需要修改 `.env`。SSH 本地转发可用回环 HTTP，远端直连必须使用 HTTPS。
+  不需要修改 `.env`。公司 RFC1918 私网地址可直接使用 HTTP，公网地址必须使用 HTTPS。
 - **运行参数**:上传上限、最大终端数、空闲终端回收时间、终端写超时。
 - **环境自检**:herdr / 各 agent 可执行文件 / Agent Mail 的就绪状态,❌ 即未安装。
 

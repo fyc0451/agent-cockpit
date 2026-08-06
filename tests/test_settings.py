@@ -74,14 +74,16 @@ def test_update_clamps_numbers():
 
 def test_update_validates_team_service_urls():
     out = settings.update({
-        "team_hub_url": " http://127.0.0.1:9765/ ",
-        "human_auth_url": "https://team.example/human-auth/",
+        "team_hub_url": " http://10.18.160.11:8765/ ",
+        "human_auth_url": "http://10.18.160.11:8766/",
     })
-    assert out["team_hub_url"] == "http://127.0.0.1:9765"
-    assert out["human_auth_url"] == "https://team.example/human-auth"
+    assert out["team_hub_url"] == "http://10.18.160.11:8765"
+    assert out["human_auth_url"] == "http://10.18.160.11:8766"
 
-    with pytest.raises(ValueError, match="本机 HTTP 或 HTTPS"):
+    with pytest.raises(ValueError, match="本机/私网 HTTP 或 HTTPS"):
         settings.update({"team_hub_url": "http://team.example:8765"})
+    with pytest.raises(ValueError, match="本机/私网 HTTP 或 HTTPS"):
+        settings.update({"team_hub_url": "http://8.8.8.8:8765"})
     with pytest.raises(ValueError, match="不能为空"):
         settings.normalize_service_url("", "Team Hub")
 

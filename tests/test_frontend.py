@@ -1118,6 +1118,9 @@ def test_settings_js_functions_exist():
     assert "HUMAN_AUTH_CONFIG_EDIT=HUB_CONFIG.human_auth||''" in HTML
     assert "team_hub:TEAM_HUB_CONFIG_EDIT.trim()" in HTML
     assert "human_auth:HUMAN_AUTH_CONFIG_EDIT.trim()" in HTML
+    assert 'placeholder="http://10.18.160.11:8765"' in HTML
+    assert 'placeholder="http://10.18.160.11:8766"' in HTML
+    assert "公司私网 IP 可使用 HTTP" in HTML
     assert "TEAM_HUB_URL 和 HUMAN_AUTH_URL 配置" not in HTML
 
 
