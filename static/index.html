@@ -1314,7 +1314,7 @@ function teamAgentRows(project){
   const globalAdmin=teamIsGlobalAdmin();
   if(!TEAM.agents.length)return'<div class="empty">当前群组还没有绑定远程 Agent。本机工作区中的 Agent 不会自动同步到群组。</div>';
   return TEAM.agents.map(agent=>{
-    const canRetire=globalAdmin||agent.owner_id===TEAM.human?.id;
+    const canRetire=globalAdmin||agent.owner_id===TEAM.human?.id||(admin&&!agent.bound_external);
     const canAssignOwner=agent.bound_external?globalAdmin:admin;
     const badge=agent.retired?'<span class="team-badge retired">retired</span>':'<span class="team-badge active">active</span>';
     const ownerControl=canAssignOwner?`<select id="teamOwner-${Number(agent.id)}">${teamOwnerOptions(agent.owner_id)}</select><button class="sm" data-action="teamOwner" data-agent-id="${Number(agent.id)}">保存归属</button>`:`<span class="muted">${esc(teamOwnerName(agent.owner_id))}</span>`;
@@ -1323,17 +1323,20 @@ function teamAgentRows(project){
   }).join('');
 }
 function teamBindingRows(admin){
-  if(!TEAM.bindings.length)return'<div class="empty">尚未绑定远程 Agent。管理员可从此群组可选 Agent 中选择绑定。</div>';
-  return TEAM.bindings.map(binding=>{
+  const rows=TEAM.bindings.map(binding=>{
     const agentId=Number(binding.agent_id);
-    const unbind=admin&&Number.isInteger(agentId)&&agentId>0?`<button class="sm danger" data-action="teamUnbind" data-agent-id="${agentId}">解绑</button>`:'';
-    return `<div class="team-row"><div class="team-row-main"><b>${esc(binding.agent_name||('Agent #'+agentId))}</b><small>${esc(binding.program||'unknown')}${binding.model?' · '+esc(binding.model):''}</small></div><div class="team-row-actions">${unbind}</div></div>`;
+    const active=binding.status==='active';
+    const agent=TEAM.agents.find(a=>Number(a.id)===agentId)||{};
+    const unbind=active&&admin&&Number.isInteger(agentId)&&agentId>0?`<button class="sm danger" data-action="teamUnbind" data-agent-id="${agentId}">解绑</button>`:'';
+    const badge=active?'<span class="team-badge active">active</span>':'<span class="team-badge retired">unbound</span>';
+    return `<div class="team-row"><div class="team-row-main"><b>${esc(binding.agent_name||agent.name||('Agent #'+agentId))} ${badge}</b><small>${esc(agent.program||binding.program||'unknown')}${agent.model||binding.model?' · '+esc(agent.model||binding.model):''}</small></div><div class="team-row-actions">${unbind}</div></div>`;
   }).join('');
+  return rows||'<div class="empty">尚未绑定远程 Agent。管理员可从此群组可选 Agent 中选择绑定。</div>';
 }
 function teamBindForm(admin){
-  if(!admin)return'';
-  const bound=new Set(TEAM.bindings.map(b=>Number(b.agent_id)));
-  const options=TEAM.candidates.filter(a=>{const id=Number(a.id);return Number.isInteger(id)&&id>0&&!bound.has(id)}).map(a=>`<option value="${Number(a.id)}">${esc(a.name)}${a.program?' · '+esc(a.program):''}</option>`).join('');
+  if(!admin&&!teamIsGlobalAdmin())return'';
+  const bound=new Set(TEAM.bindings.filter(b=>b.status==='active').map(b=>Number(b.agent_id)));
+  const options=TEAM.candidates.filter(a=>{const id=Number(a.id);return Number.isInteger(id)&&id>0&&!bound.has(id)}).map(a=>`<option value="${Number(a.id)}">${esc(a.name)}${a.project_slug?' · '+esc(a.project_slug):''}${a.program?' · '+esc(a.program):''}</option>`).join('');
   if(!options)return'';
   return `<div class="team-inline-form"><div class="field"><label>绑定可选 Agent</label><select id="teamBindSelect">${options}</select></div><button class="primary sm" data-action="teamBind">绑定</button></div>`;
 }

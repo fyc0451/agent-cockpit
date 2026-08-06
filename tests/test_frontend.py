@@ -1325,16 +1325,19 @@ def test_team_binding_ui_functions_and_actions_exist():
 def test_team_binding_ui_admin_only_controls():
     js = _inline_js()
     rows = js.split("function teamBindingRows(admin){", 1)[1].split("function ", 1)[0]
-    assert "const unbind=admin&&Number.isInteger(agentId)&&agentId>0" in rows
+    assert "const active=binding.status==='active'" in rows
+    assert "const unbind=active&&admin&&Number.isInteger(agentId)&&agentId>0" in rows
     form = js.split("function teamBindForm(admin){", 1)[1].split("function ", 1)[0]
-    assert "if(!admin)return''" in form
+    assert "if(!admin&&!teamIsGlobalAdmin())return''" in form
+    # unbound 历史不计入 bound Set，可重新出现在候选
+    assert "filter(b=>b.status==='active')" in form
 
 
 def test_team_agent_rows_permissions_for_bound_external():
     js = _inline_js()
     rows = js.split("function teamAgentRows(project){", 1)[1].split("function teamBindingRows", 1)[0]
     assert "const globalAdmin=teamIsGlobalAdmin()" in rows
-    assert "const canRetire=globalAdmin||agent.owner_id===TEAM.human?.id" in rows
+    assert "const canRetire=globalAdmin||agent.owner_id===TEAM.human?.id||(admin&&!agent.bound_external)" in rows
     assert "const canAssignOwner=agent.bound_external?globalAdmin:admin" in rows
     assert "agent.bound_external?' · 外部绑定':''" in rows
 
@@ -1342,12 +1345,14 @@ def test_team_agent_rows_permissions_for_bound_external():
 def test_team_binding_ui_escapes_hub_text_and_force_numeric_ids():
     js = _inline_js()
     rows = js.split("function teamBindingRows(admin){", 1)[1].split("function ", 1)[0]
-    assert "esc(binding.agent_name" in rows
-    assert "esc(binding.program" in rows
-    assert "esc(binding.model" in rows
+    assert "esc(binding.agent_name||agent.name||('Agent #'+agentId))" in rows
+    assert "esc(agent.program||binding.program||'unknown')" in rows
+    assert "esc(agent.model||binding.model)" in rows
     assert "Number(binding.agent_id)" in rows
+    assert "TEAM.agents.find(a=>Number(a.id)===agentId)" in rows
     form = js.split("function teamBindForm(admin){", 1)[1].split("function ", 1)[0]
     assert "esc(a.name)" in form
+    assert "esc(a.project_slug)" in form
     assert "esc(a.program)" in form
     assert "Number.isInteger(id)&&id>0" in form
     bind = js.split("function teamBind(){", 1)[1].split("function ", 1)[0]
