@@ -531,7 +531,8 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server.terminal,
         "create_term",
-        lambda cwd, **_: created.append(cwd) or {"id": "term1"},
+        lambda cwd, **kwargs: created.append((cwd, kwargs.get("command")))
+        or {"id": "term1"},
     )
     monkeypatch.setattr(
         server.terminal,
@@ -552,12 +553,10 @@ def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):
     assert body["session_started"] is True
     assert body["started"] == ["codex"]
     assert body["failed"] == []
-    assert created == [str(tmp_path)]
-    assert writes[0] == (
-        "term1",
-        f"{server.herdr_client.HERDR_BIN} --session demo\r",
-    )
-    assert writes[-1] == ("term1", "\x02d")
+    assert created == [(
+        str(tmp_path), [server.herdr_client.HERDR_BIN, "--session", "demo"],
+    )]
+    assert writes == [("term1", "\x02d")]
 
 
 def test_setup_workspace_bootstraps_safe_width_before_horizontal_splits(
@@ -583,8 +582,8 @@ def test_setup_workspace_bootstraps_safe_width_before_horizontal_splits(
     monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"panes": []})
     created = []
 
-    def create_term(cwd, cols=80, rows=24):
-        created.append((cwd, cols, rows))
+    def create_term(cwd, cols=80, rows=24, command=None):
+        created.append((cwd, cols, rows, command))
         return {"id": "term1"}
 
     monkeypatch.setattr(server.terminal, "create_term", create_term)
@@ -606,7 +605,10 @@ def test_setup_workspace_bootstraps_safe_width_before_horizontal_splits(
 
     assert response.json()["ok"] is True
     # 启动阶段还有一个 Herdr 初始 shell pane，因此为 4 个 pane 各留 100 列。
-    assert created == [(str(tmp_path), 400, 30)]
+    assert created == [(
+        str(tmp_path), 400, 30,
+        [server.herdr_client.HERDR_BIN, "--session", "demo"],
+    )]
 
 
 def test_workspace_bootstrap_dimensions_cover_all_layouts_and_caps():

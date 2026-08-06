@@ -119,13 +119,24 @@ def create_term(
     cols: int = 80,
     rows: int = 24,
     label: str | None = None,
+    command: list[str] | None = None,
 ) -> dict[str, Any]:
     """创建一个新终端会话。返回 {id, pid, label}。
 
-    尺寸非法抛 ValueError;活跃终端达上限抛 RuntimeError。
+    command 仅供服务端内部直接启动需要 PTY 的程序，避免自动化依赖用户 shell
+    初始化提示；普通 Web 终端仍启动登录 shell。尺寸非法抛 ValueError；活跃终端
+    达上限抛 RuntimeError。
     """
     cols, rows = _valid_dims(cols, rows)
     label = _valid_label(label)
+    if command is not None:
+        if (
+            not isinstance(command, list) or not command
+            or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command)
+            or not os.path.isabs(command[0])
+        ):
+            raise ValueError("PTY command 必须是非空参数列表，且可执行文件使用绝对路径")
+        command = list(command)
     workdir = cwd or HOME
     max_terms = int(_term_cfg("max_terms", MAX_TERMS))
     # 顺路回收空闲/已死终端,再检查上限
@@ -137,13 +148,14 @@ def create_term(
     with _fork_lock:
         pid, master_fd = pty.fork()
         if pid == 0:
-            # ── 子进程:exec bash ──
+            # ── 子进程:exec 登录 shell 或服务端指定的交互程序 ──
             try:
                 os.chdir(workdir)
             except OSError:
                 os.chdir(HOME)
             os.environ["TERM"] = "xterm-256color"
-            os.execv(SHELL, [SHELL, "-l"])
+            argv = command or [SHELL, "-l"]
+            os.execv(argv[0], argv)
             os._exit(127)  # execv 失败才到这
         try:
             os.set_inheritable(master_fd, False)

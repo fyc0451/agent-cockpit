@@ -2818,14 +2818,11 @@ def _setup_workspace(req: SetupWorkspaceReq):
             )
             t = terminal.create_term(
                 req.workdir, cols=bootstrap_cols, rows=bootstrap_rows,
+                command=[herdr_client.HERDR_BIN, "--session", req.session],
             )
             drain_stop, drain_thread = _start_pty_drainer(t["id"], pty_output)
-            time.sleep(0.5)
-            # 在 PTY 里跑 herdr --session <name>(创建 + detach)
-            terminal.write_term(
-                t["id"],
-                f"{shlex.quote(herdr_client.HERDR_BIN)} --session {shlex.quote(req.session)}\r",
-            )
+            # 直接在 PTY 中 exec Herdr，不能先开用户登录 shell 再输入命令：
+            # oh-my-zsh 更新询问等启动提示会吞掉命令开头，造成确定性失败。
             deadline = time.monotonic() + SESSION_START_TIMEOUT
             while time.monotonic() < deadline:
                 current_sessions = herdr_client.list_sessions()
@@ -2863,7 +2860,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 }
             # detach:发 Ctrl-b d(herdr detach 序列),让 client 脱离但 session server 继续跑
             terminal.write_term(t["id"], "\x02d")  # Ctrl-b + d
-            time.sleep(0.5)  # 等 detach 完成,session server 稳定
+            time.sleep(0.5)  # 等 Herdr client 退出,session server 稳定
             _stop_pty_drainer(drain_stop, drain_thread)
             # 记录 TUI 建 session 自带的初始 shell pane,agent 启动后清理
             base_pane_ids = [
@@ -2871,8 +2868,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 for p in herdr_client.snapshot().get("panes", [])
                 if p.get("session") == req.session and p.get("pane_id")
             ]
-            # 注意:不 kill PTY!herdr client detach 后 PTY 回到 shell,
-            # session server 是独立进程会继续跑。kill PTY 可能连带杀 server。
+            # 不主动 kill PTY；detach 后 Herdr client 会自行退出，死 PTY 由 sweep 回收。
         except Exception as e:
             _stop_pty_drainer(drain_stop, drain_thread)
             if t is not None and not session_started:

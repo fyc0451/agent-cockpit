@@ -106,6 +106,24 @@ def test_create_stores_safe_display_label():
             terminal.create_term(label=label)
 
 
+def test_create_can_exec_direct_pty_command_without_login_shell():
+    code = "import os; print('direct-pty-ok'); print(os.getcwd())"
+    term_id = terminal.create_term(
+        cwd="/tmp", command=[sys.executable, "-c", code],
+    )["id"]
+
+    output = _wait_dead(term_id)
+
+    assert b"direct-pty-ok" in output
+    assert b"/tmp" in output
+
+
+def test_create_rejects_unsafe_direct_pty_command():
+    for command in ([], ["relative"], ["/bin/echo", ""], ["/bin/echo", "bad\0arg"]):
+        with pytest.raises(ValueError, match="PTY command"):
+            terminal.create_term(command=command)
+
+
 def test_replace_labeled_term_removes_all_previous_instances():
     first = terminal.create_term(label="demo")["id"]
     second = terminal.create_term(label="demo")["id"]
