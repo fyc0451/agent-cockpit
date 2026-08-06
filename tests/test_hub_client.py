@@ -354,3 +354,63 @@ def test_human_login_rejects_cleartext_remote_issuer(monkeypatch):
     )
     with pytest.raises(ValueError, match="本机 HTTP 或 HTTPS"):
         hub_client.human_login("fyc", "local-secret")
+
+
+def test_human_account_lifecycle_calls_fixed_remote_issuer_routes(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(("timeout", kwargs["timeout"]))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, method, url, json, headers):
+            calls.append((method, url, json, headers))
+            if url.endswith("/register"):
+                return Response({"account": {"username": "alice", "status": "pending"}})
+            if url.endswith("/admin/invitations"):
+                return Response({"invite_code": "one-time", "expires_at": 123})
+            return Response({"users": []})
+
+    monkeypatch.setattr(hub_client, "HUMAN_AUTH_URL", "https://team.example/human-auth")
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+    registered = hub_client.human_register(
+        "alice", "Alice", "alice-password-123", "one-time"
+    )
+    invitation = hub_client.human_create_invitation("Bearer human.jwt", 3600)
+    users = hub_client.human_list_users("Bearer human.jwt")
+
+    assert registered["account"]["status"] == "pending"
+    assert invitation["invite_code"] == "one-time"
+    assert users == {"users": []}
+    assert calls[1] == (
+        "POST",
+        "https://team.example/human-auth/register",
+        {
+            "username": "alice",
+            "display_name": "Alice",
+            "password": "alice-password-123",
+            "invite_code": "one-time",
+        },
+        {"Accept": "application/json"},
+    )
+    assert calls[3][0:3] == (
+        "POST",
+        "https://team.example/human-auth/admin/invitations",
+        {"expires_in": 3600},
+    )
+    assert calls[3][3]["Authorization"] == "Bearer human.jwt"

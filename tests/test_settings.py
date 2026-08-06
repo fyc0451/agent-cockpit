@@ -266,11 +266,14 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
             (method, path, authorization, payload)
         ) or {"ok": True},
     )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_profile",
+        lambda authorization: {"profile": {"username": "fyc"}},
+    )
     client = TestClient(server.app)
-    headers = {
-        "authorization": "Bearer secret",
-        "x-agent-hub-authorization": "Bearer human.jwt",
-    }
+    client.cookies.set(server.TEAM_AUTH_COOKIE, "human.jwt", path="/api")
+    headers = {"authorization": "Bearer secret"}
 
     response = client.get("/api/team/projects", headers=headers)
     assert response.status_code == 200
@@ -318,10 +321,8 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         headers=headers,
         json={},
     ).status_code == 404
-    assert client.get(
-        "/api/team/projects",
-        headers={"authorization": "Bearer secret"},
-    ).status_code == 401
+    client.cookies.clear()
+    assert client.get("/api/team/projects", headers=headers).status_code == 401
 
 
 def test_team_auth_login_only_proxies_credentials_to_independent_issuer(monkeypatch):
@@ -336,7 +337,13 @@ def test_team_auth_login_only_proxies_credentials_to_independent_issuer(monkeypa
         lambda username, password: calls.append((username, password)) or {
             "access_token": "human.jwt",
             "token_type": "Bearer",
-            "profile": {"username": username, "display_name": "付彦超"},
+            "expires_in": 3600,
+            "profile": {
+                "username": username,
+                "display_name": "付彦超",
+                "roles": ["writer", "admin"],
+                "status": "active",
+            },
         },
     )
     client = TestClient(server.app)
@@ -346,5 +353,116 @@ def test_team_auth_login_only_proxies_credentials_to_independent_issuer(monkeypa
         json={"username": "fyc", "password": "local-secret"},
     )
     assert response.status_code == 200
-    assert response.json()["access_token"] == "human.jwt"
+    assert response.json()["authenticated"] is True
+    assert "access_token" not in response.json()
+    assert "cockpit_team_human_session=human.jwt" in response.headers["set-cookie"]
+    assert "HttpOnly" in response.headers["set-cookie"]
     assert calls == [("fyc", "local-secret")]
+
+
+def test_team_proxy_rechecks_disabled_human_session(monkeypatch):
+    from fastapi.testclient import TestClient
+    import server
+
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_profile",
+        lambda _authorization: (_ for _ in ()).throw(
+            server.hub_client.HumanAuthError(401, "Authentication required")
+        ),
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_api",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled account must not reach Hub")
+        ),
+    )
+    client = TestClient(server.app)
+    client.cookies.set(server.TEAM_AUTH_COOKIE, "disabled.jwt", path="/api")
+    response = client.get(
+        "/api/team/projects",
+        headers={"authorization": "Bearer secret"},
+    )
+    assert response.status_code == 401
+
+
+def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypatch):
+    from fastapi.testclient import TestClient
+    import server
+
+    calls = []
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_register",
+        lambda username, display_name, password, invite_code: calls.append(
+            ("register", username, display_name, password, invite_code)
+        ) or {"account": {"username": username, "status": "pending"}},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_profile",
+        lambda authorization: calls.append(("profile", authorization)) or {
+            "profile": {"username": "fyc", "roles": ["writer", "admin"]}
+        },
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_create_invitation",
+        lambda authorization, expires_in: calls.append(
+            ("invite", authorization, expires_in)
+        ) or {"invite_code": "one-time-code", "expires_at": 123},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_list_users",
+        lambda authorization: calls.append(("users", authorization)) or {"users": []},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_set_user_status",
+        lambda authorization, username, status: calls.append(
+            ("status", authorization, username, status)
+        ) or {"user": {"username": username, "status": status}},
+    )
+    client = TestClient(server.app)
+    headers = {"authorization": "Bearer secret"}
+
+    registered = client.post(
+        "/api/team-auth/register",
+        headers=headers,
+        json={
+            "username": "alice",
+            "display_name": "Alice",
+            "password": "alice-password-123",
+            "invite_code": "one-time-code",
+        },
+    )
+    assert registered.status_code == 201
+    assert client.get("/api/team-auth/status", headers=headers).status_code == 401
+
+    client.cookies.set(server.TEAM_AUTH_COOKIE, "human.jwt", path="/api")
+    assert client.get("/api/team-auth/status", headers=headers).status_code == 200
+    assert client.post(
+        "/api/team-auth/invitations",
+        headers=headers,
+        json={"expires_in": 3600},
+    ).status_code == 201
+    assert client.get("/api/team-auth/users", headers=headers).status_code == 200
+    assert client.patch(
+        "/api/team-auth/users/alice",
+        headers=headers,
+        json={"status": "active"},
+    ).status_code == 200
+    logged_out = client.post("/api/team-auth/logout", headers=headers)
+    assert logged_out.status_code == 200
+    assert "cockpit_team_human_session=" in logged_out.headers["set-cookie"]
+    assert calls == [
+        ("register", "alice", "Alice", "alice-password-123", "one-time-code"),
+        ("profile", "Bearer human.jwt"),
+        ("invite", "Bearer human.jwt", 3600),
+        ("users", "Bearer human.jwt"),
+        ("status", "Bearer human.jwt", "alice", "active"),
+    ]

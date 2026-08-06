@@ -508,6 +508,7 @@ header .spacer{flex:1}
       <div class="team-mode-tabs" id="teamModeTabs">
         <button class="sm active" id="teamProjectsBtn" onclick="teamShowProjects()">项目</button>
         <button class="sm" id="teamInboxBtn" onclick="teamShowInbox()">人工收件箱<span class="team-mode-count" id="teamInboxCount" style="display:none">0</span></button>
+        <button class="sm" id="teamAdminBtn" onclick="teamShowAccounts()" style="display:none">账号管理</button>
       </div>
       <span class="spacer"></span>
       <button class="sm" id="teamLogoutBtn" onclick="teamDisconnect()" style="display:none">退出 Human 身份</button>
@@ -830,8 +831,8 @@ let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_CLOSE_TIMER=null, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
-let TEAM={token:'',human:null,projects:[],selected:'',membership:null,agents:[],members:[],inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
-try{TEAM.token=sessionStorage.getItem('cockpit-human-jwt')||'';TEAM.selected=sessionStorage.getItem('cockpit-team-project')||''}catch(e){}
+let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
+try{TEAM.selected=sessionStorage.getItem('cockpit-team-project')||''}catch(e){}
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1118,12 +1119,12 @@ function pasteServiceClipboard(input){
 
 // ============ 团队 Hub（远端数据不进入 Herdr/任务/本地执行链） ============
 function teamHeaders(json=false){
-  const headers={'X-Agent-Hub-Authorization':'Bearer '+TEAM.token};
+  const headers={};
   if(json)headers['Content-Type']='application/json';
   return headers;
 }
 function teamApi(path,method='GET',body=null){
-  const options={method,headers:teamHeaders(method!=='GET')};
+  const options={method,headers:teamHeaders(method!=='GET'),credentials:'include'};
   if(method!=='GET')options.body=JSON.stringify(body||{});
   return api('/api/team/'+path,options);
 }
@@ -1131,21 +1132,48 @@ function teamHandleSeed(){
   const raw=(TEAM.human?.display_name||'human').toLowerCase().replace(/[^a-z0-9._-]+/g,'-').replace(/^-+|-+$/g,'');
   return raw||'human';
 }
-function teamLoginHtml(error=''){
+function teamLoginHtml(error='',notice=''){
   document.getElementById('teamIdentity').textContent='未连接 Human 身份';
   document.getElementById('teamLogoutBtn').style.display='none';
   document.getElementById('teamModeTabs').style.display='none';
+  document.getElementById('teamAdminBtn').style.display='none';
   document.getElementById('teamContent').innerHTML=`<div class="team-login">
     <h2>连接团队 Human 身份</h2>
-    <p class="team-login-note">使用团队 Human 账号登录。登录凭据只转发给独立身份服务；访问令牌只保存在当前浏览器标签页，关闭标签页即清除。</p>
+    <p class="team-login-note">使用远程 Hub 的 Human 账号登录。密码只转发给独立身份服务；登录令牌保存在 HttpOnly Cookie 中，页面脚本无法读取。</p>
+    ${notice?`<div class="team-status" style="margin-top:10px">${esc(notice)}</div>`:''}
     ${error?`<div class="team-status warn" style="margin-top:10px">${esc(error)}</div>`:''}
     <div class="team-login-grid">
       <div class="field"><label>账号</label><input id="teamUsername" autocomplete="username" placeholder="例如 fyc"></div>
       <div class="field"><label>密码</label><input id="teamPassword" type="password" autocomplete="current-password"></div>
     </div>
-    <button class="primary" data-action="teamConnect">连接并注册身份</button>
+    <button class="primary" data-action="teamConnect">登录</button>
+    <details class="team-create" style="margin-top:14px"><summary>没有账号？使用邀请码注册</summary>
+      <div class="field"><label>账号</label><input id="teamRegisterUsername" autocomplete="username" maxlength="64"></div>
+      <div class="field"><label>显示名</label><input id="teamRegisterDisplayName" autocomplete="name" maxlength="128"></div>
+      <div class="field"><label>邀请码</label><input id="teamRegisterInvite" autocomplete="off" maxlength="256"></div>
+      <div class="field"><label>密码（至少 12 字节）</label><input id="teamRegisterPassword" type="password" autocomplete="new-password" maxlength="256"></div>
+      <div class="field"><label>确认密码</label><input id="teamRegisterConfirm" type="password" autocomplete="new-password" maxlength="256"></div>
+      <button class="primary sm" data-action="teamRegister">提交注册申请</button>
+    </details>
     <p class="team-safety" style="margin-top:12px">安全边界：团队项目、成员、Agent 状态只用于展示与 Hub 元数据更新；不会启动 pane、shell、worktree 或本地任务。</p>
   </div>`;
+}
+async function teamRegister(){
+  if(TEAM.mutating)return;
+  const username=document.getElementById('teamRegisterUsername')?.value.trim()||'';
+  const display_name=document.getElementById('teamRegisterDisplayName')?.value.trim()||'';
+  const invite_code=document.getElementById('teamRegisterInvite')?.value.trim()||'';
+  const password=document.getElementById('teamRegisterPassword')?.value||'';
+  const confirm=document.getElementById('teamRegisterConfirm')?.value||'';
+  const passwordBytes=new TextEncoder().encode(password).length;
+  if(!username||!display_name||!invite_code||!password){toast('请完整填写注册信息');return}
+  if(password!==confirm){toast('两次输入的密码不一致');return}
+  if(passwordBytes<12||passwordBytes>256){toast('密码必须是 12–256 个 UTF-8 字节');return}
+  TEAM.mutating=true;
+  try{
+    await api('/api/team-auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,display_name,password,invite_code})});
+    teamLoginHtml('',`账号 ${username} 已提交，等待管理员审批后即可登录。`);
+  }catch(e){teamLoginHtml('注册失败：'+e)}finally{TEAM.mutating=false}
 }
 async function teamConnect(){
   if(TEAM.mutating)return;
@@ -1155,20 +1183,21 @@ async function teamConnect(){
   TEAM.mutating=true;
   try{
     const login=await api('/api/team-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
-    const token=String(login.access_token||''),displayName=String(login.profile?.display_name||'').trim();
-    if(!token||!displayName)throw new Error('身份服务返回无效响应');
-    TEAM.token=token;
+    const displayName=String(login.profile?.display_name||'').trim();
+    if(!login.authenticated||!displayName)throw new Error('身份服务返回无效响应');
+    TEAM.authenticated=true;TEAM.profile=login.profile;
     TEAM.human=await teamApi('humans/me','PUT',{display_name:displayName});
-    try{sessionStorage.setItem('cockpit-human-jwt',token)}catch(e){}
     await teamLoad(true);
     toast('Human 身份已连接');
-  }catch(e){TEAM.token='';TEAM.human=null;try{sessionStorage.removeItem('cockpit-human-jwt')}catch(_){};teamLoginHtml('连接失败：'+e)}finally{TEAM.mutating=false}
+  }catch(e){TEAM.authenticated=false;TEAM.profile=null;TEAM.human=null;teamLoginHtml('连接失败：'+e)}finally{TEAM.mutating=false}
 }
-function teamDisconnect(){
-  TEAM={token:'',human:null,projects:[],selected:'',membership:null,agents:[],members:[],inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
-  try{sessionStorage.removeItem('cockpit-human-jwt');sessionStorage.removeItem('cockpit-team-project')}catch(e){}
+async function teamDisconnect(){
+  try{await api('/api/team-auth/logout',{method:'POST'})}catch(e){}
+  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
+  try{sessionStorage.removeItem('cockpit-team-project')}catch(e){}
   teamLoginHtml();
 }
+function teamIsGlobalAdmin(){return Array.isArray(TEAM.profile?.roles)&&TEAM.profile.roles.includes('admin')}
 function teamProjectStatus(project){
   const status=project.membership?.status;
   if(status==='active')return project.membership.role==='admin'?'管理员':'已加入';
@@ -1192,13 +1221,20 @@ async function teamLoadInbox(){
   try{const data=await teamApi('inbox');TEAM.inbox=Array.isArray(data.items)?data.items:[]}
   catch(e){TEAM.inboxError=String(e)}finally{TEAM.inboxLoading=false}
 }
+async function teamLoadAccounts(){
+  if(!teamIsGlobalAdmin()){TEAM.authUsers=[];return}
+  const data=await api('/api/team-auth/users');
+  TEAM.authUsers=Array.isArray(data.users)?data.users:[];
+}
 async function teamLoad(force=false){
-  if(!TEAM.token){teamLoginHtml();return}
   if(TEAM.loading)return;
   TEAM.loading=true;
+  let sessionFound=TEAM.authenticated;
   const content=document.getElementById('teamContent');
   if(force||!TEAM.human)content.innerHTML='<div class="empty">加载团队数据…</div>';
   try{
+    if(!TEAM.authenticated){const auth=await api('/api/team-auth/status');TEAM.authenticated=!!auth.authenticated;TEAM.profile=auth.profile||null;sessionFound=TEAM.authenticated}
+    if(!TEAM.authenticated)throw new Error('登录已过期');
     const [human,projects]=await Promise.all([teamApi('humans/me'),teamApi('projects')]);
     TEAM.human=human;TEAM.projects=projects.projects||[];
     if(!TEAM.projects.some(p=>p.slug===TEAM.selected)){
@@ -1207,8 +1243,9 @@ async function teamLoad(force=false){
     try{TEAM.selected?sessionStorage.setItem('cockpit-team-project',TEAM.selected):sessionStorage.removeItem('cockpit-team-project')}catch(e){}
     await teamLoadSelection();
     await teamLoadInbox();
+    try{await teamLoadAccounts()}catch(e){TEAM.authUsers=[];toast('账号列表加载失败: '+e,5000)}
     teamRender();
-  }catch(e){teamLoginHtml('团队数据加载失败：'+e)}finally{TEAM.loading=false}
+  }catch(e){TEAM.authenticated=false;TEAM.profile=null;TEAM.human=null;teamLoginHtml(sessionFound?'团队数据加载失败：'+e:'')}finally{TEAM.loading=false}
 }
 function teamOwnerName(ownerId){
   if(ownerId==null)return'未归属';
@@ -1247,6 +1284,20 @@ function teamMemberRows(){
     return `<div class="team-row"><div class="team-row-main"><b>${esc(member.display_name)} ${self?'<span class="team-badge">你</span>':''}</b><small>@${esc(member.mention_handle)}</small></div><div>${role} ${status}</div><div class="team-row-actions">${actions}</div></div>`;
   }).join('');
 }
+function teamAccountAdminPanel(){
+  if(!teamIsGlobalAdmin())return'<div class="empty">仅系统管理员可管理账号。</div>';
+  const invite=TEAM.inviteCode?`<div class="team-status" style="margin:8px 0">一次性邀请码：<code>${esc(TEAM.inviteCode)}</code> <button class="sm" data-action="teamCopyInvite">复制</button><br><small>仅显示本次，24 小时内有效。</small></div>`:'';
+  const users=TEAM.authUsers.map(user=>{
+    const roles=Array.isArray(user.roles)?user.roles:[];
+    const isAdmin=roles.includes('admin');
+    let actions='';
+    if(!isAdmin&&user.status==='pending')actions='<button class="sm primary" data-action="teamUserStatus" data-username="'+esc(user.username)+'" data-status="active">批准</button>';
+    else if(!isAdmin&&user.status==='active')actions='<button class="sm danger" data-action="teamUserStatus" data-username="'+esc(user.username)+'" data-status="disabled">停用</button>';
+    else if(!isAdmin&&user.status==='disabled')actions='<button class="sm" data-action="teamUserStatus" data-username="'+esc(user.username)+'" data-status="active">恢复</button>';
+    return `<div class="team-row"><div class="team-row-main"><b>${esc(user.display_name)}</b><small>${esc(user.username)}</small></div><div><span class="team-badge ${esc(user.status)}">${esc(user.status)}</span>${isAdmin?' <span class="team-badge admin">系统管理员</span>':''}</div><div class="team-row-actions">${actions}</div></div>`;
+  }).join('')||'<div class="empty">暂无账号</div>';
+  return `<div class="team-panel-head"><h3>团队账号管理</h3><span class="team-badge admin">系统管理员</span></div><div class="team-panel-body"><div class="team-safety">新成员使用一次性邀请码注册后处于 pending；批准账号不会自动加入任何项目群组。</div><div class="team-section"><div class="team-section-title">邀请成员 <span>一次性 · 24 小时</span></div><button class="primary sm" data-action="teamInvite">生成一次性邀请码</button>${invite}</div><div class="team-section"><div class="team-section-title">账号审核 <span>${TEAM.authUsers.length} 个账号</span></div>${users}</div></div>`;
+}
 function teamProjectPanel(project){
   if(!project)return'<div class="empty">还没有团队群组。管理员可在左侧注册第一个群组；本机工作区不会自动出现在这里。</div>';
   const membership=project.membership;
@@ -1283,19 +1334,23 @@ function teamUpdateModeUi(){
   const inboxUnread=TEAM.inbox.filter(item=>item&&!item.read_ts).length;
   document.getElementById('teamProjectsBtn').classList.toggle('active',TEAM.mode==='projects');
   document.getElementById('teamInboxBtn').classList.toggle('active',TEAM.mode==='inbox');
+  document.getElementById('teamAdminBtn').classList.toggle('active',TEAM.mode==='accounts');
   const count=document.getElementById('teamInboxCount');count.textContent=String(inboxUnread);count.style.display=inboxUnread?'inline-flex':'none';
 }
 function teamRender(){
   document.getElementById('teamIdentity').textContent=`${TEAM.human.display_name} · Human #${TEAM.human.id}`;
   document.getElementById('teamLogoutBtn').style.display='inline-block';
   document.getElementById('teamModeTabs').style.display='flex';
+  document.getElementById('teamAdminBtn').style.display=teamIsGlobalAdmin()?'inline-block':'none';
   teamUpdateModeUi();
   const projects=TEAM.projects.map(project=>`<button class="team-project${project.slug===TEAM.selected?' active':''}" data-action="teamProject" data-slug="${esc(project.slug)}"><span class="team-project-name">${esc(project.name||project.slug)} <span class="team-badge ${esc(project.membership?.status||'')}">${esc(teamProjectStatus(project))}</span></span><span class="team-project-meta">${esc(project.slug)} · ${Number(project.active_member_count)||0} 位 active 成员</span></button>`).join('')||'<div class="empty">暂无群组；本机项目不会自动同步</div>';
-  const panel=TEAM.mode==='inbox'?teamInboxPanel():teamProjectPanel(teamSelectedProject());
-  document.getElementById('teamContent').innerHTML=`<div class="team-shell"><aside class="team-side"><div class="team-side-head"><h3>团队群组</h3><span class="team-badge">${TEAM.projects.length}</span></div><div class="team-project-list">${projects}</div><details class="team-create"><summary>＋ 管理员注册群组</summary><div class="field"><label>群组名称</label><input id="teamProjectName" placeholder="例如 Agent Cockpit 团队" maxlength="255"></div><div class="field"><label>群组标识</label><input id="teamProjectSlug" placeholder="例如 agent-cockpit" maxlength="128"></div><div class="field"><label>你的群组内 @花名</label><input id="teamProjectHandle" value="${esc(teamHandleSeed())}" maxlength="128"></div><button class="primary sm" data-action="teamCreate">注册群组</button></details></aside><main class="team-main">${panel}</main></div>`;
+  const panel=TEAM.mode==='inbox'?teamInboxPanel():(TEAM.mode==='accounts'?teamAccountAdminPanel():teamProjectPanel(teamSelectedProject()));
+  const createGroup=teamIsGlobalAdmin()?`<details class="team-create"><summary>＋ 管理员注册群组</summary><div class="field"><label>群组名称</label><input id="teamProjectName" placeholder="例如 Agent Cockpit 团队" maxlength="255"></div><div class="field"><label>群组标识</label><input id="teamProjectSlug" placeholder="例如 agent-cockpit" maxlength="128"></div><div class="field"><label>你的群组内 @花名</label><input id="teamProjectHandle" value="${esc(teamHandleSeed())}" maxlength="128"></div><button class="primary sm" data-action="teamCreate">注册群组</button></details>`:'';
+  document.getElementById('teamContent').innerHTML=`<div class="team-shell"><aside class="team-side"><div class="team-side-head"><h3>团队群组</h3><span class="team-badge">${TEAM.projects.length}</span></div><div class="team-project-list">${projects}</div>${createGroup}</aside><main class="team-main">${panel}</main></div>`;
 }
 function teamShowProjects(){TEAM.mode='projects';teamRender()}
 async function teamShowInbox(){TEAM.mode='inbox';document.getElementById('teamContent').innerHTML='<div class="empty">加载人工收件箱…</div>';await teamLoadInbox();teamRender()}
+async function teamShowAccounts(){if(!teamIsGlobalAdmin())return;TEAM.mode='accounts';document.getElementById('teamContent').innerHTML='<div class="empty">加载账号…</div>';try{await teamLoadAccounts();teamRender()}catch(e){toast('账号加载失败: '+e,5000);TEAM.mode='projects';teamRender()}}
 async function teamSelect(slug){TEAM.mode='projects';TEAM.selected=slug;try{sessionStorage.setItem('cockpit-team-project',slug)}catch(e){};document.getElementById('teamContent').innerHTML='<div class="empty">加载项目…</div>';try{await teamLoadSelection();teamRender()}catch(e){toast('项目加载失败: '+e,4500);teamRender()}}
 async function teamMutation(success,operation){
   if(TEAM.mutating)return;
@@ -1303,6 +1358,9 @@ async function teamMutation(success,operation){
   try{await operation();toast(success);await teamLoad(true)}catch(e){toast(success+'失败: '+e,5000)}finally{TEAM.mutating=false}
 }
 function teamCreateProject(){const name=document.getElementById('teamProjectName')?.value.trim(),slug=document.getElementById('teamProjectSlug')?.value.trim().toLowerCase(),handle=document.getElementById('teamProjectHandle')?.value.trim();if(!name||!slug||!handle){toast('请填写群组名称、标识和 @花名');return}if(!/^[a-z0-9][a-z0-9_-]{0,127}$/.test(slug)){toast('群组标识只能包含小写字母、数字、下划线和连字符');return}teamMutation('群组已注册',async()=>{const p=await teamApi('projects','POST',{name,slug,mention_handle:handle});TEAM.selected=p.slug})}
+async function teamCreateInvite(){if(TEAM.mutating)return;TEAM.mutating=true;try{const data=await api('/api/team-auth/invitations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expires_in:86400})});TEAM.inviteCode=String(data.invite_code||'');await teamLoadAccounts();teamRender();toast('一次性邀请码已生成')}catch(e){toast('生成邀请码失败: '+e,5000)}finally{TEAM.mutating=false}}
+async function teamSetUserStatus(username,status){if(TEAM.mutating)return;if(status==='disabled'&&!window.confirm('停用这个团队账号？'))return;TEAM.mutating=true;try{await api('/api/team-auth/users/'+encodeURIComponent(username),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});await teamLoadAccounts();teamRender();toast(status==='active'?'账号已批准/恢复':'账号已停用')}catch(e){toast('更新账号失败: '+e,5000)}finally{TEAM.mutating=false}}
+async function teamCopyInvite(){if(!TEAM.inviteCode)return;try{await navigator.clipboard.writeText(TEAM.inviteCode);toast('邀请码已复制')}catch(e){toast('复制失败，请手动复制')}}
 function teamJoin(){const project=teamSelectedProject(),handle=document.getElementById('teamJoinHandle')?.value.trim();if(!project||!handle){toast('请填写项目内 @花名');return}teamMutation('加入申请已提交',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/join-requests`,'POST',{mention_handle:handle}))}
 function teamSetDefault(){const project=teamSelectedProject(),value=document.getElementById('teamDefaultAgent')?.value;if(!project)return;teamMutation('默认 Agent 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/membership`,'PATCH',{default_agent_id:value?Number(value):null}))}
 function teamSetOwner(agentId){const project=teamSelectedProject(),value=document.getElementById('teamOwner-'+agentId)?.value;if(!project)return;teamMutation('Agent owner 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agents/${agentId}`,'PATCH',{owner_id:value?Number(value):null}))}
@@ -3348,8 +3406,12 @@ function bindDelegation(){
   on('#teamContent',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     const action=it.dataset.action;
     if(action==='teamConnect')teamConnect();
+    else if(action==='teamRegister')teamRegister();
     else if(action==='teamProject')teamSelect(it.dataset.slug);
     else if(action==='teamCreate')teamCreateProject();
+    else if(action==='teamInvite')teamCreateInvite();
+    else if(action==='teamUserStatus')teamSetUserStatus(it.dataset.username,it.dataset.status);
+    else if(action==='teamCopyInvite')teamCopyInvite();
     else if(action==='teamJoin')teamJoin();
     else if(action==='teamDefault')teamSetDefault();
     else if(action==='teamOwner')teamSetOwner(Number(it.dataset.agentId));

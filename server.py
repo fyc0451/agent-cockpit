@@ -59,6 +59,7 @@ app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
 STATIC_DIR = Path(__file__).parent / "static"
 COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
 AUTH_COOKIE = "cockpit_session"
+TEAM_AUTH_COOKIE = "cockpit_team_human_session"
 PUBLIC_PATHS = {"/", "/health", "/api/auth/status", "/api/auth/login"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 logger = logging.getLogger("agent-cockpit")
@@ -350,6 +351,21 @@ class SendMessageReq(BaseModel):
 class HumanLoginReq(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+
+
+class HumanRegistrationReq(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=256)
+    invite_code: str = Field(min_length=1, max_length=256)
+
+
+class HumanInvitationReq(BaseModel):
+    expires_in: int = Field(default=24 * 60 * 60, ge=300, le=7 * 24 * 60 * 60)
+
+
+class HumanUserStatusReq(BaseModel):
+    status: str = Field(min_length=1, max_length=16)
 
 
 class AckReq(BaseModel):
@@ -1069,13 +1085,10 @@ async def api_team_proxy(route: str, request: Request):
         for pattern, methods in TEAM_API_ROUTES
     ):
         raise HTTPException(404, "不支持的 Hub Human API 路由")
-    authorization = request.headers.get("x-agent-hub-authorization", "")
-    if (
-        not authorization.startswith("Bearer ")
-        or not authorization[7:].strip()
-        or len(authorization) > 8192
-    ):
+    token = request.cookies.get(TEAM_AUTH_COOKIE, "")
+    if not token or len(token) > 8192:
         raise HTTPException(401, "需要有效的 Hub Human JWT")
+    authorization = f"Bearer {token}"
     payload = None
     if method != "GET":
         try:
@@ -1085,6 +1098,9 @@ async def api_team_proxy(route: str, request: Request):
         if not isinstance(payload, dict):
             raise HTTPException(400, "请求体必须是 JSON 对象")
     try:
+        # Re-check the issuer on every Human API request so a disabled account
+        # loses Cockpit access immediately instead of waiting for JWT expiry.
+        hub_client.human_profile(authorization)
         return hub_client.human_api(
             method,
             f"/hub/api/{normalized}",
@@ -1093,19 +1109,124 @@ async def api_team_proxy(route: str, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(401, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
     except hub_client.HumanAPIError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
 
 
 @app.post("/api/team-auth/login")
-def api_team_auth_login(req: HumanLoginReq):
+def api_team_auth_login(req: HumanLoginReq, request: Request):
     """窄代理独立 issuer；Cockpit 不持有签名密钥或用户密码。"""
     try:
-        return hub_client.human_login(req.username, req.password)
+        data = hub_client.human_login(req.username, req.password)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except hub_client.HumanAuthError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
+    token = data.get("access_token")
+    profile = data.get("profile")
+    expires_in = data.get("expires_in")
+    if (
+        not isinstance(token, str)
+        or not token
+        or len(token) > 8192
+        or not isinstance(profile, dict)
+        or isinstance(expires_in, bool)
+        or not isinstance(expires_in, int)
+        or not 1 <= expires_in <= 7 * 24 * 60 * 60
+    ):
+        raise HTTPException(502, "Human issuer 返回了无效响应")
+    response = JSONResponse({"authenticated": True, "profile": profile})
+    response.set_cookie(
+        TEAM_AUTH_COOKIE,
+        token,
+        max_age=expires_in,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/api",
+    )
+    return response
+
+
+def _team_human_authorization(request: Request) -> str:
+    token = request.cookies.get(TEAM_AUTH_COOKIE, "")
+    if not token or len(token) > 8192:
+        raise HTTPException(401, "团队账号未登录或登录已过期")
+    return f"Bearer {token}"
+
+
+def _raise_human_auth_error(exc: hub_client.HumanAuthError) -> None:
+    raise HTTPException(exc.status_code, exc.detail) from exc
+
+
+@app.get("/api/team-auth/status")
+def api_team_auth_status(request: Request):
+    try:
+        return {
+            "authenticated": True,
+            **hub_client.human_profile(_team_human_authorization(request)),
+        }
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+
+
+@app.post("/api/team-auth/logout")
+def api_team_auth_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(TEAM_AUTH_COOKIE, path="/api")
+    return response
+
+
+@app.post("/api/team-auth/register", status_code=201)
+def api_team_auth_register(req: HumanRegistrationReq):
+    try:
+        return hub_client.human_register(
+            req.username, req.display_name, req.password, req.invite_code
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+
+
+@app.post("/api/team-auth/invitations", status_code=201)
+def api_team_auth_create_invitation(req: HumanInvitationReq, request: Request):
+    try:
+        return hub_client.human_create_invitation(
+            _team_human_authorization(request), req.expires_in
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+
+
+@app.get("/api/team-auth/users")
+def api_team_auth_users(request: Request):
+    try:
+        return hub_client.human_list_users(_team_human_authorization(request))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+
+
+@app.patch("/api/team-auth/users/{username}")
+def api_team_auth_update_user(
+    username: str, req: HumanUserStatusReq, request: Request
+):
+    try:
+        return hub_client.human_set_user_status(
+            _team_human_authorization(request), username, req.status
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
 
 
 @app.get("/api/env-check")

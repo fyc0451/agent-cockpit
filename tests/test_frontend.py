@@ -983,6 +983,10 @@ def test_team_view_covers_project_membership_and_agent_management():
     assert '<button data-view="team"' in HTML
     assert 'id="view-team"' in HTML
     assert "function teamConnect()" in js
+    assert "async function teamRegister()" in js
+    assert "async function teamShowAccounts()" in js
+    assert "async function teamCreateInvite()" in js
+    assert "async function teamSetUserStatus(username,status)" in js
     assert "function teamCreateProject()" in js
     assert "function teamJoin()" in js
     assert "function teamSetDefault()" in js
@@ -1003,17 +1007,21 @@ def test_team_view_covers_project_membership_and_agent_management():
     assert "/agents/${agentId}`,'PATCH'" in js
     assert "teamApi('inbox')" in js
     assert "teamApi('inbox/mark-read','POST',{ids})" in js
+    assert 'id="teamAdminBtn"' in HTML
+    assert "批准账号不会自动加入任何项目群组" in js
 
 
-def test_team_human_jwt_is_tab_scoped_and_hub_text_is_escaped():
+def test_team_human_jwt_uses_http_only_cookie_and_hub_text_is_escaped():
     js = _inline_js()
     assert "api('/api/team-auth/login'" in js
     assert "JSON.stringify({username,password})" in js
-    assert "sessionStorage.setItem('cockpit-human-jwt',token)" in js
-    assert "sessionStorage.removeItem('cockpit-human-jwt')" in js
+    assert "api('/api/team-auth/status')" in js
+    assert "api('/api/team-auth/logout'" in js
+    assert "sessionStorage.setItem('cockpit-human-jwt'" not in js
+    assert "sessionStorage.removeItem('cockpit-human-jwt'" not in js
     assert "localStorage.setItem('cockpit-human-jwt'" not in js
     assert "sessionStorage.setItem('cockpit-human-password'" not in js
-    assert "'X-Agent-Hub-Authorization':'Bearer '+TEAM.token" in js
+    assert "X-Agent-Hub-Authorization" not in js
     assert "${esc(project.slug)}" in js
     assert "${esc(agent.name)}" in js
     assert "${esc(member.display_name)}" in js

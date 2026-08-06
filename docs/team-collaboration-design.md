@@ -75,6 +75,8 @@ TeamProject（用户注册、首次为空、slug 全局唯一）
 
 - **个人**：本地 registry JSON、本机 Agent Mail 与 coordination.sqlite3 是权威，团队组件不启动。
 - **团队**：服务器 Hub `agents` 表 = 通讯录；花名全局唯一（统一服务器注册 + 冲突检测，存量按物理 agent 迁移）；人 = `human:<昵称>`（登录态绑定）。
+- **账号**：系统管理员生成一次性邀请码；成员注册后为 pending，需系统管理员批准。批准账号不会自动加入任何群组；停用后 Cockpit 在每次 Team API 代理前向 issuer 复核状态。
+- **登录态**：Human JWT 只进入 Cockpit 的 `HttpOnly + SameSite=Strict` Cookie，页面脚本和 `sessionStorage/localStorage` 都不读取或保存 JWT、密码。
 - **群组**：只在远程 Hub 注册；不从 Cockpit 所在机器发现目录或工作区。群组与本机 Agent 的关系只能显式建立和撤销。
 - **送达 vs 认领**：送达（durable 收件箱/频道历史）在服务器；认领/完成（处理状态）在本地 sidecar——解耦，不产生双重 claim 权威。
 - **token**：服务器持有并校验（共享或 per-agent）token，但**不存 agent 私钥/凭据**；beta 建议直接用 per-agent token（支持归因/吊销）。
@@ -94,7 +96,7 @@ TeamProject（用户注册、首次为空、slug 全局唯一）
 | M2 | 同项目公共频道 + 读游标 + @ durable 投递 | 同项目 agent 跨机频道发言/收听/离线补收成功 |
 | M3 | 身份目录 + 在线 + Web 看板 + 跨项目 @ | 目录/在线可见、跨项目 @ 可达、人+agent 同场看板 |
 | M4 | 团队试点 | 真实 codex-main ↔ opencode-main（+1 台外部机）跨机互 @ 闭环 |
-| M5 | 可选：多人登录 / per-agent token 收尾 / 待办汇入频道提及 | 试点后按真实协作痛点决定 |
+| M5 | per-agent token 收尾 / 待办汇入频道提及 | 试点后按真实协作痛点决定 |
 
 - 协调权威留本地，M1b 不迁移存量在途消息；团队试点以新项目/新频道起步（dual-run 故事），存量数据迁移试点后再定。
 - run 跨机聚合推迟到"编辑任务说明+持久化"落地之后，避免 garbage-in/garbage-out。

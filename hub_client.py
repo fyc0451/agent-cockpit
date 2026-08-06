@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import socket
 import sys
 from typing import Any
@@ -236,6 +237,106 @@ def human_login(username: str, password: str) -> dict[str, Any]:
     ):
         raise HumanAuthError(502, "Human issuer 返回了无效响应")
     return data
+
+
+def _human_auth_api(
+    method: str,
+    path: str,
+    *,
+    authorization: str = "",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    parsed = urlsplit(HUMAN_AUTH_URL)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or (parsed.scheme == "http" and not _is_loopback_host(parsed.hostname))
+    ):
+        raise ValueError("Human issuer 地址必须是本机 HTTP 或 HTTPS")
+    if authorization and (
+        not authorization.startswith("Bearer ")
+        or not authorization[7:].strip()
+        or len(authorization) > 8192
+    ):
+        raise ValueError("需要有效的 Human JWT")
+    headers = {"Accept": "application/json"}
+    if authorization:
+        headers["Authorization"] = authorization
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.request(
+                method,
+                f"{HUMAN_AUTH_URL}{path}",
+                json=payload if method != "GET" else None,
+                headers=headers,
+            )
+    except httpx.HTTPError as exc:
+        raise HumanAuthError(502, f"Human issuer 请求失败: {exc}") from exc
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if response.is_error:
+        detail = data.get("detail") if isinstance(data, dict) else None
+        raise HumanAuthError(
+            response.status_code,
+            str(detail or f"Human issuer 返回 HTTP {response.status_code}"),
+        )
+    if not isinstance(data, dict):
+        raise HumanAuthError(502, "Human issuer 返回了无效响应")
+    return data
+
+
+def human_profile(authorization: str) -> dict[str, Any]:
+    return _human_auth_api("GET", "/me", authorization=authorization)
+
+
+def human_register(
+    username: str,
+    display_name: str,
+    password: str,
+    invite_code: str,
+) -> dict[str, Any]:
+    return _human_auth_api(
+        "POST",
+        "/register",
+        payload={
+            "username": username,
+            "display_name": display_name,
+            "password": password,
+            "invite_code": invite_code,
+        },
+    )
+
+
+def human_create_invitation(authorization: str, expires_in: int) -> dict[str, Any]:
+    return _human_auth_api(
+        "POST",
+        "/admin/invitations",
+        authorization=authorization,
+        payload={"expires_in": expires_in},
+    )
+
+
+def human_list_users(authorization: str) -> dict[str, Any]:
+    return _human_auth_api("GET", "/admin/users", authorization=authorization)
+
+
+def human_set_user_status(
+    authorization: str, username: str, status: str
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", username):
+        raise ValueError("用户名格式无效")
+    return _human_auth_api(
+        "PATCH",
+        f"/admin/users/{username}",
+        authorization=authorization,
+        payload={"status": status},
+    )
 
 
 def _ensure_init() -> None:
