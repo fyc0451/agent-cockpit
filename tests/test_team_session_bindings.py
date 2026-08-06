@@ -84,9 +84,9 @@ def _human_api(membership=None, calls=None):
             return {"id": 7, "display_name": "FYC"}
         if path == "/hub/api/projects/demo/membership" and method == "GET":
             return dict(membership)
-        if path.endswith("/session-leads") and method == "POST":
+        if path.endswith("/session-lead") and method == "PUT":
             return {"active": True, "agent": {"id": 41, "name": "SessionLead41"}}
-        if "/session-leads/" in path and method == "DELETE":
+        if path.endswith("/session-lead") and method == "DELETE":
             return {"ok": True, "active": False}
         raise AssertionError((method, path, payload))
 
@@ -181,8 +181,8 @@ def test_bind_creates_managed_lead_and_saves_local_mapping(monkeypatch):
     assert response.status_code == 200
     assert response.json()["binding"]["session"] == "demo"
     assert "registration-secret" not in response.text
-    put = next(call for call in calls if call[0] == "POST")
-    assert put[1] == "/hub/api/projects/demo/session-leads"
+    put = next(call for call in calls if call[0] == "PUT")
+    assert put[1] == "/hub/api/projects/demo/session-lead"
     assert put[3]["lead_label"] == "codex-main"
     assert len(put[3]["client_session_id"]) == 64
     saved = team_sessions.list_bindings(HUB, 7)
@@ -209,7 +209,7 @@ def test_bind_requires_active_membership_before_remote_create(monkeypatch):
     )
 
     assert response.status_code == 403
-    assert not any(call[0] == "POST" for call in calls)
+    assert not any(call[0] == "PUT" for call in calls)
     assert team_sessions.list_bindings(HUB, 7) == []
 
 
@@ -237,7 +237,7 @@ def test_conflict_is_rejected_before_remote_create(monkeypatch):
     )
 
     assert response.status_code == 409
-    assert not any(call[0] == "POST" for call in calls)
+    assert not any(call[0] == "PUT" for call in calls)
 
 
 def test_local_write_failure_deactivates_remote_managed_lead(monkeypatch):
@@ -257,8 +257,8 @@ def test_local_write_failure_deactivates_remote_managed_lead(monkeypatch):
     )
 
     assert response.status_code == 500
-    assert [call[0] for call in calls] == ["GET", "GET", "POST", "DELETE"]
-    assert calls[-1][1].endswith(calls[-2][3]["client_session_id"])
+    assert [call[0] for call in calls] == ["GET", "GET", "PUT", "DELETE"]
+    assert calls[-1][3] == {"client_session_id": calls[-2][3]["client_session_id"]}
     assert team_sessions.list_bindings(HUB, 7) == []
 
 
@@ -268,7 +268,7 @@ def test_invalid_remote_response_is_deactivated_without_local_binding(monkeypatc
     remote = _human_api(calls=calls)
 
     def invalid_remote(method, path, authorization, payload=None):
-        if method == "POST" and path.endswith("/session-leads"):
+        if method == "PUT" and path.endswith("/session-lead"):
             calls.append((method, path, authorization, payload))
             return {"active": True, "agent": {"id": "invalid"}}
         return remote(method, path, authorization, payload)
@@ -282,7 +282,7 @@ def test_invalid_remote_response_is_deactivated_without_local_binding(monkeypatc
     )
 
     assert response.status_code == 502
-    assert [call[0] for call in calls][-2:] == ["POST", "DELETE"]
+    assert [call[0] for call in calls][-2:] == ["PUT", "DELETE"]
     assert team_sessions.list_bindings(HUB, 7) == []
 
 
@@ -310,12 +310,12 @@ def test_replace_deactivates_previous_project_route(monkeypatch):
     )
 
     assert response.status_code == 200
-    remote_calls = [call for call in calls if "/session-leads" in call[1]]
+    remote_calls = [call for call in calls if "/session-lead" in call[1]]
     assert [(call[0], call[1]) for call in remote_calls] == [
-        ("DELETE", "/hub/api/projects/other/session-leads/old-client"),
-        ("POST", "/hub/api/projects/demo/session-leads"),
+        ("DELETE", "/hub/api/projects/other/session-lead"),
+        ("PUT", "/hub/api/projects/demo/session-lead"),
     ]
-    assert remote_calls[0][3] is None
+    assert remote_calls[0][3] == {"client_session_id": "old-client"}
     assert [row["project_slug"] for row in team_sessions.list_bindings(HUB, 7)] == [
         "demo"
     ]
@@ -327,7 +327,7 @@ def test_failed_replace_restores_previous_project_route(monkeypatch):
     regular = _human_api(calls=calls)
 
     def fail_new_route(method, path, authorization, payload=None):
-        if method == "POST" and path == "/hub/api/projects/demo/session-leads":
+        if method == "PUT" and path == "/hub/api/projects/demo/session-lead":
             calls.append((method, path, authorization, payload))
             raise server.hub_client.HumanAPIError(503, "temporarily unavailable")
         return regular(method, path, authorization, payload)
@@ -353,11 +353,11 @@ def test_failed_replace_restores_previous_project_route(monkeypatch):
     )
 
     assert response.status_code == 503
-    remote_calls = [call for call in calls if "/session-leads" in call[1]]
+    remote_calls = [call for call in calls if "/session-lead" in call[1]]
     assert [(call[0], call[1]) for call in remote_calls] == [
-        ("DELETE", "/hub/api/projects/other/session-leads/old-client"),
-        ("POST", "/hub/api/projects/demo/session-leads"),
-        ("POST", "/hub/api/projects/other/session-leads"),
+        ("DELETE", "/hub/api/projects/other/session-lead"),
+        ("PUT", "/hub/api/projects/demo/session-lead"),
+        ("PUT", "/hub/api/projects/other/session-lead"),
     ]
     assert [row["project_slug"] for row in team_sessions.list_bindings(HUB, 7)] == [
         "other"
@@ -397,7 +397,7 @@ def test_unbind_only_removes_route_and_deactivates_managed_lead(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"ok": True, "removed": True}
     assert calls[-1] == (
-        "DELETE", "/hub/api/projects/demo/session-leads/client-run-1",
-        "Bearer human.jwt", None,
+        "DELETE", "/hub/api/projects/demo/session-lead",
+        "Bearer human.jwt", {"client_session_id": "client-run-1"},
     )
     assert team_sessions.list_bindings(HUB, 7) == []

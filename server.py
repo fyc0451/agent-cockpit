@@ -1451,8 +1451,8 @@ def _team_remote_session_lead(
 ) -> dict[str, Any]:
     try:
         result = hub_client.human_api(
-            "POST",
-            f"/hub/api/projects/{quote(project_slug, safe='')}/session-leads",
+            "PUT",
+            f"/hub/api/projects/{quote(project_slug, safe='')}/session-lead",
             authorization,
             _team_session_lead_payload(row),
         )
@@ -1469,9 +1469,9 @@ def _team_remote_session_unbind(
     try:
         hub_client.human_api(
             "DELETE",
-            f"/hub/api/projects/{quote(project_slug, safe='')}/session-leads/"
-            f"{quote(client_session_id, safe='')}",
+            f"/hub/api/projects/{quote(project_slug, safe='')}/session-lead",
             authorization,
+            {"client_session_id": client_session_id},
         )
     except hub_client.HumanAPIError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
@@ -1819,7 +1819,7 @@ def api_team_inbox_route_run(request: Request):
             hub=hub,
             human_id=int(human["id"]),
             fetch_inbox=lambda auth: hub_client.human_api(
-                "GET", "/hub/api/inbox?unread_only=true&limit=100", auth
+                "GET", "/hub/api/inbox?limit=100", auth
             ),
         )
     except RuntimeError as exc:
