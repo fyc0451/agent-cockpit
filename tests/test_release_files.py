@@ -178,15 +178,15 @@ def test_doctor_rejects_export_syntax_not_supported_by_systemd(tmp_path):
     assert ".env 不能使用 export" in result.stdout
 
 
-def test_agent_mail_is_documented_and_diagnosed_as_optional():
+def test_agent_mail_is_documented_and_diagnosed_as_required():
     readme = (ROOT / "README.md").read_text()
     doctor = (ROOT / "doctor.sh").read_text()
 
     assert "Agent Mail" in readme
-    assert "optional" in readme.lower() or "可选" in readme
+    assert "Agent Mail 为必需基础设施" in readme
     assert "XDG_DATA_HOME" in doctor
-    assert 'warn "缺少 Agent Mail 数据库' in doctor
-    assert 'fail "缺少 Agent Mail 数据库' not in doctor
+    assert 'fail "缺少 Agent Mail 数据库' in doctor
+    assert 'fail "缺少 ~/.agent-mail/client.env' in doctor
 
 
 def test_agent_mail_helpers_are_packaged_and_safely_linked():

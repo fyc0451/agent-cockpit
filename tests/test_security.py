@@ -222,6 +222,7 @@ def test_herdr_pane_send_rejects_unknown_mode(monkeypatch):
 
 def test_start_agent_accepts_unique_local_name_for_same_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "_agent_mail_requirement", lambda: None)
     calls = []
     monkeypatch.setattr(
         server.herdr_client,

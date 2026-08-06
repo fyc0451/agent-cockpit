@@ -301,6 +301,23 @@ def _agent_mail_status() -> dict[str, Any]:
     }
 
 
+def _agent_mail_requirement() -> dict[str, Any] | None:
+    """新工作区和新 Agent 必须具备可读写的 Agent Mail。"""
+    status = _agent_mail_status()
+    if status.get("available") is False:
+        reason = status.get("reason") or "Agent Mail 未安装或数据库不可用"
+    elif status.get("write_available") is False:
+        reason = status.get("write_reason") or "Agent Mail Hub 不可写"
+    else:
+        return None
+    return {
+        "ok": False,
+        "code": "agent_mail_required",
+        "error": f"Agent Mail 是创建工作区和添加 Agent 的必需能力：{reason}",
+        "agent_mail": status,
+    }
+
+
 @app.middleware("http")
 async def protect_api(request: Request, call_next):
     path = request.url.path
@@ -1058,7 +1075,11 @@ async def api_settings_put(request: Request):
 def api_agent_mail_config_get():
     """返回可公开给设置页的 Hub 配置；token 永不进入响应。"""
     config = hub_client.reload_config()
-    return {"hub": config["hub"], "status": hub_client.status()}
+    return {
+        "hub": config["hub"],
+        **hub_client.public_team_config(),
+        "status": hub_client.status(),
+    }
 
 
 @app.put("/api/agent-mail/config")
@@ -1069,7 +1090,11 @@ def api_agent_mail_config_put(req: AgentMailConfigReq):
         config = hub_client.reload_config()
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return {"hub": config["hub"], "status": hub_client.status()}
+    return {
+        "hub": config["hub"],
+        **hub_client.public_team_config(),
+        "status": hub_client.status(),
+    }
 
 
 @app.api_route(
@@ -1782,6 +1807,9 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
         raise HTTPException(400, f"不支持的布局: {req.layout}")
     if req.workspace not in {"shared", "isolated"}:
         raise HTTPException(400, f"不支持的工作目录策略: {req.workspace}")
+    mail_requirement = _agent_mail_requirement()
+    if mail_requirement:
+        raise HTTPException(503, mail_requirement["error"])
     name = req.name.strip() if req.name else None
     if name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
         raise HTTPException(400, "实例名称只能包含字母、数字、_、-，最长 32 位")
@@ -2514,6 +2542,14 @@ def _setup_workspace(req: SetupWorkspaceReq):
         return {
             "ok": False,
             "error": f"herdr 未安装或不可执行: {herdr_client.HERDR_BIN}",
+            "session": req.session,
+            "session_started": False,
+            "started": [],
+        }
+    mail_requirement = _agent_mail_requirement()
+    if mail_requirement:
+        return {
+            **mail_requirement,
             "session": req.session,
             "session_started": False,
             "started": [],

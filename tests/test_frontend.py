@@ -339,9 +339,10 @@ def test_setup_workspace_requires_real_tasks_and_keeps_success_locked():
     assert "let setupSucceeded=false" in submit
     assert "setupSucceeded=true" in submit
     assert "if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}" in submit
-    assert "SETUP_CLOSE_TIMER=setTimeout" in submit
-    assert "clearTimeout(SETUP_CLOSE_TIMER)" in js
-    assert "SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;renderSetupPreview()" in js
+    assert "SETUP_CLOSE_TIMER" not in js
+    assert 'data-action="setupOpenTerminal"' in submit
+    assert "async function setupOpenTerminal(session)" in js
+    assert "await doAttachHerdr(session)" in js
 
 
 def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
@@ -365,6 +366,9 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     assert 'id="lnLayout"' in HTML
     assert 'id="lnWorkspace"' in HTML
     assert "function launchSessionChanged" in js
+    assert "const preferredSession=(TERM_ID&&TERM_SESSIONS[TERM_ID])||CURRENT_TERM?.session||''" in js
+    assert "await loadSessions(preferredSession)" in js
+    assert "const selected=preferredSession||sel.value" in js
     assert "LAUNCH_SESSION_DIRS" in js
     assert "s.directory||''" in js
     assert "p.session===session&&p.agent&&p.cwd" in js
@@ -381,6 +385,7 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     assert "finally" in launch and "button.disabled=false" in launch
     assert "QoderCLI 首次启动可能约 60 秒" in js
     assert "const mail=r.agent_mail||{}" in launch
+    assert "const mailError=agentMailRequirementError()" in launch
     assert "mail.warning" in launch
     assert "身份 '+mail.name+' 已通知" in launch
     response = launch.split("if(r.error)", 1)[1]
@@ -418,6 +423,18 @@ def test_setup_workspace_handles_herdr_onboarding_in_visible_terminal():
     assert "async function setupHerdrOnboarding(command)" in js
     assert "data-command=\"${esc(r.herdr_command||'herdr')}\"" in js
     assert "setupHerdrOnboarding(it.dataset.command)" in js
+
+
+def test_agent_mail_is_required_for_new_workspaces_and_agents():
+    js = _inline_js()
+    assert "Agent Mail 必需" in HTML
+    assert "Agent Mail(必需,消息功能)" in js
+    assert "function agentMailRequirementError()" in js
+    errors = js.split("function setupErrors(){", 1)[1].split(
+        "function setupInspectWorkspace", 1,
+    )[0]
+    assert "errors.push(mailError)" in errors
+    assert "创建工作区和添加 Agent 已禁用" in js
 
 
 def test_attach_herdr_validates_session_name():
@@ -976,6 +993,9 @@ def test_settings_view_and_nav_exist():
     assert 'id="setUploadMax"' in HTML
     assert 'id="setHub"' in HTML
     assert 'id="setHubStatus"' in HTML
+    assert 'id="setTeamHub"' in HTML
+    assert 'id="setHumanAuth"' in HTML
+    assert 'onclick="cancelSettings()"' in HTML
 
 
 def test_team_view_covers_project_membership_and_agent_management():
@@ -1066,11 +1086,13 @@ def test_i18n_framework_and_static_markup():
 
 
 def test_settings_js_functions_exist():
-    for fn in ("loadSettings", "renderSettings", "saveSettings",
+    for fn in ("loadSettings", "renderSettings", "saveSettings", "cancelSettings",
                "setAddDirAgent", "applyEnabledAgents", "launchPreselectAgent"):
         assert f"function {fn}(" in HTML
     assert "'/api/settings'" in HTML
     assert "'/api/agent-mail/config'" in HTML
+    assert "SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS))" in HTML
+    assert "HUB_CONFIG_EDIT=HUB_CONFIG.hub||''" in HTML
 
 
 # ── 顶部导航与终端工具栏折叠 ────────────────────────────────────

@@ -404,6 +404,7 @@ def test_setup_binds_canonical_project_before_registration(monkeypatch, tmp_path
     init_script = tmp_path / "am-init-project"
     init_script.touch()
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "_agent_mail_requirement", lambda: None)
     monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", init_script)
     monkeypatch.setattr(server, "_canonical_mail_project", lambda _: str(canonical))
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
@@ -465,6 +466,7 @@ def test_setup_rejects_project_conflict_using_real_herdr_session_dir(
         path.mkdir()
     mail_projects.bind("demo", str(session_dir), str(bound))
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "_agent_mail_requirement", lambda: None)
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
         server.herdr_client,

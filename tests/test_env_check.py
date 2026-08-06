@@ -45,3 +45,33 @@ def test_env_check_herdr_missing(monkeypatch):
     data = client.get("/api/env-check").json()
     assert data["herdr"] == {"installed": False, "path": ""}
     assert all(not a["installed"] for a in data["agents"].values())
+
+
+def test_agent_mail_requirement_covers_missing_and_read_only_hub(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_agent_mail_status",
+        lambda: {"available": False, "reason": "数据库不存在"},
+    )
+    missing = server._agent_mail_requirement()
+    assert missing["code"] == "agent_mail_required"
+    assert "数据库不存在" in missing["error"]
+
+    monkeypatch.setattr(
+        server,
+        "_agent_mail_status",
+        lambda: {
+            "available": True,
+            "write_available": False,
+            "write_reason": "Hub 不可连接",
+        },
+    )
+    read_only = server._agent_mail_requirement()
+    assert "Hub 不可连接" in read_only["error"]
+
+    monkeypatch.setattr(
+        server,
+        "_agent_mail_status",
+        lambda: {"available": True, "write_available": True},
+    )
+    assert server._agent_mail_requirement() is None

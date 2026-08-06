@@ -167,6 +167,14 @@ def _team_hub_url() -> str:
     return base_url.rstrip("/")
 
 
+def public_team_config() -> dict[str, str]:
+    """返回可展示的 Team 端点；不包含 token、Cookie 或任何凭据。"""
+    return {
+        "team_hub": _team_hub_url(),
+        "human_auth": HUMAN_AUTH_URL,
+    }
+
+
 def human_api(
     method: str,
     path: str,

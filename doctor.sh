@@ -81,10 +81,10 @@ else
 fi
 [[ -f "$AGENT_MAIL_DB_PATH" ]] \
   && ok "Agent Mail 数据库存在: $AGENT_MAIL_DB_PATH" \
-  || warn "缺少 Agent Mail 数据库；消息能力会自动隐藏"
+  || fail "缺少 Agent Mail 数据库；创建工作区和添加 Agent 需要 Agent Mail"
 [[ -f "$HOME/.agent-mail/client.env" ]] \
   && ok "Agent Mail 客户端配置存在" \
-  || warn "缺少 ~/.agent-mail/client.env；发信/确认功能可能不可用"
+  || fail "缺少 ~/.agent-mail/client.env；Agent Mail Hub 必须配置"
 
 if [[ -f "$ENV_FILE" ]]; then
   ok ".env 存在"

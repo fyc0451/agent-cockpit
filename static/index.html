@@ -610,7 +610,7 @@ header .spacer{flex:1}
       <h3 style="font-size:14px">herdr sessions & agents</h3>
       <button class="primary sm" onclick="showSetupModal()" data-i18n="sessions.setup">+ 一键工作区</button>
       <button class="sm" onclick="loadSessionsView()" data-i18n="common.refresh">↻ 刷新</button>
-      <span class="muted" style="font-size:11px;margin-left:auto" data-i18n="sessions.hint">一键工作区：split pane + 启动 agent；Agent Mail 可选</span>
+      <span class="muted" style="font-size:11px;margin-left:auto" data-i18n="sessions.hint">一键工作区：split pane + 启动 agent；Agent Mail 必需</span>
     </div>
     <div id="sessionsList" style="flex:1;overflow:auto;padding:10px"></div>
   </section>
@@ -658,12 +658,20 @@ header .spacer{flex:1}
         <div id="setAgents" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px"></div>
       </div>
       <div class="set-card">
-        <h3 data-i18n="set.hub">Agent Mail Hub 地址</h3>
+        <h3 data-i18n="set.hub">本地 Agent Mail Hub 地址</h3>
         <input id="setHub" type="url" autocomplete="off" spellcheck="false"
           placeholder="http://127.0.0.1:8765" style="width:100%"
           oninput="HUB_CONFIG_EDIT=this.value">
-        <div class="muted" style="font-size:12px;margin-top:6px" data-i18n="set.hub.hint">个人模式填本机地址，团队模式填共享 Hub 地址。Token 不会在页面读取或展示，保存后新地址立即生效。</div>
+        <div class="muted" style="font-size:12px;margin-top:6px" data-i18n="set.hub.hint">只控制本机 Agent 协作与消息，不能用于切换团队 Hub。Token 不会在页面读取或展示，保存后新地址立即生效。</div>
         <div id="setHubStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
+      </div>
+      <div class="set-card">
+        <h3 data-i18n="set.teamhub">团队 Hub 连接</h3>
+        <div style="display:grid;gap:7px;margin-top:7px;font-size:12px">
+          <div><span class="muted">Team Hub API</span><br><code id="setTeamHub" style="word-break:break-all">--</code></div>
+          <div><span class="muted">Human issuer</span><br><code id="setHumanAuth" style="word-break:break-all">--</code></div>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:7px" data-i18n="set.teamhub.hint">由服务器管理员通过 TEAM_HUB_URL 和 HUMAN_AUTH_URL 配置；页面只读展示，避免成员误改共享后端。</div>
       </div>
       <div class="set-card">
         <h3 data-i18n="set.env">环境自检</h3>
@@ -679,7 +687,10 @@ header .spacer{flex:1}
           <label><span data-i18n="set.write_timeout">终端写超时(秒)</span><input type="number" id="setWriteTimeout" min="0.2" max="30" step="0.1"></label>
         </div>
       </div>
-      <button class="primary" onclick="saveSettings()" data-i18n="set.save" style="margin:4px 0 20px">保存</button>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin:4px 0 20px">
+        <button class="sm" onclick="cancelSettings()" data-i18n="set.cancel">取消</button>
+        <button class="primary" onclick="saveSettings()" data-i18n="set.save">保存</button>
+      </div>
     </div>
   </section>
 </div>
@@ -789,7 +800,7 @@ header .spacer{flex:1}
       <h3 style="font-size:15px">创建工作区</h3>
       <button class="icon" onclick="closeSetup()">✕</button>
     </div>
-    <div class="muted" style="font-size:12px;margin-bottom:10px">选择协作方式并说明每个 Agent 做什么；Cockpit 自动安排工作目录、启动 Agent 并发送任务。</div>
+    <div class="muted" style="font-size:12px;margin-bottom:10px">选择协作方式并说明每个 Agent 做什么；Cockpit 自动安排工作目录、启动 Agent、注册 Agent Mail 身份并发送任务。Agent Mail 为必需能力。</div>
     <div class="field"><label>工作目录(项目绝对路径)</label><input id="suWorkdir" placeholder="如 /home/you/my-project"></div>
     <label style="font-size:12px;color:var(--fg2)">协作方式</label>
     <div class="setup-modes" id="suModeChoices">
@@ -830,7 +841,7 @@ let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=n
 let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
-let SETUP_SUBMITTING=false, SETUP_CLOSE_TIMER=null, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
+let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
 let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
 try{TEAM.selected=sessionStorage.getItem('cockpit-team-project')||''}catch(e){}
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
@@ -858,12 +869,12 @@ en:{
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
 'term.new':'+ New terminal','term.addagent':'＋ Add Agent','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…',
 'hf.takeover':'🖥 Take over TUI','hf.hint':'Copy: paste elsewhere · Fill input: send straight to agent','hf.empty':'No agent pane in this session','hf.send':'Send','hf.paste':'📋 Fill input','hf.full':'⛶ Full','hf.exit':'Exit',
-'sessions.setup':'+ Quick workspace','sessions.hint':'Quick workspace: split pane + start agent; Agent Mail optional',
+'sessions.setup':'+ Quick workspace','sessions.hint':'Quick workspace: split pane + start agent; Agent Mail required',
 'roots.system':'System','roots.projects':'Registered projects','roots.custom':'Custom','files.rootlimit':'Already at an accessible root — tap a root name above to switch','files.rmroot':'Remove from accessible locations (directory is not deleted)','files.remove':'Remove',
 'drawer.title':'Terminal','drawer.send':'Send',
-'set.lang':'Language','set.dirs':'Accessible directories','set.dirs.hint':'Add/remove directories at the top of the Files page.','set.diragent':'Default agent per directory','set.diragent.dir':'Directory','set.diragent.agent':'Default agent','set.diragent.ph':'Absolute directory path','set.add':'＋ Add','set.enabled':'Enabled agents','set.enabled.hint':'Launch menus only list enabled agents.','set.limits':'Runtime limits','set.upload_max':'Upload limit (MB)','set.max_terms':'Max terminals','set.idle_ttl':'Idle terminal TTL (s)','set.write_timeout':'Terminal write timeout (s)','set.save':'Save','set.saved':'Saved ✓','set.savefail':'Save failed: ','set.dirph':'/abs/path','set.theme':'Appearance','set.theme.light':'☀️ Light','set.theme.dark':'🌙 Dark','set.theme.hint':'The terminal also switches to a light background in light mode.',
-'set.env':'Environment check','set.env.hint':'On first use, make sure these components are ready; ❌ means install first.','set.env.herdr':'herdr (session backend)','set.env.mail':'Agent Mail (optional, messaging)','set.env.missing':'not installed',
-'set.hub':'Agent Mail Hub address','set.hub.hint':'Use the local address for personal mode or the shared Hub for team mode. The token is never read or shown in this page; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ',
+'set.lang':'Language','set.dirs':'Accessible directories','set.dirs.hint':'Add/remove directories at the top of the Files page.','set.diragent':'Default agent per directory','set.diragent.dir':'Directory','set.diragent.agent':'Default agent','set.diragent.ph':'Absolute directory path','set.add':'＋ Add','set.enabled':'Enabled agents','set.enabled.hint':'Launch menus only list enabled agents.','set.limits':'Runtime limits','set.upload_max':'Upload limit (MB)','set.max_terms':'Max terminals','set.idle_ttl':'Idle terminal TTL (s)','set.write_timeout':'Terminal write timeout (s)','set.cancel':'Cancel','set.cancelled':'Changes cancelled','set.save':'Save','set.saved':'Saved ✓','set.savefail':'Save failed: ','set.dirph':'/abs/path','set.theme':'Appearance','set.theme.light':'☀️ Light','set.theme.dark':'🌙 Dark','set.theme.hint':'The terminal also switches to a light background in light mode.',
+'set.env':'Environment check','set.env.hint':'On first use, make sure these components are ready; ❌ means install first.','set.env.herdr':'herdr (session backend)','set.env.mail':'Agent Mail (required, messaging)','set.env.missing':'not installed',
+'set.hub':'Local Agent Mail Hub address','set.hub.hint':'Controls only local agent collaboration and messages, not the Team Hub. The token is never read or shown; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ','set.teamhub':'Team Hub connection','set.teamhub.hint':'Configured by the server administrator with TEAM_HUB_URL and HUMAN_AUTH_URL. This page is read-only to prevent members from changing the shared backend.',
 'set.termfont':'Terminal font size','set.termfont.hint':'Applies to this device only, effective immediately.',
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
@@ -879,12 +890,12 @@ ja:{
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
 'term.new':'+ 新規ターミナル','term.addagent':'＋ Agent 追加','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…',
 'hf.takeover':'🖥 TUI 接管','hf.hint':'コピー: 他アプリで貼り付け · 入力欄へ: agent に直接送信','hf.empty':'このセッションに agent pane なし','hf.send':'送信','hf.paste':'📋 入力欄へ','hf.full':'⛶ 全画面','hf.exit':'退出',
-'sessions.setup':'+ ワンクリックワークスペース','sessions.hint':'ワンクリック: pane 分割 + agent 起動;Agent Mail は任意',
+'sessions.setup':'+ ワンクリックワークスペース','sessions.hint':'ワンクリック: pane 分割 + agent 起動;Agent Mail は必須',
 'roots.system':'システム','roots.projects':'登録プロジェクト','roots.custom':'カスタム','files.rootlimit':'アクセス可能なルートです。上のルート名で切り替えられます','files.rmroot':'アクセス可能場所から削除(ディレクトリ自体は削除されません)','files.remove':'削除',
 'drawer.title':'端末','drawer.send':'送信',
-'set.lang':'表示言語','set.dirs':'アクセス可能ディレクトリ','set.dirs.hint':'ディレクトリの追加・削除は「ファイル」ページ上部で行います。','set.diragent':'ディレクトリ別デフォルト agent','set.diragent.dir':'ディレクトリ','set.diragent.agent':'デフォルト agent','set.diragent.ph':'ディレクトリの絶対パス','set.add':'＋ 追加','set.enabled':'有効な agent','set.enabled.hint':'起動メニューには有効な agent のみ表示されます。','set.limits':'実行パラメータ','set.upload_max':'アップロード上限 (MB)','set.max_terms':'最大ターミナル数','set.idle_ttl':'アイドル端末の回収(秒)','set.write_timeout':'端末書き込みタイムアウト(秒)','set.save':'保存','set.saved':'保存しました ✓','set.savefail':'保存に失敗: ','set.dirph':'/abs/path','set.theme':'外観','set.theme.light':'☀️ ライト','set.theme.dark':'🌙 ダーク','set.theme.hint':'ライトモードでは端末も淡色背景になります。',
-'set.env':'環境チェック','set.env.hint':'初回利用前にこれらのコンポーネントを確認してください。❌ は要インストールです。','set.env.herdr':'herdr(セッションバックエンド)','set.env.mail':'Agent Mail(任意、メッセージ機能)','set.env.missing':'未インストール',
-'set.hub':'Agent Mail Hub アドレス','set.hub.hint':'個人モードではローカル、チームモードでは共有 Hub のアドレスを指定します。Token は画面に読み込まず表示もしません。保存後すぐに反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ',
+'set.lang':'表示言語','set.dirs':'アクセス可能ディレクトリ','set.dirs.hint':'ディレクトリの追加・削除は「ファイル」ページ上部で行います。','set.diragent':'ディレクトリ別デフォルト agent','set.diragent.dir':'ディレクトリ','set.diragent.agent':'デフォルト agent','set.diragent.ph':'ディレクトリの絶対パス','set.add':'＋ 追加','set.enabled':'有効な agent','set.enabled.hint':'起動メニューには有効な agent のみ表示されます。','set.limits':'実行パラメータ','set.upload_max':'アップロード上限 (MB)','set.max_terms':'最大ターミナル数','set.idle_ttl':'アイドル端末の回収(秒)','set.write_timeout':'端末書き込みタイムアウト(秒)','set.cancel':'キャンセル','set.cancelled':'変更をキャンセルしました','set.save':'保存','set.saved':'保存しました ✓','set.savefail':'保存に失敗: ','set.dirph':'/abs/path','set.theme':'外観','set.theme.light':'☀️ ライト','set.theme.dark':'🌙 ダーク','set.theme.hint':'ライトモードでは端末も淡色背景になります。',
+'set.env':'環境チェック','set.env.hint':'初回利用前にこれらのコンポーネントを確認してください。❌ は要インストールです。','set.env.herdr':'herdr(セッションバックエンド)','set.env.mail':'Agent Mail(必須、メッセージ機能)','set.env.missing':'未インストール',
+'set.hub':'ローカル Agent Mail Hub アドレス','set.hub.hint':'ローカル agent の連携とメッセージだけを制御し、Team Hub は切り替えません。Token は表示せず、保存後すぐ反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ','set.teamhub':'Team Hub 接続','set.teamhub.hint':'サーバー管理者が TEAM_HUB_URL と HUMAN_AUTH_URL で設定します。メンバーによる共有バックエンドの誤変更を防ぐため、この画面では読み取り専用です。',
 'set.termfont':'端末フォントサイズ','set.termfont.hint':'このデバイスのみに適用され、即時反映されます。',
 'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ',
 }};
@@ -923,7 +934,7 @@ function toggleTermToolbar(){
 function setLang(l){LANG=l;localStorage.setItem('cockpit-lang',l);applyLang();const active=document.querySelector('#nav button.active');if(active)showView(active.dataset.view)}
 
 // ============ 设置 ============
-let SETTINGS=null, SETTINGS_EDIT=null, HUB_CONFIG=null, HUB_CONFIG_EDIT='';
+let SETTINGS=null, SETTINGS_EDIT=null, HUB_CONFIG=null, HUB_CONFIG_EDIT='', SETTINGS_SAVED_LANG=LANG;
 async function loadSettings(){
   try{
     [SETTINGS,HUB_CONFIG]=await Promise.all([
@@ -935,6 +946,7 @@ async function loadSettings(){
     if(!localStorage.getItem('cockpit-lang')&&SETTINGS.language&&SETTINGS.language!==LANG){
       LANG=SETTINGS.language;applyLang();
     }
+    SETTINGS_SAVED_LANG=LANG;
     renderSettings();applyEnabledAgents();
   }catch(e){toast('设置加载失败: '+e)}
 }
@@ -973,6 +985,10 @@ function renderSettings(){
       ?`✅ ${t('set.hub.ok','Hub 可连接')}`
       :`❌ ${t('set.hub.bad','Hub 不可用: ')}${HUB_CONFIG.status.reason||''}`;
   }
+  const teamHub=document.getElementById('setTeamHub');
+  const humanAuth=document.getElementById('setHumanAuth');
+  if(teamHub)teamHub.textContent=HUB_CONFIG?.team_hub||'--';
+  if(humanAuth)humanAuth.textContent=HUB_CONFIG?.human_auth||'--';
   // 环境自检(异步,不阻塞设置渲染)
   const envEl=document.getElementById('envCheck');
   if(envEl){
@@ -982,7 +998,7 @@ function renderSettings(){
       let html=row(r.herdr&&r.herdr.installed,t('set.env.herdr','herdr(session 后端)'),r.herdr&&(r.herdr.installed?r.herdr.path:t('set.env.missing','未安装')));
       html+=Object.entries(r.agents||{}).map(([a,info])=>row(!!info.installed,a,info.installed?info.path:t('set.env.missing','未安装'))).join('');
       const mail=r.agent_mail||{};
-      html+=row(!!mail.available,t('set.env.mail','Agent Mail(可选,消息功能)'),mail.available?'':(mail.reason||t('set.env.missing','未安装')));
+      html+=row(!!mail.available&&mail.write_available!==false,t('set.env.mail','Agent Mail(必需,消息功能)'),mail.available?(mail.write_available===false?(mail.write_reason||'Hub 不可写'):''):(mail.reason||t('set.env.missing','未安装')));
       envEl.innerHTML=html;
     }).catch(e=>{envEl.innerHTML='<span class="muted">'+esc(String(e))+'</span>'});
   }
@@ -1006,6 +1022,16 @@ function setAddDirAgent(){
   document.getElementById('setNewDir').value='';
   renderSettings();
 }
+function cancelSettings(){
+  if(!SETTINGS||!HUB_CONFIG)return;
+  SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
+  HUB_CONFIG_EDIT=HUB_CONFIG.hub||'';
+  LANG=SETTINGS_SAVED_LANG;
+  localStorage.setItem('cockpit-lang',LANG);
+  document.getElementById('setNewDir').value='';
+  applyLang();renderSettings();
+  toast(t('set.cancelled','已取消更改'));
+}
 async function saveSettings(){
   const S=SETTINGS_EDIT;
   const body={
@@ -1025,6 +1051,7 @@ async function saveSettings(){
     const saved=await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     SETTINGS={...SETTINGS,...saved};
     SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
+    SETTINGS_SAVED_LANG=LANG;
     toast(t('set.saved','已保存 ✓'));renderSettings();applyEnabledAgents();
   }catch(e){toast(t('set.savefail','保存失败: ')+e,4000)}
 }
@@ -1472,7 +1499,7 @@ function sessionTaskHtml(session){
 function renderAttention(d){
   const box=document.getElementById('attentionList');
   const mail=d.capabilities&&d.capabilities.agent_mail;
-  const note=mail&&mail.available===false?`<div class="capability-note">Agent Mail 未启用：${esc(mail.reason||'消息能力已自动隐藏')}。Herdr、终端、文件和任务仍可正常使用。</div>`:'';
+  const note=mail&&(mail.available===false||mail.write_available===false)?`<div class="capability-note">Agent Mail 是必需能力：${esc((mail.available===false?mail.reason:mail.write_reason)||'当前不可用')}。创建工作区和添加 Agent 已禁用。</div>`:'';
   const unread=Math.max(0,Number(d.mail_unread)||0);
   const mailNote=unread?`<div class="capability-note">📬 ${unread} 条 Agent Mail 未读，不计入待办。<button class="sm" data-action="openMessages">去消息查看</button></div>`:'';
   const sessions=d.sessions||[];
@@ -1890,16 +1917,17 @@ function openMsg(agent){
 
 // ============ 启动 agent ============
 async function showLaunchModal(){
+  const preferredSession=(TERM_ID&&TERM_SESSIONS[TERM_ID])||CURRENT_TERM?.session||'';
   document.getElementById('launchModal').classList.add('show');
-  await loadSessions();
+  await loadSessions(preferredSession);
   launchSessionChanged(false);
 }
 function closeLaunchModal(){document.getElementById('launchModal').classList.remove('show')}
-async function loadSessions(){
+async function loadSessions(preferredSession=''){
   try{
     const d=await api('/api/herdr/sessions');
     const sel=document.getElementById('lnSession');
-    const selected=sel.value;
+    const selected=preferredSession||sel.value;
     const running=(d.sessions||[]).filter(s=>s.status==='running');
     TERM_SESSION_CATALOG=running.filter(s=>validSessionName(s.name)).map(s=>s.name);
     LAUNCH_SESSION_DIRS=Object.fromEntries(running.map(s=>[s.name,s.directory||'']));
@@ -1926,6 +1954,8 @@ async function startAgent(){
   const layout=document.getElementById('lnLayout').value;
   const workspace=document.getElementById('lnWorkspace').value;
   const workdir=document.getElementById('lnWorkdir').value.trim();
+  const mailError=agentMailRequirementError();
+  if(mailError){toast(mailError,5000);return}
   if(!session){toast(t('launch.nosession','还没有 session,先创建一个工作区'));showSetupModal();return}
   if(!workdir){toast('填工作目录');return}
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name)){toast('实例名称只能包含字母、数字、_、-，最长 32 位');return}
@@ -2818,6 +2848,13 @@ async function initSessionMail(name){
 }
 // 协作工作区:用户描述角色与任务，Cockpit 自动规划 worktree 并注入任务。
 const SETUP_ROLE_LABELS={lead:'负责人 / 开发',developer:'开发',reviewer:'Reviewer',researcher:'调研'};
+function agentMailRequirementError(){
+  const mail=CAPABILITIES.agent_mail;
+  if(!mail)return'';
+  if(mail.available===false)return'Agent Mail 是必需能力：'+(mail.reason||'未安装或数据库不可用');
+  if(mail.write_available===false)return'Agent Mail 是必需能力：'+(mail.write_reason||'Hub 不可写');
+  return'';
+}
 function setupKnownAgents(){
   const known=SETTINGS?.known_agents||['codex','kimi','claude','qoder','grok','opencode'];
   const enabled=SETTINGS?.enabled_agents||known;
@@ -2919,6 +2956,8 @@ function setupErrors(){
   const workdir=document.getElementById('suWorkdir').value.trim();
   const inspect=SETUP_INSPECT?.requested===workdir?SETUP_INSPECT:null;
   const session=document.getElementById('suSession').value.trim();
+  const mailError=agentMailRequirementError();
+  if(mailError)errors.push(mailError);
   if(!workdir)errors.push('请填写工作目录');
   if(!session)errors.push('请填写 session 名');else if(!validSessionName(session))errors.push('session 名只能包含字母、数字、_、-');
   if(!SETUP_PARTICIPANTS.length)errors.push('至少添加一个 Agent');
@@ -2988,10 +3027,13 @@ function showSetupModal(){
   document.getElementById('setupModal').classList.add('show');
 }
 function closeSetup(){
-  if(SETUP_CLOSE_TIMER!==null){
-    clearTimeout(SETUP_CLOSE_TIMER);SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;renderSetupPreview();
-  }
+  SETUP_SUBMITTING=false;renderSetupPreview();
   document.getElementById('setupModal').classList.remove('show');
+}
+async function setupOpenTerminal(session){
+  if(!validSessionName(session)){toast('非法 session 名，无法打开终端');return}
+  closeSetup();
+  await doAttachHerdr(session);
 }
 async function doSetupWorkspace(){
   if(SETUP_SUBMITTING)return;
@@ -3013,17 +3055,17 @@ async function doSetupWorkspace(){
     if(r.ok){
       setupSucceeded=true;
       const mail=r.agent_mail||{};
-      const mailText=r.registered?'已注册':(mail.available===false?'未启用，已跳过':'未注册');
+      const mailText=r.registered?'已注册':'注册未完成';
       const started=(r.started_instances||r.started||[]).map(esc).join(', ');
       const reused=(r.reused_instances||r.reused||[]).map(esc).join(', ');
       const notified=(r.notified||[]).map(esc).join(', ');
       const workspaces=(r.workspaces||[]).map(w=>`${esc(w.name||w.agent)} [${esc(w.agent)}]: ${esc(w.strategy)} · <code>${esc(w.workdir)}</code>`).join('<br>');
       const warnings=(r.warnings||[]).map(w=>'⚠ '+esc(w)).join('<br>');
       const readyText=r.idempotent?'✅ 工作区已在运行':'✅ 工作区就绪';
-      res.innerHTML='<span style="color:var(--done)">'+readyText+'</span><br>启动: '+(started||'无')+(reused?'<br>复用: '+reused:'')+(workspaces?'<br>'+workspaces:'')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'')+(warnings?'<br><span style="color:var(--need)">'+warnings+'</span>':'');
+      res.innerHTML='<span style="color:var(--done)">'+readyText+'</span><br>启动: '+(started||'无')+(reused?'<br>复用: '+reused:'')+(workspaces?'<br>'+workspaces:'')+'<br>Agent Mail: '+esc(mailText)+(notified?'<br>通知: '+notified:'')+(warnings?'<br><span style="color:var(--need)">'+warnings+'</span>':'')+`<br><button class="primary sm" data-action="setupOpenTerminal" data-session="${esc(session)}" style="margin-top:9px">打开终端</button>`;
       document.getElementById('suStartBtn').textContent='✓ 工作区已启动';
       toast(r.idempotent?'工作区已在运行':'工作区就绪 ✓');
-      SETUP_CLOSE_TIMER=setTimeout(()=>{SETUP_CLOSE_TIMER=null;SETUP_SUBMITTING=false;closeSetup();renderSetupPreview();loadSessionsView()},3500);
+      loadSessionsView();
     }else{
       const failed=(r.failed_instances||r.failed||[]).map(x=>esc(x.name||x.agent)+': '+esc(x.error)).join('<br>');
       const terminalOutput=r.terminal_output?'<br>终端输出: <code>'+esc(r.terminal_output)+'</code>':'';
@@ -3438,7 +3480,7 @@ function bindDelegation(){
   on('#suModeChoices',e=>{const it=e.target.closest('[data-action="setupMode"]');if(it)setupMode(it.dataset.mode)});
   on('#suAddAgent',e=>{if(e.target.closest('[data-action="setupAdd"]'))setupAddAgent()});
   on('#suAgentsList',e=>{const it=e.target.closest('[data-action="setupRemove"]');if(it)setupRemoveAgent(it.dataset.id)});
-  on('#suResult',e=>{const it=e.target.closest('[data-action="setupHerdrOnboarding"]');if(it)setupHerdrOnboarding(it.dataset.command)});
+  on('#suResult',e=>{const it=e.target.closest('[data-action]');if(!it)return;if(it.dataset.action==='setupHerdrOnboarding')setupHerdrOnboarding(it.dataset.command);else if(it.dataset.action==='setupOpenTerminal')setupOpenTerminal(it.dataset.session)});
   const setupList=document.getElementById('suAgentsList');
   if(setupList){
     setupList.addEventListener('change',e=>{const it=e.target.closest('[data-field]');if(it)setupFieldChanged(it)});

@@ -3,9 +3,16 @@ import shutil
 import threading
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import server
+
+
+@pytest.fixture(autouse=True)
+def _agent_mail_ready_for_unrelated_workspace_tests(monkeypatch):
+    """工作区单测默认聚焦各自目标；必需能力由专门用例覆盖。"""
+    monkeypatch.setattr(server, "_agent_mail_requirement", lambda: None)
 
 
 def _init_git_repo(path):
@@ -366,10 +373,26 @@ def test_attention_keeps_mail_readable_when_hub_is_down(monkeypatch):
     }
 
 
-def test_setup_workspace_succeeds_without_agent_mail(monkeypatch, tmp_path):
+def test_setup_workspace_rejects_without_required_agent_mail(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", tmp_path / "missing")
+    unavailable = {
+        "available": False,
+        "reason": "数据库不存在",
+        "read_available": False,
+        "write_available": False,
+        "write_reason": "数据库不存在",
+    }
+    monkeypatch.setattr(
+        server,
+        "_agent_mail_requirement",
+        lambda: {
+            "ok": False,
+            "code": "agent_mail_required",
+            "error": "Agent Mail 是创建工作区和添加 Agent 的必需能力：数据库不存在",
+            "agent_mail": unavailable,
+        },
+    )
     monkeypatch.setattr(
         server.herdr_client,
         "list_sessions",
@@ -378,7 +401,9 @@ def test_setup_workspace_succeeds_without_agent_mail(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server.herdr_client,
         "start_agent",
-        lambda *args, **kwargs: {"available": True, "pane_id": "w1:p2"},
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Agent Mail 不可用时不应启动 Agent")
+        ),
     )
     monkeypatch.setattr(
         server.herdr_client,
@@ -405,11 +430,44 @@ def test_setup_workspace_succeeds_without_agent_mail(monkeypatch, tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert response.json()["registered"] is False
-    assert response.json()["agent_mail"]["available"] is False
-    assert response.json()["notified"] == []
+    assert response.json()["ok"] is False
+    assert response.json()["code"] == "agent_mail_required"
+    assert response.json()["agent_mail"] == unavailable
+    assert "必需能力" in response.json()["error"]
     assert sent == []
+
+
+def test_start_agent_rejects_without_required_agent_mail(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server,
+        "_agent_mail_requirement",
+        lambda: {
+            "ok": False,
+            "code": "agent_mail_required",
+            "error": "Agent Mail 是创建工作区和添加 Agent 的必需能力：Hub 不可写",
+            "agent_mail": {"available": True, "write_available": False},
+        },
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Agent Mail 不可用时不应启动 Agent")
+        ),
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(tmp_path), "agent": "codex",
+            "name": "codex-2", "workspace": "shared",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Agent Mail" in response.json()["detail"]
 
 
 def test_setup_workspace_restarts_stopped_session(monkeypatch, tmp_path):

@@ -17,7 +17,7 @@
 
 灵感来自 [Orca](https://onorca.dev) 的 Agent Dashboard,但做成轻量 Web 应用,
 直接插进你现有的 herdr 会话。[Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail)
-集成是可选的,没装也不影响其他功能。
+是必需的协作与身份基础设施；创建工作区和添加 Agent 前必须就绪。
 
 ## 功能一览
 
@@ -26,7 +26,7 @@
 - **截图 → agent** — 上传图片自动转成 `@/path` 插入,让 agent 直接"看到"截图。
 - **待办 Inbox** — 被卡住的 agent、失败的后台任务、待审 diff、Agent Mail 未读,汇成一条可操作的队列。
 - **浏览器推送** — 在待办页开启 Web Push,点通知直达对应的 pane / 任务 / 消息。
-- **agent 间消息** — 基于 Agent Mail:收发消息、已读确认;没装 Agent Mail 时消息页自动隐藏,其余功能不受影响。
+- **agent 间消息** — 基于 Agent Mail:注册身份、收发消息、已读确认和可靠协作交接。
 - **文件浏览 + 编辑** — 白名单沙箱内浏览、编辑、下载、上传项目文件。
 - **codex 后台任务** — 发起 `codex exec` 后台任务,流式看输出,审 diff,应用或stash 改动。
 - **移动端友好** — 单文件前端自适应,支持拍照上传、触屏操作、PWA 加到主屏。
@@ -46,8 +46,8 @@ Agent Cockpit(FastAPI,与 herdr + hub 同机)
 ```
 
 部署在**和 herdr 同一台机器**上,全部本地读取,零延迟;电脑和手机只是浏览器客户端。
-Agent Mail 缺失时只隐藏消息相关视图;hub 暂时挂掉时消息只读,看板、终端、文件、任务、
-待办、推送全部照常工作。
+Agent Mail 是新建工作区和添加 Agent 的前置条件；hub 暂时挂掉时禁止新增，已有消息只读，
+现有看板、终端、文件、任务、待办和推送仍可查看与操作。
 
 ## 安装
 
@@ -56,7 +56,7 @@ Agent Mail 缺失时只隐藏消息相关视图;hub 暂时挂掉时消息只读,
 | 依赖 | 用途 |
 | --- | --- |
 | [herdr](https://herdr.dev) | 本驾驶舱可视化/控制的 agent 会话 |
-| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub(`:8765`,可选) | 待办与消息页里的跨 agent 消息 |
+| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub(`:8765`,必需) | Agent 身份、协作交接与跨 agent 消息 |
 | `codex` CLI(已登录) | 后台 `codex exec` 任务 |
 | Python 3.12+ | 运行时 |
 
@@ -154,8 +154,8 @@ set -a; source .env; set +a
 ### 会话
 
 - 列出所有 herdr session:干净重启 / resume 重启 pane、停止、删除已停止会话。
-- **+ 一键工作区**:自动 建 session → 分屏 → 启动 agents;装了 Agent Mail 时
-  还会注册身份并通知,另有 **📧 初始化通信** 一键开通 session 内全部 agent 身份。
+- **+ 一键工作区**:自动 建 session → 分屏 → 启动 agents → 注册 Agent Mail 身份并通知；
+  Agent Mail 不可用时会在创建前阻止操作。另有 **📧 初始化通信** 可修复旧 session 身份。
 - 每个 session 会持久化唯一的 Agent Mail 通信项目。同一 Git clone 的独立 worktree
   自动归到主 worktree；旧 session 只有一个已注册候选时自动迁移，零个或多个候选
   会在初始化通信时要求选择，不再用第一个 pane 的 cwd 猜测。
@@ -163,7 +163,7 @@ set -a; source .env; set +a
 ### 消息
 
 - 按项目/agent 浏览 Agent Mail 消息,可发消息、已读确认。
-- Agent Mail 未安装或 hub 离线时自动降级:已有消息只读,其余功能不受影响。
+- Agent Mail hub 离线时已有消息只读，同时禁止创建工作区和添加 Agent，避免无身份运行。
 
 ### 文件
 
@@ -253,8 +253,8 @@ CLI agent(codex、kimi、qoder)各自强大却互相看不见。herdr 把它们�
   请放在防火墙或私有网络之后。
 - **传输安全** — HTTP 不保护会话 cookie,离开完全可信的网络请上 HTTPS 或
   Tailscale Serve。
-- **Agent Mail 为可选集成** — 只读它的 SQLite,写入一律走 hub MCP API;
-  缺失时仅消息类功能自动降级。
+- **Agent Mail 为必需基础设施** — 只读它的 SQLite,写入一律走 hub MCP API；
+  不可用时保留既有会话控制，但禁止新增工作区或 Agent。
 
 ## 贡献与安全
 

@@ -218,6 +218,14 @@ def test_agent_mail_config_routes_never_expose_token(tmp_path, monkeypatch):
         "status",
         lambda: {"available": True, "reason": None},
     )
+    monkeypatch.setattr(
+        server.hub_client,
+        "public_team_config",
+        lambda: {
+            "team_hub": "http://127.0.0.1:9765",
+            "human_auth": "http://127.0.0.1:9766",
+        },
+    )
     client = TestClient(server.app)
     headers = {"authorization": "Bearer secret"}
 
@@ -225,6 +233,8 @@ def test_agent_mail_config_routes_never_expose_token(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "hub": "http://old-hub:8765",
+        "team_hub": "http://127.0.0.1:9765",
+        "human_auth": "http://127.0.0.1:9766",
         "status": {"available": True, "reason": None},
     }
     assert "top-secret" not in response.text
