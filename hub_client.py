@@ -24,6 +24,9 @@ sys.path.insert(
 from am_common import load_client_config, save_client_hub as save_client_hub  # noqa: E402
 
 HUB, TOKEN = load_client_config()
+# Team Human API 可经独立 SSH 隧道/HTTPS 入口访问远端 Hub，避免把本地
+# Agent Mail 协作流量一并切走；未配置时保持旧行为并复用 HUB。
+TEAM_HUB_URL = os.environ.get("TEAM_HUB_URL", "").strip().rstrip("/")
 HUMAN_AUTH_URL = os.environ.get("HUMAN_AUTH_URL", "http://127.0.0.1:8766").rstrip("/")
 _headers = {
     "Content-Type": "application/json",
@@ -148,6 +151,22 @@ def allows_local_actions() -> bool:
         return False
 
 
+def _team_hub_url() -> str:
+    base_url = TEAM_HUB_URL or HUB
+    parsed = urlsplit(base_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or (parsed.scheme == "http" and not _is_loopback_host(parsed.hostname))
+    ):
+        raise ValueError("Team Hub 地址必须是本机 HTTP 或 HTTPS")
+    return base_url.rstrip("/")
+
+
 def human_api(
     method: str,
     path: str,
@@ -167,11 +186,12 @@ def human_api(
         **_headers,
         "Authorization": authorization,
     }
+    base_url = _team_hub_url()
     try:
         with httpx.Client(timeout=30) as client:
             response = client.request(
                 method,
-                f"{HUB}{path}",
+                f"{base_url}{path}",
                 json=payload if method != "GET" else None,
                 headers=headers,
             )

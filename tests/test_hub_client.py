@@ -271,7 +271,8 @@ def test_human_api_forwards_ephemeral_jwt_to_fixed_hub_path(monkeypatch):
             calls.append((method, url, json, headers))
             return Response()
 
-    monkeypatch.setattr(hub_client, "HUB", "https://team.example:9765")
+    monkeypatch.setattr(hub_client, "HUB", "http://127.0.0.1:8765")
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "https://team.example:9765")
     monkeypatch.setattr(hub_client.httpx, "Client", Client)
 
     result = hub_client.human_api(
@@ -306,6 +307,20 @@ def test_human_api_rejects_missing_jwt_and_non_human_path(monkeypatch):
         hub_client.human_api("GET", "/hub/api/projects", "")
     with pytest.raises(ValueError, match="路径无效"):
         hub_client.human_api("GET", "/mcp/", "Bearer human.jwt")
+
+
+def test_human_api_rejects_plain_http_remote_team_hub(monkeypatch):
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "http://10.18.160.11:8765")
+    monkeypatch.setattr(
+        hub_client.httpx,
+        "Client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not connect")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="本机 HTTP 或 HTTPS"):
+        hub_client.human_api("GET", "/hub/api/projects", "Bearer human.jwt")
 
 
 def test_human_login_uses_loopback_issuer_and_validates_response(monkeypatch):
