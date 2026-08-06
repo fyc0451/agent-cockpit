@@ -991,6 +991,12 @@ def test_team_view_covers_project_membership_and_agent_management():
     assert "function teamShowInbox()" in js
     assert "function teamMarkInboxRead(ids)" in js
     assert "'projects','POST'" in js
+    assert "{name,slug,mention_handle:handle}" in js
+    assert "human_key:key" not in js
+    assert 'id="teamProjectName"' in HTML
+    assert 'id="teamProjectSlug"' in HTML
+    assert "本机项目不会自动同步" in js
+    assert "本机工作区中的 Agent 不会自动同步到群组" in js
     assert "/join-requests`,'POST'" in js
     assert "/membership`,'PATCH'" in js
     assert "/members/${humanId}`,'PATCH'" in js

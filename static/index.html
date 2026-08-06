@@ -1222,7 +1222,7 @@ function teamOwnerOptions(selected){
 }
 function teamAgentRows(project){
   const admin=project.membership?.role==='admin';
-  if(!TEAM.agents.length)return'<div class="empty">当前项目还没有 Agent 身份</div>';
+  if(!TEAM.agents.length)return'<div class="empty">当前群组还没有绑定远程 Agent。本机工作区中的 Agent 不会自动同步到群组。</div>';
   return TEAM.agents.map(agent=>{
     const canManage=admin||agent.owner_id===TEAM.human?.id;
     const badge=agent.retired?'<span class="team-badge retired">retired</span>':'<span class="team-badge active">active</span>';
@@ -1248,11 +1248,11 @@ function teamMemberRows(){
   }).join('');
 }
 function teamProjectPanel(project){
-  if(!project)return'<div class="empty">还没有项目。可在左侧创建第一个团队项目。</div>';
+  if(!project)return'<div class="empty">还没有团队群组。管理员可在左侧注册第一个群组；本机工作区不会自动出现在这里。</div>';
   const membership=project.membership;
   if(membership?.status!=='active'){
     const pending=membership?.status==='invited';
-    return `<div class="team-panel-head"><h3>${esc(project.slug)}</h3><span class="team-badge ${pending?'invited':''}">${esc(teamProjectStatus(project))}</span></div><div class="team-panel-body">
+    return `<div class="team-panel-head"><h3>${esc(project.name||project.slug)}</h3><span class="team-badge ${pending?'invited':''}">${esc(teamProjectStatus(project))}</span></div><div class="team-panel-body">
       ${pending?'<div class="team-status warn">加入申请已提交，等待项目管理员审批。</div>':`<div class="team-status">该项目可发现，但你还不是 active 成员。申请只会更新 Hub membership，不会创建本地工作区。</div><div class="team-inline-form"><div class="field"><label>项目内 @花名</label><input id="teamJoinHandle" value="${esc(teamHandleSeed())}" maxlength="128"></div><button class="primary" data-action="teamJoin">申请加入</button></div>`}
     </div>`;
   }
@@ -1260,8 +1260,8 @@ function teamProjectPanel(project){
   const defaultOptions='<option value="">不设置（消息进入人工收件箱）</option>'+owned.map(a=>`<option value="${Number(a.id)}"${a.id===TEAM.membership?.default_agent_id?' selected':''}>${esc(a.name)}</option>`).join('');
   const admin=membership.role==='admin';
   const activeAgents=TEAM.agents.filter(a=>!a.retired).length;
-  return `<div class="team-panel-head"><h3>${esc(project.slug)}</h3><span class="team-badge ${admin?'admin':'active'}">${admin?'管理员':'成员'}</span></div><div class="team-panel-body">
-    <div class="team-safety">共享 Hub 数据只用于团队界面；切换项目不会切换 Herdr session，也不会自动启动 Agent。</div>
+  return `<div class="team-panel-head"><h3>${esc(project.name||project.slug)}</h3><span class="team-badge ${admin?'admin':'active'}">${admin?'管理员':'成员'}</span></div><div class="team-panel-body">
+    <div class="team-safety">群组标识：${esc(project.slug)}。群组只存在于远程 Hub；切换群组不会读取或切换本机目录、Herdr session，也不会自动启动 Agent。</div>
     <div class="team-stats"><div class="team-stat"><b>${Number(project.active_member_count)||0}</b><span>active 成员</span></div><div class="team-stat"><b>${activeAgents}</b><span>active Agents</span></div><div class="team-stat"><b>${TEAM.membership?.default_agent_id?'1':'0'}</b><span>我的默认 Agent</span></div></div>
     <div class="team-section"><div class="team-section-title">我的项目身份 <span>本人可修改</span></div><div class="team-row"><div class="team-row-main"><b>${esc(TEAM.human.display_name)}</b><small>@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}</small></div><select id="teamDefaultAgent">${defaultOptions}</select><div class="team-row-actions"><button class="primary sm" data-action="teamDefault">保存默认 Agent</button></div></div></div>
     <div class="team-section"><div class="team-section-title">项目 Agents <span>owner 可停用；管理员可分配 owner</span></div>${teamAgentRows(project)}</div>
@@ -1290,9 +1290,9 @@ function teamRender(){
   document.getElementById('teamLogoutBtn').style.display='inline-block';
   document.getElementById('teamModeTabs').style.display='flex';
   teamUpdateModeUi();
-  const projects=TEAM.projects.map(project=>`<button class="team-project${project.slug===TEAM.selected?' active':''}" data-action="teamProject" data-slug="${esc(project.slug)}"><span class="team-project-name">${esc(project.slug)} <span class="team-badge ${esc(project.membership?.status||'')}">${esc(teamProjectStatus(project))}</span></span><span class="team-project-meta">${Number(project.active_member_count)||0} 位 active 成员</span></button>`).join('')||'<div class="empty">暂无项目</div>';
+  const projects=TEAM.projects.map(project=>`<button class="team-project${project.slug===TEAM.selected?' active':''}" data-action="teamProject" data-slug="${esc(project.slug)}"><span class="team-project-name">${esc(project.name||project.slug)} <span class="team-badge ${esc(project.membership?.status||'')}">${esc(teamProjectStatus(project))}</span></span><span class="team-project-meta">${esc(project.slug)} · ${Number(project.active_member_count)||0} 位 active 成员</span></button>`).join('')||'<div class="empty">暂无群组；本机项目不会自动同步</div>';
   const panel=TEAM.mode==='inbox'?teamInboxPanel():teamProjectPanel(teamSelectedProject());
-  document.getElementById('teamContent').innerHTML=`<div class="team-shell"><aside class="team-side"><div class="team-side-head"><h3>项目</h3><span class="team-badge">${TEAM.projects.length}</span></div><div class="team-project-list">${projects}</div><details class="team-create"><summary>＋ 管理员创建项目（群组）</summary><div class="field"><label>项目标识</label><input id="teamProjectKey" placeholder="例如 agent-cockpit" maxlength="255"></div><div class="field"><label>你的项目内 @花名</label><input id="teamProjectHandle" value="${esc(teamHandleSeed())}" maxlength="128"></div><button class="primary sm" data-action="teamCreate">创建项目</button></details></aside><main class="team-main">${panel}</main></div>`;
+  document.getElementById('teamContent').innerHTML=`<div class="team-shell"><aside class="team-side"><div class="team-side-head"><h3>团队群组</h3><span class="team-badge">${TEAM.projects.length}</span></div><div class="team-project-list">${projects}</div><details class="team-create"><summary>＋ 管理员注册群组</summary><div class="field"><label>群组名称</label><input id="teamProjectName" placeholder="例如 Agent Cockpit 团队" maxlength="255"></div><div class="field"><label>群组标识</label><input id="teamProjectSlug" placeholder="例如 agent-cockpit" maxlength="128"></div><div class="field"><label>你的群组内 @花名</label><input id="teamProjectHandle" value="${esc(teamHandleSeed())}" maxlength="128"></div><button class="primary sm" data-action="teamCreate">注册群组</button></details></aside><main class="team-main">${panel}</main></div>`;
 }
 function teamShowProjects(){TEAM.mode='projects';teamRender()}
 async function teamShowInbox(){TEAM.mode='inbox';document.getElementById('teamContent').innerHTML='<div class="empty">加载人工收件箱…</div>';await teamLoadInbox();teamRender()}
@@ -1302,7 +1302,7 @@ async function teamMutation(success,operation){
   TEAM.mutating=true;
   try{await operation();toast(success);await teamLoad(true)}catch(e){toast(success+'失败: '+e,5000)}finally{TEAM.mutating=false}
 }
-function teamCreateProject(){const key=document.getElementById('teamProjectKey')?.value.trim(),handle=document.getElementById('teamProjectHandle')?.value.trim();if(!key||!handle){toast('请填写项目标识和 @花名');return}teamMutation('项目已创建',async()=>{const p=await teamApi('projects','POST',{human_key:key,mention_handle:handle});TEAM.selected=p.slug})}
+function teamCreateProject(){const name=document.getElementById('teamProjectName')?.value.trim(),slug=document.getElementById('teamProjectSlug')?.value.trim().toLowerCase(),handle=document.getElementById('teamProjectHandle')?.value.trim();if(!name||!slug||!handle){toast('请填写群组名称、标识和 @花名');return}if(!/^[a-z0-9][a-z0-9_-]{0,127}$/.test(slug)){toast('群组标识只能包含小写字母、数字、下划线和连字符');return}teamMutation('群组已注册',async()=>{const p=await teamApi('projects','POST',{name,slug,mention_handle:handle});TEAM.selected=p.slug})}
 function teamJoin(){const project=teamSelectedProject(),handle=document.getElementById('teamJoinHandle')?.value.trim();if(!project||!handle){toast('请填写项目内 @花名');return}teamMutation('加入申请已提交',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/join-requests`,'POST',{mention_handle:handle}))}
 function teamSetDefault(){const project=teamSelectedProject(),value=document.getElementById('teamDefaultAgent')?.value;if(!project)return;teamMutation('默认 Agent 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/membership`,'PATCH',{default_agent_id:value?Number(value):null}))}
 function teamSetOwner(agentId){const project=teamSelectedProject(),value=document.getElementById('teamOwner-'+agentId)?.value;if(!project)return;teamMutation('Agent owner 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agents/${agentId}`,'PATCH',{owner_id:value?Number(value):null}))}
