@@ -89,6 +89,78 @@ def _notification_identity(name: str, project_key: str) -> tuple[str, str] | Non
     return None
 
 
+def _registry_identities(project_key: str) -> list[dict]:
+    directory = REGISTRY_DIR / slugify(project_key)
+    identities: list[dict] = []
+    if not directory.is_dir():
+        return identities
+    for path in sorted(directory.glob("*.json")):
+        try:
+            identity = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if isinstance(identity, dict) and identity.get("project_key") == project_key:
+            identities.append(identity)
+    return identities
+
+
+def _resolve_registry_recipients(recipients: list[str], project_key: str) -> list[str]:
+    """把 agent 类型/类型-实例别名改写为本项目唯一注册的 registry 花名。
+
+    Hub 收件人只接受注册花名；直接写 agent 类型（如 qodercn）会被 Hub
+    的收件人启发式校验拒绝。本函数在发送前做本地防呆：
+    - 已是注册花名：原样保留；
+    - 类型或 类型-实例 别名且本项目 registry 唯一命中：改写为花名；
+    - 别名命中多个身份：报错并列出候选花名；
+    - 无命中：原样透传，交给 Hub 校验。
+    边界：只读本机 registry；在其他机器注册、本机无条目的身份无法解析，
+    会原样透传给 Hub。
+    """
+    identities = _registry_identities(project_key)
+    if not identities:
+        return recipients
+    registered = {
+        str(identity.get("name"))
+        for identity in identities
+        if identity.get("name")
+    }
+    resolved: list[str] = []
+    for recipient in recipients:
+        if recipient in registered:
+            resolved.append(recipient)
+            continue
+        matches = [
+            identity for identity in identities
+            if isinstance(identity.get("agent"), str) and identity["agent"]
+            and (
+                recipient == identity["agent"]
+                or (
+                    isinstance(identity.get("instance"), str)
+                    and identity["instance"]
+                    and recipient == f"{identity['agent']}-{identity['instance']}"
+                )
+            )
+        ]
+        if len(matches) > 1:
+            options = ", ".join(
+                str(identity.get("name")) for identity in matches
+            )
+            raise SystemExit(
+                f"error: 收件人 '{recipient}' 对应多个注册身份（{options}），"
+                "请改用精确花名"
+            )
+        name = str((matches[0].get("name") or "") if matches else "")
+        if matches and name and name != recipient:
+            print(
+                f"note: 收件人 '{recipient}' 改写为注册花名 '{name}'",
+                file=sys.stderr,
+            )
+            resolved.append(name)
+        else:
+            resolved.append(recipient)
+    return resolved
+
+
 def _load_bindings() -> dict:
     try:
         with open(MAIL_PROJECTS_PATH, encoding="utf-8") as handle:
@@ -297,6 +369,7 @@ def main() -> None:
         raise SystemExit("error: 正文为空（--body 或 stdin 管道）")
     identity, hub, token = load_identity(args.agent, args.instance, args.project)
     recipients = [item.strip() for item in args.to.split(",") if item.strip()]
+    recipients = _resolve_registry_recipients(recipients, identity["project_key"])
     try:
         supersedes = [int(item) for item in args.supersedes.split(",") if item.strip()]
     except ValueError:

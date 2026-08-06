@@ -597,3 +597,82 @@ def test_mail_recv_ack_failure_keeps_processed_receipt_and_retry_suppresses_body
     assert "只执行一次" not in retried
     assert "no actionable messages" in retried
     assert coordination.receipt(str(tmp_path), "kimi-main", 41)["ack_pending"] == 0
+
+
+def _write_registry(tmp_path, module, identities):
+    registry = tmp_path / module.slugify(PROJECT)
+    registry.mkdir(parents=True, exist_ok=True)
+    for identity in identities:
+        name = identity["name"]
+        path = registry / f"{identity['agent']}--{identity['instance']}.json"
+        path.write_text(json.dumps({"project_key": PROJECT, **identity}))
+    module.REGISTRY_DIR = tmp_path
+
+
+def test_resolve_recipients_maps_agent_type_to_unique_flower_name(tmp_path):
+    module = _load_mail_send()
+    _write_registry(tmp_path, module, [
+        {"name": "qodercn-main", "agent": "qodercn", "instance": "main"},
+    ])
+    assert module._resolve_registry_recipients(["qodercn"], PROJECT) == ["qodercn-main"]
+
+
+def test_resolve_recipients_maps_type_instance_alias(tmp_path):
+    module = _load_mail_send()
+    _write_registry(tmp_path, module, [
+        {"name": "qodercn-main", "agent": "qodercn", "instance": "main"},
+    ])
+    assert module._resolve_registry_recipients(["qodercn-main"], PROJECT) == ["qodercn-main"]
+
+
+def test_resolve_recipients_passes_known_flower_name_through(tmp_path):
+    module = _load_mail_send()
+    _write_registry(tmp_path, module, [
+        {"name": "WindyBarn", "agent": "claude", "instance": "main"},
+    ])
+    assert module._resolve_registry_recipients(["WindyBarn"], PROJECT) == ["WindyBarn"]
+
+
+def test_resolve_recipients_passes_unknown_name_through(tmp_path):
+    module = _load_mail_send()
+    _write_registry(tmp_path, module, [
+        {"name": "qodercn-main", "agent": "qodercn", "instance": "main"},
+    ])
+    assert module._resolve_registry_recipients(["codex"], PROJECT) == ["codex"]
+
+
+def test_resolve_recipients_ambiguous_type_raises(tmp_path):
+    module = _load_mail_send()
+    _write_registry(tmp_path, module, [
+        {"name": "qodercn-main", "agent": "qodercn", "instance": "main"},
+        {"name": "qodercn-rev", "agent": "qodercn", "instance": "rev"},
+    ])
+    with pytest.raises(SystemExit):
+        module._resolve_registry_recipients(["qodercn"], PROJECT)
+
+
+def test_resolve_recipients_no_registry_dir_passthrough(tmp_path):
+    module = _load_mail_send()
+    module.REGISTRY_DIR = tmp_path / "absent"
+    assert module._resolve_registry_recipients(["qodercn"], PROJECT) == ["qodercn"]
+
+
+def test_resolve_recipients_mixed_list(tmp_path):
+    module = _load_mail_send()
+    _write_registry(tmp_path, module, [
+        {"name": "qodercn-main", "agent": "qodercn", "instance": "main"},
+        {"name": "DarkBrook", "agent": "grok", "instance": "main"},
+    ])
+    assert module._resolve_registry_recipients(
+        ["qodercn", "DarkBrook"], PROJECT
+    ) == ["qodercn-main", "DarkBrook"]
+
+
+def test_resolve_recipients_skips_entries_missing_agent_or_instance(tmp_path):
+    module = _load_mail_send()
+    _write_registry(tmp_path, module, [
+        {"name": "BrokenEntry", "agent": None, "instance": None},
+        {"name": "qodercn-main", "agent": "qodercn", "instance": "main"},
+    ])
+    assert module._resolve_registry_recipients(["None-None"], PROJECT) == ["None-None"]
+    assert module._resolve_registry_recipients(["qodercn"], PROJECT) == ["qodercn-main"]
