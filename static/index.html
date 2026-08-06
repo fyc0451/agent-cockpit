@@ -2941,7 +2941,9 @@ function openTermWS(id,xterm,replay){
     }else{
       const st=xterm._lightAdapt;
       if(st&&st.carry){xterm.write(st.carry);st.carry=''}
-      if(typeof ev.data==='string')xterm.write(ev.data);else xterm.write(new Uint8Array(ev.data));
+      // 暗色模式:对过暗前景色做最低对比度提升(qoder 等暗色主题 CLI)
+      const s2=darkTermBoost(xterm,typeof ev.data==='string'?ev.data:new Uint8Array(ev.data),typeof ev.data!=='string');
+      if(s2)xterm.write(s2);
     }
   }catch(e){}};
   ws.onclose=ev=>{const taken=ev.code===4001,invalid=ev.code===4004;try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请重新登录]\x1b[0m\r\n':taken?'\r\n\x1b[36m[终端已由更新的页面接管]\x1b[0m\r\n':invalid?'\r\n\x1b[36m[旧终端已失效，正在自动恢复]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(invalid&&inst&&inst.ws===ws&&!inst.closing)setTimeout(()=>recoverInvalidTerm(id),0);else if(ev.code!==1008&&!taken&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
@@ -3631,6 +3633,44 @@ function lightTermAdapt(xterm,data,binary){
   // OSC 10/11 设置默认前景/背景:浅色模式下丢弃(保留查询和重置),防止 TUI 把默认底刷黑
   s=s.replace(/\x1b\]1[01];[^?\x07\x1b][^\x07\x1b]*(\x07|\x1b\\)/g,'');
   return s;
+}
+// 暗色模式最低对比度提升:部分 CLI(如 qoder 思考文本/边框 38;2;60;60;57m)
+// 在黑底上完全不可读。流式重写 SGR 38;2/38;5 前景色到最低亮度,保色相,
+// 不碰背景色(48;*)与基本语义色。
+const DARK_BOOST_MIN_LUMA=115;
+function _darkBoostFg(r,g,b){
+  const luma=0.2126*r+0.7152*g+0.0722*b;
+  if(luma>=DARK_BOOST_MIN_LUMA)return null;
+  const k=Math.min(4,DARK_BOOST_MIN_LUMA/Math.max(1,luma));
+  return [Math.min(255,Math.round(r*k)),Math.min(255,Math.round(g*k)),Math.min(255,Math.round(b*k))];
+}
+function _darkBoostRewriteSgr(full,params){
+  if(!params)return full;
+  const parts=params.split(';');
+  let changed=false;
+  for(let i=0;i<parts.length;i++){
+    if(parts[i]==='38'&&parts[i+1]==='2'&&parts.length>=i+5){
+      const lifted=_darkBoostFg(+parts[i+2],+parts[i+3],+parts[i+4]);
+      if(lifted){parts[i+2]=String(lifted[0]);parts[i+3]=String(lifted[1]);parts[i+4]=String(lifted[2]);changed=true}
+      i+=4;
+    }else if(parts[i]==='38'&&parts[i+1]==='5'&&parts.length>=i+3){
+      // 灰阶 232-255(232 最暗):低于阈值的灰统一提到 245(≈138 luma)
+      const n=+parts[i+2];
+      if(n>=232&&n<245){parts[i+2]='245';changed=true}
+      i+=2;
+    }
+  }
+  return changed?'\x1b['+parts.join(';')+'m':full;
+}
+function darkTermBoost(xterm,data,binary){
+  let st=xterm._darkBoost;
+  if(!st)st=xterm._darkBoost={carry:'',dec:new TextDecoder('utf-8')};
+  let s=binary?st.dec.decode(data,{stream:true}):data;
+  s=st.carry+s;
+  const split=_escTailSplit(s);s=split[0];st.carry=split[1];
+  if(!s)return'';
+  if(!s.includes('38;'))return s;  // 快速路径:无扩展前景色
+  return s.replace(/\x1b\[([0-9;]*)m/g,_darkBoostRewriteSgr);
 }
 function setTheme(mode,save=true){
   const light=mode==='light';

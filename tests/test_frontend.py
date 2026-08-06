@@ -1495,3 +1495,37 @@ def test_team_collab_send_failure_keeps_draft_with_inline_error():
     assert "teamCollabError" in send
     assert "内容已保留，可重试" in send
     assert "toast('团队消息发送失败" not in send
+
+
+def test_terminal_dark_mode_min_contrast_boost_exists():
+    # 暗色模式最低对比度提升:qoder 等 CLI 的过暗前景色(如 60,60,57)在黑底不可读
+    js = _inline_js()
+    assert "function darkTermBoost(xterm,data,binary){" in js
+    assert "DARK_BOOST_MIN_LUMA=115" in js
+    assert "function _darkBoostRewriteSgr(full,params){" in js
+    assert "xterm._darkBoost" in js
+    # 只提升前景(38;*),不碰背景(48;*)
+    boost = js.split("function _darkBoostRewriteSgr(full,params){", 1)[1].split(
+        "function darkTermBoost", 1
+    )[0]
+    assert "parts[i]==='38'&&parts[i+1]==='2'" in boost
+    assert "parts[i]==='38'&&parts[i+1]==='5'" in boost
+    assert "48;" not in boost.replace("parts[i]==='38'", "")
+
+
+def test_terminal_dark_boost_wired_in_ws_dark_branch():
+    js = _inline_js()
+    onmessage = js.split("ws.onmessage=ev=>{try{", 1)[1].split("ws.onclose", 1)[0]
+    dark = onmessage.split("}else{", 1)[1]
+    assert "darkTermBoost(xterm" in dark
+    assert "xterm.write(s2)" in dark
+
+
+def test_terminal_dark_boost_stream_safe_with_carry():
+    js = _inline_js()
+    fn = js.split("function darkTermBoost(xterm,data,binary){", 1)[1].split(
+        "// ============", 1
+    )[0]
+    assert "carry" in fn
+    assert "_escTailSplit" in fn
+    assert "includes('38;')" in fn  # 快速路径
