@@ -1041,7 +1041,8 @@ def test_terminal_collab_supports_real_team_messages_with_context():
     assert "@团队 · ${esc(project.name||project.slug)}" in js
     assert "member.status==='active'" in js
     assert "member.human_id!==TEAM.human?.id" in js
-    assert "TEAM.membership.default_agent_id" in js
+    assert "'以你的 Human 身份发出'" in js
+    assert "请先为 ${esc(project.name||project.slug)} 设置自己的默认 Agent" not in js
     assert "support-requests`,'POST',payload" in js
     assert "payload.mention_handles=[TEAM_COLLAB_TARGET.handle]" in js
     assert "终端上下文（由 Cockpit 自动附带）" in js
