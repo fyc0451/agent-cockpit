@@ -244,7 +244,7 @@ def claim_agent(
         ("project_slug", project_slug),
         ("source_project_slug", source_project_slug),
     ):
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value):
             raise ValueError(f"{label} 无效")
     if not isinstance(registration_token, str) or not registration_token:
         raise ValueError("registration_token 无效")

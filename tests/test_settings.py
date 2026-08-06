@@ -725,7 +725,7 @@ def test_claim_identity_rejects_identity_with_invalid_project_slug(
     tmp_path, monkeypatch
 ):
     server, client, headers, project_dir = _make_registry(tmp_path, monkeypatch)
-    _write_identity(project_dir / "qodercn--main.json", project_slug="bad slug!x")
+    _write_identity(project_dir / "qodercn--main.json", project_slug="bad.slug")
     called = []
     monkeypatch.setattr(
         server.hub_client,
@@ -809,8 +809,9 @@ def test_claim_identity_requires_valid_project_slug(tmp_path, monkeypatch):
         lambda **kwargs: called.append(kwargs) or {"agent": {"name": "x", "id": 1}},
     )
 
-    response = _claim(client, headers, project_slug="../escape")
-    assert response.status_code == 400
+    for project_slug in ("../escape", "demo.project"):
+        response = _claim(client, headers, project_slug=project_slug)
+        assert response.status_code == 400
     assert called == []
 
 

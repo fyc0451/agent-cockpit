@@ -1300,7 +1300,7 @@ def _read_registry_entry(entry: Path, resolved_root: Path) -> dict[str, Any] | N
             return None
         project_slug = data.get("project_slug")
         if not isinstance(project_slug, str) or not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", project_slug
+            r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project_slug
         ):
             return None
         token = data.get("registration_token")
@@ -1370,7 +1370,7 @@ def api_team_local_identity_claim(req: LocalIdentityClaimReq, request: Request):
         raise HTTPException(400, str(exc)) from exc
     except hub_client.HumanAuthError as exc:
         _raise_human_auth_error(exc)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", req.project_slug):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", req.project_slug):
         raise HTTPException(400, "project_slug 无效")
     identity = _registry_identity(req.identity_id)
     if identity is None:
