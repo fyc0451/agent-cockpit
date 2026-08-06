@@ -729,6 +729,116 @@ def test_resolve_recipients_passes_known_flower_name_through(tmp_path):
     assert module._resolve_registry_recipients(["WindyBarn"], PROJECT) == ["WindyBarn"]
 
 
+def _run_send_main(module, monkeypatch, tmp_path, recipients, calls):
+    identity = {
+        "project_key": str(tmp_path.resolve()),
+        "name": "codex-main",
+        "registration_token": "registration-secret",
+    }
+    monkeypatch.setattr(module, "load_identity", lambda *_args: (identity, "hub", "token"))
+    monkeypatch.setattr(
+        module.coordination, "prepare_metadata", lambda **_kwargs: ({"v": 1}, []),
+    )
+    monkeypatch.setattr(
+        module.coordination,
+        "add_metadata",
+        lambda body, _meta: "[agent-cockpit-meta]internal[/agent-cockpit-meta]\n" + body,
+    )
+    monkeypatch.setattr(module.coordination, "register_message", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        module, "mcp_call", lambda *_args, **_kwargs: calls.append(("initialize", None)),
+    )
+
+    def tool(_hub, _token, name, arguments):
+        calls.append((name, arguments))
+        return {"deliveries": [{
+            "payload": {"id": 11, "to": list(arguments["to"]), "thread_id": None},
+        }]}
+
+    def team_reply(payload):
+        calls.append(("team_reply", payload))
+        return {"status": "delivered", "message_id": 12, "deliveries": [{
+            "name": name, "status": "delivered_human_inbox", "reason": None,
+        } for name in payload["mention_handles"]]}
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    monkeypatch.setattr(module, "_team_reply", team_reply)
+    monkeypatch.setattr(module.sys, "argv", [
+        "mail-send", "--agent", "codex", "--project", str(tmp_path),
+        "--to", recipients, "--subject", "测试", "--body", "正文", "--no-notify",
+        "--idempotency-key", "stable-retry-key",
+    ])
+    module.main()
+
+
+def test_mail_send_explicit_human_recipient_uses_only_cockpit_proxy(
+    monkeypatch, tmp_path, capsys,
+):
+    module = _load_mail_send()
+    calls = []
+
+    _run_send_main(module, monkeypatch, tmp_path, "@fyc-mac", calls)
+
+    assert [name for name, _args in calls] == ["team_reply"]
+    payload = calls[0][1]
+    assert payload["mail_project"] == str(tmp_path.resolve())
+    assert payload["sender_name"] == "codex-main"
+    assert payload["mention_handles"] == ["fyc-mac"]
+    assert payload["idempotency_key"] == "stable-retry-key"
+    assert payload["body_md"] == "正文"
+    output = capsys.readouterr()
+    assert "@fyc-mac -> Team" in output.out
+    assert "registration-secret" not in output.out + output.err
+
+
+def test_mail_send_mixed_recipients_split_local_agent_and_remote_human(
+    monkeypatch, tmp_path,
+):
+    module = _load_mail_send()
+    calls = []
+
+    _run_send_main(module, monkeypatch, tmp_path, "kimi-main,@fyc-mac", calls)
+
+    assert [name for name, _args in calls] == [
+        "initialize", "send_message", "team_reply",
+    ]
+    assert calls[1][1]["to"] == ["kimi-main"]
+    assert calls[1][1]["body_md"].startswith("[agent-cockpit-meta]")
+    assert calls[2][1]["mention_handles"] == ["fyc-mac"]
+    assert calls[2][1]["body_md"] == "正文"
+
+
+def test_team_reply_retry_reuses_exact_request_body(monkeypatch):
+    module = _load_mail_send()
+    seen = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read(_limit):
+            return b'{"status":"already_delivered","message_id":12,"deliveries":[]}'
+
+    def urlopen(request, timeout):
+        assert timeout == 35
+        seen.append(request.data)
+        if len(seen) == 1:
+            raise urllib.error.URLError("temporary")
+        return Response()
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    payload = {"idempotency_key": "same-key", "registration_token": "secret"}
+
+    result = module._team_reply(payload)
+
+    assert result["status"] == "already_delivered"
+    assert seen == [seen[0], seen[0]]
+
+
 def test_resolve_recipients_passes_unknown_name_through(tmp_path):
     module = _load_mail_send()
     _write_registry(tmp_path, module, [

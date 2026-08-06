@@ -5,10 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
+import uuid
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS_DIR)
@@ -22,6 +26,7 @@ import coordination  # noqa: E402
 HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
 MAIL_RECV_BIN = os.path.join(TOOLS_DIR, "mail-recv")
 MAIL_PROJECTS_PATH = os.path.expanduser("~/dashboard-data/mail-projects.json")
+TEAM_REPLY_URL = "http://127.0.0.1:8790/api/agent/team-reply"
 PROG_TO_AGENT = {
     "codex-cli": "codex", "codex": "codex",
     "kimi-work": "kimi", "kimi": "kimi",
@@ -159,6 +164,40 @@ def _resolve_registry_recipients(recipients: list[str], project_key: str) -> lis
         else:
             resolved.append(recipient)
     return resolved
+
+
+def _team_reply(payload: dict) -> dict:
+    """经本机 Cockpit 代理远端 Team Hub；同幂等键最多重试一次。"""
+    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    last_error = ""
+    for attempt in range(2):
+        request = urllib.request.Request(
+            TEAM_REPLY_URL,
+            data=encoded,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=35) as response:
+                raw = response.read(1024 * 1024).decode("utf-8")
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                raise ValueError("响应格式无效")
+            return result
+        except urllib.error.HTTPError as exc:
+            try:
+                error_data = json.loads(exc.read(16 * 1024).decode("utf-8"))
+            except (UnicodeError, ValueError):
+                error_data = None
+            detail = error_data.get("detail") if isinstance(error_data, dict) else None
+            last_error = str(detail or f"HTTP {exc.code}")
+            if exc.code not in {502, 503, 504} or attempt:
+                break
+        except (urllib.error.URLError, TimeoutError, OSError, UnicodeError, ValueError) as exc:
+            last_error = exc.reason if isinstance(exc, urllib.error.URLError) else str(exc)
+            if attempt:
+                break
+    raise SystemExit(f"团队回复失败: {last_error or '本机 Cockpit 不可用'}")
 
 
 def _load_bindings() -> dict:
@@ -358,6 +397,7 @@ def main() -> None:
     parser.add_argument("--intent", default="info", choices=sorted(coordination.INTENTS))
     parser.add_argument("--supersedes", default="", help="被本消息替代的 message_id，逗号分隔")
     parser.add_argument("--expires-in", type=float, default=None, help="仅 info/review 可用，单位秒")
+    parser.add_argument("--idempotency-key", default="", help="团队回复重试时复用的幂等键")
     parser.add_argument("--ack", action="store_true")
     parser.add_argument("--no-notify", action="store_true")
     args = parser.parse_args()
@@ -368,8 +408,26 @@ def main() -> None:
     if not body.strip():
         raise SystemExit("error: 正文为空（--body 或 stdin 管道）")
     identity, hub, token = load_identity(args.agent, args.instance, args.project)
-    recipients = [item.strip() for item in args.to.split(",") if item.strip()]
-    recipients = _resolve_registry_recipients(recipients, identity["project_key"])
+    raw_recipients = [item.strip() for item in args.to.split(",") if item.strip()]
+    human_recipients: list[str] = []
+    agent_recipients: list[str] = []
+    for recipient in raw_recipients:
+        if recipient.startswith("@"):
+            handle = recipient[1:]
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", handle):
+                raise SystemExit(f"error: 团队成员花名无效: {recipient}")
+            if handle.lower() not in {item.lower() for item in human_recipients}:
+                human_recipients.append(handle)
+        else:
+            agent_recipients.append(recipient)
+    agent_recipients = _resolve_registry_recipients(
+        agent_recipients, identity["project_key"],
+    )
+    recipients = [*agent_recipients, *(f"@{item}" for item in human_recipients)]
+    if not recipients:
+        raise SystemExit("error: 收件人为空")
+    if args.idempotency_key and not 1 <= len(args.idempotency_key.strip()) <= 128:
+        raise SystemExit("error: --idempotency-key 长度必须为 1-128")
     try:
         supersedes = [int(item) for item in args.supersedes.split(",") if item.strip()]
     except ValueError:
@@ -384,29 +442,69 @@ def main() -> None:
         raise SystemExit(f"error: {exc}")
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
+    human_body = body
     body = coordination.add_metadata(body, meta)
-    mcp_call(hub, token, "initialize", {
-        "protocolVersion": "2025-03-26",
-        "capabilities": {},
-        "clientInfo": {"name": "mail-send", "version": "1.0"},
-    })
-    result = mcp_tool(hub, token, "send_message", {
-        "project_key": identity["project_key"],
-        "sender_name": identity["name"],
-        "sender_token": identity["registration_token"],
-        "to": recipients,
-        "subject": args.subject,
-        "body_md": body,
-        "thread_id": args.thread or None,
-        "importance": args.importance,
-        "ack_required": args.ack,
-        "auto_contact_if_blocked": True,
-    })
+    result = {"deliveries": []}
+    if agent_recipients:
+        mcp_call(hub, token, "initialize", {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "mail-send", "version": "1.0"},
+        })
+        result = mcp_tool(hub, token, "send_message", {
+            "project_key": identity["project_key"],
+            "sender_name": identity["name"],
+            "sender_token": identity["registration_token"],
+            "to": agent_recipients,
+            "subject": args.subject,
+            "body_md": body,
+            "thread_id": args.thread or None,
+            "importance": args.importance,
+            "ack_required": args.ack,
+            "auto_contact_if_blocked": True,
+        })
+    if human_recipients:
+        reply_key = args.idempotency_key.strip() or uuid.uuid4().hex
+        team_result = _team_reply({
+            "mail_project": identity["project_key"],
+            "sender_name": identity["name"],
+            "registration_token": identity["registration_token"],
+            "mention_handles": human_recipients,
+            "subject": args.subject,
+            "body_md": human_body,
+            "importance": args.importance,
+            "idempotency_key": reply_key,
+        })
+        outcomes = team_result.get("deliveries")
+        if not isinstance(outcomes, list) or not outcomes:
+            raise SystemExit(
+                f"团队回复状态无效（重试键: {reply_key}）"
+            )
+        failed = False
+        for outcome in outcomes:
+            if not isinstance(outcome, dict):
+                failed = True
+                continue
+            status = str(outcome.get("status") or "")
+            handle = str(outcome.get("name") or "")
+            if status in {"delivered", "delivered_human_inbox", "already_delivered"}:
+                print(f"sent: @{handle} -> Team [{status}]")
+            else:
+                failed = True
+                print(
+                    f"warning: @{handle} 未送达({outcome.get('reason') or status})",
+                    file=sys.stderr,
+                )
+        if failed:
+            raise SystemExit(f"团队回复未全部送达（重试键: {reply_key}）")
     deliveries = result.get("deliveries") or []
     for delivery in deliveries:
         payload = delivery.get("payload", {})
         message_id = payload.get("id")
-        print(f"sent: #{message_id} -> {args.to}  [{payload.get('thread_id') or '-'}]")
+        print(
+            f"sent: #{message_id} -> {','.join(agent_recipients)}  "
+            f"[{payload.get('thread_id') or '-'}]"
+        )
         if message_id is not None:
             try:
                 coordination.register_message(
@@ -451,7 +549,7 @@ def main() -> None:
                     f"warning: 消息 #{message_id} 已发送，但通知 {recipient} 失败: {exc}",
                     file=sys.stderr,
                 )
-    if not deliveries:
+    if agent_recipients and not deliveries:
         print(json.dumps(result, ensure_ascii=False)[:300])
 
 

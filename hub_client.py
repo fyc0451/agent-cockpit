@@ -219,6 +219,44 @@ def human_api(
     return data
 
 
+def session_lead_reply(
+    project_slug: str, payload: dict[str, Any],
+) -> dict[str, Any]:
+    """用 binding-scoped capability 调用 Team Hub 回复接口。
+
+    该路径不传 Human JWT 或全局 Hub token；reply_token 只在本次
+    HTTPS/可信内网请求体中使用，不写日志。
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project_slug):
+        raise ValueError("project_slug 无效")
+    if not isinstance(payload, dict):
+        raise ValueError("回复请求无效")
+    base_url = _team_hub_url()
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.post(
+                f"{base_url}/hub/api/projects/{quote(project_slug, safe='')}/session-lead/reply",
+                json=payload,
+                headers=_headers,
+            )
+    except httpx.HTTPError as exc:
+        raise HumanAPIError(502, "Hub 回复请求失败") from exc
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if response.is_error:
+        # capability 错误不向本地 Agent 区分 token/binding 细节。
+        detail = "Invalid reply credentials" if response.status_code == 403 else None
+        raise HumanAPIError(
+            response.status_code,
+            str(detail or f"Hub 回复失败(HTTP {response.status_code})"),
+        )
+    if not isinstance(data, dict):
+        raise HumanAPIError(502, "Hub 返回了无效的回复结果")
+    return data
+
+
 def claim_agent(
     *,
     authorization: str,

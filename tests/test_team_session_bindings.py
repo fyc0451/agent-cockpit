@@ -85,7 +85,11 @@ def _human_api(membership=None, calls=None):
         if path == "/hub/api/projects/demo/membership" and method == "GET":
             return dict(membership)
         if path.endswith("/session-lead") and method == "PUT":
-            return {"active": True, "agent": {"id": 41, "name": "SessionLead41"}}
+            return {
+                "active": True,
+                "agent": {"id": 41, "name": "SessionLead41"},
+                "reply_token": "reply-secret",
+            }
         if path.endswith("/session-lead") and method == "DELETE":
             return {"ok": True, "active": False}
         raise AssertionError((method, path, payload))
@@ -218,6 +222,76 @@ def test_bind_creates_managed_lead_and_saves_local_mapping(monkeypatch):
     assert saved[0]["mail_project"] == PROJECT_KEY
     assert saved[0]["client_session_id"] == put[3]["client_session_id"]
     assert saved[0]["lead"]["participant_id"] == "lead"
+    assert saved[0]["reply_token"] == "reply-secret"
+    assert "reply-secret" not in response.text
+
+
+def test_reusing_binding_preserves_one_time_reply_token(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    calls = []
+    regular = _human_api(calls=calls)
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+        reply_token="one-time-secret",
+    )
+
+    def reuse_without_plaintext(method, path, authorization, payload=None):
+        if method == "PUT" and path.endswith("/session-lead"):
+            calls.append((method, path, authorization, payload))
+            return {"active": True, "agent": {"id": 41}}
+        return regular(method, path, authorization, payload)
+
+    monkeypatch.setattr(server.hub_client, "human_api", reuse_without_plaintext)
+
+    response = client.put(
+        "/api/team-auth/session-bindings/demo",
+        headers=headers,
+        json={"session": "demo"},
+    )
+
+    assert response.status_code == 200
+    put = next(call for call in calls if call[0] == "PUT")
+    assert "rotate_reply_token" not in put[3]
+    saved = team_sessions.list_bindings(HUB, 7)
+    assert saved[0]["reply_token"] == "one-time-secret"
+
+
+def test_binding_without_local_capability_forces_rotation(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    calls = []
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+    )
+
+    response = client.put(
+        "/api/team-auth/session-bindings/demo",
+        headers=headers,
+        json={"session": "demo"},
+    )
+
+    assert response.status_code == 200
+    put = next(call for call in calls if call[0] == "PUT")
+    assert put[3]["rotate_reply_token"] is True
+    assert team_sessions.list_bindings(HUB, 7)[0]["reply_token"] == "reply-secret"
 
 
 def test_bind_requires_active_membership_before_remote_create(monkeypatch):
@@ -389,6 +463,9 @@ def test_failed_replace_restores_previous_project_route(monkeypatch):
     assert [row["project_slug"] for row in team_sessions.list_bindings(HUB, 7)] == [
         "other"
     ]
+    restored = team_sessions.list_bindings(HUB, 7)[0]
+    assert restored["reply_token"] == "reply-secret"
+    assert remote_calls[-1][3]["rotate_reply_token"] is True
 
 
 def test_unbind_only_removes_route_and_deactivates_managed_lead(monkeypatch):

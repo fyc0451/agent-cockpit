@@ -377,6 +377,78 @@ def test_human_api_allows_plain_http_private_team_hub(monkeypatch):
     )
 
 
+def test_session_lead_reply_uses_capability_without_authorization(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+        status_code = 201
+
+        @staticmethod
+        def json():
+            return {"status": "delivered", "message_id": 9, "deliveries": []}
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["timeout"] == 30
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url, json, headers):
+            calls.append((url, json, headers))
+            return Response()
+
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "http://10.18.160.11:8765")
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+    payload = {"client_session_id": "session-1", "reply_token": "reply-secret"}
+
+    result = hub_client.session_lead_reply("core", payload)
+
+    assert result["message_id"] == 9
+    assert calls[0][0].endswith("/hub/api/projects/core/session-lead/reply")
+    assert calls[0][1] == payload
+    assert "Authorization" not in calls[0][2]
+
+
+def test_session_lead_reply_hides_remote_credential_detail(monkeypatch):
+    class Response:
+        is_error = True
+        status_code = 403
+
+        @staticmethod
+        def json():
+            return {"detail": "token reply-secret belongs to binding 7"}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "http://10.18.160.11:8765")
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+
+    with pytest.raises(hub_client.HumanAPIError) as caught:
+        hub_client.session_lead_reply(
+            "core", {"client_session_id": "session-1", "reply_token": "reply-secret"},
+        )
+
+    assert caught.value.status_code == 403
+    assert caught.value.detail == "Invalid reply credentials"
+    assert "reply-secret" not in str(caught.value)
+
+
 def test_human_login_uses_loopback_issuer_and_validates_response(monkeypatch):
     calls = []
 

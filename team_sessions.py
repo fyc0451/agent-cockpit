@@ -104,6 +104,7 @@ def bind(
     lead: dict[str, str],
     client_session_id: str,
     agent_id: int,
+    reply_token: str | None = None,
     replace: bool = False,
 ) -> dict[str, Any]:
     """同一用户/Hub 下保持 Session↔TeamProject 一对一；改绑需显式确认。"""
@@ -113,6 +114,12 @@ def bind(
     client_id = str(client_session_id).strip()
     if not client_id:
         raise ValueError("Team Session 标识不能为空")
+    if reply_token is not None and (
+        not isinstance(reply_token, str)
+        or not reply_token
+        or len(reply_token) > 128
+    ):
+        raise ValueError("Team Session 回复凭据无效")
     entry = {
         "hub": hub,
         "human_id": int(human_id),
@@ -152,6 +159,20 @@ def bind(
         ]
         if conflicts and not replace:
             raise ValueError("Session 或团队项目已有绑定，改绑需要显式确认")
+        existing = next((
+            row for row in scoped
+            if row.get("project_slug") == project_slug
+            and row.get("session") == session
+            and row.get("session_generation") == generation
+            and row.get("client_session_id") == client_id
+        ), None)
+        effective_reply_token = reply_token
+        if effective_reply_token is None and existing is not None:
+            saved_token = existing.get("reply_token")
+            if isinstance(saved_token, str) and saved_token:
+                effective_reply_token = saved_token
+        if effective_reply_token is not None:
+            entry["reply_token"] = effective_reply_token
         data["bindings"] = [
             row for row in data["bindings"]
             if not (
@@ -166,6 +187,51 @@ def bind(
         data["bindings"].append(entry)
         _write(data)
     return dict(entry)
+
+
+def update_reply_token(
+    *,
+    hub: str,
+    human_id: int,
+    project_slug: str,
+    client_session_id: str,
+    reply_token: str,
+) -> dict[str, Any]:
+    """更新远端重建/轮换后的单 binding 回复凭据。"""
+    if not isinstance(reply_token, str) or not reply_token or len(reply_token) > 128:
+        raise ValueError("Team Session 回复凭据无效")
+    with _lock:
+        data = _load()
+        matches = [
+            row for row in data["bindings"]
+            if row.get("hub") == hub
+            and row.get("human_id") == human_id
+            and row.get("project_slug") == project_slug
+            and row.get("client_session_id") == client_session_id
+        ]
+        if len(matches) != 1:
+            raise ValueError("Team Session 绑定缺失或不唯一")
+        matches[0]["reply_token"] = reply_token
+        matches[0]["updated_ts"] = time.time()
+        _write(data)
+        return dict(matches[0])
+
+
+def reply_bindings_for_lead(
+    mail_project: str, lead_mail_name: str,
+) -> list[dict[str, Any]]:
+    """按本机物理 mail project + lead 花名精确解析回复路由。"""
+    project = str(Path(mail_project).expanduser().resolve())
+    with _lock:
+        rows = _load()["bindings"]
+    return [
+        dict(row) for row in rows
+        if row.get("mail_project") == project
+        and isinstance(row.get("lead"), dict)
+        and row["lead"].get("mail_name") == lead_mail_name
+        and isinstance(row.get("reply_token"), str)
+        and bool(row.get("reply_token"))
+    ]
 
 
 def unbind_project(hub: str, human_id: int, project_slug: str) -> dict[str, Any] | None:

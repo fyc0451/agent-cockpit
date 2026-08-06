@@ -62,7 +62,10 @@ STATIC_DIR = Path(__file__).parent / "static"
 COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
 AUTH_COOKIE = "cockpit_session"
 TEAM_AUTH_COOKIE = "cockpit_team_human_session"
-PUBLIC_PATHS = {"/", "/health", "/api/auth/status", "/api/auth/login"}
+PUBLIC_PATHS = {
+    "/", "/health", "/api/auth/status", "/api/auth/login",
+    "/api/agent/team-reply",
+}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 logger = logging.getLogger("agent-cockpit")
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -1432,7 +1435,7 @@ def _team_client_session_id(session: str, generation: str) -> str:
     return hashlib.sha256(f"{session}\0{generation}".encode()).hexdigest()
 
 
-def _team_session_lead_payload(row: dict[str, Any]) -> dict[str, str]:
+def _team_session_lead_payload(row: dict[str, Any]) -> dict[str, Any]:
     lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
     client_id = str(row.get("client_session_id") or "")
     if not client_id:
@@ -1440,10 +1443,13 @@ def _team_session_lead_payload(row: dict[str, Any]) -> dict[str, str]:
             str(row.get("session") or ""),
             str(row.get("session_generation") or row.get("generation") or ""),
         )
-    return {
+    payload: dict[str, Any] = {
         "client_session_id": client_id,
         "lead_label": str(lead.get("mail_name") or lead.get("agent") or "Session lead")[:128],
     }
+    if row.get("rotate_reply_token") is True:
+        payload["rotate_reply_token"] = True
+    return payload
 
 
 def _team_remote_session_lead(
@@ -1475,6 +1481,43 @@ def _team_remote_session_unbind(
         )
     except hub_client.HumanAPIError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
+
+
+def _team_remote_reply_token(remote: dict[str, Any]) -> str | None:
+    token = remote.get("reply_token")
+    if token is None:
+        return None
+    if not isinstance(token, str) or not token or len(token) > 128:
+        raise HTTPException(502, "Team Hub 返回了无效回复凭据")
+    return token
+
+
+def _team_restore_session_routes(
+    authorization: str,
+    hub: str,
+    human_id: int,
+    rows: list[dict[str, Any]],
+) -> None:
+    """补偿恢复已解绑路由，并立即替换本机已失效 capability。"""
+    for row in rows:
+        try:
+            remote = _team_remote_session_lead(
+                authorization,
+                str(row["project_slug"]),
+                {**row, "rotate_reply_token": True},
+            )
+            reply_token = _team_remote_reply_token(remote)
+            if reply_token is None:
+                raise HTTPException(502, "Team Hub 未签发回复凭据")
+            team_sessions.update_reply_token(
+                hub=hub,
+                human_id=human_id,
+                project_slug=str(row["project_slug"]),
+                client_session_id=str(row["client_session_id"]),
+                reply_token=reply_token,
+            )
+        except Exception:
+            logger.exception("Team Session 改绑失败后的旧路由恢复失败")
 
 
 def _team_human_context(request: Request) -> tuple[str, dict[str, Any]]:
@@ -1605,6 +1648,13 @@ def api_team_session_bind(
             raise HTTPException(
                 409, str(candidate.get("reason") or "Session 负责人不可用")
             )
+        bindings = _team_session_bindings_for(hub, int(human["id"]))
+        current = next((
+            row for row in bindings
+            if row.get("project_slug") == slug
+            and row.get("session") == req.session
+            and row.get("session_generation") == str(candidate["generation"])
+        ), None)
         try:
             conflicts = team_sessions.conflicts_for(
                 hub=hub,
@@ -1637,35 +1687,40 @@ def api_team_session_bind(
                 {
                     **candidate,
                     "client_session_id": client_session_id,
+                    "rotate_reply_token": not bool(
+                        isinstance((current or {}).get("reply_token"), str)
+                        and (current or {}).get("reply_token")
+                    ),
                 },
             )
         except Exception:
-            for conflict in deactivated:
-                try:
-                    _team_remote_session_lead(
-                        authorization, str(conflict["project_slug"]), conflict,
-                    )
-                except Exception:
-                    logger.exception("Team Session 改绑失败后的旧路由恢复失败")
+            _team_restore_session_routes(
+                authorization, hub, int(human["id"]), deactivated,
+            )
             raise
         agent = remote.get("agent") if isinstance(remote.get("agent"), dict) else None
         agent_id = agent.get("id") if isinstance(agent, dict) else None
+        reply_token = _team_remote_reply_token(remote)
+        current_reply_token = (current or {}).get("reply_token")
         if (
             isinstance(agent_id, bool)
             or not isinstance(agent_id, int)
             or agent_id <= 0
+            or (
+                reply_token is None
+                and not (
+                    isinstance(current_reply_token, str)
+                    and bool(current_reply_token)
+                )
+            )
         ):
             try:
                 _team_remote_session_unbind(authorization, slug, client_session_id)
             except Exception:
                 logger.exception("Team Hub 无效响应后的新路由清理失败")
-            for conflict in deactivated:
-                try:
-                    _team_remote_session_lead(
-                        authorization, str(conflict["project_slug"]), conflict,
-                    )
-                except Exception:
-                    logger.exception("Team Hub 无效响应后的旧路由恢复失败")
+            _team_restore_session_routes(
+                authorization, hub, int(human["id"]), deactivated,
+            )
             raise HTTPException(502, "Team Hub 返回了无效负责人 Agent")
         try:
             binding = team_sessions.bind(
@@ -1681,6 +1736,7 @@ def api_team_session_bind(
                 )},
                 client_session_id=client_session_id,
                 agent_id=agent_id,
+                reply_token=reply_token,
                 replace=req.replace,
             )
         except (ValueError, OSError) as exc:
@@ -1688,13 +1744,9 @@ def api_team_session_bind(
                 _team_remote_session_unbind(authorization, slug, client_session_id)
             except Exception:
                 logger.exception("本地 Session 绑定写入失败后的 Hub 补偿失败")
-            for conflict in deactivated:
-                try:
-                    _team_remote_session_lead(
-                        authorization, str(conflict["project_slug"]), conflict,
-                    )
-                except Exception:
-                    logger.exception("本地 Session 绑定写入失败后的旧路由恢复失败")
+            _team_restore_session_routes(
+                authorization, hub, int(human["id"]), deactivated,
+            )
             if isinstance(exc, ValueError):
                 raise HTTPException(409, str(exc)) from exc
             raise HTTPException(500, "本机 Session 绑定保存失败") from exc
@@ -1724,11 +1776,182 @@ def api_team_session_unbind(project_slug: str, request: Request):
             removed = team_sessions.unbind_project(hub, int(human["id"]), slug)
         except OSError as exc:
             try:
-                _team_remote_session_lead(authorization, slug, current)
+                remote = _team_remote_session_lead(
+                    authorization, slug,
+                    {**current, "rotate_reply_token": True},
+                )
+                reply_token = _team_remote_reply_token(remote)
+                if reply_token is None:
+                    raise HTTPException(502, "Team Hub 未签发回复凭据")
+                team_sessions.update_reply_token(
+                    hub=hub,
+                    human_id=int(human["id"]),
+                    project_slug=slug,
+                    client_session_id=str(current["client_session_id"]),
+                    reply_token=reply_token,
+                )
             except Exception:
                 logger.exception("本地 Session 解绑失败后的 Hub 补偿失败")
             raise HTTPException(500, "本机 Session 解绑保存失败") from exc
     return {"ok": True, "removed": bool(removed)}
+
+
+def _team_agent_reply_forbidden() -> HTTPException:
+    return HTTPException(403, "Invalid reply credentials")
+
+
+def _team_agent_reply_binding(
+    mail_project: str,
+    sender_name: str,
+    registration_token: str,
+) -> dict[str, Any]:
+    """用本机 registry token 证明调用者就是 active Session 的唯一 lead。"""
+    try:
+        project = str(Path(mail_project).expanduser().resolve())
+    except (OSError, ValueError):
+        raise _team_agent_reply_forbidden()
+    identities = [
+        identity for identity in _registry_scan()
+        if identity.get("project_key") == project
+        and identity.get("name") == sender_name
+        and isinstance(identity.get("registration_token"), str)
+    ]
+    if len(identities) != 1:
+        raise _team_agent_reply_forbidden()
+    try:
+        valid_identity = hmac.compare_digest(
+            str(identities[0]["registration_token"]), registration_token,
+        )
+    except TypeError:
+        valid_identity = False
+    if not valid_identity:
+        raise _team_agent_reply_forbidden()
+    try:
+        bindings = team_sessions.reply_bindings_for_lead(project, sender_name)
+    except (OSError, ValueError):
+        raise _team_agent_reply_forbidden()
+    if len(bindings) != 1:
+        raise _team_agent_reply_forbidden()
+    binding = bindings[0]
+    if binding.get("hub") != hub_client.public_team_config()["team_hub"]:
+        raise _team_agent_reply_forbidden()
+    candidates = [
+        candidate for candidate in _team_session_candidates()
+        if candidate.get("session") == binding.get("session")
+        and candidate.get("generation") == binding.get("session_generation")
+        and candidate.get("mail_project") == project
+        and candidate.get("ready") is True
+        and isinstance(candidate.get("lead"), dict)
+        and candidate["lead"].get("mail_name") == sender_name
+    ]
+    if len(candidates) != 1:
+        raise _team_agent_reply_forbidden()
+    return binding
+
+
+@app.post("/api/agent/team-reply")
+async def api_team_agent_reply(request: Request):
+    """Agent 本机验证后，以 Session lead capability 代理远端 Human 回复。"""
+    if not _is_loopback(request.client.host if request.client else None):
+        raise _team_agent_reply_forbidden()
+    try:
+        body = await request.json()
+    except (UnicodeError, ValueError):
+        raise HTTPException(400, "团队回复请求无效")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "团队回复请求无效")
+    allowed = {
+        "mail_project", "sender_name", "registration_token", "mention_handles",
+        "subject", "body_md", "importance", "idempotency_key",
+    }
+    if set(body) - allowed:
+        raise HTTPException(400, "团队回复请求包含未支持字段")
+    mail_project = body.get("mail_project")
+    sender_name = body.get("sender_name")
+    registration_token = body.get("registration_token")
+    if (
+        not isinstance(mail_project, str)
+        or not mail_project
+        or len(mail_project) > 4096
+        or not Path(mail_project).is_absolute()
+        or not isinstance(sender_name, str)
+        or not _REGISTRY_NAME_RE.fullmatch(sender_name)
+        or not isinstance(registration_token, str)
+        or not registration_token
+        or len(registration_token) > 4096
+    ):
+        raise _team_agent_reply_forbidden()
+    binding = _team_agent_reply_binding(
+        mail_project, sender_name, registration_token,
+    )
+
+    handles = body.get("mention_handles")
+    subject = body.get("subject")
+    body_md = body.get("body_md")
+    importance = body.get("importance", "normal")
+    idempotency_key = body.get("idempotency_key")
+    if not isinstance(handles, list) or not 1 <= len(handles) <= 50:
+        raise HTTPException(400, "至少需要一个团队成员")
+    clean_handles: list[str] = []
+    for value in handles:
+        if (
+            not isinstance(value, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value)
+        ):
+            raise HTTPException(400, "团队成员花名无效")
+        if value.lower() not in {item.lower() for item in clean_handles}:
+            clean_handles.append(value)
+    if (
+        not isinstance(subject, str)
+        or not subject.strip()
+        or len(subject.strip()) > 512
+        or not isinstance(body_md, str)
+        or not body_md.strip()
+        or len(body_md) > 50_000
+        or importance not in {"low", "normal", "high", "urgent"}
+        or not isinstance(idempotency_key, str)
+        or not 1 <= len(idempotency_key.strip()) <= 128
+    ):
+        raise HTTPException(400, "团队回复内容无效")
+    remote_payload = {
+        "client_session_id": str(binding["client_session_id"]),
+        "reply_token": str(binding["reply_token"]),
+        "subject": subject.strip(),
+        "body_md": body_md,
+        "importance": importance,
+        "mention_handles": clean_handles,
+        "idempotency_key": idempotency_key.strip(),
+    }
+    try:
+        result = hub_client.session_lead_reply(
+            str(binding["project_slug"]), remote_payload,
+        )
+    except hub_client.HumanAPIError as exc:
+        if exc.status_code == 403:
+            raise _team_agent_reply_forbidden() from exc
+        if exc.status_code == 404:
+            raise HTTPException(404, "团队成员不存在或已退出项目") from exc
+        if exc.status_code == 409:
+            raise HTTPException(409, "Session 负责人当前不可用") from exc
+        raise HTTPException(502, "团队回复暂时失败") from exc
+    deliveries = result.get("deliveries")
+    safe_deliveries = []
+    if isinstance(deliveries, list):
+        for item in deliveries:
+            if not isinstance(item, dict):
+                continue
+            safe_deliveries.append({
+                key: item.get(key)
+                for key in (
+                    "name", "status", "reason", "receipt_message_id",
+                    "target_project_key",
+                )
+            })
+    return {
+        "status": result.get("status"),
+        "message_id": result.get("message_id"),
+        "deliveries": safe_deliveries,
+    }
 
 
 class LocalIdentityClaimReq(BaseModel):

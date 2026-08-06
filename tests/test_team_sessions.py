@@ -42,6 +42,38 @@ def test_bind_persists_minimal_private_state(tmp_path, monkeypatch):
     assert json.loads(raw)["bindings"][0]["lead"]["mail_name"] == "codex-main"
 
 
+def test_reply_token_is_private_and_preserved_on_idempotent_bind(
+    tmp_path, monkeypatch,
+):
+    state = tmp_path / "team-sessions.json"
+    monkeypatch.setattr(team_sessions, "STATE_PATH", state)
+    _bind(reply_token="reply-secret")
+
+    rebound = _bind()
+
+    assert rebound["reply_token"] == "reply-secret"
+    assert state.stat().st_mode & 0o777 == 0o600
+
+
+def test_update_and_resolve_reply_token_by_exact_local_lead(tmp_path, monkeypatch):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    _bind(reply_token="old-secret")
+
+    updated = team_sessions.update_reply_token(
+        hub="http://team.example",
+        human_id=7,
+        project_slug="alpha",
+        client_session_id="client-run-a",
+        reply_token="new-secret",
+    )
+    matches = team_sessions.reply_bindings_for_lead("/work/a", "codex-main")
+
+    assert updated["reply_token"] == "new-secret"
+    assert len(matches) == 1
+    assert matches[0]["reply_token"] == "new-secret"
+    assert team_sessions.reply_bindings_for_lead("/work/a", "other-main") == []
+
+
 def test_same_session_generation_cannot_change_project_without_replace(
     tmp_path, monkeypatch,
 ):
