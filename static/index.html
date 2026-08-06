@@ -2344,13 +2344,11 @@ function renderTermCollab(){
     teamRows='<div class="team-status warn">尚未选择团队群组。请先在团队中心加入或选择群组。</div><button class="sm" data-action="collabOpenTeam">打开团队中心</button>';
   }else if(project.membership?.status!=='active'||TEAM.membership?.status!=='active'){
     teamRows=`<div class="team-status warn">你还不是 ${esc(project.name||project.slug)} 的 active 成员。</div><button class="sm" data-action="collabOpenTeam">查看群组</button>`;
-  }else if(!TEAM.membership.default_agent_id){
-    teamRows=`<div class="team-status warn">请先为 ${esc(project.name||project.slug)} 设置自己的默认 Agent；团队消息必须以该身份发出。</div><button class="sm" data-action="collabOpenTeam">设置默认 Agent</button>`;
   }else{
     const members=TEAM.members.filter(member=>member.status==='active'&&member.human_id!==TEAM.human?.id);
-    const sender=TEAM.agents.find(agent=>agent.id===TEAM.membership.default_agent_id);
-    const senderLabel=sender?.name||('Agent #'+TEAM.membership.default_agent_id);
-    const broadcast=members.length?`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="team" data-label="${esc(project.name||project.slug)}"><span style="font-size:20px">👥</span><span class="main"><b>@团队 · ${esc(project.name||project.slug)}</b><small>发给当前群组所有其他 active 成员 · 以 ${esc(senderLabel)} 发出</small></span></button>`:'';
+    const sender=TEAM.membership.default_agent_id?TEAM.agents.find(agent=>agent.id===TEAM.membership.default_agent_id):null;
+    const senderLabel=sender?`以 ${esc(sender.name)} Agent 发出`:'以你的 Human 身份发出';
+    const broadcast=members.length?`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="team" data-label="${esc(project.name||project.slug)}"><span style="font-size:20px">👥</span><span class="main"><b>@团队 · ${esc(project.name||project.slug)}</b><small>发给当前群组所有其他 active 成员 · ${senderLabel}</small></span></button>`:'';
     const memberRows=members.map(member=>`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="member" data-handle="${esc(member.mention_handle)}" data-label="${esc(member.display_name||member.mention_handle)}"><span style="font-size:20px">👤</span><span class="main"><b>${esc(member.display_name||member.mention_handle)} · @${esc(member.mention_handle)}</b><small>仅联系该成员；无默认 Agent 时进入 Human Inbox</small></span></button>`).join('');
     teamRows=broadcast+memberRows+(members.length?'':'<div class="muted" style="font-size:11px">当前群组没有其他 active 成员。</div>');
     if(TEAM_COLLAB_TARGET&&TEAM_COLLAB_TARGET.slug===project.slug){
