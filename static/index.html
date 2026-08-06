@@ -457,7 +457,7 @@ header .spacer{flex:1}
       <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="流视图:可滚屏/复制的 pane 输出 + 快速发指令">流</button>
       <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止">会话</button>
       <button data-view="msgs" data-i18n="nav.msgs" data-i18n-title="nav.msgs.t" title="agent 之间的消息(需安装 Agent Mail)">消息</button>
-      <button data-view="team" data-i18n="nav.team" data-i18n-title="nav.team.t" title="团队项目、成员、默认 Agent 与管理员操作">团队<span class="nav-badge" id="teamNavBadge" style="display:none">0</span></button>
+      <button data-view="team" data-i18n-title="nav.team.t" title="团队项目、成员、默认 Agent 与管理员操作"><span data-i18n="nav.team">团队</span><span class="nav-badge" id="teamNavBadge" style="display:none">0</span></button>
       <button data-view="files" data-i18n="nav.files" data-i18n-title="nav.files.t" title="浏览/编辑/下载项目文件,也可以从这里建工作区">文件</button>
       <button data-view="settings" data-i18n="nav.settings" data-i18n-title="nav.settings.t" title="语言、主题、agent、目录与环境自检">设置</button>
     </nav>
@@ -1265,11 +1265,11 @@ async function teamLoadSelection(){
   const result=await Promise.all(requests);
   TEAM.membership=result[0];TEAM.agents=result[1].agents||[];TEAM.members=result[2]?.members||[];
 }
-async function teamLoadInbox(){
+async function teamLoadInbox(throwOnError=false){
   if(TEAM.inboxLoading)return;
   TEAM.inboxLoading=true;TEAM.inboxError='';
   try{const data=await teamApi('inbox');TEAM.inbox=Array.isArray(data.items)?data.items:[]}
-  catch(e){TEAM.inboxError=String(e)}finally{TEAM.inboxLoading=false}
+  catch(e){TEAM.inboxError=String(e);if(throwOnError)throw e}finally{TEAM.inboxLoading=false}
 }
 async function teamLoadAccounts(){
   if(!teamIsGlobalAdmin()){TEAM.authUsers=[];return}
@@ -1295,7 +1295,6 @@ async function teamLoad(force=false){
     await teamLoadInbox();
     try{await teamLoadAccounts()}catch(e){TEAM.authUsers=[];toast('账号列表加载失败: '+e,5000)}
     teamRender();
-    teamUpdateModeUi();
     teamPollStart();
   }catch(e){TEAM.authenticated=false;TEAM.profile=null;TEAM.human=null;teamPollStop();const navBadge=document.getElementById('teamNavBadge');if(navBadge)navBadge.style.display='none';teamLoginHtml(sessionFound?'团队数据加载失败：'+e:'')}finally{TEAM.loading=false}
 }
@@ -1406,7 +1405,7 @@ async function teamPollTick(){
   if(!TEAM.authenticated||!TEAM.human)return;
   if(document.visibilityState==='hidden'){TEAM_POLL_TIMER=setTimeout(teamPollTick,TEAM_POLL_BACKOFF);return}
   try{
-    await teamLoadInbox();
+    await teamLoadInbox(true);
     teamUpdateModeUi();
     if(TEAM.mode==='inbox')teamRender();
     TEAM_POLL_FAILURES=0;
@@ -3653,7 +3652,7 @@ async function init(){
   document.addEventListener('visibilitychange',recoverPageState);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&TEAM.authenticated&&TEAM.human&&TEAM_POLL_TIMER){clearTimeout(TEAM_POLL_TIMER);TEAM_POLL_TIMER=null;teamPollTick()}});
   window.addEventListener('focus',recoverPageState);
-  window.addEventListener('pageshow',recoverPageState);
+  window.addEventListener('pageshow',()=>{recoverPageState();if(TEAM.authenticated&&TEAM.human&&!TEAM_POLL_TIMER)teamPollStart()});
   window.addEventListener('pagehide',()=>{releaseAllTermZoomLeases();teamPollStop()});
   COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
     for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);

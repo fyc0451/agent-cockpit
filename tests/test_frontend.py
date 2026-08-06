@@ -481,7 +481,7 @@ def test_page_focus_only_recovers_closed_connections():
     assert "now-LAST_PAGE_RECOVERY<300" in recovery
     assert "if(!SSE||SSE.readyState===2)connectSSE()" in recovery
     assert "window.addEventListener('focus',recoverPageState)" in js
-    assert "window.addEventListener('pageshow',recoverPageState)" in js
+    assert "window.addEventListener('pageshow',()=>{recoverPageState();if(TEAM.authenticated&&TEAM.human&&!TEAM_POLL_TIMER)teamPollStart()})" in js
     assert "showTermInstance(TERM_ID)" in recovery
     assert "refreshBoard()" not in recovery
     assert "loadAttention()" not in recovery
@@ -1195,7 +1195,7 @@ def test_team_inbox_polling_uses_single_flight_and_exponential_backoff():
     assert "async function teamPollTick()" in js
     assert "teamPollStop();" in js
     poll = js.split("async function teamPollTick(){", 1)[1].split("function ", 1)[0]
-    assert "await teamLoadInbox()" in poll
+    assert "await teamLoadInbox(true)" in poll
     assert "TEAM_POLL_FAILURES=0" in poll
     assert "TEAM_POLL_BACKOFF=TEAM_POLL_BACKOFFS[0]" in poll
     assert "TEAM_POLL_FAILURES++" in poll
@@ -1256,4 +1256,42 @@ def test_team_nav_badge_cleared_on_disconnect():
     disconnect = js.split("async function teamDisconnect(){", 1)[1].split("function ", 1)[0]
     assert "teamNavBadge" in disconnect
     assert "display='none'" in disconnect
+
+
+def test_team_load_inbox_throw_on_error_propagates_failures():
+    js = _inline_js()
+    load = js.split("async function teamLoadInbox(throwOnError=false){", 1)[1].split("function ", 1)[0]
+    assert "if(throwOnError)throw e" in load
+    # Manual callers (teamLoad, teamShowInbox) still use default — no throw, no toast
+    assert "await teamLoadInbox()" in js
+    # Poll caller uses throwOnError=true
+    assert "await teamLoadInbox(true)" in js
+
+
+def test_team_nav_badge_survives_language_switch():
+    js = _inline_js()
+    # data-i18n is on inner span, not the button that wraps the badge
+    assert '<span data-i18n="nav.team">' in HTML
+    assert 'id="teamNavBadge"' in HTML
+    # Extract the <button> opening tag (up to first >) for the team button
+    btn_start = HTML.index('data-view="team"')
+    tag_end = HTML.index('>', btn_start)
+    button_tag = HTML[btn_start:tag_end]
+    # Button opening tag must NOT have data-i18n (applyLang.textContent would destroy badge)
+    assert 'data-i18n=' not in button_tag
+    # But the inner span must have it for translation
+    inner = HTML[tag_end:HTML.index('</button>', tag_end)]
+    assert '<span data-i18n="nav.team">' in inner
+    assert 'id="teamNavBadge"' in inner
+
+
+def test_team_inbox_polling_recovers_after_pageshow_bfcache():
+    js = _inline_js()
+    assert "pageshow',()=>{recoverPageState();if(TEAM.authenticated&&TEAM.human&&!TEAM_POLL_TIMER)teamPollStart()}" in js
+
+
+def test_team_load_does_not_call_duplicate_team_update_mode_ui():
+    js = _inline_js()
+    load = js.split("async function teamLoad(force=false){", 1)[1].split("function ", 1)[0]
+    assert load.count("teamUpdateModeUi()") == 0
 
