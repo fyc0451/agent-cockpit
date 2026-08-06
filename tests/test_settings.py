@@ -384,6 +384,33 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         headers=headers,
         json={},
     ).status_code == 404
+    # M3d: agents catalog + agent-bindings 白名单
+    response = client.get("/api/team/agents", headers=headers)
+    assert response.status_code == 200
+    response = client.get("/api/team/projects/demo/agent-bindings", headers=headers)
+    assert response.status_code == 200
+    response = client.post(
+        "/api/team/projects/demo/agent-bindings",
+        headers=headers,
+        json={"agent_id": 7},
+    )
+    assert response.status_code == 200
+    response = client.request(
+        "DELETE",
+        "/api/team/projects/demo/agent-bindings/7",
+        headers={**headers, "content-type": "application/json"},
+        data=b"{}",
+    )
+    assert response.status_code == 200
+    # bindings 只允许 DELETE 单条；不支持 GET 单条 / 批量 DELETE
+    assert client.get(
+        "/api/team/projects/demo/agent-bindings/7",
+        headers=headers,
+    ).status_code == 404
+    assert client.delete(
+        "/api/team/projects/demo/agent-bindings",
+        headers=headers,
+    ).status_code == 404
     assert client.get(
         "/api/team/projects/demo/../../env-check",
         headers=headers,

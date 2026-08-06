@@ -77,6 +77,9 @@ TEAM_API_ROUTES = (
     (re.compile(r"^projects/[A-Za-z0-9_-]+/members/[0-9]+$"), {"PATCH"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agents$"), {"GET"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agents/[0-9]+$"), {"PATCH"}),
+    (re.compile(r"^agents$"), {"GET"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/agent-bindings$"), {"GET", "POST"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/agent-bindings/[0-9]+$"), {"DELETE"}),
 )
 VALID_AGENTS = {"codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode"}
 VALID_LAYOUTS = {"right", "horizontal", "down", "vertical", "tab"}
@@ -1114,7 +1117,7 @@ def api_agent_mail_config_put(req: AgentMailConfigReq):
 
 @app.api_route(
     "/api/team/{route:path}",
-    methods=["GET", "POST", "PUT", "PATCH"],
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
 )
 async def api_team_proxy(route: str, request: Request):
     """白名单代理 Hub Human API；返回数据不得触发任何本地执行。"""

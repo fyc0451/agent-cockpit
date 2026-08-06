@@ -854,7 +854,7 @@ let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
-let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
+let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],candidates:[],bindings:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
 let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
 let TEAM_POLL_TIMER=null, TEAM_POLL_BACKOFF=30000, TEAM_POLL_FAILURES=0;
 const TEAM_POLL_BACKOFFS=[30000,60000,120000,240000,300000];
@@ -1242,7 +1242,7 @@ async function teamConnect(){
 async function teamDisconnect(){
   teamPollStop();
   try{await api('/api/team-auth/logout',{method:'POST'})}catch(e){}
-  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
+  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],candidates:[],bindings:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',mode:'projects',loading:false,inboxLoading:false,mutating:false};
   try{sessionStorage.removeItem('cockpit-team-project')}catch(e){}
   const navBadge=document.getElementById('teamNavBadge');if(navBadge)navBadge.style.display='none';
   teamLoginHtml();
@@ -1257,13 +1257,13 @@ function teamProjectStatus(project){
 }
 function teamSelectedProject(){return TEAM.projects.find(p=>p.slug===TEAM.selected)||null}
 async function teamLoadSelection(){
-  TEAM.membership=null;TEAM.agents=[];TEAM.members=[];
+  TEAM.membership=null;TEAM.agents=[];TEAM.bindings=[];TEAM.members=[];
   const project=teamSelectedProject();
   if(!project||project.membership?.status!=='active')return;
   const slug=encodeURIComponent(project.slug);
-  const requests=[teamApi(`projects/${slug}/membership`),teamApi(`projects/${slug}/agents`),teamApi(`projects/${slug}/members`)];
+  const requests=[teamApi(`projects/${slug}/membership`),teamApi(`projects/${slug}/agents`),teamApi(`projects/${slug}/agent-bindings`),teamApi(`projects/${slug}/members`)];
   const result=await Promise.all(requests);
-  TEAM.membership=result[0];TEAM.agents=result[1].agents||[];TEAM.members=result[2]?.members||[];
+  TEAM.membership=result[0];TEAM.agents=result[1].agents||[];TEAM.bindings=Array.isArray(result[2])?result[2]:(result[2]?.bindings||[]);TEAM.members=result[3]?.members||[];
 }
 async function teamLoadInbox(throwOnError=false){
   if(TEAM.inboxLoading)return;
@@ -1287,6 +1287,7 @@ async function teamLoad(force=false){
     if(!TEAM.authenticated)throw new Error('登录已过期');
     const [human,projects]=await Promise.all([teamApi('humans/me'),teamApi('projects')]);
     TEAM.human=human;TEAM.projects=projects.projects||[];
+    try{const agents=await teamApi('agents');TEAM.candidates=Array.isArray(agents.agents)?agents.agents:[]}catch(e){TEAM.candidates=[]}
     if(!TEAM.projects.some(p=>p.slug===TEAM.selected)){
       TEAM.selected=(TEAM.projects.find(p=>p.membership?.status==='active')||TEAM.projects[0]||{}).slug||'';
     }
@@ -1310,14 +1311,31 @@ function teamOwnerOptions(selected){
 }
 function teamAgentRows(project){
   const admin=project.membership?.role==='admin';
+  const globalAdmin=teamIsGlobalAdmin();
   if(!TEAM.agents.length)return'<div class="empty">当前群组还没有绑定远程 Agent。本机工作区中的 Agent 不会自动同步到群组。</div>';
   return TEAM.agents.map(agent=>{
-    const canManage=admin||agent.owner_id===TEAM.human?.id;
+    const canRetire=globalAdmin||agent.owner_id===TEAM.human?.id;
+    const canAssignOwner=agent.bound_external?globalAdmin:admin;
     const badge=agent.retired?'<span class="team-badge retired">retired</span>':'<span class="team-badge active">active</span>';
-    const ownerControl=admin?`<select id="teamOwner-${Number(agent.id)}">${teamOwnerOptions(agent.owner_id)}</select><button class="sm" data-action="teamOwner" data-agent-id="${Number(agent.id)}">保存归属</button>`:`<span class="muted">${esc(teamOwnerName(agent.owner_id))}</span>`;
-    const retireControl=canManage?`<button class="sm${agent.retired?'':' danger'}" data-action="teamRetire" data-agent-id="${Number(agent.id)}" data-retired="${agent.retired?'1':'0'}">${agent.retired?'恢复':'停用'}</button>`:'';
-    return `<div class="team-row"><div class="team-row-main"><b>${esc(agent.name)} ${badge}</b><small>${esc(agent.program||'unknown')}${agent.model?' · '+esc(agent.model):''}</small></div><div class="muted">${esc(teamOwnerName(agent.owner_id))}</div><div class="team-row-actions">${ownerControl}${retireControl}</div></div>`;
+    const ownerControl=canAssignOwner?`<select id="teamOwner-${Number(agent.id)}">${teamOwnerOptions(agent.owner_id)}</select><button class="sm" data-action="teamOwner" data-agent-id="${Number(agent.id)}">保存归属</button>`:`<span class="muted">${esc(teamOwnerName(agent.owner_id))}</span>`;
+    const retireControl=canRetire?`<button class="sm${agent.retired?'':' danger'}" data-action="teamRetire" data-agent-id="${Number(agent.id)}" data-retired="${agent.retired?'1':'0'}">${agent.retired?'恢复':'停用'}</button>`:'';
+    return `<div class="team-row"><div class="team-row-main"><b>${esc(agent.name)} ${badge}</b><small>${esc(agent.program||'unknown')}${agent.model?' · '+esc(agent.model):''}${agent.bound_external?' · 外部绑定':''}</small></div><div class="muted">${esc(teamOwnerName(agent.owner_id))}</div><div class="team-row-actions">${ownerControl}${retireControl}</div></div>`;
   }).join('');
+}
+function teamBindingRows(admin){
+  if(!TEAM.bindings.length)return'<div class="empty">尚未绑定远程 Agent。管理员可从此群组可选 Agent 中选择绑定。</div>';
+  return TEAM.bindings.map(binding=>{
+    const agentId=Number(binding.agent_id);
+    const unbind=admin&&Number.isInteger(agentId)&&agentId>0?`<button class="sm danger" data-action="teamUnbind" data-agent-id="${agentId}">解绑</button>`:'';
+    return `<div class="team-row"><div class="team-row-main"><b>${esc(binding.agent_name||('Agent #'+agentId))}</b><small>${esc(binding.program||'unknown')}${binding.model?' · '+esc(binding.model):''}</small></div><div class="team-row-actions">${unbind}</div></div>`;
+  }).join('');
+}
+function teamBindForm(admin){
+  if(!admin)return'';
+  const bound=new Set(TEAM.bindings.map(b=>Number(b.agent_id)));
+  const options=TEAM.candidates.filter(a=>{const id=Number(a.id);return Number.isInteger(id)&&id>0&&!bound.has(id)}).map(a=>`<option value="${Number(a.id)}">${esc(a.name)}${a.program?' · '+esc(a.program):''}</option>`).join('');
+  if(!options)return'';
+  return `<div class="team-inline-form"><div class="field"><label>绑定可选 Agent</label><select id="teamBindSelect">${options}</select></div><button class="primary sm" data-action="teamBind">绑定</button></div>`;
 }
 function teamMemberRows(){
   if(!TEAM.members.length)return'<div class="empty">暂无成员</div>';
@@ -1367,6 +1385,7 @@ function teamProjectPanel(project){
     <div class="team-stats"><div class="team-stat"><b>${Number(project.active_member_count)||0}</b><span>active 成员</span></div><div class="team-stat"><b>${activeAgents}</b><span>active Agents</span></div><div class="team-stat"><b>${TEAM.membership?.default_agent_id?'1':'0'}</b><span>我的默认 Agent</span></div></div>
     <div class="team-section"><div class="team-section-title">我的项目身份 <span>本人可修改</span></div><div class="team-row"><div class="team-row-main"><b>${esc(TEAM.human.display_name)}</b><small>@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}</small></div><select id="teamDefaultAgent">${defaultOptions}</select><div class="team-row-actions"><button class="primary sm" data-action="teamDefault">保存默认 Agent</button></div></div></div>
     <div class="team-section"><div class="team-section-title">项目 Agents <span>owner 可停用；管理员可分配 owner</span></div>${teamAgentRows(project)}</div>
+    <div class="team-section"><div class="team-section-title">Agent 绑定 <span>管理员可绑定/解绑；成员只读</span></div>${teamBindForm(admin)}${teamBindingRows(admin)}</div>
     ${admin?`<div class="team-section"><div class="team-section-title">管理员 · 成员审批 <span>${TEAM.members.length} 人</span></div>${teamMemberRows()}</div>`:''}
   </div>`;
 }
@@ -1444,6 +1463,8 @@ function teamJoin(){const project=teamSelectedProject(),handle=document.getEleme
 function teamSetDefault(){const project=teamSelectedProject(),value=document.getElementById('teamDefaultAgent')?.value;if(!project)return;teamMutation('默认 Agent 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/membership`,'PATCH',{default_agent_id:value?Number(value):null}))}
 function teamSetOwner(agentId){const project=teamSelectedProject(),value=document.getElementById('teamOwner-'+agentId)?.value;if(!project)return;teamMutation('Agent owner 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agents/${agentId}`,'PATCH',{owner_id:value?Number(value):null}))}
 function teamSetRetired(agentId,retired){const project=teamSelectedProject(),next=!retired;if(!project)return;if(next&&!window.confirm('停用这个 Agent 身份？历史消息会保留，默认 Agent 引用需先清除。'))return;teamMutation(next?'Agent 已停用':'Agent 已恢复',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agents/${agentId}`,'PATCH',{retired:next}))}
+function teamBind(){const project=teamSelectedProject(),value=document.getElementById('teamBindSelect')?.value;if(!project||!value)return;const agentId=Number(value);if(!Number.isInteger(agentId)||agentId<=0)return;teamMutation('Agent 已绑定',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agent-bindings`,'POST',{agent_id:agentId}))}
+function teamUnbind(agentId){const project=teamSelectedProject();if(!project)return;if(!window.confirm('确认解绑这个 Agent？绑定关系将从群组移除。'))return;teamMutation('Agent 已解绑',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agent-bindings/${Number(agentId)}`,'DELETE'))}
 function teamSetMemberStatus(humanId,status){const project=teamSelectedProject();if(!project)return;if(status==='removed'&&!window.confirm('确认拒绝或移除这个成员？'))return;teamMutation(status==='active'?'成员已批准/恢复':'成员已移除',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/members/${humanId}`,'PATCH',{status}))}
 function teamSetRole(humanId){const project=teamSelectedProject(),role=document.getElementById('teamRole-'+humanId)?.value;if(!project||!role)return;teamMutation('成员角色已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/members/${humanId}`,'PATCH',{role}))}
 async function teamMarkInboxRead(ids){
@@ -3586,6 +3607,8 @@ function bindDelegation(){
     else if(action==='teamDefault')teamSetDefault();
     else if(action==='teamOwner')teamSetOwner(Number(it.dataset.agentId));
     else if(action==='teamRetire')teamSetRetired(Number(it.dataset.agentId),it.dataset.retired==='1');
+    else if(action==='teamBind')teamBind();
+    else if(action==='teamUnbind')teamUnbind(Number(it.dataset.agentId));
     else if(action==='teamMemberStatus')teamSetMemberStatus(Number(it.dataset.humanId),it.dataset.status);
     else if(action==='teamRole')teamSetRole(Number(it.dataset.humanId));
     else if(action==='teamInboxRead')teamMarkInboxRead([Number(it.dataset.inboxId)]);

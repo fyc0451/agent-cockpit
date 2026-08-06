@@ -1294,3 +1294,83 @@ def test_team_load_does_not_call_duplicate_team_update_mode_ui():
     js = _inline_js()
     load = js.split("async function teamLoad(force=false){", 1)[1].split("function ", 1)[0]
     assert load.count("teamUpdateModeUi()") == 0
+
+
+# ── M3d: Team Agent 选择/绑定/解绑 UI ─────────────────────────
+
+def test_team_state_has_candidates_and_bindings():
+    assert "candidates:[],bindings:[]," in HTML
+    js = _inline_js()
+    assert "teamApi('agents')" in js
+    assert "TEAM.candidates=Array.isArray(agents.agents)?agents.agents:[]" in js
+    assert "TEAM.bindings=Array.isArray(result[2])?result[2]:(result[2]?.bindings||[])" in js
+    assert "teamApi(`projects/${slug}/agent-bindings`)" in js
+
+
+def test_team_binding_ui_functions_and_actions_exist():
+    js = _inline_js()
+    assert "function teamBindingRows(admin)" in js
+    assert "function teamBindForm(admin)" in js
+    assert "function teamBind()" in js
+    assert "function teamUnbind(agentId)" in js
+    assert "action==='teamBind'" in js
+    assert "action==='teamUnbind'" in js
+    assert 'data-action="teamBind"' in js
+    assert 'data-action="teamUnbind"' in js
+    assert "agent-bindings" in js
+    assert 'id="teamBindSelect"' in js
+    assert "管理员可绑定/解绑；成员只读" in js
+
+
+def test_team_binding_ui_admin_only_controls():
+    js = _inline_js()
+    rows = js.split("function teamBindingRows(admin){", 1)[1].split("function ", 1)[0]
+    assert "const unbind=admin&&Number.isInteger(agentId)&&agentId>0" in rows
+    form = js.split("function teamBindForm(admin){", 1)[1].split("function ", 1)[0]
+    assert "if(!admin)return''" in form
+
+
+def test_team_agent_rows_permissions_for_bound_external():
+    js = _inline_js()
+    rows = js.split("function teamAgentRows(project){", 1)[1].split("function teamBindingRows", 1)[0]
+    assert "const globalAdmin=teamIsGlobalAdmin()" in rows
+    assert "const canRetire=globalAdmin||agent.owner_id===TEAM.human?.id" in rows
+    assert "const canAssignOwner=agent.bound_external?globalAdmin:admin" in rows
+    assert "agent.bound_external?' · 外部绑定':''" in rows
+
+
+def test_team_binding_ui_escapes_hub_text_and_force_numeric_ids():
+    js = _inline_js()
+    rows = js.split("function teamBindingRows(admin){", 1)[1].split("function ", 1)[0]
+    assert "esc(binding.agent_name" in rows
+    assert "esc(binding.program" in rows
+    assert "esc(binding.model" in rows
+    assert "Number(binding.agent_id)" in rows
+    form = js.split("function teamBindForm(admin){", 1)[1].split("function ", 1)[0]
+    assert "esc(a.name)" in form
+    assert "esc(a.program)" in form
+    assert "Number.isInteger(id)&&id>0" in form
+    bind = js.split("function teamBind(){", 1)[1].split("function ", 1)[0]
+    assert "const agentId=Number(value)" in bind
+    assert "Number.isInteger(agentId)||agentId<=0" in bind
+
+
+def test_team_binding_mutations_use_team_mutation_serialization():
+    js = _inline_js()
+    bind = js.split("function teamBind(){", 1)[1].split("function teamUnbind", 1)[0]
+    unbind = js.split("function teamUnbind(agentId){", 1)[1].split("function ", 1)[0]
+    assert "teamMutation('Agent 已绑定'" in bind
+    assert "teamApi(`projects/${encodeURIComponent(project.slug)}/agent-bindings`,'POST',{agent_id:agentId})" in bind
+    assert "teamMutation('Agent 已解绑'" in unbind
+    assert "agent-bindings/${Number(agentId)}`,'DELETE'" in unbind
+    assert "window.confirm('确认解绑这个 Agent？" in unbind
+
+
+def test_team_binding_ui_never_triggers_local_side_effects():
+    js = _inline_js()
+    rows = js.split("function teamBindingRows(admin){", 1)[1].split("function teamBindForm", 1)[0]
+    form = js.split("function teamBindForm(admin){", 1)[1].split("function teamMemberRows", 1)[0]
+    bind = js.split("function teamBind(){", 1)[1].split("function teamUnbind", 1)[0]
+    for part in (rows, form, bind):
+        for bad in ("openTerm", "doAttachHerdr", "createPane", "worktree", "terminal("):
+            assert bad not in part, f"绑定 UI 触发本地副作用: {bad}"
