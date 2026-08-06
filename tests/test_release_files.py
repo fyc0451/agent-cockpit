@@ -89,6 +89,53 @@ def test_agent_mail_launchd_keeps_token_out_of_plist():
     assert "__REPO_DIR__" in plist
 
 
+def test_agent_mail_launchd_restart_waits_for_old_listener(tmp_path):
+    install_dir = tmp_path / "agent-cockpit"
+    install_dir.mkdir()
+    launcher = install_dir / "agent-mail-launchd.sh"
+    launcher.write_text((ROOT / "agent-mail-launchd.sh").read_text())
+    launcher.chmod(0o755)
+    (install_dir / "agent-mail.plist").write_text(
+        (ROOT / "agent-mail.plist").read_text()
+    )
+    repo = tmp_path / "mcp_agent_mail"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python.chmod(0o755)
+    client_env = tmp_path / "client.env"
+    client_env.write_text("hub=http://127.0.0.1:8765\ntoken=test-token\n")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "launchctl").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (fake_bin / "launchctl").chmod(0o755)
+    lsof_calls = tmp_path / "lsof-calls"
+    (fake_bin / "lsof").write_text(
+        "#!/usr/bin/env bash\n"
+        f'calls=$(cat "{lsof_calls}" 2>/dev/null || echo 0)\n'
+        "calls=$((calls + 1))\n"
+        f'printf "%s\\n" "$calls" > "{lsof_calls}"\n'
+        'if [ "$calls" -le 2 ]; then echo 123; exit 0; fi\n'
+        "exit 1\n"
+    )
+    (fake_bin / "lsof").chmod(0o755)
+    home = tmp_path / "home"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "MCP_AGENT_MAIL_DIR": str(repo),
+        "AGENT_MAIL_CLIENT_ENV": str(client_env),
+    }
+
+    result = subprocess.run(
+        [str(launcher), "restart"], text=True, capture_output=True, env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert int(lsof_calls.read_text()) >= 3
+
+
 def test_launchd_installer_renders_and_restarts_service(tmp_path):
     install_dir = tmp_path / "agent-cockpit"
     install_dir.mkdir()

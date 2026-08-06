@@ -68,6 +68,16 @@ install_service() {
   chmod 600 "$PLIST_PATH"
 
   launchctl bootout "$SERVICE" >/dev/null 2>&1 || true
+  # launchctl 返回时旧进程可能仍在退出；给它一个有限的优雅释放窗口，
+  # 避免 restart 把自己的旧监听误判成非托管进程。
+  if command -v lsof >/dev/null 2>&1; then
+    for _ in {1..25}; do
+      if ! lsof -nP -tiTCP:8765 -sTCP:LISTEN 2>/dev/null | grep -q .; then
+        break
+      fi
+      sleep 0.2
+    done
+  fi
   if command -v lsof >/dev/null 2>&1 \
     && lsof -nP -tiTCP:8765 -sTCP:LISTEN 2>/dev/null | grep -q .; then
     echo "端口 8765 已被非托管进程占用，未启动 Agent Mail LaunchAgent。" >&2
