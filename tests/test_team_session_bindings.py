@@ -162,6 +162,33 @@ def test_local_agent_mail_hub_does_not_need_to_match_team_hub(monkeypatch):
     assert response.json()["sessions"][0]["ready"] is True
 
 
+def test_inbox_route_fetches_read_items_for_pending_retry(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    calls = []
+    regular = _human_api(calls=calls)
+
+    def human_api(method, path, authorization, payload=None):
+        if method == "GET" and path.startswith("/hub/api/inbox?"):
+            calls.append((method, path, authorization, payload))
+            return {"items": []}
+        return regular(method, path, authorization, payload)
+
+    def route_inbox(authorization, *, hub, human_id, fetch_inbox):
+        assert hub == HUB
+        assert human_id == 7
+        assert fetch_inbox(authorization) == {"items": []}
+        return {"fetched": 0, "delivered": 0, "pending": 0}
+
+    monkeypatch.setattr(server.hub_client, "human_api", human_api)
+    monkeypatch.setattr(server.team_inbox_router, "route_inbox", route_inbox)
+
+    response = client.post("/api/team-auth/inbox-route/route", headers=headers)
+
+    assert response.status_code == 200
+    assert calls[-1][1] == "/hub/api/inbox?limit=100"
+    assert "unread_only" not in calls[-1][1]
+
+
 def test_bind_creates_managed_lead_and_saves_local_mapping(monkeypatch):
     client, headers = _prepare(monkeypatch)
     calls = []
