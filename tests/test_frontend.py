@@ -1071,6 +1071,16 @@ def test_team_chat_shares_support_history_and_can_reply():
     assert "所有 active 成员都能查看历史" in js
 
 
+def test_team_inbox_routes_to_session_lead_on_load_poll_and_manual_retry():
+    js = _inline_js()
+    assert "/api/team-auth/inbox-route/route" in js
+    assert "/api/team-auth/inbox-route/status" in js
+    assert "await teamRouteInboxNow();" in js
+    assert "await teamRouteInboxNow(true);" in js
+    assert "action==='teamInboxRouteNow')teamRunInboxRoute()" in js
+    assert "远程 Human Inbox → 已绑定 Session 的 lead" in js
+
+
 def test_team_human_jwt_uses_http_only_cookie_and_hub_text_is_escaped():
     js = _inline_js()
     assert "api('/api/team-auth/login'" in js

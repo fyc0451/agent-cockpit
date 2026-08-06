@@ -32,6 +32,7 @@ import coordination
 import hub_client
 import herdr_client
 import tasks
+import team_inbox_router
 import uploads
 import files
 import mail_projects
@@ -1795,6 +1796,36 @@ def api_team_auth_logout():
     response = JSONResponse({"ok": True})
     response.delete_cookie(TEAM_AUTH_COOKIE, path="/api")
     return response
+
+
+@app.get("/api/team-auth/inbox-route/status")
+def api_team_inbox_route_status(request: Request):
+    """返回当前 Human 的收件箱路由状态；不含 registry/身份/凭据。"""
+    _, human = _team_human_context(request)
+    hub = hub_client.public_team_config()["team_hub"]
+    return team_inbox_router.route_status(
+        hub=hub, human_id=int(human["id"])
+    )
+
+
+@app.post("/api/team-auth/inbox-route/route")
+def api_team_inbox_route_run(request: Request):
+    """触发一次远程 Human Inbox → 本机已绑定 Session lead 的安全路由。"""
+    authorization, human = _team_human_context(request)
+    hub = hub_client.public_team_config()["team_hub"]
+    try:
+        return team_inbox_router.route_inbox(
+            authorization,
+            hub=hub,
+            human_id=int(human["id"]),
+            fetch_inbox=lambda auth: hub_client.human_api(
+                "GET", "/hub/api/inbox?unread_only=true&limit=100", auth
+            ),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
 
 
 @app.post("/api/team-auth/register", status_code=201)
