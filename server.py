@@ -35,6 +35,7 @@ import tasks
 import uploads
 import files
 import mail_projects
+import team_sessions
 import terminal
 import web_push
 import settings
@@ -111,6 +112,7 @@ MAIL_RECV_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-recv"
 TASK_REPORT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "task-report"
 _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
+_TEAM_SESSION_BIND_LOCK = threading.Lock()
 ZOOM_LEASE_TTL = 30.0
 ZOOM_LEASE_RETRY = 5.0
 _ZOOM_LEASES: dict[str, dict[str, Any]] = {}
@@ -480,6 +482,11 @@ class AgentMailConfigReq(BaseModel):
     human_auth: str | None = None
 
 
+class TeamSessionBindReq(BaseModel):
+    session: str = Field(..., min_length=1, max_length=64)
+    replace: bool = False
+
+
 # ── 认证 ─────────────────────────────────────────────────────────
 
 @app.get("/api/auth/status")
@@ -636,6 +643,7 @@ def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 "mail_name": (
                     (participant or {}).get("mail_name") or pane.get("mail_name")
                 ),
+                "participant_id": (participant or {}).get("participant_id"),
                 "role": (participant or {}).get("role"),
                 "task": (participant or {}).get("task_text"),
                 "status": status,
@@ -663,6 +671,7 @@ def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             status = "empty"
         result.append({
             "session": session,
+            "generation": str((run or {}).get("run_id") or ""),
             "directory": source["directory"],
             "status": status,
             "progress": round(summary["done"] * 100 / total) if total else 0,
@@ -1351,6 +1360,374 @@ def api_team_local_identities(request: Request):
     except hub_client.HumanAuthError as exc:
         _raise_human_auth_error(exc)
     return {"identities": _registry_identities()}
+
+
+def _team_session_candidates() -> list[dict[str, Any]]:
+    """只把运行中 Session 的唯一负责人作为 Team 绑定候选。"""
+    identities = _registry_scan()
+    result: list[dict[str, Any]] = []
+    for session in _build_session_progress(_board_snapshot()):
+        leads = [agent for agent in session["agents"] if agent.get("role") == "lead"]
+        item: dict[str, Any] = {
+            "session": session["session"],
+            "generation": session["generation"],
+            "directory": session["directory"],
+            "status": session["status"],
+            "agent_count": len(session["agents"]),
+            "lead": None,
+            "ready": False,
+            "reason": None,
+        }
+        if len(leads) != 1:
+            item["reason"] = "负责人未配置" if not leads else "存在多个负责人"
+            result.append(item)
+            continue
+        if not item["generation"]:
+            item["reason"] = "Session 尚未建立协作运行"
+            result.append(item)
+            continue
+        lead = {
+            key: leads[0].get(key)
+            for key in ("pane_id", "agent", "mail_name", "participant_id", "status")
+        }
+        item["lead"] = lead
+        if not lead.get("mail_name"):
+            item["reason"] = "负责人尚未注册 Agent Mail 身份"
+            result.append(item)
+            continue
+        try:
+            state = _mail_project_state(str(session["session"]))
+        except Exception:
+            logger.exception("Team Session 读取通信项目失败: %s", session["session"])
+            item["reason"] = "负责人通信项目不可用"
+            result.append(item)
+            continue
+        project = state.get("project") if state.get("bound") else None
+        if not project:
+            item["reason"] = "Session 尚未选择 Agent Mail 通信项目"
+            result.append(item)
+            continue
+        lead_agent = MAIL_AGENT_NAMES.get(str(lead.get("agent") or ""), str(lead.get("agent") or ""))
+        matches = [
+            identity for identity in identities
+            if identity.get("project_key") == project
+            and identity.get("name") == lead.get("mail_name")
+            and MAIL_AGENT_NAMES.get(
+                str(identity.get("agent") or ""), str(identity.get("agent") or "")
+            ) == lead_agent
+        ]
+        if len(matches) != 1:
+            item["reason"] = "负责人本机身份缺失或不唯一"
+            result.append(item)
+            continue
+        item["ready"] = True
+        item["mail_project"] = project
+        result.append(item)
+    return result
+
+
+def _team_client_session_id(session: str, generation: str) -> str:
+    """给 Team Hub 的不透明 Session 代际标识，不暴露本机名称或路径。"""
+    return hashlib.sha256(f"{session}\0{generation}".encode()).hexdigest()
+
+
+def _team_session_lead_payload(row: dict[str, Any]) -> dict[str, str]:
+    lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
+    client_id = str(row.get("client_session_id") or "")
+    if not client_id:
+        client_id = _team_client_session_id(
+            str(row.get("session") or ""),
+            str(row.get("session_generation") or row.get("generation") or ""),
+        )
+    return {
+        "client_session_id": client_id,
+        "lead_label": str(lead.get("mail_name") or lead.get("agent") or "Session lead")[:128],
+    }
+
+
+def _team_remote_session_lead(
+    authorization: str, project_slug: str, row: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        result = hub_client.human_api(
+            "POST",
+            f"/hub/api/projects/{quote(project_slug, safe='')}/session-leads",
+            authorization,
+            _team_session_lead_payload(row),
+        )
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    if not isinstance(result, dict):
+        raise HTTPException(502, "Team Hub 返回了无效 Session 负责人")
+    return result
+
+
+def _team_remote_session_unbind(
+    authorization: str, project_slug: str, client_session_id: str,
+) -> None:
+    try:
+        hub_client.human_api(
+            "DELETE",
+            f"/hub/api/projects/{quote(project_slug, safe='')}/session-leads/"
+            f"{quote(client_session_id, safe='')}",
+            authorization,
+        )
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+
+def _team_human_context(request: Request) -> tuple[str, dict[str, Any]]:
+    authorization = _team_human_authorization(request)
+    try:
+        human = hub_client.human_api("GET", "/hub/api/humans/me", authorization)
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    if (
+        not isinstance(human, dict)
+        or isinstance(human.get("id"), bool)
+        or not isinstance(human.get("id"), int)
+    ):
+        raise HTTPException(502, "Team Hub 返回了无效 Human 身份")
+    return authorization, human
+
+
+def _team_project_slug(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value):
+        raise HTTPException(400, "project_slug 无效")
+    return value
+
+
+def _public_team_session_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    lead = row.get("lead") if isinstance(row.get("lead"), dict) else None
+    return {
+        "session": row.get("session"),
+        "status": row.get("status"),
+        "agent_count": row.get("agent_count"),
+        "lead": ({
+            "agent": lead.get("agent"),
+            "mail_name": lead.get("mail_name"),
+            "status": lead.get("status"),
+        } if lead else None),
+        "ready": bool(row.get("ready")),
+        "reason": row.get("reason"),
+    }
+
+
+def _public_team_session_binding(
+    row: dict[str, Any], candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    candidate = next((
+        item for item in candidates
+        if item.get("session") == row.get("session")
+        and item.get("generation") == row.get("session_generation")
+    ), None)
+    same_name = next((
+        item for item in candidates if item.get("session") == row.get("session")
+    ), None)
+    lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
+    active = candidate is not None
+    reason = None
+    if candidate is not None and not candidate.get("ready"):
+        reason = candidate.get("reason")
+    elif candidate is None and same_name is not None:
+        reason = "Session 已重建，需要重新绑定"
+    elif candidate is None:
+        reason = "Session 已停止"
+    return {
+        "project_slug": row.get("project_slug"),
+        "session": row.get("session"),
+        "lead": {
+            "agent": lead.get("agent"),
+            "mail_name": lead.get("mail_name"),
+        },
+        "agent_id": row.get("agent_id"),
+        "active": active,
+        "ready": bool(active and candidate and candidate.get("ready")),
+        "reason": reason,
+        "updated_ts": row.get("updated_ts"),
+    }
+
+
+def _team_session_bindings_for(hub: str, human_id: int) -> list[dict[str, Any]]:
+    try:
+        return team_sessions.list_bindings(hub, human_id)
+    except OSError as exc:
+        logger.exception("本机 Session 绑定状态读取失败")
+        raise HTTPException(500, "本机 Session 绑定状态不可用") from exc
+
+
+@app.get("/api/team-auth/session-bindings")
+def api_team_session_bindings(request: Request):
+    """返回当前 Human 的本机 Session 候选和已绑定 TeamProject。"""
+    _, human = _team_human_context(request)
+    hub = hub_client.public_team_config()["team_hub"]
+    candidates = _team_session_candidates()
+    bindings = _team_session_bindings_for(hub, int(human["id"]))
+    return {
+        "sessions": [_public_team_session_candidate(row) for row in candidates],
+        "bindings": [
+            _public_team_session_binding(row, candidates) for row in bindings
+        ],
+    }
+
+
+@app.put("/api/team-auth/session-bindings/{project_slug}")
+def api_team_session_bind(
+    project_slug: str, req: TeamSessionBindReq, request: Request,
+):
+    """选择 Session 后在 Team Hub 创建受管出口并保存本机负责人路由。"""
+    slug = _team_project_slug(project_slug)
+    _validate_session_name(req.session)
+    authorization, human = _team_human_context(request)
+    hub = hub_client.public_team_config()["team_hub"]
+    with _TEAM_SESSION_BIND_LOCK:
+        try:
+            membership = hub_client.human_api(
+                "GET",
+                f"/hub/api/projects/{quote(slug, safe='')}/membership",
+                authorization,
+            )
+        except hub_client.HumanAPIError as exc:
+            raise HTTPException(exc.status_code, exc.detail) from exc
+        if not isinstance(membership, dict) or membership.get("status") != "active":
+            raise HTTPException(403, "只有项目 active 成员可以绑定本机 Session")
+        candidate = next(
+            (
+                row for row in _team_session_candidates()
+                if row["session"] == req.session
+            ),
+            None,
+        )
+        if candidate is None:
+            raise HTTPException(404, "本机 Session 不存在或已停止")
+        if not candidate.get("ready") or not candidate.get("mail_project"):
+            raise HTTPException(
+                409, str(candidate.get("reason") or "Session 负责人不可用")
+            )
+        try:
+            conflicts = team_sessions.conflicts_for(
+                hub=hub,
+                human_id=int(human["id"]),
+                project_slug=slug,
+                session=req.session,
+                session_generation=str(candidate["generation"]),
+            )
+        except OSError as exc:
+            logger.exception("本机 Session 绑定状态读取失败")
+            raise HTTPException(500, "本机 Session 绑定状态不可用") from exc
+        if conflicts and not req.replace:
+            raise HTTPException(409, "Session 或团队项目已有绑定，改绑需要显式确认")
+
+        client_session_id = _team_client_session_id(
+            req.session, str(candidate["generation"]),
+        )
+        deactivated: list[dict[str, Any]] = []
+        try:
+            for conflict in conflicts:
+                _team_remote_session_unbind(
+                    authorization,
+                    str(conflict["project_slug"]),
+                    str(conflict["client_session_id"]),
+                )
+                deactivated.append(conflict)
+            remote = _team_remote_session_lead(
+                authorization,
+                slug,
+                {
+                    **candidate,
+                    "client_session_id": client_session_id,
+                },
+            )
+        except Exception:
+            for conflict in deactivated:
+                try:
+                    _team_remote_session_lead(
+                        authorization, str(conflict["project_slug"]), conflict,
+                    )
+                except Exception:
+                    logger.exception("Team Session 改绑失败后的旧路由恢复失败")
+            raise
+        agent = remote.get("agent") if isinstance(remote.get("agent"), dict) else None
+        agent_id = agent.get("id") if isinstance(agent, dict) else None
+        if (
+            isinstance(agent_id, bool)
+            or not isinstance(agent_id, int)
+            or agent_id <= 0
+        ):
+            try:
+                _team_remote_session_unbind(authorization, slug, client_session_id)
+            except Exception:
+                logger.exception("Team Hub 无效响应后的新路由清理失败")
+            for conflict in deactivated:
+                try:
+                    _team_remote_session_lead(
+                        authorization, str(conflict["project_slug"]), conflict,
+                    )
+                except Exception:
+                    logger.exception("Team Hub 无效响应后的旧路由恢复失败")
+            raise HTTPException(502, "Team Hub 返回了无效负责人 Agent")
+        try:
+            binding = team_sessions.bind(
+                hub=hub,
+                human_id=int(human["id"]),
+                project_slug=slug,
+                session=req.session,
+                session_generation=str(candidate["generation"]),
+                session_dir=str(candidate["directory"]),
+                mail_project=str(candidate["mail_project"]),
+                lead={key: str((candidate["lead"] or {}).get(key) or "") for key in (
+                    "pane_id", "agent", "mail_name", "participant_id"
+                )},
+                client_session_id=client_session_id,
+                agent_id=agent_id,
+                replace=req.replace,
+            )
+        except (ValueError, OSError) as exc:
+            try:
+                _team_remote_session_unbind(authorization, slug, client_session_id)
+            except Exception:
+                logger.exception("本地 Session 绑定写入失败后的 Hub 补偿失败")
+            for conflict in deactivated:
+                try:
+                    _team_remote_session_lead(
+                        authorization, str(conflict["project_slug"]), conflict,
+                    )
+                except Exception:
+                    logger.exception("本地 Session 绑定写入失败后的旧路由恢复失败")
+            if isinstance(exc, ValueError):
+                raise HTTPException(409, str(exc)) from exc
+            raise HTTPException(500, "本机 Session 绑定保存失败") from exc
+    return {
+        "ok": True,
+        "binding": _public_team_session_binding(binding, [candidate]),
+    }
+
+
+@app.delete("/api/team-auth/session-bindings/{project_slug}")
+def api_team_session_unbind(project_slug: str, request: Request):
+    """解除本机 Session 路由；不停止 Session、不删除 Agent 或历史消息。"""
+    slug = _team_project_slug(project_slug)
+    authorization, human = _team_human_context(request)
+    hub = hub_client.public_team_config()["team_hub"]
+    with _TEAM_SESSION_BIND_LOCK:
+        current = next((
+            row for row in _team_session_bindings_for(hub, int(human["id"]))
+            if row.get("project_slug") == slug
+        ), None)
+        if current is None:
+            return {"ok": True, "removed": False}
+        _team_remote_session_unbind(
+            authorization, slug, str(current.get("client_session_id") or ""),
+        )
+        try:
+            removed = team_sessions.unbind_project(hub, int(human["id"]), slug)
+        except OSError as exc:
+            try:
+                _team_remote_session_lead(authorization, slug, current)
+            except Exception:
+                logger.exception("本地 Session 解绑失败后的 Hub 补偿失败")
+            raise HTTPException(500, "本机 Session 解绑保存失败") from exc
+    return {"ok": True, "removed": bool(removed)}
 
 
 class LocalIdentityClaimReq(BaseModel):

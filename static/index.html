@@ -470,7 +470,7 @@ header .spacer{flex:1}
       <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="流视图:可滚屏/复制的 pane 输出 + 快速发指令">流</button>
       <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止">会话</button>
       <button data-view="msgs" data-i18n="nav.msgs" data-i18n-title="nav.msgs.t" title="agent 之间的消息(需安装 Agent Mail)">消息</button>
-      <button data-view="team" data-i18n-title="nav.team.t" title="团队项目、成员、默认 Agent 与管理员操作"><span data-i18n="nav.team">团队</span><span class="nav-badge" id="teamNavBadge" style="display:none">0</span></button>
+      <button data-view="team" data-i18n-title="nav.team.t" title="团队项目、成员、Session 绑定与管理员操作"><span data-i18n="nav.team">团队</span><span class="nav-badge" id="teamNavBadge" style="display:none">0</span></button>
       <button data-view="files" data-i18n="nav.files" data-i18n-title="nav.files.t" title="浏览/编辑/下载项目文件,也可以从这里建工作区">文件</button>
       <button data-view="settings" data-i18n="nav.settings" data-i18n-title="nav.settings.t" title="语言、主题、agent、目录与环境自检">设置</button>
     </nav>
@@ -868,7 +868,7 @@ let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
-let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],bindings:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',chat:[],chatError:'',localIdentities:[],mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
+let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
 let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
 let TEAM_CHAT_SENDING=false;
 let TEAM_POLL_TIMER=null, TEAM_POLL_BACKOFF=30000, TEAM_POLL_FAILURES=0;
@@ -1257,7 +1257,7 @@ async function teamConnect(){
 async function teamDisconnect(){
   teamPollStop();
   try{await api('/api/team-auth/logout',{method:'POST'})}catch(e){}
-  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],bindings:[],members:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',chat:[],chatError:'',localIdentities:[],mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
+  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
   try{sessionStorage.removeItem('cockpit-team-project')}catch(e){}
   const navBadge=document.getElementById('teamNavBadge');if(navBadge)navBadge.style.display='none';
   teamLoginHtml();
@@ -1272,13 +1272,13 @@ function teamProjectStatus(project){
 }
 function teamSelectedProject(){return TEAM.projects.find(p=>p.slug===TEAM.selected)||null}
 async function teamLoadSelection(){
-  TEAM.membership=null;TEAM.agents=[];TEAM.bindings=[];TEAM.members=[];TEAM.chat=[];TEAM.chatError='';
+  TEAM.membership=null;TEAM.agents=[];TEAM.members=[];TEAM.chat=[];TEAM.chatError='';
   const project=teamSelectedProject();
   if(!project||project.membership?.status!=='active')return;
   const slug=encodeURIComponent(project.slug);
-  const requests=[teamApi(`projects/${slug}/membership`),teamApi(`projects/${slug}/agents`),teamApi(`projects/${slug}/agent-bindings`),teamApi(`projects/${slug}/members`)];
+  const requests=[teamApi(`projects/${slug}/membership`),teamApi(`projects/${slug}/agents`),teamApi(`projects/${slug}/members`)];
   const result=await Promise.all(requests);
-  TEAM.membership=result[0];TEAM.agents=result[1].agents||[];TEAM.bindings=Array.isArray(result[2])?result[2]:(result[2]?.bindings||[]);TEAM.members=result[3]?.members||[];
+  TEAM.membership=result[0];TEAM.agents=result[1].agents||[];TEAM.members=result[2]?.members||[];
 }
 async function teamLoadInbox(throwOnError=false){
   if(TEAM.inboxLoading)return;
@@ -1310,9 +1310,10 @@ async function teamLoad(force=false){
   try{
     if(!TEAM.authenticated){const auth=await api('/api/team-auth/status');TEAM.authenticated=!!auth.authenticated;TEAM.profile=auth.profile||null;sessionFound=TEAM.authenticated}
     if(!TEAM.authenticated)throw new Error('登录已过期');
-    const [human,projects]=await Promise.all([teamApi('humans/me'),teamApi('projects')]);
+    const [human,projects,sessionData]=await Promise.all([teamApi('humans/me'),teamApi('projects'),api('/api/team-auth/session-bindings')]);
     TEAM.human=human;TEAM.projects=projects.projects||[];
-    try{const local=await api('/api/team-auth/local-identities');TEAM.localIdentities=Array.isArray(local.identities)?local.identities:[]}catch(e){TEAM.localIdentities=[]}
+    TEAM.sessions=Array.isArray(sessionData.sessions)?sessionData.sessions:[];
+    TEAM.sessionBindings=Array.isArray(sessionData.bindings)?sessionData.bindings:[];
     if(!TEAM.projects.some(p=>p.slug===TEAM.selected)){
       TEAM.selected=(TEAM.projects.find(p=>p.membership?.status==='active')||TEAM.projects[0]||{}).slug||'';
     }
@@ -1325,65 +1326,32 @@ async function teamLoad(force=false){
     teamPollStart();
   }catch(e){TEAM.authenticated=false;TEAM.profile=null;TEAM.human=null;teamPollStop();const navBadge=document.getElementById('teamNavBadge');if(navBadge)navBadge.style.display='none';teamLoginHtml(sessionFound?'团队数据加载失败：'+e:'')}finally{TEAM.loading=false}
 }
-function teamOwnerName(ownerId){
-  if(ownerId==null)return'未归属';
-  if(ownerId===TEAM.human?.id)return TEAM.human.display_name+'（你）';
-  return TEAM.members.find(m=>m.human_id===ownerId)?.display_name||('Human #'+ownerId);
-}
-function teamOwnerOptions(selected){
-  return `<option value=""${selected==null?' selected':''}>未归属</option>`+TEAM.members.filter(m=>m.status==='active').map(m=>
-    `<option value="${Number(m.human_id)}"${m.human_id===selected?' selected':''}>${esc(m.display_name)} · @${esc(m.mention_handle)}</option>`
-  ).join('');
-}
-function teamAgentRows(project){
-  const admin=project.membership?.role==='admin';
-  const globalAdmin=teamIsGlobalAdmin();
-  if(!TEAM.agents.length)return'<div class="empty">当前群组还没有绑定远程 Agent。本机工作区中的 Agent 不会自动同步到群组。</div>';
-  return TEAM.agents.map(agent=>{
-    const canRetire=globalAdmin||agent.owner_id===TEAM.human?.id||(admin&&!agent.bound_external);
-    const canAssignOwner=agent.bound_external?globalAdmin:admin;
-    const badge=agent.retired?'<span class="team-badge retired">retired</span>':'<span class="team-badge active">active</span>';
-    const ownerControl=canAssignOwner?`<select id="teamOwner-${Number(agent.id)}">${teamOwnerOptions(agent.owner_id)}</select><button class="sm" data-action="teamOwner" data-agent-id="${Number(agent.id)}">保存归属</button>`:`<span class="muted">${esc(teamOwnerName(agent.owner_id))}</span>`;
-    const retireControl=canRetire?`<button class="sm${agent.retired?'':' danger'}" data-action="teamRetire" data-agent-id="${Number(agent.id)}" data-retired="${agent.retired?'1':'0'}">${agent.retired?'恢复':'停用'}</button>`:'';
-    return `<div class="team-row"><div class="team-row-main"><b>${esc(agent.name)} ${badge}</b><small>${esc(agent.program||'unknown')}${agent.model?' · '+esc(agent.model):''}${agent.bound_external?' · 外部绑定':''}</small></div><div class="muted">${esc(teamOwnerName(agent.owner_id))}</div><div class="team-row-actions">${ownerControl}${retireControl}</div></div>`;
+function teamBindingForProject(slug){return TEAM.sessionBindings.find(binding=>binding.project_slug===slug)||null}
+function teamBindingForSession(session){return TEAM.sessionBindings.find(binding=>binding.session===session&&binding.active)||null}
+function teamSessionPicker(project){
+  if(!TEAM.sessions.length)return'<div class="team-status warn">本机还没有运行中的 Session。请先创建工作区，再回来绑定。</div><button class="sm" data-action="teamGotoTerm">去终端页</button>';
+  const ready=TEAM.sessions.filter(session=>session.ready);
+  const firstReady=ready[0]?.session||'';
+  const options=TEAM.sessions.map(session=>{
+    const name=String(session.session||'');
+    const lead=session.lead?.mail_name||session.lead?.agent||'';
+    const existing=teamBindingForSession(name);
+    const projectName=existing?TEAM.projects.find(item=>item.slug===existing.project_slug)?.name||existing.project_slug:'';
+    const suffix=session.ready?`负责人 ${lead||'未命名'}${projectName?' · 当前绑定 '+projectName:''}`:(session.reason||'负责人不可用');
+    return `<option value="${esc(name)}"${name===firstReady?' selected':''}${session.ready?'':' disabled'}>${esc(name)} · ${esc(suffix)}</option>`;
   }).join('');
+  const reasons=[...new Set(TEAM.sessions.filter(session=>!session.ready).map(session=>session.reason).filter(Boolean))];
+  const warning=!ready.length?`<div class="team-status warn">${esc(reasons.slice(0,2).join('；')||'没有可绑定的 Session 负责人')}</div><button class="sm" data-action="teamGotoSessions">去会话管理</button>`:'';
+  return `<div class="team-inline-form"><div class="field"><label>本机 Session</label><select id="teamSessionSelect">${options}</select></div><button class="primary" data-action="teamSessionBind"${ready.length?'':' disabled'}>绑定到 ${esc(project.name||project.slug)}</button></div>${warning}<div class="team-safety">负责人由 Session 的唯一 lead 自动识别；developer / reviewer 只参与本地协作，不会单独暴露给团队。</div>`;
 }
-function teamBindingRows(admin){
-  const rows=TEAM.bindings.map(binding=>{
-    const agentId=Number(binding.agent_id);
-    const active=binding.status==='active';
-    const agent=TEAM.agents.find(a=>Number(a.id)===agentId)||{};
-    const unbind=active&&admin&&Number.isInteger(agentId)&&agentId>0?`<button class="sm danger" data-action="teamUnbind" data-agent-id="${agentId}">解绑</button>`:'';
-    const badge=active?'<span class="team-badge active">active</span>':'<span class="team-badge retired">unbound</span>';
-    return `<div class="team-row"><div class="team-row-main"><b>${esc(binding.agent_name||agent.name||('Agent #'+agentId))} ${badge}</b><small>${esc(agent.program||binding.program||'unknown')}${agent.model||binding.model?' · '+esc(agent.model||binding.model):''}</small></div><div class="team-row-actions">${unbind}</div></div>`;
-  }).join('');
-  return rows||'<div class="empty">当前没有绑定记录。请从“认领本机身份”选择这台电脑上真实启动的 Agent。</div>';
-}
-function teamLocalIdentityRows(){
-  const claimed=new Set(TEAM.agents.map(a=>a.name));
-  const unclaimed=TEAM.localIdentities.filter(i=>i&&typeof i==='object'&&!claimed.has(i.name));
-  const candidates=unclaimed.filter(i=>i.eligible!==false);
-  const hidden=unclaimed.length-candidates.length;
-  if(!candidates.length){
-    if(hidden)return `<div class="team-status warn">当前没有已连接 Team Hub 的本机 Agent。已隐藏 ${hidden} 个其他 Hub 或历史身份，它们不能加入当前群组。</div><button class="sm" data-action="teamGotoSettings">检查连接设置</button>`;
-    return'<div class="empty">当前没有可认领的本机 Agent。请先在工作区启动 Agent。</div>';
-  }
-  const rows=candidates.map(i=>{
-    const identityId=String(i.identity_id||'');
-    if(!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}--[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.json$/.test(identityId))return'';
-    const name=String(i.name||'');
-    const meta=esc(i.program||'unknown')+(i.model?' · '+esc(i.model):'')+(i.project_slug?' · '+esc(i.project_slug):'');
-    return `<div class="team-row"><div class="team-row-main"><b>${esc(name)}</b><small>${meta}</small></div><div class="team-row-actions"><button class="sm primary" data-action="teamClaimIdentity" data-identity-id="${esc(identityId)}">认领</button></div></div>`;
-  }).join('');
-  const note=hidden?`<div class="team-status">已隐藏 ${hidden} 个不属于当前 Team Hub 的本地或历史身份。</div>`:'';
-  return rows+note;
-}
-function teamClaimIdentity(identityId){
-  const project=teamSelectedProject();
-  if(!project)return;
-  if(!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}--[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.json$/.test(identityId)){toast('身份标识无效');return}
-  if(!window.confirm('确认认领本机身份到当前群组？认领后该身份会出现在项目 Agents 中。'))return;
-  teamMutation('身份已认领',()=>api('/api/team-auth/local-identities/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({identity_id:identityId,project_slug:project.slug})}));
+function teamSessionBindingCard(project){
+  const binding=teamBindingForProject(project.slug);
+  if(!binding)return `<div class="team-section team-hero"><div class="team-section-title">连接本机工作区 <span>选择 Session，负责人自动识别</span></div>${teamSessionPicker(project)}</div>`;
+  const lead=binding.lead?.mail_name||binding.lead?.agent||'未识别';
+  const defaultMatches=Number(TEAM.membership?.default_agent_id)===Number(binding.agent_id);
+  const ready=binding.active&&binding.ready&&defaultMatches;
+  const state=ready?'通信正常':(binding.reason||'负责人项目出口需要重新同步');
+  return `<div class="team-section"><div class="team-section-title">本机 Session <span>该 Session 的负责人统一对外</span></div><div class="team-row"><div class="team-row-main"><b>${esc(binding.session)} <span class="team-badge ${ready?'active':'invited'}">${ready?'已连接':'需处理'}</span></b><small>负责人：${esc(lead)} · ${esc(state)}</small></div><div class="team-row-actions"><button class="sm danger" data-action="teamSessionUnbind">解绑</button></div></div><details class="team-create"><summary>${ready?'更换':'重新选择'} Session</summary>${teamSessionPicker(project)}</details><div class="team-safety">解绑只移除团队通信路由，不停止 Session、不删除 worktree，也不影响 Session 内其他 Agent。</div></div>`;
 }
 function teamMemberRows(){
   if(!TEAM.members.length)return'<div class="empty">暂无成员</div>';
@@ -1424,24 +1392,13 @@ function teamProjectPanel(project){
       ${pending?'<div class="team-status warn">加入申请已提交，等待项目管理员审批。</div>':`<div class="team-status">该项目可发现，但你还不是 active 成员。申请只会更新 Hub membership，不会创建本地工作区。</div><div class="team-inline-form"><div class="field"><label>项目内 @花名</label><input id="teamJoinHandle" value="${esc(teamHandleSeed())}" maxlength="128"></div><button class="primary" data-action="teamJoin">申请加入</button></div>`}
     </div>`;
   }
-  const owned=TEAM.agents.filter(a=>a.owner_id===TEAM.human?.id&&!a.retired);
-  const defaultOptions='<option value="">不设置（消息进入人工收件箱）</option>'+owned.map(a=>`<option value="${Number(a.id)}"${a.id===TEAM.membership?.default_agent_id?' selected':''}>${esc(a.name)}</option>`).join('');
   const admin=membership.role==='admin';
-  const bindingAdmin=admin||teamIsGlobalAdmin();
-  const activeAgents=TEAM.agents.filter(a=>!a.retired).length;
-  // P0: 没有可认领的归属 Agent 时,不给空下拉,改为明确的下一步 hero 区
-  const localCount=(TEAM.localIdentities||[]).filter(i=>i&&i.eligible!==false).length;
-  const disconnectedCount=(TEAM.localIdentities||[]).filter(i=>i&&i.eligible===false).length;
-  const identityBlock=owned.length
-    ?`<div class="team-section"><div class="team-section-title">我的项目身份 <span>本人可修改</span></div><div class="team-row"><div class="team-row-main"><b>${esc(TEAM.human.display_name)}</b><small>@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}</small></div><select id="teamDefaultAgent">${defaultOptions}</select><div class="team-row-actions"><button class="primary sm" data-action="teamDefault">保存默认 Agent</button></div></div></div>`
-    :`<div class="team-section team-hero"><div class="team-section-title">下一步:设置你的搭档 Agent <span>团队通过它联系你</span></div><div class="team-status">@${esc(TEAM.membership?.mention_handle||membership.mention_handle)}，你已是本群成员。认领一个本机 Agent 作为搭档后,@你的消息会直接投递给它;否则只能进入人工收件箱。</div>${localCount?'<button class="primary" data-action="teamScrollClaim">选择本机 Agent 作为搭档</button>':disconnectedCount?'<div class="team-status warn">本机 Agent 尚未连接当前 Team Hub，暂时不能认领。历史身份已隐藏，不需要逐条处理。</div><button class="sm" data-action="teamGotoSettings">检查连接设置</button>':'<div class="team-status warn">这台电脑上还没有可认领的 Agent。请先在工作区启动一个 Agent(终端页「＋ 添加 Agent」),再回到这里认领。</div><button class="sm" data-action="teamGotoTerm">去添加 Agent</button>'}</div>`;
+  const binding=teamBindingForProject(project.slug);
+  const connected=!!(binding?.active&&binding?.ready&&Number(TEAM.membership?.default_agent_id)===Number(binding?.agent_id));
   return `<div class="team-panel-head"><h3>${esc(project.name||project.slug)}</h3><span class="team-badge ${admin?'admin':'active'}">${admin?'管理员':'成员'}</span></div><div class="team-panel-body">
-    <div class="team-safety">群组标识：${esc(project.slug)}。群组只存在于远程 Hub；切换群组不会读取或切换本机目录、Herdr session，也不会自动启动 Agent。</div>
-    <div class="team-stats"><div class="team-stat"><b>${Number(project.active_member_count)||0}</b><span>active 成员</span></div><div class="team-stat"><b>${activeAgents}</b><span>active Agents</span></div><div class="team-stat"><b>${TEAM.membership?.default_agent_id?'1':'0'}</b><span>我的默认 Agent</span></div></div>
-    ${identityBlock}
-    <div class="team-section"><div class="team-section-title">项目 Agents <span>owner 可停用；管理员可分配 owner</span></div>${teamAgentRows(project)}</div>
-    <div class="team-section" id="teamClaimSection"><div class="team-section-title">认领本机身份 <span>选择本机注册身份并确认后加入项目 Agents</span></div>${teamLocalIdentityRows()}</div>
-    <div class="team-section"><div class="team-section-title">绑定记录 <span>新增 Agent 统一从本机身份认领；管理员可解绑</span></div>${teamBindingRows(bindingAdmin)}</div>
+    <div class="team-safety">群组标识：${esc(project.slug)}。群组位于远程 Hub；你只需把一个本机 Session 连接到这里，本机目录和 worktree 不会上传。</div>
+    <div class="team-stats"><div class="team-stat"><b>${Number(project.active_member_count)||0}</b><span>active 成员</span></div><div class="team-stat"><b>${binding?'1':'0'}</b><span>本机 Session</span></div><div class="team-stat"><b>${connected?'正常':'未连接'}</b><span>团队通信</span></div></div>
+    ${teamSessionBindingCard(project)}
     ${admin?`<div class="team-section"><div class="team-section-title">管理员 · 成员审批 <span>${TEAM.members.length} 人</span></div>${teamMemberRows()}</div>`:''}
   </div>`;
 }
@@ -1453,7 +1410,7 @@ function teamInboxPanel(){
     const canMark=Number.isInteger(itemId)&&itemId>0&&!item.read_ts;
     return `<article class="team-inbox-item${item.read_ts?'':' unread'}"><div class="team-inbox-head"><span class="team-badge">${esc(item.project_slug||'unknown')}</span><b>${esc(item.subject||'（无主题）')}</b><time>${esc(fmtTime(item.created_ts))}</time></div><div class="team-inbox-meta">来自 Agent · ${esc(item.sender_name||'unknown')}${item.importance&&item.importance!=='normal'?' · '+esc(item.importance):''}</div><div class="team-inbox-body">${esc(item.body_md||'')}</div>${canMark?`<div class="team-inbox-actions"><button class="sm" data-action="teamInboxRead" data-inbox-id="${itemId}">标为已读</button></div>`:''}</article>`;
   }).join('');
-  const body=TEAM.inboxError?`<div class="team-status warn">人工收件箱加载失败：${esc(TEAM.inboxError)}</div>`:(rows||'<div class="empty">暂无人工消息。@你的消息会在没有可用默认 Agent 时出现在这里。</div>');
+  const body=TEAM.inboxError?`<div class="team-status warn">人工收件箱加载失败：${esc(TEAM.inboxError)}</div>`:(rows||'<div class="empty">暂无人工消息。@你的消息会在没有可用 Session 负责人时出现在这里。</div>');
   return `<div class="team-panel-head"><h3>人工收件箱</h3><span class="team-badge${unread.length?' invited':''}">${unread.length} 未读</span></div><div class="team-inbox-tools"><span>消息归 Human 所有，不会自动启动 Agent 或本地任务。</span><span class="spacer"></span>${unread.length?'<button class="sm" data-action="teamInboxReadAll">全部标为已读</button>':''}</div><div class="team-inbox-list">${body}</div>`;
 }
 function teamChatPanel(){
@@ -1468,13 +1425,18 @@ function teamChatPanel(){
     return `<article class="team-chat-message${mine?' mine':''}"><div class="team-chat-meta"><b>${esc(item.sender_name||'unknown')}</b><span>${via}${targets}</span><time>${esc(fmtTime(item.created_ts))}</time></div>${subject}<div class="team-chat-body">${esc(item.body_md||'')}</div></article>`;
   }).join('');
   const history=TEAM.chatError?`<div class="team-status warn">群聊加载失败：${esc(TEAM.chatError)}</div>`:(rows||'<div class="empty">还没有消息，发一条开始交流。</div>');
-  return `<div class="team-panel-head"><h3>${esc(project.name||project.slug)} · 群聊</h3><button class="icon" data-action="teamChatRefresh" title="刷新群聊">↻</button></div><div class="team-inbox-tools"><span>所有 active 成员都能查看历史；终端中的 @团队 / @成员 也会出现在这里。</span></div><div class="team-chat-list" id="teamChatList">${history}</div><div class="team-chat-compose"><textarea id="teamChatBody" maxlength="48000" placeholder="输入群聊内容，发送后所有群组成员都能看到"></textarea><button class="primary" data-action="teamChatSend">发送</button></div>`;
+  const binding=teamBindingForProject(project.slug);
+  const canSend=!!(binding?.active&&binding?.ready&&Number(TEAM.membership?.default_agent_id)===Number(binding?.agent_id));
+  const compose=canSend?'<div class="team-chat-compose"><textarea id="teamChatBody" maxlength="48000" placeholder="输入群聊内容，发送后所有群组成员都能看到"></textarea><button class="primary" data-action="teamChatSend">发送</button></div>':`<div class="team-status warn">发送群聊前，请先在“项目”页绑定一个本机 Session；消息将由该 Session 的负责人统一发出。</div>`;
+  return `<div class="team-panel-head"><h3>${esc(project.name||project.slug)} · 群聊</h3><button class="icon" data-action="teamChatRefresh" title="刷新群聊">↻</button></div><div class="team-inbox-tools"><span>所有 active 成员都能查看历史；终端中的 @团队 / @成员 也会出现在这里。</span></div><div class="team-chat-list" id="teamChatList">${history}</div>${compose}`;
 }
 function teamChatScrollBottom(){const list=document.getElementById('teamChatList');if(list)list.scrollTop=list.scrollHeight}
 async function teamChatSend(){
   if(TEAM_CHAT_SENDING)return;
   const project=teamSelectedProject(),input=document.getElementById('teamChatBody');
   const body_md=input?.value.trim()||'';
+  const binding=project?teamBindingForProject(project.slug):null;
+  if(!binding?.active||!binding?.ready||Number(TEAM.membership?.default_agent_id)!==Number(binding.agent_id)){toast('请先绑定通信正常的本机 Session');return}
   if(!project||project.membership?.status!=='active'||!body_md){toast('请输入群聊内容');return}
   TEAM_CHAT_SENDING=true;
   const button=document.querySelector('[data-action="teamChatSend"]');if(button){button.disabled=true;button.textContent='发送中…'}
@@ -1563,10 +1525,20 @@ async function teamCreateInvite(){if(TEAM.mutating)return;TEAM.mutating=true;try
 async function teamSetUserStatus(username,status){if(TEAM.mutating)return;if(status==='disabled'&&!window.confirm('停用这个团队账号？'))return;TEAM.mutating=true;try{await api('/api/team-auth/users/'+encodeURIComponent(username),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});await teamLoadAccounts();teamRender();toast(status==='active'?'账号已批准/恢复':'账号已停用')}catch(e){toast('更新账号失败: '+e,5000)}finally{TEAM.mutating=false}}
 async function teamCopyInvite(){if(!TEAM.inviteCode)return;try{await navigator.clipboard.writeText(TEAM.inviteCode);toast('邀请码已复制')}catch(e){toast('复制失败，请手动复制')}}
 function teamJoin(){const project=teamSelectedProject(),handle=document.getElementById('teamJoinHandle')?.value.trim();if(!project||!handle){toast('请填写项目内 @花名');return}teamMutation('加入申请已提交',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/join-requests`,'POST',{mention_handle:handle}))}
-function teamSetDefault(){const project=teamSelectedProject(),value=document.getElementById('teamDefaultAgent')?.value;if(!project)return;teamMutation('默认 Agent 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/membership`,'PATCH',{default_agent_id:value?Number(value):null}))}
-function teamSetOwner(agentId){const project=teamSelectedProject(),value=document.getElementById('teamOwner-'+agentId)?.value;if(!project)return;teamMutation('Agent owner 已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agents/${agentId}`,'PATCH',{owner_id:value?Number(value):null}))}
-function teamSetRetired(agentId,retired){const project=teamSelectedProject(),next=!retired;if(!project)return;if(next&&!window.confirm('停用这个 Agent 身份？历史消息会保留，默认 Agent 引用需先清除。'))return;teamMutation(next?'Agent 已停用':'Agent 已恢复',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agents/${agentId}`,'PATCH',{retired:next}))}
-function teamUnbind(agentId){const project=teamSelectedProject();if(!project)return;if(!window.confirm('确认解绑这个 Agent？绑定关系将从群组移除。'))return;teamMutation('Agent 已解绑',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/agent-bindings/${Number(agentId)}`,'DELETE'))}
+function teamBindSession(){
+  const project=teamSelectedProject(),session=document.getElementById('teamSessionSelect')?.value||'';
+  if(!project||!validSessionName(session)){toast('请选择一个负责人可用的本机 Session');return}
+  const projectBinding=teamBindingForProject(project.slug),sessionBinding=teamBindingForSession(session);
+  const replace=!!(projectBinding||sessionBinding&&sessionBinding.project_slug!==project.slug);
+  if(replace&&!window.confirm(`确认把 ${session} 绑定到 ${project.name||project.slug}？原有团队路由会被替换，Session 和 worktree 不受影响。`))return;
+  teamMutation('Session 已绑定',()=>api(`/api/team-auth/session-bindings/${encodeURIComponent(project.slug)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,replace})}));
+}
+function teamUnbindSession(){
+  const project=teamSelectedProject(),binding=project?teamBindingForProject(project.slug):null;
+  if(!project||!binding)return;
+  if(!window.confirm(`确认解除 ${binding.session} 与 ${project.name||project.slug} 的团队通信？不会停止 Session 或删除 worktree。`))return;
+  teamMutation('Session 已解绑',()=>api(`/api/team-auth/session-bindings/${encodeURIComponent(project.slug)}`,{method:'DELETE'}));
+}
 function teamSetMemberStatus(humanId,status){const project=teamSelectedProject();if(!project)return;if(status==='removed'&&!window.confirm('确认拒绝或移除这个成员？'))return;teamMutation(status==='active'?'成员已批准/恢复':'成员已移除',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/members/${humanId}`,'PATCH',{status}))}
 function teamSetRole(humanId){const project=teamSelectedProject(),role=document.getElementById('teamRole-'+humanId)?.value;if(!project||!role)return;teamMutation('成员角色已更新',()=>teamApi(`projects/${encodeURIComponent(project.slug)}/members/${humanId}`,'PATCH',{role}))}
 async function teamMarkInboxRead(ids){
@@ -2411,28 +2383,32 @@ function renderTermCollab(){
       <span class="main"><b>${esc(p.agent)}</b><small>${esc(p.session)} · ${esc(p.pane_id)}</small></span>
     </button>`).join('')||'<div class="empty">当前没有其他本地 Agent</div>';
   let teamRows='';
-  const project=teamSelectedProject();
-  const activeProjects=TEAM.projects.filter(item=>item.membership?.status==='active');
-  const projectSwitcher=activeProjects.length>1?`<div class="collab-projects"><span>发送到群组</span>${activeProjects.map(item=>`<button class="sm${item.slug===TEAM.selected?' active':''}" data-action="teamCollabProject" data-slug="${esc(item.slug)}">${esc(item.name||item.slug)} · ${esc(item.slug)}</button>`).join('')}</div>`:'';
+  const binding=teamBindingForSession(context.session);
+  const project=binding?TEAM.projects.find(item=>item.slug===binding.project_slug)||null:null;
   if(!TEAM.authenticated){
     teamRows='<div class="team-status warn">尚未登录 Team Hub。登录后才能向远端团队发消息。</div><button class="sm" data-action="collabOpenTeam">打开团队中心</button>';
+  }else if(!context.session){
+    teamRows='<div class="team-status warn">当前终端不属于本机 Session，无法确定对外负责人。</div>';
+  }else if(!binding){
+    teamRows=`<div class="team-status warn">${esc(context.session)} 尚未绑定团队项目。请先在团队中心选择项目并绑定该 Session。</div><button class="sm" data-action="collabOpenTeam">去绑定 Session</button>`;
   }else if(!project){
-    teamRows='<div class="team-status warn">尚未选择团队群组。请先在团队中心加入或选择群组。</div><button class="sm" data-action="collabOpenTeam">打开团队中心</button>';
+    teamRows='<div class="team-status warn">绑定的团队项目当前不可访问，请在团队中心检查成员状态。</div><button class="sm" data-action="collabOpenTeam">查看团队中心</button>';
   }else if(project.membership?.status!=='active'||TEAM.membership?.status!=='active'){
     teamRows=`<div class="team-status warn">你还不是 ${esc(project.name||project.slug)} 的 active 成员。</div><button class="sm" data-action="collabOpenTeam">查看群组</button>`;
+  }else if(!binding.ready||Number(TEAM.membership.default_agent_id)!==Number(binding.agent_id)){
+    teamRows=`<div class="team-status warn">${esc(binding.session)} 的负责人通信尚未就绪：${esc(binding.reason||'项目出口需要重新同步')}</div><button class="sm" data-action="collabOpenTeam">处理绑定</button>`;
   }else{
     const members=TEAM.members.filter(member=>member.status==='active'&&member.human_id!==TEAM.human?.id);
-    const sender=TEAM.membership.default_agent_id?TEAM.agents.find(agent=>agent.id===TEAM.membership.default_agent_id):null;
-    const senderLabel=sender?`以 ${esc(sender.name)} Agent 发出`:'以你的 Human 身份发出';
+    const senderLabel=`由 ${esc(binding.lead?.mail_name||binding.lead?.agent||'Session 负责人')} 统一发出`;
     const broadcast=members.length?`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="team" data-label="${esc(project.name||project.slug)}"><span style="font-size:20px">👥</span><span class="main"><b>@团队 · ${esc(project.name||project.slug)}</b><small>发给当前群组所有其他 active 成员 · ${senderLabel}</small></span></button>`:'';
-    const memberRows=members.map(member=>`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="member" data-handle="${esc(member.mention_handle)}" data-label="${esc(member.display_name||member.mention_handle)}"><span style="font-size:20px">👤</span><span class="main"><b>${esc(member.display_name||member.mention_handle)} · @${esc(member.mention_handle)}</b><small>仅联系该成员；无默认 Agent 时进入 Human Inbox</small></span></button>`).join('');
+    const memberRows=members.map(member=>`<button class="collab-target" data-action="teamCollabTarget" data-target-kind="member" data-handle="${esc(member.mention_handle)}" data-label="${esc(member.display_name||member.mention_handle)}"><span style="font-size:20px">👤</span><span class="main"><b>${esc(member.display_name||member.mention_handle)} · @${esc(member.mention_handle)}</b><small>仅联系该成员；对方没有可用负责人时进入 Human Inbox</small></span></button>`).join('');
     teamRows=broadcast+memberRows+(members.length?'':'<div class="muted" style="font-size:11px">当前群组没有其他 active 成员。</div>');
     if(TEAM_COLLAB_TARGET&&TEAM_COLLAB_TARGET.slug===project.slug){
       const contextText=teamCollabContextText(context);
       teamRows+=`<div class="collab-form"><div class="field"><label>收件人</label><b>${esc(TEAM_COLLAB_TARGET.label)}</b></div><div class="field"><label>主题</label><input id="teamCollabSubject" maxlength="512" value="${esc(teamCollabDefaultSubject(context))}"></div><div class="field"><label>求助内容</label><textarea id="teamCollabBody" maxlength="48000" placeholder="说明问题、已尝试的方法和希望团队提供的支持"></textarea></div><div class="collab-context">${esc(contextText||'未识别到 Herdr pane；只发送你填写的内容')}</div><div class="collab-actions"><button class="sm" data-action="teamCollabCancel">取消</button><button class="primary sm" data-action="teamCollabSend">发送团队消息</button></div></div>`;
     }
   }
-  document.getElementById('collabList').innerHTML=`<section class="collab-section"><div class="collab-section-title"><b>当前工作区 Agent</b><span>插入 Agent Mail 身份</span></div>${localRows}</section><section class="collab-section"><div class="collab-section-title"><b>Team Hub · 当前群组</b><span>真实投递，不启动对方终端</span></div>${projectSwitcher}${teamRows}</section>`;
+  document.getElementById('collabList').innerHTML=`<section class="collab-section"><div class="collab-section-title"><b>当前工作区 Agent</b><span>插入 Agent Mail 身份</span></div>${localRows}</section><section class="collab-section"><div class="collab-section-title"><b>Team Hub · Session 绑定项目</b><span>由负责人统一对外</span></div>${teamRows}</section>`;
 }
 async function termPickCollab(){
   if(!TERM_WS||!XTERM){toast('请先打开一个终端');return}
@@ -2443,26 +2419,26 @@ async function termPickCollab(){
   document.getElementById('collabList').innerHTML='<div class="empty">加载协作对象…</div>';
   modal.classList.add('show');
   await teamLoad(true);
+  const binding=teamBindingForSession(termCollabContext().session);
+  if(binding&&TEAM.selected!==binding.project_slug){
+    TEAM.selected=binding.project_slug;
+    try{sessionStorage.setItem('cockpit-team-project',TEAM.selected)}catch(e){}
+    await teamLoadSelection();
+  }
   if(modal.classList.contains('show'))renderTermCollab();
 }
 function teamCollabPick(kind,handle,label){
-  const project=teamSelectedProject();
+  const binding=teamBindingForSession(termCollabContext().session);
+  const project=binding?TEAM.projects.find(item=>item.slug===binding.project_slug)||null:null;
   if(!project)return;
   TEAM_COLLAB_TARGET={slug:project.slug,handle:kind==='member'?handle:'',label:kind==='member'?'@'+handle+' · '+label:'@团队 · '+label};
   renderTermCollab();
   document.getElementById('teamCollabBody')?.focus();
 }
-async function teamCollabSelectProject(slug){
-  if(TEAM.loading||!TEAM.projects.some(project=>project.slug===slug&&project.membership?.status==='active'))return;
-  TEAM.loading=true;TEAM.selected=slug;TEAM_COLLAB_TARGET=null;
-  try{
-    sessionStorage.setItem('cockpit-team-project',slug);
-    document.getElementById('collabList').innerHTML='<div class="empty">加载群组成员…</div>';
-    await teamLoadSelection();
-  }catch(e){toast('群组加载失败: '+e,4500)}finally{TEAM.loading=false;renderTermCollab()}
-}
 async function teamCollabSend(){
   if(TEAM_COLLAB_SENDING||!TEAM_COLLAB_TARGET)return;
+  const binding=teamBindingForSession(termCollabContext().session);
+  if(!binding||!binding.ready||binding.project_slug!==TEAM_COLLAB_TARGET.slug){toast('当前 Session 的团队绑定已变化，请重新打开 @协作');return}
   const subject=document.getElementById('teamCollabSubject')?.value.trim()||'';
   const message=document.getElementById('teamCollabBody')?.value.trim()||'';
   if(!subject||!message){toast('请填写主题和求助内容');return}
@@ -3763,19 +3739,16 @@ function bindDelegation(){
     else if(action==='teamUserStatus')teamSetUserStatus(it.dataset.username,it.dataset.status);
     else if(action==='teamCopyInvite')teamCopyInvite();
     else if(action==='teamJoin')teamJoin();
-    else if(action==='teamDefault')teamSetDefault();
-    else if(action==='teamOwner')teamSetOwner(Number(it.dataset.agentId));
-    else if(action==='teamRetire')teamSetRetired(Number(it.dataset.agentId),it.dataset.retired==='1');
-    else if(action==='teamUnbind')teamUnbind(Number(it.dataset.agentId));
-    else if(action==='teamClaimIdentity')teamClaimIdentity(it.dataset.identityId);
+    else if(action==='teamSessionBind')teamBindSession();
+    else if(action==='teamSessionUnbind')teamUnbindSession();
     else if(action==='teamMemberStatus')teamSetMemberStatus(Number(it.dataset.humanId),it.dataset.status);
     else if(action==='teamRole')teamSetRole(Number(it.dataset.humanId));
     else if(action==='teamChatSend')teamChatSend();
     else if(action==='teamChatRefresh')teamShowChat();
     else if(action==='teamInboxRead')teamMarkInboxRead([Number(it.dataset.inboxId)]);
     else if(action==='teamInboxReadAll')teamMarkInboxRead(TEAM.inbox.filter(item=>!item.read_ts).map(item=>Number(item.id)).filter(id=>Number.isInteger(id)&&id>0));
-    else if(action==='teamScrollClaim'){document.getElementById('teamClaimSection')?.scrollIntoView({behavior:'smooth',block:'start'})}
     else if(action==='teamGotoSettings')showView('settings');
+    else if(action==='teamGotoSessions')showView('sessions');
     else if(action==='teamGotoTerm'){document.querySelector('#nav button[data-view="term"]')?.click()}
   });
   on('#collabList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
@@ -3783,7 +3756,6 @@ function bindDelegation(){
     if(a==='uploadCurrent')sendUploadToCurrent();
     else if(a==='uploadPane')sendUploadToPane(s,p,g);
     else if(a==='collab')termInsertCollab(s,p,g);
-    else if(a==='teamCollabProject')teamCollabSelectProject(it.dataset.slug);
     else if(a==='teamCollabTarget')teamCollabPick(it.dataset.targetKind,it.dataset.handle||'',it.dataset.label||'');
     else if(a==='teamCollabCancel'){TEAM_COLLAB_TARGET=null;renderTermCollab()}
     else if(a==='teamCollabSend')teamCollabSend();

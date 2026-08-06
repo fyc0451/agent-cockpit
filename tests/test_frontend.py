@@ -1000,7 +1000,7 @@ def test_settings_view_and_nav_exist():
     assert 'onclick="cancelSettings()"' in HTML
 
 
-def test_team_view_covers_project_membership_and_agent_management():
+def test_team_view_covers_project_membership_and_session_binding():
     js = _inline_js()
     assert '<button data-view="team"' in HTML
     assert 'id="view-team"' in HTML
@@ -1011,8 +1011,8 @@ def test_team_view_covers_project_membership_and_agent_management():
     assert "async function teamSetUserStatus(username,status)" in js
     assert "function teamCreateProject()" in js
     assert "function teamJoin()" in js
-    assert "function teamSetDefault()" in js
-    assert "function teamSetOwner(agentId)" in js
+    assert "function teamBindSession()" in js
+    assert "function teamUnbindSession()" in js
     assert "function teamSetMemberStatus(humanId,status)" in js
     assert "function teamShowInbox()" in js
     assert "function teamMarkInboxRead(ids)" in js
@@ -1022,11 +1022,10 @@ def test_team_view_covers_project_membership_and_agent_management():
     assert 'id="teamProjectName"' in HTML
     assert 'id="teamProjectSlug"' in HTML
     assert "本机项目不会自动同步" in js
-    assert "本机工作区中的 Agent 不会自动同步到群组" in js
+    assert "本机目录和 worktree 不会上传" in js
     assert "/join-requests`,'POST'" in js
-    assert "/membership`,'PATCH'" in js
+    assert "/api/team-auth/session-bindings/${encodeURIComponent(project.slug)}" in js
     assert "/members/${humanId}`,'PATCH'" in js
-    assert "/agents/${agentId}`,'PATCH'" in js
     assert "teamApi('inbox')" in js
     assert "teamApi('inbox/mark-read','POST',{ids})" in js
     assert 'id="teamAdminBtn"' in HTML
@@ -1041,12 +1040,11 @@ def test_terminal_collab_supports_real_team_messages_with_context():
     assert "@团队 · ${esc(project.name||project.slug)}" in js
     assert "member.status==='active'" in js
     assert "member.human_id!==TEAM.human?.id" in js
-    assert "'以你的 Human 身份发出'" in js
-    assert "请先为 ${esc(project.name||project.slug)} 设置自己的默认 Agent" not in js
-    assert "function teamCollabSelectProject(slug)" in js
-    assert 'data-action="teamCollabProject"' in js
-    assert "project.membership?.status==='active'" in js
-    assert "sessionStorage.setItem('cockpit-team-project',slug)" in js
+    assert "由 ${esc(binding.lead?.mail_name||binding.lead?.agent||'Session 负责人')} 统一发出" in js
+    assert "function teamBindingForSession(session)" in js
+    assert "function teamCollabSelectProject(slug)" not in js
+    assert 'data-action="teamCollabProject"' not in js
+    assert "binding.project_slug" in js
     assert "support-requests`,'POST',payload" in js
     assert "payload.mention_handles=[TEAM_COLLAB_TARGET.handle]" in js
     assert "终端上下文（由 Cockpit 自动附带）" in js
@@ -1054,7 +1052,7 @@ def test_terminal_collab_supports_real_team_messages_with_context():
     assert "- Pane:" in js
     assert "- Agent:" in js
     assert "- Workdir:" in js
-    assert "真实投递，不启动对方终端" in js
+    assert "Team Hub · Session 绑定项目" in js
 
 
 def test_team_chat_shares_support_history_and_can_reply():
@@ -1085,7 +1083,8 @@ def test_team_human_jwt_uses_http_only_cookie_and_hub_text_is_escaped():
     assert "sessionStorage.setItem('cockpit-human-password'" not in js
     assert "X-Agent-Hub-Authorization" not in js
     assert "${esc(project.slug)}" in js
-    assert "${esc(agent.name)}" in js
+    assert "${esc(binding.session)}" in js
+    assert "${esc(lead)}" in js
     assert "${esc(member.display_name)}" in js
     assert "${esc(item.subject||'（无主题）')}" in js
     assert "${esc(item.body_md||'')}" in js
@@ -1317,162 +1316,110 @@ def test_team_load_does_not_call_duplicate_team_update_mode_ui():
     assert load.count("teamUpdateModeUi()") == 0
 
 
-# ── M3d: Team Agent 选择/绑定/解绑 UI ─────────────────────────
+# ── Team Session 选择/绑定/解绑 UI ─────────────────────────────
 
-def test_team_state_uses_local_identities_not_global_agent_directory():
-    assert "candidates:[]" not in HTML
+def test_team_state_loads_session_bindings_not_registry_or_global_directory():
     js = _inline_js()
     assert "teamApi('agents')" not in js
     assert "TEAM.candidates" not in js
-    assert "api('/api/team-auth/local-identities')" in js
-    assert "TEAM.bindings=Array.isArray(result[2])?result[2]:(result[2]?.bindings||[])" in js
-    assert "teamApi(`projects/${slug}/agent-bindings`)" in js
+    assert "api('/api/team-auth/session-bindings')" in js
+    assert "TEAM.sessions=Array.isArray(sessionData.sessions)?sessionData.sessions:[]" in js
+    assert "TEAM.sessionBindings=Array.isArray(sessionData.bindings)?sessionData.bindings:[]" in js
+    assert "api('/api/team-auth/local-identities')" not in js
+    assert "teamApi(`projects/${slug}/agent-bindings`)" not in js
 
 
-def test_team_binding_ui_functions_and_actions_exist():
+def test_team_session_binding_ui_functions_and_actions_exist():
     js = _inline_js()
-    assert "function teamBindingRows(admin)" in js
-    assert "function teamUnbind(agentId)" in js
-    assert "action==='teamUnbind'" in js
-    assert 'data-action="teamUnbind"' in js
-    assert "agent-bindings" in js
-    assert "function teamBindForm(admin)" not in js
-    assert "action==='teamBind'" not in js
-    assert 'id="teamBindSelect"' not in js
-    assert "新增 Agent 统一从本机身份认领" in js
+    assert "function teamSessionPicker(project)" in js
+    assert "function teamSessionBindingCard(project)" in js
+    assert "function teamBindSession()" in js
+    assert "function teamUnbindSession()" in js
+    assert "action==='teamSessionBind'" in js
+    assert "action==='teamSessionUnbind'" in js
+    assert 'data-action="teamSessionBind"' in js
+    assert 'data-action="teamSessionUnbind"' in js
+    assert "负责人由 Session 的唯一 lead 自动识别" in js
 
 
-def test_team_binding_ui_admin_only_controls():
+def test_team_session_picker_lists_only_ready_choices_as_enabled():
     js = _inline_js()
-    rows = js.split("function teamBindingRows(admin){", 1)[1].split("function ", 1)[0]
-    assert "const active=binding.status==='active'" in rows
-    assert "const unbind=active&&admin&&Number.isInteger(agentId)&&agentId>0" in rows
-    panel = js.split("function teamProjectPanel(project){", 1)[1].split("function teamInboxPanel", 1)[0]
-    assert "const bindingAdmin=admin||teamIsGlobalAdmin()" in panel
-    assert "teamBindingRows(bindingAdmin)" in panel
-    assert panel.index('id="teamClaimSection"') < panel.index("绑定记录")
+    picker = js.split("function teamSessionPicker(project){", 1)[1].split(
+        "function teamSessionBindingCard", 1
+    )[0]
+    assert "TEAM.sessions.filter(session=>session.ready)" in picker
+    assert "session.ready?'':' disabled'" in picker
+    assert "session.lead?.mail_name||session.lead?.agent" in picker
+    assert "session.reason||'负责人不可用'" in picker
+    assert "esc(name)" in picker
+    assert "esc(suffix)" in picker
 
 
-def test_team_agent_rows_permissions_for_bound_external():
+def test_team_project_panel_removes_individual_agent_identity_flow():
     js = _inline_js()
-    rows = js.split("function teamAgentRows(project){", 1)[1].split("function teamBindingRows", 1)[0]
-    assert "const globalAdmin=teamIsGlobalAdmin()" in rows
-    assert "const canRetire=globalAdmin||agent.owner_id===TEAM.human?.id||(admin&&!agent.bound_external)" in rows
-    assert "const canAssignOwner=agent.bound_external?globalAdmin:admin" in rows
-    assert "agent.bound_external?' · 外部绑定':''" in rows
+    panel = js.split("function teamProjectPanel(project){", 1)[1].split(
+        "function teamInboxPanel", 1
+    )[0]
+    assert "teamSessionBindingCard(project)" in panel
+    assert "本机 Session" in panel
+    assert "teamAgentRows" not in js
+    assert "teamBindingRows" not in js
+    assert "teamLocalIdentityRows" not in js
+    assert "teamClaimIdentity" not in js
+    assert "认领本机身份" not in js
+    assert "项目 Agents" not in js
 
 
-def test_team_binding_ui_escapes_hub_text_and_force_numeric_ids():
+def test_team_session_binding_mutations_are_confirmed_and_serialized():
     js = _inline_js()
-    rows = js.split("function teamBindingRows(admin){", 1)[1].split("function ", 1)[0]
-    assert "esc(binding.agent_name||agent.name||('Agent #'+agentId))" in rows
-    assert "esc(agent.program||binding.program||'unknown')" in rows
-    assert "esc(agent.model||binding.model)" in rows
-    assert "Number(binding.agent_id)" in rows
-    assert "TEAM.agents.find(a=>Number(a.id)===agentId)" in rows
-    assert "TEAM.candidates" not in js
+    bind = js.split("function teamBindSession(){", 1)[1].split("function ", 1)[0]
+    unbind = js.split("function teamUnbindSession(){", 1)[1].split("function ", 1)[0]
+    assert "validSessionName(session)" in bind
+    assert "window.confirm" in bind
+    assert "JSON.stringify({session,replace})" in bind
+    assert "teamMutation('Session 已绑定'" in bind
+    assert "method:'PUT'" in bind
+    assert "window.confirm" in unbind
+    assert "teamMutation('Session 已解绑'" in unbind
+    assert "method:'DELETE'" in unbind
 
 
-def test_team_binding_mutations_use_team_mutation_serialization():
+def test_team_session_binding_ui_never_leaks_registry_or_starts_local_work():
     js = _inline_js()
-    unbind = js.split("function teamUnbind(agentId){", 1)[1].split("function ", 1)[0]
-    assert "teamMutation('Agent 已解绑'" in unbind
-    assert "agent-bindings/${Number(agentId)}`,'DELETE'" in unbind
-    assert "window.confirm('确认解绑这个 Agent？" in unbind
+    start = js.index("function teamBindingForProject")
+    end = js.index("function teamMemberRows", start)
+    part = js[start:end]
+    assert "registration_token" not in part
+    assert "identity_id" not in part
+    for bad in ("openTerm(", "doAttachHerdr", "createPane", "terminal("):
+        assert bad not in part
 
 
-def test_team_binding_ui_never_triggers_local_side_effects():
-    js = _inline_js()
-    rows = js.split("function teamBindingRows(admin){", 1)[1].split("function teamLocalIdentityRows", 1)[0]
-    unbind = js.split("function teamUnbind(agentId){", 1)[1].split("function ", 1)[0]
-    for part in (rows, unbind):
-        for bad in ("openTerm", "doAttachHerdr", "createPane", "worktree", "terminal("):
-            assert bad not in part, f"绑定 UI 触发本地副作用: {bad}"
-
-
-# ── M3e: 本地注册身份选择与安全认领 UI ─────────────────────────
-
-def test_team_local_identity_claim_ui_functions_exist():
-    js = _inline_js()
-    assert "function teamLocalIdentityRows()" in js
-    assert "function teamClaimIdentity(identityId)" in js
-    assert "action==='teamClaimIdentity'" in js
-    assert 'data-action="teamClaimIdentity"' in js
-    assert "认领本机身份" in js
-    assert "当前没有已连接 Team Hub 的本机 Agent" in js
-    assert "其他 Hub 或历史身份" in js
-
-
-def test_team_local_identity_claim_escapes_and_validates_identity_id():
-    js = _inline_js()
-    rows = js.split("function teamLocalIdentityRows(){", 1)[1].split("function ", 1)[0]
-    assert "esc(i.program" in rows
-    assert "esc(i.model" in rows
-    assert "esc(i.project_slug" in rows
-    assert "esc(identityId)" in rows
-    assert "unclaimed.filter(i=>i.eligible!==false)" in rows
-    assert "unclaimed.length-candidates.length" in rows
-    claim = js.split("function teamClaimIdentity(identityId){", 1)[1].split("function ", 1)[0]
-    assert "teamSelectedProject()" in claim
-    assert "project_slug:project.slug" in claim
-    assert "identity_id:identityId" in claim
-
-
-def test_team_local_identity_claim_uses_current_project_and_confirm():
-    js = _inline_js()
-    claim = js.split("function teamClaimIdentity(identityId){", 1)[1].split("function ", 1)[0]
-    assert "window.confirm" in claim
-    assert "teamMutation('身份已认领'" in claim
-    assert "/api/team-auth/local-identities/claim" in claim
-    rows = js.split("function teamLocalIdentityRows(){", 1)[1].split("function ", 1)[0]
-    assert "已隐藏 ${hidden} 个" in rows
-    assert "该身份属于另一 Hub" not in rows
-
-
-def test_team_local_identity_claim_never_leaks_token_or_side_effects():
-    js = _inline_js()
-    claim = js.split("function teamClaimIdentity(identityId){", 1)[1].split("function ", 1)[0]
-    assert "registration_token" not in claim
-    for bad in ("openTerm", "doAttachHerdr", "createPane", "worktree", "terminal("):
-        assert bad not in claim
-
-
-def test_team_collab_never_hides_members_without_default():
-    # P0-1: @协作面板永远展示群组成员并可点击;无默认 Agent 时以 Human 身份发出
-    # (Hub 84c851d 起后端支持),不再用警告替换整个团队区导致成员"消失"。
+def test_terminal_team_collab_requires_current_session_binding():
     js = _inline_js()
     render = js.split("function renderTermCollab(){", 1)[1].split(
         "async function termPickCollab", 1
     )[0]
+    assert "teamBindingForSession(context.session)" in render
+    assert "尚未绑定团队项目" in render
+    assert "binding.project_slug" in render
+    assert "binding.ready" in render
     assert "TEAM.members.filter(member=>member.status==='active'" in render
-    assert "'以你的 Human 身份发出'" in render
+    assert "由 ${esc(binding.lead?.mail_name||binding.lead?.agent||'Session 负责人')} 统一发出" in render
     assert "data-action=\"teamCollabTarget\"" in render
-    # 不再存在按无默认分支隐藏/只读成员的旧结构
-    assert "请先为 ${esc(project.name||project.slug)} 设置自己的默认 Agent" not in js
+    assert "'以你的 Human 身份发出'" not in render
     assert "collab-target readonly" not in render
 
 
-def test_team_identity_empty_state_offers_partner_cta():
-    # P0-2/5: 没有可归属 Agent 时不渲染空默认下拉,改为 hero 下一步引导;
-    # 有可归属 Agent 时保留原下拉。
+def test_team_session_empty_state_and_navigation_actions():
     js = _inline_js()
     assert "team-hero" in HTML
-    assert "下一步:设置你的搭档 Agent" in js
-    assert "data-action=\"teamScrollClaim\"" in js
-    assert "data-action=\"teamGotoSettings\"" in js
-    assert "data-action=\"teamGotoTerm\"" in js
-    assert 'id="teamClaimSection"' in js
-    assert "identityBlock" in js
-    assert ".filter(i=>i&&i.eligible!==false).length" in js
-    assert ".filter(i=>i&&i.eligible===false).length" in js
-
-
-def test_team_partner_cta_actions_registered():
-    js = _inline_js()
-    assert "action==='teamScrollClaim'" in js
-    assert "action==='teamGotoSettings'" in js
+    assert "连接本机工作区" in js
+    assert "本机还没有运行中的 Session" in js
+    assert 'data-action="teamGotoSessions"' in js
+    assert 'data-action="teamGotoTerm"' in js
+    assert "action==='teamGotoSessions'" in js
     assert "action==='teamGotoTerm'" in js
-    assert "scrollIntoView" in js
 
 
 def test_team_nav_badge_counts_pending_approvals():

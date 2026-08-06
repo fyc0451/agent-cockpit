@@ -143,6 +143,7 @@ def test_build_attention_combines_panes_tasks_and_optional_mail(monkeypatch):
     assert session["agents"][0] == {
         "agent": "codex",
         "mail_name": "codex-main",
+        "participant_id": "lead",
         "role": "lead",
         "task": "完成任务看板",
         "status": "blocked",
