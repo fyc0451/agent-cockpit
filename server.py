@@ -1570,9 +1570,14 @@ def _public_team_session_binding(
     ), None)
     lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
     active = candidate is not None
+    has_reply_capability = bool(
+        isinstance(row.get("reply_token"), str) and row.get("reply_token")
+    )
     reason = None
     if candidate is not None and not candidate.get("ready"):
         reason = candidate.get("reason")
+    elif candidate is not None and not has_reply_capability:
+        reason = "负责人通信凭据需要重新同步"
     elif candidate is None and same_name is not None:
         reason = "Session 已重建，需要重新绑定"
     elif candidate is None:
@@ -1586,7 +1591,10 @@ def _public_team_session_binding(
         },
         "agent_id": row.get("agent_id"),
         "active": active,
-        "ready": bool(active and candidate and candidate.get("ready")),
+        "ready": bool(
+            active and candidate and candidate.get("ready")
+            and has_reply_capability
+        ),
         "reason": reason,
         "updated_ts": row.get("updated_ts"),
     }

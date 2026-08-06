@@ -166,6 +166,32 @@ def test_local_agent_mail_hub_does_not_need_to_match_team_hub(monkeypatch):
     assert response.json()["sessions"][0]["ready"] is True
 
 
+def test_legacy_binding_without_reply_capability_requires_resync(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+    )
+
+    response = client.get("/api/team-auth/session-bindings", headers=headers)
+
+    assert response.status_code == 200
+    binding = response.json()["bindings"][0]
+    assert binding["active"] is True
+    assert binding["ready"] is False
+    assert binding["reason"] == "负责人通信凭据需要重新同步"
+    assert "reply_token" not in response.text
+
+
 def test_inbox_route_fetches_read_items_for_pending_retry(monkeypatch):
     client, headers = _prepare(monkeypatch)
     calls = []
