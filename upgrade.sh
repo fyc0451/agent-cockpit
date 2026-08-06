@@ -6,7 +6,7 @@ if [[ ! "$INSTALL_DIR" =~ ^/[[:alnum:]_./-]+$ ]]; then
   echo "安装路径包含 systemd 模板不支持的字符: $INSTALL_DIR" >&2
   exit 1
 fi
-if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+if ! git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "不是 git 安装目录: $INSTALL_DIR" >&2
   exit 1
 fi

@@ -4,7 +4,8 @@ set -euo pipefail
 REPO_URL="${AGENT_COCKPIT_REPO:-https://github.com/fyc0451/agent-cockpit.git}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ -d "$SCRIPT_DIR/.git" && -f "$SCRIPT_DIR/server.py" ]]; then
+if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  && [[ -f "$SCRIPT_DIR/server.py" ]]; then
   INSTALL_DIR="$SCRIPT_DIR"
 else
   INSTALL_DIR="${AGENT_COCKPIT_DIR:-$HOME/agent-cockpit}"
@@ -13,11 +14,12 @@ if [[ ! "$INSTALL_DIR" =~ ^/[[:alnum:]_./-]+$ ]]; then
   echo "安装路径仅允许字母、数字、点、下划线、斜杠和连字符: $INSTALL_DIR" >&2
   exit 1
 fi
-if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
+if [[ -e "$INSTALL_DIR" ]] \
+  && ! git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "安装目录已存在且不是 git 仓库: $INSTALL_DIR" >&2
   exit 1
 fi
-if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+if ! git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 

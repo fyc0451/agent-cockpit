@@ -7,19 +7,22 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = (
     "install.sh", "upgrade.sh", "uninstall.sh", "doctor.sh", "launchd.sh",
-    "install-agent-mail-tools.sh",
+    "agent-mail-launchd.sh", "install-agent-mail-tools.sh",
 )
 DOCS = ("SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "CHANGELOG.md")
 
 
 def test_release_files_exist_and_scripts_are_valid():
-    for name in SCRIPTS + DOCS + ("agent-cockpit.service", "agent-cockpit.plist"):
+    for name in SCRIPTS + DOCS + (
+        "agent-cockpit.service", "agent-cockpit.plist", "agent-mail.plist",
+    ):
         assert (ROOT / name).is_file(), f"missing release file: {name}"
     for name in SCRIPTS:
         path = ROOT / name
         assert path.stat().st_mode & 0o111, f"script is not executable: {name}"
         subprocess.run(["bash", "-n", str(path)], check=True)
     ET.parse(ROOT / "agent-cockpit.plist")
+    ET.parse(ROOT / "agent-mail.plist")
 
 
 def test_readme_and_ci_have_no_release_placeholders():
@@ -47,6 +50,17 @@ def test_installers_migrate_legacy_service_name():
     assert "enable --now agent-cockpit.service" not in upgrade
 
 
+def test_installers_accept_git_worktrees():
+    installer = (ROOT / "install.sh").read_text()
+    upgrader = (ROOT / "upgrade.sh").read_text()
+
+    assert 'git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree' in installer
+    assert 'git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree' in installer
+    assert 'git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree' in upgrader
+    assert '! -d "$INSTALL_DIR/.git"' not in installer
+    assert '! -d "$INSTALL_DIR/.git"' not in upgrader
+
+
 def test_installers_manage_macos_launch_agent():
     installer = (ROOT / "install.sh").read_text()
     upgrader = (ROOT / "upgrade.sh").read_text()
@@ -61,6 +75,18 @@ def test_installers_manage_macos_launch_agent():
     assert '"$cwd" != "$INSTALL_DIR"' in launchd
     assert '"$command" != *server.py*' in launchd
     assert "Agent Cockpit LaunchAgent 正在运行" in (ROOT / "doctor.sh").read_text()
+
+
+def test_agent_mail_launchd_keeps_token_out_of_plist():
+    launcher = (ROOT / "agent-mail-launchd.sh").read_text()
+    plist = (ROOT / "agent-mail.plist").read_text()
+
+    assert 'HTTP_BEARER_TOKEN="$(load_token)"' in launcher
+    assert 'sqlite+aiosqlite:///$REPO_DIR/storage.sqlite3' in launcher
+    assert "HTTP_BEARER_TOKEN" not in plist
+    assert "token=" not in plist
+    assert "__INSTALL_DIR__/agent-mail-launchd.sh" in plist
+    assert "__REPO_DIR__" in plist
 
 
 def test_launchd_installer_renders_and_restarts_service(tmp_path):

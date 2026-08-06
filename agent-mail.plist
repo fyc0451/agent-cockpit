@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.fyc0451.mcp-agent-mail-local</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__INSTALL_DIR__/agent-mail-launchd.sh</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>3</integer>
+  <key>StandardOutPath</key>
+  <string>__REPO_DIR__/mcp-agent-mail.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO_DIR__/mcp-agent-mail.stderr.log</string>
+</dict>
+</plist>
