@@ -1294,4 +1294,3 @@ def test_team_load_does_not_call_duplicate_team_update_mode_ui():
     js = _inline_js()
     load = js.split("async function teamLoad(force=false){", 1)[1].split("function ", 1)[0]
     assert load.count("teamUpdateModeUi()") == 0
-
