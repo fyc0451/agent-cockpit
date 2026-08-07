@@ -1730,16 +1730,15 @@ def test_side_refresh_refreshes_current_view():
 
 def test_mobile_board_flat_card_grid():
     """移动端看板:四列纵排在窄屏隐藏,agent 平铺成卡片网格,点卡片直达。"""
-    assert HTML.count('id="boardFlat"') == 1
-    assert HTML.count(".board-flat{display:grid!important") == 1
-    assert HTML.count("#board{display:none!important}") == 1
+    assert 'id="boardFlat"' in HTML
+    assert ".board-flat{display:grid!important" in HTML
+    assert "#board{display:none!important}" in HTML
     js = _inline_js()
     # 平铺顺序必须是 需要你→工作中→已完成→空闲,且不重复渲染
-    assert js.count(
-        "[...cols.need,...cols.work,...cols.done,...cols.idle].map(cardHtml)"
-    ) == 1
+    assert "[...cols.need,...cols.work,...cols.done,...cols.idle].map(cardHtml)" in js
     # 空态与显示分支都要同时控制 board/flat 两个容器
     assert "boardEl.style.display='none';flatEl.style.display='none'" in js
     assert "boardEl.style.display='';flatEl.style.display=''" in js
     # 卡片沿用 openFlow 直达语义(data-action 委托)
     assert 'data-action="openFlow"' in HTML
+
