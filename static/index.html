@@ -140,7 +140,7 @@ header .spacer{flex:1}
 .file-search button{width:auto}
 .file-search-info{font-size:11px;color:var(--fg3);margin-left:auto}
 .file-guide{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;font-size:12px;color:var(--fg2);background:var(--bg3);border-bottom:1px solid var(--bd)}
-.file-guide span{flex:1;min-width:220px}
+.file-guide span{flex:1 1 280px;min-width:220px}
 .file-guide button{width:auto;flex:0 0 auto}
 .files-body{flex:1;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:14px;padding:14px;overflow:hidden}
 .file-tree{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;overflow:auto;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:6px}
@@ -601,9 +601,9 @@ header .spacer{flex:1}
   <!-- 文件 -->
   <section id="view-files" class="view files-view">
     <div class="file-guide">
-      <span data-i18n="files.guide"><b>怎么用：</b>先在“位置”下拉框选目录，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，图片/音视频直接预览，目录点 ⬇️ 打包下载。</span>
       <button class="sm" id="fileAddRootBtn" onclick="fileAddRoot()" title="添加一个允许浏览的 WSL 目录" data-i18n="files.addroot">＋ 添加目录</button>
       <button class="primary sm" id="fileWorkspaceBtn" onclick="setupWorkspaceFromFiles()" title="用文件列表当前所在目录预填一键工作区" data-i18n="files.workspace">🚀 当前目录建工作区</button>
+      <span data-i18n="files.guide"><b>怎么用：</b>先在“位置”下拉框选目录，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，图片/音视频直接预览，目录点 ⬇️ 打包下载。</span>
     </div>
     <div class="file-search">
       <input type="search" id="fileSearchInput" placeholder="搜索当前目录及子目录中的文件名" data-i18n-ph="files.search.ph" onkeydown="if(event.key==='Enter')fileSearch()">
