@@ -43,3 +43,18 @@ ac_escape_plist_value() {
   value=${value//>/\&gt;}
   printf '%s' "$value"
 }
+
+ac_client_env_loopback_hub() {
+  # 从 client.env 严格解析 loopback hub URL，成功时输出 "HOST PORT"。
+  # hub= 必须是 http://127.0.0.1[:PORT]/ 或 http://localhost[:PORT]/（PORT 缺省 8765）；
+  # 远程 hub、缺 hub= 或非 loopback HTTP 一律返回非零。
+  local file="${1:-}" value
+  [[ -f "$file" ]] || return 1
+  value="$(sed -n 's/^hub=//p' "$file" | tail -n 1)"
+  [[ -n "$value" ]] || return 1
+  if [[ "$value" =~ ^http://(127\.0\.0\.1|localhost)(:([0-9]{1,5}))?/?$ ]]; then
+    printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]:-8765}"
+    return 0
+  fi
+  return 1
+}

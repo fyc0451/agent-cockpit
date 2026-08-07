@@ -1,0 +1,15 @@
+[Unit]
+Description=MCP Agent Mail local hub (Agent Cockpit)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/agent-mail-run.sh"
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

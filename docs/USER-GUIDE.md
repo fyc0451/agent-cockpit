@@ -62,7 +62,7 @@ Agent Cockpit 是"跑在浏览器里的编码 agent 驾驶舱"：一个浏览器
 
 - Linux（含 WSL）或 macOS；Python ≥ 3.12；Git；curl
 - 各 agent CLI（codex / kimi / claude / qoder / opencode / grok 等）按需在 PATH；Herdr 可用
-- **Agent Mail Hub**（`mcp_agent_mail`，`https://github.com/fyc0451/mcp_agent_mail`）——独立项目，需先按它自己的文档部署一个可访问实例；默认是在本机监听 **8765**，也可使用受信任的共享 Hub。Cockpit 的安装脚本**不包含** Hub；没有可用 Hub 则无法创建工作区、添加 Agent 或收发 agent 消息。
+- **Agent Mail Hub**（`mcp_agent_mail`，`https://github.com/fyc0451/mcp_agent_mail`）——独立项目，需要一个可访问实例；默认在本机监听 **8765**，也可使用受信任的共享 Hub。`install.sh` 会**先检查再安装**：已配置且探活可用的 Hub（含远程指向）直接复用，不动现有配置；完全缺失时才克隆安装、生成 token、写 `~/.agent-mail/client.env` 并注册托管服务。使用共享 Hub 或手工部署的场景：设 `AGENT_MAIL_SKIP_HUB=1` 运行安装脚本，并自行维护 `client.env`。没有可用 Hub 则无法创建工作区、添加 Agent 或收发 agent 消息。
 
 ### 2.2 安装 Cockpit
 
@@ -79,7 +79,7 @@ bash install.sh
 ```
 
 install.sh 会校验现有 checkout（只有 curl 直装方式才自动 clone），然后依次：
-Python ≥3.12 检查 → 创建 `.venv` 装依赖 → 安装 Agent Mail 工具（`am-register`/`mail-send`/`mail-recv` 等）到 `~/.local/bin` → 生成 `.env` → 注册并启动服务（Linux 用 systemd 用户服务 `agent-cockpit.service`；macOS 用 `launchd.sh`）。
+Python ≥3.12 检查（自动在 python3/python3.13/python3.12 中挑选）→ 创建 `.venv` 装依赖 → 安装 Agent Mail 工具（`am-register`/`mail-send`/`mail-recv` 等）到 `~/.local/bin` → **检查/安装本地 Agent Mail Hub**（见 2.1；幂等，失败后重跑会保留 token 自愈）→ 生成 `.env` → 注册并启动服务（Linux 用 systemd 用户服务 `agent-cockpit.service` + `agent-mail.service`；macOS 用 `launchd.sh` 与 agent-mail LaunchAgent）。
 
 ### 2.3 配置文件 `.env`
 
@@ -114,8 +114,9 @@ bash upgrade.sh     # 一键升级：拉代码 + 装依赖 + 重启服务（Linu
 
 | 操作 | Linux（systemd 用户服务） | macOS |
 |---|---|---|
-| 重启 | `systemctl --user restart agent-cockpit` | `bash launchd.sh restart` |
-| 查看状态 | `systemctl --user status agent-cockpit` | `launchctl print gui/$(id -u)/io.github.fyc0451.agent-cockpit` |
+| 重启 Cockpit | `systemctl --user restart agent-cockpit` | `bash launchd.sh restart` |
+| 重启本地 Hub | `systemctl --user restart agent-mail` | `bash agent-mail-launchd.sh restart` |
+| 查看状态 | `systemctl --user status agent-cockpit agent-mail` | `launchctl print gui/$(id -u)/io.github.fyc0451.agent-cockpit` / `bash agent-mail-launchd.sh status` |
 | 日志 | `journalctl --user -u agent-cockpit -f` | `tail -f agent-cockpit.stdout.log agent-cockpit.stderr.log` |
 
 ### 2.6 验证安装成功
@@ -131,14 +132,14 @@ bash upgrade.sh     # 一键升级：拉代码 + 装依赖 + 重启服务（Linu
 ## 3. 首次配置
 
 1. **登录**：浏览器打开 `http://<主机>:8790`。设置了 `COCKPIT_TOKEN` 的首次进入会要求输入 token（在 `.env` 里查看）；没设置则直接进入。
-2. **本地 Agent Mail 连接**：编辑 `~/.agent-mail/client.env`（am 工具读这个文件）：
+2. **本地 Agent Mail 连接**：`~/.agent-mail/client.env`（am 工具读这个文件）。install.sh 自动安装 Hub 时会生成（含随机 token，权限 600），无需手改。手工部署 Hub 时才需要自己写：
 
    ```bash
    hub=http://127.0.0.1:8765
    token=<本机 Hub 的访问 token>
    ```
 
-   token 由本机 Agent Mail Hub 的部署配置给出（见 `mcp_agent_mail` 部署文档）。配完用 `doctor.sh` 验证。
+   hub 为 loopback 地址时本机托管服务会从该 URL 严格解析监听端口；指向远程 Hub 时本机不会启动托管进程。配完用 `doctor.sh` 验证。
 3. **团队通道（可选，用到第 5 章才需要）**：浏览器 设置 → Agent Mail 区域，填 **Team Hub API**（如 `http://<团队服务器>:8765`）与 **Human issuer**（如 `http://<团队服务器>:8766`），保存即生效——与本地 Hub 互不影响。
 4. **文件目录白名单**：设置/文件页添加可访问根目录（整 Home 不可添加；建议加 `~/github` 这类顶层目录）。
 5. **注册邮箱身份**（每个项目一次，终端里执行）：
@@ -338,7 +339,9 @@ mail-send --agent kimi --instance main --project /path/to/project \
 | 症状 | 原因与处理 |
 |---|---|
 | 浏览器打不开 8790 | 服务未启动（2.5 状态命令）；端口被占/防火墙；远程访问时确认 `COCKPIT_HOST` 与 token |
-| `am-register` 报"缺少 token" | 未配本机 `~/.agent-mail/client.env` |
+| `am-register` 报"缺少 token" | 未配本机 `~/.agent-mail/client.env`；重跑 `bash install.sh`（会检查并补装 Hub）或手工配置 |
+| 安装时报"端口 8765 已被占用" | 已有非托管进程监听该端口；确认是既有 Hub 就把 `hub=/token=` 写入 client.env 后重跑（也可换 `AGENT_MAIL_HUB_PORT` 端口） |
+| 安装报 client.env "不覆盖" | client.env 已有但探活失败，且不是安装脚本生成的配置；修好对应 Hub 或手工校正 client.env 后重跑（脚本生成的配置会自动自愈，不会见此错） |
 | 创建工作区报缺 Agent Mail | `client.env` 指向的 Hub 不可达或不可写；使用默认本机部署时确认 8765 正在监听，`doctor.sh` 会给出具体原因 |
 | 发信被拒"agent retired" | 闲置自动退休；重新运行 `am-register`/`am-init-project` 会自动恢复激活 |
 | mail 工具返回 400 | 若日志明确是 `/mcp/` 路径：旧工具硬编码旧端点，升级 agent-mail-tools |

@@ -2,13 +2,16 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 import os
 import shutil
+import socket
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = (
     "install.sh", "upgrade.sh", "uninstall.sh", "doctor.sh", "launchd.sh",
     "agent-mail-launchd.sh", "install-agent-mail-tools.sh",
+    "install-agent-mail-hub.sh", "agent-mail-run.sh",
 )
 SCRIPT_HELPERS = ("install-paths.sh",)
 DOCS = ("SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "CHANGELOG.md")
@@ -17,6 +20,7 @@ DOCS = ("SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "CHANGELOG.md")
 def test_release_files_exist_and_scripts_are_valid():
     for name in SCRIPTS + SCRIPT_HELPERS + DOCS + (
         "agent-cockpit.service", "agent-cockpit.plist", "agent-mail.plist",
+        "agent-mail.service",
     ):
         assert (ROOT / name).is_file(), f"missing release file: {name}"
     for name in SCRIPTS:
@@ -101,6 +105,9 @@ def test_agent_mail_launchd_restart_waits_for_old_listener(tmp_path):
     launcher = install_dir / "agent-mail-launchd.sh"
     launcher.write_text((ROOT / "agent-mail-launchd.sh").read_text())
     launcher.chmod(0o755)
+    (install_dir / "install-paths.sh").write_text(
+        (ROOT / "install-paths.sh").read_text()
+    )
     (install_dir / "agent-mail.plist").write_text(
         (ROOT / "agent-mail.plist").read_text()
     )
@@ -369,15 +376,31 @@ def test_installers_allow_spaces_and_unicode_in_install_path():
     for name, text in (("install.sh", install), ("upgrade.sh", upgrade), ("launchd.sh", launchd)):
         assert "[[:alnum:]" not in text, f"{name} 仍限制路径字符集"
         assert "install-paths.sh" in text, f"{name} 未复用路径编码"
+    for name in ("agent-mail-launchd.sh", "install-agent-mail-hub.sh", "agent-mail-run.sh"):
+        text = (ROOT / name).read_text()
+        assert "[[:alnum:]]" not in text, f"{name} 仍限制路径字符集"
+        assert "install-paths.sh" in text, f"{name} 未复用路径编码"
     assert "[[:cntrl:]]" in install
     assert "ac_validate_install_dir" in upgrade
     assert "ac_validate_install_dir" in launchd
+    assert "ac_validate_install_dir" in (ROOT / "agent-mail-launchd.sh").read_text()
     assert "ac_escape_systemd_value" in helpers
     assert "ac_escape_systemd_exec_value" in helpers
     assert "ac_escape_plist_value" in helpers
+    assert "ac_client_env_loopback_hub" in helpers
     service = (ROOT / "agent-cockpit.service").read_text()
     assert "WorkingDirectory=__INSTALL_DIR__" in service
     assert 'ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/.venv/bin/python" server.py' in service
+    # 本地 Hub 服务不硬编码端口/凭据：端口与 token 从 client.env 严格解析。
+    mail_service = (ROOT / "agent-mail.service").read_text()
+    assert "8765" not in mail_service
+    assert "HTTP_BEARER_TOKEN" not in mail_service
+    assert "agent-mail-run.sh" in mail_service
+    hub_installer = (ROOT / "install-agent-mail-hub.sh").read_text()
+    assert "HTTP_PORT=8765" not in (ROOT / "agent-mail-launchd.sh").read_text()
+    assert "ac_client_env_loopback_hub" in (ROOT / "agent-mail-run.sh").read_text()
+    assert "ac_client_env_loopback_hub" in (ROOT / "agent-mail-launchd.sh").read_text()
+    assert "ac_client_env_loopback_hub" in hub_installer
 
 
 def test_sed_and_plist_escaping_with_special_path(tmp_path):
@@ -441,3 +464,166 @@ def test_install_path_rejects_control_characters():
 
     assert result.returncode != 0
     assert "控制字符" in result.stderr
+
+
+def _run_bash(snippet, *args, env=None):
+    return subprocess.run(
+        ["bash", "-c", snippet, "_", *[str(a) for a in args]],
+        capture_output=True, text=True, env=env,
+    )
+
+
+def test_agent_mail_loopback_port_strict_parsing(tmp_path):
+    """阻断3：端口必须从 client.env 的 loopback hub URL 严格解析。"""
+    cases_ok = {
+        "hub=http://127.0.0.1:8765\ntoken=t\n": "127.0.0.1 8765",
+        "hub=http://127.0.0.1:18765\ntoken=t\n": "127.0.0.1 18765",
+        "hub=http://localhost:9000\ntoken=t\n": "localhost 9000",
+        "hub=http://127.0.0.1\ntoken=t\n": "127.0.0.1 8765",
+    }
+    cases_bad = [
+        "hub=http://10.0.0.5:8765\ntoken=t\n",   # 非 loopback
+        "hub=https://127.0.0.1:8765\ntoken=t\n",  # 非 http
+        "hub=http://evil.example:8765\ntoken=t\n",
+        "token=t\n",                               # 缺 hub=
+        "",
+    ]
+    for content, expected in cases_ok.items():
+        assert _loopback_probe(content, tmp_path) == (0, expected), content
+    for content in cases_bad:
+        rc, _ = _loopback_probe(content, tmp_path)
+        assert rc != 0, content
+
+
+def _loopback_probe(content, tmp_path):
+    env_file = tmp_path / "client.env"
+    env_file.write_text(content)
+    result = _run_bash(
+        'source "{0}"; ac_client_env_loopback_hub "{1}"'.format(
+            ROOT / "install-paths.sh", env_file),
+    )
+    return result.returncode, result.stdout.strip()
+
+
+def test_agent_mail_service_rendering_with_special_path(tmp_path):
+    """阻断2：agent-mail.service 渲染必须按 systemd/sed 规则转义特殊路径。"""
+    tricky_install = tmp_path / '我的 安装&dir"q\\z%u$FOO'
+    tricky_install.mkdir()
+    # 渲染函数从 install_dir 读取模板，特殊路径目录内也要能找到模板。
+    shutil.copy(ROOT / "agent-mail.service", tricky_install / "agent-mail.service")
+    tricky_repo = tmp_path / '仓 库&repo'
+    unit_path = tmp_path / "agent-mail.service"
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            'source "$1"; amh_render_systemd_unit "$2" "$3" "$4"',
+            "_",
+            str(ROOT / "install-agent-mail-hub.sh"),
+            str(unit_path), str(tricky_install), str(tricky_repo),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    unit = unit_path.read_text()
+    exec_dir = (str(tricky_install).replace("\\", "\\\\").replace('"', '\\"')
+                .replace("%", "%%").replace("$", "$$"))
+    sys_repo = str(tricky_repo).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    assert f'ExecStart=/usr/bin/env "{exec_dir}/agent-mail-run.sh"' in unit
+    assert f"Environment=MCP_AGENT_MAIL_DIR={sys_repo}" in unit
+
+
+def test_agent_mail_hub_installer_refuses_foreign_config(tmp_path):
+    """阻断4a：探活失败且 client.env 非本脚本生成（或指向远程）→ 拒绝且不改文件。"""
+    foreign = tmp_path / "client.env"
+    original = "hub=http://127.0.0.1:1\ntoken=keepme\n"
+    foreign.write_text(original)
+    env = {**os.environ, "AGENT_MAIL_CLIENT_ENV": str(foreign),
+           "PYTHON_BIN": sys.executable}
+    result = subprocess.run(
+        ["bash", str(ROOT / "install-agent-mail-hub.sh")],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode != 0
+    assert "不覆盖" in result.stderr
+    assert foreign.read_text() == original
+
+    remote = tmp_path / "client-remote.env"
+    remote.write_text(
+        "# generated by agent-cockpit install-agent-mail-hub.sh\n"
+        "hub=http://10.18.160.11:8765\ntoken=keepme\n")
+    env["AGENT_MAIL_CLIENT_ENV"] = str(remote)
+    result = subprocess.run(
+        ["bash", str(ROOT / "install-agent-mail-hub.sh")],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode != 0
+    assert "不覆盖" in result.stderr
+
+
+def test_agent_mail_hub_installer_self_heals_managed_config(tmp_path):
+    """阻断4b：本脚本生成的配置探活失败 → 保留 token 自愈，不永久拒绝。"""
+    marker = "# generated by agent-cockpit install-agent-mail-hub.sh"
+    client_env = tmp_path / "client.env"
+    client_env.write_text(f"{marker}\nhub=http://127.0.0.1:1\ntoken=keepme\n")
+
+    # 预置假仓库目录（空格+中文路径），跳过 clone/venv/pip。
+    repo = tmp_path / "我的 仓库"
+    (repo / ".git").mkdir(parents=True)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.symlink_to(sys.executable)
+    pkg_root = tmp_path / "pypkgs"
+    (pkg_root / "mcp_agent_mail").mkdir(parents=True)
+    (pkg_root / "mcp_agent_mail" / "__init__.py").write_text("")
+
+    env = {**os.environ,
+           "AGENT_MAIL_CLIENT_ENV": str(client_env),
+           "MCP_AGENT_MAIL_DIR": str(repo),
+           "AGENT_MAIL_NO_SERVICE": "1",
+           "PYTHON_BIN": sys.executable,
+           "PYTHONPATH": str(pkg_root)}
+    result = subprocess.run(
+        ["bash", str(ROOT / "install-agent-mail-hub.sh")],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "自愈" in result.stdout
+    assert client_env.read_text() == f"{marker}\nhub=http://127.0.0.1:1\ntoken=keepme\n"
+
+
+def test_agent_mail_hub_installer_reuses_running_hub_on_custom_port(tmp_path):
+    """阻断3端到端：非默认端口的可用 Hub 被探活识别并直接复用。"""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server_script = tmp_path / "fake_hub.py"
+    server_script.write_text(
+        "import http.server, sys\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_POST(self):\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Type', 'application/json')\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(b'{\"ok\": true}')\n"
+        "    def log_message(self, *a):\n"
+        "        pass\n"
+        f"http.server.HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n")
+    server = subprocess.Popen(
+        [sys.executable, str(server_script)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        client_env = tmp_path / "client.env"
+        client_env.write_text(f"hub=http://127.0.0.1:{port}\ntoken=tok\n")
+        env = {**os.environ, "AGENT_MAIL_CLIENT_ENV": str(client_env),
+               "PYTHON_BIN": sys.executable}
+        result = subprocess.run(
+            ["bash", str(ROOT / "install-agent-mail-hub.sh")],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "复用已有" in result.stdout
+        assert f"127.0.0.1:{port}" in result.stdout
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
