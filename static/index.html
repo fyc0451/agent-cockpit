@@ -392,7 +392,7 @@ header .spacer{flex:1}
 .hf-body.hf-full .hf-pane.hf-focus .hf-exit{display:inline}
 
 /* 消息抽屉(卡片点消息) */
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:60;padding:calc(14px + var(--safe-top)) calc(14px + var(--safe-right)) calc(14px + var(--safe-bottom)) calc(14px + var(--safe-left));overscroll-behavior:none}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:80;padding:calc(14px + var(--safe-top)) calc(14px + var(--safe-right)) calc(14px + var(--safe-bottom)) calc(14px + var(--safe-left));overscroll-behavior:none}
 .modal-bg.show{display:flex}
 .modal{background:var(--bg2);border:1px solid var(--bd2);border-radius:13px;padding:16px;max-width:560px;width:100%;max-height:85vh;overflow:auto}
 .collab-section{border-top:1px solid var(--bd);padding-top:11px;margin-top:11px}
@@ -1076,7 +1076,7 @@ function trapDialogKey(e,bg){
   else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}
 }
 const setBackgroundInert=on=>{
-  const sel='.main>header,.view,#side,#updateBanner,.drawer-bg';
+  const sel='.main>header,.view,#side,#updateBanner,.drawer-bg,#navExpand';
   if(on){
     // 只 inert 尚未 inert 的元素,并打标;保留元素原有 inert(如移动侧栏关闭态)
     document.querySelectorAll(sel).forEach(el=>{if(!el.hasAttribute('inert')){el.setAttribute('data-dlg-inert','1');el.setAttribute('inert','')}});

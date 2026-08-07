@@ -2428,15 +2428,23 @@ def test_b2_node_background_inert_preserves_preexisting():
         "function mkEl(){const a={};return{hasAttribute(k){return k in a},setAttribute(k,v){a[k]=v},removeAttribute(k){delete a[k]}}}\n"
         "const side=mkEl();side.setAttribute('inert','');\n"
         "const view=mkEl();\n"
-        "const document={querySelectorAll(sel){return sel==='[data-dlg-inert]'?[view]:[side,view]}};\n"
+        "const navExpand=mkEl();\n"
+        "const document={querySelectorAll(sel){return sel==='[data-dlg-inert]'?[view,navExpand]:[side,view,navExpand]}};\n"
         "const setBackgroundInert=on=>{\n" + inert_body + "\n};\n"
         "setBackgroundInert(true);\n"
         "if(side.hasAttribute('data-dlg-inert')){console.error('side should not get dlg tag');process.exit(1)}\n"
         "if(!side.hasAttribute('inert')){console.error('side lost pre inert on open');process.exit(2)}\n"
         "if(!view.hasAttribute('inert')||!view.hasAttribute('data-dlg-inert')){console.error('view should get dlg inert');process.exit(3)}\n"
+        "if(!navExpand.hasAttribute('inert')||!navExpand.hasAttribute('data-dlg-inert')){console.error('navExpand should get dlg inert');process.exit(6)}\n"
         "setBackgroundInert(false);\n"
         "if(!side.hasAttribute('inert')){console.error('side lost pre inert on close');process.exit(4)}\n"
         "if(view.hasAttribute('inert')||view.hasAttribute('data-dlg-inert')){console.error('view should be cleared on close');process.exit(5)}\n"
+        "if(navExpand.hasAttribute('inert')||navExpand.hasAttribute('data-dlg-inert')){console.error('navExpand should be cleared on close');process.exit(7)}\n"
         "console.log('ok');\n"
     )
     assert "ok" in out
+
+
+def test_b2_modal_bg_above_navexpand_below_toast():
+    """modal-bg z-index 高于 #navExpand(70),低于 toast(200),展开按钮不再浮在 dialog 上。"""
+    assert "z-index:80" in HTML  # .modal-bg 60 -> 80(>70 navExpand, <200 toast)
