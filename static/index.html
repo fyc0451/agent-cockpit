@@ -3802,6 +3802,37 @@ function showSetupModal(){
   setupInspectWorkspace(document.getElementById('suWorkdir').value.trim());
   document.getElementById('setupModal').classList.add('show');
 }
+function setSetupBusy(busy){
+  // 冻结 setupModal 表单/模式/增删/关闭，保留 suResult 可见；结果区动作按钮在解除时可用
+  const modal=document.getElementById('setupModal');
+  if(!modal)return;
+  const modes=document.getElementById('suModeChoices');
+  if(modes)modes.style.pointerEvents=busy?'none':'';
+  const adv=modal.querySelector('.setup-advanced');
+  if(adv)adv.style.pointerEvents=busy?'none':'';
+  modal.querySelectorAll('input,select,textarea,button').forEach(el=>{
+    if(el.closest('#suResult')){
+      // 结果区：在途可保持只读；解除 busy 后确保「打开终端」等可点
+      if(!busy)el.disabled=false;
+      return;
+    }
+    if(busy){
+      if(el.dataset.setupPrevDisabled===undefined){
+        el.dataset.setupPrevDisabled=el.disabled?'1':'0';
+      }
+      el.disabled=true;
+    }else if(el.dataset.setupPrevDisabled!==undefined){
+      el.disabled=el.dataset.setupPrevDisabled==='1';
+      delete el.dataset.setupPrevDisabled;
+    }else{
+      el.disabled=false;
+    }
+  });
+  // suResult 内按钮在成功 HTML 注入后显式可用
+  if(!busy){
+    document.querySelectorAll('#suResult button').forEach(b=>{b.disabled=false});
+  }
+}
 function closeSetup(){
   // 在途：保持 modal 可见，禁止隐藏/重开编辑导致旧响应写同一 suResult
   if(SETUP_IN_FLIGHT){
@@ -3810,6 +3841,7 @@ function closeSetup(){
   }
   document.getElementById('setupModal').classList.remove('show');
   SETUP_SUBMITTING=false;
+  setSetupBusy(false);
   renderSetupPreview();
 }
 async function setupOpenTerminal(session){
@@ -3825,7 +3857,9 @@ async function doSetupWorkspace(){
   const errors=setupErrors();
   if(errors.length){toast(errors[0]);renderSetupPreview();return}
   const reqId=++SETUP_REQ_ID;
-  SETUP_SUBMITTING=true;SETUP_IN_FLIGHT=true;renderSetupPreview();
+  SETUP_SUBMITTING=true;SETUP_IN_FLIGHT=true;
+  setSetupBusy(true);
+  renderSetupPreview();
   let setupSucceeded=false;
   const participants=SETUP_PARTICIPANTS.map(p=>({...p,task:p.task.trim(),args:(p.args||'').trim()}));
   const agents=participants.map(p=>p.agent);
@@ -3863,8 +3897,13 @@ async function doSetupWorkspace(){
   }finally{
     if(reqId===SETUP_REQ_ID){
       SETUP_IN_FLIGHT=false;
+      setSetupBusy(false);
       if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}
-      else renderSetupPreview();
+      else{
+        renderSetupPreview();
+        // 成功结果区「打开终端」必须可用
+        document.querySelectorAll('#suResult button').forEach(b=>{b.disabled=false});
+      }
     }
   }
 }
@@ -4172,12 +4211,23 @@ function connectSSE(){
   SSE=new EventSource('/api/events',{withCredentials:true});
   SSE.onopen=()=>{markSseEventOk()};
   SSE.addEventListener('board',e=>{
+    // 必须先成功 JSON.parse，再标在线；畸形事件不得回绿、不抛全局
+    let d;
+    try{d=JSON.parse(e.data)}catch(_err){
+      if(SSE_LINK!=='online'){SSE_LINK='reconnecting';updateSseLiveUi()}
+      return;
+    }
     markSseEventOk();
-    const d=JSON.parse(e.data);BOARD=d;renderBoard(d);launchSessionChanged(false);
+    BOARD=d;renderBoard(d);launchSessionChanged(false);
   });
   SSE.addEventListener('attention',e=>{
+    let d;
+    try{d=JSON.parse(e.data)}catch(_err){
+      if(SSE_LINK!=='online'){SSE_LINK='reconnecting';updateSseLiveUi()}
+      return;
+    }
     markSseEventOk();
-    loadAttention(JSON.parse(e.data));
+    loadAttention(d);
   });
   // 断线只标离线/重连中；禁止定时无条件恢复绿点
   SSE.onerror=()=>{

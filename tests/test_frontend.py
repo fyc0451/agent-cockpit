@@ -1910,6 +1910,16 @@ def test_b1_sse_has_three_states_no_timer_green():
     # renderBoard 不得用 agent 数伪造在线
     assert "liveDot').classList.toggle('off',agentN===0)" not in js
     assert "updateSseLiveUi()" in js
+    # 生产：board/attention 必须先 JSON.parse 成功再 markSseEventOk
+    sse = js.split("function connectSSE(){", 1)[1].split(
+        "window.addEventListener('beforeunload'", 1,
+    )[0]
+    for event_name in ("board", "attention"):
+        # 每个事件监听内：parse 出现在 markSseEventOk 之前
+        chunk = sse.split(f"addEventListener('{event_name}'", 1)[1][:500]
+        assert "JSON.parse" in chunk
+        assert chunk.index("JSON.parse") < chunk.index("markSseEventOk")
+        assert "catch" in chunk
 
 
 def test_b1_setup_close_does_not_clear_in_flight_lock():
@@ -1928,6 +1938,19 @@ def test_b1_setup_close_does_not_clear_in_flight_lock():
     )[0]
     assert "SETUP_IN_FLIGHT=true" in submit
     assert "reqId!==SETUP_REQ_ID" in submit
+    # 生产：setSetupBusy 在 in-flight 后立即冻结，finally 解除并恢复结果按钮
+    assert "function setSetupBusy(busy)" in js
+    assert submit.index("SETUP_IN_FLIGHT=true") < submit.index("setSetupBusy(true)")
+    assert "setSetupBusy(false)" in submit
+    assert submit.index("setSetupBusy(false)") < submit.index("renderSetupPreview()") or \
+        "setSetupBusy(false)" in submit.split("finally", 1)[1]
+    assert "#suResult button" in submit or "suResult button" in js
+    busy = js.split("function setSetupBusy(busy){", 1)[1].split(
+        "function closeSetup", 1,
+    )[0]
+    assert "suModeChoices" in busy or "pointerEvents" in busy
+    assert "setupPrevDisabled" in busy
+    assert "suResult" in busy
 
 
 def test_b1_send_paths_have_per_target_single_flight():
@@ -2014,24 +2037,95 @@ def test_b1_settings_partial_success_and_single_flight():
     assert 'id="cmpSendBtn"' in js
 
 def test_b1_node_behavior_sse_state_machine():
-    """可执行：SSE 三态仅 onopen/事件恢复在线，error 不自动回绿。"""
+    """可执行：SSE 三态仅 onopen/事件恢复在线；parse 失败不回绿。"""
+    js = _inline_js()
+    # 绑定生产 connectSSE 中 board 处理顺序
+    board = js.split("addEventListener('board'", 1)[1][:600]
+    assert board.index("JSON.parse") < board.index("markSseEventOk")
     out = _run_node(textwrap.dedent(r"""
     let SSE_LINK='offline', SSE_LAST_OK_TS=null;
     const log=[];
     function updateSseLiveUi(){log.push(SSE_LINK)}
     function markSseEventOk(){SSE_LINK='online';SSE_LAST_OK_TS=Date.now();updateSseLiveUi()}
     function onError(rs){SSE_LINK=(rs===0)?'reconnecting':'offline';updateSseLiveUi()}
-    // simulate: connect -> error CONNECTING -> must not auto-online
+    function onBoard(data){
+      let d;
+      try{d=JSON.parse(data)}catch(_err){
+        if(SSE_LINK!=='online'){SSE_LINK='reconnecting';updateSseLiveUi()}
+        return;
+      }
+      markSseEventOk();
+      return d;
+    }
     SSE_LINK='reconnecting';updateSseLiveUi();
     onError(0);
     onError(2);
-    // only markSseEventOk restores
+    // 畸形事件不得回绿
+    onBoard('{not-json');
+    if(SSE_LINK==='online') process.exit(2);
     markSseEventOk();
-    if(log.join(',')!=='reconnecting,reconnecting,offline,online'){
-      console.error('bad log', log); process.exit(1);
-    }
+    if(log.filter(x=>x==='online').length!==1){console.error(log); process.exit(1)}
+    // 合法事件才应用
+    const d=onBoard('{"ok":1}');
+    if(!d||d.ok!==1||SSE_LINK!=='online') process.exit(3);
     console.log('ok');
     """))
+    assert "ok" in out
+
+
+
+def test_b1_node_behavior_set_setup_busy_freezes_and_restores():
+    """生产 setSetupBusy：冻结表单，finally 解除后 suResult 按钮可用。"""
+    js = _inline_js()
+    busy_src = js.split("function setSetupBusy(busy){", 1)[1].split(
+        "function closeSetup(){", 1,
+    )[0]
+    submit = js.split("async function doSetupWorkspace(){", 1)[1].split(
+        "async function setupHerdrOnboarding", 1,
+    )[0]
+    assert submit.index("setSetupBusy(true)") < submit.index(
+        "await api('/api/herdr/setup-workspace'"
+    )
+    assert "setSetupBusy(false)" in submit.split("finally", 1)[1]
+    assert "suResult button" in submit
+    script = (
+        "const nodes=[];\n"
+        "function node(id, inResult){\n"
+        "  const n={id, disabled:false, dataset:{}, style:{},\n"
+        "    closest(s){return inResult&&s==='#suResult'?{}:null}};\n"
+        "  nodes.push(n); return n;\n"
+        "}\n"
+        "const suWorkdir=node('suWorkdir',false);\n"
+        "const suStartBtn=node('suStartBtn',false);\n"
+        "const closeX=node('closeX',false);\n"
+        "const openTerm=node('openTerm',true);\n"
+        "const modesEl={style:{pointerEvents:''}};\n"
+        "const advEl={style:{pointerEvents:''}};\n"
+        "const document={\n"
+        "  getElementById(id){\n"
+        "    if(id==='setupModal')return {\n"
+        "      querySelector(s){return s==='.setup-advanced'?advEl:null},\n"
+        "      querySelectorAll(){return [suWorkdir,suStartBtn,closeX,openTerm]}\n"
+        "    };\n"
+        "    if(id==='suModeChoices')return modesEl;\n"
+        "    return null;\n"
+        "  },\n"
+        "  querySelectorAll(sel){\n"
+        "    if(sel==='#suResult button')return [openTerm];\n"
+        "    return [];\n"
+        "  }\n"
+        "};\n"
+        "function setSetupBusy(busy){" + busy_src + "\n"
+        "setSetupBusy(true);\n"
+        "if(!suWorkdir.disabled||!suStartBtn.disabled||!closeX.disabled) process.exit(2);\n"
+        "if(modesEl.style.pointerEvents!=='none') process.exit(3);\n"
+        "openTerm.disabled=true;\n"
+        "setSetupBusy(false);\n"
+        "if(openTerm.disabled) process.exit(4);\n"
+        "if(modesEl.style.pointerEvents!=='') process.exit(5);\n"
+        "console.log('ok');\n"
+    )
+    out = _run_node(script)
     assert "ok" in out
 
 
@@ -2048,6 +2142,7 @@ def test_b1_node_behavior_setup_req_id_and_close_lock():
         "function toast(m){toasts.push(m)}\n"
         "const document={getElementById(){return {classList:{remove(c){removed.push(c)}}}}};\n"
         "function renderSetupPreview(){}\n"
+        "function setSetupBusy(busy){}\n"
         "function closeSetup(){" + close_src + "\n"
         "SETUP_SUBMITTING=true; SETUP_IN_FLIGHT=true;\n"
         "closeSetup();\n"
