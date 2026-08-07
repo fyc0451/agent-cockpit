@@ -3877,8 +3877,14 @@ function _hslToRgb(h,s,l){
   return[Math.round(f(h+1/3)*255),Math.round(f(h)*255),Math.round(f(h-1/3)*255)];
 }
 function _invertLight(r,g,b){const[h,s,l]=_rgbToHsl(r,g,b);return _hslToRgb(h,s,1-l)}
+const ANSI16_RGB=[
+  [0,0,0],[205,49,49],[13,188,121],[229,229,16],
+  [36,114,200],[188,63,188],[17,168,205],[229,229,229],
+  [102,102,102],[241,76,76],[35,209,139],[245,245,67],
+  [59,142,234],[214,112,214],[41,184,219],[255,255,255]
+];
 function _pal256rgb(n){
-  if(n<16)return null; // 0-15 走主题调色板,浅色主题已配好高对比色
+  if(n<16)return null; // 0-15 前景走主题调色板；背景需按上下文单独改写
   if(n<232){const c=[0,95,135,175,215,255],v=n-16;return[c[(v/36)|0],c[((v/6)|0)%6],c[v%6]]}
   const g=8+(n-232)*10;return[g,g,g];
 }
@@ -3896,8 +3902,16 @@ function _lightRewriteSgr(full,params){
   const parts=params.split(';'),out=[];
   for(let i=0;i<parts.length;i++){
     const p=parts[i];
+    const code=+p;
+    // xterm 的 0-15 调色板无法区分“黑色前景”和“黑色背景”。浅色主题要保留
+    // 黑色文字，但 Codex 输入区的 ANSI 黑背景(40/48;5;0)必须单独翻成浅色。
+    if((code>=40&&code<=47)||(code>=100&&code<=107)){
+      const rgb=ANSI16_RGB[code>=100?code-92:code-40];
+      const[r,g,b]=_invertLight(...rgb);out.push('48','2',r,g,b);continue;
+    }
     if((p==='38'||p==='48')&&parts[i+1]==='5'&&parts[i+2]){
-      const rgb=_pal256rgb(+parts[i+2]);
+      const n=+parts[i+2];
+      const rgb=p==='48'&&n>=0&&n<16?ANSI16_RGB[n]:_pal256rgb(n);
       if(rgb){const[r,g,b]=_invertLight(...rgb);out.push(p,'2',r,g,b)}else out.push(p,'5',parts[i+2]);
       i+=2;continue;
     }

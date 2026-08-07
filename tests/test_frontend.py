@@ -1540,6 +1540,21 @@ def test_terminal_dark_boost_stream_safe_with_carry():
     assert "includes('38;')" in fn  # 快速路径
 
 
+def test_terminal_light_mode_rewrites_basic_ansi_backgrounds():
+    # Codex 输入区用标准 ANSI 黑背景(40 或 48;5;0)。xterm 的 0-15
+    # 调色板不能按前景/背景分别配置，必须在浅色输出适配器中改写背景。
+    js = _inline_js()
+    rewrite = js.split("function _lightRewriteSgr(full,params){", 1)[1].split(
+        "function lightTermAdapt", 1
+    )[0]
+    assert "ANSI16_RGB" in js
+    assert "code>=40&&code<=47" in rewrite
+    assert "code>=100&&code<=107" in rewrite
+    assert "p==='48'&&n>=0&&n<16?ANSI16_RGB[n]" in rewrite
+    # 低位 ANSI 前景仍交给浅色主题调色板，不能把黑字翻成白字。
+    assert "p==='38'&&n>=0&&n<16" not in rewrite
+
+
 def test_settings_hub_error_shows_actionable_fix():
     # 新装机最常见失败(token 未配置)必须给可操作的恢复指引,不只报错
     js = _inline_js()
