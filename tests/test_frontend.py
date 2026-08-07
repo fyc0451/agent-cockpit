@@ -2143,6 +2143,7 @@ def test_b1_node_behavior_setup_req_id_and_close_lock():
         "const document={getElementById(){return {classList:{remove(c){removed.push(c)}}}}};\n"
         "function renderSetupPreview(){}\n"
         "function setSetupBusy(busy){}\n"
+        "function closeDialog(){}\n"
         "function closeSetup(){" + close_src + "\n"
         "SETUP_SUBMITTING=true; SETUP_IN_FLIGHT=true;\n"
         "closeSetup();\n"
@@ -2279,4 +2280,83 @@ def test_b1_node_behavior_msg_load_seq_drops_stale():
     if(applied.join(',')!=='B') {console.error(applied); process.exit(1)}
     console.log('ok');
     """))
+    assert "ok" in out
+
+
+# ── B2 UX-P1-08～12：a11y/UX 静态 + Node DOM stub ─────────────────────────
+
+def test_b2_modals_have_dialog_semantics():
+    """UX-P1-11: 6 modal 经 openDialog 设 role/aria-modal/aria-labelledby;标题 id 齐全;背景内联 onclick 移除。"""
+    js = _inline_js()
+    assert "function openDialog" in js and "function closeDialog" in js and "function trapDialogKey" in js
+    assert "'role','dialog'" in js and "'aria-modal','true'" in js and "'aria-labelledby'" in js
+    for tid in ("launchModalTitle", "layoutModalTitle", "mmTitle", "attentionModalTitle", "collabModalTitle", "setupModalTitle"):
+        assert 'id="' + tid + '"' in HTML
+    for bad in (
+        'onclick="if(event.target===this)closeLaunchModal()"',
+        'onclick="if(event.target===this)closeLayoutModal()"',
+        'onclick="if(event.target===this)closeMsg()"',
+        'onclick="if(event.target===this)closeAttentionModal()"',
+        'onclick="if(event.target===this)closeCollab()"',
+        'onclick="if(event.target===this)closeSetup()"',
+    ):
+        assert bad not in HTML, f"残留 modal 背景内联 onclick: {bad}"
+
+
+def test_b2_dialog_escape_uses_closer_and_setup_guard_intact():
+    """Escape/背景走各自 closer;setupModal 走 closeSetup 保留 SETUP_IN_FLIGHT guard。"""
+    js = _inline_js()
+    assert "closer:closeCollab" in js and "closer:closeSetup" in js
+    close = js.split("function closeSetup(){", 1)[1].split("async function setupOpenTerminal", 1)[0]
+    assert "SETUP_IN_FLIGHT" in close
+    assert "closeDialog()" in close
+
+
+def test_b2_click_only_items_buttonified_with_keyboard():
+    """UX-P1-10: 列表项 role=button+tabindex;委托补 Enter/Space→click。"""
+    js = _inline_js()
+    assert 'role="button" tabindex="0"' in js
+    assert "e.key!=='Enter'&&e.key!==' '" in js and "it.click()" in js
+    for marker in ('data-action="openFlow"', 'data-action="openAttention"', 'data-action="viewAgent"', 'data-action="fileUp"', 'data-action="tfBack"'):
+        assert marker in js
+
+
+def test_b2_sidebar_a11y_inert_aria_focus():
+    """UX-P1-12: 移动侧栏关闭 inert/aria-hidden;aria-expanded;打开焦点入 nav。"""
+    js = _inline_js()
+    assert "function setNavA11y" in js and "NAV_COLLAPSE_MQ.matches" in js
+    toggle = js.split("function toggleNav(){", 1)[1].split("function closeNav", 1)[0]
+    assert "#nav button" in toggle
+    close = js.split("function closeNav(){", 1)[1].split("function toggleNavPc", 1)[0]
+    assert "setNavA11y(false)" in close
+    pc = js.split("function toggleNavPc(){", 1)[1].split("function ", 1)[0]
+    assert "aria-expanded" in pc
+
+
+def test_b2_attention_empty_state_has_create_cta():
+    """UX-P1-08: 默认工作台无 session 时提供创建 CTA,且不宣称无阻塞。"""
+    js = _inline_js()
+    idx = js.index("当前没有运行中的 Herdr session")
+    tail = js[idx:idx + 220]
+    assert "showSetupModal()" in tail
+    assert "当前没有需要你处理的阻塞" not in tail
+
+
+def test_b2_flow_focuses_target_pane_input():
+    """UX-P1-09: enterHerdrFlow 命中目标 pane 后聚焦输入(非仅滚动)。"""
+    js = _inline_js()
+    assert "hf-in-'+fp" in js
+
+
+def test_b2_node_dialog_escape_calls_closer():
+    """Node DOM stub: trapDialogKey 的 Escape→bg.__closer(提取生产函数体)。"""
+    js = _inline_js()
+    trap_src = js.split("function trapDialogKey(e,bg){", 1)[1].split("\n}", 1)[0]
+    out = _run_node(
+        "function trapDialogKey(e,bg){\n" + trap_src + "\n}\n"
+        "let closed=false;\n"
+        "trapDialogKey({key:'Escape',preventDefault(){}},{__closer:()=>{closed=true}});\n"
+        "if(!closed){console.error('escape not closed');process.exit(1)}\n"
+        "console.log('ok');\n"
+    )
     assert "ok" in out

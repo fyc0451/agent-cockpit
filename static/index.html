@@ -411,6 +411,8 @@ header .spacer{flex:1}
 .collab-context{font:10px/1.5 var(--mono);color:var(--fg3);word-break:break-all;margin:7px 0}
 .collab-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:9px}
 .modal h3{font-size:15px;margin-bottom:10px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+[role="button"]{cursor:pointer}
 .setup-modes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:7px 0 13px}
 .setup-mode{padding:9px 6px;text-align:center;font-size:12px;line-height:1.35}
 .setup-mode.active{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 13%,var(--bg3));color:var(--accent)}
@@ -557,7 +559,7 @@ header .spacer{flex:1}
     <div class="side-foot">
       <div class="stat-pill"><span class="dot" id="liveDot"></span><span id="liveText">--</span></div>
       <div class="side-actions">
-        <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="任务看板与需处理事项">🔔 <span id="attentionN">0</span></div>
+        <div class="stat-pill" id="attentionPill" onclick="showView('attention')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showView('attention')}" role="button" tabindex="0" style="cursor:pointer" title="任务看板与需处理事项">🔔 <span id="attentionN">0</span></div>
         <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
         <button class="icon" onclick="refreshCurrent()" title="刷新当前页面数据" data-i18n-title="common.refresh">↻</button>
       </div>
@@ -838,11 +840,11 @@ header .spacer{flex:1}
 </div>
 
 <!-- 向已有工作区添加 Agent，仅在终端工具栏按需打开 -->
-<div class="modal-bg" id="launchModal" onclick="if(event.target===this)closeLaunchModal()">
+<div class="modal-bg" id="launchModal">
   <div class="modal launch-modal">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
       <div style="flex:1;min-width:0">
-        <h3 style="margin:0">向工作区添加 Agent</h3>
+        <h3 id="launchModalTitle" style="margin:0">向工作区添加 Agent</h3>
         <div class="muted" style="font-size:11px;margin-top:3px">选择已运行的 session，在新 pane 中启动 Agent。</div>
       </div>
       <button class="icon" onclick="closeLaunchModal()">✕</button>
@@ -868,11 +870,11 @@ header .spacer{flex:1}
 </div>
 
 <!-- 终端布局:分屏/拆开/组合 pane -->
-<div class="modal-bg" id="layoutModal" onclick="if(event.target===this)closeLayoutModal()">
+<div class="modal-bg" id="layoutModal">
   <div class="modal launch-modal">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
       <div style="flex:1;min-width:0">
-        <h3 style="margin:0" data-i18n="layout.title">终端布局</h3>
+        <h3 id="layoutModalTitle" style="margin:0" data-i18n="layout.title">终端布局</h3>
         <div class="muted" style="font-size:11px;margin-top:3px" id="layoutModalHint" data-i18n="layout.hint">对当前 pane 一键分屏/拆开，或勾选多个 pane 组合成分屏。</div>
       </div>
       <button class="icon" onclick="closeLayoutModal()">✕</button>
@@ -927,7 +929,7 @@ header .spacer{flex:1}
 </div>
 
 <!-- 消息抽屉(卡片里点消息) -->
-<div class="modal-bg" id="msgModal" onclick="if(event.target===this)closeMsg()">
+<div class="modal-bg" id="msgModal">
   <div class="modal">
     <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <h3 id="mmTitle">消息</h3>
@@ -943,7 +945,7 @@ header .spacer{flex:1}
 </div>
 
 <!-- Attention 任务详情 -->
-<div class="modal-bg" id="attentionModal" onclick="if(event.target===this)closeAttentionModal()">
+<div class="modal-bg" id="attentionModal">
   <div class="modal" style="max-width:760px">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
       <h3 id="attentionModalTitle" style="margin:0;flex:1">任务详情</h3>
@@ -959,10 +961,10 @@ header .spacer{flex:1}
 </div>
 
 <!-- 协作者选择(终端 tab 的 @协作 按钮) -->
-<div class="modal-bg" id="collabModal" onclick="if(event.target===this)closeCollab()">
+<div class="modal-bg" id="collabModal">
   <div class="modal" style="max-width:560px">
     <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <h3 style="font-size:15px">协作与团队求助</h3>
+      <h3 id="collabModalTitle" style="font-size:15px">协作与团队求助</h3>
       <button class="icon" onclick="closeCollab()">✕</button>
     </div>
     <div class="muted" style="font-size:12px;margin-bottom:10px">联系本地 Agent，或通过 Team Hub 向当前群组发送真实消息</div>
@@ -971,10 +973,10 @@ header .spacer{flex:1}
 </div>
 
 <!-- 一键工作区(setup-workspace) -->
-<div class="modal-bg" id="setupModal" onclick="if(event.target===this)closeSetup()">
+<div class="modal-bg" id="setupModal">
   <div class="modal" style="max-width:760px">
     <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <h3 style="font-size:15px">创建工作区</h3>
+      <h3 id="setupModalTitle" style="font-size:15px">创建工作区</h3>
       <button class="icon" onclick="closeSetup()">✕</button>
     </div>
     <div class="muted" style="font-size:12px;margin-bottom:10px">选择协作方式并说明每个 Agent 做什么；Cockpit 自动安排工作目录、启动 Agent、注册 Agent Mail 身份并发送任务。Agent Mail 为必需能力。</div>
@@ -1022,6 +1024,7 @@ let SETUP_SUBMITTING=false, SETUP_IN_FLIGHT=false, SETUP_REQ_ID=0, SETUP_INSPECT
 // B1: SSE 链路三态与发送/消息/文件保护
 let SSE_LINK='offline', SSE_LAST_OK_TS=null; // online | reconnecting | offline
 let TERM_SENDING={}, MSG_SENDING=false, MSG_LOAD_SEQ=0, MSG_BOUND_SLUG=null, SETTINGS_SAVING=false;
+let OPEN_DIALOG=null,LAST_FOCUS=null;
 const HF_SENDING={};
 let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',inboxRoute:null,chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
 let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
@@ -1036,6 +1039,36 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const SESSION_NAME_RE=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const validSessionName=s=>typeof s==='string'&&SESSION_NAME_RE.test(s);
 function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),ms)}
+// ============ 通用 dialog/focus helper(键盘可达与焦点管理) ============
+// openDialog: 记先前焦点→设 role/aria-modal/aria-labelledby→背景 .main+#side inert→初始聚焦→绑背景click+Tabtrap+Escape
+function openDialog(bg,{labelledBy,initialFocus,closer}={}){
+  OPEN_DIALOG=bg;LAST_FOCUS=document.activeElement;
+  bg.setAttribute('role','dialog');bg.setAttribute('aria-modal','true');
+  if(labelledBy)bg.setAttribute('aria-labelledby',labelledBy);
+  bg.__closer=typeof closer==='function'?closer:null;
+  setBackgroundInert(true);
+  const f=initialFocus?bg.querySelector(initialFocus):bg.querySelector('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])');
+  if(f){try{f.focus()}catch(e){}}
+  if(!bg.__dlgBound){bg.__dlgBound=true;
+    bg.addEventListener('click',e=>{if(e.target===bg&&bg.__closer)bg.__closer()});
+    bg.addEventListener('keydown',e=>trapDialogKey(e,bg))}
+}
+// closeDialog: 只清 a11y 态 + 去背景 inert + 恢复焦点;不碰显隐(classList 由各 closeXxx 管)。保留单 dialog 简化
+function closeDialog(){
+  const bg=OPEN_DIALOG;if(!bg)return;OPEN_DIALOG=null;
+  setBackgroundInert(false);
+  bg.removeAttribute('role');bg.removeAttribute('aria-modal');bg.removeAttribute('aria-labelledby');
+  const f=LAST_FOCUS;if(f&&f.focus){try{f.focus()}catch(e){}}
+}
+function trapDialogKey(e,bg){
+  if(e.key==='Escape'){e.preventDefault();if(bg.__closer)bg.__closer();return}
+  if(e.key!=='Tab')return;
+  const fs=[...bg.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(el=>el.offsetParent!==null||el===document.activeElement);
+  if(!fs.length)return;const first=fs[0],last=fs[fs.length-1];
+  if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}
+  else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}
+}
+const setBackgroundInert=on=>{document.querySelectorAll('.main>header,.view,#side').forEach(el=>{if(on)el.setAttribute('inert','');else el.removeAttribute('inert')})};
 
 // ============ i18n(中/英/日) ============
 // t(key, zhFallback, vars):有翻译用翻译,没有回退中文原文;{var} 插值。
@@ -1094,15 +1127,24 @@ function applyLang(){
   document.querySelectorAll('[data-i18n-title]').forEach(el=>{const v=I18N[LANG]?.[el.dataset.i18nTitle];if(v!==undefined)el.title=v});
   document.documentElement.lang=LANG==='zh'?'zh-CN':LANG;
 }
+function setNavA11y(open){
+  const side=document.getElementById('side');if(!side)return;
+  if(NAV_COLLAPSE_MQ.matches){side.setAttribute('aria-hidden',open?'false':'true');if(open)side.removeAttribute('inert');else side.setAttribute('inert','')}
+  document.querySelectorAll('.nav-toggle').forEach(b=>b.setAttribute('aria-expanded',String(open)));
+}
 function toggleNav(){
   const side=document.getElementById('side');if(!side)return;
   const open=side.classList.toggle('open');
   document.getElementById('sideBackdrop')?.classList.toggle('show',open);
+  setNavA11y(open);
   try{localStorage.setItem('nav-open',open?'1':'0')}catch(e){}
+  if(open){const f=side.querySelector('#nav button');if(f)try{f.focus()}catch(e){}}
 }
 function closeNav(){
-  document.getElementById('side')?.classList.remove('open');
+  const side=document.getElementById('side');
+  if(side)side.classList.remove('open');
   document.getElementById('sideBackdrop')?.classList.remove('show');
+  setNavA11y(false);
   try{localStorage.setItem('nav-open','0')}catch(e){}
 }
 function toggleNavPc(){
@@ -1110,6 +1152,9 @@ function toggleNavPc(){
   if(NAV_COLLAPSE_MQ.matches){closeNav();return}
   const app=document.querySelector('.app');
   const hidden=app.classList.toggle('nav-hidden');
+  const expanded=String(!hidden);
+  document.getElementById('navExpand')?.setAttribute('aria-expanded',expanded);
+  document.getElementById('navCollapse')?.setAttribute('aria-expanded',expanded);
   try{localStorage.setItem('nav-hidden-pc',hidden?'1':'0')}catch(e){}
 }
 function toggleTermToolbar(){
@@ -1121,8 +1166,13 @@ function toggleTermToolbar(){
 }
 (function restoreCollapses(){
   try{
-    if(localStorage.getItem('nav-open')==='1'){document.getElementById('side').classList.add('open');document.getElementById('sideBackdrop')?.classList.add('show')}
+    const navOpen=localStorage.getItem('nav-open')==='1';
+    if(navOpen){document.getElementById('side').classList.add('open');document.getElementById('sideBackdrop')?.classList.add('show')}
     if(localStorage.getItem('nav-hidden-pc')==='1')document.querySelector('.app').classList.add('nav-hidden');
+    setNavA11y(navOpen);
+    const pcHidden=document.querySelector('.app').classList.contains('nav-hidden');
+    document.getElementById('navExpand')?.setAttribute('aria-expanded',String(!pcHidden));
+    document.getElementById('navCollapse')?.setAttribute('aria-expanded',String(!pcHidden));
     const tb=document.querySelector('.term-toolbar');
     const stored=localStorage.getItem('term-toolbar-collapsed');
     // 触屏设备进入终端时默认保持紧凑；本次页面内仍可手动展开。
@@ -1873,7 +1923,7 @@ function sessionTaskHtml(session){
       const blocker=reported&&report.blocker?`<div class="task-report-blocker">阻塞：${esc(report.blocker)}</div>`:'';
       reportHtml=`<div class="task-agent-report"><div class="task-report-meta">${meta}${pending}${failed}</div>${summary}${next}${blocker}</div>`;
     }
-    return `<div class="task-agent"${canOpen?` data-action="openSessionAgent" data-session="${esc(session.session)}" data-pane="${esc(agent.pane_id)}"`:''}>
+    return `<div class="task-agent"${canOpen?` data-action="openSessionAgent" data-session="${esc(session.session)}" data-pane="${esc(agent.pane_id)}" role="button" tabindex="0"`:''}>
       <div class="task-agent-icon">${AGENT_EMOJI[agent.agent]||'🤖'}</div>
       <div class="task-agent-who"><div class="task-agent-mail">${esc(mail)}</div><div class="task-agent-type">${esc(agent.agent)} · ${esc(role)}</div></div>
       <div class="task-agent-task${agent.task?'':' task-agent-empty'}">${esc(task)}</div>
@@ -1899,10 +1949,10 @@ function renderAttention(d){
   const unread=Math.max(0,Number(d.mail_unread)||0);
   const mailNote=unread?`<div class="capability-note">📬 ${unread} 条 Agent Mail 未读，不计入待办。<button class="sm" data-action="openMessages">去消息查看</button></div>`:'';
   const sessions=d.sessions||[];
-  const board=sessions.length?`<div class="task-board">${sessions.map(sessionTaskHtml).join('')}</div>`:'<div class="capability-note">当前没有运行中的 Herdr session</div>';
+  const board=sessions.length?`<div class="task-board">${sessions.map(sessionTaskHtml).join('')}</div>`:'<div class="capability-note">当前没有运行中的 Herdr session</div><button class="primary sm" onclick="showSetupModal()" style="margin-top:10px">'+t('board.guide.btn','🚀 创建第一个工作区')+'</button>';
   const items=d.items||[];
   const actions=items.length?items.map((item,i)=>`
-    <div class="attention-card" data-action="openAttention" data-index="${i}">
+    <div class="attention-card" data-action="openAttention" data-index="${i}" role="button" tabindex="0">
       <div class="attention-icon">${ATTENTION_ICON[item.kind]||'🔔'}</div>
       <div class="attention-copy"><div class="attention-title">${esc(item.title)}</div><div class="attention-detail">${esc(item.detail||'')}</div></div>
       <div class="attention-action">${ATTENTION_ACTION[item.kind]||'查看'} ›</div>
@@ -1924,7 +1974,7 @@ async function openAttention(i,updateHash=true){
 async function openTaskAttention(taskId){
   if(!taskId)return;
   showView('attention');ATTENTION_TASK_ID=taskId;
-  const modal=document.getElementById('attentionModal');modal.classList.add('show');
+  const modal=document.getElementById('attentionModal');modal.classList.add('show');openDialog(modal,{labelledBy:'attentionModalTitle',closer:closeAttentionModal});
   document.getElementById('attentionModalTitle').textContent='任务 '+taskId;
   document.getElementById('attentionModalMeta').textContent='加载中…';
   document.getElementById('attentionModalBody').textContent='加载中…';
@@ -1943,7 +1993,7 @@ async function openTaskAttention(taskId){
     document.getElementById('attentionModalBody').textContent=content;
   }catch(e){document.getElementById('attentionModalBody').textContent='加载失败: '+e}
 }
-function closeAttentionModal(){document.getElementById('attentionModal').classList.remove('show');ATTENTION_TASK_ID=null}
+function closeAttentionModal(){document.getElementById('attentionModal').classList.remove('show');closeDialog();ATTENTION_TASK_ID=null}
 async function attentionTaskAction(action){
   if(!ATTENTION_TASK_ID)return;
   const label=action==='apply'?'应用':'丢弃';
@@ -2092,7 +2142,7 @@ function cardHtml(p){
   const cls=classify(p.agent_status,p.agent);
   const emoji=AGENT_EMOJI[ag]||'⬜';
   const stMap={need:'需要你',work:'运行中',done:'完成',idle:'空闲',unknown:'未知'};
-  return `<div class="card ${cls}" data-action="openFlow" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">
+  return `<div class="card ${cls}" data-action="openFlow" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}" role="button" tabindex="0">
     <div class="card-top">
       <div class="agent-icon ${esc(ag)}">${emoji}</div>
       <div class="card-name"><span class="card-name-main">${esc(p.agent||p.terminal_title||p.pane_id)}</span>${p.mail_name?`<span class="card-alias">@${esc(p.mail_name)}</span>`:''}</div>
@@ -2279,7 +2329,7 @@ function showMention(query){
   const filtered=q?cands.filter(p=>(p.agent+' '+p.session+' '+p.pane_id).toLowerCase().includes(q)):cands;
   if(!filtered.length){hideMention();return}
   pop.innerHTML=filtered.map((p,i)=>`
-    <div class="mention-item" data-action="pickMention" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border-bottom:1px solid var(--bd)">
+    <div class="mention-item" data-action="pickMention" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" role="button" tabindex="0" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border-bottom:1px solid var(--bd)">
       <span class="agent-icon ${esc(p.agent)}" style="width:22px;height:22px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
       <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span>
     </div>`).join('');
@@ -2331,7 +2381,7 @@ async function loadAgentMsgsForTerm(agent,session){
 }
 function openMsg(agent){
   CURRENT_MSG_AGENT=agent;
-  document.getElementById('msgModal').classList.add('show');
+  const mm=document.getElementById('msgModal');mm.classList.add('show');openDialog(mm,{labelledBy:'mmTitle',closer:closeMsg});
   document.getElementById('mmTitle').textContent='与 '+agent+' 的消息';
   document.getElementById('mmTo').value=agent||'';
   // TODO: 按 agent 过滤消息
@@ -2340,11 +2390,11 @@ function openMsg(agent){
 // ============ 启动 agent ============
 async function showLaunchModal(){
   const preferredSession=(TERM_ID&&TERM_SESSIONS[TERM_ID])||CURRENT_TERM?.session||'';
-  document.getElementById('launchModal').classList.add('show');
+  const lm=document.getElementById('launchModal');lm.classList.add('show');openDialog(lm,{labelledBy:'launchModalTitle',closer:closeLaunchModal});
   await loadSessions(preferredSession);
   launchSessionChanged(false);
 }
-function closeLaunchModal(){document.getElementById('launchModal').classList.remove('show')}
+function closeLaunchModal(){document.getElementById('launchModal').classList.remove('show');closeDialog()}
 async function loadSessions(preferredSession=''){
   try{
     const d=await api('/api/herdr/sessions');
@@ -2475,7 +2525,7 @@ function setMsgComposeEnabled(on){
 }
 function renderProjAgentList(d){
   document.getElementById('projAgentList').innerHTML=d.agents.map(a=>`
-    <div class="agent-item${MSG_FILTER===a.name?' active':''}" data-action="viewAgent" data-name="${esc(a.name)}" title="点击查看该 agent 的消息">
+    <div class="agent-item${MSG_FILTER===a.name?' active':''}" data-action="viewAgent" data-name="${esc(a.name)}" title="点击查看该 agent 的消息" role="button" tabindex="0">
       <span class="agent-icon ${esc(a.program||'none')}" style="width:22px;height:22px;font-size:11px">${AGENT_EMOJI[(a.program||'').replace('-cli','').replace('-work','').replace('-cn','')]||'⬜'}</span>
       <span class="an">${esc(a.name)}${a.unread?` <span class="card-badge">${esc(a.unread)}</span>`:''}</span>
     </div>`).join('')||'<div class="muted">无 agent</div>';
@@ -2721,7 +2771,7 @@ async function termTabUploadFiles(input){
       <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span></div>`;
   }
   document.getElementById('collabList').innerHTML=html;
-  m.classList.add('show');
+  m.classList.add('show');openDialog(m,{labelledBy:'collabModalTitle',closer:closeCollab});
 }
 function sendUploadToCurrent(){
   closeCollab();
@@ -2768,10 +2818,10 @@ function layoutTermContext(){
 async function showLayoutModal(){
   const {session}=layoutTermContext();
   if(!session){toast(t('layout.nosession','先打开一个终端(选择 herdr session)再调整布局'),4000);return}
-  document.getElementById('layoutModal').classList.add('show');
+  const lym=document.getElementById('layoutModal');lym.classList.add('show');openDialog(lym,{labelledBy:'layoutModalTitle',closer:closeLayoutModal});
   await renderLayoutPaneList();
 }
-function closeLayoutModal(){document.getElementById('layoutModal').classList.remove('show')}
+function closeLayoutModal(){document.getElementById('layoutModal').classList.remove('show');closeDialog()}
 async function renderLayoutPaneList(){
   const {session,target}=layoutTermContext();
   const el=document.getElementById('layoutPaneList');
@@ -2895,7 +2945,7 @@ async function termPickCollab(){
   document.querySelector('#collabModal h3').textContent='协作与团队求助';
   document.querySelector('#collabModal .muted').textContent='联系本地 Agent，或通过 Team Hub 向当前群组发送真实消息';
   document.getElementById('collabList').innerHTML='<div class="empty">加载协作对象…</div>';
-  modal.classList.add('show');
+  modal.classList.add('show');openDialog(modal,{labelledBy:'collabModalTitle',closer:closeCollab});
   await teamLoad(true);
   const binding=teamBindingForSession(termCollabContext().session);
   if(binding&&TEAM.selected!==binding.project_slug){
@@ -2943,7 +2993,7 @@ async function teamCollabSend(){
     document.querySelector('.collab-form .collab-actions')?.before(err);
   }finally{TEAM_COLLAB_SENDING=false}
 }
-function closeCollab(){document.getElementById('collabModal').classList.remove('show');TEAM_COLLAB_TARGET=null}
+function closeCollab(){document.getElementById('collabModal').classList.remove('show');closeDialog();TEAM_COLLAB_TARGET=null}
 // 在 web 终端里 attach 到 herdr session(进入多 pane 分屏视图,同时看多个 agent)
 async function termAttachHerdr(){
   // 弹 session 选择器(复用 collabModal)
@@ -2959,11 +3009,11 @@ async function termAttachHerdr(){
     ?'选一个 session 进入真实 TUI；用屏幕按键操作，Ctrl-B 后点方向键切换 pane'
     :'选一个 session,在终端里进入 herdr 多 pane 分屏视图(Ctrl-b 切 pane,d 脱离)';
   document.getElementById('collabList').innerHTML=running.map(s=>`
-    <div data-action="attach" data-session="${esc(s)}" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
+    <div data-action="attach" data-session="${esc(s)}" role="button" tabindex="0" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
       <span style="font-size:18px">🖥</span>
       <span><b>${esc(s)}</b> <span class="muted">(${sessions[s]} agent pane)</span></span>
     </div>`).join('');
-  m.classList.add('show');
+  m.classList.add('show');openDialog(m,{labelledBy:'collabModalTitle',closer:closeCollab});
 }
 async function doAttachHerdr(session){
   if(!validSessionName(session)){toast('非法 session 名,拒绝 attach');return}
@@ -3071,7 +3121,7 @@ function hfRender(){
   // 定位到入口 pane(看板卡片/终端视图点进来时)
   if(HF_FOCUS_PANE){
     const el=document.getElementById('hf-'+HF_FOCUS_PANE);
-    if(el)setTimeout(()=>el.scrollIntoView({block:'start'}),50);
+    if(el){const fp=HF_FOCUS_PANE;setTimeout(()=>{el.scrollIntoView({block:'start'});const inp=document.getElementById('hf-in-'+fp);if(inp)try{inp.focus()}catch(e){}},50)}
     HF_FOCUS_PANE=null;
   }
 }
@@ -3800,7 +3850,7 @@ function renderSetupPreview(){
 function showSetupModal(){
   if(!SETUP_PARTICIPANTS.length)setupMode('develop_review');else renderSetupAgents();
   setupInspectWorkspace(document.getElementById('suWorkdir').value.trim());
-  document.getElementById('setupModal').classList.add('show');
+  const sm=document.getElementById('setupModal');sm.classList.add('show');openDialog(sm,{labelledBy:'setupModalTitle',closer:closeSetup});
 }
 function setSetupBusy(busy){
   // 冻结 setupModal 表单/模式/增删/关闭，保留 suResult 可见；结果区动作按钮在解除时可用
@@ -3839,7 +3889,7 @@ function closeSetup(){
     toast('工作区正在启动中，请等待完成后再关闭',3500);
     return;
   }
-  document.getElementById('setupModal').classList.remove('show');
+  document.getElementById('setupModal').classList.remove('show');closeDialog();
   SETUP_SUBMITTING=false;
   setSetupBusy(false);
   renderSetupPreview();
@@ -3934,12 +3984,12 @@ async function loadFileTree(){
     const parts=rel.split('/').filter(Boolean);
     const rootLabel=fileRootLabel(root);
     let bc='<div class="ft-bc">';
-    bc+=`<span style="cursor:pointer;color:${parts.length?'var(--fg3)':'var(--accent)'}" data-action="fileGoto" data-path="${esc(root)}">${esc(rootLabel)}</span>`;
+    bc+=`<span style="cursor:pointer;color:${parts.length?'var(--fg3)':'var(--accent)'}" data-action="fileGoto" data-path="${esc(root)}" role="button" tabindex="0">${esc(rootLabel)}</span>`;
     let acc=root;
     parts.forEach((p,i)=>{
       acc+='/'+p;
       const isLast=i===parts.length-1;
-      bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(acc)}">/${esc(p)}</span>`;
+      bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(acc)}" role="button" tabindex="0">/${esc(p)}</span>`;
     });
     bc+='</div>';
     // 位置切换:一个下拉框按来源分组,替代平铺的 chip 列表
@@ -3958,9 +4008,9 @@ async function loadFileTree(){
         +'</div>';
     }
     // 上级目录按钮(到白名单根为止,再往上后端会拒绝)
-    const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">${t('files.uptop','‥ (上级)')}</span></div>`:'';
+    const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp" role="button" tabindex="0">📁 <span class="muted">${t('files.uptop','‥ (上级)')}</span></div>`:'';
     tree.innerHTML=bc+upBtn+d.entries.map((e,i)=>`
-      <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:`<button class="icon" data-action="fileDownloadDir" data-path="${esc(d.path)}" data-name="${esc(e.name)}" title="打包下载目录">⬇️</button>`}</div>`).join('');
+      <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}" role="button" tabindex="0"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:`<button class="icon" data-action="fileDownloadDir" data-path="${esc(d.path)}" data-name="${esc(e.name)}" title="打包下载目录">⬇️</button>`}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
 }
 function setFileRoots(r){FILE_ROOTS=r.roots||[];FILE_ROOT_GROUPS=r.groups||null}
@@ -4015,7 +4065,7 @@ async function fileSearch(){
     const tree=document.getElementById('fileTree');
     tree.innerHTML=`<div class="ft-bc">🔎 ${esc(d.query)} · ${esc(d.path)}</div>`+
       (FILE_ENTRIES.length?FILE_ENTRIES.map((e,i)=>`
-        <div class="ft-item" data-action="fileSearchOpen" data-idx="${i}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.relative)}</span>${e.type==='file'?`<button class="icon" data-action="fileSearchDownload" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join(''):'<div class="empty">没有匹配结果</div>');
+        <div class="ft-item" data-action="fileSearchOpen" data-idx="${i}" role="button" tabindex="0"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.relative)}</span>${e.type==='file'?`<button class="icon" data-action="fileSearchDownload" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join(''):'<div class="empty">没有匹配结果</div>');
   }catch(e){toast('搜索失败: '+e)}
 }
 function fileSearchClear(){
@@ -4158,7 +4208,7 @@ async function termFileLoad(){
       const dl=e.type==='dir'
         ?`<button class="icon" data-action="tfDlDir" data-path="${esc(full)}" title="打包下载目录">⬇️</button>`
         :`<button class="icon" data-action="tfDl" data-path="${esc(full)}" title="下载">⬇️</button>`;
-      return `<div class="ft-item" data-action="${e.type==='dir'?'tfCd':'tfOpen'}" data-path="${esc(full)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${dl}</div>`;
+      return `<div class="ft-item" data-action="${e.type==='dir'?'tfCd':'tfOpen'}" data-path="${esc(full)}" role="button" tabindex="0"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${dl}</div>`;
     }).join('')||'<div class="empty">空目录</div>';
   }catch(e){list.innerHTML=`<div class="empty">打开目录失败: ${esc(String(e))}</div>`}
 }
@@ -4166,7 +4216,7 @@ async function termFileOpen(path){
   const list=document.getElementById('termFileList');
   const ext=(path.split('.').pop()||'').toLowerCase();
   const raw='/api/files/raw?path='+encodeURIComponent(path);
-  const head=`<div class="ft-item" data-action="tfBack">← <span class="muted">返回列表</span></div>
+  const head=`<div class="ft-item" data-action="tfBack" role="button" tabindex="0">← <span class="muted">返回列表</span></div>
     <div style="font:11px var(--mono);padding:4px 8px;word-break:break-all;color:var(--fg3)">${esc(path)}</div>`;
   if(FILE_IMG_EXT.includes(ext)){list.innerHTML=head+`<div style="padding:8px"><img src="${raw}" style="max-width:100%;border-radius:8px"></div>`;return}
   if(FILE_AUD_EXT.includes(ext)){list.innerHTML=head+`<div style="padding:8px"><audio controls src="${raw}" style="width:100%"></audio></div>`;return}
@@ -4186,7 +4236,7 @@ function fileDownload(){
 }
 async function fileSave(){const c=document.getElementById('fileEditor').value;if(c===FILE_ORIG){toast('无改动');return}try{await api('/api/files/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:FILE_PATH,content:c})});FILE_ORIG=c;toast('已保存 ✓')}catch(e){toast('保存失败: '+e)}}
 
-function closeMsg(){document.getElementById('msgModal').classList.remove('show')}
+function closeMsg(){document.getElementById('msgModal').classList.remove('show');closeDialog()}
 async function mmReply(){/* TODO */}
 
 // ============ SSE 链路状态（B1 P1-01） ============
@@ -4501,7 +4551,15 @@ async function ensureAuth(){
 
 // ============ 事件委托(不可信值经 data-* 传递,不进内联 handler) ============
 function bindDelegation(){
-  const on=(sel,fn)=>{const el=document.querySelector(sel);if(el)el.addEventListener('click',fn)};
+  const on=(sel,fn)=>{const el=document.querySelector(sel);if(!el)return;el.addEventListener('click',fn);
+    // 键盘可达:div/span[role=button][data-action] 上 Enter/Space 触发 click(委托 fn 处理);原生 button/a/select/input 不拦截,避免双触发
+    el.addEventListener('keydown',e=>{
+      if(e.key!=='Enter'&&e.key!==' ')return;
+      const it=e.target.closest('[data-action]');if(!it)return;
+      const tag=it.tagName;
+      if(tag==='BUTTON'||tag==='A'||tag==='SELECT'||tag==='INPUT'||tag==='TEXTAREA')return;
+      e.preventDefault();it.click();
+    })};
   on('#board',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='openFlow')enterHerdrFlow(it.dataset.session,it.dataset.pane);
     else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
