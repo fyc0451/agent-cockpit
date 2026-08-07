@@ -167,8 +167,8 @@ Human 登录态 ──▶ human_auth issuer (8766)
 | 角色 | 来源 | 权限 |
 |---|---|---|
 | 全局 admin | JWT role 含 admin | 系统账号管理、邀请码、创建群组 |
-| 群组 admin | membership role=admin | 本群成员审批/角色/绑定 |
-| 普通成员 | active membership | 读目录、收发消息、绑定自己的 Session |
+| 群组 admin | membership role=admin | 本群成员审批、角色与移除 |
+| 普通成员 | active membership | 查看群组/成员、收发消息、绑定自己的 Session |
 
 ### 5.3 成员上手（当前主流程）
 
