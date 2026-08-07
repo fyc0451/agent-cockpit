@@ -871,7 +871,9 @@ def test_claim_identity_hub_detail_with_token_never_leaks(tmp_path, monkeypatch)
     assert response.status_code == 500
     assert "secret-token-123" not in response.text
     assert "上游异常" not in response.text
-    assert "Hub 认领失败" in response.text
+    # O2：显式 HTTPException(500) 也统一为通用文案，不再回显业务前缀
+    assert response.json()["detail"] == server.INTERNAL_ERROR_DETAIL
+    assert "Hub 认领失败" not in response.text
 
 
 def test_claim_identity_requires_team_login(tmp_path, monkeypatch):

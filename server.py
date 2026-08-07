@@ -75,8 +75,40 @@ PUBLIC_PATHS = {
 }
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 logger = logging.getLogger("agent-cockpit")
+# 对外 500 统一文案：不回显异常类型/正文/路径/token 等内部细节（O2）。
+INTERNAL_ERROR_DETAIL = "服务器内部错误，请稍后重试"
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 PANE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$")
+
+
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(request: Request, exc: HTTPException):
+    """规范化 HTTPException 响应；仅 500 强制通用文案，4xx/502/503 等保持原 detail。"""
+    if exc.status_code == 500:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": INTERNAL_ERROR_DETAIL},
+            headers=exc.headers,
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """未捕获异常：记 stack + method/path，响应仅通用 500（不记 body/鉴权/query）。"""
+    logger.exception(
+        "unhandled exception method=%s path=%s",
+        request.method,
+        request.url.path,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": INTERNAL_ERROR_DETAIL},
+    )
 TEAM_API_ROUTES = (
     (re.compile(r"^humans/me$"), {"GET", "PUT"}),
     (re.compile(r"^inbox$"), {"GET"}),
