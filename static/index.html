@@ -530,6 +530,10 @@ header .spacer{flex:1}
   #sessionsList .card button{flex:0 1 auto}
   .toast{max-width:calc(100vw - 16px);width:max-content;white-space:normal;word-break:break-word;text-align:center}
 }
+.update-banner{display:flex;align-items:center;gap:10px;padding:7px 14px;background:var(--bg2);border-bottom:1px solid var(--bd);font-size:13px;flex-wrap:wrap}
+.update-banner .ub-text{flex:1 1 160px;min-width:0}
+.update-banner .ub-link{text-decoration:underline;white-space:nowrap}
+.set-version-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}
 </style>
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP" crossorigin="anonymous">
 <script src="/static/vendor/xterm/xterm.js" integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/" crossorigin="anonymous"></script>
@@ -565,6 +569,14 @@ header .spacer{flex:1}
     <div class="logo">⚙️ Agent Cockpit</div>
     <div class="spacer"></div>
   </header>
+
+  <!-- 升级提示条(有新版本时所有视图可见,可关闭;刷新/重登后重新检查会再次出现) -->
+  <div id="updateBanner" class="update-banner" style="display:none" role="status" aria-live="polite">
+    <span class="ub-ic">⬆</span>
+    <span class="ub-text" id="updateBannerText"></span>
+    <a class="ub-link" id="updateBannerLink" target="_blank" rel="noopener noreferrer" style="display:none"></a>
+    <button class="icon ub-close" type="button" onclick="dismissUpdate()" data-i18n-title="upd.dismiss" title="关闭">✕</button>
+  </div>
 
   <!-- 看板 -->
   <section id="view-board" class="view">
@@ -758,6 +770,14 @@ header .spacer{flex:1}
           <span id="setTermFontVal" style="min-width:24px;text-align:right">13</span>
         </div>
         <div class="muted" style="font-size:12px;margin-top:6px" data-i18n="set.termfont.hint">只影响本设备,立即生效。</div>
+      </div>
+      <div class="set-card">
+        <h3 data-i18n="upd.card">版本与更新</h3>
+        <div class="set-version-row">
+          <span><span data-i18n="upd.current">当前版本</span>: <b id="setVerCur">--</b></span>
+          <button class="sm" type="button" onclick="checkUpdate()" data-i18n="upd.check">检查更新</button>
+        </div>
+        <div id="setVerStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
       </div>
       <div class="set-card">
         <h3 data-i18n="set.dirs">可访问目录</h3>
@@ -1037,7 +1057,7 @@ en:{
 'set.env':'Environment check','set.env.hint':'On first use, make sure these components are ready; ❌ means install first.','set.env.herdr':'herdr (session backend)','set.env.mail':'Agent Mail (required, messaging)','set.env.missing':'not installed',
 'set.hub':'Local Agent Mail Hub address','set.hub.hint':'Controls only local agent collaboration and messages, not the Team Hub. The token is never read or shown; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ','set.hub.fix.token':'Fix: write the HTTP_BEARER_TOKEN used by the local Hub to the token= line in ~/.agent-mail/client.env, then run chmod 600 ~/.agent-mail/client.env. Keep hub= pointed at the local Hub, then click Save here or restart Cockpit.','set.hub.fix.conn':'Fix: make sure the local Hub process is running and listening on the expected port, then verify the hub= address in ~/.agent-mail/client.env. After editing it, click Save here or restart Cockpit.','set.teamhub':'Team Hub connection','set.teamhub.hint':'Applied immediately. Company-private IPs may use HTTP; public endpoints must use HTTPS.',
 'set.termfont':'Terminal font size','set.termfont.hint':'Applies to this device only, effective immediately.',
-'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
+'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ','upd.banner':'Update available: {cur} → {lat}','upd.view':'Release notes','upd.dismiss':'Dismiss','upd.card':'Version & updates','upd.current':'Current version','upd.check':'Check for updates','upd.checking':'Checking…','upd.uptodate':'You are on the latest version.','upd.unavailable':'Version check is unavailable.','upd.latest':'Latest: {lat}',
 },
 ja:{
 'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'ワークスペース','nav.term':'開発','nav.herdrflow':'モバイル','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.team':'チーム','nav.files':'ファイル','nav.settings':'設定',
@@ -1059,7 +1079,7 @@ ja:{
 'set.env':'環境チェック','set.env.hint':'初回利用前にこれらのコンポーネントを確認してください。❌ は要インストールです。','set.env.herdr':'herdr(セッションバックエンド)','set.env.mail':'Agent Mail(必須、メッセージ機能)','set.env.missing':'未インストール',
 'set.hub':'ローカル Agent Mail Hub アドレス','set.hub.hint':'ローカル agent の連携とメッセージだけを制御し、Team Hub は切り替えません。Token は表示せず、保存後すぐ反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ','set.hub.fix.token':'修復: ローカル Hub の起動に使った HTTP_BEARER_TOKEN を ~/.agent-mail/client.env の token= 行へ書き込み、chmod 600 ~/.agent-mail/client.env を実行してください。hub= はローカル Hub を指すままにして、この画面で「保存」を押すか Cockpit を再起動します。','set.hub.fix.conn':'修復: ローカル Hub プロセスが起動して想定ポートを listen していることと、~/.agent-mail/client.env の hub= アドレスを確認してください。変更後、この画面で「保存」を押すか Cockpit を再起動します。','set.teamhub':'Team Hub 接続','set.teamhub.hint':'保存後すぐ反映されます。社内プライベート IP は HTTP を使用でき、公開アドレスには HTTPS が必要です。',
 'set.termfont':'端末フォントサイズ','set.termfont.hint':'このデバイスのみに適用され、即時反映されます。',
-'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ',
+'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ','upd.banner':'新バージョンがあります: {cur} → {lat}','upd.view':'リリースノート','upd.dismiss':'閉じる','upd.card':'バージョンと更新','upd.current':'現在のバージョン','upd.check':'更新を確認','upd.checking':'確認中…','upd.uptodate':'最新バージョンです。','upd.unavailable':'バージョン確認は利用できません。','upd.latest':'最新: {lat}',
 }};
 let LANG=localStorage.getItem('cockpit-lang')||'zh';
 function t(key,zh,vars){const m=I18N[LANG];let s=(m&&m[key])??zh??key;if(vars)for(const[k,v]of Object.entries(vars))s=s.replaceAll('{'+k+'}',v);return s}
@@ -4366,6 +4386,55 @@ function bindDelegation(){
 }
 
 // ============ init ============
+// ============ 版本与升级提示(只读 /api/version;只引导查看官方 Release,不提供升级执行) ============
+let VERSION_INFO=null, UPDATE_DISMISSED=false;
+function safeReleaseUrl(u){
+  // Release URL 是不可信输入:严格限定 https + github.com + 官方 releases 前缀
+  try{const p=new URL(String(u||''));return p.protocol==='https:'&&p.hostname==='github.com'&&p.pathname.startsWith('/fyc0451/agent-cockpit/releases/')}
+  catch(e){return false}
+}
+function renderUpdateBanner(){
+  const bar=document.getElementById('updateBanner');if(!bar)return;
+  const v=VERSION_INFO||{},latest=(v.latest&&v.latest.version)?v.latest:null;
+  if(v.status!=='update_available'||!latest||UPDATE_DISMISSED){bar.style.display='none';return}
+  const cur=(v.current&&v.current.version)||'?';
+  // version 经 textContent 写入,绝不 innerHTML,不解析 release 正文/HTML
+  document.getElementById('updateBannerText').textContent=t('upd.banner','有新版本可用: {cur} → {lat}',{cur,lat:latest.version});
+  const link=document.getElementById('updateBannerLink');
+  if(safeReleaseUrl(latest.url)){link.href=latest.url;link.textContent=t('upd.view','查看更新说明');link.style.display=''}
+  else{link.removeAttribute('href');link.style.display='none'}
+  bar.style.display='flex'
+}
+function renderVersionCard(failed){
+  const cur=document.getElementById('setVerCur'),st=document.getElementById('setVerStatus');
+  if(!cur||!st)return;
+  const v=VERSION_INFO||{};
+  cur.textContent=(v.current&&v.current.version)||'--'; // textContent:防 HTML 注入
+  st.innerHTML=''; // 清空后只用 textContent/createTextNode,绝不渲染 latest 正文/HTML
+  if(failed||v.status==='unavailable'){st.textContent=t('upd.unavailable','版本检查暂不可用');return}
+  if(v.status==='up_to_date'){st.textContent=t('upd.uptodate','已是最新版本');return}
+  if(v.status==='update_available'&&v.latest){
+    st.appendChild(document.createTextNode(t('upd.latest','最新版: {lat} ',{lat:v.latest.version||'?'})+' · '));
+    if(safeReleaseUrl(v.latest.url)){
+      const a=document.createElement('a');a.href=v.latest.url;a.target='_blank';a.rel='noopener noreferrer';
+      a.textContent=t('upd.view','查看更新说明');st.appendChild(a)
+    }
+  }
+}
+async function loadVersion(refresh){
+  try{
+    VERSION_INFO=await api('/api/version'+(refresh?'?refresh=true':''));
+    UPDATE_DISMISSED=false; // 新结果重置关闭态:刷新/重登/重新检查后,提示条可再次出现
+    renderUpdateBanner();renderVersionCard()
+  }catch(e){
+    // 刷新失败:必须隐藏旧 banner,避免继续虚假宣称仍有更新;版本卡片仍温和降级
+    const bar=document.getElementById('updateBanner');if(bar)bar.style.display='none';
+    renderVersionCard(true)
+  }
+}
+function checkUpdate(){const st=document.getElementById('setVerStatus');if(st)st.textContent=t('upd.checking','检查中…');loadVersion(true)}
+function dismissUpdate(){UPDATE_DISMISSED=true;renderUpdateBanner()}
+
 async function init(){
   bindDelegation();
   ensureTermFontLoaded();
@@ -4381,7 +4450,7 @@ async function init(){
   COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
     for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
   });
-  connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();
+  connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();loadVersion();
 }
 init();
 </script>

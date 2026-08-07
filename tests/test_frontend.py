@@ -1768,3 +1768,99 @@ def test_launch_modal_worktree_preview_and_source_fix():
     assert "launchRefreshName" not in preview
     # H5 media CSS:提示占整行,不新增横向溢出
     assert "#lnWorktreePreview{grid-column:1 / -1}" in HTML
+
+
+# ============ U1a: 升级提示 UI ============
+
+def test_update_banner_present_above_views():
+    """提示条在 </header> 之后、首个视图之前:所有视图可见。"""
+    assert 'id="updateBanner"' in HTML
+    assert 'class="update-banner"' in HTML
+    assert 'id="updateBannerText"' in HTML
+    assert HTML.index("</header>") < HTML.index('id="updateBanner"')
+    assert HTML.index('id="updateBanner"') < HTML.index('id="view-board"')
+
+
+def test_settings_version_card_present():
+    """设置页始终显示当前版本 + 检查更新按钮 + 状态位。"""
+    assert 'data-i18n="upd.card"' in HTML
+    assert 'id="setVerCur"' in HTML
+    assert 'id="setVerStatus"' in HTML
+    assert 'onclick="checkUpdate()"' in HTML
+
+
+def test_release_url_whitelist_is_strict():
+    """Release URL 不可信:safeReleaseUrl 必须 https + github.com + 官方 releases 前缀。"""
+    js = _inline_js()
+    assert "function safeReleaseUrl" in js
+    assert "protocol==='https:'" in js
+    assert "hostname==='github.com'" in js
+    assert "'/fyc0451/agent-cockpit/releases/'" in js
+
+
+def test_no_upgrade_executor_button():
+    """本批无升级执行器:严禁'立即升级'等误导已可升级的按钮/文案。"""
+    for bad in ["立即升级", "立即更新", "upgrade now", "Upgrade now",
+                "install now", "Install now", "一键升级"]:
+        assert bad not in HTML, f"出现禁止的升级执行按钮/文案: {bad}"
+
+
+def test_version_strings_escape_via_textcontent():
+    """恶意 name/version 必须经 textContent/createTextNode,绝不 innerHTML 不可信值。"""
+    js = _inline_js()
+    assert "updateBannerText').textContent" in js
+    assert "cur.textContent=(v.current&&v.current.version)" in js
+    assert "createTextNode" in js
+    assert "innerHTML=latest" not in js
+    assert "innerHTML=v.latest" not in js
+
+
+def test_version_endpoint_called_with_refresh():
+    js = _inline_js()
+    assert "/api/version" in js
+    assert "?refresh=true" in js
+
+
+def test_three_states_handled_in_version_card():
+    """up_to_date / update_available / unavailable 三状态在版本卡片都有对应分支。"""
+    js = _inline_js()
+    assert "'up_to_date'" in js
+    assert "'update_available'" in js
+    assert "'unavailable'" in js
+
+
+def test_update_i18n_en_and_ja():
+    """en/ja 字典都补了 upd 词条(zh 走 t() 第二参数)。"""
+    assert "'upd.banner':'Update available" in HTML
+    assert "'upd.banner':'新バージョンがあります" in HTML
+    assert "'upd.view':'Release notes'" in HTML
+    assert "'upd.view':'リリースノート'" in HTML
+
+
+def test_update_banner_dismissible_and_reshows():
+    """提示条可关闭;刷新/重新检查后可再次出现(UPDATE_DISMISSED 在 loadVersion 重置)。"""
+    js = _inline_js()
+    assert 'onclick="dismissUpdate()"' in HTML
+    assert "function dismissUpdate" in js
+    assert "UPDATE_DISMISSED=false" in js
+    # dismissUpdate/checkUpdate 无参,不含 ${ 不可信插值
+    assert re.search(r'onclick="dismissUpdate\([^)]*\$\{', HTML) is None
+    assert re.search(r'onclick="checkUpdate\([^)]*\$\{', HTML) is None
+
+
+def test_update_banner_css_wraps_on_mobile():
+    """提示条 flex-wrap,桌面与 H5 均不横向溢出。"""
+    idx = HTML.index(".update-banner")
+    assert "flex-wrap" in HTML[idx:idx + 200]
+
+
+def test_load_version_failure_hides_stale_banner():
+    """复审 blocker:刷新失败必须隐藏旧 banner,不虚假宣称仍有更新;
+    版本卡片仍温和降级(renderVersionCard(true))。"""
+    js = _inline_js()
+    start = js.index("async function loadVersion")
+    body = js[start:js.index("function checkUpdate")]
+    catch = body[body.index("catch"):]
+    assert "updateBanner" in catch             # 失败路径触及 banner
+    assert "display='none'" in catch           # 并隐藏它
+    assert "renderVersionCard(true)" in catch  # 版本卡片仍温和降级
