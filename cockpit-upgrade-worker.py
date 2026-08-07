@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """服务外升级执行器入口。
 
-由 upgrade_core.spawn_worker 以 start_new_session 启动，脱离 Cockpit 进程组。
+由 upgrade_core.spawn_worker 以 start_new_session / systemd-run / LaunchAgent oneshot 启动。
 不要在 server 进程内 import 后同步执行升级主路径。
 """
 from __future__ import annotations
@@ -38,7 +38,14 @@ def main(argv: list[str] | None = None) -> int:
             st["rollback_requested"] = True
             upgrade_core.write_state(st)
 
-    return upgrade_core.run_job(args.job_id, install_dir=install)
+    try:
+        return upgrade_core.run_job(args.job_id, install_dir=install)
+    finally:
+        # macOS oneshot：job 结束后 bootout 唯一 label 并删除 plist
+        try:
+            upgrade_core.cleanup_darwin_upgrade_job()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

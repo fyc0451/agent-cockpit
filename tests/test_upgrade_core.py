@@ -366,28 +366,14 @@ def test_api_maps_error_codes_without_secrets(install_tree, monkeypatch):
 
 
 def test_preflight_supervisor_no_bus(install_tree, monkeypatch):
-    """bus 不可达且无 KillMode/direct → fail closed。"""
+    """bus 不可达 → fail closed（不得因 KillMode/文件存在而 PASS）。"""
     upgrade_core.clear_hooks()
     upgrade_core.configure_hooks(skip_venv_check=lambda: True)
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
     monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
-    monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: False)
-    monkeypatch.setattr(upgrade_core, "_direct_control_ready", lambda: False)
-    with pytest.raises(ValueError, match="precheck_supervisor"):
-        upgrade_core.preflight_supervisor()
-
-
-def test_preflight_supervisor_bus_down_needs_direct_control(install_tree, monkeypatch):
-    """bus 不可达：仅 KillMode 不够，必须 direct stop/restart 就绪才 PASS。"""
-    upgrade_core.clear_hooks()
-    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
-    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
     monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: True)
-    monkeypatch.setattr(upgrade_core, "_direct_control_ready", lambda: False)
     with pytest.raises(ValueError, match="precheck_supervisor"):
         upgrade_core.preflight_supervisor()
-    monkeypatch.setattr(upgrade_core, "_direct_control_ready", lambda: True)
-    upgrade_core.preflight_supervisor()  # KillMode + direct → PASS
 
 
 def test_sha_must_be_40_hex(install_tree):
@@ -751,46 +737,63 @@ def test_r4_spawn_passes_rollback_only_flag(install_tree, monkeypatch):
     assert seen["env"].get("COCKPIT_PORT") == "9876"
 
 
-# ── R5–R8 第三轮发布阻断回归 ────────────────────────────────────
+# ── R5–R8 第三轮 / 第四轮发布阻断回归 ──────────────────────────
 
 
-def test_r5_bus_down_stop_restart_use_direct_not_systemctl(install_tree, monkeypatch):
-    """R5：bus 不可用时 stop/restart 必须走 direct，不能只打 systemctl。"""
+def test_r5_bus_down_fail_closed_no_direct_kill(install_tree, monkeypatch):
+    """R5：bus 不可达时 preflight/stop/restart 均 fail-closed，禁止 direct kill。
+
+    模拟 systemd Restart=always：即使 PID 可 kill，也不允许绕过 supervisor。
+    """
     upgrade_core.clear_hooks()
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
     monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
-    calls: list[str] = []
+    kills: list[int] = []
 
-    def stop_direct():
-        calls.append("stop_direct")
+    def boom_kill(pid, sig=None):
+        kills.append(pid)
+        raise AssertionError("must not kill under bus-down")
 
-    def restart_direct():
-        calls.append("restart_direct")
-
-    monkeypatch.setattr(upgrade_core, "_stop_cockpit_direct", stop_direct)
-    monkeypatch.setattr(upgrade_core, "_restart_cockpit_direct", restart_direct)
-
-    def boom_systemctl(*a, **k):
-        raise AssertionError("systemctl must not be used when bus down")
-
-    monkeypatch.setattr(upgrade_core.subprocess, "run", boom_systemctl)
-    upgrade_core.stop_cockpit_for_restore()
-    upgrade_core.restart_cockpit_only()
-    assert calls == ["stop_direct", "restart_direct"]
+    monkeypatch.setattr(os, "kill", boom_kill)
+    monkeypatch.setattr(upgrade_core, "_find_cockpit_pids", lambda: [2454415])
+    with pytest.raises(ValueError, match="precheck_supervisor"):
+        upgrade_core.preflight_supervisor()
+    with pytest.raises(ValueError, match="stop_failed"):
+        upgrade_core.stop_cockpit_for_restore()
+    with pytest.raises(ValueError, match="restart_failed"):
+        upgrade_core.restart_cockpit_only()
+    assert kills == [], kills
 
 
-def test_r5_preflight_pass_implies_stop_path_exists(install_tree, monkeypatch):
-    """R5：preflight PASS 的 bus-down 路径与 stop 回退一致（direct ready）。"""
+def test_r5_supervisor_respawn_scenario_documented(install_tree, monkeypatch):
+    """R5：PID 被 supervisor 自动重生时，orphan kill 无法形成稳定窗口 → stop_failed。
+
+    生产路径在 bus-down 时 fail-closed，根本不会进入 orphan kill。
+    """
     upgrade_core.clear_hooks()
-    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
-    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
-    monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: True)
-    monkeypatch.setattr(upgrade_core, "_direct_control_ready", lambda: True)
-    upgrade_core.preflight_supervisor()
-    seen = []
-    monkeypatch.setattr(upgrade_core, "_stop_cockpit_direct", lambda: seen.append("ok"))
-    upgrade_core.stop_cockpit_for_restore()
-    assert seen == ["ok"]
+    live = {"pid": 100}
+
+    def find():
+        return [live["pid"]] if live["pid"] else []
+
+    def fake_kill(pid, sig=None):
+        # 模拟 systemd Restart=always：杀后立刻新 PID
+        live["pid"] = pid + 1
+
+    monkeypatch.setattr(upgrade_core, "_find_cockpit_pids", find)
+    monkeypatch.setattr(upgrade_core, "_foreign_listener_on_port", lambda: False)
+    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(upgrade_core.time, "sleep", lambda s: None)
+    # 压缩等待：把 deadline 用 time.time 快进
+    t0 = {"n": 0.0}
+
+    def fake_time():
+        t0["n"] += 5.0  # 每次调用推进，快速超过 12s 窗口
+        return t0["n"]
+
+    monkeypatch.setattr(upgrade_core.time, "time", fake_time)
+    with pytest.raises(ValueError, match="stop_failed"):
+        upgrade_core._stop_orphaned_cockpit_pids()
 
 
 def test_r6_concurrent_reconcile_single_rollback_spawn(install_tree):
@@ -929,7 +932,7 @@ def test_r8_darwin_preflight_requires_main_label(install_tree, monkeypatch):
 
 
 def test_r8_darwin_stop_not_loaded_but_pid_alive_fails(install_tree, monkeypatch):
-    """R8：bootout 报 not loaded 但进程仍活 → stop_failed（不得假成功）。"""
+    """R8：bootout 报 not loaded 但本安装进程仍活且杀不掉 → stop_failed。"""
     upgrade_core.clear_hooks()
     monkeypatch.setattr(upgrade_core.sys, "platform", "darwin")
 
@@ -942,13 +945,34 @@ def test_r8_darwin_stop_not_loaded_but_pid_alive_fails(install_tree, monkeypatch
 
     monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
     monkeypatch.setattr(upgrade_core, "_find_cockpit_pids", lambda: [4242])
-
-    def boom_direct():
-        raise ValueError("stop_failed")
-
-    monkeypatch.setattr(upgrade_core, "_stop_cockpit_direct", boom_direct)
+    monkeypatch.setattr(upgrade_core, "_foreign_listener_on_port", lambda: False)
+    monkeypatch.setattr(os, "kill", lambda *a, **k: None)  # kill 无效，PID 仍在
     with pytest.raises(ValueError, match="stop_failed"):
         upgrade_core.stop_cockpit_for_restore()
+
+
+def test_r8_find_pids_requires_cwd_and_server_py(install_tree, monkeypatch):
+    """R8：同端口异进程不得进入 kill 列表；必须 cwd+command 核验。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core, "INSTALL_DIR", install_tree["root"])
+    monkeypatch.setattr(upgrade_core, "_listen_pids_on_port", lambda port: [111, 222])
+    monkeypatch.setattr(
+        upgrade_core,
+        "_pid_command",
+        lambda pid: "python server.py" if pid == 111 else "nginx: master",
+    )
+    monkeypatch.setattr(
+        upgrade_core,
+        "_pid_cwd",
+        lambda pid: str(install_tree["root"]) if pid == 111 else "/other/app",
+    )
+    # force non-/proc path
+    monkeypatch.setattr(upgrade_core.sys, "platform", "darwin")
+    ours = upgrade_core._find_cockpit_pids()
+    assert ours == [111]
+    assert upgrade_core._foreign_listener_on_port() is True
+    with pytest.raises(ValueError, match="stop_failed"):
+        upgrade_core._stop_orphaned_cockpit_pids()
 
 
 def test_r8_darwin_oneshot_env_and_cleanup_on_fail(install_tree, monkeypatch, tmp_path):
@@ -1012,3 +1036,59 @@ def test_r8_darwin_oneshot_env_and_cleanup_on_fail(install_tree, monkeypatch, tm
     )
     assert pid2 == -1
     assert "ok" in bootstraps
+    # 成功路径保留 plist 供 worker 结束清理
+    left_ok = list(la.glob("*.plist"))
+    assert len(left_ok) == 1
+    text = left_ok[0].read_text(encoding="utf-8")
+    assert "COCKPIT_UPGRADE_LAUNCHD_LABEL" in text
+    assert "COCKPIT_UPGRADE_LAUNCHD_PLIST" in text
+
+
+def test_r8_darwin_oneshot_fail_no_setsid_fallback(install_tree, monkeypatch):
+    """R8：Darwin oneshot 失败必须 spawn_failed，禁止 start_new_session 回退。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        upgrade_core, "_spawn_darwin_launchd_oneshot", lambda *a, **k: None
+    )
+    popen_calls: list = []
+
+    class FakePopen:
+        def __init__(self, *a, **k):
+            popen_calls.append(1)
+            self.pid = 1
+
+    monkeypatch.setattr(upgrade_core.subprocess, "Popen", FakePopen)
+    with pytest.raises(RuntimeError, match="spawn_failed"):
+        upgrade_core.spawn_worker(
+            "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "x.log",
+        )
+    assert popen_calls == []
+
+
+def test_r8_cleanup_darwin_upgrade_job(install_tree, monkeypatch, tmp_path):
+    """R8：worker 结束 cleanup 会 bootout label 并删除 plist。"""
+    upgrade_core.clear_hooks()
+    home = tmp_path / "h"
+    la = home / "Library" / "LaunchAgents"
+    la.mkdir(parents=True)
+    plist = la / "io.github.fyc0451.agent-cockpit.upgrade.abc.plist"
+    plist.write_text("<plist/>\n", encoding="utf-8")
+    monkeypatch.setenv("COCKPIT_UPGRADE_LAUNCHD_LABEL", "io.github.fyc0451.agent-cockpit.upgrade.abc")
+    monkeypatch.setenv("COCKPIT_UPGRADE_LAUNCHD_PLIST", str(plist))
+    bootouts: list = []
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        if list(cmd)[:2] == ["launchctl", "bootout"]:
+            bootouts.append(list(cmd))
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    upgrade_core.cleanup_darwin_upgrade_job()
+    assert bootouts
+    assert "upgrade.abc" in bootouts[0][-1]
+    assert not plist.exists()

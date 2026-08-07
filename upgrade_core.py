@@ -639,15 +639,6 @@ def _worker_env() -> dict[str, str]:
     return env
 
 
-def _direct_control_ready() -> bool:
-    """bus 不可用时的直接 PID 控制：可执行文件与 server.py 必须存在。"""
-    if "direct_control_ready" in _hooks:
-        return bool(_hooks["direct_control_ready"]())
-    py = INSTALL_DIR / VENV_LIVE / "bin" / "python"
-    server = INSTALL_DIR / "server.py"
-    return py.is_file() and server.is_file()
-
-
 def _user_systemd_bus_ok() -> bool:
     if "user_systemd_bus_ok" in _hooks:
         return bool(_hooks["user_systemd_bus_ok"]())
@@ -668,37 +659,70 @@ def _user_systemd_bus_ok() -> bool:
     return True
 
 
-def _find_cockpit_pids() -> list[int]:
-    """定位安装目录内的 Cockpit 主进程（server.py）。"""
-    if "find_cockpit_pids" in _hooks:
-        return [int(p) for p in _hooks["find_cockpit_pids"]()]
-    install = str(INSTALL_DIR.resolve())
-    found: list[int] = []
-    # Linux /proc 扫描
-    proc = Path("/proc")
-    if proc.is_dir():
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                raw = (entry / "cmdline").read_bytes()
-                cmd = raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore")
-                if "server.py" not in cmd:
-                    continue
-                try:
-                    cwd = os.readlink(entry / "cwd")
-                except OSError:
-                    cwd = ""
-                if cwd == install or install in cmd or str(INSTALL_DIR) in cmd:
-                    found.append(int(entry.name))
-            except OSError:
-                continue
-        if found:
-            return sorted(set(found))
-    # macOS / 通用：lsof 按监听端口
+def _pid_command(pid: int) -> str:
+    if "pid_command" in _hooks:
+        return str(_hooks["pid_command"](pid) or "")
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+    except OSError:
+        pass
+    try:
+        r = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        return (r.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _pid_cwd(pid: int) -> str:
+    if "pid_cwd" in _hooks:
+        return str(_hooks["pid_cwd"](pid) or "")
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        pass
     if shutil.which("lsof"):
         r = subprocess.run(
-            ["lsof", f"-iTCP:{_cockpit_port()}", "-sTCP:LISTEN", "-t"],
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        for line in (r.stdout or "").splitlines():
+            if line.startswith("n"):
+                return line[1:].strip()
+    return ""
+
+
+def _pid_is_our_cockpit(pid: int) -> bool:
+    """与 launchd.sh stop_legacy_listener 一致：cwd=INSTALL_DIR 且 command 含 server.py。"""
+    install = str(INSTALL_DIR.resolve())
+    cmd = _pid_command(pid)
+    cwd = _pid_cwd(pid)
+    if "server.py" not in cmd:
+        return False
+    if not cwd:
+        return False
+    try:
+        return Path(cwd).resolve() == Path(install).resolve()
+    except OSError:
+        return cwd == install or cwd.rstrip("/") == install.rstrip("/")
+
+
+def _listen_pids_on_port(port: int) -> list[int]:
+    if "listen_pids_on_port" in _hooks:
+        return [int(p) for p in _hooks["listen_pids_on_port"](port)]
+    found: list[int] = []
+    if shutil.which("lsof"):
+        r = subprocess.run(
+            ["lsof", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
             capture_output=True,
             text=True,
             check=False,
@@ -711,13 +735,53 @@ def _find_cockpit_pids() -> list[int]:
     return sorted(set(found))
 
 
-def _stop_cockpit_direct() -> None:
-    """不依赖 user bus：SIGTERM/SIGKILL 安装目录内 server.py。"""
+def _find_cockpit_pids() -> list[int]:
+    """仅返回本安装目录 Cockpit 主进程；绝不把同端口异进程当目标。"""
+    if "find_cockpit_pids" in _hooks:
+        return [int(p) for p in _hooks["find_cockpit_pids"]()]
+    install = str(INSTALL_DIR.resolve())
+    found: list[int] = []
+    # Linux /proc：cwd + server.py
+    proc = Path("/proc")
+    if proc.is_dir() and sys.platform != "darwin":
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                pid = int(entry.name)
+            except ValueError:
+                continue
+            if _pid_is_our_cockpit(pid):
+                found.append(pid)
+        return sorted(set(found))
+    # macOS / 其它：端口候选后再核验 cwd+command（对齐 launchd.sh）
+    for pid in _listen_pids_on_port(_cockpit_port()):
+        if _pid_is_our_cockpit(pid):
+            found.append(pid)
+    return sorted(set(found))
+
+
+def _foreign_listener_on_port() -> bool:
+    """同端口有监听但不属于本 INSTALL_DIR/server.py。"""
+    ours = set(_find_cockpit_pids())
+    for pid in _listen_pids_on_port(_cockpit_port()):
+        if pid not in ours and not _pid_is_our_cockpit(pid):
+            return True
+    return False
+
+
+def _stop_orphaned_cockpit_pids() -> None:
+    """仅用于 macOS launchd 未加载时的孤儿进程；必须先 cwd+command 核验。
+
+    禁止用于 Linux systemd Restart=always 场景（bus 不可达时应 fail-closed）。
+    """
     import signal as _signal
 
+    if _foreign_listener_on_port():
+        raise ValueError("stop_failed")
     pids = _find_cockpit_pids()
     if not pids:
-        return  # 已无主进程
+        return
     for pid in pids:
         try:
             os.kill(pid, _signal.SIGTERM)
@@ -734,40 +798,16 @@ def _stop_cockpit_direct() -> None:
         except ProcessLookupError:
             pass
     time.sleep(0.3)
-    if _find_cockpit_pids():
+    if _find_cockpit_pids() or _foreign_listener_on_port():
         raise ValueError("stop_failed")
-
-
-def _restart_cockpit_direct() -> None:
-    """不依赖 user bus：停旧进程后 start_new_session 拉起 .venv python server.py。"""
-    _stop_cockpit_direct()
-    py = INSTALL_DIR / VENV_LIVE / "bin" / "python"
-    server = INSTALL_DIR / "server.py"
-    if not py.is_file() or not server.is_file():
-        raise ValueError("restart_failed")
-    log_path = INSTALL_DIR / "agent-cockpit.direct.log"
-    log_fh = open(log_path, "a", encoding="utf-8")
-    try:
-        subprocess.Popen(
-            [str(py), str(server)],
-            cwd=str(INSTALL_DIR),
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=_worker_env(),
-        )
-    finally:
-        log_fh.close()
 
 
 def preflight_supervisor() -> None:
     """改代码前验证控制通道；失败 fail closed。
 
-    Linux：优先 user systemd bus；bus 不可达时必须同时具备
-    KillMode=process（worker 不随主进程被杀）与可验证的 direct stop/restart
-    （.venv/python + server.py），否则 fail-closed——绝不能 preflight PASS 后必失败。
+    Linux：必须 user systemd bus 可用，才能 systemctl stop/restart 控制
+    Restart=always 的 unit。bus 不可达时 fail-closed——禁止 direct kill
+    （会被 systemd 自动拉起，且可能再启动脱离 unit 的重复实例）。
     macOS：核验主 service label 可 print，且 launchd.sh / plist 存在。
     """
     if "preflight_supervisor" in _hooks:
@@ -794,11 +834,8 @@ def preflight_supervisor() -> None:
         if not (INSTALL_DIR / "agent-cockpit.plist").is_file():
             raise ValueError("precheck_supervisor")
         return
-    # Linux
+    # Linux：仅 bus 可用才放行
     if _user_systemd_bus_ok():
-        return
-    # bus 不可达：仅当 KillMode=process 且 direct control 就绪才放行
-    if _unit_file_killmode_process() and _direct_control_ready():
         return
     raise ValueError("precheck_supervisor")
 
@@ -1037,35 +1074,21 @@ def stop_cockpit_for_restore() -> None:
         )
         if r.returncode != 0 and not not_loaded:
             raise ValueError("stop_failed")
-        # label 不存在时不得直接当成功：手动启动的 server 可能仍在监听
-        if r.returncode != 0 and not_loaded:
-            if _find_cockpit_pids():
-                _stop_cockpit_direct()
-            return
-        # bootout 成功后仍可能有残留：再清 PID
-        if _find_cockpit_pids():
-            _stop_cockpit_direct()
+        # bootout 成功或 label 未加载：仅清本安装目录孤儿；异进程占端口 fail-closed
+        _stop_orphaned_cockpit_pids()
         return
-    # Linux：优先 systemctl；bus 失败或 stop 失败时走 direct PID（与 preflight 闭环）
-    if _user_systemd_bus_ok() and shutil.which("systemctl"):
-        r = subprocess.run(
-            ["systemctl", "--user", "stop", "agent-cockpit.service"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-        if r.returncode == 0:
-            return
-        err = (r.stderr or "") + (r.stdout or "")
-        if "Failed to connect" not in err and "No such file" not in err:
-            # unit 真失败：仍尝试 direct，再不行 raise
-            try:
-                _stop_cockpit_direct()
-                return
-            except ValueError:
-                raise ValueError("stop_failed") from None
-    _stop_cockpit_direct()
+    # Linux：必须 bus + systemctl；禁止 direct kill（Restart=always 会重生）
+    if not _user_systemd_bus_ok() or not shutil.which("systemctl"):
+        raise ValueError("stop_failed")
+    r = subprocess.run(
+        ["systemctl", "--user", "stop", "agent-cockpit.service"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if r.returncode != 0:
+        raise ValueError("stop_failed")
 
 
 def restart_cockpit_only() -> None:
@@ -1084,25 +1107,18 @@ def restart_cockpit_only() -> None:
         if r.returncode != 0:
             raise ValueError("restart_failed")
         return
-    if _user_systemd_bus_ok() and shutil.which("systemctl"):
-        r = subprocess.run(
-            ["systemctl", "--user", "restart", "agent-cockpit.service"],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=60,
-        )
-        if r.returncode == 0:
-            return
-        err = (r.stderr or "") + (r.stdout or "")
-        if "Failed to connect" not in err and "No such file" not in err:
-            try:
-                _restart_cockpit_direct()
-                return
-            except ValueError:
-                raise ValueError("restart_failed") from None
-    _restart_cockpit_direct()
-
+    # Linux：必须 bus + systemctl；禁止脱离 unit 的 Popen 重启
+    if not _user_systemd_bus_ok() or not shutil.which("systemctl"):
+        raise ValueError("restart_failed")
+    r = subprocess.run(
+        ["systemctl", "--user", "restart", "agent-cockpit.service"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    if r.returncode != 0:
+        raise ValueError("restart_failed")
 
 def health_check(*, timeout_s: float = HEALTH_TIMEOUT_S) -> bool:
     if "health_check" in _hooks:
@@ -1283,8 +1299,8 @@ def merge_spawn_identity(job_id: str, spawn_pid: int | None) -> dict[str, Any]:
     return latest
 
 
-def _cleanup_darwin_oneshot(service: str, plist_path: Path) -> None:
-    """临时 upgrade job/plist：失败必清；成功路径只卸文件，job 由下次 bootout 回收。"""
+def _cleanup_darwin_oneshot(service: str, plist_path: Path | None) -> None:
+    """临时 upgrade job + plist 一并清除。"""
     try:
         subprocess.run(
             ["launchctl", "bootout", service],
@@ -1294,10 +1310,22 @@ def _cleanup_darwin_oneshot(service: str, plist_path: Path) -> None:
         )
     except Exception:
         pass
-    try:
-        plist_path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    if plist_path is not None:
+        try:
+            plist_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def cleanup_darwin_upgrade_job() -> None:
+    """worker 正常/异常结束后调用：bootout 本 oneshot label 并删除 plist。"""
+    label = os.environ.get("COCKPIT_UPGRADE_LAUNCHD_LABEL") or ""
+    plist = os.environ.get("COCKPIT_UPGRADE_LAUNCHD_PLIST") or ""
+    if not label:
+        return
+    domain = f"gui/{os.getuid()}"
+    service = f"{domain}/{label}"
+    _cleanup_darwin_oneshot(service, Path(plist) if plist else None)
 
 
 def _spawn_darwin_launchd_oneshot(
@@ -1306,7 +1334,11 @@ def _spawn_darwin_launchd_oneshot(
     log_path: Path,
     extra: list[str],
 ) -> int | None:
-    """macOS：临时 oneshot LaunchAgent；失败 fail-closed 并清理 plist/job。"""
+    """macOS：临时 oneshot LaunchAgent。
+
+    失败：bootout+删 plist 后返回 None（调用方 fail-closed，禁止 setsid 回退）。
+    成功：保留 plist，经 env 交给 worker 结束后 cleanup_darwin_upgrade_job。
+    """
     if not shutil.which("launchctl"):
         return None
     label = f"{DARWIN_MAIN_LABEL}.upgrade.{job_id}"
@@ -1338,13 +1370,16 @@ def _spawn_darwin_launchd_oneshot(
     ]
     args_xml = "\n".join(f"    <string>{_xml(a)}</string>" for a in args)
     wenv = _worker_env()
+    env_pairs = (
+        ("PYTHONUNBUFFERED", "1"),
+        ("COCKPIT_HOST", wenv.get("COCKPIT_HOST", "127.0.0.1")),
+        ("COCKPIT_PORT", wenv.get("COCKPIT_PORT", "8790")),
+        ("COCKPIT_UPGRADE_LAUNCHD_LABEL", label),
+        ("COCKPIT_UPGRADE_LAUNCHD_PLIST", str(plist_path)),
+    )
     env_xml = "\n".join(
         f"    <key>{_xml(k)}</key>\n    <string>{_xml(str(v))}</string>"
-        for k, v in (
-            ("PYTHONUNBUFFERED", "1"),
-            ("COCKPIT_HOST", wenv.get("COCKPIT_HOST", "127.0.0.1")),
-            ("COCKPIT_PORT", wenv.get("COCKPIT_PORT", "8790")),
-        )
+        for k, v in env_pairs
     )
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1376,7 +1411,6 @@ def _spawn_darwin_launchd_oneshot(
     try:
         plist_path.write_text(body, encoding="utf-8")
         os.chmod(plist_path, 0o600)
-        # 先清旧 job
         subprocess.run(
             ["launchctl", "bootout", service],
             capture_output=True,
@@ -1394,11 +1428,7 @@ def _spawn_darwin_launchd_oneshot(
             logger.info("launchctl bootstrap upgrade worker failed rc=%s", r.returncode)
             _cleanup_darwin_oneshot(service, plist_path)
             return None
-        # 成功：plist 文件可删（job 已注册）；不 bootout，否则杀 worker
-        try:
-            plist_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # 成功：保留 plist 至 worker 结束 cleanup；不 bootout
         return -1
     except Exception as exc:
         logger.info("darwin oneshot spawn failed type=%s", type(exc).__name__)
@@ -1419,15 +1449,14 @@ def spawn_worker(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     extra = ["--rollback-only"] if rollback_only else []
     wenv = _worker_env()
-    # macOS：优先独立 oneshot LaunchAgent（主服务 restart/bootout 不会杀它）
+    # macOS：必须 oneshot LaunchAgent；失败 fail-closed，禁止 setsid 回退
     if sys.platform == "darwin":
         pid = _spawn_darwin_launchd_oneshot(job_id, install_dir, log_path, extra)
         if pid is not None:
             return int(pid)
-        # oneshot 失败：setsid 回退仍传完整 env
-        logger.info("darwin oneshot unavailable; fallback start_new_session")
-    # Linux：优先 systemd-run --user 独立 unit（KillMode=process）；显式 setenv health 目标
-    if sys.platform != "darwin" and shutil.which("systemd-run") and _user_systemd_bus_ok():
+        raise RuntimeError("spawn_failed")
+    # Linux：优先 systemd-run --user；显式 setenv health 目标
+    if shutil.which("systemd-run") and _user_systemd_bus_ok():
         unit = f"agent-cockpit-upgrade-{job_id}"
         cmd = [
             "systemd-run",
@@ -1436,7 +1465,7 @@ def spawn_worker(
             unit,
             "--collect",
             "--property=KillMode=process",
-            f"--setenv=PYTHONUNBUFFERED=1",
+            "--setenv=PYTHONUNBUFFERED=1",
             f"--setenv=COCKPIT_HOST={wenv.get('COCKPIT_HOST', '127.0.0.1')}",
             f"--setenv=COCKPIT_PORT={wenv.get('COCKPIT_PORT', '8790')}",
             sys.executable,
@@ -1451,7 +1480,7 @@ def spawn_worker(
         if r.returncode == 0:
             return -1
         logger.info("systemd-run failed rc=%s", r.returncode)
-    # 回退：setsid 独立 session（Cockpit unit 须 KillMode=process；bus 下由 systemctl 控主进程）
+    # Linux 回退：setsid（仅 bus 可用时 preflight 已放行；KillMode=process 保 worker）
     log_fh = open(log_path, "a", encoding="utf-8")
     try:
         proc = subprocess.Popen(
