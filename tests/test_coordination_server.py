@@ -189,3 +189,55 @@ def test_shared_hub_response_cannot_trigger_local_agent_actions(
     assert "仅作为只读数据处理" in body["coordination"]["warnings"][0]
     assert pane_calls == []
     assert coordination.receipt(str(tmp_path), "kimi-main", 74) is None
+
+
+def test_messages_cleanup_batches_hub_delete(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.db, "_rows",
+        lambda _sql, _params: [{"id": i} for i in range(1, 1201)],
+    )
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        def __init__(self, n):
+            self._n = n
+
+        def json(self):
+            return {"deleted_count": self._n}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json["message_ids"])
+        return _Resp(len(json["message_ids"]))
+
+    monkeypatch.setattr(server.httpx, "post", fake_post)
+
+    response = TestClient(server.app).post(
+        "/api/messages/cleanup", headers={"authorization": "Bearer secret"},
+        json={"project_id": 1, "older_than_days": 30},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": 1200}
+    assert [len(batch) for batch in calls] == [500, 500, 200]
+
+
+def test_messages_cleanup_rejects_bad_days_and_empty_set(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    bad = client.post(
+        "/api/messages/cleanup", headers={"authorization": "Bearer secret"},
+        json={"project_id": 1, "older_than_days": 0},
+    )
+    assert bad.status_code == 400
+
+    monkeypatch.setattr(server.db, "_rows", lambda _sql, _params: [])
+    empty = client.post(
+        "/api/messages/cleanup", headers={"authorization": "Bearer secret"},
+        json={"project_id": 1, "older_than_days": 30},
+    )
+    assert empty.status_code == 200
+    assert empty.json() == {"deleted": 0}

@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 import db
+import httpx
 import coordination
 import hub_client
 import herdr_client
@@ -396,6 +397,11 @@ class AckReq(BaseModel):
     project_id: int
     agent_name: str
     message_id: int
+
+
+class MessageCleanupReq(BaseModel):
+    project_id: int
+    older_than_days: int = 30
 
 
 class StartTaskReq(BaseModel):
@@ -1023,6 +1029,41 @@ def api_send(req: SendMessageReq):
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"发送失败: {e}")
+
+
+@app.post("/api/messages/cleanup")
+def api_messages_cleanup(req: MessageCleanupReq):
+    """删除某项目 N 天前的消息(经 Hub 删除接口,含 git 归档与级联)。"""
+    if req.older_than_days < 1 or req.older_than_days > 3650:
+        raise HTTPException(400, "older_than_days 须在 1-3650 之间")
+    rows = db._rows(
+        "SELECT id FROM messages WHERE project_id = ? "
+        "AND created_ts < datetime('now', ?)",
+        (req.project_id, f"-{req.older_than_days} days"),
+    )
+    ids = [int(r["id"]) for r in rows]
+    if not ids:
+        return {"deleted": 0}
+    deleted = 0
+    # Hub 删除接口单批上限 500
+    for i in range(0, len(ids), 500):
+        batch = ids[i:i + 500]
+        try:
+            resp = httpx.post(
+                f"{hub_client.HUB}/mail/api/delete-messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {hub_client.TOKEN}",
+                },
+                json={"message_ids": batch},
+                timeout=30,
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Hub 不可达: {exc.__class__.__name__}")
+        if resp.status_code != 200:
+            raise HTTPException(resp.status_code, f"Hub 删除失败: {resp.text[:200]}")
+        deleted += int(resp.json().get("deleted_count", 0))
+    return {"deleted": deleted}
 
 
 @app.post("/api/ack")

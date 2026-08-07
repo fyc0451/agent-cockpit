@@ -1551,3 +1551,15 @@ def test_settings_hub_error_shows_actionable_fix():
     assert "chmod 600 ~/.agent-mail/client.env" in hub
     assert "点击本页“保存”或重启 Cockpit" in hub
     assert "hubStatus.appendChild(hint)" in hub
+
+
+def test_messages_page_agent_filter_and_cleanup():
+    # 点 agent = 查看其消息(不再填表单),带发出/收到徽标与清除入口
+    assert 'data-action="viewAgent"' in HTML
+    assert "pickRecipient" not in HTML
+    assert "msg-filter-bar" in HTML
+    assert "clearMsgFilter" in HTML
+    assert "dir-out" in HTML and "dir-in" in HTML
+    # 消息清理按钮走 /api/messages/cleanup
+    assert "cleanupMsgs()" in HTML
+    assert "/api/messages/cleanup" in HTML
