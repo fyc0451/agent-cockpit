@@ -154,6 +154,10 @@ header .spacer{flex:1}
 .editor-area textarea{flex:1;border:none;border-radius:0;background:var(--bg);font-size:13px;tab-size:2}
 .editor-bar{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:12px}
 .editor-bar .ep{flex:1;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.media-view{flex:1;overflow:auto;padding:16px;display:flex;align-items:flex-start;justify-content:center}
+.media-view img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px}
+.media-view video{max-width:100%;max-height:100%;border-radius:8px;background:#000}
+.media-view audio{width:100%;margin-top:24px}
 
 /* 消息 view */
 .msgs-view{flex-direction:column;overflow:hidden}
@@ -584,7 +588,7 @@ header .spacer{flex:1}
   <!-- 文件 -->
   <section id="view-files" class="view files-view">
     <div class="file-guide">
-      <span data-i18n="files.guide"><b>怎么用：</b>先在“位置”下拉框选目录，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，其他文件点 ⬇️ 下载。</span>
+      <span data-i18n="files.guide"><b>怎么用：</b>先在“位置”下拉框选目录，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，图片/音视频直接预览，目录点 ⬇️ 打包下载。</span>
       <button class="sm" id="fileAddRootBtn" onclick="fileAddRoot()" title="添加一个允许浏览的 WSL 目录" data-i18n="files.addroot">＋ 添加目录</button>
       <button class="primary sm" id="fileWorkspaceBtn" onclick="setupWorkspaceFromFiles()" title="用文件列表当前所在目录预填一键工作区" data-i18n="files.workspace">🚀 当前目录建工作区</button>
     </div>
@@ -3529,7 +3533,7 @@ async function loadFileTree(){
     // 上级目录按钮(到白名单根为止,再往上后端会拒绝)
     const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">${t('files.uptop','‥ (上级)')}</span></div>`:'';
     tree.innerHTML=bc+upBtn+d.entries.map((e,i)=>`
-      <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join('');
+      <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:`<button class="icon" data-action="fileDownloadDir" data-path="${esc(d.path)}" data-name="${esc(e.name)}" title="打包下载目录">⬇️</button>`}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
 }
 function setFileRoots(r){FILE_ROOTS=r.roots||[];FILE_ROOT_GROUPS=r.groups||null}
@@ -3621,7 +3625,28 @@ function fileOpen(dir,name){
   const path=dir.endsWith('/')?dir+name:dir+'/'+name;
   return fileOpenPath(path);
 }
+const FILE_IMG_EXT=['png','jpg','jpeg','gif','webp','bmp','ico','avif'];
+const FILE_AUD_EXT=['mp3','wav','ogg','m4a','flac','aac','opus'];
+const FILE_VID_EXT=['mp4','webm','mov','m4v','mkv'];
 async function fileOpenPath(path){
+  const ext=(path.split('.').pop()||'').toLowerCase();
+  const raw='/api/files/raw?path='+encodeURIComponent(path);
+  const bar=`<div class="editor-bar"><span class="ep">${esc(path)}</span><button style="width:auto" onclick="fileDownload()">⬇️ 下载</button></div>`;
+  if(FILE_IMG_EXT.includes(ext)){
+    FILE_PATH=path;
+    document.getElementById('editorArea').innerHTML=bar+`<div class="media-view"><img src="${raw}" alt="${esc(path)}"></div>`;
+    return;
+  }
+  if(FILE_AUD_EXT.includes(ext)){
+    FILE_PATH=path;
+    document.getElementById('editorArea').innerHTML=bar+`<div class="media-view"><audio controls src="${raw}" style="width:100%"></audio></div>`;
+    return;
+  }
+  if(FILE_VID_EXT.includes(ext)){
+    FILE_PATH=path;
+    document.getElementById('editorArea').innerHTML=bar+`<div class="media-view"><video controls src="${raw}"></video></div>`;
+    return;
+  }
   try{
     const d=await api('/api/files/read?path='+encodeURIComponent(path));
     if(d.binary){FILE_PATH=d.path;fileDownload();return}
@@ -3630,6 +3655,13 @@ async function fileOpenPath(path){
       <div class="editor-bar"><span class="ep">${esc(d.path)}</span><span class="muted">${d.size}B</span><button style="width:auto" onclick="fileDownload()">⬇️ 下载</button><button class="primary" style="width:auto" onclick="fileSave()">💾</button></div>
       <textarea id="fileEditor" spellcheck="false">${esc(d.text)}</textarea>`;
   }catch(e){toast('打开失败: '+e)}
+}
+function fileDownloadDir(path,name){
+  const full=path.endsWith('/')?path+name:path+'/'+name;
+  const a=document.createElement('a');
+  a.href='/api/files/download-dir?path='+encodeURIComponent(full);
+  a.download='';document.body.appendChild(a);a.click();a.remove();
+  toast('正在打包下载目录…');
 }
 function fileDownload(){
   if(!FILE_PATH){toast('未选择文件');return}
@@ -3951,6 +3983,7 @@ function bindDelegation(){
     else if(a==='fileCd')fileCd(it.dataset.name);
     else if(a==='fileOpen')fileOpen(it.dataset.path,it.dataset.name);
     else if(a==='fileDownloadEntry')fileDownloadEntry(parseInt(it.dataset.idx));
+    else if(a==='fileDownloadDir')fileDownloadDir(it.dataset.path,it.dataset.name);
     else if(a==='fileSearchOpen')fileSearchOpen(parseInt(it.dataset.idx));
     else if(a==='fileSearchDownload')fileSearchDownload(parseInt(it.dataset.idx))});
   // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)

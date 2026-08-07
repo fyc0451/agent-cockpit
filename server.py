@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -2310,6 +2310,29 @@ def api_files_download(path: str):
         return FileResponse(target, filename=target.name)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/files/raw")
+def api_files_raw(path: str):
+    """内联预览媒体文件(图片/音视频,限 PREVIEW_EXT 白名单)。"""
+    try:
+        target = files.preview_path(path)
+        return FileResponse(target)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/files/download-dir")
+def api_files_download_dir(path: str, background: BackgroundTasks):
+    """整目录打包 zip 下载(跳过 .git 与符号链接,有数量/大小上限)。"""
+    try:
+        archive = files.zip_dir(path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    background.add_task(archive.unlink, missing_ok=True)
+    return FileResponse(
+        archive, filename=f"{Path(path).name}.zip", background=background
+    )
 
 
 @app.post("/api/files/write")

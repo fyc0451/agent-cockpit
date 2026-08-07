@@ -357,3 +357,68 @@ def test_files_roots_hides_tmp_and_internal_worktrees(monkeypatch):
     assert groups["system"] == ["/home/u/app"]
     assert groups["custom"] == ["/home/u/extra"]
     assert "/tmp/pytest-of-fyc/pytest-1/test_x0/proj" not in response.json()["roots"]
+
+
+# ── 媒体预览与目录打包下载 ──────────────────────────────────────
+
+def test_preview_path_allows_media_and_rejects_svg(tmp_path):
+    root = _mkdirs(tmp_path / "dashboard-uploads" / "media")
+    img = root / "a.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    svg = root / "b.svg"
+    svg.write_text("<svg><script>alert(1)</script></svg>")
+
+    assert files.preview_path(str(img)) == img.resolve()
+    with pytest.raises(ValueError):
+        files.preview_path(str(svg))
+    with pytest.raises(ValueError):
+        files.preview_path(str(root / "missing.txt"))
+
+
+def test_zip_dir_skips_git_and_symlink(tmp_path):
+    root = _mkdirs(tmp_path / "dashboard-uploads" / "pack")
+    (root / "keep.txt").write_text("hello")
+    _mkdirs(root / ".git" / "objects")
+    (root / ".git" / "config").write_text("secret")
+    sub = _mkdirs(root / "sub")
+    (sub / "n.md").write_text("# n")
+    (root / "link").symlink_to(root / "keep.txt")
+
+    archive = files.zip_dir(str(root))
+    try:
+        import zipfile
+        with zipfile.ZipFile(archive) as zf:
+            names = zf.namelist()
+            assert f"{root.name}/keep.txt" in names
+            assert f"{root.name}/sub/n.md" in names
+            assert not any(".git" in n.split("/") for n in names)
+            assert not any(n.endswith("/link") for n in names)
+    finally:
+        archive.unlink()
+
+    with pytest.raises(ValueError):
+        files.zip_dir(str(root / "keep.txt"))
+
+
+def test_raw_and_download_dir_endpoints(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    root = _mkdirs(tmp_path / "dashboard-uploads" / "dl")
+    (root / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (root / "doc.txt").write_text("hi")
+    client = TestClient(server.app)
+    headers = {"authorization": "Bearer secret"}
+
+    raw = client.get(f"/api/files/raw?path={root}/pic.png", headers=headers)
+    assert raw.status_code == 200
+    assert raw.content.startswith(b"\x89PNG")
+    assert "attachment" not in raw.headers.get("content-disposition", "")
+
+    bad = client.get(f"/api/files/raw?path={root}/doc.txt", headers=headers)
+    assert bad.status_code == 400
+
+    zipped = client.get(f"/api/files/download-dir?path={root}", headers=headers)
+    assert zipped.status_code == 200
+    assert zipped.headers["content-type"] == "application/zip"
+    import io, zipfile
+    with zipfile.ZipFile(io.BytesIO(zipped.content)) as zf:
+        assert f"{root.name}/doc.txt" in zf.namelist()

@@ -1566,3 +1566,15 @@ def test_messages_page_agent_filter_and_cleanup():
     # 消息清理按钮走 /api/messages/cleanup
     assert "cleanupMsgs()" in HTML
     assert "/api/messages/cleanup" in HTML
+
+
+def test_files_page_media_preview_and_dir_download():
+    js = _inline_js()
+    # 图片/音视频内联预览走 /api/files/raw
+    assert "FILE_IMG_EXT" in js and "FILE_AUD_EXT" in js and "FILE_VID_EXT" in js
+    assert "/api/files/raw?path=" in js
+    assert "<video controls" in js and "<audio controls" in js
+    # 目录打包下载
+    assert "fileDownloadDir" in js
+    assert "/api/files/download-dir?path=" in js
+    assert 'data-action="fileDownloadDir"' in js

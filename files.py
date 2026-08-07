@@ -50,6 +50,17 @@ BINARY_EXT = {
     ".node", ".wasm",
 }
 
+# 允许内联预览的媒体后缀(svg 可携带脚本,不内联,只下载)
+PREVIEW_EXT = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif",
+    ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus",
+    ".mp4", ".webm", ".mov", ".m4v", ".mkv",
+}
+
+# 目录打包下载的保护上限
+MAX_ZIP_FILES = 5000
+MAX_ZIP_SIZE = 500 * 1024 * 1024  # 500MB(打包前原始大小)
+
 # 访问根白名单的构成:本项目目录 + home 下固定子目录 + DB 注册项目
 _HOME = Path.home().resolve()
 _PROJECT_DIR = Path(__file__).resolve().parent
@@ -415,6 +426,52 @@ def download_path(rel: str) -> Path:
     if not path.is_file():
         raise ValueError(f"不是文件: {path}")
     return path
+
+
+def preview_path(rel: str) -> Path:
+    """返回校验后的内联预览文件路径(限 PREVIEW_EXT 媒体类型)。"""
+    path = download_path(rel)
+    if path.suffix.lower() not in PREVIEW_EXT:
+        raise ValueError("该文件类型不支持内联预览，请下载查看")
+    return path
+
+
+def zip_dir(rel: str) -> Path:
+    """把白名单内目录打包为临时 zip 并返回路径(调用方负责删除)。
+
+    跳过 .git 内部与符号链接;文件数/总大小超限抛 ValueError。
+    """
+    import zipfile
+
+    path = _resolve(rel)
+    if not path.is_dir():
+        raise ValueError(f"不是目录: {path}")
+    fd, tmp_name = tempfile.mkstemp(prefix=".dir-dl-", suffix=".zip")
+    total = 0
+    count = 0
+    try:
+        with os.fdopen(fd, "wb") as raw:
+            with zipfile.ZipFile(raw, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in sorted(path.rglob("*")):
+                    rel_parts = item.relative_to(path).parts
+                    if ".git" in rel_parts:
+                        continue
+                    if item.is_symlink() or not item.is_file():
+                        continue
+                    count += 1
+                    if count > MAX_ZIP_FILES:
+                        raise ValueError(f"目录文件数超过 {MAX_ZIP_FILES} 上限")
+                    total += item.stat().st_size
+                    if total > MAX_ZIP_SIZE:
+                        raise ValueError("目录总大小超过 500MB 上限")
+                    zf.write(item, arcname=str(Path(path.name, *rel_parts)))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    return Path(tmp_name)
 
 
 def write_file(rel: str, content: str, create: bool = False) -> dict[str, Any]:
