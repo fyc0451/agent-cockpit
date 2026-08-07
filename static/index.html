@@ -1042,6 +1042,10 @@ function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent
 // ============ 通用 dialog/focus helper(键盘可达与焦点管理) ============
 // openDialog: 记先前焦点→设 role/aria-modal/aria-labelledby→背景 .main+#side inert→初始聚焦→绑背景click+Tabtrap+Escape
 function openDialog(bg,{labelledBy,initialFocus,closer}={}){
+  // 切换/嵌套:已有不同 dialog 时先清旧 a11y 态,不遗留 role/aria-modal/aria-labelledby
+  if(OPEN_DIALOG&&OPEN_DIALOG!==bg){
+    OPEN_DIALOG.removeAttribute('role');OPEN_DIALOG.removeAttribute('aria-modal');OPEN_DIALOG.removeAttribute('aria-labelledby');
+  }
   OPEN_DIALOG=bg;LAST_FOCUS=document.activeElement;
   bg.setAttribute('role','dialog');bg.setAttribute('aria-modal','true');
   if(labelledBy)bg.setAttribute('aria-labelledby',labelledBy);
@@ -1053,22 +1057,25 @@ function openDialog(bg,{labelledBy,initialFocus,closer}={}){
     bg.addEventListener('click',e=>{if(e.target===bg&&bg.__closer)bg.__closer()});
     bg.addEventListener('keydown',e=>trapDialogKey(e,bg))}
 }
-// closeDialog: 只清 a11y 态 + 去背景 inert + 恢复焦点;不碰显隐(classList 由各 closeXxx 管)。保留单 dialog 简化
-function closeDialog(){
-  const bg=OPEN_DIALOG;if(!bg)return;OPEN_DIALOG=null;
+// closeDialog(expectedBg): 只清 a11y 态+去背景 inert+恢复焦点;expectedBg 校验防止异步旧 close 清掉新 dialog
+function closeDialog(expectedBg){
+  const bg=OPEN_DIALOG;if(!bg)return;
+  if(expectedBg!==undefined&&bg!==expectedBg)return;
+  OPEN_DIALOG=null;
   setBackgroundInert(false);
   bg.removeAttribute('role');bg.removeAttribute('aria-modal');bg.removeAttribute('aria-labelledby');
   const f=LAST_FOCUS;if(f&&f.focus){try{f.focus()}catch(e){}}
 }
 function trapDialogKey(e,bg){
-  if(e.key==='Escape'){e.preventDefault();if(bg.__closer)bg.__closer();return}
+  if(e.key==='Escape'){e.preventDefault();e.stopPropagation();if(bg.__closer)bg.__closer();return}
   if(e.key!=='Tab')return;
   const fs=[...bg.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(el=>el.offsetParent!==null||el===document.activeElement);
-  if(!fs.length)return;const first=fs[0],last=fs[fs.length-1];
+  if(!fs.length){bg.tabIndex=-1;try{bg.focus()}catch(err){}return}
+  const first=fs[0],last=fs[fs.length-1];
   if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}
   else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}
 }
-const setBackgroundInert=on=>{document.querySelectorAll('.main>header,.view,#side').forEach(el=>{if(on)el.setAttribute('inert','');else el.removeAttribute('inert')})};
+const setBackgroundInert=on=>{document.querySelectorAll('.main>header,.view,#side,#updateBanner,.drawer-bg').forEach(el=>{if(on)el.setAttribute('inert','');else el.removeAttribute('inert')})};
 
 // ============ i18n(中/英/日) ============
 // t(key, zhFallback, vars):有翻译用翻译,没有回退中文原文;{var} 插值。
@@ -1146,6 +1153,7 @@ function closeNav(){
   document.getElementById('sideBackdrop')?.classList.remove('show');
   setNavA11y(false);
   try{localStorage.setItem('nav-open','0')}catch(e){}
+  const op=document.querySelector('.nav-toggle');if(op)try{op.focus()}catch(e){}
 }
 function toggleNavPc(){
   // 移动端抽屉语义:« 等于关闭抽屉;PC:隐藏/展开整个侧边栏
@@ -1993,7 +2001,7 @@ async function openTaskAttention(taskId){
     document.getElementById('attentionModalBody').textContent=content;
   }catch(e){document.getElementById('attentionModalBody').textContent='加载失败: '+e}
 }
-function closeAttentionModal(){document.getElementById('attentionModal').classList.remove('show');closeDialog();ATTENTION_TASK_ID=null}
+function closeAttentionModal(){document.getElementById('attentionModal').classList.remove('show');closeDialog(document.getElementById('attentionModal'));ATTENTION_TASK_ID=null}
 async function attentionTaskAction(action){
   if(!ATTENTION_TASK_ID)return;
   const label=action==='apply'?'应用':'丢弃';
@@ -2394,7 +2402,7 @@ async function showLaunchModal(){
   await loadSessions(preferredSession);
   launchSessionChanged(false);
 }
-function closeLaunchModal(){document.getElementById('launchModal').classList.remove('show');closeDialog()}
+function closeLaunchModal(){document.getElementById('launchModal').classList.remove('show');closeDialog(document.getElementById('launchModal'))}
 async function loadSessions(preferredSession=''){
   try{
     const d=await api('/api/herdr/sessions');
@@ -2821,7 +2829,7 @@ async function showLayoutModal(){
   const lym=document.getElementById('layoutModal');lym.classList.add('show');openDialog(lym,{labelledBy:'layoutModalTitle',closer:closeLayoutModal});
   await renderLayoutPaneList();
 }
-function closeLayoutModal(){document.getElementById('layoutModal').classList.remove('show');closeDialog()}
+function closeLayoutModal(){document.getElementById('layoutModal').classList.remove('show');closeDialog(document.getElementById('layoutModal'))}
 async function renderLayoutPaneList(){
   const {session,target}=layoutTermContext();
   const el=document.getElementById('layoutPaneList');
@@ -2993,7 +3001,7 @@ async function teamCollabSend(){
     document.querySelector('.collab-form .collab-actions')?.before(err);
   }finally{TEAM_COLLAB_SENDING=false}
 }
-function closeCollab(){document.getElementById('collabModal').classList.remove('show');closeDialog();TEAM_COLLAB_TARGET=null}
+function closeCollab(){document.getElementById('collabModal').classList.remove('show');closeDialog(document.getElementById('collabModal'));TEAM_COLLAB_TARGET=null}
 // 在 web 终端里 attach 到 herdr session(进入多 pane 分屏视图,同时看多个 agent)
 async function termAttachHerdr(){
   // 弹 session 选择器(复用 collabModal)
@@ -3889,7 +3897,7 @@ function closeSetup(){
     toast('工作区正在启动中，请等待完成后再关闭',3500);
     return;
   }
-  document.getElementById('setupModal').classList.remove('show');closeDialog();
+  document.getElementById('setupModal').classList.remove('show');closeDialog(document.getElementById('setupModal'));
   SETUP_SUBMITTING=false;
   setSetupBusy(false);
   renderSetupPreview();
@@ -4010,7 +4018,7 @@ async function loadFileTree(){
     // 上级目录按钮(到白名单根为止,再往上后端会拒绝)
     const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp" role="button" tabindex="0">📁 <span class="muted">${t('files.uptop','‥ (上级)')}</span></div>`:'';
     tree.innerHTML=bc+upBtn+d.entries.map((e,i)=>`
-      <div class="ft-item" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}" role="button" tabindex="0"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:`<button class="icon" data-action="fileDownloadDir" data-path="${esc(d.path)}" data-name="${esc(e.name)}" title="打包下载目录">⬇️</button>`}</div>`).join('');
+      <div class="ft-item"><span class="ft-name" style="flex:1;overflow:hidden;text-overflow:ellipsis" role="button" tabindex="0" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:`<button class="icon" data-action="fileDownloadDir" data-path="${esc(d.path)}" data-name="${esc(e.name)}" title="打包下载目录">⬇️</button>`}</div>`).join('');
   }catch(e){toast('列目录失败: '+e)}
 }
 function setFileRoots(r){FILE_ROOTS=r.roots||[];FILE_ROOT_GROUPS=r.groups||null}
@@ -4065,7 +4073,7 @@ async function fileSearch(){
     const tree=document.getElementById('fileTree');
     tree.innerHTML=`<div class="ft-bc">🔎 ${esc(d.query)} · ${esc(d.path)}</div>`+
       (FILE_ENTRIES.length?FILE_ENTRIES.map((e,i)=>`
-        <div class="ft-item" data-action="fileSearchOpen" data-idx="${i}" role="button" tabindex="0"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.relative)}</span>${e.type==='file'?`<button class="icon" data-action="fileSearchDownload" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join(''):'<div class="empty">没有匹配结果</div>');
+        <div class="ft-item"><span class="ft-name" style="flex:1;overflow:hidden;text-overflow:ellipsis" role="button" tabindex="0" data-action="fileSearchOpen" data-idx="${i}">${e.type==='dir'?'📁':'📄'} ${esc(e.relative)}</span>${e.type==='file'?`<button class="icon" data-action="fileSearchDownload" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join(''):'<div class="empty">没有匹配结果</div>');
   }catch(e){toast('搜索失败: '+e)}
 }
 function fileSearchClear(){
@@ -4208,7 +4216,7 @@ async function termFileLoad(){
       const dl=e.type==='dir'
         ?`<button class="icon" data-action="tfDlDir" data-path="${esc(full)}" title="打包下载目录">⬇️</button>`
         :`<button class="icon" data-action="tfDl" data-path="${esc(full)}" title="下载">⬇️</button>`;
-      return `<div class="ft-item" data-action="${e.type==='dir'?'tfCd':'tfOpen'}" data-path="${esc(full)}" role="button" tabindex="0"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${dl}</div>`;
+      return `<div class="ft-item"><span class="ft-name" style="flex:1;overflow:hidden;text-overflow:ellipsis" role="button" tabindex="0" data-action="${e.type==='dir'?'tfCd':'tfOpen'}" data-path="${esc(full)}">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${dl}</div>`;
     }).join('')||'<div class="empty">空目录</div>';
   }catch(e){list.innerHTML=`<div class="empty">打开目录失败: ${esc(String(e))}</div>`}
 }
@@ -4236,7 +4244,7 @@ function fileDownload(){
 }
 async function fileSave(){const c=document.getElementById('fileEditor').value;if(c===FILE_ORIG){toast('无改动');return}try{await api('/api/files/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:FILE_PATH,content:c})});FILE_ORIG=c;toast('已保存 ✓')}catch(e){toast('保存失败: '+e)}}
 
-function closeMsg(){document.getElementById('msgModal').classList.remove('show');closeDialog()}
+function closeMsg(){document.getElementById('msgModal').classList.remove('show');closeDialog(document.getElementById('msgModal'))}
 async function mmReply(){/* TODO */}
 
 // ============ SSE 链路状态（B1 P1-01） ============

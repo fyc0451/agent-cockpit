@@ -2301,15 +2301,19 @@ def test_b2_modals_have_dialog_semantics():
         'onclick="if(event.target===this)closeSetup()"',
     ):
         assert bad not in HTML, f"残留 modal 背景内联 onclick: {bad}"
+    # 背景 inert 覆盖 #updateBanner(链接/关闭按钮)与 .drawer-bg,不漏顶层可聚焦区
+    assert "#updateBanner" in js and ".drawer-bg" in js
 
 
 def test_b2_dialog_escape_uses_closer_and_setup_guard_intact():
-    """Escape/背景走各自 closer;setupModal 走 closeSetup 保留 SETUP_IN_FLIGHT guard。"""
+    """Escape/背景走各自 closer;setupModal 走 closeSetup 保留 guard;closeXxx 传自身 bg(竞态)。"""
     js = _inline_js()
     assert "closer:closeCollab" in js and "closer:closeSetup" in js
+    assert "closeDialog(expectedBg)" in js  # 竞态校验参数
+    assert "closeDialog(document.getElementById('setupModal'))" in js
+    assert "closeDialog(document.getElementById('launchModal'))" in js
     close = js.split("function closeSetup(){", 1)[1].split("async function setupOpenTerminal", 1)[0]
     assert "SETUP_IN_FLIGHT" in close
-    assert "closeDialog()" in close
 
 
 def test_b2_click_only_items_buttonified_with_keyboard():
@@ -2348,15 +2352,53 @@ def test_b2_flow_focuses_target_pane_input():
     assert "hf-in-'+fp" in js
 
 
-def test_b2_node_dialog_escape_calls_closer():
-    """Node DOM stub: trapDialogKey 的 Escape→bg.__closer(提取生产函数体)。"""
+def test_b2_node_dialog_escape_calls_closer_and_stops_propagation():
+    """Node DOM stub: trapDialogKey Escape→closer 且 stopPropagation(不冒泡到 hfExitFullscreen)。"""
     js = _inline_js()
     trap_src = js.split("function trapDialogKey(e,bg){", 1)[1].split("\n}", 1)[0]
+    assert "e.stopPropagation()" in trap_src
     out = _run_node(
         "function trapDialogKey(e,bg){\n" + trap_src + "\n}\n"
-        "let closed=false;\n"
-        "trapDialogKey({key:'Escape',preventDefault(){}},{__closer:()=>{closed=true}});\n"
-        "if(!closed){console.error('escape not closed');process.exit(1)}\n"
+        "let stopped=false,closed=false;\n"
+        "trapDialogKey({key:'Escape',preventDefault(){},stopPropagation(){stopped=true}},{__closer:()=>{closed=true}});\n"
+        "if(!closed||!stopped){console.error('escape',closed,stopped);process.exit(1)}\n"
+        "console.log('ok');\n"
+    )
+    assert "ok" in out
+
+
+def test_b2_close_nav_restores_focus_to_toggle():
+    """UX-P1-12: closeNav 把焦点恢复到可见的 .nav-toggle(背景点击/选择后)。"""
+    js = _inline_js()
+    close = js.split("function closeNav(){", 1)[1].split("function toggleNavPc", 1)[0]
+    assert ".nav-toggle" in close
+
+
+def test_b2_file_rows_role_button_has_no_nested_button():
+    """UX-P1-10: 文件/搜索/term 文件行拆成 ft-name(role=button) + 独立 download button(sibling),
+    role=button 元素不内嵌 button,避免 axe 嵌套交互。面包屑无嵌套可保留。"""
+    js = _inline_js()
+    assert '<div class="ft-item"><span class="ft-name"' in js
+    # ft-item 容器本身不再带 role=button(role 移到 ft-name span)
+    assert '<div class="ft-item" data-action="fileSearchOpen"' not in js
+    assert '<div class="ft-item" data-action="${e.type===\'dir\'?\'fileCd\':\'fileOpen\'}"' not in js
+
+
+def test_b2_node_dialog_close_race_guarded():
+    """Node DOM stub: closeDialog(expectedBg) 仅在 OPEN_DIALOG===expected 时清理;
+    异步旧 modal 的 close 到达时不清掉用户已开的新 dialog(竞态)。"""
+    js = _inline_js()
+    close_src = js.split("function closeDialog(expectedBg){", 1)[1].split("\n}", 1)[0]
+    out = _run_node(
+        "let OPEN_DIALOG=null,LAST_FOCUS=null;\n"
+        "function setBackgroundInert(){}\n"
+        "function closeDialog(expectedBg){\n" + close_src + "\n}\n"
+        "const A={removeAttribute(){}},B={removeAttribute(){}};\n"
+        "OPEN_DIALOG=B;\n"
+        "closeDialog(A);\n"
+        "if(OPEN_DIALOG!==B){console.error('race cleared new dialog');process.exit(1)}\n"
+        "closeDialog(B);\n"
+        "if(OPEN_DIALOG!==null){console.error('did not close current');process.exit(2)}\n"
         "console.log('ok');\n"
     )
     assert "ok" in out
