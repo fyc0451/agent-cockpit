@@ -1615,3 +1615,11 @@ def test_pc_nav_hide_and_expand():
     assert ".app.nav-hidden" in HTML
     assert "function toggleNavPc()" in js
     assert "nav-hidden-pc" in js
+
+
+def test_side_refresh_refreshes_current_view():
+    js = _inline_js()
+    assert 'onclick="refreshCurrent()"' in HTML
+    assert "function refreshCurrent()" in js
+    # 不再只刷看板
+    assert 'onclick="refreshBoard()"' not in HTML

@@ -521,7 +521,7 @@ header .spacer{flex:1}
       <div class="side-actions">
         <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="任务看板与需处理事项">🔔 <span id="attentionN">0</span></div>
         <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
-        <button class="icon" onclick="refreshBoard()" title="刷新" data-i18n-title="common.refresh">↻</button>
+        <button class="icon" onclick="refreshCurrent()" title="刷新当前页面数据" data-i18n-title="common.refresh">↻</button>
       </div>
     </div>
   </aside>
@@ -1690,6 +1690,18 @@ function showView(v){
     else if(prevView==='term'&&TERM_ID&&TERM_SESSIONS[TERM_ID]){HF_SESSION=TERM_SESSIONS[TERM_ID];HF_FOCUS_PANE=null}
     hfStart();
   }else hfStop();
+}
+// 侧栏 ↻:刷新当前页面的数据(原来只刷看板,等于假的)
+function refreshCurrent(){
+  const v=document.querySelector('#nav button.active')?.dataset.view;
+  if(v==='attention')attRefresh();
+  else if(v==='msgs')loadProjList();
+  else if(v==='team')teamLoad(true);
+  else if(v==='files')loadFileTree();
+  else if(v==='herdrflow')hfLoad();
+  else if(v==='settings'){loadSettings();renderSettings()}
+  refreshBoard();
+  toast('已刷新');
 }
 const NAV_COLLAPSE_MQ=window.matchMedia('(max-width:1100px)');// 与 CSS @media(max-width:1100px) 同一断点
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(NAV_COLLAPSE_MQ.matches)closeNav()});
