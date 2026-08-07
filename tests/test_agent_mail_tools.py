@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import urllib.error
 
 import pytest
@@ -915,3 +916,48 @@ def test_resolve_recipients_skips_entries_missing_agent_or_instance(tmp_path):
     ])
     assert module._resolve_registry_recipients(["None-None"], PROJECT) == ["None-None"]
     assert module._resolve_registry_recipients(["qodercn"], PROJECT) == ["qodercn-main"]
+
+
+def test_notify_skips_pane_while_recipient_typing(monkeypatch, tmp_path):
+    """收件 session 用户正在 Web 终端输入时,跳过实时通知(消息保留未读)。"""
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    session_dir = tmp_path / "session"
+    project = tmp_path / "project"
+    for item in (session_dir, project):
+        item.mkdir()
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(
+        module, "_session_rows",
+        lambda _: [{"name": "demo", "running": True, "directory": str(session_dir)}],
+    )
+    monkeypatch.setattr(module, "_load_bindings", lambda: {})
+    typing_file = tmp_path / "typing.json"
+    typing_file.write_text(json.dumps({"demo": time.time()}), encoding="utf-8")
+    monkeypatch.setattr(module, "TYPING_STATE_PATH", str(typing_file))
+    prompts = []
+
+    def run(args, **kwargs):
+        if args[-2:] == ["api", "snapshot"]:
+            return module.subprocess.CompletedProcess(args, 0, json.dumps({
+                "result": {"snapshot": {"panes": [{
+                    "pane_id": "w1:pA", "agent": "kimi", "cwd": str(project),
+                }]}}
+            }), "")
+        if "prompt" in args:
+            prompts.append(args)
+            return module.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    module._notify_pane("kimi", "main", 900, "输入避让", str(project))
+    assert prompts == []
+
+    # 状态过期后恢复通知
+    typing_file.write_text(
+        json.dumps({"demo": time.time() - 120}), encoding="utf-8"
+    )
+    module._notify_pane("kimi", "main", 901, "输入避让2", str(project))
+    assert len(prompts) == 1

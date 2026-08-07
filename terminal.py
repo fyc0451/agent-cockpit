@@ -24,15 +24,18 @@ FastAPI WebSocket 双向桥接:浏览器击键→PTY,PTY 输出→浏览器。
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import pty
 import select
 import signal
 import struct
+import tempfile
 import termios
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 # 终端会话池:term_id -> {master_fd, pid, alive, lock, created_ts, last_active}
@@ -42,6 +45,12 @@ _terms: dict[str, dict[str, Any]] = {}
 _superseded_terms: dict[str, float] = {}
 # 浏览器经 Web PTY 向某 Herdr session 最近一次发送用户输入的时间。
 _session_user_input: dict[str, float] = {}
+# 同一份状态的落盘副本(墙钟时间),供 mail-send 等独立进程在注入
+# pane 通知前避让正在输入的用户。限频写,30s 窗口下秒级延迟无影响。
+_TYPING_STATE_PATH = (
+    Path.home() / ".local" / "state" / "agent-cockpit" / "typing.json"
+)
+_typing_state_last_write = 0.0
 _lock = threading.Lock()
 # pty.fork 先创建 master fd 再返回父进程；串行化 fork→FD_CLOEXEC，
 # 避免并发创建时另一个 shell 在标记前继承该 master fd。
@@ -546,6 +555,36 @@ def sweep_idle(max_idle: float | None = None) -> int:
     return len(victims)
 
 
+def _persist_typing_state(session: str) -> None:
+    """把本次击键的墙钟时间写入状态文件(限频,原子替换)。"""
+    global _typing_state_last_write
+    now_mono = time.monotonic()
+    if now_mono - _typing_state_last_write < 1.0:
+        return
+    _typing_state_last_write = now_mono
+    try:
+        _TYPING_STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data: dict[str, float] = {}
+        try:
+            loaded = json.loads(_TYPING_STATE_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = {str(k): float(v) for k, v in loaded.items()}
+        except (OSError, ValueError, TypeError):
+            data = {}
+        wall = time.time()
+        data[session] = wall
+        # 清理过期项,避免文件长期增长
+        data = {k: v for k, v in data.items() if wall - v < 24 * 3600}
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".typing.", suffix=".tmp", dir=str(_TYPING_STATE_PATH.parent)
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(tmp_name, _TYPING_STATE_PATH)
+    except OSError:
+        pass
+
+
 def note_user_input(term_id: str) -> str | None:
     """记录 Web PTY 用户输入；返回对应 Herdr session，无标签则 None。"""
     now = time.monotonic()
@@ -561,7 +600,8 @@ def note_user_input(term_id: str) -> str | None:
         ]
         for session in stale:
             _session_user_input.pop(session, None)
-        return label
+    _persist_typing_state(label)
+    return label
 
 
 def user_typing_recently(session: str) -> bool:

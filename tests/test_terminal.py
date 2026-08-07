@@ -7,6 +7,7 @@ import shlex
 import signal
 import sys
 import threading
+import json
 import time
 from pathlib import Path
 
@@ -107,7 +108,8 @@ def test_create_stores_safe_display_label():
             terminal.create_term(label=label)
 
 
-def test_user_typing_window_tracks_labeled_web_terminal(monkeypatch):
+def test_user_typing_window_tracks_labeled_web_terminal(monkeypatch, tmp_path):
+    monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", tmp_path / "typing.json")
     now = {"value": 100.0}
     monkeypatch.setattr(terminal.time, "monotonic", lambda: now["value"])
     labeled = terminal.create_term(label="demo")["id"]
@@ -664,3 +666,20 @@ def test_write_term_dups_fd_under_lock_and_closes_copy(monkeypatch):
     assert dup_fd in closed
     # master fd 本身未被关闭(副本关闭不影响它)
     os.fstat(master_fd)
+
+
+def test_note_user_input_persists_wall_clock_state_file(monkeypatch, tmp_path):
+    """落盘给 mail-send 等外部进程用:墙钟时间、含 session 键。"""
+    state_file = tmp_path / "state" / "typing.json"
+    monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", state_file)
+    labeled = terminal.create_term(label="demo")["id"]
+
+    assert terminal.note_user_input(labeled) == "demo"
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert abs(data["demo"] - time.time()) < 5
+
+    # 未打标签的终端不落盘
+    state_file.unlink()
+    unlabeled = terminal.create_term()["id"]
+    assert terminal.note_user_input(unlabeled) is None
+    assert not state_file.exists()

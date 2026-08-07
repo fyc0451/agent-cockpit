@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -27,6 +28,12 @@ import coordination  # noqa: E402
 HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
 MAIL_RECV_BIN = os.path.join(TOOLS_DIR, "mail-recv")
 MAIL_PROJECTS_PATH = os.path.expanduser("~/dashboard-data/mail-projects.json")
+# Cockpit 落盘的用户输入状态(session → 墙钟时间):正在输入时不注入
+# pane 通知,避免消息追加到未提交草稿后被一起提交。
+TYPING_STATE_PATH = os.path.expanduser(
+    "~/.local/state/agent-cockpit/typing.json"
+)
+TYPING_DEFER_WINDOW = 30.0
 PROG_TO_AGENT = {
     "codex-cli": "codex", "codex": "codex",
     "kimi-work": "kimi", "kimi": "kimi",
@@ -349,6 +356,17 @@ def _notify_text(
     )
 
 
+def _recipient_typing(session: str) -> bool:
+    """收件 session 的用户刚在 Web 终端输入过(状态由 Cockpit 落盘)。"""
+    try:
+        with open(TYPING_STATE_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+        ts = float(data.get(session, 0))
+    except Exception:
+        return False
+    return 0 < time.time() - ts < TYPING_DEFER_WINDOW
+
+
 def _notify_pane(
     agent_type: str, instance: str, msg_id: int, subject: str,
     project_key: str = "", intent: str = "info",
@@ -389,6 +407,13 @@ def _notify_pane(
         except Exception:
             continue
     for session, pane_id, cwd, is_exact in _select_notify_targets(candidates, project_key):
+        if _recipient_typing(session):
+            print(
+                f"notice: {session}/{pane_id} 用户正在输入，跳过实时通知"
+                "（消息保留未读，对方里程碑自查可见）",
+                file=sys.stderr,
+            )
+            continue
         note = _notify_text(
             msg_id, subject, agent_type, instance, project_key, cwd, is_exact, intent
         )
