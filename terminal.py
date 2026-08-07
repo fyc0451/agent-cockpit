@@ -28,8 +28,10 @@ import json
 import os
 import pty
 import select
+import shutil
 import signal
 import struct
+import subprocess
 import tempfile
 import termios
 import threading
@@ -44,7 +46,9 @@ _terms: dict[str, dict[str, Any]] = {}
 # 返回 taken-over 而不是普通失效；否则旧版页面会自动重建并与新页面反复争抢。
 _superseded_terms: dict[str, float] = {}
 # 浏览器经 Web PTY 向某 Herdr session 最近一次发送用户输入的时间。
-_session_user_input: dict[str, float] = {}
+# pane 粒度: (session, pane_id) -> monotonic;pane_id 为 None 表示输入时
+# 未能解析落点 pane,消费方按未知 pane 保守避让。
+_session_pane_input: dict[tuple[str, str | None], float] = {}
 # 同一份状态的落盘副本(墙钟时间),供 mail-send 等独立进程在注入
 # pane 通知前避让正在输入的用户。限频写,30s 窗口下秒级延迟无影响。
 _TYPING_STATE_PATH = (
@@ -52,6 +56,7 @@ _TYPING_STATE_PATH = (
 )
 _typing_state_last_write: dict[tuple[str, str], float] = {}
 _typing_state_lock = threading.Lock()
+_HERDR_BIN = shutil.which("herdr") or str(Path.home() / ".local" / "bin" / "herdr")
 _lock = threading.Lock()
 # pty.fork 先创建 master fd 再返回父进程；串行化 fork→FD_CLOEXEC，
 # 避免并发创建时另一个 shell 在标记前继承该 master fd。
@@ -556,8 +561,26 @@ def sweep_idle(max_idle: float | None = None) -> int:
     return len(victims)
 
 
-def _persist_typing_state(session: str) -> None:
-    """把本次击键的墙钟时间写入状态文件(每 session 限频,原子替换)。"""
+def _current_pane(session: str) -> str | None:
+    """输入发生时刻该 session 的当前 pane(herdr 侧,约 2ms);失败返回 None。"""
+    try:
+        result = subprocess.run(
+            [_HERDR_BIN, "--session", session, "pane", "current"],
+            capture_output=True, text=True, timeout=3,
+        )
+        pane = json.loads(result.stdout).get("result", {}).get("pane", {})
+        pane_id = pane.get("pane_id")
+        return str(pane_id) if pane_id else None
+    except Exception:
+        return None
+
+
+def _persist_typing_state(session: str, pane_id: str | None) -> None:
+    """把本次击键的墙钟时间写入状态文件(每 session 限频,原子替换)。
+
+    新格式: {session: {"panes": {pane_id: ts}, "unknown": ts?}};
+    读旧 float 格式时按未知 pane 处理,写入即升级。
+    """
     now_mono = time.monotonic()
     state_key = (str(_TYPING_STATE_PATH), session)
     with _typing_state_lock:
@@ -565,17 +588,36 @@ def _persist_typing_state(session: str) -> None:
             return
         try:
             _TYPING_STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            data: dict[str, float] = {}
+            data: dict[str, Any] = {}
             try:
                 loaded = json.loads(_TYPING_STATE_PATH.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
-                    data = {str(k): float(v) for k, v in loaded.items()}
+                    data = loaded
             except (OSError, ValueError, TypeError):
                 data = {}
             wall = time.time()
-            data[session] = wall
+            entry = data.get(session)
+            if not isinstance(entry, dict):
+                entry = {"panes": {}}
+            panes = entry.get("panes")
+            if not isinstance(panes, dict):
+                panes = {}
+                entry["panes"] = panes
+            if pane_id:
+                panes[pane_id] = wall
+            else:
+                entry["unknown"] = wall
             # 清理过期项,避免文件长期增长
-            data = {k: v for k, v in data.items() if wall - v < 24 * 3600}
+            panes = {
+                str(k): float(v) for k, v in panes.items()
+                if wall - float(v) < 24 * 3600
+            }
+            entry["panes"] = panes
+            data[session] = entry
+            data = {
+                str(k): v for k, v in data.items()
+                if not isinstance(v, (int, float)) or wall - float(v) < 24 * 3600
+            }
             fd, tmp_name = tempfile.mkstemp(
                 prefix=".typing.", suffix=".tmp", dir=str(_TYPING_STATE_PATH.parent)
             )
@@ -594,35 +636,49 @@ def _persist_typing_state(session: str) -> None:
 
 
 def note_user_input(term_id: str) -> str | None:
-    """记录 Web PTY 用户输入；返回对应 Herdr session，无标签则 None。"""
+    """记录 Web PTY 用户输入；返回对应 Herdr session，无标签则 None。
+
+    输入发生时就解析并记录落点 pane(约 2ms),不依赖投递时反推焦点——
+    用户输完草稿切换焦点后,给原 pane 的投递仍能正确避让。
+    """
     now = time.monotonic()
     with _lock:
         state = _terms.get(term_id)
         label = state.get("label") if state else None
         if not label:
             return None
-        _session_user_input[label] = now
+    pane_id = _current_pane(label)
+    with _lock:
+        _session_pane_input[(label, pane_id)] = now
         stale = [
-            session for session, ts in _session_user_input.items()
+            key for key, ts in _session_pane_input.items()
             if now - ts >= USER_TYPING_WINDOW
         ]
-        for session in stale:
-            _session_user_input.pop(session, None)
-    _persist_typing_state(label)
+        for key in stale:
+            _session_pane_input.pop(key, None)
+    _persist_typing_state(label, pane_id)
     return label
 
 
-def user_typing_recently(session: str) -> bool:
-    """该 Herdr session 在避让窗口内是否收到过 Web PTY 用户输入。"""
+def user_typing_recently(session: str, pane_id: str | None = None) -> bool:
+    """该 Herdr session(可选指定 pane)在避让窗口内是否有 Web PTY 用户输入。
+
+    指定 pane 时: 该 pane 有记录,或存在未知 pane 的输入(保守),返回 True。
+    """
     now = time.monotonic()
     with _lock:
-        ts = _session_user_input.get(session)
-        if ts is None:
-            return False
-        if now - ts < USER_TYPING_WINDOW:
-            return True
-        _session_user_input.pop(session, None)
-        return False
+        stale = [
+            key for key, ts in _session_pane_input.items()
+            if now - ts >= USER_TYPING_WINDOW
+        ]
+        for key in stale:
+            _session_pane_input.pop(key, None)
+        if pane_id is None:
+            return any(key[0] == session for key in _session_pane_input)
+        return (
+            (session, pane_id) in _session_pane_input
+            or (session, None) in _session_pane_input
+        )
 
 
 def list_terms() -> list[dict[str, Any]]:

@@ -411,7 +411,8 @@ def test_delivery_deferred_while_user_typing(tmp_path, monkeypatch):
         lambda *a, **k: calls.append((a, k)) or {"available": True},
     )
     monkeypatch.setattr(
-        team_inbox_router.terminal, "user_typing_recently", lambda session: True,
+        team_inbox_router.terminal, "user_typing_recently",
+        lambda session, pane_id=None: True,
     )
 
     result = team_inbox_router.route_inbox(
@@ -424,7 +425,8 @@ def test_delivery_deferred_while_user_typing(tmp_path, monkeypatch):
 
     # 用户停止输入后,下一轮正常投递且从 pending 清除
     monkeypatch.setattr(
-        team_inbox_router.terminal, "user_typing_recently", lambda session: False,
+        team_inbox_router.terminal, "user_typing_recently",
+        lambda session, pane_id=None: False,
     )
     result = team_inbox_router.route_inbox(
         "Bearer x", hub="http://hub:8765", human_id=7,
@@ -436,20 +438,21 @@ def test_delivery_deferred_while_user_typing(tmp_path, monkeypatch):
 
 
 def test_delivery_not_deferred_when_typing_in_other_pane(tmp_path, monkeypatch):
-    """pane 粒度:聚焦 pane 不是目标 lead pane 时正常投递。"""
-    import terminal
-
+    """pane 粒度:目标 lead pane 无输入(输入在同 session 其他 pane)时正常投递。"""
     _write_bindings(tmp_path / "team-sessions.json", [_binding()])
     monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
-        {"session": "s1", "pane_id": "p1", "focused": False},
-        {"session": "s1", "pane_id": "p8", "focused": True},
+        {"session": "s1", "pane_id": "p1"},
     ))
     calls = []
     monkeypatch.setattr(
         team_inbox_router, "pane_send",
         lambda *a, **k: calls.append((a, k)) or {"available": True},
     )
-    monkeypatch.setattr(terminal, "user_typing_recently", lambda session: True)
+    # 输入记录在 p8;目标是 lead pane p1 → 不避让
+    monkeypatch.setattr(
+        team_inbox_router.terminal, "user_typing_recently",
+        lambda session, pane_id=None: pane_id == "p8",
+    )
 
     result = team_inbox_router.route_inbox(
         "Bearer x", hub="http://hub:8765", human_id=7,

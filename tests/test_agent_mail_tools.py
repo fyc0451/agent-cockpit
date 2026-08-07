@@ -934,7 +934,10 @@ def test_notify_skips_pane_while_recipient_typing(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(module, "_load_bindings", lambda: {})
     typing_file = tmp_path / "typing.json"
-    typing_file.write_text(json.dumps({"demo": time.time()}), encoding="utf-8")
+    # 输入时记录的是落点 pane w1:pA;此后焦点切到 w1:p8 也不影响判定
+    typing_file.write_text(
+        json.dumps({"demo": {"panes": {"w1:pA": time.time()}}}), encoding="utf-8"
+    )
     monkeypatch.setattr(module, "TYPING_STATE_PATH", str(typing_file))
     prompts = []
 
@@ -942,10 +945,10 @@ def test_notify_skips_pane_while_recipient_typing(monkeypatch, tmp_path):
         if args[-2:] == ["api", "snapshot"]:
             return module.subprocess.CompletedProcess(args, 0, json.dumps({
                 "result": {"snapshot": {
-                    "focused_pane_id": "w1:pA",
+                    "focused_pane_id": "w1:p8",
                     "panes": [{
                         "pane_id": "w1:pA", "agent": "kimi", "cwd": str(project),
-                        "focused": True,
+                        "focused": False,
                     }],
                 }}
             }), "")
@@ -956,13 +959,14 @@ def test_notify_skips_pane_while_recipient_typing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(module.subprocess, "run", run)
 
-    # 用户正在目标 pane(w1:pA,聚焦)输入 → 跳过
+    # 目标 pane w1:pA 有未提交草稿(焦点已切走)→ 仍跳过
     module._notify_pane("kimi", "main", 900, "输入避让", str(project))
     assert prompts == []
 
     # 状态过期后恢复通知
     typing_file.write_text(
-        json.dumps({"demo": time.time() - 120}), encoding="utf-8"
+        json.dumps({"demo": {"panes": {"w1:pA": time.time() - 120}}}),
+        encoding="utf-8",
     )
     module._notify_pane("kimi", "main", 901, "输入避让2", str(project))
     assert len(prompts) == 1
@@ -984,7 +988,10 @@ def test_notify_not_deferred_when_typing_in_other_pane(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(module, "_load_bindings", lambda: {})
     typing_file = tmp_path / "typing.json"
-    typing_file.write_text(json.dumps({"demo": time.time()}), encoding="utf-8")
+    # pA 记录已过期、p8 新鲜: 两 pane 窗口独立,投 pA 不避让
+    typing_file.write_text(json.dumps({"demo": {"panes": {
+        "w1:pA": time.time() - 120, "w1:p8": time.time(),
+    }}}), encoding="utf-8")
     monkeypatch.setattr(module, "TYPING_STATE_PATH", str(typing_file))
     prompts = []
 
@@ -992,7 +999,6 @@ def test_notify_not_deferred_when_typing_in_other_pane(monkeypatch, tmp_path):
         if args[-2:] == ["api", "snapshot"]:
             return module.subprocess.CompletedProcess(args, 0, json.dumps({
                 "result": {"snapshot": {
-                    "focused_pane_id": "w1:p8",
                     "panes": [
                         {"pane_id": "w1:pA", "agent": "kimi", "cwd": str(project),
                          "focused": False},
@@ -1010,3 +1016,16 @@ def test_notify_not_deferred_when_typing_in_other_pane(monkeypatch, tmp_path):
 
     module._notify_pane("kimi", "main", 902, "pane 粒度", str(project))
     assert len(prompts) == 1
+
+    # 旧 float 格式(升级前 session 级记录)→ 保守避让
+    prompts.clear()
+    typing_file.write_text(json.dumps({"demo": time.time()}), encoding="utf-8")
+    module._notify_pane("kimi", "main", 903, "旧格式", str(project))
+    assert prompts == []
+
+    # unknown 落点(输入时解析不到 pane)→ 保守避让
+    typing_file.write_text(
+        json.dumps({"demo": {"unknown": time.time()}}), encoding="utf-8"
+    )
+    module._notify_pane("kimi", "main", 904, "未知落点", str(project))
+    assert prompts == []

@@ -23,7 +23,7 @@ def cleanup_terms():
         terminal.kill_term(t["id"])
     with terminal._lock:
         terminal._superseded_terms.clear()
-        terminal._session_user_input.clear()
+        terminal._session_pane_input.clear()
 
 
 def _create(**kw):
@@ -110,6 +110,7 @@ def test_create_stores_safe_display_label():
 
 def test_user_typing_window_tracks_labeled_web_terminal(monkeypatch, tmp_path):
     monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", tmp_path / "typing.json")
+    monkeypatch.setattr(terminal, "_current_pane", lambda session: "w1:p1")
     now = {"value": 100.0}
     monkeypatch.setattr(terminal.time, "monotonic", lambda: now["value"])
     labeled = terminal.create_term(label="demo")["id"]
@@ -117,10 +118,24 @@ def test_user_typing_window_tracks_labeled_web_terminal(monkeypatch, tmp_path):
 
     assert terminal.note_user_input(unlabeled) is None
     assert terminal.note_user_input(labeled) == "demo"
+    assert terminal.user_typing_recently("demo", "w1:p1") is True
+    # pane 粒度: 同 session 其他 pane 不受影响
+    assert terminal.user_typing_recently("demo", "w1:p8") is False
     assert terminal.user_typing_recently("demo") is True
     now["value"] += terminal.USER_TYPING_WINDOW
-    assert terminal.user_typing_recently("demo") is False
-    assert "demo" not in terminal._session_user_input
+    assert terminal.user_typing_recently("demo", "w1:p1") is False
+    assert ("demo", "w1:p1") not in terminal._session_pane_input
+
+
+def test_user_typing_unknown_pane_defers_conservatively(monkeypatch, tmp_path):
+    """输入时解析不到落点 pane → 记 unknown,任意 pane 投递都避让。"""
+    monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", tmp_path / "typing.json")
+    monkeypatch.setattr(terminal, "_current_pane", lambda session: None)
+    labeled = terminal.create_term(label="demo")["id"]
+
+    assert terminal.note_user_input(labeled) == "demo"
+    assert terminal.user_typing_recently("demo", "w1:p8") is True
+    assert terminal.user_typing_recently("demo", "w1:p1") is True
 
 
 def test_create_can_exec_direct_pty_command_without_login_shell():
@@ -669,14 +684,22 @@ def test_write_term_dups_fd_under_lock_and_closes_copy(monkeypatch):
 
 
 def test_note_user_input_persists_wall_clock_state_file(monkeypatch, tmp_path):
-    """落盘给 mail-send 等外部进程用:墙钟时间、含 session 键。"""
+    """落盘给 mail-send 等外部进程用:墙钟时间、pane 粒度。"""
     state_file = tmp_path / "state" / "typing.json"
     monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", state_file)
+    monkeypatch.setattr(terminal, "_current_pane", lambda session: "w1:p1")
     labeled = terminal.create_term(label="demo")["id"]
 
     assert terminal.note_user_input(labeled) == "demo"
     data = json.loads(state_file.read_text(encoding="utf-8"))
-    assert abs(data["demo"] - time.time()) < 5
+    assert abs(data["demo"]["panes"]["w1:p1"] - time.time()) < 5
+
+    # 落点 pane 解析失败 → unknown 保守记录
+    monkeypatch.setattr(terminal, "_current_pane", lambda session: None)
+    terminal._typing_state_last_write.clear()
+    assert terminal.note_user_input(labeled) == "demo"
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert abs(data["demo"]["unknown"] - time.time()) < 5
 
     # 未打标签的终端不落盘
     state_file.unlink()
@@ -685,10 +708,26 @@ def test_note_user_input_persists_wall_clock_state_file(monkeypatch, tmp_path):
     assert not state_file.exists()
 
 
+def test_typing_state_file_upgrade_from_legacy_float(monkeypatch, tmp_path):
+    """旧 float 格式(session 级)写入时升级为 pane 粒度新格式。"""
+    state_file = tmp_path / "state" / "typing.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"demo": time.time()}), encoding="utf-8")
+    monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", state_file)
+    monkeypatch.setattr(terminal, "_current_pane", lambda session: "w1:p1")
+    labeled = terminal.create_term(label="demo")["id"]
+
+    assert terminal.note_user_input(labeled) == "demo"
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert isinstance(data["demo"], dict)
+    assert "w1:p1" in data["demo"]["panes"]
+
+
 def test_note_user_input_persists_each_session_within_rate_limit(monkeypatch, tmp_path):
     """全局限频会漏掉另一 session；每个 session 必须各自落盘。"""
     state_file = tmp_path / "state" / "typing.json"
     monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", state_file)
+    monkeypatch.setattr(terminal, "_current_pane", lambda session: "w1:p1")
     now = {"value": 100.0}
     monkeypatch.setattr(terminal.time, "monotonic", lambda: now["value"])
     first = terminal.create_term(label="first")["id"]
@@ -700,3 +739,4 @@ def test_note_user_input_persists_each_session_within_rate_limit(monkeypatch, tm
 
     data = json.loads(state_file.read_text(encoding="utf-8"))
     assert set(data) == {"first", "second"}
+    assert all(isinstance(v, dict) for v in data.values())

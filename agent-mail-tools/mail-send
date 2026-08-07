@@ -356,24 +356,34 @@ def _notify_text(
     )
 
 
-def _recipient_typing(session: str, pane_id: str, focused_pane_id: str | None) -> bool:
+def _recipient_typing(session: str, pane_id: str) -> bool:
     """用户正在目标 pane 里输入(未提交草稿)时返回 True。
 
-    typing.json 是 session 粒度(Cockpit Web PTY 只知道 attach 的 session),
-    输入实际落在该 session 的聚焦 pane:仅当通知目标 pane 正是聚焦 pane
-    时才避让,同 session 其他 agent 的 pane 不受影响;焦点查不到时保守避让。
+    typing.json 由 Cockpit 在输入发生时按 pane 落盘:
+    新格式 {session: {"panes": {pane_id: ts}, "unknown": ts?}};
+    旧 float 格式与 unknown 记录按未知 pane 保守避让。
     """
     try:
         with open(TYPING_STATE_PATH, encoding="utf-8") as handle:
             data = json.load(handle)
-        ts = float(data.get(session, 0))
     except Exception:
         return False
-    if not 0 < time.time() - ts < TYPING_DEFER_WINDOW:
+    entry = data.get(session)
+
+    def fresh(ts) -> bool:
+        try:
+            return 0 < time.time() - float(ts) < TYPING_DEFER_WINDOW
+        except (TypeError, ValueError):
+            return False
+
+    if isinstance(entry, (int, float)):
+        return fresh(entry)  # 旧格式: pane 未知,保守避让
+    if not isinstance(entry, dict):
         return False
-    if focused_pane_id is None:
+    panes = entry.get("panes")
+    if isinstance(panes, dict) and fresh(panes.get(pane_id)):
         return True
-    return pane_id == focused_pane_id
+    return fresh(entry.get("unknown"))
 
 
 def _notify_pane(
@@ -387,7 +397,6 @@ def _notify_pane(
     bindings = _load_bindings()
     sessions = [row for row in _session_rows(env) if row.get("running")]
     candidates = []
-    focused_by_session = {}
     for session in sessions:
         try:
             result = subprocess.run(
@@ -399,11 +408,7 @@ def _notify_pane(
                 if line.startswith("data:"):
                     raw = line[5:].strip()
                     break
-            snap = json.loads(raw).get("result", {}).get("snapshot", {})
-            panes = snap.get("panes", [])
-            focused_by_session[session["name"]] = snap.get("focused_pane_id") or next(
-                (p.get("pane_id") for p in panes if p.get("focused")), None
-            )
+            panes = json.loads(raw).get("result", {}).get("snapshot", {}).get("panes", [])
             bound_project = _session_mail_project(bindings, session)
             bound = bool(bound_project) and os.path.realpath(
                 os.path.expanduser(bound_project)
@@ -421,7 +426,7 @@ def _notify_pane(
         except Exception:
             continue
     for session, pane_id, cwd, is_exact in _select_notify_targets(candidates, project_key):
-        if _recipient_typing(session, pane_id, focused_by_session.get(session)):
+        if _recipient_typing(session, pane_id):
             print(
                 f"notice: {session}/{pane_id} 用户正在输入，跳过实时通知"
                 "（消息保留未读，对方里程碑自查可见）",
