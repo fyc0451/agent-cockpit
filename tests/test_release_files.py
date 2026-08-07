@@ -1,11 +1,11 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
+import http.server
 import os
 import shutil
-import socket
 import subprocess
 import sys
-import time
+import threading
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -683,37 +683,23 @@ def test_agent_mail_hub_installer_self_heals_managed_config(tmp_path):
 
 
 def _probe_fake_hub(tmp_path, response_body):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server_script = tmp_path / "fake_hub.py"
-    server_script.write_text(
-        "import http.server, sys\n"
-        f"BODY = {response_body.encode()!r}\n"
-        "class H(http.server.BaseHTTPRequestHandler):\n"
-        "    def do_POST(self):\n"
-        "        self.send_response(200)\n"
-        "        self.send_header('Content-Type', 'application/json')\n"
-        "        self.end_headers()\n"
-        "        self.wfile.write(BODY)\n"
-        "    def log_message(self, *a):\n"
-        "        pass\n"
-        f"http.server.HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n")
-    server = subprocess.Popen(
-        [sys.executable, str(server_script)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    body = response_body.encode()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                    break
-            except OSError:
-                if server.poll() is not None:
-                    raise AssertionError("fake Hub exited before listening")
-                time.sleep(0.01)
-        else:
-            raise AssertionError("fake Hub did not listen within 5 seconds")
         client_env = tmp_path / "client.env"
         client_env.write_text(f"hub=http://127.0.0.1:{port}\ntoken=tok\n")
         env = {**os.environ, "AGENT_MAIL_CLIENT_ENV": str(client_env),
@@ -724,8 +710,9 @@ def _probe_fake_hub(tmp_path, response_body):
         )
         return result, port
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        server.shutdown()
+        server_thread.join(timeout=5)
+        server.server_close()
 
 
 def test_agent_mail_hub_installer_reuses_running_hub_on_custom_port(tmp_path):
