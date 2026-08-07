@@ -1590,3 +1590,19 @@ def test_sessions_merged_into_workspace_tab():
     assert "function attShowSessions()" in js
     assert "function attShowTasks()" in js
     assert "function attRefresh()" in js
+
+
+def test_mobile_nav_closes_and_term_file_panel():
+    js = _inline_js()
+    # 手机菜单:open 在 #side 上,点菜单项/遮罩都要能关掉
+    assert 'id="sideBackdrop"' in HTML
+    assert "function closeNav()" in js
+    assert "closeNav()" in js
+    assert ".side-backdrop.show" in HTML
+    assert "getElementById('nav').classList.remove('open')" not in js
+    # 终端工具栏「文件」按钮:PC 右侧面板/手机跳文件页
+    assert 'id="termFilesBtn"' in HTML
+    assert 'id="termFilePanel"' in HTML
+    assert "function termFiles()" in js
+    assert "function termFileOpen(" in js
+    assert "on('#termFileList'" in js

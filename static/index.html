@@ -414,13 +414,15 @@ header .spacer{flex:1}
   /* 移动端输入框 >=16px,避免 iOS focus 自动缩放 */
   input,select,textarea,.set-card input,.set-card select{font-size:16px}
 }
+.side-backdrop{display:none}
 @media(max-width:1100px){
   /* nav 折叠断点;JS 侧用同一 (max-width:1100px) matchMedia(NAV_COLLAPSE_MQ) */
   .app{grid-template-columns:1fr}
   header{display:flex}
   .nav-toggle{display:block}
-  .side{position:fixed;top:0;bottom:0;left:0;width:min(78vw,300px);transform:translateX(-102%);transition:transform .2s ease;box-shadow:0 0 40px rgba(0,0,0,.22)}
+  .side{position:fixed;top:0;bottom:0;left:0;width:min(78vw,300px);transform:translateX(-102%);transition:transform .2s ease;box-shadow:0 0 40px rgba(0,0,0,.22);z-index:60}
   .side.open{transform:none}
+  .side-backdrop.show{display:block;position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:55}
 }
 @media(max-width:860px){
   .msgs-body,.files-body{grid-template-columns:1fr}
@@ -514,6 +516,7 @@ header .spacer{flex:1}
       </div>
     </div>
   </aside>
+  <div class="side-backdrop" id="sideBackdrop" onclick="closeNav()"></div>
   <div class="main">
   <header>
     <button class="icon nav-toggle" onclick="toggleNav()" data-i18n-title="nav.menu" title="菜单">☰</button>
@@ -622,6 +625,7 @@ header .spacer{flex:1}
       <button class="primary sm" onclick="termNew()" data-i18n="term.new">+ 新终端</button>
       <button class="sm" onclick="showLaunchModal()" data-i18n="term.addagent">＋ 添加 Agent</button>
       <select id="termSelect" onchange="termSwitch(this.value)" style="width:auto;min-width:160px"></select>
+      <button class="sm" id="termFilesBtn" onclick="termFiles()" title="浏览当前终端目录的文件(PC 在右侧打开面板,手机跳到文件页)">📁 文件</button>
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端"><span data-i18n="term.upload">📎上传</span><input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="联系本地 Agent 或向当前团队群组发送求助" data-i18n="term.collab">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
@@ -667,7 +671,13 @@ header .spacer{flex:1}
       <button class="term-key-extra" onclick="termKey('F11')">F11</button>
       <button class="term-key-extra" onclick="termKey('F12')">F12</button>
     </div>
-    <div id="termContainer" style="flex:1;background:var(--term-bg);padding:6px 14px 6px 6px;overflow:hidden"></div>
+    <div id="termMain" style="flex:1;display:flex;min-height:0;overflow:hidden">
+      <div id="termContainer" style="flex:1;min-width:0;background:var(--term-bg);padding:6px 14px 6px 6px;overflow:hidden"></div>
+      <div id="termFilePanel" style="display:none;width:min(40%,460px);flex:none;border-left:1px solid var(--bd);background:var(--bg2);flex-direction:column;min-height:0">
+        <div class="editor-bar"><span class="ep" id="termFilePath"></span><button class="icon" onclick="termFileLoad()" title="刷新">↻</button><button class="icon" onclick="termFileClose()" title="关闭">✕</button></div>
+        <div id="termFileList" style="flex:1;overflow:auto;padding:6px"></div>
+      </div>
+    </div>
   </section>
 
   <!-- herdr 流视图(只读 pane 流 + 输入框发指令,手机可滚屏/复制) -->
@@ -983,7 +993,13 @@ function applyLang(){
 function toggleNav(){
   const side=document.getElementById('side');if(!side)return;
   const open=side.classList.toggle('open');
+  document.getElementById('sideBackdrop')?.classList.toggle('show',open);
   try{localStorage.setItem('nav-open',open?'1':'0')}catch(e){}
+}
+function closeNav(){
+  document.getElementById('side')?.classList.remove('open');
+  document.getElementById('sideBackdrop')?.classList.remove('show');
+  try{localStorage.setItem('nav-open','0')}catch(e){}
 }
 function toggleTermToolbar(){
   const tb=document.querySelector('.term-toolbar');if(!tb)return;
@@ -994,7 +1010,7 @@ function toggleTermToolbar(){
 }
 (function restoreCollapses(){
   try{
-    if(localStorage.getItem('nav-open')==='1')document.getElementById('side').classList.add('open');
+    if(localStorage.getItem('nav-open')==='1'){document.getElementById('side').classList.add('open');document.getElementById('sideBackdrop')?.classList.add('show')}
     const tb=document.querySelector('.term-toolbar');
     const stored=localStorage.getItem('term-toolbar-collapsed');
     // 触屏设备进入终端时默认保持紧凑；本次页面内仍可手动展开。
@@ -1659,7 +1675,7 @@ function showView(v){
   }else hfStop();
 }
 const NAV_COLLAPSE_MQ=window.matchMedia('(max-width:1100px)');// 与 CSS @media(max-width:1100px) 同一断点
-document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(NAV_COLLAPSE_MQ.matches)document.getElementById('nav').classList.remove('open')});
+document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(NAV_COLLAPSE_MQ.matches)closeNav()});
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
 const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',opencode:'🟣',gemini:'💎',grok:'✖️'};
 
@@ -3680,6 +3696,65 @@ function fileDownloadDir(path,name){
   a.download='';document.body.appendChild(a);a.click();a.remove();
   toast('正在打包下载目录…');
 }
+
+// ============ 终端内嵌文件面板 ============
+let TERM_FILE_CWD=null,TERM_FILE_OPEN=false;
+function termFiles(){
+  const ctx=termCollabContext();
+  let dir=ctx.workdir;
+  if(!dir&&ctx.session){const p=(BOARD?.panes||[]).find(x=>x.session===ctx.session&&x.cwd);dir=p?.cwd||''}
+  if(!dir){toast('当前终端没有目录信息');return}
+  // 手机/窄屏:跳到文件页定位到该目录;PC:右侧内嵌面板
+  if(NAV_COLLAPSE_MQ.matches){FILE_CWD=dir;showView('files');return}
+  if(TERM_FILE_OPEN){termFileClose();return}
+  TERM_FILE_OPEN=true;TERM_FILE_CWD=dir;
+  document.getElementById('termFilesBtn').classList.add('active');
+  document.getElementById('termFilePanel').style.display='flex';
+  termFileLoad();
+  setTimeout(()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM)},60);
+}
+function termFileClose(){
+  TERM_FILE_OPEN=false;
+  document.getElementById('termFilePanel').style.display='none';
+  document.getElementById('termFilesBtn')?.classList.remove('active');
+  setTimeout(()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM)},60);
+}
+async function termFileLoad(){
+  const list=document.getElementById('termFileList');
+  if(!TERM_FILE_OPEN)return;
+  list.innerHTML='<div class="muted" style="padding:8px">加载中…</div>';
+  try{
+    const d=await api('/api/files?path='+encodeURIComponent(TERM_FILE_CWD));
+    if(!TERM_FILE_OPEN)return;
+    TERM_FILE_CWD=d.path;
+    document.getElementById('termFilePath').textContent=d.path;
+    list.innerHTML=d.entries.map(e=>{
+      const full=d.path.endsWith('/')?d.path+e.name:d.path+'/'+e.name;
+      const dl=e.type==='dir'
+        ?`<button class="icon" data-action="tfDlDir" data-path="${esc(full)}" title="打包下载目录">⬇️</button>`
+        :`<button class="icon" data-action="tfDl" data-path="${esc(full)}" title="下载">⬇️</button>`;
+      return `<div class="ft-item" data-action="${e.type==='dir'?'tfCd':'tfOpen'}" data-path="${esc(full)}"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${dl}</div>`;
+    }).join('')||'<div class="empty">空目录</div>';
+  }catch(e){list.innerHTML=`<div class="empty">打开目录失败: ${esc(String(e))}</div>`}
+}
+async function termFileOpen(path){
+  const list=document.getElementById('termFileList');
+  const ext=(path.split('.').pop()||'').toLowerCase();
+  const raw='/api/files/raw?path='+encodeURIComponent(path);
+  const head=`<div class="ft-item" data-action="tfBack">← <span class="muted">返回列表</span></div>
+    <div style="font:11px var(--mono);padding:4px 8px;word-break:break-all;color:var(--fg3)">${esc(path)}</div>`;
+  if(FILE_IMG_EXT.includes(ext)){list.innerHTML=head+`<div style="padding:8px"><img src="${raw}" style="max-width:100%;border-radius:8px"></div>`;return}
+  if(FILE_AUD_EXT.includes(ext)){list.innerHTML=head+`<div style="padding:8px"><audio controls src="${raw}" style="width:100%"></audio></div>`;return}
+  if(FILE_VID_EXT.includes(ext)){list.innerHTML=head+`<div style="padding:8px"><video controls src="${raw}" style="max-width:100%;border-radius:8px"></video></div>`;return}
+  try{
+    const d=await api('/api/files/read?path='+encodeURIComponent(path));
+    if(d.binary){
+      const a=document.createElement('a');a.href='/api/files/download?path='+encodeURIComponent(path);a.download='';document.body.appendChild(a);a.click();a.remove();
+      return;
+    }
+    list.innerHTML=head+`<pre style="margin:0;padding:8px;font:12px var(--mono);white-space:pre-wrap;word-break:break-word">${esc(d.text)}</pre>`;
+  }catch(e){toast('打开失败: '+e)}
+}
 function fileDownload(){
   if(!FILE_PATH){toast('未选择文件');return}
   const a=document.createElement('a');
@@ -4003,6 +4078,15 @@ function bindDelegation(){
     else if(a==='fileDownloadDir')fileDownloadDir(it.dataset.path,it.dataset.name);
     else if(a==='fileSearchOpen')fileSearchOpen(parseInt(it.dataset.idx));
     else if(a==='fileSearchDownload')fileSearchDownload(parseInt(it.dataset.idx))});
+  on('#termFileList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    const a=it.dataset.action;
+    if(a==='tfCd'){TERM_FILE_CWD=it.dataset.path;termFileLoad()}
+    else if(a==='tfOpen')termFileOpen(it.dataset.path);
+    else if(a==='tfBack')termFileLoad();
+    else if(a==='tfDl'||a==='tfDlDir'){
+      const u=a==='tfDl'?'/api/files/download?path=':'/api/files/download-dir?path=';
+      const el=document.createElement('a');el.href=u+encodeURIComponent(it.dataset.path);el.download='';document.body.appendChild(el);el.click();el.remove();
+    }});
   // 单一 resize 监听(替代原先每个 termMount 各加一个的累积泄漏)
   const fitVisibleTerm=()=>{positionTermForKeyboard();if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(CURRENT_TERM)positionDrawerBelowHeader();keepFocusedControlVisible()};
   window.addEventListener('resize',fitVisibleTerm);
