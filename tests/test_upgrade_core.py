@@ -365,6 +365,49 @@ def test_api_maps_error_codes_without_secrets(install_tree, monkeypatch):
     assert "Release" in r.json()["detail"] or "官方" in r.json()["detail"]
 
 
+def test_api_upgrade_requires_cockpit_token_not_public(install_tree, monkeypatch):
+    """POST /api/upgrade 非 PUBLIC：无认证与错误 token 均 401；正确 token 仍走契约。
+
+    证明共享 COCKPIT_TOKEN 即本机管理员鉴权，升级路由受 protect_api 保护。
+    """
+    import server
+
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret-token-xyz", raising=False)
+    # 升级路由不得出现在 PUBLIC_PATHS
+    assert "/api/upgrade" not in server.PUBLIC_PATHS
+    assert "/api/upgrade/status" not in server.PUBLIC_PATHS
+
+    upgrade_core.configure_hooks(
+        skip_venv_check=lambda: True,
+        preflight_supervisor=lambda: True,
+        fetch_release=lambda tag: (_ for _ in ()).throw(ValueError("release_unavailable")),
+    )
+    client = TestClient(server.app)
+    body = {"target": "0.3.0"}
+
+    r_none = client.post("/api/upgrade", json=body)
+    assert r_none.status_code == 401, r_none.text
+    assert "未认证" in r_none.json().get("detail", "")
+
+    r_bad = client.post(
+        "/api/upgrade",
+        headers={"authorization": "Bearer wrong-token"},
+        json=body,
+    )
+    assert r_bad.status_code == 401, r_bad.text
+    assert "未认证" in r_bad.json().get("detail", "")
+
+    # 正确 token：仍走现有契约（此处 hook 抛 release_unavailable → 400）
+    r_ok = client.post(
+        "/api/upgrade",
+        headers={"authorization": "Bearer secret-token-xyz"},
+        json=body,
+    )
+    assert r_ok.status_code == 400
+    detail = r_ok.json().get("detail", "")
+    assert "Release" in detail or "官方" in detail
+
+
 def test_preflight_supervisor_no_bus(install_tree, monkeypatch):
     """bus 不可达 → fail closed（不得因 KillMode/文件存在而 PASS）。"""
     upgrade_core.clear_hooks()
@@ -1225,3 +1268,44 @@ def test_r8_cleanup_darwin_upgrade_job(install_tree, monkeypatch, tmp_path):
     assert not plist.exists()
     assert len(detached) == 1
     assert "upgrade.abc" in detached[0]
+
+
+def test_r8_cleanup_plist_deleted_even_if_detached_popen_fails(
+    install_tree, monkeypatch, tmp_path,
+):
+    """R8：detached Popen 失败时 plist 仍已先删（不依赖 cleaner 成功）。"""
+    upgrade_core.clear_hooks()
+    la = tmp_path / "Library" / "LaunchAgents"
+    la.mkdir(parents=True)
+    plist = la / "io.github.fyc0451.agent-cockpit.upgrade.fail.plist"
+    plist.write_text("<plist/>\n", encoding="utf-8")
+    monkeypatch.setenv(
+        "COCKPIT_UPGRADE_LAUNCHD_LABEL", "io.github.fyc0451.agent-cockpit.upgrade.fail"
+    )
+    monkeypatch.setenv("COCKPIT_UPGRADE_LAUNCHD_PLIST", str(plist))
+
+    bootouts: list[list[str]] = []
+
+    def boom_popen(*a, **k):
+        # 证明：调用 Popen 前 plist 必须已消失
+        assert not plist.exists(), "plist must be unlinked before detached Popen"
+        raise OSError("popen denied")
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        if list(cmd)[:2] == ["launchctl", "bootout"]:
+            bootouts.append(list(cmd))
+            # fallback _cleanup_darwin_oneshot 路径
+            assert not plist.exists()
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "Popen", boom_popen)
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    assert plist.exists()
+    upgrade_core.cleanup_darwin_upgrade_job()
+    assert not plist.exists()
+    assert bootouts, "fallback bootout after Popen failure"
+    assert "upgrade.fail" in bootouts[0][-1]
