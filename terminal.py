@@ -50,7 +50,8 @@ _session_user_input: dict[str, float] = {}
 _TYPING_STATE_PATH = (
     Path.home() / ".local" / "state" / "agent-cockpit" / "typing.json"
 )
-_typing_state_last_write = 0.0
+_typing_state_last_write: dict[tuple[str, str], float] = {}
+_typing_state_lock = threading.Lock()
 _lock = threading.Lock()
 # pty.fork 先创建 master fd 再返回父进程；串行化 fork→FD_CLOEXEC，
 # 避免并发创建时另一个 shell 在标记前继承该 master fd。
@@ -556,33 +557,40 @@ def sweep_idle(max_idle: float | None = None) -> int:
 
 
 def _persist_typing_state(session: str) -> None:
-    """把本次击键的墙钟时间写入状态文件(限频,原子替换)。"""
-    global _typing_state_last_write
+    """把本次击键的墙钟时间写入状态文件(每 session 限频,原子替换)。"""
     now_mono = time.monotonic()
-    if now_mono - _typing_state_last_write < 1.0:
-        return
-    _typing_state_last_write = now_mono
-    try:
-        _TYPING_STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        data: dict[str, float] = {}
+    state_key = (str(_TYPING_STATE_PATH), session)
+    with _typing_state_lock:
+        if now_mono - _typing_state_last_write.get(state_key, 0.0) < 1.0:
+            return
         try:
-            loaded = json.loads(_TYPING_STATE_PATH.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = {str(k): float(v) for k, v in loaded.items()}
-        except (OSError, ValueError, TypeError):
-            data = {}
-        wall = time.time()
-        data[session] = wall
-        # 清理过期项,避免文件长期增长
-        data = {k: v for k, v in data.items() if wall - v < 24 * 3600}
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".typing.", suffix=".tmp", dir=str(_TYPING_STATE_PATH.parent)
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle)
-        os.replace(tmp_name, _TYPING_STATE_PATH)
-    except OSError:
-        pass
+            _TYPING_STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            data: dict[str, float] = {}
+            try:
+                loaded = json.loads(_TYPING_STATE_PATH.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = {str(k): float(v) for k, v in loaded.items()}
+            except (OSError, ValueError, TypeError):
+                data = {}
+            wall = time.time()
+            data[session] = wall
+            # 清理过期项,避免文件长期增长
+            data = {k: v for k, v in data.items() if wall - v < 24 * 3600}
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=".typing.", suffix=".tmp", dir=str(_TYPING_STATE_PATH.parent)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle)
+                os.replace(tmp_name, _TYPING_STATE_PATH)
+            finally:
+                try:
+                    os.unlink(tmp_name)
+                except FileNotFoundError:
+                    pass
+            _typing_state_last_write[state_key] = now_mono
+        except OSError:
+            pass
 
 
 def note_user_input(term_id: str) -> str | None:

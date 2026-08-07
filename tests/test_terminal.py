@@ -683,3 +683,20 @@ def test_note_user_input_persists_wall_clock_state_file(monkeypatch, tmp_path):
     unlabeled = terminal.create_term()["id"]
     assert terminal.note_user_input(unlabeled) is None
     assert not state_file.exists()
+
+
+def test_note_user_input_persists_each_session_within_rate_limit(monkeypatch, tmp_path):
+    """全局限频会漏掉另一 session；每个 session 必须各自落盘。"""
+    state_file = tmp_path / "state" / "typing.json"
+    monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", state_file)
+    now = {"value": 100.0}
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: now["value"])
+    first = terminal.create_term(label="first")["id"]
+    second = terminal.create_term(label="second")["id"]
+
+    assert terminal.note_user_input(first) == "first"
+    now["value"] += 0.1
+    assert terminal.note_user_input(second) == "second"
+
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert set(data) == {"first", "second"}
