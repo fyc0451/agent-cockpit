@@ -472,8 +472,9 @@ def test_h5_layout_uses_visible_dynamic_viewport():
     assert "height:100dvh" in HTML
     assert ".drawer-bg.show{inset:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);padding:0}" in HTML
     assert ".drawer{height:100%;max-height:100%" in HTML
-    # 顶部导航与终端工具栏在窄屏必须换行，不能被 body overflow:hidden 裁掉。
-    assert "header nav{order:3;width:100%" in HTML
+    # 窄屏导航为左侧抽屉(可被划出),终端工具栏换行,不被 body overflow:hidden 裁掉。
+    assert ".side{position:fixed" in HTML
+    assert ".side.open{transform:none}" in HTML
     assert ".term-toolbar{flex-wrap:wrap" in HTML
     assert "visualViewport" in HTML
 
@@ -979,7 +980,7 @@ def test_agent_mail_unread_is_not_presented_as_human_attention():
 
 def test_attention_is_a_session_task_board_with_progress_and_agent_details():
     js = _inline_js()
-    assert ">任务</button>" in HTML
+    assert ">工作台</button>" in HTML
     assert 'data-i18n="attention.title">任务看板<' in HTML
     assert "function sessionTaskHtml(session)" in js
     assert 'class="task-board"' in js
@@ -1158,11 +1159,11 @@ def test_i18n_en_ja_key_sets_match():
 def test_i18n_framework_and_static_markup():
     assert "function t(key,zh,vars)" in HTML
     assert "function applyLang()" in HTML
-    assert 'data-i18n="nav.board"' in HTML
+    assert 'data-i18n="nav.attention"' in HTML
     assert 'data-i18n="nav.settings"' in HTML
     assert 'data-i18n-ph="launch.workdir.ph"' in HTML
     # 中文原文仍作为回退保留在源码中
-    assert "看板" in HTML and "设置" in HTML
+    assert "工作台" in HTML and "设置" in HTML
 
 
 def test_settings_js_functions_exist():
@@ -1190,7 +1191,7 @@ def test_nav_and_toolbar_collapsible():
     assert 'class="icon tb-toggle"' in HTML
     assert "function toggleNav()" in HTML
     assert "function toggleTermToolbar()" in HTML
-    assert "header nav.open{display:grid}" in HTML
+    assert ".side.open{transform:none}" in HTML
     assert ".term-toolbar.collapsed>*:not(.tb-toggle):not(#termKeyboardToggle){display:none}" in HTML
     # 窄屏默认收起工具栏；宽松导航在 1100px 前折叠，CSS 与 matchMedia 同源。
     assert "window.innerWidth<=860" in HTML

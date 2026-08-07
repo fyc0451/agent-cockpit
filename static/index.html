@@ -52,17 +52,28 @@ pre,.mono{font-family:var(--mono)}
 .muted{color:var(--fg3)} .fg2{color:var(--fg2)}
 
 /* 头部 */
-.app{display:flex;flex-direction:column;height:100vh;height:100dvh;padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left)}
-header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--bd);box-shadow:0 1px 2px rgba(0,0,0,.04)}
-header .logo{font-weight:750;font-size:16px;letter-spacing:-.2px;white-space:nowrap;display:flex;align-items:center;gap:8px}
-header nav{display:flex;gap:4px}
-header nav button{background:transparent;border:none;padding:8px 15px;color:var(--fg2);border-radius:999px;font-size:13.5px;font-weight:550;transition:background .15s,color .15s}
-header nav button.active{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}
+.app{display:grid;grid-template-columns:236px minmax(0,1fr);height:100vh;height:100dvh;padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left)}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+header{display:none;align-items:center;gap:10px;padding:10px 14px;background:var(--bg2);border-bottom:1px solid var(--bd)}
+header .logo{font-weight:750;font-size:15px;letter-spacing:-.2px;white-space:nowrap;display:flex;align-items:center;gap:8px}
 header .spacer{flex:1}
 .nav-toggle{display:none}
+.side{display:flex;flex-direction:column;background:var(--bg2);border-right:1px solid var(--bd);min-height:0;z-index:40}
+.side-brand{display:flex;align-items:center;gap:10px;padding:16px 16px 12px;border-bottom:1px solid var(--bd)}
+.side-logo{width:32px;height:32px;display:grid;place-items:center;border-radius:9px;background:color-mix(in srgb,var(--accent) 14%,transparent);font-size:16px}
+.side-title b{display:block;font-size:14.5px;letter-spacing:-.2px}
+.side-title small{color:var(--fg3);font-size:10.5px}
+#side nav{display:flex;flex-direction:column;gap:2px;padding:10px;flex:1;overflow:auto}
+#side nav button{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:transparent;border:none;padding:9px 12px;border-radius:9px;color:var(--fg2);font-size:13.5px;font-weight:550}
+#side nav button:hover{background:var(--bg3);color:var(--fg)}
+#side nav button.active{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}
+#side nav button .nav-ic{width:18px;text-align:center;opacity:.85}
+#side nav button .nav-badge{margin-left:auto}
+.side-foot{padding:12px;border-top:1px solid var(--bd);display:flex;flex-direction:column;gap:8px}
+.side-actions{display:flex;align-items:center;gap:8px}
 .stat-pill{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--fg2);background:var(--bg3);padding:3px 9px;border-radius:12px}
-.set-card{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;padding:16px 18px;margin-bottom:14px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.set-card h3{font-size:14px;margin-bottom:8px}
+.set-card{background:var(--bg2);border:1px solid var(--bd);border-radius:16px;padding:20px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.04),0 6px 16px rgba(0,0,0,.05)}
+.set-card h3{font-size:15px;font-weight:650;letter-spacing:-.1px;margin-bottom:12px}
 .set-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .set-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg2)}
 .set-card input,.set-card select{background:var(--bg3);border:1px solid var(--bd2);border-radius:7px;color:var(--fg);padding:6px 8px;font-size:13px}
@@ -127,14 +138,15 @@ header .spacer{flex:1}
 .file-guide{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;font-size:12px;color:var(--fg2);background:var(--bg3);border-bottom:1px solid var(--bd)}
 .file-guide span{flex:1;min-width:220px}
 .file-guide button{width:auto;flex:0 0 auto}
-.files-body{flex:1;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:10px;padding:10px;overflow:hidden}
-.file-tree{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:auto}
-.ft-item{padding:5px 10px;border-radius:6px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;white-space:nowrap}
+.files-body{flex:1;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:14px;padding:14px;overflow:hidden}
+.file-tree{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;overflow:auto;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:6px}
+.ft-item{padding:7px 12px;border-radius:9px;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;white-space:nowrap;transition:background .12s}
 .ft-item:hover{background:var(--bg3)}
-.ft-bc{font-family:var(--mono);font-size:11px;color:var(--fg3);padding:6px 4px;word-break:break-all}
+.ft-item:active{background:var(--bg4)}
+.ft-bc{font-family:var(--mono);font-size:11px;color:var(--fg3);padding:8px 8px;word-break:break-all;border-bottom:1px solid var(--bd);margin-bottom:4px}
 .ft-root-group{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:4px}
 .ft-root-group-label{flex:0 0 68px;font-size:11px;color:var(--fg3)}
-.ft-root-chip{display:inline-flex;align-items:center;gap:3px;padding:3px 6px;border:1px solid var(--bd);border-radius:6px;cursor:pointer;font:11px var(--mono);word-break:break-all}
+.ft-root-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border:1px solid var(--bd);border-radius:999px;cursor:pointer;font:11px var(--mono);word-break:break-all;background:var(--bg3)}
 .ft-root-chip.active{color:var(--accent);border-color:var(--accent)}
 .ft-root-chip button{padding:1px 4px;min-width:0;font-size:10px}
 .editor-area{display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:hidden}
@@ -160,6 +172,16 @@ header .spacer{flex:1}
 .field label{display:block;font-size:11px;color:var(--fg2);margin-bottom:3px}
 
 /* 团队 Hub：Human / 项目 / 成员 / Agent 管理，仅展示远端数据 */
+.agent-strip{display:flex;gap:8px;flex-wrap:wrap;padding:12px 14px 4px}
+.agent-chip{display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:8px 12px;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:transform .15s,border-color .15s}
+.agent-chip:hover{border-color:var(--accent);transform:translateY(-1px)}
+.agent-chip .chip-main{display:flex;flex-direction:column;align-items:flex-start;min-width:0}
+.agent-chip .chip-main b{font-size:13px}
+.agent-chip .chip-main small{color:var(--fg3);font-size:10.5px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip-status{font-size:10.5px;padding:2px 8px;border-radius:999px;background:var(--bg3);color:var(--fg2)}
+.chip-status.need{background:color-mix(in srgb,var(--need) 16%,transparent);color:var(--need)}
+.chip-status.work{background:color-mix(in srgb,var(--work) 14%,transparent);color:var(--work)}
+.chip-status.done{background:color-mix(in srgb,var(--done) 14%,transparent);color:var(--done)}
 .team-view{overflow:hidden}
 .team-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
 .team-toolbar .spacer{flex:1}
@@ -384,10 +406,11 @@ header .spacer{flex:1}
 }
 @media(max-width:1100px){
   /* nav 折叠断点;JS 侧用同一 (max-width:1100px) matchMedia(NAV_COLLAPSE_MQ) */
-  header{flex-wrap:wrap}
+  .app{grid-template-columns:1fr}
+  header{display:flex}
   .nav-toggle{display:block}
-  header nav{order:3;width:100%;display:none;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}
-  header nav.open{display:grid}
+  .side{position:fixed;top:0;bottom:0;left:0;width:min(78vw,300px);transform:translateX(-102%);transition:transform .2s ease;box-shadow:0 0 40px rgba(0,0,0,.22)}
+  .side.open{transform:none}
 }
 @media(max-width:860px){
   .msgs-body,.files-body{grid-template-columns:1fr}
@@ -461,29 +484,36 @@ header .spacer{flex:1}
 </head>
 <body>
 <div class="app">
-  <header>
-    <div class="logo">⚙️ Agent Cockpit</div>
-    <button class="icon nav-toggle" onclick="toggleNav()" data-i18n-title="nav.menu" title="菜单">☰</button>
+  <aside class="side" id="side">
+    <div class="side-brand"><span class="side-logo">⚙️</span><div class="side-title"><b>Agent Cockpit</b><small>AI Agent 驾驶舱</small></div></div>
     <nav id="nav">
-      <button data-view="board" class="active" data-i18n="nav.board" data-i18n-title="nav.board.t" title="所有 agent 状态总览:需要你 / 工作中 / 完成 / 空闲">看板</button>
-      <button data-view="attention" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="按 session 查看团队任务、进度和阻塞项">任务</button>
-      <button data-view="term" data-i18n="nav.term" data-i18n-title="nav.term.t" title="真终端:接管任意 pane 的 TUI,直接敲命令">终端</button>
-      <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="流视图:可滚屏/复制的 pane 输出 + 快速发指令">流</button>
-      <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止">会话</button>
-      <button data-view="msgs" data-i18n="nav.msgs" data-i18n-title="nav.msgs.t" title="agent 之间的消息(需安装 Agent Mail)">消息</button>
-      <button data-view="team" data-i18n-title="nav.team.t" title="团队项目、成员、Session 绑定与管理员操作"><span data-i18n="nav.team">团队</span><span class="nav-badge" id="teamNavBadge" style="display:none">0</span></button>
-      <button data-view="files" data-i18n="nav.files" data-i18n-title="nav.files.t" title="浏览/编辑/下载项目文件,也可以从这里建工作区">文件</button>
-      <button data-view="settings" data-i18n="nav.settings" data-i18n-title="nav.settings.t" title="语言、主题、agent、目录与环境自检">设置</button>
+      <button data-view="attention" class="active" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="工作台:agent 状态速览 + 任务、进度和阻塞项"><span class="nav-ic">◔</span>工作台</button>
+      <button data-view="term" data-i18n="nav.term" data-i18n-title="nav.term.t" title="开发:接管任意 pane 的真终端 TUI,直接敲命令"><span class="nav-ic">▸</span>开发</button>
+      <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="手机:可滚屏/复制的 pane 输出 + 快速发指令"><span class="nav-ic">≡</span>手机</button>
+      <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止"><span class="nav-ic">◫</span>会话</button>
+      <button data-view="msgs" data-i18n="nav.msgs" data-i18n-title="nav.msgs.t" title="agent 之间的消息(需安装 Agent Mail)"><span class="nav-ic">✉</span>消息</button>
+      <button data-view="team" data-i18n-title="nav.team.t" title="团队项目、成员、Session 绑定与管理员操作"><span class="nav-ic">◍</span><span data-i18n="nav.team">团队</span><span class="nav-badge" id="teamNavBadge" style="display:none">0</span></button>
+      <button data-view="files" data-i18n="nav.files" data-i18n-title="nav.files.t" title="浏览/编辑/下载项目文件,也可以从这里建工作区"><span class="nav-ic">⬒</span>文件</button>
+      <button data-view="settings" data-i18n="nav.settings" data-i18n-title="nav.settings.t" title="语言、主题、agent、目录与环境自检"><span class="nav-ic">⚙</span>设置</button>
     </nav>
+    <div class="side-foot">
+      <div class="stat-pill"><span class="dot" id="liveDot"></span><span id="liveText">--</span></div>
+      <div class="side-actions">
+        <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="任务看板与需处理事项">🔔 <span id="attentionN">0</span></div>
+        <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
+        <button class="icon" onclick="refreshBoard()" title="刷新" data-i18n-title="common.refresh">↻</button>
+      </div>
+    </div>
+  </aside>
+  <div class="main">
+  <header>
+    <button class="icon nav-toggle" onclick="toggleNav()" data-i18n-title="nav.menu" title="菜单">☰</button>
+    <div class="logo">⚙️ Agent Cockpit</div>
     <div class="spacer"></div>
-    <div class="stat-pill"><span class="dot" id="liveDot"></span><span id="liveText">--</span></div>
-    <div class="stat-pill" id="attentionPill" onclick="showView('attention')" style="cursor:pointer" title="任务看板与需处理事项">🔔 <span id="attentionN">0</span></div>
-    <button class="icon" onclick="toggleTheme()" title="切换主题" id="themeBtn">🌙</button>
-    <button class="icon" onclick="refreshBoard()" title="刷新" data-i18n-title="common.refresh">↻</button>
   </header>
 
   <!-- 看板 -->
-  <section id="view-board" class="view active">
+  <section id="view-board" class="view">
     <div class="board-wrap">
       <div id="boardEmpty" class="empty" style="display:none;padding:60px 20px"></div>
       <div class="board" id="board">
@@ -495,8 +525,9 @@ header .spacer{flex:1}
     </div>
   </section>
 
-  <!-- Session 任务看板 -->
-  <section id="view-attention" class="view attention-view">
+  <!-- 工作台: agent 速览 + 任务 -->
+  <section id="view-attention" class="view attention-view active">
+    <div class="agent-strip" id="agentStrip"></div>
     <div class="attention-toolbar">
       <b data-i18n="attention.title">任务看板</b>
       <span class="muted" id="attentionInfo" style="font-size:11px"></span>
@@ -858,7 +889,7 @@ header .spacer{flex:1}
     <div id="suResult" style="margin-top:10px;font-size:12px"></div>
   </div>
 </div>
-
+  </div><!-- /.main -->
 <div class="toast" id="toast"></div>
 
 <script>
@@ -890,7 +921,7 @@ function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent
 // JS 动态文案用 t('key','中文原文') 内联回退,保证源码中文不丢(测试可锚)。
 const I18N={
 en:{
-'nav.menu':'Menu','nav.board':'Board','nav.attention':'Tasks','nav.term':'Terminal','nav.herdrflow':'Flow','nav.sessions':'Sessions','nav.msgs':'Messages','nav.team':'Team','nav.files':'Files','nav.settings':'Settings',
+'nav.menu':'Menu','nav.board':'Board','nav.attention':'Workspace','nav.term':'Dev','nav.herdrflow':'Mobile','nav.sessions':'Sessions','nav.msgs':'Messages','nav.team':'Team','nav.files':'Files','nav.settings':'Settings',
 'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Tasks and progress grouped by session, including blockers','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.team.t':'Team projects, members, default agents and administration','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
 'board.guide.title':'No running agents yet','board.guide.body':'First time here? Create a workspace in one click (it creates the session and starts the agents); for an existing session, use Add Agent in the Terminal toolbar.','board.guide.btn':'🚀 Create your first workspace','board.guide.noherdr':'herdr is unavailable','board.guide.noherdr.body':'The herdr executable was not found. Check Settings → Environment check for missing components, install them, then refresh.','board.guide.noherdr.btn':'Open environment check','launch.nosession':'No session yet — create a workspace first',
 'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
@@ -911,7 +942,7 @@ en:{
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
 ja:{
-'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'タスク','nav.term':'端末','nav.herdrflow':'フロー','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.team':'チーム','nav.files':'ファイル','nav.settings':'設定',
+'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'ワークスペース','nav.term':'開発','nav.herdrflow':'モバイル','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.team':'チーム','nav.files':'ファイル','nav.settings':'設定',
 'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'session ごとのタスク、進捗、ブロッカーを表示','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.team.t':'チームプロジェクト、メンバー、デフォルト Agent、管理操作','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
 'board.guide.title':'実行中の agent はまだありません','board.guide.body':'初めてですか?下のボタンでワークスペースを一発作成(session 作成と agent 起動を自動化)。既存 session には「端末」ツールバーの「Agent 追加」から追加できます。','board.guide.btn':'🚀 最初のワークスペースを作成','board.guide.noherdr':'herdr が利用できません','board.guide.noherdr.body':'herdr 実行ファイルが見つかりません。「設定 → 環境チェック」で不足コンポーネントを確認し、インストール後に更新してください。','board.guide.noherdr.btn':'環境チェックを開く','launch.nosession':'session がまだありません。先にワークスペースを作成してください',
 'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
@@ -940,8 +971,8 @@ function applyLang(){
   document.documentElement.lang=LANG==='zh'?'zh-CN':LANG;
 }
 function toggleNav(){
-  const nav=document.getElementById('nav');if(!nav)return;
-  const open=nav.classList.toggle('open');
+  const side=document.getElementById('side');if(!side)return;
+  const open=side.classList.toggle('open');
   try{localStorage.setItem('nav-open',open?'1':'0')}catch(e){}
 }
 function toggleTermToolbar(){
@@ -953,7 +984,7 @@ function toggleTermToolbar(){
 }
 (function restoreCollapses(){
   try{
-    if(localStorage.getItem('nav-open')==='1')document.getElementById('nav').classList.add('open');
+    if(localStorage.getItem('nav-open')==='1')document.getElementById('side').classList.add('open');
     const tb=document.querySelector('.term-toolbar');
     const stored=localStorage.getItem('term-toolbar-collapsed');
     // 触屏设备进入终端时默认保持紧凑；本次页面内仍可手动展开。
@@ -1830,7 +1861,26 @@ function classify(status,agent){
   return m[status]||'idle';
 }
 
+function renderAgentStrip(d){
+  // 工作台顶部速览条: 每个 agent 一个紧凑卡片,点击直达其终端
+  const el=document.getElementById('agentStrip');
+  if(!el)return;
+  if(!d||!d.available){el.innerHTML='';return}
+  const agents=(d.panes||[]).filter(p=>p.agent);
+  if(!agents.length){el.innerHTML='';return}
+  const statusLabel={working:'工作中',needs_you:'需要你',done:'已完成',idle:'空闲',blocked:'阻塞',failed:'失败'};
+  el.innerHTML=agents.map(p=>{
+    const cls=classify(p.agent_status,p.agent);
+    const label=statusLabel[p.agent_status]||statusLabel[cls]||p.agent_status||'空闲';
+    return `<button class="agent-chip ${esc(cls)}" data-action="openTerm" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" title="${esc(p.session)} · ${esc(p.pane_id)}">
+      <span class="agent-icon ${esc(p.agent)}">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+      <span class="chip-main"><b>${esc(p.agent)}</b><small>${esc(p.session)} · ${esc(p.pane_id)}</small></span>
+      <span class="chip-status ${esc(cls)}">${esc(label)}</span>
+    </button>`;
+  }).join('');
+}
 function renderBoard(d){
+  renderAgentStrip(d);
   const emptyEl=document.getElementById('boardEmpty'),boardEl=document.getElementById('board');
   const showEmpty=html=>{emptyEl.innerHTML=html;emptyEl.style.display='block';boardEl.style.display='none'};
   if(!d.available){
@@ -3771,6 +3821,8 @@ function bindDelegation(){
   on('#board',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='openFlow')enterHerdrFlow(it.dataset.session,it.dataset.pane);
     else if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
+  on('#agentStrip',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+    if(it.dataset.action==='openTerm')openTerm(it.dataset.session,it.dataset.pane,it.dataset.agent)});
   on('#attentionList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='openAttention')openAttention(parseInt(it.dataset.index));
     else if(it.dataset.action==='openSessionAgent')enterHerdrFlow(it.dataset.session,it.dataset.pane);
