@@ -1,6 +1,7 @@
 name: release
 
-# 推送 tag 时构建 GitHub Release；tag 必须等于 v + VERSION 文件内容（如 v0.2.0）。
+# 推送 tag 时构建 GitHub Release；tag 必须等于 v + VERSION（如 v0.2.0），
+# 且 tag 指向的 commit 必须是 origin/main 的祖先（禁止任意分支同版本发版）。
 on:
   push:
     tags:
@@ -14,14 +15,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      # actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
           cache: pip
 
-      - uses: actions/setup-node@v4
+      # actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
 
@@ -32,6 +38,16 @@ jobs:
           actual="${GITHUB_REF_NAME}"
           echo "expected=${expected} actual=${actual}"
           test "${actual}" = "${expected}"
+
+      - name: Verify tag commit is ancestor of origin/main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "拒绝发版: ${GITHUB_SHA} 不是 origin/main 的祖先（禁止从非 main 历史打同版本 tag）" >&2
+            exit 1
+          fi
+          echo "ok: ${GITHUB_SHA} is ancestor of origin/main"
 
       - run: pip install -r requirements-dev.txt
 
@@ -59,8 +75,9 @@ jobs:
           test -s "$js_file"
           node --check "$js_file"
 
+      # softprops/action-gh-release@v2
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           generate_release_notes: true
           draft: false

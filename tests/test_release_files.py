@@ -758,6 +758,84 @@ def test_release_workflow_gates_tag_and_checks():
     assert "generate_release_notes: true" in raw
     assert "tags:" in raw
     assert "v*" in raw
+    # tag commit 必须是 origin/main 祖先
+    assert "merge-base --is-ancestor" in raw
+    assert "origin/main" in raw
+    assert "GITHUB_SHA" in raw
+    assert "fetch-depth: 0" in raw
+
+
+def test_release_workflow_pins_actions_to_full_commit_sha():
+    """contents:write job 内所有 uses 必须钉完整 40 位 SHA，并保留版本注释。"""
+    import re
+
+    raw = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    # 兼容 "- uses:" 与 "name: ...\n  uses:" 两种写法
+    uses = re.findall(r"^\s*(?:-\s*)?uses:\s*(\S+)\s*$", raw, flags=re.M)
+    assert uses, "release.yml 应至少有一个 uses"
+    sha_re = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
+    for ref in uses:
+        assert sha_re.fullmatch(ref), f"uses 必须钉完整 commit SHA: {ref}"
+        # 禁止可变 tag / 短 SHA
+        assert "@v" not in ref
+        assert not re.search(r"@[0-9a-f]{1,39}$", ref)
+    # 四个已知 action 均出现，且带版本注释（# actions/...@vN 或行前注释）
+    required = (
+        "actions/checkout@",
+        "actions/setup-python@",
+        "actions/setup-node@",
+        "softprops/action-gh-release@",
+    )
+    for prefix in required:
+        assert any(u.startswith(prefix) for u in uses), f"缺少 {prefix}"
+    assert "# actions/checkout@v4" in raw
+    assert "# actions/setup-python@v5" in raw
+    assert "# actions/setup-node@v4" in raw
+    assert "# softprops/action-gh-release@v2" in raw
+
+
+def test_release_main_ancestor_gate_accepts_main_commit_rejects_side_branch(tmp_path):
+    """契约：仅 origin/main 历史祖先可发版；侧支 tip 应被 merge-base 拒绝。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+    git("init", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "test")
+    (repo / "f.txt").write_text("a\n", encoding="utf-8")
+    git("add", "f.txt")
+    git("commit", "-m", "base")
+    main_sha = git("rev-parse", "HEAD").stdout.strip()
+
+    git("checkout", "-b", "side")
+    (repo / "f.txt").write_text("b\n", encoding="utf-8")
+    git("add", "f.txt")
+    git("commit", "-m", "side")
+    side_sha = git("rev-parse", "HEAD").stdout.strip()
+    git("checkout", "main")
+
+    # 模拟 origin/main
+    git("update-ref", "refs/remotes/origin/main", main_sha)
+
+    ok = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", main_sha, "origin/main"],
+        cwd=repo,
+    )
+    assert ok.returncode == 0
+
+    bad = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", side_sha, "origin/main"],
+        cwd=repo,
+    )
+    assert bad.returncode != 0
 
 
 def test_api_version_not_in_public_paths():
