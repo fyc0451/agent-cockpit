@@ -339,8 +339,10 @@ def test_files_roots_hides_tmp_and_internal_worktrees(monkeypatch):
         lambda: {
             "system": ["/home/u/app"],
             "projects": [
+                "/tmp",
                 "/home/u/repo",
                 "/tmp/pytest-of-fyc/pytest-1/test_x0/proj",
+                "/home/u/.repo-cockpit-worktrees",
                 "/home/u/.repo-cockpit-worktrees/repo/1-codex",
             ],
             "custom": ["/home/u/extra"],
@@ -357,6 +359,8 @@ def test_files_roots_hides_tmp_and_internal_worktrees(monkeypatch):
     assert groups["system"] == ["/home/u/app"]
     assert groups["custom"] == ["/home/u/extra"]
     assert "/tmp/pytest-of-fyc/pytest-1/test_x0/proj" not in response.json()["roots"]
+    assert "/tmp" not in response.json()["roots"]
+    assert "/home/u/.repo-cockpit-worktrees" not in response.json()["roots"]
 
 
 # ── 媒体预览与目录打包下载 ──────────────────────────────────────
@@ -412,6 +416,8 @@ def test_raw_and_download_dir_endpoints(tmp_path, monkeypatch):
     assert raw.status_code == 200
     assert raw.content.startswith(b"\x89PNG")
     assert "attachment" not in raw.headers.get("content-disposition", "")
+    assert raw.headers["x-content-type-options"] == "nosniff"
+    assert raw.headers["cache-control"] == "private, no-store"
 
     bad = client.get(f"/api/files/raw?path={root}/doc.txt", headers=headers)
     assert bad.status_code == 400

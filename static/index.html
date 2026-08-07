@@ -1699,7 +1699,7 @@ function refreshCurrent(){
   else if(v==='team')teamLoad(true);
   else if(v==='files')loadFileTree();
   else if(v==='herdrflow')hfLoad();
-  else if(v==='settings'){loadSettings();renderSettings()}
+  else if(v==='settings')loadSettings();
   refreshBoard();
   toast('已刷新');
 }

@@ -194,6 +194,15 @@ def test_shared_hub_response_cannot_trigger_local_agent_actions(
 def test_messages_cleanup_batches_hub_delete(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(
+        server, "_agent_mail_status",
+        lambda: {
+            "read_available": True, "reason": None,
+            "write_available": True, "write_reason": None,
+        },
+    )
+    monkeypatch.setattr(server.hub_client, "allows_local_actions", lambda: True)
+    monkeypatch.setattr(server.db, "project_by_id", lambda _project_id: {"id": 1})
+    monkeypatch.setattr(
         server.db, "_rows",
         lambda _sql, _params: [{"id": i} for i in range(1, 1201)],
     )
@@ -234,6 +243,15 @@ def test_messages_cleanup_rejects_bad_days_and_empty_set(monkeypatch, tmp_path):
     )
     assert bad.status_code == 400
 
+    monkeypatch.setattr(
+        server, "_agent_mail_status",
+        lambda: {
+            "read_available": True, "reason": None,
+            "write_available": True, "write_reason": None,
+        },
+    )
+    monkeypatch.setattr(server.hub_client, "allows_local_actions", lambda: True)
+    monkeypatch.setattr(server.db, "project_by_id", lambda _project_id: {"id": 1})
     monkeypatch.setattr(server.db, "_rows", lambda _sql, _params: [])
     empty = client.post(
         "/api/messages/cleanup", headers={"authorization": "Bearer secret"},
@@ -241,3 +259,31 @@ def test_messages_cleanup_rejects_bad_days_and_empty_set(monkeypatch, tmp_path):
     )
     assert empty.status_code == 200
     assert empty.json() == {"deleted": 0}
+
+
+def test_messages_cleanup_rejects_unknown_project_and_remote_hub(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server, "_agent_mail_status",
+        lambda: {
+            "read_available": True, "reason": None,
+            "write_available": True, "write_reason": None,
+        },
+    )
+    monkeypatch.setattr(server.hub_client, "allows_local_actions", lambda: True)
+    monkeypatch.setattr(server.db, "project_by_id", lambda _project_id: None)
+    client = TestClient(server.app)
+
+    unknown = client.post(
+        "/api/messages/cleanup", headers={"authorization": "Bearer secret"},
+        json={"project_id": 999, "older_than_days": 30},
+    )
+    assert unknown.status_code == 404
+
+    monkeypatch.setattr(server.db, "project_by_id", lambda _project_id: {"id": 1})
+    monkeypatch.setattr(server.hub_client, "allows_local_actions", lambda: False)
+    remote = client.post(
+        "/api/messages/cleanup", headers={"authorization": "Bearer secret"},
+        json={"project_id": 1, "older_than_days": 30},
+    )
+    assert remote.status_code == 409

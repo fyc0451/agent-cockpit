@@ -1036,6 +1036,15 @@ def api_messages_cleanup(req: MessageCleanupReq):
     """删除某项目 N 天前的消息(经 Hub 删除接口,含 git 归档与级联)。"""
     if req.older_than_days < 1 or req.older_than_days > 3650:
         raise HTTPException(400, "older_than_days 须在 1-3650 之间")
+    mail_status = _agent_mail_status()
+    if not mail_status["read_available"]:
+        raise HTTPException(503, mail_status["reason"])
+    if not mail_status["write_available"]:
+        raise HTTPException(503, mail_status["write_reason"])
+    if not hub_client.allows_local_actions():
+        raise HTTPException(409, "消息清理仅支持与本地数据库配套的本机 Agent Mail Hub")
+    if not db.project_by_id(req.project_id):
+        raise HTTPException(404, "项目不存在")
     rows = db._rows(
         "SELECT id FROM messages WHERE project_id = ? "
         "AND created_ts < datetime('now', ?)",
@@ -2239,9 +2248,13 @@ def api_env_check():
 def _visible_root_groups(groups: dict) -> dict:
     """展示用根目录:隐藏 /tmp 临时残留和 cockpit 内部 worktree(访问权限不变)。"""
     def hidden(p: str) -> bool:
+        normalized = p.rstrip("/") or "/"
         return (
-            p.startswith("/tmp/") or p.startswith("/var/tmp/")
-            or p.startswith("/private/tmp/") or "-cockpit-worktrees/" in p
+            any(
+                normalized == root or normalized.startswith(root + "/")
+                for root in ("/tmp", "/var/tmp", "/private/tmp")
+            )
+            or "-cockpit-worktrees/" in normalized + "/"
         )
     return {k: [p for p in paths if not hidden(p)] for k, paths in groups.items()}
 
@@ -2317,7 +2330,13 @@ def api_files_raw(path: str):
     """内联预览媒体文件(图片/音视频,限 PREVIEW_EXT 白名单)。"""
     try:
         target = files.preview_path(path)
-        return FileResponse(target)
+        return FileResponse(
+            target,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, no-store",
+            },
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
 
