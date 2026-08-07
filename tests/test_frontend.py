@@ -911,10 +911,13 @@ def test_file_manager_navigation_stops_at_allowed_roots():
 def test_file_manager_explains_roots_search_and_actions():
     js = _inline_js()
     assert 'class="file-guide"' in HTML
-    assert "可访问位置" in HTML
+    assert "先在“位置”下拉框选目录" in HTML
     assert "当前目录和子目录" in HTML
     assert "function fileRootLabel(" in js
-    assert "可访问位置：" in js
+    # 位置切换是分组下拉框,不再平铺 chip 列表
+    assert 'id="fileLocSel"' in js
+    assert "ft-loc" in js
+    assert "ft-root-chip" not in js
 
 
 def test_file_manager_groups_and_manages_custom_roots():

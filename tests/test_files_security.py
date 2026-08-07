@@ -137,14 +137,15 @@ def test_custom_root_api_adds_and_removes_directory(tmp_path, monkeypatch):
 
     assert added.status_code == 200
     assert added.json()["path"] == str(custom.resolve())
-    assert str(custom.resolve()) in added.json()["groups"]["custom"]
+    # 接口响应对 /tmp 做展示过滤;增删效果用底层分组验证
+    assert str(custom.resolve()) in files.allowed_root_groups()["custom"]
 
     removed = client.delete(
         "/api/files/roots", headers=headers, params={"path": str(custom)}
     )
 
     assert removed.status_code == 200
-    assert removed.json()["groups"]["custom"] == []
+    assert str(custom.resolve()) not in files.allowed_root_groups()["custom"]
 
 
 # ── 删除保护 ────────────────────────────────────────────────────
@@ -329,3 +330,30 @@ def test_search_endpoint_returns_authenticated_results(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["results"][0]["relative"] == "needle.txt"
+
+
+def test_files_roots_hides_tmp_and_internal_worktrees(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        files, "allowed_root_groups",
+        lambda: {
+            "system": ["/home/u/app"],
+            "projects": [
+                "/home/u/repo",
+                "/tmp/pytest-of-fyc/pytest-1/test_x0/proj",
+                "/home/u/.repo-cockpit-worktrees/repo/1-codex",
+            ],
+            "custom": ["/home/u/extra"],
+        },
+    )
+    client = TestClient(server.app)
+    response = client.get(
+        "/api/files/roots", headers={"authorization": "Bearer secret"}
+    )
+
+    assert response.status_code == 200
+    groups = response.json()["groups"]
+    assert groups["projects"] == ["/home/u/repo"]
+    assert groups["system"] == ["/home/u/app"]
+    assert groups["custom"] == ["/home/u/extra"]
+    assert "/tmp/pytest-of-fyc/pytest-1/test_x0/proj" not in response.json()["roots"]

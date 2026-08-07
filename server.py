@@ -2236,10 +2236,20 @@ def api_env_check():
 
 # ── 文件浏览/编辑路由 ──────────────────────────────────────────
 
+def _visible_root_groups(groups: dict) -> dict:
+    """展示用根目录:隐藏 /tmp 临时残留和 cockpit 内部 worktree(访问权限不变)。"""
+    def hidden(p: str) -> bool:
+        return (
+            p.startswith("/tmp/") or p.startswith("/var/tmp/")
+            or p.startswith("/private/tmp/") or "-cockpit-worktrees/" in p
+        )
+    return {k: [p for p in paths if not hidden(p)] for k, paths in groups.items()}
+
+
 @app.get("/api/files/roots")
 def api_file_roots():
     """返回允许浏览的根目录列表。"""
-    groups = files.allowed_root_groups()
+    groups = _visible_root_groups(files.allowed_root_groups())
     return {"roots": [path for roots in groups.values() for path in roots], "groups": groups}
 
 
@@ -2248,7 +2258,7 @@ def api_file_root_add(req: FileRootReq):
     """持久化添加一个明确的自定义目录。"""
     try:
         result = files.add_custom_root(req.path)
-        groups = files.allowed_root_groups()
+        groups = _visible_root_groups(files.allowed_root_groups())
         return {**result, "roots": [p for roots in groups.values() for p in roots], "groups": groups}
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -2259,7 +2269,7 @@ def api_file_root_remove(path: str):
     """移除自定义目录；系统目录和已注册项目不受影响。"""
     try:
         result = files.remove_custom_root(path)
-        groups = files.allowed_root_groups()
+        groups = _visible_root_groups(files.allowed_root_groups())
         return {**result, "roots": [p for roots in groups.values() for p in roots], "groups": groups}
     except ValueError as e:
         raise HTTPException(400, str(e))

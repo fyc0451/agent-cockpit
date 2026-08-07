@@ -78,6 +78,10 @@ header .spacer{flex:1}
 .set-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg2)}
 .set-card input,.set-card select{background:var(--bg3);border:1px solid var(--bd2);border-radius:7px;color:var(--fg);padding:6px 8px;font-size:13px}
 .set-lang-on{background:var(--accent)!important;color:#fff!important}
+.set-roots-group{margin:4px 0;border:1px solid var(--bd);border-radius:8px;background:var(--bg3)}
+.set-roots-group summary{cursor:pointer;padding:6px 10px;font-size:12px;color:var(--fg2);user-select:none}
+.set-root-line{padding:3px 12px;font-size:11px}
+.set-root-line code{font-family:var(--mono);word-break:break-all;color:var(--fg2)}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--done)}
 .dot.off{background:var(--fg3)}
 
@@ -144,11 +148,8 @@ header .spacer{flex:1}
 .ft-item:hover{background:var(--bg3)}
 .ft-item:active{background:var(--bg4)}
 .ft-bc{font-family:var(--mono);font-size:11px;color:var(--fg3);padding:8px 8px;word-break:break-all;border-bottom:1px solid var(--bd);margin-bottom:4px}
-.ft-root-group{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:4px}
-.ft-root-group-label{flex:0 0 68px;font-size:11px;color:var(--fg3)}
-.ft-root-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border:1px solid var(--bd);border-radius:999px;cursor:pointer;font:11px var(--mono);word-break:break-all;background:var(--bg3)}
-.ft-root-chip.active{color:var(--accent);border-color:var(--accent)}
-.ft-root-chip button{padding:1px 4px;min-width:0;font-size:10px}
+.ft-loc{display:flex;align-items:center;gap:6px}
+.ft-loc select{flex:1;min-width:0;font:11px var(--mono);padding:4px 6px}
 .editor-area{display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:hidden}
 .editor-area textarea{flex:1;border:none;border-radius:0;background:var(--bg);font-size:13px;tab-size:2}
 .editor-bar{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:12px}
@@ -583,7 +584,7 @@ header .spacer{flex:1}
   <!-- 文件 -->
   <section id="view-files" class="view files-view">
     <div class="file-guide">
-      <span data-i18n="files.guide"><b>怎么用：</b>先在“可访问位置”选项目，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，其他文件点 ⬇️ 下载。</span>
+      <span data-i18n="files.guide"><b>怎么用：</b>先在“位置”下拉框选目录，再点目录或文件；搜索会在当前目录和子目录中按名称查找。文本可编辑保存，其他文件点 ⬇️ 下载。</span>
       <button class="sm" id="fileAddRootBtn" onclick="fileAddRoot()" title="添加一个允许浏览的 WSL 目录" data-i18n="files.addroot">＋ 添加目录</button>
       <button class="primary sm" id="fileWorkspaceBtn" onclick="setupWorkspaceFromFiles()" title="用文件列表当前所在目录预填一键工作区" data-i18n="files.workspace">🚀 当前目录建工作区</button>
     </div>
@@ -1031,7 +1032,7 @@ function renderSettings(){
     api('/api/files/roots').then(r=>{
       const labels={system:t('roots.system','系统目录'),projects:t('roots.projects','已注册项目'),custom:t('roots.custom','自定义目录')};
       rootsEl.innerHTML=Object.entries(r.groups||{}).map(([k,arr])=>
-        arr.length?`<div style="margin:3px 0"><span class="muted">${esc(labels[k]||k)}:</span> ${arr.map(p=>`<code>${esc(p)}</code>`).join(' ')}</div>`:''
+        arr.length?`<details class="set-roots-group"${k==='custom'?' open':''}><summary>${esc(labels[k]||k)} · ${arr.length}</summary>${arr.map(p=>`<div class="set-root-line"><code>${esc(p)}</code></div>`).join('')}</details>`:''
       ).join('')||'<span class="muted">--</span>';
     }).catch(()=>{});
   }
@@ -3510,18 +3511,20 @@ async function loadFileTree(){
       bc+=`<span style="cursor:pointer;color:${isLast?'var(--accent)':'var(--fg3)'}" data-action="fileGoto" data-path="${esc(acc)}">/${esc(p)}</span>`;
     });
     bc+='</div>';
-    // 按来源分组展示白名单根；只有自定义目录提供移除操作。
+    // 位置切换:一个下拉框按来源分组,替代平铺的 chip 列表
     if(FILE_ROOTS.length){
-      bc+='<div class="ft-bc"><b>可访问位置：</b></div>';
       const groups=FILE_ROOT_GROUPS||{system:FILE_ROOTS};
       const labels={system:t('roots.system','系统目录'),projects:t('roots.projects','已注册项目'),custom:t('roots.custom','自定义目录')};
-      Object.entries(groups).forEach(([kind,roots])=>{
-        if(!roots.length)return;
-        bc+=`<div class="ft-root-group"><span class="ft-root-group-label">${esc(labels[kind]||kind)}</span>`+roots.map(r=>{
-          const on=r===root;
-          return `<span class="ft-root-chip${on?' active':''}" data-action="fileGoto" data-path="${esc(r)}" title="${esc(r)}">${on?'●':'○'} ${esc(fileRootLabel(r))}${kind==='custom'?` <button data-action="fileRemoveRoot" data-path="${esc(r)}" title="${t('files.rmroot','从可访问位置移除，不删除目录')}">${t('files.remove','移除')}</button>`:''}</span>`;
-        }).join('')+'</div>';
-      });
+      const opts=Object.entries(groups).map(([kind,roots])=>{
+        if(!roots.length)return '';
+        return `<optgroup label="${esc(labels[kind]||kind)}">`+roots.map(r=>
+          `<option value="${esc(r)}"${r===root?' selected':''}>${esc(fileRootLabel(r))}</option>`).join('')+'</optgroup>';
+      }).join('');
+      const isCustom=(groups.custom||[]).includes(root);
+      bc+=`<div class="ft-bc ft-loc"><span class="muted" style="flex:none">${t('files.location','位置')}</span>`
+        +`<select id="fileLocSel" onchange="fileGoto(this.value)">${opts}</select>`
+        +(isCustom?`<button class="icon" data-action="fileRemoveRoot" data-path="${esc(root)}" title="${t('files.rmroot','从可访问位置移除，不删除目录')}">${t('files.remove','移除')}</button>`:'')
+        +'</div>';
     }
     // 上级目录按钮(到白名单根为止,再往上后端会拒绝)
     const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp">📁 <span class="muted">${t('files.uptop','‥ (上级)')}</span></div>`:'';
