@@ -8,10 +8,12 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=install-paths.sh
 source "$SCRIPT_DIR/install-paths.sh"
 
-CLIENT_ENV="${AGENT_MAIL_CLIENT_ENV:-$HOME/.agent-mail/client.env}"
+CLIENT_ENV="${2:-${AGENT_MAIL_CLIENT_ENV:-$HOME/.agent-mail/client.env}}"
 LEGACY_DIR="$HOME/mcp_agent_mail"
 DEFAULT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/mcp_agent_mail"
-if [[ -n "${MCP_AGENT_MAIL_DIR:-}" ]]; then
+if [[ -n "${1:-}" ]]; then
+  REPO_DIR="$1"
+elif [[ -n "${MCP_AGENT_MAIL_DIR:-}" ]]; then
   REPO_DIR="$MCP_AGENT_MAIL_DIR"
 elif [[ -x "$LEGACY_DIR/.venv/bin/python" ]]; then
   REPO_DIR="$LEGACY_DIR"
@@ -20,6 +22,7 @@ else
 fi
 
 ac_validate_install_dir "$REPO_DIR"
+ac_validate_install_dir "$CLIENT_ENV"
 
 if [[ ! -f "$CLIENT_ENV" ]]; then
   echo "缺少 Agent Mail 客户端配置: $CLIENT_ENV" >&2

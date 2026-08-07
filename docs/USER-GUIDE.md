@@ -79,7 +79,7 @@ bash install.sh
 ```
 
 install.sh 会校验现有 checkout（只有 curl 直装方式才自动 clone），然后依次：
-Python ≥3.12 检查（自动在 python3/python3.13/python3.12 中挑选）→ 创建 `.venv` 装依赖 → 安装 Agent Mail 工具（`am-register`/`mail-send`/`mail-recv` 等）到 `~/.local/bin` → **检查/安装本地 Agent Mail Hub**（见 2.1；幂等，失败后重跑会保留 token 自愈）→ 生成 `.env` → 注册并启动服务（Linux 用 systemd 用户服务 `agent-cockpit.service` + `agent-mail.service`；macOS 用 `launchd.sh` 与 agent-mail LaunchAgent）。
+校验选定的 Python ≥3.12（默认 `python3`，可用 `PYTHON_BIN` 指定）→ 创建 `.venv` 装依赖 → 安装 Agent Mail 工具（`am-register`/`mail-send`/`mail-recv` 等）到 `~/.local/bin` → **检查/安装本地 Agent Mail Hub**（见 2.1；幂等，失败后重跑会保留 token 自愈）→ 生成 `.env` → 注册并启动服务（Linux 用 systemd 用户服务 `agent-cockpit.service` + `agent-mail.service`；macOS 用 `launchd.sh` 与 agent-mail LaunchAgent）。
 
 ### 2.3 配置文件 `.env`
 

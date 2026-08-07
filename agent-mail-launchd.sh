@@ -7,8 +7,8 @@ INSTALL_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=install-paths.sh
 source "$INSTALL_DIR/install-paths.sh"
 
-REPO_DIR="${MCP_AGENT_MAIL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mcp_agent_mail}"
-CLIENT_ENV="${AGENT_MAIL_CLIENT_ENV:-$HOME/.agent-mail/client.env}"
+REPO_DIR="${2:-${MCP_AGENT_MAIL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mcp_agent_mail}}"
+CLIENT_ENV="${3:-${AGENT_MAIL_CLIENT_ENV:-$HOME/.agent-mail/client.env}}"
 LABEL="io.github.fyc0451.mcp-agent-mail-local"
 DOMAIN="gui/$(id -u)"
 SERVICE="$DOMAIN/$LABEL"
@@ -19,6 +19,7 @@ PLIST_TEMPLATE="$INSTALL_DIR/agent-mail.plist"
 validate_paths() {
   ac_validate_install_dir "$INSTALL_DIR" || exit 1
   ac_validate_install_dir "$REPO_DIR" || exit 1
+  ac_validate_install_dir "$CLIENT_ENV" || exit 1
 }
 
 load_token() {
@@ -73,12 +74,14 @@ run_server() {
 }
 
 render_plist() {
-  local plist_install plist_repo
+  local plist_install plist_repo plist_client
   plist_install="$(ac_escape_plist_value "$INSTALL_DIR")"
   plist_repo="$(ac_escape_plist_value "$REPO_DIR")"
+  plist_client="$(ac_escape_plist_value "$CLIENT_ENV")"
   sed \
     -e "s|__INSTALL_DIR__|$(ac_escape_sed_replacement "$plist_install")|g" \
     -e "s|__REPO_DIR__|$(ac_escape_sed_replacement "$plist_repo")|g" \
+    -e "s|__CLIENT_ENV__|$(ac_escape_sed_replacement "$plist_client")|g" \
     "$PLIST_TEMPLATE" > "$PLIST_PATH"
   chmod 600 "$PLIST_PATH"
 }

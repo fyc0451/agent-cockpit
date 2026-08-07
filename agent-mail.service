@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/agent-mail-run.sh"
+ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/agent-mail-run.sh" "__REPO_EXEC_DIR__" "__CLIENT_ENV_EXEC__"
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1

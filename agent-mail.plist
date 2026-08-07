@@ -8,6 +8,8 @@
   <array>
     <string>__INSTALL_DIR__/agent-mail-launchd.sh</string>
     <string>run</string>
+    <string>__REPO_DIR__</string>
+    <string>__CLIENT_ENV__</string>
   </array>
   <key>WorkingDirectory</key>
   <string>__REPO_DIR__</string>

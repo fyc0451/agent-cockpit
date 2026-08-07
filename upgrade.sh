@@ -26,7 +26,8 @@ git -C "$INSTALL_DIR" pull --ff-only
 "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 "$INSTALL_DIR/install-agent-mail-tools.sh" "$INSTALL_DIR"
 # 升级时顺带自检本地 Hub：已有可用 Hub 直接复用，缺失/损坏按托管配置自愈。
-"$INSTALL_DIR/install-agent-mail-hub.sh"
+PYTHON_BIN="${PYTHON_BIN:-$INSTALL_DIR/.venv/bin/python}" \
+  "$INSTALL_DIR/install-agent-mail-hub.sh"
 
 if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
   UNIT_DIR="$HOME/.config/systemd/user"

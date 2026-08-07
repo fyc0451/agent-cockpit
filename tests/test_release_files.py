@@ -97,6 +97,7 @@ def test_agent_mail_launchd_keeps_token_out_of_plist():
     assert "token=" not in plist
     assert "__INSTALL_DIR__/agent-mail-launchd.sh" in plist
     assert "__REPO_DIR__" in plist
+    assert "__CLIENT_ENV__" in plist
 
 
 def test_agent_mail_launchd_restart_waits_for_old_listener(tmp_path):
@@ -147,6 +148,10 @@ def test_agent_mail_launchd_restart_waits_for_old_listener(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert int(lsof_calls.read_text()) >= 3
+    rendered = home / "Library/LaunchAgents/io.github.fyc0451.mcp-agent-mail-local.plist"
+    values = [node.text for node in ET.parse(rendered).findall(".//string")]
+    assert str(repo) in values
+    assert str(client_env) in values
 
 
 def test_launchd_installer_renders_and_restarts_service(tmp_path):
@@ -396,11 +401,14 @@ def test_installers_allow_spaces_and_unicode_in_install_path():
     assert "8765" not in mail_service
     assert "HTTP_BEARER_TOKEN" not in mail_service
     assert "agent-mail-run.sh" in mail_service
+    assert "__REPO_EXEC_DIR__" in mail_service
+    assert "__CLIENT_ENV_EXEC__" in mail_service
     hub_installer = (ROOT / "install-agent-mail-hub.sh").read_text()
     assert "HTTP_PORT=8765" not in (ROOT / "agent-mail-launchd.sh").read_text()
     assert "ac_client_env_loopback_hub" in (ROOT / "agent-mail-run.sh").read_text()
     assert "ac_client_env_loopback_hub" in (ROOT / "agent-mail-launchd.sh").read_text()
     assert "ac_client_env_loopback_hub" in hub_installer
+    assert 'PYTHON_BIN="${PYTHON_BIN:-$INSTALL_DIR/.venv/bin/python}"' in upgrade
 
 
 def test_sed_and_plist_escaping_with_special_path(tmp_path):
@@ -480,11 +488,15 @@ def test_agent_mail_loopback_port_strict_parsing(tmp_path):
         "hub=http://127.0.0.1:18765\ntoken=t\n": "127.0.0.1 18765",
         "hub=http://localhost:9000\ntoken=t\n": "localhost 9000",
         "hub=http://127.0.0.1\ntoken=t\n": "127.0.0.1 8765",
+        "hub=http://localhost:65535\ntoken=t\n": "localhost 65535",
     }
     cases_bad = [
         "hub=http://10.0.0.5:8765\ntoken=t\n",   # 非 loopback
         "hub=https://127.0.0.1:8765\ntoken=t\n",  # 非 http
         "hub=http://evil.example:8765\ntoken=t\n",
+        "hub=http://127.0.0.1:0\ntoken=t\n",
+        "hub=http://127.0.0.1:65536\ntoken=t\n",
+        "hub=http://127.0.0.1:99999\ntoken=t\n",
         "token=t\n",                               # 缺 hub=
         "",
     ]
@@ -512,14 +524,15 @@ def test_agent_mail_service_rendering_with_special_path(tmp_path):
     # 渲染函数从 install_dir 读取模板，特殊路径目录内也要能找到模板。
     shutil.copy(ROOT / "agent-mail.service", tricky_install / "agent-mail.service")
     tricky_repo = tmp_path / '仓 库&repo'
+    tricky_client = tmp_path / '配置 目录&x' / "client.env"
     unit_path = tmp_path / "agent-mail.service"
     result = subprocess.run(
         [
             "bash", "-c",
-            'source "$1"; amh_render_systemd_unit "$2" "$3" "$4"',
+            'source "$1"; amh_render_systemd_unit "$2" "$3" "$4" "$5"',
             "_",
             str(ROOT / "install-agent-mail-hub.sh"),
-            str(unit_path), str(tricky_install), str(tricky_repo),
+            str(unit_path), str(tricky_install), str(tricky_repo), str(tricky_client),
         ],
         capture_output=True, text=True,
     )
@@ -527,9 +540,85 @@ def test_agent_mail_service_rendering_with_special_path(tmp_path):
     unit = unit_path.read_text()
     exec_dir = (str(tricky_install).replace("\\", "\\\\").replace('"', '\\"')
                 .replace("%", "%%").replace("$", "$$"))
-    sys_repo = str(tricky_repo).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
-    assert f'ExecStart=/usr/bin/env "{exec_dir}/agent-mail-run.sh"' in unit
-    assert f"Environment=MCP_AGENT_MAIL_DIR={sys_repo}" in unit
+    repo_exec = (str(tricky_repo).replace("\\", "\\\\").replace('"', '\\"')
+                 .replace("%", "%%").replace("$", "$$"))
+    client_exec = (str(tricky_client).replace("\\", "\\\\").replace('"', '\\"')
+                   .replace("%", "%%").replace("$", "$$"))
+    assert (
+        f'ExecStart=/usr/bin/env "{exec_dir}/agent-mail-run.sh" '
+        f'"{repo_exec}" "{client_exec}"'
+    ) in unit
+    assert "Environment=MCP_AGENT_MAIL_DIR" not in unit
+    if shutil.which("systemd-analyze"):
+        verified = subprocess.run(
+            ["systemd-analyze", "verify", "--man=no", str(unit_path)],
+            capture_output=True, text=True,
+        )
+        assert verified.returncode == 0, verified.stderr
+        assert "Invalid environment assignment" not in verified.stderr
+
+
+def test_agent_mail_launchd_persists_custom_runtime_paths(tmp_path):
+    install_dir = tmp_path / "Agent Cockpit 中文"
+    install_dir.mkdir()
+    for name in ("agent-mail-launchd.sh", "install-paths.sh", "agent-mail.plist"):
+        shutil.copy(ROOT / name, install_dir / name)
+    (install_dir / "agent-mail-launchd.sh").chmod(0o755)
+    repo = tmp_path / "Hub 仓库"
+    client_env = tmp_path / "配置 目录" / "client.env"
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    result = subprocess.run(
+        [str(install_dir / "agent-mail-launchd.sh"), "render-plist"],
+        capture_output=True, text=True,
+        env={
+            **os.environ, "HOME": str(home),
+            "MCP_AGENT_MAIL_DIR": str(repo),
+            "AGENT_MAIL_CLIENT_ENV": str(client_env),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    rendered = home / "Library/LaunchAgents/io.github.fyc0451.mcp-agent-mail-local.plist"
+    values = [node.text for node in ET.parse(rendered).findall(".//string")]
+    assert str(repo) in values
+    assert str(client_env) in values
+
+
+def test_agent_mail_hub_installer_rejects_invalid_generated_port(tmp_path):
+    client_env = tmp_path / "client.env"
+    result = subprocess.run(
+        ["bash", str(ROOT / "install-agent-mail-hub.sh")],
+        capture_output=True, text=True,
+        env={
+            **os.environ,
+            "AGENT_MAIL_CLIENT_ENV": str(client_env),
+            "AGENT_MAIL_HUB_PORT": "99999",
+            "PYTHON_BIN": sys.executable,
+        },
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "1-65535" in result.stderr
+    assert not client_env.exists()
+
+
+def test_agent_mail_hub_installer_rejects_relative_client_env(tmp_path):
+    result = subprocess.run(
+        ["bash", str(ROOT / "install-agent-mail-hub.sh")],
+        capture_output=True, text=True, cwd=tmp_path,
+        env={
+            **os.environ,
+            "AGENT_MAIL_CLIENT_ENV": "relative-client.env",
+            "PYTHON_BIN": sys.executable,
+        },
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "绝对路径" in result.stderr
+    assert not (tmp_path / "relative-client.env").exists()
 
 
 def test_agent_mail_hub_installer_refuses_foreign_config(tmp_path):
@@ -592,20 +681,20 @@ def test_agent_mail_hub_installer_self_heals_managed_config(tmp_path):
     assert client_env.read_text() == f"{marker}\nhub=http://127.0.0.1:1\ntoken=keepme\n"
 
 
-def test_agent_mail_hub_installer_reuses_running_hub_on_custom_port(tmp_path):
-    """阻断3端到端：非默认端口的可用 Hub 被探活识别并直接复用。"""
+def _probe_fake_hub(tmp_path, response_body):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     server_script = tmp_path / "fake_hub.py"
     server_script.write_text(
         "import http.server, sys\n"
+        f"BODY = {response_body.encode()!r}\n"
         "class H(http.server.BaseHTTPRequestHandler):\n"
         "    def do_POST(self):\n"
         "        self.send_response(200)\n"
         "        self.send_header('Content-Type', 'application/json')\n"
         "        self.end_headers()\n"
-        "        self.wfile.write(b'{\"ok\": true}')\n"
+        "        self.wfile.write(BODY)\n"
         "    def log_message(self, *a):\n"
         "        pass\n"
         f"http.server.HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n")
@@ -621,9 +710,27 @@ def test_agent_mail_hub_installer_reuses_running_hub_on_custom_port(tmp_path):
             ["bash", str(ROOT / "install-agent-mail-hub.sh")],
             capture_output=True, text=True, env=env, timeout=60,
         )
-        assert result.returncode == 0, result.stderr
-        assert "复用已有" in result.stdout
-        assert f"127.0.0.1:{port}" in result.stdout
+        return result, port
     finally:
         server.terminate()
         server.wait(timeout=5)
+
+
+def test_agent_mail_hub_installer_reuses_running_hub_on_custom_port(tmp_path):
+    """阻断3端到端：非默认端口的真实 MCP Hub 被探活识别并复用。"""
+    body = (
+        '{"jsonrpc":"2.0","id":1,"result":'
+        '{"protocolVersion":"2025-03-26","capabilities":{}}}'
+    )
+    result, port = _probe_fake_hub(tmp_path, body)
+
+    assert result.returncode == 0, result.stderr
+    assert "复用已有" in result.stdout
+    assert f"127.0.0.1:{port}" in result.stdout
+
+
+def test_agent_mail_hub_probe_rejects_unrelated_http_200(tmp_path):
+    result, _ = _probe_fake_hub(tmp_path, '{"ok":true}')
+
+    assert result.returncode != 0
+    assert "不覆盖" in result.stderr

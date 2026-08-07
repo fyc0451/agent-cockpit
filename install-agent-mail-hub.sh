@@ -71,10 +71,50 @@ req = urllib.request.Request(
     method="POST")
 try:
     with urllib.request.urlopen(req, timeout=5) as resp:
-        sys.exit(0 if resp.status == 200 else 1)
+        if resp.status != 200:
+            sys.exit(1)
+        raw = resp.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            sys.exit(1)
+        text = raw.decode("utf-8", "replace")
 except Exception:
     sys.exit(1)
+
+def valid_initialize(message):
+    return (
+        isinstance(message, dict)
+        and message.get("jsonrpc") == "2.0"
+        and message.get("id") == 1
+        and isinstance(message.get("result"), dict)
+        and isinstance(message["result"].get("protocolVersion"), str)
+    )
+
+messages = []
+try:
+    messages.append(json.loads(text))
+except json.JSONDecodeError:
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            messages.append(json.loads(line[5:].strip()))
+        except json.JSONDecodeError:
+            pass
+sys.exit(0 if any(valid_initialize(message) for message in messages) else 1)
 PY
+}
+
+amh_normalize_port() {
+  if [[ ! "$HUB_PORT" =~ ^[0-9]{1,5}$ ]]; then
+    echo "AGENT_MAIL_HUB_PORT 必须是 1-65535 的整数: $HUB_PORT" >&2
+    return 1
+  fi
+  local port_number=$((10#$HUB_PORT))
+  if (( port_number < 1 || port_number > 65535 )); then
+    echo "AGENT_MAIL_HUB_PORT 必须是 1-65535 的整数: $HUB_PORT" >&2
+    return 1
+  fi
+  HUB_PORT="$port_number"
 }
 
 amh_port_busy() {
@@ -108,18 +148,17 @@ amh_ensure_repo_and_venv() {
 }
 
 amh_render_systemd_unit() {
-  # amh_render_systemd_unit <unit_path> <install_dir> <repo_dir>
-  local unit_path="$1" install_dir="$2" repo_dir="$3"
-  local sys_install sys_exec repo_env_line=""
-  sys_install="$(ac_escape_systemd_value "$install_dir")"
+  # amh_render_systemd_unit <unit_path> <install_dir> <repo_dir> <client_env>
+  local unit_path="$1" install_dir="$2" repo_dir="$3" client_env="$4"
+  local sys_exec repo_exec client_exec
   sys_exec="$(ac_escape_systemd_exec_value "$install_dir")"
+  repo_exec="$(ac_escape_systemd_exec_value "$repo_dir")"
+  client_exec="$(ac_escape_systemd_exec_value "$client_env")"
   sed \
     -e "s|__INSTALL_EXEC_DIR__|$(ac_escape_sed_replacement "$sys_exec")|g" \
+    -e "s|__REPO_EXEC_DIR__|$(ac_escape_sed_replacement "$repo_exec")|g" \
+    -e "s|__CLIENT_ENV_EXEC__|$(ac_escape_sed_replacement "$client_exec")|g" \
     "$install_dir/agent-mail.service" > "$unit_path"
-  if [[ "$repo_dir" != "${XDG_DATA_HOME:-$HOME/.local/share}/mcp_agent_mail" ]]; then
-    repo_env_line="Environment=MCP_AGENT_MAIL_DIR=$(ac_escape_systemd_value "$repo_dir")"
-    sed -i "/^Environment=PYTHONUNBUFFERED=1/a $(ac_escape_sed_replacement "$repo_env_line")" "$unit_path"
-  fi
   chmod 600 "$unit_path"
 }
 
@@ -136,7 +175,7 @@ amh_register_service() {
     local unit_dir="$HOME/.config/systemd/user"
     local unit_path="$unit_dir/agent-mail.service"
     mkdir -p "$unit_dir"
-    amh_render_systemd_unit "$unit_path" "$INSTALL_DIR" "$REPO_DIR"
+    amh_render_systemd_unit "$unit_path" "$INSTALL_DIR" "$REPO_DIR" "$CLIENT_ENV"
     systemctl --user daemon-reload
     # enable 设置开机自启；restart 确保加载最新 unit 并处于 active。
     systemctl --user enable agent-mail.service
@@ -173,6 +212,7 @@ amh_main() {
   fi
 
   amh_pick_python
+  ac_validate_install_dir "$CLIENT_ENV"
 
   if amh_probe_hub; then
     echo "复用已有 Agent Mail Hub: $(sed -n 's/^hub=//p' "$CLIENT_ENV" | tail -n 1)"
@@ -201,6 +241,7 @@ amh_main() {
     return $?
   fi
 
+  amh_normalize_port || return 1
   echo "未发现可用的本地 Agent Mail Hub，开始安装到: $REPO_DIR"
   amh_ensure_repo_and_venv
 
