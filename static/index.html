@@ -423,14 +423,6 @@ header .spacer{flex:1}
   /* 工作台在 H5 上使用单一纵向滚动容器。否则 Agent 多时会把内部列表压成
      零高度，手势落在速览/工具栏上也无法继续向下滚动。 */
   .attention-view{overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}
-  /* 移动端看板不再四列纵排:agent 平铺成卡片网格,点卡片直达,免长滚找 agent */
-  #board{display:none!important}
-  .board-flat{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;align-content:start;padding-bottom:24px}
-  .board-flat .card{margin:0}
-  /* 移动端看板不再四列纵排:agent 平铺成卡片网格,点卡片直达,免长滚找 agent */
-  #board{display:none!important}
-  .board-flat{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;align-content:start;padding-bottom:24px}
-  .board-flat .card{margin:0}
   .agent-strip{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:8px;scrollbar-width:none}
   .agent-strip::-webkit-scrollbar{display:none}
   .agent-chip{flex:0 0 auto}
@@ -444,6 +436,13 @@ header .spacer{flex:1}
   .hf-body{touch-action:pan-y;-webkit-overflow-scrolling:touch}
   .hf-out{max-height:none;min-height:0;overflow:visible;touch-action:pan-y}
   .hf-body.hf-full .hf-pane.hf-focus .hf-out{overflow:auto;-webkit-overflow-scrolling:touch}
+}
+@media(max-width:900px){
+  /* 窄屏看板不再四列纵排:agent 平铺成卡片网格,点卡片直达,免长滚找 agent。
+     只按视口宽度切换，避免宽屏触摸显示器被误判为手机布局。 */
+  #board{display:none!important}
+  .board-flat{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;align-content:start;padding-bottom:24px}
+  .board-flat .card{margin:0}
 }
 .side-backdrop{display:none}
 @media(max-width:1100px){
@@ -573,8 +572,6 @@ header .spacer{flex:1}
         <div class="col col-done"><div class="col-head"><span data-i18n="board.done">✓ 已完成</span> <span class="cc" id="cnt-done">0</span></div><div class="col-body" id="col-done"></div></div>
         <div class="col col-idle"><div class="col-head"><span data-i18n="board.idle">○ 空闲</span> <span class="cc" id="cnt-idle">0</span></div><div class="col-body" id="col-idle"></div></div>
       </div>
-      <!-- 移动端平铺卡片网格:免四列长滚,点卡片直达 agent(renderBoard 填充) -->
-      <div class="board-flat" id="boardFlat"></div>
       <!-- 移动端平铺卡片网格:免四列长滚,点卡片直达 agent(renderBoard 填充) -->
       <div class="board-flat" id="boardFlat"></div>
     </div>
@@ -2030,9 +2027,6 @@ function renderBoard(d){
     document.getElementById('cnt-'+k).textContent=list.length;
     document.getElementById('col-'+k).innerHTML=list.length?list.map(cardHtml).join(''):'<div class="empty" style="padding:20px">—</div>';
   }
-  // 移动端平铺网格:全部 agent 按 需要你→工作中→已完成→空闲 顺序单层铺开
-  flatEl.innerHTML=[...cols.need,...cols.work,...cols.done,...cols.idle].map(cardHtml).join('');
-  flatEl.style.display='';
   // 移动端平铺网格:全部 agent 按 需要你→工作中→已完成→空闲 顺序单层铺开
   flatEl.innerHTML=[...cols.need,...cols.work,...cols.done,...cols.idle].map(cardHtml).join('');
   flatEl.style.display='';
