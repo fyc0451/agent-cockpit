@@ -405,6 +405,58 @@ def test_start_agent_allows_qodercli_slow_session_hook(monkeypatch):
     ) not in calls
 
 
+def test_start_agent_grok_uses_native_start(monkeypatch):
+    """grok 独立终端秒起但 pane run 后台启动 herdr 不刷新检测 → 原生 agent start。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "grok")
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+
+    clock = {"now": 0.0, "snapshots": 0}
+
+    def monotonic():
+        return clock["now"]
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    def snapshot(session):
+        clock["snapshots"] += 1
+        if clock["snapshots"] == 1:
+            return {"panes": []}
+        return {"panes": [{
+            "pane_id": "w1:p3", "tab_id": "w1:t3", "workspace_id": "w1",
+            "agent": "grok",
+        }]}
+
+    monkeypatch.setattr(herdr_client.time, "monotonic", monotonic)
+    monkeypatch.setattr(herdr_client.time, "sleep", sleep)
+    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p3"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent("demo", "/tmp/project", agent="grok")
+
+    assert result["pane_id"] == "w1:p3"
+    assert call(
+        [
+            "--session", "demo", "agent", "start", "grok",
+            "--kind", "grok", "--pane", "w1:p3", "--timeout", "60000",
+        ],
+        timeout=65,
+    ) in calls
+    assert call(
+        ["--session", "demo", "pane", "run", "w1:p3", "grok"],
+        timeout=8,
+    ) not in calls
+
+
 def test_start_agent_rolls_back_qodercli_after_extended_timeout(monkeypatch):
     """QoderCLI 在专用窗口内仍未注册时，必须关闭本次新建 pane。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)

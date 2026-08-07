@@ -661,19 +661,37 @@ def start_agent(
         if not new_pid:
             raise RuntimeError("split/tab 后找不到本次创建的新 pane")
         start_timeout = _agent_start_timeout(agent)
-        if agent in QODER_AGENTS:
-            # 后台 tab 中直接 pane run QoderCLI 时，进程虽已就绪，Herdr 偶发不会
-            # 刷新该 pane 的 agent 状态。使用 Herdr 原生 agent start 针对指定 pane
-            # 启动并等待 readiness，与用户在前台 tab 手动启动的识别路径一致。
-            _run(
-                [
-                    "--session", session, "agent", "start", label or agent,
-                    "--kind", "qodercli", "--pane", new_pid,
-                    "--timeout", str(int(start_timeout * 1000)),
-                    *(["--", *agent_args] if agent_args else []),
-                ],
-                timeout=int(start_timeout) + 5,
-            )
+        # 后台 tab 中直接 pane run 时,进程虽已就绪,Herdr 偶发不会刷新该 pane
+        # 的 agent 状态(QoderCLI 实测,grok 同案:独立终端秒起但 pane run 后
+        # 识别超时)。这些 agent 改用 Herdr 原生 agent start 针对指定 pane 启动
+        # 并等待 readiness,与用户在前台 tab 手动启动的识别路径一致。
+        NATIVE_START_KIND = (
+            "qodercli" if agent in QODER_AGENTS
+            else "grok" if agent == "grok"
+            else None
+        )
+        if NATIVE_START_KIND:
+            start_argv = [
+                "--session", session, "agent", "start", label or agent,
+                "--kind", NATIVE_START_KIND, "--pane", new_pid,
+                "--timeout", str(int(start_timeout * 1000)),
+                *(["--", *agent_args] if agent_args else []),
+            ]
+            # 新建 pane 的 shell 就绪有延迟,立即 agent start 会报
+            # agent_pane_busy(not an available shell);短窗内重试等待就绪。
+            shell_deadline = time.monotonic() + 10
+            while True:
+                try:
+                    _run(start_argv, timeout=int(start_timeout) + 5)
+                    break
+                except RuntimeError as exc:
+                    if (
+                        "agent_pane_busy" in str(exc)
+                        and time.monotonic() < shell_deadline
+                    ):
+                        time.sleep(0.5)
+                        continue
+                    raise
         else:
             # pane run 接收完整命令字符串；拆分后交给 Herdr 重组会破坏引号，并让
             # 路径中的 shell 元字符在下一层被重新解释。
