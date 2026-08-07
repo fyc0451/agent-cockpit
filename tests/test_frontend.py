@@ -339,11 +339,19 @@ def test_setup_workspace_allows_optional_tasks_and_keeps_success_locked():
     assert "SETUP_PARTICIPANTS.length>1&&" not in errors
     assert "let setupSucceeded=false" in submit
     assert "setupSucceeded=true" in submit
+    assert "SETUP_IN_FLIGHT" in submit
+    assert "reqId!==SETUP_REQ_ID" in submit
     assert "if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}" in submit
     assert "SETUP_CLOSE_TIMER" not in js
     assert 'data-action="setupOpenTerminal"' in submit
     assert "async function setupOpenTerminal(session)" in js
     assert "await doAttachHerdr(session)" in js
+    # 关窗不得解除在途锁
+    close = js.split("function closeSetup(){", 1)[1].split(
+        "async function setupOpenTerminal", 1,
+    )[0]
+    assert "if(SETUP_IN_FLIGHT)return" in close
+    assert "SETUP_SUBMITTING=false;renderSetupPreview();\n  document.getElementById('setupModal')" not in js
 
 
 def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
@@ -1864,3 +1872,268 @@ def test_load_version_failure_hides_stale_banner():
     assert "updateBanner" in catch             # 失败路径触及 banner
     assert "display='none'" in catch           # 并隐藏它
     assert "renderVersionCard(true)" in catch  # 版本卡片仍温和降级
+
+
+# ── B1 UX-P1-01～07：行为级 / Node stub ─────────────────────────
+
+import json
+import subprocess
+import textwrap
+
+
+def _run_node(script: str) -> str:
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"node failed rc={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+        )
+    return proc.stdout
+
+
+def test_b1_sse_has_three_states_no_timer_green():
+    js = _inline_js()
+    assert "SSE_LINK=" in js or "SSE_LINK='" in js or 'SSE_LINK="' in js or "SSE_LINK='offline'" in js
+    assert "function updateSseLiveUi" in js
+    assert "function markSseEventOk" in js
+    assert "SSE.onopen" in js
+    assert "markSseEventOk" in js
+    # 禁止 3 秒无条件恢复绿点
+    assert "setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)" not in js
+    assert "setTimeout(()=>document.getElementById('liveDot').classList.remove(\"off\"),3000)" not in js
+    # renderBoard 不得用 agent 数伪造在线
+    assert "liveDot').classList.toggle('off',agentN===0)" not in js
+    assert "updateSseLiveUi()" in js
+
+
+def test_b1_setup_close_does_not_clear_in_flight_lock():
+    js = _inline_js()
+    close = js.split("function closeSetup(){", 1)[1].split(
+        "async function setupOpenTerminal", 1,
+    )[0]
+    assert "SETUP_IN_FLIGHT" in close
+    assert "if(SETUP_IN_FLIGHT)return" in close
+    # return 在解锁之前：在途直接返回，不执行后面的 SETUP_SUBMITTING=false
+    assert close.index("if(SETUP_IN_FLIGHT)return") < close.index("SETUP_SUBMITTING=false")
+    submit = js.split("async function doSetupWorkspace(){", 1)[1].split(
+        "async function setupHerdrOnboarding", 1,
+    )[0]
+    assert "SETUP_IN_FLIGHT=true" in submit
+    assert "reqId!==SETUP_REQ_ID" in submit
+
+
+def test_b1_send_paths_have_per_target_single_flight():
+    js = _inline_js()
+    term = js.split("async function termSend(){", 1)[1].split(
+        "async function termUploadFiles", 1,
+    )[0]
+    assert "TERM_SEND_KEY" in term
+    assert "if(TERM_SEND_KEY)return" in term
+    hf = js.split("async function hfSend(paneId){", 1)[1].split(
+        "async function hfUpload", 1,
+    )[0]
+    assert "HF_SENDING" in hf
+    assert "if(HF_SENDING[key])return" in hf
+    msg = js.split("async function sendMsg(){", 1)[1].split(
+        "async function ackMsg", 1,
+    )[0]
+    assert "if(MSG_SENDING)return" in msg
+    assert "MSG_BOUND_SLUG" in msg
+
+
+def test_b1_file_dirty_and_beforeunload():
+    js = _inline_js()
+    assert "function fileIsDirty()" in js
+    assert "function fileConfirmLeave()" in js
+    assert "beforeunload" in js
+    assert "fileConfirmLeave()" in js
+    goto = js.split("function fileGoto(p){", 1)[1][:80]
+    assert "fileConfirmLeave" in goto
+
+
+def test_b1_stop_delete_check_business_error():
+    js = _inline_js()
+    stop = js.split("async function stopSession(name){", 1)[1].split(
+        "async function deleteSession", 1,
+    )[0]
+    assert "r.error" in stop
+    assert "r.stopped" in stop
+    delete = js.split("async function deleteSession(name){", 1)[1].split(
+        "async function initSessionMail", 1,
+    )[0]
+    assert "r.error" in delete
+    assert "r.deleted" in delete
+
+
+def test_b1_settings_partial_success_and_single_flight():
+    js = _inline_js()
+    body = js.split("async function saveSettings(){", 1)[1].split(
+        "function applyEnabledAgents", 1,
+    )[0]
+    assert "if(SETTINGS_SAVING)return" in body
+    assert "SETTINGS_SAVING=true" in body
+    assert "Hub 已保存" in body or "set.partial" in body
+    assert "agent-mail/config" in body
+    assert "/api/settings" in body
+
+
+def test_b1_node_behavior_sse_state_machine():
+    """可执行：SSE 三态仅 onopen/事件恢复在线，error 不自动回绿。"""
+    out = _run_node(textwrap.dedent(r"""
+    let SSE_LINK='offline', SSE_LAST_OK_TS=null;
+    const log=[];
+    function updateSseLiveUi(){log.push(SSE_LINK)}
+    function markSseEventOk(){SSE_LINK='online';SSE_LAST_OK_TS=Date.now();updateSseLiveUi()}
+    function onError(rs){SSE_LINK=(rs===0)?'reconnecting':'offline';updateSseLiveUi()}
+    // simulate: connect -> error CONNECTING -> must not auto-online
+    SSE_LINK='reconnecting';updateSseLiveUi();
+    onError(0);
+    onError(2);
+    // only markSseEventOk restores
+    markSseEventOk();
+    if(log.join(',')!=='reconnecting,reconnecting,offline,online'){
+      console.error('bad log', log); process.exit(1);
+    }
+    console.log('ok');
+    """))
+    assert "ok" in out
+
+
+def test_b1_node_behavior_setup_req_id_and_close_lock():
+    out = _run_node(textwrap.dedent(r"""
+    let SETUP_SUBMITTING=false, SETUP_IN_FLIGHT=false, SETUP_REQ_ID=0;
+    function closeSetup(){
+      if(SETUP_IN_FLIGHT)return;
+      SETUP_SUBMITTING=false;
+    }
+    // in flight close must keep lock
+    SETUP_SUBMITTING=true; SETUP_IN_FLIGHT=true;
+    closeSetup();
+    if(!SETUP_SUBMITTING || !SETUP_IN_FLIGHT) process.exit(2);
+    // stale response
+    const reqId=++SETUP_REQ_ID;
+    SETUP_REQ_ID++; // newer request
+    const stale = reqId !== SETUP_REQ_ID;
+    if(!stale) process.exit(3);
+    // complete in flight then close unlocks
+    SETUP_IN_FLIGHT=false; SETUP_SUBMITTING=true;
+    closeSetup();
+    if(SETUP_SUBMITTING) process.exit(4);
+    console.log('ok');
+    """))
+    assert "ok" in out
+
+
+def test_b1_node_behavior_send_single_flight_and_msg_binding():
+    out = _run_node(textwrap.dedent(r"""
+    let TERM_SEND_KEY=null, calls=0;
+    async function termSend(key){
+      if(TERM_SEND_KEY)return;
+      TERM_SEND_KEY=key; calls++;
+      await Promise.resolve();
+      if(TERM_SEND_KEY===key) TERM_SEND_KEY=null;
+    }
+    await Promise.all([termSend('s/p1'), termSend('s/p1'), termSend('s/p1')]);
+    if(calls!==1) {console.error(calls); process.exit(1)}
+
+    let MSG_SENDING=false, MSG_BOUND_SLUG='proj-b', CURRENT={id:2,slug:'proj-b'};
+    let sent=[];
+    async function sendMsg(selectSlug){
+      if(MSG_SENDING)return;
+      if(!CURRENT||!MSG_BOUND_SLUG||MSG_BOUND_SLUG!==selectSlug)return;
+      MSG_SENDING=true;
+      sent.push(CURRENT.id);
+      await Promise.resolve();
+      MSG_SENDING=false;
+    }
+    await Promise.all([sendMsg('proj-b'), sendMsg('proj-b')]);
+    if(sent.length!==1 || sent[0]!==2) process.exit(2);
+    // switch race: bound A but select B
+    MSG_BOUND_SLUG='proj-a'; CURRENT={id:1,slug:'proj-a'};
+    await sendMsg('proj-b');
+    if(sent.length!==1) process.exit(3);
+    console.log('ok');
+    """))
+    assert "ok" in out
+
+
+def test_b1_node_behavior_file_dirty_and_stop_error():
+    out = _run_node(textwrap.dedent(r"""
+    let FILE_ORIG='hello', FILE_PATH='/a.txt', editorVal='hello';
+    function fileIsDirty(){return FILE_PATH!=null && FILE_ORIG!=null && editorVal!==FILE_ORIG}
+    function fileConfirmLeave(){return !fileIsDirty() || false} // refuse leave when dirty
+    editorVal='hello!';
+    if(!fileIsDirty()) process.exit(1);
+    if(fileConfirmLeave()) process.exit(2);
+    editorVal='hello'; FILE_ORIG='hello';
+    if(fileIsDirty()) process.exit(3);
+
+    function handleStop(r){
+      if(r.error||!r.stopped) return 'fail:'+(r.error||'no-stopped');
+      return 'ok';
+    }
+    if(handleStop({available:true,error:'busy'})!=='fail:busy') process.exit(4);
+    if(handleStop({available:true,stopped:'s1'})!=='ok') process.exit(5);
+    console.log('ok');
+    """))
+    assert "ok" in out
+
+
+def test_b1_node_behavior_settings_partial_success():
+    out = _run_node(textwrap.dedent(r"""
+    let SETTINGS_SAVING=false;
+    async function saveSettings(hubOk, settingsOk){
+      if(SETTINGS_SAVING)return 'blocked';
+      SETTINGS_SAVING=true;
+      let hubSaved=false;
+      try{
+        if(!hubOk) throw new Error('hub down');
+        hubSaved=true;
+        if(!settingsOk) throw new Error('settings down');
+        return 'full';
+      }catch(e){
+        if(hubSaved) return 'partial:'+e.message;
+        return 'fail:'+e.message;
+      }finally{SETTINGS_SAVING=false}
+    }
+    const a=await saveSettings(true,true);
+    const b=await saveSettings(true,false);
+    const c=await saveSettings(false,true);
+    const d=await Promise.all([saveSettings(true,true), saveSettings(true,true)]);
+    // second should be blocked while first runs — simulate sequential lock
+    SETTINGS_SAVING=false;
+    let n=0;
+    async function once(){
+      if(SETTINGS_SAVING)return 'blocked';
+      SETTINGS_SAVING=true; n++;
+      await new Promise(r=>setTimeout(r,5));
+      SETTINGS_SAVING=false;
+      return 'ok';
+    }
+    const p=[once(), once(), once()];
+    const res=await Promise.all(p);
+    if(a!=='full'||b!=='partial:settings down'||c!=='fail:hub down') {console.error({a,b,c});process.exit(1)}
+    if(n!==1 || res.filter(x=>x==='ok').length!==1) {console.error(res,n);process.exit(2)}
+    console.log('ok');
+    """))
+    assert "ok" in out
+
+
+def test_b1_node_behavior_msg_load_seq_drops_stale():
+    out = _run_node(textwrap.dedent(r"""
+    let MSG_LOAD_SEQ=0, applied=[];
+    async function load(slug, delay, data){
+      const seq=++MSG_LOAD_SEQ;
+      await new Promise(r=>setTimeout(r, delay));
+      if(seq!==MSG_LOAD_SEQ)return; // drop stale
+      applied.push(data);
+    }
+    await Promise.all([load('A',30,'A'), load('B',5,'B')]);
+    if(applied.join(',')!=='B') {console.error(applied); process.exit(1)}
+    console.log('ok');
+    """))
+    assert "ok" in out

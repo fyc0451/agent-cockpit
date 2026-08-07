@@ -90,6 +90,7 @@ header .spacer{flex:1}
 .set-root-line code{font-family:var(--mono);word-break:break-all;color:var(--fg2)}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--done)}
 .dot.off{background:var(--fg3)}
+.dot.reconnect{background:var(--need)}
 
 /* 看板 */
 .board-wrap{flex:1;overflow:auto;padding:12px}
@@ -1017,7 +1018,11 @@ let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=n
 let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
-let SETUP_SUBMITTING=false, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
+let SETUP_SUBMITTING=false, SETUP_IN_FLIGHT=false, SETUP_REQ_ID=0, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
+// B1: SSE 链路三态与发送/消息/文件保护
+let SSE_LINK='offline', SSE_LAST_OK_TS=null; // online | reconnecting | offline
+let TERM_SEND_KEY=null, MSG_SENDING=false, MSG_LOAD_SEQ=0, MSG_BOUND_SLUG=null, SETTINGS_SAVING=false;
+const HF_SENDING={};
 let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',inboxRoute:null,chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
 let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
 let TEAM_CHAT_SENDING=false;
@@ -1243,6 +1248,7 @@ function cancelSettings(){
   toast(t('set.cancelled','已取消更改'));
 }
 async function saveSettings(){
+  if(SETTINGS_SAVING)return;
   const S=SETTINGS_EDIT;
   const body={
     language:LANG,
@@ -1255,17 +1261,30 @@ async function saveSettings(){
       write_timeout:parseFloat(document.getElementById('setWriteTimeout').value)||2,
     },
   };
+  const hubPayload={hub:HUB_CONFIG_EDIT.trim(),team_hub:TEAM_HUB_CONFIG_EDIT.trim(),human_auth:HUMAN_AUTH_CONFIG_EDIT.trim()};
+  SETTINGS_SAVING=true;
+  let hubSaved=false;
   try{
-    HUB_CONFIG=await api('/api/agent-mail/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hub:HUB_CONFIG_EDIT.trim(),team_hub:TEAM_HUB_CONFIG_EDIT.trim(),human_auth:HUMAN_AUTH_CONFIG_EDIT.trim()})});
+    HUB_CONFIG=await api('/api/agent-mail/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(hubPayload)});
+    hubSaved=true;
     HUB_CONFIG_EDIT=HUB_CONFIG.hub||'';
     TEAM_HUB_CONFIG_EDIT=HUB_CONFIG.team_hub||'';
     HUMAN_AUTH_CONFIG_EDIT=HUB_CONFIG.human_auth||'';
-    const saved=await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    SETTINGS={...SETTINGS,...saved};
-    SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
-    SETTINGS_SAVED_LANG=LANG;
-    toast(t('set.saved','已保存 ✓'));renderSettings();applyEnabledAgents();
-  }catch(e){toast(t('set.savefail','保存失败: ')+e,4000)}
+    try{
+      const saved=await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      SETTINGS={...SETTINGS,...saved};
+      SETTINGS_EDIT=JSON.parse(JSON.stringify(SETTINGS));
+      SETTINGS_SAVED_LANG=LANG;
+      toast(t('set.saved','已保存 ✓'));renderSettings();applyEnabledAgents();
+    }catch(e2){
+      // Hub 已生效；本机设置失败 — 诚实部分成功，可重试第二步
+      toast(t('set.partial','Hub 已保存，本机设置失败（可重试）: ')+e2,6000);
+      renderSettings();
+    }
+  }catch(e){
+    if(hubSaved)toast(t('set.partial','Hub 已保存，本机设置失败（可重试）: ')+e,6000);
+    else toast(t('set.savefail','保存失败: ')+e,4000);
+  }finally{SETTINGS_SAVING=false}
 }
 function applyEnabledAgents(){
   if(!SETTINGS)return;
@@ -2058,7 +2077,7 @@ function renderBoard(d){
   }else{emptyEl.style.display='none';boardEl.style.display=''}
   document.getElementById('boardInfo').textContent=`${d.sessions?.length||0} session · ${agentN} agent`;
   document.getElementById('liveText').textContent=agentN+' agents';
-  document.getElementById('liveDot').classList.toggle('off',agentN===0);
+  updateSseLiveUi();
   if(CURRENT_TERM)syncPaneSelect();
 }
 
@@ -2192,13 +2211,19 @@ async function refreshTerm(){
 }
 async function termSend(){
   if(!CURRENT_TERM)return;
+  const key=CURRENT_TERM.session+'/'+CURRENT_TERM.paneId;
+  if(TERM_SEND_KEY)return;
   const text=document.getElementById('termInput').value.trim();if(!text)return;
   const mode=document.getElementById('termMode').value;
+  TERM_SEND_KEY=key;
   try{
     await api(`/api/herdr/pane/${encodeURIComponent(CURRENT_TERM.session)}/${encodeURIComponent(CURRENT_TERM.paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
-    document.getElementById('termInput').value='';
-    setTimeout(refreshTerm,800);
+    if(CURRENT_TERM&&(CURRENT_TERM.session+'/'+CURRENT_TERM.paneId)===key){
+      document.getElementById('termInput').value='';
+      setTimeout(refreshTerm,800);
+    }
   }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
+  finally{if(TERM_SEND_KEY===key)TERM_SEND_KEY=null}
 }
 // 终端里上传截图/文件,自动插入 @路径(对 agent 模式)或裸路径(对 shell)
 async function termUploadFiles(input){
@@ -2413,14 +2438,31 @@ let MSG_FILTER=null;
 let PROJ_MSG_CACHE=null;
 async function loadProjectMsgs(focusMessageId){
   const slug=document.getElementById('msgProj').value;if(!slug)return;
+  const seq=++MSG_LOAD_SEQ;
+  MSG_BOUND_SLUG=null;
+  setMsgComposeEnabled(false);
   try{
     const d=await api('/api/projects/'+encodeURIComponent(slug));
+    if(seq!==MSG_LOAD_SEQ)return; // 旧响应丢弃
+    if(document.getElementById('msgProj').value!==slug)return;
     CURRENT_PROJ=d.project;
+    MSG_BOUND_SLUG=slug;
     CAPABILITIES.agent_mail=d.agent_mail||CAPABILITIES.agent_mail;
     PROJ_MSG_CACHE=d;
     renderProjAgentList(d);
     renderProjMsgs(d,focusMessageId);
-  }catch(e){toast('加载失败: '+e)}
+    setMsgComposeEnabled(true);
+  }catch(e){
+    if(seq!==MSG_LOAD_SEQ)return;
+    toast('加载失败: '+e);
+    setMsgComposeEnabled(!!(CURRENT_PROJ&&MSG_BOUND_SLUG));
+  }
+}
+function setMsgComposeEnabled(on){
+  ['cmpFrom','cmpTo','cmpSubject','cmpBody','cmpIntent','cmpImportance','cmpHard'].forEach(id=>{
+    const el=document.getElementById(id);if(el)el.disabled=!on;
+  });
+  document.querySelectorAll('[onclick*="sendMsg"],button[data-action="sendMsg"]').forEach(b=>{b.disabled=!on||MSG_SENDING});
 }
 function renderProjAgentList(d){
   document.getElementById('projAgentList').innerHTML=d.agents.map(a=>`
@@ -2482,10 +2524,37 @@ async function cleanupMsgs(){
   }catch(e){toast('清理失败: '+e)}
 }
 async function sendMsg(){
+  if(MSG_SENDING)return;
+  const slug=document.getElementById('msgProj')?.value||'';
+  if(!CURRENT_PROJ||!MSG_BOUND_SLUG||MSG_BOUND_SLUG!==slug){
+    toast('项目切换中或未就绪，请稍后再发送');return;
+  }
   const hard=document.getElementById('cmpHard').checked;
   if(hard&&!confirm('硬中断会取消 Agent 当前在途操作；无法恢复隐式推理，确定继续？'))return;
-  try{await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:CURRENT_PROJ.id,sender_name:document.getElementById('cmpFrom').value,to:document.getElementById('cmpTo').value.split(',').map(s=>s.trim()).filter(Boolean),subject:document.getElementById('cmpSubject').value,body:document.getElementById('cmpBody').value,intent:document.getElementById('cmpIntent').value,importance:document.getElementById('cmpImportance').value,hard})});
-    toast(t('toast.sent','已发送 ✓'));loadProjectMsgs()}catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
+  const projectId=CURRENT_PROJ.id;
+  const boundSlug=MSG_BOUND_SLUG;
+  const payload={
+    project_id:projectId,
+    sender_name:document.getElementById('cmpFrom').value,
+    to:document.getElementById('cmpTo').value.split(',').map(s=>s.trim()).filter(Boolean),
+    subject:document.getElementById('cmpSubject').value,
+    body:document.getElementById('cmpBody').value,
+    intent:document.getElementById('cmpIntent').value,
+    importance:document.getElementById('cmpImportance').value,
+    hard,
+  };
+  MSG_SENDING=true;
+  try{
+    await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    // 成功才清草稿；仅当仍绑定同一项目时刷新
+    if(MSG_BOUND_SLUG===boundSlug){
+      document.getElementById('cmpBody').value='';
+      document.getElementById('cmpSubject').value='';
+      toast(t('toast.sent','已发送 ✓'));
+      loadProjectMsgs();
+    }
+  }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
+  finally{MSG_SENDING=false}
 }
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
@@ -3011,14 +3080,23 @@ async function hfRefreshAll(){
   }catch(e){if(HF_SESSION===session&&out.isConnected&&focus.classList.contains('hf-focus'))out.textContent='读取失败: '+e}
 }
 async function hfSend(paneId){
+  const key=(HF_SESSION||'')+'/'+paneId;
+  if(HF_SENDING[key])return;
   const inp=document.getElementById('hf-in-'+paneId);
+  if(!inp)return;
   const mode=document.getElementById('hf-mode-'+paneId).value;
   const text=inp.value.trim();if(!text)return;
+  const session=HF_SESSION;
+  HF_SENDING[key]=true;
   try{
-    await api(`/api/herdr/pane/${encodeURIComponent(HF_SESSION)}/${encodeURIComponent(paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
-    inp.value='';
-    setTimeout(hfRefreshAll,800);
+    await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
+    if(HF_SESSION===session){
+      const el=document.getElementById('hf-in-'+paneId);
+      if(el)el.value='';
+      setTimeout(hfRefreshAll,800);
+    }
   }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
+  finally{delete HF_SENDING[key]}
 }
 // 上传图片/文件,把 @路径(prompt)或裸路径(send)插入该 pane 的输入框
 async function hfUpload(paneId,input){
@@ -3490,11 +3568,19 @@ async function tellIdentity(session,paneId){
 }
 async function stopSession(name){
   if(!confirm('确认停止 session '+name+'?pane 保留,可再 attach'))return;
-  try{await api(`/api/herdr/session/${encodeURIComponent(name)}/stop`,{method:'POST'});toast('已停止 '+name);loadSessionsView()}catch(e){toast(e)}
+  try{
+    const r=await api(`/api/herdr/session/${encodeURIComponent(name)}/stop`,{method:'POST'});
+    if(r.error||!r.stopped){toast(r.error||('停止失败: '+name),4000);return}
+    toast('已停止 '+name);loadSessionsView();
+  }catch(e){toast(e)}
 }
 async function deleteSession(name){
   if(!confirm('确认删除 session '+name+'?不可恢复'))return;
-  try{await api(`/api/herdr/session/${encodeURIComponent(name)}`,{method:'DELETE'});toast('已删除 '+name);loadSessionsView()}catch(e){toast(e)}
+  try{
+    const r=await api(`/api/herdr/session/${encodeURIComponent(name)}`,{method:'DELETE'});
+    if(r.error||!r.deleted){toast(r.error||('删除失败: '+name),4000);return}
+    toast('已删除 '+name);loadSessionsView();
+  }catch(e){toast(e)}
 }
 async function initSessionMail(name){
   try{
@@ -3699,8 +3785,11 @@ function showSetupModal(){
   document.getElementById('setupModal').classList.add('show');
 }
 function closeSetup(){
-  SETUP_SUBMITTING=false;renderSetupPreview();
+  // 在途请求不得因关窗解锁；完成后才允许再次提交
   document.getElementById('setupModal').classList.remove('show');
+  if(SETUP_IN_FLIGHT)return;
+  SETUP_SUBMITTING=false;
+  renderSetupPreview();
 }
 async function setupOpenTerminal(session){
   if(!validSessionName(session)){toast('非法 session 名，无法打开终端');return}
@@ -3708,13 +3797,14 @@ async function setupOpenTerminal(session){
   await doAttachHerdr(session);
 }
 async function doSetupWorkspace(){
-  if(SETUP_SUBMITTING)return;
+  if(SETUP_SUBMITTING||SETUP_IN_FLIGHT)return;
   const session=document.getElementById('suSession').value.trim();
   const workdir=document.getElementById('suWorkdir').value.trim();
   const layout=document.getElementById('suLayout').value;
   const errors=setupErrors();
   if(errors.length){toast(errors[0]);renderSetupPreview();return}
-  SETUP_SUBMITTING=true;renderSetupPreview();
+  const reqId=++SETUP_REQ_ID;
+  SETUP_SUBMITTING=true;SETUP_IN_FLIGHT=true;renderSetupPreview();
   let setupSucceeded=false;
   const participants=SETUP_PARTICIPANTS.map(p=>({...p,task:p.task.trim(),args:(p.args||'').trim()}));
   const agents=participants.map(p=>p.agent);
@@ -3724,6 +3814,7 @@ async function doSetupWorkspace(){
   try{
     const body={session,workdir,mode:SETUP_MODE,participants,agents,layout};
     const r=await api('/api/herdr/setup-workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(reqId!==SETUP_REQ_ID)return; // 旧响应不得写新上下文
     if(r.ok){
       setupSucceeded=true;
       const mail=r.agent_mail||{};
@@ -3745,8 +3836,16 @@ async function doSetupWorkspace(){
         ?`<br><button class="primary sm" data-action="setupHerdrOnboarding" data-command="${esc(r.herdr_command||'herdr')}" style="margin-top:8px">打开终端配置 Herdr</button>`:'';
       res.innerHTML='<span style="color:var(--err)">启动失败</span>'+(r.error?'<br>'+esc(r.error):'')+terminalOutput+onboarding+'<br>已启动: '+((r.started||[]).map(esc).join(', ')||'无')+(failed?'<br>失败原因:<br>'+failed:'');
     }
-  }catch(e){res.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>'}
-  finally{if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}}
+  }catch(e){
+    if(reqId!==SETUP_REQ_ID)return;
+    res.innerHTML='<span style="color:var(--err)">失败: '+esc(e)+'</span>';
+  }finally{
+    if(reqId===SETUP_REQ_ID){
+      SETUP_IN_FLIGHT=false;
+      if(!setupSucceeded){SETUP_SUBMITTING=false;renderSetupPreview()}
+      else renderSetupPreview();
+    }
+  }
 }
 async function setupHerdrOnboarding(command){
   const workdir=document.getElementById('suWorkdir').value.trim();
@@ -3867,6 +3966,7 @@ function fileSearchClear(){
 function fileSearchOpen(i){
   const e=FILE_ENTRIES[i];if(!e)return;
   if(e.type==='dir'){
+    if(!fileConfirmLeave())return;
     FILE_CWD=e.path;
     document.getElementById('fileSearchInput').value='';
     loadFileTree();
@@ -3876,11 +3976,23 @@ function fileSearchDownload(i){
   const e=FILE_ENTRIES[i];if(!e||e.type!=='file')return;
   FILE_PATH=e.path;fileDownload();
 }
-function fileGoto(p){FILE_CWD=p;loadFileTree()}
-function fileCd(n){FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
+function fileIsDirty(){
+  const ed=document.getElementById('fileEditor');
+  if(!ed||FILE_ORIG===null||FILE_PATH===null)return false;
+  // 媒体预览无 textarea
+  if(!document.getElementById('fileEditor'))return false;
+  return ed.value!==FILE_ORIG;
+}
+function fileConfirmLeave(){
+  if(!fileIsDirty())return true;
+  return confirm('文件有未保存修改，确定离开并丢弃？');
+}
+function fileGoto(p){if(!fileConfirmLeave())return;FILE_CWD=p;loadFileTree()}
+function fileCd(n){if(!fileConfirmLeave())return;FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
 function fileUp(){
   // 到白名单根为止:再往上后端会拒绝(整 home 已不放行)
   if((FILE_ROOTS||[]).includes(FILE_CWD)){toast(t('files.rootlimit','已是可访问的根目录,可点上方根名切换'));return}
+  if(!fileConfirmLeave())return;
   FILE_CWD=FILE_CWD.split('/').slice(0,-1).join('/')||'/';
   loadFileTree();
 }
@@ -3897,27 +4009,28 @@ const FILE_IMG_EXT=['png','jpg','jpeg','gif','webp','bmp','ico','avif'];
 const FILE_AUD_EXT=['mp3','wav','ogg','m4a','flac','aac','opus'];
 const FILE_VID_EXT=['mp4','webm','mov','m4v','mkv'];
 async function fileOpenPath(path){
+  if(FILE_PATH&&path!==FILE_PATH&&!fileConfirmLeave())return;
   const ext=(path.split('.').pop()||'').toLowerCase();
   const raw='/api/files/raw?path='+encodeURIComponent(path);
   const bar=`<div class="editor-bar"><span class="ep">${esc(path)}</span><button style="width:auto" onclick="fileDownload()">⬇️ 下载</button></div>`;
   if(FILE_IMG_EXT.includes(ext)){
-    FILE_PATH=path;
+    FILE_PATH=path;FILE_ORIG=null;
     document.getElementById('editorArea').innerHTML=bar+`<div class="media-view"><img src="${raw}" alt="${esc(path)}"></div>`;
     return;
   }
   if(FILE_AUD_EXT.includes(ext)){
-    FILE_PATH=path;
+    FILE_PATH=path;FILE_ORIG=null;
     document.getElementById('editorArea').innerHTML=bar+`<div class="media-view"><audio controls src="${raw}" style="width:100%"></audio></div>`;
     return;
   }
   if(FILE_VID_EXT.includes(ext)){
-    FILE_PATH=path;
+    FILE_PATH=path;FILE_ORIG=null;
     document.getElementById('editorArea').innerHTML=bar+`<div class="media-view"><video controls src="${raw}"></video></div>`;
     return;
   }
   try{
     const d=await api('/api/files/read?path='+encodeURIComponent(path));
-    if(d.binary){FILE_PATH=d.path;fileDownload();return}
+    if(d.binary){FILE_PATH=d.path;FILE_ORIG=null;fileDownload();return}
     FILE_PATH=d.path;FILE_ORIG=d.text;
     document.getElementById('editorArea').innerHTML=`
       <div class="editor-bar"><span class="ep">${esc(d.path)}</span><span class="muted">${d.size}B</span><button style="width:auto" onclick="fileDownload()">⬇️ 下载</button><button class="primary" style="width:auto" onclick="fileSave()">💾</button></div>
@@ -4002,14 +4115,45 @@ async function fileSave(){const c=document.getElementById('fileEditor').value;if
 function closeMsg(){document.getElementById('msgModal').classList.remove('show')}
 async function mmReply(){/* TODO */}
 
-// ============ SSE ============
-function connectSSE(){
-  if(SSE)SSE.close();
-  SSE=new EventSource('/api/events',{withCredentials:true});
-  SSE.addEventListener('board',e=>{const d=JSON.parse(e.data);BOARD=d;renderBoard(d);launchSessionChanged(false)});
-  SSE.addEventListener('attention',e=>loadAttention(JSON.parse(e.data)));
-  SSE.onerror=()=>{document.getElementById('liveDot').classList.add('off');setTimeout(()=>document.getElementById('liveDot').classList.remove('off'),3000)};
+// ============ SSE 链路状态（B1 P1-01） ============
+function updateSseLiveUi(){
+  const dot=document.getElementById('liveDot');
+  if(!dot)return;
+  dot.classList.toggle('off',SSE_LINK!=='online');
+  dot.classList.toggle('reconnect',SSE_LINK==='reconnecting');
+  const last=SSE_LAST_OK_TS?new Date(SSE_LAST_OK_TS).toLocaleTimeString():'—';
+  const label=SSE_LINK==='online'?'在线':(SSE_LINK==='reconnecting'?'重连中':'离线');
+  dot.title=`SSE ${label} · 最近成功 ${last}`;
 }
+function markSseEventOk(){
+  SSE_LINK='online';
+  SSE_LAST_OK_TS=Date.now();
+  updateSseLiveUi();
+}
+function connectSSE(){
+  if(SSE){try{SSE.close()}catch(e){}}
+  SSE_LINK='reconnecting';
+  updateSseLiveUi();
+  SSE=new EventSource('/api/events',{withCredentials:true});
+  SSE.onopen=()=>{markSseEventOk()};
+  SSE.addEventListener('board',e=>{
+    markSseEventOk();
+    const d=JSON.parse(e.data);BOARD=d;renderBoard(d);launchSessionChanged(false);
+  });
+  SSE.addEventListener('attention',e=>{
+    markSseEventOk();
+    loadAttention(JSON.parse(e.data));
+  });
+  // 断线只标离线/重连中；禁止定时无条件恢复绿点
+  SSE.onerror=()=>{
+    const rs=SSE?SSE.readyState:-1;
+    SSE_LINK=(rs===0)?'reconnecting':'offline';
+    updateSseLiveUi();
+  };
+}
+window.addEventListener('beforeunload',e=>{
+  if(fileIsDirty()){e.preventDefault();e.returnValue='';}
+});
 
 let LAST_PAGE_RECOVERY=0;
 function recoverPageState(){
