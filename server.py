@@ -373,6 +373,7 @@ class StartAgentReq(BaseModel):
     workdir: str
     agent: str = "codex"  # codex | kimi | qodercli
     model: str | None = None
+    args: str = ""  # 追加到 agent 启动命令后的自定义参数
 
 
 class WorkspaceParticipantReq(BaseModel):
@@ -383,6 +384,7 @@ class WorkspaceParticipantReq(BaseModel):
     task: str = ""
     workspace: str = "auto"
     review_target: str | None = None
+    args: str = ""  # 追加到 agent 启动命令后的自定义参数
 
 
 class SetupWorkspaceReq(BaseModel):
@@ -1514,7 +1516,7 @@ def api_herdr_start(req: StartAgentReq):
     _validate_session_name(req.session)
     if req.agent not in VALID_AGENTS:
         raise HTTPException(400, f"不支持的 agent: {req.agent}")
-    return herdr_client.start_agent(req.session, req.workdir, req.agent, req.model)
+    return herdr_client.start_agent(req.session, req.workdir, req.agent, req.model, args=req.args)
 
 
 @app.post("/api/herdr/pane/{session}/{pane_id}/restart")
@@ -1886,8 +1888,7 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         raise HTTPException(400, "participants 包含不支持的角色")
     if any(p.workspace not in VALID_WORKSPACE_STRATEGIES for p in participants):
         raise HTTPException(400, "participants 包含不支持的工作目录策略")
-    if not legacy and any(not p.task.strip() for p in participants):
-        raise HTTPException(400, "请填写每个 Agent 的真实任务")
+    # task 为选填:留空时 _workspace_briefing 会省略"你的任务"行
 
     ids = []
     for i, p in enumerate(participants):
@@ -1973,6 +1974,7 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
             "agent": participant.agent,
             "role": participant.role,
             "task": participant.task.strip(),
+            "args": (participant.args or "").strip(),
             "review_target": participant.review_target,
             **workspace,
         })
@@ -1988,9 +1990,10 @@ def _workspace_briefing(
     lines = [
         "[Agent Cockpit 工作区任务]",
         f"你的角色: {role_labels[plan['role']]}",
-        f"你的任务: {plan['task']}",
-        f"工作目录策略: {plan['strategy']} ({plan['workdir']})",
     ]
+    if plan["task"].strip():
+        lines.append(f"你的任务: {plan['task']}")
+    lines.append(f"工作目录策略: {plan['strategy']} ({plan['workdir']})")
     if coworkers:
         lines.append(f"协作者: {coworkers}")
     if plan["role"] == "reviewer":
@@ -2248,6 +2251,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         agent_type = plan["agent"]
         r = herdr_client.start_agent(
             req.session, plan["workdir"], agent_type, layout=req.layout,
+            args=plan.get("args", ""),
         )
         results.append({"agent": agent_type, "plan": plan, "start": r})
         error = r.get("error")

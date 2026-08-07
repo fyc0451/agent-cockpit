@@ -56,8 +56,12 @@ def _find_agent_bin(name: str) -> str:
 
 
 # agent 类型 → 启动命令构造器
-def _agent_cmd(agent: str, workdir: str) -> str:
-    """构造 agent 启动命令(完整路径 + shlex 安全)。"""
+def _agent_cmd(agent: str, workdir: str, args: str = "") -> str:
+    """构造 agent 启动命令(完整路径 + shlex 安全)。
+
+    args 为用户自定义的额外启动参数,原样追加到命令末尾——等价于用户在终端
+    给 agent 手动加 flag,属本地可信输入;bin/workdir 仍由 shlex.quote 保护。
+    """
     wdb = shlex.quote(workdir)
     bins = {
         "codex": lambda b: f"{shlex.quote(b)} -C {wdb}",
@@ -71,7 +75,9 @@ def _agent_cmd(agent: str, workdir: str) -> str:
     }
     bin_path = _find_agent_bin(agent)
     builder = bins.get(agent, bins["codex"])
-    return builder(bin_path)
+    cmd = builder(bin_path)
+    extra = (args or "").strip()
+    return f"{cmd} {extra}" if extra else cmd
 
 
 def is_available() -> bool:
@@ -489,7 +495,7 @@ def _rename_agent_context(
 
 def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
-    layout: str = "tab",
+    layout: str = "tab", args: str = "",
 ) -> dict[str, Any]:
     """在指定 session 里启动一个 agent pane(新建 window/pane 跑 agent)。
 
@@ -539,7 +545,7 @@ def start_agent(
     if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
         return {"available": True, "error": f"{agent} 未安装或不在 PATH"}
     # 构造 agent 启动命令(用 _agent_cmd 统一处理完整路径)
-    cmd_str = _agent_cmd(agent, workdir)
+    cmd_str = _agent_cmd(agent, workdir, args)
     before_ids = {
         str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
     }
