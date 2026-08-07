@@ -3254,13 +3254,15 @@ function openTermWS(id,xterm,replay){
   ws.onmessage=ev=>{try{
     const light=document.documentElement.classList.contains('light');
     if(light){
+      const st=xterm._darkBoost;
+      if(st&&st.carry){xterm.write(st.carry);st.carry=''}
       // 浅色模式:重写 TUI 自带颜色(opencode 等显式刷深色底,主题管不到)
       const s=lightTermAdapt(xterm,typeof ev.data==='string'?ev.data:new Uint8Array(ev.data),typeof ev.data!=='string');
       if(s)xterm.write(s);
     }else{
       const st=xterm._lightAdapt;
       if(st&&st.carry){xterm.write(st.carry);st.carry=''}
-      // 暗色模式:对过暗前景色做最低对比度提升(qoder 等暗色主题 CLI)
+      // 暗色模式:提升过暗前景，并把 CLI 固定输出的浅背景转为深背景
       const s2=darkTermBoost(xterm,typeof ev.data==='string'?ev.data:new Uint8Array(ev.data),typeof ev.data!=='string');
       if(s2)xterm.write(s2);
     }
@@ -4081,9 +4083,8 @@ function lightTermAdapt(xterm,data,binary){
   s=s.replace(/\x1b\]1[01];[^?\x07\x1b][^\x07\x1b]*(\x07|\x1b\\)/g,'');
   return s;
 }
-// 暗色模式最低对比度提升:部分 CLI(如 qoder 思考文本/边框 38;2;60;60;57m)
-// 在黑底上完全不可读。流式重写 SGR 38;2/38;5 前景色到最低亮度,保色相,
-// 不碰背景色(48;*)与基本语义色。
+// 暗色模式颜色适配:部分 CLI 会输出过暗前景(qoder),另一些 Codex 实例会
+// 固定输出浅色背景(48;2;240;240;241)。前者提到最低亮度，后者反成深底。
 const DARK_BOOST_MIN_LUMA=115;
 function _darkBoostFg(r,g,b){
   const luma=0.2126*r+0.7152*g+0.0722*b;
@@ -4091,23 +4092,44 @@ function _darkBoostFg(r,g,b){
   const k=Math.min(4,DARK_BOOST_MIN_LUMA/Math.max(1,luma));
   return [Math.min(255,Math.round(r*k)),Math.min(255,Math.round(g*k)),Math.min(255,Math.round(b*k))];
 }
+function _darkAdaptBg(r,g,b){
+  const[h,s,l]=_rgbToHsl(r,g,b);
+  return l>0.5?_hslToRgb(h,s,1-l):null;
+}
 function _darkBoostRewriteSgr(full,params){
   if(!params)return full;
-  const parts=params.split(';');
-  let changed=false;
+  const parts=params.split(';'),out=[];let changed=false;
   for(let i=0;i<parts.length;i++){
-    if(parts[i]==='38'&&parts[i+1]==='2'&&parts.length>=i+5){
-      const lifted=_darkBoostFg(+parts[i+2],+parts[i+3],+parts[i+4]);
-      if(lifted){parts[i+2]=String(lifted[0]);parts[i+3]=String(lifted[1]);parts[i+4]=String(lifted[2]);changed=true}
-      i+=4;
-    }else if(parts[i]==='38'&&parts[i+1]==='5'&&parts.length>=i+3){
+    const p=parts[i],code=+p;
+    if((code>=40&&code<=47)||(code>=100&&code<=107)){
+      const rgb=ANSI16_RGB[code>=100?code-92:code-40],dark=_darkAdaptBg(...rgb);
+      if(dark){out.push('48','2',dark[0],dark[1],dark[2]);changed=true}else out.push(p);
+      continue;
+    }
+    if((p==='38'||p==='48')&&parts[i+1]==='2'){
+      let j=i+2;if(parts[j]==='')j++;
+      if(parts[j]!==undefined&&parts[j+1]!==undefined&&parts[j+2]!==undefined){
+        const rgb=[+parts[j]||0,+parts[j+1]||0,+parts[j+2]||0];
+        const adapted=p==='38'?_darkBoostFg(...rgb):_darkAdaptBg(...rgb);
+        if(adapted){out.push(p,'2',adapted[0],adapted[1],adapted[2]);changed=true}
+        else out.push(...parts.slice(i,j+3));
+        i=j+2;continue;
+      }
+    }
+    if((p==='38'||p==='48')&&parts[i+1]==='5'&&parts[i+2]!==undefined){
       // 灰阶 232-255(232 最暗):低于阈值的灰统一提到 245(≈138 luma)
       const n=+parts[i+2];
-      if(n>=232&&n<245){parts[i+2]='245';changed=true}
-      i+=2;
+      if(p==='38'&&n>=232&&n<245){out.push('38','5','245');changed=true}
+      else if(p==='48'){
+        const rgb=n>=0&&n<16?ANSI16_RGB[n]:_pal256rgb(n),dark=rgb?_darkAdaptBg(...rgb):null;
+        if(dark){out.push('48','2',dark[0],dark[1],dark[2]);changed=true}
+        else out.push(p,'5',parts[i+2]);
+      }else out.push(p,'5',parts[i+2]);
+      i+=2;continue;
     }
+    out.push(p);
   }
-  return changed?'\x1b['+parts.join(';')+'m':full;
+  return changed?'\x1b['+out.join(';')+'m':full;
 }
 function darkTermBoost(xterm,data,binary){
   let st=xterm._darkBoost;
@@ -4116,8 +4138,20 @@ function darkTermBoost(xterm,data,binary){
   s=st.carry+s;
   const split=_escTailSplit(s);s=split[0];st.carry=split[1];
   if(!s)return'';
-  if(!s.includes('38;'))return s;  // 快速路径:无扩展前景色
-  return s.replace(/\x1b\[([0-9;]*)m/g,_darkBoostRewriteSgr);
+  if(!s.includes('38;')&&!s.includes('48;')&&!s.includes('\x1b[4')&&!s.includes('\x1b[10')&&!s.includes('\x1b]1'))return s;
+  s=s.replace(/\x1b\[([0-9;]*)m/g,_darkBoostRewriteSgr);
+  // CLI 不能覆盖 Cockpit 选择的默认终端主题；保留 OSC 查询和重置。
+  return s.replace(/\x1b\]1[01];[^?\x07\x1b][^\x07\x1b]*(\x07|\x1b\\)/g,'');
+}
+function _repaintTermForTheme(inst){
+  const xterm=inst?.xterm,cols=xterm?.cols,rows=xterm?.rows;
+  if(!xterm||xterm._disposed||!cols||!rows)return;
+  // xterm 已缓存的显式单元格颜色不会随 theme 重新计算。轻微改变一次 PTY
+  // 宽度触发 TUI 全屏重绘，新输出会经过当前主题的 ANSI 适配器。
+  if(cols>10)xterm.resize(cols-1,rows);
+  requestAnimationFrame(()=>{try{
+    if(!xterm._disposed){if(xterm.cols!==cols)xterm.resize(cols,rows);xterm.refresh(0,xterm.rows-1)}
+  }catch(e){}});
 }
 function setTheme(mode,save=true){
   const light=mode==='light';
@@ -4125,7 +4159,7 @@ function setTheme(mode,save=true){
   const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
   const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
   const th=termTheme();
-  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th}catch(e){}}
+  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th;_repaintTermForTheme(inst)}catch(e){}}
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}

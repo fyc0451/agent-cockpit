@@ -1559,19 +1559,21 @@ def test_team_collab_send_failure_keeps_draft_with_inline_error():
 
 
 def test_terminal_dark_mode_min_contrast_boost_exists():
-    # 暗色模式最低对比度提升:qoder 等 CLI 的过暗前景色(如 60,60,57)在黑底不可读
+    # 暗色模式同时处理 qoder 过暗前景和 Codex 固定输出的浅色背景。
     js = _inline_js()
     assert "function darkTermBoost(xterm,data,binary){" in js
     assert "DARK_BOOST_MIN_LUMA=115" in js
     assert "function _darkBoostRewriteSgr(full,params){" in js
     assert "xterm._darkBoost" in js
-    # 只提升前景(38;*),不碰背景(48;*)
     boost = js.split("function _darkBoostRewriteSgr(full,params){", 1)[1].split(
         "function darkTermBoost", 1
     )[0]
-    assert "parts[i]==='38'&&parts[i+1]==='2'" in boost
-    assert "parts[i]==='38'&&parts[i+1]==='5'" in boost
-    assert "48;" not in boost.replace("parts[i]==='38'", "")
+    assert "(p==='38'||p==='48')&&parts[i+1]==='2'" in boost
+    assert "(p==='38'||p==='48')&&parts[i+1]==='5'" in boost
+    assert "function _darkAdaptBg(r,g,b){" in js
+    assert "p==='38'?_darkBoostFg(...rgb):_darkAdaptBg(...rgb)" in boost
+    assert "p==='48'" in boost
+    assert "ANSI16_RGB[n]" in boost
 
 
 def test_terminal_dark_boost_wired_in_ws_dark_branch():
@@ -1590,6 +1592,22 @@ def test_terminal_dark_boost_stream_safe_with_carry():
     assert "carry" in fn
     assert "_escTailSplit" in fn
     assert "includes('38;')" in fn  # 快速路径
+    assert "includes('48;')" in fn
+    assert "\\x1b\\]1[01]" in fn
+
+
+def test_theme_switch_forces_tui_repaint_for_explicit_colors():
+    # xterm theme 只会更新默认色；已缓存的 38/48 显式颜色必须让 TUI 重绘。
+    js = _inline_js()
+    repaint = js.split("function _repaintTermForTheme(inst){", 1)[1].split(
+        "function setTheme", 1
+    )[0]
+    set_theme = js.split("function setTheme(mode,save=true){", 1)[1].split(
+        "function toggleTheme", 1
+    )[0]
+    assert "xterm.resize(cols-1,rows)" in repaint
+    assert "xterm.resize(cols,rows)" in repaint
+    assert "_repaintTermForTheme(inst)" in set_theme
 
 
 def test_terminal_light_mode_rewrites_basic_ansi_backgrounds():
