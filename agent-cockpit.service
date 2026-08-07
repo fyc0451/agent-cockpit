@@ -6,12 +6,12 @@ After=network.target agent-mail.service
 Type=simple
 # Cockpit 会启动独立的 Herdr server/agent；发布时只替换主进程，保留 Herdr session。
 KillMode=process
-WorkingDirectory=%h/agent-cockpit
-ExecStart=%h/agent-cockpit/.venv/bin/python server.py
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/.venv/bin/python" server.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-%h/agent-cockpit/.env
+EnvironmentFile=-__INSTALL_DIR__/.env
 NoNewPrivileges=true
 UMask=0077
 

@@ -2,10 +2,9 @@
 set -euo pipefail
 
 INSTALL_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-if [[ ! "$INSTALL_DIR" =~ ^/[[:alnum:]_./-]+$ ]]; then
-  echo "安装路径包含 systemd 模板不支持的字符: $INSTALL_DIR" >&2
-  exit 1
-fi
+# shellcheck source=install-paths.sh
+source "$INSTALL_DIR/install-paths.sh"
+ac_validate_install_dir "$INSTALL_DIR"
 if ! git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "不是 git 安装目录: $INSTALL_DIR" >&2
   exit 1
@@ -31,7 +30,11 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
   UNIT_DIR="$HOME/.config/systemd/user"
   UNIT_PATH="$UNIT_DIR/agent-cockpit.service"
   mkdir -p "$UNIT_DIR"
-  sed "s|%h/agent-cockpit|$INSTALL_DIR|g" \
+  SYSTEMD_INSTALL_DIR="$(ac_escape_systemd_value "$INSTALL_DIR")"
+  SYSTEMD_EXEC_DIR="$(ac_escape_systemd_exec_value "$INSTALL_DIR")"
+  sed \
+    -e "s|__INSTALL_EXEC_DIR__|$(ac_escape_sed_replacement "$SYSTEMD_EXEC_DIR")|g" \
+    -e "s|__INSTALL_DIR__|$(ac_escape_sed_replacement "$SYSTEMD_INSTALL_DIR")|g" \
     "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
   systemctl --user daemon-reload
   systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true

@@ -9,10 +9,9 @@ PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/$LABEL.plist"
 PLIST_TEMPLATE="$INSTALL_DIR/agent-cockpit.plist"
 
-if [[ ! "$INSTALL_DIR" =~ ^/[[:alnum:]_./-]+$ ]]; then
-  echo "安装路径包含 launchd 模板不支持的字符: $INSTALL_DIR" >&2
-  exit 1
-fi
+# shellcheck source=install-paths.sh
+source "$INSTALL_DIR/install-paths.sh"
+ac_validate_install_dir "$INSTALL_DIR"
 
 load_runtime_env() {
   COCKPIT_HOST=127.0.0.1
@@ -65,7 +64,8 @@ install_service() {
   # 先确认端口没有无关进程，再卸载现有服务；失败时保留可用的 LaunchAgent。
   stop_legacy_listener check
   mkdir -p "$PLIST_DIR"
-  sed "s|__INSTALL_DIR__|$INSTALL_DIR|g" "$PLIST_TEMPLATE" > "$PLIST_PATH"
+  PLIST_INSTALL_DIR="$(ac_escape_plist_value "$INSTALL_DIR")"
+  sed "s|__INSTALL_DIR__|$(ac_escape_sed_replacement "$PLIST_INSTALL_DIR")|g" "$PLIST_TEMPLATE" > "$PLIST_PATH"
   chmod 600 "$PLIST_PATH"
   launchctl bootout "$SERVICE" >/dev/null 2>&1 || true
   stop_legacy_listener

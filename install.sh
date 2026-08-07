@@ -10,8 +10,10 @@ if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 else
   INSTALL_DIR="${AGENT_COCKPIT_DIR:-$HOME/agent-cockpit}"
 fi
-if [[ ! "$INSTALL_DIR" =~ ^/[[:alnum:]_./-]+$ ]]; then
-  echo "安装路径仅允许字母、数字、点、下划线、斜杠和连字符: $INSTALL_DIR" >&2
+# 安装目录允许空格/中文等正常路径字符。systemd ExecStart 不允许控制字符，
+# 因此这里只拒绝相对路径与控制字符，不再使用字符白名单。
+if [[ "$INSTALL_DIR" != /* || "$INSTALL_DIR" =~ [[:cntrl:]] ]]; then
+  echo "安装路径必须是绝对路径且不能包含控制字符: $INSTALL_DIR" >&2
   exit 1
 fi
 if [[ -e "$INSTALL_DIR" ]] \
@@ -22,6 +24,10 @@ fi
 if ! git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi
+
+# curl 直装时 helper 要等 clone 后才存在。
+# shellcheck source=install-paths.sh
+source "$INSTALL_DIR/install-paths.sh"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 "$PYTHON_BIN" - <<'PY'
@@ -54,7 +60,11 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
   UNIT_DIR="$HOME/.config/systemd/user"
   UNIT_PATH="$UNIT_DIR/agent-cockpit.service"
   mkdir -p "$UNIT_DIR"
-  sed "s|%h/agent-cockpit|$INSTALL_DIR|g" \
+  SYSTEMD_INSTALL_DIR="$(ac_escape_systemd_value "$INSTALL_DIR")"
+  SYSTEMD_EXEC_DIR="$(ac_escape_systemd_exec_value "$INSTALL_DIR")"
+  sed \
+    -e "s|__INSTALL_EXEC_DIR__|$(ac_escape_sed_replacement "$SYSTEMD_EXEC_DIR")|g" \
+    -e "s|__INSTALL_DIR__|$(ac_escape_sed_replacement "$SYSTEMD_INSTALL_DIR")|g" \
     "$INSTALL_DIR/agent-cockpit.service" > "$UNIT_PATH"
   systemctl --user daemon-reload
   systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true

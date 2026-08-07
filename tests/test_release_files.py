@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import os
+import shutil
 import subprocess
 
 
@@ -9,11 +10,12 @@ SCRIPTS = (
     "install.sh", "upgrade.sh", "uninstall.sh", "doctor.sh", "launchd.sh",
     "agent-mail-launchd.sh", "install-agent-mail-tools.sh",
 )
+SCRIPT_HELPERS = ("install-paths.sh",)
 DOCS = ("SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "CHANGELOG.md")
 
 
 def test_release_files_exist_and_scripts_are_valid():
-    for name in SCRIPTS + DOCS + (
+    for name in SCRIPTS + SCRIPT_HELPERS + DOCS + (
         "agent-cockpit.service", "agent-cockpit.plist", "agent-mail.plist",
     ):
         assert (ROOT / name).is_file(), f"missing release file: {name}"
@@ -21,6 +23,8 @@ def test_release_files_exist_and_scripts_are_valid():
         path = ROOT / name
         assert path.stat().st_mode & 0o111, f"script is not executable: {name}"
         subprocess.run(["bash", "-n", str(path)], check=True)
+    for name in SCRIPT_HELPERS:
+        subprocess.run(["bash", "-n", str(ROOT / name)], check=True)
     ET.parse(ROOT / "agent-cockpit.plist")
     ET.parse(ROOT / "agent-mail.plist")
 
@@ -144,6 +148,9 @@ def test_launchd_installer_renders_and_restarts_service(tmp_path):
     launcher = install_dir / "launchd.sh"
     launcher.write_text((ROOT / "launchd.sh").read_text())
     launcher.chmod(0o755)
+    (install_dir / "install-paths.sh").write_text(
+        (ROOT / "install-paths.sh").read_text()
+    )
     (install_dir / "agent-cockpit.plist").write_text(
         (ROOT / "agent-cockpit.plist").read_text()
     )
@@ -180,6 +187,9 @@ def test_launchd_installer_refuses_unrelated_port_listener(tmp_path):
     launcher = install_dir / "launchd.sh"
     launcher.write_text((ROOT / "launchd.sh").read_text())
     launcher.chmod(0o755)
+    (install_dir / "install-paths.sh").write_text(
+        (ROOT / "install-paths.sh").read_text()
+    )
     (install_dir / "agent-cockpit.plist").write_text(
         (ROOT / "agent-cockpit.plist").read_text()
     )
@@ -215,18 +225,19 @@ def test_launchd_installer_refuses_unrelated_port_listener(tmp_path):
     assert not calls.exists(), "端口预检失败时不得先卸载现有 LaunchAgent"
 
 
-def test_installer_rejects_unsafe_custom_path(tmp_path):
+def test_installer_rejects_relative_custom_path(tmp_path):
+    """字符白名单已取消；空格、中文等正常路径允许，仅拒绝相对路径/控制字符。"""
     installer = tmp_path / "install.sh"
     installer.write_text((ROOT / "install.sh").read_text())
     installer.chmod(0o755)
-    env = {**os.environ, "AGENT_COCKPIT_DIR": str(tmp_path / "bad&path")}
+    env = {**os.environ, "AGENT_COCKPIT_DIR": "relative/dir"}
 
     result = subprocess.run(
         [str(installer)], text=True, capture_output=True, env=env
     )
 
     assert result.returncode != 0
-    assert "安装路径" in result.stderr
+    assert "绝对路径" in result.stderr
 
 
 def test_doctor_treats_quoted_empty_token_as_empty(tmp_path):
@@ -347,3 +358,86 @@ def test_web_push_runtime_dependency_and_worker_are_packaged():
     assert "pywebpush==" in requirements
     assert (ROOT / "static" / "sw.js").is_file()
     assert (ROOT / "static" / "manifest.webmanifest").is_file()
+
+
+def test_installers_allow_spaces_and_unicode_in_install_path():
+    """安装目录不得再被字符白名单限制；systemd/launchd 模板替换必须转义。"""
+    install = (ROOT / "install.sh").read_text()
+    upgrade = (ROOT / "upgrade.sh").read_text()
+    launchd = (ROOT / "launchd.sh").read_text()
+    helpers = (ROOT / "install-paths.sh").read_text()
+    for name, text in (("install.sh", install), ("upgrade.sh", upgrade), ("launchd.sh", launchd)):
+        assert "[[:alnum:]" not in text, f"{name} 仍限制路径字符集"
+        assert "install-paths.sh" in text, f"{name} 未复用路径编码"
+    assert "[[:cntrl:]]" in install
+    assert "ac_validate_install_dir" in upgrade
+    assert "ac_validate_install_dir" in launchd
+    assert "ac_escape_systemd_value" in helpers
+    assert "ac_escape_systemd_exec_value" in helpers
+    assert "ac_escape_plist_value" in helpers
+    service = (ROOT / "agent-cockpit.service").read_text()
+    assert "WorkingDirectory=__INSTALL_DIR__" in service
+    assert 'ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/.venv/bin/python" server.py' in service
+
+
+def test_sed_and_plist_escaping_with_special_path(tmp_path):
+    """端到端：特殊路径渲染 unit/plist 后仍表示同一条原始路径。"""
+    tricky_path = tmp_path / '我的 项目&x<y>"q\\z%u$FOO'
+    tricky = str(tricky_path)
+    result = subprocess.run(
+        [
+            "bash", "-c", r'''
+source "$1"
+systemd_dir="$(ac_escape_systemd_value "$4")"
+systemd_exec_dir="$(ac_escape_systemd_exec_value "$4")"
+sed \
+  -e "s|__INSTALL_EXEC_DIR__|$(ac_escape_sed_replacement "$systemd_exec_dir")|g" \
+  -e "s|__INSTALL_DIR__|$(ac_escape_sed_replacement "$systemd_dir")|g" "$2"
+printf '\n__PLIST__\n'
+plist_dir="$(ac_escape_plist_value "$4")"
+sed "s|__INSTALL_DIR__|$(ac_escape_sed_replacement "$plist_dir")|g" "$3"
+''',
+            "_",
+            str(ROOT / "install-paths.sh"),
+            str(ROOT / "agent-cockpit.service"),
+            str(ROOT / "agent-cockpit.plist"),
+            tricky,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    unit, plist_xml = result.stdout.split("\n__PLIST__\n", 1)
+    systemd_dir = tricky.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    systemd_exec_dir = systemd_dir.replace("$", "$$")
+    assert f"WorkingDirectory={systemd_dir}" in unit
+    assert f'ExecStart=/usr/bin/env "{systemd_exec_dir}/.venv/bin/python" server.py' in unit
+
+    plist = ET.fromstring(plist_xml)
+    values = [node.text for node in plist.findall(".//string")]
+    assert f"{tricky}/launchd.sh" in values
+    assert tricky in values
+    assert f"{tricky}/agent-cockpit.stdout.log" in values
+
+    if shutil.which("systemd-analyze"):
+        python_bin = tricky_path / ".venv" / "bin" / "python"
+        python_bin.parent.mkdir(parents=True)
+        python_bin.symlink_to("/bin/true")
+        rendered = tmp_path / "rendered-agent-cockpit.service"
+        rendered.write_text(unit)
+        verified = subprocess.run(
+            ["systemd-analyze", "verify", "--man=no", str(rendered)],
+            capture_output=True, text=True,
+        )
+        assert verified.returncode == 0, verified.stderr
+
+
+def test_install_path_rejects_control_characters():
+    result = subprocess.run(
+        [
+            "bash", "-c", 'source "$1"; ac_validate_install_dir "$2"', "_",
+            str(ROOT / "install-paths.sh"), "/tmp/with\ttab",
+        ],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0
+    assert "控制字符" in result.stderr
