@@ -46,15 +46,21 @@ from pydantic import BaseModel, Field
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _poller_task
+    global _poller_task, _worktree_cleanup_task
     _poller_task = asyncio.create_task(_poll_live_state())
+    _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
     try:
         yield
     finally:
-        _poller_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _poller_task
+        for task in (_poller_task, _worktree_cleanup_task):
+            if task is not None:
+                task.cancel()
+        for task in (_poller_task, _worktree_cleanup_task):
+            if task is not None:
+                with suppress(asyncio.CancelledError):
+                    await task
         _poller_task = None
+        _worktree_cleanup_task = None
         await asyncio.to_thread(_release_all_zoom_leases)
 
 
@@ -4317,6 +4323,36 @@ _live_state: dict[str, Any] = {
     "attention": None,
 }
 _poller_task: asyncio.Task | None = None
+_worktree_cleanup_task: asyncio.Task | None = None
+# 过期 task worktree 后台清理：启动后立即跑一轮，之后每 6 小时一轮。
+WORKTREE_CLEANUP_INTERVAL_S = 6 * 3600
+WORKTREE_CLEANUP_MAX_AGE_HOURS = 48.0
+
+
+async def _wait_worktree_cleanup_interval() -> None:
+    """等待下一轮 worktree 清理；测试可 monkeypatch 为 Event 驱动，避免真实 sleep。"""
+    await asyncio.sleep(WORKTREE_CLEANUP_INTERVAL_S)
+
+
+async def _worktree_cleanup_loop() -> None:
+    """单协程串行清理过期 task worktree，不与自身重叠。
+
+    使用 asyncio.to_thread 调用 tasks.cleanup_worktrees，避免阻塞事件循环；
+    单次清理异常只记日志并进入下一轮等待。
+    """
+    while True:
+        try:
+            await asyncio.to_thread(
+                tasks.cleanup_worktrees, WORKTREE_CLEANUP_MAX_AGE_HOURS
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("worktree cleanup failed")
+        try:
+            await _wait_worktree_cleanup_interval()
+        except asyncio.CancelledError:
+            raise
 
 
 async def _poll_live_state() -> None:
