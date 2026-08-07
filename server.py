@@ -434,19 +434,6 @@ class PaneComposeReq(BaseModel):
     orientation: str = "horizontal"  # horizontal | vertical
 
 
-class PaneSplitLayoutReq(BaseModel):
-    mode: str = "horizontal"  # horizontal | vertical | grid4
-
-
-class TabUntileReq(BaseModel):
-    tab_id: str
-
-
-class PaneComposeReq(BaseModel):
-    pane_ids: list[str]
-    orientation: str = "horizontal"  # horizontal | vertical
-
-
 class WriteFileReq(BaseModel):
     path: str
     content: str
@@ -2978,6 +2965,8 @@ def api_herdr_pane_layout_split(session: str, pane_id: str, req: PaneSplitLayout
         raise HTTPException(400, f"不支持的分屏模式: {req.mode}")
     try:
         created = herdr_client.split_pane_layout(session, pane_id, req.mode)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
     return {"mode": req.mode, "created": created}
@@ -2990,6 +2979,8 @@ def api_herdr_pane_layout_detach(session: str, pane_id: str):
     _validate_pane_id(pane_id)
     try:
         herdr_client.detach_pane(session, pane_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
     return {"detached": pane_id}
@@ -3003,6 +2994,8 @@ def api_herdr_session_layout_untile(name: str, req: TabUntileReq):
         raise HTTPException(400, "非法 tab id")
     try:
         moved = herdr_client.untile_tab(name, req.tab_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
     return {"tab_id": req.tab_id, "moved": moved}

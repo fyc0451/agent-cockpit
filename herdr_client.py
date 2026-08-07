@@ -762,6 +762,39 @@ def _pane_ids_of(session: str) -> set[str]:
     }
 
 
+def _require_unzoomed(snap: dict[str, Any], pane_ids: list[str]) -> None:
+    """布局变更前拒绝 zoom tab，避免 Herdr 返回成功但 move 实际未执行。"""
+    pane_tabs = {
+        str(p.get("pane_id")): str(p.get("tab_id") or "")
+        for p in snap.get("panes", [])
+        if p.get("pane_id")
+    }
+    zoomed_tabs = {
+        str(layout.get("tab_id") or "")
+        for layout in snap.get("layouts", [])
+        if layout.get("zoomed")
+    }
+    if any(pane_tabs.get(pid) in zoomed_tabs for pid in pane_ids):
+        raise ValueError("pane 所在 tab 正在放大，请先退出单 pane 放大后重试")
+
+
+def _move_pane(session: str, args: list[str]) -> None:
+    """执行 pane move，并检查 Herdr 的 changed 字段而非只看退出码。"""
+    out = _run(["--session", session, "pane", "move", *args], timeout=10)
+    data = _parse_data_json(out)
+    if not data:
+        raise RuntimeError("pane move 输出解析失败")
+    result = data.get("result", data)
+    move = result.get("move_result", result)
+    if not isinstance(move, dict):
+        raise RuntimeError("pane move 输出缺少结果")
+    if not move.get("changed"):
+        reason = str(move.get("reason") or "未说明原因")
+        if reason == "zoomed_tab":
+            raise RuntimeError("pane 所在 tab 正在放大，请先退出单 pane 放大后重试")
+        raise RuntimeError(f"pane move 未生效: {reason}")
+
+
 def _split_pane_once(session: str, pane_id: str, direction: str) -> str:
     """对 pane 分屏一次(right/down),返回新建 pane id。"""
     before = _pane_ids_of(session)
@@ -793,6 +826,13 @@ def split_pane_layout(session: str, pane_id: str, mode: str) -> list[str]:
 
     - horizontal:左右两栏;vertical:上下两栏;grid4:2×2 四宫格。
     """
+    snap = _snapshot_session(session)
+    existing = {
+        str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
+    }
+    if pane_id not in existing:
+        raise ValueError(f"未找到 pane: {pane_id}")
+    _require_unzoomed(snap, [pane_id])
     if mode == "horizontal":
         return [_split_pane_once(session, pane_id, "right")]
     if mode == "vertical":
@@ -807,7 +847,21 @@ def split_pane_layout(session: str, pane_id: str, mode: str) -> list[str]:
 
 def detach_pane(session: str, pane_id: str) -> None:
     """把 pane 拆到独立 tab(herdr pane move --new-tab)。"""
-    _run(["--session", session, "pane", "move", pane_id, "--new-tab"], timeout=10)
+    snap = _snapshot_session(session)
+    pane = next(
+        (p for p in snap.get("panes", []) if str(p.get("pane_id")) == pane_id),
+        None,
+    )
+    if not pane:
+        raise ValueError(f"未找到 pane: {pane_id}")
+    same_tab = [
+        p for p in snap.get("panes", [])
+        if str(p.get("tab_id") or "") == str(pane.get("tab_id") or "")
+    ]
+    if len(same_tab) <= 1:
+        raise ValueError("当前 pane 已经是独立 tab")
+    _require_unzoomed(snap, [pane_id])
+    _move_pane(session, [pane_id, "--new-tab"])
 
 
 def untile_tab(session: str, tab_id: str) -> list[str]:
@@ -818,9 +872,17 @@ def untile_tab(session: str, tab_id: str) -> list[str]:
         for p in snap.get("panes", [])
         if p.get("pane_id") and str(p.get("tab_id") or "") == str(tab_id)
     ]
+    if not panes:
+        raise ValueError(f"未找到 tab: {tab_id}")
+    _require_unzoomed(snap, panes)
     moved: list[str] = []
     for pid in panes[1:]:
-        detach_pane(session, pid)
+        try:
+            _move_pane(session, [pid, "--new-tab"])
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"拆开整组时已移动 {len(moved)} 个 pane，后续操作失败: {exc}"
+            ) from exc
         moved.append(pid)
     return moved
 
@@ -837,30 +899,56 @@ def compose_panes(session: str, pane_ids: list[str], orientation: str) -> str:
         raise ValueError(f"组合分屏仅支持 2-{COMPOSE_MAX_PANES} 个 pane")
     if len(set(pane_ids)) != len(pane_ids):
         raise ValueError("不能重复组合同一个 pane")
-    existing = _pane_ids_of(session)
+    snap = _snapshot_session(session)
+    existing = {
+        str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
+    }
     missing = [pid for pid in pane_ids if pid not in existing]
     if missing:
         raise ValueError("未找到 pane: " + ", ".join(missing))
+    _require_unzoomed(snap, pane_ids)
     base = pane_ids[0]
+    base_tab = next(
+        (
+            str(p.get("tab_id"))
+            for p in snap.get("panes", [])
+            if str(p.get("pane_id")) == base and p.get("tab_id")
+        ),
+        "",
+    )
+    if not base_tab:
+        raise ValueError(f"无法确定基准 pane 所在 tab: {base}")
     first = "right" if orientation == "horizontal" else "down"
     second = "down" if orientation == "horizontal" else "right"
 
     def _move(pid: str, target: str, direction: str) -> None:
-        _run(
-            ["--session", session, "pane", "move", pid,
-             "--target-pane", target, "--split", direction],
-            timeout=10,
+        _move_pane(
+            session,
+            [pid, "--tab", base_tab, "--target-pane", target, "--split", direction],
         )
 
     if len(pane_ids) == 2:
-        _move(pane_ids[1], base, first)
+        moves = [(pane_ids[1], base, first)]
     elif len(pane_ids) == 3:
-        _move(pane_ids[1], base, first)
-        _move(pane_ids[2], pane_ids[1], second)
+        moves = [
+            (pane_ids[1], base, first),
+            (pane_ids[2], pane_ids[1], second),
+        ]
     else:
-        _move(pane_ids[1], base, first)
-        _move(pane_ids[2], base, second)
-        _move(pane_ids[3], pane_ids[1], second)
+        moves = [
+            (pane_ids[1], base, first),
+            (pane_ids[2], base, second),
+            (pane_ids[3], pane_ids[1], second),
+        ]
+    completed = 0
+    try:
+        for pid, target, direction in moves:
+            _move(pid, target, direction)
+            completed += 1
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"组合分屏时已完成 {completed}/{len(moves)} 步，后续操作失败: {exc}"
+        ) from exc
     return base
 
 

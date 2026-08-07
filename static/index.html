@@ -2659,7 +2659,7 @@ async function layoutSplit(mode){
     await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}/layout/split`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
     toast(t('layout.done_split','已分屏(新槽位为空 shell)'));
     refreshBoard();closeLayoutModal();
-  }catch(e){toast(t('toast.sendfail','操作失败: ')+e,5000)}
+  }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 async function layoutDetach(){
   const t=layoutTargetOrToast();if(!t)return;
@@ -2667,7 +2667,7 @@ async function layoutDetach(){
     await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}/layout/detach`,{method:'POST'});
     toast(t('layout.done_detach','已拆出到独立 tab'));
     refreshBoard();closeLayoutModal();
-  }catch(e){toast(t('toast.sendfail','操作失败: ')+e,5000)}
+  }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 async function layoutUntile(){
   const t=layoutTargetOrToast();if(!t)return;
@@ -2676,7 +2676,7 @@ async function layoutUntile(){
     const r=await api(`/api/herdr/session/${encodeURIComponent(t.session)}/layout/untile`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tab_id:t.tabId})});
     toast((r.moved&&r.moved.length)?t('layout.done_untile','已拆开')+' '+r.moved.length+' '+t('layout.panes_unit','个 pane'):t('layout.single_pane','该 tab 只有一个 pane'));
     refreshBoard();closeLayoutModal();
-  }catch(e){toast(t('toast.sendfail','操作失败: ')+e,5000)}
+  }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 async function layoutCompose(){
   const {session}=layoutTermContext();
@@ -2687,7 +2687,7 @@ async function layoutCompose(){
     await api(`/api/herdr/session/${encodeURIComponent(session)}/layout/compose`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pane_ids:picks,orientation})});
     toast(t('layout.done_compose','已组合为分屏'));
     refreshBoard();closeLayoutModal();
-  }catch(e){toast(t('toast.sendfail','操作失败: ')+e,5000)}
+  }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 function teamCollabContextText(context){
   const lines=[];
