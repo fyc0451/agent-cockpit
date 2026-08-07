@@ -1742,3 +1742,15 @@ def test_side_refresh_refreshes_current_view():
     assert "function refreshCurrent()" in js
     # 不再只刷看板
     assert 'onclick="refreshBoard()"' not in HTML
+
+
+def test_launch_modal_worktree_preview_and_source_fix():
+    """添加 Agent 弹窗:独立 worktree 模式显示自动新建预览,预填不再落在既有 worktree。"""
+    assert 'id="lnWorktreePreview"' in HTML
+    assert "function launchWorktreePreview()" in HTML
+    assert "cockpit-worktrees" in HTML
+    js = _inline_js()
+    # 独立模式预填若落在既有 cockpit worktree 目录,替换为 session 源目录
+    assert "ws==='isolated'&&/\\/\\.[^/]+-cockpit-worktrees(?:\\/|$)/.test(workdir)" in js
+    # 预览路径与服务端 _ensure_worktree 的 base 公式一致
+    assert ".${repoName}-cockpit-worktrees/${session}/${name}" in js

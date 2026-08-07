@@ -834,10 +834,11 @@ header .spacer{flex:1}
         <option value="kimi">kimi</option>
         <option value="qodercli">qoder</option>
       </select>
-      <input id="lnName" placeholder="实例名称 如 codex-2" aria-label="本地实例名称" oninput="this.dataset.auto='0'" style="max-width:155px">
+      <input id="lnName" placeholder="实例名称 如 codex-2" aria-label="本地实例名称" oninput="this.dataset.auto='0';launchWorktreePreview()" style="max-width:155px">
       <select id="lnLayout" aria-label="新 pane 位置"><option value="tab">新 tab</option><option value="right">右侧 pane</option><option value="down">下方 pane</option></select>
-      <select id="lnWorkspace" aria-label="工作目录策略"><option value="isolated">独立 worktree</option><option value="shared">共享目录</option></select>
-      <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" oninput="this.dataset.auto='0';launchPreselectAgent()" style="flex:1;min-width:160px">
+      <select id="lnWorkspace" aria-label="工作目录策略" onchange="launchSessionChanged(false);launchWorktreePreview()"><option value="isolated">独立 worktree</option><option value="shared">共享目录</option></select>
+      <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" oninput="this.dataset.auto='0';launchPreselectAgent();launchWorktreePreview()" style="flex:1;min-width:160px">
+      <span class="muted" id="lnWorktreePreview" style="display:none;font-size:11px"></span>
       <input id="lnArgs" maxlength="2048" placeholder="启动参数（选填），例如 --model gpt-5" title="按命令行参数解析，不执行额外 shell 命令" style="flex:1;min-width:160px">
       <button class="primary" id="lnStartBtn" onclick="startAgent()" data-i18n="launch.start">+ 新建 agent</button>
       <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
@@ -1023,7 +1024,7 @@ en:{
 'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
 'attention.title':'Task board','attention.push':'Enable notifications','attention.report':'Request reports','common.refresh':'Refresh','common.loading':'Loading…',
 'team.title':'Team center',
-'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
+'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent','launch.wtpreview':'Isolated mode auto-creates a new worktree; the workdir above is the source repo (editable):','launch.wtpreview':'Isolated mode auto-creates a new worktree; the workdir above is the source repo (editable):',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
 'term.new':'+ New terminal','term.addagent':'＋ Add Agent','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…','term.layout':'🧱 Layout',
@@ -1045,7 +1046,7 @@ ja:{
 'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
 'attention.title':'タスクボード','attention.push':'通知を有効化','attention.report':'進捗報告を依頼','common.refresh':'更新','common.loading':'読み込み中…',
 'team.title':'チームセンター',
-'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
+'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント','launch.wtpreview':'独立モードは新しい worktree を自動作成；上の作業ディレクトリはソースリポジトリ（変更可）:',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
 'term.new':'+ 新規ターミナル','term.addagent':'＋ Agent 追加','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…','term.layout':'🧱 レイアウト',
@@ -2313,8 +2314,28 @@ function launchSessionChanged(forceDir=false){
   const session=document.getElementById('lnSession')?.value||'';
   const paneDir=(BOARD?.panes||[]).find(p=>p.session===session&&p.agent&&p.cwd)?.cwd||'';
   const sessionDir=LAUNCH_SESSION_DIRS[session]||'';
-  const workdir=paneDir||(/\/\.config\/herdr\/sessions(?:\/|$)/.test(sessionDir)?'':sessionDir);
-  input.value=workdir;input.dataset.auto='1';launchPreselectAgent();
+  let workdir=paneDir||(/\/\.config\/herdr\/sessions(?:\/|$)/.test(sessionDir)?'':sessionDir);
+  // 独立 worktree 模式下源仓库不应预填成既有 worktree 路径，避免"只能用已创建的"错觉
+  const ws=document.getElementById('lnWorkspace')?.value||'isolated';
+  if(ws==='isolated'&&/\/\.[^/]+-cockpit-worktrees(?:\/|$)/.test(workdir)){
+    workdir=sessionDir&&!/\/\.config\/herdr\/sessions(?:\/|$)/.test(sessionDir)?sessionDir:workdir;
+  }
+  input.value=workdir;input.dataset.auto='1';launchPreselectAgent();launchWorktreePreview();
+}
+function launchWorktreePreview(){
+  const el=document.getElementById('lnWorktreePreview');if(!el)return;
+  const ws=document.getElementById('lnWorkspace')?.value||'isolated';
+  const session=document.getElementById('lnSession')?.value||'';
+  const name=(document.getElementById('lnName')?.value||'').trim();
+  const sessionDir=LAUNCH_SESSION_DIRS[session]||'';
+  if(ws!=='isolated'||!sessionDir||/\/\.config\/herdr\/sessions(?:\/|$)/.test(sessionDir)
+    ||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name)){el.style.display='none';return}
+  const root=sessionDir.replace(/\/+$/,'');
+  const parent=root.slice(0,root.lastIndexOf('/')+1);
+  const repoName=root.slice(root.lastIndexOf('/')+1);
+  el.textContent=t('launch.wtpreview',
+    `独立模式将自动新建 worktree：${parent}.${repoName}-cockpit-worktrees/${session}/${name}（上方工作目录为源仓库，可改为任意已有仓库路径）`);
+  el.style.display='';
 }
 async function startAgent(){
   const session=document.getElementById('lnSession').value;
