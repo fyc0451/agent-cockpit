@@ -74,7 +74,7 @@ if [[ -d "$legacy_dir" && -x "$source_hook" \
         mv "$backup" "$legacy_hook"
         echo "警告: 无法创建旧 Hook 兼容入口，已恢复原文件" >&2
       else
-        echo "已迁移旧 Hook 入口: $legacy_hook（备份: $backup）"
+        echo "已迁移旧 Hook 入口: ${legacy_hook}（备份: ${backup}）"
       fi
     fi
   else

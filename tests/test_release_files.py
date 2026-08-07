@@ -5,6 +5,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -347,7 +348,7 @@ def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path
         env={**os.environ, "HOME": str(home)}, text=True, capture_output=True,
     )
 
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stderr
     assert ordinary.read_text() == "keep\n"
     assert (bin_dir / "mail-recv").resolve() == custom
     assert (bin_dir / "am-init-project").resolve() == tools / "am-init-project"
@@ -702,6 +703,17 @@ def _probe_fake_hub(tmp_path, response_body):
         [sys.executable, str(server_script)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                    break
+            except OSError:
+                if server.poll() is not None:
+                    raise AssertionError("fake Hub exited before listening")
+                time.sleep(0.01)
+        else:
+            raise AssertionError("fake Hub did not listen within 5 seconds")
         client_env = tmp_path / "client.env"
         client_env.write_text(f"hub=http://127.0.0.1:{port}\ntoken=tok\n")
         env = {**os.environ, "AGENT_MAIL_CLIENT_ENV": str(client_env),

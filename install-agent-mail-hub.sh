@@ -247,7 +247,7 @@ amh_main() {
 
   if amh_port_busy "$HUB_PORT"; then
     echo "端口 $HUB_PORT 已被占用且无可用 client.env；不启动托管 Hub。" >&2
-    echo "请确认占用者是否为既有 Hub：若是，请把它写入 $CLIENT_ENV（hub=/token=）。" >&2
+    echo "请确认占用者是否为既有 Hub：若是，请把它写入 ${CLIENT_ENV}（hub=/token=）。" >&2
     return 1
   fi
 
@@ -261,7 +261,7 @@ hub=http://127.0.0.1:$HUB_PORT
 token=$token
 EOF
   chmod 600 "$CLIENT_ENV"
-  echo "已写入 Hub 客户端配置: $CLIENT_ENV（token 已生成，勿外泄）"
+  echo "已写入 Hub 客户端配置: ${CLIENT_ENV}（token 已生成，勿外泄）"
 
   if [[ "${AGENT_MAIL_NO_SERVICE:-}" == "1" ]]; then
     echo "AGENT_MAIL_NO_SERVICE=1：跳过服务注册。"
