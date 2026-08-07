@@ -1202,7 +1202,10 @@ def api_upgrade_start(req: UpgradeReq):
     try:
         result = upgrade_core.start_upgrade(req.target)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        code = str(exc)
+        # 仅稳定 error_code；对外文案不带路径/异常原文
+        detail = upgrade_core.ERROR_MESSAGES.get(code, upgrade_core.ERROR_MESSAGES["internal_error"])
+        raise HTTPException(400, detail) from None
     except Exception:
         logger.exception("upgrade start failed method=POST path=/api/upgrade")
         raise HTTPException(500, INTERNAL_ERROR_DETAIL)
