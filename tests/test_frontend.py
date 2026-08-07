@@ -1002,6 +1002,45 @@ def test_task_board_uses_single_column_agent_rows_on_narrow_screens():
     assert ".task-agent-task{grid-column:2 / 4}" in HTML
 
 
+def test_mobile_workbench_uses_one_vertical_scroll_container():
+    # H5 不能让 agent 速览/工具栏挤掉内部任务列表；整个工作台统一纵向滚动，
+    # agent 速览单独横向滑动，任务与会话内容不再使用嵌套滚动。
+    assert ".attention-list{flex:1;min-height:0;overflow:auto" in HTML
+    mobile = HTML.split(
+        "@media(max-width:900px),(any-pointer:coarse){", 1
+    )[1].split(".side-backdrop{display:none}", 1)[0]
+    assert ".attention-view{overflow-y:auto" in mobile
+    assert ".agent-strip{flex-wrap:nowrap;overflow-x:auto" in mobile
+    assert ".attention-list{flex:none;min-height:0;overflow:visible}" in mobile
+    assert "#sessionsPane{flex:none!important;min-height:0}" in mobile
+    assert "#sessionsList{flex:none!important;overflow:visible!important}" in mobile
+
+
+def test_all_h5_views_have_an_explicit_scroll_owner():
+    # body 固定不滚动；每个内容型 view 必须有可收缩的内部滚动容器。
+    assert ".view{display:none;flex:1;min-height:0;overflow:hidden" in HTML
+    assert ".msgs-body{flex:1;min-height:0" in HTML
+    assert ".msgs-list{min-width:0;min-height:0;overflow:auto" in HTML
+    assert ".files-body{flex:1;min-height:0" in HTML
+    assert ".file-tree{min-width:0;min-height:0" in HTML
+    assert ".editor-area{min-width:0;min-height:0" in HTML
+    assert ".team-content{flex:1;min-height:0;overflow:auto" in HTML
+    assert ".hf-body{flex:1;min-height:0;overflow:auto" in HTML
+    assert 'id="termMain" style="flex:1;display:flex;min-height:0;overflow:hidden"' in HTML
+    assert ".settings-scroll{flex:1;min-height:0;overflow:auto" in HTML
+
+
+def test_h5_message_file_and_settings_layouts_do_not_overflow():
+    narrow = HTML.split("@media(max-width:860px){", 1)[1].split(
+        "@media(max-width:560px){", 1
+    )[0]
+    assert ".msgs-body,.files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}" in narrow
+    assert 'class="set-dir-add"' in HTML
+    phone = HTML.split("@media(max-width:560px){", 1)[1].split("</style>", 1)[0]
+    assert ".set-dir-add{display:grid!important" in phone
+    assert ".set-dir-add #setNewDir{grid-column:1 / -1}" in phone
+
+
 # ── 设置页与 i18n ───────────────────────────────────────────────
 
 def test_settings_view_and_nav_exist():
@@ -1225,7 +1264,7 @@ def test_h5_foldable_responsive_first_batch():
     assert ".board{grid-template-columns:1fr}" not in HTML
     # msgs/files 双栏弹性比例(861px 以上不再被 240/280px 定宽挤占),手机仍单列
     assert HTML.count("minmax(200px,28%) 1fr") == 2
-    assert ".msgs-body,.files-body{grid-template-columns:1fr}" in HTML
+    assert ".msgs-body,.files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}" in HTML
     # term-toolbar 基础规则即可换行,<=1100px(折叠屏展开)不横向溢出
     assert re.search(r"\.term-toolbar\{display:flex;flex-wrap:wrap", HTML)
     # 键盘遮挡判断与宽度解耦,适配 coarse pointer(平板/折叠屏)

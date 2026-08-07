@@ -82,6 +82,7 @@ header .spacer{flex:1}
 .set-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .set-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg2)}
 .set-card input,.set-card select{background:var(--bg3);border:1px solid var(--bd2);border-radius:7px;color:var(--fg);padding:6px 8px;font-size:13px}
+.settings-scroll{flex:1;min-height:0;overflow:auto;padding:14px 20px;max-width:860px;width:100%}
 .set-lang-on{background:var(--accent)!important;color:#fff!important}
 .set-roots-group{margin:4px 0;border:1px solid var(--bd);border-radius:8px;background:var(--bg3)}
 .set-roots-group summary{cursor:pointer;padding:6px 10px;font-size:12px;color:var(--fg2);user-select:none}
@@ -135,7 +136,7 @@ header .spacer{flex:1}
 .launch-modal .launch-bar{background:transparent;border:0;padding:0}
 
 /* view 切换 */
-.view{display:none;flex:1;overflow:hidden;flex-direction:column}
+.view{display:none;flex:1;min-height:0;overflow:hidden;flex-direction:column}
 .view.active{display:flex}
 
 /* 文件 view */
@@ -147,15 +148,15 @@ header .spacer{flex:1}
 .file-guide{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;font-size:12px;color:var(--fg2);background:var(--bg3);border-bottom:1px solid var(--bd)}
 .file-guide span{flex:1 1 280px;min-width:220px}
 .file-guide button{width:auto;flex:0 0 auto}
-.files-body{flex:1;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:14px;padding:14px;overflow:hidden}
-.file-tree{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;overflow:auto;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:6px}
+.files-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:14px;padding:14px;overflow:hidden}
+.file-tree{min-width:0;min-height:0;background:var(--bg2);border:1px solid var(--bd);border-radius:14px;overflow:auto;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:6px}
 .ft-item{padding:7px 12px;border-radius:9px;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;white-space:nowrap;transition:background .12s}
 .ft-item:hover{background:var(--bg3)}
 .ft-item:active{background:var(--bg4)}
 .ft-bc{font-family:var(--mono);font-size:11px;color:var(--fg3);padding:8px 8px;word-break:break-all;border-bottom:1px solid var(--bd);margin-bottom:4px}
 .ft-loc{display:flex;align-items:center;gap:6px}
 .ft-loc select{flex:1;min-width:0;font:11px var(--mono);padding:4px 6px}
-.editor-area{display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:hidden}
+.editor-area{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;overflow:hidden}
 .editor-area textarea{flex:1;border:none;border-radius:0;background:var(--bg);font-size:13px;tab-size:2}
 .editor-bar{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:12px}
 .editor-bar .ep{flex:1;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -166,14 +167,14 @@ header .spacer{flex:1}
 
 /* 消息 view */
 .msgs-view{flex-direction:column;overflow:hidden}
-.msgs-body{flex:1;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:10px;padding:10px;overflow:hidden}
-.sidebar{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:8px;overflow:auto}
+.msgs-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:10px;padding:10px;overflow:hidden}
+.sidebar{min-width:0;min-height:0;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:8px;overflow:auto}
 .agent-item{padding:7px 9px;border-radius:7px;display:flex;align-items:center;gap:7px;margin-bottom:3px;font-size:13px;cursor:pointer}
 .agent-item:hover{background:var(--bg3)}
 .agent-item.active{background:var(--bg3);box-shadow:inset 2px 0 0 var(--accent,#4f8cff)}
 .agent-item .an{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msg-filter-bar{display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--fg2)}
-.msgs-list{overflow:auto;padding-right:4px}
+.msgs-list{min-width:0;min-height:0;overflow:auto;padding-right:4px}
 .msg{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:10px;margin-bottom:8px}
 .msg .mh{display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px;gap:6px;flex-wrap:wrap}
 .msg .ms{font-weight:600;font-size:13px}
@@ -186,7 +187,7 @@ header .spacer{flex:1}
 .field label{display:block;font-size:11px;color:var(--fg2);margin-bottom:3px}
 
 /* 团队 Hub：Human / 项目 / 成员 / Agent 管理，仅展示远端数据 */
-.agent-strip{display:flex;gap:8px;flex-wrap:wrap;padding:12px 14px 4px}
+.agent-strip{display:flex;gap:8px;flex-wrap:wrap;padding:12px 14px 4px;flex:none}
 .agent-chip{display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:8px 12px;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:transform .15s,border-color .15s}
 .agent-chip:hover{border-color:var(--accent);transform:translateY(-1px)}
 .agent-chip .chip-main{display:flex;flex-direction:column;align-items:flex-start;min-width:0}
@@ -199,7 +200,7 @@ header .spacer{flex:1}
 .team-view{overflow:hidden}
 .team-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
 .team-toolbar .spacer{flex:1}
-.team-content{flex:1;overflow:auto;padding:10px}
+.team-content{flex:1;min-height:0;overflow:auto;padding:10px}
 .team-login{max-width:560px;margin:7vh auto 0;background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:18px}
 .team-login h2{font-size:17px;margin-bottom:6px}
 .team-login-note,.team-safety{font-size:12px;color:var(--fg2);line-height:1.6}
@@ -263,10 +264,10 @@ header .spacer{flex:1}
 
 /* Session 任务看板 + Attention */
 .attention-view{overflow:hidden}
-.attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
+.attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap;flex:none}
 .attention-toolbar .spacer{flex:1}
 .attention-toolbar .team-mode-tabs{display:flex}
-.attention-list{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
+.attention-list{flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
 .task-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px;align-items:start}
 .task-session{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;overflow:hidden}
 .task-session-head{display:flex;align-items:flex-start;gap:8px;padding:11px 12px 8px}
@@ -344,7 +345,7 @@ header .spacer{flex:1}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
 .hf-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap}
-.hf-body{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
+.hf-body{flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
 .hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex-direction:column;overflow:hidden}
 .hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap}
 .hf-pane-head .pn{flex:1;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -418,6 +419,16 @@ header .spacer{flex:1}
 @media(max-width:900px),(any-pointer:coarse){
   /* 移动端输入框 >=16px,避免 iOS focus 自动缩放 */
   input,select,textarea,.set-card input,.set-card select{font-size:16px}
+  /* 工作台在 H5 上使用单一纵向滚动容器。否则 Agent 多时会把内部列表压成
+     零高度，手势落在速览/工具栏上也无法继续向下滚动。 */
+  .attention-view{overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}
+  .agent-strip{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:8px;scrollbar-width:none}
+  .agent-strip::-webkit-scrollbar{display:none}
+  .agent-chip{flex:0 0 auto}
+  .attention-toolbar{position:sticky;top:0;z-index:3}
+  .attention-list{flex:none;min-height:0;overflow:visible}
+  #sessionsPane{flex:none!important;min-height:0}
+  #sessionsList{flex:none!important;overflow:visible!important}
 }
 .side-backdrop{display:none}
 @media(max-width:1100px){
@@ -433,7 +444,7 @@ header .spacer{flex:1}
   .app.nav-hidden #side{display:flex}
 }
 @media(max-width:860px){
-  .msgs-body,.files-body{grid-template-columns:1fr}
+  .msgs-body,.files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
   .sidebar,.file-tree{max-height:25vh}
   .team-shell{grid-template-columns:1fr}
   .team-side{max-height:36vh;overflow:auto}
@@ -465,6 +476,10 @@ header .spacer{flex:1}
   .file-search input{flex-basis:100%;min-width:0}
   .file-search button{flex:1}
   .file-search-info{flex-basis:100%;margin-left:0}
+  .set-dir-add{display:grid!important;grid-template-columns:minmax(0,1fr) auto}
+  .set-dir-add #setNewDir{grid-column:1 / -1}
+  .set-dir-add #setNewDirAgent{width:100%;min-width:0}
+  .settings-scroll{padding:10px}
   .launch-bar{padding:6px 8px;gap:5px;max-height:42dvh;overflow:auto}
   .launch-bar .lbl,#boardInfo{display:none}
   .launch-bar select{flex:1;min-width:0}
@@ -704,7 +719,7 @@ header .spacer{flex:1}
   <!-- 会话管理(session + agent pane,可重启) -->
   <!-- 设置 -->
   <section id="view-settings" class="view" style="flex-direction:column">
-    <div style="flex:1;overflow:auto;padding:14px 20px;max-width:860px;width:100%">
+    <div class="settings-scroll">
       <div class="set-card">
         <h3 data-i18n="set.lang">界面语言</h3>
         <div id="setLangBtns" style="display:flex;gap:8px">
@@ -733,7 +748,7 @@ header .spacer{flex:1}
       <div class="set-card">
         <h3 data-i18n="set.diragent">每目录默认 agent</h3>
         <div id="setDirAgents"></div>
-        <div style="display:flex;gap:6px;margin-top:6px">
+        <div class="set-dir-add" style="display:flex;gap:6px;margin-top:6px">
           <input id="setNewDir" data-i18n-ph="set.diragent.ph" placeholder="目录绝对路径" style="flex:1;min-width:0">
           <select id="setNewDirAgent"></select>
           <button class="sm" onclick="setAddDirAgent()" data-i18n="set.add">＋ 添加</button>
