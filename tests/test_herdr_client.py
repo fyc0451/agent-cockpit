@@ -457,6 +457,114 @@ def test_start_agent_grok_uses_native_start(monkeypatch):
     ) not in calls
 
 
+def _grok_native_start_harness(monkeypatch):
+    """grok 原生启动路径的公共桩:可控时钟 + 可编程 _run。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "grok")
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    clock = {"now": 0.0, "snapshots": 0}
+
+    def snapshot(session):
+        clock["snapshots"] += 1
+        if clock["snapshots"] == 1:
+            return {"panes": []}
+        return {"panes": [{
+            "pane_id": "w1:p3", "tab_id": "w1:t3", "workspace_id": "w1",
+            "agent": "grok",
+        }]}
+
+    monkeypatch.setattr(herdr_client.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        herdr_client.time, "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    return clock
+
+
+def test_start_agent_grok_retries_pane_busy_then_succeeds(monkeypatch):
+    """新建 pane shell 未就绪(busy)时按 0.5s 重试,就绪后正常启动不回滚。"""
+    clock = _grok_native_start_harness(monkeypatch)
+    calls = []
+    busy_left = {"n": 2}
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p3"}}}'
+        if "agent" in args and "start" in args and busy_left["n"]:
+            busy_left["n"] -= 1
+            raise RuntimeError(
+                'agent start 失败: {"error":{"code":"agent_pane_busy"}}'
+            )
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent("demo", "/tmp/project", agent="grok")
+
+    assert result.get("error") is None
+    assert result["pane_id"] == "w1:p3"
+    starts = [c for c in calls if "start" in c.args[0] and "agent" in c.args[0]]
+    assert len(starts) == 3  # 2 次 busy + 1 次成功
+    assert clock["now"] >= 1.0  # 两次 0.5s 重试等待
+    assert call(
+        ["--session", "demo", "pane", "close", "w1:p3"], timeout=5,
+    ) not in calls
+
+
+def test_start_agent_grok_pane_busy_gives_up_and_rolls_back(monkeypatch):
+    """busy 持续到就绪窗口(10s)耗尽:不无限重试,保留原错误并关闭本次 pane。"""
+    clock = _grok_native_start_harness(monkeypatch)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p3"}}}'
+        if "agent" in args and "start" in args:
+            raise RuntimeError(
+                'agent start 失败: {"error":{"code":"agent_pane_busy"}}'
+            )
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent("demo", "/tmp/project", agent="grok")
+
+    assert "agent_pane_busy" in result["error"]
+    assert result["rolled_back"] is True
+    starts = [c for c in calls if "start" in c.args[0] and "agent" in c.args[0]]
+    assert 15 <= len(starts) <= 25  # 10s/0.5s 有限重试,非死循环
+    assert clock["now"] >= 10.0
+    assert call(
+        ["--session", "demo", "pane", "close", "w1:p3"], timeout=5,
+    ) in calls
+
+
+def test_start_agent_grok_non_busy_error_not_retried(monkeypatch):
+    """非 busy 的启动错误不重试,直接回滚。"""
+    _grok_native_start_harness(monkeypatch)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p3"}}}'
+        if "agent" in args and "start" in args:
+            raise RuntimeError("agent start 失败: unknown kind")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent("demo", "/tmp/project", agent="grok")
+
+    assert "unknown kind" in result["error"]
+    assert result["rolled_back"] is True
+    starts = [c for c in calls if "start" in c.args[0] and "agent" in c.args[0]]
+    assert len(starts) == 1
+
+
 def test_start_agent_rolls_back_qodercli_after_extended_timeout(monkeypatch):
     """QoderCLI 在专用窗口内仍未注册时，必须关闭本次新建 pane。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
