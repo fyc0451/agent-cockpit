@@ -215,6 +215,16 @@ def test_settings_routes(monkeypatch):
     r = client.put("/api/settings", headers=headers, json={"language": "xx"})
     assert r.status_code == 400
 
+    r = client.put(
+        "/api/settings",
+        headers={**headers, "content-type": "application/json"},
+        content="{",
+    )
+    assert r.status_code == 400
+
+    r = client.put("/api/settings", headers=headers, json=[])
+    assert r.status_code == 400
+
     # 未认证被拒
     assert client.get("/api/settings").status_code == 401
 

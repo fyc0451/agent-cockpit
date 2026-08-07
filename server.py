@@ -1149,10 +1149,12 @@ def api_settings_get():
 @app.put("/api/settings")
 async def api_settings_put(request: Request):
     """更新用户配置(一层合并)。校验失败 400。"""
-    body = await request.json()
     try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("设置请求必须是 JSON 对象")
         return settings.update(body)
-    except ValueError as e:
+    except (ValueError, UnicodeError) as e:
         raise HTTPException(400, str(e))
 
 
@@ -3949,12 +3951,19 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 continue
             context = None
             if coordination_run:
-                coordination.bind_identity(
-                    coordination_run["run_id"], plan["id"], my_name, pid
-                )
-                context = coordination.run_context(
-                    coordination_run["run_id"], my_name
-                )
+                try:
+                    coordination.bind_identity(
+                        coordination_run["run_id"], plan["id"], my_name, pid
+                    )
+                    context = coordination.run_context(
+                        coordination_run["run_id"], my_name
+                    )
+                except Exception:
+                    logger.exception(
+                        "coordination identity context failed: %s/%s",
+                        req.session, plan["id"],
+                    )
+                    warnings.append(f"{atype} 可靠消息身份上下文建立失败")
             hint = _identity_hint(
                 my_name, canonical_project, atype, roster=roster,
                 coordination_context=context,

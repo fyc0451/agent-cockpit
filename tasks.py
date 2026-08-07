@@ -490,6 +490,8 @@ def _run_codex(
     exit_code = None
     proc = None
     timer = None
+    stdin_writer = None
+    stdin_errors: list[Exception] = []
     timed_out = threading.Event()
     with _tasks_lock:
         cancelled = task_id in _cancel_requested
@@ -526,16 +528,39 @@ def _run_codex(
                     timer.daemon = True
                     timer.start()
                 if stdin_data and proc.stdin:
-                    try:
-                        proc.stdin.write(stdin_data)
-                        proc.stdin.close()
-                    except BrokenPipeError:
-                        pass
+                    stdin_stream = proc.stdin
+
+                    def write_stdin() -> None:
+                        try:
+                            stdin_stream.write(stdin_data)
+                        except BrokenPipeError:
+                            pass
+                        except Exception as exc:
+                            stdin_errors.append(exc)
+                        finally:
+                            try:
+                                stdin_stream.close()
+                            except (BrokenPipeError, OSError, ValueError):
+                                pass
+
+                    # stdin 与 stdout 必须并行搬运；否则两侧 pipe 同时写满会死锁。
+                    stdin_writer = threading.Thread(
+                        target=write_stdin,
+                        name=f"codex-stdin-{task_id}",
+                        daemon=True,
+                    )
+                    stdin_writer.start()
                 if proc.stdout is None:
                     raise RuntimeError("codex stdout pipe unavailable")
                 for line in proc.stdout:
                     _emit(line.rstrip("\n"))
                 proc.wait(timeout=5)
+                if stdin_writer is not None:
+                    stdin_writer.join(timeout=1)
+                    if stdin_writer.is_alive():
+                        raise RuntimeError("codex stdin writer did not finish")
+                    if stdin_errors:
+                        raise RuntimeError(f"codex stdin write failed: {stdin_errors[0]}")
                 exit_code = proc.returncode
             except FileNotFoundError:
                 _emit(f"[ERROR] codex 未找到: {CODEX_BIN}")
@@ -548,6 +573,8 @@ def _run_codex(
             timer.cancel()
         if proc is not None:
             _ensure_proc_terminated(proc)
+        if stdin_writer is not None and stdin_writer.is_alive():
+            stdin_writer.join(timeout=1)
         with _tasks_lock:
             _active_processes.pop(task_id, None)
             cancelled = task_id in _cancel_requested

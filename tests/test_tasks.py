@@ -832,6 +832,36 @@ def test_run_codex_enforces_total_timeout(temp_data, tmp_path, monkeypatch):
     assert "超过总时限" in task["output_tail"]
 
 
+def test_run_codex_drains_stdout_while_writing_large_stdin(
+    temp_data, tmp_path, monkeypatch,
+):
+    """大 prompt 与大量 stdout 不能因两边 pipe 填满而互相等待。"""
+    script = tmp_path / "chatty-codex"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "for _ in range(1024):\n"
+        "    print('x' * 128)\n"
+        "sys.stdout.flush()\n"
+        "data = sys.stdin.read()\n"
+        "print(f'READ={len(data)}')\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    task_id = "large-stdin-task"
+    _insert_worker_task(task_id, tmp_path)
+    monkeypatch.setattr(tasks, "CODEX_BIN", str(script))
+    monkeypatch.setattr(tasks, "TASK_TIMEOUT_SECONDS", 2)
+    prompt = "p" * (128 * 1024)
+
+    tasks._run_codex(task_id, str(tmp_path), prompt, [], None)
+
+    task = tasks.get_task(task_id)
+    assert task["status"] == "done"
+    assert task["exit_code"] == 0
+    assert f"READ={len(prompt)}" in task["output"]
+
+
 def test_cancel_task_terminates_running_process(temp_data, tmp_path, monkeypatch):
     script = tmp_path / "slow-codex"
     script.write_text("#!/bin/sh\nsleep 10\n")

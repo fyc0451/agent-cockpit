@@ -1033,6 +1033,86 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
         assert "完成当前原子操作并保存状态后立即停手汇报" in briefing
 
 
+@pytest.mark.parametrize("failing_step", ["bind_identity", "run_context"])
+def test_setup_workspace_keeps_launch_success_when_coordination_context_fails(
+    failing_step, monkeypatch, tmp_path,
+):
+    """Agent 已启动后，协调身份/上下文失败只能降级为 warning。"""
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [{
+            "name": "demo", "status": "running", "directory": str(tmp_path),
+        }],
+    )
+    monkeypatch.setattr(server, "_canonical_mail_project", lambda _: str(tmp_path))
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
+    monkeypatch.setattr(server.mail_projects, "bind", lambda *_: None)
+    plan = {
+        "id": "lead", "name": "codex", "agent": "codex", "role": "lead",
+        "task": "实现", "workdir": str(tmp_path), "strategy": "shared", "args": "",
+    }
+    monkeypatch.setattr(server, "_prepare_workspace", lambda _: ([plan], []))
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda *args, **kwargs: {"available": True, "pane_id": "w1:p2"},
+    )
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"panes": []})
+    monkeypatch.setattr(server.herdr_client, "pane_send", lambda *args: {"available": True})
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        server.coordination, "start_run", lambda **_: {"run_id": "run-1"},
+    )
+    if failing_step == "bind_identity":
+        monkeypatch.setattr(
+            server.coordination,
+            "bind_identity",
+            lambda *_: (_ for _ in ()).throw(RuntimeError("bind boom")),
+        )
+        monkeypatch.setattr(
+            server.coordination,
+            "run_context",
+            lambda *_: (_ for _ in ()).throw(AssertionError("不应继续取上下文")),
+        )
+    else:
+        monkeypatch.setattr(server.coordination, "bind_identity", lambda *_: None)
+        monkeypatch.setattr(
+            server.coordination,
+            "run_context",
+            lambda *_: (_ for _ in ()).throw(RuntimeError("context boom")),
+        )
+    init_script = tmp_path / "am-init-project"
+    init_script.touch()
+    monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", init_script)
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "ok", ""),
+    )
+    monkeypatch.setattr(server, "_identity_name", lambda *_: "codex-main")
+
+    response = TestClient(server.app).post(
+        "/api/herdr/setup-workspace",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(tmp_path), "mode": "custom",
+            "participants": [{
+                "id": "lead", "agent": "codex", "role": "lead", "task": "实现",
+            }],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["started"] == ["codex"]
+    assert body["notified"] == ["codex→codex-main"]
+    assert any("可靠消息身份上下文建立失败" in item for item in body["warnings"])
+
+
 def test_agent_mail_identity_hint_includes_safe_message_checkpoint_protocol():
     hint = server._identity_hint("codex-main", "/tmp/project", "codex")
 
