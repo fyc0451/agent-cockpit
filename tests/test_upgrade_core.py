@@ -366,41 +366,28 @@ def test_api_maps_error_codes_without_secrets(install_tree, monkeypatch):
 
 
 def test_preflight_supervisor_no_bus(install_tree, monkeypatch):
-    """bus 不可达且无 KillMode=process 静态证据 → fail closed。"""
+    """bus 不可达且无 KillMode/direct → fail closed。"""
     upgrade_core.clear_hooks()
     upgrade_core.configure_hooks(skip_venv_check=lambda: True)
-
-    def fake_run(cmd, **kwargs):
-        class R:
-            returncode = 1
-            stdout = ""
-            stderr = "Failed to connect to bus: No such file or directory"
-        return R()
-
-    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
-    monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: "/bin/systemctl" if n == "systemctl" else None)
+    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
     monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: False)
+    monkeypatch.setattr(upgrade_core, "_direct_control_ready", lambda: False)
     with pytest.raises(ValueError, match="precheck_supervisor"):
         upgrade_core.preflight_supervisor()
 
 
-def test_preflight_supervisor_bus_down_killmode_fallback(install_tree, monkeypatch):
-    """bus 不可达但 unit 声明 KillMode=process → 允许 setsid 回退。"""
+def test_preflight_supervisor_bus_down_needs_direct_control(install_tree, monkeypatch):
+    """bus 不可达：仅 KillMode 不够，必须 direct stop/restart 就绪才 PASS。"""
     upgrade_core.clear_hooks()
-
-    def fake_run(cmd, **kwargs):
-        class R:
-            returncode = 1
-            stdout = ""
-            stderr = "Failed to connect to bus: No such file or directory"
-        return R()
-
-    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
-    monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: "/bin/systemctl" if n == "systemctl" else None)
+    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
     monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: True)
-    upgrade_core.preflight_supervisor()  # must not raise
+    monkeypatch.setattr(upgrade_core, "_direct_control_ready", lambda: False)
+    with pytest.raises(ValueError, match="precheck_supervisor"):
+        upgrade_core.preflight_supervisor()
+    monkeypatch.setattr(upgrade_core, "_direct_control_ready", lambda: True)
+    upgrade_core.preflight_supervisor()  # KillMode + direct → PASS
 
 
 def test_sha_must_be_40_hex(install_tree):
@@ -735,7 +722,8 @@ def test_r4_dead_worker_after_checkout_spawns_rollback(install_tree):
     st_final = upgrade_core.read_state()
     assert st_final["state"] == "rolled_back", st_final
     assert _git(root, "rev-parse", "HEAD") == base_sha
-    assert pub["state"] in ("rolled_back", "rolling_back", "failed") or True  # reconcile 后终态
+    assert pub["state"] == "rolled_back"
+    assert int(st_final.get("rollback_spawn_count") or 0) >= 1
 
 
 def test_r4_spawn_passes_rollback_only_flag(install_tree, monkeypatch):
@@ -745,11 +733,14 @@ def test_r4_spawn_passes_rollback_only_flag(install_tree, monkeypatch):
     class FakePopen:
         def __init__(self, cmd, **kwargs):
             seen["cmd"] = cmd
+            seen["env"] = kwargs.get("env") or {}
             self.pid = 222
 
     monkeypatch.setattr(upgrade_core.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
     monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: None)
+    monkeypatch.setenv("COCKPIT_PORT", "9876")
+    monkeypatch.setenv("COCKPIT_HOST", "127.0.0.1")
     upgrade_core.clear_hooks()
     pid = upgrade_core.spawn_worker(
         "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "t.log",
@@ -757,3 +748,267 @@ def test_r4_spawn_passes_rollback_only_flag(install_tree, monkeypatch):
     )
     assert pid == 222
     assert "--rollback-only" in seen["cmd"]
+    assert seen["env"].get("COCKPIT_PORT") == "9876"
+
+
+# ── R5–R8 第三轮发布阻断回归 ────────────────────────────────────
+
+
+def test_r5_bus_down_stop_restart_use_direct_not_systemctl(install_tree, monkeypatch):
+    """R5：bus 不可用时 stop/restart 必须走 direct，不能只打 systemctl。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
+    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
+    calls: list[str] = []
+
+    def stop_direct():
+        calls.append("stop_direct")
+
+    def restart_direct():
+        calls.append("restart_direct")
+
+    monkeypatch.setattr(upgrade_core, "_stop_cockpit_direct", stop_direct)
+    monkeypatch.setattr(upgrade_core, "_restart_cockpit_direct", restart_direct)
+
+    def boom_systemctl(*a, **k):
+        raise AssertionError("systemctl must not be used when bus down")
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", boom_systemctl)
+    upgrade_core.stop_cockpit_for_restore()
+    upgrade_core.restart_cockpit_only()
+    assert calls == ["stop_direct", "restart_direct"]
+
+
+def test_r5_preflight_pass_implies_stop_path_exists(install_tree, monkeypatch):
+    """R5：preflight PASS 的 bus-down 路径与 stop 回退一致（direct ready）。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
+    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
+    monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: True)
+    monkeypatch.setattr(upgrade_core, "_direct_control_ready", lambda: True)
+    upgrade_core.preflight_supervisor()
+    seen = []
+    monkeypatch.setattr(upgrade_core, "_stop_cockpit_direct", lambda: seen.append("ok"))
+    upgrade_core.stop_cockpit_for_restore()
+    assert seen == ["ok"]
+
+
+def test_r6_concurrent_reconcile_single_rollback_spawn(install_tree):
+    """R6：双线程 public_status/reconcile 只补投 1 次 rollback worker。"""
+    root = install_tree["root"]
+    st = upgrade_core._default_state()
+    st.update({
+        "job_id": "race1",
+        "state": "installing",
+        "phase": "venv_staging",
+        "worker_pid": 999999,
+        "worker_started_at": "1",
+        "worker_start_boot_id": "x",
+        "created_at": upgrade_core._utc_iso(),
+        "from_sha": install_tree["base_sha"],
+        "code_mutated": True,
+        "install_dir": str(root),
+        "log_path": str(install_tree["data"] / "upgrade" / "logs" / "race1.log"),
+    })
+    upgrade_core.write_state(st)
+    barrier = threading.Barrier(2)
+    spawned: list[int] = []
+    lock = threading.Lock()
+
+    def rb_spawn(job_id, install_dir, log_path):
+        with lock:
+            spawned.append(1)
+        # 模拟慢 spawn，放大竞态窗
+        time.sleep(0.05)
+        return 1
+
+    upgrade_core.configure_hooks(
+        spawn_rollback_worker=rb_spawn,
+        worker_alive=lambda *a: False,
+    )
+
+    def worker():
+        barrier.wait(timeout=3)
+        upgrade_core.reconcile_stale_state()
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert len(spawned) == 1, f"concurrent_reconcile_spawns={len(spawned)}"
+    st2 = upgrade_core.read_state()
+    assert int(st2.get("rollback_spawn_count") or 0) == 1
+    assert st2["state"] == "rolling_back"
+    assert st2.get("rollback_requested") is True
+
+
+def test_r7_rollback_worker_death_retries_then_exhausted(install_tree):
+    """R7：rollback worker 再死可再补投；耗尽后明确 rollback_exhausted。"""
+    root = install_tree["root"]
+    st = upgrade_core._default_state()
+    st.update({
+        "job_id": "rb-dead",
+        "state": "rolling_back",
+        "phase": "rollback",
+        "worker_pid": 888888,
+        "worker_started_at": "1",
+        "worker_start_boot_id": "x",
+        "created_at": upgrade_core._utc_iso(),
+        "from_sha": install_tree["base_sha"],
+        "code_mutated": True,
+        "rollback_requested": True,
+        "rollback_only": True,
+        "rollback_spawn_count": 1,
+        "install_dir": str(root),
+        "log_path": str(install_tree["data"] / "upgrade" / "logs" / "rb-dead.log"),
+    })
+    upgrade_core.write_state(st)
+    spawned: list[int] = []
+
+    def rb_spawn(job_id, install_dir, log_path):
+        spawned.append(1)
+        return 1
+
+    upgrade_core.configure_hooks(
+        spawn_rollback_worker=rb_spawn,
+        worker_alive=lambda *a: False,
+    )
+    # 第 2 次补投
+    out = upgrade_core.reconcile_stale_state()
+    assert len(spawned) == 1
+    assert out["state"] == "rolling_back"
+    assert int(out["rollback_spawn_count"]) == 2
+    # 再死
+    st = upgrade_core.read_state()
+    st["worker_pid"] = 777777
+    upgrade_core.write_state(st)
+    out2 = upgrade_core.reconcile_stale_state()
+    assert len(spawned) == 2
+    assert int(out2["rollback_spawn_count"]) == 3
+    # 第 4 次应耗尽（MAX=3）
+    st = upgrade_core.read_state()
+    st["worker_pid"] = 666666
+    upgrade_core.write_state(st)
+    out3 = upgrade_core.reconcile_stale_state()
+    assert len(spawned) == 2  # 不再 spawn
+    assert out3["state"] == "failed"
+    assert out3["error_code"] == "rollback_failed"
+    assert out3["phase"] == "rollback_exhausted"
+
+
+def test_r8_darwin_preflight_requires_main_label(install_tree, monkeypatch):
+    """R8：macOS preflight 必须 print 主 service label，仅 domain 不够。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "darwin")
+    monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: "/bin/launchctl" if n == "launchctl" else None)
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        class R:
+            returncode = 1 if "print" in cmd and upgrade_core.DARWIN_MAIN_LABEL in " ".join(cmd) else 0
+            stdout = ""
+            stderr = "Could not find service"
+        # 主 label print 失败
+        if len(cmd) >= 3 and cmd[1] == "print" and upgrade_core.DARWIN_MAIN_LABEL in cmd[2]:
+            R.returncode = 1
+        else:
+            R.returncode = 0
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    # launchd.sh / plist 在真实 INSTALL 可能存在；monkeypatch INSTALL 到 fixture
+    monkeypatch.setattr(upgrade_core, "INSTALL_DIR", install_tree["root"])
+    (install_tree["root"] / "launchd.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (install_tree["root"] / "agent-cockpit.plist").write_text("<plist/>\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="precheck_supervisor"):
+        upgrade_core.preflight_supervisor()
+    assert any(upgrade_core.DARWIN_MAIN_LABEL in " ".join(c) for c in seen)
+
+
+def test_r8_darwin_stop_not_loaded_but_pid_alive_fails(install_tree, monkeypatch):
+    """R8：bootout 报 not loaded 但进程仍活 → stop_failed（不得假成功）。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "darwin")
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "Could not find service"
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(upgrade_core, "_find_cockpit_pids", lambda: [4242])
+
+    def boom_direct():
+        raise ValueError("stop_failed")
+
+    monkeypatch.setattr(upgrade_core, "_stop_cockpit_direct", boom_direct)
+    with pytest.raises(ValueError, match="stop_failed"):
+        upgrade_core.stop_cockpit_for_restore()
+
+
+def test_r8_darwin_oneshot_env_and_cleanup_on_fail(install_tree, monkeypatch, tmp_path):
+    """R8：oneshot 传 COCKPIT_*；bootstrap 失败则清理 plist。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "darwin")
+    monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: "/bin/launchctl")
+    monkeypatch.setenv("COCKPIT_PORT", "9123")
+    monkeypatch.setenv("COCKPIT_HOST", "127.0.0.1")
+    home = tmp_path / "home"
+    la = home / "Library" / "LaunchAgents"
+    la.mkdir(parents=True)
+    monkeypatch.setattr(upgrade_core.Path, "home", lambda: home)
+
+    bootstraps: list = []
+    cleanups: list = []
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        c = list(cmd)
+        if len(c) >= 2 and c[0] == "launchctl" and c[1] == "bootstrap":
+            bootstraps.append(c)
+            R.returncode = 1
+            R.stderr = "bootstrap failed"
+        if len(c) >= 2 and c[0] == "launchctl" and c[1] == "bootout":
+            cleanups.append(c)
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    log = install_tree["data"] / "upgrade" / "logs" / "os.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    pid = upgrade_core._spawn_darwin_launchd_oneshot(
+        "jobx", install_tree["root"], log, ["--rollback-only"],
+    )
+    assert pid is None
+    left = list(la.glob("*.plist"))
+    assert left == [], left
+    assert cleanups, "must bootout on failure"
+
+    def fake_run_ok(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        c = list(cmd)
+        if len(c) >= 2 and c[0] == "launchctl" and c[1] == "bootstrap":
+            plist = Path(c[3])
+            assert plist.is_file()
+            text = plist.read_text(encoding="utf-8")
+            assert "COCKPIT_PORT" in text and "9123" in text
+            assert "COCKPIT_HOST" in text
+            bootstraps.append("ok")
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run_ok)
+    pid2 = upgrade_core._spawn_darwin_launchd_oneshot(
+        "joby", install_tree["root"], log, [],
+    )
+    assert pid2 == -1
+    assert "ok" in bootstraps

@@ -71,9 +71,12 @@ ACTIVE_STATES = frozenset(
 
 # queued 后 worker 尚未回写 pid 的宽限（秒）
 QUEUED_HANDSHAKE_GRACE_S = 30.0
+# 半成品 rollback-only worker 最多补投次数（含首次）
+MAX_ROLLBACK_SPAWNS = 3
 HEALTH_TIMEOUT_S = 60.0
 HEALTH_POLL_S = 1.0
 DISK_MIN_FREE_BYTES = 200 * 1024 * 1024
+DARWIN_MAIN_LABEL = "io.github.fyc0451.agent-cockpit"
 
 ALLOWED_DIRTY_PREFIXES = (
     ".venv/",
@@ -185,6 +188,7 @@ def _default_state() -> dict[str, Any]:
         "code_mutated": False,
         "rollback_only": False,
         "rollback_requested": False,
+        "rollback_spawn_count": 0,
         "diagnostics": {},
     }
 
@@ -332,63 +336,117 @@ def _needs_incomplete_rollback(st: dict[str, Any]) -> bool:
     return bool(st.get("code_mutated"))
 
 
+def _created_ts(created: Any) -> float:
+    try:
+        return datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def reconcile_stale_state(state: dict[str, Any] | None = None) -> dict[str, Any]:
-    """死 worker / 超时 handshake：failed 或触发 rollback-only。"""
-    st = dict(state or read_state())
+    """死 worker / 超时 handshake：failed 或触发 rollback-only。
+
+    状态 CAS 在 UpgradeLock 内完成；spawn 在放锁后执行，避免与 run_job 抢锁死锁。
+    并发 GET 只有一个 CAS 赢家会看到「可补投」并真正 spawn。
+    """
+    st0 = dict(state or read_state())
+    if st0.get("state") not in ACTIVE_STATES:
+        return st0
+    pid0 = st0.get("worker_pid")
+    if (
+        isinstance(pid0, int)
+        and pid0 > 1
+        and _worker_alive(pid0, st0.get("worker_started_at"), st0.get("worker_start_boot_id"))
+    ):
+        return st0
+    lock = UpgradeLock()
+    if not lock.acquire(blocking=False):
+        return read_state()
+    spawn_payload: dict[str, Any] | None = None
+    try:
+        st, spawn_payload = _reconcile_stale_locked()
+    finally:
+        lock.release()
+    if spawn_payload is not None:
+        try:
+            spawn_rollback_worker(spawn_payload)
+        except Exception as exc:
+            logger.exception("spawn rollback worker failed: %s", type(exc).__name__)
+            lock2 = UpgradeLock()
+            if lock2.acquire(blocking=False):
+                try:
+                    cur = read_state()
+                    if cur.get("job_id") == spawn_payload.get("job_id") and cur.get(
+                        "state"
+                    ) in ACTIVE_STATES:
+                        cur["state"] = "failed"
+                        cur["error_code"] = "rollback_failed"
+                        cur["phase"] = "stale_spawn_rollback_failed"
+                        cur["finished_at"] = _utc_iso()
+                        write_state(cur)
+                finally:
+                    lock2.release()
+        return read_state()
+    return st
+
+
+def _reconcile_stale_locked() -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """持锁：重读盘后决策。返回 (state, spawn_payload|None)。"""
+    st = read_state()
     if st.get("state") not in ACTIVE_STATES:
-        return st
+        return st, None
     pid = st.get("worker_pid")
     created = st.get("created_at")
-    # pid=0 视为“未知/待 worker 回写”，宽限期内不判死
     if (pid is None or pid == 0) and st.get("state") == "queued":
-        try:
-            created_ts = datetime.fromisoformat(
-                str(created).replace("Z", "+00:00")
-            ).timestamp()
-        except (TypeError, ValueError):
-            created_ts = 0.0
-        if time.time() - created_ts < QUEUED_HANDSHAKE_GRACE_S:
-            return st
+        if time.time() - _created_ts(created) < QUEUED_HANDSHAKE_GRACE_S:
+            return st, None
         st["state"] = "failed"
         st["error_code"] = "stale_worker"
         st["phase"] = "handshake_timeout"
         st["finished_at"] = _utc_iso()
         write_state(st)
-        return st
+        return st, None
     if pid in (None, 0):
-        # 非 queued 但尚未有合法 pid：宽限
-        try:
-            created_ts = datetime.fromisoformat(
-                str(created).replace("Z", "+00:00")
-            ).timestamp()
-        except (TypeError, ValueError):
-            created_ts = 0.0
-        if time.time() - created_ts < QUEUED_HANDSHAKE_GRACE_S:
-            return st
+        if time.time() - _created_ts(created) < QUEUED_HANDSHAKE_GRACE_S:
+            return st, None
     alive = _worker_alive(pid, st.get("worker_started_at"), st.get("worker_start_boot_id"))
     if alive:
-        return st
-    # worker 已死
-    if _needs_incomplete_rollback(st) and not st.get("rollback_requested"):
-        st["rollback_requested"] = True
-        st["phase"] = "stale_needs_rollback"
-        write_state(st)
-        try:
-            spawn_rollback_worker(st)
-        except Exception as exc:
-            logger.exception("spawn rollback worker failed: %s", type(exc).__name__)
+        return st, None
+    if _needs_incomplete_rollback(st):
+        attempts = int(st.get("rollback_spawn_count") or 0)
+        if attempts >= MAX_ROLLBACK_SPAWNS:
             st["state"] = "failed"
             st["error_code"] = "rollback_failed"
-            st["phase"] = "stale_spawn_rollback_failed"
+            st["phase"] = "rollback_exhausted"
             st["finished_at"] = _utc_iso()
             write_state(st)
-        return read_state()
+            return st, None
+        # 另一路 CAS 已清空 pid 并标记 stale_needs_rollback：宽限内不重复 spawn
+        if (
+            pid in (None, 0)
+            and st.get("phase") == "stale_needs_rollback"
+            and time.time() - _created_ts(st.get("updated_at") or created)
+            < QUEUED_HANDSHAKE_GRACE_S
+        ):
+            return st, None
+        st["rollback_requested"] = True
+        st["rollback_only"] = True
+        st["rollback_spawn_count"] = attempts + 1
+        st["state"] = "rolling_back"
+        st["phase"] = "stale_needs_rollback"
+        st["worker_pid"] = None
+        st["worker_started_at"] = None
+        st["worker_start_boot_id"] = None
+        st["error_code"] = st.get("error_code") or "stale_worker"
+        st["finished_at"] = None
+        write_state(st)
+        return st, dict(st)
     st["state"] = "failed"
     st["error_code"] = "stale_worker"
     st["phase"] = "worker_dead"
     st["finished_at"] = _utc_iso()
     write_state(st)
-    return st
+    return st, None
 
 
 def spawn_rollback_worker(state: dict[str, Any]) -> int:
@@ -402,11 +460,13 @@ def spawn_rollback_worker(state: dict[str, Any]) -> int:
         )
     else:
         log_path = LOG_DIR / f"{job_id}-rollback.log"
-    # 持久化 rollback 标志，worker 即使无 --rollback-only 也能识别
+    # 持久化 rollback 标志（调用方已持锁时仍再读盘合并，防覆盖新身份）
     latest = read_state()
     if latest.get("job_id") == job_id:
         latest["rollback_requested"] = True
         latest["rollback_only"] = True
+        if not latest.get("rollback_spawn_count"):
+            latest["rollback_spawn_count"] = int(state.get("rollback_spawn_count") or 1)
         latest["phase"] = latest.get("phase") or "stale_needs_rollback"
         latest["log_path"] = str(log_path)
         write_state(latest)
@@ -557,12 +617,158 @@ def _unit_file_killmode_process() -> bool:
     return False
 
 
+def _cockpit_port() -> int:
+    try:
+        return int(os.environ.get("COCKPIT_PORT") or "8790")
+    except (TypeError, ValueError):
+        return 8790
+
+
+def _cockpit_host_env() -> str:
+    host = os.environ.get("COCKPIT_HOST") or "127.0.0.1"
+    if host in ("0.0.0.0", "::"):
+        return "127.0.0.1"
+    return host
+
+
+def _worker_env() -> dict[str, str]:
+    """worker / 直接重启必须继承 health 目标端口等环境。"""
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env.setdefault("COCKPIT_HOST", os.environ.get("COCKPIT_HOST") or "127.0.0.1")
+    env.setdefault("COCKPIT_PORT", str(_cockpit_port()))
+    return env
+
+
+def _direct_control_ready() -> bool:
+    """bus 不可用时的直接 PID 控制：可执行文件与 server.py 必须存在。"""
+    if "direct_control_ready" in _hooks:
+        return bool(_hooks["direct_control_ready"]())
+    py = INSTALL_DIR / VENV_LIVE / "bin" / "python"
+    server = INSTALL_DIR / "server.py"
+    return py.is_file() and server.is_file()
+
+
+def _user_systemd_bus_ok() -> bool:
+    if "user_systemd_bus_ok" in _hooks:
+        return bool(_hooks["user_systemd_bus_ok"]())
+    if not shutil.which("systemctl"):
+        return False
+    r = subprocess.run(
+        ["systemctl", "--user", "is-system-running"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    err = (r.stderr or "") + (r.stdout or "")
+    if r.returncode != 0 and (
+        "Failed to connect" in err or "No such file" in err or "not been booted" in err
+    ):
+        return False
+    return True
+
+
+def _find_cockpit_pids() -> list[int]:
+    """定位安装目录内的 Cockpit 主进程（server.py）。"""
+    if "find_cockpit_pids" in _hooks:
+        return [int(p) for p in _hooks["find_cockpit_pids"]()]
+    install = str(INSTALL_DIR.resolve())
+    found: list[int] = []
+    # Linux /proc 扫描
+    proc = Path("/proc")
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = (entry / "cmdline").read_bytes()
+                cmd = raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+                if "server.py" not in cmd:
+                    continue
+                try:
+                    cwd = os.readlink(entry / "cwd")
+                except OSError:
+                    cwd = ""
+                if cwd == install or install in cmd or str(INSTALL_DIR) in cmd:
+                    found.append(int(entry.name))
+            except OSError:
+                continue
+        if found:
+            return sorted(set(found))
+    # macOS / 通用：lsof 按监听端口
+    if shutil.which("lsof"):
+        r = subprocess.run(
+            ["lsof", f"-iTCP:{_cockpit_port()}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        for line in (r.stdout or "").splitlines():
+            line = line.strip()
+            if line.isdigit():
+                found.append(int(line))
+    return sorted(set(found))
+
+
+def _stop_cockpit_direct() -> None:
+    """不依赖 user bus：SIGTERM/SIGKILL 安装目录内 server.py。"""
+    import signal as _signal
+
+    pids = _find_cockpit_pids()
+    if not pids:
+        return  # 已无主进程
+    for pid in pids:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.time() + 12.0
+    while time.time() < deadline:
+        if not _find_cockpit_pids():
+            return
+        time.sleep(0.2)
+    for pid in _find_cockpit_pids():
+        try:
+            os.kill(pid, _signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.3)
+    if _find_cockpit_pids():
+        raise ValueError("stop_failed")
+
+
+def _restart_cockpit_direct() -> None:
+    """不依赖 user bus：停旧进程后 start_new_session 拉起 .venv python server.py。"""
+    _stop_cockpit_direct()
+    py = INSTALL_DIR / VENV_LIVE / "bin" / "python"
+    server = INSTALL_DIR / "server.py"
+    if not py.is_file() or not server.is_file():
+        raise ValueError("restart_failed")
+    log_path = INSTALL_DIR / "agent-cockpit.direct.log"
+    log_fh = open(log_path, "a", encoding="utf-8")
+    try:
+        subprocess.Popen(
+            [str(py), str(server)],
+            cwd=str(INSTALL_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=_worker_env(),
+        )
+    finally:
+        log_fh.close()
+
+
 def preflight_supervisor() -> None:
     """改代码前验证控制通道；失败 fail closed。
 
-    Linux：优先 user systemd bus；bus 不可达时仅当 unit 静态声明 KillMode=process
-    才允许 setsid 独立 session 回退（精确主 PID 杀进程不级联）。
-    macOS：必须能与 launchctl 域通信，且存在主服务 plist/脚本。
+    Linux：优先 user systemd bus；bus 不可达时必须同时具备
+    KillMode=process（worker 不随主进程被杀）与可验证的 direct stop/restart
+    （.venv/python + server.py），否则 fail-closed——绝不能 preflight PASS 后必失败。
+    macOS：核验主 service label 可 print，且 launchd.sh / plist 存在。
     """
     if "preflight_supervisor" in _hooks:
         ok = _hooks["preflight_supervisor"]()
@@ -573,8 +779,9 @@ def preflight_supervisor() -> None:
         if not shutil.which("launchctl"):
             raise ValueError("precheck_supervisor")
         domain = f"gui/{os.getuid()}"
+        service = f"{domain}/{DARWIN_MAIN_LABEL}"
         r = subprocess.run(
-            ["launchctl", "print", domain],
+            ["launchctl", "print", service],
             capture_output=True,
             text=True,
             check=False,
@@ -582,32 +789,18 @@ def preflight_supervisor() -> None:
         )
         if r.returncode != 0:
             raise ValueError("precheck_supervisor")
-        # 主服务模板与 restart 入口必须存在
         if not (INSTALL_DIR / "launchd.sh").is_file():
             raise ValueError("precheck_supervisor")
         if not (INSTALL_DIR / "agent-cockpit.plist").is_file():
             raise ValueError("precheck_supervisor")
         return
-    # Linux: systemctl 优先；bus 不可达时 KillMode=process 静态回退
-    if not shutil.which("systemctl"):
-        if _unit_file_killmode_process():
-            return
-        raise ValueError("precheck_supervisor")
-    r = subprocess.run(
-        ["systemctl", "--user", "is-system-running"],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=5,
-    )
-    err = (r.stderr or "") + (r.stdout or "")
-    bus_down = r.returncode != 0 and (
-        "Failed to connect" in err or "No such file" in err or "not been booted" in err
-    )
-    if bus_down:
-        if _unit_file_killmode_process():
-            return
-        raise ValueError("precheck_supervisor")
+    # Linux
+    if _user_systemd_bus_ok():
+        return
+    # bus 不可达：仅当 KillMode=process 且 direct control 就绪才放行
+    if _unit_file_killmode_process() and _direct_control_ready():
+        return
+    raise ValueError("precheck_supervisor")
 
 
 def estimate_space_needed(install_dir: Path) -> int:
@@ -826,29 +1019,53 @@ def stop_cockpit_for_restore() -> None:
             raise ValueError("stop_failed")
         return
     if sys.platform == "darwin":
-        # 不依赖 launchd.sh stop（脚本无此 action）；精确 bootout 主 agent 标签
-        label = "io.github.fyc0451.agent-cockpit"
+        # 不依赖 launchd.sh stop；精确 bootout 主 agent 标签
         domain = f"gui/{os.getuid()}"
+        service = f"{domain}/{DARWIN_MAIN_LABEL}"
         r = subprocess.run(
-            ["launchctl", "bootout", f"{domain}/{label}"],
+            ["launchctl", "bootout", service],
             capture_output=True,
             text=True,
             check=False,
             timeout=30,
         )
         err = (r.stderr or "") + (r.stdout or "")
-        if r.returncode != 0 and "No such process" not in err and "Could not find" not in err:
+        not_loaded = (
+            "No such process" in err
+            or "Could not find" in err
+            or "No such service" in err
+        )
+        if r.returncode != 0 and not not_loaded:
             raise ValueError("stop_failed")
+        # label 不存在时不得直接当成功：手动启动的 server 可能仍在监听
+        if r.returncode != 0 and not_loaded:
+            if _find_cockpit_pids():
+                _stop_cockpit_direct()
+            return
+        # bootout 成功后仍可能有残留：再清 PID
+        if _find_cockpit_pids():
+            _stop_cockpit_direct()
         return
-    r = subprocess.run(
-        ["systemctl", "--user", "stop", "agent-cockpit.service"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    if r.returncode != 0:
-        raise ValueError("stop_failed")
+    # Linux：优先 systemctl；bus 失败或 stop 失败时走 direct PID（与 preflight 闭环）
+    if _user_systemd_bus_ok() and shutil.which("systemctl"):
+        r = subprocess.run(
+            ["systemctl", "--user", "stop", "agent-cockpit.service"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if r.returncode == 0:
+            return
+        err = (r.stderr or "") + (r.stdout or "")
+        if "Failed to connect" not in err and "No such file" not in err:
+            # unit 真失败：仍尝试 direct，再不行 raise
+            try:
+                _stop_cockpit_direct()
+                return
+            except ValueError:
+                raise ValueError("stop_failed") from None
+    _stop_cockpit_direct()
 
 
 def restart_cockpit_only() -> None:
@@ -867,24 +1084,31 @@ def restart_cockpit_only() -> None:
         if r.returncode != 0:
             raise ValueError("restart_failed")
         return
-    r = subprocess.run(
-        ["systemctl", "--user", "restart", "agent-cockpit.service"],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=60,
-    )
-    if r.returncode != 0:
-        raise ValueError("restart_failed")
+    if _user_systemd_bus_ok() and shutil.which("systemctl"):
+        r = subprocess.run(
+            ["systemctl", "--user", "restart", "agent-cockpit.service"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        if r.returncode == 0:
+            return
+        err = (r.stderr or "") + (r.stdout or "")
+        if "Failed to connect" not in err and "No such file" not in err:
+            try:
+                _restart_cockpit_direct()
+                return
+            except ValueError:
+                raise ValueError("restart_failed") from None
+    _restart_cockpit_direct()
 
 
 def health_check(*, timeout_s: float = HEALTH_TIMEOUT_S) -> bool:
     if "health_check" in _hooks:
         return bool(_hooks["health_check"]())
-    host = os.environ.get("COCKPIT_HOST", "127.0.0.1")
-    if host in ("0.0.0.0", "::"):
-        host = "127.0.0.1"
-    port = os.environ.get("COCKPIT_PORT", "8790")
+    host = _cockpit_host_env()
+    port = str(_cockpit_port())
     url = f"http://{host}:{port}/health"
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -1059,16 +1283,33 @@ def merge_spawn_identity(job_id: str, spawn_pid: int | None) -> dict[str, Any]:
     return latest
 
 
+def _cleanup_darwin_oneshot(service: str, plist_path: Path) -> None:
+    """临时 upgrade job/plist：失败必清；成功路径只卸文件，job 由下次 bootout 回收。"""
+    try:
+        subprocess.run(
+            ["launchctl", "bootout", service],
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except Exception:
+        pass
+    try:
+        plist_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _spawn_darwin_launchd_oneshot(
     job_id: str,
     install_dir: Path,
     log_path: Path,
     extra: list[str],
 ) -> int | None:
-    """macOS：临时 oneshot LaunchAgent，避免主 LaunchAgent bootout 杀 worker。"""
+    """macOS：临时 oneshot LaunchAgent；失败 fail-closed 并清理 plist/job。"""
     if not shutil.which("launchctl"):
         return None
-    label = f"io.github.fyc0451.agent-cockpit.upgrade.{job_id}"
+    label = f"{DARWIN_MAIN_LABEL}.upgrade.{job_id}"
     domain = f"gui/{os.getuid()}"
     service = f"{domain}/{label}"
     plist_dir = Path.home() / "Library" / "LaunchAgents"
@@ -1077,7 +1318,7 @@ def _spawn_darwin_launchd_oneshot(
     except OSError:
         return None
     plist_path = plist_dir / f"{label}.plist"
-    # 转义 XML
+
     def _xml(s: str) -> str:
         return (
             s.replace("&", "&amp;")
@@ -1096,6 +1337,15 @@ def _spawn_darwin_launchd_oneshot(
         *extra,
     ]
     args_xml = "\n".join(f"    <string>{_xml(a)}</string>" for a in args)
+    wenv = _worker_env()
+    env_xml = "\n".join(
+        f"    <key>{_xml(k)}</key>\n    <string>{_xml(str(v))}</string>"
+        for k, v in (
+            ("PYTHONUNBUFFERED", "1"),
+            ("COCKPIT_HOST", wenv.get("COCKPIT_HOST", "127.0.0.1")),
+            ("COCKPIT_PORT", wenv.get("COCKPIT_PORT", "8790")),
+        )
+    )
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1118,8 +1368,7 @@ def _spawn_darwin_launchd_oneshot(
   <string>{_xml(str(log_path))}</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PYTHONUNBUFFERED</key>
-    <string>1</string>
+{env_xml}
   </dict>
 </dict>
 </plist>
@@ -1127,6 +1376,7 @@ def _spawn_darwin_launchd_oneshot(
     try:
         plist_path.write_text(body, encoding="utf-8")
         os.chmod(plist_path, 0o600)
+        # 先清旧 job
         subprocess.run(
             ["launchctl", "bootout", service],
             capture_output=True,
@@ -1142,11 +1392,17 @@ def _spawn_darwin_launchd_oneshot(
         )
         if r.returncode != 0:
             logger.info("launchctl bootstrap upgrade worker failed rc=%s", r.returncode)
+            _cleanup_darwin_oneshot(service, plist_path)
             return None
-        # 未知 pid：禁止 API 覆盖
+        # 成功：plist 文件可删（job 已注册）；不 bootout，否则杀 worker
+        try:
+            plist_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return -1
     except Exception as exc:
         logger.info("darwin oneshot spawn failed type=%s", type(exc).__name__)
+        _cleanup_darwin_oneshot(service, plist_path)
         return None
 
 
@@ -1162,45 +1418,40 @@ def spawn_worker(
     _ensure_dirs()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     extra = ["--rollback-only"] if rollback_only else []
+    wenv = _worker_env()
     # macOS：优先独立 oneshot LaunchAgent（主服务 restart/bootout 不会杀它）
     if sys.platform == "darwin":
         pid = _spawn_darwin_launchd_oneshot(job_id, install_dir, log_path, extra)
         if pid is not None:
             return int(pid)
+        # oneshot 失败：setsid 回退仍传完整 env
         logger.info("darwin oneshot unavailable; fallback start_new_session")
-    # Linux：优先 systemd-run --user 独立 unit（KillMode=process）
-    if sys.platform != "darwin" and shutil.which("systemd-run"):
-        probe = subprocess.run(
-            ["systemctl", "--user", "is-system-running"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-        bus_ok = probe.returncode == 0 or "running" in (probe.stdout or "")
-        if bus_ok:
-            unit = f"agent-cockpit-upgrade-{job_id}"
-            cmd = [
-                "systemd-run",
-                "--user",
-                "--unit",
-                unit,
-                "--collect",
-                "--property=KillMode=process",
-                sys.executable,
-                str(WORKER_SCRIPT),
-                "--job-id",
-                job_id,
-                "--install-dir",
-                str(install_dir),
-                *extra,
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if r.returncode == 0:
-                # 返回 -1 表示“pid 未知，禁止 API 覆盖 worker 身份”
-                return -1
-            logger.info("systemd-run failed rc=%s", r.returncode)
-    # 回退：setsid 独立 session（Cockpit unit 须 KillMode=process）
+    # Linux：优先 systemd-run --user 独立 unit（KillMode=process）；显式 setenv health 目标
+    if sys.platform != "darwin" and shutil.which("systemd-run") and _user_systemd_bus_ok():
+        unit = f"agent-cockpit-upgrade-{job_id}"
+        cmd = [
+            "systemd-run",
+            "--user",
+            "--unit",
+            unit,
+            "--collect",
+            "--property=KillMode=process",
+            f"--setenv=PYTHONUNBUFFERED=1",
+            f"--setenv=COCKPIT_HOST={wenv.get('COCKPIT_HOST', '127.0.0.1')}",
+            f"--setenv=COCKPIT_PORT={wenv.get('COCKPIT_PORT', '8790')}",
+            sys.executable,
+            str(WORKER_SCRIPT),
+            "--job-id",
+            job_id,
+            "--install-dir",
+            str(install_dir),
+            *extra,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if r.returncode == 0:
+            return -1
+        logger.info("systemd-run failed rc=%s", r.returncode)
+    # 回退：setsid 独立 session（Cockpit unit 须 KillMode=process；bus 下由 systemctl 控主进程）
     log_fh = open(log_path, "a", encoding="utf-8")
     try:
         proc = subprocess.Popen(
@@ -1219,7 +1470,7 @@ def spawn_worker(
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=wenv,
         )
     finally:
         log_fh.close()
