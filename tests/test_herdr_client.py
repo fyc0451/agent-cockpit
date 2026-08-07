@@ -856,3 +856,135 @@ def test_pane_zoom_degrades_on_error_and_unavailable(monkeypatch):
 
     monkeypatch.setattr(herdr_client, "is_available", lambda: False)
     assert herdr_client.pane_zoom("demo") == {"available": False}
+
+
+def _fake_herdr(monkeypatch, panes):
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session",
+        lambda session: {"panes": list(panes)},
+    )
+
+
+def test_split_pane_once_prefers_reported_new_pane(monkeypatch):
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        return 'data: {"result":{"pane":{"pane_id":"w1:p2"}}}'
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    _fake_herdr(monkeypatch, [{"pane_id": "w1:p1"}])
+
+    assert herdr_client._split_pane_once("demo", "w1:p1", "right") == "w1:p2"
+    assert calls[0][2:6] == ["pane", "split", "w1:p1", "--direction"]
+    assert calls[0][6] == "right"
+
+
+def test_split_pane_layout_modes(monkeypatch):
+    calls = []
+    reported = iter(["w1:p2", "w1:p3", "w1:p4"])
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        return 'data: {"result":{"pane":{"pane_id":"%s"}}}' % next(reported)
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    _fake_herdr(monkeypatch, [{"pane_id": "w1:p1"}])
+
+    assert herdr_client.split_pane_layout("demo", "w1:p1", "horizontal") == ["w1:p2"]
+
+    calls.clear()
+    reported = iter(["w1:p2", "w1:p3", "w1:p4"])
+    assert herdr_client.split_pane_layout("demo", "w1:p1", "vertical") == ["w1:p2"]
+    assert calls[0][6] == "down"
+
+    calls.clear()
+    reported = iter(["w1:p2", "w1:p3", "w1:p4"])
+    assert herdr_client.split_pane_layout("demo", "w1:p1", "grid4") == [
+        "w1:p2", "w1:p3", "w1:p4",
+    ]
+    splits = [c[6] for c in calls]
+    assert splits == ["right", "down", "down"]
+    # 第三刀必须切在第一刀产生的右栏上,才能形成 2×2。
+    assert calls[2][4] == "w1:p2"
+
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        herdr_client.split_pane_layout("demo", "w1:p1", "diagonal")
+
+
+def test_detach_pane_moves_to_new_tab(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(list(args)) or "",
+    )
+
+    herdr_client.detach_pane("demo", "w1:p3")
+
+    assert calls[0][2:] == ["pane", "move", "w1:p3", "--new-tab"]
+
+
+def test_untile_tab_moves_all_but_first(monkeypatch):
+    panes = [
+        {"pane_id": "w1:p1", "tab_id": "w1:t2"},
+        {"pane_id": "w1:p2", "tab_id": "w1:t2"},
+        {"pane_id": "w1:p3", "tab_id": "w1:t2"},
+        {"pane_id": "w1:p9", "tab_id": "w1:t5"},
+    ]
+    _fake_herdr(monkeypatch, panes)
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(list(args)) or "",
+    )
+
+    moved = herdr_client.untile_tab("demo", "w1:t2")
+
+    assert moved == ["w1:p2", "w1:p3"]
+    assert calls[0][2:] == ["pane", "move", "w1:p2", "--new-tab"]
+    assert calls[1][2:] == ["pane", "move", "w1:p3", "--new-tab"]
+
+
+def test_compose_pane_placement_order(monkeypatch):
+    panes = [{"pane_id": pid} for pid in ("w1:p1", "w1:p2", "w1:p3", "w1:p4")]
+    _fake_herdr(monkeypatch, panes)
+
+    def compose(orientation):
+        calls = []
+        monkeypatch.setattr(
+            herdr_client, "_run",
+            lambda args, timeout=10: calls.append(list(args)) or "",
+        )
+        herdr_client.compose_panes(
+            "demo", ["w1:p1", "w1:p2", "w1:p3", "w1:p4"], orientation)
+        return [tuple(c[2:]) for c in calls]
+
+    assert compose("horizontal") == [
+        ("pane", "move", "w1:p2", "--target-pane", "w1:p1", "--split", "right"),
+        ("pane", "move", "w1:p3", "--target-pane", "w1:p1", "--split", "down"),
+        ("pane", "move", "w1:p4", "--target-pane", "w1:p2", "--split", "down"),
+    ]
+    assert compose("vertical") == [
+        ("pane", "move", "w1:p2", "--target-pane", "w1:p1", "--split", "down"),
+        ("pane", "move", "w1:p3", "--target-pane", "w1:p1", "--split", "right"),
+        ("pane", "move", "w1:p4", "--target-pane", "w1:p2", "--split", "right"),
+    ]
+
+
+def test_compose_panes_rejects_bad_input(monkeypatch):
+    panes = [{"pane_id": pid} for pid in ("w1:p1", "w1:p2")]
+    _fake_herdr(monkeypatch, panes)
+    monkeypatch.setattr(herdr_client, "_run", lambda *a, **k: "")
+
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        herdr_client.compose_panes("demo", ["w1:p1"], "horizontal")
+    with _pt.raises(ValueError):
+        herdr_client.compose_panes("demo", ["w1:p%d" % i for i in range(6)], "horizontal")
+    with _pt.raises(ValueError):
+        herdr_client.compose_panes("demo", ["w1:p1", "w1:p1"], "horizontal")
+    with _pt.raises(ValueError):
+        herdr_client.compose_panes("demo", ["w1:p1", "nope"], "horizontal")
+    with _pt.raises(ValueError):
+        herdr_client.compose_panes("demo", ["w1:p1", "w1:p2"], "diagonal")

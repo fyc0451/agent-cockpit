@@ -659,6 +659,7 @@ header .spacer{flex:1}
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端"><span data-i18n="term.upload">📎上传</span><input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="联系本地 Agent 或向当前团队群组发送求助" data-i18n="term.collab">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
+      <button class="sm" onclick="showLayoutModal()" title="一键布局:分屏/拆开/组合 pane" data-i18n="term.layout">🧱 布局</button>
       <button class="sm" onclick="enterHerdrFlow()" title="退出 TUI，返回可滚屏/复制的 pane 流视图" data-i18n="term.back">📜 返回流视图</button>
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
       <button class="sm danger" onclick="termClose()" data-i18n="term.close">✕ 关闭</button>
@@ -832,6 +833,39 @@ header .spacer{flex:1}
   </div>
 </div>
 
+<!-- 终端布局:分屏/拆开/组合 pane -->
+<div class="modal-bg" id="layoutModal" onclick="if(event.target===this)closeLayoutModal()">
+  <div class="modal launch-modal">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <div style="flex:1;min-width:0">
+        <h3 style="margin:0" data-i18n="layout.title">终端布局</h3>
+        <div class="muted" style="font-size:11px;margin-top:3px" id="layoutModalHint" data-i18n="layout.hint">对当前 pane 一键分屏/拆开，或勾选多个 pane 组合成分屏。</div>
+      </div>
+      <button class="icon" onclick="closeLayoutModal()">✕</button>
+    </div>
+    <div class="launch-bar" style="flex-wrap:wrap">
+      <span class="lbl" data-i18n="layout.curpane">当前 pane</span>
+      <button class="sm" onclick="layoutSplit('horizontal')" data-i18n="layout.hsplit">⬌ 水平分屏</button>
+      <button class="sm" onclick="layoutSplit('vertical')" data-i18n="layout.vsplit">⬍ 垂直分屏</button>
+      <button class="sm" onclick="layoutSplit('grid4')" data-i18n="layout.grid4">⊞ 四分屏</button>
+      <button class="sm" onclick="layoutDetach()" title="把当前 pane 移到独立 tab" data-i18n="layout.detach">⛶ 拆出当前</button>
+      <button class="sm" onclick="layoutUntile()" title="把当前所在分屏组的所有 pane 拆成各自独立 tab" data-i18n="layout.untile">🧩 拆开整组</button>
+    </div>
+    <div style="margin-top:10px;border-top:1px solid var(--bd);padding-top:10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <span class="lbl" data-i18n="layout.compose">组合分屏</span>
+        <select id="lyOrientation" aria-label="组合方向">
+          <option value="horizontal" data-i18n="layout.h_first">水平为主</option>
+          <option value="vertical" data-i18n="layout.v_first">垂直为主</option>
+        </select>
+        <button class="primary sm" onclick="layoutCompose()" data-i18n="layout.compose_btn">⧉ 组合选中 pane</button>
+        <span class="muted" style="font-size:11px" data-i18n="layout.pick_hint">勾选 2-4 个 pane，第一个为基准</span>
+      </div>
+      <div id="layoutPaneList" style="display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto"></div>
+    </div>
+  </div>
+</div>
+
 <!-- 终端抽屉 -->
 <div class="drawer-bg" id="termDrawer" onclick="if(event.target===this)closeTerm()">
   <div class="drawer">
@@ -980,7 +1014,8 @@ en:{
 'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
-'term.new':'+ New terminal','term.addagent':'＋ Add Agent','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…',
+'term.new':'+ New terminal','term.addagent':'＋ Add Agent','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…','term.layout':'🧱 Layout',
+'layout.title':'Terminal Layout','layout.hint':'Split/detach the current pane in one click, or pick several panes to compose a split.','layout.curpane':'Current pane','layout.hsplit':'⬌ Split horizontal','layout.vsplit':'⬍ Split vertical','layout.grid4':'⊞ 2×2 grid','layout.detach':'⛶ Detach to tab','layout.untile':'🧩 Untile group','layout.compose':'Compose split','layout.h_first':'Horizontal-first','layout.v_first':'Vertical-first','layout.compose_btn':'⧉ Compose selected','layout.pick_hint':'Pick 2-4 panes; the first is the base','layout.nosession':'Open a terminal (pick a herdr session) before adjusting layout','layout.nopanes':'No pane in this session','layout.notarget':'Current pane not found: focus a pane in the terminal first','layout.notab':'Cannot determine the tab of the current pane','layout.pick24':'Please pick 2-4 panes','layout.done_split':'Split done (new slots are empty shells)','layout.done_detach':'Detached to its own tab','layout.done_untile':'Untiled','layout.panes_unit':'pane(s)','layout.single_pane':'This tab has only one pane','layout.done_compose':'Composed into a split',
 'hf.takeover':'🖥 Take over TUI','hf.hint':'Copy: paste elsewhere · Fill input: send straight to agent','hf.empty':'No agent pane in this session','hf.send':'Send','hf.paste':'📋 Fill input','hf.full':'⛶ Full','hf.exit':'Exit',
 'sessions.setup':'+ Quick workspace','sessions.hint':'Quick workspace: split pane + start agent; Agent Mail required',
 'roots.system':'System','roots.projects':'Registered projects','roots.custom':'Custom','files.rootlimit':'Already at an accessible root — tap a root name above to switch','files.rmroot':'Remove from accessible locations (directory is not deleted)','files.remove':'Remove',
@@ -1001,7 +1036,8 @@ ja:{
 'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
-'term.new':'+ 新規ターミナル','term.addagent':'＋ Agent 追加','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…',
+'term.new':'+ 新規ターミナル','term.addagent':'＋ Agent 追加','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…','term.layout':'🧱 レイアウト',
+'layout.title':'ターミナルレイアウト','layout.hint':'現在の pane をワンクリックで分割/分離、または複数 pane を選んで分割レイアウトに組み合わせ。','layout.curpane':'現在の pane','layout.hsplit':'⬌ 左右に分割','layout.vsplit':'⬍ 上下に分割','layout.grid4':'⊞ 2×2 分割','layout.detach':'⛶ 独立 tab へ','layout.untile':'🧩 グループ全分離','layout.compose':'分割に組み合わせ','layout.h_first':'左右優先','layout.v_first':'上下優先','layout.compose_btn':'⧉ 選択を組み合わせ','layout.pick_hint':'2-4 個の pane を選択、最初の pane が基準','layout.nosession':'先にターミナルを開いてからレイアウト調整してください','layout.nopanes':'この session に pane がありません','layout.notarget':'現在の pane が見つかりません:先に pane へフォーカスしてください','layout.notab':'現在の pane の tab を特定できません','layout.pick24':'pane を 2-4 個選んでください','layout.done_split':'分割しました(新しい枠は空シェル)','layout.done_detach':'独立 tab へ分離しました','layout.done_untile':'分離しました','layout.panes_unit':'個','layout.single_pane':'この tab には pane が1つだけ','layout.done_compose':'分割レイアウトに組み合わせました',
 'hf.takeover':'🖥 TUI 接管','hf.hint':'コピー: 他アプリで貼り付け · 入力欄へ: agent に直接送信','hf.empty':'このセッションに agent pane なし','hf.send':'送信','hf.paste':'📋 入力欄へ','hf.full':'⛶ 全画面','hf.exit':'退出',
 'sessions.setup':'+ ワンクリックワークスペース','sessions.hint':'ワンクリック: pane 分割 + agent 起動;Agent Mail は必須',
 'roots.system':'システム','roots.projects':'登録プロジェクト','roots.custom':'カスタム','files.rootlimit':'アクセス可能なルートです。上のルート名で切り替えられます','files.rmroot':'アクセス可能場所から削除(ディレクトリ自体は削除されません)','files.remove':'削除',
@@ -2572,6 +2608,86 @@ function termCollabContext(){
   const paneId=CURRENT_TERM?.paneId||'';
   const pane=paneId?(BOARD?.panes||[]).find(p=>p.session===session&&p.pane_id===paneId)||{}:{};
   return {session,paneId,agent:CURRENT_TERM?.agent||pane.agent||'',workdir:pane.cwd||''};
+}
+// 布局中心:对当前 pane 分屏/拆开,或勾选多个 pane 组合成分屏。
+async function layoutSnapshotPanes(session){
+  try{
+    const d=await api('/api/herdr/snapshot');
+    return (d.panes||[]).filter(p=>p.session===session&&p.pane_id);
+  }catch(e){return []}
+}
+function layoutTermContext(){
+  const ctx=termCollabContext();
+  const session=ctx.session||'';
+  const panes=(BOARD?.panes||[]).filter(p=>p.session===session);
+  let target=ctx.paneId?panes.find(p=>p.pane_id===ctx.paneId):null;
+  if(!target)target=panes.find(p=>p.focused);
+  if(!target&&panes.length===1)target=panes[0];
+  return {session,target,panes};
+}
+async function showLayoutModal(){
+  const {session}=layoutTermContext();
+  if(!session){toast(t('layout.nosession','先打开一个终端(选择 herdr session)再调整布局'),4000);return}
+  document.getElementById('layoutModal').classList.add('show');
+  await renderLayoutPaneList();
+}
+function closeLayoutModal(){document.getElementById('layoutModal').classList.remove('show')}
+async function renderLayoutPaneList(){
+  const {session,target}=layoutTermContext();
+  const el=document.getElementById('layoutPaneList');
+  if(!el)return;
+  const panes=await layoutSnapshotPanes(session);
+  if(!panes.length){el.innerHTML=`<div class="empty">${esc(t('layout.nopanes','当前 session 没有 pane'))}</div>`;return}
+  const picked=new Set([...document.querySelectorAll('.ly-pick:checked')].map(i=>i.value));
+  el.innerHTML=panes.map(p=>{
+    const label=p.label||p.agent||p.pane_id;
+    const checked=(picked.size?picked.has(p.pane_id):(target&&p.pane_id===target.pane_id))?'checked':'';
+    return `<label style="display:flex;gap:8px;align-items:center;font-size:12px;cursor:pointer">
+      <input type="checkbox" class="ly-pick" value="${esc(p.pane_id)}" ${checked}>
+      <b>${esc(label)}</b><span class="muted">${esc(p.pane_id)}${p.tab_id?' · '+esc(p.tab_id):''}</span></label>`;
+  }).join('');
+}
+function layoutTargetOrToast(){
+  const {session,target}=layoutTermContext();
+  if(!session){toast(t('layout.nosession','先打开一个终端(选择 herdr session)再调整布局'));return null}
+  if(!target){toast(t('layout.notarget','找不到当前 pane:请先在终端里聚焦一个 pane'));return null}
+  return {session,paneId:target.pane_id,tabId:target.tab_id||''};
+}
+async function layoutSplit(mode){
+  const t=layoutTargetOrToast();if(!t)return;
+  try{
+    await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}/layout/split`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    toast(t('layout.done_split','已分屏(新槽位为空 shell)'));
+    refreshBoard();closeLayoutModal();
+  }catch(e){toast(t('toast.sendfail','操作失败: ')+e,5000)}
+}
+async function layoutDetach(){
+  const t=layoutTargetOrToast();if(!t)return;
+  try{
+    await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}/layout/detach`,{method:'POST'});
+    toast(t('layout.done_detach','已拆出到独立 tab'));
+    refreshBoard();closeLayoutModal();
+  }catch(e){toast(t('toast.sendfail','操作失败: ')+e,5000)}
+}
+async function layoutUntile(){
+  const t=layoutTargetOrToast();if(!t)return;
+  if(!t.tabId){toast(t('layout.notab','无法确定当前 pane 所在 tab'));return}
+  try{
+    const r=await api(`/api/herdr/session/${encodeURIComponent(t.session)}/layout/untile`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tab_id:t.tabId})});
+    toast((r.moved&&r.moved.length)?t('layout.done_untile','已拆开')+' '+r.moved.length+' '+t('layout.panes_unit','个 pane'):t('layout.single_pane','该 tab 只有一个 pane'));
+    refreshBoard();closeLayoutModal();
+  }catch(e){toast(t('toast.sendfail','操作失败: ')+e,5000)}
+}
+async function layoutCompose(){
+  const {session}=layoutTermContext();
+  const picks=[...document.querySelectorAll('.ly-pick:checked')].map(i=>i.value);
+  if(picks.length<2||picks.length>4){toast(t('layout.pick24','请勾选 2-4 个 pane'));return}
+  const orientation=document.getElementById('lyOrientation').value;
+  try{
+    await api(`/api/herdr/session/${encodeURIComponent(session)}/layout/compose`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pane_ids:picks,orientation})});
+    toast(t('layout.done_compose','已组合为分屏'));
+    refreshBoard();closeLayoutModal();
+  }catch(e){toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 function teamCollabContextText(context){
   const lines=[];

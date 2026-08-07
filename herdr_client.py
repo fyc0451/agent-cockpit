@@ -748,6 +748,122 @@ def close_pane(session: str, pane_id: str) -> dict[str, Any]:
         return {"available": True, "error": str(e)}
 
 
+SPLIT_MODES = ("horizontal", "vertical", "grid4")
+COMPOSE_ORIENTATIONS = ("horizontal", "vertical")
+COMPOSE_MAX_PANES = 4
+
+
+def _pane_ids_of(session: str) -> set[str]:
+    snap = _snapshot_session(session)
+    return {
+        str(p.get("pane_id"))
+        for p in snap.get("panes", [])
+        if p.get("pane_id")
+    }
+
+
+def _split_pane_once(session: str, pane_id: str, direction: str) -> str:
+    """对 pane 分屏一次(right/down),返回新建 pane id。"""
+    before = _pane_ids_of(session)
+    out = _run(
+        ["--session", session, "pane", "split", pane_id,
+         "--direction", direction, "--no-focus"],
+        timeout=10,
+    )
+    data = _parse_data_json(out) or {}
+    result = data.get("result") or {}
+    reported = (
+        (result.get("pane") or {}).get("pane_id")
+        or (result.get("tab") or {}).get("focused_pane_id")
+    )
+    reported = str(reported) if reported else ""
+    if reported and reported not in before:
+        return reported
+    deadline = time.monotonic() + PANE_CREATE_TIMEOUT
+    while time.monotonic() < deadline:
+        created = _pane_ids_of(session) - before
+        if len(created) == 1:
+            return created.pop()
+        time.sleep(AGENT_POLL_INTERVAL)
+    raise RuntimeError("split 后无法识别新 pane")
+
+
+def split_pane_layout(session: str, pane_id: str, mode: str) -> list[str]:
+    """把单个 pane 拆成布局。新槽位为空 shell,返回新建 pane id 列表。
+
+    - horizontal:左右两栏;vertical:上下两栏;grid4:2×2 四宫格。
+    """
+    if mode == "horizontal":
+        return [_split_pane_once(session, pane_id, "right")]
+    if mode == "vertical":
+        return [_split_pane_once(session, pane_id, "down")]
+    if mode == "grid4":
+        right = _split_pane_once(session, pane_id, "right")
+        bottom_left = _split_pane_once(session, pane_id, "down")
+        bottom_right = _split_pane_once(session, right, "down")
+        return [right, bottom_left, bottom_right]
+    raise ValueError(f"不支持的分屏模式: {mode}")
+
+
+def detach_pane(session: str, pane_id: str) -> None:
+    """把 pane 拆到独立 tab(herdr pane move --new-tab)。"""
+    _run(["--session", session, "pane", "move", pane_id, "--new-tab"], timeout=10)
+
+
+def untile_tab(session: str, tab_id: str) -> list[str]:
+    """拆开 tab 内分屏:保留第一个 pane,其余逐个移到独立 tab。"""
+    snap = _snapshot_session(session)
+    panes = [
+        str(p.get("pane_id"))
+        for p in snap.get("panes", [])
+        if p.get("pane_id") and str(p.get("tab_id") or "") == str(tab_id)
+    ]
+    moved: list[str] = []
+    for pid in panes[1:]:
+        detach_pane(session, pid)
+        moved.append(pid)
+    return moved
+
+
+def compose_panes(session: str, pane_ids: list[str], orientation: str) -> str:
+    """把 2-4 个 pane 组合为一个分屏,第一个为基准。返回基准 pane id。
+
+    布局:2 → 并排;3 → 基准旁一栏再纵分;4 → 2×2 宫格。
+    orientation=horizontal 优先左右展开,vertical 优先上下叠放。
+    """
+    if orientation not in COMPOSE_ORIENTATIONS:
+        raise ValueError(f"不支持的组合方向: {orientation}")
+    if not 2 <= len(pane_ids) <= COMPOSE_MAX_PANES:
+        raise ValueError(f"组合分屏仅支持 2-{COMPOSE_MAX_PANES} 个 pane")
+    if len(set(pane_ids)) != len(pane_ids):
+        raise ValueError("不能重复组合同一个 pane")
+    existing = _pane_ids_of(session)
+    missing = [pid for pid in pane_ids if pid not in existing]
+    if missing:
+        raise ValueError("未找到 pane: " + ", ".join(missing))
+    base = pane_ids[0]
+    first = "right" if orientation == "horizontal" else "down"
+    second = "down" if orientation == "horizontal" else "right"
+
+    def _move(pid: str, target: str, direction: str) -> None:
+        _run(
+            ["--session", session, "pane", "move", pid,
+             "--target-pane", target, "--split", direction],
+            timeout=10,
+        )
+
+    if len(pane_ids) == 2:
+        _move(pane_ids[1], base, first)
+    elif len(pane_ids) == 3:
+        _move(pane_ids[1], base, first)
+        _move(pane_ids[2], pane_ids[1], second)
+    else:
+        _move(pane_ids[1], base, first)
+        _move(pane_ids[2], base, second)
+        _move(pane_ids[3], pane_ids[1], second)
+    return base
+
+
 def restart_pane(
     session: str, pane_id: str, agent: str | None = None,
     workdir: str | None = None, resume: bool = False,

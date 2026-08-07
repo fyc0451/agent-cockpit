@@ -421,6 +421,32 @@ class ZoomLeaseReq(BaseModel):
     action: str = "acquire"  # acquire | renew | release
 
 
+class PaneSplitLayoutReq(BaseModel):
+    mode: str = "horizontal"  # horizontal | vertical | grid4
+
+
+class TabUntileReq(BaseModel):
+    tab_id: str
+
+
+class PaneComposeReq(BaseModel):
+    pane_ids: list[str]
+    orientation: str = "horizontal"  # horizontal | vertical
+
+
+class PaneSplitLayoutReq(BaseModel):
+    mode: str = "horizontal"  # horizontal | vertical | grid4
+
+
+class TabUntileReq(BaseModel):
+    tab_id: str
+
+
+class PaneComposeReq(BaseModel):
+    pane_ids: list[str]
+    orientation: str = "horizontal"  # horizontal | vertical
+
+
 class WriteFileReq(BaseModel):
     path: str
     content: str
@@ -2941,6 +2967,66 @@ def api_herdr_session_delete(name: str):
         coordination.close_session(name, "deleted")
         mail_projects.unbind(name)
     return result
+
+
+@app.post("/api/herdr/pane/{session}/{pane_id}/layout/split")
+def api_herdr_pane_layout_split(session: str, pane_id: str, req: PaneSplitLayoutReq):
+    """一键分屏:当前 pane 拆成水平/垂直/2×2 四宫格,新槽位为空 shell。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
+    if req.mode not in herdr_client.SPLIT_MODES:
+        raise HTTPException(400, f"不支持的分屏模式: {req.mode}")
+    try:
+        created = herdr_client.split_pane_layout(session, pane_id, req.mode)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"mode": req.mode, "created": created}
+
+
+@app.post("/api/herdr/pane/{session}/{pane_id}/layout/detach")
+def api_herdr_pane_layout_detach(session: str, pane_id: str):
+    """拆出当前 pane:移到自己的独立 tab。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
+    try:
+        herdr_client.detach_pane(session, pane_id)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"detached": pane_id}
+
+
+@app.post("/api/herdr/session/{name}/layout/untile")
+def api_herdr_session_layout_untile(name: str, req: TabUntileReq):
+    """整组拆开:指定 tab 内除第一个 pane 外,其余逐个移到独立 tab。"""
+    _validate_session_name(name)
+    if not PANE_ID_RE.fullmatch(req.tab_id):
+        raise HTTPException(400, "非法 tab id")
+    try:
+        moved = herdr_client.untile_tab(name, req.tab_id)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"tab_id": req.tab_id, "moved": moved}
+
+
+@app.post("/api/herdr/session/{name}/layout/compose")
+def api_herdr_session_layout_compose(name: str, req: PaneComposeReq):
+    """组合分屏:把选中的 2-4 个 pane 组成一个分屏(第一个为基准)。"""
+    _validate_session_name(name)
+    if req.orientation not in herdr_client.COMPOSE_ORIENTATIONS:
+        raise HTTPException(400, f"不支持的组合方向: {req.orientation}")
+    if not 2 <= len(req.pane_ids) <= herdr_client.COMPOSE_MAX_PANES:
+        raise HTTPException(
+            400, f"组合分屏仅支持 2-{herdr_client.COMPOSE_MAX_PANES} 个 pane")
+    for pid in req.pane_ids:
+        if not PANE_ID_RE.fullmatch(pid):
+            raise HTTPException(400, f"非法 pane id: {pid}")
+    try:
+        base = herdr_client.compose_panes(name, list(req.pane_ids), req.orientation)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"base": base, "composed": len(req.pane_ids)}
 
 
 @app.get("/api/coordination/session/{name}")
