@@ -54,7 +54,7 @@ _session_pane_input: dict[tuple[str, str | None], float] = {}
 _TYPING_STATE_PATH = (
     Path.home() / ".local" / "state" / "agent-cockpit" / "typing.json"
 )
-_typing_state_last_write: dict[tuple[str, str], float] = {}
+_typing_state_last_write: dict[tuple[str, str, str], float] = {}
 _typing_state_lock = threading.Lock()
 _HERDR_BIN = (
     os.environ.get("HERDR_BIN")
