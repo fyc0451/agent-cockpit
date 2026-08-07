@@ -450,6 +450,7 @@ def test_qoder_aliases_get_longer_start_timeout_only():
     assert herdr_client._agent_start_timeout("qoder") == 60.0
     assert herdr_client._agent_start_timeout("qodercli") == 60.0
     assert herdr_client._agent_start_timeout("qodercn") == 60.0
+    assert herdr_client._agent_start_timeout("grok") == 60.0
     assert herdr_client._agent_start_timeout("codex") == 10.0
     assert herdr_client._agent_start_timeout("opencode") == 10.0
 

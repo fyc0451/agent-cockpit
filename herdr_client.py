@@ -27,16 +27,18 @@ PANE_CREATE_TIMEOUT = 3.0
 AGENT_START_TIMEOUT = 10.0
 QODER_AGENT_START_TIMEOUT = 60.0
 QODER_AGENTS = frozenset({"qoder", "qodercli", "qodercn"})
+# 其他冷启动慢的 agent 的识别窗口(二进制大/启动自检耗时,如 grok 约 160MB)
+SLOW_AGENT_START_TIMEOUTS = {"grok": 60.0}
 AGENT_STABLE_SECONDS = 1.5
 AGENT_POLL_INTERVAL = 0.2
 MAX_AGENT_ARGS_LENGTH = 2048
 
 
 def _agent_start_timeout(agent: str) -> float:
-    """QoderCLI 冷启动较慢，其余 Agent 继续使用默认识别窗口。"""
+    """QoderCLI/grok 等冷启动较慢,其余 Agent 继续使用默认识别窗口。"""
     if agent in QODER_AGENTS:
         return QODER_AGENT_START_TIMEOUT
-    return AGENT_START_TIMEOUT
+    return SLOW_AGENT_START_TIMEOUTS.get(agent, AGENT_START_TIMEOUT)
 
 
 def _find_agent_bin(name: str) -> str:
