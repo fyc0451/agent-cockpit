@@ -2414,11 +2414,22 @@ function teamCollabDefaultSubject(context){
 function renderTermCollab(){
   const context=termCollabContext();
   const cands=(BOARD?.panes||[]).filter(p=>p.agent&&!(p.session===context.session&&p.pane_id===context.paneId));
-  const localRows=cands.map(p=>`
-    <button class="collab-target" data-action="collab" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}">
-      <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
-      <span class="main"><b>${esc(p.agent)}</b><small>${esc(p.session)} · ${esc(p.pane_id)}</small></span>
-    </button>`).join('')||'<div class="empty">当前没有其他本地 Agent</div>';
+  const localGroups=new Map();
+  for(const pane of cands){
+    if(!localGroups.has(pane.session))localGroups.set(pane.session,[]);
+    localGroups.get(pane.session).push(pane);
+  }
+  const localRows=[...localGroups.entries()].map(([session,panes],groupIndex)=>{
+    const names=panes.map(p=>p.agent);
+    const isDuplicate=name=>names.indexOf(name)!==names.lastIndexOf(name);
+    const heading=`<div style="font-size:11px;color:var(--fg3);letter-spacing:.3px;margin:${groupIndex?10:0}px 4px 4px">${esc(session)} <span class="muted">· ${panes.length}</span></div>`;
+    const items=panes.map(p=>`
+      <button class="collab-target" data-action="collab" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}">
+        <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+        <span class="main"><b>${esc(p.agent)}</b>${isDuplicate(p.agent)?`<small>pane ${esc(p.pane_id)}</small>`:''}</span>
+      </button>`).join('');
+    return heading+items;
+  }).join('')||'<div class="empty">当前没有其他本地 Agent</div>';
   let teamRows='';
   const binding=teamBindingForSession(context.session);
   const project=binding?TEAM.projects.find(item=>item.slug===binding.project_slug)||null:null;

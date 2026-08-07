@@ -1421,6 +1421,18 @@ def test_terminal_team_collab_requires_current_session_binding():
     assert "collab-target readonly" not in render
 
 
+def test_terminal_collab_groups_local_agents_by_session():
+    js = _inline_js()
+    render = js.split("function renderTermCollab(){", 1)[1].split(
+        "async function termPickCollab", 1
+    )[0]
+    assert "const localGroups=new Map()" in render
+    assert "localGroups.get(pane.session).push(pane)" in render
+    assert "[...localGroups.entries()]" in render
+    assert "${esc(session)}" in render
+    assert "${panes.length}" in render
+
+
 def test_team_session_empty_state_and_navigation_actions():
     js = _inline_js()
     assert "team-hero" in HTML
