@@ -567,7 +567,11 @@ def _deliver_notify_note(
             file=sys.stderr,
         )
         return
-    is_exact = source == "exact"
+    is_exact = source == "exact" or (
+        bool(cwd)
+        and os.path.realpath(os.path.expanduser(cwd))
+        == os.path.realpath(os.path.expanduser(project_key))
+    )
     note = _notify_text(
         msg_id, subject, agent_type, instance, project_key, cwd, is_exact, intent
     )
@@ -652,6 +656,11 @@ def main() -> None:
     recipients = [*agent_recipients, *(f"@{item}" for item in human_recipients)]
     if not recipients:
         raise SystemExit("error: 收件人为空")
+    if explicit_target is not None and not agent_recipients:
+        raise SystemExit(
+            "error: 显式 session/pane 目标只用于本地 Agent 通知，"
+            "收件人至少需包含一个 Agent"
+        )
     # 显式目标在发送前一次性解析并缓存；发送之后只使用缓存结果，
     # 避免 pane 在两次 resolve 之间消失导致持久发送被误报失败。
     explicit_resolved: dict[str, tuple] = {}

@@ -1303,6 +1303,31 @@ def test_explicit_target_pane_gone_does_not_fail_sent_message(monkeypatch, tmp_p
     )
 
 
+def test_explicit_target_exact_cwd_uses_exact_notification(monkeypatch, tmp_path):
+    """显式目标 cwd 与项目相同时，不应误报“cwd 不同”。"""
+    module = _load_mail_send()
+    monkeypatch.setattr(module, "_recipient_typing", lambda *_args: False)
+    exact_flags = []
+    monkeypatch.setattr(
+        module, "_notify_text",
+        lambda _msg_id, _subject, _agent, _instance, _project, _cwd,
+        is_exact, _intent: exact_flags.append(is_exact) or "note",
+    )
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda *args, **kwargs: module.subprocess.CompletedProcess(
+            args[0], 0, "", ""
+        ),
+    )
+
+    module._deliver_notify_note(
+        {}, "demo", "w1:p1", str(tmp_path), "explicit",
+        1, "subject", "kimi", "main", str(tmp_path), "info",
+    )
+
+    assert exact_flags == [True]
+
+
 def test_explicit_target_conflicts_with_no_notify(monkeypatch, tmp_path):
     module = _load_mail_send()
     monkeypatch.setattr(sys, "argv", [
@@ -1311,6 +1336,25 @@ def test_explicit_target_conflicts_with_no_notify(monkeypatch, tmp_path):
         "--no-notify", "--target", "demo/w1:p1",
     ])
     with pytest.raises(SystemExit, match="冲突"):
+        module.main()
+
+
+def test_explicit_target_rejects_human_only_recipient(monkeypatch, tmp_path):
+    module = _load_mail_send()
+    monkeypatch.setattr(sys, "argv", [
+        "mail-send", "--agent", "kimi", "--project", str(tmp_path),
+        "--to", "@fyc-mac", "--subject", "s", "--body", "b",
+        "--target", "demo/w1:p1",
+    ])
+    monkeypatch.setattr(
+        module, "load_identity",
+        lambda *_args: (
+            {"project_key": str(tmp_path), "name": "me",
+             "registration_token": "t"},
+            "http://hub", "tok",
+        ),
+    )
+    with pytest.raises(SystemExit, match="至少需包含一个 Agent"):
         module.main()
 
 
