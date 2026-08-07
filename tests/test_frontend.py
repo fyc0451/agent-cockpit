@@ -1578,3 +1578,15 @@ def test_files_page_media_preview_and_dir_download():
     assert "fileDownloadDir" in js
     assert "/api/files/download-dir?path=" in js
     assert 'data-action="fileDownloadDir"' in js
+
+
+def test_sessions_merged_into_workspace_tab():
+    js = _inline_js()
+    # 会话不再是独立导航页,而是工作台内的 tab
+    assert 'data-view="sessions"' not in HTML
+    assert 'id="view-sessions"' not in HTML
+    assert 'id="attSessionsBtn"' in HTML
+    assert 'id="sessionsPane"' in HTML
+    assert "function attShowSessions()" in js
+    assert "function attShowTasks()" in js
+    assert "function attRefresh()" in js

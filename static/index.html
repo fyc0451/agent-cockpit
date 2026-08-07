@@ -260,6 +260,7 @@ header .spacer{flex:1}
 .attention-view{overflow:hidden}
 .attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap}
 .attention-toolbar .spacer{flex:1}
+.attention-toolbar .team-mode-tabs{display:flex}
 .attention-list{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
 .task-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px;align-items:start}
 .task-session{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;overflow:hidden}
@@ -496,10 +497,9 @@ header .spacer{flex:1}
   <aside class="side" id="side">
     <div class="side-brand"><span class="side-logo">⚙️</span><div class="side-title"><b>Agent Cockpit</b><small>AI Agent 驾驶舱</small></div></div>
     <nav id="nav">
-      <button data-view="attention" class="active" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="工作台:agent 状态速览 + 任务、进度和阻塞项"><span class="nav-ic">◔</span>工作台</button>
+      <button data-view="attention" class="active" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="工作台:agent 状态速览 + 任务、进度、阻塞项和会话管理"><span class="nav-ic">◔</span>工作台</button>
       <button data-view="term" data-i18n="nav.term" data-i18n-title="nav.term.t" title="开发:接管任意 pane 的真终端 TUI,直接敲命令"><span class="nav-ic">▸</span>开发</button>
       <button data-view="herdrflow" data-i18n="nav.herdrflow" data-i18n-title="nav.herdrflow.t" title="手机:可滚屏/复制的 pane 输出 + 快速发指令"><span class="nav-ic">≡</span>手机</button>
-      <button data-view="sessions" data-i18n="nav.sessions" data-i18n-title="nav.sessions.t" title="herdr 会话管理:建工作区、重启、停止"><span class="nav-ic">◫</span>会话</button>
       <button data-view="msgs" data-i18n="nav.msgs" data-i18n-title="nav.msgs.t" title="agent 之间的消息(需安装 Agent Mail)"><span class="nav-ic">✉</span>消息</button>
       <button data-view="team" data-i18n-title="nav.team.t" title="团队项目、成员、Session 绑定与管理员操作"><span class="nav-ic">◍</span><span data-i18n="nav.team">团队</span><span class="nav-badge" id="teamNavBadge" style="display:none">0</span></button>
       <button data-view="files" data-i18n="nav.files" data-i18n-title="nav.files.t" title="浏览/编辑/下载项目文件,也可以从这里建工作区"><span class="nav-ic">⬒</span>文件</button>
@@ -534,19 +534,29 @@ header .spacer{flex:1}
     </div>
   </section>
 
-  <!-- 工作台: agent 速览 + 任务 -->
+  <!-- 工作台: agent 速览 + 任务看板/会话管理 -->
   <section id="view-attention" class="view attention-view active">
     <div class="agent-strip" id="agentStrip"></div>
     <div class="attention-toolbar">
-      <b data-i18n="attention.title">任务看板</b>
+      <div class="team-mode-tabs">
+        <button class="sm active" id="attTasksBtn" onclick="attShowTasks()" data-i18n="attention.title">任务看板</button>
+        <button class="sm" id="attSessionsBtn" onclick="attShowSessions()" data-i18n="nav.sessions">会话</button>
+      </div>
       <span class="muted" id="attentionInfo" style="font-size:11px"></span>
       <span class="spacer"></span>
       <span class="muted" id="pushStatus" style="font-size:11px"></span>
       <button class="sm" id="pushBtn" onclick="setupPush()" data-i18n="attention.push">开启浏览器通知</button>
       <button class="sm" id="taskReportBtn" onclick="refreshTaskReports()" data-i18n="attention.report">请求上报</button>
-      <button class="icon" onclick="loadAttention()" title="刷新" data-i18n-title="common.refresh">↻</button>
+      <button class="icon" onclick="attRefresh()" title="刷新" data-i18n-title="common.refresh">↻</button>
     </div>
     <div class="attention-list" id="attentionList"><div class="empty" data-i18n="common.loading">加载中…</div></div>
+    <div id="sessionsPane" style="display:none;flex:1;min-height:0;flex-direction:column">
+      <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);flex-wrap:wrap">
+        <button class="primary sm" onclick="showSetupModal()" data-i18n="sessions.setup">+ 一键工作区</button>
+        <span class="muted" style="font-size:11px;margin-left:auto" data-i18n="sessions.hint">一键工作区：split pane + 启动 agent；Agent Mail 必需</span>
+      </div>
+      <div id="sessionsList" style="flex:1;overflow:auto;padding:10px"></div>
+    </div>
   </section>
 
   <!-- 消息 -->
@@ -673,16 +683,6 @@ header .spacer{flex:1}
   </section>
 
   <!-- 会话管理(session + agent pane,可重启) -->
-  <section id="view-sessions" class="view" style="flex-direction:column">
-    <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap">
-      <h3 style="font-size:14px">herdr sessions & agents</h3>
-      <button class="primary sm" onclick="showSetupModal()" data-i18n="sessions.setup">+ 一键工作区</button>
-      <button class="sm" onclick="loadSessionsView()" data-i18n="common.refresh">↻ 刷新</button>
-      <span class="muted" style="font-size:11px;margin-left:auto" data-i18n="sessions.hint">一键工作区：split pane + 启动 agent；Agent Mail 必需</span>
-    </div>
-    <div id="sessionsList" style="flex:1;overflow:auto;padding:10px"></div>
-  </section>
-
   <!-- 设置 -->
   <section id="view-settings" class="view" style="flex-direction:column">
     <div style="flex:1;overflow:auto;padding:14px 20px;max-width:860px;width:100%">
@@ -1650,7 +1650,6 @@ function showView(v){
   if(v==='team')teamLoad();
   if(v==='files')loadFileTree();
   if(v==='term')termEnsure();
-  if(v==='sessions')loadSessionsView();
   if(v==='settings'){applyLang();renderSettings()}
   if(v==='herdrflow'){
     // 从终端视图切过来(点导航「流」)时,同样默认选中当前终端对应的 session 并定位 pane
@@ -3162,6 +3161,24 @@ function termMount(id){
 }
 
 // ============ 会话管理(session + agent 重启) ============
+let ATT_MODE='tasks';
+function attShowTasks(){
+  ATT_MODE='tasks';
+  document.getElementById('attTasksBtn').classList.add('active');
+  document.getElementById('attSessionsBtn').classList.remove('active');
+  document.getElementById('attentionList').style.display='';
+  document.getElementById('sessionsPane').style.display='none';
+  loadAttention();
+}
+function attShowSessions(){
+  ATT_MODE='sessions';
+  document.getElementById('attSessionsBtn').classList.add('active');
+  document.getElementById('attTasksBtn').classList.remove('active');
+  document.getElementById('attentionList').style.display='none';
+  document.getElementById('sessionsPane').style.display='flex';
+  loadSessionsView();
+}
+function attRefresh(){ATT_MODE==='sessions'?loadSessionsView():loadAttention()}
 async function loadSessionsView(){
   const el=document.getElementById('sessionsList');
   el.innerHTML='<div class="muted">加载中…</div>';
@@ -3943,7 +3960,7 @@ function bindDelegation(){
     else if(action==='teamInboxReadAll')teamMarkInboxRead(TEAM.inbox.filter(item=>!item.read_ts).map(item=>Number(item.id)).filter(id=>Number.isInteger(id)&&id>0));
     else if(action==='teamInboxRouteNow')teamRunInboxRoute();
     else if(action==='teamGotoSettings')showView('settings');
-    else if(action==='teamGotoSessions')showView('sessions');
+    else if(action==='teamGotoSessions'){showView('attention');attShowSessions()}
     else if(action==='teamGotoTerm'){document.querySelector('#nav button[data-view="term"]')?.click()}
   });
   on('#collabList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
