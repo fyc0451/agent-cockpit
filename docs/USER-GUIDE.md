@@ -1,6 +1,6 @@
 # Agent Cockpit 用户手册
 
-> 版本：2026-08-07（Cockpit origin/main e3a4213；Team Hub 97a20eb）。
+> 版本：2026-08-07（适配 Cockpit origin/main ≥ 6daf313；Team Hub ≥ f74fb58）。
 > 第 1–4 章人人需要；第 5 章团队模式；第 6–8 章移动端、排障与附录。
 
 ## 阅读指引
@@ -31,15 +31,15 @@ Agent Cockpit 是"跑在浏览器里的编码 agent 驾驶舱"：一个浏览器
 |---|---|---|
 | Cockpit Web | 看板/终端/消息/文件/设置 | `http://<主机>:8790` |
 | Herdr | 终端复用器，session/pane 承载各 agent CLI | 本机 `herdr` |
-| 本地 Agent Mail Hub | agent 间消息（本机），**独立部署、必需** | 本机 8765 |
+| 本地 Agent Mail 通道 | agent 间消息，**独立部署、必需** | 默认连接本机 Hub 8765，也可连接受信任的共享 Hub |
 | Team Hub（远程） | 团队消息/成员/群组 | 团队服务器 8765 |
 | human_auth（远程） | 团队 Human 登录/JWT 签发 | 团队服务器 8766 |
 
 **关键边界**：
 
 - 每个 Cockpit 只管理**本机**的 Herdr/session/终端；跨机只有 Team 消息通信，**不远控其他机器**。
-- **本地 Agent Mail 与远程 Team Hub 是两条独立链路**：`client.env` 只控制本地 Agent Mail；Team Hub / Human issuer 在设置页分别配置。本地 agent 永远保留本机 Hub；agent 回复人类经本机 Cockpit 的回环 reply 代理 + Session 绑定 capability 到远程 Team Hub。
-- Agent Mail Hub 是**前置依赖**：创建工作区、添加 Agent 都要求 Hub 在线；Hub 挂掉时已有消息只读、禁止新增。
+- **本地 Agent Mail 与远程 Team Hub 是两条独立链路**：`client.env` 只控制本地 Agent Mail；Team Hub / Human issuer 在设置页分别配置。这里的“本地”指本机 agent 使用的消息通道，Hub 进程可在本机，也可部署为受信任的共享服务；agent 回复人类则经本机 Cockpit 的回环 reply 代理 + Session 绑定 capability 到远程 Team Hub。
+- Agent Mail Hub 是**前置依赖**：创建工作区、添加 Agent 都要求 Hub 在线且可写；Hub 挂掉时禁止新增，已有本地消息在数据库仍可读时可继续只读查看。
 
 **身份模型**（先理解这几个名词，后文不再解释）：
 
@@ -47,7 +47,7 @@ Agent Cockpit 是"跑在浏览器里的编码 agent 驾驶舱"：一个浏览器
 |---|---|---|
 | herdr session | 一组终端的容器（= 一个工作区） | `hr-ready` |
 | pane | session 内的一个终端窗口，跑一个 agent CLI | codex 的 pane |
-| 项目（project） | 一个本地目录（git 仓库根），agent 邮箱按项目隔离 | `/home/fyc/hr-ready` |
+| 项目（project） | 一个本地目录（通常是 git 仓库根），agent 邮箱按项目隔离 | `/home/fyc/hr-ready` |
 | registry 身份文件 | `~/.agent-mail/registry/<项目slug>/<类型>--<实例>.json`，**文件名只是本地 selector** | `kimi--main.json` |
 | **Agent Mail 花名** | 注册时 Hub 返回、存在身份文件 `name` 字段的收件人名 | `RedHawk`、`codex-main` |
 | Human / Human handle | 团队里**人类**的账号与 `@` 名 | `付彦超` / `@fyc-mac` |
@@ -62,7 +62,7 @@ Agent Cockpit 是"跑在浏览器里的编码 agent 驾驶舱"：一个浏览器
 
 - Linux（含 WSL）或 macOS；Python ≥ 3.12；Git；curl
 - 各 agent CLI（codex / kimi / claude / qoder / opencode / grok 等）按需在 PATH；Herdr 可用
-- **Agent Mail Hub**（`mcp_agent_mail`，`https://github.com/fyc0451/mcp_agent_mail`）——独立项目，需先按它自己的文档在本机拉起并监听 **8765**。Cockpit 的安装脚本**不包含** Hub；没有 Hub 则工作区创建、agent 消息全部不可用。
+- **Agent Mail Hub**（`mcp_agent_mail`，`https://github.com/fyc0451/mcp_agent_mail`）——独立项目，需先按它自己的文档部署一个可访问实例；默认是在本机监听 **8765**，也可使用受信任的共享 Hub。Cockpit 的安装脚本**不包含** Hub；没有可用 Hub 则无法创建工作区、添加 Agent 或收发 agent 消息。
 
 ### 2.2 安装 Cockpit
 
@@ -83,7 +83,7 @@ Python ≥3.12 检查 → 创建 `.venv` 装依赖 → 安装 Agent Mail 工具�
 
 ### 2.3 配置文件 `.env`
 
-`~/agent-cockpit/.env`（安装时自动生成）：
+部署目录中的 `.env`（默认 `~/agent-cockpit/.env`，安装时自动生成）：
 
 ```bash
 COCKPIT_HOST=127.0.0.1      # 默认仅本机访问（推荐）
@@ -114,9 +114,9 @@ bash upgrade.sh     # 一键升级：拉代码 + 装依赖 + 重启服务（Linu
 
 | 操作 | Linux（systemd 用户服务） | macOS |
 |---|---|---|
-| 重启 | `systemctl --user restart agent-cockpit` | 重启对应 launchd 代理（或重跑 `bash launchd.sh install`） |
-| 查看状态 | `systemctl --user status agent-cockpit` | `launchctl print gui/$(id -u)/ai.agent-cockpit` |
-| 日志 | `journalctl --user -u agent-cockpit -f` | launchd 日志或部署目录 `server.log` |
+| 重启 | `systemctl --user restart agent-cockpit` | `bash launchd.sh restart` |
+| 查看状态 | `systemctl --user status agent-cockpit` | `launchctl print gui/$(id -u)/io.github.fyc0451.agent-cockpit` |
+| 日志 | `journalctl --user -u agent-cockpit -f` | `tail -f agent-cockpit.stdout.log agent-cockpit.stderr.log` |
 
 ### 2.6 验证安装成功
 
@@ -169,7 +169,7 @@ cat ~/.agent-mail/registry/<项目slug>/kimi--main.json   # name 字段即花名
 
 ### 4.2 启动工作区
 
-终端页 →「＋ 添加 Agent」→ 选 session（可新建）/agent 类型/工作目录/任务/布局 → 自动建 pane、启动、注册邮箱身份、通知协作者；失败自动回滚。同类型可开多实例。Sessions 页可整体管理 session（创建/重启/停止）。
+终端页 →「＋ 添加 Agent」→ 选 session（可新建）/agent 类型/工作目录/任务/布局 → 自动建 pane、启动、注册邮箱身份、通知协作者。工作区准备或启动失败会回滚；若仅身份注册/通知失败，Agent 会保留运行并在结果中显示警告，便于修好 Hub 后补注册。同类型可开多实例。Sessions 页可整体管理 session（创建/重启/停止）。
 
 ### 4.3 终端
 
@@ -203,7 +203,7 @@ mail-recv ... --fail <id> --claim-token <tok> --reason "..."
 要点：
 
 - `--to` 支持 agent 类型别名（如 `qodercn` 自动解析为本项目唯一注册花名；歧义报错并列候选）
-- agent 之间互发的收件人只能是**花名**；回复人类要用 `@<Human handle>`（团队模式）
+- Hub 最终接收的 agent 收件人是**花名**；命令行也可输入能唯一解析的 agent 类型别名。回复人类要用 `@<Human handle>`（团队模式）
 - 协作约定：里程碑查未读；先 claim 后 complete/fail；停止/转向先存 checkpoint 再停手
 
 **最小示例**（同一项目两个 agent 互发消息）：
@@ -251,7 +251,7 @@ Human 登录态 ──▶ human_auth issuer (8766)
 ```
 
 - 本地 agent 永远保留本机 Hub；**Team 通信单独走远程 Team Hub**（设置页配置）。
-- TeamProject 不绑定本机真实目录；远程消息只读展示，绝不触发本地 shell/pane/worktree/任务。
+- TeamProject 不绑定本机真实目录；远程消息不会创建 shell、pane、worktree 或任务。属于已绑定项目的 Human Inbox 消息会被标记为“不可信远程文本”，投递到现有 Session lead 的 pane 供其处理。
 
 ### 5.2 角色
 
@@ -339,7 +339,7 @@ mail-send --agent kimi --instance main --project /path/to/project \
 |---|---|
 | 浏览器打不开 8790 | 服务未启动（2.5 状态命令）；端口被占/防火墙；远程访问时确认 `COCKPIT_HOST` 与 token |
 | `am-register` 报"缺少 token" | 未配本机 `~/.agent-mail/client.env` |
-| 创建工作区报缺 Agent Mail | 本机 Hub 未部署/未监听 8765；doctor.sh 会指明缺数据库还是缺 client.env |
+| 创建工作区报缺 Agent Mail | `client.env` 指向的 Hub 不可达或不可写；使用默认本机部署时确认 8765 正在监听，`doctor.sh` 会给出具体原因 |
 | 发信被拒"agent retired" | 闲置自动退休；重新运行 `am-register`/`am-init-project` 会自动恢复激活 |
 | mail 工具返回 400 | 若日志明确是 `/mcp/` 路径：旧工具硬编码旧端点，升级 agent-mail-tools |
 | 登录团队页面被拒 | 账号 pending，需管理员 activate |
@@ -350,7 +350,7 @@ mail-send --agent kimi --instance main --project /path/to/project \
 | 终端右侧黑条/错位、文字太暗 | 均已修复（自适应尺寸 + 暗色对比度提升），普通刷新即可 |
 | 并发同名注册偶发失败 | 既有基线竞态，重试即可 |
 
-看日志定位：Linux `journalctl --user -u agent-cockpit -f`；部署目录 `server.log`。
+看日志定位：Linux 用 `journalctl --user -u agent-cockpit -f`；macOS 看部署目录中的 `agent-cockpit.stdout.log` 和 `agent-cockpit.stderr.log`。
 
 ---
 
@@ -379,7 +379,7 @@ mail-send --agent kimi --instance main --project /path/to/project \
 
 - `COCKPIT_TOKEN`、Hub token、registration_token、reply capability token 都是凭据，不要贴进消息/日志/截图
 - 敏感目录（~/.ssh、~/.agent-mail 等）不可加入文件白名单（系统强制）
-- 远程 Hub 消息只读展示，永远不会自动执行本地动作
+- 远程消息仅作为带安全标记的不可信文本投递给已绑定 lead；不会直接执行正文中的 shell、部署、删除、权限或凭据操作
 
 ### 8.4 相关文档
 
