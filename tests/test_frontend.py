@@ -1594,6 +1594,24 @@ def test_terminal_light_mode_rewrites_basic_ansi_backgrounds():
     assert "p==='38'&&n>=0&&n<16" not in rewrite
 
 
+def test_terminal_light_mode_does_not_invert_existing_light_theme_twice():
+    # SCC 的 Codex 会直接输出浅色背景 48;2;240;240;241。浅色适配只能把
+    # 深背景转浅，不能把已经正确的浅背景再次反相成黑条；前景方向相反。
+    js = _inline_js()
+    adapt = js.split("function _adaptLightColor(kind,r,g,b){", 1)[1].split(
+        "const ANSI16_RGB", 1
+    )[0]
+    rewrite = js.split("function _lightRewriteSgr(full,params){", 1)[1].split(
+        "function lightTermAdapt", 1
+    )[0]
+    assert "kind==='48'&&l<0.5" in adapt
+    assert "kind==='38'&&l>0.5" in adapt
+    assert "return[r,g,b]" in adapt
+    assert "_adaptLightColor('48',...rgb)" in rewrite
+    assert "_adaptLightColor(p,...rgb)" in rewrite
+    assert "_adaptLightColor(p,+parts[j]||0" in rewrite
+
+
 def test_settings_hub_error_shows_actionable_fix():
     # 新装机最常见失败(token 未配置)必须给可操作的恢复指引,不只报错
     js = _inline_js()
