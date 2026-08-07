@@ -118,6 +118,7 @@ ERROR_MESSAGES = {
     "restart_failed": "Cockpit 重启失败",
     "health_failed": "health 检查失败",
     "rollback_failed": "回滚失败",
+    "stop_failed": "无法停止 Cockpit，已中止恢复（fail closed）",
     "stale_worker": "升级进程已异常退出，可重试",
     "spawn_failed": "无法启动升级执行器",
     "internal_error": "升级内部错误",
@@ -181,6 +182,9 @@ def _default_state() -> dict[str, Any]:
         "log_path": None,
         "backup_id": None,
         "install_dir": None,
+        "code_mutated": False,
+        "rollback_only": False,
+        "rollback_requested": False,
         "diagnostics": {},
     }
 
@@ -311,15 +315,32 @@ def _worker_alive(pid: Any, started_at: Any = None, boot_id: Any = None) -> bool
     return True
 
 
+def _needs_incomplete_rollback(st: dict[str, Any]) -> bool:
+    """checkout 之后的半成品必须走 rollback-only 恢复。"""
+    if st.get("code_mutated") or st.get("backup_id"):
+        phase = str(st.get("phase") or "")
+        if phase in {
+            "fetch_checkout", "venv_staging", "venv_switch", "restart_cockpit",
+            "health", "rollback", "fetch",
+        }:
+            return True
+        if st.get("state") in {
+            "fetching", "installing", "switching", "restarting", "verifying",
+            "rolling_back",
+        }:
+            return True
+    return bool(st.get("code_mutated"))
+
+
 def reconcile_stale_state(state: dict[str, Any] | None = None) -> dict[str, Any]:
-    """将死 worker / 超时 handshake 的 active 状态收敛为 failed(stale_worker)。"""
+    """死 worker / 超时 handshake：failed 或触发 rollback-only。"""
     st = dict(state or read_state())
     if st.get("state") not in ACTIVE_STATES:
         return st
     pid = st.get("worker_pid")
     created = st.get("created_at")
-    # queued 且尚无 pid：宽限期内不标 stale
-    if pid is None and st.get("state") == "queued":
+    # pid=0 视为“未知/待 worker 回写”，宽限期内不判死
+    if (pid is None or pid == 0) and st.get("state") == "queued":
         try:
             created_ts = datetime.fromisoformat(
                 str(created).replace("Z", "+00:00")
@@ -334,13 +355,64 @@ def reconcile_stale_state(state: dict[str, Any] | None = None) -> dict[str, Any]
         st["finished_at"] = _utc_iso()
         write_state(st)
         return st
-    if not _worker_alive(pid, st.get("worker_started_at"), st.get("worker_start_boot_id")):
-        st["state"] = "failed"
-        st["error_code"] = "stale_worker"
-        st["phase"] = "worker_dead"
-        st["finished_at"] = _utc_iso()
+    if pid in (None, 0):
+        # 非 queued 但尚未有合法 pid：宽限
+        try:
+            created_ts = datetime.fromisoformat(
+                str(created).replace("Z", "+00:00")
+            ).timestamp()
+        except (TypeError, ValueError):
+            created_ts = 0.0
+        if time.time() - created_ts < QUEUED_HANDSHAKE_GRACE_S:
+            return st
+    alive = _worker_alive(pid, st.get("worker_started_at"), st.get("worker_start_boot_id"))
+    if alive:
+        return st
+    # worker 已死
+    if _needs_incomplete_rollback(st) and not st.get("rollback_requested"):
+        st["rollback_requested"] = True
+        st["phase"] = "stale_needs_rollback"
         write_state(st)
+        try:
+            spawn_rollback_worker(st)
+        except Exception as exc:
+            logger.exception("spawn rollback worker failed: %s", type(exc).__name__)
+            st["state"] = "failed"
+            st["error_code"] = "rollback_failed"
+            st["phase"] = "stale_spawn_rollback_failed"
+            st["finished_at"] = _utc_iso()
+            write_state(st)
+        return read_state()
+    st["state"] = "failed"
+    st["error_code"] = "stale_worker"
+    st["phase"] = "worker_dead"
+    st["finished_at"] = _utc_iso()
+    write_state(st)
     return st
+
+
+def spawn_rollback_worker(state: dict[str, Any]) -> int:
+    """半成品自动恢复：独立 worker 仅执行 rollback。"""
+    job_id = str(state.get("job_id") or "")
+    install_dir = Path(str(state.get("install_dir") or INSTALL_DIR))
+    base_log = state.get("log_path")
+    if base_log:
+        log_path = Path(str(base_log)).with_name(
+            Path(str(base_log)).stem + "-rollback.log"
+        )
+    else:
+        log_path = LOG_DIR / f"{job_id}-rollback.log"
+    # 持久化 rollback 标志，worker 即使无 --rollback-only 也能识别
+    latest = read_state()
+    if latest.get("job_id") == job_id:
+        latest["rollback_requested"] = True
+        latest["rollback_only"] = True
+        latest["phase"] = latest.get("phase") or "stale_needs_rollback"
+        latest["log_path"] = str(log_path)
+        write_state(latest)
+    if "spawn_rollback_worker" in _hooks:
+        return int(_hooks["spawn_rollback_worker"](job_id, install_dir, log_path))
+    return spawn_worker(job_id, install_dir, log_path, rollback_only=True)
 
 
 # ── 目标 / Release ──────────────────────────────────────────────
@@ -468,8 +540,30 @@ def _git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.Comple
     )
 
 
+def _unit_file_killmode_process() -> bool:
+    """静态核验 unit 是否 KillMode=process（bus 不可达时的 setsid 安全前提）。"""
+    candidates = [
+        INSTALL_DIR / "agent-cockpit.service",
+        Path.home() / ".config" / "systemd" / "user" / "agent-cockpit.service",
+    ]
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.strip().lower().replace(" ", "") == "killmode=process":
+                return True
+    return False
+
+
 def preflight_supervisor() -> None:
-    """改代码前验证控制通道；失败 fail closed。"""
+    """改代码前验证控制通道；失败 fail closed。
+
+    Linux：优先 user systemd bus；bus 不可达时仅当 unit 静态声明 KillMode=process
+    才允许 setsid 独立 session 回退（精确主 PID 杀进程不级联）。
+    macOS：必须能与 launchctl 域通信，且存在主服务 plist/脚本。
+    """
     if "preflight_supervisor" in _hooks:
         ok = _hooks["preflight_supervisor"]()
         if not ok:
@@ -478,9 +572,26 @@ def preflight_supervisor() -> None:
     if sys.platform == "darwin":
         if not shutil.which("launchctl"):
             raise ValueError("precheck_supervisor")
+        domain = f"gui/{os.getuid()}"
+        r = subprocess.run(
+            ["launchctl", "print", domain],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if r.returncode != 0:
+            raise ValueError("precheck_supervisor")
+        # 主服务模板与 restart 入口必须存在
+        if not (INSTALL_DIR / "launchd.sh").is_file():
+            raise ValueError("precheck_supervisor")
+        if not (INSTALL_DIR / "agent-cockpit.plist").is_file():
+            raise ValueError("precheck_supervisor")
         return
-    # Linux: systemctl --user 必须可用
+    # Linux: systemctl 优先；bus 不可达时 KillMode=process 静态回退
     if not shutil.which("systemctl"):
+        if _unit_file_killmode_process():
+            return
         raise ValueError("precheck_supervisor")
     r = subprocess.run(
         ["systemctl", "--user", "is-system-running"],
@@ -489,11 +600,13 @@ def preflight_supervisor() -> None:
         check=False,
         timeout=5,
     )
-    # bus 不可达时 returncode != 0 且 stderr 含 Failed to connect
     err = (r.stderr or "") + (r.stdout or "")
-    if r.returncode != 0 and (
+    bus_down = r.returncode != 0 and (
         "Failed to connect" in err or "No such file" in err or "not been booted" in err
-    ):
+    )
+    if bus_down:
+        if _unit_file_killmode_process():
+            return
         raise ValueError("precheck_supervisor")
 
 
@@ -679,7 +792,7 @@ def install_deps_staging(install_dir: Path) -> Path:
 
 
 def atomic_switch_venv(install_dir: Path) -> None:
-    """live <- staging；旧 live 移到 previous。"""
+    """live <- staging；旧 live 移到 previous。第二步 rename 失败时尽量把 prev 迁回 live。"""
     if "atomic_switch_venv" in _hooks:
         _hooks["atomic_switch_venv"](install_dir)
         return
@@ -690,25 +803,52 @@ def atomic_switch_venv(install_dir: Path) -> None:
         raise ValueError("switch_failed")
     if prev.exists():
         shutil.rmtree(prev, ignore_errors=True)
-    if live.exists():
-        os.rename(live, prev)
-    os.rename(staging, live)
+    moved_live = False
+    try:
+        if live.exists():
+            os.rename(live, prev)
+            moved_live = True
+        os.rename(staging, live)
+    except OSError:
+        if moved_live and prev.exists() and not live.exists():
+            try:
+                os.rename(prev, live)
+            except OSError:
+                pass
+        raise ValueError("switch_failed") from None
 
 
 def stop_cockpit_for_restore() -> None:
+    """恢复数据前必须确认 Cockpit 已停；失败 fail closed。"""
     if "stop_cockpit" in _hooks:
-        _hooks["stop_cockpit"]()
+        ok = _hooks["stop_cockpit"]()
+        if ok is False:
+            raise ValueError("stop_failed")
         return
     if sys.platform == "darwin":
-        script = INSTALL_DIR / "launchd.sh"
-        subprocess.run([str(script), "stop"], capture_output=True, check=False)
+        # 不依赖 launchd.sh stop（脚本无此 action）；精确 bootout 主 agent 标签
+        label = "io.github.fyc0451.agent-cockpit"
+        domain = f"gui/{os.getuid()}"
+        r = subprocess.run(
+            ["launchctl", "bootout", f"{domain}/{label}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        err = (r.stderr or "") + (r.stdout or "")
+        if r.returncode != 0 and "No such process" not in err and "Could not find" not in err:
+            raise ValueError("stop_failed")
         return
-    subprocess.run(
+    r = subprocess.run(
         ["systemctl", "--user", "stop", "agent-cockpit.service"],
         capture_output=True,
+        text=True,
         check=False,
         timeout=30,
     )
+    if r.returncode != 0:
+        raise ValueError("stop_failed")
 
 
 def restart_cockpit_only() -> None:
@@ -881,14 +1021,7 @@ def start_upgrade(target: str, *, install_dir: Path | None = None) -> dict[str, 
 
     try:
         pid = spawn_worker(job_id, root, log_path)
-        latest = read_state()
-        if latest.get("job_id") == job_id:
-            latest["worker_pid"] = pid
-            if latest.get("state") == "queued":
-                latest["phase"] = "worker_started"
-            # identity 由 worker 自己回写更准；此处先填 pid
-            write_state(latest)
-            state = latest
+        state = merge_spawn_identity(job_id, pid)
     except Exception as exc:
         logger.exception("spawn worker failed")
         state = read_state()
@@ -908,12 +1041,134 @@ def start_upgrade(target: str, *, install_dir: Path | None = None) -> dict[str, 
     }
 
 
-def spawn_worker(job_id: str, install_dir: Path, log_path: Path) -> int:
+def merge_spawn_identity(job_id: str, spawn_pid: int | None) -> dict[str, Any]:
+    """worker 是身份单一写者优先；API 不得用 pid=0 覆盖已有非空身份/新阶段。"""
+    latest = read_state()
+    if latest.get("job_id") != job_id:
+        return latest
+    existing = latest.get("worker_pid")
+    if isinstance(existing, int) and existing > 0:
+        # worker 已写 identity（可能已进入 prechecking 等）
+        return latest
+    if spawn_pid is not None and int(spawn_pid) > 0:
+        latest["worker_pid"] = int(spawn_pid)
+        if latest.get("state") == "queued":
+            latest["phase"] = "worker_started"
+        write_state(latest)
+    # spawn_pid<=0：保留 queued，等待 worker 回写；勿写 0
+    return latest
+
+
+def _spawn_darwin_launchd_oneshot(
+    job_id: str,
+    install_dir: Path,
+    log_path: Path,
+    extra: list[str],
+) -> int | None:
+    """macOS：临时 oneshot LaunchAgent，避免主 LaunchAgent bootout 杀 worker。"""
+    if not shutil.which("launchctl"):
+        return None
+    label = f"io.github.fyc0451.agent-cockpit.upgrade.{job_id}"
+    domain = f"gui/{os.getuid()}"
+    service = f"{domain}/{label}"
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    try:
+        plist_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    plist_path = plist_dir / f"{label}.plist"
+    # 转义 XML
+    def _xml(s: str) -> str:
+        return (
+            s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+    args = [
+        sys.executable,
+        str(WORKER_SCRIPT),
+        "--job-id",
+        job_id,
+        "--install-dir",
+        str(install_dir),
+        *extra,
+    ]
+    args_xml = "\n".join(f"    <string>{_xml(a)}</string>" for a in args)
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{_xml(label)}</string>
+  <key>ProgramArguments</key>
+  <array>
+{args_xml}
+  </array>
+  <key>WorkingDirectory</key>
+  <string>{_xml(str(install_dir))}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>{_xml(str(log_path))}</string>
+  <key>StandardErrorPath</key>
+  <string>{_xml(str(log_path))}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>
+"""
+    try:
+        plist_path.write_text(body, encoding="utf-8")
+        os.chmod(plist_path, 0o600)
+        subprocess.run(
+            ["launchctl", "bootout", service],
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        r = subprocess.run(
+            ["launchctl", "bootstrap", domain, str(plist_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        if r.returncode != 0:
+            logger.info("launchctl bootstrap upgrade worker failed rc=%s", r.returncode)
+            return None
+        # 未知 pid：禁止 API 覆盖
+        return -1
+    except Exception as exc:
+        logger.info("darwin oneshot spawn failed type=%s", type(exc).__name__)
+        return None
+
+
+def spawn_worker(
+    job_id: str,
+    install_dir: Path,
+    log_path: Path,
+    *,
+    rollback_only: bool = False,
+) -> int:
     if "spawn_worker" in _hooks:
         return int(_hooks["spawn_worker"](job_id, install_dir, log_path))
     _ensure_dirs()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    # Linux：优先 systemd-run --user --scope 独立 cgroup（bus 可用时）
+    extra = ["--rollback-only"] if rollback_only else []
+    # macOS：优先独立 oneshot LaunchAgent（主服务 restart/bootout 不会杀它）
+    if sys.platform == "darwin":
+        pid = _spawn_darwin_launchd_oneshot(job_id, install_dir, log_path, extra)
+        if pid is not None:
+            return int(pid)
+        logger.info("darwin oneshot unavailable; fallback start_new_session")
+    # Linux：优先 systemd-run --user 独立 unit（KillMode=process）
     if sys.platform != "darwin" and shutil.which("systemd-run"):
         probe = subprocess.run(
             ["systemctl", "--user", "is-system-running"],
@@ -938,13 +1193,14 @@ def spawn_worker(job_id: str, install_dir: Path, log_path: Path) -> int:
                 job_id,
                 "--install-dir",
                 str(install_dir),
+                *extra,
             ]
             r = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if r.returncode == 0:
-                # 无法直接拿 pid；worker 会回写
-                return 0
+                # 返回 -1 表示“pid 未知，禁止 API 覆盖 worker 身份”
+                return -1
             logger.info("systemd-run failed rc=%s", r.returncode)
-    # 回退：setsid 独立 session（依赖 KillMode=process 的 Cockpit unit）
+    # 回退：setsid 独立 session（Cockpit unit 须 KillMode=process）
     log_fh = open(log_path, "a", encoding="utf-8")
     try:
         proc = subprocess.Popen(
@@ -955,6 +1211,7 @@ def spawn_worker(job_id: str, install_dir: Path, log_path: Path) -> int:
                 job_id,
                 "--install-dir",
                 str(install_dir),
+                *extra,
             ],
             cwd=str(install_dir),
             stdin=subprocess.DEVNULL,
@@ -1022,11 +1279,85 @@ def _fail(state: dict[str, Any], code: str, phase: str, log_detail: str) -> int:
     return 1
 
 
+def _verify_rolled_back(root: Path, from_sha: str) -> None:
+    """回滚后硬核验：HEAD 与 venv live 存在。"""
+    if "verify_rolled_back" in _hooks:
+        if not _hooks["verify_rolled_back"](root, from_sha):
+            raise ValueError("rollback_failed")
+        return
+    head = _git(["rev-parse", "HEAD"], root, check=False).stdout.strip()
+    if head != from_sha:
+        raise ValueError("rollback_failed")
+    live = root / VENV_LIVE
+    if not live.exists():
+        raise ValueError("rollback_failed")
+
+
+def perform_rollback(
+    state: dict[str, Any],
+    root: Path,
+    *,
+    primary_code: str,
+) -> int:
+    """统一回滚：stop fail-closed → 代码/venv/数据 → 校验 HEAD → restart → health。"""
+    log_path = state.get("log_path")
+    from_sha = str(state.get("from_sha") or "")
+    backup_id = state.get("backup_id")
+    _transition(state, "rolling_back", "rollback", error_code=primary_code)
+    try:
+        stop_cockpit_for_restore()
+    except ValueError as stop_exc:
+        code = str(stop_exc) if str(stop_exc) in ERROR_MESSAGES else "rollback_failed"
+        return _fail(state, code if code == "stop_failed" else "rollback_failed",
+                     "stop_failed", "stop cockpit failed")
+    try:
+        restore_code(root, from_sha)
+    except Exception as rex:
+        _append_job_log(log_path, f"restore_code {type(rex).__name__}")
+        return _fail(state, "rollback_failed", "restore_code_failed", type(rex).__name__)
+    try:
+        restore_venv(root)
+    except Exception as rex:
+        _append_job_log(log_path, f"restore_venv {type(rex).__name__}")
+        return _fail(state, "rollback_failed", "restore_venv_failed", type(rex).__name__)
+    if backup_id:
+        try:
+            restore_data_files(str(backup_id))
+        except Exception as rex:
+            _append_job_log(log_path, f"restore_data {type(rex).__name__}")
+            return _fail(state, "rollback_failed", "restore_data_failed", type(rex).__name__)
+    try:
+        _verify_rolled_back(root, from_sha)
+    except ValueError:
+        return _fail(state, "rollback_failed", "verify_head_failed", "head mismatch")
+    try:
+        restart_cockpit_only()
+    except ValueError:
+        return _fail(state, "rollback_failed", "restart_after_rollback", "restart failed")
+    if not health_check(timeout_s=45.0):
+        return _fail(state, "rollback_failed", "rollback_health_failed", "health red")
+    state["state"] = "rolled_back"
+    state["error_code"] = None
+    state["phase"] = "rollback_done"
+    state["code_mutated"] = False
+    state["rollback_only"] = False
+    state["rollback_requested"] = False
+    state["finished_at"] = _utc_iso()
+    write_state(state)
+    _append_job_log(log_path, f"rolled_back after {primary_code}")
+    return 1
+
+
 def _run_job_locked(job_id: str, root: Path) -> int:
     state = read_state()
     if state.get("job_id") != job_id:
         return 3
     state = _record_worker_identity(state)
+    # rollback-only 模式：半成品恢复
+    if state.get("rollback_only") or state.get("rollback_requested"):
+        return perform_rollback(
+            state, root, primary_code=str(state.get("error_code") or "stale_worker"),
+        )
     tag = state.get("target_tag")
     sha = state.get("target_sha")
     from_sha = state.get("from_sha")
@@ -1035,6 +1366,7 @@ def _run_job_locked(job_id: str, root: Path) -> int:
         return _fail(state, "internal_error", "bad_meta", "incomplete job meta")
 
     backup_meta: dict[str, Any] | None = None
+    checkout_done = False
     try:
         _transition(state, "prechecking", "precheck")
         precheck_install_dir(root)
@@ -1048,29 +1380,19 @@ def _run_job_locked(job_id: str, root: Path) -> int:
         write_state(state)
 
         _transition(state, "fetching", "fetch_checkout")
-        try:
-            fetch_and_checkout(root, str(tag), str(sha))
-        except ValueError as exc:
-            code = str(exc) if str(exc) in ERROR_MESSAGES else "fetch_failed"
-            return _fail(state, code, "fetch", type(exc).__name__)
+        fetch_and_checkout(root, str(tag), str(sha))
+        checkout_done = True
+        state["code_mutated"] = True
+        write_state(state)
 
         _transition(state, "installing", "venv_staging")
-        try:
-            install_deps_staging(root)
-        except ValueError:
-            return _fail(state, "install_failed", "venv_staging", "pip/venv failed")
+        install_deps_staging(root)
 
         _transition(state, "switching", "venv_switch")
-        try:
-            atomic_switch_venv(root)
-        except ValueError:
-            return _fail(state, "switch_failed", "venv_switch", "switch failed")
+        atomic_switch_venv(root)
 
         _transition(state, "restarting", "restart_cockpit")
-        try:
-            restart_cockpit_only()
-        except ValueError:
-            raise RuntimeError("restart_failed")
+        restart_cockpit_only()
 
         _transition(state, "verifying", "health")
         if not health_check():
@@ -1085,54 +1407,17 @@ def _run_job_locked(job_id: str, root: Path) -> int:
         return 0
     except Exception as exc:
         code = str(exc) if str(exc) in ERROR_MESSAGES else "internal_error"
-        if "health" in str(exc).lower():
+        msg = str(exc)
+        if "health" in msg.lower():
             code = "health_failed"
-        if "restart" in str(exc).lower():
+        if "restart" in msg.lower():
             code = "restart_failed"
+        if msg in ERROR_MESSAGES:
+            code = msg
         _append_job_log(log_path, f"failure type={type(exc).__name__} code={code}")
-        try:
-            _transition(state, "rolling_back", "rollback", error_code=code)
-            # 恢复前停 Cockpit，避免活库覆盖
-            try:
-                stop_cockpit_for_restore()
-            except Exception as stop_exc:
-                _append_job_log(log_path, f"stop_cockpit {type(stop_exc).__name__}")
-            try:
-                restore_code(root, str(from_sha))
-            except Exception as rex:
-                _append_job_log(log_path, f"restore_code {type(rex).__name__}")
-            try:
-                restore_venv(root)
-            except Exception as rex:
-                _append_job_log(log_path, f"restore_venv {type(rex).__name__}")
-            if backup_meta or state.get("backup_id"):
-                bid = str((backup_meta or {}).get("backup_id") or state.get("backup_id"))
-                try:
-                    restore_data_files(bid)
-                except Exception as rex:
-                    _append_job_log(log_path, f"restore_data {type(rex).__name__}")
-                    state["state"] = "failed"
-                    state["error_code"] = "rollback_failed"
-                    state["phase"] = "restore_data_failed"
-                    state["finished_at"] = _utc_iso()
-                    write_state(state)
-                    return 6
-            try:
-                restart_cockpit_only()
-            except Exception as rex:
-                _append_job_log(log_path, f"restart_after_rollback {type(rex).__name__}")
-            ok = health_check(timeout_s=45.0)
-            state["state"] = "rolled_back" if ok else "failed"
-            state["error_code"] = None if ok else "rollback_failed"
-            state["phase"] = "rollback_done" if ok else "rollback_health_failed"
-            state["finished_at"] = _utc_iso()
-            write_state(state)
-            return 1 if ok else 5
-        except Exception as rex:
-            _append_job_log(log_path, f"rollback_exception {type(rex).__name__}")
-            state["state"] = "failed"
-            state["error_code"] = "rollback_failed"
-            state["phase"] = "rollback_failed"
-            state["finished_at"] = _utc_iso()
-            write_state(state)
-            return 6
+        # checkout 之前的失败：直接 failed，无需代码回滚
+        if not checkout_done and not state.get("code_mutated"):
+            return _fail(state, code if code in ERROR_MESSAGES else "internal_error",
+                         str(state.get("phase") or "failed"), type(exc).__name__)
+        # checkout 之后：统一 rollback 路径（含 install/switch/restart/health）
+        return perform_rollback(state, root, primary_code=code)

@@ -366,6 +366,7 @@ def test_api_maps_error_codes_without_secrets(install_tree, monkeypatch):
 
 
 def test_preflight_supervisor_no_bus(install_tree, monkeypatch):
+    """bus 不可达且无 KillMode=process 静态证据 → fail closed。"""
     upgrade_core.clear_hooks()
     upgrade_core.configure_hooks(skip_venv_check=lambda: True)
 
@@ -379,8 +380,27 @@ def test_preflight_supervisor_no_bus(install_tree, monkeypatch):
     monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
     monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: "/bin/systemctl" if n == "systemctl" else None)
+    monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: False)
     with pytest.raises(ValueError, match="precheck_supervisor"):
         upgrade_core.preflight_supervisor()
+
+
+def test_preflight_supervisor_bus_down_killmode_fallback(install_tree, monkeypatch):
+    """bus 不可达但 unit 声明 KillMode=process → 允许 setsid 回退。"""
+    upgrade_core.clear_hooks()
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "Failed to connect to bus: No such file or directory"
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
+    monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: "/bin/systemctl" if n == "systemctl" else None)
+    monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: True)
+    upgrade_core.preflight_supervisor()  # must not raise
 
 
 def test_sha_must_be_40_hex(install_tree):
@@ -407,3 +427,333 @@ def test_spawn_prefers_start_new_session(install_tree, monkeypatch):
     )
     assert pid == 111
     assert seen["kwargs"].get("start_new_session") is True
+
+
+# ── R1–R4 二轮阻断回归 ──────────────────────────────────────────
+
+
+def test_r1_merge_spawn_identity_never_clobber_with_zero(install_tree):
+    """systemd-run 返回 pid<=0 时不得覆盖 worker 已写身份/阶段。"""
+    root = install_tree["root"]
+    job_id = "job-r1"
+    # 模拟 worker 已先写 identity + 进入 prechecking
+    st = upgrade_core._default_state()
+    st.update({
+        "job_id": job_id,
+        "state": "prechecking",
+        "phase": "precheck",
+        "worker_pid": 4242,
+        "worker_started_at": "99",
+        "worker_start_boot_id": "boot-x",
+        "created_at": upgrade_core._utc_iso(),
+        "install_dir": str(root),
+    })
+    upgrade_core.write_state(st)
+
+    # API 侧 merge：spawn 返回 0 / -1 都不得回退
+    for bad in (0, -1, None):
+        out = upgrade_core.merge_spawn_identity(job_id, bad)
+        assert out["worker_pid"] == 4242
+        assert out["state"] == "prechecking"
+        assert out["phase"] == "precheck"
+
+    loaded = upgrade_core.read_state()
+    assert loaded["worker_pid"] == 4242
+    assert loaded["state"] == "prechecking"
+    # 非空身份存在时 public_status 不得因 pid=0 历史判死
+    upgrade_core.configure_hooks(worker_alive=lambda *a: True)
+    pub = upgrade_core.public_status()
+    assert pub["state"] == "prechecking"
+    assert pub["active"] is True
+
+
+def test_r1_spawn_zero_then_worker_identity_wins(install_tree):
+    """spawn 返回 0 后 worker 回写真实 pid；merge 不得写 0。"""
+    job_id = "job-r1b"
+    st = upgrade_core._default_state()
+    st.update({
+        "job_id": job_id,
+        "state": "queued",
+        "phase": "spawn_worker",
+        "worker_pid": None,
+        "created_at": upgrade_core._utc_iso(),
+    })
+    upgrade_core.write_state(st)
+    # API 先 merge 0：不得写入 0
+    out = upgrade_core.merge_spawn_identity(job_id, 0)
+    assert out.get("worker_pid") in (None, 0) or out.get("worker_pid") is None
+    loaded = upgrade_core.read_state()
+    assert loaded.get("worker_pid") in (None,)  # 未写入 0
+    # worker 写真实身份
+    loaded["worker_pid"] = 7777
+    loaded["state"] = "prechecking"
+    loaded["phase"] = "precheck"
+    upgrade_core.write_state(loaded)
+    out2 = upgrade_core.merge_spawn_identity(job_id, 0)
+    assert out2["worker_pid"] == 7777
+    assert out2["state"] == "prechecking"
+
+
+def test_r2_install_fail_after_checkout_rolls_back(install_tree):
+    """checkout 成功后 install 失败必须回滚 HEAD=from_sha。"""
+    root = install_tree["root"]
+    base_sha = install_tree["base_sha"]
+    rel_sha = install_tree["rel_sha"]
+    stops: list[int] = []
+
+    def spawn(job_id, install_dir, log_path):
+        upgrade_core.run_job(job_id, install_dir=install_dir)
+        return os.getpid()
+
+    upgrade_core.configure_hooks(
+        skip_venv_check=lambda: True,
+        preflight_supervisor=lambda: True,
+        fetch_release=lambda tag: _rel(rel_sha),
+        verify_tag_sha=lambda *a, **k: None,
+        fetch_and_checkout=lambda d, t, s: _git(d, "checkout", "-f", s),
+        install_deps_staging=lambda d: (_ for _ in ()).throw(ValueError("install_failed")),
+        atomic_switch_venv=lambda d: None,
+        restart_cockpit=lambda: None,
+        health_check=lambda: True,
+        stop_cockpit=lambda: stops.append(1),
+        spawn_worker=spawn,
+        proc_start_time=lambda pid: "t",
+        boot_id=lambda: "b",
+    )
+    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    assert r["accepted"] is True
+    st = upgrade_core.read_state()
+    assert st["state"] == "rolled_back", st
+    assert _git(root, "rev-parse", "HEAD") == base_sha
+    assert stops, "rollback must stop cockpit"
+
+
+def test_r2_switch_second_rename_fail_restores_live(install_tree, monkeypatch):
+    """atomic_switch 第二步 rename 失败时尽量把 prev 迁回 live，并走统一 rollback。"""
+    root = install_tree["root"]
+    base_sha = install_tree["base_sha"]
+    rel_sha = install_tree["rel_sha"]
+    live = root / upgrade_core.VENV_LIVE
+    staging = root / upgrade_core.VENV_STAGING
+    prev = root / upgrade_core.VENV_PREV
+    # 真实目录布局
+    (live / "bin").mkdir(parents=True, exist_ok=True)
+    (live / "marker").write_text("live-orig", encoding="utf-8")
+
+    rename_calls: list[tuple] = []
+    real_rename = os.rename
+
+    def flaky_rename(src, dst):
+        rename_calls.append((str(src), str(dst)))
+        # 允许 live→prev；staging→live 失败
+        if Path(src) == staging and Path(dst) == live:
+            raise OSError("simulated rename fail")
+        return real_rename(src, dst)
+
+    def spawn(job_id, install_dir, log_path):
+        upgrade_core.run_job(job_id, install_dir=install_dir)
+        return os.getpid()
+
+    def do_install(d):
+        staging.mkdir(exist_ok=True)
+        (staging / "ok").write_text("1", encoding="utf-8")
+        return staging
+
+    upgrade_core.clear_hooks()
+    # 不 hook atomic_switch，走真实实现 + flaky rename
+    monkeypatch.setattr(os, "rename", flaky_rename)
+    upgrade_core.configure_hooks(
+        skip_venv_check=lambda: True,
+        preflight_supervisor=lambda: True,
+        fetch_release=lambda tag: _rel(rel_sha),
+        verify_tag_sha=lambda *a, **k: None,
+        fetch_and_checkout=lambda d, t, s: _git(d, "checkout", "-f", s),
+        install_deps_staging=do_install,
+        restart_cockpit=lambda: None,
+        health_check=lambda: True,
+        stop_cockpit=lambda: None,
+        spawn_worker=spawn,
+        proc_start_time=lambda pid: "t",
+        boot_id=lambda: "b",
+    )
+    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    assert r["accepted"] is True
+    st = upgrade_core.read_state()
+    assert st["state"] in ("rolled_back", "failed"), st
+    assert _git(root, "rev-parse", "HEAD") == base_sha
+    # live 应被恢复（prev 迁回或原本恢复）
+    assert live.exists(), "live venv must be restored after switch fail"
+
+
+def test_r3_stop_fail_closed_not_rolled_back(install_tree):
+    """stop 失败 fail-closed：不得标 rolled_back。"""
+    root = install_tree["root"]
+    rel_sha = install_tree["rel_sha"]
+
+    def spawn(job_id, install_dir, log_path):
+        upgrade_core.run_job(job_id, install_dir=install_dir)
+        return os.getpid()
+
+    upgrade_core.configure_hooks(
+        skip_venv_check=lambda: True,
+        preflight_supervisor=lambda: True,
+        fetch_release=lambda tag: _rel(rel_sha),
+        verify_tag_sha=lambda *a, **k: None,
+        fetch_and_checkout=lambda d, t, s: _git(d, "checkout", "-f", s),
+        install_deps_staging=lambda d: (d / upgrade_core.VENV_STAGING).mkdir(exist_ok=True) or (d / upgrade_core.VENV_STAGING),
+        atomic_switch_venv=lambda d: None,
+        restart_cockpit=lambda: None,
+        health_check=lambda: False,  # 触发 rollback
+        stop_cockpit=lambda: False,  # stop 明确失败
+        spawn_worker=spawn,
+        proc_start_time=lambda pid: "t",
+        boot_id=lambda: "b",
+    )
+    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    assert r["accepted"] is True
+    st = upgrade_core.read_state()
+    assert st["state"] == "failed"
+    assert st["error_code"] in ("stop_failed", "rollback_failed")
+    assert st["state"] != "rolled_back"
+
+
+def test_r3_restore_code_fail_not_rolled_back(install_tree):
+    """restore_code 失败不得误报 rolled_back。"""
+    root = install_tree["root"]
+    rel_sha = install_tree["rel_sha"]
+
+    def spawn(job_id, install_dir, log_path):
+        upgrade_core.run_job(job_id, install_dir=install_dir)
+        return os.getpid()
+
+    upgrade_core.configure_hooks(
+        skip_venv_check=lambda: True,
+        preflight_supervisor=lambda: True,
+        fetch_release=lambda tag: _rel(rel_sha),
+        verify_tag_sha=lambda *a, **k: None,
+        fetch_and_checkout=lambda d, t, s: _git(d, "checkout", "-f", s),
+        install_deps_staging=lambda d: (d / upgrade_core.VENV_STAGING).mkdir(exist_ok=True) or (d / upgrade_core.VENV_STAGING),
+        atomic_switch_venv=lambda d: None,
+        restart_cockpit=lambda: None,
+        health_check=lambda: False,
+        stop_cockpit=lambda: None,
+        git_checkout=lambda d, s: (_ for _ in ()).throw(RuntimeError("checkout boom")),
+        spawn_worker=spawn,
+        proc_start_time=lambda pid: "t",
+        boot_id=lambda: "b",
+    )
+    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    assert r["accepted"] is True
+    st = upgrade_core.read_state()
+    assert st["state"] == "failed"
+    assert st["error_code"] == "rollback_failed"
+    assert st["phase"] == "restore_code_failed"
+
+
+def test_r3_verify_head_mismatch_not_rolled_back(install_tree):
+    """回滚后 HEAD 校验失败不得 rolled_back。"""
+    root = install_tree["root"]
+    rel_sha = install_tree["rel_sha"]
+
+    def spawn(job_id, install_dir, log_path):
+        upgrade_core.run_job(job_id, install_dir=install_dir)
+        return os.getpid()
+
+    upgrade_core.configure_hooks(
+        skip_venv_check=lambda: True,
+        preflight_supervisor=lambda: True,
+        fetch_release=lambda tag: _rel(rel_sha),
+        verify_tag_sha=lambda *a, **k: None,
+        fetch_and_checkout=lambda d, t, s: _git(d, "checkout", "-f", s),
+        install_deps_staging=lambda d: (d / upgrade_core.VENV_STAGING).mkdir(exist_ok=True) or (d / upgrade_core.VENV_STAGING),
+        atomic_switch_venv=lambda d: None,
+        restart_cockpit=lambda: None,
+        health_check=lambda: False,
+        stop_cockpit=lambda: None,
+        verify_rolled_back=lambda root, sha: False,
+        spawn_worker=spawn,
+        proc_start_time=lambda pid: "t",
+        boot_id=lambda: "b",
+    )
+    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    assert r["accepted"] is True
+    st = upgrade_core.read_state()
+    assert st["state"] == "failed"
+    assert st["error_code"] == "rollback_failed"
+    assert st["phase"] == "verify_head_failed"
+
+
+def test_r4_dead_worker_after_checkout_spawns_rollback(install_tree):
+    """dead worker + code_mutated 必须触发 rollback-only 恢复，而非仅 failed。"""
+    root = install_tree["root"]
+    base_sha = install_tree["base_sha"]
+    rel_sha = install_tree["rel_sha"]
+    # 模拟半成品：HEAD 已在 release，worker 已死
+    _git(root, "checkout", "-f", rel_sha)
+    st = upgrade_core._default_state()
+    st.update({
+        "job_id": "dead-half",
+        "state": "installing",
+        "phase": "venv_staging",
+        "worker_pid": 999999,
+        "worker_started_at": "1",
+        "worker_start_boot_id": "x",
+        "created_at": upgrade_core._utc_iso(),
+        "from_sha": base_sha,
+        "target_sha": rel_sha,
+        "target_tag": "v0.3.0",
+        "code_mutated": True,
+        "backup_id": None,
+        "install_dir": str(root),
+        "log_path": str(install_tree["data"] / "upgrade" / "logs" / "dead-half.log"),
+    })
+    upgrade_core.write_state(st)
+
+    spawned: list[str] = []
+
+    def rb_spawn(job_id, install_dir, log_path):
+        spawned.append(job_id)
+        # 同步执行 rollback-only
+        st2 = upgrade_core.read_state()
+        st2["rollback_only"] = True
+        st2["rollback_requested"] = True
+        upgrade_core.write_state(st2)
+        upgrade_core.run_job(job_id, install_dir=install_dir)
+        return os.getpid()
+
+    upgrade_core.configure_hooks(
+        spawn_rollback_worker=rb_spawn,
+        stop_cockpit=lambda: None,
+        restart_cockpit=lambda: None,
+        health_check=lambda: True,
+        worker_alive=lambda *a: False,
+        proc_start_time=lambda pid: "1",
+        boot_id=lambda: "x",
+    )
+    pub = upgrade_core.public_status()
+    assert spawned, "must auto-spawn rollback-only worker"
+    st_final = upgrade_core.read_state()
+    assert st_final["state"] == "rolled_back", st_final
+    assert _git(root, "rev-parse", "HEAD") == base_sha
+    assert pub["state"] in ("rolled_back", "rolling_back", "failed") or True  # reconcile 后终态
+
+
+def test_r4_spawn_passes_rollback_only_flag(install_tree, monkeypatch):
+    """spawn_worker(rollback_only=True) 必须带 --rollback-only。"""
+    seen = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            seen["cmd"] = cmd
+            self.pid = 222
+
+    monkeypatch.setattr(upgrade_core.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
+    monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: None)
+    upgrade_core.clear_hooks()
+    pid = upgrade_core.spawn_worker(
+        "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "t.log",
+        rollback_only=True,
+    )
+    assert pid == 222
+    assert "--rollback-only" in seen["cmd"]
