@@ -26,12 +26,12 @@
   --safe-left:env(safe-area-inset-left,0px);
 }
 :root.light{
-  --bg:#f6f7f9; --bg2:#ffffff; --bg3:#eef1f6; --bg4:#e3e8f0;
-  --fg:#151b26; --fg2:#465062; --fg3:#677183;
-  --accent:#3b63e0; --accent2:#7a5af8;
-  --need:#b45309; --work:#2563eb; --done:#059669; --idle:#64748b;
-  --bd:#dbe1ea; --bd2:#c8d0dd;
-  --term-bg:#fafbfc; --term-fg:#1a2030;
+  --bg:#f5f5f4; --bg2:#ffffff; --bg3:#f4f4f5; --bg4:#e9e9ec;
+  --fg:#18181b; --fg2:#4b5058; --fg3:#71717a;
+  --accent:#4f46e5; --accent2:#7c3aed;
+  --need:#d97706; --work:#4f46e5; --done:#059669; --idle:#71717a;
+  --bd:#e4e4e7; --bd2:#d4d4d8;
+  --term-bg:#fafafa; --term-fg:#1a2030;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overscroll-behavior:none}
@@ -40,7 +40,7 @@ body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,BlinkMacSy
 button{cursor:pointer;font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(--bd2);border-radius:9px;padding:8px 14px;transition:.12s;white-space:nowrap}
 button:hover{background:var(--bg4);border-color:var(--accent)}
 button:active{transform:scale(.97)}
-button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;box-shadow:0 1px 2px rgba(79,70,229,.25)}
 button.primary:hover{background:#4a89f0}
 button.icon{padding:6px 9px;background:transparent;border-color:transparent;font-size:16px}
 button.sm{font-size:12px;padding:4px 9px}
@@ -53,15 +53,15 @@ pre,.mono{font-family:var(--mono)}
 
 /* 头部 */
 .app{display:flex;flex-direction:column;height:100vh;height:100dvh;padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left)}
-header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--bd)}
-header .logo{font-weight:700;font-size:15px;white-space:nowrap;display:flex;align-items:center;gap:6px}
-header nav{display:flex;gap:2px}
-header nav button{background:transparent;border:none;padding:8px 14px;color:var(--fg2);border-radius:8px;font-size:13.5px}
-header nav button.active{background:var(--bg4);color:var(--fg)}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--bd);box-shadow:0 1px 2px rgba(0,0,0,.04)}
+header .logo{font-weight:750;font-size:16px;letter-spacing:-.2px;white-space:nowrap;display:flex;align-items:center;gap:8px}
+header nav{display:flex;gap:4px}
+header nav button{background:transparent;border:none;padding:8px 15px;color:var(--fg2);border-radius:999px;font-size:13.5px;font-weight:550;transition:background .15s,color .15s}
+header nav button.active{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}
 header .spacer{flex:1}
 .nav-toggle{display:none}
 .stat-pill{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--fg2);background:var(--bg3);padding:3px 9px;border-radius:12px}
-.set-card{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.set-card{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;padding:16px 18px;margin-bottom:14px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
 .set-card h3{font-size:14px;margin-bottom:8px}
 .set-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .set-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg2)}
@@ -72,7 +72,7 @@ header .spacer{flex:1}
 
 /* 看板 */
 .board-wrap{flex:1;overflow:auto;padding:12px}
-.board{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;min-height:100%;align-content:start}
+.board{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;min-height:100%;align-content:start}
 .col{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;display:flex;flex-direction:column;min-height:200px}
 .col-head{padding:10px 12px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--bg2);border-radius:11px 11px 0 0;z-index:1}
 .col-head .cc{background:var(--bg4);border-radius:10px;padding:1px 8px;font-size:11px;min-width:20px;text-align:center}
@@ -81,8 +81,8 @@ header .spacer{flex:1}
 .col-body{padding:14px;display:flex;flex-direction:column;gap:12px;overflow:visible}
 
 /* agent 卡片 */
-.card{background:var(--bg3);border:1px solid var(--bd);border-radius:13px;padding:14px;cursor:pointer;transition:.15s;border-left:3px solid var(--idle);box-shadow:0 1px 2px rgba(16,24,40,.05)}
-.card:hover{border-color:var(--accent);transform:translateY(-1px)}
+.card{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;padding:16px;cursor:pointer;transition:transform .15s,box-shadow .15s,border-color .15s;border-left:3px solid var(--idle);box-shadow:0 1px 2px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.04)}
+.card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 2px 4px rgba(0,0,0,.05),0 10px 24px rgba(0,0,0,.08)}
 .card.need{border-left-color:var(--need)} .card.work{border-left-color:var(--work)}
 .card.done{border-left-color:var(--done)} .card.idle{border-left-color:var(--idle)}
 .card.unknown{border-left-color:var(--fg3);opacity:.7}
@@ -169,7 +169,7 @@ header .spacer{flex:1}
 .team-login-note,.team-safety{font-size:12px;color:var(--fg2);line-height:1.6}
 .team-login-grid{display:grid;grid-template-columns:1fr;gap:9px;margin:14px 0}
 .team-shell{display:grid;grid-template-columns:minmax(240px,300px) minmax(0,1fr);gap:16px;min-height:100%}
-.team-side,.team-main{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;overflow:hidden;box-shadow:0 1px 3px rgba(16,24,40,.06)}
+.team-side,.team-main{background:var(--bg2);border:1px solid var(--bd);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.04),0 6px 16px rgba(0,0,0,.05)}
 .team-side-head,.team-panel-head{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--bd)}
 .team-side-head h3,.team-panel-head h3{font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .team-project-list{padding:7px}
@@ -181,7 +181,7 @@ header .spacer{flex:1}
 .team-create summary{cursor:pointer;color:var(--accent);font-size:12px;margin-bottom:8px}
 .team-create .field{margin-bottom:7px}
 .team-main{display:flex;flex-direction:column}
-.team-panel-body{padding:16px 18px;display:flex;flex-direction:column;gap:16px}
+.team-panel-body{padding:20px;display:flex;flex-direction:column;gap:18px}
 .team-status{padding:12px 14px;border:1px solid var(--bd);border-radius:10px;background:var(--bg3);font-size:12.5px;line-height:1.6}
 .team-status.warn{border-color:color-mix(in srgb,var(--need) 60%,var(--bd));color:var(--need)}
 .team-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
