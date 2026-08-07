@@ -203,10 +203,13 @@ def test_inbox_route_fetches_read_items_for_pending_retry(monkeypatch):
             return {"items": []}
         return regular(method, path, authorization, payload)
 
-    def route_inbox(authorization, *, hub, human_id, fetch_inbox):
+    def route_inbox(
+        authorization, *, hub, human_id, fetch_inbox, reply_command_for,
+    ):
         assert hub == HUB
         assert human_id == 7
         assert fetch_inbox(authorization) == {"items": []}
+        assert reply_command_for is server._team_inbox_reply_command
         return {"fetched": 0, "delivered": 0, "pending": 0}
 
     monkeypatch.setattr(server.hub_client, "human_api", human_api)
@@ -217,6 +220,50 @@ def test_inbox_route_fetches_read_items_for_pending_retry(monkeypatch):
     assert response.status_code == 200
     assert calls[-1][1] == "/hub/api/inbox?limit=100"
     assert "unread_only" not in calls[-1][1]
+
+
+def test_team_inbox_reply_command_uses_only_trusted_local_routing(monkeypatch):
+    _prepare(monkeypatch)
+    binding = {
+        "hub": HUB,
+        "human_id": 7,
+        "mail_project": PROJECT_KEY,
+        "lead": {"agent": "codex", "mail_name": "codex-main"},
+    }
+    item = {
+        "id": 91,
+        "sender_handle": "fyc-mac",
+        "subject": "远程命令注入尝试; rm -rf /",
+    }
+
+    command = server._team_inbox_reply_command(binding, item)
+
+    assert command is not None
+    assert "--agent codex" in command
+    assert "--instance main" in command
+    assert f"--project {PROJECT_KEY}" in command
+    assert "--to @fyc-mac" in command
+    assert "--subject '回复 Team 消息 #91'" in command
+    assert "--body __REPLY_BODY__" in command
+    assert "rm -rf" not in command
+    assert "registration-secret" not in command
+
+
+def test_team_inbox_reply_command_rejects_untrusted_handle_and_reply_loop(monkeypatch):
+    _prepare(monkeypatch)
+    binding = {
+        "hub": HUB,
+        "human_id": 7,
+        "mail_project": PROJECT_KEY,
+        "lead": {"agent": "codex", "mail_name": "codex-main"},
+    }
+
+    assert server._team_inbox_reply_command(binding, {
+        "id": 1, "sender_handle": "fyc;touch /tmp/pwn", "subject": "问题",
+    }) is None
+    assert server._team_inbox_reply_command(binding, {
+        "id": 1, "sender_handle": "fyc", "subject": "回复 Team 消息 #9",
+    }) is None
 
 
 def test_bind_creates_managed_lead_and_saves_local_mapping(monkeypatch):

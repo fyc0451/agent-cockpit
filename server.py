@@ -2039,6 +2039,72 @@ def api_team_inbox_route_status(request: Request):
     )
 
 
+def _team_inbox_reply_command(
+    binding: dict[str, Any], item: dict[str, Any],
+) -> str | None:
+    """为远程 Human 消息生成只含本机可信字段的幂等回复命令。"""
+    subject = str(item.get("subject") or "")
+    if re.fullmatch(r"回复 Team 消息 #[A-Za-z0-9_.:-]+", subject):
+        return None
+    handle = item.get("sender_handle")
+    remote_id = item.get("id")
+    if (
+        not isinstance(handle, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", handle)
+        or isinstance(remote_id, bool)
+        or not isinstance(remote_id, (int, str))
+        or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", str(remote_id))
+    ):
+        return None
+    lead = binding.get("lead") if isinstance(binding.get("lead"), dict) else {}
+    raw_mail_project = binding.get("mail_project")
+    if not isinstance(raw_mail_project, str) or not Path(raw_mail_project).is_absolute():
+        return None
+    try:
+        mail_project = str(Path(raw_mail_project).resolve())
+    except (OSError, ValueError):
+        return None
+    mail_name = lead.get("mail_name")
+    lead_agent = MAIL_AGENT_NAMES.get(
+        str(lead.get("agent") or ""), str(lead.get("agent") or ""),
+    )
+    identities = [
+        identity for identity in _registry_scan()
+        if identity.get("project_key") == mail_project
+        and identity.get("name") == mail_name
+        and MAIL_AGENT_NAMES.get(
+            str(identity.get("agent") or ""), str(identity.get("agent") or ""),
+        ) == lead_agent
+    ]
+    if len(identities) != 1:
+        return None
+    agent = identities[0].get("agent")
+    instance = identities[0].get("instance")
+    safe_identity = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+    if (
+        not isinstance(agent, str)
+        or not re.fullmatch(safe_identity, agent)
+        or not isinstance(instance, str)
+        or not re.fullmatch(safe_identity, instance)
+    ):
+        return None
+    reply_key = "team-inbox-" + hashlib.sha256(
+        f"{binding.get('hub')}\0{binding.get('human_id')}\0{remote_id}".encode()
+    ).hexdigest()[:32]
+    mail_send = Path(__file__).resolve().parent / "agent-mail-tools" / "mail-send"
+    args = [
+        str(mail_send),
+        "--agent", agent,
+        "--instance", instance,
+        "--project", mail_project,
+        "--to", f"@{handle}",
+        "--subject", f"回复 Team 消息 #{remote_id}",
+        "--body", "__REPLY_BODY__",
+        "--idempotency-key", reply_key,
+    ]
+    return " ".join(shlex.quote(value) for value in args)
+
+
 @app.post("/api/team-auth/inbox-route/route")
 def api_team_inbox_route_run(request: Request):
     """触发一次远程 Human Inbox → 本机已绑定 Session lead 的安全路由。"""
@@ -2052,6 +2118,7 @@ def api_team_inbox_route_run(request: Request):
             fetch_inbox=lambda auth: hub_client.human_api(
                 "GET", "/hub/api/inbox?limit=100", auth
             ),
+            reply_command_for=_team_inbox_reply_command,
         )
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
