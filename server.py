@@ -408,7 +408,7 @@ class StartTaskReq(BaseModel):
     workdir: str
     prompt: str
     images: list[str] | None = None  # 已上传的文件 path 列表
-    model: str | None = None
+    model: str | None = Field(default=None, pattern=tasks.MODEL_PATTERN)
 
 
 class PaneSendReq(BaseModel):

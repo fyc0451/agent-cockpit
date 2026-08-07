@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import sqlite3
@@ -54,6 +55,11 @@ except ValueError:
 # 只保存本进程启动的子进程；重启后的 pending/running 由 _init_db 标为失败。
 _active_processes: dict[str, subprocess.Popen] = {}
 _cancel_requested: set[str] = set()
+
+# Codex model 是单个 argv 值，只允许常见模型标识字符；禁止以 "-" 开头被
+# CLI 解释为新选项。server.StartTaskReq 与 start_task 共用同一契约。
+MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+_MODEL_RE = re.compile(MODEL_PATTERN)
 
 
 # ── DB ──────────────────────────────────────────────────────────
@@ -354,6 +360,11 @@ def start_task(
     model: str | None = None,
 ) -> dict[str, Any]:
     """创建并启动一个 codex exec 任务(在隔离 worktree 中运行)。返回 task info。"""
+    if model is not None and not _MODEL_RE.fullmatch(model):
+        raise ValueError(
+            "model 只能包含字母、数字、点、下划线和连字符，长度 1-64，"
+            "且不能以连字符开头"
+        )
     task_id = uuid.uuid4().hex[:12]
     workdir_path = Path(workdir).expanduser().resolve()
     if not workdir_path.is_dir():

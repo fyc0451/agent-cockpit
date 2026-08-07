@@ -521,6 +521,46 @@ def test_cleanup_keeps_recent(temp_data, git_repo):
 
 # ── start_task 集成 ─────────────────────────────────────────────
 
+@pytest.mark.parametrize("model", ["-danger", "gpt 5", "gpt/5", "a" * 65, ""])
+def test_start_task_rejects_invalid_model_before_worktree(
+    temp_data, git_repo, monkeypatch, model,
+):
+    """直接调用执行层也必须在创建 worktree 前拒绝非法 model。"""
+    monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
+
+    def must_not_create(*args, **kwargs):
+        raise AssertionError("非法 model 不应创建 worktree")
+
+    monkeypatch.setattr(tasks, "_create_worktree", must_not_create)
+    with pytest.raises(ValueError, match="model"):
+        tasks.start_task(str(git_repo), "test prompt", model=model)
+
+
+@pytest.mark.parametrize("model", [None, "gpt-5", "gpt_5.1-codex"])
+def test_start_task_accepts_supported_model_names(
+    temp_data, git_repo, monkeypatch, model,
+):
+    monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
+    monkeypatch.setattr(
+        tasks, "_create_worktree",
+        lambda source, task_id: (git_repo, "a" * 40),
+    )
+    started = []
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon):
+            started.append((target, args, daemon))
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(tasks.threading, "Thread", FakeThread)
+    result = tasks.start_task(str(git_repo), "test prompt", model=model)
+
+    assert result["status"] == "pending"
+    assert started[0][1][-1] == model
+
+
 def test_start_task_creates_worktree(temp_data, git_repo, monkeypatch):
     """start_task 创建隔离 worktree 并在其中运行 codex。"""
     done_event = threading.Event()

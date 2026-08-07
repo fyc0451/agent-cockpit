@@ -1,10 +1,23 @@
 import asyncio
 import pytest
 import threading
+from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import server
+
+
+@pytest.mark.parametrize("model", ["-danger", "gpt 5", "gpt/5", "a" * 65, ""])
+def test_start_task_request_rejects_invalid_model(model):
+    with pytest.raises(ValidationError):
+        server.StartTaskReq(workdir="/tmp", prompt="test", model=model)
+
+
+@pytest.mark.parametrize("model", [None, "gpt-5", "gpt_5.1-codex"])
+def test_start_task_request_accepts_supported_model_names(model):
+    req = server.StartTaskReq(workdir="/tmp", prompt="test", model=model)
+    assert req.model == model
 
 
 def test_new_terminal_websocket_cancels_and_supersedes_old_reader():
