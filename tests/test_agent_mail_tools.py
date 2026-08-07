@@ -839,6 +839,39 @@ def test_team_reply_retry_reuses_exact_request_body(monkeypatch):
     assert seen == [seen[0], seen[0]]
 
 
+def test_team_reply_url_reads_custom_port_from_environment(monkeypatch, tmp_path):
+    module = _load_mail_send()
+    monkeypatch.setattr(module, "INSTALL_ROOT", str(tmp_path))
+    monkeypatch.setenv("COCKPIT_PORT", "18790")
+
+    assert module._team_reply_url() == (
+        "http://127.0.0.1:18790/api/agent/team-reply"
+    )
+
+
+def test_team_reply_url_reads_custom_port_from_dotenv(monkeypatch, tmp_path):
+    module = _load_mail_send()
+    monkeypatch.setattr(module, "INSTALL_ROOT", str(tmp_path))
+    monkeypatch.delenv("COCKPIT_PORT", raising=False)
+    (tmp_path / ".env").write_text(
+        'export COCKPIT_PORT="18791" # custom\n', encoding="utf-8",
+    )
+
+    assert module._team_reply_url() == (
+        "http://127.0.0.1:18791/api/agent/team-reply"
+    )
+
+
+@pytest.mark.parametrize("port", ["", "0", "65536", "not-a-port"])
+def test_team_reply_url_rejects_invalid_port(monkeypatch, tmp_path, port):
+    module = _load_mail_send()
+    monkeypatch.setattr(module, "INSTALL_ROOT", str(tmp_path))
+    monkeypatch.setenv("COCKPIT_PORT", port)
+
+    with pytest.raises(SystemExit, match="COCKPIT_PORT"):
+        module._team_reply_url()
+
+
 def test_resolve_recipients_passes_unknown_name_through(tmp_path):
     module = _load_mail_send()
     _write_registry(tmp_path, module, [

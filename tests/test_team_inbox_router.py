@@ -70,6 +70,15 @@ def _noop_send(*args, **kwargs):
     return {"available": True}
 
 
+def test_format_item_includes_session_lead_attribution():
+    item = _item(sender="付彦超")
+    item.update({"sender_kind": "session_lead", "sender_agent": "codex-main"})
+
+    text = team_inbox_router._format_item(item)
+
+    assert "付彦超 · via codex-main（session_lead）" in text
+
+
 class TestFiltering:
     def test_ignores_unbound_project(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding(project_slug="acme")])

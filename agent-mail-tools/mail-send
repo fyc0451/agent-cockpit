@@ -15,8 +15,9 @@ import urllib.request
 import uuid
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+INSTALL_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, TOOLS_DIR)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+sys.path.insert(0, INSTALL_ROOT)
 from am_common import (  # noqa: E402
     REGISTRY_DIR, load_identity, mcp_call, mcp_tool, slugify,
 )
@@ -26,7 +27,6 @@ import coordination  # noqa: E402
 HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
 MAIL_RECV_BIN = os.path.join(TOOLS_DIR, "mail-recv")
 MAIL_PROJECTS_PATH = os.path.expanduser("~/dashboard-data/mail-projects.json")
-TEAM_REPLY_URL = "http://127.0.0.1:8790/api/agent/team-reply"
 PROG_TO_AGENT = {
     "codex-cli": "codex", "codex": "codex",
     "kimi-work": "kimi", "kimi": "kimi",
@@ -35,6 +35,32 @@ PROG_TO_AGENT = {
     "claude": "claude", "claude-code": "claude",
     "grok": "grok", "opencode": "opencode",
 }
+
+
+def _team_reply_url() -> str:
+    """解析本机 Cockpit 端口；代理地址始终限制在 loopback。"""
+    raw_port = os.environ.get("COCKPIT_PORT")
+    if raw_port is None:
+        try:
+            with open(os.path.join(INSTALL_ROOT, ".env"), encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if line.startswith("export "):
+                        line = line[7:].lstrip()
+                    key, separator, value = line.partition("=")
+                    if separator and key.strip() == "COCKPIT_PORT":
+                        try:
+                            parts = shlex.split(value, comments=True)
+                        except ValueError:
+                            parts = []
+                        raw_port = parts[0] if len(parts) == 1 else ""
+                        break
+        except OSError:
+            pass
+    raw_port = "8790" if raw_port is None else raw_port.strip()
+    if not raw_port.isdecimal() or not 1 <= int(raw_port) <= 65535:
+        raise SystemExit(f"error: COCKPIT_PORT 必须是 1-65535 的整数: {raw_port!r}")
+    return f"http://127.0.0.1:{raw_port}/api/agent/team-reply"
 
 
 def _agent_types_match(left: str, right: str) -> bool:
@@ -172,7 +198,7 @@ def _team_reply(payload: dict) -> dict:
     last_error = ""
     for attempt in range(2):
         request = urllib.request.Request(
-            TEAM_REPLY_URL,
+            _team_reply_url(),
             data=encoded,
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             method="POST",
