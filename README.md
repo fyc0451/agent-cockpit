@@ -10,6 +10,8 @@
 
 [English](README.en.md) | [日本語](README.ja.md)
 
+📖 **[用户手册（安装到团队协作全流程）](docs/USER-GUIDE.md)**
+
 <p align="center">
   <img src="docs/screenshots/board-desktop.png" alt="看板(桌面端)" width="74%">
   <img src="docs/screenshots/board-mobile.png" alt="看板(手机端)" width="22%">
