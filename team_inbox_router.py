@@ -121,14 +121,33 @@ def _lead_online(session: str, pane_id: str) -> bool:
     return False
 
 
+def _focused_pane(session: str) -> str | None:
+    """该 session 当前聚焦 pane(用户输入的实际落点);查不到返回 None。"""
+    try:
+        snap = snapshot()
+    except Exception:
+        return None
+    if isinstance(snap, dict) and snap.get("available") is False:
+        return None
+    for pane in (snap or {}).get("panes", []):
+        if pane.get("session") == session and pane.get("focused"):
+            return pane.get("pane_id")
+    return None
+
+
 def _deliver_text(session: str, pane_id: str, text: str) -> dict[str, Any]:
     """向 lead 投递文本上下文；mode=send 会执行，故只用 prompt（提示文本）。
 
     用户正在该 session 的终端打字时暂缓投递:此时 prompt 会把消息追加到
     未提交的草稿后一起提交。暂缓返回 error,消息留在 pending 下轮重试。
+    避让按 pane 粒度:typing 记录是 session 级(Web PTY 只知道 attach 的
+    session),输入实际落在聚焦 pane,仅目标 pane 即聚焦 pane 时才避让,
+    不误伤同 session 的其他 agent。
     """
     if terminal.user_typing_recently(session):
-        return {"available": True, "error": "用户正在输入，暂缓投递"}
+        focused = _focused_pane(session)
+        if focused is None or focused == pane_id:
+            return {"available": True, "error": "用户正在输入，暂缓投递"}
     try:
         return pane_send(session, pane_id, text, mode="prompt")
     except Exception as exc:

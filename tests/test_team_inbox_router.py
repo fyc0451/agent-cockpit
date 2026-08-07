@@ -433,3 +433,27 @@ def test_delivery_deferred_while_user_typing(tmp_path, monkeypatch):
     assert result["delivered"] == 1
     assert result["pending"] == 0
     assert len(calls) == 1
+
+
+def test_delivery_not_deferred_when_typing_in_other_pane(tmp_path, monkeypatch):
+    """pane 粒度:聚焦 pane 不是目标 lead pane 时正常投递。"""
+    import terminal
+
+    _write_bindings(tmp_path / "team-sessions.json", [_binding()])
+    monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        {"session": "s1", "pane_id": "p1", "focused": False},
+        {"session": "s1", "pane_id": "p8", "focused": True},
+    ))
+    calls = []
+    monkeypatch.setattr(
+        team_inbox_router, "pane_send",
+        lambda *a, **k: calls.append((a, k)) or {"available": True},
+    )
+    monkeypatch.setattr(terminal, "user_typing_recently", lambda session: True)
+
+    result = team_inbox_router.route_inbox(
+        "Bearer x", hub="http://hub:8765", human_id=7,
+        fetch_inbox=lambda _auth: {"items": [_item(item_id=301)]},
+    )
+    assert result["delivered"] == 1
+    assert len(calls) == 1

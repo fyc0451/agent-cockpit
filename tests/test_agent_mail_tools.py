@@ -941,9 +941,13 @@ def test_notify_skips_pane_while_recipient_typing(monkeypatch, tmp_path):
     def run(args, **kwargs):
         if args[-2:] == ["api", "snapshot"]:
             return module.subprocess.CompletedProcess(args, 0, json.dumps({
-                "result": {"snapshot": {"panes": [{
-                    "pane_id": "w1:pA", "agent": "kimi", "cwd": str(project),
-                }]}}
+                "result": {"snapshot": {
+                    "focused_pane_id": "w1:pA",
+                    "panes": [{
+                        "pane_id": "w1:pA", "agent": "kimi", "cwd": str(project),
+                        "focused": True,
+                    }],
+                }}
             }), "")
         if "prompt" in args:
             prompts.append(args)
@@ -952,6 +956,7 @@ def test_notify_skips_pane_while_recipient_typing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(module.subprocess, "run", run)
 
+    # 用户正在目标 pane(w1:pA,聚焦)输入 → 跳过
     module._notify_pane("kimi", "main", 900, "输入避让", str(project))
     assert prompts == []
 
@@ -960,4 +965,48 @@ def test_notify_skips_pane_while_recipient_typing(monkeypatch, tmp_path):
         json.dumps({"demo": time.time() - 120}), encoding="utf-8"
     )
     module._notify_pane("kimi", "main", 901, "输入避让2", str(project))
+    assert len(prompts) == 1
+
+
+def test_notify_not_deferred_when_typing_in_other_pane(monkeypatch, tmp_path):
+    """pane 粒度:用户在同 session 另一个 pane 输入时,目标 pane 通知不避让。"""
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    session_dir = tmp_path / "session"
+    project = tmp_path / "project"
+    for item in (session_dir, project):
+        item.mkdir()
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(
+        module, "_session_rows",
+        lambda _: [{"name": "demo", "running": True, "directory": str(session_dir)}],
+    )
+    monkeypatch.setattr(module, "_load_bindings", lambda: {})
+    typing_file = tmp_path / "typing.json"
+    typing_file.write_text(json.dumps({"demo": time.time()}), encoding="utf-8")
+    monkeypatch.setattr(module, "TYPING_STATE_PATH", str(typing_file))
+    prompts = []
+
+    def run(args, **kwargs):
+        if args[-2:] == ["api", "snapshot"]:
+            return module.subprocess.CompletedProcess(args, 0, json.dumps({
+                "result": {"snapshot": {
+                    "focused_pane_id": "w1:p8",
+                    "panes": [
+                        {"pane_id": "w1:pA", "agent": "kimi", "cwd": str(project),
+                         "focused": False},
+                        {"pane_id": "w1:p8", "agent": "claude", "cwd": str(project),
+                         "focused": True},
+                    ],
+                }}
+            }), "")
+        if "prompt" in args:
+            prompts.append(args)
+            return module.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    module._notify_pane("kimi", "main", 902, "pane 粒度", str(project))
     assert len(prompts) == 1
