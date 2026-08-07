@@ -1000,6 +1000,20 @@ def test_settings_view_and_nav_exist():
     assert 'onclick="cancelSettings()"' in HTML
 
 
+def test_light_theme_is_default_without_overriding_saved_dark_preference():
+    js = _inline_js()
+    assert '<meta name="theme-color" content="#ffffff">' in HTML
+    assert "(localStorage.getItem('dash-theme')||'light')==='light'" in HTML
+    assert "setTheme(localStorage.getItem('dash-theme')||'light',false)" in js
+    assert "meta.content=light?'#ffffff':'#181d27'" in js
+
+
+def test_roomy_header_collapses_before_navigation_can_overflow():
+    js = _inline_js()
+    assert "@media(max-width:1100px)" in HTML
+    assert "window.matchMedia('(max-width:1100px)')" in js
+
+
 def test_team_view_covers_project_membership_and_session_binding():
     js = _inline_js()
     assert '<button data-view="team"' in HTML
@@ -1163,11 +1177,11 @@ def test_nav_and_toolbar_collapsible():
     assert "function toggleTermToolbar()" in HTML
     assert "header nav.open{display:grid}" in HTML
     assert ".term-toolbar.collapsed>*:not(.tb-toggle):not(#termKeyboardToggle){display:none}" in HTML
-    # 窄屏默认收起工具栏;点导航项后自动收起菜单(nav 断点统一 900px,CSS 与 matchMedia 同源)
+    # 窄屏默认收起工具栏；宽松导航在 1100px 前折叠，CSS 与 matchMedia 同源。
     assert "window.innerWidth<=860" in HTML
     assert "window.innerWidth<=560" not in HTML
-    assert "@media(max-width:900px)" in HTML
-    assert "matchMedia('(max-width:900px)')" in HTML
+    assert "@media(max-width:1100px)" in HTML
+    assert "matchMedia('(max-width:1100px)')" in HTML
 
 
 # ── 终端字体大小设置(本机偏好) ──────────────────────────────────

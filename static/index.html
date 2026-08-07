@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#151921">
+<meta name="theme-color" content="#ffffff">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Agent Cockpit</title>
 <link rel="manifest" href="/manifest.webmanifest">
+<script id="themeBoot">try{if((localStorage.getItem('dash-theme')||'light')==='light')document.documentElement.classList.add('light');else document.querySelector('meta[name="theme-color"]').content='#181d27'}catch(e){document.documentElement.classList.add('light')}</script>
 <style>
 @font-face{font-family:'Cascadia Mono';src:url('/static/fonts/CascadiaMono.woff2') format('woff2');font-display:swap}
 @font-face{font-family:'Cascadia Mono NF';src:url('/static/fonts/CascadiaMonoNF.woff2') format('woff2');font-display:swap}
@@ -381,8 +382,8 @@ header .spacer{flex:1}
   /* 移动端输入框 >=16px,避免 iOS focus 自动缩放 */
   input,select,textarea,.set-card input,.set-card select{font-size:16px}
 }
-@media(max-width:900px){
-  /* nav 折叠断点;JS 侧用同一 (max-width:900px) matchMedia(NAV_COLLAPSE_MQ) */
+@media(max-width:1100px){
+  /* nav 折叠断点;JS 侧用同一 (max-width:1100px) matchMedia(NAV_COLLAPSE_MQ) */
   header{flex-wrap:wrap}
   .nav-toggle{display:block}
   header nav{order:3;width:100%;display:none;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}
@@ -1616,7 +1617,7 @@ function showView(v){
     hfStart();
   }else hfStop();
 }
-const NAV_COLLAPSE_MQ=window.matchMedia('(max-width:900px)');// 与 CSS @media(max-width:900px) 同一断点
+const NAV_COLLAPSE_MQ=window.matchMedia('(max-width:1100px)');// 与 CSS @media(max-width:1100px) 同一断点
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{showView(b.dataset.view);if(NAV_COLLAPSE_MQ.matches)document.getElementById('nav').classList.remove('open')});
 function fmtTime(s){if(!s)return'-';try{let d=new Date(typeof s==='number'?s*1000:s.replace(' ','T')+(s.endsWith('Z')?'':'Z'));return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}catch{return s}}
 const AGENT_EMOJI={codex:'🔷',kimi:'🟠',qodercli:'🟢',qoder:'🟢',claude:'🔶',opencode:'🟣',gemini:'💎',grok:'✖️'};
@@ -3714,6 +3715,7 @@ function darkTermBoost(xterm,data,binary){
 function setTheme(mode,save=true){
   const light=mode==='light';
   document.documentElement.classList.toggle('light',light);
+  const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
   const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
   const th=termTheme();
   for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th}catch(e){}}
