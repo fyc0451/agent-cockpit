@@ -252,7 +252,7 @@ def test_start_agent_accepts_unique_local_name_for_same_runtime(monkeypatch, tmp
 
     assert response.status_code == 200
     assert response.json()["label"] == "codex-2"
-    assert calls[0][1] == {"layout": "right", "label": "codex-2"}
+    assert calls[0][1] == {"layout": "right", "label": "codex-2", "args": ""}
     assert client.post(
         "/api/herdr/start",
         headers=headers,

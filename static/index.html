@@ -427,7 +427,7 @@ header .spacer{flex:1}
   .launch-bar select{flex:1;min-width:0}
   .launch-bar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
   .launch-bar select,.launch-bar input,.launch-bar button{order:initial;width:100%;max-width:none!important;min-width:0!important}
-  #lnSession,#lnName,#lnWorkdir,.launch-bar button{grid-column:1 / -1}
+  #lnSession,#lnName,#lnWorkdir,#lnArgs,.launch-bar button{grid-column:1 / -1}
   .launch-modal .launch-bar{max-height:none;overflow:visible;padding:0}
   .term-toolbar{flex-wrap:wrap;padding:6px;gap:5px}
   .term-toolbar #termSelect{flex:1;min-width:120px!important}
@@ -744,6 +744,7 @@ header .spacer{flex:1}
       <select id="lnLayout" aria-label="新 pane 位置"><option value="tab">新 tab</option><option value="right">右侧 pane</option><option value="down">下方 pane</option></select>
       <select id="lnWorkspace" aria-label="工作目录策略"><option value="isolated">独立 worktree</option><option value="shared">共享目录</option></select>
       <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" oninput="this.dataset.auto='0';launchPreselectAgent()" style="flex:1;min-width:160px">
+      <input id="lnArgs" maxlength="2048" placeholder="启动参数（选填），例如 --model gpt-5" title="按命令行参数解析，不执行额外 shell 命令" style="flex:1;min-width:160px">
       <button class="primary" id="lnStartBtn" onclick="startAgent()" data-i18n="launch.start">+ 新建 agent</button>
       <span class="muted" id="boardInfo" style="font-size:11px;margin-left:auto"></span>
     </div>
@@ -2149,6 +2150,7 @@ async function startAgent(){
   const layout=document.getElementById('lnLayout').value;
   const workspace=document.getElementById('lnWorkspace').value;
   const workdir=document.getElementById('lnWorkdir').value.trim();
+  const args=document.getElementById('lnArgs').value.trim();
   const mailError=agentMailRequirementError();
   if(mailError){toast(mailError,5000);return}
   if(!session){toast(t('launch.nosession','还没有 session,先创建一个工作区'));showSetupModal();return}
@@ -2162,7 +2164,7 @@ async function startAgent(){
   button.textContent=qoderSlow?'QoderCLI 正在初始化…':'正在启动…';
   if(qoderSlow)toast('QoderCLI 首次启动可能约 60 秒，请稍候');
   try{
-    const r=await api('/api/herdr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agent,name,layout,workspace})});
+    const r=await api('/api/herdr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agent,name,layout,workspace,args})});
     if(r.error)toast('启动: '+r.error);else{
       const mail=r.agent_mail||{};
       const mailStatus=mail.notified?(' · 身份 '+mail.name+' 已通知'):(mail.warning?(' · Agent Mail: '+mail.warning):'');
@@ -3171,10 +3173,10 @@ function setupNextAgentName(agent,excludeId=null){
   do{name=`${agent}-${index++}`}while(used.has(name.toLowerCase()));
   return name;
 }
-function setupParticipant(agent,role,task,reviewTarget=null){
+function setupParticipant(agent,role,task,reviewTarget=null,args=''){
   SETUP_AGENT_SEQ++;
   const id='agent-'+SETUP_AGENT_SEQ;
-  return {id,name:setupNextAgentName(agent),agent,role,task,workspace:'auto',review_target:reviewTarget};
+  return {id,name:setupNextAgentName(agent),agent,role,task,args,workspace:'auto',review_target:reviewTarget};
 }
 function setupMode(mode){
   SETUP_MODE=mode;
@@ -3218,9 +3220,10 @@ function renderSetupAgents(){
         <button class="icon" data-action="setupRemove" data-id="${esc(p.id)}" title="移除 Agent"${SETUP_PARTICIPANTS.length===1?' disabled':''}>✕</button>
       </div>
       <div class="setup-agent-task">
-        <input data-id="${esc(p.id)}" data-field="task" value="${esc(p.task)}" placeholder="填写真实任务和验收条件">
+        <input data-id="${esc(p.id)}" data-field="task" value="${esc(p.task)}" placeholder="任务和验收条件(选填)">
         <select data-id="${esc(p.id)}" data-field="workspace" aria-label="工作目录策略">${setupWorkspaceOptions(p.workspace)}</select>
-      </div>${review}
+      </div>
+      <input data-id="${esc(p.id)}" data-field="args" value="${esc(p.args||'')}" maxlength="2048" placeholder="启动参数（选填），例如 --model gpt-5" title="按命令行参数解析，不执行额外 shell 命令" style="width:100%;margin-top:7px;box-sizing:border-box">${review}
     </div>`;
   }).join('');
   renderSetupPreview();
@@ -3268,7 +3271,7 @@ function setupErrors(){
   if(!SETUP_PARTICIPANTS.length)errors.push('至少添加一个 Agent');
   if(SETUP_PARTICIPANTS.some(p=>!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(p.name||'')))errors.push('实例名称只能包含字母、数字、_、-，最长 32 位');
   if(new Set(SETUP_PARTICIPANTS.map(p=>(p.name||'').toLowerCase())).size!==SETUP_PARTICIPANTS.length)errors.push('实例名称不能重复');
-  if(SETUP_PARTICIPANTS.some(p=>!p.task.trim()))errors.push('请填写每个 Agent 的真实任务');
+  // task 选填(前后端均已放开)
   if(SETUP_MODE==='develop_review'&&(!writers.length||!SETUP_PARTICIPANTS.some(p=>p.role==='reviewer')))errors.push('开发 + 复核需要开发者和 Reviewer');
   if(SETUP_MODE==='parallel'&&writers.length<2)errors.push('并行开发至少需要两名写入者');
   if(writers.length>1&&writers.some(p=>p.workspace==='shared'))errors.push('多个并行写入者不能共享目录');
@@ -3349,7 +3352,7 @@ async function doSetupWorkspace(){
   if(errors.length){toast(errors[0]);renderSetupPreview();return}
   SETUP_SUBMITTING=true;renderSetupPreview();
   let setupSucceeded=false;
-  const participants=SETUP_PARTICIPANTS.map(p=>({...p,task:p.task.trim()}));
+  const participants=SETUP_PARTICIPANTS.map(p=>({...p,task:p.task.trim(),args:(p.args||'').trim()}));
   const agents=participants.map(p=>p.agent);
   const qoderSlow=participants.some(p=>['qoder','qodercli','qodercn'].includes(p.agent));
   const res=document.getElementById('suResult');

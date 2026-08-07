@@ -952,7 +952,7 @@ def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
         raise AssertionError("非 Git 目录不应启动并行写入者")
 
 
-def test_prepare_workspace_rejects_blank_participant_task(tmp_path):
+def test_prepare_workspace_accepts_blank_participant_task(tmp_path):
     req = server.SetupWorkspaceReq(
         session="demo",
         workdir=str(tmp_path),
@@ -962,13 +962,12 @@ def test_prepare_workspace_rejects_blank_participant_task(tmp_path):
         ],
     )
 
-    try:
-        server._prepare_workspace(req)
-    except server.HTTPException as exc:
-        assert exc.status_code == 400
-        assert "真实任务" in exc.detail
-    else:
-        raise AssertionError("协作工作区不应接受空白任务")
+    plans, warnings = server._prepare_workspace(req)
+
+    assert warnings == []
+    assert plans[0]["task"] == ""
+    briefing = server._workspace_briefing(req, plans[0], plans)
+    assert "你的任务:" not in briefing
 
 
 def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
@@ -979,12 +978,16 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
         server.herdr_client, "list_sessions",
         lambda: [{"name": "demo", "status": "running"}],
     )
-    monkeypatch.setattr(
-        server.herdr_client, "start_agent",
-        lambda session, workdir, agent, **kwargs: {
-            "available": True, "pane_id": "w1:p2" if agent == "codex" else "w1:p3",
-        },
-    )
+    starts = []
+
+    def start_agent(session, workdir, agent, **kwargs):
+        starts.append((session, workdir, agent, kwargs))
+        return {
+            "available": True,
+            "pane_id": "w1:p2" if agent == "codex" else "w1:p3",
+        }
+
+    monkeypatch.setattr(server.herdr_client, "start_agent", start_agent)
     monkeypatch.setattr(server.herdr_client, "snapshot", lambda: {"sessions": []})
     sent = []
     monkeypatch.setattr(
@@ -1001,7 +1004,10 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
             "workdir": str(tmp_path),
             "mode": "develop_review",
             "participants": [
-                {"id": "lead", "agent": "codex", "role": "lead", "task": "实现"},
+                {
+                    "id": "lead", "agent": "codex", "role": "lead",
+                    "task": "实现", "args": '--model "gpt 5" ;',
+                },
                 {
                     "id": "review", "agent": "kimi", "role": "reviewer",
                     "task": "复核", "review_target": "lead",
@@ -1019,6 +1025,8 @@ def test_setup_workspace_briefs_roles_without_agent_mail(monkeypatch, tmp_path):
     assert "你的角色: Reviewer" in sent[1][1]
     assert "共享工作目录" in sent[1][1]
     assert "detached worktree" not in sent[1][1]
+    assert starts[0][3]["args"] == "--model 'gpt 5' ';'"
+    assert starts[1][3]["args"] == ""
     for _, briefing, _ in sent:
         assert "每完成一个里程碑检查一次未读消息" in briefing
         assert "多封消息按时间顺序处理" in briefing
@@ -1327,6 +1335,7 @@ def test_start_agent_can_create_named_isolated_worktree(monkeypatch, tmp_path):
         json={
             "session": "demo", "workdir": str(repo), "agent": "codex",
             "name": "codex-2", "layout": "right", "workspace": "isolated",
+            "args": '--model "gpt 5" ;',
         },
     )
 
@@ -1336,7 +1345,40 @@ def test_start_agent_can_create_named_isolated_worktree(monkeypatch, tmp_path):
     assert body["workspace"]["branch"] == "agent-cockpit/demo/codex-2"
     assert Path(body["workspace"]["worktree"]).is_dir()
     assert calls[0][0][1] == body["workspace"]["workdir"]
-    assert calls[0][1] == {"layout": "right", "label": "codex-2"}
+    assert calls[0][1] == {
+        "layout": "right", "label": "codex-2",
+        "args": "--model 'gpt 5' ';'",
+    }
+
+
+def test_start_agent_rejects_invalid_args_before_creating_worktree(
+    monkeypatch, tmp_path,
+):
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "_agent_mail_requirement", lambda: None)
+    monkeypatch.setattr(
+        server,
+        "_ensure_worktree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("参数无效时不应创建 worktree")
+        ),
+    )
+
+    response = TestClient(server.app).post(
+        "/api/herdr/start",
+        headers={"authorization": "Bearer secret"},
+        json={
+            "session": "demo", "workdir": str(repo), "agent": "codex",
+            "name": "codex-2", "workspace": "isolated",
+            "args": '--model "unterminated',
+        },
+    )
+
+    assert response.status_code == 400
+    assert "启动参数格式无效" in response.json()["detail"]
 
 
 def test_start_agent_registers_and_notifies_unique_qoder_identity(

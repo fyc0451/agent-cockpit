@@ -29,6 +29,7 @@ QODER_AGENT_START_TIMEOUT = 60.0
 QODER_AGENTS = frozenset({"qoder", "qodercli", "qodercn"})
 AGENT_STABLE_SECONDS = 1.5
 AGENT_POLL_INTERVAL = 0.2
+MAX_AGENT_ARGS_LENGTH = 2048
 
 
 def _agent_start_timeout(agent: str) -> float:
@@ -65,8 +66,22 @@ def _find_agent_bin(name: str) -> str:
 
 
 # agent 类型 → 启动命令构造器
-def _agent_cmd(agent: str, workdir: str) -> str:
-    """构造 agent 启动命令(完整路径 + shlex 安全)。"""
+def normalize_agent_args(args: str = "") -> str:
+    """把用户输入解析为参数列表后逐项引用，禁止把它升级成 shell 语句。"""
+    if not isinstance(args, str):
+        raise ValueError("启动参数必须是字符串")
+    if len(args) > MAX_AGENT_ARGS_LENGTH:
+        raise ValueError(f"启动参数不能超过 {MAX_AGENT_ARGS_LENGTH} 个字符")
+    if any(char in args for char in ("\0", "\r", "\n")):
+        raise ValueError("启动参数不能包含换行或 NUL 字符")
+    try:
+        return shlex.join(shlex.split(args, posix=True))
+    except ValueError as exc:
+        raise ValueError(f"启动参数格式无效: {exc}") from exc
+
+
+def _agent_cmd(agent: str, workdir: str, args: str = "") -> str:
+    """构造 agent 启动命令，二进制、目录和额外参数均经 shlex 安全引用。"""
     wdb = shlex.quote(workdir)
     bins = {
         "codex": lambda b: f"{shlex.quote(b)} -C {wdb}",
@@ -80,7 +95,9 @@ def _agent_cmd(agent: str, workdir: str) -> str:
     }
     bin_path = _find_agent_bin(agent)
     builder = bins.get(agent, bins["codex"])
-    return builder(bin_path)
+    cmd = builder(bin_path)
+    extra = normalize_agent_args(args)
+    return f"{cmd} {extra}" if extra else cmd
 
 
 def is_available() -> bool:
@@ -502,7 +519,7 @@ def _rename_agent_context(
 
 def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
-    layout: str = "tab", label: str | None = None,
+    layout: str = "tab", label: str | None = None, args: str = "",
 ) -> dict[str, Any]:
     """在指定 session 里启动一个 agent pane(新建 window/pane 跑 agent)。
 
@@ -511,6 +528,8 @@ def start_agent(
     """
     if not is_available():
         return {"available": False}
+    normalized_args = normalize_agent_args(args)
+    agent_args = shlex.split(normalized_args) if normalized_args else []
     # 只复用当前 live snapshot 中 agent 与工作目录都匹配的 pane。仅按 agent
     # 复用会把新任务静默送进另一个项目；不在 snapshot 中的旧 pane 不视为存活。
     snap = _snapshot_session(session)
@@ -578,7 +597,7 @@ def start_agent(
     if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
         return {"available": True, "error": f"{agent} 未安装或不在 PATH"}
     # 构造 agent 启动命令(用 _agent_cmd 统一处理完整路径)
-    cmd_str = _agent_cmd(agent, workdir)
+    cmd_str = _agent_cmd(agent, workdir, normalized_args)
     before_ids = {
         str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
     }
@@ -649,6 +668,7 @@ def start_agent(
                     "--session", session, "agent", "start", label or agent,
                     "--kind", "qodercli", "--pane", new_pid,
                     "--timeout", str(int(start_timeout * 1000)),
+                    *(["--", *agent_args] if agent_args else []),
                 ],
                 timeout=int(start_timeout) + 5,
             )

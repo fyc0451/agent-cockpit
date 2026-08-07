@@ -317,7 +317,7 @@ def test_setup_workspace_supports_roles_tasks_and_automatic_worktrees():
     assert layout.group(1).find('value="tab"') < layout.group(1).find('value="right"')
 
 
-def test_setup_workspace_requires_real_tasks_and_keeps_success_locked():
+def test_setup_workspace_allows_optional_tasks_and_keeps_success_locked():
     js = _inline_js()
     modes = js.split("function setupMode(mode){", 1)[1].split(
         "function setupRoleOptions", 1,
@@ -333,8 +333,9 @@ def test_setup_workspace_requires_real_tasks_and_keeps_success_locked():
     assert "检查需求、代码和测试" not in modes
     assert "负责模块 A" not in modes
     assert "setupParticipant(first,'lead','')" in modes
-    assert "SETUP_PARTICIPANTS.some(p=>!p.task.trim())" in errors
-    assert "请填写每个 Agent 的真实任务" in errors
+    assert "SETUP_PARTICIPANTS.some(p=>!p.task.trim())" not in errors
+    assert "请填写每个 Agent 的真实任务" not in errors
+    assert "task 选填" in errors
     assert "SETUP_PARTICIPANTS.length>1&&" not in errors
     assert "let setupSucceeded=false" in submit
     assert "setupSucceeded=true" in submit
@@ -368,6 +369,20 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     assert "function launchSessionChanged" in js
     assert "const preferredSession=(TERM_ID&&TERM_SESSIONS[TERM_ID])||CURRENT_TERM?.session||''" in js
     assert "await loadSessions(preferredSession)" in js
+
+
+def test_agent_launch_args_are_available_only_in_on_demand_forms():
+    js = _inline_js()
+    launch = HTML.split('id="launchModal"', 1)[1].split('id="termDrawer"', 1)[0]
+
+    assert 'id="lnArgs"' in launch
+    assert 'maxlength="2048"' in launch
+    assert '按命令行参数解析，不执行额外 shell 命令' in launch
+    assert "JSON.stringify({session,workdir,agent,name,layout,workspace,args})" in js
+    assert 'data-field="args"' in HTML
+    assert "args:(p.args||'').trim()" in js
+    assert "--dangerously-bypass-approvals-and-sandbox" not in HTML
+    assert "#lnSession,#lnName,#lnWorkdir,#lnArgs" in HTML
     assert "const selected=preferredSession||sel.value" in js
     assert "LAUNCH_SESSION_DIRS" in js
     assert "s.directory||''" in js
@@ -376,7 +391,7 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     launch = js.split("async function startAgent(){", 1)[1].split(
         "// ============ 消息 view", 1,
     )[0]
-    assert "JSON.stringify({session,workdir,agent,name,layout,workspace})" in launch
+    assert "JSON.stringify({session,workdir,agent,name,layout,workspace,args})" in launch
     assert "workspace==='shared'" in launch
     assert "共享工作目录，并发写入可能冲突" in launch
     assert 'id="lnStartBtn"' in HTML

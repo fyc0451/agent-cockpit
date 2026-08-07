@@ -1,8 +1,35 @@
+import shlex
 import sys
 import time
 from unittest.mock import call
 
 import herdr_client
+import pytest
+
+
+def test_normalize_agent_args_preserves_argv_without_shell_execution():
+    raw = '--model "gpt 5" ; touch /tmp/pwn $(id)'
+
+    normalized = herdr_client.normalize_agent_args(raw)
+
+    assert shlex.split(normalized) == [
+        "--model", "gpt 5", ";", "touch", "/tmp/pwn", "$(id)",
+    ]
+    assert "';'" in normalized
+    assert "'$(id)'" in normalized
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        '--model "unterminated',
+        "--model gpt\n--dangerous",
+        "x" * (herdr_client.MAX_AGENT_ARGS_LENGTH + 1),
+    ],
+)
+def test_normalize_agent_args_rejects_invalid_input(args):
+    with pytest.raises(ValueError, match="启动参数"):
+        herdr_client.normalize_agent_args(args)
 
 
 def test_onboarding_required_when_config_is_missing(monkeypatch, tmp_path):
@@ -354,6 +381,7 @@ def test_start_agent_allows_qodercli_slow_session_hook(monkeypatch):
 
     result = herdr_client.start_agent(
         "demo", "/tmp/project", agent="qodercli", layout="tab", label="qoder-2",
+        args='--model "qwen 2.5" ; $(id)',
     )
 
     assert result["pane_id"] == "w1:p2"
@@ -367,6 +395,7 @@ def test_start_agent_allows_qodercli_slow_session_hook(monkeypatch):
         [
             "--session", "demo", "agent", "start", "qoder-2",
             "--kind", "qodercli", "--pane", "w1:p2", "--timeout", "60000",
+            "--", "--model", "qwen 2.5", ";", "$(id)",
         ],
         timeout=65,
     ) in calls

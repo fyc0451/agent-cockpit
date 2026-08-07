@@ -433,6 +433,7 @@ class StartAgentReq(BaseModel):
     name: str | None = None  # 工作区内唯一的本地实例名；为空时保留旧版复用语义
     layout: str = "tab"
     workspace: str = "shared"  # shared(兼容旧调用) | isolated(新建/复用 worktree)
+    args: str = Field(default="", max_length=herdr_client.MAX_AGENT_ARGS_LENGTH)
 
 
 class WorkspaceParticipantReq(BaseModel):
@@ -444,6 +445,7 @@ class WorkspaceParticipantReq(BaseModel):
     task: str = ""
     workspace: str = "auto"
     review_target: str | None = None
+    args: str = Field(default="", max_length=herdr_client.MAX_AGENT_ARGS_LENGTH)
 
 
 class SetupWorkspaceReq(BaseModel):
@@ -2733,6 +2735,10 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     name = req.name.strip() if req.name else None
     if name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
         raise HTTPException(400, "实例名称只能包含字母、数字、_、-，最长 32 位")
+    try:
+        normalized_args = herdr_client.normalize_agent_args(req.args)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     project_dir = Path(req.workdir).expanduser().resolve()
     workspace: dict[str, Any] = {
         "strategy": "shared", "workdir": str(project_dir),
@@ -2759,7 +2765,7 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     try:
         result = herdr_client.start_agent(
             req.session, workspace["workdir"], req.agent, req.model,
-            layout=req.layout, label=name,
+            layout=req.layout, label=name, args=normalized_args,
         )
     except Exception as exc:
         cleanup_errors = (
@@ -3229,8 +3235,17 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         raise HTTPException(400, "participants 包含不支持的角色")
     if any(p.workspace not in VALID_WORKSPACE_STRATEGIES for p in participants):
         raise HTTPException(400, "participants 包含不支持的工作目录策略")
-    if not legacy and any(not p.task.strip() for p in participants):
-        raise HTTPException(400, "请填写每个 Agent 的真实任务")
+    # task 为选填:留空时 _workspace_briefing 会省略"你的任务"行
+    normalized_agent_args = []
+    for participant in participants:
+        try:
+            normalized_agent_args.append(
+                herdr_client.normalize_agent_args(participant.args)
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                400, f"{participant.name or participant.agent} 的{exc}"
+            ) from exc
 
     ids = []
     names = []
@@ -3283,7 +3298,9 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
 
     plans = []
     created_workspaces: list[dict[str, Any]] = []
-    for index, (participant, pid, name) in enumerate(zip(participants, ids, names)):
+    for index, (participant, pid, name, normalized_args) in enumerate(
+        zip(participants, ids, names, normalized_agent_args)
+    ):
         strategy = participant.workspace
         if strategy == "auto":
             if participant.role == "reviewer":
@@ -3327,6 +3344,7 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
             "agent": participant.agent,
             "role": participant.role,
             "task": participant.task.strip(),
+            "args": normalized_args,
             "review_target": participant.review_target,
             **workspace,
         })
@@ -3346,9 +3364,10 @@ def _workspace_briefing(
         "[Agent Cockpit 工作区任务]",
         f"你的本地实例: {plan['name']} ({plan['agent']})",
         f"你的角色: {role_labels[plan['role']]}",
-        f"你的任务: {plan['task']}",
-        f"工作目录策略: {plan['strategy']} ({plan['workdir']})",
     ]
+    if plan["task"].strip():
+        lines.append(f"你的任务: {plan['task']}")
+    lines.append(f"工作目录策略: {plan['strategy']} ({plan['workdir']})")
     if coworkers:
         lines.append(f"协作者: {coworkers}")
     if plan["role"] == "reviewer":
@@ -3613,7 +3632,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         agent_type = plan["agent"]
         r = herdr_client.start_agent(
             req.session, plan["workdir"], agent_type, layout=req.layout,
-            label=plan["name"],
+            label=plan["name"], args=plan.get("args", ""),
         )
         results.append({
             "agent": agent_type, "name": plan["name"], "plan": plan, "start": r,
