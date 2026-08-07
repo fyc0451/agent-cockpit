@@ -1505,3 +1505,19 @@ def test_terminal_dark_boost_stream_safe_with_carry():
     assert "carry" in fn
     assert "_escTailSplit" in fn
     assert "includes('38;')" in fn  # 快速路径
+
+
+def test_settings_hub_error_shows_actionable_fix():
+    # 新装机最常见失败(token 未配置)必须给可操作的恢复指引,不只报错
+    js = _inline_js()
+    assert "set.hub.fix.token" in js
+    assert "set.hub.fix.conn" in js
+    assert "HTTP_BEARER_TOKEN" in js
+    assert "~/.agent-mail/client.env" in js
+    hub = js.split("const hubStatus=document.getElementById('setHubStatus')", 1)[1].split(
+        "const teamHub=", 1
+    )[0]
+    assert "reason.toLowerCase().includes('token')" in hub
+    assert "chmod 600 ~/.agent-mail/client.env" in hub
+    assert "点击本页“保存”或重启 Cockpit" in hub
+    assert "hubStatus.appendChild(hint)" in hub

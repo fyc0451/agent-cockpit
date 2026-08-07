@@ -904,7 +904,7 @@ en:{
 'drawer.title':'Terminal','drawer.send':'Send',
 'set.lang':'Language','set.dirs':'Accessible directories','set.dirs.hint':'Add/remove directories at the top of the Files page.','set.diragent':'Default agent per directory','set.diragent.dir':'Directory','set.diragent.agent':'Default agent','set.diragent.ph':'Absolute directory path','set.add':'＋ Add','set.enabled':'Enabled agents','set.enabled.hint':'Launch menus only list enabled agents.','set.limits':'Runtime limits','set.upload_max':'Upload limit (MB)','set.max_terms':'Max terminals','set.idle_ttl':'Idle terminal TTL (s)','set.write_timeout':'Terminal write timeout (s)','set.cancel':'Cancel','set.cancelled':'Changes cancelled','set.save':'Save','set.saved':'Saved ✓','set.savefail':'Save failed: ','set.dirph':'/abs/path','set.theme':'Appearance','set.theme.light':'☀️ Light','set.theme.dark':'🌙 Dark','set.theme.hint':'The terminal also switches to a light background in light mode.',
 'set.env':'Environment check','set.env.hint':'On first use, make sure these components are ready; ❌ means install first.','set.env.herdr':'herdr (session backend)','set.env.mail':'Agent Mail (required, messaging)','set.env.missing':'not installed',
-'set.hub':'Local Agent Mail Hub address','set.hub.hint':'Controls only local agent collaboration and messages, not the Team Hub. The token is never read or shown; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ','set.teamhub':'Team Hub connection','set.teamhub.hint':'Applied immediately. Company-private IPs may use HTTP; public endpoints must use HTTPS.',
+'set.hub':'Local Agent Mail Hub address','set.hub.hint':'Controls only local agent collaboration and messages, not the Team Hub. The token is never read or shown; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ','set.hub.fix.token':'Fix: write the HTTP_BEARER_TOKEN used by the local Hub to the token= line in ~/.agent-mail/client.env, then run chmod 600 ~/.agent-mail/client.env. Keep hub= pointed at the local Hub, then click Save here or restart Cockpit.','set.hub.fix.conn':'Fix: make sure the local Hub process is running and listening on the expected port, then verify the hub= address in ~/.agent-mail/client.env. After editing it, click Save here or restart Cockpit.','set.teamhub':'Team Hub connection','set.teamhub.hint':'Applied immediately. Company-private IPs may use HTTP; public endpoints must use HTTPS.',
 'set.termfont':'Terminal font size','set.termfont.hint':'Applies to this device only, effective immediately.',
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ',
 },
@@ -925,7 +925,7 @@ ja:{
 'drawer.title':'端末','drawer.send':'送信',
 'set.lang':'表示言語','set.dirs':'アクセス可能ディレクトリ','set.dirs.hint':'ディレクトリの追加・削除は「ファイル」ページ上部で行います。','set.diragent':'ディレクトリ別デフォルト agent','set.diragent.dir':'ディレクトリ','set.diragent.agent':'デフォルト agent','set.diragent.ph':'ディレクトリの絶対パス','set.add':'＋ 追加','set.enabled':'有効な agent','set.enabled.hint':'起動メニューには有効な agent のみ表示されます。','set.limits':'実行パラメータ','set.upload_max':'アップロード上限 (MB)','set.max_terms':'最大ターミナル数','set.idle_ttl':'アイドル端末の回収(秒)','set.write_timeout':'端末書き込みタイムアウト(秒)','set.cancel':'キャンセル','set.cancelled':'変更をキャンセルしました','set.save':'保存','set.saved':'保存しました ✓','set.savefail':'保存に失敗: ','set.dirph':'/abs/path','set.theme':'外観','set.theme.light':'☀️ ライト','set.theme.dark':'🌙 ダーク','set.theme.hint':'ライトモードでは端末も淡色背景になります。',
 'set.env':'環境チェック','set.env.hint':'初回利用前にこれらのコンポーネントを確認してください。❌ は要インストールです。','set.env.herdr':'herdr(セッションバックエンド)','set.env.mail':'Agent Mail(必須、メッセージ機能)','set.env.missing':'未インストール',
-'set.hub':'ローカル Agent Mail Hub アドレス','set.hub.hint':'ローカル agent の連携とメッセージだけを制御し、Team Hub は切り替えません。Token は表示せず、保存後すぐ反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ','set.teamhub':'Team Hub 接続','set.teamhub.hint':'保存後すぐ反映されます。社内プライベート IP は HTTP を使用でき、公開アドレスには HTTPS が必要です。',
+'set.hub':'ローカル Agent Mail Hub アドレス','set.hub.hint':'ローカル agent の連携とメッセージだけを制御し、Team Hub は切り替えません。Token は表示せず、保存後すぐ反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ','set.hub.fix.token':'修復: ローカル Hub の起動に使った HTTP_BEARER_TOKEN を ~/.agent-mail/client.env の token= 行へ書き込み、chmod 600 ~/.agent-mail/client.env を実行してください。hub= はローカル Hub を指すままにして、この画面で「保存」を押すか Cockpit を再起動します。','set.hub.fix.conn':'修復: ローカル Hub プロセスが起動して想定ポートを listen していることと、~/.agent-mail/client.env の hub= アドレスを確認してください。変更後、この画面で「保存」を押すか Cockpit を再起動します。','set.teamhub':'Team Hub 接続','set.teamhub.hint':'保存後すぐ反映されます。社内プライベート IP は HTTP を使用でき、公開アドレスには HTTPS が必要です。',
 'set.termfont':'端末フォントサイズ','set.termfont.hint':'このデバイスのみに適用され、即時反映されます。',
 'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ',
 }};
@@ -1013,9 +1013,19 @@ function renderSettings(){
   if(hubInput&&document.activeElement!==hubInput)hubInput.value=HUB_CONFIG_EDIT;
   const hubStatus=document.getElementById('setHubStatus');
   if(hubStatus&&HUB_CONFIG?.status){
-    hubStatus.textContent=HUB_CONFIG.status.available
-      ?`✅ ${t('set.hub.ok','Hub 可连接')}`
-      :`❌ ${t('set.hub.bad','Hub 不可用: ')}${HUB_CONFIG.status.reason||''}`;
+    if(HUB_CONFIG.status.available){
+      hubStatus.textContent=`✅ ${t('set.hub.ok','Hub 可连接')}`;
+    }else{
+      // 给出可操作的恢复指引,不只报错(新装机最常见:token 未配置)
+      const reason=HUB_CONFIG.status.reason||'';
+      hubStatus.textContent=`❌ ${t('set.hub.bad','Hub 不可用: ')}${reason}`;
+      const hint=document.createElement('div');
+      hint.style.cssText='margin-top:6px;line-height:1.7';
+      hint.textContent=reason.toLowerCase().includes('token')
+        ?t('set.hub.fix.token','修复: 把本机 Hub 启动时使用的 HTTP_BEARER_TOKEN 写入 ~/.agent-mail/client.env 的 token= 行,并执行 chmod 600 ~/.agent-mail/client.env;hub= 保持本机 Hub 地址。然后点击本页“保存”或重启 Cockpit。')
+        :t('set.hub.fix.conn','修复: 确认本机 Hub 进程已启动并监听对应端口,核对 ~/.agent-mail/client.env 的 hub= 地址;修改后点击本页“保存”或重启 Cockpit。');
+      hubStatus.appendChild(hint);
+    }
   }
   const teamHub=document.getElementById('setTeamHub');
   const humanAuth=document.getElementById('setHumanAuth');
