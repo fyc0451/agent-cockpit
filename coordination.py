@@ -379,6 +379,26 @@ def run_participants(run_id: str) -> list[dict[str, Any]]:
         ]
 
 
+def panes_by_mail_name(mail_name: str) -> dict[str, set]:
+    """active runs 中某 mail 花名强绑定的 session → {pane_id}（消息通知一级选路用）。"""
+    if not mail_name:
+        return {}
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT r.session, p.pane_id FROM runs r "
+            "JOIN participants p ON p.run_id = r.run_id "
+            "WHERE r.state='active' AND p.mail_name = ?",
+            (mail_name,),
+        ).fetchall()
+    out: dict[str, set] = {}
+    for row in rows:
+        session = str(row["session"] or "")
+        pane_id = str(row["pane_id"] or "")
+        if session and pane_id:
+            out.setdefault(session, set()).add(pane_id)
+    return out
+
+
 def active_context(project_key: str, mail_name: str) -> dict[str, Any] | None:
     project = str(Path(project_key).expanduser().resolve())
     with _connect() as con:

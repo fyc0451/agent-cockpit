@@ -303,28 +303,84 @@ def _session_bound_to(bindings: dict, session: dict, project_key: str) -> bool:
     )
 
 
-def _select_notify_targets(candidates: list[tuple], project_key: str) -> list[tuple]:
-    """绑定或 cwd 命中的 pane 仍须全局唯一；无命中时仅允许全局唯一兜底。"""
-    matches = []
+def _git_common_dir(path: str) -> str | None:
+    """返回目录所属 git 仓库的公共 git dir（worktree 归一到主仓库），失败返回 None。"""
+    if not path:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except Exception:
+        return None
+    out = (result.stdout or "").strip()
+    if result.returncode != 0 or not out:
+        return None
+    if not os.path.isabs(out):
+        out = os.path.join(path, out)
+    try:
+        return os.path.realpath(out)
+    except OSError:
+        return None
+
+
+def _identity_bound_panes(mail_name: str) -> dict[str, set]:
+    """coordination 强绑定: mail_name → {session 内绑定的 pane_id}。"""
+    try:
+        return coordination.panes_by_mail_name(mail_name)
+    except Exception:
+        return {}
+
+
+def _select_notify_targets(
+    candidates: list[tuple], project_key: str, mail_name: str = "",
+) -> list[tuple]:
+    """分级选路；同级唯一才投，歧义/无相关候选一律跳过（不再全局同类型兜底）。
+
+    优先级：1) coordination 强绑定(mail_name→session/pane)；2) session 显式绑定
+    项目；3) pane cwd 位于项目根或其子目录；4) cwd 与项目根同 git common-dir
+    （覆盖 worktree）。cwd 不可访问时仅 1/2 级可用；返回
+    [(session, pane_id, cwd, is_exact)]，is_exact 仅当 cwd 恰为项目根。
+    """
     eligible = []
     for candidate in candidates:
-        session, pane_id, cwd = candidate[:3]
         bound = bool(candidate[3]) if len(candidate) > 3 else False
         has_binding = bool(candidate[4]) if len(candidate) > 4 else False
         if has_binding and not bound:
             continue
         eligible.append(candidate)
-        exact = bool(cwd) and (
-            os.path.realpath(os.path.expanduser(cwd))
-            == os.path.realpath(os.path.expanduser(project_key))
-        )
-        if exact or bound:
-            matches.append((session, pane_id, cwd, exact))
-    if len(matches) == 1:
-        return matches
-    if not matches and len(eligible) == 1:
-        session, pane_id, cwd = eligible[0][:3]
-        return [(session, pane_id, cwd, False)]
+    if not eligible:
+        return []
+    identity_panes = _identity_bound_panes(mail_name)
+    tiers: dict[int, list] = {1: [], 2: [], 3: [], 4: []}
+    proj_real = os.path.realpath(os.path.expanduser(project_key or ""))
+    proj_git = _git_common_dir(proj_real)
+    for candidate in eligible:
+        session, pane_id, cwd = candidate[:3]
+        bound = bool(candidate[3]) if len(candidate) > 3 else False
+        if pane_id in (identity_panes.get(session) or set()):
+            tiers[1].append(candidate)
+            continue
+        if bound:
+            tiers[2].append(candidate)
+            continue
+        if not cwd or not os.path.isdir(cwd):
+            continue
+        cwd_real = os.path.realpath(os.path.expanduser(cwd))
+        if cwd_real == proj_real or cwd_real.startswith(proj_real + os.sep):
+            tiers[3].append(candidate)
+            continue
+        if proj_git and _git_common_dir(cwd_real) == proj_git:
+            tiers[4].append(candidate)
+    for tier in (1, 2, 3, 4):
+        picks = tiers[tier]
+        if len(picks) == 1:
+            session, pane_id, cwd = picks[0][:3]
+            exact = bool(cwd) and (
+                os.path.realpath(os.path.expanduser(cwd)) == proj_real
+            )
+            return [(session, pane_id, cwd, exact)]
     return []
 
 
@@ -386,72 +442,147 @@ def _recipient_typing(session: str, pane_id: str) -> bool:
     return fresh(entry.get("unknown"))
 
 
+def _herdr_env() -> dict:
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(HERDR_BIN) + ":" + env.get("PATH", "")
+    return env
+
+
+def _session_panes(session_name: str, env: dict) -> list[dict]:
+    """读取某 session 的 pane 快照（SSE data: 行优先）。"""
+    result = subprocess.run(
+        [HERDR_BIN, "--session", session_name, "api", "snapshot"],
+        capture_output=True, text=True, timeout=5, env=env,
+    )
+    raw = result.stdout
+    for line in raw.splitlines():
+        if line.startswith("data:"):
+            raw = line[5:].strip()
+            break
+    try:
+        return json.loads(raw).get("result", {}).get("snapshot", {}).get("panes", [])
+    except (ValueError, json.JSONDecodeError):
+        return []
+
+
+def resolve_explicit_target(
+    session_name: str, pane_id: str, agent_type: str,
+) -> tuple[str, str, str]:
+    """校验显式通知目标，返回 (session, pane_id, cwd)；不合法直接抛 ValueError。"""
+    if not session_name or not pane_id:
+        raise ValueError("显式目标需要同时提供 session 与 pane")
+    env = _herdr_env()
+    running = {
+        str(row.get("name")) for row in _session_rows(env) if row.get("running")
+    }
+    if session_name not in running:
+        raise ValueError(f"session 不存在或未运行: {session_name}")
+    pane = next(
+        (p for p in _session_panes(session_name, env)
+         if str(p.get("pane_id") or "") == pane_id),
+        None,
+    )
+    if pane is None:
+        raise ValueError(f"pane 不存在: {session_name}/{pane_id}")
+    pane_agent = str(pane.get("agent") or "")
+    if not _agent_types_match(agent_type, pane_agent):
+        raise ValueError(
+            f"pane {session_name}/{pane_id} 的 agent 类型为 "
+            f"{pane_agent or '空'}，与收件人类型 {agent_type} 不兼容"
+        )
+    cwd = str(pane.get("cwd") or pane.get("foreground_cwd") or "")
+    return session_name, pane_id, cwd
+
+
 def _notify_pane(
     agent_type: str, instance: str, msg_id: int, subject: str,
     project_key: str = "", intent: str = "info",
+    mail_name: str = "", explicit: tuple | None = None,
 ) -> None:
     if not os.path.isfile(HERDR_BIN) or not project_key:
         return
-    env = dict(os.environ)
-    env["PATH"] = os.path.dirname(HERDR_BIN) + ":" + env.get("PATH", "")
+    env = _herdr_env()
+    if explicit is not None:
+        session, pane_id, cwd = explicit
+        _deliver_notify_note(
+            env, session, pane_id, cwd, "explicit",
+            msg_id, subject, agent_type, instance, project_key, intent,
+        )
+        return
     bindings = _load_bindings()
     sessions = [row for row in _session_rows(env) if row.get("running")]
     candidates = []
     for session in sessions:
         try:
-            result = subprocess.run(
-                [HERDR_BIN, "--session", session["name"], "api", "snapshot"],
-                capture_output=True, text=True, timeout=5, env=env,
-            )
-            raw = result.stdout
-            for line in raw.splitlines():
-                if line.startswith("data:"):
-                    raw = line[5:].strip()
-                    break
-            panes = json.loads(raw).get("result", {}).get("snapshot", {}).get("panes", [])
-            bound_project = _session_mail_project(bindings, session)
-            bound = bool(bound_project) and os.path.realpath(
-                os.path.expanduser(bound_project)
-            ) == os.path.realpath(os.path.expanduser(project_key))
-            for pane in panes:
-                if (
-                    not _agent_types_match(agent_type, str(pane.get("agent") or ""))
-                    or not pane.get("pane_id")
-                ):
-                    continue
-                cwd = pane.get("cwd") or pane.get("foreground_cwd") or ""
-                candidates.append((
-                    session["name"], pane["pane_id"], cwd, bound, bool(bound_project)
-                ))
+            panes = _session_panes(session["name"], env)
         except Exception:
             continue
-    for session, pane_id, cwd, is_exact in _select_notify_targets(candidates, project_key):
-        if _recipient_typing(session, pane_id):
+        bound_project = _session_mail_project(bindings, session)
+        bound = bool(bound_project) and os.path.realpath(
+            os.path.expanduser(bound_project)
+        ) == os.path.realpath(os.path.expanduser(project_key))
+        for pane in panes:
+            if (
+                not _agent_types_match(agent_type, str(pane.get("agent") or ""))
+                or not pane.get("pane_id")
+            ):
+                continue
+            cwd = pane.get("cwd") or pane.get("foreground_cwd") or ""
+            candidates.append((
+                session["name"], pane["pane_id"], cwd, bound, bool(bound_project)
+            ))
+    targets = _select_notify_targets(candidates, project_key, mail_name=mail_name)
+    if not targets:
+        if candidates:
+            detail = "; ".join(
+                f"{s}/{p}(cwd={c or '无'})" for s, p, c, *_ in candidates[:8]
+            )
             print(
-                f"notice: {session}/{pane_id} 用户正在输入，跳过实时通知"
-                "（消息保留未读，对方里程碑自查可见）",
+                f"warning: 无法唯一确定 {agent_type} 的通知目标，已跳过实时通知"
+                "（消息保留未读）。候选: " + detail +
+                "。多实例场景可用 --session/--pane 显式指定。",
                 file=sys.stderr,
             )
-            continue
-        note = _notify_text(
-            msg_id, subject, agent_type, instance, project_key, cwd, is_exact, intent
+        return
+    for session, pane_id, cwd, is_exact in targets:
+        _deliver_notify_note(
+            env, session, pane_id, cwd, "auto" if not is_exact else "exact",
+            msg_id, subject, agent_type, instance, project_key, intent,
         )
-        try:
-            notified = subprocess.run(
-                [HERDR_BIN, "--session", session, "agent", "prompt", pane_id, note],
-                capture_output=True, text=True, timeout=8, env=env,
-            )
-            if notified.returncode != 0:
-                print(
-                    f"warning: Herdr 通知失败({session}/{pane_id}): "
-                    f"{notified.stderr.strip()[:200]}",
-                    file=sys.stderr,
-                )
-        except Exception as exc:
+
+
+def _deliver_notify_note(
+    env: dict, session: str, pane_id: str, cwd: str, source: str,
+    msg_id: int, subject: str, agent_type: str, instance: str,
+    project_key: str, intent: str,
+) -> None:
+    if _recipient_typing(session, pane_id):
+        print(
+            f"notice: {session}/{pane_id} 用户正在输入，跳过实时通知"
+            "（消息保留未读，对方里程碑自查可见）",
+            file=sys.stderr,
+        )
+        return
+    is_exact = source == "exact"
+    note = _notify_text(
+        msg_id, subject, agent_type, instance, project_key, cwd, is_exact, intent
+    )
+    try:
+        notified = subprocess.run(
+            [HERDR_BIN, "--session", session, "agent", "prompt", pane_id, note],
+            capture_output=True, text=True, timeout=8, env=env,
+        )
+        if notified.returncode != 0:
             print(
-                f"warning: Herdr 通知异常({session}/{pane_id}): {exc}",
+                f"warning: Herdr 通知失败({session}/{pane_id}): "
+                f"{notified.stderr.strip()[:200]}",
                 file=sys.stderr,
             )
+    except Exception as exc:
+        print(
+            f"warning: Herdr 通知异常({session}/{pane_id}): {exc}",
+            file=sys.stderr,
+        )
 
 
 def main() -> None:
@@ -470,7 +601,25 @@ def main() -> None:
     parser.add_argument("--idempotency-key", default="", help="团队回复重试时复用的幂等键")
     parser.add_argument("--ack", action="store_true")
     parser.add_argument("--no-notify", action="store_true")
+    parser.add_argument("--session", default="", help="显式通知目标 session（与 --pane 成对）")
+    parser.add_argument("--pane", default="", help="显式通知目标 pane id（与 --session 成对）")
+    parser.add_argument("--target", default="", help="显式通知目标，格式 session/pane（等价 --session+--pane）")
     args = parser.parse_args()
+
+    explicit_target = None
+    if args.target or args.session or args.pane:
+        if args.target and (args.session or args.pane):
+            raise SystemExit("error: --target 与 --session/--pane 不能同时使用")
+        if args.target:
+            parts = args.target.split("/", 1)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                raise SystemExit("error: --target 格式应为 session/pane")
+            target_session, target_pane = parts
+        else:
+            if not args.session or not args.pane:
+                raise SystemExit("error: 显式目标需要同时提供 --session 与 --pane")
+            target_session, target_pane = args.session, args.pane
+        explicit_target = (target_session, target_pane)
 
     body = args.body
     if not body and not sys.stdin.isatty():
@@ -496,6 +645,18 @@ def main() -> None:
     recipients = [*agent_recipients, *(f"@{item}" for item in human_recipients)]
     if not recipients:
         raise SystemExit("error: 收件人为空")
+    if explicit_target is not None:
+        for recipient in agent_recipients:
+            cli_identity = _notification_identity(recipient, identity["project_key"])
+            if not cli_identity:
+                continue
+            try:
+                resolve_explicit_target(
+                    explicit_target[0], explicit_target[1], cli_identity[0])
+            except (ValueError, RuntimeError) as exc:
+                raise SystemExit(
+                    f"error: 显式通知目标不可用: {exc}（不回退自动选路，消息未发送）"
+                ) from exc
     if args.idempotency_key and not 1 <= len(args.idempotency_key.strip()) <= 128:
         raise SystemExit("error: --idempotency-key 长度必须为 1-128")
     try:
@@ -609,10 +770,21 @@ def main() -> None:
                     file=sys.stderr,
                 )
                 continue
+            explicit_resolved = None
+            if explicit_target is not None:
+                try:
+                    explicit_resolved = resolve_explicit_target(
+                        explicit_target[0], explicit_target[1], agent_type,
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    raise SystemExit(
+                        f"error: 显式通知目标不可用: {exc}（不回退自动选路）"
+                    ) from exc
             try:
                 _notify_pane(
                     agent_type, instance, message_id, args.subject, project_key,
                     str(meta.get("intent") or "info"),
+                    mail_name=recipient, explicit=explicit_resolved,
                 )
             except Exception as exc:
                 print(

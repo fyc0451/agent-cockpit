@@ -1029,3 +1029,172 @@ def test_notify_not_deferred_when_typing_in_other_pane(monkeypatch, tmp_path):
     )
     module._notify_pane("kimi", "main", 904, "未知落点", str(project))
     assert prompts == []
+
+
+# ============ 分级选路与显式通知目标(#1162 修订版 A/B) ============
+
+def test_no_global_fallback_for_unrelated_unique_candidate():
+    """project_key 存在时,禁止跨项目'全局唯一同类型'兜底。"""
+    module = _load_mail_send()
+    assert module._select_notify_targets([
+        ("other", "w1:p9", "/somewhere/else"),
+    ], PROJECT) == []
+
+
+def test_cwd_subdir_unique_hit(tmp_path):
+    """cwd 位于项目根子目录 → 三级命中(非 git 仅路径包含)。"""
+    module = _load_mail_send()
+    project = tmp_path / "proj"
+    sub = project / "src"
+    sub.mkdir(parents=True)
+    monkey_git = lambda path: None  # noqa: E731
+    module._git_common_dir = monkey_git
+    result = module._select_notify_targets(
+        [("demo", "w1:p1", str(sub))], str(project))
+    assert result == [("demo", "w1:p1", str(sub), False)]
+
+
+def test_same_tier_ambiguity_skipped(tmp_path):
+    """同级多候选 → 跳过,不任选。"""
+    module = _load_mail_send()
+    project = tmp_path / "proj"
+    sub = project / "src"
+    sub.mkdir(parents=True)
+    module._git_common_dir = lambda path: None
+    assert module._select_notify_targets([
+        ("demo", "w1:p1", str(sub)),
+        ("demo", "w1:p2", str(project)),
+    ], str(project)) == []
+
+
+def test_worktree_common_dir_unique_hit(tmp_path):
+    """cwd 与项目根同 git common-dir → 四级命中。"""
+    module = _load_mail_send()
+    project = tmp_path / "repo"
+    worktree = tmp_path / "wt"
+    project.mkdir()
+    worktree.mkdir()
+    common = str(project / ".git")
+    module._git_common_dir = (
+        lambda path: common if path in (str(project), str(worktree)) else None
+    )
+    result = module._select_notify_targets(
+        [("demo", "w1:p1", str(worktree))], str(project))
+    assert result == [("demo", "w1:p1", str(worktree), False)]
+
+
+def test_git_common_dir_real_worktree(tmp_path):
+    """真实 git common-dir 解析:worktree 归一到主仓库。"""
+    module = _load_mail_send()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    module.subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    module.subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    wt = tmp_path / "wt"
+    module.subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", str(wt)], check=True)
+    assert module._git_common_dir(str(repo)) == module._git_common_dir(str(wt))
+    result = module._select_notify_targets([("s", "w1:p1", str(wt))], str(repo))
+    assert result and result[0][:2] == ("s", "w1:p1")
+
+
+def test_coordination_identity_binding_takes_priority(tmp_path):
+    """一级:coordination mail_name→pane 强绑定优先于 cwd 命中。"""
+    module = _load_mail_send()
+    project = tmp_path / "proj"
+    sub = project / "sub"
+    sub.mkdir(parents=True)
+    module._git_common_dir = lambda path: None
+    module._identity_bound_panes = (
+        lambda name: {"bound-sess": {"w1:pB"}} if name == "KimiFoo" else {}
+    )
+    result = module._select_notify_targets([
+        ("bound-sess", "w1:pB", "/unrelated/dir"),
+        ("other", "w1:pC", str(sub)),
+    ], str(project), mail_name="KimiFoo")
+    assert result == [("bound-sess", "w1:pB", "/unrelated/dir", False)]
+
+
+def test_panes_by_mail_name_reads_active_runs(tmp_path):
+    import coordination
+    coordination.start_run(
+        project_key=str(tmp_path), session="demo",
+        session_dir=str(tmp_path),
+        participants=[{"id": "k1", "agent": "kimi", "role": "developer",
+                       "task": "", "workdir": str(tmp_path)}],
+    )
+    run = coordination.run_by_session("demo")
+    assert coordination.bind_identity(
+        str(run["run_id"]), "k1", "KimiFoo", "w1:pB")
+    assert coordination.panes_by_mail_name("KimiFoo") == {"demo": {"w1:pB"}}
+    assert coordination.panes_by_mail_name("Nobody") == {}
+
+
+def test_resolve_explicit_target_success(monkeypatch):
+    module = _load_mail_send()
+    monkeypatch.setattr(module, "_session_rows",
+                        lambda env: [{"name": "demo", "running": True}])
+    monkeypatch.setattr(module, "_session_panes", lambda s, env: [
+        {"pane_id": "w1:p2", "agent": "kimi", "cwd": "/x"}])
+    assert module.resolve_explicit_target("demo", "w1:p2", "kimi") == (
+        "demo", "w1:p2", "/x")
+
+
+def test_resolve_explicit_target_session_missing(monkeypatch):
+    module = _load_mail_send()
+    monkeypatch.setattr(module, "_session_rows", lambda env: [])
+    with pytest.raises(ValueError, match="session"):
+        module.resolve_explicit_target("ghost", "w1:p1", "kimi")
+
+
+def test_resolve_explicit_target_pane_missing(monkeypatch):
+    module = _load_mail_send()
+    monkeypatch.setattr(module, "_session_rows",
+                        lambda env: [{"name": "demo", "running": True}])
+    monkeypatch.setattr(module, "_session_panes", lambda s, env: [])
+    with pytest.raises(ValueError, match="pane"):
+        module.resolve_explicit_target("demo", "w1:p9", "kimi")
+
+
+def test_resolve_explicit_target_type_incompatible(monkeypatch):
+    module = _load_mail_send()
+    monkeypatch.setattr(module, "_session_rows",
+                        lambda env: [{"name": "demo", "running": True}])
+    monkeypatch.setattr(module, "_session_panes", lambda s, env: [
+        {"pane_id": "w1:p2", "agent": "codex", "cwd": "/x"}])
+    with pytest.raises(ValueError, match="不兼容"):
+        module.resolve_explicit_target("demo", "w1:p2", "kimi")
+
+
+def test_explicit_target_notifies_without_auto_routing(monkeypatch, tmp_path):
+    """显式目标直达 pane,失败不回退自动选路(此处验证不触发自动选路)。"""
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(module, "TYPING_STATE_PATH", str(tmp_path / "none.json"))
+
+    def no_auto(*args, **kwargs):
+        raise AssertionError("显式目标不应触发自动选路")
+
+    monkeypatch.setattr(module, "_select_notify_targets", no_auto)
+    prompts = []
+
+    def run(args, **kwargs):
+        if "prompt" in args:
+            prompts.append(args)
+            return module.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    module._notify_pane(
+        "kimi", "main", 1, "显式", str(project),
+        explicit=("demo", "w1:pX", "/x"),
+    )
+    assert len(prompts) == 1
+    assert prompts[0][5] == "w1:pX"
