@@ -4287,7 +4287,9 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                         pass
                 try:
                     # 自动团队消息据此避让尚未提交的 TUI 草稿。
-                    terminal.note_user_input(term_id)
+                    # note_user_input 内部会起 herdr 子进程解析落点 pane,
+                    # 必须放进线程,避免阻塞事件循环和用户输入。
+                    await asyncio.to_thread(terminal.note_user_input, term_id)
                     await asyncio.to_thread(terminal.write_term, term_id, text)
                 except (TimeoutError, OSError) as e:
                     logger.warning("terminal input write failed %s: %s", term_id, e)

@@ -56,7 +56,11 @@ _TYPING_STATE_PATH = (
 )
 _typing_state_last_write: dict[tuple[str, str], float] = {}
 _typing_state_lock = threading.Lock()
-_HERDR_BIN = shutil.which("herdr") or str(Path.home() / ".local" / "bin" / "herdr")
+_HERDR_BIN = (
+    os.environ.get("HERDR_BIN")
+    or shutil.which("herdr")
+    or str(Path.home() / ".local" / "bin" / "herdr")
+)
 _lock = threading.Lock()
 # pty.fork 先创建 master fd 再返回父进程；串行化 fork→FD_CLOEXEC，
 # 避免并发创建时另一个 shell 在标记前继承该 master fd。
@@ -562,11 +566,15 @@ def sweep_idle(max_idle: float | None = None) -> int:
 
 
 def _current_pane(session: str) -> str | None:
-    """输入发生时刻该 session 的当前 pane(herdr 侧,约 2ms);失败返回 None。"""
+    """输入发生时刻该 session 的当前 pane(herdr 侧,正常约 2ms);失败返回 None。
+
+    超时收紧到 0.5s: 该调用位于用户输入路径,Herdr 慢/故障时宁可记
+    unknown 保守避让,也不能拖住事件循环。
+    """
     try:
         result = subprocess.run(
             [_HERDR_BIN, "--session", session, "pane", "current"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, timeout=0.5,
         )
         pane = json.loads(result.stdout).get("result", {}).get("pane", {})
         pane_id = pane.get("pane_id")
@@ -576,48 +584,66 @@ def _current_pane(session: str) -> str | None:
 
 
 def _persist_typing_state(session: str, pane_id: str | None) -> None:
-    """把本次击键的墙钟时间写入状态文件(每 session 限频,原子替换)。
+    """把本次击键的墙钟时间写入状态文件(按 pane 限频,原子替换)。
 
     新格式: {session: {"panes": {pane_id: ts}, "unknown": ts?}};
-    读旧 float 格式时按未知 pane 处理,写入即升级。
+    读旧 float 格式时按未知 pane 处理,写入即升级。损坏的嵌套值逐项丢弃
+    (自愈),unknown 与空 session 同样做 24h 清理。
     """
     now_mono = time.monotonic()
-    state_key = (str(_TYPING_STATE_PATH), session)
+    state_key = (str(_TYPING_STATE_PATH), session, pane_id or "")
     with _typing_state_lock:
         if now_mono - _typing_state_last_write.get(state_key, 0.0) < 1.0:
             return
         try:
             _TYPING_STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            data: dict[str, Any] = {}
             try:
                 loaded = json.loads(_TYPING_STATE_PATH.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    data = loaded
             except (OSError, ValueError, TypeError):
-                data = {}
+                loaded = {}
+            if not isinstance(loaded, dict):
+                loaded = {}
             wall = time.time()
+
+            def _fresh_ts(value: Any) -> float | None:
+                """逐项校验 timestamp;损坏/过期返回 None(丢弃)。"""
+                try:
+                    ts = float(value)
+                except (TypeError, ValueError):
+                    return None
+                return ts if wall - ts < 24 * 3600 else None
+
+            data: dict[str, Any] = {}
+            for key, value in loaded.items():
+                if isinstance(value, dict):
+                    raw_panes = value.get("panes")
+                    if not isinstance(raw_panes, dict):
+                        raw_panes = {}
+                    panes = {
+                        str(k): ts
+                        for k, v in raw_panes.items()
+                        if (ts := _fresh_ts(v)) is not None
+                    }
+                    unknown = _fresh_ts(value.get("unknown"))
+                    if panes or unknown is not None:
+                        entry: dict[str, Any] = {"panes": panes}
+                        if unknown is not None:
+                            entry["unknown"] = unknown
+                        data[str(key)] = entry
+                else:
+                    ts = _fresh_ts(value)  # 旧 float 格式,原样保留
+                    if ts is not None:
+                        data[str(key)] = ts
+
             entry = data.get(session)
             if not isinstance(entry, dict):
                 entry = {"panes": {}}
-            panes = entry.get("panes")
-            if not isinstance(panes, dict):
-                panes = {}
-                entry["panes"] = panes
             if pane_id:
-                panes[pane_id] = wall
+                entry["panes"][pane_id] = wall
             else:
                 entry["unknown"] = wall
-            # 清理过期项,避免文件长期增长
-            panes = {
-                str(k): float(v) for k, v in panes.items()
-                if wall - float(v) < 24 * 3600
-            }
-            entry["panes"] = panes
             data[session] = entry
-            data = {
-                str(k): v for k, v in data.items()
-                if not isinstance(v, (int, float)) or wall - float(v) < 24 * 3600
-            }
+
             fd, tmp_name = tempfile.mkstemp(
                 prefix=".typing.", suffix=".tmp", dir=str(_TYPING_STATE_PATH.parent)
             )

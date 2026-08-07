@@ -740,3 +740,53 @@ def test_note_user_input_persists_each_session_within_rate_limit(monkeypatch, tm
     data = json.loads(state_file.read_text(encoding="utf-8"))
     assert set(data) == {"first", "second"}
     assert all(isinstance(v, dict) for v in data.values())
+
+
+def test_note_user_input_persists_both_panes_within_rate_limit(monkeypatch, tmp_path):
+    """同 session 两 pane 在 1s 限频窗口内先后输入,文件必须同时含两条。
+
+    回归: 限频键不含 pane 时,第二个 pane 的输入不落盘,外部进程会
+    误判该 pane 无草稿并注入通知。
+    """
+    state_file = tmp_path / "state" / "typing.json"
+    monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", state_file)
+    current = {"pane": "w1:p1"}
+    monkeypatch.setattr(terminal, "_current_pane", lambda session: current["pane"])
+    now = {"value": 100.0}
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: now["value"])
+    labeled = terminal.create_term(label="demo")["id"]
+
+    assert terminal.note_user_input(labeled) == "demo"
+    current["pane"] = "w1:p8"
+    now["value"] += 0.1  # 1s 限频内切 pane 继续输入
+    assert terminal.note_user_input(labeled) == "demo"
+
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert set(data["demo"]["panes"]) == {"w1:p1", "w1:p8"}
+
+
+def test_typing_state_file_self_heals_corrupt_nested_values(monkeypatch, tmp_path):
+    """损坏的嵌套值逐项丢弃,不得让异常逃出 note_user_input。"""
+    state_file = tmp_path / "state" / "typing.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({
+        "demo": {"panes": {"w1:p9": "garbage", "w1:p2": ["broken"]}, "unknown": "x"},
+        "legacy": time.time(),
+    }), encoding="utf-8")
+    monkeypatch.setattr(terminal, "_TYPING_STATE_PATH", state_file)
+    monkeypatch.setattr(terminal, "_current_pane", lambda session: "w1:p1")
+    labeled = terminal.create_term(label="demo")["id"]
+
+    assert terminal.note_user_input(labeled) == "demo"
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert set(data["demo"]["panes"]) == {"w1:p1"}  # 损坏项已丢弃
+    assert "unknown" not in data["demo"]  # 损坏 unknown 已清
+    assert isinstance(data["legacy"], float)  # 旧 float 格式保留
+
+
+def test_websocket_records_typing_off_event_loop():
+    """WebSocket 主循环必须经 to_thread 调 note_user_input(内部起子进程)。"""
+    source = (Path(__file__).resolve().parent.parent / "server.py").read_text(
+        encoding="utf-8"
+    )
+    assert "await asyncio.to_thread(terminal.note_user_input, term_id)" in source
