@@ -40,6 +40,7 @@ import mail_projects
 import team_sessions
 import terminal
 import version
+import upgrade_core
 import web_push
 import settings
 from pydantic import BaseModel, Field
@@ -1182,6 +1183,30 @@ def api_version(refresh: bool = Query(False)):
     refresh=true 绕过 6h 缓存；网络/解析失败时仍 200 且 status=unavailable。
     """
     return version.get_version_info(refresh=refresh)
+
+
+class UpgradeReq(BaseModel):
+    """管理员显式升级目标（x.y.z 或 vx.y.z）。"""
+    target: str = Field(..., min_length=1, max_length=32)
+
+
+@app.get("/api/upgrade/status")
+def api_upgrade_status():
+    """升级任务脱敏状态（需认证）。成功仅终态 succeeded。"""
+    return upgrade_core.public_status()
+
+
+@app.post("/api/upgrade")
+def api_upgrade_start(req: UpgradeReq):
+    """触发服务外升级。accepted=true 只表示已排队/进行中，不代表升级成功。"""
+    try:
+        result = upgrade_core.start_upgrade(req.target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        logger.exception("upgrade start failed method=POST path=/api/upgrade")
+        raise HTTPException(500, INTERNAL_ERROR_DETAIL)
+    return result
 
 
 # ── 设置路由 ────────────────────────────────────────────────────
