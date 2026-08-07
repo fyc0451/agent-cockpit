@@ -40,6 +40,8 @@ _terms: dict[str, dict[str, Any]] = {}
 # 被“较新页面接管”替换的 term_id 临时保留原因，供仍连接旧 ID 的 WebSocket
 # 返回 taken-over 而不是普通失效；否则旧版页面会自动重建并与新页面反复争抢。
 _superseded_terms: dict[str, float] = {}
+# 浏览器经 Web PTY 向某 Herdr session 最近一次发送用户输入的时间。
+_session_user_input: dict[str, float] = {}
 _lock = threading.Lock()
 # pty.fork 先创建 master fd 再返回父进程；串行化 fork→FD_CLOEXEC，
 # 避免并发创建时另一个 shell 在标记前继承该 master fd。
@@ -71,6 +73,7 @@ OUTPUT_HISTORY_MAX = 1024 * 1024
 # 退出后的 PTY 可能仍有后台进程持续写；drain 必须同时限制内存和总时长。
 DRAIN_MAX_BYTES = 1024 * 1024
 DRAIN_MAX_SECONDS = 2.0
+USER_TYPING_WINDOW = 30.0
 
 
 def _term_cfg(key: str, default: float) -> float:
@@ -543,13 +546,35 @@ def sweep_idle(max_idle: float | None = None) -> int:
     return len(victims)
 
 
-def term_label(term_id: str) -> str | None:
-    """返回终端的 herdr session 标签(attach 类终端才有),无则 None。"""
+def note_user_input(term_id: str) -> str | None:
+    """记录 Web PTY 用户输入；返回对应 Herdr session，无标签则 None。"""
+    now = time.monotonic()
     with _lock:
         state = _terms.get(term_id)
-    if not state:
-        return None
-    return state.get("label")
+        label = state.get("label") if state else None
+        if not label:
+            return None
+        _session_user_input[label] = now
+        stale = [
+            session for session, ts in _session_user_input.items()
+            if now - ts >= USER_TYPING_WINDOW
+        ]
+        for session in stale:
+            _session_user_input.pop(session, None)
+        return label
+
+
+def user_typing_recently(session: str) -> bool:
+    """该 Herdr session 在避让窗口内是否收到过 Web PTY 用户输入。"""
+    now = time.monotonic()
+    with _lock:
+        ts = _session_user_input.get(session)
+        if ts is None:
+            return False
+        if now - ts < USER_TYPING_WINDOW:
+            return True
+        _session_user_input.pop(session, None)
+        return False
 
 
 def list_terms() -> list[dict[str, Any]]:

@@ -22,6 +22,7 @@ def cleanup_terms():
         terminal.kill_term(t["id"])
     with terminal._lock:
         terminal._superseded_terms.clear()
+        terminal._session_user_input.clear()
 
 
 def _create(**kw):
@@ -104,6 +105,20 @@ def test_create_stores_safe_display_label():
     for label in ("", " ", "x" * 65, "bad\nname", "bad\x7fname"):
         with pytest.raises(ValueError, match="名称"):
             terminal.create_term(label=label)
+
+
+def test_user_typing_window_tracks_labeled_web_terminal(monkeypatch):
+    now = {"value": 100.0}
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: now["value"])
+    labeled = terminal.create_term(label="demo")["id"]
+    unlabeled = terminal.create_term()["id"]
+
+    assert terminal.note_user_input(unlabeled) is None
+    assert terminal.note_user_input(labeled) == "demo"
+    assert terminal.user_typing_recently("demo") is True
+    now["value"] += terminal.USER_TYPING_WINDOW
+    assert terminal.user_typing_recently("demo") is False
+    assert "demo" not in terminal._session_user_input
 
 
 def test_create_can_exec_direct_pty_command_without_login_shell():

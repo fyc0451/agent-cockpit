@@ -124,17 +124,6 @@ _ZOOM_LEASES: dict[str, dict[str, Any]] = {}
 _ZOOM_LEASES_LOCK = threading.RLock()
 TERM_WS_TAKEN_OVER_CODE = 4001
 TERM_WS_INVALID_CODE = 4004
-
-# 用户在某 herdr session 终端里击键的时间戳(session → monotonic)。
-# 自动投递(team inbox 等)据此避让:正在输入时直接 prompt 会把消息
-# 追加到未提交的草稿后并一起提交。
-USER_TYPING: dict[str, float] = {}
-USER_TYPING_WINDOW = 30.0
-
-
-def user_typing_recently(session: str) -> bool:
-    ts = USER_TYPING.get(session)
-    return ts is not None and time.monotonic() - ts < USER_TYPING_WINDOW
 _TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
@@ -4288,11 +4277,8 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                     except json.JSONDecodeError:
                         pass
                 try:
-                    label = terminal.term_label(term_id)
-                    if label:
-                        # 记录用户在 herdr session 终端的击键时间,
-                        # 自动消息投递据此避让未提交的草稿
-                        USER_TYPING[label] = time.monotonic()
+                    # 自动团队消息据此避让尚未提交的 TUI 草稿。
+                    terminal.note_user_input(term_id)
                     await asyncio.to_thread(terminal.write_term, term_id, text)
                 except (TimeoutError, OSError) as e:
                     logger.warning("terminal input write failed %s: %s", term_id, e)

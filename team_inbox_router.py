@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from herdr_client import pane_send, snapshot
+import terminal
 import team_sessions
 
 ROUTE_STATE = Path.home() / "dashboard-data" / "team-inbox-route.json"
@@ -126,13 +127,8 @@ def _deliver_text(session: str, pane_id: str, text: str) -> dict[str, Any]:
     用户正在该 session 的终端打字时暂缓投递:此时 prompt 会把消息追加到
     未提交的草稿后一起提交。暂缓返回 error,消息留在 pending 下轮重试。
     """
-    try:
-        import server  # 延迟导入,避免模块级循环依赖
-
-        if server.user_typing_recently(session):
-            return {"available": True, "error": "用户正在输入，暂缓投递"}
-    except Exception:
-        pass
+    if terminal.user_typing_recently(session):
+        return {"available": True, "error": "用户正在输入，暂缓投递"}
     try:
         return pane_send(session, pane_id, text, mode="prompt")
     except Exception as exc:

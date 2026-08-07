@@ -342,6 +342,7 @@ def test_terminal_create_can_atomically_replace_same_label(monkeypatch):
 def test_websocket_forwards_non_control_json_input(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     written = []
+    noted = []
     received = threading.Event()
     monkeypatch.setattr(server.terminal, "list_terms", lambda: [{"id": "term1"}])
     monkeypatch.setattr(server.terminal, "read_output", lambda *args: b"")
@@ -352,6 +353,9 @@ def test_websocket_forwards_non_control_json_input(monkeypatch):
         received.set()
 
     monkeypatch.setattr(server.terminal, "write_term", record_write)
+    monkeypatch.setattr(
+        server.terminal, "note_user_input", lambda term_id: noted.append(term_id),
+    )
     client = TestClient(server.app)
     client.post("/api/auth/login", json={"token": "secret"})
 
@@ -362,6 +366,7 @@ def test_websocket_forwards_non_control_json_input(monkeypatch):
         assert received.wait(2)
 
     assert written == [("term1", '{"not":"a resize"}')]
+    assert noted == ["term1"]
 
 
 def test_websocket_drains_tail_before_exit_message(monkeypatch):
