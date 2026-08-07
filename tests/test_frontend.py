@@ -1745,12 +1745,19 @@ def test_side_refresh_refreshes_current_view():
 
 
 def test_launch_modal_worktree_preview_and_source_fix():
-    """添加 Agent 弹窗:独立 worktree 模式显示自动新建预览,预填不再落在既有 worktree。"""
+    """添加 Agent 弹窗:独立 worktree 模式说明自动新建,预填不再落在既有 worktree。"""
     assert 'id="lnWorktreePreview"' in HTML
     assert "function launchWorktreePreview()" in HTML
-    assert "cockpit-worktrees" in HTML
     js = _inline_js()
     # 独立模式预填若落在既有 cockpit worktree 目录,替换为 session 源目录
     assert "ws==='isolated'&&/\\/\\.[^/]+-cockpit-worktrees(?:\\/|$)/.test(workdir)" in js
-    # 预览路径与服务端 _ensure_worktree 的 base 公式一致
-    assert ".${repoName}-cockpit-worktrees/${session}/${name}" in js
+    # 方案 A:预览不承诺完整路径(服务端 base 取决于 _git_root(workdir)),
+    # 只说明 <session>/<name> 隔离 worktree 会从源仓库自动创建;
+    # 预览函数不再依赖 LAUNCH_SESSION_DIRS,编辑 workdir 不会展示错误旧路径。
+    start = js.index("function launchWorktreePreview()")
+    preview = js[start:js.index("function ", start + 10)]
+    assert "LAUNCH_SESSION_DIRS" not in preview
+    assert "cockpit-worktrees" not in preview
+    assert "${session}/${name}" in preview
+    # en/ja 词条各只保留一项(修复重复定义)
+    assert HTML.count("'launch.wtpreview':") == 2
