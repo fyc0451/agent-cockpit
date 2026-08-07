@@ -1765,11 +1765,20 @@ function termPickCollab(){
   if(!TERM_WS||!XTERM){toast('请先打开一个终端');return}
   const cands=(BOARD?.panes||[]).filter(p=>p.agent);
   if(!cands.length){toast('无可用 agent');return}
-  document.getElementById('collabList').innerHTML=cands.map(p=>`
-    <div class="mention-item" data-action="collab" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
-      <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
-      <span><b>${esc(p.agent)}</b> <span class="muted">@ ${esc(p.session)}</span></span>
-    </div>`).join('');
+  // 按 session 分组(保持首次出现顺序):让用户一眼看清每个 agent 属于哪个 session
+  const groups=new Map();
+  for(const p of cands){if(!groups.has(p.session))groups.set(p.session,[]);groups.get(p.session).push(p)}
+  document.getElementById('collabList').innerHTML=[...groups.entries()].map(([session,panes],gi)=>{
+    // 同一 session 内若有重名 agent,用 pane_id 区分
+    const names=panes.map(p=>p.agent),dup=n=>names.indexOf(n)!==names.lastIndexOf(n);
+    const head=`<div style="font-size:11px;color:var(--fg3);letter-spacing:.3px;margin:${gi?10:0}px 4px 4px">${esc(session)} <span class="muted">· ${panes.length}</span></div>`;
+    const items=panes.map(p=>`
+      <div class="mention-item" data-action="collab" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
+        <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+        <span><b>${esc(p.agent)}</b>${dup(p.agent)?` <span class="muted">pane ${esc(p.pane_id)}</span>`:''}</span>
+      </div>`).join('');
+    return head+items;
+  }).join('');
   document.getElementById('collabModal').classList.add('show');
 }
 function closeCollab(){document.getElementById('collabModal').classList.remove('show')}
