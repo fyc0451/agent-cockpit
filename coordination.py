@@ -200,7 +200,12 @@ def start_run(
     project = str(Path(project_key).expanduser().resolve())
     generation = str(Path(session_dir).expanduser().resolve())
     digest = _config_hash(participants)
-    with _connect() as con:
+    con = _connect()
+    try:
+        # BEGIN IMMEDIATE 在读取 active/MAX revision 前拿下写锁，保证同
+        # (session, session_dir) 并发 start_run 串行——否则两个事务都读到
+        # 相同 MAX(revision)，第二个 INSERT 撞 UNIQUE(session,session_dir,revision)。
+        con.execute("BEGIN IMMEDIATE")
         active = con.execute(
             "SELECT * FROM runs WHERE session=? AND session_dir=? AND state='active' "
             "ORDER BY revision DESC LIMIT 1",
@@ -218,6 +223,7 @@ def start_run(
                         run_id, str(item["id"]),
                     ),
                 )
+            con.commit()
             result = dict(active)
             result.update({"created": False, "reused": True})
             return result
@@ -253,6 +259,12 @@ def start_run(
                     "working", current,
                 ),
             )
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
     return {
         "run_id": run_id, "project_key": project, "session": session,
         "session_dir": generation, "revision": revision, "state": "active",
@@ -733,23 +745,31 @@ def checkpoint_message(
 ) -> dict[str, Any]:
     current = time.time() if now is None else now
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    con = _connect()
+    try:
+        # lease 校验与 checkpoint 写入置于同一 BEGIN IMMEDIATE 事务，阻止旧
+        # claim_token 在过期→reclaim 后仍覆盖新持有者的检查点。
+        con.execute("BEGIN IMMEDIATE")
         row = con.execute(
             "SELECT * FROM receipts WHERE project_key=? AND recipient=? AND message_id=?",
             (project, recipient, int(message_id)),
         ).fetchone()
         if not row:
             raise ValueError(f"消息 #{message_id} 尚未 claim")
-        if (
-            row["state"] == "claimed" and row["claim_expires_ts"] is not None
-            and float(row["claim_expires_ts"]) <= current
-        ):
-            raise ValueError(f"消息 #{message_id} 的 claim 已过期")
-        if (
-            row["state"] == "claimed" and row["claim_token"]
-            and claim_token != row["claim_token"]
-        ):
-            raise ValueError(f"消息 #{message_id} 的 claim 已失效")
+        if row["state"] != "claimed" and row["state"] != "processed":
+            # pending(watcher 回收的过期 claim)/stale/failed 等状态一律拒绝，
+            # 阻止过期 lease 在 reclaim 窗口仍覆盖 checkpoint_json。
+            raise ValueError(
+                f"消息 #{message_id} 当前状态为 {row['state']}，不可写检查点"
+            )
+        if row["state"] == "claimed":
+            if (
+                row["claim_expires_ts"] is not None
+                and float(row["claim_expires_ts"]) <= current
+            ):
+                raise ValueError(f"消息 #{message_id} 的 claim 已过期")
+            if row["claim_token"] and claim_token != row["claim_token"]:
+                raise ValueError(f"消息 #{message_id} 的 claim 已失效")
         try:
             checkpoint = json.loads(row["checkpoint_json"] or "{}")
         except ValueError:
@@ -764,7 +784,13 @@ def checkpoint_message(
             "WHERE project_key=? AND recipient=? AND message_id=?",
             (json.dumps(checkpoint, ensure_ascii=False), current, project, recipient, message_id),
         )
-    return checkpoint
+        con.commit()
+        return checkpoint
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 
 def request_pause(
@@ -915,14 +941,20 @@ def resume_message(
 ) -> dict[str, Any]:
     current = time.time() if now is None else now
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    con = _connect()
+    try:
+        # resume 的状态判定与 participants 写入放入同一 BEGIN IMMEDIATE 事务，
+        # 避免 SELECT 后状态被并发改变（如新一轮 claim/complete）导致基于过期数据恢复。
+        con.execute("BEGIN IMMEDIATE")
         row = con.execute(
             "SELECT * FROM receipts WHERE project_key=? AND recipient=? AND message_id=?",
             (project, recipient, int(message_id)),
         ).fetchone()
         if not row or row["state"] != "processed":
+            con.commit()
             return {"resumed": False, "reason": "message_not_processed"}
         if row["intent"] in NO_RESUME_INTENTS:
+            con.commit()
             return {"resumed": False, "reason": row["intent"]}
         context = con.execute(
             "SELECT r.state AS run_state,p.task_revision,p.state FROM runs r "
@@ -931,8 +963,10 @@ def resume_message(
             (row["run_id"], row["task_id"]),
         ).fetchone()
         if not context or context["run_state"] != "active":
+            con.commit()
             return {"resumed": False, "reason": "run_not_active"}
         if int(context["task_revision"]) != int(row["task_revision"]):
+            con.commit()
             return {"resumed": False, "reason": "revision_changed"}
         try:
             checkpoint = json.loads(row["checkpoint_json"] or "{}")
@@ -942,6 +976,7 @@ def resume_message(
             checkpoint.get("step_state") == "uncertain"
             or checkpoint.get("in_flight_safe") is False
         ):
+            con.commit()
             return {
                 "resumed": False, "reason": "uncertain_checkpoint",
                 "checkpoint": checkpoint,
@@ -951,7 +986,13 @@ def resume_message(
             "AND participant_id=?",
             (current, row["run_id"], row["task_id"]),
         )
+        con.commit()
         return {"resumed": True, "checkpoint": checkpoint}
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 
 def fail_message(
@@ -960,7 +1001,11 @@ def fail_message(
 ) -> bool:
     current = time.time() if now is None else now
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    con = _connect()
+    try:
+        # lease 校验与 failed 写入置于同一 BEGIN IMMEDIATE 事务，阻止旧
+        # claim_token 在过期→reclaim 后仍能把新持有者的消息标失败。
+        con.execute("BEGIN IMMEDIATE")
         row = con.execute(
             "SELECT run_id,task_id,state,claim_token,claim_expires_ts FROM receipts "
             "WHERE project_key=? AND recipient=? "
@@ -968,8 +1013,10 @@ def fail_message(
             (project, recipient, int(message_id)),
         ).fetchone()
         if not row:
+            con.commit()
             return False
         if row["state"] != "claimed":
+            con.commit()
             return False
         if (
             row["claim_expires_ts"] is not None
@@ -991,7 +1038,13 @@ def fail_message(
                 "AND participant_id=?",
                 (current, row["run_id"], row["task_id"]),
             )
+        con.commit()
         return True
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 
 def mark_acked(project_key: str, recipient: str, message_id: int) -> None:

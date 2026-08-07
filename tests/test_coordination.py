@@ -1,3 +1,4 @@
+import json
 import threading
 
 import coordination
@@ -507,3 +508,144 @@ def test_task_report_rejects_invalid_content_and_clears_reused_pane_identity(
     assert changed["reported_ts"] is None
     assert changed["summary"] is None
     assert changed["pending"] is True
+
+
+def test_concurrent_start_run_same_config_never_hits_unique(tmp_path, monkeypatch):
+    """M1: 同 (session, session_dir) 并发 start_run 必须 BEGIN IMMEDIATE 串行，
+    绝不撞 UNIQUE(session, session_dir, revision)；相同配置只产出一个 active run。"""
+    monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    for name in ("lead", "dev"):
+        (tmp_path / name).mkdir(exist_ok=True)
+    participants = _participants(tmp_path)
+    barrier = threading.Barrier(8)
+    results = []
+    errors = []
+
+    def start():
+        try:
+            barrier.wait()
+            results.append(coordination.start_run(
+                project_key=str(tmp_path), session="demo", session_dir=str(tmp_path),
+                participants=participants, now=100,
+            ))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=start) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []  # 不得出现 IntegrityError
+    assert len(results) == 8
+    assert len({run["run_id"] for run in results}) == 1  # 全部复用首个 active run
+    assert sum(1 for run in results if run["created"]) == 1
+    assert sum(1 for run in results if run["reused"]) == 7
+    final = coordination.run_by_session("demo")
+    assert final["state"] == "active"
+    assert final["revision"] == 1
+
+
+def test_stale_claim_token_cannot_checkpoint_or_fail_after_reclaim(tmp_path, monkeypatch):
+    """M2: claim 过期→reclaim 后，旧 claim_token 的 checkpoint/fail 必须被拒，
+    不得覆盖新持有者的检查点或把消息错误标失败。"""
+    _run(tmp_path, monkeypatch)
+    message = _message(20, coordination.add_metadata("阻断", _meta(tmp_path)))
+    first = coordination.claim_message(
+        project_key=str(tmp_path), recipient="kimi-main", message=message,
+        claimant="x", cwd=str(tmp_path), now=110, ttl=10,
+    )
+    coordination.maintain_live_claims({"panes": []}, now=121)  # 过期 → pending，token 清空
+    assert coordination.receipt(str(tmp_path), "kimi-main", 20)["state"] == "pending"
+    second = coordination.claim_message(
+        project_key=str(tmp_path), recipient="kimi-main", message=message,
+        claimant="y", cwd=str(tmp_path), now=122, ttl=10,
+    )
+
+    with pytest.raises(ValueError, match="claim 已失效"):
+        coordination.checkpoint_message(
+            str(tmp_path), "kimi-main", 20, summary="旧持有者",
+            claim_token=first["claim_token"], now=123,
+        )
+    with pytest.raises(ValueError, match="claim 已失效"):
+        coordination.fail_message(
+            str(tmp_path), "kimi-main", 20, "旧持有者失败",
+            claim_token=first["claim_token"], now=124,
+        )
+
+    # 新持有者照常写入；旧 token 没有覆盖它
+    coordination.checkpoint_message(
+        str(tmp_path), "kimi-main", 20, summary="新持有者",
+        claim_token=second["claim_token"], now=125,
+    )
+    stored = json.loads(
+        coordination.receipt(str(tmp_path), "kimi-main", 20)["checkpoint_json"]
+    )
+    assert stored["summary"] == "新持有者"
+
+
+def test_pending_window_rejects_stale_checkpoint_before_reclaim(tmp_path, monkeypatch):
+    """codex 复审: claim 过期为 pending 后、reclaim 前，旧 token 的 checkpoint 必须
+    失败且 checkpoint_json 不变；reclaim 后旧 token 仍失败、新 token 成功。"""
+    _run(tmp_path, monkeypatch)
+    message = _message(22, coordination.add_metadata("阻断", _meta(tmp_path)))
+    first = coordination.claim_message(
+        project_key=str(tmp_path), recipient="kimi-main", message=message,
+        claimant="x", cwd=str(tmp_path), now=110, ttl=10,
+    )
+    coordination.checkpoint_message(
+        str(tmp_path), "kimi-main", 22, summary="首次进度",
+        claim_token=first["claim_token"], now=111,
+    )
+    before = coordination.receipt(str(tmp_path), "kimi-main", 22)["checkpoint_json"]
+    coordination.maintain_live_claims({"panes": []}, now=121)  # 过期 → pending，token 清空
+    assert coordination.receipt(str(tmp_path), "kimi-main", 22)["state"] == "pending"
+
+    with pytest.raises(ValueError, match="pending"):
+        coordination.checkpoint_message(
+            str(tmp_path), "kimi-main", 22, summary="过期后的写入",
+            claim_token=first["claim_token"], now=122,
+        )
+    # checkpoint_json 未被覆盖
+    assert coordination.receipt(str(tmp_path), "kimi-main", 22)["checkpoint_json"] == before
+
+    # reclaim 后旧 token 仍失败、新 token 成功
+    second = coordination.claim_message(
+        project_key=str(tmp_path), recipient="kimi-main", message=message,
+        claimant="y", cwd=str(tmp_path), now=123, ttl=10,
+    )
+    with pytest.raises(ValueError, match="claim 已失效"):
+        coordination.checkpoint_message(
+            str(tmp_path), "kimi-main", 22, summary="旧 token 再试",
+            claim_token=first["claim_token"], now=124,
+        )
+    coordination.checkpoint_message(
+        str(tmp_path), "kimi-main", 22, summary="新 token 写入",
+        claim_token=second["claim_token"], now=125,
+    )
+    stored = json.loads(
+        coordination.receipt(str(tmp_path), "kimi-main", 22)["checkpoint_json"]
+    )
+    assert stored["summary"] == "新 token 写入"
+
+
+def test_resume_refuses_when_run_has_advanced(tmp_path, monkeypatch):
+    """M2: resume 的状态判定放入事务；run 被 supersede 后不得把旧 participant 改回 working。"""
+    _run(tmp_path, monkeypatch)
+    message = _message(21, coordination.add_metadata("复核", _meta(tmp_path)))
+    claimed = coordination.claim_message(
+        project_key=str(tmp_path), recipient="kimi-main", message=message,
+        claimant="x", cwd=str(tmp_path), now=110,
+    )
+    coordination.complete_message(
+        str(tmp_path), "kimi-main", 21, claim_token=claimed["claim_token"], now=111,
+    )
+    coordination.start_run(  # 配置变化 → 当前 run 被 supersede
+        project_key=str(tmp_path), session="demo", session_dir=str(tmp_path),
+        participants=_participants(tmp_path, dev_task="新任务"), now=112,
+    )
+
+    resumed = coordination.resume_message(str(tmp_path), "kimi-main", 21, now=113)
+    assert resumed["resumed"] is False
+    assert resumed["reason"] == "run_not_active"
