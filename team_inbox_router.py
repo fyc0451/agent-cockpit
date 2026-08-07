@@ -121,7 +121,18 @@ def _lead_online(session: str, pane_id: str) -> bool:
 
 
 def _deliver_text(session: str, pane_id: str, text: str) -> dict[str, Any]:
-    """向 lead 投递文本上下文；mode=send 会执行，故只用 prompt（提示文本）。"""
+    """向 lead 投递文本上下文；mode=send 会执行，故只用 prompt（提示文本）。
+
+    用户正在该 session 的终端打字时暂缓投递:此时 prompt 会把消息追加到
+    未提交的草稿后一起提交。暂缓返回 error,消息留在 pending 下轮重试。
+    """
+    try:
+        import server  # 延迟导入,避免模块级循环依赖
+
+        if server.user_typing_recently(session):
+            return {"available": True, "error": "用户正在输入，暂缓投递"}
+    except Exception:
+        pass
     try:
         return pane_send(session, pane_id, text, mode="prompt")
     except Exception as exc:

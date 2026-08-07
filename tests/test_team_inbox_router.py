@@ -397,3 +397,37 @@ class TestStatusSafety:
         )
         mode = (tmp_path / "team-inbox-route.json").stat().st_mode & 0o777
         assert mode == 0o600
+
+
+def test_delivery_deferred_while_user_typing(tmp_path, monkeypatch):
+    """用户正在该 session 终端打字时暂缓投递,消息留在 pending 下轮重试。"""
+    import server
+
+    _write_bindings(tmp_path / "team-sessions.json", [_binding()])
+    monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        {"session": "s1", "pane_id": "p1"},
+    ))
+    calls = []
+    monkeypatch.setattr(
+        team_inbox_router, "pane_send",
+        lambda *a, **k: calls.append((a, k)) or {"available": True},
+    )
+    monkeypatch.setattr(server, "user_typing_recently", lambda session: True)
+
+    result = team_inbox_router.route_inbox(
+        "Bearer x", hub="http://hub:8765", human_id=7,
+        fetch_inbox=lambda _auth: {"items": [_item(item_id=201)]},
+    )
+    assert result["delivered"] == 0
+    assert result["pending"] == 1
+    assert calls == []
+
+    # 用户停止输入后,下一轮正常投递且从 pending 清除
+    monkeypatch.setattr(server, "user_typing_recently", lambda session: False)
+    result = team_inbox_router.route_inbox(
+        "Bearer x", hub="http://hub:8765", human_id=7,
+        fetch_inbox=lambda _auth: {"items": [_item(item_id=201)]},
+    )
+    assert result["delivered"] == 1
+    assert result["pending"] == 0
+    assert len(calls) == 1

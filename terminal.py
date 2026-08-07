@@ -543,6 +543,15 @@ def sweep_idle(max_idle: float | None = None) -> int:
     return len(victims)
 
 
+def term_label(term_id: str) -> str | None:
+    """返回终端的 herdr session 标签(attach 类终端才有),无则 None。"""
+    with _lock:
+        state = _terms.get(term_id)
+    if not state:
+        return None
+    return state.get("label")
+
+
 def list_terms() -> list[dict[str, Any]]:
     """列出所有终端会话。"""
     now = time.monotonic()
