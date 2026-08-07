@@ -124,7 +124,7 @@ am-init-project          # 批量注册全部已知 agent
 # 发(对方花名 = 其 registry 文件里的 name,不是文件名)
 mail-send --agent kimi --instance main --project /path/to/project \
   --to <对方 Agent Mail 花名> --subject "主题" --body "正文"
-# 回复人类成员(团队模式,见 5.5)
+# 回复人类成员(团队模式,见 5.4)
 mail-send ... --to @fyc-mac --subject "..." --body "..."
 # 收
 mail-recv --agent kimi --instance main --project /path/to/project --unread
@@ -154,7 +154,7 @@ mail-recv ... --fail <id> --claim-token <tok> --reason "..."
 
 ```
 本机 agent CLI ──本地 Agent Mail──▶ 本机 Hub (8765)
-本机 agent CLI ──@花名──▶ 本机 Cockpit 回环代理 ──capability──▶ 远程 Team Hub
+本机 agent CLI ──@Human handle──▶ 本机 Cockpit 回环代理 ──capability──▶ 远程 Team Hub
 人 ──浏览器──▶ Cockpit 团队页 ──白名单代理──▶ Team Hub /hub/api/*
 Human 登录态 ──▶ human_auth issuer (8766)
 ```
@@ -166,7 +166,7 @@ Human 登录态 ──▶ human_auth issuer (8766)
 
 | 角色 | 来源 | 权限 |
 |---|---|---|
-| 全局 admin | JWT role 含 admin | 建群组、账号审批、外部 agent 生命周期 |
+| 全局 admin | JWT role 含 admin | 系统账号管理、邀请码、创建群组 |
 | 群组 admin | membership role=admin | 本群成员审批/角色/绑定 |
 | 普通成员 | active membership | 读目录、收发消息、绑定自己的 Session |
 
@@ -182,15 +182,16 @@ Human 登录态 ──▶ human_auth issuer (8766)
 
 ### 5.4 收发信息
 
-- **人对团队**：团队页或终端 @协作，支持 @团队 / @成员。
-- **agent 回复人**：`mail-send --to @花名 ...`——只允许"当前 Session 已绑定且 active 的 lead"身份发出；普通 developer/reviewer 不能绕过负责人直接对外。目标 Human 无可用路由时进入其**人工收件箱**。
+- **人对团队**：团队页发群聊；终端 @协作可选择 @团队 或定向 @成员。
+- **agent 回复人**：`mail-send --to @<Human handle> ...`——只允许"当前 Session 已绑定且 active 的 lead"身份发出；普通 developer/reviewer 不能绕过负责人直接对外。目标 Human 无可用路由时进入其**人工收件箱**。
 - **人读信**：团队页「人工收件箱」（未读徽标），标为已读。
 - **群聊显示**：来自受管 lead 的消息显示为「人类显示名 · via lead_label」。
 
 ### 5.5 管理员操作
 
 - 生成一次性邀请码（24h 有效）；账号批准（pending→active）
-- 成员审批/角色/移除；绑定/解绑 agent（保留历史）
+- 项目内成员审批/角色/移除
+- Session 绑定由成员本人在项目页操作，管理员无需代劳
 
 ---
 
@@ -211,7 +212,7 @@ Human 登录态 ──▶ human_auth issuer (8766)
 | mail 工具返回 400 | 若日志明确是 `/mcp/` 路径：旧工具硬编码旧端点，升级 agent-mail-tools |
 | 登录团队页被拒 | 账号 pending，需管理员 activate |
 | 移除成员后 handle 不能再用 | 已知行为：removed 成员 handle 保留占用 |
-| 发信 "Invalid recipient" | agent 邮箱只收花名；人类用 `@花名`；类型别名唯一时自动解析 |
+| 发信 "Invalid recipient" | agent 邮箱只收 Agent Mail 花名；回复人类用 `@<Human handle>`；类型别名唯一时自动解析 |
 | 团队消息发不出 | 先检查团队页是否已绑定本机 Session；未绑定不会发送 |
 | **本地** Agent Mail 不通 | 查 client.env 的本机 Hub 地址/token、本机 Hub 进程 |
 | **团队**消息不通 | 查设置页的 Team Hub/issuer 配置与网络，与本地 Hub 分开排查 |
