@@ -39,6 +39,7 @@ import files
 import mail_projects
 import team_sessions
 import terminal
+import version
 import web_push
 import settings
 from pydantic import BaseModel, Field
@@ -1170,6 +1171,17 @@ async def api_upload(file: UploadFile):
 @app.get("/api/uploads")
 def api_uploads():
     return uploads.list_uploads()
+
+
+# ── 版本 / Release ──────────────────────────────────────────────
+
+@app.get("/api/version")
+def api_version(refresh: bool = Query(False)):
+    """当前版本 + GitHub latest Release 状态（需 Cockpit 认证，非 PUBLIC）。
+
+    refresh=true 绕过 6h 缓存；网络/解析失败时仍 200 且 status=unavailable。
+    """
+    return version.get_version_info(refresh=refresh)
 
 
 # ── 设置路由 ────────────────────────────────────────────────────

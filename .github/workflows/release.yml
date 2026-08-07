@@ -1,0 +1,67 @@
+name: release
+
+# 推送 tag 时构建 GitHub Release；tag 必须等于 v + VERSION 文件内容（如 v0.2.0）。
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify tag matches VERSION
+        run: |
+          set -euo pipefail
+          expected="v$(tr -d '[:space:]' < VERSION)"
+          actual="${GITHUB_REF_NAME}"
+          echo "expected=${expected} actual=${actual}"
+          test "${actual}" = "${expected}"
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Full pytest (Python 3.12)
+        run: pytest -q
+
+      - name: py_compile / AST parse
+        run: |
+          set -euo pipefail
+          for file in *.py tests/*.py; do
+            python - "$file" <<'PY'
+          import ast, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          source = path.read_text()
+          compile(source, str(path), "exec")
+          ast.parse(source, filename=str(path))
+          PY
+          done
+
+      - name: Frontend node --check
+        run: |
+          set -euo pipefail
+          js_file="$(mktemp -t cockpit-inline-XXXXXX).js"
+          sed -n '/<script>$/,/^<\/script>$/p' static/index.html | sed '1d;$d' > "$js_file"
+          test -s "$js_file"
+          node --check "$js_file"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: false

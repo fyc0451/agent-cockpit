@@ -733,3 +733,34 @@ def test_agent_mail_hub_probe_rejects_unrelated_http_200(tmp_path):
 
     assert result.returncode != 0
     assert "不覆盖" in result.stderr
+
+
+# ── U1a：VERSION / Release workflow 门禁 ─────────────────────────
+
+def test_version_file_is_exactly_0_2_0():
+    text = (ROOT / "VERSION").read_text(encoding="utf-8")
+    assert text.strip() == "0.2.0"
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert lines == ["0.2.0"]
+
+
+def test_release_workflow_gates_tag_and_checks():
+    path = ROOT / ".github" / "workflows" / "release.yml"
+    assert path.is_file()
+    raw = path.read_text(encoding="utf-8")
+    assert "Verify tag matches VERSION" in raw
+    assert "GITHUB_REF_NAME" in raw
+    assert "python-version" in raw and "3.12" in raw
+    assert "pytest -q" in raw
+    assert "ast.parse" in raw or "compile(source" in raw
+    assert "node --check" in raw
+    assert "contents: write" in raw
+    assert "generate_release_notes: true" in raw
+    assert "tags:" in raw
+    assert "v*" in raw
+
+
+def test_api_version_not_in_public_paths():
+    import server
+
+    assert "/api/version" not in server.PUBLIC_PATHS
