@@ -1109,7 +1109,8 @@ def test_coordination_identity_binding_takes_priority(tmp_path):
     sub.mkdir(parents=True)
     module._git_common_dir = lambda path: None
     module._identity_bound_panes = (
-        lambda name: {"bound-sess": {"w1:pB"}} if name == "KimiFoo" else {}
+        lambda project_key, name: {"bound-sess": {"w1:pB"}}
+        if name == "KimiFoo" else {}
     )
     result = module._select_notify_targets([
         ("bound-sess", "w1:pB", "/unrelated/dir"),
@@ -1129,8 +1130,59 @@ def test_panes_by_mail_name_reads_active_runs(tmp_path):
     run = coordination.run_by_session("demo")
     assert coordination.bind_identity(
         str(run["run_id"]), "k1", "KimiFoo", "w1:pB")
-    assert coordination.panes_by_mail_name("KimiFoo") == {"demo": {"w1:pB"}}
-    assert coordination.panes_by_mail_name("Nobody") == {}
+    assert coordination.panes_by_mail_name(str(tmp_path), "KimiFoo") == {
+        "demo": {"w1:pB"}}
+    assert coordination.panes_by_mail_name(str(tmp_path), "Nobody") == {}
+
+
+def test_panes_by_mail_name_isolated_by_project(tmp_path):
+    """花名是项目内身份：两个项目同花名时只返回目标项目的绑定 pane。"""
+    import coordination
+    project_a = tmp_path / "proj-a"
+    project_b = tmp_path / "proj-b"
+    project_a.mkdir()
+    project_b.mkdir()
+    coordination.start_run(
+        project_key=str(project_a), session="sess-a",
+        session_dir=str(project_a),
+        participants=[{"id": "k1", "agent": "kimi", "role": "developer",
+                       "task": "", "workdir": str(project_a)}],
+    )
+    coordination.start_run(
+        project_key=str(project_b), session="sess-b",
+        session_dir=str(project_b),
+        participants=[{"id": "k2", "agent": "kimi", "role": "developer",
+                       "task": "", "workdir": str(project_b)}],
+    )
+    coordination.bind_identity(
+        str(coordination.run_by_session("sess-a")["run_id"]),
+        "k1", "KimiFoo", "w1:pA")
+    coordination.bind_identity(
+        str(coordination.run_by_session("sess-b")["run_id"]),
+        "k2", "KimiFoo", "w1:pB")
+    assert coordination.panes_by_mail_name(str(project_a), "KimiFoo") == {
+        "sess-a": {"w1:pA"}}
+    assert coordination.panes_by_mail_name(str(project_b), "KimiFoo") == {
+        "sess-b": {"w1:pB"}}
+
+
+def test_first_nonempty_tier_ambiguity_does_not_downgrade(tmp_path):
+    """tier1 两个强绑定候选为歧义：即使 tier2/3 存在唯一候选也不得降级投递。"""
+    module = _load_mail_send()
+    project = tmp_path / "proj"
+    sub = project / "sub"
+    sub.mkdir(parents=True)
+    module._git_common_dir = lambda path: None
+    module._identity_bound_panes = (
+        lambda project_key, name: {"s1": {"w1:p1", "w1:p2"}}
+        if name == "KimiFoo" else {}
+    )
+    result = module._select_notify_targets([
+        ("s1", "w1:p1", "/elsewhere"),
+        ("s1", "w1:p2", "/elsewhere"),
+        ("s2", "w1:p3", str(sub)),
+    ], str(project), mail_name="KimiFoo")
+    assert result == []
 
 
 def test_resolve_explicit_target_success(monkeypatch):
@@ -1198,3 +1250,91 @@ def test_explicit_target_notifies_without_auto_routing(monkeypatch, tmp_path):
     )
     assert len(prompts) == 1
     assert prompts[0][5] == "w1:pX"
+
+
+def test_explicit_target_never_re_resolves(monkeypatch, tmp_path):
+    """显式目标只在发送前解析一次；通知阶段不得再次 resolve。"""
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(module, "TYPING_STATE_PATH", str(tmp_path / "none.json"))
+
+    def no_resolve(*args, **kwargs):
+        raise AssertionError("显式目标不得在通知阶段二次 resolve")
+
+    monkeypatch.setattr(module, "resolve_explicit_target", no_resolve)
+    prompts = []
+
+    def run(args, **kwargs):
+        if "prompt" in args:
+            prompts.append(args)
+            return module.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    module._notify_pane(
+        "kimi", "main", 1, "只解析一次", str(project),
+        explicit=("demo", "w1:p1", str(project)),
+    )
+    assert len(prompts) == 1
+
+
+def test_explicit_target_pane_gone_does_not_fail_sent_message(monkeypatch, tmp_path):
+    """pane 在实际 prompt 时消失：仅警告'消息已发送'，不得抛异常中断。"""
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(module, "TYPING_STATE_PATH", str(tmp_path / "none.json"))
+
+    def run(args, **kwargs):
+        return module.subprocess.CompletedProcess(args, 1, "", "pane gone")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    # 不得抛异常（持久发送已成功，通知失败只警告）
+    module._notify_pane(
+        "kimi", "main", 1, "pane消失", str(project),
+        explicit=("demo", "w1:p1", "/x"),
+    )
+
+
+def test_explicit_target_conflicts_with_no_notify(monkeypatch, tmp_path):
+    module = _load_mail_send()
+    monkeypatch.setattr(sys, "argv", [
+        "mail-send", "--agent", "kimi", "--project", str(tmp_path),
+        "--to", "KimiFoo", "--subject", "s", "--body", "b",
+        "--no-notify", "--target", "demo/w1:p1",
+    ])
+    with pytest.raises(SystemExit, match="冲突"):
+        module.main()
+
+
+def test_explicit_target_identity_unresolvable_fails_before_send(monkeypatch, tmp_path):
+    """指定显式目标而收件人本地身份无法解析：发送前报错，不得静默忽略。"""
+    module = _load_mail_send()
+    monkeypatch.setattr(sys, "argv", [
+        "mail-send", "--agent", "kimi", "--project", str(tmp_path),
+        "--to", "KimiFoo", "--subject", "s", "--body", "b",
+        "--session", "demo", "--pane", "w1:p1",
+    ])
+    monkeypatch.setattr(
+        module, "load_identity",
+        lambda agent, instance, project: (
+            {"project_key": str(tmp_path), "name": "me",
+             "registration_token": "t"},
+            "http://hub", "tok"))
+    monkeypatch.setattr(
+        module, "_notification_identity", lambda name, project_key: None)
+
+    def forbid(*args, **kwargs):
+        raise AssertionError("身份不可解析时不得发送消息")
+
+    monkeypatch.setattr(module, "mcp_call", forbid)
+    monkeypatch.setattr(module, "mcp_tool", forbid)
+    with pytest.raises(SystemExit, match="无法解析"):
+        module.main()

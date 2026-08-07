@@ -379,16 +379,21 @@ def run_participants(run_id: str) -> list[dict[str, Any]]:
         ]
 
 
-def panes_by_mail_name(mail_name: str) -> dict[str, set]:
-    """active runs 中某 mail 花名强绑定的 session → {pane_id}（消息通知一级选路用）。"""
+def panes_by_mail_name(project_key: str, mail_name: str) -> dict[str, set]:
+    """某项目内某 mail 花名强绑定的 session → {pane_id}（消息通知一级选路用）。
+
+    花名是项目内身份：必须限定 project_key，避免把本项目消息投到另一项目
+    同花名的 pane。project_key 需为 canonical（expanduser+resolve）形式。
+    """
     if not mail_name:
         return {}
+    project = str(Path(project_key).expanduser().resolve())
     with _connect() as con:
         rows = con.execute(
             "SELECT r.session, p.pane_id FROM runs r "
             "JOIN participants p ON p.run_id = r.run_id "
-            "WHERE r.state='active' AND p.mail_name = ?",
-            (mail_name,),
+            "WHERE r.state='active' AND r.project_key = ? AND p.mail_name = ?",
+            (project, mail_name),
         ).fetchall()
     out: dict[str, set] = {}
     for row in rows:

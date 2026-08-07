@@ -325,10 +325,10 @@ def _git_common_dir(path: str) -> str | None:
         return None
 
 
-def _identity_bound_panes(mail_name: str) -> dict[str, set]:
-    """coordination 强绑定: mail_name → {session 内绑定的 pane_id}。"""
+def _identity_bound_panes(project_key: str, mail_name: str) -> dict[str, set]:
+    """coordination 强绑定（项目内）: mail_name → {session 内绑定的 pane_id}。"""
     try:
-        return coordination.panes_by_mail_name(mail_name)
+        return coordination.panes_by_mail_name(project_key, mail_name)
     except Exception:
         return {}
 
@@ -352,10 +352,10 @@ def _select_notify_targets(
         eligible.append(candidate)
     if not eligible:
         return []
-    identity_panes = _identity_bound_panes(mail_name)
-    tiers: dict[int, list] = {1: [], 2: [], 3: [], 4: []}
     proj_real = os.path.realpath(os.path.expanduser(project_key or ""))
     proj_git = _git_common_dir(proj_real)
+    identity_panes = _identity_bound_panes(proj_real, mail_name)
+    tiers: dict[int, list] = {1: [], 2: [], 3: [], 4: []}
     for candidate in eligible:
         session, pane_id, cwd = candidate[:3]
         bound = bool(candidate[3]) if len(candidate) > 3 else False
@@ -373,14 +373,18 @@ def _select_notify_targets(
             continue
         if proj_git and _git_common_dir(cwd_real) == proj_git:
             tiers[4].append(candidate)
+    # 首个非空层即定夺：唯一则投；同级多候选为歧义，立即返回空，不降级。
     for tier in (1, 2, 3, 4):
         picks = tiers[tier]
+        if not picks:
+            continue
         if len(picks) == 1:
             session, pane_id, cwd = picks[0][:3]
             exact = bool(cwd) and (
                 os.path.realpath(os.path.expanduser(cwd)) == proj_real
             )
             return [(session, pane_id, cwd, exact)]
+        return []
     return []
 
 
@@ -608,6 +612,9 @@ def main() -> None:
 
     explicit_target = None
     if args.target or args.session or args.pane:
+        if args.no_notify:
+            raise SystemExit(
+                "error: --session/--pane/--target 与 --no-notify 冲突")
         if args.target and (args.session or args.pane):
             raise SystemExit("error: --target 与 --session/--pane 不能同时使用")
         if args.target:
@@ -645,13 +652,18 @@ def main() -> None:
     recipients = [*agent_recipients, *(f"@{item}" for item in human_recipients)]
     if not recipients:
         raise SystemExit("error: 收件人为空")
+    # 显式目标在发送前一次性解析并缓存；发送之后只使用缓存结果，
+    # 避免 pane 在两次 resolve 之间消失导致持久发送被误报失败。
+    explicit_resolved: dict[str, tuple] = {}
     if explicit_target is not None:
         for recipient in agent_recipients:
             cli_identity = _notification_identity(recipient, identity["project_key"])
             if not cli_identity:
-                continue
+                raise SystemExit(
+                    f"error: 已指定显式通知目标，但收件人 {recipient} 的本地"
+                    "身份无法解析，不能静默忽略显式目标（消息未发送）")
             try:
-                resolve_explicit_target(
+                explicit_resolved[recipient] = resolve_explicit_target(
                     explicit_target[0], explicit_target[1], cli_identity[0])
             except (ValueError, RuntimeError) as exc:
                 raise SystemExit(
@@ -770,21 +782,21 @@ def main() -> None:
                     file=sys.stderr,
                 )
                 continue
-            explicit_resolved = None
-            if explicit_target is not None:
-                try:
-                    explicit_resolved = resolve_explicit_target(
-                        explicit_target[0], explicit_target[1], agent_type,
-                    )
-                except (ValueError, RuntimeError) as exc:
-                    raise SystemExit(
-                        f"error: 显式通知目标不可用: {exc}（不回退自动选路）"
-                    ) from exc
+            # 显式目标只用发送前的缓存解析结果；pane 若此刻已消失，
+            # _notify_pane 内仅警告"消息已发送、实时通知失败"，不再重新 resolve。
+            cached_explicit = explicit_resolved.get(recipient)
+            if explicit_target is not None and cached_explicit is None:
+                print(
+                    f"warning: 消息 #{message_id} 已发送，但 {recipient} 无"
+                    "发送前缓存的显式目标，跳过实时通知",
+                    file=sys.stderr,
+                )
+                continue
             try:
                 _notify_pane(
                     agent_type, instance, message_id, args.subject, project_key,
                     str(meta.get("intent") or "info"),
-                    mail_name=recipient, explicit=explicit_resolved,
+                    mail_name=recipient, explicit=cached_explicit,
                 )
             except Exception as exc:
                 print(
