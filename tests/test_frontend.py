@@ -785,23 +785,36 @@ def test_herdr_flow_is_mobile_friendly_default_card_view():
     assert 'id="view-herdrflow"' in HTML
     assert 'data-action="openFlow"' in HTML
     assert "enterHerdrFlow(it.dataset.session,it.dataset.pane)" in js
-    assert ".hf-out{" in HTML
-    assert "user-select:text" in HTML
+    assert ".hf-body{flex:1;min-height:0;overflow:auto;padding:10px;display:grid" in HTML
+    assert "grid-template-columns:repeat(auto-fill,minmax(170px,1fr))" in HTML
+    assert 'class="hf-card"' in HTML
+    assert ".hf-pane-head,.hf-out,.hf-in{display:none}" in HTML
+    assert ".hf-body.hf-full .hf-card{display:none}" in HTML
+    assert ".hf-body.hf-full .hf-pane-head{display:flex" in HTML
+    assert ".hf-body.hf-full .hf-pane.hf-focus .hf-out{display:block" in HTML
+    assert ".hf-body.hf-full .hf-in{display:flex" in HTML
     assert "HF_TIMER=setInterval(hfRefreshAll,3000)" in js
     assert "function hfStop()" in js
 
 
-def test_herdr_flow_requests_300_lines_per_agent_pane():
+def test_herdr_flow_only_requests_the_focused_agent_output():
     js = _inline_js()
     flow = js.split("async function hfRefreshAll(){", 1)[1].split(
         "async function hfSend", 1
     )[0]
 
+    assert "if(!body?.classList.contains('hf-full'))return" in flow
+    assert "body.querySelector('.hf-pane.hf-focus')" in flow
+    assert "p.pane_id===paneId" in flow
     assert "?lines=300&is_agent=true" in flow
+    assert "for(const p of panes)" not in flow
 
 
 def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     js = _inline_js()
+    toggle = js.split("async function hfToggle(paneId){", 1)[1].split(
+        "function hfExitFullscreen", 1
+    )[0]
     assert ".app.hf-immersive #view-herdrflow{" in HTML
     assert "position:fixed;inset:0" in HTML
     assert 'id="hfToolbar" class="hf-toolbar"' in HTML
@@ -813,6 +826,10 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     assert "class=\"hf-enter\"" in HTML and "hf.full" in HTML
     assert "class=\"hf-exit\"" in HTML and "hf.exit" in HTML
     assert "app.classList.add('hf-immersive')" in js
+    assert "await hfRefreshAll()" in toggle
+    assert toggle.index("pane.classList.add('hf-focus')") < toggle.index(
+        "await hfRefreshAll()"
+    )
     # 不进原生全屏(Android Chrome 会弹系统提示),只保留退出兜底
     assert "requestFullscreen()" not in js
     assert "function hfExitFullscreen(" in js
@@ -1031,14 +1048,13 @@ def test_all_h5_views_have_an_explicit_scroll_owner():
 
 
 def test_mobile_herdr_flow_uses_one_vertical_scroll_owner():
-    # pane 默认 flex-shrink 会把多个 pane 硬压进 hf-body，导致 scrollHeight
-    # 永远等于 clientHeight；手机普通模式还不能保留嵌套的 hf-out 滚动区。
+    # 总览是紧凑卡片网格；进入单 pane 全屏后，滚动 owner 才交给输出区。
     assert ".hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex:none" in HTML
     mobile = HTML.split(
         "@media(max-width:900px),(any-pointer:coarse){", 1
     )[1].split(".side-backdrop{display:none}", 1)[0]
+    assert ".hf-body:not(.hf-full){grid-template-columns:repeat(2,minmax(0,1fr))}" in mobile
     assert ".hf-body{touch-action:pan-y;-webkit-overflow-scrolling:touch}" in mobile
-    assert ".hf-out{max-height:none;min-height:0;overflow:visible;touch-action:pan-y}" in mobile
     assert ".hf-body.hf-full .hf-pane.hf-focus .hf-out{overflow:auto" in mobile
     assert ".hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-height:0" in HTML
 

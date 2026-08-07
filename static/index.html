@@ -345,12 +345,21 @@ header .spacer{flex:1}
 
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
 .hf-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap}
-.hf-body{flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
+.hf-body{flex:1;min-height:0;overflow:auto;padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));align-content:start;gap:10px}
 .hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex:none;flex-direction:column;overflow:hidden}
-.hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap}
+.hf-card{display:flex;min-width:0;min-height:118px;padding:12px;flex-direction:column;align-items:stretch;gap:8px;border:0;border-radius:0;background:transparent;color:inherit;text-align:left;cursor:pointer}
+.hf-card:hover{background:var(--bg3)}
+.hf-card-main{display:flex;min-width:0;align-items:center;gap:8px}
+.hf-card-title{display:flex;min-width:0;flex:1;flex-direction:column;gap:2px}
+.hf-card-title strong,.hf-card-title small,.hf-card-cwd{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hf-card-title small,.hf-card-cwd{color:var(--fg3);font-family:var(--mono);font-size:11px}
+.hf-card-cwd{min-height:16px}
+.hf-card-open{margin-top:auto;color:var(--accent);font-size:12px;font-weight:600}
+.hf-pane-head,.hf-out,.hf-in{display:none}
+.hf-pane-head{align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap}
 .hf-pane-head .pn{flex:1;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hf-out{background:var(--term-bg);color:var(--term-fg);font-family:var(--mono);font-size:12px;line-height:1.5;padding:10px 12px;white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:32vh;min-height:120px;user-select:text;-webkit-user-select:text}
-.hf-in{display:flex;gap:7px;padding:8px;border-top:1px solid var(--bd);flex-wrap:wrap}
+.hf-in{gap:7px;padding:8px;border-top:1px solid var(--bd);flex-wrap:wrap}
 .hf-in input{flex:1;min-width:140px;font-family:var(--mono)}
 .hf-in select{width:auto}
 .hf-expand{margin-left:auto;font-size:12px;color:var(--fg2);padding:4px 8px}
@@ -360,14 +369,17 @@ header .spacer{flex:1}
 .app.hf-immersive>header{display:none}
 .app.hf-immersive #view-herdrflow{position:fixed;inset:0;z-index:120;display:flex;background:var(--bg);padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left)}
 .app.hf-immersive #hfToolbar{display:none}
-.hf-body.hf-full{overflow:hidden;padding:0;gap:0}
+.hf-body.hf-full{display:flex;overflow:hidden;padding:0;gap:0}
 .hf-body.hf-full .hf-pane{display:none}
 .hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-height:0;border:none;border-radius:0}
+.hf-body.hf-full .hf-card{display:none}
+.hf-body.hf-full .hf-pane-head{display:flex}
 .hf-body.hf-full .hf-pane-head{padding:4px 7px;gap:5px;flex-wrap:nowrap}
 .hf-body.hf-full .hf-pane-head .agent-icon{width:20px!important;height:20px!important;font-size:10px!important}
 .hf-body.hf-full .hf-pane-head>.muted{display:none}
 .hf-body.hf-full .hf-expand{padding:2px 5px}
-.hf-body.hf-full .hf-pane.hf-focus .hf-out{max-height:none;min-height:0;flex:1;font-size:13px}
+.hf-body.hf-full .hf-pane.hf-focus .hf-out{display:block;max-height:none;min-height:0;flex:1;font-size:13px}
+.hf-body.hf-full .hf-in{display:flex}
 .hf-body.hf-full .hf-in{padding:4px;gap:4px;flex-wrap:nowrap}
 .hf-body.hf-full .hf-in input{min-width:0;padding:5px 7px}
 .hf-body.hf-full .hf-in select{padding:5px 6px}
@@ -429,11 +441,11 @@ header .spacer{flex:1}
   .attention-list{flex:none;min-height:0;overflow:visible}
   #sessionsPane{flex:none!important;min-height:0}
   #sessionsList{flex:none!important;overflow:visible!important}
-  /* “手机”流视图使用一个纵向滚动 owner。pane 禁止 flex 收缩，普通模式下
-     展开完整输出由 hf-body 滚动；单 pane 全屏时再把滚动交回该输出区。 */
+  /* “手机”流视图总览一屏优先展示两列 Agent 卡片；进入单 pane 全屏后，
+     再把滚动 owner 交给该输出区。 */
   .hf-toolbar{flex:none}
+  .hf-body:not(.hf-full){grid-template-columns:repeat(2,minmax(0,1fr))}
   .hf-body{touch-action:pan-y;-webkit-overflow-scrolling:touch}
-  .hf-out{max-height:none;min-height:0;overflow:visible;touch-action:pan-y}
   .hf-body.hf-full .hf-pane.hf-focus .hf-out{overflow:auto;-webkit-overflow-scrolling:touch}
 }
 .side-backdrop{display:none}
@@ -2901,7 +2913,16 @@ function hfRender(){
   if(!panes.length){body.innerHTML='<div class="empty">'+t('hf.empty','该 session 无 agent pane')+'</div>';return}
   body.innerHTML=panes.map(p=>{
     const cls=classify(p.agent_status,p.agent);
-    return `<div class="hf-pane" id="hf-${esc(p.pane_id)}">
+    return `<div class="hf-pane" id="hf-${esc(p.pane_id)}" data-pane="${esc(p.pane_id)}">
+      <button class="hf-card" data-action="hfToggle" data-pane="${esc(p.pane_id)}" title="全屏查看 ${esc(p.agent)}">
+        <span class="hf-card-main">
+          <span class="agent-icon ${esc(p.agent)}" style="width:28px;height:28px;font-size:13px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
+          <span class="hf-card-title"><strong>${esc(p.agent)}</strong><small>${esc(p.pane_id)}</small></span>
+          <span class="status-dot ${cls}"></span>
+        </span>
+        <span class="hf-card-cwd">${esc(p.cwd_name||p.cwd||'')}</span>
+        <span class="hf-card-open">${t('hf.full','⛶ 全屏查看')}</span>
+      </button>
       <div class="hf-pane-head">
         <span class="agent-icon ${esc(p.agent)}" style="width:24px;height:24px;font-size:11px">${AGENT_EMOJI[p.agent]||'⬜'}</span>
         <span class="pn">${esc(p.agent)} <span class="muted">${esc(p.pane_id)}</span></span>
@@ -2927,22 +2948,26 @@ function hfRender(){
   }
 }
 async function hfRefreshAll(){
+  const body=document.getElementById('hfBody');
+  if(!body?.classList.contains('hf-full'))return;
+  const focus=body.querySelector('.hf-pane.hf-focus');
+  const paneId=focus?.dataset.pane;
+  if(!paneId)return;
   const session=HF_SESSION;
-  const panes=(BOARD?.panes||[]).filter(p=>p.session===session&&p.agent);
-  for(const p of panes){
-    const out=document.getElementById('hf-out-'+p.pane_id);
-    if(!out)continue;
-    try{
-      const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=300&is_agent=true`);
-      if(HF_SESSION!==session||!out.isConnected)return;
-      const next=paneReadText(d);
-      if(out.textContent===next)continue;
-      const selection=window.getSelection();
-      if(selection&&!selection.isCollapsed&&out.contains(selection.anchorNode))continue;
-      // textContent 防 ANSI 转义注入;用户上翻时保留位置,原本在底部时继续跟随。
-      updatePaneOutput(out,next);
-    }catch(e){if(HF_SESSION===session&&out.isConnected)out.textContent='读取失败: '+e}
-  }
+  const p=(BOARD?.panes||[]).find(p=>p.session===session&&p.agent&&p.pane_id===paneId);
+  if(!p)return;
+  const out=document.getElementById('hf-out-'+p.pane_id);
+  if(!out)return;
+  try{
+    const d=await api(`/api/herdr/pane/${encodeURIComponent(p.session)}/${encodeURIComponent(p.pane_id)}?lines=300&is_agent=true`);
+    if(HF_SESSION!==session||!out.isConnected||!focus.classList.contains('hf-focus'))return;
+    const next=paneReadText(d);
+    if(out.textContent===next)return;
+    const selection=window.getSelection();
+    if(selection&&!selection.isCollapsed&&out.contains(selection.anchorNode))return;
+    // textContent 防 ANSI 转义注入;用户上翻时保留位置,原本在底部时继续跟随。
+    updatePaneOutput(out,next);
+  }catch(e){if(HF_SESSION===session&&out.isConnected&&focus.classList.contains('hf-focus'))out.textContent='读取失败: '+e}
 }
 async function hfSend(paneId){
   const inp=document.getElementById('hf-in-'+paneId);
@@ -2985,8 +3010,9 @@ async function hfToggle(paneId){
   app.classList.add('hf-immersive');
   body.classList.add('hf-full');
   pane.classList.add('hf-focus');
+  await hfRefreshAll();
   const out=document.getElementById('hf-out-'+paneId);
-  if(out)out.scrollTop=out.scrollHeight;
+  if(out&&pane.classList.contains('hf-focus'))out.scrollTop=out.scrollHeight;
   // 不再进原生全屏:Android Chrome 每次都会弹「退出全屏模式」系统提示,
   // 视觉沉浸模式(hf-immersive)已占满可视区,体验一致且无打扰。
 }
