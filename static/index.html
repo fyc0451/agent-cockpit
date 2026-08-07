@@ -346,7 +346,7 @@ header .spacer{flex:1}
 /* herdr 流视图(只读 pane 流,手机可滚屏/复制) */
 .hf-toolbar{display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);background:var(--bg2);flex-wrap:wrap}
 .hf-body{flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
-.hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex-direction:column;overflow:hidden}
+.hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex:none;flex-direction:column;overflow:hidden}
 .hf-pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);background:var(--bg3);font-size:13px;flex-wrap:wrap}
 .hf-pane-head .pn{flex:1;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hf-out{background:var(--term-bg);color:var(--term-fg);font-family:var(--mono);font-size:12px;line-height:1.5;padding:10px 12px;white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:32vh;min-height:120px;user-select:text;-webkit-user-select:text}
@@ -362,7 +362,7 @@ header .spacer{flex:1}
 .app.hf-immersive #hfToolbar{display:none}
 .hf-body.hf-full{overflow:hidden;padding:0;gap:0}
 .hf-body.hf-full .hf-pane{display:none}
-.hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;border:none;border-radius:0}
+.hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-height:0;border:none;border-radius:0}
 .hf-body.hf-full .hf-pane-head{padding:4px 7px;gap:5px;flex-wrap:nowrap}
 .hf-body.hf-full .hf-pane-head .agent-icon{width:20px!important;height:20px!important;font-size:10px!important}
 .hf-body.hf-full .hf-pane-head>.muted{display:none}
@@ -429,6 +429,12 @@ header .spacer{flex:1}
   .attention-list{flex:none;min-height:0;overflow:visible}
   #sessionsPane{flex:none!important;min-height:0}
   #sessionsList{flex:none!important;overflow:visible!important}
+  /* “手机”流视图使用一个纵向滚动 owner。pane 禁止 flex 收缩，普通模式下
+     展开完整输出由 hf-body 滚动；单 pane 全屏时再把滚动交回该输出区。 */
+  .hf-toolbar{flex:none}
+  .hf-body{touch-action:pan-y;-webkit-overflow-scrolling:touch}
+  .hf-out{max-height:none;min-height:0;overflow:visible;touch-action:pan-y}
+  .hf-body.hf-full .hf-pane.hf-focus .hf-out{overflow:auto;-webkit-overflow-scrolling:touch}
 }
 .side-backdrop{display:none}
 @media(max-width:1100px){

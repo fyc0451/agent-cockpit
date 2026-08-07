@@ -1030,6 +1030,19 @@ def test_all_h5_views_have_an_explicit_scroll_owner():
     assert ".settings-scroll{flex:1;min-height:0;overflow:auto" in HTML
 
 
+def test_mobile_herdr_flow_uses_one_vertical_scroll_owner():
+    # pane 默认 flex-shrink 会把多个 pane 硬压进 hf-body，导致 scrollHeight
+    # 永远等于 clientHeight；手机普通模式还不能保留嵌套的 hf-out 滚动区。
+    assert ".hf-pane{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;display:flex;flex:none" in HTML
+    mobile = HTML.split(
+        "@media(max-width:900px),(any-pointer:coarse){", 1
+    )[1].split(".side-backdrop{display:none}", 1)[0]
+    assert ".hf-body{touch-action:pan-y;-webkit-overflow-scrolling:touch}" in mobile
+    assert ".hf-out{max-height:none;min-height:0;overflow:visible;touch-action:pan-y}" in mobile
+    assert ".hf-body.hf-full .hf-pane.hf-focus .hf-out{overflow:auto" in mobile
+    assert ".hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-height:0" in HTML
+
+
 def test_h5_message_file_and_settings_layouts_do_not_overflow():
     narrow = HTML.split("@media(max-width:860px){", 1)[1].split(
         "@media(max-width:560px){", 1
