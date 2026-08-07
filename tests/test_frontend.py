@@ -1606,3 +1606,12 @@ def test_mobile_nav_closes_and_term_file_panel():
     assert "function termFiles()" in js
     assert "function termFileOpen(" in js
     assert "on('#termFileList'" in js
+
+
+def test_pc_nav_hide_and_expand():
+    js = _inline_js()
+    assert 'id="navCollapse"' in HTML
+    assert 'id="navExpand"' in HTML
+    assert ".app.nav-hidden" in HTML
+    assert "function toggleNavPc()" in js
+    assert "nav-hidden-pc" in js

@@ -58,6 +58,11 @@ header{display:none;align-items:center;gap:10px;padding:10px 14px;background:var
 header .logo{font-weight:750;font-size:15px;letter-spacing:-.2px;white-space:nowrap;display:flex;align-items:center;gap:8px}
 header .spacer{flex:1}
 .nav-toggle{display:none}
+#navExpand{display:none;position:fixed;top:calc(10px + var(--safe-top));left:calc(10px + var(--safe-left));z-index:70;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;box-shadow:0 2px 10px rgba(0,0,0,.12)}
+#navCollapse{margin-left:auto}
+.app.nav-hidden{grid-template-columns:1fr}
+.app.nav-hidden #side{display:none}
+.app.nav-hidden #navExpand{display:grid}
 .side{display:flex;flex-direction:column;background:var(--bg2);border-right:1px solid var(--bd);min-height:0;z-index:40}
 .side-brand{display:flex;align-items:center;gap:10px;padding:16px 16px 12px;border-bottom:1px solid var(--bd)}
 .side-logo{width:32px;height:32px;display:grid;place-items:center;border-radius:9px;background:color-mix(in srgb,var(--accent) 14%,transparent);font-size:16px}
@@ -423,6 +428,9 @@ header .spacer{flex:1}
   .side{position:fixed;top:0;bottom:0;left:0;width:min(78vw,300px);transform:translateX(-102%);transition:transform .2s ease;box-shadow:0 0 40px rgba(0,0,0,.22);z-index:60}
   .side.open{transform:none}
   .side-backdrop.show{display:block;position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:55}
+  /* 移动端有 header ☰,不用浮动展开钮;抽屉也不受 PC 隐藏态影响 */
+  #navExpand{display:none!important}
+  .app.nav-hidden #side{display:flex}
 }
 @media(max-width:860px){
   .msgs-body,.files-body{grid-template-columns:1fr}
@@ -496,8 +504,9 @@ header .spacer{flex:1}
 </head>
 <body>
 <div class="app">
+  <button class="icon" id="navExpand" onclick="toggleNavPc()" title="展开菜单" data-i18n-title="nav.menu">☰</button>
   <aside class="side" id="side">
-    <div class="side-brand"><span class="side-logo">⚙️</span><div class="side-title"><b>Agent Cockpit</b><small>AI Agent 驾驶舱</small></div></div>
+    <div class="side-brand"><span class="side-logo">⚙️</span><div class="side-title"><b>Agent Cockpit</b><small>AI Agent 驾驶舱</small></div><button class="icon" id="navCollapse" onclick="toggleNavPc()" title="收起菜单">«</button></div>
     <nav id="nav">
       <button data-view="attention" class="active" data-i18n="nav.attention" data-i18n-title="nav.attention.t" title="工作台:agent 状态速览 + 任务、进度、阻塞项和会话管理"><span class="nav-ic">◔</span>工作台</button>
       <button data-view="term" data-i18n="nav.term" data-i18n-title="nav.term.t" title="开发:接管任意 pane 的真终端 TUI,直接敲命令"><span class="nav-ic">▸</span>开发</button>
@@ -1001,6 +1010,13 @@ function closeNav(){
   document.getElementById('sideBackdrop')?.classList.remove('show');
   try{localStorage.setItem('nav-open','0')}catch(e){}
 }
+function toggleNavPc(){
+  // 移动端抽屉语义:« 等于关闭抽屉;PC:隐藏/展开整个侧边栏
+  if(NAV_COLLAPSE_MQ.matches){closeNav();return}
+  const app=document.querySelector('.app');
+  const hidden=app.classList.toggle('nav-hidden');
+  try{localStorage.setItem('nav-hidden-pc',hidden?'1':'0')}catch(e){}
+}
 function toggleTermToolbar(){
   const tb=document.querySelector('.term-toolbar');if(!tb)return;
   const collapsed=tb.classList.toggle('collapsed');
@@ -1011,6 +1027,7 @@ function toggleTermToolbar(){
 (function restoreCollapses(){
   try{
     if(localStorage.getItem('nav-open')==='1'){document.getElementById('side').classList.add('open');document.getElementById('sideBackdrop')?.classList.add('show')}
+    if(localStorage.getItem('nav-hidden-pc')==='1')document.querySelector('.app').classList.add('nav-hidden');
     const tb=document.querySelector('.term-toolbar');
     const stored=localStorage.getItem('term-toolbar-collapsed');
     // 触屏设备进入终端时默认保持紧凑；本次页面内仍可手动展开。
