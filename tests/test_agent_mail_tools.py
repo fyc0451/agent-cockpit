@@ -972,6 +972,50 @@ def test_notify_skips_pane_while_recipient_typing(monkeypatch, tmp_path):
     assert len(prompts) == 1
 
 
+def test_notify_skips_working_agent_without_interrupting_current_turn(
+    monkeypatch, tmp_path,
+):
+    """Herdr prompt 是合成用户输入；working Agent 必须只保留未读消息。"""
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    session_dir = tmp_path / "session"
+    project = tmp_path / "project"
+    for item in (session_dir, project):
+        item.mkdir()
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(module, "TYPING_STATE_PATH", str(tmp_path / "none.json"))
+    monkeypatch.setattr(
+        module, "_session_rows",
+        lambda _: [{"name": "demo", "running": True, "directory": str(session_dir)}],
+    )
+    monkeypatch.setattr(module, "_load_bindings", lambda: {})
+    status = {"value": "working"}
+    prompts = []
+
+    def run(args, **kwargs):
+        if args[-2:] == ["api", "snapshot"]:
+            return module.subprocess.CompletedProcess(args, 0, json.dumps({
+                "result": {"snapshot": {"panes": [{
+                    "pane_id": "w1:pA", "agent": "kimi", "cwd": str(project),
+                    "agent_status": status["value"],
+                }]}},
+            }), "")
+        if "prompt" in args:
+            prompts.append(args)
+            return module.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    module._notify_pane("kimi", "main", 905, "工作中避让", str(project))
+    assert prompts == []
+
+    status["value"] = "idle"
+    module._notify_pane("kimi", "main", 906, "空闲可通知", str(project))
+    assert len(prompts) == 1
+
+
 def test_notify_not_deferred_when_typing_in_other_pane(monkeypatch, tmp_path):
     """pane 粒度:用户在同 session 另一个 pane 输入时,目标 pane 通知不避让。"""
     module = _load_mail_send()
@@ -1190,9 +1234,10 @@ def test_resolve_explicit_target_success(monkeypatch):
     monkeypatch.setattr(module, "_session_rows",
                         lambda env: [{"name": "demo", "running": True}])
     monkeypatch.setattr(module, "_session_panes", lambda s, env: [
-        {"pane_id": "w1:p2", "agent": "kimi", "cwd": "/x"}])
+        {"pane_id": "w1:p2", "agent": "kimi", "cwd": "/x",
+         "agent_status": "working"}])
     assert module.resolve_explicit_target("demo", "w1:p2", "kimi") == (
-        "demo", "w1:p2", "/x")
+        "demo", "w1:p2", "/x", "working")
 
 
 def test_resolve_explicit_target_session_missing(monkeypatch):
@@ -1250,6 +1295,27 @@ def test_explicit_target_notifies_without_auto_routing(monkeypatch, tmp_path):
     )
     assert len(prompts) == 1
     assert prompts[0][5] == "w1:pX"
+
+
+def test_explicit_target_uses_cached_working_status_without_prompt(
+    monkeypatch, tmp_path,
+):
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(module, "TYPING_STATE_PATH", str(tmp_path / "none.json"))
+
+    def no_prompt(*args, **kwargs):
+        raise AssertionError("working Agent 不应收到 Herdr prompt")
+
+    monkeypatch.setattr(module.subprocess, "run", no_prompt)
+    module._notify_pane(
+        "kimi", "main", 1, "工作中显式目标", str(project),
+        explicit=("demo", "w1:p1", "/x", "working"),
+    )
 
 
 def test_explicit_target_never_re_resolves(monkeypatch, tmp_path):

@@ -471,8 +471,8 @@ def _session_panes(session_name: str, env: dict) -> list[dict]:
 
 def resolve_explicit_target(
     session_name: str, pane_id: str, agent_type: str,
-) -> tuple[str, str, str]:
-    """校验显式通知目标，返回 (session, pane_id, cwd)；不合法直接抛 ValueError。"""
+) -> tuple[str, str, str, str]:
+    """校验显式通知目标，返回目标与解析时的 Agent 状态。"""
     if not session_name or not pane_id:
         raise ValueError("显式目标需要同时提供 session 与 pane")
     env = _herdr_env()
@@ -495,7 +495,7 @@ def resolve_explicit_target(
             f"{pane_agent or '空'}，与收件人类型 {agent_type} 不兼容"
         )
     cwd = str(pane.get("cwd") or pane.get("foreground_cwd") or "")
-    return session_name, pane_id, cwd
+    return session_name, pane_id, cwd, str(pane.get("agent_status") or "")
 
 
 def _notify_pane(
@@ -507,15 +507,17 @@ def _notify_pane(
         return
     env = _herdr_env()
     if explicit is not None:
-        session, pane_id, cwd = explicit
+        session, pane_id, cwd, *extra = explicit
         _deliver_notify_note(
             env, session, pane_id, cwd, "explicit",
             msg_id, subject, agent_type, instance, project_key, intent,
+            agent_status=str(extra[0]) if extra else "",
         )
         return
     bindings = _load_bindings()
     sessions = [row for row in _session_rows(env) if row.get("running")]
     candidates = []
+    agent_statuses = {}
     for session in sessions:
         try:
             panes = _session_panes(session["name"], env)
@@ -532,6 +534,9 @@ def _notify_pane(
             ):
                 continue
             cwd = pane.get("cwd") or pane.get("foreground_cwd") or ""
+            agent_statuses[(session["name"], pane["pane_id"])] = str(
+                pane.get("agent_status") or ""
+            )
             candidates.append((
                 session["name"], pane["pane_id"], cwd, bound, bool(bound_project)
             ))
@@ -552,14 +557,24 @@ def _notify_pane(
         _deliver_notify_note(
             env, session, pane_id, cwd, "auto" if not is_exact else "exact",
             msg_id, subject, agent_type, instance, project_key, intent,
+            agent_status=agent_statuses.get((session, pane_id), ""),
         )
 
 
 def _deliver_notify_note(
     env: dict, session: str, pane_id: str, cwd: str, source: str,
     msg_id: int, subject: str, agent_type: str, instance: str,
-    project_key: str, intent: str,
+    project_key: str, intent: str, agent_status: str = "",
 ) -> None:
+    # Herdr prompt 会被 CLI 当成新的用户输入；Agent 正在生成时直接 prompt
+    # 会取消当前 turn。此时只保留持久未读消息，等对方空闲或里程碑自查。
+    if agent_status == "working":
+        print(
+            f"notice: {session}/{pane_id} Agent 正在工作，跳过实时通知"
+            "（消息保留未读，对方里程碑自查可见）",
+            file=sys.stderr,
+        )
+        return
     if _recipient_typing(session, pane_id):
         print(
             f"notice: {session}/{pane_id} 用户正在输入，跳过实时通知"
