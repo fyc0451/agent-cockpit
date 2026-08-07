@@ -831,7 +831,7 @@ header .spacer{flex:1}
       </div>
       <div style="display:flex;justify-content:flex-end;gap:8px;margin:4px 0 20px">
         <button class="sm" onclick="cancelSettings()" data-i18n="set.cancel">取消</button>
-        <button class="primary" onclick="saveSettings()" data-i18n="set.save">保存</button>
+        <button class="primary" id="setSaveBtn" onclick="saveSettings()" data-i18n="set.save">保存</button>
       </div>
     </div>
   </section>
@@ -1021,7 +1021,7 @@ let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_IN_FLIGHT=false, SETUP_REQ_ID=0, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
 // B1: SSE 链路三态与发送/消息/文件保护
 let SSE_LINK='offline', SSE_LAST_OK_TS=null; // online | reconnecting | offline
-let TERM_SEND_KEY=null, MSG_SENDING=false, MSG_LOAD_SEQ=0, MSG_BOUND_SLUG=null, SETTINGS_SAVING=false;
+let TERM_SENDING={}, MSG_SENDING=false, MSG_LOAD_SEQ=0, MSG_BOUND_SLUG=null, SETTINGS_SAVING=false;
 const HF_SENDING={};
 let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',inboxRoute:null,chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
 let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
@@ -1263,6 +1263,8 @@ async function saveSettings(){
   };
   const hubPayload={hub:HUB_CONFIG_EDIT.trim(),team_hub:TEAM_HUB_CONFIG_EDIT.trim(),human_auth:HUMAN_AUTH_CONFIG_EDIT.trim()};
   SETTINGS_SAVING=true;
+  const saveBtn=document.getElementById('setSaveBtn');
+  if(saveBtn)saveBtn.disabled=true;
   let hubSaved=false;
   try{
     HUB_CONFIG=await api('/api/agent-mail/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(hubPayload)});
@@ -1284,7 +1286,11 @@ async function saveSettings(){
   }catch(e){
     if(hubSaved)toast(t('set.partial','Hub 已保存，本机设置失败（可重试）: ')+e,6000);
     else toast(t('set.savefail','保存失败: ')+e,4000);
-  }finally{SETTINGS_SAVING=false}
+  }finally{
+    SETTINGS_SAVING=false;
+    const btn=document.getElementById('setSaveBtn');
+    if(btn)btn.disabled=false;
+  }
 }
 function applyEnabledAgents(){
   if(!SETTINGS)return;
@@ -2212,18 +2218,19 @@ async function refreshTerm(){
 async function termSend(){
   if(!CURRENT_TERM)return;
   const key=CURRENT_TERM.session+'/'+CURRENT_TERM.paneId;
-  if(TERM_SEND_KEY)return;
+  if(TERM_SENDING[key])return; // per-target: A 发送不阻塞 B
   const text=document.getElementById('termInput').value.trim();if(!text)return;
   const mode=document.getElementById('termMode').value;
-  TERM_SEND_KEY=key;
+  const session=CURRENT_TERM.session, paneId=CURRENT_TERM.paneId;
+  TERM_SENDING[key]=true;
   try{
-    await api(`/api/herdr/pane/${encodeURIComponent(CURRENT_TERM.session)}/${encodeURIComponent(CURRENT_TERM.paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
+    await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/send`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,mode})});
     if(CURRENT_TERM&&(CURRENT_TERM.session+'/'+CURRENT_TERM.paneId)===key){
       document.getElementById('termInput').value='';
       setTimeout(refreshTerm,800);
     }
   }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
-  finally{if(TERM_SEND_KEY===key)TERM_SEND_KEY=null}
+  finally{delete TERM_SENDING[key]}
 }
 // 终端里上传截图/文件,自动插入 @路径(对 agent 模式)或裸路径(对 shell)
 async function termUploadFiles(input){
@@ -2462,6 +2469,8 @@ function setMsgComposeEnabled(on){
   ['cmpFrom','cmpTo','cmpSubject','cmpBody','cmpIntent','cmpImportance','cmpHard'].forEach(id=>{
     const el=document.getElementById(id);if(el)el.disabled=!on;
   });
+  const sendBtn=document.getElementById('cmpSendBtn');
+  if(sendBtn)sendBtn.disabled=!on||MSG_SENDING;
   document.querySelectorAll('[onclick*="sendMsg"],button[data-action="sendMsg"]').forEach(b=>{b.disabled=!on||MSG_SENDING});
 }
 function renderProjAgentList(d){
@@ -2500,7 +2509,7 @@ function renderProjMsgs(d,focusMessageId){
     <div class="field"><label>重要性</label><select id="cmpImportance"><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option><option value="low">low</option></select></div>
     <label style="display:flex;gap:8px;align-items:center;font-size:12px"><input id="cmpHard" type="checkbox" style="width:auto">硬中断（仅 stop/redirect；先保存 uncertain checkpoint，再发送 Ctrl-C）</label>
     <div class="field"><label>正文</label><textarea id="cmpBody" rows="3"></textarea></div>
-    <button class="primary" onclick="sendMsg()">${t('hf.send','发送')}</button></div>`:`<div class="capability-note">Agent Mail Hub 当前不可用，消息暂时只读：${esc(d.agent_mail?.write_reason||'连接失败')}</div>`}`;
+    <button class="primary" id="cmpSendBtn" onclick="sendMsg()">${t('hf.send','发送')}</button></div>`:`<div class="capability-note">Agent Mail Hub 当前不可用，消息暂时只读：${esc(d.agent_mail?.write_reason||'连接失败')}</div>`}`;
   if(focusMessageId){
     const target=[...document.querySelectorAll('#msgList [data-message-id]')].find(el=>el.dataset.messageId===String(focusMessageId));
     if(target)target.scrollIntoView({block:'center'});
@@ -2544,17 +2553,26 @@ async function sendMsg(){
     hard,
   };
   MSG_SENDING=true;
+  setMsgComposeEnabled(false);
   try{
     await api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     // 成功才清草稿；仅当仍绑定同一项目时刷新
     if(MSG_BOUND_SLUG===boundSlug){
-      document.getElementById('cmpBody').value='';
-      document.getElementById('cmpSubject').value='';
+      const bodyEl=document.getElementById('cmpBody');
+      const subEl=document.getElementById('cmpSubject');
+      if(bodyEl)bodyEl.value='';
+      if(subEl)subEl.value='';
       toast(t('toast.sent','已发送 ✓'));
       loadProjectMsgs();
     }
   }catch(e){toast(t('toast.sendfail','发送失败: ')+e)}
-  finally{MSG_SENDING=false}
+  finally{
+    MSG_SENDING=false;
+    // 仍绑定当前项目时恢复可编辑
+    if(MSG_BOUND_SLUG&&document.getElementById('msgProj')?.value===MSG_BOUND_SLUG){
+      setMsgComposeEnabled(true);
+    }
+  }
 }
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
@@ -3785,9 +3803,12 @@ function showSetupModal(){
   document.getElementById('setupModal').classList.add('show');
 }
 function closeSetup(){
-  // 在途请求不得因关窗解锁；完成后才允许再次提交
+  // 在途：保持 modal 可见，禁止隐藏/重开编辑导致旧响应写同一 suResult
+  if(SETUP_IN_FLIGHT){
+    toast('工作区正在启动中，请等待完成后再关闭',3500);
+    return;
+  }
   document.getElementById('setupModal').classList.remove('show');
-  if(SETUP_IN_FLIGHT)return;
   SETUP_SUBMITTING=false;
   renderSetupPreview();
 }
@@ -3974,18 +3995,28 @@ function fileSearchOpen(i){
 }
 function fileSearchDownload(i){
   const e=FILE_ENTRIES[i];if(!e||e.type!=='file')return;
-  FILE_PATH=e.path;fileDownload();
+  // 局部 path 下载，绝不改写当前编辑目标 FILE_PATH
+  fileDownloadPath(e.path);
 }
 function fileIsDirty(){
   const ed=document.getElementById('fileEditor');
   if(!ed||FILE_ORIG===null||FILE_PATH===null)return false;
-  // 媒体预览无 textarea
-  if(!document.getElementById('fileEditor'))return false;
   return ed.value!==FILE_ORIG;
+}
+function fileClearEditor(){
+  // 确认丢弃后清空编辑目标，避免 beforeunload/误保存残留草稿
+  FILE_PATH=null;
+  FILE_ORIG=null;
+  const area=document.getElementById('editorArea');
+  if(area){
+    area.innerHTML='<div class="empty" style="display:flex;align-items:center;justify-content:center;height:100%" data-i18n="files.empty">'+esc(t('files.empty','选择左侧文件'))+'</div>';
+  }
 }
 function fileConfirmLeave(){
   if(!fileIsDirty())return true;
-  return confirm('文件有未保存修改，确定离开并丢弃？');
+  if(!confirm('文件有未保存修改，确定离开并丢弃？'))return false;
+  fileClearEditor();
+  return true;
 }
 function fileGoto(p){if(!fileConfirmLeave())return;FILE_CWD=p;loadFileTree()}
 function fileCd(n){if(!fileConfirmLeave())return;FILE_CWD=FILE_CWD+'/'+n;loadFileTree()}
@@ -3998,8 +4029,15 @@ function fileUp(){
 }
 function fileDownloadEntry(i){
   const e=FILE_ENTRIES[i];if(!e||e.type!=='file')return;
-  FILE_PATH=FILE_CWD.endsWith('/')?FILE_CWD+e.name:FILE_CWD+'/'+e.name;
-  fileDownload();
+  const path=FILE_CWD.endsWith('/')?FILE_CWD+e.name:FILE_CWD+'/'+e.name;
+  fileDownloadPath(path);
+}
+function fileDownloadPath(path){
+  if(!path){toast('未选择文件');return}
+  const a=document.createElement('a');
+  a.href='/api/files/download?path='+encodeURIComponent(path);
+  a.download='';document.body.appendChild(a);a.click();a.remove();
+  toast('开始下载');
 }
 function fileOpen(dir,name){
   const path=dir.endsWith('/')?dir+name:dir+'/'+name;
@@ -4104,11 +4142,8 @@ async function termFileOpen(path){
   }catch(e){toast('打开失败: '+e)}
 }
 function fileDownload(){
-  if(!FILE_PATH){toast('未选择文件');return}
-  const a=document.createElement('a');
-  a.href='/api/files/download?path='+encodeURIComponent(FILE_PATH);
-  a.download='';document.body.appendChild(a);a.click();a.remove();
-  toast('开始下载');
+  // 当前编辑文件下载；列表下载请用 fileDownloadPath，勿改写 FILE_PATH
+  fileDownloadPath(FILE_PATH);
 }
 async function fileSave(){const c=document.getElementById('fileEditor').value;if(c===FILE_ORIG){toast('无改动');return}try{await api('/api/files/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:FILE_PATH,content:c})});FILE_ORIG=c;toast('已保存 ✓')}catch(e){toast('保存失败: '+e)}}
 

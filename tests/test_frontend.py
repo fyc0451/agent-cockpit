@@ -350,8 +350,10 @@ def test_setup_workspace_allows_optional_tasks_and_keeps_success_locked():
     close = js.split("function closeSetup(){", 1)[1].split(
         "async function setupOpenTerminal", 1,
     )[0]
-    assert "if(SETUP_IN_FLIGHT)return" in close
-    assert "SETUP_SUBMITTING=false;renderSetupPreview();\n  document.getElementById('setupModal')" not in js
+    assert "if(SETUP_IN_FLIGHT)" in close
+    # remove('show') 必须在 in-flight guard 之后（在途不隐藏）
+    assert close.index("if(SETUP_IN_FLIGHT)") < close.index("remove('show')")
+    assert "工作区正在启动中" in close
 
 
 def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
@@ -1916,9 +1918,11 @@ def test_b1_setup_close_does_not_clear_in_flight_lock():
         "async function setupOpenTerminal", 1,
     )[0]
     assert "SETUP_IN_FLIGHT" in close
-    assert "if(SETUP_IN_FLIGHT)return" in close
-    # return 在解锁之前：在途直接返回，不执行后面的 SETUP_SUBMITTING=false
-    assert close.index("if(SETUP_IN_FLIGHT)return") < close.index("SETUP_SUBMITTING=false")
+    assert "if(SETUP_IN_FLIGHT)" in close
+    # 在途 guard 必须先于 remove('show')：保持 modal 可见
+    assert close.index("if(SETUP_IN_FLIGHT)") < close.index("remove('show')")
+    assert "工作区正在启动中" in close
+    assert close.index("if(SETUP_IN_FLIGHT)") < close.index("SETUP_SUBMITTING=false")
     submit = js.split("async function doSetupWorkspace(){", 1)[1].split(
         "async function setupHerdrOnboarding", 1,
     )[0]
@@ -1931,8 +1935,10 @@ def test_b1_send_paths_have_per_target_single_flight():
     term = js.split("async function termSend(){", 1)[1].split(
         "async function termUploadFiles", 1,
     )[0]
-    assert "TERM_SEND_KEY" in term
-    assert "if(TERM_SEND_KEY)return" in term
+    assert "TERM_SENDING" in term
+    assert "if(TERM_SENDING[key])return" in term
+    assert "delete TERM_SENDING[key]" in term
+    assert "TERM_SEND_KEY" not in term
     hf = js.split("async function hfSend(paneId){", 1)[1].split(
         "async function hfUpload", 1,
     )[0]
@@ -1943,16 +1949,37 @@ def test_b1_send_paths_have_per_target_single_flight():
     )[0]
     assert "if(MSG_SENDING)return" in msg
     assert "MSG_BOUND_SLUG" in msg
+    # 生产路径：上锁后立刻禁用 compose
+    assert msg.index("MSG_SENDING=true") < msg.index("setMsgComposeEnabled(false)")
+    assert "finally" in msg and "setMsgComposeEnabled(true)" in msg
 
 
 def test_b1_file_dirty_and_beforeunload():
     js = _inline_js()
     assert "function fileIsDirty()" in js
     assert "function fileConfirmLeave()" in js
+    assert "function fileClearEditor()" in js
+    assert "function fileDownloadPath(path)" in js
     assert "beforeunload" in js
     assert "fileConfirmLeave()" in js
     goto = js.split("function fileGoto(p){", 1)[1][:80]
     assert "fileConfirmLeave" in goto
+    # 下载不得改写 FILE_PATH：列表下载走局部 path
+    dl_entry = js.split("function fileDownloadEntry(i){", 1)[1].split(
+        "function fileDownloadPath(", 1,
+    )[0]
+    assert "fileDownloadPath(path)" in dl_entry
+    assert "FILE_PATH=" not in dl_entry
+    dl_search = js.split("function fileSearchDownload(i){", 1)[1].split(
+        "function fileIsDirty", 1,
+    )[0]
+    assert "fileDownloadPath(e.path)" in dl_search
+    assert "FILE_PATH=" not in dl_search
+    # 丢弃后清空编辑器
+    confirm = js.split("function fileConfirmLeave(){", 1)[1].split(
+        "function fileGoto", 1,
+    )[0]
+    assert "fileClearEditor()" in confirm
 
 
 def test_b1_stop_delete_check_business_error():
@@ -1979,7 +2006,12 @@ def test_b1_settings_partial_success_and_single_flight():
     assert "Hub 已保存" in body or "set.partial" in body
     assert "agent-mail/config" in body
     assert "/api/settings" in body
-
+    # 生产按钮绑定：稳定 id + 保存中 disabled
+    assert 'id="setSaveBtn"' in HTML
+    assert "getElementById('setSaveBtn')" in body
+    assert "disabled=true" in body and "disabled=false" in body
+    assert body.index("SETTINGS_SAVING=true") < body.index("disabled=true")
+    assert 'id="cmpSendBtn"' in js
 
 def test_b1_node_behavior_sse_state_machine():
     """可执行：SSE 三态仅 onopen/事件恢复在线，error 不自动回绿。"""
@@ -2004,58 +2036,74 @@ def test_b1_node_behavior_sse_state_machine():
 
 
 def test_b1_node_behavior_setup_req_id_and_close_lock():
-    out = _run_node(textwrap.dedent(r"""
-    let SETUP_SUBMITTING=false, SETUP_IN_FLIGHT=false, SETUP_REQ_ID=0;
-    function closeSetup(){
-      if(SETUP_IN_FLIGHT)return;
-      SETUP_SUBMITTING=false;
-    }
-    // in flight close must keep lock
-    SETUP_SUBMITTING=true; SETUP_IN_FLIGHT=true;
-    closeSetup();
-    if(!SETUP_SUBMITTING || !SETUP_IN_FLIGHT) process.exit(2);
-    // stale response
-    const reqId=++SETUP_REQ_ID;
-    SETUP_REQ_ID++; // newer request
-    const stale = reqId !== SETUP_REQ_ID;
-    if(!stale) process.exit(3);
-    // complete in flight then close unlocks
-    SETUP_IN_FLIGHT=false; SETUP_SUBMITTING=true;
-    closeSetup();
-    if(SETUP_SUBMITTING) process.exit(4);
-    console.log('ok');
-    """))
+    # 从生产 closeSetup 抽取并执行：在途不 remove show
+    js = _inline_js()
+    close_src = js.split("function closeSetup(){", 1)[1].split(
+        "async function setupOpenTerminal", 1,
+    )[0]
+    # close_src 已含函数体结尾 }，不可再包一层
+    script = (
+        "let SETUP_SUBMITTING=false, SETUP_IN_FLIGHT=false, SETUP_REQ_ID=0;\n"
+        "const toasts=[], removed=[];\n"
+        "function toast(m){toasts.push(m)}\n"
+        "const document={getElementById(){return {classList:{remove(c){removed.push(c)}}}}};\n"
+        "function renderSetupPreview(){}\n"
+        "function closeSetup(){" + close_src + "\n"
+        "SETUP_SUBMITTING=true; SETUP_IN_FLIGHT=true;\n"
+        "closeSetup();\n"
+        "if(removed.includes('show')) {console.error('hid while in flight', removed); process.exit(2)}\n"
+        "if(!toasts.some(t=>String(t).includes('启动'))) process.exit(3);\n"
+        "if(!SETUP_SUBMITTING) process.exit(4);\n"
+        "SETUP_IN_FLIGHT=false;\n"
+        "closeSetup();\n"
+        "if(!removed.includes('show')) process.exit(5);\n"
+        "if(SETUP_SUBMITTING) process.exit(6);\n"
+        "const reqId=1; SETUP_REQ_ID=2;\n"
+        "if(!(reqId!==SETUP_REQ_ID)) process.exit(7);\n"
+        "console.log('ok');\n"
+    )
+    out = _run_node(script)
     assert "ok" in out
 
 
 def test_b1_node_behavior_send_single_flight_and_msg_binding():
+    # 生产 termSend 形态：TERM_SENDING map，A 不阻塞 B
+    js = _inline_js()
+    term_src = js.split("async function termSend(){", 1)[1].split(
+        "async function termUploadFiles", 1,
+    )[0]
+    assert "TERM_SENDING[key]" in term_src
+    assert "delete TERM_SENDING[key]" in term_src
     out = _run_node(textwrap.dedent(r"""
-    let TERM_SEND_KEY=null, calls=0;
+    let TERM_SENDING={}, calls={};
     async function termSend(key){
-      if(TERM_SEND_KEY)return;
-      TERM_SEND_KEY=key; calls++;
-      await Promise.resolve();
-      if(TERM_SEND_KEY===key) TERM_SEND_KEY=null;
+      if(TERM_SENDING[key])return;
+      TERM_SENDING[key]=true; calls[key]=(calls[key]||0)+1;
+      await new Promise(r=>setTimeout(r,10));
+      delete TERM_SENDING[key];
     }
-    await Promise.all([termSend('s/p1'), termSend('s/p1'), termSend('s/p1')]);
-    if(calls!==1) {console.error(calls); process.exit(1)}
+    await Promise.all([termSend('s/p1'), termSend('s/p1'), termSend('s/p2'), termSend('s/p2')]);
+    if(calls['s/p1']!==1 || calls['s/p2']!==1) {console.error(calls); process.exit(1)}
 
     let MSG_SENDING=false, MSG_BOUND_SLUG='proj-b', CURRENT={id:2,slug:'proj-b'};
-    let sent=[];
+    let sent=[], enabled=[];
+    function setMsgComposeEnabled(on){enabled.push(!!on)}
     async function sendMsg(selectSlug){
       if(MSG_SENDING)return;
       if(!CURRENT||!MSG_BOUND_SLUG||MSG_BOUND_SLUG!==selectSlug)return;
       MSG_SENDING=true;
+      setMsgComposeEnabled(false);
       sent.push(CURRENT.id);
       await Promise.resolve();
       MSG_SENDING=false;
+      if(MSG_BOUND_SLUG===selectSlug) setMsgComposeEnabled(true);
     }
     await Promise.all([sendMsg('proj-b'), sendMsg('proj-b')]);
     if(sent.length!==1 || sent[0]!==2) process.exit(2);
-    // switch race: bound A but select B
+    if(enabled[0]!==false || enabled[1]!==true) {console.error(enabled); process.exit(3)}
     MSG_BOUND_SLUG='proj-a'; CURRENT={id:1,slug:'proj-a'};
     await sendMsg('proj-b');
-    if(sent.length!==1) process.exit(3);
+    if(sent.length!==1) process.exit(4);
     console.log('ok');
     """))
     assert "ok" in out
