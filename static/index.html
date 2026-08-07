@@ -94,7 +94,6 @@ header .spacer{flex:1}
 /* 看板 */
 .board-wrap{flex:1;overflow:auto;padding:12px}
 .board{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;min-height:100%;align-content:start}
-.board-flat{display:none}
 .col{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;display:flex;flex-direction:column;min-height:200px}
 .col-head{padding:10px 12px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--bg2);border-radius:11px 11px 0 0;z-index:1}
 .col-head .cc{background:var(--bg4);border-radius:10px;padding:1px 8px;font-size:11px;min-width:20px;text-align:center}
@@ -423,14 +422,6 @@ header .spacer{flex:1}
   /* 工作台在 H5 上使用单一纵向滚动容器。否则 Agent 多时会把内部列表压成
      零高度，手势落在速览/工具栏上也无法继续向下滚动。 */
   .attention-view{overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}
-  /* 移动端看板不再四列纵排:agent 平铺成卡片网格,点卡片直达,免长滚找 agent */
-  #board{display:none!important}
-  .board-flat{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;align-content:start;padding-bottom:24px}
-  .board-flat .card{margin:0}
-  /* 移动端看板不再四列纵排:agent 平铺成卡片网格,点卡片直达,免长滚找 agent */
-  #board{display:none!important}
-  .board-flat{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;align-content:start;padding-bottom:24px}
-  .board-flat .card{margin:0}
   .agent-strip{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:8px;scrollbar-width:none}
   .agent-strip::-webkit-scrollbar{display:none}
   .agent-chip{flex:0 0 auto}
@@ -573,10 +564,6 @@ header .spacer{flex:1}
         <div class="col col-done"><div class="col-head"><span data-i18n="board.done">✓ 已完成</span> <span class="cc" id="cnt-done">0</span></div><div class="col-body" id="col-done"></div></div>
         <div class="col col-idle"><div class="col-head"><span data-i18n="board.idle">○ 空闲</span> <span class="cc" id="cnt-idle">0</span></div><div class="col-body" id="col-idle"></div></div>
       </div>
-      <!-- 移动端平铺卡片网格:免四列长滚,点卡片直达 agent(renderBoard 填充) -->
-      <div class="board-flat" id="boardFlat"></div>
-      <!-- 移动端平铺卡片网格:免四列长滚,点卡片直达 agent(renderBoard 填充) -->
-      <div class="board-flat" id="boardFlat"></div>
     </div>
   </section>
 
@@ -2006,8 +1993,7 @@ function renderAgentStrip(d){
 function renderBoard(d){
   renderAgentStrip(d);
   const emptyEl=document.getElementById('boardEmpty'),boardEl=document.getElementById('board');
-  const flatEl=document.getElementById('boardFlat');
-  const showEmpty=html=>{emptyEl.innerHTML=html;emptyEl.style.display='block';boardEl.style.display='none';flatEl.style.display='none'};
+  const showEmpty=html=>{emptyEl.innerHTML=html;emptyEl.style.display='block';boardEl.style.display='none'};
   if(!d.available){
     document.getElementById('boardInfo').textContent='herdr 不可用';
     ['need','work','done','idle'].forEach(c=>document.getElementById('col-'+c).innerHTML='<div class="empty">—</div>');
@@ -2030,19 +2016,13 @@ function renderBoard(d){
     document.getElementById('cnt-'+k).textContent=list.length;
     document.getElementById('col-'+k).innerHTML=list.length?list.map(cardHtml).join(''):'<div class="empty" style="padding:20px">—</div>';
   }
-  // 移动端平铺网格:全部 agent 按 需要你→工作中→已完成→空闲 顺序单层铺开
-  flatEl.innerHTML=[...cols.need,...cols.work,...cols.done,...cols.idle].map(cardHtml).join('');
-  flatEl.style.display='';
-  // 移动端平铺网格:全部 agent 按 需要你→工作中→已完成→空闲 顺序单层铺开
-  flatEl.innerHTML=[...cols.need,...cols.work,...cols.done,...cols.idle].map(cardHtml).join('');
-  flatEl.style.display='';
   const agentN=agents.length;
   if(agentN===0){
     // 首次使用引导:直接给出一键工作区入口(它会自动建 session)
     showEmpty(`<div style="font-size:15px;font-weight:600">${esc(t('board.guide.title','还没有运行中的 agent'))}</div>
       <div class="muted" style="margin:8px auto 14px;max-width:420px">${esc(t('board.guide.body','第一次使用?点下面按钮一键建工作区(自动建 session 并启动 agent);已有 session 时到「终端」工具栏点「添加 Agent」。'))}</div>
       <button class="primary" onclick="showSetupModal()">${esc(t('board.guide.btn','🚀 创建第一个工作区'))}</button>`);
-  }else{emptyEl.style.display='none';boardEl.style.display='';flatEl.style.display=''}
+  }else{emptyEl.style.display='none';boardEl.style.display=''}
   document.getElementById('boardInfo').textContent=`${d.sessions?.length||0} session · ${agentN} agent`;
   document.getElementById('liveText').textContent=agentN+' agents';
   document.getElementById('liveDot').classList.toggle('off',agentN===0);
