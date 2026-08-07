@@ -743,7 +743,7 @@ header .spacer{flex:1}
     <div id="hfToolbar" class="hf-toolbar">
       <select id="hfSession" onchange="hfLoad()" style="width:auto;min-width:140px"></select>
       <button class="sm" onclick="hfLoad()" data-i18n="common.refresh">↻ 刷新</button>
-      <button class="sm" onclick="hfTakeover()" title="需要方向键、确认菜单等终端交互时使用" data-i18n="hf.takeover">🖥 接管 TUI</button>
+      <button class="sm" onclick="hfTakeover()" title="接管整个 session 的 TUI(非当前 pane);Ctrl-b 切 pane" data-i18n="hf.takeover">🖥 接管 session TUI</button>
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
       <span class="muted" style="font-size:11px;margin-left:auto" data-i18n="hf.hint">复制到剪贴板：供其他应用粘贴 · 填入输入框：直接发给 agent</span>
     </div>
@@ -1075,7 +1075,16 @@ function trapDialogKey(e,bg){
   if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}
   else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}
 }
-const setBackgroundInert=on=>{document.querySelectorAll('.main>header,.view,#side,#updateBanner,.drawer-bg').forEach(el=>{if(on)el.setAttribute('inert','');else el.removeAttribute('inert')})};
+const setBackgroundInert=on=>{
+  const sel='.main>header,.view,#side,#updateBanner,.drawer-bg';
+  if(on){
+    // 只 inert 尚未 inert 的元素,并打标;保留元素原有 inert(如移动侧栏关闭态)
+    document.querySelectorAll(sel).forEach(el=>{if(!el.hasAttribute('inert')){el.setAttribute('data-dlg-inert','1');el.setAttribute('inert','')}});
+  }else{
+    // 只清本 helper 添加的(data-dlg-inert),保留元素原有 inert
+    document.querySelectorAll('[data-dlg-inert]').forEach(el=>{el.removeAttribute('inert');el.removeAttribute('data-dlg-inert')});
+  }
+};
 
 // ============ i18n(中/英/日) ============
 // t(key, zhFallback, vars):有翻译用翻译,没有回退中文原文;{var} 插值。
@@ -1094,7 +1103,7 @@ en:{
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
 'term.new':'+ New terminal','term.addagent':'＋ Add Agent','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…','term.layout':'🧱 Layout',
 'layout.title':'Terminal Layout','layout.hint':'Split/detach the current pane in one click, or pick several panes to compose a split.','layout.curpane':'Current pane','layout.hsplit':'⬌ Split horizontal','layout.vsplit':'⬍ Split vertical','layout.grid4':'⊞ 2×2 grid','layout.detach':'⛶ Detach to tab','layout.untile':'🧩 Untile group','layout.compose':'Compose split','layout.h_first':'Horizontal-first','layout.v_first':'Vertical-first','layout.compose_btn':'⧉ Compose selected','layout.pick_hint':'Pick 2-4 panes; the first is the base','layout.nosession':'Open a terminal (pick a herdr session) before adjusting layout','layout.nopanes':'No pane in this session','layout.notarget':'Current pane not found: focus a pane in the terminal first','layout.notab':'Cannot determine the tab of the current pane','layout.pick24':'Please pick 2-4 panes','layout.done_split':'Split done (new slots are empty shells)','layout.done_detach':'Detached to its own tab','layout.done_untile':'Untiled','layout.panes_unit':'pane(s)','layout.single_pane':'This tab has only one pane','layout.done_compose':'Composed into a split',
-'hf.takeover':'🖥 Take over TUI','hf.hint':'Copy: paste elsewhere · Fill input: send straight to agent','hf.empty':'No agent pane in this session','hf.send':'Send','hf.paste':'📋 Fill input','hf.full':'⛶ Full','hf.exit':'Exit',
+'hf.takeover':'🖥 Take over session TUI','hf.hint':'Copy: paste elsewhere · Fill input: send straight to agent','hf.empty':'No agent pane in this session','hf.send':'Send','hf.paste':'📋 Fill input','hf.full':'⛶ Full','hf.exit':'Exit',
 'sessions.setup':'+ Quick workspace','sessions.hint':'Quick workspace: split pane + start agent; Agent Mail required',
 'roots.system':'System','roots.projects':'Registered projects','roots.custom':'Custom','files.rootlimit':'Already at an accessible root — tap a root name above to switch','files.rmroot':'Remove from accessible locations (directory is not deleted)','files.remove':'Remove',
 'drawer.title':'Terminal','drawer.send':'Send',
@@ -1116,7 +1125,7 @@ ja:{
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
 'term.new':'+ 新規ターミナル','term.addagent':'＋ Agent 追加','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…','term.layout':'🧱 レイアウト',
 'layout.title':'ターミナルレイアウト','layout.hint':'現在の pane をワンクリックで分割/分離、または複数 pane を選んで分割レイアウトに組み合わせ。','layout.curpane':'現在の pane','layout.hsplit':'⬌ 左右に分割','layout.vsplit':'⬍ 上下に分割','layout.grid4':'⊞ 2×2 分割','layout.detach':'⛶ 独立 tab へ','layout.untile':'🧩 グループ全分離','layout.compose':'分割に組み合わせ','layout.h_first':'左右優先','layout.v_first':'上下優先','layout.compose_btn':'⧉ 選択を組み合わせ','layout.pick_hint':'2-4 個の pane を選択、最初の pane が基準','layout.nosession':'先にターミナルを開いてからレイアウト調整してください','layout.nopanes':'この session に pane がありません','layout.notarget':'現在の pane が見つかりません:先に pane へフォーカスしてください','layout.notab':'現在の pane の tab を特定できません','layout.pick24':'pane を 2-4 個選んでください','layout.done_split':'分割しました(新しい枠は空シェル)','layout.done_detach':'独立 tab へ分離しました','layout.done_untile':'分離しました','layout.panes_unit':'個','layout.single_pane':'この tab には pane が1つだけ','layout.done_compose':'分割レイアウトに組み合わせました',
-'hf.takeover':'🖥 TUI 接管','hf.hint':'コピー: 他アプリで貼り付け · 入力欄へ: agent に直接送信','hf.empty':'このセッションに agent pane なし','hf.send':'送信','hf.paste':'📋 入力欄へ','hf.full':'⛶ 全画面','hf.exit':'退出',
+'hf.takeover':'🖥 セッション TUI を操作','hf.hint':'コピー: 他アプリで貼り付け · 入力欄へ: agent に直接送信','hf.empty':'このセッションに agent pane なし','hf.send':'送信','hf.paste':'📋 入力欄へ','hf.full':'⛶ 全画面','hf.exit':'退出',
 'sessions.setup':'+ ワンクリックワークスペース','sessions.hint':'ワンクリック: pane 分割 + agent 起動;Agent Mail は必須',
 'roots.system':'システム','roots.projects':'登録プロジェクト','roots.custom':'カスタム','files.rootlimit':'アクセス可能なルートです。上のルート名で切り替えられます','files.rmroot':'アクセス可能場所から削除(ディレクトリ自体は削除されません)','files.remove':'削除',
 'drawer.title':'端末','drawer.send':'送信',
@@ -1964,8 +1973,8 @@ function renderAttention(d){
       <div class="attention-icon">${ATTENTION_ICON[item.kind]||'🔔'}</div>
       <div class="attention-copy"><div class="attention-title">${esc(item.title)}</div><div class="attention-detail">${esc(item.detail||'')}</div></div>
       <div class="attention-action">${ATTENTION_ACTION[item.kind]||'查看'} ›</div>
-    </div>`).join(''):'<div class="capability-note">✓ 当前没有需要你处理的阻塞或代码改动</div>';
-  const actionTitle=`<div class="attention-section-title">需处理事项 <span class="count">${items.length}</span></div>`;
+    </div>`).join(''):(sessions.length?'<div class="capability-note">✓ 当前没有需要你处理的阻塞或代码改动</div>':'');
+  const actionTitle=sessions.length?`<div class="attention-section-title">需处理事项 <span class="count">${items.length}</span></div>`:'';
   box.innerHTML=note+board+actionTitle+actions+mailNote;
 }
 function replaceAttentionHash(item){

@@ -2402,3 +2402,41 @@ def test_b2_node_dialog_close_race_guarded():
         "console.log('ok');\n"
     )
     assert "ok" in out
+
+
+def test_b2_attention_no_blocker_when_no_session():
+    """P1-08: 无 session 不渲染'无阻塞'/'需处理事项'标题,只 CTA;有 session 且无 items 才显示无阻塞。"""
+    js = _inline_js()
+    assert "(sessions.length?'<div class=\"capability-note\">✓ 当前没有需要你处理的阻塞" in js
+    assert "const actionTitle=sessions.length?" in js
+
+
+def test_b2_hf_takeover_says_session_tui():
+    """hfTakeover 文案明确 session TUI(zh 按钮/title + en + ja),不暗示 pane 级接管。"""
+    assert "接管 session TUI" in HTML
+    assert "接管整个 session" in HTML
+    assert "'hf.takeover':'🖥 Take over session TUI'" in HTML
+    assert "'hf.takeover':'🖥 セッション TUI を操作'" in HTML
+
+
+def test_b2_node_background_inert_preserves_preexisting():
+    """Node: setBackgroundInert 只恢复本 helper 添加的 inert;
+    side 初始 inert→open/close 后仍 inert;view 初始无→open 时 inert、close 后恢复无。"""
+    js = _inline_js()
+    inert_body = js.split("const setBackgroundInert=on=>{", 1)[1].split("\n};", 1)[0]
+    out = _run_node(
+        "function mkEl(){const a={};return{hasAttribute(k){return k in a},setAttribute(k,v){a[k]=v},removeAttribute(k){delete a[k]}}}\n"
+        "const side=mkEl();side.setAttribute('inert','');\n"
+        "const view=mkEl();\n"
+        "const document={querySelectorAll(sel){return sel==='[data-dlg-inert]'?[view]:[side,view]}};\n"
+        "const setBackgroundInert=on=>{\n" + inert_body + "\n};\n"
+        "setBackgroundInert(true);\n"
+        "if(side.hasAttribute('data-dlg-inert')){console.error('side should not get dlg tag');process.exit(1)}\n"
+        "if(!side.hasAttribute('inert')){console.error('side lost pre inert on open');process.exit(2)}\n"
+        "if(!view.hasAttribute('inert')||!view.hasAttribute('data-dlg-inert')){console.error('view should get dlg inert');process.exit(3)}\n"
+        "setBackgroundInert(false);\n"
+        "if(!side.hasAttribute('inert')){console.error('side lost pre inert on close');process.exit(4)}\n"
+        "if(view.hasAttribute('inert')||view.hasAttribute('data-dlg-inert')){console.error('view should be cleared on close');process.exit(5)}\n"
+        "console.log('ok');\n"
+    )
+    assert "ok" in out
