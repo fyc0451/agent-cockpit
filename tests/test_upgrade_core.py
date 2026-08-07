@@ -394,6 +394,7 @@ def test_spawn_prefers_start_new_session(install_tree, monkeypatch):
     monkeypatch.setattr(upgrade_core.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
     monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: None)
+    monkeypatch.setattr(upgrade_core, "_linux_unit_killmode_process_live", lambda: True)
     upgrade_core.clear_hooks()
     pid = upgrade_core.spawn_worker(
         "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "t.log",
@@ -725,6 +726,7 @@ def test_r4_spawn_passes_rollback_only_flag(install_tree, monkeypatch):
     monkeypatch.setattr(upgrade_core.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
     monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: None)
+    monkeypatch.setattr(upgrade_core, "_linux_unit_killmode_process_live", lambda: True)
     monkeypatch.setenv("COCKPIT_PORT", "9876")
     monkeypatch.setenv("COCKPIT_HOST", "127.0.0.1")
     upgrade_core.clear_hooks()
@@ -741,10 +743,7 @@ def test_r4_spawn_passes_rollback_only_flag(install_tree, monkeypatch):
 
 
 def test_r5_bus_down_fail_closed_no_direct_kill(install_tree, monkeypatch):
-    """R5：bus 不可达时 preflight/stop/restart 均 fail-closed，禁止 direct kill。
-
-    模拟 systemd Restart=always：即使 PID 可 kill，也不允许绕过 supervisor。
-    """
+    """R5：bus 不可达时 preflight/stop/restart 均 fail-closed，禁止 direct kill。"""
     upgrade_core.clear_hooks()
     monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
     monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: False)
@@ -765,11 +764,149 @@ def test_r5_bus_down_fail_closed_no_direct_kill(install_tree, monkeypatch):
     assert kills == [], kills
 
 
-def test_r5_supervisor_respawn_scenario_documented(install_tree, monkeypatch):
-    """R5：PID 被 supervisor 自动重生时，orphan kill 无法形成稳定窗口 → stop_failed。
+def test_r5_preflight_requires_active_our_mainpid_and_killmode(install_tree, monkeypatch):
+    """R5：bus 在但 service 未 active / MainPID 非本安装 / KillMode 非 process → 拒绝。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
+    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: True)
+    monkeypatch.setattr(upgrade_core, "INSTALL_DIR", install_tree["root"])
 
-    生产路径在 bus-down 时 fail-closed，根本不会进入 orphan kill。
-    """
+    # inactive
+    monkeypatch.setattr(
+        upgrade_core,
+        "_systemctl_user_show",
+        lambda props, unit="agent-cockpit.service": {
+            "ActiveState": "inactive", "MainPID": "0", "KillMode": "process",
+        },
+    )
+    with pytest.raises(ValueError, match="precheck_supervisor"):
+        upgrade_core.preflight_supervisor()
+
+    # active but wrong MainPID (not our server)
+    monkeypatch.setattr(
+        upgrade_core,
+        "_systemctl_user_show",
+        lambda props, unit="agent-cockpit.service": {
+            "ActiveState": "active", "MainPID": "999", "KillMode": "process",
+        },
+    )
+    monkeypatch.setattr(upgrade_core, "_pid_is_our_cockpit", lambda pid: False)
+    with pytest.raises(ValueError, match="precheck_supervisor"):
+        upgrade_core.preflight_supervisor()
+
+    # our MainPID but KillMode=control-group (旧 unit)
+    monkeypatch.setattr(
+        upgrade_core,
+        "_systemctl_user_show",
+        lambda props, unit="agent-cockpit.service": {
+            "ActiveState": "active", "MainPID": "100", "KillMode": "control-group",
+        },
+    )
+    monkeypatch.setattr(upgrade_core, "_pid_is_our_cockpit", lambda pid: pid == 100)
+    monkeypatch.setattr(upgrade_core, "_unit_file_killmode_process", lambda: False)
+    with pytest.raises(ValueError, match="precheck_supervisor"):
+        upgrade_core.preflight_supervisor()
+
+    # happy path
+    monkeypatch.setattr(
+        upgrade_core,
+        "_systemctl_user_show",
+        lambda props, unit="agent-cockpit.service": {
+            "ActiveState": "active", "MainPID": "100", "KillMode": "process",
+        },
+    )
+    upgrade_core.preflight_supervisor()
+
+
+def test_r5_stop_restart_postconditions(install_tree, monkeypatch):
+    """R5：stop 后必须 inactive；restart 后必须 active+our MainPID。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
+    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: True)
+    monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: "/bin/systemctl")
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    # stop postcondition fails if still active our pid
+    monkeypatch.setattr(
+        upgrade_core,
+        "_systemctl_user_show",
+        lambda props, unit="agent-cockpit.service": {
+            "ActiveState": "active", "MainPID": "50", "KillMode": "process",
+        },
+    )
+    monkeypatch.setattr(upgrade_core, "_pid_is_our_cockpit", lambda pid: True)
+    monkeypatch.setattr(upgrade_core, "_find_cockpit_pids", lambda: [50])
+    monkeypatch.setattr(upgrade_core.time, "sleep", lambda s: None)
+    t = {"n": 0.0}
+    monkeypatch.setattr(upgrade_core.time, "time", lambda: t.__setitem__("n", t["n"] + 5) or t["n"])
+    with pytest.raises(ValueError, match="stop_failed"):
+        upgrade_core.stop_cockpit_for_restore()
+
+    # stop success
+    monkeypatch.setattr(
+        upgrade_core,
+        "_systemctl_user_show",
+        lambda props, unit="agent-cockpit.service": {
+            "ActiveState": "inactive", "MainPID": "0", "KillMode": "process",
+        },
+    )
+    monkeypatch.setattr(upgrade_core, "_find_cockpit_pids", lambda: [])
+    t["n"] = 0.0
+    upgrade_core.stop_cockpit_for_restore()
+
+    # restart requires identity ok
+    monkeypatch.setattr(upgrade_core, "_linux_supervisor_identity_ok", lambda: False)
+    t["n"] = 0.0
+    with pytest.raises(ValueError, match="restart_failed"):
+        upgrade_core.restart_cockpit_only()
+    monkeypatch.setattr(upgrade_core, "_linux_supervisor_identity_ok", lambda: True)
+    t["n"] = 0.0
+    upgrade_core.restart_cockpit_only()
+
+
+def test_r5_systemd_run_fail_without_killmode_spawn_failed(install_tree, monkeypatch):
+    """R5：systemd-run 失败且 unit KillMode 非 process → spawn_failed，禁止 setsid。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.sys, "platform", "linux")
+    monkeypatch.setattr(upgrade_core, "_user_systemd_bus_ok", lambda: True)
+    monkeypatch.setattr(
+        upgrade_core.shutil, "which",
+        lambda n: "/bin/systemd-run" if n == "systemd-run" else "/bin/systemctl",
+    )
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "fail"
+        return R()
+
+    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(upgrade_core, "_linux_unit_killmode_process_live", lambda: False)
+    popen = []
+
+    class FakePopen:
+        def __init__(self, *a, **k):
+            popen.append(1)
+            self.pid = 1
+
+    monkeypatch.setattr(upgrade_core.subprocess, "Popen", FakePopen)
+    with pytest.raises(RuntimeError, match="spawn_failed"):
+        upgrade_core.spawn_worker(
+            "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "z.log",
+        )
+    assert popen == []
+
+
+def test_r5_supervisor_respawn_scenario_documented(install_tree, monkeypatch):
+    """R5：PID 被 supervisor 自动重生时，orphan kill 无法形成稳定窗口 → stop_failed。"""
     upgrade_core.clear_hooks()
     live = {"pid": 100}
 
@@ -777,18 +914,16 @@ def test_r5_supervisor_respawn_scenario_documented(install_tree, monkeypatch):
         return [live["pid"]] if live["pid"] else []
 
     def fake_kill(pid, sig=None):
-        # 模拟 systemd Restart=always：杀后立刻新 PID
         live["pid"] = pid + 1
 
     monkeypatch.setattr(upgrade_core, "_find_cockpit_pids", find)
     monkeypatch.setattr(upgrade_core, "_foreign_listener_on_port", lambda: False)
     monkeypatch.setattr(os, "kill", fake_kill)
     monkeypatch.setattr(upgrade_core.time, "sleep", lambda s: None)
-    # 压缩等待：把 deadline 用 time.time 快进
     t0 = {"n": 0.0}
 
     def fake_time():
-        t0["n"] += 5.0  # 每次调用推进，快速超过 12s 窗口
+        t0["n"] += 5.0
         return t0["n"]
 
     monkeypatch.setattr(upgrade_core.time, "time", fake_time)
@@ -1067,28 +1202,26 @@ def test_r8_darwin_oneshot_fail_no_setsid_fallback(install_tree, monkeypatch):
 
 
 def test_r8_cleanup_darwin_upgrade_job(install_tree, monkeypatch, tmp_path):
-    """R8：worker 结束 cleanup 会 bootout label 并删除 plist。"""
+    """R8：cleanup 先删 plist，再 detached bootout。"""
     upgrade_core.clear_hooks()
-    home = tmp_path / "h"
-    la = home / "Library" / "LaunchAgents"
+    la = tmp_path / "Library" / "LaunchAgents"
     la.mkdir(parents=True)
     plist = la / "io.github.fyc0451.agent-cockpit.upgrade.abc.plist"
     plist.write_text("<plist/>\n", encoding="utf-8")
-    monkeypatch.setenv("COCKPIT_UPGRADE_LAUNCHD_LABEL", "io.github.fyc0451.agent-cockpit.upgrade.abc")
+    monkeypatch.setenv(
+        "COCKPIT_UPGRADE_LAUNCHD_LABEL", "io.github.fyc0451.agent-cockpit.upgrade.abc"
+    )
     monkeypatch.setenv("COCKPIT_UPGRADE_LAUNCHD_PLIST", str(plist))
-    bootouts: list = []
+    detached: list = []
 
-    def fake_run(cmd, **kwargs):
-        class R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        if list(cmd)[:2] == ["launchctl", "bootout"]:
-            bootouts.append(list(cmd))
-        return R()
+    def fake_detached(service, pl):
+        # 此时 plist 应已删除
+        assert not Path(pl).exists()
+        detached.append(service)
 
-    monkeypatch.setattr(upgrade_core.subprocess, "run", fake_run)
+    upgrade_core._hooks["darwin_cleanup_detached"] = fake_detached
+    assert plist.exists()
     upgrade_core.cleanup_darwin_upgrade_job()
-    assert bootouts
-    assert "upgrade.abc" in bootouts[0][-1]
     assert not plist.exists()
+    assert len(detached) == 1
+    assert "upgrade.abc" in detached[0]

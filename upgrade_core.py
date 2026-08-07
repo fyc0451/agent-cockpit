@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -802,12 +803,95 @@ def _stop_orphaned_cockpit_pids() -> None:
         raise ValueError("stop_failed")
 
 
+def _systemctl_user_show(props: list[str], unit: str = "agent-cockpit.service") -> dict[str, str]:
+    """解析 systemctl --user show -p Prop1 -p Prop2 unit。"""
+    if "systemctl_user_show" in _hooks:
+        return dict(_hooks["systemctl_user_show"](props, unit))
+    if not shutil.which("systemctl"):
+        return {}
+    args = ["systemctl", "--user", "show", unit]
+    for p in props:
+        args.extend(["-p", p])
+    r = subprocess.run(args, capture_output=True, text=True, check=False, timeout=10)
+    if r.returncode != 0:
+        return {}
+    out: dict[str, str] = {}
+    for line in (r.stdout or "").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _linux_unit_killmode_process_live() -> bool:
+    """运行中 unit 的 KillMode 必须为 process（保护跨 restart 的 worker）。"""
+    props = _systemctl_user_show(["KillMode"])
+    km = (props.get("KillMode") or "").lower()
+    if km == "process":
+        return True
+    # 静态 unit 文件兜底
+    return _unit_file_killmode_process()
+
+
+def _linux_supervisor_identity_ok() -> bool:
+    """精确核验：active + MainPID 属于本 INSTALL_DIR/server.py + KillMode=process。"""
+    if "linux_supervisor_identity_ok" in _hooks:
+        return bool(_hooks["linux_supervisor_identity_ok"]())
+    if not _user_systemd_bus_ok():
+        return False
+    props = _systemctl_user_show(["ActiveState", "MainPID", "KillMode"])
+    if (props.get("ActiveState") or "") != "active":
+        return False
+    try:
+        main_pid = int(props.get("MainPID") or "0")
+    except ValueError:
+        main_pid = 0
+    if main_pid <= 1:
+        return False
+    if not _pid_is_our_cockpit(main_pid):
+        return False
+    km = (props.get("KillMode") or "").lower()
+    if km and km != "process":
+        return False
+    if not km and not _unit_file_killmode_process():
+        return False
+    return True
+
+
+def _verify_linux_stopped(*, timeout_s: float = 15.0) -> None:
+    """stop 后置：unit 非 active 且无本安装 server 主进程。"""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        props = _systemctl_user_show(["ActiveState", "MainPID"])
+        state = (props.get("ActiveState") or "").lower()
+        try:
+            main_pid = int(props.get("MainPID") or "0")
+        except ValueError:
+            main_pid = 0
+        still_ours = bool(main_pid > 1 and _pid_is_our_cockpit(main_pid))
+        if state in {"inactive", "failed", "dead", ""} and not still_ours:
+            if not _find_cockpit_pids():
+                return
+        time.sleep(0.25)
+    raise ValueError("stop_failed")
+
+
+def _verify_linux_restarted(*, timeout_s: float = 20.0) -> None:
+    """restart 后置：unit active 且 MainPID 属于本安装。"""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _linux_supervisor_identity_ok():
+            return
+        time.sleep(0.3)
+    raise ValueError("restart_failed")
+
+
 def preflight_supervisor() -> None:
     """改代码前验证控制通道；失败 fail closed。
 
-    Linux：必须 user systemd bus 可用，才能 systemctl stop/restart 控制
-    Restart=always 的 unit。bus 不可达时 fail-closed——禁止 direct kill
-    （会被 systemd 自动拉起，且可能再启动脱离 unit 的重复实例）。
+    Linux：user bus + agent-cockpit.service ActiveState=active + MainPID 属于
+    当前 INSTALL_DIR/server.py + KillMode=process。禁止「bus 在但 service
+    未加载/指向别处」时误放行。
     macOS：核验主 service label 可 print，且 launchd.sh / plist 存在。
     """
     if "preflight_supervisor" in _hooks:
@@ -834,11 +918,8 @@ def preflight_supervisor() -> None:
         if not (INSTALL_DIR / "agent-cockpit.plist").is_file():
             raise ValueError("precheck_supervisor")
         return
-    # Linux：仅 bus 可用才放行
-    if _user_systemd_bus_ok():
-        return
-    raise ValueError("precheck_supervisor")
-
+    if not _linux_supervisor_identity_ok():
+        raise ValueError("precheck_supervisor")
 
 def estimate_space_needed(install_dir: Path) -> int:
     """预估所需空间：当前 .venv 大小 + 备份余量。"""
@@ -1089,6 +1170,7 @@ def stop_cockpit_for_restore() -> None:
     )
     if r.returncode != 0:
         raise ValueError("stop_failed")
+    _verify_linux_stopped()
 
 
 def restart_cockpit_only() -> None:
@@ -1119,7 +1201,7 @@ def restart_cockpit_only() -> None:
     )
     if r.returncode != 0:
         raise ValueError("restart_failed")
-
+    _verify_linux_restarted()
 def health_check(*, timeout_s: float = HEALTH_TIMEOUT_S) -> bool:
     if "health_check" in _hooks:
         return bool(_hooks["health_check"]())
@@ -1300,7 +1382,15 @@ def merge_spawn_identity(job_id: str, spawn_pid: int | None) -> dict[str, Any]:
 
 
 def _cleanup_darwin_oneshot(service: str, plist_path: Path | None) -> None:
-    """临时 upgrade job + plist 一并清除。"""
+    """临时 upgrade job + plist 清除。
+
+    顺序：先 unlink plist，再 bootout——避免 bootout 同步杀本进程导致 unlink 永远执行不到。
+    """
+    if plist_path is not None:
+        try:
+            plist_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         subprocess.run(
             ["launchctl", "bootout", service],
@@ -1310,23 +1400,48 @@ def _cleanup_darwin_oneshot(service: str, plist_path: Path | None) -> None:
         )
     except Exception:
         pass
-    if plist_path is not None:
-        try:
-            plist_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def cleanup_darwin_upgrade_job() -> None:
-    """worker 正常/异常结束后调用：bootout 本 oneshot label 并删除 plist。"""
+    """worker 结束后清理 oneshot：先删 plist，再用 detached cleaner bootout。
+
+    bootout 可能立刻终止本 job；detached 子进程在新 session 中执行 bootout，
+    不依赖 worker 进程在 bootout 后继续运行。
+    """
     label = os.environ.get("COCKPIT_UPGRADE_LAUNCHD_LABEL") or ""
     plist = os.environ.get("COCKPIT_UPGRADE_LAUNCHD_PLIST") or ""
     if not label:
         return
     domain = f"gui/{os.getuid()}"
     service = f"{domain}/{label}"
-    _cleanup_darwin_oneshot(service, Path(plist) if plist else None)
-
+    # 1) 先删 plist（worker 仍存活时保证文件消失）
+    if plist:
+        try:
+            Path(plist).unlink(missing_ok=True)
+        except OSError:
+            pass
+    # 2) detached cleaner：sleep 后 bootout（及二次 rm），不属本 job 主进程树
+    if "darwin_cleanup_detached" in _hooks:
+        _hooks["darwin_cleanup_detached"](service, plist)
+        return
+    script = (
+        "sleep 0.3; "
+        f"launchctl bootout {shlex.quote(service)} >/dev/null 2>&1 || true; "
+    )
+    if plist:
+        script += f"rm -f -- {shlex.quote(plist)} >/dev/null 2>&1 || true"
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        # 最后手段：本进程内 bootout（可能杀自己，plist 已删）
+        _cleanup_darwin_oneshot(service, Path(plist) if plist else None)
 
 def _spawn_darwin_launchd_oneshot(
     job_id: str,
@@ -1455,7 +1570,7 @@ def spawn_worker(
         if pid is not None:
             return int(pid)
         raise RuntimeError("spawn_failed")
-    # Linux：优先 systemd-run --user；显式 setenv health 目标
+    # Linux：优先 systemd-run --user（独立 unit + KillMode=process）
     if shutil.which("systemd-run") and _user_systemd_bus_ok():
         unit = f"agent-cockpit-upgrade-{job_id}"
         cmd = [
@@ -1480,7 +1595,9 @@ def spawn_worker(
         if r.returncode == 0:
             return -1
         logger.info("systemd-run failed rc=%s", r.returncode)
-    # Linux 回退：setsid（仅 bus 可用时 preflight 已放行；KillMode=process 保 worker）
+    # setsid 回退：仅当 Cockpit unit KillMode=process 已证明，restart 不会杀 worker
+    if not _linux_unit_killmode_process_live():
+        raise RuntimeError("spawn_failed")
     log_fh = open(log_path, "a", encoding="utf-8")
     try:
         proc = subprocess.Popen(
