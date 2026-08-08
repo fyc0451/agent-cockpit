@@ -2,46 +2,51 @@ import json
 import shlex
 import socket
 import sys
+import tempfile
 import threading
 import time
+from pathlib import Path
 from unittest.mock import call
 
 import herdr_client
 import pytest
 
 
-def test_socket_request_uses_herdr_json_line_protocol(tmp_path):
-    socket_path = tmp_path / "herdr.sock"
-    seen = []
-    ready = threading.Event()
+def test_socket_request_uses_herdr_json_line_protocol():
+    # macOS sockaddr_un paths are short; pytest's nested tmp_path exceeds the
+    # kernel limit on hosted runners.
+    with tempfile.TemporaryDirectory(prefix="cockpit-sock-", dir="/tmp") as temp_dir:
+        socket_path = Path(temp_dir) / "herdr.sock"
+        seen = []
+        ready = threading.Event()
 
-    def serve():
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-            listener.bind(str(socket_path))
-            listener.listen(1)
-            ready.set()
-            connection, _ = listener.accept()
-            with connection:
-                request = json.loads(connection.makefile("rb").readline())
-                seen.append(request)
-                response = {
-                    "id": request["id"],
-                    "result": {"type": "pane_read", "read": {"text": "screen"}},
-                }
-                connection.sendall(json.dumps(response).encode() + b"\n")
+        def serve():
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(socket_path))
+                listener.listen(1)
+                ready.set()
+                connection, _ = listener.accept()
+                with connection:
+                    request = json.loads(connection.makefile("rb").readline())
+                    seen.append(request)
+                    response = {
+                        "id": request["id"],
+                        "result": {"type": "pane_read", "read": {"text": "screen"}},
+                    }
+                    connection.sendall(json.dumps(response).encode() + b"\n")
 
-    thread = threading.Thread(target=serve)
-    thread.start()
-    assert ready.wait(1)
-    result = herdr_client.socket_request(
-        str(socket_path), "pane.read", {"pane_id": "w1:p1", "source": "visible"}
-    )
-    thread.join(1)
+        thread = threading.Thread(target=serve)
+        thread.start()
+        assert ready.wait(1)
+        result = herdr_client.socket_request(
+            str(socket_path), "pane.read", {"pane_id": "w1:p1", "source": "visible"}
+        )
+        thread.join(1)
 
-    assert result["read"]["text"] == "screen"
-    assert seen[0]["method"] == "pane.read"
-    assert seen[0]["params"] == {"pane_id": "w1:p1", "source": "visible"}
-    assert seen[0]["id"].startswith("cockpit:")
+        assert result["read"]["text"] == "screen"
+        assert seen[0]["method"] == "pane.read"
+        assert seen[0]["params"] == {"pane_id": "w1:p1", "source": "visible"}
+        assert seen[0]["id"].startswith("cockpit:")
 
 
 def test_live_pane_helpers_use_visible_ansi_and_raw_input(monkeypatch):
