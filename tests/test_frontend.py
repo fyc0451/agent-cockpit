@@ -1612,7 +1612,7 @@ def test_terminal_ws_writes_data_directly_without_color_rewrite():
 
 
 def test_theme_switch_no_longer_forces_pty_resize():
-    # 主题切换只重绘 xterm，不 resize PTY，避免每次切主题产生两次后端 resize。
+    # 主题切换只更新 xterm 原生渲染选项，不 resize PTY。
     js = _inline_js()
     assert "function _repaintTermForTheme" not in js
     assert "TERM_LIGHT" not in js
@@ -1620,20 +1620,26 @@ def test_theme_switch_no_longer_forces_pty_resize():
         "function toggleTheme", 1
     )[0]
     assert "options.theme=th" in set_theme
-    assert "xterm.refresh(0,inst.xterm.rows-1)" in set_theme
+    assert "options.minimumContrastRatio" in set_theme
+    assert "xterm.refresh" not in set_theme
     assert "sendAllTermColorSchemes()" in set_theme
     assert "xterm.resize" not in set_theme
 
 
-def test_theme_switch_uses_dark_tui_base_and_gpu_visual_mapping():
+def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     js = _inline_js()
-    assert ":root.light #termContainer .xterm{filter:invert(1) hue-rotate(180deg) brightness(.98)}" in HTML
-    assert "function currentTermColorScheme(){return 'dark'}" in js
+    assert "filter:invert(" not in HTML
+    assert "hue-rotate(" not in HTML
+    assert "function currentTermColorScheme(){return document.documentElement.classList.contains('light')?'light':'dark'}" in js
     term_theme = js.split("function termTheme(){", 1)[1].split(
-        "function setTheme", 1
+        "function termMinimumContrastRatio", 1
     )[0]
-    assert "classList.contains('light')" not in term_theme
+    assert "classList.contains('light')" in term_theme
+    assert "background:'#fafbfc',foreground:'#1a2030'" in term_theme
     assert "background:'#000000',foreground:'#e8e8e8'" in term_theme
+    assert "function termMinimumContrastRatio(){return document.documentElement.classList.contains('light')?4.5:3}" in js
+    constructor = js.split("const xterm=new Terminal({", 1)[1].split("});", 1)[0]
+    assert "minimumContrastRatio:termMinimumContrastRatio()" in constructor
 
     report = js.split("function sendTermColorScheme(id,ws,notify){", 1)[1].split(
         "function sendAllTermColorSchemes", 1
