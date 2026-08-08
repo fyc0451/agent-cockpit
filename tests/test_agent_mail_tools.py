@@ -421,6 +421,7 @@ def test_register_reuse_restores_retired_identity(tmp_path, monkeypatch, capsys)
         "name": "codex-main",
         "registration_token": "registration-token",
     }))
+    registry_file.chmod(0o600)
     monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
     monkeypatch.setattr(module, "mcp_call", lambda *_args, **_kwargs: {})
     calls = []
@@ -456,11 +457,13 @@ def test_register_reuse_does_not_unretire_active_identity(tmp_path, monkeypatch)
     project.mkdir()
     registry_dir = tmp_path / module.slugify(str(project))
     registry_dir.mkdir()
-    (registry_dir / "codex--default.json").write_text(json.dumps({
+    registry_file = registry_dir / "codex--default.json"
+    registry_file.write_text(json.dumps({
         "project_key": str(project),
         "name": "codex-main",
         "registration_token": "registration-token",
     }))
+    registry_file.chmod(0o600)
     monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
     monkeypatch.setattr(module, "mcp_call", lambda *_args, **_kwargs: {})
     calls = []
@@ -486,11 +489,13 @@ def test_register_reuse_rejects_malformed_whois(tmp_path, monkeypatch):
     project.mkdir()
     registry_dir = tmp_path / module.slugify(str(project))
     registry_dir.mkdir()
-    (registry_dir / "codex--default.json").write_text(json.dumps({
+    registry_file = registry_dir / "codex--default.json"
+    registry_file.write_text(json.dumps({
         "project_key": str(project),
         "name": "codex-main",
         "registration_token": "registration-token",
     }))
+    registry_file.chmod(0o600)
     monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
     monkeypatch.setattr(module, "mcp_call", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(module, "mcp_tool", lambda *_args, **_kwargs: [])
@@ -1474,6 +1479,7 @@ def _register_fixture(tmp_path, module, agent="demo", instance="main", old_token
         "hub": "http://127.0.0.1:8765",
     }))
     registry_file.chmod(0o600)
+    registry_file.chmod(0o600)
     return project, registry_file
 
 
@@ -1852,3 +1858,88 @@ def test_recover_without_pending_is_noop(tmp_path, monkeypatch, capsys):
 
     assert "无待恢复" in capsys.readouterr().out
     assert json.loads(registry_file.read_text())["registration_token"] == "o" * 43
+
+
+def test_secure_read_rejects_symlink_registry(tmp_path, monkeypatch):
+    """registry 为 symlink：拒绝读取。"""
+    import os as _os
+
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    real = registry_file.with_name("real.json")
+    real.write_text(registry_file.read_text())
+    real.chmod(0o600)
+    registry_file.unlink()
+    _os.symlink(real.name, registry_file)
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: {})
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
+    with pytest.raises(SystemExit, match="symlink"):
+        module.main()
+
+
+def test_secure_read_rejects_symlink_pending(tmp_path, monkeypatch, capsys):
+    """pending 为 symlink：拒绝恢复。"""
+    import os as _os
+
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    real = module._pending_path(registry_file).with_name("real.pending")
+    real.write_text(registry_file.read_text())
+    real.chmod(0o600)
+    _os.symlink(real.name, module._pending_path(registry_file))
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: {})
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
+    with pytest.raises(SystemExit, match="symlink"):
+        module.main()
+    combined = capsys.readouterr().out + capsys.readouterr().err
+    assert "o" * 43 not in combined
+
+
+def test_secure_read_rejects_0644_registry(tmp_path, monkeypatch):
+    """registry 权限过宽（0644）：拒绝。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    registry_file.chmod(0o644)
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: {})
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
+    with pytest.raises(SystemExit, match="权限过宽"):
+        module.main()
+
+
+def test_secure_read_rejects_0644_pending(tmp_path, monkeypatch, capsys):
+    """pending 权限过宽（0644）：拒绝恢复。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    pending_identity = json.loads(registry_file.read_text())
+    pending_identity["registration_token"] = "n" * 43
+    module._atomic_write_identity(module._pending_path(registry_file), pending_identity)
+    module._pending_path(registry_file).chmod(0o644)
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: {})
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
+    with pytest.raises(SystemExit, match="权限过宽"):
+        module.main()
+    combined = capsys.readouterr().out + capsys.readouterr().err
+    assert ("o" * 43) not in combined and ("n" * 43) not in combined
+
+
+def test_secure_read_rejects_foreign_owner_registry(tmp_path, monkeypatch):
+    """registry 属主非当前用户：拒绝。"""
+    import os as _os
+
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    monkeypatch.setattr(_os, "getuid", lambda: 99999)
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: {})
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
+    with pytest.raises(SystemExit, match="属主"):
+        module.main()

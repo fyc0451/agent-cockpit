@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -28,31 +29,31 @@ def _validate_component(name: str, label: str) -> str:
     return name
 
 
-def _atomic_write_identity(path: Path, identity: dict) -> None:
-    """原子写身份文件:mkstemp + fsync + chmod 0600 + os.replace。
-
-    不先写目标再 chmod(中间态可能 0644 暴露 registration_token),也避免
-    写一半中断留下损坏文件;replace 保证读者永远看到完整内容。
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".am-register.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(identity, ensure_ascii=False, indent=2) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def _pending_path(registry_file: Path) -> Path:
     return registry_file.with_name(registry_file.name + ".pending")
+
+
+def _secure_read_identity(path: Path, label: str = "身份文件") -> dict:
+    """读取前安全门：拒绝 symlink/非普通文件/非当前 uid/group-other 权限。"""
+    try:
+        st = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"{label}不可读: {path}（capability 值不会输出）") from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise SystemExit(f"拒绝 symlink {label}: {path}（capability 值不会输出）")
+    if not stat.S_ISREG(st.st_mode):
+        raise SystemExit(f"{label}不是普通文件: {path}（capability 值不会输出）")
+    if st.st_uid != os.getuid():
+        raise SystemExit(f"{label}属主不是当前用户: {path}（capability 值不会输出）")
+    if st.st_mode & 0o077:
+        raise SystemExit(f"{label}权限过宽（要求 0600）: {path}（capability 值不会输出）")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"{label}损坏不可读: {path}（capability 值不会输出）") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"{label}格式错误: {path}")
+    return data
 
 
 def _lock_path(registry_file: Path) -> Path:
@@ -157,17 +158,12 @@ _PENDING_IMMUTABLE_KEYS = (
 
 
 def _load_pending(registry_file: Path, identity: dict) -> dict:
-    """读取并强校验 pending：格式合法且不可变字段与正式 registry 一致。"""
+    """读取并强校验 pending：安全门 + 格式合法 + 不可变字段与正式 registry 一致。"""
     pending = _pending_path(registry_file)
     if not pending.is_file():
         raise SystemExit("pending 不存在")
-    try:
-        pending_identity = json.loads(pending.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(
-            f"pending 文件损坏不可读: {pending}（capability 值不会输出；请人工处理）"
-        ) from exc
-    if not isinstance(pending_identity, dict) or not pending_identity.get("registration_token"):
+    pending_identity = _secure_read_identity(pending, label="pending 文件")
+    if not pending_identity.get("registration_token"):
         raise SystemExit(
             f"pending 文件格式无效: {pending}（capability 值不会输出；请人工处理）"
         )
@@ -239,7 +235,7 @@ def _rotate_capability(registry_file: Path, identity: dict, hub: str, token: str
             elif outcome == "rolled_back":
                 print("注意：检测到未生效的轮换残留，已自动回滚", file=sys.stderr)
             # 恢复后重载 registry：promote 后旧值已失效，必须用新值继续
-            identity = json.loads(registry_file.read_text(encoding="utf-8"))
+            identity = _secure_read_identity(registry_file)
 
         new_value = secrets.token_urlsafe(32)
         if new_value == identity["registration_token"]:
@@ -303,7 +299,7 @@ def main() -> None:
 
     identity = {}
     if registry_file.is_file():
-        identity = json.loads(registry_file.read_text())
+        identity = _secure_read_identity(registry_file)
         if identity.get("project_key") != project_key:
             raise SystemExit(
                 f"本地身份项目不匹配: {identity.get('project_key')!r} != {project_key!r}"
