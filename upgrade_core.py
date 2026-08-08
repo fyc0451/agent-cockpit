@@ -1202,6 +1202,27 @@ def restart_cockpit_only() -> None:
     if r.returncode != 0:
         raise ValueError("restart_failed")
     _verify_linux_restarted()
+
+
+def health_payload_is_green(payload: Any) -> bool:
+    """升级成功/回滚后置：status 严格等于 \"ok\"，且 db/herdr/hub/push 均 is True。
+
+    server /health 在依赖红灯时仍可能返回 status=ok；仅看 status 会误判 succeeded。
+    缺键、False、字符串 truthy（如 \"true\"）、1、仅 status ok 一律失败。
+    """
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("status") != "ok":
+        return False
+    for key in ("db", "herdr", "hub", "push"):
+        if key not in payload:
+            return False
+        if payload[key] is not True:
+            return False
+    return True
+
+
+
 def health_check(*, timeout_s: float = HEALTH_TIMEOUT_S) -> bool:
     if "health_check" in _hooks:
         return bool(_hooks["health_check"]())
@@ -1213,7 +1234,7 @@ def health_check(*, timeout_s: float = HEALTH_TIMEOUT_S) -> bool:
         try:
             with httpx.Client(timeout=2.0) as client:
                 resp = client.get(url)
-            if resp.status_code == 200 and resp.json().get("status") == "ok":
+            if resp.status_code == 200 and health_payload_is_green(resp.json()):
                 return True
         except Exception:
             pass

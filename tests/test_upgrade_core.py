@@ -365,6 +365,103 @@ def test_api_maps_error_codes_without_secrets(install_tree, monkeypatch):
     assert "Release" in r.json()["detail"] or "官方" in r.json()["detail"]
 
 
+def test_health_payload_requires_five_strict_greens():
+    """成功 health：status 严格 ok 且 db/herdr/hub/push 均为 bool True。"""
+    green = {"status": "ok", "db": True, "herdr": True, "hub": True, "push": True}
+    assert upgrade_core.health_payload_is_green(green) is True
+
+    # 仅 status=ok
+    assert upgrade_core.health_payload_is_green({"status": "ok"}) is False
+    # 缺任一键
+    for key in ("db", "herdr", "hub", "push"):
+        body = dict(green)
+        del body[key]
+        assert upgrade_core.health_payload_is_green(body) is False, key
+    # false
+    for key in ("db", "herdr", "hub", "push"):
+        body = dict(green)
+        body[key] = False
+        assert upgrade_core.health_payload_is_green(body) is False, key
+    # 字符串 truthy 不算
+    for key in ("db", "herdr", "hub", "push"):
+        body = dict(green)
+        body[key] = "true"
+        assert upgrade_core.health_payload_is_green(body) is False, key
+    # 数值 1 也不算
+    for key in ("db", "herdr", "hub", "push"):
+        body = dict(green)
+        body[key] = 1
+        assert upgrade_core.health_payload_is_green(body) is False, key
+    body = dict(green)
+    body["status"] = "OK"  # 大小写
+    assert upgrade_core.health_payload_is_green(body) is False
+    body = dict(green)
+    body["status"] = True
+    assert upgrade_core.health_payload_is_green(body) is False
+    assert upgrade_core.health_payload_is_green(None) is False
+    assert upgrade_core.health_payload_is_green([]) is False
+    assert upgrade_core.health_payload_is_green("ok") is False
+
+
+def test_health_check_uses_strict_payload(install_tree, monkeypatch):
+    """health_check HTTP 路径：不全绿失败；仅 status ok 失败；全绿成功。"""
+    upgrade_core.clear_hooks()
+    monkeypatch.setattr(upgrade_core.time, "sleep", lambda s: None)
+    seq: list = []
+
+    class FakeResp:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            return FakeResp(seq.pop(0) if seq else {"status": "ok"})
+
+    monkeypatch.setattr(upgrade_core.httpx, "Client", FakeClient)
+
+    # 依赖红灯但仍 status=ok → 失败
+    seq[:] = [
+        {"status": "ok", "db": False, "herdr": True, "hub": True, "push": True},
+    ]
+    assert upgrade_core.health_check(timeout_s=0.05) is False
+
+    # 缺 push → 失败
+    seq[:] = [{"status": "ok", "db": True, "herdr": True, "hub": True}]
+    assert upgrade_core.health_check(timeout_s=0.05) is False
+
+    # 字符串 truthy → 失败
+    seq[:] = [
+        {
+            "status": "ok",
+            "db": True,
+            "herdr": True,
+            "hub": True,
+            "push": "true",
+        }
+    ]
+    assert upgrade_core.health_check(timeout_s=0.05) is False
+
+    # 先红后绿 → 重试后成功
+    seq[:] = [
+        {"status": "ok", "db": False, "herdr": True, "hub": True, "push": True},
+        {"status": "ok", "db": True, "herdr": True, "hub": True, "push": True},
+    ]
+    assert upgrade_core.health_check(timeout_s=3.0) is True
+
+
 def test_api_upgrade_requires_cockpit_token_not_public(install_tree, monkeypatch):
     """POST /api/upgrade 非 PUBLIC：无认证与错误 token 均 401；正确 token 仍走契约。
 
@@ -1309,3 +1406,4 @@ def test_r8_cleanup_plist_deleted_even_if_detached_popen_fails(
     assert not plist.exists()
     assert bootouts, "fallback bootout after Popen failure"
     assert "upgrade.fail" in bootouts[0][-1]
+
