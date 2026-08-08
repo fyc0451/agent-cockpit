@@ -203,7 +203,7 @@ def test_herdr_terminal_attach_atomically_replaces_restored_pty_on_server():
     created = attach.split("const r=await api('/api/term?label='", 1)[1]
     assert created.index("termMount(r.id)") < created.index("renderTermOptions()")
     # WebSocket 必须先设置主题和尺寸，再执行排队的 herdr attach 命令。
-    assert websocket.index("sendTermColorScheme(id,ws,!replay)") < websocket.index(
+    assert websocket.index("sendTermColorScheme(id,ws,true)") < websocket.index(
         "type:'resize'"
     )
     assert websocket.index("type:'resize'") < websocket.index("flushTermInput(id,ws)")
@@ -669,7 +669,16 @@ def test_terminal_does_not_forward_browser_focus_reports_to_pty():
     assert "const isTermFocusReport=data=>data==='\\x1b[I'||data==='\\x1b[O'" in js
     mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
     assert "xterm.onData(d=>{if(isTermFocusReport(d))return;" in mount
-    assert "w.send(applyTermModifiers(d))" in mount
+    assert "queueTermInput(id,applyTermModifiers(d))" in mount
+
+
+def test_terminal_queues_first_input_until_websocket_opens():
+    """首个鼠标/按键事件不能因终端 WebSocket 尚在连接而丢失。"""
+    js = _inline_js()
+    mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
+    on_data = mount.split("xterm.onData(d=>", 1)[1].split("xterm.onResize", 1)[0]
+    assert "queueTermInput(id,applyTermModifiers(d))" in on_data
+    assert "readyState===1" not in on_data
 
 
 def test_terminal_keyboard_toggle_in_toolbar_and_keys_hidden_by_default():
@@ -1656,6 +1665,13 @@ def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     assert "Object.entries(TERM_INSTANCES||{})" in broadcast
     assert "sendTermColorScheme(id,inst.ws,true)" in broadcast
     assert "setTimeout" not in broadcast
+
+    # 首次 replay 挂载也要通知已运行的 TUI，不能只更新后台查询色。
+    open_ws = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
+        "function showTermInstance", 1
+    )[0]
+    assert "sendTermColorScheme(id,ws,true)" in open_ws
+    assert "sendTermColorScheme(id,ws,!replay)" not in open_ws
 
 
 def test_settings_hub_error_shows_actionable_fix():

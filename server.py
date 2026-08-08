@@ -167,6 +167,7 @@ TERM_WS_INVALID_CODE = 4004
 _TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
 _TERM_INPUT_NOTE_TASKS: dict[str, asyncio.Task[None]] = {}
 _TERM_INPUT_NOTE_PENDING: set[str] = set()
+_TERM_THEME_TASKS: set[asyncio.Task[Any]] = set()
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
     "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报；"
@@ -4387,12 +4388,23 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                             terminal.resize_term(term_id, ctrl.get("cols", 80), ctrl.get("rows", 24))
                             continue
                         if isinstance(ctrl, dict) and ctrl.get("type") == "theme":
-                            await asyncio.to_thread(
+                            mode = ctrl.get("mode")
+                            notify = ctrl.get("notify") is True
+                            updated = await asyncio.to_thread(
                                 terminal.set_color_scheme,
                                 term_id,
-                                ctrl.get("mode"),
-                                notify=ctrl.get("notify") is True,
+                                mode,
+                                notify=notify,
                             )
+                            session = terminal.term_label(term_id)
+                            if updated and notify and session:
+                                task = asyncio.create_task(asyncio.to_thread(
+                                    herdr_client.notify_opencode_color_scheme,
+                                    session,
+                                    mode,
+                                ))
+                                _TERM_THEME_TASKS.add(task)
+                                task.add_done_callback(_TERM_THEME_TASKS.discard)
                             continue
                     except json.JSONDecodeError:
                         pass

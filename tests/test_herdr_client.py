@@ -229,6 +229,43 @@ def test_snapshot_handles_unexpected_json_shapes(monkeypatch):
     }
 
 
+def test_notify_opencode_color_scheme_targets_only_opencode_panes(monkeypatch):
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: {
+            "panes": [
+                {"pane_id": "w1:p2", "agent": "codex"},
+                {"pane_id": "w1:p7", "agent": "opencode"},
+                {"pane_id": "w1:p9", "agent": None},
+            ],
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda args, timeout=10: calls.append((args, timeout)) or "",
+    )
+
+    assert herdr_client.notify_opencode_color_scheme("demo", "light") == 1
+    assert calls == [
+        ([
+            "--session", "demo", "pane", "send-text", "w1:p7",
+            "\x1b[?997;2n",
+        ], 5),
+    ]
+
+
+def test_notify_opencode_color_scheme_rejects_invalid_mode(monkeypatch):
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: (_ for _ in ()).throw(AssertionError("snapshot")),
+    )
+    assert herdr_client.notify_opencode_color_scheme("demo", "sepia") == 0
+
+
 def test_start_agent_uses_snapshot_delta_and_single_command_argument(monkeypatch):
     """无创建响应时只能选前后 snapshot 唯一新增 pane，不能猜最大 id。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)

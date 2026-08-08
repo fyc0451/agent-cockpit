@@ -3483,8 +3483,8 @@ function openTermWS(id,xterm,replay){
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{
     const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;
-    // 新 PTY 先设置 OSC 10/11 回复色再启动 Herdr；重连则同时通知已运行 Herdr。
-    sendTermColorScheme(id,ws,!replay);
+    // 先设置 OSC 10/11 回复色并通知已运行 TUI；首次 replay 也可能挂到旧 pane。
+    sendTermColorScheme(id,ws,true);
     try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}
     flushTermInput(id,ws);startTermZoomLease(id);
     if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}
@@ -3584,7 +3584,7 @@ function termMount(id){
     TERM_INSTANCES[id].resizeObserver=ro;
   }
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
-  xterm.onData(d=>{if(isTermFocusReport(d))return;const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(applyTermModifiers(d))});
+  xterm.onData(d=>{if(isTermFocusReport(d))return;queueTermInput(id,applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   TERM_INSTANCES[id].ws=openTermWS(id,xterm,true);
   XTERM=xterm;FIT=fit;

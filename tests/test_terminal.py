@@ -1038,5 +1038,6 @@ def test_websocket_theme_control_bypasses_user_input_accounting():
         "except json.JSONDecodeError", 1
     )[0]
     assert "terminal.set_color_scheme" in theme
+    assert "herdr_client.notify_opencode_color_scheme" in theme
     assert "continue" in theme
     assert "_schedule_term_input_note" not in theme

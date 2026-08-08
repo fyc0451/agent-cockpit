@@ -357,6 +357,16 @@ def set_color_scheme(term_id: str, mode: Any, *, notify: bool = False) -> bool:
     return True
 
 
+def term_label(term_id: str) -> str | None:
+    """返回终端的受校验 label；供上层把 Herdr 控制限定到对应 session。"""
+    t = _get(term_id)
+    if not t:
+        return None
+    with t["lock"]:
+        label = t.get("label")
+    return label if isinstance(label, str) and label else None
+
+
 def write_term(term_id: str, data: str) -> None:
     """往终端写击键(浏览器→PTY)。
 
