@@ -1668,28 +1668,26 @@ def test_terminal_output_yields_between_bounded_chunks():
     assert "renderGeneration:0" in mount
 
 
-def test_interaction_diagnostics_capture_latency_without_input_payloads():
+def test_terminal_loading_waits_for_replay_parse_before_fading():
     js = _inline_js()
-    diag = js.split("const INTERACTION_DIAG=", 1)[1].split(
-        "// 文本与双引号属性上下文都安全", 1
+    assert ".term-loading{" in HTML
+    assert "replay_complete" in js
+    settle = js.split("function settleTermLoading(id,force=false){", 1)[1].split(
+        "function writeTermOutput", 1
     )[0]
-    assert "pointerdown" in diag
-    assert "keydown" in diag
-    assert "wheel" in diag
-    assert "PerformanceObserver" in diag
-    assert "event_loop_lag" in diag
-    assert "interaction_diag=" in diag
-    assert "e.key" not in diag
-    assert "clientX" not in diag
-    assert "clientY" not in diag
-
-    mount = js.split("function termMount(id){", 1)[1].split(
-        "// ============ 会话管理", 1
+    assert "inst.replayComplete" in settle
+    assert "inst.rendering" in settle
+    assert "inst.renderQueue.length" in settle
+    websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
+        "function showTermInstance", 1
     )[0]
-    assert "term_webgl_load" in mount
-    assert "term_ondata" in mount
-    assert "term_write_parsed" in mount
-    assert "chars:d.length" in mount
+    assert "if(!binary){" in websocket
+    assert "if(!binary&&awaitingReplay)" not in websocket
+    assert "inst.replayComplete=true;settleTermLoading(id)" in websocket
+    pump = js.split("function pumpTermRender(id){", 1)[1].split(
+        "function queueTermRender", 1
+    )[0]
+    assert "settleTermLoading(id)" in pump
 
 
 def test_theme_switch_updates_visible_terminal_without_contrast_rebuild_or_resize():

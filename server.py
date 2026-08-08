@@ -4357,6 +4357,7 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                 return
             if history:
                 await websocket.send_bytes(history)
+            await websocket.send_json({"type": "replay_complete"})
         # 输出转发任务:PTY → WebSocket
         async def pump_out():
             while _term_websocket_is_current(term_id, connection):
