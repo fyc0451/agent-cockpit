@@ -140,7 +140,7 @@ def reload_config(timeout: int = 10) -> dict[str, Any]:
     try:
         sessions = [
             s.get("name") for s in list_sessions()
-            if s.get("name") and s.get("running") is not False
+            if s.get("name") and s.get("status") == "running"
         ]
     except Exception:
         sessions = []
