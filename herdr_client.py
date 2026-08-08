@@ -131,12 +131,31 @@ def herdr_config_path() -> Path:
 
 
 def reload_config(timeout: int = 10) -> dict[str, Any]:
-    """热重载运行中的 herdr server 配置；返回 ok/error,不抛异常。"""
+    """热重载运行中的 herdr server 配置；返回 ok/reloaded/errors,不抛异常。
+
+    herdr socket 是 per-session 的(~/.config/herdr/sessions/<name>/herdr.sock),
+    必须对每个运行中的 session 带 --session 执行 reload-config；
+    枚举不到 session 时退回默认 server 命令。
+    """
     try:
-        _run(["server", "reload-config"], timeout=timeout)
-        return {"ok": True}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        sessions = [s.get("name") for s in list_sessions() if s.get("name")]
+    except Exception:
+        sessions = []
+    if not sessions:
+        try:
+            _run(["server", "reload-config"], timeout=timeout)
+            return {"ok": True, "reloaded": [], "errors": []}
+        except Exception as exc:
+            return {"ok": False, "reloaded": [], "errors": [str(exc)]}
+    reloaded: list[str] = []
+    errors: list[str] = []
+    for name in sessions:
+        try:
+            _run(["--session", str(name), "server", "reload-config"], timeout=timeout)
+            reloaded.append(str(name))
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    return {"ok": not errors, "reloaded": reloaded, "errors": errors}
 
 
 _THEME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")

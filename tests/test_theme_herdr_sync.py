@@ -63,13 +63,49 @@ def test_set_theme_rejects_invalid_name(tmp_path, monkeypatch):
     assert path.read_text(encoding="utf-8") == "[theme]\n"  # 未改动
 
 
-def test_reload_config_reports_error_without_raising(monkeypatch):
-    def boom(_args, timeout=10):
-        raise RuntimeError("herdr 不在")
-
-    monkeypatch.setattr(herdr_client, "_run", boom)
+def test_reload_config_hits_every_running_session(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "list_sessions",
+        lambda: [{"name": "s1"}, {"name": "s2"}],
+    )
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(args) or "",
+    )
     result = herdr_client.reload_config()
-    assert result["ok"] is False and "herdr 不在" in result["error"]
+    assert result["ok"] is True
+    assert result["reloaded"] == ["s1", "s2"]
+    assert calls == [
+        ["--session", "s1", "server", "reload-config"],
+        ["--session", "s2", "server", "reload-config"],
+    ]
+
+
+def test_reload_config_partial_failure_reports_session(monkeypatch):
+    monkeypatch.setattr(herdr_client, "list_sessions", lambda: [{"name": "good"}, {"name": "bad"}])
+
+    def flaky(args, timeout=10):
+        if args[1] == "bad":
+            raise RuntimeError("boom")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", flaky)
+    result = herdr_client.reload_config()
+    assert result["ok"] is False
+    assert result["reloaded"] == ["good"]
+    assert any("bad" in e for e in result["errors"])
+
+
+def test_reload_config_falls_back_without_sessions(monkeypatch):
+    calls = []
+    monkeypatch.setattr(herdr_client, "list_sessions", lambda: [])
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(args) or "",
+    )
+    result = herdr_client.reload_config()
+    assert result["ok"] is True and calls == [["server", "reload-config"]]
 
 
 def test_theme_herdr_endpoint(monkeypatch, tmp_path):
