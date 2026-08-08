@@ -565,12 +565,23 @@ def sweep_idle(max_idle: float | None = None) -> int:
     return len(victims)
 
 
+# _current_pane 的 TTL 缓存:用户在同一 pane 连续打字时,焦点不变,不必每键
+# 都 fork 一次 herdr。1 秒 TTL 与 _persist_typing_state 的落盘限频一致。
+_PANE_CURRENT_TTL = 1.0
+_pane_current_cache: dict[str, tuple[str | None, float]] = {}
+
+
 def _current_pane(session: str) -> str | None:
-    """输入发生时刻该 session 的当前 pane(herdr 侧,正常约 2ms);失败返回 None。
+    """输入发生时刻该 session 的当前 pane(herdr 侧);失败返回 None。
 
     超时收紧到 0.5s: 该调用位于用户输入路径,Herdr 慢/故障时宁可记
     unknown 保守避让,也不能拖住事件循环。
+    带 1 秒 TTL 缓存: 连续输入时复用近期焦点,避免每键都 fork herdr。
     """
+    now = time.monotonic()
+    cached = _pane_current_cache.get(session)
+    if cached and now - cached[1] < _PANE_CURRENT_TTL:
+        return cached[0]
     try:
         result = subprocess.run(
             [_HERDR_BIN, "--session", session, "pane", "current"],
@@ -578,9 +589,11 @@ def _current_pane(session: str) -> str | None:
         )
         pane = json.loads(result.stdout).get("result", {}).get("pane", {})
         pane_id = pane.get("pane_id")
-        return str(pane_id) if pane_id else None
+        resolved = str(pane_id) if pane_id else None
     except Exception:
-        return None
+        resolved = None
+    _pane_current_cache[session] = (resolved, now)
+    return resolved
 
 
 def _persist_typing_state(session: str, pane_id: str | None) -> None:
@@ -664,7 +677,7 @@ def _persist_typing_state(session: str, pane_id: str | None) -> None:
 def note_user_input(term_id: str) -> str | None:
     """记录 Web PTY 用户输入；返回对应 Herdr session，无标签则 None。
 
-    输入发生时就解析并记录落点 pane(约 2ms),不依赖投递时反推焦点——
+    输入发生时就解析并记录落点 pane,不依赖投递时反推焦点——
     用户输完草稿切换焦点后,给原 pane 的投递仍能正确避让。
     """
     now = time.monotonic()
