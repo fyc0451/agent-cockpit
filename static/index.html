@@ -3483,8 +3483,9 @@ function openTermWS(id,xterm,replay){
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{
     const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;
-    // 先设置 OSC 10/11 回复色并通知已运行 TUI；首次 replay 也可能挂到旧 pane。
-    sendTermColorScheme(id,ws,true);
+    // 首次挂载时 Herdr 命令还在输入队列里，不能先把 Mode 2031 写给登录 shell。
+    // 重连挂到已运行的 TUI 时才通知；两种情况都会更新 OSC 10/11 回复色。
+    sendTermColorScheme(id,ws,!replay);
     try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}
     flushTermInput(id,ws);startTermZoomLease(id);
     if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}

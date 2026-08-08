@@ -203,7 +203,7 @@ def test_herdr_terminal_attach_atomically_replaces_restored_pty_on_server():
     created = attach.split("const r=await api('/api/term?label='", 1)[1]
     assert created.index("termMount(r.id)") < created.index("renderTermOptions()")
     # WebSocket 必须先设置主题和尺寸，再执行排队的 herdr attach 命令。
-    assert websocket.index("sendTermColorScheme(id,ws,true)") < websocket.index(
+    assert websocket.index("sendTermColorScheme(id,ws,!replay)") < websocket.index(
         "type:'resize'"
     )
     assert websocket.index("type:'resize'") < websocket.index("flushTermInput(id,ws)")
@@ -1666,12 +1666,16 @@ def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     assert "sendTermColorScheme(id,inst.ws,true)" in broadcast
     assert "setTimeout" not in broadcast
 
-    # 首次 replay 挂载也要通知已运行的 TUI，不能只更新后台查询色。
+    # 首次 replay 时 Herdr 尚未启动，不能把 Mode 2031 报告写给登录 shell；
+    # 重连到已运行 TUI 时才通知。两条路径都会更新 OSC 10/11 回复色。
     open_ws = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
         "function showTermInstance", 1
     )[0]
-    assert "sendTermColorScheme(id,ws,true)" in open_ws
-    assert "sendTermColorScheme(id,ws,!replay)" not in open_ws
+    assert "sendTermColorScheme(id,ws,!replay)" in open_ws
+    assert "sendTermColorScheme(id,ws,true)" not in open_ws
+    assert open_ws.index("sendTermColorScheme(id,ws,!replay)") < open_ws.index(
+        "flushTermInput(id,ws)"
+    )
 
 
 def test_settings_hub_error_shows_actionable_fix():
