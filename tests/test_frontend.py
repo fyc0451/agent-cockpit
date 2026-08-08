@@ -1612,8 +1612,7 @@ def test_terminal_ws_writes_data_directly_without_color_rewrite():
 
 
 def test_theme_switch_no_longer_forces_pty_resize():
-    # _repaintTermForTheme 已删除(颜色重写移除后,触发 PTY resize 重绘 TUI 的理由消失)。
-    # setTheme 只更新 xterm options.theme,不再 resize → 避免每次切主题产生两次后端 resize。
+    # 主题切换只重绘 xterm，不 resize PTY，避免每次切主题产生两次后端 resize。
     js = _inline_js()
     assert "function _repaintTermForTheme" not in js
     assert "TERM_LIGHT" not in js
@@ -1621,12 +1620,21 @@ def test_theme_switch_no_longer_forces_pty_resize():
         "function toggleTheme", 1
     )[0]
     assert "options.theme=th" in set_theme
+    assert "xterm.refresh(0,inst.xterm.rows-1)" in set_theme
     assert "sendAllTermColorSchemes()" in set_theme
     assert "xterm.resize" not in set_theme
 
 
-def test_theme_switch_reports_running_scheme_without_ansi_rewrite():
+def test_theme_switch_uses_dark_tui_base_and_gpu_visual_mapping():
     js = _inline_js()
+    assert ":root.light #termContainer .xterm{filter:invert(1) hue-rotate(180deg) brightness(.98)}" in HTML
+    assert "function currentTermColorScheme(){return 'dark'}" in js
+    term_theme = js.split("function termTheme(){", 1)[1].split(
+        "function setTheme", 1
+    )[0]
+    assert "classList.contains('light')" not in term_theme
+    assert "background:'#000000',foreground:'#e8e8e8'" in term_theme
+
     report = js.split("function sendTermColorScheme(id,ws,notify){", 1)[1].split(
         "function sendAllTermColorSchemes", 1
     )[0]

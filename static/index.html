@@ -338,6 +338,8 @@ header .spacer{flex:1}
 .term-keys.expanded .term-key-extra{display:block}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
 #termContainer{min-height:0}
+/* TUI 一律按深色基准绘制；浅色仅在 GPU 合成层映射整屏，避免逐 WS chunk 改写 ANSI。 */
+:root.light #termContainer .xterm{filter:invert(1) hue-rotate(180deg) brightness(.98)}
 /* 普通 scrollback 由 xterm 原生处理；TUI 鼠标上报或 alternate buffer 由下方 JS 接管 */
 #termContainer .xterm.enable-mouse-events{touch-action:none;overscroll-behavior:contain}
 /* xterm 不处理 Pointer Events；alternate buffer 也没有原生 touch scrollback，需合成 wheel */
@@ -4368,7 +4370,9 @@ function positionTermForKeyboard(){
 
 // ============ 主题切换 ============
 const TERM_FONT="'Cascadia Mono NF','Cascadia Mono',ui-monospace,Menlo,Consolas,monospace";
-function currentTermColorScheme(){return document.documentElement.classList.contains('light')?'light':'dark'}
+// Codex 没有公开运行期整套 TUI 主题切换接口。所有程序固定使用深色基准，
+// Cockpit 浅色模式由 xterm 外层的 GPU filter 映射，显式 RGB 颜色也能一起切换。
+function currentTermColorScheme(){return 'dark'}
 function sendTermColorScheme(id,ws,notify){
   if(!ws||ws.readyState!==1)return;
   // 服务端按 PTY label 判断是否为 Herdr；不能依赖可能尚未恢复完成的前端映射。
@@ -4378,27 +4382,20 @@ function sendAllTermColorSchemes(){
   for(const [id,inst] of Object.entries(TERM_INSTANCES||{}))sendTermColorScheme(id,inst.ws,true);
 }
 function termTheme(){
-  // 明亮主题给终端配浅底深字 + 高对比 ANSI;黑暗保持原样
-  if(document.documentElement.classList.contains('light')){
-    return {background:'#fafbfc',foreground:'#1a2030',cursor:'#2563eb',selectionBackground:'#d0d8e8',
-      black:'#1a2030',red:'#c0392b',green:'#1e8449',yellow:'#b9770e',blue:'#2563eb',magenta:'#7c3aed',cyan:'#0e7490',
-      white:'#3f4756',brightWhite:'#111827',
-      brightBlack:'#6b7280',brightRed:'#e74c3c',brightGreen:'#27ae60',brightYellow:'#d4ac0d',brightBlue:'#4a89f0',brightMagenta:'#9b59b6',brightCyan:'#17a2b8'};
-  }
   return {background:'#000000',foreground:'#e8e8e8'};
 }
 // 注:浅色/暗色模式的 JS ANSI 颜色重写(_rgbToHsl/_lightRewriteSgr/lightTermAdapt/
 // darkTermBoost 等)已移除——它让每个终端 WS chunk 都在主线程跑正则+HSL 运算,是
 // TUI 程序(codex/kimi 等,输出全是颜色码)卡顿的根因。颜色现交由 xterm 渲染层原生
-// 处理(options.theme + WebGL),与 Orca 的做法一致。浅色主题下 TUI 自带的显式深色
-// 背景不再被反转,可读性略降,但换取了流畅度。
+// 处理(options.theme + WebGL),与 Orca 的做法一致。显式 RGB 颜色由 xterm 外层的
+// CSS filter 在 GPU 合成阶段统一映射，不进入 WebSocket 输出热路径。
 function setTheme(mode,save=true){
   const light=mode==='light';
   document.documentElement.classList.toggle('light',light);
   const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
   const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
   const th=termTheme();
-  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th}catch(e){}}
+  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th;inst.xterm.refresh(0,inst.xterm.rows-1)}catch(e){}}
   sendAllTermColorSchemes();
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
 }
