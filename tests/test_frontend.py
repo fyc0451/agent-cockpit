@@ -255,20 +255,21 @@ def test_terminal_assets_are_self_hosted_with_subresource_integrity():
         / "xterm"
         / "README.md"
     ).read_text()
-    assert "@xterm/xterm` 5.5.0" in notice
-    assert "@xterm/addon-fit` 0.10.0" in notice
-    assert "@xterm/addon-webgl` 0.18.0" in notice
+    assert "@xterm/xterm` 6.1.0-beta.287" in notice
+    assert "@xterm/addon-fit` 0.12.0-beta.287" in notice
+    assert "@xterm/addon-webgl` 0.20.0-beta.286" in notice
 
 
-def test_terminal_uses_stable_default_renderer_without_webgl():
+def test_terminal_webgl_renderer_with_safe_fallback():
     js = _inline_js()
     mount = js.split("function termMount(id){", 1)[1].split("// ============ 会话管理", 1)[0]
 
-    # WebGL glyph atlas 在 CJK + TUI 高频重绘、标签页恢复后可能损坏，表现为
-    # 字符仍可读但单元格互相覆盖。稳定性优先，使用 xterm 内置 renderer。
-    assert "/static/vendor/xterm/addon-webgl.js" not in HTML
-    assert "enableTermWebgl" not in js
-    assert "WebglAddon" not in js
+    # xterm 6.x 渲染器重写后重新启用 WebGL;必须保留 context-loss 回退
+    # (dispose + 强制重绘),避免 8/5 回滚事件的字符错位复发。
+    assert "/static/vendor/xterm/addon-webgl.js" in HTML
+    assert "enableTermWebgl(xterm)" in mount
+    assert "onContextLoss" in js
+    assert "xterm.refresh(0,xterm.rows-1)" in js
     assert "TERM_INSTANCES[id]={xterm,fit,ws:null," in mount
 
 

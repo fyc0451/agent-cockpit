@@ -538,9 +538,10 @@ header .spacer{flex:1}
 .update-banner .ub-link{text-decoration:underline;white-space:nowrap}
 .set-version-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}
 </style>
-<link rel="stylesheet" href="/static/vendor/xterm/xterm.css" integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP" crossorigin="anonymous">
-<script src="/static/vendor/xterm/xterm.js" integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/" crossorigin="anonymous"></script>
-<script src="/static/vendor/xterm/addon-fit.js" integrity="sha384-iF+jqbuti4XlB64clWgFWYEscb+UnSRv3VgVikGYZu+otNFnSHr7y7NcKfBnGizn" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css" integrity="sha384-RlUgwnogl7w/AwRKwR8Ldr3dCZcsB+HEiEFsHHdhtFhg8zsBTiZJ6WNG075XG3ai" crossorigin="anonymous">
+<script src="/static/vendor/xterm/xterm.js" integrity="sha384-V07/83JpIh3smwW92EhQq8qCIhaPdTzboQI5GJoG27x+I7OMo6newC3jIss5Gfk0" crossorigin="anonymous"></script>
+<script src="/static/vendor/xterm/addon-fit.js" integrity="sha384-ZeFtItM3CHY6XwVqfAXVnYMs7bYmLr3BEAi968nRl3dltc2MFXJX1HcKi4YAw9G6" crossorigin="anonymous"></script>
+<script src="/static/vendor/xterm/addon-webgl.js" integrity="sha384-n1f+ywzr/5g7Zb0vN9kXcYmjc0vmEVO7xHaCWYnAkW2ip6ZGkwyoExcZRJcTyUYL" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="app">
@@ -3536,6 +3537,24 @@ function termSwitch(id){
   if(TERM_INSTANCES[id]){showTermInstance(id)}
   else{termMount(id)}
 }
+function enableTermWebgl(xterm){
+  // WebGL 渲染(xterm 6.x 重写渲染器,CJK 已修);context 丢失后回退 canvas
+  // 并强制整屏重绘,避免字符错位(8/5 回滚事件的教训)
+  if(typeof WebglAddon==='undefined'||!WebglAddon.WebglAddon)return null;
+  let addon=null;
+  try{
+    addon=new WebglAddon.WebglAddon();
+    addon.onContextLoss(()=>{
+      try{addon.dispose()}catch(e){}
+      try{xterm.refresh(0,xterm.rows-1)}catch(e){}
+    });
+    xterm.loadAddon(addon);
+    return addon;
+  }catch(e){
+    try{addon?.dispose()}catch(ignore){}
+    return null;
+  }
+}
 function termMount(id){
   const c=document.getElementById('termContainer');
   if(typeof Terminal==='undefined'){c.innerHTML='<div class="empty" style="color:#c00;padding:20px">xterm.js 加载失败(CDN 不可达?)</div>';return}
@@ -3549,6 +3568,7 @@ function termMount(id){
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open(el);
+  enableTermWebgl(xterm);
   enableTermTouchScroll(el,xterm);
   xterm.parser.registerOscHandler(52,handleOsc52);
   // 隐藏其他终端的容器
