@@ -13,7 +13,6 @@ import os
 import re
 import shlex
 import shutil
-import socket
 import subprocess
 import tempfile
 import time
@@ -35,7 +34,6 @@ SLOW_AGENT_START_TIMEOUTS = {"grok": 60.0}
 AGENT_STABLE_SECONDS = 1.5
 AGENT_POLL_INTERVAL = 0.2
 MAX_AGENT_ARGS_LENGTH = 2048
-MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 def _agent_start_timeout(agent: str) -> float:
@@ -280,108 +278,6 @@ def list_sessions() -> list[dict[str, Any]]:
                 "socket": parts[-1],
             })
     return sessions
-
-
-def session_socket_path(session: str) -> str:
-    """Resolve a running session to its official JSON-line API socket."""
-    for row in list_sessions():
-        if row.get("name") != session or row.get("status") != "running":
-            continue
-        path = str(row.get("socket") or "")
-        if path:
-            return path
-    raise RuntimeError(f"herdr session 未运行: {session}")
-
-
-def socket_request(
-    socket_path: str,
-    method: str,
-    params: dict[str, Any],
-    timeout: float = 2.0,
-) -> dict[str, Any]:
-    """Send one request over Herdr's newline-delimited Unix socket API.
-
-    Herdr 0.8 handles one JSON request per connection. Opening the local socket
-    is cheap; the important performance property here is avoiding a CLI
-    fork/exec for every live pane refresh and keystroke.
-    """
-    request_id = f"cockpit:{time.monotonic_ns()}"
-    payload = json.dumps(
-        {"id": request_id, "method": method, "params": params},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8") + b"\n"
-    data = bytearray()
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
-            stream.settimeout(timeout)
-            stream.connect(socket_path)
-            stream.sendall(payload)
-            while b"\n" not in data:
-                chunk = stream.recv(65536)
-                if not chunk:
-                    break
-                data.extend(chunk)
-                if len(data) > MAX_API_RESPONSE_BYTES:
-                    raise RuntimeError("herdr API 响应过大")
-    except (OSError, TimeoutError) as exc:
-        raise RuntimeError(f"herdr API 连接失败: {exc}") from exc
-    line = bytes(data).split(b"\n", 1)[0]
-    if not line:
-        raise RuntimeError("herdr API 未返回响应")
-    try:
-        response = json.loads(line)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("herdr API 响应解析失败") from exc
-    if not isinstance(response, dict) or response.get("id") != request_id:
-        raise RuntimeError("herdr API 响应 ID 不匹配")
-    error = response.get("error")
-    if isinstance(error, dict):
-        code = str(error.get("code") or "error")
-        message = str(error.get("message") or "请求失败")
-        raise RuntimeError(f"herdr API {code}: {message}")
-    result = response.get("result")
-    if not isinstance(result, dict):
-        raise RuntimeError("herdr API 响应缺少 result")
-    return result
-
-
-def session_snapshot_live(socket_path: str) -> dict[str, Any]:
-    result = socket_request(socket_path, "session.snapshot", {})
-    snapshot = result.get("snapshot")
-    if not isinstance(snapshot, dict):
-        raise RuntimeError("herdr API snapshot 响应无效")
-    return snapshot
-
-
-def pane_read_live(
-    socket_path: str,
-    pane_id: str,
-    *,
-    source: str = "visible",
-    lines: int | None = None,
-) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "pane_id": pane_id,
-        "source": source,
-        "format": "ansi",
-        "strip_ansi": False,
-    }
-    if lines is not None:
-        params["lines"] = lines
-    result = socket_request(socket_path, "pane.read", params)
-    read = result.get("read")
-    if not isinstance(read, dict):
-        raise RuntimeError("herdr API pane.read 响应无效")
-    return read
-
-
-def pane_send_input_live(socket_path: str, pane_id: str, text: str) -> None:
-    socket_request(
-        socket_path,
-        "pane.send_input",
-        {"pane_id": pane_id, "text": text},
-    )
 
 
 def _slim_layout(layout: dict[str, Any]) -> dict[str, Any]:
