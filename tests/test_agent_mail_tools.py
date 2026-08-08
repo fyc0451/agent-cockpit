@@ -1531,6 +1531,8 @@ def test_rotate_writes_pending_0600_before_hub_call(tmp_path, monkeypatch, capsy
         raise AssertionError(name)
 
     monkeypatch.setattr(module, "mcp_tool", tool)
+    fsync_calls = []
+    monkeypatch.setattr(module, "_fsync_dir", lambda p: fsync_calls.append(str(p)))
     monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate"))
 
     module.main()
@@ -1545,11 +1547,47 @@ def test_rotate_writes_pending_0600_before_hub_call(tmp_path, monkeypatch, capsy
     final = json.loads(registry_file.read_text())
     assert final["registration_token"] == new_token
     assert (registry_file.stat().st_mode & 0o777) == 0o600
-    combined = capsys.readouterr().out + capsys.readouterr().err
+    # 目录 fsync：pending 写 + registry 写 + pending unlink 各一次
+    assert len(fsync_calls) >= 3
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
     assert old_token not in combined and new_token not in combined
 
 
-def test_rotate_hub_failure_keeps_registry_and_removes_pending(tmp_path, monkeypatch, capsys):
+def test_rotate_hub_failure_rolls_back_when_old_still_valid(tmp_path, monkeypatch, capsys):
+    """Hub 拒绝且明确旧值仍有效：回滚删 pending，registry 保持旧值。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    old_token = "o" * 43
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_a, **_k: {})
+
+    def tool(_hub, _token, name, args):
+        if name == "rotate_agent_capability":
+            raise SystemExit("Hub error with secret value")
+        if name == "whois":
+            if args["registration_token"] == old_token:
+                return {"name": "demo-main"}
+            raise SystemExit("invalid")
+        raise AssertionError(name)
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate"))
+
+    module.main()
+
+    assert json.loads(registry_file.read_text())["registration_token"] == old_token
+    assert not module._pending_path(registry_file).exists()
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
+    assert old_token not in combined
+    assert "Hub error" not in combined and "secret value" not in combined
+    assert "已回滚" in combined
+
+
+def test_rotate_hub_failure_indeterminate_keeps_pending(tmp_path, monkeypatch, capsys):
+    """Hub 响应不确定（超时/解析失败且探测均无效）：保留 pending 提示 --recover。"""
     module = _load_am_register()
     project, registry_file = _register_fixture(tmp_path, module)
     module._project = project
@@ -1558,19 +1596,112 @@ def test_rotate_hub_failure_keeps_registry_and_removes_pending(tmp_path, monkeyp
     monkeypatch.setattr(module, "mcp_call", lambda *_a, **_k: {})
 
     def tool(_hub, _token, name, _args):
-        raise SystemExit("Hub error with secret value")
+        raise SystemExit("timeout")
 
     monkeypatch.setattr(module, "mcp_tool", tool)
     monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate"))
 
-    with pytest.raises(SystemExit, match="旧值仍然有效"):
+    with pytest.raises(SystemExit, match="--recover"):
         module.main()
 
     assert json.loads(registry_file.read_text())["registration_token"] == old_token
-    assert not module._pending_path(registry_file).exists()
-    combined = capsys.readouterr().out + capsys.readouterr().err
+    assert module._pending_path(registry_file).is_file()
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
     assert old_token not in combined
-    assert "Hub error" not in combined and "secret value" not in combined
+    assert "timeout" not in combined
+
+
+def test_rotate_hub_failure_promotes_when_hub_committed(tmp_path, monkeypatch, capsys):
+    """Hub 已提交但响应丢失：探测新值有效 → promote，本地不失联。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    old_token = "o" * 43
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_a, **_k: {})
+    captured = {}
+
+    def tool(_hub, _token, name, args):
+        if name == "rotate_agent_capability":
+            captured["new"] = args["new_registration_token"]
+            raise SystemExit("response lost")
+        if name == "whois":
+            if args["registration_token"] == captured["new"]:
+                return {"name": "demo-main"}
+            raise SystemExit("invalid")
+        raise AssertionError(name)
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate"))
+
+    module.main()
+
+    new_token = captured["new"]
+    assert json.loads(registry_file.read_text())["registration_token"] == new_token
+    assert not module._pending_path(registry_file).exists()
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
+    assert old_token not in combined and new_token not in combined
+    assert "已收敛为新值" in combined
+
+
+def test_rotate_rejects_non_rotated_response_keeps_pending(tmp_path, monkeypatch, capsys):
+    """rotate 返回 {} 或非 status=rotated：视为不确定，保 pending 提示 --recover。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    old_token = "o" * 43
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_a, **_k: {})
+
+    def tool(_hub, _token, name, _args):
+        if name == "rotate_agent_capability":
+            return {}
+        raise SystemExit("unreachable")
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate"))
+
+    with pytest.raises(SystemExit, match="--recover"):
+        module.main()
+
+    assert json.loads(registry_file.read_text())["registration_token"] == old_token
+    assert module._pending_path(registry_file).is_file()
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
+    assert old_token not in combined
+
+
+def test_rotate_recover_argparse_mutually_exclusive(tmp_path, monkeypatch):
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: {})
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate", "--recover"))
+    with pytest.raises(SystemExit):
+        module.main()
+
+
+def test_rotate_lock_contention_rejected(tmp_path, monkeypatch):
+    """同 registry 已有进程持锁：拒绝并发操作，防止互删/覆盖 pending。"""
+    import fcntl
+
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    lock_file = module._lock_path(registry_file)
+    fh = open(lock_file, "w")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    try:
+        monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+        monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: {})
+        monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate"))
+        with pytest.raises(SystemExit, match="并发"):
+            module.main()
+    finally:
+        fh.close()
 
 
 def test_rotate_rename_failure_keeps_pending_then_recover_promotes(tmp_path, monkeypatch, capsys):
@@ -1625,7 +1756,8 @@ def test_rotate_rename_failure_keeps_pending_then_recover_promotes(tmp_path, mon
 
     assert json.loads(registry_file.read_text())["registration_token"] == new_token
     assert not pending.exists()
-    combined = capsys.readouterr().out + capsys.readouterr().err
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
     assert old_token not in combined and new_token not in combined
 
 
@@ -1635,9 +1767,9 @@ def test_recover_rollback_when_old_still_valid(tmp_path, monkeypatch, capsys):
     module._project = project
     old_token = "o" * 43
     new_token = "n" * 43
-    module._atomic_write_identity(module._pending_path(registry_file), {
-        "project_key": str(project), "name": "demo-main", "registration_token": new_token,
-    })
+    pending_identity = json.loads(registry_file.read_text())
+    pending_identity["registration_token"] = new_token
+    module._atomic_write_identity(module._pending_path(registry_file), pending_identity)
     monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
 
     def tool(_hub, _token, name, args):
@@ -1654,7 +1786,8 @@ def test_recover_rollback_when_old_still_valid(tmp_path, monkeypatch, capsys):
 
     assert json.loads(registry_file.read_text())["registration_token"] == old_token
     assert not module._pending_path(registry_file).exists()
-    combined = capsys.readouterr().out + capsys.readouterr().err
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
     assert old_token not in combined and new_token not in combined
     assert "rollback" in combined
 
@@ -1665,9 +1798,9 @@ def test_recover_indeterminate_keeps_both(tmp_path, monkeypatch, capsys):
     module._project = project
     old_token = "o" * 43
     new_token = "n" * 43
-    module._atomic_write_identity(module._pending_path(registry_file), {
-        "project_key": str(project), "name": "demo-main", "registration_token": new_token,
-    })
+    pending_identity = json.loads(registry_file.read_text())
+    pending_identity["registration_token"] = new_token
+    module._atomic_write_identity(module._pending_path(registry_file), pending_identity)
     monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
     monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: (_ for _ in ()).throw(SystemExit("unreachable")))
     monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
@@ -1677,7 +1810,33 @@ def test_recover_indeterminate_keeps_both(tmp_path, monkeypatch, capsys):
 
     assert module._pending_path(registry_file).is_file()
     assert json.loads(registry_file.read_text())["registration_token"] == old_token
-    combined = capsys.readouterr().out + capsys.readouterr().err
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
+    assert old_token not in combined and new_token not in combined
+
+
+def test_recover_rejects_mismatched_pending(tmp_path, monkeypatch, capsys):
+    """pending 不可变字段与正式 registry 不一致：拒绝恢复外来/陈旧 pending。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    old_token = "o" * 43
+    new_token = "n" * 43
+    pending_identity = json.loads(registry_file.read_text())
+    pending_identity["registration_token"] = new_token
+    pending_identity["name"] = "intruder-main"
+    module._atomic_write_identity(module._pending_path(registry_file), pending_identity)
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("不应调用 hub")))
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
+
+    with pytest.raises(SystemExit, match="身份不一致"):
+        module.main()
+
+    assert module._pending_path(registry_file).is_file()
+    assert json.loads(registry_file.read_text())["registration_token"] == old_token
+    _captured = capsys.readouterr()
+    combined = _captured.out + _captured.err
     assert old_token not in combined and new_token not in combined
 
 

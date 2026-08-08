@@ -55,6 +55,86 @@ def _pending_path(registry_file: Path) -> Path:
     return registry_file.with_name(registry_file.name + ".pending")
 
 
+def _lock_path(registry_file: Path) -> Path:
+    return registry_file.with_name(registry_file.name + ".lock")
+
+
+def _fsync_dir(path: Path) -> None:
+    """fsync 目录，保证 rename/unlink 落盘；平台不支持时尽力而为。"""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_identity(path: Path, identity: dict) -> None:
+    """原子写身份文件:mkstemp + fsync + chmod 0600 + os.replace + 目录 fsync。
+
+    不先写目标再 chmod(中间态可能 0644 暴露 registration_token),也避免
+    写一半中断留下损坏文件;replace 保证读者永远看到完整内容。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".am-register.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(identity, ensure_ascii=False, indent=2) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        _fsync_dir(path.parent)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _unlink_pending(pending: Path) -> None:
+    try:
+        pending.unlink()
+    except OSError:
+        pass
+    _fsync_dir(pending.parent)
+
+
+class _RegistryLock:
+    """同 registry 独占锁（flock LOCK_EX|LOCK_NB）：防止互删/覆盖同一 pending。"""
+
+    def __init__(self, registry_file: Path):
+        self._path = _lock_path(registry_file)
+        self._fh = None
+
+    def __enter__(self) -> "_RegistryLock":
+        import fcntl
+
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "w")
+        try:
+            os.fchmod(self._fh.fileno(), 0o600)
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self._fh.close()
+            self._fh = None
+            raise SystemExit(
+                "另一轮换/恢复进程正在进行，已拒绝并发操作"
+                f"（锁文件: {self._path}；capability 值不会输出）"
+            ) from exc
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+
 def _capability_valid(hub: str, token: str, project_key: str, name: str, value: str) -> bool:
     """探测某 capability 当前是否有效；不输出值。"""
     try:
@@ -69,13 +149,18 @@ def _capability_valid(hub: str, token: str, project_key: str, name: str, value: 
     return isinstance(profile, dict) and profile.get("name") == name
 
 
-def _recover_pending(
-    registry_file: Path, identity: dict, hub: str, token: str
-) -> str:
-    """收敛未完成轮换：探测新旧哪个有效并安全 promote/rollback。幂等。"""
+# pending 中除 capability 外必须与正式 registry 一致的不可变字段
+_PENDING_IMMUTABLE_KEYS = (
+    "project_key", "project_slug", "agent", "instance", "name",
+    "program", "model", "hub",
+)
+
+
+def _load_pending(registry_file: Path, identity: dict) -> dict:
+    """读取并强校验 pending：格式合法且不可变字段与正式 registry 一致。"""
     pending = _pending_path(registry_file)
     if not pending.is_file():
-        return "no_pending"
+        raise SystemExit("pending 不存在")
     try:
         pending_identity = json.loads(pending.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
@@ -86,6 +171,23 @@ def _recover_pending(
         raise SystemExit(
             f"pending 文件格式无效: {pending}（capability 值不会输出；请人工处理）"
         )
+    for key in _PENDING_IMMUTABLE_KEYS:
+        if pending_identity.get(key) != identity.get(key):
+            raise SystemExit(
+                f"pending 与正式 registry 身份不一致（字段 {key}），"
+                f"拒绝恢复外来/陈旧 pending（capability 值不会输出）"
+            )
+    return pending_identity
+
+
+def _recover_pending(
+    registry_file: Path, identity: dict, hub: str, token: str
+) -> str:
+    """收敛未完成轮换：探测新旧哪个有效并安全 promote/rollback。幂等。"""
+    pending = _pending_path(registry_file)
+    if not pending.is_file():
+        return "no_pending"
+    pending_identity = _load_pending(registry_file, identity)
     old_ok = _capability_valid(
         hub, token, identity["project_key"], identity["name"],
         identity["registration_token"],
@@ -98,11 +200,11 @@ def _recover_pending(
         # Hub 已轮换（或新值已生效）：promote。old 同时有效也不危险——
         # 新值对同一身份可用，正式 registry 指向新值即可收敛。
         _atomic_write_identity(registry_file, pending_identity)
-        pending.unlink()
+        _unlink_pending(pending)
         return "promoted"
     if old_ok:
         # Hub 从未轮换：回滚，丢弃 pending
-        pending.unlink()
+        _unlink_pending(pending)
         return "rolled_back"
     raise SystemExit(
         "恢复失败：新旧 capability 均无效或 Hub 不可达；"
@@ -110,54 +212,69 @@ def _recover_pending(
     )
 
 
-def _rotate_capability(registry_file: Path, identity: dict, hub: str, token: str) -> None:
-    """原位轮换：pending 两阶段协议，任何失败均可恢复且不输出值。"""
-    if _pending_path(registry_file).is_file():
+def _settle_uncertain(
+    registry_file: Path, identity: dict, hub: str, token: str
+) -> None:
+    """Hub 结果不确定（响应丢失/超时/非精确成功）时探测收敛；不输出值。"""
+    try:
         outcome = _recover_pending(registry_file, identity, hub, token)
-        if outcome == "promoted":
-            print("注意：检测到已生效但未落盘的轮换，已自动完成本地收敛", file=sys.stderr)
-        elif outcome == "rolled_back":
-            print("注意：检测到未生效的轮换残留，已自动回滚", file=sys.stderr)
+    except SystemExit as exc:
+        raise SystemExit(
+            "轮换结果不确定：pending 已保留，请运行 --recover 收敛"
+            "（capability 值不会输出）"
+        ) from exc
+    if outcome == "promoted":
+        print("注意：Hub 已生效但响应不确定，本地已收敛为新值", file=sys.stderr)
+    elif outcome == "rolled_back":
+        print("注意：Hub 未接受轮换（旧值仍有效），已回滚", file=sys.stderr)
 
-    new_value = secrets.token_urlsafe(32)
-    if new_value == identity["registration_token"]:
+
+def _rotate_capability(registry_file: Path, identity: dict, hub: str, token: str) -> None:
+    """原位轮换：pending 两阶段协议 + 独占锁，任何失败均可恢复且不输出值。"""
+    with _RegistryLock(registry_file):
+        if _pending_path(registry_file).is_file():
+            outcome = _recover_pending(registry_file, identity, hub, token)
+            if outcome == "promoted":
+                print("注意：检测到已生效但未落盘的轮换，已自动完成本地收敛", file=sys.stderr)
+            elif outcome == "rolled_back":
+                print("注意：检测到未生效的轮换残留，已自动回滚", file=sys.stderr)
+            # 恢复后重载 registry：promote 后旧值已失效，必须用新值继续
+            identity = json.loads(registry_file.read_text(encoding="utf-8"))
+
         new_value = secrets.token_urlsafe(32)
-    pending_identity = dict(identity)
-    pending_identity["registration_token"] = new_value
+        if new_value == identity["registration_token"]:
+            new_value = secrets.token_urlsafe(32)
+        pending_identity = dict(identity)
+        pending_identity["registration_token"] = new_value
 
-    # 阶段 1：先落本地 pending（0600+fsync），Hub 失败时本地可安全恢复
-    _atomic_write_identity(_pending_path(registry_file), pending_identity)
-    try:
-        mcp_tool(hub, token, "rotate_agent_capability", {
-            "project_key": identity["project_key"],
-            "agent_name": identity["name"],
-            "old_registration_token": identity["registration_token"],
-            "new_registration_token": new_value,
-        })
-    except SystemExit:
+        # 阶段 1：先落本地 pending（0600+fsync），结果不确定时本地可安全恢复
+        _atomic_write_identity(_pending_path(registry_file), pending_identity)
         try:
-            _pending_path(registry_file).unlink()
-        except OSError:
-            pass
-        raise SystemExit(
-            "轮换失败：Hub 未接受新 capability，旧值仍然有效；"
-            "本地 registry 已保留（详情脱敏，capability 值不会输出）"
-        )
+            result = mcp_tool(hub, token, "rotate_agent_capability", {
+                "project_key": identity["project_key"],
+                "agent_name": identity["name"],
+                "old_registration_token": identity["registration_token"],
+                "new_registration_token": new_value,
+            })
+        except SystemExit:
+            # 可能 Hub 已提交但响应超时/解析失败：结果不确定，先探测再定论
+            _settle_uncertain(registry_file, identity, hub, token)
+            return
+        if not (isinstance(result, dict) and result.get("status") == "rotated"):
+            _settle_uncertain(registry_file, identity, hub, token)
+            return
 
-    # 阶段 2：Hub 已生效，正式落盘 registry；rename 失败保留 pending 供 --recover
-    try:
-        _atomic_write_identity(registry_file, pending_identity)
-    except OSError:
-        raise SystemExit(
-            "轮换已在 Hub 生效，但本地正式写入失败；"
-            "pending 已保留，请运行 --recover 收敛（capability 值不会输出）"
-        )
-    try:
-        _pending_path(registry_file).unlink()
-    except OSError:
-        pass
-    print(f"轮换成功: {identity['name']}  @ {identity['project_key']}（旧 capability 已失效）")
-    print(f"registry: {registry_file}")
+        # 阶段 2：Hub 已生效，正式落盘 registry；rename 失败保留 pending 供 --recover
+        try:
+            _atomic_write_identity(registry_file, pending_identity)
+        except OSError:
+            raise SystemExit(
+                "轮换已在 Hub 生效，但本地正式写入失败；"
+                "pending 已保留，请运行 --recover 收敛（capability 值不会输出）"
+            )
+        _unlink_pending(_pending_path(registry_file))
+        print(f"轮换成功: {identity['name']}  @ {identity['project_key']}（旧 capability 已失效）")
+        print(f"registry: {registry_file}")
 
 
 def main() -> None:
@@ -171,8 +288,9 @@ def main() -> None:
     parser.add_argument("--name", default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--show", action="store_true")
-    parser.add_argument("--rotate", action="store_true", help="原位安全轮换本地 registry 的 registration capability")
-    parser.add_argument("--recover", action="store_true", help="收敛未完成的轮换（探测新旧值并 promote/rollback）")
+    rotate_group = parser.add_mutually_exclusive_group()
+    rotate_group.add_argument("--rotate", action="store_true", help="原位安全轮换本地 registry 的 registration capability")
+    rotate_group.add_argument("--recover", action="store_true", help="收敛未完成的轮换（探测新旧值并 promote/rollback）")
     args = parser.parse_args()
 
     agent = _validate_component(args.agent, "agent")
@@ -206,7 +324,8 @@ def main() -> None:
         if args.rotate:
             _rotate_capability(registry_file, identity, hub, token)
             return
-        outcome = _recover_pending(registry_file, identity, hub, token)
+        with _RegistryLock(registry_file):
+            outcome = _recover_pending(registry_file, identity, hub, token)
         if outcome == "no_pending":
             print("无待恢复的 pending，无需操作")
         else:
