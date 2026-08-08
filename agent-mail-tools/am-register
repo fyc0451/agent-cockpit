@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import sys
 import tempfile
 from pathlib import Path
@@ -50,6 +51,115 @@ def _atomic_write_identity(path: Path, identity: dict) -> None:
         raise
 
 
+def _pending_path(registry_file: Path) -> Path:
+    return registry_file.with_name(registry_file.name + ".pending")
+
+
+def _capability_valid(hub: str, token: str, project_key: str, name: str, value: str) -> bool:
+    """探测某 capability 当前是否有效；不输出值。"""
+    try:
+        profile = mcp_tool(hub, token, "whois", {
+            "project_key": project_key,
+            "agent_name": name,
+            "registration_token": value,
+            "include_recent_commits": False,
+        })
+    except SystemExit:
+        return False
+    return isinstance(profile, dict) and profile.get("name") == name
+
+
+def _recover_pending(
+    registry_file: Path, identity: dict, hub: str, token: str
+) -> str:
+    """收敛未完成轮换：探测新旧哪个有效并安全 promote/rollback。幂等。"""
+    pending = _pending_path(registry_file)
+    if not pending.is_file():
+        return "no_pending"
+    try:
+        pending_identity = json.loads(pending.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(
+            f"pending 文件损坏不可读: {pending}（capability 值不会输出；请人工处理）"
+        ) from exc
+    if not isinstance(pending_identity, dict) or not pending_identity.get("registration_token"):
+        raise SystemExit(
+            f"pending 文件格式无效: {pending}（capability 值不会输出；请人工处理）"
+        )
+    old_ok = _capability_valid(
+        hub, token, identity["project_key"], identity["name"],
+        identity["registration_token"],
+    )
+    new_ok = _capability_valid(
+        hub, token, pending_identity["project_key"], pending_identity["name"],
+        pending_identity["registration_token"],
+    )
+    if new_ok:
+        # Hub 已轮换（或新值已生效）：promote。old 同时有效也不危险——
+        # 新值对同一身份可用，正式 registry 指向新值即可收敛。
+        _atomic_write_identity(registry_file, pending_identity)
+        pending.unlink()
+        return "promoted"
+    if old_ok:
+        # Hub 从未轮换：回滚，丢弃 pending
+        pending.unlink()
+        return "rolled_back"
+    raise SystemExit(
+        "恢复失败：新旧 capability 均无效或 Hub 不可达；"
+        "registry 与 pending 均保留（capability 值不会输出）"
+    )
+
+
+def _rotate_capability(registry_file: Path, identity: dict, hub: str, token: str) -> None:
+    """原位轮换：pending 两阶段协议，任何失败均可恢复且不输出值。"""
+    if _pending_path(registry_file).is_file():
+        outcome = _recover_pending(registry_file, identity, hub, token)
+        if outcome == "promoted":
+            print("注意：检测到已生效但未落盘的轮换，已自动完成本地收敛", file=sys.stderr)
+        elif outcome == "rolled_back":
+            print("注意：检测到未生效的轮换残留，已自动回滚", file=sys.stderr)
+
+    new_value = secrets.token_urlsafe(32)
+    if new_value == identity["registration_token"]:
+        new_value = secrets.token_urlsafe(32)
+    pending_identity = dict(identity)
+    pending_identity["registration_token"] = new_value
+
+    # 阶段 1：先落本地 pending（0600+fsync），Hub 失败时本地可安全恢复
+    _atomic_write_identity(_pending_path(registry_file), pending_identity)
+    try:
+        mcp_tool(hub, token, "rotate_agent_capability", {
+            "project_key": identity["project_key"],
+            "agent_name": identity["name"],
+            "old_registration_token": identity["registration_token"],
+            "new_registration_token": new_value,
+        })
+    except SystemExit:
+        try:
+            _pending_path(registry_file).unlink()
+        except OSError:
+            pass
+        raise SystemExit(
+            "轮换失败：Hub 未接受新 capability，旧值仍然有效；"
+            "本地 registry 已保留（详情脱敏，capability 值不会输出）"
+        )
+
+    # 阶段 2：Hub 已生效，正式落盘 registry；rename 失败保留 pending 供 --recover
+    try:
+        _atomic_write_identity(registry_file, pending_identity)
+    except OSError:
+        raise SystemExit(
+            "轮换已在 Hub 生效，但本地正式写入失败；"
+            "pending 已保留，请运行 --recover 收敛（capability 值不会输出）"
+        )
+    try:
+        _pending_path(registry_file).unlink()
+    except OSError:
+        pass
+    print(f"轮换成功: {identity['name']}  @ {identity['project_key']}（旧 capability 已失效）")
+    print(f"registry: {registry_file}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent", required=True)
@@ -61,12 +171,17 @@ def main() -> None:
     parser.add_argument("--name", default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--rotate", action="store_true", help="原位安全轮换本地 registry 的 registration capability")
+    parser.add_argument("--recover", action="store_true", help="收敛未完成的轮换（探测新旧值并 promote/rollback）")
     args = parser.parse_args()
 
     agent = _validate_component(args.agent, "agent")
     instance = _validate_component(args.instance, "instance")
     project_key = str(Path(args.project).resolve())
     registry_file = REGISTRY_DIR / slugify(project_key) / f"{agent}--{instance}.json"
+
+    if (args.rotate or args.recover) and (args.force or args.show):
+        raise SystemExit("--rotate/--recover 不能与 --force/--show 混用")
 
     identity = {}
     if registry_file.is_file():
@@ -81,6 +196,25 @@ def main() -> None:
             return
     elif args.show:
         raise SystemExit(f"尚未注册: {agent}--{instance} @ {project_key}")
+
+    if args.rotate or args.recover:
+        if not registry_file.is_file():
+            raise SystemExit(f"尚未注册，无法轮换: {registry_file}")
+        hub, token = load_client_config()
+        if not token:
+            raise SystemExit("缺少 token，请配置 ~/.agent-mail/client.env（hub=/token=）")
+        if args.rotate:
+            _rotate_capability(registry_file, identity, hub, token)
+            return
+        outcome = _recover_pending(registry_file, identity, hub, token)
+        if outcome == "no_pending":
+            print("无待恢复的 pending，无需操作")
+        else:
+            print(
+                f"恢复完成: {identity['name']}  @ {identity['project_key']}"
+                f"（{'promote：新值已生效' if outcome == 'promoted' else 'rollback：新值未生效'}）"
+            )
+        return
 
     hub, token = load_client_config()
     if not token:
