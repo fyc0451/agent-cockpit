@@ -1599,7 +1599,7 @@ def test_team_collab_send_failure_keeps_draft_with_inline_error():
     assert "toast('团队消息发送失败" not in send
 
 
-def test_terminal_ws_writes_data_directly_without_color_rewrite():
+def test_terminal_ws_queues_data_without_color_rewrite():
     # 颜色由 xterm 渲染层原生处理(options.theme + WebGL),不再逐 chunk JS 改写。
     # 这与 Orca 的做法一致;JS ANSI 重写是 TUI 高速输出时主线程卡顿的根因。
     js = _inline_js()
@@ -1609,8 +1609,8 @@ def test_terminal_ws_writes_data_directly_without_color_rewrite():
     renderer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
         "function loadOlderTermHistory", 1
     )[0]
-    assert "inst.xterm.write(visible)" in renderer
-    assert "inst.xterm.write(data)" in renderer
+    assert "queueTermRender(id,visible)" in renderer
+    assert "queueTermRender(id,data)" in renderer
     # onmessage 不再有主题分支/颜色重写调用(注释提及已移除不算)
     code_only = "\n".join(
         line for line in onmessage.splitlines()
@@ -1634,7 +1634,7 @@ def test_terminal_replay_is_bounded_and_older_history_loads_on_scroll():
         "function loadOlderTermHistory", 1
     )[0]
     assert "data.byteLength-TERM_REPLAY_INITIAL" in writer
-    assert "inst.xterm.write(visible)" in writer
+    assert "queueTermRender(id,visible)" in writer
     pager = js.split("function loadOlderTermHistory(id){", 1)[1].split(
         "function enableTermHistoryPaging", 1
     )[0]
@@ -1648,20 +1648,48 @@ def test_terminal_replay_is_bounded_and_older_history_loads_on_scroll():
     assert "loadOlderTermHistory(id)" in wheel
 
 
-def test_terminal_output_uses_xterm_native_batching_without_manual_micro_chunks():
+def test_terminal_output_yields_between_bounded_chunks():
     js = _inline_js()
-    assert "TERM_RENDER_CHUNK" not in js
-    assert "function pumpTermRender" not in js
-    assert "function queueTermRender" not in js
+    assert "TERM_RENDER_CHUNK=16*1024" in js
+    pump = js.split("function pumpTermRender(id){", 1)[1].split(
+        "function queueTermRender", 1
+    )[0]
+    assert "item.offset+TERM_RENDER_CHUNK" in pump
+    assert "setTimeout(()=>pumpTermRender(id),0)" in pump
     writer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
         "function loadOlderTermHistory", 1
     )[0]
-    assert "inst.xterm.write(data)" in writer
+    assert "queueTermRender(id,visible)" in writer
+    assert "queueTermRender(id,data)" in writer
     mount = js.split("function termMount(id){", 1)[1].split(
         "// ============ 会话管理", 1
     )[0]
-    assert "renderQueue" not in mount
-    assert "renderGeneration" not in mount
+    assert "renderQueue:[]" in mount
+    assert "renderGeneration:0" in mount
+
+
+def test_interaction_diagnostics_capture_latency_without_input_payloads():
+    js = _inline_js()
+    diag = js.split("const INTERACTION_DIAG=", 1)[1].split(
+        "// 文本与双引号属性上下文都安全", 1
+    )[0]
+    assert "pointerdown" in diag
+    assert "keydown" in diag
+    assert "wheel" in diag
+    assert "PerformanceObserver" in diag
+    assert "event_loop_lag" in diag
+    assert "interaction_diag=" in diag
+    assert "e.key" not in diag
+    assert "clientX" not in diag
+    assert "clientY" not in diag
+
+    mount = js.split("function termMount(id){", 1)[1].split(
+        "// ============ 会话管理", 1
+    )[0]
+    assert "term_webgl_load" in mount
+    assert "term_ondata" in mount
+    assert "term_write_parsed" in mount
+    assert "chars:d.length" in mount
 
 
 def test_theme_switch_updates_visible_terminal_without_contrast_rebuild_or_resize():
