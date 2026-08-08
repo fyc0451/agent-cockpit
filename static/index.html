@@ -3179,6 +3179,9 @@ async function termClose(){
 }
 // 多终端保活:每个终端一个独立容器元素,切换时隐藏/显示(不销毁)
 let TERM_INSTANCES={}; // {term_id: {xterm, fit, ws, el, reconnectDelay, reconnectTimer, closing}}
+// 终端主题缓存:setTheme 与首屏初始化时更新,避免 onmessage 每个 WS chunk 都
+// classList.contains('light') 查 DOM(高速刷屏时是主线程同步开销)。
+let TERM_LIGHT=document.documentElement.classList.contains('light');
 function safeFitOf(fit,xterm){
   const view=document.getElementById('view-term');
   const el=xterm?.element;
@@ -3299,8 +3302,7 @@ function openTermWS(id,xterm,replay){
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);startTermZoomLease(id);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
   ws.onmessage=ev=>{try{
-    const light=document.documentElement.classList.contains('light');
-    if(light){
+    if(TERM_LIGHT){
       const st=xterm._darkBoost;
       if(st&&st.carry){xterm.write(st.carry);st.carry=''}
       // 浅色模式:重写 TUI 自带颜色(opencode 等显式刷深色底,主题管不到)
@@ -4122,9 +4124,14 @@ function lightTermAdapt(xterm,data,binary){
   let st=xterm._lightAdapt;
   if(!st)st=xterm._lightAdapt={carry:'',dec:new TextDecoder('utf-8')};
   let s=binary?st.dec.decode(data,{stream:true}):data;
+  // 快路径:无跨包残留且本 chunk 不含任何转义序列(纯文本输出)→ 原样返回,
+  // 跳过字符串拼接和两轮正则扫描。高速刷屏(编译/ls/日志)时绝大多数 chunk 走这条路。
+  if(!st.carry&&s.indexOf('\x1b')<0)return s;
   s=st.carry+s;
   const split=_escTailSplit(s);s=split[0];st.carry=split[1];
   if(!s)return'';
+  // 含转义但无需要改写的颜色码(只有重置/加粗等)→ 也跳过正则,与 darkTermBoost 对称。
+  if(!s.includes('38;')&&!s.includes('48;')&&!s.includes('\x1b[4')&&!s.includes('\x1b[10')&&!s.includes('\x1b]1'))return s;
   s=s.replace(/\x1b\[([0-9;]*)m/g,_lightRewriteSgr);
   // OSC 10/11 设置默认前景/背景:浅色模式下丢弃(保留查询和重置),防止 TUI 把默认底刷黑
   s=s.replace(/\x1b\]1[01];[^?\x07\x1b][^\x07\x1b]*(\x07|\x1b\\)/g,'');
@@ -4202,6 +4209,7 @@ function _repaintTermForTheme(inst){
 }
 function setTheme(mode,save=true){
   const light=mode==='light';
+  TERM_LIGHT=light;
   document.documentElement.classList.toggle('light',light);
   const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
   const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
