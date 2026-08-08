@@ -1604,7 +1604,13 @@ def test_terminal_ws_writes_data_directly_without_color_rewrite():
     # 这与 Orca 的做法一致;JS ANSI 重写是 TUI 高速输出时主线程卡顿的根因。
     js = _inline_js()
     onmessage = js.split("ws.onmessage=ev=>{try{", 1)[1].split("ws.onclose", 1)[0]
-    assert "xterm.write(typeof ev.data" in onmessage
+    assert "writeTermOutput(id,data,replayFrame)" in onmessage
+    assert "TERM_TEXT_ENCODER.encode(ev.data)" in onmessage
+    renderer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
+        "function loadOlderTermHistory", 1
+    )[0]
+    assert "queueTermRender(id,visible)" in renderer
+    assert "queueTermRender(id,data)" in renderer
     # onmessage 不再有主题分支/颜色重写调用(注释提及已移除不算)
     code_only = "\n".join(
         line for line in onmessage.splitlines()
@@ -1618,6 +1624,42 @@ def test_terminal_ws_writes_data_directly_without_color_rewrite():
     assert "function darkTermBoost" not in js
     assert "function _rgbToHsl" not in js
     assert "ANSI16_RGB" not in js
+
+
+def test_terminal_replay_is_bounded_and_older_history_loads_on_scroll():
+    js = _inline_js()
+    assert "TERM_REPLAY_INITIAL=64*1024" in js
+    assert "TERM_RENDER_CHUNK=64*1024" in js
+    writer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
+        "function loadOlderTermHistory", 1
+    )[0]
+    assert "data.byteLength-TERM_REPLAY_INITIAL" in writer
+    assert "queueTermRender(id,visible)" in writer
+    pager = js.split("function loadOlderTermHistory(id){", 1)[1].split(
+        "function enableTermHistoryPaging", 1
+    )[0]
+    assert "historyHiddenBytes-TERM_HISTORY_PAGE" in pager
+    assert "buffer?.type!=='normal'" in pager
+    wheel = js.split("function enableTermHistoryPaging(el,id,xterm){", 1)[1].split(
+        "// xterm 原生处理普通 scrollback", 1
+    )[0]
+    assert "e.deltaY>=0" in wheel
+    assert "buffer.viewportY===0" in wheel
+    assert "loadOlderTermHistory(id)" in wheel
+
+
+def test_terminal_output_rendering_yields_between_bounded_chunks():
+    js = _inline_js()
+    pump = js.split("function pumpTermRender(id){", 1)[1].split(
+        "function queueTermRender", 1
+    )[0]
+    assert "item.offset+TERM_RENDER_CHUNK" in pump
+    assert "setTimeout(()=>pumpTermRender(id),0)" in pump
+    mount = js.split("function termMount(id){", 1)[1].split(
+        "// ============ 会话管理", 1
+    )[0]
+    assert "renderQueue:[]" in mount
+    assert "renderGeneration:0" in mount
 
 
 def test_theme_switch_no_longer_forces_pty_resize():
