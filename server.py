@@ -4364,11 +4364,17 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                     except json.JSONDecodeError:
                         pass
                 try:
-                    # 自动团队消息据此避让尚未提交的 TUI 草稿。
-                    # note_user_input 内部会起 herdr 子进程解析落点 pane,
-                    # 必须放进线程,避免阻塞事件循环和用户输入。
-                    await asyncio.to_thread(terminal.note_user_input, term_id)
+                    # 先写 PTY(低延迟路径):用户输入的回显只取决于数据多快到
+                    # PTY 又被 pump_out 发回来。note_user_input 内部会 fork herdr
+                    # 子进程解析落点 pane(server.py 注释原称约 2ms,实测 fork+exec
+                    # 在 Linux 上 5-15ms、macOS 更慢),把它放到 write 之后且不 await,
+                    # 避免每个按键的回显都等一次 fork——这是终端输入卡顿的主因。
+                    # note_user_input 只产生副作用(记录避让时间戳),返回值不用于
+                    # 决定本次写入,线程安全(_lock 保护内部 dict),可安全发后即忘。
                     await asyncio.to_thread(terminal.write_term, term_id, text)
+                    asyncio.create_task(
+                        asyncio.to_thread(terminal.note_user_input, term_id)
+                    )
                 except (TimeoutError, OSError) as e:
                     logger.warning("terminal input write failed %s: %s", term_id, e)
                     await websocket.send_text(f"\r\n[输入未完整写入: {e}]\r\n")

@@ -138,6 +138,31 @@ def test_user_typing_unknown_pane_defers_conservatively(monkeypatch, tmp_path):
     assert terminal.user_typing_recently("demo", "w1:p1") is True
 
 
+def test_current_pane_ttl_cache_avoids_fork_per_keystroke(monkeypatch):
+    """_current_pane 在 TTL 窗口内复用结果,不每键都 fork herdr。"""
+    monkeypatch.setattr(terminal, "_pane_current_cache", {})
+    calls = {"n": 0}
+    clock = {"t": 1000.0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        class _R:
+            stdout = '{"result": {"pane": {"pane_id": "w1:p1"}}}'
+        return _R()
+
+    monkeypatch.setattr(terminal.subprocess, "run", fake_run)
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: clock["t"])
+
+    assert terminal._current_pane("demo") == "w1:p1"
+    assert terminal._current_pane("demo") == "w1:p1"
+    assert terminal._current_pane("demo") == "w1:p1"
+    assert calls["n"] == 1  # 3 次调用只 fork 1 次
+
+    clock["t"] += terminal._PANE_CURRENT_TTL + 0.01  # 超过 TTL
+    assert terminal._current_pane("demo") == "w1:p1"
+    assert calls["n"] == 2  # 过期后重新 fork
+
+
 def test_create_can_exec_direct_pty_command_without_login_shell():
     code = "import os; print('direct-pty-ok'); print(os.getcwd())"
     term_id = terminal.create_term(
@@ -785,8 +810,13 @@ def test_typing_state_file_self_heals_corrupt_nested_values(monkeypatch, tmp_pat
 
 
 def test_websocket_records_typing_off_event_loop():
-    """WebSocket 主循环必须经 to_thread 调 note_user_input(内部起子进程)。"""
+    """WebSocket 主循环必须经 to_thread 调 note_user_input(内部起子进程)。
+
+    note_user_input 必须在事件循环线程之外执行;但为避免每按键 fork herdr
+    拖慢回显,它现在发后即忘(asyncio.create_task)而非 await 阻塞 write_term。
+    """
     source = (Path(__file__).resolve().parent.parent / "server.py").read_text(
         encoding="utf-8"
     )
-    assert "await asyncio.to_thread(terminal.note_user_input, term_id)" in source
+    assert "asyncio.to_thread(terminal.note_user_input, term_id)" in source
+    assert "terminal.write_term" in source
