@@ -61,15 +61,10 @@ def _lock_path(registry_file: Path) -> Path:
 
 
 def _fsync_dir(path: Path) -> None:
-    """fsync 目录，保证 rename/unlink 落盘；平台不支持时尽力而为。"""
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
+    """fsync 目录；失败向上抛（fail-closed），由调用方中止成功宣告。"""
+    fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
-    except OSError:
-        pass
     finally:
         os.close(fd)
 
@@ -99,10 +94,8 @@ def _atomic_write_identity(path: Path, identity: dict) -> None:
 
 
 def _unlink_pending(pending: Path) -> None:
-    try:
-        pending.unlink()
-    except OSError:
-        pass
+    """删除 pending 并 fsync 目录；失败向上抛（fail-closed）。"""
+    pending.unlink()
     _fsync_dir(pending.parent)
 
 
@@ -195,12 +188,30 @@ def _recover_pending(
     if new_ok:
         # Hub 已轮换（或新值已生效）：promote。old 同时有效也不危险——
         # 新值对同一身份可用，正式 registry 指向新值即可收敛。
-        _atomic_write_identity(registry_file, pending_identity)
-        _unlink_pending(pending)
+        try:
+            _atomic_write_identity(registry_file, pending_identity)
+        except OSError as exc:
+            raise SystemExit(
+                "恢复失败：promote 落盘失败，pending 已保留"
+                "（capability 值不会输出）"
+            ) from exc
+        try:
+            _unlink_pending(pending)
+        except OSError as exc:
+            raise SystemExit(
+                "恢复失败：promote 已生效但收敛失败，registry 已更新；"
+                "pending 保留，重试 --recover 可幂等收敛（capability 值不会输出）"
+            ) from exc
         return "promoted"
     if old_ok:
         # Hub 从未轮换：回滚，丢弃 pending
-        _unlink_pending(pending)
+        try:
+            _unlink_pending(pending)
+        except OSError as exc:
+            raise SystemExit(
+                "恢复失败：rollback 收敛失败，registry 未变，pending 保留"
+                "（capability 值不会输出）"
+            ) from exc
         return "rolled_back"
     raise SystemExit(
         "恢复失败：新旧 capability 均无效或 Hub 不可达；"
@@ -244,7 +255,13 @@ def _rotate_capability(registry_file: Path, identity: dict, hub: str, token: str
         pending_identity["registration_token"] = new_value
 
         # 阶段 1：先落本地 pending（0600+fsync），结果不确定时本地可安全恢复
-        _atomic_write_identity(_pending_path(registry_file), pending_identity)
+        try:
+            _atomic_write_identity(_pending_path(registry_file), pending_identity)
+        except OSError as exc:
+            raise SystemExit(
+                "轮换失败：本地 pending 写入失败，未触碰 Hub"
+                "（capability 值不会输出）"
+            ) from exc
         try:
             result = mcp_tool(hub, token, "rotate_agent_capability", {
                 "project_key": identity["project_key"],
@@ -260,7 +277,7 @@ def _rotate_capability(registry_file: Path, identity: dict, hub: str, token: str
             _settle_uncertain(registry_file, identity, hub, token)
             return
 
-        # 阶段 2：Hub 已生效，正式落盘 registry；rename 失败保留 pending 供 --recover
+        # 阶段 2：Hub 已生效，正式落盘 registry；rename/fsync 失败保留 pending 供 --recover
         try:
             _atomic_write_identity(registry_file, pending_identity)
         except OSError:
@@ -268,7 +285,13 @@ def _rotate_capability(registry_file: Path, identity: dict, hub: str, token: str
                 "轮换已在 Hub 生效，但本地正式写入失败；"
                 "pending 已保留，请运行 --recover 收敛（capability 值不会输出）"
             )
-        _unlink_pending(_pending_path(registry_file))
+        try:
+            _unlink_pending(_pending_path(registry_file))
+        except OSError:
+            raise SystemExit(
+                "轮换已在 Hub 生效并落盘，但本地收敛失败；"
+                "pending 已保留，请运行 --recover 收敛（capability 值不会输出）"
+            )
         print(f"轮换成功: {identity['name']}  @ {identity['project_key']}（旧 capability 已失效）")
         print(f"registry: {registry_file}")
 

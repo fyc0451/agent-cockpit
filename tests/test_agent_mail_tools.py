@@ -1943,3 +1943,108 @@ def test_secure_read_rejects_foreign_owner_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
     with pytest.raises(SystemExit, match="属主"):
         module.main()
+
+
+def test_rotate_pending_write_fsync_failure_fails_closed(tmp_path, monkeypatch, capsys):
+    """pending 写入目录 fsync 失败：fail-closed，不触碰 Hub、不宣告成功。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    old_token = "o" * 43
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_a, **_k: {})
+    monkeypatch.setattr(module, "mcp_tool", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("不应调用 Hub")))
+
+    def boom(_p):
+        raise OSError("dir fsync failed")
+
+    monkeypatch.setattr(module, "_fsync_dir", boom)
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate"))
+
+    with pytest.raises(SystemExit, match="pending 写入失败"):
+        module.main()
+
+    assert json.loads(registry_file.read_text())["registration_token"] == old_token
+    # replace 先于目录 fsync：pending 可能已落但持久性未知；关键是未触碰 Hub 且未宣告成功
+    combined = capsys.readouterr().out + capsys.readouterr().err
+    assert old_token not in combined
+    assert "轮换成功" not in combined
+
+
+def test_rotate_unlink_fsync_failure_fails_closed(tmp_path, monkeypatch, capsys):
+    """成功路径 unlink 目录 fsync 失败：不得宣告成功，提示 --recover。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    old_token = "o" * 43
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_a, **_k: {})
+    captured = {}
+
+    def tool(_hub, _token, name, args):
+        if name == "rotate_agent_capability":
+            captured["new"] = args["new_registration_token"]
+            return {"status": "rotated"}
+        raise AssertionError(name)
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    real_fsync = module._fsync_dir
+
+    def flaky(p):
+        flaky.n += 1
+        if flaky.n >= 3:
+            raise OSError("dir fsync failed")
+        return real_fsync(p)
+
+    flaky.n = 0
+    monkeypatch.setattr(module, "_fsync_dir", flaky)
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--rotate"))
+
+    with pytest.raises(SystemExit, match="--recover"):
+        module.main()
+
+    new_token = captured["new"]
+    assert json.loads(registry_file.read_text())["registration_token"] == new_token
+    combined = capsys.readouterr().out + capsys.readouterr().err
+    assert old_token not in combined and new_token not in combined
+    assert "轮换成功" not in combined
+
+
+def test_recover_promote_unlink_fsync_failure_fails_closed(tmp_path, monkeypatch, capsys):
+    """recover promote 的 unlink 目录 fsync 失败：fail-closed，registry 已更新。"""
+    module = _load_am_register()
+    project, registry_file = _register_fixture(tmp_path, module)
+    module._project = project
+    old_token = "o" * 43
+    new_token = "n" * 43
+    pending_identity = json.loads(registry_file.read_text())
+    pending_identity["registration_token"] = new_token
+    module._atomic_write_identity(module._pending_path(registry_file), pending_identity)
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "token"))
+
+    def tool(_hub, _token, name, args):
+        if name == "whois":
+            if args["registration_token"] == new_token:
+                return {"name": "demo-main"}
+            raise SystemExit("invalid")
+        raise AssertionError(name)
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    real_fsync = module._fsync_dir
+
+    def flaky(p):
+        flaky.n += 1
+        if flaky.n >= 2:
+            raise OSError("dir fsync failed")
+        return real_fsync(p)
+
+    flaky.n = 0
+    monkeypatch.setattr(module, "_fsync_dir", flaky)
+    monkeypatch.setattr(module.sys, "argv", _argv(module, "--recover"))
+
+    with pytest.raises(SystemExit, match="收敛失败"):
+        module.main()
+
+    assert json.loads(registry_file.read_text())["registration_token"] == new_token
+    combined = capsys.readouterr().out + capsys.readouterr().err
+    assert old_token not in combined and new_token not in combined
