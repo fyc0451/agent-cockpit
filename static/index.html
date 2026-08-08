@@ -4474,6 +4474,7 @@ function setTheme(mode,save=true){
     else inst.pendingTheme=th;
   }
   sendAllTermColorSchemes();
+  try{fetch('/api/theme/herdr',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({mode:light?'light':'dark'})}).catch(()=>{})}catch(e){}
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}

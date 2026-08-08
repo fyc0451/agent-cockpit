@@ -1217,6 +1217,30 @@ def api_upgrade_start(req: UpgradeReq):
 
 # ── 设置路由 ────────────────────────────────────────────────────
 
+# ── 主题同步到 Herdr（Web 主题为单一真相源）────────────────────
+# Web 切主题时把 Herdr 自身 UI 主题写进 config.toml 并热重载；
+# 映射为默认值,后续可做成设置项。不改 auto_switch 等其余键。
+HERDR_THEME_MAP = {"light": "solarized", "dark": "catppuccin"}
+
+
+class ThemeHerdrReq(BaseModel):
+    mode: str
+
+
+@app.post("/api/theme/herdr")
+def api_theme_herdr(req: ThemeHerdrReq):
+    if req.mode not in HERDR_THEME_MAP:
+        raise HTTPException(400, "mode 必须是 light 或 dark")
+    theme_name = HERDR_THEME_MAP[req.mode]
+    try:
+        herdr_client.set_theme_name(theme_name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except OSError as exc:
+        raise HTTPException(500, f"写入 herdr 配置失败: {exc}")
+    return {"ok": True, "theme": theme_name, "reload": herdr_client.reload_config()}
+
+
 @app.get("/api/settings")
 def api_settings_get():
     """读用户配置(附 known agent 类型与语言枚举,供设置页渲染)。"""
