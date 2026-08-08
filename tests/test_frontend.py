@@ -1628,8 +1628,9 @@ def test_terminal_ws_writes_data_directly_without_color_rewrite():
 
 def test_terminal_replay_is_bounded_and_older_history_loads_on_scroll():
     js = _inline_js()
-    assert "TERM_REPLAY_INITIAL=64*1024" in js
-    assert "TERM_RENDER_CHUNK=8*1024" in js
+    assert "TERM_REPLAY_INITIAL=8*1024" in js
+    assert "TERM_HISTORY_PAGE=8*1024" in js
+    assert "TERM_RENDER_CHUNK=1024" in js
     writer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
         "function loadOlderTermHistory", 1
     )[0]

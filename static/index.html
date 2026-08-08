@@ -2648,7 +2648,7 @@ async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',head
 let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_ZOOM={}, TERM_FONT_READY=null;
 let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
 const TERM_SESSION_PREFIX='session:';
-const TERM_REPLAY_INITIAL=64*1024,TERM_HISTORY_PAGE=64*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=8*1024;
+const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=1024;
 const TERM_TEXT_ENCODER=new TextEncoder();
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
