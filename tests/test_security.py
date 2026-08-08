@@ -183,6 +183,82 @@ def test_websocket_rejects_missing_auth(monkeypatch):
             pass
 
 
+def test_herdr_live_websocket_selects_pane_sends_input_and_loads_history(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.herdr_client, "session_socket_path", lambda session: "/tmp/herdr.sock"
+    )
+    snapshot = {
+        "focused_pane_id": "w1:p1",
+        "panes": [
+            {"pane_id": "w1:p1", "agent": "codex", "agent_status": "working", "revision": 3},
+            {"pane_id": "w1:p2", "agent": "opencode", "agent_status": "idle", "revision": 7},
+        ],
+    }
+    monkeypatch.setattr(
+        server.herdr_client, "session_snapshot_live", lambda socket_path: snapshot
+    )
+    reads = []
+
+    def fake_read(socket_path, pane_id, *, source="visible", lines=None):
+        reads.append((pane_id, source, lines))
+        return {
+            "pane_id": pane_id,
+            "revision": 3 if pane_id == "w1:p1" else 7,
+            "text": "history" if source == "recent" else f"screen:{pane_id}",
+        }
+
+    sent = threading.Event()
+    inputs = []
+
+    def fake_send(socket_path, pane_id, text):
+        inputs.append((pane_id, text))
+        sent.set()
+
+    monkeypatch.setattr(server.herdr_client, "pane_read_live", fake_read)
+    monkeypatch.setattr(server.herdr_client, "pane_send_input_live", fake_send)
+    client = TestClient(server.app)
+    client.post("/api/auth/login", json={"token": "secret"})
+
+    with client.websocket_connect(
+        "/api/herdr/live/demo?rows=24", headers={"origin": "http://testserver"}
+    ) as websocket:
+        state = websocket.receive_json()
+        screen = websocket.receive_json()
+        assert state["type"] == "state"
+        assert state["selected"] == "w1:p1"
+        assert screen == {
+            "type": "screen", "pane_id": "w1:p1", "revision": 3,
+            "text": "screen:w1:p1",
+        }
+
+        websocket.send_json({"type": "select", "pane_id": "w1:p2"})
+        assert websocket.receive_json()["selected"] == "w1:p2"
+        assert websocket.receive_json()["pane_id"] == "w1:p2"
+        websocket.send_json({"type": "input", "data": "\x03"})
+        assert sent.wait(1)
+        websocket.send_json({"type": "history", "lines": 200})
+        history = websocket.receive_json()
+        assert history["type"] == "history"
+        assert history["text"] == "history"
+
+    assert inputs == [("w1:p2", "\x03")]
+    assert ("w1:p1", "visible", 24) in reads
+    assert ("w1:p2", "recent", 200) in reads
+
+
+def test_herdr_live_websocket_rejects_cross_origin(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    client.post("/api/auth/login", json={"token": "secret"})
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/api/herdr/live/demo", headers={"origin": "https://evil.example"}
+        ):
+            pass
+
+
 def test_websocket_marks_missing_terminal_as_non_reconnectable(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server.terminal, "list_terms", lambda: [])

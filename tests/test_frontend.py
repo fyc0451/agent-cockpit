@@ -141,7 +141,8 @@ def test_terminal_selector_uses_herdr_session_name():
     assert "function renderTermOptions()" in js
     assert "function termLabel(id)" in js
     assert "label='+encodeURIComponent(session)" in js
-    assert "TERM_LABELS[r.id]=r.label||session" in js
+    assert "TERM_LABELS[id]=session+' · pane'" in js
+    assert "TERM_LABELS[r.id]=session+' · 完整接管'" in js
     assert "TERM_LABELS[r.id]=r.label||''" in js
 
 
@@ -182,27 +183,30 @@ def test_terminal_page_only_catalogs_live_terms_until_explicit_open():
     assert "restoreAllHerdrSessions" not in js
 
 
-def test_herdr_terminal_attach_atomically_replaces_restored_pty_on_server():
+def test_herdr_terminal_defaults_to_live_pane_and_keeps_explicit_takeover():
     js = _inline_js()
     attach = js.split("async function doAttachHerdr(session){", 1)[1].split(
-        "// ============ herdr", 1
+        "async function doTakeoverHerdr", 1
+    )[0]
+    takeover = js.split("async function doTakeoverHerdr(session){", 1)[1].split(
+        "function termTakeoverCurrent", 1
     )[0]
     websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
         "function showTermInstance", 1
     )[0]
 
     assert 'onclick="termAttachHerdr()"' in HTML
+    assert 'onclick="termTakeoverCurrent()"' in HTML
     assert "data-action=\"attach\"" in js
     assert "else if(a==='attach')doAttachHerdr(s)" in js
-    # 跨浏览器不能各自按缓存删除旧 ID 再创建；服务端必须串行替换同 label PTY。
-    assert "replace_existing=true" in attach
-    assert "await api('/api/term/'+id,{method:'DELETE'})" not in attach
-    assert "TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id])" in attach
-    assert "TERMS.filter(id=>TERM_SESSIONS[id]===session)" in attach
-    # 新终端挂载完成后再刷新 selector，不能又显示成待打开的 session。
-    created = attach.split("const r=await api('/api/term?label='", 1)[1]
-    assert created.index("termMount(r.id)") < created.index("renderTermOptions()")
-    # WebSocket 必须先设置主题和尺寸，再执行排队的 herdr attach 命令。
+    assert "TERM_LIVE_PREFIX+session" in attach
+    assert "TERM_LIVE_CONFIG[id]={session}" in attach
+    assert "/api/term?label=" not in attach
+    assert "herdr --session" not in attach
+    assert "/api/herdr/live/" in js
+    # 原生 TUI 仍可显式接管，且保留启动时主题/尺寸/输入顺序。
+    assert "replace_existing=true" in takeover
+    assert "herdr --session '+session+'\\r'" in takeover
     assert websocket.index("sendTermColorScheme(id,ws,!replay)") < websocket.index(
         "type:'resize'"
     )
@@ -1654,7 +1658,7 @@ def test_terminal_output_yields_between_bounded_chunks():
     pump = js.split("function pumpTermRender(id){", 1)[1].split(
         "function queueTermRender", 1
     )[0]
-    assert "item.offset+TERM_RENDER_CHUNK" in pump
+    assert "item.offset+(item.chunk||TERM_RENDER_CHUNK)" in pump
     assert "setTimeout(()=>pumpTermRender(id),0)" in pump
     writer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
         "function loadOlderTermHistory", 1
@@ -1668,28 +1672,23 @@ def test_terminal_output_yields_between_bounded_chunks():
     assert "renderGeneration:0" in mount
 
 
-def test_interaction_diagnostics_capture_latency_without_input_payloads():
+def test_herdr_live_terminal_coalesces_snapshots_and_pages_history_on_scroll():
     js = _inline_js()
-    diag = js.split("const INTERACTION_DIAG=", 1)[1].split(
-        "// 文本与双引号属性上下文都安全", 1
+    assert ".term-pane-bar{display:flex;flex:none" in HTML
+    assert "overflow-x:auto" in HTML
+    assert "grid" not in HTML.split(".term-pane-bar{", 1)[1].split("}", 1)[0]
+    live = js.split("function renderHerdrScreen(id,message){", 1)[1].split(
+        "function renderHerdrHistory", 1
     )[0]
-    assert "pointerdown" in diag
-    assert "keydown" in diag
-    assert "wheel" in diag
-    assert "PerformanceObserver" in diag
-    assert "event_loop_lag" in diag
-    assert "interaction_diag=" in diag
-    assert "e.key" not in diag
-    assert "clientX" not in diag
-    assert "clientY" not in diag
-
-    mount = js.split("function termMount(id){", 1)[1].split(
-        "// ============ 会话管理", 1
+    assert "if(inst.herdrScreenRendering){inst.herdrPending=message;return}" in live
+    assert "prev[i]!==next[i]" in live
+    assert "TERM_LIVE_RENDER_CHUNK" in live
+    assert "xterm.reset" not in live.split("}else{", 1)[1]
+    wheel = js.split("function enableTermHistoryPaging(el,id,xterm){", 1)[1].split(
+        "// xterm 原生处理普通 scrollback", 1
     )[0]
-    assert "term_webgl_load" in mount
-    assert "term_ondata" in mount
-    assert "term_write_parsed" in mount
-    assert "chars:d.length" in mount
+    assert "type:'history'" in wheel
+    assert "inst?.liveSession" in wheel
 
 
 def test_theme_switch_updates_visible_terminal_without_contrast_rebuild_or_resize():

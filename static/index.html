@@ -329,6 +329,13 @@ header .spacer{flex:1}
 .term-toolbar .tb-toggle{margin-left:auto;padding:3px 8px;color:var(--fg3)}
 .term-toolbar.collapsed{padding:2px 8px;gap:4px}
 .term-toolbar.collapsed>*:not(.tb-toggle):not(#termKeyboardToggle){display:none}
+.term-pane-bar{display:flex;flex:none;gap:4px;overflow-x:auto;padding:5px 8px;border-bottom:1px solid var(--bd);background:var(--bg2);scrollbar-width:thin}
+.term-pane-bar[hidden]{display:none}
+.term-pane-bar button{flex:none;max-width:220px;padding:4px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.term-pane-bar button.active{border-color:var(--accent);color:var(--accent);background:var(--bg3)}
+.term-pane-bar .status-dot{display:inline-block;width:7px;height:7px;margin-right:5px;border-radius:50%;background:var(--fg3)}
+.term-pane-bar .working .status-dot{background:var(--accent)}
+.term-pane-bar .blocked .status-dot{background:var(--warn)}
 .term-help{font-size:11px;margin-left:auto}
 .term-keys{display:none;gap:5px;padding:5px 6px;overflow-x:auto;background:var(--bg2);border-bottom:1px solid var(--bd);flex-shrink:0}
 .term-keys button{flex:0 0 auto;min-width:38px;padding:5px 8px;font-family:var(--mono);font-size:12px}
@@ -686,15 +693,17 @@ header .spacer{flex:1}
       <button class="sm" id="termFilesBtn" onclick="termFiles()" title="浏览当前终端目录的文件(PC 在右侧打开面板,手机跳到文件页)">📁 文件</button>
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端"><span data-i18n="term.upload">📎上传</span><input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="联系本地 Agent 或向当前团队群组发送求助" data-i18n="term.collab">@协作</button>
-      <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
+      <button class="sm" onclick="termAttachHerdr()" title="打开低延迟 Herdr pane 终端">🖥 herdr</button>
+      <button class="sm" id="termTakeoverBtn" onclick="termTakeoverCurrent()" title="打开 Herdr 原生多 pane TUI">完整接管</button>
       <button class="sm" onclick="showLayoutModal()" title="一键布局:分屏/拆开/组合 pane" data-i18n="term.layout">🧱 布局</button>
       <button class="sm" onclick="enterHerdrFlow()" title="退出 TUI，返回可滚屏/复制的 pane 流视图" data-i18n="term.back">📜 返回流视图</button>
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
       <button class="sm danger" onclick="termClose()" data-i18n="term.close">✕ 关闭</button>
-      <span class="muted term-help" data-i18n="term.help">herdr 分屏:Ctrl-b 切 pane / d 脱离 / ? 快捷键</span>
+      <span class="muted term-help" data-i18n="term.help">pane 在下方单行标签切换；完整 TUI 请点“完整接管”</span>
       <button class="sm" id="termKeyboardToggle" onclick="toggleTermKeyboard()" title="展开触屏按键" aria-expanded="false">⌨ 按键</button>
       <button class="icon tb-toggle" onclick="toggleTermToolbar()" data-i18n-title="term.tbcollapse" title="收起工具栏">▴</button>
     </div>
+    <div class="term-pane-bar" id="termPaneBar" hidden></div>
     <div class="term-keys" id="termKeys" aria-label="手机电脑键盘">
       <button onclick="termKey('ArrowUp')" title="方向键上">↑</button>
       <button onclick="termKey('ArrowDown')" title="方向键下">↓</button>
@@ -1034,63 +1043,6 @@ let TEAM_POLL_TIMER=null, TEAM_POLL_BACKOFF=30000, TEAM_POLL_FAILURES=0;
 const TEAM_POLL_BACKOFFS=[30000,60000,120000,240000,300000];
 try{TEAM.selected=sessionStorage.getItem('cockpit-team-project')||''}catch(e){}
 const api=async(u,o)=>{const r=await fetch(u,{credentials:'include',...(o||{})});if(r.ok)return r.json();let detail=r.statusText;try{const t=await r.text();try{detail=JSON.parse(t).detail||t}catch(_){if(t)detail=t}}catch(_){}throw detail};
-// 临时交互诊断:仅记录事件类型、排队/处理耗时和字节数，不记录按键内容、坐标或终端输出。
-// 数据分批附在 /api/version 查询参数中，便于直接从服务访问日志定位真机卡死层级。
-const INTERACTION_DIAG={activeUntil:0,events:[],flushTimer:null,lagTimer:null,expectedTick:0,lastWheel:0,batch:0};
-function interactionDiagFlush(){
-  INTERACTION_DIAG.flushTimer=null;
-  if(!INTERACTION_DIAG.events.length)return;
-  const events=INTERACTION_DIAG.events.splice(0,25);
-  const payload=JSON.stringify({v:1,batch:++INTERACTION_DIAG.batch,events});
-  try{fetch('/api/version?interaction_diag='+encodeURIComponent(payload),{credentials:'include',cache:'no-store',keepalive:true}).catch(()=>{})}catch(e){}
-  if(INTERACTION_DIAG.events.length)INTERACTION_DIAG.flushTimer=setTimeout(interactionDiagFlush,250);
-}
-function interactionDiagMark(type,details){
-  const now=performance.now();
-  if(now>INTERACTION_DIAG.activeUntil)return;
-  INTERACTION_DIAG.events.push({type,wall:Date.now(),at:Math.round(now),...(details||{})});
-  if(INTERACTION_DIAG.events.length>100)INTERACTION_DIAG.events.splice(0,INTERACTION_DIAG.events.length-100);
-  if(!INTERACTION_DIAG.flushTimer)INTERACTION_DIAG.flushTimer=setTimeout(interactionDiagFlush,500);
-}
-function interactionDiagActivate(reason,duration=15000){
-  const now=performance.now();
-  INTERACTION_DIAG.activeUntil=Math.max(INTERACTION_DIAG.activeUntil,now+duration);
-  interactionDiagMark('diag_start',{reason});
-  if(INTERACTION_DIAG.lagTimer)return;
-  INTERACTION_DIAG.expectedTick=now+100;
-  INTERACTION_DIAG.lagTimer=setInterval(()=>{
-    const tick=performance.now(),lag=Math.max(0,tick-INTERACTION_DIAG.expectedTick);
-    INTERACTION_DIAG.expectedTick=tick+100;
-    if(lag>=50)interactionDiagMark('event_loop_lag',{ms:Math.round(lag)});
-    if(tick>INTERACTION_DIAG.activeUntil){clearInterval(INTERACTION_DIAG.lagTimer);INTERACTION_DIAG.lagTimer=null}
-  },100);
-}
-function interactionEventAge(e){
-  let ts=Number(e.timeStamp)||performance.now();
-  if(ts>1e12)ts-=performance.timeOrigin;
-  return Math.max(0,Math.round(performance.now()-ts));
-}
-function interactionEventArea(e){
-  const target=e.target;
-  if(target?.closest?.('#themeBtn'))return 'theme';
-  if(document.getElementById('termContainer')?.contains(target))return 'term';
-  return 'page';
-}
-document.addEventListener('pointerdown',e=>interactionDiagMark('dom_pointerdown',{age:interactionEventAge(e),pointer:e.pointerType||'unknown',area:interactionEventArea(e)}),true);
-document.addEventListener('keydown',e=>interactionDiagMark('dom_keydown',{age:interactionEventAge(e),area:interactionEventArea(e)}),true);
-document.addEventListener('wheel',e=>{
-  const now=performance.now();if(now-INTERACTION_DIAG.lastWheel<100)return;INTERACTION_DIAG.lastWheel=now;
-  interactionDiagMark('dom_wheel',{age:interactionEventAge(e),area:interactionEventArea(e)});
-},{capture:true,passive:true});
-document.addEventListener('click',e=>interactionDiagMark('dom_click_capture',{age:interactionEventAge(e),area:interactionEventArea(e)}),true);
-document.addEventListener('click',e=>interactionDiagMark('dom_click_bubble',{age:interactionEventAge(e),area:interactionEventArea(e)}));
-try{
-  new PerformanceObserver(list=>list.getEntries().forEach(entry=>interactionDiagMark('long_task',{start:Math.round(entry.startTime),ms:Math.round(entry.duration)}))).observe({type:'longtask',buffered:true});
-}catch(e){}
-try{
-  new PerformanceObserver(list=>list.getEntries().forEach(entry=>interactionDiagMark('event_timing',{name:entry.name,delay:Math.max(0,Math.round(entry.processingStart-entry.startTime)),ms:Math.round(entry.duration)}))).observe({type:'event',buffered:true,durationThreshold:16});
-}catch(e){}
-interactionDiagActivate('page_load',30000);
 // 文本与双引号属性上下文都安全(转义 & < > " ');不可信值一律 esc + data-* + 事件委托,绝不进内联 handler / JS 字符串
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // session 名白名单(与后端一致),doAttachHerdr 拼进发给 PTY 的 shell 命令前必须先过
@@ -2702,10 +2654,11 @@ async function sendMsg(){
 async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:pid,agent_name:name,message_id:mid})});toast('已读 ✓');loadProjectMsgs()}catch(e){toast(e)}}
 
 // ============ Web 终端(xterm.js + PTY) ============
-let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_ZOOM={}, TERM_FONT_READY=null;
+let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_ZOOM={}, TERM_LIVE_CONFIG={}, TERM_FONT_READY=null;
 let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
 const TERM_SESSION_PREFIX='session:';
-const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=16*1024;
+const TERM_LIVE_PREFIX='herdr:';
+const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=16*1024,TERM_LIVE_RENDER_CHUNK=4*1024;
 const TERM_TEXT_ENCODER=new TextEncoder();
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
@@ -2853,7 +2806,7 @@ async function termTabUploadFiles(input){
 function sendUploadToCurrent(){
   closeCollab();
   if(TERM_WS&&TERM_WS.readyState===1){
-    TERM_WS.send(UPLOADED_REFS.join(''));
+    queueTermInput(TERM_ID,UPLOADED_REFS.join(''));
     toast('已插入当前终端');
     XTERM&&XTERM.focus();
   }else{toast('当前终端未连接')}
@@ -3071,7 +3024,7 @@ async function teamCollabSend(){
   }finally{TEAM_COLLAB_SENDING=false}
 }
 function closeCollab(){document.getElementById('collabModal').classList.remove('show');closeDialog(document.getElementById('collabModal'));TEAM_COLLAB_TARGET=null}
-// 在 web 终端里 attach 到 herdr session(进入多 pane 分屏视图,同时看多个 agent)
+// 默认打开低延迟 pane 终端；完整 Herdr TUI 作为显式接管入口。
 async function termAttachHerdr(){
   // 弹 session 选择器(复用 collabModal)
   if(!BOARD){toast('看板数据未加载');return}
@@ -3081,10 +3034,8 @@ async function termAttachHerdr(){
   const running=Object.keys(sessions);
   if(!running.length){toast('无可用 session');return}
   const m=document.getElementById('collabModal');
-  document.querySelector('#collabModal h3').textContent='attach herdr session';
-  document.querySelector('#collabModal .muted').textContent=isCompactScreen()
-    ?'选一个 session 进入真实 TUI；用屏幕按键操作，Ctrl-B 后点方向键切换 pane'
-    :'选一个 session,在终端里进入 herdr 多 pane 分屏视图(Ctrl-b 切 pane,d 脱离)';
+  document.querySelector('#collabModal h3').textContent='打开 Herdr session';
+  document.querySelector('#collabModal .muted').textContent='默认只同步当前 pane 的可见屏幕；pane 在终端上方单行切换';
   document.getElementById('collabList').innerHTML=running.map(s=>`
     <div data-action="attach" data-session="${esc(s)}" role="button" tabindex="0" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px">
       <span style="font-size:18px">🖥</span>
@@ -3101,25 +3052,49 @@ async function doAttachHerdr(session){
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
-  let createdId=null;
   try{
-    const existing=TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id]);
+    const existing=TERMS.find(id=>TERM_INSTANCES[id]?.liveSession===session);
     if(existing){TERM_ID=existing;renderTermOptions();termSwitch(existing);return}
     await ensureTermFontLoaded();
-    // 服务端串行替换同 session 的全部旧 PTY，避免多个浏览器基于各自缓存
-    // 同时删除旧 ID、再各自创建一份。较新的显式打开始终成为唯一实例。
+    const id=TERM_LIVE_PREFIX+session;
+    if(!TERMS.includes(id))TERMS.push(id);
+    TERM_ID=id;TERM_LABELS[id]=session+' · pane';TERM_SESSIONS[id]=session;TERM_LIVE_CONFIG[id]={session};
+    termMount(id);
+    renderTermOptions();
+    if(!TERM_INSTANCES[id])throw new Error('终端初始化失败');
+  }catch(e){
+    toast('打开 Herdr pane 失败: '+e)
+  }
+}
+
+async function doTakeoverHerdr(session){
+  if(!validSessionName(session)){toast('非法 session 名,拒绝接管');return}
+  await restoreTerms();closeCollab();hfStop();
+  document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
+  document.getElementById('view-term').classList.add('active');
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
+  let createdId=null;
+  try{
+    const existing=TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id]&&!TERM_INSTANCES[id].liveSession);
+    if(existing){TERM_ID=existing;renderTermOptions();termSwitch(existing);return}
+    await ensureTermFontLoaded();
     const r=await api('/api/term?label='+encodeURIComponent(session)+'&replace_existing=true',{method:'POST'});
     createdId=r.id;
-    for(const id of TERMS.filter(id=>TERM_SESSIONS[id]===session))removeTermInstance(id);
-    TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=r.label||session;TERM_SESSIONS[r.id]=session;
-    termMount(r.id);
-    renderTermOptions();
+    for(const id of TERMS.filter(id=>TERM_SESSIONS[id]===session&&id!==TERM_LIVE_PREFIX+session))removeTermInstance(id);
+    TERMS.push(r.id);TERM_ID=r.id;TERM_LABELS[r.id]=session+' · 完整接管';TERM_SESSIONS[r.id]=session;
+    termMount(r.id);renderTermOptions();
     if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败');
-    queueTermInput(r.id,'herdr --session '+session+'\r','已进入 herdr/'+session+' (Ctrl-b 切 pane)');
+    queueTermInput(r.id,'herdr --session '+session+'\r','已完整接管 herdr/'+session);
   }catch(e){
     if(createdId&&TERMS.includes(createdId)){TERM_ID=createdId;await termClose()}
-    toast('创建终端失败: '+e)
+    toast('完整接管失败: '+e)
   }
+}
+
+function termTakeoverCurrent(){
+  const session=(TERM_ID&&TERM_SESSIONS[TERM_ID])||CURRENT_TERM?.session||'';
+  if(!session){termAttachHerdr();return}
+  doTakeoverHerdr(session);
 }
 
 // ============ herdr 流视图(只读 pane 流 + 输入框发指令) ============
@@ -3296,7 +3271,7 @@ function hfExitFullscreen(exitNative=true){
 function hfTakeover(){
   // 切到 xterm TUI attach(桌面端完整交互)
   if(!HF_SESSION){toast('无 session');return}
-  doAttachHerdr(HF_SESSION);
+  doTakeoverHerdr(HF_SESSION);
 }
 async function termInsertCollab(session,paneId,agent){
   closeCollab();
@@ -3310,7 +3285,7 @@ async function termInsertCollab(session,paneId,agent){
     }else{
       ref=`[@${agent} @ ${session}] `;
     }
-    TERM_WS.send(ref);  // 作为击键写入终端
+    queueTermInput(TERM_ID,ref);
     toast('已插入 '+agent+' 协作信息');
     XTERM.focus();
   }catch(e){toast('查询失败: '+e)}
@@ -3318,7 +3293,7 @@ async function termInsertCollab(session,paneId,agent){
 const TERM_ZOOM_HEARTBEAT=10000;
 function termZoomState(id){
   const session=TERM_SESSIONS[id];
-  if(!session)return null;
+  if(!session||TERM_INSTANCES[id]?.liveSession)return null;
   if(!TERM_ZOOM[id])TERM_ZOOM[id]={session,owned:false,timer:null,busy:false,lastReason:null,closing:false,suspended:false};
   return TERM_ZOOM[id];
 }
@@ -3385,6 +3360,7 @@ function removeTermInstance(id){
   TERMS=TERMS.filter(t=>t!==id);
   delete TERM_LABELS[id];
   delete TERM_SESSIONS[id];
+  delete TERM_LIVE_CONFIG[id];
   delete TERM_ZOOM[id];
   if(TERM_ID===id)TERM_ID=TERMS[0]||null;
   renderTermOptions();
@@ -3413,9 +3389,9 @@ function releaseAllTermZoomLeases(){
 }
 async function termClose(){
   if(!TERM_ID)return;
-  const id=TERM_ID;
+  const id=TERM_ID,live=!!TERM_INSTANCES[id]?.liveSession;
   await releaseTermZoomLease(id);
-  try{await api('/api/term/'+id,{method:'DELETE'})}catch(e){}
+  if(!live)try{await api('/api/term/'+id,{method:'DELETE'})}catch(e){}
   removeTermInstance(id);
   if(TERM_ID)showTermInstance(TERM_ID);
   else {XTERM=null;FIT=null;TERM_WS=null;document.getElementById('termContainer').innerHTML='<div class="empty" style="color:#666;padding:20px">点"+ 新终端"开始</div>'}
@@ -3445,15 +3421,13 @@ function flushTermInput(id,ws){
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.ws!==ws||ws?.readyState!==1||!inst.pendingInput)return;
   try{
-    const chars=inst.pendingInput.length,queuedMs=inst.pendingInputSince===null?0:Math.round(performance.now()-inst.pendingInputSince);
-    ws.send(inst.pendingInput);inst.pendingInput='';inst.pendingInputSince=null;
-    interactionDiagMark('term_ws_send',{chars,queuedMs});
+    const payload=inst.liveSession?JSON.stringify({type:'input',data:inst.pendingInput}):inst.pendingInput;
+    ws.send(payload);inst.pendingInput='';
     if(inst.pendingNotice){toast(inst.pendingNotice);inst.pendingNotice=''}
   }catch(e){}
 }
 function queueTermInput(id,data,notice){
   const inst=TERM_INSTANCES[id];if(!inst)return;
-  if(!inst.pendingInput)inst.pendingInputSince=performance.now();
   inst.pendingInput=(inst.pendingInput||'')+data;
   if(notice)inst.pendingNotice=notice;
   flushTermInput(id,inst.ws);
@@ -3484,8 +3458,7 @@ function pumpTermRender(id){
   if(!inst||inst.closing||inst.rendering||!inst.renderQueue.length)return;
   const item=inst.renderQueue[0],generation=inst.renderGeneration;
   inst.rendering=true;
-  const end=Math.min(item.offset+TERM_RENDER_CHUNK,item.data.byteLength);
-  inst.lastWriteQueuedAt=performance.now();inst.lastWriteBytes=end-item.offset;
+  const end=Math.min(item.offset+(item.chunk||TERM_RENDER_CHUNK),item.data.byteLength);
   try{inst.xterm.write(item.data.subarray(item.offset,end),()=>{
     const current=TERM_INSTANCES[id];
     if(!current||current!==inst||current.renderGeneration!==generation)return;
@@ -3496,9 +3469,9 @@ function pumpTermRender(id){
     inst.rendering=false;inst.renderQueue.shift();setTimeout(()=>pumpTermRender(id),0);
   }
 }
-function queueTermRender(id,data,done){
+function queueTermRender(id,data,done,chunk){
   const inst=TERM_INSTANCES[id];if(!inst||!data?.byteLength)return;
-  inst.renderQueue.push({data,offset:0,done});pumpTermRender(id);
+  inst.renderQueue.push({data,offset:0,done,chunk});pumpTermRender(id);
 }
 function writeTermOutput(id,data,replayFrame){
   const inst=TERM_INSTANCES[id];if(!inst||inst.closing)return;
@@ -3506,7 +3479,6 @@ function writeTermOutput(id,data,replayFrame){
   if(replayFrame){
     inst.historyHiddenBytes=Math.max(0,inst.historyBytes-TERM_REPLAY_INITIAL);
     const visible=data.subarray(Math.max(0,data.byteLength-TERM_REPLAY_INITIAL));
-    interactionDiagMark('term_replay_received',{received:data.byteLength,rendered:visible.byteLength});
     queueTermRender(id,visible);
   }else queueTermRender(id,data);
 }
@@ -3534,6 +3506,12 @@ function enableTermHistoryPaging(el,id,xterm){
     if(e.deltaY>=0)return;
     setTimeout(()=>{
       const inst=TERM_INSTANCES[id],buffer=xterm.buffer?.active;
+      if(inst?.liveSession&&buffer?.viewportY===0&&!inst.historyLoading&&inst.ws?.readyState===1){
+        inst.historyLoading=true;
+        const lines=Math.min(1000,Math.max(200,(inst.herdrHistoryLines||0)+200));
+        inst.ws.send(JSON.stringify({type:'history',lines}));
+        return;
+      }
       if(inst&&buffer?.type==='normal'&&buffer.viewportY===0)loadOlderTermHistory(id);
     },0);
   },{passive:true});
@@ -3605,6 +3583,97 @@ function enableTermTouchScroll(el,xterm){
   el.addEventListener('pointercancel',finishPointer,{passive:true});
   el.addEventListener('pointerleave',finishPointer,{passive:true});
 }
+function herdrSnapshotLines(text){
+  const lines=String(text||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
+  if(lines.length&&lines[lines.length-1]==='')lines.pop();
+  return lines;
+}
+function finishHerdrRender(id,inst,lines,paneId){
+  const current=TERM_INSTANCES[id];
+  if(!current||current!==inst)return;
+  current.herdrLines=lines;current.herdrPane=paneId;current.herdrScreenRendering=false;
+  const pending=current.herdrPending;current.herdrPending=null;
+  if(pending)setTimeout(()=>pending.type==='history'?renderHerdrHistory(id,pending):renderHerdrScreen(id,pending),0);
+}
+function renderHerdrScreen(id,message){
+  const inst=TERM_INSTANCES[id];if(!inst||inst.closing||message.pane_id!==inst.herdrSelectedPane)return;
+  if(inst.herdrScreenRendering){inst.herdrPending=message;return}
+  const next=herdrSnapshotLines(message.text),full=inst.herdrPane!==message.pane_id||!inst.herdrLines;
+  let output='';
+  if(full){
+    try{inst.xterm.reset()}catch(e){}
+    output='\x1b[H\x1b[2J\x1b[?25l\x1b[0m'+next.join('\r\n')+'\x1b[0m';
+  }else{
+    const prev=inst.herdrLines,max=Math.max(prev.length,next.length),changed=[];
+    for(let i=0;i<max;i++)if(prev[i]!==next[i])changed.push(i);
+    if(!changed.length){inst.herdrLines=next;return}
+    output='\x1b[?25l'+changed.map(i=>`\x1b[${i+1};1H\x1b[2K\x1b[0m${next[i]||''}\x1b[0m`).join('');
+  }
+  inst.herdrScreenRendering=true;
+  queueTermRender(id,TERM_TEXT_ENCODER.encode(output),()=>finishHerdrRender(id,inst,next,message.pane_id),TERM_LIVE_RENDER_CHUNK);
+}
+function renderHerdrHistory(id,message){
+  const inst=TERM_INSTANCES[id];if(!inst||inst.closing||message.pane_id!==inst.herdrSelectedPane)return;
+  if(inst.herdrScreenRendering){inst.herdrPending={...message,type:'history'};return}
+  const lines=herdrSnapshotLines(message.text),visible=lines.slice(-Math.max(1,inst.xterm.rows));
+  inst.herdrScreenRendering=true;
+  try{inst.xterm.reset()}catch(e){}
+  const output='\x1b[?25l\x1b[0m'+lines.join('\r\n')+'\x1b[0m';
+  queueTermRender(id,TERM_TEXT_ENCODER.encode(output),()=>{
+    inst.historyLoading=false;inst.herdrHistoryLines=Math.max(inst.herdrHistoryLines||0,lines.length);
+    finishHerdrRender(id,inst,visible,message.pane_id);
+    try{inst.xterm.scrollLines(-Math.max(1,Math.floor(inst.xterm.rows/2)))}catch(e){}
+  },TERM_LIVE_RENDER_CHUNK);
+}
+function renderTermPaneBar(inst){
+  const bar=document.getElementById('termPaneBar');if(!bar)return;
+  if(!inst?.liveSession){bar.hidden=true;bar.innerHTML='';return}
+  const statuses=new Set(['working','blocked','done','idle','unknown']);
+  bar.hidden=false;
+  bar.innerHTML=(inst.herdrPanes||[]).map(p=>{
+    const status=statuses.has(p.agent_status)?p.agent_status:'unknown';
+    const label=p.agent||p.label||p.title||p.pane_id;
+    return `<button class="sm ${status}${p.pane_id===inst.herdrSelectedPane?' active':''}" data-action="herdrPaneSelect" data-pane="${esc(p.pane_id)}" title="${esc(p.title||p.cwd_name||p.pane_id)}"><span class="status-dot"></span>${esc(label)} <span class="muted">${esc(p.pane_id)}</span></button>`;
+  }).join('');
+}
+function selectHerdrPane(paneId){
+  const inst=TERM_INSTANCES[TERM_ID];
+  if(!inst?.liveSession||!(inst.herdrPanes||[]).some(p=>p.pane_id===paneId))return;
+  inst.herdrSelectedPane=paneId;inst.herdrLines=null;inst.herdrPane=null;inst.herdrPending=null;
+  renderTermPaneBar(inst);
+  if(inst.ws?.readyState===1)inst.ws.send(JSON.stringify({type:'select',pane_id:paneId}));
+  inst.xterm.focus();
+}
+function openHerdrLiveWS(id,xterm){
+  const inst=TERM_INSTANCES[id],session=inst?.liveSession;
+  const query=new URLSearchParams({rows:String(xterm.rows)});
+  if(inst?.herdrSelectedPane)query.set('pane',inst.herdrSelectedPane);
+  const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/herdr/live/${encodeURIComponent(session)}?${query}`);
+  ws.onopen=()=>{
+    const current=TERM_INSTANCES[id];if(!current||current.ws!==ws)return;
+    current.reconnectDelay=1000;
+    try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}
+    flushTermInput(id,ws);
+    if(id===TERM_ID)try{xterm.focus()}catch(e){}
+  };
+  ws.onmessage=event=>{try{
+    const message=JSON.parse(event.data),current=TERM_INSTANCES[id];if(!current||current.ws!==ws)return;
+    if(message.type==='state'){
+      current.herdrPanes=Array.isArray(message.panes)?message.panes:[];
+      current.herdrSelectedPane=message.selected||current.herdrSelectedPane;
+      const pane=current.herdrPanes.find(p=>p.pane_id===current.herdrSelectedPane);
+      TERM_LABELS[id]=session+' · '+(pane?.agent||pane?.label||pane?.pane_id||'pane');
+      if(id===TERM_ID){renderTermPaneBar(current);renderTermOptions()}
+    }else if(message.type==='screen')renderHerdrScreen(id,message);
+    else if(message.type==='history')renderHerdrHistory(id,message);
+    else if(message.type==='error')toast(message.message||'Herdr 终端读取失败');
+  }catch(e){}};
+  ws.onclose=event=>{
+    const current=TERM_INSTANCES[id];if(!current||current.ws!==ws||current.closing)return;
+    if(event.code!==1008)scheduleTermReconnect(id);
+  };
+  return ws;
+}
 function scheduleTermReconnect(id){
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.closing||inst.xterm._disposed||inst.reconnectTimer)return;
@@ -3620,12 +3689,12 @@ function scheduleTermReconnect(id){
 }
 // 为某终端建立一条独立 WS(重连时复用,不触碰其它实例的 WS)
 function openTermWS(id,xterm,replay){
+  if(TERM_INSTANCES[id]?.liveSession)return openHerdrLiveWS(id,xterm);
   const replayQuery=replay?'?replay=1':'';
   const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}${replayQuery}`);
   ws.binaryType='arraybuffer';
   let awaitingReplay=!!replay;
   ws.onopen=()=>{
-    interactionDiagMark('term_ws_open',{replay:!!replay});
     const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;
     // 首次挂载时 Herdr 命令还在输入队列里，不能先把 Mode 2031 写给登录 shell。
     // 重连挂到已运行的 TUI 时才通知；两种情况都会更新 OSC 10/11 回复色。
@@ -3654,6 +3723,7 @@ function showTermInstance(id){
   }
   const inst=TERM_INSTANCES[id];
   if(!inst)return;
+  renderTermPaneBar(inst);
   if(inst.pendingTheme){
     try{inst.xterm.options.theme=inst.pendingTheme}catch(e){}
     inst.pendingTheme=null;
@@ -3665,8 +3735,7 @@ function showTermInstance(id){
     inst.ws=openTermWS(id,inst.xterm,false);
   }
   XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;
-  const fitStarted=performance.now();safeFitOf(inst.fit,inst.xterm);
-  interactionDiagMark('term_show_fit',{ms:Math.round(performance.now()-fitStarted)});
+  safeFitOf(inst.fit,inst.xterm);
   // 首次挂载时 flex/WebGL 布局尚未稳定；下一帧按最终尺寸重算并强制重绘，
   // 避免第一次进入 TUI 错位、必须切换第二次才恢复。
   requestAnimationFrame(()=>{
@@ -3704,8 +3773,6 @@ function enableTermWebgl(xterm){
   }
 }
 function termMount(id){
-  interactionDiagActivate('term_mount',15000);
-  const mountStarted=performance.now();
   const c=document.getElementById('termContainer');
   if(typeof Terminal==='undefined'){c.innerHTML='<div class="empty" style="color:#c00;padding:20px">xterm.js 加载失败(版本升级后旧缓存?)<br><button class="primary" style="margin-top:10px" onclick="location.reload(true)">刷新页面</button></div>';return}
   // 为这个终端创建独立子容器(不销毁其他终端)
@@ -3717,20 +3784,20 @@ function termMount(id){
   const xterm=new Terminal({cursorBlink:true,fontSize:termFontSize(),fontFamily:TERM_FONT,theme:termTheme(),minimumContrastRatio:termMinimumContrastRatio(),scrollback:5000});
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
-  const openStarted=performance.now();
   xterm.open(el);
-  interactionDiagMark('term_xterm_open',{ms:Math.round(performance.now()-openStarted)});
-  const webglStarted=performance.now(),webgl=enableTermWebgl(xterm);
-  interactionDiagMark('term_webgl_load',{ms:Math.round(performance.now()-webglStarted),enabled:!!webgl});
+  enableTermWebgl(xterm);
   enableTermTouchScroll(el,xterm);
   xterm.parser.registerOscHandler(52,handleOsc52);
   // 隐藏其他终端的容器
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
+  const live=TERM_LIVE_CONFIG[id]||{};
   TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:'',resizeObserver:null,
-    pendingInputSince:null,historyChunks:[],historyBytes:0,historyHiddenBytes:0,historyLoading:false,pendingTheme:null,
-    renderQueue:[],rendering:false,renderGeneration:0,lastWriteQueuedAt:0,lastWriteBytes:0,lastParsedDiagAt:0};
+    historyChunks:[],historyBytes:0,historyHiddenBytes:0,historyLoading:false,pendingTheme:null,
+    renderQueue:[],rendering:false,renderGeneration:0,
+    liveSession:live.session||null,herdrSelectedPane:live.paneId||null,herdrPanes:[],herdrLines:null,herdrPane:null,
+    herdrPending:null,herdrScreenRendering:false,herdrHistoryLines:0};
   enableTermHistoryPaging(el,id,xterm);
   // 容器尺寸变化不一定伴随 window/visualViewport resize 事件（布局延迟稳定、
   // 侧边栏开合、缩放恢复、字体加载后重排等），漏一次 refit 终端就会比可见
@@ -3745,18 +3812,11 @@ function termMount(id){
     TERM_INSTANCES[id].resizeObserver=ro;
   }
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
-  xterm.onData(d=>{if(isTermFocusReport(d))return;interactionDiagMark('term_ondata',{chars:d.length,mouse:d.startsWith('\x1b[<')||d.startsWith('\x1b[M')});queueTermInput(id,applyTermModifiers(d))});
-  if(typeof xterm.onWriteParsed==='function')xterm.onWriteParsed(()=>{
-    const inst=TERM_INSTANCES[id],now=performance.now();
-    if(!inst||!inst.lastWriteQueuedAt||now-inst.lastParsedDiagAt<200)return;
-    inst.lastParsedDiagAt=now;
-    interactionDiagMark('term_write_parsed',{delay:Math.round(now-inst.lastWriteQueuedAt),bytes:inst.lastWriteBytes});
-  });
+  xterm.onData(d=>{if(isTermFocusReport(d))return;queueTermInput(id,applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   TERM_INSTANCES[id].ws=openTermWS(id,xterm,true);
   XTERM=xterm;FIT=fit;
   TERM_INSTANCES[id].ws&&showTermInstance(id);
-  interactionDiagMark('term_mount_done',{ms:Math.round(performance.now()-mountStarted)});
 }
 
 // ============ 会话管理(session + agent 重启) ============
@@ -4562,8 +4622,6 @@ function termMinimumContrastRatio(){return document.documentElement.classList.co
 // TUI 程序(codex/kimi 等,输出全是颜色码)卡顿的根因。颜色现交由 xterm 渲染层原生
 // 处理(options.theme + minimumContrastRatio + WebGL),与 Orca 的做法一致。
 function setTheme(mode,save=true){
-  if(save)interactionDiagActivate('theme_switch',10000);
-  const themeStarted=performance.now();
   const light=mode==='light';
   document.documentElement.classList.toggle('light',light);
   const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
@@ -4571,15 +4629,13 @@ function setTheme(mode,save=true){
   const th=termTheme();
   for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
     if(id===TERM_ID&&inst.el?.style.display!=='none')try{
-      const applyStarted=performance.now();inst.xterm.options.theme=th;
-      interactionDiagMark('term_theme_apply',{ms:Math.round(performance.now()-applyStarted)});
+      inst.xterm.options.theme=th;
     }catch(e){}
     else inst.pendingTheme=th;
   }
   sendAllTermColorSchemes();
   try{fetch('/api/theme/herdr',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({mode:light?'light':'dark'})}).catch(()=>{})}catch(e){}
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
-  interactionDiagMark('theme_switch_done',{ms:Math.round(performance.now()-themeStarted),mode:light?'light':'dark'});
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
 (function(){try{setTheme(localStorage.getItem('dash-theme')||'light',false)}catch(e){}})();
@@ -4653,6 +4709,7 @@ function bindDelegation(){
   if(hfBodyEl)hfBodyEl.addEventListener('change',e=>{
     const it=e.target.closest('[data-action="hfUpload"]');if(it)hfUpload(it.dataset.pane,it)
   });
+  on('#termPaneBar',e=>{const it=e.target.closest('[data-action="herdrPaneSelect"]');if(it)selectHerdrPane(it.dataset.pane)});
   on('#mentionPopover',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='pickMention')pickMention(it.dataset.session,it.dataset.pane,it.dataset.agent)});
   on('#projAgentList',e=>{const it=e.target.closest('[data-action]');if(!it)return;

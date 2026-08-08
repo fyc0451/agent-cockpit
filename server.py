@@ -149,6 +149,9 @@ SESSION_BOOTSTRAP_PANE_COLS = 100
 SESSION_BOOTSTRAP_PANE_ROWS = 30
 TERM_READ_WAIT = 0.02
 TERM_READ_BURST = 256 * 1024
+HERDR_LIVE_POLL_INTERVAL = 0.2
+HERDR_LIVE_MAX_INPUT = 64 * 1024
+HERDR_LIVE_MAX_HISTORY_LINES = 1000
 ROOT_DIR = Path(__file__).resolve().parent
 AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
@@ -4315,6 +4318,245 @@ def _schedule_term_input_note(term_id: str) -> None:
         _TERM_INPUT_NOTE_TASKS[term_id] = asyncio.create_task(
             _drain_term_input_notes(term_id)
         )
+
+
+def _herdr_live_panes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    panes = []
+    for pane in snapshot.get("panes") or []:
+        if not isinstance(pane, dict) or not pane.get("pane_id"):
+            continue
+        cwd = str(pane.get("cwd") or pane.get("foreground_cwd") or "")
+        panes.append({
+            "pane_id": str(pane["pane_id"]),
+            "workspace_id": str(pane.get("workspace_id") or ""),
+            "tab_id": str(pane.get("tab_id") or ""),
+            "agent": str(pane.get("agent") or ""),
+            "agent_status": str(pane.get("agent_status") or "unknown"),
+            "label": str(pane.get("label") or ""),
+            "title": str(
+                pane.get("terminal_title_stripped")
+                or pane.get("terminal_title")
+                or ""
+            ),
+            "cwd_name": cwd.rstrip("/").rsplit("/", 1)[-1] if cwd else "",
+            "revision": int(pane.get("revision") or 0),
+        })
+    return panes
+
+
+def _herdr_live_selected_pane(
+    snapshot: dict[str, Any], panes: list[dict[str, Any]], preferred: str | None,
+) -> str:
+    pane_ids = {pane["pane_id"] for pane in panes}
+    if preferred in pane_ids:
+        return str(preferred)
+    focused = snapshot.get("focused_pane_id")
+    if focused in pane_ids:
+        return str(focused)
+    return panes[0]["pane_id"] if panes else ""
+
+
+@app.websocket("/api/herdr/live/{session}")
+async def api_herdr_live_ws(websocket: WebSocket, session: str):
+    """Low-volume interactive view of one Herdr pane.
+
+    Herdr 0.8 does not expose arbitrary output changes through events.wait or
+    events.subscribe. Polling pane.read over the local JSON-line socket is the
+    supported fallback; revision checks ensure the browser only receives a new
+    visible snapshot when that pane actually changed.
+    """
+    if not _websocket_authenticated(websocket) or not _same_origin(
+        websocket.headers.get("origin"), websocket.headers.get("host")
+    ):
+        await websocket.close(code=1008)
+        return
+    try:
+        _validate_session_name(session)
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+    preferred = websocket.query_params.get("pane")
+    if preferred and not PANE_ID_RE.fullmatch(preferred):
+        await websocket.close(code=1008)
+        return
+    try:
+        rows = max(10, min(200, int(websocket.query_params.get("rows") or 40)))
+    except ValueError:
+        rows = 40
+    await websocket.accept()
+    send_lock = asyncio.Lock()
+
+    async def send_json(payload: dict[str, Any]) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    try:
+        socket_path = await asyncio.to_thread(herdr_client.session_socket_path, session)
+        snapshot = await asyncio.to_thread(
+            herdr_client.session_snapshot_live, socket_path
+        )
+        panes = _herdr_live_panes(snapshot)
+        selected = _herdr_live_selected_pane(snapshot, panes, preferred)
+        if not selected:
+            await send_json({"type": "error", "message": "session 中没有可用 pane"})
+            await websocket.close(code=4004)
+            return
+        state: dict[str, Any] = {
+            "selected": selected,
+            "panes": panes,
+            "rows": rows,
+            "last_revision": None,
+            "last_error": "",
+        }
+
+        async def publish_state() -> None:
+            await send_json({
+                "type": "state",
+                "session": session,
+                "selected": state["selected"],
+                "panes": state["panes"],
+            })
+
+        async def publish_visible(current: dict[str, Any]) -> None:
+            pane_id = str(state["selected"])
+            pane = next(
+                (item for item in current.get("panes") or []
+                 if isinstance(item, dict) and item.get("pane_id") == pane_id),
+                None,
+            )
+            if pane is None:
+                return
+            revision = int(pane.get("revision") or 0)
+            if revision == state["last_revision"]:
+                return
+            read = await asyncio.to_thread(
+                herdr_client.pane_read_live,
+                socket_path,
+                pane_id,
+                source="visible",
+                lines=int(state["rows"]),
+            )
+            if pane_id != state["selected"]:
+                return
+            state["last_revision"] = revision
+            state["last_error"] = ""
+            await send_json({
+                "type": "screen",
+                "pane_id": pane_id,
+                "revision": revision,
+                "text": str(read.get("text") or ""),
+            })
+
+        await publish_state()
+        await publish_visible(snapshot)
+
+        async def pump() -> None:
+            while True:
+                await asyncio.sleep(HERDR_LIVE_POLL_INTERVAL)
+                try:
+                    current = await asyncio.to_thread(
+                        herdr_client.session_snapshot_live, socket_path
+                    )
+                    next_panes = _herdr_live_panes(current)
+                    next_selected = _herdr_live_selected_pane(
+                        current, next_panes, str(state["selected"])
+                    )
+                    if next_panes != state["panes"] or next_selected != state["selected"]:
+                        state["panes"] = next_panes
+                        if next_selected != state["selected"]:
+                            state["selected"] = next_selected
+                            state["last_revision"] = None
+                        await publish_state()
+                    await publish_visible(current)
+                except (RuntimeError, OSError) as exc:
+                    message = str(exc)
+                    if message != state["last_error"]:
+                        state["last_error"] = message
+                        await send_json({"type": "error", "message": message})
+
+        pump_task = asyncio.create_task(pump())
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+                text = message.get("text")
+                if not text:
+                    continue
+                try:
+                    control = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(control, dict):
+                    continue
+                kind = control.get("type")
+                if kind == "resize":
+                    try:
+                        state["rows"] = max(10, min(200, int(control.get("rows") or 40)))
+                    except (TypeError, ValueError):
+                        pass
+                elif kind == "select":
+                    pane_id = str(control.get("pane_id") or "")
+                    if not PANE_ID_RE.fullmatch(pane_id):
+                        continue
+                    if pane_id not in {pane["pane_id"] for pane in state["panes"]}:
+                        continue
+                    state["selected"] = pane_id
+                    state["last_revision"] = None
+                    await publish_state()
+                    current = await asyncio.to_thread(
+                        herdr_client.session_snapshot_live, socket_path
+                    )
+                    await publish_visible(current)
+                elif kind == "history":
+                    pane_id = str(state["selected"])
+                    try:
+                        lines = max(1, min(
+                            HERDR_LIVE_MAX_HISTORY_LINES,
+                            int(control.get("lines") or 200),
+                        ))
+                    except (TypeError, ValueError):
+                        lines = 200
+                    read = await asyncio.to_thread(
+                        herdr_client.pane_read_live,
+                        socket_path,
+                        pane_id,
+                        source="recent",
+                        lines=lines,
+                    )
+                    if pane_id == state["selected"]:
+                        await send_json({
+                            "type": "history",
+                            "pane_id": pane_id,
+                            "revision": int(read.get("revision") or 0),
+                            "text": str(read.get("text") or ""),
+                        })
+                elif kind == "input":
+                    data = control.get("data")
+                    if not isinstance(data, str) or not data:
+                        continue
+                    if len(data.encode("utf-8")) > HERDR_LIVE_MAX_INPUT:
+                        await send_json({"type": "error", "message": "单次终端输入过大"})
+                        continue
+                    await asyncio.to_thread(
+                        herdr_client.pane_send_input_live,
+                        socket_path,
+                        str(state["selected"]),
+                        data,
+                    )
+        finally:
+            pump_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pump_task
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("herdr live websocket failed: %s", session)
+        with suppress(Exception):
+            await send_json({"type": "error", "message": "Herdr 实时终端连接失败"})
+    finally:
+        with suppress(Exception):
+            await websocket.close()
 
 
 @app.websocket("/api/term/{term_id}")
