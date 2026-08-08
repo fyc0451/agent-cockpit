@@ -1136,14 +1136,14 @@ def test_compose_pane_placement_order(monkeypatch):
         return [tuple(c[2:]) for c in calls]
 
     assert compose("horizontal") == [
-        ("pane", "move", "w1:p2", "--tab", "w1:t1", "--target-pane", "w1:p1", "--split", "right"),
-        ("pane", "move", "w1:p3", "--tab", "w1:t1", "--target-pane", "w1:p1", "--split", "down"),
-        ("pane", "move", "w1:p4", "--tab", "w1:t1", "--target-pane", "w1:p2", "--split", "down"),
+        ("pane", "move", "w1:p2", "--tab", "w1:t1", "--target-pane", "w1:p1", "--split", "right", "--ratio", "0.25"),
+        ("pane", "move", "w1:p3", "--tab", "w1:t1", "--target-pane", "w1:p2", "--split", "right", "--ratio", "0.333333"),
+        ("pane", "move", "w1:p4", "--tab", "w1:t1", "--target-pane", "w1:p3", "--split", "right", "--ratio", "0.5"),
     ]
     assert compose("vertical") == [
-        ("pane", "move", "w1:p2", "--tab", "w1:t1", "--target-pane", "w1:p1", "--split", "down"),
-        ("pane", "move", "w1:p3", "--tab", "w1:t1", "--target-pane", "w1:p1", "--split", "right"),
-        ("pane", "move", "w1:p4", "--tab", "w1:t1", "--target-pane", "w1:p2", "--split", "right"),
+        ("pane", "move", "w1:p2", "--tab", "w1:t1", "--target-pane", "w1:p1", "--split", "down", "--ratio", "0.25"),
+        ("pane", "move", "w1:p3", "--tab", "w1:t1", "--target-pane", "w1:p2", "--split", "down", "--ratio", "0.333333"),
+        ("pane", "move", "w1:p4", "--tab", "w1:t1", "--target-pane", "w1:p3", "--split", "down", "--ratio", "0.5"),
     ]
 
 

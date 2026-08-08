@@ -910,8 +910,7 @@ def untile_tab(session: str, tab_id: str) -> list[str]:
 def compose_panes(session: str, pane_ids: list[str], orientation: str) -> str:
     """把 2-4 个 pane 组合为一个分屏,第一个为基准。返回基准 pane id。
 
-    布局:2 → 并排;3 → 基准旁一栏再纵分;4 → 2×2 宫格。
-    orientation=horizontal 优先左右展开,vertical 优先上下叠放。
+    horizontal 将所有 pane 排成单行,vertical 将所有 pane 排成单列。
     """
     if orientation not in COMPOSE_ORIENTATIONS:
         raise ValueError(f"不支持的组合方向: {orientation}")
@@ -938,32 +937,28 @@ def compose_panes(session: str, pane_ids: list[str], orientation: str) -> str:
     )
     if not base_tab:
         raise ValueError(f"无法确定基准 pane 所在 tab: {base}")
-    first = "right" if orientation == "horizontal" else "down"
-    second = "down" if orientation == "horizontal" else "right"
+    direction = "right" if orientation == "horizontal" else "down"
 
-    def _move(pid: str, target: str, direction: str) -> None:
+    def _move(pid: str, target: str, direction: str, ratio: str) -> None:
         _move_pane(
             session,
-            [pid, "--tab", base_tab, "--target-pane", target, "--split", direction],
+            [pid, "--tab", base_tab, "--target-pane", target, "--split", direction,
+             "--ratio", ratio],
         )
 
-    if len(pane_ids) == 2:
-        moves = [(pane_ids[1], base, first)]
-    elif len(pane_ids) == 3:
-        moves = [
-            (pane_ids[1], base, first),
-            (pane_ids[2], pane_ids[1], second),
-        ]
-    else:
-        moves = [
-            (pane_ids[1], base, first),
-            (pane_ids[2], base, second),
-            (pane_ids[3], pane_ids[1], second),
-        ]
+    moves = [
+        (
+            pane_ids[index],
+            pane_ids[index - 1],
+            direction,
+            f"{1 / (len(pane_ids) - index + 1):.6f}".rstrip("0").rstrip("."),
+        )
+        for index in range(1, len(pane_ids))
+    ]
     completed = 0
     try:
-        for pid, target, direction in moves:
-            _move(pid, target, direction)
+        for pid, target, move_direction, ratio in moves:
+            _move(pid, target, move_direction, ratio)
             completed += 1
     except RuntimeError as exc:
         raise RuntimeError(

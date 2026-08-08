@@ -137,3 +137,9 @@ def test_layout_frontend_entry_and_modal_present():
     assert "layoutCompose()" in html
     assert "/layout/compose" in html
     assert "term.layout" in html
+    assert '>单行水平</option>' in html
+    assert '>单列垂直</option>' in html
+    assert "'layout.h_first':'Single horizontal row'" in html
+    assert "'layout.v_first':'Single vertical column'" in html
+    assert "'layout.h_first':'横一列'" in html
+    assert "'layout.v_first':'縦一列'" in html
