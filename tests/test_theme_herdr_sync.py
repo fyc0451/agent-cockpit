@@ -67,7 +67,7 @@ def test_reload_config_hits_every_running_session(monkeypatch):
     calls = []
     monkeypatch.setattr(
         herdr_client, "list_sessions",
-        lambda: [{"name": "s1"}, {"name": "s2"}],
+        lambda: [{"name": "s1", "running": True}, {"name": "s2", "running": True}],
     )
     monkeypatch.setattr(
         herdr_client, "_run",
@@ -83,7 +83,10 @@ def test_reload_config_hits_every_running_session(monkeypatch):
 
 
 def test_reload_config_partial_failure_reports_session(monkeypatch):
-    monkeypatch.setattr(herdr_client, "list_sessions", lambda: [{"name": "good"}, {"name": "bad"}])
+    monkeypatch.setattr(
+        herdr_client, "list_sessions",
+        lambda: [{"name": "good", "running": True}, {"name": "bad", "running": True}],
+    )
 
     def flaky(args, timeout=10):
         if args[1] == "bad":
@@ -95,6 +98,24 @@ def test_reload_config_partial_failure_reports_session(monkeypatch):
     assert result["ok"] is False
     assert result["reloaded"] == ["good"]
     assert any("bad" in e for e in result["errors"])
+
+
+def test_reload_config_skips_not_running_sessions(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "list_sessions",
+        lambda: [
+            {"name": "default", "running": False},
+            {"name": "live", "running": True},
+        ],
+    )
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(args) or "",
+    )
+    result = herdr_client.reload_config()
+    assert result["ok"] is True and result["reloaded"] == ["live"]
+    assert calls == [["--session", "live", "server", "reload-config"]]
 
 
 def test_reload_config_falls_back_without_sessions(monkeypatch):

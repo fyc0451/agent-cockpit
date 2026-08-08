@@ -138,7 +138,10 @@ def reload_config(timeout: int = 10) -> dict[str, Any]:
     枚举不到 session 时退回默认 server 命令。
     """
     try:
-        sessions = [s.get("name") for s in list_sessions() if s.get("name")]
+        sessions = [
+            s.get("name") for s in list_sessions()
+            if s.get("name") and s.get("running") is not False
+        ]
     except Exception:
         sessions = []
     if not sessions:
