@@ -4386,6 +4386,14 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                         if isinstance(ctrl, dict) and ctrl.get("type") == "resize":
                             terminal.resize_term(term_id, ctrl.get("cols", 80), ctrl.get("rows", 24))
                             continue
+                        if isinstance(ctrl, dict) and ctrl.get("type") == "theme":
+                            await asyncio.to_thread(
+                                terminal.set_color_scheme,
+                                term_id,
+                                ctrl.get("mode"),
+                                notify=ctrl.get("notify") is True,
+                            )
+                            continue
                     except json.JSONDecodeError:
                         pass
                 try:

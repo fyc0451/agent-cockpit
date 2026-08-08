@@ -3481,7 +3481,14 @@ function openTermWS(id,xterm,replay){
   const replayQuery=replay?'?replay=1':'';
   const ws=new WebSocket(`${WS_PROTO}://${location.host}/api/term/${id}${replayQuery}`);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);startTermZoomLease(id);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
+  ws.onopen=()=>{
+    const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;
+    // 新 PTY 先设置 OSC 10/11 回复色再启动 Herdr；重连则同时通知已运行 Herdr。
+    sendTermColorScheme(id,ws,!replay);
+    try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}
+    flushTermInput(id,ws);startTermZoomLease(id);
+    if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}
+  };
   ws.onmessage=ev=>{try{
     // 直接写入 xterm:颜色由 xterm 渲染层(Terminal options.theme + WebGL)原生处理。
     // 不再用 JS 逐 chunk 改写 ANSI(lightTermAdapt/darkTermBoost 已移除)——那是
@@ -4361,6 +4368,15 @@ function positionTermForKeyboard(){
 
 // ============ 主题切换 ============
 const TERM_FONT="'Cascadia Mono NF','Cascadia Mono',ui-monospace,Menlo,Consolas,monospace";
+function currentTermColorScheme(){return document.documentElement.classList.contains('light')?'light':'dark'}
+function sendTermColorScheme(id,ws,notify){
+  if(!ws||ws.readyState!==1)return;
+  // 服务端按 PTY label 判断是否为 Herdr；不能依赖可能尚未恢复完成的前端映射。
+  try{ws.send(JSON.stringify({type:'theme',mode:currentTermColorScheme(),notify:!!notify}))}catch(e){}
+}
+function sendAllTermColorSchemes(){
+  for(const [id,inst] of Object.entries(TERM_INSTANCES||{}))sendTermColorScheme(id,inst.ws,true);
+}
 function termTheme(){
   // 明亮主题给终端配浅底深字 + 高对比 ANSI;黑暗保持原样
   if(document.documentElement.classList.contains('light')){
@@ -4383,6 +4399,7 @@ function setTheme(mode,save=true){
   const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
   const th=termTheme();
   for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th}catch(e){}}
+  sendAllTermColorSchemes();
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}

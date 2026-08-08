@@ -202,7 +202,10 @@ def test_herdr_terminal_attach_atomically_replaces_restored_pty_on_server():
     # 新终端挂载完成后再刷新 selector，不能又显示成待打开的 session。
     created = attach.split("const r=await api('/api/term?label='", 1)[1]
     assert created.index("termMount(r.id)") < created.index("renderTermOptions()")
-    # WebSocket 必须先把当前浏览器尺寸送进新 PTY，再执行排队的 herdr attach 命令。
+    # WebSocket 必须先设置主题和尺寸，再执行排队的 herdr attach 命令。
+    assert websocket.index("sendTermColorScheme(id,ws,!replay)") < websocket.index(
+        "type:'resize'"
+    )
     assert websocket.index("type:'resize'") < websocket.index("flushTermInput(id,ws)")
 
 
@@ -1618,7 +1621,27 @@ def test_theme_switch_no_longer_forces_pty_resize():
         "function toggleTheme", 1
     )[0]
     assert "options.theme=th" in set_theme
+    assert "sendAllTermColorSchemes()" in set_theme
     assert "xterm.resize" not in set_theme
+
+
+def test_theme_switch_reports_running_scheme_without_ansi_rewrite():
+    js = _inline_js()
+    report = js.split("function sendTermColorScheme(id,ws,notify){", 1)[1].split(
+        "function sendAllTermColorSchemes", 1
+    )[0]
+    assert "type:'theme'" in report
+    assert "mode:currentTermColorScheme()" in report
+    assert "notify:!!notify" in report
+    assert "TERM_SESSIONS" not in report
+    assert "ws.readyState!==1" in report
+
+    broadcast = js.split("function sendAllTermColorSchemes(){", 1)[1].split(
+        "function termTheme", 1
+    )[0]
+    assert "Object.entries(TERM_INSTANCES||{})" in broadcast
+    assert "sendTermColorScheme(id,inst.ws,true)" in broadcast
+    assert "setTimeout" not in broadcast
 
 
 def test_settings_hub_error_shows_actionable_fix():

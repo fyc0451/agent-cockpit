@@ -290,6 +290,108 @@ def test_startup_color_queries_receive_dark_reply_without_browser():
     assert b"PROBE_REPLY=" + expected.hex().encode() in output
 
 
+def test_startup_color_queries_use_browser_selected_light_theme():
+    """WS 必须能在 Herdr 启动前设置浅色，不能继续固定回答黑背景。"""
+    child = "\n".join((
+        "import os, select, time, tty",
+        "tty.setraw(0)",
+        "os.write(1, bytes.fromhex('1b5d31303b3f1b5c1b5d31313b3f1b5c'))",
+        "reply = bytearray()",
+        "deadline = time.monotonic() + 2",
+        "while time.monotonic() < deadline and b']11;' not in reply:",
+        "    ready, _, _ = select.select([0], [], [], 0.1)",
+        "    if ready:",
+        "        reply.extend(os.read(0, 4096))",
+        "os.write(1, b'\\r\\nPROBE_REPLY=' + bytes(reply).hex().encode() + b'\\r\\n')",
+    ))
+    tid = terminal.create_term(command=[sys.executable, "-c", child])["id"]
+    assert terminal.set_color_scheme(tid, "light") is True
+
+    output = _wait_dead(tid) + terminal.drain_output(tid, timeout=0.05)
+
+    expected = (
+        b"\x1b]10;rgb:1a1a/2020/3030\x1b\\"
+        b"\x1b]11;rgb:fafa/fbfb/fcfc\x1b\\"
+    )
+    assert b"PROBE_REPLY=" + expected.hex().encode() in output
+
+
+def test_runtime_color_scheme_report_reopens_bounded_query_window():
+    """Herdr 收到浅色报告后重查 OSC 10/11，必须在同一 PTY 内拿到新回复。"""
+    child = "\n".join((
+        "import os, select, time, tty",
+        "tty.setraw(0)",
+        "os.write(1, b'READY')",
+        "report = bytearray()",
+        "deadline = time.monotonic() + 2",
+        "while time.monotonic() < deadline and b'n' not in report:",
+        "    ready, _, _ = select.select([0], [], [], 0.1)",
+        "    if ready:",
+        "        report.extend(os.read(0, 4096))",
+        "os.write(1, bytes.fromhex('1b5d31303b3f1b5c1b5d31313b3f1b5c'))",
+        "reply = bytearray()",
+        "deadline = time.monotonic() + 2",
+        "while time.monotonic() < deadline and b']11;' not in reply:",
+        "    ready, _, _ = select.select([0], [], [], 0.1)",
+        "    if ready:",
+        "        reply.extend(os.read(0, 4096))",
+        "os.write(1, b'\\r\\nRUNTIME_REPORT=' + bytes(report).hex().encode())",
+        "os.write(1, b'\\r\\nRUNTIME_REPLY=' + bytes(reply).hex().encode() + b'\\r\\n')",
+    ))
+    tid = terminal.create_term(
+        label="herdr-session", command=[sys.executable, "-c", child],
+    )["id"]
+    assert b"READY" in _read_until(tid, b"READY")
+
+    assert terminal.set_color_scheme(tid, "light", notify=True) is True
+    output = _wait_dead(tid) + terminal.drain_output(tid, timeout=0.05)
+
+    report = terminal._COLOR_SCHEME_REPORTS["light"].encode()
+    replies = (
+        terminal._LIGHT_COLOR_QUERY_REPLIES[10]
+        + terminal._LIGHT_COLOR_QUERY_REPLIES[11]
+    )
+    assert b"RUNTIME_REPORT=" + report.hex().encode() in output
+    assert b"RUNTIME_REPLY=" + replies.hex().encode() in output
+
+
+def test_color_scheme_change_notifies_only_labeled_herdr_terms(monkeypatch):
+    """运行期报告只进 Herdr host，不能向普通 shell 注入控制响应。"""
+    state = {
+        "lock": threading.Lock(), "alive": True, "label": None,
+        "color_scheme": "dark",
+    }
+    monkeypatch.setattr(terminal, "_get", lambda term_id: state)
+    writes = []
+    monkeypatch.setattr(terminal, "write_term", lambda term_id, data: writes.append(data))
+
+    assert terminal.set_color_scheme("term", "light", notify=True) is True
+    assert state["color_scheme"] == "light"
+    assert writes == []
+
+    state["label"] = "github-agent-cockpit"
+    assert terminal.set_color_scheme("term", "dark", notify=True) is True
+    assert writes == ["\x1b[?997;1n"]
+    assert state["startup_color_query"] is not None
+    assert terminal.set_color_scheme("term", "light", notify=True) is True
+    assert writes[-1] == "\x1b[?997;2n"
+
+
+def test_color_scheme_control_rejects_invalid_mode(monkeypatch):
+    state = {
+        "lock": threading.Lock(), "alive": True, "label": "demo",
+        "color_scheme": "dark",
+    }
+    monkeypatch.setattr(terminal, "_get", lambda term_id: state)
+    writes = []
+    monkeypatch.setattr(terminal, "write_term", lambda term_id, data: writes.append(data))
+
+    assert terminal.set_color_scheme("term", "sepia", notify=True) is False
+    assert terminal.set_color_scheme("term", {"bad": "type"}, notify=True) is False
+    assert state["color_scheme"] == "dark"
+    assert writes == []
+
+
 def test_startup_color_query_filter_handles_split_st_and_bel(monkeypatch):
     now = 100.0
     monkeypatch.setattr(terminal.time, "monotonic", lambda: now)
@@ -926,3 +1028,15 @@ def test_websocket_records_typing_off_event_loop():
     assert "_schedule_term_input_note(term_id)" in source
     assert "await asyncio.to_thread(terminal.note_user_input, term_id)" in source
     assert "terminal.write_term" in source
+
+
+def test_websocket_theme_control_bypasses_user_input_accounting():
+    source = (Path(__file__).resolve().parent.parent / "server.py").read_text(
+        encoding="utf-8"
+    )
+    theme = source.split('ctrl.get("type") == "theme"', 1)[1].split(
+        "except json.JSONDecodeError", 1
+    )[0]
+    assert "terminal.set_color_scheme" in theme
+    assert "continue" in theme
+    assert "_schedule_term_input_note" not in theme

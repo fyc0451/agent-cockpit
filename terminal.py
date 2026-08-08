@@ -93,8 +93,8 @@ OUTPUT_HISTORY_MAX = 1024 * 1024
 DRAIN_MAX_BYTES = 1024 * 1024
 DRAIN_MAX_SECONDS = 2.0
 USER_TYPING_WINDOW = 30.0
-# Herdr/OpenCode 会在首屏用 OSC 10/11 查询默认前景/背景。浏览器尚未挂载时
-# xterm 无法代答，因此只在启动小窗口内由 PTY 层回答；正常输出不进入此路径。
+# Herdr/OpenCode 会用 OSC 10/11 查询默认前景/背景。浏览器无法通过 PTY 代答，
+# 因此只在启动和主题变化后的小窗口内由 PTY 层回答；正常输出不进入此路径。
 STARTUP_COLOR_QUERY_TIMEOUT = 5.0
 STARTUP_COLOR_QUERY_SCAN_MAX = 64 * 1024
 STARTUP_COLOR_REPLY_DELAY = 0.001
@@ -106,6 +106,18 @@ _STARTUP_COLOR_QUERY_SPECS = (
 _STARTUP_COLOR_QUERY_REPLIES = {
     10: b"\x1b]10;rgb:e8e8/e8e8/e8e8\x1b\\",
     11: b"\x1b]11;rgb:0000/0000/0000\x1b\\",
+}
+_LIGHT_COLOR_QUERY_REPLIES = {
+    10: b"\x1b]10;rgb:1a1a/2020/3030\x1b\\",
+    11: b"\x1b]11;rgb:fafa/fbfb/fcfc\x1b\\",
+}
+_COLOR_SCHEME_QUERY_REPLIES = {
+    "dark": _STARTUP_COLOR_QUERY_REPLIES,
+    "light": _LIGHT_COLOR_QUERY_REPLIES,
+}
+_COLOR_SCHEME_REPORTS = {
+    "dark": "\x1b[?997;1n",
+    "light": "\x1b[?997;2n",
 }
 
 
@@ -229,6 +241,7 @@ def create_term(
                 "lock": threading.Lock(), "write_lock": threading.Lock(),
                 "created_ts": now, "last_active": now,
                 "dead_ts": None, "label": label, "output_history": bytearray(),
+                "color_scheme": "dark",
                 "startup_color_query": _new_startup_color_query_state(now),
                 "startup_color_replies": [],
             }
@@ -322,6 +335,28 @@ def resize_term(term_id: str, cols: int, rows: int) -> None:
             _set_size(t["master_fd"], cols, rows)
 
 
+def set_color_scheme(term_id: str, mode: Any, *, notify: bool = False) -> bool:
+    """更新 PTY host 明暗主题；运行期只向带 Herdr 标签的终端发 Mode 2031 报告。"""
+    if not isinstance(mode, str) or mode not in _COLOR_SCHEME_QUERY_REPLIES:
+        return False
+    t = _get(term_id)
+    if not t:
+        return False
+    with t["lock"]:
+        t["color_scheme"] = mode
+        should_notify = bool(notify and t.get("alive") and t.get("label"))
+        if should_notify:
+            # Herdr 收到 Mode 2031 报告后会立即重查 OSC 10/11。仅为这次重查
+            # 重开有界扫描窗口，避免恢复逐输出 chunk 的常驻颜色处理。
+            t["startup_color_query"] = _new_startup_color_query_state(time.monotonic())
+    if should_notify:
+        try:
+            write_term(term_id, _COLOR_SCHEME_REPORTS[mode])
+        except (ConnectionError, TimeoutError, OSError):
+            return False
+    return True
+
+
 def write_term(term_id: str, data: str) -> None:
     """往终端写击键(浏览器→PTY)。
 
@@ -400,7 +435,7 @@ def _remember_output(t: dict[str, Any], data: bytes) -> None:
 
 
 def _filter_startup_color_queries(t: dict[str, Any], data: bytes) -> bytes:
-    """过滤并排队启动期 OSC 10/11 回复。调用方须持有 t['lock']。"""
+    """在有界窗口内过滤并排队 OSC 10/11 回复。调用方须持有 t['lock']。"""
     state = t.get("startup_color_query")
     if not state:
         return data
@@ -454,10 +489,13 @@ def _filter_startup_color_queries(t: dict[str, Any], data: bytes) -> bytes:
         if matched:
             consumed, slots = matched
             replies = t.setdefault("startup_color_replies", [])
+            scheme_replies = _COLOR_SCHEME_QUERY_REPLIES.get(
+                t.get("color_scheme"), _STARTUP_COLOR_QUERY_REPLIES,
+            )
             for slot in slots:
                 if slot in state["answered"]:
                     continue
-                replies.append(_STARTUP_COLOR_QUERY_REPLIES[slot])
+                replies.append(scheme_replies[slot])
                 state["answered"].add(slot)
             cursor = candidate + consumed
             if state["answered"] >= {10, 11}:
