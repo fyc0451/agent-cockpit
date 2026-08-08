@@ -1406,4 +1406,3 @@ def test_r8_cleanup_plist_deleted_even_if_detached_popen_fails(
     assert not plist.exists()
     assert bootouts, "fallback bootout after Popen failure"
     assert "upgrade.fail" in bootouts[0][-1]
-
