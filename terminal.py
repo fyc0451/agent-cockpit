@@ -93,6 +93,20 @@ OUTPUT_HISTORY_MAX = 1024 * 1024
 DRAIN_MAX_BYTES = 1024 * 1024
 DRAIN_MAX_SECONDS = 2.0
 USER_TYPING_WINDOW = 30.0
+# Herdr/OpenCode 会在首屏用 OSC 10/11 查询默认前景/背景。浏览器尚未挂载时
+# xterm 无法代答，因此只在启动小窗口内由 PTY 层回答；正常输出不进入此路径。
+STARTUP_COLOR_QUERY_TIMEOUT = 5.0
+STARTUP_COLOR_QUERY_SCAN_MAX = 64 * 1024
+STARTUP_COLOR_REPLY_DELAY = 0.001
+_STARTUP_COLOR_QUERY_SPECS = (
+    (b"\x1b]10;?;?", (10, 11)),
+    (b"\x1b]10;?", (10,)),
+    (b"\x1b]11;?", (11,)),
+)
+_STARTUP_COLOR_QUERY_REPLIES = {
+    10: b"\x1b]10;rgb:e8e8/e8e8/e8e8\x1b\\",
+    11: b"\x1b]11;rgb:0000/0000/0000\x1b\\",
+}
 
 
 def _term_cfg(key: str, default: float) -> float:
@@ -134,6 +148,15 @@ def _get(term_id: str) -> dict[str, Any] | None:
 def _active_count() -> int:
     with _lock:
         return sum(1 for t in _terms.values() if t.get("alive"))
+
+
+def _new_startup_color_query_state(now: float) -> dict[str, Any]:
+    return {
+        "deadline": now + STARTUP_COLOR_QUERY_TIMEOUT,
+        "scanned": 0,
+        "pending": b"",
+        "answered": set(),
+    }
 
 
 def create_term(
@@ -206,6 +229,8 @@ def create_term(
                 "lock": threading.Lock(), "write_lock": threading.Lock(),
                 "created_ts": now, "last_active": now,
                 "dead_ts": None, "label": label, "output_history": bytearray(),
+                "startup_color_query": _new_startup_color_query_state(now),
+                "startup_color_replies": [],
             }
     if over:
         _kill_child(pid, master_fd)
@@ -374,6 +399,108 @@ def _remember_output(t: dict[str, Any], data: bytes) -> None:
         del history[:-OUTPUT_HISTORY_MAX]
 
 
+def _filter_startup_color_queries(t: dict[str, Any], data: bytes) -> bytes:
+    """过滤并排队启动期 OSC 10/11 回复。调用方须持有 t['lock']。"""
+    state = t.get("startup_color_query")
+    if not state:
+        return data
+
+    pending = state.get("pending", b"")
+    if (
+        time.monotonic() >= state["deadline"]
+        or state["scanned"] >= STARTUP_COLOR_QUERY_SCAN_MAX
+    ):
+        t["startup_color_query"] = None
+        return pending + data
+
+    remaining = STARTUP_COLOR_QUERY_SCAN_MAX - state["scanned"]
+    scanned_data = data[:remaining]
+    unscanned_data = data[remaining:]
+    state["scanned"] += len(scanned_data)
+    source = pending + scanned_data
+    state["pending"] = b""
+    output = bytearray()
+    cursor = 0
+
+    while cursor < len(source):
+        candidate = source.find(b"\x1b", cursor)
+        if candidate < 0:
+            output.extend(source[cursor:])
+            break
+        output.extend(source[cursor:candidate])
+        tail = source[candidate:]
+        matched: tuple[int, tuple[int, ...]] | None = None
+        partial = False
+
+        for prefix, slots in _STARTUP_COLOR_QUERY_SPECS:
+            if prefix.startswith(tail):
+                partial = True
+                continue
+            if not tail.startswith(prefix):
+                continue
+            terminator_offset = len(prefix)
+            if len(tail) == terminator_offset:
+                partial = True
+            elif tail[terminator_offset] == 0x07:
+                matched = (terminator_offset + 1, slots)
+            elif tail[terminator_offset] == 0x1b:
+                if len(tail) == terminator_offset + 1:
+                    partial = True
+                elif tail[terminator_offset + 1] == 0x5c:
+                    matched = (terminator_offset + 2, slots)
+            if matched or partial:
+                break
+
+        if matched:
+            consumed, slots = matched
+            replies = t.setdefault("startup_color_replies", [])
+            for slot in slots:
+                if slot in state["answered"]:
+                    continue
+                replies.append(_STARTUP_COLOR_QUERY_REPLIES[slot])
+                state["answered"].add(slot)
+            cursor = candidate + consumed
+            if state["answered"] >= {10, 11}:
+                t["startup_color_query"] = None
+                output.extend(source[cursor:])
+                output.extend(unscanned_data)
+                return bytes(output)
+            continue
+
+        if partial:
+            state["pending"] = tail
+            cursor = len(source)
+            break
+
+        output.append(0x1b)
+        cursor = candidate + 1
+
+    if state["scanned"] >= STARTUP_COLOR_QUERY_SCAN_MAX:
+        output.extend(state.get("pending", b""))
+        state["pending"] = b""
+        t["startup_color_query"] = None
+    output.extend(unscanned_data)
+    return bytes(output)
+
+
+def _take_startup_color_replies(t: dict[str, Any]) -> list[bytes]:
+    replies = t.get("startup_color_replies") or []
+    t["startup_color_replies"] = []
+    return replies
+
+
+def _send_startup_color_replies(term_id: str, replies: list[bytes]) -> None:
+    if not replies:
+        return
+    # 让查询程序完成 raw-mode 切换，避免回复被行规程回显成可见文本。
+    time.sleep(STARTUP_COLOR_REPLY_DELAY)
+    for reply in replies:
+        try:
+            write_term(term_id, reply.decode("ascii"))
+        except OSError:
+            return
+
+
 def _read_fd(t: dict[str, Any], timeout: float) -> bytes:
     """在 t['lock'] 内从 master fd 读一次。alive=False 后也允许读(尾输出)。"""
     fd = t["master_fd"]
@@ -382,11 +509,14 @@ def _read_fd(t: dict[str, Any], timeout: float) -> bytes:
         if r:
             data = os.read(fd, 65536)
             t["last_active"] = time.monotonic()
+            data = _filter_startup_color_queries(t, data)
             _remember_output(t, data)
             return data
     except OSError:  # EIO 等:slave 端已全部关闭
         pass
-    return b""
+    data = _filter_startup_color_queries(t, b"")
+    _remember_output(t, data)
+    return data
 
 
 def read_output(term_id: str, timeout: float = 0.1) -> bytes:
@@ -398,7 +528,10 @@ def read_output(term_id: str, timeout: float = 0.1) -> bytes:
     if not t:
         return b""
     with t["lock"]:
-        return _read_fd(t, timeout)
+        data = _read_fd(t, timeout)
+        replies = _take_startup_color_replies(t)
+    _send_startup_color_replies(term_id, replies)
+    return data
 
 
 def output_history(term_id: str) -> bytes:
@@ -429,15 +562,18 @@ def read_available(
     with t["lock"]:
         data = _read_fd(t, timeout)
         if not data:
-            return b""
-        chunks.append(data)
-        total += len(data)
-        while total < max_bytes:
-            data = _read_fd(t, 0)
-            if not data:
-                break
+            replies = _take_startup_color_replies(t)
+        else:
             chunks.append(data)
             total += len(data)
+            while total < max_bytes:
+                data = _read_fd(t, 0)
+                if not data:
+                    break
+                chunks.append(data)
+                total += len(data)
+            replies = _take_startup_color_replies(t)
+    _send_startup_color_replies(term_id, replies)
     return b"".join(chunks)
 
 
@@ -462,6 +598,8 @@ def drain_output(term_id: str, timeout: float = 0.5) -> bytes:
             overflow = len(output) - DRAIN_MAX_BYTES
             if overflow > 0:
                 del output[:overflow]
+        replies = _take_startup_color_replies(t)
+    _send_startup_color_replies(term_id, replies)
     return bytes(output)
 
 

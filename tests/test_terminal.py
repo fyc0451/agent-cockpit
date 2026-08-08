@@ -265,6 +265,111 @@ def test_echo_roundtrip():
     assert terminal.is_alive(tid)
 
 
+def test_startup_color_queries_receive_dark_reply_without_browser():
+    """Herdr/OpenCode 在 xterm 挂载前查询主题时也必须拿到深色回复。"""
+    child = "\n".join((
+        "import os, select, time, tty",
+        "tty.setraw(0)",
+        "os.write(1, bytes.fromhex('1b5d31303b3f1b5c1b5d31313b3f1b5c'))",
+        "reply = bytearray()",
+        "deadline = time.monotonic() + 2",
+        "while time.monotonic() < deadline and b']11;' not in reply:",
+        "    ready, _, _ = select.select([0], [], [], 0.1)",
+        "    if ready:",
+        "        reply.extend(os.read(0, 4096))",
+        "os.write(1, b'\\r\\nPROBE_REPLY=' + bytes(reply).hex().encode() + b'\\r\\n')",
+    ))
+    tid = terminal.create_term(command=[sys.executable, "-c", child])["id"]
+
+    output = _wait_dead(tid) + terminal.drain_output(tid, timeout=0.05)
+
+    expected = (
+        b"\x1b]10;rgb:e8e8/e8e8/e8e8\x1b\\"
+        b"\x1b]11;rgb:0000/0000/0000\x1b\\"
+    )
+    assert b"PROBE_REPLY=" + expected.hex().encode() in output
+
+
+def test_startup_color_query_filter_handles_split_st_and_bel(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: now)
+    state = {
+        "startup_color_query": terminal._new_startup_color_query_state(now),
+        "startup_color_replies": [],
+    }
+
+    first = terminal._filter_startup_color_queries(state, b"before\x1b]10;")
+    second = terminal._filter_startup_color_queries(
+        state, b"?\x07middle\x1b]11;?\x1b\\after",
+    )
+
+    assert first == b"before"
+    assert second == b"middleafter"
+    assert state["startup_color_replies"] == [
+        terminal._STARTUP_COLOR_QUERY_REPLIES[10],
+        terminal._STARTUP_COLOR_QUERY_REPLIES[11],
+    ]
+    assert state["startup_color_query"] is None
+
+
+def test_startup_color_query_filter_answers_stacked_query(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: now)
+    state = {
+        "startup_color_query": terminal._new_startup_color_query_state(now),
+        "startup_color_replies": [],
+    }
+
+    output = terminal._filter_startup_color_queries(
+        state, b"\x1b]10;?;?\x1b\\visible",
+    )
+
+    assert output == b"visible"
+    assert state["startup_color_replies"] == [
+        terminal._STARTUP_COLOR_QUERY_REPLIES[10],
+        terminal._STARTUP_COLOR_QUERY_REPLIES[11],
+    ]
+
+
+def test_startup_color_query_filter_replies_once_per_slot(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: now)
+    state = {
+        "startup_color_query": terminal._new_startup_color_query_state(now),
+        "startup_color_replies": [],
+    }
+
+    output = terminal._filter_startup_color_queries(
+        state, b"\x1b]10;?\x07\x1b]10;?\x07\x1b]11;?\x07",
+    )
+
+    assert output == b""
+    assert state["startup_color_replies"] == [
+        terminal._STARTUP_COLOR_QUERY_REPLIES[10],
+        terminal._STARTUP_COLOR_QUERY_REPLIES[11],
+    ]
+
+
+def test_startup_color_query_filter_preserves_invalid_and_expired_input(monkeypatch):
+    clock = {"now": 100.0}
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: clock["now"])
+    state = {
+        "startup_color_query": terminal._new_startup_color_query_state(clock["now"]),
+        "startup_color_replies": [],
+    }
+    invalid = b"\x1b]11;rgb:ffff/ffff/ffff\x07"
+
+    assert terminal._filter_startup_color_queries(state, invalid) == invalid
+    assert terminal._filter_startup_color_queries(state, b"tail\x1b]11;") == b"tail"
+    clock["now"] += terminal.STARTUP_COLOR_QUERY_TIMEOUT
+
+    assert terminal._filter_startup_color_queries(state, b"not-a-query") == (
+        b"\x1b]11;not-a-query"
+    )
+    assert state["startup_color_replies"] == []
+    assert state["startup_color_query"] is None
+
+
 def test_read_available_waits_once_and_coalesces_ready_chunks(monkeypatch):
     """macOS 的连续小块 PTY 输出应合并，不能每块都走一次 WebSocket。"""
     state = {"lock": threading.Lock()}
