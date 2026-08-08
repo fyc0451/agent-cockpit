@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -120,6 +122,79 @@ def onboarding_required() -> bool:
         return False
     # Herdr 默认配置约定：缺少 onboarding 也会显示首次配置向导。
     return config.get("onboarding") is not False
+
+
+def herdr_config_path() -> Path:
+    return Path(
+        os.environ.get("HERDR_CONFIG_PATH", "~/.config/herdr/config.toml")
+    ).expanduser()
+
+
+def reload_config(timeout: int = 10) -> dict[str, Any]:
+    """热重载运行中的 herdr server 配置；返回 ok/error,不抛异常。"""
+    try:
+        _run(["server", "reload-config"], timeout=timeout)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+_THEME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def set_theme_name(name: str) -> Path:
+    """更新 config.toml [theme].name,其余内容按行保留;缺节则追加。
+
+    原子写(mkstemp+fsync+replace)。不触碰 auto_switch 等其余键。
+    """
+    if not _THEME_NAME_RE.fullmatch(name or ""):
+        raise ValueError("非法主题名")
+    path = herdr_config_path()
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.is_file() else []
+    out: list[str] = []
+    in_theme = False
+    replaced = False
+
+    def _name_line(ending: str = "\n") -> str:
+        return f'name = "{name}"{ending}'
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            if in_theme and not replaced:
+                out.append(_name_line())
+                replaced = True
+            in_theme = stripped == "[theme]"
+            out.append(line)
+            continue
+        if in_theme and not replaced and re.match(r"^\s*name\s*=", line):
+            ending = "\n" if line.endswith("\n") else ""
+            out.append(_name_line(ending))
+            replaced = True
+            continue
+        out.append(line)
+    if in_theme and not replaced:
+        out.append(_name_line())
+        replaced = True
+    if not replaced:
+        if out and not out[-1].endswith("\n"):
+            out.append("\n")
+        out.extend(["\n", "[theme]\n", _name_line()])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".herdr-config.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("".join(out))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def _run(args: list[str], timeout: int = 10) -> str:

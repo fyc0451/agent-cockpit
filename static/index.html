@@ -4489,6 +4489,7 @@ function setTheme(mode,save=true){
   const contrast=termMinimumContrastRatio();
   for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th;if(inst.xterm.options.minimumContrastRatio!==contrast)inst.xterm.options.minimumContrastRatio=contrast}catch(e){}}
   sendAllTermColorSchemes();
+  try{fetch('/api/theme/herdr',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({mode:light?'light':'dark'})}).catch(()=>{})}catch(e){}
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
