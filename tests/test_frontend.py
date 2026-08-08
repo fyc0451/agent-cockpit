@@ -258,6 +258,8 @@ def test_terminal_assets_are_self_hosted_with_subresource_integrity():
     assert "@xterm/xterm` 6.1.0-beta.287" in notice
     assert "@xterm/addon-fit` 0.12.0-beta.287" in notice
     assert "@xterm/addon-webgl` 0.20.0-beta.286" in notice
+    assert "xterm.js 加载失败(版本升级后旧缓存?)" in HTML
+    assert 'onclick="location.reload(true)"' in HTML
 
 
 def test_terminal_webgl_renderer_with_safe_fallback():
