@@ -1608,18 +1608,17 @@ def test_terminal_ws_writes_data_directly_without_color_rewrite():
     assert "ANSI16_RGB" not in js
 
 
-def test_theme_switch_forces_tui_repaint_for_explicit_colors():
-    # xterm theme 只会更新默认色；已缓存的 38/48 显式颜色必须让 TUI 重绘。
+def test_theme_switch_no_longer_forces_pty_resize():
+    # _repaintTermForTheme 已删除(颜色重写移除后,触发 PTY resize 重绘 TUI 的理由消失)。
+    # setTheme 只更新 xterm options.theme,不再 resize → 避免每次切主题产生两次后端 resize。
     js = _inline_js()
-    repaint = js.split("function _repaintTermForTheme(inst){", 1)[1].split(
-        "function setTheme", 1
-    )[0]
+    assert "function _repaintTermForTheme" not in js
+    assert "TERM_LIGHT" not in js
     set_theme = js.split("function setTheme(mode,save=true){", 1)[1].split(
         "function toggleTheme", 1
     )[0]
-    assert "xterm.resize(cols-1,rows)" in repaint
-    assert "xterm.resize(cols,rows)" in repaint
-    assert "_repaintTermForTheme(inst)" in set_theme
+    assert "options.theme=th" in set_theme
+    assert "xterm.resize" not in set_theme
 
 
 def test_settings_hub_error_shows_actionable_fix():

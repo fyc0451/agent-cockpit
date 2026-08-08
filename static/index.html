@@ -3363,9 +3363,6 @@ async function termClose(){
 }
 // 多终端保活:每个终端一个独立容器元素,切换时隐藏/显示(不销毁)
 let TERM_INSTANCES={}; // {term_id: {xterm, fit, ws, el, reconnectDelay, reconnectTimer, closing}}
-// 终端主题缓存:setTheme 与首屏初始化时更新,避免 onmessage 每个 WS chunk 都
-// classList.contains('light') 查 DOM(高速刷屏时是主线程同步开销)。
-let TERM_LIGHT=document.documentElement.classList.contains('light');
 function safeFitOf(fit,xterm){
   const view=document.getElementById('view-term');
   const el=xterm?.element;
@@ -4379,24 +4376,13 @@ function termTheme(){
 // TUI 程序(codex/kimi 等,输出全是颜色码)卡顿的根因。颜色现交由 xterm 渲染层原生
 // 处理(options.theme + WebGL),与 Orca 的做法一致。浅色主题下 TUI 自带的显式深色
 // 背景不再被反转,可读性略降,但换取了流畅度。
-function _repaintTermForTheme(inst){
-  const xterm=inst?.xterm,cols=xterm?.cols,rows=xterm?.rows;
-  if(!xterm||xterm._disposed||!cols||!rows)return;
-  // xterm 已缓存的显式单元格颜色不会随 theme 重新计算。轻微改变一次 PTY
-  // 宽度触发 TUI 全屏重绘，新输出会经过当前主题的 ANSI 适配器。
-  if(cols>10)xterm.resize(cols-1,rows);
-  requestAnimationFrame(()=>{try{
-    if(!xterm._disposed){if(xterm.cols!==cols)xterm.resize(cols,rows);xterm.refresh(0,xterm.rows-1)}
-  }catch(e){}});
-}
 function setTheme(mode,save=true){
   const light=mode==='light';
-  TERM_LIGHT=light;
   document.documentElement.classList.toggle('light',light);
   const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
   const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
   const th=termTheme();
-  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th;_repaintTermForTheme(inst)}catch(e){}}
+  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th}catch(e){}}
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
