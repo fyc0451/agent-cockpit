@@ -1609,8 +1609,8 @@ def test_terminal_ws_writes_data_directly_without_color_rewrite():
     renderer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
         "function loadOlderTermHistory", 1
     )[0]
-    assert "queueTermRender(id,visible)" in renderer
-    assert "queueTermRender(id,data)" in renderer
+    assert "inst.xterm.write(visible)" in renderer
+    assert "inst.xterm.write(data)" in renderer
     # onmessage 不再有主题分支/颜色重写调用(注释提及已移除不算)
     code_only = "\n".join(
         line for line in onmessage.splitlines()
@@ -1630,12 +1630,11 @@ def test_terminal_replay_is_bounded_and_older_history_loads_on_scroll():
     js = _inline_js()
     assert "TERM_REPLAY_INITIAL=8*1024" in js
     assert "TERM_HISTORY_PAGE=8*1024" in js
-    assert "TERM_RENDER_CHUNK=1024" in js
     writer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
         "function loadOlderTermHistory", 1
     )[0]
     assert "data.byteLength-TERM_REPLAY_INITIAL" in writer
-    assert "queueTermRender(id,visible)" in writer
+    assert "inst.xterm.write(visible)" in writer
     pager = js.split("function loadOlderTermHistory(id){", 1)[1].split(
         "function enableTermHistoryPaging", 1
     )[0]
@@ -1649,22 +1648,25 @@ def test_terminal_replay_is_bounded_and_older_history_loads_on_scroll():
     assert "loadOlderTermHistory(id)" in wheel
 
 
-def test_terminal_output_rendering_yields_between_bounded_chunks():
+def test_terminal_output_uses_xterm_native_batching_without_manual_micro_chunks():
     js = _inline_js()
-    pump = js.split("function pumpTermRender(id){", 1)[1].split(
-        "function queueTermRender", 1
+    assert "TERM_RENDER_CHUNK" not in js
+    assert "function pumpTermRender" not in js
+    assert "function queueTermRender" not in js
+    writer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
+        "function loadOlderTermHistory", 1
     )[0]
-    assert "item.offset+TERM_RENDER_CHUNK" in pump
-    assert "setTimeout(()=>pumpTermRender(id),0)" in pump
+    assert "inst.xterm.write(data)" in writer
     mount = js.split("function termMount(id){", 1)[1].split(
         "// ============ 会话管理", 1
     )[0]
-    assert "renderQueue:[]" in mount
-    assert "renderGeneration:0" in mount
+    assert "renderQueue" not in mount
+    assert "renderGeneration" not in mount
 
 
-def test_theme_switch_no_longer_forces_pty_resize():
-    # 主题切换只更新 xterm 原生渲染选项，不 resize PTY。
+def test_theme_switch_updates_visible_terminal_without_contrast_rebuild_or_resize():
+    # minimumContrastRatio 的运行期 setter 会让 WebGL 逐格重算颜色；主题切换只
+    # 更新当前可见终端的 palette，隐藏终端切过去时再应用。
     js = _inline_js()
     assert "function _repaintTermForTheme" not in js
     assert "TERM_LIGHT" not in js
@@ -1672,10 +1674,17 @@ def test_theme_switch_no_longer_forces_pty_resize():
         "function toggleTheme", 1
     )[0]
     assert "options.theme=th" in set_theme
-    assert "options.minimumContrastRatio" in set_theme
+    assert "options.minimumContrastRatio" not in set_theme
+    assert "id===TERM_ID" in set_theme
+    assert "inst.pendingTheme=th" in set_theme
     assert "xterm.refresh" not in set_theme
     assert "sendAllTermColorSchemes()" in set_theme
     assert "xterm.resize" not in set_theme
+    show = js.split("function showTermInstance(id){", 1)[1].split(
+        "function termSwitch", 1
+    )[0]
+    assert "if(inst.pendingTheme)" in show
+    assert "inst.xterm.options.theme=inst.pendingTheme" in show
 
 
 def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():

@@ -2648,7 +2648,7 @@ async function ackMsg(pid,name,mid){try{await api('/api/ack',{method:'POST',head
 let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, TERM_SESSIONS={}, TERM_ZOOM={}, TERM_FONT_READY=null;
 let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
 const TERM_SESSION_PREFIX='session:';
-const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=1024;
+const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024;
 const TERM_TEXT_ENCODER=new TextEncoder();
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
@@ -3419,45 +3419,24 @@ function termHistorySlice(inst,start){
   }
   return out;
 }
-function pumpTermRender(id){
-  const inst=TERM_INSTANCES[id];
-  if(!inst||inst.closing||inst.rendering||!inst.renderQueue.length)return;
-  const item=inst.renderQueue[0],generation=inst.renderGeneration;
-  inst.rendering=true;
-  const end=Math.min(item.offset+TERM_RENDER_CHUNK,item.data.byteLength);
-  try{inst.xterm.write(item.data.subarray(item.offset,end),()=>{
-    const current=TERM_INSTANCES[id];
-    if(!current||current!==inst||current.renderGeneration!==generation)return;
-    item.offset=end;current.rendering=false;
-    if(item.offset>=item.data.byteLength){current.renderQueue.shift();try{item.done?.()}catch(e){}}
-    setTimeout(()=>pumpTermRender(id),0);
-  })}catch(e){
-    inst.rendering=false;inst.renderQueue.shift();setTimeout(()=>pumpTermRender(id),0);
-  }
-}
-function queueTermRender(id,data,done){
-  const inst=TERM_INSTANCES[id];if(!inst||!data?.byteLength)return;
-  inst.renderQueue.push({data,offset:0,done});pumpTermRender(id);
-}
 function writeTermOutput(id,data,replayFrame){
   const inst=TERM_INSTANCES[id];if(!inst||inst.closing)return;
   rememberTermOutput(inst,data);
   if(replayFrame){
     inst.historyHiddenBytes=Math.max(0,inst.historyBytes-TERM_REPLAY_INITIAL);
     const visible=data.subarray(Math.max(0,data.byteLength-TERM_REPLAY_INITIAL));
-    queueTermRender(id,visible);
-  }else queueTermRender(id,data);
+    inst.xterm.write(visible);
+  }else inst.xterm.write(data);
 }
 function loadOlderTermHistory(id){
   const inst=TERM_INSTANCES[id],buffer=inst?.xterm?.buffer?.active;
-  if(!inst||inst.closing||inst.historyLoading||inst.rendering||inst.renderQueue.length||
-     !inst.historyHiddenBytes||buffer?.type!=='normal')return;
+  if(!inst||inst.closing||inst.historyLoading||!inst.historyHiddenBytes||buffer?.type!=='normal')return;
   const oldLength=buffer.length,oldViewport=buffer.viewportY;
   inst.historyHiddenBytes=Math.max(0,inst.historyHiddenBytes-TERM_HISTORY_PAGE);
   const history=termHistorySlice(inst,inst.historyHiddenBytes);
-  inst.historyLoading=true;inst.renderGeneration++;inst.renderQueue=[];inst.rendering=false;
+  inst.historyLoading=true;
   try{inst.xterm.reset()}catch(e){inst.historyLoading=false;return}
-  queueTermRender(id,history,()=>{
+  inst.xterm.write(history,()=>{
     const current=TERM_INSTANCES[id];if(!current||current!==inst)return;
     current.historyLoading=false;
     const active=current.xterm.buffer.active;
@@ -3591,6 +3570,10 @@ function showTermInstance(id){
   }
   const inst=TERM_INSTANCES[id];
   if(!inst)return;
+  if(inst.pendingTheme){
+    try{inst.xterm.options.theme=inst.pendingTheme}catch(e){}
+    inst.pendingTheme=null;
+  }
   // 切回死连接(CLOSING/CLOSED)→ 自动重连;每实例独立 WS,新建时不互相关闭
   if(!inst.ws||inst.ws.readyState>=2){
     if(inst.reconnectTimer){clearTimeout(inst.reconnectTimer);inst.reconnectTimer=null}
@@ -3656,7 +3639,7 @@ function termMount(id){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
   TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:'',resizeObserver:null,
-    historyChunks:[],historyBytes:0,historyHiddenBytes:0,historyLoading:false,renderQueue:[],rendering:false,renderGeneration:0};
+    historyChunks:[],historyBytes:0,historyHiddenBytes:0,historyLoading:false,pendingTheme:null};
   enableTermHistoryPaging(el,id,xterm);
   // 容器尺寸变化不一定伴随 window/visualViewport resize 事件（布局延迟稳定、
   // 侧边栏开合、缩放恢复、字体加载后重排等），漏一次 refit 终端就会比可见
@@ -4486,8 +4469,10 @@ function setTheme(mode,save=true){
   const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
   const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
   const th=termTheme();
-  const contrast=termMinimumContrastRatio();
-  for(const inst of Object.values(TERM_INSTANCES||{})){try{inst.xterm.options.theme=th;if(inst.xterm.options.minimumContrastRatio!==contrast)inst.xterm.options.minimumContrastRatio=contrast}catch(e){}}
+  for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
+    if(id===TERM_ID&&inst.el?.style.display!=='none')try{inst.xterm.options.theme=th}catch(e){}
+    else inst.pendingTheme=th;
+  }
   sendAllTermColorSchemes();
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
 }
