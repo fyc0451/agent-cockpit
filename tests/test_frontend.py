@@ -1587,42 +1587,25 @@ def test_team_collab_send_failure_keeps_draft_with_inline_error():
     assert "toast('团队消息发送失败" not in send
 
 
-def test_terminal_dark_mode_min_contrast_boost_exists():
-    # 暗色模式同时处理 qoder 过暗前景和 Codex 固定输出的浅色背景。
-    js = _inline_js()
-    assert "function darkTermBoost(xterm,data,binary){" in js
-    assert "DARK_BOOST_MIN_LUMA=115" in js
-    assert "function _darkBoostRewriteSgr(full,params){" in js
-    assert "xterm._darkBoost" in js
-    boost = js.split("function _darkBoostRewriteSgr(full,params){", 1)[1].split(
-        "function darkTermBoost", 1
-    )[0]
-    assert "(p==='38'||p==='48')&&parts[i+1]==='2'" in boost
-    assert "(p==='38'||p==='48')&&parts[i+1]==='5'" in boost
-    assert "function _darkAdaptBg(r,g,b){" in js
-    assert "p==='38'?_darkBoostFg(...rgb):_darkAdaptBg(...rgb)" in boost
-    assert "p==='48'" in boost
-    assert "ANSI16_RGB[n]" in boost
-
-
-def test_terminal_dark_boost_wired_in_ws_dark_branch():
+def test_terminal_ws_writes_data_directly_without_color_rewrite():
+    # 颜色由 xterm 渲染层原生处理(options.theme + WebGL),不再逐 chunk JS 改写。
+    # 这与 Orca 的做法一致;JS ANSI 重写是 TUI 高速输出时主线程卡顿的根因。
     js = _inline_js()
     onmessage = js.split("ws.onmessage=ev=>{try{", 1)[1].split("ws.onclose", 1)[0]
-    dark = onmessage.split("}else{", 1)[1]
-    assert "darkTermBoost(xterm" in dark
-    assert "xterm.write(s2)" in dark
-
-
-def test_terminal_dark_boost_stream_safe_with_carry():
-    js = _inline_js()
-    fn = js.split("function darkTermBoost(xterm,data,binary){", 1)[1].split(
-        "// ============", 1
-    )[0]
-    assert "carry" in fn
-    assert "_escTailSplit" in fn
-    assert "includes('38;')" in fn  # 快速路径
-    assert "includes('48;')" in fn
-    assert "\\x1b\\]1[01]" in fn
+    assert "xterm.write(typeof ev.data" in onmessage
+    # onmessage 不再有主题分支/颜色重写调用(注释提及已移除不算)
+    code_only = "\n".join(
+        line for line in onmessage.splitlines()
+        if line.strip() and not line.strip().startswith("//")
+    )
+    assert "lightTermAdapt(" not in code_only
+    assert "darkTermBoost(" not in code_only
+    assert "TERM_LIGHT" not in code_only
+    # 颜色重写函数已整体移除(定义不存在)
+    assert "function lightTermAdapt" not in js
+    assert "function darkTermBoost" not in js
+    assert "function _rgbToHsl" not in js
+    assert "ANSI16_RGB" not in js
 
 
 def test_theme_switch_forces_tui_repaint_for_explicit_colors():
@@ -1637,39 +1620,6 @@ def test_theme_switch_forces_tui_repaint_for_explicit_colors():
     assert "xterm.resize(cols-1,rows)" in repaint
     assert "xterm.resize(cols,rows)" in repaint
     assert "_repaintTermForTheme(inst)" in set_theme
-
-
-def test_terminal_light_mode_rewrites_basic_ansi_backgrounds():
-    # Codex 输入区用标准 ANSI 黑背景(40 或 48;5;0)。xterm 的 0-15
-    # 调色板不能按前景/背景分别配置，必须在浅色输出适配器中改写背景。
-    js = _inline_js()
-    rewrite = js.split("function _lightRewriteSgr(full,params){", 1)[1].split(
-        "function lightTermAdapt", 1
-    )[0]
-    assert "ANSI16_RGB" in js
-    assert "code>=40&&code<=47" in rewrite
-    assert "code>=100&&code<=107" in rewrite
-    assert "p==='48'&&n>=0&&n<16?ANSI16_RGB[n]" in rewrite
-    # 低位 ANSI 前景仍交给浅色主题调色板，不能把黑字翻成白字。
-    assert "p==='38'&&n>=0&&n<16" not in rewrite
-
-
-def test_terminal_light_mode_does_not_invert_existing_light_theme_twice():
-    # SCC 的 Codex 会直接输出浅色背景 48;2;240;240;241。浅色适配只能把
-    # 深背景转浅，不能把已经正确的浅背景再次反相成黑条；前景方向相反。
-    js = _inline_js()
-    adapt = js.split("function _adaptLightColor(kind,r,g,b){", 1)[1].split(
-        "const ANSI16_RGB", 1
-    )[0]
-    rewrite = js.split("function _lightRewriteSgr(full,params){", 1)[1].split(
-        "function lightTermAdapt", 1
-    )[0]
-    assert "kind==='48'&&l<0.5" in adapt
-    assert "kind==='38'&&l>0.5" in adapt
-    assert "return[r,g,b]" in adapt
-    assert "_adaptLightColor('48',...rgb)" in rewrite
-    assert "_adaptLightColor(p,...rgb)" in rewrite
-    assert "_adaptLightColor(p,+parts[j]||0" in rewrite
 
 
 def test_settings_hub_error_shows_actionable_fix():

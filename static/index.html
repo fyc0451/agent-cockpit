@@ -3486,19 +3486,10 @@ function openTermWS(id,xterm,replay){
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}flushTermInput(id,ws);startTermZoomLease(id);if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}};
   ws.onmessage=ev=>{try{
-    if(TERM_LIGHT){
-      const st=xterm._darkBoost;
-      if(st&&st.carry){xterm.write(st.carry);st.carry=''}
-      // 浅色模式:重写 TUI 自带颜色(opencode 等显式刷深色底,主题管不到)
-      const s=lightTermAdapt(xterm,typeof ev.data==='string'?ev.data:new Uint8Array(ev.data),typeof ev.data!=='string');
-      if(s)xterm.write(s);
-    }else{
-      const st=xterm._lightAdapt;
-      if(st&&st.carry){xterm.write(st.carry);st.carry=''}
-      // 暗色模式:提升过暗前景，并把 CLI 固定输出的浅背景转为深背景
-      const s2=darkTermBoost(xterm,typeof ev.data==='string'?ev.data:new Uint8Array(ev.data),typeof ev.data!=='string');
-      if(s2)xterm.write(s2);
-    }
+    // 直接写入 xterm:颜色由 xterm 渲染层(Terminal options.theme + WebGL)原生处理。
+    // 不再用 JS 逐 chunk 改写 ANSI(lightTermAdapt/darkTermBoost 已移除)——那是
+    // TUI 高速输出时主线程卡顿的根因。Orca 同样把主题交给 xterm,不做 JS 颜色重写。
+    xterm.write(typeof ev.data==='string'?ev.data:new Uint8Array(ev.data));
   }catch(e){}};
   ws.onclose=ev=>{const taken=ev.code===4001,invalid=ev.code===4004;try{if(!xterm._disposed)xterm.write(ev.code===1008?'\r\n\x1b[31m[会话已失效，请重新登录]\x1b[0m\r\n':taken?'\r\n\x1b[36m[终端已由更新的页面接管]\x1b[0m\r\n':invalid?'\r\n\x1b[36m[旧终端已失效，正在自动恢复]\x1b[0m\r\n':'\r\n\x1b[33m[连接已断开，正在自动重连]\x1b[0m\r\n')}catch(e){}const inst=TERM_INSTANCES[id];if(invalid&&inst&&inst.ws===ws&&!inst.closing)setTimeout(()=>recoverInvalidTerm(id),0);else if(ev.code!==1008&&!taken&&inst&&inst.ws===ws)scheduleTermReconnect(id)};
   ws.onerror=()=>{try{if(!xterm._disposed)xterm.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n')}catch(e){}};
@@ -4383,156 +4374,11 @@ function termTheme(){
   }
   return {background:'#000000',foreground:'#e8e8e8'};
 }
-// ============ 浅色模式 ANSI 适配 ============
-// opencode 等 TUI 用 256 色/RGB SGR 显式刷深色背景,xterm 主题只控制默认底色,管不到显式颜色。
-// 浅色模式下对输出里的显式颜色做 HSL 明度反转:深底变浅、浅字变深,尽量保持原有对比关系。
-function _rgbToHsl(r,g,b){
-  r/=255;g/=255;b/=255;
-  const mx=Math.max(r,g,b),mn=Math.min(r,g,b);let h=0,s=0;const l=(mx+mn)/2;
-  if(mx!==mn){const d=mx-mn;s=l>0.5?d/(2-mx-mn):d/(mx+mn);
-    if(mx===r)h=(g-b)/d+(g<b?6:0);else if(mx===g)h=(b-r)/d+2;else h=(r-g)/d+4;h/=6}
-  return[h,s,l];
-}
-function _hslToRgb(h,s,l){
-  if(s===0){const v=Math.round(l*255);return[v,v,v]}
-  const q=l<0.5?l*(1+s):l+s-l*s,p=2*l-q;
-  const f=t=>{if(t<0)t+=1;if(t>1)t-=1;
-    if(t<1/6)return p+(q-p)*6*t;if(t<1/2)return q;if(t<2/3)return p+(q-p)*(2/3-t)*6;return p};
-  return[Math.round(f(h+1/3)*255),Math.round(f(h)*255),Math.round(f(h-1/3)*255)];
-}
-function _adaptLightColor(kind,r,g,b){
-  const[h,s,l]=_rgbToHsl(r,g,b);
-  // TUI 可能已经根据 COLORFGBG/终端能力输出浅色主题。只修正与浅底冲突的
-  // 颜色，不能把它已经给出的浅背景再次反相成黑色。
-  if((kind==='48'&&l<0.5)||(kind==='38'&&l>0.5))return _hslToRgb(h,s,1-l);
-  return[r,g,b];
-}
-const ANSI16_RGB=[
-  [0,0,0],[205,49,49],[13,188,121],[229,229,16],
-  [36,114,200],[188,63,188],[17,168,205],[229,229,229],
-  [102,102,102],[241,76,76],[35,209,139],[245,245,67],
-  [59,142,234],[214,112,214],[41,184,219],[255,255,255]
-];
-function _pal256rgb(n){
-  if(n<16)return null; // 0-15 前景走主题调色板；背景需按上下文单独改写
-  if(n<232){const c=[0,95,135,175,215,255],v=n-16;return[c[(v/36)|0],c[((v/6)|0)%6],c[v%6]]}
-  const g=8+(n-232)*10;return[g,g,g];
-}
-// 拆出末尾不完整的转义序列(CSI/OSC 可能跨 WS 分片),留到下一段拼上再解析
-function _escTailSplit(s){
-  const i=s.lastIndexOf('\x1b');
-  if(i<0)return[s,''];
-  const t=s.slice(i);
-  if(t==='\x1b'||/^\x1b\[[0-?]*[ -/]*$/.test(t))return[s.slice(0,i),t];
-  if(/^\x1b\]/.test(t)&&!/(\x07|\x1b\\)/.test(t))return[s.slice(0,i),t];
-  return[s,''];
-}
-function _lightRewriteSgr(full,params){
-  if(!params)return full;
-  const parts=params.split(';'),out=[];
-  for(let i=0;i<parts.length;i++){
-    const p=parts[i];
-    const code=+p;
-    // xterm 的 0-15 调色板无法区分“黑色前景”和“黑色背景”。浅色主题要保留
-    // 黑色文字，但 Codex 输入区的 ANSI 黑背景(40/48;5;0)必须单独翻成浅色。
-    if((code>=40&&code<=47)||(code>=100&&code<=107)){
-      const rgb=ANSI16_RGB[code>=100?code-92:code-40];
-      const[r,g,b]=_adaptLightColor('48',...rgb);out.push('48','2',r,g,b);continue;
-    }
-    if((p==='38'||p==='48')&&parts[i+1]==='5'&&parts[i+2]){
-      const n=+parts[i+2];
-      const rgb=p==='48'&&n>=0&&n<16?ANSI16_RGB[n]:_pal256rgb(n);
-      if(rgb){const[r,g,b]=_adaptLightColor(p,...rgb);out.push(p,'2',r,g,b)}else out.push(p,'5',parts[i+2]);
-      i+=2;continue;
-    }
-    if((p==='38'||p==='48')&&parts[i+1]==='2'){
-      let j=i+2;if(parts[j]==='')j++; // 兼容 38;2;;r;g;b(带空 colorspace)
-      if(parts[j]!==undefined&&parts[j+1]!==undefined&&parts[j+2]!==undefined){
-        const[r,g,b]=_adaptLightColor(p,+parts[j]||0,+parts[j+1]||0,+parts[j+2]||0);
-        out.push(p,'2',r,g,b);i=j+2;continue;
-      }
-    }
-    out.push(p);
-  }
-  return'\x1b['+out.join(';')+'m';
-}
-function lightTermAdapt(xterm,data,binary){
-  let st=xterm._lightAdapt;
-  if(!st)st=xterm._lightAdapt={carry:'',dec:new TextDecoder('utf-8')};
-  let s=binary?st.dec.decode(data,{stream:true}):data;
-  // 快路径:无跨包残留且本 chunk 不含任何转义序列(纯文本输出)→ 原样返回,
-  // 跳过字符串拼接和两轮正则扫描。高速刷屏(编译/ls/日志)时绝大多数 chunk 走这条路。
-  if(!st.carry&&s.indexOf('\x1b')<0)return s;
-  s=st.carry+s;
-  const split=_escTailSplit(s);s=split[0];st.carry=split[1];
-  if(!s)return'';
-  // 含转义但无需要改写的颜色码(只有重置/加粗等)→ 也跳过正则,与 darkTermBoost 对称。
-  if(!s.includes('38;')&&!s.includes('48;')&&!s.includes('\x1b[4')&&!s.includes('\x1b[10')&&!s.includes('\x1b]1'))return s;
-  s=s.replace(/\x1b\[([0-9;]*)m/g,_lightRewriteSgr);
-  // OSC 10/11 设置默认前景/背景:浅色模式下丢弃(保留查询和重置),防止 TUI 把默认底刷黑
-  s=s.replace(/\x1b\]1[01];[^?\x07\x1b][^\x07\x1b]*(\x07|\x1b\\)/g,'');
-  return s;
-}
-// 暗色模式颜色适配:部分 CLI 会输出过暗前景(qoder),另一些 Codex 实例会
-// 固定输出浅色背景(48;2;240;240;241)。前者提到最低亮度，后者反成深底。
-const DARK_BOOST_MIN_LUMA=115;
-function _darkBoostFg(r,g,b){
-  const luma=0.2126*r+0.7152*g+0.0722*b;
-  if(luma>=DARK_BOOST_MIN_LUMA)return null;
-  const k=Math.min(4,DARK_BOOST_MIN_LUMA/Math.max(1,luma));
-  return [Math.min(255,Math.round(r*k)),Math.min(255,Math.round(g*k)),Math.min(255,Math.round(b*k))];
-}
-function _darkAdaptBg(r,g,b){
-  const[h,s,l]=_rgbToHsl(r,g,b);
-  return l>0.5?_hslToRgb(h,s,1-l):null;
-}
-function _darkBoostRewriteSgr(full,params){
-  if(!params)return full;
-  const parts=params.split(';'),out=[];let changed=false;
-  for(let i=0;i<parts.length;i++){
-    const p=parts[i],code=+p;
-    if((code>=40&&code<=47)||(code>=100&&code<=107)){
-      const rgb=ANSI16_RGB[code>=100?code-92:code-40],dark=_darkAdaptBg(...rgb);
-      if(dark){out.push('48','2',dark[0],dark[1],dark[2]);changed=true}else out.push(p);
-      continue;
-    }
-    if((p==='38'||p==='48')&&parts[i+1]==='2'){
-      let j=i+2;if(parts[j]==='')j++;
-      if(parts[j]!==undefined&&parts[j+1]!==undefined&&parts[j+2]!==undefined){
-        const rgb=[+parts[j]||0,+parts[j+1]||0,+parts[j+2]||0];
-        const adapted=p==='38'?_darkBoostFg(...rgb):_darkAdaptBg(...rgb);
-        if(adapted){out.push(p,'2',adapted[0],adapted[1],adapted[2]);changed=true}
-        else out.push(...parts.slice(i,j+3));
-        i=j+2;continue;
-      }
-    }
-    if((p==='38'||p==='48')&&parts[i+1]==='5'&&parts[i+2]!==undefined){
-      // 灰阶 232-255(232 最暗):低于阈值的灰统一提到 245(≈138 luma)
-      const n=+parts[i+2];
-      if(p==='38'&&n>=232&&n<245){out.push('38','5','245');changed=true}
-      else if(p==='48'){
-        const rgb=n>=0&&n<16?ANSI16_RGB[n]:_pal256rgb(n),dark=rgb?_darkAdaptBg(...rgb):null;
-        if(dark){out.push('48','2',dark[0],dark[1],dark[2]);changed=true}
-        else out.push(p,'5',parts[i+2]);
-      }else out.push(p,'5',parts[i+2]);
-      i+=2;continue;
-    }
-    out.push(p);
-  }
-  return changed?'\x1b['+out.join(';')+'m':full;
-}
-function darkTermBoost(xterm,data,binary){
-  let st=xterm._darkBoost;
-  if(!st)st=xterm._darkBoost={carry:'',dec:new TextDecoder('utf-8')};
-  let s=binary?st.dec.decode(data,{stream:true}):data;
-  s=st.carry+s;
-  const split=_escTailSplit(s);s=split[0];st.carry=split[1];
-  if(!s)return'';
-  if(!s.includes('38;')&&!s.includes('48;')&&!s.includes('\x1b[4')&&!s.includes('\x1b[10')&&!s.includes('\x1b]1'))return s;
-  s=s.replace(/\x1b\[([0-9;]*)m/g,_darkBoostRewriteSgr);
-  // CLI 不能覆盖 Cockpit 选择的默认终端主题；保留 OSC 查询和重置。
-  return s.replace(/\x1b\]1[01];[^?\x07\x1b][^\x07\x1b]*(\x07|\x1b\\)/g,'');
-}
+// 注:浅色/暗色模式的 JS ANSI 颜色重写(_rgbToHsl/_lightRewriteSgr/lightTermAdapt/
+// darkTermBoost 等)已移除——它让每个终端 WS chunk 都在主线程跑正则+HSL 运算,是
+// TUI 程序(codex/kimi 等,输出全是颜色码)卡顿的根因。颜色现交由 xterm 渲染层原生
+// 处理(options.theme + WebGL),与 Orca 的做法一致。浅色主题下 TUI 自带的显式深色
+// 背景不再被反转,可读性略降,但换取了流畅度。
 function _repaintTermForTheme(inst){
   const xterm=inst?.xterm,cols=xterm?.cols,rows=xterm?.rows;
   if(!xterm||xterm._disposed||!cols||!rows)return;
