@@ -50,6 +50,40 @@ def test_new_terminal_websocket_cancels_and_supersedes_old_reader():
     asyncio.run(exercise())
 
 
+def test_terminal_input_notes_are_coalesced_with_one_trailing_run(monkeypatch):
+    """连续按键最多占一个线程；执行期间的新输入合并为一次尾随记录。"""
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake_note(term_id):
+        calls.append(term_id)
+        started.set()
+        assert release.wait(2)
+
+    async def exercise():
+        monkeypatch.setattr(server, "_TERM_INPUT_NOTE_TASKS", {})
+        monkeypatch.setattr(server, "_TERM_INPUT_NOTE_PENDING", set())
+        monkeypatch.setattr(server.terminal, "note_user_input", fake_note)
+
+        for _ in range(64):
+            server._schedule_term_input_note("term1")
+        assert await asyncio.to_thread(started.wait, 1)
+        for _ in range(64):
+            server._schedule_term_input_note("term1")
+        await asyncio.sleep(0)
+        assert calls == ["term1"]
+
+        task = server._TERM_INPUT_NOTE_TASKS["term1"]
+        release.set()
+        await asyncio.wait_for(task, 2)
+        assert calls == ["term1", "term1"]
+        assert server._TERM_INPUT_NOTE_TASKS == {}
+        assert server._TERM_INPUT_NOTE_PENDING == set()
+
+    asyncio.run(exercise())
+
+
 def test_api_requires_auth_when_token_configured(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     response = TestClient(server.app).get("/api/files/roots")

@@ -165,6 +165,8 @@ _ZOOM_LEASES_LOCK = threading.RLock()
 TERM_WS_TAKEN_OVER_CODE = 4001
 TERM_WS_INVALID_CODE = 4004
 _TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
+_TERM_INPUT_NOTE_TASKS: dict[str, asyncio.Task[None]] = {}
+_TERM_INPUT_NOTE_PENDING: set[str] = set()
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
     "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报；"
@@ -4267,6 +4269,29 @@ def _release_term_websocket(term_id: str, connection: dict[str, Any]) -> None:
         _TERM_WS_CONNECTIONS.pop(term_id, None)
 
 
+async def _drain_term_input_notes(term_id: str) -> None:
+    """合并连续按键的后台记录，避免 note 任务挤满默认线程池。"""
+    try:
+        while term_id in _TERM_INPUT_NOTE_PENDING:
+            _TERM_INPUT_NOTE_PENDING.discard(term_id)
+            try:
+                await asyncio.to_thread(terminal.note_user_input, term_id)
+            except Exception:
+                logger.exception("terminal input note failed: %s", term_id)
+    finally:
+        if _TERM_INPUT_NOTE_TASKS.get(term_id) is asyncio.current_task():
+            _TERM_INPUT_NOTE_TASKS.pop(term_id, None)
+
+
+def _schedule_term_input_note(term_id: str) -> None:
+    _TERM_INPUT_NOTE_PENDING.add(term_id)
+    task = _TERM_INPUT_NOTE_TASKS.get(term_id)
+    if task is None or task.done():
+        _TERM_INPUT_NOTE_TASKS[term_id] = asyncio.create_task(
+            _drain_term_input_notes(term_id)
+        )
+
+
 @app.websocket("/api/term/{term_id}")
 async def api_term_ws(websocket: WebSocket, term_id: str):
     """终端 WebSocket 双向桥接:浏览器↔PTY。"""
@@ -4370,11 +4395,10 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                     # 在 Linux 上 5-15ms、macOS 更慢),把它放到 write 之后且不 await,
                     # 避免每个按键的回显都等一次 fork——这是终端输入卡顿的主因。
                     # note_user_input 只产生副作用(记录避让时间戳),返回值不用于
-                    # 决定本次写入,线程安全(_lock 保护内部 dict),可安全发后即忘。
+                    # 决定本次写入；连续按键合并为单任务 + 一次尾随记录，避免
+                    # 大量 to_thread 任务反过来挤占 write_term 使用的默认线程池。
                     await asyncio.to_thread(terminal.write_term, term_id, text)
-                    asyncio.create_task(
-                        asyncio.to_thread(terminal.note_user_input, term_id)
-                    )
+                    _schedule_term_input_note(term_id)
                 except (TimeoutError, OSError) as e:
                     logger.warning("terminal input write failed %s: %s", term_id, e)
                     await websocket.send_text(f"\r\n[输入未完整写入: {e}]\r\n")

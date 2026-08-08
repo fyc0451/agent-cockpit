@@ -813,10 +813,11 @@ def test_websocket_records_typing_off_event_loop():
     """WebSocket 主循环必须经 to_thread 调 note_user_input(内部起子进程)。
 
     note_user_input 必须在事件循环线程之外执行;但为避免每按键 fork herdr
-    拖慢回显,它现在发后即忘(asyncio.create_task)而非 await 阻塞 write_term。
+    拖慢回显,它现在由合并调度器发后即忘,不 await 阻塞 write_term。
     """
     source = (Path(__file__).resolve().parent.parent / "server.py").read_text(
         encoding="utf-8"
     )
-    assert "asyncio.to_thread(terminal.note_user_input, term_id)" in source
+    assert "_schedule_term_input_note(term_id)" in source
+    assert "await asyncio.to_thread(terminal.note_user_input, term_id)" in source
     assert "terminal.write_term" in source
