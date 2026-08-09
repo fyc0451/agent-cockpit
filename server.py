@@ -32,6 +32,7 @@ import httpx
 import coordination
 import hub_client
 import herdr_client
+import release_identity
 import tasks
 import team_inbox_router
 import uploads
@@ -83,7 +84,7 @@ COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
 AUTH_COOKIE = "cockpit_session"
 TEAM_AUTH_COOKIE = "cockpit_team_human_session"
 PUBLIC_PATHS = {
-    "/", "/health", "/api/auth/status", "/api/auth/login",
+    "/", "/health", "/health/live", "/api/auth/status", "/api/auth/login",
     "/api/agent/team-reply",
 }
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -4811,6 +4812,17 @@ def health():
         "hub": mail_status["write_available"],
         "push": push_status["available"],
     }
+
+
+@app.get("/health/live")
+def health_live():
+    """纯读无副作用(Wiki13 J1A)：只证明目标进程响应并返回 release identity。
+    不探测 Herdr/Hub/Push/Mail，不触发 DDL/reconcile。"""
+    try:
+        identity = release_identity.get_release_identity()
+    except ValueError as exc:
+        raise HTTPException(503, f"release identity invalid: {exc}")
+    return {"status": "live", "identity": identity}
 
 
 @app.get("/health.poll")
