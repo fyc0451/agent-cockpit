@@ -1690,7 +1690,7 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     assert "inst.renderQueue.length" in settle
     assert "inst.xterm.buffer.active.type!=='alternate'" in settle
     assert "TERM_LOADING_QUIET-(performance.now()-inst.loadingLastOutputAt)" in settle
-    assert "requestAnimationFrame(()=>requestAnimationFrame" in settle
+    assert "afterTermPaints(()=>{" in settle
     writer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
         "function loadOlderTermHistory", 1
     )[0]
@@ -1709,9 +1709,17 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     mount = js.split("function termMount(id){", 1)[1].split(
         "// ============ 会话管理", 1
     )[0]
-    assert mount.index("requestAnimationFrame(()=>requestAnimationFrame") < mount.index(
-        "openTermWS(id,xterm,true)"
-    )
+    assert "requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(callback)))" in js
+    painted = mount.index("afterTermPaints(()=>{")
+    opened = mount.index("xterm.open(el)")
+    webgl = mount.index("enableTermWebgl(xterm)")
+    assert painted < opened < webgl
+    assert "xterm.write(TERM_WEBGL_WARMUP,clearWarmup)" in mount
+    assert "current.initializing=false" in mount
+    clear_warmup = mount.split("const clearWarmup=", 1)[1].split(
+        "try{xterm.write", 1
+    )[0]
+    assert clear_warmup.index("xterm.reset()") < clear_warmup.index("afterTermPaints(connect)")
     assert "isTermFocusReport(d)||TERM_INSTANCES[id]?.loadingEl" in mount
     term_key = js.split("function termKey(name){", 1)[1].split(
         "async function termEnsure", 1

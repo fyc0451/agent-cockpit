@@ -2655,7 +2655,9 @@ let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
 const TERM_SESSION_PREFIX='session:';
 const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=16*1024;
 const TERM_LOADING_QUIET=400,TERM_LOADING_TIMEOUT=15000;
+const TERM_WEBGL_WARMUP='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()[]{}<>+-=_/\\|:;,.? ┌─┐│└┘├┤┬┴┼ 中文';
 const TERM_TEXT_ENCODER=new TextEncoder();
+const afterTermPaints=callback=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(callback)));
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
 const TERM_KEY_SEQ={ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D',Enter:'\r',Tab:'\t',Escape:'\x1b',Backspace:'\x7f',Delete:'\x1b[3~',Home:'\x1b[H',End:'\x1b[F',PageUp:'\x1b[5~',PageDown:'\x1b[6~',CtrlC:'\x03',CtrlB:'\x02',CtrlD:'\x04',CtrlL:'\x0c',CtrlZ:'\x1a',F1:'\x1bOP',F2:'\x1bOQ',F3:'\x1bOR',F4:'\x1bOS',F5:'\x1b[15~',F6:'\x1b[17~',F7:'\x1b[18~',F8:'\x1b[19~',F9:'\x1b[20~',F10:'\x1b[21~',F11:'\x1b[23~',F12:'\x1b[24~'};
 const TERM_MODIFIERS={ctrl:false,alt:false,shift:false};
@@ -3481,12 +3483,12 @@ function settleTermLoading(id,force=false){
   }
   if(inst.loadingPaintPending)return;
   inst.loadingPaintPending=true;
-  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+  afterTermPaints(()=>{
     const current=TERM_INSTANCES[id];if(!current?.loadingEl)return;
     current.loadingPaintPending=false;
     if(!current.replayComplete||current.loadingWaitForTui||current.rendering||current.renderQueue.length||performance.now()-current.loadingLastOutputAt<TERM_LOADING_QUIET){settleTermLoading(id);return}
     finishTermLoading(id,current);
-  }));
+  });
 }
 function writeTermOutput(id,data,replayFrame){
   const inst=TERM_INSTANCES[id];if(!inst||inst.closing)return;
@@ -3659,7 +3661,7 @@ function showTermInstance(id){
     inst.pendingTheme=null;
   }
   // 切回死连接(CLOSING/CLOSED)→ 自动重连;每实例独立 WS,新建时不互相关闭
-  if(!inst.ws||inst.ws.readyState>=2){
+  if((!inst.ws&&!inst.initializing)||inst.ws?.readyState>=2){
     if(inst.reconnectTimer){clearTimeout(inst.reconnectTimer);inst.reconnectTimer=null}
     try{if(!inst.xterm._disposed)inst.xterm.write('\r\n\x1b[36m[重连中…]\x1b[0m\r\n')}catch(e){}
     inst.ws=openTermWS(id,inst.xterm,false);
@@ -3714,10 +3716,6 @@ function termMount(id){
   const xterm=new Terminal({cursorBlink:true,fontSize:termFontSize(),fontFamily:TERM_FONT,theme:termTheme(),minimumContrastRatio:termMinimumContrastRatio(),scrollback:5000});
   const fit=new FitAddon.FitAddon();
   xterm.loadAddon(fit);
-  xterm.open(el);
-  enableTermWebgl(xterm);
-  enableTermTouchScroll(el,xterm);
-  xterm.parser.registerOscHandler(52,handleOsc52);
   const loadingEl=document.createElement('div');
   loadingEl.className='term-loading';loadingEl.setAttribute('role','status');
   loadingEl.innerHTML='<span class="term-loading-spinner" aria-hidden="true"></span><span>正在恢复终端</span>';
@@ -3726,34 +3724,36 @@ function termMount(id){
   for(const [tid,inst] of Object.entries(TERM_INSTANCES)){
     if(inst.el&&tid!==id)inst.el.style.display='none';
   }
-  TERM_INSTANCES[id]={xterm,fit,ws:null,el,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:'',resizeObserver:null,
+  TERM_INSTANCES[id]={xterm,fit,ws:null,el,webgl:null,initializing:true,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:'',resizeObserver:null,
     historyChunks:[],historyBytes:0,historyHiddenBytes:0,historyLoading:false,pendingTheme:null,
     renderQueue:[],rendering:false,renderGeneration:0,replayComplete:false,loadingEl,loadingWaitForTui:false,
     loadingLastOutputAt:performance.now(),loadingTimer:null,loadingDeadlineTimer:null,loadingPaintPending:false};
-  enableTermHistoryPaging(el,id,xterm);
-  // 容器尺寸变化不一定伴随 window/visualViewport resize 事件（布局延迟稳定、
-  // 侧边栏开合、缩放恢复、字体加载后重排等），漏一次 refit 终端就会比可见
-  // 区域窄几列，右侧留黑条。ResizeObserver 覆盖所有容器尺寸变化；
-  // safeFitOf 内部已有隐藏/零尺寸守卫和目标尺寸一致的短路，不会刷 PTY resize。
-  if(typeof ResizeObserver!=='undefined'){
-    const ro=new ResizeObserver(()=>{
-      const inst=TERM_INSTANCES[id];
-      if(inst&&!inst.closing)safeFitOf(inst.fit,inst.xterm);
-    });
-    ro.observe(el);
-    TERM_INSTANCES[id].resizeObserver=ro;
-  }
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   xterm.onData(d=>{if(isTermFocusReport(d)||TERM_INSTANCES[id]?.loadingEl)return;queueTermInput(id,applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   XTERM=xterm;FIT=fit;
-  // 先让浏览器真正画出 loading，再开始历史回放和 TUI 启动；否则首帧解析
-  // 会抢在遮罩绘制之前占住主线程，用户仍会看到旧页面像“卡死”。
-  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+  // 先让浏览器画出 loading，再在同一个 xterm/WebGL context 中完成首帧和
+  // 常用字符纹理预热。预热内容清空且 GPU 再绘制两帧后才连接 PTY。
+  afterTermPaints(()=>{
     const inst=TERM_INSTANCES[id];if(!inst||inst.closing||inst.xterm!==xterm)return;
-    inst.ws=openTermWS(id,xterm,true);
-    if(TERM_ID===id){TERM_WS=inst.ws;showTermInstance(id)}
-  }));
+    xterm.open(el);inst.webgl=enableTermWebgl(xterm);enableTermTouchScroll(el,xterm);
+    xterm.parser.registerOscHandler(52,handleOsc52);enableTermHistoryPaging(el,id,xterm);safeFitOf(fit,xterm);
+    if(typeof ResizeObserver!=='undefined'){
+      const ro=new ResizeObserver(()=>{const current=TERM_INSTANCES[id];if(current&&!current.closing)safeFitOf(current.fit,current.xterm)});
+      ro.observe(el);TERM_INSTANCES[id].resizeObserver=ro;
+    }
+    const connect=()=>{
+      const current=TERM_INSTANCES[id];if(!current||current.closing||current.xterm!==xterm)return;
+      current.initializing=false;current.ws=openTermWS(id,xterm,true);
+      if(TERM_ID===id){TERM_WS=current.ws;showTermInstance(id)}
+    };
+    const clearWarmup=()=>afterTermPaints(()=>{
+      const current=TERM_INSTANCES[id];if(!current||current.closing||current.xterm!==xterm)return;
+      try{xterm.reset()}catch(e){}
+      afterTermPaints(connect);
+    });
+    try{xterm.write(TERM_WEBGL_WARMUP,clearWarmup)}catch(e){clearWarmup()}
+  });
 }
 
 // ============ 会话管理(session + agent 重启) ============
