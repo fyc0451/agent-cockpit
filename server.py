@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
+import itertools
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import subprocess
 import threading
 import time
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -75,7 +77,10 @@ async def lifespan(_: FastAPI):
         try:
             await asyncio.to_thread(_release_all_zoom_leases)
         finally:
-            await asyncio.to_thread(_stop_state_client)
+            survivors = await asyncio.to_thread(_stop_state_client)
+            if survivors:
+                # deadline 耗尽仍有存活 state 线程:显式告警,保留诊断引用
+                logger.error("herdr state clients survived stop: %s", survivors)
             _poller_task = None
             _message_poller_task = None
             _worktree_cleanup_task = None
@@ -4614,10 +4619,20 @@ _state_epoch = 0
 # socket 换入超时未就绪的持久降级:name -> {"reason"};旧客户端缓存继续可读,
 # 但 snapshot/SSE 显式 degraded,retry 成功换入后清除。
 _state_swap_pending: dict[str, dict[str, str]] = {}
-# H0.5 R4:已登记未发布的候选客户端(锁外等待期)。候选必须在启动线程前于
-# 同临界区登记,stop 与 published 一起摘取并停止;ownership 归属摘取者,
-# 防止 stop/reconcile 双停。
-_state_inflight: dict[str, herdr_state.HerdrStateClient] = {}
+# H0.5 R5:已登记未发布的候选 owner record(不可变:epoch/name/token/client
+# identity)。登记同名活跃候选时跳过复用;摘除仅当 current is owner(身份
+# 比较),旧 epoch/旧 worker 绝不能移除新候选。start/stop 线性化由
+# HerdrStateClient._lifecycle_lock 保证(stop 先取得则 start 拒绝生线程)。
+@dataclass(frozen=True)
+class _InflightOwner:
+    epoch: int
+    name: str
+    token: int
+    client: "herdr_state.HerdrStateClient"
+
+
+_state_inflight: dict[str, _InflightOwner] = {}
+_inflight_token = itertools.count(1)
 # socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
 STATE_SWAP_READY_TIMEOUT_S = 2.0
 # stop 对全部唯一 client(published+inflight)共享的总 join 预算(秒),
@@ -4650,11 +4665,13 @@ def _open_state_clients() -> None:
         _state_epoch += 1
 
 
-def _stop_state_client() -> None:
-    """lifespan 关闭:同一临界区关 running 闸门、递增 epoch,并摘取全部
-    published+inflight 客户端,清空 clients/inflight/meta/swap-pending/
-    discovery;锁外按共享总 deadline 停止并 join 所有唯一 client(多
-    session 不叠加),返回瞬间无存活 cockpit-state 线程/FD;幂等。"""
+def _stop_state_client() -> list[dict[str, Any]]:
+    """lifespan 关闭(两阶段)。阶段一同一临界区:关 running 闸门、递增
+    epoch、摘取全部 published+inflight(去重)、清空 clients/inflight/meta/
+    swap-pending/discovery。阶段二锁外:先向所有唯一 client 广播
+    request_stop(置标志+关在途 socket,不 join——不等 A 耗尽才 signal B),
+    再按共享总 deadline 逐个 join。返回 survivor 诊断列表(deadline 耗尽仍
+    存活者,保留引用);空列表=全部干净退出,正常路径必须如此。"""
     global _state_clients, _state_sessions_meta, _state_running, _state_epoch
     global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
     global _state_inflight
@@ -4662,19 +4679,47 @@ def _stop_state_client() -> None:
         _state_running = False
         _state_epoch += 1
         unique: dict[int, herdr_state.HerdrStateClient] = {}
-        for client in list(_state_clients.values()) + list(_state_inflight.values()):
+        for client in list(_state_clients.values()):
             unique[id(client)] = client
+        for owner in _state_inflight.values():
+            unique[id(owner.client)] = owner.client
         _state_clients = {}
         _state_inflight = {}
         _state_sessions_meta = {}
         _state_swap_pending = {}
         _state_discovery_ok = False
         _state_discovery_reason = "state client not running"
+    clients = list(unique.values())
+    # 阶段二 a:先广播 cancel,所有 client 同时收到停止信号
+    for client in clients:
+        try:
+            client.request_stop()
+        except Exception:
+            logger.exception("herdr state client request_stop failed")
+    # 阶段二 b:共享总 deadline 逐个 join(stop 幂等,信号已发)
     deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
-    for client in unique.values():
-        _stop_client_quietly(
-            client, join_timeout=max(0.0, deadline - time.monotonic())
-        )
+    survivors: list[dict[str, Any]] = []
+    for client in clients:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            all_exited = client.stop(join_timeout=remaining)
+        except Exception:
+            logger.exception("herdr state client stop failed")
+            all_exited = False
+        if not all_exited:
+            alive = [
+                t.name for t in threading.enumerate()
+                if t.name.startswith("cockpit-state-") and t.is_alive()
+            ]
+            sessions = getattr(client, "_sessions", None) or getattr(
+                client, "sessions", {}
+            )
+            survivors.append({
+                "client": repr(client),
+                "sessions": sorted(sessions),
+                "alive_state_threads": alive,
+            })
+    return survivors
 
 
 def _discover_running_sessions() -> dict[str, dict[str, str]] | None:
@@ -4718,16 +4763,14 @@ def _client_ready(client: herdr_state.HerdrStateClient, name: str) -> bool:
     return state == "subscribed"
 
 
-def _candidate_cancelled(
-    name: str, client: herdr_state.HerdrStateClient, epoch: int
-) -> bool:
-    """候选是否已被取消:stop 关闸/epoch 变迁/inflight 易主(ownership 被
-    stop 摘取)。ready 等待每轮调用,stop 后立即退出等待。"""
+def _candidate_cancelled(name: str, owner: _InflightOwner) -> bool:
+    """候选是否已被取消:stop 关闸/epoch 变迁/inflight 易主(身份比较,
+    旧 worker 不会误认新 epoch 同名候选)。ready 等待每轮调用。"""
     with _STATE_CLIENT_LOCK:
         return (
             not _state_running
-            or _state_epoch != epoch
-            or _state_inflight.get(name) is not client
+            or _state_epoch != owner.epoch
+            or _state_inflight.get(name) is not owner
         )
 
 
@@ -4735,15 +4778,16 @@ def _reconcile_state_client() -> None:
     """按发现结果增量对齐 per-session 客户端。
 
     - 发现失败:fail-closed,只标记 discovery degraded,不动旧客户端/缓存。
-    - 新增 session:登记 inflight→持锁启动→原子 inflight→published,全部在
-      同一临界区,无 start→CAS 窗口;bootstrap 前该 session 显式 degraded。
+    - 新增 session:锁内登记不可变 owner record(同名活跃候选跳过复用),
+      锁外 start(stop 先取得所有权则 start 拒绝不生线程),再 owner+epoch
+      CAS 原子 inflight→published;bootstrap 前该 session 显式 degraded。
     - 删除 session:只停止并摘除该 session 的客户端。
-    - socket 路径变化(restart):候选先登记 inflight 再持锁启动,锁外有界
-      等待就绪(每轮观察取消);ready 后 CAS(running+epoch+old client+
-      ownership)通过才原子换入并停旧;超时弃新留旧,记录
-      _state_swap_pending 持久 degraded,下轮发现自动重试,成功后清降级。
-    - ownership:谁从 inflight 摘取谁负责 stop;stop 摘走的候选 reconcile
-      绝不再停(防双停),也绝不 publish(不复活线程/FD)。
+    - socket 路径变化(restart):同样 owner 登记+锁外 start,锁外有界等待
+      就绪(每轮观察取消);ready 后 owner+epoch+old-client CAS 通过才原子
+      换入并停旧;超时弃新留旧,记录 _state_swap_pending 持久 degraded,
+      下轮发现自动重试,成功后清降级。
+    - ownership:摘除仅当 current is owner(身份比较);stop 摘走的候选
+      reconcile 绝不再 stop/publish,旧 epoch worker 摘不到新同名候选。
     """
     global _state_discovery_ok, _state_discovery_reason, _state_sessions_meta
     running = _discover_running_sessions()
@@ -4793,32 +4837,55 @@ def _reconcile_state_client() -> None:
                 and name not in _state_sessions_meta
             ):
                 continue  # 闸门已关:候选从未启动线程,零副作用直接丢弃
-            _state_inflight[name] = client
-            client.start()  # 持锁启动:登记与启动之间 stop 无法穿插
-            if _state_inflight.pop(name, None) is client:
+            if name in _state_inflight:
+                continue  # 同名活跃候选已在途:跳过复用,不起双 worker
+            owner = _InflightOwner(
+                epoch=epoch, name=name,
+                token=next(_inflight_token), client=client,
+            )
+            _state_inflight[name] = owner
+        # 锁外启动:若 stop 已先取得所有权(request_stop),start 拒绝不生线程
+        if not client.start():
+            continue  # stop 拥有该候选:不 publish、不再 stop(防双停)
+        with _STATE_CLIENT_LOCK:
+            if (
+                _state_inflight.get(name) is owner  # 身份比较
+                and _state_running
+                and _state_epoch == epoch
+                and name not in _state_clients
+                and name not in _state_sessions_meta
+            ):
                 # 仍持有 ownership:原子 inflight→published
+                del _state_inflight[name]
                 _state_clients[name] = client
                 _state_sessions_meta[name] = running[name]
-            # 否则 start 期间 stop 已摘取并拥有该候选,不得再 publish/stop
+            # 否则 stop 已摘取并拥有该候选,不得 publish
     for name, socket_path, old_client in changed:
         new_client = _build_session_client(name, socket_path)
+        owner: _InflightOwner | None = None
         with _STATE_CLIENT_LOCK:
             owned = (
                 _state_running
                 and _state_epoch == epoch
                 and _state_clients.get(name) is old_client
+                and name not in _state_inflight  # 同名候选在途:跳过复用
             )
             if owned:
-                _state_inflight[name] = new_client
-                new_client.start()  # 持锁启动
-        if not owned:
-            continue  # 从未启动线程,直接丢弃
+                owner = _InflightOwner(
+                    epoch=epoch, name=name,
+                    token=next(_inflight_token), client=new_client,
+                )
+                _state_inflight[name] = owner
+        if owner is None:
+            continue  # 闸门已关或已有同名候选:未启动线程,直接丢弃
+        if not new_client.start():
+            continue  # stop 已先取得所有权:不生线程、不 publish
         # 锁外有界等待就绪:每轮观察取消,stop 后立即退出
         ready = False
         cancelled = False
         deadline = time.monotonic() + STATE_SWAP_READY_TIMEOUT_S
         while time.monotonic() < deadline:
-            if _candidate_cancelled(name, new_client, epoch):
+            if _candidate_cancelled(name, owner):
                 cancelled = True
                 break
             if _client_ready(new_client, name):
@@ -4828,7 +4895,9 @@ def _reconcile_state_client() -> None:
         swapped = False
         stop_new = False
         with _STATE_CLIENT_LOCK:
-            still_owned = _state_inflight.pop(name, None) is new_client
+            still_owned = _state_inflight.get(name) is owner
+            if still_owned:
+                del _state_inflight[name]  # 仅 owner 本人可摘除
             if (
                 still_owned
                 and not cancelled

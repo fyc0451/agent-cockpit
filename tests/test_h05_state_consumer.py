@@ -7,11 +7,14 @@ fork(轮询 + team router 10 pending)、SSE sig 纳入 degraded/state_status、
 OpenCode 颜色字节注入清债。
 R3 复审修订(#1727 两项 HIGH):running/epoch CAS 屏障与 swap timeout 持久
 degraded→retry 原子换入清降级。
-R4 复审修订(#1745 REVIEW_BLOCK):_state_inflight 候选登记(启动线程前)、
-持锁启动消除 start→CAS 窗口、ownership 防双停、stop 同临界区摘取
-published+inflight 并按共享总 deadline join(stop 返回瞬间无线程/FD)、
-ready wait 每轮观察取消;覆盖 candidate start 后/wait 中/ready 后 CAS 前/
-added start→CAS/跨 restart/多 session 共享 deadline/真实线程 FD 基线。
+R4 复审修订(#1745 REVIEW_BLOCK):_state_inflight 候选登记、ownership 防
+双停、stop 摘取 published+inflight、ready wait 每轮观察取消。
+R5 复审修订(#1763 REVIEW_BLOCK):不可变 owner record(epoch/name/token/
+client 身份比较,同名跳过复用,旧 worker 摘不到新候选)、start 移出锁
+(HerdrStateClient lifecycle lock/request_stop 线性化,stop 先取得则
+start 拒绝生线程)、两阶段 stop(先广播 request_stop 再共享 deadline
+join)、survivor 显式返回不静默;覆盖同 epoch 双 worker、跨 epoch 同名、
+锁外 blocked start、A/B signal 顺序、deadline survivor、线程/FD 基线。
 """
 import asyncio
 import threading
@@ -74,12 +77,20 @@ class FakeStateClient:
         self.ready = {name: FakeStateClient.ready_next for name in sessions}
         self.started = False
         self.stopped = False
+        self.stop_requested = False
         FakeStateClient.instances.append(self)
 
     def start(self):
+        if self.stop_requested:
+            return False  # stop 先取得所有权:不生线程
         self.started = True
+        return True
+
+    def request_stop(self):
+        self.stop_requested = True
 
     def stop(self, join_timeout=5.0):
+        self.request_stop()
         self.stopped = True
         return True
 
@@ -379,14 +390,15 @@ def test_stop_state_client_stops_all_and_is_idempotent(monkeypatch):
 
 
 def _patch_start_calls_stop(monkeypatch, reopen=False):
-    """候选 start 期间模拟 lifespan stop 抢先(同线程重入 RLock)。"""
+    """候选 start 期间模拟 lifespan stop 抢先(锁外 start 窗口)。"""
     real_start = FakeStateClient.start
 
     def start_then_stop(self):
-        real_start(self)
+        result = real_start(self)
         server._stop_state_client()
         if reopen:
             server._open_state_clients()
+        return result
 
     monkeypatch.setattr(FakeStateClient, "start", start_then_stop)
 
@@ -559,6 +571,158 @@ def test_stop_shared_deadline_multi_session(monkeypatch):
     assert join_timeouts[1] < 0.15  # 共享递减:不是每个都拿满 0.25
     assert join_timeouts[2] < 0.05
     assert server._state_clients == {}
+
+
+# ── R5 复审修订(#1763):owner 身份安全 + 两阶段 stop ─────────────
+
+
+def test_same_epoch_changed_double_worker_skipped(monkeypatch):
+    """同 epoch 同名 changed 双 reconcile:第二个候选登记时跳过复用,
+    全程只启动一个 swap worker。"""
+    clients = _install(monkeypatch, names=("demo",))
+    FakeStateClient.ready_next = False
+    monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 1.0)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo-new.sock"})
+    first_wait = threading.Event()
+    real_cancelled = server._candidate_cancelled
+
+    def cancel_spy(name, owner):
+        first_wait.set()  # worker1 已登记并进入 ready wait
+        return real_cancelled(name, owner)
+
+    monkeypatch.setattr(server, "_candidate_cancelled", cancel_spy)
+    t1 = threading.Thread(target=server._reconcile_state_client)
+    t2 = threading.Thread(target=server._reconcile_state_client)
+    t1.start()
+    assert first_wait.wait(5)
+    t2.start()
+    t1.join(5)
+    t2.join(5)
+    assert not t1.is_alive() and not t2.is_alive()
+    candidates = [
+        i for i in FakeStateClient.instances
+        if i is not clients["demo"] and i.started
+    ]
+    assert len(candidates) == 1  # 双 worker 被注册跳过拦截(第二个从未启动)
+
+
+def test_cross_epoch_same_name_old_worker_cannot_evict_new(monkeypatch):
+    """old/new epoch 同名:旧 worker 迟到收尾不得摘除/停止新 epoch 候选,
+    不得覆盖新 publish。"""
+    clients = _install(monkeypatch, names=("demo",))
+    FakeStateClient.ready_next = False
+    monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 30.0)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo-new.sock"})
+    first_wait = threading.Event()
+    real_cancelled = server._candidate_cancelled
+
+    def cancel_spy(name, owner):
+        first_wait.set()
+        return real_cancelled(name, owner)
+
+    monkeypatch.setattr(server, "_candidate_cancelled", cancel_spy)
+    t1 = threading.Thread(target=server._reconcile_state_client)
+    t1.start()
+    assert first_wait.wait(5)  # 旧 epoch worker 在 ready wait 中
+    # stop+reopen:旧候选被 stop 摘取停止;新 epoch 重新 reconcile 上线
+    survivors = server._stop_state_client()
+    assert survivors == []
+    server._open_state_clients()
+    server._reconcile_state_client()  # added 路径直接 publish 新客户端
+    new_client = server._state_clients["demo"]
+    old_candidate = FakeStateClient.instances[1]
+    assert new_client is not clients["demo"] and new_client is not old_candidate
+    t1.join(5)
+    assert not t1.is_alive()
+    # 旧 worker 收尾后:新客户端仍在且未被停止(身份比较防误删/双停)
+    assert server._state_clients["demo"] is new_client
+    assert new_client.stopped is False
+    assert old_candidate.stopped is True
+
+
+def test_stop_signals_all_before_any_join(monkeypatch):
+    """两阶段 stop:所有 client 先收 request_stop,再逐个 join——A 未耗尽
+    前 B 已被 signal。"""
+    events: list[str] = []
+    real_req = FakeStateClient.request_stop
+    real_stop = FakeStateClient.stop
+
+    def req(self):
+        events.append(f"req:{next(iter(self.sessions))}")
+        return real_req(self)
+
+    def stp(self, join_timeout=5.0):
+        events.append(f"stop:{next(iter(self.sessions))}")
+        time.sleep(0.1)  # A 的 join 耗时期间 B 必须已被 signal
+        return real_stop(self, join_timeout)
+
+    monkeypatch.setattr(FakeStateClient, "request_stop", req)
+    monkeypatch.setattr(FakeStateClient, "stop", stp)
+    _install(monkeypatch, names=("a", "b"))
+    assert server._stop_state_client() == []
+    assert events.index("req:b") < events.index("stop:a")
+
+
+def test_stop_deadline_survivor_reported_not_silent(monkeypatch):
+    """deadline 耗尽仍存活:不静默成功、不丢引用——返回 survivor 诊断。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.1)
+
+    class ZombieClient(FakeStateClient):
+        def stop(self, join_timeout=5.0):
+            self.request_stop()
+            self.stopped = True
+            return False  # 线程拒不退场
+
+    zombie = ZombieClient({"z": "/tmp/z.sock"})
+    zombie.start()
+    monkeypatch.setattr(server, "_state_clients", {"z": zombie})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "z": {"socket": "/tmp/z.sock", "directory": "/d"},
+    })
+    survivors = server._stop_state_client()
+    assert server._state_clients == {}
+    assert len(survivors) == 1
+    assert survivors[0]["sessions"] == ["z"]
+    assert repr(zombie) in survivors[0]["client"]  # 保留引用诊断
+
+
+def test_real_stop_during_blocked_start_no_thread(monkeypatch):
+    """另一线程 stop-during-blocked-start:request_stop 先取得所有权后,
+    被放行的 start 必须拒绝生线程;无 survivor、无 publish。"""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingStartClient(_REAL_STATE_CLIENT):
+        def start(self):
+            entered.set()
+            release.wait(5)
+            return super().start()
+
+    def build_blocking(name, socket_path):
+        return BlockingStartClient(
+            {name: socket_path},
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.1,
+            health_check_interval=None,
+        )
+
+    monkeypatch.setattr(server, "_build_session_client", build_blocking)
+    _fake_discovery(monkeypatch, {"blk": "/nonexistent/blk.sock"})
+    worker = threading.Thread(target=server._reconcile_state_client)
+    worker.start()
+    assert entered.wait(5)  # reconcile 已登记 owner,阻塞在锁外 start
+    survivors = server._stop_state_client()  # stop 在 start 完成前取得所有权
+    assert survivors == []
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert server._state_clients == {}
+    assert server._state_inflight == {}
+    assert server._state_sessions_meta == {}
+    assert not [
+        t for t in threading.enumerate()
+        if t.name.startswith("cockpit-state-blk") and t.is_alive()
+    ]
 
 
 def test_real_inflight_candidate_stop_no_thread_fd_leak(monkeypatch):

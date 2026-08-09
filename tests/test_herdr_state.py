@@ -1273,6 +1273,19 @@ class TestHerdrStateClient:
         with pytest.raises(RuntimeError, match="已启动过"):
             client.start()
 
+    def test_start_refused_after_request_stop(self) -> None:
+        """H0.5 R5:request_stop 先取得所有权后 start 拒绝(返回 False)且
+        不生线程——start/stop 经 lifecycle lock 线性化。"""
+        client = herdr_state.HerdrStateClient({"s": "/nonexistent.sock"})
+        client.request_stop()
+        assert client.start() is False
+        assert client._threads == {}
+        assert not [
+            t for t in threading.enumerate()
+            if t.name.startswith("cockpit-state-s") and t.is_alive()
+        ]
+        assert client.stop() is True
+
     def test_register_after_stop_closes_and_raises(self) -> None:
         """stop 已置位后新 socket 登记被拒绝且立即关闭（无新 I/O 存活）。"""
         client = herdr_state.HerdrStateClient({})
