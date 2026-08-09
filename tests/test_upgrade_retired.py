@@ -170,13 +170,35 @@ class TestEntryPoints:
 # ---------------------------------------------------------------------------
 
 class TestDocs:
-    def test_readme_no_one_click_upgrade(self) -> None:
-        text = Path("README.md").read_text(encoding="utf-8")
-        assert "已退役" in text
-        assert "受管人工发布" in text
-        assert "升级后自动重启 systemd" not in text
+    # 旧文案禁止项：任何仍宣称 upgrade.sh 会拉代码/装依赖/重启的表述
+    _FORBIDDEN_PATTERNS = (
+        "升级后自动重启 systemd",
+        "拉代码 + 装依赖",
+        "refuses local tracked changes; restarts",
+        "ローカル変更を拒否し",
+        "restarts systemd/LaunchAgent",
+        "自動再起動",
+    )
+
+    def test_all_readmes_use_retired_boundary(self) -> None:
+        for name in ("README.md", "README.en.md", "README.ja.md"):
+            text = Path(name).read_text(encoding="utf-8")
+            for pattern in self._FORBIDDEN_PATTERNS:
+                assert pattern not in text, f"{name} 仍宣称旧一键升级能力: {pattern}"
+        assert "已退役" in Path("README.md").read_text(encoding="utf-8")
+        assert "RETIRED" in Path("README.en.md").read_text(encoding="utf-8")
+        assert "退役" in Path("README.ja.md").read_text(encoding="utf-8")
 
     def test_user_guide_no_one_click_upgrade(self) -> None:
         text = Path("docs/USER-GUIDE.md").read_text(encoding="utf-8")
-        assert "拉代码 + 装依赖" not in text
+        for pattern in self._FORBIDDEN_PATTERNS:
+            assert pattern not in text
         assert "已退役" in text
+
+    def test_docs_require_managed_release_boundary(self) -> None:
+        zh = Path("README.md").read_text(encoding="utf-8")
+        en = Path("README.en.md").read_text(encoding="utf-8")
+        ja = Path("README.ja.md").read_text(encoding="utf-8")
+        assert "受管人工发布" in zh
+        assert "managed release" in en
+        assert "管理されたリリース" in ja

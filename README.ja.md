@@ -236,7 +236,7 @@ token は含みません。
 ## アップグレード、診断、アンインストール
 
 ```bash
-./upgrade.sh       # ローカル変更を拒否し、systemd/LaunchAgent を自動再起動
+./upgrade.sh       # 退役(fail-closed)：ワンクリック更新を無効化、管理されたリリース手順のみ
 ./doctor.sh        # Python、依存、herdr、Agent Mail、認証、サービスをチェック
 ./uninstall.sh     # user service のみ削除。コード・設定・データは保持
 ```
@@ -262,7 +262,7 @@ agent-cockpit/
 ├── static/sw.js           Web Push service worker とディープリンク
 ├── static/manifest.webmanifest  PWA メタデータ
 ├── tests/                 リグレッション/セキュリティテスト
-├── install.sh / upgrade.sh / doctor.sh / uninstall.sh
+├── install.sh / upgrade.sh（退役） / doctor.sh / uninstall.sh
 ├── agent-cockpit.service  systemd user ユニットテンプレート
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```
