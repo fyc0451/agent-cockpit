@@ -483,3 +483,121 @@ class TestPersistence:
         con.close()
         assert {r["mail_name"]: r["state"] for r in rows} == {"a": "previous", "b": "active"}
         assert migs == 2  # 首绑 + a→b
+
+# ── R5: 迁移安全（#1860 两项 HIGH）──────────────────────────────────────
+
+_OLD_LB_R2 = (
+    "CREATE TABLE leader_bindings ("
+    "issuer TEXT NOT NULL, scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL, "
+    "mail_name TEXT NOT NULL, binding_id TEXT NOT NULL, binding_version INTEGER NOT NULL, "
+    "state TEXT NOT NULL, updated_ts REAL NOT NULL, route_epoch INTEGER NOT NULL DEFAULT 0, "
+    "migration_id TEXT, drain_revision INTEGER NOT NULL DEFAULT 0, "
+    "drain_remaining INTEGER NOT NULL DEFAULT 0, drain_pending INTEGER NOT NULL DEFAULT 0, "
+    "drain_claimed INTEGER NOT NULL DEFAULT 0, drain_ack_pending INTEGER NOT NULL DEFAULT 0, "
+    "PRIMARY KEY(scope_kind, scope_id, mail_name));"
+)
+_OLD_CE_R2 = (
+    "CREATE TABLE control_events ("
+    "event_id TEXT PRIMARY KEY, issuer TEXT NOT NULL, scope_kind TEXT, scope_id TEXT, "
+    "event_type TEXT, binding_version INTEGER, migration_id TEXT, payload_json TEXT, "
+    "created_ts REAL, fanned_out INTEGER);"
+)
+
+
+class TestR5MigrationSafety:
+    def test_rebuild_rollback_on_copy_failure(self, db_path: Path) -> None:
+        """rebuild INSERT(copy)失败→rollback→原表名/schema/行不变。"""
+        con = _fresh_connect()
+        con.executescript(_OLD_LB_R2)
+        con.execute(
+            "INSERT INTO leader_bindings VALUES('i','team','t1','a','bid1',1,'active',"
+            "1.0,1,'m',0,0,0,0,0)"
+        )
+        con.commit(); con.close()
+        # 注入 copy 失败（用 wrapper，sqlite3.Connection.execute 不可直接赋值）
+        class FailOnCopy:
+            def __init__(self, c):
+                self._c = c
+            def __getattr__(self, n):
+                return getattr(self._c, n)
+            def execute(self, sql, *a, **k):
+                if "INSERT INTO leader_bindings" in sql and "_leader_bindings_old" in sql:
+                    raise sqlite3.IntegrityError("injected copy failure")
+                return self._c.execute(sql, *a, **k)
+        con = FailOnCopy(_fresh_connect())
+        with pytest.raises(sqlite3.IntegrityError, match="injected"):
+            leader_binding._rebuild_leader_bindings(con)
+        con.close()
+        # rollback 后原表名/schema/行不变
+        con = _fresh_connect()
+        tables = [r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        assert "leader_bindings" in tables
+        assert "_leader_bindings_old" not in tables
+        rows = con.execute("SELECT * FROM leader_bindings").fetchall()
+        assert len(rows) == 1 and rows[0]["mail_name"] == "a"
+        pk = [r["name"] for r in con.execute("PRAGMA table_info(leader_bindings)") if int(r["pk"]) > 0]
+        assert "issuer" not in pk  # 旧 PK 未变（rollback 成功）
+        con.close()
+
+    def test_connect_closes_on_runtime_error(self, db_path, monkeypatch) -> None:
+        """_connect 初始化 RuntimeError 时关闭连接（#1860 非 OperationalError close）。"""
+        held = []
+        def fake_init(con):
+            held.append(con)
+            raise RuntimeError("init boom")
+        monkeypatch.setattr(leader_binding, "_initialize_connection", fake_init)
+        with pytest.raises(RuntimeError, match="init boom"):
+            leader_binding._connect()
+        if held:
+            with pytest.raises(Exception):
+                held[0].execute("SELECT 1")
+
+
+class TestR5ControlEventsSeqOrder:
+    def test_seq_in_created_ts_event_id_order(self, db_path: Path) -> None:
+        """旧 control_events 乱序→rebuild 后 seq 按 created_ts, event_id 稳定分配。"""
+        con = _fresh_connect()
+        con.executescript(_OLD_LB_R2 + _OLD_CE_R2)
+        con.executescript(
+            "INSERT INTO control_events VALUES('eid_z','i','team','t1','x',1,NULL,'{}',3.0,0);"
+            "INSERT INTO control_events VALUES('eid_a','i','team','t1','x',1,NULL,'{}',1.0,0);"
+            "INSERT INTO control_events VALUES('eid_m','i','team','t1','x',1,NULL,'{}',2.0,0);"
+        )
+        con.commit(); con.close()
+        leader_binding._connect().close()
+        con = _fresh_connect()
+        rows = con.execute("SELECT seq, event_id FROM control_events ORDER BY seq").fetchall()
+        con.close()
+        assert [r["event_id"] for r in rows] == ["eid_a", "eid_m", "eid_z"]
+        assert [r["seq"] for r in rows] == [1, 2, 3]
+
+    def test_same_timestamp_tiebreak_by_event_id(self, db_path: Path) -> None:
+        con = _fresh_connect()
+        con.executescript(_OLD_LB_R2 + _OLD_CE_R2)
+        con.executescript(
+            "INSERT INTO control_events VALUES('zebra','i','team','t1','x',1,NULL,'{}',5.0,0);"
+            "INSERT INTO control_events VALUES('alpha','i','team','t1','x',1,NULL,'{}',5.0,0);"
+            "INSERT INTO control_events VALUES('mid','i','team','t1','x',1,NULL,'{}',5.0,0);"
+        )
+        con.commit(); con.close()
+        leader_binding._connect().close()
+        con = _fresh_connect()
+        rows = con.execute("SELECT seq, event_id FROM control_events ORDER BY seq").fetchall()
+        con.close()
+        assert [r["event_id"] for r in rows] == ["alpha", "mid", "zebra"]
+
+    def test_after_seq_restart_paging(self, db_path: Path) -> None:
+        con = _fresh_connect()
+        con.executescript(_OLD_LB_R2 + _OLD_CE_R2)
+        con.executescript(
+            "INSERT INTO control_events VALUES('e1','i','team','t1','x',1,NULL,'{}',1.0,0);"
+            "INSERT INTO control_events VALUES('e2','i','team','t1','x',1,NULL,'{}',2.0,0);"
+            "INSERT INTO control_events VALUES('e3','i','team','t1','x',1,NULL,'{}',3.0,0);"
+        )
+        con.commit(); con.close()
+        leader_binding._connect().close()
+        page2 = leader_binding.list_control_events("i", "team", "t1", after_seq=1, limit=10)
+        assert len(page2) == 2
+        assert [e["seq"] for e in page2] == [2, 3]

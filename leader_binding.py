@@ -155,11 +155,12 @@ def _pk_columns(con: sqlite3.Connection, table: str) -> list[str]:
 
 
 def _rebuild_leader_bindings(con: sqlite3.Connection) -> None:
-    """旧 schema（PK 不含 issuer，如 Q1/R2）事务重建为新 schema。
+    """旧 schema（PK 不含 issuer）事务重建为新 schema（真单事务，#1860-1）。
 
-    空旧库 → 结构重建（0 行拷贝），此后可真实 bind；有行旧库 → 仅当 issuer 与
-    binding_id 可无歧义映射才迁移，否则原库不变并 fail-closed（绝不猜默认 issuer
-    或编造 binding_id）。重建后 PK/unique/index 全部按新 schema 重建。
+    rename 前预检（NULL issuer/binding_id、重复 active）；BEGIN 后用 con.execute
+    逐条（executescript 会隐式 COMMIT 破坏事务）；任一失败 rollback 后原表名/
+    sqlite_master/index/行不变。空旧库→可 bind；有行旧库 issuer/binding_id 不可
+    无歧义映射→fail-closed 原库不变。
     """
     old_cols = _table_columns(con, "leader_bindings")
     n_rows = int(con.execute("SELECT COUNT(*) FROM leader_bindings").fetchone()[0])
@@ -168,16 +169,34 @@ def _rebuild_leader_bindings(con: sqlite3.Connection) -> None:
             raise RuntimeError(
                 "leader_bindings fail-closed: 旧 schema 有行但缺 issuer 列，无法无歧义映射；原库不变，需人工迁移"
             )
-        bad_issuer = int(con.execute(
+        if int(con.execute(
             "SELECT COUNT(*) FROM leader_bindings WHERE issuer IS NULL OR issuer=''"
-        ).fetchone()[0])
-        if bad_issuer:
+        ).fetchone()[0]):
             raise RuntimeError(
-                f"leader_bindings fail-closed: {bad_issuer} 行 issuer 为空，无法迁移；原库不变"
+                "leader_bindings fail-closed: 存在 issuer 为空的行，无法迁移；原库不变"
             )
         if "binding_id" not in old_cols:
             raise RuntimeError(
                 "leader_bindings fail-closed: 旧 schema 有行但缺 binding_id，无法无歧义映射；原库不变，需人工迁移"
+            )
+        if int(con.execute(
+            "SELECT COUNT(*) FROM leader_bindings WHERE binding_id IS NULL OR binding_id=''"
+        ).fetchone()[0]):
+            raise RuntimeError(
+                "leader_bindings fail-closed: 存在 binding_id 为空的行，无法迁移；原库不变"
+            )
+    # 重复 active 预检（rename 前，避免 rename 后唯一索引撞冲突）
+    if "state" in old_cols and "issuer" in old_cols:
+        dup = con.execute(
+            "SELECT issuer, scope_kind, scope_id, COUNT(*) AS n FROM leader_bindings "
+            "WHERE state='active' GROUP BY issuer, scope_kind, scope_id HAVING COUNT(*) > 1"
+        ).fetchall()
+        if dup:
+            spots = ", ".join(
+                f"{r['issuer']}/{r['scope_kind']}/{r['scope_id']}({r['n']})" for r in dup
+            )
+            raise RuntimeError(
+                f"leader_bindings fail-closed: 重复 active，原库不变: {spots}"
             )
     # 构建 SELECT 列映射：旧表有则取，无则用字面量（仅空表会到此处拷贝 0 行）
     select_cols: list[str] = []
@@ -196,7 +215,7 @@ def _rebuild_leader_bindings(con: sqlite3.Connection) -> None:
     con.execute("BEGIN")
     try:
         con.execute("ALTER TABLE leader_bindings RENAME TO _leader_bindings_old")
-        con.executescript(_LEADER_BINDINGS_DDL)
+        con.execute(_LEADER_BINDINGS_DDL)  # con.execute（非 executescript）保持事务
         con.execute(
             f"INSERT INTO leader_bindings ({', '.join(_LEADER_BINDINGS_COLUMNS)}) "
             f"SELECT {', '.join(select_cols)} FROM _leader_bindings_old"
@@ -217,16 +236,27 @@ def _rebuild_leader_bindings(con: sqlite3.Connection) -> None:
 
 
 def _rebuild_control_events(con: sqlite3.Connection) -> None:
-    """旧 control_events（event_id 为 PK、无 seq/issuer）事务重建为 seq-AUTOINCREMENT schema。
+    """旧 control_events 事务重建为 seq-AUTOINCREMENT schema（真单事务，#1860）。
 
-    保留 event_id/fanned_out/created_ts；seq 确定性单调分配；有行旧库缺 issuer → fail-closed。
+    seq 按旧稳定 ORDER BY created_ts, event_id 确定性分配（覆盖乱序/同 timestamp）；
+    rename 前预检 event_id 唯一 + NULL issuer fail-closed；BEGIN 后 con.execute 逐条。
     """
     old_cols = _table_columns(con, "control_events")
     n_rows = int(con.execute("SELECT COUNT(*) FROM control_events").fetchone()[0])
-    if n_rows > 0 and "issuer" not in old_cols:
-        raise RuntimeError(
-            "control_events fail-closed: 旧 schema 有行但缺 issuer，无法迁移；原库不变，需人工迁移"
-        )
+    if n_rows > 0:
+        if "issuer" not in old_cols:
+            raise RuntimeError(
+                "control_events fail-closed: 旧 schema 有行但缺 issuer，无法迁移；原库不变，需人工迁移"
+            )
+        if "event_id" in old_cols:
+            dup_eid = int(con.execute(
+                "SELECT COUNT(*) FROM (SELECT event_id FROM control_events "
+                "GROUP BY event_id HAVING COUNT(*) > 1)"
+            ).fetchone()[0])
+            if dup_eid:
+                raise RuntimeError(
+                    f"control_events fail-closed: {dup_eid} 个重复 event_id，无法迁移；原库不变"
+                )
     new_cols = (
         "event_id", "issuer", "scope_kind", "scope_id", "event_type",
         "binding_version", "migration_id", "payload_json", "created_ts", "fanned_out",
@@ -236,13 +266,19 @@ def _rebuild_control_events(con: sqlite3.Connection) -> None:
         else ("''" if c == "issuer" else ("0" if c == "fanned_out" else "NULL"))
         for c in new_cols
     ]
+    # seq 按旧稳定 created_ts, event_id 顺序确定性分配
+    order_by = ""
+    if "created_ts" in old_cols and "event_id" in old_cols:
+        order_by = " ORDER BY created_ts, event_id"
+    elif "event_id" in old_cols:
+        order_by = " ORDER BY event_id"
     con.execute("BEGIN")
     try:
         con.execute("ALTER TABLE control_events RENAME TO _control_events_old")
-        con.executescript(_CONTROL_EVENTS_DDL)
+        con.execute(_CONTROL_EVENTS_DDL)  # con.execute 保持事务
         con.execute(
             f"INSERT INTO control_events ({', '.join(new_cols)}) "
-            f"SELECT {', '.join(select_cols)} FROM _control_events_old"
+            f"SELECT {', '.join(select_cols)} FROM _control_events_old{order_by}"
         )
         con.execute("DROP TABLE _control_events_old")
         con.execute(
@@ -358,6 +394,11 @@ def _connect() -> sqlite3.Connection:
                 raise
             time.sleep(delay)
             delay *= 2
+        except BaseException:
+            # #1860: 非 OperationalError 初始化失败也 close，不泄漏连接
+            if con is not None:
+                con.close()
+            raise
     raise RuntimeError("leader binding DB 连接重试耗尽")
 
 
@@ -644,8 +685,8 @@ def bind_leader(
         else:
             new_binding_id = uuid.uuid4().hex
             con.execute(
-                "INSERT INTO leader_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,"
-                "?,?,?,?,?,?,0,0,0,0,0)",
+                f"INSERT INTO leader_bindings ({', '.join(_LEADER_BINDINGS_COLUMNS)}) "
+                f"VALUES({','.join(['?'] * 18 + ['0'] * 5)})",
                 (
                     issuer, scope_kind, scope_id, mail_name, new_binding_id,
                     previous_name,
@@ -657,7 +698,9 @@ def bind_leader(
                 ),
             )
         con.execute(
-            "INSERT INTO binding_migrations VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO binding_migrations (migration_id, issuer, scope_kind, "
+            "scope_id, from_binding_id, to_binding_id, route_epoch, created_ts) "
+            "VALUES(?,?,?,?,?,?,?,?)",
             (migration_id, issuer, scope_kind, scope_id,
              old_binding_id, new_binding_id, route_epoch, current),
         )
