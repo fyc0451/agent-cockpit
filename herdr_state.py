@@ -146,13 +146,17 @@ class HerdrSocket:
             raise HerdrSocketError(f"herdr {method} 传输失败: {exc}") from exc
         if response is None:
             raise HerdrSocketError(f"herdr {method} 连接被对端关闭")
+        # 先验证响应 id（无论 success/error），再解释 payload；例外：
+        # invalid_request 类 server 无法解析 id 会回 id=""，此时保留 error
+        # 诊断信息而非误报 id mismatch。
+        response_id = response.get("id")
         error = response.get("error")
+        if response_id != rid and not (response_id == "" and error is not None):
+            raise HerdrSocketError(f"herdr {method} 响应 id 不匹配")
         if error is not None:
             code = str(error.get("code") or "")
             message = str(error.get("message") or "")
             raise HerdrSocketError(f"herdr {method} 失败: {code} {message}".strip())
-        if response.get("id") != rid:
-            raise HerdrSocketError(f"herdr {method} 响应 id 不匹配")
         result = response.get("result")
         if not isinstance(result, dict):
             raise HerdrSocketError(f"herdr {method} 响应缺少 result")
@@ -662,7 +666,8 @@ class HerdrStateClient:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._threads: dict[str, threading.Thread] = {}
-        self._sockets: dict[str, HerdrSocket] = {}
+        self._active: set[HerdrSocket] = set()
+        self._started = False
         self._lifecycle: dict[str, dict[str, Any]] = {}
         for name in self._sessions:
             self._lifecycle[name] = {
@@ -685,7 +690,11 @@ class HerdrStateClient:
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
-        if not self._stop.is_set():
+        """一次性启动：重复 start 或 stop 后再 start 均拒绝（不支持 restart）。"""
+        with self._lock:
+            if self._started:
+                raise RuntimeError("HerdrStateClient 已启动过，不支持重复 start 或 restart")
+            self._started = True
             self._stop.clear()
         for name, path in self._sessions.items():
             state = SessionState(name)
@@ -698,14 +707,14 @@ class HerdrStateClient:
             thread.start()
 
     def stop(self, join_timeout: float = 5.0) -> bool:
-        """幂等。置停止标志 → shutdown/close 所有 socket（唤醒阻塞读）→
-        按总 deadline join；返回是否全部线程退出（不虚报 stopped）。"""
+        """幂等。置停止标志 → close 全部在途 socket（含 snapshot/health 临时
+        socket，唤醒阻塞读）→ 按总 deadline join；返回是否全部线程退出
+        （不虚报 stopped）。"""
         self._stop.set()
         with self._lock:
-            sockets = list(self._sockets.values())
+            active = list(self._active)
             threads = list(self._threads.values())
-            self._sockets.clear()
-        for sock in sockets:
+        for sock in active:
             sock.close()
         deadline = time.monotonic() + join_timeout
         all_exited = True
@@ -714,6 +723,15 @@ class HerdrStateClient:
             thread.join(remaining)
             all_exited = all_exited and not thread.is_alive()
         return all_exited
+
+    def _register(self, sock: HerdrSocket) -> None:
+        """在途 socket 登记（connect 前调用），stop 可原子关闭全部。"""
+        with self._lock:
+            self._active.add(sock)
+
+    def _unregister(self, sock: HerdrSocket) -> None:
+        with self._lock:
+            self._active.discard(sock)
 
     def state(self) -> dict[str, Any]:
         with self._lock:
@@ -735,47 +753,49 @@ class HerdrStateClient:
             while not self._stop.is_set():
                 lc["state"] = "connecting"
                 sock = HerdrSocket(path, connect_timeout=self._connect_timeout)
+                self._register(sock)  # connect 前登记，stop 可原子关闭
                 try:
-                    sock.connect()
-                except HerdrSocketError as exc:
-                    lc["last_error"] = str(exc)
-                    lc["state"] = "reconnecting"
-                    lc["reconnects"] += 1
-                    if not self._backoff(delay):
+                    try:
+                        sock.connect()
+                    except HerdrSocketError as exc:
+                        lc["last_error"] = str(exc)
+                        lc["state"] = "reconnecting"
+                        lc["reconnects"] += 1
+                        if not self._backoff(delay):
+                            return
+                        delay = min(delay * 2, self._reconnect_max_delay)
+                        continue
+                    try:
+                        self._handle_connection(name, path, sock, state, lc)
+                        if self._stop.is_set():
+                            return
+                        lc["state"] = "reconnecting"
+                        lc["reconnects"] += 1
+                    except HerdrProtocolMismatchError as exc:
+                        lc["last_error"] = str(exc)
+                        if lc["state"] != "capability_mismatch":
+                            lc["state"] = "protocol_mismatch"
                         return
-                    delay = min(delay * 2, self._reconnect_max_delay)
-                    continue
-                delay = max(0.0, self._reconnect_base_delay)
-                with self._lock:
-                    self._sockets[name] = sock
-                try:
-                    self._handle_connection(name, path, sock, state, lc)
-                    if self._stop.is_set():
-                        return
-                    lc["state"] = "reconnecting"
-                    lc["reconnects"] += 1
-                except HerdrProtocolMismatchError as exc:
-                    lc["last_error"] = str(exc)
-                    if lc["state"] != "capability_mismatch":
-                        lc["state"] = "protocol_mismatch"
-                    return
-                except HerdrSocketError as exc:
-                    lc["last_error"] = str(exc)
-                    if self._stop.is_set():
-                        return
-                    lc["state"] = "reconnecting"
-                    lc["reconnects"] += 1
-                except Exception as exc:  # 兜底：reader 逻辑自身 bug 不杀线程
-                    lc["last_error"] = f"crash: {exc}"
-                    if self._stop.is_set():
-                        return
-                    lc["state"] = "reconnecting"
-                    lc["reconnects"] += 1
+                    except HerdrSocketError as exc:
+                        lc["last_error"] = str(exc)
+                        if self._stop.is_set():
+                            return
+                        lc["state"] = "reconnecting"
+                        lc["reconnects"] += 1
+                    except Exception as exc:  # 兜底：reader 逻辑自身 bug 不杀线程
+                        lc["last_error"] = f"crash: {exc}"
+                        if self._stop.is_set():
+                            return
+                        lc["state"] = "reconnecting"
+                        lc["reconnects"] += 1
                 finally:
-                    with self._lock:
-                        if self._sockets.get(name) is sock:
-                            self._sockets.pop(name, None)
+                    self._unregister(sock)
                     sock.close()
+                # 仅在完成稳定 subscribe+resync 后重置退避；connect/ping/
+                # snapshot/subscribe/EOF 连续失败共享指数退避与封顶
+                if lc.get("stable"):
+                    delay = max(0.0, self._reconnect_base_delay)
+                    lc["stable"] = False
                 if self._stop.is_set():
                     return
                 if not self._backoff(delay):
@@ -804,9 +824,8 @@ class HerdrStateClient:
         lc["connected_at"] = time.monotonic()
         # 3. 订阅专用流：确认 subscription_started 后才发布 subscribed
         sub = HerdrSocket(path, connect_timeout=self._connect_timeout)
+        self._register(sub)
         sub.connect()
-        with self._lock:
-            self._sockets[f"{name}:sub"] = sub
         try:
             try:
                 sub.request(
@@ -823,6 +842,7 @@ class HerdrStateClient:
             lc["state"] = "subscribed"
             # 4. 握手后 resync：消除 snapshot→subscribe 窗口的事件回放错位
             self._resync(name, path, state, lc)
+            lc["stable"] = True  # 完成稳定 subscribe+resync，退避可重置
             # 5. 读循环：resync_pending 时读超时最多等剩余防抖间隔，
             #    保证未知 pane 即使事件流静默也能及时触发 resync。
             last_resync = time.monotonic()
@@ -853,14 +873,13 @@ class HerdrStateClient:
                 state.apply_event(envelope)
                 self._sync_counts(lc, state)
         finally:
-            with self._lock:
-                if self._sockets.get(f"{name}:sub") is sub:
-                    self._sockets.pop(f"{name}:sub", None)
+            self._unregister(sub)
             sub.close()
 
     def _snapshot_request(self, path: str) -> dict[str, Any]:
         """独立连接执行 session.snapshot；返回 SessionSnapshot 对象。"""
         sock = HerdrSocket(path, connect_timeout=self._connect_timeout)
+        self._register(sock)  # 临时 socket 也登记，stop 可中断在途 snapshot
         sock.connect()
         try:
             response = sock.request(
@@ -868,6 +887,7 @@ class HerdrStateClient:
                 expect_type="session_snapshot",
             )
         finally:
+            self._unregister(sock)
             sock.close()
         snap = response.get("snapshot")
         if not isinstance(snap, dict):
@@ -881,6 +901,7 @@ class HerdrStateClient:
     def _health_ok(self, path: str) -> bool:
         """独立连接 ping 探测 server 健康。"""
         sock = HerdrSocket(path, connect_timeout=self._connect_timeout)
+        self._register(sock)  # 临时 socket 也登记，stop 可中断 health ping
         try:
             sock.connect()
             pong = sock.request(
@@ -890,6 +911,7 @@ class HerdrStateClient:
         except HerdrSocketError:
             return False
         finally:
+            self._unregister(sock)
             sock.close()
 
     def _sync_counts(self, lc: dict[str, Any], state: SessionState) -> None:

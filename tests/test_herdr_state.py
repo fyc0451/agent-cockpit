@@ -295,6 +295,32 @@ class TestHerdrSocket:
         sock.close()
         server.stop()
 
+    def test_error_with_wrong_id_is_id_mismatch(self, tmp_path: Path) -> None:
+        """error 响应也必须先验证 id：wrong id + method_not_found 报 id mismatch。"""
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            server.send(conn, {"id": "wrong", "error": {"code": "method_not_found", "message": "x"}})
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        sock = herdr_state.HerdrSocket(str(server.path), connect_timeout=0.5)
+        sock.connect()
+        with pytest.raises(herdr_state.HerdrSocketError, match="id 不匹配"):
+            sock.request("ping", {}, timeout=0.5, expect_type="pong")
+        sock.close()
+        server.stop()
+
+    def test_invalid_request_empty_id_keeps_error_diagnosis(self, tmp_path: Path) -> None:
+        """server 无法解析请求时回 id=\"\"+error，应保留 error 而非误报 id mismatch。"""
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            server.read(conn)
+            server.send(conn, {"id": "", "error": {"code": "invalid_request", "message": "missing field params"}})
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        sock = herdr_state.HerdrSocket(str(server.path), connect_timeout=0.5)
+        sock.connect()
+        with pytest.raises(herdr_state.HerdrSocketError, match="invalid_request"):
+            sock.request("ping", {}, timeout=0.5)
+        sock.close()
+        server.stop()
+
     def test_malformed_line_raises(self, tmp_path: Path) -> None:
         def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
             conn.sendall(b"not-json\n")
@@ -522,6 +548,37 @@ class TestSessionState:
         pane = state.panes()[0]
         pane["revision"] = 999
         assert state.panes()[0]["revision"] == 1
+
+    def test_reads_return_deep_copies_agents_and_layouts(self) -> None:
+        state = self._state()
+        snap = make_snapshot(make_pane("p1", tab_id="t1"))
+        snap["agents"] = [{"name": "a1", "meta": {"x": 1}}]
+        snap["layouts"] = [{
+            "tab_id": "t1", "workspace_id": "w1", "zoomed": False,
+            "focused_pane_id": "p1",
+            "panes": [{"pane_id": "p1", "rect": {"x": 0, "y": 0, "width": 10, "height": 5}, "focused": True}],
+        }]
+        state.apply_snapshot(snap)
+        agent = state.agents()[0]
+        agent["meta"]["x"] = 999
+        assert state.agents()[0]["meta"]["x"] == 1
+        layout = state.layouts()[0]
+        layout["panes"][0]["width"] = 999
+        assert state.layouts()[0]["panes"][0]["width"] == 10
+
+    def test_multi_session_same_pane_id_is_isolated(self) -> None:
+        store = herdr_state.StateStore()
+        a = herdr_state.SessionState("a")
+        a.apply_snapshot(make_snapshot(make_pane("p1", agent="codex")))
+        b = herdr_state.SessionState("b")
+        b.apply_snapshot(make_snapshot(make_pane("p1", agent="kimi")))
+        store.set_session("a", a)
+        store.set_session("b", b)
+        out = store.snapshot_cached()
+        assert out["total_panes"] == 2
+        assert sorted(p["session"] for p in out["panes"]) == ["a", "b"]
+        agents = sorted(p["agent"] for p in out["panes"])
+        assert agents == ["codex", "kimi"]
 
     def test_resync_replaces_everything(self) -> None:
         state = self._state()
@@ -944,3 +1001,237 @@ class TestHerdrStateClient:
         assert out["available"] is True
         assert out["panes"][0]["pane_id"] == "p1"
         server.stop()
+
+    def test_stop_interrupts_bootstrap_snapshot(self, tmp_path: Path) -> None:
+        """snapshot 阻塞中 stop：临时 socket 被关闭，reader 立即退出无残留。"""
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            if req.get("method") == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif req.get("method") == "session.snapshot":
+                time.sleep(10)
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = herdr_state.HerdrStateClient(
+            {"work": str(server.path)},
+            connect_timeout=0.3, request_timeout=0.3, health_check_interval=None,
+            reconnect_base_delay=0.02, reconnect_max_delay=0.05,
+            snapshot_timeout=60.0,  # 不让 request 自身超时退出
+        )
+        client.start()
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["work"]["state"] == "bootstrap"
+            )
+            started = time.monotonic()
+            exited = client.stop(join_timeout=1.0)
+            assert exited is True
+            assert time.monotonic() - started < 2.0
+            assert _no_state_threads()
+        finally:
+            server.stop()
+
+    def test_stop_interrupts_handshake_resync(self, tmp_path: Path) -> None:
+        """握手后 resync 的 snapshot 阻塞中 stop：无残留线程。"""
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                if server.accepted >= 4:  # 第 4 个连接 = 握手后 resync
+                    time.sleep(10)
+                server.send(conn, _snapshot_response(str(req["id"]), make_snapshot(make_pane("p1"))))
+            elif method == "events.subscribe":
+                server.send(conn, _started_response(str(req["id"])))
+                _hang(conn)
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = herdr_state.HerdrStateClient(
+            {"work": str(server.path)},
+            connect_timeout=0.3, request_timeout=0.3, health_check_interval=None,
+            reconnect_base_delay=0.02, reconnect_max_delay=0.05,
+            snapshot_timeout=60.0,
+        )
+        client.start()
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["work"]["state"] == "subscribed"
+                and server.accepted >= 4
+            )
+            started = time.monotonic()
+            exited = client.stop(join_timeout=1.0)
+            assert exited is True
+            assert time.monotonic() - started < 2.0
+            assert _no_state_threads()
+        finally:
+            server.stop()
+
+    def test_stop_interrupts_health_ping(self, tmp_path: Path) -> None:
+        """health ping 阻塞中 stop：临时 socket 被关闭，reader 退出。"""
+        ping_count = {"n": 0}
+
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                ping_count["n"] += 1
+                if ping_count["n"] > 1:  # 协议门之后（health/重连）的 ping 卡住
+                    time.sleep(10)
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                server.send(conn, _snapshot_response(str(req["id"]), make_snapshot(make_pane("p1"))))
+            elif method == "events.subscribe":
+                server.send(conn, _started_response(str(req["id"])))
+                _hang(conn)
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = herdr_state.HerdrStateClient(
+            {"work": str(server.path)},
+            connect_timeout=0.3, request_timeout=0.3, health_check_interval=0.05,
+            reconnect_base_delay=0.02, reconnect_max_delay=0.05,
+            snapshot_timeout=0.5,
+        )
+        client.start()
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["work"]["state"] == "subscribed"
+            )
+            _wait_for(lambda: ping_count["n"] >= 2, timeout=2.0)  # 进入 health ping
+            started = time.monotonic()
+            exited = client.stop(join_timeout=1.0)
+            assert exited is True
+            assert time.monotonic() - started < 2.0
+            assert _no_state_threads()
+        finally:
+            server.stop()
+
+    def test_stop_during_reconnect_backoff(self, tmp_path: Path) -> None:
+        """退避等待中 stop：立即退出无残留。"""
+        client = _start_client({"work": str(tmp_path / "not-there.sock")})
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["work"]["state"] == "reconnecting"
+            )
+            started = time.monotonic()
+            exited = client.stop(join_timeout=1.0)
+            assert exited is True
+            assert time.monotonic() - started < 1.5
+            assert _no_state_threads()
+        finally:
+            pass
+
+    def test_backoff_grows_exponentially_on_persistent_failure(
+        self, tmp_path: Path, monkeypatch: Any,
+    ) -> None:
+        """connect 成功但握手持续失败：退避指数增长并封顶（仅稳定后重置）。"""
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            server.send(conn, _error_response(str(req["id"]), "internal_error"))
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = herdr_state.HerdrStateClient(
+            {"work": str(server.path)},
+            connect_timeout=0.3, request_timeout=0.3, health_check_interval=None,
+            reconnect_base_delay=0.05, reconnect_max_delay=0.2,
+            snapshot_timeout=0.3,
+        )
+        delays: list[float] = []
+        original_backoff = client._backoff
+
+        def recording_backoff(delay: float) -> bool:
+            delays.append(delay)
+            return original_backoff(delay)
+        monkeypatch.setattr(client, "_backoff", recording_backoff)
+        client.start()
+        try:
+            _wait_for(lambda: len(delays) >= 4, timeout=3.0)
+            assert delays[:4] == [0.05, 0.1, 0.2, 0.2]  # 指数 + 封顶
+        finally:
+            client.stop()
+            server.stop()
+
+    def test_backoff_resets_after_stable_period(self, tmp_path: Path) -> None:
+        """稳定 subscribe+resync 后 EOF 断开：退避回到 base 而非继续增长。"""
+        subscribe_count = {"n": 0}
+
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                server.send(conn, _snapshot_response(str(req["id"]), make_snapshot(make_pane("p1"))))
+            elif method == "events.subscribe":
+                subscribe_count["n"] += 1
+                server.send(conn, _started_response(str(req["id"])))
+                if subscribe_count["n"] == 1:
+                    return  # 第一周期稳定后立即 EOF → 断开
+                _hang(conn)
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = herdr_state.HerdrStateClient(
+            {"work": str(server.path)},
+            connect_timeout=0.3, request_timeout=0.3, health_check_interval=None,
+            reconnect_base_delay=0.1, reconnect_max_delay=0.4,
+            snapshot_timeout=0.3,
+        )
+        monkeypatch_delays: list[float] = []
+        original_backoff = client._backoff
+
+        def recording_backoff(delay: float) -> bool:
+            monkeypatch_delays.append(delay)
+            return original_backoff(delay)
+        client._backoff = recording_backoff  # type: ignore[method-assign]
+        client.start()
+        try:
+            _wait_for(
+                lambda: subscribe_count["n"] >= 2
+                and len(monkeypatch_delays) >= 1,
+                timeout=5.0,
+            )
+            # 第二周期稳定；后续若再断开，退避应从 base 重新开始
+            assert monkeypatch_delays[0] == 0.1
+        finally:
+            client.stop()
+            server.stop()
+
+    def test_start_is_single_use(self) -> None:
+        client = herdr_state.HerdrStateClient({})
+        client.start()
+        with pytest.raises(RuntimeError, match="已启动过"):
+            client.start()
+        assert client.stop() is True
+        with pytest.raises(RuntimeError, match="已启动过"):
+            client.start()
+
+    def test_multi_session_same_pane_id_live(self, tmp_path: Path) -> None:
+        a = FakeHerdrServer(
+            tmp_path, snapshot=make_snapshot(make_pane("p1", agent="codex")), name="a",
+        ).start()
+        b = FakeHerdrServer(
+            tmp_path, snapshot=make_snapshot(make_pane("p1", agent="kimi")), name="b",
+        ).start()
+        client = _start_client({"a": str(a.path), "b": str(b.path)})
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["a"]["state"] == "subscribed"
+                and client.state()["sessions"]["b"]["state"] == "subscribed"
+            )
+            panes = client.snapshot_cached()["panes"]
+            assert len(panes) == 2
+            assert sorted(p["session"] for p in panes) == ["a", "b"]
+        finally:
+            client.stop()
+            a.stop()
+            b.stop()
+
+
+def _no_state_threads() -> bool:
+    import threading as _th
+    return not [t.name for t in _th.enumerate() if "cockpit-state" in t.name]
