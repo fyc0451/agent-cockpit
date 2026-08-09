@@ -2615,3 +2615,9 @@ def test_b2_node_background_inert_preserves_preexisting():
 def test_b2_modal_bg_above_navexpand_below_toast():
     """modal-bg z-index 高于 #navExpand(70),低于 toast(200),展开按钮不再浮在 dialog 上。"""
     assert "z-index:80" in HTML  # .modal-bg 60 -> 80(>70 navExpand, <200 toast)
+
+
+def test_inline_input_send_appends_enter():
+    js = _inline_js()
+    # 发送=提交:必须补 \r,否则文字只停在 agent 输入框
+    assert "queueTermInput(TERM_ID,text+'\\r')" in js

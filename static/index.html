@@ -2727,7 +2727,8 @@ function termSendInlineInput(){
   const inp=document.getElementById('termTextInput');if(!inp)return;
   const text=inp.value;if(!text)return;
   if(!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
-  queueTermInput(TERM_ID,text);
+  // 发送=提交:补回车,否则文字只停在 agent 输入框里等人工回车
+  queueTermInput(TERM_ID,text+'\r');
   inp.value='';try{inp.focus()}catch(e){}
 }
 async function termEnsure(){
