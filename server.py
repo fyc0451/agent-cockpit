@@ -3070,8 +3070,11 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     if mail_requirement:
         raise HTTPException(503, mail_requirement["error"])
     name = req.name.strip() if req.name else None
-    if name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
-        raise HTTPException(400, "实例名称只能包含字母、数字、_、-，最长 32 位")
+    if name:
+        try:
+            herdr_client.validate_agent_name(name)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     try:
         normalized_args = herdr_client.normalize_agent_args(req.args)
     except ValueError as exc:
@@ -3660,8 +3663,10 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         ids.append(pid)
         agent_counts[p.agent] = agent_counts.get(p.agent, 0) + 1
         name = p.name.strip() or f"{p.agent}-{agent_counts[p.agent]}"
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
-            raise HTTPException(400, f"无效的实例名称: {name}")
+        try:
+            herdr_client.validate_agent_name(name)
+        except ValueError as exc:
+            raise HTTPException(400, f"无效的实例名称: {name}（{exc}）") from exc
         names.append(name)
     if len(set(ids)) != len(ids):
         raise HTTPException(400, "participant id 不能重复")

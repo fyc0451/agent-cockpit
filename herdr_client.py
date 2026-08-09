@@ -19,6 +19,7 @@ import threading
 import time
 import tomllib
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,94 @@ _SNAPSHOT_EXECUTOR_LOCK = threading.RLock()
 _SNAPSHOT_EXECUTOR: ThreadPoolExecutor | None = None
 _SNAPSHOT_FUTURES: set[Future[dict[str, Any]]] = set()
 SNAPSHOT_MAX_QUEUED = 64
+HERDR_MIN_VERSION = (0, 8, 0)
+HERDR_MIN_PROTOCOL = 19
+HERDR_MIN_SCHEMA_VERSION = 1
+HERDR_REQUIRED_METHODS = frozenset({
+    "session.snapshot",
+    "agent.list",
+    "agent.get",
+    "agent.start",
+    "agent.read",
+    "agent.prompt",
+    "events.subscribe",
+})
+AGENT_KIND_ALIASES = {
+    "codex": "codex",
+    "claude": "claude",
+    "kimi": "kimi",
+    "opencode": "opencode",
+    "grok": "grok",
+    "qoder": "qodercli",
+    "qodercli": "qodercli",
+    "qodercn": "qodercli",
+    "qoderclicn": "qodercli",
+}
+_AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+
+class HerdrCapabilityError(RuntimeError):
+    """安装版 Herdr 不满足 Cockpit 运行时契约。"""
+
+
+def normalize_agent_kind(agent: str) -> str:
+    """把产品侧 agent 别名映射成 Herdr 原生 kind。"""
+    kind = AGENT_KIND_ALIASES.get(agent)
+    if kind is None:
+        raise ValueError(f"不支持的 agent: {agent}")
+    return kind
+
+
+def validate_agent_name(name: str) -> str:
+    """验证 Herdr 0.8 的唯一 live agent name 语法。"""
+    if not isinstance(name, str) or not _AGENT_NAME_RE.fullmatch(name):
+        raise ValueError(
+            "实例名称必须以小写字母开头，且只能包含小写字母、数字、_、-，最长 32 位"
+        )
+    return name
+
+
+def resolve_unique_agent_name(
+    agent: str, requested: str | None, agents: list[dict[str, Any]],
+) -> str:
+    """根据实时 agent 列表生成或验证 session 内唯一名称。"""
+    normalize_agent_kind(agent)
+    live_names = {
+        str(item.get("name"))
+        for item in agents
+        if isinstance(item, dict) and item.get("name")
+    }
+    if requested is not None:
+        candidate = validate_agent_name(requested.strip())
+        if candidate in live_names:
+            raise ValueError(f"实例名称已被占用: {candidate}")
+        return candidate
+    index = 1
+    while True:
+        candidate = validate_agent_name(f"{agent}-{index}")
+        if candidate not in live_names:
+            return candidate
+        index += 1
+
+
+def require_live_pane_id(pane_id: str, panes: list[dict[str, Any]]) -> str:
+    """只接受实时快照返回的精确 pane ID，不解析或猜测 opaque handle。"""
+    if (
+        not isinstance(pane_id, str)
+        or not pane_id
+        or len(pane_id) > 128
+        or pane_id.startswith("-")
+        or not pane_id.isascii()
+        or any(ord(char) < 32 or ord(char) == 127 for char in pane_id)
+    ):
+        raise ValueError("pane id 格式无效")
+    matches = [
+        item for item in panes
+        if isinstance(item, dict) and item.get("pane_id") == pane_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"pane id 不属于当前实时快照: {pane_id}")
+    return pane_id
 
 
 def _snapshot_future_done(
@@ -281,6 +370,83 @@ def _run(args: list[str], timeout: float = 10) -> str:
     if r.returncode != 0:
         raise RuntimeError(f"herdr {' '.join(args)} 失败: {r.stderr.strip()[:200]}")
     return r.stdout
+
+
+def _schema_method_names(value: Any) -> set[str]:
+    methods: set[str] = set()
+    if isinstance(value, dict):
+        method = value.get("method")
+        if isinstance(method, dict) and isinstance(method.get("const"), str):
+            methods.add(method["const"])
+        for child in value.values():
+            methods.update(_schema_method_names(child))
+    elif isinstance(value, list):
+        for child in value:
+            methods.update(_schema_method_names(child))
+    return methods
+
+
+def probe_herdr_capabilities() -> dict[str, Any]:
+    """读取安装版 CLI 的版本和 schema，拒绝旧能力或静默兼容。"""
+    if not is_available():
+        raise HerdrCapabilityError("Herdr 未安装；请安装或升级到 0.8.0 以上版本")
+    try:
+        version_output = _run(["--version"], timeout=5)
+    except RuntimeError as exc:
+        raise HerdrCapabilityError(f"无法读取 Herdr 版本；请升级或重装 Herdr: {exc}") from exc
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", version_output)
+    if not match:
+        raise HerdrCapabilityError("无法识别 Herdr 版本；请升级或重装 Herdr")
+    version_tuple = tuple(int(part) for part in match.groups())
+    version = ".".join(match.groups())
+    if version_tuple < HERDR_MIN_VERSION:
+        raise HerdrCapabilityError(
+            f"Herdr {version} 不受支持；请升级到 0.8.0 以上版本"
+        )
+
+    try:
+        schema_output = _run(["api", "schema", "--json"], timeout=5)
+        schema = json.loads(schema_output)
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HerdrCapabilityError(
+            f"Herdr API schema 无效；请升级或重装 Herdr: {exc}"
+        ) from exc
+    if not isinstance(schema, dict):
+        raise HerdrCapabilityError("Herdr API schema 无效；请升级或重装 Herdr")
+    protocol = schema.get("protocol")
+    schema_version = schema.get("schema_version")
+    if not isinstance(protocol, int) or isinstance(protocol, bool):
+        raise HerdrCapabilityError("Herdr API schema 缺少 protocol；请升级 Herdr")
+    if protocol < HERDR_MIN_PROTOCOL:
+        raise HerdrCapabilityError(
+            f"Herdr protocol {protocol} 不受支持；请升级到 protocol 19 以上版本"
+        )
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version < HERDR_MIN_SCHEMA_VERSION
+    ):
+        raise HerdrCapabilityError(
+            "Herdr API schema_version 不受支持；请升级 Herdr"
+        )
+    methods = _schema_method_names(schema.get("schemas"))
+    missing = HERDR_REQUIRED_METHODS - methods
+    if missing:
+        raise HerdrCapabilityError(
+            "Herdr API 缺少必要方法 " + ", ".join(sorted(missing)) + "；请升级 Herdr"
+        )
+    return {
+        "version": version,
+        "protocol": protocol,
+        "schema_version": schema_version,
+        "methods": sorted(HERDR_REQUIRED_METHODS),
+    }
+
+
+@lru_cache(maxsize=1)
+def require_herdr_capabilities() -> dict[str, Any]:
+    """每个 Cockpit 进程只探测一次安装版 Herdr 能力。"""
+    return probe_herdr_capabilities()
 
 
 def list_sessions() -> list[dict[str, Any]]:
@@ -781,6 +947,19 @@ def start_agent(
     """
     if not is_available():
         return {"available": False}
+    try:
+        require_herdr_capabilities()
+        normalize_agent_kind(agent)
+        if label is not None:
+            validate_agent_name(label)
+    except HerdrCapabilityError as exc:
+        return {
+            "available": True,
+            "error_code": "herdr_upgrade_required",
+            "error": str(exc),
+        }
+    except ValueError as exc:
+        return {"available": True, "error_code": "invalid_agent_identity", "error": str(exc)}
     normalized_args = normalize_agent_args(args)
     agent_args = shlex.split(normalized_args) if normalized_args else []
     # 只复用当前 live snapshot 中 agent 与工作目录都匹配的 pane。仅按 agent

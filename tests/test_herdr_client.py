@@ -1,3 +1,4 @@
+import json
 import shlex
 import sys
 import threading
@@ -6,6 +7,183 @@ from unittest.mock import call
 
 import herdr_client
 import pytest
+
+
+REQUIRED_H0_METHODS = {
+    "session.snapshot",
+    "agent.list",
+    "agent.get",
+    "agent.start",
+    "agent.read",
+    "agent.prompt",
+    "events.subscribe",
+}
+
+
+@pytest.fixture(autouse=True)
+def _assume_supported_herdr(monkeypatch):
+    """现有单元测试聚焦命令语义；能力门由本文件的专门用例覆盖。"""
+    monkeypatch.setattr(
+        herdr_client,
+        "require_herdr_capabilities",
+        lambda: {
+            "version": "0.8.0",
+            "protocol": 19,
+            "schema_version": 1,
+            "methods": sorted(REQUIRED_H0_METHODS),
+        },
+        raising=False,
+    )
+
+
+def _herdr_schema(*, protocol=19, schema_version=1, methods=None):
+    method_names = REQUIRED_H0_METHODS if methods is None else set(methods)
+    return json.dumps({
+        "protocol": protocol,
+        "schema_version": schema_version,
+        "schemas": {
+            "request": {
+                "oneOf": [
+                    {"properties": {"method": {"const": method}}}
+                    for method in sorted(method_names)
+                ]
+            }
+        },
+    })
+
+
+def test_probe_herdr_capabilities_accepts_supported_installed_schema(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if args == ["--version"]:
+            return "herdr 0.8.0\n"
+        if args == ["api", "schema", "--json"]:
+            return _herdr_schema()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.probe_herdr_capabilities()
+
+    assert result == {
+        "version": "0.8.0",
+        "protocol": 19,
+        "schema_version": 1,
+        "methods": sorted(REQUIRED_H0_METHODS),
+    }
+    assert calls == [
+        call(["--version"], timeout=5),
+        call(["api", "schema", "--json"], timeout=5),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("version", "schema", "match"),
+    [
+        ("herdr 0.7.4", _herdr_schema(), "0.8.0"),
+        ("herdr 0.8.0", _herdr_schema(protocol=18), "protocol 19"),
+        (
+            "herdr 0.8.0",
+            _herdr_schema(methods=REQUIRED_H0_METHODS - {"events.subscribe"}),
+            "events.subscribe",
+        ),
+        ("herdr 0.8.0", "not-json", "API schema"),
+    ],
+)
+def test_probe_herdr_capabilities_requires_upgrade_instead_of_fallback(
+    monkeypatch, version, schema, match,
+):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda args, timeout=10: version if args == ["--version"] else schema,
+    )
+
+    with pytest.raises(herdr_client.HerdrCapabilityError, match=match):
+        herdr_client.probe_herdr_capabilities()
+
+
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("kimi", "kimi"),
+        ("opencode", "opencode"),
+        ("grok", "grok"),
+        ("qoder", "qodercli"),
+        ("qodercli", "qodercli"),
+        ("qodercn", "qodercli"),
+        ("qoderclicn", "qodercli"),
+    ],
+)
+def test_normalize_agent_kind_uses_herdr_kind_aliases(name, kind):
+    assert herdr_client.normalize_agent_kind(name) == kind
+
+
+def test_normalize_agent_kind_rejects_unknown_kind():
+    with pytest.raises(ValueError, match="不支持的 agent"):
+        herdr_client.normalize_agent_kind("unknown")
+
+
+@pytest.mark.parametrize("name", ["codex-1", "lead", "reviewer_2", "a" * 32])
+def test_validate_agent_name_accepts_herdr_native_names(name):
+    assert herdr_client.validate_agent_name(name) == name
+
+
+@pytest.mark.parametrize(
+    "name", ["", "1-codex", "Codex-1", "bad name", "a" * 33, "agent/one"],
+)
+def test_validate_agent_name_rejects_names_herdr_cannot_own(name):
+    with pytest.raises(ValueError, match="实例名称"):
+        herdr_client.validate_agent_name(name)
+
+
+def test_resolve_unique_agent_name_checks_live_names_without_reusing_labels():
+    agents = [{"name": "codex-1"}, {"name": "reviewer"}]
+
+    assert herdr_client.resolve_unique_agent_name("codex", None, agents) == "codex-2"
+    assert herdr_client.resolve_unique_agent_name("qoder", "qoder-main", agents) == "qoder-main"
+    with pytest.raises(ValueError, match="已被占用"):
+        herdr_client.resolve_unique_agent_name("codex", "reviewer", agents)
+
+
+def test_require_live_pane_id_uses_exact_snapshot_id_as_opaque_handle():
+    panes = [{"pane_id": "w1:p1"}, {"pane_id": "p_7_9"}]
+
+    assert herdr_client.require_live_pane_id("w1:p1", panes) == "w1:p1"
+    assert herdr_client.require_live_pane_id("p_7_9", panes) == "p_7_9"
+    for invalid in ("", "--help", "term_abc", "reviewer", "w1:p2"):
+        with pytest.raises(ValueError, match="pane"):
+            herdr_client.require_live_pane_id(invalid, panes)
+
+
+def test_start_agent_capability_failure_does_not_mutate_layout(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client,
+        "require_herdr_capabilities",
+        lambda: (_ for _ in ()).throw(
+            herdr_client.HerdrCapabilityError("Herdr protocol 19 required；请升级 Herdr")
+        ),
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应修改 pane")),
+    )
+
+    result = herdr_client.start_agent("demo", "/tmp/project", "codex")
+
+    assert result == {
+        "available": True,
+        "error_code": "herdr_upgrade_required",
+        "error": "Herdr protocol 19 required；请升级 Herdr",
+    }
 
 
 def test_normalize_agent_args_preserves_argv_without_shell_execution():
@@ -735,12 +913,12 @@ def test_start_agent_rejects_label_used_by_another_pane(monkeypatch):
     )
 
     result = herdr_client.start_agent(
-        "demo", "/tmp/project", "codex", label="CODEX-2",
+        "demo", "/tmp/project", "codex", label="codex-2",
     )
 
     assert result == {
         "available": True,
-        "error": "实例名称已被 pane w1:p2 使用: CODEX-2",
+        "error": "实例名称已被 pane w1:p2 使用: codex-2",
     }
 
 
