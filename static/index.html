@@ -3461,6 +3461,32 @@ function finishTermLoading(id,inst){
   setTimeout(()=>loading.remove(),180);
   if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active'))requestAnimationFrame(()=>{try{inst.xterm.focus()}catch(e){}});
 }
+// 切主题期间盖遮罩:WebGL 整屏重绘会阻塞主线程,期间点击/输入会被
+// 堆积并在阻塞结束后"幽灵回放"。盖住可见终端 + 全局禁输入,渲染完
+// 再揭开,让用户看到"正在切换"而非"点了没反应"。
+let TERM_THEME_OVERLAYING=false;
+function showTermThemeOverlay(){
+  if(TERM_THEME_OVERLAYING)return;
+  TERM_THEME_OVERLAYING=true;
+  for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
+    if(!inst?.el||inst.el.style.display==='none')continue;
+    if(inst.themeOverlayEl)continue;
+    const ov=document.createElement('div');
+    ov.className='term-loading';ov.setAttribute('role','status');
+    ov.innerHTML='<span class="term-loading-spinner" aria-hidden="true"></span><span>切换主题…</span>';
+    inst.el.appendChild(ov);inst.themeOverlayEl=ov;
+  }
+}
+function hideTermThemeOverlay(){
+  if(!TERM_THEME_OVERLAYING)return;
+  TERM_THEME_OVERLAYING=false;
+  for(const inst of Object.values(TERM_INSTANCES||{})){
+    const ov=inst?.themeOverlayEl;if(!ov)continue;
+    inst.themeOverlayEl=null;
+    ov.classList.add('done');
+    setTimeout(()=>{try{ov.remove()}catch(e){}},180);
+  }
+}
 function holdTermLoadingForTui(id){
   const inst=TERM_INSTANCES[id];if(!inst?.loadingEl)return;
   inst.loadingWaitForTui=true;
@@ -3780,7 +3806,7 @@ function termMount(id){
     renderQueue:[],rendering:false,renderGeneration:0,replayComplete:false,loadingEl,loadingWaitForTui:false,
     loadingLastOutputAt:performance.now(),loadingTimer:null,loadingDeadlineTimer:null,loadingPaintPending:false};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
-  xterm.onData(d=>{if(isTermFocusReport(d)||TERM_INSTANCES[id]?.loadingEl)return;queueTermInput(id,applyTermModifiers(d))});
+  xterm.onData(d=>{if(isTermFocusReport(d)||TERM_THEME_OVERLAYING||TERM_INSTANCES[id]?.loadingEl)return;queueTermInput(id,applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   XTERM=xterm;FIT=fit;
   // 先让浏览器画出 loading，再在同一个 xterm/WebGL context 中完成首帧和
@@ -4615,20 +4641,32 @@ function termMinimumContrastRatio(){return TERM_WEBGL_CONTRAST}
 function setTheme(mode,save=true){
   const themeStarted=performance.now();
   const light=mode==='light';
-  document.documentElement.classList.toggle('light',light);
-  const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
-  const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
   const th=termTheme();
-  for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
-    if(id===TERM_ID&&inst.el?.style.display!=='none')try{
-      inst.xterm.options.theme=th;
-    }catch(e){}
-    else inst.pendingTheme=th;
-  }
-  sendAllTermColorSchemes();
-  try{fetch('/api/theme/herdr',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({mode:light?'light':'dark'})}).catch(()=>{})}catch(e){}
-  if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
-  if(save)afterTermPaints(()=>{window.__termThemeSwitchMs=Math.round((performance.now()-themeStarted)*10)/10})
+  const hasVisibleTerm=Object.values(TERM_INSTANCES||{}).some(i=>i?.el&&i.el.style.display!=='none');
+  const applyTheme=()=>{
+    document.documentElement.classList.toggle('light',light);
+    const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
+    const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
+    for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
+      if(id===TERM_ID&&inst.el?.style.display!=='none')try{
+        inst.xterm.options.theme=th;
+      }catch(e){}
+      else inst.pendingTheme=th;
+    }
+    sendAllTermColorSchemes();
+    try{fetch('/api/theme/herdr',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({mode:light?'light':'dark'})}).catch(()=>{})}catch(e){}
+    if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+    afterTermPaints(()=>{
+      hideTermThemeOverlay();
+      if(save)window.__termThemeSwitchMs=Math.round((performance.now()-themeStarted)*10)/10;
+    });
+  };
+  // 有可见终端时先盖遮罩并等一帧(确保遮罩画出),再触发 WebGL 重绘;
+  // 避免遮罩和重绘同帧导致遮罩还没渲染就卡住。无可见终端则直接切。
+  if(hasVisibleTerm){
+    showTermThemeOverlay();
+    requestAnimationFrame(()=>requestAnimationFrame(applyTheme));
+  }else applyTheme();
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
 (function(){try{setTheme(localStorage.getItem('dash-theme')||'light',false)}catch(e){}})();

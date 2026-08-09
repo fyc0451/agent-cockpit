@@ -671,7 +671,7 @@ def test_terminal_does_not_forward_browser_focus_reports_to_pty():
     js = _inline_js()
     assert "const isTermFocusReport=data=>data==='\\x1b[I'||data==='\\x1b[O'" in js
     mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
-    assert "xterm.onData(d=>{if(isTermFocusReport(d)||TERM_INSTANCES[id]?.loadingEl)return;" in mount
+    assert "xterm.onData(d=>{if(isTermFocusReport(d)||TERM_THEME_OVERLAYING||TERM_INSTANCES[id]?.loadingEl)return;" in mount
     assert "queueTermInput(id,applyTermModifiers(d))" in mount
 
 
@@ -1721,7 +1721,7 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
         "try{xterm.write", 1
     )[0]
     assert clear_warmup.index("xterm.reset()") < clear_warmup.index("afterTermPaints(connect)")
-    assert "isTermFocusReport(d)||TERM_INSTANCES[id]?.loadingEl" in mount
+    assert "isTermFocusReport(d)||TERM_THEME_OVERLAYING||TERM_INSTANCES[id]?.loadingEl" in mount
     term_key = js.split("function termKey(name){", 1)[1].split(
         "async function termEnsure", 1
     )[0]
@@ -1745,6 +1745,10 @@ def test_theme_switch_updates_visible_terminal_without_contrast_rebuild_or_resiz
     assert "sendAllTermColorSchemes()" in set_theme
     assert "xterm.resize" not in set_theme
     assert "window.__termThemeSwitchMs" in set_theme
+    # 切主题时盖遮罩并禁输入,渲染完揭开——避免 WebGL 重绘期间点击堆积"幽灵回放"
+    assert "showTermThemeOverlay()" in set_theme
+    assert "hideTermThemeOverlay()" in set_theme
+    assert "requestAnimationFrame(applyTheme)" in set_theme
     show = js.split("function showTermInstance(id){", 1)[1].split(
         "function termSwitch", 1
     )[0]
