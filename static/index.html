@@ -338,7 +338,7 @@ header .spacer{flex:1}
 .term-keys.expanded .term-key-extra{display:block}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
 #termContainer{min-height:0;position:relative}
-.term-loading{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--term-bg);color:var(--term-fg);font-size:13px;opacity:1;transition:opacity .16s ease;pointer-events:auto;cursor:wait;user-select:none}
+.term-loading{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--term-bg);color:var(--term-fg);font-size:13px;opacity:1;transition:opacity .16s ease;pointer-events:none;user-select:none}
 .term-loading.done{opacity:0;pointer-events:none}
 .term-loading-spinner{width:16px;height:16px;border:2px solid color-mix(in srgb,var(--term-fg) 28%,transparent);border-top-color:var(--term-fg);border-radius:50%;animation:term-loading-spin .8s linear infinite}
 @keyframes term-loading-spin{to{transform:rotate(360deg)}}
@@ -2659,6 +2659,7 @@ const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*
 const TERM_LOADING_QUIET=400,TERM_LOADING_TIMEOUT=15000;
 const TERM_WEBGL_WARMUP='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()[]{}<>+-=_/\\|:;,.? ┌─┐│└┘├┤┬┴┼ 中文';
 const TERM_WEBGL_CONTRAST=document.documentElement.classList.contains('light')?4.5:3;
+const TERM_THEME_MIN_MS=1500; // 主题遮罩最小显示时长,兜底盖住WebGL整屏重绘卡顿
 const TERM_TEXT_ENCODER=new TextEncoder();
 const afterTermPaints=callback=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(callback)));
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
@@ -4657,10 +4658,18 @@ function setTheme(mode,save=true){
     sendAllTermColorSchemes();
     try{fetch('/api/theme/herdr',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({mode:light?'light':'dark'})}).catch(()=>{})}catch(e){}
     if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
-    afterTermPaints(()=>{
-      hideTermThemeOverlay();
-      if(save)window.__termThemeSwitchMs=Math.round((performance.now()-themeStarted)*10)/10;
-    });
+    // afterTermPaints(3帧)在真实GPU上可能早于WebGL重绘完成就回调,
+    // 导致遮罩闪一下就消失。用最小显示时长(TERM_THEME_MIN_MS)兜底,
+    // 取"渲染完成"和"最小时长"两者更晚,确保遮罩盖住整个卡顿期。
+    const hide=()=>{
+      if(performance.now()-themeStarted<TERM_THEME_MIN_MS){
+        setTimeout(hide,TERM_THEME_MIN_MS-(performance.now()-themeStarted));
+      }else{
+        hideTermThemeOverlay();
+        if(save)window.__termThemeSwitchMs=Math.round((performance.now()-themeStarted)*10)/10;
+      }
+    };
+    afterTermPaints(hide);
   };
   // 有终端时先盖全局固定遮罩(offsetHeight 强制画出),下一帧再触发 WebGL
   // 重绘。遮罩在独立合成层,即使主线程被重绘卡住也仍可见。
