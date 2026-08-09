@@ -1286,6 +1286,32 @@ class TestHerdrStateClient:
         ]
         assert client.stop() is True
 
+    def test_start_partial_failure_cleans_threads(self, monkeypatch) -> None:
+        """H0.5 R9:多 session 中第二个 thread.start 抛异常(partial-start),
+        已生线程必须 signal+join 回收后异常上抛,不泄漏线程/FD。"""
+        real_thread = threading.Thread
+
+        class FlakyThread(real_thread):
+            def start(self) -> None:
+                if self.name == "cockpit-state-pb":
+                    raise RuntimeError("spawn boom")
+                super().start()
+
+        monkeypatch.setattr(herdr_state.threading, "Thread", FlakyThread)
+        client = herdr_state.HerdrStateClient(
+            {"pa": "/nonexistent/pa.sock", "pb": "/nonexistent/pb.sock"},
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.1,
+            health_check_interval=None,
+        )
+        with pytest.raises(RuntimeError, match="spawn boom"):
+            client.start()
+        assert not [
+            t for t in threading.enumerate()
+            if t.name.startswith("cockpit-state-p") and t.is_alive()
+        ]
+        assert client.stop() is True
+
     def test_register_after_stop_closes_and_raises(self) -> None:
         """stop 已置位后新 socket 登记被拒绝且立即关闭（无新 I/O 存活）。"""
         client = herdr_state.HerdrStateClient({})

@@ -737,11 +737,22 @@ class HerdrStateClient:
         self._snapshot_timeout = snapshot_timeout
         self._resync_min_interval = resync_min_interval
 
+    def _signal_stop_locked(self) -> None:
+        """_lifecycle_lock 下调用:置停止请求与标志,关闭全部在途 socket。"""
+        self._stop_requested = True
+        self._stop.set()
+        with self._lock:
+            active = list(self._active)
+        for sock in active:
+            sock.close()
+
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> bool:
         """一次性启动 reader 线程。重复 start / start-after-start 抛
         RuntimeError;request_stop/stop 已取得所有权后拒绝(返回 False)且
-        不生线程。与 request_stop 经 _lifecycle_lock 线性化。"""
+        不生线程。与 request_stop 经 _lifecycle_lock 线性化。H0.5 R9:
+        thread.start 中途异常(partial-start)时,已生线程/在途 socket 必须
+        回收后再抛,不泄漏线程/FD。"""
         with self._lifecycle_lock:
             if self._started:
                 raise RuntimeError("HerdrStateClient 已启动过，不支持重复 start 或 restart")
@@ -749,27 +760,35 @@ class HerdrStateClient:
                 return False  # stop 已取得所有权:不得再生线程
             self._started = True
             self._stop.clear()
-            for name, path in self._sessions.items():
-                state = SessionState(name)
-                self._store.set_session(name, state)
-                thread = threading.Thread(
-                    target=self._run_session, args=(name, path, state),
-                    name=f"cockpit-state-{name}", daemon=True,
-                )
-                self._threads[name] = thread
-                thread.start()
+            spawned: list[threading.Thread] = []
+            error: Exception | None = None
+            try:
+                for name, path in self._sessions.items():
+                    state = SessionState(name)
+                    self._store.set_session(name, state)
+                    thread = threading.Thread(
+                        target=self._run_session, args=(name, path, state),
+                        name=f"cockpit-state-{name}", daemon=True,
+                    )
+                    thread.start()
+                    # start 成功才登记:partial-start 残留的未启动线程不进
+                    # _threads,stop 的 join 不会撞上 cannot-join
+                    self._threads[name] = thread
+                    spawned.append(thread)
+            except Exception as exc:
+                self._signal_stop_locked()  # 关闸+关在途 socket
+                error = exc
+        if error is not None:
+            for thread in spawned:  # 锁外 join 已生线程,不泄漏
+                thread.join(5.0)
+            raise error
         return True
 
     def request_stop(self) -> None:
         """信号阶段(不 join):置停止标志并关闭全部在途 socket,唤醒阻塞读。
         幂等;此后 start 拒绝再生线程。"""
         with self._lifecycle_lock:
-            self._stop_requested = True
-        self._stop.set()
-        with self._lock:
-            active = list(self._active)
-        for sock in active:
-            sock.close()
+            self._signal_stop_locked()
 
     def stop(self, join_timeout: float = 5.0) -> bool:
         """幂等。request_stop(置标志+关在途 socket 唤醒阻塞读)→ 按总

@@ -28,6 +28,10 @@ reconcile 注册/发布/换入 CAS 全局拒绝未决 ownership;_STATE_REAP_LOCK
 串行 stop/reaper/to_reap/重复 stop,survivor 转移锁内身份 CAS 防幽灵
 复活/重复报告;覆盖 survivor 未回收→open/reconcile 拒绝→回收后 restart、
 双 stop 交错无幽灵。
+R9 复审修订(#1841 REVIEW_BLOCK):start False/异常/partial-start 统一
+identity-safe 收尾(_start_candidate,单候选失败不炸 reconcile),
+HerdrStateClient.start partial 失败回收已生线程再抛;stop 总预算从
+函数入口起算、等 REAP 锁计时、timed acquire 耗尽 deferred 不重置窗口。
 """
 import asyncio
 import threading
@@ -91,6 +95,7 @@ class FakeStateClient:
         self.started = False
         self.stopped = False
         self.stop_requested = False
+        self.stop_calls = 0
         FakeStateClient.instances.append(self)
 
     def start(self):
@@ -105,6 +110,7 @@ class FakeStateClient:
     def stop(self, join_timeout=5.0):
         self.request_stop()
         self.stopped = True
+        self.stop_calls += 1
         return True
 
     def snapshot_cached(self):
@@ -1026,6 +1032,168 @@ def test_double_open_serialized_epochs(monkeypatch):
     assert results == [True, True]
     assert server._state_epoch == epoch0 + 2
     assert server._state_running is True
+
+
+# ── R9 复审修订(#1841):start 异常统一收尾 + stop 绝对 deadline ──
+
+
+def test_added_start_exception_unified_cleanup(monkeypatch):
+    """added start 抛异常:reconcile 不炸,候选 identity-safe 收尾(无僵尸
+    inflight、无活线程假象),下轮恢复发布。"""
+    real_start = FakeStateClient.start
+    calls = {"n": 0}
+
+    def start_boom_once(self):
+        calls["n"] += 1
+        if calls["n"] == 2:  # instances[0]=_install 的 demo;第二个是候选
+            raise RuntimeError("start boom")
+        return real_start(self)
+
+    monkeypatch.setattr(FakeStateClient, "start", start_boom_once)
+    _install(monkeypatch)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock", "bad": "/tmp/bad.sock"})
+    server._reconcile_state_client()  # 不抛
+    assert server._state_inflight == {}
+    assert "bad" not in server._state_clients
+    assert server._state_retiring == {}  # 已经统一 REAP 回收
+    assert server._state_survivors == {}
+    assert server._state_clients["demo"].stopped is False  # 健康 session 不动
+    server._reconcile_state_client()  # 恢复轮
+    assert "bad" in server._state_clients
+
+
+def test_added_start_false_unified_cleanup(monkeypatch):
+    """added start 返回 False(stop 先取得所有权语义):统一收尾不双停。"""
+    _install(monkeypatch)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock", "late": "/tmp/late.sock"})
+    real_start = FakeStateClient.start
+
+    def start_stop_first(self):
+        server._stop_state_client()  # stop 在 start 前取得所有权
+        return real_start(self)  # stop_requested 已置 → False
+
+    monkeypatch.setattr(FakeStateClient, "start", start_stop_first)
+    server._reconcile_state_client()
+    candidate = FakeStateClient.instances[-1]
+    assert server._state_inflight == {}
+    assert candidate.stop_calls == 1  # stop 摘取后只停一次,无双停
+    assert server._state_clients == {}
+
+
+def test_changed_start_exception_unified_cleanup(monkeypatch):
+    """changed(swap)候选 start 抛异常:旧 client 不受影响继续服务,候选
+    统一收尾,下轮重试换入。"""
+    clients = _install(monkeypatch)
+    calls = {"n": 0}
+    real_start = FakeStateClient.start
+
+    def start_boom_once(self):
+        calls["n"] += 1
+        if calls["n"] == 1:  # patch 在 _install 之后:首个即 swap 候选
+            raise RuntimeError("swap start boom")
+        return real_start(self)
+
+    monkeypatch.setattr(FakeStateClient, "start", start_boom_once)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo-new.sock"})
+    server._reconcile_state_client()  # 不抛
+    assert server._state_inflight == {}
+    assert server._state_retiring == {}
+    assert server._state_clients["demo"] is clients["demo"]  # 旧 client 保留
+    assert clients["demo"].stopped is False
+    server._reconcile_state_client()  # 重试成功换入
+    assert server._state_clients["demo"] is not clients["demo"]
+    assert clients["demo"].stopped is True
+
+
+def test_changed_start_exception_with_concurrent_stop_no_double(monkeypatch):
+    """changed 候选 start 期间并发 stop 摘取 + start 抛异常:不双停、
+    不复活、四 maps 全空。"""
+    clients = _install(monkeypatch)
+    real_start = FakeStateClient.start
+
+    def start_stop_then_boom(self):
+        server._stop_state_client()
+        raise RuntimeError("boom after stop")
+
+    monkeypatch.setattr(FakeStateClient, "start", start_stop_then_boom)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo-new.sock"})
+    server._reconcile_state_client()  # 不抛
+    candidate = FakeStateClient.instances[-1]
+    assert candidate is not clients["demo"]
+    assert candidate.stop_calls == 1  # 仅 stop 摘取时停一次
+    assert server._state_clients == {}
+    assert server._state_inflight == {}
+    assert server._state_retiring == {}
+    assert server._state_survivors == {}
+
+
+def test_stop_lock_wait_counts_toward_budget(monkeypatch):
+    """stop 总预算含等 REAP 锁:前一 stop 占锁 join 时,排队 stop 的
+    wall-clock 不超过 budget+调度容差,且 join 只用 remaining。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.3)
+
+    class SlowStop(FakeStateClient):
+        def stop(self, join_timeout=5.0):
+            self.request_stop()
+            time.sleep(0.2)
+            self.stopped = True
+            return True
+
+    c = SlowStop({"s": "/tmp/s.sock"})
+    c.start()
+    monkeypatch.setattr(server, "_state_clients", {"s": c})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "s": {"socket": "/tmp/s.sock", "directory": "/d"},
+    })
+    out: dict[str, object] = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("first", server._stop_state_client())
+    )
+    t.start()
+    time.sleep(0.05)  # 前一 stop 持 REAP  join 中
+    t0 = time.monotonic()
+    r = server._stop_state_client()  # 排队 stop:等锁计入预算
+    elapsed = time.monotonic() - t0
+    t.join(5)
+    assert out["first"] == []
+    assert r == []  # 前者已收干净,本 stop 无剩余工作
+    assert elapsed < 0.3 + 0.3  # budget + 合理调度容差
+
+
+def test_stop_budget_exhausted_by_lock_wait_defers(monkeypatch):
+    """等锁耗尽预算:deferred 返回,不重置 join 窗口;ownership 原样受管
+    (maps 未被本 stop 触碰),running 不被改动。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.15)
+
+    class VerySlowStop(FakeStateClient):
+        def stop(self, join_timeout=5.0):
+            self.request_stop()
+            time.sleep(0.3)
+            self.stopped = True
+            return True
+
+    c = VerySlowStop({"s": "/tmp/s.sock"})
+    c.start()
+    monkeypatch.setattr(server, "_state_clients", {"s": c})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "s": {"socket": "/tmp/s.sock", "directory": "/d"},
+    })
+    out: dict[str, object] = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("first", server._stop_state_client())
+    )
+    t.start()
+    time.sleep(0.05)  # 前一 stop 持 REAP(其 join 0.3s > 本次预算)
+    t0 = time.monotonic()
+    r = server._stop_state_client()
+    elapsed = time.monotonic() - t0
+    t.join(5)
+    assert r and r[0].get("deferred") is True  # 预算耗尽,明确放弃
+    assert elapsed < 0.15 + 0.3  # 不超过预算+容差
+    assert out["first"] == []
+    # ownership 未丢:first stop 已完成回收,maps 干净;本 stop 未产生幽灵
+    assert server._state_retiring == {}
+    assert server._state_survivors == {}
 
 
 def _wait_client_ready(name, timeout=5.0):

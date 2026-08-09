@@ -4761,7 +4761,18 @@ def _stop_state_client() -> list[dict[str, Any]]:
     global _state_clients, _state_sessions_meta, _state_running, _state_epoch
     global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
     global _state_inflight
-    with _STATE_REAP_LOCK:
+    # R9:总预算从函数入口起算,等待 REAP 锁的时间也计入;耗尽即放弃
+    # (不重置完整 join 窗口),ownership 原样受管不丢,running 不被改动。
+    absolute_deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
+    if not _STATE_REAP_LOCK.acquire(
+        timeout=max(0.0, absolute_deadline - time.monotonic())
+    ):
+        return [{
+            "deferred": True,
+            "reason": "reap_lock_timeout",
+            "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+        }]
+    try:
         with _STATE_CLIENT_LOCK:
             _state_running = False
             _state_epoch += 1
@@ -4782,16 +4793,15 @@ def _stop_state_client() -> list[dict[str, Any]]:
             ):
                 targets[id(owner.client)] = owner
         owners = list(targets.values())
-        # 阶段二:先广播 cancel,再按共享总 deadline 逐个 join(stop 幂等)
+        # 阶段二:先广播 cancel,再按入口绝对 deadline 的剩余窗口逐个 join
         for owner in owners:
             try:
                 owner.client.request_stop()
             except Exception:
                 logger.exception("herdr state client request_stop failed")
-        deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
         survived: list[_InflightOwner] = []
         for owner in owners:
-            remaining = max(0.0, deadline - time.monotonic())
+            remaining = max(0.0, absolute_deadline - time.monotonic())
             if not _reap_owner(owner, join_timeout=remaining):
                 # 锁内身份 CAS:仅仍受管于 retiring/survivors 的才确认
                 # survivor;被并发成功摘除的不得复活/报告
@@ -4805,6 +4815,8 @@ def _stop_state_client() -> list[dict[str, Any]]:
                         managed = True
                 if managed:
                     survived.append(owner)
+    finally:
+        _STATE_REAP_LOCK.release()
     diagnostics: list[dict[str, Any]] = []
     for owner in survived:
         alive = [
@@ -4875,6 +4887,30 @@ def _candidate_cancelled(name: str, owner: _InflightOwner) -> bool:
             or _state_epoch != owner.epoch
             or _state_inflight.get(name) is not owner
         )
+
+
+def _start_candidate(
+    name: str, epoch: int, client: herdr_state.HerdrStateClient,
+    owner: _InflightOwner,
+) -> bool:
+    """锁外启动候选;False/异常/partial-start 统一 identity-safe 收尾:
+    仍是 owner 则 CLIENT 临界区 del inflight→retiring,经统一 REAP 入口
+    回收;已被 global stop 摘取则不双停。异常记录且不炸掉整个 reconcile。
+    返回是否已成功启动(调用方继续 publish CAS)。"""
+    try:
+        started = client.start()
+    except Exception:
+        logger.exception("herdr state candidate start failed: %s", name)
+        started = False
+    if started:
+        return True
+    iter_reap: list[_InflightOwner] = []
+    with _STATE_CLIENT_LOCK:
+        if _state_inflight.get(name) is owner:
+            del _state_inflight[name]
+            iter_reap.append(_retire_client_locked(name, epoch, client))
+    _reap_owners(iter_reap, STATE_STOP_JOIN_TIMEOUT_S)
+    return False
 
 
 def _reconcile_state_client() -> None:
@@ -4953,9 +4989,9 @@ def _reconcile_state_client() -> None:
                 token=next(_inflight_token), client=client,
             )
             _state_inflight[name] = owner
-        # 锁外启动:若 stop 已先取得所有权(request_stop),start 拒绝不生线程
-        if not client.start():
-            continue  # stop 拥有该候选:不 publish、不再 stop(防双停)
+        # 锁外启动:False/异常/partial 统一收尾;stop 先取得所有权则不生线程
+        if not _start_candidate(name, epoch, client, owner):
+            continue
         # R8:added 统一 identity-safe 收尾——publish CAS 任一条件失败但仍是
         # owner 时,同一 CLIENT 临界区 del inflight→转 retiring,锁外经统一
         # REAP 入口回收;不留僵尸 inflight/活线程,同名下轮不再饥饿。
@@ -5000,8 +5036,9 @@ def _reconcile_state_client() -> None:
                 _state_inflight[name] = owner
         if owner is None:
             continue  # 闸门已关或已有同名候选:未启动线程,直接丢弃
-        if not new_client.start():
-            continue  # stop 已先取得所有权:不生线程、不 publish
+        # 锁外启动:False/异常/partial 统一收尾;stop 先取得所有权则不生线程
+        if not _start_candidate(name, epoch, new_client, owner):
+            continue
         # 锁外有界等待就绪:每轮观察取消,stop 后立即退出
         ready = False
         cancelled = False
