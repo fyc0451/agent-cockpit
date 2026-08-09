@@ -202,6 +202,9 @@ def test_herdr_terminal_attach_atomically_replaces_restored_pty_on_server():
     # 新终端挂载完成后再刷新 selector，不能又显示成待打开的 session。
     created = attach.split("const r=await api('/api/term?label='", 1)[1]
     assert created.index("termMount(r.id)") < created.index("renderTermOptions()")
+    assert created.index("holdTermLoadingForTui(r.id)") < created.index(
+        "queueTermInput(r.id,'herdr --session '"
+    )
     # WebSocket 必须先设置主题和尺寸，再执行排队的 herdr attach 命令。
     assert websocket.index("sendTermColorScheme(id,ws,!replay)") < websocket.index(
         "type:'resize'"
@@ -668,7 +671,7 @@ def test_terminal_does_not_forward_browser_focus_reports_to_pty():
     js = _inline_js()
     assert "const isTermFocusReport=data=>data==='\\x1b[I'||data==='\\x1b[O'" in js
     mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
-    assert "xterm.onData(d=>{if(isTermFocusReport(d))return;" in mount
+    assert "xterm.onData(d=>{if(isTermFocusReport(d)||TERM_INSTANCES[id]?.loadingEl)return;" in mount
     assert "queueTermInput(id,applyTermModifiers(d))" in mount
 
 
@@ -1668,16 +1671,31 @@ def test_terminal_output_yields_between_bounded_chunks():
     assert "renderGeneration:0" in mount
 
 
-def test_terminal_loading_waits_for_replay_parse_before_fading():
+def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     js = _inline_js()
     assert ".term-loading{" in HTML
+    assert "pointer-events:auto" in HTML
+    assert "TERM_LOADING_QUIET=400,TERM_LOADING_TIMEOUT=15000" in js
     assert "replay_complete" in js
+    hold = js.split("function holdTermLoadingForTui(id){", 1)[1].split(
+        "function settleTermLoading", 1
+    )[0]
+    assert "inst.loadingWaitForTui=true" in hold
+    assert "TERM_LOADING_TIMEOUT" in hold
     settle = js.split("function settleTermLoading(id,force=false){", 1)[1].split(
         "function writeTermOutput", 1
     )[0]
     assert "inst.replayComplete" in settle
     assert "inst.rendering" in settle
     assert "inst.renderQueue.length" in settle
+    assert "inst.xterm.buffer.active.type!=='alternate'" in settle
+    assert "TERM_LOADING_QUIET-(performance.now()-inst.loadingLastOutputAt)" in settle
+    assert "requestAnimationFrame(()=>requestAnimationFrame" in settle
+    writer = js.split("function writeTermOutput(id,data,replayFrame){", 1)[1].split(
+        "function loadOlderTermHistory", 1
+    )[0]
+    assert "inst.loadingLastOutputAt=performance.now()" in writer
+    assert "clearTimeout(inst.loadingTimer)" in writer
     websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
         "function showTermInstance", 1
     )[0]
@@ -1688,6 +1706,17 @@ def test_terminal_loading_waits_for_replay_parse_before_fading():
         "function queueTermRender", 1
     )[0]
     assert "settleTermLoading(id)" in pump
+    mount = js.split("function termMount(id){", 1)[1].split(
+        "// ============ 会话管理", 1
+    )[0]
+    assert mount.index("requestAnimationFrame(()=>requestAnimationFrame") < mount.index(
+        "openTermWS(id,xterm,true)"
+    )
+    assert "isTermFocusReport(d)||TERM_INSTANCES[id]?.loadingEl" in mount
+    term_key = js.split("function termKey(name){", 1)[1].split(
+        "async function termEnsure", 1
+    )[0]
+    assert "TERM_INSTANCES[TERM_ID].loadingEl" in term_key
 
 
 def test_theme_switch_updates_visible_terminal_without_contrast_rebuild_or_resize():
