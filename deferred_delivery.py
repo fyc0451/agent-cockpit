@@ -186,12 +186,19 @@ class DeferredDeliveryCore:
     def _deliver_outside_lock(
         self, scope: str, inflight: _InFlight,
     ) -> dict[str, Any]:
-        """锁外调用 adapter，返回后入锁 CAS 收尾。"""
+        """锁外调用 adapter，返回后入锁 CAS 收尾。
+
+        adapter 只收到对 inflight.events 逐 event copy.deepcopy 后的全新
+        list——恶意/有缺陷 adapter 对入参的 append/clear/reorder/summary
+        变异都无法触及内部 inflight.events（pristine，只供收尾）；核心状态
+        守恒。
+        """
+        adapter_events = [copy.deepcopy(e) for e in inflight.events]
         accepted = False
         try:
             accepted = bool(
                 self._adapter.deliver(
-                    scope, inflight.binding_version, inflight.events,
+                    scope, inflight.binding_version, adapter_events,
                 )
             )
         except Exception:

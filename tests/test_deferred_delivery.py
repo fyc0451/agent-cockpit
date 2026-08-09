@@ -558,3 +558,168 @@ def test_handoff_zero_loss_zero_dup_new_target_delivers_once():
     assert core.state("s1")["delivered_count"] == 1
     # e1 共投递两次：旧 target（holder）+ 新 target（flush），各一次
     assert sum(c[2].count("e1") for c in adapter.calls) == 2
+
+
+# ── R4（#1788/#1786）：adapter 入参深拷贝隔离（恶意 adapter 不可污染核心）──
+
+class MaliciousAdapter:
+    """对入参 events 做破坏性变异；记录收到的 list identity。"""
+
+    def __init__(self, mode, accept=True):
+        self.mode = mode
+        self.accept = accept
+        self.received_lists = []
+        self.raise_before_mutate = False
+
+    def deliver(self, scope, binding_version, events):
+        self.received_lists.append(events)
+        if self.mode == "append":
+            events.append(dd.DeferredEvent(
+                event_id="GARBAGE", scope=scope, binding_version=binding_version,
+                summary={"junk": True}, created_ts=0.0,
+            ))
+        elif self.mode == "clear":
+            events.clear()
+        elif self.mode == "reorder":
+            events.reverse()
+        elif self.mode == "mutate_summary":
+            for e in events:
+                e.summary.clear()
+                e.summary["polluted"] = True
+        return self.accept
+
+
+def _setup_malicious(mode, accept=True):
+    adapter = MaliciousAdapter(mode, accept=accept)
+    core = dd.DeferredDeliveryCore(adapter)
+    core.set_active_binding("s1", 1)
+    core.set_target_status("s1", "working")
+    core.ingest(ev("e1", summary={"v": 1, "nested": {"x": 1}}))
+    core.ingest(ev("e2", summary={"v": 2}))
+    return adapter, core
+
+
+def test_malicious_append_does_not_corrupt_finish():
+    """adapter append 垃圾 → _finish 迭代 pristine inflight.events，无
+    AttributeError、delivered_ids/count 不含垃圾、public API 不抛。"""
+    adapter, core = _setup_malicious("append", accept=True)
+    core.set_target_status("s1", "ready")  # 触发投递（adapter append GARBAGE）
+    st = core.state("s1")
+    assert st["delivered_count"] == 2  # 只有 e1/e2，无 GARBAGE
+    assert core.pending("s1") == []
+    assert "GARBAGE" not in core.late_results("s1")
+    # 核心状态守恒：后续 ingest 正常
+    r = core.ingest(ev("e3", binding_version=1))
+    assert r["queued"] is True
+
+
+def test_malicious_clear_does_not_lose_events_on_reject():
+    """adapter clear 入参 + reject → requeue 用 pristine inflight，事件零丢。"""
+    adapter, core = _setup_malicious("clear", accept=False)
+    core.set_target_status("s1", "ready")  # 投递被拒 + 入参被 clear
+    pend = core.pending("s1")
+    assert sorted(e.event_id for e in pend) == ["e1", "e2"]  # 零丢
+    assert core.state("s1")["delivered_count"] == 0
+
+
+def test_malicious_reorder_keeps_finish_consistent():
+    """adapter reorder 入参 → delivered 集合不受顺序影响。"""
+    adapter, core = _setup_malicious("reorder", accept=True)
+    core.set_target_status("s1", "ready")
+    assert core.state("s1")["delivered_count"] == 2
+    assert core.pending("s1") == []
+
+
+def test_malicious_summary_mutation_does_not_pollute_core():
+    """adapter 变异入参嵌套 summary → 核心 pending/handoff 不被污染。"""
+    adapter, core = _setup_malicious("mutate_summary", accept=False)
+    core.set_target_status("s1", "ready")  # reject → requeue
+    pend = {e.event_id: e for e in core.pending("s1")}
+    assert pend["e1"].summary == {"v": 1, "nested": {"x": 1}}  # pristine
+    assert "polluted" not in pend["e1"].summary
+    assert pend["e2"].summary == {"v": 2}
+
+
+def test_malicious_exception_keeps_core_invariant():
+    """adapter 变异后抛异常 → accepted=False、requeue、public API 不抛。"""
+    class ExplodingAdapter(MaliciousAdapter):
+        def deliver(self, scope, binding_version, events):
+            events.append("GARBAGE")
+            raise RuntimeError("boom")
+
+    adapter = ExplodingAdapter("append", accept=False)
+    core = dd.DeferredDeliveryCore(adapter)
+    core.set_active_binding("s1", 1)
+    core.set_target_status("s1", "working")
+    core.ingest(ev("e1", summary={"v": 1}))
+    core.set_target_status("s1", "ready")  # 不抛
+    assert sorted(e.event_id for e in core.pending("s1")) == ["e1"]
+    assert core.state("s1")["delivered_count"] == 0
+
+
+def test_malicious_accepted_with_generation_switch_handoff_clean():
+    """adapter append + accepted + generation 切换 → handoff 用 pristine
+    inflight，转投新 target 不含垃圾、零丢零重。"""
+    adapter = MaliciousAdapter("append", accept=True)
+    core = dd.DeferredDeliveryCore(adapter)
+    core.set_active_binding("s1", 1)
+    core.set_target_status("s1", "ready")
+
+    holder_blocked = threading.Event()
+    release = threading.Event()
+    real_deliver = adapter.deliver
+
+    def blocking_deliver(scope, binding_version, events):
+        events.append(dd.DeferredEvent(
+            event_id="GARBAGE", scope=scope, binding_version=binding_version,
+            summary={}, created_ts=0.0,
+        ))
+        holder_blocked.set()
+        release.wait(timeout=10)
+        return True
+
+    adapter.deliver = blocking_deliver
+
+    def holder():
+        core.ingest(ev("e1", summary={"v": 1}))
+
+    t = threading.Thread(target=holder)
+    t.start()
+    holder_blocked.wait(timeout=5)
+    core.set_active_binding("s1", 2)  # generation 切换
+    release.set()
+    t.join(timeout=5)
+    # handoff 只转投 e1（pristine），无 GARBAGE
+    late = core.late_results("s1")
+    assert len(late) == 1
+    assert late[0]["category"] == "delivered_stale_target"
+    assert late[0]["handed_off"] == ["e1"]
+    pend = core.pending("s1")
+    assert [e.event_id for e in pend] == ["e1"]
+    assert all(e.event_id != "GARBAGE" for e in pend)
+    assert core.state("s1")["delivered_count"] == 0  # 新 gen 尚未投递
+
+
+def test_adapter_receives_fresh_list_not_inflight_reference():
+    """adapter 收到的 list 不是 inflight.events 同一引用（身份隔离）。"""
+    adapter = RecordingAdapter()
+    core = dd.DeferredDeliveryCore(adapter)
+    core.set_active_binding("s1", 1)
+    core.set_target_status("s1", "working")
+    core.ingest(ev("e1"))
+    # 捕获 inflight 引用不可行（内部），改为：adapter 修改收到的 list 后
+    # 核心 pending 不受影响（rejected 路径）
+    class MutatingReject:
+        def __init__(self): self.got = None
+        def deliver(self, scope, bv, events):
+            self.got = events
+            events.clear()
+            return False
+    m = MutatingReject()
+    core2 = dd.DeferredDeliveryCore(m)
+    core2.set_active_binding("s1", 1)
+    core2.set_target_status("s1", "ready")
+    core2.ingest(ev("e1"))
+    assert m.got is not None
+    # 入参被 clear，但核心 pending 仍有 e1（requeue 自 pristine）
+    assert [e.event_id for e in core2.pending("s1")] == ["e1"]
