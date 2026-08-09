@@ -858,8 +858,9 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     assert toggle.index("pane.classList.add('hf-focus')") < toggle.index(
         "await hfRefreshAll()"
     )
-    # 不进原生全屏(Android Chrome 会弹系统提示),只保留退出兜底
-    assert "requestFullscreen()" not in js
+    # herdrflow 沉浸模式不进原生全屏(Android Chrome 会弹系统提示);
+    # 终端真全屏(toggleTermFullscreen)是独立入口,不在此约束内
+    assert "requestFullscreen" not in toggle
     assert "function hfExitFullscreen(" in js
     assert "if(e.key==='Escape')hfExitFullscreen()" in js
     assert "document.addEventListener('fullscreenchange'" in js
@@ -2621,3 +2622,14 @@ def test_inline_input_send_appends_enter():
     js = _inline_js()
     # 发送=提交:必须补 \r,否则文字只停在 agent 输入框
     assert "queueTermInput(TERM_ID,text+'\\r')" in js
+
+
+def test_terminal_true_fullscreen():
+    js = _inline_js()
+    assert "function toggleTermFullscreen()" in js
+    assert "requestFullscreen" in js
+    assert "term-fs-fixed" in js  # iOS 回退
+    assert 'id="termFsExit"' in HTML
+    assert "#termStage:fullscreen" in HTML
+    # 全屏切换后 refit + 强制重绘
+    assert "fullscreenchange" in js
