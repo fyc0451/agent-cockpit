@@ -1319,24 +1319,16 @@ class UpgradeReq(BaseModel):
 
 @app.get("/api/upgrade/status")
 def api_upgrade_status():
-    """升级任务脱敏状态（需认证）。成功仅终态 succeeded。"""
-    return upgrade_core.public_status()
+    """升级状态（需认证）。V1 升级引擎已退役：固定只读 retired 契约，
+    不 reconcile、不拉起 worker、无任何状态写副作用。"""
+    return upgrade_core.retired_status()
 
 
 @app.post("/api/upgrade")
 def api_upgrade_start(req: UpgradeReq):
-    """触发服务外升级。accepted=true 只表示已排队/进行中，不代表升级成功。"""
-    try:
-        result = upgrade_core.start_upgrade(req.target)
-    except ValueError as exc:
-        code = str(exc)
-        # 仅稳定 error_code；对外文案不带路径/异常原文
-        detail = upgrade_core.ERROR_MESSAGES.get(code, upgrade_core.ERROR_MESSAGES["internal_error"])
-        raise HTTPException(400, detail) from None
-    except Exception:
-        logger.exception("upgrade start failed method=POST path=/api/upgrade")
-        raise HTTPException(500, INTERNAL_ERROR_DETAIL)
-    return result
+    """V1 升级引擎已退役（fail-closed）。稳定返回 retired 契约；
+    不调用 upgrade_core.start_upgrade，不 spawn worker。"""
+    return upgrade_core.retired_start_response()
 
 
 # ── 设置路由 ────────────────────────────────────────────────────

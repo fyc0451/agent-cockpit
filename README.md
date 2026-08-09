@@ -215,7 +215,7 @@ localStorage。session 的 Agent Mail 通信项目绑定存在
 ## 升级、诊断、卸载
 
 ```bash
-./upgrade.sh       # 有本地改动时拒绝覆盖；升级后自动重启 systemd/LaunchAgent
+./upgrade.sh       # 已退役(fail-closed)：一键升级引擎停用，升级走受管人工发布
 ./doctor.sh        # 检查 Python、依赖、herdr、Agent Mail、认证、服务
 ./uninstall.sh     # 只删 user service;代码、配置、数据保留
 ```
@@ -240,7 +240,7 @@ agent-cockpit/
 ├── static/sw.js           Web Push service worker 与深链跳转
 ├── static/manifest.webmanifest  PWA 元数据
 ├── tests/                 回归与安全测试
-├── install.sh / upgrade.sh / doctor.sh / uninstall.sh
+├── install.sh / upgrade.sh(已退役) / doctor.sh / uninstall.sh
 ├── agent-cockpit.service  systemd user 单元模板
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```
