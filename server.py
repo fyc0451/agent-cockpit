@@ -4679,12 +4679,18 @@ def _stop_tickets_pending() -> bool:
         return bool(_state_stop_tickets)
 
 
-def _consume_stop_tickets(ticket: int) -> None:
+def _consume_stop_tickets(ticket: int, timeout: float = 5.0) -> bool:
     """stop 完成:仅清除 <= 本 ticket 的 intent(覆盖更早 deferred);
-    更晚 ticket 保留——较早完成绝不清除较晚 ticket。"""
-    with _STATE_TICKET_LOCK:
+    更晚 ticket 保留——较早完成绝不清除较晚 ticket。
+    R13:bounded TICKET acquire(timeout);拿不到→False(ticket 保留)。"""
+    if not _STATE_TICKET_LOCK.acquire(timeout=timeout):
+        return False
+    try:
         for pending in [t for t in _state_stop_tickets if t <= ticket]:
             _state_stop_tickets.discard(pending)
+    finally:
+        _STATE_TICKET_LOCK.release()
+    return True
 # socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
 STATE_SWAP_READY_TIMEOUT_S = 2.0
 # stop 对全部唯一 client(published+inflight)共享的总 join 预算(秒),
@@ -4878,9 +4884,31 @@ def _stop_state_client() -> list[dict[str, Any]]:
                     finally:
                         _STATE_CLIENT_LOCK.release()
                 # 拿不到 CLIENT → deferred:owner 留在 retiring,不进 survived
-        # 完成:经 TICKET 锁消费 <= 本 ticket 的全部 intent(覆盖更早
-        # deferred);更晚 ticket 保留,较早完成绝不清除较晚 ticket
-        _consume_stop_tickets(ticket)
+        # R13:仅当无 deferred(owner 全摘除或转 survivor)才消费 ticket;
+        # deferred 时不清 ticket、owner 仍受管、返回明确诊断让 retry 后再消费
+        has_deferred = bool(_state_retiring)  # REAP 锁下读,安全
+        if has_deferred:
+            # deferred:不清 ticket,返回明确诊断
+            _STATE_REAP_LOCK.release()
+            return [{
+                "deferred": True,
+                "reason": "phase2 CLIENT reacquire timeout;owners 仍留 retiring",
+                "ticket": ticket,
+                "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+                "pending_retiring": len(_state_retiring),
+                "pending_survivors": len(_state_survivors),
+            }]
+        # 全部完成(reaped 或 survivor):bounded TICKET 消费 <= 本 ticket
+        remaining = max(0.0, absolute_deadline - time.monotonic())
+        if not _consume_stop_tickets(ticket, timeout=remaining):
+            # TICKET 拿不到→deferred:不清 ticket,返回诊断
+            _STATE_REAP_LOCK.release()
+            return [{
+                "deferred": True,
+                "reason": "TICKET lock acquire timeout",
+                "ticket": ticket,
+                "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+            }]
     finally:
         _STATE_REAP_LOCK.release()
     diagnostics: list[dict[str, Any]] = []
