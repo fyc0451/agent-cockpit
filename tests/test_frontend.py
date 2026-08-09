@@ -1714,6 +1714,7 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     opened = mount.index("xterm.open(el)")
     webgl = mount.index("enableTermWebgl(xterm)")
     assert painted < opened < webgl
+    assert "if(prewarmed)afterTermPaints(connect)" in mount
     assert "xterm.write(TERM_WEBGL_WARMUP,clearWarmup)" in mount
     assert "current.initializing=false" in mount
     clear_warmup = mount.split("const clearWarmup=", 1)[1].split(
@@ -1743,6 +1744,7 @@ def test_theme_switch_updates_visible_terminal_without_contrast_rebuild_or_resiz
     assert "xterm.refresh" not in set_theme
     assert "sendAllTermColorSchemes()" in set_theme
     assert "xterm.resize" not in set_theme
+    assert "window.__termThemeSwitchMs" in set_theme
     show = js.split("function showTermInstance(id){", 1)[1].split(
         "function termSwitch", 1
     )[0]
@@ -1755,13 +1757,13 @@ def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     assert "filter:invert(" not in HTML
     assert "hue-rotate(" not in HTML
     assert "function currentTermColorScheme(){return document.documentElement.classList.contains('light')?'light':'dark'}" in js
-    term_theme = js.split("function termTheme(){", 1)[1].split(
+    term_theme = js.split("function termTheme(mode=currentTermColorScheme()){", 1)[1].split(
         "function termMinimumContrastRatio", 1
     )[0]
-    assert "classList.contains('light')" in term_theme
+    assert "if(mode==='light')" in term_theme
     assert "background:'#fafbfc',foreground:'#1a2030'" in term_theme
     assert "background:'#000000',foreground:'#e8e8e8'" in term_theme
-    assert "function termMinimumContrastRatio(){return document.documentElement.classList.contains('light')?4.5:3}" in js
+    assert "function termMinimumContrastRatio(){return TERM_WEBGL_CONTRAST}" in js
     constructor = js.split("const xterm=new Terminal({", 1)[1].split("});", 1)[0]
     assert "minimumContrastRatio:termMinimumContrastRatio()" in constructor
 
@@ -1791,6 +1793,43 @@ def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     assert open_ws.index("sendTermColorScheme(id,ws,!replay)") < open_ws.index(
         "flushTermInput(id,ws)"
     )
+
+
+def test_webgl_themes_are_prewarmed_after_login_and_reused_by_terminal_mount():
+    js = _inline_js()
+    prewarm = js.split("function scheduleTermThemePrewarm(){", 1)[1].split(
+        "function takeTermThemePrewarmer", 1
+    )[0]
+    assert "await ensureTermFontLoaded()" in prewarm
+    assert "modes=[predicted,predicted==='light'?'dark':'light',predicted]" in prewarm
+    assert "await waitForTermIdle()" in prewarm
+    assert "createTermThemePrewarmer(mode)" in prewarm
+
+    creator = js.split("function createTermThemePrewarmer(mode){", 1)[1].split(
+        "function scheduleTermThemePrewarm", 1
+    )[0]
+    assert "cols:8,rows:2" in creator
+    assert "theme:termTheme(mode)" in creator
+    assert "minimumContrastRatio:termMinimumContrastRatio()" in creator
+    assert "enableTermWebgl(xterm)" in creator
+    assert "xterm.write(TERM_WEBGL_WARMUP,ready)" in creator
+    assert "resolve({mode,xterm,fit,webgl,host})" in creator
+
+    take = js.split("function takeTermThemePrewarmer(mode){", 1)[1].split(
+        "function termMount", 1
+    )[0]
+    assert "pool.length>1?pool.pop():null" in take
+
+    mount = js.split("function termMount(id){", 1)[1].split(
+        "// ============ 会话管理", 1
+    )[0]
+    assert "takeTermThemePrewarmer(currentTermColorScheme())" in mount
+    assert "prewarmed?.xterm||new Terminal" in mount
+    assert "el.appendChild(xterm.element)" in mount
+    assert "prewarmed.host.remove()" in mount
+
+    init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
+    assert init.index("if(!ok)") < init.index("scheduleTermThemePrewarm()")
 
 
 def test_settings_hub_error_shows_actionable_fix():

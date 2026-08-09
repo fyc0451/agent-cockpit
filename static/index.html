@@ -2656,6 +2656,7 @@ const TERM_SESSION_PREFIX='session:';
 const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=16*1024;
 const TERM_LOADING_QUIET=400,TERM_LOADING_TIMEOUT=15000;
 const TERM_WEBGL_WARMUP='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()[]{}<>+-=_/\\|:;,.? ┌─┐│└┘├┤┬┴┼ 中文';
+const TERM_WEBGL_CONTRAST=document.documentElement.classList.contains('light')?4.5:3;
 const TERM_TEXT_ENCODER=new TextEncoder();
 const afterTermPaints=callback=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(callback)));
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
@@ -3704,6 +3705,55 @@ function enableTermWebgl(xterm){
     return null;
   }
 }
+let TERM_THEME_PREWARMERS={light:[],dark:[]},TERM_THEME_PREWARM_PROMISE=null;
+function waitForTermIdle(){
+  return new Promise(resolve=>{
+    if(typeof requestIdleCallback==='function')requestIdleCallback(()=>resolve(),{timeout:1500});
+    else setTimeout(resolve,0);
+  })
+}
+function createTermThemePrewarmer(mode){
+  return new Promise(resolve=>{
+    if(typeof Terminal==='undefined'||typeof FitAddon==='undefined'){resolve(null);return}
+    const host=document.createElement('div');
+    host.style.cssText='position:fixed;left:-10000px;top:0;width:96px;height:48px;overflow:hidden;opacity:0;pointer-events:none;contain:strict';
+    document.body.appendChild(host);
+    const xterm=new Terminal({cols:8,rows:2,cursorBlink:false,fontSize:termFontSize(),fontFamily:TERM_FONT,theme:termTheme(mode),minimumContrastRatio:termMinimumContrastRatio(),scrollback:5000});
+    const fit=new FitAddon.FitAddon();xterm.loadAddon(fit);
+    try{
+      xterm.open(host);
+      const webgl=enableTermWebgl(xterm);
+      if(!webgl)throw new Error('WebGL unavailable');
+      const ready=()=>afterTermPaints(()=>{
+        try{xterm.reset()}catch(e){}
+        afterTermPaints(()=>resolve({mode,xterm,fit,webgl,host}))
+      });
+      xterm.write(TERM_WEBGL_WARMUP,ready);
+    }catch(e){
+      try{xterm.dispose()}catch(ignore){}
+      host.remove();resolve(null)
+    }
+  })
+}
+function scheduleTermThemePrewarm(){
+  if(TERM_THEME_PREWARM_PROMISE)return TERM_THEME_PREWARM_PROMISE;
+  TERM_THEME_PREWARM_PROMISE=(async()=>{
+    await ensureTermFontLoaded();
+    const predicted=currentTermColorScheme(),modes=[predicted,predicted==='light'?'dark':'light',predicted];
+    for(const mode of modes){
+      if(TERM_THEME_PREWARMERS[mode].length>=(mode===predicted?2:1))continue;
+      await waitForTermIdle();
+      const prewarmer=await createTermThemePrewarmer(mode);
+      if(prewarmer)TERM_THEME_PREWARMERS[mode].push(prewarmer)
+    }
+  })().finally(()=>{TERM_THEME_PREWARM_PROMISE=null});
+  return TERM_THEME_PREWARM_PROMISE
+}
+function takeTermThemePrewarmer(mode){
+  const pool=TERM_THEME_PREWARMERS[mode]||[];
+  // 每个主题至少留一个 owner，防止 xterm 在往返切换时释放共享 atlas。
+  return pool.length>1?pool.pop():null
+}
 function termMount(id){
   const c=document.getElementById('termContainer');
   if(typeof Terminal==='undefined'){c.innerHTML='<div class="empty" style="color:#c00;padding:20px">xterm.js 加载失败(版本升级后旧缓存?)<br><button class="primary" style="margin-top:10px" onclick="location.reload(true)">刷新页面</button></div>';return}
@@ -3713,9 +3763,10 @@ function termMount(id){
   // 清掉 empty 提示
   const empty=c.querySelector('.empty');if(empty)empty.remove();
   c.appendChild(el);
-  const xterm=new Terminal({cursorBlink:true,fontSize:termFontSize(),fontFamily:TERM_FONT,theme:termTheme(),minimumContrastRatio:termMinimumContrastRatio(),scrollback:5000});
-  const fit=new FitAddon.FitAddon();
-  xterm.loadAddon(fit);
+  const prewarmed=takeTermThemePrewarmer(currentTermColorScheme());
+  const xterm=prewarmed?.xterm||new Terminal({cursorBlink:true,fontSize:termFontSize(),fontFamily:TERM_FONT,theme:termTheme(),minimumContrastRatio:termMinimumContrastRatio(),scrollback:5000});
+  const fit=prewarmed?.fit||new FitAddon.FitAddon();
+  if(!prewarmed)xterm.loadAddon(fit);else xterm.options.cursorBlink=true;
   const loadingEl=document.createElement('div');
   loadingEl.className='term-loading';loadingEl.setAttribute('role','status');
   loadingEl.innerHTML='<span class="term-loading-spinner" aria-hidden="true"></span><span>正在恢复终端</span>';
@@ -3736,7 +3787,9 @@ function termMount(id){
   // 常用字符纹理预热。预热内容清空且 GPU 再绘制两帧后才连接 PTY。
   afterTermPaints(()=>{
     const inst=TERM_INSTANCES[id];if(!inst||inst.closing||inst.xterm!==xterm)return;
-    xterm.open(el);inst.webgl=enableTermWebgl(xterm);enableTermTouchScroll(el,xterm);
+    if(prewarmed){el.appendChild(xterm.element);prewarmed.host.remove();inst.webgl=prewarmed.webgl}
+    else{xterm.open(el);inst.webgl=enableTermWebgl(xterm)}
+    enableTermTouchScroll(el,xterm);
     xterm.parser.registerOscHandler(52,handleOsc52);enableTermHistoryPaging(el,id,xterm);safeFitOf(fit,xterm);
     if(typeof ResizeObserver!=='undefined'){
       const ro=new ResizeObserver(()=>{const current=TERM_INSTANCES[id];if(current&&!current.closing)safeFitOf(current.fit,current.xterm)});
@@ -3752,7 +3805,8 @@ function termMount(id){
       try{xterm.reset()}catch(e){}
       afterTermPaints(connect);
     });
-    try{xterm.write(TERM_WEBGL_WARMUP,clearWarmup)}catch(e){clearWarmup()}
+    if(prewarmed)afterTermPaints(connect);
+    else try{xterm.write(TERM_WEBGL_WARMUP,clearWarmup)}catch(e){clearWarmup()}
   });
 }
 
@@ -4542,10 +4596,10 @@ function sendTermColorScheme(id,ws,notify){
 function sendAllTermColorSchemes(){
   for(const [id,inst] of Object.entries(TERM_INSTANCES||{}))sendTermColorScheme(id,inst.ws,true);
 }
-function termTheme(){
+function termTheme(mode=currentTermColorScheme()){
   // 与 Orca 相同：主题交给 xterm 原生调色板；显式低对比色由
   // minimumContrastRatio 在渲染层按背景校正，不改写 PTY 输出。
-  if(document.documentElement.classList.contains('light')){
+  if(mode==='light'){
     return {background:'#fafbfc',foreground:'#1a2030',cursor:'#2563eb',selectionBackground:'#d0d8e8',
       black:'#1a2030',red:'#c0392b',green:'#1e8449',yellow:'#b9770e',blue:'#2563eb',magenta:'#7c3aed',cyan:'#0e7490',
       white:'#3f4756',brightWhite:'#111827',
@@ -4553,12 +4607,13 @@ function termTheme(){
   }
   return {background:'#000000',foreground:'#e8e8e8'};
 }
-function termMinimumContrastRatio(){return document.documentElement.classList.contains('light')?4.5:3}
+function termMinimumContrastRatio(){return TERM_WEBGL_CONTRAST}
 // 注:浅色/暗色模式的 JS ANSI 颜色重写(_rgbToHsl/_lightRewriteSgr/lightTermAdapt/
 // darkTermBoost 等)已移除——它让每个终端 WS chunk 都在主线程跑正则+HSL 运算,是
 // TUI 程序(codex/kimi 等,输出全是颜色码)卡顿的根因。颜色现交由 xterm 渲染层原生
 // 处理(options.theme + minimumContrastRatio + WebGL),与 Orca 的做法一致。
 function setTheme(mode,save=true){
+  const themeStarted=performance.now();
   const light=mode==='light';
   document.documentElement.classList.toggle('light',light);
   const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
@@ -4573,6 +4628,7 @@ function setTheme(mode,save=true){
   sendAllTermColorSchemes();
   try{fetch('/api/theme/herdr',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({mode:light?'light':'dark'})}).catch(()=>{})}catch(e){}
   if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+  if(save)afterTermPaints(()=>{window.__termThemeSwitchMs=Math.round((performance.now()-themeStarted)*10)/10})
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
 (function(){try{setTheme(localStorage.getItem('dash-theme')||'light',false)}catch(e){}})();
@@ -4794,6 +4850,7 @@ async function init(){
   const ok=await ensureAuth();
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
   applyLang();
+  scheduleTermThemePrewarm();
   loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
   document.addEventListener('visibilitychange',recoverPageState);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&TEAM.authenticated&&TEAM.human&&TEAM_POLL_TIMER){clearTimeout(TEAM_POLL_TIMER);TEAM_POLL_TIMER=null;teamPollTick()}});
