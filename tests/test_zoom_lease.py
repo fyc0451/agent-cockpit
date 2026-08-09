@@ -10,13 +10,14 @@ def reset_zoom_leases():
     server._ZOOM_LEASES.clear()
 
 
-def _layout(*, zoomed=False, horizontal=True, pane_id="w1:p2"):
+def _layout(*, zoomed=False, horizontal=True, pane_id="w1:p2", pane_count=2):
     return {
         "available": True,
         "zoomed": zoomed,
         "horizontal_split": horizontal,
         "focused_pane_id": pane_id,
         "tab_id": "w1:t1",
+        "panes": [{"pane_id": f"w1:p{index + 1}"} for index in range(pane_count)],
     }
 
 
@@ -103,21 +104,45 @@ def test_zoom_lease_does_not_own_manual_zoom_that_wins_after_layout_check(monkey
     assert calls == ["on"]
 
 
-def test_zoom_lease_only_applies_to_horizontal_multi_pane(monkeypatch):
+def test_zoom_lease_applies_to_vertical_multi_pane(monkeypatch):
     monkeypatch.setattr(server.terminal, "list_terms", lambda: _term_list("term1"))
     monkeypatch.setattr(
         server.herdr_client, "pane_layout",
         lambda *args: _layout(zoomed=False, horizontal=False),
     )
+    calls = []
     monkeypatch.setattr(
         server.herdr_client, "pane_zoom",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("竖分屏不得 zoom")),
+        lambda session, pane_id, mode: calls.append((session, pane_id, mode)) or {
+            "available": True, "zoomed": True, "changed": True,
+            "focused_pane_id": pane_id,
+        },
+    )
+
+    result = server._acquire_zoom_lease("demo", "term1", now=100)
+
+    assert result["acquired"] is True
+    assert result["owned"] is True
+    assert calls == [("demo", "w1:p2", "on")]
+
+
+def test_zoom_lease_skips_single_pane_tab(monkeypatch):
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: _term_list("term1"))
+    monkeypatch.setattr(
+        server.herdr_client, "pane_layout",
+        lambda *args: _layout(zoomed=False, horizontal=False, pane_count=1),
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "pane_zoom",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("单 pane 不应启动 zoom")
+        ),
     )
 
     result = server._acquire_zoom_lease("demo", "term1", now=100)
 
     assert result["acquired"] is False
-    assert result["reason"] == "not_horizontal"
+    assert result["reason"] == "single_pane"
 
 
 def test_zoom_lease_does_not_cross_terminal_owners(monkeypatch):

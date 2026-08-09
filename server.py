@@ -2621,10 +2621,10 @@ def _acquire_zoom_lease(
                 "available": True, "acquired": False, "owned": False,
                 "reason": "already_zoomed", "session": session,
             }
-        if not layout.get("horizontal_split"):
+        if len(layout.get("panes") or []) <= 1:
             return {
                 "available": True, "acquired": False, "owned": False,
-                "reason": "not_horizontal", "session": session,
+                "reason": "single_pane", "session": session,
             }
         pane_id = layout.get("focused_pane_id")
         if not pane_id:
