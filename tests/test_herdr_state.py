@@ -308,15 +308,43 @@ class TestHerdrSocket:
         sock.close()
         server.stop()
 
-    def test_invalid_request_empty_id_keeps_error_diagnosis(self, tmp_path: Path) -> None:
-        """server 无法解析请求时回 id=\"\"+error，应保留 error 而非误报 id mismatch。"""
+    def test_invalid_request_empty_id_is_id_mismatch(self, tmp_path: Path) -> None:
+        """id=\"\"+error 也必须报 id mismatch（无法关联的响应不能归属当前请求），
+        server 原始错误附在文本中保留诊断。"""
         def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
             server.read(conn)
             server.send(conn, {"id": "", "error": {"code": "invalid_request", "message": "missing field params"}})
         server = FakeHerdrServer(tmp_path, handler=handler).start()
         sock = herdr_state.HerdrSocket(str(server.path), connect_timeout=0.5)
         sock.connect()
-        with pytest.raises(herdr_state.HerdrSocketError, match="invalid_request"):
+        with pytest.raises(herdr_state.HerdrSocketError, match="id 不匹配") as exc:
+            sock.request("ping", {}, timeout=0.5)
+        assert "invalid_request" in str(exc.value)  # 诊断保留在 mismatch 文本
+        sock.close()
+        server.stop()
+
+    def test_empty_id_with_method_not_found_is_id_mismatch(self, tmp_path: Path) -> None:
+        """id=\"\"+method_not_found 不得被接受为当前请求错误（否则会误判
+        capability_mismatch），必须报 id mismatch。"""
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            server.read(conn)
+            server.send(conn, {"id": "", "error": {"code": "method_not_found", "message": "x"}})
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        sock = herdr_state.HerdrSocket(str(server.path), connect_timeout=0.5)
+        sock.connect()
+        with pytest.raises(herdr_state.HerdrSocketError, match="id 不匹配"):
+            sock.request("ping", {}, timeout=0.5)
+        sock.close()
+        server.stop()
+
+    def test_missing_id_is_id_mismatch(self, tmp_path: Path) -> None:
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            server.read(conn)
+            server.send(conn, {"result": {"type": "pong", "protocol": 19}})
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        sock = herdr_state.HerdrSocket(str(server.path), connect_timeout=0.5)
+        sock.connect()
+        with pytest.raises(herdr_state.HerdrSocketError, match="id 不匹配"):
             sock.request("ping", {}, timeout=0.5)
         sock.close()
         server.stop()
@@ -1209,6 +1237,79 @@ class TestHerdrStateClient:
         assert client.stop() is True
         with pytest.raises(RuntimeError, match="已启动过"):
             client.start()
+
+    def test_register_after_stop_closes_and_raises(self) -> None:
+        """stop 已置位后新 socket 登记被拒绝且立即关闭（无新 I/O 存活）。"""
+        client = herdr_state.HerdrStateClient({})
+        client.start()
+        client.stop()
+        sock = herdr_state.HerdrSocket("/nonexistent.sock")
+        with pytest.raises(herdr_state.HerdrSocketError, match="已停止"):
+            client._register(sock)
+        assert sock._sock is None  # 已关闭
+        assert client._active == set()
+
+    def test_stop_closes_half_connected_socket(self, tmp_path: Path) -> None:
+        """register 后、connect 完成前 stop：close 必须清理半途 socket，
+        connect 随后失败而非进入 60s request。"""
+        server = FakeHerdrServer(tmp_path).start()
+        client = herdr_state.HerdrStateClient({})
+        sock = herdr_state.HerdrSocket(str(server.path), connect_timeout=0.5)
+        sock._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # 模拟 connect 前已创建 fd
+        client._register(sock)
+        assert sock._sock is not None
+        client.stop()
+        assert sock._sock is None  # 被 stop 关闭
+        with pytest.raises(herdr_state.HerdrSocketError):
+            sock.connect()  # closed 标志生效，不会新建 fd 绕过
+        assert sock._closed is True
+        client._unregister(sock)  # 真实路径由调用方 finally 负责注销
+        assert client._active == set()
+        server.stop()
+
+    def test_snapshot_request_connect_failure_cleans_up(self, tmp_path: Path) -> None:
+        """_snapshot_request 的 connect 失败也必须 unregister/close（active 不泄漏）。"""
+        client = herdr_state.HerdrStateClient({})
+        with pytest.raises(herdr_state.HerdrSocketError):
+            client._snapshot_request(str(tmp_path / "missing.sock"))
+        assert client._active == set()
+
+    def test_connect_failures_do_not_leak_active(self, tmp_path: Path) -> None:
+        """连接持续失败：active 有界（最多当前迭代 1 个），stop 后必空
+        （无界增长回归）。"""
+        client = _start_client({"work": str(tmp_path / "not-there.sock")})
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["work"]["reconnects"] >= 5,
+                timeout=3.0,
+            )
+            assert len(client._active) <= 1  # 只有当前迭代的 sock，无历史泄漏
+            client.stop()
+            assert client._active == set()
+        finally:
+            client.stop()
+
+    def test_stop_multi_session_total_deadline(self, tmp_path: Path) -> None:
+        """多 session 共享 stop 总 deadline：全部退出无残留。"""
+        a = FakeHerdrServer(
+            tmp_path, snapshot=make_snapshot(make_pane("p1")), name="a",
+        ).start()
+        b = FakeHerdrServer(
+            tmp_path, snapshot=make_snapshot(make_pane("p2")), name="b",
+        ).start()
+        client = _start_client({"a": str(a.path), "b": str(b.path)})
+        _wait_for(
+            lambda: client.state()["sessions"]["a"]["state"] == "subscribed"
+            and client.state()["sessions"]["b"]["state"] == "subscribed"
+        )
+        started = time.monotonic()
+        exited = client.stop(join_timeout=0.5)
+        assert exited is True
+        assert time.monotonic() - started < 1.0
+        assert client._active == set()
+        assert _no_state_threads()
+        a.stop()
+        b.stop()
 
     def test_multi_session_same_pane_id_live(self, tmp_path: Path) -> None:
         a = FakeHerdrServer(

@@ -87,25 +87,48 @@ class HerdrSocket:
     def __init__(self, path: str | Path, connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_S) -> None:
         self.path = str(path)
         self.connect_timeout = connect_timeout
+        self._lock = threading.Lock()
         self._sock: socket.socket | None = None
         self._buf = b""
+        self._closed = False
 
     def connect(self) -> None:
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        """创建 socket 后立即赋值 self._sock，再执行阻塞 connect。与 close
+        互斥（_lock）：stop 在 register→connect 之间 close 会置 closed 标志，
+        connect 入口直接失败；close 在 connect 阻塞中执行会关闭真实 fd 并
+        中断 connect。"""
+        with self._lock:
+            if self._closed:
+                raise HerdrSocketError("herdr socket 已关闭")
+            try:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            except OSError as exc:
+                raise HerdrSocketError(f"herdr socket 创建失败: {exc}") from exc
+            self._sock = sock
             sock.settimeout(self.connect_timeout)
+        try:
             sock.connect(self.path)
         except OSError as exc:
+            with self._lock:
+                if self._sock is sock:
+                    self._sock = None
+            try:
+                sock.close()
+            except OSError:
+                pass
             raise HerdrSocketError(f"herdr socket 连接失败: {exc}") from exc
-        self._sock = sock
 
     def close(self) -> None:
-        """跨线程幂等：局部快照并先清空。stop 主线程与 reader finally 会
-        并发 close 同一对象，先置 None 保证后到者直接返回，shutdown/close
-        各自捕获 OSError，异常边界完整。"""
-        sock = self._sock
-        self._sock = None
-        self._buf = b""
+        """跨线程幂等：锁内置 closed 并快照清空，锁外 shutdown/close。
+        stop 主线程与 reader finally 并发 close 同一对象时后到者直接返回；
+        close 与 connect 互斥，保证 connect 前/中/后任意时刻均可取消。"""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            sock = self._sock
+            self._sock = None
+            self._buf = b""
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -139,20 +162,28 @@ class HerdrSocket:
         rid = request_id or f"h04:{method}:{time.monotonic_ns()}"
         payload = {"id": rid, "method": method, "params": params}
         try:
-            self._sock.settimeout(timeout)
-            self._sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+            sock = self._sock  # 局部快照：close 并发时不出现 NoneType 访问
+            if sock is None:
+                raise HerdrSocketError("socket 未连接")
+            sock.settimeout(timeout)
+            sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
             response = self.read_line(timeout=timeout)
         except OSError as exc:
             raise HerdrSocketError(f"herdr {method} 传输失败: {exc}") from exc
         if response is None:
             raise HerdrSocketError(f"herdr {method} 连接被对端关闭")
-        # 先验证响应 id（无论 success/error），再解释 payload；例外：
-        # invalid_request 类 server 无法解析 id 会回 id=""，此时保留 error
-        # 诊断信息而非误报 id mismatch。
+        # 严格校验响应 id（success/error 一律先验 id）：客户端发出的请求
+        # 始终有可解析 id，无法关联的响应不能归属于当前请求；server 原始
+        # error 附在 mismatch 文本中保留诊断，但不按当前请求错误分支解释。
         response_id = response.get("id")
         error = response.get("error")
-        if response_id != rid and not (response_id == "" and error is not None):
-            raise HerdrSocketError(f"herdr {method} 响应 id 不匹配")
+        if response_id != rid:
+            detail = ""
+            if error is not None:
+                code = str(error.get("code") or "")
+                message = str(error.get("message") or "")
+                detail = f" (server error: {code} {message})".rstrip()
+            raise HerdrSocketError(f"herdr {method} 响应 id 不匹配{detail}")
         if error is not None:
             code = str(error.get("code") or "")
             message = str(error.get("message") or "")
@@ -170,12 +201,13 @@ class HerdrSocket:
     def read_line(self, timeout: float | None = None) -> dict[str, Any] | None:
         """读一行并解析 JSON。EOF 返回 None；超时抛 HerdrSocketIdleTimeout；
         畸形抛 HerdrSocketError。timeout=None 无限阻塞。"""
-        if self._sock is None:
+        sock = self._sock  # 局部快照：close 并发时以已关闭 fd 失败而非崩溃
+        if sock is None:
             raise HerdrSocketError("socket 未连接")
-        self._sock.settimeout(timeout)
+        sock.settimeout(timeout)
         while b"\n" not in self._buf:
             try:
-                chunk = self._sock.recv(4096)
+                chunk = sock.recv(4096)
             except socket.timeout as exc:
                 raise HerdrSocketIdleTimeout(
                     f"herdr socket 读空闲超时(>{timeout}s)"
@@ -725,8 +757,12 @@ class HerdrStateClient:
         return all_exited
 
     def _register(self, sock: HerdrSocket) -> None:
-        """在途 socket 登记（connect 前调用），stop 可原子关闭全部。"""
+        """在途 socket 登记（connect 前调用）。与 stop 原子协作：stop 已置位
+        时立即关闭并抛错，保证 stop 后不会再有新 I/O 存活。"""
         with self._lock:
+            if self._stop.is_set():
+                sock.close()
+                raise HerdrSocketError("client 已停止，拒绝新连接")
             self._active.add(sock)
 
     def _unregister(self, sock: HerdrSocket) -> None:
@@ -825,8 +861,8 @@ class HerdrStateClient:
         # 3. 订阅专用流：确认 subscription_started 后才发布 subscribed
         sub = HerdrSocket(path, connect_timeout=self._connect_timeout)
         self._register(sub)
-        sub.connect()
         try:
+            sub.connect()
             try:
                 sub.request(
                     "events.subscribe",
@@ -880,8 +916,8 @@ class HerdrStateClient:
         """独立连接执行 session.snapshot；返回 SessionSnapshot 对象。"""
         sock = HerdrSocket(path, connect_timeout=self._connect_timeout)
         self._register(sock)  # 临时 socket 也登记，stop 可中断在途 snapshot
-        sock.connect()
         try:
+            sock.connect()
             response = sock.request(
                 "session.snapshot", {}, timeout=self._snapshot_timeout,
                 expect_type="session_snapshot",
