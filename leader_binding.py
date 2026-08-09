@@ -266,19 +266,8 @@ def _initialize_connection(con: sqlite3.Connection) -> None:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='leader_bindings'"
     ).fetchone()
     if not lb_exists:
-        # 全新库：直接建新 schema（含 drain_revision）
-        con.executescript(
-            _LEADER_BINDINGS_DDL + ";\n" + _BINDING_MIGRATIONS_DDL + ";\n"
-            + _CONTROL_EVENTS_DDL + ";\n"
-            "CREATE UNIQUE INDEX leader_bindings_active_once "
-            "ON leader_bindings(issuer, scope_kind, scope_id) WHERE state='active';"
-            "CREATE INDEX leader_bindings_scope "
-            "ON leader_bindings(issuer, scope_kind, scope_id, state);"
-            "CREATE INDEX control_events_scope "
-            "ON control_events(issuer, scope_kind, scope_id, seq);"
-            "CREATE INDEX control_events_pending ON control_events(fanned_out, seq);"
-        )
-        return
+        # 全新 leader_bindings + binding_migrations；control_events 由下方块统一处理
+        con.executescript(_LEADER_BINDINGS_DDL + ";\n" + _BINDING_MIGRATIONS_DDL)
     # leader_bindings 已存在：判断是否需要重建（旧 PK 不含 issuer）
     lb_pk = _pk_columns(con, "leader_bindings")
     if lb_pk != ["issuer", "scope_kind", "scope_id", "mail_name"]:
