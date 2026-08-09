@@ -57,6 +57,8 @@ HERDR_REQUIRED_METHODS = frozenset({
     "agent.start",
     "agent.read",
     "agent.prompt",
+    "agent.wait",
+    "agent.send_keys",
     "events.subscribe",
 })
 AGENT_KIND_ALIASES = {
@@ -943,6 +945,102 @@ def agent_wait(
         }
 
 
+# ── managed launch descriptor ──────────────────────────────────────────
+# Herdr AgentInfo/snapshot 不保留原始 `agent start` argv，process-info 也不能当
+# 重建契约。Cockpit 在原生启动成功时把权威契约 {name, kind, args} 持久化，供
+# restart 按 session+pane/name 精确取回，绝不在 restart 时从进程 argv/label/类型
+# 默认值猜测。key 为 session|name（name 是 session 内唯一且跨 workspace 移动稳定）。
+_LAUNCH_DESCRIPTOR_LOCK = threading.RLock()
+
+
+def launch_descriptors_path() -> Path:
+    """launch descriptor 持久化路径；可用 COCKPIT_LAUNCH_DESCRIPTORS_PATH 覆盖（测试用）。"""
+    configured = os.environ.get("COCKPIT_LAUNCH_DESCRIPTORS_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / "dashboard-data" / "launch-descriptors.json"
+
+
+def _load_launch_descriptors() -> dict[str, Any]:
+    path = launch_descriptors_path()
+    if not path.is_file():
+        return {"schema": 1, "descriptors": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"schema": 1, "descriptors": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("descriptors"), dict):
+        return {"schema": 1, "descriptors": {}}
+    return data
+
+
+def _save_launch_descriptors(data: dict[str, Any]) -> None:
+    path = launch_descriptors_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".launch-desc.", suffix=".tmp", dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def save_launch_descriptor(
+    *, session: str, pane_id: str, name: str, kind: str, args: list[str],
+    agent: str | None = None, workdir: str | None = None,
+) -> dict[str, Any]:
+    """原生启动成功后持久化权威 launch 契约；返回写入的规范化记录。
+
+    name 是 resolve_unique_agent_name 给出的 session 内唯一运行时名；kind 是
+    canonical Herdr kind；args 是传给 `--` 的原生 argv 列表（保留空格/分号等原样）。
+    """
+    record = {
+        "session": str(session),
+        "name": str(name),
+        "kind": str(kind),
+        "args": [str(a) for a in args] if isinstance(args, (list, tuple)) else [],
+        "agent": agent,
+        "pane_id": str(pane_id),
+        "workdir": workdir,
+    }
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        data["descriptors"][f"{session}|{name}"] = record
+        _save_launch_descriptors(data)
+    return dict(record)
+
+
+def get_launch_descriptor(session: str, pane_id: str) -> dict[str, Any] | None:
+    """按 session+pane 精确取回 launch 契约；不存在返回 None（restart 不得猜测）。"""
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+    for record in data["descriptors"].values():
+        if (
+            isinstance(record, dict)
+            and record.get("session") == session
+            and record.get("pane_id") == pane_id
+        ):
+            return dict(record)
+    return None
+
+
+def get_launch_descriptor_by_name(session: str, name: str) -> dict[str, Any] | None:
+    """按 session+唯一 name 取回 launch 契约（name 跨 workspace 移动稳定）。"""
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+    record = data["descriptors"].get(f"{session}|{name}")
+    return dict(record) if isinstance(record, dict) else None
+
+
 def _rename_agent_context(
     session: str, pane: dict[str, Any], agent: str, layout: str,
     label: str | None = None,
@@ -1061,10 +1159,24 @@ def start_agent(
             result["cwd"] = existing_cwd
         if label:
             result["label"] = label
+        # 复用路径与启动路径语义一致：若该 pane 由本路径启动过（有 launch 契约），
+        # 暴露其权威 name/kind；legacy pane 无契约则不臆造。
+        reused_desc = get_launch_descriptor(session, existing["pane_id"])
+        if reused_desc:
+            result["name"] = reused_desc["name"]
+            result["kind"] = reused_desc["kind"]
         return result
     agent_bin = _find_agent_bin(agent)
     if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
         return {"available": True, "error": f"{agent} 未安装或不在 PATH"}
+    # 在任何布局 mutation 前，基于当前 live agents 解析 session 内唯一运行时名：
+    # label 缺省时分配 agent-N，避免裸名与已有同 kind live agent 冲突，导致 pane 已
+    # 创建却在 agent start 时因 live name 唯一约束失败回滚。
+    try:
+        runtime_name = resolve_unique_agent_name(agent, label, snap.get("agents", []))
+    except ValueError as exc:
+        return {"available": True, "error": str(exc)}
+    canonical_kind = normalize_agent_kind(agent)
     before_ids = {
         str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
     }
@@ -1135,8 +1247,8 @@ def start_agent(
         # Cockpit 不再按 agent 类型回退 pane run，也不自造 readiness 轮询；任何启动
         # 失败都保留原 pane/session 并返回结构化错误，不回退键盘模拟。
         start_argv = [
-            "--session", session, "agent", "start", label or agent,
-            "--kind", normalize_agent_kind(agent),
+            "--session", session, "agent", "start", runtime_name,
+            "--kind", canonical_kind,
             "--pane", new_pid,
             "--timeout", str(int(start_timeout * 1000)),
         ]
@@ -1160,18 +1272,34 @@ def start_agent(
 
         # 启动成功：把 workspace/tab/pane 改成可辨认名称(默认是序号,看板/TUI 里
         # 分不清)；失败不影响启动结果。created_pane 来自创建后的 snapshot，含
-        # tab_id/workspace_id，无需再取一次 snapshot。
+        # tab_id/workspace_id，无需再取一次 snapshot。展示名用唯一 runtime_name。
         _rename_agent_context(
-            session, created_pane or {"pane_id": new_pid}, agent, effective_layout, label
+            session, created_pane or {"pane_id": new_pid}, agent, effective_layout,
+            runtime_name,
         )
+        # 持久化权威 launch 契约 {name, kind, args}：Herdr 不保留原始 start argv，
+        # 故由启动路径落盘，供 restart 按 session+pane/name 精确取回原参数重建，
+        # 绝不从进程 argv/label/类型默认值猜测。落盘失败不杀已成功启动的 agent。
+        descriptor_error: str | None = None
+        try:
+            save_launch_descriptor(
+                session=session, pane_id=new_pid, name=runtime_name,
+                kind=canonical_kind, args=agent_args, agent=agent, workdir=workdir,
+            )
+        except OSError as exc:
+            descriptor_error = str(exc)
         result = {
             "available": True,
             "pane_id": new_pid,
             "agent": agent,
+            "name": runtime_name,
+            "kind": canonical_kind,
             "layout": effective_layout,
         }
         if label:
             result["label"] = label
+        if descriptor_error:
+            result["descriptor_error"] = descriptor_error
         return result
     except RuntimeError as e:
         rolled_back = False

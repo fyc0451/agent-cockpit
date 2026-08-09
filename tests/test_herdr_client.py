@@ -16,6 +16,8 @@ REQUIRED_H0_METHODS = {
     "agent.start",
     "agent.read",
     "agent.prompt",
+    "agent.wait",
+    "agent.send_keys",
     "events.subscribe",
 }
 
@@ -33,6 +35,14 @@ def _assume_supported_herdr(monkeypatch):
             "methods": sorted(REQUIRED_H0_METHODS),
         },
         raising=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_launch_descriptors(monkeypatch, tmp_path):
+    """launch descriptor 落盘到临时路径，避免污染真实 ~/dashboard-data。"""
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "launch-descriptors.json"),
     )
 
 
@@ -89,6 +99,11 @@ def test_probe_herdr_capabilities_accepts_supported_installed_schema(monkeypatch
             "herdr 0.8.0",
             _herdr_schema(methods=REQUIRED_H0_METHODS - {"events.subscribe"}),
             "events.subscribe",
+        ),
+        (
+            "herdr 0.8.0",
+            _herdr_schema(methods=REQUIRED_H0_METHODS - {"agent.wait"}),
+            "agent.wait",
         ),
         ("herdr 0.8.0", "not-json", "API schema"),
     ],
@@ -395,7 +410,8 @@ def test_start_agent_unifies_every_supported_kind_on_native_start(monkeypatch, a
     start_calls = [c for c in calls if "agent" in c.args[0] and "start" in c.args[0]]
     assert len(start_calls) == 1
     argv = start_calls[0].args[0]
-    assert argv[2:6] == ["agent", "start", agent, "--kind"]
+    # label 缺省：resolve_unique_agent_name 分配 agent-1，避免裸名与同 kind live agent 冲突
+    assert argv[2:6] == ["agent", "start", f"{agent}-1", "--kind"]
     assert argv[6] == kind
     assert "--pane" in argv and "w1:p1" in argv
     assert "--timeout" in argv
@@ -620,10 +636,13 @@ def test_start_agent_uses_snapshot_delta_before_native_start(monkeypatch):
     assert result["pane_id"] == "w1:p2"
     assert result["layout"] == "tab"
     assert result["agent"] == "codex"
+    # label 缺省：resolve_unique_agent_name 分配 codex-1
+    assert result["name"] == "codex-1"
+    assert result["kind"] == "codex"
     # 全 agent 统一原生 agent start，不再 pane run
     assert call(
         [
-            "--session", "demo", "agent", "start", "codex",
+            "--session", "demo", "agent", "start", "codex-1",
             "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000",
         ],
         timeout=15,
@@ -632,11 +651,11 @@ def test_start_agent_uses_snapshot_delta_before_native_start(monkeypatch):
         c.args[0][:4] == ["--session", "demo", "pane", "run"] for c in calls
     )
     assert call(
-        ["--session", "demo", "pane", "rename", "w1:p2", "codex"],
+        ["--session", "demo", "pane", "rename", "w1:p2", "codex-1"],
         timeout=5,
     ) in calls
     assert call(
-        ["--session", "demo", "tab", "rename", "w1:t2", "codex"],
+        ["--session", "demo", "tab", "rename", "w1:t2", "codex-1"],
         timeout=5,
     ) in calls
     assert call(
@@ -670,13 +689,14 @@ def test_start_agent_renames_workspace_tab_and_pane(monkeypatch):
     result = herdr_client.start_agent("demo", "/tmp/project", layout="tab")
 
     assert result["pane_id"] == "w1:p2"
+    assert result["name"] == "codex-1"
     assert call(
-        ["--session", "demo", "agent", "start", "codex",
+        ["--session", "demo", "agent", "start", "codex-1",
          "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000"],
         timeout=15,
     ) in calls
-    assert call(["--session", "demo", "pane", "rename", "w1:p2", "codex"], timeout=5) in calls
-    assert call(["--session", "demo", "tab", "rename", "w1:t2", "codex"], timeout=5) in calls
+    assert call(["--session", "demo", "pane", "rename", "w1:p2", "codex-1"], timeout=5) in calls
+    assert call(["--session", "demo", "tab", "rename", "w1:t2", "codex-1"], timeout=5) in calls
     assert call(["--session", "demo", "workspace", "rename", "w1", "demo"], timeout=5) in calls
 
 
@@ -785,9 +805,10 @@ def test_start_agent_grok_uses_native_start(monkeypatch):
     result = herdr_client.start_agent("demo", "/tmp/project", agent="grok")
 
     assert result["pane_id"] == "w1:p3"
+    assert result["name"] == "grok-1"
     assert call(
         [
-            "--session", "demo", "agent", "start", "grok",
+            "--session", "demo", "agent", "start", "grok-1",
             "--kind", "grok", "--pane", "w1:p3", "--timeout", "60000",
         ],
         timeout=65,
@@ -1003,6 +1024,177 @@ def test_start_agent_uses_label_to_create_second_same_type_instance(monkeypatch)
         ["--session", "demo", "pane", "rename", "w1:p3", "codex-2"],
         timeout=5,
     ) in calls
+
+
+def test_start_agent_assigns_unique_runtime_name_for_same_kind_second_instance(monkeypatch):
+    """同 kind + 不同 cwd + 无 label：resolve_unique_agent_name 分配唯一名，不在创建后冲突。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    # 已有一个 codex（live name codex-1）在别的 cwd；本次不同 cwd、无 label
+    snapshots = iter([
+        {"panes": [{"pane_id": "w1:p1", "agent": "codex", "cwd": "/tmp/other"}],
+         "agents": [{"name": "codex-1"}]},
+        {"panes": [
+            {"pane_id": "w1:p1", "agent": "codex", "cwd": "/tmp/other"},
+            {"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1"},
+        ]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent("demo", "/tmp/project", "codex", layout="tab")
+
+    # cwd 不同 → 不复用 → 新建；codex-1 已 live → 分配 codex-2，绝不回退裸名 codex
+    assert result["pane_id"] == "w1:p2"
+    assert result["name"] == "codex-2"
+    assert result.get("reused") is not True
+    assert call(
+        ["--session", "demo", "agent", "start", "codex-2",
+         "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000"],
+        timeout=15,
+    ) in calls
+    assert not any(
+        c.args[0][:6] == ["--session", "demo", "agent", "start", "codex", "--kind"]
+        for c in calls
+    )
+
+
+def test_start_agent_persists_launch_descriptor_retrievable_by_pane_and_name(monkeypatch):
+    """启动成功持久化权威契约 {name, kind, args}，可按 session+pane / session+name 精确取回。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        if "create" in args else "",
+    )
+
+    herdr_client.start_agent(
+        "demo", "/tmp/project", "codex", layout="tab", label="lead",
+        args='--model "gpt 5" ; echo hi',
+    )
+
+    by_pane = herdr_client.get_launch_descriptor("demo", "w1:p2")
+    by_name = herdr_client.get_launch_descriptor_by_name("demo", "lead")
+    assert by_pane == by_name
+    # args 为原生 argv 列表，保留空格/分号原样，未被 shell 重组
+    assert by_pane == {
+        "session": "demo", "name": "lead", "kind": "codex",
+        "args": ["--model", "gpt 5", ";", "echo", "hi"],
+        "agent": "codex", "pane_id": "w1:p2", "workdir": "/tmp/project",
+    }
+
+
+def test_start_agent_descriptor_uses_canonical_kind_for_aliases(monkeypatch):
+    """qoder 别名启动时 descriptor 的 kind 必须是 canonical qodercli。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p5", "tab_id": "w1:t5", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p5"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    herdr_client.start_agent("demo", "/tmp/project", "qoder", layout="tab", label="q-1")
+
+    assert herdr_client.get_launch_descriptor("demo", "w1:p5")["kind"] == "qodercli"
+    assert call(
+        ["--session", "demo", "agent", "start", "q-1",
+         "--kind", "qodercli", "--pane", "w1:p5", "--timeout", "60000"],
+        timeout=65,
+    ) in calls
+
+
+def test_start_agent_keeps_distinct_descriptors_for_same_kind_instances(monkeypatch):
+    """同类型多实例各自有独立 name 与独立 descriptor，按 pane 各自取回不串。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    state = {"panes": [], "agents": []}
+    counter = {"n": 1}
+
+    def snapshot(session):
+        return {"panes": list(state["panes"]), "agents": list(state["agents"])}
+
+    def fake_run(args, timeout=10):
+        if "create" in args:
+            pid = "w1:p%d" % (counter["n"] + 1)
+            counter["n"] += 1
+            state["panes"].append({
+                "pane_id": pid, "tab_id": "w1:t%d" % counter["n"], "workspace_id": "w1",
+            })
+            return 'data: {"result":{"tab":{"focused_pane_id":"%s"}}}' % pid
+        if "agent" in args and "start" in args:
+            state["agents"].append({"name": args[args.index("start") + 1]})
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    herdr_client.start_agent("demo", "/tmp/project", "codex", layout="tab")
+    herdr_client.start_agent("demo", "/tmp/project", "codex", layout="tab")
+
+    d1 = herdr_client.get_launch_descriptor("demo", "w1:p2")
+    d2 = herdr_client.get_launch_descriptor("demo", "w1:p3")
+    assert d1["name"] == "codex-1"
+    assert d2["name"] == "codex-2"
+    assert d1 != d2
+
+
+def test_get_launch_descriptor_returns_none_without_guessing(monkeypatch, tmp_path):
+    """无契约时返回 None；调用方（restart）不得据此猜测 name/kind/args。"""
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "none.json"))
+    assert herdr_client.get_launch_descriptor("demo", "w1:p9") is None
+    assert herdr_client.get_launch_descriptor_by_name("demo", "ghost") is None
+
+
+def test_start_agent_reuse_exposes_descriptor_name_without_fabricating(monkeypatch):
+    """复用由本路径启动过的 pane 时暴露其权威 name/kind；legacy pane 无契约则不臆造。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snap_with_codex = {
+        "panes": [{"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project",
+                   "tab_id": "w1:t2", "workspace_id": "w1"}],
+    }
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: snap_with_codex)
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: "")
+    # legacy：尚无 descriptor
+    legacy = herdr_client.start_agent("demo", "/tmp/project", "codex")
+    assert legacy["reused"] is True
+    assert "name" not in legacy and "kind" not in legacy
+    # 写入契约后再复用：应暴露权威 name/kind
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p2", name="codex-1", kind="codex", args=[], agent="codex",
+    )
+    with_desc = herdr_client.start_agent("demo", "/tmp/project", "codex")
+    assert with_desc["name"] == "codex-1"
+    assert with_desc["kind"] == "codex"
 
 
 def test_start_agent_rejects_label_used_by_another_pane(monkeypatch):
