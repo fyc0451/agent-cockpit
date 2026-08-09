@@ -814,6 +814,41 @@ class TestHerdrStateClient:
             client.stop()
             server.stop()
 
+    @pytest.mark.parametrize("bad_id", ["", "wrong", None])
+    def test_subscribe_bad_id_method_not_found_is_not_capability_mismatch(
+        self, tmp_path: Path, bad_id: str | None,
+    ) -> None:
+        """id 校验失败（empty/wrong/missing）+ method_not_found 只算连接失败，
+        重连并报 id mismatch，绝不能误判 capability_mismatch。"""
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                server.send(conn, _snapshot_response(str(req["id"]), make_snapshot()))
+            elif method == "events.subscribe":
+                resp: dict[str, Any] = {"error": {"code": "method_not_found", "message": "x"}}
+                if bad_id is not None:
+                    resp["id"] = bad_id
+                server.send(conn, resp)
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = _start_client({"work": str(server.path)})
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["work"]["state"] == "reconnecting"
+                and client.state()["sessions"]["work"]["reconnects"] >= 1,
+                timeout=3.0,
+            )
+            state = client.state()["sessions"]["work"]
+            assert state["state"] != "capability_mismatch"
+            assert "id 不匹配" in str(state["last_error"])
+        finally:
+            client.stop()
+            server.stop()
+
     def test_eof_reconnects_and_resyncs(self, tmp_path: Path) -> None:
         """EOF → 重连 → 新 snapshot 全量覆盖（旧 pane 消失）。"""
         subscribe_count = {"n": 0}

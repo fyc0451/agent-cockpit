@@ -65,6 +65,18 @@ class HerdrSocketError(RuntimeError):
     """socket 传输层错误（连接拒绝/超时/EOF/畸形帧/error_response/响应不匹配）。"""
 
 
+class HerdrRequestError(HerdrSocketError):
+    """id 校验通过的服务端 error_response，携带结构化 code。
+
+    能力/分类判断必须基于 code（而非异常文本搜索）；id 不匹配的响应抛
+    普通 HerdrSocketError，不得进入 error code 分支。
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"herdr 请求失败: {code} {message}".rstrip())
+        self.code = code
+
+
 class HerdrSocketIdleTimeout(HerdrSocketError):
     """订阅连接读空闲超时（仅健康检查用，不代表断连）。"""
 
@@ -187,7 +199,7 @@ class HerdrSocket:
         if error is not None:
             code = str(error.get("code") or "")
             message = str(error.get("message") or "")
-            raise HerdrSocketError(f"herdr {method} 失败: {code} {message}".strip())
+            raise HerdrRequestError(code, message)
         result = response.get("result")
         if not isinstance(result, dict):
             raise HerdrSocketError(f"herdr {method} 响应缺少 result")
@@ -870,8 +882,10 @@ class HerdrStateClient:
                     timeout=self._request_timeout,
                     expect_type="subscription_started",
                 )
-            except HerdrSocketError as exc:
-                if "method_not_found" in str(exc) or "unknown_method" in str(exc):
+            except HerdrRequestError as exc:
+                # 仅 id 校验通过（matching id）的 method_not_found 才判能力缺失；
+                # id 不匹配抛的是普通 HerdrSocketError，不得进入此分支。
+                if exc.code in ("method_not_found", "unknown_method"):
                     lc["state"] = "capability_mismatch"
                     raise HerdrProtocolMismatchError(str(exc)) from exc
                 raise
