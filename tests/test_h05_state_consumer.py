@@ -15,6 +15,13 @@ client 身份比较,同名跳过复用,旧 worker 摘不到新候选)、start �
 start 拒绝生线程)、两阶段 stop(先广播 request_stop 再共享 deadline
 join)、survivor 显式返回不静默;覆盖同 epoch 双 worker、跨 epoch 同名、
 锁外 blocked start、A/B signal 顺序、deadline survivor、线程/FD 基线。
+R6 复审修订(#1780 REVIEW_BLOCK):retiring ownership——removed/swap-old/
+timeout 候选在同一锁临界区 identity-safe 转移进 _state_retiring(真引用
+受管,request_stop+join 成功才摘);global stop 快照 published+inflight+
+retiring+survivors 先广播再共享 deadline join;survivor 真引用入
+_state_survivors 可重复 reaper 回收,诊断序列化与引用分离;lifespan 遇
+survivor raise 非正常完成。三类 retiring 真实命名线程/FD barrier、两
+survivor 重试回收、正常 stop/restart。
 """
 import asyncio
 import threading
@@ -134,6 +141,8 @@ def _reset_state(monkeypatch):
     monkeypatch.setattr(server, "_state_epoch", 1)
     monkeypatch.setattr(server, "_state_swap_pending", {})
     monkeypatch.setattr(server, "_state_inflight", {})
+    monkeypatch.setattr(server, "_state_retiring", {})
+    monkeypatch.setattr(server, "_state_survivors", {})
     monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 0.2)
     monkeypatch.setattr(
         server.herdr_state, "HerdrStateClient", FakeStateClient
@@ -141,6 +150,8 @@ def _reset_state(monkeypatch):
     yield
     monkeypatch.setattr(server, "_state_clients", {})
     monkeypatch.setattr(server, "_state_sessions_meta", {})
+    monkeypatch.setattr(server, "_state_retiring", {})
+    monkeypatch.setattr(server, "_state_survivors", {})
 
 
 def _install(monkeypatch, names=("demo",), discovery_ok=True):
@@ -489,6 +500,8 @@ def test_same_process_restart_after_stop(monkeypatch):
     server._stop_state_client()
     assert server._state_clients == {}
     assert server._state_inflight == {}
+    assert server._state_retiring == {}
+    assert server._state_survivors == {}
     assert server._state_sessions_meta == {}
     assert server._state_swap_pending == {}
     assert server._state_discovery_ok is False
@@ -683,7 +696,188 @@ def test_stop_deadline_survivor_reported_not_silent(monkeypatch):
     assert server._state_clients == {}
     assert len(survivors) == 1
     assert survivors[0]["sessions"] == ["z"]
-    assert repr(zombie) in survivors[0]["client"]  # 保留引用诊断
+    assert repr(zombie) in survivors[0]["client"]  # 序列化诊断
+    # 真实引用与 ownership 保留在 _state_survivors(与诊断分离)
+    assert [o.client for o in server._state_survivors.values()] == [zombie]
+    assert server._state_retiring == {}
+
+
+def test_two_survivors_retry_reaped(monkeypatch):
+    """两个 survivor:重复 request_stop/join 重试回收,成功后才释放真引用。"""
+    class FlakyZombie(FakeStateClient):
+        def __init__(self, sessions):
+            super().__init__(sessions)
+            self.fail_stop = True
+
+        def stop(self, join_timeout=5.0):
+            self.request_stop()
+            if self.fail_stop:
+                return False
+            self.stopped = True
+            return True
+
+    z1 = FlakyZombie({"z1": "/tmp/z1.sock"})
+    z1.start()
+    z2 = FlakyZombie({"z2": "/tmp/z2.sock"})
+    z2.start()
+    monkeypatch.setattr(server, "_state_clients", {"z1": z1, "z2": z2})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        n: {"socket": f"/tmp/{n}.sock", "directory": "/d"} for n in ("z1", "z2")
+    })
+    survivors = server._stop_state_client()
+    assert len(survivors) == 2
+    assert {o.client for o in server._state_survivors.values()} == {z1, z2}
+    assert server._state_retiring == {}
+    # 恢复可停后 reaper 重试回收,真引用释放
+    z1.fail_stop = False
+    z2.fail_stop = False
+    server._reap_retired_clients()
+    assert server._state_survivors == {}
+    assert z1.stopped and z2.stopped
+    assert server._stop_state_client() == []  # 幂等
+
+
+def test_lifespan_raises_on_stop_survivors(monkeypatch):
+    """lifespan 超时不得仅 logger.error 后正常完成:survivor 非空即 raise。"""
+    monkeypatch.setattr(
+        server, "_stop_state_client", lambda: [{"client": "zombie"}],
+    )
+
+    async def _noop_loop():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(server, "_reconcile_state_client", lambda: None)
+    monkeypatch.setattr(server, "_poll_live_state", _noop_loop)
+    monkeypatch.setattr(server, "_poll_message_state", _noop_loop)
+    monkeypatch.setattr(server, "_worktree_cleanup_loop", _noop_loop)
+    monkeypatch.setattr(server, "_release_all_zoom_leases", lambda: None)
+
+    from fastapi.testclient import TestClient
+
+    with pytest.raises(RuntimeError, match="survived stop"):
+        with TestClient(server.app):
+            pass
+
+
+# ── R6 复审修订(#1780):retiring 真实线程/FD barrier ─────────────
+
+
+def _build_real_client(name, socket_path):
+    return _REAL_STATE_CLIENT(
+        {name: socket_path},
+        reconnect_base_delay=0.05,
+        reconnect_max_delay=0.1,
+        health_check_interval=None,
+    )
+
+
+def _alive_state_threads(name):
+    return [
+        t for t in threading.enumerate()
+        if t.name.startswith(f"cockpit-state-{name}") and t.is_alive()
+    ]
+
+
+def _wait_fd_at_most(baseline, timeout=3.0):
+    """FD 数有瞬态(握手临时 socket),有界等待回落到基线内。"""
+    import os
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if len(os.listdir("/proc/self/fd")) <= baseline:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _wait_client_ready(name, timeout=5.0):
+    """等 published 真实 client 完成握手(subscribed),给 FD 基线稳态。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        client = server._state_clients.get(name)
+        if client is not None and server._client_ready(client, name):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_retiring_removed_session_real_thread_fd(monkeypatch, tmp_path):
+    """removed pop→真实 stop 之间 client 受管于 retiring:真实线程退出、
+    FD 回基线、retiring 摘除。"""
+    import os
+
+    from test_herdr_state import FakeHerdrServer
+
+    srv = FakeHerdrServer(tmp_path, name="rm").start()
+    monkeypatch.setattr(server, "_build_session_client", _build_real_client)
+    _fake_discovery(monkeypatch, {"rm": str(srv.path)})
+    server._reconcile_state_client()
+    assert "rm" in server._state_clients
+    fd_before = len(os.listdir("/proc/self/fd"))
+    _fake_discovery(monkeypatch, {})  # session 消失
+    server._reconcile_state_client()
+    assert server._state_clients == {}
+    assert server._state_retiring == {}  # 真正停成功才摘
+    assert server._state_survivors == {}
+    assert _alive_state_threads("rm") == []
+    assert len(os.listdir("/proc/self/fd")) <= fd_before
+    srv.stop()
+
+
+def test_retiring_swap_old_client_real_thread_fd(monkeypatch, tmp_path):
+    """swap CAS 后旧 client 真实回收:只剩新 client 线程,FD 不增长。"""
+    import os
+
+    from test_herdr_state import FakeHerdrServer
+
+    srv_a = FakeHerdrServer(tmp_path, name="swa").start()
+    srv_b = FakeHerdrServer(tmp_path, name="swb").start()
+    monkeypatch.setattr(server, "_build_session_client", _build_real_client)
+    monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 5.0)
+    _fake_discovery(monkeypatch, {"sw": str(srv_a.path)})
+    server._reconcile_state_client()
+    old = server._state_clients["sw"]
+    assert _wait_client_ready("sw")  # 稳态后再取 FD 基线
+    fd_before = len(os.listdir("/proc/self/fd"))
+    _fake_discovery(monkeypatch, {"sw": str(srv_b.path)})
+    server._reconcile_state_client()
+    assert server._state_clients["sw"] is not old
+    assert server._state_retiring == {}
+    assert server._state_survivors == {}
+    assert len(_alive_state_threads("sw")) == 1  # 仅新 client 线程存活
+    assert _wait_fd_at_most(fd_before)
+    assert server._state_sessions_meta["sw"]["socket"] == str(srv_b.path)
+    server._stop_state_client()  # 清理:停掉存活的新 client,防线程泄漏
+    srv_a.stop()
+    srv_b.stop()
+
+
+def test_retiring_timeout_candidate_real_thread_fd(monkeypatch, tmp_path):
+    """swap timeout 候选摘除→真实 stop:旧 client 线程独存,候选无线程/FD。"""
+    import os
+
+    from test_herdr_state import FakeHerdrServer
+
+    srv_a = FakeHerdrServer(tmp_path, name="to").start()
+    monkeypatch.setattr(server, "_build_session_client", _build_real_client)
+    _fake_discovery(monkeypatch, {"to": str(srv_a.path)})
+    server._reconcile_state_client()
+    old = server._state_clients["to"]
+    assert _wait_client_ready("to")  # 稳态后再取 FD 基线
+    fd_before = len(os.listdir("/proc/self/fd"))
+    _fake_discovery(monkeypatch, {"to": "/nonexistent/to-dead.sock"})
+    server._reconcile_state_client()  # 候选永不就绪→timeout 弃新留旧
+    assert server._state_clients["to"] is old
+    assert server._state_retiring == {}
+    assert server._state_survivors == {}
+    assert len(_alive_state_threads("to")) == 1  # 仅旧 client
+    assert _wait_fd_at_most(fd_before)
+    assert server._state_swap_pending  # 持久 degraded 记录保留
+    server._stop_state_client()  # 清理:停掉存活的旧 client,防线程泄漏
+    srv_a.stop()
 
 
 def test_real_stop_during_blocked_start_no_thread(monkeypatch):

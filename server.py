@@ -79,8 +79,12 @@ async def lifespan(_: FastAPI):
         finally:
             survivors = await asyncio.to_thread(_stop_state_client)
             if survivors:
-                # deadline 耗尽仍有存活 state 线程:显式告警,保留诊断引用
+                # deadline 耗尽仍有存活 state 线程:诊断已序列化,真实引用
+                # 保留在 _state_survivors;不得仅记日志后正常完成
                 logger.error("herdr state clients survived stop: %s", survivors)
+                raise RuntimeError(
+                    f"herdr state clients survived stop: {len(survivors)}"
+                )
             _poller_task = None
             _message_poller_task = None
             _worktree_cleanup_task = None
@@ -4633,6 +4637,13 @@ class _InflightOwner:
 
 _state_inflight: dict[str, _InflightOwner] = {}
 _inflight_token = itertools.count(1)
+# H0.5 R6:retiring ownership。任何"已摘下但尚未真正停止"的 client 都必须
+# 在同一锁临界区 identity-safe 转移进 _state_retiring(token->owner 真引用),
+# 不得只存在于 reconcile 局部变量;request_stop+join 真正成功后才摘除。
+_state_retiring: dict[int, _InflightOwner] = {}
+# deadline 耗尽仍存活的 client:保留真实对象与 ownership,可重复
+# request_stop/join(reaper/再次 stop 重试);诊断序列化与内部引用分离。
+_state_survivors: dict[int, _InflightOwner] = {}
 # socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
 STATE_SWAP_READY_TIMEOUT_S = 2.0
 # stop 对全部唯一 client(published+inflight)共享的总 join 预算(秒),
@@ -4647,13 +4658,48 @@ def _state_discovery_interval() -> float:
         return 10.0
 
 
-def _stop_client_quietly(
-    client: herdr_state.HerdrStateClient, join_timeout: float = 5.0
-) -> None:
+def _retire_client_locked(
+    name: str, epoch: int, client: herdr_state.HerdrStateClient
+) -> _InflightOwner:
+    """锁内调用:把已摘下的 client 所有权 identity-safe 转移进
+    _state_retiring(真实引用受管,不停成功不摘)。"""
+    owner = _InflightOwner(
+        epoch=epoch, name=name, token=next(_inflight_token), client=client,
+    )
+    _state_retiring[owner.token] = owner
+    return owner
+
+
+def _reap_owner(owner: _InflightOwner, join_timeout: float) -> bool:
+    """锁外 request_stop+join 一个 retiring/survivor client;真正成功(线程
+    全退)才从受管 map 摘除,失败保留真实引用等下轮重试。返回是否已回收。"""
     try:
-        client.stop(join_timeout=join_timeout)
+        ok = owner.client.stop(join_timeout=join_timeout)
     except Exception:
-        logger.exception("herdr state client stop failed")
+        logger.exception("herdr state client stop failed: %s", owner.name)
+        ok = False
+    if ok:
+        with _STATE_CLIENT_LOCK:
+            if _state_retiring.get(owner.token) is owner:
+                del _state_retiring[owner.token]
+            if _state_survivors.get(owner.token) is owner:
+                del _state_survivors[owner.token]
+    return ok
+
+
+def _reap_retired_clients() -> None:
+    """reaper:reconcile 每轮重试回收 retiring/survivors(重复
+    request_stop+join,共享小 deadline 不叠加)。"""
+    with _STATE_CLIENT_LOCK:
+        owners = list(_state_retiring.values()) + [
+            o for o in _state_survivors.values()
+            if o.token not in _state_retiring
+        ]
+    if not owners:
+        return
+    deadline = time.monotonic() + 1.0
+    for owner in owners:
+        _reap_owner(owner, join_timeout=max(0.0, deadline - time.monotonic()))
 
 
 def _open_state_clients() -> None:
@@ -4666,60 +4712,75 @@ def _open_state_clients() -> None:
 
 
 def _stop_state_client() -> list[dict[str, Any]]:
-    """lifespan 关闭(两阶段)。阶段一同一临界区:关 running 闸门、递增
-    epoch、摘取全部 published+inflight(去重)、清空 clients/inflight/meta/
-    swap-pending/discovery。阶段二锁外:先向所有唯一 client 广播
-    request_stop(置标志+关在途 socket,不 join——不等 A 耗尽才 signal B),
-    再按共享总 deadline 逐个 join。返回 survivor 诊断列表(deadline 耗尽仍
-    存活者,保留引用);空列表=全部干净退出,正常路径必须如此。"""
+    """lifespan 关闭(两阶段,R6)。阶段一同一临界区:关 running 闸门、递增
+    epoch、把 published+inflight 全部 identity-safe 转移进 _state_retiring
+    (与既有 retiring 合并),清空 clients/inflight/meta/swap-pending/
+    discovery。阶段二锁外:先向快照内所有唯一 client(published+inflight+
+    retiring+既往 survivors 重试)广播 request_stop,再按共享总 deadline
+    逐个 join;真正退出才摘除。deadline 耗尽仍存活者移入 _state_survivors
+    保留真实引用与 ownership(可重复 request_stop/join/reaper),返回诊断
+    列表(序列化与内部引用分离);空列表=全部干净退出。"""
     global _state_clients, _state_sessions_meta, _state_running, _state_epoch
     global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
     global _state_inflight
     with _STATE_CLIENT_LOCK:
         _state_running = False
         _state_epoch += 1
-        unique: dict[int, herdr_state.HerdrStateClient] = {}
-        for client in list(_state_clients.values()):
-            unique[id(client)] = client
+        epoch = _state_epoch
+        for name, client in _state_clients.items():
+            _retire_client_locked(name, epoch, client)
         for owner in _state_inflight.values():
-            unique[id(owner.client)] = owner.client
+            _state_retiring[owner.token] = owner
         _state_clients = {}
         _state_inflight = {}
         _state_sessions_meta = {}
         _state_swap_pending = {}
         _state_discovery_ok = False
         _state_discovery_reason = "state client not running"
-    clients = list(unique.values())
+        targets: dict[int, _InflightOwner] = {}
+        for owner in list(_state_retiring.values()) + list(
+            _state_survivors.values()
+        ):
+            targets[id(owner.client)] = owner
+    owners = list(targets.values())
     # 阶段二 a:先广播 cancel,所有 client 同时收到停止信号
-    for client in clients:
+    for owner in owners:
         try:
-            client.request_stop()
+            owner.client.request_stop()
         except Exception:
             logger.exception("herdr state client request_stop failed")
     # 阶段二 b:共享总 deadline 逐个 join(stop 幂等,信号已发)
     deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
-    survivors: list[dict[str, Any]] = []
-    for client in clients:
+    survived: list[_InflightOwner] = []
+    for owner in owners:
         remaining = max(0.0, deadline - time.monotonic())
-        try:
-            all_exited = client.stop(join_timeout=remaining)
-        except Exception:
-            logger.exception("herdr state client stop failed")
-            all_exited = False
-        if not all_exited:
-            alive = [
-                t.name for t in threading.enumerate()
-                if t.name.startswith("cockpit-state-") and t.is_alive()
-            ]
-            sessions = getattr(client, "_sessions", None) or getattr(
-                client, "sessions", {}
-            )
-            survivors.append({
-                "client": repr(client),
-                "sessions": sorted(sessions),
-                "alive_state_threads": alive,
-            })
-    return survivors
+        if not _reap_owner(owner, join_timeout=remaining):
+            survived.append(owner)
+    # survivor 保留真实引用与 ownership(从 retiring 转入 survivors)
+    if survived:
+        with _STATE_CLIENT_LOCK:
+            for owner in survived:
+                if _state_retiring.get(owner.token) is owner:
+                    del _state_retiring[owner.token]
+                _state_survivors[owner.token] = owner
+    diagnostics: list[dict[str, Any]] = []
+    for owner in survived:
+        alive = [
+            t.name for t in threading.enumerate()
+            if t.name.startswith(f"cockpit-state-{owner.name}") and t.is_alive()
+        ]
+        sessions = getattr(owner.client, "_sessions", None) or getattr(
+            owner.client, "sessions", {}
+        )
+        diagnostics.append({
+            "client": repr(owner.client),
+            "sessions": sorted(sessions),
+            "name": owner.name,
+            "epoch": owner.epoch,
+            "token": owner.token,
+            "alive_state_threads": alive,
+        })
+    return diagnostics
 
 
 def _discover_running_sessions() -> dict[str, dict[str, str]] | None:
@@ -4797,7 +4858,8 @@ def _reconcile_state_client() -> None:
                 _state_discovery_ok = False
                 _state_discovery_reason = "session discovery unavailable"
         return
-    to_stop: list[herdr_state.HerdrStateClient] = []
+    _reap_retired_clients()  # reaper:重试回收 retiring/survivors
+    to_reap: list[_InflightOwner] = []
     added: list[tuple[str, str]] = []
     changed: list[tuple[str, str, herdr_state.HerdrStateClient | None]] = []
     with _STATE_CLIENT_LOCK:
@@ -4817,7 +4879,8 @@ def _reconcile_state_client() -> None:
         for name in removed:
             client = _state_clients.pop(name, None)
             if client is not None:
-                to_stop.append(client)
+                # 同临界区 identity-safe 转移所有权,不停成功不摘
+                to_reap.append(_retire_client_locked(name, epoch, client))
             _state_swap_pending.pop(name, None)
         # removed 立即从 meta 摘除;added/changed 的 meta 仅发布成功后推进
         _state_sessions_meta = {
@@ -4893,7 +4956,6 @@ def _reconcile_state_client() -> None:
                 break
             time.sleep(0.05)
         swapped = False
-        stop_new = False
         with _STATE_CLIENT_LOCK:
             still_owned = _state_inflight.get(name) is owner
             if still_owned:
@@ -4906,13 +4968,17 @@ def _reconcile_state_client() -> None:
                 and _state_epoch == epoch
                 and _state_clients.get(name) is old_client
             ):
-                # 原子换入:新客户端握手含全量 resync,清降级,meta 推进
+                # 原子换入:新客户端握手含全量 resync,清降级,meta 推进;
+                # 旧 client 同一临界区转移进 retiring(不停成功不摘)
                 _state_clients[name] = new_client
                 _state_sessions_meta[name] = running[name]
                 _state_swap_pending.pop(name, None)
                 swapped = True
+                if old_client is not None:
+                    to_reap.append(_retire_client_locked(name, epoch, old_client))
             elif still_owned:
-                stop_new = True  # 我们摘取→我们负责 stop
+                # 我们摘取→我们负责 stop:同一临界区转移进 retiring
+                to_reap.append(_retire_client_locked(name, epoch, new_client))
                 if (
                     not cancelled
                     and not ready
@@ -4925,13 +4991,8 @@ def _reconcile_state_client() -> None:
                         "reason": f"state socket swap not ready: {socket_path}",
                     }
             # still_owned=False:stop 已摘取并拥有候选,不得再 stop/publish
-        if swapped:
-            if old_client is not None:
-                to_stop.append(old_client)
-        elif stop_new:
-            _stop_client_quietly(new_client)
-    for client in to_stop:
-        _stop_client_quietly(client)
+    for owner in to_reap:
+        _reap_owner(owner, STATE_STOP_JOIN_TIMEOUT_S)
 
 
 def _state_client_snapshot() -> dict[str, Any]:
