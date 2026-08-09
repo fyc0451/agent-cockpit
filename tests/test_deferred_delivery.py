@@ -261,3 +261,91 @@ def test_state_reports_status_binding_and_counts():
     assert st["pending_count"] == 1
     assert st["delivered_count"] == 0
     assert st["eligible"] is False
+
+
+# ── #1706 复核：同版本重绑 / 切换移交 / 锁外 adapter / 多 scope 隔离 ─────
+
+def test_same_version_rebind_keeps_pending():
+    """同版本重绑（幂等声明，如重启后恢复）不清 pending。"""
+    adapter = RecordingAdapter()
+    core = dd.DeferredDeliveryCore(adapter)
+    core.set_active_binding("s1", 2)
+    core.set_target_status("s1", "working")
+    core.ingest(ev("e1", binding_version=2))
+    r = core.set_active_binding("s1", 2)  # 同版本重绑
+    assert r["rebound_same_version"] is True
+    assert r["cleared_pending"] == 0
+    assert [e.event_id for e in core.pending("s1")] == ["e1"]  # 在途保留
+    assert adapter.calls == []            # 不触发投递
+    core.set_target_status("s1", "ready")
+    assert len(adapter.calls) == 1 and adapter.calls[0][2] == ["e1"]
+
+
+def test_same_version_rebind_keeps_delivered_dedup():
+    """同版本重绑后 delivered 去重记录保留（不重复投递）。"""
+    adapter = RecordingAdapter()
+    core = dd.DeferredDeliveryCore(adapter)
+    core.set_active_binding("s1", 1)
+    core.set_target_status("s1", "ready")
+    core.ingest(ev("e1"))                 # 已投递
+    core.set_active_binding("s1", 1)      # 同版本重绑
+    r = core.ingest(ev("e1"))             # 再来同 id
+    assert r["duplicate"] is True
+    assert len(adapter.calls) == 1
+
+
+def test_binding_switch_returns_cleared_events_for_handoff():
+    """切 binding 时旧在途事件本体返回给调用方移交（不静默丢弃）。"""
+    adapter = RecordingAdapter()
+    core = dd.DeferredDeliveryCore(adapter)
+    core.set_active_binding("s1", 1)
+    core.set_target_status("s1", "working")
+    core.ingest(ev("old1", binding_version=1, ts=1.0))
+    core.ingest(ev("old2", binding_version=1, ts=2.0))
+    r = core.set_active_binding("s1", 2)
+    assert r["cleared_pending"] == 2
+    ids = sorted(e.event_id for e in r["cleared_pending_events"])
+    assert ids == ["old1", "old2"]        # 事件本体可移交（排空/转投）
+    assert core.pending("s1") == []       # 核心内已清，但调用方持有移交清单
+
+
+def test_adapter_called_outside_lock_no_deadlock():
+    """adapter 在核心锁外调用：内部再调核心方法不死锁。"""
+    seen = {}
+
+    class ReentrantAdapter:
+        def deliver(self, scope, version, events):
+            seen["pending_inside"] = [e.event_id for e in core.pending(scope)]
+            return True
+
+    core = dd.DeferredDeliveryCore(ReentrantAdapter())
+    core.set_active_binding("s1", 1)
+    core.set_target_status("s1", "ready")
+    core.ingest(ev("e1"))
+    assert seen["pending_inside"] == ["e1"]  # 若 adapter 在锁内调用会死锁
+
+
+def test_scope_isolation_under_blocking_adapter():
+    """s1 的阻塞 adapter 不阻塞 s2 的 ingest/状态操作（多 scope 不互阻塞）。"""
+    released = threading.Event()
+
+    class BlockingAdapter:
+        def deliver(self, scope, version, events):
+            if scope == "s1":
+                released.wait(timeout=5)
+            return True
+
+    core = dd.DeferredDeliveryCore(BlockingAdapter())
+    core.set_active_binding("s1", 1)
+    core.set_target_status("s1", "ready")
+    core.ingest(ev("e1"))                 # s1 adapter 阻塞中
+
+    import time
+    t0 = time.monotonic()
+    core.set_active_binding("s2", 1)
+    core.set_target_status("s2", "working")
+    r = core.ingest(ev("e2", scope="s2"))
+    elapsed = time.monotonic() - t0
+    released.set()
+    assert r["queued"] is True
+    assert elapsed < 0.5                  # 不等待 s1 adapter

@@ -109,19 +109,34 @@ class DeferredDeliveryCore:
 
     # -- 公共 API -----------------------------------------------------------
     def set_active_binding(self, scope: str, binding_version: int) -> dict[str, Any]:
-        """单写者选定当前 active binding。切换版本 = 新一代：清空旧 pending 与
-        delivered 记录；旧版本事件此后视为 stale。"""
+        """单写者选定当前 active binding。
+
+        - 同版本重绑（幂等声明，如服务重启后恢复）：不清 pending/delivered，
+          在途消息与去重记录原样保留。
+        - 版本切换 = 新一代：旧 pending 事件**返回给调用方移交**（不静默丢弃，
+          调用方负责排空/转投），旧 delivered 记录清空；此后旧版本事件视为
+          stale。
+        """
         with self._lock:
             st = self._state(scope)
+            if st.active_binding_version == binding_version:
+                return {
+                    "binding_version": binding_version,
+                    "cleared_pending": 0,
+                    "cleared_pending_events": [],
+                    "delivered": False,
+                    "rebound_same_version": True,
+                }
             st.active_binding_version = binding_version
-            cleared = len(st.pending)
+            cleared_events = list(st.pending.values())
             st.pending.clear()
             st.delivered_ids.clear()
             st.delivered_count = 0
             delivered = self._try_deliver(st, scope)
         return {
             "binding_version": binding_version,
-            "cleared_pending": cleared,
+            "cleared_pending": len(cleared_events),
+            "cleared_pending_events": cleared_events,
             "delivered": delivered,
         }
 
