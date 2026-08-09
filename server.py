@@ -4606,17 +4606,23 @@ _state_clients: dict[str, herdr_state.HerdrStateClient] = {}
 _state_sessions_meta: dict[str, dict[str, str]] = {}
 _state_discovery_ok = False
 _state_discovery_reason = "state client not running"
-# H0.5 R3:lifespan running 闸门 + epoch。reconcile 在锁外启动/等待新客户端,
-# publish 前在同一把锁内校验 running+epoch+old/meta(CAS);lifespan stop 关
-# 闸门并递增 epoch,迟到的 publish 一律被拒并立刻 stop 新客户端,不会复活
-# cockpit-state 线程/FD;同进程新 lifespan 重新 open 后旧 epoch 仍失效。
+# H0.5 R3:lifespan running 闸门 + epoch。publish 前在同一把锁内校验
+# running+epoch+old/meta(CAS);lifespan stop 关闸门并递增 epoch,同进程新
+# lifespan 重新 open 后旧 epoch 仍失效。
 _state_running = False
 _state_epoch = 0
 # socket 换入超时未就绪的持久降级:name -> {"reason"};旧客户端缓存继续可读,
 # 但 snapshot/SSE 显式 degraded,retry 成功换入后清除。
 _state_swap_pending: dict[str, dict[str, str]] = {}
+# H0.5 R4:已登记未发布的候选客户端(锁外等待期)。候选必须在启动线程前于
+# 同临界区登记,stop 与 published 一起摘取并停止;ownership 归属摘取者,
+# 防止 stop/reconcile 双停。
+_state_inflight: dict[str, herdr_state.HerdrStateClient] = {}
 # socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
 STATE_SWAP_READY_TIMEOUT_S = 2.0
+# stop 对全部唯一 client(published+inflight)共享的总 join 预算(秒),
+# 不随 session 数叠加。
+STATE_STOP_JOIN_TIMEOUT_S = 5.0
 
 
 def _state_discovery_interval() -> float:
@@ -4626,9 +4632,11 @@ def _state_discovery_interval() -> float:
         return 10.0
 
 
-def _stop_client_quietly(client: herdr_state.HerdrStateClient) -> None:
+def _stop_client_quietly(
+    client: herdr_state.HerdrStateClient, join_timeout: float = 5.0
+) -> None:
     try:
-        client.stop()
+        client.stop(join_timeout=join_timeout)
     except Exception:
         logger.exception("herdr state client stop failed")
 
@@ -4643,22 +4651,30 @@ def _open_state_clients() -> None:
 
 
 def _stop_state_client() -> None:
-    """lifespan 关闭:关 running 闸门并递增 epoch,摘下并停止全部 per-session
-    客户端,清空 meta/swap-pending/discovery 标志;幂等。stop 后任何迟到
-    publish 都被 epoch CAS 拒绝,不复活 cockpit-state 线程/FD。"""
+    """lifespan 关闭:同一临界区关 running 闸门、递增 epoch,并摘取全部
+    published+inflight 客户端,清空 clients/inflight/meta/swap-pending/
+    discovery;锁外按共享总 deadline 停止并 join 所有唯一 client(多
+    session 不叠加),返回瞬间无存活 cockpit-state 线程/FD;幂等。"""
     global _state_clients, _state_sessions_meta, _state_running, _state_epoch
     global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
+    global _state_inflight
     with _STATE_CLIENT_LOCK:
         _state_running = False
         _state_epoch += 1
-        clients = list(_state_clients.values())
+        unique: dict[int, herdr_state.HerdrStateClient] = {}
+        for client in list(_state_clients.values()) + list(_state_inflight.values()):
+            unique[id(client)] = client
         _state_clients = {}
+        _state_inflight = {}
         _state_sessions_meta = {}
         _state_swap_pending = {}
         _state_discovery_ok = False
         _state_discovery_reason = "state client not running"
-    for client in clients:
-        _stop_client_quietly(client)
+    deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
+    for client in unique.values():
+        _stop_client_quietly(
+            client, join_timeout=max(0.0, deadline - time.monotonic())
+        )
 
 
 def _discover_running_sessions() -> dict[str, dict[str, str]] | None:
@@ -4685,10 +4701,10 @@ def _discover_running_sessions() -> dict[str, dict[str, str]] | None:
     }
 
 
-def _start_session_client(name: str, socket_path: str) -> herdr_state.HerdrStateClient:
-    client = herdr_state.HerdrStateClient({name: socket_path})
-    client.start()
-    return client
+def _build_session_client(name: str, socket_path: str) -> herdr_state.HerdrStateClient:
+    """仅构建候选客户端,不启动线程。线程启动必须在 inflight 登记后的
+    同一临界区内进行(见 _reconcile_state_client)。"""
+    return herdr_state.HerdrStateClient({name: socket_path})
 
 
 def _client_ready(client: herdr_state.HerdrStateClient, name: str) -> bool:
@@ -4702,18 +4718,32 @@ def _client_ready(client: herdr_state.HerdrStateClient, name: str) -> bool:
     return state == "subscribed"
 
 
+def _candidate_cancelled(
+    name: str, client: herdr_state.HerdrStateClient, epoch: int
+) -> bool:
+    """候选是否已被取消:stop 关闸/epoch 变迁/inflight 易主(ownership 被
+    stop 摘取)。ready 等待每轮调用,stop 后立即退出等待。"""
+    with _STATE_CLIENT_LOCK:
+        return (
+            not _state_running
+            or _state_epoch != epoch
+            or _state_inflight.get(name) is not client
+        )
+
+
 def _reconcile_state_client() -> None:
     """按发现结果增量对齐 per-session 客户端。
 
     - 发现失败:fail-closed,只标记 discovery degraded,不动旧客户端/缓存。
-    - 新增 session:锁外起独立客户端,CAS(running+epoch)通过才 publish;
-      bootstrap 前该 session 显式 degraded,不影响其他 session 缓存。
+    - 新增 session:登记 inflight→持锁启动→原子 inflight→published,全部在
+      同一临界区,无 start→CAS 窗口;bootstrap 前该 session 显式 degraded。
     - 删除 session:只停止并摘除该 session 的客户端。
-    - socket 路径变化(restart):锁外起新客户端,有界等待就绪,CAS
-      (running+epoch+old client)通过才原子换入并停旧;超时弃新留旧,记录
+    - socket 路径变化(restart):候选先登记 inflight 再持锁启动,锁外有界
+      等待就绪(每轮观察取消);ready 后 CAS(running+epoch+old client+
+      ownership)通过才原子换入并停旧;超时弃新留旧,记录
       _state_swap_pending 持久 degraded,下轮发现自动重试,成功后清降级。
-    - 任何 CAS 失败(lifespan stop 交错/同进程 restart):立刻 stop 新客户
-      端,绝不 publish,不复活线程/FD。
+    - ownership:谁从 inflight 摘取谁负责 stop;stop 摘走的候选 reconcile
+      绝不再停(防双停),也绝不 publish(不复活线程/FD)。
     """
     global _state_discovery_ok, _state_discovery_reason, _state_sessions_meta
     running = _discover_running_sessions()
@@ -4745,7 +4775,7 @@ def _reconcile_state_client() -> None:
             if client is not None:
                 to_stop.append(client)
             _state_swap_pending.pop(name, None)
-        # removed 立即从 meta 摘除;added/changed 的 meta 仅 CAS 发布成功后推进
+        # removed 立即从 meta 摘除;added/changed 的 meta 仅发布成功后推进
         _state_sessions_meta = {
             n: m for n, m in _state_sessions_meta.items() if n in running
         }
@@ -4753,55 +4783,84 @@ def _reconcile_state_client() -> None:
             added.append((name, running[name]["socket"]))
         for name in changed_names:
             changed.append((name, running[name]["socket"], _state_clients.get(name)))
-    # 锁外启动/有界等待:期间若 lifespan stop 抢先清空,epoch 失效,CAS 拒发。
     for name, socket_path in added:
-        client = _start_session_client(name, socket_path)
+        client = _build_session_client(name, socket_path)
         with _STATE_CLIENT_LOCK:
-            published = (
+            if not (
                 _state_running
                 and _state_epoch == epoch
                 and name not in _state_clients
                 and name not in _state_sessions_meta
-            )
-            if published:
+            ):
+                continue  # 闸门已关:候选从未启动线程,零副作用直接丢弃
+            _state_inflight[name] = client
+            client.start()  # 持锁启动:登记与启动之间 stop 无法穿插
+            if _state_inflight.pop(name, None) is client:
+                # 仍持有 ownership:原子 inflight→published
                 _state_clients[name] = client
                 _state_sessions_meta[name] = running[name]
-        if not published:
-            _stop_client_quietly(client)  # CAS 失败立刻 stop new
+            # 否则 start 期间 stop 已摘取并拥有该候选,不得再 publish/stop
     for name, socket_path, old_client in changed:
-        new_client = _start_session_client(name, socket_path)
+        new_client = _build_session_client(name, socket_path)
+        with _STATE_CLIENT_LOCK:
+            owned = (
+                _state_running
+                and _state_epoch == epoch
+                and _state_clients.get(name) is old_client
+            )
+            if owned:
+                _state_inflight[name] = new_client
+                new_client.start()  # 持锁启动
+        if not owned:
+            continue  # 从未启动线程,直接丢弃
+        # 锁外有界等待就绪:每轮观察取消,stop 后立即退出
+        ready = False
+        cancelled = False
         deadline = time.monotonic() + STATE_SWAP_READY_TIMEOUT_S
-        while time.monotonic() < deadline and not _client_ready(new_client, name):
+        while time.monotonic() < deadline:
+            if _candidate_cancelled(name, new_client, epoch):
+                cancelled = True
+                break
+            if _client_ready(new_client, name):
+                ready = True
+                break
             time.sleep(0.05)
-        if _client_ready(new_client, name):
-            with _STATE_CLIENT_LOCK:
-                swapped = (
-                    _state_running
-                    and _state_epoch == epoch
-                    and _state_clients.get(name) is old_client
-                )
-                if swapped:
-                    # 原子换入:新客户端握手含全量 resync,清降级,meta 推进
-                    _state_clients[name] = new_client
-                    _state_sessions_meta[name] = running[name]
-                    _state_swap_pending.pop(name, None)
-            if swapped:
-                if old_client is not None:
-                    to_stop.append(old_client)
-            else:
-                _stop_client_quietly(new_client)  # stop 已清空:不得复活
-        else:
-            # 新 socket 不就绪:弃新留旧,旧缓存可读但持久 degraded,下轮重试
-            _stop_client_quietly(new_client)
-            with _STATE_CLIENT_LOCK:
+        swapped = False
+        stop_new = False
+        with _STATE_CLIENT_LOCK:
+            still_owned = _state_inflight.pop(name, None) is new_client
+            if (
+                still_owned
+                and not cancelled
+                and ready
+                and _state_running
+                and _state_epoch == epoch
+                and _state_clients.get(name) is old_client
+            ):
+                # 原子换入:新客户端握手含全量 resync,清降级,meta 推进
+                _state_clients[name] = new_client
+                _state_sessions_meta[name] = running[name]
+                _state_swap_pending.pop(name, None)
+                swapped = True
+            elif still_owned:
+                stop_new = True  # 我们摘取→我们负责 stop
                 if (
-                    _state_running
+                    not cancelled
+                    and not ready
+                    and _state_running
                     and _state_epoch == epoch
                     and _state_clients.get(name) is old_client
                 ):
+                    # 新 socket 不就绪:弃新留旧,旧缓存可读但持久 degraded
                     _state_swap_pending[name] = {
                         "reason": f"state socket swap not ready: {socket_path}",
                     }
+            # still_owned=False:stop 已摘取并拥有候选,不得再 stop/publish
+        if swapped:
+            if old_client is not None:
+                to_stop.append(old_client)
+        elif stop_new:
+            _stop_client_quietly(new_client)
     for client in to_stop:
         _stop_client_quietly(client)
 

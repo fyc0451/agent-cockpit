@@ -5,9 +5,13 @@ degraded/unavailable、discovery fail-closed(含 list_sessions 真实吞错
 路径与 is_available=False)、per-session 无空窗增删/换 socket、稳态零
 fork(轮询 + team router 10 pending)、SSE sig 纳入 degraded/state_status、
 OpenCode 颜色字节注入清债。
-R3 复审修订(#1727 两项 HIGH):running/epoch CAS 屏障(stop 在 ready 前/后
-抢先、重复 reconcile、同进程 restart、跨 restart stale epoch、真实客户端
-无线程残留)与 swap timeout 持久 degraded→retry 原子换入清降级。
+R3 复审修订(#1727 两项 HIGH):running/epoch CAS 屏障与 swap timeout 持久
+degraded→retry 原子换入清降级。
+R4 复审修订(#1745 REVIEW_BLOCK):_state_inflight 候选登记(启动线程前)、
+持锁启动消除 start→CAS 窗口、ownership 防双停、stop 同临界区摘取
+published+inflight 并按共享总 deadline join(stop 返回瞬间无线程/FD)、
+ready wait 每轮观察取消;覆盖 candidate start 后/wait 中/ready 后 CAS 前/
+added start→CAS/跨 restart/多 session 共享 deadline/真实线程 FD 基线。
 """
 import asyncio
 import threading
@@ -118,6 +122,7 @@ def _reset_state(monkeypatch):
     monkeypatch.setattr(server, "_state_running", True)
     monkeypatch.setattr(server, "_state_epoch", 1)
     monkeypatch.setattr(server, "_state_swap_pending", {})
+    monkeypatch.setattr(server, "_state_inflight", {})
     monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 0.2)
     monkeypatch.setattr(
         server.herdr_state, "HerdrStateClient", FakeStateClient
@@ -370,49 +375,89 @@ def test_stop_state_client_stops_all_and_is_idempotent(monkeypatch):
     server._stop_state_client()
 
 
-# ── R3 复审修订(#1727):stop 竞态屏障 + swap 持久降级 ────────────
+# ── R4 复审修订(#1745):inflight 屏障 + 共享 stop deadline ──────
 
 
-def test_late_publish_rejected_when_stop_interleaves(monkeypatch):
-    """stop 在 reconcile 锁外窗口抢先(ready 前):epoch CAS 拒绝迟到 publish,
-    新客户端立刻 stop,clients/meta/pending 全空。"""
+def _patch_start_calls_stop(monkeypatch, reopen=False):
+    """候选 start 期间模拟 lifespan stop 抢先(同线程重入 RLock)。"""
+    real_start = FakeStateClient.start
+
+    def start_then_stop(self):
+        real_start(self)
+        server._stop_state_client()
+        if reopen:
+            server._open_state_clients()
+
+    monkeypatch.setattr(FakeStateClient, "start", start_then_stop)
+
+
+def test_stop_during_added_start_cas_window(monkeypatch):
+    """added start→CAS 窗口:candidate 登记后、start 期间 stop 抢先。
+    候选被 stop 摘取停止,不得 publish;所有 map 空。"""
     _install(monkeypatch)
+    _patch_start_calls_stop(monkeypatch)
     _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock", "late": "/tmp/late.sock"})
-    real_start = server._start_session_client
-
-    def start_then_stop(name, socket_path):
-        client = real_start(name, socket_path)
-        server._stop_state_client()  # 模拟 lifespan 关闭在 CAS publish 前抢先
-        return client
-
-    monkeypatch.setattr(server, "_start_session_client", start_then_stop)
     server._reconcile_state_client()
     assert server._state_clients == {}
+    assert server._state_inflight == {}
     assert server._state_sessions_meta == {}
     assert server._state_swap_pending == {}
     late = FakeStateClient.instances[-1]
     assert late.sessions == {"late": "/tmp/late.sock"}
-    assert late.stopped is True  # 迟到的新客户端被立刻 stop,未复活
+    assert late.stopped is True  # stop 拥有并停止,未复活未双停
 
 
-def test_late_swap_rejected_when_stop_interleaves_after_ready(monkeypatch):
-    """stop 在新客户端 ready 后、换入 CAS 前抢先:不得换入,新客户端立刻停。"""
+def test_stop_during_swap_ready_wait(monkeypatch):
+    """候选 start 后、ready wait 中 stop:等待立即退出,stop 摘取并停止
+    候选,reconcile 不再 stop/publish(ownership 单一)。"""
     clients = _install(monkeypatch)
     _fake_discovery(monkeypatch, {"demo": "/tmp/demo-new.sock"})
-    real_start = server._start_session_client
 
-    def start_then_stop(name, socket_path):
-        client = real_start(name, socket_path)
-        server._stop_state_client()
-        return client
+    def ready_calls_stop(client, name):
+        server._stop_state_client()  # wait 第一轮观察点之间抢先
+        return False
 
-    monkeypatch.setattr(server, "_start_session_client", start_then_stop)
+    monkeypatch.setattr(server, "_client_ready", ready_calls_stop)
     server._reconcile_state_client()
-    assert server._state_clients == {}  # 旧客户端已被 stop 清空,新客户端未换入
+    candidate = FakeStateClient.instances[-1]
+    assert candidate is not clients["demo"]
+    assert candidate.stopped is True  # stop 摘取 inflight 并停止
+    assert server._state_clients == {}
+    assert server._state_inflight == {}
     assert server._state_sessions_meta == {}
-    new_client = FakeStateClient.instances[-1]
-    assert new_client is not clients["demo"]
-    assert new_client.stopped is True
+    assert server._state_swap_pending == {}  # 取消路径不留 pending
+
+
+def test_stop_after_ready_before_cas(monkeypatch):
+    """ready 后、换入 CAS 前 stop:不得换入,候选由 stop 停止。"""
+    clients = _install(monkeypatch)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo-new.sock"})
+
+    def ready_then_stop(client, name):
+        server._stop_state_client()
+        return True  # ready 成立,但 CAS 前已被 stop
+
+    monkeypatch.setattr(server, "_client_ready", ready_then_stop)
+    server._reconcile_state_client()
+    candidate = FakeStateClient.instances[-1]
+    assert candidate is not clients["demo"]
+    assert candidate.stopped is True
+    assert server._state_clients == {}  # 未换入
+    assert server._state_inflight == {}
+    assert server._state_sessions_meta == {}
+
+
+def test_cross_restart_late_worker_not_published(monkeypatch):
+    """跨 restart:候选 start 期间 stop+reopen(新 epoch),late worker
+    不得在新 lifespan publish;候选仍由 stop 停止。"""
+    _install(monkeypatch)
+    _patch_start_calls_stop(monkeypatch, reopen=True)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock", "late": "/tmp/late.sock"})
+    server._reconcile_state_client()
+    assert "late" not in server._state_clients
+    assert server._state_clients == {}
+    assert server._state_inflight == {}
+    assert FakeStateClient.instances[-1].stopped is True
 
 
 def test_reconcile_repeated_is_idempotent(monkeypatch):
@@ -431,6 +476,7 @@ def test_same_process_restart_after_stop(monkeypatch):
     clients = _install(monkeypatch)
     server._stop_state_client()
     assert server._state_clients == {}
+    assert server._state_inflight == {}
     assert server._state_sessions_meta == {}
     assert server._state_swap_pending == {}
     assert server._state_discovery_ok is False
@@ -447,20 +493,20 @@ def test_same_process_restart_after_stop(monkeypatch):
 
 
 def test_stale_epoch_publish_rejected_across_restart(monkeypatch):
-    """旧 lifespan 的迟到 publish 在新 lifespan(epoch 已递增)仍被拒绝。"""
+    """swap 路径跨 restart:wait 中 stop+reopen,新 epoch 下不得换入/留 pending。"""
     _install(monkeypatch)
-    _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock", "late": "/tmp/late.sock"})
-    real_start = server._start_session_client
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo-new.sock"})
 
-    def start_stop_reopen(name, socket_path):
-        client = real_start(name, socket_path)
+    def ready_stop_reopen(client, name):
         server._stop_state_client()
-        server._open_state_clients()  # 同进程新 lifespan
-        return client
+        server._open_state_clients()
+        return True
 
-    monkeypatch.setattr(server, "_start_session_client", start_stop_reopen)
+    monkeypatch.setattr(server, "_client_ready", ready_stop_reopen)
     server._reconcile_state_client()
-    assert "late" not in server._state_clients
+    assert server._state_clients == {}
+    assert server._state_inflight == {}
+    assert server._state_swap_pending == {}
     assert FakeStateClient.instances[-1].stopped is True
 
 
@@ -494,36 +540,65 @@ def test_socket_swap_timeout_persistent_degraded_then_recovers(monkeypatch):
     assert snap2["sessions"][0]["state_status"] == "subscribed"
 
 
-def test_real_client_late_publish_stop_leaves_no_thread(monkeypatch):
-    """真实 HerdrStateClient:stop 抢先后 CAS 拒绝+立刻 stop,无线程残留。"""
-    monkeypatch.setattr(server.herdr_state, "HerdrStateClient", _REAL_STATE_CLIENT)
+def test_stop_shared_deadline_multi_session(monkeypatch):
+    """多 session stop 共享总 deadline:join_timeout 逐个递减而非每个叠加。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.25)
+    join_timeouts: list[float] = []
 
-    def fast_start(name, socket_path):
-        client = _REAL_STATE_CLIENT(
+    def slow_stop(self, join_timeout=5.0):
+        join_timeouts.append(join_timeout)
+        self.stopped = True
+        time.sleep(0.2)  # 每个 client 消耗 0.2s 预算
+        return True
+
+    monkeypatch.setattr(FakeStateClient, "stop", slow_stop)
+    _install(monkeypatch, names=("a", "b", "c"))
+    server._stop_state_client()
+    assert len(join_timeouts) == 3
+    assert join_timeouts[0] == pytest.approx(0.25, abs=0.05)
+    assert join_timeouts[1] < 0.15  # 共享递减:不是每个都拿满 0.25
+    assert join_timeouts[2] < 0.05
+    assert server._state_clients == {}
+
+
+def test_real_inflight_candidate_stop_no_thread_fd_leak(monkeypatch):
+    """真实候选在 ready wait 中被 stop:stop 返回瞬间所有 map 空、无存活
+    cockpit-state 线程、FD 回基线;reconcile 随后退出且不 publish。"""
+    import os
+
+    def build_real(name, socket_path):
+        return _REAL_STATE_CLIENT(
             {name: socket_path},
             reconnect_base_delay=0.05,
             reconnect_max_delay=0.1,
             health_check_interval=None,
         )
-        client.start()
-        return client
 
-    real_fast_start = fast_start
-
-    def start_then_stop(name, socket_path):
-        client = real_fast_start(name, socket_path)
-        server._stop_state_client()
-        return client
-
-    monkeypatch.setattr(server, "_start_session_client", start_then_stop)
-    _fake_discovery(monkeypatch, {"h05race": "/nonexistent/h05-race.sock"})
-    server._reconcile_state_client()
+    monkeypatch.setattr(server, "_build_session_client", build_real)
+    _install(monkeypatch, names=("race",))  # 旧 published 为 Fake
+    _fake_discovery(monkeypatch, {"race": "/nonexistent/race-new.sock"})
+    monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 30.0)
+    fd_before = len(os.listdir("/proc/self/fd"))
+    worker = threading.Thread(target=server._reconcile_state_client)
+    worker.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not server._state_inflight:
+        time.sleep(0.01)
+    assert server._state_inflight  # 候选已登记,处于 ready wait
+    server._stop_state_client()
+    # stop 返回瞬间:全部 map 空、线程/FD 无残留
     assert server._state_clients == {}
+    assert server._state_inflight == {}
     assert server._state_sessions_meta == {}
+    assert server._state_swap_pending == {}
     assert not [
         t for t in threading.enumerate()
-        if t.name.startswith("cockpit-state-h05race") and t.is_alive()
+        if t.name.startswith("cockpit-state-race") and t.is_alive()
     ]
+    assert len(os.listdir("/proc/self/fd")) <= fd_before
+    worker.join(5)
+    assert not worker.is_alive()  # wait 循环观察取消立即退出
+    assert server._state_clients == {}  # late worker 未 publish
 
 
 # ── R2:稳态零 fork(轮询 + team router) ────────────────────────
