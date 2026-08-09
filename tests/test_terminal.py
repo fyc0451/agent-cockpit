@@ -539,27 +539,31 @@ def test_large_write_full_integrity(tmp_path, monkeypatch):
     # CI runner 负载高时 drainer 消费慢,2s 默认超时会把本用例打成 flake;
     # 放宽到与下方完整性等待相同的 10s(只放宽本用例,不改产品默认值)。
     monkeypatch.setattr(terminal, "WRITE_TIMEOUT", 10.0)
-    tid = _create()
     target = tmp_path / "payload.txt"
-    _start_file_receiver(tid, target, tmp_path / "receiver-ready")
-    # 模拟 server pump 持续读走回显:canonical 模式输入会回显到 master,
-    # 没人读时 macOS 的小 PTY 缓冲会反压输入(Linux 缓冲大,不显性)
-    stop = threading.Event()
-    def _drain():
-        while not stop.is_set():
-            terminal.read_output(tid, 0.05)
-    drainer = threading.Thread(target=_drain, daemon=True)
-    drainer.start()
-    try:
-        # 每行 < 4096(canonical MAX_CANON),总量超过 PTY 缓冲,触发短写循环
-        payload = "".join(f"{i:05d}" + "x" * 95 + "\n" for i in range(2000))
-        terminal.write_term(tid, payload)   # 不得 TimeoutError
-        terminal.write_term(tid, "\x04")    # Ctrl-D EOF
-        _wait_file_size(target, len(payload))
-        assert target.read_text() == payload
-    finally:
-        stop.set()
-        drainer.join(timeout=2)
+    ready = tmp_path / "receiver-ready"
+    payload = "".join(f"{i:05d}" + "x" * 95 + "\n" for i in range(2000))
+    code = "\n".join((
+        "import os, pathlib, sys, time, tty",
+        "target, ready, expected = sys.argv[1], sys.argv[2], int(sys.argv[3])",
+        "tty.setraw(0)",
+        "pathlib.Path(ready).touch()",
+        "data = bytearray()",
+        "while len(data) < expected:",
+        "    data.extend(os.read(0, min(1024, expected - len(data))))",
+        "    time.sleep(0.001)",
+        "pathlib.Path(target).write_bytes(data)",
+    ))
+    tid = _create(command=[
+        sys.executable, "-c", code, str(target), str(ready), str(len(payload)),
+    ])
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and not ready.exists():
+        terminal.read_output(tid, 0.05)
+    assert ready.exists(), "PTY raw接收器未及时启动"
+
+    terminal.write_term(tid, payload)  # 不得 TimeoutError
+    _wait_file_size(target, len(payload))
+    assert target.read_text() == payload
 
 
 def test_concurrent_writes_preserve_message_boundaries(tmp_path, monkeypatch):
