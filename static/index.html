@@ -2727,7 +2727,8 @@ function termSendInlineInput(){
   const inp=document.getElementById('termTextInput');if(!inp)return;
   const text=inp.value;if(!text)return;
   if(!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
-  queueTermInput(TERM_ID,text);
+  // 发送=提交:补回车,否则文字只停在 agent 输入框里等人工回车
+  queueTermInput(TERM_ID,text+'\r');
   inp.value='';try{inp.focus()}catch(e){}
 }
 async function termEnsure(){
@@ -3604,6 +3605,7 @@ function enableTermTouchScroll(el,xterm){
     // 快滑时一次 move 可能攒很多行;只扣实际派发的部分,余量留到下个事件,不丢距离
     const direction=Math.sign(lines),steps=Math.min(maxSteps,Math.abs(lines));
     remainder-=direction*steps*rowHeight;
+    if(tapStart)tapStart.cancelled=true; // 已实际滚动:本次手势不是 tap,不合成点击
     if(screen&&typeof WheelEvent==='function'){
       for(let i=0;i<steps;i++){
         const wheel=new WheelEvent('wheel',{deltaY:direction*rowHeight,deltaMode:0,bubbles:true,cancelable:true});
@@ -3644,6 +3646,39 @@ function enableTermTouchScroll(el,xterm){
   el.addEventListener('pointerup',finishPointer,{passive:true});
   el.addEventListener('pointercancel',finishPointer,{passive:true});
   el.addEventListener('pointerleave',finishPointer,{passive:true});
+  // tap→鼠标点击合成:真机 Chrome 里 tap 落在 xterm link-layer 时,xterm
+  // 手势层会在 document 冒泡阶段 preventDefault touchend,浏览器随之不派发
+  // 兼容鼠标事件(mousedown/mouseup),开启鼠标追踪的 TUI(如 herdr switch
+  // 面板)收不到点击。这里保存 touchend 事件,待 xterm 手势层处理完后检查
+  // defaultPrevented——只有它吞掉兼容鼠标事件时才合成,不另设全局守卫。
+  let tapStart=null;
+  const mouseWanted=()=>xterm.modes?.mouseTrackingMode&&xterm.modes.mouseTrackingMode!=='none';
+  el.addEventListener('touchstart',e=>{
+    if(e.touches.length===1&&mouseWanted()){
+      const t=e.touches[0];
+      tapStart={x:t.clientX,y:t.clientY,t:Date.now(),target:e.target,cancelled:false};
+    }else tapStart=null;
+  },{passive:true});
+  // 二维位移取消(复审 #1524):水平拖动不派发 wheel,不会触发滚动取消,
+  // 但 xterm 对 END 手势也 preventDefault,会误判成点击。>10px slop 取消,
+  // 保留"实际 wheel step 必取消"作第二道保证;不用"任意 move 即取消",
+  // 避免真机手指微抖让正常 tap 失效。
+  el.addEventListener('touchmove',e=>{
+    if(!tapStart||e.touches.length!==1)return;
+    const t=e.touches[0];
+    if(Math.hypot(t.clientX-tapStart.x,t.clientY-tapStart.y)>10)tapStart.cancelled=true;
+  },{passive:true});
+  el.addEventListener('touchend',e=>{
+    const tap=tapStart;tapStart=null;
+    if(!tap||tap.cancelled||Date.now()-tap.t>500||!mouseWanted())return;
+    const touchendEvent=e;
+    setTimeout(()=>{
+      if(!touchendEvent.defaultPrevented)return; // 浏览器会自行派发鼠标事件
+      if(!el.isConnected||!el.contains(tap.target)||!mouseWanted())return;
+      tap.target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,view:window,button:0,buttons:1,clientX:tap.x,clientY:tap.y,screenX:tap.x,screenY:tap.y}));
+      tap.target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,view:window,button:0,buttons:0,clientX:tap.x,clientY:tap.y,screenX:tap.x,screenY:tap.y}));
+    },30);
+  },{passive:true});
 }
 function scheduleTermReconnect(id){
   const inst=TERM_INSTANCES[id];
