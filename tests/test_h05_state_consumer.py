@@ -43,6 +43,9 @@ check+commit 与登记线性化;CLIENT timed acquire 耗尽→总预算内 defer
 (client_lock_timeout)、ticket 持久、running/ownership 零部分变更;
 CLIENT-lock barrier(有/无 published client)wall-clock<=budget+容差、
 释放后 open 仍 False、retry 后 open True;较早完成不清更晚 ticket。
+R15:按 ADR 把 ticket 持久登记定义为唯一预算例外，登记后立即建立共享
+deadline；phase2 后 bounded CLIENT 锁内读取全局 ownership，retiring 未清
+或完成消费 TICKET 超时均保留 intent 并明确 deferred；REAP 单一 finally。
 """
 import asyncio
 import threading
@@ -1932,3 +1935,179 @@ class TestPhase2BoundedClientR12:
         time.sleep(0.05)  # 确保 holder 退出
         assert server._reap_owner(owner, time.monotonic() + 1.0) is True
         assert owner.token not in server._state_retiring  # 摘除成功
+
+
+class TestDurableStopTicketR15:
+    """R15:ticket 登记是预算前的持久前奏；登记后的所有 barrier 都在
+    同一 absolute deadline 内明确 deferred，且只有 retry global stop
+    完成后才消费 intent。"""
+
+    class Phase2BarrierClient(FakeStateClient):
+        def __init__(self, sessions, entered, holder_has, *, stop_ok):
+            super().__init__(sessions)
+            self.entered = entered
+            self.holder_has = holder_has
+            self.stop_ok = stop_ok
+
+        def stop(self, join_timeout=5.0):
+            self.request_stop()
+            self.stop_calls += 1
+            self.entered.set()
+            assert self.holder_has.wait(5)
+            if self.stop_ok:
+                self.stopped = True
+            return self.stop_ok
+
+    @pytest.mark.parametrize("initial_stop_ok", [True, False])
+    def test_phase2_client_barrier_requires_retry_global_stop(
+        self, monkeypatch, initial_stop_ok,
+    ):
+        """完整 stop=True/False phase2 barrier：预算内明确 deferred，
+        ticket/owner 持久；仅 reaper 摘 owner 后 direct open 仍拒绝，retry
+        global stop identity-safe 完成后才消费并允许 explicit open。"""
+        monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.1)
+        entered, holder_has, release = (
+            threading.Event(), threading.Event(), threading.Event()
+        )
+        client = self.Phase2BarrierClient(
+            {"p2": "/tmp/p2.sock"}, entered, holder_has,
+            stop_ok=initial_stop_ok,
+        )
+        client.start()
+        monkeypatch.setattr(server, "_state_clients", {"p2": client})
+        monkeypatch.setattr(server, "_state_sessions_meta", {
+            "p2": {"socket": "/tmp/p2.sock", "directory": "/d"},
+        })
+
+        def hold_client_after_stop():
+            assert entered.wait(5)
+            with server._STATE_CLIENT_LOCK:
+                holder_has.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_client_after_stop)
+        holder.start()
+        start = time.monotonic()
+        result = server._stop_state_client()
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.1 + 0.15
+        assert result and result[0]["deferred"] is True
+        assert result[0]["reason"] == "phase2_state_lock_timeout"
+        assert server._state_stop_tickets == {result[0]["ticket"]}
+        release.set()
+        holder.join(5)
+        assert not holder.is_alive()
+
+        # 首轮 CLIENT 超时前 owner 已 identity-safe 摘入 retiring。
+        assert len(server._state_retiring) == 1
+        assert server._state_survivors == {}
+        client.stop_ok = True
+        server._reap_retired_clients()
+        assert server._state_retiring == {}
+        assert server._state_survivors == {}
+        # Reaper 只回收 owner，不能替 retry global stop 消费 intent。
+        assert server._state_stop_tickets
+        assert server._open_state_clients() is False
+        assert server._stop_state_client() == []
+        assert not server._state_stop_tickets
+        assert server._open_state_clients() is True
+
+    def test_ticket_consume_barrier_defers_and_preserves_intent(self, monkeypatch):
+        """phase2 已回收后完成消费 TICKET 锁被持有：same deadline 内
+        deferred，ticket 持久；释放后仍需 retry global stop。"""
+        monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.1)
+        entered, holder_has, release = (
+            threading.Event(), threading.Event(), threading.Event()
+        )
+        client = self.Phase2BarrierClient(
+            {"tc": "/tmp/tc.sock"}, entered, holder_has, stop_ok=True,
+        )
+        client.start()
+        monkeypatch.setattr(server, "_state_clients", {"tc": client})
+        monkeypatch.setattr(server, "_state_sessions_meta", {
+            "tc": {"socket": "/tmp/tc.sock", "directory": "/d"},
+        })
+
+        def hold_ticket_after_stop():
+            assert entered.wait(5)
+            with server._STATE_TICKET_LOCK:
+                holder_has.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_ticket_after_stop)
+        holder.start()
+        start = time.monotonic()
+        result = server._stop_state_client()
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.1 + 0.15
+        assert result and result[0]["deferred"] is True
+        assert result[0]["reason"] == "ticket_consume_timeout"
+        ticket = result[0]["ticket"]
+        release.set()
+        holder.join(5)
+        assert not holder.is_alive()
+        assert server._state_stop_tickets == {ticket}
+        assert server._state_retiring == {}
+        assert server._state_survivors == {}
+        assert server._open_state_clients() is False
+        assert server._stop_state_client() == []
+        assert not server._state_stop_tickets
+        assert server._open_state_clients() is True
+
+    def test_ticket_registration_serializes_before_budget_final_stop_wins(
+        self, monkeypatch,
+    ):
+        """入口 TICKET 是唯一预算例外：stop/open 同时排队时先完成持久
+        登记，再获得完整 shutdown budget；无论 open 线性化先后，最终 stop
+        关闸且 ticket 被最终 stop 消费。"""
+        monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.1)
+        held, release = threading.Event(), threading.Event()
+        results: dict[str, object] = {}
+
+        class BudgetProbe(FakeStateClient):
+            def __init__(self):
+                super().__init__({"reg": "/tmp/reg.sock"})
+                self.join_timeouts = []
+
+            def stop(self, join_timeout=5.0):
+                self.join_timeouts.append(join_timeout)
+                return super().stop(join_timeout)
+
+        client = BudgetProbe()
+        client.start()
+        monkeypatch.setattr(server, "_state_clients", {"reg": client})
+        monkeypatch.setattr(server, "_state_sessions_meta", {
+            "reg": {"socket": "/tmp/reg.sock", "directory": "/d"},
+        })
+
+        def hold_ticket():
+            with server._STATE_TICKET_LOCK:
+                held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_ticket)
+        holder.start()
+        assert held.wait(5)
+        stop_thread = threading.Thread(
+            target=lambda: results.setdefault("stop", server._stop_state_client())
+        )
+        open_thread = threading.Thread(
+            target=lambda: results.setdefault("open", server._open_state_clients())
+        )
+        stop_thread.start()
+        time.sleep(0.15)  # 超过 join budget，仍在线性化前奏等待
+        open_thread.start()
+        time.sleep(0.05)
+        assert stop_thread.is_alive()
+        release.set()
+        holder.join(5)
+        stop_thread.join(5)
+        open_thread.join(5)
+        assert not holder.is_alive()
+        assert not stop_thread.is_alive()
+        assert not open_thread.is_alive()
+        assert results["stop"] == []
+        # 登记等待超过 join budget，但 deadline 从登记成功后才开始。
+        assert client.join_timeouts and client.join_timeouts[0] > 0.07
+        assert server._state_running is False  # final stop wins
+        assert not server._state_stop_tickets

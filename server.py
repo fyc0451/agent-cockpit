@@ -4813,13 +4813,11 @@ def _stop_state_client() -> list[dict[str, Any]]:
     global _state_clients, _state_sessions_meta, _state_running, _state_epoch
     global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
     global _state_inflight
-    # R11:absolute deadline 是函数首个时序动作——之后 REAP/CLIENT 锁等待
-    # 与 client join 全部只花 remaining,任何等待都计入总预算;CLIENT 在
-    # 剩余窗口内拿不到即返回 deferred(ticket 持久,running/ownership 零
-    # 部分变更),绝不等待后再给完整 join 预算。R11:ticket 登记改经独立
-    # TICKET 锁短临界区,不再依赖可能长持有的 CLIENT 锁。
-    absolute_deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
+    # R15:ticket 登记是持久 shutdown intent 的线性化前奏，也是唯一预算
+    # 例外。登记成功后立即建立 absolute deadline；之后 REAP/CLIENT、join、
+    # phase2 bookkeeping 与完成消费 TICKET 全部只使用同一 remaining。
     ticket = _register_stop_ticket()
+    absolute_deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
     if not _STATE_REAP_LOCK.acquire(
         timeout=max(0.0, absolute_deadline - time.monotonic())
     ):
@@ -4884,30 +4882,41 @@ def _stop_state_client() -> list[dict[str, Any]]:
                     finally:
                         _STATE_CLIENT_LOCK.release()
                 # 拿不到 CLIENT → deferred:owner 留在 retiring,不进 survived
-        # R13:仅当无 deferred(owner 全摘除或转 survivor)才消费 ticket;
-        # deferred 时不清 ticket、owner 仍受管、返回明确诊断让 retry 后再消费
-        has_deferred = bool(_state_retiring)  # REAP 锁下读,安全
-        if has_deferred:
-            # deferred:不清 ticket,返回明确诊断
-            _STATE_REAP_LOCK.release()
+        # R15:retiring/survivors 只能在 CLIENT 锁下读取。拿不到锁或仍有
+        # retiring 都表示本轮未完成：保留 ticket，返回明确 deferred。
+        remaining = max(0.0, absolute_deadline - time.monotonic())
+        if not _STATE_CLIENT_LOCK.acquire(timeout=remaining):
             return [{
                 "deferred": True,
-                "reason": "phase2 CLIENT reacquire timeout;owners 仍留 retiring",
+                "reason": "phase2_state_lock_timeout",
                 "ticket": ticket,
                 "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
-                "pending_retiring": len(_state_retiring),
-                "pending_survivors": len(_state_survivors),
+            }]
+        try:
+            pending_retiring = len(_state_retiring)
+            pending_survivors = len(_state_survivors)
+        finally:
+            _STATE_CLIENT_LOCK.release()
+        if pending_retiring:
+            return [{
+                "deferred": True,
+                "reason": "phase2_incomplete",
+                "ticket": ticket,
+                "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+                "pending_retiring": pending_retiring,
+                "pending_survivors": pending_survivors,
             }]
         # 全部完成(reaped 或 survivor):bounded TICKET 消费 <= 本 ticket
         remaining = max(0.0, absolute_deadline - time.monotonic())
         if not _consume_stop_tickets(ticket, timeout=remaining):
             # TICKET 拿不到→deferred:不清 ticket,返回诊断
-            _STATE_REAP_LOCK.release()
             return [{
                 "deferred": True,
-                "reason": "TICKET lock acquire timeout",
+                "reason": "ticket_consume_timeout",
                 "ticket": ticket,
                 "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+                "pending_retiring": pending_retiring,
+                "pending_survivors": pending_survivors,
             }]
     finally:
         _STATE_REAP_LOCK.release()
