@@ -2936,8 +2936,8 @@ def api_herdr_pane_identity(session: str, pane_id: str):
     """
     _validate_session_name(session)
     _validate_pane_id(pane_id)
-    # 先从 snapshot 拿这个 pane 的 cwd 和 agent 类型
-    snap = herdr_client.snapshot()
+    # 先从状态缓存拿这个 pane 的 cwd 和 agent 类型(H0.5:GET 状态消费者走缓存)
+    snap = _state_client_snapshot()
     pane = next((p for p in snap.get("panes", [])
                  if p.get("session") == session and p.get("pane_id") == pane_id), None)
     if not pane:
@@ -2997,6 +2997,8 @@ def _started_agent_mail_identity(
     }
     mail_agent = MAIL_AGENT_NAMES.get(agent_type, agent_type)
     try:
+        # H0.5 保留 CLI:agent start mutation 后需即时看到新 pane 做同类型
+        # 数量判定,socket 缓存可能滞后一个事件窗口。
         panes = [
             pane for pane in herdr_client.snapshot().get("panes", [])
             if pane.get("session") == session
@@ -3381,7 +3383,7 @@ def _same_mail_project_family(project: str, session_path: str) -> bool:
 
 
 def _session_pane_paths(name: str) -> list[str]:
-    snap = herdr_client.snapshot()
+    snap = _state_client_snapshot()
     sess = next(
         (item for item in snap.get("sessions", []) if item.get("session") == name),
         None,
@@ -3999,6 +4001,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
             time.sleep(0.5)  # 等 Herdr client 退出,session server 稳定
             _stop_pty_drainer(drain_stop, drain_thread)
             # 记录 TUI 建 session 自带的初始 shell pane,agent 启动后清理
+            # H0.5 保留 CLI:session start mutation 后的即时验证读取
             base_pane_ids = [
                 p.get("pane_id")
                 for p in herdr_client.snapshot().get("panes", [])
@@ -4072,6 +4075,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
     # 1.5 清理建 session 时 TUI 自带的空白 shell pane(至少一个 agent 在跑才清,避免空 session)
     closed_panes = []
     if base_pane_ids and started:
+        # H0.5 保留 CLI:close pane mutation 前的即时存在性验证
         current = {
             p.get("pane_id"): p
             for p in herdr_client.snapshot().get("panes", [])
@@ -4240,7 +4244,7 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
     """手动给单个 pane 发身份告知(适用于手动在 herdr 里开的新 pane)。"""
     _validate_session_name(session)
     _validate_pane_id(pane_id)
-    snap = herdr_client.snapshot()
+    snap = _state_client_snapshot()
     p = next(
         (
             x for s in snap.get("sessions", []) if s.get("session") == session
@@ -4311,7 +4315,7 @@ def api_herdr_session_init_mail(name: str, req: MailProjectReq | None = None):
                 **state,
             }
         project = state["project"]
-    snap = herdr_client.snapshot()
+    snap = _state_client_snapshot()
     sess = next((s for s in snap.get("sessions", []) if s.get("session") == name), None)
     if not sess:
         raise HTTPException(404, f"session 不存在: {name}")
@@ -4591,12 +4595,18 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
 # mutation、能力门和 session 发现(list_sessions)。socket/server 中断时
 # 继续服务旧缓存并显式 degraded,恢复后由 H0.4 客户端自动 resync;
 # 无可靠缓存时显式 unavailable,禁止静默回退旧轮询 fork。
+# 每 session 一个独立客户端:增删/socket 变化只影响该 session,旧健康
+# session 缓存持续可读,无整体空窗;发现失败 fail-closed,保留旧客户端
+# 与缓存,绝不清空。
 
 _STATE_CLIENT_LOCK = threading.RLock()
-_state_client: herdr_state.HerdrStateClient | None = None
+_state_clients: dict[str, herdr_state.HerdrStateClient] = {}
 # 发现层元数据:name -> {"socket","directory"};仅 running session。
 _state_sessions_meta: dict[str, dict[str, str]] = {}
 _state_discovery_ok = False
+_state_discovery_reason = "state client not running"
+# socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
+STATE_SWAP_READY_TIMEOUT_S = 2.0
 
 
 def _state_discovery_interval() -> float:
@@ -4606,38 +4616,38 @@ def _state_discovery_interval() -> float:
         return 10.0
 
 
+def _stop_client_quietly(client: herdr_state.HerdrStateClient) -> None:
+    try:
+        client.stop()
+    except Exception:
+        logger.exception("herdr state client stop failed")
+
+
 def _stop_state_client() -> None:
-    """lifespan 关闭用:摘下并停止当前状态客户端,幂等。"""
-    global _state_client
+    """lifespan 关闭用:摘下并停止全部 per-session 客户端,幂等。"""
+    global _state_clients
     with _STATE_CLIENT_LOCK:
-        client = _state_client
-        _state_client = None
-    if client is not None:
-        try:
-            client.stop()
-        except Exception:
-            logger.exception("herdr state client stop failed")
+        clients = list(_state_clients.values())
+        _state_clients = {}
+    for client in clients:
+        _stop_client_quietly(client)
 
 
-def _reconcile_state_client() -> None:
-    """发现 running session;session 增删或 socket 路径变化时重建状态客户端。
-
-    发现走 CLI list_sessions(单个 fork,属于必要的 session 发现);session
-    集合不变时零成本返回。重建先起新客户端再停旧的,旧缓存在切换瞬间前
-    一直可读。
-    """
-    global _state_client, _state_sessions_meta, _state_discovery_ok
+def _discover_running_sessions() -> dict[str, dict[str, str]] | None:
+    """CLI session 发现(单 fork)。返回 None 表示发现不可用/失败(fail-closed,
+    调用方必须保留旧客户端与缓存);空 dict 表示成功发现零 session。"""
     if not herdr_client.is_available():
-        discovered: list[dict[str, Any]] = []
-    else:
-        try:
-            discovered = herdr_client.list_sessions()
-        except Exception:
-            logger.exception("herdr state session discovery failed")
-            with _STATE_CLIENT_LOCK:
-                _state_discovery_ok = False
-            return
-    running = {
+        return None
+    try:
+        discovered = herdr_client.list_sessions()
+    except Exception:
+        logger.exception("herdr state session discovery failed")
+        return None
+    # list_sessions 对 JSON/兼容表格两条命令都失败时吞错返回 [] 并置失败
+    # 标志(threading.local,与本调用同线程可读);空列表+标志=失败而非空态。
+    if getattr(herdr_client._LIST_SESSIONS_FAILED, "value", False):
+        return None
+    return {
         str(item["name"]): {
             "socket": str(item.get("socket") or ""),
             "directory": str(item.get("directory") or ""),
@@ -4645,33 +4655,95 @@ def _reconcile_state_client() -> None:
         for item in discovered
         if item.get("status") == "running" and item.get("socket")
     }
+
+
+def _start_session_client(name: str, socket_path: str) -> herdr_state.HerdrStateClient:
+    client = herdr_state.HerdrStateClient({name: socket_path})
+    client.start()
+    return client
+
+
+def _client_ready(client: herdr_state.HerdrStateClient, name: str) -> bool:
+    try:
+        store = client.snapshot_cached()
+    except Exception:
+        return False
+    if not store.get("available"):
+        return False
+    state = client.state().get("sessions", {}).get(name, {}).get("state")
+    return state == "subscribed"
+
+
+def _reconcile_state_client() -> None:
+    """按发现结果增量对齐 per-session 客户端。
+
+    - 发现失败:fail-closed,只标记 discovery degraded,不动旧客户端/缓存。
+    - 新增 session:直接起独立客户端,bootstrap 前该 session 显式 degraded,
+      不影响其他 session 的缓存。
+    - 删除 session:只停止并摘除该 session 的客户端。
+    - socket 路径变化(restart):先起新客户端,有界等待就绪后原子换入再停
+      旧客户端;超时则弃新留旧(旧缓存继续可读,显式 degraded)。
+    """
+    global _state_discovery_ok, _state_discovery_reason, _state_sessions_meta
+    running = _discover_running_sessions()
+    if running is None:
+        with _STATE_CLIENT_LOCK:
+            _state_discovery_ok = False
+            _state_discovery_reason = "session discovery unavailable"
+        return
+    to_stop: list[herdr_state.HerdrStateClient] = []
     with _STATE_CLIENT_LOCK:
         _state_discovery_ok = True
+        _state_discovery_reason = ""
         if running == _state_sessions_meta:
             return
-        old_client = _state_client
-        new_client = None
-        if running:
-            new_client = herdr_state.HerdrStateClient(
-                {name: meta["socket"] for name, meta in running.items()}
+        removed = [n for n in _state_sessions_meta if n not in running]
+        added = [n for n in running if n not in _state_sessions_meta]
+        changed = [
+            n for n in running
+            if n in _state_sessions_meta and running[n] != _state_sessions_meta[n]
+        ]
+        for name in removed:
+            client = _state_clients.pop(name, None)
+            if client is not None:
+                to_stop.append(client)
+        for name in added:
+            _state_clients[name] = _start_session_client(
+                name, running[name]["socket"]
             )
-            new_client.start()
-        _state_client = new_client
-        _state_sessions_meta = running
-    if old_client is not None:
-        try:
-            old_client.stop()
-        except Exception:
-            logger.exception("herdr state client stop failed during reconcile")
+        # changed 的 meta 只在换入成功后推进,失败保留下轮重试
+        _state_sessions_meta = {
+            name: (_state_sessions_meta[name] if name in changed else running[name])
+            for name in running
+        }
+    # changed 在锁外做有界就绪切换:等待期间旧客户端缓存持续可读。
+    for name in changed:
+        new_client = _start_session_client(name, running[name]["socket"])
+        deadline = time.monotonic() + STATE_SWAP_READY_TIMEOUT_S
+        while time.monotonic() < deadline and not _client_ready(new_client, name):
+            time.sleep(0.05)
+        if _client_ready(new_client, name):
+            with _STATE_CLIENT_LOCK:
+                old_client = _state_clients.get(name)
+                _state_clients[name] = new_client
+                _state_sessions_meta[name] = running[name]
+            if old_client is not None:
+                to_stop.append(old_client)
+        else:
+            # 新 socket 不就绪:弃新留旧,旧缓存+degraded 继续服务
+            to_stop.append(new_client)
+    for client in to_stop:
+        _stop_client_quietly(client)
 
 
 def _state_client_snapshot() -> dict[str, Any]:
-    """读状态客户端缓存,合并发现层 directory,显式 degraded/unavailable。"""
+    """聚合各 per-session 客户端缓存,合并 directory,显式 degraded/unavailable。"""
     with _STATE_CLIENT_LOCK:
-        client = _state_client
+        clients = dict(_state_clients)
         meta = {name: dict(item) for name, item in _state_sessions_meta.items()}
         discovery_ok = _state_discovery_ok
-    if client is None:
+        discovery_reason = _state_discovery_reason
+    if not clients:
         # 无 running session(发现正常)是合法空态;否则显式 unavailable。
         if discovery_ok and not meta:
             return {
@@ -4681,31 +4753,70 @@ def _state_client_snapshot() -> dict[str, Any]:
             }
         return {
             "available": False, "degraded": True,
-            "reason": "state client not running",
+            "reason": discovery_reason or "state client not running",
             "sessions": [], "panes": [], "agents": [],
             "total_panes": 0, "agent_panes": 0,
         }
-    snap = client.snapshot_cached()
-    lifecycle = client.state().get("sessions", {})
     degraded = not discovery_ok
-    sessions = []
-    for entry in snap.get("sessions", []):
-        name = entry.get("session")
-        entry["directory"] = meta.get(name, {}).get("directory", "")
+    sessions: list[dict[str, Any]] = []
+    panes: list[dict[str, Any]] = []
+    agents: list[dict[str, Any]] = []
+    any_bootstrapped = False
+    for name, client in clients.items():
+        try:
+            store = client.snapshot_cached()
+            lifecycle = client.state().get("sessions", {})
+        except Exception:
+            logger.exception("herdr state client read failed: %s", name)
+            store, lifecycle = {"available": False, "sessions": []}, {}
         state = lifecycle.get(name, {}).get("state")
+        entry = next(
+            (s for s in store.get("sessions", []) if s.get("session") == name),
+            None,
+        )
+        if entry is None:
+            entry = {
+                "session": name, "status": "running", "panes": [],
+                "agents": [], "focused_pane_id": None, "layouts": [],
+            }
+        entry["directory"] = meta.get(name, {}).get("directory", "")
         entry["state_status"] = state
         if state != "subscribed":
             degraded = True
+        if store.get("available"):
+            any_bootstrapped = True
         sessions.append(entry)
-    snap["sessions"] = sessions
-    # 已发现但尚未进入缓存(刚 reconcile、未完成 bootstrap)也算 degraded。
-    if any(name not in {e.get("session") for e in sessions} for name in meta):
-        degraded = True
-    snap["degraded"] = degraded or not snap.get("available", False)
-    if not snap.get("available"):
-        snap.setdefault("reason", "no bootstrapped session cache")
-    return snap
+        panes.extend(entry.get("panes", []))
+        agents.extend(entry.get("agents", []))
+    # 已发现但尚未建客户端的 session(异常窗口)显式 degraded。
+    for name in meta:
+        if name not in clients:
+            degraded = True
+            sessions.append({
+                "session": name, "status": "running", "panes": [],
+                "agents": [], "focused_pane_id": None, "layouts": [],
+                "directory": meta[name].get("directory", ""),
+                "state_status": "starting",
+            })
+    available = any_bootstrapped
+    result: dict[str, Any] = {
+        "available": available,
+        "degraded": degraded or not available,
+        "sessions": sessions,
+        "panes": panes,
+        "agents": agents,
+        "total_panes": len(panes),
+        "agent_panes": sum(1 for p in panes if p.get("agent")),
+    }
+    if not available:
+        result["reason"] = "no bootstrapped session cache"
+    elif not discovery_ok and discovery_reason:
+        result["reason"] = discovery_reason
+    return result
 
+
+# team_inbox_router 共享同一缓存:路由 lead 在线判断零 fork。
+team_inbox_router.set_snapshot_provider(_state_client_snapshot)
 
 _live_state: dict[str, Any] = {
     "revision": 0,
@@ -4776,6 +4887,15 @@ async def _poll_live_state() -> None:
                     "unread": unread,
                     "attention": attention["items"],
                     "capabilities": attention["capabilities"],
+                    # H0.5:可用性/降级与生命周期变化也必须触发 revision+1 推送
+                    "available": snap.get("available"),
+                    "degraded": snap.get("degraded"),
+                    "reason": snap.get("reason"),
+                    "state_status": {
+                        s.get("session"): s.get("state_status")
+                        for s in snap.get("sessions", [])
+                        if isinstance(s, dict)
+                    },
                     "session_tasks": [
                         (
                             session.get("session"), session.get("status"),

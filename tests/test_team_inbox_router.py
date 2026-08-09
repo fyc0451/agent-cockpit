@@ -105,7 +105,7 @@ def test_format_item_suppresses_automatic_reply_to_generated_reply():
 class TestFiltering:
     def test_ignores_unbound_project(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding(project_slug="acme")])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         calls = []
@@ -125,7 +125,7 @@ class TestFiltering:
         self, tmp_path, monkeypatch,
     ):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         prompts = []
@@ -154,7 +154,7 @@ class TestFiltering:
         _write_bindings(tmp_path / "team-sessions.json", [
             _binding(project_slug="acme", hub="http://other:8765"),
         ])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         monkeypatch.setattr(team_inbox_router, "pane_send", _noop_send)
@@ -169,7 +169,7 @@ class TestFiltering:
         _write_bindings(tmp_path / "team-sessions.json", [
             _binding(project_slug="acme", human_id=99),
         ])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         monkeypatch.setattr(team_inbox_router, "pane_send", _noop_send)
@@ -201,7 +201,7 @@ class TestFiltering:
 class TestDedup:
     def test_duplicate_id_not_delivered_twice(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         calls = []
@@ -215,7 +215,7 @@ class TestDedup:
 
     def test_restart_persists_delivered(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         calls = []
@@ -229,7 +229,7 @@ class TestDedup:
 
     def test_pending_persists_across_restart(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot())
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot())
         team_inbox_router.route_inbox(
             "Bearer x", hub="http://hub:8765", human_id=7,
             fetch_inbox=lambda auth: {"items": [_item(item_id=101)]},
@@ -241,7 +241,7 @@ class TestDedup:
 
     def test_pending_retries_when_lead_returns_online(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot())
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot())
         calls = []
         monkeypatch.setattr(
             team_inbox_router, "pane_send",
@@ -251,7 +251,7 @@ class TestDedup:
         team_inbox_router.route_inbox(
             "Bearer x", hub="http://hub:8765", human_id=7, fetch_inbox=fetch,
         )
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
 
@@ -270,7 +270,7 @@ class TestDedup:
             _binding(human_id=7),
             _binding(human_id=8),
         ])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         calls = []
@@ -294,7 +294,7 @@ class TestDedup:
 class TestDelivery:
     def test_lead_online_delivers_prompt_text(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         calls = []
@@ -316,7 +316,7 @@ class TestDelivery:
 
     def test_lead_offline_keeps_pending(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot())
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot())
         monkeypatch.setattr(team_inbox_router, "pane_send", _noop_send)
         result = team_inbox_router.route_inbox(
             "Bearer x", hub="http://hub:8765", human_id=7,
@@ -327,7 +327,7 @@ class TestDelivery:
 
     def test_deliver_failure_keeps_pending_with_error(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         monkeypatch.setattr(team_inbox_router, "pane_send", lambda *a, **k: {"available": False, "error": "boom"})
@@ -342,7 +342,7 @@ class TestDelivery:
 
     def test_real_pane_error_shape_is_not_marked_delivered(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         monkeypatch.setattr(
@@ -387,7 +387,7 @@ class TestStatusSafety:
 
     def test_route_state_file_permissions(self, tmp_path, monkeypatch):
         _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-        monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+        monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
             {"session": "s1", "pane_id": "p1"},
         ))
         monkeypatch.setattr(team_inbox_router, "pane_send", _noop_send)
@@ -402,7 +402,7 @@ class TestStatusSafety:
 def test_delivery_deferred_while_user_typing(tmp_path, monkeypatch):
     """用户正在该 session 终端打字时暂缓投递,消息留在 pending 下轮重试。"""
     _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-    monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+    monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
         {"session": "s1", "pane_id": "p1"},
     ))
     calls = []
@@ -440,7 +440,7 @@ def test_delivery_deferred_while_user_typing(tmp_path, monkeypatch):
 def test_delivery_not_deferred_when_typing_in_other_pane(tmp_path, monkeypatch):
     """pane 粒度:目标 lead pane 无输入(输入在同 session 其他 pane)时正常投递。"""
     _write_bindings(tmp_path / "team-sessions.json", [_binding()])
-    monkeypatch.setattr(team_inbox_router, "snapshot", _fake_snapshot(
+    monkeypatch.setattr(team_inbox_router, "_snapshot", _fake_snapshot(
         {"session": "s1", "pane_id": "p1"},
     ))
     calls = []
