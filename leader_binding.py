@@ -52,7 +52,7 @@ _DRAIN_FORWARD: dict[str, frozenset[str]] = {
     "degraded": frozenset({"degraded", "draining"}),
     "drained": frozenset({"drained"}),  # 终态：仅幂等确认，不可回退
 }
-CONTROL_EVENT_TYPES = ("binding_changed", "binding_retired", "drain_state_changed")
+CONTROL_EVENT_TYPES = ("binding_changed", "binding_updated", "binding_retired", "drain_state_changed")
 CONNECT_RETRIES = 6
 CONNECT_RETRY_BASE = 0.02
 _CONNECT_INIT_LOCK = threading.Lock()
@@ -73,144 +73,276 @@ class StaleVersionError(BindingError):
     """CAS 失败：expected version/state/migration 与当前不符。"""
 
 
+_LEADER_BINDINGS_COLUMNS = (
+    "issuer", "scope_kind", "scope_id", "mail_name", "binding_id",
+    "previous_mail_name", "previous_state", "agent_name", "agent_kind",
+    "session", "pane_id", "registry_selector", "binding_version", "state",
+    "degraded_reason", "updated_ts", "route_epoch", "migration_id",
+    "drain_revision",
+    "drain_remaining", "drain_pending", "drain_claimed", "drain_ack_pending",
+)
+_LEADER_BINDINGS_DDL = """
+CREATE TABLE IF NOT EXISTS leader_bindings (
+  issuer TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  mail_name TEXT NOT NULL,
+  binding_id TEXT NOT NULL,
+  previous_mail_name TEXT,
+  previous_state TEXT,
+  agent_name TEXT,
+  agent_kind TEXT,
+  session TEXT,
+  pane_id TEXT,
+  registry_selector TEXT,
+  binding_version INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  degraded_reason TEXT,
+  updated_ts REAL NOT NULL,
+  route_epoch INTEGER NOT NULL DEFAULT 0,
+  migration_id TEXT,
+  drain_revision INTEGER NOT NULL DEFAULT 0,
+  drain_remaining INTEGER NOT NULL DEFAULT 0,
+  drain_pending INTEGER NOT NULL DEFAULT 0,
+  drain_claimed INTEGER NOT NULL DEFAULT 0,
+  drain_ack_pending INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(issuer, scope_kind, scope_id, mail_name),
+  CHECK (state IN ('active', 'previous', 'retired')),
+  CHECK (binding_version > 0)
+)
+"""
+_BINDING_MIGRATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS binding_migrations (
+  migration_id TEXT PRIMARY KEY,
+  issuer TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  from_binding_id TEXT,
+  to_binding_id TEXT,
+  route_epoch INTEGER NOT NULL,
+  created_ts REAL NOT NULL
+)
+"""
+_CONTROL_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS control_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  issuer TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  binding_version INTEGER NOT NULL,
+  migration_id TEXT,
+  payload_json TEXT NOT NULL,
+  created_ts REAL NOT NULL,
+  fanned_out INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+
+def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
+
+
+def _pk_columns(con: sqlite3.Connection, table: str) -> list[str]:
+    rows = [
+        (int(r["pk"]), r["name"])
+        for r in con.execute(f"PRAGMA table_info({table})")
+        if int(r["pk"]) > 0
+    ]
+    rows.sort()
+    return [name for _, name in rows]
+
+
+def _rebuild_leader_bindings(con: sqlite3.Connection) -> None:
+    """旧 schema（PK 不含 issuer，如 Q1/R2）事务重建为新 schema。
+
+    空旧库 → 结构重建（0 行拷贝），此后可真实 bind；有行旧库 → 仅当 issuer 与
+    binding_id 可无歧义映射才迁移，否则原库不变并 fail-closed（绝不猜默认 issuer
+    或编造 binding_id）。重建后 PK/unique/index 全部按新 schema 重建。
+    """
+    old_cols = _table_columns(con, "leader_bindings")
+    n_rows = int(con.execute("SELECT COUNT(*) FROM leader_bindings").fetchone()[0])
+    if n_rows > 0:
+        if "issuer" not in old_cols:
+            raise RuntimeError(
+                "leader_bindings fail-closed: 旧 schema 有行但缺 issuer 列，无法无歧义映射；原库不变，需人工迁移"
+            )
+        bad_issuer = int(con.execute(
+            "SELECT COUNT(*) FROM leader_bindings WHERE issuer IS NULL OR issuer=''"
+        ).fetchone()[0])
+        if bad_issuer:
+            raise RuntimeError(
+                f"leader_bindings fail-closed: {bad_issuer} 行 issuer 为空，无法迁移；原库不变"
+            )
+        if "binding_id" not in old_cols:
+            raise RuntimeError(
+                "leader_bindings fail-closed: 旧 schema 有行但缺 binding_id，无法无歧义映射；原库不变，需人工迁移"
+            )
+    # 构建 SELECT 列映射：旧表有则取，无则用字面量（仅空表会到此处拷贝 0 行）
+    select_cols: list[str] = []
+    for col in _LEADER_BINDINGS_COLUMNS:
+        if col in old_cols:
+            select_cols.append(col)
+        elif col in (
+            "drain_revision", "drain_remaining", "drain_pending",
+            "drain_claimed", "drain_ack_pending", "route_epoch",
+        ):
+            select_cols.append("0")
+        elif col == "binding_id":
+            select_cols.append("lower(hex(randomblob(16)))")
+        else:
+            select_cols.append("NULL")
+    con.execute("BEGIN")
+    try:
+        con.execute("ALTER TABLE leader_bindings RENAME TO _leader_bindings_old")
+        con.executescript(_LEADER_BINDINGS_DDL)
+        con.execute(
+            f"INSERT INTO leader_bindings ({', '.join(_LEADER_BINDINGS_COLUMNS)}) "
+            f"SELECT {', '.join(select_cols)} FROM _leader_bindings_old"
+        )
+        con.execute("DROP TABLE _leader_bindings_old")
+        con.execute(
+            "CREATE UNIQUE INDEX leader_bindings_active_once "
+            "ON leader_bindings(issuer, scope_kind, scope_id) WHERE state='active'"
+        )
+        con.execute(
+            "CREATE INDEX leader_bindings_scope "
+            "ON leader_bindings(issuer, scope_kind, scope_id, state)"
+        )
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
+
+
+def _rebuild_control_events(con: sqlite3.Connection) -> None:
+    """旧 control_events（event_id 为 PK、无 seq/issuer）事务重建为 seq-AUTOINCREMENT schema。
+
+    保留 event_id/fanned_out/created_ts；seq 确定性单调分配；有行旧库缺 issuer → fail-closed。
+    """
+    old_cols = _table_columns(con, "control_events")
+    n_rows = int(con.execute("SELECT COUNT(*) FROM control_events").fetchone()[0])
+    if n_rows > 0 and "issuer" not in old_cols:
+        raise RuntimeError(
+            "control_events fail-closed: 旧 schema 有行但缺 issuer，无法迁移；原库不变，需人工迁移"
+        )
+    new_cols = (
+        "event_id", "issuer", "scope_kind", "scope_id", "event_type",
+        "binding_version", "migration_id", "payload_json", "created_ts", "fanned_out",
+    )
+    select_cols = [
+        c if c in old_cols
+        else ("''" if c == "issuer" else ("0" if c == "fanned_out" else "NULL"))
+        for c in new_cols
+    ]
+    con.execute("BEGIN")
+    try:
+        con.execute("ALTER TABLE control_events RENAME TO _control_events_old")
+        con.executescript(_CONTROL_EVENTS_DDL)
+        con.execute(
+            f"INSERT INTO control_events ({', '.join(new_cols)}) "
+            f"SELECT {', '.join(select_cols)} FROM _control_events_old"
+        )
+        con.execute("DROP TABLE _control_events_old")
+        con.execute(
+            "CREATE INDEX control_events_scope "
+            "ON control_events(issuer, scope_kind, scope_id, seq)"
+        )
+        con.execute(
+            "CREATE INDEX control_events_pending ON control_events(fanned_out, seq)"
+        )
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
+
+
 def _initialize_connection(con: sqlite3.Connection) -> None:
     mode = con.execute("PRAGMA journal_mode").fetchone()[0]
     if str(mode).lower() != "wal":
         con.execute("PRAGMA journal_mode=WAL")
-    con.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS leader_bindings (
-          issuer TEXT NOT NULL,
-          scope_kind TEXT NOT NULL,
-          scope_id TEXT NOT NULL,
-          mail_name TEXT NOT NULL,
-          binding_id TEXT NOT NULL,
-          previous_mail_name TEXT,
-          previous_state TEXT,
-          agent_name TEXT,
-          agent_kind TEXT,
-          session TEXT,
-          pane_id TEXT,
-          registry_selector TEXT,
-          binding_version INTEGER NOT NULL,
-          state TEXT NOT NULL,
-          degraded_reason TEXT,
-          updated_ts REAL NOT NULL,
-          route_epoch INTEGER NOT NULL DEFAULT 0,
-          migration_id TEXT,
-          drain_remaining INTEGER NOT NULL DEFAULT 0,
-          drain_pending INTEGER NOT NULL DEFAULT 0,
-          drain_claimed INTEGER NOT NULL DEFAULT 0,
-          drain_ack_pending INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY(issuer, scope_kind, scope_id, mail_name),
-          CHECK (state IN ('active', 'previous', 'retired')),
-          CHECK (binding_version > 0)
-        );
-        CREATE TABLE IF NOT EXISTS binding_migrations (
-          migration_id TEXT PRIMARY KEY,
-          issuer TEXT NOT NULL,
-          scope_kind TEXT NOT NULL,
-          scope_id TEXT NOT NULL,
-          from_binding_id TEXT,
-          to_binding_id TEXT,
-          route_epoch INTEGER NOT NULL,
-          created_ts REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS control_events (
-          seq INTEGER PRIMARY KEY AUTOINCREMENT,
-          event_id TEXT NOT NULL UNIQUE,
-          issuer TEXT NOT NULL,
-          scope_kind TEXT NOT NULL,
-          scope_id TEXT NOT NULL,
-          event_type TEXT NOT NULL,
-          binding_version INTEGER NOT NULL,
-          migration_id TEXT,
-          payload_json TEXT NOT NULL,
-          created_ts REAL NOT NULL,
-          fanned_out INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS control_events_scope
-          ON control_events(issuer, scope_kind, scope_id, seq);
-        CREATE INDEX IF NOT EXISTS control_events_pending
-          ON control_events(fanned_out, seq);
-        """
-    )
-    # 前向迁移：历史库缺列时补齐（幂等）；失败给可定位诊断
-    columns = {
-        row["name"]
-        for row in con.execute("PRAGMA table_info(leader_bindings)").fetchall()
-    }
-    for name, ddl in (
-        ("previous_mail_name", "TEXT"),
-        ("previous_state", "TEXT"),
-        ("agent_name", "TEXT"),
-        ("agent_kind", "TEXT"),
-        ("session", "TEXT"),
-        ("pane_id", "TEXT"),
-        ("degraded_reason", "TEXT"),
-        ("issuer", "TEXT"),
-        ("registry_selector", "TEXT"),
-        ("route_epoch", "INTEGER NOT NULL DEFAULT 0"),
-        ("migration_id", "TEXT"),
-        ("binding_id", "TEXT"),
-        ("drain_remaining", "INTEGER NOT NULL DEFAULT 0"),
-        ("drain_pending", "INTEGER NOT NULL DEFAULT 0"),
-        ("drain_claimed", "INTEGER NOT NULL DEFAULT 0"),
-        ("drain_ack_pending", "INTEGER NOT NULL DEFAULT 0"),
-    ):
-        if name not in columns:
-            try:
-                con.execute(
-                    f"ALTER TABLE leader_bindings ADD COLUMN {name} {ddl}"
-                )
-            except sqlite3.OperationalError as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise RuntimeError(
-                        f"leader_bindings 前向迁移失败（列 {name}）: {exc}"
-                    ) from exc
+    lb_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='leader_bindings'"
+    ).fetchone()
+    if not lb_exists:
+        # 全新库：直接建新 schema（含 drain_revision）
+        con.executescript(
+            _LEADER_BINDINGS_DDL + ";\n" + _BINDING_MIGRATIONS_DDL + ";\n"
+            + _CONTROL_EVENTS_DDL + ";\n"
+            "CREATE UNIQUE INDEX leader_bindings_active_once "
+            "ON leader_bindings(issuer, scope_kind, scope_id) WHERE state='active';"
+            "CREATE INDEX leader_bindings_scope "
+            "ON leader_bindings(issuer, scope_kind, scope_id, state);"
+            "CREATE INDEX control_events_scope "
+            "ON control_events(issuer, scope_kind, scope_id, seq);"
+            "CREATE INDEX control_events_pending ON control_events(fanned_out, seq);"
+        )
+        return
+    # leader_bindings 已存在：判断是否需要重建（旧 PK 不含 issuer）
+    lb_pk = _pk_columns(con, "leader_bindings")
+    if lb_pk != ["issuer", "scope_kind", "scope_id", "mail_name"]:
+        _rebuild_leader_bindings(con)
+    else:
+        # R3→R4：仅缺 drain_revision 时 ALTER 补列（PK 已正确）
+        lb_cols = _table_columns(con, "leader_bindings")
+        if "drain_revision" not in lb_cols:
+            con.execute(
+                "ALTER TABLE leader_bindings ADD COLUMN drain_revision "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+    # control_events：旧 schema（无 seq/issuer，event_id 为 PK）需重建
+    ce_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='control_events'"
+    ).fetchone()
+    if ce_exists:
+        ce_cols = _table_columns(con, "control_events")
+        if "seq" not in ce_cols or "issuer" not in ce_cols:
+            _rebuild_control_events(con)
+    else:
+        con.executescript(_CONTROL_EVENTS_DDL)
+        con.execute(
+            "CREATE INDEX control_events_scope "
+            "ON control_events(issuer, scope_kind, scope_id, seq)"
+        )
+        con.execute(
+            "CREATE INDEX control_events_pending ON control_events(fanned_out, seq)"
+        )
+    # binding_migrations（幂等创建）
+    con.executescript(_BINDING_MIGRATIONS_DDL)
+    # 索引幂等保证（重建路径已建，此处理论 IF NOT EXISTS 跳过）
     con.execute(
         "CREATE INDEX IF NOT EXISTS leader_bindings_scope "
         "ON leader_bindings(issuer, scope_kind, scope_id, state)"
     )
-    # fail-closed：旧表已有行但无法推断 issuer（NULL/空）→ 显式迁移诊断，
-    # 绝不猜默认 issuer
-    rows = con.execute(
-        "SELECT COUNT(*) AS n FROM leader_bindings"
-    ).fetchone()
+    # fail-closed：有行但 issuer/binding_id 空 → 干净诊断（重建后新库不应触发）
+    rows = con.execute("SELECT COUNT(*) AS n FROM leader_bindings").fetchone()
     if rows and int(rows["n"]) > 0:
         null_issuer = con.execute(
-            "SELECT COUNT(*) AS n FROM leader_bindings "
-            "WHERE issuer IS NULL OR issuer=''"
+            "SELECT COUNT(*) AS n FROM leader_bindings WHERE issuer IS NULL OR issuer=''"
         ).fetchone()
         if null_issuer and int(null_issuer["n"]) > 0:
             raise RuntimeError(
-                "leader_bindings fail-closed: 旧 schema 存在无法推断 issuer 的"
-                f"绑定行（{null_issuer['n']} 行）。需人工指定 trust-domain "
-                "issuer 迁移，不得猜测默认值"
+                f"leader_bindings fail-closed: {null_issuer['n']} 行 issuer 为空，无法迁移"
             )
-        null_binding_id = con.execute(
-            "SELECT COUNT(*) AS n FROM leader_bindings "
-            "WHERE binding_id IS NULL OR binding_id=''"
+        null_bid = con.execute(
+            "SELECT COUNT(*) AS n FROM leader_bindings WHERE binding_id IS NULL OR binding_id=''"
         ).fetchone()
-        if null_binding_id and int(null_binding_id["n"]) > 0:
+        if null_bid and int(null_bid["n"]) > 0:
             raise RuntimeError(
-                "leader_bindings fail-closed: 旧 schema 存在缺少 binding_id 的"
-                f"绑定行（{null_binding_id['n']} 行）。需人工迁移补全 binding_id"
+                f"leader_bindings fail-closed: {null_bid['n']} 行 binding_id 为空，需人工补全"
             )
-    # 重复 active 诊断：在唯一索引重建前拦截，给可定位错误
+    # 重复 active 诊断
     dup = con.execute(
         "SELECT issuer, scope_kind, scope_id, COUNT(*) AS n FROM leader_bindings "
-        "WHERE state='active' GROUP BY issuer, scope_kind, scope_id "
-        "HAVING COUNT(*) > 1"
+        "WHERE state='active' GROUP BY issuer, scope_kind, scope_id HAVING COUNT(*) > 1"
     ).fetchall()
     if dup:
         spots = ", ".join(
-            f"{r['issuer']}/{r['scope_kind']}/{r['scope_id']}({r['n']})"
-            for r in dup
+            f"{r['issuer']}/{r['scope_kind']}/{r['scope_id']}({r['n']})" for r in dup
         )
         raise RuntimeError(
-            "leader_bindings fail-closed: 旧 schema 存在重复 active 绑定，"
-            f"拒绝启动（需人工修复）: {spots}"
+            f"leader_bindings fail-closed: 重复 active 绑定，拒绝启动: {spots}"
         )
     con.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS leader_bindings_active_once "
@@ -434,37 +566,31 @@ def bind_leader(
             if _normalized_payload(active) == incoming:
                 con.rollback()
                 return dict(active)
-            # payload 变化 = 变更：version+1 + migration + outbox
+            # 路由载荷变化（同 mail_name）：version+1、route_epoch+1，发
+            # binding_updated；不造 from=to migration、不产生 previous（ADR §3）
             version = int(active["binding_version"]) + 1
-            migration_id = uuid.uuid4().hex
+            route_epoch = int(active["route_epoch"]) + 1
             event_id = uuid.uuid4().hex
             con.execute(
                 "UPDATE leader_bindings SET agent_name=?, agent_kind=?, "
                 "session=?, pane_id=?, registry_selector=?, "
-                "binding_version=?, migration_id=?, updated_ts=? "
+                "binding_version=?, route_epoch=?, updated_ts=? "
                 "WHERE issuer=? AND scope_kind=? AND scope_id=? AND mail_name=?",
                 (agent_name, agent_kind, session, pane_id, registry_selector,
-                 version, migration_id, current,
+                 version, route_epoch, current,
                  issuer, scope_kind, scope_id, mail_name),
-            )
-            con.execute(
-                "INSERT INTO binding_migrations VALUES(?,?,?,?,?,?,?,?)",
-                (migration_id, issuer, scope_kind, scope_id,
-                 str(active["binding_id"]), str(active["binding_id"]),
-                 int(active["route_epoch"]), current),
             )
             con.execute(
                 "INSERT INTO control_events "
                 "(event_id, issuer, scope_kind, scope_id, event_type, "
                 "binding_version, migration_id, payload_json, created_ts, "
-                "fanned_out) VALUES(?,?,?,?,?,?,?,?,?,0)",
-                (event_id, issuer, scope_kind, scope_id, "binding_changed",
-                 version, migration_id,
+                "fanned_out) VALUES(?,?,?,?,?,?,NULL,?,?,0)",
+                (event_id, issuer, scope_kind, scope_id, "binding_updated",
+                 version,
                  _event_payload({
-                     "mail_name": mail_name, "previous_mail_name": mail_name,
-                     "issuer": issuer, "route_epoch": int(active["route_epoch"]),
+                     "mail_name": mail_name, "issuer": issuer,
+                     "route_epoch": route_epoch,
                      "registry_selector": registry_selector,
-                     "changed_fields": True,
                  }),
                  current),
             )
@@ -518,6 +644,7 @@ def bind_leader(
                 "agent_name=?, agent_kind=?, session=?, pane_id=?, "
                 "registry_selector=?, binding_version=?, route_epoch=?, "
                 "migration_id=?, degraded_reason=NULL, updated_ts=?, "
+                "drain_revision=0, "
                 "drain_remaining=0, drain_pending=0, drain_claimed=0, "
                 "drain_ack_pending=0 "
                 "WHERE issuer=? AND scope_kind=? AND scope_id=? AND mail_name=?",
@@ -529,7 +656,7 @@ def bind_leader(
             new_binding_id = uuid.uuid4().hex
             con.execute(
                 "INSERT INTO leader_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,"
-                "?,?,?,?,?,?,0,0,0,0)",
+                "?,?,?,?,?,?,0,0,0,0,0)",
                 (
                     issuer, scope_kind, scope_id, mail_name, new_binding_id,
                     previous_name,
@@ -600,6 +727,7 @@ def mark_previous_state(
     expected_binding_version: int | None = None,
     expected_migration_id: str | None = None,
     expected_state: str | None = None,
+    expected_drain_revision: int | None = None,
     remaining: int | None = None,
     pending: int | None = None,
     claimed: int | None = None,
@@ -625,6 +753,7 @@ def mark_previous_state(
         ("expected_binding_version", expected_binding_version),
         ("expected_migration_id", expected_migration_id),
         ("expected_state", expected_state),
+        ("expected_drain_revision", expected_drain_revision),
     ):
         if value is None:
             raise BindingError(f"必须提供 {name}（drain CAS 强制）")
@@ -650,42 +779,59 @@ def mark_previous_state(
         if row is None:
             con.rollback()
             return {"updated": False, "event_id": None}
-        # 强制 CAS：version + migration id + state 全匹配才更新
+        # 强制 CAS：version+migration+state+drain_revision 全匹配
+        prev_state = row["previous_state"] or "pending"
+        cur_drain_rev = int(row["drain_revision"])
         if (
             int(row["binding_version"]) != expected_binding_version
             or (row["migration_id"] or "") != expected_migration_id
+            or prev_state != expected_state
+            or cur_drain_rev != expected_drain_revision
         ):
             raise StaleVersionError(
                 "drain CAS 失败：expected "
                 f"version={expected_binding_version} "
-                f"migration={expected_migration_id!r}，当前 "
+                f"migration={expected_migration_id!r} "
+                f"state={expected_state!r} "
+                f"drain_revision={expected_drain_revision}，当前 "
                 f"version={row['binding_version']} "
-                f"migration={row['migration_id']!r}"
-            )
-        prev_state = row["previous_state"] or "pending"
-        if prev_state != expected_state:
-            raise StaleVersionError(
-                f"drain CAS 失败：expected state {expected_state!r}，"
-                f"当前 {prev_state!r}"
+                f"migration={row['migration_id']!r} "
+                f"state={prev_state!r} drain_revision={cur_drain_rev}"
             )
         if state not in _DRAIN_FORWARD.get(prev_state, frozenset()):
             raise BindingError(
                 f"非法 drain 迁移: {prev_state!r} → {state!r}"
                 f"（合法: {sorted(_DRAIN_FORWARD.get(prev_state, frozenset()))}）"
             )
-        set_clause = "previous_state=?, degraded_reason=?, updated_ts=?"
+        set_clause = (
+            "previous_state=?, degraded_reason=?, updated_ts=?, "
+            "drain_revision=drain_revision+1"
+        )
         params: list[Any] = [state, reason, current]
         for name in ("remaining", "pending", "claimed", "ack_pending"):
             if name in counters:
                 set_clause += f", drain_{name}=?"
                 params.append(counters[name])
-        params += [issuer, scope_kind, scope_id, previous_mail_name]
-        con.execute(
+        # 原子 CAS：UPDATE WHERE 含 version+migration+state+drain_revision，
+        # rowcount 检查使并发 self-loop 只一方成功（另一方 drain_revision 已变）
+        params += [
+            issuer, scope_kind, scope_id, previous_mail_name,
+            expected_binding_version, expected_migration_id, expected_state,
+            expected_drain_revision,
+        ]
+        cur = con.execute(
             f"UPDATE leader_bindings SET {set_clause} "
             "WHERE issuer=? AND scope_kind=? AND scope_id=? AND mail_name=? "
-            "AND state='previous'",
+            "AND state='previous' AND binding_version=? "
+            "AND COALESCE(migration_id,'')=? "
+            "AND COALESCE(previous_state,'pending')=? "
+            "AND drain_revision=?",
             params,
         )
+        if cur.rowcount != 1:
+            raise StaleVersionError(
+                "drain CAS 失败：并发竞态，行已被另一 worker 改动（零变更）"
+            )
         event_id = _write_control_event(
             con, issuer=issuer, scope_kind=scope_kind, scope_id=scope_id,
             event_type="drain_state_changed",
@@ -706,14 +852,27 @@ def mark_previous_state(
 
 def retire_binding(
     issuer: str, scope_kind: str, scope_id: str, mail_name: str, *,
+    expected_binding_version: int | None = None,
+    expected_migration_id: str | None = None,
+    expected_state: str | None = None,
+    expected_drain_revision: int | None = None,
     reason: str | None = None, now: float | None = None,
 ) -> dict[str, Any]:
-    """把 previous 绑定标记 retired。前置从 DB 读取证明：previous_state 必须
-    为 drained 且 drain_remaining/pending/claimed/ack_pending 全零（无调用
-    者直传旁路）。成功同一事务写 binding_retired control event。"""
+    """把 previous 绑定标记 retired。强制 binding version+migration id+state+
+    drain_revision CAS（任何缺省拒绝），UPDATE WHERE 原子 CAS + rowcount，
+    跨 a→b→a→b 旧轮 worker（持旧 migration context）零变更。前置从 DB 读证明：
+    previous_state=drained 且 drain_* 全零。成功同一事务写 binding_retired event。"""
     _validate_issuer(issuer)
     _validate_scope(scope_kind, scope_id)
     _validate_mail_name(mail_name)
+    for name, value in (
+        ("expected_binding_version", expected_binding_version),
+        ("expected_migration_id", expected_migration_id),
+        ("expected_state", expected_state),
+        ("expected_drain_revision", expected_drain_revision),
+    ):
+        if value is None:
+            raise BindingError(f"必须提供 {name}（retire CAS 强制）")
     current = time.time() if now is None else now
     con = _connect()
     try:
@@ -744,14 +903,23 @@ def retire_binding(
                 + " ".join(f"{k}={v}" for k, v in counts.items())
                 + "，必须全零"
             )
-        con.execute(
+        cur = con.execute(
             "UPDATE leader_bindings SET state='retired', "
             "previous_state='drained', "
             "degraded_reason=COALESCE(?,degraded_reason), updated_ts=? "
             "WHERE issuer=? AND scope_kind=? AND scope_id=? AND mail_name=? "
-            "AND state='previous'",
-            (reason, current, issuer, scope_kind, scope_id, mail_name),
+            "AND state='previous' AND binding_version=? "
+            "AND COALESCE(migration_id,'')=? "
+            "AND COALESCE(previous_state,'pending')=? "
+            "AND drain_revision=?",
+            (reason, current, issuer, scope_kind, scope_id, mail_name,
+             expected_binding_version, expected_migration_id,
+             expected_state, expected_drain_revision),
         )
+        if cur.rowcount != 1:
+            raise StaleVersionError(
+                "retire CAS 失败：行已被另一迁移/worker 改动（零变更）"
+            )
         event_id = _write_control_event(
             con, issuer=issuer, scope_kind=scope_kind, scope_id=scope_id,
             event_type="binding_retired",
@@ -808,28 +976,32 @@ def list_control_events(
     return [dict(r) for r in rows]
 
 
-def undelivered_control_events(limit: int = 100) -> list[dict[str, Any]]:
-    """未 fanout 的 control events（按 seq 升序；fanout 按 event_id 幂等）。"""
+def undelivered_control_events(
+    issuer: str, *, limit: int = 100,
+) -> list[dict[str, Any]]:
+    """该 issuer 未 fanout 的 control events（按 seq 升序；issuer 隔离）。"""
+    _validate_issuer(issuer)
     con = _connect()
     try:
         rows = con.execute(
-            "SELECT * FROM control_events WHERE fanned_out=0 "
+            "SELECT * FROM control_events WHERE issuer=? AND fanned_out=0 "
             "ORDER BY seq LIMIT ?",
-            (max(1, min(int(limit), 1000)),),
+            (issuer, max(1, min(int(limit), 1000))),
         ).fetchall()
     finally:
         con.close()
     return [dict(r) for r in rows]
 
 
-def mark_event_fanned_out(event_id: str) -> bool:
-    """标记事件已 fanout；重复标记幂等（已 fanout 返回 False）。"""
+def mark_event_fanned_out(issuer: str, event_id: str) -> bool:
+    """标记本 issuer 的某事件已 fanout；跨 issuer 零变更（WHERE issuer 隔离）。"""
+    _validate_issuer(issuer)
     con = _connect()
     try:
         cur = con.execute(
             "UPDATE control_events SET fanned_out=1 "
-            "WHERE event_id=? AND fanned_out=0",
-            (event_id,),
+            "WHERE issuer=? AND event_id=? AND fanned_out=0",
+            (issuer, event_id),
         )
         con.commit()
         return cur.rowcount == 1
