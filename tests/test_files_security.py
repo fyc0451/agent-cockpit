@@ -13,11 +13,13 @@ import server
 def fake_home(tmp_path, monkeypatch):
     """隔离环境:home 指向 tmp_path,DB 注册项目置空。
 
-    白名单 = _PROJECT_DIR(真实仓库,测试中不触碰)+ tmp_path 下三个子目录。
-    J1B1:custom-roots 配置文件由 runtime_paths 决定,这里把 config 根也指到
-    tmp_path,保证 file-roots.json 落在隔离 home 下。
+    白名单 = _PROJECT_DIR(真实仓库,测试中不触碰)+ resolver 生效根 +
+    agent-mail-tools 兼容根。R2-E 后白名单不再硬编码 legacy home 存储,
+    因此把 data/uploads/config 根都指到 tmp_path,保证隔离目录可浏览。
     """
     import runtime_paths
+    monkeypatch.setenv("COCKPIT_DATA_DIR", str(tmp_path / "dashboard-data"))
+    monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(tmp_path / "dashboard-uploads"))
     monkeypatch.setenv("COCKPIT_CONFIG_DIR", str(tmp_path / ".config" / "agent-cockpit"))
     runtime_paths.reset_cache()
     monkeypatch.setattr(files, "_HOME", tmp_path.resolve())

@@ -1,6 +1,6 @@
-"""runtime_paths — 唯一的运行时路径解析器(Wiki13 J1B1)。
+"""runtime_paths — 唯一的运行时路径解析器(Wiki13 J1B1,R2 修订)。
 
-设计合同(与 #1927 J1B 审计一致):
+设计合同(#1927 J1B 审计 + #1933 R2 修订):
 - 纯解析:本模块不做 mkdir/写文件/DDL;任何创建只发生在消费方明确的
   写路径(save/upload/connect/ensure_dirs)。
 - 四个根:data(~/dashboard-data)、config(~/.config/agent-cockpit)、
@@ -8,12 +8,19 @@
   与 J0 默认路径逐字节兼容;env 覆盖仅 COCKPIT_DATA_DIR/
   COCKPIT_CONFIG_DIR/COCKPIT_STATE_DIR/COCKPIT_UPLOADS_DIR 与既有的
   COCKPIT_COORDINATION_DB。
-- fail-closed:env 覆盖为相对路径/含 NUL/越界 symlink/落在应用 bundle
-  内/与其他根重叠时拒绝该覆盖并回落默认,诊断记入 diagnostics() 与
-  inspect();绝不按进程 CWD 静默解析相对路径。
-- inspect() 是纯读健康判定材料(供后续 /health/ready):现存路径
-  owner/mode/可读写错误→不 ready;首装缺席→仅当最近现存父目录可按
-  当前 uid/mode 安全创建才判 ready。
+- 原子 fail-closed(R2-A):非空显式 override 一旦非法(相对路径/NUL/
+  越界 symlink/bundle/过宽根/根重叠/store 碰撞)直接抛
+  PathResolutionError,绝不回落默认、绝不静默换库;仅 unset/全空回默认。
+  错误信息只含 reason 与 env 名,不回显完整敏感路径。
+- 全根集合校验(R2-B):最终四根无论 default/custom 整体校验——拒绝
+  /、HOME、install root 及其祖先/内部,任意双向嵌套/相等。
+- COCKPIT_COORDINATION_DB(R2-C):同样过 bundle+过宽根+全命名 store
+  碰撞门;不得等于 tasks/push 等 store 路径或任一根,外置路径可用但
+  必须安全。
+- inspect()(R2-D):纯读检查根与 store 的真实写语义——现存文件 store
+  要求父目录可写可执行(原子替换/WAL/key 创建);敏感 store 按声明
+  mode 拒绝 0644 等;wrong owner、group/world 不安全、类型错位均
+  not-ready;首装 creatable 仍纯读。
 """
 from __future__ import annotations
 
@@ -24,16 +31,17 @@ from typing import Any
 
 
 class PathResolutionError(RuntimeError):
-    """路径校验失败;reason 为机器可读分类。"""
+    """路径校验失败;reason 机器可读。detail 只含 env 名,不含敏感路径。"""
 
-    def __init__(self, reason: str, detail: str):
-        super().__init__(f"{reason}: {detail}")
+    def __init__(self, reason: str, env_name: str):
+        super().__init__(f"{reason}: {env_name}")
         self.reason = reason
-        self.detail = detail
+        self.env_name = env_name
 
 
-# 应用 bundle 根(本文件所在目录):持久路径禁止落在其中。
+# 应用 bundle 根(本文件所在目录):持久路径禁止落在其中或其祖先。
 INSTALL_ROOT = Path(__file__).resolve().parent
+_HOME_ROOT = Path.home().resolve()
 
 ENV_DATA_DIR = "COCKPIT_DATA_DIR"
 ENV_CONFIG_DIR = "COCKPIT_CONFIG_DIR"
@@ -55,48 +63,40 @@ _ROOT_DEFAULTS: dict[str, Path] = {
     "uploads": Path.home() / "dashboard-uploads",
 }
 
-# store 名 → (根, 相对路径, 类型 file|dir, writer)
-STORES: dict[str, tuple[str, str, str, str]] = {
-    "settings": ("data", "settings.json", "file", "server"),
-    "tasks": ("data", "tasks.sqlite3", "file", "server"),
-    "worktrees": ("data", "worktrees", "dir", "server"),
-    "coordination": ("data", "coordination.sqlite3", "file", "server+tools"),
-    "push": ("data", "push.sqlite3", "file", "server"),
-    "vapid": ("data", "vapid-private.pem", "file", "server"),
-    "mail_projects": ("data", "mail-projects.json", "file", "server"),
-    "team_sessions": ("data", "team-sessions.json", "file", "server"),
-    "inbox_route": ("data", "team-inbox-route.json", "file", "server"),
-    "upgrade": ("data", "upgrade", "dir", "server"),
-    "typing": ("state", "typing.json", "file", "server"),
-    "file_roots": ("config", "file-roots.json", "file", "server"),
+# store 名 → (根, 相对路径, 类型 file|dir, writer, 声明 mode 或 None)
+# 声明 mode:敏感 store 必须精确 0600,多余位(如 0644)判 not-ready。
+STORES: dict[str, tuple[str, str, str, str, int | None]] = {
+    "settings": ("data", "settings.json", "file", "server", 0o600),
+    "tasks": ("data", "tasks.sqlite3", "file", "server", None),
+    "worktrees": ("data", "worktrees", "dir", "server", None),
+    "coordination": ("data", "coordination.sqlite3", "file", "server+tools", None),
+    "push": ("data", "push.sqlite3", "file", "server", None),
+    "vapid": ("data", "vapid-private.pem", "file", "server", 0o600),
+    "mail_projects": ("data", "mail-projects.json", "file", "server", 0o600),
+    "team_sessions": ("data", "team-sessions.json", "file", "server", 0o600),
+    "inbox_route": ("data", "team-inbox-route.json", "file", "server", 0o600),
+    "upgrade": ("data", "upgrade", "dir", "server", None),
+    "typing": ("state", "typing.json", "file", "server", None),
+    "file_roots": ("config", "file-roots.json", "file", "server", 0o600),
 }
 
 _lock = threading.Lock()
-_diagnostics: list[dict[str, str]] = []
 _resolved_roots: dict[str, Path] = {}
-
-
-def _record(reason: str, detail: str) -> None:
-    _diagnostics.append({"reason": reason, "detail": detail})
 
 
 def canonicalize(raw: str, *, env_name: str) -> Path:
     """唯一 canonical 点:expanduser→绝对路径校验→resolve。任何一步失败
-    抛 PathResolutionError(机器可读 reason)。"""
+    抛 PathResolutionError(机器可读 reason,detail 只含 env 名)。"""
     if not isinstance(raw, str) or "\x00" in raw:
-        raise PathResolutionError("nul_or_invalid", f"{env_name} 含非法字符")
+        raise PathResolutionError("nul_or_invalid", env_name)
     expanded = os.path.expanduser(raw)
     if not os.path.isabs(expanded):
-        raise PathResolutionError(
-            "relative_path", f"{env_name}={raw!r} 是相对路径,拒绝按 CWD 解析",
-        )
+        raise PathResolutionError("relative_path", env_name)
     p = Path(expanded)
     resolved = p.resolve(strict=False)
     if resolved != Path(os.path.normpath(expanded)):
         # 越界 symlink:词法路径与真实路径不一致(含链接重定向)
-        raise PathResolutionError(
-            "symlink_escape", f"{env_name}={raw!r} 经 symlink 重定向",
-        )
+        raise PathResolutionError("symlink_escape", env_name)
     return resolved
 
 
@@ -108,41 +108,45 @@ def _is_within(child: Path, parent: Path) -> bool:
         return False
 
 
-def _resolve_root(name: str) -> Path:
-    default = _ROOT_DEFAULTS[name].resolve(strict=False)
-    env_name = _ROOT_ENV[name]
-    raw = os.environ.get(env_name, "").strip()
-    if not raw:
-        return default
-    try:
-        p = canonicalize(raw, env_name=env_name)
-    except PathResolutionError as exc:
-        _record(exc.reason, f"{env_name}: {exc.detail};回落默认 {default}")
-        return default
-    if _is_within(p, INSTALL_ROOT) or p == INSTALL_ROOT:
-        _record(
-            "bundle_path",
-            f"{env_name}={raw!r} 落在应用 bundle 内,拒绝;回落默认 {default}",
-        )
-        return default
-    for other in _ROOTS:
-        if other == name or other not in _resolved_roots:
-            continue
-        op = _resolved_roots[other]
-        if p == op or _is_within(p, op) or _is_within(op, p):
-            _record(
-                "store_overlap",
-                f"{env_name}={raw!r} 与根 {other}({op}) 重叠,拒绝;回落默认 {default}",
-            )
-            return default
-    return p
+def _check_broad(p: Path, env_name: str) -> None:
+    """过宽根/危险位置拒绝(R2-B):/、HOME、install root 及其祖先/内部。"""
+    if p == Path("/") or p == _HOME_ROOT:
+        raise PathResolutionError("broad_root", env_name)
+    if p == INSTALL_ROOT or _is_within(p, INSTALL_ROOT):
+        raise PathResolutionError("bundle_path", env_name)
+    if _is_within(INSTALL_ROOT, p):
+        # install root 的祖先:bundle 整体落在持久根内,升级即数据混写
+        raise PathResolutionError("broad_root", env_name)
+
+
+def _resolve_roots_locked() -> dict[str, Path]:
+    """一次性解析并整体校验四根;任何非法直接抛错(不部分缓存)。"""
+    resolved: dict[str, Path] = {}
+    for name in _ROOTS:
+        env_name = _ROOT_ENV[name]
+        default = _ROOT_DEFAULTS[name].resolve(strict=False)
+        raw = os.environ.get(env_name, "").strip()
+        if raw:
+            p = canonicalize(raw, env_name=env_name)  # 非法即抛
+            _check_broad(p, env_name)
+        else:
+            p = default
+            _check_broad(p, env_name)  # default 同样过宽根门
+        resolved[name] = p
+    for i, a in enumerate(_ROOTS):
+        for b in _ROOTS[i + 1:]:
+            pa, pb = resolved[a], resolved[b]
+            if pa == pb or _is_within(pa, pb) or _is_within(pb, pa):
+                raise PathResolutionError(
+                    "root_nested", f"{_ROOT_ENV[a]}|{_ROOT_ENV[b]}",
+                )
+    return resolved
 
 
 def _roots() -> dict[str, Path]:
     with _lock:
         if not _resolved_roots:
-            for name in _ROOTS:  # 固定顺序:data<config<state<uploads
-                _resolved_roots[name] = _resolve_root(name)
+            _resolved_roots.update(_resolve_roots_locked())
         return dict(_resolved_roots)
 
 
@@ -150,7 +154,6 @@ def reset_cache() -> None:
     """测试/env 变更后重建解析缓存。"""
     with _lock:
         _resolved_roots.clear()
-        _diagnostics.clear()
 
 
 def data_root() -> Path:
@@ -170,27 +173,35 @@ def uploads_root() -> Path:
 
 
 def store(name: str) -> Path:
-    """命名 store 的 canonical 路径。coordination 保留既有
-    COCKPIT_COORDINATION_DB 覆盖(同样过 fail-closed 校验)。"""
+    """命名 store 的 canonical 路径。coordination 的 COCKPIT_COORDINATION_DB
+    覆盖过与根同级的 fail-closed 门(R2-C):bundle/过宽根/全命名 store
+    碰撞;不得等于任一 store 路径或根。"""
     if name not in STORES:
         raise KeyError(f"未知 store: {name}")
     if name == "coordination":
         raw = os.environ.get(ENV_COORDINATION_DB, "").strip()
         if raw:
-            try:
-                return canonicalize(raw, env_name=ENV_COORDINATION_DB)
-            except PathResolutionError as exc:
-                _record(
-                    exc.reason,
-                    f"{ENV_COORDINATION_DB}: {exc.detail};回落默认",
-                )
-    root_name, rel, _, _ = STORES[name]
+            p = canonicalize(raw, env_name=ENV_COORDINATION_DB)  # 非法即抛
+            _check_broad(p, ENV_COORDINATION_DB)
+            roots = _roots()
+            if p in roots.values():
+                raise PathResolutionError("store_collision", ENV_COORDINATION_DB)
+            for other in STORES:
+                if other == "coordination":
+                    continue
+                root_name, rel = STORES[other][0], STORES[other][1]
+                if p == roots[root_name] / rel:
+                    raise PathResolutionError(
+                        "store_collision", ENV_COORDINATION_DB,
+                    )
+            return p
+    root_name, rel = STORES[name][0], STORES[name][1]
     return _roots()[root_name] / rel
 
 
 def diagnostics() -> list[dict[str, str]]:
-    with _lock:
-        return list(_diagnostics)
+    """R2 起 override 非法直接抛错,不再静默回落,故无累积诊断;保留 API。"""
+    return []
 
 
 def _nearest_existing_ancestor(p: Path) -> Path:
@@ -201,37 +212,61 @@ def _nearest_existing_ancestor(p: Path) -> Path:
     return Path("/").resolve()
 
 
-def _path_health(p: Path, kind: str) -> tuple[bool, str]:
-    """纯读判定:现存路径 owner/mode/可读写;缺席路径看最近现存父目录
-    是否可按当前 uid 安全创建。"""
+def _dir_safe(st: os.stat_result, uid: int) -> str | None:
+    """目录写语义检查:owner + group/world 不安全。返回 reason 或 None。"""
+    if st.st_uid != uid and uid != 0:
+        return "wrong_owner"
+    if st.st_mode & 0o022:
+        return "insecure_mode"
+    return None
+
+
+def _path_health(p: Path, kind: str, declared_mode: int | None) -> tuple[bool, str]:
+    """纯读判定(R2-D):现存路径检查真实写语义——原子替换/WAL/key 创建
+    要求父目录可写可执行;敏感 store 按声明 mode 拒绝多余位;缺席路径
+    看最近现存父目录是否可按当前 uid 安全创建。"""
     uid = os.getuid()
     if p.exists():
         try:
             st = p.stat()
-        except OSError as exc:
-            return False, f"stat_failed:{exc}"
+        except OSError:
+            return False, "stat_failed"
         if kind == "file" and p.is_dir():
             return False, "type_mismatch_dir_not_file"
         if kind == "dir" and p.is_file():
             return False, "type_mismatch_file_not_dir"
         if st.st_uid != uid and uid != 0:
             return False, "wrong_owner"
-        if st.st_mode & 0o002:
-            return False, "world_writable"
-        if not os.access(p, os.R_OK | os.W_OK):
+        if st.st_mode & 0o022:
+            return False, "insecure_mode"
+        if declared_mode is not None and (st.st_mode & 0o777) & ~declared_mode:
+            return False, "insecure_mode"
+        need = os.R_OK | os.W_OK | (os.X_OK if kind == "dir" else 0)
+        if not os.access(p, need):
             return False, "not_readable_writable"
+        if kind == "file":
+            # 原子替换/WAL/key 创建都要求父目录可写可执行
+            parent = p.parent
+            try:
+                pst = parent.stat()
+            except OSError:
+                return False, "parent_stat_failed"
+            reason = _dir_safe(pst, uid)
+            if reason:
+                return False, f"parent_{reason}"
+            if not os.access(parent, os.W_OK | os.X_OK):
+                return False, "parent_not_writable"
         return True, "ok"
     ancestor = _nearest_existing_ancestor(p)
     try:
         st = ancestor.stat()
-    except OSError as exc:
-        return False, f"parent_stat_failed:{exc}"
+    except OSError:
+        return False, "parent_stat_failed"
     if not ancestor.is_dir():
         return False, "parent_not_dir"
-    if st.st_uid != uid and uid != 0:
-        return False, "parent_wrong_owner"
-    if st.st_mode & 0o002:
-        return False, "parent_world_writable"
+    reason = _dir_safe(st, uid)
+    if reason:
+        return False, f"parent_{reason}"
     if not os.access(ancestor, os.W_OK | os.X_OK):
         return False, "parent_not_writable"
     return True, "creatable"
@@ -241,9 +276,9 @@ def inspect() -> dict[str, Any]:
     """纯读诊断快照(供后续 /health/ready):只 stat/access,不创建。"""
     roots = _roots()
     stores: list[dict[str, Any]] = []
-    for name, (root_name, rel, kind, writer) in STORES.items():
+    for name, (root_name, rel, kind, writer, declared_mode) in STORES.items():
         p = store(name)
-        ready, reason = _path_health(p, kind)
+        ready, reason = _path_health(p, kind, declared_mode)
         stores.append({
             "name": name, "path": str(p), "root": root_name, "rel": rel,
             "kind": kind, "writer": writer, "exists": p.exists(),

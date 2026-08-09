@@ -7,8 +7,8 @@
   - 本项目(dashboard)目录
   - agent-mail DB 已注册且实际存在的项目 human_key
   - 用户通过文件页显式添加的自定义目录
-  - ~/dashboard-uploads/(上传文件区)
-  - ~/dashboard-data/
+  - runtime_paths 当前生效的 uploads/data 根(默认 ~/dashboard-uploads、
+    ~/dashboard-data;env 自定义 profile 时跟随覆盖值)
   - ~/agent-mail-tools/
 路径必须解析后落在某个白名单根下,否则拒绝;空路径直接拒绝。
 """
@@ -74,13 +74,13 @@ def _custom_roots_file() -> Path:
 
 
 def _system_roots() -> list[Path]:
+    # R2-E:白名单只纳入 resolver 当前生效的 data/uploads 根,不再硬编码
+    # legacy ~/dashboard-data 与 ~/dashboard-uploads,自定义 profile 时不暴露默认 home 存储。
     roots = [_PROJECT_DIR]
     for p in (
-        _HOME / "dashboard-uploads",
-        _HOME / "dashboard-data",
-        _HOME / "agent-mail-tools",
         runtime_paths.uploads_root(),
         runtime_paths.data_root(),
+        _HOME / "agent-mail-tools",
     ):
         rp = p.resolve(strict=False)
         if rp not in roots:

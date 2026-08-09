@@ -136,7 +136,12 @@ def _migrate_db(con: sqlite3.Connection) -> None:
     cols = {r[1] for r in con.execute("PRAGMA table_info(tasks)").fetchall()}
     for col in ("source_workdir", "base_sha", "run_workdir", "preview_hash"):
         if col not in cols:
-            con.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+            try:
+                con.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError as exc:
+                # 并发首用时另一连接可能已补列;duplicate column 视为已迁移
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
 
 # J1B1:import 期不再调用 _init_db();由 _db() 首次使用时惰性初始化

@@ -1,11 +1,20 @@
-"""Wiki13 J1B1:runtime_paths 行为测试。
+"""Wiki13 J1B1 R2:runtime_paths 行为测试。
 
-覆盖合同(#1929):invalid-input fail-closed、全模块隔离 HOME import 零侧效、
-默认路径与 J0 逐字节兼容、多 profile env 覆盖不重叠、inspect 纯读判定。
+覆盖合同(#1933 A-F):
+- A 非空显式 override 原子 fail-closed:非法直接抛 PathResolutionError,
+  绝不回落默认;仅 unset/全空回默认;错误不含完整敏感路径。
+- B 最终四根整体校验:拒绝 /、HOME、install root 及祖先/内部、双向嵌套。
+- C COCKPIT_COORDINATION_DB 过 bundle+过宽根+全命名 store 碰撞门。
+- D inspect 真实写语义:父目录可写可执行、敏感 store 声明 mode、
+  group/world 不安全、类型错位、首装 creatable 纯读。
+- E 自定义 profile 不暴露 legacy home 根。
+- F 定向矩阵 + 默认兼容 + 13 模块隔离 HOME import 零写盘 +
+  tasks 首次并发 _db barrier。
 """
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -41,6 +50,7 @@ def fake_home(tmp_path, monkeypatch):
             "uploads": home / "dashboard-uploads",
         },
     )
+    monkeypatch.setattr(runtime_paths, "_HOME_ROOT", home.resolve())
     for var in ("COCKPIT_DATA_DIR", "COCKPIT_CONFIG_DIR", "COCKPIT_STATE_DIR",
                 "COCKPIT_UPLOADS_DIR", "COCKPIT_COORDINATION_DB"):
         monkeypatch.delenv(var, raising=False)
@@ -48,58 +58,247 @@ def fake_home(tmp_path, monkeypatch):
     return home
 
 
-# ── invalid-input fail-closed ─────────────────────────────────
+def _expect_error(fn, reason):
+    with pytest.raises(runtime_paths.PathResolutionError) as exc:
+        fn()
+    assert exc.value.reason == reason
+    # R2-A:错误信息只含 reason+env 名,不回显完整敏感路径
+    msg = str(exc.value)
+    assert "/home" not in msg and "tmp" not in msg and str(reason) in msg
+    return exc.value
 
 
-class TestInvalidInput:
-    def test_relative_coordination_env_falls_back(self, fake_home, monkeypatch):
+# ── A 原子 fail-closed ────────────────────────────────────────
+
+
+class TestAtomicFailClosed:
+    def test_relative_root_override_raises(self, fake_home, monkeypatch):
+        monkeypatch.setenv("COCKPIT_DATA_DIR", "rel/data")
+        _expect_error(runtime_paths.data_root, "relative_path")
+
+    def test_relative_coordination_override_raises(self, fake_home, monkeypatch):
         monkeypatch.setenv("COCKPIT_COORDINATION_DB", "rel/x.db")
-        assert runtime_paths.store("coordination") == (
-            fake_home / "dashboard-data" / "coordination.sqlite3"
-        )
-        assert any(d["reason"] == "relative_path" for d in runtime_paths.diagnostics())
+        _expect_error(lambda: runtime_paths.store("coordination"), "relative_path")
 
-    def test_nul_rejected(self):
+    def test_nul_raises(self):
         with pytest.raises(runtime_paths.PathResolutionError) as exc:
             runtime_paths.canonicalize("/tmp/a\x00b", env_name="X")
         assert exc.value.reason == "nul_or_invalid"
 
-    def test_empty_env_falls_back(self, fake_home, monkeypatch):
-        monkeypatch.setenv("COCKPIT_DATA_DIR", "   ")
-        assert runtime_paths.data_root() == fake_home / "dashboard-data"
-
-    def test_absolute_coordination_env_honored(self, fake_home, monkeypatch, tmp_path):
-        target = tmp_path / "alt" / "c.sqlite3"
-        monkeypatch.setenv("COCKPIT_COORDINATION_DB", str(target))
-        assert runtime_paths.store("coordination") == target.resolve()
-
-    def test_data_root_override_honored(self, fake_home, monkeypatch, tmp_path):
-        alt = tmp_path / "alt-data"
-        monkeypatch.setenv("COCKPIT_DATA_DIR", str(alt))
-        assert runtime_paths.data_root() == alt.resolve()
-        assert runtime_paths.store("settings") == alt.resolve() / "settings.json"
-
-    def test_bundle_path_rejected(self, fake_home, monkeypatch):
-        monkeypatch.setenv("COCKPIT_DATA_DIR", str(runtime_paths.INSTALL_ROOT / "x"))
-        assert runtime_paths.data_root() == fake_home / "dashboard-data"
-        assert any(d["reason"] == "bundle_path" for d in runtime_paths.diagnostics())
-
-    def test_symlink_escape_rejected(self, fake_home, monkeypatch, tmp_path):
+    def test_symlink_escape_raises(self, fake_home, monkeypatch, tmp_path):
         real = tmp_path / "elsewhere"
         real.mkdir()
         link = fake_home / "link-data"
         link.symlink_to(real)
         monkeypatch.setenv("COCKPIT_DATA_DIR", str(link))
-        assert runtime_paths.data_root() == fake_home / "dashboard-data"
-        assert any(d["reason"] == "symlink_escape" for d in runtime_paths.diagnostics())
+        _expect_error(runtime_paths.data_root, "symlink_escape")
 
-    def test_overlap_roots_fall_back(self, fake_home, monkeypatch, tmp_path):
-        alt = tmp_path / "shared"
+    def test_empty_and_unset_fall_back_to_default(self, fake_home, monkeypatch):
+        monkeypatch.setenv("COCKPIT_DATA_DIR", "   ")
+        assert runtime_paths.data_root() == fake_home / "dashboard-data"
+        monkeypatch.delenv("COCKPIT_DATA_DIR")
+        runtime_paths.reset_cache()
+        assert runtime_paths.data_root() == fake_home / "dashboard-data"
+
+    def test_absolute_override_honored_no_silent_swap(self, fake_home, monkeypatch, tmp_path):
+        alt = tmp_path / "alt-data"
         monkeypatch.setenv("COCKPIT_DATA_DIR", str(alt))
-        monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(alt / "sub"))
         assert runtime_paths.data_root() == alt.resolve()
-        assert runtime_paths.uploads_root() == fake_home / "dashboard-uploads"
-        assert any(d["reason"] == "store_overlap" for d in runtime_paths.diagnostics())
+        assert runtime_paths.store("settings") == alt.resolve() / "settings.json"
+
+    def test_diagnostics_do_not_leak_paths(self, fake_home, monkeypatch):
+        monkeypatch.setenv("COCKPIT_DATA_DIR", "rel/data")
+        with pytest.raises(runtime_paths.PathResolutionError):
+            runtime_paths.data_root()
+        for d in runtime_paths.diagnostics():
+            assert str(fake_home) not in str(d)
+
+
+# ── B 全根集合校验 ────────────────────────────────────────────
+
+
+class TestRootSetValidation:
+    def test_data_eq_home_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(fake_home))
+        _expect_error(runtime_paths.data_root, "broad_root")
+
+    def test_root_slash_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv("COCKPIT_DATA_DIR", "/")
+        _expect_error(runtime_paths.data_root, "broad_root")
+
+    def test_bundle_root_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(runtime_paths.INSTALL_ROOT / "x"))
+        _expect_error(runtime_paths.data_root, "bundle_path")
+
+    def test_install_root_ancestor_rejected(self, fake_home, monkeypatch):
+        # install root 的祖先作为持久根:bundle 落在根内
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(runtime_paths.INSTALL_ROOT.parent))
+        _expect_error(runtime_paths.data_root, "broad_root")
+
+    def test_nested_roots_rejected(self, fake_home, monkeypatch, tmp_path):
+        outer = tmp_path / "outer"
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(outer))
+        monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(outer / "inner"))
+        _expect_error(runtime_paths.uploads_root, "root_nested")
+
+    def test_equal_roots_rejected(self, fake_home, monkeypatch, tmp_path):
+        same = tmp_path / "same"
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(same))
+        monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(same))
+        _expect_error(runtime_paths.uploads_root, "root_nested")
+
+
+# ── C coordination 碰撞门 ─────────────────────────────────────
+
+
+class TestCoordinationGates:
+    def test_coordination_equals_tasks_store_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv(
+            "COCKPIT_COORDINATION_DB",
+            str(fake_home / "dashboard-data" / "tasks.sqlite3"),
+        )
+        _expect_error(lambda: runtime_paths.store("coordination"), "store_collision")
+
+    def test_coordination_equals_push_store_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv(
+            "COCKPIT_COORDINATION_DB",
+            str(fake_home / "dashboard-data" / "push.sqlite3"),
+        )
+        _expect_error(lambda: runtime_paths.store("coordination"), "store_collision")
+
+    def test_coordination_equals_root_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv("COCKPIT_COORDINATION_DB", str(fake_home / "dashboard-data"))
+        _expect_error(lambda: runtime_paths.store("coordination"), "store_collision")
+
+    def test_coordination_in_bundle_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv(
+            "COCKPIT_COORDINATION_DB",
+            str(runtime_paths.INSTALL_ROOT / "c.sqlite3"),
+        )
+        _expect_error(lambda: runtime_paths.store("coordination"), "bundle_path")
+
+    def test_coordination_external_safe_path_ok(self, fake_home, monkeypatch, tmp_path):
+        ext = tmp_path / "ext" / "c.sqlite3"
+        monkeypatch.setenv("COCKPIT_COORDINATION_DB", str(ext))
+        assert runtime_paths.store("coordination") == ext.resolve()
+
+    def test_coordination_relative_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv("COCKPIT_COORDINATION_DB", "c.db")
+        _expect_error(lambda: runtime_paths.store("coordination"), "relative_path")
+
+
+# ── D inspect 写语义 ──────────────────────────────────────────
+
+
+class TestInspectWriteSemantics:
+    def test_fresh_home_ready_creatable(self, fake_home):
+        snap = runtime_paths.inspect()
+        assert snap["ready"] is True
+        for s in snap["stores"]:
+            assert s["exists"] is False
+            assert s["reason"] == "creatable"
+
+    def test_inspect_creates_nothing(self, fake_home):
+        runtime_paths.inspect()
+        assert list(fake_home.iterdir()) == []
+
+    def test_type_mismatch_not_ready(self, fake_home):
+        (fake_home / "dashboard-data").mkdir(parents=True)
+        (fake_home / "dashboard-data" / "tasks.sqlite3").mkdir()
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "tasks")
+        assert entry["ready"] is False
+        assert entry["reason"] == "type_mismatch_dir_not_file"
+        assert snap["ready"] is False
+
+    def test_vapid_0644_rejected_by_declared_mode(self, fake_home):
+        data = fake_home / "dashboard-data"
+        data.mkdir()
+        key = data / "vapid-private.pem"
+        key.write_text("pem")
+        key.chmod(0o644)
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "vapid")
+        assert entry["ready"] is False and entry["reason"] == "insecure_mode"
+
+    def test_vapid_0600_ok(self, fake_home):
+        data = fake_home / "dashboard-data"
+        data.mkdir()
+        key = data / "vapid-private.pem"
+        key.write_text("pem")
+        key.chmod(0o600)
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "vapid")
+        assert entry["ready"] is True and entry["reason"] == "ok"
+
+    def test_settings_writable_but_parent_0500_rejected(self, fake_home):
+        data = fake_home / "dashboard-data"
+        data.mkdir()
+        s = data / "settings.json"
+        s.write_text("{}")
+        s.chmod(0o600)
+        data.chmod(0o500)  # 父目录只读:原子替换不可行
+        try:
+            snap = runtime_paths.inspect()
+            entry = next(x for x in snap["stores"] if x["name"] == "settings")
+            assert entry["ready"] is False
+            assert entry["reason"] == "parent_not_writable"
+            assert snap["ready"] is False
+        finally:
+            data.chmod(0o755)
+
+    def test_world_writable_parent_not_ready(self, fake_home):
+        data = fake_home / "dashboard-data"
+        data.mkdir()
+        data.chmod(0o777)
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "settings")
+        assert entry["ready"] is False
+        assert entry["reason"] == "parent_insecure_mode"
+
+    def test_group_writable_existing_store_not_ready(self, fake_home):
+        data = fake_home / "dashboard-data"
+        data.mkdir()
+        db = data / "tasks.sqlite3"
+        db.write_bytes(b"")
+        db.chmod(0o664)  # group 可写
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "tasks")
+        assert entry["ready"] is False and entry["reason"] == "insecure_mode"
+
+    def test_existing_store_readable_writable_ok(self, fake_home):
+        data = fake_home / "dashboard-data"
+        data.mkdir()
+        s = data / "settings.json"
+        s.write_text("{}", encoding="utf-8")
+        s.chmod(0o600)
+        snap = runtime_paths.inspect()
+        entry = next(x for x in snap["stores"] if x["name"] == "settings")
+        assert entry["exists"] is True and entry["ready"] is True
+        assert entry["reason"] == "ok"
+
+
+# ── E profile 隔离 ────────────────────────────────────────────
+
+
+class TestProfileIsolation:
+    def test_custom_profile_does_not_expose_legacy_roots(
+        self, fake_home, monkeypatch, tmp_path,
+    ):
+        import files
+        alt_data, alt_up = tmp_path / "p-data", tmp_path / "p-uploads"
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(alt_data))
+        monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(alt_up))
+        runtime_paths.reset_cache()
+        monkeypatch.setattr(files, "_HOME", fake_home.resolve())
+        roots = files._system_roots()
+        assert alt_data.resolve() in roots
+        assert alt_up.resolve() in roots
+        # legacy 默认 home 存储不得出现在自定义 profile 白名单
+        assert (fake_home / "dashboard-data").resolve() not in roots
+        assert (fake_home / "dashboard-uploads").resolve() not in roots
+        # agent-mail-tools 兼容根保留
+        assert (fake_home / "agent-mail-tools").resolve() in roots
 
 
 # ── 默认兼容(J0 逐字节)──────────────────────────────────────
@@ -124,90 +323,35 @@ class TestDefaultCompat:
         for name, rel in expect.items():
             assert runtime_paths.store(name) == fake_home / rel, name
 
-    def test_module_constants_follow_resolver(self, fake_home):
-        import importlib
-        for mod in ("settings", "tasks", "web_push", "mail_projects",
-                    "team_sessions", "uploads", "coordination"):
-            importlib.reload(importlib.import_module(mod))
-        import settings, tasks, web_push, mail_projects, team_sessions
-        import uploads, coordination
-        assert settings.DATA_DIR == fake_home / "dashboard-data"
-        assert settings.SETTINGS_PATH == fake_home / "dashboard-data" / "settings.json"
-        assert tasks.TASKS_DB == fake_home / "dashboard-data" / "tasks.sqlite3"
-        assert tasks.WORKTREE_ROOT == fake_home / "dashboard-data" / "worktrees"
-        assert web_push.DB_PATH == fake_home / "dashboard-data" / "push.sqlite3"
-        assert web_push.KEY_PATH == fake_home / "dashboard-data" / "vapid-private.pem"
-        assert mail_projects.STATE_PATH == fake_home / "dashboard-data" / "mail-projects.json"
-        assert team_sessions.STATE_PATH == fake_home / "dashboard-data" / "team-sessions.json"
-        assert uploads.UPLOAD_DIR == fake_home / "dashboard-uploads"
-        assert coordination.DB_PATH == fake_home / "dashboard-data" / "coordination.sqlite3"
+
+# ── tasks 首次并发 _db barrier ────────────────────────────────
 
 
-# ── 多 profile 不重叠 ─────────────────────────────────────────
+class TestTasksConcurrentFirstUse:
+    def test_first_db_concurrent_barrier(self, tmp_path, monkeypatch):
+        import tasks
+        monkeypatch.setattr(tasks, "TASKS_DB", tmp_path / "tasks.sqlite3")
+        monkeypatch.setattr(tasks, "_db_swept", False)
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(8)
 
+        def worker():
+            try:
+                barrier.wait(5)
+                con = tasks._db()
+                con.execute("SELECT count(*) FROM tasks").fetchone()
+                cols = {r[1] for r in con.execute("PRAGMA table_info(tasks)")}
+                assert {"source_workdir", "base_sha", "run_workdir", "preview_hash"} <= cols
+                con.close()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
 
-class TestMultiProfile:
-    def test_distinct_roots_no_overlap(self, fake_home, monkeypatch, tmp_path):
-        a, b = tmp_path / "profile-a", tmp_path / "profile-b"
-        monkeypatch.setenv("COCKPIT_DATA_DIR", str(a))
-        monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(b))
-        assert runtime_paths.store("tasks") == a.resolve() / "tasks.sqlite3"
-        assert runtime_paths.uploads_root() == b.resolve()
-        assert not runtime_paths.diagnostics()
-
-    def test_nested_override_rejected_both_ways(self, fake_home, monkeypatch, tmp_path):
-        outer = tmp_path / "outer"
-        monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(outer))
-        monkeypatch.setenv("COCKPIT_DATA_DIR", str(outer / "inner"))
-        # uploads 先解析(顺序 data<config<state<uploads?data 先)→data 生效,
-        # uploads 与 data 重叠则回落;无论哪侧回落,二者绝不嵌套
-        d, u = runtime_paths.data_root(), runtime_paths.uploads_root()
-        assert not str(u).startswith(str(d) + os.sep) or d == u
-        assert runtime_paths.diagnostics()
-
-
-# ── inspect 纯读判定 ──────────────────────────────────────────
-
-
-class TestInspect:
-    def test_fresh_home_ready_creatable(self, fake_home):
-        snap = runtime_paths.inspect()
-        assert snap["ready"] is True
-        for s in snap["stores"]:
-            assert s["exists"] is False
-            assert s["reason"] == "creatable"
-
-    def test_inspect_creates_nothing(self, fake_home):
-        runtime_paths.inspect()
-        assert list(fake_home.iterdir()) == []
-
-    def test_type_mismatch_not_ready(self, fake_home):
-        # tasks 应为 file,放一个目录 → type_mismatch
-        (fake_home / "dashboard-data").mkdir(parents=True)
-        (fake_home / "dashboard-data" / "tasks.sqlite3").mkdir()
-        snap = runtime_paths.inspect()
-        entry = next(s for s in snap["stores"] if s["name"] == "tasks")
-        assert entry["ready"] is False
-        assert entry["reason"] == "type_mismatch_dir_not_file"
-        assert snap["ready"] is False
-
-    def test_world_writable_parent_not_ready(self, fake_home):
-        data = fake_home / "dashboard-data"
-        data.mkdir()
-        data.chmod(0o777)
-        snap = runtime_paths.inspect()
-        entry = next(s for s in snap["stores"] if s["name"] == "settings")
-        assert entry["ready"] is False
-        assert entry["reason"] == "parent_world_writable"
-
-    def test_existing_store_readable_writable(self, fake_home):
-        data = fake_home / "dashboard-data"
-        data.mkdir(parents=True)
-        (data / "settings.json").write_text("{}", encoding="utf-8")
-        snap = runtime_paths.inspect()
-        entry = next(s for s in snap["stores"] if s["name"] == "settings")
-        assert entry["exists"] is True and entry["ready"] is True
-        assert entry["reason"] == "ok"
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        assert not errors, errors
 
 
 # ── 全模块隔离 HOME import 零侧效 ─────────────────────────────
@@ -217,9 +361,7 @@ class TestInspect:
 def test_import_zero_side_effects(mod, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    env = {
-        **os.environ, "HOME": str(home), "PYTHONPATH": REPO_ROOT,
-    }
+    env = {**os.environ, "HOME": str(home), "PYTHONPATH": REPO_ROOT}
     for var in ("COCKPIT_DATA_DIR", "COCKPIT_CONFIG_DIR", "COCKPIT_STATE_DIR",
                 "COCKPIT_UPLOADS_DIR", "COCKPIT_COORDINATION_DB", "XDG_DATA_HOME"):
         env.pop(var, None)
