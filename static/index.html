@@ -3820,15 +3820,6 @@ function termMount(id){
     if(prewarmed){el.appendChild(xterm.element);prewarmed.host.remove();inst.webgl=prewarmed.webgl}
     else{xterm.open(el);inst.webgl=enableTermWebgl(xterm)}
     enableTermTouchScroll(el,xterm);
-    // H5/触屏:点击或滚动终端区域不应呼出软键盘(只有 termInput 输入框才该呼)。
-    // xterm 用隐藏 textarea 接收键盘,默认点击终端会让它获焦→弹键盘。
-    // 触屏设备上把该 textarea 设 readonly,阻止软键盘呼出;用户经 termInput 输入。
-    if(isTouchTerminal()){
-      const lockTextarea=()=>{const ta=el.querySelector('.xterm-helper-textarea');if(ta)ta.readOnly=true};
-      lockTextarea();
-      // xterm 可能在重绘后重建 textarea,持续锁定
-      const ro=new MutationObserver(lockTextarea);ro.observe(el,{childList:true,subtree:true});
-    }
     xterm.parser.registerOscHandler(52,handleOsc52);enableTermHistoryPaging(el,id,xterm);safeFitOf(fit,xterm);
     if(typeof ResizeObserver!=='undefined'){
       const ro=new ResizeObserver(()=>{const current=TERM_INSTANCES[id];if(current&&!current.closing)safeFitOf(current.fit,current.xterm)});
