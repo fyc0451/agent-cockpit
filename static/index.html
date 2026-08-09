@@ -340,6 +340,15 @@ header .spacer{flex:1}
 .term-keys.expanded .term-key-extra{display:block}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
 #termContainer{min-height:0;position:relative}
+/* 终端真全屏:Fullscreen API 隐藏浏览器地址栏/书签栏,只剩终端画面 */
+#termStage:fullscreen{background:var(--term-bg)}
+#termStage:fullscreen #termContainer{padding:0!important}
+#termFsExit{display:none;position:absolute;top:calc(10px + var(--safe-top));right:calc(10px + var(--safe-right));z-index:20;width:auto;padding:5px 10px;font-size:12px;opacity:.75}
+#termFsExit:hover{opacity:1}
+#termStage:fullscreen #termFsExit{display:block}
+/* iOS Safari 不支持元素级全屏的回退:固定铺满可视区 */
+#termStage.term-fs-fixed{position:fixed;inset:0;z-index:80;background:var(--term-bg)}
+#termStage.term-fs-fixed #termFsExit{display:block}
 .term-loading{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--term-bg);color:var(--term-fg);font-size:13px;opacity:1;transition:opacity .16s ease;pointer-events:none;user-select:none}
 .term-loading.done{opacity:0;pointer-events:none}
 .term-loading-spinner{width:16px;height:16px;border:2px solid color-mix(in srgb,var(--term-fg) 28%,transparent);border-top-color:var(--term-fg);border-radius:50%;animation:term-loading-spin .8s linear infinite}
@@ -697,6 +706,7 @@ header .spacer{flex:1}
       <label class="sm" style="cursor:pointer;display:flex;align-items:center;gap:3px" title="上传截图/文件,插入@路径到终端"><span data-i18n="term.upload">📎上传</span><input type="file" id="termTabUpload" multiple style="display:none;width:0" onchange="termTabUploadFiles(this)"></label>
       <button class="sm" onclick="termPickCollab()" title="联系本地 Agent 或向当前团队群组发送求助" data-i18n="term.collab">@协作</button>
       <button class="sm" onclick="termAttachHerdr()" title="在终端里 attach 到 herdr session(多 pane 分屏,同时看 codex+kimi)">🖥 herdr</button>
+      <button class="sm" onclick="toggleTermFullscreen()" title="真全屏:隐藏浏览器地址栏/书签栏,只看终端内容(Esc 或右下按钮退出)">⛶ 全屏</button>
       <button class="sm" onclick="showLayoutModal()" title="一键布局:分屏/拆开/组合 pane" data-i18n="term.layout">🧱 布局</button>
       <button class="sm" onclick="enterHerdrFlow()" title="退出 TUI，返回可滚屏/复制的 pane 流视图" data-i18n="term.back">📜 返回流视图</button>
       <button class="sm" onclick="syncServiceClipboard()" title="把刚才在 Herdr TUI 里复制的文字放进系统剪贴板" data-i18n="term.copymac">📋 复制到剪贴板</button>
@@ -741,7 +751,8 @@ header .spacer{flex:1}
       <button class="term-key-extra" onclick="termKey('F12')">F12</button>
     </div>
     <div id="termMain" style="flex:1;display:flex;min-height:0;overflow:hidden">
-      <div style="flex:1;display:flex;flex-direction:column;min-width:0;min-height:0">
+      <div id="termStage" style="flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;position:relative">
+      <button id="termFsExit" onclick="exitTermFullscreen()" title="退出全屏">✕ 退出全屏</button>
       <div id="termContainer" style="flex:1;min-width:0;background:var(--term-bg);padding:6px 14px 6px 6px;overflow:hidden"></div>
       <div id="termInlineInput" class="term-inline-input" style="display:none">
         <input id="termTextInput" placeholder="输入发给 agent 的文字…" enterkeyhint="send" autocomplete="off" onkeydown="if(event.key==='Enter'){termSendInlineInput()}">
@@ -3420,8 +3431,7 @@ async function hfToggle(paneId){
   // 不再进原生全屏:Android Chrome 每次都会弹「退出全屏模式」系统提示,
   // 视觉沉浸模式(hf-immersive)已占满可视区,体验一致且无打扰。
 }
-function hfExitFullscreen(exitNative=true){
-  const body=document.getElementById('hfBody');
+function hfExitFullscreen(exitNative=true){  const body=document.getElementById('hfBody');
   const app=document.querySelector('.app');
   const wasFull=!!(body?.classList.contains('hf-full')||app?.classList.contains('hf-immersive'));
   if(body){
@@ -3431,6 +3441,25 @@ function hfExitFullscreen(exitNative=true){
   if(app)app.classList.remove('hf-immersive');
   if(wasFull&&exitNative&&document.fullscreenElement&&document.exitFullscreen){
     document.exitFullscreen().catch(()=>{});
+  }
+}
+// 终端真全屏:Fullscreen API(PC/Android 隐藏浏览器全部 chrome);
+// iOS Safari 不支持元素级全屏,回退为 fixed 铺满可视区
+function exitTermFullscreen(){
+  // 统一退出路径(浮动按钮与 Escape 共用):总是清理 fixed 回退类,
+  // 仅当原生全屏确实落在 termStage 上时才调 exitFullscreen
+  const stage=document.getElementById('termStage');
+  if(stage)stage.classList.remove('term-fs-fixed');
+  if(stage&&document.fullscreenElement===stage)document.exitFullscreen().catch(()=>{});
+}
+function toggleTermFullscreen(){
+  const stage=document.getElementById('termStage');
+  if(!stage)return;
+  if(document.fullscreenElement===stage||stage.classList.contains('term-fs-fixed')){exitTermFullscreen();return}
+  if(stage.requestFullscreen){
+    stage.requestFullscreen().catch(()=>stage.classList.add('term-fs-fixed'));
+  }else{
+    stage.classList.add('term-fs-fixed');
   }
 }
 function hfTakeover(){
@@ -5109,9 +5138,13 @@ function bindDelegation(){
   document.addEventListener('focusin',()=>setTimeout(fitVisibleTerm,50));
   document.addEventListener('focusout',()=>setTimeout(fitVisibleTerm,50));
   document.addEventListener('focusin',keepFocusedControlVisible);
-  document.addEventListener('keydown',e=>{if(e.key==='Escape')hfExitFullscreen()});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'){hfExitFullscreen();exitTermFullscreen()}});
   document.addEventListener('keydown',handleGlobalShortcut);
-  document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)hfExitFullscreen(false)});
+  document.addEventListener('fullscreenchange',()=>{
+    if(!document.fullscreenElement){hfExitFullscreen(false);document.getElementById('termStage')?.classList.remove('term-fs-fixed')}
+    // 全屏切换后可视区变化,重算终端尺寸并强制重绘
+    setTimeout(()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(XTERM)try{XTERM.refresh(0,XTERM.rows-1)}catch(e){}},60);
+  });
 }
 
 function shortcutGuard(e){
