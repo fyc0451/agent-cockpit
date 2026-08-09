@@ -48,22 +48,33 @@ from pydantic import BaseModel, Field
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _poller_task, _worktree_cleanup_task
+    global _poller_task, _message_poller_task, _worktree_cleanup_task
     _poller_task = asyncio.create_task(_poll_live_state())
+    _message_poller_task = asyncio.create_task(_poll_message_state())
     _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
     try:
         yield
     finally:
-        for task in (_poller_task, _worktree_cleanup_task):
+        background_tasks = (
+            _poller_task, _message_poller_task, _worktree_cleanup_task,
+        )
+        for task in background_tasks:
             if task is not None:
                 task.cancel()
-        for task in (_poller_task, _worktree_cleanup_task):
+        for task in background_tasks:
             if task is not None:
-                with suppress(asyncio.CancelledError):
+                try:
                     await task
-        _poller_task = None
-        _worktree_cleanup_task = None
-        await asyncio.to_thread(_release_all_zoom_leases)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("background task failed during shutdown")
+        try:
+            await asyncio.to_thread(_release_all_zoom_leases)
+        finally:
+            _poller_task = None
+            _message_poller_task = None
+            _worktree_cleanup_task = None
 
 
 app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
@@ -149,6 +160,117 @@ SESSION_BOOTSTRAP_PANE_COLS = 100
 SESSION_BOOTSTRAP_PANE_ROWS = 30
 TERM_READ_WAIT = 0.02
 TERM_READ_BURST = 256 * 1024
+
+
+def _parse_poll_interval(raw: str | None) -> float:
+    """解析 COCKPIT_POLL_INTERVAL:拒 <=0/NaN/inf,非法值回退默认。"""
+    default = 2.0
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    # math.isfinite 拒 NaN/inf;<=0 会 busy loop
+    import math
+    if not math.isfinite(val) or val <= 0:
+        return default
+    return val
+
+
+# live-state 轮询间隔:默认 2s(并行 snapshot 后单轮总耗时≈最慢单项,可承受更短间隔)。
+# 无 session 时回到空闲间隔省 fork;连续失败退避避免风暴(分支优先于 idle:即使
+# 无 session,失败时也要退避,否则异常时永远固定 idle 10s 不做连续退避)。
+POLL_INTERVAL = _parse_poll_interval(os.environ.get("COCKPIT_POLL_INTERVAL"))
+POLL_IDLE_INTERVAL = 10.0
+POLL_BACKOFF = 1.5
+POLL_BACKOFF_MAX = 20.0
+# 轮询指标:保留最近 N 次耗时,计算 p50/p95/failure_rate,供诊断(不改 SSE schema)。
+_POLL_METRICS_SAMPLES = 60
+_POLL_METRICS: dict[str, Any] = {
+    "count": 0, "failures": 0, "consecutive_failures": 0,
+    "last_duration": 0.0, "last_session_count": 0, "samples": [],
+    "duration_p50": 0.0, "duration_p95": 0.0, "failure_rate": 0.0,
+}
+_message_state: dict[str, Any] = {
+    "revision": 0, "source_version": None, "signatures": None, "changes": [],
+}
+
+
+def _record_poll_metrics(duration: float, session_count: int, success: bool) -> None:
+    """记录单次 poll 指标并更新聚合(p50/p95/failure_rate)。生产路径,测试直接调。"""
+    m = _POLL_METRICS
+    m["count"] += 1
+    m["last_duration"] = duration
+    m["last_session_count"] = session_count
+    samples = m["samples"]
+    samples.append(duration)
+    if len(samples) > _POLL_METRICS_SAMPLES:
+        del samples[: len(samples) - _POLL_METRICS_SAMPLES]
+    if success:
+        m["consecutive_failures"] = 0
+    else:
+        m["failures"] += 1
+        m["consecutive_failures"] += 1
+    # 聚合:基于 samples 窗口的 p50/p95;failure_rate 基于累计 count。
+    sorted_samples = sorted(samples)
+    n = len(sorted_samples)
+    m["duration_p50"] = sorted_samples[n // 2] if n else 0.0
+    p95_idx = min(n - 1, int(n * 0.95))
+    m["duration_p95"] = sorted_samples[p95_idx] if n else 0.0
+    m["failure_rate"] = m["failures"] / m["count"] if m["count"] else 0.0
+
+
+def _poll_delay(session_count: int) -> float:
+    """计算下一轮 poll 的 sleep 间隔。失败分支优先于 idle。
+
+    生产路径,测试直接调:覆盖成功(idle/正常)、连续失败 delay 递增封顶。
+    """
+    cf = _POLL_METRICS["consecutive_failures"]
+    if cf > 0:
+        delay = POLL_INTERVAL
+        for _ in range(cf):
+            delay *= POLL_BACKOFF
+            if delay >= POLL_BACKOFF_MAX:
+                return POLL_BACKOFF_MAX
+        return delay
+    if session_count == 0:
+        return POLL_IDLE_INTERVAL
+    return POLL_INTERVAL
+
+
+def _refresh_message_state() -> None:
+    """在外部 SQLite 提交后更新项目级消息 revision，不读取消息正文。"""
+    global _message_state
+    version = (db.data_version(), coordination.message_state_revision())
+    if version == _message_state["source_version"]:
+        return
+    signatures = db.message_project_signatures()
+    slugs = db.project_slugs_by_human_key()
+    for project_key, receipt_signature in coordination.message_project_signatures().items():
+        slug = slugs.get(project_key)
+        if slug:
+            signatures[slug] = (signatures.get(slug, ()), receipt_signature)
+    previous = _message_state["signatures"]
+    changed: list[str] = []
+    revision = int(_message_state["revision"])
+    if previous is not None:
+        changed = sorted(
+            slug for slug in set(previous) | set(signatures)
+            if previous.get(slug) != signatures.get(slug)
+        )
+        if changed:
+            revision += 1
+    changes = list(_message_state["changes"])
+    if changed:
+        changes.append({"revision": revision, "projects": changed})
+        changes = changes[-60:]
+    _message_state = {
+        "revision": revision,
+        "source_version": version,
+        "signatures": signatures,
+        "changes": changes,
+    }
 ROOT_DIR = Path(__file__).resolve().parent
 AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
@@ -372,7 +494,9 @@ def _agent_mail_requirement() -> dict[str, Any] | None:
 @app.middleware("http")
 async def protect_api(request: Request, call_next):
     path = request.url.path
-    protected = path.startswith("/api/") or path in {"/docs", "/redoc", "/openapi.json"}
+    protected = path.startswith("/api/") or path in {
+        "/docs", "/redoc", "/openapi.json", "/health.poll",
+    }
     if not protected or path in PUBLIC_PATHS:
         return await call_next(request)
     if not _request_authenticated(request):
@@ -4470,6 +4594,7 @@ _live_state: dict[str, Any] = {
     "attention": None,
 }
 _poller_task: asyncio.Task | None = None
+_message_poller_task: asyncio.Task | None = None
 _worktree_cleanup_task: asyncio.Task | None = None
 # 过期 task worktree 后台清理：启动后立即跑一轮，之后每 6 小时一轮。
 WORKTREE_CLEANUP_INTERVAL_S = 6 * 3600
@@ -4507,9 +4632,13 @@ async def _poll_live_state() -> None:
     last_sig = ""
     attention_ids: set[str] | None = None
     while True:
+        poll_start = time.monotonic()
+        success = False
+        session_count = 0
         try:
             await asyncio.to_thread(_expire_zoom_leases)
             snap = await asyncio.to_thread(_board_snapshot)
+            session_count = len(snap.get("sessions", [])) if snap.get("available") else 0
             await asyncio.to_thread(coordination.maintain_live_claims, snap)
             attention = await asyncio.to_thread(_build_attention, snap)
             attention_ids, new_items = _attention_changes(
@@ -4566,20 +4695,44 @@ async def _poll_live_state() -> None:
                     "attention": attention,
                 }
                 last_sig = sig
+            success = bool(snap.get("available", True)) and not any(
+                session.get("error") for session in snap.get("sessions", [])
+                if isinstance(session, dict)
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("live state poll failed")
-        await asyncio.sleep(4)
+        # 指标 + 自适应间隔:统一走 helper(生产路径单一,测试直接调 helper)。
+        # delay 失败分支优先于 idle:_poll_delay 内部先看 consecutive_failures。
+        duration = time.monotonic() - poll_start
+        _record_poll_metrics(duration, session_count, success)
+        await asyncio.sleep(_poll_delay(session_count))
+
+
+async def _poll_message_state() -> None:
+    """独立1秒消息revision检测；不受Herdr空闲/失败退避影响。"""
+    while True:
+        if not db.DB_PATH.is_file():
+            await asyncio.sleep(5)
+            continue
+        try:
+            await asyncio.to_thread(_refresh_message_state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("message revision poll failed")
+        await asyncio.sleep(1)
 
 
 @app.get("/api/events")
 async def api_events(request: Request):
     """把共享轮询缓存中的变化推送给浏览器。"""
     last_revision = -1
+    last_message_revision = -1
 
     async def event_gen():
-        nonlocal last_revision
+        nonlocal last_revision, last_message_revision
         while not await request.is_disconnected():
             state = _live_state
             if state["revision"] != last_revision and state["unread"] is not None:
@@ -4595,6 +4748,34 @@ async def api_events(request: Request):
                         "data": json.dumps(state["attention"], ensure_ascii=False),
                     }
                 last_revision = state["revision"]
+            message_state = _message_state
+            if (
+                message_state["signatures"] is not None
+                and message_state["revision"] != last_message_revision
+            ):
+                projects: list[str]
+                if last_message_revision == -1:
+                    projects = sorted(message_state["signatures"] or {})
+                else:
+                    changes = [
+                        change for change in message_state["changes"]
+                        if change["revision"] > last_message_revision
+                    ]
+                    oldest = message_state["changes"][0]["revision"] if message_state["changes"] else message_state["revision"]
+                    if last_message_revision >= 0 and last_message_revision < oldest - 1:
+                        projects = sorted(message_state["signatures"] or {})
+                    else:
+                        projects = sorted({
+                            project for change in changes for project in change["projects"]
+                        })
+                yield {
+                    "event": "messages",
+                    "data": json.dumps({
+                        "revision": message_state["revision"],
+                        "projects": projects,
+                    }),
+                }
+                last_message_revision = message_state["revision"]
             await asyncio.sleep(1)
 
     return EventSourceResponse(event_gen())
@@ -4637,6 +4818,23 @@ def health():
         "herdr": herdr_client.is_available(),
         "hub": mail_status["write_available"],
         "push": push_status["available"],
+    }
+
+
+@app.get("/health.poll")
+def health_poll():
+    """返回受认证的 poll 聚合诊断，不暴露 raw samples。"""
+    m = _POLL_METRICS
+    return {
+        "count": m["count"],
+        "failures": m["failures"],
+        "failure_rate": m["failure_rate"],
+        "consecutive_failures": m["consecutive_failures"],
+        "last_duration": m["last_duration"],
+        "duration_p50": m["duration_p50"],
+        "duration_p95": m["duration_p95"],
+        "last_session_count": m["last_session_count"],
+        "interval": POLL_INTERVAL,
     }
 
 

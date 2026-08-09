@@ -1864,6 +1864,66 @@ def test_messages_page_agent_filter_and_cleanup():
     assert "/api/messages/cleanup" in HTML
 
 
+def test_messages_sse_refresh_is_visible_scoped_debounced_and_draft_safe():
+    js = _inline_js()
+    assert 'id="msgLoadState"' in HTML
+    assert 'id="msgList" aria-busy="false"' in HTML
+    assert "SSE.addEventListener('messages'" in js
+    assert "d.projects.forEach(project=>MSG_DIRTY_PROJECTS.add(project))" in js
+    assert "const MSG_DIRTY_PROJECTS=new Set()" in js
+    schedule = js.split("function scheduleMessageRefresh(slug){", 1)[1].split(
+        "async function loadProjectMsgs", 1
+    )[0]
+    assert "active!=='msgs'||document.hidden" in schedule
+    assert "MSG_SENDING" in schedule
+    assert "setTimeout(()=>loadProjectMsgs(undefined,true),250)" in schedule
+    load = js.split("async function loadProjectMsgs(focusMessageId,background=false,requestedSlug){", 1)[1].split(
+        "function setMsgComposeEnabled", 1
+    )[0]
+    assert "queueMessageRequest(slug,focusMessageId,background)" in load
+    assert "const pending=MSG_PENDING_REQUEST;MSG_PENDING_REQUEST=null" in load
+    assert "const draft=background&&MSG_BOUND_SLUG===slug?msgDraft():null" in load
+    assert load.index("const d=await api") < load.index("const draft=background")
+    assert "restoreMsgDraft(draft)" in load
+    assert "setMsgLoadState('error'" in load
+    queue = js.split("function queueMessageRequest(slug,focusMessageId,background){", 1)[1].split(
+        "function scheduleMessageRefresh", 1
+    )[0]
+    assert "const sameProject=previous?.slug===slug" in queue
+    assert "focusMessageId:focusMessageId??(sameProject?previous.focusMessageId:null)??null" in queue
+    assert "background:sameProject&&previous.background===false?false:background" in queue
+    assert "const dirtyGeneration=MSG_DIRTY_GENERATIONS.get(slug)||0" in load
+    assert "(MSG_DIRTY_GENERATIONS.get(slug)||0)===dirtyGeneration" in load
+    recovery = js.split("function recoverPageState(){", 1)[1].split(
+        "function keepFocusedControlVisible", 1
+    )[0]
+    assert "MSG_DIRTY_PROJECTS.has(slug)" in recovery
+
+
+def test_global_shortcuts_are_discoverable_guarded_and_optional():
+    js = _inline_js()
+    assert 'id="setShortcuts"' in HTML
+    assert 'data-i18n="set.shortcuts.hint"' in HTML
+    assert "const SHORTCUTS_KEY='cockpit-shortcuts'" in js
+    assert "function setShortcutsEnabled(on)" in js
+    assert "document.addEventListener('keydown',handleGlobalShortcut)" in js
+    guard = js.split("function shortcutGuard(e){", 1)[1].split(
+        "function focusViewSearch", 1
+    )[0]
+    for marker in ("SHORTCUTS_ENABLED", "e.isComposing", "e.ctrlKey", "e.altKey", "e.metaKey", "OPEN_DIALOG", "target?.isContentEditable", "target?.closest?.('.xterm')"):
+        assert marker in guard
+    handler = js.split("function handleGlobalShortcut(e){", 1)[1].split(
+        "// ============ init", 1
+    )[0]
+    assert "{b:'attention',t:'term',f:'files',m:'msgs',s:'settings'}" in handler
+    assert "key==='/'" in handler and "focusViewSearch()" in handler
+    assert "key==='r'" in handler and "refreshCurrent()" in handler
+    focus = js.split("function focusViewSearch(){", 1)[1].split(
+        "function handleGlobalShortcut", 1
+    )[0]
+    assert "showView('files')" in focus and "fileSearchInput" in focus
+
+
 def test_files_page_media_preview_and_dir_download():
     js = _inline_js()
     # 图片/音视频内联预览走 /api/files/raw
@@ -1919,6 +1979,97 @@ def test_side_refresh_refreshes_current_view():
     assert "function refreshCurrent()" in js
     # 不再只刷看板
     assert 'onclick="refreshBoard()"' not in HTML
+
+
+def test_board_and_files_keep_last_result_with_local_busy_feedback():
+    js = _inline_js()
+    assert 'id="board" aria-busy="false"' in HTML
+    assert 'id="fileTree" aria-busy="false"' in HTML
+    assert 'id="attentionList" aria-busy="false"' in HTML
+    board = js.split("async function refreshBoard(){", 1)[1].split(
+        "function renderBoard", 1
+    )[0]
+    assert "board.setAttribute('aria-busy','true')" in board
+    assert "BOARD?'刷新失败，显示上次结果':'加载失败'" in board
+    assert "finally{if(seq===BOARD_LOAD_SEQ&&board)board.setAttribute('aria-busy','false')}" in board
+    tree = js.split("async function loadFileTree(){", 1)[1].split(
+        "function setFileRoots", 1
+    )[0]
+    assert "tree.setAttribute('aria-busy','true')" in tree
+    assert "'刷新失败，显示上次结果'" in tree
+    search = js.split("async function fileSearch(){", 1)[1].split(
+        "function fileSearchClear", 1
+    )[0]
+    assert "'正在搜索…'" in search
+    assert "'搜索失败，显示上次结果'" in search
+    attention = js.split("async function loadAttention(payload){", 1)[1].split(
+        "async function refreshTaskReports", 1
+    )[0]
+    assert "list?.setAttribute('aria-busy','true')" in attention
+    assert "'刷新失败，显示上次结果'" in attention
+
+
+def test_view_and_stable_selections_restore_without_sensitive_state():
+    js = _inline_js()
+    assert "const STABLE_STATE_KEYS=" in js
+    assert "session:'cockpit-session'" in js
+    assert "fileDir:'cockpit-file-dir'" in js
+    assert "messageProject:'cockpit-message-project'" in js
+    assert "function viewFromLocation()" in js
+    assert "function syncViewLocation(v,replace=false)" in js
+    assert "window.addEventListener('popstate',restoreViewFromLocation)" in js
+    assert "window.addEventListener('hashchange',restoreViewFromLocation)" in js
+    assert "VIEW_LOCATION_LOCK=true" in js
+    assert "if(target===LAST_RESTORED_LOCATION)return" in js
+    assert "if(current!==view)showView(view)" in js
+    assert "history.pushState(null,'','/#/'+v)" in js
+    assert "history.replaceState(null,'','/#/'+v)" in js
+    assert "LAST_RESTORED_LOCATION=location.pathname+location.search+location.hash" in js
+    init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
+    assert "VIEW_LOCATION_LOCK=true;try{await handleAttentionHash()}finally{VIEW_LOCATION_LOCK=false}" in init
+    attention = js.split("async function openAttention(i,updateHash=true){", 1)[1].split(
+        "async function openTaskAttention", 1
+    )[0]
+    assert "if(updateHash)VIEW_LOCATION_LOCK=true" in attention
+    assert "finally{VIEW_LOCATION_LOCK=previousLock}" in attention
+    assert "pending=openMailAttention" in attention
+    assert attention.index("finally{VIEW_LOCATION_LOCK=previousLock}") < attention.index("if(pending)await pending")
+
+    # 恢复值必须经最新 catalog 验证；临时终端 ID 和敏感/可编辑内容绝不持久化。
+    assert "validateRestoredSession(TERM_SESSION_CATALOG)" in js
+    assert "filePathAllowed(stored,FILE_ROOTS)" in js
+    assert "projects.some(p=>p.slug===stored)" in js
+    assert "rememberStable(STABLE_STATE_KEYS.session" in js
+    assert "rememberStable(STABLE_STATE_KEYS.fileDir" in js
+    assert "rememberStable(STABLE_STATE_KEYS.messageProject" in js
+    for forbidden in (
+        "localStorage.setItem('TERM_ID'",
+        "localStorage.setItem('FILE_PATH'",
+        "localStorage.setItem('FILE_ORIG'",
+        "localStorage.setItem('MSG_BODY'",
+        "localStorage.setItem('token'",
+    ):
+        assert forbidden not in js
+
+
+def test_file_tree_and_search_share_sequence_and_preserve_last_success():
+    js = _inline_js()
+    tree = js.split("async function loadFileTree(){", 1)[1].split(
+        "function setFileRoots", 1
+    )[0]
+    search = js.split("async function fileSearch(){", 1)[1].split(
+        "function fileSearchClear", 1
+    )[0]
+    assert "let FILE_LOAD_SEQ=0, FILE_APPLIED_CWD=null" in js
+    assert "const seq=++FILE_LOAD_SEQ" in tree
+    assert "const r=await api('/api/files/roots');if(seq!==FILE_LOAD_SEQ)return;setFileRoots(r)" in tree
+    assert "if(seq!==FILE_LOAD_SEQ||FILE_CWD!==target)return" in tree
+    assert "const seq=++FILE_LOAD_SEQ" in search
+    assert "const r=await api('/api/files/roots');if(seq!==FILE_LOAD_SEQ)return;setFileRoots(r)" in search
+    assert "if(seq!==FILE_LOAD_SEQ||input.value.trim()!==q||FILE_CWD!==base)return" in search
+    assert "FILE_APPLIED_CWD=d.path" in tree
+    assert "filePathAllowed(FILE_APPLIED_CWD,FILE_ROOTS||[])" in tree
+    assert "rememberFileDir(d.path)" in tree
 
 
 def test_launch_modal_worktree_preview_and_source_fix():
@@ -2445,6 +2596,127 @@ def test_b1_node_behavior_msg_load_seq_drops_stale():
     }
     await Promise.all([load('A',30,'A'), load('B',5,'B')]);
     if(applied.join(',')!=='B') {console.error(applied); process.exit(1)}
+    console.log('ok');
+    """))
+    assert "ok" in out
+
+
+def test_state_restore_node_behavior_drops_stale_and_rejects_removed_catalog_items():
+    out = _run_node(textwrap.dedent(r"""
+    let FILE_LOAD_SEQ=0, FILE_CWD='/old', applied=[];
+    async function loadTree(target, delay){
+      FILE_CWD=target;
+      const seq=++FILE_LOAD_SEQ;
+      await new Promise(r=>setTimeout(r,delay));
+      if(seq!==FILE_LOAD_SEQ||FILE_CWD!==target)return;
+      applied.push(target);
+    }
+    await Promise.all([loadTree('/old',30),loadTree('/new',5)]);
+    if(applied.join(',')!=='/new')process.exit(1);
+
+    const allowed=(path,roots)=>roots.some(root=>path===root||path.startsWith(root+'/'));
+    const restoreFile=(stored,roots)=>allowed(stored,roots)?stored:(roots[0]||null);
+    const restoreProject=(stored,projects)=>projects.some(p=>p.slug===stored)?stored:(projects[0]?.slug||'');
+    const restoreSession=(stored,sessions)=>sessions.includes(stored)?stored:(sessions[0]||null);
+    if(restoreFile('/revoked/private',['/safe'])!=='/safe')process.exit(2);
+    if(restoreProject('deleted',[{slug:'live'}])!=='live')process.exit(3);
+    if(restoreSession('stopped',['running'])!=='running')process.exit(4);
+    console.log('ok');
+    """))
+    assert "ok" in out
+
+
+def test_message_refresh_node_behavior_is_single_flight_and_preserves_draft():
+    out = _run_node(textwrap.dedent(r"""
+    let inFlight=false,pending=null,loads=0,body='A',rendered='old',focuses=[];
+    async function load(background=false){
+      if(inFlight){pending={background,focus:42};return}
+      inFlight=true;loads++;
+      await new Promise(r=>setTimeout(r,10));
+      const draft=background?body:null;
+      rendered='new';body='';
+      if(draft!==null)body=draft;
+      inFlight=false;
+      if(pending){const next=pending;pending=null;focuses.push(next.focus);await load(next.background)}
+    }
+    const first=load(true);
+    await new Promise(r=>setTimeout(r,2));
+    body='AB';
+    await Promise.all([load(true),load(true)]);
+    await first;
+    await new Promise(r=>setTimeout(r,15));
+    if(loads!==2||rendered!=='new'||body!=='AB')process.exit(1);
+    if(focuses.join(',')!=='42')process.exit(2);
+    console.log('ok');
+    """))
+    assert "ok" in out
+
+
+def test_async_generations_bind_task_actions_and_drop_old_reads():
+    js = _inline_js()
+    task = js.split("async function openTaskAttention(taskId){", 1)[1].split(
+        "function closeAttentionModal", 1
+    )[0]
+    assert "const seq=++ATTENTION_TASK_SEQ" in task
+    assert "seq!==ATTENTION_TASK_SEQ||ATTENTION_TASK_ID!==taskId" in task
+    action = js.split("async function attentionTaskAction(action){", 1)[1].split(
+        "async function openMailAttention", 1
+    )[0]
+    assert "const taskId=ATTENTION_TASK_ID" in action
+    assert "if(ATTENTION_TASK_ID!==taskId)return" in action
+    assert "encodeURIComponent(taskId)" in action
+    assert "ATTENTION_TASK_ACTION_BUSY" in action
+    assert "attentionApplyBtn').disabled=true" in action
+
+    board = js.split("async function refreshBoard(){", 1)[1].split(
+        "function renderBoard", 1
+    )[0]
+    assert "const seq=++BOARD_LOAD_SEQ" in board
+    assert "if(seq!==BOARD_LOAD_SEQ)return" in board
+    attention = js.split("async function loadAttention(payload){", 1)[1].split(
+        "async function refreshTaskReports", 1
+    )[0]
+    assert "const seq=++ATTENTION_LOAD_SEQ" in attention
+    assert "if(seq!==ATTENTION_LOAD_SEQ)return" in attention
+    sse = js.split("SSE.addEventListener('board'", 1)[1].split(
+        "SSE.addEventListener('messages'", 1
+    )[0]
+    assert "BOARD_LOAD_SEQ++" in sse
+    assert "ATTENTION_LOAD_SEQ++" in sse
+    assert "aria-busy','false'" in sse
+
+
+def test_mail_deep_link_uses_one_load_and_preserves_focus_request():
+    js = _inline_js()
+    mail = js.split("async function openMailAttention(slug,messageId){", 1)[1].split(
+        "async function handleAttentionHash", 1
+    )[0]
+    assert "VIEW_LOAD_SUPPRESSED=true" in mail
+    assert "showView('msgs')" in mail
+    assert "finally{VIEW_LOAD_SUPPRESSED=previous}" in mail
+    assert "loadProjList(slug,messageId)" in mail
+    load = js.split("async function loadProjectMsgs(focusMessageId,background=false,requestedSlug){", 1)[1].split(
+        "function setMsgComposeEnabled", 1
+    )[0]
+    assert "queueMessageRequest(slug,focusMessageId,background)" in load
+    assert "loadProjectMsgs(pending.focusMessageId,pending.background,pending.slug)" in load
+
+
+def test_shortcut_guard_node_behavior_blocks_editing_modal_ime_and_modifiers():
+    out = _run_node(textwrap.dedent(r"""
+    let enabled=true,modal=false;
+    function guard(e){
+      if(!enabled||e.defaultPrevented||e.isComposing||e.ctrlKey||e.altKey||e.metaKey||modal)return true;
+      const target=e.target,tag=target?.tagName;
+      return tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||target?.isContentEditable||target?.xterm;
+    }
+    const base={defaultPrevented:false,isComposing:false,ctrlKey:false,altKey:false,metaKey:false,target:{tagName:'DIV'}};
+    if(guard(base))process.exit(1);
+    for(const patch of [{isComposing:true},{ctrlKey:true},{target:{tagName:'INPUT'}},{target:{tagName:'DIV',isContentEditable:true}},{target:{tagName:'DIV',xterm:true}}]){
+      if(!guard({...base,...patch}))process.exit(2);
+    }
+    modal=true;if(!guard(base))process.exit(3);
+    modal=false;enabled=false;if(!guard(base))process.exit(4);
     console.log('ok');
     """))
     assert "ok" in out

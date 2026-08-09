@@ -1,5 +1,6 @@
 import shlex
 import sys
+import threading
 import time
 from unittest.mock import call
 
@@ -1239,3 +1240,251 @@ def test_move_pane_rejects_herdr_noop(monkeypatch):
     import pytest as _pt
     with _pt.raises(RuntimeError, match="正在放大"):
         herdr_client._move_pane("demo", ["w1:p2", "--new-tab"])
+
+
+# ── B1: snapshot 有界并行 + poll 指标/退避 ─────────────────────
+
+def _mock_sessions(names):
+    """构造 list_sessions 返回值(全 running)。"""
+    return [{"name": n, "status": "running", "directory": f"/tmp/{n}", "socket": ""} for n in names]
+
+
+def test_snapshot_parallelizes_sessions_and_preserves_order(monkeypatch):
+    """多 session 并行执行 _snapshot_session,结果按 list_sessions 顺序回填。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "list_sessions", lambda: _mock_sessions(["s1", "s2", "s3"]))
+    barrier = threading.Barrier(3)
+
+    def fake_snapshot(name):
+        # 3 个线程都到达 barrier 才放行 → 证明并行(串行会永远阻塞)
+        barrier.wait(timeout=2)
+        time.sleep(0.05)  # 模拟 fork 耗时
+        return {"session": name, "panes": [{"pane_id": name + ":p1", "agent": "codex"}]}
+
+    monkeypatch.setattr(herdr_client, "_snapshot_session", fake_snapshot)
+    result = herdr_client.snapshot()
+    # 顺序保持(list_sessions 的 s1/s2/s3)
+    assert [s["session"] for s in result["sessions"]] == ["s1", "s2", "s3"]
+    assert result["total_panes"] == 3
+    assert result["agent_panes"] == 3
+    # directory 正确回填
+    assert result["sessions"][0]["directory"] == "/tmp/s1"
+
+
+def test_snapshot_isolates_single_session_failure(monkeypatch):
+    """单个 session 失败返回 error dict,不阻断其他 session。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "list_sessions", lambda: _mock_sessions(["ok", "bad", "ok2"]))
+
+    def fake_snapshot(name):
+        if name == "bad":
+            return {"session": "bad", "error": "boom", "panes": []}
+        return {"session": name, "panes": [{"pane_id": name + ":p1"}]}
+
+    monkeypatch.setattr(herdr_client, "_snapshot_session", fake_snapshot)
+    result = herdr_client.snapshot()
+    sessions = {s["session"]: s for s in result["sessions"]}
+    assert sessions["bad"]["error"] == "boom"
+    assert sessions["ok"]["panes"]  # 其他正常
+    assert sessions["ok2"]["panes"]
+    assert result["total_panes"] == 2  # bad 的空 panes 不计入
+
+
+def test_snapshot_single_session_skips_thread_pool(monkeypatch):
+    """N=1 时不走线程池(barrier 不会卡住)。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "list_sessions", lambda: _mock_sessions(["only"]))
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda name: {"session": name, "panes": []})
+    result = herdr_client.snapshot()
+    assert len(result["sessions"]) == 1
+
+
+def test_snapshot_no_running_sessions_returns_empty(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "list_sessions", lambda: _mock_sessions([]))
+    result = herdr_client.snapshot()
+    assert result["sessions"] == []
+    assert result["total_panes"] == 0
+
+
+def test_snapshot_worker_cap_is_min_4_n(monkeypatch):
+    """并发 worker 峰值不超过 min(4, N)。6 个 session 时峰值=4。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "list_sessions", lambda: _mock_sessions([f"s{i}" for i in range(6)]))
+    peak = {"current": 0, "max": 0}
+    lock = threading.Lock()
+
+    def fake_snapshot(name):
+        with lock:
+            peak["current"] += 1
+            peak["max"] = max(peak["max"], peak["current"])
+        time.sleep(0.08)
+        with lock:
+            peak["current"] -= 1
+        return {"session": name, "panes": []}
+
+    monkeypatch.setattr(herdr_client, "_snapshot_session", fake_snapshot)
+    herdr_client.snapshot()
+    assert peak["max"] <= 4, f"worker 峰值 {peak['max']} 超过 min(4,N)=4"
+
+
+def test_snapshot_session_safe_catches_crash_and_preserves_order(monkeypatch):
+    """_snapshot_session_safe 兜底:即使 _snapshot_session 抛非 RuntimeError(如 KeyError),
+    也返回保持 session/panes 空的 error dict,且并行结果顺序不变。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "list_sessions", lambda: _mock_sessions(["s1", "crash", "s3"]))
+
+    def crashing_snapshot(name):
+        if name == "crash":
+            raise KeyError("simulated parse bug")
+        return {"session": name, "panes": [{"pane_id": name + ":p1"}]}
+
+    monkeypatch.setattr(herdr_client, "_snapshot_session", crashing_snapshot)
+    result = herdr_client.snapshot()
+    sessions = result["sessions"]
+    # 顺序保持: s1, crash, s3
+    assert [s["session"] for s in sessions] == ["s1", "crash", "s3"]
+    # crash 的结构正确(error + 空 panes)
+    crash_session = sessions[1]
+    assert "error" in crash_session
+    assert crash_session["panes"] == []
+    # 前后 session 正常
+    assert sessions[0]["panes"]
+    assert sessions[2]["panes"]
+    assert result["total_panes"] == 2
+
+
+def test_snapshot_total_deadline_limits_later_worker_waves(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client,
+        "list_sessions",
+        lambda: _mock_sessions([f"s{i}" for i in range(8)]),
+    )
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.12)
+    budgets: list[float] = []
+    lock = threading.Lock()
+
+    def budgeted_snapshot(name):
+        budget = herdr_client._snapshot_timeout()
+        with lock:
+            budgets.append(budget)
+        if budget < 0.05:
+            time.sleep(budget)
+            return {"session": name, "error": "snapshot total timeout", "panes": []}
+        time.sleep(0.09)
+        return {"session": name, "panes": [{"pane_id": name + ":p1"}]}
+
+    monkeypatch.setattr(herdr_client, "_snapshot_session", budgeted_snapshot)
+    started = time.monotonic()
+    result = herdr_client.snapshot()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert [s["session"] for s in result["sessions"]] == [f"s{i}" for i in range(8)]
+    assert min(budgets) < max(budgets) - 0.04
+    assert any("timeout" in s.get("error", "") for s in result["sessions"][4:])
+
+
+def test_snapshot_total_deadline_includes_session_listing(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.04)
+
+    def slow_list():
+        time.sleep(0.03)
+        return _mock_sessions(["one"])
+
+    budgets = []
+    monkeypatch.setattr(herdr_client, "list_sessions", slow_list)
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session",
+        lambda name: budgets.append(herdr_client._snapshot_timeout()) or {
+            "session": name, "panes": [],
+        },
+    )
+
+    herdr_client.snapshot()
+    assert budgets and budgets[0] < 0.02
+
+
+def test_snapshot_returns_without_waiting_for_uncooperative_worker(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "list_sessions", lambda: _mock_sessions(["one", "two"]),
+    )
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda name: (
+            time.sleep(0.15) or {"session": name, "panes": []}
+        ),
+    )
+
+    started = time.monotonic()
+    result = herdr_client.snapshot()
+
+    assert time.monotonic() - started < 0.08
+    assert all("timeout" in row.get("error", "") for row in result["sessions"])
+
+
+def test_single_snapshot_returns_without_waiting_for_uncooperative_worker(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "list_sessions", lambda: _mock_sessions(["one"]),
+    )
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda name: (
+            time.sleep(0.15) or {"session": name, "panes": []}
+        ),
+    )
+
+    started = time.monotonic()
+    result = herdr_client.snapshot()
+
+    assert time.monotonic() - started < 0.08
+    assert "timeout" in result["sessions"][0]["error"]
+
+
+def test_repeated_snapshot_timeouts_keep_worker_threads_bounded(monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "list_sessions",
+        lambda: _mock_sessions(["one", "two", "three", "four"]),
+    )
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session",
+        lambda name: release.wait(1) or {"session": name, "panes": []},
+    )
+
+    try:
+        for _ in range(3):
+            herdr_client.snapshot()
+        workers = [
+            thread for thread in threading.enumerate()
+            if thread.name.startswith("cockpit-snapshot")
+        ]
+        assert len(workers) <= 4
+    finally:
+        release.set()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and any(
+            thread.name.startswith("cockpit-snapshot")
+            for thread in threading.enumerate()
+        ):
+            time.sleep(0.01)
+
+
+def test_snapshot_reports_session_list_failure(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "_run", lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("socket down")
+        ),
+    )
+
+    result = herdr_client.snapshot()
+
+    assert result["available"] is False
+    assert result["error"] == "session list failed"

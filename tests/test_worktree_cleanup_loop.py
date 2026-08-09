@@ -130,6 +130,7 @@ def test_lifespan_starts_and_cancels_worktree_cleanup(monkeypatch):
     cleanup_started = asyncio.Event()
     cleanup_cancelled = asyncio.Event()
     poller_started = asyncio.Event()
+    message_poller_started = asyncio.Event()
 
     async def fake_cleanup_loop() -> None:
         cleanup_started.set()
@@ -146,11 +147,19 @@ def test_lifespan_starts_and_cancels_worktree_cleanup(monkeypatch):
         except asyncio.CancelledError:
             raise
 
+    async def fake_message_poller() -> None:
+        message_poller_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise
+
     async def fake_release() -> None:
         return None
 
     monkeypatch.setattr(server, "_worktree_cleanup_loop", fake_cleanup_loop)
     monkeypatch.setattr(server, "_poll_live_state", fake_poller)
+    monkeypatch.setattr(server, "_poll_message_state", fake_message_poller)
     monkeypatch.setattr(
         server, "_release_all_zoom_leases", lambda: None,
     )
@@ -159,13 +168,43 @@ def test_lifespan_starts_and_cancels_worktree_cleanup(monkeypatch):
         async with server.lifespan(server.app):
             await asyncio.wait_for(cleanup_started.wait(), timeout=2)
             await asyncio.wait_for(poller_started.wait(), timeout=2)
+            await asyncio.wait_for(message_poller_started.wait(), timeout=2)
             assert server._worktree_cleanup_task is not None
+            assert server._message_poller_task is not None
             assert not server._worktree_cleanup_task.done()
         await asyncio.wait_for(cleanup_cancelled.wait(), timeout=2)
         assert server._worktree_cleanup_task is None
         assert server._poller_task is None
+        assert server._message_poller_task is None
 
     asyncio.run(exercise())
+
+
+def test_lifespan_cleans_up_when_background_task_already_failed(monkeypatch):
+    released = []
+
+    async def failed_poller() -> None:
+        raise RuntimeError("poller crashed")
+
+    async def waiting_task() -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(server, "_poll_live_state", failed_poller)
+    monkeypatch.setattr(server, "_poll_message_state", waiting_task)
+    monkeypatch.setattr(server, "_worktree_cleanup_loop", waiting_task)
+    monkeypatch.setattr(
+        server, "_release_all_zoom_leases", lambda: released.append(True),
+    )
+
+    async def exercise() -> None:
+        async with server.lifespan(server.app):
+            await asyncio.sleep(0)
+        assert server._poller_task is None
+        assert server._message_poller_task is None
+        assert server._worktree_cleanup_task is None
+
+    asyncio.run(exercise())
+    assert released == [True]
 
 
 def test_wait_interval_uses_six_hours(monkeypatch):

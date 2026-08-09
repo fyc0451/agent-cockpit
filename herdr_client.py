@@ -15,8 +15,10 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import tomllib
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,50 @@ SLOW_AGENT_START_TIMEOUTS = {"grok": 60.0}
 AGENT_STABLE_SECONDS = 1.5
 AGENT_POLL_INTERVAL = 0.2
 MAX_AGENT_ARGS_LENGTH = 2048
+SNAPSHOT_SESSION_TIMEOUT_S = 8.0
+SNAPSHOT_TOTAL_TIMEOUT_S = 10.0
+_SNAPSHOT_DEADLINE = threading.local()
+_LIST_SESSIONS_FAILED = threading.local()
+_SNAPSHOT_EXECUTOR_LOCK = threading.RLock()
+_SNAPSHOT_EXECUTOR: ThreadPoolExecutor | None = None
+_SNAPSHOT_FUTURES: set[Future[dict[str, Any]]] = set()
+SNAPSHOT_MAX_QUEUED = 64
+
+
+def _snapshot_future_done(
+    pool: ThreadPoolExecutor, future: Future[dict[str, Any]],
+) -> None:
+    """最后一个 snapshot future 完成后销毁空闲池，避免常驻线程与 PTY fork 并存。"""
+    global _SNAPSHOT_EXECUTOR
+    shutdown = False
+    with _SNAPSHOT_EXECUTOR_LOCK:
+        _SNAPSHOT_FUTURES.discard(future)
+        if not _SNAPSHOT_FUTURES and _SNAPSHOT_EXECUTOR is pool:
+            _SNAPSHOT_EXECUTOR = None
+            shutdown = True
+    if shutdown:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _submit_snapshot(
+    session: str, deadline: float,
+) -> Future[dict[str, Any]] | None:
+    """提交到全局有界池；卡死任务最多占 4 线程、排队最多 64 项。"""
+    global _SNAPSHOT_EXECUTOR
+    with _SNAPSHOT_EXECUTOR_LOCK:
+        if len(_SNAPSHOT_FUTURES) >= SNAPSHOT_MAX_QUEUED:
+            return None
+        if _SNAPSHOT_EXECUTOR is None:
+            _SNAPSHOT_EXECUTOR = ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="cockpit-snapshot",
+            )
+        pool = _SNAPSHOT_EXECUTOR
+        future = pool.submit(_snapshot_session_safe, session, deadline)
+        _SNAPSHOT_FUTURES.add(future)
+        future.add_done_callback(
+            lambda done, owner=pool: _snapshot_future_done(owner, done)
+        )
+        return future
 
 
 def _agent_start_timeout(agent: str) -> float:
@@ -219,7 +265,7 @@ def set_theme_name(name: str) -> Path:
     return path
 
 
-def _run(args: list[str], timeout: int = 10) -> str:
+def _run(args: list[str], timeout: float = 10) -> str:
     """跑 herdr 子命令,注入 PATH,返回 stdout。失败抛 RuntimeError。"""
     extra_path = _HERDR_DIR + (":" + os.environ.get("PATH", "") if os.environ.get("PATH") else "")
     env = {**os.environ, "PATH": extra_path or os.environ.get("PATH", "/usr/bin:/bin")}
@@ -241,8 +287,9 @@ def list_sessions() -> list[dict[str, Any]]:
     """枚举所有 herdr session。返回 [{name, status, directory, socket}]。"""
     if not is_available():
         return []
+    _LIST_SESSIONS_FAILED.value = False
     try:
-        out = _run(["session", "list", "--json"], timeout=8)
+        out = _run(["session", "list", "--json"], timeout=_snapshot_timeout())
         data = json.loads(out)
         if not isinstance(data, dict):
             raise ValueError("session list 不是对象")
@@ -263,8 +310,9 @@ def list_sessions() -> list[dict[str, Any]]:
         # 兼容尚未支持 --json 的旧版 herdr；新版使用稳定 JSON，避免表格
         # 列宽、路径空格或展示格式变化导致 running session 被误判为缺失。
         try:
-            out = _run(["session", "list"], timeout=8)
+            out = _run(["session", "list"], timeout=_snapshot_timeout())
         except RuntimeError:
+            _LIST_SESSIONS_FAILED.value = True
             return []
     sessions = []
     for line in out.splitlines():
@@ -306,10 +354,17 @@ def _slim_layout(layout: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _snapshot_timeout() -> float:
+    deadline = getattr(_SNAPSHOT_DEADLINE, "value", None)
+    if deadline is None:
+        return SNAPSHOT_SESSION_TIMEOUT_S
+    return max(0.001, min(SNAPSHOT_SESSION_TIMEOUT_S, deadline - time.monotonic()))
+
+
 def _snapshot_session(session: str) -> dict[str, Any]:
     """取单个 session 的 snapshot,返回精简后的 {panes, agents}。"""
     try:
-        out = _run(["api", "snapshot", "--session", session], timeout=8)
+        out = _run(["api", "snapshot", "--session", session], timeout=_snapshot_timeout())
     except RuntimeError as e:
         return {"session": session, "error": str(e), "panes": []}
     # 解析 SSE data: 行
@@ -392,16 +447,91 @@ def notify_opencode_color_scheme(session: str, mode: str) -> int:
     return notified
 
 
+def _snapshot_session_safe(session: str, deadline: float) -> dict[str, Any]:
+    """_snapshot_session 的安全包装:捕获一切异常,绝不抛出。
+
+    _snapshot_session 内部已 try/except herdr 调用失败,但若其解析逻辑本身有 bug
+    抛出非 RuntimeError(如 KeyError/TypeError),会中断整轮 snapshot 的 future 收集。
+    这里兜底:任何异常都转成与失败一致的结构(session/error/panes 空),保持顺序。
+    """
+    if time.monotonic() >= deadline:
+        return {"session": session, "error": "snapshot total timeout", "panes": []}
+    _SNAPSHOT_DEADLINE.value = deadline
+    try:
+        result = _snapshot_session(session)
+        if not isinstance(result, dict):
+            return {"session": session, "error": "snapshot returned non-dict", "panes": []}
+        return result
+    except Exception as e:
+        return {"session": session, "error": f"snapshot crashed: {e}", "panes": []}
+    finally:
+        try:
+            del _SNAPSHOT_DEADLINE.value
+        except AttributeError:
+            pass
+
+
 def snapshot() -> dict[str, Any]:
-    """聚合所有 running session 的 pane,这是 agent 全景视图。"""
+    """聚合所有 running session 的 pane,这是 agent 全景视图。
+
+    多 session 的 snapshot 调用各 fork 一个 herdr 子进程;串行执行时 N 个 session
+    要等 N 倍单次耗时。用有界线程池并行,worker 上限 min(4, N),结果按 list_sessions
+    原顺序回填(不用 as_completed)。_snapshot_session_safe 兜底一切异常,单个 session
+    失败/崩溃返回 error dict 不影响其他,顺序稳定。所有 worker 共用整轮 deadline,
+    后续批次只拿剩余预算,避免 N>4 时总耗时按批次倍增。所有 N>=1 都走
+    worker,这样即使内部逻辑不合作,调用方也能按整轮 deadline 返回。
+    """
     if not is_available():
         return {"available": False, "sessions": [], "panes": [], "agents": []}
-    sessions = list_sessions()
+    deadline = time.monotonic() + SNAPSHOT_TOTAL_TIMEOUT_S
+    _SNAPSHOT_DEADLINE.value = deadline
+    _LIST_SESSIONS_FAILED.value = False
+    try:
+        sessions = list_sessions()
+    finally:
+        try:
+            del _SNAPSHOT_DEADLINE.value
+        except AttributeError:
+            pass
+    if getattr(_LIST_SESSIONS_FAILED, "value", False):
+        return {
+            "available": False, "sessions": [], "panes": [], "agents": [],
+            "error": "session list failed",
+        }
     running = [s for s in sessions if s.get("status") == "running"]
-    results = []
-    all_panes = []
-    for s in running:
-        snap = _snapshot_session(s["name"])
+    if not running:
+        return {
+            "available": True, "sessions": [], "panes": [],
+            "total_panes": 0, "agent_panes": 0,
+        }
+    # 按 list_sessions 顺序提交,收集到同序的 future 列表,保证 results 顺序稳定。
+    snaps: list[dict[str, Any] | None] = [None] * len(running)
+    futures = [_submit_snapshot(s["name"], deadline) for s in running]
+    submitted = [future for future in futures if future is not None]
+    remaining = max(0.0, deadline - time.monotonic())
+    done, pending = wait(submitted, timeout=remaining)
+    for i, fut in enumerate(futures):
+        if fut is None:
+            snaps[i] = {
+                "session": running[i]["name"],
+                "error": "snapshot worker queue full", "panes": [],
+            }
+            continue
+        if fut not in done:
+            snaps[i] = {
+                "session": running[i]["name"],
+                "error": "snapshot total timeout", "panes": [],
+            }
+            continue
+        try:
+            snaps[i] = fut.result()
+        except Exception as e:
+            snaps[i] = {"session": running[i]["name"], "error": f"future failed: {e}", "panes": []}
+    for fut in pending:
+        fut.cancel()
+    results: list[dict[str, Any]] = []
+    all_panes: list[dict[str, Any]] = []
+    for s, snap in zip(running, snaps):
         snap["directory"] = s.get("directory", "")
         results.append(snap)
         all_panes.extend(snap.get("panes", []))

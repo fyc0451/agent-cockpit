@@ -595,7 +595,7 @@ header .spacer{flex:1}
   <section id="view-board" class="view">
     <div class="board-wrap">
       <div id="boardEmpty" class="empty" style="display:none;padding:60px 20px"></div>
-      <div class="board" id="board">
+      <div class="board" id="board" aria-busy="false">
         <div class="col col-need"><div class="col-head"><span data-i18n="board.need">⚠ 需要你</span> <span class="cc" id="cnt-need">0</span></div><div class="col-body" id="col-need"></div></div>
         <div class="col col-work"><div class="col-head"><span data-i18n="board.work">⚡ 工作中</span> <span class="cc" id="cnt-work">0</span></div><div class="col-body" id="col-work"></div></div>
         <div class="col col-done"><div class="col-head"><span data-i18n="board.done">✓ 已完成</span> <span class="cc" id="cnt-done">0</span></div><div class="col-body" id="col-done"></div></div>
@@ -619,7 +619,7 @@ header .spacer{flex:1}
       <button class="sm" id="taskReportBtn" onclick="refreshTaskReports()" data-i18n="attention.report">请求上报</button>
       <button class="icon" onclick="attRefresh()" title="刷新" data-i18n-title="common.refresh">↻</button>
     </div>
-    <div class="attention-list" id="attentionList"><div class="empty" data-i18n="common.loading">加载中…</div></div>
+    <div class="attention-list" id="attentionList" aria-busy="false"><div class="empty" data-i18n="common.loading">加载中…</div></div>
     <div id="sessionsPane" style="display:none;flex:1;min-height:0;flex-direction:column">
       <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);flex-wrap:wrap">
         <button class="primary sm" onclick="showSetupModal()" data-i18n="sessions.setup">+ 一键工作区</button>
@@ -642,7 +642,8 @@ header .spacer{flex:1}
           <button class="icon" onclick="loadProjectMsgs()">↻</button>
           <button class="icon" onclick="cleanupMsgs()" title="清理该项目的历史消息">🧹 清理</button>
         </div>
-        <div id="msgList"></div>
+        <div id="msgLoadState" class="muted" role="status" aria-live="polite" style="font-size:11px;min-height:18px"></div>
+        <div id="msgList" aria-busy="false"></div>
       </div>
     </div>
   </section>
@@ -679,7 +680,7 @@ header .spacer{flex:1}
       <span class="file-search-info" id="fileSearchInfo"></span>
     </div>
     <div class="files-body">
-      <div class="file-tree" id="fileTree"></div>
+      <div class="file-tree" id="fileTree" aria-busy="false"></div>
       <div class="editor-area" id="editorArea">
         <div class="empty" style="display:flex;align-items:center;justify-content:center;height:100%" data-i18n="files.empty">选择左侧文件</div>
       </div>
@@ -789,6 +790,9 @@ header .spacer{flex:1}
           <span id="setTermFontVal" style="min-width:24px;text-align:right">13</span>
         </div>
         <div class="muted" style="font-size:12px;margin-top:6px" data-i18n="set.termfont.hint">只影响本设备,立即生效。</div>
+        <h3 style="margin-top:12px" data-i18n="set.shortcuts">全局快捷键</h3>
+        <label style="display:flex;gap:8px;align-items:center;font-size:13px"><input id="setShortcuts" type="checkbox" style="width:auto" onchange="setShortcutsEnabled(this.checked)"><span data-i18n="set.shortcuts.on">启用键盘快捷键</span></label>
+        <div class="muted" style="font-size:12px;margin-top:6px" data-i18n="set.shortcuts.hint">g b 工作台 · g t 开发 · g f 文件 · g m 消息 · g s 设置 · / 搜索 · r 刷新</div>
       </div>
       <div class="set-card">
         <h3 data-i18n="upd.card">版本与更新</h3>
@@ -1031,15 +1035,20 @@ header .spacer{flex:1}
 <script>
 // ============ 状态 ============
 let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null, FILE_ENTRIES=[], FILE_ROOTS=null, FILE_ROOT_GROUPS=null;
+let FILE_LOAD_SEQ=0, FILE_APPLIED_CWD=null;
 let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
 let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=null;
+let ATTENTION_LOAD_SEQ=0, ATTENTION_TASK_SEQ=0, BOARD_LOAD_SEQ=0;
 let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
 let SETUP_SUBMITTING=false, SETUP_IN_FLIGHT=false, SETUP_REQ_ID=0, SETUP_INSPECT=null, SETUP_INSPECT_TIMER=null, SETUP_INSPECT_SEQ=0;
 // B1: SSE 链路三态与发送/消息/文件保护
 let SSE_LINK='offline', SSE_LAST_OK_TS=null; // online | reconnecting | offline
-let TERM_SENDING={}, MSG_SENDING=false, MSG_LOAD_SEQ=0, MSG_BOUND_SLUG=null, SETTINGS_SAVING=false;
+let TERM_SENDING={}, MSG_SENDING=false, MSG_LOAD_SEQ=0, MSG_PROJECT_SEQ=0, MSG_BOUND_SLUG=null, MSG_LOAD_IN_FLIGHT=false, MSG_PENDING_REQUEST=null, MSG_REFRESH_TIMER=null, SETTINGS_SAVING=false;
+const MSG_DIRTY_PROJECTS=new Set();
+const MSG_DIRTY_GENERATIONS=new Map();
+let ATTENTION_TASK_ACTION_BUSY=false;
 let OPEN_DIALOG=null,LAST_FOCUS=null;
 const HF_SENDING={};
 let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',inboxRoute:null,chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
@@ -1054,6 +1063,24 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 // session 名白名单(与后端一致),doAttachHerdr 拼进发给 PTY 的 shell 命令前必须先过
 const SESSION_NAME_RE=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const validSessionName=s=>typeof s==='string'&&SESSION_NAME_RE.test(s);
+const STABLE_STATE_KEYS={session:'cockpit-session',fileDir:'cockpit-file-dir',messageProject:'cockpit-message-project'};
+const SHORTCUTS_KEY='cockpit-shortcuts';
+let SHORTCUTS_ENABLED=storedStable(SHORTCUTS_KEY)!=='0', SHORTCUT_PREFIX=false, SHORTCUT_PREFIX_TIMER=null;
+let VIEW_LOCATION_LOCK=false, LAST_RESTORED_LOCATION='';
+let VIEW_LOAD_SUPPRESSED=false;
+function storedStable(key){try{return localStorage.getItem(key)||''}catch(e){return ''}}
+function rememberStable(key,value){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key)}catch(e){}}
+let RESTORED_SESSION=storedStable(STABLE_STATE_KEYS.session)||null;
+function rememberSession(session){if(!validSessionName(session))return;RESTORED_SESSION=session;rememberStable(STABLE_STATE_KEYS.session,session)}
+function validateRestoredSession(sessions){
+  if(RESTORED_SESSION&&sessions.includes(RESTORED_SESSION))return RESTORED_SESSION;
+  RESTORED_SESSION=sessions[0]||null;rememberStable(STABLE_STATE_KEYS.session,RESTORED_SESSION);return RESTORED_SESSION;
+}
+function filePathAllowed(path,roots){return !!path&&roots.some(root=>path===root||path.startsWith(root+'/'))}
+function rememberFileDir(path){rememberStable(STABLE_STATE_KEYS.fileDir,path)}
+function rememberMessageProject(slug){rememberStable(STABLE_STATE_KEYS.messageProject,slug)}
+function setShortcutsEnabled(on){SHORTCUTS_ENABLED=!!on;rememberStable(SHORTCUTS_KEY,on?'1':'0');SHORTCUT_PREFIX=false;renderShortcutSetting()}
+function renderShortcutSetting(){const el=document.getElementById('setShortcuts');if(el)el.checked=SHORTCUTS_ENABLED}
 function toast(m,ms=2000){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),ms)}
 // ============ 通用 dialog/focus helper(键盘可达与焦点管理) ============
 // openDialog: 记先前焦点→设 role/aria-modal/aria-labelledby→背景 .main+#side inert→初始聚焦→绑背景click+Tabtrap+Escape
@@ -1127,6 +1154,7 @@ en:{
 'set.env':'Environment check','set.env.hint':'On first use, make sure these components are ready; ❌ means install first.','set.env.herdr':'herdr (session backend)','set.env.mail':'Agent Mail (required, messaging)','set.env.missing':'not installed',
 'set.hub':'Local Agent Mail Hub address','set.hub.hint':'Controls only local agent collaboration and messages, not the Team Hub. The token is never read or shown; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ','set.hub.fix.token':'Fix: write the HTTP_BEARER_TOKEN used by the local Hub to the token= line in ~/.agent-mail/client.env, then run chmod 600 ~/.agent-mail/client.env. Keep hub= pointed at the local Hub, then click Save here or restart Cockpit.','set.hub.fix.conn':'Fix: make sure the local Hub process is running and listening on the expected port, then verify the hub= address in ~/.agent-mail/client.env. After editing it, click Save here or restart Cockpit.','set.teamhub':'Team Hub connection','set.teamhub.hint':'Applied immediately. Company-private IPs may use HTTP; public endpoints must use HTTPS.',
 'set.termfont':'Terminal font size','set.termfont.hint':'Applies to this device only, effective immediately.',
+'set.shortcuts':'Global shortcuts','set.shortcuts.on':'Enable keyboard shortcuts','set.shortcuts.hint':'g b Workspace · g t Dev · g f Files · g m Messages · g s Settings · / Search · r Refresh',
 'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ','upd.banner':'Update available: {cur} → {lat}','upd.view':'Release notes','upd.dismiss':'Dismiss','upd.card':'Version & updates','upd.current':'Current version','upd.check':'Check for updates','upd.checking':'Checking…','upd.uptodate':'You are on the latest version.','upd.unavailable':'Version check is unavailable.','upd.latest':'Latest: {lat}',
 },
 ja:{
@@ -1149,6 +1177,7 @@ ja:{
 'set.env':'環境チェック','set.env.hint':'初回利用前にこれらのコンポーネントを確認してください。❌ は要インストールです。','set.env.herdr':'herdr(セッションバックエンド)','set.env.mail':'Agent Mail(必須、メッセージ機能)','set.env.missing':'未インストール',
 'set.hub':'ローカル Agent Mail Hub アドレス','set.hub.hint':'ローカル agent の連携とメッセージだけを制御し、Team Hub は切り替えません。Token は表示せず、保存後すぐ反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ','set.hub.fix.token':'修復: ローカル Hub の起動に使った HTTP_BEARER_TOKEN を ~/.agent-mail/client.env の token= 行へ書き込み、chmod 600 ~/.agent-mail/client.env を実行してください。hub= はローカル Hub を指すままにして、この画面で「保存」を押すか Cockpit を再起動します。','set.hub.fix.conn':'修復: ローカル Hub プロセスが起動して想定ポートを listen していることと、~/.agent-mail/client.env の hub= アドレスを確認してください。変更後、この画面で「保存」を押すか Cockpit を再起動します。','set.teamhub':'Team Hub 接続','set.teamhub.hint':'保存後すぐ反映されます。社内プライベート IP は HTTP を使用でき、公開アドレスには HTTPS が必要です。',
 'set.termfont':'端末フォントサイズ','set.termfont.hint':'このデバイスのみに適用され、即時反映されます。',
+'set.shortcuts':'グローバルショートカット','set.shortcuts.on':'キーボードショートカットを有効化','set.shortcuts.hint':'g b ワークスペース · g t 開発 · g f ファイル · g m メッセージ · g s 設定 · / 検索 · r 更新',
 'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ','upd.banner':'新バージョンがあります: {cur} → {lat}','upd.view':'リリースノート','upd.dismiss':'閉じる','upd.card':'バージョンと更新','upd.current':'現在のバージョン','upd.check':'更新を確認','upd.checking':'確認中…','upd.uptodate':'最新バージョンです。','upd.unavailable':'バージョン確認は利用できません。','upd.latest':'最新: {lat}',
 }};
 let LANG=localStorage.getItem('cockpit-lang')||'zh';
@@ -1303,6 +1332,7 @@ function renderSettings(){
   document.getElementById('setMaxTerms').value=S.term?.max_terms??16;
   document.getElementById('setIdleTtl').value=S.term?.idle_ttl??1800;
   document.getElementById('setWriteTimeout').value=S.term?.write_timeout??2;
+  renderShortcutSetting();
 }
 function setToggleAgent(cb){
   const list=SETTINGS_EDIT.enabled_agents||[];
@@ -1868,16 +1898,43 @@ async function teamMarkInboxRead(ids){
   try{await teamApi('inbox/mark-read','POST',{ids});const now=new Date().toISOString();TEAM.inbox.forEach(item=>{if(ids.includes(Number(item.id)))item.read_ts=now});teamRender();toast('已标为已读')}
   catch(e){toast('标记已读失败: '+e,5000)}finally{TEAM.mutating=false}
 }
+function viewFromLocation(){
+  const view=location.hash.startsWith('#/')?location.hash.slice(2).split('/')[0]:'';
+  return [...document.querySelectorAll('#nav button[data-view]')].some(button=>button.dataset.view===view)?view:null;
+}
+function syncViewLocation(v,replace=false){
+  if(v==='attention'&&location.hash.startsWith('#/attention/'))return;
+  if(location.hash==='#/'+v)return;
+  if(replace)history.replaceState(null,'','/#/'+v);
+  else history.pushState(null,'','/#/'+v);
+  LAST_RESTORED_LOCATION=location.pathname+location.search+location.hash;
+}
+function restoreViewFromLocation(){
+  const target=location.pathname+location.search+location.hash;
+  if(target===LAST_RESTORED_LOCATION)return;
+  LAST_RESTORED_LOCATION=target;
+  const view=viewFromLocation()||'attention';
+  const current=document.querySelector('#nav button.active')?.dataset.view;
+  VIEW_LOCATION_LOCK=true;
+  try{
+    if(current!==view)showView(view);
+    if(location.hash.startsWith('#/attention/'))handleAttentionHash();
+  }finally{VIEW_LOCATION_LOCK=false}
+}
+window.addEventListener('popstate',restoreViewFromLocation);
+window.addEventListener('hashchange',restoreViewFromLocation);
 function showView(v){
+  if(!document.getElementById('view-'+v))v='attention';
   const prevView=document.querySelector('#nav button.active')?.dataset.view;
   const drawer=document.getElementById('termDrawer');
   if(drawer&&drawer.classList.contains('show'))closeTerm();
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-'+v).classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+  if(!VIEW_LOCATION_LOCK)syncViewLocation(v);
   if(v==='board')refreshBoard();
   if(v==='attention')loadAttention();
-  if(v==='msgs')loadProjList();
+  if(v==='msgs'&&!VIEW_LOAD_SUPPRESSED)loadProjList();
   if(v==='team')teamLoad();
   if(v==='files')loadFileTree();
   if(v==='term')termEnsure();
@@ -1913,14 +1970,22 @@ const TASK_STATUS_LABEL={blocked:'待处理',working:'工作中',done:'已完成
 const TASK_ROLE_LABEL={lead:'负责人',developer:'开发',reviewer:'复核',researcher:'调研'};
 function taskStatusKey(value,total){return total===0?'empty':(Object.prototype.hasOwnProperty.call(TASK_STATUS_LABEL,value)?value:'unknown')}
 async function loadAttention(payload){
+  const list=document.getElementById('attentionList');
+  const seq=++ATTENTION_LOAD_SEQ;
+  if(!payload){list?.setAttribute('aria-busy','true');document.getElementById('attentionInfo').textContent='正在刷新…'}
   try{
     const d=payload||await api('/api/attention');
+    if(seq!==ATTENTION_LOAD_SEQ)return;
     ATTENTION=d;CAPABILITIES=d.capabilities||{};
     document.getElementById('attentionN').textContent=d.count||0;
     const unread=Math.max(0,Number(d.mail_unread)||0);
     document.getElementById('attentionInfo').textContent=(d.sessions||[]).length+' 个 session · '+(d.count||0)+' 项需处理'+(unread?' · '+unread+' 条未读消息':'');
     renderAttention(d);
-  }catch(e){document.getElementById('attentionList').textContent='任务看板加载失败: '+e}
+  }catch(e){
+    if(seq!==ATTENTION_LOAD_SEQ)return;
+    if(ATTENTION)document.getElementById('attentionInfo').textContent='刷新失败，显示上次结果';
+    else if(list)list.textContent='任务看板加载失败: '+e;
+  }finally{if(seq===ATTENTION_LOAD_SEQ)list?.setAttribute('aria-busy','false')}
 }
 async function refreshTaskReports(){
   const button=document.getElementById('taskReportBtn');
@@ -2000,12 +2065,19 @@ async function openAttention(i,updateHash=true){
   const item=ATTENTION&&(ATTENTION.items||[])[i];if(!item)return;
   if(updateHash)replaceAttentionHash(item);
   const t=item.target||{};
-  if(item.kind==='pane_blocked')enterHerdrFlow(t.session,t.pane_id);
-  else if(item.kind==='task_failed'||item.kind==='task_review')openTaskAttention(t.task_id);
-  else if(item.kind==='mail_unread')openMailAttention(t.project_slug,t.message_id);
+  const previousLock=VIEW_LOCATION_LOCK;
+  if(updateHash)VIEW_LOCATION_LOCK=true;
+  let pending;
+  try{
+    if(item.kind==='pane_blocked')enterHerdrFlow(t.session,t.pane_id);
+    else if(item.kind==='task_failed'||item.kind==='task_review')pending=openTaskAttention(t.task_id);
+    else if(item.kind==='mail_unread')pending=openMailAttention(t.project_slug,t.message_id);
+  }finally{VIEW_LOCATION_LOCK=previousLock}
+  if(pending)await pending;
 }
 async function openTaskAttention(taskId){
   if(!taskId)return;
+  const seq=++ATTENTION_TASK_SEQ;
   showView('attention');ATTENTION_TASK_ID=taskId;
   const modal=document.getElementById('attentionModal');modal.classList.add('show');openDialog(modal,{labelledBy:'attentionModalTitle',closer:closeAttentionModal});
   document.getElementById('attentionModalTitle').textContent='任务 '+taskId;
@@ -2015,29 +2087,45 @@ async function openTaskAttention(taskId){
   document.getElementById('attentionDiscardBtn').classList.add('hidden');
   try{
     const task=await api('/api/tasks/'+encodeURIComponent(taskId));
+    if(seq!==ATTENTION_TASK_SEQ||ATTENTION_TASK_ID!==taskId)return;
     document.getElementById('attentionModalMeta').textContent=(task.workdir||'')+' · '+task.status;
     let content=(task.output||[]).join('\n')||task.output_tail||'(没有输出)';
     if(task.status==='done'&&task.run_workdir){
       const diff=await api('/api/tasks/'+encodeURIComponent(taskId)+'/diff');
+      if(seq!==ATTENTION_TASK_SEQ||ATTENTION_TASK_ID!==taskId)return;
       content=diff.diff||'(没有代码改动，应用后会清理隔离 worktree)';
       document.getElementById('attentionApplyBtn').classList.remove('hidden');
     }
     if(task.run_workdir)document.getElementById('attentionDiscardBtn').classList.remove('hidden');
     document.getElementById('attentionModalBody').textContent=content;
-  }catch(e){document.getElementById('attentionModalBody').textContent='加载失败: '+e}
+  }catch(e){if(seq===ATTENTION_TASK_SEQ&&ATTENTION_TASK_ID===taskId)document.getElementById('attentionModalBody').textContent='加载失败: '+e}
 }
-function closeAttentionModal(){document.getElementById('attentionModal').classList.remove('show');closeDialog(document.getElementById('attentionModal'));ATTENTION_TASK_ID=null}
+function closeAttentionModal(){ATTENTION_TASK_SEQ++;document.getElementById('attentionModal').classList.remove('show');closeDialog(document.getElementById('attentionModal'));ATTENTION_TASK_ID=null}
 async function attentionTaskAction(action){
-  if(!ATTENTION_TASK_ID)return;
+  if(!ATTENTION_TASK_ID||ATTENTION_TASK_ACTION_BUSY)return;
+  const taskId=ATTENTION_TASK_ID;
   const label=action==='apply'?'应用':'丢弃';
   if(!window.confirm('确认'+label+'这个任务的隔离改动？'))return;
+  if(ATTENTION_TASK_ID!==taskId)return;
+  ATTENTION_TASK_ACTION_BUSY=true;
+  document.getElementById('attentionApplyBtn').disabled=true;
+  document.getElementById('attentionDiscardBtn').disabled=true;
   try{
-    const r=await api('/api/tasks/'+encodeURIComponent(ATTENTION_TASK_ID)+'/apply?action='+encodeURIComponent(action),{method:'POST'});
-    toast(label+'完成: '+(r.result||r.action||'ok'));closeAttentionModal();history.replaceState(null,'','/#/attention');loadAttention();
+    const r=await api('/api/tasks/'+encodeURIComponent(taskId)+'/apply?action='+encodeURIComponent(action),{method:'POST'});
+    toast(label+'完成: '+(r.result||r.action||'ok'));
+    if(ATTENTION_TASK_ID===taskId){closeAttentionModal();history.replaceState(null,'','/#/attention')}
+    loadAttention();
   }catch(e){toast(label+'失败: '+e,4500)}
+  finally{
+    ATTENTION_TASK_ACTION_BUSY=false;
+    document.getElementById('attentionApplyBtn').disabled=false;
+    document.getElementById('attentionDiscardBtn').disabled=false;
+  }
 }
 async function openMailAttention(slug,messageId){
-  showView('msgs');await loadProjList(slug,messageId);
+  const previous=VIEW_LOAD_SUPPRESSED;VIEW_LOAD_SUPPRESSED=true;
+  try{showView('msgs')}finally{VIEW_LOAD_SUPPRESSED=previous}
+  await loadProjList(slug,messageId);
 }
 async function handleAttentionHash(){
   if(!location.hash.startsWith('#/attention/'))return;
@@ -2094,15 +2182,21 @@ async function setupPush(){
 
 // ============ 看板 ============
 async function refreshBoard(){
+  const board=document.getElementById('board'),info=document.getElementById('boardInfo');
+  const seq=++BOARD_LOAD_SEQ;
+  if(board)board.setAttribute('aria-busy','true');
+  if(info)info.textContent='正在刷新…';
   try{
     const d=await api('/api/herdr/snapshot');
+    if(seq!==BOARD_LOAD_SEQ)return;
     BOARD=d;
     renderBoard(d);
     launchSessionChanged(false);
   }catch(e){
-    document.getElementById('boardInfo').textContent='加载失败';
+    if(seq!==BOARD_LOAD_SEQ)return;
+    if(info)info.textContent=BOARD?'刷新失败，显示上次结果':'加载失败';
     toast('看板加载失败: '+e);
-  }
+  }finally{if(seq===BOARD_LOAD_SEQ&&board)board.setAttribute('aria-busy','false')}
 }
 
 function classify(status,agent){
@@ -2435,10 +2529,12 @@ async function loadSessions(preferredSession=''){
     const selected=preferredSession||sel.value;
     const running=(d.sessions||[]).filter(s=>s.status==='running');
     TERM_SESSION_CATALOG=running.filter(s=>validSessionName(s.name)).map(s=>s.name);
+    const restored=validateRestoredSession(TERM_SESSION_CATALOG);
     LAUNCH_SESSION_DIRS=Object.fromEntries(running.map(s=>[s.name,s.directory||'']));
     renderTermOptions();
     sel.innerHTML=(d.sessions||[]).map(s=>`<option value="${esc(s.name)}" ${s.status==='running'?'':'disabled'}>${esc(s.name)}${s.status==='running'?'':' (停)'}</option>`).join('');
-    if(selected&&[...sel.options].some(o=>o.value===selected&&!o.disabled))sel.value=selected;
+    const target=selected||restored;
+    if(target&&[...sel.options].some(o=>o.value===target&&!o.disabled))sel.value=target;
     launchSessionChanged(false);
   }catch(e){}
 }
@@ -2507,8 +2603,10 @@ async function startAgent(){
 
 // ============ 消息 view ============
 async function loadProjList(preferredSlug,focusMessageId){
+  const seq=++MSG_PROJECT_SEQ;
   try{
     const d=await api('/api/overview');
+    if(seq!==MSG_PROJECT_SEQ)return;
     CAPABILITIES.agent_mail=d.agent_mail||CAPABILITIES.agent_mail;
     const sel=document.getElementById('msgProj');
     if(d.agent_mail&&d.agent_mail.available===false){
@@ -2519,38 +2617,96 @@ async function loadProjList(preferredSlug,focusMessageId){
       return;
     }
     sel.disabled=false;
-    if(!sel.options.length)d.projects.forEach(p=>sel.add(new Option(p.slug,p.slug)));
-    if(preferredSlug&&[...sel.options].some(o=>o.value===preferredSlug))sel.value=preferredSlug;
-    await loadProjectMsgs(focusMessageId);
+    const projects=d.projects||[];
+    const stored=preferredSlug||sel.value||storedStable(STABLE_STATE_KEYS.messageProject);
+    sel.innerHTML='';projects.forEach(p=>sel.add(new Option(p.slug,p.slug)));
+    if(stored&&projects.some(p=>p.slug===stored))sel.value=stored;
+    else if(projects.length)sel.value=projects[0].slug;
+    rememberMessageProject(sel.value);
+    await loadProjectMsgs(focusMessageId,false,sel.value);
   }catch(e){toast('加载失败: '+e)}
 }
 let MSG_FILTER=null;
 let PROJ_MSG_CACHE=null;
-async function loadProjectMsgs(focusMessageId){
-  const slug=document.getElementById('msgProj').value;if(!slug)return;
+function msgDraft(){
+  const ids=['cmpFrom','cmpTo','cmpSubject','cmpBody','cmpIntent','cmpImportance','cmpHard'];
+  return Object.fromEntries(ids.map(id=>{const el=document.getElementById(id);return [id,el?(el.type==='checkbox'?el.checked:el.value):null]}));
+}
+function restoreMsgDraft(draft){
+  if(!draft)return;
+  Object.entries(draft).forEach(([id,value])=>{const el=document.getElementById(id);if(el&&value!==null){if(el.type==='checkbox')el.checked=!!value;else el.value=value}});
+}
+function setMsgLoadState(state,detail=''){
+  const list=document.getElementById('msgList'),status=document.getElementById('msgLoadState');
+  if(list)list.setAttribute('aria-busy',String(state==='loading'));
+  if(status)status.textContent=state==='loading'?`正在刷新 ${detail}…`:(state==='error'?`刷新失败，显示上次结果：${detail}`:'');
+}
+function queueMessageRequest(slug,focusMessageId,background){
+  const previous=MSG_PENDING_REQUEST;
+  const sameProject=previous?.slug===slug;
+  MSG_PENDING_REQUEST={
+    slug,
+    focusMessageId:focusMessageId??(sameProject?previous.focusMessageId:null)??null,
+    background:sameProject&&previous.background===false?false:background,
+  };
+}
+function scheduleMessageRefresh(slug){
+  if(!slug)return;
+  MSG_DIRTY_PROJECTS.add(slug);
+  MSG_DIRTY_GENERATIONS.set(slug,(MSG_DIRTY_GENERATIONS.get(slug)||0)+1);
+  const active=document.querySelector('#nav button.active')?.dataset.view;
+  if(active!=='msgs'||document.hidden||document.getElementById('msgProj')?.value!==slug)return;
+  if(MSG_SENDING){queueMessageRequest(slug,null,true);return}
+  clearTimeout(MSG_REFRESH_TIMER);MSG_REFRESH_TIMER=setTimeout(()=>loadProjectMsgs(undefined,true),250);
+}
+async function loadProjectMsgs(focusMessageId,background=false,requestedSlug){
+  const slug=requestedSlug||document.getElementById('msgProj').value;if(!slug)return;
+  if(MSG_LOAD_IN_FLIGHT){
+    queueMessageRequest(slug,focusMessageId,background);return;
+  }
+  MSG_LOAD_IN_FLIGHT=true;
   const seq=++MSG_LOAD_SEQ;
-  MSG_BOUND_SLUG=null;
-  setMsgComposeEnabled(false);
+  const dirtyGeneration=MSG_DIRTY_GENERATIONS.get(slug)||0;
+  let loaded=false;
+  if(!background){MSG_BOUND_SLUG=null;setMsgComposeEnabled(false)}
+  setMsgLoadState('loading',slug);
   try{
     const d=await api('/api/projects/'+encodeURIComponent(slug));
     if(seq!==MSG_LOAD_SEQ)return; // 旧响应丢弃
     if(document.getElementById('msgProj').value!==slug)return;
+    const draft=background&&MSG_BOUND_SLUG===slug?msgDraft():null;
     CURRENT_PROJ=d.project;
     MSG_BOUND_SLUG=slug;
     CAPABILITIES.agent_mail=d.agent_mail||CAPABILITIES.agent_mail;
     PROJ_MSG_CACHE=d;
+    rememberMessageProject(slug);
     renderProjAgentList(d);
     renderProjMsgs(d,focusMessageId);
+    restoreMsgDraft(draft);
     setMsgComposeEnabled(true);
+    setMsgLoadState('ready');
+    loaded=true;
   }catch(e){
     if(seq!==MSG_LOAD_SEQ)return;
     toast('加载失败: '+e);
     setMsgComposeEnabled(!!(CURRENT_PROJ&&MSG_BOUND_SLUG));
+    setMsgLoadState('error',String(e));
+  }finally{
+    if(seq===MSG_LOAD_SEQ){
+      MSG_LOAD_IN_FLIGHT=false;
+      if(loaded&&MSG_BOUND_SLUG===slug&&(MSG_DIRTY_GENERATIONS.get(slug)||0)===dirtyGeneration){
+        MSG_DIRTY_PROJECTS.delete(slug);
+      }
+      if(MSG_PENDING_REQUEST){
+        const pending=MSG_PENDING_REQUEST;MSG_PENDING_REQUEST=null;
+        loadProjectMsgs(pending.focusMessageId,pending.background,pending.slug);
+      }
+    }
   }
 }
 function setMsgComposeEnabled(on){
   ['cmpFrom','cmpTo','cmpSubject','cmpBody','cmpIntent','cmpImportance','cmpHard'].forEach(id=>{
-    const el=document.getElementById(id);if(el)el.disabled=!on;
+    const el=document.getElementById(id);if(el)el.disabled=!on||MSG_SENDING;
   });
   const sendBtn=document.getElementById('cmpSendBtn');
   if(sendBtn)sendBtn.disabled=!on||MSG_SENDING;
@@ -2654,6 +2810,10 @@ async function sendMsg(){
     // 仍绑定当前项目时恢复可编辑
     if(MSG_BOUND_SLUG&&document.getElementById('msgProj')?.value===MSG_BOUND_SLUG){
       setMsgComposeEnabled(true);
+    }
+    if(MSG_PENDING_REQUEST){
+      const pending=MSG_PENDING_REQUEST;MSG_PENDING_REQUEST=null;
+      loadProjectMsgs(pending.focusMessageId,pending.background,pending.slug);
     }
   }
 }
@@ -2768,6 +2928,7 @@ async function restoreTerms(){
       TERM_SESSION_CATALOG=(sessionData.sessions||[])
         .filter(session=>session.status==='running'&&validSessionName(session.name))
         .map(session=>session.name);
+      validateRestoredSession(TERM_SESSION_CATALOG);
       for(const item of (termData.terms||[])){
         const id=String(item.id||'');
         if(!id||item.alive===false||TERMS.includes(id))continue;
@@ -2775,6 +2936,7 @@ async function restoreTerms(){
         if(item.label&&TERM_SESSION_CATALOG.includes(item.label))TERM_SESSIONS[id]=item.label;
       }
       renderTermOptions();
+      if(!TERM_ID&&RESTORED_SESSION)document.getElementById('termSelect').value=TERM_SESSION_PREFIX+RESTORED_SESSION;
     }catch(e){TERM_RESTORE_PROMISE=null;renderTermOptions()}
   })();
   return TERM_RESTORE_PROMISE;
@@ -3106,6 +3268,7 @@ function enterHerdrFlow(session,paneId){
   if(!session&&CURRENT_TERM){session=CURRENT_TERM.session;paneId=paneId||CURRENT_TERM.paneId}
   if(!session&&TERM_ID&&TERM_SESSIONS[TERM_ID])session=TERM_SESSIONS[TERM_ID];
   HF_SESSION=session||null;
+  if(HF_SESSION)rememberSession(HF_SESSION);
   HF_FOCUS_PANE=paneId||null;
   showView('herdrflow');
 }
@@ -3119,8 +3282,10 @@ async function hfStart(){
   const sessions=[...agentSess,...otherSess];
   const sel=document.getElementById('hfSession');
   sel.innerHTML=sessions.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  if(!HF_SESSION&&RESTORED_SESSION&&sessions.includes(RESTORED_SESSION))HF_SESSION=RESTORED_SESSION;
   if(HF_SESSION&&sessions.includes(HF_SESSION))sel.value=HF_SESSION;
   else if(sessions.length){sel.value=sessions[0];HF_SESSION=sessions[0]}
+  if(HF_SESSION)rememberSession(HF_SESSION);
   hfLoad();
   if(HF_TIMER)clearInterval(HF_TIMER);
   HF_TIMER=setInterval(hfRefreshAll,3000);
@@ -3133,6 +3298,7 @@ function hfLoad(){
     HF_FOCUS_PANE=null;
   }
   HF_SESSION=nextSession;
+  if(HF_SESSION)rememberSession(HF_SESSION);
   hfRender();
   hfRefreshAll();
 }
@@ -3766,8 +3932,9 @@ function showTermInstance(id){
 }
 function termSwitch(id){
   if(!id)return;
-  if(id.startsWith(TERM_SESSION_PREFIX)){doAttachHerdr(id.slice(TERM_SESSION_PREFIX.length));return}
+  if(id.startsWith(TERM_SESSION_PREFIX)){const session=id.slice(TERM_SESSION_PREFIX.length);rememberSession(session);doAttachHerdr(session);return}
   TERM_ID=id;
+  if(TERM_SESSIONS[id])rememberSession(TERM_SESSIONS[id]);
   if(TERM_INSTANCES[id]){showTermInstance(id)}
   else{termMount(id)}
 }
@@ -4318,14 +4485,21 @@ async function setupHerdrOnboarding(command){
 
 // ============ 文件 ============
 async function loadFileTree(){
+  const seq=++FILE_LOAD_SEQ;
+  const tree=document.getElementById('fileTree'),info=document.getElementById('fileSearchInfo');
+  if(tree)tree.setAttribute('aria-busy','true');
+  if(info)info.textContent='正在刷新 '+(FILE_CWD||'目录')+'…';
   try{
-    if(!FILE_ROOTS){const r=await api('/api/files/roots');setFileRoots(r)}
-    if(!FILE_CWD)FILE_CWD=FILE_ROOTS[0]||'/';
-    const d=await api('/api/files?path='+encodeURIComponent(FILE_CWD));
+    if(!FILE_ROOTS){const r=await api('/api/files/roots');if(seq!==FILE_LOAD_SEQ)return;setFileRoots(r)}
+    if(!FILE_CWD){const stored=storedStable(STABLE_STATE_KEYS.fileDir);FILE_CWD=filePathAllowed(stored,FILE_ROOTS)?stored:(FILE_ROOTS[0]||'/')}
+    const target=FILE_CWD;
+    const d=await api('/api/files?path='+encodeURIComponent(target));
+    if(seq!==FILE_LOAD_SEQ||FILE_CWD!==target)return;
     FILE_CWD=d.path;
+    FILE_APPLIED_CWD=d.path;
     FILE_ENTRIES=d.entries;
+    rememberFileDir(d.path);
     document.getElementById('fileSearchInfo').textContent='';
-    const tree=document.getElementById('fileTree');
     // 当前命中的白名单根(最长前缀);根以上的路径段后端会拒绝,不展示
     const root=FILE_ROOTS.filter(r=>d.path===r||d.path.startsWith(r+'/')).sort((a,b)=>b.length-a.length)[0]||d.path;
     // 面包屑:从白名单根开始,可点击跳转
@@ -4360,7 +4534,15 @@ async function loadFileTree(){
     const upBtn=d.path!==root?`<div class="ft-item" data-action="fileUp" role="button" tabindex="0">📁 <span class="muted">${t('files.uptop','‥ (上级)')}</span></div>`:'';
     tree.innerHTML=bc+upBtn+d.entries.map((e,i)=>`
       <div class="ft-item"><span class="ft-name" style="flex:1;overflow:hidden;text-overflow:ellipsis" role="button" tabindex="0" data-action="${e.type==='dir'?'fileCd':'fileOpen'}" data-path="${esc(d.path)}" data-name="${esc(e.name)}">${e.type==='dir'?'📁':'📄'} ${esc(e.name)}</span>${e.type==='file'?`<button class="icon" data-action="fileDownloadEntry" data-idx="${i}" title="下载">⬇️</button>`:`<button class="icon" data-action="fileDownloadDir" data-path="${esc(d.path)}" data-name="${esc(e.name)}" title="打包下载目录">⬇️</button>`}</div>`).join('');
-  }catch(e){toast('列目录失败: '+e)}
+  }catch(e){
+    if(seq!==FILE_LOAD_SEQ)return;
+    const fallback=filePathAllowed(FILE_APPLIED_CWD,FILE_ROOTS||[])?FILE_APPLIED_CWD:((FILE_ROOTS||[])[0]||null);
+    const retry=!FILE_APPLIED_CWD&&fallback&&fallback!==FILE_CWD;
+    FILE_CWD=fallback;
+    if(retry){rememberFileDir(fallback);loadFileTree()}
+    if(info)info.textContent=FILE_APPLIED_CWD?'刷新失败，显示上次结果':'加载失败';
+    toast('列目录失败: '+e)
+  }finally{if(seq===FILE_LOAD_SEQ&&tree)tree.setAttribute('aria-busy','false')}
 }
 function setFileRoots(r){FILE_ROOTS=r.roots||[];FILE_ROOT_GROUPS=r.groups||null}
 function fileRootLabel(path){return path.replace(/^\/home\/[^/]+/,'~')||'/'}
@@ -4401,21 +4583,27 @@ async function setupWorkspaceFromFiles(){
   showSetupModal();
 }
 async function fileSearch(){
+  const seq=++FILE_LOAD_SEQ;
   const input=document.getElementById('fileSearchInput');
+  const tree=document.getElementById('fileTree');
   const q=input.value.trim();
   if(!q){fileSearchClear();return}
+  if(tree)tree.setAttribute('aria-busy','true');
+  document.getElementById('fileSearchInfo').textContent='正在搜索…';
   try{
-    if(!FILE_CWD){const r=await api('/api/files/roots');setFileRoots(r);FILE_CWD=FILE_ROOTS[0]}
+    if(!FILE_CWD){const r=await api('/api/files/roots');if(seq!==FILE_LOAD_SEQ)return;setFileRoots(r);const stored=storedStable(STABLE_STATE_KEYS.fileDir);FILE_CWD=filePathAllowed(stored,FILE_ROOTS)?stored:FILE_ROOTS[0]}
+    if(seq!==FILE_LOAD_SEQ)return;
     const base=FILE_CWD;
     const d=await api('/api/files/search?path='+encodeURIComponent(base)+'&q='+encodeURIComponent(q));
-    if(input.value.trim()!==q||FILE_CWD!==base)return;
+    if(seq!==FILE_LOAD_SEQ||input.value.trim()!==q||FILE_CWD!==base)return;
     FILE_ENTRIES=d.results||[];
     document.getElementById('fileSearchInfo').textContent=`${FILE_ENTRIES.length} 项${d.truncated?' · 结果已截断':''}`;
     const tree=document.getElementById('fileTree');
     tree.innerHTML=`<div class="ft-bc">🔎 ${esc(d.query)} · ${esc(d.path)}</div>`+
       (FILE_ENTRIES.length?FILE_ENTRIES.map((e,i)=>`
         <div class="ft-item"><span class="ft-name" style="flex:1;overflow:hidden;text-overflow:ellipsis" role="button" tabindex="0" data-action="fileSearchOpen" data-idx="${i}">${e.type==='dir'?'📁':'📄'} ${esc(e.relative)}</span>${e.type==='file'?`<button class="icon" data-action="fileSearchDownload" data-idx="${i}" title="下载">⬇️</button>`:''}</div>`).join(''):'<div class="empty">没有匹配结果</div>');
-  }catch(e){toast('搜索失败: '+e)}
+  }catch(e){if(seq===FILE_LOAD_SEQ){document.getElementById('fileSearchInfo').textContent='搜索失败，显示上次结果';toast('搜索失败: '+e)}}
+  finally{if(seq===FILE_LOAD_SEQ&&tree)tree.setAttribute('aria-busy','false')}
 }
 function fileSearchClear(){
   document.getElementById('fileSearchInput').value='';
@@ -4617,6 +4805,8 @@ function connectSSE(){
       return;
     }
     markSseEventOk();
+    BOARD_LOAD_SEQ++;
+    document.getElementById('board')?.setAttribute('aria-busy','false');
     BOARD=d;renderBoard(d);launchSessionChanged(false);
   });
   SSE.addEventListener('attention',e=>{
@@ -4626,7 +4816,16 @@ function connectSSE(){
       return;
     }
     markSseEventOk();
+    ATTENTION_LOAD_SEQ++;
     loadAttention(d);
+  });
+  SSE.addEventListener('messages',e=>{
+    let d;
+    try{d=JSON.parse(e.data)}catch(_err){return}
+    markSseEventOk();
+    const slug=document.getElementById('msgProj')?.value||'';
+    if(Array.isArray(d.projects))d.projects.forEach(project=>MSG_DIRTY_PROJECTS.add(project));
+    if(MSG_DIRTY_PROJECTS.has(slug))scheduleMessageRefresh(slug);
   });
   // 断线只标离线/重连中；禁止定时无条件恢复绿点
   SSE.onerror=()=>{
@@ -4649,6 +4848,10 @@ function recoverPageState(){
   // Herdr 输出或发送 PTY resize（SIGWINCH 会让 TUI 整屏重绘）；只救真正关闭的连接。
   if(!SSE||SSE.readyState===2)connectSSE();
   const activeView=document.querySelector('#nav button.active')?.dataset.view;
+  if(activeView==='msgs'){
+    const slug=document.getElementById('msgProj')?.value||'';
+    if(MSG_DIRTY_PROJECTS.has(slug))scheduleMessageRefresh(slug);
+  }
   if(activeView==='term'&&TERM_ID){
     const inst=TERM_INSTANCES[TERM_ID];
     if(inst&&(!inst.ws||inst.ws.readyState>=2))showTermInstance(TERM_ID);
@@ -4907,7 +5110,31 @@ function bindDelegation(){
   document.addEventListener('focusout',()=>setTimeout(fitVisibleTerm,50));
   document.addEventListener('focusin',keepFocusedControlVisible);
   document.addEventListener('keydown',e=>{if(e.key==='Escape')hfExitFullscreen()});
+  document.addEventListener('keydown',handleGlobalShortcut);
   document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)hfExitFullscreen(false)});
+}
+
+function shortcutGuard(e){
+  if(!SHORTCUTS_ENABLED||e.defaultPrevented||e.isComposing||e.ctrlKey||e.altKey||e.metaKey||OPEN_DIALOG)return true;
+  const target=e.target,tag=target?.tagName;
+  return tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||target?.isContentEditable||target?.closest?.('.xterm');
+}
+function focusViewSearch(){
+  if(document.querySelector('#nav button.active')?.dataset.view!=='files')showView('files');
+  requestAnimationFrame(()=>{const target=document.getElementById('fileSearchInput');if(target){target.focus();target.select()}});
+}
+function handleGlobalShortcut(e){
+  if(shortcutGuard(e)){SHORTCUT_PREFIX=false;return}
+  const key=e.key.toLowerCase();
+  if(SHORTCUT_PREFIX){
+    SHORTCUT_PREFIX=false;clearTimeout(SHORTCUT_PREFIX_TIMER);
+    const view={b:'attention',t:'term',f:'files',m:'msgs',s:'settings'}[key];
+    if(view){e.preventDefault();showView(view)}
+    return;
+  }
+  if(key==='g'){SHORTCUT_PREFIX=true;clearTimeout(SHORTCUT_PREFIX_TIMER);SHORTCUT_PREFIX_TIMER=setTimeout(()=>{SHORTCUT_PREFIX=false},1200);return}
+  if(key==='/'){e.preventDefault();focusViewSearch()}
+  else if(key==='r'){e.preventDefault();refreshCurrent()}
 }
 
 // ============ init ============
@@ -4967,6 +5194,9 @@ async function init(){
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
   applyLang();
   scheduleTermThemePrewarm();
+  const initialView=viewFromLocation()||'attention';
+  if(!viewFromLocation())syncViewLocation(initialView,true);
+  VIEW_LOCATION_LOCK=true;try{showView(initialView)}finally{VIEW_LOCATION_LOCK=false}
   loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
   document.addEventListener('visibilitychange',recoverPageState);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&TEAM.authenticated&&TEAM.human&&TEAM_POLL_TIMER){clearTimeout(TEAM_POLL_TIMER);TEAM_POLL_TIMER=null;teamPollTick()}});
@@ -4976,7 +5206,9 @@ async function init(){
   COMPACT_SCREEN_MQ.addEventListener?.('change',()=>{
     for(const id of Object.keys(TERM_SESSIONS))startTermZoomLease(id);
   });
-  connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();handleAttentionHash();loadVersion();
+  connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();
+  VIEW_LOCATION_LOCK=true;try{await handleAttentionHash()}finally{VIEW_LOCATION_LOCK=false}
+  loadVersion();
 }
 init();
 </script>

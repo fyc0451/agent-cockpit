@@ -46,6 +46,37 @@ def message_timestamp(message: dict[str, Any], default: float = 0.0) -> float:
             return default
 
 
+def message_state_revision() -> tuple[tuple[int, int], ...]:
+    """协调库及 WAL 的轻量版本；文件变化时调用方再查询 receipt 签名。"""
+    revisions = []
+    for path in (DB_PATH, Path(str(DB_PATH) + "-wal")):
+        try:
+            stat = path.stat()
+            revisions.append((stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            revisions.append((0, 0))
+    return tuple(revisions)
+
+
+def message_project_signatures() -> dict[str, tuple[tuple[Any, ...], ...]]:
+    """按项目返回不含正文的 receipt 行签名，供消息页revision检测。"""
+    if not DB_PATH.is_file():
+        return {}
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT project_key,recipient,message_id,state,reason,ack_pending,updated_ts "
+            "FROM receipts ORDER BY project_key,recipient,message_id"
+        ).fetchall()
+    grouped: dict[str, list[tuple[Any, ...]]] = {}
+    for row in rows:
+        key = str(Path(row["project_key"]).expanduser().resolve())
+        grouped.setdefault(key, []).append((
+            row["recipient"], row["message_id"], row["state"], row["reason"],
+            row["ack_pending"], row["updated_ts"],
+        ))
+    return {key: tuple(values) for key, values in grouped.items()}
+
+
 def _initialize_connection(con: sqlite3.Connection) -> None:
     mode = con.execute("PRAGMA journal_mode").fetchone()[0]
     if str(mode).lower() != "wal":

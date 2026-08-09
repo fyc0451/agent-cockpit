@@ -116,6 +116,49 @@ def global_unread_count() -> int:
     return r["n"] if r else 0
 
 
+def data_version() -> int:
+    """返回只读连接观察到的外部提交版本；本连接从不写数据库。"""
+    with _conn_lock:
+        row = _con().execute("PRAGMA data_version").fetchone()
+        return int(row[0])
+
+
+def message_project_signatures() -> dict[str, tuple[Any, ...]]:
+    """项目级消息轻量签名，用于定位外部 Agent Mail 写入影响范围。"""
+    rows = _rows(
+        "SELECT p.slug, "
+        " (SELECT COUNT(*) FROM messages m WHERE m.project_id = p.id) AS message_count, "
+        " (SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.project_id = p.id) AS max_message_id, "
+        " (SELECT COUNT(*) FROM agents a WHERE a.project_id = p.id AND a.retired_at IS NULL) AS agent_count, "
+        " (SELECT COUNT(*) FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id "
+        "    WHERE a.project_id = p.id) AS recipient_count, "
+        " (SELECT COUNT(*) FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id "
+        "    WHERE a.project_id = p.id AND mr.read_ts IS NULL) AS unread_count, "
+        " (SELECT COALESCE(MAX(mr.read_ts), '') FROM message_recipients mr "
+        "    JOIN agents a ON a.id = mr.agent_id WHERE a.project_id = p.id) AS last_read_ts, "
+        " (SELECT COALESCE(MAX(mr.ack_ts), '') FROM message_recipients mr "
+        "    JOIN agents a ON a.id = mr.agent_id WHERE a.project_id = p.id) AS last_ack_ts "
+        "FROM projects p WHERE p.archived_at IS NULL ORDER BY p.slug"
+    )
+    return {
+        str(row["slug"]): (
+            row["message_count"], row["max_message_id"], row["agent_count"],
+            row["recipient_count"], row["unread_count"], row["last_read_ts"],
+            row["last_ack_ts"],
+        )
+        for row in rows
+    }
+
+
+def project_slugs_by_human_key() -> dict[str, str]:
+    return {
+        str(Path(row["human_key"]).expanduser().resolve()): str(row["slug"])
+        for row in _rows(
+            "SELECT slug,human_key FROM projects WHERE archived_at IS NULL"
+        )
+    }
+
+
 def unread_messages(limit: int = 50) -> list[dict[str, Any]]:
     """跨项目聚合未读消息，供 Attention Inbox 使用。"""
     return _rows(

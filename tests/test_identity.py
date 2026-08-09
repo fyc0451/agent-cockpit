@@ -337,3 +337,21 @@ def test_recent_messages_batches_recipient_query(mail_db, monkeypatch):
         "active-agent",
     ]
     assert len(calls) == 2
+
+
+def test_message_project_signatures_cover_message_and_read_state(mail_db):
+    initial = db.message_project_signatures()
+    assert set(initial) == {"active"}
+
+    mail_db.execute("UPDATE message_recipients SET read_ts = 5 WHERE message_id = 1")
+    mail_db.commit()
+    after_read = db.message_project_signatures()
+    assert after_read["active"] != initial["active"]
+
+    mail_db.execute(
+        "INSERT INTO messages VALUES (4, 1, 't4', '', 'four', '', 'normal', 0, 4, NULL, 1)"
+    )
+    mail_db.execute("INSERT INTO message_recipients VALUES (4, 1, 'to', NULL, NULL)")
+    mail_db.commit()
+    after_message = db.message_project_signatures()
+    assert after_message["active"] != after_read["active"]
