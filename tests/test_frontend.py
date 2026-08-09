@@ -311,8 +311,8 @@ def test_board_degraded_banner_consumes_reason_and_state_status():
     assert "esc(stateStatusLabel(st))" in fn
     # 原始值绝不直插 HTML
     assert "${d.reason}" not in fn and "${s.state_reason}" not in fn
-    # available / 非 degraded 时横幅隐藏(保持既有行为)
-    assert "!d.available||!d.degraded" in fn
+    # R2:degraded 即展示(available=false 也展示真实 reason);非 degraded 隐藏
+    assert "!d||!d.degraded" in fn
     # renderBoard 两条路径都经过 renderBoardDegraded
     body = js.split("function renderBoard(d){", 1)[1].split("function cardHtml", 1)[0]
     assert body.count("renderBoardDegraded(d)") >= 2
@@ -323,8 +323,8 @@ def test_board_unavailable_separated_from_idle():
     # 独立列展示,禁止落入空闲;旧 payload 无 state_status → 行为不变
     js = _inline_js()
     assert "stateStatus!=='subscribed')return 'unavailable'" in js
-    assert "unavailable:'不可用'" in js  # statusLabel(agent strip)+ stMap(card)
-    assert js.count("unavailable:'不可用'") >= 2
+    assert "'st.unavailable','不可用'" in js  # statusText + cardStatusText
+    assert js.count("'st.unavailable','不可用'") >= 2
     assert 'id="colWrap-unavailable"' in HTML
     assert 'id="col-unavailable"' in HTML and 'id="cnt-unavailable"' in HTML
     assert "'board.unavailable'" in HTML
@@ -333,6 +333,38 @@ def test_board_unavailable_separated_from_idle():
     assert "colWrap-unavailable').style.display=cols.unavailable.length?'':'none'" in js
     # 旧 payload 兼容:无 sessions/state_status 时 classify 第三参为 undefined
     assert "return s?s.state_status:undefined" in js
+
+
+def test_board_unavailable_false_shows_real_reason_not_install_claim():
+    # R2(#1904):available=false 时只有 reason 明确 executable missing 才显示
+    # 安装引导;否则泛化不可用诊断+重试,真实原因走降级横幅
+    js = _inline_js()
+    body = js.split("if(!d.available){", 1)[1].split("return;", 1)[0]
+    assert "renderBoardDegraded(d)" in body  # 真实 reason 仍可见
+    assert "herdr 未找到|not installed|not found|executable|未安装" in body
+    assert "board.unavailable.title" in body and "refreshCurrent()" in body
+    # 安装引导只在 missing 分支内
+    missing_branch = body.split("if(missing){", 1)[1]
+    assert "board.guide.noherdr" in missing_branch
+    generic = body.split("}else{", 1)[1]
+    assert "board.guide.noherdr" not in generic
+
+
+def test_dynamic_status_labels_all_i18n_keys():
+    # R2:新增动态状态全部 t()+zh/en/ja,英文/日文不得混中文
+    js = _inline_js()
+    for key in (
+        "st.unavailable", "st.connecting", "st.starting",
+        "st.swap_pending", "st.reconnecting",
+    ):
+        assert f"'{key}'" in js  # t() 调用处
+        assert f"'{key}'" in HTML.split("const I18N", 1)[1]  # en/ja 字典
+    for fn in ("statusText", "cardStatusText", "stateStatusLabel"):
+        assert f"function {fn}(" in js
+        body = js.split(f"function {fn}(", 1)[1].split("function ", 1)[0]
+        assert "t(" in body  # 统一走 t()
+    # strip/card 不再有硬编码中文状态 map
+    assert "statusLabel={" not in js and "stMap={" not in js
 
 
 def test_board_has_no_binding_field_placeholders():
