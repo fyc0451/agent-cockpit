@@ -97,6 +97,18 @@ eval(fnSrc);
     await sleep(50);
     check('wheel-dispatched drag not synthesized', dispatched.length === 0);
   }
+  // 3b) 水平拖动(不派发 wheel)也不合成 —— #1524 回归
+  {
+    const el = makeEl(), x = makeXterm();
+    const dispatched = [];
+    const target = { dispatchEvent(e) { dispatched.push(e.type); } };
+    enableTermTouchScroll(el, x);
+    el.fire('touchstart', { touches: [touch(100, 200, target)], target });
+    el.fire('touchmove', { touches: [touch(130, 200, target)], preventDefault() {} }); // 纯水平 30px
+    el.fire('touchend', { changedTouches: [touch(130, 200, target)], defaultPrevented: true });
+    await sleep(50);
+    check('horizontal drag not synthesized', dispatched.length === 0);
+  }
   // 4) 目标已离开终端(终端销毁/抽屉覆盖) → 不派发
   {
     const el = makeEl(), x = makeXterm();
@@ -129,20 +141,17 @@ eval(fnSrc);
 """
 
 
-def _run_harness():
-    harness = ROOT / "tests" / "_h5_tap_harness.js"
+def _run_harness(tmp_path):
+    harness = tmp_path / "_h5_tap_harness.js"
     harness.write_text(HARNESS, encoding="utf-8")
-    try:
-        return subprocess.run(
-            ["node", str(harness), str(ROOT / "static" / "index.html")],
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        harness.unlink(missing_ok=True)
+    return subprocess.run(
+        ["node", str(harness), str(ROOT / "static" / "index.html")],
+        capture_output=True, text=True, timeout=60,
+    )
 
 
-def test_h5_tap_synthesis_behavior():
-    result = _run_harness()
+def test_h5_tap_synthesis_behavior(tmp_path):
+    result = _run_harness(tmp_path)
     print(result.stdout)
     print(result.stderr)
     assert result.returncode == 0, result.stderr or result.stdout

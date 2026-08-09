@@ -3659,6 +3659,15 @@ function enableTermTouchScroll(el,xterm){
       tapStart={x:t.clientX,y:t.clientY,t:Date.now(),target:e.target,cancelled:false};
     }else tapStart=null;
   },{passive:true});
+  // 二维位移取消(复审 #1524):水平拖动不派发 wheel,不会触发滚动取消,
+  // 但 xterm 对 END 手势也 preventDefault,会误判成点击。>10px slop 取消,
+  // 保留"实际 wheel step 必取消"作第二道保证;不用"任意 move 即取消",
+  // 避免真机手指微抖让正常 tap 失效。
+  el.addEventListener('touchmove',e=>{
+    if(!tapStart||e.touches.length!==1)return;
+    const t=e.touches[0];
+    if(Math.hypot(t.clientX-tapStart.x,t.clientY-tapStart.y)>10)tapStart.cancelled=true;
+  },{passive:true});
   el.addEventListener('touchend',e=>{
     const tap=tapStart;tapStart=null;
     if(!tap||tap.cancelled||Date.now()-tap.t>500||!mouseWanted())return;
