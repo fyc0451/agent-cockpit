@@ -6,6 +6,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_settings(tmp_path, monkeypatch):
     import coordination
+    import files
     import mail_projects
     import settings
     import team_inbox_router
@@ -20,3 +21,4 @@ def _isolate_settings(tmp_path, monkeypatch):
         team_inbox_router, "ROUTE_STATE", tmp_path / "team-inbox-route.json",
     )
     monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
+    monkeypatch.setattr(files, "_custom_roots_file", lambda: tmp_path / "file-roots.json")

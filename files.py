@@ -19,6 +19,7 @@ import os
 import stat
 import tempfile
 import threading
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,28 @@ _PROJECT_DIR = Path(__file__).resolve().parent
 _ROOTS_LOCK = threading.Lock()
 
 
+class CustomRootsReason(str, Enum):
+    UNREADABLE = "unreadable"
+    INVALID_JSON = "invalid_json"
+    INVALID_SHAPE = "invalid_shape"
+    TOO_MANY_ENTRIES = "too_many_entries"
+    INVALID_ENTRY_TYPE = "invalid_entry_type"
+    RELATIVE_PATH = "relative_path"
+    NONCANONICAL_PATH = "noncanonical_path"
+    BROAD_ROOT = "broad_root"
+    SENSITIVE_ROOT = "sensitive_root"
+    MISSING_PATH = "missing_path"
+    NOT_DIRECTORY = "not_directory"
+
+
+class CustomRootsError(RuntimeError):
+    """持久化 custom roots 整体无效；正文仅含稳定 reason，不含路径。"""
+
+    def __init__(self, reason: CustomRootsReason):
+        self.reason = reason
+        super().__init__(f"custom_roots_invalid:{reason.value}")
+
+
 def _custom_roots_file() -> Path:
     return runtime_paths.store("file_roots")
 
@@ -109,22 +132,83 @@ def _registered_project_roots() -> list[Path]:
     return roots
 
 
-def _read_custom_roots() -> list[Path]:
-    try:
-        raw = json.loads(_custom_roots_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return []
-    if not isinstance(raw, list):
-        return []
-    roots = []
-    for value in raw:
-        if not isinstance(value, str):
-            continue
+def _custom_root_policy(path: Path) -> CustomRootsReason | None:
+    broad = {Path("/"), _HOME.resolve(), _HOME.parent.resolve()}
+    if path in broad:
+        return CustomRootsReason.BROAD_ROOT
+    blocked = (
+        Path("/etc"), Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
+        _HOME / ".ssh", _HOME / ".gnupg", _HOME / ".agent-mail",
+        _HOME / ".config" / "agent-cockpit",
+        runtime_paths.data_root(), runtime_paths.config_root(),
+        runtime_paths.state_root(), runtime_paths.uploads_root(),
+    )
+    for root in blocked:
         try:
-            path = Path(value).expanduser().resolve(strict=False)
-        except OSError:
+            path.relative_to(root.resolve(strict=False))
+        except ValueError:
             continue
-        if path.is_dir() and path not in roots:
+        return CustomRootsReason.SENSITIVE_ROOT
+    return None
+
+
+def _persisted_custom_root(value: Any) -> Path:
+    if not isinstance(value, str):
+        raise CustomRootsError(CustomRootsReason.INVALID_ENTRY_TYPE)
+    if "\x00" in value:
+        raise CustomRootsError(CustomRootsReason.NONCANONICAL_PATH)
+    lexical = Path(value)
+    if not lexical.is_absolute():
+        raise CustomRootsError(CustomRootsReason.RELATIVE_PATH)
+    if value != str(lexical):
+        raise CustomRootsError(CustomRootsReason.NONCANONICAL_PATH)
+    try:
+        check = lexical.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        raise CustomRootsError(CustomRootsReason.NONCANONICAL_PATH) from None
+    reason = _custom_root_policy(check)
+    if reason:
+        raise CustomRootsError(reason)
+    try:
+        resolved = lexical.resolve(strict=True)
+    except FileNotFoundError:
+        raise CustomRootsError(CustomRootsReason.MISSING_PATH) from None
+    except (OSError, RuntimeError, ValueError):
+        raise CustomRootsError(CustomRootsReason.NONCANONICAL_PATH) from None
+    if resolved != lexical:
+        raise CustomRootsError(CustomRootsReason.NONCANONICAL_PATH)
+    if not resolved.is_dir():
+        raise CustomRootsError(CustomRootsReason.NOT_DIRECTORY)
+    return resolved
+
+
+def _read_custom_roots() -> list[Path]:
+    target = _custom_roots_file()
+    if target == runtime_paths.store("file_roots"):
+        try:
+            runtime_paths.validate_store("file_roots")
+        except runtime_paths.PathResolutionError:
+            raise CustomRootsError(CustomRootsReason.UNREADABLE) from None
+    if target.is_symlink():
+        raise CustomRootsError(CustomRootsReason.UNREADABLE) from None
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeError):
+        raise CustomRootsError(CustomRootsReason.UNREADABLE) from None
+    try:
+        raw = json.loads(text)
+    except (ValueError, TypeError):
+        raise CustomRootsError(CustomRootsReason.INVALID_JSON) from None
+    if not isinstance(raw, list):
+        raise CustomRootsError(CustomRootsReason.INVALID_SHAPE)
+    if len(raw) > 100:
+        raise CustomRootsError(CustomRootsReason.TOO_MANY_ENTRIES)
+    roots: list[Path] = []
+    for value in raw:
+        path = _persisted_custom_root(value)
+        if path not in roots:
             roots.append(path)
     return roots
 
@@ -188,20 +272,10 @@ def _normalize_custom_root(rel: str, *, must_exist: bool) -> Path:
     # 先用非严格解析做名单判断:即使目标不存在(如 macOS 无 /proc),
     # 宽泛/敏感目录也必须报对应的原因,而不是"不存在"
     check = path.resolve(strict=False)
-    broad = {Path("/"), _HOME.resolve(), _HOME.parent.resolve()}
-    if check in broad:
+    reason = _custom_root_policy(check)
+    if reason is CustomRootsReason.BROAD_ROOT:
         raise ValueError("请选择具体目录，不能添加 /、/home 或整个用户 Home")
-    blocked = [
-        Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
-        _HOME / ".ssh", _HOME / ".gnupg", _HOME / ".agent-mail",
-        _HOME / ".config" / "agent-cockpit",
-        runtime_paths.config_root(),
-    ]
-    for root in blocked:
-        try:
-            check.relative_to(root.resolve(strict=False))
-        except ValueError:
-            continue
+    if reason is CustomRootsReason.SENSITIVE_ROOT:
         raise ValueError(f"敏感或系统运行目录不能添加: {check}")
     try:
         path = path.resolve(strict=must_exist)
