@@ -172,6 +172,7 @@ def _initialize_connection(con: sqlite3.Connection) -> None:
 
 
 def _connect() -> sqlite3.Connection:
+    runtime_paths.validate_store("coordination")  # R3-B:symlink 逃逸 fail-closed
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     delay = CONNECT_RETRY_BASE
     for attempt in range(CONNECT_RETRIES):

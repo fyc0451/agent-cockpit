@@ -795,6 +795,7 @@ def _persist_typing_state(session: str, pane_id: str | None) -> None:
         if now_mono - _typing_state_last_write.get(state_key, 0.0) < 1.0:
             return
         try:
+            runtime_paths.validate_store("typing")  # R3-B:symlink 逃逸 fail-closed
             _TYPING_STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
                 loaded = json.loads(_TYPING_STATE_PATH.read_text(encoding="utf-8"))
@@ -856,7 +857,7 @@ def _persist_typing_state(session: str, pane_id: str | None) -> None:
                 except FileNotFoundError:
                     pass
             _typing_state_last_write[state_key] = now_mono
-        except OSError:
+        except (OSError, runtime_paths.PathResolutionError):
             pass
 
 

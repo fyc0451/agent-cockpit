@@ -24,6 +24,7 @@ logger = logging.getLogger("agent-cockpit.web-push")
 
 
 def _db() -> sqlite3.Connection:
+    runtime_paths.validate_store("push")  # R3-B:symlink 逃逸 fail-closed
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
@@ -82,6 +83,7 @@ def _ensure_private_key() -> tuple[str, str]:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
 
+    runtime_paths.validate_store("vapid")  # R3-B:symlink 逃逸 fail-closed
     KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         pem = KEY_PATH.read_bytes()

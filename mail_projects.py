@@ -33,6 +33,7 @@ def _load() -> dict[str, Any]:
 
 
 def _write(data: dict[str, Any]) -> None:
+    runtime_paths.validate_store("mail_projects")  # R3-B:symlink 逃逸 fail-closed
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
         prefix=".mail-projects.", suffix=".tmp", dir=str(STATE_PATH.parent)

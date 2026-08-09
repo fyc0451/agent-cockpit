@@ -189,8 +189,10 @@ def store(name: str) -> Path:
             for other in STORES:
                 if other == "coordination":
                     continue
-                root_name, rel = STORES[other][0], STORES[other][1]
-                if p == roots[root_name] / rel:
+                root_name, rel, kind = STORES[other][0], STORES[other][1], STORES[other][2]
+                sp = roots[root_name] / rel
+                # R3-A:等于任一 store 路径,或落在目录型 store 内部,均为碰撞
+                if p == sp or (kind == "dir" and _is_within(p, sp)):
                     raise PathResolutionError(
                         "store_collision", ENV_COORDINATION_DB,
                     )
@@ -212,6 +214,33 @@ def _nearest_existing_ancestor(p: Path) -> Path:
     return Path("/").resolve()
 
 
+def _store_escape_reason(p: Path, root: Path) -> str | None:
+    """R3-B 纯读:app-owned store 不得经 final/intermediate symlink 逃出
+    canonical assigned root。store 路径本身是链接(悬空/指向 root 外/
+    指向 root 内)一律 fail-closed;中间层链接使真实路径越界同样拒绝。
+    返回机器可读 reason 或 None。"""
+    if p.is_symlink():
+        return "symlink_escape"
+    real = Path(os.path.realpath(p))
+    if real != p and not _is_within(real, root):
+        return "symlink_escape"
+    return None
+
+
+def validate_store(name: str) -> Path:
+    """写前守卫(R3-B):writer/DDL 在 mkdir/connect/写文件前必须调用;
+    store 路径存在 symlink 逃逸即抛 PathResolutionError(只含 reason 与
+    store 名,不泄露真实路径)。"""
+    if name not in STORES:
+        raise KeyError(f"未知 store: {name}")
+    p = store(name)
+    root = _roots()[STORES[name][0]]
+    reason = _store_escape_reason(p, root)
+    if reason:
+        raise PathResolutionError(reason, f"store:{name}")
+    return p
+
+
 def _dir_safe(st: os.stat_result, uid: int) -> str | None:
     """目录写语义检查:owner + group/world 不安全。返回 reason 或 None。"""
     if st.st_uid != uid and uid != 0:
@@ -221,11 +250,14 @@ def _dir_safe(st: os.stat_result, uid: int) -> str | None:
     return None
 
 
-def _path_health(p: Path, kind: str, declared_mode: int | None) -> tuple[bool, str]:
-    """纯读判定(R2-D):现存路径检查真实写语义——原子替换/WAL/key 创建
-    要求父目录可写可执行;敏感 store 按声明 mode 拒绝多余位;缺席路径
-    看最近现存父目录是否可按当前 uid 安全创建。"""
+def _path_health(p: Path, kind: str, declared_mode: int | None, root: Path) -> tuple[bool, str]:
+    """纯读判定(R2-D+R3-B):先查 symlink 逃逸(fail-closed);现存路径
+    检查真实写语义——原子替换/WAL/key 创建要求父目录可写可执行;敏感
+    store 按声明 mode 拒绝多余位;缺席路径看最近现存父目录是否可按
+    当前 uid 安全创建。"""
     uid = os.getuid()
+    if _store_escape_reason(p, root):
+        return False, "symlink_escape"
     if p.exists():
         try:
             st = p.stat()
@@ -278,7 +310,7 @@ def inspect() -> dict[str, Any]:
     stores: list[dict[str, Any]] = []
     for name, (root_name, rel, kind, writer, declared_mode) in STORES.items():
         p = store(name)
-        ready, reason = _path_health(p, kind, declared_mode)
+        ready, reason = _path_health(p, kind, declared_mode, roots[root_name])
         stores.append({
             "name": name, "path": str(p), "root": root_name, "rel": rel,
             "kind": kind, "writer": writer, "exists": p.exists(),

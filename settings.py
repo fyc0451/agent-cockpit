@@ -228,6 +228,7 @@ def update(partial: dict[str, Any]) -> dict[str, Any]:
                 raw[k] = {**stored, **{name: cfg[k][name] for name in v}}
             else:
                 raw[k] = cfg[k]
+        runtime_paths.validate_store("settings")  # R3-B:symlink 逃逸 fail-closed
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=str(DATA_DIR))
         try:

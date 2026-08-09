@@ -327,6 +327,116 @@ class TestDefaultCompat:
 # ── tasks 首次并发 _db barrier ────────────────────────────────
 
 
+# ── R3-A 目录 store containment ───────────────────────────────
+
+
+class TestR3CoordinationContainment:
+    def test_coordination_inside_worktrees_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv(
+            "COCKPIT_COORDINATION_DB",
+            str(fake_home / "dashboard-data" / "worktrees" / "coordination.sqlite3"),
+        )
+        _expect_error(lambda: runtime_paths.store("coordination"), "store_collision")
+
+    def test_coordination_inside_upgrade_rejected(self, fake_home, monkeypatch):
+        monkeypatch.setenv(
+            "COCKPIT_COORDINATION_DB",
+            str(fake_home / "dashboard-data" / "upgrade" / "coordination.sqlite3"),
+        )
+        _expect_error(lambda: runtime_paths.store("coordination"), "store_collision")
+
+    def test_coordination_external_safe_still_ok(self, fake_home, monkeypatch, tmp_path):
+        ext = tmp_path / "ext" / "c.sqlite3"
+        monkeypatch.setenv("COCKPIT_COORDINATION_DB", str(ext))
+        assert runtime_paths.store("coordination") == ext.resolve()
+
+
+# ── R3-B symlink 逃逸 fail-closed ─────────────────────────────
+
+
+class TestR3SymlinkEscape:
+    def _data(self, fake_home):
+        data = fake_home / "dashboard-data"
+        data.mkdir(exist_ok=True)
+        return data
+
+    def test_file_symlink_to_outside_existing_not_ready(self, fake_home, tmp_path):
+        data = self._data(fake_home)
+        outside = tmp_path / "outside.sqlite3"
+        outside.write_bytes(b"x")
+        (data / "tasks.sqlite3").symlink_to(outside)
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "tasks")
+        assert entry["ready"] is False and entry["reason"] == "symlink_escape"
+        assert snap["ready"] is False
+
+    def test_dangling_file_symlink_not_ready(self, fake_home):
+        data = self._data(fake_home)
+        (data / "tasks.sqlite3").symlink_to(tmp_target := fake_home / "ghost-nowhere")
+        assert not tmp_target.exists()
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "tasks")
+        assert entry["ready"] is False and entry["reason"] == "symlink_escape"
+
+    def test_dir_symlink_to_outside_not_ready(self, fake_home, tmp_path):
+        data = self._data(fake_home)
+        outside_dir = tmp_path / "outside-dir"
+        outside_dir.mkdir()
+        (data / "worktrees").symlink_to(outside_dir)
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "worktrees")
+        assert entry["ready"] is False and entry["reason"] == "symlink_escape"
+        assert snap["ready"] is False
+
+    def test_internal_regular_file_still_ok(self, fake_home):
+        data = self._data(fake_home)
+        db = data / "tasks.sqlite3"
+        db.write_bytes(b"")
+        db.chmod(0o644)
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "tasks")
+        assert entry["ready"] is True and entry["reason"] == "ok"
+
+    def test_external_coordination_non_symlink_inspect_ok(self, fake_home, monkeypatch, tmp_path):
+        ext = tmp_path / "ext"
+        ext.mkdir()
+        db = ext / "c.sqlite3"
+        db.write_bytes(b"")
+        db.chmod(0o644)
+        monkeypatch.setenv("COCKPIT_COORDINATION_DB", str(db))
+        runtime_paths.reset_cache()
+        snap = runtime_paths.inspect()
+        entry = next(s for s in snap["stores"] if s["name"] == "coordination")
+        assert entry["ready"] is True and entry["reason"] == "ok"
+
+    def test_writer_guard_raises_before_ddl(self, fake_home, tmp_path, monkeypatch):
+        import tasks
+        data = self._data(fake_home)
+        outside = tmp_path / "victim.sqlite3"
+        link = data / "tasks.sqlite3"
+        link.symlink_to(outside)
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(data))
+        runtime_paths.reset_cache()
+        monkeypatch.setattr(tasks, "TASKS_DB", link)
+        monkeypatch.setattr(tasks, "_db_swept", False)
+        _expect_error(tasks._db, "symlink_escape")
+        # fail-closed:未建库、未写受害者文件
+        assert not outside.exists()
+
+    def test_validate_store_error_message_no_path_leak(self, fake_home, tmp_path):
+        data = self._data(fake_home)
+        outside = tmp_path / "leak.sqlite3"
+        (data / "settings.json").symlink_to(outside)
+        with pytest.raises(runtime_paths.PathResolutionError) as exc:
+            runtime_paths.validate_store("settings")
+        msg = str(exc.value)
+        assert str(outside) not in msg and str(data) not in msg
+        assert "symlink_escape" in msg
+
+
+# ── tasks 首次并发 _db barrier ────────────────────────────────
+
+
 class TestTasksConcurrentFirstUse:
     def test_first_db_concurrent_barrier(self, tmp_path, monkeypatch):
         import tasks

@@ -131,6 +131,7 @@ def _read_custom_roots() -> list[Path]:
 
 def _write_custom_roots(roots: list[Path]) -> None:
     target = _custom_roots_file()
+    runtime_paths.validate_store("file_roots")  # R3-B:symlink 逃逸 fail-closed
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp_name = tempfile.mkstemp(
         prefix=".file-roots.", suffix=".tmp", dir=str(target.parent)

@@ -184,6 +184,7 @@ def _utc_iso(ts: float | None = None) -> str:
 
 
 def _ensure_dirs() -> None:
+    runtime_paths.validate_store("upgrade")  # R3-B:symlink 逃逸 fail-closed
     UPGRADE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     BACKUP_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)

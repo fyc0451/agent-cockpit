@@ -72,6 +72,7 @@ _MODEL_RE = re.compile(MODEL_PATTERN)
 
 def _db() -> sqlite3.Connection:
     global _db_swept
+    runtime_paths.validate_store("tasks")  # R3-B:symlink 逃逸 fail-closed
     TASKS_DB.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(TASKS_DB)
     con.row_factory = sqlite3.Row
@@ -121,6 +122,7 @@ def _mark_interrupted(con: sqlite3.Connection) -> None:
 
 def _init_db() -> None:
     """显式初始化路径:schema+迁移+重启中断标记。import 不再触发。"""
+    runtime_paths.validate_store("tasks")  # R3-B:symlink 逃逸 fail-closed
     TASKS_DB.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(TASKS_DB)
     con.row_factory = sqlite3.Row

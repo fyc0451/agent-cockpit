@@ -84,6 +84,7 @@ def _load_route_state(hub: str, human_id: int) -> dict[str, Any]:
 def _write_route_state(hub: str, human_id: int, state: dict[str, Any]) -> None:
     data = _load_route_file()
     data["routes"][_route_scope(hub, human_id)] = state
+    runtime_paths.validate_store("inbox_route")  # R3-B:symlink 逃逸 fail-closed
     ROUTE_STATE.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
         prefix=".team-inbox-route.", suffix=".tmp", dir=str(ROUTE_STATE.parent)
