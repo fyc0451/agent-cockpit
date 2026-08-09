@@ -299,6 +299,48 @@ def test_board_card_displays_escaped_agent_mail_name():
     assert '@${p.mail_name}' not in card
 
 
+def test_board_degraded_banner_consumes_reason_and_state_status():
+    # Wiki16-19 前端场景3:renderBoard 消费 board degraded/reason 与
+    # sessions[].state_status/state_reason,Hub/socket 降级原因可见且全部转义
+    js = _inline_js()
+    assert 'id="boardDegraded"' in HTML
+    assert "function renderBoardDegraded(d)" in js
+    fn = js.split("function renderBoardDegraded(d){", 1)[1].split("function ", 1)[0]
+    assert "esc(String(d.reason))" in fn
+    assert "esc(String(s.state_reason))" in fn
+    assert "esc(stateStatusLabel(st))" in fn
+    # 原始值绝不直插 HTML
+    assert "${d.reason}" not in fn and "${s.state_reason}" not in fn
+    # available / 非 degraded 时横幅隐藏(保持既有行为)
+    assert "!d.available||!d.degraded" in fn
+    # renderBoard 两条路径都经过 renderBoardDegraded
+    body = js.split("function renderBoard(d){", 1)[1].split("function cardHtml", 1)[0]
+    assert body.count("renderBoardDegraded(d)") >= 2
+
+
+def test_board_unavailable_separated_from_idle():
+    # Wiki16-19 前端场景4:state_status 非 subscribed 的 pane 归 unavailable,
+    # 独立列展示,禁止落入空闲;旧 payload 无 state_status → 行为不变
+    js = _inline_js()
+    assert "stateStatus!=='subscribed')return 'unavailable'" in js
+    assert "unavailable:'不可用'" in js  # statusLabel(agent strip)+ stMap(card)
+    assert js.count("unavailable:'不可用'") >= 2
+    assert 'id="colWrap-unavailable"' in HTML
+    assert 'id="col-unavailable"' in HTML and 'id="cnt-unavailable"' in HTML
+    assert "'board.unavailable'" in HTML
+    # 列默认隐藏,有内容才显示
+    assert 'id="colWrap-unavailable" style="display:none"' in HTML
+    assert "colWrap-unavailable').style.display=cols.unavailable.length?'':'none'" in js
+    # 旧 payload 兼容:无 sessions/state_status 时 classify 第三参为 undefined
+    assert "return s?s.state_status:undefined" in js
+
+
+def test_board_has_no_binding_field_placeholders():
+    # 本轮边界:不新增 pending_count/binding_version/route_epoch 或 binding 占位
+    for bad in ("pending_count", "binding_version", "route_epoch"):
+        assert bad not in HTML
+
+
 def test_setup_workspace_output_escaped():
     # r.started/r.notified 来自后端响应,经 map(esc) 后再 join
     assert "(r.started||[]).map(esc).join" in HTML
