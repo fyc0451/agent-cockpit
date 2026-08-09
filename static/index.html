@@ -343,7 +343,7 @@ header .spacer{flex:1}
 /* 终端真全屏:Fullscreen API 隐藏浏览器地址栏/书签栏,只剩终端画面 */
 #termStage:fullscreen{background:var(--term-bg)}
 #termStage:fullscreen #termContainer{padding:0!important}
-#termFsExit{display:none;position:absolute;right:10px;bottom:10px;z-index:20;width:auto;padding:5px 10px;font-size:12px;opacity:.75}
+#termFsExit{display:none;position:absolute;top:calc(10px + var(--safe-top));right:calc(10px + var(--safe-right));z-index:20;width:auto;padding:5px 10px;font-size:12px;opacity:.75}
 #termFsExit:hover{opacity:1}
 #termStage:fullscreen #termFsExit{display:block}
 /* iOS Safari 不支持元素级全屏的回退:固定铺满可视区 */
@@ -751,7 +751,7 @@ header .spacer{flex:1}
     </div>
     <div id="termMain" style="flex:1;display:flex;min-height:0;overflow:hidden">
       <div id="termStage" style="flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;position:relative">
-      <button id="termFsExit" onclick="toggleTermFullscreen()" title="退出全屏">✕ 退出全屏</button>
+      <button id="termFsExit" onclick="exitTermFullscreen()" title="退出全屏">✕ 退出全屏</button>
       <div id="termContainer" style="flex:1;min-width:0;background:var(--term-bg);padding:6px 14px 6px 6px;overflow:hidden"></div>
       <div id="termInlineInput" class="term-inline-input" style="display:none">
         <input id="termTextInput" placeholder="输入发给 agent 的文字…" enterkeyhint="send" autocomplete="off" onkeydown="if(event.key==='Enter'){termSendInlineInput()}">
@@ -3279,11 +3279,17 @@ function hfExitFullscreen(exitNative=true){  const body=document.getElementById(
 }
 // 终端真全屏:Fullscreen API(PC/Android 隐藏浏览器全部 chrome);
 // iOS Safari 不支持元素级全屏,回退为 fixed 铺满可视区
+function exitTermFullscreen(){
+  // 统一退出路径(浮动按钮与 Escape 共用):总是清理 fixed 回退类,
+  // 仅当原生全屏确实落在 termStage 上时才调 exitFullscreen
+  const stage=document.getElementById('termStage');
+  if(stage)stage.classList.remove('term-fs-fixed');
+  if(stage&&document.fullscreenElement===stage)document.exitFullscreen().catch(()=>{});
+}
 function toggleTermFullscreen(){
   const stage=document.getElementById('termStage');
   if(!stage)return;
-  if(document.fullscreenElement){document.exitFullscreen().catch(()=>{});return}
-  if(stage.classList.contains('term-fs-fixed')){stage.classList.remove('term-fs-fixed');return}
+  if(document.fullscreenElement===stage||stage.classList.contains('term-fs-fixed')){exitTermFullscreen();return}
   if(stage.requestFullscreen){
     stage.requestFullscreen().catch(()=>stage.classList.add('term-fs-fixed'));
   }else{
@@ -4929,9 +4935,9 @@ function bindDelegation(){
   document.addEventListener('focusin',()=>setTimeout(fitVisibleTerm,50));
   document.addEventListener('focusout',()=>setTimeout(fitVisibleTerm,50));
   document.addEventListener('focusin',keepFocusedControlVisible);
-  document.addEventListener('keydown',e=>{if(e.key==='Escape')hfExitFullscreen()});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'){hfExitFullscreen();exitTermFullscreen()}});
   document.addEventListener('fullscreenchange',()=>{
-    if(!document.fullscreenElement)hfExitFullscreen(false);
+    if(!document.fullscreenElement){hfExitFullscreen(false);document.getElementById('termStage')?.classList.remove('term-fs-fixed')}
     // 全屏切换后可视区变化,重算终端尺寸并强制重绘
     setTimeout(()=>{if(FIT&&XTERM)safeFitOf(FIT,XTERM);if(XTERM)try{XTERM.refresh(0,XTERM.rows-1)}catch(e){}},60);
   });

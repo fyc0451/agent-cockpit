@@ -862,7 +862,7 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     # 终端真全屏(toggleTermFullscreen)是独立入口,不在此约束内
     assert "requestFullscreen" not in toggle
     assert "function hfExitFullscreen(" in js
-    assert "if(e.key==='Escape')hfExitFullscreen()" in js
+    assert "if(e.key==='Escape'){hfExitFullscreen();exitTermFullscreen()}" in js
     assert "document.addEventListener('fullscreenchange'" in js
 
 
@@ -2631,5 +2631,14 @@ def test_terminal_true_fullscreen():
     assert "term-fs-fixed" in js  # iOS 回退
     assert 'id="termFsExit"' in HTML
     assert "#termStage:fullscreen" in HTML
+    # 统一退出路径:浮动按钮与 Escape 共用 exitTermFullscreen
+    assert "function exitTermFullscreen()" in js
+    assert 'onclick="exitTermFullscreen()"' in HTML
+    assert "if(e.key==='Escape'){hfExitFullscreen();exitTermFullscreen()}" in js
+    # 原生全屏退出时兜底清理 fixed 类
+    assert "classList.remove('term-fs-fixed')" in js
+    # 退出钮在顶部(含 safe-area),不遮挡底部 H5 内联输入条
+    assert "top:calc(10px + var(--safe-top))" in HTML
+    assert "bottom:10px" not in HTML.split("#termFsExit{", 1)[1].split("}", 1)[0]
     # 全屏切换后 refit + 强制重绘
     assert "fullscreenchange" in js
