@@ -52,7 +52,9 @@ from pydantic import BaseModel, Field
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
-    _open_state_clients()
+    if not _open_state_clients():
+        # R7 门禁:未决 retiring/survivors 未回收,fail-closed 拒绝启动
+        raise RuntimeError("herdr state clients not fully reaped; refusing start")
     await asyncio.to_thread(_reconcile_state_client)
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
@@ -4644,6 +4646,11 @@ _state_retiring: dict[int, _InflightOwner] = {}
 # deadline 耗尽仍存活的 client:保留真实对象与 ownership,可重复
 # request_stop/join(reaper/再次 stop 重试);诊断序列化与内部引用分离。
 _state_survivors: dict[int, _InflightOwner] = {}
+# H0.5 R7:reap/生命周期串行锁。global stop 阶段二、reaper、reconcile 的
+# to_reap 回收、open 的有界 reap 全部在此锁下串行(single-owner);锁序
+# 恒为 REAP→CLIENT,禁止反序。survivor 转移靠锁内身份 CAS,并发成功摘除
+# 的 owner 不得复活/重复报告。
+_STATE_REAP_LOCK = threading.Lock()
 # socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
 STATE_SWAP_READY_TIMEOUT_S = 2.0
 # stop 对全部唯一 client(published+inflight)共享的总 join 预算(秒),
@@ -4671,8 +4678,8 @@ def _retire_client_locked(
 
 
 def _reap_owner(owner: _InflightOwner, join_timeout: float) -> bool:
-    """锁外 request_stop+join 一个 retiring/survivor client;真正成功(线程
-    全退)才从受管 map 摘除,失败保留真实引用等下轮重试。返回是否已回收。"""
+    """_STATE_REAP_LOCK 下调用:锁外 stop+join;真正成功(线程全退)才经
+    锁内身份 CAS 摘除,失败保留真实引用等下轮重试。返回是否已回收。"""
     try:
         ok = owner.client.stop(join_timeout=join_timeout)
     except Exception:
@@ -4687,28 +4694,55 @@ def _reap_owner(owner: _InflightOwner, join_timeout: float) -> bool:
     return ok
 
 
-def _reap_retired_clients() -> None:
-    """reaper:reconcile 每轮重试回收 retiring/survivors(重复
-    request_stop+join,共享小 deadline 不叠加)。"""
-    with _STATE_CLIENT_LOCK:
-        owners = list(_state_retiring.values()) + [
-            o for o in _state_survivors.values()
-            if o.token not in _state_retiring
-        ]
+def _pending_owners_locked() -> list[_InflightOwner]:
+    """_STATE_CLIENT_LOCK 下调用:全部未决 ownership(retiring+survivors)。"""
+    return list(_state_retiring.values()) + [
+        o for o in _state_survivors.values() if o.token not in _state_retiring
+    ]
+
+
+def _reap_owners(owners: list[_InflightOwner], budget: float) -> None:
+    """REAP 锁下按共享预算回收一批 owner(stop/reaper/reconcile 共用,
+    保证 single-owner 串行)。"""
     if not owners:
         return
-    deadline = time.monotonic() + 1.0
-    for owner in owners:
-        _reap_owner(owner, join_timeout=max(0.0, deadline - time.monotonic()))
+    with _STATE_REAP_LOCK:
+        deadline = time.monotonic() + budget
+        for owner in owners:
+            _reap_owner(owner, max(0.0, deadline - time.monotonic()))
 
 
-def _open_state_clients() -> None:
-    """lifespan 启动:开启新一轮 running epoch。同进程 restart 时,旧 lifespan
-    迟到 publish 因 epoch 不匹配仍被 CAS 拒绝。"""
-    global _state_running, _state_epoch
+def _reap_retired_clients() -> None:
+    """reaper:reconcile 每轮重试回收 retiring/survivors(重复
+    request_stop+join,共享小 deadline 不叠加;REAP 锁串行)。"""
     with _STATE_CLIENT_LOCK:
-        _state_running = True
-        _state_epoch += 1
+        owners = _pending_owners_locked()
+    _reap_owners(owners, budget=1.0)
+
+
+def _open_state_clients() -> bool:
+    """lifespan 启动(R7 门禁):先在有界窗口内 reap 未决 retiring/survivors,
+    锁内确认全空才开新 running epoch;否则 fail-closed 返回 False——旧同名
+    线程未退绝不发布新同名 client,回收后才允许 restart。"""
+    global _state_running, _state_epoch
+    deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
+    with _STATE_REAP_LOCK:
+        while True:
+            with _STATE_CLIENT_LOCK:
+                owners = _pending_owners_locked()
+            if not owners or time.monotonic() >= deadline:
+                break
+            for owner in owners:
+                _reap_owner(
+                    owner, max(0.0, deadline - time.monotonic())
+                )
+            time.sleep(0.05)
+        with _STATE_CLIENT_LOCK:
+            if _state_retiring or _state_survivors:
+                return False  # fail-closed:拒绝 running/new epoch
+            _state_running = True
+            _state_epoch += 1
+            return True
 
 
 def _stop_state_client() -> list[dict[str, Any]]:
@@ -4743,26 +4777,31 @@ def _stop_state_client() -> list[dict[str, Any]]:
         ):
             targets[id(owner.client)] = owner
     owners = list(targets.values())
-    # 阶段二 a:先广播 cancel,所有 client 同时收到停止信号
-    for owner in owners:
-        try:
-            owner.client.request_stop()
-        except Exception:
-            logger.exception("herdr state client request_stop failed")
-    # 阶段二 b:共享总 deadline 逐个 join(stop 幂等,信号已发)
-    deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
-    survived: list[_InflightOwner] = []
-    for owner in owners:
-        remaining = max(0.0, deadline - time.monotonic())
-        if not _reap_owner(owner, join_timeout=remaining):
-            survived.append(owner)
-    # survivor 保留真实引用与 ownership(从 retiring 转入 survivors)
-    if survived:
-        with _STATE_CLIENT_LOCK:
-            for owner in survived:
-                if _state_retiring.get(owner.token) is owner:
-                    del _state_retiring[owner.token]
-                _state_survivors[owner.token] = owner
+    # 阶段二(REAP 锁串行,与 reaper/重复 stop 单 owner):先广播 cancel,
+    # 再按共享总 deadline 逐个 join(stop 幂等,信号已发)
+    with _STATE_REAP_LOCK:
+        for owner in owners:
+            try:
+                owner.client.request_stop()
+            except Exception:
+                logger.exception("herdr state client request_stop failed")
+        deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
+        survived: list[_InflightOwner] = []
+        for owner in owners:
+            remaining = max(0.0, deadline - time.monotonic())
+            if not _reap_owner(owner, join_timeout=remaining):
+                # 锁内身份 CAS:仅仍受管于 retiring/survivors 的才确认
+                # survivor;被并发成功摘除的不得复活/报告
+                with _STATE_CLIENT_LOCK:
+                    managed = False
+                    if _state_retiring.get(owner.token) is owner:
+                        del _state_retiring[owner.token]
+                        _state_survivors[owner.token] = owner
+                        managed = True
+                    elif _state_survivors.get(owner.token) is owner:
+                        managed = True
+                if managed:
+                    survived.append(owner)
     diagnostics: list[dict[str, Any]] = []
     for owner in survived:
         alive = [
@@ -4890,6 +4929,8 @@ def _reconcile_state_client() -> None:
             added.append((name, running[name]["socket"]))
         for name in changed_names:
             changed.append((name, running[name]["socket"], _state_clients.get(name)))
+    # removed 退休者立即回收(REAP 锁串行),避免门禁阻塞本轮新增/换入
+    _reap_owners(to_reap, STATE_STOP_JOIN_TIMEOUT_S)
     for name, socket_path in added:
         client = _build_session_client(name, socket_path)
         with _STATE_CLIENT_LOCK:
@@ -4902,6 +4943,8 @@ def _reconcile_state_client() -> None:
                 continue  # 闸门已关:候选从未启动线程,零副作用直接丢弃
             if name in _state_inflight:
                 continue  # 同名活跃候选已在途:跳过复用,不起双 worker
+            if _state_retiring or _state_survivors:
+                continue  # R7 门禁:未决 ownership 未清,拒绝新候选(下轮重试)
             owner = _InflightOwner(
                 epoch=epoch, name=name,
                 token=next(_inflight_token), client=client,
@@ -4917,6 +4960,8 @@ def _reconcile_state_client() -> None:
                 and _state_epoch == epoch
                 and name not in _state_clients
                 and name not in _state_sessions_meta
+                and not _state_retiring
+                and not _state_survivors  # R7:发布前确认无未决 ownership
             ):
                 # 仍持有 ownership:原子 inflight→published
                 del _state_inflight[name]
@@ -4925,6 +4970,7 @@ def _reconcile_state_client() -> None:
             # 否则 stop 已摘取并拥有该候选,不得 publish
     for name, socket_path, old_client in changed:
         new_client = _build_session_client(name, socket_path)
+        iter_reap: list[_InflightOwner] = []
         owner: _InflightOwner | None = None
         with _STATE_CLIENT_LOCK:
             owned = (
@@ -4932,6 +4978,8 @@ def _reconcile_state_client() -> None:
                 and _state_epoch == epoch
                 and _state_clients.get(name) is old_client
                 and name not in _state_inflight  # 同名候选在途:跳过复用
+                and not _state_retiring
+                and not _state_survivors  # R7 门禁:未决 ownership 未清不起换入
             )
             if owned:
                 owner = _InflightOwner(
@@ -4967,6 +5015,8 @@ def _reconcile_state_client() -> None:
                 and _state_running
                 and _state_epoch == epoch
                 and _state_clients.get(name) is old_client
+                and not _state_retiring
+                and not _state_survivors  # R7:换入前确认无未决 ownership
             ):
                 # 原子换入:新客户端握手含全量 resync,清降级,meta 推进;
                 # 旧 client 同一临界区转移进 retiring(不停成功不摘)
@@ -4975,10 +5025,10 @@ def _reconcile_state_client() -> None:
                 _state_swap_pending.pop(name, None)
                 swapped = True
                 if old_client is not None:
-                    to_reap.append(_retire_client_locked(name, epoch, old_client))
+                    iter_reap.append(_retire_client_locked(name, epoch, old_client))
             elif still_owned:
                 # 我们摘取→我们负责 stop:同一临界区转移进 retiring
-                to_reap.append(_retire_client_locked(name, epoch, new_client))
+                iter_reap.append(_retire_client_locked(name, epoch, new_client))
                 if (
                     not cancelled
                     and not ready
@@ -4991,8 +5041,8 @@ def _reconcile_state_client() -> None:
                         "reason": f"state socket swap not ready: {socket_path}",
                     }
             # still_owned=False:stop 已摘取并拥有候选,不得再 stop/publish
-    for owner in to_reap:
-        _reap_owner(owner, STATE_STOP_JOIN_TIMEOUT_S)
+        # 立即回收本轮退休者(REAP 锁串行),避免门禁阻塞后续 session
+        _reap_owners(iter_reap, STATE_STOP_JOIN_TIMEOUT_S)
 
 
 def _state_client_snapshot() -> dict[str, Any]:

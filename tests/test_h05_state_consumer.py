@@ -22,6 +22,12 @@ retiring+survivors 先广播再共享 deadline join;survivor 真引用入
 _state_survivors 可重复 reaper 回收,诊断序列化与引用分离;lifespan 遇
 survivor raise 非正常完成。三类 retiring 真实命名线程/FD barrier、两
 survivor 重试回收、正常 stop/restart。
+R7 复审修订(#1810 REVIEW_BLOCK):reopen 门禁——open 先有界 reap 未决
+retiring/survivors、锁内确认全空才开新 epoch,否则 fail-closed 拒绝;
+reconcile 注册/发布/换入 CAS 全局拒绝未决 ownership;_STATE_REAP_LOCK
+串行 stop/reaper/to_reap/重复 stop,survivor 转移锁内身份 CAS 防幽灵
+复活/重复报告;覆盖 survivor 未回收→open/reconcile 拒绝→回收后 restart、
+双 stop 交错无幽灵。
 """
 import asyncio
 import threading
@@ -760,6 +766,94 @@ def test_lifespan_raises_on_stop_survivors(monkeypatch):
     with pytest.raises(RuntimeError, match="survived stop"):
         with TestClient(server.app):
             pass
+
+
+# ── R7 复审修订(#1810):reopen 门禁 + reap 串行防幽灵 ────────────
+
+
+class _FlakyZombie(FakeStateClient):
+    """stop 前 fail_stop=True 时永不退场;转 False 后可回收。"""
+
+    def __init__(self, sessions):
+        super().__init__(sessions)
+        self.fail_stop = True
+
+    def stop(self, join_timeout=5.0):
+        self.request_stop()
+        if self.fail_stop:
+            return False
+        self.stopped = True
+        return True
+
+
+def test_open_refused_until_survivor_reaped_then_restart(monkeypatch):
+    """survivor 未回收→open 有界 reap 后 fail-closed 拒绝新 epoch、reconcile
+    不发布;回收后 open 放行、restart 正常上线。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.2)
+    z = _FlakyZombie({"z": "/tmp/z.sock"})
+    z.start()
+    monkeypatch.setattr(server, "_state_clients", {"z": z})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "z": {"socket": "/tmp/z.sock", "directory": "/d"},
+    })
+    survivors = server._stop_state_client()
+    assert len(survivors) == 1
+    # 未决 ownership:open 拒绝(有界 reap 失败后 fail-closed)
+    assert server._open_state_clients() is False
+    assert server._state_running is False
+    assert server._state_survivors  # 真引用仍受管
+    _fake_discovery(monkeypatch, {"z": "/tmp/z.sock"})
+    server._reconcile_state_client()
+    assert server._state_clients == {}  # 旧线程未退,绝不发布新同名 client
+    # 回收后允许 restart
+    z.fail_stop = False
+    assert server._open_state_clients() is True
+    assert server._state_survivors == {}
+    assert server._state_retiring == {}
+    server._reconcile_state_client()
+    assert "z" in server._state_clients
+    assert server._state_clients["z"] is not z
+
+
+def test_reconcile_refuses_publish_with_pending_ownership(monkeypatch):
+    """running 但有未决 retiring:added 注册/发布被门禁拒绝;reaper 回收后
+    下轮放行。"""
+    z = _FlakyZombie({"old": "/tmp/old.sock"})
+    z.start()
+    with server._STATE_CLIENT_LOCK:
+        server._retire_client_locked("old", server._state_epoch, z)
+    _fake_discovery(monkeypatch, {"new": "/tmp/new.sock"})
+    server._reconcile_state_client()
+    assert "new" not in server._state_clients  # 门禁拒绝
+    assert server._state_inflight == {}
+    assert server._state_retiring  # 未决 ownership 保留
+    z.fail_stop = False
+    server._reconcile_state_client()  # reaper 回收→放行
+    assert server._state_retiring == {}
+    assert "new" in server._state_clients
+
+
+def test_double_stop_interleave_no_ghost_survivor(monkeypatch):
+    """两次 global stop + reaper 交错(REAP 锁串行):同一 owner 不重复
+    报告、成功摘除后不复活、最终零 survivor。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.2)
+    z = _FlakyZombie({"z": "/tmp/z.sock"})
+    z.start()
+    monkeypatch.setattr(server, "_state_clients", {"z": z})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "z": {"socket": "/tmp/z.sock", "directory": "/d"},
+    })
+    r1 = server._stop_state_client()
+    r2 = server._stop_state_client()  # 重复 stop:同一 owner 重试
+    assert len(r1) == 1 and len(r2) == 1
+    assert r1[0]["token"] == r2[0]["token"]  # 同一 owner,无双 owner
+    assert len(server._state_survivors) == 1
+    z.fail_stop = False
+    server._reap_retired_clients()  # reaper 成功摘除
+    assert server._state_survivors == {}
+    assert server._state_retiring == {}
+    # 幽灵检查:摘除后的 stop 不得再报告该 owner
+    assert server._stop_state_client() == []
 
 
 # ── R6 复审修订(#1780):retiring 真实线程/FD barrier ─────────────
