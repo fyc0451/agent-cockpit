@@ -343,6 +343,8 @@ header .spacer{flex:1}
 .term-loading-spinner{width:16px;height:16px;border:2px solid color-mix(in srgb,var(--term-fg) 28%,transparent);border-top-color:var(--term-fg);border-radius:50%;animation:term-loading-spin .8s linear infinite}
 @keyframes term-loading-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.term-loading{transition:none}.term-loading-spinner{animation:none}}
+.term-theme-overlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--bg,#0d1117);color:var(--fg,#e8e8e8);font-size:15px;opacity:1;transition:opacity .16s ease;pointer-events:auto;cursor:wait;user-select:none}
+.term-theme-overlay.done{opacity:0;pointer-events:none}
 /* 普通 scrollback 由 xterm 原生处理；TUI 鼠标上报或 alternate buffer 由下方 JS 接管 */
 #termContainer .xterm.enable-mouse-events{touch-action:none;overscroll-behavior:contain}
 /* xterm 不处理 Pointer Events；alternate buffer 也没有原生 touch scrollback，需合成 wheel */
@@ -3462,30 +3464,29 @@ function finishTermLoading(id,inst){
   if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active'))requestAnimationFrame(()=>{try{inst.xterm.focus()}catch(e){}});
 }
 // 切主题期间盖遮罩:WebGL 整屏重绘会阻塞主线程,期间点击/输入会被
-// 堆积并在阻塞结束后"幽灵回放"。盖住可见终端 + 全局禁输入,渲染完
-// 再揭开,让用户看到"正在切换"而非"点了没反应"。
-let TERM_THEME_OVERLAYING=false;
+// 堆积并在阻塞结束后"幽灵回放"。全局固定遮罩盖住一切 + 禁输入,
+// 渲染完揭开。用 position:fixed + z-index:9999,确保盖在 H5 zoom、
+// 侧边栏、终端 canvas 之上,不依赖终端容器可见性。
+let TERM_THEME_OVERLAYING=false,TERM_THEME_OVERLAY_EL=null;
 function showTermThemeOverlay(){
   if(TERM_THEME_OVERLAYING)return;
   TERM_THEME_OVERLAYING=true;
-  for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
-    if(!inst?.el||inst.el.style.display==='none')continue;
-    if(inst.themeOverlayEl)continue;
-    const ov=document.createElement('div');
-    ov.className='term-loading';ov.setAttribute('role','status');
-    ov.innerHTML='<span class="term-loading-spinner" aria-hidden="true"></span><span>切换主题…</span>';
-    inst.el.appendChild(ov);inst.themeOverlayEl=ov;
-  }
+  if(TERM_THEME_OVERLAY_EL)return;
+  const ov=document.createElement('div');
+  ov.className='term-theme-overlay';ov.setAttribute('role','status');
+  ov.innerHTML='<span class="term-loading-spinner" aria-hidden="true"></span><span>切换主题…</span>';
+  document.body.appendChild(ov);
+  // 强制同步 layout,确保浏览器把遮罩绘制到屏幕,再让调用方触发重绘。
+  void ov.offsetHeight;
+  TERM_THEME_OVERLAY_EL=ov;
 }
 function hideTermThemeOverlay(){
   if(!TERM_THEME_OVERLAYING)return;
   TERM_THEME_OVERLAYING=false;
-  for(const inst of Object.values(TERM_INSTANCES||{})){
-    const ov=inst?.themeOverlayEl;if(!ov)continue;
-    inst.themeOverlayEl=null;
-    ov.classList.add('done');
-    setTimeout(()=>{try{ov.remove()}catch(e){}},180);
-  }
+  const ov=TERM_THEME_OVERLAY_EL;TERM_THEME_OVERLAY_EL=null;
+  if(!ov)return;
+  ov.classList.add('done');
+  setTimeout(()=>{try{ov.remove()}catch(e){}},180);
 }
 function holdTermLoadingForTui(id){
   const inst=TERM_INSTANCES[id];if(!inst?.loadingEl)return;
@@ -4642,7 +4643,7 @@ function setTheme(mode,save=true){
   const themeStarted=performance.now();
   const light=mode==='light';
   const th=termTheme();
-  const hasVisibleTerm=Object.values(TERM_INSTANCES||{}).some(i=>i?.el&&i.el.style.display!=='none');
+  const hasTerm=Object.keys(TERM_INSTANCES||{}).length>0;
   const applyTheme=()=>{
     document.documentElement.classList.toggle('light',light);
     const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
@@ -4661,11 +4662,11 @@ function setTheme(mode,save=true){
       if(save)window.__termThemeSwitchMs=Math.round((performance.now()-themeStarted)*10)/10;
     });
   };
-  // 有可见终端时先盖遮罩并等一帧(确保遮罩画出),再触发 WebGL 重绘;
-  // 避免遮罩和重绘同帧导致遮罩还没渲染就卡住。无可见终端则直接切。
-  if(hasVisibleTerm){
+  // 有终端时先盖全局固定遮罩(offsetHeight 强制画出),下一帧再触发 WebGL
+  // 重绘。遮罩在独立合成层,即使主线程被重绘卡住也仍可见。
+  if(hasTerm){
     showTermThemeOverlay();
-    requestAnimationFrame(()=>requestAnimationFrame(applyTheme));
+    requestAnimationFrame(applyTheme);
   }else applyTheme();
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
