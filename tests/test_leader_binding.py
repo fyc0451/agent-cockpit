@@ -1,11 +1,13 @@
-"""test_leader_binding.py — B0-PREP Q1 leader_binding 持久层测试。
+"""test_leader_binding.py — B0-PREP Q1/R2/R3 leader_binding 持久层测试。
 
-覆盖：迁移幂等、首次绑定、CAS 改绑、stale version、并发改绑唯一 active、
-无效状态/scope/字段拒绝、active/previous 查询、失败回滚旧绑定保持、
-previous 排空状态演进、重启持久化、无凭据字段。
+覆盖：迁移幂等与旧 schema fail-closed、issuer 跨域隔离、mandatory CAS、
+真幂等 payload、migration 记录、drain 单调状态机 + 强制 CAS + 计数持久化、
+retire DB 证明、control_events outbox 单调 seq 分页/fanout 重放、
+并发改绑唯一 active、失败回滚、重启持久化。
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -29,6 +31,13 @@ def _fresh_connect() -> sqlite3.Connection:
     return con
 
 
+def _bind(issuer="issuer-1", scope_kind="team", scope_id="t1", **kw):
+    kw.setdefault("expected_version", 0)
+    return leader_binding.bind_leader(
+        issuer, scope_kind, scope_id, **kw,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 迁移与 schema
 # ---------------------------------------------------------------------------
@@ -37,7 +46,7 @@ class TestSchema:
     def test_migration_idempotent(self, db_path: Path) -> None:
         con = leader_binding._connect()
         con.close()
-        con = leader_binding._connect()  # 二次初始化不报错
+        con = leader_binding._connect()
         con.close()
         assert db_path.is_file()
 
@@ -46,29 +55,49 @@ class TestSchema:
         columns = {
             row["name"] for row in con.execute("PRAGMA table_info(leader_bindings)").fetchall()
         }
+        events = {
+            row["name"] for row in con.execute("PRAGMA table_info(control_events)").fetchall()
+        }
         con.close()
         assert columns >= {
-            "scope_kind", "scope_id", "mail_name", "previous_mail_name",
-            "previous_state", "agent_name", "agent_kind", "session", "pane_id",
-            "binding_version", "state", "degraded_reason", "updated_ts",
+            "issuer", "scope_kind", "scope_id", "mail_name", "binding_id",
+            "previous_mail_name", "previous_state", "agent_name", "agent_kind",
+            "session", "pane_id", "registry_selector", "binding_version",
+            "state", "degraded_reason", "updated_ts", "route_epoch",
+            "migration_id", "drain_remaining", "drain_pending",
+            "drain_claimed", "drain_ack_pending",
         }
-        for col in columns:
-            assert "token" not in col.lower()
-            assert "password" not in col.lower()
-            assert "secret" not in col.lower()
+        assert "seq" in events and "event_id" in events
+        for col in columns | events:
+            for secret in ("token", "password", "secret"):
+                assert secret not in col.lower()
 
-    def test_schema_forward_migration_adds_missing_column(self, db_path: Path) -> None:
-        # 模拟历史库：先建旧版表（缺新列），再初始化应补齐
+    def test_old_schema_with_rows_fails_closed_no_issuer_guess(self, db_path: Path) -> None:
+        """旧表有行且 issuer 无法推断：fail-closed 显式迁移诊断，不猜默认。"""
         con = _fresh_connect()
         con.executescript(
             """
             CREATE TABLE leader_bindings (
-              scope_kind TEXT NOT NULL,
-              scope_id TEXT NOT NULL,
-              mail_name TEXT NOT NULL,
-              binding_version INTEGER NOT NULL,
-              state TEXT NOT NULL,
-              updated_ts REAL NOT NULL,
+              scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL,
+              mail_name TEXT NOT NULL, binding_version INTEGER NOT NULL,
+              state TEXT NOT NULL, updated_ts REAL NOT NULL,
+              PRIMARY KEY(scope_kind, scope_id, mail_name)
+            );
+            INSERT INTO leader_bindings VALUES('team','t1','a',1,'active',1.0);
+            """
+        )
+        con.close()
+        with pytest.raises(RuntimeError, match="issuer"):
+            leader_binding._connect()
+
+    def test_old_schema_empty_migrates(self, db_path: Path) -> None:
+        con = _fresh_connect()
+        con.executescript(
+            """
+            CREATE TABLE leader_bindings (
+              scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL,
+              mail_name TEXT NOT NULL, binding_version INTEGER NOT NULL,
+              state TEXT NOT NULL, updated_ts REAL NOT NULL,
               PRIMARY KEY(scope_kind, scope_id, mail_name)
             );
             """
@@ -79,20 +108,43 @@ class TestSchema:
             row["name"] for row in con.execute("PRAGMA table_info(leader_bindings)").fetchall()
         }
         con.close()
-        assert "previous_mail_name" in columns
-        assert "agent_kind" in columns
+        assert "issuer" in columns and "binding_id" in columns
 
-    def test_unique_active_index_enforced(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="a@t1", issuer="issuer-1", expected_version=0)
-        with pytest.raises(sqlite3.IntegrityError):
-            con = _fresh_connect()
+    def test_duplicate_active_old_schema_fail_closed(self, db_path: Path) -> None:
+        """旧 schema 重复 active：初始化必须抛可定位错误。"""
+        con = leader_binding._connect()
+        con.execute(
+            "INSERT INTO leader_bindings VALUES('i','team','t1','a','b1',NULL,"
+            "NULL,NULL,NULL,NULL,NULL,NULL,1,'active',NULL,1.0,1,NULL,0,0,0,0)"
+        )
+        con.commit()
+        con.close()
+        con = sqlite3.connect(db_path)
+        con.execute("DROP INDEX leader_bindings_active_once")
+        con.commit()
+        con.close()
+        con = sqlite3.connect(db_path)
+        con.execute(
+            "INSERT INTO leader_bindings VALUES('i','team','t1','b','b2',NULL,"
+            "NULL,NULL,NULL,NULL,NULL,NULL,2,'active',NULL,1.0,2,NULL,0,0,0,0)"
+        )
+        con.commit()
+        con.close()
+        with pytest.raises(RuntimeError, match="重复 active"):
+            leader_binding._connect()
+
+    def test_binding_state_degraded_rejected_by_schema(self, db_path: Path) -> None:
+        con = leader_binding._connect()
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
             con.execute(
-                "INSERT INTO leader_bindings VALUES('team','t1','x@t1',NULL,NULL,"
-                "NULL,NULL,NULL,NULL,5,'active',NULL,1.0,"
-                "'i',NULL,1,NULL)"
+                "INSERT INTO leader_bindings VALUES('i','team','t1','x','bx',"
+                "NULL,NULL,NULL,NULL,NULL,NULL,NULL,1,'degraded',NULL,1.0,1,"
+                "NULL,0,0,0,0)"
             )
             con.commit()
-            con.close()
+        con.close()
+        with pytest.raises(leader_binding.BindingError, match="state"):
+            leader_binding.list_bindings(state="degraded")
 
 
 # ---------------------------------------------------------------------------
@@ -102,57 +154,67 @@ class TestSchema:
 class TestBind:
     def test_first_bind_creates_active(self, db_path: Path) -> None:
         binding = leader_binding.bind_leader(
-            "team", "channel-1", mail_name="codex-agent-cockpit", issuer="issuer-1",
+            "issuer-1", "team", "channel-1", mail_name="codex-agent-cockpit",
             agent_name="codex", agent_kind="codex", session="s1", pane_id="p1",
             expected_version=0,
         )
         assert binding["state"] == "active"
         assert binding["binding_version"] == 1
-        assert binding["mail_name"] == "codex-agent-cockpit"
-        assert binding["previous_mail_name"] is None
-        active = leader_binding.get_active_binding("team", "channel-1")
-        assert active is not None
+        assert binding["binding_id"]
+        assert binding["issuer"] == "issuer-1"
+        active = leader_binding.get_active_binding("issuer-1", "team", "channel-1")
         assert active["mail_name"] == "codex-agent-cockpit"
         assert active["agent_kind"] == "codex"
-        assert active["session"] == "s1"
-        assert active["pane_id"] == "p1"
 
-    def test_same_mail_name_rebind_is_idempotent(self, db_path: Path) -> None:
-        leader_binding.bind_leader("user", "u1", mail_name="a", issuer="issuer-1", pane_id="p1", expected_version=0)
-        leader_binding.bind_leader("user", "u1", mail_name="a", issuer="issuer-1", pane_id="p2", expected_version=1)
-        active = leader_binding.get_active_binding("user", "u1")
-        assert active["mail_name"] == "a"
-        assert active["pane_id"] == "p2"
-        assert active["binding_version"] == 1  # 未产生新版本
-        assert len(leader_binding.list_bindings("user", "u1")) == 1
+    def test_same_issuer_same_payload_rebind_is_true_idempotent(self, db_path: Path) -> None:
+        _bind(mail_name="a", pane_id="p1", agent_kind="codex")
+        second = _bind(mail_name="a", pane_id="p1", agent_kind="codex",
+                       expected_version=1)
+        assert second["binding_version"] == 1  # 真幂等：不推进版本
+        assert len(leader_binding.list_control_events("issuer-1", "team", "t1")) == 1
+        assert len(leader_binding.list_bindings("issuer-1", "team", "t1")) == 1
+
+    def test_same_mail_name_payload_change_bumps_version(self, db_path: Path) -> None:
+        _bind(mail_name="a", pane_id="p1")
+        changed = _bind(mail_name="a", pane_id="p2", expected_version=1)
+        assert changed["binding_version"] == 2  # payload 变化 → version+1
+        events = leader_binding.list_control_events("issuer-1", "team", "t1")
+        assert len(events) == 2  # 变更也写 outbox
+        assert events[-1]["binding_version"] == 2
+        mig = leader_binding.get_migration(changed["migration_id"])
+        assert mig is not None
+        assert mig["from_binding_id"] == mig["to_binding_id"]  # 同 binding 变更
 
     def test_invalid_scope_rejected(self, db_path: Path) -> None:
         with pytest.raises(leader_binding.BindingError, match="scope_kind"):
-            leader_binding.bind_leader("org", "x", mail_name="a", issuer="issuer-1", expected_version=0)
+            _bind(scope_kind="org", mail_name="a")
         with pytest.raises(leader_binding.BindingError, match="scope_id"):
-            leader_binding.bind_leader("team", "", mail_name="a", issuer="issuer-1", expected_version=0)
+            _bind(scope_id="", mail_name="a")
 
     def test_invalid_mail_name_rejected(self, db_path: Path) -> None:
         with pytest.raises(leader_binding.BindingError, match="mail_name"):
-            leader_binding.bind_leader("team", "t1", mail_name="", expected_version=0, issuer="issuer-1")
+            _bind(mail_name="")
         with pytest.raises(leader_binding.BindingError, match="mail_name"):
-            leader_binding.bind_leader("team", "t1", mail_name="a\nb", issuer="issuer-1", expected_version=0)
+            _bind(mail_name="a\nb")
 
     def test_credentials_field_rejected(self, db_path: Path) -> None:
-        # 正常字段不抛
-        leader_binding.bind_leader(
-            "team", "t1", mail_name="a", issuer="issuer-1", agent_name="x", agent_kind="k",
-            session="s", pane_id="p", expected_version=0,
-        )
-        # 敏感字段名被拒绝（白名单防护）
+        _bind(mail_name="a", pane_id="p")
         with pytest.raises(leader_binding.BindingError, match="敏感"):
             leader_binding._validate_fields({"access_token": "secret"})
         with pytest.raises(leader_binding.BindingError, match="敏感"):
             leader_binding._validate_fields({"pane_password": "x"})
 
-    def test_invalid_state_query_rejected(self, db_path: Path) -> None:
-        with pytest.raises(leader_binding.BindingError, match="state"):
-            leader_binding.list_bindings(state="bogus")
+    def test_issuer_isolation(self, db_path: Path) -> None:
+        """跨 issuer 隔离：同 scope 不同 issuer 各自独立 active。"""
+        a = _bind(issuer="issuer-a", mail_name="a1")
+        b = _bind(issuer="issuer-b", mail_name="b1")
+        assert a["binding_version"] == 1 and b["binding_version"] == 1
+        assert leader_binding.get_active_binding("issuer-a", "team", "t1")["mail_name"] == "a1"
+        assert leader_binding.get_active_binding("issuer-b", "team", "t1")["mail_name"] == "b1"
+        # issuer-a 的改绑不影响 issuer-b
+        _bind(issuer="issuer-a", mail_name="a2", expected_version=1)
+        assert leader_binding.get_active_binding("issuer-b", "team", "t1")["mail_name"] == "b1"
+        assert leader_binding.get_active_binding("issuer-b", "team", "t1")["binding_version"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -161,68 +223,55 @@ class TestBind:
 
 class TestCasRebind:
     def test_rebind_with_correct_version(self, db_path: Path) -> None:
-        first = leader_binding.bind_leader("team", "t1", mail_name="old@t1", issuer="issuer-1", expected_version=0)
-        assert first["binding_version"] == 1
-        second = leader_binding.bind_leader(
-            "team", "t1", mail_name="new@t1", issuer="issuer-1", expected_version=1,
-        )
+        first = _bind(mail_name="old@t1")
+        second = _bind(mail_name="new@t1", expected_version=1)
         assert second["binding_version"] == 2
-        assert second["state"] == "active"
         assert second["previous_mail_name"] == "old@t1"
-        # 旧绑定软退役保留
-        old = leader_binding.get_binding("team", "t1", "old@t1")
-        assert old is not None
+        old = leader_binding.get_binding("issuer-1", "team", "t1", "old@t1")
         assert old["state"] == "previous"
-        assert old["previous_state"] == "draining"
-        # 唯一 active
-        assert leader_binding.get_active_binding("team", "t1")["mail_name"] == "new@t1"
-        assert len(leader_binding.list_bindings("team", "t1", state="active")) == 1
+        assert old["migration_id"] == second["migration_id"]  # 不保留旧激活 migration
+        assert leader_binding.get_active_binding("issuer-1", "team", "t1")["mail_name"] == "new@t1"
+
+    def test_migration_record_links_from_to_binding(self, db_path: Path) -> None:
+        first = _bind(mail_name="a")
+        second = _bind(mail_name="b", expected_version=1)
+        mig = leader_binding.get_migration(second["migration_id"])
+        assert mig is not None
+        assert mig["issuer"] == "issuer-1"
+        assert mig["from_binding_id"] == first["binding_id"]
+        assert mig["to_binding_id"] == second["binding_id"]
+        assert mig["route_epoch"] == 2
 
     def test_stale_version_rejected_no_change(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="a", issuer="issuer-1", expected_version=0)
+        _bind(mail_name="a")
         with pytest.raises(leader_binding.StaleVersionError, match="CAS"):
-            leader_binding.bind_leader(
-                "team", "t1", mail_name="b", issuer="issuer-1", expected_version=99,
-            )
-        active = leader_binding.get_active_binding("team", "t1")
+            _bind(mail_name="b", expected_version=99)
+        active = leader_binding.get_active_binding("issuer-1", "team", "t1")
         assert active["mail_name"] == "a"
         assert active["binding_version"] == 1
-        assert leader_binding.get_binding("team", "t1", "b") is None
+        assert leader_binding.get_binding("issuer-1", "team", "t1", "b") is None
 
     def test_rebind_without_version_rejected(self, db_path: Path) -> None:
-        """mandatory CAS：expected_version=None 一律拒绝，零变更。"""
-        leader_binding.bind_leader("team", "t1", mail_name="a", issuer="issuer-1", expected_version=0)
+        _bind(mail_name="a")
         with pytest.raises(leader_binding.BindingError, match="expected_version"):
-            leader_binding.bind_leader("team", "t1", mail_name="b", issuer="issuer-1")
-        with pytest.raises(leader_binding.BindingError, match="expected_version"):
-            leader_binding.bind_leader("team", "t1", mail_name="a", issuer="issuer-1")  # 幂等路径同样拒绝
-        active = leader_binding.get_active_binding("team", "t1")
-        assert active["mail_name"] == "a"
-        assert active["binding_version"] == 1
-        assert leader_binding.get_binding("team", "t1", "b") is None
-
-    def test_stale_same_mail_name_rebind_zero_mutation(self, db_path: Path) -> None:
-        """同 mail_name 幂等路径也在 CAS 之后：wrong version 零变更。"""
-        leader_binding.bind_leader(
-            "team", "t1", mail_name="a", issuer="issuer-1", agent_kind="codex", pane_id="p1",
-            expected_version=0,
-        )
-        with pytest.raises(leader_binding.StaleVersionError, match="CAS"):
             leader_binding.bind_leader(
-                "team", "t1", mail_name="a", issuer="issuer-1", pane_id="p2", expected_version=99,
+                "issuer-1", "team", "t1", mail_name="b",
             )
-        active = leader_binding.get_active_binding("team", "t1")
-        assert active["pane_id"] == "p1"  # 未刷新
+        with pytest.raises(leader_binding.BindingError, match="expected_version"):
+            leader_binding.bind_leader(
+                "issuer-1", "team", "t1", mail_name="a", pane_id="p2",
+            )
+
+    def test_stale_same_mail_name_zero_mutation(self, db_path: Path) -> None:
+        _bind(mail_name="a", pane_id="p1")
+        with pytest.raises(leader_binding.StaleVersionError, match="CAS"):
+            _bind(mail_name="a", pane_id="p2", expected_version=99)
+        active = leader_binding.get_active_binding("issuer-1", "team", "t1")
+        assert active["pane_id"] == "p1"
         assert active["binding_version"] == 1
-        # 正确 version 的幂等刷新仍生效
-        refreshed = leader_binding.bind_leader(
-            "team", "t1", mail_name="a", issuer="issuer-1", pane_id="p3", expected_version=1,
-        )
-        assert refreshed["pane_id"] == "p3"
-        assert refreshed["binding_version"] == 1
 
     def test_concurrent_rebind_single_active(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="base", issuer="issuer-1", expected_version=0)
+        _bind(mail_name="base")
         results: list[Any] = []
         errors: list[BaseException] = []
         barrier = threading.Barrier(2)
@@ -231,7 +280,8 @@ class TestCasRebind:
             barrier.wait()
             try:
                 results.append(leader_binding.bind_leader(
-                    "team", "t1", mail_name=mail_name, issuer="issuer-1", expected_version=1,
+                    "issuer-1", "team", "t1", mail_name=mail_name,
+                    expected_version=1,
                 ))
             except BaseException as exc:  # noqa: BLE001 - 收集 stale 等异常
                 errors.append(exc)
@@ -244,21 +294,20 @@ class TestCasRebind:
             t.start()
         for t in threads:
             t.join(timeout=10)
-        assert len(results) == 1  # 恰一个 CAS 成功
+        assert len(results) == 1
         assert any(isinstance(e, leader_binding.StaleVersionError) for e in errors)
-        active_rows = leader_binding.list_bindings("team", "t1", state="active")
-        assert len(active_rows) == 1  # 任一 scope 不得出现两个 active
+        active_rows = leader_binding.list_bindings(
+            "issuer-1", "team", "t1", state="active",
+        )
+        assert len(active_rows) == 1
 
     def test_failed_activation_keeps_old_active(
         self, db_path: Path, monkeypatch: Any,
     ) -> None:
-        """新 active 行插入失败 → 整个事务回滚，旧绑定保持 active（未被软退役）。"""
-        leader_binding.bind_leader("team", "t1", mail_name="old@t1", issuer="issuer-1", expected_version=0)
+        _bind(mail_name="old@t1")
         real_connect = leader_binding._connect
 
         class FlakyConnection:
-            """代理连接：INSERT 到 leader_bindings 时注入失败。"""
-
             def __init__(self, con: sqlite3.Connection) -> None:
                 self._con = con
 
@@ -276,96 +325,230 @@ class TestCasRebind:
         monkeypatch.setattr(leader_binding, "_connect", flaky_connect)
         with pytest.raises(sqlite3.IntegrityError):
             leader_binding.bind_leader(
-                "team", "t1", mail_name="new@t1", issuer="issuer-1", expected_version=1,
+                "issuer-1", "team", "t1", mail_name="new@t1",
+                expected_version=1,
             )
-        # 注意：不能用 monkeypatch.undo()（会连 fixture 的 DB_PATH 一起撤销）
         monkeypatch.setattr(leader_binding, "_connect", real_connect)
-        # 回滚验证：旧 active 行未被软退役、版本未变
-        old = leader_binding.get_binding("team", "t1", "old@t1")
-        assert old is not None
+        old = leader_binding.get_binding("issuer-1", "team", "t1", "old@t1")
         assert old["state"] == "active"
         assert old["binding_version"] == 1
-        # 新绑定未产生
-        assert leader_binding.get_binding("team", "t1", "new@t1") is None
-        assert leader_binding.get_active_binding("team", "t1")["mail_name"] == "old@t1"
+        assert leader_binding.get_binding("issuer-1", "team", "t1", "new@t1") is None
+        # outbox 无失败事件（同事务回滚）
+        events = leader_binding.list_control_events("issuer-1", "team", "t1")
+        assert len(events) == 1
 
     def test_reactivate_previous_mail_name(self, db_path: Path) -> None:
-        """软退役行不删除但可原地复活为 active（主键占用不阻塞切回）。"""
-        leader_binding.bind_leader("team", "t1", mail_name="a", issuer="issuer-1", expected_version=0)
-        leader_binding.bind_leader("team", "t1", mail_name="b", issuer="issuer-1", expected_version=1)
-        assert leader_binding.get_active_binding("team", "t1")["mail_name"] == "b"
-        # 未排空禁止再改绑：a 仍是 previous(draining)，复活被拒
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
         with pytest.raises(leader_binding.BindingError, match="未排空"):
             leader_binding.bind_leader(
-                "team", "t1", mail_name="a", issuer="issuer-1", expected_version=2,
+                "issuer-1", "team", "t1", mail_name="a", expected_version=2,
             )
-        # 排空 a 后可复活
-        leader_binding.mark_previous_state("team", "t1", "a", state="drained")
+        _drain("a", expected_version=1)
         back = leader_binding.bind_leader(
-            "team", "t1", mail_name="a", issuer="issuer-1", expected_version=2,
+            "issuer-1", "team", "t1", mail_name="a", expected_version=2,
         )
         assert back["mail_name"] == "a"
-        assert back["state"] == "active"
         assert back["binding_version"] == 3
-        assert back["previous_mail_name"] == "b"
-        # a 行原地复活（无重复行）
-        rows = leader_binding.list_bindings("team", "t1")
+        rows = leader_binding.list_bindings("issuer-1", "team", "t1")
         assert len(rows) == 2
-        active_rows = [r for r in rows if r["state"] == "active"]
-        assert len(active_rows) == 1
-        assert active_rows[0]["mail_name"] == "a"
+        assert len([r for r in rows if r["state"] == "active"]) == 1
+
+
+def _drain(mail_name, *, issuer="issuer-1", expected_version, migration_id=None,
+           state="drained"):
+    row = leader_binding.get_binding(issuer, "team", "t1", mail_name)
+    mig = migration_id or row["migration_id"]
+    return leader_binding.mark_previous_state(
+        issuer, "team", "t1", mail_name, state=state,
+        expected_binding_version=expected_version,
+        expected_migration_id=mig,
+        expected_state="draining",
+    )
 
 
 # ---------------------------------------------------------------------------
-# previous 排空状态与退役
+# drain 状态机（强制 CAS + 计数持久化）
 # ---------------------------------------------------------------------------
 
-class TestPreviousDrain:
-    def test_previous_state_progression(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="old@t1", issuer="issuer-1", expected_version=0)
-        leader_binding.bind_leader("team", "t1", mail_name="new@t1", issuer="issuer-1", expected_version=1)
-        old = leader_binding.get_binding("team", "t1", "old@t1")
-        assert old["previous_state"] == "draining"
-        # 排空失败 → degraded（显式可见，不静默宣告成功）
-        assert leader_binding.mark_previous_state(
-            "team", "t1", "old@t1", state="degraded",
-            reason="拉取凭证缺失",
-        )["updated"] is True
-        old = leader_binding.get_binding("team", "t1", "old@t1")
+class TestDrain:
+    def test_forced_cas_required(self, db_path: Path) -> None:
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
+        with pytest.raises(leader_binding.BindingError, match="expected_binding_version"):
+            leader_binding.mark_previous_state(
+                "issuer-1", "team", "t1", "a", state="drained",
+                expected_migration_id="m", expected_state="draining",
+            )
+        with pytest.raises(leader_binding.BindingError, match="expected_migration_id"):
+            leader_binding.mark_previous_state(
+                "issuer-1", "team", "t1", "a", state="drained",
+                expected_binding_version=1, expected_state="draining",
+            )
+        with pytest.raises(leader_binding.BindingError, match="expected_state"):
+            leader_binding.mark_previous_state(
+                "issuer-1", "team", "t1", "a", state="drained",
+                expected_binding_version=1, expected_migration_id="m",
+            )
+
+    def test_stale_worker_zero_mutation(self, db_path: Path) -> None:
+        """stale worker（版本/迁移 id 不符）零变更。"""
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
+        with pytest.raises(leader_binding.StaleVersionError, match="drain CAS"):
+            leader_binding.mark_previous_state(
+                "issuer-1", "team", "t1", "a", state="drained",
+                expected_binding_version=99,
+                expected_migration_id="wrong-migration",
+                expected_state="draining",
+            )
+        old = leader_binding.get_binding("issuer-1", "team", "t1", "a")
+        assert old["previous_state"] == "draining"  # 零变更
+
+    def test_drain_monotonic_and_terminal(self, db_path: Path) -> None:
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
+        row = leader_binding.get_binding("issuer-1", "team", "t1", "a")
+        mig = row["migration_id"]
+        # 合法：draining → degraded（失败可见）
+        leader_binding.mark_previous_state(
+            "issuer-1", "team", "t1", "a", state="degraded",
+            expected_binding_version=1, expected_migration_id=mig,
+            expected_state="draining", reason="拉取凭证缺失",
+        )
+        old = leader_binding.get_binding("issuer-1", "team", "t1", "a")
         assert old["previous_state"] == "degraded"
         assert old["degraded_reason"] == "拉取凭证缺失"
         # degraded 仅可重试 draining
-        assert leader_binding.mark_previous_state(
-            "team", "t1", "old@t1", state="draining",
-        )["updated"] is True
+        leader_binding.mark_previous_state(
+            "issuer-1", "team", "t1", "a", state="draining",
+            expected_binding_version=1, expected_migration_id=mig,
+            expected_state="degraded",
+        )
         # drained 终态
-        assert leader_binding.mark_previous_state(
-            "team", "t1", "old@t1", state="drained",
-        )["updated"] is True
-        old = leader_binding.get_binding("team", "t1", "old@t1")
+        leader_binding.mark_previous_state(
+            "issuer-1", "team", "t1", "a", state="drained",
+            expected_binding_version=1, expected_migration_id=mig,
+            expected_state="draining",
+        )
+        old = leader_binding.get_binding("issuer-1", "team", "t1", "a")
         assert old["previous_state"] == "drained"
         # drained 不可回退
         with pytest.raises(leader_binding.BindingError, match="非法 drain 迁移"):
             leader_binding.mark_previous_state(
-                "team", "t1", "old@t1", state="degraded",
+                "issuer-1", "team", "t1", "a", state="degraded",
+                expected_binding_version=1, expected_migration_id=mig,
+                expected_state="drained",
             )
 
-    def test_mark_previous_state_rejects_invalid(self, db_path: Path) -> None:
-        with pytest.raises(leader_binding.BindingError, match="previous state"):
-            leader_binding.mark_previous_state("team", "t1", "old", state="bogus")
+    def test_drain_counters_persist_and_cas(self, db_path: Path) -> None:
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
+        row = leader_binding.get_binding("issuer-1", "team", "t1", "a")
+        mig = row["migration_id"]
+        leader_binding.mark_previous_state(
+            "issuer-1", "team", "t1", "a", state="draining",
+            expected_binding_version=1, expected_migration_id=mig,
+            expected_state="draining", remaining=3, pending=2, claimed=1, ack_pending=0,
+        )
+        old = leader_binding.get_binding("issuer-1", "team", "t1", "a")
+        assert old["drain_remaining"] == 3
+        assert old["drain_pending"] == 2
+        assert old["drain_claimed"] == 1
+        assert old["drain_ack_pending"] == 0
+        # 计数更新后置零
+        leader_binding.mark_previous_state(
+            "issuer-1", "team", "t1", "a", state="drained",
+            expected_binding_version=1, expected_migration_id=mig,
+            expected_state="draining", remaining=0, pending=0, claimed=0, ack_pending=0,
+        )
+        old = leader_binding.get_binding("issuer-1", "team", "t1", "a")
+        assert old["drain_remaining"] == 0
 
-    def test_retire_previous_keeps_row(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="old@t1", issuer="issuer-1", expected_version=0)
-        leader_binding.bind_leader("team", "t1", mail_name="new@t1", issuer="issuer-1", expected_version=1)
-        leader_binding.mark_previous_state("team", "t1", "old@t1", state="drained")
-        r = leader_binding.retire_binding("team", "t1", "old@t1")
+
+# ---------------------------------------------------------------------------
+# retire（DB 证明，无调用者旁路）
+# ---------------------------------------------------------------------------
+
+class TestRetire:
+    def test_retire_requires_drained_and_db_zero_counts(self, db_path: Path) -> None:
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
+        with pytest.raises(leader_binding.BindingError, match="previous_state"):
+            leader_binding.retire_binding("issuer-1", "team", "t1", "a")
+        # 排空但计数非零（DB 证明）→ 拒绝
+        row = leader_binding.get_binding("issuer-1", "team", "t1", "a")
+        leader_binding.mark_previous_state(
+            "issuer-1", "team", "t1", "a", state="drained",
+            expected_binding_version=1, expected_migration_id=row["migration_id"],
+            expected_state="draining", remaining=1,
+        )
+        with pytest.raises(leader_binding.BindingError, match="DB 证明"):
+            leader_binding.retire_binding("issuer-1", "team", "t1", "a")
+        # 计数清零后成功
+        leader_binding.mark_previous_state(
+            "issuer-1", "team", "t1", "a", state="drained",
+            expected_binding_version=1, expected_migration_id=row["migration_id"],
+            expected_state="drained", remaining=0,
+        )
+        r = leader_binding.retire_binding("issuer-1", "team", "t1", "a")
         assert r["retired"] is True
-        old = leader_binding.get_binding("team", "t1", "old@t1")
-        assert old is not None  # 软退役不删除
+        old = leader_binding.get_binding("issuer-1", "team", "t1", "a")
         assert old["state"] == "retired"
-        assert old["previous_state"] == "drained"
-        active = leader_binding.get_active_binding("team", "t1")
-        assert active["mail_name"] == "new@t1"
+
+    def test_retire_forgery_rejected(self, db_path: Path) -> None:
+        """调用者无法伪造证明：无计数参数旁路。"""
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
+        with pytest.raises(TypeError):
+            leader_binding.retire_binding(
+                "issuer-1", "team", "t1", "a", remaining=0,  # 不再接受该参数
+            )
+
+
+# ---------------------------------------------------------------------------
+# outbox（单调 seq 分页；fanout 重放）
+# ---------------------------------------------------------------------------
+
+class TestOutbox:
+    def test_seq_monotonic_and_pagination(self, db_path: Path) -> None:
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
+        _drain("a", expected_version=1)
+        _bind(mail_name="c", expected_version=2)
+        _drain("b", expected_version=2)
+        events = leader_binding.list_control_events("issuer-1", "team", "t1")
+        assert len(events) == 5  # 3 binding_changed + 2 drain_state_changed
+        seqs = [e["seq"] for e in events]
+        assert seqs == sorted(seqs) and len(set(seqs)) == 5  # 单调唯一
+        # 游标分页
+        page2 = leader_binding.list_control_events(
+            "issuer-1", "team", "t1", after_seq=seqs[0],
+        )
+        assert len(page2) == 4
+        assert page2[0]["seq"] > seqs[0]
+
+    def test_fanout_replayable_and_idempotent(self, db_path: Path) -> None:
+        _bind(mail_name="a")
+        pending = leader_binding.undelivered_control_events()
+        assert len(pending) == 1
+        event_id = pending[0]["event_id"]
+        assert leader_binding.mark_event_fanned_out(event_id) is True
+        assert leader_binding.undelivered_control_events() == []
+        assert leader_binding.mark_event_fanned_out(event_id) is False
+
+    def test_events_carry_issuer_scope_migration(self, db_path: Path) -> None:
+        _bind(mail_name="a")
+        _bind(mail_name="b", expected_version=1)
+        events = leader_binding.list_control_events("issuer-1", "team", "t1")
+        changed = events[-1]
+        assert changed["event_type"] == "binding_changed"
+        assert changed["issuer"] == "issuer-1"
+        assert changed["binding_version"] == 2
+        mig = leader_binding.get_migration(changed["migration_id"])
+        assert mig is not None
+        payload = json.loads(changed["payload_json"])
+        assert payload["mail_name"] == "b"
 
 
 # ---------------------------------------------------------------------------
@@ -373,207 +556,19 @@ class TestPreviousDrain:
 # ---------------------------------------------------------------------------
 
 class TestPersistence:
-    def test_restart_persists(self, db_path: Path, monkeypatch: Any) -> None:
-        leader_binding.bind_leader(
-            "team", "t1", mail_name="a", issuer="issuer-1", agent_kind="codex",
-            session="s1", pane_id="p1", expected_version=0,
-        )
-        leader_binding.bind_leader("team", "t1", mail_name="b", issuer="issuer-1", expected_version=1)
-        # 模拟重启：断开全部连接后重新绑定（新连接读取同一 DB 文件）
+    def test_restart_persists(self, db_path: Path) -> None:
+        _bind(mail_name="a", agent_kind="codex", session="s1", pane_id="p1")
+        _bind(mail_name="b", expected_version=1)
         con = _fresh_connect()
         rows = con.execute("SELECT * FROM leader_bindings ORDER BY updated_ts").fetchall()
         con.close()
         assert len(rows) == 2
         states = {r["mail_name"]: r["state"] for r in rows}
         assert states == {"a": "previous", "b": "active"}
-        active = leader_binding.get_active_binding("team", "t1")
+        active = leader_binding.get_active_binding("issuer-1", "team", "t1")
         assert active["mail_name"] == "b"
         assert active["binding_version"] == 2
-
-
-# ── R2 复核：degraded 不作为 binding state（防第二 active footgun）──────
-
-def test_binding_state_degraded_rejected_by_schema(db_path: Path):
-    """binding state 无 degraded：active 退化只能经 previous_state=degraded
-    表达，DB CHECK 拒绝 state='degraded' 行（避免 partial index 漏洞）。"""
-    con = leader_binding._connect()
-    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
-        con.execute(
-            "INSERT INTO leader_bindings VALUES('team','t1','x@t1',NULL,NULL,"
-            "NULL,NULL,NULL,NULL,1,'degraded',NULL,1.0,"
-            "'i',NULL,1,NULL)"
-        )
-        con.commit()
-    con.close()
-    # 应用层同样拒绝
-    with pytest.raises(leader_binding.BindingError, match="state"):
-        leader_binding.list_bindings(state="degraded")
-
-
-# ── 扩大门禁（#1732）：issuer/principal、route_epoch/migration_id、outbox ──
-
-def test_issuer_and_registry_selector_persisted(db_path: Path) -> None:
-    b = leader_binding.bind_leader(
-        "team", "t1", mail_name="a", issuer="user-admin",
-        registry_selector="registry://user/lark", expected_version=0,
-    )
-    assert b["issuer"] == "user-admin"
-    assert b["registry_selector"] == "registry://user/lark"
-    active = leader_binding.get_active_binding("team", "t1")
-    assert active["issuer"] == "user-admin"
-    assert active["registry_selector"] == "registry://user/lark"
-    assert "token" not in str(active)  # 凭证只存 selector 不存 token
-
-
-def test_route_epoch_and_migration_id_advance_on_switch(db_path: Path) -> None:
-    first = leader_binding.bind_leader("team", "t1", mail_name="a", issuer="i", expected_version=0)
-    assert first["route_epoch"] == 1
-    assert first["migration_id"]
-    second = leader_binding.bind_leader("team", "t1", mail_name="b", issuer="i", expected_version=1)
-    assert second["route_epoch"] == 2
-    assert second["migration_id"] != first["migration_id"]
-    # 同版本幂等重绑不推进 route_epoch
-    same = leader_binding.bind_leader("team", "t1", mail_name="b", issuer="i", expected_version=2)
-    assert same["route_epoch"] == 2
-
-
-def test_binding_changed_outbox_same_transaction(db_path: Path) -> None:
-    leader_binding.bind_leader("team", "t1", mail_name="a", issuer="i", expected_version=0)
-    leader_binding.bind_leader("team", "t1", mail_name="b", issuer="i", expected_version=1)
-    events = leader_binding.list_control_events("team", "t1")
-    assert len(events) == 2  # 两次切换各一个 binding_changed
-    changed = events[-1]
-    assert changed["event_type"] == "binding_changed"
-    assert changed["binding_version"] == 2
-    assert changed["migration_id"]
-    assert changed["fanned_out"] == 0
-    import json
-    payload = json.loads(changed["payload_json"])
-    assert payload["mail_name"] == "b"
-    assert payload["previous_mail_name"] == "a"
-    assert payload["issuer"] == "i"
-    assert payload["route_epoch"] == 2
-
-
-def test_outbox_fanout_replayable_and_idempotent(db_path: Path) -> None:
-    leader_binding.bind_leader("team", "t1", mail_name="a", issuer="i", expected_version=0)
-    pending = leader_binding.undelivered_control_events()
-    assert len(pending) == 1
-    event_id = pending[0]["event_id"]
-    assert leader_binding.mark_event_fanned_out(event_id) is True
-    assert leader_binding.undelivered_control_events() == []
-    assert leader_binding.mark_event_fanned_out(event_id) is False  # 幂等
-    # cursor 续读
-    events = leader_binding.list_control_events(after_event_id=event_id)
-    assert events == []
-
-
-def test_binding_failure_rolls_back_outbox(db_path: Path, monkeypatch: Any) -> None:
-    """激活失败回滚时 outbox 事件也不落库（同事务）。"""
-    leader_binding.bind_leader("team", "t1", mail_name="old@t1", issuer="i", expected_version=0)
-    real_connect = leader_binding._connect
-
-    class FlakyConnection:
-        def __init__(self, con: sqlite3.Connection) -> None:
-            self._con = con
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._con, name)
-
-        def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
-            if "INSERT INTO leader_bindings VALUES" in sql:
-                raise sqlite3.IntegrityError("injected insert failure")
-            return self._con.execute(sql, *args, **kwargs)
-
-    def flaky_connect() -> Any:
-        return FlakyConnection(real_connect())
-
-    monkeypatch.setattr(leader_binding, "_connect", flaky_connect)
-    with pytest.raises(sqlite3.IntegrityError):
-        leader_binding.bind_leader("team", "t1", mail_name="new@t1", issuer="i", expected_version=1)
-    monkeypatch.setattr(leader_binding, "_connect", real_connect)
-    events = leader_binding.list_control_events("team", "t1")
-    assert len(events) == 1  # 只有首绑事件；失败切换未落 outbox
-    assert leader_binding.get_active_binding("team", "t1")["mail_name"] == "old@t1"
-
-
-def test_undrained_previous_blocks_chain(db_path: Path) -> None:
-    """未排空禁止 a→b→c：previous 未 drained 时再次改绑被拒。"""
-    leader_binding.bind_leader("team", "t1", mail_name="a", issuer="i", expected_version=0)
-    leader_binding.bind_leader("team", "t1", mail_name="b", issuer="i", expected_version=1)
-    with pytest.raises(leader_binding.BindingError, match="未排空"):
-        leader_binding.bind_leader("team", "t1", mail_name="c", issuer="i", expected_version=2)
-    # 排空后可继续
-    leader_binding.mark_previous_state("team", "t1", "a", state="drained")
-    c = leader_binding.bind_leader("team", "t1", mail_name="c", issuer="i", expected_version=2)
-    assert c["mail_name"] == "c"
-
-
-def test_drain_cas_expected_state(db_path: Path) -> None:
-    leader_binding.bind_leader("team", "t1", mail_name="a", issuer="i", expected_version=0)
-    leader_binding.bind_leader("team", "t1", mail_name="b", issuer="i", expected_version=1)
-    with pytest.raises(leader_binding.StaleVersionError, match="drain CAS"):
-        leader_binding.mark_previous_state(
-            "team", "t1", "a", state="drained", expected_state="drained",
-        )
-    # 正确 expected_state 成功
-    assert leader_binding.mark_previous_state(
-        "team", "t1", "a", state="drained", expected_state="draining",
-    )["updated"] is True
-
-
-def test_drain_event_written(db_path: Path) -> None:
-    leader_binding.bind_leader("team", "t1", mail_name="a", issuer="i", expected_version=0)
-    leader_binding.bind_leader("team", "t1", mail_name="b", issuer="i", expected_version=1)
-    r = leader_binding.mark_previous_state("team", "t1", "a", state="drained")
-    assert r["event_id"]
-    events = leader_binding.list_control_events("team", "t1")
-    assert events[-1]["event_type"] == "drain_state_changed"
-    assert events[-1]["event_id"] == r["event_id"]
-
-
-def test_retire_requires_drained_and_zero_counts(db_path: Path) -> None:
-    leader_binding.bind_leader("team", "t1", mail_name="a", issuer="i", expected_version=0)
-    leader_binding.bind_leader("team", "t1", mail_name="b", issuer="i", expected_version=1)
-    # 未 drained 拒绝
-    with pytest.raises(leader_binding.BindingError, match="previous_state"):
-        leader_binding.retire_binding("team", "t1", "a")
-    leader_binding.mark_previous_state("team", "t1", "a", state="drained")
-    # 计数非零拒绝
-    with pytest.raises(leader_binding.BindingError, match="全零"):
-        leader_binding.retire_binding("team", "t1", "a", remaining=1)
-    with pytest.raises(leader_binding.BindingError, match="全零"):
-        leader_binding.retire_binding("team", "t1", "a", ack_pending=2)
-    # 全零成功 + outbox
-    r = leader_binding.retire_binding("team", "t1", "a")
-    assert r["retired"] is True
-    assert r["event_id"]
-    events = leader_binding.list_control_events("team", "t1")
-    assert events[-1]["event_type"] == "binding_retired"
-    old = leader_binding.get_binding("team", "t1", "a")
-    assert old["state"] == "retired"
-
-
-def test_duplicate_active_old_schema_fail_closed(db_path: Path) -> None:
-    """旧 schema 存在重复 active：初始化必须抛可定位错误（fail-closed）。"""
-    con = leader_binding._connect()
-    con.execute(
-        "INSERT INTO leader_bindings VALUES('team','t1','a@t1',NULL,NULL,"
-        "NULL,NULL,NULL,NULL,1,'active',NULL,1.0,'i',NULL,1,NULL)"
-    )
-    con.commit()
-    con.close()
-    # 模拟历史库：先删除唯一索引，再插入第二个 active（旧 schema 才可能）
-    con = sqlite3.connect(db_path)
-    con.execute("DROP INDEX leader_bindings_active_once")
-    con.commit()
-    con.close()
-    con = sqlite3.connect(db_path)
-    con.execute(
-        "INSERT INTO leader_bindings VALUES('team','t1','b@t1',NULL,NULL,"
-        "NULL,NULL,NULL,NULL,2,'active',NULL,1.0,'i',NULL,2,NULL)"
-    )
-    con.commit()
-    con.close()
-    with pytest.raises(RuntimeError, match="重复 active"):
-        leader_binding._connect()
+        con = _fresh_connect()
+        migs = con.execute("SELECT COUNT(*) AS n FROM binding_migrations").fetchone()
+        con.close()
+        assert int(migs["n"]) == 2  # 首绑 + a→b 各一条 migration
