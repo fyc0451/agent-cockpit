@@ -32,6 +32,7 @@ import httpx
 import coordination
 import hub_client
 import herdr_client
+import herdr_state
 import tasks
 import team_inbox_router
 import uploads
@@ -49,6 +50,7 @@ from pydantic import BaseModel, Field
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
+    await asyncio.to_thread(_reconcile_state_client)
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
     _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
@@ -72,6 +74,7 @@ async def lifespan(_: FastAPI):
         try:
             await asyncio.to_thread(_release_all_zoom_leases)
         finally:
+            await asyncio.to_thread(_stop_state_client)
             _poller_task = None
             _message_poller_task = None
             _worktree_cleanup_task = None
@@ -289,7 +292,6 @@ TERM_WS_INVALID_CODE = 4004
 _TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
 _TERM_INPUT_NOTE_TASKS: dict[str, asyncio.Task[None]] = {}
 _TERM_INPUT_NOTE_PENDING: set[str] = set()
-_TERM_THEME_TASKS: set[asyncio.Task[Any]] = set()
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
     "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报；"
@@ -419,7 +421,7 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def _board_snapshot() -> dict[str, Any]:
-    return _enrich_board_identities(herdr_client.snapshot())
+    return _enrich_board_identities(_state_client_snapshot())
 
 
 def _identity_hint(
@@ -4544,21 +4546,12 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                         if isinstance(ctrl, dict) and ctrl.get("type") == "theme":
                             mode = ctrl.get("mode")
                             notify = ctrl.get("notify") is True
-                            updated = await asyncio.to_thread(
+                            await asyncio.to_thread(
                                 terminal.set_color_scheme,
                                 term_id,
                                 mode,
                                 notify=notify,
                             )
-                            session = terminal.term_label(term_id)
-                            if updated and notify and session:
-                                task = asyncio.create_task(asyncio.to_thread(
-                                    herdr_client.notify_opencode_color_scheme,
-                                    session,
-                                    mode,
-                                ))
-                                _TERM_THEME_TASKS.add(task)
-                                task.add_done_callback(_TERM_THEME_TASKS.discard)
                             continue
                     except json.JSONDecodeError:
                         pass
@@ -4591,6 +4584,128 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
 
 
 # ── SSE 实时推送(看板状态变化) ────────────────────────────────
+
+# ── H0.5 socket 状态客户端(稳态看板/Attention/SSE 数据源) ─────
+# 稳态下 _board_snapshot 只读 H0.4 长连接状态客户端的线程安全缓存,
+# 不再周期性 fork 每 session 的 herdr api snapshot;CLI 仅保留给
+# mutation、能力门和 session 发现(list_sessions)。socket/server 中断时
+# 继续服务旧缓存并显式 degraded,恢复后由 H0.4 客户端自动 resync;
+# 无可靠缓存时显式 unavailable,禁止静默回退旧轮询 fork。
+
+_STATE_CLIENT_LOCK = threading.RLock()
+_state_client: herdr_state.HerdrStateClient | None = None
+# 发现层元数据:name -> {"socket","directory"};仅 running session。
+_state_sessions_meta: dict[str, dict[str, str]] = {}
+_state_discovery_ok = False
+
+
+def _state_discovery_interval() -> float:
+    try:
+        return max(1.0, float(os.environ.get("COCKPIT_STATE_DISCOVERY_INTERVAL", "10")))
+    except ValueError:
+        return 10.0
+
+
+def _stop_state_client() -> None:
+    """lifespan 关闭用:摘下并停止当前状态客户端,幂等。"""
+    global _state_client
+    with _STATE_CLIENT_LOCK:
+        client = _state_client
+        _state_client = None
+    if client is not None:
+        try:
+            client.stop()
+        except Exception:
+            logger.exception("herdr state client stop failed")
+
+
+def _reconcile_state_client() -> None:
+    """发现 running session;session 增删或 socket 路径变化时重建状态客户端。
+
+    发现走 CLI list_sessions(单个 fork,属于必要的 session 发现);session
+    集合不变时零成本返回。重建先起新客户端再停旧的,旧缓存在切换瞬间前
+    一直可读。
+    """
+    global _state_client, _state_sessions_meta, _state_discovery_ok
+    if not herdr_client.is_available():
+        discovered: list[dict[str, Any]] = []
+    else:
+        try:
+            discovered = herdr_client.list_sessions()
+        except Exception:
+            logger.exception("herdr state session discovery failed")
+            with _STATE_CLIENT_LOCK:
+                _state_discovery_ok = False
+            return
+    running = {
+        str(item["name"]): {
+            "socket": str(item.get("socket") or ""),
+            "directory": str(item.get("directory") or ""),
+        }
+        for item in discovered
+        if item.get("status") == "running" and item.get("socket")
+    }
+    with _STATE_CLIENT_LOCK:
+        _state_discovery_ok = True
+        if running == _state_sessions_meta:
+            return
+        old_client = _state_client
+        new_client = None
+        if running:
+            new_client = herdr_state.HerdrStateClient(
+                {name: meta["socket"] for name, meta in running.items()}
+            )
+            new_client.start()
+        _state_client = new_client
+        _state_sessions_meta = running
+    if old_client is not None:
+        try:
+            old_client.stop()
+        except Exception:
+            logger.exception("herdr state client stop failed during reconcile")
+
+
+def _state_client_snapshot() -> dict[str, Any]:
+    """读状态客户端缓存,合并发现层 directory,显式 degraded/unavailable。"""
+    with _STATE_CLIENT_LOCK:
+        client = _state_client
+        meta = {name: dict(item) for name, item in _state_sessions_meta.items()}
+        discovery_ok = _state_discovery_ok
+    if client is None:
+        # 无 running session(发现正常)是合法空态;否则显式 unavailable。
+        if discovery_ok and not meta:
+            return {
+                "available": True, "degraded": False,
+                "sessions": [], "panes": [], "agents": [],
+                "total_panes": 0, "agent_panes": 0,
+            }
+        return {
+            "available": False, "degraded": True,
+            "reason": "state client not running",
+            "sessions": [], "panes": [], "agents": [],
+            "total_panes": 0, "agent_panes": 0,
+        }
+    snap = client.snapshot_cached()
+    lifecycle = client.state().get("sessions", {})
+    degraded = not discovery_ok
+    sessions = []
+    for entry in snap.get("sessions", []):
+        name = entry.get("session")
+        entry["directory"] = meta.get(name, {}).get("directory", "")
+        state = lifecycle.get(name, {}).get("state")
+        entry["state_status"] = state
+        if state != "subscribed":
+            degraded = True
+        sessions.append(entry)
+    snap["sessions"] = sessions
+    # 已发现但尚未进入缓存(刚 reconcile、未完成 bootstrap)也算 degraded。
+    if any(name not in {e.get("session") for e in sessions} for name in meta):
+        degraded = True
+    snap["degraded"] = degraded or not snap.get("available", False)
+    if not snap.get("available"):
+        snap.setdefault("reason", "no bootstrapped session cache")
+    return snap
+
 
 _live_state: dict[str, Any] = {
     "revision": 0,
@@ -4636,11 +4751,15 @@ async def _poll_live_state() -> None:
     global _live_state
     last_sig = ""
     attention_ids: set[str] | None = None
+    last_discovery = 0.0
     while True:
         poll_start = time.monotonic()
         success = False
         session_count = 0
         try:
+            if time.monotonic() - last_discovery >= _state_discovery_interval():
+                await asyncio.to_thread(_reconcile_state_client)
+                last_discovery = time.monotonic()
             await asyncio.to_thread(_expire_zoom_leases)
             snap = await asyncio.to_thread(_board_snapshot)
             session_count = len(snap.get("sessions", [])) if snap.get("available") else 0
@@ -4700,10 +4819,10 @@ async def _poll_live_state() -> None:
                     "attention": attention,
                 }
                 last_sig = sig
-            success = bool(snap.get("available", True)) and not any(
+            success = bool(snap.get("available", False)) and not any(
                 session.get("error") for session in snap.get("sessions", [])
                 if isinstance(session, dict)
-            )
+            ) and not snap.get("degraded", False)
         except asyncio.CancelledError:
             raise
         except Exception:

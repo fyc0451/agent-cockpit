@@ -598,30 +598,6 @@ def _snapshot_session(session: str) -> dict[str, Any]:
     }
 
 
-def notify_opencode_color_scheme(session: str, mode: str) -> int:
-    """把 host 明暗报告直送 OpenCode pane；Herdr 外层转发不可靠时兜底。"""
-    reports = {"dark": "\x1b[?997;1n", "light": "\x1b[?997;2n"}
-    report = reports.get(mode)
-    if report is None:
-        return 0
-    notified = 0
-    for pane in _snapshot_session(session).get("panes", []):
-        if not isinstance(pane, dict) or pane.get("agent") != "opencode":
-            continue
-        pane_id = pane.get("pane_id")
-        if not isinstance(pane_id, str) or not pane_id:
-            continue
-        try:
-            _run(
-                ["--session", session, "pane", "send-text", pane_id, report],
-                timeout=5,
-            )
-        except RuntimeError:
-            continue
-        notified += 1
-    return notified
-
-
 def _snapshot_session_safe(session: str, deadline: float) -> dict[str, Any]:
     """_snapshot_session 的安全包装:捕获一切异常,绝不抛出。
 

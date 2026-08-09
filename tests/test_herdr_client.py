@@ -579,41 +579,9 @@ def test_snapshot_handles_unexpected_json_shapes(monkeypatch):
     }
 
 
-def test_notify_opencode_color_scheme_targets_only_opencode_panes(monkeypatch):
-    monkeypatch.setattr(
-        herdr_client,
-        "_snapshot_session",
-        lambda session: {
-            "panes": [
-                {"pane_id": "w1:p2", "agent": "codex"},
-                {"pane_id": "w1:p7", "agent": "opencode"},
-                {"pane_id": "w1:p9", "agent": None},
-            ],
-        },
-    )
-    calls = []
-    monkeypatch.setattr(
-        herdr_client,
-        "_run",
-        lambda args, timeout=10: calls.append((args, timeout)) or "",
-    )
-
-    assert herdr_client.notify_opencode_color_scheme("demo", "light") == 1
-    assert calls == [
-        ([
-            "--session", "demo", "pane", "send-text", "w1:p7",
-            "\x1b[?997;2n",
-        ], 5),
-    ]
-
-
-def test_notify_opencode_color_scheme_rejects_invalid_mode(monkeypatch):
-    monkeypatch.setattr(
-        herdr_client,
-        "_snapshot_session",
-        lambda session: (_ for _ in ()).throw(AssertionError("snapshot")),
-    )
-    assert herdr_client.notify_opencode_color_scheme("demo", "sepia") == 0
+def test_notify_opencode_color_scheme_removed():
+    """H0.5 清债:OpenCode pane 字节注入已删除,主题只走外层终端协议/Herdr 传播。"""
+    assert not hasattr(herdr_client, "notify_opencode_color_scheme")
 
 
 def test_start_agent_uses_snapshot_delta_before_native_start(monkeypatch):
