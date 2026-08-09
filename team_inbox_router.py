@@ -19,10 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from herdr_client import pane_send, snapshot
+import runtime_paths
 import terminal
 import team_sessions
 
-ROUTE_STATE = Path.home() / "dashboard-data" / "team-inbox-route.json"
+ROUTE_STATE = runtime_paths.store("inbox_route")
 _lock = threading.RLock()
 
 

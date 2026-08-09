@@ -11,10 +11,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import runtime_paths
+
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path.home() / "dashboard-data"
-DB_PATH = DATA_DIR / "push.sqlite3"
-KEY_PATH = DATA_DIR / "vapid-private.pem"
+DATA_DIR = runtime_paths.data_root()
+DB_PATH = runtime_paths.store("push")
+KEY_PATH = runtime_paths.store("vapid")
 VAPID_SUBJECT = os.environ.get(
     "COCKPIT_VAPID_SUBJECT", "mailto:agent-cockpit@localhost"
 )

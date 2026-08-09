@@ -13,13 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import runtime_paths
 
-DB_PATH = Path(
-    os.environ.get(
-        "COCKPIT_COORDINATION_DB",
-        str(Path.home() / "dashboard-data" / "coordination.sqlite3"),
-    )
-).expanduser()
+
+DB_PATH = runtime_paths.store("coordination")
 CLAIM_TTL = 300.0
 META_PREFIX = "<!-- agent-cockpit-meta:"
 META_SUFFIX = " -->"

@@ -12,7 +12,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-UPLOAD_DIR = Path.home() / "dashboard-uploads"
+import runtime_paths
+
+UPLOAD_DIR = runtime_paths.uploads_root()
 MAX_SIZE = 100 * 1024 * 1024  # 100MB(默认值;设置页 upload_max_mb 可覆盖)
 
 

@@ -8,8 +8,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import runtime_paths
 
-STATE_PATH = Path.home() / "dashboard-data" / "mail-projects.json"
+
+STATE_PATH = runtime_paths.store("mail_projects")
 _lock = threading.RLock()
 
 

@@ -24,8 +24,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-DATA_DIR = Path.home() / "dashboard-data"
-SETTINGS_PATH = DATA_DIR / "settings.json"
+import runtime_paths
+
+DATA_DIR = runtime_paths.data_root()
+SETTINGS_PATH = runtime_paths.store("settings")
 
 # 已知 agent 类型(与 herdr_client._find_agent_bin / _agent_cmd 对齐)
 KNOWN_AGENTS = ["codex", "kimi", "claude", "qodercli", "grok", "opencode"]

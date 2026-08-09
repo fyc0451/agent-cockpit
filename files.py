@@ -22,6 +22,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import runtime_paths
+
 # 最大可编辑文件大小(防止加载巨大文件拖垮前端)
 MAX_EDIT_SIZE = 2 * 1024 * 1024  # 2MB
 MAX_SEARCH_RESULTS = 200
@@ -64,16 +66,26 @@ MAX_ZIP_SIZE = 500 * 1024 * 1024  # 500MB(打包前原始大小)
 # 访问根白名单的构成:本项目目录 + home 下固定子目录 + DB 注册项目
 _HOME = Path.home().resolve()
 _PROJECT_DIR = Path(__file__).resolve().parent
-_HOME_SUBDIRS = ("dashboard-uploads", "dashboard-data", "agent-mail-tools")
 _ROOTS_LOCK = threading.Lock()
 
 
 def _custom_roots_file() -> Path:
-    return _HOME / ".config" / "agent-cockpit" / "file-roots.json"
+    return runtime_paths.store("file_roots")
 
 
 def _system_roots() -> list[Path]:
-    return [_PROJECT_DIR, *((_HOME / name).resolve(strict=False) for name in _HOME_SUBDIRS)]
+    roots = [_PROJECT_DIR]
+    for p in (
+        _HOME / "dashboard-uploads",
+        _HOME / "dashboard-data",
+        _HOME / "agent-mail-tools",
+        runtime_paths.uploads_root(),
+        runtime_paths.data_root(),
+    ):
+        rp = p.resolve(strict=False)
+        if rp not in roots:
+            roots.append(rp)
+    return roots
 
 
 def _registered_project_roots() -> list[Path]:
@@ -182,6 +194,7 @@ def _normalize_custom_root(rel: str, *, must_exist: bool) -> Path:
         Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
         _HOME / ".ssh", _HOME / ".gnupg", _HOME / ".agent-mail",
         _HOME / ".config" / "agent-cockpit",
+        runtime_paths.config_root(),
     ]
     for root in blocked:
         try:

@@ -40,6 +40,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import runtime_paths
+
 # 终端会话池:term_id -> {master_fd, pid, alive, lock, created_ts, last_active}
 _terms: dict[str, dict[str, Any]] = {}
 # 被“较新页面接管”替换的 term_id 临时保留原因，供仍连接旧 ID 的 WebSocket
@@ -51,9 +53,7 @@ _superseded_terms: dict[str, float] = {}
 _session_pane_input: dict[tuple[str, str | None], float] = {}
 # 同一份状态的落盘副本(墙钟时间),供 mail-send 等独立进程在注入
 # pane 通知前避让正在输入的用户。限频写,30s 窗口下秒级延迟无影响。
-_TYPING_STATE_PATH = (
-    Path.home() / ".local" / "state" / "agent-cockpit" / "typing.json"
-)
+_TYPING_STATE_PATH = runtime_paths.store("typing")
 _typing_state_last_write: dict[tuple[str, str, str], float] = {}
 _typing_state_lock = threading.Lock()
 _HERDR_BIN = (
