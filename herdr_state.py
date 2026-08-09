@@ -100,18 +100,21 @@ class HerdrSocket:
         self._sock = sock
 
     def close(self) -> None:
-        """先 shutdown 唤醒阻塞的 recv，再关闭 socket，避免 close 卡锁。"""
-        if self._sock is not None:
-            try:
-                self._sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+        """跨线程幂等：局部快照并先清空。stop 主线程与 reader finally 会
+        并发 close 同一对象，先置 None 保证后到者直接返回，shutdown/close
+        各自捕获 OSError，异常边界完整。"""
+        sock = self._sock
+        self._sock = None
         self._buf = b""
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def __enter__(self) -> "HerdrSocket":
         return self
@@ -890,9 +893,10 @@ class HerdrStateClient:
             sock.close()
 
     def _sync_counts(self, lc: dict[str, Any], state: SessionState) -> None:
-        lc["events_seen"] = state.events_seen
-        lc["applied_events"] = state.applied_events
-        lc["stale_events"] = state.stale_events
+        with self._lock:
+            lc["events_seen"] = state.events_seen
+            lc["applied_events"] = state.applied_events
+            lc["stale_events"] = state.stale_events
 
     def _backoff(self, delay: float) -> bool:
         """等待 delay 秒；stop 时立即返回 False。"""

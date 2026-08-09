@@ -331,6 +331,31 @@ class TestHerdrSocket:
         sock.close()
         server.stop()
 
+    def test_concurrent_close_is_idempotent(self, tmp_path: Path) -> None:
+        """stop 主线程与 reader finally 会并发 close 同一 socket；
+        close 必须幂等且绝不抛 AttributeError/OSError。"""
+        server = FakeHerdrServer(tmp_path).start()
+        sock = herdr_state.HerdrSocket(str(server.path), connect_timeout=0.5)
+        sock.connect()
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
+
+        def closer() -> None:
+            barrier.wait()
+            for _ in range(300):
+                try:
+                    sock.close()
+                except BaseException as exc:  # noqa: BLE001 - 测试断言任何异常
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=closer) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        assert errors == []
+        server.stop()
+
 
 # ---------------------------------------------------------------------------
 # SessionState 纯逻辑
