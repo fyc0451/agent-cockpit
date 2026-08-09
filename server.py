@@ -4818,12 +4818,13 @@ def health():
 def health_live():
     """纯读无副作用(Wiki13 J1A)：只证明目标进程响应并返回 release identity。
     不探测 Herdr/Hub/Push/Mail，不触发 DDL/reconcile。
-    R2: 错误使用 stable reason code，不回显 raw env/VERSION/exception。"""
+    R3: ReleaseIdentityError 暴露 allowlisted reason；未知异常→unexpected，
+    任意 raw text 不得出现在 503 响应中。"""
     try:
         identity = release_identity.get_release_identity()
-    except ValueError as exc:
-        # R2: stable reason code — 不回显 raw env/exception text
-        raise HTTPException(503, f"release_identity_error: {exc}")
+    except release_identity.ReleaseIdentityError as exc:
+        # R3: 只暴露 allowlisted reason，不拼接任意 ValueError 正文
+        raise HTTPException(503, f"release_identity_error: {exc.reason}")
     except Exception:
         raise HTTPException(503, "release_identity_error: unexpected")
     return {"status": "live", "identity": identity}
