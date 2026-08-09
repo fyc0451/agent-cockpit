@@ -50,6 +50,7 @@ from pydantic import BaseModel, Field
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
+    _open_state_clients()
     await asyncio.to_thread(_reconcile_state_client)
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
@@ -4605,6 +4606,15 @@ _state_clients: dict[str, herdr_state.HerdrStateClient] = {}
 _state_sessions_meta: dict[str, dict[str, str]] = {}
 _state_discovery_ok = False
 _state_discovery_reason = "state client not running"
+# H0.5 R3:lifespan running 闸门 + epoch。reconcile 在锁外启动/等待新客户端,
+# publish 前在同一把锁内校验 running+epoch+old/meta(CAS);lifespan stop 关
+# 闸门并递增 epoch,迟到的 publish 一律被拒并立刻 stop 新客户端,不会复活
+# cockpit-state 线程/FD;同进程新 lifespan 重新 open 后旧 epoch 仍失效。
+_state_running = False
+_state_epoch = 0
+# socket 换入超时未就绪的持久降级:name -> {"reason"};旧客户端缓存继续可读,
+# 但 snapshot/SSE 显式 degraded,retry 成功换入后清除。
+_state_swap_pending: dict[str, dict[str, str]] = {}
 # socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
 STATE_SWAP_READY_TIMEOUT_S = 2.0
 
@@ -4623,12 +4633,30 @@ def _stop_client_quietly(client: herdr_state.HerdrStateClient) -> None:
         logger.exception("herdr state client stop failed")
 
 
-def _stop_state_client() -> None:
-    """lifespan 关闭用:摘下并停止全部 per-session 客户端,幂等。"""
-    global _state_clients
+def _open_state_clients() -> None:
+    """lifespan 启动:开启新一轮 running epoch。同进程 restart 时,旧 lifespan
+    迟到 publish 因 epoch 不匹配仍被 CAS 拒绝。"""
+    global _state_running, _state_epoch
     with _STATE_CLIENT_LOCK:
+        _state_running = True
+        _state_epoch += 1
+
+
+def _stop_state_client() -> None:
+    """lifespan 关闭:关 running 闸门并递增 epoch,摘下并停止全部 per-session
+    客户端,清空 meta/swap-pending/discovery 标志;幂等。stop 后任何迟到
+    publish 都被 epoch CAS 拒绝,不复活 cockpit-state 线程/FD。"""
+    global _state_clients, _state_sessions_meta, _state_running, _state_epoch
+    global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
+    with _STATE_CLIENT_LOCK:
+        _state_running = False
+        _state_epoch += 1
         clients = list(_state_clients.values())
         _state_clients = {}
+        _state_sessions_meta = {}
+        _state_swap_pending = {}
+        _state_discovery_ok = False
+        _state_discovery_reason = "state client not running"
     for client in clients:
         _stop_client_quietly(client)
 
@@ -4678,28 +4706,37 @@ def _reconcile_state_client() -> None:
     """按发现结果增量对齐 per-session 客户端。
 
     - 发现失败:fail-closed,只标记 discovery degraded,不动旧客户端/缓存。
-    - 新增 session:直接起独立客户端,bootstrap 前该 session 显式 degraded,
-      不影响其他 session 的缓存。
+    - 新增 session:锁外起独立客户端,CAS(running+epoch)通过才 publish;
+      bootstrap 前该 session 显式 degraded,不影响其他 session 缓存。
     - 删除 session:只停止并摘除该 session 的客户端。
-    - socket 路径变化(restart):先起新客户端,有界等待就绪后原子换入再停
-      旧客户端;超时则弃新留旧(旧缓存继续可读,显式 degraded)。
+    - socket 路径变化(restart):锁外起新客户端,有界等待就绪,CAS
+      (running+epoch+old client)通过才原子换入并停旧;超时弃新留旧,记录
+      _state_swap_pending 持久 degraded,下轮发现自动重试,成功后清降级。
+    - 任何 CAS 失败(lifespan stop 交错/同进程 restart):立刻 stop 新客户
+      端,绝不 publish,不复活线程/FD。
     """
     global _state_discovery_ok, _state_discovery_reason, _state_sessions_meta
     running = _discover_running_sessions()
     if running is None:
         with _STATE_CLIENT_LOCK:
-            _state_discovery_ok = False
-            _state_discovery_reason = "session discovery unavailable"
+            if _state_running:
+                _state_discovery_ok = False
+                _state_discovery_reason = "session discovery unavailable"
         return
     to_stop: list[herdr_state.HerdrStateClient] = []
+    added: list[tuple[str, str]] = []
+    changed: list[tuple[str, str, herdr_state.HerdrStateClient | None]] = []
     with _STATE_CLIENT_LOCK:
+        if not _state_running:
+            return  # lifespan 已关闭:拒绝一切 publish
+        epoch = _state_epoch
         _state_discovery_ok = True
         _state_discovery_reason = ""
         if running == _state_sessions_meta:
             return
         removed = [n for n in _state_sessions_meta if n not in running]
-        added = [n for n in running if n not in _state_sessions_meta]
-        changed = [
+        added_names = [n for n in running if n not in _state_sessions_meta]
+        changed_names = [
             n for n in running
             if n in _state_sessions_meta and running[n] != _state_sessions_meta[n]
         ]
@@ -4707,31 +4744,64 @@ def _reconcile_state_client() -> None:
             client = _state_clients.pop(name, None)
             if client is not None:
                 to_stop.append(client)
-        for name in added:
-            _state_clients[name] = _start_session_client(
-                name, running[name]["socket"]
-            )
-        # changed 的 meta 只在换入成功后推进,失败保留下轮重试
+            _state_swap_pending.pop(name, None)
+        # removed 立即从 meta 摘除;added/changed 的 meta 仅 CAS 发布成功后推进
         _state_sessions_meta = {
-            name: (_state_sessions_meta[name] if name in changed else running[name])
-            for name in running
+            n: m for n, m in _state_sessions_meta.items() if n in running
         }
-    # changed 在锁外做有界就绪切换:等待期间旧客户端缓存持续可读。
-    for name in changed:
-        new_client = _start_session_client(name, running[name]["socket"])
+        for name in added_names:
+            added.append((name, running[name]["socket"]))
+        for name in changed_names:
+            changed.append((name, running[name]["socket"], _state_clients.get(name)))
+    # 锁外启动/有界等待:期间若 lifespan stop 抢先清空,epoch 失效,CAS 拒发。
+    for name, socket_path in added:
+        client = _start_session_client(name, socket_path)
+        with _STATE_CLIENT_LOCK:
+            published = (
+                _state_running
+                and _state_epoch == epoch
+                and name not in _state_clients
+                and name not in _state_sessions_meta
+            )
+            if published:
+                _state_clients[name] = client
+                _state_sessions_meta[name] = running[name]
+        if not published:
+            _stop_client_quietly(client)  # CAS 失败立刻 stop new
+    for name, socket_path, old_client in changed:
+        new_client = _start_session_client(name, socket_path)
         deadline = time.monotonic() + STATE_SWAP_READY_TIMEOUT_S
         while time.monotonic() < deadline and not _client_ready(new_client, name):
             time.sleep(0.05)
         if _client_ready(new_client, name):
             with _STATE_CLIENT_LOCK:
-                old_client = _state_clients.get(name)
-                _state_clients[name] = new_client
-                _state_sessions_meta[name] = running[name]
-            if old_client is not None:
-                to_stop.append(old_client)
+                swapped = (
+                    _state_running
+                    and _state_epoch == epoch
+                    and _state_clients.get(name) is old_client
+                )
+                if swapped:
+                    # 原子换入:新客户端握手含全量 resync,清降级,meta 推进
+                    _state_clients[name] = new_client
+                    _state_sessions_meta[name] = running[name]
+                    _state_swap_pending.pop(name, None)
+            if swapped:
+                if old_client is not None:
+                    to_stop.append(old_client)
+            else:
+                _stop_client_quietly(new_client)  # stop 已清空:不得复活
         else:
-            # 新 socket 不就绪:弃新留旧,旧缓存+degraded 继续服务
-            to_stop.append(new_client)
+            # 新 socket 不就绪:弃新留旧,旧缓存可读但持久 degraded,下轮重试
+            _stop_client_quietly(new_client)
+            with _STATE_CLIENT_LOCK:
+                if (
+                    _state_running
+                    and _state_epoch == epoch
+                    and _state_clients.get(name) is old_client
+                ):
+                    _state_swap_pending[name] = {
+                        "reason": f"state socket swap not ready: {socket_path}",
+                    }
     for client in to_stop:
         _stop_client_quietly(client)
 
@@ -4741,6 +4811,9 @@ def _state_client_snapshot() -> dict[str, Any]:
     with _STATE_CLIENT_LOCK:
         clients = dict(_state_clients)
         meta = {name: dict(item) for name, item in _state_sessions_meta.items()}
+        swap_pending = {
+            name: dict(item) for name, item in _state_swap_pending.items()
+        }
         discovery_ok = _state_discovery_ok
         discovery_reason = _state_discovery_reason
     if not clients:
@@ -4783,6 +4856,11 @@ def _state_client_snapshot() -> dict[str, Any]:
         entry["state_status"] = state
         if state != "subscribed":
             degraded = True
+        if name in swap_pending:
+            # socket 换入超时:旧缓存仍可读,但显式 degraded 且原因可见
+            degraded = True
+            entry["state_status"] = "swap_pending"
+            entry["state_reason"] = swap_pending[name].get("reason", "")
         if store.get("available"):
             any_bootstrapped = True
         sessions.append(entry)
@@ -4812,6 +4890,10 @@ def _state_client_snapshot() -> dict[str, Any]:
         result["reason"] = "no bootstrapped session cache"
     elif not discovery_ok and discovery_reason:
         result["reason"] = discovery_reason
+    elif swap_pending:
+        result["reason"] = "state socket swap pending: " + ",".join(
+            sorted(swap_pending)
+        )
     return result
 
 

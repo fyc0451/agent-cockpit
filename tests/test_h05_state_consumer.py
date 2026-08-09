@@ -5,6 +5,9 @@ degraded/unavailable、discovery fail-closed(含 list_sessions 真实吞错
 路径与 is_available=False)、per-session 无空窗增删/换 socket、稳态零
 fork(轮询 + team router 10 pending)、SSE sig 纳入 degraded/state_status、
 OpenCode 颜色字节注入清债。
+R3 复审修订(#1727 两项 HIGH):running/epoch CAS 屏障(stop 在 ready 前/后
+抢先、重复 reconcile、同进程 restart、跨 restart stale epoch、真实客户端
+无线程残留)与 swap timeout 持久 degraded→retry 原子换入清降级。
 """
 import asyncio
 import threading
@@ -112,6 +115,9 @@ def _reset_state(monkeypatch):
     monkeypatch.setattr(server, "_state_sessions_meta", {})
     monkeypatch.setattr(server, "_state_discovery_ok", False)
     monkeypatch.setattr(server, "_state_discovery_reason", "test reset")
+    monkeypatch.setattr(server, "_state_running", True)
+    monkeypatch.setattr(server, "_state_epoch", 1)
+    monkeypatch.setattr(server, "_state_swap_pending", {})
     monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 0.2)
     monkeypatch.setattr(
         server.herdr_state, "HerdrStateClient", FakeStateClient
@@ -362,6 +368,162 @@ def test_stop_state_client_stops_all_and_is_idempotent(monkeypatch):
     assert clients["a"].stopped and clients["b"].stopped
     assert server._state_clients == {}
     server._stop_state_client()
+
+
+# ── R3 复审修订(#1727):stop 竞态屏障 + swap 持久降级 ────────────
+
+
+def test_late_publish_rejected_when_stop_interleaves(monkeypatch):
+    """stop 在 reconcile 锁外窗口抢先(ready 前):epoch CAS 拒绝迟到 publish,
+    新客户端立刻 stop,clients/meta/pending 全空。"""
+    _install(monkeypatch)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock", "late": "/tmp/late.sock"})
+    real_start = server._start_session_client
+
+    def start_then_stop(name, socket_path):
+        client = real_start(name, socket_path)
+        server._stop_state_client()  # 模拟 lifespan 关闭在 CAS publish 前抢先
+        return client
+
+    monkeypatch.setattr(server, "_start_session_client", start_then_stop)
+    server._reconcile_state_client()
+    assert server._state_clients == {}
+    assert server._state_sessions_meta == {}
+    assert server._state_swap_pending == {}
+    late = FakeStateClient.instances[-1]
+    assert late.sessions == {"late": "/tmp/late.sock"}
+    assert late.stopped is True  # 迟到的新客户端被立刻 stop,未复活
+
+
+def test_late_swap_rejected_when_stop_interleaves_after_ready(monkeypatch):
+    """stop 在新客户端 ready 后、换入 CAS 前抢先:不得换入,新客户端立刻停。"""
+    clients = _install(monkeypatch)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo-new.sock"})
+    real_start = server._start_session_client
+
+    def start_then_stop(name, socket_path):
+        client = real_start(name, socket_path)
+        server._stop_state_client()
+        return client
+
+    monkeypatch.setattr(server, "_start_session_client", start_then_stop)
+    server._reconcile_state_client()
+    assert server._state_clients == {}  # 旧客户端已被 stop 清空,新客户端未换入
+    assert server._state_sessions_meta == {}
+    new_client = FakeStateClient.instances[-1]
+    assert new_client is not clients["demo"]
+    assert new_client.stopped is True
+
+
+def test_reconcile_repeated_is_idempotent(monkeypatch):
+    """重复 reconcile(发现结果不变):零新客户端、零停止、零 meta 漂移。"""
+    clients = _install(monkeypatch)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock"})
+    server._reconcile_state_client()
+    server._reconcile_state_client()
+    assert len(FakeStateClient.instances) == 1
+    assert clients["demo"].stopped is False
+    assert server._state_sessions_meta["demo"]["socket"] == "/tmp/demo.sock"
+
+
+def test_same_process_restart_after_stop(monkeypatch):
+    """同进程新 lifespan:stop 清空后 open+reconcile,全新客户端正常上线。"""
+    clients = _install(monkeypatch)
+    server._stop_state_client()
+    assert server._state_clients == {}
+    assert server._state_sessions_meta == {}
+    assert server._state_swap_pending == {}
+    assert server._state_discovery_ok is False
+    server._open_state_clients()
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock"})
+    server._reconcile_state_client()
+    new_client = server._state_clients["demo"]
+    assert new_client is not clients["demo"]
+    assert new_client.started and not new_client.stopped
+    snap = server._state_client_snapshot()
+    assert snap["available"] is True
+    assert snap["degraded"] is False
+    assert snap["sessions"][0]["state_status"] == "subscribed"
+
+
+def test_stale_epoch_publish_rejected_across_restart(monkeypatch):
+    """旧 lifespan 的迟到 publish 在新 lifespan(epoch 已递增)仍被拒绝。"""
+    _install(monkeypatch)
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo.sock", "late": "/tmp/late.sock"})
+    real_start = server._start_session_client
+
+    def start_stop_reopen(name, socket_path):
+        client = real_start(name, socket_path)
+        server._stop_state_client()
+        server._open_state_clients()  # 同进程新 lifespan
+        return client
+
+    monkeypatch.setattr(server, "_start_session_client", start_stop_reopen)
+    server._reconcile_state_client()
+    assert "late" not in server._state_clients
+    assert FakeStateClient.instances[-1].stopped is True
+
+
+def test_socket_swap_timeout_persistent_degraded_then_recovers(monkeypatch):
+    """swap timeout:旧缓存可读但持久 degraded(state_status/reason 可见);
+    retry ready 后原子换入、清 degraded、meta 推进。"""
+    clients = _install(monkeypatch)
+    FakeStateClient.ready_next = False
+    _fake_discovery(monkeypatch, {"demo": "/tmp/demo-dead.sock"})
+    server._reconcile_state_client()
+    snap = server._state_client_snapshot()
+    assert snap["available"] is True  # 旧缓存仍可服务
+    assert snap["degraded"] is True
+    assert "swap pending" in snap["reason"]
+    entry = snap["sessions"][0]
+    assert entry["state_status"] == "swap_pending"
+    assert "swap not ready" in entry["state_reason"]
+    assert entry["panes"][0]["pane_id"] == "w1:p1"  # 旧 pane 可读
+    assert server._state_clients["demo"] is clients["demo"]
+    assert clients["demo"].stopped is False
+    # retry ready:原子换入、清降级
+    FakeStateClient.ready_next = True
+    server._reconcile_state_client()
+    assert server._state_clients["demo"] is not clients["demo"]
+    assert clients["demo"].stopped is True
+    assert server._state_sessions_meta["demo"]["socket"] == "/tmp/demo-dead.sock"
+    assert server._state_swap_pending == {}
+    snap2 = server._state_client_snapshot()
+    assert snap2["degraded"] is False
+    assert "reason" not in snap2
+    assert snap2["sessions"][0]["state_status"] == "subscribed"
+
+
+def test_real_client_late_publish_stop_leaves_no_thread(monkeypatch):
+    """真实 HerdrStateClient:stop 抢先后 CAS 拒绝+立刻 stop,无线程残留。"""
+    monkeypatch.setattr(server.herdr_state, "HerdrStateClient", _REAL_STATE_CLIENT)
+
+    def fast_start(name, socket_path):
+        client = _REAL_STATE_CLIENT(
+            {name: socket_path},
+            reconnect_base_delay=0.05,
+            reconnect_max_delay=0.1,
+            health_check_interval=None,
+        )
+        client.start()
+        return client
+
+    real_fast_start = fast_start
+
+    def start_then_stop(name, socket_path):
+        client = real_fast_start(name, socket_path)
+        server._stop_state_client()
+        return client
+
+    monkeypatch.setattr(server, "_start_session_client", start_then_stop)
+    _fake_discovery(monkeypatch, {"h05race": "/nonexistent/h05-race.sock"})
+    server._reconcile_state_client()
+    assert server._state_clients == {}
+    assert server._state_sessions_meta == {}
+    assert not [
+        t for t in threading.enumerate()
+        if t.name.startswith("cockpit-state-h05race") and t.is_alive()
+    ]
 
 
 # ── R2:稳态零 fork(轮询 + team router) ────────────────────────
