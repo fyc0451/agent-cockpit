@@ -36,6 +36,13 @@ R10 复审修订(#1853 REVIEW_BLOCK):shutdown intent ticket——stop 入口
 (尝试 REAP 前)登记,deferred 持久;open/reconcile 注册/发布/换入 CAS
 被 ticket 门禁拒绝;完成的 stop 仅消费 <= 自己 ticket;覆盖前一 stop/
 reaper/open 持锁三场景的 deferred→拒绝→retry→放行与真实线程零残留。
+R11 复审修订(#1874 REVIEW_BLOCK):absolute deadline 为函数首个时序
+动作;ticket 登记改经独立 _STATE_TICKET_LOCK 严格短临界区(不依赖可能
+长持有的 CLIENT 锁),open/reconcile 读取与完成消费经同一锁同步、CAS
+check+commit 与登记线性化;CLIENT timed acquire 耗尽→总预算内 deferred
+(client_lock_timeout)、ticket 持久、running/ownership 零部分变更;
+CLIENT-lock barrier(有/无 published client)wall-clock<=budget+容差、
+释放后 open 仍 False、retry 后 open True;较早完成不清更晚 ticket。
 """
 import asyncio
 import threading
@@ -1335,6 +1342,114 @@ def test_deferred_stop_intent_when_open_holds_lock(monkeypatch):
     assert out["open"] is False  # retiring 未清+intent 未清:open 拒绝
     z.fail_stop = False
     assert server._stop_state_client() == []  # retry 完成
+    assert not server._state_stop_tickets
+    assert server._open_state_clients() is True
+
+
+# ── R11 复审修订(#1874):CLIENT 锁等待计入 absolute deadline ──────
+
+
+def _hold_client_lock(entered, release):
+    with server._STATE_CLIENT_LOCK:
+        entered.set()
+        release.wait(5)
+
+
+def test_stop_client_lock_held_defers_with_published_client(monkeypatch):
+    """R11:有 published client 时 CLIENT 锁被持有 > budget→stop 在总预算
+    内 deferred(client_lock_timeout),wall-clock<=budget+容差;ticket
+    持久,running/ownership 零部分变更;释放后 open 仍 False,retry stop
+    完成后 open True。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.2)
+    c = FakeStateClient({"s": "/tmp/s.sock"})
+    c.start()
+    monkeypatch.setattr(server, "_state_clients", {"s": c})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "s": {"socket": "/tmp/s.sock", "directory": "/d"},
+    })
+    entered, release = threading.Event(), threading.Event()
+    t = threading.Thread(target=_hold_client_lock, args=(entered, release))
+    t.start()
+    assert entered.wait(5)
+    t0 = time.monotonic()
+    r = server._stop_state_client()
+    elapsed = time.monotonic() - t0
+    assert r[0]["deferred"] is True
+    assert r[0]["reason"] == "client_lock_timeout"
+    assert elapsed < 0.2 + 0.3  # CLIENT 等待计入预算,不超 budget+调度容差
+    assert server._state_stop_tickets  # intent 持久
+    # 零部分变更:running 未动,client 未被摘/未停,无 retiring 残留
+    assert server._state_running is True
+    assert server._state_clients.get("s") is c
+    assert not c.stopped
+    assert server._state_retiring == {}
+    assert server._state_survivors == {}
+    release.set()
+    t.join(5)
+    assert server._open_state_clients() is False  # intent 未清仍拒绝
+    assert server._stop_state_client() == []  # retry:干净完成并消费 intent
+    assert c.stopped
+    assert not server._state_stop_tickets
+    assert server._open_state_clients() is True
+
+
+def test_stop_client_lock_held_defers_without_client(monkeypatch):
+    """R11:无 published client 时 CLIENT 锁被持有 > budget 同样在预算内
+    deferred、零部分变更;释放后 open 仍 False,retry 后 open True。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.2)
+    entered, release = threading.Event(), threading.Event()
+    t = threading.Thread(target=_hold_client_lock, args=(entered, release))
+    t.start()
+    assert entered.wait(5)
+    t0 = time.monotonic()
+    r = server._stop_state_client()
+    elapsed = time.monotonic() - t0
+    assert r[0]["deferred"] is True
+    assert r[0]["reason"] == "client_lock_timeout"
+    assert elapsed < 0.2 + 0.3
+    assert server._state_stop_tickets
+    assert server._state_running is True  # 零部分变更
+    assert server._state_clients == {}
+    release.set()
+    t.join(5)
+    assert server._open_state_clients() is False
+    assert server._stop_state_client() == []
+    assert not server._state_stop_tickets
+    assert server._open_state_clients() is True
+
+
+def test_earlier_stop_completion_keeps_later_ticket(monkeypatch):
+    """R11:较早 ticket 的 stop 完成只消费 <= 自己 ticket——完成期间登记
+    的更晚 ticket 保留,open 仍拒绝;retry stop 完成才放行。"""
+    gate = threading.Event()
+    z = _GatedZombie({"z": "/tmp/z.sock"}, gate)
+    z.fail_stop = False  # 放行后 stop 成功
+    z.start()
+    monkeypatch.setattr(server, "_state_clients", {"z": z})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "z": {"socket": "/tmp/z.sock", "directory": "/d"},
+    })
+    out: dict[str, object] = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("first", server._stop_state_client())
+    )
+    t.start()
+    deadline = time.monotonic() + 5
+    while not z.stop_requested and time.monotonic() < deadline:
+        time.sleep(0.01)  # 等 first stop 进入阶段二 join(持 REAP,阻塞在 gate)
+    assert z.stop_requested
+    # first stop 事务进行中登记更晚 ticket(REAP 被持→本次 deferred)
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.1)
+    r2 = server._stop_state_client()
+    assert r2[0]["deferred"] is True
+    later_ticket = r2[0]["ticket"]
+    gate.set()
+    t.join(5)
+    assert out["first"] == []  # 较早 ticket 的 stop 完成
+    # 较早完成绝不清除更晚 ticket
+    assert server._state_stop_tickets == {later_ticket}
+    assert server._open_state_clients() is False
+    assert server._stop_state_client() == []  # retry:消费更晚 ticket
     assert not server._state_stop_tickets
     assert server._open_state_clients() is True
 

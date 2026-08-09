@@ -4651,13 +4651,40 @@ _state_survivors: dict[int, _InflightOwner] = {}
 # 恒为 REAP→CLIENT,禁止反序。survivor 转移靠锁内身份 CAS,并发成功摘除
 # 的 owner 不得复活/重复报告。
 _STATE_REAP_LOCK = threading.Lock()
-# H0.5 R10:shutdown intent ticket(CLIENT 锁保护)。stop 在函数入口、尝试
-# REAP 之前即登记 ticket;timed acquire 耗尽返回 deferred 时 ticket 持久——
-# open 必须 False,reconcile 注册/发布/换入 CAS 必须拒绝,不能只靠调用者
-# 看到返回值。stop 完成时仅清除 <= 自己 ticket 的 intent(覆盖更早的
-# deferred 请求;较早完成绝不清除较晚 ticket)。
+# H0.5 R10/R11:shutdown intent ticket(独立 TICKET 锁保护)。R11:登记改经
+# 专用 _STATE_TICKET_LOCK 严格短临界区,不依赖可能长持有的 CLIENT 锁;
+# open/reconcile 的读取与 stop 完成的消费全部经同一锁同步,CAS 场景
+# check+commit 在 TICKET 临界区内与登记线性化。stop 在尝试 REAP 之前即
+# 登记 ticket;timed acquire 耗尽返回 deferred 时 ticket 持久——open 必须
+# False,reconcile 注册/发布/换入 CAS 必须拒绝,不能只靠调用者看到返回值。
+# stop 完成时仅清除 <= 自己 ticket 的 intent(覆盖更早的 deferred 请求;
+# 较早完成绝不清除较晚 ticket)。TICKET 是叶子锁:持 TICKET 时绝不再取
+# REAP/CLIENT,锁序恒 REAP→CLIENT→TICKET。
+_STATE_TICKET_LOCK = threading.Lock()
 _state_stop_tickets: set[int] = set()
 _state_stop_ticket_seq = itertools.count(1)
+
+
+def _register_stop_ticket() -> int:
+    """TICKET 锁短临界区登记 shutdown intent,返回单调 ticket 号。"""
+    with _STATE_TICKET_LOCK:
+        ticket = next(_state_stop_ticket_seq)
+        _state_stop_tickets.add(ticket)
+        return ticket
+
+
+def _stop_tickets_pending() -> bool:
+    """TICKET 锁下读取是否有未消费 shutdown intent(门禁用)。"""
+    with _STATE_TICKET_LOCK:
+        return bool(_state_stop_tickets)
+
+
+def _consume_stop_tickets(ticket: int) -> None:
+    """stop 完成:仅清除 <= 本 ticket 的 intent(覆盖更早 deferred);
+    更晚 ticket 保留——较早完成绝不清除较晚 ticket。"""
+    with _STATE_TICKET_LOCK:
+        for pending in [t for t in _state_stop_tickets if t <= ticket]:
+            _state_stop_tickets.discard(pending)
 # socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
 STATE_SWAP_READY_TIMEOUT_S = 2.0
 # stop 对全部唯一 client(published+inflight)共享的总 join 预算(秒),
@@ -4745,11 +4772,14 @@ def _open_state_clients() -> bool:
                 )
             time.sleep(0.05)
         with _STATE_CLIENT_LOCK:
-            if _state_retiring or _state_survivors or _state_stop_tickets:
-                return False  # fail-closed:未决 ownership/shutdown intent 拒绝开新 epoch
-            _state_running = True
-            _state_epoch += 1
-            return True
+            # R11:check+commit 与 ticket 登记经 TICKET 锁线性化——登记
+            # 先于本临界区完成则 open 拒绝;反之 open 先提交,登记其后。
+            with _STATE_TICKET_LOCK:
+                if _state_retiring or _state_survivors or _state_stop_tickets:
+                    return False  # fail-closed:未决 ownership/shutdown intent 拒绝开新 epoch
+                _state_running = True
+                _state_epoch += 1
+                return True
 
 
 def _stop_state_client() -> list[dict[str, Any]]:
@@ -4768,14 +4798,13 @@ def _stop_state_client() -> list[dict[str, Any]]:
     global _state_clients, _state_sessions_meta, _state_running, _state_epoch
     global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
     global _state_inflight
-    # R9:总预算从函数入口起算,等待 REAP 锁的时间也计入;耗尽即放弃
-    # (不重置完整 join 窗口),ownership 原样受管不丢,running 不被改动。
-    # R10:入口先登记 shutdown intent ticket——即使 deferred,open/reconcile
-    # 也被门禁拒绝,直到某个 stop 真正完成。
-    with _STATE_CLIENT_LOCK:
-        ticket = next(_state_stop_ticket_seq)
-        _state_stop_tickets.add(ticket)
+    # R11:absolute deadline 是函数首个时序动作——之后 REAP/CLIENT 锁等待
+    # 与 client join 全部只花 remaining,任何等待都计入总预算;CLIENT 在
+    # 剩余窗口内拿不到即返回 deferred(ticket 持久,running/ownership 零
+    # 部分变更),绝不等待后再给完整 join 预算。R11:ticket 登记改经独立
+    # TICKET 锁短临界区,不再依赖可能长持有的 CLIENT 锁。
     absolute_deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
+    ticket = _register_stop_ticket()
     if not _STATE_REAP_LOCK.acquire(
         timeout=max(0.0, absolute_deadline - time.monotonic())
     ):
@@ -4786,7 +4815,16 @@ def _stop_state_client() -> list[dict[str, Any]]:
             "ticket": ticket,
         }]
     try:
-        with _STATE_CLIENT_LOCK:
+        if not _STATE_CLIENT_LOCK.acquire(
+            timeout=max(0.0, absolute_deadline - time.monotonic())
+        ):
+            return [{
+                "deferred": True,
+                "reason": "client_lock_timeout",
+                "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+                "ticket": ticket,
+            }]
+        try:
             _state_running = False
             _state_epoch += 1
             epoch = _state_epoch
@@ -4805,6 +4843,8 @@ def _stop_state_client() -> list[dict[str, Any]]:
                 _state_survivors.values()
             ):
                 targets[id(owner.client)] = owner
+        finally:
+            _STATE_CLIENT_LOCK.release()
         owners = list(targets.values())
         # 阶段二:先广播 cancel,再按入口绝对 deadline 的剩余窗口逐个 join
         for owner in owners:
@@ -4828,13 +4868,9 @@ def _stop_state_client() -> list[dict[str, Any]]:
                         managed = True
                 if managed:
                     survived.append(owner)
-        with _STATE_CLIENT_LOCK:
-            # 完成:消费 <= 本 ticket 的全部 intent(覆盖更早 deferred);
-            # 更晚 ticket 保留,较早完成绝不清除较晚 ticket
-            for pending in [
-                t for t in _state_stop_tickets if t <= ticket
-            ]:
-                _state_stop_tickets.discard(pending)
+        # 完成:经 TICKET 锁消费 <= 本 ticket 的全部 intent(覆盖更早
+        # deferred);更晚 ticket 保留,较早完成绝不清除较晚 ticket
+        _consume_stop_tickets(ticket)
     finally:
         _STATE_REAP_LOCK.release()
     diagnostics: list[dict[str, Any]] = []
@@ -5002,8 +5038,8 @@ def _reconcile_state_client() -> None:
                 continue  # 闸门已关:候选从未启动线程,零副作用直接丢弃
             if name in _state_inflight:
                 continue  # 同名活跃候选已在途:跳过复用,不起双 worker
-            if _state_retiring or _state_survivors or _state_stop_tickets:
-                continue  # R7/R10 门禁:未决 ownership/shutdown intent 未清,拒绝新候选(下轮重试)
+            if _state_retiring or _state_survivors or _stop_tickets_pending():
+                continue  # R7/R10/R11 门禁:未决 ownership/shutdown intent 未清,拒绝新候选(下轮重试)
             owner = _InflightOwner(
                 epoch=epoch, name=name,
                 token=next(_inflight_token), client=client,
@@ -5017,23 +5053,25 @@ def _reconcile_state_client() -> None:
         # REAP 入口回收;不留僵尸 inflight/活线程,同名下轮不再饥饿。
         iter_reap = []
         with _STATE_CLIENT_LOCK:
-            if (
-                _state_inflight.get(name) is owner  # 身份比较
-                and _state_running
-                and _state_epoch == epoch
-                and name not in _state_clients
-                and name not in _state_sessions_meta
-                and not _state_retiring
-                and not _state_survivors  # R7:发布前确认无未决 ownership
-                and not _state_stop_tickets  # R10:shutdown intent 未清不发布
-            ):
-                # 仍持有 ownership:原子 inflight→published
-                del _state_inflight[name]
-                _state_clients[name] = client
-                _state_sessions_meta[name] = running[name]
-            elif _state_inflight.get(name) is owner:
-                del _state_inflight[name]
-                iter_reap.append(_retire_client_locked(name, epoch, client))
+            # R11:check+commit 与 ticket 登记经 TICKET 锁线性化
+            with _STATE_TICKET_LOCK:
+                if (
+                    _state_inflight.get(name) is owner  # 身份比较
+                    and _state_running
+                    and _state_epoch == epoch
+                    and name not in _state_clients
+                    and name not in _state_sessions_meta
+                    and not _state_retiring
+                    and not _state_survivors  # R7:发布前确认无未决 ownership
+                    and not _state_stop_tickets  # R10:shutdown intent 未清不发布
+                ):
+                    # 仍持有 ownership:原子 inflight→published
+                    del _state_inflight[name]
+                    _state_clients[name] = client
+                    _state_sessions_meta[name] = running[name]
+                elif _state_inflight.get(name) is owner:
+                    del _state_inflight[name]
+                    iter_reap.append(_retire_client_locked(name, epoch, client))
             # 否则 stop 已摘取并拥有该候选,不得 publish/再 stop
         _reap_owners(iter_reap, STATE_STOP_JOIN_TIMEOUT_S)
     for name, socket_path, old_client in changed:
@@ -5041,21 +5079,23 @@ def _reconcile_state_client() -> None:
         iter_reap: list[_InflightOwner] = []
         owner: _InflightOwner | None = None
         with _STATE_CLIENT_LOCK:
-            owned = (
-                _state_running
-                and _state_epoch == epoch
-                and _state_clients.get(name) is old_client
-                and name not in _state_inflight  # 同名候选在途:跳过复用
-                and not _state_retiring
-                and not _state_survivors  # R7 门禁:未决 ownership 未清不起换入
-                and not _state_stop_tickets  # R10:shutdown intent 未清不起候选
-            )
-            if owned:
-                owner = _InflightOwner(
-                    epoch=epoch, name=name,
-                    token=next(_inflight_token), client=new_client,
+            # R11:check+commit 与 ticket 登记经 TICKET 锁线性化
+            with _STATE_TICKET_LOCK:
+                owned = (
+                    _state_running
+                    and _state_epoch == epoch
+                    and _state_clients.get(name) is old_client
+                    and name not in _state_inflight  # 同名候选在途:跳过复用
+                    and not _state_retiring
+                    and not _state_survivors  # R7 门禁:未决 ownership 未清不起换入
+                    and not _state_stop_tickets  # R10:shutdown intent 未清不起候选
                 )
-                _state_inflight[name] = owner
+                if owned:
+                    owner = _InflightOwner(
+                        epoch=epoch, name=name,
+                        token=next(_inflight_token), client=new_client,
+                    )
+                    _state_inflight[name] = owner
         if owner is None:
             continue  # 闸门已关或已有同名候选:未启动线程,直接丢弃
         # 锁外启动:False/异常/partial 统一收尾;stop 先取得所有权则不生线程
@@ -5075,42 +5115,44 @@ def _reconcile_state_client() -> None:
             time.sleep(0.05)
         swapped = False
         with _STATE_CLIENT_LOCK:
-            still_owned = _state_inflight.get(name) is owner
-            if still_owned:
-                del _state_inflight[name]  # 仅 owner 本人可摘除
-            if (
-                still_owned
-                and not cancelled
-                and ready
-                and _state_running
-                and _state_epoch == epoch
-                and _state_clients.get(name) is old_client
-                and not _state_retiring
-                and not _state_survivors  # R7:换入前确认无未决 ownership
-                and not _state_stop_tickets  # R10:shutdown intent 未清不换入
-            ):
-                # 原子换入:新客户端握手含全量 resync,清降级,meta 推进;
-                # 旧 client 同一临界区转移进 retiring(不停成功不摘)
-                _state_clients[name] = new_client
-                _state_sessions_meta[name] = running[name]
-                _state_swap_pending.pop(name, None)
-                swapped = True
-                if old_client is not None:
-                    iter_reap.append(_retire_client_locked(name, epoch, old_client))
-            elif still_owned:
-                # 我们摘取→我们负责 stop:同一临界区转移进 retiring
-                iter_reap.append(_retire_client_locked(name, epoch, new_client))
+            # R11:check+commit 与 ticket 登记经 TICKET 锁线性化
+            with _STATE_TICKET_LOCK:
+                still_owned = _state_inflight.get(name) is owner
+                if still_owned:
+                    del _state_inflight[name]  # 仅 owner 本人可摘除
                 if (
-                    not cancelled
-                    and not ready
+                    still_owned
+                    and not cancelled
+                    and ready
                     and _state_running
                     and _state_epoch == epoch
                     and _state_clients.get(name) is old_client
+                    and not _state_retiring
+                    and not _state_survivors  # R7:换入前确认无未决 ownership
+                    and not _state_stop_tickets  # R10:shutdown intent 未清不换入
                 ):
-                    # 新 socket 不就绪:弃新留旧,旧缓存可读但持久 degraded
-                    _state_swap_pending[name] = {
-                        "reason": f"state socket swap not ready: {socket_path}",
-                    }
+                    # 原子换入:新客户端握手含全量 resync,清降级,meta 推进;
+                    # 旧 client 同一临界区转移进 retiring(不停成功不摘)
+                    _state_clients[name] = new_client
+                    _state_sessions_meta[name] = running[name]
+                    _state_swap_pending.pop(name, None)
+                    swapped = True
+                    if old_client is not None:
+                        iter_reap.append(_retire_client_locked(name, epoch, old_client))
+                elif still_owned:
+                    # 我们摘取→我们负责 stop:同一临界区转移进 retiring
+                    iter_reap.append(_retire_client_locked(name, epoch, new_client))
+                    if (
+                        not cancelled
+                        and not ready
+                        and _state_running
+                        and _state_epoch == epoch
+                        and _state_clients.get(name) is old_client
+                    ):
+                        # 新 socket 不就绪:弃新留旧,旧缓存可读但持久 degraded
+                        _state_swap_pending[name] = {
+                            "reason": f"state socket swap not ready: {socket_path}",
+                        }
             # still_owned=False:stop 已摘取并拥有候选,不得再 stop/publish
         # 立即回收本轮退休者(REAP 锁串行),避免门禁阻塞后续 session
         _reap_owners(iter_reap, STATE_STOP_JOIN_TIMEOUT_S)
