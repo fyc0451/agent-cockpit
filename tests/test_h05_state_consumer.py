@@ -32,6 +32,10 @@ R9 复审修订(#1841 REVIEW_BLOCK):start False/异常/partial-start 统一
 identity-safe 收尾(_start_candidate,单候选失败不炸 reconcile),
 HerdrStateClient.start partial 失败回收已生线程再抛;stop 总预算从
 函数入口起算、等 REAP 锁计时、timed acquire 耗尽 deferred 不重置窗口。
+R10 复审修订(#1853 REVIEW_BLOCK):shutdown intent ticket——stop 入口
+(尝试 REAP 前)登记,deferred 持久;open/reconcile 注册/发布/换入 CAS
+被 ticket 门禁拒绝;完成的 stop 仅消费 <= 自己 ticket;覆盖前一 stop/
+reaper/open 持锁三场景的 deferred→拒绝→retry→放行与真实线程零残留。
 """
 import asyncio
 import threading
@@ -155,6 +159,7 @@ def _reset_state(monkeypatch):
     monkeypatch.setattr(server, "_state_inflight", {})
     monkeypatch.setattr(server, "_state_retiring", {})
     monkeypatch.setattr(server, "_state_survivors", {})
+    monkeypatch.setattr(server, "_state_stop_tickets", set())
     monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 0.2)
     monkeypatch.setattr(
         server.herdr_state, "HerdrStateClient", FakeStateClient
@@ -996,8 +1001,10 @@ def test_open_while_stop_join_blocked_serializes(monkeypatch):
 
 
 def test_stop_while_open_reap_blocked_serializes(monkeypatch):
-    """open 有界 reap 占 REAP 期间 stop 到达:stop 等锁;open 先完成
-    (running=True),stop 随后关闸——最终 running=False,较早 open 不得恢复。"""
+    """open 有界 reap 占 REAP 期间 stop 到达:stop 等锁;open 的 reap 可完成,
+    但 R10 起 stop 已在入口登记 shutdown ticket——open 终检被 intent 拒绝
+    (返回 False),stop 随后完成关闸;最终 running=False,ticket 清空后
+    新 open 才放行。"""
     monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.3)
     z = _FlakyZombie({"z": "/tmp/z.sock"})
     z.start()
@@ -1010,11 +1017,13 @@ def test_stop_while_open_reap_blocked_serializes(monkeypatch):
     )
     t.start()
     time.sleep(0.05)  # open 持 REAP 循环 reap(zombie 尚未自愈)
-    r = server._stop_state_client()  # 等 open 完成
+    r = server._stop_state_client()  # 入口登记 ticket,等 open 完成
     t.join(5)
-    assert out["open"] is True  # open 先完成:回收成功并开了 running
+    assert out["open"] is False  # R10:stop 的 shutdown intent 拒绝 open
     assert server._state_running is False  # stop 后完成,最终关闸
     assert r == []  # zombie 已被 open 回收,stop 无 survivor
+    assert not server._state_stop_tickets  # 完成即消费 intent
+    assert server._open_state_clients() is True  # ticket 清空后放行
 
 
 def test_double_open_serialized_epochs(monkeypatch):
@@ -1194,6 +1203,140 @@ def test_stop_budget_exhausted_by_lock_wait_defers(monkeypatch):
     # ownership 未丢:first stop 已完成回收,maps 干净;本 stop 未产生幽灵
     assert server._state_retiring == {}
     assert server._state_survivors == {}
+
+
+# ── R10 复审修订(#1853):deferred shutdown intent 持久门禁 ───────
+
+
+class _GatedZombie(FakeStateClient):
+    """stop 阻塞在 gate 上,由测试主线程控制放行;fail_stop 控制成败。"""
+
+    def __init__(self, sessions, gate):
+        super().__init__(sessions)
+        self.gate = gate
+        self.fail_stop = True
+
+    def stop(self, join_timeout=5.0):
+        self.request_stop()
+        self.gate.wait(5)
+        if self.fail_stop:
+            return False
+        self.stopped = True
+        return True
+
+
+def test_deferred_stop_intent_blocks_until_retry(monkeypatch):
+    """REAP 被前一 stop 持有→本 stop deferred:shutdown intent 持久——
+    open=False、reconcile 零新增;含 published client+真实 inflight 候选;
+    retry stop 完成后 open 才放行;真实线程最终零。"""
+    import os
+
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.15)
+
+    class VerySlowStop(FakeStateClient):
+        def stop(self, join_timeout=5.0):
+            self.request_stop()
+            time.sleep(0.3)
+            self.stopped = True
+            return True
+
+    slow = VerySlowStop({"s": "/tmp/s.sock"})
+    slow.start()
+    monkeypatch.setattr(server, "_state_clients", {"s": slow})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "s": {"socket": "/tmp/s.sock", "directory": "/d"},
+    })
+    # 真实 inflight 候选(死 socket,线程在退避循环中)
+    cand = _REAL_STATE_CLIENT(
+        {"r10": "/nonexistent/r10.sock"},
+        reconnect_base_delay=0.05,
+        reconnect_max_delay=0.1,
+        health_check_interval=None,
+    )
+    cand.start()
+    with server._STATE_CLIENT_LOCK:
+        owner = server._InflightOwner(
+            epoch=server._state_epoch, name="r10",
+            token=next(server._inflight_token), client=cand,
+        )
+        server._state_inflight["r10"] = owner
+    fd_before = len(os.listdir("/proc/self/fd"))
+    out: dict[str, object] = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("first", server._stop_state_client())
+    )
+    t.start()
+    time.sleep(0.05)  # 前一 stop 持 REAP join 中
+    r2 = server._stop_state_client()  # 预算耗尽 → deferred
+    assert r2[0]["deferred"] is True
+    assert server._state_stop_tickets  # intent 未丢
+    t.join(5)
+    assert out["first"] == []
+    assert slow.stopped and server._state_clients == {}  # 旧 client 已停
+    assert _alive_state_threads("r10") == []  # inflight 候选线程已回收
+    # intent 未清:直接 open 拒绝、reconcile 零新增/零候选
+    assert server._open_state_clients() is False
+    monkeypatch.setattr(server, "_state_running", True)  # 单独验 ticket 门禁
+    _fake_discovery(monkeypatch, {"new": "/tmp/n.sock"})
+    server._reconcile_state_client()
+    assert "new" not in server._state_clients
+    assert server._state_inflight == {}
+    # retry stop 完成(更晚 ticket 覆盖更早 intent)→ open 放行
+    assert server._stop_state_client() == []
+    assert not server._state_stop_tickets
+    assert server._open_state_clients() is True
+    assert len(os.listdir("/proc/self/fd")) <= fd_before
+
+
+def test_deferred_stop_intent_when_reaper_holds_lock(monkeypatch):
+    """REAP 被 reaper 持有(reap 阻塞)→stop deferred,intent 持久门禁。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.15)
+    gate = threading.Event()
+    z = _GatedZombie({"z": "/tmp/z.sock"}, gate)
+    z.start()
+    with server._STATE_CLIENT_LOCK:
+        server._retire_client_locked("z", server._state_epoch, z)
+    out: dict[str, object] = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("reap", server._reap_retired_clients())
+    )
+    t.start()
+    time.sleep(0.05)  # reaper 持 REAP,阻塞在 zombie.stop 的 gate 上
+    r = server._stop_state_client()
+    assert r[0]["deferred"] is True
+    assert server._state_stop_tickets
+    gate.set()
+    t.join(5)
+    assert server._open_state_clients() is False  # intent 未清仍拒绝
+    z.fail_stop = False
+    assert server._stop_state_client() == []  # retry:完成并消费 intent
+    assert server._open_state_clients() is True
+
+
+def test_deferred_stop_intent_when_open_holds_lock(monkeypatch):
+    """REAP 被 open 的有界 reap 持有→stop deferred;open 自身也被 intent
+    门禁拒绝;retry stop 完成后才允许 open。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.15)
+    gate = threading.Event()
+    z = _GatedZombie({"z": "/tmp/z.sock"}, gate)
+    z.start()
+    with server._STATE_CLIENT_LOCK:
+        server._retire_client_locked("z", server._state_epoch, z)
+    out: dict[str, object] = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("open", server._open_state_clients())
+    )
+    t.start()
+    time.sleep(0.05)  # open 持 REAP reap,阻塞在 gate
+    r = server._stop_state_client()
+    assert r[0]["deferred"] is True
+    gate.set()  # 放行 open 的 reap(zombie 仍 fail→open 有界耗尽)
+    t.join(5)
+    assert out["open"] is False  # retiring 未清+intent 未清:open 拒绝
+    z.fail_stop = False
+    assert server._stop_state_client() == []  # retry 完成
+    assert not server._state_stop_tickets
+    assert server._open_state_clients() is True
 
 
 def _wait_client_ready(name, timeout=5.0):
