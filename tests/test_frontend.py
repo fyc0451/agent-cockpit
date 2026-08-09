@@ -710,7 +710,9 @@ def test_mobile_terminal_keeps_native_input_visible_above_soft_keyboard():
     assert "view.contains(active)" in position
     assert "active.matches('input,textarea')" in position
     assert "vv.offsetTop+vv.height" in position
-    assert "view.getBoundingClientRect().bottom-visibleBottom" in position
+    assert "const layoutBottom=fixed?window.innerHeight:view.getBoundingClientRect().bottom" in position
+    assert "stage.style.bottom=padding" in position
+    assert "stage.style.bottom=''" in position
     assert "view.style.paddingBottom=padding" in position
     assert "if(inset<80)inset=0" in position
     assert "positionTermForKeyboard();if(FIT&&XTERM)safeFitOf(FIT,XTERM)" in js
@@ -2901,8 +2903,14 @@ def test_terminal_true_fullscreen():
     assert "function toggleTermFullscreen()" in js
     assert "requestFullscreen" in js
     assert "term-fs-fixed" in js  # iOS 回退
+    assert "padding-bottom:var(--safe-bottom)" in HTML
+    assert "Esc 或右上按钮退出" in HTML
     assert 'id="termFsExit"' in HTML
     assert "#termStage:fullscreen" in HTML
+    assert "#termStage{position:relative}" in HTML
+    stage_tag = HTML.split('id="termStage"', 1)[1].split(">", 1)[0]
+    assert "position:relative" not in stage_tag
+    assert "#termStage.term-fs-fixed{position:fixed" in HTML
     # 统一退出路径:浮动按钮与 Escape 共用 exitTermFullscreen
     assert "function exitTermFullscreen()" in js
     assert 'onclick="exitTermFullscreen()"' in HTML

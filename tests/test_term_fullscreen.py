@@ -33,18 +33,31 @@ const stage = {
   },
   requestFullscreen: null,
   exited: 0,
+  style: { bottom: '' },
+  getBoundingClientRect() { return { bottom: 800 }; },
+};
+const active = { matches: s => s === 'input,textarea' };
+const view = {
+  style: { paddingBottom: '' },
+  classList: { contains: c => c === 'active' },
+  contains: el => el === active,
+  getBoundingClientRect() { return { bottom: 800 }; },
 };
 const doc = { fullscreenElement: null };
 globalThis.document = {
-  getElementById: id => (id === 'termStage' ? stage : null),
+  getElementById: id => (id === 'termStage' ? stage : id === 'view-term' ? view : null),
+  activeElement: active,
   exitFullscreen() { doc.fullscreenElement = null; return Promise.resolve(); },
 };
 Object.defineProperty(globalThis.document, 'fullscreenElement', {
   get() { return doc.fullscreenElement; },
 });
+globalThis.window = { innerHeight: 800, visualViewport: { offsetTop: 0, height: 500 } };
+globalThis.isTouchTerminal = () => true;
 
 eval(extract('toggleTermFullscreen'));
 eval(extract('exitTermFullscreen'));
+eval(extract('positionTermForKeyboard'));
 
 (async () => {
   let failures = 0;
@@ -84,8 +97,12 @@ eval(extract('exitTermFullscreen'));
     stage.requestFullscreen = undefined;
     toggleTermFullscreen();
     check('no API goes straight to fixed', stage.classList.contains('term-fs-fixed'));
+    positionTermForKeyboard();
+    check('fixed keyboard inset applies to stage', stage.style.bottom === '300px');
+    check('fixed keyboard inset leaves ancestor clean', view.style.paddingBottom === '');
     exitTermFullscreen();
     check('cleanup after no-API path', stage.classes.size === 0);
+    check('exit clears fixed keyboard inset', stage.style.bottom === '');
   }
   process.exit(failures ? 1 : 0);
 })();
