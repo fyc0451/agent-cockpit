@@ -433,6 +433,105 @@ class TestR3SymlinkEscape:
         assert str(outside) not in msg and str(data) not in msg
         assert "symlink_escape" in msg
 
+    def test_intermediate_root_symlink_not_ready(self, fake_home, tmp_path):
+        # root 本身被替换成指向外部的 symlink:解析期即 fail-closed
+        import shutil
+        data = self._data(fake_home)
+        outside = tmp_path / "outside-data"
+        outside.mkdir()
+        shutil.rmtree(data)
+        data.symlink_to(outside)
+        runtime_paths.reset_cache()
+        with pytest.raises(runtime_paths.PathResolutionError) as exc:
+            runtime_paths.inspect()
+        assert exc.value.reason == "symlink_escape"
+
+    def test_intermediate_component_symlink_rejected(self, fake_home, tmp_path):
+        # state 根路径的中间组件(~/.local)是链接:非 final 层也必须拒绝
+        outside = tmp_path / "dot-local-outside"
+        outside.mkdir()
+        (fake_home / ".local").symlink_to(outside)
+        runtime_paths.reset_cache()
+        _expect_error(runtime_paths.state_root, "symlink_escape")
+
+
+# ── R3 worktree 逃逸 barrier(真实 git 仓库)─────────────────
+
+
+class TestR3WorktreeEscape:
+    @pytest.fixture
+    def git_source(self, tmp_path):
+        import subprocess
+        src = tmp_path / "src-repo"
+        src.mkdir()
+        subprocess.run(["git", "init", "-q", str(src)], check=True)
+        (src / "f.txt").write_text("x")
+        subprocess.run(["git", "-C", str(src), "add", "f.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(src), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "init"],
+            check=True,
+        )
+        return src
+
+    def test_create_worktree_fails_closed_before_git(
+        self, fake_home, tmp_path, monkeypatch, git_source,
+    ):
+        import tasks
+        data = fake_home / "dashboard-data"
+        data.mkdir(exist_ok=True)
+        victim = tmp_path / "victim-outside"
+        (data / "worktrees").symlink_to(victim)
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(data))
+        runtime_paths.reset_cache()
+        monkeypatch.setattr(tasks, "WORKTREE_ROOT", data / "worktrees")
+        _expect_error(
+            lambda: tasks._create_worktree(git_source, "escape"),
+            "symlink_escape",
+        )
+        # 未调用 git、未创建受害者目录及其内容
+        assert not victim.exists()
+        r = subprocess.run(
+            ["git", "-C", str(git_source), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        assert "escape" not in r.stdout
+
+    def test_remove_worktree_fails_closed_before_rmtree(
+        self, fake_home, tmp_path, monkeypatch,
+    ):
+        import tasks
+        data = fake_home / "dashboard-data"
+        data.mkdir(exist_ok=True)
+        victim = tmp_path / "victim-dir"
+        victim.mkdir()
+        (victim / "precious.txt").write_text("keep")
+        (data / "worktrees").symlink_to(victim)
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(data))
+        runtime_paths.reset_cache()
+        monkeypatch.setattr(tasks, "WORKTREE_ROOT", data / "worktrees")
+        with pytest.raises(runtime_paths.PathResolutionError) as exc:
+            tasks._remove_worktree(None, data / "worktrees" / "t1")
+        assert exc.value.reason == "symlink_escape"
+        # 受害者目录与内容未被删除
+        assert (victim / "precious.txt").read_text() == "keep"
+
+    def test_validate_worktree_path_rejects_symlink_leaf(
+        self, fake_home, tmp_path, monkeypatch,
+    ):
+        import tasks
+        data = fake_home / "dashboard-data"
+        (data / "worktrees").mkdir(parents=True)
+        target = tmp_path / "real-dir"
+        target.mkdir()
+        link = data / "worktrees" / "linked"
+        link.symlink_to(target)
+        monkeypatch.setenv("COCKPIT_DATA_DIR", str(data))
+        runtime_paths.reset_cache()
+        monkeypatch.setattr(tasks, "WORKTREE_ROOT", data / "worktrees")
+        with pytest.raises(ValueError):
+            tasks._validate_worktree_path(link)
+
 
 # ── tasks 首次并发 _db barrier ────────────────────────────────
 

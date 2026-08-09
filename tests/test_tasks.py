@@ -29,6 +29,9 @@ import tasks
 @pytest.fixture
 def temp_data(tmp_path, monkeypatch):
     """将 tasks 数据目录和 DB 重定向到 tmp_path。"""
+    import runtime_paths
+    monkeypatch.setenv("COCKPIT_DATA_DIR", str(tmp_path))
+    runtime_paths.reset_cache()
     monkeypatch.setattr(tasks, "DATA_DIR", tmp_path)
     monkeypatch.setattr(tasks, "TASKS_DB", tmp_path / "tasks.sqlite3")
     monkeypatch.setattr(tasks, "WORKTREE_ROOT", tmp_path / "worktrees")
@@ -36,7 +39,8 @@ def temp_data(tmp_path, monkeypatch):
     tasks._active_processes.clear()
     tasks._cancel_requested.clear()
     tasks._init_db()
-    return tmp_path
+    yield tmp_path
+    runtime_paths.reset_cache()
 
 
 @pytest.fixture

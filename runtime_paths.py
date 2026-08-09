@@ -108,6 +108,16 @@ def _is_within(child: Path, parent: Path) -> bool:
         return False
 
 
+def _path_has_symlink(p: Path) -> bool:
+    """任一组件是链接即 True(#1940:逐组件检查,不只 final)。"""
+    cur = Path(p.anchor)
+    for part in p.parts[1:]:
+        cur = cur / part
+        if cur.is_symlink():
+            return True
+    return False
+
+
 def _check_broad(p: Path, env_name: str) -> None:
     """过宽根/危险位置拒绝(R2-B):/、HOME、install root 及其祖先/内部。"""
     if p == Path("/") or p == _HOME_ROOT:
@@ -124,14 +134,20 @@ def _resolve_roots_locked() -> dict[str, Path]:
     resolved: dict[str, Path] = {}
     for name in _ROOTS:
         env_name = _ROOT_ENV[name]
-        default = _ROOT_DEFAULTS[name].resolve(strict=False)
+        default_lex = _ROOT_DEFAULTS[name]
+        default = default_lex.resolve(strict=False)
         raw = os.environ.get(env_name, "").strip()
         if raw:
             p = canonicalize(raw, env_name=env_name)  # 非法即抛
             _check_broad(p, env_name)
+            lex = Path(os.path.expanduser(raw))
         else:
             p = default
             _check_broad(p, env_name)  # default 同样过宽根门
+            lex = default_lex
+        if _path_has_symlink(lex):
+            # 词法路径任一组件是链接即拒绝:不被 resolve 静默重锚到外部
+            raise PathResolutionError("symlink_escape", env_name)
         resolved[name] = p
     for i, a in enumerate(_ROOTS):
         for b in _ROOTS[i + 1:]:
@@ -183,6 +199,8 @@ def store(name: str) -> Path:
         if raw:
             p = canonicalize(raw, env_name=ENV_COORDINATION_DB)  # 非法即抛
             _check_broad(p, ENV_COORDINATION_DB)
+            if _path_has_symlink(p):
+                raise PathResolutionError("symlink_escape", ENV_COORDINATION_DB)
             roots = _roots()
             if p in roots.values():
                 raise PathResolutionError("store_collision", ENV_COORDINATION_DB)
@@ -215,15 +233,23 @@ def _nearest_existing_ancestor(p: Path) -> Path:
 
 
 def _store_escape_reason(p: Path, root: Path) -> str | None:
-    """R3-B 纯读:app-owned store 不得经 final/intermediate symlink 逃出
-    canonical assigned root。store 路径本身是链接(悬空/指向 root 外/
-    指向 root 内)一律 fail-closed;中间层链接使真实路径越界同样拒绝。
+    """R3-B+#1940 纯读:app-owned store 不得经 final/intermediate symlink
+    逃出 canonical assigned root。路径中任何一层存在链接(realpath 与词
+    法路径不一致)即 fail-closed——无论目标在 root 内外;无链接时对 root
+    内路径逐级复核组件。外部 store(coordination 覆盖)无链接即安全。
     返回机器可读 reason 或 None。"""
-    if p.is_symlink():
-        return "symlink_escape"
     real = Path(os.path.realpath(p))
-    if real != p and not _is_within(real, root):
+    if real != p:
         return "symlink_escape"
+    try:
+        rel_parts = p.relative_to(root).parts
+    except ValueError:
+        return None  # root 外且无链接:外置 store,安全
+    cur = root
+    for part in rel_parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return "symlink_escape"
     return None
 
 

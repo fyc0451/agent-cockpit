@@ -248,6 +248,7 @@ def _create_worktree(source: Path, task_id: str) -> tuple[Path, str]:
 
     返回 (worktree_path, base_sha)。
     """
+    runtime_paths.validate_store("worktrees")  # 先于任何 git/mkdir fail-closed
     ok, base_sha = _git_ok(["rev-parse", "HEAD"], source)
     if not ok or not base_sha:
         raise ValueError(f"源目录不是有效的 git 仓库或无提交: {source}")
@@ -262,16 +263,19 @@ def _create_worktree(source: Path, task_id: str) -> tuple[Path, str]:
 
 
 def _validate_worktree_path(worktree: Path) -> None:
-    """验证 worktree 路径是 WORKTREE_ROOT 的直接子目录。
+    """验证 worktree 路径是 canonical WORKTREE_ROOT 的直接子目录。
 
-    拒绝:根目录本身、外部路径、软链逃逸。
+    拒绝:根目录本身、外部路径、任何层级的软链逃逸。使用被验证的
+    canonical store(symlink 逃逸时 fail-closed),不先 resolve symlink。
     """
-    root = WORKTREE_ROOT.resolve()
-    resolved = worktree.resolve(strict=False)
-    if resolved == root:
+    root = runtime_paths.validate_store("worktrees")
+    worktree = Path(worktree)
+    if worktree == root:
         raise ValueError(f"拒绝操作 worktree 根目录: {worktree}")
-    if resolved.parent != root:
+    if worktree.parent != root:
         raise ValueError(f"worktree 路径不在 {root} 下: {worktree}")
+    if worktree.is_symlink():
+        raise ValueError(f"拒绝操作软链 worktree: {worktree}")
 
 
 def _remove_worktree(source: Path | None, worktree: Path) -> None:
