@@ -1674,14 +1674,14 @@ def test_terminal_output_yields_between_bounded_chunks():
 def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     js = _inline_js()
     assert ".term-loading{" in HTML
-    assert "pointer-events:auto" in HTML
-    assert "TERM_LOADING_QUIET=400,TERM_LOADING_TIMEOUT=15000" in js
+    assert "pointer-events:none" in HTML
+    assert "TERM_LOADING_QUIET=80,TERM_LOADING_TIMEOUT=15000" in js
     assert "replay_complete" in js
     hold = js.split("function holdTermLoadingForTui(id){", 1)[1].split(
         "function settleTermLoading", 1
     )[0]
     assert "inst.loadingWaitForTui=true" in hold
-    assert "TERM_LOADING_TIMEOUT" in hold
+    assert "settleTermLoading(id,true),1500" in hold
     settle = js.split("function settleTermLoading(id,force=false){", 1)[1].split(
         "function writeTermOutput", 1
     )[0]

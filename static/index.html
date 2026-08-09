@@ -2656,7 +2656,7 @@ let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, 
 let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
 const TERM_SESSION_PREFIX='session:';
 const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=16*1024;
-const TERM_LOADING_QUIET=400,TERM_LOADING_TIMEOUT=15000;
+const TERM_LOADING_QUIET=80,TERM_LOADING_TIMEOUT=15000;
 const TERM_WEBGL_WARMUP='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()[]{}<>+-=_/\\|:;,.? ┌─┐│└┘├┤┬┴┼ 中文';
 const TERM_WEBGL_CONTRAST=document.documentElement.classList.contains('light')?4.5:3;
 const TERM_THEME_MIN_MS=1500; // 主题遮罩最小显示时长,兜底盖住WebGL整屏重绘卡顿
@@ -3494,7 +3494,9 @@ function holdTermLoadingForTui(id){
   inst.loadingWaitForTui=true;
   const label=inst.loadingEl.querySelector('span:last-child');if(label)label.textContent='正在启动完整终端';
   if(inst.loadingDeadlineTimer)clearTimeout(inst.loadingDeadlineTimer);
-  inst.loadingDeadlineTimer=setTimeout(()=>settleTermLoading(id,true),TERM_LOADING_TIMEOUT);
+  // TUI 等待上限:不依赖 15s 兜底,1.5s 内没进 alternate buffer 就放行,
+  // 避免遮罩长时间盖住画面(pointer-events:none 已允许期间交互)。
+  inst.loadingDeadlineTimer=setTimeout(()=>settleTermLoading(id,true),1500);
 }
 function settleTermLoading(id,force=false){
   const inst=TERM_INSTANCES[id];
