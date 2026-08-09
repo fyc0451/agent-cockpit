@@ -887,6 +887,147 @@ def _wait_fd_at_most(baseline, timeout=3.0):
     return False
 
 
+# ── R8 复审修订(#1829):added 拒绝统一收尾 + open/stop 线性化 ──────
+
+
+def _inject_retiring_ghost():
+    ghost = FakeStateClient({"ghost": "/tmp/ghost.sock"})
+    with server._STATE_CLIENT_LOCK:
+        server._retire_client_locked("ghost", server._state_epoch, ghost)
+
+
+def _inject_survivor_ghost():
+    ghost = FakeStateClient({"ghost": "/tmp/ghost.sock"})
+    with server._STATE_CLIENT_LOCK:
+        owner = server._retire_client_locked("ghost", server._state_epoch, ghost)
+        del server._state_retiring[owner.token]
+        server._state_survivors[owner.token] = owner
+
+
+def _inject_epoch_bump():
+    assert server._open_state_clients() is True
+
+
+def _added_blocked_real_cleanup(monkeypatch, tmp_path, inject, tag):
+    """added start 后、publish CAS 前注入阻断:候选必须 identity-safe 统一
+    收尾(inflight→retiring→REAP 回收),真实线程零残留,下轮恢复发布。"""
+    from test_herdr_state import FakeHerdrServer
+
+    srv = FakeHerdrServer(tmp_path, name=tag).start()
+    real_start = _REAL_STATE_CLIENT.start
+
+    fired = {"done": False}
+
+    def start_then_inject(self):
+        result = real_start(self)
+        if not fired["done"]:
+            fired["done"] = True
+            inject()
+        return result
+
+    monkeypatch.setattr(_REAL_STATE_CLIENT, "start", start_then_inject)
+    monkeypatch.setattr(server, "_build_session_client", _build_real_client)
+    _fake_discovery(monkeypatch, {tag: str(srv.path)})
+    server._reconcile_state_client()
+    assert tag not in server._state_clients  # 门禁拒绝发布
+    assert server._state_inflight == {}  # 无僵尸 inflight(同名不饥饿)
+    assert _alive_state_threads(tag) == []  # 真实线程已回收
+    server._reconcile_state_client()  # 阻断消失后下一轮恢复
+    assert tag in server._state_clients
+    assert _wait_client_ready(tag)
+    assert server._state_retiring == {}
+    assert server._state_survivors == {}
+    server._stop_state_client()  # 清理,防线程泄漏
+    srv.stop()
+
+
+def test_added_publish_blocked_by_retiring_cleanup(monkeypatch, tmp_path):
+    _added_blocked_real_cleanup(
+        monkeypatch, tmp_path, _inject_retiring_ghost, "r8a",
+    )
+
+
+def test_added_publish_blocked_by_survivor_cleanup(monkeypatch, tmp_path):
+    _added_blocked_real_cleanup(
+        monkeypatch, tmp_path, _inject_survivor_ghost, "r8b",
+    )
+
+
+def test_added_publish_blocked_by_epoch_cleanup(monkeypatch, tmp_path):
+    _added_blocked_real_cleanup(
+        monkeypatch, tmp_path, _inject_epoch_bump, "r8c",
+    )
+
+
+def test_open_while_stop_join_blocked_serializes(monkeypatch):
+    """stop 阶段二 join 占 REAP 期间 open 到达:open 等锁,stop 先完整结束;
+    open 随后开新 epoch——最终 running=True 由锁内顺序决定。"""
+
+    class SlowStop(FakeStateClient):
+        def stop(self, join_timeout=5.0):
+            self.request_stop()
+            time.sleep(0.2)
+            self.stopped = True
+            return True
+
+    c = SlowStop({"s": "/tmp/s.sock"})
+    c.start()
+    monkeypatch.setattr(server, "_state_clients", {"s": c})
+    monkeypatch.setattr(server, "_state_sessions_meta", {
+        "s": {"socket": "/tmp/s.sock", "directory": "/d"},
+    })
+    out: dict[str, object] = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("stop", server._stop_state_client())
+    )
+    t.start()
+    time.sleep(0.05)  # stop 已持 REAP 进入 join
+    r = server._open_state_clients()  # 必须等 stop 完成
+    t.join(5)
+    assert out["stop"] == []  # open 返回时 stop 已完整结束
+    assert r is True
+    assert server._state_running is True
+
+
+def test_stop_while_open_reap_blocked_serializes(monkeypatch):
+    """open 有界 reap 占 REAP 期间 stop 到达:stop 等锁;open 先完成
+    (running=True),stop 随后关闸——最终 running=False,较早 open 不得恢复。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.3)
+    z = _FlakyZombie({"z": "/tmp/z.sock"})
+    z.start()
+    with server._STATE_CLIENT_LOCK:
+        server._retire_client_locked("z", server._state_epoch, z)
+    threading.Timer(0.15, lambda: setattr(z, "fail_stop", False)).start()
+    out: dict[str, object] = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("open", server._open_state_clients())
+    )
+    t.start()
+    time.sleep(0.05)  # open 持 REAP 循环 reap(zombie 尚未自愈)
+    r = server._stop_state_client()  # 等 open 完成
+    t.join(5)
+    assert out["open"] is True  # open 先完成:回收成功并开了 running
+    assert server._state_running is False  # stop 后完成,最终关闸
+    assert r == []  # zombie 已被 open 回收,stop 无 survivor
+
+
+def test_double_open_serialized_epochs(monkeypatch):
+    """双 open 并发:REAP 锁串行,各增一次 epoch,均返回 True。"""
+    epoch0 = server._state_epoch
+    results: list[bool] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(server._open_state_clients()))
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert results == [True, True]
+    assert server._state_epoch == epoch0 + 2
+    assert server._state_running is True
+
+
 def _wait_client_ready(name, timeout=5.0):
     """等 published 真实 client 完成握手(subscribed),给 FD 基线稳态。"""
     deadline = time.monotonic() + timeout

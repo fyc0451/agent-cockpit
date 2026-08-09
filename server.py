@@ -4746,40 +4746,43 @@ def _open_state_clients() -> bool:
 
 
 def _stop_state_client() -> list[dict[str, Any]]:
-    """lifespan 关闭(两阶段,R6)。阶段一同一临界区:关 running 闸门、递增
-    epoch、把 published+inflight 全部 identity-safe 转移进 _state_retiring
-    (与既有 retiring 合并),清空 clients/inflight/meta/swap-pending/
-    discovery。阶段二锁外:先向快照内所有唯一 client(published+inflight+
-    retiring+既往 survivors 重试)广播 request_stop,再按共享总 deadline
-    逐个 join;真正退出才摘除。deadline 耗尽仍存活者移入 _state_survivors
-    保留真实引用与 ownership(可重复 request_stop/join/reaper),返回诊断
-    列表(序列化与内部引用分离);空列表=全部干净退出。"""
+    """lifespan 关闭(R8:全事务线性化)。整个事务(关闸/增 epoch/摘
+    ownership、广播/join、survivor 转移)在 _STATE_REAP_LOCK 下与 open
+    全事务互斥——open 设 running 与 stop 关闸绝不交错,锁内顺序决定最终
+    running,stop 返回后不会被较早开始的 open 恢复。阶段一(同一 CLIENT
+    临界区):关 running 闸门、递增 epoch、把 published+inflight 全部
+    identity-safe 转移进 _state_retiring(与既有 retiring 合并),清空
+    clients/inflight/meta/swap-pending/discovery。阶段二:先向快照内所有
+    唯一 client(published+inflight+retiring+既往 survivors 重试)广播
+    request_stop,再按共享总 deadline 逐个 join;真正退出才摘除。deadline
+    耗尽仍存活者移入 _state_survivors 保留真实引用与 ownership(可重复
+    request_stop/join/reaper),返回诊断列表(序列化与内部引用分离);
+    空列表=全部干净退出。"""
     global _state_clients, _state_sessions_meta, _state_running, _state_epoch
     global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
     global _state_inflight
-    with _STATE_CLIENT_LOCK:
-        _state_running = False
-        _state_epoch += 1
-        epoch = _state_epoch
-        for name, client in _state_clients.items():
-            _retire_client_locked(name, epoch, client)
-        for owner in _state_inflight.values():
-            _state_retiring[owner.token] = owner
-        _state_clients = {}
-        _state_inflight = {}
-        _state_sessions_meta = {}
-        _state_swap_pending = {}
-        _state_discovery_ok = False
-        _state_discovery_reason = "state client not running"
-        targets: dict[int, _InflightOwner] = {}
-        for owner in list(_state_retiring.values()) + list(
-            _state_survivors.values()
-        ):
-            targets[id(owner.client)] = owner
-    owners = list(targets.values())
-    # 阶段二(REAP 锁串行,与 reaper/重复 stop 单 owner):先广播 cancel,
-    # 再按共享总 deadline 逐个 join(stop 幂等,信号已发)
     with _STATE_REAP_LOCK:
+        with _STATE_CLIENT_LOCK:
+            _state_running = False
+            _state_epoch += 1
+            epoch = _state_epoch
+            for name, client in _state_clients.items():
+                _retire_client_locked(name, epoch, client)
+            for owner in _state_inflight.values():
+                _state_retiring[owner.token] = owner
+            _state_clients = {}
+            _state_inflight = {}
+            _state_sessions_meta = {}
+            _state_swap_pending = {}
+            _state_discovery_ok = False
+            _state_discovery_reason = "state client not running"
+            targets: dict[int, _InflightOwner] = {}
+            for owner in list(_state_retiring.values()) + list(
+                _state_survivors.values()
+            ):
+                targets[id(owner.client)] = owner
+        owners = list(targets.values())
+        # 阶段二:先广播 cancel,再按共享总 deadline 逐个 join(stop 幂等)
         for owner in owners:
             try:
                 owner.client.request_stop()
@@ -4953,6 +4956,10 @@ def _reconcile_state_client() -> None:
         # 锁外启动:若 stop 已先取得所有权(request_stop),start 拒绝不生线程
         if not client.start():
             continue  # stop 拥有该候选:不 publish、不再 stop(防双停)
+        # R8:added 统一 identity-safe 收尾——publish CAS 任一条件失败但仍是
+        # owner 时,同一 CLIENT 临界区 del inflight→转 retiring,锁外经统一
+        # REAP 入口回收;不留僵尸 inflight/活线程,同名下轮不再饥饿。
+        iter_reap = []
         with _STATE_CLIENT_LOCK:
             if (
                 _state_inflight.get(name) is owner  # 身份比较
@@ -4967,7 +4974,11 @@ def _reconcile_state_client() -> None:
                 del _state_inflight[name]
                 _state_clients[name] = client
                 _state_sessions_meta[name] = running[name]
-            # 否则 stop 已摘取并拥有该候选,不得 publish
+            elif _state_inflight.get(name) is owner:
+                del _state_inflight[name]
+                iter_reap.append(_retire_client_locked(name, epoch, client))
+            # 否则 stop 已摘取并拥有该候选,不得 publish/再 stop
+        _reap_owners(iter_reap, STATE_STOP_JOIN_TIMEOUT_S)
     for name, socket_path, old_client in changed:
         new_client = _build_session_client(name, socket_path)
         iter_reap: list[_InflightOwner] = []
