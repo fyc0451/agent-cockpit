@@ -5,13 +5,21 @@
 更新、线程安全聚合缓存、有上限指数退避重连 + 重连后全量 resync、可靠
 shutdown。与 herdr_client.py（CLI 子进程封装）并行存在，不改其接口。
 
-参考: herdr api schema --json; src/api/client.rs(NDJSON 请求/响应行),
-src/api/server.rs(events.subscribe 长连接: 先回 subscription_started 再逐行
-推送信封), src/api/schema/response.rs(ResponseResult: pong/session_snapshot/
-subscription_started)。
+真实协议契约（herdr 0.8.0 实测）：
+- 每个请求必须携带 `params` 字段（serde flatten+tag/content 要求，缺则
+  `invalid_request missing field params`）；Request={id, method, params}。
+- server 每连接只读一条 initial request：普通请求响应后即关闭连接；仅
+  events.subscribe（与 pane.graphics.stream）为长连接。
+- events.subscribe 的 Subscription 只有 24 个无参类型；pane.output_matched、
+  pane.agent_status_changed、pane.scroll_changed 必须带 pane_id 等参数，
+  不能全局订阅。
+- 成功响应 {id, result:{type:...}}；error {id, error:{code, message}}。
+参考: src/api/schema.rs(Request), src/api/client.rs(NDJSON 行),
+src/api/server.rs(handle_connection 一连接一请求; stream_subscriptions 长连接)。
 """
 from __future__ import annotations
 
+import copy
 import json
 import socket
 import threading
@@ -27,12 +35,18 @@ from herdr_client import HERDR_MIN_PROTOCOL
 
 DEFAULT_CONNECT_TIMEOUT_S = 3.0
 DEFAULT_REQUEST_TIMEOUT_S = 5.0
-DEFAULT_READ_IDLE_TIMEOUT_S = 30.0
+# 订阅连接健康检查间隔：读空闲超过该值后用独立连接 ping 探测 server；
+# None 表示无限阻塞（不探测）。真实订阅无事件时本就静默，不能直接重连。
+DEFAULT_HEALTH_CHECK_INTERVAL_S = 30.0
 DEFAULT_RECONNECT_BASE_DELAY_S = 0.5
 DEFAULT_RECONNECT_MAX_DELAY_S = 8.0
 DEFAULT_SNAPSHOT_TIMEOUT_S = 10.0
+# 未知 pane 事件触发 resync 的最小间隔（防抖）
+DEFAULT_RESYNC_MIN_INTERVAL_S = 5.0
 
-# events.subscribe 全量订阅（protocol 19 schema Subscription oneOf 全集）
+# events.subscribe 合法无参订阅（protocol 19 schema Subscription oneOf 中
+# 不带必填参数的 24 个类型；pane.output_matched / pane.agent_status_changed /
+# pane.scroll_changed 必须带 pane_id 等参数，不能全局订阅）。
 ALL_SUBSCRIPTIONS: list[dict[str, str]] = [
     {"type": t} for t in (
         "workspace.created", "workspace.updated", "workspace.metadata_updated",
@@ -42,24 +56,17 @@ ALL_SUBSCRIPTIONS: list[dict[str, str]] = [
         "tab.created", "tab.closed", "tab.focused", "tab.renamed", "tab.moved",
         "pane.created", "pane.closed", "pane.updated", "pane.focused",
         "pane.moved", "pane.exited", "pane.agent_detected",
-        "pane.output_matched", "pane.agent_status_changed", "pane.scroll_changed",
         "layout.updated",
     )
 ]
 
-# 订阅事件信封（与普通 EventEnvelope 区分；事件名带点号）
-_SUBSCRIPTION_EVENTS = frozenset({
-    "pane.output_matched", "pane.agent_status_changed", "pane.scroll_changed",
-})
-
-_LIFECYCLE_STATES = frozenset({
-    "init", "connecting", "bootstrap", "subscribed", "reconnecting",
-    "protocol_mismatch", "capability_mismatch", "stopped",
-})
-
 
 class HerdrSocketError(RuntimeError):
-    """socket 传输层错误（连接拒绝/超时/EOF/畸形帧/error_response）。"""
+    """socket 传输层错误（连接拒绝/超时/EOF/畸形帧/error_response/响应不匹配）。"""
+
+
+class HerdrSocketIdleTimeout(HerdrSocketError):
+    """订阅连接读空闲超时（仅健康检查用，不代表断连）。"""
 
 
 class HerdrProtocolMismatchError(HerdrSocketError):
@@ -71,13 +78,17 @@ class HerdrProtocolMismatchError(HerdrSocketError):
 # ---------------------------------------------------------------------------
 
 class HerdrSocket:
-    """单个 per-session API socket 的 NDJSON 客户端。非线程安全，单线程使用。"""
+    """单个 API socket 的 NDJSON 客户端。一连接一请求（订阅除外），单线程使用。
+
+    不用 socket.makefile（超时触发后其内部缓冲进入 timed out 状态，后续
+    readline 全部失败），改为 recv 手动缓冲按行切分。
+    """
 
     def __init__(self, path: str | Path, connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_S) -> None:
         self.path = str(path)
         self.connect_timeout = connect_timeout
         self._sock: socket.socket | None = None
-        self._file: Any = None
+        self._buf = b""
 
     def connect(self) -> None:
         try:
@@ -87,21 +98,20 @@ class HerdrSocket:
         except OSError as exc:
             raise HerdrSocketError(f"herdr socket 连接失败: {exc}") from exc
         self._sock = sock
-        self._file = sock.makefile("rb")
 
     def close(self) -> None:
-        if self._file is not None:
+        """先 shutdown 唤醒阻塞的 recv，再关闭 socket，避免 close 卡锁。"""
+        if self._sock is not None:
             try:
-                self._file.close()
+                self._sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            self._file = None
-        if self._sock is not None:
             try:
                 self._sock.close()
             except OSError:
                 pass
             self._sock = None
+        self._buf = b""
 
     def __enter__(self) -> "HerdrSocket":
         return self
@@ -110,17 +120,21 @@ class HerdrSocket:
         self.close()
 
     def request(
-        self, method: str, params: dict[str, Any] | None = None,
-        *, timeout: float = DEFAULT_REQUEST_TIMEOUT_S,
+        self, method: str, params: dict[str, Any], *,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT_S,
         request_id: str | None = None,
+        expect_type: str | None = None,
     ) -> dict[str, Any]:
-        """发一个请求并读响应。返回 result；error_response 抛 HerdrSocketError。"""
+        """发一个请求并读响应。
+
+        params 必传（真实 server 要求字段存在，缺则 invalid_request）。
+        校验响应 id 与请求一致、result.type 为 expect_type；error 抛
+        HerdrSocketError。
+        """
         if self._sock is None:
             raise HerdrSocketError("socket 未连接")
-        rid = request_id or f"h04:{method}"
-        payload = {"id": rid, "method": method}
-        if params is not None:
-            payload["params"] = params
+        rid = request_id or f"h04:{method}:{time.monotonic_ns()}"
+        payload = {"id": rid, "method": method, "params": params}
         try:
             self._sock.settimeout(timeout)
             self._sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
@@ -133,25 +147,41 @@ class HerdrSocket:
         if error is not None:
             code = str(error.get("code") or "")
             message = str(error.get("message") or "")
-            if method == "ping":
-                raise HerdrSocketError(f"herdr {method} 失败: {code} {message}".strip())
             raise HerdrSocketError(f"herdr {method} 失败: {code} {message}".strip())
+        if response.get("id") != rid:
+            raise HerdrSocketError(f"herdr {method} 响应 id 不匹配")
         result = response.get("result")
         if not isinstance(result, dict):
             raise HerdrSocketError(f"herdr {method} 响应缺少 result")
+        rtype = result.get("type")
+        if expect_type is not None and rtype != expect_type:
+            raise HerdrSocketError(
+                f"herdr {method} 响应类型不匹配: {rtype!r} != {expect_type!r}"
+            )
         return result
 
-    def read_line(self, timeout: float = DEFAULT_READ_IDLE_TIMEOUT_S) -> dict[str, Any] | None:
-        """读一行并解析 JSON。EOF 返回 None；超时/畸形抛 HerdrSocketError。"""
-        if self._sock is None or self._file is None:
+    def read_line(self, timeout: float | None = None) -> dict[str, Any] | None:
+        """读一行并解析 JSON。EOF 返回 None；超时抛 HerdrSocketIdleTimeout；
+        畸形抛 HerdrSocketError。timeout=None 无限阻塞。"""
+        if self._sock is None:
             raise HerdrSocketError("socket 未连接")
-        try:
-            self._sock.settimeout(timeout)
-            line = self._file.readline()
-        except socket.timeout as exc:
-            raise HerdrSocketError(f"herdr socket 读空闲超时(>{timeout}s)") from exc
-        except OSError as exc:
-            raise HerdrSocketError(f"herdr socket 读失败: {exc}") from exc
+        self._sock.settimeout(timeout)
+        while b"\n" not in self._buf:
+            try:
+                chunk = self._sock.recv(4096)
+            except socket.timeout as exc:
+                raise HerdrSocketIdleTimeout(
+                    f"herdr socket 读空闲超时(>{timeout}s)"
+                ) from exc
+            except OSError as exc:
+                raise HerdrSocketError(f"herdr socket 读失败: {exc}") from exc
+            if not chunk:
+                break  # EOF
+            self._buf += chunk
+        if b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+        else:
+            line, self._buf = self._buf, b""
         if not line:
             return None
         try:
@@ -169,7 +199,7 @@ class HerdrSocket:
 
 class SessionState:
     """单个 session 的实时缓存。由 HerdrStateClient 的 reader 线程写入，
-    外部读取一律返回拷贝，保证线程安全。"""
+    外部读取一律返回深拷贝，保证线程安全与返回值隔离。"""
 
     def __init__(self, session: str) -> None:
         self.session = session
@@ -186,6 +216,7 @@ class SessionState:
         self.applied_events = 0
         self.stale_events = 0
         self._bootstrapped = False
+        self.resync_pending = False
 
     # -- 写 ----------------------------------------------------------------
     def apply_snapshot(self, snap: dict[str, Any]) -> None:
@@ -220,12 +251,14 @@ class SessionState:
             self.focused_pane_id = snap.get("focused_pane_id")
             self.focused_tab_id = snap.get("focused_tab_id")
             self.focused_workspace_id = snap.get("focused_workspace_id")
+            self.resync_pending = False
 
     def apply_event(self, envelope: dict[str, Any]) -> bool:
-        """应用一个事件信封（普通 EventEnvelope 或 SubscriptionEventEnvelope）。
+        """应用一个事件信封（普通 EventEnvelope）。
 
-        返回 True 表示产生了缓存更新；未知事件/未知 pane/陈旧 revision 返回
-        False 并计数。绝不抛出。
+        返回 True 表示产生了缓存更新；False 为忽略（未知事件/陈旧/无状态
+        事件）。未知 pane 引用会置 resync_pending（客户端据此触发 resync）。
+        绝不抛出。
         """
         if not isinstance(envelope, dict):
             return False
@@ -250,7 +283,7 @@ class SessionState:
         if event in ("pane_closed", "pane_exited"):
             return self._remove_pane(data.get("pane_id"))
         if event == "pane_focused":
-            return self._apply_focused(data.get("pane_id"))
+            return self._apply_focused(data)
         if event == "pane_output_changed":
             return self._apply_output_revision(data)
         if event == "pane_agent_detected":
@@ -258,8 +291,8 @@ class SessionState:
         if event == "layout_updated":
             return self._upsert_layout(data.get("layout"))
         if event in ("workspace_created", "workspace_updated",
-                     "workspace_moved", "workspace_reordered",
-                     "worktree_created", "worktree_opened"):
+                     "workspace_metadata_updated", "workspace_moved",
+                     "workspace_reordered", "worktree_created", "worktree_opened"):
             return self._upsert_workspace(data.get("workspace"))
         if event == "workspace_closed":
             return self._remove_workspace(data.get("workspace_id"))
@@ -267,15 +300,19 @@ class SessionState:
             return self._rename_workspace(data)
         if event == "workspace_focused":
             return self._apply_workspace_focused(data.get("workspace_id"))
+        if event == "worktree_removed":
+            return self._remove_worktree(data.get("workspace_id"))
         if event == "tab_created":
             return self._upsert_tab(data.get("tab"))
         if event == "tab_closed":
             return self._remove_tab(data.get("tab_id"))
         if event == "tab_renamed":
             return self._rename_tab(data)
+        if event == "tab_moved":
+            return self._move_tab(data)
         if event == "tab_focused":
             return self._apply_tab_focused(data.get("tab_id"))
-        # pane.output_matched / pane.scroll_changed / worktree.* / 未知事件
+        # pane.output_matched / pane.scroll_changed / 未知事件
         return False
 
     def _upsert_pane(self, pane: Any) -> bool:
@@ -284,8 +321,8 @@ class SessionState:
             return False
         pane_id = str(slim["pane_id"])
         current = self._panes.get(pane_id)
-        if current is not None and int(slim["revision"]) < int(current["revision"]):
-            return False  # 乱序/重复：陈旧 revision 丢弃
+        if current is not None and int(slim["revision"]) <= int(current["revision"]):
+            return False  # 乱序/重复/相等 revision 一律按重复拒绝
         self._panes[pane_id] = slim
         return True
 
@@ -298,10 +335,16 @@ class SessionState:
             self.focused_pane_id = None
         return True
 
-    def _apply_focused(self, pane_id: Any) -> bool:
+    def _apply_focused(self, data: dict[str, Any]) -> bool:
+        pane_id = data.get("pane_id")
         if not isinstance(pane_id, str):
             return False
+        current = self._panes.get(pane_id)
+        if current is None:
+            self.resync_pending = True  # 未知 pane：不设 ghost，等 resync
+            return False
         self.focused_pane_id = pane_id
+        current["focused"] = True
         return True
 
     def _apply_output_revision(self, data: dict[str, Any]) -> bool:
@@ -310,11 +353,12 @@ class SessionState:
             return False
         current = self._panes.get(pane_id)
         if current is None:
+            self.resync_pending = True
             return False
         revision = data.get("revision")
         if not isinstance(revision, int):
             return False
-        if revision < int(current["revision"]):
+        if revision <= int(current["revision"]):
             return False
         current["revision"] = revision
         return True
@@ -325,6 +369,7 @@ class SessionState:
             return False
         current = self._panes.get(pane_id)
         if current is None:
+            self.resync_pending = True
             return False
         agent = data.get("agent")
         if agent is not None and not isinstance(agent, str):
@@ -339,7 +384,8 @@ class SessionState:
             return False
         current = self._panes.get(pane_id)
         if current is None:
-            return False  # 未知 pane：bootstrap 未覆盖，等下次 resync
+            self.resync_pending = True  # 未知 pane：等 resync，不静默忽略
+            return False
         status = data.get("agent_status")
         if status is not None:
             current["agent_status"] = status
@@ -386,6 +432,15 @@ class SessionState:
         self.focused_workspace_id = workspace_id
         return True
 
+    def _remove_worktree(self, workspace_id: Any) -> bool:
+        if not isinstance(workspace_id, str):
+            return False
+        current = self._workspaces.get(workspace_id)
+        if current is None:
+            return False
+        current["worktree"] = None
+        return True
+
     def _upsert_tab(self, tab: Any) -> bool:
         if not isinstance(tab, dict) or not tab.get("tab_id"):
             return False
@@ -408,32 +463,49 @@ class SessionState:
         current["label"] = label
         return True
 
+    def _move_tab(self, data: dict[str, Any]) -> bool:
+        tab_id = data.get("tab_id")
+        workspace_id = data.get("workspace_id")
+        tabs = data.get("tabs")
+        if not isinstance(tab_id, str) or not isinstance(workspace_id, str):
+            return False
+        current = self._tabs.get(tab_id)
+        if current is not None:
+            current["workspace_id"] = workspace_id
+        if isinstance(tabs, list):  # 完整 tabs 列表（重排结果）
+            rebuilt: dict[str, dict[str, Any]] = {}
+            for t in tabs:
+                if isinstance(t, dict) and t.get("tab_id"):
+                    rebuilt[str(t["tab_id"])] = t
+            self._tabs = rebuilt
+        return True
+
     def _apply_tab_focused(self, tab_id: Any) -> bool:
         if not isinstance(tab_id, str):
             return False
         self.focused_tab_id = tab_id
         return True
 
-    # -- 读（返回拷贝） ------------------------------------------------------
+    # -- 读（深拷贝） ---------------------------------------------------------
     def panes(self) -> list[dict[str, Any]]:
         with self._lock:
-            return list(self._panes.values())
+            return copy.deepcopy(list(self._panes.values()))
 
     def agents(self) -> list[dict[str, Any]]:
         with self._lock:
-            return list(self._agents)
+            return copy.deepcopy(self._agents)
 
     def layouts(self) -> list[dict[str, Any]]:
         with self._lock:
-            return list(self._layouts.values())
+            return copy.deepcopy(list(self._layouts.values()))
 
     def workspaces(self) -> list[dict[str, Any]]:
         with self._lock:
-            return list(self._workspaces.values())
+            return copy.deepcopy(list(self._workspaces.values()))
 
     def tabs(self) -> list[dict[str, Any]]:
         with self._lock:
-            return list(self._tabs.values())
+            return copy.deepcopy(list(self._tabs.values()))
 
     def layout_zoomed(self, tab_id: str) -> bool:
         with self._lock:
@@ -450,10 +522,10 @@ class SessionState:
             return {
                 "session": self.session,
                 "status": "running",
-                "panes": list(self._panes.values()),
-                "agents": list(self._agents),
+                "panes": copy.deepcopy(list(self._panes.values())),
+                "agents": copy.deepcopy(self._agents),
                 "focused_pane_id": self.focused_pane_id,
-                "layouts": list(self._layouts.values()),
+                "layouts": copy.deepcopy(list(self._layouts.values())),
             }
 
     # -- slim 构造 -----------------------------------------------------------
@@ -559,19 +631,28 @@ class StateStore:
 # ---------------------------------------------------------------------------
 
 class HerdrStateClient:
-    """为每个 session 启动一个 reader 线程：connect → ping 协议门 → snapshot
-    bootstrap → events.subscribe 长连接增量更新；断线按有上限指数退避重连，
-    重连成功后全量 resync。stop() 幂等，关闭 socket 后 join 所有线程。
+    """为每个 session 启动一个 reader 线程，连接流程（真实协议契约）：
+
+      1. 独立连接 ping → 校验 protocol（协议门）
+      2. 独立连接 session.snapshot → 全量 bootstrap
+      3. 专用流连接 events.subscribe → 确认 subscription_started 后才置 subscribed
+      4. 独立连接 session.snapshot → 握手后全量 resync（消除回放窗口）
+      5. 读循环：阻塞读事件；读空闲超过 health_check_interval 时用独立连接
+         ping 探测（成功=健康静默继续读，失败=重建连接）；EOF/错误→重连
+
+    重连后重复 1-5；有上限指数退避。stop() 幂等，关闭 socket 唤醒 reader 后
+    join，返回是否全部线程退出。
     """
 
     def __init__(
         self, sessions: dict[str, str], *,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_S,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT_S,
-        read_idle_timeout: float = DEFAULT_READ_IDLE_TIMEOUT_S,
+        health_check_interval: float | None = DEFAULT_HEALTH_CHECK_INTERVAL_S,
         reconnect_base_delay: float = DEFAULT_RECONNECT_BASE_DELAY_S,
         reconnect_max_delay: float = DEFAULT_RECONNECT_MAX_DELAY_S,
         snapshot_timeout: float = DEFAULT_SNAPSHOT_TIMEOUT_S,
+        resync_min_interval: float = DEFAULT_RESYNC_MIN_INTERVAL_S,
     ) -> None:
         self._sessions = dict(sessions)
         self._store = StateStore()
@@ -593,10 +674,11 @@ class HerdrStateClient:
             }
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
-        self._read_idle_timeout = read_idle_timeout
+        self._health_check_interval = health_check_interval
         self._reconnect_base_delay = reconnect_base_delay
         self._reconnect_max_delay = reconnect_max_delay
         self._snapshot_timeout = snapshot_timeout
+        self._resync_min_interval = resync_min_interval
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
@@ -612,8 +694,9 @@ class HerdrStateClient:
             self._threads[name] = thread
             thread.start()
 
-    def stop(self, join_timeout: float = 5.0) -> None:
-        """幂等：置停止标志 → 关闭所有 socket（解除阻塞读）→ join 线程。"""
+    def stop(self, join_timeout: float = 5.0) -> bool:
+        """幂等。置停止标志 → shutdown/close 所有 socket（唤醒阻塞读）→
+        按总 deadline join；返回是否全部线程退出（不虚报 stopped）。"""
         self._stop.set()
         with self._lock:
             sockets = list(self._sockets.values())
@@ -621,11 +704,13 @@ class HerdrStateClient:
             self._sockets.clear()
         for sock in sockets:
             sock.close()
+        deadline = time.monotonic() + join_timeout
+        all_exited = True
         for thread in threads:
-            thread.join(timeout=join_timeout)
-        for name in self._lifecycle:
-            if self._lifecycle[name]["state"] not in ("protocol_mismatch", "capability_mismatch"):
-                self._lifecycle[name]["state"] = "stopped"
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(remaining)
+            all_exited = all_exited and not thread.is_alive()
+        return all_exited
 
     def state(self) -> dict[str, Any]:
         with self._lock:
@@ -643,104 +728,171 @@ class HerdrStateClient:
     def _run_session(self, name: str, path: str, state: SessionState) -> None:
         lc = self._lifecycle[name]
         delay = max(0.0, self._reconnect_base_delay)
-        while not self._stop.is_set():
-            lc["state"] = "connecting"
-            sock = HerdrSocket(path, connect_timeout=self._connect_timeout)
-            try:
-                sock.connect()
-            except HerdrSocketError as exc:
-                lc["last_error"] = str(exc)
-                lc["state"] = "reconnecting"
-                lc["reconnects"] += 1
+        try:
+            while not self._stop.is_set():
+                lc["state"] = "connecting"
+                sock = HerdrSocket(path, connect_timeout=self._connect_timeout)
+                try:
+                    sock.connect()
+                except HerdrSocketError as exc:
+                    lc["last_error"] = str(exc)
+                    lc["state"] = "reconnecting"
+                    lc["reconnects"] += 1
+                    if not self._backoff(delay):
+                        return
+                    delay = min(delay * 2, self._reconnect_max_delay)
+                    continue
+                delay = max(0.0, self._reconnect_base_delay)
+                with self._lock:
+                    self._sockets[name] = sock
+                try:
+                    self._handle_connection(name, path, sock, state, lc)
+                    if self._stop.is_set():
+                        return
+                    lc["state"] = "reconnecting"
+                    lc["reconnects"] += 1
+                except HerdrProtocolMismatchError as exc:
+                    lc["last_error"] = str(exc)
+                    if lc["state"] != "capability_mismatch":
+                        lc["state"] = "protocol_mismatch"
+                    return
+                except HerdrSocketError as exc:
+                    lc["last_error"] = str(exc)
+                    if self._stop.is_set():
+                        return
+                    lc["state"] = "reconnecting"
+                    lc["reconnects"] += 1
+                except Exception as exc:  # 兜底：reader 逻辑自身 bug 不杀线程
+                    lc["last_error"] = f"crash: {exc}"
+                    if self._stop.is_set():
+                        return
+                    lc["state"] = "reconnecting"
+                    lc["reconnects"] += 1
+                finally:
+                    with self._lock:
+                        if self._sockets.get(name) is sock:
+                            self._sockets.pop(name, None)
+                    sock.close()
+                if self._stop.is_set():
+                    return
                 if not self._backoff(delay):
                     return
                 delay = min(delay * 2, self._reconnect_max_delay)
-                continue
-            delay = max(0.0, self._reconnect_base_delay)
-            with self._lock:
-                self._sockets[name] = sock
-            try:
-                self._handle_connection(name, path, sock, state, lc)
-                if self._stop.is_set():
-                    return
-                lc["state"] = "reconnecting"
-                lc["reconnects"] += 1
-            except HerdrProtocolMismatchError as exc:
-                lc["last_error"] = str(exc)
-                if lc["state"] != "capability_mismatch":
-                    lc["state"] = "protocol_mismatch"
-                return
-            except HerdrSocketError as exc:
-                lc["last_error"] = str(exc)
-                if self._stop.is_set():
-                    return
-                lc["state"] = "reconnecting"
-                lc["reconnects"] += 1
-            except Exception as exc:  # 兜底：reader 逻辑自身 bug 不杀线程
-                lc["last_error"] = f"crash: {exc}"
-                if self._stop.is_set():
-                    return
-                lc["state"] = "reconnecting"
-                lc["reconnects"] += 1
-            finally:
-                with self._lock:
-                    if self._sockets.get(name) is sock:
-                        self._sockets.pop(name, None)
-                sock.close()
+        finally:
             if self._stop.is_set():
-                return
-            if not self._backoff(delay):
-                return
-            delay = min(delay * 2, self._reconnect_max_delay)
+                lc["state"] = "stopped"
 
     def _handle_connection(
         self, name: str, path: str, sock: HerdrSocket, state: SessionState,
         lc: dict[str, Any],
     ) -> None:
-        # 协议门：ping → pong.protocol 必须等于 HERDR_MIN_PROTOCOL
-        pong = sock.request("ping", timeout=self._request_timeout)
+        # 1. 协议门：独立连接 ping → pong.protocol 必须等于 HERDR_MIN_PROTOCOL
+        pong = sock.request("ping", {}, timeout=self._request_timeout, expect_type="pong")
         protocol = pong.get("protocol")
         if protocol != HERDR_MIN_PROTOCOL:
             raise HerdrProtocolMismatchError(
                 f"herdr protocol {protocol} 不满足最低要求 {HERDR_MIN_PROTOCOL}"
             )
-        # bootstrap：session.snapshot 全量覆盖
+        # 2. bootstrap：独立连接 session.snapshot 全量覆盖
         lc["state"] = "bootstrap"
-        response = sock.request(
-            "session.snapshot", timeout=self._snapshot_timeout,
-        )
+        response = self._snapshot_request(path)
+        state.apply_snapshot(response)
+        lc["bootstrapped"] = True
+        lc["connected_at"] = time.monotonic()
+        # 3. 订阅专用流：确认 subscription_started 后才发布 subscribed
+        sub = HerdrSocket(path, connect_timeout=self._connect_timeout)
+        sub.connect()
+        with self._lock:
+            self._sockets[f"{name}:sub"] = sub
+        try:
+            try:
+                sub.request(
+                    "events.subscribe",
+                    {"subscriptions": ALL_SUBSCRIPTIONS},
+                    timeout=self._request_timeout,
+                    expect_type="subscription_started",
+                )
+            except HerdrSocketError as exc:
+                if "method_not_found" in str(exc) or "unknown_method" in str(exc):
+                    lc["state"] = "capability_mismatch"
+                    raise HerdrProtocolMismatchError(str(exc)) from exc
+                raise
+            lc["state"] = "subscribed"
+            # 4. 握手后 resync：消除 snapshot→subscribe 窗口的事件回放错位
+            self._resync(name, path, state, lc)
+            # 5. 读循环：resync_pending 时读超时最多等剩余防抖间隔，
+            #    保证未知 pane 即使事件流静默也能及时触发 resync。
+            last_resync = time.monotonic()
+            while not self._stop.is_set():
+                if state.resync_pending and (
+                    time.monotonic() - last_resync >= self._resync_min_interval
+                ):
+                    self._resync(name, path, state, lc)
+                    last_resync = time.monotonic()
+                    continue
+                read_timeout = self._health_check_interval
+                if state.resync_pending:
+                    remaining = self._resync_min_interval - (
+                        time.monotonic() - last_resync
+                    )
+                    remaining = max(0.0, remaining)
+                    if read_timeout is None or remaining < read_timeout:
+                        read_timeout = remaining
+                try:
+                    envelope = sub.read_line(timeout=read_timeout)
+                except HerdrSocketIdleTimeout:
+                    # 无事件不代表断连；独立 ping 探测 server 健康
+                    if self._health_check_interval is not None and not self._health_ok(path):
+                        raise HerdrSocketError("health ping 失败，重建连接")
+                    continue
+                if envelope is None:
+                    raise HerdrSocketError("events.subscribe 连接被对端关闭")
+                state.apply_event(envelope)
+                self._sync_counts(lc, state)
+        finally:
+            with self._lock:
+                if self._sockets.get(f"{name}:sub") is sub:
+                    self._sockets.pop(f"{name}:sub", None)
+            sub.close()
+
+    def _snapshot_request(self, path: str) -> dict[str, Any]:
+        """独立连接执行 session.snapshot；返回 SessionSnapshot 对象。"""
+        sock = HerdrSocket(path, connect_timeout=self._connect_timeout)
+        sock.connect()
+        try:
+            response = sock.request(
+                "session.snapshot", {}, timeout=self._snapshot_timeout,
+                expect_type="session_snapshot",
+            )
+        finally:
+            sock.close()
         snap = response.get("snapshot")
         if not isinstance(snap, dict):
             raise HerdrSocketError("session.snapshot 响应缺少 snapshot")
-        was_bootstrapped = lc.get("bootstrapped", False)
-        state.apply_snapshot(snap)
-        if was_bootstrapped:
-            lc["resyncs"] += 1
-        lc["bootstrapped"] = True
-        lc["connected_at"] = time.monotonic()
-        # subscribe：长连接，先回 subscription_started 再逐行推事件
-        lc["state"] = "subscribed"
+        return snap
+
+    def _resync(self, name: str, path: str, state: SessionState, lc: dict[str, Any]) -> None:
+        state.apply_snapshot(self._snapshot_request(path))
+        lc["resyncs"] += 1
+
+    def _health_ok(self, path: str) -> bool:
+        """独立连接 ping 探测 server 健康。"""
+        sock = HerdrSocket(path, connect_timeout=self._connect_timeout)
         try:
-            sock.request(
-                "events.subscribe",
-                params={"subscriptions": ALL_SUBSCRIPTIONS},
-                timeout=self._request_timeout,
+            sock.connect()
+            pong = sock.request(
+                "ping", {}, timeout=self._request_timeout, expect_type="pong",
             )
-        except HerdrSocketError as exc:
-            if "method" in str(exc) and "not_found" in str(exc):
-                lc["last_error"] = str(exc)
-                lc["state"] = "capability_mismatch"
-                raise HerdrProtocolMismatchError(str(exc)) from exc
-            raise
-        while not self._stop.is_set():
-            envelope = sock.read_line(timeout=self._read_idle_timeout)
-            if envelope is None:
-                raise HerdrSocketError("events.subscribe 连接被对端关闭")
-            state.apply_event(envelope)
-            # 把 state 侧计数同步到 lifecycle（state() 从这里读）
-            lc["events_seen"] = state.events_seen
-            lc["applied_events"] = state.applied_events
-            lc["stale_events"] = state.stale_events
+            return pong.get("protocol") == HERDR_MIN_PROTOCOL
+        except HerdrSocketError:
+            return False
+        finally:
+            sock.close()
+
+    def _sync_counts(self, lc: dict[str, Any], state: SessionState) -> None:
+        lc["events_seen"] = state.events_seen
+        lc["applied_events"] = state.applied_events
+        lc["stale_events"] = state.stale_events
 
     def _backoff(self, delay: float) -> bool:
         """等待 delay 秒；stop 时立即返回 False。"""
