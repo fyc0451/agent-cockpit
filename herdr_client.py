@@ -34,8 +34,10 @@ QODER_AGENT_START_TIMEOUT = 60.0
 QODER_AGENTS = frozenset({"qoder", "qodercli", "qodercn"})
 # 其他冷启动慢的 agent 的识别窗口(二进制大/启动自检耗时,如 grok 约 160MB)
 SLOW_AGENT_START_TIMEOUTS = {"grok": 60.0}
-AGENT_STABLE_SECONDS = 1.5
 AGENT_POLL_INTERVAL = 0.2
+# agent wait 未显式给 timeout 时的子进程上限：herdr 默认无限等待，Cockpit 不能
+# 让子进程永久阻塞，故给一个有限上界；调用方需要更长的真实等待应显式传 timeout_ms。
+AGENT_WAIT_DEFAULT_TIMEOUT_S = 60.0
 MAX_AGENT_ARGS_LENGTH = 2048
 SNAPSHOT_SESSION_TIMEOUT_S = 8.0
 SNAPSHOT_TOTAL_TIMEOUT_S = 10.0
@@ -897,15 +899,48 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
         if mode == "prompt":
             _run(["--session", session, "agent", "prompt", pane_id, text], timeout=10)
         elif mode == "send":
-            # send-text 发文本,再 send-keys 发回车执行
-            _run(["--session", session, "pane", "send-text", pane_id, text], timeout=5)
-            _run(["--session", session, "pane", "send-keys", pane_id, "Enter"], timeout=5)
+            # 普通命令：原子 pane run 一次性发命令并提交回车，不再拆成
+            # send-text + send-keys 两次（拆分会让 agent TUI 把首段当 prompt）。
+            _run(["--session", session, "pane", "run", pane_id, text], timeout=8)
         else:  # keys
             keys = text.split()
             _run(["--session", session, "pane", "send-keys", pane_id] + keys, timeout=5)
         return {"available": True, "sent": text, "mode": mode}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
+
+
+def agent_wait(
+    session: str, target: str, until: list[str] | None = None,
+    timeout_ms: int | None = None,
+) -> dict[str, Any]:
+    """等 agent 进入指定状态，使用原生 `agent wait`，不轮询也不键盘模拟。
+
+    target 优先用稳定唯一 agent name（跨 workspace 移动后 pane id 会变），
+    也兼容 pane id。until 为空时沿用 herdr 默认（idle/done/blocked）。
+    timeout_ms 同时作为 herdr --timeout（毫秒）；省略时不向 herdr 传 --timeout，
+    子进程等待由 AGENT_WAIT_DEFAULT_TIMEOUT_S 兜底，避免永久阻塞。
+    """
+    if not is_available():
+        return {"available": False}
+    argv = ["--session", session, "agent", "wait", target]
+    for status in until or []:
+        argv += ["--until", str(status)]
+    if timeout_ms is not None:
+        argv += ["--timeout", str(int(timeout_ms))]
+        subprocess_timeout = timeout_ms / 1000.0 + 5
+    else:
+        subprocess_timeout = AGENT_WAIT_DEFAULT_TIMEOUT_S
+    try:
+        _run(argv, timeout=subprocess_timeout)
+        return {
+            "available": True, "session": session, "target": target, "matched": True,
+        }
+    except RuntimeError as exc:
+        return {
+            "available": True, "session": session, "target": target,
+            "matched": False, "error": str(exc),
+        }
 
 
 def _rename_agent_context(
@@ -940,10 +975,12 @@ def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
     layout: str = "tab", label: str | None = None, args: str = "",
 ) -> dict[str, Any]:
-    """在指定 session 里启动一个 agent pane(新建 window/pane 跑 agent)。
+    """在指定 session 里启动一个 agent pane(新建 tab/pane 跑 agent)。
 
-    agent: codex | kimi | qodercli
-    返回新 pane 信息(尽力而为,herdr 版本不同命令可能略异)。
+    全部受支持 agent 统一用 Herdr 原生 `agent start`：先按 layout 创建 pane 并
+    解析响应 ID，再以唯一 name + --kind + --pane 启动，readiness 由 --timeout 兜底。
+    agent: codex | claude | kimi | opencode | grok | qoder(cli/cn)。
+    返回新 pane 信息；启动失败回滚本次 pane，返回结构化 error，不回退键盘模拟。
     """
     if not is_available():
         return {"available": False}
@@ -1028,8 +1065,6 @@ def start_agent(
     agent_bin = _find_agent_bin(agent)
     if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
         return {"available": True, "error": f"{agent} 未安装或不在 PATH"}
-    # 构造 agent 启动命令(用 _agent_cmd 统一处理完整路径)
-    cmd_str = _agent_cmd(agent, workdir, normalized_args)
     before_ids = {
         str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
     }
@@ -1069,21 +1104,25 @@ def start_agent(
             )
             break
 
-        # 无论 Herdr 是否返回 id，都用前后 snapshot 验证它确实是本次新增 pane。
+        # 无论 Herdr 是否返回 id，都用前后 snapshot 验证它确实是本次新增 pane，
+        # 并保留该 pane 的 tab/workspace id 供启动后改名复用（无需再取一次 snapshot）。
+        created_pane: dict[str, Any] | None = None
         deadline = time.monotonic() + PANE_CREATE_TIMEOUT
         while time.monotonic() < deadline:
             after = _snapshot_session(session)
-            after_ids = {
-                str(p.get("pane_id"))
+            after_panes = {
+                str(p.get("pane_id")): p
                 for p in after.get("panes", [])
-                if p.get("pane_id")
+                if isinstance(p, dict) and p.get("pane_id")
             }
-            created_ids = after_ids - before_ids
+            created_ids = set(after_panes) - before_ids
             if reported_pid and str(reported_pid) in created_ids:
                 new_pid = str(reported_pid)
+                created_pane = after_panes[new_pid]
                 break
             if not reported_pid and len(created_ids) == 1:
                 new_pid = created_ids.pop()
+                created_pane = after_panes[new_pid]
                 break
             if not reported_pid and len(created_ids) > 1:
                 raise RuntimeError("创建 pane 时同时出现多个新 pane，无法安全识别")
@@ -1091,86 +1130,49 @@ def start_agent(
         if not new_pid:
             raise RuntimeError("split/tab 后找不到本次创建的新 pane")
         start_timeout = _agent_start_timeout(agent)
-        # 后台 tab 中直接 pane run 时,进程虽已就绪,Herdr 偶发不会刷新该 pane
-        # 的 agent 状态(QoderCLI 实测,grok 同案:独立终端秒起但 pane run 后
-        # 识别超时)。这些 agent 改用 Herdr 原生 agent start 针对指定 pane 启动
-        # 并等待 readiness,与用户在前台 tab 手动启动的识别路径一致。
-        NATIVE_START_KIND = (
-            "qodercli" if agent in QODER_AGENTS
-            else "grok" if agent == "grok"
-            else None
-        )
-        if NATIVE_START_KIND:
-            start_argv = [
-                "--session", session, "agent", "start", label or agent,
-                "--kind", NATIVE_START_KIND, "--pane", new_pid,
-                "--timeout", str(int(start_timeout * 1000)),
-                *(["--", *agent_args] if agent_args else []),
-            ]
-            # 新建 pane 的 shell 就绪有延迟,立即 agent start 会报
-            # agent_pane_busy(not an available shell);短窗内重试等待就绪。
-            shell_deadline = time.monotonic() + 10
-            while True:
-                try:
-                    _run(start_argv, timeout=int(start_timeout) + 5)
-                    break
-                except RuntimeError as exc:
-                    if (
-                        "agent_pane_busy" in str(exc)
-                        and time.monotonic() < shell_deadline
-                    ):
-                        time.sleep(0.5)
-                        continue
-                    raise
-        else:
-            # pane run 接收完整命令字符串；拆分后交给 Herdr 重组会破坏引号，并让
-            # 路径中的 shell 元字符在下一层被重新解释。
-            _run(["--session", session, "pane", "run", new_pid, cmd_str], timeout=8)
-
-        # 启动命令成功后仍以 snapshot 为准，再经过稳定窗口复查，捕获
-        # OpenCode/Bun 这类启动后立即崩溃、只留下空 pane 的情况。
-        saw_agent = False
-        confirmed_pane = None
-        deadline = time.monotonic() + start_timeout
-        while time.monotonic() < deadline:
-            current = next(
-                (
-                    p for p in _snapshot_session(session).get("panes", [])
-                    if str(p.get("pane_id")) == new_pid
-                ),
-                None,
-            )
-            if current and current.get("agent") == agent:
-                saw_agent = True
-                time.sleep(AGENT_STABLE_SECONDS)
-                confirmed_pane = next(
-                    (
-                        p for p in _snapshot_session(session).get("panes", [])
-                        if str(p.get("pane_id")) == new_pid
-                    ),
-                    None,
-                )
-                if confirmed_pane and confirmed_pane.get("agent") == agent:
-                    # pane 命名成 agent 名，tab/workspace 也改成可辨认名称
-                    # (默认是序号,看板/TUI 里分不清);失败不影响启动
-                    _rename_agent_context(
-                        session, confirmed_pane, agent, effective_layout, label
-                    )
-                    result = {
-                        "available": True,
-                        "pane_id": new_pid,
-                        "agent": agent,
-                        "cmd": cmd_str,
-                        "layout": effective_layout,
-                    }
-                    if label:
-                        result["label"] = label
-                    return result
+        # 全部受支持 agent 统一用原生 agent start：Herdr 按 --kind 解析 canonical
+        # 可执行文件、在 pane 的交互 shell 内启动，并在 --timeout 内等待 readiness。
+        # Cockpit 不再按 agent 类型回退 pane run，也不自造 readiness 轮询；任何启动
+        # 失败都保留原 pane/session 并返回结构化错误，不回退键盘模拟。
+        start_argv = [
+            "--session", session, "agent", "start", label or agent,
+            "--kind", normalize_agent_kind(agent),
+            "--pane", new_pid,
+            "--timeout", str(int(start_timeout * 1000)),
+        ]
+        if agent_args:
+            start_argv += ["--", *agent_args]
+        # 新建 pane 的交互 shell 就绪有延迟，立即 agent start 会报
+        # agent_pane_busy(not an available shell)；短窗内重试等待就绪。
+        shell_deadline = time.monotonic() + 10
+        while True:
+            try:
+                _run(start_argv, timeout=int(start_timeout) + 5)
                 break
-            time.sleep(AGENT_POLL_INTERVAL)
-        if saw_agent:
-            raise RuntimeError(f"{agent} 启动后未能保持运行")
-        raise RuntimeError(f"{agent} 启动超时，Herdr 未识别到运行中的 agent")
+            except RuntimeError as exc:
+                if (
+                    "agent_pane_busy" in str(exc)
+                    and time.monotonic() < shell_deadline
+                ):
+                    time.sleep(0.5)
+                    continue
+                raise
+
+        # 启动成功：把 workspace/tab/pane 改成可辨认名称(默认是序号,看板/TUI 里
+        # 分不清)；失败不影响启动结果。created_pane 来自创建后的 snapshot，含
+        # tab_id/workspace_id，无需再取一次 snapshot。
+        _rename_agent_context(
+            session, created_pane or {"pane_id": new_pid}, agent, effective_layout, label
+        )
+        result = {
+            "available": True,
+            "pane_id": new_pid,
+            "agent": agent,
+            "layout": effective_layout,
+        }
+        if label:
+            result["label"] = label
+        return result
     except RuntimeError as e:
         rolled_back = False
         if new_pid:

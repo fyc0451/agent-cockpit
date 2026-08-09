@@ -362,6 +362,155 @@ def test_pane_read_does_not_hide_unrelated_agent_errors(monkeypatch):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("agent", "kind"),
+    [
+        ("codex", "codex"), ("claude", "claude"), ("kimi", "kimi"),
+        ("opencode", "opencode"), ("grok", "grok"),
+        ("qoder", "qodercli"), ("qodercli", "qodercli"), ("qodercn", "qodercli"),
+    ],
+)
+def test_start_agent_unifies_every_supported_kind_on_native_start(monkeypatch, agent, kind):
+    """H0.2：全部受支持 agent 统一原生 agent start，删除按类型回退 pane run。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p1"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    herdr_client.start_agent("demo", "/tmp/project", agent, layout="tab")
+
+    start_calls = [c for c in calls if "agent" in c.args[0] and "start" in c.args[0]]
+    assert len(start_calls) == 1
+    argv = start_calls[0].args[0]
+    assert argv[2:6] == ["agent", "start", agent, "--kind"]
+    assert argv[6] == kind
+    assert "--pane" in argv and "w1:p1" in argv
+    assert "--timeout" in argv
+    # 全程不回退 pane run / send-text / send-keys 键盘模拟
+    flat = [c.args[0] for c in calls]
+    assert not any(a[2:4] == ["pane", "run"] for a in flat)
+    assert not any("send-text" in a or "send-keys" in a for a in flat)
+
+
+def test_pane_send_send_mode_uses_atomic_pane_run(monkeypatch):
+    """普通命令用原子 pane run，不再拆成 send-text + send-keys 两次。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
+    )
+
+    result = herdr_client.pane_send("demo", "w1:p2", "ls -la", "send")
+
+    assert result == {"available": True, "sent": "ls -la", "mode": "send"}
+    assert calls == [
+        call(["--session", "demo", "pane", "run", "w1:p2", "ls -la"], timeout=8),
+    ]
+    assert not any(
+        "send-text" in c.args[0] or "send-keys" in c.args[0] for c in calls
+    )
+
+
+def test_pane_send_prompt_mode_uses_agent_prompt(monkeypatch):
+    """prompt 模式必须用 agent prompt，而非键盘 send-text/send-keys。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
+    )
+
+    result = herdr_client.pane_send("demo", "w1:p2", "hello world", "prompt")
+
+    assert result == {"available": True, "sent": "hello world", "mode": "prompt"}
+    assert calls == [
+        call(["--session", "demo", "agent", "prompt", "w1:p2", "hello world"], timeout=10),
+    ]
+
+
+def test_pane_send_prompt_failure_does_not_fall_back_to_keyboard(monkeypatch):
+    """agent prompt 失败时返回结构化错误，绝不回退键盘模拟。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        raise RuntimeError("agent prompt 失败: agent_not_found")
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.pane_send("demo", "w1:p2", "hello", "prompt")
+
+    assert result["error"] == "agent prompt 失败: agent_not_found"
+    assert len(calls) == 1
+    assert calls[0] == call(
+        ["--session", "demo", "agent", "prompt", "w1:p2", "hello"], timeout=10
+    )
+    assert not any(
+        "send-text" in c.args[0] or "send-keys" in c.args[0] for c in calls
+    )
+
+
+def test_agent_wait_uses_native_agent_wait_primitive(monkeypatch):
+    """等待 agent 状态使用原生 agent wait --until --timeout，不轮询不键盘模拟。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
+    )
+
+    result = herdr_client.agent_wait(
+        "demo", "codex-2", until=["idle", "done"], timeout_ms=5000,
+    )
+
+    assert result == {
+        "available": True, "session": "demo", "target": "codex-2",
+        "matched": True,
+    }
+    assert calls == [
+        call([
+            "--session", "demo", "agent", "wait", "codex-2",
+            "--until", "idle", "--until", "done", "--timeout", "5000",
+        ], timeout=10),
+    ]
+
+
+def test_agent_wait_reports_timeout_without_keyboard_fallback(monkeypatch):
+    """agent wait 超时返回 matched=False 的结构化错误，不回退键盘。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        raise RuntimeError("agent wait 失败: timeout")
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.agent_wait("demo", "codex-2", timeout_ms=1000)
+
+    assert result["matched"] is False
+    assert "timeout" in result["error"]
+    assert len(calls) == 1
+    assert not any(
+        "send-text" in c.args[0] or "send-keys" in c.args[0] for c in calls
+    )
+
+
 def test_start_agent_reuses_existing_pane_with_cwd(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
@@ -445,27 +594,16 @@ def test_notify_opencode_color_scheme_rejects_invalid_mode(monkeypatch):
     assert herdr_client.notify_opencode_color_scheme("demo", "sepia") == 0
 
 
-def test_start_agent_uses_snapshot_delta_and_single_command_argument(monkeypatch):
-    """无创建响应时只能选前后 snapshot 唯一新增 pane，不能猜最大 id。"""
+def test_start_agent_uses_snapshot_delta_before_native_start(monkeypatch):
+    """无创建响应时只能选前后 snapshot 唯一新增 pane，再用原生 agent start 启动。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    command = "'/tmp/agent path/codex' --flag 'a;b'"
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: command)
-    # 可执行文件探测与宿主机解耦(CI 上没有安装 codex)
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
     monkeypatch.setattr(time, "sleep", lambda _: None)
     snapshots = iter([
         {"panes": [{"pane_id": "w1:p9", "agent": None}]},
         {"panes": [
             {"pane_id": "w1:p9", "agent": None},
-            {"pane_id": "w1:p2", "agent": None},
-        ]},
-        {"panes": [
-            {"pane_id": "w1:p9", "agent": None},
-            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project"},
-        ]},
-        {"panes": [
-            {"pane_id": "w1:p9", "agent": None},
-            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project"},
+            {"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1", "agent": None},
         ]},
     ])
     monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
@@ -477,16 +615,32 @@ def test_start_agent_uses_snapshot_delta_and_single_command_argument(monkeypatch
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
 
-    result = herdr_client.start_agent("demo", "/tmp/project")
+    result = herdr_client.start_agent("demo", "/tmp/project", "codex", layout="tab")
 
     assert result["pane_id"] == "w1:p2"
     assert result["layout"] == "tab"
+    assert result["agent"] == "codex"
+    # 全 agent 统一原生 agent start，不再 pane run
     assert call(
-        ["--session", "demo", "pane", "run", "w1:p2", command],
-        timeout=8,
+        [
+            "--session", "demo", "agent", "start", "codex",
+            "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000",
+        ],
+        timeout=15,
     ) in calls
+    assert not any(
+        c.args[0][:4] == ["--session", "demo", "pane", "run"] for c in calls
+    )
     assert call(
         ["--session", "demo", "pane", "rename", "w1:p2", "codex"],
+        timeout=5,
+    ) in calls
+    assert call(
+        ["--session", "demo", "tab", "rename", "w1:t2", "codex"],
+        timeout=5,
+    ) in calls
+    assert call(
+        ["--session", "demo", "workspace", "rename", "w1", "demo"],
         timeout=5,
     ) in calls
 
@@ -494,54 +648,56 @@ def test_start_agent_uses_snapshot_delta_and_single_command_argument(monkeypatch
 def test_start_agent_renames_workspace_tab_and_pane(monkeypatch):
     """tab 布局必须改用户实际看到的三层名称，而不只是 pane label。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "codex")
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
     monkeypatch.setattr(time, "sleep", lambda _: None)
     snapshots = iter([
         {"panes": []},
         {"panes": [{
             "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
-            "agent": None,
         }]},
-        {"panes": [{
-            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
-            "agent": "codex",
-        }]},
-        {"panes": [{
-            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
-            "agent": "codex",
-        }]},
-    ])
-    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
-    calls = []
-    monkeypatch.setattr(
-        herdr_client, "_run", lambda args, timeout=10: calls.append(args) or ""
-    )
-
-    result = herdr_client.start_agent("demo", "/tmp/project", layout="tab")
-
-    assert result["pane_id"] == "w1:p2"
-    assert ["--session", "demo", "pane", "rename", "w1:p2", "codex"] in calls
-    assert ["--session", "demo", "tab", "rename", "w1:t2", "codex"] in calls
-    assert ["--session", "demo", "workspace", "rename", "w1", "demo"] in calls
-
-
-def test_start_agent_forces_opencode_to_tab_and_rolls_back_delayed_crash(monkeypatch):
-    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "opencode")
-    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
-    monkeypatch.setattr(time, "sleep", lambda _: None)
-    snapshots = iter([
-        {"panes": []},
-        {"panes": [{"pane_id": "w1:p2", "agent": None}]},
-        {"panes": [{"pane_id": "w1:p2", "agent": "opencode"}]},
-        {"panes": [{"pane_id": "w1:p2", "agent": None}]},
     ])
     monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
     calls = []
 
     def fake_run(args, timeout=10):
         calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent("demo", "/tmp/project", layout="tab")
+
+    assert result["pane_id"] == "w1:p2"
+    assert call(
+        ["--session", "demo", "agent", "start", "codex",
+         "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000"],
+        timeout=15,
+    ) in calls
+    assert call(["--session", "demo", "pane", "rename", "w1:p2", "codex"], timeout=5) in calls
+    assert call(["--session", "demo", "tab", "rename", "w1:t2", "codex"], timeout=5) in calls
+    assert call(["--session", "demo", "workspace", "rename", "w1", "demo"], timeout=5) in calls
+
+
+def test_start_agent_forces_opencode_to_tab_and_rolls_back_on_start_failure(monkeypatch):
+    """opencode 强制独立 tab；原生 agent start 失败时回滚本次 pane，不回退键盘模拟。"""
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        if "agent" in args and "start" in args:
+            raise RuntimeError("agent start 失败: readiness timeout")
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
@@ -550,41 +706,27 @@ def test_start_agent_forces_opencode_to_tab_and_rolls_back_delayed_crash(monkeyp
         "demo", "/tmp/project", agent="opencode", layout="right"
     )
 
-    assert result["error"] == "opencode 启动后未能保持运行"
+    assert result["error"] == "agent start 失败: readiness timeout"
     assert result["rolled_back"] is True
+    # opencode 永远强制独立 tab，不会 split
     assert not any("split" in c.args[0] for c in calls)
+    # 启动失败只回滚 pane，不回退 send-text/send-keys 键盘模拟
+    assert not any("send-text" in c.args[0] or "send-keys" in c.args[0] for c in calls)
     assert call(
         ["--session", "demo", "pane", "close", "w1:p2"], timeout=5
     ) in calls
 
 
-def test_start_agent_allows_qodercli_slow_session_hook(monkeypatch):
-    """QoderCLI 冷启动可超过 10 秒，不能在 SessionStart hook 前误杀。"""
+def test_start_agent_qodercli_passes_slow_timeout_to_native_start(monkeypatch):
+    """QoderCLI 冷启动由 agent start --timeout 兜底，Cockpit 不再自造 readiness 轮询。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "qodercli")
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
-
-    clock = {"now": 0.0, "snapshots": 0}
-
-    def monotonic():
-        return clock["now"]
-
-    def sleep(seconds):
-        clock["now"] += seconds
-
-    def snapshot(session):
-        clock["snapshots"] += 1
-        if clock["snapshots"] == 1:
-            return {"panes": []}
-        agent = "qodercli" if clock["now"] >= 40 else None
-        return {"panes": [{
-            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
-            "agent": agent,
-        }]}
-
-    monkeypatch.setattr(herdr_client.time, "monotonic", monotonic)
-    monkeypatch.setattr(herdr_client.time, "sleep", sleep)
-    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
     calls = []
 
     def fake_run(args, timeout=10):
@@ -603,7 +745,6 @@ def test_start_agent_allows_qodercli_slow_session_hook(monkeypatch):
     assert result["pane_id"] == "w1:p2"
     assert result["agent"] == "qodercli"
     assert result["label"] == "qoder-2"
-    assert clock["now"] >= 41.5
     assert call(
         ["--session", "demo", "pane", "close", "w1:p2"], timeout=5,
     ) not in calls
@@ -622,31 +763,15 @@ def test_start_agent_allows_qodercli_slow_session_hook(monkeypatch):
 
 
 def test_start_agent_grok_uses_native_start(monkeypatch):
-    """grok 独立终端秒起但 pane run 后台启动 herdr 不刷新检测 → 原生 agent start。"""
+    """grok 与所有受支持 agent 一致，统一走原生 agent start。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "grok")
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
-
-    clock = {"now": 0.0, "snapshots": 0}
-
-    def monotonic():
-        return clock["now"]
-
-    def sleep(seconds):
-        clock["now"] += seconds
-
-    def snapshot(session):
-        clock["snapshots"] += 1
-        if clock["snapshots"] == 1:
-            return {"panes": []}
-        return {"panes": [{
-            "pane_id": "w1:p3", "tab_id": "w1:t3", "workspace_id": "w1",
-            "agent": "grok",
-        }]}
-
-    monkeypatch.setattr(herdr_client.time, "monotonic", monotonic)
-    monkeypatch.setattr(herdr_client.time, "sleep", sleep)
-    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p3", "tab_id": "w1:t3", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
     calls = []
 
     def fake_run(args, timeout=10):
@@ -673,41 +798,34 @@ def test_start_agent_grok_uses_native_start(monkeypatch):
     ) not in calls
 
 
-def _grok_native_start_harness(monkeypatch):
-    """grok 原生启动路径的公共桩:可控时钟 + 可编程 _run。"""
+def _native_start_harness(monkeypatch, pane="w1:p3"):
+    """原生启动路径公共桩:可控时钟(供 busy 重试计时)+ 固定 snapshot 序列。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "grok")
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
-    clock = {"now": 0.0, "snapshots": 0}
-
-    def snapshot(session):
-        clock["snapshots"] += 1
-        if clock["snapshots"] == 1:
-            return {"panes": []}
-        return {"panes": [{
-            "pane_id": "w1:p3", "tab_id": "w1:t3", "workspace_id": "w1",
-            "agent": "grok",
-        }]}
-
+    clock = {"now": 0.0}
     monkeypatch.setattr(herdr_client.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(
         herdr_client.time, "sleep",
         lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
     )
-    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
-    return clock
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": pane, "tab_id": "w1:t3", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    return clock, pane
 
 
 def test_start_agent_grok_retries_pane_busy_then_succeeds(monkeypatch):
     """新建 pane shell 未就绪(busy)时按 0.5s 重试,就绪后正常启动不回滚。"""
-    clock = _grok_native_start_harness(monkeypatch)
+    clock, pane = _native_start_harness(monkeypatch)
     calls = []
     busy_left = {"n": 2}
 
     def fake_run(args, timeout=10):
         calls.append(call(args, timeout=timeout))
         if "create" in args:
-            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p3"}}}'
+            return 'data: {"result":{"tab":{"focused_pane_id":"%s"}}}' % pane
         if "agent" in args and "start" in args and busy_left["n"]:
             busy_left["n"] -= 1
             raise RuntimeError(
@@ -720,24 +838,24 @@ def test_start_agent_grok_retries_pane_busy_then_succeeds(monkeypatch):
     result = herdr_client.start_agent("demo", "/tmp/project", agent="grok")
 
     assert result.get("error") is None
-    assert result["pane_id"] == "w1:p3"
+    assert result["pane_id"] == pane
     starts = [c for c in calls if "start" in c.args[0] and "agent" in c.args[0]]
     assert len(starts) == 3  # 2 次 busy + 1 次成功
     assert clock["now"] >= 1.0  # 两次 0.5s 重试等待
     assert call(
-        ["--session", "demo", "pane", "close", "w1:p3"], timeout=5,
+        ["--session", "demo", "pane", "close", pane], timeout=5,
     ) not in calls
 
 
 def test_start_agent_grok_pane_busy_gives_up_and_rolls_back(monkeypatch):
     """busy 持续到就绪窗口(10s)耗尽:不无限重试,保留原错误并关闭本次 pane。"""
-    clock = _grok_native_start_harness(monkeypatch)
+    clock, pane = _native_start_harness(monkeypatch)
     calls = []
 
     def fake_run(args, timeout=10):
         calls.append(call(args, timeout=timeout))
         if "create" in args:
-            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p3"}}}'
+            return 'data: {"result":{"tab":{"focused_pane_id":"%s"}}}' % pane
         if "agent" in args and "start" in args:
             raise RuntimeError(
                 'agent start 失败: {"error":{"code":"agent_pane_busy"}}'
@@ -754,19 +872,19 @@ def test_start_agent_grok_pane_busy_gives_up_and_rolls_back(monkeypatch):
     assert 15 <= len(starts) <= 25  # 10s/0.5s 有限重试,非死循环
     assert clock["now"] >= 10.0
     assert call(
-        ["--session", "demo", "pane", "close", "w1:p3"], timeout=5,
+        ["--session", "demo", "pane", "close", pane], timeout=5,
     ) in calls
 
 
 def test_start_agent_grok_non_busy_error_not_retried(monkeypatch):
     """非 busy 的启动错误不重试,直接回滚。"""
-    _grok_native_start_harness(monkeypatch)
+    _clock, pane = _native_start_harness(monkeypatch)
     calls = []
 
     def fake_run(args, timeout=10):
         calls.append(call(args, timeout=timeout))
         if "create" in args:
-            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p3"}}}'
+            return 'data: {"result":{"tab":{"focused_pane_id":"%s"}}}' % pane
         if "agent" in args and "start" in args:
             raise RuntimeError("agent start 失败: unknown kind")
         return ""
@@ -781,31 +899,24 @@ def test_start_agent_grok_non_busy_error_not_retried(monkeypatch):
     assert len(starts) == 1
 
 
-def test_start_agent_rolls_back_qodercli_after_extended_timeout(monkeypatch):
-    """QoderCLI 在专用窗口内仍未注册时，必须关闭本次新建 pane。"""
+def test_start_agent_qodercli_rolls_back_when_native_start_fails(monkeypatch):
+    """原生 agent start 未在 --timeout 内达到 readiness 时，关闭本次新建 pane。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "qodercli")
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
-
-    clock = {"now": 0.0, "snapshots": 0}
-
-    def snapshot(session):
-        clock["snapshots"] += 1
-        if clock["snapshots"] == 1:
-            return {"panes": []}
-        return {"panes": [{"pane_id": "w1:p2", "agent": None}]}
-
-    monkeypatch.setattr(herdr_client.time, "monotonic", lambda: clock["now"])
-    monkeypatch.setattr(
-        herdr_client.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
-    )
-    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
     calls = []
 
     def fake_run(args, timeout=10):
         calls.append(call(args, timeout=timeout))
         if "create" in args:
             return 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        if "agent" in args and "start" in args:
+            raise RuntimeError("agent start 失败: readiness timeout")
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
@@ -814,9 +925,8 @@ def test_start_agent_rolls_back_qodercli_after_extended_timeout(monkeypatch):
         "demo", "/tmp/project", agent="qodercli", layout="tab",
     )
 
-    assert result["error"] == "qodercli 启动超时，Herdr 未识别到运行中的 agent"
     assert result["rolled_back"] is True
-    assert clock["now"] >= 60.0
+    assert "readiness timeout" in result["error"]
     assert call(
         ["--session", "demo", "pane", "close", "w1:p2"], timeout=5,
     ) in calls
@@ -851,7 +961,6 @@ def test_start_agent_reuses_only_matching_workdir(monkeypatch):
 
 def test_start_agent_uses_label_to_create_second_same_type_instance(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "_agent_cmd", lambda *args: "codex")
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
     monkeypatch.setattr(time, "sleep", lambda _: None)
     snapshots = iter([
@@ -861,15 +970,7 @@ def test_start_agent_uses_label_to_create_second_same_type_instance(monkeypatch)
         }]},
         {"panes": [
             {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project", "label": "codex-1"},
-            {"pane_id": "w1:p3", "agent": None, "cwd": "/tmp/project"},
-        ]},
-        {"panes": [
-            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project", "label": "codex-1"},
-            {"pane_id": "w1:p3", "agent": "codex", "cwd": "/tmp/project"},
-        ]},
-        {"panes": [
-            {"pane_id": "w1:p2", "agent": "codex", "cwd": "/tmp/project", "label": "codex-1"},
-            {"pane_id": "w1:p3", "agent": "codex", "cwd": "/tmp/project", "label": "codex-2"},
+            {"pane_id": "w1:p3", "tab_id": "w1:t3", "workspace_id": "w1"},
         ]},
     ])
     monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
@@ -890,6 +991,14 @@ def test_start_agent_uses_label_to_create_second_same_type_instance(monkeypatch)
     assert result["pane_id"] == "w1:p3"
     assert result["label"] == "codex-2"
     assert result.get("reused") is not True
+    # 同类型第二实例也用原生 agent start，name 用唯一 label
+    assert call(
+        [
+            "--session", "demo", "agent", "start", "codex-2",
+            "--kind", "codex", "--pane", "w1:p3", "--timeout", "10000",
+        ],
+        timeout=15,
+    ) in calls
     assert call(
         ["--session", "demo", "pane", "rename", "w1:p3", "codex-2"],
         timeout=5,
