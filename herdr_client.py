@@ -38,6 +38,8 @@ AGENT_POLL_INTERVAL = 0.2
 # agent wait 未显式给 timeout 时的子进程上限：herdr 默认无限等待，Cockpit 不能
 # 让子进程永久阻塞，故给一个有限上界；调用方需要更长的真实等待应显式传 timeout_ms。
 AGENT_WAIT_DEFAULT_TIMEOUT_S = 60.0
+RESTART_SHELL_TIMEOUT_S = 10.0
+RESTART_SECOND_INTERRUPT_S = 2.0
 MAX_AGENT_ARGS_LENGTH = 2048
 SNAPSHOT_SESSION_TIMEOUT_S = 8.0
 SNAPSHOT_TOTAL_TIMEOUT_S = 10.0
@@ -59,6 +61,7 @@ HERDR_REQUIRED_METHODS = frozenset({
     "agent.prompt",
     "agent.wait",
     "agent.send_keys",
+    "pane.process_info",
     "events.subscribe",
 })
 AGENT_KIND_ALIASES = {
@@ -73,6 +76,8 @@ AGENT_KIND_ALIASES = {
     "qoderclicn": "qodercli",
 }
 _AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_RESTART_GUARD = threading.Lock()
+_RESTARTING_PANES: set[tuple[str, str]] = set()
 
 
 class HerdrCapabilityError(RuntimeError):
@@ -1587,70 +1592,236 @@ def compose_panes(session: str, pane_ids: list[str], orientation: str) -> str:
     return base
 
 
+def _restart_error(code: str, error: str, pane_id: str) -> dict[str, Any]:
+    return {
+        "available": True, "error_code": code, "error": error,
+        "pane_id": pane_id, "preserved": True,
+    }
+
+
+def _pane_at_available_shell(session: str, pane_id: str) -> bool:
+    """以 process-info 证明 shell 自身在前台，且没有其他前台进程。"""
+    out = _run(
+        ["--session", session, "pane", "process-info", "--pane", pane_id],
+        timeout=5,
+    )
+    data = _parse_data_json(out)
+    if not data:
+        raise RuntimeError("pane process-info 输出解析失败")
+    result = data.get("result", data)
+    if not isinstance(result, dict):
+        raise RuntimeError("pane process-info 输出格式无效")
+    info = result.get("process_info", result)
+    if not isinstance(info, dict) or info.get("pane_id") != pane_id:
+        raise RuntimeError("pane process-info 输出缺少目标 pane")
+    shell_pid = info.get("shell_pid")
+    foreground_pgid = info.get("foreground_process_group_id")
+    processes = info.get("foreground_processes")
+    if not isinstance(shell_pid, int) or isinstance(shell_pid, bool):
+        return False
+    if foreground_pgid != shell_pid or not isinstance(processes, list):
+        return False
+    return all(
+        isinstance(process, dict) and process.get("pid") == shell_pid
+        for process in processes
+    )
+
+
 def restart_pane(
     session: str, pane_id: str, agent: str | None = None,
     workdir: str | None = None, resume: bool = False,
 ) -> dict[str, Any]:
-    """重启 pane 里的 agent(Ctrl+C 退出 + 重新启动)。
-
-    场景:agent 卡死 / thread 损坏 / 想用新 PATH。
-    resume=True 时尝试 codex resume --last 恢复历史会话。
-    """
+    """原位重启 managed agent，并恢复原唯一 name/kind/native args。"""
     if not is_available():
         return {"available": False}
+    key = (session, pane_id)
+    with _RESTART_GUARD:
+        if key in _RESTARTING_PANES:
+            return _restart_error(
+                "restart_in_progress", f"pane {pane_id} 正在重启", pane_id,
+            )
+        _RESTARTING_PANES.add(key)
     try:
-        # 1. 在发送退出按键前确认 pane 和 agent，避免检测丢失后误启 Codex。
+        try:
+            require_herdr_capabilities()
+        except HerdrCapabilityError as exc:
+            return _restart_error("herdr_upgrade_required", str(exc), pane_id)
+
         snap = _snapshot_session(session)
-        p = next(
-            (x for x in snap.get("panes", []) if x.get("pane_id") == pane_id),
+        if snap.get("error"):
+            return _restart_error(
+                "restart_snapshot_failed", str(snap["error"]), pane_id,
+            )
+        pane = next(
+            (item for item in snap.get("panes", []) if item.get("pane_id") == pane_id),
             None,
         )
-        if p is None:
-            return {"available": True, "error": f"找不到 pane: {pane_id}"}
-        previous_agent = p.get("agent")
-        agent = agent or previous_agent
-        if not agent:
-            return {
-                "available": True,
-                "error": f"无法识别 pane {pane_id} 的 agent，已取消重启",
-            }
-        if agent not in {
-            "codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode",
-        }:
-            return {"available": True, "error": f"不支持的 agent: {agent}"}
-        workdir = workdir or p.get("cwd") or str(Path.home())
-
-        # 2. 先 Esc(取消任何 TUI 子模式/输入),再 Ctrl+C 退出 agent
-        _run(["--session", session, "pane", "send-keys", pane_id, "Escape"], timeout=3)
-        time.sleep(0.5)
-        _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
-        time.sleep(1.5)
-        # 再发一次确保退到 shell(agent 可能需要两次 C-c)
-        _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
-        time.sleep(1)
-        # 3. 清空当前输入行(防有残留):Ctrl+U 清行(herdr 可能不支持,失败忽略)
+        if pane is None:
+            return _restart_error(
+                "restart_pane_not_found", f"找不到 pane: {pane_id}", pane_id,
+            )
+        descriptor = get_launch_descriptor(session, pane_id)
+        if descriptor is None:
+            return _restart_error(
+                "restart_identity_missing",
+                f"pane {pane_id} 缺少 managed launch descriptor", pane_id,
+            )
+        name = descriptor.get("name")
+        kind = descriptor.get("kind")
+        launch_args = descriptor.get("args")
+        product_agent = descriptor.get("agent") or pane.get("agent")
+        if (
+            not isinstance(name, str) or not name
+            or not isinstance(kind, str) or not kind
+            or not isinstance(launch_args, list)
+            or any(not isinstance(value, str) for value in launch_args)
+            or not isinstance(product_agent, str) or not product_agent
+        ):
+            return _restart_error(
+                "restart_identity_invalid", "managed launch descriptor 无效", pane_id,
+            )
         try:
-            _run(["--session", session, "pane", "send-keys", pane_id, "C-u"], timeout=3)
-            time.sleep(0.3)
-        except RuntimeError:
-            pass
-        # 4. 构造启动命令(用 _agent_cmd 统一处理所有 agent 类型)
-        if agent == "codex" and resume:
-            codex_bin = shlex.quote(_find_agent_bin("codex"))
-            cmd_str = f'cd {shlex.quote(workdir)} && {codex_bin} resume --last'
-        else:
-            base = _agent_cmd(agent, workdir)
-            cmd_str = f'cd {shlex.quote(workdir)} && {base}'
-        # 5. 用 pane run 启动命令(比 send-text+Enter 可靠,不会被 agent TUI 当 prompt)
-        # pane run 发命令+回车,语义是"在 pane 里执行命令"
-        _run(["--session", session, "pane", "run", pane_id, cmd_str], timeout=8)
+            if normalize_agent_kind(product_agent) != kind:
+                raise ValueError("kind 不匹配")
+        except ValueError as exc:
+            return _restart_error("restart_identity_invalid", str(exc), pane_id)
+        live = [
+            item for item in snap.get("agents", [])
+            if isinstance(item, dict) and item.get("pane_id") == pane_id
+        ]
+        try:
+            live_kind = (
+                normalize_agent_kind(str(live[0].get("agent") or ""))
+                if len(live) == 1 else None
+            )
+        except ValueError:
+            live_kind = None
+        if len(live) != 1 or live[0].get("name") != name or live_kind != kind:
+            return _restart_error(
+                "restart_identity_mismatch",
+                f"pane {pane_id} 的 live identity 与 launch descriptor 不一致",
+                pane_id,
+            )
+        if agent is not None:
+            try:
+                requested_kind = normalize_agent_kind(agent)
+            except ValueError as exc:
+                return _restart_error("restart_identity_invalid", str(exc), pane_id)
+            if requested_kind != kind:
+                return _restart_error(
+                    "restart_identity_mismatch",
+                    "请求 agent 与 managed kind 不一致", pane_id,
+                )
+        if resume and kind != "codex":
+            return _restart_error(
+                "restart_resume_unsupported", "resume 仅支持 Codex", pane_id,
+            )
+
+        try:
+            _run(
+                ["--session", session, "agent", "send-keys", name, "esc"],
+                timeout=3,
+            )
+            _run(
+                ["--session", session, "agent", "send-keys", name, "ctrl+c"],
+                timeout=3,
+            )
+        except RuntimeError as exc:
+            return _restart_error("restart_exit_failed", str(exc), pane_id)
+
+        deadline = time.monotonic() + RESTART_SHELL_TIMEOUT_S
+        second_interrupt_at = time.monotonic() + RESTART_SECOND_INTERRUPT_S
+        second_interrupt_sent = False
+        shell_ready = False
+        while time.monotonic() < deadline:
+            current = _snapshot_session(session)
+            if current.get("error"):
+                return _restart_error(
+                    "restart_shell_probe_failed", str(current["error"]), pane_id,
+                )
+            current_pane = next(
+                (
+                    item for item in current.get("panes", [])
+                    if item.get("pane_id") == pane_id
+                ),
+                None,
+            )
+            if current_pane is None:
+                return _restart_error(
+                    "restart_pane_lost", f"重启期间 pane {pane_id} 消失", pane_id,
+                )
+            old_live = any(
+                isinstance(item, dict) and item.get("name") == name
+                for item in current.get("agents", [])
+            )
+            if not old_live and not current_pane.get("agent"):
+                try:
+                    shell_ready = _pane_at_available_shell(session, pane_id)
+                except RuntimeError as exc:
+                    return _restart_error(
+                        "restart_shell_probe_failed", str(exc), pane_id,
+                    )
+                if shell_ready:
+                    break
+            elif (
+                not second_interrupt_sent
+                and time.monotonic() >= second_interrupt_at
+            ):
+                try:
+                    _run(
+                        ["--session", session, "agent", "send-keys", name, "ctrl+c"],
+                        timeout=3,
+                    )
+                except RuntimeError:
+                    # 可选第二次中断与 agent 正常退出存在竞态；下一轮快照与
+                    # process-info 才是是否回到 shell 的权威判定。
+                    pass
+                second_interrupt_sent = True
+            time.sleep(AGENT_POLL_INTERVAL)
+        if not shell_ready:
+            return _restart_error(
+                "restart_shell_not_ready",
+                f"pane {pane_id} 未在 {RESTART_SHELL_TIMEOUT_S:g}s 内回到可用 shell",
+                pane_id,
+            )
+
+        native_args = list(launch_args)
+        if resume:
+            native_args += ["resume", "--last"]
+        start_timeout = _agent_start_timeout(product_agent)
+        start_argv = [
+            "--session", session, "agent", "start", name,
+            "--kind", kind, "--pane", pane_id,
+            "--timeout", str(int(start_timeout * 1000)),
+        ]
+        if native_args:
+            start_argv += ["--", *native_args]
+        start_deadline = time.monotonic() + RESTART_SHELL_TIMEOUT_S
+        while True:
+            try:
+                _run(start_argv, timeout=int(start_timeout) + 5)
+                break
+            except RuntimeError as exc:
+                if (
+                    "agent_pane_busy" in str(exc)
+                    and time.monotonic() < start_deadline
+                ):
+                    time.sleep(AGENT_POLL_INTERVAL)
+                    continue
+                code = (
+                    "restart_shell_not_ready"
+                    if "agent_pane_busy" in str(exc)
+                    else "restart_start_failed"
+                )
+                return _restart_error(code, str(exc), pane_id)
         return {
-            "available": True, "restarted": True, "pane_id": pane_id,
-            "agent": agent, "previous_agent": previous_agent,
-            "cmd": cmd_str, "resume": resume,
+            "available": True, "restarted": True, "preserved": True,
+            "pane_id": pane_id, "agent": product_agent, "name": name,
+            "kind": kind, "args": native_args, "resume": resume,
         }
-    except RuntimeError as e:
-        return {"available": True, "error": str(e)}
+    finally:
+        with _RESTART_GUARD:
+            _RESTARTING_PANES.discard(key)
 
 
 def stop_session(session: str) -> dict[str, Any]:

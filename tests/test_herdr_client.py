@@ -18,6 +18,7 @@ REQUIRED_H0_METHODS = {
     "agent.prompt",
     "agent.wait",
     "agent.send_keys",
+    "pane.process_info",
     "events.subscribe",
 }
 
@@ -104,6 +105,11 @@ def test_probe_herdr_capabilities_accepts_supported_installed_schema(monkeypatch
             "herdr 0.8.0",
             _herdr_schema(methods=REQUIRED_H0_METHODS - {"agent.wait"}),
             "agent.wait",
+        ),
+        (
+            "herdr 0.8.0",
+            _herdr_schema(methods=REQUIRED_H0_METHODS - {"pane.process_info"}),
+            "pane.process_info",
         ),
         ("herdr 0.8.0", "not-json", "API schema"),
     ],
@@ -1353,40 +1359,76 @@ def test_start_agent_reports_missing_executable_before_split(monkeypatch):
     assert result == {"available": True, "error": "qoder 未安装或不在 PATH"}
 
 
-def test_restart_pane_preserves_detected_agent(monkeypatch):
-    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(
-        herdr_client,
-        "_snapshot_session",
-        lambda session: {
-            "panes": [{
-                "pane_id": "w1:p5",
-                "agent": "opencode",
-                "cwd": "/tmp/project",
+def _managed_restart_snapshot(*, running=True, name="opencode-1", kind="opencode"):
+    pane = {
+        "pane_id": "w1:p5", "agent": kind if running else None,
+        "cwd": "/tmp/project",
+    }
+    agents = ([{
+        "pane_id": "w1:p5", "agent": kind, "name": name,
+        "interactive_ready": True,
+    }] if running else [])
+    return {"panes": [pane], "agents": agents}
+
+
+def _shell_process_info(pane_id="w1:p5", shell_pid=123):
+    return "data: " + json.dumps({
+        "result": {"type": "pane_process_info", "process_info": {
+            "pane_id": pane_id,
+            "shell_pid": shell_pid,
+            "foreground_process_group_id": shell_pid,
+            "foreground_processes": [{
+                "pid": shell_pid, "name": "zsh", "argv": ["zsh"],
             }],
-        },
+        }},
+    })
+
+
+def test_restart_pane_rebuilds_original_managed_identity_on_same_pane(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode",
+        args=["--model", "gpt 5", ";"], agent="opencode", workdir="/tmp/project",
     )
-    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        _managed_restart_snapshot(),
+        _managed_restart_snapshot(running=False),
+    ])
     monkeypatch.setattr(
-        herdr_client,
-        "_agent_cmd",
-        lambda agent, workdir: f"{agent} {workdir}",
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
     )
     calls = []
-    monkeypatch.setattr(
-        herdr_client,
-        "_run",
-        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
-    )
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "process-info" in args:
+            return _shell_process_info()
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
 
     result = herdr_client.restart_pane("demo", "w1:p5")
 
+    assert result["restarted"] is True
+    assert result["preserved"] is True
+    assert result["name"] == "opencode-1"
+    assert result["kind"] == "opencode"
     assert result["agent"] == "opencode"
-    assert result["previous_agent"] == "opencode"
     assert call(
-        ["--session", "demo", "pane", "run", "w1:p5", "cd /tmp/project && opencode /tmp/project"],
-        timeout=8,
+        ["--session", "demo", "agent", "send-keys", "opencode-1", "esc"],
+        timeout=3,
     ) in calls
+    assert call(
+        ["--session", "demo", "agent", "send-keys", "opencode-1", "ctrl+c"],
+        timeout=3,
+    ) in calls
+    assert call(
+        ["--session", "demo", "agent", "start", "opencode-1", "--kind", "opencode",
+         "--pane", "w1:p5", "--timeout", "10000", "--", "--model", "gpt 5", ";"],
+        timeout=15,
+    ) in calls
+    assert not any(c.args[0][2:4] == ["pane", "run"] for c in calls)
+    assert not any("close" in c.args[0] for c in calls)
 
 
 def test_restart_pane_rejects_unknown_pane_before_sending_keys(monkeypatch):
@@ -1402,15 +1444,14 @@ def test_restart_pane_rejects_unknown_pane_before_sending_keys(monkeypatch):
 
     result = herdr_client.restart_pane("demo", "w1:p5")
 
-    assert result == {"available": True, "error": "找不到 pane: w1:p5"}
+    assert result["error_code"] == "restart_pane_not_found"
+    assert result["preserved"] is True
 
 
-def test_restart_pane_rejects_unidentified_agent_before_sending_keys(monkeypatch):
+def test_restart_pane_rejects_missing_descriptor_before_sending_keys(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
-        herdr_client,
-        "_snapshot_session",
-        lambda session: {"panes": [{"pane_id": "w1:p5", "agent": None}]},
+        herdr_client, "_snapshot_session", lambda session: _managed_restart_snapshot(),
     )
     monkeypatch.setattr(
         herdr_client,
@@ -1422,10 +1463,286 @@ def test_restart_pane_rejects_unidentified_agent_before_sending_keys(monkeypatch
 
     result = herdr_client.restart_pane("demo", "w1:p5")
 
-    assert result == {
-        "available": True,
-        "error": "无法识别 pane w1:p5 的 agent，已取消重启",
-    }
+    assert result["error_code"] == "restart_identity_missing"
+    assert result["preserved"] is True
+
+
+def test_restart_pane_rejects_descriptor_live_identity_mismatch(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session",
+        lambda session: _managed_restart_snapshot(name="other-agent"),
+    )
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应发送按键")),
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["error_code"] == "restart_identity_mismatch"
+    assert result["preserved"] is True
+
+
+def test_restart_pane_rejects_unknown_live_kind_without_raising(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    snap = _managed_restart_snapshot()
+    snap["agents"][0]["agent"] = "future-agent"
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: snap)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["error_code"] == "restart_identity_mismatch"
+    assert result["preserved"] is True
+
+
+def test_restart_pane_rejects_unknown_requested_agent_without_raising(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: _managed_restart_snapshot(),
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5", agent="future-agent")
+
+    assert result["error_code"] == "restart_identity_invalid"
+    assert result["preserved"] is True
+
+
+def test_restart_pane_capability_failure_does_not_mutate(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "require_herdr_capabilities",
+        lambda: (_ for _ in ()).throw(herdr_client.HerdrCapabilityError("upgrade")),
+    )
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应修改 pane")),
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["error_code"] == "herdr_upgrade_required"
+    assert result["preserved"] is True
+
+
+def test_restart_pane_times_out_if_agent_never_returns_to_shell(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: _managed_restart_snapshot(),
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(herdr_client.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        herdr_client.time, "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["error_code"] == "restart_shell_not_ready"
+    assert result["preserved"] is True
+    assert not any("start" in c.args[0] for c in calls)
+    assert not any("close" in c.args[0] for c in calls)
+
+
+def test_restart_pane_surfaces_shell_probe_failure(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    snapshots = iter([
+        _managed_restart_snapshot(),
+        _managed_restart_snapshot(running=False),
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+
+    def fake_run(args, timeout=10):
+        if "process-info" in args:
+            raise RuntimeError("process probe failed")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["error_code"] == "restart_shell_probe_failed"
+    assert result["preserved"] is True
+
+
+def test_restart_pane_rejects_shell_with_foreground_command(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    snapshots = iter([
+        _managed_restart_snapshot(),
+        *[_managed_restart_snapshot(running=False) for _ in range(4)],
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    clock = {"now": 0.0}
+    monkeypatch.setattr(herdr_client, "RESTART_SHELL_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(herdr_client.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        herdr_client.time, "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+
+    def fake_run(args, timeout=10):
+        if "process-info" in args:
+            data = json.loads(_shell_process_info()[len("data: "):])
+            info = data["result"]["process_info"]
+            info["foreground_process_group_id"] = 456
+            info["foreground_processes"] = [{"pid": 456, "name": "pytest"}]
+            return "data: " + json.dumps(data)
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["error_code"] == "restart_shell_not_ready"
+    assert result["preserved"] is True
+
+
+def test_restart_pane_preserves_pane_when_native_start_fails(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    snapshots = iter([
+        _managed_restart_snapshot(),
+        _managed_restart_snapshot(running=False),
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "process-info" in args:
+            return _shell_process_info()
+        if "start" in args:
+            raise RuntimeError("agent start failed: unknown kind")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["error_code"] == "restart_start_failed"
+    assert result["preserved"] is True
+    assert not any("close" in c.args[0] for c in calls)
+
+
+def test_restart_pane_retries_native_start_when_shell_temporarily_busy(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    snapshots = iter([
+        _managed_restart_snapshot(),
+        _managed_restart_snapshot(running=False),
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+    busy = {"left": 2}
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "process-info" in args:
+            return _shell_process_info()
+        if "start" in args and busy["left"]:
+            busy["left"] -= 1
+            raise RuntimeError('{"error":{"code":"agent_pane_busy"}}')
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["restarted"] is True
+    assert len([c for c in calls if "start" in c.args[0]]) == 3
+
+
+def test_restart_pane_rejects_resume_for_non_codex_before_mutation(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="opencode-1", kind="opencode", args=[],
+    )
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: _managed_restart_snapshot(),
+    )
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应修改 pane")),
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5", resume=True)
+
+    assert result["error_code"] == "restart_resume_unsupported"
+    assert result["preserved"] is True
+
+
+def test_restart_pane_codex_resume_keeps_original_args(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name="codex-1", kind="codex",
+        args=["--model", "gpt-5"], agent="codex",
+    )
+    snapshots = iter([
+        _managed_restart_snapshot(name="codex-1", kind="codex"),
+        _managed_restart_snapshot(running=False, name="codex-1", kind="codex"),
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        return _shell_process_info() if "process-info" in args else ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5", resume=True)
+
+    assert result["restarted"] is True
+    assert result["args"] == ["--model", "gpt-5", "resume", "--last"]
+    assert call(
+        ["--session", "demo", "agent", "start", "codex-1", "--kind", "codex",
+         "--pane", "w1:p5", "--timeout", "10000", "--",
+         "--model", "gpt-5", "resume", "--last"],
+        timeout=15,
+    ) in calls
+
+
+def test_restart_pane_rejects_concurrent_request(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    key = ("demo", "w1:p5")
+    with herdr_client._RESTART_GUARD:
+        herdr_client._RESTARTING_PANES.add(key)
+    try:
+        result = herdr_client.restart_pane("demo", "w1:p5")
+    finally:
+        with herdr_client._RESTART_GUARD:
+            herdr_client._RESTARTING_PANES.discard(key)
+
+    assert result["error_code"] == "restart_in_progress"
+    assert result["preserved"] is True
 
 
 def _layout_json(panes, zoomed=False, focused="w1:p2"):
