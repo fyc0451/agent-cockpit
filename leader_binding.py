@@ -24,7 +24,11 @@ DB_PATH = Path(
 ).expanduser()
 
 SCOPE_KINDS = ("user", "team", "channel")
-BINDING_STATES = ("active", "previous", "retired", "degraded")
+# binding state 不含 degraded：active 退化用 previous_state='degraded' 表达
+# （previous 邮箱排空失败），active 行本身不可变 degraded——避免 partial
+# unique index（WHERE state='active'）出现"active 改 degraded 后可再插第二
+# active"的 footgun。
+BINDING_STATES = ("active", "previous", "retired")
 PREVIOUS_STATES = ("pending", "draining", "drained", "degraded")
 CONNECT_RETRIES = 6
 CONNECT_RETRY_BASE = 0.02
@@ -66,7 +70,7 @@ def _initialize_connection(con: sqlite3.Connection) -> None:
           degraded_reason TEXT,
           updated_ts REAL NOT NULL,
           PRIMARY KEY(scope_kind, scope_id, mail_name),
-          CHECK (state IN ('active', 'previous', 'retired', 'degraded')),
+          CHECK (state IN ('active', 'previous', 'retired')),
           CHECK (binding_version > 0)
         );
         CREATE INDEX IF NOT EXISTS leader_bindings_scope
@@ -156,12 +160,15 @@ def get_active_binding(
 ) -> dict[str, Any] | None:
     """当前 scope 的 active 绑定（每 scope 至多一个）。"""
     _validate_scope(scope_kind, scope_id)
-    with _connect() as con:
+    con = _connect()
+    try:
         row = con.execute(
             "SELECT * FROM leader_bindings "
             "WHERE scope_kind=? AND scope_id=? AND state='active'",
             (scope_kind, scope_id),
         ).fetchone()
+    finally:
+        con.close()
     return _dict(row)
 
 
@@ -171,12 +178,15 @@ def get_binding(
     """指定 scope+mail_name 的绑定（任意 state）。"""
     _validate_scope(scope_kind, scope_id)
     _validate_mail_name(mail_name)
-    with _connect() as con:
+    con = _connect()
+    try:
         row = con.execute(
             "SELECT * FROM leader_bindings "
             "WHERE scope_kind=? AND scope_id=? AND mail_name=?",
             (scope_kind, scope_id, mail_name),
         ).fetchone()
+    finally:
+        con.close()
     return _dict(row)
 
 
@@ -201,12 +211,15 @@ def list_bindings(
         clauses.append("state=?")
         params.append(state)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    with _connect() as con:
+    con = _connect()
+    try:
         rows = con.execute(
             f"SELECT * FROM leader_bindings {where} "
             "ORDER BY scope_kind, scope_id, updated_ts",
             params,
         ).fetchall()
+    finally:
+        con.close()
     return [dict(r) for r in rows]
 
 
@@ -226,10 +239,11 @@ def bind_leader(
 ) -> dict[str, Any]:
     """原子改绑：新 mail_name 成为 scope 唯一 active。
 
-    CAS：expected_version 必须等于当前 active 的 binding_version，否则抛
-    StaleVersionError 且无任何变更。同一事务内先软退役旧 active（state=
-    previous，记录排空起点），再插入新 active；新行任何约束失败都会
-    rollback，旧 binding 保持有效。
+    mandatory CAS：所有 mutation 必须携带 expected_version——无 active
+    首绑传 0，active 存在时必须等于当前 binding_version，否则抛
+    StaleVersionError 且零变更（含同 mail_name 幂等刷新路径）。None 一律
+    拒绝。同一事务内先软退役旧 active（state=previous，记录排空起点），
+    再插入/复活新 active；任何约束失败都会 rollback，旧 binding 保持有效。
 
     返回新 active 行。previous 行只软退役，永不删除。
     """
@@ -239,6 +253,10 @@ def bind_leader(
         "agent_name": agent_name, "agent_kind": agent_kind,
         "session": session, "pane_id": pane_id,
     })
+    if expected_version is None:
+        raise BindingError(
+            "必须提供 expected_version（无 active 首绑传 0）"
+        )
     current = time.time() if now is None else now
     con = _connect()
     try:
@@ -248,8 +266,15 @@ def bind_leader(
             "WHERE scope_kind=? AND scope_id=? AND state='active'",
             (scope_kind, scope_id),
         ).fetchone()
+        # CAS 先于一切 mutation：首绑期望 0，有 active 时必须等于当前版本
+        actual = int(active["binding_version"]) if active is not None else 0
+        if actual != expected_version:
+            raise StaleVersionError(
+                f"CAS 失败：expected version {expected_version}，"
+                f"当前 active version {actual}"
+            )
         if active is not None and str(active["mail_name"]) == mail_name:
-            # 幂等：同一 mail_name 已是 active，仅刷新运行信息
+            # 幂等（CAS 通过后）：同一 mail_name 已是 active，仅刷新运行信息
             con.execute(
                 "UPDATE leader_bindings SET agent_name=COALESCE(?,agent_name), "
                 "agent_kind=COALESCE(?,agent_kind), session=COALESCE(?,session), "
@@ -264,13 +289,6 @@ def bind_leader(
                 "WHERE scope_kind=? AND scope_id=? AND mail_name=?",
                 (scope_kind, scope_id, mail_name),
             ).fetchone())
-        if expected_version is not None:
-            actual = int(active["binding_version"]) if active is not None else None
-            if actual != expected_version:
-                raise StaleVersionError(
-                    f"CAS 失败：expected version {expected_version}，"
-                    f"当前 active version {actual}"
-                )
         version = (int(active["binding_version"]) + 1) if active is not None else 1
         if active is not None:
             # 软退役旧 active：保留行，标记 previous 与排空起点
@@ -332,7 +350,8 @@ def mark_previous_state(
             f"非法 previous state: {state!r}（允许 {PREVIOUS_STATES}）"
         )
     current = time.time() if now is None else now
-    with _connect() as con:
+    con = _connect()
+    try:
         cur = con.execute(
             "UPDATE leader_bindings SET previous_state=?, "
             "degraded_reason=?, updated_ts=? "
@@ -342,6 +361,8 @@ def mark_previous_state(
         )
         con.commit()
         return cur.rowcount == 1
+    finally:
+        con.close()
 
 
 def retire_binding(
@@ -352,7 +373,8 @@ def retire_binding(
     _validate_scope(scope_kind, scope_id)
     _validate_mail_name(mail_name)
     current = time.time() if now is None else now
-    with _connect() as con:
+    con = _connect()
+    try:
         cur = con.execute(
             "UPDATE leader_bindings SET state='retired', "
             "previous_state='drained', "
@@ -363,3 +385,5 @@ def retire_binding(
         )
         con.commit()
         return cur.rowcount == 1
+    finally:
+        con.close()

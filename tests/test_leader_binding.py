@@ -83,7 +83,7 @@ class TestSchema:
         assert "agent_kind" in columns
 
     def test_unique_active_index_enforced(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="a@t1")
+        leader_binding.bind_leader("team", "t1", mail_name="a@t1", expected_version=0)
         with pytest.raises(sqlite3.IntegrityError):
             con = _fresh_connect()
             con.execute(
@@ -103,6 +103,7 @@ class TestBind:
         binding = leader_binding.bind_leader(
             "team", "channel-1", mail_name="codex-agent-cockpit",
             agent_name="codex", agent_kind="codex", session="s1", pane_id="p1",
+            expected_version=0,
         )
         assert binding["state"] == "active"
         assert binding["binding_version"] == 1
@@ -116,8 +117,8 @@ class TestBind:
         assert active["pane_id"] == "p1"
 
     def test_same_mail_name_rebind_is_idempotent(self, db_path: Path) -> None:
-        leader_binding.bind_leader("user", "u1", mail_name="a", pane_id="p1")
-        leader_binding.bind_leader("user", "u1", mail_name="a", pane_id="p2")
+        leader_binding.bind_leader("user", "u1", mail_name="a", pane_id="p1", expected_version=0)
+        leader_binding.bind_leader("user", "u1", mail_name="a", pane_id="p2", expected_version=1)
         active = leader_binding.get_active_binding("user", "u1")
         assert active["mail_name"] == "a"
         assert active["pane_id"] == "p2"
@@ -126,21 +127,21 @@ class TestBind:
 
     def test_invalid_scope_rejected(self, db_path: Path) -> None:
         with pytest.raises(leader_binding.BindingError, match="scope_kind"):
-            leader_binding.bind_leader("org", "x", mail_name="a")
+            leader_binding.bind_leader("org", "x", mail_name="a", expected_version=0)
         with pytest.raises(leader_binding.BindingError, match="scope_id"):
-            leader_binding.bind_leader("team", "", mail_name="a")
+            leader_binding.bind_leader("team", "", mail_name="a", expected_version=0)
 
     def test_invalid_mail_name_rejected(self, db_path: Path) -> None:
         with pytest.raises(leader_binding.BindingError, match="mail_name"):
-            leader_binding.bind_leader("team", "t1", mail_name="")
+            leader_binding.bind_leader("team", "t1", mail_name="", expected_version=0)
         with pytest.raises(leader_binding.BindingError, match="mail_name"):
-            leader_binding.bind_leader("team", "t1", mail_name="a\nb")
+            leader_binding.bind_leader("team", "t1", mail_name="a\nb", expected_version=0)
 
     def test_credentials_field_rejected(self, db_path: Path) -> None:
         # 正常字段不抛
         leader_binding.bind_leader(
             "team", "t1", mail_name="a", agent_name="x", agent_kind="k",
-            session="s", pane_id="p",
+            session="s", pane_id="p", expected_version=0,
         )
         # 敏感字段名被拒绝（白名单防护）
         with pytest.raises(leader_binding.BindingError, match="敏感"):
@@ -159,7 +160,7 @@ class TestBind:
 
 class TestCasRebind:
     def test_rebind_with_correct_version(self, db_path: Path) -> None:
-        first = leader_binding.bind_leader("team", "t1", mail_name="old@t1")
+        first = leader_binding.bind_leader("team", "t1", mail_name="old@t1", expected_version=0)
         assert first["binding_version"] == 1
         second = leader_binding.bind_leader(
             "team", "t1", mail_name="new@t1", expected_version=1,
@@ -177,7 +178,7 @@ class TestCasRebind:
         assert len(leader_binding.list_bindings("team", "t1", state="active")) == 1
 
     def test_stale_version_rejected_no_change(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="a")
+        leader_binding.bind_leader("team", "t1", mail_name="a", expected_version=0)
         with pytest.raises(leader_binding.StaleVersionError, match="CAS"):
             leader_binding.bind_leader(
                 "team", "t1", mail_name="b", expected_version=99,
@@ -187,14 +188,40 @@ class TestCasRebind:
         assert active["binding_version"] == 1
         assert leader_binding.get_binding("team", "t1", "b") is None
 
-    def test_rebind_without_version_forces_overwrite(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="a")
-        # 显式 expected_version 语义：缺省视为管理覆盖
-        leader_binding.bind_leader("team", "t1", mail_name="b")
-        assert leader_binding.get_active_binding("team", "t1")["mail_name"] == "b"
+    def test_rebind_without_version_rejected(self, db_path: Path) -> None:
+        """mandatory CAS：expected_version=None 一律拒绝，零变更。"""
+        leader_binding.bind_leader("team", "t1", mail_name="a", expected_version=0)
+        with pytest.raises(leader_binding.BindingError, match="expected_version"):
+            leader_binding.bind_leader("team", "t1", mail_name="b")
+        with pytest.raises(leader_binding.BindingError, match="expected_version"):
+            leader_binding.bind_leader("team", "t1", mail_name="a")  # 幂等路径同样拒绝
+        active = leader_binding.get_active_binding("team", "t1")
+        assert active["mail_name"] == "a"
+        assert active["binding_version"] == 1
+        assert leader_binding.get_binding("team", "t1", "b") is None
+
+    def test_stale_same_mail_name_rebind_zero_mutation(self, db_path: Path) -> None:
+        """同 mail_name 幂等路径也在 CAS 之后：wrong version 零变更。"""
+        leader_binding.bind_leader(
+            "team", "t1", mail_name="a", agent_kind="codex", pane_id="p1",
+            expected_version=0,
+        )
+        with pytest.raises(leader_binding.StaleVersionError, match="CAS"):
+            leader_binding.bind_leader(
+                "team", "t1", mail_name="a", pane_id="p2", expected_version=99,
+            )
+        active = leader_binding.get_active_binding("team", "t1")
+        assert active["pane_id"] == "p1"  # 未刷新
+        assert active["binding_version"] == 1
+        # 正确 version 的幂等刷新仍生效
+        refreshed = leader_binding.bind_leader(
+            "team", "t1", mail_name="a", pane_id="p3", expected_version=1,
+        )
+        assert refreshed["pane_id"] == "p3"
+        assert refreshed["binding_version"] == 1
 
     def test_concurrent_rebind_single_active(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="base")
+        leader_binding.bind_leader("team", "t1", mail_name="base", expected_version=0)
         results: list[Any] = []
         errors: list[BaseException] = []
         barrier = threading.Barrier(2)
@@ -225,7 +252,7 @@ class TestCasRebind:
         self, db_path: Path, monkeypatch: Any,
     ) -> None:
         """新 active 行插入失败 → 整个事务回滚，旧绑定保持 active（未被软退役）。"""
-        leader_binding.bind_leader("team", "t1", mail_name="old@t1")
+        leader_binding.bind_leader("team", "t1", mail_name="old@t1", expected_version=0)
         real_connect = leader_binding._connect
 
         class FlakyConnection:
@@ -263,7 +290,7 @@ class TestCasRebind:
 
     def test_reactivate_previous_mail_name(self, db_path: Path) -> None:
         """软退役行不删除但可原地复活为 active（主键占用不阻塞切回）。"""
-        leader_binding.bind_leader("team", "t1", mail_name="a")
+        leader_binding.bind_leader("team", "t1", mail_name="a", expected_version=0)
         leader_binding.bind_leader("team", "t1", mail_name="b", expected_version=1)
         assert leader_binding.get_active_binding("team", "t1")["mail_name"] == "b"
         back = leader_binding.bind_leader(
@@ -287,7 +314,7 @@ class TestCasRebind:
 
 class TestPreviousDrain:
     def test_previous_state_progression(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="old@t1")
+        leader_binding.bind_leader("team", "t1", mail_name="old@t1", expected_version=0)
         leader_binding.bind_leader("team", "t1", mail_name="new@t1", expected_version=1)
         old = leader_binding.get_binding("team", "t1", "old@t1")
         assert old["previous_state"] == "draining"
@@ -310,7 +337,7 @@ class TestPreviousDrain:
             leader_binding.mark_previous_state("team", "t1", "old", state="bogus")
 
     def test_retire_previous_keeps_row(self, db_path: Path) -> None:
-        leader_binding.bind_leader("team", "t1", mail_name="old@t1")
+        leader_binding.bind_leader("team", "t1", mail_name="old@t1", expected_version=0)
         leader_binding.bind_leader("team", "t1", mail_name="new@t1", expected_version=1)
         assert leader_binding.retire_binding("team", "t1", "old@t1") is True
         old = leader_binding.get_binding("team", "t1", "old@t1")
@@ -329,7 +356,7 @@ class TestPersistence:
     def test_restart_persists(self, db_path: Path, monkeypatch: Any) -> None:
         leader_binding.bind_leader(
             "team", "t1", mail_name="a", agent_kind="codex",
-            session="s1", pane_id="p1",
+            session="s1", pane_id="p1", expected_version=0,
         )
         leader_binding.bind_leader("team", "t1", mail_name="b", expected_version=1)
         # 模拟重启：断开全部连接后重新绑定（新连接读取同一 DB 文件）
@@ -342,3 +369,21 @@ class TestPersistence:
         active = leader_binding.get_active_binding("team", "t1")
         assert active["mail_name"] == "b"
         assert active["binding_version"] == 2
+
+
+# ── R2 复核：degraded 不作为 binding state（防第二 active footgun）──────
+
+def test_binding_state_degraded_rejected_by_schema(db_path: Path):
+    """binding state 无 degraded：active 退化只能经 previous_state=degraded
+    表达，DB CHECK 拒绝 state='degraded' 行（避免 partial index 漏洞）。"""
+    con = leader_binding._connect()
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+        con.execute(
+            "INSERT INTO leader_bindings VALUES('team','t1','x@t1',NULL,NULL,"
+            "NULL,NULL,NULL,NULL,1,'degraded',NULL,1.0)"
+        )
+        con.commit()
+    con.close()
+    # 应用层同样拒绝
+    with pytest.raises(leader_binding.BindingError, match="state"):
+        leader_binding.list_bindings(state="degraded")
