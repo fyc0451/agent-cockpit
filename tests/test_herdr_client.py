@@ -1249,6 +1249,16 @@ def _mock_sessions(names):
     return [{"name": n, "status": "running", "directory": f"/tmp/{n}", "socket": ""} for n in names]
 
 
+def _wait_snapshot_pool_idle(timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with herdr_client._SNAPSHOT_EXECUTOR_LOCK:
+            if not herdr_client._SNAPSHOT_FUTURES:
+                return
+        time.sleep(0.01)
+    raise AssertionError("snapshot worker pool did not become idle")
+
+
 def test_snapshot_parallelizes_sessions_and_preserves_order(monkeypatch):
     """多 session 并行执行 _snapshot_session,结果按 list_sessions 顺序回填。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
@@ -1355,13 +1365,14 @@ def test_snapshot_session_safe_catches_crash_and_preserves_order(monkeypatch):
 
 
 def test_snapshot_total_deadline_limits_later_worker_waves(monkeypatch):
+    _wait_snapshot_pool_idle()
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
         herdr_client,
         "list_sessions",
         lambda: _mock_sessions([f"s{i}" for i in range(8)]),
     )
-    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.12)
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.5)
     budgets: list[float] = []
     lock = threading.Lock()
 
@@ -1369,10 +1380,10 @@ def test_snapshot_total_deadline_limits_later_worker_waves(monkeypatch):
         budget = herdr_client._snapshot_timeout()
         with lock:
             budgets.append(budget)
-        if budget < 0.05:
+        if budget < 0.2:
             time.sleep(budget)
             return {"session": name, "error": "snapshot total timeout", "panes": []}
-        time.sleep(0.09)
+        time.sleep(0.3)
         return {"session": name, "panes": [{"pane_id": name + ":p1"}]}
 
     monkeypatch.setattr(herdr_client, "_snapshot_session", budgeted_snapshot)
@@ -1380,18 +1391,19 @@ def test_snapshot_total_deadline_limits_later_worker_waves(monkeypatch):
     result = herdr_client.snapshot()
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.2
+    assert elapsed < 0.8
     assert [s["session"] for s in result["sessions"]] == [f"s{i}" for i in range(8)]
-    assert min(budgets) < max(budgets) - 0.04
+    assert min(budgets) < max(budgets) - 0.15
     assert any("timeout" in s.get("error", "") for s in result["sessions"][4:])
 
 
 def test_snapshot_total_deadline_includes_session_listing(monkeypatch):
+    _wait_snapshot_pool_idle()
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
-    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.04)
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.5)
 
     def slow_list():
-        time.sleep(0.03)
+        time.sleep(0.15)
         return _mock_sessions(["one"])
 
     budgets = []
@@ -1404,45 +1416,53 @@ def test_snapshot_total_deadline_includes_session_listing(monkeypatch):
     )
 
     herdr_client.snapshot()
-    assert budgets and budgets[0] < 0.02
+    assert budgets and budgets[0] < 0.4
 
 
 def test_snapshot_returns_without_waiting_for_uncooperative_worker(monkeypatch):
+    _wait_snapshot_pool_idle()
+    release = threading.Event()
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
         herdr_client, "list_sessions", lambda: _mock_sessions(["one", "two"]),
     )
-    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.2)
     monkeypatch.setattr(
-        herdr_client, "_snapshot_session", lambda name: (
-            time.sleep(0.15) or {"session": name, "panes": []}
-        ),
+        herdr_client, "_snapshot_session",
+        lambda name: release.wait(2) or {"session": name, "panes": []},
     )
 
     started = time.monotonic()
-    result = herdr_client.snapshot()
-
-    assert time.monotonic() - started < 0.08
-    assert all("timeout" in row.get("error", "") for row in result["sessions"])
+    try:
+        result = herdr_client.snapshot()
+        assert time.monotonic() - started < 0.6
+        assert all("timeout" in row.get("error", "") for row in result["sessions"])
+    finally:
+        release.set()
+        _wait_snapshot_pool_idle()
 
 
 def test_single_snapshot_returns_without_waiting_for_uncooperative_worker(monkeypatch):
+    _wait_snapshot_pool_idle()
+    release = threading.Event()
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
         herdr_client, "list_sessions", lambda: _mock_sessions(["one"]),
     )
-    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(herdr_client, "SNAPSHOT_TOTAL_TIMEOUT_S", 0.2)
     monkeypatch.setattr(
-        herdr_client, "_snapshot_session", lambda name: (
-            time.sleep(0.15) or {"session": name, "panes": []}
-        ),
+        herdr_client, "_snapshot_session",
+        lambda name: release.wait(2) or {"session": name, "panes": []},
     )
 
     started = time.monotonic()
-    result = herdr_client.snapshot()
-
-    assert time.monotonic() - started < 0.08
-    assert "timeout" in result["sessions"][0]["error"]
+    try:
+        result = herdr_client.snapshot()
+        assert time.monotonic() - started < 0.6
+        assert "timeout" in result["sessions"][0]["error"]
+    finally:
+        release.set()
+        _wait_snapshot_pool_idle()
 
 
 def test_repeated_snapshot_timeouts_keep_worker_threads_bounded(monkeypatch):
