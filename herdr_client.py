@@ -1041,6 +1041,58 @@ def get_launch_descriptor_by_name(session: str, name: str) -> dict[str, Any] | N
     return dict(record) if isinstance(record, dict) else None
 
 
+def clear_launch_descriptors(session: str) -> dict[str, Any]:
+    """删除某 session 的全部 launch descriptor。
+
+    仅在 `herdr session delete` 成功后调用：Herdr 删除 session 后以同名重建会重新分配
+    workspace/pane/name ID，上一代 descriptor 会与新 live identity 假匹配，让 restart
+    误用旧 kind/args。返回 cleared 计数；落盘失败时返回 error，由调用方结构化暴露，
+    不静默宣告 descriptor 已安全。
+    """
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        descriptors = data["descriptors"]
+        doomed = [
+            key for key, record in descriptors.items()
+            if isinstance(record, dict) and record.get("session") == session
+        ]
+        if not doomed:
+            return {"cleared": 0}
+        for key in doomed:
+            del descriptors[key]
+        try:
+            _save_launch_descriptors(data)
+        except OSError as exc:
+            return {"cleared": 0, "error": str(exc)}
+        return {"cleared": len(doomed)}
+
+
+def clear_launch_descriptor_by_pane(session: str, pane_id: str) -> dict[str, Any]:
+    """删除某 session+pane 对应的 launch descriptor。
+
+    pane close 后 Herdr 可能复用该 opaque pane ID；若不清理，新 agent 落到复用 ID 时，
+    get_launch_descriptor 会把旧记录误当当前契约。仅在 `herdr pane close` 成功后调用。
+    """
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        descriptors = data["descriptors"]
+        doomed = [
+            key for key, record in descriptors.items()
+            if isinstance(record, dict)
+            and record.get("session") == session
+            and record.get("pane_id") == pane_id
+        ]
+        if not doomed:
+            return {"cleared": 0}
+        for key in doomed:
+            del descriptors[key]
+        try:
+            _save_launch_descriptors(data)
+        except OSError as exc:
+            return {"cleared": 0, "error": str(exc)}
+        return {"cleared": len(doomed)}
+
+
 def _rename_agent_context(
     session: str, pane: dict[str, Any], agent: str, layout: str,
     label: str | None = None,
@@ -1323,9 +1375,17 @@ def close_pane(session: str, pane_id: str) -> dict[str, Any]:
         return {"available": False}
     try:
         _run(["--session", session, "pane", "close", pane_id], timeout=5)
-        return {"available": True, "closed": pane_id}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
+    # pane 已关闭：清理该 pane 的 launch descriptor。Herdr 可能复用 opaque pane ID，
+    # 不清理会让后续复用该 ID 的新 agent 误读旧契约。
+    cleanup = clear_launch_descriptor_by_pane(session, pane_id)
+    result: dict[str, Any] = {"available": True, "closed": pane_id}
+    if cleanup.get("error"):
+        result["descriptor_cleanup_error"] = cleanup["error"]
+    else:
+        result["descriptors_cleared"] = cleanup.get("cleared", 0)
+    return result
 
 
 SPLIT_MODES = ("horizontal", "vertical", "grid4")
@@ -1610,6 +1670,15 @@ def delete_session(session: str) -> dict[str, Any]:
         return {"available": False}
     try:
         _run(["session", "delete", session], timeout=10)
-        return {"available": True, "deleted": session}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
+    # session 已删除：清理该 session 的 launch descriptor，避免同名 session 重建后
+    # 把上一代 args 误当当前权威契约（workspace/pane/name ID 会被 Herdr 重新分配）。
+    # 清理失败不复活 session，但必须结构化暴露，不静默宣告 descriptor 已安全。
+    cleanup = clear_launch_descriptors(session)
+    result: dict[str, Any] = {"available": True, "deleted": session}
+    if cleanup.get("error"):
+        result["descriptor_cleanup_error"] = cleanup["error"]
+    else:
+        result["descriptors_cleared"] = cleanup.get("cleared", 0)
+    return result

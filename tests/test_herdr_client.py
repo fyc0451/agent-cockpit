@@ -1197,6 +1197,117 @@ def test_start_agent_reuse_exposes_descriptor_name_without_fabricating(monkeypat
     assert with_desc["kind"] == "codex"
 
 
+def test_clear_launch_descriptors_removes_only_target_session():
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name="a-1", kind="codex", args=[], agent="codex",
+    )
+    herdr_client.save_launch_descriptor(
+        session="other", pane_id="w1:p1", name="a-1", kind="codex", args=[], agent="codex",
+    )
+    assert herdr_client.clear_launch_descriptors("demo") == {"cleared": 1}
+    assert herdr_client.clear_launch_descriptors("demo") == {"cleared": 0}  # 幂等
+    assert herdr_client.get_launch_descriptor_by_name("demo", "a-1") is None
+    assert herdr_client.get_launch_descriptor_by_name("other", "a-1") is not None
+
+
+def test_delete_session_clears_descriptors_only_on_success(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name="codex-1", kind="codex",
+        args=["--old"], agent="codex",
+    )
+    # delete 失败 → 不清理，结果只含 error
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: (_ for _ in ()).throw(RuntimeError("herdr failed: not_stopped")),
+    )
+    failed = herdr_client.delete_session("demo")
+    assert failed["error"] == "herdr failed: not_stopped"
+    assert "descriptors_cleared" not in failed
+    assert herdr_client.get_launch_descriptor("demo", "w1:p1") is not None
+    # delete 成功 → 清理
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: "")
+    ok = herdr_client.delete_session("demo")
+    assert ok["deleted"] == "demo"
+    assert ok["descriptors_cleared"] == 1
+    assert herdr_client.get_launch_descriptor("demo", "w1:p1") is None
+
+
+def test_delete_session_preserves_other_sessions_descriptors(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: "")
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name="codex-1", kind="codex",
+        args=["--a"], agent="codex",
+    )
+    herdr_client.save_launch_descriptor(
+        session="other", pane_id="w1:p1", name="codex-1", kind="codex",
+        args=["--b"], agent="codex",
+    )
+    result = herdr_client.delete_session("demo")
+    assert result["descriptors_cleared"] == 1
+    assert herdr_client.get_launch_descriptor("demo", "w1:p1") is None
+    kept = herdr_client.get_launch_descriptor("other", "w1:p1")
+    assert kept is not None and kept["args"] == ["--b"]
+
+
+def test_same_name_session_recreate_cannot_read_stale_descriptor(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: "")
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name="agent-1", kind="codex",
+        args=["--old"], agent="codex",
+    )
+    herdr_client.delete_session("demo")
+    # 同名 session 重建后，即便 Herdr 复用 w1:p1 / agent-1，也读不到上一代契约
+    assert herdr_client.get_launch_descriptor("demo", "w1:p1") is None
+    assert herdr_client.get_launch_descriptor_by_name("demo", "agent-1") is None
+
+
+def test_close_pane_clears_its_descriptor_only_on_success(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p2", name="codex-1", kind="codex",
+        args=[], agent="codex",
+    )
+    flag = {"fail": True}
+
+    def fake_run(args, timeout=10):
+        if flag["fail"]:
+            raise RuntimeError("herdr failed: busy")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    failed = herdr_client.close_pane("demo", "w1:p2")
+    assert failed["error"] == "herdr failed: busy"
+    assert herdr_client.get_launch_descriptor("demo", "w1:p2") is not None  # close 失败不清
+    flag["fail"] = False
+    ok = herdr_client.close_pane("demo", "w1:p2")
+    assert ok["closed"] == "w1:p2"
+    assert ok["descriptors_cleared"] == 1
+    assert herdr_client.get_launch_descriptor("demo", "w1:p2") is None
+
+
+def test_descriptor_cleanup_failure_is_surfaced_not_silent(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name="codex-1", kind="codex",
+        args=["--old"], agent="codex",
+    )
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: "")  # delete 成功
+    monkeypatch.setattr(
+        herdr_client, "_save_launch_descriptors",
+        lambda data: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    result = herdr_client.delete_session("demo")
+    # herdr 侧已删除，但 descriptor 清理失败必须结构化暴露，不静默宣告安全
+    assert result["deleted"] == "demo"
+    assert result["descriptor_cleanup_error"] == "disk full"
+    assert "descriptors_cleared" not in result
+    # 清理失败 → 盘上旧记录仍在（读取走 _load，不受 _save mock 影响），由运营处理
+    assert herdr_client.get_launch_descriptor("demo", "w1:p1") is not None
+
+
 def test_start_agent_rejects_label_used_by_another_pane(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
