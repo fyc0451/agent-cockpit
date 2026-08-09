@@ -4711,21 +4711,30 @@ def _retire_client_locked(
     return owner
 
 
-def _reap_owner(owner: _InflightOwner, join_timeout: float) -> bool:
-    """_STATE_REAP_LOCK 下调用:锁外 stop+join;真正成功(线程全退)才经
-    锁内身份 CAS 摘除,失败保留真实引用等下轮重试。返回是否已回收。"""
+def _reap_owner(owner: _InflightOwner, absolute_deadline: float) -> bool:
+    """_STATE_REAP_LOCK 下调用:锁外 stop+join(剩余窗口);真正成功才经
+    锁内身份 CAS 摘除。phase2 CLIENT reacquire 用 remaining 有界获取
+    (#1883);拿不到→False(deferred,owner 保留不清 ticket/不丢 owner),
+    绝不阻塞。survivor 转移由调用方(stop 路径)做,reaper 不转移。"""
+    remaining = max(0.0, absolute_deadline - time.monotonic())
     try:
-        ok = owner.client.stop(join_timeout=join_timeout)
+        ok = owner.client.stop(join_timeout=remaining)
     except Exception:
         logger.exception("herdr state client stop failed: %s", owner.name)
         ok = False
-    if ok:
-        with _STATE_CLIENT_LOCK:
-            if _state_retiring.get(owner.token) is owner:
-                del _state_retiring[owner.token]
-            if _state_survivors.get(owner.token) is owner:
-                del _state_survivors[owner.token]
-    return ok
+    if not ok:
+        return False
+    remaining = max(0.0, absolute_deadline - time.monotonic())
+    if not _STATE_CLIENT_LOCK.acquire(timeout=remaining):
+        return False  # deferred:拿不到 CLIENT,owner 保留在 retiring/survivors
+    try:
+        if _state_retiring.get(owner.token) is owner:
+            del _state_retiring[owner.token]
+        if _state_survivors.get(owner.token) is owner:
+            del _state_survivors[owner.token]
+    finally:
+        _STATE_CLIENT_LOCK.release()
+    return True
 
 
 def _pending_owners_locked() -> list[_InflightOwner]:
@@ -4743,7 +4752,7 @@ def _reap_owners(owners: list[_InflightOwner], budget: float) -> None:
     with _STATE_REAP_LOCK:
         deadline = time.monotonic() + budget
         for owner in owners:
-            _reap_owner(owner, max(0.0, deadline - time.monotonic()))
+            _reap_owner(owner, deadline)
 
 
 def _reap_retired_clients() -> None:
@@ -4768,7 +4777,7 @@ def _open_state_clients() -> bool:
                 break
             for owner in owners:
                 _reap_owner(
-                    owner, max(0.0, deadline - time.monotonic())
+                    owner, deadline
                 )
             time.sleep(0.05)
         with _STATE_CLIENT_LOCK:
@@ -4854,20 +4863,21 @@ def _stop_state_client() -> list[dict[str, Any]]:
                 logger.exception("herdr state client request_stop failed")
         survived: list[_InflightOwner] = []
         for owner in owners:
-            remaining = max(0.0, absolute_deadline - time.monotonic())
-            if not _reap_owner(owner, join_timeout=remaining):
-                # 锁内身份 CAS:仅仍受管于 retiring/survivors 的才确认
-                # survivor;被并发成功摘除的不得复活/报告
-                with _STATE_CLIENT_LOCK:
-                    managed = False
-                    if _state_retiring.get(owner.token) is owner:
-                        del _state_retiring[owner.token]
-                        _state_survivors[owner.token] = owner
-                        managed = True
-                    elif _state_survivors.get(owner.token) is owner:
-                        managed = True
-                if managed:
-                    survived.append(owner)
+            if not _reap_owner(owner, absolute_deadline):
+                # R12:phase2 survivor 转移用 bounded CLIENT reacquire(remaining);
+                # 拿不到→deferred(owner 保留在 retiring,不清 ticket/不丢 owner)
+                remaining = max(0.0, absolute_deadline - time.monotonic())
+                if _STATE_CLIENT_LOCK.acquire(timeout=remaining):
+                    try:
+                        if _state_retiring.get(owner.token) is owner:
+                            del _state_retiring[owner.token]
+                            _state_survivors[owner.token] = owner
+                            survived.append(owner)
+                        elif _state_survivors.get(owner.token) is owner:
+                            survived.append(owner)
+                    finally:
+                        _STATE_CLIENT_LOCK.release()
+                # 拿不到 CLIENT → deferred:owner 留在 retiring,不进 survived
         # 完成:经 TICKET 锁消费 <= 本 ticket 的全部 intent(覆盖更早
         # deferred);更晚 ticket 保留,较早完成绝不清除较晚 ticket
         _consume_stop_tickets(ticket)

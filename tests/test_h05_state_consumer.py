@@ -1848,3 +1848,87 @@ def test_opencode_injection_removed_from_server_source():
     source = Path(server.__file__).read_text(encoding="utf-8")
     assert "notify_opencode_color_scheme" not in source
     assert "_TERM_THEME_TASKS" not in source
+
+
+class TestPhase2BoundedClientR12:
+    """#1883: phase2 CLIENT reacquire bounded by absolute_deadline;另一线程
+    持 CLIENT 至 >budget → _reap_owner/survivor 转移在 remaining 内返回
+    False(deferred),不阻塞;ownership 保留在 retiring。"""
+
+    def _hold_client(self, hold_s: float):
+        """起一线程持 _STATE_CLIENT_LOCK hold_s 秒。"""
+        release = threading.Event()
+
+        def hold():
+            with server._STATE_CLIENT_LOCK:
+                release.wait(hold_s)
+
+        t = threading.Thread(target=hold, daemon=True)
+        t.start()
+        return release, t
+
+    def test_reap_returns_within_budget_when_client_held_stop_true(self, monkeypatch):
+        """stop=True 后 CLIENT reacquire 被另一线程持有→_reap_owner 在剩余
+        窗口内返回 False(deferred);owner 保留在 retiring;wall-clock <= budget+容差。"""
+        client = FakeStateClient({"s1": "/tmp/x.sock"})
+        with server._STATE_CLIENT_LOCK:
+            owner = server._retire_client_locked("s1", server._state_epoch, client)
+        release, holder = self._hold_client(0.5)
+        time.sleep(0.05)  # 确保持有
+        budget = 0.1
+        deadline = time.monotonic() + budget
+        start = time.monotonic()
+        result = server._reap_owner(owner, deadline)
+        elapsed = time.monotonic() - start
+        release.set(); holder.join(timeout=2)
+        assert result is False  # deferred
+        assert elapsed < budget + 0.08  # bounded (容差 for scheduling)
+        assert owner.token in server._state_retiring  # ownership 保留
+
+    def test_survivor_transfer_deferred_when_client_held_stop_false(self, monkeypatch):
+        """stop=False 后 phase2 survivor 转移用 bounded CLIENT;拿不到→deferred,
+        owner 保留在 retiring(不转 survivor);wall-clock <= budget+容差。"""
+        class FailStop(FakeStateClient):
+            def stop(self, join_timeout=5.0):
+                return False
+        client = FailStop({"s1": "/tmp/x.sock"})
+        with server._STATE_CLIENT_LOCK:
+            owner = server._retire_client_locked("s1", server._state_epoch, client)
+        release, holder = self._hold_client(0.5)
+        time.sleep(0.05)
+        budget = 0.1
+        deadline = time.monotonic() + budget
+        start = time.monotonic()
+        survived = []
+        # 模拟 phase2 loop（_stop_state_client 内的逻辑）
+        if not server._reap_owner(owner, deadline):
+            remaining = max(0.0, deadline - time.monotonic())
+            if server._STATE_CLIENT_LOCK.acquire(timeout=remaining):
+                try:
+                    if server._state_retiring.get(owner.token) is owner:
+                        del server._state_retiring[owner.token]
+                        server._state_survivors[owner.token] = owner
+                        survived.append(owner)
+                finally:
+                    server._STATE_CLIENT_LOCK.release()
+        elapsed = time.monotonic() - start
+        release.set(); holder.join(timeout=2)
+        assert len(survived) == 0  # deferred:未转移
+        assert owner.token in server._state_retiring  # 保留在 retiring
+        assert elapsed < budget + 0.08  # bounded
+
+    def test_reap_succeeds_after_client_released_retry(self, monkeypatch):
+        """retry:CLIENT 释放后 _reap_owner 正常摘除(stop=True)。"""
+        client = FakeStateClient({"s1": "/tmp/x.sock"})
+        with server._STATE_CLIENT_LOCK:
+            owner = server._retire_client_locked("s1", server._state_epoch, client)
+        # 第一轮:CLIENT 被持有→deferred
+        release, holder = self._hold_client(0.3)
+        time.sleep(0.05)
+        assert not server._reap_owner(owner, time.monotonic() + 0.1)
+        assert owner.token in server._state_retiring
+        # holder 释放后 retry
+        release.set(); holder.join(timeout=2)
+        time.sleep(0.05)  # 确保 holder 退出
+        assert server._reap_owner(owner, time.monotonic() + 1.0) is True
+        assert owner.token not in server._state_retiring  # 摘除成功
