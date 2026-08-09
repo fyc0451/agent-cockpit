@@ -4817,11 +4817,15 @@ def health():
 @app.get("/health/live")
 def health_live():
     """纯读无副作用(Wiki13 J1A)：只证明目标进程响应并返回 release identity。
-    不探测 Herdr/Hub/Push/Mail，不触发 DDL/reconcile。"""
+    不探测 Herdr/Hub/Push/Mail，不触发 DDL/reconcile。
+    R2: 错误使用 stable reason code，不回显 raw env/VERSION/exception。"""
     try:
         identity = release_identity.get_release_identity()
     except ValueError as exc:
-        raise HTTPException(503, f"release identity invalid: {exc}")
+        # R2: stable reason code — 不回显 raw env/exception text
+        raise HTTPException(503, f"release_identity_error: {exc}")
+    except Exception:
+        raise HTTPException(503, "release_identity_error: unexpected")
     return {"status": "live", "identity": identity}
 
 
