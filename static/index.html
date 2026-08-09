@@ -335,6 +335,8 @@ header .spacer{flex:1}
 .term-keys .term-key-extra{display:none}
 /* 按键栏默认不占行,点工具栏 ⌨ 按键才展开(展开入口在工具栏,收起态也保留) */
 .term-keys.expanded{display:flex;flex-wrap:wrap;overflow-y:auto;max-height:46dvh;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.term-inline-input{display:none;gap:6px;padding:6px;align-items:center;background:var(--bg2);border-top:1px solid var(--bd)}
+.term-inline-input input{flex:1;min-width:0}
 .term-keys.expanded .term-key-extra{display:block}
 .term-keys button.active{color:var(--bg);background:var(--accent);border-color:var(--accent)}
 #termContainer{min-height:0;position:relative}
@@ -738,7 +740,13 @@ header .spacer{flex:1}
       <button class="term-key-extra" onclick="termKey('F12')">F12</button>
     </div>
     <div id="termMain" style="flex:1;display:flex;min-height:0;overflow:hidden">
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;min-height:0">
       <div id="termContainer" style="flex:1;min-width:0;background:var(--term-bg);padding:6px 14px 6px 6px;overflow:hidden"></div>
+      <div id="termInlineInput" class="term-inline-input" style="display:none">
+        <input id="termTextInput" placeholder="输入发给 agent 的文字…" enterkeyhint="send" autocomplete="off" onkeydown="if(event.key==='Enter'){termSendInlineInput()}">
+        <button class="primary sm" onclick="termSendInlineInput()">发送</button>
+      </div>
+      </div>
       <div id="termFilePanel" style="display:none;width:min(40%,460px);flex:none;border-left:1px solid var(--bd);background:var(--bg2);flex-direction:column;min-height:0">
         <div class="editor-bar"><span class="ep" id="termFilePath"></span><button class="icon" onclick="termFileLoad()" title="刷新">↻</button><button class="icon" onclick="termFileClose()" title="关闭">✕</button></div>
         <div id="termFileList" style="flex:1;overflow:auto;padding:6px"></div>
@@ -2714,6 +2722,14 @@ function termKey(name){
   queueTermInput(TERM_ID,applyTermModifiers(seq,name));
   XTERM&&XTERM.focus();
 }
+// H5 触屏:点终端画面不弹键盘,文字输入走这个内联输入框(点它弹键盘)。
+function termSendInlineInput(){
+  const inp=document.getElementById('termTextInput');if(!inp)return;
+  const text=inp.value;if(!text)return;
+  if(!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
+  queueTermInput(TERM_ID,text);
+  inp.value='';try{inp.focus()}catch(e){}
+}
 async function termEnsure(){
   await restoreTerms();
   if(TERM_ID&&TERM_INSTANCES[TERM_ID]){showTermInstance(TERM_ID);return}
@@ -3698,6 +3714,9 @@ function showTermInstance(id){
     inst.ws=openTermWS(id,inst.xterm,false);
   }
   XTERM=inst.xterm;FIT=inst.fit;TERM_WS=inst.ws;
+  // H5/触屏:显示内联打字输入条(点它弹键盘);桌面端隐藏(直接在终端打字)
+  const inlineInput=document.getElementById('termInlineInput');
+  if(inlineInput)inlineInput.style.display=isTouchTerminal()?'flex':'none';
   safeFitOf(inst.fit,inst.xterm);
   // 首次挂载时 flex/WebGL 布局尚未稳定；下一帧按最终尺寸重算并强制重绘，
   // 避免第一次进入 TUI 错位、必须切换第二次才恢复。
@@ -3820,6 +3839,18 @@ function termMount(id){
     if(prewarmed){el.appendChild(xterm.element);prewarmed.host.remove();inst.webgl=prewarmed.webgl}
     else{xterm.open(el);inst.webgl=enableTermWebgl(xterm)}
     enableTermTouchScroll(el,xterm);
+    // H5/触屏:点终端画面或滚动不应弹软键盘。xterm 用隐藏 textarea(.xterm-helper-textarea)
+    // 接收键盘,触摸时它获焦会呼出键盘。在 capture 阶段拦截 focusin,阻止该 textarea 获焦。
+    // 输入走专门的输入框(点它才弹)。桌面端和 term-keys 按钮不受影响。
+    if(isTouchTerminal()){
+      el.addEventListener('focusin',e=>{
+        if(e.target instanceof HTMLTextAreaElement&&e.target.classList.contains('xterm-helper-textarea')){
+          e.preventDefault();e.stopImmediatePropagation();
+          // 已获焦则立即收回(避免键盘闪烁)
+          if(document.activeElement===e.target)e.target.blur();
+        }
+      },true);
+    }
     xterm.parser.registerOscHandler(52,handleOsc52);enableTermHistoryPaging(el,id,xterm);safeFitOf(fit,xterm);
     if(typeof ResizeObserver!=='undefined'){
       const ro=new ResizeObserver(()=>{const current=TERM_INSTANCES[id];if(current&&!current.closing)safeFitOf(current.fit,current.xterm)});
