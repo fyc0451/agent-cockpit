@@ -1916,38 +1916,26 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     assert "终端正在启动，请稍候" not in term_key
 
 
-def test_theme_switch_forces_full_page_reload_after_saving_preference():
-    # 运行时改 xterm/WebGL 主题会切一次后错乱；用户切换改为写偏好 + 整页刷新。
-    # boot(save=false) 只同步 DOM class，不 reload；reload 前写入 resume 并在 init 自动 attach。
+def test_theme_switch_is_inplace_without_reload():
+    """主题必须就地切换：禁止 reload（会 re-attach 假死 + 弄丢 Mode 2031 目标 PTY）。"""
     js = _inline_js()
-    assert "function _repaintTermForTheme" not in js
-    assert "TERM_LIGHT" not in js
     assert "function applyDocumentTheme(mode)" in js
-    assert "function captureThemeResume()" in js
-    assert "function consumeThemeResume()" in js
-    assert "THEME_RESUME_KEY" in js
     set_theme = js.split("function setTheme(mode,save=true){", 1)[1].split(
         "function toggleTheme", 1
     )[0]
-    assert "localStorage.setItem('dash-theme'" in set_theme
-    assert "location.reload()" in set_theme
-    assert "captureThemeResume()" in set_theme
-    assert "if(!save)" in set_theme
+    assert "location.reload()" not in set_theme
+    assert "captureThemeResume()" not in set_theme
     assert "applyDocumentTheme" in set_theme
-    assert "options.theme=th" not in set_theme
-    assert "showTermThemeOverlay()" not in set_theme
-    assert "requestAnimationFrame(applyTheme)" not in set_theme
-    assert "sendAllTermColorSchemes()" not in set_theme
+    # class 切换后再 termTheme()，避免反色
+    assert set_theme.index("applyDocumentTheme") < set_theme.index("termTheme()")
+    assert "options.theme=th" in set_theme
+    assert "sendAllTermColorSchemes()" in set_theme
     assert "/api/theme/herdr" in set_theme
-    assert "setTimeout(finish,800)" in set_theme
+    assert "localStorage.setItem('dash-theme'" in set_theme
+    # 旧 resume re-attach 不得再出现
     init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
-    assert "consumeThemeResume()" in init
-    assert "doAttachHerdr(themeResume.session,{themeResume:true})" in init
-    assert "function scheduleHerdrColorSchemeNotify" in js
-    attach = js.split("async function doAttachHerdr(session", 1)[1].split(
-        "// ============ herdr 流视图", 1
-    )[0]
-    assert "scheduleHerdrColorSchemeNotify" in attach
+    assert "doAttachHerdr(themeResume" not in init
+
 
 
 def test_layout_pane_list_checkbox_not_full_width():

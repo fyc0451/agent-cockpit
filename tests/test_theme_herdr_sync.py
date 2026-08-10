@@ -26,9 +26,7 @@ x = 1
     text = path.read_text(encoding="utf-8")
     config = tomllib.loads(text)
     assert config["theme"]["name"] == "catppuccin"
-    assert config["theme"]["auto_switch"] is True  # Web 同步开启 auto_switch
-    assert config["theme"]["dark_name"] == "catppuccin"
-    assert config["theme"]["light_name"] == "solarized-light"
+    assert config["theme"]["auto_switch"] is False  # 强制 name，避免 appearance 默认 dark 卡死
     assert config["keys"]["x"] == 1
 
 
@@ -39,7 +37,7 @@ auto_switch = false
     herdr_client.set_theme_name("dracula")
     config = tomllib.loads(path.read_text(encoding="utf-8"))
     assert config["theme"]["name"] == "dracula"
-    assert config["theme"]["auto_switch"] is True
+    assert config["theme"]["auto_switch"] is False
 
 
 def test_set_theme_appends_section_when_absent(tmp_path, monkeypatch):
@@ -162,7 +160,10 @@ def test_frontend_set_theme_calls_herdr_sync():
         encoding="utf-8"
     )
     assert "/api/theme/herdr" in html
-    # 整页刷新路径：写偏好后调 herdr 同步；attach 后再 Mode 2031 推 agent pane
-    assert "captureThemeResume()" in html or "function captureThemeResume" in html
-    assert "scheduleHerdrColorSchemeNotify" in html
-    assert "location.reload()" in html
+    # 就地切换：sendAllTermColorSchemes + herdr 同步；禁止 setTheme 整页 reload
+    set_theme = html.split("function setTheme(mode,save=true){", 1)[1].split(
+        "function toggleTheme", 1
+    )[0]
+    assert "sendAllTermColorSchemes()" in set_theme
+    assert "/api/theme/herdr" in set_theme
+    assert "location.reload()" not in set_theme

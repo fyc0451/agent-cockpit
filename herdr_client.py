@@ -320,10 +320,11 @@ def set_theme_name(name: str) -> Path:
 
 
 def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
-    """按 Web light/dark 写 herdr [theme]：name + auto_switch + dark/light_name。
+    """按 Web light/dark 强制写 herdr [theme].name，并关闭 auto_switch。
 
-    auto_switch=true 时 Mode 2031 会在 dark_name/light_name 间切换，opencode 等
-    跟 host 终端色的 pane 才能随 Web 主题变。light 名必须是浅色内置主题。
+    关键：auto_switch=true 时若 attach 客户端未收到 Mode 2031，appearance 默认 dark，
+    会一直用 dark_name，导致 Web 切浅色后 opencode 等 pane「永远不变」。
+    因此 Web 为主时 auto_switch=false，直接 name=浅色/深色内置主题，reload-config 即生效。
     """
     if mode not in ("light", "dark"):
         raise ValueError("mode 必须是 light 或 dark")
@@ -336,8 +337,6 @@ def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
         name = light_name if mode == "light" else dark_name
     if not _THEME_NAME_RE.fullmatch(name or ""):
         raise ValueError("非法主题名")
-    if not _THEME_NAME_RE.fullmatch(dark_name) or not _THEME_NAME_RE.fullmatch(light_name):
-        raise ValueError("非法主题名")
     path = herdr_config_path()
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.is_file() else []
     out: list[str] = []
@@ -349,11 +348,10 @@ def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
             return f"{key} = {value}{ending}"
         return f'{key} = "{value}"{ending}'
 
+    # 强制 name；auto_switch=false 让 reload 立刻用 name，不依赖 host appearance
     keys_wanted = {
         "name": name,
-        "auto_switch": "true",
-        "dark_name": dark_name,
-        "light_name": light_name,
+        "auto_switch": "false",
     }
 
     for line in lines:
@@ -371,9 +369,11 @@ def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
             m = re.match(r"^\s*(name|auto_switch|dark_name|light_name)\s*=", line)
             if m:
                 key = m.group(1)
-                ending = "\n" if line.endswith("\n") else ""
-                out.append(_kv(key, keys_wanted[key], ending))
-                seen.add(key)
+                if key in keys_wanted:
+                    ending = "\n" if line.endswith("\n") else ""
+                    out.append(_kv(key, keys_wanted[key], ending))
+                    seen.add(key)
+                # 丢弃旧 dark_name/light_name 行（Web 强制 name 模式不再需要）
                 continue
         out.append(line)
     if in_theme:

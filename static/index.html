@@ -5584,24 +5584,36 @@ function applyDocumentTheme(mode){
   return light;
 }
 function setTheme(mode,save=true){
+  // 就地切换：禁止 location.reload。
+  // reload 会 re-attach、loading 吞输入，且销毁带 label 的 PTY 导致 Mode 2031 无处可推。
   const light=mode==='light';
-  if(!save){
-    applyDocumentTheme(light?'light':'dark');
-    return;
-  }
-  try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
   applyDocumentTheme(light?'light':'dark');
-  captureThemeResume();
-  const reload=()=>{try{location.reload()}catch(e){location.href=location.href}};
-  let done=false;
-  const finish=()=>{if(done)return;done=true;reload()};
-  try{
-    fetch('/api/theme/herdr',{
-      method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
-      body:JSON.stringify({mode:light?'light':'dark'}),
-    }).then(finish,finish);
-  }catch(e){finish()}
-  setTimeout(finish,800);
+  // 必须在 class 切换之后再取 termTheme，否则会用反色（旧 bug）
+  const th=termTheme();
+  for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
+    try{
+      if(id===TERM_ID&&inst.el?.style.display!=='none'){
+        inst.xterm.options.theme=th;
+        try{inst.xterm.refresh(0,inst.xterm.rows-1)}catch(_){}
+      }else{
+        inst.pendingTheme=th;
+      }
+    }catch(e){}
+  }
+  // 现网已 attach 的 herdr PTY：立刻 Mode 2031（opencode 等跟 host 色）
+  sendAllTermColorSchemes();
+  if(save){
+    try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+    // herdr config 强制 name + reload；grok 后台 /theme
+    try{
+      fetch('/api/theme/herdr',{
+        method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
+        body:JSON.stringify({mode:light?'light':'dark'}),
+      }).catch(()=>{});
+    }catch(e){}
+  }
+  // 清掉历史 theme-resume，避免误触发 re-attach
+  try{localStorage.removeItem(THEME_RESUME_KEY)}catch(e){}
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
 (function(){try{setTheme(localStorage.getItem('dash-theme')||'light',false)}catch(e){}})();
@@ -5847,12 +5859,10 @@ async function init(){
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
   applyLang();
   scheduleTermThemePrewarm();
-  const themeResume=consumeThemeResume();
-  if(themeResume?.session)rememberSession(themeResume.session);
-  const initialView=(themeResume?.view&&document.getElementById('view-'+themeResume.view))
-    ?themeResume.view
-    :(viewFromLocation()||'attention');
-  if(!viewFromLocation()||themeResume?.view)syncViewLocation(initialView,true);
+  // 丢弃历史 theme-resume（旧版整页刷新残留），主题已改为就地切换
+  try{consumeThemeResume()}catch(e){}
+  const initialView=viewFromLocation()||'attention';
+  if(!viewFromLocation())syncViewLocation(initialView,true);
   VIEW_LOCATION_LOCK=true;try{showView(initialView)}finally{VIEW_LOCATION_LOCK=false}
   loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
   document.addEventListener('visibilitychange',recoverPageState);
@@ -5866,21 +5876,6 @@ async function init(){
   connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();
   VIEW_LOCATION_LOCK=true;try{await handleAttentionHash()}finally{VIEW_LOCATION_LOCK=false}
   loadVersion();
-  // 主题整页刷新后：自动回到终端并重新 attach 原 session，不丢工作现场
-  if(themeResume?.autoAttach&&themeResume.session&&validSessionName(themeResume.session)){
-    try{
-      if(themeResume.view==='herdrflow'){
-        HF_SESSION=themeResume.session;
-        rememberSession(themeResume.session);
-        if(document.querySelector('#nav button.active')?.dataset.view!=='herdrflow'){
-          VIEW_LOCATION_LOCK=true;try{showView('herdrflow')}finally{VIEW_LOCATION_LOCK=false}
-        }
-      }else{
-        // 不阻塞 init：attach 在后台跑，避免整页几秒点不动
-        void doAttachHerdr(themeResume.session,{themeResume:true}).catch(e=>toast('主题切换后自动打开 session 失败: '+e,4000));
-      }
-    }catch(e){toast('主题切换后自动打开 session 失败: '+e,4000)}
-  }
 }
 init();
 </script>
