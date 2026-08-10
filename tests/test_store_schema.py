@@ -267,6 +267,64 @@ def test_inbox_route_exact_value_shape(isolated_roots):
     }
 
 
+def test_inbox_route_nested_entries_fail_closed(isolated_roots):
+    """Lead R4 counter-example (1): garbage nested entries not compatible."""
+    path = runtime_paths.store("inbox_route")
+    path.write_text(json.dumps({
+        "version": 2,
+        "routes": {
+            "h:1": {
+                "delivered": [True],
+                "last_delivered": [{"future": 1}],
+                "pending": ["garbage"],
+            },
+        },
+    }), encoding="utf-8")
+    r = store_schema._check_versioned_json("inbox_route")
+    assert r["state"] != "compatible"
+    assert r["reason"] in {
+        store_schema.REASON_FINGERPRINT_MISMATCH,
+        store_schema.REASON_UNKNOWN_FIELDS,
+    }
+
+
+def test_settings_invalid_payloads_never_raise(isolated_roots):
+    """Lead R4 counter-example (2): no TypeError/OverflowError; NaN rejected."""
+    path = runtime_paths.store("settings")
+    cases = [
+        {"language": []},
+        {"enabled_agents": [{}]},
+        {"upload_max_mb": float("inf")},
+        {"term": {"idle_ttl": float("nan")}},
+        {"team_hub_url": "http://example.com"},  # public HTTP rejected
+    ]
+    for payload in cases:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        r = store_schema._check_settings()
+        assert r["state"] != "compatible", payload
+        assert r["reason"] in {
+            store_schema.REASON_FINGERPRINT_MISMATCH,
+            store_schema.REASON_UNKNOWN_FIELDS,
+        }
+
+
+def test_required_manifest_inventory_covers_static_tree():
+    """Lead R4 (3): inventory from real static tree, not hand-written 4-item set."""
+    inv = store_schema.required_manifest_digest_paths()
+    assert "VERSION" in inv
+    assert "static/index.html" in inv
+    assert "static/sw.js" in inv
+    assert "static/manifest.webmanifest" in inv
+    assert "static/fonts/CascadiaMono.woff2" in inv
+    assert "static/fonts/CascadiaMonoNF.woff2" in inv
+    assert "static/vendor/xterm/xterm.js" in inv
+    assert "static/vendor/xterm/xterm.css" in inv
+    assert "static/vendor/xterm/addon-fit.js" in inv
+    assert "static/vendor/xterm/addon-webgl.js" in inv
+    # fonts(2)+vendor(>=4 runtime)+index+sw+webmanifest+VERSION
+    assert len(inv) >= 10
+
+
 def test_typing_legacy_float_and_panes(isolated_roots):
     path = runtime_paths.store("typing")
     path.write_text(json.dumps({"demo": 1.5}), encoding="utf-8")

@@ -9,11 +9,15 @@ Contract (decisions/2026-08-10-agent-cockpit-j1-ready-schema-policy.md):
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import sqlite3
 import stat
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+import ipaddress
 
 import runtime_paths
 
@@ -404,13 +408,93 @@ _KNOWN_AGENTS = frozenset({
     "codex", "kimi", "claude", "qodercli", "grok", "opencode",
 })
 _LANGUAGES = frozenset({"zh", "en", "ja"})
+_PRIVATE_HTTP_V4 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+_PRIVATE_HTTP_V6 = ipaddress.ip_network("fc00::/7")
+
+
+def _is_finite_number(value: Any) -> bool:
+    if type(value) is bool:
+        return False
+    if type(value) is int:
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    return False
+
+
+def _as_int(value: Any) -> int | None:
+    """Strict int conversion; never raises OverflowError/TypeError to caller."""
+    if type(value) is bool:
+        return None
+    if type(value) is int:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        if abs(value) > 2**53:
+            return None
+        return int(value)
+    return None
+
+
+def _as_float(value: Any) -> float | None:
+    if type(value) is bool:
+        return None
+    if type(value) is int:
+        return float(value)
+    if type(value) is float:
+        return value if math.isfinite(value) else None
+    return None
+
+
+def _service_url_ok(value: Any, *, allow_empty: bool) -> bool:
+    """Mirror settings.normalize_service_url contract without raising."""
+    if not isinstance(value, str):
+        return False
+    endpoint = value.strip().rstrip("/")
+    if not endpoint:
+        return bool(allow_empty)
+    if any(ch.isspace() for ch in endpoint):
+        return False
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError:
+        return False
+    host = parsed.hostname or ""
+    try:
+        address = ipaddress.ip_address(host)
+        private_http = address.is_loopback or (
+            address.version == 4
+            and any(address in network for network in _PRIVATE_HTTP_V4)
+        ) or (
+            address.version == 6 and address in _PRIVATE_HTTP_V6
+        )
+    except ValueError:
+        private_http = host.lower() == "localhost"
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not 1 <= port <= 65535)
+        or (parsed.scheme == "http" and not private_http)
+    ):
+        return False
+    return True
 
 
 def _check_settings() -> dict[str, Any]:
     """Sparse settings: only validate keys that appear (writer sparse store).
 
     Unknown keys → unknown_fields. Present keys: type/range equivalent to
-    settings._validate, without calling the writer module.
+    settings._validate, without calling the writer module. Never raises.
     """
     name = "settings"
     path = runtime_paths.store(name)
@@ -425,63 +509,62 @@ def _check_settings() -> dict[str, Any]:
         return _store_result(name, "error", REASON_INVALID_JSON)
     if not isinstance(data, dict):
         return _store_result(name, "error", REASON_INVALID_JSON)
-    keys = set(data)
-    if keys - _SETTINGS_KEYS:
-        return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-    # Sparse: empty object is valid (all defaults live-only).
-    if "language" in data:
-        if data["language"] not in _LANGUAGES:
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if "dir_agents" in data:
-        da = data["dir_agents"]
-        if not isinstance(da, dict):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        for d, a in da.items():
-            if not isinstance(d, str) or not isinstance(a, str):
-                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            if not Path(d).is_absolute() or a not in _KNOWN_AGENTS:
-                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if "enabled_agents" in data:
-        agents = data["enabled_agents"]
-        if not isinstance(agents, list) or not agents:
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        if any(a not in _KNOWN_AGENTS for a in agents):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if "upload_max_mb" in data:
-        try:
-            mb = int(data["upload_max_mb"])
-        except (TypeError, ValueError):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        # bool is int subclass — reject
-        if type(data["upload_max_mb"]) is bool or mb < 1 or mb > 2048:
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if "team_hub_url" in data and not isinstance(data["team_hub_url"], str):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if "human_auth_url" in data and not isinstance(data["human_auth_url"], str):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if "term" in data:
-        term = data["term"]
-        if not isinstance(term, dict):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        allowed_term = {"max_terms", "idle_ttl", "write_timeout"}
-        if set(term) - allowed_term:
+    try:
+        keys = set(data)
+        if keys - _SETTINGS_KEYS:
             return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-        try:
+        if "language" in data:
+            lang = data["language"]
+            if not isinstance(lang, str) or lang not in _LANGUAGES:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if "dir_agents" in data:
+            da = data["dir_agents"]
+            if not isinstance(da, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            for d, a in da.items():
+                if not isinstance(d, str) or not isinstance(a, str):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                if not Path(d).is_absolute() or a not in _KNOWN_AGENTS:
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if "enabled_agents" in data:
+            agents = data["enabled_agents"]
+            if not isinstance(agents, list) or not agents:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if any(not isinstance(a, str) or a not in _KNOWN_AGENTS for a in agents):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if "upload_max_mb" in data:
+            mb = _as_int(data["upload_max_mb"])
+            if mb is None or mb < 1 or mb > 2048:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if "team_hub_url" in data:
+            if not _service_url_ok(data["team_hub_url"], allow_empty=True):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if "human_auth_url" in data:
+            if not _service_url_ok(data["human_auth_url"], allow_empty=True):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if "term" in data:
+            term = data["term"]
+            if not isinstance(term, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            allowed_term = {"max_terms", "idle_ttl", "write_timeout"}
+            if set(term) - allowed_term:
+                return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
             if "max_terms" in term:
-                v = term["max_terms"]
-                if type(v) is bool or int(v) < 1 or int(v) > 64:
+                v = _as_int(term["max_terms"])
+                if v is None or v < 1 or v > 64:
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
             if "idle_ttl" in term:
-                v = float(term["idle_ttl"])
-                if type(term["idle_ttl"]) is bool or v < 60.0 or v > 86400.0:
+                v = _as_float(term["idle_ttl"])
+                if v is None or v < 60.0 or v > 86400.0:
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
             if "write_timeout" in term:
-                v = float(term["write_timeout"])
-                if type(term["write_timeout"]) is bool or v < 0.2 or v > 30.0:
+                v = _as_float(term["write_timeout"])
+                if v is None or v < 0.2 or v > 30.0:
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        except (TypeError, ValueError):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    return _store_result(name, "compatible", REASON_COMPATIBLE)
+        return _store_result(name, "compatible", REASON_COMPATIBLE)
+    except Exception:
+        # Ready must never 500 on malformed settings payloads.
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
 
 
 # Exact top-level shapes for versioned JSON (0.3.x).
@@ -589,6 +672,15 @@ def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, 
         if not isinstance(routes, dict):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
         route_keys = frozenset({"delivered", "last_delivered", "pending"})
+        last_keys = frozenset({
+            "id", "message_id", "project_slug", "session",
+            "sender_name", "subject", "delivered_ts",
+        })
+        pending_required = frozenset({
+            "id", "message_id", "project_slug", "session",
+            "sender_name", "subject", "created_ts", "queued_ts",
+        })
+        pending_optional = frozenset({"deliver_error"})
         for key, route in routes.items():
             if not isinstance(key, str) or not isinstance(route, dict):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
@@ -597,8 +689,63 @@ def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, 
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
             if rk - route_keys:
                 return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-            for rk_name in route_keys:
-                if not isinstance(route.get(rk_name), list):
+            delivered = route.get("delivered")
+            if not isinstance(delivered, list):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            for item in delivered:
+                # writer: int|str, not bool
+                if type(item) is bool or not isinstance(item, (int, str)):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            last_delivered = route.get("last_delivered")
+            if not isinstance(last_delivered, list):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            for item in last_delivered:
+                if not isinstance(item, dict):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                ik = set(item)
+                if not last_keys.issubset(ik):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                if ik - last_keys:
+                    return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+                if type(item.get("id")) is bool or not isinstance(item.get("id"), (int, str)):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                for sk in ("project_slug", "session", "sender_name", "subject"):
+                    if not isinstance(item.get(sk), str) and item.get(sk) is not None:
+                        # writer may put None from item.get — accept str or None
+                        if item.get(sk) is not None:
+                            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                if item.get("message_id") is not None and type(item.get("message_id")) is bool:
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                if item.get("message_id") is not None and not isinstance(item.get("message_id"), (int, str)):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                dts = item.get("delivered_ts")
+                if dts is not None and (type(dts) is bool or not isinstance(dts, (int, float)) or not math.isfinite(float(dts))):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            pending = route.get("pending")
+            if not isinstance(pending, list):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            for item in pending:
+                if not isinstance(item, dict):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                ik = set(item)
+                if not pending_required.issubset(ik):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                if ik - pending_required - pending_optional:
+                    return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+                if type(item.get("id")) is bool or not isinstance(item.get("id"), (int, str)):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                for sk in ("project_slug", "session", "sender_name", "subject"):
+                    val = item.get(sk)
+                    if val is not None and not isinstance(val, str):
+                        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                for tk in ("created_ts", "queued_ts"):
+                    tv = item.get(tk)
+                    if tv is not None and (
+                        type(tv) is bool or not isinstance(tv, (int, float))
+                        or not math.isfinite(float(tv))
+                    ):
+                        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                if "deliver_error" in item and not isinstance(item["deliver_error"], str):
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
@@ -713,16 +860,9 @@ def _check_typing() -> dict[str, Any]:
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
-_SHA256_RE = __import__("re").compile(r"^[0-9a-f]{64}$")
-_GIT_SHA_RE = __import__("re").compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MANIFEST_KEYS = frozenset({"version", "source_sha", "edition", "digests"})
-# Frozen required static set (not only index+VERSION).
-_REQUIRED_DIGEST_PATHS = (
-    "static/index.html",
-    "VERSION",
-    "static/sw.js",
-    "static/manifest.webmanifest",
-)
 
 
 def _file_sha256(path: Path) -> str:
@@ -732,6 +872,44 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    """True if any path component is a symlink (not only the leaf)."""
+    try:
+        if not path.is_absolute():
+            path = path.resolve(strict=False)
+        cur = Path(path.anchor)
+        for part in path.parts[1:]:
+            cur = cur / part
+            if cur.is_symlink():
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def required_manifest_digest_paths(root: Path | None = None) -> tuple[str, ...]:
+    """Real inventory of runtime served/loaded artifacts under package root.
+
+    Includes VERSION + every regular file under static/ (fonts, vendor, sw,
+    webmanifest, index). Tests must call this rather than hard-coding the set.
+    """
+    base = root if root is not None else Path(__file__).resolve().parent
+    paths: list[str] = []
+    version = base / "VERSION"
+    if version.is_file():
+        paths.append("VERSION")
+    static = base / "static"
+    if static.is_dir():
+        for p in sorted(static.rglob("*")):
+            if not p.is_file():
+                continue
+            if _path_has_symlink_component(p):
+                continue
+            rel = str(p.relative_to(base)).replace("\\", "/")
+            paths.append(rel)
+    return tuple(paths)
 
 
 def probe_manifest(
@@ -859,14 +1037,29 @@ def probe_manifest(
             "state": "error",
             "reason": REASON_FINGERPRINT_MISMATCH,
         }
-    for rel in _REQUIRED_DIGEST_PATHS:
-        if rel not in digests:
-            return {
-                "name": "release_manifest",
-                "compat_family": COMPAT_FAMILY,
-                "state": "error",
-                "reason": REASON_FINGERPRINT_MISMATCH,
-            }
+    required = set(required_manifest_digest_paths(root))
+    if not required:
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_FINGERPRINT_MISMATCH,
+        }
+    digest_keys = set(digests)
+    if not required.issubset(digest_keys):
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_FINGERPRINT_MISMATCH,
+        }
+    if digest_keys - required:
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "future",
+            "reason": REASON_FUTURE_SCHEMA,
+        }
     for rel, digest in digests.items():
         if not isinstance(rel, str) or not isinstance(digest, str):
             return {
@@ -882,7 +1075,6 @@ def probe_manifest(
                 "state": "error",
                 "reason": REASON_FINGERPRINT_MISMATCH,
             }
-        # Reject path traversal in digest keys
         if ".." in rel.split("/") or rel.startswith("/"):
             return {
                 "name": "release_manifest",
@@ -891,15 +1083,22 @@ def probe_manifest(
                 "reason": REASON_UNSAFE,
             }
         raw_target = root / rel
-        # Reject digest targets that are symlinks (before resolve).
-        if raw_target.is_symlink():
+        if _path_has_symlink_component(raw_target) or raw_target.is_symlink():
             return {
                 "name": "release_manifest",
                 "compat_family": COMPAT_FAMILY,
                 "state": "error",
                 "reason": REASON_UNSAFE,
             }
-        target = raw_target.resolve()
+        try:
+            target = raw_target.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError, FileNotFoundError):
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
         try:
             target.relative_to(root)
         except ValueError:
@@ -909,13 +1108,21 @@ def probe_manifest(
                 "state": "error",
                 "reason": REASON_UNSAFE,
             }
-        if not target.is_file() or target.is_symlink():
+        try:
+            st = target.stat()
+        except OSError:
             return {
                 "name": "release_manifest",
                 "compat_family": COMPAT_FAMILY,
                 "state": "error",
-                "reason": REASON_FINGERPRINT_MISMATCH
-                if not target.is_file() else REASON_UNSAFE,
+                "reason": REASON_UNREADABLE,
+            }
+        if not stat.S_ISREG(st.st_mode):
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_UNSAFE,
             }
         if _file_sha256(target) != digest:
             return {
