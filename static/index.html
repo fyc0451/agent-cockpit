@@ -2309,15 +2309,18 @@ function renderAgentStrip(d){
     </button>`;
   }).join('');
 }
-// R3(#1981):herdr 二进制/命令缺失判定。必须同时锚定 herdr 与缺失语义;
-// 裸 not found / executable / not installed 一律不命中。
+// R4(#2008):严格 allowlist——missing 短语必须直接修饰 herdr 二进制/命令。
+// 删除 R3 的 80 字符共现窗（会误判 socket/plugin/agent/cache not installed，
+// 且 Unicode 词界与 JS \\b 不一致导致测试假绿）。裸 not found/executable/
+// not installed 一律不命中。
 function isHerdrBinaryMissing(reason){
   const r=String(reason||'');
   return /herdr\s+executable\s+not\s+found/i.test(r)
     || /command\s+not\s+found\s*:\s*herdr\b/i.test(r)
     || /herdr\s*未找到/i.test(r)
-    || /\bherdr\b[\s\S]{0,80}\b(not\s+installed|未安装)\b/i.test(r)
-    || /\b(not\s+installed|未安装)\b[\s\S]{0,80}\bherdr\b/i.test(r);
+    || /herdr\s+is\s+not\s+installed/i.test(r)
+    || /not\s+installed\s*:\s*herdr\b/i.test(r)
+    || /herdr\s*未安装/i.test(r);
 }
 function renderBoard(d){
   renderAgentStrip(d);

@@ -336,79 +336,91 @@ def test_board_unavailable_separated_from_idle():
 
 
 def test_board_unavailable_false_shows_real_reason_not_install_claim():
-    # R2(#1904)/R3(#1981):available=false 时只有 reason 明确 herdr 二进制/
-    # 命令缺失才显示安装引导;否则泛化不可用诊断+重试,真实原因走降级横幅
+    # R2/R3/R4:available=false 时只有严格 allowlist 的 herdr 二进制/命令缺失
+    # 才显示安装引导;否则泛化诊断+重试,真实原因走降级横幅
     js = _inline_js()
     body = js.split("if(!d.available){", 1)[1].split("return;", 1)[0]
-    assert "renderBoardDegraded(d)" in body  # 真实 reason 仍可见
+    assert "renderBoardDegraded(d)" in body
     assert "isHerdrBinaryMissing(reason)" in body
     assert "function isHerdrBinaryMissing(" in js
-    # R3:禁止 R2 裸 not found / executable / 孤立 not installed 误判
+    # R4:禁止 80 字符共现窗与裸 not found
+    fn = js.split("function isHerdrBinaryMissing(", 1)[1].split("function ", 1)[0]
+    assert r"[\s\S]{0,80}" not in fn and "{0,80}" not in fn
     assert "|not found|" not in body and "not found|executable" not in body
     assert "board.unavailable.title" in body and "refreshCurrent()" in body
-    # 安装引导只在 missing 分支内
     missing_branch = body.split("if(missing){", 1)[1]
     assert "board.guide.noherdr" in missing_branch
     generic = body.split("}else{", 1)[1]
     assert "board.guide.noherdr" not in generic
 
 
-def _is_herdr_binary_missing(reason: str) -> bool:
-    """与 static/index.html isHerdrBinaryMissing 同语义(Python 镜像,供契约断言)。"""
-    import re
-    r = str(reason or "")
-    return bool(
-        re.search(r"herdr\s+executable\s+not\s+found", r, re.I)
-        or re.search(r"command\s+not\s+found\s*:\s*herdr\b", r, re.I)
-        or re.search(r"herdr\s*未找到", r, re.I)
-        or re.search(r"\bherdr\b[\s\S]{0,80}\b(not\s+installed|未安装)\b", r, re.I)
-        or re.search(r"\b(not\s+installed|未安装)\b[\s\S]{0,80}\bherdr\b", r, re.I)
-    )
-
-
-def test_herdr_binary_missing_positive_reasons():
-    # R3 正向:明确 herdr executable/command/binary 缺失 → 安装引导
-    positives = [
-        "herdr executable not found",
-        "herdr executable not found: /usr/local/bin/herdr",
-        "command not found: herdr",
-        "bash: command not found: herdr",
-        "herdr 未找到",
-        "herdr 未找到: /nope",
-        "herdr is not installed",
-        "not installed: herdr",
-        "未安装 herdr",
-        "herdr 未安装",
-    ]
-    for reason in positives:
-        assert _is_herdr_binary_missing(reason), reason
+def _extract_is_herdr_binary_missing_js() -> str:
+    """从 static/index.html 抽出真实 isHerdrBinaryMissing 函数体(供 Node 执行)。"""
     js = _inline_js()
-    # 源码必须包含正向锚定(非裸 not found)
+    start = js.index("function isHerdrBinaryMissing(")
+    end = js.index("function renderBoard(", start)
+    return js[start:end].strip()
+
+
+def _js_is_herdr_binary_missing(reason: str) -> bool:
+    """R4:分类真值必须来自真实 JS 引擎,禁止 Python 复制正则。"""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    assert node, "node required for herdr-binary-missing JS truth table"
+    fn = _extract_is_herdr_binary_missing_js()
+    script = fn + f"\nprocess.stdout.write(String(isHerdrBinaryMissing({json.dumps(reason)})));\n"
+    proc = subprocess.run(
+        [node, "-e", script],
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    out = (proc.stdout or "").strip()
+    assert out in ("true", "false"), (reason, out, proc.stderr)
+    return out == "true"
+
+
+# R4(#2008) 真值表——与实现单正文一致
+HERDR_MISSING_POSITIVES = [
+    "Herdr 未安装；请安装或升级到0.8.0以上",
+    "herdr 未安装或不可执行:/missing/herdr",
+    "herdr executable not found",
+    "command not found: herdr",
+    "herdr 未找到",
+    "herdr is not installed",
+    "not installed: herdr",
+]
+HERDR_MISSING_NEGATIVES = [
+    "herdr socket not installed",
+    "herdr available; agent opencode not installed",
+    "not installed plugin for herdr status provider",
+    "herdr state cache is not installed",
+    "not found",
+    "executable",
+    "not installed",
+    "socket not found",
+    "cache not found",
+    "session not found",
+    "pane not found",
+    "state not found",
+]
+
+
+def test_herdr_binary_missing_js_truth_table_positive():
+    # 真实 Node/JS 引擎真值:正向 → true
+    for reason in HERDR_MISSING_POSITIVES:
+        assert _js_is_herdr_binary_missing(reason) is True, reason
+    js = _inline_js()
     assert "herdr\\s+executable\\s+not\\s+found" in js
-    assert "command\\s+not\\s+found\\s*:\\s*herdr" in js
+    assert "herdr\\s*未安装" in js
+    assert "herdr\\s+is\\s+not\\s+installed" in js
 
 
-def test_herdr_binary_missing_negative_socket_cache_state():
-    # R3 反向:socket/cache/session/pane/state not found 不得安装引导
-    negatives = [
-        "socket not found",
-        "cache not found",
-        "session not found",
-        "pane not found",
-        "state not found",
-        "state socket not found: /tmp/x.sock",
-        "session cache not found",
-        "pane id not found: w1:p9",
-        "state cache not ready / not found",
-        "not found",  # 裸 not found
-        "executable",  # 裸 executable
-        "not installed",  # 无 herdr 锚定
-        "未安装",
-        "file not found",
-    ]
-    for reason in negatives:
-        assert not _is_herdr_binary_missing(reason), reason
-    # 源码侧:renderBoard 走 isHerdrBinaryMissing,不再内联裸 not found 正则
+def test_herdr_binary_missing_js_truth_table_negative():
+    # 真实 Node/JS 引擎真值:反向 → false(含误判样例与裸短语)
+    for reason in HERDR_MISSING_NEGATIVES:
+        assert _js_is_herdr_binary_missing(reason) is False, reason
     body = _inline_js().split("if(!d.available){", 1)[1].split("return;", 1)[0]
     assert "isHerdrBinaryMissing(reason)" in body
 
