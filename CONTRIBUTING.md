@@ -23,4 +23,12 @@ git diff --check
 Keep changes focused, add a regression test for bug fixes, and never commit `.env`,
 tokens, passwords, SQLite databases, uploaded files, or other runtime data.
 
+## Managed releases
+
+All source releases must run as one complete child command under
+[the managed-release procedure](docs/RELEASING.md). The lane serializes
+publishers, rejects a stale `origin/main`, and writes the fixed candidate and
+rollback SHA to a durable receipt. Do not push `main` or change the live service
+outside that lane.
+
 Security reports should follow [SECURITY.md](SECURITY.md), not public issues.

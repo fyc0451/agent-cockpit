@@ -21,6 +21,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A managed release-lane CLI that serializes local publishers, rejects stale
+  `origin/main` baselines before mutation, keeps its lock through child-process
+  failure, and writes credential-free atomic release receipts.
 - A dormant durable delivery-outbox store with atomic claiming, idempotent
   enqueue, retry/dead-letter transitions, fail-closed legacy migration, and
   credential-safe persistence. It is not yet wired into the server or Hub worker.

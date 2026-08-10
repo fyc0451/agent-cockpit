@@ -1,0 +1,54 @@
+# Managed Releases
+
+`upgrade.sh` is retired. A source release is a managed, local operation and must
+run through `release_lane.py`; direct `git push ... main` or service mutation is
+outside the supported release path.
+
+## Release lane v1
+
+Prepare one executable command or script containing the complete mutation window:
+push the fixed candidate, create its immutable deployment checkout and rollback
+unit, switch the service, and run the release-specific health checks. Then run it
+as one child process:
+
+```bash
+python3 release_lane.py run \
+  --repo /absolute/path/to/clean-release-worktree \
+  --expected-main <40-character-origin-main-sha> \
+  --candidate <40-character-descendant-sha> \
+  --release-id <unique-non-secret-id> \
+  -- /absolute/path/to/release-command
+```
+
+The lane:
+
+- takes a non-blocking, per-user `flock` before Git or release mutations;
+- rejects a second publisher immediately;
+- reads `origin/main` directly and rejects a stale expected SHA;
+- requires the clean worktree HEAD and candidate to descend from that SHA;
+- keeps the lock descriptor in the child, so killing only the guard cannot expose
+  an in-flight release to a second publisher;
+- requires `origin/main` to equal the candidate after a successful child command;
+- atomically writes a mode-0600 JSON receipt with the rollback SHA and result.
+
+The default state directory is
+`$XDG_STATE_HOME/agent-cockpit/release-lane`, falling back to
+`~/.local/state/agent-cockpit/release-lane`. Set
+`AGENT_COCKPIT_RELEASE_STATE_DIR` only to an absolute, user-owned directory on a
+local filesystem.
+
+Receipts deliberately omit the child command, environment, stdout, and stderr.
+Do not put credentials in the release id or command line; load them inside the
+managed command from the existing protected environment when required.
+
+## Failure handling
+
+A rejected receipt means no child command ran. A failed receipt can represent a
+partial release; compare `observed_main_after`, `candidate`, and `rollback_sha`
+before taking action. Never reuse a release id. The lane serializes publishers but
+does not infer application-specific rollback steps or make an unsafe automatic
+rollback decision.
+
+This first version is an enforced team workflow, not an OS security boundary:
+someone can still bypass it by running raw commands. Repository contributors and
+agents must treat such bypasses as unsupported release failures.
