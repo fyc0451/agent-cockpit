@@ -399,7 +399,19 @@ def _read_json_file(path: Path) -> Any:
     return json.loads(text)
 
 
+# Known agents (mirror settings.KNOWN_AGENTS without importing settings writer).
+_KNOWN_AGENTS = frozenset({
+    "codex", "kimi", "claude", "qodercli", "grok", "opencode",
+})
+_LANGUAGES = frozenset({"zh", "en", "ja"})
+
+
 def _check_settings() -> dict[str, Any]:
+    """Sparse settings: only validate keys that appear (writer sparse store).
+
+    Unknown keys → unknown_fields. Present keys: type/range equivalent to
+    settings._validate, without calling the writer module.
+    """
     name = "settings"
     path = runtime_paths.store(name)
     if not path.exists():
@@ -414,32 +426,61 @@ def _check_settings() -> dict[str, Any]:
     if not isinstance(data, dict):
         return _store_result(name, "error", REASON_INVALID_JSON)
     keys = set(data)
-    if not _SETTINGS_KEYS.issubset(keys):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     if keys - _SETTINGS_KEYS:
         return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-    # Exact types for 0.3.x
-    if not isinstance(data.get("language"), str):
+    # Sparse: empty object is valid (all defaults live-only).
+    if "language" in data:
+        if data["language"] not in _LANGUAGES:
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if "dir_agents" in data:
+        da = data["dir_agents"]
+        if not isinstance(da, dict):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        for d, a in da.items():
+            if not isinstance(d, str) or not isinstance(a, str):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if not Path(d).is_absolute() or a not in _KNOWN_AGENTS:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if "enabled_agents" in data:
+        agents = data["enabled_agents"]
+        if not isinstance(agents, list) or not agents:
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if any(a not in _KNOWN_AGENTS for a in agents):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if "upload_max_mb" in data:
+        try:
+            mb = int(data["upload_max_mb"])
+        except (TypeError, ValueError):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        # bool is int subclass — reject
+        if type(data["upload_max_mb"]) is bool or mb < 1 or mb > 2048:
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if "team_hub_url" in data and not isinstance(data["team_hub_url"], str):
         return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if not isinstance(data.get("dir_agents"), dict):
+    if "human_auth_url" in data and not isinstance(data["human_auth_url"], str):
         return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if not isinstance(data.get("enabled_agents"), list):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if not isinstance(data.get("upload_max_mb"), (int, float)):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if not isinstance(data.get("team_hub_url"), str):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if not isinstance(data.get("human_auth_url"), str):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    term = data.get("term")
-    if not isinstance(term, dict):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    term_keys = set(term)
-    allowed_term = {"max_terms", "idle_ttl", "write_timeout"}
-    if not allowed_term.issubset(term_keys):
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if term_keys - allowed_term:
-        return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+    if "term" in data:
+        term = data["term"]
+        if not isinstance(term, dict):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        allowed_term = {"max_terms", "idle_ttl", "write_timeout"}
+        if set(term) - allowed_term:
+            return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+        try:
+            if "max_terms" in term:
+                v = term["max_terms"]
+                if type(v) is bool or int(v) < 1 or int(v) > 64:
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "idle_ttl" in term:
+                v = float(term["idle_ttl"])
+                if type(term["idle_ttl"]) is bool or v < 60.0 or v > 86400.0:
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "write_timeout" in term:
+                v = float(term["write_timeout"])
+                if type(term["write_timeout"]) is bool or v < 0.2 or v > 30.0:
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        except (TypeError, ValueError):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
@@ -466,7 +507,8 @@ def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, 
     if not isinstance(data, dict):
         return _store_result(name, "error", REASON_INVALID_JSON)
     ver = data.get(version_key)
-    if not isinstance(ver, int):
+    # bool is a subclass of int — require exact int type.
+    if type(ver) is not int:
         return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     if ver > expected_v:
         return _store_result(name, "future", REASON_FUTURE_SCHEMA)
@@ -478,12 +520,11 @@ def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, 
         return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     if keys - allowed:
         return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-    # Core members required + exact member shapes (0.3.x).
+    # Core members required + exact member shapes (writer-aligned 0.3.x).
     if name == "mail_projects":
         sessions = data.get("sessions")
         if not isinstance(sessions, dict):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        # entry: {project: str, session_dir: str} only
         entry_keys = frozenset({"project", "session_dir"})
         for key, entry in sessions.items():
             if not isinstance(key, str) or not isinstance(entry, dict):
@@ -501,26 +542,64 @@ def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, 
         bindings = data.get("bindings")
         if not isinstance(bindings, list):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        required_b = frozenset({
+            "hub", "human_id", "project_slug", "session", "session_generation",
+            "session_dir", "mail_project", "lead", "client_session_id",
+            "agent_id", "updated_ts",
+        })
+        optional_b = frozenset({"reply_token"})
+        lead_keys = frozenset({"pane_id", "agent", "mail_name", "participant_id"})
         for item in bindings:
             if not isinstance(item, dict):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            # Allow known binding keys only (loose set from writers); reject unknowns.
-            allowed_b = frozenset({
-                "hub", "human_id", "project_slug", "session", "session_generation",
-                "agent_id", "agent_name", "pane_id", "updated_ts", "status",
-            })
-            extra = set(item) - allowed_b
-            if extra:
+            ik = set(item)
+            if not required_b.issubset(ik):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if ik - required_b - optional_b:
                 return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+            if not isinstance(item.get("hub"), str):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if type(item.get("human_id")) is not int:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if type(item.get("agent_id")) is not int:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if not isinstance(item.get("updated_ts"), (int, float)) or type(item.get("updated_ts")) is bool:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            for sk in (
+                "project_slug", "session", "session_generation",
+                "session_dir", "mail_project", "client_session_id",
+            ):
+                if not isinstance(item.get(sk), str):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            lead = item.get("lead")
+            if not isinstance(lead, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if set(lead) - lead_keys:
+                return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+            if not lead_keys.issubset(set(lead)):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if any(not isinstance(lead.get(k), str) for k in lead_keys):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "reply_token" in item:
+                rt = item["reply_token"]
+                if not isinstance(rt, str) or not rt or len(rt) > 128:
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     elif name == "inbox_route":
         routes = data.get("routes")
         if not isinstance(routes, dict):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        route_keys = frozenset({"delivered", "last_delivered", "pending"})
         for key, route in routes.items():
             if not isinstance(key, str) or not isinstance(route, dict):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            # routes values are opaque dicts but must not be non-dicts; unknown
-            # nested keys left to route writer contract — require dict only.
+            rk = set(route)
+            if not route_keys.issubset(rk):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if rk - route_keys:
+                return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+            for rk_name in route_keys:
+                if not isinstance(route.get(rk_name), list):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
@@ -552,11 +631,14 @@ def _check_file_roots() -> dict[str, Any]:
 
 
 def _check_vapid() -> dict[str, Any]:
+    """True EC P-256 PKCS8 parse (no generate; no marker-only accept)."""
     name = "vapid"
     path = runtime_paths.store(name)
     if not path.exists():
         reason = REASON_MISSING_CREATABLE if _path_creatable(path) else REASON_MISSING_BLOCKED
         return _store_result(name, "absent", reason)
+    if path.is_symlink():
+        return _store_result(name, "error", REASON_UNSAFE)
     try:
         st = path.stat()
     except OSError:
@@ -569,20 +651,25 @@ def _check_vapid() -> dict[str, Any]:
         return _store_result(name, "error", REASON_UNSAFE)
     if st.st_size <= 0:
         return _store_result(name, "error", REASON_CORRUPT)
-    # Algorithm gate: PEM EC private key (VAPID). Reject non-PEM / wrong algo markers.
     try:
-        head = path.read_bytes()[:256]
+        pem = path.read_bytes()
     except OSError:
         return _store_result(name, "error", REASON_UNREADABLE)
-    if b"BEGIN" not in head or b"PRIVATE KEY" not in head:
-        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if b"RSA PRIVATE KEY" in head:
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        key = serialization.load_pem_private_key(pem, password=None)
+        if not isinstance(key, ec.EllipticCurvePrivateKey):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if not isinstance(key.curve, ec.SECP256R1):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    except Exception:
         return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
 def _check_typing() -> dict[str, Any]:
-    # typing is rebuildable but still app-owned (ADR §5). Exact 0.3.x shapes only.
+    """typing.json: legacy session→float or session→{panes, unknown?} (terminal writer)."""
     name = "typing"
     path = runtime_paths.store(name)
     if not path.exists():
@@ -596,26 +683,32 @@ def _check_typing() -> dict[str, Any]:
         return _store_result(name, "error", REASON_INVALID_JSON)
     if not isinstance(data, dict):
         return _store_result(name, "error", REASON_INVALID_JSON)
-    if "version" in data:
-        ver = data.get("version")
-        if not isinstance(ver, int):
+    for key, value in data.items():
+        if not isinstance(key, str):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        if ver > 1:
-            return _store_result(name, "future", REASON_FUTURE_SCHEMA)
-        if ver < 1:
-            return _store_result(name, "migration_required", REASON_MIGRATION_REQUIRED)
-        allowed = {"version", "sessions"}
-        keys = set(data)
-        if not {"version"}.issubset(keys):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        if keys - allowed:
-            return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-        if "sessions" in data and not isinstance(data["sessions"], dict):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    else:
-        # Bare session map: values must be dicts; no reserved version key elsewhere.
-        for key, val in data.items():
-            if not isinstance(key, str) or not isinstance(val, dict):
+        if isinstance(value, dict):
+            allowed = {"panes", "unknown"}
+            if set(value) - allowed:
+                return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+            panes = value.get("panes", {})
+            if "panes" in value and not isinstance(panes, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if isinstance(panes, dict):
+                for pk, pv in panes.items():
+                    if not isinstance(pk, str):
+                        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                    if type(pv) is bool or not isinstance(pv, (int, float)):
+                        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "unknown" in value:
+                uv = value["unknown"]
+                if type(uv) is bool or not isinstance(uv, (int, float)):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            # must have panes or unknown
+            if "panes" not in value and "unknown" not in value:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        else:
+            # legacy float timestamp
+            if type(value) is bool or not isinstance(value, (int, float)):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
@@ -623,7 +716,13 @@ def _check_typing() -> dict[str, Any]:
 _SHA256_RE = __import__("re").compile(r"^[0-9a-f]{64}$")
 _GIT_SHA_RE = __import__("re").compile(r"^[0-9a-f]{40}$")
 _MANIFEST_KEYS = frozenset({"version", "source_sha", "edition", "digests"})
-_REQUIRED_DIGEST_PATHS = ("static/index.html", "VERSION")
+# Frozen required static set (not only index+VERSION).
+_REQUIRED_DIGEST_PATHS = (
+    "static/index.html",
+    "VERSION",
+    "static/sw.js",
+    "static/manifest.webmanifest",
+)
 
 
 def _file_sha256(path: Path) -> str:
@@ -653,12 +752,20 @@ def probe_manifest(
         }
     root = Path(__file__).resolve().parent
     manifest = root / "release-manifest.json"
-    if not manifest.is_file():
+    if not manifest.exists():
         return {
             "name": "release_manifest",
             "compat_family": COMPAT_FAMILY,
             "state": "missing",
             "reason": REASON_PRODUCTION_MANIFEST_MISSING,
+        }
+    # Reject symlink for the manifest file itself.
+    if manifest.is_symlink() or not manifest.is_file():
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_UNSAFE,
         }
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -783,7 +890,16 @@ def probe_manifest(
                 "state": "error",
                 "reason": REASON_UNSAFE,
             }
-        target = (root / rel).resolve()
+        raw_target = root / rel
+        # Reject digest targets that are symlinks (before resolve).
+        if raw_target.is_symlink():
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_UNSAFE,
+            }
+        target = raw_target.resolve()
         try:
             target.relative_to(root)
         except ValueError:
@@ -793,12 +909,13 @@ def probe_manifest(
                 "state": "error",
                 "reason": REASON_UNSAFE,
             }
-        if not target.is_file():
+        if not target.is_file() or target.is_symlink():
             return {
                 "name": "release_manifest",
                 "compat_family": COMPAT_FAMILY,
                 "state": "error",
-                "reason": REASON_FINGERPRINT_MISMATCH,
+                "reason": REASON_FINGERPRINT_MISMATCH
+                if not target.is_file() else REASON_UNSAFE,
             }
         if _file_sha256(target) != digest:
             return {
@@ -807,6 +924,7 @@ def probe_manifest(
                 "state": "error",
                 "reason": REASON_FINGERPRINT_MISMATCH,
             }
+
     return {
         "name": "release_manifest",
         "compat_family": COMPAT_FAMILY,

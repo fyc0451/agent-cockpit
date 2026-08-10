@@ -149,12 +149,32 @@ def test_wal_plus_shm_requires_quiescence_no_shm_mutation(isolated_roots):
 def test_settings_unknown_field_future(isolated_roots):
     path = runtime_paths.store("settings")
     path.write_text(json.dumps({
-        "language": "zh", "dir_agents": {}, "enabled_agents": [],
-        "upload_max_mb": 1, "team_hub_url": "", "human_auth_url": "",
-        "term": {}, "unexpected_key": 1,
+        "language": "zh", "unexpected_key": 1,
     }), encoding="utf-8")
     r = store_schema._check_settings()
     assert r["reason"] == store_schema.REASON_UNKNOWN_FIELDS
+
+
+def test_settings_sparse_language_only_ok(isolated_roots):
+    """Writer sparse store: {language: en} must be compatible."""
+    path = runtime_paths.store("settings")
+    path.write_text(json.dumps({"language": "en"}), encoding="utf-8")
+    r = store_schema._check_settings()
+    assert r["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_settings_empty_object_ok(isolated_roots):
+    path = runtime_paths.store("settings")
+    path.write_text("{}", encoding="utf-8")
+    r = store_schema._check_settings()
+    assert r["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_bool_version_rejected(isolated_roots):
+    path = runtime_paths.store("mail_projects")
+    path.write_text(json.dumps({"version": True, "sessions": {}}), encoding="utf-8")
+    r = store_schema._check_versioned_json("mail_projects")
+    assert r["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
 
 
 def test_mail_projects_future_version(isolated_roots):
@@ -197,6 +217,89 @@ def test_mail_projects_entry_shape_exact(isolated_roots):
     }), encoding="utf-8")
     r = store_schema._check_versioned_json("mail_projects")
     assert r["reason"] == store_schema.REASON_UNKNOWN_FIELDS
+
+
+def test_team_sessions_real_binding_shape(isolated_roots):
+    path = runtime_paths.store("team_sessions")
+    path.write_text(json.dumps({
+        "version": 1,
+        "bindings": [{
+            "hub": "http://h",
+            "human_id": 1,
+            "project_slug": "p",
+            "session": "s",
+            "session_generation": "g",
+            "session_dir": "/tmp/s",
+            "mail_project": "/tmp/p",
+            "lead": {
+                "pane_id": "w1:p1", "agent": "codex",
+                "mail_name": "codex-main", "participant_id": "a1",
+            },
+            "client_session_id": "c1",
+            "agent_id": 2,
+            "updated_ts": 1.0,
+            "reply_token": "tok",
+        }],
+    }), encoding="utf-8")
+    r = store_schema._check_versioned_json("team_sessions")
+    assert r["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_inbox_route_exact_value_shape(isolated_roots):
+    path = runtime_paths.store("inbox_route")
+    path.write_text(json.dumps({
+        "version": 2,
+        "routes": {
+            "h:1": {"delivered": [], "last_delivered": [], "pending": []},
+        },
+    }), encoding="utf-8")
+    assert store_schema._check_versioned_json("inbox_route")["reason"] == (
+        store_schema.REASON_COMPATIBLE
+    )
+    path.write_text(json.dumps({
+        "version": 2,
+        "routes": {"h:1": {"delivered": [], "opaque": 1}},
+    }), encoding="utf-8")
+    r = store_schema._check_versioned_json("inbox_route")
+    assert r["reason"] in {
+        store_schema.REASON_FINGERPRINT_MISMATCH,
+        store_schema.REASON_UNKNOWN_FIELDS,
+    }
+
+
+def test_typing_legacy_float_and_panes(isolated_roots):
+    path = runtime_paths.store("typing")
+    path.write_text(json.dumps({"demo": 1.5}), encoding="utf-8")
+    assert store_schema._check_typing()["reason"] == store_schema.REASON_COMPATIBLE
+    path.write_text(json.dumps({
+        "demo": {"panes": {"w1:p1": 1.5}, "unknown": 2.0},
+    }), encoding="utf-8")
+    assert store_schema._check_typing()["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_vapid_garbage_pem_rejected(isolated_roots):
+    path = runtime_paths.store("vapid")
+    path.write_bytes(
+        b"-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----\n"
+    )
+    os.chmod(path, 0o600)
+    r = store_schema._check_vapid()
+    assert r["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
+
+
+def test_vapid_real_ec_p256_ok(isolated_roots):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    path = runtime_paths.store("vapid")
+    key = ec.generate_private_key(ec.SECP256R1())
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    path.write_bytes(pem)
+    os.chmod(path, 0o600)
+    assert store_schema._check_vapid()["reason"] == store_schema.REASON_COMPATIBLE
 
 
 def test_path_gate_blocks_non_sqlite_symlink_escape(isolated_roots, monkeypatch):
