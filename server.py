@@ -36,6 +36,8 @@ import hub_client
 import herdr_client
 import release_identity
 import herdr_state
+import leader_binding
+import b0_wiring
 import tasks
 import team_inbox_router
 import uploads
@@ -108,6 +110,7 @@ async def lifespan(_: FastAPI):
         raise RuntimeError("herdr state clients not fully reaped; refusing start")
     if state_enabled:
         await asyncio.to_thread(_reconcile_state_client)
+    await asyncio.to_thread(_b0_rebuild_on_start)
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
     _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
@@ -374,6 +377,94 @@ MAIL_COORDINATION_GUIDE = (
 LOCAL_ONLY_AUTH_DETAIL = (
     "未设置 COCKPIT_TOKEN 时仅允许本机回环访问；局域网访问请配置 COCKPIT_TOKEN"
 )
+
+# --- B0 wiring（A2/B1 定稿合同；消息 I/O 仅在 _poll_message_state 链路） ---
+B0_ISSUER = os.environ.get("B0_ISSUER", "local").strip() or "local"
+_b0_coordinator: b0_wiring.B0Coordinator | None = None
+_b0_init_lock = threading.Lock()
+
+
+def _b0_binding_target(scope: str) -> tuple[str, str] | None:
+    """scope → active binding 的 (session, pane_id)（W1 adapter 路由）。"""
+    try:
+        issuer, scope_kind, scope_id = b0_wiring.split_scope_key(scope)
+        row = leader_binding.get_active_binding(issuer, scope_kind, scope_id)
+    except Exception:
+        return None
+    if not row:
+        return None
+    session = str(row.get("session") or "")
+    pane_id = str(row.get("pane_id") or "")
+    if not session or not pane_id:
+        return None
+    return session, pane_id
+
+
+def _b0_get_coordinator() -> b0_wiring.B0Coordinator | None:
+    """惰性创建 B0 协调器（DB/环境异常时返回 None，调用方降级跳过）。"""
+    global _b0_coordinator
+    if _b0_coordinator is not None:
+        return _b0_coordinator
+    with _b0_init_lock:
+        if _b0_coordinator is None:
+            try:
+                adapter = b0_wiring.HerdrPromptAdapter(_b0_binding_target)
+                _b0_coordinator = b0_wiring.B0Coordinator(adapter, B0_ISSUER)
+            except Exception:
+                logger.exception("b0 coordinator init failed")
+                return None
+    return _b0_coordinator
+
+
+def _b0_poll_tick() -> None:
+    """消息 poller 链路的一次 B0 tick：sync + fanout + dual-pull/ingest。"""
+    coord = _b0_get_coordinator()
+    if coord is None:
+        return
+    try:
+        coord.sync_bindings()
+        coord.fanout_control_events()
+        coord.poll_once()
+    except Exception:
+        logger.exception("b0 poll tick failed")
+
+
+def _b0_apply_live_status(snap: dict[str, Any]) -> None:
+    """live poller 唯一允许的 B0 入口：仅注入 agent_status，禁消息 I/O。"""
+    coord = _b0_get_coordinator()
+    if coord is None or not isinstance(snap, dict):
+        return
+    try:
+        rows = coord.active_bindings()
+    except Exception:
+        return
+    status_by_pane = {
+        p.get("pane_id"): p.get("agent_status")
+        for p in snap.get("panes", []) if isinstance(p, dict)
+    }
+    for row in rows:
+        pane_id = str(row.get("pane_id") or "")
+        status = status_by_pane.get(pane_id)
+        if not status:
+            continue
+        scope = b0_wiring.scope_key(
+            row["issuer"], row["scope_kind"], row["scope_id"],
+        )
+        try:
+            coord.set_target_status(scope, str(status))
+        except Exception:
+            logger.exception("b0 set_target_status failed")
+
+
+def _b0_rebuild_on_start() -> None:
+    """restart rebuild（ADR 故障5）：同步 binding + 从 Hub unread 重建 pending。"""
+    coord = _b0_get_coordinator()
+    if coord is None:
+        return
+    try:
+        coord.rebuild()
+    except Exception:
+        logger.exception("b0 rebuild failed")
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -656,6 +747,19 @@ class StartTaskReq(BaseModel):
 class PaneSendReq(BaseModel):
     text: str
     mode: str = "send"  # send | prompt
+
+
+class RebindReq(BaseModel):
+    """B1 控制面改绑请求（ADR §2a 修订）：expected_version 必填 CAS。"""
+
+    mail_name: str
+    expected_version: int
+    agent_name: str | None = None
+    agent_kind: str | None = None
+    session: str | None = None
+    pane_id: str | None = None
+    registry_selector: str | None = None
+    caller_mail_name: str | None = None
 
 
 class ZoomLeaseReq(BaseModel):
@@ -1196,6 +1300,19 @@ def _notify_coordination_message(
         "处理完成后按工具输出单条 complete；普通打断会自动校验 revision 并恢复，"
         "stop/redirect 不恢复旧任务。"
     )
+    if intent in coordination.NO_RESUME_INTENTS:
+        # W6：控制动作正文携带 canonical binding version（ADR §4/故障6）
+        try:
+            binding = leader_binding.get_active_binding(
+                B0_ISSUER, "user", "default",
+            )
+        except Exception:
+            binding = None
+        if binding:
+            note += (
+                f" [canonical binding v{binding['binding_version']} "
+                f"from={binding['mail_name']}；与本地已知版本冲突时拒绝并报警]"
+            )
     sent = herdr_client.pane_send(session, pane_id, note, "prompt")
     return {
         "notified": not sent.get("error") and sent.get("available", True),
@@ -1356,6 +1473,62 @@ def api_ack(req: AckReq):
         return {"ok": True, "result": result}
     except Exception as e:
         raise HTTPException(500, f"ack 失败: {e}")
+
+
+# ── B1 控制面：Leader 改绑（ADR §2a 修订；与 team-auth session-bindings 正交） ──
+
+@app.post("/api/binding/{scope_kind}/{scope_id}/rebind")
+def api_binding_rebind(scope_kind: str, scope_id: str, req: RebindReq):
+    if scope_kind not in leader_binding.SCOPE_KINDS:
+        raise HTTPException(400, f"非法 scope_kind（允许 {leader_binding.SCOPE_KINDS}）")
+    try:
+        active = leader_binding.get_active_binding(B0_ISSUER, scope_kind, scope_id)
+    except leader_binding.BindingError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception:
+        logger.exception("rebind: read active binding failed")
+        raise HTTPException(503, "binding 存储暂不可用")
+    # 鉴权：用户（已过全局认证）直接放行；否则要求 caller == active mail_name
+    ok, actor = b0_wiring.rebind_authorize(
+        user_authenticated=True,
+        caller_mail_name=req.caller_mail_name,
+        active=active,
+    )
+    if not ok:
+        raise HTTPException(403, "改绑仅限 COCKPIT_TOKEN 用户或当前 active Leader")
+    try:
+        row = b0_wiring.perform_rebind(
+            scope_kind, scope_id, issuer=B0_ISSUER,
+            mail_name=req.mail_name, expected_version=req.expected_version,
+            agent_name=req.agent_name, agent_kind=req.agent_kind,
+            session=req.session, pane_id=req.pane_id,
+            registry_selector=req.registry_selector,
+        )
+    except leader_binding.StaleVersionError as exc:
+        # CAS 失败：零变更，保持旧 binding
+        raise HTTPException(409, str(exc))
+    except leader_binding.BindingError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception:
+        logger.exception("rebind failed")
+        raise HTTPException(500, "改绑失败（零变更）")
+    coord = _b0_get_coordinator()
+    if coord is not None:
+        try:
+            coord.sync_bindings()
+        except Exception:
+            logger.exception("rebind: coordinator sync failed")
+    return {
+        "rebound": True,
+        "actor": actor,
+        "issuer": B0_ISSUER,
+        "scope_kind": scope_kind,
+        "scope_id": scope_id,
+        "mail_name": row.get("mail_name"),
+        "binding_version": row.get("binding_version"),
+        "route_epoch": row.get("route_epoch"),
+        "previous_mail_name": row.get("previous_mail_name"),
+    }
 
 
 # ── 上传路由 ────────────────────────────────────────────────────
@@ -5511,6 +5684,7 @@ async def _poll_live_state() -> None:
                 last_discovery = time.monotonic()
             await asyncio.to_thread(_expire_zoom_leases)
             snap = await asyncio.to_thread(_board_snapshot)
+            await asyncio.to_thread(_b0_apply_live_status, snap)
             session_count = len(snap.get("sessions", [])) if snap.get("available") else 0
             await asyncio.to_thread(coordination.maintain_live_claims, snap)
             attention = await asyncio.to_thread(_build_attention, snap)
@@ -5600,6 +5774,7 @@ async def _poll_message_state() -> None:
             continue
         try:
             await asyncio.to_thread(_refresh_message_state)
+            await asyncio.to_thread(_b0_poll_tick)
         except asyncio.CancelledError:
             raise
         except Exception:
