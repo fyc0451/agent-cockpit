@@ -10,7 +10,8 @@ Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
 + STILL BLOCKED #2189 (precise allowlist: ordered cols + defaults + index/FK/user_version)
 + STILL BLOCKED #2194 (fingerprint ALL indexes incl. UNIQUE autoindex by origin)
 + STILL BLOCKED #2197 (index name + duplicate count: sorted-tuple multiset)
-+ LAST KNOWN BLOCK #2203/#2200 (column fingerprint via table_xinfo incl. hidden/generated).
++ LAST KNOWN BLOCK #2203/#2200 (column fingerprint via table_xinfo incl. hidden/generated)
++ REVIEW_BLOCK #2208/#2206 (known-legacy sqlite_master metadata exactness).
 - Canonical payload JSON + sha256 digest; a repeated idempotency key reuses the
   original record only when job_kind/target/digest all match — any difference
   fails closed as IdempotencyConflict.
@@ -30,10 +31,15 @@ Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
   carries the hidden flag (expected 0). Indexes are a sorted-tuple multiset of
   (origin, name, unique, partial, key-columns) — origin='c' keeps the exact
   name, pk/u autoindex uses a "" placeholder; sorted tuple preserves duplicate
-  count. Any difference — extra/future/generated column, swapped order,
-  unexpected default, renamed/duplicate/extra index (incl. UNIQUE autoindex),
-  extra FK, or non-zero user_version — raises OutboxStoreError fail-closed and
-  mutates nothing (DB hash/schema/rows unchanged). Failure is atomic.
+  count. The known-legacy path ALSO compares the canonical CREATE SQL of
+  delivery_jobs (from sqlite_master) against the unique accepted legacy DDL —
+  catching CHECK constraints and column COLLATE that no PRAGMA exposes — and
+  rejects any non-expected trigger/view/attached schema object in the dedicated
+  outbox DB. Any difference — extra/future/generated column, swapped order,
+  unexpected default, CHECK/COLLATE, renamed/duplicate/extra index (incl. UNIQUE
+  autoindex), extra FK/trigger/view/table, or non-zero user_version — raises
+  OutboxStoreError fail-closed and mutates nothing (DB byte hash, full
+  sqlite_master, table_xinfo, rows, user_version unchanged). Failure is atomic.
 """
 from __future__ import annotations
 
@@ -137,6 +143,15 @@ _LEGACY_INDEXES = (
     ("pk", "", 1, 0, (("job_id", 0, "BINARY"),)),
 )
 _LEGACY_FKS: tuple = ()
+# Canonical CREATE SQL of the unique accepted legacy DDL (whitespace + spaces
+# around ()/, normalized). Compared against sqlite_master.sql so CHECK
+# constraints and column COLLATE (which no PRAGMA exposes) are detected.
+_LEGACY_CREATE_SQL = (
+    "CREATE TABLE delivery_jobs(job_id TEXT PRIMARY KEY,"
+    "idempotency_key TEXT NOT NULL,job_kind TEXT NOT NULL,"
+    "target TEXT NOT NULL,payload_json TEXT NOT NULL,"
+    "created_ts REAL NOT NULL)"
+)
 _COLUMNS = (
     "job_id", "idempotency_key", "job_kind", "target", "payload_json",
     "payload_digest", "attempt", "next_attempt_at", "status",
@@ -301,6 +316,44 @@ def _user_version_is_zero(con: sqlite3.Connection) -> bool:
         return False
 
 
+def _canon_sql(sql: str) -> str:
+    """Canonicalize a CREATE SQL: trim spaces around ()/, then collapse
+    whitespace. SQLite stores the original text, so this normalizes formatting
+    without parsing (sufficient because the accepted legacy DDL is unique)."""
+    s = re.sub(r"\s*([(),])\s*", r"\1", sql)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _legacy_create_sql_matches(con: sqlite3.Connection) -> bool:
+    """True iff delivery_jobs' CREATE SQL (canonical) equals the unique accepted
+    legacy DDL — catches CHECK constraints and column COLLATE that no PRAGMA
+    exposes."""
+    row = con.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='delivery_jobs'"
+    ).fetchone()
+    if row is None or not row[0]:
+        return False
+    return _canon_sql(str(row[0])) == _LEGACY_CREATE_SQL
+
+
+def _no_extra_objects(con: sqlite3.Connection) -> bool:
+    """True iff sqlite_master contains ONLY the delivery_jobs table and its
+    implicit PK autoindex (sql IS NULL) — no triggers, views, extra tables, or
+    extra user indexes (the latter also covered by _all_indexes)."""
+    saw_table = False
+    for typ, name, sql in con.execute(
+        "SELECT type, name, sql FROM sqlite_master"
+    ).fetchall():
+        if typ == "table" and str(name) == "delivery_jobs":
+            saw_table = True
+            continue
+        if typ == "index" and sql is None:
+            continue  # implicit autoindex (PK/UNIQUE); UNIQUE covered by _all_indexes
+        return False  # trigger / view / extra table / user index
+    return saw_table
+
+
 def _schema_matches(con: sqlite3.Connection) -> bool:
     """True iff delivery_jobs exactly matches the current CREATE (ordered
     table_xinfo columns + defaults + hidden=0 + all indexes + FKs + user_version=0)."""
@@ -313,15 +366,20 @@ def _schema_matches(con: sqlite3.Connection) -> bool:
 
 
 def _is_known_legacy(con: sqlite3.Connection) -> bool:
-    """True only for the exact known 6-column legacy fingerprint (ordered
+    """True only for the exact known 6-column legacy fingerprint: ordered
     table_xinfo columns + defaults + hidden=0 + ONLY the PK autoindex + no FK
-    + user_version=0)."""
+    + user_version=0 + canonical CREATE SQL matches the unique legacy DDL
+    (no CHECK/COLLATE) + no extra schema objects (no trigger/view/extra table)."""
     cols, indexes, fks = _fingerprint(con)
     if cols != _LEGACY_COLUMNS:
         return False
     if indexes != _LEGACY_INDEXES or fks != _LEGACY_FKS:
         return False
-    return _user_version_is_zero(con)
+    if not _user_version_is_zero(con):
+        return False
+    if not _legacy_create_sql_matches(con):
+        return False
+    return _no_extra_objects(con)
 
 
 def _rebuild_legacy(con: sqlite3.Connection) -> None:

@@ -504,6 +504,30 @@ def test_unknown_schema_extra_column_fail_closed(outbox_db: Path) -> None:
             "ALWAYS AS (payload_json) STORED);",
             id="generated-stored",
         ),
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL, "
+            "job_kind TEXT NOT NULL CHECK(job_kind='send_message'), "
+            "target TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_ts REAL NOT NULL);",
+            id="check-constraint",
+        ),
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL, job_kind TEXT NOT NULL, "
+            "target TEXT NOT NULL COLLATE NOCASE, "
+            "payload_json TEXT NOT NULL, created_ts REAL NOT NULL);",
+            id="collate-nocase",
+        ),
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL, job_kind TEXT NOT NULL, "
+            "target TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_ts REAL NOT NULL); "
+            "CREATE TRIGGER legacy_guard AFTER DELETE ON delivery_jobs "
+            "BEGIN SELECT 1; END;",
+            id="extra-trigger",
+        ),
     ],
 )
 def test_legacy_allowlist_rejects_non_exact(
@@ -519,21 +543,34 @@ def test_legacy_allowlist_rejects_non_exact(
     )
     con.close()
     outbox_db.chmod(0o600)
-    before = hashlib.sha256(outbox_db.read_bytes()).hexdigest()
+
+    def snapshot():
+        c = sqlite3.connect(outbox_db)
+        m = sorted(
+            c.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master"
+            ).fetchall()
+        )
+        x = c.execute("PRAGMA table_xinfo(delivery_jobs)").fetchall()
+        v = c.execute("PRAGMA user_version").fetchone()[0]
+        r = c.execute("SELECT COUNT(*) FROM delivery_jobs").fetchone()[0]
+        c.close()
+        return m, x, v, r
+
+    before_hash = hashlib.sha256(outbox_db.read_bytes()).hexdigest()
+    before_master, before_xinfo, before_version, before_rows = snapshot()
     with pytest.raises(delivery_outbox.OutboxStoreError):
         delivery_outbox.get_job("r1")
-    # fail-closed: content hash unchanged, no rebuild table, row preserved.
-    assert hashlib.sha256(outbox_db.read_bytes()).hexdigest() == before
-    con = sqlite3.connect(outbox_db)
-    tables = {
-        r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
-    }
-    rows = con.execute("SELECT COUNT(*) FROM delivery_jobs").fetchone()[0]
-    con.close()
-    assert "delivery_jobs_new" not in tables
-    assert rows == 1
+    after_hash = hashlib.sha256(outbox_db.read_bytes()).hexdigest()
+    after_master, after_xinfo, after_version, after_rows = snapshot()
+    # fail-closed: byte hash, full sqlite_master, table_xinfo, rows and
+    # user_version all unchanged; no rebuild table created.
+    assert after_hash == before_hash
+    assert after_master == before_master
+    assert after_xinfo == before_xinfo
+    assert after_version == before_version
+    assert after_rows == before_rows == 1
+    assert "delivery_jobs_new" not in {r[1] for r in after_master}
 
 
 # ── STILL BLOCKED #2197: index name + duplicate count ──────────
