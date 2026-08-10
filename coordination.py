@@ -266,6 +266,194 @@ def _expected_version(value: Any) -> int:
     return value
 
 
+# ---------------------------------------------------------------------------
+# L1 assignment 持久层（最小状态迁移 + 显式 close + expected_version CAS）
+# ---------------------------------------------------------------------------
+
+def create_assignment(
+    *, project_key: str, assignment: str, assignee: str,
+    expected_reply: str | None = None, deadline: float | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """创建 assignment（status='assigned'，version=1）。"""
+    project = _required_text(project_key, "project_key", limit=ASSIGNMENT_TEXT_LIMIT)
+    project = str(Path(project).expanduser().resolve())
+    text = _required_text(assignment, "assignment", limit=ASSIGNMENT_TEXT_LIMIT)
+    who = _required_text(assignee, "assignee", limit=ASSIGNEE_TEXT_LIMIT)
+    reply = _optional_text(
+        expected_reply, "expected_reply", limit=EXPECTED_REPLY_TEXT_LIMIT,
+    )
+    due = _optional_epoch(deadline, "deadline")
+    stamp = _optional_epoch(now, "now")
+    current = time.time() if stamp is None else stamp
+    assignment_id = f"a-{uuid.uuid4().hex}"
+    con = _connect()
+    try:
+        con.execute(
+            "INSERT INTO assignments(assignment_id, project_key, assignment, "
+            "assignee, expected_reply, deadline, status, closed_at, version, "
+            "created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,NULL,1,?,?)",
+            (assignment_id, project, text, who, reply, due,
+             "assigned", current, current),
+        )
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    return get_assignment(assignment_id) or {}
+
+
+def get_assignment(assignment_id: str) -> dict[str, Any] | None:
+    con = _connect()
+    try:
+        row = con.execute(
+            "SELECT * FROM assignments WHERE assignment_id=?",
+            (assignment_id,),
+        ).fetchone()
+    finally:
+        con.close()
+    return _dict(row)
+
+
+def _update_assignment_cas(
+    assignment_id: str, expected_version: int, *,
+    set_sql: str, params: tuple[Any, ...],
+) -> dict[str, Any]:
+    """公共 CAS：WHERE version=expected，成功 version+1，stale 零变更。"""
+    con = _connect()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT * FROM assignments WHERE assignment_id=?",
+            (assignment_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"任务不存在: {assignment_id}")
+        if row["status"] == "closed":
+            raise ValueError(f"任务已关闭，不得变更: {assignment_id}")
+        if int(row["version"]) != expected_version:
+            raise ValueError(
+                f"expected_version 冲突：期望 {expected_version}，"
+                f"当前 {int(row['version'])}"
+            )
+        cur = con.execute(
+            f"UPDATE assignments SET {set_sql}, version=version+1 "
+            "WHERE assignment_id=? AND version=?",
+            (*params, assignment_id, expected_version),
+        )
+        if cur.rowcount != 1:
+            raise ValueError("expected_version 冲突：并发写导致零变更")
+        # 同事务内读回并复制，锁定本次成功调用返回恰好 expected_version+1
+        snapshot = _dict(con.execute(
+            "SELECT * FROM assignments WHERE assignment_id=?",
+            (assignment_id,),
+        ).fetchone())
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    return snapshot or {}
+
+
+def transition_assignment(
+    assignment_id: str, *, to_status: str, expected_version: int,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """最小状态迁移；close 只能走 close_assignment；CAS 成功 version+1。"""
+    version = _expected_version(expected_version)
+    if to_status not in ASSIGNMENT_STATUSES:
+        raise ValueError(
+            f"非法 status: {to_status!r}（允许 {ASSIGNMENT_STATUSES}）"
+        )
+    if to_status == "closed":
+        raise ValueError("closed 必须通过 close_assignment 显式关闭")
+    con = _connect()
+    try:
+        row = con.execute(
+            "SELECT status FROM assignments WHERE assignment_id=?",
+            (assignment_id,),
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise ValueError(f"任务不存在: {assignment_id}")
+    if row["status"] == "closed":
+        raise ValueError(f"任务已关闭，不得变更: {assignment_id}")
+    allowed = ASSIGNMENT_TRANSITIONS.get(str(row["status"]), frozenset())
+    if to_status not in allowed:
+        raise ValueError(
+            f"非法状态迁移: {row['status']} → {to_status}"
+            f"（允许 {sorted(allowed)}）"
+        )
+    stamp = _optional_epoch(now, "now")
+    current = time.time() if stamp is None else stamp
+    return _update_assignment_cas(
+        assignment_id, version,
+        set_sql="status=?, updated_at=?",
+        params=(to_status, current),
+    )
+
+
+def close_assignment(
+    assignment_id: str, *, expected_version: int, now: float | None = None,
+) -> dict[str, Any]:
+    """显式关闭（唯一进入 closed 的路径）；closed_at 仅在终态写入。"""
+    version = _expected_version(expected_version)
+    stamp = _optional_epoch(now, "now")
+    current = time.time() if stamp is None else stamp
+    return _update_assignment_cas(
+        assignment_id, version,
+        set_sql="status='closed', closed_at=?, updated_at=?",
+        params=(current, current),
+    )
+
+
+def list_assignments(
+    project_key: str | None = None, *,
+    statuses: list[str] | None = None, assignee: str | None = None,
+) -> list[dict[str, Any]]:
+    """按项目/status/assignee 过滤；未关闭按 deadline 升序在前，closed 殿后。"""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if project_key is not None:
+        project = _required_text(
+            project_key, "project_key", limit=ASSIGNMENT_TEXT_LIMIT,
+        )
+        clauses.append("project_key=?")
+        params.append(str(Path(project).expanduser().resolve()))
+    if statuses is not None:
+        for status in statuses:
+            if status not in ASSIGNMENT_STATUSES:
+                raise ValueError(
+                    f"非法 status: {status!r}（允许 {ASSIGNMENT_STATUSES}）"
+                )
+        if not statuses:
+            return []
+        marks = ",".join("?" * len(statuses))
+        clauses.append(f"status IN ({marks})")
+        params.extend(statuses)
+    if assignee is not None:
+        clauses.append("assignee=?")
+        params.append(assignee)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    con = _connect()
+    try:
+        rows = con.execute(
+            f"SELECT * FROM assignments {where} "
+            "ORDER BY CASE WHEN status='closed' THEN 1 ELSE 0 END, "
+            "deadline IS NULL, deadline ASC, created_at ASC, assignment_id ASC",
+            params,
+        ).fetchall()
+    finally:
+        con.close()
+    return [dict(r) for r in rows]
+
+
 def _config_hash(participants: list[dict[str, Any]]) -> str:
     config = [
         {

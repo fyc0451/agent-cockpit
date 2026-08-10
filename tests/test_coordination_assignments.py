@@ -1,4 +1,5 @@
 import math
+import os
 
 import pytest
 
@@ -226,3 +227,104 @@ def test_list_assignments_filters_project_status_and_assignee(tmp_path):
     ) == [coordination.get_assignment(second["assignment_id"])]
     with pytest.raises(ValueError, match="非法 status"):
         coordination.list_assignments(str(tmp_path), statuses=["unknown"])
+
+
+def test_create_assignment_rejects_overlong_texts(tmp_path):
+    with pytest.raises(ValueError, match="assignment"):
+        _create(tmp_path, assignment="x" * (coordination.ASSIGNMENT_TEXT_LIMIT + 1))
+    with pytest.raises(ValueError, match="assignee"):
+        _create(tmp_path, assignee="y" * (coordination.ASSIGNEE_TEXT_LIMIT + 1))
+
+
+def test_concurrent_transitions_same_version_exactly_one_wins(tmp_path):
+    import threading
+
+    assignment = _create(tmp_path)
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def worker(name):
+        barrier.wait()
+        try:
+            results[name] = coordination.transition_assignment(
+                assignment["assignment_id"],
+                to_status="in_progress",
+                expected_version=1,
+            )
+        except ValueError as exc:
+            results[name] = exc
+
+    threads = [threading.Thread(target=worker, args=(f"w{i}",)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ok = [r for r in results.values() if isinstance(r, dict)]
+    failed = [r for r in results.values() if isinstance(r, ValueError)]
+    assert len(ok) == 1 and len(failed) == 1
+    assert ok[0]["version"] == 2
+    assert "version 冲突" in str(failed[0])
+    assert coordination.get_assignment(assignment["assignment_id"])["version"] == 2
+
+
+def test_list_assignments_stable_order_deadline_then_id(tmp_path):
+    same_deadline = [
+        _create(tmp_path, deadline=2_000.0, assignee=f"w-{i}", now=1_000.0 + i)
+        for i in range(3)
+    ]
+    later = _create(tmp_path, deadline=2_500.0, now=1_100.0)
+    rows = coordination.list_assignments(str(tmp_path))
+    assert [r["assignment_id"] for r in rows] == [
+        *[a["assignment_id"] for a in same_deadline],
+        later["assignment_id"],
+    ]
+
+
+def test_project_key_canonical_on_create_and_list(tmp_path):
+    sub = tmp_path / "proj"
+    sub.mkdir()
+    created = coordination.create_assignment(
+        project_key=f"{sub}{os.sep}.",
+        assignment="canonical 校验",
+        assignee="w",
+        now=1_000.0,
+    )
+    assert created["project_key"] == str(sub.resolve())
+    assert [
+        r["assignment_id"]
+        for r in coordination.list_assignments(f"{sub}{os.sep}.")
+    ] == [created["assignment_id"]]
+
+
+@pytest.mark.parametrize("bad_now", [True, False, math.nan, math.inf, "1000"])
+def test_explicit_now_rejects_non_finite_epoch(tmp_path, bad_now):
+    with pytest.raises(ValueError, match="now"):
+        _create(tmp_path, now=bad_now)
+    assignment = _create(tmp_path)
+    with pytest.raises(ValueError, match="now"):
+        coordination.transition_assignment(
+            assignment["assignment_id"],
+            to_status="in_progress", expected_version=1, now=bad_now,
+        )
+    with pytest.raises(ValueError, match="now"):
+        coordination.close_assignment(
+            assignment["assignment_id"], expected_version=1, now=bad_now,
+        )
+
+
+def test_list_assignments_empty_statuses_returns_empty(tmp_path):
+    _create(tmp_path)
+    assert coordination.list_assignments(str(tmp_path), statuses=[]) == []
+
+
+def test_successful_cas_returns_exactly_expected_plus_one(tmp_path):
+    assignment = _create(tmp_path)
+    for expected in (1, 2, 3):
+        result = coordination.transition_assignment(
+            assignment["assignment_id"],
+            to_status="in_progress" if expected % 2 else "blocked",
+            expected_version=expected,
+        )
+        assert result["version"] == expected + 1
+        assert result == coordination.get_assignment(assignment["assignment_id"])

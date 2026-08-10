@@ -135,6 +135,19 @@ _COORD_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
         ("blocker", "TEXT", 0, 0),
         ("reported_ts", "REAL", 0, 0),
     ),
+    "assignments": (
+        ("assignment_id", "TEXT", 0, 1),
+        ("project_key", "TEXT", 1, 0),
+        ("assignment", "TEXT", 1, 0),
+        ("assignee", "TEXT", 1, 0),
+        ("expected_reply", "TEXT", 0, 0),
+        ("deadline", "REAL", 0, 0),
+        ("status", "TEXT", 1, 0),
+        ("closed_at", "REAL", 0, 0),
+        ("version", "INTEGER", 1, 0),
+        ("created_at", "REAL", 1, 0),
+        ("updated_at", "REAL", 1, 0),
+    ),
 }
 _LEADER_BINDING_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
     "leader_bindings": (
@@ -322,6 +335,7 @@ _PUSH_DEFAULTS: dict[str, str] = {}
 _COORD_DEFAULTS: dict[str, dict[str, str]] = {
     "message_meta": {"trusted_user": "0"},
     "receipts": {"ack_pending": "0"},
+    "assignments": {"status": "assigned", "version": "1"},
 }
 _COORD_INDEXES: dict[str, frozenset[tuple[str, int, tuple[str, ...]]]] = {
     "runs": frozenset({("runs_project_state", 0, ("project_key", "state"))}),
@@ -329,6 +343,10 @@ _COORD_INDEXES: dict[str, frozenset[tuple[str, int, tuple[str, ...]]]] = {
     "message_meta": frozenset(),
     "receipts": frozenset({("receipts_claims", 0, ("state", "claim_expires_ts"))}),
     "task_reports": frozenset(),
+    "assignments": frozenset({
+        ("assignments_project_status", 0, ("project_key", "status", "deadline")),
+        ("assignments_assignee_status", 0, ("assignee", "status", "deadline")),
+    }),
 }
 _COORD_FKS: dict[str, frozenset[tuple[str, str, str]]] = {
     "runs": frozenset(),
@@ -336,6 +354,7 @@ _COORD_FKS: dict[str, frozenset[tuple[str, str, str]]] = {
     "message_meta": frozenset(),
     "receipts": frozenset(),
     "task_reports": frozenset(),
+    "assignments": frozenset(),
 }
 _LEADER_BINDING_DEFAULTS: dict[str, dict[str, str]] = {
     "leader_bindings": {
