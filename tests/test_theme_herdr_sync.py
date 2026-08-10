@@ -26,7 +26,7 @@ x = 1
     text = path.read_text(encoding="utf-8")
     config = tomllib.loads(text)
     assert config["theme"]["name"] == "catppuccin"
-    assert config["theme"]["auto_switch"] is False  # 强制 name，避免 appearance 默认 dark 卡死
+    assert config["theme"]["auto_switch"] is False  # 其余键不动
     assert config["keys"]["x"] == 1
 
 
@@ -132,19 +132,30 @@ def test_reload_config_falls_back_without_sessions(monkeypatch):
 def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     _write_config(tmp_path, monkeypatch, "[theme]\nname = \"terminal\"\n")
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
-    monkeypatch.setattr(server.herdr_client, "reload_config", lambda timeout=10: {"ok": True})
-    monkeypatch.setattr(server.herdr_client, "apply_grok_web_theme", lambda mode: {"ok": True, "applied": [], "errors": [], "command": f"/theme {mode}"})
-    monkeypatch.setattr(server.herdr_client, "set_web_theme_mode", lambda mode: None)
-    monkeypatch.setattr(server.herdr_client, "set_theme_for_web_mode", lambda mode, name_override=None: None)
-    monkeypatch.setattr(server.herdr_client, "grok_theme_slash", lambda mode: f"/theme {mode}")
+    reloads = []
+    monkeypatch.setattr(
+        server.herdr_client, "reload_config",
+        lambda timeout=10: reloads.append(True) or {"ok": True},
+    )
     client = TestClient(server.app, headers={"Authorization": "Bearer secret"})
 
     r = client.post("/api/theme/herdr", json={"mode": "dark"})
     assert r.status_code == 200
     body = r.json()
     assert body["theme"] == "catppuccin"
-    assert body.get("reload", {}).get("ok") is True
+    assert body["config_changed"] is True
+    assert body["reload"]["ok"] is True
+    assert body["reload"].get("scheduled") is True or body["reload"].get("skipped") is False
     assert "notified_terms" in body
+
+    # 第二次同 mode：config 未变，应跳过 reload-config
+    reloads.clear()
+    r = client.post("/api/theme/herdr", json={"mode": "dark"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["config_changed"] is False
+    assert body["reload"].get("skipped") is True
+    assert reloads == []
 
     r = client.post("/api/theme/herdr", json={"mode": "light"})
     assert r.json()["theme"] == "solarized-light"
@@ -160,10 +171,6 @@ def test_frontend_set_theme_calls_herdr_sync():
         encoding="utf-8"
     )
     assert "/api/theme/herdr" in html
-    # 就地切换：sendAllTermColorSchemes + herdr 同步；禁止 setTheme 整页 reload
-    set_theme = html.split("function setTheme(mode,save=true){", 1)[1].split(
-        "function toggleTheme", 1
-    )[0]
-    assert "sendAllTermColorSchemes()" in set_theme
-    assert "/api/theme/herdr" in set_theme
-    assert "location.reload()" not in set_theme
+    # 壳层可调 sendAll(notify=false)；Mode 2031 只走 API 一次
+    assert "sendAllTermColorSchemes(false)" in html
+    assert "armTermInputGate" in html

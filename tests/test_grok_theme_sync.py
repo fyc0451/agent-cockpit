@@ -19,9 +19,22 @@ def test_apply_grok_web_theme_targets_only_grok(monkeypatch):
             "panes": [
                 {"session": "s1", "pane_id": "p1", "agent": "grok"},
                 {"session": "s1", "pane_id": "p2", "agent": "codex"},
+                {"session": "s1", "pane_id": "p4", "agent": "opencode"},
                 {"session": "s2", "pane_id": "p3", "agent": "grok"},
             ]
         },
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "set_opencode_tui_theme",
+        lambda name: __import__("pathlib").Path("/tmp/fake-tui.json"),
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "apply_opencode_theme_to_pane",
+        lambda session, pane_id, theme_name: calls.append(
+            (session, pane_id, f"/themes→{theme_name}", "opencode")
+        ) or {"available": True},
     )
     monkeypatch.setattr(
         herdr_client,
@@ -30,8 +43,11 @@ def test_apply_grok_web_theme_targets_only_grok(monkeypatch):
     )
     out = herdr_client.apply_grok_web_theme("light")
     assert out["command"] == "/theme light"
-    assert {(c[0], c[1], c[3]) for c in calls} == {("s1", "p1", "slash"), ("s2", "p3", "slash")}
-    assert all(c[2] == "/theme light" for c in calls)
+    # 兼容封装只返回 grok；但 apply_agent 仍会推 opencode（另一路）
+    grok_slash = {(c[0], c[1]) for c in calls if c[3] == "slash" and c[2] == "/theme light"}
+    assert grok_slash == {("s1", "p1"), ("s2", "p3")}
+    assert ("s1", "p4", "/themes→palenight", "opencode") in calls
+    assert not any(c[2] == "/theme light" and c[1] == "p2" for c in calls)
 
 
 def test_start_agent_injects_light_flag_for_grok(monkeypatch):

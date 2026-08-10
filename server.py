@@ -2056,56 +2056,93 @@ class ThemeHerdrReq(BaseModel):
 
 @app.post("/api/theme/herdr")
 def api_theme_herdr(req: ThemeHerdrReq):
-    """同步 Web 主题到 Herdr。前端已先完成 palette；此处只做配置与 PTY 协议。
+    """同步 Web 主题到 Herdr / agent。
 
-    不在此路径对 agent pane 键入 /theme（会抢焦点、干扰工作中的 agent）。
-    Grok 自绘主题请用其自身 /theme 或启动 --light；OpenCode 走 Mode 2031。
+    顺序（后台）：
+      1) 条件 reload-config（仅 config 变更）
+      2) Mode 2031 一次 → OpenCode 等跟宿主 light/dark mode（/themes 只是选择器）
+      3) agent 原生 slash：Grok `/theme light|dark` 等
+
+    前端只改 palette；禁止前端再 notify 双发 Mode 2031。
     """
     if req.mode not in HERDR_THEME_MAP:
         raise HTTPException(400, "mode 必须是 light 或 dark")
     theme_name = HERDR_THEME_MAP[req.mode]
     herdr_client.set_web_theme_mode(req.mode)
     try:
-        # auto_switch=false + 强制 name，reload 后立即用浅/深内置主题
-        herdr_client.set_theme_for_web_mode(req.mode, name_override=theme_name)
+        write = herdr_client.set_theme_for_web_mode(req.mode, name_override=theme_name)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except OSError as exc:
         raise HTTPException(500, f"写入 herdr 配置失败: {exc}")
-    # 已 attach 的 herdr PTY：Mode 2031（OpenCode 等订阅协议的 TUI）
-    notified: list[str] = []
-    try:
-        for item in terminal.list_terms():
-            tid = str(item.get("id") or "")
-            if not tid or not item.get("alive") or not item.get("label"):
-                continue
-            if terminal.set_color_scheme(tid, req.mode, notify=True):
-                notified.append(tid)
-    except Exception:
-        logger.exception("theme/herdr notify labeled terms failed")
-    # herdr reload-config 可能触发各 session 全量重绘，放到线程里，API 先返回
-    reload_state: dict[str, Any] = {"ok": True, "scheduled": True}
+    config_changed = bool(write.get("changed")) if isinstance(write, dict) else True
 
-    def _bg_reload() -> None:
+    reload_state: dict[str, Any] = {
+        "ok": True, "scheduled": False, "skipped": not config_changed,
+    }
+    agents_state: dict[str, Any] = {"scheduled": True}
+
+    def _notify_mode_2031() -> list[str]:
+        notified: list[str] = []
         try:
-            herdr_client.reload_config()
+            for item in terminal.list_terms():
+                tid = str(item.get("id") or "")
+                if not tid or not item.get("alive") or not item.get("label"):
+                    continue
+                if terminal.set_color_scheme(tid, req.mode, notify=True):
+                    notified.append(tid)
         except Exception:
-            logger.exception("theme/herdr reload_config failed")
+            logger.exception("theme/herdr notify labeled terms failed")
+        return notified
+
+    def _bg_theme_side_effects() -> None:
+        # config 变了：先 reload 再 Mode 2031（herdr 用新 name 答 OSC，OpenCode 才准）
+        # config 未变：同步路径已发过 Mode 2031，这里只补 agent slash
+        if config_changed:
+            try:
+                herdr_client.reload_config()
+            except Exception:
+                logger.exception("theme/herdr reload_config failed")
+            try:
+                _notify_mode_2031()
+            except Exception:
+                logger.exception("theme/herdr Mode 2031 failed")
+        # Grok 等自绘：原生 /theme slash（OpenCode 走 Mode 2031，不在此灌 /themes 选择器）
+        try:
+            herdr_client.apply_agent_web_themes(req.mode)
+        except Exception:
+            logger.exception("theme/herdr apply_agent_web_themes failed")
+
+    # config 未变：同步立刻 Mode 2031；变了则等后台 reload 后再发（避免双发）
+    notified_sync = [] if config_changed else _notify_mode_2031()
 
     try:
         import threading
-        threading.Thread(target=_bg_reload, name="herdr-theme-reload", daemon=True).start()
+        if config_changed:
+            reload_state["scheduled"] = True
+        threading.Thread(
+            target=_bg_theme_side_effects, name="herdr-theme-side", daemon=True,
+        ).start()
     except Exception:
-        logger.exception("theme/herdr schedule reload failed")
+        logger.exception("theme/herdr schedule side effects failed")
+        if config_changed:
+            try:
+                reload_state = herdr_client.reload_config()
+            except Exception as exc:
+                reload_state = {"ok": False, "error": str(exc)}
+            notified_sync = _notify_mode_2031()
         try:
-            reload_state = herdr_client.reload_config()
+            agents_state = herdr_client.apply_agent_web_themes(req.mode)
         except Exception as exc:
-            reload_state = {"ok": False, "error": str(exc)}
+            agents_state = {"ok": False, "error": str(exc)}
+
     return {
         "ok": True,
         "theme": theme_name,
+        "config_changed": config_changed,
         "reload": reload_state,
-        "notified_terms": notified,
+        "notified_terms": notified_sync,
+        "agents": agents_state,
     }
 
 
