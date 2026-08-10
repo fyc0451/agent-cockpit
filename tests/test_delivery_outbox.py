@@ -359,3 +359,79 @@ def test_stat_failure_fail_closed(outbox_db: Path, monkeypatch) -> None:
     # no new payload: still 1 row
     with sqlite3.connect(outbox_db) as con:
         assert con.execute("SELECT COUNT(*) FROM delivery_jobs").fetchone()[0] == 1
+
+
+# ── FIX #2184/#2169: credential normalization + legacy allowlist ───
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "API_KEY", "Api-Key", "X-API-KEY", "access_key", "AccessKey",
+        "cookie", "Set-Cookie", "COOKIE",
+    ],
+)
+def test_enqueue_rejects_normalized_credential_keys(
+    outbox_db: Path, key: str,
+) -> None:
+    with pytest.raises(delivery_outbox.OutboxValidationError, match="credential"):
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="t",
+            payload={key: "v"}, idempotency_key="c", now=1.0,
+        )
+    assert not outbox_db.exists()
+
+
+def test_credential_error_sanitized_no_key_no_value(outbox_db: Path) -> None:
+    secret = "hunter2-secret-value-xyz"
+    for key in ("api_key", "x-api-key", "access_key", "cookie", "set-cookie"):
+        with pytest.raises(delivery_outbox.OutboxValidationError) as exc:
+            delivery_outbox.enqueue(
+                job_kind="send_message", target="t",
+                payload={key: secret}, idempotency_key="c", now=1.0,
+            )
+        msg = str(exc.value)
+        assert secret not in msg
+        assert key not in msg
+        assert not outbox_db.exists()
+
+
+def test_unknown_schema_extra_column_fail_closed(outbox_db: Path) -> None:
+    outbox_db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(outbox_db)
+    con.executescript(
+        """
+        CREATE TABLE delivery_jobs (
+          job_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL,
+          job_kind TEXT NOT NULL, target TEXT NOT NULL,
+          payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL,
+          attempt INTEGER NOT NULL DEFAULT 0, next_attempt_at REAL NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending', created_ts REAL NOT NULL,
+          updated_ts REAL NOT NULL, last_error_summary TEXT,
+          evil_future TEXT
+        );
+        INSERT INTO delivery_jobs VALUES(
+          'r1', 'k', 'send_message', 't', '{}', 'd', 0, 1.0,
+          'pending', 1.0, 1.0, NULL, 'x'
+        );
+        """
+    )
+    con.close()
+    outbox_db.chmod(0o600)
+    before = hashlib.sha256(outbox_db.read_bytes()).hexdigest()
+    with pytest.raises(delivery_outbox.OutboxStoreError):
+        delivery_outbox.get_job("r1")
+    # fail-closed: content hash, schema and rows unchanged; no rebuild table.
+    assert hashlib.sha256(outbox_db.read_bytes()).hexdigest() == before
+    con = sqlite3.connect(outbox_db)
+    tables = {
+        r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    cols = {r[1] for r in con.execute("PRAGMA table_info(delivery_jobs)")}
+    rows = con.execute("SELECT COUNT(*) FROM delivery_jobs").fetchone()[0]
+    con.close()
+    assert "delivery_jobs_new" not in tables
+    assert "evil_future" in cols
+    assert rows == 1

@@ -5,19 +5,24 @@ until a worker picks them up. This slice implements persistence + idempotency
 only; it stays dormant (not imported by server/hub_client, no worker started).
 
 Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
-+ REVIEW_BLOCK #2154 (0600 fail-closed, legacy schema rebuild).
++ REVIEW_BLOCK #2154 (0600 fail-closed, legacy schema rebuild)
++ FIX #2184/#2169 (legacy allowlist + credential key normalization).
 - Canonical payload JSON + sha256 digest; a repeated idempotency key reuses the
   original record only when job_kind/target/digest all match — any difference
   fails closed as IdempotencyConflict.
-- Credentials never enter the schema or API; nested credential-named fields,
-  NaN/Inf, non-string keys and non-serializable values are rejected before any
-  DB write (OutboxValidationError), and errors never echo payload content.
+- Credentials never enter the schema or API; credential-named fields are
+  detected after key normalization (lowercase, separators stripped) so api_key,
+  x-api-key, access_key, cookie, set-cookie and the classic token/authorization/
+  password/secret/credential are all rejected before any DB write
+  (OutboxValidationError); errors are sanitized (no key, no value).
+  NaN/Inf, non-string keys and non-serializable values are likewise rejected.
 - Write guard via runtime_paths.validate_store (final/intermediate symlink
   escape fail-closed); store file mode is enforced to 0600 fail-closed before
   any payload write (OutboxStoreError on chmod/stat failure).
-- Legacy schema is rebuilt in a transaction (CREATE new + copy + DROP + RENAME)
-  so the physical schema exactly matches the current CREATE/fingerprint, with
-  failure atomicity (rollback leaves the legacy table intact).
+- Only the exact known 6-column legacy fingerprint may be rebuilt in a
+  transaction (CREATE new + copy + DROP + RENAME); any future/extra/unknown
+  schema difference raises OutboxStoreError fail-closed and mutates nothing
+  (DB hash/schema/rows unchanged). Failure is atomic (rollback leaves legacy).
 """
 from __future__ import annotations
 
@@ -25,6 +30,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -48,10 +54,16 @@ class IdempotencyConflict(RuntimeError):
 
 
 class OutboxStoreError(RuntimeError):
-    """Store integrity failure (mode/stat) — fail-closed before any write."""
+    """Store integrity failure (mode/stat/unknown schema) — fail-closed."""
 
 
-_CREDENTIAL_WORDS = ("token", "authorization", "password", "secret", "credential")
+# Credential indicators matched against the alnum-normalized key (lowercase,
+# separators stripped): catches api_key/api-key/APIKEY, x-api-key, access_key,
+# cookie/set-cookie, plus token/authorization/password/secret/credential.
+_CREDENTIAL_INDICATORS = (
+    "apikey", "accesskey", "cookie", "token",
+    "authorization", "password", "secret", "credential",
+)
 _STORE_MODE = 0o600
 
 _CREATE_BODY = (
@@ -89,6 +101,15 @@ _FRESH_COLUMNS = (
     ("updated_ts", "REAL", 1, 0),
     ("last_error_summary", "TEXT", 0, 0),
 )
+# Exact known-legacy 6-column fingerprint — the ONLY shape rebuilt in place.
+_LEGACY_COLUMNS = (
+    ("job_id", "TEXT", 0, 1),
+    ("idempotency_key", "TEXT", 1, 0),
+    ("job_kind", "TEXT", 1, 0),
+    ("target", "TEXT", 1, 0),
+    ("payload_json", "TEXT", 1, 0),
+    ("created_ts", "REAL", 1, 0),
+)
 _COLUMNS = (
     "job_id", "idempotency_key", "job_kind", "target", "payload_json",
     "payload_digest", "attempt", "next_attempt_at", "status",
@@ -109,6 +130,19 @@ def _digest_for(payload: Any) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _credential_indicator(key: str) -> str | None:
+    """Return the matched indicator if the normalized key looks credential-ish.
+
+    Normalization lowercases and strips non-alphanumerics so api_key, Api-Key,
+    APIKEY, x-api-key all collapse to a form containing 'apikey'.
+    """
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    for indicator in _CREDENTIAL_INDICATORS:
+        if indicator in normalized:
+            return indicator
+    return None
+
+
 def _validate_value(obj: Any) -> None:
     # bool before int (bool is a subclass). Errors carry no payload content.
     if isinstance(obj, bool):
@@ -123,7 +157,7 @@ def _validate_value(obj: Any) -> None:
         for key, value in obj.items():
             if not isinstance(key, str):
                 raise OutboxValidationError("non-string key")
-            if any(word in key.lower() for word in _CREDENTIAL_WORDS):
+            if _credential_indicator(key):
                 raise OutboxValidationError("credential field not allowed")
             _validate_value(value)
         return
@@ -195,9 +229,24 @@ def _schema_matches(con: sqlite3.Connection) -> bool:
     return actual == expected
 
 
+def _is_known_legacy(con: sqlite3.Connection) -> bool:
+    """True only for the exact known 6-column legacy fingerprint."""
+    try:
+        rows = con.execute("PRAGMA table_info(delivery_jobs)").fetchall()
+    except sqlite3.Error:
+        return False
+    if len(rows) != len(_LEGACY_COLUMNS):
+        return False
+    actual = {
+        str(r[1]): (str(r[2] or "").upper(), int(r[3]), int(r[5])) for r in rows
+    }
+    expected = {name: (typ, nn, pk) for name, typ, nn, pk in _LEGACY_COLUMNS}
+    return actual == expected
+
+
 def _rebuild_legacy(con: sqlite3.Connection) -> None:
-    """Rebuild legacy schema in a transaction to exactly match the current
-    CREATE, preserving rows (digest/next_attempt_at/updated_ts backfilled).
+    """Rebuild the known legacy schema in a transaction to exactly match the
+    current CREATE, preserving rows (digest/next_attempt_at/updated_ts backfilled).
 
     Failure is atomic: any error rolls back so the legacy table is untouched.
     """
@@ -238,12 +287,18 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         con.execute(_CREATE_SQL)
         con.execute(_INDEX_SQL)
         return
-    if not _schema_matches(con):
+    if _schema_matches(con):
+        indexes = {
+            row[1] for row in con.execute("PRAGMA index_list(delivery_jobs)")
+        }
+        if "delivery_jobs_idempotency" not in indexes:
+            con.execute(_INDEX_SQL)
+        return
+    if _is_known_legacy(con):
         _rebuild_legacy(con)
         return
-    indexes = {row[1] for row in con.execute("PRAGMA index_list(delivery_jobs)")}
-    if "delivery_jobs_idempotency" not in indexes:
-        con.execute(_INDEX_SQL)
+    # Unknown/future/extra schema: fail closed — never rebuild or mutate.
+    raise OutboxStoreError("unknown delivery_outbox schema; refusing to migrate")
 
 
 def _row_to_job(row: tuple) -> dict:
@@ -319,7 +374,7 @@ def enqueue(*, job_kind, target, payload, idempotency_key, now):
 
 
 def get_job(job_id):
-    """Read a job by id, rebuilding a legacy schema in place if needed."""
+    """Read a job by id, rebuilding a known legacy schema in place if needed."""
     _guard_store()
     with _lock:
         con = _connect()
