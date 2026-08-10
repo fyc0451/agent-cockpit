@@ -97,6 +97,74 @@ def test_opencode_theme_picker_closes_its_dialog_after_filter_failure(monkeypatc
     assert all("/themes" not in arg for call in calls for arg in call)
 
 
+def test_opencode_mode_picker_switches_to_requested_mode_without_touching_composer(monkeypatch):
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if "wait-output" in args and "Switch to" in " ".join(args):
+            return '{"matched_line":"Switch to light mode"}'
+        if "read" in args:
+            return "  ┃  preserved draft\n  ┃  Build · model\n"
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_mode_to_pane("demo", "w1:p4", "light")
+
+    assert result == {
+        "available": True,
+        "sent": "theme-mode → light",
+        "mode": "opencode-theme-mode",
+        "changed": True,
+    }
+    assert calls[0] == [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "ctrl+p",
+    ]
+    assert [
+        "--session", "demo", "pane", "send-text", "w1:p4", "Switch to",
+    ] in calls
+    assert [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "Enter",
+    ] in calls
+
+
+def test_opencode_mode_picker_is_idempotent(monkeypatch):
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if "wait-output" in args and "Switch to" in " ".join(args):
+            return '{"matched_line":"Switch to dark mode"}'
+        if "read" in args:
+            return "  ┃  preserved draft\n  ┃  Build · model\n"
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_mode_to_pane("demo", "w1:p4", "light")
+
+    assert result["changed"] is False
+    assert [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "esc",
+    ] in calls
+    assert not any(call[-1:] == ["Enter"] for call in calls)
+
+
+def test_opencode_mode_picker_rejects_invalid_mode(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run", lambda args, timeout=10: calls.append(list(args)),
+    )
+
+    assert herdr_client.apply_opencode_mode_to_pane(
+        "demo", "w1:p4", "sepia",
+    ) == {"error": "mode 必须是 light 或 dark"}
+    assert calls == []
+
+
 def test_opencode_tui_theme_preserves_config_and_rejects_invalid_json(
     tmp_path, monkeypatch,
 ):
@@ -156,6 +224,42 @@ def test_agent_theme_sync_skips_live_opencode_when_persistence_fails(monkeypatch
         "reason": "tui_config_write_failed",
     }]
     assert calls == [("grok", "s1", "p2", "/theme dark", "slash")]
+
+
+def test_agent_theme_sync_sets_opencode_theme_and_explicit_mode(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "set_opencode_tui_theme", lambda theme: f"/tmp/{theme}.json",
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "snapshot",
+        lambda: {"panes": [
+            {"session": "s1", "pane_id": "p1", "agent": "opencode"},
+        ]},
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "apply_opencode_theme_to_pane",
+        lambda session, pane_id, theme: calls.append(
+            ("theme", session, pane_id, theme)
+        ) or {"available": True},
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "apply_opencode_mode_to_pane",
+        lambda session, pane_id, mode: calls.append(
+            ("mode", session, pane_id, mode)
+        ) or {"available": True},
+    )
+
+    result = herdr_client.apply_agent_web_themes("light")
+
+    assert result["ok"] is True
+    assert calls == [
+        ("theme", "s1", "p1", "palenight"),
+        ("mode", "s1", "p1", "light"),
+    ]
 
 
 def test_start_agent_injects_light_flag_for_grok(monkeypatch):

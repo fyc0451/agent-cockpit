@@ -8,6 +8,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Set OpenCode's light/dark mode explicitly in addition to selecting its theme,
+  so the light Web theme renders a genuinely light OpenCode background.
 - Switch live OpenCode themes through its dedicated theme dialog so rapid
   changes cannot leave commands in the composer or submit them as chat.
 - Block terminal pointer and keyboard input while a terminal is loading or its

@@ -1089,12 +1089,79 @@ def apply_opencode_theme_to_pane(
     }
 
 
+def apply_opencode_mode_to_pane(
+    session: str, pane_id: str, mode: str,
+) -> dict[str, Any]:
+    """通过 OpenCode 命令弹层把主题模式显式设为 light 或 dark。"""
+    if mode not in ("light", "dark"):
+        return {"error": "mode 必须是 light 或 dark"}
+
+    prefix = ["--session", session, "pane"]
+    dialog_open = False
+    try:
+        _run(prefix + ["send-keys", pane_id, "ctrl+p"], timeout=5)
+        _run(
+            prefix + [
+                "wait-output", pane_id,
+                "--regex", r"^\s*Commands\s+esc\s*$",
+                "--source", "visible", "--lines", "60",
+                "--timeout", "2000", "--raw",
+            ],
+            timeout=3,
+        )
+        dialog_open = True
+        _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
+        _run(prefix + ["send-text", pane_id, "Switch to"], timeout=5)
+        output = _run(
+            prefix + [
+                "wait-output", pane_id,
+                "--regex", r"^\s*Switch to (?:light|dark) mode\s*$",
+                "--source", "visible", "--lines", "60",
+                "--timeout", "2000", "--raw",
+            ],
+            timeout=3,
+        )
+        match = re.search(r"Switch to (light|dark) mode", output)
+        if match is None:
+            raise RuntimeError("无法识别 OpenCode 当前主题模式")
+        changed = match.group(1) == mode
+        _run(
+            prefix + ["send-keys", pane_id, "Enter" if changed else "esc"],
+            timeout=5,
+        )
+        for _ in range(10):
+            time.sleep(0.1)
+            screen = _run(
+                prefix + [
+                    "read", pane_id, "--source", "visible",
+                    "--lines", "60", "--format", "text",
+                ],
+                timeout=5,
+            )
+            if not re.search(r"(?m)^\s*Commands\s+esc\s*$", screen):
+                dialog_open = False
+                break
+        if dialog_open:
+            raise RuntimeError("OpenCode 命令弹层未关闭")
+    except RuntimeError as exc:
+        if dialog_open:
+            try:
+                _run(prefix + ["send-keys", pane_id, "esc"], timeout=5)
+            except RuntimeError:
+                pass
+        return {"error": str(exc)}
+    return {
+        "available": True, "sent": f"theme-mode → {mode}",
+        "mode": "opencode-theme-mode", "changed": changed,
+    }
+
+
 def apply_agent_web_themes(mode: str) -> dict[str, Any]:
     """把 Web 明暗推到 live agent pane（按 agent 原生主题手段）。
 
     - grok: `/theme light|dark`（自绘，light/dark 就是主题别名）
-    - opencode: 同一条路 /themes → 主题名（亮 palenight / 暗 aura）+ tui.json
-      不是「//theme dark」另一套；OpenCode 的明暗靠换主题包，不是换 mode 指令。
+    - opencode: 主题弹层选主题名（亮 palenight / 暗 aura），再通过命令弹层显式
+      设置 light/dark mode；主题名与明暗模式是两个独立状态。
     """
     if mode not in ("light", "dark"):
         raise ValueError("mode 必须是 light 或 dark")
@@ -1139,11 +1206,16 @@ def apply_agent_web_themes(mode: str) -> dict[str, Any]:
             result = apply_opencode_theme_to_pane(session, pane_id, opencode_theme)
             if result.get("error"):
                 errors.append(f"opencode:{session}/{pane_id}: {result['error']}")
-            else:
-                applied.append({
-                    "session": session, "pane_id": pane_id,
-                    "agent": "opencode", "command": f"/themes→{opencode_theme}",
-                })
+                continue
+            mode_result = apply_opencode_mode_to_pane(session, pane_id, mode)
+            if mode_result.get("error"):
+                errors.append(f"opencode:{session}/{pane_id}: {mode_result['error']}")
+                continue
+            applied.append({
+                "session": session, "pane_id": pane_id,
+                "agent": "opencode",
+                "command": f"theme-dialog→{opencode_theme}; mode→{mode}",
+            })
             continue
 
         cmd = agent_theme_slash(agent, mode)
