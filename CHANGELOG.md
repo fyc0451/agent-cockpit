@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Confirm Herdr pane-set changes against an authoritative snapshot before
+  rebuilding parameterized subscriptions, preventing stale pane events from
+  causing a permanent `pane_not_found` reconnect loop.
 - Messages Session control is navigation-only (jump to mail-project human_key),
   with clearer chips/toasts; message body still loads from the project library.
 - Layout「拆开整组」resolves the multi-pane group from a fresh snapshot
