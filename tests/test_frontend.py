@@ -1914,26 +1914,42 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
 
 def test_theme_switch_forces_full_page_reload_after_saving_preference():
     # 运行时改 xterm/WebGL 主题会切一次后错乱；用户切换改为写偏好 + 整页刷新。
-    # boot(save=false) 只同步 DOM class，不 reload。
+    # boot(save=false) 只同步 DOM class，不 reload；reload 前写入 resume 并在 init 自动 attach。
     js = _inline_js()
     assert "function _repaintTermForTheme" not in js
     assert "TERM_LIGHT" not in js
     assert "function applyDocumentTheme(mode)" in js
+    assert "function captureThemeResume()" in js
+    assert "function consumeThemeResume()" in js
+    assert "THEME_RESUME_KEY" in js
     set_theme = js.split("function setTheme(mode,save=true){", 1)[1].split(
         "function toggleTheme", 1
     )[0]
     assert "localStorage.setItem('dash-theme'" in set_theme
     assert "location.reload()" in set_theme
+    assert "captureThemeResume()" in set_theme
     assert "if(!save)" in set_theme
     assert "applyDocumentTheme" in set_theme
-    # 用户路径不得再做半套 in-place xterm 主题切换
     assert "options.theme=th" not in set_theme
     assert "showTermThemeOverlay()" not in set_theme
     assert "requestAnimationFrame(applyTheme)" not in set_theme
     assert "sendAllTermColorSchemes()" not in set_theme
-    # herdr 主题通知仍可 fire-and-forget，完成后/超时都 reload
     assert "/api/theme/herdr" in set_theme
     assert "setTimeout(finish,800)" in set_theme
+    init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
+    assert "consumeThemeResume()" in init
+    assert "doAttachHerdr(themeResume.session)" in init
+
+
+def test_layout_pane_list_checkbox_not_full_width():
+    """全局 input{width:100%} 不得撑爆布局列表 checkbox（会挤掉 agent 名）。"""
+    js = _inline_js()
+    render = js.split("async function renderLayoutPaneList(){", 1)[1].split(
+        "async function layoutTargetOrToast", 1
+    )[0]
+    assert 'class="ly-pick"' in render
+    assert "width:auto" in render
+    assert "min-width:16px" in render
 
 def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     js = _inline_js()

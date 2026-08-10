@@ -3502,10 +3502,14 @@ async function renderLayoutPaneList(){
     }
     const focusMark=(target&&p.pane_id===target.pane_id)?' · 当前焦点':'';
     const groupMark=groupIds.has(p.pane_id)&&groupIds.size>1?' · 你所在组':'';
-    return `<label style="display:flex;gap:8px;align-items:center;font-size:12px;cursor:pointer">
-      <input type="checkbox" class="ly-pick" value="${esc(p.pane_id)}" ${checked?'checked':''}>
-      <span style="flex:1;min-width:0"><b>${esc(label)}</b><span class="muted">${focusMark}${groupMark}</span>
-      <span class="muted" style="font-size:10px"> ${esc(p.pane_id)}${p.tab_id?' · '+esc(p.tab_id):''}</span></span></label>`;
+    // 全局 input{width:100%} 会把 checkbox 撑满、文字挤没；必须 width:auto
+    return `<label class="ly-pane" style="display:flex;gap:8px;align-items:flex-start;font-size:12px;cursor:pointer;padding:6px 8px;border-radius:8px;color:var(--fg);background:${checked?'color-mix(in srgb,var(--accent) 10%,transparent)':'var(--bg)'}">
+      <input type="checkbox" class="ly-pick" value="${esc(p.pane_id)}" ${checked?'checked':''} style="width:auto;min-width:16px;margin-top:2px;flex:0 0 auto">
+      <span style="flex:1;min-width:0;line-height:1.35">
+        <b>${esc(label)}</b>${isAgent?'':' <span class="tag">空 shell</span>'}<span class="muted">${esc(focusMark+groupMark)}</span><br>
+        <span class="muted" style="font-size:10px">${esc(p.pane_id)}${p.tab_id?' · '+esc(String(p.tab_id)):''}</span>
+      </span>
+    </label>`;
   }).join('');
 }
 async function layoutTargetOrToast(){
@@ -3702,6 +3706,7 @@ async function termAttachHerdr(){
 }
 async function doAttachHerdr(session){
   if(!validSessionName(session)){toast('非法 session 名,拒绝 attach');return}
+  rememberSession(session);
   await restoreTerms();
   closeCollab();
   hfStop();
@@ -3713,6 +3718,7 @@ async function doAttachHerdr(session){
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-term').classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view==='term'));
+  try{syncViewLocation('term',true)}catch(e){}
   let createdId=null;
   try{
     const existing=TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id]);
@@ -5503,6 +5509,36 @@ function termMinimumContrastRatio(){return TERM_WEBGL_CONTRAST}
 // 处理(options.theme + minimumContrastRatio + WebGL),与 Orca 的做法一致。
 // 用户切换主题：写 localStorage 后整页刷新。运行时改 xterm/WebGL 曾导致切一次后错乱；
 // boot 路径(save=false)只改 class，不 reload。
+// 刷新前写入 theme-resume：回到原 view 并自动重新打开 session（不得丢工作现场）。
+const THEME_RESUME_KEY='cockpit-theme-resume';
+function captureThemeResume(){
+  const view=document.querySelector('#nav button.active')?.dataset.view||viewFromLocation()||'attention';
+  const session=CURRENT_TERM?.session||(TERM_ID&&TERM_SESSIONS[TERM_ID])||RESTORED_SESSION||'';
+  const sess=validSessionName(session)?session:'';
+  if(sess)rememberSession(sess);
+  // 固定 hash，reload 后 init 能落到同一 view
+  try{syncViewLocation(view,true)}catch(e){}
+  const resume={
+    view,
+    session:sess,
+    // 终端页/已 attach 的 session：刷新后必须自动 doAttachHerdr
+    autoAttach:!!(sess&&(view==='term'||view==='herdrflow'||TERM_ID||CURRENT_TERM)),
+  };
+  try{localStorage.setItem(THEME_RESUME_KEY,JSON.stringify(resume))}catch(e){}
+  return resume;
+}
+function consumeThemeResume(){
+  try{
+    const raw=localStorage.getItem(THEME_RESUME_KEY);
+    if(!raw)return null;
+    localStorage.removeItem(THEME_RESUME_KEY);
+    const data=JSON.parse(raw);
+    return data&&typeof data==='object'?data:null;
+  }catch(e){
+    try{localStorage.removeItem(THEME_RESUME_KEY)}catch(_){}
+    return null;
+  }
+}
 function applyDocumentTheme(mode){
   const light=mode==='light';
   document.documentElement.classList.toggle('light',light);
@@ -5518,6 +5554,7 @@ function setTheme(mode,save=true){
   }
   try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
   applyDocumentTheme(light?'light':'dark');
+  captureThemeResume();
   const reload=()=>{try{location.reload()}catch(e){location.href=location.href}};
   let done=false;
   const finish=()=>{if(done)return;done=true;reload()};
@@ -5773,8 +5810,12 @@ async function init(){
   if(!ok){document.body.innerHTML='<div class="empty" style="padding:60px;text-align:center">未认证,请刷新重试</div>';return}
   applyLang();
   scheduleTermThemePrewarm();
-  const initialView=viewFromLocation()||'attention';
-  if(!viewFromLocation())syncViewLocation(initialView,true);
+  const themeResume=consumeThemeResume();
+  if(themeResume?.session)rememberSession(themeResume.session);
+  const initialView=(themeResume?.view&&document.getElementById('view-'+themeResume.view))
+    ?themeResume.view
+    :(viewFromLocation()||'attention');
+  if(!viewFromLocation()||themeResume?.view)syncViewLocation(initialView,true);
   VIEW_LOCATION_LOCK=true;try{showView(initialView)}finally{VIEW_LOCATION_LOCK=false}
   loadSettings();  // 后台拉配置:语言默认值/启用 agent/目录默认 agent
   document.addEventListener('visibilitychange',recoverPageState);
@@ -5788,6 +5829,20 @@ async function init(){
   connectSSE();loadSessions();refreshBoard();await loadAttention();refreshPushStatus();
   VIEW_LOCATION_LOCK=true;try{await handleAttentionHash()}finally{VIEW_LOCATION_LOCK=false}
   loadVersion();
+  // 主题整页刷新后：自动回到终端并重新 attach 原 session，不丢工作现场
+  if(themeResume?.autoAttach&&themeResume.session&&validSessionName(themeResume.session)){
+    try{
+      if(themeResume.view==='herdrflow'){
+        HF_SESSION=themeResume.session;
+        rememberSession(themeResume.session);
+        if(document.querySelector('#nav button.active')?.dataset.view!=='herdrflow'){
+          VIEW_LOCATION_LOCK=true;try{showView('herdrflow')}finally{VIEW_LOCATION_LOCK=false}
+        }
+      }else{
+        await doAttachHerdr(themeResume.session);
+      }
+    }catch(e){toast('主题切换后自动打开 session 失败: '+e,4000)}
+  }
 }
 init();
 </script>
