@@ -8,7 +8,8 @@ Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
 + REVIEW_BLOCK #2154 (0600 fail-closed, legacy schema rebuild)
 + FIX #2184/#2169 (legacy allowlist + credential key normalization)
 + STILL BLOCKED #2189 (precise allowlist: ordered cols + defaults + index/FK/user_version)
-+ STILL BLOCKED #2194 (fingerprint ALL indexes incl. UNIQUE autoindex by origin).
++ STILL BLOCKED #2194 (fingerprint ALL indexes incl. UNIQUE autoindex by origin)
++ STILL BLOCKED #2197 (index name + duplicate count: sorted-tuple multiset).
 - Canonical payload JSON + sha256 digest; a repeated idempotency key reuses the
   original record only when job_kind/target/digest all match — any difference
   fails closed as IdempotencyConflict.
@@ -24,13 +25,15 @@ Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
 - Schema allowlist is exact: only the precise known 6-column legacy fingerprint
   (ordered columns + defaults + ONLY the PK autoindex + no FK + user_version=0)
   may be rebuilt in a transaction (CREATE new + copy + DROP + RENAME). Indexes
-  are fingerprinted by origin/unique/partial + key columns (NOT by name), so a
-  UNIQUE-constraint autoindex (origin='u') is distinguished from the PK
-  autoindex (origin='pk') and not silently dropped. Any difference — extra/future
-  column, swapped order, unexpected default, extra index (incl. UNIQUE
-  autoindex), extra FK, or non-zero user_version — raises OutboxStoreError
-  fail-closed and mutates nothing (DB hash/schema/rows unchanged). Failure is
-  atomic (rollback leaves legacy intact).
+  are fingerprinted as a sorted-tuple multiset of (origin, name, unique, partial,
+  key-columns) — origin='c' user indexes keep the EXACT name (a rename is
+  detected), pk/u autoindex names are not stable so use a "" placeholder but
+  retain origin + key columns. A sorted tuple (not frozenset) preserves
+  duplicate count; autoindex origin ('u' for UNIQUE, 'pk' for PK) is never
+  silently dropped. Any difference — extra/future column, swapped order,
+  unexpected default, renamed/duplicate/extra index (incl. UNIQUE autoindex),
+  extra FK, or non-zero user_version — raises OutboxStoreError fail-closed and
+  mutates nothing (DB hash/schema/rows unchanged). Failure is atomic.
 """
 from __future__ import annotations
 
@@ -110,15 +113,15 @@ _FRESH_COLUMNS = (
     ("updated_ts", "REAL", 1, 0, None),
     ("last_error_summary", "TEXT", 0, 0, None),
 )
-# All-index fingerprint (incl. autoindex) by origin/unique/partial + key columns
-# (col,desc,collation) from index_xinfo — name-independent so a UNIQUE-constraint
-# autoindex (origin='u') is distinguished from the PK autoindex (origin='pk'),
-# never silently dropped.
-_FRESH_INDEXES = frozenset({
-    ("pk", 1, 0, (("job_id", 0, "BINARY"),)),
-    ("c", 1, 0, (("idempotency_key", 0, "BINARY"),)),
-})
-_FRESH_FKS = frozenset()
+# Sorted-tuple multiset of index fingerprints: (origin, name, unique, partial,
+# keycols). origin='c' user index keeps the EXACT name (a rename is detected);
+# pk/u autoindex names are not stable, so name="" placeholder but origin +
+# keycols retained. A sorted tuple (not frozenset) preserves duplicate count.
+_FRESH_INDEXES = (
+    ("c", "delivery_jobs_idempotency", 1, 0, (("idempotency_key", 0, "BINARY"),)),
+    ("pk", "", 1, 0, (("job_id", 0, "BINARY"),)),
+)
+_FRESH_FKS: tuple = ()
 # Exact known-legacy 6-column fingerprint (ordered columns + defaults + ONLY the
 # PK autoindex + no FK + user_version=0) — the ONLY shape rebuilt in place.
 _LEGACY_COLUMNS = (
@@ -129,10 +132,10 @@ _LEGACY_COLUMNS = (
     ("payload_json", "TEXT", 1, 0, None),
     ("created_ts", "REAL", 1, 0, None),
 )
-_LEGACY_INDEXES = frozenset({
-    ("pk", 1, 0, (("job_id", 0, "BINARY"),)),
-})
-_LEGACY_FKS = frozenset()
+_LEGACY_INDEXES = (
+    ("pk", "", 1, 0, (("job_id", 0, "BINARY"),)),
+)
+_LEGACY_FKS: tuple = ()
 _COLUMNS = (
     "job_id", "idempotency_key", "job_kind", "target", "payload_json",
     "payload_digest", "attempt", "next_attempt_at", "status",
@@ -245,11 +248,13 @@ def _norm_dflt(value: Any) -> str | None:
     return s
 
 
-def _all_indexes(con: sqlite3.Connection, table: str) -> frozenset:
-    """Fingerprint ALL indexes (incl. autoindex) by origin/unique/partial +
-    key columns (col,desc,collation) from index_xinfo — name-independent so a
-    UNIQUE-constraint autoindex (origin='u') is distinguished from the PK
-    autoindex (origin='pk') and not silently dropped."""
+def _all_indexes(con: sqlite3.Connection, table: str) -> tuple:
+    """Fingerprint ALL indexes (incl. autoindex) as a sorted-tuple multiset of
+    (origin, name, unique, partial, keycols). origin='c' user indexes keep the
+    EXACT name (a rename is detected); pk/u autoindex names are not stable, so
+    name="" placeholder but origin + key columns retained. A sorted tuple (not
+    frozenset) preserves duplicate count; autoindex origin ('u' for UNIQUE
+    constraints, 'pk' for PRIMARY KEY) is never silently dropped."""
     items: list = []
     for row in con.execute(f"PRAGMA index_list({table})").fetchall():
         # seq, name, unique, origin, partial
@@ -262,16 +267,17 @@ def _all_indexes(con: sqlite3.Connection, table: str) -> frozenset:
             for c in con.execute(f"PRAGMA index_xinfo({name})").fetchall()
             if int(c[5])  # key column only
         )
-        items.append((origin, unique, partial, keycols))
-    return frozenset(items)
+        named = name if origin == "c" else ""
+        items.append((origin, named, unique, partial, keycols))
+    return tuple(sorted(items))
 
 
-def _foreign_keys(con: sqlite3.Connection, table: str) -> frozenset:
-    """Foreign keys as (from_col, ref_table, to_col)."""
+def _foreign_keys(con: sqlite3.Connection, table: str) -> tuple:
+    """Foreign keys as a sorted-tuple multiset of (from_col, ref_table, to_col)."""
     items: list = []
     for row in con.execute(f"PRAGMA foreign_key_list({table})").fetchall():
         items.append((str(row[3]), str(row[2]), str(row[4])))
-    return frozenset(items)
+    return tuple(sorted(items))
 
 
 def _fingerprint(con: sqlite3.Connection) -> tuple:
