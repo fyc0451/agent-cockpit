@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Block terminal pointer and keyboard input while a terminal is loading or its
+  theme is repainting, preventing delayed clicks from replaying after the UI
+  becomes responsive while still allowing required xterm protocol replies.
 - Confirm Herdr pane-set changes against an authoritative snapshot before
   rebuilding parameterized subscriptions, preventing stale pane events from
   causing a permanent `pane_not_found` reconnect loop.

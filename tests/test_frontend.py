@@ -629,7 +629,7 @@ def test_attach_herdr_validates_session_name():
 
 def test_attach_herdr_waits_for_its_websocket():
     js = _inline_js()
-    assert "function queueTermInput(id,data,notice)" in js
+    assert "function queueTermInput(id,data,notice,protocol=false)" in js
     assert "flushTermInput(id,ws)" in js
     assert "queueTermInput(r.id,'herdr --session '+session+'\\r'" in js
     assert "// 等 WS 连上,发 herdr attach 命令\n    setTimeout" not in js
@@ -829,17 +829,26 @@ def test_terminal_does_not_forward_browser_focus_reports_to_pty():
     js = _inline_js()
     assert "const isTermFocusReport=data=>data==='\\x1b[I'||data==='\\x1b[O'" in js
     mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
-    assert "xterm.onData(d=>{if(isTermFocusReport(d)||termThemeInputBlocked())return;" in mount
-    assert "queueTermInput(id,applyTermModifiers(d))" in mount
+    assert "if(isTermFocusReport(d))return" in mount
+    assert "if(isTermProtocolReply(d))" in mount
+    assert "queueTermInput(id,d,null,true)" in mount
+    assert "else queueTermInput(id,applyTermModifiers(d))" in mount
 
 
-def test_terminal_queues_first_input_until_websocket_opens():
-    """首个鼠标/按键事件不能因终端 WebSocket 尚在连接而丢失。"""
+def test_terminal_drops_blocked_user_input_and_never_replays_mouse_input():
+    """启动/断线窗口的用户键鼠必须丢弃，不能恢复后回放。"""
     js = _inline_js()
     mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
     on_data = mount.split("xterm.onData(d=>", 1)[1].split("xterm.onResize", 1)[0]
     assert "queueTermInput(id,applyTermModifiers(d))" in on_data
-    assert "readyState===1" not in on_data
+    queue = js.split("function queueTermInput(id,data,notice,protocol=false){", 1)[1].split(
+        "function rememberTermOutput", 1
+    )[0]
+    assert "isTermMouseReport(data)" in queue
+    assert "inst.ws?.readyState!==1" in queue
+    assert "termUserInputBlocked(id)" in queue
+    assert queue.index("isTermMouseReport(data)") < queue.index("inst.pendingInput=")
+    assert "protocol" in queue
 
 
 def test_terminal_keyboard_toggle_in_toolbar_and_keys_hidden_by_default():
@@ -1857,8 +1866,10 @@ def test_terminal_output_yields_between_bounded_chunks():
 
 def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     js = _inline_js()
-    assert ".term-loading{" in HTML
-    assert "pointer-events:none" in HTML
+    loading_css = HTML.split(".term-loading{", 1)[1].split("}", 1)[0]
+    assert "pointer-events:auto" in loading_css
+    assert "cursor:wait" in loading_css
+    assert ".term-loading.done{opacity:0;pointer-events:none}" in HTML
     assert "TERM_LOADING_QUIET=80,TERM_LOADING_TIMEOUT=15000" in js
     assert "replay_complete" in js
     hold = js.split("function holdTermLoadingForTui(id", 1)[1].split(
@@ -1906,9 +1917,20 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
         "try{xterm.write", 1
     )[0]
     assert clear_warmup.index("xterm.reset()") < clear_warmup.index("afterTermPaints(connect)")
-    # loading 语义保持原样；仅主题切换窗口会短暂拒绝输入。
-    assert "isTermFocusReport(d)||termThemeInputBlocked())return" in mount
-    assert "TERM_INSTANCES[id]?.loadingEl)return" not in mount
+    # loading 期用户键鼠必须丢弃，但 xterm 的明暗协议应答要放行，
+    # 否则 Herdr 启动会退回 shell。
+    assert "const isTermProtocolReply=" in js
+    gate = js.split("function termUserInputBlocked(id){", 1)[1].split(
+        "function flushTermInput", 1
+    )[0]
+    assert "inst.initializing" in gate
+    assert "!inst.replayComplete" in gate
+    assert "inst.loadingEl" in gate
+    assert "inst.loadingWaitForTui" in gate
+    finish = js.split("function finishTermLoading(id,inst){", 1)[1].split(
+        "function showTermThemeOverlay", 1
+    )[0]
+    assert "inst.loadingWaitForTui=false" in finish
     term_key = js.split("function termKey(name){", 1)[1].split(
         "async function termEnsure", 1
     )[0]
@@ -3335,7 +3357,11 @@ def test_theme_switch_inplace_single_herdr_notify_and_input_gate():
     assert "location.reload()" not in set_theme
     assert "applyDocumentTheme" in set_theme
     assert "options.theme=th" in set_theme
-    assert "showTermThemeOverlay()" not in set_theme
+    assert "showTermThemeOverlay()" in set_theme
+    assert set_theme.index("showTermThemeOverlay()") < set_theme.index("options.theme=th")
+    assert "requestAnimationFrame(()=>requestAnimationFrame(applyTheme))" in set_theme
+    assert "afterTermPaints(()=>" in set_theme
+    assert "hideTermThemeOverlay()" in set_theme
     assert "armTermInputGate" in set_theme
     assert "sendAllTermColorSchemes(false)" in set_theme
     assert "/api/theme/herdr" in set_theme
@@ -3343,18 +3369,19 @@ def test_theme_switch_inplace_single_herdr_notify_and_input_gate():
     assert "sendAllTermColorSchemes()" not in set_theme
     assert "sendAllTermColorSchemes(true)" not in set_theme
     assert "let TERM_INPUT_GATE_UNTIL=0;" in js
-    gate = js.split("function termThemeInputBlocked(){", 1)[1].split(
+    gate = js.split("function termUserInputBlocked(id){", 1)[1].split(
         "function flushTermInput", 1
     )[0]
     assert "TERM_THEME_OVERLAYING" in gate
     assert "TERM_INPUT_GATE_UNTIL" in gate
-    assert "loadingEl" not in gate
-    assert "replayComplete" not in gate
+    assert "loadingEl" in gate
+    assert "replayComplete" in gate
     websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
         "function showTermInstance", 1
     )[0]
     assert "armTermInputGate" not in websocket
-    assert "isTermMouseReport" not in js
+    assert "isTermMouseReport" in js
+    assert "isTermProtocolReply" in js
 
 
 def test_layout_quick_pair_and_empty_shell_controls_are_separated():

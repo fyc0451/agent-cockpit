@@ -359,7 +359,7 @@ header .spacer{flex:1}
 /* iOS Safari 不支持元素级全屏的回退:固定铺满可视区 */
 #termStage.term-fs-fixed{position:fixed;inset:0;z-index:80;background:var(--term-bg);padding-bottom:var(--safe-bottom)}
 #termStage.term-fs-fixed #termFsExit{display:block}
-.term-loading{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--term-bg);color:var(--term-fg);font-size:13px;opacity:1;transition:opacity .16s ease;pointer-events:none;user-select:none}
+.term-loading{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--term-bg);color:var(--term-fg);font-size:13px;opacity:1;transition:opacity .16s ease;pointer-events:auto;cursor:wait;user-select:none}
 .term-loading.done{opacity:0;pointer-events:none}
 .term-loading-spinner{width:16px;height:16px;border:2px solid color-mix(in srgb,var(--term-fg) 28%,transparent);border-top-color:var(--term-fg);border-radius:50%;animation:term-loading-spin .8s linear infinite}
 @keyframes term-loading-spin{to{transform:rotate(360deg)}}
@@ -3263,6 +3263,9 @@ function applyTermModifiers(data,name){
 // TUI 常开启 DECSET 1004；xterm 会在浏览器失焦/回焦时生成 ESC[O / ESC[I。
 // 转发给 PTY 会让 Herdr/TUI 把普通页面切换误当成终端焦点变化并整屏重绘。
 const isTermFocusReport=data=>data==='\x1b[I'||data==='\x1b[O';
+const isTermProtocolReply=data=>typeof data==='string'&&/^(?:\x1b\[\?997;[12]n)+$/.test(data);
+const isTermMouseReport=data=>typeof data==='string'&&data.length>=3&&data.charCodeAt(0)===0x1b
+  &&(data.startsWith('\x1b[M')||data.startsWith('\x1b[<'));
 function termKey(name){
   const seq=TERM_KEY_SEQ[name];
   if(!seq||!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
@@ -4211,9 +4214,12 @@ function armTermInputGate(ms=1200){
   const until=performance.now()+Math.max(0,Number(ms)||0);
   if(until>TERM_INPUT_GATE_UNTIL)TERM_INPUT_GATE_UNTIL=until;
 }
-function termThemeInputBlocked(){
+function termUserInputBlocked(id){
   if(TERM_THEME_OVERLAYING)return true;
   if(performance.now()<TERM_INPUT_GATE_UNTIL)return true;
+  const inst=TERM_INSTANCES[id];
+  if(!inst||inst.closing||inst.initializing)return true;
+  if(!inst.replayComplete||inst.loadingEl||inst.loadingWaitForTui)return true;
   return false;
 }
 function flushTermInput(id,ws){
@@ -4224,9 +4230,12 @@ function flushTermInput(id,ws){
     if(inst.pendingNotice){toast(inst.pendingNotice);inst.pendingNotice=''}
   }catch(e){}
 }
-function queueTermInput(id,data,notice){
+function queueTermInput(id,data,notice,protocol=false){
   const inst=TERM_INSTANCES[id];if(!inst)return;
-  if(!notice&&termThemeInputBlocked())return;
+  if(!notice&&!protocol){
+    if(termUserInputBlocked(id))return;
+    if(isTermMouseReport(data)&&inst.ws?.readyState!==1)return;
+  }
   inst.pendingInput=(inst.pendingInput||'')+data;
   if(notice)inst.pendingNotice=notice;
   flushTermInput(id,inst.ws);
@@ -4277,6 +4286,7 @@ function finishTermLoading(id,inst){
   if(inst.loadingTimer){clearTimeout(inst.loadingTimer);inst.loadingTimer=null}
   if(inst.loadingDeadlineTimer){clearTimeout(inst.loadingDeadlineTimer);inst.loadingDeadlineTimer=null}
   const loading=inst.loadingEl;inst.loadingEl=null;inst.loadingPaintPending=false;
+  inst.loadingWaitForTui=false;
   inst.el?.removeAttribute('aria-busy');loading.classList.add('done');
   setTimeout(()=>loading.remove(),180);
   if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active'))requestAnimationFrame(()=>{try{inst.xterm.focus()}catch(e){}});
@@ -4312,7 +4322,7 @@ function holdTermLoadingForTui(id,maxWaitMs=1500){
   const label=inst.loadingEl.querySelector('span:last-child');if(label)label.textContent='正在启动完整终端';
   if(inst.loadingDeadlineTimer)clearTimeout(inst.loadingDeadlineTimer);
   // TUI 等待上限:主题刷新重 attach 用更短窗口(见 maxWaitMs)，避免「点了几秒没反应」。
-  // 遮罩 pointer-events:none；输入也不再因 loadingEl 丢弃。
+  // 上限只是防止遮罩永久挂住；正常仍在 alternate screen 安静后立即揭开。
   const wait=Math.max(200,Math.min(1500,Number(maxWaitMs)||1500));
   inst.loadingDeadlineTimer=setTimeout(()=>settleTermLoading(id,true),wait);
 }
@@ -4666,8 +4676,8 @@ function termMount(id){
     renderQueue:[],rendering:false,renderGeneration:0,replayComplete:false,loadingEl,loadingWaitForTui:false,
     loadingLastOutputAt:performance.now(),loadingTimer:null,loadingDeadlineTimer:null,loadingPaintPending:false};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
-  // loading 遮罩 pointer-events:none，期间应可交互；仅主题全屏遮罩禁输入防幽灵回放
-  xterm.onData(d=>{if(isTermFocusReport(d)||termThemeInputBlocked())return;queueTermInput(id,applyTermModifiers(d))});
+  // loading/主题重绘期用户输入丢弃，不入队；xterm 协议应答单独放行。
+  xterm.onData(d=>{if(isTermFocusReport(d))return;if(isTermProtocolReply(d))queueTermInput(id,d,null,true);else queueTermInput(id,applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   XTERM=xterm;FIT=fit;
   // 先让浏览器画出 loading，再在同一个 xterm/WebGL context 中完成首帧和
@@ -5622,19 +5632,23 @@ function applyDocumentTheme(mode){
 }
 function setTheme(mode,save=true){
   // 就地切换：壳+xterm 立刻变；Herdr 只走 API 一次 Mode 2031（禁止再 sendAll notify）。
-  // 重绘窗口静默丢终端输入，防假死连点重放。
+  // 先让交互遮罩成帧，再改 WebGL palette；阻塞期点击不会落到 xterm。
   const light=mode==='light';
-  applyDocumentTheme(light?'light':'dark');
-  const th=termTheme();
-  for(const [,inst] of Object.entries(TERM_INSTANCES||{})){
-    try{
-      if(inst.xterm&&!inst.xterm._disposed)inst.xterm.options.theme=th;
-      inst.pendingTheme=null;
-    }catch(e){}
-  }
   if(save){
     try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+    showTermThemeOverlay();
     armTermInputGate(TERM_THEME_GATE_MS);
+  }
+  const applyTheme=()=>{
+    applyDocumentTheme(light?'light':'dark');
+    const th=termTheme();
+    for(const [,inst] of Object.entries(TERM_INSTANCES||{})){
+      try{
+        if(inst.xterm&&!inst.xterm._disposed)inst.xterm.options.theme=th;
+        inst.pendingTheme=null;
+      }catch(e){}
+    }
+    if(!save)return;
     const modeStr=light?'light':'dark';
     setTimeout(()=>{
       // 只更新各 term 的 OSC 回复色，notify=false —— Mode 2031 交给 API 唯一一次
@@ -5643,13 +5657,13 @@ function setTheme(mode,save=true){
         fetch('/api/theme/herdr',{
           method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
           body:JSON.stringify({mode:modeStr}),
-        }).then(r=>{
-          // 若 herdr 仍在重绘，门禁可略延长，但不超过 1.2s
-          if(r&&r.ok)armTermInputGate(400);
-        }).catch(()=>{});
+        }).then(r=>{if(r&&r.ok)armTermInputGate(400)}).catch(()=>{});
       }catch(e){}
     },0);
-  }
+    afterTermPaints(()=>{armTermInputGate(300);hideTermThemeOverlay()});
+  };
+  if(save)requestAnimationFrame(()=>requestAnimationFrame(applyTheme));
+  else applyTheme();
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
 (function(){try{setTheme(localStorage.getItem('dash-theme')||'light',false)}catch(e){}})();
