@@ -183,6 +183,25 @@ async def lifespan(_: FastAPI):
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
     _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
+    # T1:pending 重启恢复。单任务失败只记日志；列库失败可重试一次，不拖垮启动。
+    try:
+        recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
+        if recovery.get("retryable"):
+            logger.warning(
+                "pending task recovery list failed; retrying once: %s", recovery
+            )
+            recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
+        if recovery.get("failed") or recovery.get("error"):
+            logger.warning("pending task recovery incomplete: %s", recovery)
+        elif not recovery.get("skipped"):
+            logger.info(
+                "pending task recovery: recovered=%s failed=%s total=%s",
+                recovery.get("recovered"),
+                recovery.get("failed"),
+                recovery.get("total"),
+            )
+    except Exception:
+        logger.exception("pending task recovery crashed; continuing startup")
     try:
         yield
     finally:
