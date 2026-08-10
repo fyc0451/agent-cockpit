@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
+import itertools
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import subprocess
 import threading
 import time
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -33,6 +35,7 @@ import coordination
 import hub_client
 import herdr_client
 import release_identity
+import herdr_state
 import tasks
 import team_inbox_router
 import uploads
@@ -50,6 +53,10 @@ from pydantic import BaseModel, Field
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
+    if not _open_state_clients():
+        # R7 门禁:未决 retiring/survivors 未回收,fail-closed 拒绝启动
+        raise RuntimeError("herdr state clients not fully reaped; refusing start")
+    await asyncio.to_thread(_reconcile_state_client)
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
     _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
@@ -73,6 +80,14 @@ async def lifespan(_: FastAPI):
         try:
             await asyncio.to_thread(_release_all_zoom_leases)
         finally:
+            survivors = await asyncio.to_thread(_stop_state_client)
+            if survivors:
+                # deadline 耗尽仍有存活 state 线程:诊断已序列化,真实引用
+                # 保留在 _state_survivors;不得仅记日志后正常完成
+                logger.error("herdr state clients survived stop: %s", survivors)
+                raise RuntimeError(
+                    f"herdr state clients survived stop: {len(survivors)}"
+                )
             _poller_task = None
             _message_poller_task = None
             _worktree_cleanup_task = None
@@ -296,7 +311,6 @@ TERM_WS_INVALID_CODE = 4004
 _TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
 _TERM_INPUT_NOTE_TASKS: dict[str, asyncio.Task[None]] = {}
 _TERM_INPUT_NOTE_PENDING: set[str] = set()
-_TERM_THEME_TASKS: set[asyncio.Task[Any]] = set()
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
     "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报；"
@@ -426,7 +440,7 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def _board_snapshot() -> dict[str, Any]:
-    return _enrich_board_identities(herdr_client.snapshot())
+    return _enrich_board_identities(_state_client_snapshot())
 
 
 def _identity_hint(
@@ -2933,8 +2947,8 @@ def api_herdr_pane_identity(session: str, pane_id: str):
     """
     _validate_session_name(session)
     _validate_pane_id(pane_id)
-    # 先从 snapshot 拿这个 pane 的 cwd 和 agent 类型
-    snap = herdr_client.snapshot()
+    # 先从状态缓存拿这个 pane 的 cwd 和 agent 类型(H0.5:GET 状态消费者走缓存)
+    snap = _state_client_snapshot()
     pane = next((p for p in snap.get("panes", [])
                  if p.get("session") == session and p.get("pane_id") == pane_id), None)
     if not pane:
@@ -2994,6 +3008,8 @@ def _started_agent_mail_identity(
     }
     mail_agent = MAIL_AGENT_NAMES.get(agent_type, agent_type)
     try:
+        # H0.5 保留 CLI:agent start mutation 后需即时看到新 pane 做同类型
+        # 数量判定,socket 缓存可能滞后一个事件窗口。
         panes = [
             pane for pane in herdr_client.snapshot().get("panes", [])
             if pane.get("session") == session
@@ -3069,8 +3085,11 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     if mail_requirement:
         raise HTTPException(503, mail_requirement["error"])
     name = req.name.strip() if req.name else None
-    if name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
-        raise HTTPException(400, "实例名称只能包含字母、数字、_、-，最长 32 位")
+    if name:
+        try:
+            herdr_client.validate_agent_name(name)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     try:
         normalized_args = herdr_client.normalize_agent_args(req.args)
     except ValueError as exc:
@@ -3375,7 +3394,7 @@ def _same_mail_project_family(project: str, session_path: str) -> bool:
 
 
 def _session_pane_paths(name: str) -> list[str]:
-    snap = herdr_client.snapshot()
+    snap = _state_client_snapshot()
     sess = next(
         (item for item in snap.get("sessions", []) if item.get("session") == name),
         None,
@@ -3659,8 +3678,10 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         ids.append(pid)
         agent_counts[p.agent] = agent_counts.get(p.agent, 0) + 1
         name = p.name.strip() or f"{p.agent}-{agent_counts[p.agent]}"
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
-            raise HTTPException(400, f"无效的实例名称: {name}")
+        try:
+            herdr_client.validate_agent_name(name)
+        except ValueError as exc:
+            raise HTTPException(400, f"无效的实例名称: {name}（{exc}）") from exc
         names.append(name)
     if len(set(ids)) != len(ids):
         raise HTTPException(400, "participant id 不能重复")
@@ -3991,6 +4012,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
             time.sleep(0.5)  # 等 Herdr client 退出,session server 稳定
             _stop_pty_drainer(drain_stop, drain_thread)
             # 记录 TUI 建 session 自带的初始 shell pane,agent 启动后清理
+            # H0.5 保留 CLI:session start mutation 后的即时验证读取
             base_pane_ids = [
                 p.get("pane_id")
                 for p in herdr_client.snapshot().get("panes", [])
@@ -4064,6 +4086,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
     # 1.5 清理建 session 时 TUI 自带的空白 shell pane(至少一个 agent 在跑才清,避免空 session)
     closed_panes = []
     if base_pane_ids and started:
+        # H0.5 保留 CLI:close pane mutation 前的即时存在性验证
         current = {
             p.get("pane_id"): p
             for p in herdr_client.snapshot().get("panes", [])
@@ -4232,7 +4255,7 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
     """手动给单个 pane 发身份告知(适用于手动在 herdr 里开的新 pane)。"""
     _validate_session_name(session)
     _validate_pane_id(pane_id)
-    snap = herdr_client.snapshot()
+    snap = _state_client_snapshot()
     p = next(
         (
             x for s in snap.get("sessions", []) if s.get("session") == session
@@ -4303,7 +4326,7 @@ def api_herdr_session_init_mail(name: str, req: MailProjectReq | None = None):
                 **state,
             }
         project = state["project"]
-    snap = herdr_client.snapshot()
+    snap = _state_client_snapshot()
     sess = next((s for s in snap.get("sessions", []) if s.get("session") == name), None)
     if not sess:
         raise HTTPException(404, f"session 不存在: {name}")
@@ -4538,21 +4561,12 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
                         if isinstance(ctrl, dict) and ctrl.get("type") == "theme":
                             mode = ctrl.get("mode")
                             notify = ctrl.get("notify") is True
-                            updated = await asyncio.to_thread(
+                            await asyncio.to_thread(
                                 terminal.set_color_scheme,
                                 term_id,
                                 mode,
                                 notify=notify,
                             )
-                            session = terminal.term_label(term_id)
-                            if updated and notify and session:
-                                task = asyncio.create_task(asyncio.to_thread(
-                                    herdr_client.notify_opencode_color_scheme,
-                                    session,
-                                    mode,
-                                ))
-                                _TERM_THEME_TASKS.add(task)
-                                task.add_done_callback(_TERM_THEME_TASKS.discard)
                             continue
                     except json.JSONDecodeError:
                         pass
@@ -4585,6 +4599,704 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
 
 
 # ── SSE 实时推送(看板状态变化) ────────────────────────────────
+
+# ── H0.5 socket 状态客户端(稳态看板/Attention/SSE 数据源) ─────
+# 稳态下 _board_snapshot 只读 H0.4 长连接状态客户端的线程安全缓存,
+# 不再周期性 fork 每 session 的 herdr api snapshot;CLI 仅保留给
+# mutation、能力门和 session 发现(list_sessions)。socket/server 中断时
+# 继续服务旧缓存并显式 degraded,恢复后由 H0.4 客户端自动 resync;
+# 无可靠缓存时显式 unavailable,禁止静默回退旧轮询 fork。
+# 每 session 一个独立客户端:增删/socket 变化只影响该 session,旧健康
+# session 缓存持续可读,无整体空窗;发现失败 fail-closed,保留旧客户端
+# 与缓存,绝不清空。
+
+_STATE_CLIENT_LOCK = threading.RLock()
+_state_clients: dict[str, herdr_state.HerdrStateClient] = {}
+# 发现层元数据:name -> {"socket","directory"};仅 running session。
+_state_sessions_meta: dict[str, dict[str, str]] = {}
+_state_discovery_ok = False
+_state_discovery_reason = "state client not running"
+# H0.5 R3:lifespan running 闸门 + epoch。publish 前在同一把锁内校验
+# running+epoch+old/meta(CAS);lifespan stop 关闸门并递增 epoch,同进程新
+# lifespan 重新 open 后旧 epoch 仍失效。
+_state_running = False
+_state_epoch = 0
+# socket 换入超时未就绪的持久降级:name -> {"reason"};旧客户端缓存继续可读,
+# 但 snapshot/SSE 显式 degraded,retry 成功换入后清除。
+_state_swap_pending: dict[str, dict[str, str]] = {}
+# H0.5 R5:已登记未发布的候选 owner record(不可变:epoch/name/token/client
+# identity)。登记同名活跃候选时跳过复用;摘除仅当 current is owner(身份
+# 比较),旧 epoch/旧 worker 绝不能移除新候选。start/stop 线性化由
+# HerdrStateClient._lifecycle_lock 保证(stop 先取得则 start 拒绝生线程)。
+@dataclass(frozen=True)
+class _InflightOwner:
+    epoch: int
+    name: str
+    token: int
+    client: "herdr_state.HerdrStateClient"
+
+
+_state_inflight: dict[str, _InflightOwner] = {}
+_inflight_token = itertools.count(1)
+# H0.5 R6:retiring ownership。任何"已摘下但尚未真正停止"的 client 都必须
+# 在同一锁临界区 identity-safe 转移进 _state_retiring(token->owner 真引用),
+# 不得只存在于 reconcile 局部变量;request_stop+join 真正成功后才摘除。
+_state_retiring: dict[int, _InflightOwner] = {}
+# deadline 耗尽仍存活的 client:保留真实对象与 ownership,可重复
+# request_stop/join(reaper/再次 stop 重试);诊断序列化与内部引用分离。
+_state_survivors: dict[int, _InflightOwner] = {}
+# H0.5 R7:reap/生命周期串行锁。global stop 阶段二、reaper、reconcile 的
+# to_reap 回收、open 的有界 reap 全部在此锁下串行(single-owner);锁序
+# 恒为 REAP→CLIENT,禁止反序。survivor 转移靠锁内身份 CAS,并发成功摘除
+# 的 owner 不得复活/重复报告。
+_STATE_REAP_LOCK = threading.Lock()
+# H0.5 R10/R11:shutdown intent ticket(独立 TICKET 锁保护)。R11:登记改经
+# 专用 _STATE_TICKET_LOCK 严格短临界区,不依赖可能长持有的 CLIENT 锁;
+# open/reconcile 的读取与 stop 完成的消费全部经同一锁同步,CAS 场景
+# check+commit 在 TICKET 临界区内与登记线性化。stop 在尝试 REAP 之前即
+# 登记 ticket;timed acquire 耗尽返回 deferred 时 ticket 持久——open 必须
+# False,reconcile 注册/发布/换入 CAS 必须拒绝,不能只靠调用者看到返回值。
+# stop 完成时仅清除 <= 自己 ticket 的 intent(覆盖更早的 deferred 请求;
+# 较早完成绝不清除较晚 ticket)。TICKET 是叶子锁:持 TICKET 时绝不再取
+# REAP/CLIENT,锁序恒 REAP→CLIENT→TICKET。
+_STATE_TICKET_LOCK = threading.Lock()
+_state_stop_tickets: set[int] = set()
+_state_stop_ticket_seq = itertools.count(1)
+
+
+def _register_stop_ticket() -> int:
+    """TICKET 锁短临界区登记 shutdown intent,返回单调 ticket 号。"""
+    with _STATE_TICKET_LOCK:
+        ticket = next(_state_stop_ticket_seq)
+        _state_stop_tickets.add(ticket)
+        return ticket
+
+
+def _stop_tickets_pending() -> bool:
+    """TICKET 锁下读取是否有未消费 shutdown intent(门禁用)。"""
+    with _STATE_TICKET_LOCK:
+        return bool(_state_stop_tickets)
+
+
+def _consume_stop_tickets(ticket: int, timeout: float = 5.0) -> bool:
+    """stop 完成:仅清除 <= 本 ticket 的 intent(覆盖更早 deferred);
+    更晚 ticket 保留——较早完成绝不清除较晚 ticket。
+    R13:bounded TICKET acquire(timeout);拿不到→False(ticket 保留)。"""
+    if not _STATE_TICKET_LOCK.acquire(timeout=timeout):
+        return False
+    try:
+        for pending in [t for t in _state_stop_tickets if t <= ticket]:
+            _state_stop_tickets.discard(pending)
+    finally:
+        _STATE_TICKET_LOCK.release()
+    return True
+# socket 变化时等新客户端完成 bootstrap 的有界就绪窗口(秒)。
+STATE_SWAP_READY_TIMEOUT_S = 2.0
+# stop 对全部唯一 client(published+inflight)共享的总 join 预算(秒),
+# 不随 session 数叠加。
+STATE_STOP_JOIN_TIMEOUT_S = 5.0
+
+
+def _state_discovery_interval() -> float:
+    try:
+        return max(1.0, float(os.environ.get("COCKPIT_STATE_DISCOVERY_INTERVAL", "10")))
+    except ValueError:
+        return 10.0
+
+
+def _retire_client_locked(
+    name: str, epoch: int, client: herdr_state.HerdrStateClient
+) -> _InflightOwner:
+    """锁内调用:把已摘下的 client 所有权 identity-safe 转移进
+    _state_retiring(真实引用受管,不停成功不摘)。"""
+    owner = _InflightOwner(
+        epoch=epoch, name=name, token=next(_inflight_token), client=client,
+    )
+    _state_retiring[owner.token] = owner
+    return owner
+
+
+def _reap_owner(owner: _InflightOwner, absolute_deadline: float) -> bool:
+    """_STATE_REAP_LOCK 下调用:锁外 stop+join(剩余窗口);真正成功才经
+    锁内身份 CAS 摘除。phase2 CLIENT reacquire 用 remaining 有界获取
+    (#1883);拿不到→False(deferred,owner 保留不清 ticket/不丢 owner),
+    绝不阻塞。survivor 转移由调用方(stop 路径)做,reaper 不转移。"""
+    remaining = max(0.0, absolute_deadline - time.monotonic())
+    try:
+        ok = owner.client.stop(join_timeout=remaining)
+    except Exception:
+        logger.exception("herdr state client stop failed: %s", owner.name)
+        ok = False
+    if not ok:
+        return False
+    remaining = max(0.0, absolute_deadline - time.monotonic())
+    if not _STATE_CLIENT_LOCK.acquire(timeout=remaining):
+        return False  # deferred:拿不到 CLIENT,owner 保留在 retiring/survivors
+    try:
+        if _state_retiring.get(owner.token) is owner:
+            del _state_retiring[owner.token]
+        if _state_survivors.get(owner.token) is owner:
+            del _state_survivors[owner.token]
+    finally:
+        _STATE_CLIENT_LOCK.release()
+    return True
+
+
+def _pending_owners_locked() -> list[_InflightOwner]:
+    """_STATE_CLIENT_LOCK 下调用:全部未决 ownership(retiring+survivors)。"""
+    return list(_state_retiring.values()) + [
+        o for o in _state_survivors.values() if o.token not in _state_retiring
+    ]
+
+
+def _reap_owners(owners: list[_InflightOwner], budget: float) -> None:
+    """REAP 锁下按共享预算回收一批 owner(stop/reaper/reconcile 共用,
+    保证 single-owner 串行)。"""
+    if not owners:
+        return
+    with _STATE_REAP_LOCK:
+        deadline = time.monotonic() + budget
+        for owner in owners:
+            _reap_owner(owner, deadline)
+
+
+def _reap_retired_clients() -> None:
+    """reaper:reconcile 每轮重试回收 retiring/survivors(重复
+    request_stop+join,共享小 deadline 不叠加;REAP 锁串行)。"""
+    with _STATE_CLIENT_LOCK:
+        owners = _pending_owners_locked()
+    _reap_owners(owners, budget=1.0)
+
+
+def _open_state_clients() -> bool:
+    """lifespan 启动(R7 门禁):先在有界窗口内 reap 未决 retiring/survivors,
+    锁内确认全空才开新 running epoch;否则 fail-closed 返回 False——旧同名
+    线程未退绝不发布新同名 client,回收后才允许 restart。"""
+    global _state_running, _state_epoch
+    deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
+    with _STATE_REAP_LOCK:
+        while True:
+            with _STATE_CLIENT_LOCK:
+                owners = _pending_owners_locked()
+            if not owners or time.monotonic() >= deadline:
+                break
+            for owner in owners:
+                _reap_owner(
+                    owner, deadline
+                )
+            time.sleep(0.05)
+        with _STATE_CLIENT_LOCK:
+            # R11:check+commit 与 ticket 登记经 TICKET 锁线性化——登记
+            # 先于本临界区完成则 open 拒绝;反之 open 先提交,登记其后。
+            with _STATE_TICKET_LOCK:
+                if _state_retiring or _state_survivors or _state_stop_tickets:
+                    return False  # fail-closed:未决 ownership/shutdown intent 拒绝开新 epoch
+                _state_running = True
+                _state_epoch += 1
+                return True
+
+
+def _stop_state_client() -> list[dict[str, Any]]:
+    """lifespan 关闭(R8:全事务线性化)。整个事务(关闸/增 epoch/摘
+    ownership、广播/join、survivor 转移)在 _STATE_REAP_LOCK 下与 open
+    全事务互斥——open 设 running 与 stop 关闸绝不交错,锁内顺序决定最终
+    running,stop 返回后不会被较早开始的 open 恢复。阶段一(同一 CLIENT
+    临界区):关 running 闸门、递增 epoch、把 published+inflight 全部
+    identity-safe 转移进 _state_retiring(与既有 retiring 合并),清空
+    clients/inflight/meta/swap-pending/discovery。阶段二:先向快照内所有
+    唯一 client(published+inflight+retiring+既往 survivors 重试)广播
+    request_stop,再按共享总 deadline 逐个 join;真正退出才摘除。deadline
+    耗尽仍存活者移入 _state_survivors 保留真实引用与 ownership(可重复
+    request_stop/join/reaper),返回诊断列表(序列化与内部引用分离);
+    空列表=全部干净退出。"""
+    global _state_clients, _state_sessions_meta, _state_running, _state_epoch
+    global _state_discovery_ok, _state_discovery_reason, _state_swap_pending
+    global _state_inflight
+    # R15:ticket 登记是持久 shutdown intent 的线性化前奏，也是唯一预算
+    # 例外。登记成功后立即建立 absolute deadline；之后 REAP/CLIENT、join、
+    # phase2 bookkeeping 与完成消费 TICKET 全部只使用同一 remaining。
+    ticket = _register_stop_ticket()
+    absolute_deadline = time.monotonic() + STATE_STOP_JOIN_TIMEOUT_S
+    if not _STATE_REAP_LOCK.acquire(
+        timeout=max(0.0, absolute_deadline - time.monotonic())
+    ):
+        return [{
+            "deferred": True,
+            "reason": "reap_lock_timeout",
+            "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+            "ticket": ticket,
+        }]
+    try:
+        if not _STATE_CLIENT_LOCK.acquire(
+            timeout=max(0.0, absolute_deadline - time.monotonic())
+        ):
+            return [{
+                "deferred": True,
+                "reason": "client_lock_timeout",
+                "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+                "ticket": ticket,
+            }]
+        try:
+            _state_running = False
+            _state_epoch += 1
+            epoch = _state_epoch
+            for name, client in _state_clients.items():
+                _retire_client_locked(name, epoch, client)
+            for owner in _state_inflight.values():
+                _state_retiring[owner.token] = owner
+            _state_clients = {}
+            _state_inflight = {}
+            _state_sessions_meta = {}
+            _state_swap_pending = {}
+            _state_discovery_ok = False
+            _state_discovery_reason = "state client not running"
+            targets: dict[int, _InflightOwner] = {}
+            for owner in list(_state_retiring.values()) + list(
+                _state_survivors.values()
+            ):
+                targets[id(owner.client)] = owner
+        finally:
+            _STATE_CLIENT_LOCK.release()
+        owners = list(targets.values())
+        # 阶段二:先广播 cancel,再按入口绝对 deadline 的剩余窗口逐个 join
+        for owner in owners:
+            try:
+                owner.client.request_stop()
+            except Exception:
+                logger.exception("herdr state client request_stop failed")
+        survived: list[_InflightOwner] = []
+        for owner in owners:
+            if not _reap_owner(owner, absolute_deadline):
+                # R12:phase2 survivor 转移用 bounded CLIENT reacquire(remaining);
+                # 拿不到→deferred(owner 保留在 retiring,不清 ticket/不丢 owner)
+                remaining = max(0.0, absolute_deadline - time.monotonic())
+                if _STATE_CLIENT_LOCK.acquire(timeout=remaining):
+                    try:
+                        if _state_retiring.get(owner.token) is owner:
+                            del _state_retiring[owner.token]
+                            _state_survivors[owner.token] = owner
+                            survived.append(owner)
+                        elif _state_survivors.get(owner.token) is owner:
+                            survived.append(owner)
+                    finally:
+                        _STATE_CLIENT_LOCK.release()
+                # 拿不到 CLIENT → deferred:owner 留在 retiring,不进 survived
+        # R15:retiring/survivors 只能在 CLIENT 锁下读取。拿不到锁或仍有
+        # retiring 都表示本轮未完成：保留 ticket，返回明确 deferred。
+        remaining = max(0.0, absolute_deadline - time.monotonic())
+        if not _STATE_CLIENT_LOCK.acquire(timeout=remaining):
+            return [{
+                "deferred": True,
+                "reason": "phase2_state_lock_timeout",
+                "ticket": ticket,
+                "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+            }]
+        try:
+            pending_retiring = len(_state_retiring)
+            pending_survivors = len(_state_survivors)
+        finally:
+            _STATE_CLIENT_LOCK.release()
+        if pending_retiring:
+            return [{
+                "deferred": True,
+                "reason": "phase2_incomplete",
+                "ticket": ticket,
+                "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+                "pending_retiring": pending_retiring,
+                "pending_survivors": pending_survivors,
+            }]
+        # 全部完成(reaped 或 survivor):bounded TICKET 消费 <= 本 ticket
+        remaining = max(0.0, absolute_deadline - time.monotonic())
+        if not _consume_stop_tickets(ticket, timeout=remaining):
+            # TICKET 拿不到→deferred:不清 ticket,返回诊断
+            return [{
+                "deferred": True,
+                "reason": "ticket_consume_timeout",
+                "ticket": ticket,
+                "budget_s": STATE_STOP_JOIN_TIMEOUT_S,
+                "pending_retiring": pending_retiring,
+                "pending_survivors": pending_survivors,
+            }]
+    finally:
+        _STATE_REAP_LOCK.release()
+    diagnostics: list[dict[str, Any]] = []
+    for owner in survived:
+        alive = [
+            t.name for t in threading.enumerate()
+            if t.name.startswith(f"cockpit-state-{owner.name}") and t.is_alive()
+        ]
+        sessions = getattr(owner.client, "_sessions", None) or getattr(
+            owner.client, "sessions", {}
+        )
+        diagnostics.append({
+            "client": repr(owner.client),
+            "sessions": sorted(sessions),
+            "name": owner.name,
+            "epoch": owner.epoch,
+            "token": owner.token,
+            "alive_state_threads": alive,
+        })
+    return diagnostics
+
+
+def _discover_running_sessions() -> dict[str, dict[str, str]] | None:
+    """CLI session 发现(单 fork)。返回 None 表示发现不可用/失败(fail-closed,
+    调用方必须保留旧客户端与缓存);空 dict 表示成功发现零 session。"""
+    if not herdr_client.is_available():
+        return None
+    try:
+        discovered = herdr_client.list_sessions()
+    except Exception:
+        logger.exception("herdr state session discovery failed")
+        return None
+    # list_sessions 对 JSON/兼容表格两条命令都失败时吞错返回 [] 并置失败
+    # 标志(threading.local,与本调用同线程可读);空列表+标志=失败而非空态。
+    if getattr(herdr_client._LIST_SESSIONS_FAILED, "value", False):
+        return None
+    return {
+        str(item["name"]): {
+            "socket": str(item.get("socket") or ""),
+            "directory": str(item.get("directory") or ""),
+        }
+        for item in discovered
+        if item.get("status") == "running" and item.get("socket")
+    }
+
+
+def _build_session_client(name: str, socket_path: str) -> herdr_state.HerdrStateClient:
+    """仅构建候选客户端,不启动线程。线程启动必须在 inflight 登记后的
+    同一临界区内进行(见 _reconcile_state_client)。"""
+    return herdr_state.HerdrStateClient({name: socket_path})
+
+
+def _client_ready(client: herdr_state.HerdrStateClient, name: str) -> bool:
+    try:
+        store = client.snapshot_cached()
+    except Exception:
+        return False
+    if not store.get("available"):
+        return False
+    state = client.state().get("sessions", {}).get(name, {}).get("state")
+    return state == "subscribed"
+
+
+def _candidate_cancelled(name: str, owner: _InflightOwner) -> bool:
+    """候选是否已被取消:stop 关闸/epoch 变迁/inflight 易主(身份比较,
+    旧 worker 不会误认新 epoch 同名候选)。ready 等待每轮调用。"""
+    with _STATE_CLIENT_LOCK:
+        return (
+            not _state_running
+            or _state_epoch != owner.epoch
+            or _state_inflight.get(name) is not owner
+        )
+
+
+def _start_candidate(
+    name: str, epoch: int, client: herdr_state.HerdrStateClient,
+    owner: _InflightOwner,
+) -> bool:
+    """锁外启动候选;False/异常/partial-start 统一 identity-safe 收尾:
+    仍是 owner 则 CLIENT 临界区 del inflight→retiring,经统一 REAP 入口
+    回收;已被 global stop 摘取则不双停。异常记录且不炸掉整个 reconcile。
+    返回是否已成功启动(调用方继续 publish CAS)。"""
+    try:
+        started = client.start()
+    except Exception:
+        logger.exception("herdr state candidate start failed: %s", name)
+        started = False
+    if started:
+        return True
+    iter_reap: list[_InflightOwner] = []
+    with _STATE_CLIENT_LOCK:
+        if _state_inflight.get(name) is owner:
+            del _state_inflight[name]
+            iter_reap.append(_retire_client_locked(name, epoch, client))
+    _reap_owners(iter_reap, STATE_STOP_JOIN_TIMEOUT_S)
+    return False
+
+
+def _reconcile_state_client() -> None:
+    """按发现结果增量对齐 per-session 客户端。
+
+    - 发现失败:fail-closed,只标记 discovery degraded,不动旧客户端/缓存。
+    - 新增 session:锁内登记不可变 owner record(同名活跃候选跳过复用),
+      锁外 start(stop 先取得所有权则 start 拒绝不生线程),再 owner+epoch
+      CAS 原子 inflight→published;bootstrap 前该 session 显式 degraded。
+    - 删除 session:只停止并摘除该 session 的客户端。
+    - socket 路径变化(restart):同样 owner 登记+锁外 start,锁外有界等待
+      就绪(每轮观察取消);ready 后 owner+epoch+old-client CAS 通过才原子
+      换入并停旧;超时弃新留旧,记录 _state_swap_pending 持久 degraded,
+      下轮发现自动重试,成功后清降级。
+    - ownership:摘除仅当 current is owner(身份比较);stop 摘走的候选
+      reconcile 绝不再 stop/publish,旧 epoch worker 摘不到新同名候选。
+    """
+    global _state_discovery_ok, _state_discovery_reason, _state_sessions_meta
+    running = _discover_running_sessions()
+    if running is None:
+        with _STATE_CLIENT_LOCK:
+            if _state_running:
+                _state_discovery_ok = False
+                _state_discovery_reason = "session discovery unavailable"
+        return
+    _reap_retired_clients()  # reaper:重试回收 retiring/survivors
+    to_reap: list[_InflightOwner] = []
+    added: list[tuple[str, str]] = []
+    changed: list[tuple[str, str, herdr_state.HerdrStateClient | None]] = []
+    with _STATE_CLIENT_LOCK:
+        if not _state_running:
+            return  # lifespan 已关闭:拒绝一切 publish
+        epoch = _state_epoch
+        _state_discovery_ok = True
+        _state_discovery_reason = ""
+        if running == _state_sessions_meta:
+            return
+        removed = [n for n in _state_sessions_meta if n not in running]
+        added_names = [n for n in running if n not in _state_sessions_meta]
+        changed_names = [
+            n for n in running
+            if n in _state_sessions_meta and running[n] != _state_sessions_meta[n]
+        ]
+        for name in removed:
+            client = _state_clients.pop(name, None)
+            if client is not None:
+                # 同临界区 identity-safe 转移所有权,不停成功不摘
+                to_reap.append(_retire_client_locked(name, epoch, client))
+            _state_swap_pending.pop(name, None)
+        # removed 立即从 meta 摘除;added/changed 的 meta 仅发布成功后推进
+        _state_sessions_meta = {
+            n: m for n, m in _state_sessions_meta.items() if n in running
+        }
+        for name in added_names:
+            added.append((name, running[name]["socket"]))
+        for name in changed_names:
+            changed.append((name, running[name]["socket"], _state_clients.get(name)))
+    # removed 退休者立即回收(REAP 锁串行),避免门禁阻塞本轮新增/换入
+    _reap_owners(to_reap, STATE_STOP_JOIN_TIMEOUT_S)
+    for name, socket_path in added:
+        client = _build_session_client(name, socket_path)
+        with _STATE_CLIENT_LOCK:
+            if not (
+                _state_running
+                and _state_epoch == epoch
+                and name not in _state_clients
+                and name not in _state_sessions_meta
+            ):
+                continue  # 闸门已关:候选从未启动线程,零副作用直接丢弃
+            if name in _state_inflight:
+                continue  # 同名活跃候选已在途:跳过复用,不起双 worker
+            if _state_retiring or _state_survivors or _stop_tickets_pending():
+                continue  # R7/R10/R11 门禁:未决 ownership/shutdown intent 未清,拒绝新候选(下轮重试)
+            owner = _InflightOwner(
+                epoch=epoch, name=name,
+                token=next(_inflight_token), client=client,
+            )
+            _state_inflight[name] = owner
+        # 锁外启动:False/异常/partial 统一收尾;stop 先取得所有权则不生线程
+        if not _start_candidate(name, epoch, client, owner):
+            continue
+        # R8:added 统一 identity-safe 收尾——publish CAS 任一条件失败但仍是
+        # owner 时,同一 CLIENT 临界区 del inflight→转 retiring,锁外经统一
+        # REAP 入口回收;不留僵尸 inflight/活线程,同名下轮不再饥饿。
+        iter_reap = []
+        with _STATE_CLIENT_LOCK:
+            # R11:check+commit 与 ticket 登记经 TICKET 锁线性化
+            with _STATE_TICKET_LOCK:
+                if (
+                    _state_inflight.get(name) is owner  # 身份比较
+                    and _state_running
+                    and _state_epoch == epoch
+                    and name not in _state_clients
+                    and name not in _state_sessions_meta
+                    and not _state_retiring
+                    and not _state_survivors  # R7:发布前确认无未决 ownership
+                    and not _state_stop_tickets  # R10:shutdown intent 未清不发布
+                ):
+                    # 仍持有 ownership:原子 inflight→published
+                    del _state_inflight[name]
+                    _state_clients[name] = client
+                    _state_sessions_meta[name] = running[name]
+                elif _state_inflight.get(name) is owner:
+                    del _state_inflight[name]
+                    iter_reap.append(_retire_client_locked(name, epoch, client))
+            # 否则 stop 已摘取并拥有该候选,不得 publish/再 stop
+        _reap_owners(iter_reap, STATE_STOP_JOIN_TIMEOUT_S)
+    for name, socket_path, old_client in changed:
+        new_client = _build_session_client(name, socket_path)
+        iter_reap: list[_InflightOwner] = []
+        owner: _InflightOwner | None = None
+        with _STATE_CLIENT_LOCK:
+            # R11:check+commit 与 ticket 登记经 TICKET 锁线性化
+            with _STATE_TICKET_LOCK:
+                owned = (
+                    _state_running
+                    and _state_epoch == epoch
+                    and _state_clients.get(name) is old_client
+                    and name not in _state_inflight  # 同名候选在途:跳过复用
+                    and not _state_retiring
+                    and not _state_survivors  # R7 门禁:未决 ownership 未清不起换入
+                    and not _state_stop_tickets  # R10:shutdown intent 未清不起候选
+                )
+                if owned:
+                    owner = _InflightOwner(
+                        epoch=epoch, name=name,
+                        token=next(_inflight_token), client=new_client,
+                    )
+                    _state_inflight[name] = owner
+        if owner is None:
+            continue  # 闸门已关或已有同名候选:未启动线程,直接丢弃
+        # 锁外启动:False/异常/partial 统一收尾;stop 先取得所有权则不生线程
+        if not _start_candidate(name, epoch, new_client, owner):
+            continue
+        # 锁外有界等待就绪:每轮观察取消,stop 后立即退出
+        ready = False
+        cancelled = False
+        deadline = time.monotonic() + STATE_SWAP_READY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if _candidate_cancelled(name, owner):
+                cancelled = True
+                break
+            if _client_ready(new_client, name):
+                ready = True
+                break
+            time.sleep(0.05)
+        swapped = False
+        with _STATE_CLIENT_LOCK:
+            # R11:check+commit 与 ticket 登记经 TICKET 锁线性化
+            with _STATE_TICKET_LOCK:
+                still_owned = _state_inflight.get(name) is owner
+                if still_owned:
+                    del _state_inflight[name]  # 仅 owner 本人可摘除
+                if (
+                    still_owned
+                    and not cancelled
+                    and ready
+                    and _state_running
+                    and _state_epoch == epoch
+                    and _state_clients.get(name) is old_client
+                    and not _state_retiring
+                    and not _state_survivors  # R7:换入前确认无未决 ownership
+                    and not _state_stop_tickets  # R10:shutdown intent 未清不换入
+                ):
+                    # 原子换入:新客户端握手含全量 resync,清降级,meta 推进;
+                    # 旧 client 同一临界区转移进 retiring(不停成功不摘)
+                    _state_clients[name] = new_client
+                    _state_sessions_meta[name] = running[name]
+                    _state_swap_pending.pop(name, None)
+                    swapped = True
+                    if old_client is not None:
+                        iter_reap.append(_retire_client_locked(name, epoch, old_client))
+                elif still_owned:
+                    # 我们摘取→我们负责 stop:同一临界区转移进 retiring
+                    iter_reap.append(_retire_client_locked(name, epoch, new_client))
+                    if (
+                        not cancelled
+                        and not ready
+                        and _state_running
+                        and _state_epoch == epoch
+                        and _state_clients.get(name) is old_client
+                    ):
+                        # 新 socket 不就绪:弃新留旧,旧缓存可读但持久 degraded
+                        _state_swap_pending[name] = {
+                            "reason": f"state socket swap not ready: {socket_path}",
+                        }
+            # still_owned=False:stop 已摘取并拥有候选,不得再 stop/publish
+        # 立即回收本轮退休者(REAP 锁串行),避免门禁阻塞后续 session
+        _reap_owners(iter_reap, STATE_STOP_JOIN_TIMEOUT_S)
+
+
+def _state_client_snapshot() -> dict[str, Any]:
+    """聚合各 per-session 客户端缓存,合并 directory,显式 degraded/unavailable。"""
+    with _STATE_CLIENT_LOCK:
+        clients = dict(_state_clients)
+        meta = {name: dict(item) for name, item in _state_sessions_meta.items()}
+        swap_pending = {
+            name: dict(item) for name, item in _state_swap_pending.items()
+        }
+        discovery_ok = _state_discovery_ok
+        discovery_reason = _state_discovery_reason
+    if not clients:
+        # 无 running session(发现正常)是合法空态;否则显式 unavailable。
+        if discovery_ok and not meta:
+            return {
+                "available": True, "degraded": False,
+                "sessions": [], "panes": [], "agents": [],
+                "total_panes": 0, "agent_panes": 0,
+            }
+        return {
+            "available": False, "degraded": True,
+            "reason": discovery_reason or "state client not running",
+            "sessions": [], "panes": [], "agents": [],
+            "total_panes": 0, "agent_panes": 0,
+        }
+    degraded = not discovery_ok
+    sessions: list[dict[str, Any]] = []
+    panes: list[dict[str, Any]] = []
+    agents: list[dict[str, Any]] = []
+    any_bootstrapped = False
+    for name, client in clients.items():
+        try:
+            store = client.snapshot_cached()
+            lifecycle = client.state().get("sessions", {})
+        except Exception:
+            logger.exception("herdr state client read failed: %s", name)
+            store, lifecycle = {"available": False, "sessions": []}, {}
+        state = lifecycle.get(name, {}).get("state")
+        entry = next(
+            (s for s in store.get("sessions", []) if s.get("session") == name),
+            None,
+        )
+        if entry is None:
+            entry = {
+                "session": name, "status": "running", "panes": [],
+                "agents": [], "focused_pane_id": None, "layouts": [],
+            }
+        entry["directory"] = meta.get(name, {}).get("directory", "")
+        entry["state_status"] = state
+        if state != "subscribed":
+            degraded = True
+        if name in swap_pending:
+            # socket 换入超时:旧缓存仍可读,但显式 degraded 且原因可见
+            degraded = True
+            entry["state_status"] = "swap_pending"
+            entry["state_reason"] = swap_pending[name].get("reason", "")
+        if store.get("available"):
+            any_bootstrapped = True
+        sessions.append(entry)
+        panes.extend(entry.get("panes", []))
+        agents.extend(entry.get("agents", []))
+    # 已发现但尚未建客户端的 session(异常窗口)显式 degraded。
+    for name in meta:
+        if name not in clients:
+            degraded = True
+            sessions.append({
+                "session": name, "status": "running", "panes": [],
+                "agents": [], "focused_pane_id": None, "layouts": [],
+                "directory": meta[name].get("directory", ""),
+                "state_status": "starting",
+            })
+    available = any_bootstrapped
+    result: dict[str, Any] = {
+        "available": available,
+        "degraded": degraded or not available,
+        "sessions": sessions,
+        "panes": panes,
+        "agents": agents,
+        "total_panes": len(panes),
+        "agent_panes": sum(1 for p in panes if p.get("agent")),
+    }
+    if not available:
+        result["reason"] = "no bootstrapped session cache"
+    elif not discovery_ok and discovery_reason:
+        result["reason"] = discovery_reason
+    elif swap_pending:
+        result["reason"] = "state socket swap pending: " + ",".join(
+            sorted(swap_pending)
+        )
+    return result
+
+
+# team_inbox_router 共享同一缓存:路由 lead 在线判断零 fork。
+team_inbox_router.set_snapshot_provider(_state_client_snapshot)
 
 _live_state: dict[str, Any] = {
     "revision": 0,
@@ -4630,11 +5342,15 @@ async def _poll_live_state() -> None:
     global _live_state
     last_sig = ""
     attention_ids: set[str] | None = None
+    last_discovery = 0.0
     while True:
         poll_start = time.monotonic()
         success = False
         session_count = 0
         try:
+            if time.monotonic() - last_discovery >= _state_discovery_interval():
+                await asyncio.to_thread(_reconcile_state_client)
+                last_discovery = time.monotonic()
             await asyncio.to_thread(_expire_zoom_leases)
             snap = await asyncio.to_thread(_board_snapshot)
             session_count = len(snap.get("sessions", [])) if snap.get("available") else 0
@@ -4651,6 +5367,15 @@ async def _poll_live_state() -> None:
                     "unread": unread,
                     "attention": attention["items"],
                     "capabilities": attention["capabilities"],
+                    # H0.5:可用性/降级与生命周期变化也必须触发 revision+1 推送
+                    "available": snap.get("available"),
+                    "degraded": snap.get("degraded"),
+                    "reason": snap.get("reason"),
+                    "state_status": {
+                        s.get("session"): s.get("state_status")
+                        for s in snap.get("sessions", [])
+                        if isinstance(s, dict)
+                    },
                     "session_tasks": [
                         (
                             session.get("session"), session.get("status"),
@@ -4694,10 +5419,10 @@ async def _poll_live_state() -> None:
                     "attention": attention,
                 }
                 last_sig = sig
-            success = bool(snap.get("available", True)) and not any(
+            success = bool(snap.get("available", False)) and not any(
                 session.get("error") for session in snap.get("sessions", [])
                 if isinstance(session, dict)
-            )
+            ) and not snap.get("degraded", False)
         except asyncio.CancelledError:
             raise
         except Exception:

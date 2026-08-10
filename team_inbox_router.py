@@ -18,13 +18,32 @@ import time
 from pathlib import Path
 from typing import Any
 
-from herdr_client import pane_send, snapshot
+from herdr_client import pane_send
 import runtime_paths
 import terminal
 import team_sessions
 
 ROUTE_STATE = runtime_paths.store("inbox_route")
 _lock = threading.RLock()
+
+# lead 在线判断的状态源由 server 注入(H0.5:共享 socket 状态缓存,
+# 每条 pending 不再 fork herdr snapshot CLI);未注入时一律视为离线,
+# 消息保留 pending,安全默认不投递。
+_snapshot_provider = None
+
+
+def set_snapshot_provider(provider) -> None:
+    global _snapshot_provider
+    _snapshot_provider = provider
+
+
+def _snapshot() -> dict[str, Any]:
+    if _snapshot_provider is None:
+        return {
+            "available": False, "sessions": [], "panes": [],
+            "reason": "state cache provider not wired",
+        }
+    return _snapshot_provider()
 
 
 def _load_bindings(hub: str, human_id: int) -> list[dict[str, Any]]:
@@ -107,9 +126,9 @@ def _write_route_state(hub: str, human_id: int, state: dict[str, Any]) -> None:
 
 
 def _lead_online(session: str, pane_id: str) -> bool:
-    """lead 在线 = 绑定 session 正在运行且其 pane 存在。"""
+    """lead 在线 = 绑定 session 正在运行且其 pane 存在(读共享状态缓存)。"""
     try:
-        snap = snapshot()
+        snap = _snapshot()
     except Exception:
         return False
     if not snap.get("available"):

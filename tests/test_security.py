@@ -313,6 +313,14 @@ def test_start_agent_accepts_unique_local_name_for_same_runtime(monkeypatch, tmp
         headers=headers,
         json={
             "session": "demo", "workdir": str(tmp_path), "agent": "codex",
+            "name": "Codex-2",
+        },
+    ).status_code == 400
+    assert client.post(
+        "/api/herdr/start",
+        headers=headers,
+        json={
+            "session": "demo", "workdir": str(tmp_path), "agent": "codex",
             "name": "codex-2", "workspace": "unexpected",
         },
     ).status_code == 400

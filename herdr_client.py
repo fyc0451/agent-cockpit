@@ -19,6 +19,7 @@ import threading
 import time
 import tomllib
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +34,12 @@ QODER_AGENT_START_TIMEOUT = 60.0
 QODER_AGENTS = frozenset({"qoder", "qodercli", "qodercn"})
 # 其他冷启动慢的 agent 的识别窗口(二进制大/启动自检耗时,如 grok 约 160MB)
 SLOW_AGENT_START_TIMEOUTS = {"grok": 60.0}
-AGENT_STABLE_SECONDS = 1.5
 AGENT_POLL_INTERVAL = 0.2
+# agent wait 未显式给 timeout 时的子进程上限：herdr 默认无限等待，Cockpit 不能
+# 让子进程永久阻塞，故给一个有限上界；调用方需要更长的真实等待应显式传 timeout_ms。
+AGENT_WAIT_DEFAULT_TIMEOUT_S = 60.0
+RESTART_SHELL_TIMEOUT_S = 10.0
+RESTART_SECOND_INTERRUPT_S = 2.0
 MAX_AGENT_ARGS_LENGTH = 2048
 SNAPSHOT_SESSION_TIMEOUT_S = 8.0
 SNAPSHOT_TOTAL_TIMEOUT_S = 10.0
@@ -44,6 +49,99 @@ _SNAPSHOT_EXECUTOR_LOCK = threading.RLock()
 _SNAPSHOT_EXECUTOR: ThreadPoolExecutor | None = None
 _SNAPSHOT_FUTURES: set[Future[dict[str, Any]]] = set()
 SNAPSHOT_MAX_QUEUED = 64
+HERDR_MIN_VERSION = (0, 8, 0)
+HERDR_MIN_PROTOCOL = 19
+HERDR_MIN_SCHEMA_VERSION = 1
+HERDR_REQUIRED_METHODS = frozenset({
+    "session.snapshot",
+    "agent.list",
+    "agent.get",
+    "agent.start",
+    "agent.read",
+    "agent.prompt",
+    "agent.wait",
+    "agent.send_keys",
+    "pane.process_info",
+    "events.subscribe",
+})
+AGENT_KIND_ALIASES = {
+    "codex": "codex",
+    "claude": "claude",
+    "kimi": "kimi",
+    "opencode": "opencode",
+    "grok": "grok",
+    "qoder": "qodercli",
+    "qodercli": "qodercli",
+    "qodercn": "qodercli",
+    "qoderclicn": "qodercli",
+}
+_AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_RESTART_GUARD = threading.Lock()
+_RESTARTING_PANES: set[tuple[str, str]] = set()
+
+
+class HerdrCapabilityError(RuntimeError):
+    """安装版 Herdr 不满足 Cockpit 运行时契约。"""
+
+
+def normalize_agent_kind(agent: str) -> str:
+    """把产品侧 agent 别名映射成 Herdr 原生 kind。"""
+    kind = AGENT_KIND_ALIASES.get(agent)
+    if kind is None:
+        raise ValueError(f"不支持的 agent: {agent}")
+    return kind
+
+
+def validate_agent_name(name: str) -> str:
+    """验证 Herdr 0.8 的唯一 live agent name 语法。"""
+    if not isinstance(name, str) or not _AGENT_NAME_RE.fullmatch(name):
+        raise ValueError(
+            "实例名称必须以小写字母开头，且只能包含小写字母、数字、_、-，最长 32 位"
+        )
+    return name
+
+
+def resolve_unique_agent_name(
+    agent: str, requested: str | None, agents: list[dict[str, Any]],
+) -> str:
+    """根据实时 agent 列表生成或验证 session 内唯一名称。"""
+    normalize_agent_kind(agent)
+    live_names = {
+        str(item.get("name"))
+        for item in agents
+        if isinstance(item, dict) and item.get("name")
+    }
+    if requested is not None:
+        candidate = validate_agent_name(requested.strip())
+        if candidate in live_names:
+            raise ValueError(f"实例名称已被占用: {candidate}")
+        return candidate
+    index = 1
+    while True:
+        candidate = validate_agent_name(f"{agent}-{index}")
+        if candidate not in live_names:
+            return candidate
+        index += 1
+
+
+def require_live_pane_id(pane_id: str, panes: list[dict[str, Any]]) -> str:
+    """只接受实时快照返回的精确 pane ID，不解析或猜测 opaque handle。"""
+    if (
+        not isinstance(pane_id, str)
+        or not pane_id
+        or len(pane_id) > 128
+        or pane_id.startswith("-")
+        or not pane_id.isascii()
+        or any(ord(char) < 32 or ord(char) == 127 for char in pane_id)
+    ):
+        raise ValueError("pane id 格式无效")
+    matches = [
+        item for item in panes
+        if isinstance(item, dict) and item.get("pane_id") == pane_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"pane id 不属于当前实时快照: {pane_id}")
+    return pane_id
 
 
 def _snapshot_future_done(
@@ -283,6 +381,83 @@ def _run(args: list[str], timeout: float = 10) -> str:
     return r.stdout
 
 
+def _schema_method_names(value: Any) -> set[str]:
+    methods: set[str] = set()
+    if isinstance(value, dict):
+        method = value.get("method")
+        if isinstance(method, dict) and isinstance(method.get("const"), str):
+            methods.add(method["const"])
+        for child in value.values():
+            methods.update(_schema_method_names(child))
+    elif isinstance(value, list):
+        for child in value:
+            methods.update(_schema_method_names(child))
+    return methods
+
+
+def probe_herdr_capabilities() -> dict[str, Any]:
+    """读取安装版 CLI 的版本和 schema，拒绝旧能力或静默兼容。"""
+    if not is_available():
+        raise HerdrCapabilityError("Herdr 未安装；请安装或升级到 0.8.0 以上版本")
+    try:
+        version_output = _run(["--version"], timeout=5)
+    except RuntimeError as exc:
+        raise HerdrCapabilityError(f"无法读取 Herdr 版本；请升级或重装 Herdr: {exc}") from exc
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", version_output)
+    if not match:
+        raise HerdrCapabilityError("无法识别 Herdr 版本；请升级或重装 Herdr")
+    version_tuple = tuple(int(part) for part in match.groups())
+    version = ".".join(match.groups())
+    if version_tuple < HERDR_MIN_VERSION:
+        raise HerdrCapabilityError(
+            f"Herdr {version} 不受支持；请升级到 0.8.0 以上版本"
+        )
+
+    try:
+        schema_output = _run(["api", "schema", "--json"], timeout=5)
+        schema = json.loads(schema_output)
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HerdrCapabilityError(
+            f"Herdr API schema 无效；请升级或重装 Herdr: {exc}"
+        ) from exc
+    if not isinstance(schema, dict):
+        raise HerdrCapabilityError("Herdr API schema 无效；请升级或重装 Herdr")
+    protocol = schema.get("protocol")
+    schema_version = schema.get("schema_version")
+    if not isinstance(protocol, int) or isinstance(protocol, bool):
+        raise HerdrCapabilityError("Herdr API schema 缺少 protocol；请升级 Herdr")
+    if protocol < HERDR_MIN_PROTOCOL:
+        raise HerdrCapabilityError(
+            f"Herdr protocol {protocol} 不受支持；请升级到 protocol 19 以上版本"
+        )
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version < HERDR_MIN_SCHEMA_VERSION
+    ):
+        raise HerdrCapabilityError(
+            "Herdr API schema_version 不受支持；请升级 Herdr"
+        )
+    methods = _schema_method_names(schema.get("schemas"))
+    missing = HERDR_REQUIRED_METHODS - methods
+    if missing:
+        raise HerdrCapabilityError(
+            "Herdr API 缺少必要方法 " + ", ".join(sorted(missing)) + "；请升级 Herdr"
+        )
+    return {
+        "version": version,
+        "protocol": protocol,
+        "schema_version": schema_version,
+        "methods": sorted(HERDR_REQUIRED_METHODS),
+    }
+
+
+@lru_cache(maxsize=1)
+def require_herdr_capabilities() -> dict[str, Any]:
+    """每个 Cockpit 进程只探测一次安装版 Herdr 能力。"""
+    return probe_herdr_capabilities()
+
+
 def list_sessions() -> list[dict[str, Any]]:
     """枚举所有 herdr session。返回 [{name, status, directory, socket}]。"""
     if not is_available():
@@ -421,30 +596,6 @@ def _snapshot_session(session: str) -> dict[str, Any]:
             _slim_layout(l) for l in snap.get("layouts", []) if isinstance(l, dict)
         ],
     }
-
-
-def notify_opencode_color_scheme(session: str, mode: str) -> int:
-    """把 host 明暗报告直送 OpenCode pane；Herdr 外层转发不可靠时兜底。"""
-    reports = {"dark": "\x1b[?997;1n", "light": "\x1b[?997;2n"}
-    report = reports.get(mode)
-    if report is None:
-        return 0
-    notified = 0
-    for pane in _snapshot_session(session).get("panes", []):
-        if not isinstance(pane, dict) or pane.get("agent") != "opencode":
-            continue
-        pane_id = pane.get("pane_id")
-        if not isinstance(pane_id, str) or not pane_id:
-            continue
-        try:
-            _run(
-                ["--session", session, "pane", "send-text", pane_id, report],
-                timeout=5,
-            )
-        except RuntimeError:
-            continue
-        notified += 1
-    return notified
 
 
 def _snapshot_session_safe(session: str, deadline: float) -> dict[str, Any]:
@@ -731,15 +882,196 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
         if mode == "prompt":
             _run(["--session", session, "agent", "prompt", pane_id, text], timeout=10)
         elif mode == "send":
-            # send-text 发文本,再 send-keys 发回车执行
-            _run(["--session", session, "pane", "send-text", pane_id, text], timeout=5)
-            _run(["--session", session, "pane", "send-keys", pane_id, "Enter"], timeout=5)
+            # 普通命令：原子 pane run 一次性发命令并提交回车，不再拆成
+            # send-text + send-keys 两次（拆分会让 agent TUI 把首段当 prompt）。
+            _run(["--session", session, "pane", "run", pane_id, text], timeout=8)
         else:  # keys
             keys = text.split()
             _run(["--session", session, "pane", "send-keys", pane_id] + keys, timeout=5)
         return {"available": True, "sent": text, "mode": mode}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
+
+
+def agent_wait(
+    session: str, target: str, until: list[str] | None = None,
+    timeout_ms: int | None = None,
+) -> dict[str, Any]:
+    """等 agent 进入指定状态，使用原生 `agent wait`，不轮询也不键盘模拟。
+
+    target 优先用稳定唯一 agent name（跨 workspace 移动后 pane id 会变），
+    也兼容 pane id。until 为空时沿用 herdr 默认（idle/done/blocked）。
+    timeout_ms 同时作为 herdr --timeout（毫秒）；省略时不向 herdr 传 --timeout，
+    子进程等待由 AGENT_WAIT_DEFAULT_TIMEOUT_S 兜底，避免永久阻塞。
+    """
+    if not is_available():
+        return {"available": False}
+    argv = ["--session", session, "agent", "wait", target]
+    for status in until or []:
+        argv += ["--until", str(status)]
+    if timeout_ms is not None:
+        argv += ["--timeout", str(int(timeout_ms))]
+        subprocess_timeout = timeout_ms / 1000.0 + 5
+    else:
+        subprocess_timeout = AGENT_WAIT_DEFAULT_TIMEOUT_S
+    try:
+        _run(argv, timeout=subprocess_timeout)
+        return {
+            "available": True, "session": session, "target": target, "matched": True,
+        }
+    except RuntimeError as exc:
+        return {
+            "available": True, "session": session, "target": target,
+            "matched": False, "error": str(exc),
+        }
+
+
+# ── managed launch descriptor ──────────────────────────────────────────
+# Herdr AgentInfo/snapshot 不保留原始 `agent start` argv，process-info 也不能当
+# 重建契约。Cockpit 在原生启动成功时把权威契约 {name, kind, args} 持久化，供
+# restart 按 session+pane/name 精确取回，绝不在 restart 时从进程 argv/label/类型
+# 默认值猜测。key 为 session|name（name 是 session 内唯一且跨 workspace 移动稳定）。
+_LAUNCH_DESCRIPTOR_LOCK = threading.RLock()
+
+
+def launch_descriptors_path() -> Path:
+    """launch descriptor 持久化路径；可用 COCKPIT_LAUNCH_DESCRIPTORS_PATH 覆盖（测试用）。"""
+    configured = os.environ.get("COCKPIT_LAUNCH_DESCRIPTORS_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / "dashboard-data" / "launch-descriptors.json"
+
+
+def _load_launch_descriptors() -> dict[str, Any]:
+    path = launch_descriptors_path()
+    if not path.is_file():
+        return {"schema": 1, "descriptors": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"schema": 1, "descriptors": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("descriptors"), dict):
+        return {"schema": 1, "descriptors": {}}
+    return data
+
+
+def _save_launch_descriptors(data: dict[str, Any]) -> None:
+    path = launch_descriptors_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".launch-desc.", suffix=".tmp", dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def save_launch_descriptor(
+    *, session: str, pane_id: str, name: str, kind: str, args: list[str],
+    agent: str | None = None, workdir: str | None = None,
+) -> dict[str, Any]:
+    """原生启动成功后持久化权威 launch 契约；返回写入的规范化记录。
+
+    name 是 resolve_unique_agent_name 给出的 session 内唯一运行时名；kind 是
+    canonical Herdr kind；args 是传给 `--` 的原生 argv 列表（保留空格/分号等原样）。
+    """
+    record = {
+        "session": str(session),
+        "name": str(name),
+        "kind": str(kind),
+        "args": [str(a) for a in args] if isinstance(args, (list, tuple)) else [],
+        "agent": agent,
+        "pane_id": str(pane_id),
+        "workdir": workdir,
+    }
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        data["descriptors"][f"{session}|{name}"] = record
+        _save_launch_descriptors(data)
+    return dict(record)
+
+
+def get_launch_descriptor(session: str, pane_id: str) -> dict[str, Any] | None:
+    """按 session+pane 精确取回 launch 契约；不存在返回 None（restart 不得猜测）。"""
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+    for record in data["descriptors"].values():
+        if (
+            isinstance(record, dict)
+            and record.get("session") == session
+            and record.get("pane_id") == pane_id
+        ):
+            return dict(record)
+    return None
+
+
+def get_launch_descriptor_by_name(session: str, name: str) -> dict[str, Any] | None:
+    """按 session+唯一 name 取回 launch 契约（name 跨 workspace 移动稳定）。"""
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+    record = data["descriptors"].get(f"{session}|{name}")
+    return dict(record) if isinstance(record, dict) else None
+
+
+def clear_launch_descriptors(session: str) -> dict[str, Any]:
+    """删除某 session 的全部 launch descriptor。
+
+    仅在 `herdr session delete` 成功后调用：Herdr 删除 session 后以同名重建会重新分配
+    workspace/pane/name ID，上一代 descriptor 会与新 live identity 假匹配，让 restart
+    误用旧 kind/args。返回 cleared 计数；落盘失败时返回 error，由调用方结构化暴露，
+    不静默宣告 descriptor 已安全。
+    """
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        descriptors = data["descriptors"]
+        doomed = [
+            key for key, record in descriptors.items()
+            if isinstance(record, dict) and record.get("session") == session
+        ]
+        if not doomed:
+            return {"cleared": 0}
+        for key in doomed:
+            del descriptors[key]
+        try:
+            _save_launch_descriptors(data)
+        except OSError as exc:
+            return {"cleared": 0, "error": str(exc)}
+        return {"cleared": len(doomed)}
+
+
+def clear_launch_descriptor_by_pane(session: str, pane_id: str) -> dict[str, Any]:
+    """删除某 session+pane 对应的 launch descriptor。
+
+    pane close 后 Herdr 可能复用该 opaque pane ID；若不清理，新 agent 落到复用 ID 时，
+    get_launch_descriptor 会把旧记录误当当前契约。仅在 `herdr pane close` 成功后调用。
+    """
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        descriptors = data["descriptors"]
+        doomed = [
+            key for key, record in descriptors.items()
+            if isinstance(record, dict)
+            and record.get("session") == session
+            and record.get("pane_id") == pane_id
+        ]
+        if not doomed:
+            return {"cleared": 0}
+        for key in doomed:
+            del descriptors[key]
+        try:
+            _save_launch_descriptors(data)
+        except OSError as exc:
+            return {"cleared": 0, "error": str(exc)}
+        return {"cleared": len(doomed)}
 
 
 def _rename_agent_context(
@@ -774,13 +1106,28 @@ def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
     layout: str = "tab", label: str | None = None, args: str = "",
 ) -> dict[str, Any]:
-    """在指定 session 里启动一个 agent pane(新建 window/pane 跑 agent)。
+    """在指定 session 里启动一个 agent pane(新建 tab/pane 跑 agent)。
 
-    agent: codex | kimi | qodercli
-    返回新 pane 信息(尽力而为,herdr 版本不同命令可能略异)。
+    全部受支持 agent 统一用 Herdr 原生 `agent start`：先按 layout 创建 pane 并
+    解析响应 ID，再以唯一 name + --kind + --pane 启动，readiness 由 --timeout 兜底。
+    agent: codex | claude | kimi | opencode | grok | qoder(cli/cn)。
+    返回新 pane 信息；启动失败回滚本次 pane，返回结构化 error，不回退键盘模拟。
     """
     if not is_available():
         return {"available": False}
+    try:
+        require_herdr_capabilities()
+        normalize_agent_kind(agent)
+        if label is not None:
+            validate_agent_name(label)
+    except HerdrCapabilityError as exc:
+        return {
+            "available": True,
+            "error_code": "herdr_upgrade_required",
+            "error": str(exc),
+        }
+    except ValueError as exc:
+        return {"available": True, "error_code": "invalid_agent_identity", "error": str(exc)}
     normalized_args = normalize_agent_args(args)
     agent_args = shlex.split(normalized_args) if normalized_args else []
     # 只复用当前 live snapshot 中 agent 与工作目录都匹配的 pane。仅按 agent
@@ -845,12 +1192,24 @@ def start_agent(
             result["cwd"] = existing_cwd
         if label:
             result["label"] = label
+        # 复用路径与启动路径语义一致：若该 pane 由本路径启动过（有 launch 契约），
+        # 暴露其权威 name/kind；legacy pane 无契约则不臆造。
+        reused_desc = get_launch_descriptor(session, existing["pane_id"])
+        if reused_desc:
+            result["name"] = reused_desc["name"]
+            result["kind"] = reused_desc["kind"]
         return result
     agent_bin = _find_agent_bin(agent)
     if not (Path(agent_bin).is_file() and os.access(agent_bin, os.X_OK)):
         return {"available": True, "error": f"{agent} 未安装或不在 PATH"}
-    # 构造 agent 启动命令(用 _agent_cmd 统一处理完整路径)
-    cmd_str = _agent_cmd(agent, workdir, normalized_args)
+    # 在任何布局 mutation 前，基于当前 live agents 解析 session 内唯一运行时名：
+    # label 缺省时分配 agent-N，避免裸名与已有同 kind live agent 冲突，导致 pane 已
+    # 创建却在 agent start 时因 live name 唯一约束失败回滚。
+    try:
+        runtime_name = resolve_unique_agent_name(agent, label, snap.get("agents", []))
+    except ValueError as exc:
+        return {"available": True, "error": str(exc)}
+    canonical_kind = normalize_agent_kind(agent)
     before_ids = {
         str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
     }
@@ -890,21 +1249,25 @@ def start_agent(
             )
             break
 
-        # 无论 Herdr 是否返回 id，都用前后 snapshot 验证它确实是本次新增 pane。
+        # 无论 Herdr 是否返回 id，都用前后 snapshot 验证它确实是本次新增 pane，
+        # 并保留该 pane 的 tab/workspace id 供启动后改名复用（无需再取一次 snapshot）。
+        created_pane: dict[str, Any] | None = None
         deadline = time.monotonic() + PANE_CREATE_TIMEOUT
         while time.monotonic() < deadline:
             after = _snapshot_session(session)
-            after_ids = {
-                str(p.get("pane_id"))
+            after_panes = {
+                str(p.get("pane_id")): p
                 for p in after.get("panes", [])
-                if p.get("pane_id")
+                if isinstance(p, dict) and p.get("pane_id")
             }
-            created_ids = after_ids - before_ids
+            created_ids = set(after_panes) - before_ids
             if reported_pid and str(reported_pid) in created_ids:
                 new_pid = str(reported_pid)
+                created_pane = after_panes[new_pid]
                 break
             if not reported_pid and len(created_ids) == 1:
                 new_pid = created_ids.pop()
+                created_pane = after_panes[new_pid]
                 break
             if not reported_pid and len(created_ids) > 1:
                 raise RuntimeError("创建 pane 时同时出现多个新 pane，无法安全识别")
@@ -912,86 +1275,65 @@ def start_agent(
         if not new_pid:
             raise RuntimeError("split/tab 后找不到本次创建的新 pane")
         start_timeout = _agent_start_timeout(agent)
-        # 后台 tab 中直接 pane run 时,进程虽已就绪,Herdr 偶发不会刷新该 pane
-        # 的 agent 状态(QoderCLI 实测,grok 同案:独立终端秒起但 pane run 后
-        # 识别超时)。这些 agent 改用 Herdr 原生 agent start 针对指定 pane 启动
-        # 并等待 readiness,与用户在前台 tab 手动启动的识别路径一致。
-        NATIVE_START_KIND = (
-            "qodercli" if agent in QODER_AGENTS
-            else "grok" if agent == "grok"
-            else None
-        )
-        if NATIVE_START_KIND:
-            start_argv = [
-                "--session", session, "agent", "start", label or agent,
-                "--kind", NATIVE_START_KIND, "--pane", new_pid,
-                "--timeout", str(int(start_timeout * 1000)),
-                *(["--", *agent_args] if agent_args else []),
-            ]
-            # 新建 pane 的 shell 就绪有延迟,立即 agent start 会报
-            # agent_pane_busy(not an available shell);短窗内重试等待就绪。
-            shell_deadline = time.monotonic() + 10
-            while True:
-                try:
-                    _run(start_argv, timeout=int(start_timeout) + 5)
-                    break
-                except RuntimeError as exc:
-                    if (
-                        "agent_pane_busy" in str(exc)
-                        and time.monotonic() < shell_deadline
-                    ):
-                        time.sleep(0.5)
-                        continue
-                    raise
-        else:
-            # pane run 接收完整命令字符串；拆分后交给 Herdr 重组会破坏引号，并让
-            # 路径中的 shell 元字符在下一层被重新解释。
-            _run(["--session", session, "pane", "run", new_pid, cmd_str], timeout=8)
-
-        # 启动命令成功后仍以 snapshot 为准，再经过稳定窗口复查，捕获
-        # OpenCode/Bun 这类启动后立即崩溃、只留下空 pane 的情况。
-        saw_agent = False
-        confirmed_pane = None
-        deadline = time.monotonic() + start_timeout
-        while time.monotonic() < deadline:
-            current = next(
-                (
-                    p for p in _snapshot_session(session).get("panes", [])
-                    if str(p.get("pane_id")) == new_pid
-                ),
-                None,
-            )
-            if current and current.get("agent") == agent:
-                saw_agent = True
-                time.sleep(AGENT_STABLE_SECONDS)
-                confirmed_pane = next(
-                    (
-                        p for p in _snapshot_session(session).get("panes", [])
-                        if str(p.get("pane_id")) == new_pid
-                    ),
-                    None,
-                )
-                if confirmed_pane and confirmed_pane.get("agent") == agent:
-                    # pane 命名成 agent 名，tab/workspace 也改成可辨认名称
-                    # (默认是序号,看板/TUI 里分不清);失败不影响启动
-                    _rename_agent_context(
-                        session, confirmed_pane, agent, effective_layout, label
-                    )
-                    result = {
-                        "available": True,
-                        "pane_id": new_pid,
-                        "agent": agent,
-                        "cmd": cmd_str,
-                        "layout": effective_layout,
-                    }
-                    if label:
-                        result["label"] = label
-                    return result
+        # 全部受支持 agent 统一用原生 agent start：Herdr 按 --kind 解析 canonical
+        # 可执行文件、在 pane 的交互 shell 内启动，并在 --timeout 内等待 readiness。
+        # Cockpit 不再按 agent 类型回退 pane run，也不自造 readiness 轮询；任何启动
+        # 失败都保留原 pane/session 并返回结构化错误，不回退键盘模拟。
+        start_argv = [
+            "--session", session, "agent", "start", runtime_name,
+            "--kind", canonical_kind,
+            "--pane", new_pid,
+            "--timeout", str(int(start_timeout * 1000)),
+        ]
+        if agent_args:
+            start_argv += ["--", *agent_args]
+        # 新建 pane 的交互 shell 就绪有延迟，立即 agent start 会报
+        # agent_pane_busy(not an available shell)；短窗内重试等待就绪。
+        shell_deadline = time.monotonic() + 10
+        while True:
+            try:
+                _run(start_argv, timeout=int(start_timeout) + 5)
                 break
-            time.sleep(AGENT_POLL_INTERVAL)
-        if saw_agent:
-            raise RuntimeError(f"{agent} 启动后未能保持运行")
-        raise RuntimeError(f"{agent} 启动超时，Herdr 未识别到运行中的 agent")
+            except RuntimeError as exc:
+                if (
+                    "agent_pane_busy" in str(exc)
+                    and time.monotonic() < shell_deadline
+                ):
+                    time.sleep(0.5)
+                    continue
+                raise
+
+        # 启动成功：把 workspace/tab/pane 改成可辨认名称(默认是序号,看板/TUI 里
+        # 分不清)；失败不影响启动结果。created_pane 来自创建后的 snapshot，含
+        # tab_id/workspace_id，无需再取一次 snapshot。展示名用唯一 runtime_name。
+        _rename_agent_context(
+            session, created_pane or {"pane_id": new_pid}, agent, effective_layout,
+            runtime_name,
+        )
+        # 持久化权威 launch 契约 {name, kind, args}：Herdr 不保留原始 start argv，
+        # 故由启动路径落盘，供 restart 按 session+pane/name 精确取回原参数重建，
+        # 绝不从进程 argv/label/类型默认值猜测。落盘失败不杀已成功启动的 agent。
+        descriptor_error: str | None = None
+        try:
+            save_launch_descriptor(
+                session=session, pane_id=new_pid, name=runtime_name,
+                kind=canonical_kind, args=agent_args, agent=agent, workdir=workdir,
+            )
+        except OSError as exc:
+            descriptor_error = str(exc)
+        result = {
+            "available": True,
+            "pane_id": new_pid,
+            "agent": agent,
+            "name": runtime_name,
+            "kind": canonical_kind,
+            "layout": effective_layout,
+        }
+        if label:
+            result["label"] = label
+        if descriptor_error:
+            result["descriptor_error"] = descriptor_error
+        return result
     except RuntimeError as e:
         rolled_back = False
         if new_pid:
@@ -1014,9 +1356,17 @@ def close_pane(session: str, pane_id: str) -> dict[str, Any]:
         return {"available": False}
     try:
         _run(["--session", session, "pane", "close", pane_id], timeout=5)
-        return {"available": True, "closed": pane_id}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
+    # pane 已关闭：清理该 pane 的 launch descriptor。Herdr 可能复用 opaque pane ID，
+    # 不清理会让后续复用该 ID 的新 agent 误读旧契约。
+    cleanup = clear_launch_descriptor_by_pane(session, pane_id)
+    result: dict[str, Any] = {"available": True, "closed": pane_id}
+    if cleanup.get("error"):
+        result["descriptor_cleanup_error"] = cleanup["error"]
+    else:
+        result["descriptors_cleared"] = cleanup.get("cleared", 0)
+    return result
 
 
 SPLIT_MODES = ("horizontal", "vertical", "grid4")
@@ -1218,70 +1568,236 @@ def compose_panes(session: str, pane_ids: list[str], orientation: str) -> str:
     return base
 
 
+def _restart_error(code: str, error: str, pane_id: str) -> dict[str, Any]:
+    return {
+        "available": True, "error_code": code, "error": error,
+        "pane_id": pane_id, "preserved": True,
+    }
+
+
+def _pane_at_available_shell(session: str, pane_id: str) -> bool:
+    """以 process-info 证明 shell 自身在前台，且没有其他前台进程。"""
+    out = _run(
+        ["--session", session, "pane", "process-info", "--pane", pane_id],
+        timeout=5,
+    )
+    data = _parse_data_json(out)
+    if not data:
+        raise RuntimeError("pane process-info 输出解析失败")
+    result = data.get("result", data)
+    if not isinstance(result, dict):
+        raise RuntimeError("pane process-info 输出格式无效")
+    info = result.get("process_info", result)
+    if not isinstance(info, dict) or info.get("pane_id") != pane_id:
+        raise RuntimeError("pane process-info 输出缺少目标 pane")
+    shell_pid = info.get("shell_pid")
+    foreground_pgid = info.get("foreground_process_group_id")
+    processes = info.get("foreground_processes")
+    if not isinstance(shell_pid, int) or isinstance(shell_pid, bool):
+        return False
+    if foreground_pgid != shell_pid or not isinstance(processes, list):
+        return False
+    return all(
+        isinstance(process, dict) and process.get("pid") == shell_pid
+        for process in processes
+    )
+
+
 def restart_pane(
     session: str, pane_id: str, agent: str | None = None,
     workdir: str | None = None, resume: bool = False,
 ) -> dict[str, Any]:
-    """重启 pane 里的 agent(Ctrl+C 退出 + 重新启动)。
-
-    场景:agent 卡死 / thread 损坏 / 想用新 PATH。
-    resume=True 时尝试 codex resume --last 恢复历史会话。
-    """
+    """原位重启 managed agent，并恢复原唯一 name/kind/native args。"""
     if not is_available():
         return {"available": False}
+    key = (session, pane_id)
+    with _RESTART_GUARD:
+        if key in _RESTARTING_PANES:
+            return _restart_error(
+                "restart_in_progress", f"pane {pane_id} 正在重启", pane_id,
+            )
+        _RESTARTING_PANES.add(key)
     try:
-        # 1. 在发送退出按键前确认 pane 和 agent，避免检测丢失后误启 Codex。
+        try:
+            require_herdr_capabilities()
+        except HerdrCapabilityError as exc:
+            return _restart_error("herdr_upgrade_required", str(exc), pane_id)
+
         snap = _snapshot_session(session)
-        p = next(
-            (x for x in snap.get("panes", []) if x.get("pane_id") == pane_id),
+        if snap.get("error"):
+            return _restart_error(
+                "restart_snapshot_failed", str(snap["error"]), pane_id,
+            )
+        pane = next(
+            (item for item in snap.get("panes", []) if item.get("pane_id") == pane_id),
             None,
         )
-        if p is None:
-            return {"available": True, "error": f"找不到 pane: {pane_id}"}
-        previous_agent = p.get("agent")
-        agent = agent or previous_agent
-        if not agent:
-            return {
-                "available": True,
-                "error": f"无法识别 pane {pane_id} 的 agent，已取消重启",
-            }
-        if agent not in {
-            "codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode",
-        }:
-            return {"available": True, "error": f"不支持的 agent: {agent}"}
-        workdir = workdir or p.get("cwd") or str(Path.home())
-
-        # 2. 先 Esc(取消任何 TUI 子模式/输入),再 Ctrl+C 退出 agent
-        _run(["--session", session, "pane", "send-keys", pane_id, "Escape"], timeout=3)
-        time.sleep(0.5)
-        _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
-        time.sleep(1.5)
-        # 再发一次确保退到 shell(agent 可能需要两次 C-c)
-        _run(["--session", session, "pane", "send-keys", pane_id, "C-c"], timeout=3)
-        time.sleep(1)
-        # 3. 清空当前输入行(防有残留):Ctrl+U 清行(herdr 可能不支持,失败忽略)
+        if pane is None:
+            return _restart_error(
+                "restart_pane_not_found", f"找不到 pane: {pane_id}", pane_id,
+            )
+        descriptor = get_launch_descriptor(session, pane_id)
+        if descriptor is None:
+            return _restart_error(
+                "restart_identity_missing",
+                f"pane {pane_id} 缺少 managed launch descriptor", pane_id,
+            )
+        name = descriptor.get("name")
+        kind = descriptor.get("kind")
+        launch_args = descriptor.get("args")
+        product_agent = descriptor.get("agent") or pane.get("agent")
+        if (
+            not isinstance(name, str) or not name
+            or not isinstance(kind, str) or not kind
+            or not isinstance(launch_args, list)
+            or any(not isinstance(value, str) for value in launch_args)
+            or not isinstance(product_agent, str) or not product_agent
+        ):
+            return _restart_error(
+                "restart_identity_invalid", "managed launch descriptor 无效", pane_id,
+            )
         try:
-            _run(["--session", session, "pane", "send-keys", pane_id, "C-u"], timeout=3)
-            time.sleep(0.3)
-        except RuntimeError:
-            pass
-        # 4. 构造启动命令(用 _agent_cmd 统一处理所有 agent 类型)
-        if agent == "codex" and resume:
-            codex_bin = shlex.quote(_find_agent_bin("codex"))
-            cmd_str = f'cd {shlex.quote(workdir)} && {codex_bin} resume --last'
-        else:
-            base = _agent_cmd(agent, workdir)
-            cmd_str = f'cd {shlex.quote(workdir)} && {base}'
-        # 5. 用 pane run 启动命令(比 send-text+Enter 可靠,不会被 agent TUI 当 prompt)
-        # pane run 发命令+回车,语义是"在 pane 里执行命令"
-        _run(["--session", session, "pane", "run", pane_id, cmd_str], timeout=8)
+            if normalize_agent_kind(product_agent) != kind:
+                raise ValueError("kind 不匹配")
+        except ValueError as exc:
+            return _restart_error("restart_identity_invalid", str(exc), pane_id)
+        live = [
+            item for item in snap.get("agents", [])
+            if isinstance(item, dict) and item.get("pane_id") == pane_id
+        ]
+        try:
+            live_kind = (
+                normalize_agent_kind(str(live[0].get("agent") or ""))
+                if len(live) == 1 else None
+            )
+        except ValueError:
+            live_kind = None
+        if len(live) != 1 or live[0].get("name") != name or live_kind != kind:
+            return _restart_error(
+                "restart_identity_mismatch",
+                f"pane {pane_id} 的 live identity 与 launch descriptor 不一致",
+                pane_id,
+            )
+        if agent is not None:
+            try:
+                requested_kind = normalize_agent_kind(agent)
+            except ValueError as exc:
+                return _restart_error("restart_identity_invalid", str(exc), pane_id)
+            if requested_kind != kind:
+                return _restart_error(
+                    "restart_identity_mismatch",
+                    "请求 agent 与 managed kind 不一致", pane_id,
+                )
+        if resume and kind != "codex":
+            return _restart_error(
+                "restart_resume_unsupported", "resume 仅支持 Codex", pane_id,
+            )
+
+        try:
+            _run(
+                ["--session", session, "agent", "send-keys", name, "esc"],
+                timeout=3,
+            )
+            _run(
+                ["--session", session, "agent", "send-keys", name, "ctrl+c"],
+                timeout=3,
+            )
+        except RuntimeError as exc:
+            return _restart_error("restart_exit_failed", str(exc), pane_id)
+
+        deadline = time.monotonic() + RESTART_SHELL_TIMEOUT_S
+        second_interrupt_at = time.monotonic() + RESTART_SECOND_INTERRUPT_S
+        second_interrupt_sent = False
+        shell_ready = False
+        while time.monotonic() < deadline:
+            current = _snapshot_session(session)
+            if current.get("error"):
+                return _restart_error(
+                    "restart_shell_probe_failed", str(current["error"]), pane_id,
+                )
+            current_pane = next(
+                (
+                    item for item in current.get("panes", [])
+                    if item.get("pane_id") == pane_id
+                ),
+                None,
+            )
+            if current_pane is None:
+                return _restart_error(
+                    "restart_pane_lost", f"重启期间 pane {pane_id} 消失", pane_id,
+                )
+            old_live = any(
+                isinstance(item, dict) and item.get("name") == name
+                for item in current.get("agents", [])
+            )
+            if not old_live and not current_pane.get("agent"):
+                try:
+                    shell_ready = _pane_at_available_shell(session, pane_id)
+                except RuntimeError as exc:
+                    return _restart_error(
+                        "restart_shell_probe_failed", str(exc), pane_id,
+                    )
+                if shell_ready:
+                    break
+            elif (
+                not second_interrupt_sent
+                and time.monotonic() >= second_interrupt_at
+            ):
+                try:
+                    _run(
+                        ["--session", session, "agent", "send-keys", name, "ctrl+c"],
+                        timeout=3,
+                    )
+                except RuntimeError:
+                    # 可选第二次中断与 agent 正常退出存在竞态；下一轮快照与
+                    # process-info 才是是否回到 shell 的权威判定。
+                    pass
+                second_interrupt_sent = True
+            time.sleep(AGENT_POLL_INTERVAL)
+        if not shell_ready:
+            return _restart_error(
+                "restart_shell_not_ready",
+                f"pane {pane_id} 未在 {RESTART_SHELL_TIMEOUT_S:g}s 内回到可用 shell",
+                pane_id,
+            )
+
+        native_args = list(launch_args)
+        if resume:
+            native_args += ["resume", "--last"]
+        start_timeout = _agent_start_timeout(product_agent)
+        start_argv = [
+            "--session", session, "agent", "start", name,
+            "--kind", kind, "--pane", pane_id,
+            "--timeout", str(int(start_timeout * 1000)),
+        ]
+        if native_args:
+            start_argv += ["--", *native_args]
+        start_deadline = time.monotonic() + RESTART_SHELL_TIMEOUT_S
+        while True:
+            try:
+                _run(start_argv, timeout=int(start_timeout) + 5)
+                break
+            except RuntimeError as exc:
+                if (
+                    "agent_pane_busy" in str(exc)
+                    and time.monotonic() < start_deadline
+                ):
+                    time.sleep(AGENT_POLL_INTERVAL)
+                    continue
+                code = (
+                    "restart_shell_not_ready"
+                    if "agent_pane_busy" in str(exc)
+                    else "restart_start_failed"
+                )
+                return _restart_error(code, str(exc), pane_id)
         return {
-            "available": True, "restarted": True, "pane_id": pane_id,
-            "agent": agent, "previous_agent": previous_agent,
-            "cmd": cmd_str, "resume": resume,
+            "available": True, "restarted": True, "preserved": True,
+            "pane_id": pane_id, "agent": product_agent, "name": name,
+            "kind": kind, "args": native_args, "resume": resume,
         }
-    except RuntimeError as e:
-        return {"available": True, "error": str(e)}
+    finally:
+        with _RESTART_GUARD:
+            _RESTARTING_PANES.discard(key)
 
 
 def stop_session(session: str) -> dict[str, Any]:
@@ -1301,6 +1817,15 @@ def delete_session(session: str) -> dict[str, Any]:
         return {"available": False}
     try:
         _run(["session", "delete", session], timeout=10)
-        return {"available": True, "deleted": session}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
+    # session 已删除：清理该 session 的 launch descriptor，避免同名 session 重建后
+    # 把上一代 args 误当当前权威契约（workspace/pane/name ID 会被 Herdr 重新分配）。
+    # 清理失败不复活 session，但必须结构化暴露，不静默宣告 descriptor 已安全。
+    cleanup = clear_launch_descriptors(session)
+    result: dict[str, Any] = {"available": True, "deleted": session}
+    if cleanup.get("error"):
+        result["descriptor_cleanup_error"] = cleanup["error"]
+    else:
+        result["descriptors_cleared"] = cleanup.get("cleared", 0)
+    return result

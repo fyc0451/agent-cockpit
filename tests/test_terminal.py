@@ -1042,6 +1042,8 @@ def test_websocket_theme_control_bypasses_user_input_accounting():
         "except json.JSONDecodeError", 1
     )[0]
     assert "terminal.set_color_scheme" in theme
-    assert "herdr_client.notify_opencode_color_scheme" in theme
+    # H0.5 清债:WS 主题路径只走外层真实终端协议,不再向 OpenCode pane 注入字节
+    assert "notify_opencode_color_scheme" not in theme
+    assert "_TERM_THEME_TASKS" not in theme
     assert "continue" in theme
     assert "_schedule_term_input_note" not in theme
