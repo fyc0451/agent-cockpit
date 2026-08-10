@@ -202,7 +202,7 @@ def test_migrate_idempotent(temp_data):
     assert isinstance(tl, list)
 
 
-def test_init_db_marks_interrupted_tasks_failed(temp_data):
+def test_init_db_preserves_pending_and_marks_running_failed(temp_data):
     now = time.time()
     with tasks._db() as con:
         for task_id, status in (("pending-old", "pending"), ("running-old", "running")):
@@ -215,11 +215,16 @@ def test_init_db_marks_interrupted_tasks_failed(temp_data):
 
     tasks._init_db()
 
-    for task_id in ("pending-old", "running-old"):
-        task = tasks.get_task(task_id)
-        assert task["status"] == "failed"
-        assert task["exit_code"] == -1
-        assert "服务重启" in task["output_tail"]
+    pending = tasks.get_task("pending-old")
+    assert pending["status"] == "pending"
+    assert pending["exit_code"] is None
+    assert pending["finished_ts"] is None
+    assert pending["output_tail"] is None
+
+    running = tasks.get_task("running-old")
+    assert running["status"] == "failed"
+    assert running["exit_code"] == -1
+    assert "服务重启" in running["output_tail"]
 
 
 # ── task_diff ───────────────────────────────────────────────────
