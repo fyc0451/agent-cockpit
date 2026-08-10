@@ -3343,3 +3343,140 @@ def test_theme_switch_inplace_single_herdr_notify_and_input_gate():
     assert "sendAllTermColorSchemes()" not in set_theme
     assert "sendAllTermColorSchemes(true)" not in set_theme
 
+
+def test_layout_quick_pair_and_empty_shell_controls_are_separated():
+    modal = HTML.split('<div class="modal-bg" id="layoutModal">', 1)[1].split(
+        "<!-- 终端抽屉 -->", 1
+    )[0]
+    quick, advanced = modal.split('<details class="layout-advanced">', 1)
+    assert "layoutPair('horizontal')" in quick
+    assert "layoutPair('vertical')" in quick
+    for mode in ("horizontal", "vertical", "grid4"):
+        action = f"layoutSplit('{mode}')"
+        assert action not in quick
+        assert action in advanced
+    for key in (
+        "layout.pair_h",
+        "layout.pair_v",
+        "layout.advanced",
+        "layout.advanced_hint",
+        "layout.group_loading",
+    ):
+        assert HTML.count(f"'{key}'") == 2, f"{key} must have English and Japanese translations"
+    for key in (
+        "layout.group_single",
+        "layout.group_multi",
+        "layout.empty_shell",
+        "layout.empty_shell_tag",
+        "layout.focus_mark",
+        "layout.group_mark",
+        "layout.single_no_groups",
+    ):
+        assert HTML.count(f"'{key}'") >= 3, f"{key} must be translated and used dynamically"
+
+
+def test_node_layout_pair_composes_only_existing_agent_panes():
+    js = _inline_js()
+    pair_src = "async function layoutPair(orientation){" + js.split(
+        "async function layoutPair(orientation){", 1
+    )[1].split("\nasync function layoutSplit", 1)[0]
+    assert "/layout/compose" in pair_src
+    assert "/layout/split" not in pair_src
+    assert "close_empty" not in pair_src
+    out = _run_node(
+        textwrap.dedent(
+            r"""
+            let context=null;
+            const calls=[];
+            const toasts=[];
+            let refreshes=0;
+            let closes=0;
+            async function layoutFreshContext(){return context}
+            async function api(url,options){calls.push({url,options});return {}}
+            async function refreshBoard(){refreshes++}
+            function closeLayoutModal(){closes++}
+            function toast(message){toasts.push(message)}
+            function t(_key,fallback){return fallback}
+            """
+        )
+        + pair_src
+        + textwrap.dedent(
+            r"""
+            context={
+              session:'demo',
+              target:{pane_id:'w1:p2',agent:'codex'},
+              panes:[
+                {pane_id:'w1:p1',agent:null},
+                {pane_id:'w1:p2',agent:'codex'},
+                {pane_id:'w1:p3',agent:'grok'},
+              ],
+            };
+            await layoutPair('horizontal');
+            let body=JSON.parse(calls[0].options.body);
+            if(calls[0].url!=='/api/herdr/session/demo/layout/compose')process.exit(1);
+            if(JSON.stringify(body)!==JSON.stringify({pane_ids:['w1:p2','w1:p3'],orientation:'horizontal'}))process.exit(2);
+
+            context={
+              session:'demo',
+              target:{pane_id:'w1:p1',agent:null},
+              panes:[
+                {pane_id:'w1:p1',agent:null},
+                {pane_id:'w1:p4',agent:'opencode'},
+                {pane_id:'w1:p5',agent:'claude'},
+              ],
+            };
+            await layoutPair('vertical');
+            body=JSON.parse(calls[1].options.body);
+            if(JSON.stringify(body)!==JSON.stringify({pane_ids:['w1:p4','w1:p5'],orientation:'vertical'}))process.exit(3);
+
+            const before=calls.length;
+            context={session:'demo',target:{pane_id:'w1:p1',agent:null},panes:[
+              {pane_id:'w1:p1',agent:null},{pane_id:'w1:p4',agent:'opencode'},
+            ]};
+            await layoutPair('horizontal');
+            if(calls.length!==before)process.exit(4);
+            if(!toasts.includes('当前 session 至少需要两个 Agent pane'))process.exit(5);
+            if(calls.some(call=>call.url.includes('/layout/split')||call.url.includes('/close')))process.exit(6);
+            if(refreshes!==2||closes!==2)process.exit(7);
+            console.log('ok');
+            """
+        )
+    )
+    assert "ok" in out
+
+
+def test_node_layout_split_requires_confirmation_before_api():
+    js = _inline_js()
+    split_src = "async function layoutSplit(mode){" + js.split(
+        "async function layoutSplit(mode){", 1
+    )[1].split("\nasync function layoutDetach", 1)[0]
+    assert split_src.index("confirm(") < split_src.index("await api(")
+    out = _run_node(
+        textwrap.dedent(
+            r"""
+            const calls=[];
+            let approved=false;
+            async function layoutTargetOrToast(){return {session:'demo',paneId:'w1:p1'}}
+            function confirm(){return approved}
+            async function api(url,options){calls.push({url,options});return {}}
+            async function refreshBoard(){}
+            function closeLayoutModal(){}
+            function toast(){}
+            function t(_key,fallback){return fallback}
+            """
+        )
+        + split_src
+        + textwrap.dedent(
+            r"""
+            await layoutSplit('grid4');
+            if(calls.length!==0)process.exit(1);
+            approved=true;
+            await layoutSplit('grid4');
+            if(calls.length!==1)process.exit(2);
+            if(!calls[0].url.endsWith('/layout/split'))process.exit(3);
+            if(JSON.parse(calls[0].options.body).mode!=='grid4')process.exit(4);
+            console.log('ok');
+            """
+        )
+    )
+    assert "ok" in out

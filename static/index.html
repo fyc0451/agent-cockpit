@@ -454,6 +454,10 @@ header .spacer{flex:1}
 .setup-preview{border:1px solid var(--bd);border-radius:8px;padding:9px 10px;background:var(--bg);font-size:12px;line-height:1.6;margin-top:10px}
 .setup-advanced{margin-top:10px;border-top:1px solid var(--bd);padding-top:8px}
 .setup-advanced summary{cursor:pointer;color:var(--fg2);font-size:12px}
+.layout-advanced{margin-top:10px;border-top:1px solid var(--bd);padding-top:8px}
+.layout-advanced summary{cursor:pointer;color:var(--fg2);font-size:12px;overflow-wrap:anywhere}
+.layout-advanced-body{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px;padding:8px;border:1px solid var(--bd);border-radius:8px;background:var(--bg3)}
+.layout-advanced-body .muted{flex:1 1 220px;min-width:0;overflow-wrap:anywhere}
 
 .toast{position:fixed;bottom:calc(64px + var(--safe-bottom));left:50%;transform:translateX(-50%);background:var(--bg4);border:1px solid var(--bd2);border-radius:9px;padding:9px 16px;z-index:200;opacity:0;transition:.3s;pointer-events:none;font-size:13px}
 .toast.show{opacity:1}
@@ -955,19 +959,27 @@ header .spacer{flex:1}
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
       <div style="flex:1;min-width:0">
         <h3 id="layoutModalTitle" style="margin:0" data-i18n="layout.title">终端布局</h3>
-        <div class="muted" style="font-size:11px;margin-top:3px" id="layoutModalHint" data-i18n="layout.hint">对当前 pane 一键分屏/拆开，或勾选多个 pane 组合成分屏。</div>
+        <div class="muted" style="font-size:11px;margin-top:3px" id="layoutModalHint" data-i18n="layout.hint">优先组合已有 Agent pane；也可拆开分屏或手动选择 pane。</div>
       </div>
       <button class="icon" onclick="closeLayoutModal()">✕</button>
     </div>
-    <div id="layoutGroupHint" class="muted" style="font-size:11px;margin-bottom:8px;padding:6px 8px;border-radius:8px;background:var(--bg3);border:1px dashed var(--bd)">打开后识别当前分屏组…</div>
+    <div id="layoutGroupHint" class="muted" style="font-size:11px;margin-bottom:8px;padding:6px 8px;border-radius:8px;background:var(--bg3);border:1px dashed var(--bd)" data-i18n="layout.group_loading">打开后识别当前分屏组…</div>
     <div class="launch-bar" style="flex-wrap:wrap">
-      <span class="lbl" data-i18n="layout.curpane">当前 / 快捷</span>
+      <span class="lbl" data-i18n="layout.curpane">快捷布局</span>
+      <button class="primary sm" onclick="layoutPair('horizontal')" data-i18n="layout.pair_h">⬌ 与 Agent 左右</button>
+      <button class="primary sm" onclick="layoutPair('vertical')" data-i18n="layout.pair_v">⬍ 与 Agent 上下</button>
       <button class="sm" onclick="layoutDetach()" title="把当前焦点 pane 移到独立 tab" data-i18n="layout.detach">⛶ 拆出当前</button>
       <button class="sm" onclick="layoutUntile()" title="把你所在分屏组内所有 pane 拆成各自独立 tab" data-i18n="layout.untile">🧩 拆开整组</button>
-      <button class="sm" onclick="layoutSplit('horizontal')" data-i18n="layout.hsplit" title="插入空 shell 槽">⬌ 空槽左右</button>
-      <button class="sm" onclick="layoutSplit('vertical')" data-i18n="layout.vsplit" title="插入空 shell 槽">⬍ 空槽上下</button>
-      <button class="sm" onclick="layoutSplit('grid4')" data-i18n="layout.grid4" title="插入空 shell 槽">⊞ 空槽四分</button>
     </div>
+    <details class="layout-advanced">
+      <summary data-i18n="layout.advanced">高级：插入空 shell 槽</summary>
+      <div class="layout-advanced-body">
+        <span class="muted" style="font-size:11px" data-i18n="layout.advanced_hint">这些操作会新建空 shell pane，仅在确实需要额外终端时使用。</span>
+        <button class="sm" onclick="layoutSplit('horizontal')" data-i18n="layout.hsplit" title="插入空 shell 槽">⬌ 空槽左右</button>
+        <button class="sm" onclick="layoutSplit('vertical')" data-i18n="layout.vsplit" title="插入空 shell 槽">⬍ 空槽上下</button>
+        <button class="sm" onclick="layoutSplit('grid4')" data-i18n="layout.grid4" title="插入空 shell 槽">⊞ 空槽四分</button>
+      </div>
+    </details>
     <div style="margin-top:10px;border-top:1px solid var(--bd);padding-top:10px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
         <span class="lbl" data-i18n="layout.compose">组合分屏</span>
@@ -1208,7 +1220,7 @@ en:{
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
 'term.new':'+ New terminal','term.addagent':'＋ Add Agent','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…','term.layout':'🧱 Layout',
-'layout.title':'Terminal Layout','layout.hint':'Split/detach the current pane in one click, or pick several panes to compose a split.','layout.curpane':'Current pane','layout.hsplit':'⬌ Split horizontal','layout.vsplit':'⬍ Split vertical','layout.grid4':'⊞ 2×2 grid','layout.detach':'⛶ Detach to tab','layout.untile':'🧩 Untile group','layout.compose':'Compose split','layout.h_first':'Single horizontal row','layout.v_first':'Single vertical column','layout.compose_btn':'⧉ Compose selected','layout.pick_hint':'Pick 2-4 panes; the first is the base','layout.nosession':'Open a terminal (pick a herdr session) before adjusting layout','layout.nopanes':'No pane in this session','layout.notarget':'Current pane not found: focus a pane in the terminal first','layout.notab':'Cannot determine the tab of the current pane','layout.pick24':'Please pick 2-4 panes','layout.done_split':'Split done (new slots are empty shells)','layout.done_detach':'Detached to its own tab','layout.done_untile':'Untiled','layout.panes_unit':'pane(s)','layout.single_pane':'This tab has only one pane','layout.done_compose':'Composed into a split',
+'layout.title':'Terminal Layout','layout.hint':'Prefer composing existing Agent panes; you can also untile or pick panes manually.','layout.curpane':'Quick layout','layout.pair_h':'⬌ Beside Agent','layout.pair_v':'⬍ Below Agent','layout.advanced':'Advanced: insert empty shell panes','layout.advanced_hint':'These actions create empty shell panes. Use them only when you need an extra terminal.','layout.hsplit':'⬌ Empty panes side by side','layout.vsplit':'⬍ Empty panes stacked','layout.grid4':'⊞ Empty 2×2 grid','layout.detach':'⛶ Detach to tab','layout.untile':'🧩 Untile group','layout.compose':'Compose split','layout.h_first':'Single horizontal row','layout.v_first':'Single vertical column','layout.compose_btn':'⧉ Compose selected','layout.pick_hint':'Pick 2-4 panes; the first is the base','layout.group_loading':'Identifying the current split group…','layout.group_single':'Your tab {tab} already has one pane ({label}); nothing to untile.','layout.group_multi':'Your split group: {tab} · {count} panes','layout.empty_shell':'(empty shell)','layout.empty_shell_tag':'empty shell','layout.focus_mark':' · current','layout.group_mark':' · your group','layout.nosession':'Open a terminal (pick a herdr session) before adjusting layout','layout.nopanes':'No pane in this session','layout.notarget':'Current pane not found: focus a pane in the terminal first','layout.notab':'Cannot determine the tab of the current pane','layout.pick24':'Please pick 2-4 panes','layout.need_agents':'This session needs at least two Agent panes','layout.split_confirm':'This will create empty shell panes. Continue?','layout.done_split':'Split done (new slots are empty shells)','layout.done_detach':'Detached to its own tab','layout.done_untile':'Untiled','layout.panes_unit':'pane(s)','layout.single_pane':'This tab has only one pane','layout.single_no_groups':'This tab has one pane, and the session has no other split groups','layout.done_compose':'Composed into a split',
 'hf.takeover':'🖥 Take over session TUI','hf.hint':'Copy: paste elsewhere · Fill input: send straight to agent','hf.empty':'No agent pane in this session','hf.send':'Send','hf.paste':'📋 Fill input','hf.full':'⛶ Full','hf.exit':'Exit',
 'sessions.setup':'+ Quick workspace','sessions.hint':'Quick workspace: split pane + start agent; Agent Mail required',
 'roots.system':'System','roots.projects':'Registered projects','roots.custom':'Custom','files.rootlimit':'Already at an accessible root — tap a root name above to switch','files.rmroot':'Remove from accessible locations (directory is not deleted)','files.remove':'Remove',
@@ -1233,7 +1245,7 @@ ja:{
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
 'term.new':'+ 新規ターミナル','term.addagent':'＋ Agent 追加','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…','term.layout':'🧱 レイアウト',
-'layout.title':'ターミナルレイアウト','layout.hint':'現在の pane をワンクリックで分割/分離、または複数 pane を選んで分割レイアウトに組み合わせ。','layout.curpane':'現在の pane','layout.hsplit':'⬌ 左右に分割','layout.vsplit':'⬍ 上下に分割','layout.grid4':'⊞ 2×2 分割','layout.detach':'⛶ 独立 tab へ','layout.untile':'🧩 グループ全分離','layout.compose':'分割に組み合わせ','layout.h_first':'横一列','layout.v_first':'縦一列','layout.compose_btn':'⧉ 選択を組み合わせ','layout.pick_hint':'2-4 個の pane を選択、最初の pane が基準','layout.nosession':'先にターミナルを開いてからレイアウト調整してください','layout.nopanes':'この session に pane がありません','layout.notarget':'現在の pane が見つかりません:先に pane へフォーカスしてください','layout.notab':'現在の pane の tab を特定できません','layout.pick24':'pane を 2-4 個選んでください','layout.done_split':'分割しました(新しい枠は空シェル)','layout.done_detach':'独立 tab へ分離しました','layout.done_untile':'分離しました','layout.panes_unit':'個','layout.single_pane':'この tab には pane が1つだけ','layout.done_compose':'分割レイアウトに組み合わせました',
+'layout.title':'ターミナルレイアウト','layout.hint':'既存の Agent pane の組み合わせを優先し、必要に応じて分離または手動選択できます。','layout.curpane':'クイックレイアウト','layout.pair_h':'⬌ Agent と左右','layout.pair_v':'⬍ Agent と上下','layout.advanced':'詳細：空 shell pane を追加','layout.advanced_hint':'これらの操作は空 shell pane を新規作成します。追加のターミナルが必要な場合だけ使用してください。','layout.hsplit':'⬌ 空枠を左右に追加','layout.vsplit':'⬍ 空枠を上下に追加','layout.grid4':'⊞ 空枠を 2×2 に追加','layout.detach':'⛶ 独立 tab へ','layout.untile':'🧩 グループ全分離','layout.compose':'分割に組み合わせ','layout.h_first':'横一列','layout.v_first':'縦一列','layout.compose_btn':'⧉ 選択を組み合わせ','layout.pick_hint':'2-4 個の pane を選択、最初の pane が基準','layout.group_loading':'現在の分割グループを確認中…','layout.group_single':'現在の tab {tab} は単一 pane（{label}）のため、分離は不要です。','layout.group_multi':'現在の分割グループ：{tab} · {count} pane','layout.empty_shell':'（空 shell）','layout.empty_shell_tag':'空 shell','layout.focus_mark':' · 現在','layout.group_mark':' · 現在のグループ','layout.nosession':'先にターミナルを開いてからレイアウト調整してください','layout.nopanes':'この session に pane がありません','layout.notarget':'現在の pane が見つかりません:先に pane へフォーカスしてください','layout.notab':'現在の pane の tab を特定できません','layout.pick24':'pane を 2-4 個選んでください','layout.need_agents':'この session には Agent pane が2つ以上必要です','layout.split_confirm':'空 shell pane を新規作成します。続行しますか？','layout.done_split':'分割しました(新しい枠は空シェル)','layout.done_detach':'独立 tab へ分離しました','layout.done_untile':'分離しました','layout.panes_unit':'個','layout.single_pane':'この tab には pane が1つだけ','layout.single_no_groups':'この tab は単一 pane で、session 内に他の分割グループもありません','layout.done_compose':'分割レイアウトに組み合わせました',
 'hf.takeover':'🖥 セッション TUI を操作','hf.hint':'コピー: 他アプリで貼り付け · 入力欄へ: agent に直接送信','hf.empty':'このセッションに agent pane なし','hf.send':'送信','hf.paste':'📋 入力欄へ','hf.full':'⛶ 全画面','hf.exit':'退出',
 'sessions.setup':'+ ワンクリックワークスペース','sessions.hint':'ワンクリック: pane 分割 + agent 起動;Agent Mail は必須',
 'roots.system':'システム','roots.projects':'登録プロジェクト','roots.custom':'カスタム','files.rootlimit':'アクセス可能なルートです。上のルート名で切り替えられます','files.rmroot':'アクセス可能場所から削除(ディレクトリ自体は削除されません)','files.remove':'削除',
@@ -3458,16 +3470,16 @@ function layoutGroupLabel(group){
 function layoutUpdateGroupHint(ctx){
   const el=document.getElementById('layoutGroupHint');
   if(!el)return;
-  if(!ctx.session){el.textContent='先打开终端并选择 herdr session';return}
+  if(!ctx.session){el.textContent=t('layout.nosession','先打开终端并选择 herdr session');return}
   if(!ctx.groupTabId||!ctx.group.length){
-    el.textContent='当前 session 没有可识别的 pane';
+    el.textContent=t('layout.nopanes','当前 session 没有 pane');
     return;
   }
   if(ctx.group.length<=1){
-    el.textContent=`你所在的 tab ${ctx.groupTabId} 已是单 pane（${layoutGroupLabel(ctx.group)||'—'}），无需拆开。`;
+    el.textContent=t('layout.group_single','你所在的 tab {tab} 已是单 pane（{label}），无需拆开。',{tab:ctx.groupTabId,label:layoutGroupLabel(ctx.group)||'—'});
     return;
   }
-  el.innerHTML=`你所在的分屏组：<b>${esc(ctx.groupTabId)}</b> · <b>${ctx.group.length}</b> 个 pane<br><span style="font-size:10px">${esc(layoutGroupLabel(ctx.group))}</span>`;
+  el.innerHTML=`${esc(t('layout.group_multi','你所在的分屏组：{tab} · {count} 个 pane',{tab:ctx.groupTabId,count:ctx.group.length}))}<br><span style="font-size:10px">${esc(layoutGroupLabel(ctx.group))}</span>`;
 }
 async function showLayoutModal(){
   const quick=layoutTermContext();
@@ -3489,7 +3501,7 @@ async function renderLayoutPaneList(){
   const groupIds=new Set((ctx.group||[]).map(p=>p.pane_id));
   el.innerHTML=sorted.map(p=>{
     const isAgent=!!p.agent;
-    const label=p.label||p.agent||'(空 shell)';
+    const label=p.label||p.agent||t('layout.empty_shell','(空 shell)');
     let checked=false;
     if(picked.size)checked=picked.has(p.pane_id);
     else if(isAgent){
@@ -3501,13 +3513,13 @@ async function renderLayoutPaneList(){
         checked=defaultPicks.includes(p.pane_id);
       }
     }
-    const focusMark=(target&&p.pane_id===target.pane_id)?' · 当前焦点':'';
-    const groupMark=groupIds.has(p.pane_id)&&groupIds.size>1?' · 你所在组':'';
+    const focusMark=(target&&p.pane_id===target.pane_id)?t('layout.focus_mark',' · 当前焦点'):'';
+    const groupMark=groupIds.has(p.pane_id)&&groupIds.size>1?t('layout.group_mark',' · 你所在组'):'';
     // 全局 input{width:100%} 会把 checkbox 撑满、文字挤没；必须 width:auto
     return `<label class="ly-pane" style="display:flex;gap:8px;align-items:flex-start;font-size:12px;cursor:pointer;padding:6px 8px;border-radius:8px;color:var(--fg);background:${checked?'color-mix(in srgb,var(--accent) 10%,transparent)':'var(--bg)'}">
       <input type="checkbox" class="ly-pick" value="${esc(p.pane_id)}" ${checked?'checked':''} style="width:auto;min-width:16px;margin-top:2px;flex:0 0 auto">
       <span style="flex:1;min-width:0;line-height:1.35">
-        <b>${esc(label)}</b>${isAgent?'':' <span class="tag">空 shell</span>'}<span class="muted">${esc(focusMark+groupMark)}</span><br>
+        <b>${esc(label)}</b>${isAgent?'':` <span class="tag">${esc(t('layout.empty_shell_tag','空 shell'))}</span>`}<span class="muted">${esc(focusMark+groupMark)}</span><br>
         <span class="muted" style="font-size:10px">${esc(p.pane_id)}${p.tab_id?' · '+esc(String(p.tab_id)):''}</span>
       </span>
     </label>`;
@@ -3525,10 +3537,28 @@ async function layoutTargetOrToast(){
     group:ctx.group||[],
   };
 }
-async function layoutSplit(mode){
-  const t=await layoutTargetOrToast();if(!t)return;
+async function layoutPair(orientation){
+  const ctx=await layoutFreshContext();
+  if(!ctx.session){toast(t('layout.nosession','先打开一个终端(选择 herdr session)再调整布局'));return}
+  const agents=ctx.panes.filter(p=>p.agent&&p.pane_id);
+  const picks=[];
+  if(ctx.target&&ctx.target.agent)picks.push(ctx.target.pane_id);
+  for(const pane of agents){
+    if(!picks.includes(pane.pane_id))picks.push(pane.pane_id);
+    if(picks.length===2)break;
+  }
+  if(picks.length<2){toast(t('layout.need_agents','当前 session 至少需要两个 Agent pane'));return}
   try{
-    await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}/layout/split`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    await api(`/api/herdr/session/${encodeURIComponent(ctx.session)}/layout/compose`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pane_ids:picks,orientation})});
+    toast(t('layout.done_compose','已组合为分屏'));
+    await refreshBoard();closeLayoutModal();
+  }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
+}
+async function layoutSplit(mode){
+  const target=await layoutTargetOrToast();if(!target)return;
+  if(!confirm(t('layout.split_confirm','将新建空 shell pane，确认继续吗？')))return;
+  try{
+    await api(`/api/herdr/pane/${encodeURIComponent(target.session)}/${encodeURIComponent(target.paneId)}/layout/split`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
     toast(t('layout.done_split','已分屏(新槽位为空 shell)'));
     await refreshBoard();closeLayoutModal();
   }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
@@ -3546,7 +3576,7 @@ async function layoutUntile(){
   const tabId=t.groupTabId||t.tabId;
   if(!tabId){toast(t('layout.notab','无法确定当前 pane 所在 tab'));return}
   if((t.group||[]).length<=1){
-    toast(t('layout.single_pane','该 tab 只有一个 pane')+'（session 内也没有其他多分屏组）',4500);
+    toast(t('layout.single_no_groups','该 tab 只有一个 pane（session 内也没有其他多分屏组）'),4500);
     return;
   }
   try{
