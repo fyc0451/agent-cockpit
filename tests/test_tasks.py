@@ -1751,7 +1751,97 @@ def test_recover_fail_closed_base_mismatch(temp_data, git_repo, monkeypatch):
     assert result["failed"] == 1
     t = tasks.get_task(task["id"])
     assert t["status"] == "failed"
-    assert "base" in (t["output_tail"] or "").lower() or "HEAD" in (t["output_tail"] or "")
+    tail = t["output_tail"] or ""
+    assert "base" in tail.lower() or "HEAD" in tail or "不可解析" in tail
+
+
+def test_recover_fail_closed_source_dirty(temp_data, git_repo, monkeypatch):
+    """source 不干净 → 单条 fail-closed。"""
+    monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
+    task = _insert_pending_recoverable(git_repo, "recovsrcdirt")
+    (git_repo / "dirty.txt").write_text("source dirty")
+    result = tasks.recover_pending_tasks()
+    assert result["failed"] == 1
+    t = tasks.get_task(task["id"])
+    assert t["status"] == "failed"
+    assert "不干净" in (t["output_tail"] or "") or "source" in (t["output_tail"] or "").lower()
+
+
+def test_recover_fail_closed_run_workdir_dirty(temp_data, git_repo, monkeypatch):
+    """run_workdir 遗留改动 → 单条 fail-closed。"""
+    monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
+    task = _insert_pending_recoverable(git_repo, "recovrundirt")
+    (task["run_workdir"] / "leftover.txt").write_text("run dirty")
+    result = tasks.recover_pending_tasks()
+    assert result["failed"] == 1
+    t = tasks.get_task(task["id"])
+    assert t["status"] == "failed"
+    assert "不干净" in (t["output_tail"] or "") or "run_workdir" in (t["output_tail"] or "")
+
+
+def test_recover_fail_closed_source_head_drift(temp_data, git_repo, monkeypatch):
+    """source HEAD 相对 base_sha 漂移 → fail-closed。"""
+    monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
+    task = _insert_pending_recoverable(git_repo, "recovsrchead")
+    (git_repo / "new.txt").write_text("drift")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "drift"], cwd=git_repo, capture_output=True, check=True
+    )
+    result = tasks.recover_pending_tasks()
+    assert result["failed"] == 1
+    t = tasks.get_task(task["id"])
+    assert t["status"] == "failed"
+    assert "source HEAD" in (t["output_tail"] or "") or "base_sha" in (t["output_tail"] or "")
+
+
+def test_recover_dirty_task_isolates_good_pending(temp_data, git_repo, monkeypatch):
+    """单条 source 脏任务 failed，其它 clean pending 继续恢复。"""
+    monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
+    good = _insert_pending_recoverable(git_repo, "recovokdirty0")
+    bad = _insert_pending_recoverable(git_repo, "recovbaddirty")
+    (bad["run_workdir"] / "stale.patch").write_text("x")
+    started = []
+
+    def capture_run(task_id, workdir, prompt, images, model):
+        started.append(task_id)
+        with tasks._db() as con:
+            con.execute(
+                "UPDATE tasks SET status='done', exit_code=0, finished_ts=? WHERE id=?",
+                (time.time(), task_id),
+            )
+            con.commit()
+
+    monkeypatch.setattr(tasks, "_run_codex", capture_run)
+    result = tasks.recover_pending_tasks()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and good["id"] not in started:
+        time.sleep(0.01)
+    assert result["recovered"] == 1
+    assert result["failed"] == 1
+    assert good["id"] in started
+    assert bad["id"] not in started
+    assert tasks.get_task(bad["id"])["status"] == "failed"
+    assert tasks.get_task(good["id"])["status"] == "done"
+
+
+def test_run_codex_cas_miss_clears_launch_claim(temp_data, tmp_path, monkeypatch):
+    """pending→running CAS 未命中时必须释放 _codex_launch_claims。"""
+    task_id = "casmiss00001"
+    now = time.time()
+    with tasks._db() as con:
+        con.execute(
+            "INSERT INTO tasks (id, workdir, prompt, status, created_ts) "
+            "VALUES (?, ?, 'x', 'done', ?)",
+            (task_id, str(tmp_path), now),
+        )
+        con.commit()
+    monkeypatch.setattr(tasks, "CODEX_BIN", "/nonexistent-codex-binary")
+    tasks._run_codex(task_id, str(tmp_path), "p", [], None)
+    with tasks._tasks_lock:
+        assert task_id not in tasks._codex_launch_claims
+    t = tasks.get_task(task_id)
+    assert t["status"] == "done"  # 未被 CAS 改写
 
 
 def test_recover_process_once(temp_data, git_repo, monkeypatch):
@@ -1876,9 +1966,6 @@ def test_running_stays_failed_no_resume(temp_data, git_repo, monkeypatch):
 
 def test_recover_pending_crash_does_not_raise(temp_data, monkeypatch):
     """list 阶段异常由 recover 吞掉并返回 error，不向外抛。"""
-    def boom():
-        raise RuntimeError("db down")
-
     class BoomCM:
         def __enter__(self):
             raise RuntimeError("db down")
@@ -1888,4 +1975,59 @@ def test_recover_pending_crash_does_not_raise(temp_data, monkeypatch):
 
     monkeypatch.setattr(tasks, "_db", lambda: BoomCM())
     out = tasks.recover_pending_tasks()
-    assert out.get("error") == "list_failed" or out.get("failed") == 0
+    assert out.get("error") == "list_failed"
+    assert out.get("retryable") is True
+    assert tasks._pending_recovery_done is False
+
+
+def test_recover_list_failure_allows_retry(temp_data, git_repo, monkeypatch):
+    """列库首次失败不锁死 _pending_recovery_done，随后可成功恢复。"""
+    monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
+    task = _insert_pending_recoverable(git_repo, "recovretry01")
+    real_db = tasks._db
+    calls = {"n": 0}
+
+    class BoomCM:
+        def __enter__(self):
+            raise RuntimeError("transient")
+
+        def __exit__(self, *a):
+            return False
+
+    def flaky_db():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return BoomCM()
+        return real_db()
+
+    monkeypatch.setattr(tasks, "_db", flaky_db)
+    first = tasks.recover_pending_tasks()
+    assert first.get("error") == "list_failed"
+    assert first.get("retryable") is True
+    assert tasks._pending_recovery_done is False
+
+    started = []
+
+    def capture_run(task_id, workdir, prompt, images, model):
+        started.append(task_id)
+        with real_db() as con:
+            con.execute(
+                "UPDATE tasks SET status='done', exit_code=0, finished_ts=? WHERE id=?",
+                (time.time(), task_id),
+            )
+            con.commit()
+
+    monkeypatch.setattr(tasks, "_run_codex", capture_run)
+    # 第二次: _db 不再 boom（calls.n>1）; recover 内部还会多次 _db
+    monkeypatch.setattr(tasks, "_db", real_db)
+    second = tasks.recover_pending_tasks()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not started:
+        time.sleep(0.01)
+    assert second.get("skipped") is not True
+    assert second.get("error") is None
+    assert second["recovered"] == 1
+    assert task["id"] in started
+    # 成功后应锁死，第三次 skip
+    third = tasks.recover_pending_tasks()
+    assert third.get("skipped") is True

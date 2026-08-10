@@ -557,12 +557,26 @@ def _parse_task_images(raw: Any) -> list[str]:
     return [str(x) for x in data]
 
 
+def _resolve_base_sha(repo: Path, base_sha: str) -> str:
+    """将 base_sha 解析为 repo 内完整对象名;失败抛 ValueError。"""
+    ok, full = _git_ok(["rev-parse", "--verify", f"{base_sha}^{{commit}}"], repo)
+    if not ok or not full:
+        raise ValueError(f"base_sha 在仓库中不可解析: {base_sha[:12]}")
+    return full
+
+
 def _validate_pending_for_recovery(row: dict[str, Any]) -> tuple[str, list[str], str | None]:
     """校验 pending 任务可安全重入。
 
+    必须同时满足:
+      - source HEAD == base_sha(解析后全对象)
+      - source git status clean
+      - run_workdir HEAD == base_sha
+      - run_workdir git status clean
+      - images/model 可重验
+
     返回 (run_workdir, images, model)。失败抛 ValueError(调用方 fail-closed)。
     """
-    task_id = row["id"]
     run_raw = row.get("run_workdir")
     if not run_raw:
         raise ValueError("缺少 run_workdir，无法复用隔离工作区")
@@ -589,13 +603,34 @@ def _validate_pending_for_recovery(row: dict[str, Any]) -> tuple[str, list[str],
     base_sha = (row.get("base_sha") or "").strip()
     if not base_sha:
         raise ValueError("缺少 base_sha")
-    ok, head = _git_ok(["rev-parse", "HEAD"], run_workdir)
-    if not ok or not head:
-        raise ValueError(f"run_workdir 不是有效 git worktree: {run_workdir}")
-    if head != base_sha and not head.startswith(base_sha) and not base_sha.startswith(head):
-        # 要求 worktree HEAD 仍锚定创建时 base(允许 abbreviated 互包含)
+    # 以 source 解析 base,并要求 source HEAD 与之严格相等
+    resolved_base = _resolve_base_sha(source, base_sha)
+    ok_src, source_head = _git_ok(["rev-parse", "HEAD"], source)
+    if not ok_src or not source_head:
+        raise ValueError(f"source 不是有效 git 仓库: {source}")
+    if source_head != resolved_base:
         raise ValueError(
-            f"base_sha 与 run_workdir HEAD 不一致: base={base_sha[:12]} head={head[:12]}"
+            f"source HEAD 与 base_sha 不一致: "
+            f"base={resolved_base[:12]} head={source_head[:12]}"
+        )
+    src_clean, src_status = _source_is_clean(source)
+    if not src_clean:
+        raise ValueError(
+            f"source 工作区不干净(存在漂移/遗留改动): {src_status[:200]}"
+        )
+
+    ok_run, run_head = _git_ok(["rev-parse", "HEAD"], run_workdir)
+    if not ok_run or not run_head:
+        raise ValueError(f"run_workdir 不是有效 git worktree: {run_workdir}")
+    if run_head != resolved_base:
+        raise ValueError(
+            f"run_workdir HEAD 与 base_sha 不一致: "
+            f"base={resolved_base[:12]} head={run_head[:12]}"
+        )
+    run_clean, run_status = _source_is_clean(run_workdir)
+    if not run_clean:
+        raise ValueError(
+            f"run_workdir 不干净(存在漂移/遗留改动): {run_status[:200]}"
         )
 
     model = row.get("model")
@@ -627,8 +662,9 @@ def recover_pending_tasks() -> dict[str, Any]:
     """服务启动时恢复 pending 任务(T1)。
 
     - 复用已有 run_workdir,不新建 worktree
-    - 校验 source/base/images/model;单条失败 fail-closed,不拖垮整体
-    - 每进程只跑一次;已在本进程启动的 task 不双启
+    - 校验 source/base/clean/images/model;单条失败 fail-closed,不拖垮整体
+    - 列库成功后每进程只跑一次;列库失败不锁死,允许重试
+    - 已在本进程启动的 task 不双启
     - 不处理 running(由 _mark_interrupted 标 failed,无 resume/lease)
     """
     global _pending_recovery_done
@@ -640,17 +676,23 @@ def recover_pending_tasks() -> dict[str, Any]:
                 "failed": 0,
                 "reason": "already_ran",
             }
+        # 列库必须在置 done 之前;失败保持未完成以便重试
+        try:
+            with _db() as con:
+                rows = con.execute(
+                    "SELECT * FROM tasks WHERE status = 'pending' "
+                    "ORDER BY created_ts ASC"
+                ).fetchall()
+        except Exception:
+            logger.exception("pending recovery: list tasks failed")
+            return {
+                "skipped": False,
+                "recovered": 0,
+                "failed": 0,
+                "error": "list_failed",
+                "retryable": True,
+            }
         _pending_recovery_done = True
-
-    # 确保 schema + running 清扫已发生
-    try:
-        with _db() as con:
-            rows = con.execute(
-                "SELECT * FROM tasks WHERE status = 'pending' ORDER BY created_ts ASC"
-            ).fetchall()
-    except Exception:
-        logger.exception("pending recovery: list tasks failed")
-        return {"skipped": False, "recovered": 0, "failed": 0, "error": "list_failed"}
 
     recovered = 0
     failed = 0
@@ -699,6 +741,7 @@ def recover_pending_tasks() -> dict[str, Any]:
         "failed": failed,
         "total": len(rows),
         "details": details,
+        "retryable": False,
     }
 
 
@@ -712,139 +755,144 @@ def _run_codex(
             return
         _codex_launch_claims.add(task_id)
 
-    cmd = [CODEX_BIN, "exec", "-s", "workspace-write"]
-    if model:
-        cmd += ["-m", model]
-    for img in images:
-        cmd += ["-i", img]
-    # prompt 用 stdin(codex exec 读 stdin),避免长 prompt 的 shell 转义问题
-    # 这里用位置参数传 prompt(短),长 prompt 走 stdin
-    if "\n" in prompt or len(prompt) > 200:
-        stdin_data = prompt
-    else:
-        cmd.append(prompt)
-        stdin_data = None
-
-    def _emit(line: str) -> None:
-        with _tasks_lock:
-            buf = _output_buffers.setdefault(task_id, [])
-            buf.append(line)
-            # 只保留最近 2000 行,防爆内存
-            if len(buf) > 2000:
-                del buf[: len(buf) - 2000]
-
-    started = time.time()
     try:
-        with _db() as con:
-            cur = con.execute(
-                "UPDATE tasks SET status='running', started_ts=? "
-                "WHERE id=? AND status='pending'",
-                (started, task_id),
-            )
-            con.commit()
-            if cur.rowcount != 1:
-                # 非 pending(已结束/已 running)或并发抢占失败
-                return
-    except Exception:
-        logger.exception("task %s failed to claim pending→running", task_id)
-        with _tasks_lock:
-            _codex_launch_claims.discard(task_id)
-        return
-
-    exit_code = None
-    proc = None
-    timer = None
-    stdin_writer = None
-    stdin_errors: list[Exception] = []
-    timed_out = threading.Event()
-    with _tasks_lock:
-        cancelled = task_id in _cancel_requested
-    try:
-        if cancelled:
-            _emit("[CANCELLED] 任务在进程启动前已取消")
-            exit_code = 130
+        cmd = [CODEX_BIN, "exec", "-s", "workspace-write"]
+        if model:
+            cmd += ["-m", model]
+        for img in images:
+            cmd += ["-i", img]
+        # prompt 用 stdin(codex exec 读 stdin),避免长 prompt 的 shell 转义问题
+        # 这里用位置参数传 prompt(短),长 prompt 走 stdin
+        if "\n" in prompt or len(prompt) > 200:
+            stdin_data = prompt
         else:
-            try:
-                proc = subprocess.Popen(
-                    cmd, cwd=workdir, stdin=subprocess.PIPE if stdin_data else None,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    bufsize=1, start_new_session=True,  # 行缓冲 + 独立进程组供取消
+            cmd.append(prompt)
+            stdin_data = None
+
+        def _emit(line: str) -> None:
+            with _tasks_lock:
+                buf = _output_buffers.setdefault(task_id, [])
+                buf.append(line)
+                # 只保留最近 2000 行,防爆内存
+                if len(buf) > 2000:
+                    del buf[: len(buf) - 2000]
+
+        started = time.time()
+        try:
+            with _db() as con:
+                cur = con.execute(
+                    "UPDATE tasks SET status='running', started_ts=? "
+                    "WHERE id=? AND status='pending'",
+                    (started, task_id),
                 )
-                with _tasks_lock:
-                    _active_processes[task_id] = proc
-                    cancelled = task_id in _cancel_requested
-                with _db() as con:
-                    con.execute("UPDATE tasks SET pid=? WHERE id=?", (proc.pid, task_id))
-                    con.commit()
-                if cancelled:
-                    _ensure_proc_terminated(proc)
-                elif TASK_TIMEOUT_SECONDS > 0:
-                    def expire() -> None:
-                        if proc is not None and proc.poll() is None:
-                            timed_out.set()
-                            _emit(
-                                f"[ERROR] 任务超过总时限 "
-                                f"{TASK_TIMEOUT_SECONDS:g} 秒，已终止"
-                            )
-                            _ensure_proc_terminated(proc)
+                con.commit()
+                if cur.rowcount != 1:
+                    # 非 pending(已结束/已 running)或并发抢占失败
+                    return
+        except Exception:
+            logger.exception("task %s failed to claim pending→running", task_id)
+            return
 
-                    timer = threading.Timer(TASK_TIMEOUT_SECONDS, expire)
-                    timer.daemon = True
-                    timer.start()
-                if stdin_data and proc.stdin:
-                    stdin_stream = proc.stdin
-
-                    def write_stdin() -> None:
-                        try:
-                            stdin_stream.write(stdin_data)
-                        except BrokenPipeError:
-                            pass
-                        except Exception as exc:
-                            stdin_errors.append(exc)
-                        finally:
-                            try:
-                                stdin_stream.close()
-                            except (BrokenPipeError, OSError, ValueError):
-                                pass
-
-                    # stdin 与 stdout 必须并行搬运；否则两侧 pipe 同时写满会死锁。
-                    stdin_writer = threading.Thread(
-                        target=write_stdin,
-                        name=f"codex-stdin-{task_id}",
-                        daemon=True,
-                    )
-                    stdin_writer.start()
-                if proc.stdout is None:
-                    raise RuntimeError("codex stdout pipe unavailable")
-                for line in proc.stdout:
-                    _emit(line.rstrip("\n"))
-                proc.wait(timeout=5)
-                if stdin_writer is not None:
-                    stdin_writer.join(timeout=1)
-                    if stdin_writer.is_alive():
-                        raise RuntimeError("codex stdin writer did not finish")
-                    if stdin_errors:
-                        raise RuntimeError(f"codex stdin write failed: {stdin_errors[0]}")
-                exit_code = proc.returncode
-            except FileNotFoundError:
-                _emit(f"[ERROR] codex 未找到: {CODEX_BIN}")
-                exit_code = 127
-            except Exception as e:
-                _emit(f"[ERROR] {type(e).__name__}: {e}")
-                exit_code = 1
-    finally:
-        if timer is not None:
-            timer.cancel()
-        if proc is not None:
-            _ensure_proc_terminated(proc)
-        if stdin_writer is not None and stdin_writer.is_alive():
-            stdin_writer.join(timeout=1)
+        exit_code = None
+        proc = None
+        timer = None
+        stdin_writer = None
+        stdin_errors: list[Exception] = []
+        timed_out = threading.Event()
         with _tasks_lock:
-            _active_processes.pop(task_id, None)
             cancelled = task_id in _cancel_requested
-            _cancel_requested.discard(task_id)
+        try:
+            if cancelled:
+                _emit("[CANCELLED] 任务在进程启动前已取消")
+                exit_code = 130
+            else:
+                try:
+                    proc = subprocess.Popen(
+                        cmd, cwd=workdir,
+                        stdin=subprocess.PIPE if stdin_data else None,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1, start_new_session=True,
+                    )
+                    with _tasks_lock:
+                        _active_processes[task_id] = proc
+                        cancelled = task_id in _cancel_requested
+                    with _db() as con:
+                        con.execute(
+                            "UPDATE tasks SET pid=? WHERE id=?",
+                            (proc.pid, task_id),
+                        )
+                        con.commit()
+                    if cancelled:
+                        _ensure_proc_terminated(proc)
+                    elif TASK_TIMEOUT_SECONDS > 0:
+                        def expire() -> None:
+                            if proc is not None and proc.poll() is None:
+                                timed_out.set()
+                                _emit(
+                                    f"[ERROR] 任务超过总时限 "
+                                    f"{TASK_TIMEOUT_SECONDS:g} 秒，已终止"
+                                )
+                                _ensure_proc_terminated(proc)
 
-    try:
+                        timer = threading.Timer(TASK_TIMEOUT_SECONDS, expire)
+                        timer.daemon = True
+                        timer.start()
+                    if stdin_data and proc.stdin:
+                        stdin_stream = proc.stdin
+
+                        def write_stdin() -> None:
+                            try:
+                                stdin_stream.write(stdin_data)
+                            except BrokenPipeError:
+                                pass
+                            except Exception as exc:
+                                stdin_errors.append(exc)
+                            finally:
+                                try:
+                                    stdin_stream.close()
+                                except (BrokenPipeError, OSError, ValueError):
+                                    pass
+
+                        # stdin 与 stdout 必须并行搬运；否则两侧 pipe 同时写满会死锁。
+                        stdin_writer = threading.Thread(
+                            target=write_stdin,
+                            name=f"codex-stdin-{task_id}",
+                            daemon=True,
+                        )
+                        stdin_writer.start()
+                    if proc.stdout is None:
+                        raise RuntimeError("codex stdout pipe unavailable")
+                    for line in proc.stdout:
+                        _emit(line.rstrip("\n"))
+                    proc.wait(timeout=5)
+                    if stdin_writer is not None:
+                        stdin_writer.join(timeout=1)
+                        if stdin_writer.is_alive():
+                            raise RuntimeError("codex stdin writer did not finish")
+                        if stdin_errors:
+                            raise RuntimeError(
+                                f"codex stdin write failed: {stdin_errors[0]}"
+                            )
+                    exit_code = proc.returncode
+                except FileNotFoundError:
+                    _emit(f"[ERROR] codex 未找到: {CODEX_BIN}")
+                    exit_code = 127
+                except Exception as e:
+                    _emit(f"[ERROR] {type(e).__name__}: {e}")
+                    exit_code = 1
+        finally:
+            if timer is not None:
+                timer.cancel()
+            if proc is not None:
+                _ensure_proc_terminated(proc)
+            if stdin_writer is not None and stdin_writer.is_alive():
+                stdin_writer.join(timeout=1)
+            with _tasks_lock:
+                _active_processes.pop(task_id, None)
+                cancelled = task_id in _cancel_requested
+                _cancel_requested.discard(task_id)
+
         finished = time.time()
         if timed_out.is_set():
             exit_code, status = 124, "failed"
@@ -864,6 +912,7 @@ def _run_codex(
         with _tasks_lock:
             _output_buffers.pop(task_id, None)
     finally:
+        # CAS 早退、异常与正常结束均释放 claim,避免永久占用
         with _tasks_lock:
             _codex_launch_claims.discard(task_id)
 
