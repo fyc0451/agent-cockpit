@@ -996,6 +996,8 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     )[0]
     assert ".app.hf-immersive #view-herdrflow{" in HTML
     assert "position:fixed;inset:0" in HTML
+    assert "width:100%;min-width:0" in HTML
+    assert ".hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-width:0" in HTML
     assert 'id="hfToolbar" class="hf-toolbar"' in HTML
     assert 'id="hfToolbar" style=' not in HTML
     assert ".app.hf-immersive #hfToolbar{display:none}" in HTML
@@ -1015,7 +1017,10 @@ def test_herdr_flow_focus_uses_the_entire_viewport_and_can_exit():
     assert "function hfExitFullscreen(" in js
     assert "if(e.key==='Escape'){hfExitFullscreen();exitTermFullscreen()}" in js
     assert "document.addEventListener('fullscreenchange'" in js
-
+    # re-render 时自愈残留 hf-full（否则无 focus 的 pane 会全部 display:none）
+    render = js.split("function hfRender(){", 1)[1].split("async function hfRefreshAll", 1)[0]
+    assert "body.classList.remove('hf-full')" in render
+    assert "hfToggle(fp)" in render
 
 def test_herdr_flow_session_switch_exits_fullscreen_before_render():
     js = _inline_js()
@@ -1042,11 +1047,18 @@ def test_herdr_flow_preserves_selection_and_ignores_stale_refresh():
 def test_herdr_flow_entry_from_term_defaults_to_current_term():
     # 终端视图切到流视图(工具栏按钮或导航「流」)时,默认选中当前终端的 session/pane
     js = _inline_js()
-    enter = js.split("function enterHerdrFlow(session,paneId){", 1)[1].split("}", 1)[0]
+    enter = js.split("async function enterHerdrFlow(session,paneId){", 1)[1].split(
+        "async function hfStart", 1
+    )[0]
     assert "if(!session&&CURRENT_TERM)" in enter
     assert "session=CURRENT_TERM.session" in enter
     assert "paneId=paneId||CURRENT_TERM.paneId" in enter
+    # 从 TUI 回流转：释放 zoom + 退出终端固定全屏，避免窄列硬换行残留
+    assert "exitTermFullscreen()" in enter
+    assert "releaseAllTermZoomLeasesAwait" in enter
     show = js.split("function showView(v){", 1)[1].split("function ", 1)[0]
+    assert "prevView==='term'&&v!=='term'" in show
+    assert "releaseAllTermZoomLeasesAwait" in show
     assert "prevView==='term'&&CURRENT_TERM" in show
     assert "HF_SESSION=CURRENT_TERM.session" in show
     assert js.count("updatePaneOutput(out,next)") >= 2
@@ -1058,7 +1070,9 @@ def test_herdr_flow_entry_from_term_defaults_to_current_term():
 def test_herdr_flow_entry_from_term_uses_attached_session_identity():
     # 显示名称和 Herdr session 分开保存，返回流视图不能再拿 label 猜 session。
     js = _inline_js()
-    enter = js.split("function enterHerdrFlow(session,paneId){", 1)[1].split("function showView", 1)[0]
+    enter = js.split("async function enterHerdrFlow(session,paneId){", 1)[1].split(
+        "async function hfStart", 1
+    )[0]
     assert "TERM_SESSIONS[TERM_ID]" in enter
     show = js.split("function showView(v){", 1)[1].split("function ", 1)[0]
     assert "TERM_SESSIONS[TERM_ID]" in show
@@ -1236,7 +1250,7 @@ def test_mobile_herdr_flow_uses_one_vertical_scroll_owner():
     assert ".hf-body:not(.hf-full){grid-template-columns:repeat(2,minmax(0,1fr))}" in mobile
     assert ".hf-body{touch-action:pan-y;-webkit-overflow-scrolling:touch}" in mobile
     assert ".hf-body.hf-full .hf-pane.hf-focus .hf-out{overflow:auto" in mobile
-    assert ".hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-height:0" in HTML
+    assert ".hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-width:0;min-height:0" in HTML
 
 
 def test_h5_message_file_and_settings_layouts_do_not_overflow():

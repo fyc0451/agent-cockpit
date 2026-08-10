@@ -396,18 +396,19 @@ header .spacer{flex:1}
 /* 全屏单 pane 模式:隐藏页面 chrome,选中的 pane 覆盖整个可视区 */
 .app.hf-immersive{padding:0}
 .app.hf-immersive>header{display:none}
-.app.hf-immersive #view-herdrflow{position:fixed;inset:0;z-index:120;display:flex;background:var(--bg);padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left)}
+.app.hf-immersive #view-herdrflow{position:fixed;inset:0;z-index:120;display:flex;flex-direction:column;width:100%;min-width:0;background:var(--bg);padding:var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);box-sizing:border-box}
 .app.hf-immersive #hfToolbar{display:none}
-.hf-body.hf-full{display:flex;overflow:hidden;padding:0;gap:0}
+.app.hf-immersive #hfBody{flex:1;min-width:0;min-height:0;width:100%}
+.hf-body.hf-full{display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0;width:100%;min-width:0}
 .hf-body.hf-full .hf-pane{display:none}
-.hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-height:0;border:none;border-radius:0}
+.hf-body.hf-full .hf-pane.hf-focus{display:flex;flex:1;min-width:0;min-height:0;width:100%;max-width:none;border:none;border-radius:0}
 .hf-body.hf-full .hf-card{display:none}
 .hf-body.hf-full .hf-pane-head{display:flex}
 .hf-body.hf-full .hf-pane-head{padding:4px 7px;gap:5px;flex-wrap:nowrap}
 .hf-body.hf-full .hf-pane-head .agent-icon{width:20px!important;height:20px!important;font-size:10px!important}
 .hf-body.hf-full .hf-pane-head>.muted{display:none}
 .hf-body.hf-full .hf-expand{padding:2px 5px}
-.hf-body.hf-full .hf-pane.hf-focus .hf-out{display:block;max-height:none;min-height:0;flex:1;font-size:13px}
+.hf-body.hf-full .hf-pane.hf-focus .hf-out{display:block;max-height:none;min-height:0;flex:1;width:100%;min-width:0;box-sizing:border-box;font-size:13px}
 .hf-body.hf-full .hf-in{display:flex}
 .hf-body.hf-full .hf-in{padding:4px;gap:4px;flex-wrap:nowrap}
 .hf-body.hf-full .hf-in input{min-width:0;padding:5px 7px}
@@ -1991,6 +1992,11 @@ function showView(v){
   const prevView=document.querySelector('#nav button.active')?.dataset.view;
   const drawer=document.getElementById('termDrawer');
   if(drawer&&drawer.classList.contains('show'))closeTerm();
+  // 离开终端视图：清固定全屏 + 释放窄屏 zoom，避免 agent 仍按手机列宽硬换行
+  if(prevView==='term'&&v!=='term'){
+    exitTermFullscreen();
+    void releaseAllTermZoomLeasesAwait();
+  }
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-'+v).classList.add('active');
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
@@ -3605,11 +3611,14 @@ async function doAttachHerdr(session){
 // 手机端默认入口:HTML 渲染 pane 输出,天然支持滚屏/长按选择/复制;
 // 输入框直接调 /api/herdr/pane/.../send 发指令,无需进 TUI。
 let HF_TIMER=null, HF_SESSION=null, HF_FOCUS_PANE=null;
-function enterHerdrFlow(session,paneId){
+async function enterHerdrFlow(session,paneId){
   // 未显式指定时(终端工具栏「返回流视图」)默认带到当前终端对应的 session/pane:
   // 卡片抽屉终端看 CURRENT_TERM;attach/接管的 PTY 使用独立 session 映射。
   if(!session&&CURRENT_TERM){session=CURRENT_TERM.session;paneId=paneId||CURRENT_TERM.paneId}
   if(!session&&TERM_ID&&TERM_SESSIONS[TERM_ID])session=TERM_SESSIONS[TERM_ID];
+  // 从 TUI 回来先退出终端固定全屏并释放 zoom，否则流页输出仍按窄屏列宽硬换行
+  exitTermFullscreen();
+  try{await releaseAllTermZoomLeasesAwait()}catch(e){}
   HF_SESSION=session||null;
   if(HF_SESSION)rememberSession(HF_SESSION);
   HF_FOCUS_PANE=paneId||null;
@@ -3647,7 +3656,14 @@ function hfLoad(){
 }
 function hfRender(){
   const body=document.getElementById('hfBody');
+  const app=document.querySelector('.app');
   const panes=(BOARD?.panes||[]).filter(p=>p.session===HF_SESSION&&p.agent);
+  // 重建 DOM 会丢掉 .hf-focus；若残留 hf-full 会把所有 pane display:none 成空白
+  const wantFocus=HF_FOCUS_PANE;
+  if(body.classList.contains('hf-full')||app?.classList.contains('hf-immersive')){
+    body.classList.remove('hf-full');
+    app?.classList.remove('hf-immersive');
+  }
   if(!panes.length){body.innerHTML='<div class="empty">'+t('hf.empty','该 session 无 agent pane')+'</div>';return}
   body.innerHTML=panes.map(p=>{
     const cls=classify(p.agent_status,p.agent,boardSessionState(p.session));
@@ -3678,11 +3694,18 @@ function hfRender(){
       </div>
     </div>`;
   }).join('');
-  // 定位到入口 pane(看板卡片/终端视图点进来时)
-  if(HF_FOCUS_PANE){
-    const el=document.getElementById('hf-'+HF_FOCUS_PANE);
-    if(el){const fp=HF_FOCUS_PANE;setTimeout(()=>{el.scrollIntoView({block:'start'});const inp=document.getElementById('hf-in-'+fp);if(inp)try{inp.focus()}catch(e){}},50)}
+  // 定位到入口 pane(看板卡片/终端视图点进来时)：全屏占满宽度再刷输出
+  if(wantFocus){
     HF_FOCUS_PANE=null;
+    const fp=wantFocus;
+    setTimeout(async()=>{
+      const el=document.getElementById('hf-'+fp);
+      if(!el)return;
+      try{await hfToggle(fp)}catch(e){
+        el.scrollIntoView({block:'start'});
+        const inp=document.getElementById('hf-in-'+fp);if(inp)try{inp.focus()}catch(_){}
+      }
+    },50);
   }
 }
 async function hfRefreshAll(){
@@ -3913,6 +3936,12 @@ function releaseAllTermZoomLeases(){
       body:JSON.stringify({term_id:id,action:'release'})
     }).catch(()=>{});
   }
+}
+/** 可 await 的 zoom 释放：从 TUI 回流转视图时用，确保 agent pane 恢复分屏宽度 */
+async function releaseAllTermZoomLeasesAwait(){
+  const ids=Object.keys(TERM_ZOOM);
+  if(!ids.length)return;
+  await Promise.all(ids.map(id=>releaseTermZoomLease(id,true).catch(()=>{})));
 }
 async function termClose(){
   if(!TERM_ID)return;
