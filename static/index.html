@@ -2309,6 +2309,16 @@ function renderAgentStrip(d){
     </button>`;
   }).join('');
 }
+// R3(#1981):herdr 二进制/命令缺失判定。必须同时锚定 herdr 与缺失语义;
+// 裸 not found / executable / not installed 一律不命中。
+function isHerdrBinaryMissing(reason){
+  const r=String(reason||'');
+  return /herdr\s+executable\s+not\s+found/i.test(r)
+    || /command\s+not\s+found\s*:\s*herdr\b/i.test(r)
+    || /herdr\s*未找到/i.test(r)
+    || /\bherdr\b[\s\S]{0,80}\b(not\s+installed|未安装)\b/i.test(r)
+    || /\b(not\s+installed|未安装)\b[\s\S]{0,80}\bherdr\b/i.test(r);
+}
 function renderBoard(d){
   renderAgentStrip(d);
   const emptyEl=document.getElementById('boardEmpty'),boardEl=document.getElementById('board');
@@ -2319,9 +2329,12 @@ function renderBoard(d){
     ['need','work','done','idle'].forEach(c=>document.getElementById('col-'+c).innerHTML='<div class="empty">—</div>');
     document.getElementById('colWrap-unavailable').style.display='none';
     const reason=String(d.reason||'');
-    // 仅 reason 明确指向 executable missing 时才给安装引导;否则泛化不可用
-    // 诊断+重试(真实原因在上方横幅),不得一律声称未安装 herdr
-    const missing=/herdr 未找到|not installed|not found|executable|未安装/i.test(reason);
+    // R3:仅 reason 明确指向 herdr 可执行文件/命令/二进制缺失时才给安装引导。
+    // 禁止裸 "not found"/"executable"/"not installed"——否则 socket/cache/
+    // session/pane/state not found 会被误报为「未安装 herdr」。
+    // 正向: herdr executable not found | command not found: herdr | herdr 未找到
+    // 反向: socket/cache/session/pane/state not found → 泛化诊断+重试
+    const missing=isHerdrBinaryMissing(reason);
     if(missing){
       // 首次安装缺 herdr 时给出明确去向,而不是四个空列
       showEmpty(`<div style="font-size:15px;font-weight:600">${esc(t('board.guide.noherdr','herdr 不可用'))}</div>
