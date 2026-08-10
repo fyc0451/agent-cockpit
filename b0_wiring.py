@@ -1034,11 +1034,11 @@ class B0Coordinator:
                 })
         return identities
 
-    def poll_once(self, *, unread_only: bool = False) -> dict[str, Any]:
+    def poll_once(self, *, unread_only: bool = True) -> dict[str, Any]:
         """一次全量 dual-pull + observe + deferred ingest（消息 poller 调用）。"""
         self.last_reasons = {}
         now = time.monotonic()
-        full_flush = unread_only or (now - self._last_full_flush) >= self._flush_interval
+        full_flush = (now - self._last_full_flush) >= self._flush_interval
         if full_flush:
             self._last_full_flush = now
         stats = {"scopes": 0, "pulled": 0, "ingested": 0,
@@ -1064,7 +1064,6 @@ class B0Coordinator:
                 for message in messages:
                     outcome = self._ingest_message(
                         key, version, identity, message,
-                        skip_processed=full_flush,
                     )
                     stats[outcome] = stats.get(outcome, 0) + 1
                 if ident_meta["role"] == "previous" and not messages:
@@ -1106,7 +1105,7 @@ class B0Coordinator:
 
     def _ingest_message(
         self, scope: str, version: int, identity: dict[str, Any],
-        message: dict[str, Any], *, skip_processed: bool,
+        message: dict[str, Any],
     ) -> str:
         mail_name = str(identity.get("name") or "")
         try:
@@ -1128,16 +1127,15 @@ class B0Coordinator:
             self._seen.add(message_id)
             self._record(REASON_DUPLICATE_EVENT_ID)
             return "duplicate"
-        if skip_processed:
-            receipt = coordination.receipt(
-                str(identity.get("project_key") or ""), mail_name, message_id,
-            )
-            if receipt is not None and receipt.get("state") in (
-                "processed", "claimed",
-            ):
-                self._seen.add(message_id)
-                self._record(REASON_DUPLICATE_EVENT_ID)
-                return "duplicate"
+        receipt = coordination.receipt(
+            str(identity.get("project_key") or ""), mail_name, message_id,
+        )
+        if receipt is not None and receipt.get("state") in (
+            "processed", "claimed",
+        ):
+            self._seen.add(message_id)
+            self._record(REASON_DUPLICATE_EVENT_ID)
+            return "duplicate"
         self._seen.add(message_id)
         event = DeferredEvent(
             event_id=event_id,

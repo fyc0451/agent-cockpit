@@ -229,6 +229,23 @@ def test_full_flush_explicitly_flushes_pending(
     assert coord.core.state(scope)["delivered_count"] == 1
 
 
+def test_unread_poll_does_not_bypass_flush_interval(
+    binding_db: Path, registry: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coord, _adapter = _make_coordinator(binding_db, registry)
+    _stub_fetch(monkeypatch, [])
+    flushed: list[str] = []
+    monkeypatch.setattr(
+        coord.core, "flush",
+        lambda scope: flushed.append(scope) or {"delivered": False},
+    )
+    coord._last_full_flush = time.monotonic()
+
+    coord.poll_once(unread_only=True)
+
+    assert flushed == []
+
+
 # ---------------------------------------------------------------------------
 # 合同：previous drain CAS 闭环
 # ---------------------------------------------------------------------------

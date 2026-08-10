@@ -71,6 +71,33 @@ def test_scope_enablement_by_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     assert server._b0_scope_enabled("team", "t2")
 
 
+def test_runtime_tick_only_pulls_unread(monkeypatch: pytest.MonkeyPatch) -> None:
+    import server
+
+    calls: list[bool] = []
+
+    class Coordinator:
+        def sync_bindings(self):
+            return []
+
+        def fanout_control_events(self, **_kwargs):
+            return 0
+
+        def poll_once(self, *, unread_only: bool):
+            calls.append(unread_only)
+            return {}
+
+        def state(self):
+            return {"scopes": {}, "last_reasons": {}}
+
+    monkeypatch.setattr(server, "B0_MODE", "canary")
+    monkeypatch.setattr(server, "_b0_get_coordinator", lambda: Coordinator())
+
+    server._b0_poll_tick()
+
+    assert calls == [True]
+
+
 def test_off_does_not_construct_coordinator(monkeypatch: pytest.MonkeyPatch) -> None:
     import server
 

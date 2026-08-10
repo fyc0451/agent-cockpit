@@ -543,7 +543,7 @@ def _b0_poll_tick() -> None:
     try:
         coord.sync_bindings()
         coord.fanout_control_events(transport=_b0_control_transport)
-        coord.poll_once()
+        coord.poll_once(unread_only=True)
         state = coord.state()
         degraded = any(
             bool(scope.get("degraded"))
