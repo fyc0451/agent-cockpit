@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Preparation-only leader-binding ledger and deferred-delivery core for future
+  Team Inbox routing, with versioned CAS migrations, a replayable outbox,
+  deduplication, retries, and binding-generation handoff. These modules are not
+  connected to runtime routes or background polling yet.
 - Herdr native lifecycle control for all supported agents: capability and identity
   gates, managed `agent start`/prompt/wait primitives, identity-preserving restart,
   and a default-off event-driven socket state cache with an explicit session-scoped
