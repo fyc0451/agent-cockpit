@@ -38,6 +38,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Accept JSON and SSE FastMCP inbox responses, including structured tool results,
+  and poll only unread messages so enabling B0 cannot replay existing read history.
 - Retire the legacy in-process Git/pip upgrade executor and fail closed instead of
   allowing the application to mutate its own live checkout.
 - Reject unsafe runtime path overrides, symlink escapes, colliding stores, and
