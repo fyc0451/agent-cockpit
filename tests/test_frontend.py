@@ -184,7 +184,7 @@ def test_terminal_page_only_catalogs_live_terms_until_explicit_open():
 
 def test_herdr_terminal_attach_atomically_replaces_restored_pty_on_server():
     js = _inline_js()
-    attach = js.split("async function doAttachHerdr(session){", 1)[1].split(
+    attach = js.split("async function doAttachHerdr(session", 1)[1].split(
         "// ============ herdr", 1
     )[0]
     websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
@@ -202,7 +202,7 @@ def test_herdr_terminal_attach_atomically_replaces_restored_pty_on_server():
     # 新终端挂载完成后再刷新 selector，不能又显示成待打开的 session。
     created = attach.split("const r=await api('/api/term?label='", 1)[1]
     assert created.index("termMount(r.id)") < created.index("renderTermOptions()")
-    assert created.index("holdTermLoadingForTui(r.id)") < created.index(
+    assert created.index("holdTermLoadingForTui(r.id") < created.index(
         "queueTermInput(r.id,'herdr --session '"
     )
     # WebSocket 必须先设置主题和尺寸，再执行排队的 herdr attach 命令。
@@ -696,7 +696,7 @@ def test_h5_drawer_can_switch_herdr_panes_without_keyboard_shortcuts():
 
 def test_h5_takeover_opens_real_tui_with_touch_keys():
     js = _inline_js()
-    takeover = js.split("async function doAttachHerdr(session){", 1)[1].split(
+    takeover = js.split("async function doAttachHerdr(session", 1)[1].split(
         "// ============ herdr 流视图", 1
     )[0]
     # “接管 TUI”在手机上也必须创建 PTY 并执行 herdr attach，不能降级成普通 pane 抽屉。
@@ -718,7 +718,7 @@ def test_h5_takeover_opens_real_tui_with_touch_keys():
 
 def test_narrow_takeover_owns_zoom_with_heartbeat_and_release_fallbacks():
     js = _inline_js()
-    takeover = js.split("async function doAttachHerdr(session){", 1)[1].split(
+    takeover = js.split("async function doAttachHerdr(session", 1)[1].split(
         "// ============ herdr 流视图", 1
     )[0]
     close = js.split("async function termClose(){", 1)[1].split(
@@ -829,7 +829,7 @@ def test_terminal_does_not_forward_browser_focus_reports_to_pty():
     js = _inline_js()
     assert "const isTermFocusReport=data=>data==='\\x1b[I'||data==='\\x1b[O'" in js
     mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
-    assert "xterm.onData(d=>{if(isTermFocusReport(d)||TERM_THEME_OVERLAYING||TERM_INSTANCES[id]?.loadingEl)return;" in mount
+    assert "xterm.onData(d=>{if(isTermFocusReport(d)||TERM_THEME_OVERLAYING)return;" in mount
     assert "queueTermInput(id,applyTermModifiers(d))" in mount
 
 
@@ -1085,7 +1085,7 @@ def test_herdr_flow_entry_from_term_uses_attached_session_identity():
     assert "TERM_SESSIONS[TERM_ID]" in enter
     show = js.split("function showView(v){", 1)[1].split("function ", 1)[0]
     assert "TERM_SESSIONS[TERM_ID]" in show
-    attach = js.split("async function doAttachHerdr(session){", 1)[1].split("// ============ herdr", 1)[0]
+    attach = js.split("async function doAttachHerdr(session", 1)[1].split("// ============ herdr", 1)[0]
     assert "TERM_SESSIONS[r.id]=session" in attach
     assert "delete TERM_SESSIONS[id]" in js
 
@@ -1099,7 +1099,7 @@ def test_safe_fit_waits_for_fonts_and_keeps_right_gutter():
     assert "document.fonts.load" in js
     term_new = js.split("async function termNew(cwd){", 1)[1].split("function ", 1)[0]
     assert term_new.index("await ensureTermFontLoaded()") < term_new.index("api(url")
-    attach = js.split("async function doAttachHerdr(session){", 1)[1].split("// ============ herdr", 1)[0]
+    attach = js.split("async function doAttachHerdr(session", 1)[1].split("// ============ herdr", 1)[0]
     assert attach.index("await ensureTermFontLoaded()") < attach.index(
         "const r=await api('/api/term?label='"
     )
@@ -1861,11 +1861,12 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     assert "pointer-events:none" in HTML
     assert "TERM_LOADING_QUIET=80,TERM_LOADING_TIMEOUT=15000" in js
     assert "replay_complete" in js
-    hold = js.split("function holdTermLoadingForTui(id){", 1)[1].split(
+    hold = js.split("function holdTermLoadingForTui(id", 1)[1].split(
         "function settleTermLoading", 1
     )[0]
     assert "inst.loadingWaitForTui=true" in hold
-    assert "settleTermLoading(id,true),1500" in hold
+    assert "settleTermLoading(id,true)" in hold
+    assert "maxWaitMs" in hold or "1500" in hold
     settle = js.split("function settleTermLoading(id,force=false){", 1)[1].split(
         "function writeTermOutput", 1
     )[0]
@@ -1905,11 +1906,14 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
         "try{xterm.write", 1
     )[0]
     assert clear_warmup.index("xterm.reset()") < clear_warmup.index("afterTermPaints(connect)")
-    assert "isTermFocusReport(d)||TERM_THEME_OVERLAYING||TERM_INSTANCES[id]?.loadingEl" in mount
+    # loading 遮罩不再吞 onData（否则主题刷新后几秒键盘/点击像死了）
+    assert "isTermFocusReport(d)||TERM_THEME_OVERLAYING)return" in mount
+    assert "TERM_INSTANCES[id]?.loadingEl)return" not in mount
     term_key = js.split("function termKey(name){", 1)[1].split(
         "async function termEnsure", 1
     )[0]
-    assert "TERM_INSTANCES[TERM_ID].loadingEl" in term_key
+    assert "queueTermInput(TERM_ID" in term_key
+    assert "终端正在启动，请稍候" not in term_key
 
 
 def test_theme_switch_forces_full_page_reload_after_saving_preference():
@@ -1938,9 +1942,9 @@ def test_theme_switch_forces_full_page_reload_after_saving_preference():
     assert "setTimeout(finish,800)" in set_theme
     init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
     assert "consumeThemeResume()" in init
-    assert "doAttachHerdr(themeResume.session)" in init
+    assert "doAttachHerdr(themeResume.session,{themeResume:true})" in init
     assert "function scheduleHerdrColorSchemeNotify" in js
-    attach = js.split("async function doAttachHerdr(session){", 1)[1].split(
+    attach = js.split("async function doAttachHerdr(session", 1)[1].split(
         "// ============ herdr 流视图", 1
     )[0]
     assert "scheduleHerdrColorSchemeNotify" in attach

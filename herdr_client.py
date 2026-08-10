@@ -313,39 +313,80 @@ def set_theme_name(name: str) -> Path:
 
     原子写(mkstemp+fsync+replace)。不触碰 auto_switch 等其余键。
     """
+    return set_theme_for_web_mode(
+        "light" if "light" in (name or "").lower() or name in ("solarized-light", "catppuccin-latte", "one-light", "gruvbox-light", "tokyo-night-day", "kanagawa-lotus", "rose-pine-dawn") else "dark",
+        name_override=name,
+    )
+
+
+def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
+    """按 Web light/dark 写 herdr [theme]：name + auto_switch + dark/light_name。
+
+    auto_switch=true 时 Mode 2031 会在 dark_name/light_name 间切换，opencode 等
+    跟 host 终端色的 pane 才能随 Web 主题变。light 名必须是浅色内置主题。
+    """
+    if mode not in ("light", "dark"):
+        raise ValueError("mode 必须是 light 或 dark")
+    dark_name = "catppuccin"
+    light_name = "solarized-light"
+    # name_override 显式传入时即使是空串也要校验失败，不能 or 回退默认名
+    if name_override is not None:
+        name = name_override
+    else:
+        name = light_name if mode == "light" else dark_name
     if not _THEME_NAME_RE.fullmatch(name or ""):
+        raise ValueError("非法主题名")
+    if not _THEME_NAME_RE.fullmatch(dark_name) or not _THEME_NAME_RE.fullmatch(light_name):
         raise ValueError("非法主题名")
     path = herdr_config_path()
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.is_file() else []
     out: list[str] = []
     in_theme = False
-    replaced = False
+    seen: set[str] = set()
 
-    def _name_line(ending: str = "\n") -> str:
-        return f'name = "{name}"{ending}'
+    def _kv(key: str, value: str, ending: str = "\n") -> str:
+        if key == "auto_switch":
+            return f"{key} = {value}{ending}"
+        return f'{key} = "{value}"{ending}'
+
+    keys_wanted = {
+        "name": name,
+        "auto_switch": "true",
+        "dark_name": dark_name,
+        "light_name": light_name,
+    }
 
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("["):
-            if in_theme and not replaced:
-                out.append(_name_line())
-                replaced = True
+            if in_theme:
+                for key, val in keys_wanted.items():
+                    if key not in seen:
+                        out.append(_kv(key, val))
+                        seen.add(key)
             in_theme = stripped == "[theme]"
             out.append(line)
             continue
-        if in_theme and not replaced and re.match(r"^\s*name\s*=", line):
-            ending = "\n" if line.endswith("\n") else ""
-            out.append(_name_line(ending))
-            replaced = True
-            continue
+        if in_theme:
+            m = re.match(r"^\s*(name|auto_switch|dark_name|light_name)\s*=", line)
+            if m:
+                key = m.group(1)
+                ending = "\n" if line.endswith("\n") else ""
+                out.append(_kv(key, keys_wanted[key], ending))
+                seen.add(key)
+                continue
         out.append(line)
-    if in_theme and not replaced:
-        out.append(_name_line())
-        replaced = True
-    if not replaced:
+    if in_theme:
+        for key, val in keys_wanted.items():
+            if key not in seen:
+                out.append(_kv(key, val))
+                seen.add(key)
+    if not seen:
         if out and not out[-1].endswith("\n"):
             out.append("\n")
-        out.extend(["\n", "[theme]\n", _name_line()])
+        out.extend(["\n", "[theme]\n"])
+        for key, val in keys_wanted.items():
+            out.append(_kv(key, val))
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".herdr-config.", suffix=".tmp", dir=str(path.parent))
     try:

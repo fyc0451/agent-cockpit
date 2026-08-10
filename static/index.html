@@ -3253,7 +3253,7 @@ const isTermFocusReport=data=>data==='\x1b[I'||data==='\x1b[O';
 function termKey(name){
   const seq=TERM_KEY_SEQ[name];
   if(!seq||!TERM_ID||!TERM_INSTANCES[TERM_ID]){toast('终端尚未连接');return}
-  if(TERM_INSTANCES[TERM_ID].loadingEl){toast('终端正在启动，请稍候');return}
+  // loading 遮罩不挡交互；主题刷新后应立即可按
   queueTermInput(TERM_ID,applyTermModifiers(seq,name));
   XTERM&&XTERM.focus();
 }
@@ -3704,8 +3704,10 @@ async function termAttachHerdr(){
     </div>`).join('');
   m.classList.add('show');openDialog(m,{labelledBy:'collabModalTitle',closer:closeCollab});
 }
-async function doAttachHerdr(session){
+async function doAttachHerdr(session,opts={}){
   if(!validSessionName(session)){toast('非法 session 名,拒绝 attach');return}
+  // themeResume: 主题整页刷新后重连，herdr 已在跑，loading 要短，避免「点了没反应」
+  const themeResume=!!opts.themeResume;
   rememberSession(session);
   await restoreTerms();
   closeCollab();
@@ -3742,7 +3744,7 @@ async function doAttachHerdr(session){
     termMount(r.id);
     renderTermOptions();
     if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败');
-    holdTermLoadingForTui(r.id);
+    holdTermLoadingForTui(r.id, themeResume?400:1500);
     const hint=isCompactScreen()
       ?'已进入 herdr/'+session+'（手机已拆分屏为独立 tab，Ctrl-B 切换）'
       :'已进入 herdr/'+session+' (Ctrl-b 切 pane)';
@@ -4263,14 +4265,15 @@ function hideTermThemeOverlay(){
   ov.classList.add('done');
   setTimeout(()=>{try{ov.remove()}catch(e){}},180);
 }
-function holdTermLoadingForTui(id){
+function holdTermLoadingForTui(id,maxWaitMs=1500){
   const inst=TERM_INSTANCES[id];if(!inst?.loadingEl)return;
   inst.loadingWaitForTui=true;
   const label=inst.loadingEl.querySelector('span:last-child');if(label)label.textContent='正在启动完整终端';
   if(inst.loadingDeadlineTimer)clearTimeout(inst.loadingDeadlineTimer);
-  // TUI 等待上限:不依赖 15s 兜底,1.5s 内没进 alternate buffer 就放行,
-  // 避免遮罩长时间盖住画面(pointer-events:none 已允许期间交互)。
-  inst.loadingDeadlineTimer=setTimeout(()=>settleTermLoading(id,true),1500);
+  // TUI 等待上限:主题刷新重 attach 用更短窗口(见 maxWaitMs)，避免「点了几秒没反应」。
+  // 遮罩 pointer-events:none；输入也不再因 loadingEl 丢弃。
+  const wait=Math.max(200,Math.min(1500,Number(maxWaitMs)||1500));
+  inst.loadingDeadlineTimer=setTimeout(()=>settleTermLoading(id,true),wait);
 }
 function settleTermLoading(id,force=false){
   const inst=TERM_INSTANCES[id];
@@ -4622,7 +4625,8 @@ function termMount(id){
     renderQueue:[],rendering:false,renderGeneration:0,replayComplete:false,loadingEl,loadingWaitForTui:false,
     loadingLastOutputAt:performance.now(),loadingTimer:null,loadingDeadlineTimer:null,loadingPaintPending:false};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
-  xterm.onData(d=>{if(isTermFocusReport(d)||TERM_THEME_OVERLAYING||TERM_INSTANCES[id]?.loadingEl)return;queueTermInput(id,applyTermModifiers(d))});
+  // loading 遮罩 pointer-events:none，期间应可交互；仅主题全屏遮罩禁输入防幽灵回放
+  xterm.onData(d=>{if(isTermFocusReport(d)||TERM_THEME_OVERLAYING)return;queueTermInput(id,applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   XTERM=xterm;FIT=fit;
   // 先让浏览器画出 loading，再在同一个 xterm/WebGL context 中完成首帧和
@@ -5501,25 +5505,28 @@ function sendAllTermColorSchemes(){
  * 各 pane（含 grok）才跟 Web 明暗主题。
  * 首次 attach 时 openTermWS(replay) 故意 notify=false，避免写给登录 shell，故此处补发。
  */
-function scheduleHerdrColorSchemeNotify(id,attempts=24){
+function scheduleHerdrColorSchemeNotify(id,attempts=16){
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.closing)return;
   // 仅 herdr 会话终端（有 session 标签）需要通知
   if(!TERM_SESSIONS[id]){
-    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),200);
+    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),150);
     return;
   }
   const ws=inst.ws;
   if(!ws||ws.readyState!==1){
-    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),250);
+    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),200);
     return;
   }
-  // 等 loading 收起（herdr 已吃到输入并开始画 TUI），再 Mode 2031
-  if(inst.loadingEl&&attempts>8){
-    setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),300);
+  // 有 session 标签且 WS 已开：不必死等 loading 遮罩（遮罩已不挡输入）。
+  // 略延迟让 herdr 命令进入 PTY，再 Mode 2031（含 opencode 等跟终端色的 pane）。
+  if(attempts>=16){
+    setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),400);
     return;
   }
   sendTermColorScheme(id,ws,true);
+  // 再补一次，覆盖 herdr attach 较慢时第一次 Mode 2031 落在 shell 上的情况
+  if(attempts>12)setTimeout(()=>{const cur=TERM_INSTANCES[id];if(cur?.ws?.readyState===1)sendTermColorScheme(id,cur.ws,true)},1200);
 }
 function termTheme(mode=currentTermColorScheme()){
   // 与 Orca 相同：主题交给 xterm 原生调色板；显式低对比色由
@@ -5869,7 +5876,8 @@ async function init(){
           VIEW_LOCATION_LOCK=true;try{showView('herdrflow')}finally{VIEW_LOCATION_LOCK=false}
         }
       }else{
-        await doAttachHerdr(themeResume.session);
+        // 不阻塞 init：attach 在后台跑，避免整页几秒点不动
+        void doAttachHerdr(themeResume.session,{themeResume:true}).catch(e=>toast('主题切换后自动打开 session 失败: '+e,4000));
       }
     }catch(e){toast('主题切换后自动打开 session 失败: '+e,4000)}
   }

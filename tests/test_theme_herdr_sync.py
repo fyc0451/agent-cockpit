@@ -26,7 +26,9 @@ x = 1
     text = path.read_text(encoding="utf-8")
     config = tomllib.loads(text)
     assert config["theme"]["name"] == "catppuccin"
-    assert config["theme"]["auto_switch"] is False  # 其余键不动
+    assert config["theme"]["auto_switch"] is True  # Web 同步开启 auto_switch
+    assert config["theme"]["dark_name"] == "catppuccin"
+    assert config["theme"]["light_name"] == "solarized-light"
     assert config["keys"]["x"] == 1
 
 
@@ -37,7 +39,7 @@ auto_switch = false
     herdr_client.set_theme_name("dracula")
     config = tomllib.loads(path.read_text(encoding="utf-8"))
     assert config["theme"]["name"] == "dracula"
-    assert config["theme"]["auto_switch"] is False
+    assert config["theme"]["auto_switch"] is True
 
 
 def test_set_theme_appends_section_when_absent(tmp_path, monkeypatch):
@@ -135,6 +137,8 @@ def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     monkeypatch.setattr(server.herdr_client, "reload_config", lambda timeout=10: {"ok": True})
     monkeypatch.setattr(server.herdr_client, "apply_grok_web_theme", lambda mode: {"ok": True, "applied": [], "errors": [], "command": f"/theme {mode}"})
     monkeypatch.setattr(server.herdr_client, "set_web_theme_mode", lambda mode: None)
+    monkeypatch.setattr(server.herdr_client, "set_theme_for_web_mode", lambda mode, name_override=None: None)
+    monkeypatch.setattr(server.herdr_client, "grok_theme_slash", lambda mode: f"/theme {mode}")
     client = TestClient(server.app, headers={"Authorization": "Bearer secret"})
 
     r = client.post("/api/theme/herdr", json={"mode": "dark"})
@@ -142,6 +146,7 @@ def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     body = r.json()
     assert body["theme"] == "catppuccin" and body["reload"] == {"ok": True}
     assert "notified_terms" in body
+    assert body.get("grok", {}).get("scheduled") is True
 
     r = client.post("/api/theme/herdr", json={"mode": "light"})
     assert r.json()["theme"] == "solarized-light"

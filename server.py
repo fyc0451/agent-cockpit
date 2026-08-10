@@ -2061,7 +2061,8 @@ def api_theme_herdr(req: ThemeHerdrReq):
     theme_name = HERDR_THEME_MAP[req.mode]
     herdr_client.set_web_theme_mode(req.mode)
     try:
-        herdr_client.set_theme_name(theme_name)
+        # auto_switch + dark/light_name，Mode 2031 才能驱动 opencode 等跟 host 色
+        herdr_client.set_theme_for_web_mode(req.mode, name_override=theme_name)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except OSError as exc:
@@ -2078,19 +2079,24 @@ def api_theme_herdr(req: ThemeHerdrReq):
                 notified.append(tid)
     except Exception:
         logger.exception("theme/herdr notify labeled terms failed")
-    # Grok 自绘 TUI 不跟 herdr 调色板；对 live grok pane 键入 /theme light|dark
-    grok_sync: dict[str, Any] = {"applied": [], "errors": [], "command": ""}
+    # Grok slash 较慢，后台跑，避免前端等 fetch 卡住数百 ms～数秒
+    def _bg_grok() -> None:
+        try:
+            herdr_client.apply_grok_web_theme(req.mode)
+        except Exception:
+            logger.exception("theme/herdr apply grok theme failed")
+
     try:
-        grok_sync = herdr_client.apply_grok_web_theme(req.mode)
+        import threading
+        threading.Thread(target=_bg_grok, name="grok-theme-sync", daemon=True).start()
     except Exception:
-        logger.exception("theme/herdr apply grok theme failed")
-        grok_sync = {"ok": False, "applied": [], "errors": ["apply_grok_web_theme crashed"], "command": ""}
+        logger.exception("theme/herdr schedule grok theme failed")
     return {
         "ok": True,
         "theme": theme_name,
         "reload": reload,
         "notified_terms": notified,
-        "grok": grok_sync,
+        "grok": {"scheduled": True, "command": herdr_client.grok_theme_slash(req.mode)},
     }
 
 
