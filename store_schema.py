@@ -188,11 +188,16 @@ def _path_creatable(path: Path) -> bool:
 
 
 def _sqlite_wal_shm_state(db_path: Path) -> str | None:
-    """Return probe_requires_quiescence if WAL exists without SHM."""
+    """Any live WAL or SHM sidecar forbids connect (OpenCode #2054).
+
+    mode=ro + query_only still mutates -shm on first open of a live WAL DB.
+    This slice has no controlled snapshot path → always probe_requires_quiescence
+    when either sidecar exists. Only no-sidecar DBs may open with immutable=1.
+    """
     wal = Path(str(db_path) + "-wal")
     shm = Path(str(db_path) + "-shm")
     try:
-        if wal.exists() and not shm.exists():
+        if wal.exists() or shm.exists():
             return REASON_PROBE_REQUIRES_QUIESCENCE
     except OSError:
         return REASON_UNREADABLE
@@ -200,7 +205,8 @@ def _sqlite_wal_shm_state(db_path: Path) -> str | None:
 
 
 def _open_sqlite_ro(db_path: Path) -> sqlite3.Connection:
-    uri = db_path.resolve().as_uri() + "?mode=ro"
+    """Open only after sidecar gate; immutable=1 keeps true zero-write."""
+    uri = db_path.resolve().as_uri() + "?mode=ro&immutable=1"
     con = sqlite3.connect(uri, uri=True, timeout=1.0)
     con.execute("PRAGMA query_only=ON")
     return con
@@ -307,6 +313,7 @@ def _check_sqlite(
 
     quiet = _sqlite_wal_shm_state(path)
     if quiet:
+        # Do not open the DB at all (would mutate -shm under mode=ro).
         return _store_result(name, "blocked", quiet)
 
     try:
@@ -471,16 +478,49 @@ def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, 
         return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     if keys - allowed:
         return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-    # Value shapes
+    # Core members required + exact member shapes (0.3.x).
     if name == "mail_projects":
-        if not isinstance(data.get("sessions"), dict):
+        sessions = data.get("sessions")
+        if not isinstance(sessions, dict):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        # entry: {project: str, session_dir: str} only
+        entry_keys = frozenset({"project", "session_dir"})
+        for key, entry in sessions.items():
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            ek = set(entry)
+            if not entry_keys.issubset(ek):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if ek - entry_keys:
+                return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+            if not isinstance(entry.get("project"), str):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if not isinstance(entry.get("session_dir"), str):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     elif name == "team_sessions":
-        if not isinstance(data.get("bindings"), list):
+        bindings = data.get("bindings")
+        if not isinstance(bindings, list):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        for item in bindings:
+            if not isinstance(item, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            # Allow known binding keys only (loose set from writers); reject unknowns.
+            allowed_b = frozenset({
+                "hub", "human_id", "project_slug", "session", "session_generation",
+                "agent_id", "agent_name", "pane_id", "updated_ts", "status",
+            })
+            extra = set(item) - allowed_b
+            if extra:
+                return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
     elif name == "inbox_route":
-        if not isinstance(data.get("routes"), dict):
+        routes = data.get("routes")
+        if not isinstance(routes, dict):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        for key, route in routes.items():
+            if not isinstance(key, str) or not isinstance(route, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            # routes values are opaque dicts but must not be non-dicts; unknown
+            # nested keys left to route writer contract — require dict only.
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
@@ -790,18 +830,31 @@ def probe_all_stores() -> list[dict[str, Any]]:
     }
 
     def path_gate(name: str) -> dict[str, Any] | None:
+        """Unified runtime_paths.inspect fail-closed for EVERY app-owned store.
+
+        creatable (ready=True, reason=creatable) → allow content probe (may be
+        missing_creatable). Any other not-ready reason blocks before content
+        probe (OpenCode #2054: non-SQLite symlink_escape must not report
+        compatible).
+        """
         item = path_by_name.get(name)
         if not item:
-            return None
+            return _store_result(name, "error", REASON_PATHS_NOT_READY)
+        reason = str(item.get("reason") or REASON_PATHS_NOT_READY)
         if item.get("ready") is True:
             return None
-        reason = str(item.get("reason") or REASON_PATHS_NOT_READY)
-        # Map path reasons into ready enums (no path leakage).
         if reason == "creatable":
-            return None  # content-level may still be missing_creatable
+            return None
         if "symlink" in reason or "owner" in reason or "mode" in reason:
             return _store_result(name, "error", REASON_UNSAFE)
         return _store_result(name, "error", REASON_PATHS_NOT_READY)
+
+    def gated(name: str, probe):
+        blocked = path_gate(name)
+        if blocked is not None:
+            results.append(blocked)
+            return
+        results.append(probe())
 
     # SQLite
     sqlite_specs = (
@@ -828,25 +881,22 @@ def probe_all_stores() -> list[dict[str, Any]]:
         ),
     )
     for name, tables, defaults, indexes, fks in sqlite_specs:
-        blocked = path_gate(name)
-        if blocked and blocked["reason"] != REASON_PATHS_NOT_READY:
-            results.append(blocked)
-            continue
-        results.append(
-            _check_sqlite(
-                name, tables,
-                expected_defaults=defaults,
-                expected_indexes=indexes,
-                expected_fks=fks,
-            )
+        gated(
+            name,
+            lambda n=name, t=tables, d=defaults, i=indexes, f=fks: _check_sqlite(
+                n, t,
+                expected_defaults=d,
+                expected_indexes=i,
+                expected_fks=f,
+            ),
         )
 
-    results.append(_check_settings())
+    gated("settings", _check_settings)
     for jname in ("mail_projects", "team_sessions", "inbox_route"):
-        results.append(_check_versioned_json(jname))
-    results.append(_check_typing())
-    results.append(_check_file_roots())
-    results.append(_check_vapid())
+        gated(jname, lambda n=jname: _check_versioned_json(n))
+    gated("typing", _check_typing)
+    gated("file_roots", _check_file_roots)
+    gated("vapid", _check_vapid)
     return results
 
 

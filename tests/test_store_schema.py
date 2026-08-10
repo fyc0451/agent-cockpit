@@ -129,6 +129,23 @@ def test_wal_without_shm_requires_quiescence(isolated_roots):
     assert r["reason"] == store_schema.REASON_PROBE_REQUIRES_QUIESCENCE
 
 
+def test_wal_plus_shm_requires_quiescence_no_shm_mutation(isolated_roots):
+    """OpenCode #2054: live WAL+SHM must not be opened (mode=ro mutates -shm)."""
+    import hashlib
+    path = runtime_paths.store("tasks")
+    _mk_tasks_db(path)
+    wal = Path(str(path) + "-wal")
+    shm = Path(str(path) + "-shm")
+    wal.write_bytes(b"W" * 64)
+    shm.write_bytes(b"S" * 64)
+    before = hashlib.sha256(shm.read_bytes()).hexdigest()
+    mtime = shm.stat().st_mtime_ns
+    r = _tasks_check()
+    assert r["reason"] == store_schema.REASON_PROBE_REQUIRES_QUIESCENCE
+    assert hashlib.sha256(shm.read_bytes()).hexdigest() == before
+    assert shm.stat().st_mtime_ns == mtime
+
+
 def test_settings_unknown_field_future(isolated_roots):
     path = runtime_paths.store("settings")
     path.write_text(json.dumps({
@@ -161,6 +178,56 @@ def test_mail_projects_unknown_field_future(isolated_roots):
     r = store_schema._check_versioned_json("mail_projects")
     assert r["reason"] == store_schema.REASON_UNKNOWN_FIELDS
     assert r["state"] == "future"
+
+
+def test_mail_projects_missing_sessions_not_compatible(isolated_roots):
+    """#2054: versioned JSON missing core sessions is not compatible."""
+    path = runtime_paths.store("mail_projects")
+    path.write_text(json.dumps({"version": 1}), encoding="utf-8")
+    r = store_schema._check_versioned_json("mail_projects")
+    assert r["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
+    assert r["state"] != "compatible"
+
+
+def test_mail_projects_entry_shape_exact(isolated_roots):
+    path = runtime_paths.store("mail_projects")
+    path.write_text(json.dumps({
+        "version": 1,
+        "sessions": {"s1": {"project": "/p", "session_dir": "/d", "extra": 1}},
+    }), encoding="utf-8")
+    r = store_schema._check_versioned_json("mail_projects")
+    assert r["reason"] == store_schema.REASON_UNKNOWN_FIELDS
+
+
+def test_path_gate_blocks_non_sqlite_symlink_escape(isolated_roots, monkeypatch):
+    """#2054: path_gate must cover settings/etc, not only SQLite."""
+    # Force inspect to report symlink_escape for settings.
+    fake = {
+        "ready": False,
+        "stores": [
+            {"name": n, "ready": True, "reason": "ok"}
+            for n in (
+                "tasks", "coordination", "push", "vapid", "mail_projects",
+                "team_sessions", "inbox_route", "typing", "file_roots",
+                "settings", "worktrees", "upgrade",
+            )
+        ],
+    }
+    for item in fake["stores"]:
+        if item["name"] == "settings":
+            item["ready"] = False
+            item["reason"] = "symlink_escape"
+    monkeypatch.setattr(runtime_paths, "inspect", lambda: fake)
+    # Content would look compatible if probe ran
+    path = runtime_paths.store("settings")
+    path.write_text(json.dumps({
+        "language": "zh", "dir_agents": {}, "enabled_agents": [],
+        "upload_max_mb": 1, "team_hub_url": "", "human_auth_url": "",
+        "term": {"max_terms": 1, "idle_ttl": 1, "write_timeout": 1.0},
+    }), encoding="utf-8")
+    results = {r["name"]: r for r in store_schema.probe_all_stores()}
+    assert results["settings"]["reason"] == store_schema.REASON_UNSAFE
+    assert results["settings"]["state"] == "error"
 
 
 def test_file_roots_unsafe_slash(isolated_roots):
