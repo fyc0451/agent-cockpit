@@ -1161,23 +1161,32 @@ def api_overview():
 
 
 @app.get("/api/projects/{slug}")
-def api_project(slug: str):
-    """项目详情:agent 列表 + 消息流。"""
+def api_project(slug: str, limit: int = 50):
+    """项目详情:agent 列表 + 消息流。
+
+    limit: 最近消息条数，默认 50，上限 500（消息页全列表筛选用）。
+    """
     mail_status = _agent_mail_status()
     if not mail_status["available"]:
         raise HTTPException(503, mail_status["reason"])
     proj = db.project_by_slug(slug)
     if not proj:
         raise HTTPException(404, f"项目不存在: {slug}")
+    try:
+        msg_limit = int(limit)
+    except (TypeError, ValueError):
+        msg_limit = 50
+    msg_limit = max(1, min(msg_limit, 500))
     messages = [
         coordination.enrich_message(proj["human_key"], message)
-        for message in db.recent_messages(proj["id"])
+        for message in db.recent_messages(proj["id"], limit=msg_limit)
     ]
     return {
         "project": proj,
         "agents": db.list_agents(proj["id"]),
         "messages": messages,
         "agent_mail": mail_status,
+        "message_limit": msg_limit,
     }
 
 

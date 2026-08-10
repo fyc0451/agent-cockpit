@@ -282,11 +282,11 @@ def test_terminal_webgl_renderer_with_safe_fallback():
 
 
 def test_message_fields_escaped():
-    # m.importance 可由 API 写入,不得裸进 innerHTML;fmtTime/m.id/a.unread 同理 esc
+    # m.importance 可由 API 写入,不得裸进 innerHTML;fmtTime/m.id 同理 esc
     assert "${m.importance" not in HTML
     assert "${esc(m.importance" in HTML
     assert "${esc(fmtTime(m.created_ts))}" in HTML
-    assert 'card-badge">${esc(a.unread)}' in HTML
+    assert "${esc(m.sender_name" in HTML
     # data-pid/data-mid 属性上下文也 esc(防御契约变化)
     assert 'data-pid="${esc(d.project.id)}"' in HTML
     assert 'data-mid="${esc(m.id)}"' in HTML
@@ -1217,7 +1217,7 @@ def test_all_h5_views_have_an_explicit_scroll_owner():
     # body 固定不滚动；每个内容型 view 必须有可收缩的内部滚动容器。
     assert ".view{display:none;flex:1;min-height:0;overflow:hidden" in HTML
     assert ".msgs-body{flex:1;min-height:0" in HTML
-    assert ".msgs-list{min-width:0;min-height:0;overflow:auto" in HTML
+    assert ".msgs-list{flex:1;min-width:0;min-height:0;overflow:auto" in HTML
     assert ".files-body{flex:1;min-height:0" in HTML
     assert ".file-tree{min-width:0;min-height:0" in HTML
     assert ".editor-area{min-width:0;min-height:0" in HTML
@@ -1243,7 +1243,9 @@ def test_h5_message_file_and_settings_layouts_do_not_overflow():
     narrow = HTML.split("@media(max-width:860px){", 1)[1].split(
         "@media(max-width:560px){", 1
     )[0]
-    assert ".msgs-body,.files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}" in narrow
+    # 消息页改为单列 flex；文件页仍双栏折叠为单列
+    assert ".msgs-body{display:flex;flex-direction:column}" in narrow
+    assert ".files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}" in narrow
     assert 'class="set-dir-add"' in HTML
     phone = HTML.split("@media(max-width:560px){", 1)[1].split("</style>", 1)[0]
     assert ".set-dir-add{display:grid!important" in phone
@@ -1471,9 +1473,11 @@ def test_h5_foldable_responsive_first_batch():
     assert "repeat(auto-fit,minmax(220px,1fr))" in HTML
     assert ".board{grid-template-columns:repeat(2,1fr)}" not in HTML
     assert ".board{grid-template-columns:1fr}" not in HTML
-    # msgs/files 双栏弹性比例(861px 以上不再被 240/280px 定宽挤占),手机仍单列
-    assert HTML.count("minmax(200px,28%) 1fr") == 2
-    assert ".msgs-body,.files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}" in HTML
+    # 文件页保留双栏弹性比例；消息页改为全宽 flex 列表
+    assert HTML.count("minmax(200px,28%) 1fr") == 1
+    assert ".files-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(200px,28%) 1fr" in HTML
+    assert ".msgs-body{flex:1;min-height:0;display:flex;flex-direction:column" in HTML
+    assert ".files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}" in HTML
     # term-toolbar 基础规则即可换行,<=1100px(折叠屏展开)不横向溢出
     assert re.search(r"\.term-toolbar\{display:flex;flex-wrap:wrap", HTML)
     # 键盘遮挡判断与宽度解耦,适配 coarse pointer(平板/折叠屏)
@@ -2005,11 +2009,21 @@ def test_settings_hub_error_shows_actionable_fix():
 
 
 def test_messages_page_agent_filter_and_cleanup():
-    # 点 agent = 查看其消息(不再填表单),带发出/收到徽标与清除入口
-    assert 'data-action="viewAgent"' in HTML
+    # 全宽消息列表 + 顶部筛选（session/发件人/收件人/时间/状态），无左侧 agent 列表
+    assert 'id="msgFilters"' in HTML
+    assert 'id="msgFilterSender"' in HTML
+    assert 'id="msgFilterRecipient"' in HTML
+    assert 'id="msgFilterFrom"' in HTML
+    assert 'id="msgFilterTo"' in HTML
+    assert 'id="msgFilterStatus"' in HTML
+    assert 'id="msgSession"' in HTML
+    assert "projAgentList" not in HTML
+    assert 'data-action="viewAgent"' not in HTML
     assert "pickRecipient" not in HTML
     assert "msg-filter-bar" in HTML
     assert "clearMsgFilter" in HTML
+    assert "applyMsgFilters" in HTML
+    assert "filterProjMessages" in HTML
     assert "dir-out" in HTML and "dir-in" in HTML
     # 消息清理按钮走 /api/messages/cleanup
     assert "cleanupMsgs()" in HTML
@@ -2912,7 +2926,7 @@ def test_b2_click_only_items_buttonified_with_keyboard():
     js = _inline_js()
     assert 'role="button" tabindex="0"' in js
     assert "e.key!=='Enter'&&e.key!==' '" in js and "it.click()" in js
-    for marker in ('data-action="openFlow"', 'data-action="openAttention"', 'data-action="viewAgent"', 'data-action="fileUp"', 'data-action="tfBack"'):
+    for marker in ('data-action="openFlow"', 'data-action="openAttention"', 'data-action="fileUp"', 'data-action="tfBack"'):
         assert marker in js
 
 

@@ -171,16 +171,17 @@ header .spacer{flex:1}
 .media-view video{max-width:100%;max-height:100%;border-radius:8px;background:#000}
 .media-view audio{width:100%;margin-top:24px}
 
-/* 消息 view */
+/* 消息 view：全宽列表 + 顶部筛选 */
 .msgs-view{flex-direction:column;overflow:hidden}
-.msgs-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(200px,28%) 1fr;gap:10px;padding:10px;overflow:hidden}
-.sidebar{min-width:0;min-height:0;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:8px;overflow:auto}
-.agent-item{padding:7px 9px;border-radius:7px;display:flex;align-items:center;gap:7px;margin-bottom:3px;font-size:13px;cursor:pointer}
-.agent-item:hover{background:var(--bg3)}
-.agent-item.active{background:var(--bg3);box-shadow:inset 2px 0 0 var(--accent,#4f8cff)}
-.agent-item .an{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.msg-filter-bar{display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--fg2)}
-.msgs-list{min-width:0;min-height:0;overflow:auto;padding-right:4px}
+.msgs-body{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:10px;overflow:hidden}
+.msg-filters{flex:none;display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 10px;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:10px}
+.msg-filters .mf{display:flex;flex-direction:column;gap:3px;min-width:0}
+.msg-filters .mf label{font-size:10px;color:var(--fg3);letter-spacing:.02em}
+.msg-filters .mf select,.msg-filters .mf input{font-size:12px;min-width:120px;max-width:200px}
+.msg-filters .mf-time input{min-width:150px;max-width:180px}
+.msg-filters .mf-actions{display:flex;align-items:center;gap:6px;margin-left:auto;padding-bottom:1px}
+.msg-filter-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--bg3);border:1px solid var(--bd);border-radius:8px;padding:6px 10px;margin-bottom:8px;font-size:12px;color:var(--fg2)}
+.msgs-list{flex:1;min-width:0;min-height:0;overflow:auto;padding-right:4px}
 .msg{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:10px;margin-bottom:8px}
 .msg .mh{display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px;gap:6px;flex-wrap:wrap}
 .msg .ms{font-weight:600;font-size:13px}
@@ -188,6 +189,9 @@ header .spacer{flex:1}
 .tag{background:var(--bg4);border-radius:5px;padding:1px 6px;font-size:10px;color:var(--fg2)}
 .tag.dir-out{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
 .tag.dir-in{background:color-mix(in srgb,#16a34a 16%,transparent);color:#16a34a}
+.tag.st-unread{background:color-mix(in srgb,var(--need) 16%,transparent);color:var(--need)}
+.tag.st-read{background:color-mix(in srgb,var(--done) 14%,transparent);color:var(--done)}
+.tag.st-work{background:color-mix(in srgb,var(--work) 14%,transparent);color:var(--work)}
 .compose{background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:10px;margin-top:6px}
 .field{margin-bottom:8px}
 .field label{display:block;font-size:11px;color:var(--fg2);margin-bottom:3px}
@@ -489,7 +493,10 @@ header .spacer{flex:1}
   .app.nav-hidden #side{display:flex}
 }
 @media(max-width:860px){
-  .msgs-body,.files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
+  .msgs-body{display:flex;flex-direction:column}
+  .files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
+  .msg-filters .mf select,.msg-filters .mf input{max-width:100%;min-width:0;width:100%}
+  .msg-filters .mf-actions{margin-left:0;width:100%}
   .sidebar,.file-tree{max-height:25vh}
   .team-shell{grid-template-columns:1fr}
   .team-side{max-height:36vh;overflow:auto}
@@ -647,21 +654,54 @@ header .spacer{flex:1}
   </section>
 
   <!-- 消息 -->
+  <!-- 全宽列表 + 顶部筛选（无左侧 agent 列表） -->
   <section id="view-msgs" class="view msgs-view">
     <div class="msgs-body">
-      <div class="sidebar">
-        <div class="muted" style="font-size:11px;padding:3px 5px 6px">项目 / AGENTS</div>
-        <div id="projAgentList"></div>
-      </div>
-      <div class="msgs-list">
-        <div class="row" style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
-          <select id="msgProj" onchange="MSG_FILTER=null;loadProjectMsgs()" style="width:auto;min-width:180px"></select>
-          <button class="icon" onclick="loadProjectMsgs()">↻</button>
+      <div class="msg-filters" id="msgFilters">
+        <div class="mf">
+          <label for="msgSession">Session</label>
+          <select id="msgSession" onchange="onMsgSessionChange()" title="Herdr session → 绑定的邮件项目"></select>
+        </div>
+        <div class="mf">
+          <label for="msgProj">项目</label>
+          <select id="msgProj" onchange="onMsgProjectChange()" style="min-width:160px;max-width:240px"></select>
+        </div>
+        <div class="mf">
+          <label for="msgFilterSender">发件人</label>
+          <select id="msgFilterSender" onchange="applyMsgFilters()"><option value="">全部</option></select>
+        </div>
+        <div class="mf">
+          <label for="msgFilterRecipient">收件人</label>
+          <select id="msgFilterRecipient" onchange="applyMsgFilters()"><option value="">全部</option></select>
+        </div>
+        <div class="mf mf-time">
+          <label for="msgFilterFrom">发件时间起</label>
+          <input type="datetime-local" id="msgFilterFrom" onchange="applyMsgFilters()">
+        </div>
+        <div class="mf mf-time">
+          <label for="msgFilterTo">发件时间止</label>
+          <input type="datetime-local" id="msgFilterTo" onchange="applyMsgFilters()">
+        </div>
+        <div class="mf">
+          <label for="msgFilterStatus">状态</label>
+          <select id="msgFilterStatus" onchange="applyMsgFilters()">
+            <option value="">全部</option>
+            <option value="unread">未读</option>
+            <option value="read">已读</option>
+            <option value="acked">已 ack</option>
+            <option value="processing">处理中</option>
+            <option value="processed">已处理</option>
+            <option value="stale">stale</option>
+          </select>
+        </div>
+        <div class="mf-actions">
+          <button class="icon" onclick="loadProjectMsgs()" title="刷新">↻</button>
+          <button class="sm" onclick="clearMsgFilter()" title="清除筛选">清除筛选</button>
           <button class="icon" onclick="cleanupMsgs()" title="清理该项目的历史消息">🧹 清理</button>
         </div>
-        <div id="msgLoadState" class="muted" role="status" aria-live="polite" style="font-size:11px;min-height:18px"></div>
-        <div id="msgList" aria-busy="false"></div>
       </div>
+      <div id="msgLoadState" class="muted" role="status" aria-live="polite" style="font-size:11px;min-height:18px;padding:0 2px"></div>
+      <div class="msgs-list" id="msgList" aria-busy="false"></div>
     </div>
   </section>
 
@@ -2715,6 +2755,12 @@ async function startAgent(){
 }
 
 // ============ 消息 view ============
+// 筛选条件（session/项目/发件人/收件人/时间/状态）；无左侧 agent 列表
+let MSG_FILTER=null; // 兼容旧字段：等同发件人或收件人快捷筛选
+let MSG_FILTERS={session:'',sender:'',recipient:'',fromTs:'',toTs:'',status:''};
+let MSG_SESSION_PROJECT={}; // session name → project path/slug 提示
+let PROJ_MSG_CACHE=null;
+
 async function loadProjList(preferredSlug,focusMessageId){
   const seq=++MSG_PROJECT_SEQ;
   try{
@@ -2723,24 +2769,105 @@ async function loadProjList(preferredSlug,focusMessageId){
     CAPABILITIES.agent_mail=d.agent_mail||CAPABILITIES.agent_mail;
     const sel=document.getElementById('msgProj');
     if(d.agent_mail&&d.agent_mail.available===false){
-      sel.innerHTML='';sel.disabled=true;
-      document.getElementById('projAgentList').innerHTML='<div class="muted" style="padding:8px">本地消息列表不可用</div>';
-      const list=document.getElementById('msgList');list.innerHTML='<div class="empty"><b>本地消息能力已自动降级</b><div id="mailUnavailableReason" class="muted" style="margin-top:6px"></div></div>';
-      document.getElementById('mailUnavailableReason').textContent=(d.agent_mail.reason||'未配置本地 Agent Mail 数据库')+'；远程团队消息请使用「团队」页面';
+      if(sel){sel.innerHTML='';sel.disabled=true}
+      const sess=document.getElementById('msgSession');if(sess){sess.innerHTML='';sess.disabled=true}
+      const list=document.getElementById('msgList');
+      if(list)list.innerHTML='<div class="empty"><b>本地消息能力已自动降级</b><div id="mailUnavailableReason" class="muted" style="margin-top:6px"></div></div>';
+      const reason=document.getElementById('mailUnavailableReason');
+      if(reason)reason.textContent=(d.agent_mail.reason||'未配置本地 Agent Mail 数据库')+'；远程团队消息请使用「团队」页面';
       return;
     }
-    sel.disabled=false;
+    if(sel)sel.disabled=false;
     const projects=d.projects||[];
-    const stored=preferredSlug||sel.value||storedStable(STABLE_STATE_KEYS.messageProject);
-    sel.innerHTML='';projects.forEach(p=>sel.add(new Option(p.slug,p.slug)));
-    if(stored&&projects.some(p=>p.slug===stored))sel.value=stored;
-    else if(projects.length)sel.value=projects[0].slug;
-    rememberMessageProject(sel.value);
-    await loadProjectMsgs(focusMessageId,false,sel.value);
+    const stored=preferredSlug||sel?.value||storedStable(STABLE_STATE_KEYS.messageProject);
+    if(sel){
+      sel.innerHTML='';
+      projects.forEach(p=>sel.add(new Option(
+        (p.slug||'')+(p.unread?` · ${p.unread}未读`:''),
+        p.slug
+      )));
+      if(stored&&projects.some(p=>p.slug===stored))sel.value=stored;
+      else if(projects.length)sel.value=projects[0].slug;
+      rememberMessageProject(sel.value);
+    }
+    await loadMsgSessions();
+    await loadProjectMsgs(focusMessageId,false,sel?.value);
   }catch(e){toast('加载失败: '+e)}
 }
-let MSG_FILTER=null;
-let PROJ_MSG_CACHE=null;
+async function loadMsgSessions(){
+  const sel=document.getElementById('msgSession');
+  if(!sel)return;
+  const keep=sel.value||MSG_FILTERS.session||'';
+  sel.innerHTML='';
+  sel.add(new Option('全部 session',''));
+  try{
+    const d=await api('/api/herdr/sessions');
+    const sessions=(d.sessions||[]).filter(s=>s&&s.name&&s.name!=='default');
+    MSG_SESSION_PROJECT={};
+    for(const s of sessions){
+      const label=(s.status==='running'?'● ':'○ ')+(s.name||'');
+      sel.add(new Option(label,s.name));
+    }
+    // 后台解析 running session → mail project（失败忽略）
+    const running=sessions.filter(s=>s.status==='running').slice(0,12);
+    await Promise.all(running.map(async s=>{
+      try{
+        const info=await api('/api/herdr/session/'+encodeURIComponent(s.name)+'/mail-project');
+        if(info&&info.bound&&info.project){
+          MSG_SESSION_PROJECT[s.name]=info.project;
+        }
+      }catch(_){}
+    }));
+    if(keep&&[...sel.options].some(o=>o.value===keep))sel.value=keep;
+    else sel.value='';
+    MSG_FILTERS.session=sel.value||'';
+    sel.disabled=false;
+  }catch(e){
+    sel.innerHTML='';
+    sel.add(new Option('session 不可用',''));
+    sel.disabled=true;
+  }
+}
+function slugifyProjectPath(path){
+  // 与 agent-mail registry 常见 slug 接近：/home/fyc/github/agent-cockpit → home-fyc-github-agent-cockpit
+  return String(path||'').replace(/\\/g,'/').replace(/^\/+/,'').replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase();
+}
+function onMsgSessionChange(){
+  const sess=document.getElementById('msgSession')?.value||'';
+  MSG_FILTERS.session=sess;
+  if(!sess){applyMsgFilters();return}
+  const projectPath=MSG_SESSION_PROJECT[sess];
+  const sel=document.getElementById('msgProj');
+  if(projectPath&&sel){
+    const want=slugifyProjectPath(projectPath);
+    const options=[...sel.options];
+    let pick=options.find(o=>o.value===want);
+    if(!pick){
+      // 最长后缀/包含匹配
+      pick=options
+        .filter(o=>o.value&&(want.endsWith(o.value)||o.value.endsWith(want)||want.includes(o.value)||o.value.includes(want)))
+        .sort((a,b)=>b.value.length-a.value.length)[0];
+    }
+    if(pick&&sel.value!==pick.value){
+      sel.value=pick.value;
+      rememberMessageProject(sel.value);
+      MSG_FILTER=null;
+      MSG_FILTERS.sender='';MSG_FILTERS.recipient='';
+      loadProjectMsgs(undefined,false,sel.value);
+      return;
+    }
+  }
+  // 无绑定或未匹配到项目：仅记录 session 筛选标签，列表仍用当前项目
+  applyMsgFilters();
+}
+function onMsgProjectChange(){
+  MSG_FILTER=null;
+  MSG_FILTERS.sender='';
+  MSG_FILTERS.recipient='';
+  const slug=document.getElementById('msgProj')?.value;
+  rememberMessageProject(slug);
+  loadProjectMsgs(undefined,false,slug);
+}
 function msgDraft(){
   const ids=['cmpFrom','cmpTo','cmpSubject','cmpBody','cmpIntent','cmpImportance','cmpHard'];
   return Object.fromEntries(ids.map(id=>{const el=document.getElementById(id);return [id,el?(el.type==='checkbox'?el.checked:el.value):null]}));
@@ -2753,6 +2880,92 @@ function setMsgLoadState(state,detail=''){
   const list=document.getElementById('msgList'),status=document.getElementById('msgLoadState');
   if(list)list.setAttribute('aria-busy',String(state==='loading'));
   if(status)status.textContent=state==='loading'?`正在刷新 ${detail}…`:(state==='error'?`刷新失败，显示上次结果：${detail}`:'');
+}
+function readMsgFiltersFromDom(){
+  MSG_FILTERS.session=document.getElementById('msgSession')?.value||'';
+  MSG_FILTERS.sender=document.getElementById('msgFilterSender')?.value||'';
+  MSG_FILTERS.recipient=document.getElementById('msgFilterRecipient')?.value||'';
+  MSG_FILTERS.fromTs=document.getElementById('msgFilterFrom')?.value||'';
+  MSG_FILTERS.toTs=document.getElementById('msgFilterTo')?.value||'';
+  MSG_FILTERS.status=document.getElementById('msgFilterStatus')?.value||'';
+  // 兼容 MSG_FILTER：任一侧单人筛选
+  if(MSG_FILTERS.sender&&MSG_FILTERS.sender===MSG_FILTERS.recipient)MSG_FILTER=MSG_FILTERS.sender;
+  else if(MSG_FILTERS.sender&&!MSG_FILTERS.recipient)MSG_FILTER=MSG_FILTERS.sender;
+  else if(!MSG_FILTERS.sender&&MSG_FILTERS.recipient)MSG_FILTER=MSG_FILTERS.recipient;
+  else MSG_FILTER=null;
+}
+function applyMsgFilters(){
+  readMsgFiltersFromDom();
+  if(PROJ_MSG_CACHE)renderProjMsgs(PROJ_MSG_CACHE);
+}
+function msgCreatedMs(ts){
+  if(ts==null||ts==='')return null;
+  if(typeof ts==='number'&&Number.isFinite(ts))return ts>1e12?ts:ts*1000;
+  const s=String(ts).trim();
+  let t=Date.parse(s);
+  if(!Number.isFinite(t))t=Date.parse(s.replace(' ','T'));
+  return Number.isFinite(t)?t:null;
+}
+function msgStatusBucket(m){
+  const receipts=Object.values(m.coordination?.receipts||{});
+  const states=receipts.map(r=>String(r.state||'').toLowerCase());
+  if(states.some(s=>s==='stale'))return 'stale';
+  if(states.some(s=>s==='processed'||s==='done'||s==='completed'))return 'processed';
+  if(states.some(s=>['claimed','working','handling_interrupt','checkpointed','in_progress'].includes(s)))return 'processing';
+  const recs=m.recipients||[];
+  if(recs.some(r=>r.ack_ts))return 'acked';
+  if(recs.length&&recs.every(r=>r.read_ts))return 'read';
+  if(recs.some(r=>!r.read_ts))return 'unread';
+  return 'other';
+}
+function filterProjMessages(msgs){
+  readMsgFiltersFromDom();
+  const sender=MSG_FILTERS.sender;
+  const recipient=MSG_FILTERS.recipient;
+  const status=MSG_FILTERS.status;
+  const fromMs=MSG_FILTERS.fromTs?Date.parse(MSG_FILTERS.fromTs):null;
+  const toMs=MSG_FILTERS.toTs?Date.parse(MSG_FILTERS.toTs):null;
+  return (msgs||[]).filter(m=>{
+    if(sender&&m.sender_name!==sender)return false;
+    if(recipient&&!(m.recipients||[]).some(r=>r.name===recipient))return false;
+    if(status){
+      const b=msgStatusBucket(m);
+      if(status==='unread'&&b!=='unread')return false;
+      if(status==='read'&&b!=='read'&&b!=='acked'&&b!=='processed')return false;
+      if(status==='acked'&&b!=='acked'&&b!=='processed')return false;
+      if(status==='processing'&&b!=='processing')return false;
+      if(status==='processed'&&b!=='processed')return false;
+      if(status==='stale'&&b!=='stale')return false;
+    }
+    const ms=msgCreatedMs(m.created_ts);
+    if(fromMs&&Number.isFinite(fromMs)&&ms!=null&&ms<fromMs)return false;
+    if(toMs&&Number.isFinite(toMs)&&ms!=null&&ms>toMs)return false;
+    return true;
+  });
+}
+function fillMsgFilterOptions(d){
+  const agents=d.agents||[];
+  const names=new Set(agents.map(a=>a.name).filter(Boolean));
+  (d.messages||[]).forEach(m=>{
+    if(m.sender_name)names.add(m.sender_name);
+    (m.recipients||[]).forEach(r=>{if(r.name)names.add(r.name)});
+  });
+  const sorted=[...names].sort((a,b)=>a.localeCompare(b));
+  const fill=(id,current)=>{
+    const el=document.getElementById(id);if(!el)return;
+    const keep=current||el.value||'';
+    el.innerHTML='<option value="">全部</option>';
+    sorted.forEach(n=>el.add(new Option(n,n)));
+    if(keep&&sorted.includes(keep))el.value=keep;
+  };
+  fill('msgFilterSender',MSG_FILTERS.sender);
+  fill('msgFilterRecipient',MSG_FILTERS.recipient);
+  const st=document.getElementById('msgFilterStatus');
+  if(st&&MSG_FILTERS.status)st.value=MSG_FILTERS.status;
+  const f=document.getElementById('msgFilterFrom');
+  if(f&&MSG_FILTERS.fromTs)f.value=MSG_FILTERS.fromTs;
+  const t=document.getElementById('msgFilterTo');
+  if(t&&MSG_FILTERS.toTs)t.value=MSG_FILTERS.toTs;
 }
 function queueMessageRequest(slug,focusMessageId,background){
   const previous=MSG_PENDING_REQUEST;
@@ -2773,7 +2986,7 @@ function scheduleMessageRefresh(slug){
   clearTimeout(MSG_REFRESH_TIMER);MSG_REFRESH_TIMER=setTimeout(()=>loadProjectMsgs(undefined,true),250);
 }
 async function loadProjectMsgs(focusMessageId,background=false,requestedSlug){
-  const slug=requestedSlug||document.getElementById('msgProj').value;if(!slug)return;
+  const slug=requestedSlug||document.getElementById('msgProj')?.value;if(!slug)return;
   if(MSG_LOAD_IN_FLIGHT){
     queueMessageRequest(slug,focusMessageId,background);return;
   }
@@ -2784,16 +2997,16 @@ async function loadProjectMsgs(focusMessageId,background=false,requestedSlug){
   if(!background){MSG_BOUND_SLUG=null;setMsgComposeEnabled(false)}
   setMsgLoadState('loading',slug);
   try{
-    const d=await api('/api/projects/'+encodeURIComponent(slug));
+    const d=await api('/api/projects/'+encodeURIComponent(slug)+'?limit=300');
     if(seq!==MSG_LOAD_SEQ)return; // 旧响应丢弃
-    if(document.getElementById('msgProj').value!==slug)return;
+    if(document.getElementById('msgProj')?.value!==slug)return;
     const draft=background&&MSG_BOUND_SLUG===slug?msgDraft():null;
     CURRENT_PROJ=d.project;
     MSG_BOUND_SLUG=slug;
     CAPABILITIES.agent_mail=d.agent_mail||CAPABILITIES.agent_mail;
     PROJ_MSG_CACHE=d;
     rememberMessageProject(slug);
-    renderProjAgentList(d);
+    fillMsgFilterOptions(d);
     renderProjMsgs(d,focusMessageId);
     restoreMsgDraft(draft);
     setMsgComposeEnabled(true);
@@ -2825,37 +3038,47 @@ function setMsgComposeEnabled(on){
   if(sendBtn)sendBtn.disabled=!on||MSG_SENDING;
   document.querySelectorAll('[onclick*="sendMsg"],button[data-action="sendMsg"]').forEach(b=>{b.disabled=!on||MSG_SENDING});
 }
-function renderProjAgentList(d){
-  document.getElementById('projAgentList').innerHTML=d.agents.map(a=>`
-    <div class="agent-item${MSG_FILTER===a.name?' active':''}" data-action="viewAgent" data-name="${esc(a.name)}" title="点击查看该 agent 的消息" role="button" tabindex="0">
-      <span class="agent-icon ${esc(a.program||'none')}" style="width:22px;height:22px;font-size:11px">${AGENT_EMOJI[(a.program||'').replace('-cli','').replace('-work','').replace('-cn','')]||'⬜'}</span>
-      <span class="an">${esc(a.name)}${a.unread?` <span class="card-badge">${esc(a.unread)}</span>`:''}</span>
-    </div>`).join('')||'<div class="muted">无 agent</div>';
+function renderProjAgentList(_d){
+  // 左侧 agent 列表已移除；保留空函数以免旧调用/热缓存报错
 }
 function renderProjMsgs(d,focusMessageId){
   const writeEnabled=!d.agent_mail||d.agent_mail.write_available!==false;
+  const all=d.messages||[];
+  const msgs=filterProjMessages(all);
   const f=MSG_FILTER;
-  let msgs=d.messages;
+  const chips=[];
+  if(MSG_FILTERS.session)chips.push(`session=<b>${esc(MSG_FILTERS.session)}</b>`);
+  if(MSG_FILTERS.sender)chips.push(`发件人=<b>${esc(MSG_FILTERS.sender)}</b>`);
+  if(MSG_FILTERS.recipient)chips.push(`收件人=<b>${esc(MSG_FILTERS.recipient)}</b>`);
+  if(MSG_FILTERS.fromTs)chips.push(`从 ${esc(MSG_FILTERS.fromTs)}`);
+  if(MSG_FILTERS.toTs)chips.push(`到 ${esc(MSG_FILTERS.toTs)}`);
+  if(MSG_FILTERS.status)chips.push(`状态=<b>${esc(MSG_FILTERS.status)}</b>`);
   let filterBar='';
-  if(f){
-    const isOut=m=>m.sender_name===f;
-    const isIn=m=>(m.recipients||[]).some(r=>r.name===f);
-    msgs=msgs.filter(m=>isOut(m)||isIn(m));
-    filterBar=`<div class="msg-filter-bar">正在查看 <b>@${esc(f)}</b> 的消息 · 发出 ${msgs.filter(isOut).length} · 收到 ${msgs.filter(isIn).length}
+  if(chips.length){
+    filterBar=`<div class="msg-filter-bar">筛选中：${chips.join(' · ')} · 显示 ${msgs.length}/${all.length}
       <button class="icon" onclick="clearMsgFilter()" style="font-size:11px">× 清除</button></div>`;
+  }else{
+    filterBar=`<div class="msg-filter-bar muted" style="background:transparent;border-style:dashed">共 ${all.length} 条（最多 300）· 可用上方条件筛选</div>`;
   }
-  document.getElementById('msgList').innerHTML=filterBar+msgs.map(m=>`
+  const statusLabel=b=>({unread:'未读',read:'已读',acked:'已ack',processing:'处理中',processed:'已处理',stale:'stale',other:''}[b]||'');
+  const statusClass=b=>({unread:'st-unread',read:'st-read',acked:'st-read',processing:'st-work',processed:'st-read',stale:'st-unread'}[b]||'');
+  document.getElementById('msgList').innerHTML=filterBar+msgs.map(m=>{
+    const bucket=msgStatusBucket(m);
+    const st=statusLabel(bucket);
+    const dirTag=f?` <span class="tag ${m.sender_name===f?'dir-out':'dir-in'}">${m.sender_name===f?'发出':'收到'}</span>`:'';
+    return `
     <div class="msg" data-message-id="${esc(m.id)}">
-      <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${esc(m.importance||'normal')}</span>${m.coordination?.meta?.intent?` <span class="tag">${esc(m.coordination.meta.intent)}</span>`:''}${f?` <span class="tag ${m.sender_name===f?'dir-out':'dir-in'}">${m.sender_name===f?'发出':'收到'}</span>`:''}</div>
+      <div class="mh"><div><span class="ms">${esc(m.subject||'(无主题)')}</span> <span class="tag">${esc(m.importance||'normal')}</span>${m.coordination?.meta?.intent?` <span class="tag">${esc(m.coordination.meta.intent)}</span>`:''}${st?` <span class="tag ${statusClass(bucket)}">${esc(st)}</span>`:''}${dirTag}</div>
       <span class="muted">#${esc(m.id)} ${esc(fmtTime(m.created_ts))}</span></div>
-      <div class="muted" style="font-size:11px;margin-bottom:5px"><b>${esc(m.sender_name||'?')}</b> → ${(m.recipients||[]).map(r=>esc(r.name)).join(', ')}</div>
+      <div class="muted" style="font-size:11px;margin-bottom:5px"><b>${esc(m.sender_name||'?')}</b> → ${(m.recipients||[]).map(r=>esc(r.name)).join(', ')||'—'}</div>
       ${Object.keys(m.coordination?.receipts||{}).length?`<div class="muted" style="font-size:11px;margin-bottom:5px">消费状态: ${Object.entries(m.coordination.receipts).map(([name,r])=>`${esc(name)}=${esc(r.state)}`).join(', ')}</div>`:''}
       ${m.body_md?`<div class="mb">${esc(m.body_md)}</div>`:''}
       ${writeEnabled&&(m.recipients||[]).some(r=>!r.read_ts)?`<button class="icon" data-action="ack" data-pid="${esc(d.project.id)}" data-mid="${esc(m.id)}" data-name="${esc((m.recipients.find(r=>!r.read_ts)||{}).name||'')}" style="font-size:11px">✓已读</button>`:''}
-    </div>`).join('')+`
+    </div>`;
+  }).join('')+(msgs.length?'':`<div class="empty">没有符合筛选条件的消息</div>`)+`
     ${writeEnabled?`<div class="compose"><div class="muted" style="font-size:11px;margin-bottom:6px">✉️ 写消息</div>
-    <div class="field"><label>发件人</label><select id="cmpFrom">${d.agents.map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}</select></div>
-    <div class="field"><label>收件人(逗号分隔)</label><input id="cmpTo" value="${f?esc(f):''}"></div>
+    <div class="field"><label>发件人</label><select id="cmpFrom">${(d.agents||[]).map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>收件人(逗号分隔)</label><input id="cmpTo" value="${MSG_FILTERS.recipient?esc(MSG_FILTERS.recipient):(f?esc(f):'')}"></div>
     <div class="field"><label>主题</label><input id="cmpSubject"></div>
     <div class="field"><label>消息意图</label><select id="cmpIntent"><option value="info">info · 普通信息</option><option value="action">action · 执行请求</option><option value="review">review · 复核后恢复</option><option value="blocking">blocking · 安全停手处理后恢复</option><option value="stop">stop · 停止且不恢复</option><option value="redirect">redirect · 转向且不恢复</option></select></div>
     <div class="field"><label>重要性</label><select id="cmpImportance"><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option><option value="low">low</option></select></div>
@@ -2869,7 +3092,14 @@ function renderProjMsgs(d,focusMessageId){
 }
 function clearMsgFilter(){
   MSG_FILTER=null;
-  if(PROJ_MSG_CACHE){renderProjAgentList(PROJ_MSG_CACHE);renderProjMsgs(PROJ_MSG_CACHE);}
+  MSG_FILTERS={session:'',sender:'',recipient:'',fromTs:'',toTs:'',status:''};
+  const sess=document.getElementById('msgSession');if(sess)sess.value='';
+  const s=document.getElementById('msgFilterSender');if(s)s.value='';
+  const r=document.getElementById('msgFilterRecipient');if(r)r.value='';
+  const f=document.getElementById('msgFilterFrom');if(f)f.value='';
+  const tEl=document.getElementById('msgFilterTo');if(tEl)tEl.value='';
+  const st=document.getElementById('msgFilterStatus');if(st)st.value='';
+  if(PROJ_MSG_CACHE)renderProjMsgs(PROJ_MSG_CACHE);
 }
 async function cleanupMsgs(){
   if(!CURRENT_PROJ){toast('请先选择项目');return}
@@ -5163,11 +5393,6 @@ function bindDelegation(){
   });
   on('#mentionPopover',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='pickMention')pickMention(it.dataset.session,it.dataset.pane,it.dataset.agent)});
-  on('#projAgentList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
-    if(it.dataset.action==='viewAgent'){
-      MSG_FILTER=(MSG_FILTER===it.dataset.name)?null:it.dataset.name;
-      if(PROJ_MSG_CACHE){renderProjAgentList(PROJ_MSG_CACHE);renderProjMsgs(PROJ_MSG_CACHE);}
-    }});
   on('#msgList',e=>{const it=e.target.closest('[data-action]');if(!it)return;
     if(it.dataset.action==='ack')ackMsg(parseInt(it.dataset.pid),it.dataset.name,parseInt(it.dataset.mid))});
   on('#teamContent',e=>{const it=e.target.closest('[data-action]');if(!it)return;
