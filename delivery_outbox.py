@@ -7,7 +7,8 @@ only; it stays dormant (not imported by server/hub_client, no worker started).
 Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
 + REVIEW_BLOCK #2154 (0600 fail-closed, legacy schema rebuild)
 + FIX #2184/#2169 (legacy allowlist + credential key normalization)
-+ STILL BLOCKED #2189 (precise allowlist: ordered cols + defaults + index/FK/user_version).
++ STILL BLOCKED #2189 (precise allowlist: ordered cols + defaults + index/FK/user_version)
++ STILL BLOCKED #2194 (fingerprint ALL indexes incl. UNIQUE autoindex by origin).
 - Canonical payload JSON + sha256 digest; a repeated idempotency key reuses the
   original record only when job_kind/target/digest all match — any difference
   fails closed as IdempotencyConflict.
@@ -21,12 +22,15 @@ Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
   escape fail-closed); store file mode is enforced to 0600 fail-closed before
   any payload write (OutboxStoreError on chmod/stat failure).
 - Schema allowlist is exact: only the precise known 6-column legacy fingerprint
-  (ordered columns + defaults + no named index + no FK + user_version=0) may be
-  rebuilt in a transaction (CREATE new + copy + DROP + RENAME). Any difference —
-  extra/future column, swapped order, unexpected default, extra index/FK, or
-  non-zero user_version — raises OutboxStoreError fail-closed and mutates
-  nothing (DB hash/schema/rows unchanged). Failure is atomic (rollback leaves
-  legacy intact).
+  (ordered columns + defaults + ONLY the PK autoindex + no FK + user_version=0)
+  may be rebuilt in a transaction (CREATE new + copy + DROP + RENAME). Indexes
+  are fingerprinted by origin/unique/partial + key columns (NOT by name), so a
+  UNIQUE-constraint autoindex (origin='u') is distinguished from the PK
+  autoindex (origin='pk') and not silently dropped. Any difference — extra/future
+  column, swapped order, unexpected default, extra index (incl. UNIQUE
+  autoindex), extra FK, or non-zero user_version — raises OutboxStoreError
+  fail-closed and mutates nothing (DB hash/schema/rows unchanged). Failure is
+  atomic (rollback leaves legacy intact).
 """
 from __future__ import annotations
 
@@ -106,12 +110,17 @@ _FRESH_COLUMNS = (
     ("updated_ts", "REAL", 1, 0, None),
     ("last_error_summary", "TEXT", 0, 0, None),
 )
-_FRESH_INDEXES = frozenset(
-    {("delivery_jobs_idempotency", 1, ("idempotency_key",))}
-)
+# All-index fingerprint (incl. autoindex) by origin/unique/partial + key columns
+# (col,desc,collation) from index_xinfo — name-independent so a UNIQUE-constraint
+# autoindex (origin='u') is distinguished from the PK autoindex (origin='pk'),
+# never silently dropped.
+_FRESH_INDEXES = frozenset({
+    ("pk", 1, 0, (("job_id", 0, "BINARY"),)),
+    ("c", 1, 0, (("idempotency_key", 0, "BINARY"),)),
+})
 _FRESH_FKS = frozenset()
-# Exact known-legacy 6-column fingerprint (ordered columns + defaults + no
-# named index + no FK + user_version=0) — the ONLY shape rebuilt in place.
+# Exact known-legacy 6-column fingerprint (ordered columns + defaults + ONLY the
+# PK autoindex + no FK + user_version=0) — the ONLY shape rebuilt in place.
 _LEGACY_COLUMNS = (
     ("job_id", "TEXT", 0, 1, None),
     ("idempotency_key", "TEXT", 1, 0, None),
@@ -120,7 +129,9 @@ _LEGACY_COLUMNS = (
     ("payload_json", "TEXT", 1, 0, None),
     ("created_ts", "REAL", 1, 0, None),
 )
-_LEGACY_INDEXES = frozenset()
+_LEGACY_INDEXES = frozenset({
+    ("pk", 1, 0, (("job_id", 0, "BINARY"),)),
+})
 _LEGACY_FKS = frozenset()
 _COLUMNS = (
     "job_id", "idempotency_key", "job_kind", "target", "payload_json",
@@ -234,19 +245,24 @@ def _norm_dflt(value: Any) -> str | None:
     return s
 
 
-def _named_indexes(con: sqlite3.Connection, table: str) -> frozenset:
-    """Named (non-autoindex) indexes as (name, unique, columns-tuple)."""
+def _all_indexes(con: sqlite3.Connection, table: str) -> frozenset:
+    """Fingerprint ALL indexes (incl. autoindex) by origin/unique/partial +
+    key columns (col,desc,collation) from index_xinfo — name-independent so a
+    UNIQUE-constraint autoindex (origin='u') is distinguished from the PK
+    autoindex (origin='pk') and not silently dropped."""
     items: list = []
     for row in con.execute(f"PRAGMA index_list({table})").fetchall():
+        # seq, name, unique, origin, partial
         name = str(row[1])
-        if name.startswith("sqlite_autoindex_"):
-            continue
+        origin = str(row[3])
         unique = int(row[2])
-        cols = tuple(
-            str(c[2])
-            for c in con.execute(f"PRAGMA index_info({name})").fetchall()
+        partial = int(row[4])
+        keycols = tuple(
+            (str(c[2]), int(c[3]), str(c[4]))
+            for c in con.execute(f"PRAGMA index_xinfo({name})").fetchall()
+            if int(c[5])  # key column only
         )
-        items.append((name, unique, cols))
+        items.append((origin, unique, partial, keycols))
     return frozenset(items)
 
 
@@ -259,13 +275,13 @@ def _foreign_keys(con: sqlite3.Connection, table: str) -> frozenset:
 
 
 def _fingerprint(con: sqlite3.Connection) -> tuple:
-    """Ordered columns (name,type,notnull,pk,dflt) + named indexes + FKs."""
+    """Ordered columns (name,type,notnull,pk,dflt) + all indexes + FKs."""
     cols = tuple(
         (str(r[1]), str(r[2] or "").upper(), int(r[3]), int(r[5]),
          _norm_dflt(r[4]))
         for r in con.execute("PRAGMA table_info(delivery_jobs)").fetchall()
     )
-    return cols, _named_indexes(con, "delivery_jobs"), _foreign_keys(
+    return cols, _all_indexes(con, "delivery_jobs"), _foreign_keys(
         con, "delivery_jobs"
     )
 
@@ -279,7 +295,7 @@ def _user_version_is_zero(con: sqlite3.Connection) -> bool:
 
 def _schema_matches(con: sqlite3.Connection) -> bool:
     """True iff delivery_jobs exactly matches the current CREATE (ordered
-    columns + defaults + named indexes + FKs + user_version=0)."""
+    columns + defaults + all indexes + FKs + user_version=0)."""
     cols, indexes, fks = _fingerprint(con)
     if cols != _FRESH_COLUMNS:
         return False
@@ -290,7 +306,7 @@ def _schema_matches(con: sqlite3.Connection) -> bool:
 
 def _is_known_legacy(con: sqlite3.Connection) -> bool:
     """True only for the exact known 6-column legacy fingerprint (ordered
-    columns + defaults + no named index + no FK + user_version=0)."""
+    columns + defaults + ONLY the PK autoindex + no FK + user_version=0)."""
     cols, indexes, fks = _fingerprint(con)
     if cols != _LEGACY_COLUMNS:
         return False
