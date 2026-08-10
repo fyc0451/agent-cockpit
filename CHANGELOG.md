@@ -38,6 +38,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Keep the event-driven Herdr state cache current by subscribing to each pane's
+  agent-status events and rebuilding subscriptions when the pane set changes,
+  without adding CLI polling or expanding the configured canary scope.
 - Accept JSON and SSE FastMCP inbox responses, including structured tool results,
   and poll only unread messages so enabling B0 cannot replay existing read history.
 - Retire the legacy in-process Git/pip upgrade executor and fail closed instead of
