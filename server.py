@@ -51,20 +51,52 @@ from pydantic import BaseModel, Field
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
+H0_STATE_CANARY_SESSIONS_ENV = "COCKPIT_HERDR_STATE_CANARY_SESSIONS"
+_H0_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 def _parse_h0_state_mode(value: str | None) -> str:
     mode = (value or "").strip().lower() or "off"
-    if mode not in {"off", "on"}:
+    if mode not in {"off", "canary", "on"}:
         raise RuntimeError(f"invalid {H0_STATE_MODE_ENV}")
     return mode
 
 
+def _parse_h0_canary_sessions(value: str | None) -> frozenset[str]:
+    raw = (value or "").strip()
+    if not raw:
+        return frozenset()
+    sessions: list[str] = []
+    for item in raw.split(","):
+        name = item.strip()
+        if not name or not _H0_SESSION_NAME_RE.fullmatch(name):
+            raise RuntimeError(f"invalid {H0_STATE_CANARY_SESSIONS_ENV}")
+        if name in sessions:
+            raise RuntimeError(f"duplicate {H0_STATE_CANARY_SESSIONS_ENV}")
+        sessions.append(name)
+    return frozenset(sessions)
+
+
+def _validate_h0_state_config(mode: str, canary_sessions: frozenset[str]) -> None:
+    if mode == "canary" and not canary_sessions:
+        raise RuntimeError(f"{H0_STATE_CANARY_SESSIONS_ENV} required for canary")
+
+
 H0_STATE_MODE = _parse_h0_state_mode(os.environ.get(H0_STATE_MODE_ENV))
+H0_STATE_CANARY_SESSIONS = _parse_h0_canary_sessions(
+    os.environ.get(H0_STATE_CANARY_SESSIONS_ENV)
+)
+_validate_h0_state_config(H0_STATE_MODE, H0_STATE_CANARY_SESSIONS)
 
 
 def _h0_state_enabled() -> bool:
-    return H0_STATE_MODE == "on"
+    return H0_STATE_MODE in {"canary", "on"}
+
+
+def _h0_state_session_enabled(name: str) -> bool:
+    return H0_STATE_MODE == "on" or (
+        H0_STATE_MODE == "canary" and name in H0_STATE_CANARY_SESSIONS
+    )
 
 
 @asynccontextmanager
@@ -4622,10 +4654,11 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
 
 # ── SSE 实时推送(看板状态变化) ────────────────────────────────
 
-# ── H0.5 socket 状态客户端(稳态看板/Attention/SSE 数据源) ─────
-# 稳态下 _board_snapshot 只读 H0.4 长连接状态客户端的线程安全缓存,
-# 不再周期性 fork 每 session 的 herdr api snapshot;CLI 仅保留给
-# mutation、能力门和 session 发现(list_sessions)。socket/server 中断时
+# ── H0.5 socket 状态客户端(看板/Attention/SSE 可选数据源) ─────
+# off 全量沿用 CLI；canary 仅 allowlist session 读 H0.4 线程安全缓存，
+# 其他 session 仍走 CLI；on 全量读缓存。启用缓存后不再周期性 fork 对应
+# session 的 herdr api snapshot；CLI 仍保留给 mutation、能力门和 session
+# 发现(list_sessions)。socket/server 中断时
 # 继续服务旧缓存并显式 degraded,恢复后由 H0.4 客户端自动 resync;
 # 无可靠缓存时显式 unavailable,禁止静默回退旧轮询 fork。
 # 每 session 一个独立客户端:增删/socket 变化只影响该 session,旧健康
@@ -4975,7 +5008,7 @@ def _discover_running_sessions() -> dict[str, dict[str, str]] | None:
     # 标志(threading.local,与本调用同线程可读);空列表+标志=失败而非空态。
     if getattr(herdr_client._LIST_SESSIONS_FAILED, "value", False):
         return None
-    return {
+    running = {
         str(item["name"]): {
             "socket": str(item.get("socket") or ""),
             "directory": str(item.get("directory") or ""),
@@ -4983,6 +5016,12 @@ def _discover_running_sessions() -> dict[str, dict[str, str]] | None:
         for item in discovered
         if item.get("status") == "running" and item.get("socket")
     }
+    if H0_STATE_MODE == "canary":
+        return {
+            name: item for name, item in running.items()
+            if _h0_state_session_enabled(name)
+        }
+    return running
 
 
 def _build_session_client(name: str, socket_path: str) -> herdr_state.HerdrStateClient:
@@ -5317,10 +5356,98 @@ def _state_client_snapshot() -> dict[str, Any]:
     return result
 
 
+def _merge_h0_canary_snapshot(
+    legacy: dict[str, Any], cached: dict[str, Any],
+) -> dict[str, Any]:
+    """allowlist session 用 socket cache，其余 session 保持旧 CLI 快照。"""
+    scope = H0_STATE_CANARY_SESSIONS
+    cached_by_name = {
+        str(item.get("session")): item
+        for item in cached.get("sessions", [])
+        if isinstance(item, dict) and item.get("session") in scope
+    }
+    sessions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    has_unscoped = False
+    has_scoped = False
+    missing_scoped = False
+    for legacy_entry in legacy.get("sessions", []):
+        if not isinstance(legacy_entry, dict) or not legacy_entry.get("session"):
+            continue
+        name = str(legacy_entry["session"])
+        seen.add(name)
+        if name not in scope:
+            has_unscoped = True
+            sessions.append(legacy_entry)
+            continue
+        has_scoped = True
+        cached_entry = cached_by_name.get(name)
+        if cached_entry is not None:
+            sessions.append(cached_entry)
+            continue
+        missing_scoped = True
+        sessions.append({
+            "session": name,
+            "status": legacy_entry.get("status", "running"),
+            "directory": legacy_entry.get("directory", ""),
+            "panes": [],
+            "agents": [],
+            "focused_pane_id": None,
+            "layouts": [],
+            "state_status": "unavailable",
+            "state_reason": cached.get("reason", "canary state cache unavailable"),
+        })
+    for name, cached_entry in cached_by_name.items():
+        if name not in seen:
+            has_scoped = True
+            sessions.append(cached_entry)
+
+    panes = [pane for session in sessions for pane in session.get("panes", [])]
+    agents = [agent for session in sessions for agent in session.get("agents", [])]
+    if not sessions:
+        available = bool(legacy.get("available")) and bool(cached.get("available"))
+    else:
+        available = (
+            (has_unscoped and bool(legacy.get("available")))
+            or (has_scoped and not missing_scoped and bool(cached.get("available")))
+        )
+    degraded = (
+        bool(legacy.get("degraded"))
+        or not bool(legacy.get("available"))
+        or bool(cached.get("degraded"))
+        or missing_scoped
+        or not available
+    )
+    reasons: list[str] = []
+    if (bool(cached.get("degraded")) or missing_scoped) and cached.get("reason"):
+        reasons.append(f"canary cache: {cached['reason']}")
+    if not bool(legacy.get("available")) and legacy.get("reason"):
+        reasons.append(f"legacy snapshot: {legacy['reason']}")
+    result: dict[str, Any] = {
+        "available": available,
+        "degraded": degraded,
+        "sessions": sessions,
+        "panes": panes,
+        "agents": agents,
+        "total_panes": len(panes),
+        "agent_panes": sum(1 for pane in panes if pane.get("agent")),
+    }
+    if reasons:
+        result["reason"] = "; ".join(reasons)
+    return result
+
+
 def _herdr_runtime_snapshot() -> dict[str, Any]:
-    """off 保持既有 CLI 行为；on 才启用 H0 socket 缓存。"""
-    if _h0_state_enabled():
+    """off 用 CLI，canary 按 session 混合，on 全量使用 socket cache。"""
+    if H0_STATE_MODE == "on":
         return _state_client_snapshot()
+    if H0_STATE_MODE == "canary":
+        return _merge_h0_canary_snapshot(
+            herdr_client.snapshot(
+                exclude_sessions=H0_STATE_CANARY_SESSIONS
+            ),
+            _state_client_snapshot(),
+        )
     return herdr_client.snapshot()
 
 
@@ -5579,6 +5706,10 @@ def health():
         "status": "ok" if ok else "degraded",
         "ts": time.time(),
         "herdr_state_mode": H0_STATE_MODE,
+        "herdr_state_canary_sessions": (
+            sorted(H0_STATE_CANARY_SESSIONS)
+            if H0_STATE_MODE == "canary" else []
+        ),
         **external,
         "external": external,
     }

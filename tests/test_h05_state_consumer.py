@@ -1806,8 +1806,8 @@ def test_mutation_adjacent_snapshot_stays_cli():
     from pathlib import Path
 
     source = Path(server.__file__).read_text(encoding="utf-8")
-    kept = source.count("herdr_client.snapshot()")
-    assert kept == 4  # 3 个 mutation 验证 + 默认 off 的兼容 snapshot
+    kept = source.count("herdr_client.snapshot(")
+    assert kept == 5  # 3 个 mutation 验证 + off/canary 的兼容 snapshot
     for marker in ("H0.5 保留 CLI",):
         assert source.count(marker) == 3
 

@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Herdr native lifecycle control for all supported agents: capability and identity
+  gates, managed `agent start`/prompt/wait primitives, identity-preserving restart,
+  and a default-off event-driven socket state cache with an explicit session-scoped
+  canary mode.
+- Machine-verifiable `/health/live` release identity and a side-effect-free
+  `/health/ready` compatibility report for runtime paths, persisted stores, and
+  release artifacts.
 - Team collaboration design docs: overall personal/team dual-mode design and the
   project channel technical design (方案 Y), plus the M1a deployment guide for a
   shared hub reachable on the intranet.
@@ -23,6 +30,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Retire the legacy in-process Git/pip upgrade executor and fail closed instead of
+  allowing the application to mutate its own live checkout.
+- Reject unsafe runtime path overrides, symlink escapes, colliding stores, and
+  persisted file roots before they can authorize reads or writes outside the
+  configured profile.
 - Persist one canonical Agent Mail human key per Herdr session, unify linked Git
   worktrees under their main worktree, and require explicit selection for ambiguous
   legacy sessions instead of guessing from pane cwd.

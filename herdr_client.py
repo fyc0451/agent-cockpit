@@ -622,9 +622,13 @@ def _snapshot_session_safe(session: str, deadline: float) -> dict[str, Any]:
             pass
 
 
-def snapshot() -> dict[str, Any]:
+def snapshot(
+    *, exclude_sessions: set[str] | frozenset[str] | None = None,
+) -> dict[str, Any]:
     """聚合所有 running session 的 pane,这是 agent 全景视图。
 
+    exclude_sessions 仅供 scoped canary 的兼容快照使用：在提交 worker 前排除
+    已由 socket cache 接管的 session，避免名义切换后仍 fork 对应 CLI snapshot。
     多 session 的 snapshot 调用各 fork 一个 herdr 子进程;串行执行时 N 个 session
     要等 N 倍单次耗时。用有界线程池并行,worker 上限 min(4, N),结果按 list_sessions
     原顺序回填(不用 as_completed)。_snapshot_session_safe 兜底一切异常,单个 session
@@ -649,7 +653,11 @@ def snapshot() -> dict[str, Any]:
             "available": False, "sessions": [], "panes": [], "agents": [],
             "error": "session list failed",
         }
-    running = [s for s in sessions if s.get("status") == "running"]
+    excluded = exclude_sessions or set()
+    running = [
+        session for session in sessions
+        if session.get("status") == "running" and session.get("name") not in excluded
+    ]
     if not running:
         return {
             "available": True, "sessions": [], "panes": [],

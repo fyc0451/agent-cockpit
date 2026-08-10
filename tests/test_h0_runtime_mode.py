@@ -11,9 +11,28 @@ import server
 def test_mode_parser_defaults_off_and_rejects_unknown() -> None:
     assert server._parse_h0_state_mode(None) == "off"
     assert server._parse_h0_state_mode("") == "off"
+    assert server._parse_h0_state_mode(" CANARY ") == "canary"
     assert server._parse_h0_state_mode(" ON ") == "on"
     with pytest.raises(RuntimeError, match="COCKPIT_HERDR_STATE_MODE"):
         server._parse_h0_state_mode("shadow")
+
+
+def test_canary_scope_parser_and_config_are_fail_closed() -> None:
+    assert server._parse_h0_canary_sessions(None) == frozenset()
+    assert server._parse_h0_canary_sessions(" one,two ") == frozenset({"one", "two"})
+    with pytest.raises(RuntimeError, match="CANARY_SESSIONS"):
+        server._parse_h0_canary_sessions("one,,two")
+    with pytest.raises(RuntimeError, match="duplicate"):
+        server._parse_h0_canary_sessions("one,one")
+    with pytest.raises(RuntimeError, match="required for canary"):
+        server._validate_h0_state_config("canary", frozenset())
+    server._validate_h0_state_config("off", frozenset())
+    server._validate_h0_state_config("canary", frozenset({"one"}))
+
+
+def test_canary_mode_enables_state_lifecycle(monkeypatch) -> None:
+    monkeypatch.setattr(server, "H0_STATE_MODE", "canary")
+    assert server._h0_state_enabled() is True
 
 
 def test_runtime_snapshot_off_uses_legacy_cli(monkeypatch) -> None:
@@ -38,6 +57,87 @@ def test_runtime_snapshot_on_uses_state_cache(monkeypatch) -> None:
         lambda: pytest.fail("on must not fork the legacy snapshot CLI"),
     )
     assert server._herdr_runtime_snapshot() is cached
+
+
+def test_runtime_snapshot_canary_only_replaces_scoped_sessions(monkeypatch) -> None:
+    legacy = {
+        "available": True,
+        "sessions": [
+            {"session": "target", "panes": [{"pane_id": "legacy-target"}], "agents": []},
+            {"session": "other", "panes": [{"pane_id": "legacy-other"}], "agents": []},
+        ],
+    }
+    cached = {
+        "available": True,
+        "degraded": False,
+        "sessions": [
+            {"session": "target", "panes": [{"pane_id": "cached-target"}], "agents": []},
+        ],
+    }
+    monkeypatch.setattr(server, "H0_STATE_MODE", "canary")
+    monkeypatch.setattr(server, "H0_STATE_CANARY_SESSIONS", frozenset({"target"}))
+    legacy_calls = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "snapshot",
+        lambda **kwargs: legacy_calls.append(kwargs) or legacy,
+    )
+    monkeypatch.setattr(server, "_state_client_snapshot", lambda: cached)
+
+    result = server._herdr_runtime_snapshot()
+
+    assert result["available"] is True
+    assert [pane["pane_id"] for pane in result["panes"]] == [
+        "cached-target", "legacy-other",
+    ]
+    assert legacy_calls == [{"exclude_sessions": frozenset({"target"})}]
+
+
+def test_runtime_snapshot_canary_never_falls_back_for_scoped_session(monkeypatch) -> None:
+    legacy = {
+        "available": True,
+        "sessions": [
+            {"session": "target", "panes": [{"pane_id": "legacy-target"}], "agents": []},
+        ],
+    }
+    cached = {
+        "available": False,
+        "degraded": True,
+        "reason": "not bootstrapped",
+        "sessions": [],
+    }
+    monkeypatch.setattr(server, "H0_STATE_MODE", "canary")
+    monkeypatch.setattr(server, "H0_STATE_CANARY_SESSIONS", frozenset({"target"}))
+    monkeypatch.setattr(server.herdr_client, "snapshot", lambda **_: legacy)
+    monkeypatch.setattr(server, "_state_client_snapshot", lambda: cached)
+
+    result = server._herdr_runtime_snapshot()
+
+    assert result["available"] is False
+    assert result["degraded"] is True
+    assert result["panes"] == []
+    assert result["sessions"][0]["state_status"] == "unavailable"
+    assert "not bootstrapped" in result["reason"]
+
+
+def test_discovery_canary_only_opens_scoped_sessions(monkeypatch) -> None:
+    monkeypatch.setattr(server, "H0_STATE_MODE", "canary")
+    monkeypatch.setattr(server, "H0_STATE_CANARY_SESSIONS", frozenset({"target"}))
+    monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        server.herdr_client._LIST_SESSIONS_FAILED, "value", False, raising=False
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [
+            {"name": "target", "status": "running", "socket": "/target.sock"},
+            {"name": "other", "status": "running", "socket": "/other.sock"},
+        ],
+    )
+    assert server._discover_running_sessions() == {
+        "target": {"socket": "/target.sock", "directory": ""},
+    }
 
 
 def test_lifespan_off_never_opens_or_stops_state_clients(monkeypatch) -> None:
@@ -105,11 +205,16 @@ def test_poll_off_does_not_reconcile_state_clients(monkeypatch) -> None:
 
 
 def test_health_exposes_current_mode(monkeypatch) -> None:
-    monkeypatch.setattr(server, "H0_STATE_MODE", "off")
+    monkeypatch.setattr(server, "H0_STATE_MODE", "canary")
+    monkeypatch.setattr(
+        server, "H0_STATE_CANARY_SESSIONS", frozenset({"target"})
+    )
     monkeypatch.setattr(
         server, "_agent_mail_status",
         lambda: {"available": True, "write_available": True},
     )
     monkeypatch.setattr(server.herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(server.web_push, "public_config", lambda: {"available": True})
-    assert server.health()["herdr_state_mode"] == "off"
+    result = server.health()
+    assert result["herdr_state_mode"] == "canary"
+    assert result["herdr_state_canary_sessions"] == ["target"]

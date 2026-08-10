@@ -2192,6 +2192,24 @@ def test_snapshot_no_running_sessions_returns_empty(monkeypatch):
     assert result["total_panes"] == 0
 
 
+def test_snapshot_excludes_canary_sessions_before_worker_submission(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "list_sessions", lambda: _mock_sessions(["target", "other"])
+    )
+    called = []
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda name: called.append(name) or {"session": name, "panes": []},
+    )
+
+    result = herdr_client.snapshot(exclude_sessions={"target"})
+
+    assert called == ["other"]
+    assert [item["session"] for item in result["sessions"]] == ["other"]
+
+
 def test_snapshot_worker_cap_is_min_4_n(monkeypatch):
     """并发 worker 峰值不超过 min(4, N)。6 个 session 时峰值=4。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
