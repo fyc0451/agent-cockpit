@@ -312,3 +312,50 @@ def test_delivery_outbox_dormant_not_imported_by_server_or_hub_client() -> None:
         src = p.read_text(encoding="utf-8")
         assert "import delivery_outbox" not in src, name
         assert "from delivery_outbox" not in src, name
+
+
+# ── REVIEW_BLOCK #2154 B1: 0600 fail-closed ──────────────────────
+
+
+def test_chmod_failure_fail_closed(outbox_db: Path, monkeypatch) -> None:
+    outbox_db.parent.mkdir(parents=True, exist_ok=True)
+    outbox_db.touch()
+    outbox_db.chmod(0o644)
+
+    def boom(path, mode):
+        raise PermissionError("chmod denied")
+
+    monkeypatch.setattr(delivery_outbox.os, "chmod", boom)
+    with pytest.raises(delivery_outbox.OutboxStoreError, match="chmod"):
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="t", payload={"s": 1},
+            idempotency_key="x", now=1.0,
+        )
+    # fail-closed: no schema created, no payload written
+    con = sqlite3.connect(outbox_db)
+    tables = {
+        r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    con.close()
+    assert "delivery_jobs" not in tables
+
+
+def test_stat_failure_fail_closed(outbox_db: Path, monkeypatch) -> None:
+    _enqueue()  # DB at 0600, 1 row
+
+    def stat_boom(*a, **k):
+        raise OSError("stat boom")
+
+    monkeypatch.setattr(delivery_outbox.os, "stat", stat_boom)
+    # stat failure anywhere in the write path (guard_store symlink probe or
+    # mode enforcement) must fail closed — never silently proceed to write.
+    with pytest.raises((OSError, delivery_outbox.OutboxStoreError), match="stat"):
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="t", payload={"s": 2},
+            idempotency_key="y", now=2.0,
+        )
+    # no new payload: still 1 row
+    with sqlite3.connect(outbox_db) as con:
+        assert con.execute("SELECT COUNT(*) FROM delivery_jobs").fetchone()[0] == 1

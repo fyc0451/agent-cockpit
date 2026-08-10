@@ -644,3 +644,77 @@ def test_delivery_outbox_missing_column_mismatch(isolated_roots):
         expected_fks=store_schema._DELIVERY_OUTBOX_FKS,
     )
     assert r["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
+
+
+def test_delivery_outbox_legacy_migration_then_compatible(
+    isolated_roots, monkeypatch,
+):
+    import delivery_outbox
+
+    path = runtime_paths.store("delivery_outbox")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE delivery_jobs (
+          job_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL,
+          job_kind TEXT NOT NULL, target TEXT NOT NULL,
+          payload_json TEXT NOT NULL, created_ts REAL NOT NULL
+        );
+        INSERT INTO delivery_jobs VALUES(
+          'legacy-job', 'legacy-key', 'send_message', 'project-a/agent-b',
+          '{"subject": "old"}', 12.5
+        );
+        """
+    )
+    con.close()
+    os.chmod(path, 0o600)
+    monkeypatch.setattr(delivery_outbox, "DB_PATH", path)
+    job = delivery_outbox.get_job("legacy-job")
+    assert job is not None
+    assert job["payload"] == {"subject": "old"}
+    result = {
+        r["name"]: r for r in store_schema.probe_all_stores()
+    }["delivery_outbox"]
+    assert result["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_delivery_outbox_legacy_migration_failure_atomic(
+    isolated_roots, monkeypatch,
+):
+    import delivery_outbox
+
+    path = runtime_paths.store("delivery_outbox")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE delivery_jobs (
+          job_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL,
+          job_kind TEXT NOT NULL, target TEXT NOT NULL,
+          payload_json TEXT NOT NULL, created_ts REAL NOT NULL
+        );
+        INSERT INTO delivery_jobs VALUES(
+          'bad', 'k', 'send_message', 't', 'not-json', 12.5
+        );
+        """
+    )
+    con.close()
+    os.chmod(path, 0o600)
+    monkeypatch.setattr(delivery_outbox, "DB_PATH", path)
+    with pytest.raises(json.JSONDecodeError):
+        delivery_outbox.get_job("bad")
+    con = sqlite3.connect(path)
+    tables = {
+        r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    cols = {r[1] for r in con.execute("PRAGMA table_info(delivery_jobs)")}
+    con.close()
+    assert "delivery_jobs" in tables
+    assert "delivery_jobs_new" not in tables
+    assert cols == {
+        "job_id", "idempotency_key", "job_kind", "target",
+        "payload_json", "created_ts",
+    }
