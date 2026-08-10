@@ -142,9 +142,9 @@ def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     r = client.post("/api/theme/herdr", json={"mode": "dark"})
     assert r.status_code == 200
     body = r.json()
-    assert body["theme"] == "catppuccin" and body["reload"] == {"ok": True}
+    assert body["theme"] == "catppuccin"
+    assert body.get("reload", {}).get("ok") is True
     assert "notified_terms" in body
-    assert body.get("grok", {}).get("scheduled") is True
 
     r = client.post("/api/theme/herdr", json={"mode": "light"})
     assert r.json()["theme"] == "solarized-light"

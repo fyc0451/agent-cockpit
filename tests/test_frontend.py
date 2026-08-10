@@ -1917,22 +1917,21 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
 
 
 def test_theme_switch_is_inplace_without_reload():
-    """主题必须就地切换：禁止 reload（会 re-attach 假死 + 弄丢 Mode 2031 目标 PTY）。"""
+    """主题必须就地轻量切换：禁止 reload/整屏 refresh；重活延后。"""
     js = _inline_js()
     assert "function applyDocumentTheme(mode)" in js
     set_theme = js.split("function setTheme(mode,save=true){", 1)[1].split(
         "function toggleTheme", 1
     )[0]
     assert "location.reload()" not in set_theme
-    assert "captureThemeResume()" not in set_theme
+    assert "refresh(0," not in set_theme  # 禁止整屏 force refresh
     assert "applyDocumentTheme" in set_theme
-    # class 切换后再 termTheme()，避免反色
     assert set_theme.index("applyDocumentTheme") < set_theme.index("termTheme()")
     assert "options.theme=th" in set_theme
     assert "sendAllTermColorSchemes()" in set_theme
     assert "/api/theme/herdr" in set_theme
+    assert "setTimeout" in set_theme  # Mode 2031/herdr 延后，不卡同一帧
     assert "localStorage.setItem('dash-theme'" in set_theme
-    # 旧 resume re-attach 不得再出现
     init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
     assert "doAttachHerdr(themeResume" not in init
 

@@ -5584,35 +5584,33 @@ function applyDocumentTheme(mode){
   return light;
 }
 function setTheme(mode,save=true){
-  // 就地切换：禁止 location.reload。
-  // reload 会 re-attach、loading 吞输入，且销毁带 label 的 PTY 导致 Mode 2031 无处可推。
+  // 就地轻量切换：禁止 reload；禁止整屏 xterm.refresh（WebGL 会卡死主线程）。
+  // 页面 class + palette 同步做完即返回；Mode 2031 / herdr config 放到下一任务，
+  // 避免和 Web 重绘抢同一帧导致「卡得要死」。
   const light=mode==='light';
   applyDocumentTheme(light?'light':'dark');
-  // 必须在 class 切换之后再取 termTheme，否则会用反色（旧 bug）
-  const th=termTheme();
-  for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
+  const th=termTheme(); // class 切换之后再取，避免反色
+  for(const [,inst] of Object.entries(TERM_INSTANCES||{})){
     try{
-      if(id===TERM_ID&&inst.el?.style.display!=='none'){
-        inst.xterm.options.theme=th;
-        try{inst.xterm.refresh(0,inst.xterm.rows-1)}catch(_){}
-      }else{
-        inst.pendingTheme=th;
-      }
+      // 只改 palette，不 force refresh（ADR：主题切换不强制 refresh 诱导重绘）
+      if(inst.xterm&&!inst.xterm._disposed)inst.xterm.options.theme=th;
+      inst.pendingTheme=null;
     }catch(e){}
   }
-  // 现网已 attach 的 herdr PTY：立刻 Mode 2031（opencode 等跟 host 色）
-  sendAllTermColorSchemes();
   if(save){
     try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
-    // herdr config 强制 name + reload；grok 后台 /theme
-    try{
-      fetch('/api/theme/herdr',{
-        method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
-        body:JSON.stringify({mode:light?'light':'dark'}),
-      }).catch(()=>{});
-    }catch(e){}
+    const modeStr=light?'light':'dark';
+    // 下一 macrotask：先让浏览器画完 UI，再推 PTY/herdr（重则卡 herdr 全屏，不挡 Web 点击）
+    setTimeout(()=>{
+      try{sendAllTermColorSchemes()}catch(e){}
+      try{
+        fetch('/api/theme/herdr',{
+          method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
+          body:JSON.stringify({mode:modeStr}),
+        }).catch(()=>{});
+      }catch(e){}
+    },0);
   }
-  // 清掉历史 theme-resume，避免误触发 re-attach
   try{localStorage.removeItem(THEME_RESUME_KEY)}catch(e){}
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
