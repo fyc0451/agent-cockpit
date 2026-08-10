@@ -206,17 +206,88 @@ def _open_sqlite_ro(db_path: Path) -> sqlite3.Connection:
     return con
 
 
-def _table_fingerprint(con: sqlite3.Connection, table: str) -> tuple[tuple[str, str, int, int], ...]:
+def _norm_dflt(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    # SQLite may quote string defaults
+    if len(s) >= 2 and s[0] == s[-1] == "'":
+        s = s[1:-1]
+    return s
+
+
+def _table_columns(con: sqlite3.Connection, table: str) -> dict[str, tuple[str, int, int, str | None]]:
+    """name → (type, notnull, pk, dflt)."""
     rows = con.execute(f"PRAGMA table_info({table})").fetchall()
-    # cid, name, type, notnull, dflt, pk
-    return tuple((str(r[1]), str(r[2] or "").upper(), int(r[3]), int(r[5])) for r in rows)
+    out: dict[str, tuple[str, int, int, str | None]] = {}
+    for r in rows:
+        out[str(r[1])] = (
+            str(r[2] or "").upper(),
+            int(r[3]),
+            int(r[5]),
+            _norm_dflt(r[4]),
+        )
+    return out
+
+
+def _named_indexes(con: sqlite3.Connection, table: str) -> frozenset[tuple[str, int, tuple[str, ...]]]:
+    """Non-autoindex indexes: (name, unique, columns)."""
+    items: list[tuple[str, int, tuple[str, ...]]] = []
+    for row in con.execute(f"PRAGMA index_list({table})").fetchall():
+        # seq, name, unique, origin, partial
+        name = str(row[1])
+        if name.startswith("sqlite_autoindex_"):
+            continue
+        unique = int(row[2])
+        cols = tuple(
+            str(c[2])
+            for c in con.execute(f"PRAGMA index_info({name})").fetchall()
+        )
+        items.append((name, unique, cols))
+    return frozenset(items)
+
+
+def _foreign_keys(con: sqlite3.Connection, table: str) -> frozenset[tuple[str, str, str]]:
+    """(from_col, ref_table, to_col)."""
+    items: list[tuple[str, str, str]] = []
+    for row in con.execute(f"PRAGMA foreign_key_list({table})").fetchall():
+        # id, seq, table, from, to, on_update, on_delete, match
+        items.append((str(row[3]), str(row[2]), str(row[4])))
+    return frozenset(items)
+
+
+# Expected defaults / indexes / FKs for current writers (user_version=0).
+_TASKS_DEFAULTS = {"status": "pending"}
+_PUSH_DEFAULTS: dict[str, str] = {}
+_COORD_DEFAULTS: dict[str, dict[str, str]] = {
+    "message_meta": {"trusted_user": "0"},
+    "receipts": {"ack_pending": "0"},
+}
+_COORD_INDEXES: dict[str, frozenset[tuple[str, int, tuple[str, ...]]]] = {
+    "runs": frozenset({("runs_project_state", 0, ("project_key", "state"))}),
+    "participants": frozenset({("participants_mail", 0, ("mail_name", "run_id"))}),
+    "message_meta": frozenset(),
+    "receipts": frozenset({("receipts_claims", 0, ("state", "claim_expires_ts"))}),
+    "task_reports": frozenset(),
+}
+_COORD_FKS: dict[str, frozenset[tuple[str, str, str]]] = {
+    "runs": frozenset(),
+    "participants": frozenset({("run_id", "runs", "run_id")}),
+    "message_meta": frozenset(),
+    "receipts": frozenset(),
+    "task_reports": frozenset(),
+}
+_TASKS_INDEXES: frozenset[tuple[str, int, tuple[str, ...]]] = frozenset()
+_PUSH_INDEXES: frozenset[tuple[str, int, tuple[str, ...]]] = frozenset()
 
 
 def _check_sqlite(
     name: str,
     expected_tables: dict[str, tuple[tuple[str, str, int, int], ...]],
     *,
-    allow_empty_user_version: bool = True,
+    expected_defaults: dict[str, dict[str, str]] | None = None,
+    expected_indexes: dict[str, frozenset[tuple[str, int, tuple[str, ...]]]] | None = None,
+    expected_fks: dict[str, frozenset[tuple[str, str, str]]] | None = None,
 ) -> dict[str, Any]:
     path = runtime_paths.store(name)
     if not path.exists():
@@ -249,10 +320,11 @@ def _check_sqlite(
             return _store_result(name, "error", REASON_CORRUPT)
         if user_version < 0:
             return _store_result(name, "error", REASON_CORRUPT)
-        if user_version > 0 and user_version in _PREVIOUS_USER_VERSIONS:
+        # Current writers freeze user_version=0. Known previous → migration_required;
+        # any other non-zero is future_schema (never compatible).
+        if user_version in _PREVIOUS_USER_VERSIONS:
             return _store_result(name, "migration_required", REASON_MIGRATION_REQUIRED)
-        if user_version > 0 and not allow_empty_user_version:
-            # Current writers leave user_version=0; future writers may set >0 as future.
+        if user_version != 0:
             return _store_result(name, "future", REASON_FUTURE_SCHEMA)
         # Discover tables (exclude sqlite_*)
         names = {
@@ -263,26 +335,48 @@ def _check_sqlite(
         }
         expected_names = set(expected_tables)
         if not expected_names.issubset(names):
-            # Missing core table: treat as mismatch (or empty pre-init corrupt if file non-empty)
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
         extras = names - expected_names
         if extras:
             return _store_result(name, "future", REASON_FUTURE_SCHEMA)
+        exp_defaults = expected_defaults or {}
+        exp_indexes = expected_indexes or {}
+        exp_fks = expected_fks or {}
         for table, expected_cols in expected_tables.items():
-            actual = _table_fingerprint(con, table)
-            # Order-independent: name → (type, notnull, pk); column reordering
-            # from migrations must not fail-closed.
-            act_map = {n: (t.upper(), nn, pk) for n, t, nn, pk in actual}
-            exp_map = {n: (t.upper(), nn, pk) for n, t, nn, pk in expected_cols}
-            if set(exp_map) - set(act_map):
+            actual = _table_columns(con, table)
+            exp_map = {
+                n: (t.upper(), nn, pk)
+                for n, t, nn, pk in expected_cols
+            }
+            if set(exp_map) - set(actual):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            if set(act_map) - set(exp_map):
+            if set(actual) - set(exp_map):
                 return _store_result(name, "future", REASON_FUTURE_SCHEMA)
             for col, exp in exp_map.items():
-                if act_map[col] != exp:
+                typ, nn, pk = exp
+                atyp, ann, apk, adflt = actual[col]
+                if (atyp, ann, apk) != (typ, nn, pk):
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                want_dflt = exp_defaults.get(table, {}).get(col)
+                if want_dflt is not None and adflt != want_dflt:
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                if want_dflt is None and adflt is not None and col not in exp_defaults.get(table, {}):
+                    # Unexpected default on column that should have none → future/mismatch
+                    # Only enforce when we listed defaults for the table
+                    if table in exp_defaults:
+                        return _store_result(name, "future", REASON_FUTURE_SCHEMA)
+            if table in exp_indexes and _named_indexes(con, table) != exp_indexes[table]:
+                # Extra named index → future; missing → mismatch
+                act_idx = _named_indexes(con, table)
+                if exp_indexes[table].issubset(act_idx) and act_idx - exp_indexes[table]:
+                    return _store_result(name, "future", REASON_FUTURE_SCHEMA)
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if table in exp_fks and _foreign_keys(con, table) != exp_fks[table]:
+                act_fk = _foreign_keys(con, table)
+                if exp_fks[table].issubset(act_fk) and act_fk - exp_fks[table]:
+                    return _store_result(name, "future", REASON_FUTURE_SCHEMA)
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
         try:
-            # Read-only integrity probe (no writes)
             check = con.execute("PRAGMA quick_check").fetchone()
             if not check or str(check[0]).lower() != "ok":
                 return _store_result(name, "error", REASON_CORRUPT)
@@ -317,7 +411,37 @@ def _check_settings() -> dict[str, Any]:
         return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     if keys - _SETTINGS_KEYS:
         return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+    # Exact types for 0.3.x
+    if not isinstance(data.get("language"), str):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if not isinstance(data.get("dir_agents"), dict):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if not isinstance(data.get("enabled_agents"), list):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if not isinstance(data.get("upload_max_mb"), (int, float)):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if not isinstance(data.get("team_hub_url"), str):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if not isinstance(data.get("human_auth_url"), str):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    term = data.get("term")
+    if not isinstance(term, dict):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    term_keys = set(term)
+    allowed_term = {"max_terms", "idle_ttl", "write_timeout"}
+    if not allowed_term.issubset(term_keys):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if term_keys - allowed_term:
+        return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
+
+
+# Exact top-level shapes for versioned JSON (0.3.x).
+_JSON_SHAPES: dict[str, frozenset[str]] = {
+    "mail_projects": frozenset({"version", "sessions"}),
+    "team_sessions": frozenset({"version", "bindings"}),
+    "inbox_route": frozenset({"version", "routes"}),
+}
 
 
 def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, Any]:
@@ -341,6 +465,22 @@ def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, 
         return _store_result(name, "future", REASON_FUTURE_SCHEMA)
     if ver < expected_v:
         return _store_result(name, "migration_required", REASON_MIGRATION_REQUIRED)
+    allowed = _JSON_SHAPES[name]
+    keys = set(data)
+    if not allowed.issubset(keys):
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if keys - allowed:
+        return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+    # Value shapes
+    if name == "mail_projects":
+        if not isinstance(data.get("sessions"), dict):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    elif name == "team_sessions":
+        if not isinstance(data.get("bindings"), list):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    elif name == "inbox_route":
+        if not isinstance(data.get("routes"), dict):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
@@ -389,11 +529,20 @@ def _check_vapid() -> dict[str, Any]:
         return _store_result(name, "error", REASON_UNSAFE)
     if st.st_size <= 0:
         return _store_result(name, "error", REASON_CORRUPT)
+    # Algorithm gate: PEM EC private key (VAPID). Reject non-PEM / wrong algo markers.
+    try:
+        head = path.read_bytes()[:256]
+    except OSError:
+        return _store_result(name, "error", REASON_UNREADABLE)
+    if b"BEGIN" not in head or b"PRIVATE KEY" not in head:
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    if b"RSA PRIVATE KEY" in head:
+        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
 def _check_typing() -> dict[str, Any]:
-    # typing is rebuildable but still app-owned (ADR §5).
+    # typing is rebuildable but still app-owned (ADR §5). Exact 0.3.x shapes only.
     name = "typing"
     path = runtime_paths.store(name)
     if not path.exists():
@@ -407,7 +556,6 @@ def _check_typing() -> dict[str, Any]:
         return _store_result(name, "error", REASON_INVALID_JSON)
     if not isinstance(data, dict):
         return _store_result(name, "error", REASON_INVALID_JSON)
-    # Accept either versioned envelope or bare map of session→payload (legacy).
     if "version" in data:
         ver = data.get("version")
         if not isinstance(ver, int):
@@ -416,11 +564,46 @@ def _check_typing() -> dict[str, Any]:
             return _store_result(name, "future", REASON_FUTURE_SCHEMA)
         if ver < 1:
             return _store_result(name, "migration_required", REASON_MIGRATION_REQUIRED)
+        allowed = {"version", "sessions"}
+        keys = set(data)
+        if not {"version"}.issubset(keys):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if keys - allowed:
+            return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+        if "sessions" in data and not isinstance(data["sessions"], dict):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    else:
+        # Bare session map: values must be dicts; no reserved version key elsewhere.
+        for key, val in data.items():
+            if not isinstance(key, str) or not isinstance(val, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
-def probe_manifest(edition: str) -> dict[str, Any]:
-    """Artifact/release manifest gate (production fail-closed; source N/A)."""
+_SHA256_RE = __import__("re").compile(r"^[0-9a-f]{64}$")
+_GIT_SHA_RE = __import__("re").compile(r"^[0-9a-f]{40}$")
+_MANIFEST_KEYS = frozenset({"version", "source_sha", "edition", "digests"})
+_REQUIRED_DIGEST_PATHS = ("static/index.html", "VERSION")
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def probe_manifest(
+    edition: str,
+    identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Artifact/release manifest gate (production fail-closed; source N/A).
+
+    Production must bind identity version/source_sha/edition and verify
+    static asset digests. Wrong/future/missing → not compatible.
+    """
     if edition == "source":
         return {
             "name": "release_manifest",
@@ -428,8 +611,8 @@ def probe_manifest(edition: str) -> dict[str, Any]:
             "state": "not_applicable",
             "reason": REASON_NOT_APPLICABLE,
         }
-    # Production editions require a bound manifest file next to package root.
-    manifest = Path(__file__).resolve().parent / "release-manifest.json"
+    root = Path(__file__).resolve().parent
+    manifest = root / "release-manifest.json"
     if not manifest.is_file():
         return {
             "name": "release_manifest",
@@ -453,14 +636,137 @@ def probe_manifest(edition: str) -> dict[str, Any]:
             "state": "error",
             "reason": REASON_INVALID_JSON,
         }
-    # Future schema / digest mismatch left for promotion slice; require version+source_sha keys.
-    if "version" not in data or "source_sha" not in data:
+    keys = set(data)
+    if not _MANIFEST_KEYS.issubset(keys):
         return {
             "name": "release_manifest",
             "compat_family": COMPAT_FAMILY,
             "state": "error",
             "reason": REASON_FINGERPRINT_MISMATCH,
         }
+    if keys - _MANIFEST_KEYS:
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "future",
+            "reason": REASON_FUTURE_SCHEMA,
+        }
+    man_version = data.get("version")
+    man_sha = data.get("source_sha")
+    man_edition = data.get("edition")
+    digests = data.get("digests")
+    if not isinstance(man_version, str) or not man_version:
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_FINGERPRINT_MISMATCH,
+        }
+    if not isinstance(man_sha, str) or not _GIT_SHA_RE.fullmatch(man_sha):
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_FINGERPRINT_MISMATCH,
+        }
+    if man_edition not in {"server", "desktop"}:
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_FINGERPRINT_MISMATCH,
+        }
+    if edition != man_edition:
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_FINGERPRINT_MISMATCH,
+        }
+    if identity is not None:
+        if str(identity.get("version")) != man_version:
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
+        if str(identity.get("source_sha")) != man_sha:
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
+        if str(identity.get("edition")) != man_edition:
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
+    if not isinstance(digests, dict) or not digests:
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_FINGERPRINT_MISMATCH,
+        }
+    for rel in _REQUIRED_DIGEST_PATHS:
+        if rel not in digests:
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
+    for rel, digest in digests.items():
+        if not isinstance(rel, str) or not isinstance(digest, str):
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
+        if not _SHA256_RE.fullmatch(digest):
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
+        # Reject path traversal in digest keys
+        if ".." in rel.split("/") or rel.startswith("/"):
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_UNSAFE,
+            }
+        target = (root / rel).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_UNSAFE,
+            }
+        if not target.is_file():
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
+        if _file_sha256(target) != digest:
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_FINGERPRINT_MISMATCH,
+            }
     return {
         "name": "release_manifest",
         "compat_family": COMPAT_FAMILY,
@@ -498,16 +804,42 @@ def probe_all_stores() -> list[dict[str, Any]]:
         return _store_result(name, "error", REASON_PATHS_NOT_READY)
 
     # SQLite
-    for name, tables in (
-        ("tasks", {"tasks": _TASKS_COLUMNS}),
-        ("push", {"subscriptions": _PUSH_COLUMNS}),
-        ("coordination", _COORD_TABLES),
-    ):
+    sqlite_specs = (
+        (
+            "tasks",
+            {"tasks": _TASKS_COLUMNS},
+            {"tasks": _TASKS_DEFAULTS},
+            {"tasks": _TASKS_INDEXES},
+            {"tasks": frozenset()},
+        ),
+        (
+            "push",
+            {"subscriptions": _PUSH_COLUMNS},
+            {"subscriptions": _PUSH_DEFAULTS},
+            {"subscriptions": _PUSH_INDEXES},
+            {"subscriptions": frozenset()},
+        ),
+        (
+            "coordination",
+            _COORD_TABLES,
+            _COORD_DEFAULTS,
+            _COORD_INDEXES,
+            _COORD_FKS,
+        ),
+    )
+    for name, tables, defaults, indexes, fks in sqlite_specs:
         blocked = path_gate(name)
         if blocked and blocked["reason"] != REASON_PATHS_NOT_READY:
             results.append(blocked)
             continue
-        results.append(_check_sqlite(name, tables))
+        results.append(
+            _check_sqlite(
+                name, tables,
+                expected_defaults=defaults,
+                expected_indexes=indexes,
+                expected_fks=fks,
+            )
+        )
 
     results.append(_check_settings())
     for jname in ("mail_projects", "team_sessions", "inbox_route"):
@@ -525,7 +857,7 @@ def evaluate_ready(identity: dict[str, Any]) -> dict[str, Any]:
     """
     edition = str(identity.get("edition") or "source")
     stores = probe_all_stores()
-    manifest = probe_manifest(edition)
+    manifest = probe_manifest(edition, identity=identity)
     items = list(stores) + [manifest]
 
     not_ready_reasons: list[str] = []

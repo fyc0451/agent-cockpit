@@ -42,11 +42,11 @@ def test_missing_stores_are_creatable_no_writes(isolated_roots, tmp_path):
     assert created == []
 
 
-def test_tasks_fingerprint_compatible(isolated_roots):
-    path = runtime_paths.store("tasks")
+def _mk_tasks_db(path: Path, *, user_version: int = 0, extra_col: str | None = None) -> None:
     con = sqlite3.connect(path)
+    extra = f", {extra_col} TEXT" if extra_col else ""
     con.executescript(
-        """
+        f"""
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY,
             workdir TEXT NOT NULL,
@@ -64,27 +64,45 @@ def test_tasks_fingerprint_compatible(isolated_roots):
             base_sha TEXT,
             run_workdir TEXT,
             preview_hash TEXT
+            {extra}
         );
+        PRAGMA user_version={int(user_version)};
         """
     )
     con.close()
-    r = store_schema._check_sqlite("tasks", {"tasks": store_schema._TASKS_COLUMNS})
+
+
+def _tasks_check(**kwargs):
+    return store_schema._check_sqlite(
+        "tasks",
+        {"tasks": store_schema._TASKS_COLUMNS},
+        expected_defaults={"tasks": store_schema._TASKS_DEFAULTS},
+        expected_indexes={"tasks": store_schema._TASKS_INDEXES},
+        expected_fks={"tasks": frozenset()},
+        **kwargs,
+    )
+
+
+def test_tasks_fingerprint_compatible(isolated_roots):
+    path = runtime_paths.store("tasks")
+    _mk_tasks_db(path)
+    r = _tasks_check()
     assert r["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_user_version_nonzero_is_future_schema(isolated_roots):
+    """Lead R2 counter-example (1): user_version=999 + full columns → future_schema."""
+    path = runtime_paths.store("tasks")
+    _mk_tasks_db(path, user_version=999)
+    r = _tasks_check()
+    assert r["reason"] == store_schema.REASON_FUTURE_SCHEMA
+    assert r["state"] == "future"
 
 
 def test_future_column_fail_closed(isolated_roots):
     path = runtime_paths.store("tasks")
-    con = sqlite3.connect(path)
-    con.execute(
-        "CREATE TABLE tasks (id TEXT PRIMARY KEY, workdir TEXT NOT NULL, "
-        "prompt TEXT NOT NULL, images TEXT, model TEXT, status TEXT NOT NULL, "
-        "pid INTEGER, exit_code INTEGER, created_ts REAL NOT NULL, "
-        "started_ts REAL, finished_ts REAL, output_tail TEXT, "
-        "source_workdir TEXT, base_sha TEXT, run_workdir TEXT, "
-        "preview_hash TEXT, evil_future TEXT)"
-    )
-    con.close()
-    r = store_schema._check_sqlite("tasks", {"tasks": store_schema._TASKS_COLUMNS})
+    _mk_tasks_db(path, extra_col="evil_future")
+    r = _tasks_check()
     assert r["reason"] == store_schema.REASON_FUTURE_SCHEMA
 
 
@@ -92,7 +110,11 @@ def test_corrupt_sqlite(isolated_roots):
     path = runtime_paths.store("push")
     path.write_text("not-a-database", encoding="utf-8")
     r = store_schema._check_sqlite(
-        "push", {"subscriptions": store_schema._PUSH_COLUMNS},
+        "push",
+        {"subscriptions": store_schema._PUSH_COLUMNS},
+        expected_defaults={"subscriptions": store_schema._PUSH_DEFAULTS},
+        expected_indexes={"subscriptions": store_schema._PUSH_INDEXES},
+        expected_fks={"subscriptions": frozenset()},
     )
     assert r["reason"] in {
         store_schema.REASON_CORRUPT, store_schema.REASON_UNREADABLE,
@@ -101,18 +123,9 @@ def test_corrupt_sqlite(isolated_roots):
 
 def test_wal_without_shm_requires_quiescence(isolated_roots):
     path = runtime_paths.store("tasks")
-    con = sqlite3.connect(path)
-    con.execute(
-        "CREATE TABLE tasks (id TEXT PRIMARY KEY, workdir TEXT NOT NULL, "
-        "prompt TEXT NOT NULL, images TEXT, model TEXT, status TEXT NOT NULL, "
-        "pid INTEGER, exit_code INTEGER, created_ts REAL NOT NULL, "
-        "started_ts REAL, finished_ts REAL, output_tail TEXT, "
-        "source_workdir TEXT, base_sha TEXT, run_workdir TEXT, preview_hash TEXT)"
-    )
-    con.close()
+    _mk_tasks_db(path)
     Path(str(path) + "-wal").write_bytes(b"x" * 32)
-    # no -shm
-    r = store_schema._check_sqlite("tasks", {"tasks": store_schema._TASKS_COLUMNS})
+    r = _tasks_check()
     assert r["reason"] == store_schema.REASON_PROBE_REQUIRES_QUIESCENCE
 
 
@@ -134,6 +147,22 @@ def test_mail_projects_future_version(isolated_roots):
     assert r["reason"] == store_schema.REASON_FUTURE_SCHEMA
 
 
+def test_mail_projects_unknown_field_future(isolated_roots):
+    """Lead R2 counter-example (2): version=1 + unexpected field → future."""
+    path = runtime_paths.store("mail_projects")
+    path.write_text(
+        json.dumps({
+            "version": 1,
+            "sessions": {},
+            "unexpected_future_payload": True,
+        }),
+        encoding="utf-8",
+    )
+    r = store_schema._check_versioned_json("mail_projects")
+    assert r["reason"] == store_schema.REASON_UNKNOWN_FIELDS
+    assert r["state"] == "future"
+
+
 def test_file_roots_unsafe_slash(isolated_roots):
     import files
     # Must use the same path the production reader uses (conftest may redirect it).
@@ -153,6 +182,31 @@ def test_manifest_source_not_applicable(monkeypatch):
 def test_manifest_production_missing(monkeypatch):
     m = store_schema.probe_manifest("server")
     assert m["reason"] == store_schema.REASON_PRODUCTION_MANIFEST_MISSING
+
+
+def test_manifest_wrong_identity_binding_fail_closed():
+    """Lead R2 counter-example (3): WRONG version / not-a-sha → not compatible."""
+    root = Path(store_schema.__file__).resolve().parent
+    man = root / "release-manifest.json"
+    payload = {
+        "version": "WRONG",
+        "source_sha": "not-a-sha",
+        "edition": "server",
+        "digests": {"static/index.html": "0" * 64, "VERSION": "0" * 64},
+    }
+    man.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        identity = {
+            "version": "1.2.3", "source_sha": "a" * 40,
+            "edition": "server", "instance_id": "x",
+        }
+        m = store_schema.probe_manifest("server", identity=identity)
+        assert m["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
+        assert m["state"] != "compatible"
+        m2 = store_schema.probe_manifest("server")
+        assert m2["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
+    finally:
+        man.unlink(missing_ok=True)
 
 
 def test_evaluate_ready_source_empty_profile(isolated_roots, monkeypatch):
