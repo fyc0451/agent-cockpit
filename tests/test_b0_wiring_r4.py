@@ -251,6 +251,63 @@ def test_rebind_prevalidation_zero_change(client, registry: Path) -> None:
 # B5：fetch_inbox 网络前 loopback fail-closed
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize(
+    "result_body",
+    [
+        {"content": [{
+            "type": "text", "text": json.dumps([{"id": 41}]),
+        }]},
+        {"content": [], "structuredContent": {"result": [{"id": 41}]}},
+    ],
+    ids=("content-text", "structured-content"),
+)
+def test_fetch_inbox_accepts_mcp_response_formats(
+    monkeypatch: pytest.MonkeyPatch, result_body: dict[str, Any],
+) -> None:
+    seen: dict[str, Any] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self) -> bytes:
+            result = {
+                "jsonrpc": "2.0", "id": 1,
+                "result": result_body,
+            }
+            raw = json.dumps(result)
+            split = raw.index('"result"')
+            return (
+                "event: message\n"
+                f"data: {raw[:split]}\n"
+                f"data: {raw[split:]}\n\n"
+            ).encode()
+
+    def open_request(request, **_kwargs):
+        seen["accept"] = request.get_header("Accept")
+        seen["format"] = json.loads(request.data)["params"]["arguments"].get(
+            "format"
+        )
+        return Response()
+
+    monkeypatch.setattr(b0_wiring.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(hub_client, "HUB", "http://127.0.0.1:8765")
+    monkeypatch.setattr(hub_client, "TOKEN", "client-token")
+
+    messages = b0_wiring.fetch_inbox_for({
+        "project_key": "/tmp/p", "name": "agent-a",
+        "registration_token": "registration-token",
+        "hub": "http://127.0.0.1:8765",
+    })
+
+    assert messages == [{"id": 41}]
+    assert seen["accept"] == "application/json, text/event-stream"
+    assert seen["format"] == "json"
+
+
 def test_fetch_inbox_refuses_remote_hub_before_network(
     registry: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

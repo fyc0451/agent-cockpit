@@ -219,35 +219,46 @@ def fetch_inbox_for(
             "limit": int(limit),
             "unread_only": unread_only,
             "include_bodies": include_bodies,
+            "format": "json",
         }},
     }
     req = urllib.request.Request(
         f"{hub_url}/api/", data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
             "Authorization": f"Bearer {_hub_token()}",
         },
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            out = json.loads(resp.read())
+            raw = resp.read().decode("utf-8")
+            out = json.loads(hub_client._response_data(raw))
     except urllib.error.HTTPError as exc:
         raise CredentialUnavailable(f"Hub HTTP {exc.code}")
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, OSError, UnicodeError, ValueError) as exc:
         raise CredentialUnavailable(f"Hub 不可读: {type(exc).__name__}")
+    if not isinstance(out, dict):
+        raise CredentialUnavailable("Hub rpc 响应结构异常")
     if out.get("error"):
         raise CredentialUnavailable("Hub rpc error")
     result = out.get("result") or {}
+    if not isinstance(result, dict):
+        raise CredentialUnavailable("fetch_inbox 响应结构异常")
     if result.get("isError"):
         raise CredentialUnavailable("fetch_inbox rejected")
-    text = "".join(
-        c.get("text", "") for c in (result.get("content") or [])
-        if isinstance(c, dict) and c.get("type") == "text"
-    )
-    try:
-        data = json.loads(text)
-    except ValueError:
-        raise CredentialUnavailable("fetch_inbox 响应非 JSON")
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict) and "result" in structured:
+        data = structured["result"]
+    else:
+        text = "".join(
+            c.get("text", "") for c in (result.get("content") or [])
+            if isinstance(c, dict) and c.get("type") == "text"
+        )
+        try:
+            data = json.loads(text)
+        except ValueError:
+            raise CredentialUnavailable("fetch_inbox 响应非 JSON")
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
