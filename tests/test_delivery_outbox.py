@@ -488,6 +488,22 @@ def test_unknown_schema_extra_column_fail_closed(outbox_db: Path) -> None:
             "created_ts REAL NOT NULL);",
             id="extra-unique-autoindex",
         ),
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL, job_kind TEXT NOT NULL, "
+            "target TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_ts REAL NOT NULL, generated_shadow TEXT GENERATED "
+            "ALWAYS AS (payload_json) VIRTUAL);",
+            id="generated-virtual",
+        ),
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL, job_kind TEXT NOT NULL, "
+            "target TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_ts REAL NOT NULL, generated_shadow TEXT GENERATED "
+            "ALWAYS AS (payload_json) STORED);",
+            id="generated-stored",
+        ),
     ],
 )
 def test_legacy_allowlist_rejects_non_exact(

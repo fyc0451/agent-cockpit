@@ -9,7 +9,8 @@ Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
 + FIX #2184/#2169 (legacy allowlist + credential key normalization)
 + STILL BLOCKED #2189 (precise allowlist: ordered cols + defaults + index/FK/user_version)
 + STILL BLOCKED #2194 (fingerprint ALL indexes incl. UNIQUE autoindex by origin)
-+ STILL BLOCKED #2197 (index name + duplicate count: sorted-tuple multiset).
++ STILL BLOCKED #2197 (index name + duplicate count: sorted-tuple multiset)
++ LAST KNOWN BLOCK #2203/#2200 (column fingerprint via table_xinfo incl. hidden/generated).
 - Canonical payload JSON + sha256 digest; a repeated idempotency key reuses the
   original record only when job_kind/target/digest all match — any difference
   fails closed as IdempotencyConflict.
@@ -23,14 +24,13 @@ Contract: tests/test_delivery_outbox.py (red at 633f223) + R1.1 reviewer #2120
   escape fail-closed); store file mode is enforced to 0600 fail-closed before
   any payload write (OutboxStoreError on chmod/stat failure).
 - Schema allowlist is exact: only the precise known 6-column legacy fingerprint
-  (ordered columns + defaults + ONLY the PK autoindex + no FK + user_version=0)
-  may be rebuilt in a transaction (CREATE new + copy + DROP + RENAME). Indexes
-  are fingerprinted as a sorted-tuple multiset of (origin, name, unique, partial,
-  key-columns) — origin='c' user indexes keep the EXACT name (a rename is
-  detected), pk/u autoindex names are not stable so use a "" placeholder but
-  retain origin + key columns. A sorted tuple (not frozenset) preserves
-  duplicate count; autoindex origin ('u' for UNIQUE, 'pk' for PK) is never
-  silently dropped. Any difference — extra/future column, swapped order,
+  may be rebuilt in a transaction (CREATE new + copy + DROP + RENAME). The column
+  fingerprint uses PRAGMA table_xinfo (NOT table_info) so VIRTUAL/STORED
+  generated columns (hidden=2/3) are NOT silently dropped — each column tuple
+  carries the hidden flag (expected 0). Indexes are a sorted-tuple multiset of
+  (origin, name, unique, partial, key-columns) — origin='c' keeps the exact
+  name, pk/u autoindex uses a "" placeholder; sorted tuple preserves duplicate
+  count. Any difference — extra/future/generated column, swapped order,
   unexpected default, renamed/duplicate/extra index (incl. UNIQUE autoindex),
   extra FK, or non-zero user_version — raises OutboxStoreError fail-closed and
   mutates nothing (DB hash/schema/rows unchanged). Failure is atomic.
@@ -97,21 +97,22 @@ _INDEX_SQL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS delivery_jobs_idempotency "
     "ON delivery_jobs(idempotency_key)"
 )
-# Ordered (name, type-upper, notnull, pk, dflt-normalized) — must match
-# PRAGMA table_info of _CREATE_SQL exactly (column order + defaults included).
+# Ordered (name, type-upper, notnull, pk, dflt-normalized, hidden) — from
+# PRAGMA table_xinfo (NOT table_info) so VIRTUAL/STORED generated columns
+# (hidden=2/3) are included, not silently dropped. Hidden expected 0.
 _FRESH_COLUMNS = (
-    ("job_id", "TEXT", 0, 1, None),
-    ("idempotency_key", "TEXT", 1, 0, None),
-    ("job_kind", "TEXT", 1, 0, None),
-    ("target", "TEXT", 1, 0, None),
-    ("payload_json", "TEXT", 1, 0, None),
-    ("payload_digest", "TEXT", 1, 0, None),
-    ("attempt", "INTEGER", 1, 0, "0"),
-    ("next_attempt_at", "REAL", 1, 0, None),
-    ("status", "TEXT", 1, 0, "pending"),
-    ("created_ts", "REAL", 1, 0, None),
-    ("updated_ts", "REAL", 1, 0, None),
-    ("last_error_summary", "TEXT", 0, 0, None),
+    ("job_id", "TEXT", 0, 1, None, 0),
+    ("idempotency_key", "TEXT", 1, 0, None, 0),
+    ("job_kind", "TEXT", 1, 0, None, 0),
+    ("target", "TEXT", 1, 0, None, 0),
+    ("payload_json", "TEXT", 1, 0, None, 0),
+    ("payload_digest", "TEXT", 1, 0, None, 0),
+    ("attempt", "INTEGER", 1, 0, "0", 0),
+    ("next_attempt_at", "REAL", 1, 0, None, 0),
+    ("status", "TEXT", 1, 0, "pending", 0),
+    ("created_ts", "REAL", 1, 0, None, 0),
+    ("updated_ts", "REAL", 1, 0, None, 0),
+    ("last_error_summary", "TEXT", 0, 0, None, 0),
 )
 # Sorted-tuple multiset of index fingerprints: (origin, name, unique, partial,
 # keycols). origin='c' user index keeps the EXACT name (a rename is detected);
@@ -122,15 +123,15 @@ _FRESH_INDEXES = (
     ("pk", "", 1, 0, (("job_id", 0, "BINARY"),)),
 )
 _FRESH_FKS: tuple = ()
-# Exact known-legacy 6-column fingerprint (ordered columns + defaults + ONLY the
-# PK autoindex + no FK + user_version=0) — the ONLY shape rebuilt in place.
+# Exact known-legacy 6-column fingerprint (ordered columns + defaults + hidden=0
+# + ONLY the PK autoindex + no FK + user_version=0) — the ONLY shape rebuilt.
 _LEGACY_COLUMNS = (
-    ("job_id", "TEXT", 0, 1, None),
-    ("idempotency_key", "TEXT", 1, 0, None),
-    ("job_kind", "TEXT", 1, 0, None),
-    ("target", "TEXT", 1, 0, None),
-    ("payload_json", "TEXT", 1, 0, None),
-    ("created_ts", "REAL", 1, 0, None),
+    ("job_id", "TEXT", 0, 1, None, 0),
+    ("idempotency_key", "TEXT", 1, 0, None, 0),
+    ("job_kind", "TEXT", 1, 0, None, 0),
+    ("target", "TEXT", 1, 0, None, 0),
+    ("payload_json", "TEXT", 1, 0, None, 0),
+    ("created_ts", "REAL", 1, 0, None, 0),
 )
 _LEGACY_INDEXES = (
     ("pk", "", 1, 0, (("job_id", 0, "BINARY"),)),
@@ -281,11 +282,12 @@ def _foreign_keys(con: sqlite3.Connection, table: str) -> tuple:
 
 
 def _fingerprint(con: sqlite3.Connection) -> tuple:
-    """Ordered columns (name,type,notnull,pk,dflt) + all indexes + FKs."""
+    """Ordered columns (name,type,notnull,pk,dflt,hidden) via table_xinfo (so
+    VIRTUAL/STORED generated columns are included) + all indexes + FKs."""
     cols = tuple(
         (str(r[1]), str(r[2] or "").upper(), int(r[3]), int(r[5]),
-         _norm_dflt(r[4]))
-        for r in con.execute("PRAGMA table_info(delivery_jobs)").fetchall()
+         _norm_dflt(r[4]), int(r[6]))
+        for r in con.execute("PRAGMA table_xinfo(delivery_jobs)").fetchall()
     )
     return cols, _all_indexes(con, "delivery_jobs"), _foreign_keys(
         con, "delivery_jobs"
@@ -301,7 +303,7 @@ def _user_version_is_zero(con: sqlite3.Connection) -> bool:
 
 def _schema_matches(con: sqlite3.Connection) -> bool:
     """True iff delivery_jobs exactly matches the current CREATE (ordered
-    columns + defaults + all indexes + FKs + user_version=0)."""
+    table_xinfo columns + defaults + hidden=0 + all indexes + FKs + user_version=0)."""
     cols, indexes, fks = _fingerprint(con)
     if cols != _FRESH_COLUMNS:
         return False
@@ -312,7 +314,8 @@ def _schema_matches(con: sqlite3.Connection) -> bool:
 
 def _is_known_legacy(con: sqlite3.Connection) -> bool:
     """True only for the exact known 6-column legacy fingerprint (ordered
-    columns + defaults + ONLY the PK autoindex + no FK + user_version=0)."""
+    table_xinfo columns + defaults + hidden=0 + ONLY the PK autoindex + no FK
+    + user_version=0)."""
     cols, indexes, fks = _fingerprint(con)
     if cols != _LEGACY_COLUMNS:
         return False
