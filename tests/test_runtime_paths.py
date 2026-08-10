@@ -24,7 +24,7 @@ import runtime_paths
 MODULES = [
     "runtime_paths", "settings", "tasks", "coordination", "web_push",
     "mail_projects", "team_sessions", "team_inbox_router", "terminal",
-    "uploads", "files", "db", "server",
+    "uploads", "files", "db", "delivery_outbox", "server",
 ]
 
 REPO_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -312,6 +312,7 @@ class TestDefaultCompat:
             "worktrees": "dashboard-data/worktrees",
             "coordination": "dashboard-data/coordination.sqlite3",
             "leader_binding": "dashboard-data/leader-binding.sqlite3",
+            "delivery_outbox": "dashboard-data/delivery-outbox.sqlite3",
             "push": "dashboard-data/push.sqlite3",
             "vapid": "dashboard-data/vapid-private.pem",
             "mail_projects": "dashboard-data/mail-projects.json",

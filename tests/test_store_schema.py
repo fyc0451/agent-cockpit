@@ -36,10 +36,26 @@ def test_missing_stores_are_creatable_no_writes(isolated_roots, tmp_path):
     results = {r["name"]: r for r in store_schema.probe_all_stores()}
     assert results["tasks"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["coordination"]["reason"] == store_schema.REASON_MISSING_CREATABLE
+    assert results["delivery_outbox"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     after_files = list(tmp_path.rglob("*"))
     # probe must not create db/json/wal/shm
     created = [p for p in after_files if p.is_file() and p not in before]
     assert created == []
+
+
+def test_delivery_outbox_current_store_fingerprint_compatible(isolated_roots, monkeypatch):
+    import delivery_outbox
+
+    path = runtime_paths.store("delivery_outbox")
+    monkeypatch.setattr(delivery_outbox, "DB_PATH", path)
+    delivery_outbox.enqueue(
+        job_kind="send_message", target="project-a/agent-b",
+        payload={"subject": "status"}, idempotency_key="ready-check", now=1.0,
+    )
+    result = {
+        row["name"]: row for row in store_schema.probe_all_stores()
+    }["delivery_outbox"]
+    assert result["reason"] == store_schema.REASON_COMPATIBLE
 
 
 def test_b0_store_is_conditional_and_missing_creatable(
