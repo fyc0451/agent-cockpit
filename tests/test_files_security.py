@@ -1,6 +1,9 @@
 """files.py 安全模型测试:显式白名单、删除保护、原子写。"""
+import hashlib
+import json
 import os
 import stat
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,16 +16,40 @@ import server
 def fake_home(tmp_path, monkeypatch):
     """隔离环境:home 指向 tmp_path,DB 注册项目置空。
 
-    白名单 = _PROJECT_DIR(真实仓库,测试中不触碰)+ tmp_path 下三个子目录。
+    白名单 = _PROJECT_DIR(真实仓库,测试中不触碰)+ resolver 生效根 +
+    agent-mail-tools 兼容根。R2-E 后白名单不再硬编码 legacy home 存储,
+    因此把 data/uploads/config 根都指到 tmp_path,保证隔离目录可浏览。
     """
+    import runtime_paths
+    monkeypatch.setenv("COCKPIT_DATA_DIR", str(tmp_path / "dashboard-data"))
+    monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(tmp_path / "dashboard-uploads"))
+    monkeypatch.setenv("COCKPIT_CONFIG_DIR", str(tmp_path / ".config" / "agent-cockpit"))
+    runtime_paths.reset_cache()
     monkeypatch.setattr(files, "_HOME", tmp_path.resolve())
+    monkeypatch.setattr(
+        files, "_custom_roots_file",
+        lambda: tmp_path / ".config" / "agent-cockpit" / "file-roots.json",
+    )
     monkeypatch.setattr(files, "_registered_project_roots", lambda: [])
-    return tmp_path
+    yield tmp_path
+    runtime_paths.reset_cache()
 
 
 def _mkdirs(p):
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _roots_file(tmp_path):
+    path = tmp_path / ".config" / "agent-cockpit" / "file-roots.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_roots(tmp_path, value):
+    path = _roots_file(tmp_path)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return path
 
 
 # ── 路径白名单 ──────────────────────────────────────────────────
@@ -97,6 +124,207 @@ def test_custom_root_persists_is_grouped_and_can_be_removed(tmp_path):
 
     assert removed == {"path": str(custom.resolve()), "removed": True}
     assert files.allowed_root_groups()["custom"] == []
+
+
+def test_persisted_root_cannot_authorize_entire_filesystem(tmp_path):
+    _write_roots(tmp_path, ["/"])
+
+    for operation in (
+        lambda: files._resolve("/etc/passwd"),
+        lambda: files.list_dir("/etc"),
+        lambda: files.read_file("/etc/passwd"),
+    ):
+        with pytest.raises(files.CustomRootsError) as exc:
+            operation()
+        assert exc.value.reason is files.CustomRootsReason.BROAD_ROOT
+
+
+def test_persisted_mixed_valid_and_invalid_roots_rejects_entire_set(tmp_path):
+    valid = _mkdirs(tmp_path / "valid-project")
+    target = valid / "safe.txt"
+    target.write_text("safe", encoding="utf-8")
+    _write_roots(tmp_path, [str(valid), "/"])
+
+    with pytest.raises(files.CustomRootsError) as exc:
+        files._resolve(str(target))
+    assert exc.value.reason is files.CustomRootsReason.BROAD_ROOT
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ({"roots": []}, "INVALID_SHAPE"),
+        ([1], "INVALID_ENTRY_TYPE"),
+        (["relative/path"], "RELATIVE_PATH"),
+        (["bad\0path"], "NONCANONICAL_PATH"),
+        ([["nested"]], "INVALID_ENTRY_TYPE"),
+    ],
+)
+def test_persisted_roots_reject_invalid_shape_and_types(tmp_path, value, reason):
+    _write_roots(tmp_path, value)
+
+    with pytest.raises(files.CustomRootsError) as exc:
+        files.allowed_root_groups()
+    assert exc.value.reason is getattr(files.CustomRootsReason, reason)
+
+
+def test_persisted_roots_reject_malformed_json(tmp_path):
+    path = _roots_file(tmp_path)
+    path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(files.CustomRootsError) as exc:
+        files.allowed_root_groups()
+    assert exc.value.reason is files.CustomRootsReason.INVALID_JSON
+
+
+def test_persisted_roots_reject_tilde_and_noncanonical_paths(tmp_path):
+    valid = _mkdirs(tmp_path / "canonical")
+    for value, reason in (
+        ("~/canonical", files.CustomRootsReason.RELATIVE_PATH),
+        (f"{valid.parent}/./{valid.name}", files.CustomRootsReason.NONCANONICAL_PATH),
+    ):
+        _write_roots(tmp_path, [value])
+        with pytest.raises(files.CustomRootsError) as exc:
+            files.allowed_root_groups()
+        assert exc.value.reason is reason
+
+
+def test_persisted_roots_reject_more_than_100_entries(tmp_path):
+    valid = _mkdirs(tmp_path / "valid")
+    _write_roots(tmp_path, [str(valid)] * 101)
+
+    with pytest.raises(files.CustomRootsError) as exc:
+        files.allowed_root_groups()
+    assert exc.value.reason is files.CustomRootsReason.TOO_MANY_ENTRIES
+
+
+def test_persisted_roots_accept_exactly_100_and_deduplicate(tmp_path):
+    roots = [_mkdirs(tmp_path / f"valid-{index}") for index in range(100)]
+    _write_roots(tmp_path, [str(path) for path in roots])
+    assert files.allowed_root_groups()["custom"] == [str(path) for path in roots]
+
+    _write_roots(tmp_path, [str(roots[0]), str(roots[0])])
+    assert files.allowed_root_groups()["custom"] == [str(roots[0])]
+
+
+def test_persisted_roots_reject_missing_and_non_directory_paths(tmp_path):
+    regular = tmp_path / "regular.txt"
+    regular.write_text("x", encoding="utf-8")
+    for value, reason in (
+        (tmp_path / "missing", files.CustomRootsReason.MISSING_PATH),
+        (regular, files.CustomRootsReason.NOT_DIRECTORY),
+    ):
+        _write_roots(tmp_path, [str(value)])
+        with pytest.raises(files.CustomRootsError) as exc:
+            files.allowed_root_groups()
+        assert exc.value.reason is reason
+
+
+def test_persisted_roots_reject_broad_sensitive_and_runtime_roots(tmp_path):
+    import runtime_paths
+
+    sensitive_home = [
+        _mkdirs(tmp_path / name)
+        for name in (".ssh", ".gnupg", ".agent-mail")
+    ]
+    broad = [Path("/"), tmp_path, tmp_path.parent]
+    sensitive = [
+        Path("/etc"), Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
+        *sensitive_home,
+        runtime_paths.data_root(), runtime_paths.config_root(),
+        runtime_paths.state_root(), runtime_paths.uploads_root(),
+    ]
+    for value in broad:
+        _write_roots(tmp_path, [str(value)])
+        with pytest.raises(files.CustomRootsError) as exc:
+            files.allowed_root_groups()
+        assert exc.value.reason is files.CustomRootsReason.BROAD_ROOT
+    for value in sensitive:
+        _write_roots(tmp_path, [str(value)])
+        with pytest.raises(files.CustomRootsError) as exc:
+            files.allowed_root_groups()
+        assert exc.value.reason is files.CustomRootsReason.SENSITIVE_ROOT
+
+
+def test_persisted_symlink_to_sensitive_root_rejected(tmp_path):
+    sensitive = _mkdirs(tmp_path / ".ssh")
+    link = tmp_path / "apparently-safe"
+    link.symlink_to(sensitive, target_is_directory=True)
+    _write_roots(tmp_path, [str(link)])
+
+    with pytest.raises(files.CustomRootsError) as exc:
+        files.allowed_root_groups()
+    assert exc.value.reason is files.CustomRootsReason.SENSITIVE_ROOT
+
+
+def test_persisted_intermediate_symlink_to_sensitive_root_rejected(tmp_path):
+    link = tmp_path / "apparently-safe"
+    link.symlink_to("/etc", target_is_directory=True)
+    _write_roots(tmp_path, [str(link / "ssh")])
+
+    with pytest.raises(files.CustomRootsError) as exc:
+        files.allowed_root_groups()
+    assert exc.value.reason is files.CustomRootsReason.SENSITIVE_ROOT
+
+
+def test_persisted_roots_store_symlink_rejected_without_following(tmp_path):
+    outside = tmp_path / "outside-roots.json"
+    outside.write_text(json.dumps(["/"]), encoding="utf-8")
+    store = _roots_file(tmp_path)
+    store.unlink(missing_ok=True)
+    store.symlink_to(outside)
+
+    with pytest.raises(files.CustomRootsError) as exc:
+        files.allowed_root_groups()
+    assert exc.value.reason is files.CustomRootsReason.UNREADABLE
+
+
+def test_invalid_persisted_roots_response_is_stable_and_redacted(tmp_path, monkeypatch):
+    marker = "relative-secret-MARKER"
+    _write_roots(tmp_path, [marker])
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+
+    response = TestClient(server.app).get(
+        "/api/files/roots", headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "custom_roots_invalid:relative_path"}
+    assert marker not in response.text
+
+
+def test_polluted_roots_api_cannot_list_or_read_outside_files(tmp_path, monkeypatch):
+    _write_roots(tmp_path, ["/"])
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    headers = {"authorization": "Bearer secret"}
+
+    listed = client.get("/api/files", params={"path": "/etc"}, headers=headers)
+    read = client.get(
+        "/api/files/read", params={"path": "/etc/passwd"}, headers=headers,
+    )
+
+    assert listed.status_code == read.status_code == 503
+    assert listed.json() == read.json() == {
+        "detail": "custom_roots_invalid:broad_root",
+    }
+
+
+def test_invalid_persisted_roots_reader_is_byte_for_byte_read_only(tmp_path):
+    path = _write_roots(tmp_path, ["/"])
+    before_names = sorted(entry.name for entry in path.parent.iterdir())
+    before_stat = path.stat()
+    before_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(files.CustomRootsError):
+        files.allowed_root_groups()
+
+    after_stat = path.stat()
+    assert sorted(entry.name for entry in path.parent.iterdir()) == before_names
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before_hash
+    assert (after_stat.st_ino, after_stat.st_size, after_stat.st_mtime_ns) == (
+        before_stat.st_ino, before_stat.st_size, before_stat.st_mtime_ns,
+    )
 
 
 def test_custom_root_rejects_broad_or_missing_directories(tmp_path):

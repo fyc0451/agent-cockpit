@@ -31,13 +31,14 @@ from typing import Any, Callable
 
 import httpx
 
+import runtime_paths
 import settings
 import version
 
 logger = logging.getLogger("agent-cockpit.upgrade")
 
 INSTALL_DIR = Path(__file__).resolve().parent
-UPGRADE_DIR = settings.DATA_DIR / "upgrade"
+UPGRADE_DIR = runtime_paths.store("upgrade")
 STATE_PATH = UPGRADE_DIR / "state.json"
 LOCK_PATH = UPGRADE_DIR / "upgrade.lock"
 LOG_DIR = UPGRADE_DIR / "logs"
@@ -183,6 +184,7 @@ def _utc_iso(ts: float | None = None) -> str:
 
 
 def _ensure_dirs() -> None:
+    runtime_paths.validate_store("upgrade")  # R3-B:symlink 逃逸 fail-closed
     UPGRADE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     BACKUP_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)

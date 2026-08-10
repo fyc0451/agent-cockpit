@@ -11,10 +11,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import runtime_paths
+
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path.home() / "dashboard-data"
-DB_PATH = DATA_DIR / "push.sqlite3"
-KEY_PATH = DATA_DIR / "vapid-private.pem"
+DATA_DIR = runtime_paths.data_root()
+DB_PATH = runtime_paths.store("push")
+KEY_PATH = runtime_paths.store("vapid")
 VAPID_SUBJECT = os.environ.get(
     "COCKPIT_VAPID_SUBJECT", "mailto:agent-cockpit@localhost"
 )
@@ -22,6 +24,7 @@ logger = logging.getLogger("agent-cockpit.web-push")
 
 
 def _db() -> sqlite3.Connection:
+    runtime_paths.validate_store("push")  # R3-B:symlink 逃逸 fail-closed
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
@@ -80,6 +83,7 @@ def _ensure_private_key() -> tuple[str, str]:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
 
+    runtime_paths.validate_store("vapid")  # R3-B:symlink 逃逸 fail-closed
     KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         pem = KEY_PATH.read_bytes()

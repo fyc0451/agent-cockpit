@@ -31,11 +31,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import runtime_paths
+
 # dashboard 自己的状态库,与 hub 隔离
-DATA_DIR = Path.home() / "dashboard-data"
-TASKS_DB = DATA_DIR / "tasks.sqlite3"
-WORKTREE_ROOT = DATA_DIR / "worktrees"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR = runtime_paths.data_root()
+TASKS_DB = runtime_paths.store("tasks")
+WORKTREE_ROOT = runtime_paths.store("worktrees")
+# J1B1:import 不再 mkdir/DDL;目录与 schema 仅在明确写路径惰性创建
 
 # 内存中的输出缓冲(每个任务一个 list,worker 线程写,API 线程读)
 _output_buffers: dict[str, list[str]] = {}
@@ -44,6 +46,10 @@ _tasks_lock = threading.Lock()
 # per-source 操作串行锁(apply / discard / diff / cleanup 同一源仓库互斥)
 _apply_locks: dict[str, threading.Lock] = {}
 _apply_locks_guard = threading.Lock()
+
+# J1B1:DB 初始化惰性化——重启中断清扫每进程至多一次
+_db_swept = False
+_db_init_lock = threading.Lock()
 
 # codex 二进制:优先环境变量,其次 PATH 探测
 CODEX_BIN = os.environ.get("CODEX_BIN") or shutil.which("codex") or "codex"
@@ -65,13 +71,23 @@ _MODEL_RE = re.compile(MODEL_PATTERN)
 # ── DB ──────────────────────────────────────────────────────────
 
 def _db() -> sqlite3.Connection:
+    global _db_swept
+    runtime_paths.validate_store("tasks")  # R3-B:symlink 逃逸 fail-closed
+    TASKS_DB.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(TASKS_DB)
     con.row_factory = sqlite3.Row
+    _ensure_schema(con)
+    if not _db_swept:
+        with _db_init_lock:
+            if not _db_swept:
+                _mark_interrupted(con)
+                _db_swept = True
     return con
 
 
-def _init_db() -> None:
-    with _db() as con:
+def _ensure_schema(con: sqlite3.Connection) -> None:
+    """幂等 schema(每次连接校验,CREATE IF NOT EXISTS + 列迁移)。"""
+    with con:
         con.execute(
             """CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
@@ -89,7 +105,12 @@ def _init_db() -> None:
             )"""
         )
         _migrate_db(con)
-        interrupted = "[ERROR] Agent Cockpit 服务重启，任务进程已中断"
+
+
+def _mark_interrupted(con: sqlite3.Connection) -> None:
+    """重启清扫:pending/running 标记失败。每进程至多一次。"""
+    interrupted = "[ERROR] Agent Cockpit 服务重启，任务进程已中断"
+    with con:
         con.execute(
             "UPDATE tasks SET status='failed', exit_code=-1, finished_ts=?, "
             "output_tail=CASE WHEN output_tail IS NULL OR output_tail='' THEN ? "
@@ -97,7 +118,19 @@ def _init_db() -> None:
             "WHERE status IN ('pending', 'running')",
             (time.time(), interrupted, interrupted),
         )
-        con.commit()
+
+
+def _init_db() -> None:
+    """显式初始化路径:schema+迁移+重启中断标记。import 不再触发。"""
+    runtime_paths.validate_store("tasks")  # R3-B:symlink 逃逸 fail-closed
+    TASKS_DB.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(TASKS_DB)
+    con.row_factory = sqlite3.Row
+    try:
+        _ensure_schema(con)
+        _mark_interrupted(con)
+    finally:
+        con.close()
 
 
 def _migrate_db(con: sqlite3.Connection) -> None:
@@ -105,10 +138,15 @@ def _migrate_db(con: sqlite3.Connection) -> None:
     cols = {r[1] for r in con.execute("PRAGMA table_info(tasks)").fetchall()}
     for col in ("source_workdir", "base_sha", "run_workdir", "preview_hash"):
         if col not in cols:
-            con.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+            try:
+                con.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError as exc:
+                # 并发首用时另一连接可能已补列;duplicate column 视为已迁移
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
 
-_init_db()
+# J1B1:import 期不再调用 _init_db();由 _db() 首次使用时惰性初始化
 
 
 def _clear_run_workdir(task_id: str) -> None:
@@ -183,7 +221,7 @@ def _validate_image_paths(images: list[str]) -> list[str]:
         import uploads
         upload_dir = uploads.UPLOAD_DIR.resolve()
     except ImportError:
-        upload_dir = (Path.home() / "dashboard-uploads").resolve()
+        upload_dir = runtime_paths.uploads_root().resolve()
 
     validated: list[str] = []
     for img in images:
@@ -210,6 +248,7 @@ def _create_worktree(source: Path, task_id: str) -> tuple[Path, str]:
 
     返回 (worktree_path, base_sha)。
     """
+    runtime_paths.validate_store("worktrees")  # 先于任何 git/mkdir fail-closed
     ok, base_sha = _git_ok(["rev-parse", "HEAD"], source)
     if not ok or not base_sha:
         raise ValueError(f"源目录不是有效的 git 仓库或无提交: {source}")
@@ -224,16 +263,19 @@ def _create_worktree(source: Path, task_id: str) -> tuple[Path, str]:
 
 
 def _validate_worktree_path(worktree: Path) -> None:
-    """验证 worktree 路径是 WORKTREE_ROOT 的直接子目录。
+    """验证 worktree 路径是 canonical WORKTREE_ROOT 的直接子目录。
 
-    拒绝:根目录本身、外部路径、软链逃逸。
+    拒绝:根目录本身、外部路径、任何层级的软链逃逸。使用被验证的
+    canonical store(symlink 逃逸时 fail-closed),不先 resolve symlink。
     """
-    root = WORKTREE_ROOT.resolve()
-    resolved = worktree.resolve(strict=False)
-    if resolved == root:
+    root = runtime_paths.validate_store("worktrees")
+    worktree = Path(worktree)
+    if worktree == root:
         raise ValueError(f"拒绝操作 worktree 根目录: {worktree}")
-    if resolved.parent != root:
+    if worktree.parent != root:
         raise ValueError(f"worktree 路径不在 {root} 下: {worktree}")
+    if worktree.is_symlink():
+        raise ValueError(f"拒绝操作软链 worktree: {worktree}")
 
 
 def _remove_worktree(source: Path | None, worktree: Path) -> None:

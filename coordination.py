@@ -13,13 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import runtime_paths
 
-DB_PATH = Path(
-    os.environ.get(
-        "COCKPIT_COORDINATION_DB",
-        str(Path.home() / "dashboard-data" / "coordination.sqlite3"),
-    )
-).expanduser()
+
+DB_PATH = runtime_paths.store("coordination")
 CLAIM_TTL = 300.0
 META_PREFIX = "<!-- agent-cockpit-meta:"
 META_SUFFIX = " -->"
@@ -175,6 +172,7 @@ def _initialize_connection(con: sqlite3.Connection) -> None:
 
 
 def _connect() -> sqlite3.Connection:
+    runtime_paths.validate_store("coordination")  # R3-B:symlink 逃逸 fail-closed
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     delay = CONNECT_RETRY_BASE
     for attempt in range(CONNECT_RETRIES):

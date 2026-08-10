@@ -19,10 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from herdr_client import pane_send, snapshot
+import runtime_paths
 import terminal
 import team_sessions
 
-ROUTE_STATE = Path.home() / "dashboard-data" / "team-inbox-route.json"
+ROUTE_STATE = runtime_paths.store("inbox_route")
 _lock = threading.RLock()
 
 
@@ -83,6 +84,7 @@ def _load_route_state(hub: str, human_id: int) -> dict[str, Any]:
 def _write_route_state(hub: str, human_id: int, state: dict[str, Any]) -> None:
     data = _load_route_file()
     data["routes"][_route_scope(hub, human_id)] = state
+    runtime_paths.validate_store("inbox_route")  # R3-B:symlink 逃逸 fail-closed
     ROUTE_STATE.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
         prefix=".team-inbox-route.", suffix=".tmp", dir=str(ROUTE_STATE.parent)

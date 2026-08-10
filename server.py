@@ -123,6 +123,12 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": INTERNAL_ERROR_DETAIL},
     )
+
+
+@app.exception_handler(files.CustomRootsError)
+async def _custom_roots_exception_handler(request: Request, exc: files.CustomRootsError):
+    """污染的本地授权 store 属服务不可用，返回稳定脱敏 reason。"""
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 TEAM_API_ROUTES = (
     (re.compile(r"^humans/me$"), {"GET", "PUT"}),
     (re.compile(r"^inbox$"), {"GET"}),
