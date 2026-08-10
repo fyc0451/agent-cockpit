@@ -2764,7 +2764,8 @@ async function startAgent(){
 // 筛选条件（session/项目/发件人/收件人/时间/状态）；无左侧 agent 列表
 let MSG_FILTER=null; // 兼容旧字段：等同发件人或收件人快捷筛选
 let MSG_FILTERS={session:'',sender:'',recipient:'',fromTs:'',toTs:'',status:''};
-let MSG_SESSION_PROJECT={}; // session name → project path/slug 提示
+let MSG_SESSION_PROJECT={}; // session name → mail-project 返回的 project path（human_key）
+let MSG_OVERVIEW_PROJECTS=[]; // /api/overview 的 projects（含 slug + human_key）
 let PROJ_MSG_CACHE=null;
 
 async function loadProjList(preferredSlug,focusMessageId){
@@ -2775,6 +2776,7 @@ async function loadProjList(preferredSlug,focusMessageId){
     CAPABILITIES.agent_mail=d.agent_mail||CAPABILITIES.agent_mail;
     const sel=document.getElementById('msgProj');
     if(d.agent_mail&&d.agent_mail.available===false){
+      MSG_OVERVIEW_PROJECTS=[];
       if(sel){sel.innerHTML='';sel.disabled=true}
       const sess=document.getElementById('msgSession');if(sess){sess.innerHTML='';sess.disabled=true}
       const list=document.getElementById('msgList');
@@ -2785,6 +2787,7 @@ async function loadProjList(preferredSlug,focusMessageId){
     }
     if(sel)sel.disabled=false;
     const projects=d.projects||[];
+    MSG_OVERVIEW_PROJECTS=projects;
     const stored=preferredSlug||sel?.value||storedStable(STABLE_STATE_KEYS.messageProject);
     if(sel){
       sel.innerHTML='';
@@ -2834,9 +2837,20 @@ async function loadMsgSessions(){
     sel.disabled=true;
   }
 }
-function slugifyProjectPath(path){
-  // 与 agent-mail registry 常见 slug 接近：/home/fyc/github/agent-cockpit → home-fyc-github-agent-cockpit
-  return String(path||'').replace(/\\/g,'/').replace(/^\/+/,'').replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase();
+/** 规范化路径再做 human_key 精确比较：统一 /、去尾斜杠。禁止 slug 模糊匹配。 */
+function normalizeHumanKey(path){
+  return String(path||'').replace(/\\/g,'/').replace(/\/+$/,'').trim();
+}
+/**
+ * session mail-project path → overview 项目 slug。
+ * 仅当 path 与 /api/overview 某项 human_key 规范化后全等时命中；无模糊/后缀/包含匹配。
+ */
+function resolveSlugByHumanKey(projectPath,projects){
+  const want=normalizeHumanKey(projectPath);
+  if(!want)return '';
+  const list=projects||MSG_OVERVIEW_PROJECTS||[];
+  const hit=list.find(p=>normalizeHumanKey(p&&p.human_key)===want);
+  return hit&&hit.slug?String(hit.slug):'';
 }
 function onMsgSessionChange(){
   const sess=document.getElementById('msgSession')?.value||'';
@@ -2845,17 +2859,9 @@ function onMsgSessionChange(){
   const projectPath=MSG_SESSION_PROJECT[sess];
   const sel=document.getElementById('msgProj');
   if(projectPath&&sel){
-    const want=slugifyProjectPath(projectPath);
-    const options=[...sel.options];
-    let pick=options.find(o=>o.value===want);
-    if(!pick){
-      // 最长后缀/包含匹配
-      pick=options
-        .filter(o=>o.value&&(want.endsWith(o.value)||o.value.endsWith(want)||want.includes(o.value)||o.value.includes(want)))
-        .sort((a,b)=>b.value.length-a.value.length)[0];
-    }
-    if(pick&&sel.value!==pick.value){
-      sel.value=pick.value;
+    const slug=resolveSlugByHumanKey(projectPath,MSG_OVERVIEW_PROJECTS);
+    if(slug&&[...sel.options].some(o=>o.value===slug)&&sel.value!==slug){
+      sel.value=slug;
       rememberMessageProject(sel.value);
       MSG_FILTER=null;
       MSG_FILTERS.sender='';MSG_FILTERS.recipient='';
@@ -2863,7 +2869,7 @@ function onMsgSessionChange(){
       return;
     }
   }
-  // 无绑定或未匹配到项目：仅记录 session 筛选标签，列表仍用当前项目
+  // 无绑定或 human_key 未精确命中：仅记录 session 筛选，列表仍用当前项目
   applyMsgFilters();
 }
 function onMsgProjectChange(){
@@ -3856,6 +3862,8 @@ async function termInsertCollab(session,paneId,agent){
 const TERM_ZOOM_HEARTBEAT=10000;
 // session → 是否已对本 session 做过手机分屏拆开（避免心跳里反复 untile）
 const MOBILE_UNTILED_SESSIONS=new Set();
+// session → 进行中的 untile Promise（并发 attach/zoom/心跳共用同一 in-flight，避免双 untile）
+const MOBILE_UNTILE_INFLIGHT={};
 function termZoomState(id){
   const session=TERM_SESSIONS[id];
   if(!session)return null;
@@ -3866,35 +3874,41 @@ function termZoomState(id){
  * 手机 H5：把 session 内「同一 tab 多分屏」拆成独立 tab。
  * 分屏在窄屏几乎不可读；拆开后每个 pane 全宽，用 Ctrl-B / 切 tab 浏览。
  * 不恢复原分屏（避免与 zoom lease 叠床架屋）；桌面可再用布局组合。
+ * 同一 session 并发调用共享 in-flight Promise，完成后才写入 MOBILE_UNTILED_SESSIONS。
  */
 async function ensureMobileSessionUntiled(session){
   if(!session||!isCompactScreen())return {moved:[]};
   if(MOBILE_UNTILED_SESSIONS.has(session))return {moved:[],skipped:true};
-  let snap;
-  try{snap=await api('/api/herdr/snapshot')}catch(e){return {moved:[],error:String(e)}}
-  const panes=(snap.panes||[]).filter(p=>p.session===session&&p.pane_id&&p.tab_id);
-  const byTab={};
-  for(const p of panes){
-    const tid=String(p.tab_id);
-    (byTab[tid]=byTab[tid]||[]).push(p);
-  }
-  const moved=[];
-  for(const [tabId,list] of Object.entries(byTab)){
-    if(list.length<=1)continue;
-    try{
-      const r=await api(`/api/herdr/session/${encodeURIComponent(session)}/layout/untile`,{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({tab_id:tabId}),
-      });
-      if(Array.isArray(r.moved)&&r.moved.length)moved.push(...r.moved);
-    }catch(e){/* 单 tab 失败不阻断 attach */}
-  }
-  MOBILE_UNTILED_SESSIONS.add(session);
-  if(moved.length){
-    toast(`手机端已将 ${moved.length} 个分屏 pane 拆成独立 tab，全宽查看（Ctrl-B 切换）`,4500);
-    try{BOARD=await api('/api/herdr/snapshot')}catch(e){}
-  }
-  return {moved};
+  if(MOBILE_UNTILE_INFLIGHT[session])return MOBILE_UNTILE_INFLIGHT[session];
+  const run=(async()=>{
+    let snap;
+    try{snap=await api('/api/herdr/snapshot')}catch(e){return {moved:[],error:String(e)}}
+    const panes=(snap.panes||[]).filter(p=>p.session===session&&p.pane_id&&p.tab_id);
+    const byTab={};
+    for(const p of panes){
+      const tid=String(p.tab_id);
+      (byTab[tid]=byTab[tid]||[]).push(p);
+    }
+    const moved=[];
+    for(const [tabId,list] of Object.entries(byTab)){
+      if(list.length<=1)continue;
+      try{
+        const r=await api(`/api/herdr/session/${encodeURIComponent(session)}/layout/untile`,{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({tab_id:tabId}),
+        });
+        if(Array.isArray(r.moved)&&r.moved.length)moved.push(...r.moved);
+      }catch(e){/* 单 tab 失败不阻断 attach */}
+    }
+    MOBILE_UNTILED_SESSIONS.add(session);
+    if(moved.length){
+      toast(`手机端已将 ${moved.length} 个分屏 pane 拆成独立 tab，全宽查看（Ctrl-B 切换）`,4500);
+      try{BOARD=await api('/api/herdr/snapshot')}catch(e){}
+    }
+    return {moved};
+  })();
+  MOBILE_UNTILE_INFLIGHT[session]=run;
+  try{return await run}finally{delete MOBILE_UNTILE_INFLIGHT[session]}
 }
 async function syncTermZoomLease(id){
   const state=termZoomState(id);

@@ -737,6 +737,9 @@ def test_narrow_takeover_owns_zoom_with_heartbeat_and_release_fallbacks():
     assert "ensureMobileSessionUntiled(session)" in takeover
     assert "/layout/untile" in js
     assert "MOBILE_UNTILED_SESSIONS" in js
+    # session 级 in-flight Promise 去重，避免并发 attach/zoom 双 untile
+    assert "MOBILE_UNTILE_INFLIGHT" in js
+    assert "if(MOBILE_UNTILE_INFLIGHT[session])return MOBILE_UNTILE_INFLIGHT[session]" in js
     assert "/zoom-lease" in js
     assert "action=state.owned?'renew':'acquire'" in js
     assert "TERM_ZOOM_HEARTBEAT=10000" in js
@@ -2048,6 +2051,22 @@ def test_messages_page_agent_filter_and_cleanup():
     # 消息清理按钮走 /api/messages/cleanup
     assert "cleanupMsgs()" in HTML
     assert "/api/messages/cleanup" in HTML
+    # session→项目：只按 overview human_key 精确映射，禁止 slug 模糊
+    js = _inline_js()
+    assert "MSG_OVERVIEW_PROJECTS" in js
+    assert "function resolveSlugByHumanKey" in js
+    assert "function normalizeHumanKey" in js
+    assert "slugifyProjectPath" not in js
+    assert "want.endsWith(o.value)" not in js
+    assert "o.value.endsWith(want)" not in js
+    assert "want.includes(o.value)" not in js
+    assert "o.value.includes(want)" not in js
+    sess_change = js.split("function onMsgSessionChange(){", 1)[1].split(
+        "function onMsgProjectChange", 1
+    )[0]
+    assert "resolveSlugByHumanKey(projectPath,MSG_OVERVIEW_PROJECTS)" in sess_change
+    assert "endsWith" not in sess_change
+    assert "includes(" not in sess_change
 
 
 def test_messages_sse_refresh_is_visible_scoped_debounced_and_draft_safe():
@@ -3105,3 +3124,123 @@ def test_terminal_true_fullscreen():
     assert "bottom:10px" not in HTML.split("#termFsExit{", 1)[1].split("}", 1)[0]
     # 全屏切换后 refit + 强制重绘
     assert "fullscreenchange" in js
+
+
+def test_node_mobile_untile_inflight_promise_dedupes_concurrent_calls():
+    """Lead OCR: 同一 session 并发 ensureMobileSessionUntiled 共用 in-flight Promise，只发一次 untile。"""
+    js = _inline_js()
+    assert "MOBILE_UNTILE_INFLIGHT" in js
+    # 从源码抽出函数体，挂到可测 harness（stub isCompactScreen/api/toast）
+    fn_src = js.split("async function ensureMobileSessionUntiled(session){", 1)[1].split(
+        "\nasync function syncTermZoomLease", 1
+    )[0]
+    out = _run_node(
+        textwrap.dedent(
+            r"""
+            const MOBILE_UNTILED_SESSIONS=new Set();
+            const MOBILE_UNTILE_INFLIGHT={};
+            let BOARD=null;
+            let compact=true;
+            const calls=[];
+            function isCompactScreen(){return compact}
+            function toast(){}
+            function api(url,opts){
+              calls.push({url,method:(opts&&opts.method)||'GET',body:opts&&opts.body});
+              if(url==='/api/herdr/snapshot'){
+                return Promise.resolve({panes:[
+                  {session:'S1',pane_id:'p1',tab_id:'t1'},
+                  {session:'S1',pane_id:'p2',tab_id:'t1'},
+                ]});
+              }
+              if(String(url).includes('/layout/untile')){
+                // 模拟慢响应，拉长 in-flight 窗口
+                return new Promise(resolve=>setTimeout(
+                  ()=>resolve({moved:[{pane_id:'p2'}]}), 40
+                ));
+              }
+              return Promise.resolve({});
+            }
+            async function ensureMobileSessionUntiled(session){
+            """
+        )
+        + fn_src
+        + textwrap.dedent(
+            r"""
+            const [a,b]=await Promise.all([
+              ensureMobileSessionUntiled('S1'),
+              ensureMobileSessionUntiled('S1'),
+            ]);
+            const untileCalls=calls.filter(c=>String(c.url).includes('/layout/untile'));
+            if(untileCalls.length!==1){
+              console.error('expected 1 untile, got',untileCalls.length,calls);process.exit(1);
+            }
+            if(!MOBILE_UNTILED_SESSIONS.has('S1')){
+              console.error('session not marked untiled');process.exit(2);
+            }
+            if(Object.keys(MOBILE_UNTILE_INFLIGHT).length!==0){
+              console.error('inflight not cleared',MOBILE_UNTILE_INFLIGHT);process.exit(3);
+            }
+            // 完成后再次调用应直接 skip，不再请求
+            const before=calls.length;
+            const c=await ensureMobileSessionUntiled('S1');
+            if(!c.skipped){console.error('expected skipped after done',c);process.exit(4)}
+            if(calls.length!==before){console.error('skipped still hit api');process.exit(5)}
+            // 桌面宽屏不请求
+            compact=false;
+            MOBILE_UNTILED_SESSIONS.clear();
+            const d=await ensureMobileSessionUntiled('S1');
+            if(d.moved&&d.moved.length){console.error('desktop should no-op',d);process.exit(6)}
+            console.log('ok');
+            """
+        )
+    )
+    assert "ok" in out
+
+
+def test_node_resolve_slug_by_human_key_exact_only():
+    """Lead OCR: session→消息项目只按 overview human_key 精确映射；后缀/包含不得命中。"""
+    js = _inline_js()
+    norm_src = js.split("function normalizeHumanKey(path){", 1)[1].split(
+        "\n/**", 1
+    )[0]
+    resolve_src = js.split("function resolveSlugByHumanKey(projectPath,projects){", 1)[1].split(
+        "\nfunction onMsgSessionChange", 1
+    )[0]
+    # 禁止旧 fuzzy 残留
+    assert "slugifyProjectPath" not in js
+    assert "want.endsWith" not in js
+    out = _run_node(
+        "function normalizeHumanKey(path){\n"
+        + norm_src
+        + "\n"
+        + "function resolveSlugByHumanKey(projectPath,projects){\n"
+        + resolve_src
+        + "\n"
+        + textwrap.dedent(
+            r"""
+            const projects=[
+              {slug:'agent-cockpit',human_key:'/home/fyc/github/agent-cockpit'},
+              {slug:'cockpit',human_key:'/home/fyc/github/cockpit'},
+              {slug:'other',human_key:'/tmp/other'},
+            ];
+            // 精确命中
+            const a=resolveSlugByHumanKey('/home/fyc/github/agent-cockpit',projects);
+            if(a!=='agent-cockpit'){console.error('exact fail',a);process.exit(1)}
+            // 尾斜杠规范化后仍精确
+            const b=resolveSlugByHumanKey('/home/fyc/github/agent-cockpit/',projects);
+            if(b!=='agent-cockpit'){console.error('trail slash fail',b);process.exit(2)}
+            // 后缀/包含模糊：不得把 .../agent-cockpit 误匹配到 slug 'cockpit'
+            // （旧逻辑 slugify 后 endsWith/includes 会误中）
+            const c=resolveSlugByHumanKey('/home/fyc/github/agent-cockpit-extra',projects);
+            if(c!==''){console.error('must not fuzzy match extra path',c);process.exit(3)}
+            // human_key 仅后缀相同、整路径不同 → 不命中
+            const d=resolveSlugByHumanKey('/elsewhere/agent-cockpit',projects);
+            if(d!==''){console.error('must not suffix-match human_key',d);process.exit(4)}
+            // 空 / 无列表
+            if(resolveSlugByHumanKey('',projects)!==''){console.error('empty path');process.exit(5)}
+            if(resolveSlugByHumanKey('/tmp/other',[])!==''){console.error('empty list');process.exit(6)}
+            console.log('ok');
+            """
+        )
+    )
+    assert "ok" in out
