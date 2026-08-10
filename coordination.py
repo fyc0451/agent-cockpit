@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import runtime_paths
 
@@ -321,8 +321,14 @@ def get_assignment(assignment_id: str) -> dict[str, Any] | None:
 def _update_assignment_cas(
     assignment_id: str, expected_version: int, *,
     set_sql: str, params: tuple[Any, ...],
+    guard: Callable[[Any], None] | None = None,
 ) -> dict[str, Any]:
-    """公共 CAS：WHERE version=expected，成功 version+1，stale 零变更。"""
+    """公共 CAS：WHERE version=expected，成功 version+1，stale 零变更。
+
+    guard(row) 在同一 BEGIN IMMEDIATE 事务内、基于事务内读到的行执行
+    （如 from-status 合法性），杜绝事务外读取的 TOCTOU；校验失败抛
+    ValueError 并整体回滚，零变更。
+    """
     con = _connect()
     try:
         con.execute("BEGIN IMMEDIATE")
@@ -334,6 +340,8 @@ def _update_assignment_cas(
             raise ValueError(f"任务不存在: {assignment_id}")
         if row["status"] == "closed":
             raise ValueError(f"任务已关闭，不得变更: {assignment_id}")
+        if guard is not None:
+            guard(row)
         if int(row["version"]) != expected_version:
             raise ValueError(
                 f"expected_version 冲突：期望 {expected_version}，"
@@ -364,7 +372,11 @@ def transition_assignment(
     assignment_id: str, *, to_status: str, expected_version: int,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """最小状态迁移；close 只能走 close_assignment；CAS 成功 version+1。"""
+    """最小状态迁移；close 只能走 close_assignment；CAS 成功 version+1。
+
+    from-status 合法性在 CAS 事务内基于事务内行校验（guard），杜绝
+    事务外读取后被并发写者抢先的 TOCTOU。
+    """
     version = _expected_version(expected_version)
     if to_status not in ASSIGNMENT_STATUSES:
         raise ValueError(
@@ -372,30 +384,22 @@ def transition_assignment(
         )
     if to_status == "closed":
         raise ValueError("closed 必须通过 close_assignment 显式关闭")
-    con = _connect()
-    try:
-        row = con.execute(
-            "SELECT status FROM assignments WHERE assignment_id=?",
-            (assignment_id,),
-        ).fetchone()
-    finally:
-        con.close()
-    if row is None:
-        raise ValueError(f"任务不存在: {assignment_id}")
-    if row["status"] == "closed":
-        raise ValueError(f"任务已关闭，不得变更: {assignment_id}")
-    allowed = ASSIGNMENT_TRANSITIONS.get(str(row["status"]), frozenset())
-    if to_status not in allowed:
-        raise ValueError(
-            f"非法状态迁移: {row['status']} → {to_status}"
-            f"（允许 {sorted(allowed)}）"
-        )
     stamp = _optional_epoch(now, "now")
     current = time.time() if stamp is None else stamp
+
+    def _guard(row: Any) -> None:
+        allowed = ASSIGNMENT_TRANSITIONS.get(str(row["status"]), frozenset())
+        if to_status not in allowed:
+            raise ValueError(
+                f"非法状态迁移: {row['status']} → {to_status}"
+                f"（允许 {sorted(allowed)}）"
+            )
+
     return _update_assignment_cas(
         assignment_id, version,
         set_sql="status=?, updated_at=?",
         params=(to_status, current),
+        guard=_guard,
     )
 
 

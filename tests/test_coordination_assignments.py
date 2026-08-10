@@ -264,7 +264,7 @@ def test_concurrent_transitions_same_version_exactly_one_wins(tmp_path):
     failed = [r for r in results.values() if isinstance(r, ValueError)]
     assert len(ok) == 1 and len(failed) == 1
     assert ok[0]["version"] == 2
-    assert "version 冲突" in str(failed[0])
+    assert "version 冲突" in str(failed[0]) or "非法状态迁移" in str(failed[0])
     assert coordination.get_assignment(assignment["assignment_id"])["version"] == 2
 
 
@@ -328,3 +328,64 @@ def test_successful_cas_returns_exactly_expected_plus_one(tmp_path):
         )
         assert result["version"] == expected + 1
         assert result == coordination.get_assignment(assignment["assignment_id"])
+
+
+def test_transition_from_status_interleaving_toctou(tmp_path):
+    """Lead REVIEW_BLOCK 复现：from-status 判定后另一写者抢先迁移，
+    持新 expected_version 的调用不得把非法 from-status 写成功。"""
+    assignment = _create(tmp_path)
+    aid = assignment["assignment_id"]
+    coordination.transition_assignment(
+        aid, to_status="in_progress", expected_version=1,
+    )
+    # writer A 读到 in_progress/v2，判定 →review 合法，尚未进入 CAS
+    # writer B 抢先：in_progress→blocked（v3）
+    coordination.transition_assignment(aid, to_status="blocked", expected_version=2)
+    # writer A 携 expected_version=3 继续：blocked→review 非法，必须拒绝零变更
+    with pytest.raises(ValueError, match="非法状态迁移"):
+        coordination.transition_assignment(
+            aid, to_status="review", expected_version=3,
+        )
+    row = coordination.get_assignment(aid)
+    assert (row["status"], row["version"]) == ("blocked", 3)
+
+
+def test_concurrent_divergent_transitions_final_state_consistent(tmp_path):
+    """两并发写者从 in_progress/v2 竞争 blocked 与 review：恰一成功，
+    终态必须是合法迁移结果，败者报 version 冲突或非法迁移。"""
+    import threading
+
+    assignment = _create(tmp_path)
+    aid = assignment["assignment_id"]
+    coordination.transition_assignment(
+        aid, to_status="in_progress", expected_version=1,
+    )
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def worker(name, target):
+        barrier.wait()
+        try:
+            results[name] = coordination.transition_assignment(
+                aid, to_status=target, expected_version=2,
+            )
+        except ValueError as exc:
+            results[name] = exc
+
+    threads = [
+        threading.Thread(target=worker, args=("w-blocked", "blocked")),
+        threading.Thread(target=worker, args=("w-review", "review")),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ok = [r for r in results.values() if isinstance(r, dict)]
+    failed = [r for r in results.values() if isinstance(r, ValueError)]
+    assert len(ok) == 1 and len(failed) == 1
+    assert ok[0]["version"] == 3
+    assert ok[0]["status"] in ("blocked", "review")
+    assert "冲突" in str(failed[0]) or "非法状态迁移" in str(failed[0])
+    final = coordination.get_assignment(aid)
+    assert (final["status"], final["version"]) == (ok[0]["status"], 3)
