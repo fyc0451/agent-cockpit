@@ -34,6 +34,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A read-only project workbench API that combines durable coordination
   assignments with exactly bound, field-restricted Herdr session summaries and
   degrades safely when live Herdr state is unavailable.
+- Authenticated HTTP endpoints for creating, listing, reading, transitioning,
+  and closing project-scoped coordination assignments with optimistic CAS.
 - A managed release-lane CLI that serializes local publishers, rejects stale
   `origin/main` baselines before mutation, keeps its lock through child-process
   failure, and writes credential-free atomic release receipts.
