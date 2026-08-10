@@ -1298,6 +1298,11 @@ def test_light_theme_is_default_without_overriding_saved_dark_preference():
     assert "(localStorage.getItem('dash-theme')||'light')==='light'" in HTML
     assert "setTheme(localStorage.getItem('dash-theme')||'light',false)" in js
     assert "meta.content=light?'#ffffff':'#181d27'" in js
+    # boot 不整页刷新；用户切换才 reload
+    boot_apply = js.split("function applyDocumentTheme(mode){", 1)[1].split(
+        "function setTheme", 1
+    )[0]
+    assert "location.reload()" not in boot_apply
 
 
 def test_roomy_header_collapses_before_navigation_can_overflow():
@@ -1907,33 +1912,28 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     assert "TERM_INSTANCES[TERM_ID].loadingEl" in term_key
 
 
-def test_theme_switch_updates_visible_terminal_without_contrast_rebuild_or_resize():
-    # minimumContrastRatio 的运行期 setter 会让 WebGL 逐格重算颜色；主题切换只
-    # 更新当前可见终端的 palette，隐藏终端切过去时再应用。
+def test_theme_switch_forces_full_page_reload_after_saving_preference():
+    # 运行时改 xterm/WebGL 主题会切一次后错乱；用户切换改为写偏好 + 整页刷新。
+    # boot(save=false) 只同步 DOM class，不 reload。
     js = _inline_js()
     assert "function _repaintTermForTheme" not in js
     assert "TERM_LIGHT" not in js
+    assert "function applyDocumentTheme(mode)" in js
     set_theme = js.split("function setTheme(mode,save=true){", 1)[1].split(
         "function toggleTheme", 1
     )[0]
-    assert "options.theme=th" in set_theme
-    assert "options.minimumContrastRatio" not in set_theme
-    assert "id===TERM_ID" in set_theme
-    assert "inst.pendingTheme=th" in set_theme
-    assert "xterm.refresh" not in set_theme
-    assert "sendAllTermColorSchemes()" in set_theme
-    assert "xterm.resize" not in set_theme
-    assert "window.__termThemeSwitchMs" in set_theme
-    # 切主题时盖遮罩并禁输入,渲染完揭开——避免 WebGL 重绘期间点击堆积"幽灵回放"
-    assert "showTermThemeOverlay()" in set_theme
-    assert "hideTermThemeOverlay()" in set_theme
-    assert "requestAnimationFrame(applyTheme)" in set_theme
-    show = js.split("function showTermInstance(id){", 1)[1].split(
-        "function termSwitch", 1
-    )[0]
-    assert "if(inst.pendingTheme)" in show
-    assert "inst.xterm.options.theme=inst.pendingTheme" in show
-
+    assert "localStorage.setItem('dash-theme'" in set_theme
+    assert "location.reload()" in set_theme
+    assert "if(!save)" in set_theme
+    assert "applyDocumentTheme" in set_theme
+    # 用户路径不得再做半套 in-place xterm 主题切换
+    assert "options.theme=th" not in set_theme
+    assert "showTermThemeOverlay()" not in set_theme
+    assert "requestAnimationFrame(applyTheme)" not in set_theme
+    assert "sendAllTermColorSchemes()" not in set_theme
+    # herdr 主题通知仍可 fire-and-forget，完成后/超时都 reload
+    assert "/api/theme/herdr" in set_theme
+    assert "setTimeout(finish,800)" in set_theme
 
 def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     js = _inline_js()
@@ -2067,6 +2067,10 @@ def test_messages_page_agent_filter_and_cleanup():
     assert "resolveSlugByHumanKey(projectPath,MSG_OVERVIEW_PROJECTS)" in sess_change
     assert "endsWith" not in sess_change
     assert "includes(" not in sess_change
+    # session 是「定位绑定项目」导航，不是消息字段筛选
+    assert "不是消息字段筛选" in sess_change or "只用来跳转" in sess_change
+    assert "定位 session=" in js
+    assert "消息按「项目」库加载" in js
 
 
 def test_messages_sse_refresh_is_visible_scoped_debounced_and_draft_safe():
@@ -3244,3 +3248,61 @@ def test_node_resolve_slug_by_human_key_exact_only():
         )
     )
     assert "ok" in out
+
+def test_layout_untile_uses_fresh_session_focus_not_stale_board():
+    """拆开整组必须用新鲜 snapshot 的 session.focused_pane_id，禁止 BOARD 多 focused 盲取第一个。"""
+    js = _inline_js()
+    assert "async function layoutFreshContext()" in js
+    assert "focused_pane_id" in js
+    assert "layoutGroupHint" in HTML
+    assert "你所在的分屏组" in js or "你所在的分屏组" in HTML
+    untile = js.split("async function layoutUntile(){", 1)[1].split(
+        "async function layoutCompose", 1
+    )[0]
+    assert "await layoutTargetOrToast()" in untile
+    assert "groupTabId" in untile
+    # 不再同步 layoutTargetOrToast 吃 stale BOARD
+    assert "async function layoutTargetOrToast()" in js
+
+def test_node_layout_fresh_context_picks_multi_pane_group():
+    """Node: focused_pane_id 在 4-pane tab 时，拆开整组目标 tab 为该 multi 组，而非单 pane focused。"""
+    js = _inline_js()
+    # 抽出 layoutFreshContext 主体并 stub api/termCollabContext/BOARD
+    fn_src = js.split("async function layoutFreshContext(){", 1)[1].split(
+        "\nfunction layoutGroupLabel", 1
+    )[0]
+    out = _run_node(
+        textwrap.dedent(
+            r"""
+            let BOARD=null;
+            function termCollabContext(){return {session:'github-agent-cockpit',paneId:''}}
+            function api(){
+              return Promise.resolve({
+                sessions:[{session:'github-agent-cockpit',focused_pane_id:'w1:p9'}],
+                panes:[
+                  {session:'github-agent-cockpit',pane_id:'w1:p4',tab_id:'w1:tD',agent:'opencode',focused:true},
+                  {session:'github-agent-cockpit',pane_id:'w1:p7',tab_id:'w1:t5',agent:'grok',focused:false},
+                  {session:'github-agent-cockpit',pane_id:'w1:p9',tab_id:'w1:t5',agent:'claude',focused:true},
+                  {session:'github-agent-cockpit',pane_id:'w1:pA',tab_id:'w1:t5',agent:'qodercli',focused:false},
+                  {session:'github-agent-cockpit',pane_id:'w1:p5',tab_id:'w1:t5',agent:'qodercli',focused:false},
+                ],
+              });
+            }
+            async function layoutFreshContext(){
+            """
+        )
+        + fn_src
+        + textwrap.dedent(
+            r"""
+            const ctx=await layoutFreshContext();
+            if(ctx.focusedPaneId!=='w1:p9'){console.error('focus',ctx.focusedPaneId);process.exit(1)}
+            if(ctx.groupTabId!=='w1:t5'){console.error('groupTab',ctx.groupTabId,ctx);process.exit(2)}
+            if(ctx.group.length!==4){console.error('group size',ctx.group.length);process.exit(3)}
+            if(ctx.target?.pane_id!=='w1:p9'){console.error('target',ctx.target);process.exit(4)}
+            // 无 CURRENT_TERM 时不得盲取 BOARD 里第一个 focused(w1:p4 单 pane)
+            console.log('ok');
+            """
+        )
+    )
+    assert "ok" in out
+

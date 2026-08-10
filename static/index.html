@@ -660,12 +660,12 @@ header .spacer{flex:1}
     <div class="msgs-body">
       <div class="msg-filters" id="msgFilters">
         <div class="mf">
-          <label for="msgSession">Session</label>
-          <select id="msgSession" onchange="onMsgSessionChange()" title="Herdr session → 绑定的邮件项目"></select>
+          <label for="msgSession" title="Herdr session：用来定位它绑定的 Agent Mail 项目，不按 session 过滤消息正文">Session</label>
+          <select id="msgSession" onchange="onMsgSessionChange()" title="选择 Herdr session → 自动跳到其绑定的邮件项目（消息仍按「项目」库加载）"></select>
         </div>
         <div class="mf">
-          <label for="msgProj">项目</label>
-          <select id="msgProj" onchange="onMsgProjectChange()" style="min-width:160px;max-width:240px"></select>
+          <label for="msgProj" title="Agent Mail 项目（human_key 路径）：消息真正存放的库">项目</label>
+          <select id="msgProj" onchange="onMsgProjectChange()" style="min-width:160px;max-width:240px" title="消息所属的 Agent Mail 项目库"></select>
         </div>
         <div class="mf">
           <label for="msgFilterSender">发件人</label>
@@ -959,13 +959,14 @@ header .spacer{flex:1}
       </div>
       <button class="icon" onclick="closeLayoutModal()">✕</button>
     </div>
+    <div id="layoutGroupHint" class="muted" style="font-size:11px;margin-bottom:8px;padding:6px 8px;border-radius:8px;background:var(--bg3);border:1px dashed var(--bd)">打开后识别当前分屏组…</div>
     <div class="launch-bar" style="flex-wrap:wrap">
-      <span class="lbl" data-i18n="layout.curpane">当前 pane</span>
-      <button class="sm" onclick="layoutSplit('horizontal')" data-i18n="layout.hsplit">⬌ 水平分屏</button>
-      <button class="sm" onclick="layoutSplit('vertical')" data-i18n="layout.vsplit">⬍ 垂直分屏</button>
-      <button class="sm" onclick="layoutSplit('grid4')" data-i18n="layout.grid4">⊞ 四分屏</button>
-      <button class="sm" onclick="layoutDetach()" title="把当前 pane 移到独立 tab" data-i18n="layout.detach">⛶ 拆出当前</button>
-      <button class="sm" onclick="layoutUntile()" title="把当前所在分屏组的所有 pane 拆成各自独立 tab" data-i18n="layout.untile">🧩 拆开整组</button>
+      <span class="lbl" data-i18n="layout.curpane">当前 / 快捷</span>
+      <button class="sm" onclick="layoutDetach()" title="把当前焦点 pane 移到独立 tab" data-i18n="layout.detach">⛶ 拆出当前</button>
+      <button class="sm" onclick="layoutUntile()" title="把你所在分屏组内所有 pane 拆成各自独立 tab" data-i18n="layout.untile">🧩 拆开整组</button>
+      <button class="sm" onclick="layoutSplit('horizontal')" data-i18n="layout.hsplit" title="插入空 shell 槽">⬌ 空槽左右</button>
+      <button class="sm" onclick="layoutSplit('vertical')" data-i18n="layout.vsplit" title="插入空 shell 槽">⬍ 空槽上下</button>
+      <button class="sm" onclick="layoutSplit('grid4')" data-i18n="layout.grid4" title="插入空 shell 槽">⊞ 空槽四分</button>
     </div>
     <div style="margin-top:10px;border-top:1px solid var(--bd);padding-top:10px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
@@ -975,7 +976,7 @@ header .spacer{flex:1}
           <option value="vertical" data-i18n="layout.v_first">单列垂直</option>
         </select>
         <button class="primary sm" onclick="layoutCompose()" data-i18n="layout.compose_btn">⧉ 组合选中 pane</button>
-        <span class="muted" style="font-size:11px" data-i18n="layout.pick_hint">勾选 2-4 个 pane，第一个为基准</span>
+        <span class="muted" style="font-size:11px" data-i18n="layout.pick_hint">勾选 2-4 个 pane（第一个为基准）。下方列表仅服务组合，拆开整组不看勾选。</span>
       </div>
       <div id="layoutPaneList" style="display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto"></div>
     </div>
@@ -2854,22 +2855,34 @@ function resolveSlugByHumanKey(projectPath,projects){
 }
 function onMsgSessionChange(){
   const sess=document.getElementById('msgSession')?.value||'';
+  // session 不是消息字段筛选：只用来跳转到绑定项目（mail-project.human_key → overview slug）
   MSG_FILTERS.session=sess;
   if(!sess){applyMsgFilters();return}
   const projectPath=MSG_SESSION_PROJECT[sess];
   const sel=document.getElementById('msgProj');
+  if(!projectPath){
+    toast('Session「'+sess+'」未绑定 Agent Mail 项目；消息仍显示当前「项目」库。可在终端里 init-mail 绑定。',5000);
+    applyMsgFilters();
+    return;
+  }
   if(projectPath&&sel){
     const slug=resolveSlugByHumanKey(projectPath,MSG_OVERVIEW_PROJECTS);
-    if(slug&&[...sel.options].some(o=>o.value===slug)&&sel.value!==slug){
-      sel.value=slug;
-      rememberMessageProject(sel.value);
-      MSG_FILTER=null;
-      MSG_FILTERS.sender='';MSG_FILTERS.recipient='';
-      loadProjectMsgs(undefined,false,sel.value);
+    if(slug&&[...sel.options].some(o=>o.value===slug)){
+      if(sel.value!==slug){
+        sel.value=slug;
+        rememberMessageProject(sel.value);
+        MSG_FILTER=null;
+        MSG_FILTERS.sender='';MSG_FILTERS.recipient='';
+        toast('已跳到 session 绑定项目：'+slug,3200);
+        loadProjectMsgs(undefined,false,sel.value);
+        return;
+      }
+      toast('Session 已绑定当前项目「'+slug+'」（消息按项目库加载，不按 session 过滤）',3500);
+      applyMsgFilters();
       return;
     }
+    toast('Session 绑定路径 '+projectPath+' 在项目列表无精确匹配（human_key）；请手动选项目。',5000);
   }
-  // 无绑定或 human_key 未精确命中：仅记录 session 筛选，列表仍用当前项目
   applyMsgFilters();
 }
 function onMsgProjectChange(){
@@ -3059,7 +3072,14 @@ function renderProjMsgs(d,focusMessageId){
   const msgs=filterProjMessages(all);
   const f=MSG_FILTER;
   const chips=[];
-  if(MSG_FILTERS.session)chips.push(`session=<b>${esc(MSG_FILTERS.session)}</b>`);
+  // session 只是「定位绑定项目」的导航状态，不是消息字段筛选
+  if(MSG_FILTERS.session){
+    const bound=MSG_SESSION_PROJECT[MSG_FILTERS.session];
+    const boundSlug=bound?resolveSlugByHumanKey(bound,MSG_OVERVIEW_PROJECTS):'';
+    chips.push(boundSlug
+      ?`定位 session=<b>${esc(MSG_FILTERS.session)}</b>→项目 <b>${esc(boundSlug)}</b>`
+      :`定位 session=<b>${esc(MSG_FILTERS.session)}</b>（未绑定/未匹配项目）`);
+  }
   if(MSG_FILTERS.sender)chips.push(`发件人=<b>${esc(MSG_FILTERS.sender)}</b>`);
   if(MSG_FILTERS.recipient)chips.push(`收件人=<b>${esc(MSG_FILTERS.recipient)}</b>`);
   if(MSG_FILTERS.fromTs)chips.push(`从 ${esc(MSG_FILTERS.fromTs)}`);
@@ -3070,7 +3090,7 @@ function renderProjMsgs(d,focusMessageId){
     filterBar=`<div class="msg-filter-bar">筛选中：${chips.join(' · ')} · 显示 ${msgs.length}/${all.length}
       <button class="icon" onclick="clearMsgFilter()" style="font-size:11px">× 清除</button></div>`;
   }else{
-    filterBar=`<div class="msg-filter-bar muted" style="background:transparent;border-style:dashed">共 ${all.length} 条（最多 300）· 可用上方条件筛选</div>`;
+    filterBar=`<div class="msg-filter-bar muted" style="background:transparent;border-style:dashed">共 ${all.length} 条（最多 300）· Session 用于跳转绑定项目；消息按「项目」库加载并用发件人/时间等筛选</div>`;
   }
   const statusLabel=b=>({unread:'未读',read:'已读',acked:'已ack',processing:'处理中',processed:'已处理',stale:'stale',other:''}[b]||'');
   const statusClass=b=>({unread:'st-unread',read:'st-read',acked:'st-read',processing:'st-work',processed:'st-read',stale:'st-unread'}[b]||'');
@@ -3373,77 +3393,175 @@ async function layoutSnapshotPanes(session){
     return (d.panes||[]).filter(p=>p.session===session&&p.pane_id);
   }catch(e){return []}
 }
+/** 同步兜底：仅用 BOARD（可能 stale、多 pane focused=true）。动作路径请用 layoutFreshContext。 */
 function layoutTermContext(){
   const ctx=termCollabContext();
   const session=ctx.session||'';
   const panes=(BOARD?.panes||[]).filter(p=>p.session===session);
+  const sessEntry=(BOARD?.sessions||[]).find(s=>s.session===session)||{};
+  const focusedPaneId=sessEntry.focused_pane_id||null;
   let target=ctx.paneId?panes.find(p=>p.pane_id===ctx.paneId):null;
+  if(!target&&focusedPaneId)target=panes.find(p=>p.pane_id===focusedPaneId)||null;
   if(!target)target=panes.find(p=>p.focused);
   if(!target&&panes.length===1)target=panes[0];
-  return {session,target,panes};
+  return {session,target,panes,focusedPaneId};
+}
+/**
+ * 新鲜 snapshot 解析「你所在的分屏组」：
+ * 优先 CURRENT_TERM.paneId → session.focused_pane_id → 唯一 focused → 最大多分屏 tab。
+ * 禁止仅靠 BOARD 里多个 focused=true 的第一个（会拆错 tab / 显示无变化）。
+ */
+async function layoutFreshContext(){
+  const ctx=termCollabContext();
+  const session=ctx.session||'';
+  if(!session)return {session:'',target:null,panes:[],focusedPaneId:null,groupTabId:'',group:[]};
+  let snap=null;
+  try{snap=await api('/api/herdr/snapshot')}catch(e){snap=null}
+  if(snap)BOARD=snap;
+  const panes=((snap&&snap.panes)||BOARD?.panes||[]).filter(p=>p.session===session&&p.pane_id);
+  const sessEntry=((snap&&snap.sessions)||BOARD?.sessions||[]).find(s=>s&&s.session===session)||{};
+  const focusedPaneId=sessEntry.focused_pane_id||null;
+  let target=null;
+  if(ctx.paneId)target=panes.find(p=>p.pane_id===ctx.paneId)||null;
+  if(!target&&focusedPaneId)target=panes.find(p=>p.pane_id===focusedPaneId)||null;
+  if(!target){
+    const focused=panes.filter(p=>p.focused);
+    if(focused.length===1)target=focused[0];
+  }
+  if(!target&&panes.length===1)target=panes[0];
+  const byTab={};
+  for(const p of panes){
+    const tid=String(p.tab_id||'');
+    if(!tid)continue;
+    (byTab[tid]=byTab[tid]||[]).push(p);
+  }
+  let groupTabId=target?String(target.tab_id||''):'';
+  let group=groupTabId?(byTab[groupTabId]||[]):[];
+  if(group.length<=1){
+    const multi=Object.entries(byTab)
+      .filter(([,list])=>list.length>1)
+      .sort((a,b)=>b[1].length-a[1].length);
+    if(multi.length){
+      const containing=target?multi.find(([,list])=>list.some(p=>p.pane_id===target.pane_id)):null;
+      const pick=containing||multi[0];
+      groupTabId=pick[0];
+      group=pick[1];
+      if(!target)target=group.find(p=>p.focused)||group[0];
+    }
+  }
+  return {session,target,panes,focusedPaneId,groupTabId,group,byTab};
+}
+function layoutGroupLabel(group){
+  return (group||[]).map(p=>p.label||p.agent||p.pane_id).join(' · ');
+}
+function layoutUpdateGroupHint(ctx){
+  const el=document.getElementById('layoutGroupHint');
+  if(!el)return;
+  if(!ctx.session){el.textContent='先打开终端并选择 herdr session';return}
+  if(!ctx.groupTabId||!ctx.group.length){
+    el.textContent='当前 session 没有可识别的 pane';
+    return;
+  }
+  if(ctx.group.length<=1){
+    el.textContent=`你所在的 tab ${ctx.groupTabId} 已是单 pane（${layoutGroupLabel(ctx.group)||'—'}），无需拆开。`;
+    return;
+  }
+  el.innerHTML=`你所在的分屏组：<b>${esc(ctx.groupTabId)}</b> · <b>${ctx.group.length}</b> 个 pane<br><span style="font-size:10px">${esc(layoutGroupLabel(ctx.group))}</span>`;
 }
 async function showLayoutModal(){
-  const {session}=layoutTermContext();
-  if(!session){toast(t('layout.nosession','先打开一个终端(选择 herdr session)再调整布局'),4000);return}
+  const quick=layoutTermContext();
+  if(!quick.session){toast(t('layout.nosession','先打开一个终端(选择 herdr session)再调整布局'),4000);return}
   const lym=document.getElementById('layoutModal');lym.classList.add('show');openDialog(lym,{labelledBy:'layoutModalTitle',closer:closeLayoutModal});
   await renderLayoutPaneList();
 }
 function closeLayoutModal(){document.getElementById('layoutModal').classList.remove('show');closeDialog(document.getElementById('layoutModal'))}
 async function renderLayoutPaneList(){
-  const {session,target}=layoutTermContext();
+  const ctx=await layoutFreshContext();
+  layoutUpdateGroupHint(ctx);
+  const {target,panes}=ctx;
   const el=document.getElementById('layoutPaneList');
   if(!el)return;
-  const panes=await layoutSnapshotPanes(session);
   if(!panes.length){el.innerHTML=`<div class="empty">${esc(t('layout.nopanes','当前 session 没有 pane'))}</div>`;return}
+  const sorted=[...panes].sort((a,b)=>(b.agent?1:0)-(a.agent?1:0));
   const picked=new Set([...document.querySelectorAll('.ly-pick:checked')].map(i=>i.value));
-  el.innerHTML=panes.map(p=>{
-    const label=p.label||p.agent||p.pane_id;
-    const checked=(picked.size?picked.has(p.pane_id):(target&&p.pane_id===target.pane_id))?'checked':'';
+  const agents=sorted.filter(p=>p.agent);
+  const groupIds=new Set((ctx.group||[]).map(p=>p.pane_id));
+  el.innerHTML=sorted.map(p=>{
+    const isAgent=!!p.agent;
+    const label=p.label||p.agent||'(空 shell)';
+    let checked=false;
+    if(picked.size)checked=picked.has(p.pane_id);
+    else if(isAgent){
+      if(groupIds.size>1)checked=groupIds.has(p.pane_id);
+      else{
+        const defaultPicks=[];
+        if(target)defaultPicks.push(target.pane_id);
+        for(const a of agents){if(!defaultPicks.includes(a.pane_id))defaultPicks.push(a.pane_id);if(defaultPicks.length>=4)break}
+        checked=defaultPicks.includes(p.pane_id);
+      }
+    }
+    const focusMark=(target&&p.pane_id===target.pane_id)?' · 当前焦点':'';
+    const groupMark=groupIds.has(p.pane_id)&&groupIds.size>1?' · 你所在组':'';
     return `<label style="display:flex;gap:8px;align-items:center;font-size:12px;cursor:pointer">
-      <input type="checkbox" class="ly-pick" value="${esc(p.pane_id)}" ${checked}>
-      <b>${esc(label)}</b><span class="muted">${esc(p.pane_id)}${p.tab_id?' · '+esc(p.tab_id):''}</span></label>`;
+      <input type="checkbox" class="ly-pick" value="${esc(p.pane_id)}" ${checked?'checked':''}>
+      <span style="flex:1;min-width:0"><b>${esc(label)}</b><span class="muted">${focusMark}${groupMark}</span>
+      <span class="muted" style="font-size:10px"> ${esc(p.pane_id)}${p.tab_id?' · '+esc(p.tab_id):''}</span></span></label>`;
   }).join('');
 }
-function layoutTargetOrToast(){
-  const {session,target}=layoutTermContext();
-  if(!session){toast(t('layout.nosession','先打开一个终端(选择 herdr session)再调整布局'));return null}
-  if(!target){toast(t('layout.notarget','找不到当前 pane:请先在终端里聚焦一个 pane'));return null}
-  return {session,paneId:target.pane_id,tabId:target.tab_id||''};
+async function layoutTargetOrToast(){
+  const ctx=await layoutFreshContext();
+  if(!ctx.session){toast(t('layout.nosession','先打开一个终端(选择 herdr session)再调整布局'));return null}
+  if(!ctx.target){toast(t('layout.notarget','找不到当前 pane:请先在终端里聚焦一个 pane'));return null}
+  return {
+    session:ctx.session,
+    paneId:ctx.target.pane_id,
+    tabId:ctx.target.tab_id||'',
+    groupTabId:ctx.groupTabId||ctx.target.tab_id||'',
+    group:ctx.group||[],
+  };
 }
 async function layoutSplit(mode){
-  const t=layoutTargetOrToast();if(!t)return;
+  const t=await layoutTargetOrToast();if(!t)return;
   try{
     await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}/layout/split`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
     toast(t('layout.done_split','已分屏(新槽位为空 shell)'));
-    refreshBoard();closeLayoutModal();
+    await refreshBoard();closeLayoutModal();
   }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 async function layoutDetach(){
-  const t=layoutTargetOrToast();if(!t)return;
+  const t=await layoutTargetOrToast();if(!t)return;
   try{
     await api(`/api/herdr/pane/${encodeURIComponent(t.session)}/${encodeURIComponent(t.paneId)}/layout/detach`,{method:'POST'});
     toast(t('layout.done_detach','已拆出到独立 tab'));
-    refreshBoard();closeLayoutModal();
+    await refreshBoard();closeLayoutModal();
   }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 async function layoutUntile(){
-  const t=layoutTargetOrToast();if(!t)return;
-  if(!t.tabId){toast(t('layout.notab','无法确定当前 pane 所在 tab'));return}
+  const t=await layoutTargetOrToast();if(!t)return;
+  const tabId=t.groupTabId||t.tabId;
+  if(!tabId){toast(t('layout.notab','无法确定当前 pane 所在 tab'));return}
+  if((t.group||[]).length<=1){
+    toast(t('layout.single_pane','该 tab 只有一个 pane')+'（session 内也没有其他多分屏组）',4500);
+    return;
+  }
   try{
-    const r=await api(`/api/herdr/session/${encodeURIComponent(t.session)}/layout/untile`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tab_id:t.tabId})});
-    toast((r.moved&&r.moved.length)?t('layout.done_untile','已拆开')+' '+r.moved.length+' '+t('layout.panes_unit','个 pane'):t('layout.single_pane','该 tab 只有一个 pane'));
-    refreshBoard();closeLayoutModal();
+    const r=await api(`/api/herdr/session/${encodeURIComponent(t.session)}/layout/untile`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tab_id:tabId})});
+    const moved=r.moved&&r.moved.length?r.moved.length:0;
+    toast(moved
+      ?`${t('layout.done_untile','已拆开')} ${tabId}：${moved} ${t('layout.panes_unit','个 pane')}`
+      :t('layout.single_pane','该 tab 只有一个 pane'));
+    await refreshBoard();closeLayoutModal();
   }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 async function layoutCompose(){
-  const {session}=layoutTermContext();
+  const {session}=await layoutFreshContext();
   const picks=[...document.querySelectorAll('.ly-pick:checked')].map(i=>i.value);
   if(picks.length<2||picks.length>4){toast(t('layout.pick24','请勾选 2-4 个 pane'));return}
   const orientation=document.getElementById('lyOrientation').value;
   try{
     await api(`/api/herdr/session/${encodeURIComponent(session)}/layout/compose`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pane_ids:picks,orientation})});
     toast(t('layout.done_compose','已组合为分屏'));
-    refreshBoard();closeLayoutModal();
+    await refreshBoard();closeLayoutModal();
   }catch(e){await refreshBoard();toast(t('toast.sendfail','操作失败: ')+e,5000)}
 }
 function teamCollabContextText(context){
@@ -5383,43 +5501,33 @@ function termMinimumContrastRatio(){return TERM_WEBGL_CONTRAST}
 // darkTermBoost 等)已移除——它让每个终端 WS chunk 都在主线程跑正则+HSL 运算,是
 // TUI 程序(codex/kimi 等,输出全是颜色码)卡顿的根因。颜色现交由 xterm 渲染层原生
 // 处理(options.theme + minimumContrastRatio + WebGL),与 Orca 的做法一致。
-function setTheme(mode,save=true){
-  const themeStarted=performance.now();
+// 用户切换主题：写 localStorage 后整页刷新。运行时改 xterm/WebGL 曾导致切一次后错乱；
+// boot 路径(save=false)只改 class，不 reload。
+function applyDocumentTheme(mode){
   const light=mode==='light';
-  const th=termTheme();
-  const hasTerm=Object.keys(TERM_INSTANCES||{}).length>0;
-  const applyTheme=()=>{
-    document.documentElement.classList.toggle('light',light);
-    const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
-    const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
-    for(const [id,inst] of Object.entries(TERM_INSTANCES||{})){
-      if(id===TERM_ID&&inst.el?.style.display!=='none')try{
-        inst.xterm.options.theme=th;
-      }catch(e){}
-      else inst.pendingTheme=th;
-    }
-    sendAllTermColorSchemes();
-    try{fetch('/api/theme/herdr',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({mode:light?'light':'dark'})}).catch(()=>{})}catch(e){}
-    if(save)try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
-    // afterTermPaints(3帧)在真实GPU上可能早于WebGL重绘完成就回调,
-    // 导致遮罩闪一下就消失。用最小显示时长(TERM_THEME_MIN_MS)兜底,
-    // 取"渲染完成"和"最小时长"两者更晚,确保遮罩盖住整个卡顿期。
-    const hide=()=>{
-      if(performance.now()-themeStarted<TERM_THEME_MIN_MS){
-        setTimeout(hide,TERM_THEME_MIN_MS-(performance.now()-themeStarted));
-      }else{
-        hideTermThemeOverlay();
-        if(save)window.__termThemeSwitchMs=Math.round((performance.now()-themeStarted)*10)/10;
-      }
-    };
-    afterTermPaints(hide);
-  };
-  // 有终端时先盖全局固定遮罩(offsetHeight 强制画出),下一帧再触发 WebGL
-  // 重绘。遮罩在独立合成层,即使主线程被重绘卡住也仍可见。
-  if(hasTerm){
-    showTermThemeOverlay();
-    requestAnimationFrame(applyTheme);
-  }else applyTheme();
+  document.documentElement.classList.toggle('light',light);
+  const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=light?'#ffffff':'#181d27';
+  const btn=document.getElementById('themeBtn');if(btn)btn.textContent=light?'☀️':'🌙';
+  return light;
+}
+function setTheme(mode,save=true){
+  const light=mode==='light';
+  if(!save){
+    applyDocumentTheme(light?'light':'dark');
+    return;
+  }
+  try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+  applyDocumentTheme(light?'light':'dark');
+  const reload=()=>{try{location.reload()}catch(e){location.href=location.href}};
+  let done=false;
+  const finish=()=>{if(done)return;done=true;reload()};
+  try{
+    fetch('/api/theme/herdr',{
+      method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
+      body:JSON.stringify({mode:light?'light':'dark'}),
+    }).then(finish,finish);
+  }catch(e){finish()}
+  setTimeout(finish,800);
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
 (function(){try{setTheme(localStorage.getItem('dash-theme')||'light',false)}catch(e){}})();

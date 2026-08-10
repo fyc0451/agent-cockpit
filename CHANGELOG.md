@@ -6,6 +6,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Messages Session control is navigation-only (jump to mail-project human_key),
+  with clearer chips/toasts; message body still loads from the project library.
+- Layout「拆开整组」resolves the multi-pane group from a fresh snapshot
+  `sessions[].focused_pane_id` instead of a stale BOARD with multiple focused panes.
+- Theme switch writes preference and force-reloads the page to avoid broken
+  xterm/WebGL runtime theme state.
+
+
 ### Added
 
 - Persistent coordination assignments with durable create/list operations,
