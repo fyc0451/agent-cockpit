@@ -329,7 +329,8 @@ def _rebind_body(**over: Any) -> dict[str, Any]:
     return body
 
 
-def test_rebind_endpoint_first_bind_and_cas(client) -> None:
+def test_rebind_endpoint_first_bind_and_cas(client, registry: Path) -> None:
+    _write_identity(registry, "proj-x/n--main.json", name="leader-new")
     resp = client.post(
         "/api/binding/user/default/rebind", json=_rebind_body(), headers=AUTH,
     )

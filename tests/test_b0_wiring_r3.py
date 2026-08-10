@@ -66,6 +66,7 @@ def test_rebind_leader_one_time_grant(client, registry: Path) -> None:
         json={
             "mail_name": "leader-new", "expected_version": 0,
             "registry_selector": "proj-x/n--main.json",
+            "session": "sess-g", "pane_id": "pane-g0",
         },
         headers=AUTH,
     )
@@ -83,7 +84,7 @@ def test_rebind_leader_one_time_grant(client, registry: Path) -> None:
     # Leader 用 grant 改绑（无用户凭据）
     body = {
         "mail_name": "leader-new", "expected_version": version,
-        "pane_id": "pane-g1",
+        "session": "sess-g", "pane_id": "pane-g1",
         "registry_selector": "proj-x/n--main.json",
         "caller_mail_name": "leader-new", "grant_token": grant,
     }
@@ -118,6 +119,7 @@ def test_rebind_grant_wrong_mail_name_rejected(client, registry: Path) -> None:
         json={
             "mail_name": "leader-new", "expected_version": 0,
             "registry_selector": "proj-x/n--main.json",
+            "session": "sess-g", "pane_id": "pane-g0",
         },
         headers=AUTH,
     )
@@ -132,6 +134,7 @@ def test_rebind_grant_wrong_mail_name_rejected(client, registry: Path) -> None:
         json={
             "mail_name": "leader-new", "expected_version": 1,
             "caller_mail_name": "impostor", "grant_token": grant,
+            "session": "sess-g", "pane_id": "pane-g0",
         },
         headers={"x-b0-grant-token": grant},
     )

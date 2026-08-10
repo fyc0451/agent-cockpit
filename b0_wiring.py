@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -98,13 +99,48 @@ def _check_ancestor_dirs(path: Path) -> None:
 
 
 def scope_key(issuer: str, scope_kind: str, scope_id: str) -> str:
-    return f"{issuer}/{scope_kind}/{scope_id}"
+    # JSON 数组编码：对含 '/' 等任意字符的输入保持单射可逆
+    return json.dumps([issuer, scope_kind, scope_id], ensure_ascii=False)
 
 
 def split_scope_key(key: str) -> tuple[str, str, str]:
+    try:
+        parts = json.loads(key)
+        if isinstance(parts, list) and len(parts) == 3:
+            return str(parts[0]), str(parts[1]), str(parts[2])
+    except ValueError:
+        pass
     issuer, _, rest = key.partition("/")
     scope_kind, _, scope_id = rest.partition("/")
     return issuer, scope_kind, scope_id
+
+
+def _safe_ts(value: Any) -> float:
+    """created_ts 宽容解析：数值/数值字符串有效，其余回退当前时间，
+    绝不抛异常毒化去重。"""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return time.time()
+    return time.time()
+
+
+def _require_local_hub(url: str) -> None:
+    """网络前 fail-closed：Hub 必须是本机回环，否则拒绝（capability 不得
+    离开本机）。"""
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        if host == "localhost":
+            return
+        raise CredentialUnavailable(f"Hub 必须是本机回环地址: {url!r}")
+    if not ip.is_loopback:
+        raise CredentialUnavailable(f"Hub 必须是本机回环地址: {url!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +200,11 @@ def fetch_inbox_for(
     hub_url = (hub_client.HUB or "").rstrip("/")
     if not hub_url:
         raise CredentialUnavailable("本地 Hub 未配置")
+    # 网络前 fail-closed：Bearer/registration_token 绝不得离开本机
+    _require_local_hub(hub_url)
+    ident_hub = str(identity.get("hub") or "")
+    if ident_hub:
+        _require_local_hub(ident_hub)
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "fetch_inbox", "arguments": {
@@ -242,22 +283,108 @@ def cross_run_fail_fast(
 
 
 # ---------------------------------------------------------------------------
+# F6/F7：binding control event 的 Hub transport（可 claim、携 binding version）
+# ---------------------------------------------------------------------------
+
+def active_run_participants() -> list[tuple[str, str]]:
+    """coordination 权威：所有 active run 的参与者 (project_key, mail_name)。"""
+    con = coordination._connect()
+    try:
+        rows = con.execute(
+            "SELECT r.project_key AS project_key, p.mail_name AS mail_name "
+            "FROM participants p JOIN runs r ON r.run_id = p.run_id "
+            "WHERE r.state='active' AND p.mail_name IS NOT NULL "
+            "AND p.mail_name != ''",
+        ).fetchall()
+    finally:
+        con.close()
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for row in rows:
+        item = (str(row["project_key"]), str(row["mail_name"]))
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def send_control_message_to_participants(
+    event: dict[str, Any], sender_identity: dict[str, Any],
+) -> bool:
+    """ADR 故障6/7：向各 active run 参与者发送可 claim 的 binding control
+    message。正文携带 binding version 与 scope；不附 task/revision；
+    ack_required=True。无参与者时空真（vacuous）成功。发送失败返回 False
+    （fanout 保持未 mark，下轮重试）。"""
+    participants = active_run_participants()
+    if not participants:
+        return True
+    sender_name = str(sender_identity.get("name") or "")
+    sender_token = str(sender_identity.get("registration_token") or "")
+    if not sender_name or not sender_token:
+        return False
+    event_type = str(event.get("event_type") or "binding_event")
+    version = int(event.get("binding_version") or 0)
+    payload: dict[str, Any] = {}
+    try:
+        payload = json.loads(event.get("payload_json") or "{}")
+    except ValueError:
+        payload = {}
+    body = (
+        f"[binding {event_type} v{version}] "
+        f"scope={event.get('scope_kind')}/{event.get('scope_id')} "
+        f"issuer={event.get('issuer')} "
+        f"mail_name={payload.get('mail_name') or ''} "
+        f"previous_mail_name={payload.get('previous_mail_name') or ''}\n"
+        "此为团队/频道控制面事件，不附 task/revision；"
+        f"请以 binding version v{version} 校验后 claim 处理。"
+    )
+    subject = f"[binding {event_type}] v{version}"
+    by_project: dict[str, list[str]] = {}
+    for project_key, mail_name in participants:
+        by_project.setdefault(project_key, []).append(mail_name)
+    ok = True
+    for project_key, names in sorted(by_project.items()):
+        try:
+            hub_client.send_message(
+                project_key=project_key,
+                sender_name=sender_name,
+                sender_token=sender_token,
+                to=sorted(set(names)),
+                subject=subject,
+                body_md=body,
+                importance="normal",
+                ack_required=True,
+            )
+        except Exception:
+            logging.getLogger("b0.wiring").exception(
+                "control message transport failed project=%s", project_key,
+            )
+            ok = False
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # 投递权威：复用 coordination receipts（R3：不新建第二 outbox）
 # ---------------------------------------------------------------------------
 
-def mark_prompted(project_key: str, mail_name: str, message_id: int) -> bool:
-    """在权威 receipts 上写 b0_prompted 标记（单事务原子 upsert）。
+def set_prompt_marker(
+    project_key: str, mail_name: str, message_id: int, phase: str,
+) -> bool:
+    """在权威 receipts 上写投递标记（单事务原子 upsert）。
 
-    可证明失败语义：标记写入成功才允许 prompt；写失败则不 prompt、事件
-    保留 pending 重试。重启后凡带标记的消息不再重复 prompt。
-    无 receipt 行时插入 state='notified'：不在 claim 阻塞集
-    （processed/stale/claimed）内，agent 后续 claim 正常进行且 checkpoint_json
-    标记被保留。
+    两相语义（与真实 accept 闭合）：
+    - phase='attempt'：投递尝试前写入；adapter 拒绝时必须 clear，重启后
+      允许补投（不得永久漏）。
+    - phase='delivered'：adapter 真实 accept 后写入，是唯一跨重启防重的
+      durable 证明。
+    无 receipt 行时插入 state='notified'（不在 claim 阻塞集内）。
     """
+    if phase not in ("attempt", "delivered"):
+        raise ValueError(f"非法 phase: {phase!r}")
     con = coordination._connect()
     try:
         now = time.time()
-        data = {"b0_prompted": now}
+        key = f"b0_prompt_{phase}" if phase == "attempt" else "b0_prompted"
         row = con.execute(
             "SELECT checkpoint_json FROM receipts "
             "WHERE project_key=? AND recipient=? AND message_id=?",
@@ -270,14 +397,14 @@ def mark_prompted(project_key: str, mail_name: str, message_id: int) -> bool:
                 "created_ts,updated_ts) "
                 "VALUES(?,?,?,'info','normal','notified','b0_prompted',?,1,?,?)",
                 (project_key, mail_name, message_id,
-                 json.dumps(data, ensure_ascii=False), now, now),
+                 json.dumps({key: now}, ensure_ascii=False), now, now),
             )
         else:
             try:
                 merged = json.loads(row["checkpoint_json"] or "{}")
             except ValueError:
                 merged = {}
-            merged.update(data)
+            merged[key] = now
             con.execute(
                 "UPDATE receipts SET checkpoint_json=?, updated_ts=? "
                 "WHERE project_key=? AND recipient=? AND message_id=?",
@@ -290,11 +417,47 @@ def mark_prompted(project_key: str, mail_name: str, message_id: int) -> bool:
         con.close()
 
 
+def clear_prompt_marker(
+    project_key: str, mail_name: str, message_id: int,
+) -> None:
+    """adapter 拒绝后清除 attempt 标记：该消息重启后仍可补投（零漏）。"""
+    con = coordination._connect()
+    try:
+        row = con.execute(
+            "SELECT checkpoint_json FROM receipts "
+            "WHERE project_key=? AND recipient=? AND message_id=?",
+            (project_key, mail_name, message_id),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            merged = json.loads(row["checkpoint_json"] or "{}")
+        except ValueError:
+            merged = {}
+        if "b0_prompt_attempt" not in merged:
+            return
+        merged.pop("b0_prompt_attempt", None)
+        con.execute(
+            "UPDATE receipts SET checkpoint_json=?, updated_ts=? "
+            "WHERE project_key=? AND recipient=? AND message_id=?",
+            (json.dumps(merged, ensure_ascii=False), time.time(),
+             project_key, mail_name, message_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def is_prompted(project_key: str, mail_name: str, message_id: int) -> bool:
+    """仅 delivered 标记算 durable 投递证明；attempt 不阻塞重启补投。"""
     receipt = coordination.receipt(project_key, mail_name, message_id)
     if receipt is None:
         return False
-    return "b0_prompted" in str(receipt.get("checkpoint_json") or "")
+    try:
+        data = json.loads(receipt.get("checkpoint_json") or "{}")
+    except ValueError:
+        return False
+    return "b0_prompted" in data
 
 
 def receipt_drain_counters(
@@ -339,6 +502,7 @@ class _ProofAdapter:
     def deliver(
         self, scope: str, binding_version: int, events: list[DeferredEvent],
     ) -> bool:
+        mail_targets: list[tuple[str, str, int]] = []
         for ev in events:
             if not ev.event_id.startswith("mail:"):
                 continue
@@ -348,16 +512,39 @@ class _ProofAdapter:
             message_id = summary.get("message_id")
             if not project_key or not mail_name or message_id is None:
                 return False
+            mail_targets.append((project_key, mail_name, int(message_id)))
+        # 先写 attempt：写失败则不投递（保留 pending 重试）
+        for pk, mn, mid in mail_targets:
             try:
-                if not mark_prompted(project_key, mail_name, int(message_id)):
+                if not set_prompt_marker(pk, mn, mid, "attempt"):
                     return False
             except Exception:
-                logging.getLogger("b0.wiring").exception("mark_prompted failed")
+                logging.getLogger("b0.wiring").exception("set_prompt_marker failed")
                 return False
-        accepted = bool(self._inner.deliver(scope, binding_version, events))
+        try:
+            accepted = bool(self._inner.deliver(scope, binding_version, events))
+        except Exception:
+            accepted = False
         if accepted:
+            # 真实 accept → 升级为 durable delivered 证明 + 投递证明集
+            for pk, mn, mid in mail_targets:
+                try:
+                    set_prompt_marker(pk, mn, mid, "delivered")
+                except Exception:
+                    logging.getLogger("b0.wiring").exception(
+                        "set_prompt_marker delivered failed",
+                    )
             for ev in events:
                 self.proof.add(ev.event_id)
+        else:
+            # 拒绝 → 清除 attempt：重启后允许补投（不得永久漏）
+            for pk, mn, mid in mail_targets:
+                try:
+                    clear_prompt_marker(pk, mn, mid)
+                except Exception:
+                    logging.getLogger("b0.wiring").exception(
+                        "clear_prompt_marker failed",
+                    )
         return accepted
 
 
@@ -607,7 +794,7 @@ class B0Coordinator:
                 "importance": message.get("importance"),
                 "created_ts": message.get("created_ts"),
             },
-            created_ts=float(message.get("created_ts") or time.time()),
+            created_ts=_safe_ts(message.get("created_ts")),
         )
         result = self.core.ingest(event)
         if result.get("stale"):
@@ -663,11 +850,15 @@ class B0Coordinator:
             logging.getLogger("b0.wiring").exception("close drain failed")
 
     # -- W5 control-event fanout（issuer-scoped） ---------------------------
-    def fanout_control_events(self, *, limit: int = 100) -> int:
-        """把本 issuer 未 fanout 的 control events 注入 deferred。
+    def fanout_control_events(
+        self, *, limit: int = 100,
+        transport: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> int:
+        """把本 issuer 未 fanout 的 control events 注入 deferred 并 transport。
 
-        只有事件真正 delivered 才 mark fanned_out；working/拒绝时保持未
-        mark，下一轮 tick 或 crash 重建后重放（零丢零重由 event_id 去重）。
+        只有同时满足 1) 本进程 durable 投递证明（adapter 真实 accept）与
+        2) transport 成功（F6/F7 Hub control message 已发出）才 mark
+        fanned_out；任一不满足保持未 mark，下一轮 tick 或 crash 重建后重放。
         跨 issuer 读/ack 由 PREP 层强制零变更（WHERE issuer 隔离）。
         """
         fanned = 0
@@ -699,17 +890,29 @@ class B0Coordinator:
                     "mail_name": payload.get("mail_name"),
                     "previous_mail_name": payload.get("previous_mail_name"),
                 },
-                created_ts=float(event.get("created_ts") or time.time()),
+                created_ts=_safe_ts(event.get("created_ts")),
             ))
-            if result.get("delivered") or (
-                str(event["event_id"]) in self._proof_adapter.proof
+            delivered_proof = (
+                result.get("delivered")
+                or str(event["event_id"]) in self._proof_adapter.proof
+            )
+            if not delivered_proof:
+                continue  # pending/仅入队：不 mark，crash 可重放
+            transported = True
+            if transport is not None:
+                try:
+                    transported = bool(transport(event))
+                except Exception:
+                    logging.getLogger("b0.wiring").exception(
+                        "control transport failed",
+                    )
+                    transported = False
+            if not transported:
+                continue  # transport 失败不 mark，下轮重试
+            if leader_binding.mark_event_fanned_out(
+                self._issuer, str(event["event_id"]),
             ):
-                # 只有 durable 投递证明（本进程 adapter 真实 accept）才 ack；
-                # pending/仅 duplicate 不得 mark，crash 后由 outbox 重放
-                if leader_binding.mark_event_fanned_out(
-                    self._issuer, str(event["event_id"]),
-                ):
-                    fanned += 1
+                fanned += 1
         return fanned
 
     # -- restart rebuild ------------------------------------------------------
@@ -781,7 +984,30 @@ def perform_rebind(
     session: str | None = None, pane_id: str | None = None,
     registry_selector: str | None = None,
 ) -> dict[str, Any]:
-    """B1 CAS 改绑（expected_version 必填；失败零变更由 PREP 保证）。"""
+    """B1 CAS 改绑（expected_version 必填；失败零变更由 PREP 保证）。
+
+    CAS 之前强制预校验（任一失败抛 BindingError，零变更）：
+    - registry_selector 必填且可解析（A2 fail-closed 全套门）；
+    - identity name 必须等于 mail_name（身份一致）；
+    - identity hub 必须是本地 Hub（不得指向远端）；
+    - session/pane_id 必填非空（路由完整性）。
+    """
+    if not registry_selector:
+        raise leader_binding.BindingError("registry_selector 必填")
+    try:
+        identity = resolve_selector(registry_selector)
+    except CredentialUnavailable as exc:
+        raise leader_binding.BindingError(f"selector 校验失败: {exc}")
+    if str(identity.get("name") or "") != mail_name:
+        raise leader_binding.BindingError(
+            f"selector 身份 {identity.get('name')!r} 与 mail_name {mail_name!r} 不符"
+        )
+    ident_hub = str(identity.get("hub") or "").rstrip("/")
+    local_hub = (hub_client.HUB or "").rstrip("/")
+    if not ident_hub or ident_hub != local_hub:
+        raise leader_binding.BindingError("identity hub 必须是本地 Hub")
+    if not str(session or "").strip() or not str(pane_id or "").strip():
+        raise leader_binding.BindingError("session/pane_id 必填非空")
     row = leader_binding.bind_leader(
         issuer, scope_kind, scope_id,
         mail_name=mail_name,

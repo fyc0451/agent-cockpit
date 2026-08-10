@@ -417,6 +417,26 @@ def _b0_get_coordinator() -> b0_wiring.B0Coordinator | None:
     return _b0_coordinator
 
 
+def _b0_control_transport(event: dict[str, Any]) -> bool:
+    """F6/F7：以事件 scope 的 active binding 身份向各 active run 参与者
+    发送可 claim、携 binding version 的 Hub control message。"""
+    try:
+        row = leader_binding.get_active_binding(
+            str(event.get("issuer") or ""),
+            str(event.get("scope_kind") or ""),
+            str(event.get("scope_id") or ""),
+        )
+    except Exception:
+        return False
+    if not row or not row.get("registry_selector"):
+        return False
+    try:
+        identity = b0_wiring.resolve_selector(str(row["registry_selector"]))
+    except b0_wiring.CredentialUnavailable:
+        return False
+    return b0_wiring.send_control_message_to_participants(event, identity)
+
+
 def _b0_poll_tick() -> None:
     """消息 poller 链路的一次 B0 tick：sync + fanout + dual-pull/ingest。"""
     coord = _b0_get_coordinator()
@@ -424,7 +444,7 @@ def _b0_poll_tick() -> None:
         return
     try:
         coord.sync_bindings()
-        coord.fanout_control_events()
+        coord.fanout_control_events(transport=_b0_control_transport)
         coord.poll_once()
     except Exception:
         logger.exception("b0 poll tick failed")
@@ -442,16 +462,27 @@ def _b0_apply_live_status(snap: dict[str, Any]) -> None:
         return
     panes = [p for p in snap.get("panes", []) if isinstance(p, dict)]
     status_by_pane = {p.get("pane_id"): p.get("agent_status") for p in panes}
-    panes_by_mail = {p.get("mail_name"): p for p in panes if p.get("mail_name")}
+    panes_by_mail: dict[Any, list[dict[str, Any]]] = {}
+    for p in panes:
+        if p.get("mail_name"):
+            panes_by_mail.setdefault(p.get("mail_name"), []).append(p)
     for row in rows:
         pane_id = str(row.get("pane_id") or "")
-        # G6：路由 pane 消失但同 mail_name 有新 pane → 改绑路由载荷
+        # G6：路由 pane 消失但同 mail_name 有新 pane → 改绑路由载荷；
+        # 多候选歧义时禁止自动改绑（确定性门）
         if pane_id not in status_by_pane:
-            cand = panes_by_mail.get(row.get("mail_name"))
-            if (
-                cand is not None and cand.get("pane_id")
-                and cand.get("pane_id") != pane_id
-            ):
+            candidates = panes_by_mail.get(row.get("mail_name")) or []
+            candidates = [
+                c for c in candidates if c.get("pane_id") != pane_id
+            ]
+            if len(candidates) > 1:
+                logger.warning(
+                    "b0 G6 ambiguous panes for mail_name=%s count=%d; "
+                    "refusing auto-rebind",
+                    row.get("mail_name"), len(candidates),
+                )
+            elif len(candidates) == 1:
+                cand = candidates[0]
                 try:
                     leader_binding.bind_leader(
                         row["issuer"], row["scope_kind"], row["scope_id"],
@@ -1300,12 +1331,35 @@ def _delivery_payloads(result: Any) -> list[dict[str, Any]]:
 
 def _notify_coordination_message(
     project_key: str, recipient: str, message_id: int, subject: str,
-    meta: dict[str, Any], *, hard: bool,
+    meta: dict[str, Any], *, hard: bool, sender: str | None = None,
 ) -> dict[str, Any]:
+    intent = str(meta.get("intent") or "info")
+    # W6 canonical 授权门：控制动作必须先于任何中断（含 hard C-c）校验发送者
+    canonical_note = ""
+    if intent in coordination.NO_RESUME_INTENTS:
+        try:
+            bindings = leader_binding.list_bindings(
+                issuer=B0_ISSUER, state="active",
+            )
+        except Exception:
+            bindings = []
+        if bindings:
+            canonical_names = {str(b["mail_name"]) for b in bindings}
+            if not sender or sender not in canonical_names:
+                return {
+                    "notified": False,
+                    "reason": "canonical_binding_not_authorized",
+                }
+            for binding in bindings[:3]:
+                canonical_note += (
+                    f" [canonical binding v{binding['binding_version']} "
+                    f"from={binding['mail_name']} "
+                    f"scope={binding['scope_kind']}/{binding['scope_id']}；"
+                    "与本地已知版本冲突时拒绝并报警]"
+                )
     context = coordination.active_context(project_key, recipient)
     if not context or context.get("run_id") != meta.get("run_id"):
         return {"notified": False, "reason": "recipient_not_in_unique_active_run"}
-    intent = str(meta.get("intent") or "info")
     checkpoint = None
     if intent in coordination.INTERRUPT_INTENTS:
         checkpoint = coordination.request_pause(
@@ -1337,23 +1391,7 @@ def _notify_coordination_message(
         f"基础 checkpoint 已保存；运行 {command} 领取。"
         "处理完成后按工具输出单条 complete；普通打断会自动校验 revision 并恢复，"
         "stop/redirect 不恢复旧任务。"
-    )
-    if intent in coordination.NO_RESUME_INTENTS:
-        # W6：控制动作正文携带 canonical binding version（ADR §4/故障6）；
-        # 枚举本 issuer 的真实 active scope，不硬编码 scope
-        try:
-            bindings = leader_binding.list_bindings(
-                issuer=B0_ISSUER, state="active",
-            )
-        except Exception:
-            bindings = []
-        for binding in bindings[:3]:
-            note += (
-                f" [canonical binding v{binding['binding_version']} "
-                f"from={binding['mail_name']} "
-                f"scope={binding['scope_kind']}/{binding['scope_id']}；"
-                "与本地已知版本冲突时拒绝并报警]"
-            )
+    ) + canonical_note
     sent = herdr_client.pane_send(session, pane_id, note, "prompt")
     return {
         "notified": not sent.get("error") and sent.get("available", True),
@@ -1430,6 +1468,7 @@ def api_send(req: SendMessageReq):
                     notification = _notify_coordination_message(
                         proj["human_key"], str(recipient), int(message_id),
                         req.subject, meta, hard=req.hard,
+                        sender=sender["name"],
                     )
                 except Exception as exc:
                     notification = {
