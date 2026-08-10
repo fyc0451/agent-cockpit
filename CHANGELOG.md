@@ -38,6 +38,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Preserve and safely recover eligible pending background tasks after a Cockpit
+  restart, while failing interrupted running tasks closed and rejecting dirty or
+  mismatched worktrees before relaunch.
 - Keep the event-driven Herdr state cache current by subscribing to each pane's
   agent-status events and rebuilding subscriptions when the pane set changes,
   without adding CLI polling or expanding the configured canary scope.
