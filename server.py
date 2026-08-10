@@ -50,13 +50,32 @@ import settings
 from pydantic import BaseModel, Field
 
 
+H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
+
+
+def _parse_h0_state_mode(value: str | None) -> str:
+    mode = (value or "").strip().lower() or "off"
+    if mode not in {"off", "on"}:
+        raise RuntimeError(f"invalid {H0_STATE_MODE_ENV}")
+    return mode
+
+
+H0_STATE_MODE = _parse_h0_state_mode(os.environ.get(H0_STATE_MODE_ENV))
+
+
+def _h0_state_enabled() -> bool:
+    return H0_STATE_MODE == "on"
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
-    if not _open_state_clients():
+    state_enabled = _h0_state_enabled()
+    if state_enabled and not _open_state_clients():
         # R7 门禁:未决 retiring/survivors 未回收,fail-closed 拒绝启动
         raise RuntimeError("herdr state clients not fully reaped; refusing start")
-    await asyncio.to_thread(_reconcile_state_client)
+    if state_enabled:
+        await asyncio.to_thread(_reconcile_state_client)
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
     _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
@@ -80,8 +99,11 @@ async def lifespan(_: FastAPI):
         try:
             await asyncio.to_thread(_release_all_zoom_leases)
         finally:
-            survivors = await asyncio.to_thread(_stop_state_client)
-            if survivors:
+            survivors = (
+                await asyncio.to_thread(_stop_state_client)
+                if state_enabled else []
+            )
+            if state_enabled and survivors:
                 # deadline 耗尽仍有存活 state 线程:诊断已序列化,真实引用
                 # 保留在 _state_survivors;不得仅记日志后正常完成
                 logger.error("herdr state clients survived stop: %s", survivors)
@@ -440,7 +462,7 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def _board_snapshot() -> dict[str, Any]:
-    return _enrich_board_identities(_state_client_snapshot())
+    return _enrich_board_identities(_herdr_runtime_snapshot())
 
 
 def _identity_hint(
@@ -2947,8 +2969,8 @@ def api_herdr_pane_identity(session: str, pane_id: str):
     """
     _validate_session_name(session)
     _validate_pane_id(pane_id)
-    # 先从状态缓存拿这个 pane 的 cwd 和 agent 类型(H0.5:GET 状态消费者走缓存)
-    snap = _state_client_snapshot()
+    # 先从当前运行时快照拿这个 pane 的 cwd 和 agent 类型。
+    snap = _herdr_runtime_snapshot()
     pane = next((p for p in snap.get("panes", [])
                  if p.get("session") == session and p.get("pane_id") == pane_id), None)
     if not pane:
@@ -3394,7 +3416,7 @@ def _same_mail_project_family(project: str, session_path: str) -> bool:
 
 
 def _session_pane_paths(name: str) -> list[str]:
-    snap = _state_client_snapshot()
+    snap = _herdr_runtime_snapshot()
     sess = next(
         (item for item in snap.get("sessions", []) if item.get("session") == name),
         None,
@@ -4255,7 +4277,7 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
     """手动给单个 pane 发身份告知(适用于手动在 herdr 里开的新 pane)。"""
     _validate_session_name(session)
     _validate_pane_id(pane_id)
-    snap = _state_client_snapshot()
+    snap = _herdr_runtime_snapshot()
     p = next(
         (
             x for s in snap.get("sessions", []) if s.get("session") == session
@@ -4326,7 +4348,7 @@ def api_herdr_session_init_mail(name: str, req: MailProjectReq | None = None):
                 **state,
             }
         project = state["project"]
-    snap = _state_client_snapshot()
+    snap = _herdr_runtime_snapshot()
     sess = next((s for s in snap.get("sessions", []) if s.get("session") == name), None)
     if not sess:
         raise HTTPException(404, f"session 不存在: {name}")
@@ -5295,8 +5317,14 @@ def _state_client_snapshot() -> dict[str, Any]:
     return result
 
 
-# team_inbox_router 共享同一缓存:路由 lead 在线判断零 fork。
-team_inbox_router.set_snapshot_provider(_state_client_snapshot)
+def _herdr_runtime_snapshot() -> dict[str, Any]:
+    """off 保持既有 CLI 行为；on 才启用 H0 socket 缓存。"""
+    if _h0_state_enabled():
+        return _state_client_snapshot()
+    return herdr_client.snapshot()
+
+
+team_inbox_router.set_snapshot_provider(_herdr_runtime_snapshot)
 
 _live_state: dict[str, Any] = {
     "revision": 0,
@@ -5348,7 +5376,10 @@ async def _poll_live_state() -> None:
         success = False
         session_count = 0
         try:
-            if time.monotonic() - last_discovery >= _state_discovery_interval():
+            if (
+                _h0_state_enabled()
+                and time.monotonic() - last_discovery >= _state_discovery_interval()
+            ):
                 await asyncio.to_thread(_reconcile_state_client)
                 last_discovery = time.monotonic()
             await asyncio.to_thread(_expire_zoom_leases)
@@ -5547,6 +5578,7 @@ def health():
     return {
         "status": "ok" if ok else "degraded",
         "ts": time.time(),
+        "herdr_state_mode": H0_STATE_MODE,
         **external,
         "external": external,
     }

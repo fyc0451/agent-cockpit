@@ -159,6 +159,7 @@ class FakeStateClient:
 def _reset_state(monkeypatch):
     FakeStateClient.instances = []
     FakeStateClient.ready_next = True
+    monkeypatch.setattr(server, "H0_STATE_MODE", "on")
     monkeypatch.setattr(server, "_state_clients", {})
     monkeypatch.setattr(server, "_state_sessions_meta", {})
     monkeypatch.setattr(server, "_state_discovery_ok", False)
@@ -1806,7 +1807,7 @@ def test_mutation_adjacent_snapshot_stays_cli():
 
     source = Path(server.__file__).read_text(encoding="utf-8")
     kept = source.count("herdr_client.snapshot()")
-    assert kept == 3  # start_agent 同类型判定 + launch 建 session/清 pane 验证
+    assert kept == 4  # 3 个 mutation 验证 + 默认 off 的兼容 snapshot
     for marker in ("H0.5 保留 CLI",):
         assert source.count(marker) == 3
 

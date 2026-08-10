@@ -176,7 +176,7 @@ def test_board_snapshot_adds_identity_from_session_binding(monkeypatch):
             {"session": "demo", "pane_id": "w1:p2", "agent": None},
         ],
     }
-    monkeypatch.setattr(server, "_state_client_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
     monkeypatch.setattr(
         server.mail_projects,
         "get",
@@ -202,7 +202,7 @@ def test_board_snapshot_omits_identity_without_binding(monkeypatch):
         "sessions": [{"session": "demo", "directory": "/sessions/demo"}],
         "panes": [{"session": "demo", "pane_id": "w1:p1", "agent": "codex"}],
     }
-    monkeypatch.setattr(server, "_state_client_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
     monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
     monkeypatch.setattr(
         server,

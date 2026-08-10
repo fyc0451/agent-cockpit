@@ -125,7 +125,7 @@ def test_old_session_with_multiple_registered_candidates_requires_selection(
     )
     monkeypatch.setattr(
         server,
-        "_state_client_snapshot",
+        "_herdr_runtime_snapshot",
         lambda: {
             "sessions": [{
                 "session": "demo",
@@ -163,7 +163,7 @@ def test_old_session_auto_adopts_only_registered_candidate(monkeypatch, tmp_path
     )
     monkeypatch.setattr(
         server,
-        "_state_client_snapshot",
+        "_herdr_runtime_snapshot",
         lambda: {"sessions": [{"session": "demo", "panes": []}]},
     )
     monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
@@ -195,7 +195,7 @@ def test_zero_candidate_suggests_unique_pane_project_not_herdr_state_dir(
     )
     monkeypatch.setattr(
         server,
-        "_state_client_snapshot",
+        "_herdr_runtime_snapshot",
         lambda: {"sessions": [{
             "session": "demo", "panes": [{"pane_id": "w1:p1", "cwd": str(project)}],
         }]},
@@ -226,7 +226,7 @@ def test_archived_stale_binding_is_replaced_by_unique_active_candidate(
     )
     monkeypatch.setattr(
         server,
-        "_state_client_snapshot",
+        "_herdr_runtime_snapshot",
         lambda: {"sessions": [{
             "session": "demo", "panes": [{"pane_id": "w1:p1", "cwd": str(active)}],
         }]},
@@ -267,7 +267,7 @@ def test_identity_endpoint_uses_bound_project_not_pane_cwd(monkeypatch, tmp_path
     )
     monkeypatch.setattr(
         server,
-        "_state_client_snapshot",
+        "_herdr_runtime_snapshot",
         lambda: {"panes": [{
             "session": "demo", "pane_id": "w1:p1", "cwd": str(worktree), "agent": "codex",
         }]},
@@ -305,7 +305,7 @@ def test_identity_endpoint_requests_project_selection_instead_of_guessing(
     )
     monkeypatch.setattr(
         server,
-        "_state_client_snapshot",
+        "_herdr_runtime_snapshot",
         lambda: {"panes": [{
             "session": "demo", "pane_id": "w1:p1", "cwd": str(session_dir), "agent": "codex",
         }]},
@@ -347,7 +347,7 @@ def test_init_mail_explicitly_binds_and_passes_project_argument(monkeypatch, tmp
     )
     monkeypatch.setattr(
         server,
-        "_state_client_snapshot",
+        "_herdr_runtime_snapshot",
         lambda: {"sessions": [{
             "session": "demo",
             "panes": [{"pane_id": "w1:p1", "cwd": str(session_dir), "agent": "claude"}],
