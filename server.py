@@ -2045,9 +2045,9 @@ def api_upgrade_start(req: UpgradeReq):
 # ── 设置路由 ────────────────────────────────────────────────────
 
 # ── 主题同步到 Herdr（Web 主题为单一真相源）────────────────────
-# Web 切主题时把 Herdr 自身 UI 主题写进 config.toml 并热重载；
-# 映射为默认值,后续可做成设置项。不改 auto_switch 等其余键。
-HERDR_THEME_MAP = {"light": "solarized", "dark": "catppuccin"}
+# Web 切主题时把 Herdr 自身 UI 主题写进 config.toml 并热重载。
+# light 必须用浅色内置名：solarized 是暗色，solarized-light 才是浅色。
+HERDR_THEME_MAP = {"light": "solarized-light", "dark": "catppuccin"}
 
 
 class ThemeHerdrReq(BaseModel):
@@ -2059,6 +2059,7 @@ def api_theme_herdr(req: ThemeHerdrReq):
     if req.mode not in HERDR_THEME_MAP:
         raise HTTPException(400, "mode 必须是 light 或 dark")
     theme_name = HERDR_THEME_MAP[req.mode]
+    herdr_client.set_web_theme_mode(req.mode)
     try:
         herdr_client.set_theme_name(theme_name)
     except ValueError as exc:
@@ -2077,11 +2078,19 @@ def api_theme_herdr(req: ThemeHerdrReq):
                 notified.append(tid)
     except Exception:
         logger.exception("theme/herdr notify labeled terms failed")
+    # Grok 自绘 TUI 不跟 herdr 调色板；对 live grok pane 键入 /theme light|dark
+    grok_sync: dict[str, Any] = {"applied": [], "errors": [], "command": ""}
+    try:
+        grok_sync = herdr_client.apply_grok_web_theme(req.mode)
+    except Exception:
+        logger.exception("theme/herdr apply grok theme failed")
+        grok_sync = {"ok": False, "applied": [], "errors": ["apply_grok_web_theme crashed"], "command": ""}
     return {
         "ok": True,
         "theme": theme_name,
         "reload": reload,
         "notified_terms": notified,
+        "grok": grok_sync,
     }
 
 

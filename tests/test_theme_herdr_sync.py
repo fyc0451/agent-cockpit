@@ -133,6 +133,8 @@ def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     _write_config(tmp_path, monkeypatch, "[theme]\nname = \"terminal\"\n")
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server.herdr_client, "reload_config", lambda timeout=10: {"ok": True})
+    monkeypatch.setattr(server.herdr_client, "apply_grok_web_theme", lambda mode: {"ok": True, "applied": [], "errors": [], "command": f"/theme {mode}"})
+    monkeypatch.setattr(server.herdr_client, "set_web_theme_mode", lambda mode: None)
     client = TestClient(server.app, headers={"Authorization": "Bearer secret"})
 
     r = client.post("/api/theme/herdr", json={"mode": "dark"})
@@ -142,7 +144,7 @@ def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     assert "notified_terms" in body
 
     r = client.post("/api/theme/herdr", json={"mode": "light"})
-    assert r.json()["theme"] == "solarized"
+    assert r.json()["theme"] == "solarized-light"
 
     r = client.post("/api/theme/herdr", json={"mode": "purple"})
     assert r.status_code == 400

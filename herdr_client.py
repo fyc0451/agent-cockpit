@@ -882,6 +882,7 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
       prompt    → agent pane 用 `agent prompt`(把文本作为提示提交给 agent)
       send      → 普通终端用 `pane send-text`(发文本)+ Enter(执行)
       keys      → 按键序列用 `pane send-keys`(只接受按键名如 Enter C-c Esc)
+      slash     → agent TUI 斜杠命令：send-text + Enter（不走 agent prompt，避免当聊天提交）
     正确语法统一为 `herdr --session <s> <subcmd> <pane_id> ...`(session 全局前置)。
     """
     if not is_available():
@@ -893,12 +894,77 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
             # 普通命令：原子 pane run 一次性发命令并提交回车，不再拆成
             # send-text + send-keys 两次（拆分会让 agent TUI 把首段当 prompt）。
             _run(["--session", session, "pane", "run", pane_id, text], timeout=8)
+        elif mode == "slash":
+            # Grok 等自绘 TUI：/theme light 必须当斜杠命令键入，不能 agent prompt。
+            cmd = str(text or "").strip()
+            if not cmd.startswith("/"):
+                cmd = "/" + cmd
+            _run(["--session", session, "pane", "send-text", pane_id, cmd], timeout=5)
+            _run(["--session", session, "pane", "send-keys", pane_id, "Enter"], timeout=5)
         else:  # keys
             keys = text.split()
             _run(["--session", session, "pane", "send-keys", pane_id] + keys, timeout=5)
         return {"available": True, "sent": text, "mode": mode}
     except RuntimeError as e:
         return {"available": True, "error": str(e)}
+
+
+def grok_theme_slash(mode: str) -> str:
+    """Web light/dark → Grok /theme 目标（见 grok user-guide 06-theming）。"""
+    return "/theme light" if mode == "light" else "/theme dark"
+
+
+def apply_grok_web_theme(mode: str) -> dict[str, Any]:
+    """把 Web 明暗推到所有 live grok pane（/theme），并返回结果摘要。
+
+    Grok TUI 默认 GrokNight 暗色，不继承 herdr/Web 主题；其它 agent 多跟终端色，
+    因此只需对 grok 单独 slash。working 中的 pane 仍会尝试（/theme 不提交聊天），
+    失败记入 errors，不阻断主题切换。
+    """
+    if mode not in ("light", "dark"):
+        raise ValueError("mode 必须是 light 或 dark")
+    cmd = grok_theme_slash(mode)
+    applied: list[dict[str, str]] = []
+    errors: list[str] = []
+    try:
+        snap = snapshot()
+    except Exception as exc:
+        return {"ok": False, "applied": [], "errors": [f"snapshot: {exc}"], "command": cmd}
+    for pane in snap.get("panes") or []:
+        if not isinstance(pane, dict):
+            continue
+        if str(pane.get("agent") or "").lower() != "grok":
+            continue
+        session = str(pane.get("session") or "")
+        pane_id = str(pane.get("pane_id") or "")
+        if not session or not pane_id:
+            continue
+        result = pane_send(session, pane_id, cmd, mode="slash")
+        if result.get("error"):
+            errors.append(f"{session}/{pane_id}: {result['error']}")
+        else:
+            applied.append({"session": session, "pane_id": pane_id})
+    return {"ok": not errors, "applied": applied, "errors": errors, "command": cmd}
+
+
+def grok_launch_theme_args(mode: str | None) -> list[str]:
+    """新建 grok 时附加的原生 argv：浅色用 --light，暗色不传（默认 GrokNight）。"""
+    if mode == "light":
+        return ["--light"]
+    return []
+
+
+# Web 主题最近一次同步结果（供 start_agent 注入 grok --light）
+_WEB_THEME_MODE: str | None = None
+
+
+def set_web_theme_mode(mode: str | None) -> None:
+    global _WEB_THEME_MODE
+    _WEB_THEME_MODE = mode if mode in ("light", "dark") else None
+
+
+def current_web_theme_mode() -> str | None:
+    return _WEB_THEME_MODE
 
 
 def agent_wait(
@@ -1138,6 +1204,11 @@ def start_agent(
         return {"available": True, "error_code": "invalid_agent_identity", "error": str(exc)}
     normalized_args = normalize_agent_args(args)
     agent_args = shlex.split(normalized_args) if normalized_args else []
+    # Grok 自绘 TUI 默认暗色；Web 浅色时启动加 --light（运行中切主题走 /theme slash）
+    if agent == "grok":
+        for flag in grok_launch_theme_args(current_web_theme_mode()):
+            if flag not in agent_args:
+                agent_args = [flag, *agent_args]
     # 只复用当前 live snapshot 中 agent 与工作目录都匹配的 pane。仅按 agent
     # 复用会把新任务静默送进另一个项目；不在 snapshot 中的旧 pane 不视为存活。
     snap = _snapshot_session(session)
