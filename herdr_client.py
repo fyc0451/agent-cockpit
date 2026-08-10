@@ -309,28 +309,27 @@ _THEME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 def set_theme_name(name: str) -> Path:
-    """更新 config.toml [theme].name,其余内容按行保留;缺节则追加。
-
-    原子写(mkstemp+fsync+replace)。不触碰 auto_switch 等其余键。
-    """
-    return set_theme_for_web_mode(
-        "light" if "light" in (name or "").lower() or name in ("solarized-light", "catppuccin-latte", "one-light", "gruvbox-light", "tokyo-night-day", "kanagawa-lotus", "rose-pine-dawn") else "dark",
-        name_override=name,
+    """更新 config.toml [theme].name；委托 set_theme_for_web_mode。"""
+    light_names = (
+        "solarized-light", "catppuccin-latte", "one-light", "gruvbox-light",
+        "tokyo-night-day", "kanagawa-lotus", "rose-pine-dawn", "solarized",
     )
+    mode = "light" if "light" in (name or "").lower() or name in light_names else "dark"
+    return set_theme_for_web_mode(mode, name_override=name)["path"]
 
 
-def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
-    """按 Web light/dark 强制写 herdr [theme].name，并关闭 auto_switch。
+def set_theme_for_web_mode(
+    mode: str, name_override: str | None = None,
+) -> dict[str, Any]:
+    """按 Web light/dark 写 herdr [theme].name，并关闭 auto_switch。
 
-    关键：auto_switch=true 时若 attach 客户端未收到 Mode 2031，appearance 默认 dark，
-    会一直用 dark_name，导致 Web 切浅色后 opencode 等 pane「永远不变」。
-    因此 Web 为主时 auto_switch=false，直接 name=浅色/深色内置主题，reload-config 即生效。
+    返回 {"path","name","changed"}。changed=False 时跳过 reload-config，
+    避免无配置变更仍全 session 重绘；Mode 2031 / grok slash 仍每次执行。
     """
     if mode not in ("light", "dark"):
         raise ValueError("mode 必须是 light 或 dark")
     dark_name = "catppuccin"
     light_name = "solarized-light"
-    # name_override 显式传入时即使是空串也要校验失败，不能 or 回退默认名
     if name_override is not None:
         name = name_override
     else:
@@ -348,7 +347,6 @@ def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
             return f"{key} = {value}{ending}"
         return f'{key} = "{value}"{ending}'
 
-    # 强制 name；auto_switch=false 让 reload 立刻用 name，不依赖 host appearance
     keys_wanted = {
         "name": name,
         "auto_switch": "false",
@@ -373,7 +371,6 @@ def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
                     ending = "\n" if line.endswith("\n") else ""
                     out.append(_kv(key, keys_wanted[key], ending))
                     seen.add(key)
-                # 丢弃旧 dark_name/light_name 行（Web 强制 name 模式不再需要）
                 continue
         out.append(line)
     if in_theme:
@@ -387,11 +384,17 @@ def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
         out.extend(["\n", "[theme]\n"])
         for key, val in keys_wanted.items():
             out.append(_kv(key, val))
+
+    new_text = "".join(out)
+    old_text = "".join(lines)
+    if new_text == old_text:
+        return {"path": path, "name": name, "changed": False}
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".herdr-config.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("".join(out))
+            f.write(new_text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -401,7 +404,7 @@ def set_theme_for_web_mode(mode: str, name_override: str | None = None) -> Path:
         except OSError:
             pass
         raise
-    return path
+    return {"path": path, "name": name, "changed": True}
 
 
 def _run(args: list[str], timeout: float = 10) -> str:
@@ -951,41 +954,204 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
 
 
 def grok_theme_slash(mode: str) -> str:
-    """Web light/dark → Grok /theme 目标（见 grok user-guide 06-theming）。"""
+    """Web light/dark → Grok /theme 目标（见 grok user-guide 06-theming）。
+
+    Grok 接受 light/dark 别名（GrokDay/GrokNight），也接受 /theme grokday 等。
+    """
     return "/theme light" if mode == "light" else "/theme dark"
 
 
-def apply_grok_web_theme(mode: str) -> dict[str, Any]:
-    """把 Web 明暗推到所有 live grok pane（/theme），并返回结果摘要。
+# Web light/dark → OpenCode 内置主题名（用户指定；勿用 Mode 2031 当唯一手段）
+OPENCODE_THEME_BY_WEB = {
+    "light": "palenight",
+    "dark": "aura",
+}
 
-    Grok TUI 默认 GrokNight 暗色，不继承 herdr/Web 主题；其它 agent 多跟终端色，
-    因此只需对 grok 单独 slash。working 中的 pane 仍会尝试（/theme 不提交聊天），
-    失败记入 errors，不阻断主题切换。
+
+def agent_theme_slash(agent: str, mode: str) -> str | None:
+    """各 agent 可直接一次发完的主题 slash；需多步 UI 的返回 None 由专用路径处理。
+
+    - grok: `/theme light|dark`
+    - opencode: 不走 light/dark 指令，统一 /themes → 主题名（palenight / aura）
+    """
+    if mode not in ("light", "dark"):
+        return None
+    kind = str(agent or "").strip().lower()
+    if kind == "grok":
+        return grok_theme_slash(mode)
+    return None
+
+
+def opencode_theme_name(mode: str) -> str:
+    """Web light/dark → OpenCode 主题 key（亮 palenight / 暗 aura）。"""
+    if mode not in OPENCODE_THEME_BY_WEB:
+        raise ValueError("mode 必须是 light 或 dark")
+    return OPENCODE_THEME_BY_WEB[mode]
+
+
+def set_opencode_tui_theme(theme_name: str) -> Path:
+    """写入 ~/.config/opencode/tui.json 的 theme，供新建/重启 OpenCode 继承。"""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", theme_name or ""):
+        raise ValueError("非法 OpenCode 主题名")
+    path = Path.home() / ".config" / "opencode" / "tui.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = raw
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    data["$schema"] = data.get("$schema") or "https://opencode.ai/tui.json"
+    data["theme"] = theme_name
+    text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    fd, tmp = tempfile.mkstemp(
+        prefix=".tui-theme.", suffix=".tmp", dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def apply_opencode_theme_to_pane(
+    session: str, pane_id: str, theme_name: str,
+) -> dict[str, Any]:
+    """在 live OpenCode pane 上选中主题：/themes → 输入名 → Enter 确认。
+
+    OpenCode 的 /themes 只打开选择器；filter 会预览，必须 Enter 才 confirmed，
+    否则 onCleanup 会回退。间隔留给 TUI 弹层。
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", theme_name or ""):
+        return {"error": "非法主题名"}
+    # 1) 打开主题列表
+    r1 = pane_send(session, pane_id, "/themes", mode="slash")
+    if r1.get("error"):
+        return r1
+    time.sleep(0.18)
+    # 2) 输入主题名（只 send-text，不 Enter，作为 filter）
+    try:
+        _run(
+            ["--session", session, "pane", "send-text", pane_id, theme_name],
+            timeout=5,
+        )
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    time.sleep(0.12)
+    # 3) Enter 确认选中（DialogThemeList onSelect → confirmed）
+    try:
+        _run(
+            ["--session", session, "pane", "send-keys", pane_id, "Enter"],
+            timeout=5,
+        )
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    return {
+        "available": True, "sent": f"/themes → {theme_name}",
+        "mode": "opencode-theme-pick",
+    }
+
+
+def apply_agent_web_themes(mode: str) -> dict[str, Any]:
+    """把 Web 明暗推到 live agent pane（按 agent 原生主题手段）。
+
+    - grok: `/theme light|dark`（自绘，light/dark 就是主题别名）
+    - opencode: 同一条路 /themes → 主题名（亮 palenight / 暗 aura）+ tui.json
+      不是「//theme dark」另一套；OpenCode 的明暗靠换主题包，不是换 mode 指令。
     """
     if mode not in ("light", "dark"):
         raise ValueError("mode 必须是 light 或 dark")
-    cmd = grok_theme_slash(mode)
     applied: list[dict[str, str]] = []
     errors: list[str] = []
+    skipped: list[dict[str, str]] = []
+    opencode_theme = opencode_theme_name(mode)
+    tui_path: str | None = None
+    try:
+        tui_path = str(set_opencode_tui_theme(opencode_theme))
+    except Exception as exc:
+        errors.append(f"opencode:tui.json: {exc}")
+
     try:
         snap = snapshot()
     except Exception as exc:
-        return {"ok": False, "applied": [], "errors": [f"snapshot: {exc}"], "command": cmd}
+        return {
+            "ok": False, "applied": [], "errors": [f"snapshot: {exc}"],
+            "skipped": [], "mode": mode, "opencode_theme": opencode_theme,
+            "tui_json": tui_path,
+        }
     for pane in snap.get("panes") or []:
         if not isinstance(pane, dict):
             continue
-        if str(pane.get("agent") or "").lower() != "grok":
+        agent = str(pane.get("agent") or "").strip().lower()
+        if not agent:
             continue
         session = str(pane.get("session") or "")
         pane_id = str(pane.get("pane_id") or "")
         if not session or not pane_id:
             continue
+
+        if agent in ("opencode", "open-code"):
+            # 亮/暗同一机制：/themes 选中不同主题名
+            result = apply_opencode_theme_to_pane(session, pane_id, opencode_theme)
+            if result.get("error"):
+                errors.append(f"opencode:{session}/{pane_id}: {result['error']}")
+            else:
+                applied.append({
+                    "session": session, "pane_id": pane_id,
+                    "agent": "opencode", "command": f"/themes→{opencode_theme}",
+                })
+            continue
+
+        cmd = agent_theme_slash(agent, mode)
+        if not cmd:
+            skipped.append({
+                "session": session, "pane_id": pane_id, "agent": agent,
+                "reason": "no_theme_slash",
+            })
+            continue
         result = pane_send(session, pane_id, cmd, mode="slash")
         if result.get("error"):
-            errors.append(f"{session}/{pane_id}: {result['error']}")
+            errors.append(f"{agent}:{session}/{pane_id}: {result['error']}")
         else:
-            applied.append({"session": session, "pane_id": pane_id})
-    return {"ok": not errors, "applied": applied, "errors": errors, "command": cmd}
+            applied.append({
+                "session": session, "pane_id": pane_id,
+                "agent": agent, "command": cmd,
+            })
+    return {
+        "ok": not errors,
+        "applied": applied,
+        "errors": errors,
+        "skipped": skipped,
+        "mode": mode,
+        "opencode_theme": opencode_theme,
+        "tui_json": tui_path,
+    }
+
+
+def apply_grok_web_theme(mode: str) -> dict[str, Any]:
+    """兼容旧名：只推 grok pane 的 /theme slash。"""
+    out = apply_agent_web_themes(mode)
+    applied = [a for a in out.get("applied") or [] if a.get("agent") == "grok"]
+    errors = [e for e in (out.get("errors") or []) if e.startswith("grok:")]
+    cmd = grok_theme_slash(mode) if mode in ("light", "dark") else ""
+    return {
+        "ok": not errors,
+        "applied": [
+            {"session": a["session"], "pane_id": a["pane_id"]} for a in applied
+        ],
+        "errors": [e.split(": ", 1)[-1] if ": " in e else e for e in errors],
+        "command": cmd,
+    }
 
 
 def grok_launch_theme_args(mode: str | None) -> list[str]:

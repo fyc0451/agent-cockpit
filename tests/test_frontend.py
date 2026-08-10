@@ -1928,9 +1928,12 @@ def test_theme_switch_is_inplace_without_reload():
     assert "applyDocumentTheme" in set_theme
     assert set_theme.index("applyDocumentTheme") < set_theme.index("termTheme()")
     assert "options.theme=th" in set_theme
-    assert "sendAllTermColorSchemes()" in set_theme
+    # notify=false：Mode 2031 只走 API，禁止前端双发
+    assert "sendAllTermColorSchemes(false)" in set_theme
+    assert "sendAllTermColorSchemes()" not in set_theme
     assert "/api/theme/herdr" in set_theme
     assert "setTimeout" in set_theme  # Mode 2031/herdr 延后，不卡同一帧
+    assert "armTermInputGate" in set_theme
     assert "localStorage.setItem('dash-theme'" in set_theme
     init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
     assert "doAttachHerdr(themeResume" not in init
@@ -1959,8 +1962,10 @@ def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     assert "background:'#fafbfc',foreground:'#1a2030'" in term_theme
     assert "background:'#000000',foreground:'#e8e8e8'" in term_theme
     assert "function termMinimumContrastRatio(){return TERM_WEBGL_CONTRAST}" in js
-    constructor = js.split("const xterm=new Terminal({", 1)[1].split("});", 1)[0]
-    assert "minimumContrastRatio:termMinimumContrastRatio()" in constructor
+    constructor = re.search(
+        r"const xterm=(?:prewarmed\?\.xterm\|\|)?new Terminal\(\{([^}]*)\}\)", js
+    )
+    assert constructor and "minimumContrastRatio:termMinimumContrastRatio()" in constructor.group(1)
 
     report = js.split("function sendTermColorScheme(id,ws,notify){", 1)[1].split(
         "function sendAllTermColorSchemes", 1
@@ -1971,20 +1976,14 @@ def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     assert "TERM_SESSIONS" not in report
     assert "ws.readyState!==1" in report
 
-    broadcast = js.split("function sendAllTermColorSchemes(){", 1)[1].split(
+    broadcast = js.split("function sendAllTermColorSchemes(notify=false){", 1)[1].split(
         "function scheduleHerdrColorSchemeNotify", 1
     )[0]
     assert "Object.entries(TERM_INSTANCES||{})" in broadcast
-    assert "sendTermColorScheme(id,inst.ws,true)" in broadcast
-    assert "setTimeout" not in broadcast
-    # herdr 起来后补 Mode 2031，agent pane（含 grok）才跟 Web 明暗
-    assert "function scheduleHerdrColorSchemeNotify" in js
-    assert "sendTermColorScheme(id,ws,true)" in js.split(
-        "function scheduleHerdrColorSchemeNotify", 1
-    )[1][:800]
+    assert "sendTermColorScheme(id,inst.ws,!!notify)" in broadcast
 
-    # 首次 replay 时 Herdr 尚未启动，不能先把 Mode 2031 写给登录 shell；
-    # 重连或 attach 就绪后再 notify。open 时仍只更新 OSC 回复色。
+    # 首次 replay 时 Herdr 尚未启动，不能把 Mode 2031 报告写给登录 shell；
+    # 重连到已运行 TUI 时才通知。两条路径都会更新 OSC 10/11 回复色。
     open_ws = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
         "function showTermInstance", 1
     )[0]
@@ -1993,7 +1992,6 @@ def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     assert open_ws.index("sendTermColorScheme(id,ws,!replay)") < open_ws.index(
         "flushTermInput(id,ws)"
     )
-
 
 def test_webgl_themes_are_prewarmed_after_login_and_reused_by_terminal_mount():
     js = _inline_js()
@@ -3322,4 +3320,26 @@ def test_node_layout_fresh_context_picks_multi_pane_group():
         )
     )
     assert "ok" in out
+
+
+def test_theme_switch_inplace_single_herdr_notify_and_input_gate():
+    # 就地切换：禁止整页 reload；Mode 2031 只走 API 一次；重绘期静默丢输入。
+    js = _inline_js()
+    assert "function _repaintTermForTheme" not in js
+    assert "TERM_LIGHT" not in js
+    assert "function applyDocumentTheme(mode)" in js
+    set_theme = js.split("function setTheme(mode,save=true){", 1)[1].split(
+        "function toggleTheme", 1
+    )[0]
+    assert "localStorage.setItem('dash-theme'" in set_theme
+    assert "location.reload()" not in set_theme
+    assert "applyDocumentTheme" in set_theme
+    assert "options.theme=th" in set_theme
+    assert "showTermThemeOverlay()" not in set_theme
+    assert "armTermInputGate" in set_theme
+    assert "sendAllTermColorSchemes(false)" in set_theme
+    assert "/api/theme/herdr" in set_theme
+    # 禁止默认 true 广播（会与 API 双发 Mode 2031）
+    assert "sendAllTermColorSchemes()" not in set_theme
+    assert "sendAllTermColorSchemes(true)" not in set_theme
 

@@ -3199,10 +3199,11 @@ let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, 
 let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
 const TERM_SESSION_PREFIX='session:';
 const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=16*1024;
-const TERM_LOADING_QUIET=80,TERM_LOADING_TIMEOUT=15000;
+const TERM_LOADING_QUIET=50,TERM_LOADING_TIMEOUT=8000;
 const TERM_WEBGL_WARMUP='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()[]{}<>+-=_/\\|:;,.? ┌─┐│└┘├┤┬┴┼ 中文';
 const TERM_WEBGL_CONTRAST=document.documentElement.classList.contains('light')?4.5:3;
-const TERM_THEME_MIN_MS=1500; // 主题遮罩最小显示时长,兜底盖住WebGL整屏重绘卡顿
+const TERM_THEME_GATE_MS=800;
+const TERM_LOADING_TUI_MAX_MS=400;
 const TERM_TEXT_ENCODER=new TextEncoder();
 const afterTermPaints=callback=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(callback)));
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
@@ -4176,6 +4177,24 @@ function safeFitOf(fit,xterm){
     return true
   }catch(e){return false}
 }
+function armTermInputGate(ms=1200){
+  const until=performance.now()+Math.max(0,Number(ms)||0);
+  if(until>TERM_INPUT_GATE_UNTIL)TERM_INPUT_GATE_UNTIL=until;
+}
+function isTermMouseReport(data){
+  // X10: ESC [ M Cb Cx Cy；SGR: ESC [ < ... 
+  return typeof data==='string'&&data.length>=3&&data.charCodeAt(0)===0x1b
+    &&(data.startsWith('\x1b[M')||data.startsWith('\x1b[<'));
+}
+function termInputBlocked(id){
+  if(TERM_THEME_OVERLAYING)return true;
+  if(performance.now()<TERM_INPUT_GATE_UNTIL)return true;
+  const inst=TERM_INSTANCES[id];
+  if(!inst||inst.closing||inst.initializing)return true;
+  // 历史回放 / 等 alternate TUI / loading 遮罩仍在：一律不收终端输入
+  if(!inst.replayComplete||inst.loadingEl||inst.loadingWaitForTui)return true;
+  return false;
+}
 function flushTermInput(id,ws){
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.ws!==ws||ws?.readyState!==1||!inst.pendingInput)return;
@@ -4186,6 +4205,12 @@ function flushTermInput(id,ws){
 }
 function queueTermInput(id,data,notice){
   const inst=TERM_INSTANCES[id];if(!inst)return;
+  // notice=启动 herdr 等显式命令，允许在 loading 期排队
+  if(!notice){
+    if(termInputBlocked(id))return;
+    // WS 未开时绝不缓存鼠标报告——重连 onopen 会一泻千里
+    if(isTermMouseReport(data)&&(!inst.ws||inst.ws.readyState!==1))return;
+  }
   inst.pendingInput=(inst.pendingInput||'')+data;
   if(notice)inst.pendingNotice=notice;
   flushTermInput(id,inst.ws);
@@ -4236,6 +4261,7 @@ function finishTermLoading(id,inst){
   if(inst.loadingTimer){clearTimeout(inst.loadingTimer);inst.loadingTimer=null}
   if(inst.loadingDeadlineTimer){clearTimeout(inst.loadingDeadlineTimer);inst.loadingDeadlineTimer=null}
   const loading=inst.loadingEl;inst.loadingEl=null;inst.loadingPaintPending=false;
+  inst.loadingWaitForTui=false; // 强制揭开时必须放行输入，否则永久假死门禁
   inst.el?.removeAttribute('aria-busy');loading.classList.add('done');
   setTimeout(()=>loading.remove(),180);
   if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active'))requestAnimationFrame(()=>{try{inst.xterm.focus()}catch(e){}});
@@ -4265,14 +4291,13 @@ function hideTermThemeOverlay(){
   ov.classList.add('done');
   setTimeout(()=>{try{ov.remove()}catch(e){}},180);
 }
-function holdTermLoadingForTui(id,maxWaitMs=1500){
+function holdTermLoadingForTui(id,maxWaitMs){
   const inst=TERM_INSTANCES[id];if(!inst?.loadingEl)return;
   inst.loadingWaitForTui=true;
   const label=inst.loadingEl.querySelector('span:last-child');if(label)label.textContent='正在启动完整终端';
   if(inst.loadingDeadlineTimer)clearTimeout(inst.loadingDeadlineTimer);
-  // TUI 等待上限:主题刷新重 attach 用更短窗口(见 maxWaitMs)，避免「点了几秒没反应」。
-  // 遮罩 pointer-events:none；输入也不再因 loadingEl 丢弃。
-  const wait=Math.max(200,Math.min(1500,Number(maxWaitMs)||1500));
+  // 揭遮罩要快；输入门禁另管，避免「等 1.5s + 假死重放」。
+  const wait=Math.max(150,Math.min(800,Number(maxWaitMs)||TERM_LOADING_TUI_MAX_MS));
   inst.loadingDeadlineTimer=setTimeout(()=>settleTermLoading(id,true),wait);
 }
 function settleTermLoading(id,force=false){
@@ -4461,10 +4486,23 @@ function openTermWS(id,xterm,replay){
   let awaitingReplay=!!replay;
   ws.onopen=()=>{
     const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;
+    // 回放/重连窗口：再挡一会输入，避免「假死后点击全部灌进 TUI」
+    if(replay)armTermInputGate(400);
     // 首次挂载时 Herdr 命令还在输入队列里，不能先把 Mode 2031 写给登录 shell。
     // 重连挂到已运行的 TUI 时才通知；两种情况都会更新 OSC 10/11 回复色。
     sendTermColorScheme(id,ws,!replay);
     try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}
+    // 只刷 notice 启动命令；丢弃假死期误积的鼠标/键盘垃圾
+    if(inst){
+      if(inst.pendingNotice&&inst.pendingInput){/* keep */}
+      else if(inst.pendingInput&&!inst.pendingNotice){
+        // 无 notice 时 pending 多半是误触；整段丢掉
+        inst.pendingInput='';
+      }else if(inst.pendingInput){
+        // 有 notice：尽量只保留可打印启动串，剥掉 ESC 鼠标报告
+        inst.pendingInput=String(inst.pendingInput).replace(/\x1b\[M...|\x1b\[<[^a-zA-Z]*[mM]/g,'');
+      }
+    }
     flushTermInput(id,ws);startTermZoomLease(id);
     if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}
   };
@@ -4478,7 +4516,13 @@ function openTermWS(id,xterm,replay){
         const control=JSON.parse(ev.data);
         if(control?.type==='replay_complete'){
           awaitingReplay=false;
-          const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws){inst.replayComplete=true;settleTermLoading(id)}
+          const inst=TERM_INSTANCES[id];
+          if(inst&&inst.ws===ws){
+            inst.replayComplete=true;
+            // 回放刚结束、TUI 可能仍在吃历史/重绘：再挡 300ms 输入
+            armTermInputGate(300);
+            settleTermLoading(id);
+          }
           return;
         }
       }catch(e){}
@@ -4626,7 +4670,7 @@ function termMount(id){
     loadingLastOutputAt:performance.now(),loadingTimer:null,loadingDeadlineTimer:null,loadingPaintPending:false};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   // loading 遮罩 pointer-events:none，期间应可交互；仅主题全屏遮罩禁输入防幽灵回放
-  xterm.onData(d=>{if(isTermFocusReport(d)||TERM_THEME_OVERLAYING)return;queueTermInput(id,applyTermModifiers(d))});
+  xterm.onData(d=>{if(isTermFocusReport(d)||termInputBlocked(id))return;queueTermInput(id,applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   XTERM=xterm;FIT=fit;
   // 先让浏览器画出 loading，再在同一个 xterm/WebGL context 中完成首帧和
@@ -5496,8 +5540,8 @@ function sendTermColorScheme(id,ws,notify){
   // 服务端按 PTY label 判断是否为 Herdr；不能依赖可能尚未恢复完成的前端映射。
   try{ws.send(JSON.stringify({type:'theme',mode:currentTermColorScheme(),notify:!!notify}))}catch(e){}
 }
-function sendAllTermColorSchemes(){
-  for(const [id,inst] of Object.entries(TERM_INSTANCES||{}))sendTermColorScheme(id,inst.ws,true);
+function sendAllTermColorSchemes(notify=false){
+  for(const [id,inst] of Object.entries(TERM_INSTANCES||{}))sendTermColorScheme(id,inst.ws,!!notify);
 }
 /**
  * Herdr 已在 PTY 内跑起来后，再发 Mode 2031（notify=true）。
@@ -5505,28 +5549,24 @@ function sendAllTermColorSchemes(){
  * 各 pane（含 grok）才跟 Web 明暗主题。
  * 首次 attach 时 openTermWS(replay) 故意 notify=false，避免写给登录 shell，故此处补发。
  */
-function scheduleHerdrColorSchemeNotify(id,attempts=16){
+function scheduleHerdrColorSchemeNotify(id,attempts=12){
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.closing)return;
-  // 仅 herdr 会话终端（有 session 标签）需要通知
   if(!TERM_SESSIONS[id]){
-    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),150);
+    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),120);
     return;
   }
   const ws=inst.ws;
   if(!ws||ws.readyState!==1){
-    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),200);
+    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),150);
     return;
   }
-  // 有 session 标签且 WS 已开：不必死等 loading 遮罩（遮罩已不挡输入）。
-  // 略延迟让 herdr 命令进入 PTY，再 Mode 2031（含 opencode 等跟终端色的 pane）。
-  if(attempts>=16){
-    setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),400);
+  // 首次进入：略等 herdr 命令进 PTY，再发一次 notify
+  if(attempts>=12){
+    setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),350);
     return;
   }
   sendTermColorScheme(id,ws,true);
-  // 再补一次，覆盖 herdr attach 较慢时第一次 Mode 2031 落在 shell 上的情况
-  if(attempts>12)setTimeout(()=>{const cur=TERM_INSTANCES[id];if(cur?.ws?.readyState===1)sendTermColorScheme(id,cur.ws,true)},1200);
 }
 function termTheme(mode=currentTermColorScheme()){
   // 与 Orca 相同：主题交给 xterm 原生调色板；显式低对比色由
@@ -5584,34 +5624,35 @@ function applyDocumentTheme(mode){
   return light;
 }
 function setTheme(mode,save=true){
-  // 就地轻量切换：禁止 reload；禁止整屏 xterm.refresh（WebGL 会卡死主线程）。
-  // 页面 class + palette 同步做完即返回；Mode 2031 / herdr config 放到下一任务，
-  // 避免和 Web 重绘抢同一帧导致「卡得要死」。
+  // 就地切换：壳+xterm 立刻变；Herdr 只走 API 一次 Mode 2031（禁止再 sendAll notify）。
+  // 重绘窗口静默丢终端输入，防假死连点重放。
   const light=mode==='light';
   applyDocumentTheme(light?'light':'dark');
-  const th=termTheme(); // class 切换之后再取，避免反色
+  const th=termTheme();
   for(const [,inst] of Object.entries(TERM_INSTANCES||{})){
     try{
-      // 只改 palette，不 force refresh（ADR：主题切换不强制 refresh 诱导重绘）
       if(inst.xterm&&!inst.xterm._disposed)inst.xterm.options.theme=th;
       inst.pendingTheme=null;
     }catch(e){}
   }
   if(save){
     try{localStorage.setItem('dash-theme',light?'light':'dark')}catch(e){}
+    armTermInputGate(TERM_THEME_GATE_MS);
     const modeStr=light?'light':'dark';
-    // 下一 macrotask：先让浏览器画完 UI，再推 PTY/herdr（重则卡 herdr 全屏，不挡 Web 点击）
     setTimeout(()=>{
-      try{sendAllTermColorSchemes()}catch(e){}
+      // 只更新各 term 的 OSC 回复色，notify=false —— Mode 2031 交给 API 唯一一次
+      try{sendAllTermColorSchemes(false)}catch(e){}
       try{
         fetch('/api/theme/herdr',{
           method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
           body:JSON.stringify({mode:modeStr}),
+        }).then(r=>{
+          // 若 herdr 仍在重绘，门禁可略延长，但不超过 1.2s
+          if(r&&r.ok)armTermInputGate(400);
         }).catch(()=>{});
       }catch(e){}
     },0);
   }
-  try{localStorage.removeItem(THEME_RESUME_KEY)}catch(e){}
 }
 function toggleTheme(){setTheme(document.documentElement.classList.contains('light')?'dark':'light')}
 (function(){try{setTheme(localStorage.getItem('dash-theme')||'light',false)}catch(e){}})();
