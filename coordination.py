@@ -15,6 +15,10 @@ from typing import Any
 
 import runtime_paths
 
+# 可插拔控制消息认领门（B0 W6）：默认 None 保持历史行为；由接线层安装。
+CONTROL_CLAIM_GATE: Any = None
+
+
 
 DB_PATH = runtime_paths.store("coordination")
 CLAIM_TTL = 300.0
@@ -685,6 +689,36 @@ def claim_message(
         sender = str(message.get("from") or message.get("sender_name") or "")
         importance = str(message.get("importance") or "normal")
         intent = str((meta or {}).get("intent") or "info")
+        # 可插拔控制消息认领门（B0 W6 服务端 fail-closed；默认 None 旧行为）。
+        # 钩子签名: (project, recipient, message, meta) -> (ok, reason)
+        if CONTROL_CLAIM_GATE is not None:
+            try:
+                gate_ok, gate_reason = CONTROL_CLAIM_GATE(
+                    project, recipient, message, meta,
+                )
+            except Exception:
+                gate_ok, gate_reason = False, "claim_gate_error"
+            if not gate_ok:
+                reason = str(gate_reason or "claim_rejected")
+                con.execute(
+                    "INSERT INTO receipts(project_key,recipient,message_id,"
+                    "sender,intent,importance,state,reason,ack_pending,"
+                    "created_ts,updated_ts) "
+                    "VALUES(?,?,?,?,?,?,'stale',?,1,?,?) "
+                    "ON CONFLICT(project_key,recipient,message_id) DO UPDATE SET "
+                    "state=CASE WHEN receipts.state='processed' "
+                    "THEN receipts.state ELSE 'stale' END,"
+                    "reason=CASE WHEN receipts.state='processed' "
+                    "THEN receipts.reason ELSE excluded.reason END,"
+                    "updated_ts=excluded.updated_ts",
+                    (project, recipient, int(message["id"]), sender,
+                     intent, importance, reason, current, current),
+                )
+                con.commit()
+                return {
+                    "deliver": False, "reason": reason,
+                    "message_id": int(message["id"]),
+                }
         claim_token = uuid.uuid4().hex
         run_id = (meta or {}).get("run_id")
         task_id = None

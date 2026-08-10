@@ -42,6 +42,9 @@ REGISTRY_DIR = Path(
     )
 ).expanduser()
 
+# B0 trust-domain issuer（与 server.B0_ISSUER 同源）
+B0_ISSUER = os.environ.get("B0_ISSUER", "local").strip() or "local"
+
 # 冻结：9 个 stable reason（ADR 门禁合同 §7，不得增删改名）
 REASON_DEFERRED_WORKING = "deferred_working"
 REASON_DEFERRED_DELIVERED = "deferred_delivered"
@@ -324,6 +327,7 @@ def send_control_message_to_participants(
         return False
     event_type = str(event.get("event_type") or "binding_event")
     version = int(event.get("binding_version") or 0)
+    event_id = str(event.get("event_id") or "")
     payload: dict[str, Any] = {}
     try:
         payload = json.loads(event.get("payload_json") or "{}")
@@ -331,14 +335,16 @@ def send_control_message_to_participants(
         payload = {}
     body = (
         f"[binding {event_type} v{version}] "
+        f"event_id={event_id} "
         f"scope={event.get('scope_kind')}/{event.get('scope_id')} "
         f"issuer={event.get('issuer')} "
         f"mail_name={payload.get('mail_name') or ''} "
         f"previous_mail_name={payload.get('previous_mail_name') or ''}\n"
         "此为团队/频道控制面事件，不附 task/revision；"
-        f"请以 binding version v{version} 校验后 claim 处理。"
+        f"请以 binding version v{version} 校验后 claim 处理；"
+        f"event_id={event_id} 为稳定幂等键，重复送达按同一事件去重。"
     )
-    subject = f"[binding {event_type}] v{version}"
+    subject = f"[binding {event_type}] v{version} #{event_id}"
     by_project: dict[str, list[str]] = {}
     for project_key, mail_name in participants:
         by_project.setdefault(project_key, []).append(mail_name)
@@ -448,16 +454,115 @@ def clear_prompt_marker(
         con.close()
 
 
-def is_prompted(project_key: str, mail_name: str, message_id: int) -> bool:
-    """仅 delivered 标记算 durable 投递证明；attempt 不阻塞重启补投。"""
+def prompt_marker_state(
+    project_key: str, mail_name: str, message_id: int,
+) -> str | None:
+    """标记三态：'delivered'=durable 投递证明；'attempt'=尝试过但未证明
+    （外部 accept 后 mark 崩溃的不确定态，按已投处理防重复）；None=从未尝试。"""
     receipt = coordination.receipt(project_key, mail_name, message_id)
+    if receipt is None:
+        return None
+    try:
+        data = json.loads(receipt.get("checkpoint_json") or "{}")
+    except ValueError:
+        return None
+    if "b0_prompted" in data:
+        return "delivered"
+    if "b0_prompt_attempt" in data:
+        return "attempt"
+    return None
+
+
+def is_prompted(project_key: str, mail_name: str, message_id: int) -> bool:
+    """delivered 与 attempt（不确定）都阻塞重启重 prompt；拒绝路径已清
+    attempt，故不会误伤可补投消息。"""
+    return prompt_marker_state(project_key, mail_name, message_id) in (
+        "delivered", "attempt",
+    )
+
+
+def set_ctl_transport_mark(event_id: str) -> bool:
+    """transport 成功后的 durable 幂等标记（重启不得重发）。复用 receipts
+    权威行 /b0/control/<event_id>，不新建 outbox。"""
+    con = coordination._connect()
+    try:
+        now = time.time()
+        row = con.execute(
+            "SELECT checkpoint_json FROM receipts "
+            "WHERE project_key='/b0/control' AND recipient=? AND message_id=0",
+            (event_id,),
+        ).fetchone()
+        data: dict[str, Any] = {}
+        if row is not None:
+            try:
+                data = json.loads(row["checkpoint_json"] or "{}")
+            except ValueError:
+                data = {}
+        data["b0_ctl_transport"] = now
+        if row is None:
+            con.execute(
+                "INSERT INTO receipts(project_key,recipient,message_id,intent,"
+                "importance,state,reason,checkpoint_json,ack_pending,"
+                "created_ts,updated_ts) "
+                "VALUES('/b0/control',?,0,'info','normal','notified',"
+                "'b0_ctl_transport',?,0,?,?)",
+                (event_id, json.dumps(data, ensure_ascii=False), now, now),
+            )
+        else:
+            con.execute(
+                "UPDATE receipts SET checkpoint_json=?, updated_ts=? "
+                "WHERE project_key='/b0/control' AND recipient=? AND message_id=0",
+                (json.dumps(data, ensure_ascii=False), now, event_id),
+            )
+        con.commit()
+        return True
+    finally:
+        con.close()
+
+
+def ctl_transport_done(event_id: str) -> bool:
+    receipt = coordination.receipt("/b0/control", event_id, 0)
     if receipt is None:
         return False
     try:
         data = json.loads(receipt.get("checkpoint_json") or "{}")
     except ValueError:
         return False
-    return "b0_prompted" in data
+    return "b0_ctl_transport" in data
+
+
+def control_claim_gate(
+    project: str, recipient: str, message: dict[str, Any],
+    meta: dict[str, Any] | None,
+) -> tuple[bool, str | None]:
+    """W6 服务端 fail-closed 认领门：控制消息（stop/redirect）必须携带
+    canonical binding version，且与当前 active binding 版本一致；冲突或
+    无法解析（存在 active binding 时）→ stale_binding_version 拒绝。
+    不依赖 prompt 指令，receipt 侧记录 stable reason。"""
+    intent = str((meta or {}).get("intent") or "info")
+    if intent not in coordination.NO_RESUME_INTENTS:
+        return True, None
+    try:
+        bindings = leader_binding.list_bindings(issuer=B0_ISSUER, state="active")
+    except Exception:
+        logging.getLogger("b0.wiring").exception("claim gate: bindings unreadable")
+        return True, None  # binding 存储不可读：degraded 另行可见，不误伤普通流
+    if not bindings:
+        return True, None  # 尚未建立 canonical：保持旧行为
+    version = (meta or {}).get("binding_version")
+    try:
+        version_int = int(version)
+    except (TypeError, ValueError):
+        return False, REASON_STALE_BINDING_VERSION
+    versions = {int(b["binding_version"]) for b in bindings}
+    if version_int not in versions:
+        return False, REASON_STALE_BINDING_VERSION
+    return True, None
+
+
+def install_claim_gate() -> None:
+    """把 W6 认领门安装到 coordination.claim_message（幂等）。"""
+    coordination.CONTROL_CLAIM_GATE = control_claim_gate
 
 
 def receipt_drain_counters(
@@ -498,23 +603,50 @@ class _ProofAdapter:
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self.proof: set[str] = set()
+        # accept 成功但 delivered-mark 崩溃的事件：下轮只补标记、不重 prompt
+        self._pending_marks: dict[str, list[tuple[str, str, int]]] = {}
+
+    @staticmethod
+    def _marker_targets(events: list[DeferredEvent]) -> list[tuple[str, str, int]] | None:
+        """mail 事件 → (project_key, mail_name, message_id)；
+        control 事件 → ("b0://control", event_id, 0)。缺字段返回 None。"""
+        targets: list[tuple[str, str, int]] = []
+        for ev in events:
+            if ev.event_id.startswith("mail:"):
+                summary = ev.summary or {}
+                project_key = str(summary.get("project_key") or "")
+                mail_name = str(summary.get("mail_name") or "")
+                message_id = summary.get("message_id")
+                if not project_key or not mail_name or message_id is None:
+                    return None
+                targets.append((project_key, mail_name, int(message_id)))
+            else:
+                targets.append(("/b0/control", ev.event_id, 0))
+        return targets
 
     def deliver(
         self, scope: str, binding_version: int, events: list[DeferredEvent],
     ) -> bool:
-        mail_targets: list[tuple[str, str, int]] = []
-        for ev in events:
-            if not ev.event_id.startswith("mail:"):
-                continue
-            summary = ev.summary or {}
-            project_key = str(summary.get("project_key") or "")
-            mail_name = str(summary.get("mail_name") or "")
-            message_id = summary.get("message_id")
-            if not project_key or not mail_name or message_id is None:
-                return False
-            mail_targets.append((project_key, mail_name, int(message_id)))
+        targets = self._marker_targets(events)
+        if targets is None:
+            return False
+        event_ids = [ev.event_id for ev in events]
+        # 恢复路径：上轮外部已 accept 但 delivered-mark 崩溃 → 只补标记
+        if event_ids and all(eid in self._pending_marks for eid in event_ids):
+            ok = True
+            for eid in event_ids:
+                for pk, mn, mid in self._pending_marks[eid]:
+                    try:
+                        if not set_prompt_marker(pk, mn, mid, "delivered"):
+                            ok = False
+                    except Exception:
+                        ok = False
+                if ok:
+                    self._pending_marks.pop(eid, None)
+                    self.proof.add(eid)
+            return ok
         # 先写 attempt：写失败则不投递（保留 pending 重试）
-        for pk, mn, mid in mail_targets:
+        for pk, mn, mid in targets:
             try:
                 if not set_prompt_marker(pk, mn, mid, "attempt"):
                     return False
@@ -525,27 +657,35 @@ class _ProofAdapter:
             accepted = bool(self._inner.deliver(scope, binding_version, events))
         except Exception:
             accepted = False
-        if accepted:
-            # 真实 accept → 升级为 durable delivered 证明 + 投递证明集
-            for pk, mn, mid in mail_targets:
-                try:
-                    set_prompt_marker(pk, mn, mid, "delivered")
-                except Exception:
-                    logging.getLogger("b0.wiring").exception(
-                        "set_prompt_marker delivered failed",
-                    )
-            for ev in events:
-                self.proof.add(ev.event_id)
-        else:
+        if not accepted:
             # 拒绝 → 清除 attempt：重启后允许补投（不得永久漏）
-            for pk, mn, mid in mail_targets:
+            for pk, mn, mid in targets:
                 try:
                     clear_prompt_marker(pk, mn, mid)
                 except Exception:
                     logging.getLogger("b0.wiring").exception(
                         "clear_prompt_marker failed",
                     )
-        return accepted
+            return False
+        # 外部已 accept：升级 durable delivered 证明。写失败 = 不确定投递，
+        # 不得声称 delivered（禁止 catch 掩盖）；记入待补标记，下轮幂等恢复
+        mark_ok = True
+        for pk, mn, mid in targets:
+            try:
+                if not set_prompt_marker(pk, mn, mid, "delivered"):
+                    mark_ok = False
+            except Exception:
+                logging.getLogger("b0.wiring").exception(
+                    "set_prompt_marker delivered failed",
+                )
+                mark_ok = False
+        if not mark_ok:
+            for eid in event_ids:
+                self._pending_marks[eid] = targets
+            return False
+        for ev in events:
+            self.proof.add(ev.event_id)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -830,7 +970,7 @@ class B0Coordinator:
         if any(counters.values()):
             return  # 未排空：真实计数非零，禁止伪造 drained
         try:
-            leader_binding.mark_previous_state(
+            drained = leader_binding.mark_previous_state(
                 row["issuer"], row["scope_kind"], row["scope_id"],
                 prev_name,
                 state="drained",
@@ -845,9 +985,48 @@ class B0Coordinator:
                 reason="hub_inbox_empty+receipts_zero",
             )
         except leader_binding.StaleVersionError:
-            pass  # 并发/旧轮 worker：零变更即正确
+            return  # 并发/旧轮 worker：零变更即正确
         except Exception:
             logging.getLogger("b0.wiring").exception("close drain failed")
+            return
+        if not drained.get("updated"):
+            return
+        # drained → retired 闭环（PREP CAS：state='drained'、revision+1）
+        try:
+            retired = leader_binding.retire_binding(
+                row["issuer"], row["scope_kind"], row["scope_id"],
+                prev_name,
+                expected_binding_version=int(prev_row.get("binding_version") or 0),
+                expected_migration_id=str(prev_row.get("migration_id") or ""),
+                expected_state="drained",
+                expected_drain_revision=int(prev_row.get("drain_revision") or 0) + 1,
+                reason="b0_drain_closed",
+            )
+        except leader_binding.StaleVersionError:
+            return
+        except Exception:
+            logging.getLogger("b0.wiring").exception("retire failed")
+            return
+        if not retired.get("retired"):
+            return
+        # A2：retire 后清除 previous selector（token 引用不再保留）
+        try:
+            con = leader_binding._connect()
+            try:
+                con.execute(
+                    "UPDATE leader_bindings SET registry_selector=NULL, "
+                    "updated_ts=? WHERE issuer=? AND scope_kind=? "
+                    "AND scope_id=? AND mail_name=? AND state='retired'",
+                    (time.time(), row["issuer"], row["scope_kind"],
+                     row["scope_id"], prev_name),
+                )
+                con.commit()
+            finally:
+                con.close()
+        except Exception:
+            logging.getLogger("b0.wiring").exception(
+                "clear retired selector failed",
+            )
 
     # -- W5 control-event fanout（issuer-scoped） ---------------------------
     def fanout_control_events(
@@ -879,39 +1058,64 @@ class B0Coordinator:
                 payload = json.loads(event.get("payload_json") or "{}")
             except ValueError:
                 payload = {}
-            result = self.core.ingest(DeferredEvent(
-                event_id=str(event["event_id"]),
-                scope=key,
-                binding_version=int(event["binding_version"]),
-                summary={
-                    "kind": "control_event",
-                    "title": f"{event_type} v{event['binding_version']}",
-                    "event_type": event_type,
-                    "mail_name": payload.get("mail_name"),
-                    "previous_mail_name": payload.get("previous_mail_name"),
-                },
-                created_ts=_safe_ts(event.get("created_ts")),
-            ))
-            delivered_proof = (
-                result.get("delivered")
-                or str(event["event_id"]) in self._proof_adapter.proof
-            )
+            event_id = str(event["event_id"])
+            # 已投递（或不确定已投递）的事件不得重 prompt：跳过 ingest
+            delivered_state = prompt_marker_state("/b0/control", event_id, 0)
+            if delivered_state in ("delivered", "attempt"):
+                delivered_proof = True
+            else:
+                result = self.core.ingest(DeferredEvent(
+                    event_id=event_id,
+                    scope=key,
+                    binding_version=int(event["binding_version"]),
+                    summary={
+                        "kind": "control_event",
+                        "title": f"{event_type} v{event['binding_version']}",
+                        "event_type": event_type,
+                        "mail_name": payload.get("mail_name"),
+                        "previous_mail_name": payload.get("previous_mail_name"),
+                    },
+                    created_ts=_safe_ts(event.get("created_ts")),
+                ))
+                delivered_proof = (
+                    result.get("delivered") or event_id in self._proof_adapter.proof
+                )
             if not delivered_proof:
                 continue  # pending/仅入队：不 mark，crash 可重放
             transported = True
             if transport is not None:
-                try:
-                    transported = bool(transport(event))
-                except Exception:
-                    logging.getLogger("b0.wiring").exception(
-                        "control transport failed",
-                    )
-                    transported = False
+                # durable 幂等标记：transport 成功过则重启不重发
+                if ctl_transport_done(event_id):
+                    transported = True
+                else:
+                    try:
+                        transported = bool(transport(event))
+                    except Exception:
+                        logging.getLogger("b0.wiring").exception(
+                            "control transport failed",
+                        )
+                        transported = False
+                    if transported:
+                        try:
+                            set_ctl_transport_mark(event_id)
+                        except Exception:
+                            logging.getLogger("b0.wiring").exception(
+                                "set_ctl_transport_mark failed",
+                            )
             if not transported:
                 continue  # transport 失败不 mark，下轮重试
-            if leader_binding.mark_event_fanned_out(
-                self._issuer, str(event["event_id"]),
-            ):
+            try:
+                marked = leader_binding.mark_event_fanned_out(
+                    self._issuer, event_id,
+                )
+            except Exception:
+                # mark 崩溃：不掩盖——事件保持 undelivered，投递/transport
+                # 均有 durable 标记，下轮/重建后仅补 mark（零丢零重）
+                logging.getLogger("b0.wiring").exception(
+                    "mark_event_fanned_out failed; will retry",
+                )
+                continue
+            if marked:
                 fanned += 1
         return fanned
 

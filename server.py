@@ -111,6 +111,7 @@ async def lifespan(_: FastAPI):
         raise RuntimeError("herdr state clients not fully reaped; refusing start")
     if state_enabled:
         await asyncio.to_thread(_reconcile_state_client)
+    b0_wiring.install_claim_gate()
     await asyncio.to_thread(_b0_rebuild_on_start)
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
@@ -1430,6 +1431,18 @@ def api_send(req: SendMessageReq):
             authority="user", supersedes=req.supersedes,
             expires_in=req.expires_in,
         )
+        # W6：控制消息持久化 canonical binding version（claim 服务端门依据）
+        if req.intent in coordination.NO_RESUME_INTENTS:
+            try:
+                active = leader_binding.list_bindings(
+                    issuer=B0_ISSUER, state="active",
+                )
+            except Exception:
+                active = []
+            if active:
+                meta["binding_version"] = max(
+                    int(b["binding_version"]) for b in active
+                )
         body = coordination.add_metadata(req.body, meta)
         result = hub_client.send_message(
             project_key=proj["human_key"],
