@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Persistent coordination assignments with durable create/list operations,
+  explicit status transitions and close, stable ordering, and optimistic CAS
+  versions for concurrent agents.
 - Full-width Messages workspace with top filters for project, session, sender,
   recipient, time range, and status, including exact session-to-project mapping.
 - Localized board degradation banners and a dedicated unavailable-agent column,
@@ -40,6 +43,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Validate assignment transition legality inside the same database transaction
+  as its versioned update, preventing concurrent writers from committing an
+  invalid state transition.
 - Restore the full-width flow after leaving a mobile terminal and split cramped
   mobile terminal panes into independent tabs before attaching.
 - Preserve and safely recover eligible pending background tasks after a Cockpit
