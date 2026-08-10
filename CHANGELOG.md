@@ -8,6 +8,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Full-width Messages workspace with top filters for project, session, sender,
+  recipient, time range, and status, including exact session-to-project mapping.
 - Localized board degradation banners and a dedicated unavailable-agent column,
   with strict Herdr-binary detection so recoverable socket/cache failures show a
   retry path instead of misleading installation guidance.
@@ -38,6 +40,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Restore the full-width flow after leaving a mobile terminal and split cramped
+  mobile terminal panes into independent tabs before attaching.
 - Preserve and safely recover eligible pending background tasks after a Cockpit
   restart, while failing interrupted running tasks closed and rejecting dirty or
   mismatched worktrees before relaunch.
