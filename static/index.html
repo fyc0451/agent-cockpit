@@ -3724,6 +3724,8 @@ async function doAttachHerdr(session){
     const existing=TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id]);
     if(existing){
       TERM_ID=existing;renderTermOptions();termSwitch(existing);
+      // 复用已开终端时也推一次主题，避免主题切换后 agent pane 仍旧配色
+      scheduleHerdrColorSchemeNotify(existing);
       if(isCompactScreen()){
         try{await ensureMobileSessionUntiled(session)}catch(e){}
         startTermZoomLease(existing);
@@ -3745,6 +3747,8 @@ async function doAttachHerdr(session){
       ?'已进入 herdr/'+session+'（手机已拆分屏为独立 tab，Ctrl-B 切换）'
       :'已进入 herdr/'+session+' (Ctrl-b 切 pane)';
     queueTermInput(r.id,'herdr --session '+session+'\r',hint);
+    // herdr 起来后再 Mode 2031：让 session 内各 agent pane 跟 Web 明暗
+    scheduleHerdrColorSchemeNotify(r.id);
   }catch(e){
     if(createdId&&TERMS.includes(createdId)){TERM_ID=createdId;await termClose()}
     toast('创建终端失败: '+e)
@@ -5490,6 +5494,32 @@ function sendTermColorScheme(id,ws,notify){
 }
 function sendAllTermColorSchemes(){
   for(const [id,inst] of Object.entries(TERM_INSTANCES||{}))sendTermColorScheme(id,inst.ws,true);
+}
+/**
+ * Herdr 已在 PTY 内跑起来后，再发 Mode 2031（notify=true）。
+ * 仅更新浏览器 xterm 调色板不会改 agent pane；Mode 2031 触发 herdr 重查 OSC 10/11，
+ * 各 pane（含 grok）才跟 Web 明暗主题。
+ * 首次 attach 时 openTermWS(replay) 故意 notify=false，避免写给登录 shell，故此处补发。
+ */
+function scheduleHerdrColorSchemeNotify(id,attempts=24){
+  const inst=TERM_INSTANCES[id];
+  if(!inst||inst.closing)return;
+  // 仅 herdr 会话终端（有 session 标签）需要通知
+  if(!TERM_SESSIONS[id]){
+    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),200);
+    return;
+  }
+  const ws=inst.ws;
+  if(!ws||ws.readyState!==1){
+    if(attempts>0)setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),250);
+    return;
+  }
+  // 等 loading 收起（herdr 已吃到输入并开始画 TUI），再 Mode 2031
+  if(inst.loadingEl&&attempts>8){
+    setTimeout(()=>scheduleHerdrColorSchemeNotify(id,attempts-1),300);
+    return;
+  }
+  sendTermColorScheme(id,ws,true);
 }
 function termTheme(mode=currentTermColorScheme()){
   // 与 Orca 相同：主题交给 xterm 原生调色板；显式低对比色由

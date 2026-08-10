@@ -1939,6 +1939,11 @@ def test_theme_switch_forces_full_page_reload_after_saving_preference():
     init = js.split("async function init(){", 1)[1].split("init();", 1)[0]
     assert "consumeThemeResume()" in init
     assert "doAttachHerdr(themeResume.session)" in init
+    assert "function scheduleHerdrColorSchemeNotify" in js
+    attach = js.split("async function doAttachHerdr(session){", 1)[1].split(
+        "// ============ herdr 流视图", 1
+    )[0]
+    assert "scheduleHerdrColorSchemeNotify" in attach
 
 
 def test_layout_pane_list_checkbox_not_full_width():
@@ -1976,14 +1981,19 @@ def test_theme_switch_uses_xterm_theme_contrast_and_native_protocol():
     assert "ws.readyState!==1" in report
 
     broadcast = js.split("function sendAllTermColorSchemes(){", 1)[1].split(
-        "function termTheme", 1
+        "function scheduleHerdrColorSchemeNotify", 1
     )[0]
     assert "Object.entries(TERM_INSTANCES||{})" in broadcast
     assert "sendTermColorScheme(id,inst.ws,true)" in broadcast
     assert "setTimeout" not in broadcast
+    # herdr 起来后补 Mode 2031，agent pane（含 grok）才跟 Web 明暗
+    assert "function scheduleHerdrColorSchemeNotify" in js
+    assert "sendTermColorScheme(id,ws,true)" in js.split(
+        "function scheduleHerdrColorSchemeNotify", 1
+    )[1][:800]
 
-    # 首次 replay 时 Herdr 尚未启动，不能把 Mode 2031 报告写给登录 shell；
-    # 重连到已运行 TUI 时才通知。两条路径都会更新 OSC 10/11 回复色。
+    # 首次 replay 时 Herdr 尚未启动，不能先把 Mode 2031 写给登录 shell；
+    # 重连或 attach 就绪后再 notify。open 时仍只更新 OSC 回复色。
     open_ws = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
         "function showTermInstance", 1
     )[0]

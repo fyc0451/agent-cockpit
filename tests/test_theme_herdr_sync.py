@@ -139,6 +139,7 @@ def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["theme"] == "catppuccin" and body["reload"] == {"ok": True}
+    assert "notified_terms" in body
 
     r = client.post("/api/theme/herdr", json={"mode": "light"})
     assert r.json()["theme"] == "solarized"
@@ -154,4 +155,7 @@ def test_frontend_set_theme_calls_herdr_sync():
         encoding="utf-8"
     )
     assert "/api/theme/herdr" in html
-    assert "sendAllTermColorSchemes();" in html
+    # 整页刷新路径：写偏好后调 herdr 同步；attach 后再 Mode 2031 推 agent pane
+    assert "captureThemeResume()" in html or "function captureThemeResume" in html
+    assert "scheduleHerdrColorSchemeNotify" in html
+    assert "location.reload()" in html

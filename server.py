@@ -2065,7 +2065,24 @@ def api_theme_herdr(req: ThemeHerdrReq):
         raise HTTPException(400, str(exc))
     except OSError as exc:
         raise HTTPException(500, f"写入 herdr 配置失败: {exc}")
-    return {"ok": True, "theme": theme_name, "reload": herdr_client.reload_config()}
+    reload = herdr_client.reload_config()
+    # 已 attach 的 herdr PTY：推 Mode 2031，触发 session 内各 agent pane 重查 OSC 10/11
+    notified: list[str] = []
+    try:
+        for item in terminal.list_terms():
+            tid = str(item.get("id") or "")
+            if not tid or not item.get("alive") or not item.get("label"):
+                continue
+            if terminal.set_color_scheme(tid, req.mode, notify=True):
+                notified.append(tid)
+    except Exception:
+        logger.exception("theme/herdr notify labeled terms failed")
+    return {
+        "ok": True,
+        "theme": theme_name,
+        "reload": reload,
+        "notified_terms": notified,
+    }
 
 
 @app.get("/api/settings")
