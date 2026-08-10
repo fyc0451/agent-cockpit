@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import Body, FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -50,7 +50,7 @@ import version
 import upgrade_core
 import web_push
 import settings
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
@@ -1096,6 +1096,35 @@ class TeamSessionBindReq(BaseModel):
     replace: bool = False
 
 
+class _AssignmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AssignmentCreateReq(_AssignmentRequest):
+    assignment: str
+    assignee: str
+    expected_reply: str | None = None
+    deadline: float | None = None
+
+    @field_validator("deadline", mode="before")
+    @classmethod
+    def _strict_deadline(cls, value: Any) -> Any:
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            raise ValueError("deadline 必须是有限 epoch 或 null")
+        return value
+
+
+class AssignmentPatchReq(_AssignmentRequest):
+    status: str
+    expected_version: StrictInt
+
+
+class AssignmentCloseReq(_AssignmentRequest):
+    expected_version: StrictInt
+
+
 # ── 认证 ─────────────────────────────────────────────────────────
 
 @app.get("/api/auth/status")
@@ -1284,6 +1313,121 @@ def api_project_workbench(slug: str):
             "observed_at": observed_at,
         },
     }
+
+
+def _assignment_project_key(slug: str) -> str:
+    project = db.project_by_slug(slug)
+    if not project:
+        raise HTTPException(404, f"项目不存在: {slug}")
+    return str(Path(project["human_key"]).expanduser().resolve())
+
+
+def _assignment_request(model: type[_AssignmentRequest], body: Any) -> Any:
+    try:
+        return model.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(400, "assignment 请求参数无效") from exc
+
+
+def _project_assignment(project_key: str, assignment_id: str) -> dict[str, Any]:
+    row = coordination.get_assignment(assignment_id)
+    if row is None or row["project_key"] != project_key:
+        raise HTTPException(404, f"任务不存在: {assignment_id}")
+    return row
+
+
+def _raise_assignment_error(
+    exc: ValueError, assignment_id: str | None = None,
+) -> None:
+    message = str(exc)
+    if "任务不存在" in message:
+        raise HTTPException(404, message) from exc
+    if "expected_version 冲突" in message or "任务已关闭" in message:
+        detail: dict[str, Any] = {"message": message}
+        current = coordination.get_assignment(assignment_id or "")
+        if current is not None:
+            detail.update(
+                current_version=current["version"],
+                current_status=current["status"],
+            )
+        raise HTTPException(409, detail) from exc
+    raise HTTPException(400, message) from exc
+
+
+@app.get("/api/coordination/projects/{slug}/assignments")
+def api_coordination_assignments(
+    slug: str,
+    statuses: list[str] | None = Query(default=None),
+    assignee: str | None = None,
+):
+    project_key = _assignment_project_key(slug)
+    if statuses is not None and any(
+        status not in coordination.ASSIGNMENT_STATUSES for status in statuses
+    ):
+        raise HTTPException(400, "statuses 包含非法 status")
+    if assignee is not None:
+        assignee = assignee.strip()
+        if not assignee or len(assignee) > coordination.ASSIGNEE_TEXT_LIMIT:
+            raise HTTPException(400, "assignee 必须非空且不超过 128 字符")
+    try:
+        return coordination.list_assignments(
+            project_key, statuses=statuses, assignee=assignee,
+        )
+    except ValueError as exc:
+        _raise_assignment_error(exc)
+
+
+@app.post("/api/coordination/projects/{slug}/assignments")
+def api_coordination_assignment_create(
+    slug: str, body: Any = Body(...),
+):
+    project_key = _assignment_project_key(slug)
+    req = _assignment_request(AssignmentCreateReq, body)
+    try:
+        return coordination.create_assignment(project_key=project_key, **req.model_dump())
+    except ValueError as exc:
+        _raise_assignment_error(exc)
+
+
+@app.get("/api/coordination/projects/{slug}/assignments/{assignment_id}")
+def api_coordination_assignment(slug: str, assignment_id: str):
+    return _project_assignment(_assignment_project_key(slug), assignment_id)
+
+
+@app.patch("/api/coordination/projects/{slug}/assignments/{assignment_id}")
+def api_coordination_assignment_patch(
+    slug: str, assignment_id: str, body: Any = Body(...),
+):
+    project_key = _assignment_project_key(slug)
+    _project_assignment(project_key, assignment_id)
+    req = _assignment_request(AssignmentPatchReq, body)
+    if req.expected_version < 1:
+        raise HTTPException(400, "expected_version 必须是正整数")
+    try:
+        return coordination.transition_assignment(
+            assignment_id,
+            to_status=req.status,
+            expected_version=req.expected_version,
+        )
+    except ValueError as exc:
+        _raise_assignment_error(exc, assignment_id)
+
+
+@app.post("/api/coordination/projects/{slug}/assignments/{assignment_id}/close")
+def api_coordination_assignment_close(
+    slug: str, assignment_id: str, body: Any = Body(...),
+):
+    project_key = _assignment_project_key(slug)
+    _project_assignment(project_key, assignment_id)
+    req = _assignment_request(AssignmentCloseReq, body)
+    if req.expected_version < 1:
+        raise HTTPException(400, "expected_version 必须是正整数")
+    try:
+        return coordination.close_assignment(
+            assignment_id, expected_version=req.expected_version,
+        )
+    except ValueError as exc:
+        _raise_assignment_error(exc, assignment_id)
 
 
 SESSION_AGENT_STATUSES = {"working", "blocked", "done", "idle", "unknown"}
