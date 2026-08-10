@@ -205,52 +205,6 @@ def test_cross_run_fail_fast_sender_side() -> None:
 # 合同：B1 capability_digest（非用户路径需能力证明）
 # ---------------------------------------------------------------------------
 
-def _digest_of_selector(registry: Path, rel: str) -> str:
-    data = json.loads((registry / rel).read_text())
-    return hashlib.sha256(
-        str(data["registration_token"]).encode("utf-8"),
-    ).hexdigest()
-
-
-def test_rebind_leader_requires_capability_digest(
-    client, registry: Path,
-) -> None:
-    # 首绑（用户路径，Bearer）建立 active
-    _write_identity(registry, "proj-x/n--main.json", name="leader-new")
-    resp = client.post(
-        "/api/binding/user/default/rebind",
-        json={
-            "mail_name": "leader-new", "expected_version": 0,
-            "registry_selector": "proj-x/n--main.json",
-        },
-        headers=AUTH,
-    )
-    assert resp.status_code == 200, resp.text
-    digest = _digest_of_selector(registry, "proj-x/n--main.json")
-    body = {
-        "mail_name": "leader-new", "expected_version": 1,
-        "pane_id": "pane-77",
-        "registry_selector": "proj-x/n--main.json",
-        "caller_mail_name": "leader-new",
-    }
-    # 非用户路径 + 无 capability → 403
-    resp = client.post("/api/binding/user/default/rebind", json=body)
-    assert resp.status_code == 403, resp.text
-    # 错误 digest → 403
-    resp = client.post(
-        "/api/binding/user/default/rebind",
-        json={**body, "capability_digest": "0" * 64},
-    )
-    assert resp.status_code == 403, resp.text
-    # 正确 digest → 200，actor=active_leader
-    resp = client.post(
-        "/api/binding/user/default/rebind",
-        json={**body, "capability_digest": digest},
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["actor"] == "active_leader"
-
-
 # ---------------------------------------------------------------------------
 # 合同：4s 显式 flush
 # ---------------------------------------------------------------------------

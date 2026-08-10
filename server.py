@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import threading
@@ -430,7 +431,8 @@ def _b0_poll_tick() -> None:
 
 
 def _b0_apply_live_status(snap: dict[str, Any]) -> None:
-    """live poller 唯一允许的 B0 入口：仅注入 agent_status，禁消息 I/O。"""
+    """live poller 唯一允许的 B0 入口：仅注入 agent_status，禁消息 I/O。
+    附带 G6 闭环：同名 agent 以新 pane 重启时更新 binding 路由载荷。"""
     coord = _b0_get_coordinator()
     if coord is None or not isinstance(snap, dict):
         return
@@ -438,12 +440,32 @@ def _b0_apply_live_status(snap: dict[str, Any]) -> None:
         rows = coord.active_bindings()
     except Exception:
         return
-    status_by_pane = {
-        p.get("pane_id"): p.get("agent_status")
-        for p in snap.get("panes", []) if isinstance(p, dict)
-    }
+    panes = [p for p in snap.get("panes", []) if isinstance(p, dict)]
+    status_by_pane = {p.get("pane_id"): p.get("agent_status") for p in panes}
+    panes_by_mail = {p.get("mail_name"): p for p in panes if p.get("mail_name")}
     for row in rows:
         pane_id = str(row.get("pane_id") or "")
+        # G6：路由 pane 消失但同 mail_name 有新 pane → 改绑路由载荷
+        if pane_id not in status_by_pane:
+            cand = panes_by_mail.get(row.get("mail_name"))
+            if (
+                cand is not None and cand.get("pane_id")
+                and cand.get("pane_id") != pane_id
+            ):
+                try:
+                    leader_binding.bind_leader(
+                        row["issuer"], row["scope_kind"], row["scope_id"],
+                        mail_name=str(row["mail_name"]),
+                        agent_name=row.get("agent_name"),
+                        agent_kind=row.get("agent_kind"),
+                        session=str(cand.get("session") or row.get("session") or ""),
+                        pane_id=str(cand["pane_id"]),
+                        registry_selector=row.get("registry_selector"),
+                        expected_version=int(row["binding_version"]),
+                    )
+                    pane_id = str(cand["pane_id"])
+                except Exception:
+                    logger.exception("b0 G6 pane rebind failed")
         status = status_by_pane.get(pane_id)
         if not status:
             continue
@@ -663,8 +685,14 @@ async def protect_api(request: Request, call_next):
     protected = path.startswith("/api/") or path in {
         "/docs", "/redoc", "/openapi.json", "/health.poll",
     }
-    # B0 B1 rebind 端点自行完成鉴权（用户 Bearer/cookie 或 capability_digest）
-    if path.startswith("/api/binding/") and path.endswith("/rebind"):
+    # 窄豁免：仅持有效一次性 grant（头携带、scope 匹配、未用未过期）的
+    # rebind 请求可绕过全局门；grant 在端点内原子消费
+    parts = path.split("/")
+    if (
+        len(parts) == 6 and parts[1] == "api" and parts[2] == "binding"
+        and parts[5] == "rebind"
+        and _b0_valid_grant_for(request, parts[3], parts[4])
+    ):
         return await call_next(request)
     if not protected or path in PUBLIC_PATHS:
         return await call_next(request)
@@ -707,6 +735,7 @@ class SendMessageReq(BaseModel):
     supersedes: list[int] = Field(default_factory=list)
     expires_in: float | None = None
     hard: bool = False
+    run_independent: bool = False
 
 
 class HumanLoginReq(BaseModel):
@@ -763,7 +792,12 @@ class RebindReq(BaseModel):
     pane_id: str | None = None
     registry_selector: str | None = None
     caller_mail_name: str | None = None
-    capability_digest: str | None = None
+    grant_token: str | None = None
+
+
+class RebindGrantReq(BaseModel):
+    mail_name: str
+    ttl_seconds: int = Field(default=300, ge=10, le=3600)
 
 
 class ZoomLeaseReq(BaseModel):
@@ -1341,6 +1375,16 @@ def api_send(req: SendMessageReq):
         raise HTTPException(404, f"发送身份不存在: {req.sender_name}")
     if req.hard and req.intent not in coordination.NO_RESUME_INTENTS:
         raise HTTPException(400, "硬中断仅允许 stop/redirect")
+    # cross_run_fail_fast（冻结合同）：发送端在 Hub 写入前失败，零半成功
+    sender_ctx = coordination.active_context(proj["human_key"], sender["name"])
+    try:
+        b0_wiring.cross_run_fail_fast(
+            proj["human_key"], sender["name"], list(req.to),
+            sender_run_id=(sender_ctx or {}).get("run_id"),
+            run_independent=req.run_independent,
+        )
+    except b0_wiring.CrossRunFailFast as exc:
+        raise HTTPException(409, str(exc))
     try:
         meta, warnings = coordination.prepare_metadata(
             project_key=proj["human_key"], sender=sender["name"],
@@ -1484,32 +1528,89 @@ def api_ack(req: AckReq):
 
 # ── B1 控制面：Leader 改绑（ADR §2a 修订；与 team-auth session-bindings 正交） ──
 
-def _b0_is_user_request(request: Request) -> bool:
-    """用户判定：携带正确 COCKPIT_TOKEN Bearer 或已登录用户会话 cookie。"""
-    if COCKPIT_TOKEN:
-        value = request.headers.get("authorization", "")
-        if value.startswith("Bearer ") and hmac.compare_digest(
-            value[7:], COCKPIT_TOKEN,
+_B0_GRANT_TTL_DEFAULT = 300.0
+_B0_REBIND_GRANTS: dict[str, dict[str, Any]] = {}
+_B0_REBIND_GRANTS_LOCK = threading.Lock()
+
+
+def _b0_issue_grant(scope_kind: str, scope_id: str, mail_name: str, ttl: float) -> dict[str, Any]:
+    token = secrets.token_hex(32)
+    expires = time.time() + ttl
+    with _B0_REBIND_GRANTS_LOCK:
+        # 清理过期/已用 grant，防内存累积
+        stale = [
+            k for k, v in _B0_REBIND_GRANTS.items()
+            if v["expires_ts"] < time.time() or v["used"]
+        ]
+        for k in stale:
+            _B0_REBIND_GRANTS.pop(k, None)
+        _B0_REBIND_GRANTS[token] = {
+            "scope_kind": scope_kind, "scope_id": scope_id,
+            "mail_name": mail_name, "expires_ts": expires, "used": False,
+        }
+    return {"grant_token": token, "expires_ts": expires, "single_use": True}
+
+
+def _b0_consume_grant(
+    token: str | None, scope_kind: str, scope_id: str, mail_name: str | None,
+) -> bool:
+    """原子消费一次性 grant：必须匹配 scope+mail_name、未过期、未使用。"""
+    if not token or not mail_name:
+        return False
+    with _B0_REBIND_GRANTS_LOCK:
+        grant = _B0_REBIND_GRANTS.get(token)
+        if grant is None or grant["used"]:
+            return False
+        if grant["expires_ts"] < time.time():
+            _B0_REBIND_GRANTS.pop(token, None)
+            return False
+        if (
+            grant["scope_kind"] != scope_kind
+            or grant["scope_id"] != scope_id
+            or not hmac.compare_digest(grant["mail_name"], mail_name)
         ):
-            return True
-        return bool(request.cookies.get(AUTH_COOKIE))
-    # 未设 token 时全局中间件已限定本机回环 = 用户
-    return True
+            return False
+        grant["used"] = True
+        return True
 
 
-def _b0_capability_digest(active: dict[str, Any] | None) -> str | None:
-    """active binding selector 对应 registration_token 的 sha256（仅内存比较，
-    不落日志）；selector 不可解析时返回 None（leader 路径必然拒绝）。"""
-    if not active or not active.get("registry_selector"):
-        return None
-    try:
-        identity = b0_wiring.resolve_selector(str(active["registry_selector"]))
-    except b0_wiring.CredentialUnavailable:
-        return None
-    token = str(identity.get("registration_token") or "")
+def _b0_valid_grant_for(request: Request, scope_kind: str, scope_id: str) -> bool:
+    """中间件窄豁免前置：请求头必须携带与该 scope 匹配的有效未用 grant
+    （消费发生在端点内；此处只判有效性）。"""
+    token = (request.headers.get("x-b0-grant-token") or "").strip()
     if not token:
-        return None
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return False
+    with _B0_REBIND_GRANTS_LOCK:
+        grant = _B0_REBIND_GRANTS.get(token)
+        if grant is None or grant["used"] or grant["expires_ts"] < time.time():
+            return False
+        return grant["scope_kind"] == scope_kind and grant["scope_id"] == scope_id
+
+
+def _b0_user_request(request: Request) -> bool:
+    """用户判定：复用全局门的 _valid_bearer/_valid_cookie/loopback 语义；
+    cookie 写请求附加同源 CSRF 校验。bogus cookie/非回环无 token 一律拒绝。"""
+    if COCKPIT_TOKEN:
+        if _valid_bearer(request.headers.get("authorization")):
+            return True
+        if _valid_cookie(request.cookies.get(AUTH_COOKIE)):
+            origin = request.headers.get("origin")
+            if origin and not _same_origin(origin, request.headers.get("host")):
+                return False
+            return True
+        return False
+    return _is_loopback(request.client.host if request.client else None)
+
+
+@app.post("/api/binding/{scope_kind}/{scope_id}/rebind-grant")
+def api_binding_rebind_grant(
+    scope_kind: str, scope_id: str, req: RebindGrantReq, request: Request,
+):
+    if scope_kind not in leader_binding.SCOPE_KINDS:
+        raise HTTPException(400, f"非法 scope_kind（允许 {leader_binding.SCOPE_KINDS}）")
+    if not _b0_user_request(request):
+        raise HTTPException(403, "签发 grant 仅限 COCKPIT_TOKEN 用户")
+    return _b0_issue_grant(scope_kind, scope_id, req.mail_name, float(req.ttl_seconds))
 
 
 @app.post("/api/binding/{scope_kind}/{scope_id}/rebind")
@@ -1523,17 +1624,26 @@ def api_binding_rebind(scope_kind: str, scope_id: str, req: RebindReq, request: 
     except Exception:
         logger.exception("rebind: read active binding failed")
         raise HTTPException(503, "binding 存储暂不可用")
-    # 鉴权：用户（Bearer/会话）放行；否则 caller==active mail_name 且必须
-    # 提供 capability_digest（sha256(registration_token)）能力证明
-    ok, actor = b0_wiring.rebind_authorize(
-        user_authenticated=_b0_is_user_request(request),
-        caller_mail_name=req.caller_mail_name,
-        active=active,
-        capability_digest=req.capability_digest,
-        expected_digest=_b0_capability_digest(active),
-    )
-    if not ok:
-        raise HTTPException(403, "改绑仅限 COCKPIT_TOKEN 用户或当前 active Leader")
+    # 鉴权：用户（_valid_bearer/_valid_cookie/loopback，含 CSRF）放行；
+    # 否则 active Leader 必须持一次性/有时效 grant（禁止长期 digest）
+    if _b0_user_request(request):
+        actor = "user"
+    else:
+        if (
+            active is not None
+            and req.caller_mail_name
+            and hmac.compare_digest(
+                str(req.caller_mail_name), str(active.get("mail_name") or ""),
+            )
+            and _b0_consume_grant(
+                req.grant_token, scope_kind, scope_id, req.caller_mail_name,
+            )
+        ):
+            actor = "active_leader"
+        else:
+            raise HTTPException(
+                403, "改绑仅限 COCKPIT_TOKEN 用户或持一次性 grant 的 active Leader",
+            )
     try:
         row = b0_wiring.perform_rebind(
             scope_kind, scope_id, issuer=B0_ISSUER,

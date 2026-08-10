@@ -49,6 +49,8 @@ def binding_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "registry"
     (root / "proj-x").mkdir(parents=True)
+    os.chmod(root, 0o700)
+    os.chmod(root / "proj-x", 0o700)
     monkeypatch.setattr(b0_wiring, "REGISTRY_DIR", root)
     monkeypatch.setattr(hub_client, "HUB", "http://127.0.0.1:8765")
     monkeypatch.setattr(hub_client, "TOKEN", "client-token")
@@ -62,6 +64,7 @@ def _write_identity(
 ) -> Path:
     path = registry / rel
     path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
     path.write_text(json.dumps({
         "project_key": "/tmp/proj-x", "project_slug": "proj-x",
         "name": name, "registration_token": token, "hub": hub,
