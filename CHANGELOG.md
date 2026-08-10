@@ -15,8 +15,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with clearer chips/toasts; message body still loads from the project library.
 - Layout「拆开整组」resolves the multi-pane group from a fresh snapshot
   `sessions[].focused_pane_id` instead of a stale BOARD with multiple focused panes.
-- Theme switch writes preference and force-reloads the page to avoid broken
-  xterm/WebGL runtime theme state.
+- Layout quick actions now compose two existing Agent panes and never create or
+  close panes; empty-shell splits live under a confirmed advanced control.
+- Theme switching is in-place and latest-request-wins across Web, Herdr, Grok
+  (`/theme light|dark`), and OpenCode (`/themes` with `palenight`/`aura`), while
+  preserving existing OpenCode TUI settings and refusing to overwrite invalid JSON.
 
 
 ### Added

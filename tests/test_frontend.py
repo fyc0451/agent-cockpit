@@ -829,7 +829,7 @@ def test_terminal_does_not_forward_browser_focus_reports_to_pty():
     js = _inline_js()
     assert "const isTermFocusReport=data=>data==='\\x1b[I'||data==='\\x1b[O'" in js
     mount = js.split("function termMount(id){", 1)[1].split("function ", 1)[0]
-    assert "xterm.onData(d=>{if(isTermFocusReport(d)||TERM_THEME_OVERLAYING)return;" in mount
+    assert "xterm.onData(d=>{if(isTermFocusReport(d)||termThemeInputBlocked())return;" in mount
     assert "queueTermInput(id,applyTermModifiers(d))" in mount
 
 
@@ -1906,8 +1906,8 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
         "try{xterm.write", 1
     )[0]
     assert clear_warmup.index("xterm.reset()") < clear_warmup.index("afterTermPaints(connect)")
-    # loading 遮罩不再吞 onData（否则主题刷新后几秒键盘/点击像死了）
-    assert "isTermFocusReport(d)||TERM_THEME_OVERLAYING)return" in mount
+    # loading 语义保持原样；仅主题切换窗口会短暂拒绝输入。
+    assert "isTermFocusReport(d)||termThemeInputBlocked())return" in mount
     assert "TERM_INSTANCES[id]?.loadingEl)return" not in mount
     term_key = js.split("function termKey(name){", 1)[1].split(
         "async function termEnsure", 1
@@ -3342,6 +3342,19 @@ def test_theme_switch_inplace_single_herdr_notify_and_input_gate():
     # 禁止默认 true 广播（会与 API 双发 Mode 2031）
     assert "sendAllTermColorSchemes()" not in set_theme
     assert "sendAllTermColorSchemes(true)" not in set_theme
+    assert "let TERM_INPUT_GATE_UNTIL=0;" in js
+    gate = js.split("function termThemeInputBlocked(){", 1)[1].split(
+        "function flushTermInput", 1
+    )[0]
+    assert "TERM_THEME_OVERLAYING" in gate
+    assert "TERM_INPUT_GATE_UNTIL" in gate
+    assert "loadingEl" not in gate
+    assert "replayComplete" not in gate
+    websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
+        "function showTermInstance", 1
+    )[0]
+    assert "armTermInputGate" not in websocket
+    assert "isTermMouseReport" not in js
 
 
 def test_layout_quick_pair_and_empty_shell_controls_are_separated():

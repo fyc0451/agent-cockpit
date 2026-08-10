@@ -312,7 +312,7 @@ def set_theme_name(name: str) -> Path:
     """更新 config.toml [theme].name；委托 set_theme_for_web_mode。"""
     light_names = (
         "solarized-light", "catppuccin-latte", "one-light", "gruvbox-light",
-        "tokyo-night-day", "kanagawa-lotus", "rose-pine-dawn", "solarized",
+        "tokyo-night-day", "kanagawa-lotus", "rose-pine-dawn",
     )
     mode = "light" if "light" in (name or "").lower() or name in light_names else "dark"
     return set_theme_for_web_mode(mode, name_override=name)["path"]
@@ -993,16 +993,19 @@ def set_opencode_tui_theme(theme_name: str) -> Path:
     """写入 ~/.config/opencode/tui.json 的 theme，供新建/重启 OpenCode 继承。"""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", theme_name or ""):
         raise ValueError("非法 OpenCode 主题名")
-    path = Path.home() / ".config" / "opencode" / "tui.json"
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+    path = root / "opencode" / "tui.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {}
     if path.is_file():
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                data = raw
-        except (OSError, json.JSONDecodeError):
-            data = {}
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"现有 OpenCode tui.json 不是有效 JSON: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise ValueError("现有 OpenCode tui.json 必须是 JSON 对象")
+        data = raw
     data["$schema"] = data.get("$schema") or "https://opencode.ai/tui.json"
     data["theme"] = theme_name
     text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
@@ -1084,8 +1087,9 @@ def apply_agent_web_themes(mode: str) -> dict[str, Any]:
     try:
         snap = snapshot()
     except Exception as exc:
+        errors.append(f"snapshot: {exc}")
         return {
-            "ok": False, "applied": [], "errors": [f"snapshot: {exc}"],
+            "ok": False, "applied": [], "errors": errors,
             "skipped": [], "mode": mode, "opencode_theme": opencode_theme,
             "tui_json": tui_path,
         }
@@ -1101,6 +1105,12 @@ def apply_agent_web_themes(mode: str) -> dict[str, Any]:
             continue
 
         if agent in ("opencode", "open-code"):
+            if tui_path is None:
+                skipped.append({
+                    "session": session, "pane_id": pane_id,
+                    "agent": "opencode", "reason": "tui_config_write_failed",
+                })
+                continue
             # 亮/暗同一机制：/themes 选中不同主题名
             result = apply_opencode_theme_to_pane(session, pane_id, opencode_theme)
             if result.get("error"):
@@ -1140,16 +1150,34 @@ def apply_agent_web_themes(mode: str) -> dict[str, Any]:
 
 def apply_grok_web_theme(mode: str) -> dict[str, Any]:
     """兼容旧名：只推 grok pane 的 /theme slash。"""
-    out = apply_agent_web_themes(mode)
-    applied = [a for a in out.get("applied") or [] if a.get("agent") == "grok"]
-    errors = [e for e in (out.get("errors") or []) if e.startswith("grok:")]
-    cmd = grok_theme_slash(mode) if mode in ("light", "dark") else ""
+    if mode not in ("light", "dark"):
+        raise ValueError("mode 必须是 light 或 dark")
+    cmd = grok_theme_slash(mode)
+    applied: list[dict[str, str]] = []
+    errors: list[str] = []
+    try:
+        panes = snapshot().get("panes") or []
+    except Exception as exc:
+        return {
+            "ok": False, "applied": [], "errors": [f"snapshot: {exc}"],
+            "command": cmd,
+        }
+    for pane in panes:
+        if not isinstance(pane, dict) or str(pane.get("agent") or "").lower() != "grok":
+            continue
+        session = str(pane.get("session") or "")
+        pane_id = str(pane.get("pane_id") or "")
+        if not session or not pane_id:
+            continue
+        result = pane_send(session, pane_id, cmd, mode="slash")
+        if result.get("error"):
+            errors.append(f"{session}/{pane_id}: {result['error']}")
+        else:
+            applied.append({"session": session, "pane_id": pane_id})
     return {
         "ok": not errors,
-        "applied": [
-            {"session": a["session"], "pane_id": a["pane_id"]} for a in applied
-        ],
-        "errors": [e.split(": ", 1)[-1] if ": " in e else e for e in errors],
+        "applied": applied,
+        "errors": errors,
         "command": cmd,
     }
 

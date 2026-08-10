@@ -1,4 +1,5 @@
 import tomllib
+import threading
 
 import herdr_client
 import server
@@ -133,9 +134,19 @@ def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     _write_config(tmp_path, monkeypatch, "[theme]\nname = \"terminal\"\n")
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     reloads = []
+    effects = []
+    effect_done = threading.Event()
     monkeypatch.setattr(
         server.herdr_client, "reload_config",
         lambda timeout=10: reloads.append(True) or {"ok": True},
+    )
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: [])
+    monkeypatch.setattr(
+        server.herdr_client,
+        "apply_agent_web_themes",
+        lambda mode: effects.append(mode) or effect_done.set() or {
+            "ok": True, "applied": [], "errors": [],
+        },
     )
     client = TestClient(server.app, headers={"Authorization": "Bearer secret"})
 
@@ -147,21 +158,146 @@ def test_theme_herdr_endpoint(monkeypatch, tmp_path):
     assert body["reload"]["ok"] is True
     assert body["reload"].get("scheduled") is True or body["reload"].get("skipped") is False
     assert "notified_terms" in body
+    assert effect_done.wait(2)
+    assert reloads == [True]
+    assert effects == ["dark"]
 
     # 第二次同 mode：config 未变，应跳过 reload-config
     reloads.clear()
+    effect_done.clear()
     r = client.post("/api/theme/herdr", json={"mode": "dark"})
     assert r.status_code == 200
     body = r.json()
     assert body["config_changed"] is False
     assert body["reload"].get("skipped") is True
+    assert effect_done.wait(2)
     assert reloads == []
+    assert effects == ["dark", "dark"]
 
+    effect_done.clear()
     r = client.post("/api/theme/herdr", json={"mode": "light"})
     assert r.json()["theme"] == "solarized-light"
+    assert effect_done.wait(2)
 
     r = client.post("/api/theme/herdr", json={"mode": "purple"})
     assert r.status_code == 400
+
+
+def test_theme_side_effects_are_serialized_and_latest_request_wins(monkeypatch):
+    first_reload_started = threading.Event()
+    release_first_reload = threading.Event()
+    dark_applied = threading.Event()
+    reload_count = 0
+    applied = []
+
+    monkeypatch.setattr(server.herdr_client, "set_web_theme_mode", lambda _mode: None)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "set_theme_for_web_mode",
+        lambda _mode, name_override=None: {"changed": True},
+    )
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: [])
+
+    def reload_config(timeout=10):
+        nonlocal reload_count
+        reload_count += 1
+        if reload_count == 1:
+            first_reload_started.set()
+            assert release_first_reload.wait(2)
+        return {"ok": True}
+
+    def apply_agents(mode):
+        applied.append(mode)
+        if mode == "dark":
+            dark_applied.set()
+        return {"ok": True, "applied": [], "errors": []}
+
+    monkeypatch.setattr(server.herdr_client, "reload_config", reload_config)
+    monkeypatch.setattr(server.herdr_client, "apply_agent_web_themes", apply_agents)
+
+    server.api_theme_herdr(server.ThemeHerdrReq(mode="light"))
+    assert first_reload_started.wait(2)
+    server.api_theme_herdr(server.ThemeHerdrReq(mode="dark"))
+    release_first_reload.set()
+
+    assert dark_applied.wait(2)
+    assert applied == ["dark"]
+
+
+def test_latest_same_theme_request_keeps_pending_config_reload(monkeypatch):
+    changes = iter((True, False))
+    reloaded = []
+    applied = []
+    applied_done = threading.Event()
+    monkeypatch.setattr(server, "_THEME_CONFIG_DIRTY", False)
+    monkeypatch.setattr(server.herdr_client, "set_web_theme_mode", lambda _mode: None)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "set_theme_for_web_mode",
+        lambda _mode, name_override=None: {"changed": next(changes)},
+    )
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: [])
+    monkeypatch.setattr(
+        server.herdr_client, "reload_config",
+        lambda timeout=10: reloaded.append(True) or {"ok": True},
+    )
+
+    def apply_agents(mode):
+        applied.append(mode)
+        applied_done.set()
+        return {"ok": True, "applied": [], "errors": []}
+
+    monkeypatch.setattr(server.herdr_client, "apply_agent_web_themes", apply_agents)
+
+    server._THEME_EFFECT_LOCK.acquire()
+    try:
+        server.api_theme_herdr(server.ThemeHerdrReq(mode="light"))
+        second = server.api_theme_herdr(server.ThemeHerdrReq(mode="light"))
+    finally:
+        server._THEME_EFFECT_LOCK.release()
+
+    assert second["reload"]["scheduled"] is True
+    assert applied_done.wait(2)
+    assert reloaded == [True]
+    assert applied == ["light"]
+
+
+def test_failed_theme_reload_stays_dirty_for_same_mode_retry(monkeypatch):
+    changes = iter((True, False))
+    reload_results = iter(({"ok": False, "errors": ["boom"]}, {"ok": True}))
+    reload_count = 0
+    applied_done = threading.Event()
+    monkeypatch.setattr(server, "_THEME_CONFIG_DIRTY", False)
+    monkeypatch.setattr(server.herdr_client, "set_web_theme_mode", lambda _mode: None)
+    monkeypatch.setattr(
+        server.herdr_client, "set_theme_for_web_mode",
+        lambda _mode, name_override=None: {"changed": next(changes)},
+    )
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: [])
+
+    def reload_config(timeout=10):
+        nonlocal reload_count
+        reload_count += 1
+        return next(reload_results)
+
+    monkeypatch.setattr(server.herdr_client, "reload_config", reload_config)
+    monkeypatch.setattr(
+        server.herdr_client, "apply_agent_web_themes",
+        lambda _mode: applied_done.set() or {"ok": True, "applied": [], "errors": []},
+    )
+
+    server.api_theme_herdr(server.ThemeHerdrReq(mode="dark"))
+    assert applied_done.wait(2)
+    with server._THEME_REQUEST_LOCK:
+        assert server._THEME_CONFIG_DIRTY is True
+
+    applied_done.clear()
+    second = server.api_theme_herdr(server.ThemeHerdrReq(mode="dark"))
+    assert second["reload"]["scheduled"] is True
+    assert applied_done.wait(2)
+    assert reload_count == 2
+    with server._THEME_REQUEST_LOCK:
+        assert server._THEME_CONFIG_DIRTY is False
 
 
 def test_frontend_set_theme_calls_herdr_sync():

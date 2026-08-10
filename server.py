@@ -2048,6 +2048,15 @@ def api_upgrade_start(req: UpgradeReq):
 # Web 切主题时把 Herdr 自身 UI 主题写进 config.toml 并热重载。
 # light 必须用浅色内置名：solarized 是暗色，solarized-light 才是浅色。
 HERDR_THEME_MAP = {"light": "solarized-light", "dark": "catppuccin"}
+_THEME_REQUEST_LOCK = threading.Lock()
+_THEME_EFFECT_LOCK = threading.Lock()
+_THEME_GENERATION = 0
+_THEME_CONFIG_DIRTY = False
+
+
+def _theme_generation_is_current(generation: int) -> bool:
+    with _THEME_REQUEST_LOCK:
+        return generation == _THEME_GENERATION
 
 
 class ThemeHerdrReq(BaseModel):
@@ -2067,18 +2076,25 @@ def api_theme_herdr(req: ThemeHerdrReq):
     """
     if req.mode not in HERDR_THEME_MAP:
         raise HTTPException(400, "mode 必须是 light 或 dark")
-    theme_name = HERDR_THEME_MAP[req.mode]
-    herdr_client.set_web_theme_mode(req.mode)
-    try:
-        write = herdr_client.set_theme_for_web_mode(req.mode, name_override=theme_name)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    except OSError as exc:
-        raise HTTPException(500, f"写入 herdr 配置失败: {exc}")
-    config_changed = bool(write.get("changed")) if isinstance(write, dict) else True
+    mode = req.mode
+    theme_name = HERDR_THEME_MAP[mode]
+    global _THEME_CONFIG_DIRTY, _THEME_GENERATION
+    with _THEME_REQUEST_LOCK:
+        _THEME_GENERATION += 1
+        generation = _THEME_GENERATION
+        try:
+            write = herdr_client.set_theme_for_web_mode(mode, name_override=theme_name)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except OSError as exc:
+            raise HTTPException(500, f"写入 herdr 配置失败: {exc}")
+        herdr_client.set_web_theme_mode(mode)
+        config_changed = bool(write.get("changed")) if isinstance(write, dict) else True
+        _THEME_CONFIG_DIRTY = _THEME_CONFIG_DIRTY or config_changed
+        reload_pending = _THEME_CONFIG_DIRTY
 
     reload_state: dict[str, Any] = {
-        "ok": True, "scheduled": False, "skipped": not config_changed,
+        "ok": True, "scheduled": False, "skipped": not reload_pending,
     }
     agents_state: dict[str, Any] = {"scheduled": True}
 
@@ -2089,59 +2105,65 @@ def api_theme_herdr(req: ThemeHerdrReq):
                 tid = str(item.get("id") or "")
                 if not tid or not item.get("alive") or not item.get("label"):
                     continue
-                if terminal.set_color_scheme(tid, req.mode, notify=True):
+                if terminal.set_color_scheme(tid, mode, notify=True):
                     notified.append(tid)
         except Exception:
             logger.exception("theme/herdr notify labeled terms failed")
         return notified
 
     def _bg_theme_side_effects() -> None:
-        # config 变了：先 reload 再 Mode 2031（herdr 用新 name 答 OSC，OpenCode 才准）
-        # config 未变：同步路径已发过 Mode 2031，这里只补 agent slash
-        if config_changed:
-            try:
-                herdr_client.reload_config()
-            except Exception:
-                logger.exception("theme/herdr reload_config failed")
+        # 请求可并发到达：副作用串行化，并在每个阶段执行 latest-wins 检查。
+        # 旧请求即使先启动，也不能在新请求之后反向覆盖 Agent 主题。
+        with _THEME_EFFECT_LOCK:
+            if not _theme_generation_is_current(generation):
+                return
+            global _THEME_CONFIG_DIRTY
+            with _THEME_REQUEST_LOCK:
+                if generation != _THEME_GENERATION:
+                    return
+                reload_required = _THEME_CONFIG_DIRTY
+                _THEME_CONFIG_DIRTY = False
+            if reload_required:
+                try:
+                    result = herdr_client.reload_config()
+                    if not result.get("ok", False):
+                        raise RuntimeError(str(result.get("errors") or "reload failed"))
+                except Exception:
+                    logger.exception("theme/herdr reload_config failed")
+                    with _THEME_REQUEST_LOCK:
+                        _THEME_CONFIG_DIRTY = True
+            if not _theme_generation_is_current(generation):
+                return
             try:
                 _notify_mode_2031()
             except Exception:
                 logger.exception("theme/herdr Mode 2031 failed")
-        # Grok 等自绘：原生 /theme slash（OpenCode 走 Mode 2031，不在此灌 /themes 选择器）
-        try:
-            herdr_client.apply_agent_web_themes(req.mode)
-        except Exception:
-            logger.exception("theme/herdr apply_agent_web_themes failed")
-
-    # config 未变：同步立刻 Mode 2031；变了则等后台 reload 后再发（避免双发）
-    notified_sync = [] if config_changed else _notify_mode_2031()
+            if not _theme_generation_is_current(generation):
+                return
+            try:
+                agents = herdr_client.apply_agent_web_themes(mode)
+                if not agents.get("ok", False):
+                    logger.warning("theme/herdr agent sync incomplete: %s", agents)
+            except Exception:
+                logger.exception("theme/herdr apply_agent_web_themes failed")
 
     try:
-        import threading
-        if config_changed:
+        if reload_pending:
             reload_state["scheduled"] = True
         threading.Thread(
             target=_bg_theme_side_effects, name="herdr-theme-side", daemon=True,
         ).start()
     except Exception:
         logger.exception("theme/herdr schedule side effects failed")
-        if config_changed:
-            try:
-                reload_state = herdr_client.reload_config()
-            except Exception as exc:
-                reload_state = {"ok": False, "error": str(exc)}
-            notified_sync = _notify_mode_2031()
-        try:
-            agents_state = herdr_client.apply_agent_web_themes(req.mode)
-        except Exception as exc:
-            agents_state = {"ok": False, "error": str(exc)}
+        _bg_theme_side_effects()
 
     return {
         "ok": True,
         "theme": theme_name,
+        "generation": generation,
         "config_changed": config_changed,
         "reload": reload_state,
-        "notified_terms": notified_sync,
+        "notified_terms": [],
         "agents": agents_state,
     }
 

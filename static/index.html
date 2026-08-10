@@ -3211,11 +3211,11 @@ let XTERM=null, FIT=null, TERM_WS=null, TERM_ID=null, TERMS=[], TERM_LABELS={}, 
 let TERM_SESSION_CATALOG=[], TERM_RESTORE_PROMISE=null;
 const TERM_SESSION_PREFIX='session:';
 const TERM_REPLAY_INITIAL=8*1024,TERM_HISTORY_PAGE=8*1024,TERM_HISTORY_MAX=1024*1024,TERM_RENDER_CHUNK=16*1024;
-const TERM_LOADING_QUIET=50,TERM_LOADING_TIMEOUT=8000;
+const TERM_LOADING_QUIET=80,TERM_LOADING_TIMEOUT=15000;
 const TERM_WEBGL_WARMUP='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()[]{}<>+-=_/\\|:;,.? ┌─┐│└┘├┤┬┴┼ 中文';
 const TERM_WEBGL_CONTRAST=document.documentElement.classList.contains('light')?4.5:3;
-const TERM_THEME_GATE_MS=800;
-const TERM_LOADING_TUI_MAX_MS=400;
+const TERM_THEME_GATE_MS=1200;
+let TERM_INPUT_GATE_UNTIL=0;
 const TERM_TEXT_ENCODER=new TextEncoder();
 const afterTermPaints=callback=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(callback)));
 const WS_PROTO=location.protocol==='https:'?'wss':'ws';
@@ -4211,18 +4211,9 @@ function armTermInputGate(ms=1200){
   const until=performance.now()+Math.max(0,Number(ms)||0);
   if(until>TERM_INPUT_GATE_UNTIL)TERM_INPUT_GATE_UNTIL=until;
 }
-function isTermMouseReport(data){
-  // X10: ESC [ M Cb Cx Cy；SGR: ESC [ < ... 
-  return typeof data==='string'&&data.length>=3&&data.charCodeAt(0)===0x1b
-    &&(data.startsWith('\x1b[M')||data.startsWith('\x1b[<'));
-}
-function termInputBlocked(id){
+function termThemeInputBlocked(){
   if(TERM_THEME_OVERLAYING)return true;
   if(performance.now()<TERM_INPUT_GATE_UNTIL)return true;
-  const inst=TERM_INSTANCES[id];
-  if(!inst||inst.closing||inst.initializing)return true;
-  // 历史回放 / 等 alternate TUI / loading 遮罩仍在：一律不收终端输入
-  if(!inst.replayComplete||inst.loadingEl||inst.loadingWaitForTui)return true;
   return false;
 }
 function flushTermInput(id,ws){
@@ -4235,12 +4226,7 @@ function flushTermInput(id,ws){
 }
 function queueTermInput(id,data,notice){
   const inst=TERM_INSTANCES[id];if(!inst)return;
-  // notice=启动 herdr 等显式命令，允许在 loading 期排队
-  if(!notice){
-    if(termInputBlocked(id))return;
-    // WS 未开时绝不缓存鼠标报告——重连 onopen 会一泻千里
-    if(isTermMouseReport(data)&&(!inst.ws||inst.ws.readyState!==1))return;
-  }
+  if(!notice&&termThemeInputBlocked())return;
   inst.pendingInput=(inst.pendingInput||'')+data;
   if(notice)inst.pendingNotice=notice;
   flushTermInput(id,inst.ws);
@@ -4291,7 +4277,6 @@ function finishTermLoading(id,inst){
   if(inst.loadingTimer){clearTimeout(inst.loadingTimer);inst.loadingTimer=null}
   if(inst.loadingDeadlineTimer){clearTimeout(inst.loadingDeadlineTimer);inst.loadingDeadlineTimer=null}
   const loading=inst.loadingEl;inst.loadingEl=null;inst.loadingPaintPending=false;
-  inst.loadingWaitForTui=false; // 强制揭开时必须放行输入，否则永久假死门禁
   inst.el?.removeAttribute('aria-busy');loading.classList.add('done');
   setTimeout(()=>loading.remove(),180);
   if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active'))requestAnimationFrame(()=>{try{inst.xterm.focus()}catch(e){}});
@@ -4321,13 +4306,14 @@ function hideTermThemeOverlay(){
   ov.classList.add('done');
   setTimeout(()=>{try{ov.remove()}catch(e){}},180);
 }
-function holdTermLoadingForTui(id,maxWaitMs){
+function holdTermLoadingForTui(id,maxWaitMs=1500){
   const inst=TERM_INSTANCES[id];if(!inst?.loadingEl)return;
   inst.loadingWaitForTui=true;
   const label=inst.loadingEl.querySelector('span:last-child');if(label)label.textContent='正在启动完整终端';
   if(inst.loadingDeadlineTimer)clearTimeout(inst.loadingDeadlineTimer);
-  // 揭遮罩要快；输入门禁另管，避免「等 1.5s + 假死重放」。
-  const wait=Math.max(150,Math.min(800,Number(maxWaitMs)||TERM_LOADING_TUI_MAX_MS));
+  // TUI 等待上限:主题刷新重 attach 用更短窗口(见 maxWaitMs)，避免「点了几秒没反应」。
+  // 遮罩 pointer-events:none；输入也不再因 loadingEl 丢弃。
+  const wait=Math.max(200,Math.min(1500,Number(maxWaitMs)||1500));
   inst.loadingDeadlineTimer=setTimeout(()=>settleTermLoading(id,true),wait);
 }
 function settleTermLoading(id,force=false){
@@ -4516,23 +4502,10 @@ function openTermWS(id,xterm,replay){
   let awaitingReplay=!!replay;
   ws.onopen=()=>{
     const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;
-    // 回放/重连窗口：再挡一会输入，避免「假死后点击全部灌进 TUI」
-    if(replay)armTermInputGate(400);
     // 首次挂载时 Herdr 命令还在输入队列里，不能先把 Mode 2031 写给登录 shell。
     // 重连挂到已运行的 TUI 时才通知；两种情况都会更新 OSC 10/11 回复色。
     sendTermColorScheme(id,ws,!replay);
     try{ws.send(JSON.stringify({type:'resize',cols:xterm.cols,rows:xterm.rows}))}catch(e){}
-    // 只刷 notice 启动命令；丢弃假死期误积的鼠标/键盘垃圾
-    if(inst){
-      if(inst.pendingNotice&&inst.pendingInput){/* keep */}
-      else if(inst.pendingInput&&!inst.pendingNotice){
-        // 无 notice 时 pending 多半是误触；整段丢掉
-        inst.pendingInput='';
-      }else if(inst.pendingInput){
-        // 有 notice：尽量只保留可打印启动串，剥掉 ESC 鼠标报告
-        inst.pendingInput=String(inst.pendingInput).replace(/\x1b\[M...|\x1b\[<[^a-zA-Z]*[mM]/g,'');
-      }
-    }
     flushTermInput(id,ws);startTermZoomLease(id);
     if(id===TERM_ID&&document.getElementById('view-term')?.classList.contains('active')){try{xterm.focus()}catch(e){}}
   };
@@ -4546,13 +4519,7 @@ function openTermWS(id,xterm,replay){
         const control=JSON.parse(ev.data);
         if(control?.type==='replay_complete'){
           awaitingReplay=false;
-          const inst=TERM_INSTANCES[id];
-          if(inst&&inst.ws===ws){
-            inst.replayComplete=true;
-            // 回放刚结束、TUI 可能仍在吃历史/重绘：再挡 300ms 输入
-            armTermInputGate(300);
-            settleTermLoading(id);
-          }
+          const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws){inst.replayComplete=true;settleTermLoading(id)}
           return;
         }
       }catch(e){}
@@ -4700,7 +4667,7 @@ function termMount(id){
     loadingLastOutputAt:performance.now(),loadingTimer:null,loadingDeadlineTimer:null,loadingPaintPending:false};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   // loading 遮罩 pointer-events:none，期间应可交互；仅主题全屏遮罩禁输入防幽灵回放
-  xterm.onData(d=>{if(isTermFocusReport(d)||termInputBlocked(id))return;queueTermInput(id,applyTermModifiers(d))});
+  xterm.onData(d=>{if(isTermFocusReport(d)||termThemeInputBlocked())return;queueTermInput(id,applyTermModifiers(d))});
   xterm.onResize(({cols,rows})=>{const w=TERM_INSTANCES[id]?.ws;if(w&&w.readyState===1)w.send(JSON.stringify({type:'resize',cols,rows}))});
   XTERM=xterm;FIT=fit;
   // 先让浏览器画出 loading，再在同一个 xterm/WebGL context 中完成首帧和
