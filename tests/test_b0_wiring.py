@@ -244,9 +244,14 @@ def test_dual_pull_previous_identity(
 def test_fanout_issuer_scoped(binding_db: Path, registry: Path) -> None:
     coord, adapter = _make_coordinator(binding_db, registry)
     scope = b0_wiring.scope_key(ISSUER, "user", "default")
-    coord.set_target_status(scope, "working")
     events = leader_binding.undelivered_control_events(ISSUER)
     assert events  # bind_leader 已产生 binding_changed
+    # working：注入但不 mark（crash 可重放，零丢）
+    coord.set_target_status(scope, "working")
+    assert coord.fanout_control_events() == 0
+    assert len(leader_binding.undelivered_control_events(ISSUER)) == len(events)
+    # ready：投递成功才 mark
+    coord.set_target_status(scope, "ready")
     n = coord.fanout_control_events()
     assert n == len(events)
     assert leader_binding.undelivered_control_events(ISSUER) == []
@@ -268,14 +273,27 @@ def test_rebind_authorize() -> None:
     assert ok and actor == "user"
     ok, actor = b0_wiring.rebind_authorize(
         user_authenticated=False, caller_mail_name="leader-x", active=active,
+        capability_digest="d" * 64, expected_digest="d" * 64,
     )
     assert ok and actor == "active_leader"
     ok, _ = b0_wiring.rebind_authorize(
         user_authenticated=False, caller_mail_name="impostor", active=active,
+        capability_digest="d" * 64, expected_digest="d" * 64,
     )
     assert not ok
     ok, _ = b0_wiring.rebind_authorize(
         user_authenticated=False, caller_mail_name="leader-x", active=None,
+        capability_digest="d" * 64, expected_digest="d" * 64,
+    )
+    assert not ok
+    # 名字对但无能力证明 / digest 不匹配 → 拒绝
+    ok, _ = b0_wiring.rebind_authorize(
+        user_authenticated=False, caller_mail_name="leader-x", active=active,
+    )
+    assert not ok
+    ok, _ = b0_wiring.rebind_authorize(
+        user_authenticated=False, caller_mail_name="leader-x", active=active,
+        capability_digest="e" * 64, expected_digest="d" * 64,
     )
     assert not ok
 

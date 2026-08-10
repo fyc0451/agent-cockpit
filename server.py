@@ -663,6 +663,9 @@ async def protect_api(request: Request, call_next):
     protected = path.startswith("/api/") or path in {
         "/docs", "/redoc", "/openapi.json", "/health.poll",
     }
+    # B0 B1 rebind 端点自行完成鉴权（用户 Bearer/cookie 或 capability_digest）
+    if path.startswith("/api/binding/") and path.endswith("/rebind"):
+        return await call_next(request)
     if not protected or path in PUBLIC_PATHS:
         return await call_next(request)
     if not _request_authenticated(request):
@@ -760,6 +763,7 @@ class RebindReq(BaseModel):
     pane_id: str | None = None
     registry_selector: str | None = None
     caller_mail_name: str | None = None
+    capability_digest: str | None = None
 
 
 class ZoomLeaseReq(BaseModel):
@@ -1301,17 +1305,20 @@ def _notify_coordination_message(
         "stop/redirect 不恢复旧任务。"
     )
     if intent in coordination.NO_RESUME_INTENTS:
-        # W6：控制动作正文携带 canonical binding version（ADR §4/故障6）
+        # W6：控制动作正文携带 canonical binding version（ADR §4/故障6）；
+        # 枚举本 issuer 的真实 active scope，不硬编码 scope
         try:
-            binding = leader_binding.get_active_binding(
-                B0_ISSUER, "user", "default",
+            bindings = leader_binding.list_bindings(
+                issuer=B0_ISSUER, state="active",
             )
         except Exception:
-            binding = None
-        if binding:
+            bindings = []
+        for binding in bindings[:3]:
             note += (
                 f" [canonical binding v{binding['binding_version']} "
-                f"from={binding['mail_name']}；与本地已知版本冲突时拒绝并报警]"
+                f"from={binding['mail_name']} "
+                f"scope={binding['scope_kind']}/{binding['scope_id']}；"
+                "与本地已知版本冲突时拒绝并报警]"
             )
     sent = herdr_client.pane_send(session, pane_id, note, "prompt")
     return {
@@ -1477,8 +1484,36 @@ def api_ack(req: AckReq):
 
 # ── B1 控制面：Leader 改绑（ADR §2a 修订；与 team-auth session-bindings 正交） ──
 
+def _b0_is_user_request(request: Request) -> bool:
+    """用户判定：携带正确 COCKPIT_TOKEN Bearer 或已登录用户会话 cookie。"""
+    if COCKPIT_TOKEN:
+        value = request.headers.get("authorization", "")
+        if value.startswith("Bearer ") and hmac.compare_digest(
+            value[7:], COCKPIT_TOKEN,
+        ):
+            return True
+        return bool(request.cookies.get(AUTH_COOKIE))
+    # 未设 token 时全局中间件已限定本机回环 = 用户
+    return True
+
+
+def _b0_capability_digest(active: dict[str, Any] | None) -> str | None:
+    """active binding selector 对应 registration_token 的 sha256（仅内存比较，
+    不落日志）；selector 不可解析时返回 None（leader 路径必然拒绝）。"""
+    if not active or not active.get("registry_selector"):
+        return None
+    try:
+        identity = b0_wiring.resolve_selector(str(active["registry_selector"]))
+    except b0_wiring.CredentialUnavailable:
+        return None
+    token = str(identity.get("registration_token") or "")
+    if not token:
+        return None
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 @app.post("/api/binding/{scope_kind}/{scope_id}/rebind")
-def api_binding_rebind(scope_kind: str, scope_id: str, req: RebindReq):
+def api_binding_rebind(scope_kind: str, scope_id: str, req: RebindReq, request: Request):
     if scope_kind not in leader_binding.SCOPE_KINDS:
         raise HTTPException(400, f"非法 scope_kind（允许 {leader_binding.SCOPE_KINDS}）")
     try:
@@ -1488,11 +1523,14 @@ def api_binding_rebind(scope_kind: str, scope_id: str, req: RebindReq):
     except Exception:
         logger.exception("rebind: read active binding failed")
         raise HTTPException(503, "binding 存储暂不可用")
-    # 鉴权：用户（已过全局认证）直接放行；否则要求 caller == active mail_name
+    # 鉴权：用户（Bearer/会话）放行；否则 caller==active mail_name 且必须
+    # 提供 capability_digest（sha256(registration_token)）能力证明
     ok, actor = b0_wiring.rebind_authorize(
-        user_authenticated=True,
+        user_authenticated=_b0_is_user_request(request),
         caller_mail_name=req.caller_mail_name,
         active=active,
+        capability_digest=req.capability_digest,
+        expected_digest=_b0_capability_digest(active),
     )
     if not ok:
         raise HTTPException(403, "改绑仅限 COCKPIT_TOKEN 用户或当前 active Leader")

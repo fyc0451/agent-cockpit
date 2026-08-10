@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import os
+import sqlite3
 import stat
 import threading
 import time
@@ -60,9 +61,47 @@ STABLE_REASONS = frozenset({
 
 FLUSH_INTERVAL_S = 4.0
 
+# durable delivery ledger（R2：重启后不得对已投递事件重复 prompt）
+LEDGER_PATH = Path(
+    os.environ.get(
+        "B0_LEDGER_DB",
+        str(Path.home() / "dashboard-data" / "b0-delivery-ledger.sqlite3"),
+    )
+).expanduser()
+
 
 class CredentialUnavailable(RuntimeError):
     """A2 fail-closed：selector 不可解析/Hub 不可读（credential_unavailable）。"""
+
+
+class CrossRunFailFast(RuntimeError):
+    """跨 run 业务消息在发送端失败（stable reason: cross_run_fail_fast）。"""
+
+
+def _check_ancestor_dirs(path: Path) -> None:
+    """祖先目录门：registry 根到 selector 父目录不得是 symlink 或组/他人可写。"""
+    parts: list[Path] = []
+    cur = path.parent
+    root = REGISTRY_DIR.resolve()
+    while True:
+        parts.append(cur)
+        if cur == root or cur.parent == cur:
+            break
+        cur = cur.parent
+    for d in parts:
+        if d.is_symlink():
+            raise CredentialUnavailable(f"祖先目录是 symlink: {d}")
+        try:
+            st = d.stat()
+        except OSError:
+            raise CredentialUnavailable(f"祖先目录不可读: {d}")
+        mode = stat.S_IMODE(st.st_mode)
+        if mode & 0o002:
+            raise CredentialUnavailable(f"祖先目录他人可写 {oct(mode)}: {d}")
+        if mode & 0o020 and st.st_uid != os.getuid():
+            raise CredentialUnavailable(
+                f"祖先目录组可写且属主非当前用户 {oct(mode)}: {d}"
+            )
 
 
 def scope_key(issuer: str, scope_kind: str, scope_id: str) -> str:
@@ -92,6 +131,7 @@ def resolve_selector(selector: str) -> dict[str, Any]:
     if rel.startswith("/") or ".." in Path(rel).parts:
         raise CredentialUnavailable(f"selector 必须相对 registry 根: {rel!r}")
     path = REGISTRY_DIR / rel
+    _check_ancestor_dirs(path)
     if not path.is_file():
         raise CredentialUnavailable(f"selector 不存在: {rel}")
     if path.is_symlink():
@@ -179,6 +219,111 @@ def fetch_inbox_for(
 
 
 # ---------------------------------------------------------------------------
+# cross_run_fail_fast（发送端，stable reason 之一）
+# ---------------------------------------------------------------------------
+
+def cross_run_fail_fast(
+    project_key: str, sender: str, recipients: list[str], *,
+    sender_run_id: str | None,
+    active_context: Callable[[str, str], dict[str, Any] | None] | None = None,
+    run_independent: bool = False,
+) -> dict[str, Any]:
+    """普通业务消息的跨 run 发送端 fail-fast（不产生半成功）。
+
+    默认：任一收件人不在发送者同一 active run → 发送前抛
+    CrossRunFailFast；显式 run_independent=True（如 binding 事件）放行。
+    """
+    if run_independent:
+        return {"failed": False, "reason": None, "run_independent": True}
+    ctx_fn = active_context or coordination.active_context
+    bad: list[str] = []
+    for recipient in recipients:
+        ctx = ctx_fn(project_key, recipient)
+        if not ctx or ctx.get("run_id") != sender_run_id:
+            bad.append(recipient)
+    if bad:
+        raise CrossRunFailFast(
+            f"cross_run_fail_fast: 收件人不在发送者 active run: {bad}"
+        )
+    return {"failed": False, "reason": None, "run_independent": False}
+
+
+# ---------------------------------------------------------------------------
+# durable delivery ledger（重启不重 prompt）
+# ---------------------------------------------------------------------------
+
+class B0DeliveryLedger:
+    """持久投递台账：adapter accept 后按 event_id 落盘；重启重建时用于
+    跳过已投递事件（零重），不依赖 coordination claim 进度。"""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(path or LEDGER_PATH)
+
+    def _connect(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(self.path, timeout=5)
+        con.execute("PRAGMA busy_timeout=5000")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS deliveries ("
+            " event_id TEXT PRIMARY KEY, scope TEXT NOT NULL,"
+            " delivered_ts REAL NOT NULL)"
+        )
+        return con
+
+    def record(self, scope: str, event_ids: list[str]) -> None:
+        if not event_ids:
+            return
+        con = self._connect()
+        try:
+            now = time.time()
+            con.executemany(
+                "INSERT OR IGNORE INTO deliveries(event_id, scope, delivered_ts)"
+                " VALUES(?,?,?)",
+                [(eid, scope, now) for eid in event_ids],
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def delivered_set(self, event_ids: list[str]) -> set[str]:
+        if not event_ids:
+            return set()
+        con = self._connect()
+        try:
+            marks = ",".join("?" * len(event_ids))
+            rows = con.execute(
+                f"SELECT event_id FROM deliveries WHERE event_id IN ({marks})",
+                list(event_ids),
+            ).fetchall()
+            return {r[0] for r in rows}
+        finally:
+            con.close()
+
+    def is_delivered(self, event_id: str) -> bool:
+        return event_id in self.delivered_set([event_id])
+
+
+class _LedgeredAdapter:
+    """包装投递 adapter：accept 成功后先把 event_id 记入持久台账。"""
+
+    def __init__(self, inner: Any, ledger: B0DeliveryLedger) -> None:
+        self._inner = inner
+        self._ledger = ledger
+
+    def deliver(
+        self, scope: str, binding_version: int, events: list[DeferredEvent],
+    ) -> bool:
+        accepted = bool(self._inner.deliver(scope, binding_version, events))
+        if accepted:
+            try:
+                self._ledger.record(scope, [e.event_id for e in events])
+            except Exception:
+                # 台账写失败不改变投递事实；下一轮 seen/核心去重兜底
+                logging.getLogger("b0.wiring").exception("ledger record failed")
+        return accepted
+
+
+# ---------------------------------------------------------------------------
 # W1 HerdrPromptAdapter
 # ---------------------------------------------------------------------------
 
@@ -242,13 +387,16 @@ class B0Coordinator:
     def __init__(
         self, adapter: Any, issuer: str, *,
         flush_interval: float = FLUSH_INTERVAL_S,
+        ledger: B0DeliveryLedger | None = None,
     ) -> None:
         self._issuer = issuer
-        self.core = DeferredDeliveryCore(adapter)
+        self._ledger = ledger if ledger is not None else B0DeliveryLedger()
+        self.core = DeferredDeliveryCore(_LedgeredAdapter(adapter, self._ledger))
         self._flush_interval = float(flush_interval)
         self._last_full_flush = 0.0
-        # (mail_name, message_id) 进程内去重
-        self._seen: set[tuple[str, int]] = set()
+        # Hub 全局 message_id 进程内去重（不得带 mail_name：同一 Hub 消息
+        # 在 active/previous 两身份可见时必须只投一次）
+        self._seen: set[int] = set()
         # scope -> degraded reason（credential_unavailable 可见）
         self.degraded: dict[str, str] = {}
         # 最近一次 poll 的 reason 统计（可观测性，G7）
@@ -295,6 +443,7 @@ class B0Coordinator:
             ):
                 identities.append({
                     "selector": prev_row["registry_selector"], "role": "previous",
+                    "prev_row": prev_row,
                 })
         return identities
 
@@ -306,25 +455,19 @@ class B0Coordinator:
         if full_flush:
             self._last_full_flush = now
         stats = {"scopes": 0, "pulled": 0, "ingested": 0,
-                 "duplicate": 0, "stale": 0, "degraded": 0}
+                 "duplicate": 0, "stale": 0, "degraded": 0, "skipped": 0}
         for row in self.active_bindings():
             key = scope_key(row["issuer"], row["scope_kind"], row["scope_id"])
             version = int(row["binding_version"])
             stats["scopes"] += 1
-            for ident_meta in self._identities_for(row):
+            scope_failures = 0
+            identities = self._identities_for(row)
+            for ident_meta in identities:
                 try:
                     identity = resolve_selector(ident_meta["selector"])
-                except CredentialUnavailable as exc:
-                    self.degraded[key] = REASON_CREDENTIAL_UNAVAILABLE
-                    self._record(REASON_CREDENTIAL_UNAVAILABLE)
-                    stats["degraded"] += 1
-                    _log_degraded(key, ident_meta["role"], exc)
-                    continue
-                self.degraded.pop(key, None)
-                try:
                     messages = fetch_inbox_for(identity, unread_only=unread_only)
                 except CredentialUnavailable as exc:
-                    self.degraded[key] = REASON_CREDENTIAL_UNAVAILABLE
+                    scope_failures += 1
                     self._record(REASON_CREDENTIAL_UNAVAILABLE)
                     stats["degraded"] += 1
                     _log_degraded(key, ident_meta["role"], exc)
@@ -337,6 +480,26 @@ class B0Coordinator:
                         skip_processed=full_flush,
                     )
                     stats[outcome] = stats.get(outcome, 0) + 1
+                if ident_meta["role"] == "previous" and not messages:
+                    self._close_drain(row, ident_meta.get("prev_row") or {})
+            # degraded 按轮聚合：任一身份失败即保持 degraded（部分成功不清除）
+            if scope_failures:
+                self.degraded[key] = REASON_CREDENTIAL_UNAVAILABLE
+            elif identities:
+                self.degraded.pop(key, None)
+        if full_flush:
+            # 4s 全量兜底：显式 flush 所有 scope（不依赖状态翻转）
+            for row in self.active_bindings():
+                key = scope_key(row["issuer"], row["scope_kind"], row["scope_id"])
+                try:
+                    result = self.core.flush(key)
+                except Exception:
+                    logging.getLogger("b0.wiring").exception(
+                        "b0 flush failed scope=%s", key,
+                    )
+                    continue
+                if result.get("delivered"):
+                    self._record(REASON_DEFERRED_DELIVERED)
         return stats
 
     def _observe(
@@ -365,8 +528,15 @@ class B0Coordinator:
             message_id = -1
         if message_id < 0:
             return "skipped"
-        dedup_key = (mail_name, message_id)
-        if dedup_key in self._seen:
+        # 去重键是 Hub 全局 message_id：同一 Hub 消息在 active/previous
+        # 两身份可见时只允许一次 prompt
+        if message_id in self._seen:
+            self._record(REASON_DUPLICATE_EVENT_ID)
+            return "duplicate"
+        event_id = f"mail:{message_id}"
+        # durable ledger：已投递事件（跨重启）不得再次 prompt
+        if self._ledger.is_delivered(event_id):
+            self._seen.add(message_id)
             self._record(REASON_DUPLICATE_EVENT_ID)
             return "duplicate"
         if skip_processed:
@@ -376,12 +546,12 @@ class B0Coordinator:
             if receipt is not None and receipt.get("state") in (
                 "processed", "claimed",
             ):
-                self._seen.add(dedup_key)
+                self._seen.add(message_id)
                 self._record(REASON_DUPLICATE_EVENT_ID)
                 return "duplicate"
-        self._seen.add(dedup_key)
+        self._seen.add(message_id)
         event = DeferredEvent(
-            event_id=f"mail:{mail_name}:{message_id}",
+            event_id=event_id,
             scope=scope,
             binding_version=version,
             summary={
@@ -408,10 +578,36 @@ class B0Coordinator:
             self._record(REASON_DEFERRED_WORKING)
         return "ingested"
 
+    def _close_drain(
+        self, row: dict[str, Any], prev_row: dict[str, Any],
+    ) -> None:
+        """previous 邮箱 Hub 拉空 → drain CAS 闭环到 drained（PREP 强制 CAS，
+        stale 零变更）。失败仅日志，保持 degraded 可重试。"""
+        if not prev_row:
+            return
+        try:
+            leader_binding.mark_previous_state(
+                row["issuer"], row["scope_kind"], row["scope_id"],
+                str(prev_row["mail_name"]),
+                state="drained",
+                expected_binding_version=int(prev_row.get("binding_version") or 0),
+                expected_migration_id=str(prev_row.get("migration_id") or ""),
+                expected_state=str(prev_row.get("previous_state") or "pending"),
+                expected_drain_revision=int(prev_row.get("drain_revision") or 0),
+                remaining=0, pending=0, claimed=0, ack_pending=0,
+                reason="hub_inbox_empty",
+            )
+        except leader_binding.StaleVersionError:
+            pass  # 并发/旧轮 worker：零变更即正确
+        except Exception:
+            logging.getLogger("b0.wiring").exception("close drain failed")
+
     # -- W5 control-event fanout（issuer-scoped） ---------------------------
     def fanout_control_events(self, *, limit: int = 100) -> int:
-        """把本 issuer 未 fanout 的 control events 注入 deferred 并 ack。
+        """把本 issuer 未 fanout 的 control events 注入 deferred。
 
+        只有事件真正 delivered 才 mark fanned_out；working/拒绝时保持未
+        mark，下一轮 tick 或 crash 重建后重放（零丢零重由 event_id 去重）。
         跨 issuer 读/ack 由 PREP 层强制零变更（WHERE issuer 隔离）。
         """
         fanned = 0
@@ -432,7 +628,7 @@ class B0Coordinator:
                 payload = json.loads(event.get("payload_json") or "{}")
             except ValueError:
                 payload = {}
-            self.core.ingest(DeferredEvent(
+            result = self.core.ingest(DeferredEvent(
                 event_id=str(event["event_id"]),
                 scope=key,
                 binding_version=int(event["binding_version"]),
@@ -445,10 +641,12 @@ class B0Coordinator:
                 },
                 created_ts=float(event.get("created_ts") or time.time()),
             ))
-            if leader_binding.mark_event_fanned_out(
-                self._issuer, str(event["event_id"]),
-            ):
-                fanned += 1
+            if result.get("duplicate") or result.get("delivered"):
+                # duplicate=本进程已投/在途；delivered=刚投成功。两者都可 ack。
+                if leader_binding.mark_event_fanned_out(
+                    self._issuer, str(event["event_id"]),
+                ):
+                    fanned += 1
         return fanned
 
     # -- restart rebuild ------------------------------------------------------
@@ -490,16 +688,26 @@ def _log_degraded(scope: str, role: str, exc: CredentialUnavailable) -> None:
 def rebind_authorize(
     *, user_authenticated: bool, caller_mail_name: str | None,
     active: dict[str, Any] | None,
+    capability_digest: str | None = None,
+    expected_digest: str | None = None,
 ) -> tuple[bool, str]:
     """B1 鉴权：COCKPIT_TOKEN 用户（或本机回环用户会话）直接通过；
-    否则要求 caller mail_name == 当前 active binding mail_name。"""
+    否则要求 caller mail_name == 当前 active binding mail_name，且必须
+    附带 capability_digest = sha256(registration_token) 的能力证明
+    （token 本身不出现在请求/日志中）。"""
     if user_authenticated:
         return True, "user"
     if caller_mail_name and active is not None:
         if hmac.compare_digest(
             str(caller_mail_name), str(active.get("mail_name") or ""),
         ):
-            return True, "active_leader"
+            if (
+                capability_digest and expected_digest
+                and hmac.compare_digest(
+                    str(capability_digest), str(expected_digest),
+                )
+            ):
+                return True, "active_leader"
     return False, "unauthorized"
 
 

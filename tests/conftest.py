@@ -5,6 +5,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _isolate_settings(tmp_path, monkeypatch):
+    import b0_wiring
     import coordination
     import files
     import mail_projects
@@ -22,3 +23,4 @@ def _isolate_settings(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
     monkeypatch.setattr(files, "_custom_roots_file", lambda: tmp_path / "file-roots.json")
+    monkeypatch.setattr(b0_wiring, "LEDGER_PATH", tmp_path / "b0-ledger.sqlite3")
