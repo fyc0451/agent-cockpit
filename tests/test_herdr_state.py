@@ -676,6 +676,169 @@ class TestHerdrStateClient:
         assert "pane.agent_status_changed" not in types
         assert "pane.scroll_changed" not in types
 
+    def test_bootstrap_adds_parameterized_agent_status_subscription(
+        self, tmp_path: Path,
+    ) -> None:
+        requested: list[list[dict[str, Any]]] = []
+
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                server.send(conn, _snapshot_response(
+                    str(req["id"]), make_snapshot(make_pane("p1")),
+                ))
+            elif method == "events.subscribe":
+                subscriptions = req.get("params", {}).get("subscriptions", [])
+                requested.append(subscriptions)
+                server.send(conn, _started_response(str(req["id"])))
+                if {
+                    "type": "pane.agent_status_changed", "pane_id": "p1",
+                } in subscriptions:
+                    server.send(conn, {
+                        "event": "pane_agent_status_changed",
+                        "data": {
+                            "type": "pane_agent_status_changed", "pane_id": "p1",
+                            "workspace_id": "w1", "agent_status": "working",
+                            "agent": "codex", "display_agent": "codex",
+                            "state_labels": {}, "title": None,
+                        },
+                    })
+                _hang(conn)
+
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = _start_client({"work": str(server.path)})
+        try:
+            _wait_for(
+                lambda: bool(requested)
+                and client.snapshot_cached()["panes"][0]["agent_status"] == "working",
+            )
+            status_specs = [
+                spec for spec in requested[0]
+                if spec.get("type") == "pane.agent_status_changed"
+            ]
+            assert status_specs == [{
+                "type": "pane.agent_status_changed", "pane_id": "p1",
+            }]
+        finally:
+            client.stop()
+            server.stop()
+
+    def test_new_pane_rebuilds_subscription_and_snapshot_closes_window(
+        self, tmp_path: Path,
+    ) -> None:
+        requested: list[list[dict[str, Any]]] = []
+        snapshots = {"n": 0}
+        first_cancelled = threading.Event()
+
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                snapshots["n"] += 1
+                panes = [make_pane("p1")]
+                if snapshots["n"] >= 3:
+                    panes.append(make_pane("p2", agent_status="working"))
+                server.send(conn, _snapshot_response(
+                    str(req["id"]), make_snapshot(*panes),
+                ))
+            elif method == "events.subscribe":
+                subscriptions = req.get("params", {}).get("subscriptions", [])
+                requested.append(subscriptions)
+                generation = len(requested)
+                if generation > 1:
+                    assert first_cancelled.wait(2.0)
+                server.send(conn, _started_response(str(req["id"])))
+                if generation == 1:
+                    server.send(conn, {
+                        "event": "pane_created",
+                        "data": {
+                            "type": "pane_created",
+                            "pane": make_pane("p2"),
+                        },
+                    })
+                    _hang(conn)
+                    first_cancelled.set()
+                    return
+                _hang(conn)
+
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = _start_client({"work": str(server.path)})
+        try:
+            _wait_for(
+                lambda: len(requested) >= 2
+                and {p["pane_id"]: p["agent_status"]
+                     for p in client.snapshot_cached()["panes"]}.get("p2") == "working",
+                timeout=5.0,
+            )
+            status_specs = {
+                spec["pane_id"] for spec in requested[1]
+                if spec.get("type") == "pane.agent_status_changed"
+            }
+            assert status_specs == {"p1", "p2"}
+            assert first_cancelled.is_set()
+            assert client.state()["sessions"]["work"]["reconnects"] == 0
+        finally:
+            client.stop()
+            server.stop()
+
+    def test_reconnect_rebuilds_status_subscription_from_new_snapshot(
+        self, tmp_path: Path,
+    ) -> None:
+        requested: list[list[dict[str, Any]]] = []
+        snapshots = {"n": 0}
+
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                snapshots["n"] += 1
+                # First connection bootstrap + post-subscribe resync both p1.
+                # Only the outer reconnect sees p2.
+                pane_id = "p1" if snapshots["n"] <= 2 else "p2"
+                server.send(conn, _snapshot_response(
+                    str(req["id"]), make_snapshot(make_pane(pane_id)),
+                ))
+            elif method == "events.subscribe":
+                subscriptions = req.get("params", {}).get("subscriptions", [])
+                requested.append(subscriptions)
+                server.send(conn, _started_response(str(req["id"])))
+                if len(requested) == 1:
+                    return
+                _hang(conn)
+
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = _start_client({"work": str(server.path)})
+        try:
+            _wait_for(
+                lambda: len(requested) >= 2
+                and client.state()["sessions"]["work"]["state"] == "subscribed"
+                and client.state()["sessions"]["work"]["reconnects"] >= 1,
+                timeout=5.0,
+            )
+            status_specs = [
+                spec for spec in requested[-1]
+                if spec.get("type") == "pane.agent_status_changed"
+            ]
+            assert status_specs == [{
+                "type": "pane.agent_status_changed", "pane_id": "p2",
+            }]
+        finally:
+            client.stop()
+            server.stop()
+
     def test_event_applied_to_cache(self, tmp_path: Path) -> None:
         def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
             req = server.read(conn)

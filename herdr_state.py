@@ -44,9 +44,9 @@ DEFAULT_SNAPSHOT_TIMEOUT_S = 10.0
 # 未知 pane 事件触发 resync 的最小间隔（防抖）
 DEFAULT_RESYNC_MIN_INTERVAL_S = 5.0
 
-# events.subscribe 合法无参订阅（protocol 19 schema Subscription oneOf 中
-# 不带必填参数的 24 个类型；pane.output_matched / pane.agent_status_changed /
-# pane.scroll_changed 必须带 pane_id 等参数，不能全局订阅）。
+# events.subscribe 合法无参基础订阅（protocol 19 schema Subscription oneOf 中
+# 不带必填参数的 24 个类型）。pane.agent_status_changed 由每轮 snapshot 中
+# 的 pane_id 动态补入；pane.output_matched / pane.scroll_changed 不在状态缓存范围。
 ALL_SUBSCRIPTIONS: list[dict[str, str]] = [
     {"type": t} for t in (
         "workspace.created", "workspace.updated", "workspace.metadata_updated",
@@ -542,6 +542,11 @@ class SessionState:
         with self._lock:
             return copy.deepcopy(list(self._panes.values()))
 
+    def pane_ids(self) -> frozenset[str]:
+        """当前 snapshot/event 已知 pane 集合，用于派生参数化订阅。"""
+        with self._lock:
+            return frozenset(self._panes)
+
     def agents(self) -> list[dict[str, Any]]:
         with self._lock:
             return copy.deepcopy(self._agents)
@@ -906,61 +911,85 @@ class HerdrStateClient:
         state.apply_snapshot(response)
         lc["bootstrapped"] = True
         lc["connected_at"] = time.monotonic()
-        # 3. 订阅专用流：确认 subscription_started 后才发布 subscribed
-        sub = HerdrSocket(path, connect_timeout=self._connect_timeout)
-        self._register(sub)
-        try:
-            sub.connect()
+        # 3. 订阅专用流。agent status 事件必须按 pane_id 参数化订阅；pane
+        # 集合变化时关闭旧流并重建，不把受控重订阅计为连接故障。
+        while not self._stop.is_set():
+            subscribed_panes = state.pane_ids()
+            subscriptions = list(ALL_SUBSCRIPTIONS) + [
+                {"type": "pane.agent_status_changed", "pane_id": pane_id}
+                for pane_id in sorted(subscribed_panes)
+            ]
+            sub = HerdrSocket(path, connect_timeout=self._connect_timeout)
+            self._register(sub)
+            rebuild = False
             try:
-                sub.request(
-                    "events.subscribe",
-                    {"subscriptions": ALL_SUBSCRIPTIONS},
-                    timeout=self._request_timeout,
-                    expect_type="subscription_started",
-                )
-            except HerdrRequestError as exc:
-                # 仅 id 校验通过（matching id）的 method_not_found 才判能力缺失；
-                # id 不匹配抛的是普通 HerdrSocketError，不得进入此分支。
-                if exc.code in ("method_not_found", "unknown_method"):
-                    lc["state"] = "capability_mismatch"
-                    raise HerdrProtocolMismatchError(str(exc)) from exc
-                raise
-            lc["state"] = "subscribed"
-            # 4. 握手后 resync：消除 snapshot→subscribe 窗口的事件回放错位
-            self._resync(name, path, state, lc)
-            lc["stable"] = True  # 完成稳定 subscribe+resync，退避可重置
-            # 5. 读循环：resync_pending 时读超时最多等剩余防抖间隔，
-            #    保证未知 pane 即使事件流静默也能及时触发 resync。
-            last_resync = time.monotonic()
-            while not self._stop.is_set():
-                if state.resync_pending and (
-                    time.monotonic() - last_resync >= self._resync_min_interval
-                ):
-                    self._resync(name, path, state, lc)
-                    last_resync = time.monotonic()
-                    continue
-                read_timeout = self._health_check_interval
-                if state.resync_pending:
-                    remaining = self._resync_min_interval - (
-                        time.monotonic() - last_resync
-                    )
-                    remaining = max(0.0, remaining)
-                    if read_timeout is None or remaining < read_timeout:
-                        read_timeout = remaining
+                sub.connect()
                 try:
-                    envelope = sub.read_line(timeout=read_timeout)
-                except HerdrSocketIdleTimeout:
-                    # 无事件不代表断连；独立 ping 探测 server 健康
-                    if self._health_check_interval is not None and not self._health_ok(path):
-                        raise HerdrSocketError("health ping 失败，重建连接")
+                    sub.request(
+                        "events.subscribe",
+                        {"subscriptions": subscriptions},
+                        timeout=self._request_timeout,
+                        expect_type="subscription_started",
+                    )
+                except HerdrRequestError as exc:
+                    # 仅 id 校验通过（matching id）的 method_not_found 才判能力缺失；
+                    # id 不匹配抛的是普通 HerdrSocketError，不得进入此分支。
+                    if exc.code in ("method_not_found", "unknown_method"):
+                        lc["state"] = "capability_mismatch"
+                        raise HerdrProtocolMismatchError(str(exc)) from exc
+                    raise
+                lc["state"] = "subscribed"
+                # 4. 每次握手后 resync：既消除 snapshot→subscribe 窗口，也让
+                # 新 pane 的初始状态在参数化订阅生效后确定性收敛。
+                self._resync(name, path, state, lc)
+                lc["stable"] = True
+                if state.pane_ids() != subscribed_panes:
+                    rebuild = True
                     continue
-                if envelope is None:
-                    raise HerdrSocketError("events.subscribe 连接被对端关闭")
-                state.apply_event(envelope)
-                self._sync_counts(lc, state)
-        finally:
-            self._unregister(sub)
-            sub.close()
+
+                # 5. 读循环：pane 集合变化立即重建流；未知 pane 仍沿用防抖
+                # resync，避免畸形/乱序事件制造 ghost pane。
+                last_resync = time.monotonic()
+                while not self._stop.is_set():
+                    if state.resync_pending and (
+                        time.monotonic() - last_resync >= self._resync_min_interval
+                    ):
+                        self._resync(name, path, state, lc)
+                        last_resync = time.monotonic()
+                        if state.pane_ids() != subscribed_panes:
+                            rebuild = True
+                            break
+                        continue
+                    read_timeout = self._health_check_interval
+                    if state.resync_pending:
+                        remaining = self._resync_min_interval - (
+                            time.monotonic() - last_resync
+                        )
+                        remaining = max(0.0, remaining)
+                        if read_timeout is None or remaining < read_timeout:
+                            read_timeout = remaining
+                    try:
+                        envelope = sub.read_line(timeout=read_timeout)
+                    except HerdrSocketIdleTimeout:
+                        # 无事件不代表断连；独立 ping 探测 server 健康
+                        if (
+                            self._health_check_interval is not None
+                            and not self._health_ok(path)
+                        ):
+                            raise HerdrSocketError("health ping 失败，重建连接")
+                        continue
+                    if envelope is None:
+                        raise HerdrSocketError("events.subscribe 连接被对端关闭")
+                    state.apply_event(envelope)
+                    self._sync_counts(lc, state)
+                    if state.pane_ids() != subscribed_panes:
+                        rebuild = True
+                        break
+            finally:
+                self._unregister(sub)
+                sub.close()
+            if not rebuild:
+                return
 
     def _snapshot_request(self, path: str) -> dict[str, Any]:
         """独立连接执行 session.snapshot；返回 SessionSnapshot 对象。"""
