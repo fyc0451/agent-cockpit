@@ -21,6 +21,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A dormant durable delivery-outbox store with atomic claiming, idempotent
+  enqueue, retry/dead-letter transitions, fail-closed legacy migration, and
+  credential-safe persistence. It is not yet wired into the server or Hub worker.
 - Persistent coordination assignments with durable create/list operations,
   explicit status transitions and close, stable ordering, and optimistic CAS
   versions for concurrent agents.
