@@ -8,6 +8,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Switch live OpenCode themes through its dedicated theme dialog so rapid
+  changes cannot leave commands in the composer or submit them as chat.
 - Block terminal pointer and keyboard input while a terminal is loading or its
   theme is repainting, preventing delayed clicks from replaying after the UI
   becomes responsive while still allowing required xterm protocol replies.

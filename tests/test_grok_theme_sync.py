@@ -41,24 +41,60 @@ def test_apply_grok_web_theme_targets_only_grok(monkeypatch):
     ]
 
 
-def test_opencode_theme_picker_uses_themes_filter_and_confirm(monkeypatch):
+def test_opencode_theme_picker_uses_shortcut_without_touching_composer(monkeypatch):
     calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if "pane" in args and "read" in args:
+            return "  ┃  preserved draft\n  ┃  Build · model\n"
+        return ""
+
     monkeypatch.setattr(
         herdr_client,
         "_run",
-        lambda args, timeout=10: calls.append(list(args)) or "",
+        fake_run,
     )
     monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
 
     result = herdr_client.apply_opencode_theme_to_pane("demo", "w1:p4", "palenight")
 
     assert result["available"] is True
-    assert calls == [
-        ["--session", "demo", "pane", "send-text", "w1:p4", "/themes"],
-        ["--session", "demo", "pane", "send-keys", "w1:p4", "Enter"],
-        ["--session", "demo", "pane", "send-text", "w1:p4", "palenight"],
-        ["--session", "demo", "pane", "send-keys", "w1:p4", "Enter"],
+    assert calls[0] == [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "ctrl+x", "t",
     ]
+    assert [
+        "--session", "demo", "pane", "send-text", "w1:p4", "palenight",
+    ] in calls
+    assert [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "Enter",
+    ] in calls
+    assert all("/themes" not in arg for call in calls for arg in call)
+
+
+def test_opencode_theme_picker_closes_its_dialog_after_filter_failure(monkeypatch):
+    calls = []
+    wait_count = 0
+
+    def fake_run(args, timeout=10):
+        nonlocal wait_count
+        calls.append(list(args))
+        if "wait-output" in args:
+            wait_count += 1
+            if wait_count == 2:
+                raise RuntimeError("theme filter did not render")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_theme_to_pane("demo", "w1:p4", "aura")
+
+    assert "error" in result
+    assert calls[-1] == [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "esc",
+    ]
+    assert all("/themes" not in arg for call in calls for arg in call)
 
 
 def test_opencode_tui_theme_preserves_config_and_rejects_invalid_json(

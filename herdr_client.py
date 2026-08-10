@@ -1030,37 +1030,61 @@ def set_opencode_tui_theme(theme_name: str) -> Path:
 def apply_opencode_theme_to_pane(
     session: str, pane_id: str, theme_name: str,
 ) -> dict[str, Any]:
-    """在 live OpenCode pane 上选中主题：/themes → 输入名 → Enter 确认。
-
-    OpenCode 的 /themes 只打开选择器；filter 会预览，必须 Enter 才 confirmed，
-    否则 onCleanup 会回退。间隔留给 TUI 弹层。
-    """
+    """通过 OpenCode 主题弹层切换主题，不触碰或提交 composer 草稿。"""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", theme_name or ""):
         return {"error": "非法主题名"}
-    # 1) 打开主题列表
-    r1 = pane_send(session, pane_id, "/themes", mode="slash")
-    if r1.get("error"):
-        return r1
-    time.sleep(0.18)
-    # 2) 输入主题名（只 send-text，不 Enter，作为 filter）
+
+    prefix = ["--session", session, "pane"]
+    dialog_open = False
     try:
+        # Ctrl+X,T 直接打开独立主题弹层，OpenCode 会保留已有 composer 草稿。
+        _run(prefix + ["send-keys", pane_id, "ctrl+x", "t"], timeout=5)
         _run(
-            ["--session", session, "pane", "send-text", pane_id, theme_name],
-            timeout=5,
+            prefix + [
+                "wait-output", pane_id,
+                "--regex", r"^\s*Themes\s+esc\s*$",
+                "--source", "visible", "--lines", "60",
+                "--timeout", "2000", "--raw",
+            ],
+            timeout=3,
         )
-    except RuntimeError as exc:
-        return {"error": str(exc)}
-    time.sleep(0.12)
-    # 3) Enter 确认选中（DialogThemeList onSelect → confirmed）
-    try:
+        dialog_open = True
+        _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
+        _run(prefix + ["send-text", pane_id, theme_name], timeout=5)
+        time.sleep(0.25)
         _run(
-            ["--session", session, "pane", "send-keys", pane_id, "Enter"],
-            timeout=5,
+            prefix + [
+                "wait-output", pane_id,
+                "--regex", rf"^\s*(?:●\s+)?{re.escape(theme_name)}\s*$",
+                "--source", "visible", "--lines", "60",
+                "--timeout", "2000", "--raw",
+            ],
+            timeout=3,
         )
+        _run(prefix + ["send-keys", pane_id, "Enter"], timeout=5)
+        for _ in range(10):
+            time.sleep(0.1)
+            screen = _run(
+                prefix + [
+                    "read", pane_id, "--source", "visible",
+                    "--lines", "60", "--format", "text",
+                ],
+                timeout=5,
+            )
+            if not re.search(r"(?m)^\s*Themes\s+esc\s*$", screen):
+                dialog_open = False
+                break
+        if dialog_open:
+            raise RuntimeError("OpenCode 主题弹层确认后未关闭")
     except RuntimeError as exc:
+        if dialog_open:
+            try:
+                _run(prefix + ["send-keys", pane_id, "esc"], timeout=5)
+            except RuntimeError:
+                pass
         return {"error": str(exc)}
     return {
-        "available": True, "sent": f"/themes → {theme_name}",
+        "available": True, "sent": f"theme-dialog → {theme_name}",
         "mode": "opencode-theme-pick",
     }
 
