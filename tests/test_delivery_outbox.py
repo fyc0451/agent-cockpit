@@ -435,3 +435,79 @@ def test_unknown_schema_extra_column_fail_closed(outbox_db: Path) -> None:
     assert "delivery_jobs_new" not in tables
     assert "evil_future" in cols
     assert rows == 1
+
+
+# ── STILL BLOCKED #2189: precise legacy allowlist ───────────────
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL DEFAULT 'x', "
+            "job_kind TEXT NOT NULL, target TEXT NOT NULL, "
+            "payload_json TEXT NOT NULL, created_ts REAL NOT NULL);",
+            id="unexpected-default",
+        ),
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "target TEXT NOT NULL, idempotency_key TEXT NOT NULL, "
+            "job_kind TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_ts REAL NOT NULL);",
+            id="swapped-order",
+        ),
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL, job_kind TEXT NOT NULL, "
+            "target TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_ts REAL NOT NULL); "
+            "CREATE INDEX extra_idx ON delivery_jobs(job_kind);",
+            id="extra-index",
+        ),
+        pytest.param(
+            "CREATE TABLE parent(x TEXT PRIMARY KEY); "
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL, job_kind TEXT NOT NULL, "
+            "target TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_ts REAL NOT NULL, "
+            "FOREIGN KEY (job_kind) REFERENCES parent(x));",
+            id="foreign-key",
+        ),
+        pytest.param(
+            "CREATE TABLE delivery_jobs (job_id TEXT PRIMARY KEY, "
+            "idempotency_key TEXT NOT NULL, job_kind TEXT NOT NULL, "
+            "target TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_ts REAL NOT NULL); PRAGMA user_version=5;",
+            id="nonzero-user-version",
+        ),
+    ],
+)
+def test_legacy_allowlist_rejects_non_exact(
+    outbox_db: Path, setup: str,
+) -> None:
+    outbox_db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(outbox_db)
+    con.executescript(
+        setup
+        + "INSERT INTO delivery_jobs (job_id, idempotency_key, job_kind, "
+        "target, payload_json, created_ts) "
+        + "VALUES('r1','k','send_message','t','{}',12.5);"
+    )
+    con.close()
+    outbox_db.chmod(0o600)
+    before = hashlib.sha256(outbox_db.read_bytes()).hexdigest()
+    with pytest.raises(delivery_outbox.OutboxStoreError):
+        delivery_outbox.get_job("r1")
+    # fail-closed: content hash unchanged, no rebuild table, row preserved.
+    assert hashlib.sha256(outbox_db.read_bytes()).hexdigest() == before
+    con = sqlite3.connect(outbox_db)
+    tables = {
+        r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    rows = con.execute("SELECT COUNT(*) FROM delivery_jobs").fetchone()[0]
+    con.close()
+    assert "delivery_jobs_new" not in tables
+    assert rows == 1
