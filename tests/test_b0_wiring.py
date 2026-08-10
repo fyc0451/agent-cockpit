@@ -311,6 +311,8 @@ def client(binding_db: Path, monkeypatch: pytest.MonkeyPatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setattr(server, "B0_ISSUER", ISSUER)
+    monkeypatch.setattr(server, "B0_MODE", "on")
+    monkeypatch.setattr(server, "B0_CANARY_SCOPES", frozenset())
     monkeypatch.setattr(server, "_b0_coordinator", None)
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     return TestClient(server.app)

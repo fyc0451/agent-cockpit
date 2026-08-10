@@ -21,6 +21,7 @@ import ipaddress
 import json
 import logging
 import os
+import sqlite3
 import stat
 import threading
 import time
@@ -64,6 +65,7 @@ STABLE_REASONS = frozenset({
 })
 
 FLUSH_INTERVAL_S = 4.0
+ScopeFilter = Callable[[str, str], bool]
 
 
 class CredentialUnavailable(RuntimeError):
@@ -253,6 +255,124 @@ def fetch_inbox_for(
         if isinstance(msgs, list):
             return msgs
     raise CredentialUnavailable("fetch_inbox 响应结构异常")
+
+
+def shadow_probe(
+    issuer: str, *, scope_filter: ScopeFilter | None = None,
+) -> dict[str, Any]:
+    """只读验证 binding store、A2 selector 与 Hub 拉取链，不迁移或写库。"""
+    path = leader_binding.DB_PATH
+    if not path.is_file():
+        return {
+            "available": True, "degraded": False, "reason": None,
+            "scopes": 0, "identities": 0, "pulled": 0,
+        }
+    try:
+        if any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-shm")):
+            return {
+                "available": False, "degraded": True,
+                "reason": "probe_requires_quiescence",
+                "scopes": 0, "identities": 0, "pulled": 0,
+            }
+    except OSError:
+        return {
+            "available": False, "degraded": True,
+            "reason": "binding_store_unavailable",
+            "scopes": 0, "identities": 0, "pulled": 0,
+        }
+    required = {
+        "issuer", "scope_kind", "scope_id", "mail_name", "state",
+        "binding_version", "registry_selector", "previous_mail_name",
+        "previous_state",
+    }
+    try:
+        con = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro&immutable=1",
+            uri=True,
+            timeout=1.0,
+        )
+        con.execute("PRAGMA query_only=ON")
+        con.row_factory = sqlite3.Row
+        try:
+            columns = {
+                str(row[1]) for row in con.execute(
+                    "PRAGMA table_info(leader_bindings)"
+                ).fetchall()
+            }
+            if not required.issubset(columns):
+                return {
+                    "available": False, "degraded": True,
+                    "reason": "binding_store_incompatible",
+                    "scopes": 0, "identities": 0, "pulled": 0,
+                }
+            rows = [dict(row) for row in con.execute(
+                "SELECT * FROM leader_bindings "
+                "WHERE issuer=? AND state='active' "
+                "ORDER BY scope_kind, scope_id",
+                (issuer,),
+            ).fetchall()]
+            previous: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for row in con.execute(
+                "SELECT * FROM leader_bindings "
+                "WHERE issuer=? AND state='previous'",
+                (issuer,),
+            ).fetchall():
+                item = dict(row)
+                previous[(
+                    str(item.get("scope_kind") or ""),
+                    str(item.get("scope_id") or ""),
+                    str(item.get("mail_name") or ""),
+                )] = item
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {
+            "available": False, "degraded": True,
+            "reason": "binding_store_unavailable",
+            "scopes": 0, "identities": 0, "pulled": 0,
+        }
+
+    allowed = scope_filter or (lambda _kind, _scope_id: True)
+    checked_scopes = 0
+    identities = 0
+    pulled = 0
+    failures = 0
+    for row in rows:
+        kind = str(row.get("scope_kind") or "")
+        scope_id = str(row.get("scope_id") or "")
+        if not allowed(kind, scope_id):
+            continue
+        checked_scopes += 1
+        selectors: list[str] = []
+        if row.get("registry_selector"):
+            selectors.append(str(row["registry_selector"]))
+        previous_name = str(row.get("previous_mail_name") or "")
+        previous_row = previous.get((kind, scope_id, previous_name))
+        if (
+            previous_row
+            and str(previous_row.get("previous_state") or "")
+            in {"pending", "draining"}
+            and previous_row.get("registry_selector")
+        ):
+            selectors.append(str(previous_row["registry_selector"]))
+        if not selectors:
+            failures += 1
+            continue
+        for selector in selectors:
+            identities += 1
+            try:
+                identity = resolve_selector(selector)
+                pulled += len(fetch_inbox_for(identity, unread_only=True))
+            except CredentialUnavailable:
+                failures += 1
+    return {
+        "available": failures == 0,
+        "degraded": failures > 0,
+        "reason": REASON_CREDENTIAL_UNAVAILABLE if failures else None,
+        "scopes": checked_scopes,
+        "identities": identities,
+        "pulled": pulled,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -531,38 +651,116 @@ def ctl_transport_done(event_id: str) -> bool:
     return "b0_ctl_transport" in data
 
 
+def make_control_claim_gate(
+    issuer: str, *, scope_filter: ScopeFilter | None = None,
+    enforce_all: bool = True,
+) -> Callable[[str, str, dict[str, Any], dict[str, Any] | None], tuple[bool, str | None]]:
+    """构造按 issuer/scope/version/sender 精确绑定的控制消息认领门。"""
+    allowed = scope_filter or (lambda _kind, _scope_id: True)
+
+    def gate(
+        project: str, recipient: str, message: dict[str, Any],
+        meta: dict[str, Any] | None,
+    ) -> tuple[bool, str | None]:
+        del project, recipient
+        data = meta or {}
+        intent = str(data.get("intent") or "info")
+        if intent not in coordination.NO_RESUME_INTENTS:
+            return True, None
+        sender = str(message.get("from") or message.get("sender_name") or "")
+        meta_issuer = str(data.get("binding_issuer") or "")
+        scope_kind = str(data.get("binding_scope_kind") or "")
+        scope_id = str(data.get("binding_scope_id") or "")
+        has_scope = bool(meta_issuer or scope_kind or scope_id)
+        if has_scope:
+            if (
+                meta_issuer != issuer
+                or scope_kind not in leader_binding.SCOPE_KINDS
+                or not scope_id
+            ):
+                return False, REASON_STALE_BINDING_VERSION
+            if not allowed(scope_kind, scope_id):
+                return True, None
+            try:
+                active = leader_binding.get_active_binding(
+                    issuer, scope_kind, scope_id,
+                )
+            except Exception:
+                logging.getLogger("b0.wiring").exception(
+                    "claim gate: scoped binding unreadable"
+                )
+                return False, REASON_STALE_BINDING_VERSION
+            try:
+                version = int(data.get("binding_version"))
+            except (TypeError, ValueError):
+                return False, REASON_STALE_BINDING_VERSION
+            if (
+                not active
+                or version != int(active.get("binding_version") or -1)
+                or not sender
+                or not hmac.compare_digest(
+                    sender, str(active.get("mail_name") or ""),
+                )
+            ):
+                return False, REASON_STALE_BINDING_VERSION
+            return True, None
+
+        try:
+            bindings = [
+                row for row in leader_binding.list_bindings(
+                    issuer=issuer, state="active",
+                )
+                if allowed(
+                    str(row.get("scope_kind") or ""),
+                    str(row.get("scope_id") or ""),
+                )
+            ]
+        except Exception:
+            logging.getLogger("b0.wiring").exception(
+                "claim gate: bindings unreadable"
+            )
+            return (
+                (False, REASON_STALE_BINDING_VERSION)
+                if enforce_all else (True, None)
+            )
+        if not bindings:
+            return True, None
+        if any(
+            sender and hmac.compare_digest(
+                sender, str(row.get("mail_name") or ""),
+            )
+            for row in bindings
+        ):
+            return False, REASON_STALE_BINDING_VERSION
+        return (
+            (False, REASON_STALE_BINDING_VERSION)
+            if enforce_all else (True, None)
+        )
+
+    return gate
+
+
 def control_claim_gate(
     project: str, recipient: str, message: dict[str, Any],
     meta: dict[str, Any] | None,
 ) -> tuple[bool, str | None]:
-    """W6 服务端 fail-closed 认领门：控制消息（stop/redirect）必须携带
-    canonical binding version，且与当前 active binding 版本一致；冲突或
-    无法解析（存在 active binding 时）→ stale_binding_version 拒绝。
-    不依赖 prompt 指令，receipt 侧记录 stable reason。"""
-    intent = str((meta or {}).get("intent") or "info")
-    if intent not in coordination.NO_RESUME_INTENTS:
-        return True, None
-    try:
-        bindings = leader_binding.list_bindings(issuer=B0_ISSUER, state="active")
-    except Exception:
-        logging.getLogger("b0.wiring").exception("claim gate: bindings unreadable")
-        return True, None  # binding 存储不可读：degraded 另行可见，不误伤普通流
-    if not bindings:
-        return True, None  # 尚未建立 canonical：保持旧行为
-    version = (meta or {}).get("binding_version")
-    try:
-        version_int = int(version)
-    except (TypeError, ValueError):
-        return False, REASON_STALE_BINDING_VERSION
-    versions = {int(b["binding_version"]) for b in bindings}
-    if version_int not in versions:
-        return False, REASON_STALE_BINDING_VERSION
-    return True, None
+    return make_control_claim_gate(B0_ISSUER)(project, recipient, message, meta)
 
 
-def install_claim_gate() -> None:
-    """把 W6 认领门安装到 coordination.claim_message（幂等）。"""
-    coordination.CONTROL_CLAIM_GATE = control_claim_gate
+def install_claim_gate(
+    *, issuer: str | None = None, scope_filter: ScopeFilter | None = None,
+    enforce_all: bool = True,
+) -> None:
+    """把 scope-aware W6 认领门安装到 coordination.claim_message。"""
+    coordination.CONTROL_CLAIM_GATE = make_control_claim_gate(
+        issuer or B0_ISSUER,
+        scope_filter=scope_filter,
+        enforce_all=enforce_all,
+    )
+
+
+def uninstall_claim_gate() -> None:
+    coordination.CONTROL_CLAIM_GATE = None
 
 
 def receipt_drain_counters(
@@ -752,11 +950,13 @@ class B0Coordinator:
     def __init__(
         self, adapter: Any, issuer: str, *,
         flush_interval: float = FLUSH_INTERVAL_S,
+        scope_filter: ScopeFilter | None = None,
     ) -> None:
         self._issuer = issuer
         self._proof_adapter = _ProofAdapter(adapter)
         self.core = DeferredDeliveryCore(self._proof_adapter)
         self._flush_interval = float(flush_interval)
+        self._scope_filter = scope_filter or (lambda _kind, _scope_id: True)
         self._last_full_flush = 0.0
         # Hub 全局 message_id 进程内去重（不得带 mail_name：同一 Hub 消息
         # 在 active/previous 两身份可见时必须只投一次）
@@ -773,7 +973,15 @@ class B0Coordinator:
 
     # -- binding 同步 -------------------------------------------------------
     def active_bindings(self) -> list[dict[str, Any]]:
-        return leader_binding.list_bindings(issuer=self._issuer, state="active")
+        return [
+            row for row in leader_binding.list_bindings(
+                issuer=self._issuer, state="active",
+            )
+            if self._scope_filter(
+                str(row.get("scope_kind") or ""),
+                str(row.get("scope_id") or ""),
+            )
+        ]
 
     def sync_bindings(self) -> list[dict[str, Any]]:
         """把 DB 中 active binding 同步进 core；cleared 事件 handoff 重投。"""
@@ -1044,6 +1252,11 @@ class B0Coordinator:
         for event in leader_binding.undelivered_control_events(
             self._issuer, limit=limit,
         ):
+            if not self._scope_filter(
+                str(event.get("scope_kind") or ""),
+                str(event.get("scope_id") or ""),
+            ):
+                continue
             key = scope_key(
                 event["issuer"], event["scope_kind"], event["scope_id"],
             )

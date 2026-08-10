@@ -136,6 +136,56 @@ _COORD_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
         ("reported_ts", "REAL", 0, 0),
     ),
 }
+_LEADER_BINDING_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
+    "leader_bindings": (
+        ("issuer", "TEXT", 1, 1),
+        ("scope_kind", "TEXT", 1, 2),
+        ("scope_id", "TEXT", 1, 3),
+        ("mail_name", "TEXT", 1, 4),
+        ("binding_id", "TEXT", 1, 0),
+        ("previous_mail_name", "TEXT", 0, 0),
+        ("previous_state", "TEXT", 0, 0),
+        ("agent_name", "TEXT", 0, 0),
+        ("agent_kind", "TEXT", 0, 0),
+        ("session", "TEXT", 0, 0),
+        ("pane_id", "TEXT", 0, 0),
+        ("registry_selector", "TEXT", 0, 0),
+        ("binding_version", "INTEGER", 1, 0),
+        ("state", "TEXT", 1, 0),
+        ("degraded_reason", "TEXT", 0, 0),
+        ("updated_ts", "REAL", 1, 0),
+        ("route_epoch", "INTEGER", 1, 0),
+        ("migration_id", "TEXT", 0, 0),
+        ("drain_revision", "INTEGER", 1, 0),
+        ("drain_remaining", "INTEGER", 1, 0),
+        ("drain_pending", "INTEGER", 1, 0),
+        ("drain_claimed", "INTEGER", 1, 0),
+        ("drain_ack_pending", "INTEGER", 1, 0),
+    ),
+    "binding_migrations": (
+        ("migration_id", "TEXT", 0, 1),
+        ("issuer", "TEXT", 1, 0),
+        ("scope_kind", "TEXT", 1, 0),
+        ("scope_id", "TEXT", 1, 0),
+        ("from_binding_id", "TEXT", 0, 0),
+        ("to_binding_id", "TEXT", 0, 0),
+        ("route_epoch", "INTEGER", 1, 0),
+        ("created_ts", "REAL", 1, 0),
+    ),
+    "control_events": (
+        ("seq", "INTEGER", 0, 1),
+        ("event_id", "TEXT", 1, 0),
+        ("issuer", "TEXT", 1, 0),
+        ("scope_kind", "TEXT", 1, 0),
+        ("scope_id", "TEXT", 1, 0),
+        ("event_type", "TEXT", 1, 0),
+        ("binding_version", "INTEGER", 1, 0),
+        ("migration_id", "TEXT", 0, 0),
+        ("payload_json", "TEXT", 1, 0),
+        ("created_ts", "REAL", 1, 0),
+        ("fanned_out", "INTEGER", 1, 0),
+    ),
+}
 
 # Known previous user_version values (recognized but not ready).
 _PREVIOUS_USER_VERSIONS: frozenset[int] = frozenset()
@@ -286,6 +336,31 @@ _COORD_FKS: dict[str, frozenset[tuple[str, str, str]]] = {
     "message_meta": frozenset(),
     "receipts": frozenset(),
     "task_reports": frozenset(),
+}
+_LEADER_BINDING_DEFAULTS: dict[str, dict[str, str]] = {
+    "leader_bindings": {
+        "route_epoch": "0", "drain_revision": "0",
+        "drain_remaining": "0", "drain_pending": "0",
+        "drain_claimed": "0", "drain_ack_pending": "0",
+    },
+    "binding_migrations": {},
+    "control_events": {"fanned_out": "0"},
+}
+_LEADER_BINDING_INDEXES: dict[
+    str, frozenset[tuple[str, int, tuple[str, ...]]]
+] = {
+    "leader_bindings": frozenset({
+        ("leader_bindings_active_once", 1, ("issuer", "scope_kind", "scope_id")),
+        ("leader_bindings_scope", 0, ("issuer", "scope_kind", "scope_id", "state")),
+    }),
+    "binding_migrations": frozenset(),
+    "control_events": frozenset({
+        ("control_events_scope", 0, ("issuer", "scope_kind", "scope_id", "seq")),
+        ("control_events_pending", 0, ("fanned_out", "seq")),
+    }),
+}
+_LEADER_BINDING_FKS = {
+    name: frozenset() for name in _LEADER_BINDING_TABLES
 }
 _TASKS_INDEXES: frozenset[tuple[str, int, tuple[str, ...]]] = frozenset()
 _PUSH_INDEXES: frozenset[tuple[str, int, tuple[str, ...]]] = frozenset()
@@ -1182,7 +1257,7 @@ def probe_all_stores() -> list[dict[str, Any]]:
         results.append(probe())
 
     # SQLite
-    sqlite_specs = (
+    sqlite_specs = [
         (
             "tasks",
             {"tasks": _TASKS_COLUMNS},
@@ -1204,7 +1279,15 @@ def probe_all_stores() -> list[dict[str, Any]]:
             _COORD_INDEXES,
             _COORD_FKS,
         ),
-    )
+    ]
+    if (os.environ.get("COCKPIT_B0_MODE") or "off").strip().lower() != "off":
+        sqlite_specs.append((
+            "leader_binding",
+            _LEADER_BINDING_TABLES,
+            _LEADER_BINDING_DEFAULTS,
+            _LEADER_BINDING_INDEXES,
+            _LEADER_BINDING_FKS,
+        ))
     for name, tables, defaults, indexes, fks in sqlite_specs:
         gated(
             name,

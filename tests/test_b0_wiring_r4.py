@@ -151,6 +151,14 @@ def test_w6_blocks_noncanonical_stop_before_interrupt(
 
     _make_coordinator(binding_db, registry)  # active mail_name=agent-a
     monkeypatch.setattr(server, "B0_ISSUER", ISSUER)
+    monkeypatch.setattr(server, "B0_MODE", "on")
+    active = leader_binding.get_active_binding(ISSUER, "user", "default")
+    control_meta = {
+        "intent": "stop", "run_id": "run-1",
+        "binding_issuer": ISSUER, "binding_scope_kind": "user",
+        "binding_scope_id": "default",
+        "binding_version": int(active["binding_version"]),
+    }
     monkeypatch.setattr(
         coordination, "active_context",
         lambda pk, rc: {
@@ -170,16 +178,16 @@ def test_w6_blocks_noncanonical_stop_before_interrupt(
     # 非 canonical 发送者尝试 hard stop：必须拒绝且不发 C-c
     result = server._notify_coordination_message(
         "/tmp/proj-x", "agent-x", 900, "stop now",
-        {"intent": "stop", "run_id": "run-1"}, hard=True,
+        control_meta, hard=True,
         sender="intruder-mail",
     )
     assert result["notified"] is False
-    assert result["reason"] == "canonical_binding_not_authorized"
+    assert result["reason"] == b0_wiring.REASON_STALE_BINDING_VERSION
     assert sends == [], "canonical 门前不得发出 C-c/prompt"
     # canonical 发送者：放行且正文携 binding version
     result = server._notify_coordination_message(
         "/tmp/proj-x", "agent-x", 901, "stop now",
-        {"intent": "stop", "run_id": "run-1"}, hard=True,
+        control_meta, hard=True,
         sender="agent-a",
     )
     assert result["notified"] is True
@@ -301,6 +309,7 @@ def test_g6_multi_pane_same_mail_ambiguous_no_rebind(
 
     _make_coordinator(binding_db, registry)  # pane_id=pane-1, mail=agent-a
     monkeypatch.setattr(server, "B0_ISSUER", ISSUER)
+    monkeypatch.setattr(server, "B0_MODE", "on")
     monkeypatch.setattr(server, "_b0_coordinator", None)
     snap = {
         "available": True,

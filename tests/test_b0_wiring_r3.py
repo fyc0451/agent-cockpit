@@ -176,6 +176,14 @@ def send_client(binding_db: Path, monkeypatch: pytest.MonkeyPatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server, "B0_ISSUER", ISSUER)
+    monkeypatch.setattr(server, "B0_MODE", "on")
+    monkeypatch.setattr(server, "B0_CANARY_SCOPES", frozenset())
+    leader_binding.bind_leader(
+        ISSUER, "user", "default", mail_name="sender-a",
+        session="sess-s", pane_id="pane-s", registry_selector="stub.json",
+        expected_version=0,
+    )
     monkeypatch.setattr(server, "_agent_mail_status", lambda: {
         "write_available": True, "write_reason": None,
     })
@@ -418,6 +426,7 @@ def test_g6_pane_rebind_by_mail_name(
 
     _make_coordinator(binding_db, registry)
     monkeypatch.setattr(server, "B0_ISSUER", ISSUER)
+    monkeypatch.setattr(server, "B0_MODE", "on")
     monkeypatch.setattr(server, "_b0_coordinator", None)
     active = leader_binding.get_active_binding(ISSUER, "user", "default")
     assert active["pane_id"] == "pane-1"

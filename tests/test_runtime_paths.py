@@ -311,6 +311,7 @@ class TestDefaultCompat:
             "tasks": "dashboard-data/tasks.sqlite3",
             "worktrees": "dashboard-data/worktrees",
             "coordination": "dashboard-data/coordination.sqlite3",
+            "leader_binding": "dashboard-data/leader-binding.sqlite3",
             "push": "dashboard-data/push.sqlite3",
             "vapid": "dashboard-data/vapid-private.pem",
             "mail_projects": "dashboard-data/mail-projects.json",

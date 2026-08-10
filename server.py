@@ -91,6 +91,55 @@ H0_STATE_CANARY_SESSIONS = _parse_h0_canary_sessions(
 )
 _validate_h0_state_config(H0_STATE_MODE, H0_STATE_CANARY_SESSIONS)
 
+B0_MODE_ENV = "COCKPIT_B0_MODE"
+B0_CANARY_SCOPES_ENV = "COCKPIT_B0_CANARY_SCOPES"
+
+
+def _parse_b0_mode(value: str | None) -> str:
+    mode = (value or "").strip().lower() or "off"
+    if mode not in {"off", "shadow", "canary", "on"}:
+        raise RuntimeError(f"invalid {B0_MODE_ENV}")
+    return mode
+
+
+def _parse_b0_canary_scopes(value: str | None) -> frozenset[tuple[str, str]]:
+    raw = (value or "").strip()
+    if not raw:
+        return frozenset()
+    scopes: list[tuple[str, str]] = []
+    for item in raw.split(","):
+        entry = item.strip()
+        scope_kind, separator, scope_id = entry.partition("/")
+        if (
+            not entry
+            or not separator
+            or scope_kind not in leader_binding.SCOPE_KINDS
+            or not scope_id
+            or len(scope_id) > 256
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in scope_id)
+        ):
+            raise RuntimeError(f"invalid {B0_CANARY_SCOPES_ENV}")
+        scope = (scope_kind, scope_id)
+        if scope in scopes:
+            raise RuntimeError(f"duplicate {B0_CANARY_SCOPES_ENV}")
+        scopes.append(scope)
+    return frozenset(scopes)
+
+
+def _validate_b0_config(
+    mode: str, canary_scopes: frozenset[tuple[str, str]],
+) -> None:
+    if mode == "canary" and not canary_scopes:
+        raise RuntimeError(f"{B0_CANARY_SCOPES_ENV} required for canary")
+
+
+B0_MODE = _parse_b0_mode(os.environ.get(B0_MODE_ENV))
+B0_CANARY_SCOPES = _parse_b0_canary_scopes(
+    os.environ.get(B0_CANARY_SCOPES_ENV)
+)
+_validate_b0_config(B0_MODE, B0_CANARY_SCOPES)
+B0_ISSUER = os.environ.get("B0_ISSUER", "local").strip() or "local"
+
 
 def _h0_state_enabled() -> bool:
     return H0_STATE_MODE in {"canary", "on"}
@@ -102,17 +151,35 @@ def _h0_state_session_enabled(name: str) -> bool:
     )
 
 
+def _b0_runtime_active() -> bool:
+    return B0_MODE in {"canary", "on"}
+
+
+def _b0_scope_enabled(scope_kind: str, scope_id: str) -> bool:
+    return B0_MODE == "on" or (
+        B0_MODE == "canary" and (scope_kind, scope_id) in B0_CANARY_SCOPES
+    )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
     state_enabled = _h0_state_enabled()
+    b0_runtime_active = _b0_runtime_active()
     if state_enabled and not _open_state_clients():
         # R7 门禁:未决 retiring/survivors 未回收,fail-closed 拒绝启动
         raise RuntimeError("herdr state clients not fully reaped; refusing start")
     if state_enabled:
         await asyncio.to_thread(_reconcile_state_client)
-    b0_wiring.install_claim_gate()
-    await asyncio.to_thread(_b0_rebuild_on_start)
+    if b0_runtime_active:
+        b0_wiring.install_claim_gate(
+            issuer=B0_ISSUER,
+            scope_filter=_b0_scope_enabled,
+            enforce_all=B0_MODE == "on",
+        )
+        await asyncio.to_thread(_b0_rebuild_on_start)
+    else:
+        b0_wiring.uninstall_claim_gate()
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
     _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
@@ -133,6 +200,8 @@ async def lifespan(_: FastAPI):
                     pass
                 except Exception:
                     logger.exception("background task failed during shutdown")
+        if b0_runtime_active:
+            b0_wiring.uninstall_claim_gate()
         try:
             await asyncio.to_thread(_release_all_zoom_leases)
         finally:
@@ -381,15 +450,26 @@ LOCAL_ONLY_AUTH_DETAIL = (
 )
 
 # --- B0 wiring（A2/B1 定稿合同；消息 I/O 仅在 _poll_message_state 链路） ---
-B0_ISSUER = os.environ.get("B0_ISSUER", "local").strip() or "local"
 _b0_coordinator: b0_wiring.B0Coordinator | None = None
 _b0_init_lock = threading.Lock()
+_b0_shadow_state: dict[str, Any] = {
+    "available": True, "degraded": False, "reason": None,
+    "scopes": 0, "identities": 0, "pulled": 0,
+}
+_b0_shadow_lock = threading.Lock()
+_b0_runtime_state: dict[str, Any] = {
+    "available": False, "degraded": True, "reason": "starting",
+    "scopes": {}, "last_reasons": {},
+}
+_b0_runtime_state_lock = threading.Lock()
 
 
 def _b0_binding_target(scope: str) -> tuple[str, str] | None:
     """scope → active binding 的 (session, pane_id)（W1 adapter 路由）。"""
     try:
         issuer, scope_kind, scope_id = b0_wiring.split_scope_key(scope)
+        if issuer != B0_ISSUER or not _b0_scope_enabled(scope_kind, scope_id):
+            return None
         row = leader_binding.get_active_binding(issuer, scope_kind, scope_id)
     except Exception:
         return None
@@ -405,13 +485,17 @@ def _b0_binding_target(scope: str) -> tuple[str, str] | None:
 def _b0_get_coordinator() -> b0_wiring.B0Coordinator | None:
     """惰性创建 B0 协调器（DB/环境异常时返回 None，调用方降级跳过）。"""
     global _b0_coordinator
+    if not _b0_runtime_active():
+        return None
     if _b0_coordinator is not None:
         return _b0_coordinator
     with _b0_init_lock:
         if _b0_coordinator is None:
             try:
                 adapter = b0_wiring.HerdrPromptAdapter(_b0_binding_target)
-                _b0_coordinator = b0_wiring.B0Coordinator(adapter, B0_ISSUER)
+                _b0_coordinator = b0_wiring.B0Coordinator(
+                    adapter, B0_ISSUER, scope_filter=_b0_scope_enabled,
+                )
             except Exception:
                 logger.exception("b0 coordinator init failed")
                 return None
@@ -421,11 +505,16 @@ def _b0_get_coordinator() -> b0_wiring.B0Coordinator | None:
 def _b0_control_transport(event: dict[str, Any]) -> bool:
     """F6/F7：以事件 scope 的 active binding 身份向各 active run 参与者
     发送可 claim、携 binding version 的 Hub control message。"""
+    scope_kind = str(event.get("scope_kind") or "")
+    scope_id = str(event.get("scope_id") or "")
+    if (
+        str(event.get("issuer") or "") != B0_ISSUER
+        or not _b0_scope_enabled(scope_kind, scope_id)
+    ):
+        return False
     try:
         row = leader_binding.get_active_binding(
-            str(event.get("issuer") or ""),
-            str(event.get("scope_kind") or ""),
-            str(event.get("scope_id") or ""),
+            B0_ISSUER, scope_kind, scope_id,
         )
     except Exception:
         return False
@@ -440,6 +529,14 @@ def _b0_control_transport(event: dict[str, Any]) -> bool:
 
 def _b0_poll_tick() -> None:
     """消息 poller 链路的一次 B0 tick：sync + fanout + dual-pull/ingest。"""
+    global _b0_shadow_state, _b0_runtime_state
+    if B0_MODE == "off":
+        return
+    if B0_MODE == "shadow":
+        state = b0_wiring.shadow_probe(B0_ISSUER)
+        with _b0_shadow_lock:
+            _b0_shadow_state = dict(state)
+        return
     coord = _b0_get_coordinator()
     if coord is None:
         return
@@ -447,13 +544,37 @@ def _b0_poll_tick() -> None:
         coord.sync_bindings()
         coord.fanout_control_events(transport=_b0_control_transport)
         coord.poll_once()
+        state = coord.state()
+        degraded = any(
+            bool(scope.get("degraded"))
+            for scope in state.get("scopes", {}).values()
+            if isinstance(scope, dict)
+        )
+        with _b0_runtime_state_lock:
+            _b0_runtime_state = {
+                "available": not degraded,
+                "degraded": degraded,
+                "reason": (
+                    b0_wiring.REASON_CREDENTIAL_UNAVAILABLE if degraded else None
+                ),
+                "scopes": state.get("scopes", {}),
+                "last_reasons": state.get("last_reasons", {}),
+            }
     except Exception:
         logger.exception("b0 poll tick failed")
+        with _b0_runtime_state_lock:
+            _b0_runtime_state = {
+                "available": False, "degraded": True,
+                "reason": "runtime_error", "scopes": {},
+                "last_reasons": {},
+            }
 
 
 def _b0_apply_live_status(snap: dict[str, Any]) -> None:
     """live poller 唯一允许的 B0 入口：仅注入 agent_status，禁消息 I/O。
     附带 G6 闭环：同名 agent 以新 pane 重启时更新 binding 路由载荷。"""
+    if not _b0_runtime_active():
+        return
     coord = _b0_get_coordinator()
     if coord is None or not isinstance(snap, dict):
         return
@@ -512,13 +633,38 @@ def _b0_apply_live_status(snap: dict[str, Any]) -> None:
 
 def _b0_rebuild_on_start() -> None:
     """restart rebuild（ADR 故障5）：同步 binding + 从 Hub unread 重建 pending。"""
+    if not _b0_runtime_active():
+        return
+    global _b0_runtime_state
     coord = _b0_get_coordinator()
     if coord is None:
         return
     try:
         coord.rebuild()
+        state = coord.state()
+        degraded = any(
+            bool(scope.get("degraded"))
+            for scope in state.get("scopes", {}).values()
+            if isinstance(scope, dict)
+        )
+        with _b0_runtime_state_lock:
+            _b0_runtime_state = {
+                "available": not degraded,
+                "degraded": degraded,
+                "reason": (
+                    b0_wiring.REASON_CREDENTIAL_UNAVAILABLE if degraded else None
+                ),
+                "scopes": state.get("scopes", {}),
+                "last_reasons": state.get("last_reasons", {}),
+            }
     except Exception:
         logger.exception("b0 rebuild failed")
+        with _b0_runtime_state_lock:
+            _b0_runtime_state = {
+                "available": False, "degraded": True,
+                "reason": "restart_rebuild_failed", "scopes": {},
+                "last_reasons": {},
+            }
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -723,6 +869,7 @@ async def protect_api(request: Request, call_next):
     if (
         len(parts) == 6 and parts[1] == "api" and parts[2] == "binding"
         and parts[5] == "rebind"
+        and _b0_scope_enabled(parts[3], parts[4])
         and _b0_valid_grant_for(request, parts[3], parts[4])
     ):
         return await call_next(request)
@@ -768,6 +915,8 @@ class SendMessageReq(BaseModel):
     expires_in: float | None = None
     hard: bool = False
     run_independent: bool = False
+    binding_scope_kind: str | None = None
+    binding_scope_id: str | None = None
 
 
 class HumanLoginReq(BaseModel):
@@ -1330,6 +1479,88 @@ def _delivery_payloads(result: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _b0_enabled_bindings() -> list[dict[str, Any]]:
+    if not _b0_runtime_active():
+        return []
+    try:
+        rows = leader_binding.list_bindings(issuer=B0_ISSUER, state="active")
+    except Exception:
+        logger.exception("b0 active bindings unavailable")
+        raise HTTPException(503, "B0 binding 存储暂不可用")
+    return [
+        row for row in rows
+        if _b0_scope_enabled(
+            str(row.get("scope_kind") or ""),
+            str(row.get("scope_id") or ""),
+        )
+    ]
+
+
+def _b0_select_sender_binding(
+    sender: str, scope_kind: str | None, scope_id: str | None,
+) -> tuple[dict[str, Any] | None, int]:
+    """按显式 scope 或唯一 canonical sender 选择 B0 binding。"""
+    if not _b0_runtime_active():
+        return None, 0
+    if bool(scope_kind) != bool(scope_id):
+        raise HTTPException(400, "binding_scope_kind 与 binding_scope_id 必须同时提供")
+    rows = _b0_enabled_bindings()
+    if scope_kind and scope_id:
+        if scope_kind not in leader_binding.SCOPE_KINDS:
+            raise HTTPException(400, "binding_scope_kind 无效")
+        if not _b0_scope_enabled(scope_kind, scope_id):
+            raise HTTPException(409, "B0 scope 未启用")
+        selected = [
+            row for row in rows
+            if row.get("scope_kind") == scope_kind and row.get("scope_id") == scope_id
+        ]
+        if len(selected) != 1 or not hmac.compare_digest(
+            sender, str(selected[0].get("mail_name") or "") if selected else "",
+        ):
+            raise HTTPException(403, "发送者不是该 scope 的 active canonical Leader")
+        return selected[0], len(rows)
+    matches = [
+        row for row in rows
+        if hmac.compare_digest(sender, str(row.get("mail_name") or ""))
+    ]
+    if len(matches) > 1:
+        raise HTTPException(409, "canonical Leader 匹配多个 scope，必须显式选择")
+    return (matches[0] if matches else None), len(rows)
+
+
+def _b0_validate_control_metadata(
+    meta: dict[str, Any], sender: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not _b0_runtime_active():
+        return None, None
+    issuer = str(meta.get("binding_issuer") or "")
+    scope_kind = str(meta.get("binding_scope_kind") or "")
+    scope_id = str(meta.get("binding_scope_id") or "")
+    if not (issuer or scope_kind or scope_id):
+        return None, None
+    if (
+        issuer != B0_ISSUER
+        or scope_kind not in leader_binding.SCOPE_KINDS
+        or not scope_id
+        or not _b0_scope_enabled(scope_kind, scope_id)
+    ):
+        return None, b0_wiring.REASON_STALE_BINDING_VERSION
+    try:
+        row = leader_binding.get_active_binding(B0_ISSUER, scope_kind, scope_id)
+        version = int(meta.get("binding_version"))
+    except Exception:
+        logger.exception("b0 control metadata validation failed")
+        return None, b0_wiring.REASON_STALE_BINDING_VERSION
+    if (
+        not row
+        or version != int(row.get("binding_version") or -1)
+        or not sender
+        or not hmac.compare_digest(sender, str(row.get("mail_name") or ""))
+    ):
+        return None, b0_wiring.REASON_STALE_BINDING_VERSION
+    return row, None
+
+
 def _notify_coordination_message(
     project_key: str, recipient: str, message_id: int, subject: str,
     meta: dict[str, Any], *, hard: bool, sender: str | None = None,
@@ -1338,26 +1569,16 @@ def _notify_coordination_message(
     # W6 canonical 授权门：控制动作必须先于任何中断（含 hard C-c）校验发送者
     canonical_note = ""
     if intent in coordination.NO_RESUME_INTENTS:
-        try:
-            bindings = leader_binding.list_bindings(
-                issuer=B0_ISSUER, state="active",
+        binding, reason = _b0_validate_control_metadata(meta, sender)
+        if reason:
+            return {"notified": False, "reason": reason}
+        if binding:
+            canonical_note = (
+                f" [canonical binding v{binding['binding_version']} "
+                f"from={binding['mail_name']} "
+                f"scope={binding['scope_kind']}/{binding['scope_id']}；"
+                "与本地已知版本冲突时拒绝并报警]"
             )
-        except Exception:
-            bindings = []
-        if bindings:
-            canonical_names = {str(b["mail_name"]) for b in bindings}
-            if not sender or sender not in canonical_names:
-                return {
-                    "notified": False,
-                    "reason": "canonical_binding_not_authorized",
-                }
-            for binding in bindings[:3]:
-                canonical_note += (
-                    f" [canonical binding v{binding['binding_version']} "
-                    f"from={binding['mail_name']} "
-                    f"scope={binding['scope_kind']}/{binding['scope_id']}；"
-                    "与本地已知版本冲突时拒绝并报警]"
-                )
     context = coordination.active_context(project_key, recipient)
     if not context or context.get("run_id") != meta.get("run_id"):
         return {"notified": False, "reason": "recipient_not_in_unique_active_run"}
@@ -1414,16 +1635,27 @@ def api_send(req: SendMessageReq):
         raise HTTPException(404, f"发送身份不存在: {req.sender_name}")
     if req.hard and req.intent not in coordination.NO_RESUME_INTENTS:
         raise HTTPException(400, "硬中断仅允许 stop/redirect")
+    selected_binding, enabled_binding_count = _b0_select_sender_binding(
+        str(sender["name"]), req.binding_scope_kind, req.binding_scope_id,
+    )
+    if (
+        req.intent in coordination.NO_RESUME_INTENTS
+        and B0_MODE == "on"
+        and enabled_binding_count
+        and selected_binding is None
+    ):
+        raise HTTPException(403, "控制消息发送者不是 active canonical Leader")
     # cross_run_fail_fast（冻结合同）：发送端在 Hub 写入前失败，零半成功
-    sender_ctx = coordination.active_context(proj["human_key"], sender["name"])
-    try:
-        b0_wiring.cross_run_fail_fast(
-            proj["human_key"], sender["name"], list(req.to),
-            sender_run_id=(sender_ctx or {}).get("run_id"),
-            run_independent=req.run_independent,
-        )
-    except b0_wiring.CrossRunFailFast as exc:
-        raise HTTPException(409, str(exc))
+    if selected_binding is not None:
+        sender_ctx = coordination.active_context(proj["human_key"], sender["name"])
+        try:
+            b0_wiring.cross_run_fail_fast(
+                proj["human_key"], sender["name"], list(req.to),
+                sender_run_id=(sender_ctx or {}).get("run_id"),
+                run_independent=req.run_independent,
+            )
+        except b0_wiring.CrossRunFailFast as exc:
+            raise HTTPException(409, str(exc))
     try:
         meta, warnings = coordination.prepare_metadata(
             project_key=proj["human_key"], sender=sender["name"],
@@ -1432,17 +1664,16 @@ def api_send(req: SendMessageReq):
             expires_in=req.expires_in,
         )
         # W6：控制消息持久化 canonical binding version（claim 服务端门依据）
-        if req.intent in coordination.NO_RESUME_INTENTS:
-            try:
-                active = leader_binding.list_bindings(
-                    issuer=B0_ISSUER, state="active",
-                )
-            except Exception:
-                active = []
-            if active:
-                meta["binding_version"] = max(
-                    int(b["binding_version"]) for b in active
-                )
+        if (
+            req.intent in coordination.NO_RESUME_INTENTS
+            and selected_binding is not None
+        ):
+            meta.update({
+                "binding_issuer": B0_ISSUER,
+                "binding_scope_kind": selected_binding["scope_kind"],
+                "binding_scope_id": selected_binding["scope_id"],
+                "binding_version": int(selected_binding["binding_version"]),
+            })
         body = coordination.add_metadata(req.body, meta)
         result = hub_client.send_message(
             project_key=proj["human_key"],
@@ -1660,6 +1891,8 @@ def api_binding_rebind_grant(
 ):
     if scope_kind not in leader_binding.SCOPE_KINDS:
         raise HTTPException(400, f"非法 scope_kind（允许 {leader_binding.SCOPE_KINDS}）")
+    if not _b0_scope_enabled(scope_kind, scope_id):
+        raise HTTPException(409, "B0 scope 未启用")
     if not _b0_user_request(request):
         raise HTTPException(403, "签发 grant 仅限 COCKPIT_TOKEN 用户")
     return _b0_issue_grant(scope_kind, scope_id, req.mail_name, float(req.ttl_seconds))
@@ -1669,6 +1902,8 @@ def api_binding_rebind_grant(
 def api_binding_rebind(scope_kind: str, scope_id: str, req: RebindReq, request: Request):
     if scope_kind not in leader_binding.SCOPE_KINDS:
         raise HTTPException(400, f"非法 scope_kind（允许 {leader_binding.SCOPE_KINDS}）")
+    if not _b0_scope_enabled(scope_kind, scope_id):
+        raise HTTPException(409, "B0 scope 未启用")
     try:
         active = leader_binding.get_active_binding(B0_ISSUER, scope_kind, scope_id)
     except leader_binding.BindingError as exc:
@@ -6076,7 +6311,18 @@ def health():
         "hub": bool(mail_status.get("write_available")),
         "push": bool(push_status.get("available")),
     }
-    ok = all(external.values())
+    if B0_MODE == "off":
+        b0_state = {
+            "active": False, "available": True,
+            "degraded": False, "reason": None,
+        }
+    elif B0_MODE == "shadow":
+        with _b0_shadow_lock:
+            b0_state = {"active": False, "shadow": True, **_b0_shadow_state}
+    else:
+        with _b0_runtime_state_lock:
+            b0_state = {"active": True, **_b0_runtime_state}
+    ok = all(external.values()) and not bool(b0_state.get("degraded"))
     return {
         "status": "ok" if ok else "degraded",
         "ts": time.time(),
@@ -6085,6 +6331,12 @@ def health():
             sorted(H0_STATE_CANARY_SESSIONS)
             if H0_STATE_MODE == "canary" else []
         ),
+        "b0_mode": B0_MODE,
+        "b0_canary_scopes": (
+            sorted(f"{kind}/{scope_id}" for kind, scope_id in B0_CANARY_SCOPES)
+            if B0_MODE == "canary" else []
+        ),
+        "b0": b0_state,
         **external,
         "external": external,
     }

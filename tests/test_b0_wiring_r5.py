@@ -26,6 +26,15 @@ from tests.test_b0_wiring import (
 )
 
 
+@pytest.fixture(autouse=True)
+def restore_claim_gate():
+    previous = coordination.CONTROL_CLAIM_GATE
+    try:
+        yield
+    finally:
+        coordination.CONTROL_CLAIM_GATE = previous
+
+
 # ---------------------------------------------------------------------------
 # P0-1：accept → delivered-mark crash
 # ---------------------------------------------------------------------------
@@ -157,9 +166,11 @@ def test_claim_gate_rejects_stale_binding_version(
     monkeypatch.setattr(b0_wiring, "B0_ISSUER", ISSUER)
     b0_wiring.install_claim_gate()
     msg = {
-        "id": 501, "from": "leader-a", "subject": "stop",
+        "id": 501, "from": "agent-a", "subject": "stop",
         "body_md": coordination.add_metadata("", {
-            "intent": "stop", "binding_version": 99,
+            "intent": "stop", "binding_issuer": ISSUER,
+            "binding_scope_kind": "user", "binding_scope_id": "default",
+            "binding_version": 99,
         }),
         "kind": "message", "importance": "normal", "created_ts": 1.0,
     }
@@ -181,8 +192,11 @@ def test_claim_gate_missing_version_fail_closed(
     monkeypatch.setattr(b0_wiring, "B0_ISSUER", ISSUER)
     b0_wiring.install_claim_gate()
     msg = {
-        "id": 502, "from": "leader-a", "subject": "stop",
-        "body_md": coordination.add_metadata("", {"intent": "stop"}),
+        "id": 502, "from": "agent-a", "subject": "stop",
+        "body_md": coordination.add_metadata("", {
+            "intent": "stop", "binding_issuer": ISSUER,
+            "binding_scope_kind": "user", "binding_scope_id": "default",
+        }),
         "kind": "message", "importance": "normal", "created_ts": 1.0,
     }
     result = coordination.claim_message(
@@ -200,9 +214,11 @@ def test_claim_gate_matching_version_passes(
     monkeypatch.setattr(b0_wiring, "B0_ISSUER", ISSUER)
     b0_wiring.install_claim_gate()
     msg = {
-        "id": 503, "from": "leader-a", "subject": "stop",
+        "id": 503, "from": "agent-a", "subject": "stop",
         "body_md": coordination.add_metadata("", {
-            "intent": "stop", "binding_version": int(active["binding_version"]),
+            "intent": "stop", "binding_issuer": ISSUER,
+            "binding_scope_kind": "user", "binding_scope_id": "default",
+            "binding_version": int(active["binding_version"]),
         }),
         "kind": "message", "importance": "normal", "created_ts": 1.0,
     }

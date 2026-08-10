@@ -11,10 +11,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Localized board degradation banners and a dedicated unavailable-agent column,
   with strict Herdr-binary detection so recoverable socket/cache failures show a
   retry path instead of misleading installation guidance.
-- Preparation-only leader-binding ledger and deferred-delivery core for future
-  Team Inbox routing, with versioned CAS migrations, a replayable outbox,
-  deduplication, retries, and binding-generation handoff. These modules are not
-  connected to runtime routes or background polling yet.
+- Leader-binding ledger and deferred-delivery runtime wiring for Team Inbox
+  routing, with versioned CAS migrations, a replayable outbox, deduplication,
+  retries, binding-generation handoff, and explicit `off`/`shadow`/scoped
+  `canary`/`on` rollout modes. The runtime remains `off` by default and does not
+  open the binding store, install claim gates, or poll until explicitly enabled.
 - Herdr native lifecycle control for all supported agents: capability and identity
   gates, managed `agent start`/prompt/wait primitives, identity-preserving restart,
   and a default-off event-driven socket state cache with an explicit session-scoped

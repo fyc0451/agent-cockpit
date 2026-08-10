@@ -25,20 +25,16 @@ ALTER 前向迁移、BEGIN IMMEDIATE 事务。
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
-DB_PATH = Path(
-    os.environ.get(
-        "LEADER_BINDING_DB",
-        str(Path.home() / "dashboard-data" / "leader-binding.sqlite3"),
-    )
-).expanduser()
+import runtime_paths
+
+
+DB_PATH = runtime_paths.store("leader_binding")
 
 SCOPE_KINDS = ("user", "team", "channel")
 BINDING_STATES = ("active", "previous", "retired")

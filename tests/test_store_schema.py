@@ -42,6 +42,49 @@ def test_missing_stores_are_creatable_no_writes(isolated_roots, tmp_path):
     assert created == []
 
 
+def test_b0_store_is_conditional_and_missing_creatable(
+    isolated_roots, monkeypatch,
+):
+    monkeypatch.setenv("COCKPIT_B0_MODE", "off")
+    off = {r["name"]: r for r in store_schema.probe_all_stores()}
+    assert "leader_binding" not in off
+
+    monkeypatch.setenv("COCKPIT_B0_MODE", "shadow")
+    shadow = {r["name"]: r for r in store_schema.probe_all_stores()}
+    assert shadow["leader_binding"]["reason"] == store_schema.REASON_MISSING_CREATABLE
+
+
+def test_b0_legacy_store_requires_migration(isolated_roots, monkeypatch):
+    monkeypatch.setenv("COCKPIT_B0_MODE", "shadow")
+    path = runtime_paths.store("leader_binding")
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE TABLE leader_bindings (scope_kind TEXT, scope_id TEXT, "
+        "mail_name TEXT, state TEXT, binding_version INTEGER)"
+    )
+    con.commit()
+    con.close()
+    result = {
+        row["name"]: row for row in store_schema.probe_all_stores()
+    }["leader_binding"]
+    assert result["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
+    assert result["state"] == "error"
+
+
+def test_b0_current_store_fingerprint_compatible(isolated_roots, monkeypatch):
+    import leader_binding
+
+    monkeypatch.setenv("COCKPIT_B0_MODE", "canary")
+    path = runtime_paths.store("leader_binding")
+    monkeypatch.setattr(leader_binding, "DB_PATH", path)
+    con = leader_binding._connect()
+    con.close()
+    result = {
+        row["name"]: row for row in store_schema.probe_all_stores()
+    }["leader_binding"]
+    assert result["reason"] == store_schema.REASON_COMPATIBLE
+
+
 def _mk_tasks_db(path: Path, *, user_version: int = 0, extra_col: str | None = None) -> None:
     con = sqlite3.connect(path)
     extra = f", {extra_col} TEXT" if extra_col else ""
