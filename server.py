@@ -84,7 +84,7 @@ COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
 AUTH_COOKIE = "cockpit_session"
 TEAM_AUTH_COOKIE = "cockpit_team_human_session"
 PUBLIC_PATHS = {
-    "/", "/health", "/health/live", "/api/auth/status", "/api/auth/login",
+    "/", "/health", "/health/live", "/health/ready", "/api/auth/status", "/api/auth/login",
     "/api/agent/team-reply",
 }
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -4808,15 +4808,22 @@ def index():
 
 @app.get("/health")
 def health():
+    """外部依赖聚合(Wiki13 J1)：失败仍 HTTP 200 + status=degraded，
+    不得触发 bundle rollback。不探测 app-owned store schema。"""
     mail_status = _agent_mail_status()
     push_status = web_push.public_config()
+    external = {
+        "db": bool(mail_status.get("available")),
+        "herdr": bool(herdr_client.is_available()),
+        "hub": bool(mail_status.get("write_available")),
+        "push": bool(push_status.get("available")),
+    }
+    ok = all(external.values())
     return {
-        "status": "ok",
+        "status": "ok" if ok else "degraded",
         "ts": time.time(),
-        "db": mail_status["available"],
-        "herdr": herdr_client.is_available(),
-        "hub": mail_status["write_available"],
-        "push": push_status["available"],
+        **external,
+        "external": external,
     }
 
 
@@ -4834,6 +4841,43 @@ def health_live():
     except Exception:
         raise HTTPException(503, "release_identity_error: unexpected")
     return {"status": "live", "identity": identity}
+
+
+@app.get("/health/ready")
+def health_ready():
+    """公共纯读 readiness(Wiki13 J1)：release identity + paths/config/manifest
+    + app-owned store 严格 fingerprint。零写入；响应脱敏(无路径/异常正文)。
+    不兼容 → HTTP 503；兼容(含 missing_creatable) → 200。"""
+    try:
+        identity = release_identity.get_release_identity()
+    except release_identity.ReleaseIdentityError as exc:
+        raise HTTPException(
+            503,
+            {
+                "status": "not_ready",
+                "compat_family": "0.3.x",
+                "reason": f"identity_error:{exc.reason}",
+                "stores": [],
+            },
+        )
+    except Exception:
+        raise HTTPException(
+            503,
+            {
+                "status": "not_ready",
+                "compat_family": "0.3.x",
+                "reason": "identity_error:unexpected",
+                "stores": [],
+            },
+        )
+    import store_schema
+
+    body = store_schema.evaluate_ready(identity)
+    # Strip any accidental path-like fields; identity already sanitized.
+    if body.get("ready"):
+        return body
+    raise HTTPException(503, body)
+
 
 
 @app.get("/health.poll")
