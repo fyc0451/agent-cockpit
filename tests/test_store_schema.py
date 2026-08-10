@@ -126,11 +126,41 @@ def _tasks_check(**kwargs):
     )
 
 
+def _coordination_check(**kwargs):
+    return store_schema._check_sqlite(
+        "coordination",
+        store_schema._COORD_TABLES,
+        expected_defaults=store_schema._COORD_DEFAULTS,
+        expected_indexes=store_schema._COORD_INDEXES,
+        expected_fks=store_schema._COORD_FKS,
+        **kwargs,
+    )
+
+
 def test_tasks_fingerprint_compatible(isolated_roots):
     path = runtime_paths.store("tasks")
     _mk_tasks_db(path)
     r = _tasks_check()
     assert r["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_coordination_assignment_schema_migrates_existing_store(
+    isolated_roots, monkeypatch,
+):
+    import coordination
+
+    path = runtime_paths.store("coordination")
+    monkeypatch.setattr(coordination, "DB_PATH", path)
+
+    con = coordination._connect()
+    con.execute("DROP TABLE assignments")
+    con.commit()
+    con.close()
+    assert _coordination_check()["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
+
+    con = coordination._connect()
+    con.close()
+    assert _coordination_check()["reason"] == store_schema.REASON_COMPATIBLE
 
 
 def test_user_version_nonzero_is_future_schema(isolated_roots):

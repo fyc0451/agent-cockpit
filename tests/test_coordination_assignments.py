@@ -1,0 +1,228 @@
+import math
+
+import pytest
+
+import coordination
+
+
+def _create(tmp_path, **overrides):
+    values = {
+        "project_key": str(tmp_path),
+        "assignment": "修复可靠发送失败后的补偿路径",
+        "assignee": "codex-worker",
+        "expected_reply": "提交 SHA、测试结果和剩余风险",
+        "deadline": 2_000.0,
+        "now": 1_000.0,
+    }
+    values.update(overrides)
+    return coordination.create_assignment(**values)
+
+
+def test_create_assignment_persists_minimum_contract(tmp_path):
+    created = _create(tmp_path)
+
+    assert created == {
+        "assignment_id": created["assignment_id"],
+        "project_key": str(tmp_path.resolve()),
+        "assignment": "修复可靠发送失败后的补偿路径",
+        "assignee": "codex-worker",
+        "expected_reply": "提交 SHA、测试结果和剩余风险",
+        "deadline": 2_000.0,
+        "status": "assigned",
+        "closed_at": None,
+        "version": 1,
+        "created_at": 1_000.0,
+        "updated_at": 1_000.0,
+    }
+    assert created["assignment_id"].startswith("a-")
+    assert coordination.get_assignment(created["assignment_id"]) == created
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("project_key", ""),
+        ("assignment", "  "),
+        ("assignee", ""),
+    ],
+)
+def test_create_assignment_rejects_blank_required_text(tmp_path, field, value):
+    with pytest.raises(ValueError, match=field):
+        _create(tmp_path, **{field: value})
+
+
+@pytest.mark.parametrize("deadline", [True, "tomorrow", math.inf, math.nan])
+def test_create_assignment_rejects_invalid_deadline(tmp_path, deadline):
+    with pytest.raises(ValueError, match="deadline"):
+        _create(tmp_path, deadline=deadline)
+
+
+def test_expected_reply_and_deadline_are_nullable(tmp_path):
+    created = _create(tmp_path, expected_reply=None, deadline=None)
+
+    assert created["expected_reply"] is None
+    assert created["deadline"] is None
+
+    epoch = _create(tmp_path, deadline=0)
+    assert epoch["deadline"] == 0.0
+
+
+def test_create_assignment_rejects_invalid_optional_reply(tmp_path):
+    with pytest.raises(ValueError, match="expected_reply"):
+        _create(tmp_path, expected_reply="  ")
+    with pytest.raises(ValueError, match="expected_reply"):
+        _create(tmp_path, expected_reply="x" * 2_001)
+
+
+def test_assignment_lifecycle_and_explicit_close(tmp_path):
+    assignment = _create(tmp_path)
+
+    started = coordination.transition_assignment(
+        assignment["assignment_id"],
+        to_status="in_progress",
+        expected_version=1,
+        now=1_100.0,
+    )
+    assert (started["status"], started["version"], started["updated_at"]) == (
+        "in_progress",
+        2,
+        1_100.0,
+    )
+
+    blocked = coordination.transition_assignment(
+        assignment["assignment_id"],
+        to_status="blocked",
+        expected_version=2,
+        now=1_200.0,
+    )
+    resumed = coordination.transition_assignment(
+        assignment["assignment_id"],
+        to_status="in_progress",
+        expected_version=3,
+        now=1_300.0,
+    )
+    review = coordination.transition_assignment(
+        assignment["assignment_id"],
+        to_status="review",
+        expected_version=4,
+        now=1_400.0,
+    )
+
+    assert blocked["version"] == 3
+    assert resumed["version"] == 4
+    assert review["version"] == 5
+    assert review["closed_at"] is None
+
+    closed = coordination.close_assignment(
+        assignment["assignment_id"], expected_version=5, now=1_500.0,
+    )
+    assert closed["status"] == "closed"
+    assert closed["closed_at"] == 1_500.0
+    assert closed["updated_at"] == 1_500.0
+    assert closed["version"] == 6
+
+
+def test_review_can_return_to_in_progress(tmp_path):
+    assignment = _create(tmp_path)
+    for version, status in ((1, "in_progress"), (2, "review"), (3, "in_progress")):
+        result = coordination.transition_assignment(
+            assignment["assignment_id"],
+            to_status=status,
+            expected_version=version,
+        )
+    assert result["status"] == "in_progress"
+    assert result["version"] == 4
+
+
+@pytest.mark.parametrize(
+    ("start", "target"),
+    [
+        (None, "review"),
+        (None, "closed"),
+        ("in_progress", "assigned"),
+        ("blocked", "review"),
+    ],
+)
+def test_transition_assignment_rejects_illegal_transitions(tmp_path, start, target):
+    assignment = _create(tmp_path)
+    version = 1
+    if start is not None:
+        assignment = coordination.transition_assignment(
+            assignment["assignment_id"],
+            to_status=start,
+            expected_version=version,
+        )
+        version = assignment["version"]
+
+    with pytest.raises(ValueError, match="非法状态迁移|显式关闭"):
+        coordination.transition_assignment(
+            assignment["assignment_id"],
+            to_status=target,
+            expected_version=version,
+        )
+
+
+def test_stale_version_rejected_without_mutation(tmp_path):
+    assignment = _create(tmp_path)
+
+    with pytest.raises(ValueError, match="version 冲突"):
+        coordination.transition_assignment(
+            assignment["assignment_id"],
+            to_status="in_progress",
+            expected_version=99,
+            now=1_100.0,
+        )
+
+    assert coordination.get_assignment(assignment["assignment_id"]) == assignment
+
+
+def test_closed_assignment_rejects_further_mutation(tmp_path):
+    assignment = _create(tmp_path)
+    closed = coordination.close_assignment(
+        assignment["assignment_id"], expected_version=1, now=1_100.0,
+    )
+
+    with pytest.raises(ValueError, match="已关闭"):
+        coordination.transition_assignment(
+            assignment["assignment_id"],
+            to_status="in_progress",
+            expected_version=closed["version"],
+        )
+    with pytest.raises(ValueError, match="已关闭"):
+        coordination.close_assignment(
+            assignment["assignment_id"], expected_version=closed["version"],
+        )
+
+
+def test_transition_rejects_missing_assignment_and_bad_version(tmp_path):
+    _create(tmp_path)
+
+    with pytest.raises(ValueError, match="任务不存在"):
+        coordination.transition_assignment(
+            "a-missing", to_status="in_progress", expected_version=1,
+        )
+    for version in (None, True, 0, "1"):
+        with pytest.raises(ValueError, match="expected_version"):
+            coordination.transition_assignment(
+                "a-missing", to_status="in_progress", expected_version=version,
+            )
+
+
+def test_list_assignments_filters_project_status_and_assignee(tmp_path):
+    other_project = tmp_path / "other"
+    first = _create(tmp_path, assignee="codex-worker", deadline=3_000.0)
+    second = _create(tmp_path, assignee="claude-reviewer", deadline=2_500.0)
+    _create(other_project, assignee="codex-worker")
+    coordination.transition_assignment(
+        second["assignment_id"], to_status="in_progress", expected_version=1,
+    )
+
+    assert [row["assignment_id"] for row in coordination.list_assignments(str(tmp_path))] == [
+        second["assignment_id"],
+        first["assignment_id"],
+    ]
+    assert coordination.list_assignments(
+        str(tmp_path), statuses=["in_progress"], assignee="claude-reviewer",
+    ) == [coordination.get_assignment(second["assignment_id"])]
+    with pytest.raises(ValueError, match="非法 status"):
+        coordination.list_assignments(str(tmp_path), statuses=["unknown"])

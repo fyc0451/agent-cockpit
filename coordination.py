@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import subprocess
@@ -30,6 +31,17 @@ NO_RESUME_INTENTS = {"stop", "redirect"}
 CONNECT_RETRIES = 6
 CONNECT_RETRY_BASE = 0.02
 TASK_REPORT_TEXT_LIMIT = 2000
+ASSIGNMENT_TEXT_LIMIT = 4000
+EXPECTED_REPLY_TEXT_LIMIT = 2000
+ASSIGNEE_TEXT_LIMIT = 128
+ASSIGNMENT_STATUSES = ("assigned", "in_progress", "blocked", "review", "closed")
+ASSIGNMENT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "assigned": frozenset({"in_progress", "blocked"}),
+    "in_progress": frozenset({"blocked", "review"}),
+    "blocked": frozenset({"in_progress"}),
+    "review": frozenset({"in_progress"}),
+    "closed": frozenset(),
+}
 _CONNECT_INIT_LOCK = threading.Lock()
 
 
@@ -162,6 +174,26 @@ def _initialize_connection(con: sqlite3.Connection) -> None:
           reported_ts REAL,
           PRIMARY KEY(session, pane_id)
         );
+        CREATE TABLE IF NOT EXISTS assignments (
+          assignment_id TEXT PRIMARY KEY,
+          project_key TEXT NOT NULL,
+          assignment TEXT NOT NULL,
+          assignee TEXT NOT NULL,
+          expected_reply TEXT,
+          deadline REAL,
+          status TEXT NOT NULL DEFAULT 'assigned',
+          closed_at REAL,
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          CHECK(status IN ('assigned','in_progress','blocked','review','closed')),
+          CHECK(version >= 1),
+          CHECK((status = 'closed') = (closed_at IS NOT NULL))
+        );
+        CREATE INDEX IF NOT EXISTS assignments_project_status
+          ON assignments(project_key, status, deadline);
+        CREATE INDEX IF NOT EXISTS assignments_assignee_status
+          ON assignments(assignee, status, deadline);
         """
     )
     columns = {
@@ -200,6 +232,38 @@ def _connect() -> sqlite3.Connection:
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
+def _required_text(value: Any, field: str, *, limit: int) -> str:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        raise ValueError(f"{field} 不能为空")
+    if len(text) > limit:
+        raise ValueError(f"{field} 超过 {limit} 字符上限")
+    return text
+
+
+def _optional_text(value: Any, field: str, *, limit: int) -> str | None:
+    if value is None:
+        return None
+    return _required_text(value, field, limit=limit)
+
+
+def _optional_epoch(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} 必须是有限 epoch 或 null")
+    timestamp = float(value)
+    if not math.isfinite(timestamp):
+        raise ValueError(f"{field} 必须是有限 epoch 或 null")
+    return timestamp
+
+
+def _expected_version(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("expected_version 必须是正整数")
+    return value
 
 
 def _config_hash(participants: list[dict[str, Any]]) -> str:
