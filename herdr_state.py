@@ -983,8 +983,16 @@ class HerdrStateClient:
                     state.apply_event(envelope)
                     self._sync_counts(lc, state)
                     if state.pane_ids() != subscribed_panes:
-                        rebuild = True
-                        break
+                        # pane.created/closed may have been buffered before this
+                        # subscription became active. Confirm against the
+                        # authoritative socket snapshot before rebuilding;
+                        # otherwise a stale ghost pane poisons the next
+                        # parameterized subscription with pane_not_found.
+                        self._resync(name, path, state, lc)
+                        last_resync = time.monotonic()
+                        if state.pane_ids() != subscribed_panes:
+                            rebuild = True
+                            break
             finally:
                 self._unregister(sub)
                 sub.close()

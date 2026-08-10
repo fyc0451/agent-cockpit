@@ -785,9 +785,116 @@ class TestHerdrStateClient:
             }
             assert status_specs == {"p1", "p2"}
             assert first_cancelled.is_set()
+            # bootstrap + first handshake + pane-set confirmation + second handshake
+            assert snapshots["n"] >= 4
             assert client.state()["sessions"]["work"]["reconnects"] == 0
         finally:
             client.stop()
+            server.stop()
+
+    def test_stale_pane_created_resyncs_without_subscribing_ghost(
+        self, tmp_path: Path,
+    ) -> None:
+        """Buffered stale pane.created must not poison parameterized subscriptions."""
+        requested: list[list[dict[str, Any]]] = []
+        snapshots = {"n": 0}
+
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                snapshots["n"] += 1
+                # Authoritative state never contains the stale ghost pane.
+                server.send(conn, _snapshot_response(
+                    str(req["id"]), make_snapshot(make_pane("p1")),
+                ))
+            elif method == "events.subscribe":
+                subscriptions = req.get("params", {}).get("subscriptions", [])
+                requested.append(subscriptions)
+                server.send(conn, _started_response(str(req["id"])))
+                if len(requested) == 1:
+                    server.send(conn, {
+                        "event": "pane_created",
+                        "data": {
+                            "type": "pane_created",
+                            "pane": make_pane("ghost", revision=99),
+                        },
+                    })
+                _hang(conn)
+
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = _start_client({"work": str(server.path)})
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["work"]["resyncs"] >= 2
+                and [p["pane_id"] for p in client.snapshot_cached()["panes"]] == ["p1"],
+                timeout=5.0,
+            )
+            assert len(requested) == 1
+            assert not any(
+                spec.get("pane_id") == "ghost" for spec in requested[0]
+            )
+            session = client.state()["sessions"]["work"]
+            assert session["state"] == "subscribed"
+            assert session["reconnects"] == 0
+        finally:
+            client.stop()
+            server.stop()
+
+    def test_pane_change_confirmation_resync_failure_reconnects(
+        self, tmp_path: Path,
+    ) -> None:
+        snapshots = {"n": 0}
+        subscriptions = {"n": 0}
+
+        def handler(conn: socket.socket, server: FakeHerdrServer) -> None:
+            req = server.read(conn)
+            if req is None:
+                return
+            method = req.get("method")
+            if method == "ping":
+                server.send(conn, _pong(str(req["id"])))
+            elif method == "session.snapshot":
+                snapshots["n"] += 1
+                if snapshots["n"] == 3:
+                    server.send(conn, _error_response(
+                        str(req["id"]), "internal_error", "snapshot failed",
+                    ))
+                    return
+                server.send(conn, _snapshot_response(
+                    str(req["id"]), make_snapshot(make_pane("p1")),
+                ))
+            elif method == "events.subscribe":
+                subscriptions["n"] += 1
+                server.send(conn, _started_response(str(req["id"])))
+                if subscriptions["n"] == 1:
+                    server.send(conn, {
+                        "event": "pane_created",
+                        "data": {
+                            "type": "pane_created",
+                            "pane": make_pane("ghost", revision=99),
+                        },
+                    })
+                _hang(conn)
+
+        server = FakeHerdrServer(tmp_path, handler=handler).start()
+        client = _start_client({"work": str(server.path)})
+        try:
+            _wait_for(
+                lambda: client.state()["sessions"]["work"]["reconnects"] >= 1
+                and client.state()["sessions"]["work"]["state"] == "subscribed"
+                and subscriptions["n"] >= 2,
+                timeout=5.0,
+            )
+            assert [
+                p["pane_id"] for p in client.snapshot_cached()["panes"]
+            ] == ["p1"]
+        finally:
+            assert client.stop(join_timeout=2.0) is True
             server.stop()
 
     def test_reconnect_rebuilds_status_subscription_from_new_snapshot(
