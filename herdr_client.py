@@ -1115,7 +1115,7 @@ def apply_opencode_mode_to_pane(
         output = _run(
             prefix + [
                 "wait-output", pane_id,
-                "--regex", r"^\s*Switch to (?:light|dark) mode\s*$",
+                "--regex", r"Switch to (light|dark) mode",
                 "--source", "visible", "--lines", "60",
                 "--timeout", "2000", "--raw",
             ],

@@ -1,5 +1,6 @@
 
 import json
+import re
 
 import herdr_client
 
@@ -103,7 +104,11 @@ def test_opencode_mode_picker_switches_to_requested_mode_without_touching_compos
     def fake_run(args, timeout=10):
         calls.append(list(args))
         if "wait-output" in args and "Switch to" in " ".join(args):
-            return '{"matched_line":"Switch to light mode"}'
+            line = "  ┃                                   Switch to light mode"
+            pattern = args[args.index("--regex") + 1]
+            if re.search(pattern, line) is None:
+                raise RuntimeError("theme mode option did not match")
+            return f'{{"matched_line":{json.dumps(line)}}}'
         if "read" in args:
             return "  ┃  preserved draft\n  ┃  Build · model\n"
         return ""
