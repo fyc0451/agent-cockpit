@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Localized board degradation banners and a dedicated unavailable-agent column,
+  with strict Herdr-binary detection so recoverable socket/cache failures show a
+  retry path instead of misleading installation guidance.
 - Preparation-only leader-binding ledger and deferred-delivery core for future
   Team Inbox routing, with versioned CAS migrations, a replayable outbox,
   deduplication, retries, and binding-generation handoff. These modules are not

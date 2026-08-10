@@ -95,11 +95,14 @@ header .spacer{flex:1}
 /* 看板 */
 .board-wrap{flex:1;overflow:auto;padding:12px}
 .board{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;min-height:100%;align-content:start}
+.board-degraded{margin:0 0 12px;padding:10px 12px;border:1px solid var(--need);border-radius:10px;background:color-mix(in srgb,var(--need) 8%,transparent);font-size:12.5px;line-height:1.5;overflow-wrap:anywhere;max-height:120px;overflow:auto}
+.board-degraded .sess{margin-top:4px;color:var(--fg2)}
 .col{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;display:flex;flex-direction:column;min-height:200px}
 .col-head{padding:10px 12px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--bg2);border-radius:11px 11px 0 0;z-index:1}
 .col-head .cc{background:var(--bg4);border-radius:10px;padding:1px 8px;font-size:11px;min-width:20px;text-align:center}
 .col-need .col-head{color:var(--need)} .col-work .col-head{color:var(--work)}
 .col-done .col-head{color:var(--done)} .col-idle .col-head{color:var(--idle)}
+.col-unavailable .col-head{color:var(--fg3)}
 .col-body{padding:14px;display:flex;flex-direction:column;gap:12px;overflow:visible}
 
 /* agent 卡片 */
@@ -108,6 +111,7 @@ header .spacer{flex:1}
 .card.need{border-left-color:var(--need)} .card.work{border-left-color:var(--work)}
 .card.done{border-left-color:var(--done)} .card.idle{border-left-color:var(--idle)}
 .card.unknown{border-left-color:var(--fg3);opacity:.7}
+.card.unavailable{border-left-color:var(--fg3);opacity:.7}
 .card-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .agent-icon{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0}
 .agent-icon.codex{background:#0f1729;color:#4a9eff}
@@ -127,6 +131,7 @@ header .spacer{flex:1}
 .status-dot.work{background:var(--work);box-shadow:0 0 6px var(--work);animation:pulse 1.5s infinite}
 .status-dot.done{background:var(--done)} .status-dot.idle{background:var(--idle)}
 .status-dot.unknown{background:var(--fg3)}
+.status-dot.unavailable{background:var(--fg3)}
 @keyframes pulse{50%{opacity:.4}}
 
 /* 启动栏 */
@@ -604,12 +609,14 @@ header .spacer{flex:1}
   <!-- 看板 -->
   <section id="view-board" class="view">
     <div class="board-wrap">
+      <div id="boardDegraded" class="board-degraded" style="display:none" role="status"></div>
       <div id="boardEmpty" class="empty" style="display:none;padding:60px 20px"></div>
       <div class="board" id="board" aria-busy="false">
         <div class="col col-need"><div class="col-head"><span data-i18n="board.need">⚠ 需要你</span> <span class="cc" id="cnt-need">0</span></div><div class="col-body" id="col-need"></div></div>
         <div class="col col-work"><div class="col-head"><span data-i18n="board.work">⚡ 工作中</span> <span class="cc" id="cnt-work">0</span></div><div class="col-body" id="col-work"></div></div>
         <div class="col col-done"><div class="col-head"><span data-i18n="board.done">✓ 已完成</span> <span class="cc" id="cnt-done">0</span></div><div class="col-body" id="col-done"></div></div>
         <div class="col col-idle"><div class="col-head"><span data-i18n="board.idle">○ 空闲</span> <span class="cc" id="cnt-idle">0</span></div><div class="col-body" id="col-idle"></div></div>
+        <div class="col col-unavailable" id="colWrap-unavailable" style="display:none"><div class="col-head"><span data-i18n="board.unavailable">▦ 不可用</span> <span class="cc" id="cnt-unavailable">0</span></div><div class="col-body" id="col-unavailable"></div></div>
       </div>
     </div>
   </section>
@@ -1150,7 +1157,9 @@ en:{
 'nav.menu':'Menu','nav.board':'Board','nav.attention':'Workspace','nav.term':'Dev','nav.herdrflow':'Mobile','nav.sessions':'Sessions','nav.msgs':'Messages','nav.team':'Team','nav.files':'Files','nav.settings':'Settings',
 'nav.board.t':'All agents at a glance: needs you / working / done / idle','nav.attention.t':'Tasks and progress grouped by session, including blockers','nav.term.t':'Real terminal: take over any pane TUI and type commands','nav.herdrflow.t':'Flow view: scrollable/copyable pane output + quick prompts','nav.sessions.t':'herdr sessions: create workspaces, restart, stop','nav.msgs.t':'Messages between agents (requires Agent Mail)','nav.team.t':'Team projects, members, default agents and administration','nav.files.t':'Browse/edit/download project files; create a workspace from here','nav.settings.t':'Language, theme, agents, directories, environment check',
 'board.guide.title':'No running agents yet','board.guide.body':'First time here? Create a workspace in one click (it creates the session and starts the agents); for an existing session, use Add Agent in the Terminal toolbar.','board.guide.btn':'🚀 Create your first workspace','board.guide.noherdr':'herdr is unavailable','board.guide.noherdr.body':'The herdr executable was not found. Check Settings → Environment check for missing components, install them, then refresh.','board.guide.noherdr.btn':'Open environment check','launch.nosession':'No session yet — create a workspace first',
-'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle',
+'board.need':'⚠ Needs you','board.work':'⚡ Working','board.done':'✓ Done','board.idle':'○ Idle','board.unavailable':'▦ Unavailable','board.degraded':'Board data degraded — showing the last cached snapshot',
+'board.unavailable.short':'herdr unavailable','board.unavailable.title':'Board data temporarily unavailable','board.unavailable.body':'The state cache is not ready yet or the connection is degraded. Retry in a moment; if it persists, check Settings → Environment check.','board.retry':'Retry',
+'st.working':'Working','st.needs_you':'Needs you','st.done':'Done','st.done.short':'Done','st.idle':'Idle','st.blocked':'Blocked','st.failed':'Failed','st.unknown':'Unknown','st.unavailable':'Unavailable','st.running':'Running','st.connecting':'Connecting','st.starting':'Starting','st.swap_pending':'Socket swap pending','st.reconnecting':'Reconnecting',
 'attention.title':'Task board','attention.push':'Enable notifications','attention.report':'Request reports','common.refresh':'Refresh','common.loading':'Loading…',
 'team.title':'Team center',
 'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent','launch.wtpreview':'Isolated mode: a new isolated worktree "{session}/{name}" is auto-created from the source repo above (workdir editable to any existing repo path).',
@@ -1173,7 +1182,9 @@ ja:{
 'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'ワークスペース','nav.term':'開発','nav.herdrflow':'モバイル','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.team':'チーム','nav.files':'ファイル','nav.settings':'設定',
 'nav.board.t':'全 agent の状態一覧:対応必要 / 実行中 / 完了 / 待機','nav.attention.t':'session ごとのタスク、進捗、ブロッカーを表示','nav.term.t':'実端末:任意の pane の TUI を接管してコマンド入力','nav.herdrflow.t':'フロー表示:スクロール/コピー可能な pane 出力 + クイック指示','nav.sessions.t':'herdr セッション管理:ワークスペース作成・再起動・停止','nav.msgs.t':'agent 間メッセージ(Agent Mail が必要)','nav.team.t':'チームプロジェクト、メンバー、デフォルト Agent、管理操作','nav.files.t':'プロジェクトファイルの閲覧/編集/ダウンロード、ここからワークスペース作成も可','nav.settings.t':'言語、テーマ、agent、ディレクトリ、環境チェック',
 'board.guide.title':'実行中の agent はまだありません','board.guide.body':'初めてですか?下のボタンでワークスペースを一発作成(session 作成と agent 起動を自動化)。既存 session には「端末」ツールバーの「Agent 追加」から追加できます。','board.guide.btn':'🚀 最初のワークスペースを作成','board.guide.noherdr':'herdr が利用できません','board.guide.noherdr.body':'herdr 実行ファイルが見つかりません。「設定 → 環境チェック」で不足コンポーネントを確認し、インストール後に更新してください。','board.guide.noherdr.btn':'環境チェックを開く','launch.nosession':'session がまだありません。先にワークスペースを作成してください',
-'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機',
+'board.need':'⚠ 対応必要','board.work':'⚡ 実行中','board.done':'✓ 完了','board.idle':'○ 待機','board.unavailable':'▦ 利用不可','board.degraded':'ボードデータが degraded 状態 — 最新のキャッシュを表示中',
+'board.unavailable.short':'herdr 利用不可','board.unavailable.title':'ボードデータは一時的に利用できません','board.unavailable.body':'状態キャッシュが未準備か、接続が degraded です。しばらくしてから再試行してください。続く場合は設定 → 環境チェックを確認してください。','board.retry':'再試行',
+'st.working':'実行中','st.needs_you':'対応必要','st.done':'完了','st.done.short':'完了','st.idle':'待機','st.blocked':'ブロック','st.failed':'失敗','st.unknown':'不明','st.unavailable':'利用不可','st.running':'実行中','st.connecting':'接続中','st.starting':'起動中','st.swap_pending':'ソケット切替保留中','st.reconnecting':'再接続中',
 'attention.title':'タスクボード','attention.push':'通知を有効化','attention.report':'進捗報告を依頼','common.refresh':'更新','common.loading':'読み込み中…',
 'team.title':'チームセンター',
 'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント','launch.wtpreview':'独立モード：上のソースリポジトリから新しい隔離 worktree「{session}/{name}」を自動作成（workdir は任意の既存リポジトリパスに変更可）。',
@@ -2211,12 +2222,74 @@ async function refreshBoard(){
   }finally{if(seq===BOARD_LOAD_SEQ&&board)board.setAttribute('aria-busy','false')}
 }
 
-function classify(status,agent){
+function classify(status,agent,stateStatus){
   // unknown 且无 agent → idle(普通终端)
   if(!agent)return 'idle';
+  // 会话状态缓存不可信(未订阅/建连中/换入挂起等):pane 状态一律 unavailable,
+  // 从 idle 分离,禁止按空闲展示
+  if(stateStatus&&stateStatus!=='subscribed')return 'unavailable';
   if(status==='blocked'||status==='unknown'&&(agent))return status==='blocked'?'need':'unknown';
   const m={blocked:'need',working:'work',done:'done',idle:'idle',unknown:'idle'};
   return m[status]||'idle';
+}
+
+function boardSessionState(name){
+  // BOARD.sessions[].state_status(旧 payload 无此字段 → undefined,行为不变)
+  const s=((BOARD&&BOARD.sessions)||[]).find(x=>x&&x.session===name);
+  return s?s.state_status:undefined;
+}
+
+// 动态状态文案统一 t()(zh 兜底,en/ja 走 I18N,不得混中文)
+function statusText(st){
+  const m={
+    working:['st.working','工作中'],needs_you:['st.needs_you','需要你'],
+    need:['st.needs_you','需要你'],done:['st.done','已完成'],
+    idle:['st.idle','空闲'],blocked:['st.blocked','阻塞'],
+    failed:['st.failed','失败'],unknown:['st.unknown','未知'],
+    unavailable:['st.unavailable','不可用'],
+  };
+  const e=m[st];
+  return e?t(e[0],e[1]):null;
+}
+
+function cardStatusText(cls){
+  const m={
+    need:['st.needs_you','需要你'],work:['st.running','运行中'],
+    done:['st.done.short','完成'],idle:['st.idle','空闲'],
+    unknown:['st.unknown','未知'],unavailable:['st.unavailable','不可用'],
+  };
+  const e=m[cls];
+  return e?t(e[0],e[1]):cls;
+}
+
+function stateStatusLabel(st){
+  const m={
+    connecting:['st.connecting','连接中'],starting:['st.starting','启动中'],
+    swap_pending:['st.swap_pending','socket 换入挂起'],
+    reconnecting:['st.reconnecting','重连中'],
+  };
+  const e=m[st];
+  return e?t(e[0],e[1]):st||'';
+}
+
+function renderBoardDegraded(d){
+  // 看板级/会话级降级可视化:Hub/socket 降级原因可见(available=false 时也
+  // 展示真实 reason/state),内容全部 esc 防注入,CSS max-height+overflow 兜底
+  const el=document.getElementById('boardDegraded');
+  if(!el)return;
+  if(!d||!d.degraded){el.style.display='none';el.textContent='';return}
+  const lines=[`<b>⚠ ${esc(t('board.degraded','看板数据降级,显示最近缓存快照'))}</b>`];
+  if(d.reason)lines.push(`<div>${esc(String(d.reason))}</div>`);
+  for(const s of d.sessions||[]){
+    if(!s||!s.session)continue;
+    const st=s.state_status;
+    if(st&&st!=='subscribed'){
+      const reason=s.state_reason?`: ${esc(String(s.state_reason))}`:'';
+      lines.push(`<div class="sess">${esc(String(s.session))} · ${esc(stateStatusLabel(st))}${reason}</div>`);
+    }
+  }
+  el.innerHTML=lines.join('');
+  el.style.display='';
 }
 
 function renderAgentStrip(d){
@@ -2226,10 +2299,9 @@ function renderAgentStrip(d){
   if(!d||!d.available){el.innerHTML='';return}
   const agents=(d.panes||[]).filter(p=>p.agent);
   if(!agents.length){el.innerHTML='';return}
-  const statusLabel={working:'工作中',needs_you:'需要你',done:'已完成',idle:'空闲',blocked:'阻塞',failed:'失败'};
   el.innerHTML=agents.map(p=>{
-    const cls=classify(p.agent_status,p.agent);
-    const label=statusLabel[p.agent_status]||statusLabel[cls]||p.agent_status||'空闲';
+    const cls=classify(p.agent_status,p.agent,boardSessionState(p.session));
+    const label=cls==='unavailable'?statusText('unavailable'):(statusText(p.agent_status)||statusText(cls)||p.agent_status||t('st.idle','空闲'));
     return `<button class="agent-chip ${esc(cls)}" data-action="openTerm" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(p.agent)}" title="${esc(p.session)} · ${esc(p.pane_id)}">
       <span class="agent-icon ${esc(p.agent)}">${AGENT_EMOJI[p.agent]||'⬜'}</span>
       <span class="chip-main"><b>${esc(p.agent)}</b><small>${esc(p.session)} · ${esc(p.pane_id)}</small></span>
@@ -2237,32 +2309,62 @@ function renderAgentStrip(d){
     </button>`;
   }).join('');
 }
+// R4(#2008):严格 allowlist——missing 短语必须直接修饰 herdr 二进制/命令。
+// 删除 R3 的 80 字符共现窗（会误判 socket/plugin/agent/cache not installed，
+// 且 Unicode 词界与 JS \\b 不一致导致测试假绿）。裸 not found/executable/
+// not installed 一律不命中。
+function isHerdrBinaryMissing(reason){
+  const r=String(reason||'');
+  return /herdr\s+executable\s+not\s+found/i.test(r)
+    || /command\s+not\s+found\s*:\s*herdr\b/i.test(r)
+    || /herdr\s*未找到/i.test(r)
+    || /herdr\s+is\s+not\s+installed/i.test(r)
+    || /not\s+installed\s*:\s*herdr\b/i.test(r)
+    || /herdr\s*未安装/i.test(r);
+}
 function renderBoard(d){
   renderAgentStrip(d);
   const emptyEl=document.getElementById('boardEmpty'),boardEl=document.getElementById('board');
   const showEmpty=html=>{emptyEl.innerHTML=html;emptyEl.style.display='block';boardEl.style.display='none'};
   if(!d.available){
-    document.getElementById('boardInfo').textContent='herdr 不可用';
+    renderBoardDegraded(d);  // available=false 时也展示真实 reason/state
+    document.getElementById('boardInfo').textContent=t('board.unavailable.short','herdr 不可用');
     ['need','work','done','idle'].forEach(c=>document.getElementById('col-'+c).innerHTML='<div class="empty">—</div>');
-    // 首次安装缺 herdr 时给出明确去向,而不是四个空列
-    showEmpty(`<div style="font-size:15px;font-weight:600">${esc(t('board.guide.noherdr','herdr 不可用'))}</div>
-      <div class="muted" style="margin:8px auto 14px;max-width:420px">${esc(t('board.guide.noherdr.body','检测不到 herdr 可执行文件。请到「设置 → 环境自检」确认缺失组件,安装后刷新。'))}</div>
-      <button class="primary" onclick="showView('settings')">${esc(t('board.guide.noherdr.btn','去设置页自检'))}</button>`);
+    document.getElementById('colWrap-unavailable').style.display='none';
+    const reason=String(d.reason||'');
+    // R3:仅 reason 明确指向 herdr 可执行文件/命令/二进制缺失时才给安装引导。
+    // 禁止裸 "not found"/"executable"/"not installed"——否则 socket/cache/
+    // session/pane/state not found 会被误报为「未安装 herdr」。
+    // 正向: herdr executable not found | command not found: herdr | herdr 未找到
+    // 反向: socket/cache/session/pane/state not found → 泛化诊断+重试
+    const missing=isHerdrBinaryMissing(reason);
+    if(missing){
+      // 首次安装缺 herdr 时给出明确去向,而不是四个空列
+      showEmpty(`<div style="font-size:15px;font-weight:600">${esc(t('board.guide.noherdr','herdr 不可用'))}</div>
+        <div class="muted" style="margin:8px auto 14px;max-width:420px">${esc(t('board.guide.noherdr.body','检测不到 herdr 可执行文件。请到「设置 → 环境自检」确认缺失组件,安装后刷新。'))}</div>
+        <button class="primary" onclick="showView('settings')">${esc(t('board.guide.noherdr.btn','去设置页自检'))}</button>`);
+    }else{
+      showEmpty(`<div style="font-size:15px;font-weight:600">${esc(t('board.unavailable.title','看板数据暂不可用'))}</div>
+        <div class="muted" style="margin:8px auto 14px;max-width:420px;overflow-wrap:anywhere">${esc(t('board.unavailable.body','状态缓存尚未就绪或连接已降级,请稍后重试;若持续存在请到「设置 → 环境自检」排查。'))}</div>
+        <button class="primary" onclick="refreshCurrent()">${esc(t('board.retry','重试'))}</button>`);
+    }
     return;
   }
   const panes=d.panes||[];
-  const cols={need:[],work:[],done:[],idle:[]};
+  const cols={need:[],work:[],done:[],idle:[],unavailable:[]};
   // 只显示真正的 coding agent(agent 字段非空),过滤掉普通 shell 终端
   const agents=panes.filter(p=>p.agent);
   for(const p of agents){
-    const cls=classify(p.agent_status,p.agent);
+    const cls=classify(p.agent_status,p.agent,boardSessionState(p.session));
     (cols[cls]||cols.idle).push(p);
   }
-  // 渲染每列
+  // 渲染每列(unavailable 列有内容才显示)
   for(const [k,list] of Object.entries(cols)){
     document.getElementById('cnt-'+k).textContent=list.length;
     document.getElementById('col-'+k).innerHTML=list.length?list.map(cardHtml).join(''):'<div class="empty" style="padding:20px">—</div>';
   }
+  document.getElementById('colWrap-unavailable').style.display=cols.unavailable.length?'':'none';
+  renderBoardDegraded(d);
   const agentN=agents.length;
   if(agentN===0){
     // 首次使用引导:直接给出一键工作区入口(它会自动建 session)
@@ -2278,9 +2380,8 @@ function renderBoard(d){
 
 function cardHtml(p){
   const ag=p.agent||'none';
-  const cls=classify(p.agent_status,p.agent);
+  const cls=classify(p.agent_status,p.agent,boardSessionState(p.session));
   const emoji=AGENT_EMOJI[ag]||'⬜';
-  const stMap={need:'需要你',work:'运行中',done:'完成',idle:'空闲',unknown:'未知'};
   return `<div class="card ${cls}" data-action="openFlow" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}" role="button" tabindex="0">
     <div class="card-top">
       <div class="agent-icon ${esc(ag)}">${emoji}</div>
@@ -2288,7 +2389,7 @@ function cardHtml(p){
       <button class="icon" style="padding:2px 6px;font-size:13px" title="接管 TUI(xterm)" data-action="openTerm" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">🖥</button>
       <span class="status-dot ${cls}"></span>
     </div>
-    <div class="card-meta">${esc(p.session)} · ${esc(p.cwd_name||p.cwd||'')} · ${stMap[cls]}</div>
+    <div class="card-meta">${esc(p.session)} · ${esc(p.cwd_name||p.cwd||'')} · ${esc(cardStatusText(cls))}</div>
   </div>`;
 }
 
@@ -2320,7 +2421,7 @@ function updateDrawerHead(){
   if(!CURRENT_TERM)return;
   document.getElementById('tdTitle').textContent=(CURRENT_TERM.agent||'终端')+' · '+CURRENT_TERM.session+' / '+CURRENT_TERM.paneId;
   const pane=(BOARD?.panes||[]).find(p=>p.pane_id===CURRENT_TERM.paneId&&p.session===CURRENT_TERM.session)||{};
-  document.getElementById('tdDot').className='status-dot '+classify(pane.agent_status,pane.agent);
+  document.getElementById('tdDot').className='status-dot '+classify(pane.agent_status,pane.agent,boardSessionState(pane.session));
 }
 function switchDrawerPane(paneId){
   if(!CURRENT_TERM||!paneId||paneId===CURRENT_TERM.paneId)return;
@@ -3319,7 +3420,7 @@ function hfRender(){
   const panes=(BOARD?.panes||[]).filter(p=>p.session===HF_SESSION&&p.agent);
   if(!panes.length){body.innerHTML='<div class="empty">'+t('hf.empty','该 session 无 agent pane')+'</div>';return}
   body.innerHTML=panes.map(p=>{
-    const cls=classify(p.agent_status,p.agent);
+    const cls=classify(p.agent_status,p.agent,boardSessionState(p.session));
     return `<div class="hf-pane" id="hf-${esc(p.pane_id)}" data-pane="${esc(p.pane_id)}">
       <button class="hf-card" data-action="hfToggle" data-pane="${esc(p.pane_id)}" title="全屏查看 ${esc(p.agent)}">
         <span class="hf-card-main">
