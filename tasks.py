@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import signal
@@ -32,6 +33,8 @@ from pathlib import Path
 from typing import Any
 
 import runtime_paths
+
+logger = logging.getLogger("agent-cockpit.tasks")
 
 # dashboard 自己的状态库,与 hub 隔离
 DATA_DIR = runtime_paths.data_root()
@@ -58,9 +61,15 @@ try:
 except ValueError:
     TASK_TIMEOUT_SECONDS = 3600.0
 
-# 只保存本进程启动的子进程；重启后的 pending/running 由 _init_db 标为失败。
+# 只保存本进程启动的子进程。重启后:running 一律 failed(无 resume/lease);
+# pending 保留并由 recover_pending_tasks 安全重入(复用 run_workdir)。
 _active_processes: dict[str, subprocess.Popen] = {}
 _cancel_requested: set[str] = set()
+# 防双启:同一 task_id 在本进程至多一个 _run_codex 入口(含恢复与正常启动竞态)
+_codex_launch_claims: set[str] = set()
+# pending 恢复入口每进程至多一次(lifespan 与测试可显式重置)
+_pending_recovery_done = False
+_pending_recovery_lock = threading.Lock()
 
 # Codex model 是单个 argv 值，只允许常见模型标识字符；禁止以 "-" 开头被
 # CLI 解释为新选项。server.StartTaskReq 与 start_task 共用同一契约。
@@ -108,27 +117,37 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
 
 
 def _mark_interrupted(con: sqlite3.Connection) -> None:
-    """重启清扫:pending/running 标记失败。每进程至多一次。"""
+    """重启清扫:仅 running 标 failed(无 resume/lease)。pending 保留供恢复。
+
+    每进程至多一次(由 _db / _init_db 协调)。
+    """
     interrupted = "[ERROR] Agent Cockpit 服务重启，任务进程已中断"
     with con:
         con.execute(
             "UPDATE tasks SET status='failed', exit_code=-1, finished_ts=?, "
             "output_tail=CASE WHEN output_tail IS NULL OR output_tail='' THEN ? "
             "ELSE output_tail || char(10) || ? END "
-            "WHERE status IN ('pending', 'running')",
+            "WHERE status = 'running'",
             (time.time(), interrupted, interrupted),
         )
 
 
 def _init_db() -> None:
     """显式初始化路径:schema+迁移+重启中断标记。import 不再触发。"""
+    global _db_swept
     runtime_paths.validate_store("tasks")  # R3-B:symlink 逃逸 fail-closed
     TASKS_DB.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(TASKS_DB)
     con.row_factory = sqlite3.Row
     try:
         _ensure_schema(con)
-        _mark_interrupted(con)
+        with _db_init_lock:
+            if not _db_swept:
+                _mark_interrupted(con)
+                _db_swept = True
+            else:
+                # 测试/显式重入:仍只清 running,不触碰 pending
+                _mark_interrupted(con)
     finally:
         con.close()
 
@@ -508,10 +527,191 @@ def cancel_task(task_id: str) -> dict[str, Any]:
     return {"id": task_id, "cancel_requested": True}
 
 
+def _fail_task_closed(task_id: str, reason: str) -> None:
+    """将单条任务标为 failed(恢复路径 fail-closed);不抛出。"""
+    msg = f"[ERROR] {reason}"
+    finished = time.time()
+    try:
+        with _db() as con:
+            con.execute(
+                "UPDATE tasks SET status='failed', exit_code=-1, finished_ts=?, "
+                "output_tail=CASE WHEN output_tail IS NULL OR output_tail='' THEN ? "
+                "ELSE output_tail || char(10) || ? END "
+                "WHERE id=? AND status='pending'",
+                (finished, msg, msg, task_id),
+            )
+            con.commit()
+    except Exception:
+        logger.exception("fail-closed update failed for task %s", task_id)
+
+
+def _parse_task_images(raw: Any) -> list[str]:
+    """解析 DB images 字段;非法 JSON 抛 ValueError。"""
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    data = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(data, list):
+        raise ValueError("images 必须是 JSON 数组")
+    return [str(x) for x in data]
+
+
+def _validate_pending_for_recovery(row: dict[str, Any]) -> tuple[str, list[str], str | None]:
+    """校验 pending 任务可安全重入。
+
+    返回 (run_workdir, images, model)。失败抛 ValueError(调用方 fail-closed)。
+    """
+    task_id = row["id"]
+    run_raw = row.get("run_workdir")
+    if not run_raw:
+        raise ValueError("缺少 run_workdir，无法复用隔离工作区")
+    run_workdir = Path(str(run_raw))
+    try:
+        _validate_worktree_path(run_workdir)
+    except ValueError as exc:
+        raise ValueError(f"run_workdir 非法: {exc}") from exc
+    if not run_workdir.is_dir():
+        raise ValueError(f"run_workdir 不存在: {run_workdir}")
+
+    source_raw = row.get("source_workdir") or row.get("workdir")
+    if not source_raw:
+        raise ValueError("缺少 source/workdir")
+    source = Path(str(source_raw)).expanduser()
+    if not source.is_dir():
+        raise ValueError(f"source 工作目录不存在: {source}")
+    try:
+        source = source.resolve()
+    except OSError as exc:
+        raise ValueError(f"source 无法 resolve: {exc}") from exc
+    _check_workdir_allowed(source)
+
+    base_sha = (row.get("base_sha") or "").strip()
+    if not base_sha:
+        raise ValueError("缺少 base_sha")
+    ok, head = _git_ok(["rev-parse", "HEAD"], run_workdir)
+    if not ok or not head:
+        raise ValueError(f"run_workdir 不是有效 git worktree: {run_workdir}")
+    if head != base_sha and not head.startswith(base_sha) and not base_sha.startswith(head):
+        # 要求 worktree HEAD 仍锚定创建时 base(允许 abbreviated 互包含)
+        raise ValueError(
+            f"base_sha 与 run_workdir HEAD 不一致: base={base_sha[:12]} head={head[:12]}"
+        )
+
+    model = row.get("model")
+    if model is not None and model != "":
+        model_s = str(model)
+        if not _MODEL_RE.fullmatch(model_s):
+            raise ValueError("model 非法，拒绝恢复")
+        model = model_s
+    else:
+        model = None
+
+    try:
+        images_raw = _parse_task_images(row.get("images"))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"images 记录损坏: {exc}") from exc
+    try:
+        images = _validate_image_paths(images_raw)
+    except ValueError as exc:
+        raise ValueError(f"images 校验失败: {exc}") from exc
+
+    prompt = row.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise ValueError("prompt 缺失")
+
+    return str(run_workdir), images, model
+
+
+def recover_pending_tasks() -> dict[str, Any]:
+    """服务启动时恢复 pending 任务(T1)。
+
+    - 复用已有 run_workdir,不新建 worktree
+    - 校验 source/base/images/model;单条失败 fail-closed,不拖垮整体
+    - 每进程只跑一次;已在本进程启动的 task 不双启
+    - 不处理 running(由 _mark_interrupted 标 failed,无 resume/lease)
+    """
+    global _pending_recovery_done
+    with _pending_recovery_lock:
+        if _pending_recovery_done:
+            return {
+                "skipped": True,
+                "recovered": 0,
+                "failed": 0,
+                "reason": "already_ran",
+            }
+        _pending_recovery_done = True
+
+    # 确保 schema + running 清扫已发生
+    try:
+        with _db() as con:
+            rows = con.execute(
+                "SELECT * FROM tasks WHERE status = 'pending' ORDER BY created_ts ASC"
+            ).fetchall()
+    except Exception:
+        logger.exception("pending recovery: list tasks failed")
+        return {"skipped": False, "recovered": 0, "failed": 0, "error": "list_failed"}
+
+    recovered = 0
+    failed = 0
+    details: list[dict[str, str]] = []
+
+    for row in rows:
+        task = dict(row)
+        task_id = task["id"]
+        try:
+            with _tasks_lock:
+                if (
+                    task_id in _active_processes
+                    or task_id in _codex_launch_claims
+                ):
+                    details.append({"id": task_id, "result": "skip_active"})
+                    continue
+            run_workdir, images, model = _validate_pending_for_recovery(task)
+            prompt = task["prompt"]
+            with _tasks_lock:
+                if (
+                    task_id in _active_processes
+                    or task_id in _codex_launch_claims
+                ):
+                    details.append({"id": task_id, "result": "skip_active"})
+                    continue
+                _output_buffers.setdefault(task_id, [])
+            thread = threading.Thread(
+                target=_run_codex,
+                args=(task_id, run_workdir, prompt, images, model),
+                daemon=True,
+                name=f"task-recover-{task_id}",
+            )
+            thread.start()
+            recovered += 1
+            details.append({"id": task_id, "result": "recovered"})
+        except Exception as exc:
+            failed += 1
+            reason = str(exc) or type(exc).__name__
+            logger.warning("pending recovery fail-closed task=%s: %s", task_id, reason)
+            _fail_task_closed(task_id, f"重启恢复失败: {reason}")
+            details.append({"id": task_id, "result": "failed", "reason": reason})
+
+    return {
+        "skipped": False,
+        "recovered": recovered,
+        "failed": failed,
+        "total": len(rows),
+        "details": details,
+    }
+
+
 def _run_codex(
     task_id: str, workdir: str, prompt: str, images: list[str], model: str | None
 ) -> None:
     """worker 线程:在隔离 worktree 中跑 codex exec,捕获输出。"""
+    # 防双启:同一 task 在本进程只允许一个 worker 入口
+    with _tasks_lock:
+        if task_id in _codex_launch_claims or task_id in _active_processes:
+            return
+        _codex_launch_claims.add(task_id)
+
     cmd = [CODEX_BIN, "exec", "-s", "workspace-write"]
     if model:
         cmd += ["-m", model]
@@ -534,11 +734,22 @@ def _run_codex(
                 del buf[: len(buf) - 2000]
 
     started = time.time()
-    with _db() as con:
-        con.execute(
-            "UPDATE tasks SET status='running', started_ts=? WHERE id=?", (started, task_id)
-        )
-        con.commit()
+    try:
+        with _db() as con:
+            cur = con.execute(
+                "UPDATE tasks SET status='running', started_ts=? "
+                "WHERE id=? AND status='pending'",
+                (started, task_id),
+            )
+            con.commit()
+            if cur.rowcount != 1:
+                # 非 pending(已结束/已 running)或并发抢占失败
+                return
+    except Exception:
+        logger.exception("task %s failed to claim pending→running", task_id)
+        with _tasks_lock:
+            _codex_launch_claims.discard(task_id)
+        return
 
     exit_code = None
     proc = None
@@ -633,23 +844,28 @@ def _run_codex(
             cancelled = task_id in _cancel_requested
             _cancel_requested.discard(task_id)
 
-    finished = time.time()
-    if timed_out.is_set():
-        exit_code, status = 124, "failed"
-    elif cancelled:
-        exit_code, status = 130, "cancelled"
-    else:
-        status = "done" if exit_code == 0 else "failed"
-    with _tasks_lock:
-        tail = "\n".join(_output_buffers.get(task_id, [])[-50:])
-    with _db() as con:
-        con.execute(
-            "UPDATE tasks SET status=?, exit_code=?, finished_ts=?, output_tail=? WHERE id=?",
-            (status, exit_code, finished, tail, task_id),
-        )
-        con.commit()
-    with _tasks_lock:
-        _output_buffers.pop(task_id, None)
+    try:
+        finished = time.time()
+        if timed_out.is_set():
+            exit_code, status = 124, "failed"
+        elif cancelled:
+            exit_code, status = 130, "cancelled"
+        else:
+            status = "done" if exit_code == 0 else "failed"
+        with _tasks_lock:
+            tail = "\n".join(_output_buffers.get(task_id, [])[-50:])
+        with _db() as con:
+            con.execute(
+                "UPDATE tasks SET status=?, exit_code=?, finished_ts=?, "
+                "output_tail=? WHERE id=?",
+                (status, exit_code, finished, tail, task_id),
+            )
+            con.commit()
+        with _tasks_lock:
+            _output_buffers.pop(task_id, None)
+    finally:
+        with _tasks_lock:
+            _codex_launch_claims.discard(task_id)
 
 
 def task_diff(task_id: str) -> dict[str, Any]:
