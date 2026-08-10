@@ -731,6 +731,12 @@ def test_narrow_takeover_owns_zoom_with_heartbeat_and_release_fallbacks():
     assert "startTermZoomLease(r.id)" not in takeover
     assert "if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败')" in takeover
     assert "await termClose()" in takeover
+    # 手机端 attach 前先拆分屏为独立 tab，避免窄屏挤成一条缝
+    assert "ensureMobileSessionUntiled" in js
+    assert "isCompactScreen()" in takeover
+    assert "ensureMobileSessionUntiled(session)" in takeover
+    assert "/layout/untile" in js
+    assert "MOBILE_UNTILED_SESSIONS" in js
     assert "/zoom-lease" in js
     assert "action=state.owned?'renew':'acquire'" in js
     assert "TERM_ZOOM_HEARTBEAT=10000" in js

@@ -3581,6 +3581,10 @@ async function doAttachHerdr(session){
   await restoreTerms();
   closeCollab();
   hfStop();
+  // 手机端：分屏先拆成独立 tab，再 attach，否则窄屏 TUI 挤成一条缝
+  if(isCompactScreen()){
+    try{await ensureMobileSessionUntiled(session)}catch(e){}
+  }
   // 切到终端 tab,创建新终端
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('view-term').classList.add('active');
@@ -3588,7 +3592,14 @@ async function doAttachHerdr(session){
   let createdId=null;
   try{
     const existing=TERMS.find(id=>TERM_SESSIONS[id]===session&&TERM_INSTANCES[id]);
-    if(existing){TERM_ID=existing;renderTermOptions();termSwitch(existing);return}
+    if(existing){
+      TERM_ID=existing;renderTermOptions();termSwitch(existing);
+      if(isCompactScreen()){
+        try{await ensureMobileSessionUntiled(session)}catch(e){}
+        startTermZoomLease(existing);
+      }
+      return;
+    }
     await ensureTermFontLoaded();
     // 服务端串行替换同 session 的全部旧 PTY，避免多个浏览器基于各自缓存
     // 同时删除旧 ID、再各自创建一份。较新的显式打开始终成为唯一实例。
@@ -3600,7 +3611,10 @@ async function doAttachHerdr(session){
     renderTermOptions();
     if(!TERM_INSTANCES[r.id])throw new Error('终端初始化失败');
     holdTermLoadingForTui(r.id);
-    queueTermInput(r.id,'herdr --session '+session+'\r','已进入 herdr/'+session+' (Ctrl-b 切 pane)');
+    const hint=isCompactScreen()
+      ?'已进入 herdr/'+session+'（手机已拆分屏为独立 tab，Ctrl-B 切换）'
+      :'已进入 herdr/'+session+' (Ctrl-b 切 pane)';
+    queueTermInput(r.id,'herdr --session '+session+'\r',hint);
   }catch(e){
     if(createdId&&TERMS.includes(createdId)){TERM_ID=createdId;await termClose()}
     toast('创建终端失败: '+e)
@@ -3840,11 +3854,47 @@ async function termInsertCollab(session,paneId,agent){
   }catch(e){toast('查询失败: '+e)}
 }
 const TERM_ZOOM_HEARTBEAT=10000;
+// session → 是否已对本 session 做过手机分屏拆开（避免心跳里反复 untile）
+const MOBILE_UNTILED_SESSIONS=new Set();
 function termZoomState(id){
   const session=TERM_SESSIONS[id];
   if(!session)return null;
   if(!TERM_ZOOM[id])TERM_ZOOM[id]={session,owned:false,timer:null,busy:false,lastReason:null,closing:false,suspended:false};
   return TERM_ZOOM[id];
+}
+/**
+ * 手机 H5：把 session 内「同一 tab 多分屏」拆成独立 tab。
+ * 分屏在窄屏几乎不可读；拆开后每个 pane 全宽，用 Ctrl-B / 切 tab 浏览。
+ * 不恢复原分屏（避免与 zoom lease 叠床架屋）；桌面可再用布局组合。
+ */
+async function ensureMobileSessionUntiled(session){
+  if(!session||!isCompactScreen())return {moved:[]};
+  if(MOBILE_UNTILED_SESSIONS.has(session))return {moved:[],skipped:true};
+  let snap;
+  try{snap=await api('/api/herdr/snapshot')}catch(e){return {moved:[],error:String(e)}}
+  const panes=(snap.panes||[]).filter(p=>p.session===session&&p.pane_id&&p.tab_id);
+  const byTab={};
+  for(const p of panes){
+    const tid=String(p.tab_id);
+    (byTab[tid]=byTab[tid]||[]).push(p);
+  }
+  const moved=[];
+  for(const [tabId,list] of Object.entries(byTab)){
+    if(list.length<=1)continue;
+    try{
+      const r=await api(`/api/herdr/session/${encodeURIComponent(session)}/layout/untile`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({tab_id:tabId}),
+      });
+      if(Array.isArray(r.moved)&&r.moved.length)moved.push(...r.moved);
+    }catch(e){/* 单 tab 失败不阻断 attach */}
+  }
+  MOBILE_UNTILED_SESSIONS.add(session);
+  if(moved.length){
+    toast(`手机端已将 ${moved.length} 个分屏 pane 拆成独立 tab，全宽查看（Ctrl-B 切换）`,4500);
+    try{BOARD=await api('/api/herdr/snapshot')}catch(e){}
+  }
+  return {moved};
 }
 async function syncTermZoomLease(id){
   const state=termZoomState(id);
@@ -3855,6 +3905,10 @@ async function syncTermZoomLease(id){
   }
   state.busy=true;
   try{
+    // 先拆分屏再 zoom：多 pane 挤在一屏时 zoom 也难读
+    if(!MOBILE_UNTILED_SESSIONS.has(state.session)){
+      try{await ensureMobileSessionUntiled(state.session)}catch(e){}
+    }
     let action=state.owned?'renew':'acquire';
     const request=()=>api(`/api/herdr/session/${encodeURIComponent(state.session)}/zoom-lease`,{
       method:'POST',headers:{'Content-Type':'application/json'},
@@ -3869,10 +3923,12 @@ async function syncTermZoomLease(id){
     }
     const becameOwner=!state.owned&&result.acquired===true;
     state.owned=result.acquired===true&&result.owned===true;
-    if(becameOwner)toast('窄屏已自动聚焦单个 pane，关闭终端后恢复分屏');
+    // 已 untile 成单 pane 时 zoom 常返回 single_pane，不必提示失败
+    if(becameOwner)toast('窄屏已聚焦当前 pane');
     if(!state.owned&&result.reason&&result.reason!==state.lastReason){
       if(result.reason==='already_zoomed')toast('该 Herdr tab 已手动放大，保持原状态');
       else if(result.reason==='leased')toast('该 Herdr session 已由另一窄屏终端接管');
+      else if(result.reason==='single_pane'){/* 拆分后正常：每个 tab 一 pane */}
     }
     state.lastReason=result.reason||null;
   }catch(e){}finally{state.busy=false}
@@ -3880,6 +3936,9 @@ async function syncTermZoomLease(id){
 async function startTermZoomLease(id){
   const state=termZoomState(id);if(!state)return;
   state.suspended=false;
+  if(isCompactScreen()){
+    try{await ensureMobileSessionUntiled(state.session)}catch(e){}
+  }
   if(!state.timer)state.timer=setInterval(()=>syncTermZoomLease(id),TERM_ZOOM_HEARTBEAT);
   await syncTermZoomLease(id);
 }
