@@ -105,7 +105,7 @@ COCKPIT_TOKEN=<随机串>      # 监听非本机地址时必须同时设置 toke
 
 ```bash
 bash doctor.sh      # herdr / 各 agent CLI / Agent Mail 数据库与 client.env 就绪检查
-bash upgrade.sh     # 一键升级：拉代码 + 装依赖 + 重启服务（Linux/macOS 通用）
+bash upgrade.sh     # 已退役(fail-closed)：一键升级停用，升级走受管人工发布
 ```
 
 `doctor.sh` 全绿（0 个错误）才算装好；出现 ✗ 时按提示逐项补齐再重跑。

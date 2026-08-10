@@ -229,7 +229,7 @@ live in `~/dashboard-data/mail-projects.json` and contain no identity tokens.
 ## Upgrade, diagnostics, and uninstall
 
 ```bash
-./upgrade.sh       # refuses local tracked changes; restarts systemd/LaunchAgent
+./upgrade.sh       # RETIRED (fail-closed): one-click updater disabled; managed release only
 ./doctor.sh        # checks Python, dependencies, Herdr, Agent Mail, auth, and service
 ./uninstall.sh     # removes only the user service; code, config, and data are preserved
 ```
@@ -255,7 +255,7 @@ agent-cockpit/
 ├── static/sw.js           Web Push service worker and deep-link handler
 ├── static/manifest.webmanifest  Root-scope installable Web App metadata
 ├── tests/                 Regression and security tests
-├── install.sh / upgrade.sh / doctor.sh / uninstall.sh
+├── install.sh / upgrade.sh (retired) / doctor.sh / uninstall.sh
 ├── agent-cockpit.service  systemd user unit template
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```

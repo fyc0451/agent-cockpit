@@ -1,51 +1,37 @@
 #!/usr/bin/env python3
-"""服务外升级执行器入口。
+"""服务外升级执行器入口（Wiki13 J0 已退役）。
 
-由 upgrade_core.spawn_worker 以 start_new_session / systemd-run / LaunchAgent oneshot 启动。
-不要在 server 进程内 import 后同步执行升级主路径。
+V1 升级引擎 fail-closed：入口一律拒绝执行，生产路径不可达。
+旧引擎代码（upgrade_core.run_job 等）保留供审计与历史测试，但不再有
+任何可执行入口能触发它。
 """
 from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Agent Cockpit out-of-process upgrade worker")
+    parser = argparse.ArgumentParser(
+        description="Agent Cockpit upgrade worker (RETIRED, fail-closed)"
+    )
     parser.add_argument("--job-id", required=True)
     parser.add_argument(
         "--install-dir",
-        default=str(Path(__file__).resolve().parent),
-        help="Cockpit 安装目录",
+        help="Cockpit 安装目录（已退役，忽略）",
     )
     parser.add_argument(
         "--rollback-only",
         action="store_true",
-        help="仅执行回滚（半成品恢复），不继续升级事务",
+        help="仅执行回滚（已退役，忽略）",
     )
-    args = parser.parse_args(argv)
-    # 保证可 import 同目录模块
-    install = Path(args.install_dir).resolve()
-    if str(install) not in sys.path:
-        sys.path.insert(0, str(install))
-    import upgrade_core
-
-    if args.rollback_only:
-        st = upgrade_core.read_state()
-        if st.get("job_id") == args.job_id:
-            st["rollback_only"] = True
-            st["rollback_requested"] = True
-            upgrade_core.write_state(st)
-
-    try:
-        return upgrade_core.run_job(args.job_id, install_dir=install)
-    finally:
-        # macOS oneshot：job 结束后 bootout 唯一 label 并删除 plist
-        try:
-            upgrade_core.cleanup_darwin_upgrade_job()
-        except Exception:
-            pass
+    parser.parse_args(argv)
+    print(
+        "upgrade_engine_retired: V1 升级引擎已退役，拒绝执行 worker。"
+        "请使用受管人工发布流程。",
+        file=sys.stderr,
+    )
+    return 1
 
 
 if __name__ == "__main__":

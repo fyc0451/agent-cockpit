@@ -347,22 +347,22 @@ def test_public_error_sanitized_no_paths(install_tree, monkeypatch):
 
 
 def test_api_maps_error_codes_without_secrets(install_tree, monkeypatch):
+    """Wiki13 J0：V1 引擎退役后 API 不再映射引擎错误码；退役契约的
+    error_code/error_message 稳定且不含 secrets/路径。"""
     import server
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret-token-xyz", raising=False)
     monkeypatch.setattr(upgrade_core, "INSTALL_DIR", install_tree["root"])
-    upgrade_core.configure_hooks(
-        skip_venv_check=lambda: True,
-        preflight_supervisor=lambda: True,
-        fetch_release=lambda tag: (_ for _ in ()).throw(ValueError("release_unavailable")),
-    )
     client = TestClient(server.app)
     headers = {"authorization": "Bearer secret-token-xyz"}
     r = client.post("/api/upgrade", headers=headers, json={"target": "0.3.0"})
-    assert r.status_code == 400
+    assert r.status_code == 200
     assert "secret-token" not in r.text
     assert "/home/" not in r.text
+    payload = r.json()
+    assert payload["reason"] == "upgrade_engine_retired"
+    assert payload["status"]["error_code"] == "upgrade_engine_retired"
     # 中文稳定文案
-    assert "Release" in r.json()["detail"] or "官方" in r.json()["detail"]
+    assert "受管人工发布" in payload["status"]["error_message"]
 
 
 def test_health_payload_requires_five_strict_greens():
@@ -463,7 +463,8 @@ def test_health_check_uses_strict_payload(install_tree, monkeypatch):
 
 
 def test_api_upgrade_requires_cockpit_token_not_public(install_tree, monkeypatch):
-    """POST /api/upgrade 非 PUBLIC：无认证与错误 token 均 401；正确 token 仍走契约。
+    """POST /api/upgrade 非 PUBLIC：无认证与错误 token 均 401；正确 token 走
+    退役契约（Wiki13 J0：V1 升级引擎 fail-closed）。
 
     证明共享 COCKPIT_TOKEN 即本机管理员鉴权，升级路由受 protect_api 保护。
     """
@@ -474,11 +475,6 @@ def test_api_upgrade_requires_cockpit_token_not_public(install_tree, monkeypatch
     assert "/api/upgrade" not in server.PUBLIC_PATHS
     assert "/api/upgrade/status" not in server.PUBLIC_PATHS
 
-    upgrade_core.configure_hooks(
-        skip_venv_check=lambda: True,
-        preflight_supervisor=lambda: True,
-        fetch_release=lambda tag: (_ for _ in ()).throw(ValueError("release_unavailable")),
-    )
     client = TestClient(server.app)
     body = {"target": "0.3.0"}
 
@@ -494,15 +490,17 @@ def test_api_upgrade_requires_cockpit_token_not_public(install_tree, monkeypatch
     assert r_bad.status_code == 401, r_bad.text
     assert "未认证" in r_bad.json().get("detail", "")
 
-    # 正确 token：仍走现有契约（此处 hook 抛 release_unavailable → 400）
+    # 正确 token：V1 升级引擎已退役，稳定 fail-closed 契约
     r_ok = client.post(
         "/api/upgrade",
         headers={"authorization": "Bearer secret-token-xyz"},
         json=body,
     )
-    assert r_ok.status_code == 400
-    detail = r_ok.json().get("detail", "")
-    assert "Release" in detail or "官方" in detail
+    assert r_ok.status_code == 200, r_ok.text
+    payload = r_ok.json()
+    assert payload["accepted"] is False
+    assert payload["reason"] == "upgrade_engine_retired"
+    assert payload["status"]["error_code"] == "upgrade_engine_retired"
 
 
 def test_preflight_supervisor_no_bus(install_tree, monkeypatch):

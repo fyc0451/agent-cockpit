@@ -32,6 +32,7 @@ import httpx
 import coordination
 import hub_client
 import herdr_client
+import release_identity
 import tasks
 import team_inbox_router
 import uploads
@@ -83,7 +84,7 @@ COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
 AUTH_COOKIE = "cockpit_session"
 TEAM_AUTH_COOKIE = "cockpit_team_human_session"
 PUBLIC_PATHS = {
-    "/", "/health", "/api/auth/status", "/api/auth/login",
+    "/", "/health", "/health/live", "/api/auth/status", "/api/auth/login",
     "/api/agent/team-reply",
 }
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -1319,24 +1320,16 @@ class UpgradeReq(BaseModel):
 
 @app.get("/api/upgrade/status")
 def api_upgrade_status():
-    """升级任务脱敏状态（需认证）。成功仅终态 succeeded。"""
-    return upgrade_core.public_status()
+    """升级状态（需认证）。V1 升级引擎已退役：固定只读 retired 契约，
+    不 reconcile、不拉起 worker、无任何状态写副作用。"""
+    return upgrade_core.retired_status()
 
 
 @app.post("/api/upgrade")
 def api_upgrade_start(req: UpgradeReq):
-    """触发服务外升级。accepted=true 只表示已排队/进行中，不代表升级成功。"""
-    try:
-        result = upgrade_core.start_upgrade(req.target)
-    except ValueError as exc:
-        code = str(exc)
-        # 仅稳定 error_code；对外文案不带路径/异常原文
-        detail = upgrade_core.ERROR_MESSAGES.get(code, upgrade_core.ERROR_MESSAGES["internal_error"])
-        raise HTTPException(400, detail) from None
-    except Exception:
-        logger.exception("upgrade start failed method=POST path=/api/upgrade")
-        raise HTTPException(500, INTERNAL_ERROR_DETAIL)
-    return result
+    """V1 升级引擎已退役（fail-closed）。稳定返回 retired 契约；
+    不调用 upgrade_core.start_upgrade，不 spawn worker。"""
+    return upgrade_core.retired_start_response()
 
 
 # ── 设置路由 ────────────────────────────────────────────────────
@@ -4819,6 +4812,22 @@ def health():
         "hub": mail_status["write_available"],
         "push": push_status["available"],
     }
+
+
+@app.get("/health/live")
+def health_live():
+    """纯读无副作用(Wiki13 J1A)：只证明目标进程响应并返回 release identity。
+    不探测 Herdr/Hub/Push/Mail，不触发 DDL/reconcile。
+    R3: ReleaseIdentityError 暴露 allowlisted reason；未知异常→unexpected，
+    任意 raw text 不得出现在 503 响应中。"""
+    try:
+        identity = release_identity.get_release_identity()
+    except release_identity.ReleaseIdentityError as exc:
+        # R3: 只暴露 allowlisted reason，不拼接任意 ValueError 正文
+        raise HTTPException(503, f"release_identity_error: {exc.reason}")
+    except Exception:
+        raise HTTPException(503, "release_identity_error: unexpected")
+    return {"status": "live", "identity": identity}
 
 
 @app.get("/health.poll")

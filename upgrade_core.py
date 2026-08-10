@@ -126,7 +126,44 @@ ERROR_MESSAGES = {
     "stale_worker": "升级进程已异常退出，可重试",
     "spawn_failed": "无法启动升级执行器",
     "internal_error": "升级内部错误",
+    # Wiki13 J0：V1 升级引擎退役（fail-closed），稳定契约错误码
+    "upgrade_engine_retired": "升级引擎已退役，请使用受管人工发布流程",
 }
+
+# Wiki13 J0：V1 升级引擎退役门。生产入口（server API 路由、worker 入口、
+# upgrade.sh）一律短路到 retired 契约；旧引擎代码保留供审计与历史测试，
+# 但生产路径不可达。
+UPGRADE_ENGINE_RETIRED = True
+
+
+def retired_status() -> dict[str, Any]:
+    """V1 升级引擎固定退役契约。纯只读：不 reconcile、不读 state、
+    不查 worker、无任何状态写副作用。"""
+    return {
+        "job_id": None,
+        "state": "retired",
+        "target_version": None,
+        "target_tag": None,
+        "from_version": None,
+        "phase": None,
+        "error_code": "upgrade_engine_retired",
+        "error_message": ERROR_MESSAGES["upgrade_engine_retired"],
+        "created_at": None,
+        "updated_at": None,
+        "finished_at": None,
+        "active": False,
+        "worker_running": False,
+    }
+
+
+def retired_start_response() -> dict[str, Any]:
+    """POST /api/upgrade 的 fail-closed 契约（不触发任何升级路径）。"""
+    return {
+        "accepted": False,
+        "reason": "upgrade_engine_retired",
+        "status": retired_status(),
+    }
+
 
 _hooks: dict[str, Callable[..., Any]] = {}
 
