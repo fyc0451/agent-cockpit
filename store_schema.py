@@ -67,6 +67,33 @@ _PUSH_COLUMNS: tuple[tuple[str, str, int, int], ...] = (
     ("payload", "TEXT", 1, 0),
     ("created_ts", "REAL", 1, 0),
 )
+_DELIVERY_OUTBOX_COLUMNS: tuple[tuple[str, str, int, int], ...] = (
+    ("job_id", "TEXT", 0, 1),
+    ("idempotency_key", "TEXT", 1, 0),
+    ("job_kind", "TEXT", 1, 0),
+    ("target", "TEXT", 1, 0),
+    ("payload_json", "TEXT", 1, 0),
+    ("payload_digest", "TEXT", 1, 0),
+    ("attempt", "INTEGER", 1, 0),
+    ("next_attempt_at", "REAL", 1, 0),
+    ("status", "TEXT", 1, 0),
+    ("created_ts", "REAL", 1, 0),
+    ("updated_ts", "REAL", 1, 0),
+    ("last_error_summary", "TEXT", 0, 0),
+)
+_DELIVERY_OUTBOX_DEFAULTS: dict[str, dict[str, str]] = {
+    "delivery_jobs": {"attempt": "0", "status": "pending"},
+}
+_DELIVERY_OUTBOX_INDEXES: dict[
+    str, frozenset[tuple[str, int, tuple[str, ...]]]
+] = {
+    "delivery_jobs": frozenset(
+        {("delivery_jobs_idempotency", 1, ("idempotency_key",))}
+    ),
+}
+_DELIVERY_OUTBOX_FKS: dict[str, frozenset[tuple[str, str, str]]] = {
+    "delivery_jobs": frozenset(),
+}
 _COORD_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
     "runs": (
         ("run_id", "TEXT", 0, 1),
@@ -1297,6 +1324,13 @@ def probe_all_stores() -> list[dict[str, Any]]:
             _COORD_DEFAULTS,
             _COORD_INDEXES,
             _COORD_FKS,
+        ),
+        (
+            "delivery_outbox",
+            {"delivery_jobs": _DELIVERY_OUTBOX_COLUMNS},
+            _DELIVERY_OUTBOX_DEFAULTS,
+            _DELIVERY_OUTBOX_INDEXES,
+            _DELIVERY_OUTBOX_FKS,
         ),
     ]
     if (os.environ.get("COCKPIT_B0_MODE") or "off").strip().lower() != "off":

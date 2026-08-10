@@ -599,3 +599,48 @@ def test_no_server_import_in_store_schema():
     src = Path(store_schema.__file__).read_text(encoding="utf-8")
     assert "import server" not in src
     assert "from server" not in src
+
+
+def test_delivery_outbox_future_column_rejected(isolated_roots):
+    path = runtime_paths.store("delivery_outbox")
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE delivery_jobs ("
+        "job_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL, "
+        "job_kind TEXT NOT NULL, target TEXT NOT NULL, "
+        "payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL, "
+        "attempt INTEGER NOT NULL DEFAULT 0, next_attempt_at REAL NOT NULL, "
+        "status TEXT NOT NULL DEFAULT 'pending', created_ts REAL NOT NULL, "
+        "updated_ts REAL NOT NULL, last_error_summary TEXT, evil_future TEXT)"
+    )
+    con.close()
+    os.chmod(path, 0o600)
+    r = store_schema._check_sqlite(
+        "delivery_outbox",
+        {"delivery_jobs": store_schema._DELIVERY_OUTBOX_COLUMNS},
+        expected_defaults=store_schema._DELIVERY_OUTBOX_DEFAULTS,
+        expected_indexes=store_schema._DELIVERY_OUTBOX_INDEXES,
+        expected_fks=store_schema._DELIVERY_OUTBOX_FKS,
+    )
+    assert r["reason"] == store_schema.REASON_FUTURE_SCHEMA
+    assert r["state"] == "future"
+
+
+def test_delivery_outbox_missing_column_mismatch(isolated_roots):
+    path = runtime_paths.store("delivery_outbox")
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE delivery_jobs ("
+        "job_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL, "
+        "job_kind TEXT NOT NULL, target TEXT NOT NULL, payload_json TEXT NOT NULL)"
+    )
+    con.close()
+    os.chmod(path, 0o600)
+    r = store_schema._check_sqlite(
+        "delivery_outbox",
+        {"delivery_jobs": store_schema._DELIVERY_OUTBOX_COLUMNS},
+        expected_defaults=store_schema._DELIVERY_OUTBOX_DEFAULTS,
+        expected_indexes=store_schema._DELIVERY_OUTBOX_INDEXES,
+        expected_fks=store_schema._DELIVERY_OUTBOX_FKS,
+    )
+    assert r["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH

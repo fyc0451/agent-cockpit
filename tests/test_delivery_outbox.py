@@ -186,3 +186,129 @@ def test_schema_contains_no_credential_columns(outbox_db: Path) -> None:
             word in name
             for word in ("token", "authorization", "password", "secret", "credential")
         )
+
+
+# ── R1.1 reviewer #2120: 必须项覆盖 ──────────────────────────────
+
+
+def test_store_file_held_at_0600(outbox_db: Path) -> None:
+    _enqueue()
+    assert (outbox_db.stat().st_mode & 0o777) == 0o600
+
+
+def test_enqueue_rejects_final_symlink_escape(
+    outbox_db: Path, tmp_path: Path,
+) -> None:
+    outbox_db.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.sqlite3"
+    outbox_db.symlink_to(outside)
+    with pytest.raises(runtime_paths.PathResolutionError) as exc:
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="t",
+            payload={"subject": "s"}, idempotency_key="sym", now=1.0,
+        )
+    assert exc.value.reason == "symlink_escape"
+    assert not outside.exists()
+
+
+def test_duplicate_key_different_kind_conflicts(outbox_db: Path) -> None:
+    _enqueue()
+    with pytest.raises(delivery_outbox.IdempotencyConflict):
+        delivery_outbox.enqueue(
+            job_kind="other_kind", target="project-a/agent-b",
+            payload={"subject": "status", "body_md": "done", "to": ["agent-b"]},
+            idempotency_key="send-1", now=200.0,
+        )
+
+
+def test_duplicate_key_different_target_conflicts(outbox_db: Path) -> None:
+    _enqueue()
+    with pytest.raises(delivery_outbox.IdempotencyConflict):
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="other/target",
+            payload={"subject": "status", "body_md": "done", "to": ["agent-b"]},
+            idempotency_key="send-1", now=200.0,
+        )
+
+
+def test_concurrent_different_content_single_winner(outbox_db: Path) -> None:
+    barrier = threading.Barrier(8)
+    results: list = []
+    errors: list = []
+
+    def submit(idx: int) -> None:
+        barrier.wait()
+        try:
+            results.append(delivery_outbox.enqueue(
+                job_kind="send_message", target="project-a/agent-b",
+                payload={"subject": f"msg-{idx}"}, idempotency_key="race",
+                now=100.0,
+            ))
+        except delivery_outbox.IdempotencyConflict as exc:
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(submit, range(8)))
+
+    assert len(results) == 1
+    assert len(errors) == 7
+    with sqlite3.connect(outbox_db) as con:
+        assert con.execute("SELECT COUNT(*) FROM delivery_jobs").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"subject": float("nan")},
+        {"subject": float("inf")},
+        {"subject": float("-inf")},
+    ],
+)
+def test_enqueue_rejects_non_finite_numbers(
+    outbox_db: Path, payload: dict,
+) -> None:
+    with pytest.raises(delivery_outbox.OutboxValidationError, match="non-finite"):
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="t", payload=payload,
+            idempotency_key="nf", now=1.0,
+        )
+    assert not outbox_db.exists()
+
+
+def test_enqueue_rejects_non_string_key(outbox_db: Path) -> None:
+    with pytest.raises(delivery_outbox.OutboxValidationError, match="non-string key"):
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="t",
+            payload={1: "v"}, idempotency_key="nk", now=1.0,
+        )
+    assert not outbox_db.exists()
+
+
+def test_enqueue_rejects_non_serializable_value(outbox_db: Path) -> None:
+    with pytest.raises(delivery_outbox.OutboxValidationError, match="non-serializable"):
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="t",
+            payload={"subject": object()}, idempotency_key="ns", now=1.0,
+        )
+    assert not outbox_db.exists()
+
+
+def test_credential_error_does_not_echo_payload(outbox_db: Path) -> None:
+    secret = "super-secret-value-123"
+    with pytest.raises(delivery_outbox.OutboxValidationError) as exc:
+        delivery_outbox.enqueue(
+            job_kind="send_message", target="t",
+            payload={"api_token": secret}, idempotency_key="c", now=1.0,
+        )
+    assert secret not in str(exc.value)
+
+
+def test_delivery_outbox_dormant_not_imported_by_server_or_hub_client() -> None:
+    root = Path(delivery_outbox.__file__).resolve().parent
+    for name in ("server.py", "hub_client.py"):
+        p = root / name
+        if not p.exists():
+            continue
+        src = p.read_text(encoding="utf-8")
+        assert "import delivery_outbox" not in src, name
+        assert "from delivery_outbox" not in src, name

@@ -72,6 +72,7 @@ STORES: dict[str, tuple[str, str, str, str, int | None]] = {
     "coordination": ("data", "coordination.sqlite3", "file", "server+tools", None),
     "leader_binding": ("data", "leader-binding.sqlite3", "file", "server", None),
     "push": ("data", "push.sqlite3", "file", "server", None),
+    "delivery_outbox": ("data", "delivery-outbox.sqlite3", "file", "server", 0o600),
     "vapid": ("data", "vapid-private.pem", "file", "server", 0o600),
     "mail_projects": ("data", "mail-projects.json", "file", "server", 0o600),
     "team_sessions": ("data", "team-sessions.json", "file", "server", 0o600),
