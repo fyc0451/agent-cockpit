@@ -21,6 +21,15 @@ from release_index import canonical_bytes, verify_release_index
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_SCRIPT = ROOT / "scripts" / "build_server_artifact.py"
+HELPER_COMMANDS = (
+    "am-register",
+    "am-retire",
+    "am-init-project",
+    "mail-send",
+    "mail-recv",
+    "mail-identity-inject",
+    "task-report",
+)
 
 
 def _build_module():
@@ -41,6 +50,22 @@ def _fake_elf() -> bytes:
     header[16:18] = (2).to_bytes(2, "little")
     header[18:20] = (62).to_bytes(2, "little")  # EM_X86_64
     return bytes(header) + b"fake-launcher"
+
+
+def test_native_server_entry_dispatches_helpers_before_app_imports() -> None:
+    source = (ROOT / "server.py").read_text(encoding="utf-8")
+    dispatch = "native_launcher.main()"
+
+    assert dispatch in source
+    assert source.index(dispatch) < source.index("from fastapi import")
+
+
+def test_pyinstaller_collects_all_dynamic_helper_modules() -> None:
+    spec = (ROOT / "packaging/agent-cockpit-server.spec").read_text(encoding="utf-8")
+
+    for command in HELPER_COMMANDS:
+        module = command.replace("-", "_")
+        assert f'"agent_mail_commands.{module}"' in spec
 
 
 def _source_tree(tmp_path: Path) -> Path:
@@ -181,6 +206,24 @@ def test_real_pyinstaller_onedir_runs_from_random_cwd(tmp_path: Path) -> None:
     cwd = tmp_path / "random-cwd"
     home.mkdir()
     cwd.mkdir()
+    helper_env = {**os.environ, "HOME": str(home)}
+    for command in HELPER_COMMANDS:
+        explicit = subprocess.run(
+            [str(launcher), "helper", command, "--help"],
+            cwd=cwd, env=helper_env, text=True, capture_output=True, check=False,
+        )
+        assert explicit.returncode == 0, explicit.stderr
+        assert "usage:" in explicit.stdout
+
+        alias = cwd / command
+        alias.symlink_to(launcher)
+        multicall = subprocess.run(
+            [str(alias), "--help"],
+            cwd=cwd, env=helper_env, text=True, capture_output=True, check=False,
+        )
+        assert multicall.returncode == 0, multicall.stderr
+        assert "usage:" in multicall.stdout
+
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]

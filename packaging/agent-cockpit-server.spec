@@ -9,6 +9,13 @@ analysis = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
+        "agent_mail_commands.am_init_project",
+        "agent_mail_commands.am_register",
+        "agent_mail_commands.am_retire",
+        "agent_mail_commands.mail_identity_inject",
+        "agent_mail_commands.mail_recv",
+        "agent_mail_commands.mail_send",
+        "agent_mail_commands.task_report",
         "uvicorn.lifespan.on",
         "uvicorn.logging",
         "uvicorn.loops.auto",

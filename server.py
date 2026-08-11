@@ -26,6 +26,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+if __name__ == "__main__":
+    import native_launcher
+
+    _helper_result = native_launcher.main()
+    if _helper_result is not None:
+        raise SystemExit(_helper_result)
+    del native_launcher, _helper_result
+
 from fastapi import Body, FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
