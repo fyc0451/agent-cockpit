@@ -1054,11 +1054,6 @@ def _wait_opencode_visible(
         time.sleep(min(0.1, remaining))
 
 
-_OPENCODE_COMMAND_LIST_MARKERS = (
-    "Switch session", "New session", "Switch model", "Open editor",
-)
-
-
 class _OpenCodePopupRegion(NamedTuple):
     title: str
     header_line: int
@@ -1079,30 +1074,54 @@ def _opencode_popup_regions(
         prefix = line[:match.start()]
         border_column = prefix.rfind("┃")
         header_indent = len(prefix[border_column + 1:]) if border_column >= 0 else len(prefix)
-        # Split panes repeat their vertical border on every row. Single-pane output
-        # has no border, so in that case the contiguous non-empty rows are the region.
+        # Real OpenCode popups start with: header, spacer, Search/filter, spacer.
+        # Split panes repeat their vertical border; single-pane output has none.
         bordered = (
             border_column >= 0
-            and index + 1 < len(lines)
-            and len(lines[index + 1]) > border_column
-            and lines[index + 1][border_column] == "┃"
+            and any(
+                len(row) > border_column and row[border_column] == "┃"
+                for row in lines[index + 1:index + 4]
+            )
         )
-        rows: list[str] = []
-        for row in lines[index + 1:index + 25]:
+
+        def content_at(row: str) -> str | None:
             if bordered:
                 if len(row) <= border_column or row[border_column] != "┃":
-                    break
-                content = row[border_column + 1:]
-            else:
-                content = row
-            if not content.strip() or header_pattern.search(content):
+                    return None
+                return row[border_column + 1:]
+            return row
+
+        layout = [content_at(row) for row in lines[index + 1:index + 4]]
+        if (
+            len(layout) != 3
+            or any(content is None for content in layout)
+            or layout[0].strip()
+            or not layout[1].strip()
+            or layout[2].strip()
+        ):
+            continue
+        query = layout[1]
+        indent = len(query) - len(query.lstrip())
+        if indent < max(0, header_indent - 2):
+            continue
+
+        rows = [query.strip()]
+        blank_run = 0
+        for row in lines[index + 4:index + 25]:
+            content = content_at(row)
+            if content is None or header_pattern.search(content):
                 break
+            if not content.strip():
+                blank_run += 1
+                if blank_run > 2:
+                    break
+                continue
             indent = len(content) - len(content.lstrip())
             if indent < max(0, header_indent - 2):
                 break
+            blank_run = 0
             rows.append(content.strip())
-        if rows:
-            regions.append(_OpenCodePopupRegion(title, index, prefix, tuple(rows)))
+        regions.append(_OpenCodePopupRegion(title, index, prefix, tuple(rows)))
     return tuple(regions)
 
 
@@ -1140,31 +1159,15 @@ def _opencode_popup_has_label(region: _OpenCodePopupRegion, label: str) -> bool:
     return any(_opencode_popup_label(row) == label for row in region.rows)
 
 
-def _opencode_theme_region_valid(region: _OpenCodePopupRegion) -> bool:
-    candidates = sum(
-        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", _opencode_popup_label(row))
-        is not None
-        for row in region.rows
-    )
-    return candidates >= 2
-
-
-def _opencode_command_region_valid(region: _OpenCodePopupRegion) -> bool:
-    labels = {_opencode_popup_label(row) for row in region.rows}
-    return len(labels.intersection(_OPENCODE_COMMAND_LIST_MARKERS)) >= 2
-
-
 def _opencode_new_popup_region(
     screen: str,
     title: str,
     before: tuple[_OpenCodePopupRegion, ...],
-    valid: Callable[[_OpenCodePopupRegion], bool],
 ) -> _OpenCodePopupRegion | None:
     old_anchors = {(region.header_line, region.header_prefix) for region in before}
     return next(
         (region for region in _opencode_popup_regions(screen, title)
-         if (region.header_line, region.header_prefix) not in old_anchors
-         and valid(region)),
+         if (region.header_line, region.header_prefix) not in old_anchors),
         None,
     )
 
@@ -1186,12 +1189,12 @@ def apply_opencode_theme_to_pane(
         opened = _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: _opencode_new_popup_region(
-                screen, "Themes", before_regions, _opencode_theme_region_valid,
+                screen, "Themes", before_regions,
             ) is not None,
             "OpenCode 主题弹层未打开",
         )
         popup = _opencode_new_popup_region(
-            opened, "Themes", before_regions, _opencode_theme_region_valid,
+            opened, "Themes", before_regions,
         )
         if popup is None:
             raise RuntimeError("OpenCode 主题弹层未打开")
@@ -1242,12 +1245,12 @@ def apply_opencode_mode_to_pane(
         opened = _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: _opencode_new_popup_region(
-                screen, "Commands", before_regions, _opencode_command_region_valid,
+                screen, "Commands", before_regions,
             ) is not None,
             "OpenCode 命令弹层未打开",
         )
         popup = _opencode_new_popup_region(
-            opened, "Commands", before_regions, _opencode_command_region_valid,
+            opened, "Commands", before_regions,
         )
         if popup is None:
             raise RuntimeError("OpenCode 命令弹层未打开")

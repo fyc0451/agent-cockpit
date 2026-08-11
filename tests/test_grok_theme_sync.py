@@ -5,56 +5,104 @@ import herdr_client
 import pytest
 
 
-def _popup(title, *rows):
+def _popup(title, query, *rows):
+    body = [
+        ("   " if row.startswith("● ") else "     ") + row
+        for row in rows
+    ]
     return "\n".join([
-        f"  ┃       {title}                  esc",
-        *(f"  ┃       {row}" for row in rows),
+        f"     {title:<41}esc",
+        "",
+        f"     {query}",
+        "",
+        *body,
     ])
 
 
+THEME_INITIAL_54 = "\n".join([
+    "     Themes                                  esc",
+    "",
+    "     Search",
+    "",
+    "     orng",
+    "     osaka-jade",
+    "   ● palenight",
+    "     rosepine",
+    "     solarized",
+])
+THEME_FILTERED_54 = "\n".join([
+    "     Themes                                  esc",
+    "",
+    "     palenight",
+    "",
+    "   ● palenight",
+])
+COMMANDS_INITIAL_54 = "\n".join([
+    "     Commands                                esc",
+    "",
+    "     Search",
+    "",
+    "     Suggested",
+    "     Switch session                     ctrl+x l",
+    "     Switch model                       ctrl+x m",
+    "",
+    "     Session",
+])
+COMMANDS_FILTERED_54 = "\n".join([
+    "     Commands                                esc",
+    "",
+    "     Switch to",
+    "",
+    "     System",
+    "     Switch to dark mode",
+    "",
+    "     Agent",
+    "     Switch model                       ctrl+x m",
+])
+
+
 def test_theme_popup_region_ignores_background_marker_changes():
-    before = _popup("Themes", "tokyonight", "nightowl") + "\nold transcript"
+    before = THEME_INITIAL_54 + "\nold transcript"
     current = before + " now mentions cobalt2"
     regions = herdr_client._opencode_popup_regions(before, "Themes")
 
     assert herdr_client._opencode_new_popup_region(
-        current, "Themes", regions, herdr_client._opencode_theme_region_valid,
+        current, "Themes", regions,
     ) is None
 
 
 def test_theme_popup_region_stays_open_when_option_changes():
-    opened = "background\n" + _popup(
-        "Themes", "orng", "osaka-jade", "● palenight", "rosepine", "solarized",
-    )
+    opened = "background\n" + THEME_INITIAL_54
     popup = herdr_client._opencode_popup_regions(opened, "Themes")[0]
-    filtered = "background\n" + _popup("Themes", "● aura")
+    filtered = "background\n" + THEME_FILTERED_54
 
-    assert herdr_client._opencode_theme_region_valid(popup) is True
     assert herdr_client._opencode_popup_header_at(filtered, popup) is True
     assert herdr_client._opencode_popup_has_label(
-        herdr_client._opencode_popup_region_at(filtered, popup), "aura",
+        herdr_client._opencode_popup_region_at(filtered, popup), "palenight",
     ) is True
 
 
 def test_command_popup_region_ignores_background_marker_changes():
-    before = _popup("Commands", "Switch session", "New session") + "\nold transcript"
+    before = COMMANDS_INITIAL_54 + "\nold transcript"
     current = before + " now mentions Open editor"
     regions = herdr_client._opencode_popup_regions(before, "Commands")
 
     assert herdr_client._opencode_new_popup_region(
-        current, "Commands", regions, herdr_client._opencode_command_region_valid,
+        current, "Commands", regions,
     ) is None
 
 
 def test_command_popup_region_stays_open_when_history_rolls_and_action_flips():
     opened = (
         "Switch to light mode\nold history\n"
-        + _popup("Commands", "Switch to dark mode")
+        + COMMANDS_FILTERED_54
     )
     popup = herdr_client._opencode_popup_regions(opened, "Commands")[0]
     flipped = (
         "new history\nanother line\n"
-        + _popup("Commands", "Switch to light mode")
+        + COMMANDS_FILTERED_54.replace(
+            "Switch to dark mode", "Switch to light mode",
+        )
     )
 
     assert herdr_client._opencode_popup_header_at(flipped, popup) is True
@@ -105,11 +153,11 @@ def test_apply_grok_web_theme_targets_only_grok(monkeypatch):
 
 def test_opencode_theme_picker_uses_shortcut_without_touching_composer(monkeypatch):
     calls = []
-    baseline = "  ┃       Themes                  esc\n       palenight\n  ┃  preserved draft"
+    baseline = "preserved draft"
     screens = iter([
         baseline,
-        baseline + "\n       Themes                  esc\n       tokyonight\n       nightowl",
-        baseline + "\n       Themes                  esc\n       palenight",
+        baseline + "\n" + THEME_INITIAL_54,
+        baseline + "\n" + THEME_FILTERED_54,
         baseline,
     ])
 
@@ -153,10 +201,7 @@ def test_opencode_theme_picker_closes_its_dialog_after_filter_failure(monkeypatc
             if read_count == 1:
                 return "preserved draft"
             if read_count == 2:
-                return (
-                    "preserved draft\n       Themes                  esc"
-                    "\n       tokyonight\n       nightowl"
-                )
+                return "preserved draft\n" + THEME_INITIAL_54
             if read_count == 3:
                 raise RuntimeError("theme filter did not render")
         return ""
@@ -178,7 +223,9 @@ def test_opencode_theme_picker_does_not_trust_background_marker_changes(
 ):
     calls = []
     read_count = 0
-    background = "Themes                  esc\ntokyonight\nnightowl\nold transcript"
+    background = _popup(
+        "Themes", "Search", "tokyonight", "nightowl",
+    ) + "\nold transcript"
 
     def fake_run(args, timeout=10):
         nonlocal read_count
@@ -205,7 +252,7 @@ def test_opencode_theme_picker_does_not_trust_background_marker_changes(
 def test_opencode_theme_picker_rejects_full_dialog_left_after_enter(monkeypatch):
     calls = []
     read_count = 0
-    full_dialog = "Themes                  esc\ntokyonight\nnightowl"
+    full_dialog = _popup("Themes", "Search", "tokyonight", "nightowl")
 
     def fake_run(args, timeout=10):
         nonlocal read_count
@@ -215,7 +262,7 @@ def test_opencode_theme_picker_rejects_full_dialog_left_after_enter(monkeypatch)
             screens = {
                 1: "preserved draft",
                 2: "preserved draft\n" + full_dialog,
-                3: "preserved draft\nThemes                  esc\n       aura",
+                3: "preserved draft\n" + _popup("Themes", "aura", "● aura"),
                 4: "preserved draft\n" + full_dialog,
             }
             if read_count in screens:
@@ -237,11 +284,13 @@ def test_opencode_theme_picker_rejects_full_dialog_left_after_enter(monkeypatch)
 
 def test_opencode_mode_picker_switches_to_requested_mode_without_touching_composer(monkeypatch):
     calls = []
-    baseline = "       Commands                esc\n       Switch to light mode\n  ┃  preserved draft"
+    baseline = "preserved draft"
     screens = iter([
         baseline,
-        baseline + "\n       Commands                esc\n       Switch session\n       New session",
-        baseline + "\n       Commands                esc\n       Switch to light mode",
+        baseline + "\n" + COMMANDS_INITIAL_54,
+        baseline + "\n" + COMMANDS_FILTERED_54.replace(
+            "Switch to dark mode", "Switch to light mode",
+        ),
         baseline,
     ])
 
@@ -277,8 +326,8 @@ def test_opencode_mode_picker_is_idempotent(monkeypatch):
     calls = []
     screens = iter([
         "preserved draft",
-        "preserved draft\n       Commands                esc\n       Switch session\n       New session",
-        "preserved draft\n       Commands                esc\n       Switch to dark mode",
+        "preserved draft\n" + COMMANDS_INITIAL_54,
+        "preserved draft\n" + COMMANDS_FILTERED_54,
         "preserved draft",
     ])
 
@@ -305,7 +354,9 @@ def test_opencode_mode_picker_does_not_trust_background_marker_changes(
 ):
     calls = []
     read_count = 0
-    background = "Commands                esc\nSwitch session\nNew session\nold transcript"
+    background = _popup(
+        "Commands", "Search", "Suggested", "Switch session", "Switch model",
+    ) + "\nold transcript"
 
     def fake_run(args, timeout=10):
         nonlocal read_count
@@ -332,7 +383,9 @@ def test_opencode_mode_picker_does_not_trust_background_marker_changes(
 def test_opencode_mode_picker_rejects_full_dialog_left_after_action(monkeypatch):
     calls = []
     read_count = 0
-    full_dialog = "Commands                esc\nSwitch session\nNew session"
+    full_dialog = _popup(
+        "Commands", "Search", "Suggested", "Switch session", "Switch model",
+    )
 
     def fake_run(args, timeout=10):
         nonlocal read_count
@@ -342,7 +395,9 @@ def test_opencode_mode_picker_rejects_full_dialog_left_after_action(monkeypatch)
             screens = {
                 1: "preserved draft",
                 2: "preserved draft\n" + full_dialog,
-                3: "preserved draft\nCommands                esc\nSwitch to dark mode",
+                3: "preserved draft\n" + _popup(
+                    "Commands", "Switch to", "System", "Switch to dark mode",
+                ),
                 4: "preserved draft\n" + full_dialog,
             }
             if read_count in screens:
@@ -374,16 +429,23 @@ def test_opencode_mode_picker_rejects_flipped_action_left_after_enter(monkeypatc
             screens = {
                 1: "preserved draft",
                 2: (
-                    "preserved draft\nCommands                esc"
-                    "\nSwitch session\nNew session"
+                    "preserved draft\n"
+                    + _popup(
+                        "Commands", "Search", "Suggested", "Switch session",
+                        "Switch model",
+                    )
                 ),
                 3: (
-                    "preserved draft\nCommands                esc"
-                    "\nSwitch to dark mode"
+                    "preserved draft\n"
+                    + _popup(
+                        "Commands", "Switch to", "System", "Switch to dark mode",
+                    )
                 ),
                 4: (
-                    "preserved draft\nCommands                esc"
-                    "\nSwitch to light mode"
+                    "preserved draft\n"
+                    + _popup(
+                        "Commands", "Switch to", "System", "Switch to light mode",
+                    )
                 ),
             }
             if read_count in screens:
