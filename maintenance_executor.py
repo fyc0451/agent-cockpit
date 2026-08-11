@@ -700,6 +700,75 @@ def _drive(
         _fail("journal_failed")
 
 
+def _execute_with_lease(
+    request: MaintenanceRequest,
+    *,
+    runner: Runner,
+    ready_probe: ReadyProbe,
+    prepare_target: PrepareTarget,
+    activate_binding: ActivateBinding,
+    read_binding: ReadBinding,
+    controller_lease: maintenance_controller.ControllerLease,
+) -> dict[str, Any]:
+    maintenance_controller.require_controller_lease(
+        plan=request.plan, lease=controller_lease
+    )
+    journal = _entry_journal(request)
+    if journal is not None and journal["stage"] == "committed":
+        target_binding = _read_binding(request, "target", read_binding)
+        return {
+            "journal": journal,
+            "evidence_path": target_binding.evidence_path,
+            "evidence_sha256": target_binding.evidence_sha256,
+        }
+    if journal is not None and journal["stage"] == "rolled_back":
+        primary = journal.get("primary_error_code")
+        if type(primary) is not str:
+            _fail("journal_failed")
+        raise _RolledBackError(primary)
+    _read_binding(request, "previous", read_binding)
+    if journal is None:
+        _read_active_binding(request, "previous", read_binding)
+        journal = _create_journal(request)
+    try:
+        journal = _drive(
+            request,
+            journal,
+            runner=runner,
+            ready_probe=ready_probe,
+            prepare_target=prepare_target,
+            activate_binding=activate_binding,
+            read_binding=read_binding,
+        )
+        target_binding = _read_binding(request, "target", read_binding)
+        return {
+            "journal": journal,
+            "evidence_path": target_binding.evidence_path,
+            "evidence_sha256": target_binding.evidence_sha256,
+        }
+    except Exception as exc:
+        if isinstance(exc, _RolledBackError):
+            raise
+        if isinstance(exc, MaintenanceExecutorError) and exc.code in {
+            "current_drift",
+            "journal_failed",
+            "service_truth_unknown",
+        }:
+            raise
+        code = exc.code if isinstance(exc, MaintenanceExecutorError) else (
+            "maintenance_failed"
+        )
+        _rollback(
+            request,
+            code,
+            runner,
+            ready_probe,
+            activate_binding,
+            read_binding,
+        )
+        _fail(code)
+
+
 def execute_prepared_generation(
     request: MaintenanceRequest,
     *,
@@ -708,6 +777,7 @@ def execute_prepared_generation(
     prepare_target: PrepareTarget | None = None,
     activate_binding: ActivateBinding | None = None,
     read_binding: ReadBinding | None = None,
+    controller_lease: maintenance_controller.ControllerLease | None = None,
 ) -> dict[str, Any]:
     """Execute one prepared generation; production wiring is intentionally absent."""
     if (
@@ -721,61 +791,26 @@ def execute_prepared_generation(
         _fail("wiring_unavailable")
     _validate(request)
     try:
-        with maintenance_controller.controller_lock(request.plan):
-            journal = _entry_journal(request)
-            if journal is not None and journal["stage"] == "committed":
-                target_binding = _read_binding(request, "target", read_binding)
-                return {
-                    "journal": journal,
-                    "evidence_path": target_binding.evidence_path,
-                    "evidence_sha256": target_binding.evidence_sha256,
-                }
-            if journal is not None and journal["stage"] == "rolled_back":
-                primary = journal.get("primary_error_code")
-                if type(primary) is not str:
-                    _fail("journal_failed")
-                raise _RolledBackError(primary)
-            _read_binding(request, "previous", read_binding)
-            if journal is None:
-                _read_active_binding(request, "previous", read_binding)
-                journal = _create_journal(request)
-            try:
-                journal = _drive(
-                    request,
-                    journal,
-                    runner=runner,
-                    ready_probe=ready_probe,
-                    prepare_target=prepare_target,
-                    activate_binding=activate_binding,
-                    read_binding=read_binding,
-                )
-                target_binding = _read_binding(request, "target", read_binding)
-                return {
-                    "journal": journal,
-                    "evidence_path": target_binding.evidence_path,
-                    "evidence_sha256": target_binding.evidence_sha256,
-                }
-            except Exception as exc:
-                if isinstance(exc, _RolledBackError):
-                    raise
-                if isinstance(exc, MaintenanceExecutorError) and exc.code in {
-                    "current_drift",
-                    "journal_failed",
-                    "service_truth_unknown",
-                }:
-                    raise
-                code = exc.code if isinstance(exc, MaintenanceExecutorError) else (
-                    "maintenance_failed"
-                )
-                _rollback(
-                    request,
-                    code,
-                    runner,
-                    ready_probe,
-                    activate_binding,
-                    read_binding,
-                )
-                _fail(code)
+        if controller_lease is not None:
+            return _execute_with_lease(
+                request,
+                runner=runner,
+                ready_probe=ready_probe,
+                prepare_target=prepare_target,
+                activate_binding=activate_binding,
+                read_binding=read_binding,
+                controller_lease=controller_lease,
+            )
+        with maintenance_controller.controller_lock(request.plan) as acquired:
+            return _execute_with_lease(
+                request,
+                runner=runner,
+                ready_probe=ready_probe,
+                prepare_target=prepare_target,
+                activate_binding=activate_binding,
+                read_binding=read_binding,
+                controller_lease=acquired,
+            )
     except maintenance_controller.ControllerPreflightError as exc:
         _fail(exc.code)
     except MaintenanceExecutorError:

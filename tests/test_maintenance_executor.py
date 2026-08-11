@@ -736,6 +736,160 @@ def test_previous_binding_precheck_precedes_fresh_journal_and_external_mutation(
     assert not any(call[0] == "activate" for call in harness.binding_calls)
 
 
+def _execute_with_lease(
+    request: executor.MaintenanceRequest,
+    harness: Harness,
+    lease: maintenance_controller.ControllerLease,
+) -> dict[str, Any]:
+    return executor.execute_prepared_generation(
+        request,
+        runner=harness.runner,
+        ready_probe=harness.ready,
+        prepare_target=harness.prepare_target,
+        activate_binding=harness.activate,
+        read_binding=harness.read,
+        controller_lease=lease,
+    )
+
+
+def test_injected_controller_lease_happy_path_never_reacquires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    harness = Harness(request)
+
+    with maintenance_controller.controller_lock(request.plan) as lease:
+        monkeypatch.setattr(
+            executor.maintenance_controller,
+            "controller_lock",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("executor must reuse the injected lease")
+            ),
+        )
+        result = _execute_with_lease(request, harness, lease)
+        maintenance_controller.require_controller_lease(
+            plan=request.plan, lease=lease
+        )
+
+    assert result["journal"]["stage"] == "committed"
+
+
+def test_injected_controller_lease_existing_rollback_never_reacquires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    _journal_at(request, "prepared", upgrade_journal.INTENT_STOP_SERVICES)
+    common = {
+        "root": request.plan.journal_root,
+        "request_id": request.request_id,
+        "target_digest": request.target.artifact_digest,
+    }
+    upgrade_journal.record_intent(
+        **common,
+        intent=upgrade_journal.INTENT_ROLLBACK,
+        primary_error_code="stop_services_failed",
+    )
+    harness = Harness(request)
+
+    with maintenance_controller.controller_lock(request.plan) as lease:
+        monkeypatch.setattr(
+            executor.maintenance_controller,
+            "controller_lock",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("executor must reuse the injected lease")
+            ),
+        )
+        with pytest.raises(executor.MaintenanceExecutorError) as exc:
+            _execute_with_lease(request, harness, lease)
+        maintenance_controller.require_controller_lease(
+            plan=request.plan, lease=lease
+        )
+
+    assert exc.value.code == "stop_services_failed"
+    assert upgrade_journal.load_journal(root=request.plan.journal_root)["stage"] == (
+        "rolled_back"
+    )
+
+
+@pytest.mark.parametrize("stage", ["committed", "rolled_back"])
+def test_injected_controller_lease_terminal_reentry_never_reacquires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    request = _request(tmp_path)
+    common = {
+        "root": request.plan.journal_root,
+        "request_id": request.request_id,
+        "target_digest": request.target.artifact_digest,
+    }
+    if stage == "committed":
+        _journal_at(request, "services_started", upgrade_journal.INTENT_COMMIT)
+        upgrade_journal.advance_journal(**common, stage="committed")
+    else:
+        _journal_at(request, "prepared", upgrade_journal.INTENT_STOP_SERVICES)
+        upgrade_journal.record_intent(
+            **common,
+            intent=upgrade_journal.INTENT_ROLLBACK,
+            primary_error_code="stop_services_failed",
+        )
+        upgrade_journal.advance_journal(**common, stage="rolled_back")
+    harness = Harness(request)
+    harness.active_role = "target" if stage == "committed" else "previous"
+
+    with maintenance_controller.controller_lock(request.plan) as lease:
+        monkeypatch.setattr(
+            executor.maintenance_controller,
+            "controller_lock",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("executor must reuse the injected lease")
+            ),
+        )
+        if stage == "committed":
+            assert _execute_with_lease(request, harness, lease)["journal"][
+                "stage"
+            ] == "committed"
+        else:
+            with pytest.raises(executor.MaintenanceExecutorError) as exc:
+                _execute_with_lease(request, harness, lease)
+            assert exc.value.code == "stop_services_failed"
+        maintenance_controller.require_controller_lease(
+            plan=request.plan, lease=lease
+        )
+
+
+def test_expired_controller_lease_fails_before_executor_side_effects(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    harness = Harness(request)
+    with maintenance_controller.controller_lock(request.plan) as lease:
+        pass
+
+    with pytest.raises(executor.MaintenanceExecutorError) as exc:
+        _execute_with_lease(request, harness, lease)
+
+    assert exc.value.code == "controller_lease_invalid"
+    assert not request.plan.journal_root.exists()
+    assert harness.calls == []
+    assert harness.binding_calls == []
+
+
+def test_wrong_plan_controller_lease_fails_before_executor_side_effects(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path / "request")
+    other = _request(tmp_path / "other", request_id="other-request")
+    harness = Harness(request)
+
+    with maintenance_controller.controller_lock(other.plan) as lease:
+        with pytest.raises(executor.MaintenanceExecutorError) as exc:
+            _execute_with_lease(request, harness, lease)
+
+    assert exc.value.code == "controller_lease_invalid"
+    assert not request.plan.journal_root.exists()
+    assert harness.calls == []
+    assert harness.binding_calls == []
+
+
 def test_mismatched_existing_journal_has_zero_runner_or_binding_calls(
     tmp_path: Path,
 ) -> None:

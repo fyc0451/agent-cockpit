@@ -778,6 +778,51 @@ def _read_active_environment_bytes(
         os.close(state_fd)
 
 
+def freeze_active_server_evidence_under_lease(
+    *,
+    controller_lease: maintenance_controller.ControllerLease,
+    plan: maintenance_controller.ControllerPlan,
+    request_id: str,
+    expected_version: str,
+    expected_generation: generation_switch.GenerationIdentity,
+    artifact_root: Path,
+) -> EvidenceBinding:
+    """Rebind active target as request previous under the caller's lease."""
+    try:
+        maintenance_controller.require_controller_lease(
+            plan=plan, lease=controller_lease
+        )
+    except maintenance_controller.ControllerPreflightError as exc:
+        _fail(exc.code)
+    _validate_plan(plan)
+    _request_hash(request_id)
+    _validate_expected(
+        plan,
+        role="target",
+        version=expected_version,
+        generation=expected_generation,
+        artifact_root=artifact_root,
+    )
+    evidence, active_before = _read_active_source(
+        plan=plan,
+        expected_version=expected_version,
+        expected_generation=expected_generation,
+        artifact_root=artifact_root,
+    )
+    frozen = publish_schema_evidence(
+        plan=plan,
+        request_id=request_id,
+        role="previous",
+        expected_version=expected_version,
+        expected_generation=expected_generation,
+        artifact_root=artifact_root,
+        evidence=evidence,
+    )
+    if _read_active_environment_bytes(plan) != active_before:
+        _fail("environment_changed")
+    return frozen
+
+
 @contextmanager
 def freeze_active_server_evidence(
     *,
@@ -797,25 +842,15 @@ def freeze_active_server_evidence(
         generation=expected_generation,
         artifact_root=artifact_root,
     )
-    with maintenance_controller.controller_lock(plan):
-        evidence, active_before = _read_active_source(
-            plan=plan,
-            expected_version=expected_version,
-            expected_generation=expected_generation,
-            artifact_root=artifact_root,
-        )
-        frozen = publish_schema_evidence(
+    with maintenance_controller.controller_lock(plan) as lease:
+        yield freeze_active_server_evidence_under_lease(
+            controller_lease=lease,
             plan=plan,
             request_id=request_id,
-            role="previous",
             expected_version=expected_version,
             expected_generation=expected_generation,
             artifact_root=artifact_root,
-            evidence=evidence,
         )
-        if _read_active_environment_bytes(plan) != active_before:
-            _fail("environment_changed")
-        yield frozen
 
 
 def activate_server_evidence(
@@ -975,6 +1010,7 @@ __all__ = [
     "activate_server_evidence",
     "environment_mapping",
     "freeze_active_server_evidence",
+    "freeze_active_server_evidence_under_lease",
     "load_schema_evidence",
     "publish_schema_evidence",
     "read_active_server_evidence",

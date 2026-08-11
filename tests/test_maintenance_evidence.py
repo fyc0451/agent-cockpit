@@ -441,6 +441,37 @@ def test_freeze_active_target_as_request_previous_holds_controller_lock(
     assert recovered == frozen
 
 
+def test_freeze_under_lease_reuses_owner_lock_without_acquiring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan(tmp_path)
+    active, artifact, identity = _publish(
+        tmp_path, plan, request_id="old-request", role="target",
+    )
+    _activate(plan, active, artifact)
+
+    with maintenance_controller.controller_lock(plan) as lease:
+        monkeypatch.setattr(
+            maintenance_evidence.maintenance_controller,
+            "controller_lock",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("under-lease freeze must not acquire")
+            ),
+        )
+        frozen = maintenance_evidence.freeze_active_server_evidence_under_lease(
+            controller_lease=lease,
+            plan=plan,
+            request_id="new-request",
+            expected_version=identity["version"],
+            expected_generation=TARGET,
+            artifact_root=artifact,
+        )
+
+    assert frozen.request_id == "new-request"
+    assert frozen.role == "previous"
+    assert frozen.path.read_bytes() == active.path.read_bytes()
+
+
 def test_freeze_rejects_non_target_active_without_new_request_binding(
     tmp_path: Path,
 ) -> None:
