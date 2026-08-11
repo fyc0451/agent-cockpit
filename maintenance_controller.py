@@ -218,7 +218,7 @@ def require_controller_lease(
     if (
         type(lease) is not ControllerLease
         or getattr(lease, "_active", False) is not True
-        or getattr(lease, "_plan", None) is not plan
+        or getattr(lease, "_plan", None) != plan
     ):
         _fail("controller_lease_invalid")
     rebound_fd = -1

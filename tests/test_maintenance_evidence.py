@@ -472,6 +472,55 @@ def test_freeze_under_lease_reuses_owner_lock_without_acquiring(
     assert frozen.path.read_bytes() == active.path.read_bytes()
 
 
+@pytest.mark.parametrize("lease_state", ["expired", "wrong_plan"])
+def test_freeze_under_invalid_lease_preserves_selector_and_evidence(
+    tmp_path: Path, lease_state: str
+) -> None:
+    plan = _plan(tmp_path / "target")
+    active, artifact, identity = _publish(
+        tmp_path, plan, request_id="old-request", role="target",
+    )
+    selector = _activate(plan, active, artifact)
+    evidence_dir = plan.state_root / maintenance_evidence.EVIDENCE_DIR_NAME
+
+    def assert_rejected(
+        lease: maintenance_controller.ControllerLease,
+    ) -> None:
+        selector_before = selector.read_bytes()
+        evidence_before = tuple(
+            sorted(
+                (path.name, path.read_bytes())
+                for path in evidence_dir.iterdir()
+            )
+        )
+        with pytest.raises(maintenance_evidence.EvidenceEnvironmentError) as exc:
+            maintenance_evidence.freeze_active_server_evidence_under_lease(
+                controller_lease=lease,
+                plan=plan,
+                request_id="new-request",
+                expected_version=identity["version"],
+                expected_generation=TARGET,
+                artifact_root=artifact,
+            )
+        assert exc.value.code == "controller_lease_invalid"
+        assert selector.read_bytes() == selector_before
+        assert tuple(
+            sorted(
+                (path.name, path.read_bytes())
+                for path in evidence_dir.iterdir()
+            )
+        ) == evidence_before
+
+    if lease_state == "expired":
+        with maintenance_controller.controller_lock(plan) as lease:
+            pass
+        assert_rejected(lease)
+    else:
+        other = _plan(tmp_path / "other")
+        with maintenance_controller.controller_lock(other) as lease:
+            assert_rejected(lease)
+
+
 def test_freeze_rejects_non_target_active_without_new_request_binding(
     tmp_path: Path,
 ) -> None:
