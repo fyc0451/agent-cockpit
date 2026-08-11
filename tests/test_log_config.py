@@ -1,4 +1,4 @@
-"""O3: log level gate, macOS rotation, launchd template paths."""
+"""O3 R2: log level, privacy, rotation, secure paths, launchd template."""
 from __future__ import annotations
 
 import logging
@@ -41,59 +41,89 @@ def test_configure_logging_linux_uses_stderr_only(tmp_path, monkeypatch):
     root = logging.getLogger()
     assert len(root.handlers) == 1
     assert isinstance(root.handlers[0], logging.StreamHandler)
-    # No app log file on Linux.
     assert not (tmp_path / "logs" / log_config.APP_LOG_NAME).exists()
-    # Uvicorn shares root — no private handlers.
     assert logging.getLogger("uvicorn").handlers == []
     assert logging.getLogger("uvicorn").propagate is True
-    assert logging.getLogger("agent-cockpit").propagate is True
+    access = logging.getLogger("uvicorn.access")
+    assert access.disabled is True
+    assert access.propagate is False
 
 
-def test_configure_logging_macos_rotating_file_and_permissions(tmp_path, monkeypatch):
+def test_configure_logging_macos_rotating_file_mode_from_creation(tmp_path, monkeypatch):
     monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
-    log_dir = tmp_path / "logs"
-    name = log_config.configure_logging(
-        platform="darwin", log_dir=log_dir, install_dir=tmp_path
-    )
+    install = tmp_path / "install"
+    install.mkdir()
+    name = log_config.configure_logging(platform="darwin", install_dir=install)
     assert name == "INFO"
+    log_dir = install / "logs"
     app_log = log_dir / log_config.APP_LOG_NAME
     assert app_log.is_file()
+    assert not app_log.is_symlink()
     assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(app_log.stat().st_mode) == 0o600
+    assert app_log.stat().st_uid == os.getuid()
     root = logging.getLogger()
     assert len(root.handlers) == 1
-    assert isinstance(root.handlers[0], logging.handlers.RotatingFileHandler)
+    from logging.handlers import RotatingFileHandler
+    assert isinstance(root.handlers[0], RotatingFileHandler)
+    assert root.handlers[0].maxBytes == log_config.MAC_MAX_BYTES
+    assert root.handlers[0].backupCount == log_config.MAC_BACKUP_COUNT
     logging.getLogger("agent-cockpit").info("hello-o3")
     for h in root.handlers:
         h.flush()
     assert "hello-o3" in app_log.read_text(encoding="utf-8")
-    # No second stream handler on macOS (launchd has separate bootstrap files).
-    assert not any(
-        type(h) is logging.StreamHandler and not isinstance(h, logging.FileHandler)
-        for h in root.handlers
-    )
 
 
-def test_configure_logging_invalid_level_fails_closed(monkeypatch):
+def test_configure_logging_invalid_level_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setenv("COCKPIT_LOG_LEVEL", "nope")
     with pytest.raises(log_config.LogConfigError):
-        log_config.configure_logging(platform="linux")
+        log_config.configure_logging(platform="linux", install_dir=tmp_path)
+
+
+def test_configure_logging_macos_requires_install_dir():
+    with pytest.raises(log_config.LogConfigError):
+        log_config.configure_logging(platform="darwin", install_dir=None)
+
+
+def test_no_cockpit_log_dir_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("COCKPIT_LOG_DIR", str(tmp_path / "evil-elsewhere"))
+    install = tmp_path / "install"
+    install.mkdir()
+    log_config.configure_logging(platform="darwin", install_dir=install)
+    assert (install / "logs" / log_config.APP_LOG_NAME).is_file()
+    assert not (tmp_path / "evil-elsewhere").exists()
+
+
+def test_rotate_launchd_only_not_app_log(tmp_path):
+    install = tmp_path / "install"
+    install.mkdir()
+    log_dir = log_config.ensure_private_log_dir(install / "logs")
+    app = log_dir / log_config.APP_LOG_NAME
+    app.write_bytes(b"A" * (log_config.LAUNCHD_MAX_BYTES + 10))
+    os.chmod(app, 0o600)
+    bootstrap = log_dir / log_config.LAUNCHD_STDERR_NAME
+    bootstrap.write_bytes(b"B" * (log_config.LAUNCHD_MAX_BYTES + 10))
+    os.chmod(bootstrap, 0o600)
+    log_config.prepare_macos_log_dir(install)
+    # launchd rotated
+    assert bootstrap.stat().st_size == 0
+    assert (log_dir / f"{log_config.LAUNCHD_STDERR_NAME}.1").exists()
+    # app log untouched by prepare (handler thresholds only)
+    assert app.stat().st_size == log_config.LAUNCHD_MAX_BYTES + 10
+    assert not (log_dir / f"{log_config.APP_LOG_NAME}.1").exists()
 
 
 def test_rotate_file_if_needed_retention(tmp_path):
     path = tmp_path / "launchd.stderr.log"
     path.write_bytes(b"x" * 100)
-    # First rollover
+    os.chmod(path, 0o600)
     log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
     assert path.read_bytes() == b""
     assert (tmp_path / "launchd.stderr.log.1").read_bytes() == b"x" * 100
-    # Fill and roll again twice
-    path.write_bytes(b"y" * 100)
-    log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
-    path.write_bytes(b"z" * 100)
-    log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
-    path.write_bytes(b"w" * 100)
-    log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
+    for payload in (b"y" * 100, b"z" * 100, b"w" * 100):
+        path.write_bytes(payload)
+        os.chmod(path, 0o600)
+        log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
     assert (tmp_path / "launchd.stderr.log.1").exists()
     assert (tmp_path / "launchd.stderr.log.2").exists()
     assert (tmp_path / "launchd.stderr.log.3").exists()
@@ -101,21 +131,66 @@ def test_rotate_file_if_needed_retention(tmp_path):
     assert path.stat().st_size == 0
 
 
-def test_prepare_macos_log_dir_special_paths(tmp_path):
-    install = tmp_path / "inst with spaces" / "dir"
-    install.mkdir(parents=True)
-    log_dir = log_config.prepare_macos_log_dir(install)
-    assert log_dir == install / "logs"
-    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
-    # Symlink log dir rejected
-    bad_root = tmp_path / "bad"
-    bad_root.mkdir()
+def test_rejects_symlink_log_dir(tmp_path):
+    install = tmp_path / "install"
+    install.mkdir()
     target = tmp_path / "elsewhere"
     target.mkdir()
-    link = bad_root / "logs"
+    link = install / "logs"
     link.symlink_to(target, target_is_directory=True)
     with pytest.raises(log_config.LogConfigError):
         log_config.ensure_private_log_dir(link)
+    with pytest.raises(log_config.LogConfigError):
+        log_config.configure_logging(platform="darwin", install_dir=install)
+
+
+def test_rejects_symlink_app_log_leaf(tmp_path):
+    install = tmp_path / "install"
+    install.mkdir()
+    log_dir = log_config.ensure_private_log_dir(install / "logs")
+    outside = tmp_path / "secret"
+    outside.write_text("leak", encoding="utf-8")
+    leaf = log_dir / log_config.APP_LOG_NAME
+    leaf.symlink_to(outside)
+    with pytest.raises(log_config.LogConfigError):
+        log_config.configure_logging(platform="darwin", install_dir=install)
+
+
+def test_rejects_parent_symlink_in_log_chain(tmp_path):
+    real = tmp_path / "real-install"
+    real.mkdir()
+    linked = tmp_path / "linked-install"
+    linked.symlink_to(real, target_is_directory=True)
+    # install_dir itself is symlink — default_log_dir uses it; chain check must fail
+    with pytest.raises(log_config.LogConfigError):
+        log_config.prepare_macos_log_dir(linked)
+
+
+def test_access_logger_does_not_record_secret_query(tmp_path, monkeypatch):
+    """Runtime counterexample: secret query must never reach the app sink."""
+    monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
+    install = tmp_path / "install"
+    install.mkdir()
+    log_config.configure_logging(platform="darwin", install_dir=install)
+    secret = "token=super-secret-token&q=1"
+    access = logging.getLogger("uvicorn.access")
+    # Even if something logs a full_path-like line, access is disabled.
+    access.info('%s - "%s" %s', "127.0.0.1", f"GET /api/x?{secret} HTTP/1.1", 200)
+    logging.getLogger("agent-cockpit").info("benign")
+    for h in logging.getLogger().handlers:
+        h.flush()
+    text = (install / "logs" / log_config.APP_LOG_NAME).read_text(encoding="utf-8")
+    assert "super-secret-token" not in text
+    assert "benign" in text
+
+
+def test_server_main_disables_access_log_and_uses_install_dir():
+    root = Path(__file__).resolve().parents[1]
+    server = (root / "server.py").read_text(encoding="utf-8")
+    assert "access_log=False" in server
+    assert "Path(__file__).resolve().parent" in server
+    assert "os.environ.get(\"COCKPIT_LOG_DIR\"" not in server
+    assert "os.environ[\"COCKPIT_LOG_DIR\"]" not in server
 
 
 def test_plist_template_uses_logs_launchd_paths():
@@ -124,24 +199,55 @@ def test_plist_template_uses_logs_launchd_paths():
     values = [node.text for node in plist.findall(".//string")]
     assert "__INSTALL_DIR__/logs/launchd.stdout.log" in values
     assert "__INSTALL_DIR__/logs/launchd.stderr.log" in values
-    assert not any(
-        v and v.endswith("agent-cockpit.stdout.log") for v in values if v
-    )
+    assert not any(v and v.endswith("agent-cockpit.stdout.log") for v in values if v)
 
 
-def test_launchd_sh_prepares_logs_and_exports_dir():
+def test_launchd_sh_no_shell_mkdir_and_sys_path():
     root = Path(__file__).resolve().parents[1]
     text = (root / "launchd.sh").read_text(encoding="utf-8")
     assert "prepare_logs" in text
-    assert "COCKPIT_LOG_DIR" in text
-    assert "prepare_macos_log_dir" in text
-    assert 'mkdir -p -m 700 "$INSTALL_DIR/logs"' in text
+    assert "sys.path.insert" in text
+    assert "mkdir -p -m 700" not in text
+    assert "COCKPIT_LOG_DIR" not in text
+    assert "sys.path.insert" in text
+    prepare_body = text.split("prepare_logs()")[1].split("case ")[0]
+    assert "|| true" not in prepare_body
+    assert "umask 077" in text
+    assert '[[ -L "$INSTALL_DIR/logs" ]]' in text
+
+
+def test_arbitrary_cwd_prepare_uses_install_sys_path(tmp_path, monkeypatch):
+    """prepare_macos_log_dir import must not depend on process cwd."""
+    install = tmp_path / "install"
+    install.mkdir()
+    # Copy minimal module so sys.path=[install] works like launchd.sh
+    import shutil
+
+    root = Path(__file__).resolve().parents[1]
+    shutil.copy(root / "log_config.py", install / "log_config.py")
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    import runpy
+    import subprocess
+    import sys
+
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(install)!r})\n"
+        "from pathlib import Path\n"
+        "from log_config import prepare_macos_log_dir\n"
+        f"prepare_macos_log_dir(Path({str(install)!r}))\n"
+    )
+    subprocess.run([sys.executable, "-c", script], check=True, cwd=tmp_path / "other")
+    assert (install / "logs").is_dir()
+    assert stat.S_IMODE((install / "logs").stat().st_mode) == 0o700
 
 
 def test_exception_handler_does_not_log_query_or_body():
-    """Regression: unhandled handler only logs method + path (no query/body)."""
     root = Path(__file__).resolve().parents[1]
     server = (root / "server.py").read_text(encoding="utf-8")
     assert 'logger.exception(\n        "unhandled exception method=%s path=%s"' in server
-    assert "request.url.query" not in server
-    assert "await request.body" not in server.split("unhandled exception")[1][:400]
+    chunk = server.split("unhandled exception")[1][:500]
+    assert "request.url.query" not in chunk
+    assert "await request.body" not in chunk

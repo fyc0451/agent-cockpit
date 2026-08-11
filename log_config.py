@@ -1,8 +1,8 @@
-"""Cockpit process logging: level gate + platform handlers (O3).
+"""Cockpit process logging: level gate + platform handlers (O3 R2).
 
 Linux keeps stderr/journald only (no unbounded app files).
-macOS writes a size-rotated private app log and keeps separate launchd
-bootstrap paths for pre-Python startup failures.
+macOS writes a size-rotated private app log under fixed <install>/logs
+and keeps separate launchd bootstrap paths for pre-Python startup failures.
 """
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ ALLOWED_LEVELS: Final[frozenset[str]] = frozenset(
     {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 )
 DEFAULT_LEVEL: Final[str] = "INFO"
-# macOS app log: size-capped, fixed retention (not unlimited).
+# macOS app log: size-capped, fixed retention (handler-owned only).
 MAC_MAX_BYTES: Final[int] = 5 * 1024 * 1024
 MAC_BACKUP_COUNT: Final[int] = 5
-# launchd bootstrap stdio (pre-Python); rotated by launchd.sh.
+# launchd bootstrap stdio (pre-Python); rotated only by prepare_macos_log_dir.
 LAUNCHD_MAX_BYTES: Final[int] = 1 * 1024 * 1024
 LAUNCHD_BACKUP_COUNT: Final[int] = 3
 APP_LOG_NAME: Final[str] = "agent-cockpit.log"
@@ -48,41 +48,155 @@ def resolve_level(name: str | None = None) -> tuple[str, int]:
     return key, getattr(logging, key)
 
 
-def default_log_dir(install_dir: str | Path | None = None) -> Path:
-    """Prefer COCKPIT_LOG_DIR, else <install>/logs, else cwd/logs."""
-    env = os.environ.get("COCKPIT_LOG_DIR")
-    if env:
-        return Path(env).expanduser()
-    if install_dir is not None:
-        return Path(install_dir) / LOG_DIR_NAME
-    return Path.cwd() / LOG_DIR_NAME
+def default_log_dir(install_dir: str | Path) -> Path:
+    """Fixed layout: <install_dir>/logs (no env override)."""
+    root = Path(install_dir)
+    if not root.is_absolute():
+        raise LogConfigError("install_dir 必须是绝对路径")
+    return root / LOG_DIR_NAME
+
+
+def _require_owner_mode(
+    path: Path, info: os.stat_result, *, expect_dir: bool, mode: int
+) -> None:
+    if expect_dir:
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise LogConfigError(f"路径不是普通目录: {path}")
+    else:
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise LogConfigError(f"路径不是普通文件: {path}")
+    if info.st_uid != os.getuid():
+        raise LogConfigError(f"路径 owner 不正确: {path}")
+    if stat.S_IMODE(info.st_mode) != mode:
+        raise LogConfigError(f"路径 mode 必须为 {oct(mode)}: {path}")
+
+
+def _reject_symlink_components(path: Path) -> None:
+    """Reject any symlink in the absolute path chain (including leaf)."""
+    path = Path(path)
+    if not path.is_absolute():
+        raise LogConfigError(f"路径必须是绝对路径: {path}")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                raise LogConfigError(f"日志路径含符号链接: {current}")
+        except OSError as exc:
+            raise LogConfigError(f"无法检查日志路径: {current}") from exc
 
 
 def ensure_private_log_dir(path: Path) -> Path:
-    """Create log directory as 0700 owned layout; reject symlinks."""
+    """Create/validate log directory as 0700 current-uid; reject symlink chain."""
     path = Path(path)
-    if path.exists() and path.is_symlink():
+    if not path.is_absolute():
+        raise LogConfigError(f"日志目录必须是绝对路径: {path}")
+    _reject_symlink_components(path if path.exists() or path.is_symlink() else path.parent)
+    # Parent chain must exist and be free of symlinks; only leaf may be created.
+    parent = path.parent
+    if not parent.is_dir() or parent.is_symlink():
+        # re-check each parent component
+        _reject_symlink_components(parent)
+        if not parent.is_dir():
+            raise LogConfigError(f"日志父目录不存在或不可用: {parent}")
+    if path.is_symlink():
         raise LogConfigError(f"日志目录不得为符号链接: {path}")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        info = path.lstat()
-    except OSError as exc:
-        raise LogConfigError(f"无法访问日志目录: {path}") from exc
-    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-        raise LogConfigError(f"日志路径不是普通目录: {path}")
-    try:
-        os.chmod(path, 0o700)
-    except OSError as exc:
-        raise LogConfigError(f"无法收紧日志目录权限: {path}") from exc
+    if path.exists():
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise LogConfigError(f"无法访问日志目录: {path}") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise LogConfigError(f"日志路径不是普通目录: {path}")
+        if info.st_uid != os.getuid():
+            raise LogConfigError(f"日志目录 owner 不正确: {path}")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            try:
+                os.chmod(path, 0o700)
+            except OSError as exc:
+                raise LogConfigError(f"无法收紧日志目录权限: {path}") from exc
+            try:
+                after = path.lstat()
+            except OSError as exc:
+                raise LogConfigError(f"无法复验日志目录权限: {path}") from exc
+            if stat.S_IMODE(after.st_mode) != 0o700 or after.st_uid != os.getuid():
+                raise LogConfigError(f"日志目录权限复验失败: {path}")
+    else:
+        try:
+            os.mkdir(path, 0o700)
+        except OSError as exc:
+            raise LogConfigError(f"无法创建日志目录: {path}") from exc
+        try:
+            os.chmod(path, 0o700)
+            info = path.lstat()
+        except OSError as exc:
+            raise LogConfigError(f"无法收紧新建日志目录权限: {path}") from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise LogConfigError(f"新建日志目录不安全: {path}")
+    _reject_symlink_components(path)
     return path
 
 
-def _chmod_file(path: Path, mode: int = 0o600) -> None:
+def _chmod_file_strict(path: Path, mode: int = 0o600) -> None:
     try:
-        if path.is_file() and not path.is_symlink():
+        info = path.lstat()
+    except OSError as exc:
+        raise LogConfigError(f"无法访问日志文件: {path}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise LogConfigError(f"日志文件不是普通文件: {path}")
+    if info.st_uid != os.getuid():
+        raise LogConfigError(f"日志文件 owner 不正确: {path}")
+    if stat.S_IMODE(info.st_mode) != mode:
+        try:
             os.chmod(path, mode)
-    except OSError:
-        pass
+        except OSError as exc:
+            raise LogConfigError(f"无法收紧日志文件权限: {path}") from exc
+        try:
+            after = path.lstat()
+        except OSError as exc:
+            raise LogConfigError(f"无法复验日志文件权限: {path}") from exc
+        if stat.S_IMODE(after.st_mode) != mode or after.st_uid != os.getuid():
+            raise LogConfigError(f"日志文件权限复验失败: {path}")
+
+
+def _prepare_app_log_file(path: Path) -> None:
+    """Ensure app log is a regular 0600 file owned by current uid (no symlink)."""
+    path = Path(path)
+    _reject_symlink_components(path if path.exists() or path.is_symlink() else path.parent)
+    if path.is_symlink():
+        raise LogConfigError(f"应用日志不得为符号链接: {path}")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_APPEND
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = -1
+    try:
+        fd = os.open(path, flags, 0o600)
+        os.fchmod(fd, 0o600)
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise LogConfigError(f"应用日志文件不安全: {path}")
+    except OSError as exc:
+        raise LogConfigError(f"无法安全打开应用日志: {path}") from exc
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    _chmod_file_strict(path, 0o600)
 
 
 def rotate_file_if_needed(
@@ -91,18 +205,20 @@ def rotate_file_if_needed(
     max_bytes: int = LAUNCHD_MAX_BYTES,
     backup_count: int = LAUNCHD_BACKUP_COUNT,
 ) -> None:
-    """Simple size rotation for launchd bootstrap logs (pre-Python)."""
+    """Simple size rotation for launchd bootstrap logs (pre-Python) only."""
     path = Path(path)
     if backup_count < 1 or max_bytes < 1:
         raise LogConfigError("轮转参数无效")
-    if not path.is_file() or path.is_symlink():
+    if path.is_symlink():
+        raise LogConfigError(f"bootstrap 日志不得为符号链接: {path}")
+    if not path.is_file():
         return
     try:
         size = path.stat().st_size
-    except OSError:
-        return
+    except OSError as exc:
+        raise LogConfigError(f"无法读取 bootstrap 日志大小: {path}") from exc
     if size < max_bytes:
-        _chmod_file(path)
+        _chmod_file_strict(path, 0o600)
         return
     try:
         oldest = Path(f"{path}.{backup_count}")
@@ -111,21 +227,25 @@ def rotate_file_if_needed(
         for index in range(backup_count - 1, 0, -1):
             src = Path(f"{path}.{index}")
             dst = Path(f"{path}.{index + 1}")
-            if src.is_file() and not src.is_symlink():
+            if src.is_symlink():
+                raise LogConfigError(f"bootstrap 轮转副本不得为符号链接: {src}")
+            if src.is_file():
                 src.replace(dst)
-                _chmod_file(dst)
+                _chmod_file_strict(dst, 0o600)
         path.replace(Path(f"{path}.1"))
-        _chmod_file(Path(f"{path}.1"))
+        _chmod_file_strict(Path(f"{path}.1"), 0o600)
         path.write_bytes(b"")
-        _chmod_file(path)
-    except OSError:
-        pass
+        _chmod_file_strict(path, 0o600)
+    except LogConfigError:
+        raise
+    except OSError as exc:
+        raise LogConfigError(f"bootstrap 日志轮转失败: {path}") from exc
 
 
 def prepare_macos_log_dir(install_dir: str | Path) -> Path:
-    """Ensure macOS log dir + rotate launchd bootstrap files if oversized."""
+    """Ensure fixed <install>/logs and rotate launchd bootstrap files only."""
     log_dir = ensure_private_log_dir(default_log_dir(install_dir))
-    for name in (LAUNCHD_STDOUT_NAME, LAUNCHD_STDERR_NAME, APP_LOG_NAME):
+    for name in (LAUNCHD_STDOUT_NAME, LAUNCHD_STDERR_NAME):
         rotate_file_if_needed(log_dir / name)
     return log_dir
 
@@ -138,42 +258,67 @@ def _build_formatter() -> logging.Formatter:
     )
 
 
+def _close_handlers(logger: logging.Logger) -> None:
+    for handler in list(logger.handlers):
+        try:
+            handler.close()
+        except Exception:
+            pass
+        try:
+            logger.removeHandler(handler)
+        except Exception:
+            pass
+
+
 def configure_logging(
     *,
     level_name: str | None = None,
     platform: str | None = None,
-    log_dir: str | Path | None = None,
     install_dir: str | Path | None = None,
 ) -> str:
     """Configure root logging once. Returns resolved level name.
 
     - Linux/other: stderr only (journald captures unit stderr).
-    - macOS: rotating file under private logs/ + no extra stream handler
-      (launchd still has separate bootstrap stdio files).
-    Uvicorn loggers propagate to root only (no duplicate handlers).
+    - macOS: rotating file under fixed <install>/logs (requires install_dir).
+    - uvicorn.access is disabled (no full_path/query in app logs).
     """
     name, level = resolve_level(
         level_name if level_name is not None else os.environ.get("COCKPIT_LOG_LEVEL")
     )
     plat = platform if platform is not None else sys.platform
     root = logging.getLogger()
-    root.handlers.clear()
+    _close_handlers(root)
     root.setLevel(level)
     formatter = _build_formatter()
 
     if plat == "darwin":
-        directory = ensure_private_log_dir(
-            Path(log_dir) if log_dir is not None else default_log_dir(install_dir)
-        )
+        if install_dir is None:
+            raise LogConfigError("macOS 日志需要绝对 install_dir")
+        directory = ensure_private_log_dir(default_log_dir(install_dir))
         app_path = directory / APP_LOG_NAME
-        handler: logging.Handler = RotatingFileHandler(
-            app_path,
-            maxBytes=MAC_MAX_BYTES,
-            backupCount=MAC_BACKUP_COUNT,
-            encoding="utf-8",
-            delay=False,
-        )
-        _chmod_file(app_path)
+        try:
+            _prepare_app_log_file(app_path)
+            handler = RotatingFileHandler(
+                app_path,
+                maxBytes=MAC_MAX_BYTES,
+                backupCount=MAC_BACKUP_COUNT,
+                encoding="utf-8",
+                delay=False,
+            )
+        except LogConfigError:
+            raise
+        except OSError as exc:
+            raise LogConfigError(f"无法创建轮转日志 handler: {app_path}") from exc
+        try:
+            if app_path.is_symlink() or not app_path.is_file():
+                raise LogConfigError(f"应用日志在 handler 打开后变得不安全: {app_path}")
+            _chmod_file_strict(app_path, 0o600)
+        except LogConfigError:
+            try:
+                handler.close()
+            except Exception:
+                pass
+            raise
     else:
         handler = logging.StreamHandler(sys.stderr)
 
@@ -181,20 +326,26 @@ def configure_logging(
     handler.setFormatter(formatter)
     root.addHandler(handler)
 
-    # Single sink: clear third-party handlers and propagate to root.
+    # App loggers: single sink via root.
     for logger_name in (
         "uvicorn",
         "uvicorn.error",
-        "uvicorn.access",
         "agent-cockpit",
         "agent-cockpit.tasks",
         "agent-cockpit.web-push",
         "agent-cockpit.upgrade",
     ):
         lg = logging.getLogger(logger_name)
-        lg.handlers.clear()
+        _close_handlers(lg)
         lg.setLevel(level)
         lg.propagate = True
+
+    # F1: never emit access lines (full_path includes query).
+    access = logging.getLogger("uvicorn.access")
+    _close_handlers(access)
+    access.propagate = False
+    access.disabled = True
+    access.setLevel(logging.CRITICAL)
 
     return name
 

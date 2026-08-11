@@ -82,25 +82,40 @@ uninstall_service() {
 }
 
 prepare_logs() {
-  # Private log dir for app + launchd bootstrap diagnostics (O3).
-  mkdir -p -m 700 "$INSTALL_DIR/logs"
-  chmod 700 "$INSTALL_DIR/logs" 2>/dev/null || true
-  export COCKPIT_LOG_DIR="${COCKPIT_LOG_DIR:-$INSTALL_DIR/logs}"
+  # umask 077 so bootstrap stdio files start private (plist has no Umask key).
+  umask 077
+  if [[ -L "$INSTALL_DIR/logs" ]]; then
+    echo "日志目录不得为符号链接: $INSTALL_DIR/logs" >&2
+    exit 1
+  fi
   if [[ -x "$INSTALL_DIR/.venv/bin/python" ]]; then
-    "$INSTALL_DIR/.venv/bin/python" - "$INSTALL_DIR" <<'PY' || true
+    # Prefer Python: full parent-chain checks + launchd bootstrap rotation.
+    # INSTALL_DIR is injected on sys.path so cwd does not matter (F4).
+    "$INSTALL_DIR/.venv/bin/python" - "$INSTALL_DIR" <<'PY'
 import sys
 from pathlib import Path
 
+install = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(install))
+from log_config import LogConfigError, prepare_macos_log_dir
+
 try:
-    from log_config import prepare_macos_log_dir
-except Exception:
-    sys.exit(0)
-try:
-    prepare_macos_log_dir(Path(sys.argv[1]))
+    prepare_macos_log_dir(install)
+except LogConfigError as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(2) from exc
 except Exception as exc:
-    print(f"prepare_macos_log_dir: {exc}", file=sys.stderr)
-    sys.exit(0)
+    print(f"prepare_macos_log_dir failed: {exc}", file=sys.stderr)
+    raise SystemExit(2) from exc
 PY
+  else
+    # Pre-venv / fixture: only create if absent (never mkdir through a symlink).
+    if [[ ! -e "$INSTALL_DIR/logs" ]]; then
+      mkdir -m 700 "$INSTALL_DIR/logs" || exit 1
+    elif [[ ! -d "$INSTALL_DIR/logs" ]]; then
+      echo "日志路径不是目录: $INSTALL_DIR/logs" >&2
+      exit 1
+    fi
   fi
 }
 

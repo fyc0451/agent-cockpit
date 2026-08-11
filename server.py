@@ -6785,19 +6785,23 @@ if __name__ == "__main__":
 
     from log_config import LogConfigError, configure_logging
 
+    # Fixed install root = package directory (not process cwd).
+    _install_dir = Path(__file__).resolve().parent
     try:
-        level_name = configure_logging()
+        level_name = configure_logging(install_dir=_install_dir)
     except LogConfigError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from exc
     host = os.environ.get("COCKPIT_HOST", "127.0.0.1")
     port = int(os.environ.get("COCKPIT_PORT", "8790"))
     _validate_bind(host)
-    # log_config=None: use process logging (no second uvicorn config / no duplicates).
+    # log_config=None avoids a second uvicorn config; access_log=False blocks
+    # full_path/query leakage from uvicorn.access (see O3 R1 F1).
     uvicorn.run(
         app,
         host=host,
         port=port,
         log_level=level_name.lower(),
         log_config=None,
+        access_log=False,
     )
