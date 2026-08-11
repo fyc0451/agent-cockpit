@@ -157,6 +157,14 @@ jobs:
           assert asset["sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
           PY
 
+      - name: Reverify remote tag before signing
+        run: |
+          set -euo pipefail
+          remote_tag="refs/tags/${GITHUB_REF_NAME}"
+          verification_ref="refs/release-verification/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git fetch --no-tags --force origin "${remote_tag}:${verification_ref}"
+          test "$(git rev-parse "${verification_ref}^{commit}")" = "${GITHUB_SHA}"
+
       - name: Sign canonical release index
         env:
           SERVER_RELEASE_ED25519_PRIVATE_KEY_B64: ${{ secrets.SERVER_RELEASE_ED25519_PRIVATE_KEY_B64 }}

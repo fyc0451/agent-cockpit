@@ -64,6 +64,25 @@ def test_release_workflow_signs_only_in_protected_environment() -> None:
     assert "SERVER_RELEASE_ED25519_PRIVATE_KEY_B64" not in build
 
 
+def test_publish_reverifies_remote_tag_after_environment_gate_before_signing() -> None:
+    publish = _workflow().split("  publish:\n", 1)[1]
+
+    verify_step = publish.index("Reverify remote tag before signing")
+    fetch = publish.index(
+        'remote_tag="refs/tags/${GITHUB_REF_NAME}"',
+        verify_step,
+    )
+    fetch_exact = publish.index(
+        'git fetch --no-tags --force origin "${remote_tag}:${verification_ref}"',
+        fetch,
+    )
+    dereference = publish.index('^{commit}', fetch_exact)
+    compare = publish.index('= "${GITHUB_SHA}"', dereference)
+    sign = publish.index("Sign canonical release index", compare)
+    create = publish.index("gh release create", sign)
+    assert verify_step < fetch < fetch_exact < dereference < compare < sign < create
+
+
 def test_release_workflow_keeps_draft_private_until_remote_assets_verify() -> None:
     raw = _workflow()
     publish = raw.split("  publish:\n", 1)[1]
