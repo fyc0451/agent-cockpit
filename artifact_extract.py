@@ -5,6 +5,7 @@ import os
 import re
 import stat
 import tarfile
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,11 @@ from release_index import MAX_ASSET_BYTES, MAX_ASSET_NAME_BYTES
 MAX_MEMBERS = 10_000
 MAX_MEMBER_BYTES = 8 * 1024 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 16 * 1024 * 1024 * 1024
+MAX_MEMBER_PATH_BYTES = 4096
+MAX_MEMBER_COMPONENT_BYTES = 255
+MAX_MEMBER_DEPTH = 128
+MAX_ARCHIVE_METADATA_BYTES = 16 * 1024 * 1024
+MAX_DESTINATION_NAME_BYTES = 255
 
 _ASSET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -45,6 +51,50 @@ class ArtifactExtractError(ValueError):
 
 def _reject(code: str) -> None:
     raise ArtifactExtractError(code)
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """Reject extension-header bombs before tarfile allocates their payload."""
+
+    def _charge_metadata(self, archive: tarfile.TarFile, amount: int) -> None:
+        used = getattr(archive, "_artifact_metadata_bytes", 0)
+        if amount > MAX_ARCHIVE_METADATA_BYTES - used:
+            _reject("archive_limit_exceeded")
+        archive._artifact_metadata_bytes = used + amount
+
+    def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        self._charge_metadata(archive, tarfile.BLOCKSIZE)
+        if self.type == tarfile.GNUTYPE_SPARSE:
+            _reject("archive_invalid")
+        if self.type in (
+            tarfile.GNUTYPE_LONGNAME,
+            tarfile.GNUTYPE_LONGLINK,
+            tarfile.XHDTYPE,
+            tarfile.XGLTYPE,
+            tarfile.SOLARIS_XHDTYPE,
+        ):
+            if type(self.size) is not int or self.size < 0:
+                _reject("archive_invalid")
+            self._charge_metadata(archive, self._block(self.size))
+        return super()._proc_member(archive)
+
+    def _proc_pax(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        # PAX sparse formats can consume additional map data before yielding a
+        # TarInfo. Inspect the already-bounded header first and reject them.
+        position = archive.fileobj.tell()
+        payload = archive.fileobj.read(self._block(self.size))
+        archive.fileobj.seek(position)
+        if b"GNU.sparse" in payload:
+            _reject("archive_invalid")
+        return super()._proc_pax(archive)
+
+
+class _PathNode:
+    __slots__ = ("children", "kind")
+
+    def __init__(self) -> None:
+        self.children: dict[str, _PathNode] = {}
+        self.kind: str | None = None
 
 
 def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
@@ -259,20 +309,29 @@ def _member_path(member: tarfile.TarInfo) -> tuple[str, ...]:
     parts = name.split("/")
     if not name or any(not part or part in {".", ".."} for part in parts):
         _reject("archive_invalid")
+    try:
+        encoded_name = name.encode("utf-8")
+        encoded_parts = [part.encode("utf-8") for part in parts]
+    except UnicodeEncodeError:
+        _reject("archive_invalid")
+    if (
+        len(encoded_name) > MAX_MEMBER_PATH_BYTES
+        or len(parts) > MAX_MEMBER_DEPTH
+        or any(len(part) > MAX_MEMBER_COMPONENT_BYTES for part in encoded_parts)
+    ):
+        _reject("archive_limit_exceeded")
     return tuple(parts)
 
 
 def _scan_members(archive: tarfile.TarFile) -> list[tuple[tarfile.TarInfo, tuple[str, ...]]]:
     scanned: list[tuple[tarfile.TarInfo, tuple[str, ...]]] = []
-    kinds: dict[tuple[str, ...], str] = {}
+    paths = _PathNode()
     total = 0
     try:
         for member in archive:
             if len(scanned) >= MAX_MEMBERS:
                 _reject("archive_limit_exceeded")
             parts = _member_path(member)
-            if parts in kinds:
-                _reject("archive_invalid")
             if member.issparse() or not (member.isdir() or member.isreg()):
                 _reject("archive_invalid")
             if type(member.size) is not int or member.size < 0:
@@ -288,14 +347,14 @@ def _scan_members(archive: tarfile.TarFile) -> list[tuple[tarfile.TarInfo, tuple
                 if total > MAX_EXTRACTED_BYTES:
                     _reject("archive_limit_exceeded")
                 kind = "file"
-            for index in range(1, len(parts)):
-                if kinds.get(parts[:index]) == "file":
+            node = paths
+            for component in parts:
+                if node.kind == "file":
                     _reject("archive_invalid")
-            if kind == "file" and any(
-                existing[: len(parts)] == parts for existing in kinds
-            ):
+                node = node.children.setdefault(component, _PathNode())
+            if node.kind is not None or (kind == "file" and node.children):
                 _reject("archive_invalid")
-            kinds[parts] = kind
+            node.kind = kind
             scanned.append((member, parts))
     except ArtifactExtractError:
         raise
@@ -385,28 +444,39 @@ def _write_member_file(
             or opened.st_nlink != 1
         ):
             _reject("destination_unsafe")
-        source = archive.extractfile(member)
+        try:
+            source = archive.extractfile(member)
+        except (tarfile.TarError, EOFError, OSError, ValueError, zlib.error):
+            _reject("archive_invalid")
         if source is None:
             _reject("archive_invalid")
         total = 0
         try:
             while total < member.size:
-                chunk = source.read(min(1024 * 1024, member.size - total))
+                try:
+                    chunk = source.read(min(1024 * 1024, member.size - total))
+                except (tarfile.TarError, EOFError, OSError, ValueError, zlib.error):
+                    _reject("archive_invalid")
                 if not chunk:
                     _reject("archive_invalid")
                 total += len(chunk)
                 view = memoryview(chunk)
                 while view:
-                    written = os.write(output_fd, view)
+                    try:
+                        written = os.write(output_fd, view)
+                    except OSError:
+                        _reject("extract_failed")
                     if written <= 0:
                         _reject("extract_failed")
                     view = view[written:]
-            if source.read(1):
+            try:
+                trailing = source.read(1)
+            except (tarfile.TarError, EOFError, OSError, ValueError, zlib.error):
+                _reject("archive_invalid")
+            if trailing:
                 _reject("archive_invalid")
         except ArtifactExtractError:
             raise
-        except (tarfile.TarError, EOFError, OSError, ValueError):
-            _reject("archive_invalid")
         finally:
             source.close()
         os.fsync(output_fd)
@@ -540,6 +610,8 @@ def extract_verified_tarball(
 ) -> Path:
     """Verify one cached gzip tarball and extract it into a new staging directory.
 
+    Extracted files are deliberately non-executable (0600). Server artifacts
+    must use an explicit interpreter argv rather than relying on tar mode bits.
     On failure, a directory created by this call may remain as forensic evidence.
     Callers must never promote a failed destination and must not recursively clean it.
     """
@@ -560,6 +632,18 @@ def extract_verified_tarball(
             or not destination.is_absolute()
             or ".." in destination.parts
             or not destination.name
+        ):
+            _reject("destination_invalid")
+        try:
+            destination_name = destination.name.encode("utf-8")
+        except UnicodeEncodeError:
+            _reject("destination_invalid")
+        if (
+            len(destination_name) > MAX_DESTINATION_NAME_BYTES
+            or destination.name in {".", ".."}
+            or "/" in destination.name
+            or "\\" in destination.name
+            or "\x00" in destination.name
         ):
             _reject("destination_invalid")
         destination_parent_fd, destination_parent_info = _open_directory_chain(
@@ -591,7 +675,11 @@ def extract_verified_tarball(
         stream = os.fdopen(artifact_fd, "rb", closefd=False)
         try:
             try:
-                archive = tarfile.open(fileobj=stream, mode="r:gz")
+                archive = tarfile.open(
+                    fileobj=stream, mode="r:gz", tarinfo=_BoundedTarInfo
+                )
+            except ArtifactExtractError:
+                raise
             except (tarfile.TarError, EOFError, OSError, ValueError):
                 _reject("archive_invalid")
             with archive:
@@ -667,7 +755,12 @@ def extract_verified_tarball(
 __all__ = [
     "ArtifactExtractError",
     "MAX_EXTRACTED_BYTES",
+    "MAX_ARCHIVE_METADATA_BYTES",
+    "MAX_DESTINATION_NAME_BYTES",
     "MAX_MEMBERS",
     "MAX_MEMBER_BYTES",
+    "MAX_MEMBER_COMPONENT_BYTES",
+    "MAX_MEMBER_DEPTH",
+    "MAX_MEMBER_PATH_BYTES",
     "extract_verified_tarball",
 ]

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import errno
+import gzip
 import hashlib
 import io
 import os
 import stat
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -27,6 +31,13 @@ def _tar(entries: list[tuple[str, bytes | None, bytes | None]]) -> bytes:
                 info.size = len(payload)
                 archive.addfile(info, io.BytesIO(payload))
     return output.getvalue()
+
+
+def _declared_extension_header(member_type: bytes, size: int) -> bytes:
+    info = tarfile.TarInfo("metadata")
+    info.type = member_type
+    info.size = size
+    return gzip.compress(info.tobuf() + (b"\0" * tarfile.RECORDSIZE))
 
 
 def _ready(
@@ -109,6 +120,34 @@ def test_rejects_nul_member_name() -> None:
 
 
 @pytest.mark.parametrize(
+    ("name", "code"),
+    [
+        ("a" * 256, "archive_limit_exceeded"),
+        ("é" * 128, "archive_limit_exceeded"),
+        ("a/" * 128 + "a", "archive_limit_exceeded"),
+        ("a" * 250 + "/" + "b" * 250, "archive_limit_exceeded"),
+    ],
+)
+def test_rejects_member_component_depth_and_total_utf8_byte_limits(
+    monkeypatch: pytest.MonkeyPatch, name: str, code: str
+) -> None:
+    monkeypatch.setattr(artifact_extract, "MAX_MEMBER_PATH_BYTES", 400)
+    info = tarfile.TarInfo(name)
+
+    _assert_code(code, lambda: artifact_extract._member_path(info))
+
+
+def test_accepts_member_path_exactly_at_all_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(artifact_extract, "MAX_MEMBER_PATH_BYTES", 6)
+    monkeypatch.setattr(artifact_extract, "MAX_MEMBER_COMPONENT_BYTES", 3)
+    monkeypatch.setattr(artifact_extract, "MAX_MEMBER_DEPTH", 2)
+
+    assert artifact_extract._member_path(tarfile.TarInfo("abc/é")) == ("abc", "é")
+
+
+@pytest.mark.parametrize(
     "member_type",
     [
         tarfile.SYMTYPE,
@@ -162,6 +201,73 @@ def test_rejects_member_count_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         "archive_limit_exceeded",
         lambda: extract_verified_tarball(artifact, asset, destination),
     )
+
+
+def test_prefix_index_rejects_file_directory_collisions_in_either_order(
+    tmp_path: Path,
+) -> None:
+    for entries in (
+        [("app", b"file", None), ("app/child", b"child", None)],
+        [("app/child", b"child", None), ("app", b"file", None)],
+    ):
+        case = tmp_path / str(len(list(tmp_path.iterdir())))
+        case.mkdir(mode=0o700)
+        artifact, asset, destination = _ready(case, _tar(entries))
+        _assert_code(
+            "archive_invalid",
+            lambda: extract_verified_tarball(artifact, asset, destination),
+        )
+        assert not destination.exists()
+
+
+def test_prefix_index_does_not_scan_all_prior_flat_members() -> None:
+    slice_count = 0
+
+    class TrackingTuple(tuple[str, ...]):
+        def __getitem__(self, key: object) -> object:
+            nonlocal slice_count
+            if isinstance(key, slice):
+                slice_count += 1
+            return super().__getitem__(key)  # type: ignore[index]
+
+    class FakeMember:
+        size = 0
+
+        def issparse(self) -> bool:
+            return False
+
+        def isdir(self) -> bool:
+            return False
+
+        def isreg(self) -> bool:
+            return True
+
+    members = [FakeMember() for _ in range(artifact_extract.MAX_MEMBERS)]
+    paths = iter(TrackingTuple((f"file-{index}",)) for index in range(len(members)))
+    original = artifact_extract._member_path
+    artifact_extract._member_path = lambda _member: next(paths)  # type: ignore[assignment]
+    try:
+        scanned = artifact_extract._scan_members(iter(members))  # type: ignore[arg-type]
+    finally:
+        artifact_extract._member_path = original
+
+    assert len(scanned) == artifact_extract.MAX_MEMBERS
+    assert slice_count == 0
+
+
+@pytest.mark.parametrize("member_type", [tarfile.XHDTYPE, tarfile.GNUTYPE_LONGNAME])
+def test_rejects_declared_pax_and_gnu_metadata_bombs_before_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member_type: bytes
+) -> None:
+    monkeypatch.setattr(artifact_extract, "MAX_ARCHIVE_METADATA_BYTES", 1024)
+    payload = _declared_extension_header(member_type, 1025)
+    artifact, asset, destination = _ready(tmp_path, payload)
+
+    _assert_code(
+        "archive_limit_exceeded",
+        lambda: extract_verified_tarball(artifact, asset, destination),
+    )
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize("payload", [b"not gzip", b"\x1f\x8btruncated"])
@@ -375,6 +481,27 @@ def test_rejects_destination_parent_with_wrong_owner_contract(
     assert not destination.exists()
 
 
+def test_rejects_destination_leaf_over_filesystem_byte_boundary(
+    tmp_path: Path,
+) -> None:
+    artifact, asset, destination = _ready(tmp_path, _tar([("file", b"x", None)]))
+    destination = destination.with_name("é" * 128)
+
+    _assert_code(
+        "destination_invalid",
+        lambda: extract_verified_tarball(artifact, asset, destination),
+    )
+    assert destination.name not in os.listdir(destination.parent)
+
+
+def test_accepts_destination_leaf_at_filesystem_byte_boundary(tmp_path: Path) -> None:
+    artifact, asset, destination = _ready(tmp_path, _tar([("file", b"x", None)]))
+    destination = destination.with_name("a" * artifact_extract.MAX_DESTINATION_NAME_BYTES)
+
+    assert extract_verified_tarball(artifact, asset, destination) == destination
+    assert (destination / "file").read_bytes() == b"x"
+
+
 def test_write_race_never_overwrites_existing_member(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -397,6 +524,81 @@ def test_write_race_never_overwrites_existing_member(
     )
     assert raced is True
     assert (destination / "file").read_bytes() == b"attacker"
+
+
+@pytest.mark.parametrize("write_errno", [errno.ENOSPC, errno.EIO])
+def test_destination_write_errors_are_extract_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_errno: int
+) -> None:
+    artifact, asset, destination = _ready(tmp_path, _tar([("file", b"payload", None)]))
+    monkeypatch.setattr(
+        artifact_extract.os,
+        "write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError(write_errno, "write")),
+    )
+
+    _assert_code(
+        "extract_failed", lambda: extract_verified_tarball(artifact, asset, destination)
+    )
+    assert destination.is_dir()
+    assert not (destination / "file").is_symlink()
+
+
+def test_archive_source_read_error_is_archive_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact, asset, destination = _ready(tmp_path, _tar([("file", b"payload", None)]))
+    real_extractfile = tarfile.TarFile.extractfile
+
+    class BrokenSource:
+        def read(self, _size: int = -1) -> bytes:
+            raise OSError(errno.EIO, "corrupt source")
+
+        def close(self) -> None:
+            pass
+
+    def broken_extractfile(
+        archive: tarfile.TarFile, member: tarfile.TarInfo
+    ) -> object:
+        source = real_extractfile(archive, member)
+        assert source is not None
+        source.close()
+        return BrokenSource()
+
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", broken_extractfile)
+
+    _assert_code(
+        "archive_invalid", lambda: extract_verified_tarball(artifact, asset, destination)
+    )
+    assert destination.is_dir()
+
+
+def test_server_artifact_uses_explicit_python_argv_not_tar_exec_mode(
+    tmp_path: Path,
+) -> None:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        server = tarfile.TarInfo("server.py")
+        server.mode = 0o755
+        body = b'print("server-fixture-ok")\n'
+        server.size = len(body)
+        archive.addfile(server, io.BytesIO(body))
+        version = tarfile.TarInfo("VERSION")
+        version.size = len(b"1.2.3\n")
+        archive.addfile(version, io.BytesIO(b"1.2.3\n"))
+    artifact, asset, destination = _ready(tmp_path, output.getvalue())
+
+    extract_verified_tarball(artifact, asset, destination)
+
+    entrypoint = destination / "server.py"
+    assert stat.S_IMODE(entrypoint.stat().st_mode) == 0o600
+    completed = subprocess.run(
+        [sys.executable, str(entrypoint)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.stdout == "server-fixture-ok\n"
 
 
 def test_destination_parent_replaced_while_writing_is_rejected(
