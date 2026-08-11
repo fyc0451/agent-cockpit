@@ -4,8 +4,8 @@ import errno
 import hashlib
 import os
 import re
+import secrets
 import stat
-import tempfile
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -100,28 +100,110 @@ def _validate_asset(asset: Any) -> tuple[str, int, str, str]:
     return name, size, digest, url
 
 
-def _prepare_cache_dir(cache_dir: Path) -> None:
-    try:
-        cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = cache_dir.lstat()
-    except OSError:
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+    os, "O_NOFOLLOW", 0
+)
+
+
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _secure_cache_file(info: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.getuid()
+        and stat.S_IMODE(info.st_mode) == 0o600
+        and info.st_nlink == 1
+    )
+
+
+def _file_signature(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _open_cache_dir(cache_dir: Path) -> int:
+    if not cache_dir.is_absolute() or ".." in cache_dir.parts:
         _reject("cache_path_invalid")
-    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+    components = cache_dir.parts[1:]
+    if not components:
         _reject("cache_path_invalid")
 
-
-def _open_regular_nofollow(path: Path) -> tuple[int, os.stat_result]:
-    try:
-        before = path.lstat()
-    except OSError:
-        _reject("cache_invalid")
-    if not stat.S_ISREG(before.st_mode):
-        _reject("cache_invalid")
-
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = -1
     try:
-        fd = os.open(path, flags)
+        fd = os.open("/", _DIRECTORY_FLAGS)
+        leaf_before: os.stat_result | None = None
+        leaf_after: os.stat_result | None = None
+        for component in components:
+            try:
+                before = os.stat(component, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                os.mkdir(component, 0o700, dir_fd=fd)
+                before = os.stat(component, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISDIR(before.st_mode):
+                _reject("cache_path_invalid")
+            child_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=fd)
+            after = os.fstat(child_fd)
+            if not stat.S_ISDIR(after.st_mode) or not _same_inode(before, after):
+                os.close(child_fd)
+                _reject("cache_path_invalid")
+            os.close(fd)
+            fd = child_fd
+            leaf_before = before
+            leaf_after = after
+        assert leaf_before is not None and leaf_after is not None
+        if (
+            leaf_before.st_uid != os.getuid()
+            or stat.S_IMODE(leaf_before.st_mode) != 0o700
+            or leaf_after.st_uid != os.getuid()
+            or stat.S_IMODE(leaf_after.st_mode) != 0o700
+        ):
+            _reject("cache_path_invalid")
+        return fd
+    except ArtifactDownloadError:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
+    except OSError:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        _reject("cache_path_invalid")
+
+
+def _open_regular_nofollow(
+    cache_fd: int, name: str
+) -> tuple[int, os.stat_result]:
+    try:
+        before = os.stat(name, dir_fd=cache_fd, follow_symlinks=False)
+    except OSError:
+        _reject("cache_invalid")
+    if not _secure_cache_file(before):
+        _reject("cache_invalid")
+
+    fd = -1
+    try:
+        fd = os.open(name, _FILE_FLAGS, dir_fd=cache_fd)
         after = os.fstat(fd)
     except OSError:
         if fd >= 0:
@@ -131,35 +213,44 @@ def _open_regular_nofollow(path: Path) -> tuple[int, os.stat_result]:
                 pass
         _reject("cache_invalid")
     if (
-        not stat.S_ISREG(after.st_mode)
-        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        not _secure_cache_file(after)
+        or _file_signature(before) != _file_signature(after)
     ):
         os.close(fd)
         _reject("cache_invalid")
     return fd, after
 
 
-def _verify_cached(path: Path, expected_size: int, expected_digest: str) -> Path:
-    fd, info = _open_regular_nofollow(path)
+def _verify_cached(
+    cache_fd: int,
+    name: str,
+    path: Path,
+    expected_size: int,
+    expected_digest: str,
+) -> Path:
+    fd, info = _open_regular_nofollow(cache_fd, name)
     digest = hashlib.sha256()
     total = 0
     try:
         if info.st_size != expected_size:
             _reject("cache_invalid")
-        with os.fdopen(fd, "rb") as stream:
-            fd = -1
-            while chunk := stream.read(1024 * 1024):
-                total += len(chunk)
-                if total > expected_size:
-                    _reject("cache_invalid")
-                digest.update(chunk)
+        while chunk := os.read(fd, 1024 * 1024):
+            total += len(chunk)
+            if total > expected_size:
+                _reject("cache_invalid")
+            digest.update(chunk)
+        after = os.fstat(fd)
+        if (
+            not _secure_cache_file(after)
+            or _file_signature(info) != _file_signature(after)
+        ):
+            _reject("cache_invalid")
     except ArtifactDownloadError:
         raise
     except OSError:
         _reject("cache_invalid")
     finally:
-        if fd >= 0:
-            os.close(fd)
+        os.close(fd)
     if total != expected_size or digest.hexdigest() != expected_digest:
         _reject("cache_invalid")
     return path
@@ -226,43 +317,57 @@ def _download_part(
             os.close(part_fd)
 
 
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+def _fsync_directory(cache_fd: int) -> None:
     try:
-        fd = os.open(path, flags)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        os.fsync(cache_fd)
     except OSError:
         _reject("download_failed")
 
 
-def _create_part(cache_dir: Path, digest: str) -> tuple[int, Path]:
-    fd = -1
-    raw_part: str | None = None
-    try:
-        fd, raw_part = tempfile.mkstemp(
-            prefix=f".{digest}.", suffix=".part", dir=cache_dir
-        )
-        os.fchmod(fd, 0o600)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+def _create_part(cache_fd: int, digest: str) -> tuple[int, str]:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    for _ in range(100):
+        name = f".{digest}.{secrets.token_hex(12)}.part"
+        try:
+            fd = os.open(name, flags, 0o600, dir_fd=cache_fd)
+        except FileExistsError:
+            continue
+        except OSError:
             _reject("cache_path_invalid")
-        return fd, Path(raw_part)
-    except (ArtifactDownloadError, OSError) as exc:
-        if fd >= 0:
+        try:
+            os.fchmod(fd, 0o600)
+            if not _secure_cache_file(os.fstat(fd)):
+                _reject("cache_path_invalid")
+            return fd, name
+        except (ArtifactDownloadError, OSError) as exc:
             try:
                 os.close(fd)
             except OSError:
                 pass
-        if raw_part is not None:
             try:
-                Path(raw_part).unlink(missing_ok=True)
+                os.unlink(name, dir_fd=cache_fd)
             except OSError:
                 pass
-        if isinstance(exc, ArtifactDownloadError):
-            raise
-        _reject("cache_path_invalid")
+            if isinstance(exc, ArtifactDownloadError):
+                raise
+            _reject("cache_path_invalid")
+    _reject("cache_path_invalid")
+
+
+def _entry_exists(cache_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=cache_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        _reject("cache_invalid")
 
 
 def download_verified_artifact(
@@ -273,36 +378,78 @@ def download_verified_artifact(
 ) -> Path:
     """Download one verified release asset into an immutable digest cache."""
     _name, expected_size, expected_digest, url = _validate_asset(asset)
-    if not isinstance(cache_dir, Path):
+    if not isinstance(cache_dir, Path) or not cache_dir.is_absolute():
         _reject("cache_path_invalid")
-    _prepare_cache_dir(cache_dir)
+    cache_fd = _open_cache_dir(cache_dir)
     target = cache_dir / expected_digest
-    if target.exists() or target.is_symlink():
-        return _verify_cached(target, expected_size, expected_digest)
-
-    part_fd, part = _create_part(cache_dir, expected_digest)
     try:
-        _download_part(
-            part_fd,
-            url,
-            expected_size,
-            expected_digest,
-            transport or _default_transport,
-        )
+        if _entry_exists(cache_fd, expected_digest):
+            return _verify_cached(
+                cache_fd,
+                expected_digest,
+                target,
+                expected_size,
+                expected_digest,
+            )
+
+        part_fd, part = _create_part(cache_fd, expected_digest)
         try:
-            os.link(part, target)
-        except FileExistsError:
-            return _verify_cached(target, expected_size, expected_digest)
-        except OSError as exc:
-            if exc.errno == errno.EEXIST:
-                return _verify_cached(target, expected_size, expected_digest)
-            _reject("download_failed")
-        part.unlink()
-        _fsync_directory(cache_dir)
-        return target
+            _download_part(
+                part_fd,
+                url,
+                expected_size,
+                expected_digest,
+                transport or _default_transport,
+            )
+            try:
+                os.link(
+                    part,
+                    expected_digest,
+                    src_dir_fd=cache_fd,
+                    dst_dir_fd=cache_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                return _verify_cached(
+                    cache_fd,
+                    expected_digest,
+                    target,
+                    expected_size,
+                    expected_digest,
+                )
+            except OSError as exc:
+                if exc.errno == errno.EEXIST:
+                    return _verify_cached(
+                        cache_fd,
+                        expected_digest,
+                        target,
+                        expected_size,
+                        expected_digest,
+                    )
+                _reject("download_failed")
+            try:
+                os.unlink(part, dir_fd=cache_fd)
+            except OSError:
+                _reject("download_failed")
+            part = ""
+            result = _verify_cached(
+                cache_fd,
+                expected_digest,
+                target,
+                expected_size,
+                expected_digest,
+            )
+            _fsync_directory(cache_fd)
+            return result
+        finally:
+            if part:
+                try:
+                    os.unlink(part, dir_fd=cache_fd)
+                except OSError:
+                    pass
     finally:
         try:
-            part.unlink(missing_ok=True)
+            os.close(cache_fd)
         except OSError:
             pass
 

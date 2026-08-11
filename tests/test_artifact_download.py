@@ -91,6 +91,8 @@ def test_downloads_to_content_addressed_cache_and_reuses_verified_file(
     assert result == tmp_path / "cache" / asset["sha256"]
     assert result.read_bytes() == payload
     assert stat.S_IMODE(result.stat().st_mode) == 0o600
+    assert result.stat().st_uid == os.getuid()
+    assert result.stat().st_nlink == 1
     assert stat.S_IMODE(result.parent.stat().st_mode) == 0o700
     assert transport.calls == [asset["url"]]
 
@@ -260,12 +262,58 @@ def test_rejects_symlink_cache_directory_before_network(tmp_path: Path) -> None:
     assert transport.calls == []
 
 
+def test_rejects_relative_cache_directory_before_network(tmp_path: Path) -> None:
+    transport = FakeTransport(AssertionError("relative cache must not use transport"))
+
+    _assert_code(
+        "cache_path_invalid",
+        lambda: download_verified_artifact(
+            _asset(), Path("relative-cache"), transport=transport
+        ),
+    )
+    assert not Path("relative-cache").exists()
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o777])
+def test_rejects_existing_cache_directory_with_unsafe_mode_before_network(
+    tmp_path: Path, mode: int
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    cache.chmod(mode)
+    transport = FakeTransport(AssertionError("unsafe cache must not use transport"))
+
+    _assert_code(
+        "cache_path_invalid",
+        lambda: download_verified_artifact(_asset(), cache, transport=transport),
+    )
+    assert stat.S_IMODE(cache.stat().st_mode) == mode
+    assert transport.calls == []
+
+
+def test_rejects_symlink_in_cache_parent_chain_before_network(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    cache = linked_parent / "cache"
+    transport = FakeTransport(AssertionError("unsafe parent must not use transport"))
+
+    _assert_code(
+        "cache_path_invalid",
+        lambda: download_verified_artifact(_asset(), cache, transport=transport),
+    )
+    assert not (real_parent / "cache").exists()
+    assert transport.calls == []
+
+
 @pytest.mark.parametrize("kind", ["symlink", "directory", "fifo"])
 def test_rejects_non_regular_existing_cache_object_without_removing_it(
     tmp_path: Path, kind: str
 ) -> None:
     cache = tmp_path / "cache"
-    cache.mkdir()
+    cache.mkdir(mode=0o700)
     target = cache / _asset()["sha256"]  # type: ignore[operator]
     if kind == "symlink":
         outside = tmp_path / "outside"
@@ -289,7 +337,7 @@ def test_rejects_corrupt_existing_cache_object_without_deleting_it(
     tmp_path: Path,
 ) -> None:
     cache = tmp_path / "cache"
-    cache.mkdir()
+    cache.mkdir(mode=0o700)
     target = cache / _asset()["sha256"]  # type: ignore[operator]
     target.write_bytes(b"corrupt")
 
@@ -300,6 +348,71 @@ def test_rejects_corrupt_existing_cache_object_without_deleting_it(
         ),
     )
     assert target.read_bytes() == b"corrupt"
+
+
+@pytest.mark.parametrize("kind", ["mode", "nlink"])
+def test_rejects_insecure_existing_cache_file_without_deleting_it(
+    tmp_path: Path, kind: str
+) -> None:
+    payload = b"verified artifact"
+    asset = _asset(payload)
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    target = cache / asset["sha256"]  # type: ignore[operator]
+    target.write_bytes(payload)
+    target.chmod(0o600)
+    sibling = cache / "second-link"
+    if kind == "mode":
+        target.chmod(0o644)
+    else:
+        os.link(target, sibling)
+    transport = FakeTransport(AssertionError("unsafe object must not use transport"))
+
+    _assert_code(
+        "cache_invalid",
+        lambda: download_verified_artifact(asset, cache, transport=transport),
+    )
+    assert target.read_bytes() == payload
+    if kind == "mode":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    else:
+        assert target.stat().st_nlink == 2
+        assert sibling.read_bytes() == payload
+    assert transport.calls == []
+
+
+def test_rejects_cache_file_if_fd_signature_changes_while_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"verified artifact"
+    asset = _asset(payload)
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    target = cache / asset["sha256"]  # type: ignore[operator]
+    target.write_bytes(payload)
+    target.chmod(0o600)
+    real_read = os.read
+    changed = False
+
+    def mutating_read(fd: int, size: int) -> bytes:
+        nonlocal changed
+        chunk = real_read(fd, size)
+        if chunk and not changed:
+            changed = True
+            target.chmod(0o644)
+        return chunk
+
+    monkeypatch.setattr(artifact_download.os, "read", mutating_read)
+
+    _assert_code(
+        "cache_invalid",
+        lambda: download_verified_artifact(
+            asset,
+            cache,
+            transport=FakeTransport(AssertionError("no network")),
+        ),
+    )
+    assert target.exists()
 
 
 def test_success_fsyncs_file_and_directory_and_publishes_atomically(
@@ -341,7 +454,8 @@ def test_concurrent_cache_publish_never_overwrites_existing_object(
     cache = tmp_path / "cache"
 
     def racing_link(source: object, target: object, **kwargs: object) -> None:
-        Path(target).write_bytes(raced_payload)
+        (cache / str(target)).write_bytes(raced_payload)
+        (cache / str(target)).chmod(0o600)
         raise FileExistsError
 
     monkeypatch.setattr(artifact_download.os, "link", racing_link)
