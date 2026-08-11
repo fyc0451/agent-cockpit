@@ -2567,6 +2567,10 @@ def restart_pane(
         try:
             if kind == "grok":
                 _run(
+                    ["--session", session, "pane", "send-keys", pane_id, "ctrl+u"],
+                    timeout=3,
+                )
+                _run(
                     ["--session", session, "pane", "send-text", pane_id, "/quit"],
                     timeout=3,
                 )
