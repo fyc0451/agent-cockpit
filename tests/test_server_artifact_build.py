@@ -68,6 +68,14 @@ def test_pyinstaller_collects_all_dynamic_helper_modules() -> None:
         assert f'"agent_mail_commands.{module}"' in spec
 
 
+def test_pyinstaller_collects_dynamic_maintenance_cli() -> None:
+    spec = (ROOT / "packaging/agent-cockpit-server.spec").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"maintenance_cli"' in spec
+
+
 def _source_tree(tmp_path: Path) -> Path:
     source = tmp_path / "source"
     static = source / "static"
@@ -235,6 +243,13 @@ def test_real_pyinstaller_onedir_runs_from_random_cwd(tmp_path: Path) -> None:
         assert os.readlink(deploy / "helpers" / command) == (
             "../current/bin/agent-cockpit"
         )
+
+    controller = subprocess.run(
+        [str(launcher), "maintenance-controller", "--help"],
+        cwd=cwd, env=helper_env, text=True, capture_output=True, check=False,
+    )
+    assert controller.returncode == 0, controller.stderr
+    assert "usage:" in controller.stdout
 
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
