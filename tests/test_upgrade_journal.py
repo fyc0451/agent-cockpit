@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -49,6 +50,136 @@ def _advance(root: Path, intent: str, stage: str) -> dict[str, object]:
         target_digest=DIGEST,
         stage=stage,
     )
+
+
+def _terminal(root: Path, stage: str = "committed") -> dict[str, object]:
+    journal.advance_journal(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        stage="services_stopped",
+    )
+    if stage == "committed":
+        _advance(root, journal.INTENT_SWITCH_CURRENT, "switched")
+        _advance(root, journal.INTENT_START_SERVICES, "services_started")
+        return _advance(root, journal.INTENT_COMMIT, "committed")
+    journal.record_intent(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        intent=journal.INTENT_ROLLBACK,
+        primary_error_code="upgrade_failed",
+    )
+    return journal.advance_journal(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        stage="rolled_back",
+    )
+
+
+@pytest.mark.parametrize("stage", ["committed", "rolled_back"])
+def test_archives_exact_terminal_journal_in_same_secure_root(
+    tmp_path: Path, stage: str,
+) -> None:
+    root = _create(tmp_path)
+    terminal = _terminal(root, stage)
+    fixed = root / journal.JOURNAL_NAME
+    raw = fixed.read_bytes()
+    expected_name = (
+        f"upgrade-journal-{hashlib.sha256(REQUEST.encode()).hexdigest()}-"
+        f"{DIGEST}.json"
+    )
+
+    archived = journal.archive_terminal_journal(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+    )
+
+    assert archived == root / expected_name
+    assert len(archived.name.encode("ascii")) <= 255
+    assert not fixed.exists()
+    assert archived.read_bytes() == raw
+    assert stat.S_IMODE(archived.stat().st_mode) == 0o600
+    assert archived.stat().st_nlink == 1
+    assert json.loads(raw)["stage"] == terminal["stage"]
+    with pytest.raises(journal.UpgradeJournalError, match="journal_missing"):
+        journal.load_journal(root=root)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("nonterminal", "journal_transition_invalid"),
+        ("request_mismatch", "journal_identity_mismatch"),
+        ("digest_mismatch", "journal_identity_mismatch"),
+        ("request_invalid", "journal_identity_invalid"),
+        ("digest_invalid", "journal_identity_invalid"),
+        ("collision", "journal_archive_exists"),
+    ],
+)
+def test_archive_failure_leaves_fixed_journal_unchanged(
+    tmp_path: Path, mutation: str, code: str,
+) -> None:
+    root = _create(tmp_path)
+    if mutation != "nonterminal":
+        _terminal(root)
+    fixed = root / journal.JOURNAL_NAME
+    before = fixed.read_bytes()
+    before_stat = fixed.stat()
+    request_id: object = REQUEST
+    digest: object = DIGEST
+    if mutation == "request_mismatch":
+        request_id = "other-request"
+    elif mutation == "digest_mismatch":
+        digest = "e" * 64
+    elif mutation == "request_invalid":
+        request_id = ""
+    elif mutation == "digest_invalid":
+        digest = "D" * 64
+    elif mutation == "collision":
+        archive = root / journal.archive_journal_name(REQUEST, DIGEST)
+        archive.write_bytes(b"existing archive")
+        archive.chmod(0o600)
+
+    with pytest.raises(journal.UpgradeJournalError, match=code):
+        journal.archive_terminal_journal(
+            root=root,
+            request_id=request_id,  # type: ignore[arg-type]
+            target_digest=digest,  # type: ignore[arg-type]
+        )
+
+    after_stat = fixed.stat()
+    assert fixed.read_bytes() == before
+    assert (after_stat.st_dev, after_stat.st_ino) == (
+        before_stat.st_dev, before_stat.st_ino,
+    )
+
+
+def test_archive_renames_before_fsyncing_same_root(monkeypatch, tmp_path: Path) -> None:
+    root = _create(tmp_path)
+    _terminal(root)
+    events: list[str] = []
+    real_rename = journal.os.rename
+    real_fsync = journal.os.fsync
+
+    def tracked_rename(*args, **kwargs):
+        events.append("rename")
+        return real_rename(*args, **kwargs)
+
+    def tracked_fsync(fd: int):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(journal.os, "rename", tracked_rename)
+    monkeypatch.setattr(journal.os, "fsync", tracked_fsync)
+
+    journal.archive_terminal_journal(
+        root=root, request_id=REQUEST, target_digest=DIGEST,
+    )
+
+    assert events == ["rename", "fsync"]
 
 
 def test_happy_path_records_each_intent_before_forward_transition(tmp_path: Path) -> None:
