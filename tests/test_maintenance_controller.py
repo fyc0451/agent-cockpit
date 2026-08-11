@@ -204,6 +204,39 @@ def test_lock_contention_is_nonblocking_and_never_unlinks(tmp_path: Path) -> Non
         os.close(fd)
 
 
+def test_controller_lease_is_plan_bound_and_only_live_inside_context(
+    tmp_path: Path,
+) -> None:
+    plan, _ = _layout(tmp_path / "first")
+    other, _ = _layout(tmp_path / "other")
+    equivalent = controller.ControllerPlan(**plan.__dict__)
+    assert equivalent == plan and equivalent is not plan
+
+    with controller.controller_lock(plan) as lease:
+        assert isinstance(lease, controller.ControllerLease)
+        controller.require_controller_lease(plan=plan, lease=lease)
+        controller.require_controller_lease(plan=equivalent, lease=lease)
+        with pytest.raises(controller.ControllerPreflightError) as exc:
+            controller.require_controller_lease(plan=other, lease=lease)
+        assert exc.value.code == "controller_lease_invalid"
+
+    with pytest.raises(controller.ControllerPreflightError) as exc:
+        controller.require_controller_lease(plan=plan, lease=lease)
+    assert exc.value.code == "controller_lease_invalid"
+
+
+@pytest.mark.parametrize("lease", [None, object(), False])
+def test_controller_lease_rejects_wrong_type(
+    tmp_path: Path, lease: object
+) -> None:
+    plan, _ = _layout(tmp_path)
+
+    with pytest.raises(controller.ControllerPreflightError) as exc:
+        controller.require_controller_lease(plan=plan, lease=lease)  # type: ignore[arg-type]
+
+    assert exc.value.code == "controller_lease_invalid"
+
+
 def test_missing_status_is_byte_for_byte_read_only(tmp_path: Path) -> None:
     plan, state = _layout(tmp_path)
     before = (state.stat().st_mtime_ns, tuple(state.iterdir()))

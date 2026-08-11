@@ -29,6 +29,8 @@ LINUX_UNIT_NAME = "agent-cockpit.service"
 MAC_MAIN_LABEL = "io.github.fyc0451.agent-cockpit"
 MAC_CONTROLLER_LABEL = "io.github.fyc0451.agent-cockpit-controller"
 FIXED_SERVER_LAUNCHER_RELATIVE_PATH = "bin/agent-cockpit"
+LINUX_EVIDENCE_ENV_NAME = "server-evidence.env"
+_SYSTEMD_SAFE_ENVIRONMENT_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 
 # 允许的固定 Mac labels（V1 动态 upgrade.<job> 一律禁止）
 FIXED_MAC_LABELS: frozenset[str] = frozenset({MAC_MAIN_LABEL, MAC_CONTROLLER_LABEL})
@@ -72,7 +74,12 @@ class LinuxUnitContract:
     kill_mode: str
     working_directory: str
     exec_start: str
-    environment_file: str | None
+    environment_files: tuple[tuple[str, bool], ...]
+
+    @property
+    def environment_file(self) -> str | None:
+        """Legacy first EnvironmentFile path."""
+        return self.environment_files[0][0] if self.environment_files else None
 
 
 @dataclass(frozen=True)
@@ -517,6 +524,40 @@ def _parse_exec_start_argv(exec_start: str) -> tuple[str, ...]:
     return tuple(args)
 
 
+def validate_release_external_environment_file(
+    value: str | Path,
+    *,
+    deploy_root: str | Path | None,
+) -> Path:
+    """Validate the fixed release-external Server evidence selector path."""
+    path = validate_absolute_path(value, role="evidence_environment_file")
+    if _SYSTEMD_SAFE_ENVIRONMENT_PATH_RE.fullmatch(path.as_posix()) is None:
+        raise SupervisorAdapterError("evidence_environment_path_unsupported")
+    if path.name != LINUX_EVIDENCE_ENV_NAME:
+        raise SupervisorAdapterError("evidence_environment_name_mismatch")
+    if deploy_root is None:
+        raise SupervisorAdapterError("deploy_root_required")
+    root = validate_absolute_path(deploy_root, role="deploy_root")
+    if path == root or _is_relative_to(path, root):
+        raise SupervisorAdapterError("evidence_environment_inside_release_tree")
+    try:
+        path_resolved = path.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise SupervisorAdapterError("evidence_environment_unresolvable") from exc
+    if path_resolved == root_resolved or _is_relative_to(path_resolved, root_resolved):
+        raise SupervisorAdapterError("evidence_environment_inside_release_tree")
+    current = Path(path.anchor)
+    try:
+        for part in path.parts[1:]:
+            current /= part
+            if current.is_symlink():
+                raise SupervisorAdapterError("evidence_environment_symlink")
+    except OSError as exc:
+        raise SupervisorAdapterError("evidence_environment_unresolvable") from exc
+    return path
+
+
 # ── 渲染 ──────────────────────────────────────────────────────────
 
 
@@ -525,6 +566,7 @@ def render_linux_unit(
     current_dir: str | Path,
     program_arguments: Sequence[str],
     deploy_root: str | Path | None = None,
+    evidence_environment_file: str | Path | None = None,
     description: str = "Agent Cockpit (FastAPI :8790)",
 ) -> str:
     """渲染固定 user unit，指向受控 current；强制 KillMode=process。
@@ -539,6 +581,15 @@ def render_linux_unit(
     cur = current.as_posix()
     wd = escape_systemd_value(cur)
     env_file = escape_systemd_value(f"{cur}/.env")
+    evidence_line = ""
+    if evidence_environment_file is not None:
+        evidence_path = validate_release_external_environment_file(
+            evidence_environment_file,
+            deploy_root=deploy_root,
+        )
+        evidence_line = (
+            f"EnvironmentFile={escape_systemd_value(evidence_path.as_posix())}\n"
+        )
     exec_start = _format_exec_start(argv)
     return (
         "[Unit]\n"
@@ -555,6 +606,7 @@ def render_linux_unit(
         "RestartSec=3\n"
         "Environment=PYTHONUNBUFFERED=1\n"
         f"EnvironmentFile=-{env_file}\n"
+        f"{evidence_line}"
         "NoNewPrivileges=true\n"
         "UMask=0077\n"
         "\n"
@@ -712,13 +764,13 @@ MAC_PLIST_ALLOWED_KEYS: frozenset[str] = frozenset(
 MAC_PLIST_FORBIDDEN_KEYS: frozenset[str] = frozenset({"Program"})
 
 
-def _parse_unit_by_section(text: str) -> dict[str, str]:
+def _parse_unit_by_section(text: str) -> dict[str, object]:
     """按 section 解析 unit；关键键仅在 [Service]；拒绝错位、键重复与 section 重复。"""
     section: str | None = None
     seen_sections: set[str] = set()
     # (section, key) → value；再投影 service 字段
     seen: set[tuple[str, str]] = set()
-    service_fields: dict[str, str] = {}
+    service_fields: dict[str, object] = {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -745,6 +797,17 @@ def _parse_unit_by_section(text: str) -> dict[str, str]:
                 raise SupervisorAdapterError("unit_key_wrong_section", f"{key} in [{section}]")
             raise SupervisorAdapterError("unit_key_not_allowlisted", key)
         sk = (section, key)
+        if section == "Service" and key == "EnvironmentFile":
+            if raw != line or not raw.startswith("EnvironmentFile="):
+                raise SupervisorAdapterError("environment_file_noncanonical")
+            values = service_fields.setdefault(key, [])
+            assert isinstance(values, list)
+            if value in values:
+                raise SupervisorAdapterError("environment_file_duplicate")
+            values.append(value)
+            if len(values) > 2:
+                raise SupervisorAdapterError("environment_file_count_invalid")
+            continue
         if sk in seen:
             raise SupervisorAdapterError("unit_duplicate_key", f"[{section}] {key}")
         seen.add(sk)
@@ -767,15 +830,21 @@ def parse_linux_unit_contract(text: str) -> LinuxUnitContract:
     for required in _SERVICE_REQUIRED_KEYS:
         if required not in fields:
             raise SupervisorAdapterError("unit_missing_field", required)
-    env_file = fields.get("EnvironmentFile")
-    if env_file and env_file.startswith("-"):
-        env_file = env_file[1:]
+    raw_env_files = fields.get("EnvironmentFile", [])
+    if isinstance(raw_env_files, str):
+        raw_env_files = [raw_env_files]
+    assert isinstance(raw_env_files, list)
+    environment_files: list[tuple[str, bool]] = []
+    for value in raw_env_files:
+        assert isinstance(value, str)
+        optional = value.startswith("-")
+        environment_files.append((value[1:] if optional else value, optional))
     return LinuxUnitContract(
         unit_name=LINUX_UNIT_NAME,
-        kill_mode=fields["KillMode"].strip(),
-        working_directory=fields["WorkingDirectory"].strip(),
-        exec_start=fields["ExecStart"].strip(),
-        environment_file=env_file.strip() if env_file else None,
+        kill_mode=str(fields["KillMode"]).strip(),
+        working_directory=str(fields["WorkingDirectory"]).strip(),
+        exec_start=str(fields["ExecStart"]).strip(),
+        environment_files=tuple(environment_files),
     )
 
 
@@ -785,6 +854,7 @@ def validate_linux_unit_contract(
     current_dir: str | Path,
     program_arguments: Sequence[str],
     deploy_root: str | Path | None = None,
+    evidence_environment_file: str | Path | None = None,
 ) -> LinuxUnitContract:
     """KillMode=process；固定安全字段精确；WD 与 ExecStart argv 同源 current。"""
     current = validate_current_path(current_dir, deploy_root=deploy_root)
@@ -795,7 +865,7 @@ def validate_linux_unit_contract(
     contract = parse_linux_unit_contract(text)
     fields = _parse_unit_by_section(text)
     for key, want in LINUX_SERVICE_FIXED_FIELDS.items():
-        got = (fields.get(key) or "").strip()
+        got = str(fields.get(key) or "").strip()
         if got != want:
             raise SupervisorAdapterError("linux_fixed_field_mismatch", f"{key}={got!r}")
     if contract.kill_mode != "process":
@@ -808,10 +878,32 @@ def validate_linux_unit_contract(
         raise SupervisorAdapterError("exec_start_argv_mismatch")
     if not (actual[0] == cur or actual[0].startswith(cur + "/")):
         raise SupervisorAdapterError("launcher_outside_current", actual[0])
-    if contract.environment_file is None:
+    expected_raw_environment_files = (
+        f"-{escape_systemd_value(f'{cur}/.env')}",
+    )
+    if evidence_environment_file is not None:
+        evidence_path = validate_release_external_environment_file(
+            evidence_environment_file,
+            deploy_root=deploy_root,
+        )
+        expected_raw_environment_files += (
+            escape_systemd_value(evidence_path.as_posix()),
+        )
+    raw_environment_files = fields.get("EnvironmentFile", [])
+    if not isinstance(raw_environment_files, list) or tuple(
+        raw_environment_files
+    ) != expected_raw_environment_files:
         raise SupervisorAdapterError("environment_file_mismatch")
-    ef = _unescape_systemd_value(contract.environment_file)
-    if ef != f"{cur}/.env":
+    actual_environment_files = tuple(
+        (_unescape_systemd_value(path), optional)
+        for path, optional in contract.environment_files
+    )
+    expected_environment_files: tuple[tuple[str, bool], ...] = (
+        (f"{cur}/.env", True),
+    )
+    if evidence_environment_file is not None:
+        expected_environment_files += ((evidence_path.as_posix(), False),)
+    if actual_environment_files != expected_environment_files:
         raise SupervisorAdapterError("environment_file_mismatch")
     return contract
 
@@ -1129,6 +1221,7 @@ def planned_argv_tools(commands: Iterable[PlannedCommand]) -> frozenset[str]:
 __all__ = [
     "FIXED_MAC_LABELS",
     "FIXED_SERVER_LAUNCHER_RELATIVE_PATH",
+    "LINUX_EVIDENCE_ENV_NAME",
     "LINUX_UNIT_NAME",
     "MAC_CONTROLLER_LABEL",
     "MAC_MAIN_LABEL",
@@ -1167,5 +1260,6 @@ __all__ = [
     "validate_controller_path",
     "validate_current_path",
     "validate_linux_unit_contract",
+    "validate_release_external_environment_file",
     "validate_mac_plist_contract",
 ]

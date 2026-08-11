@@ -52,8 +52,60 @@ class ControllerPlan:
     schema_version: int = upgrade_journal.SCHEMA_VERSION
 
 
+_LEASE_TOKEN = object()
+
+
+class ControllerLease:
+    __slots__ = (
+        "_active",
+        "_lock_fd",
+        "_lock_identity",
+        "_plan",
+        "_state_fd",
+        "_state_identity",
+    )
+
+    def __init__(
+        self,
+        token: object,
+        plan: ControllerPlan,
+        state_fd: int,
+        state_identity: tuple[int, ...],
+        lock_fd: int,
+        lock_identity: tuple[int, ...],
+    ) -> None:
+        if token is not _LEASE_TOKEN:
+            _fail("controller_lease_invalid")
+        self._plan = plan
+        self._state_fd = state_fd
+        self._state_identity = state_identity
+        self._lock_fd = lock_fd
+        self._lock_identity = lock_identity
+        self._active = True
+
+    def _invalidate(self) -> None:
+        self._active = False
+
+
 def _fail(code: str) -> None:
     raise ControllerPreflightError(code)
+
+
+def _state_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode)
+
+
+def _lock_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (*_state_identity(info), info.st_nlink)
+
+
+def _secure_lock(info: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.getuid()
+        and stat.S_IMODE(info.st_mode) == 0o600
+        and info.st_nlink == 1
+    )
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -159,14 +211,53 @@ def build_controller_plan(
     return ControllerPlan(state, state / JOURNAL_DIR_NAME, root, current_path, controller)
 
 
+def require_controller_lease(
+    *, plan: ControllerPlan, lease: ControllerLease
+) -> None:
+    """Require one live lease bound to this exact controller plan."""
+    if (
+        type(lease) is not ControllerLease
+        or getattr(lease, "_active", False) is not True
+        or getattr(lease, "_plan", None) != plan
+    ):
+        _fail("controller_lease_invalid")
+    rebound_fd = -1
+    try:
+        state_opened = os.fstat(lease._state_fd)
+        lock_opened = os.fstat(lease._lock_fd)
+        rebound = _secure_state(plan.state_root)
+        assert rebound is not None
+        rebound_fd, state_current = rebound
+        lock_current = os.stat(
+            LOCK_NAME, dir_fd=rebound_fd, follow_symlinks=False
+        )
+        if (
+            _state_identity(state_opened) != lease._state_identity
+            or _state_identity(state_current) != lease._state_identity
+            or _lock_identity(lock_opened) != lease._lock_identity
+            or _lock_identity(lock_current) != lease._lock_identity
+            or not _secure_lock(lock_opened)
+            or not _secure_lock(lock_current)
+        ):
+            _fail("controller_lease_invalid")
+    except ControllerPreflightError:
+        _fail("controller_lease_invalid")
+    except (AttributeError, OSError, ValueError, TypeError):
+        _fail("controller_lease_invalid")
+    finally:
+        if rebound_fd >= 0:
+            os.close(rebound_fd)
+
+
 @contextmanager
-def controller_lock(plan: ControllerPlan) -> Iterator[None]:
+def controller_lock(plan: ControllerPlan) -> Iterator[ControllerLease]:
     """Hold the controller's nonblocking lock; never unlink it."""
     _validate_plan(plan)
     secured = _secure_state(plan.state_root)
     assert secured is not None
     state_fd, _ = secured
     lock_fd = -1
+    lease: ControllerLease | None = None
     try:
         try:
             before = os.stat(LOCK_NAME, dir_fd=state_fd, follow_symlinks=False)
@@ -179,13 +270,22 @@ def controller_lock(plan: ControllerPlan) -> Iterator[None]:
             lock_fd = os.open(LOCK_NAME, _LOCK_FLAGS, dir_fd=state_fd)
         opened = os.fstat(lock_fd)
         current = os.stat(LOCK_NAME, dir_fd=state_fd, follow_symlinks=False)
-        signature = lambda value: (value.st_dev, value.st_ino, value.st_uid, value.st_mode)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o600 or opened.st_nlink != 1 or signature(before) != signature(opened) or signature(current) != signature(opened):
+        if not _secure_lock(opened) or _lock_identity(before) != _lock_identity(opened) or _lock_identity(current) != _lock_identity(opened):
             _fail("lock_unsafe")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             _fail("controller_locked")
+        state_identity = _state_identity(os.fstat(state_fd))
+        lock_identity = _lock_identity(os.fstat(lock_fd))
+        lease = ControllerLease(
+            _LEASE_TOKEN,
+            plan,
+            state_fd,
+            state_identity,
+            lock_fd,
+            lock_identity,
+        )
     except ControllerPreflightError:
         if lock_fd >= 0: os.close(lock_fd)
         os.close(state_fd)
@@ -195,8 +295,11 @@ def controller_lock(plan: ControllerPlan) -> Iterator[None]:
         os.close(state_fd)
         _fail("lock_unsafe")
     try:
-        yield
+        assert lease is not None
+        yield lease
     finally:
+        if lease is not None:
+            lease._invalidate()
         if lock_fd >= 0: os.close(lock_fd)
         os.close(state_fd)
 
@@ -237,9 +340,11 @@ def read_controller_status(plan: ControllerPlan) -> dict[str, object]:
 
 
 __all__ = [
+    "ControllerLease",
     "ControllerPlan",
     "ControllerPreflightError",
     "build_controller_plan",
     "controller_lock",
+    "require_controller_lease",
     "read_controller_status",
 ]
