@@ -3,11 +3,14 @@ import json
 import re
 
 import herdr_client
+import pytest
 
 
 def test_grok_theme_slash_and_launch_args():
-    assert herdr_client.grok_theme_slash("light") == "/theme light"
-    assert herdr_client.grok_theme_slash("dark") == "/theme dark"
+    assert herdr_client.grok_theme_slash("light") == "/theme grokday"
+    assert herdr_client.grok_theme_slash("dark") == "/theme groknight"
+    with pytest.raises(ValueError, match="mode"):
+        herdr_client.grok_theme_slash("sepia")
     assert herdr_client.grok_launch_theme_args("light") == ["--light"]
     assert herdr_client.grok_launch_theme_args("dark") == []
     assert herdr_client.grok_launch_theme_args(None) == []
@@ -35,10 +38,10 @@ def test_apply_grok_web_theme_targets_only_grok(monkeypatch):
         lambda session, pane_id, text, mode="prompt": calls.append((session, pane_id, text, mode)) or {"available": True, "sent": text, "mode": mode},
     )
     out = herdr_client.apply_grok_web_theme("light")
-    assert out["command"] == "/theme light"
+    assert out["command"] == "/theme grokday"
     assert calls == [
-        ("s1", "p1", "/theme light", "slash"),
-        ("s2", "p3", "/theme light", "slash"),
+        ("s1", "p1", "/theme grokday", "slash"),
+        ("s2", "p3", "/theme grokday", "slash"),
     ]
 
 
@@ -228,7 +231,7 @@ def test_agent_theme_sync_skips_live_opencode_when_persistence_fails(monkeypatch
         "session": "s1", "pane_id": "p1", "agent": "opencode",
         "reason": "tui_config_write_failed",
     }]
-    assert calls == [("grok", "s1", "p2", "/theme dark", "slash")]
+    assert calls == [("grok", "s1", "p2", "/theme groknight", "slash")]
 
 
 def test_agent_theme_sync_sets_opencode_theme_and_explicit_mode(monkeypatch):

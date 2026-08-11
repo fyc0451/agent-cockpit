@@ -939,7 +939,7 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
             # send-text + send-keys 两次（拆分会让 agent TUI 把首段当 prompt）。
             _run(["--session", session, "pane", "run", pane_id, text], timeout=8)
         elif mode == "slash":
-            # Grok 等自绘 TUI：/theme light 必须当斜杠命令键入，不能 agent prompt。
+            # Grok 等自绘 TUI：/theme grokday 必须当斜杠命令键入，不能 agent prompt。
             cmd = str(text or "").strip()
             if not cmd.startswith("/"):
                 cmd = "/" + cmd
@@ -956,9 +956,11 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
 def grok_theme_slash(mode: str) -> str:
     """Web light/dark → Grok /theme 目标（见 grok user-guide 06-theming）。
 
-    Grok 接受 light/dark 别名（GrokDay/GrokNight），也接受 /theme grokday 等。
+    Grok 4.5 只接受主题 key；light/dark 会返回 ``Unknown theme``。
     """
-    return "/theme light" if mode == "light" else "/theme dark"
+    if mode not in ("light", "dark"):
+        raise ValueError("mode 必须是 light 或 dark")
+    return "/theme grokday" if mode == "light" else "/theme groknight"
 
 
 # Web light/dark → OpenCode 内置主题名（用户指定；勿用 Mode 2031 当唯一手段）
@@ -971,7 +973,7 @@ OPENCODE_THEME_BY_WEB = {
 def agent_theme_slash(agent: str, mode: str) -> str | None:
     """各 agent 可直接一次发完的主题 slash；需多步 UI 的返回 None 由专用路径处理。
 
-    - grok: `/theme light|dark`
+    - grok: `/theme grokday|groknight`
     - opencode: 不走 light/dark 指令，统一 /themes → 主题名（palenight / aura）
     """
     if mode not in ("light", "dark"):
@@ -1159,7 +1161,7 @@ def apply_opencode_mode_to_pane(
 def apply_agent_web_themes(mode: str) -> dict[str, Any]:
     """把 Web 明暗推到 live agent pane（按 agent 原生主题手段）。
 
-    - grok: `/theme light|dark`（自绘，light/dark 就是主题别名）
+    - grok: `/theme grokday|groknight`（Grok 4.5 的真实主题 key）
     - opencode: 主题弹层选主题名（亮 palenight / 暗 aura），再通过命令弹层显式
       设置 light/dark mode；主题名与明暗模式是两个独立状态。
     """
