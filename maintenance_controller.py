@@ -64,7 +64,9 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-def _open_directory_chain(path: Path, code: str) -> tuple[int, os.stat_result]:
+def _open_directory_chain(
+    path: Path, code: str, *, missing_ok: bool = False
+) -> tuple[int, os.stat_result] | None:
     fd = -1
     try:
         fd = os.open("/", _DIR_FLAGS)
@@ -82,21 +84,42 @@ def _open_directory_chain(path: Path, code: str) -> tuple[int, os.stat_result]:
     except ControllerPreflightError:
         if fd >= 0: os.close(fd)
         raise
+    except FileNotFoundError:
+        if fd >= 0: os.close(fd)
+        if missing_ok:
+            return None
+        _fail(code)
     except OSError:
         if fd >= 0: os.close(fd)
         _fail(code)
 
 
-def _secure_state(path: Path) -> None:
-    fd, info = _open_directory_chain(path, "state_unsafe")
-    os.close(fd)
+def _secure_state(
+    path: Path, *, missing_ok: bool = False
+) -> tuple[int, os.stat_result] | None:
+    opened = _open_directory_chain(path, "state_unsafe", missing_ok=missing_ok)
+    if opened is None:
+        return None
+    fd, info = opened
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(fd)
         _fail("state_unsafe")
+    return fd, info
 
 
 def _validate_plan(plan: ControllerPlan) -> None:
     if (
         not isinstance(plan, ControllerPlan)
+        or not all(
+            isinstance(path, Path)
+            for path in (
+                plan.state_root,
+                plan.journal_root,
+                plan.deploy_root,
+                plan.current,
+                plan.controller_root,
+            )
+        )
         or plan.journal_root != plan.state_root / JOURNAL_DIR_NAME
         or plan.current != plan.deploy_root / "current"
         or plan.engine != upgrade_journal.ENGINE
@@ -104,9 +127,14 @@ def _validate_plan(plan: ControllerPlan) -> None:
     ):
         _fail("plan_invalid")
     try:
+        state = supervisor_adapter.validate_absolute_path(
+            plan.state_root, role="state_root"
+        )
         supervisor_adapter.require_canonical_current_and_deploy(current=plan.current, deploy_root=plan.deploy_root)
         supervisor_adapter.validate_controller_path(plan.controller_root, current=plan.current, deploy_root=plan.deploy_root)
     except supervisor_adapter.SupervisorAdapterError:
+        _fail("plan_invalid")
+    if state == plan.deploy_root or _inside(state, plan.deploy_root):
         _fail("plan_invalid")
 
 
@@ -126,13 +154,8 @@ def build_controller_plan(
         state = supervisor_adapter.validate_absolute_path(state_root, role="state_root")
     except supervisor_adapter.SupervisorAdapterError:
         _fail("plan_invalid")
-    try:
-        state_resolved, root_resolved = state.resolve(strict=True), root.resolve(strict=True)
-    except OSError:
-        _fail("state_unsafe")
-    if state == root or _inside(state, root) or state_resolved == root_resolved or _inside(state_resolved, root_resolved):
+    if state == root or _inside(state, root):
         _fail("plan_invalid")
-    _secure_state(state)
     return ControllerPlan(state, state / JOURNAL_DIR_NAME, root, current_path, controller)
 
 
@@ -140,11 +163,11 @@ def build_controller_plan(
 def controller_lock(plan: ControllerPlan) -> Iterator[None]:
     """Hold the controller's nonblocking lock; never unlink it."""
     _validate_plan(plan)
-    state_fd, info = _open_directory_chain(plan.state_root, "state_unsafe")
+    secured = _secure_state(plan.state_root)
+    assert secured is not None
+    state_fd, _ = secured
     lock_fd = -1
     try:
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-            _fail("state_unsafe")
         try:
             before = os.stat(LOCK_NAME, dir_fd=state_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -181,13 +204,36 @@ def controller_lock(plan: ControllerPlan) -> Iterator[None]:
 def read_controller_status(plan: ControllerPlan) -> dict[str, object]:
     """Read journal state without locking, creating, repairing, or reconciling."""
     _validate_plan(plan)
+    secured = _secure_state(plan.state_root, missing_ok=True)
+    if secured is None:
+        return {"state": "idle", "journal": None}
+    state_fd, state_info = secured
     try:
-        value = upgrade_journal.load_journal(root=plan.journal_root)
-    except upgrade_journal.UpgradeJournalError as exc:
-        if exc.code == "journal_missing":
-            return {"state": "idle", "journal": None}
-        _fail("journal_invalid")
-    return {"state": value["stage"], "journal": {field: value[field] for field in _STATUS_FIELDS}}
+        try:
+            value = upgrade_journal.load_journal(root=plan.journal_root)
+            result = {
+                "state": value["stage"],
+                "journal": {field: value[field] for field in _STATUS_FIELDS},
+            }
+        except upgrade_journal.UpgradeJournalError as exc:
+            if exc.code == "journal_missing":
+                result = {"state": "idle", "journal": None}
+            else:
+                _fail("journal_invalid")
+        rebound = _secure_state(plan.state_root)
+        assert rebound is not None
+        rebound_fd, rebound_info = rebound
+        try:
+            if (state_info.st_dev, state_info.st_ino) != (
+                rebound_info.st_dev,
+                rebound_info.st_ino,
+            ):
+                _fail("state_unsafe")
+        finally:
+            os.close(rebound_fd)
+        return result
+    finally:
+        os.close(state_fd)
 
 
 __all__ = [

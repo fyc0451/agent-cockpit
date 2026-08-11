@@ -39,6 +39,16 @@ def test_builds_fixed_release_external_plan(tmp_path: Path) -> None:
     assert plan.engine == upgrade_journal.ENGINE
     assert plan.schema_version == upgrade_journal.SCHEMA_VERSION
 
+    missing = tmp_path / "installer-will-create"
+    missing_plan = controller.build_controller_plan(
+        state_root=missing,
+        deploy_root=plan.deploy_root,
+        current=plan.current,
+        controller_root=plan.controller_root,
+    )
+    assert missing_plan.state_root == missing
+    assert not missing.exists()
+
 
 @pytest.mark.parametrize("mutation", ["relative", "wrong_current", "state_in_release", "wrong_type"])
 def test_plan_rejects_noncanonical_or_release_internal_paths(
@@ -77,7 +87,7 @@ def test_plan_rejects_noncanonical_or_release_internal_paths(
 
 
 @pytest.mark.parametrize("mutation", ["wide", "symlink_parent", "wrong_owner"])
-def test_plan_rejects_unsafe_state(
+def test_status_revalidates_unsafe_existing_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
     plan, state = _layout(tmp_path)
@@ -91,13 +101,29 @@ def test_plan_rejects_unsafe_state(
         monkeypatch.setattr(controller.os, "getuid", lambda: state.stat().st_uid + 1)
 
     with pytest.raises(controller.ControllerPreflightError) as exc:
-        controller.build_controller_plan(
-            state_root=state,
-            deploy_root=plan.deploy_root,
-            current=plan.current,
-            controller_root=plan.controller_root,
-        )
+        controller.read_controller_status(plan)
     assert exc.value.code == "state_unsafe"
+
+
+@pytest.mark.parametrize("mutation", ["relative", "state_in_release", "journal_leaf"])
+def test_public_entries_reject_forged_plan(tmp_path: Path, mutation: str) -> None:
+    plan, _ = _layout(tmp_path)
+    values = dict(plan.__dict__)
+    if mutation == "relative":
+        values["state_root"] = Path("relative")
+        values["journal_root"] = Path("relative") / controller.JOURNAL_DIR_NAME
+    elif mutation == "state_in_release":
+        values["state_root"] = plan.deploy_root / "state"
+        values["journal_root"] = values["state_root"] / controller.JOURNAL_DIR_NAME
+    else:
+        values["journal_root"] = plan.state_root / "caller-chosen"
+    forged = controller.ControllerPlan(**values)
+
+    with pytest.raises(controller.ControllerPreflightError, match="plan_invalid"):
+        controller.read_controller_status(forged)
+    with pytest.raises(controller.ControllerPreflightError, match="plan_invalid"):
+        with controller.controller_lock(forged):
+            pass
 
 
 def test_lock_create_is_private_durable_and_persistent(
@@ -119,6 +145,22 @@ def test_lock_create_is_private_durable_and_persistent(
         assert info.st_nlink == 1
         assert synced
     assert lock.is_file()
+
+
+def test_lock_requires_installer_created_state(tmp_path: Path) -> None:
+    plan, _ = _layout(tmp_path)
+    missing = tmp_path / "missing-controller-state"
+    missing_plan = controller.build_controller_plan(
+        state_root=missing,
+        deploy_root=plan.deploy_root,
+        current=plan.current,
+        controller_root=plan.controller_root,
+    )
+
+    with pytest.raises(controller.ControllerPreflightError, match="state_unsafe"):
+        with controller.controller_lock(missing_plan):
+            pass
+    assert not missing.exists()
 
 
 @pytest.mark.parametrize("mutation", ["symlink", "directory", "hardlink", "wide"])
@@ -171,6 +213,21 @@ def test_missing_status_is_byte_for_byte_read_only(tmp_path: Path) -> None:
     assert not plan.journal_root.exists()
     assert (state.stat().st_mtime_ns, tuple(state.iterdir())) == before
 
+    missing = tmp_path / "missing-state"
+    missing_plan = controller.build_controller_plan(
+        state_root=missing,
+        deploy_root=plan.deploy_root,
+        current=plan.current,
+        controller_root=plan.controller_root,
+    )
+    parent_before = (tmp_path.stat().st_mtime_ns, tuple(tmp_path.iterdir()))
+    assert controller.read_controller_status(missing_plan) == {
+        "state": "idle",
+        "journal": None,
+    }
+    assert not missing.exists()
+    assert (tmp_path.stat().st_mtime_ns, tuple(tmp_path.iterdir())) == parent_before
+
 
 def test_valid_status_projects_allowlisted_fields_without_writes(tmp_path: Path) -> None:
     plan, _ = _layout(tmp_path)
@@ -208,11 +265,16 @@ def test_source_has_no_upgrade_mutation_or_execution_capability() -> None:
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     imports = {
-        alias.name
+        alias.name.split(".", 1)[0]
         for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
+        if isinstance(node, ast.Import)
         for alias in node.names
     }
+    imports.update(
+        node.module.split(".", 1)[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    )
     assert not imports & {"subprocess", "socket", "urllib", "httpx", "requests"}
     for forbidden in (
         "systemctl",
