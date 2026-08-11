@@ -19,6 +19,10 @@ def _popup(title, query, *rows):
     ])
 
 
+def _zoom_popup_row(left, content, right=""):
+    return left.ljust(138) + content.ljust(52) + right
+
+
 THEME_INITIAL_54 = "\n".join([
     "     Themes                                  esc",
     "",
@@ -59,6 +63,60 @@ COMMANDS_FILTERED_54 = "\n".join([
     "     Agent",
     "     Switch model                       ctrl+x m",
 ])
+WIDE_THEME_INITIAL = "\n".join([
+    "  ┃  regio    Themes                                  esc",
+    "  ┃  regio",
+    "  ┃           Search",
+    "",
+    "left residue  orng",
+    "other output  osaka-jade",
+])
+WIDE_THEME_FILTERED = "\n".join([
+    "changed-left  Themes                                  esc",
+    "changed-left",
+    "query residue palenight",
+    "",
+    "body residue  palenight",
+])
+WIDE_COMMANDS_INITIAL = "\n".join([
+    "left residue  Commands                                esc",
+    "under output  ",
+    "query residue Search",
+    "",
+    "body residue  Suggested",
+    "other output  Switch session                     ctrl+x l",
+])
+WIDE_COMMANDS_FILTERED = "\n".join([
+    "changed-left  Commands                                esc",
+    "stale region  ",
+    "query residue Switch to",
+    "",
+    "body residue  System",
+    "other output  Switch to dark mode",
+])
+ZOOM_THEME_INITIAL = "\n".join([
+    _zoom_popup_row(
+        "history Themes  esc", "Themes                                  esc",
+        "right header residue",
+    ),
+    _zoom_popup_row("under output", "", "right spacer residue"),
+    _zoom_popup_row("+ Thought: 1.3s", "Search", "right query residue"),
+    _zoom_popup_row("pane background", "", "right spacer changed"),
+    _zoom_popup_row("  ┃", "flexoki", "right body residue"),
+    _zoom_popup_row("Todos", "github", "right body changed"),
+    _zoom_popup_row("status text", "gruvbox", "right body output"),
+    _zoom_popup_row("other output", "kanagawa", "right body tail"),
+])
+ZOOM_THEME_FILTERED = "\n".join([
+    _zoom_popup_row(
+        "changed Themes  esc", "Themes                                  esc",
+        "different header residue",
+    ),
+    _zoom_popup_row("changed under", "", "different spacer residue"),
+    _zoom_popup_row("different thought", "kanagawa", "different query residue"),
+    _zoom_popup_row("changed pane", "", "different spacer changed"),
+    _zoom_popup_row("changed status", "kanagawa", "different body residue"),
+])
 
 
 def _split_popup(screen):
@@ -86,13 +144,56 @@ def test_popup_region_accepts_bordered_rows_with_bare_spacers(
     assert herdr_client._opencode_popup_has_label(regions[0], label) is True
 
 
-def test_popup_region_still_requires_border_on_nonempty_split_rows():
+def test_popup_region_requires_query_at_overlay_column():
     lines = _split_popup(THEME_INITIAL_54).splitlines()
-    lines[2] = "     Search"
+    lines[2] = "residue"
 
     assert herdr_client._opencode_popup_regions(
         "\n".join(lines), "Themes",
     ) == ()
+
+
+def test_popup_region_uses_overlay_column_with_arbitrary_left_residue():
+    regions = herdr_client._opencode_popup_regions(WIDE_THEME_INITIAL, "Themes")
+
+    assert len(regions) == 1
+    popup = regions[0]
+    filtered = herdr_client._opencode_popup_region_at(
+        WIDE_THEME_FILTERED, popup,
+    )
+    assert filtered is not None
+    assert herdr_client._opencode_popup_has_label(filtered, "palenight") is True
+
+
+def test_popup_region_prefers_wide_overlay_title_over_left_title_residue():
+    regions = herdr_client._opencode_popup_regions(ZOOM_THEME_INITIAL, "Themes")
+
+    assert len(regions) == 1
+    popup = regions[0]
+    assert popup.header_column == 138
+    assert popup.rows == ("Search", "flexoki", "github", "gruvbox", "kanagawa")
+    filtered = herdr_client._opencode_popup_region_at(ZOOM_THEME_FILTERED, popup)
+    assert filtered is not None
+    assert filtered.rows == ("kanagawa", "kanagawa")
+
+
+def test_command_popup_region_uses_overlay_column_with_arbitrary_left_residue():
+    regions = herdr_client._opencode_popup_regions(
+        WIDE_COMMANDS_INITIAL, "Commands",
+    )
+
+    assert len(regions) == 1
+    popup = regions[0]
+    filtered = herdr_client._opencode_popup_region_at(
+        WIDE_COMMANDS_FILTERED, popup,
+    )
+    assert filtered is not None
+    assert herdr_client._opencode_popup_header_at(
+        WIDE_COMMANDS_FILTERED, popup,
+    ) is True
+    assert herdr_client._opencode_popup_has_label(
+        filtered, "Switch to dark mode",
+    ) is True
 
 
 def test_theme_popup_region_ignores_background_marker_changes():

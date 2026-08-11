@@ -1057,67 +1057,66 @@ def _wait_opencode_visible(
 class _OpenCodePopupRegion(NamedTuple):
     title: str
     header_line: int
-    header_prefix: str
+    header_column: int
     rows: tuple[str, ...]
+
+
+_OPENCODE_POPUP_WIDTH = 54
+_OPENCODE_POPUP_TITLE_OFFSET = 2
 
 
 def _opencode_popup_regions(
     screen: str, title: str,
 ) -> tuple[_OpenCodePopupRegion, ...]:
     lines = screen.splitlines()
-    header_pattern = re.compile(rf"{re.escape(title)}\s{{2,}}esc\s*$")
+    header_pattern = re.compile(rf"{re.escape(title)}\s{{2,}}esc")
+    header_crop_pattern = re.compile(
+        rf"{re.escape(title)}\s{{2,}}esc\s*$",
+    )
     regions: list[_OpenCodePopupRegion] = []
     for index, line in enumerate(lines):
-        match = header_pattern.search(line)
-        if match is None:
-            continue
-        prefix = line[:match.start()]
-        border_column = prefix.rfind("┃")
-        header_indent = len(prefix[border_column + 1:]) if border_column >= 0 else len(prefix)
-        # Real OpenCode popups start with: header, spacer, Search/filter, spacer.
-        # Split panes repeat their vertical border; single-pane output has none.
-        bordered = border_column >= 0
-
-        def content_at(row: str) -> str | None:
-            if bordered:
-                if not row.strip():
-                    return ""
-                if len(row) <= border_column or row[border_column] != "┃":
-                    return None
-                return row[border_column + 1:]
-            return row
-
-        layout = [content_at(row) for row in lines[index + 1:index + 4]]
-        if (
-            len(layout) != 3
-            or any(content is None for content in layout)
-            or layout[0].strip()
-            or not layout[1].strip()
-            or layout[2].strip()
-        ):
-            continue
-        query = layout[1]
-        indent = len(query) - len(query.lstrip())
-        if indent < max(0, header_indent - 2):
-            continue
-
-        rows = [query.strip()]
-        blank_run = 0
-        for row in lines[index + 4:index + 25]:
-            content = content_at(row)
-            if content is None or header_pattern.search(content):
-                break
-            if not content.strip():
-                blank_run += 1
-                if blank_run > 2:
-                    break
+        for match in header_pattern.finditer(line):
+            header_column = match.start()
+            crop_right = header_column + (
+                _OPENCODE_POPUP_WIDTH - _OPENCODE_POPUP_TITLE_OFFSET
+            )
+            if not header_crop_pattern.fullmatch(line[header_column:crop_right]):
                 continue
-            indent = len(content) - len(content.lstrip())
-            if indent < max(0, header_indent - 2):
-                break
+            # Real OpenCode popups start with: header, spacer, Search/filter,
+            # spacer. Both sides of the fixed-width crop may retain background.
+            def content_at(row: str) -> str:
+                return row[header_column:crop_right]
+
+            layout = [content_at(row) for row in lines[index + 1:index + 4]]
+            if (
+                len(layout) != 3
+                or layout[0].strip()
+                or not layout[1].strip()
+                or layout[2].strip()
+            ):
+                continue
+            query = layout[1]
+            if query != query.lstrip():
+                continue
+
+            rows = [query.strip()]
             blank_run = 0
-            rows.append(content.strip())
-        regions.append(_OpenCodePopupRegion(title, index, prefix, tuple(rows)))
+            for row in lines[index + 4:index + 25]:
+                content = content_at(row)
+                if header_crop_pattern.fullmatch(content):
+                    break
+                if not content.strip():
+                    blank_run += 1
+                    if blank_run > 2:
+                        break
+                    continue
+                if content != content.lstrip():
+                    break
+                blank_run = 0
+                rows.append(content.strip())
+            regions.append(
+                _OpenCodePopupRegion(title, index, header_column, tuple(rows)),
+            )
     return tuple(regions)
 
 
@@ -1127,7 +1126,7 @@ def _opencode_popup_region_at(
     for region in _opencode_popup_regions(screen, expected.title):
         if (
             region.header_line == expected.header_line
-            and region.header_prefix == expected.header_prefix
+            and region.header_column == expected.header_column
         ):
             return region
     return None
@@ -1139,12 +1138,13 @@ def _opencode_popup_header_at(
     lines = screen.splitlines()
     if expected.header_line >= len(lines):
         return False
-    pattern = re.compile(rf"{re.escape(expected.title)}\s{{2,}}esc\s*$")
-    match = pattern.search(lines[expected.header_line])
-    return (
-        match is not None
-        and lines[expected.header_line][:match.start()] == expected.header_prefix
+    crop_right = expected.header_column + (
+        _OPENCODE_POPUP_WIDTH - _OPENCODE_POPUP_TITLE_OFFSET
     )
+    pattern = re.compile(rf"{re.escape(expected.title)}\s{{2,}}esc\s*$")
+    return pattern.fullmatch(
+        lines[expected.header_line][expected.header_column:crop_right],
+    ) is not None
 
 
 def _opencode_popup_label(row: str) -> str:
@@ -1160,10 +1160,10 @@ def _opencode_new_popup_region(
     title: str,
     before: tuple[_OpenCodePopupRegion, ...],
 ) -> _OpenCodePopupRegion | None:
-    old_anchors = {(region.header_line, region.header_prefix) for region in before}
+    old_anchors = {(region.header_line, region.header_column) for region in before}
     return next(
         (region for region in _opencode_popup_regions(screen, title)
-         if (region.header_line, region.header_prefix) not in old_anchors),
+         if (region.header_line, region.header_column) not in old_anchors),
         None,
     )
 
