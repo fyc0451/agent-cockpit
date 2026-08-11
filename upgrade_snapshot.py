@@ -466,14 +466,44 @@ def _hash_owned_file(path: Path, *, max_bytes: int) -> tuple[int, str]:
 
 
 def _sqlite_fd_uri(fd: int) -> str:
+    """Bind sqlite URI to an already-open fd via /proc/self/fd or /dev/fd.
+
+    macOS /dev/fd/N often has Path.stat() metadata that does not match fstat(fd);
+    re-open the descriptor path and compare fstat results before accepting it.
+    """
     opened = os.fstat(fd)
+    candidates: list[Path] = []
     for directory in (Path("/proc/self/fd"), Path("/dev/fd")):
-        descriptor_path = directory / str(fd)
+        if directory.is_dir():
+            candidates.append(directory / str(fd))
+    for descriptor_path in candidates:
         try:
             current = descriptor_path.stat()
         except OSError:
+            current = None
+        if current is not None and (current.st_dev, current.st_ino) == (
+            opened.st_dev,
+            opened.st_ino,
+        ):
+            return f"{descriptor_path.as_uri()}?mode=ro"
+        # Darwin: path.stat() can disagree; open the path and fstat the probe.
+        probe = -1
+        probed: os.stat_result | None = None
+        try:
+            probe = os.open(
+                descriptor_path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+            probed = os.fstat(probe)
+        except OSError:
             continue
-        if (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+        finally:
+            if probe >= 0:
+                os.close(probe)
+        if probed is not None and (probed.st_dev, probed.st_ino) == (
+            opened.st_dev,
+            opened.st_ino,
+        ):
             return f"{descriptor_path.as_uri()}?mode=ro"
     _reject("backup_snapshot_unsafe")
 
