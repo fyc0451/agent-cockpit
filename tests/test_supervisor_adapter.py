@@ -1087,3 +1087,188 @@ class TestR4ContractGaps:
         sig = inspect.signature(sa.render_mac_controller_plist)
         assert "stdout_name" not in sig.parameters
         assert "stderr_name" not in sig.parameters
+
+
+def _handcraft_controller_plist(
+    *,
+    working_directory: str,
+    program_arguments: tuple[str, ...],
+) -> str:
+    """构造表面合规的 controller plist（不经 render，用于 validator 反例）。"""
+    args_xml = "\n".join(
+        f"    <string>{sa.escape_plist_xml(a)}</string>" for a in program_arguments
+    )
+    wd = sa.escape_plist_xml(working_directory)
+    stdout = sa.escape_plist_xml(f"{working_directory}/{sa.MAC_CONTROLLER_STDOUT_NAME}")
+    stderr = sa.escape_plist_xml(f"{working_directory}/{sa.MAC_CONTROLLER_STDERR_NAME}")
+    label = sa.escape_plist_xml(sa.MAC_CONTROLLER_LABEL)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        "  <key>Label</key>\n"
+        f"  <string>{label}</string>\n"
+        "  <key>ProgramArguments</key>\n"
+        "  <array>\n"
+        f"{args_xml}\n"
+        "  </array>\n"
+        "  <key>WorkingDirectory</key>\n"
+        f"  <string>{wd}</string>\n"
+        "  <key>RunAtLoad</key>\n"
+        "  <true/>\n"
+        "  <key>KeepAlive</key>\n"
+        "  <true/>\n"
+        "  <key>ThrottleInterval</key>\n"
+        "  <integer>3</integer>\n"
+        "  <key>StandardOutPath</key>\n"
+        f"  <string>{stdout}</string>\n"
+        "  <key>StandardErrorPath</key>\n"
+        f"  <string>{stderr}</string>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+
+
+# ── S0 R5：controller validator 无条件 canonical + argv 边界 ────
+
+
+class TestR5ControllerValidatorGaps:
+    def test_r5_omitted_context_must_not_accept_tmp_evil_controller(
+        self, tmp_path: Path
+    ) -> None:
+        """Terra BLOCK：controller label + /tmp/evil 在省略上下文时不得通过。"""
+        evil = Path("/tmp") / f"evil-controller-s0r5-{tmp_path.name}"
+        evil.mkdir(parents=True, exist_ok=True)
+        bin_path = evil / "run.sh"
+        bin_path.write_text("#!/bin/sh\n", encoding="utf-8")
+        text = _handcraft_controller_plist(
+            working_directory=evil.as_posix(),
+            program_arguments=(bin_path.as_posix(),),
+        )
+        # 省略 program_arguments / current_dir / deploy_root —— 旧实现错误 ACCEPT
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_mac_plist_contract(
+                text,
+                expected_label=sa.MAC_CONTROLLER_LABEL,
+                expected_working_directory=evil,
+            )
+        assert exc.value.reason == "controller_canonical_required"
+
+    def test_r5_controller_requires_canonical_even_with_expected_argv(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        ctrl = deploy_layout["controller"]
+        prog = (ctrl / "run.sh").as_posix()
+        Path(prog).write_text("#!/bin/sh\n", encoding="utf-8")
+        text = sa.render_mac_controller_plist(
+            controller_dir=ctrl,
+            program_arguments=[prog],
+            current_dir=deploy_layout["current"],
+            deploy_root=deploy_layout["root"],
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_mac_plist_contract(
+                text,
+                expected_label=sa.MAC_CONTROLLER_LABEL,
+                expected_working_directory=ctrl,
+                program_arguments=[prog],
+                # 故意省略 current/deploy
+            )
+        assert exc.value.reason == "controller_canonical_required"
+
+    def test_r5_validator_rejects_argv_outside_controller_dir(
+        self, deploy_layout: dict[str, Path], tmp_path: Path
+    ) -> None:
+        ctrl = deploy_layout["controller"]
+        outside = tmp_path / "not-controller" / "bin"
+        outside.parent.mkdir()
+        outside.write_text("x", encoding="utf-8")
+        text = _handcraft_controller_plist(
+            working_directory=ctrl.as_posix(),
+            program_arguments=(outside.as_posix(),),
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_mac_plist_contract(
+                text,
+                expected_label=sa.MAC_CONTROLLER_LABEL,
+                expected_working_directory=ctrl,
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "controller_argv_outside_controller"
+
+    def test_r5_validator_rejects_controller_wd_inside_release_tree(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        root = deploy_layout["root"]
+        cur = deploy_layout["current"]
+        # 落在 release tree 内的伪 controller
+        inside = root / "fake-controller"
+        inside.mkdir()
+        prog = inside / "run.sh"
+        prog.write_text("#!/bin/sh\n", encoding="utf-8")
+        text = _handcraft_controller_plist(
+            working_directory=inside.as_posix(),
+            program_arguments=(prog.as_posix(),),
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_mac_plist_contract(
+                text,
+                expected_label=sa.MAC_CONTROLLER_LABEL,
+                expected_working_directory=inside,
+                current_dir=cur,
+                deploy_root=root,
+            )
+        assert exc.value.reason == "controller_inside_release_tree"
+
+    def test_r5_validator_rejects_nested_symlink_argv_escape(
+        self, deploy_layout: dict[str, Path], tmp_path: Path
+    ) -> None:
+        ctrl = deploy_layout["controller"]
+        evil = tmp_path / "escape-target"
+        evil.mkdir()
+        (evil / "payload").write_text("x", encoding="utf-8")
+        link = ctrl / "jump"
+        link.symlink_to(evil)
+        text = _handcraft_controller_plist(
+            working_directory=ctrl.as_posix(),
+            program_arguments=(f"{ctrl.as_posix()}/jump/payload",),
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_mac_plist_contract(
+                text,
+                expected_label=sa.MAC_CONTROLLER_LABEL,
+                expected_working_directory=ctrl,
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "controller_argv_symlink_escape"
+
+    def test_r5_main_plist_contract_still_requires_launcher_only(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        """主 app plist 不因 R5 改成 controller 语义。"""
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        text = sa.render_mac_main_plist(
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+        )
+        sa.validate_mac_plist_contract(
+            text,
+            expected_label=sa.MAC_MAIN_LABEL,
+            expected_working_directory=cur,
+            program_arguments=argv,
+            current_dir=cur,
+            deploy_root=deploy_layout["root"],
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_mac_plist_contract(
+                text,
+                expected_label=sa.MAC_MAIN_LABEL,
+                expected_working_directory=cur,
+            )
+        assert exc.value.reason == "main_launcher_required"

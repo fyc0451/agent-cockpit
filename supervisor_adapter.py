@@ -910,8 +910,10 @@ def validate_mac_plist_contract(
 ) -> MacPlistContract:
     """校验固定 label、WD、exact bool/int 字段与**固定**同源 log 文件名。
 
-    日志名不可由 caller 放宽。主 LA 必须提供 program_arguments+current_dir；
-    controller 校验 argv 时若提供 program_arguments 则要求 current+deploy_root。
+    日志名不可由 caller 放宽。主 LA 必须提供 program_arguments+current_dir。
+    controller LA **无条件**要求 canonical current_dir+deploy_root，并对 plist
+    实际 ProgramArguments 始终执行 normalize_controller_argv（argv[0] 字面+
+    resolve 须在 controller_dir 内且 release tree 外）。
     """
     assert_fixed_mac_label(expected_label)
     wd = validate_absolute_path(expected_working_directory, role="working_directory")
@@ -954,17 +956,27 @@ def validate_mac_plist_contract(
         )
         if contract.program_arguments != expected:
             raise SupervisorAdapterError("program_arguments_mismatch")
-    elif program_arguments is not None:
+    elif expected_label == MAC_CONTROLLER_LABEL:
+        # R5：不可因省略 program_arguments 而跳过 controller 边界校验
         if current_dir is None or deploy_root is None:
             raise SupervisorAdapterError("controller_canonical_required")
-        expected = normalize_controller_argv(
-            program_arguments,
+        normalized = normalize_controller_argv(
+            contract.program_arguments,
             controller_dir=wd,
             current=current_dir,
             deploy_root=deploy_root,
         )
-        if contract.program_arguments != expected:
+        if contract.program_arguments != normalized:
             raise SupervisorAdapterError("program_arguments_mismatch")
+        if program_arguments is not None:
+            expected = normalize_controller_argv(
+                program_arguments,
+                controller_dir=wd,
+                current=current_dir,
+                deploy_root=deploy_root,
+            )
+            if contract.program_arguments != expected:
+                raise SupervisorAdapterError("program_arguments_mismatch")
     return contract
 
 
