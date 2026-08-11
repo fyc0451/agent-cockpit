@@ -117,7 +117,7 @@ bash upgrade.sh     # 已退役(fail-closed)：一键升级停用，升级走受
 | 重启 Cockpit | `systemctl --user restart agent-cockpit` | `bash launchd.sh restart` |
 | 重启本地 Hub | `systemctl --user restart agent-mail` | `bash agent-mail-launchd.sh restart` |
 | 查看状态 | `systemctl --user status agent-cockpit agent-mail` | `launchctl print gui/$(id -u)/io.github.fyc0451.agent-cockpit` / `bash agent-mail-launchd.sh status` |
-| 日志 | `journalctl --user -u agent-cockpit -f` | `tail -f agent-cockpit.stdout.log agent-cockpit.stderr.log` |
+| 日志 | `journalctl --user -u agent-cockpit -f` | `tail -f logs/agent-cockpit.log`（启动失败看 `logs/launchd.*.log`） |
 
 ### 2.6 验证安装成功
 
@@ -362,7 +362,7 @@ mail-send --agent kimi --instance main --project /path/to/project \
 | 终端右侧黑条/错位、文字太暗 | 均已修复（自适应尺寸 + 暗色对比度提升），普通刷新即可 |
 | 并发同名注册偶发失败 | 既有基线竞态，重试即可 |
 
-看日志定位：Linux 用 `journalctl --user -u agent-cockpit -f`；macOS 看部署目录中的 `agent-cockpit.stdout.log` 和 `agent-cockpit.stderr.log`。
+看日志定位：Linux 用 `journalctl --user -u agent-cockpit -f`；macOS 看部署目录 `logs/agent-cockpit.log`（大小轮转），启动失败诊断见 `logs/launchd.stdout.log` / `logs/launchd.stderr.log`。
 
 ---
 

@@ -454,7 +454,8 @@ sed "s|__INSTALL_DIR__|$(ac_escape_sed_replacement "$plist_dir")|g" "$3"
     values = [node.text for node in plist.findall(".//string")]
     assert f"{tricky}/launchd.sh" in values
     assert tricky in values
-    assert f"{tricky}/agent-cockpit.stdout.log" in values
+    assert f"{tricky}/logs/launchd.stdout.log" in values
+    assert f"{tricky}/logs/launchd.stderr.log" in values
 
     if shutil.which("systemd-analyze"):
         python_bin = tricky_path / ".venv" / "bin" / "python"

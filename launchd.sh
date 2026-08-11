@@ -81,14 +81,39 @@ uninstall_service() {
   echo "Agent Cockpit LaunchAgent 已卸载。"
 }
 
+prepare_logs() {
+  # Private log dir for app + launchd bootstrap diagnostics (O3).
+  mkdir -p -m 700 "$INSTALL_DIR/logs"
+  chmod 700 "$INSTALL_DIR/logs" 2>/dev/null || true
+  export COCKPIT_LOG_DIR="${COCKPIT_LOG_DIR:-$INSTALL_DIR/logs}"
+  if [[ -x "$INSTALL_DIR/.venv/bin/python" ]]; then
+    "$INSTALL_DIR/.venv/bin/python" - "$INSTALL_DIR" <<'PY' || true
+import sys
+from pathlib import Path
+
+try:
+    from log_config import prepare_macos_log_dir
+except Exception:
+    sys.exit(0)
+try:
+    prepare_macos_log_dir(Path(sys.argv[1]))
+except Exception as exc:
+    print(f"prepare_macos_log_dir: {exc}", file=sys.stderr)
+    sys.exit(0)
+PY
+  fi
+}
+
 case "${1:-}" in
   run)
     load_runtime_env
+    prepare_logs
     export PYTHONUNBUFFERED=1
     export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$HOME/.kimi-code/bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
     exec "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/server.py"
     ;;
   install|restart)
+    prepare_logs
     install_service
     ;;
   uninstall)

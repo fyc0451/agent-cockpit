@@ -17,6 +17,7 @@ import re
 import secrets
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager, suppress
@@ -6781,7 +6782,22 @@ def health_poll():
 
 if __name__ == "__main__":
     import uvicorn
+
+    from log_config import LogConfigError, configure_logging
+
+    try:
+        level_name = configure_logging()
+    except LogConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from exc
     host = os.environ.get("COCKPIT_HOST", "127.0.0.1")
     port = int(os.environ.get("COCKPIT_PORT", "8790"))
     _validate_bind(host)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # log_config=None: use process logging (no second uvicorn config / no duplicates).
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=level_name.lower(),
+        log_config=None,
+    )
