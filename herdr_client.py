@@ -1169,15 +1169,27 @@ def _opencode_popup_has_first_body_label(
     )
 
 
+def _opencode_popup_opening_signature(
+    region: _OpenCodePopupRegion,
+) -> tuple[int, int, str, tuple[str, ...]]:
+    # Rows after the first body item may be background below the borderless popup.
+    return (
+        region.header_line, region.header_column,
+        region.query, region.rows[1:2],
+    )
+
+
 def _opencode_new_popup_region(
     screen: str,
     title: str,
     before: tuple[_OpenCodePopupRegion, ...],
 ) -> _OpenCodePopupRegion | None:
-    old_anchors = {(region.header_line, region.header_column) for region in before}
+    old_signatures = {
+        _opencode_popup_opening_signature(region) for region in before
+    }
     return next(
         (region for region in _opencode_popup_regions(screen, title)
-         if (region.header_line, region.header_column) not in old_anchors),
+         if _opencode_popup_opening_signature(region) not in old_signatures),
         None,
     )
 
@@ -1190,12 +1202,13 @@ def apply_opencode_theme_to_pane(
         return {"error": "非法主题名"}
 
     prefix = ["--session", session, "pane"]
-    dialog_open = False
+    dialog_may_be_open = False
     try:
         before = _opencode_visible(prefix, pane_id)
         before_regions = _opencode_popup_regions(before, "Themes")
         # Ctrl+X,T 直接打开独立主题弹层，OpenCode 会保留已有 composer 草稿。
         _run(prefix + ["send-keys", pane_id, "ctrl+x", "t"], timeout=5)
+        dialog_may_be_open = True
         opened = _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: _opencode_new_popup_region(
@@ -1208,7 +1221,6 @@ def apply_opencode_theme_to_pane(
         )
         if popup is None:
             raise RuntimeError("OpenCode 主题弹层未打开")
-        dialog_open = True
         _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
         _run(prefix + ["send-text", pane_id, theme_name], timeout=5)
         _wait_opencode_visible(
@@ -1227,12 +1239,12 @@ def apply_opencode_theme_to_pane(
             lambda screen: not _opencode_popup_header_at(screen, popup),
             "OpenCode 主题弹层确认后未关闭", timeout=1.0,
         )
-        dialog_open = False
-    except RuntimeError as exc:
-        if dialog_open:
+        dialog_may_be_open = False
+    except Exception as exc:
+        if dialog_may_be_open:
             try:
                 _run(prefix + ["send-keys", pane_id, "esc"], timeout=5)
-            except RuntimeError:
+            except Exception:
                 pass
         return {"error": str(exc)}
     return {
@@ -1249,11 +1261,12 @@ def apply_opencode_mode_to_pane(
         return {"error": "mode 必须是 light 或 dark"}
 
     prefix = ["--session", session, "pane"]
-    dialog_open = False
+    dialog_may_be_open = False
     try:
         before = _opencode_visible(prefix, pane_id)
         before_regions = _opencode_popup_regions(before, "Commands")
         _run(prefix + ["send-keys", pane_id, "ctrl+p"], timeout=5)
+        dialog_may_be_open = True
         opened = _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: _opencode_new_popup_region(
@@ -1266,7 +1279,6 @@ def apply_opencode_mode_to_pane(
         )
         if popup is None:
             raise RuntimeError("OpenCode 命令弹层未打开")
-        dialog_open = True
         _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
         _run(prefix + ["send-text", pane_id, "Switch to"], timeout=5)
 
@@ -1297,12 +1309,12 @@ def apply_opencode_mode_to_pane(
             lambda screen: not _opencode_popup_header_at(screen, popup),
             "OpenCode 命令弹层未关闭", timeout=1.0,
         )
-        dialog_open = False
-    except RuntimeError as exc:
-        if dialog_open:
+        dialog_may_be_open = False
+    except Exception as exc:
+        if dialog_may_be_open:
             try:
                 _run(prefix + ["send-keys", pane_id, "esc"], timeout=5)
-            except RuntimeError:
+            except Exception:
                 pass
         return {"error": str(exc)}
     return {

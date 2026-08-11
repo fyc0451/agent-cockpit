@@ -117,6 +117,26 @@ ZOOM_THEME_FILTERED = "\n".join([
     _zoom_popup_row("changed pane", "", "different spacer changed"),
     _zoom_popup_row("changed status", "kanagawa", "different body residue"),
 ])
+SAME_ANCHOR_THEME_BEFORE = "\n".join([
+    *(["history"] * 16),
+    "left residue  Themes                                  esc",
+    "left residue  ",
+    "left residue  aura",
+    "left residue  ",
+    "left residue  aura",
+])
+SAME_ANCHOR_THEME_AFTER = "\n".join([
+    *(["history"] * 16),
+    "changed-left  Themes                                  esc",
+    "changed-left  ",
+    "changed-left  Search",
+    "changed-left  ",
+    "changed-left  flexoki",
+    "changed-left  github",
+    "changed-left  gruvbox",
+    "changed-left  kanagawa",
+    "changed-left  lucent-orng",
+])
 
 
 def _split_popup(screen):
@@ -220,6 +240,56 @@ def test_theme_popup_region_ignores_background_marker_changes():
     assert herdr_client._opencode_new_popup_region(
         current, "Themes", regions,
     ) is None
+
+
+def test_theme_popup_region_treats_changed_same_anchor_signature_as_new():
+    before = herdr_client._opencode_popup_regions(THEME_INITIAL_54, "Themes")
+
+    popup = herdr_client._opencode_new_popup_region(
+        THEME_FILTERED_54, "Themes", before,
+    )
+
+    assert popup is not None
+    assert popup.header_line == before[0].header_line
+    assert popup.header_column == before[0].header_column
+    assert popup.query == "palenight"
+
+
+def test_theme_popup_region_uses_real_same_anchor_signature():
+    before = herdr_client._opencode_popup_regions(
+        SAME_ANCHOR_THEME_BEFORE, "Themes",
+    )
+
+    assert len(before) == 1
+    assert (before[0].header_line, before[0].header_column) == (16, 14)
+    assert (before[0].query, before[0].rows) == ("aura", ("aura", "aura"))
+    popup = herdr_client._opencode_new_popup_region(
+        SAME_ANCHOR_THEME_AFTER, "Themes", before,
+    )
+    assert popup is not None
+    assert (popup.header_line, popup.header_column) == (16, 14)
+    assert popup.query == "Search"
+    assert popup.rows == (
+        "Search", "flexoki", "github", "gruvbox", "kanagawa", "lucent-orng",
+    )
+    assert herdr_client._opencode_new_popup_region(
+        SAME_ANCHOR_THEME_BEFORE.replace("left residue", "other output"),
+        "Themes", before,
+    ) is None
+
+
+def test_theme_popup_region_treats_changed_first_body_with_same_query_as_new():
+    before = herdr_client._opencode_popup_regions(
+        _popup("Themes", "Search", "old-theme"), "Themes",
+    )
+
+    popup = herdr_client._opencode_new_popup_region(
+        _popup("Themes", "Search", "new-theme"), "Themes", before,
+    )
+
+    assert popup is not None
+    assert popup.query == "Search"
+    assert popup.rows[1] == "new-theme"
 
 
 def test_theme_popup_region_stays_open_when_option_changes():
@@ -366,6 +436,34 @@ def test_opencode_theme_picker_accepts_first_unselected_theme(monkeypatch):
     ] in calls
 
 
+def test_opencode_theme_picker_accepts_changed_signature_at_same_anchor(
+    monkeypatch,
+):
+    calls = []
+    screens = iter([
+        _popup("Themes", "Search", "old-theme"),
+        _popup("Themes", "Search", "new-theme"),
+        _popup("Themes", "aura", "aura"),
+        "preserved draft",
+    ])
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if "read" in args:
+            return next(screens)
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_theme_to_pane("demo", "w1:p4", "aura")
+
+    assert result["available"] is True
+    assert [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "Enter",
+    ] in calls
+
+
 @pytest.mark.parametrize(
     ("first_theme", "tail_theme", "requested_theme"),
     [
@@ -450,6 +548,8 @@ def test_opencode_theme_picker_does_not_trust_background_marker_changes(
     def fake_run(args, timeout=10):
         nonlocal read_count
         calls.append(list(args))
+        if args[-1:] == ["esc"]:
+            raise RuntimeError("cleanup failed")
         if "read" in args:
             read_count += 1
             if read_count == 1:
@@ -466,7 +566,68 @@ def test_opencode_theme_picker_does_not_trust_background_marker_changes(
 
     assert result == {"error": "popup did not open"}
     assert not any("send-text" in call for call in calls)
-    assert not any(call[-1:] == ["esc"] for call in calls)
+    assert calls[-1] == [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "esc",
+    ]
+    assert sum(call[-1:] == ["esc"] for call in calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("apply_picker", "argument"),
+    [
+        (herdr_client.apply_opencode_theme_to_pane, "aura"),
+        (herdr_client.apply_opencode_mode_to_pane, "dark"),
+    ],
+)
+def test_opencode_picker_cleans_parser_exception_once(
+    monkeypatch, apply_picker, argument,
+):
+    calls = []
+
+    def fail_parser(*_args):
+        raise ValueError("parser failed")
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        return "preserved draft"
+
+    monkeypatch.setattr(herdr_client, "_opencode_new_popup_region", fail_parser)
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = apply_picker("demo", "w1:p4", argument)
+
+    assert result == {"error": "parser failed"}
+    assert sum(call[-1:] == ["esc"] for call in calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("apply_picker", "argument"),
+    [
+        (herdr_client.apply_opencode_theme_to_pane, "aura"),
+        (herdr_client.apply_opencode_mode_to_pane, "dark"),
+    ],
+)
+def test_opencode_picker_preserves_primary_error_when_cleanup_raises_oserror(
+    monkeypatch, apply_picker, argument,
+):
+    calls = []
+
+    def fail_parser(*_args):
+        raise RuntimeError("primary failure")
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if args[-1:] == ["esc"]:
+            raise OSError("cleanup failed")
+        return "preserved draft"
+
+    monkeypatch.setattr(herdr_client, "_opencode_new_popup_region", fail_parser)
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = apply_picker("demo", "w1:p4", argument)
+
+    assert result == {"error": "primary failure"}
+    assert sum(call[-1:] == ["esc"] for call in calls) == 1
 
 
 def test_opencode_theme_picker_rejects_full_dialog_left_after_enter(monkeypatch):
@@ -638,7 +799,10 @@ def test_opencode_mode_picker_does_not_trust_background_marker_changes(
 
     assert result == {"error": "popup did not open"}
     assert not any("send-text" in call for call in calls)
-    assert not any(call[-1:] == ["esc"] for call in calls)
+    assert calls[-1] == [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "esc",
+    ]
+    assert sum(call[-1:] == ["esc"] for call in calls) == 1
 
 
 def test_opencode_mode_picker_rejects_full_dialog_left_after_action(monkeypatch):
