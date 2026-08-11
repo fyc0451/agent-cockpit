@@ -34,6 +34,17 @@ def _record_dispatch(monkeypatch):
     return calls
 
 
+def _record_schema_dispatch(monkeypatch):
+    calls = []
+
+    def fake_dispatch(argv):
+        calls.append(argv)
+        return 19
+
+    monkeypatch.setattr(native_launcher, "dispatch_schema_probe", fake_dispatch)
+    return calls
+
+
 def test_fixed_helper_command_set():
     assert set(native_launcher.HELPER_COMMANDS) == COMMANDS
 
@@ -47,6 +58,46 @@ def test_explicit_helper_dispatch_preserves_arguments(monkeypatch):
 
     assert native_launcher.main(argv, program="agent-cockpit") == 17
     assert calls == [("mail-send", argv[2:])]
+
+
+def test_explicit_schema_probe_dispatch_preserves_exact_arguments(monkeypatch):
+    calls = _record_schema_dispatch(monkeypatch)
+    argv = [
+        "schema-probe",
+        "--snapshot-root", "/state/snapshot",
+        "--artifact-root", "/deploy/generation",
+        "--version", "2.0.0",
+        "--source-sha", "a" * 40,
+        "--backup-inventory-path", "/state/snapshot/backup-inventory.json",
+        "--backup-inventory-sha256", "b" * 64,
+    ]
+
+    assert native_launcher.main(argv, program="agent-cockpit") == 19
+    assert calls == [argv[1:]]
+
+
+@pytest.mark.parametrize(("result", "expected"), [(None, 0), (23, 23)])
+def test_schema_probe_dispatch_calls_release_readiness_main_with_exact_argv(
+    monkeypatch, result, expected,
+):
+    calls = []
+    imports = []
+
+    class Probe:
+        @staticmethod
+        def main(argv):
+            calls.append(argv)
+            return result
+
+    def fake_import(name):
+        imports.append(name)
+        return Probe
+
+    monkeypatch.setattr(native_launcher.importlib, "import_module", fake_import)
+
+    assert native_launcher.dispatch_schema_probe(["--version", "2.0.0"]) == expected
+    assert imports == ["release_readiness"]
+    assert calls == [["--version", "2.0.0"]]
 
 
 @pytest.mark.parametrize("command", sorted(COMMANDS))
@@ -66,6 +117,15 @@ def test_basename_never_supplies_identity_defaults(monkeypatch):
         program="/opt/bin/mail-recv",
     ) == 17
     assert calls == [("mail-recv", ["--agent", "codex", "--project", "/tmp/project"])]
+
+
+def test_schema_probe_basename_is_not_a_multicall_alias(monkeypatch):
+    calls = _record_schema_dispatch(monkeypatch)
+
+    assert native_launcher.main(
+        ["--version", "2.0.0"], program="/opt/bin/schema-probe"
+    ) is None
+    assert calls == []
 
 
 def test_dispatch_calls_importable_command_main_with_exact_argv(monkeypatch):

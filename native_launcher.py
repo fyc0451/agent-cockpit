@@ -1,4 +1,4 @@
-"""Composable fixed Agent Mail helper dispatcher for the native launcher."""
+"""Composable fixed command dispatcher for the native launcher."""
 from __future__ import annotations
 
 import importlib
@@ -24,6 +24,12 @@ def dispatch_helper(command: str, argv: Sequence[str]) -> int:
     return 0 if result is None else int(result)
 
 
+def dispatch_schema_probe(argv: Sequence[str]) -> int:
+    module = importlib.import_module("release_readiness")
+    result = module.main(list(argv))
+    return 0 if result is None else int(result)
+
+
 def _usage() -> None:
     commands = "|".join(HELPER_COMMANDS)
     print(f"usage: agent-cockpit helper <{commands}> [args ...]", file=sys.stderr)
@@ -41,4 +47,6 @@ def main(
             return dispatch_helper(args[1], args[2:])
         _usage()
         return 2
+    if args and args[0] == "schema-probe":
+        return dispatch_schema_probe(args[1:])
     return None
