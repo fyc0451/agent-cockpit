@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""退休（soft-delete）一个 Agent Mail 身份：Hub retire_agent + 本地 registry tombstone。
+
+合同（IDENTITY R1）
+------------------
+- 精确 agent + opaque instance 定位 registry（文件名 ``{agent}--{instance}.json``）
+- Hub ``retire_agent`` 成功后**保留** registry 文件，写入 retired tombstone（不删除）
+- 重复调用幂等
+- 任何失败 fail-closed，不谎报成功；不输出 registration_token
+
+不触碰 server.py / herdr_client.py。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from am_common import (  # noqa: E402
+    REGISTRY_DIR,
+    load_client_config,
+    mcp_call,
+    mcp_tool,
+    slugify,
+)
+
+_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _validate_component(name: str, label: str) -> str:
+    if not _COMPONENT_RE.fullmatch(name):
+        raise SystemExit(
+            f"{label} 仅允许字母、数字、下划线、点和连字符"
+            f"(1-64 字符,不能以标点开头): {name!r}"
+        )
+    return name
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _secure_read_identity(path: Path, label: str = "身份文件") -> dict:
+    """读取前安全门：拒绝 symlink/非普通文件/非当前 uid/group-other 权限。"""
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"{label}不可读: {path}（capability 值不会输出）") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise SystemExit(f"拒绝 symlink {label}: {path}（capability 值不会输出）")
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit(f"{label}不是普通文件: {path}（capability 值不会输出）")
+    if info.st_uid != os.getuid():
+        raise SystemExit(f"{label}属主不是当前用户: {path}（capability 值不会输出）")
+    if info.st_mode & 0o077:
+        raise SystemExit(
+            f"{label}权限过宽（要求 0600）: {path}（capability 值不会输出）"
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(
+            f"{label}损坏不可读: {path}（capability 值不会输出）"
+        ) from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"{label}格式错误: {path}")
+    return data
+
+
+def _atomic_write_identity(path: Path, identity: dict) -> None:
+    """原子写身份/tombstone：mkstemp + fsync + chmod 0600 + replace + 目录 fsync。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".am-retire.", suffix=".tmp", dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(identity, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        _fsync_dir(path.parent)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _hub_retire(
+    hub: str, token: str, project_key: str, agent_name: str, registration_token: str,
+) -> dict:
+    """调用 Hub retire_agent；仅当返回 status=retired 视为成功。"""
+    result = mcp_tool(hub, token, "retire_agent", {
+        "project_key": project_key,
+        "agent_name": agent_name,
+        "registration_token": registration_token,
+    })
+    if not isinstance(result, dict) or result.get("status") != "retired":
+        raise SystemExit(
+            "Hub retire_agent 未确认退休"
+            f"（status={result.get('status') if isinstance(result, dict) else type(result)!r}；"
+            "capability 值不会输出）"
+        )
+    return result
+
+
+def _write_tombstone(registry_file: Path, identity: dict, *, retired_at: str | None) -> dict:
+    tombstone = dict(identity)
+    tombstone["status"] = "retired"
+    tombstone["retired_at"] = retired_at or identity.get("retired_at") or _utc_now()
+    try:
+        _atomic_write_identity(registry_file, tombstone)
+    except OSError as exc:
+        raise SystemExit(
+            "Hub 已退休该身份，但本地 tombstone 落盘失败；"
+            "registry 文件仍保留原内容，请重试 am-retire 幂等收敛"
+            "（capability 值不会输出）"
+        ) from exc
+    return tombstone
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--agent", required=True, help="产品侧 agent 类型（registry 键）")
+    parser.add_argument(
+        "--instance", required=True,
+        help="opaque instance ID（registry 键；不是显示名）",
+    )
+    parser.add_argument("--project", default=str(Path.cwd()))
+    args = parser.parse_args(argv)
+
+    agent = _validate_component(args.agent, "agent")
+    instance = _validate_component(args.instance, "instance")
+    project_key = str(Path(args.project).resolve())
+    registry_file = REGISTRY_DIR / slugify(project_key) / f"{agent}--{instance}.json"
+
+    if not registry_file.exists():
+        raise SystemExit(
+            f"身份未注册: {registry_file}\n"
+            f"先运行: am-register --agent {agent} --instance {instance} "
+            f"--project {project_key}"
+        )
+    # exists 但可能是 dangling symlink：交给 secure_read 拒绝
+    identity = _secure_read_identity(registry_file)
+    if identity.get("project_key") != project_key:
+        raise SystemExit(
+            f"本地身份项目不匹配: {identity.get('project_key')!r} != {project_key!r}"
+        )
+    agent_name = identity.get("name")
+    registration_token = identity.get("registration_token")
+    if not isinstance(agent_name, str) or not agent_name:
+        raise SystemExit("身份文件缺少 name（capability 值不会输出）")
+    if not isinstance(registration_token, str) or not registration_token:
+        raise SystemExit("身份文件缺少 registration_token（capability 值不会输出）")
+    if identity.get("agent") not in (None, agent):
+        raise SystemExit(
+            f"身份文件 agent 字段与请求不一致: {identity.get('agent')!r} != {agent!r}"
+        )
+    if identity.get("instance") not in (None, instance):
+        raise SystemExit(
+            f"身份文件 instance 字段与请求不一致: "
+            f"{identity.get('instance')!r} != {instance!r}"
+        )
+
+    hub, token = load_client_config()
+    if not token:
+        raise SystemExit("缺少 token，请配置 ~/.agent-mail/client.env（hub=/token=）")
+
+    mcp_call(hub, token, "initialize", {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "am-retire", "version": "1.0"},
+    })
+
+    # 本地已 tombstone：仍与 Hub 对齐（幂等），不删文件。
+    already_local = (
+        identity.get("status") == "retired"
+        or bool(identity.get("retired_at"))
+    )
+    if already_local:
+        try:
+            profile = mcp_tool(hub, token, "whois", {
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "registration_token": registration_token,
+                "include_recent_commits": False,
+            })
+        except SystemExit:
+            profile = None
+        if isinstance(profile, dict) and profile.get("retired_at"):
+            # Hub 已退休且本地已有 tombstone → 幂等成功
+            if identity.get("status") != "retired" or not identity.get("retired_at"):
+                _write_tombstone(
+                    registry_file, identity,
+                    retired_at=str(profile.get("retired_at")),
+                )
+            print(
+                f"已退休（幂等）: {agent_name}  "
+                f"({agent}--{instance} @ {project_key})"
+            )
+            print(f"registry: {registry_file}")
+            return
+        # 本地标 retired 但 Hub 仍 active：继续强制 retire（收敛）
+
+    try:
+        result = _hub_retire(
+            hub, token, project_key, agent_name, registration_token,
+        )
+    except SystemExit:
+        raise
+
+    retired_at = None
+    # Hub 当前仅返回 status；用 whois 补 retired_at（任何失败不阻断，用本地时钟）
+    try:
+        profile = mcp_tool(hub, token, "whois", {
+            "project_key": project_key,
+            "agent_name": agent_name,
+            "registration_token": registration_token,
+            "include_recent_commits": False,
+        })
+        if isinstance(profile, dict) and profile.get("retired_at"):
+            retired_at = str(profile["retired_at"])
+    except Exception:
+        retired_at = None
+
+    _write_tombstone(registry_file, identity, retired_at=retired_at)
+    print(f"退休成功: {agent_name}  ({agent}--{instance} @ {project_key})")
+    print(f"registry tombstone: {registry_file}")
+
+
+if __name__ == "__main__":
+    main()
