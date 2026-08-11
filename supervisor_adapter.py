@@ -436,9 +436,17 @@ def normalize_fixed_server_launcher_argv(
         leaf = launcher.lstat()
     except OSError as exc:
         raise SupervisorAdapterError("fixed_launcher_missing") from exc
+    # Symlink loops / unresolvable leaves: prefer launcher_unresolvable over
+    # fixed_launcher_unsafe so Linux (RuntimeError) and macOS (OSError ELOOP)
+    # share one stable reason before type/mode checks.
+    if stat.S_ISLNK(leaf.st_mode) or not stat.S_ISREG(leaf.st_mode):
+        try:
+            launcher.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SupervisorAdapterError("launcher_unresolvable") from exc
+        raise SupervisorAdapterError("fixed_launcher_unsafe")
     if (
-        not stat.S_ISREG(leaf.st_mode)
-        or leaf.st_uid != os.getuid()
+        leaf.st_uid != os.getuid()
         or stat.S_IMODE(leaf.st_mode) != 0o700
         or leaf.st_nlink != 1
     ):
