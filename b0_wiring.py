@@ -504,6 +504,15 @@ def send_control_message_to_participants(
 # 投递权威：复用 coordination receipts（R3：不新建第二 outbox）
 # ---------------------------------------------------------------------------
 
+def _canonical_project_key(project_key: str) -> str:
+    """与 coordination.receipt/mark_acked 同语义的 project key。
+
+    macOS 上 Path('/tmp/...').resolve() 变为 /private/tmp/...；写入端若用
+    原始 '/tmp/...' 而查询端 resolve，durable marker 会写读 key 分裂。
+    """
+    return str(Path(project_key).expanduser().resolve())
+
+
 def set_prompt_marker(
     project_key: str, mail_name: str, message_id: int, phase: str,
 ) -> bool:
@@ -518,6 +527,7 @@ def set_prompt_marker(
     """
     if phase not in ("attempt", "delivered"):
         raise ValueError(f"非法 phase: {phase!r}")
+    project_key = _canonical_project_key(project_key)
     con = coordination._connect()
     try:
         now = time.time()
@@ -558,6 +568,7 @@ def clear_prompt_marker(
     project_key: str, mail_name: str, message_id: int,
 ) -> None:
     """adapter 拒绝后清除 attempt 标记：该消息重启后仍可补投（零漏）。"""
+    project_key = _canonical_project_key(project_key)
     con = coordination._connect()
     try:
         row = con.execute(
@@ -590,6 +601,8 @@ def prompt_marker_state(
 ) -> str | None:
     """标记三态：'delivered'=durable 投递证明；'attempt'=尝试过但未证明
     （外部 accept 后 mark 崩溃的不确定态，按已投处理防重复）；None=从未尝试。"""
+    # coordination.receipt 内部也会 resolve；此处统一入口避免双语义分叉。
+    project_key = _canonical_project_key(project_key)
     receipt = coordination.receipt(project_key, mail_name, message_id)
     if receipt is None:
         return None
@@ -779,6 +792,7 @@ def receipt_drain_counters(
 ) -> dict[str, int]:
     """真实排空计数（权威 receipts）：pending=未 processed 的行，
     claimed=认领中，ack_pending=未回执。drain 只认全零。"""
+    project_key = _canonical_project_key(project_key)
     con = coordination._connect()
     try:
         where = "WHERE project_key=? AND recipient=?"
