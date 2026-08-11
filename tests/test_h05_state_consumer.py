@@ -1029,24 +1029,59 @@ def test_stop_while_open_reap_blocked_serializes(monkeypatch):
     """open 有界 reap 占 REAP 期间 stop 到达:stop 等锁;open 的 reap 可完成,
     但 R10 起 stop 已在入口登记 shutdown ticket——open 终检被 intent 拒绝
     (返回 False),stop 随后完成关闸;最终 running=False,ticket 清空后
-    新 open 才放行。"""
-    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.3)
-    z = _FlakyZombie({"z": "/tmp/z.sock"})
+    新 open 才放行。
+
+    根因(macOS/3.14 时序):原 sleep(0.05)+Timer(0.15) 不能保证 open 先持
+    REAP;stop 可能 REAP 超时 deferred 且不关 running。用 Event 屏障:open
+    进入 zombie.stop 后才启动 stop,确认 ticket 登记后再放行 reap。
+    """
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.5)
+    in_reap = threading.Event()
+    allow_finish = threading.Event()
+
+    class ControlledZombie(FakeStateClient):
+        """stop 先发 in_reap,阻塞到 allow_finish;fail_stop 控制成败。"""
+
+        def __init__(self, sessions):
+            super().__init__(sessions)
+            self.fail_stop = True
+
+        def stop(self, join_timeout=5.0):
+            self.request_stop()
+            in_reap.set()
+            allow_finish.wait(5)
+            if self.fail_stop:
+                return False
+            self.stopped = True
+            return True
+
+    z = ControlledZombie({"z": "/tmp/z.sock"})
     z.start()
     with server._STATE_CLIENT_LOCK:
         server._retire_client_locked("z", server._state_epoch, z)
-    threading.Timer(0.15, lambda: setattr(z, "fail_stop", False)).start()
     out: dict[str, object] = {}
-    t = threading.Thread(
+    open_t = threading.Thread(
         target=lambda: out.setdefault("open", server._open_state_clients())
     )
-    t.start()
-    time.sleep(0.05)  # open 持 REAP 循环 reap(zombie 尚未自愈)
-    r = server._stop_state_client()  # 入口登记 ticket,等 open 完成
-    t.join(5)
+    open_t.start()
+    assert in_reap.wait(5)  # open 已持 REAP 并进入 _reap_owner→client.stop
+    stop_out: dict[str, object] = {}
+    stop_t = threading.Thread(
+        target=lambda: stop_out.setdefault("r", server._stop_state_client())
+    )
+    stop_t.start()
+    # 等 stop 入口登记 ticket(阻塞在 REAP 上)再放行 open 的 reap
+    ticket_deadline = time.monotonic() + 2.0
+    while time.monotonic() < ticket_deadline and not server._state_stop_tickets:
+        time.sleep(0.01)
+    assert server._state_stop_tickets
+    z.fail_stop = False
+    allow_finish.set()
+    open_t.join(5)
+    stop_t.join(5)
     assert out["open"] is False  # R10:stop 的 shutdown intent 拒绝 open
     assert server._state_running is False  # stop 后完成,最终关闸
-    assert r == []  # zombie 已被 open 回收,stop 无 survivor
+    assert stop_out["r"] == []  # zombie 已被 open 回收,stop 无 survivor
     assert not server._state_stop_tickets  # 完成即消费 intent
     assert server._open_state_clients() is True  # ticket 清空后放行
 
