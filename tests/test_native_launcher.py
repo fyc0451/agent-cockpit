@@ -9,6 +9,7 @@ import sys
 import pytest
 
 import native_launcher
+import native_helper_install
 from agent_mail_commands import common
 
 
@@ -81,6 +82,25 @@ def test_dispatch_calls_importable_command_main_with_exact_argv(monkeypatch):
 
     assert native_launcher.dispatch_helper("mail-recv", ["--instance", "i-opaque"]) == 0
     assert calls == [["--instance", "i-opaque"]]
+
+
+def test_install_helpers_dispatches_frozen_installer(tmp_path):
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+
+    assert native_launcher.main(
+        ["install-helpers", "--deploy-root", str(deploy)],
+        program="agent-cockpit",
+    ) == 0
+
+    helpers = deploy / "helpers"
+    for command in native_helper_install.HELPER_COMMANDS:
+        assert os.readlink(helpers / command) == native_helper_install.HELPER_TARGET
+
+
+def test_install_helpers_requires_explicit_deploy_root():
+    with pytest.raises(SystemExit, match="2"):
+        native_launcher.main(["install-helpers"], program="agent-cockpit")
 
 
 def test_frozen_helper_command_uses_multicall_alias_from_path(monkeypatch, tmp_path):

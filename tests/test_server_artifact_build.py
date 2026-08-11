@@ -224,6 +224,18 @@ def test_real_pyinstaller_onedir_runs_from_random_cwd(tmp_path: Path) -> None:
         assert multicall.returncode == 0, multicall.stderr
         assert "usage:" in multicall.stdout
 
+    deploy = tmp_path / "native-deploy"
+    deploy.mkdir()
+    install = subprocess.run(
+        [str(launcher), "install-helpers", "--deploy-root", str(deploy)],
+        cwd=cwd, env=helper_env, text=True, capture_output=True, check=False,
+    )
+    assert install.returncode == 0, install.stderr
+    for command in HELPER_COMMANDS:
+        assert os.readlink(deploy / "helpers" / command) == (
+            "../current/bin/agent-cockpit"
+        )
+
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
