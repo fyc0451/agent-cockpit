@@ -2474,6 +2474,29 @@ def test_upgrade_retired_disabled_and_error_states_degrade_truthfully():
     assert "btn.style.display=canStart?'':'none'" in render
 
 
+def test_upgrade_terminal_states_render_before_generic_submitted():
+    js = _inline_js()
+    render = js.split("function renderUpgradeControl(){", 1)[1].split(
+        "function scheduleUpgradeStatusPoll", 1,
+    )[0]
+    assert "state==='committed'" in render
+    assert "state==='rolled_back'" in render
+    submitted = "if(UPGRADE_START_SENT){st.textContent=t('upd.submitted'"
+    assert render.index("state==='committed'") < render.index(submitted)
+    assert render.index("state==='rolled_back'") < render.index(submitted)
+
+
+def test_upgrade_poll_stops_after_committed_or_rolled_back():
+    js = _inline_js()
+    schedule = js.split("function scheduleUpgradeStatusPoll(){", 1)[1].split(
+        "async function loadUpgradeStatus", 1,
+    )[0]
+    assert "state==='committed'" in schedule
+    assert "state==='rolled_back'" in schedule
+    assert schedule.index("state==='committed'") < schedule.index("setTimeout")
+    assert schedule.index("state==='rolled_back'") < schedule.index("setTimeout")
+
+
 def test_version_strings_escape_via_textcontent():
     """恶意 name/version 必须经 textContent/createTextNode,绝不 innerHTML 不可信值。"""
     js = _inline_js()
@@ -2513,6 +2536,12 @@ def test_upgrade_action_i18n_zh_en_ja():
     assert "'upd.start':'⬆ 新しいバージョンへ更新'" in HTML
     assert "'upd.service_unavailable':'Upgrade service is unavailable.'" in HTML
     assert "'upd.service_unavailable':'アップグレードサービスを利用できません。'" in HTML
+    assert "升级已完成" in HTML
+    assert "升级已回滚" in HTML
+    assert "'upd.completed':'Upgrade completed.'" in HTML
+    assert "'upd.completed':'アップグレードが完了しました。'" in HTML
+    assert "'upd.rolled_back':'Upgrade rolled back.'" in HTML
+    assert "'upd.rolled_back':'アップグレードはロールバックされました。'" in HTML
 
 
 def test_update_banner_dismissible_and_reshows():
