@@ -1,3 +1,4 @@
+import fcntl
 import os
 from pathlib import Path
 
@@ -84,11 +85,120 @@ def test_repeated_activation_is_explicitly_unchanged(tmp_path):
     root = _layout(tmp_path, first)
     activate_generation(root, first, expected_previous=None)
 
-    repeated = activate_generation(root, first, expected_previous=None)
+    repeated = activate_generation(root, first, expected_previous=first)
 
     assert repeated.changed is False
     assert repeated.previous_target == f"generations/{first.generation_id}"
     assert repeated.current_target == repeated.previous_target
+
+
+def test_idempotent_fast_path_rejects_expected_previous_mismatch(tmp_path):
+    first = _identity(SOURCE_A, DIGEST_A)
+    root = _layout(tmp_path, first)
+    activate_generation(root, first, expected_previous=None)
+
+    with pytest.raises(GenerationSwitchError, match="current_drift"):
+        activate_generation(root, first, expected_previous=None)
+
+    assert _current(root) == f"generations/{first.generation_id}"
+
+
+def test_rejects_intermediate_deploy_root_symlink(tmp_path):
+    target = _identity(SOURCE_A, DIGEST_A)
+    real_parent = tmp_path / "real"
+    root = _layout(real_parent, target)
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(GenerationSwitchError, match="deploy_root_symlink"):
+        activate_generation(
+            linked_parent / root.relative_to(real_parent),
+            target,
+            expected_previous=None,
+        )
+
+    assert not (root / "current").exists()
+
+
+def test_same_root_lock_covers_current_compare(monkeypatch, tmp_path):
+    target = _identity(SOURCE_A, DIGEST_A)
+    root = _layout(tmp_path, target)
+    real_read_current = generation_switch._read_current
+    checked = False
+
+    def assert_locked(root_fd: int) -> str | None:
+        nonlocal checked
+        lock_fd = os.open(".generation-switch.lock", os.O_RDWR, dir_fd=root_fd)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            checked = True
+        finally:
+            os.close(lock_fd)
+        return real_read_current(root_fd)
+
+    monkeypatch.setattr(generation_switch, "_read_current", assert_locked)
+
+    activate_generation(root, target, expected_previous=None)
+
+    assert checked is True
+
+
+def test_rejects_replaced_temp_without_deleting_attacker_link(monkeypatch, tmp_path):
+    target = _identity(SOURCE_A, DIGEST_A)
+    root = _layout(tmp_path, target)
+    real_read_current = generation_switch._read_current
+    calls = 0
+
+    def replace_temp(root_fd: int) -> str | None:
+        nonlocal calls
+        calls += 1
+        current = real_read_current(root_fd)
+        if calls == 2:
+            temp_name = next(
+                name
+                for name in os.listdir(root_fd)
+                if name.startswith(".current.tmp-")
+            )
+            os.unlink(temp_name, dir_fd=root_fd)
+            os.symlink("attacker", temp_name, dir_fd=root_fd)
+        return current
+
+    monkeypatch.setattr(generation_switch, "_read_current", replace_temp)
+
+    with pytest.raises(GenerationSwitchError, match="temp_changed"):
+        activate_generation(root, target, expected_previous=None)
+
+    residue = _temps(root)
+    assert len(residue) == 1
+    assert os.readlink(residue[0]) == "attacker"
+    assert not (root / "current").exists()
+
+
+def test_rejects_target_generation_entry_replacement(monkeypatch, tmp_path):
+    target = _identity(SOURCE_A, DIGEST_A)
+    root = _layout(tmp_path, target)
+    generation = root / "generations" / target.generation_id
+    held = root / "generations" / "held"
+    real_read_current = generation_switch._read_current
+    calls = 0
+
+    def replace_target(root_fd: int) -> str | None:
+        nonlocal calls
+        calls += 1
+        current = real_read_current(root_fd)
+        if calls == 2:
+            generation.rename(held)
+            generation.mkdir(mode=0o700)
+        return current
+
+    monkeypatch.setattr(generation_switch, "_read_current", replace_target)
+
+    with pytest.raises(GenerationSwitchError, match="generation_changed"):
+        activate_generation(root, target, expected_previous=None)
+
+    assert _temps(root) == []
+    assert not (root / "current").exists()
 
 
 def test_activation_rejects_current_drift(tmp_path):
