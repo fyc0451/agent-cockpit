@@ -21,7 +21,7 @@ import tomllib
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # herdr 二进制:优先用环境变量,其次 PATH 探测,最后试 ~/.local/bin
 _HERDR_ENV = os.environ.get("HERDR_BIN")
@@ -1029,6 +1029,60 @@ def set_opencode_tui_theme(theme_name: str) -> Path:
     return path
 
 
+def _opencode_visible(prefix: list[str], pane_id: str) -> str:
+    return _run(
+        prefix + [
+            "read", pane_id, "--source", "visible",
+            "--lines", "60", "--format", "text",
+        ],
+        timeout=5,
+    )
+
+
+def _wait_opencode_visible(
+    prefix: list[str], pane_id: str, predicate: Callable[[str], bool],
+    error: str, timeout: float = 5.0,
+) -> str:
+    deadline = time.monotonic() + timeout
+    while True:
+        screen = _opencode_visible(prefix, pane_id)
+        if predicate(screen):
+            return screen
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(error)
+        time.sleep(min(0.1, remaining))
+
+
+def _opencode_header_visible(screen: str, title: str) -> bool:
+    return bool(re.search(rf"{re.escape(title)}\s{{2,}}esc", screen))
+
+
+def _opencode_option_count(screen: str, label: str) -> int:
+    return len(re.findall(
+        rf"(?m)^\s*(?:●\s+)?{re.escape(label)}\s*$", screen,
+    ))
+
+
+def _opencode_theme_list_visible(screen: str) -> bool:
+    markers = (
+        "catppuccin-frappe", "catppuccin-macchiato", "tokyonight",
+        "nightowl", "cobalt2", "lucent-orng",
+    )
+    return (
+        _opencode_header_visible(screen, "Themes")
+        and sum(marker in screen for marker in markers) >= 2
+    )
+
+
+def _opencode_command_list_visible(screen: str) -> bool:
+    markers = ("Switch session", "New session", "Switch model", "Open editor")
+    return (
+        _opencode_header_visible(screen, "Commands")
+        and sum(marker in screen for marker in markers) >= 2
+    )
+
+
 def apply_opencode_theme_to_pane(
     session: str, pane_id: str, theme_name: str,
 ) -> dict[str, Any]:
@@ -1039,45 +1093,35 @@ def apply_opencode_theme_to_pane(
     prefix = ["--session", session, "pane"]
     dialog_open = False
     try:
+        before = _opencode_visible(prefix, pane_id)
+        option_before = _opencode_option_count(before, theme_name)
         # Ctrl+X,T 直接打开独立主题弹层，OpenCode 会保留已有 composer 草稿。
         _run(prefix + ["send-keys", pane_id, "ctrl+x", "t"], timeout=5)
-        _run(
-            prefix + [
-                "wait-output", pane_id,
-                "--regex", r"Themes\s+esc",
-                "--source", "visible", "--lines", "60",
-                "--timeout", "5000", "--raw",
-            ],
-            timeout=6,
+        _wait_opencode_visible(
+            prefix, pane_id, _opencode_theme_list_visible,
+            "OpenCode 主题弹层未打开",
         )
         dialog_open = True
         _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
         _run(prefix + ["send-text", pane_id, theme_name], timeout=5)
-        time.sleep(0.25)
-        _run(
-            prefix + [
-                "wait-output", pane_id,
-                "--regex", rf"^\s*(?:●\s+)?{re.escape(theme_name)}\s*$",
-                "--source", "visible", "--lines", "60",
-                "--timeout", "2000", "--raw",
-            ],
-            timeout=3,
+        _wait_opencode_visible(
+            prefix, pane_id,
+            lambda screen: (
+                _opencode_header_visible(screen, "Themes")
+                and _opencode_option_count(screen, theme_name) > option_before
+            ),
+            f"OpenCode 主题候选未出现: {theme_name}",
         )
         _run(prefix + ["send-keys", pane_id, "Enter"], timeout=5)
-        for _ in range(10):
-            time.sleep(0.1)
-            screen = _run(
-                prefix + [
-                    "read", pane_id, "--source", "visible",
-                    "--lines", "60", "--format", "text",
-                ],
-                timeout=5,
-            )
-            if not re.search(r"(?m)^\s*Themes\s+esc\s*$", screen):
-                dialog_open = False
-                break
-        if dialog_open:
-            raise RuntimeError("OpenCode 主题弹层确认后未关闭")
+        _wait_opencode_visible(
+            prefix, pane_id,
+            lambda screen: not (
+                _opencode_header_visible(screen, "Themes")
+                and _opencode_option_count(screen, theme_name) > option_before
+            ),
+            "OpenCode 主题弹层确认后未关闭", timeout=1.0,
+        )
+        dialog_open = False
     except RuntimeError as exc:
         if dialog_open:
             try:
@@ -1101,50 +1145,53 @@ def apply_opencode_mode_to_pane(
     prefix = ["--session", session, "pane"]
     dialog_open = False
     try:
+        before = _opencode_visible(prefix, pane_id)
+        option_before = {
+            target: _opencode_option_count(
+                before, f"Switch to {target} mode",
+            )
+            for target in ("light", "dark")
+        }
         _run(prefix + ["send-keys", pane_id, "ctrl+p"], timeout=5)
-        _run(
-            prefix + [
-                "wait-output", pane_id,
-                "--regex", r"Commands\s+esc",
-                "--source", "visible", "--lines", "60",
-                "--timeout", "5000", "--raw",
-            ],
-            timeout=6,
+        _wait_opencode_visible(
+            prefix, pane_id, _opencode_command_list_visible,
+            "OpenCode 命令弹层未打开",
         )
         dialog_open = True
         _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
         _run(prefix + ["send-text", pane_id, "Switch to"], timeout=5)
-        output = _run(
-            prefix + [
-                "wait-output", pane_id,
-                "--regex", r"Switch to (light|dark) mode",
-                "--source", "visible", "--lines", "60",
-                "--timeout", "2000", "--raw",
-            ],
-            timeout=3,
+
+        def _target_mode(screen: str) -> str | None:
+            for target in ("light", "dark"):
+                if _opencode_option_count(
+                    screen, f"Switch to {target} mode",
+                ) > option_before[target]:
+                    return target
+            return None
+
+        output = _wait_opencode_visible(
+            prefix, pane_id, lambda screen: _target_mode(screen) is not None,
+            "无法识别 OpenCode 当前主题模式",
         )
-        match = re.search(r"Switch to (light|dark) mode", output)
-        if match is None:
+        target_mode = _target_mode(output)
+        if target_mode is None:
             raise RuntimeError("无法识别 OpenCode 当前主题模式")
-        changed = match.group(1) == mode
+        changed = target_mode == mode
         _run(
             prefix + ["send-keys", pane_id, "Enter" if changed else "esc"],
             timeout=5,
         )
-        for _ in range(10):
-            time.sleep(0.1)
-            screen = _run(
-                prefix + [
-                    "read", pane_id, "--source", "visible",
-                    "--lines", "60", "--format", "text",
-                ],
-                timeout=5,
-            )
-            if not re.search(r"(?m)^\s*Commands\s+esc\s*$", screen):
-                dialog_open = False
-                break
-        if dialog_open:
-            raise RuntimeError("OpenCode 命令弹层未关闭")
+        _wait_opencode_visible(
+            prefix, pane_id,
+            lambda screen: not (
+                _opencode_header_visible(screen, "Commands")
+                and _opencode_option_count(
+                    screen, f"Switch to {target_mode} mode",
+                ) > option_before[target_mode]
+            ),
+            "OpenCode 命令弹层未关闭", timeout=1.0,
+        )
+        dialog_open = False
     except RuntimeError as exc:
         if dialog_open:
             try:

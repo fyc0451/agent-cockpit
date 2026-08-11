@@ -1,6 +1,5 @@
 
 import json
-import re
 
 import herdr_client
 import pytest
@@ -47,15 +46,18 @@ def test_apply_grok_web_theme_targets_only_grok(monkeypatch):
 
 def test_opencode_theme_picker_uses_shortcut_without_touching_composer(monkeypatch):
     calls = []
+    baseline = "  ┃       Themes                  esc\n       palenight\n  ┃  preserved draft"
+    screens = iter([
+        baseline,
+        baseline + "\n       Themes                  esc\n       tokyonight\n       nightowl",
+        baseline + "\n       Themes                  esc\n       palenight",
+        baseline,
+    ])
 
     def fake_run(args, timeout=10):
         calls.append(list(args))
-        if "wait-output" in args and "Themes" in " ".join(args):
-            pattern = args[args.index("--regex") + 1]
-            assert re.search(pattern, "  ┃       Themes                  esc")
-            assert args[args.index("--timeout") + 1] == "5000"
         if "pane" in args and "read" in args:
-            return "  ┃  preserved draft\n  ┃  Build · model\n"
+            return next(screens)
         return ""
 
     monkeypatch.setattr(
@@ -68,9 +70,9 @@ def test_opencode_theme_picker_uses_shortcut_without_touching_composer(monkeypat
     result = herdr_client.apply_opencode_theme_to_pane("demo", "w1:p4", "palenight")
 
     assert result["available"] is True
-    assert calls[0] == [
+    assert [
         "--session", "demo", "pane", "send-keys", "w1:p4", "ctrl+x", "t",
-    ]
+    ] in calls
     assert [
         "--session", "demo", "pane", "send-text", "w1:p4", "palenight",
     ] in calls
@@ -82,14 +84,21 @@ def test_opencode_theme_picker_uses_shortcut_without_touching_composer(monkeypat
 
 def test_opencode_theme_picker_closes_its_dialog_after_filter_failure(monkeypatch):
     calls = []
-    wait_count = 0
+    read_count = 0
 
     def fake_run(args, timeout=10):
-        nonlocal wait_count
+        nonlocal read_count
         calls.append(list(args))
-        if "wait-output" in args:
-            wait_count += 1
-            if wait_count == 2:
+        if "read" in args:
+            read_count += 1
+            if read_count == 1:
+                return "preserved draft"
+            if read_count == 2:
+                return (
+                    "preserved draft\n       Themes                  esc"
+                    "\n       tokyonight\n       nightowl"
+                )
+            if read_count == 3:
                 raise RuntimeError("theme filter did not render")
         return ""
 
@@ -107,21 +116,18 @@ def test_opencode_theme_picker_closes_its_dialog_after_filter_failure(monkeypatc
 
 def test_opencode_mode_picker_switches_to_requested_mode_without_touching_composer(monkeypatch):
     calls = []
+    baseline = "       Commands                esc\n       Switch to light mode\n  ┃  preserved draft"
+    screens = iter([
+        baseline,
+        baseline + "\n       Commands                esc\n       Switch session\n       New session",
+        baseline + "\n       Commands                esc\n       Switch to light mode",
+        baseline,
+    ])
 
     def fake_run(args, timeout=10):
         calls.append(list(args))
-        if "wait-output" in args and "Commands" in " ".join(args):
-            pattern = args[args.index("--regex") + 1]
-            assert re.search(pattern, "  ┃       Commands                esc")
-            assert args[args.index("--timeout") + 1] == "5000"
-        if "wait-output" in args and "Switch to" in " ".join(args):
-            line = "  ┃                                   Switch to light mode"
-            pattern = args[args.index("--regex") + 1]
-            if re.search(pattern, line) is None:
-                raise RuntimeError("theme mode option did not match")
-            return f'{{"matched_line":{json.dumps(line)}}}'
         if "read" in args:
-            return "  ┃  preserved draft\n  ┃  Build · model\n"
+            return next(screens)
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
@@ -135,9 +141,9 @@ def test_opencode_mode_picker_switches_to_requested_mode_without_touching_compos
         "mode": "opencode-theme-mode",
         "changed": True,
     }
-    assert calls[0] == [
+    assert [
         "--session", "demo", "pane", "send-keys", "w1:p4", "ctrl+p",
-    ]
+    ] in calls
     assert [
         "--session", "demo", "pane", "send-text", "w1:p4", "Switch to",
     ] in calls
@@ -148,13 +154,17 @@ def test_opencode_mode_picker_switches_to_requested_mode_without_touching_compos
 
 def test_opencode_mode_picker_is_idempotent(monkeypatch):
     calls = []
+    screens = iter([
+        "preserved draft",
+        "preserved draft\n       Commands                esc\n       Switch session\n       New session",
+        "preserved draft\n       Commands                esc\n       Switch to dark mode",
+        "preserved draft",
+    ])
 
     def fake_run(args, timeout=10):
         calls.append(list(args))
-        if "wait-output" in args and "Switch to" in " ".join(args):
-            return '{"matched_line":"Switch to dark mode"}'
         if "read" in args:
-            return "  ┃  preserved draft\n  ┃  Build · model\n"
+            return next(screens)
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
