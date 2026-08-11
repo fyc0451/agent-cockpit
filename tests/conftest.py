@@ -11,6 +11,8 @@ def _isolate_settings(tmp_path, monkeypatch):
     import settings
     import team_inbox_router
     import team_sessions
+    import upgrade_service
+    monkeypatch.delenv(upgrade_service.ENABLE_ENV, raising=False)
     monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
     monkeypatch.setattr(settings, "_cache", None)
