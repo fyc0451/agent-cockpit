@@ -100,13 +100,18 @@ class TestPathValidation:
     def test_controller_inside_current_rejected(self, deploy_layout: dict[str, Path]) -> None:
         bad = deploy_layout["current"] / "nested-controller"
         with pytest.raises(sa.SupervisorAdapterError) as exc:
-            sa.validate_controller_path(bad, current=deploy_layout["current"])
+            sa.validate_controller_path(
+                bad,
+                current=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
         assert exc.value.reason == "controller_inside_current"
 
     def test_controller_outside_ok(self, deploy_layout: dict[str, Path]) -> None:
         got = sa.validate_controller_path(
             deploy_layout["controller"],
             current=deploy_layout["current"],
+            deploy_root=deploy_layout["root"],
         )
         assert got == deploy_layout["controller"]
 
@@ -261,7 +266,11 @@ class TestLinuxUnit:
                 program_arguments=argv,
                 deploy_root=deploy_layout["root"],
             )
-        assert exc.value.reason == "killmode_not_process"
+        # R4：KillMode 同时是固定安全字段；优先 linux_fixed_field_mismatch
+        assert exc.value.reason in {
+            "killmode_not_process",
+            "linux_fixed_field_mismatch",
+        }
 
     def test_wrong_current_in_wd_rejected(self, deploy_layout: dict[str, Path]) -> None:
         cur = deploy_layout["current"]
@@ -364,6 +373,7 @@ class TestMacPlist:
             controller_dir=ctrl,
             program_arguments=argv,
             current_dir=deploy_layout["current"],
+            deploy_root=deploy_layout["root"],
         )
         assert f"<string>{sa.MAC_CONTROLLER_LABEL}</string>" in text
         assert f"<string>{sa.MAC_MAIN_LABEL}</string>" not in text
@@ -372,6 +382,8 @@ class TestMacPlist:
             expected_label=sa.MAC_CONTROLLER_LABEL,
             expected_working_directory=ctrl,
             program_arguments=argv,
+            current_dir=deploy_layout["current"],
+            deploy_root=deploy_layout["root"],
         )
         assert contract.label == sa.MAC_CONTROLLER_LABEL
         assert contract.program_arguments == argv
@@ -580,12 +592,15 @@ def test_render_validate_plan_pipeline(deploy_layout: dict[str, Path]) -> None:
         controller_dir=deploy_layout["controller"],
         program_arguments=[ctrl_bin.as_posix()],
         current_dir=cur,
+        deploy_root=root,
     )
     sa.validate_mac_plist_contract(
         ctrl,
         expected_label=sa.MAC_CONTROLLER_LABEL,
         expected_working_directory=deploy_layout["controller"],
         program_arguments=[ctrl_bin.as_posix()],
+        current_dir=cur,
+        deploy_root=root,
     )
     plans = (
         sa.plan_linux_install_unit(unit_path=root / "agent-cockpit.service")
@@ -631,19 +646,25 @@ class TestR2ContractGaps:
         fake_controller = gen / "nested-controller"
         fake_controller.mkdir()
         with pytest.raises(sa.SupervisorAdapterError) as exc:
-            sa.validate_controller_path(fake_controller, current=current)
+            sa.validate_controller_path(
+                fake_controller, current=current, deploy_root=root
+            )
         assert exc.value.reason == "controller_inside_current"
         with pytest.raises(sa.SupervisorAdapterError) as exc2:
             sa.render_mac_controller_plist(
                 controller_dir=fake_controller,
                 program_arguments=[(fake_controller / "bin").as_posix()],
                 current_dir=current,
+                deploy_root=root,
             )
         assert exc2.value.reason == "controller_inside_current"
         # 真正 release 外仍可通过
         outside = tmp_path / "controller-install"
         outside.mkdir()
-        assert sa.validate_controller_path(outside, current=current) == outside
+        assert (
+            sa.validate_controller_path(outside, current=current, deploy_root=root)
+            == outside
+        )
 
     def test_b2_launcher_rejects_subdir_symlink_escape(
         self, tmp_path: Path
@@ -799,10 +820,9 @@ class TestR3ContractGaps:
             sa.validate_controller_path(outside, current=current, deploy_root=root)
             == outside
         )
-        # 仅 current 也可推导 deploy_root
-        with pytest.raises(sa.SupervisorAdapterError) as exc3:
-            sa.validate_controller_path(fake, current=current)
-        assert exc3.value.reason == "controller_inside_generations"
+        # R4：禁止省略 deploy_root（TypeError）
+        with pytest.raises(TypeError):
+            sa.validate_controller_path(fake, current=current)  # type: ignore[call-arg]
 
     def test_r3_repeated_service_section_rejected(self) -> None:
         """R3-2：重复 [Service]/[Unit]/[Install] section 不得拼接合同。"""
@@ -923,5 +943,147 @@ class TestR3ContractGaps:
             expected_label=sa.MAC_CONTROLLER_LABEL,
             expected_working_directory=ctrl,
             program_arguments=[prog],
+            current_dir=cur,
             deploy_root=deploy_layout["root"],
         )
+
+
+# ── S0 R4：canonical deploy / controller argv / fixed fields ────
+
+
+class TestR4ContractGaps:
+    def test_r4_b1_requires_canonical_current_and_deploy_root(
+        self, tmp_path: Path
+    ) -> None:
+        """B1：必须显式 deploy_root+字面 {root}/current；禁止省略/伪造。"""
+        root = tmp_path / "deploy"
+        gen = root / "generations" / "g1"
+        gen.mkdir(parents=True)
+        current = root / "current"
+        current.symlink_to(gen)
+        outside = tmp_path / "controller-install"
+        outside.mkdir()
+        # 省略任一侧 → TypeError
+        with pytest.raises(TypeError):
+            sa.validate_controller_path(outside, current=current)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            sa.validate_controller_path(outside, deploy_root=root)  # type: ignore[call-arg]
+        # 伪造 deploy_root（与 current 父目录不一致）
+        forged = tmp_path / "forged-root"
+        forged.mkdir()
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_controller_path(
+                outside, current=current, deploy_root=forged
+            )
+        assert exc.value.reason in {
+            "current_outside_deploy_root",
+            "current_deploy_root_mismatch",
+        }
+        # 伪造 current 非 root/current
+        other = root / "not-current"
+        other.mkdir()
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.require_canonical_current_and_deploy(
+                current=other, deploy_root=root
+            )
+        assert exc2.value.reason == "current_name_required"
+        # 合法
+        assert (
+            sa.validate_controller_path(outside, current=current, deploy_root=root)
+            == outside
+        )
+
+    def test_r4_b2_controller_argv_must_stay_in_controller_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """B2：argv[0] 字面+resolve 均在 controller_dir 内且 release tree 外。"""
+        root = tmp_path / "deploy"
+        gen = root / "generations" / "g1"
+        gen.mkdir(parents=True)
+        current = root / "current"
+        current.symlink_to(gen)
+        ctrl = tmp_path / "controller-install"
+        ctrl.mkdir()
+        evil = tmp_path / "evil"
+        evil.mkdir()
+        (evil / "bin").write_text("x", encoding="utf-8")
+        # 字面指向 controller 外
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_controller_argv(
+                [evil.as_posix() + "/bin"],
+                controller_dir=ctrl,
+                current=current,
+                deploy_root=root,
+            )
+        assert exc.value.reason == "controller_argv_outside_controller"
+        # controller 内 symlink 逃到外部
+        link = ctrl / "jump"
+        link.symlink_to(evil)
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.normalize_controller_argv(
+                [f"{ctrl.as_posix()}/jump/bin"],
+                controller_dir=ctrl,
+                current=current,
+                deploy_root=root,
+            )
+        assert exc2.value.reason == "controller_argv_symlink_escape"
+        # 合法：controller 内真实文件
+        real = ctrl / "run.sh"
+        real.write_text("#!/bin/sh\n", encoding="utf-8")
+        got = sa.normalize_controller_argv(
+            [real.as_posix(), "run"],
+            controller_dir=ctrl,
+            current=current,
+            deploy_root=root,
+        )
+        assert got[0] == real.as_posix()
+
+    def test_r4_b3_fixed_mac_log_names_and_linux_fixed_fields(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        """B3：Mac 日志名固定；Linux Type/Restart/NoNewPrivileges/UMask 精确。"""
+        cur = deploy_layout["current"]
+        root = deploy_layout["root"]
+        argv = deploy_layout["main_argv"]
+        unit = sa.render_linux_unit(
+            current_dir=cur, program_arguments=argv, deploy_root=root
+        )
+        sa.validate_linux_unit_contract(
+            unit, current_dir=cur, program_arguments=argv, deploy_root=root
+        )
+        # 篡改 Type
+        bad_type = unit.replace("Type=simple", "Type=oneshot")
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_linux_unit_contract(
+                bad_type, current_dir=cur, program_arguments=argv, deploy_root=root
+            )
+        assert exc.value.reason == "linux_fixed_field_mismatch"
+        # 篡改 NoNewPrivileges
+        bad_priv = unit.replace("NoNewPrivileges=true", "NoNewPrivileges=false")
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.validate_linux_unit_contract(
+                bad_priv, current_dir=cur, program_arguments=argv, deploy_root=root
+            )
+        assert exc2.value.reason == "linux_fixed_field_mismatch"
+        # Mac：日志名被改成 caller 自定义
+        main = sa.render_mac_main_plist(
+            current_dir=cur, program_arguments=argv, deploy_root=root
+        )
+        evil = main.replace(
+            sa.MAC_MAIN_STDOUT_NAME, "custom.out.log"
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc3:
+            sa.validate_mac_plist_contract(
+                evil,
+                expected_label=sa.MAC_MAIN_LABEL,
+                expected_working_directory=cur,
+                program_arguments=argv,
+                current_dir=cur,
+                deploy_root=root,
+            )
+        assert exc3.value.reason == "plist_stdout_path_mismatch"
+        # render 签名无 stdout_name 参数
+        import inspect
+        sig = inspect.signature(sa.render_mac_controller_plist)
+        assert "stdout_name" not in sig.parameters
+        assert "stderr_name" not in sig.parameters

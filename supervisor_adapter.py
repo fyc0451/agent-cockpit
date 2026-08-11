@@ -155,12 +155,44 @@ def validate_current_path(
     return path
 
 
+# 固定 Mac 日志文件名（不可由 caller 改写）
+MAC_MAIN_STDOUT_NAME = "agent-cockpit.stdout.log"
+MAC_MAIN_STDERR_NAME = "agent-cockpit.stderr.log"
+MAC_CONTROLLER_STDOUT_NAME = "controller.stdout.log"
+MAC_CONTROLLER_STDERR_NAME = "controller.stderr.log"
+
+# Linux unit [Service] 固定安全字段（精确字符串）
+LINUX_SERVICE_FIXED_FIELDS: dict[str, str] = {
+    "Type": "simple",
+    "KillMode": "process",
+    "Restart": "always",
+    "RestartSec": "3",
+    "Environment": "PYTHONUNBUFFERED=1",
+    "NoNewPrivileges": "true",
+    "UMask": "0077",
+}
+
+
+def require_canonical_current_and_deploy(
+    *,
+    current: str | Path,
+    deploy_root: str | Path,
+) -> tuple[Path, Path]:
+    """强制字面 ``{deploy_root}/current`` 与显式 deploy_root 一致；禁止省略/伪造。"""
+    root = validate_absolute_path(deploy_root, role="deploy_root")
+    cur = validate_current_path(current, deploy_root=root, require_name_current=True)
+    expected = Path(root.as_posix() + "/current")
+    if cur.as_posix() != expected.as_posix():
+        raise SupervisorAdapterError("current_deploy_root_mismatch")
+    return root, cur
+
+
 def derive_deploy_root(
     *,
     current: str | Path | None = None,
     deploy_root: str | Path | None = None,
 ) -> Path | None:
-    """显式 deploy_root 优先；否则由 ``.../current`` 推导父目录为 release root。"""
+    """显式 deploy_root 优先；否则由 ``.../current`` 推导（仅辅助，controller 合同不用）。"""
     if deploy_root is not None:
         return validate_absolute_path(deploy_root, role="deploy_root")
     if current is not None:
@@ -173,55 +205,95 @@ def derive_deploy_root(
 def validate_controller_path(
     controller: str | Path,
     *,
-    current: str | Path | None = None,
-    deploy_root: str | Path | None = None,
+    current: str | Path,
+    deploy_root: str | Path,
 ) -> Path:
     """Controller 安装根：绝对路径；必须在 release tree 外。
+
+    **必须**同时提供 canonical ``deploy_root`` 与 ``current``
+    （``current`` 字面量必须等于 ``{deploy_root}/current``）。
 
     - 字面 / resolve 不得落在 ``current`` 或其 active generation 内；
     - 拒全部 ``{deploy_root}/generations/**``（含 inactive generation）；
     - 拒整个 release tree（``deploy_root`` 及其子路径）。
-    ``deploy_root`` 可显式传入，或由 ``current`` 推导。
     """
+    root, cur = require_canonical_current_and_deploy(
+        current=current, deploy_root=deploy_root
+    )
     path = validate_absolute_path(controller, role="controller")
-    root = derive_deploy_root(current=current, deploy_root=deploy_root)
-    cur: Path | None = None
-    if current is not None:
-        cur = validate_absolute_path(current, role="current")
-        if path == cur or _is_relative_to(path, cur):
-            raise SupervisorAdapterError("controller_inside_current")
+    if path == cur or _is_relative_to(path, cur):
+        raise SupervisorAdapterError("controller_inside_current")
     try:
         path_res = path.resolve(strict=False)
+        cur_res = cur.resolve(strict=False)
+        root_res = root.resolve(strict=False)
+        gens_res = (root / "generations").resolve(strict=False)
     except OSError as exc:
         raise SupervisorAdapterError("controller_path_unresolvable") from exc
-    if cur is not None:
-        try:
-            cur_res = cur.resolve(strict=False)
-        except OSError as exc:
-            raise SupervisorAdapterError("controller_path_unresolvable") from exc
-        if path_res == cur_res or _is_relative_to(path_res, cur_res):
-            raise SupervisorAdapterError("controller_inside_current")
-    if root is not None:
-        gens = root / "generations"
-        if (
-            path == gens
-            or _is_relative_to(path, gens)
-            or path_res == gens.resolve(strict=False)
-            or _is_relative_to(path_res, gens.resolve(strict=False))
-        ):
-            raise SupervisorAdapterError("controller_inside_generations")
-        try:
-            root_res = root.resolve(strict=False)
-        except OSError as exc:
-            raise SupervisorAdapterError("controller_path_unresolvable") from exc
-        if (
-            path == root
-            or _is_relative_to(path, root)
-            or path_res == root_res
-            or _is_relative_to(path_res, root_res)
-        ):
-            raise SupervisorAdapterError("controller_inside_release_tree")
+    if path_res == cur_res or _is_relative_to(path_res, cur_res):
+        raise SupervisorAdapterError("controller_inside_current")
+    gens = root / "generations"
+    if (
+        path == gens
+        or _is_relative_to(path, gens)
+        or path_res == gens_res
+        or _is_relative_to(path_res, gens_res)
+    ):
+        raise SupervisorAdapterError("controller_inside_generations")
+    if (
+        path == root
+        or _is_relative_to(path, root)
+        or path_res == root_res
+        or _is_relative_to(path_res, root_res)
+    ):
+        raise SupervisorAdapterError("controller_inside_release_tree")
     return path
+
+
+def normalize_controller_argv(
+    program_arguments: Sequence[str],
+    *,
+    controller_dir: str | Path,
+    current: str | Path,
+    deploy_root: str | Path,
+) -> tuple[str, ...]:
+    """controller ProgramArguments：argv[0] 字面+resolve 均须在 controller_dir 内且 release 外。"""
+    if not program_arguments:
+        raise SupervisorAdapterError("empty_program_arguments")
+    controller = validate_controller_path(
+        controller_dir, current=current, deploy_root=deploy_root
+    )
+    root, _cur = require_canonical_current_and_deploy(
+        current=current, deploy_root=deploy_root
+    )
+    ctrl = controller.as_posix()
+    out: list[str] = []
+    for i, arg in enumerate(program_arguments):
+        if not isinstance(arg, str) or not arg:
+            raise SupervisorAdapterError("invalid_program_argument", str(i))
+        if _has_control_chars(arg):
+            raise SupervisorAdapterError("control_char_in_argument", str(i))
+        if i == 0:
+            launcher = validate_absolute_path(arg, role="controller_launcher")
+            literal = launcher.as_posix()
+            if not (literal == ctrl or literal.startswith(ctrl + "/")):
+                raise SupervisorAdapterError("controller_argv_outside_controller", literal)
+            try:
+                resolved = launcher.resolve(strict=False)
+                ctrl_res = controller.resolve(strict=False)
+                root_res = root.resolve(strict=False)
+            except OSError as exc:
+                raise SupervisorAdapterError("controller_argv_unresolvable") from exc
+            if not (resolved == ctrl_res or _is_relative_to(resolved, ctrl_res)):
+                raise SupervisorAdapterError("controller_argv_symlink_escape")
+            if resolved == root_res or _is_relative_to(resolved, root_res):
+                raise SupervisorAdapterError("controller_argv_inside_release_tree")
+            out.append(literal)
+        else:
+            if arg.startswith("/"):
+                validate_absolute_path(arg, role=f"program_arg[{i}]")
+            out.append(arg)
+    return tuple(out)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -459,8 +531,8 @@ def render_mac_main_plist(
     )
     cur = current.as_posix()
     wd = escape_plist_xml(cur)
-    stdout = escape_plist_xml(f"{cur}/agent-cockpit.stdout.log")
-    stderr = escape_plist_xml(f"{cur}/agent-cockpit.stderr.log")
+    stdout = escape_plist_xml(f"{cur}/{MAC_MAIN_STDOUT_NAME}")
+    stderr = escape_plist_xml(f"{cur}/{MAC_MAIN_STDERR_NAME}")
     label = escape_plist_xml(MAC_MAIN_LABEL)
     args_xml = "\n".join(
         f"    <string>{escape_plist_xml(a)}</string>" for a in argv
@@ -498,34 +570,31 @@ def render_mac_controller_plist(
     *,
     controller_dir: str | Path,
     program_arguments: Sequence[str],
-    current_dir: str | Path | None = None,
-    deploy_root: str | Path | None = None,
-    stdout_name: str = "controller.stdout.log",
-    stderr_name: str = "controller.stderr.log",
+    current_dir: str | Path,
+    deploy_root: str | Path,
 ) -> str:
-    """固定 controller LaunchAgent（release 外）；禁止 upgrade.<job> label。"""
+    """固定 controller LaunchAgent（release 外）；禁止 upgrade.<job> label。
+
+    必须同时传 canonical ``current_dir`` + ``deploy_root``；日志名固定不可改。
+    """
     controller = validate_controller_path(
         controller_dir, current=current_dir, deploy_root=deploy_root
     )
-    if not program_arguments:
-        raise SupervisorAdapterError("empty_program_arguments")
-    args: list[str] = []
-    for i, arg in enumerate(program_arguments):
-        if not isinstance(arg, str) or not arg:
-            raise SupervisorAdapterError("invalid_program_argument", str(i))
-        if _has_control_chars(arg):
-            raise SupervisorAdapterError("control_char_in_argument", str(i))
-        # 首参若为路径则必须绝对
-        if i == 0 and arg.startswith("/") is False and "/" in arg:
-            raise SupervisorAdapterError("relative_program_path")
-        if arg.startswith("/"):
-            validate_absolute_path(arg, role=f"program_arg[{i}]")
-        args.append(escape_plist_xml(arg))
+    argv = normalize_controller_argv(
+        program_arguments,
+        controller_dir=controller,
+        current=current_dir,
+        deploy_root=deploy_root,
+    )
     wd = escape_plist_xml(controller.as_posix())
-    stdout = escape_plist_xml(f"{controller.as_posix()}/{stdout_name}")
-    stderr = escape_plist_xml(f"{controller.as_posix()}/{stderr_name}")
+    stdout = escape_plist_xml(
+        f"{controller.as_posix()}/{MAC_CONTROLLER_STDOUT_NAME}"
+    )
+    stderr = escape_plist_xml(
+        f"{controller.as_posix()}/{MAC_CONTROLLER_STDERR_NAME}"
+    )
     label = escape_plist_xml(MAC_CONTROLLER_LABEL)
-    args_xml = "\n".join(f"    <string>{a}</string>" for a in args)
+    args_xml = "\n".join(f"    <string>{escape_plist_xml(a)}</string>" for a in argv)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -669,14 +738,19 @@ def validate_linux_unit_contract(
     program_arguments: Sequence[str],
     deploy_root: str | Path | None = None,
 ) -> LinuxUnitContract:
-    """KillMode=process；WD 与 ExecStart argv 精确对齐调用方 launcher，同源 current。"""
+    """KillMode=process；固定安全字段精确；WD 与 ExecStart argv 同源 current。"""
     current = validate_current_path(current_dir, deploy_root=deploy_root)
     expected = normalize_launcher_argv(
         program_arguments, current_dir=current, deploy_root=deploy_root
     )
     cur = current.as_posix()
     contract = parse_linux_unit_contract(text)
-    if contract.kill_mode.lower() != "process":
+    fields = _parse_unit_by_section(text)
+    for key, want in LINUX_SERVICE_FIXED_FIELDS.items():
+        got = (fields.get(key) or "").strip()
+        if got != want:
+            raise SupervisorAdapterError("linux_fixed_field_mismatch", f"{key}={got!r}")
+    if contract.kill_mode != "process":
         raise SupervisorAdapterError("killmode_not_process", contract.kill_mode)
     wd = _unescape_systemd_value(contract.working_directory)
     if wd != cur:
@@ -686,10 +760,11 @@ def validate_linux_unit_contract(
         raise SupervisorAdapterError("exec_start_argv_mismatch")
     if not (actual[0] == cur or actual[0].startswith(cur + "/")):
         raise SupervisorAdapterError("launcher_outside_current", actual[0])
-    if contract.environment_file is not None:
-        ef = _unescape_systemd_value(contract.environment_file)
-        if ef != f"{cur}/.env":
-            raise SupervisorAdapterError("environment_file_mismatch")
+    if contract.environment_file is None:
+        raise SupervisorAdapterError("environment_file_mismatch")
+    ef = _unescape_systemd_value(contract.environment_file)
+    if ef != f"{cur}/.env":
+        raise SupervisorAdapterError("environment_file_mismatch")
     return contract
 
 
@@ -832,13 +907,11 @@ def validate_mac_plist_contract(
     program_arguments: Sequence[str] | None = None,
     current_dir: str | Path | None = None,
     deploy_root: str | Path | None = None,
-    stdout_name: str | None = None,
-    stderr_name: str | None = None,
 ) -> MacPlistContract:
-    """校验固定 label、WD、exact bool/int 字段与同源 log 路径。
+    """校验固定 label、WD、exact bool/int 字段与**固定**同源 log 文件名。
 
-    主 LA（``MAC_MAIN_LABEL``）必须提供 ``program_arguments`` 与 ``current_dir``，
-    以验证 argv[0] 落在 current 字面路径下。controller 仅要求 argv 非空且路径合法。
+    日志名不可由 caller 放宽。主 LA 必须提供 program_arguments+current_dir；
+    controller 校验 argv 时若提供 program_arguments 则要求 current+deploy_root。
     """
     assert_fixed_mac_label(expected_label)
     wd = validate_absolute_path(expected_working_directory, role="working_directory")
@@ -848,7 +921,6 @@ def validate_mac_plist_contract(
         raise SupervisorAdapterError("label_mismatch", contract.label)
     if contract.working_directory != wd.as_posix():
         raise SupervisorAdapterError("working_directory_mismatch")
-    # exact type+value（禁止 bool 强转后的假阳性）
     if contract.run_at_load is not True:
         raise SupervisorAdapterError("plist_run_at_load_not_true")
     if contract.keep_alive is not True:
@@ -856,11 +928,11 @@ def validate_mac_plist_contract(
     if type(contract.throttle_interval) is not int or contract.throttle_interval != 3:
         raise SupervisorAdapterError("plist_throttle_interval_not_3")
     if expected_label == MAC_MAIN_LABEL:
-        out_name = stdout_name or "agent-cockpit.stdout.log"
-        err_name = stderr_name or "agent-cockpit.stderr.log"
+        out_name = MAC_MAIN_STDOUT_NAME
+        err_name = MAC_MAIN_STDERR_NAME
     else:
-        out_name = stdout_name or "controller.stdout.log"
-        err_name = stderr_name or "controller.stderr.log"
+        out_name = MAC_CONTROLLER_STDOUT_NAME
+        err_name = MAC_CONTROLLER_STDERR_NAME
     expected_out = f"{wd.as_posix()}/{out_name}"
     expected_err = f"{wd.as_posix()}/{err_name}"
     if contract.standard_out_path != expected_out:
@@ -883,7 +955,15 @@ def validate_mac_plist_contract(
         if contract.program_arguments != expected:
             raise SupervisorAdapterError("program_arguments_mismatch")
     elif program_arguments is not None:
-        if tuple(program_arguments) != contract.program_arguments:
+        if current_dir is None or deploy_root is None:
+            raise SupervisorAdapterError("controller_canonical_required")
+        expected = normalize_controller_argv(
+            program_arguments,
+            controller_dir=wd,
+            current=current_dir,
+            deploy_root=deploy_root,
+        )
+        if contract.program_arguments != expected:
             raise SupervisorAdapterError("program_arguments_mismatch")
     return contract
 
@@ -997,12 +1077,18 @@ __all__ = [
     "MacPlistContract",
     "PlannedCommand",
     "SupervisorAdapterError",
+    "LINUX_SERVICE_FIXED_FIELDS",
+    "MAC_CONTROLLER_STDERR_NAME",
+    "MAC_CONTROLLER_STDOUT_NAME",
+    "MAC_MAIN_STDERR_NAME",
+    "MAC_MAIN_STDOUT_NAME",
     "assert_fixed_mac_label",
     "derive_deploy_root",
     "escape_plist_xml",
     "escape_systemd_exec_value",
     "escape_systemd_value",
     "is_forbidden_mac_label",
+    "normalize_controller_argv",
     "normalize_launcher_argv",
     "parse_linux_unit_contract",
     "parse_mac_plist_contract",
@@ -1014,6 +1100,7 @@ __all__ = [
     "render_linux_unit",
     "render_mac_controller_plist",
     "render_mac_main_plist",
+    "require_canonical_current_and_deploy",
     "validate_absolute_path",
     "validate_controller_path",
     "validate_current_path",
