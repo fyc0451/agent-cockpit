@@ -2565,14 +2565,28 @@ def restart_pane(
             )
 
         try:
-            _run(
-                ["--session", session, "agent", "send-keys", name, "esc"],
-                timeout=3,
-            )
-            _run(
-                ["--session", session, "agent", "send-keys", name, "ctrl+c"],
-                timeout=3,
-            )
+            if kind == "grok":
+                _run(
+                    ["--session", session, "pane", "send-keys", pane_id, "ctrl+u"],
+                    timeout=3,
+                )
+                _run(
+                    ["--session", session, "pane", "send-text", pane_id, "/quit"],
+                    timeout=3,
+                )
+                _run(
+                    ["--session", session, "pane", "send-keys", pane_id, "Enter"],
+                    timeout=3,
+                )
+            else:
+                _run(
+                    ["--session", session, "agent", "send-keys", name, "esc"],
+                    timeout=3,
+                )
+                _run(
+                    ["--session", session, "agent", "send-keys", name, "ctrl+c"],
+                    timeout=3,
+                )
         except RuntimeError as exc:
             return _restart_error("restart_exit_failed", str(exc), pane_id)
 
@@ -2611,7 +2625,8 @@ def restart_pane(
                 if shell_ready:
                     break
             elif (
-                not second_interrupt_sent
+                kind != "grok"
+                and not second_interrupt_sent
                 and time.monotonic() >= second_interrupt_at
             ):
                 try:
