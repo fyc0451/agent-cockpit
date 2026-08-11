@@ -1539,7 +1539,91 @@ def test_restart_pane_rebuilds_original_managed_identity_on_same_pane(monkeypatc
         timeout=15,
     ) in calls
     assert not any(c.args[0][2:4] == ["pane", "run"] for c in calls)
+    assert not any("/quit" in c.args[0] for c in calls)
     assert not any("close" in c.args[0] for c in calls)
+
+
+def test_restart_pane_grok_uses_raw_quit_and_preserves_opaque_identity(monkeypatch):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name=instance_id, kind="grok",
+        args=[], agent="grok", instance_id=instance_id, display_name="退出测试",
+    )
+    snapshots = iter([
+        _managed_restart_snapshot(name=instance_id, kind="grok"),
+        _managed_restart_snapshot(running=False, name=instance_id, kind="grok"),
+    ])
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
+    )
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        return _shell_process_info() if "process-info" in args else ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["restarted"] is True
+    assert result["instance_id"] == instance_id
+    assert result["display_name"] == "退出测试"
+    assert call(
+        ["--session", "demo", "pane", "send-text", "w1:p5", "/quit"],
+        timeout=3,
+    ) in calls
+    assert call(
+        ["--session", "demo", "pane", "send-keys", "w1:p5", "Enter"],
+        timeout=3,
+    ) in calls
+    assert not any(c.args[0][2:4] == ["agent", "send-keys"] for c in calls)
+    assert call(
+        ["--session", "demo", "agent", "start", instance_id,
+         "--kind", "grok", "--pane", "w1:p5", "--timeout", "60000"],
+        timeout=65,
+    ) in calls
+
+
+def test_restart_pane_grok_quit_timeout_never_falls_back_to_interrupt(monkeypatch):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name=instance_id, kind="grok",
+        args=[], agent="grok", instance_id=instance_id, display_name="退出测试",
+    )
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session",
+        lambda session: _managed_restart_snapshot(name=instance_id, kind="grok"),
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(herdr_client, "RESTART_SHELL_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(herdr_client.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        herdr_client.time, "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
+    )
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["error_code"] == "restart_shell_not_ready"
+    assert result["preserved"] is True
+    assert call(
+        ["--session", "demo", "pane", "send-text", "w1:p5", "/quit"],
+        timeout=3,
+    ) in calls
+    assert call(
+        ["--session", "demo", "pane", "send-keys", "w1:p5", "Enter"],
+        timeout=3,
+    ) in calls
+    assert not any(c.args[0][2:4] == ["agent", "send-keys"] for c in calls)
+    assert not any("start" in c.args[0] for c in calls)
 
 
 def test_restart_pane_preserves_opaque_instance_id(monkeypatch):
