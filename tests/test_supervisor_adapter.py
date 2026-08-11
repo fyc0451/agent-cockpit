@@ -7,6 +7,7 @@ symlink 逃逸、命令计划不执行、禁止 upgrade.<job>、无恒真断言�
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def deploy_layout(tmp_path: Path) -> dict[str, Path]:
     launcher = gen / "bin" / "agent-cockpit"
     launcher.parent.mkdir(parents=True)
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o700)
     current = root / "current"
     current.symlink_to(gen)
     controller = tmp_path / "controller-install"
@@ -147,6 +149,154 @@ class TestEscaping:
 
 
 class TestLauncherArgv:
+    def test_fixed_server_launcher_requires_exact_literal_argv0(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        assert sa.normalize_fixed_server_launcher_argv(
+            deploy_layout["main_argv"],
+            current_dir=deploy_layout["current"],
+            deploy_root=deploy_layout["root"],
+        ) == deploy_layout["main_argv"]
+
+    @pytest.mark.parametrize(
+        "argv0",
+        [
+            "agent-cockpit",
+            "/usr/bin/env",
+            "/usr/bin/python3",
+            "{current}/server.py",
+            "{current}/launchd.sh",
+            "{current}/.venv/bin/python",
+            "{generation}/bin/agent-cockpit",
+        ],
+    )
+    def test_fixed_server_launcher_never_guesses_or_accepts_alternates(
+        self, deploy_layout: dict[str, Path], argv0: str
+    ) -> None:
+        value = argv0.format(
+            current=deploy_layout["current"].as_posix(),
+            generation=deploy_layout["gen"].as_posix(),
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                (value, "serve"),
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason in {
+            "relative_path",
+            "launcher_outside_current",
+            "fixed_launcher_argv0_mismatch",
+        }
+
+    def test_fixed_server_launcher_rejects_post_promotion_leaf_symlink(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        launcher = deploy_layout["gen"] / "bin" / "agent-cockpit"
+        replacement = launcher.with_name("replacement")
+        launcher.rename(replacement)
+        launcher.symlink_to(replacement.name)
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "fixed_launcher_unsafe"
+
+    def test_fixed_server_launcher_rejects_missing_path(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        launcher = deploy_layout["gen"] / "bin" / "agent-cockpit"
+        launcher.unlink()
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "fixed_launcher_missing"
+
+    @pytest.mark.parametrize("mutation", ["mode", "hardlink"])
+    def test_fixed_server_launcher_rejects_unsafe_leaf(
+        self, deploy_layout: dict[str, Path], mutation: str
+    ) -> None:
+        launcher = deploy_layout["gen"] / "bin" / "agent-cockpit"
+        if mutation == "mode":
+            launcher.chmod(0o600)
+        else:
+            os.link(launcher, launcher.with_name("other-link"))
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "fixed_launcher_unsafe"
+
+    @pytest.mark.parametrize("leaf_kind", ["directory", "fifo", "symlink_loop"])
+    def test_fixed_server_launcher_rejects_non_regular_leaf_types(
+        self, deploy_layout: dict[str, Path], leaf_kind: str
+    ) -> None:
+        launcher = deploy_layout["gen"] / "bin" / "agent-cockpit"
+        launcher.unlink()
+        if leaf_kind == "directory":
+            launcher.mkdir(mode=0o700)
+        elif leaf_kind == "fifo":
+            os.mkfifo(launcher, 0o700)
+        else:
+            launcher.symlink_to(launcher.name)
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        expected = (
+            "launcher_unresolvable"
+            if leaf_kind == "symlink_loop"
+            else "fixed_launcher_unsafe"
+        )
+        assert exc.value.reason == expected
+
+    def test_fixed_server_launcher_redacts_resolve_runtime_error(
+        self, deploy_layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        launcher = deploy_layout["current"] / "bin" / "agent-cockpit"
+        real_resolve = Path.resolve
+
+        def broken_resolve(path: Path, strict: bool = False) -> Path:
+            if path == launcher:
+                raise RuntimeError("symlink loop detail")
+            return real_resolve(path, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", broken_resolve)
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "launcher_unresolvable"
+
+    def test_existing_launcher_normalizer_compatibility_is_unchanged(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        legacy = (
+            f"{deploy_layout['current'].as_posix()}/server.py",
+            "serve",
+        )
+        assert sa.normalize_launcher_argv(
+            legacy,
+            current_dir=deploy_layout["current"],
+            deploy_root=deploy_layout["root"],
+        ) == legacy
+
     def test_empty_argv_rejected(self, deploy_layout: dict[str, Path]) -> None:
         cur = deploy_layout["current"]
         with pytest.raises(sa.SupervisorAdapterError) as exc:

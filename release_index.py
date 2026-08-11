@@ -16,6 +16,9 @@ MAX_INDEX_BYTES = 256 * 1024
 MAX_ASSETS = 64
 MAX_ASSET_BYTES = 8 * 1024 * 1024 * 1024
 MAX_ASSET_NAME_BYTES = 128
+MAX_LAUNCHER_BYTES = 8 * 1024 * 1024 * 1024
+SERVER_LAUNCHER_PATH = "bin/agent-cockpit"
+SERVER_LAUNCHER_FORMATS = {"linux": "elf", "macos": "mach-o"}
 
 _INDEX_FIELDS = {
     "schema_version",
@@ -33,7 +36,9 @@ _ASSET_FIELDS = {
     "arch",
     "size",
     "sha256",
+    "launcher",
 }
+_LAUNCHER_FIELDS = {"path", "size", "sha256", "format"}
 _VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 _SOURCE_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -155,13 +160,30 @@ def _validate_asset(asset: Any) -> dict[str, Any]:
     ):
         _reject()
     _require_string(asset["sha256"], _SHA256_RE)
+    launcher = asset["launcher"]
+    if type(launcher) is not dict or set(launcher) != _LAUNCHER_FIELDS:
+        _reject()
+    if type(launcher["path"]) is not str or launcher["path"] != SERVER_LAUNCHER_PATH:
+        _reject()
+    if (
+        type(launcher["size"]) is not int
+        or launcher["size"] <= 0
+        or launcher["size"] > MAX_LAUNCHER_BYTES
+    ):
+        _reject()
+    _require_string(launcher["sha256"], _SHA256_RE)
+    if (
+        type(launcher["format"]) is not str
+        or launcher["format"] != SERVER_LAUNCHER_FORMATS[asset["platform"]]
+    ):
+        _reject()
     return asset
 
 
 def _validate_index(parsed: dict[str, Any]) -> list[dict[str, Any]]:
     if set(parsed) != _INDEX_FIELDS or type(parsed["schema_version"]) is not int:
         _reject()
-    if parsed["schema_version"] != 1:
+    if parsed["schema_version"] != 2:
         _reject()
 
     version = _require_string(parsed["version"], _VERSION_RE)
@@ -198,7 +220,7 @@ def verify_release_index(
     platform: str,
     arch: str,
 ) -> dict[str, Any]:
-    """Verify a canonical v1 index and return its single matching server asset."""
+    """Verify a canonical v2 index and return its single matching server asset."""
     parsed = _parse_canonical(index_bytes)
     _verify_signature(index_bytes, signature_bytes, public_key_bytes)
     assets = _validate_index(parsed)
@@ -232,8 +254,11 @@ __all__ = [
     "MAX_ASSET_NAME_BYTES",
     "MAX_ASSETS",
     "MAX_INDEX_BYTES",
+    "MAX_LAUNCHER_BYTES",
     "OFFICIAL_RELEASE_DOWNLOAD_PREFIX",
     "ReleaseIndexError",
+    "SERVER_LAUNCHER_FORMATS",
+    "SERVER_LAUNCHER_PATH",
     "canonical_bytes",
     "verify_release_index",
 ]
