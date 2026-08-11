@@ -1,20 +1,22 @@
 name: release
 
-# 推送 tag 时构建 GitHub Release；tag 必须等于 agent-cockpit-v + VERSION
-#（如 agent-cockpit-v0.2.0），
-# 且 tag 指向的 commit 必须是 origin/main 的祖先（禁止任意分支同版本发版）。
+# Formal releases are built from tags matching agent-cockpit-v + VERSION.
 on:
   push:
     tags:
       - "agent-cockpit-v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       # actions/checkout@v4
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -39,26 +41,30 @@ jobs:
           actual="${GITHUB_REF_NAME}"
           echo "expected=${expected} actual=${actual}"
           test "${actual}" = "${expected}"
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
 
       - name: Verify tag commit is ancestor of origin/main
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
           if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
-            echo "拒绝发版: ${GITHUB_SHA} 不是 origin/main 的祖先（禁止从非 main 历史打同版本 tag）" >&2
+            echo "拒绝发版: ${GITHUB_SHA} 不是 origin/main 的祖先" >&2
             exit 1
           fi
-          echo "ok: ${GITHUB_SHA} is ancestor of origin/main"
+          test "$(uname -m)" = "x86_64"
 
-      - run: pip install -r requirements-dev.txt
+      - name: Install test and native build dependencies
+        run: pip install -r requirements-dev.txt -r requirements-build.txt
 
-      - name: Full pytest (Python 3.12)
+      - name: Full pytest including real onedir smoke
+        env:
+          P3A_BUILD_PYTHON: python
         run: pytest -q
 
       - name: py_compile / AST parse
         run: |
           set -euo pipefail
-          for file in *.py tests/*.py; do
+          for file in *.py scripts/*.py tests/*.py; do
             python - "$file" <<'PY'
           import ast, pathlib, sys
           path = pathlib.Path(sys.argv[1])
@@ -76,10 +82,203 @@ jobs:
           test -s "$js_file"
           node --check "$js_file"
 
-      # softprops/action-gh-release@v2
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+      - name: Build unsigned native assets
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          mkdir -m 700 release-assets
+          python scripts/build_server_artifact.py \
+            --output-dir release-assets \
+            --source-sha "${GITHUB_SHA}" \
+            --source-date-epoch "${source_date_epoch}"
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 2
+          test -f release-assets/release-index.json
+          test -f "release-assets/agent-cockpit-server-$(tr -d '[:space:]' < VERSION)-linux-x86_64.tar.gz"
+
+      # actions/upload-artifact@v4
+      - name: Transfer immutable unsigned assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          generate_release_notes: true
-          draft: false
-          prerelease: false
+          name: unsigned-server-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Required reviewers and formal-tag restrictions are configured on this environment.
+    environment:
+      name: server-release
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      # actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install verification dependencies
+        run: pip install -r requirements.txt
+
+      # actions/download-artifact@v4
+      - name: Download immutable unsigned assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-server-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets
+
+      - name: Verify transferred unsigned assets
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          asset="release-assets/agent-cockpit-server-${version}-linux-x86_64.tar.gz"
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 2
+          test -f "${asset}"
+          test -f release-assets/release-index.json
+          python - "${asset}" <<'PY'
+          import hashlib, json, pathlib, sys
+          archive = pathlib.Path(sys.argv[1])
+          index = json.loads(pathlib.Path("release-assets/release-index.json").read_bytes())
+          assert index["tag"] == "agent-cockpit-v" + pathlib.Path("VERSION").read_text().strip()
+          assert index["source_sha"] == __import__("os").environ["GITHUB_SHA"]
+          assert len(index["assets"]) == 1
+          asset = index["assets"][0]
+          assert asset["name"] == archive.name
+          assert asset["size"] == archive.stat().st_size
+          assert asset["sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+          PY
+
+      - name: Sign canonical release index
+        env:
+          SERVER_RELEASE_ED25519_PRIVATE_KEY_B64: ${{ secrets.SERVER_RELEASE_ED25519_PRIVATE_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python - <<'PY'
+          import base64, os, pathlib
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+          from release_index import verify_release_index
+
+          encoded = os.environ.pop("SERVER_RELEASE_ED25519_PRIVATE_KEY_B64", "")
+          try:
+              private_key_bytes = base64.b64decode(encoded, validate=True)
+          except ValueError as exc:
+              raise SystemExit("release_signing_key_invalid") from exc
+          if len(private_key_bytes) != 32:
+              raise SystemExit("release_signing_key_invalid")
+          key = Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+          index = pathlib.Path("release-assets/release-index.json").read_bytes()
+          signature = key.sign(index)
+          if len(signature) != 64:
+              raise SystemExit("release_signature_invalid")
+          pathlib.Path("release-assets/release-index.json.sig").write_bytes(signature)
+          public = key.public_key().public_bytes(
+              encoding=serialization.Encoding.Raw,
+              format=serialization.PublicFormat.Raw,
+          )
+          public_path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-public-key.bin"
+          public_path.write_bytes(public)
+          verify_release_index(index, signature, public, platform="linux", arch="x86_64")
+          PY
+
+      - name: Create, verify, and publish draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          tag="${GITHUB_REF_NAME}"
+          version="$(tr -d '[:space:]' < VERSION)"
+          asset_name="agent-cockpit-server-${version}-linux-x86_64.tar.gz"
+          asset="release-assets/${asset_name}"
+          index="release-assets/release-index.json"
+          signature="release-assets/release-index.json.sig"
+          release_title="${tag} (${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT})"
+          created=0
+          published=0
+
+          cleanup() {
+            if [[ "${created}" = 1 && "${published}" = 0 ]]; then
+              draft_identity="$(gh release view "${tag}" --json isDraft,name --jq '[.isDraft,.name] | @tsv' 2>/dev/null || true)"
+              if [[ "${draft_identity}" = $'true\t'"${release_title}" ]]; then
+                gh release delete "${tag}" --yes || true
+              fi
+            fi
+          }
+          trap cleanup EXIT
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "refusing to replace existing release: ${tag}" >&2
+            exit 1
+          fi
+          created=1
+          gh release create "${tag}" "${asset}" "${index}" "${signature}" \
+            --draft --generate-notes --title "${release_title}"
+
+          mkdir -m 700 remote-assets
+          gh release view "${tag}" --json isDraft,isPrerelease,tagName,name,assets > remote-release.json
+          python - "${tag}" "${release_title}" "${asset_name}" <<'PY'
+          import json, pathlib, sys
+          release = json.loads(pathlib.Path("remote-release.json").read_text())
+          expected_names = {sys.argv[3], "release-index.json", "release-index.json.sig"}
+          names = [asset["name"] for asset in release["assets"]]
+          assert release["tagName"] == sys.argv[1]
+          assert release["name"] == sys.argv[2]
+          assert release["isDraft"] is True
+          assert release["isPrerelease"] is False
+          assert len(names) == len(expected_names) and set(names) == expected_names
+          PY
+          gh release download "${tag}" --dir remote-assets \
+            --pattern "${asset_name}" \
+            --pattern "release-index.json" \
+            --pattern "release-index.json.sig"
+
+          python - "${asset_name}" <<'PY'
+          import os, pathlib, shutil, sys
+          import artifact_extract
+          from release_index import verify_release_index
+
+          expected_names = {sys.argv[1], "release-index.json", "release-index.json.sig"}
+          local_root = pathlib.Path("release-assets")
+          remote_root = pathlib.Path("remote-assets")
+          assert {path.name for path in remote_root.iterdir()} == expected_names
+          for name in expected_names:
+              local = local_root / name
+              remote = remote_root / name
+              if remote.read_bytes() != local.read_bytes():
+                  raise SystemExit("remote_asset_mismatch")
+          index = (remote_root / "release-index.json").read_bytes()
+          signature = (remote_root / "release-index.json.sig").read_bytes()
+          public = (pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-public-key.bin").read_bytes()
+          verified = verify_release_index(
+              index, signature, public, platform="linux", arch="x86_64",
+          )
+          asset = verified["selected_asset"]
+          assert asset["name"] == sys.argv[1]
+          cache = pathlib.Path("verify-cache")
+          staging = pathlib.Path("verify-staging")
+          cache.mkdir(mode=0o700)
+          staging.mkdir(mode=0o700)
+          cached = cache / asset["sha256"]
+          shutil.copyfile(remote_root / sys.argv[1], cached)
+          cached.chmod(0o600)
+          generation = artifact_extract.extract_verified_tarball(
+              cached, asset, staging / "generation",
+          )
+          artifact_extract.verify_server_launcher(generation, asset["launcher"])
+          PY
+
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq .id)"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false -f make_latest=true --jq '.draft == false' | grep -qx true
+          published=1

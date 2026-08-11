@@ -763,7 +763,7 @@ def test_release_workflow_gates_tag_and_checks():
     assert "ast.parse" in raw or "compile(source" in raw
     assert "node --check" in raw
     assert "contents: write" in raw
-    assert "generate_release_notes: true" in raw
+    assert "--generate-notes" in raw
     assert "tags:" in raw
     assert '"agent-cockpit-v*"' in raw
     assert 'expected="agent-cockpit-v$(tr -d \'[:space:]\' < VERSION)"' in raw
@@ -789,19 +789,21 @@ def test_release_workflow_pins_actions_to_full_commit_sha():
         # 禁止可变 tag / 短 SHA
         assert "@v" not in ref
         assert not re.search(r"@[0-9a-f]{1,39}$", ref)
-    # 四个已知 action 均出现，且带版本注释（# actions/...@vN 或行前注释）
+    # 五个已知 action 均出现，且带版本注释（# actions/...@vN 或行前注释）
     required = (
         "actions/checkout@",
         "actions/setup-python@",
         "actions/setup-node@",
-        "softprops/action-gh-release@",
+        "actions/upload-artifact@",
+        "actions/download-artifact@",
     )
     for prefix in required:
         assert any(u.startswith(prefix) for u in uses), f"缺少 {prefix}"
     assert "# actions/checkout@v4" in raw
     assert "# actions/setup-python@v5" in raw
     assert "# actions/setup-node@v4" in raw
-    assert "# softprops/action-gh-release@v2" in raw
+    assert "# actions/upload-artifact@v4" in raw
+    assert "# actions/download-artifact@v4" in raw
 
 
 def test_release_main_ancestor_gate_accepts_main_commit_rejects_side_branch(tmp_path):
