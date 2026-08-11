@@ -144,16 +144,19 @@ def test_popup_region_accepts_bordered_rows_with_bare_spacers(
     assert herdr_client._opencode_popup_has_label(regions[0], label) is True
 
 
-def test_theme_selected_label_requires_matching_query():
+def test_theme_first_body_label_requires_matching_query():
     region = herdr_client._opencode_popup_regions(
-        _split_popup(THEME_FILTERED_54), "Themes",
+        _popup("Themes", "aura", "aura", "palenight"), "Themes",
     )[0]
 
-    assert herdr_client._opencode_popup_has_selected_label(
-        region, "palenight", "palenight",
+    assert herdr_client._opencode_popup_has_first_body_label(
+        region, "aura", "aura",
     ) is True
-    assert herdr_client._opencode_popup_has_selected_label(
-        region, "different query", "palenight",
+    assert herdr_client._opencode_popup_has_first_body_label(
+        region, "different query", "aura",
+    ) is False
+    assert herdr_client._opencode_popup_has_first_body_label(
+        region, "aura", "palenight",
     ) is False
 
 
@@ -337,7 +340,42 @@ def test_opencode_theme_picker_uses_shortcut_without_touching_composer(monkeypat
     assert all("/themes" not in arg for call in calls for arg in call)
 
 
-def test_opencode_theme_picker_rejects_unselected_vertical_tail(monkeypatch):
+def test_opencode_theme_picker_accepts_first_unselected_theme(monkeypatch):
+    calls = []
+    screens = iter([
+        "preserved draft",
+        "preserved draft\n" + THEME_INITIAL_54,
+        "preserved draft\n" + _popup("Themes", "aura", "aura"),
+        "preserved draft",
+    ])
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if "read" in args:
+            return next(screens)
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_theme_to_pane("demo", "w1:p4", "aura")
+
+    assert result["available"] is True
+    assert [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "Enter",
+    ] in calls
+
+
+@pytest.mark.parametrize(
+    ("first_theme", "tail_theme", "requested_theme"),
+    [
+        ("aura", "palenight", "palenight"),
+        ("palenight", "aura", "aura"),
+    ],
+)
+def test_opencode_theme_picker_uses_first_theme_before_vertical_tail(
+    monkeypatch, first_theme, tail_theme, requested_theme,
+):
     calls = []
     read_count = 0
 
@@ -352,7 +390,7 @@ def test_opencode_theme_picker_rejects_unselected_vertical_tail(monkeypatch):
                 return "preserved draft\n" + THEME_INITIAL_54
             if read_count == 3:
                 return "preserved draft\n" + _popup(
-                    "Themes", "palenight", "● aura", "palenight",
+                    "Themes", requested_theme, first_theme, tail_theme,
                 )
             raise RuntimeError("vertical tail must not confirm theme")
         return ""
@@ -361,7 +399,7 @@ def test_opencode_theme_picker_rejects_unselected_vertical_tail(monkeypatch):
     monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
 
     result = herdr_client.apply_opencode_theme_to_pane(
-        "demo", "w1:p4", "palenight",
+        "demo", "w1:p4", requested_theme,
     )
 
     assert result == {"error": "vertical tail must not confirm theme"}
