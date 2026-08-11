@@ -12,7 +12,6 @@ import json
 import os
 import re
 import socket
-import sys
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -20,10 +19,7 @@ import httpx
 
 import settings
 
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-mail-tools")
-)
-from am_common import load_client_config, save_client_hub as save_client_hub  # noqa: E402
+from agent_mail_commands.common import load_client_config, save_client_hub
 
 HUB, TOKEN = load_client_config()
 # Team Human API 可经独立 SSH 隧道/HTTPS 入口访问远端 Hub，避免把本地

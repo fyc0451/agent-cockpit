@@ -1,8 +1,7 @@
 """Focused tests for agent-mail-tools/am-retire (Hub retire_agent + local tombstone)."""
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
+import importlib
 import json
 import os
 import stat
@@ -15,16 +14,7 @@ TOOLS = ROOT / "agent-mail-tools"
 
 
 def _load_am_retire():
-    path = TOOLS / "am-retire"
-    if not path.is_file():
-        pytest.skip("am-retire not implemented yet")
-    loader = importlib.machinery.SourceFileLoader("cockpit_am_retire", str(path))
-    spec = importlib.util.spec_from_file_location(
-        "cockpit_am_retire", str(path), loader=loader
-    )
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return importlib.reload(importlib.import_module("agent_mail_commands.am_retire"))
 
 
 def _seed_registry(module, tmp_path: Path, *, instance: str = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"):

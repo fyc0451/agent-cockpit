@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""SessionStart hook：从 Herdr session 绑定恢复 canonical Agent Mail 身份。"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+from .common import REGISTRY_DIR, helper_command, slugify
+
+
+MAIL_PROJECTS_PATH = Path.home() / "dashboard-data" / "mail-projects.json"
+AGENT_ALIASES = {
+    "codex-cli": "codex",
+    "kimi-work": "kimi",
+    "claude-code": "claude",
+    "qoder": "qodercn",
+    "qodercli": "qodercn",
+    "qoder-cn": "qodercn",
+}
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def _canonical_project(
+    cwd: str, session: str, state_path: Path, socket_path: str = "",
+) -> str:
+    """仅信任 session 名与 session_dir 同时吻合的持久化绑定。"""
+    if session and SESSION_RE.fullmatch(session):
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            entry = data.get("sessions", {}).get(session, {})
+            bound_dir = Path(str(entry.get("session_dir") or "")).expanduser().resolve()
+            expected_dir = (
+                Path(socket_path).expanduser().resolve().parent
+                if socket_path else
+                (Path.home() / ".config" / "herdr" / "sessions" / session).resolve()
+            )
+            project = Path(str(entry.get("project") or "")).expanduser().resolve()
+            if bound_dir == expected_dir and project.is_dir():
+                return str(project)
+        except (OSError, TypeError, ValueError):
+            pass
+    return str(Path(cwd).expanduser().resolve())
+
+
+def _identity(project: str, agent: str) -> dict | None:
+    registry = REGISTRY_DIR / slugify(project) / f"{agent}--main.json"
+    try:
+        identity = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    if not isinstance(identity, dict):
+        return None
+    if (
+        identity.get("project_key") != project
+        or identity.get("agent") != agent
+        or identity.get("instance") != "main"
+        or not identity.get("name")
+    ):
+        return None
+    return identity
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args:
+        return
+    if args[0] in {"-h", "--help"}:
+        print("usage: mail-identity-inject <agent>")
+        return
+    agent = AGENT_ALIASES.get(args[0], args[0])
+    project = _canonical_project(
+        os.getcwd(), os.environ.get("HERDR_SESSION", ""), MAIL_PROJECTS_PATH,
+        os.environ.get("HERDR_SOCKET_PATH", ""),
+    )
+    identity = _identity(project, agent)
+    if not identity:
+        return
+    send = helper_command("mail-send")
+    recv = helper_command("mail-recv")
+    name = identity["name"]
+    text = (
+        f"[agent-mail 身份] 你是 {name},项目 {project}。"
+        f" 发消息: {send} --agent {agent} --instance main --project \"{project}\""
+        " --to <花名> --subject \"...\" --body \"...\";"
+        f" 收消息: {recv} --agent {agent} --instance main --project \"{project}\""
+        " --unread。"
+    )
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": text,
+        }
+    }, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

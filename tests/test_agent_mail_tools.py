@@ -1,5 +1,4 @@
-import importlib.machinery
-import importlib.util
+import importlib
 import json
 import os
 from pathlib import Path
@@ -16,45 +15,23 @@ PROJECT = "/tmp/project"
 
 
 def _load_mail_send():
-    path = TOOLS / "mail-send"
-    loader = importlib.machinery.SourceFileLoader("cockpit_mail_send", str(path))
-    spec = importlib.util.spec_from_file_location(
-        "cockpit_mail_send", str(path), loader=loader
-    )
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return importlib.reload(importlib.import_module("agent_mail_commands.mail_send"))
 
 
 def _load_mail_recv():
-    path = TOOLS / "mail-recv"
-    loader = importlib.machinery.SourceFileLoader("cockpit_mail_recv", str(path))
-    spec = importlib.util.spec_from_file_location(
-        "cockpit_mail_recv", str(path), loader=loader
-    )
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return importlib.reload(importlib.import_module("agent_mail_commands.mail_recv"))
 
 
 def _load_task_report():
-    path = TOOLS / "task-report"
-    loader = importlib.machinery.SourceFileLoader("cockpit_task_report", str(path))
-    spec = importlib.util.spec_from_file_location(
-        "cockpit_task_report", str(path), loader=loader
-    )
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return importlib.reload(importlib.import_module("agent_mail_commands.task_report"))
 
 
 def _load_tool(name, module_name):
-    path = TOOLS / name
-    loader = importlib.machinery.SourceFileLoader(module_name, str(path))
-    spec = importlib.util.spec_from_file_location(module_name, str(path), loader=loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    del module_name
+    package_name = name.replace("-", "_").removesuffix(".py")
+    if package_name == "am_common":
+        return importlib.import_module("agent_mail_commands.common")
+    return importlib.reload(importlib.import_module(f"agent_mail_commands.{package_name}"))
 
 
 def _load_am_common():
@@ -219,7 +196,7 @@ def test_session_binding_requires_matching_session_directory(tmp_path):
 
 
 def test_mail_send_source_uses_loaded_identity_project_key():
-    source = (TOOLS / "mail-send").read_text(encoding="utf-8")
+    source = (ROOT / "agent_mail_commands" / "mail_send.py").read_text(encoding="utf-8")
 
     assert 'project_key = identity["project_key"]' in source
     assert 'delivery.get("project")' not in source
@@ -252,10 +229,10 @@ def test_db_path_prefers_xdg_then_keeps_legacy_compatible(monkeypatch, tmp_path)
 
 
 def test_init_project_registers_claude_and_qoder_command_identity():
-    source = (TOOLS / "am-init-project").read_text(encoding="utf-8")
+    source = (ROOT / "agent_mail_commands" / "am_init_project.py").read_text(encoding="utf-8")
 
-    assert '"claude|claude-code|unknown"' in source
-    assert '"qodercn|qoder-cn|unknown"' in source
+    assert '("claude", "claude-code", "unknown")' in source
+    assert '("qodercn", "qoder-cn", "unknown")' in source
 
 
 def test_qoder_notification_uses_registered_command_identity():
@@ -339,7 +316,7 @@ def test_identity_hook_uses_validated_herdr_session_binding(monkeypatch, tmp_pat
 
 
 def test_register_does_not_fabricate_agent_main_name():
-    source = (TOOLS / "am-register").read_text(encoding="utf-8")
+    source = (ROOT / "agent_mail_commands" / "am_register.py").read_text(encoding="utf-8")
 
     assert 'f"{args.agent}-{args.instance}"' not in source
     assert 'if args.name:' in source
@@ -349,14 +326,7 @@ def test_register_does_not_fabricate_agent_main_name():
 
 
 def _load_am_register():
-    path = TOOLS / "am-register"
-    loader = importlib.machinery.SourceFileLoader("cockpit_am_register", str(path))
-    spec = importlib.util.spec_from_file_location(
-        "cockpit_am_register", str(path), loader=loader
-    )
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return importlib.reload(importlib.import_module("agent_mail_commands.am_register"))
 
 
 def test_register_rejects_unsafe_agent_component(monkeypatch):
@@ -608,13 +578,13 @@ def test_task_report_cli_submits_structured_progress(
         "demo", "w1:p1", "codex", "codex-main",
         request_id="request-1", now=10,
     )
-    monkeypatch.setattr(module.sys, "argv", [
-        "task-report", "--session", "demo", "--pane", "w1:p1",
+    argv = [
+        "--session", "demo", "--pane", "w1:p1",
         "--request-id", "request-1", "--progress", "75",
         "--summary", "完成实现", "--next", "执行回归", "--blocker", "",
-    ])
+    ]
 
-    module.main()
+    module.main(argv)
 
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
