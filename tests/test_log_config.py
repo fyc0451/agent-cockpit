@@ -281,6 +281,38 @@ def test_rotate_rejects_backup_symlinks_including_broken(tmp_path):
     assert path.read_bytes() == b"x" * 100
 
 
+def test_rotate_rejects_directory_slot_with_existing_backup_unchanged(tmp_path):
+    """Directory in a slot + another valid backup: fail closed, zero mutation."""
+    path = tmp_path / "launchd.stderr.log"
+    base_bytes = b"BASE" * 30
+    path.write_bytes(base_bytes)
+    os.chmod(path, 0o600)
+    slot1 = tmp_path / "launchd.stderr.log.1"
+    slot1_bytes = b"OLD1-CONTENT"
+    slot1.write_bytes(slot1_bytes)
+    os.chmod(slot1, 0o644)  # mode may be tightened only after full precheck passes
+    slot2 = tmp_path / "launchd.stderr.log.2"
+    slot2.mkdir()  # directory/FIFO/socket class: not a regular file
+    before = {
+        "base": path.read_bytes(),
+        "s1": slot1.read_bytes(),
+        "s2_is_dir": slot2.is_dir(),
+        "s1_mode": stat.S_IMODE(slot1.stat().st_mode),
+        "base_mode": stat.S_IMODE(path.stat().st_mode),
+    }
+    with pytest.raises(log_config.LogConfigError) as exc:
+        log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
+    assert "普通文件" in str(exc.value) or "符号链接" in str(exc.value) or "owner" in str(
+        exc.value
+    )
+    assert path.read_bytes() == before["base"] == base_bytes
+    assert slot1.read_bytes() == before["s1"] == slot1_bytes
+    assert slot2.is_dir() is True
+    assert stat.S_IMODE(slot1.stat().st_mode) == before["s1_mode"]
+    assert stat.S_IMODE(path.stat().st_mode) == before["base_mode"]
+    assert not (tmp_path / "launchd.stderr.log.3").exists()
+
+
 def test_prepare_rejects_relative_and_symlink_install(tmp_path):
     with pytest.raises(log_config.LogConfigError):
         log_config.prepare_macos_log_dir("relative-install")

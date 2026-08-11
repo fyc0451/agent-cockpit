@@ -199,6 +199,26 @@ def _prepare_app_log_file(path: Path) -> None:
     _chmod_file_strict(path, 0o600)
 
 
+def _precheck_rotate_slot(path: Path, *, role: str) -> None:
+    """If path exists, require current-uid regular file (mode may be tightened later).
+
+    Symlink (including broken), directory, FIFO, socket, or wrong owner → error.
+    Must run before any rename/unlink so base and slots stay unchanged on failure.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise LogConfigError(f"无法检查 bootstrap {role}: {path}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise LogConfigError(f"bootstrap {role} 不得为符号链接: {path}")
+    if not stat.S_ISREG(info.st_mode):
+        raise LogConfigError(f"bootstrap {role} 必须是普通文件: {path}")
+    if info.st_uid != os.getuid():
+        raise LogConfigError(f"bootstrap {role} owner 不正确: {path}")
+
+
 def rotate_file_if_needed(
     path: Path,
     *,
@@ -211,11 +231,9 @@ def rotate_file_if_needed(
         raise LogConfigError("轮转参数无效")
     if path.is_symlink():
         raise LogConfigError(f"bootstrap 日志不得为符号链接: {path}")
-    # Reject every backup slot (including broken symlinks) before any rename/unlink.
+    # Preflight every backup slot before any rename/unlink (zero mutation on fail).
     for index in range(1, backup_count + 1):
-        backup = Path(f"{path}.{index}")
-        if backup.is_symlink():
-            raise LogConfigError(f"bootstrap 轮转副本不得为符号链接: {backup}")
+        _precheck_rotate_slot(Path(f"{path}.{index}"), role=f"轮转副本 .{index}")
     if not path.is_file():
         return
     try:
@@ -225,22 +243,25 @@ def rotate_file_if_needed(
     if size < max_bytes:
         _chmod_file_strict(path, 0o600)
         return
+    # Current file must also be a current-uid regular file before we move it.
+    _precheck_rotate_slot(path, role="当前日志")
     try:
         oldest = Path(f"{path}.{backup_count}")
-        if oldest.exists():
-            if oldest.is_symlink():
-                raise LogConfigError(f"bootstrap 轮转副本不得为符号链接: {oldest}")
+        try:
+            oldest.lstat()
+        except FileNotFoundError:
+            pass
+        else:
             oldest.unlink()
         for index in range(backup_count - 1, 0, -1):
             src = Path(f"{path}.{index}")
             dst = Path(f"{path}.{index + 1}")
-            if src.is_symlink() or dst.is_symlink():
-                raise LogConfigError(
-                    f"bootstrap 轮转副本不得为符号链接: {src if src.is_symlink() else dst}"
-                )
-            if src.is_file():
-                src.replace(dst)
-                _chmod_file_strict(dst, 0o600)
+            try:
+                src.lstat()
+            except FileNotFoundError:
+                continue
+            src.replace(dst)
+            _chmod_file_strict(dst, 0o600)
         path.replace(Path(f"{path}.1"))
         _chmod_file_strict(Path(f"{path}.1"), 0o600)
         path.write_bytes(b"")
