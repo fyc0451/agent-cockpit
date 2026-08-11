@@ -2198,8 +2198,8 @@ def _require_unzoomed(snap: dict[str, Any], pane_ids: list[str]) -> None:
         raise ValueError("pane 所在 tab 正在放大，请先退出单 pane 放大后重试")
 
 
-def _move_pane(session: str, args: list[str]) -> None:
-    """执行 pane move，并检查 Herdr 的 changed 字段而非只看退出码。"""
+def _move_pane(session: str, args: list[str]) -> dict[str, Any]:
+    """执行 pane move，返回包含新 pane ID 的权威 move_result。"""
     out = _run(["--session", session, "pane", "move", *args], timeout=10)
     data = _parse_data_json(out)
     if not data:
@@ -2213,6 +2213,58 @@ def _move_pane(session: str, args: list[str]) -> None:
         if reason == "zoomed_tab":
             raise RuntimeError("pane 所在 tab 正在放大，请先退出单 pane 放大后重试")
         raise RuntimeError(f"pane move 未生效: {reason}")
+    return move
+
+
+def _pane_identity_label(
+    session: str, pane: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str, str]:
+    """返回 descriptor、显示标签和 agent kind；显示字段不参与任何寻址。"""
+    pane_id = str(pane.get("pane_id") or "")
+    descriptor = get_launch_descriptor(session, pane_id) if pane_id else None
+    candidates = (
+        descriptor.get("display_name") if descriptor else None,
+        pane.get("label"),
+        pane.get("agent"),
+        pane.get("runtime_name") or pane.get("agent_name") or pane.get("name"),
+    )
+    label = next(
+        (str(value).strip() for value in candidates if str(value or "").strip()),
+        pane_id or "agent",
+    )
+    agent = str(
+        (descriptor or {}).get("agent") or pane.get("agent") or "agent"
+    ).strip() or "agent"
+    return descriptor, label, agent
+
+
+def _restore_moved_pane_identity(
+    session: str, pane: dict[str, Any], move: dict[str, Any], *, layout: str,
+) -> str:
+    """move 后迁移 descriptor，并恢复 pane/tab 的可读标签。"""
+    old_pane_id = str(pane.get("pane_id") or "")
+    descriptor, label, agent = _pane_identity_label(session, pane)
+    moved_pane = move.get("pane") if isinstance(move.get("pane"), dict) else {}
+    new_pane_id = str(moved_pane.get("pane_id") or old_pane_id)
+    if not new_pane_id:
+        raise RuntimeError("pane move 成功但未返回可识别的 pane id")
+    descriptor_error: str | None = None
+    if descriptor and new_pane_id != old_pane_id:
+        instance_id = descriptor.get("instance_id")
+        if instance_id:
+            try:
+                update_launch_descriptor_by_instance(instance_id, pane_id=new_pane_id)
+            except (OSError, ValueError) as exc:
+                descriptor_error = str(exc)
+    renamed_pane = dict(pane)
+    renamed_pane.update(moved_pane)
+    renamed_pane["pane_id"] = new_pane_id
+    _rename_agent_context(session, renamed_pane, agent, layout, label)
+    if descriptor_error:
+        raise RuntimeError(
+            f"pane 已移动到 {new_pane_id}，但 descriptor 迁移失败: {descriptor_error}"
+        )
+    return new_pane_id
 
 
 def _split_pane_once(session: str, pane_id: str, direction: str) -> str:
@@ -2265,8 +2317,8 @@ def split_pane_layout(session: str, pane_id: str, mode: str) -> list[str]:
     raise ValueError(f"不支持的分屏模式: {mode}")
 
 
-def detach_pane(session: str, pane_id: str) -> None:
-    """把 pane 拆到独立 tab(herdr pane move --new-tab)。"""
+def detach_pane(session: str, pane_id: str) -> str:
+    """把 pane 拆到独立 tab，并返回 move 后的真实 pane id。"""
     snap = _snapshot_session(session)
     pane = next(
         (p for p in snap.get("panes", []) if str(p.get("pane_id")) == pane_id),
@@ -2281,29 +2333,35 @@ def detach_pane(session: str, pane_id: str) -> None:
     if len(same_tab) <= 1:
         raise ValueError("当前 pane 已经是独立 tab")
     _require_unzoomed(snap, [pane_id])
-    _move_pane(session, [pane_id, "--new-tab"])
+    move = _move_pane(session, [pane_id, "--new-tab"])
+    return _restore_moved_pane_identity(session, pane, move, layout="tab")
 
 
 def untile_tab(session: str, tab_id: str) -> list[str]:
     """拆开 tab 内分屏:保留第一个 pane,其余逐个移到独立 tab。"""
     snap = _snapshot_session(session)
     panes = [
-        str(p.get("pane_id"))
+        p
         for p in snap.get("panes", [])
         if p.get("pane_id") and str(p.get("tab_id") or "") == str(tab_id)
     ]
     if not panes:
         raise ValueError(f"未找到 tab: {tab_id}")
-    _require_unzoomed(snap, panes)
+    pane_ids = [str(p.get("pane_id")) for p in panes]
+    _require_unzoomed(snap, pane_ids)
     moved: list[str] = []
-    for pid in panes[1:]:
+    for pane in panes[1:]:
+        pid = str(pane.get("pane_id"))
         try:
-            _move_pane(session, [pid, "--new-tab"])
+            move = _move_pane(session, [pid, "--new-tab"])
+            moved_id = _restore_moved_pane_identity(
+                session, pane, move, layout="tab",
+            )
         except RuntimeError as exc:
             raise RuntimeError(
                 f"拆开整组时已移动 {len(moved)} 个 pane，后续操作失败: {exc}"
             ) from exc
-        moved.append(pid)
+        moved.append(moved_id)
     return moved
 
 
@@ -2339,8 +2397,8 @@ def compose_panes(session: str, pane_ids: list[str], orientation: str) -> str:
         raise ValueError(f"无法确定基准 pane 所在 tab: {base}")
     direction = "right" if orientation == "horizontal" else "down"
 
-    def _move(pid: str, target: str, direction: str, ratio: str) -> None:
-        _move_pane(
+    def _move(pid: str, target: str, direction: str, ratio: str) -> dict[str, Any]:
+        return _move_pane(
             session,
             [pid, "--tab", base_tab, "--target-pane", target, "--split", direction,
              "--ratio", ratio],
@@ -2356,15 +2414,29 @@ def compose_panes(session: str, pane_ids: list[str], orientation: str) -> str:
         for index in range(1, len(pane_ids))
     ]
     completed = 0
+    pane_by_id = {
+        str(p.get("pane_id")): p for p in snap.get("panes", []) if p.get("pane_id")
+    }
+    current_ids = {pid: pid for pid in pane_ids}
     try:
-        for pid, target, move_direction, ratio in moves:
-            _move(pid, target, move_direction, ratio)
+        for original_pid, original_target, move_direction, ratio in moves:
+            pid = current_ids[original_pid]
+            target = current_ids[original_target]
+            pane = pane_by_id[original_pid]
+            move = _move(pid, target, move_direction, ratio)
+            current_ids[original_pid] = _restore_moved_pane_identity(
+                session, pane, move, layout=direction,
+            )
             completed += 1
     except RuntimeError as exc:
         raise RuntimeError(
             f"组合分屏时已完成 {completed}/{len(moves)} 步，后续操作失败: {exc}"
         ) from exc
-    return base
+    # 基准 pane 没有 move，也恢复一次名称，防止原 tab 名覆盖了 pane 识别信息。
+    _restore_moved_pane_identity(
+        session, pane_by_id[base], {"changed": True}, layout=direction,
+    )
+    return current_ids[base]
 
 
 def _restart_error(code: str, error: str, pane_id: str) -> dict[str, Any]:

@@ -292,6 +292,98 @@ def test_identity_endpoint_uses_bound_project_not_pane_cwd(monkeypatch, tmp_path
     assert seen == [(str(project), "codex")]
 
 
+def test_managed_identity_endpoint_uses_exact_descriptor_instance(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    session_dir = tmp_path / "session"
+    project.mkdir()
+    session_dir.mkdir()
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name=instance_id, kind="codex",
+        args=[], agent="codex", instance_id=instance_id, display_name="同名",
+    )
+    mail_projects.bind("demo", str(session_dir), str(project))
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
+    monkeypatch.setattr(
+        server.db, "list_projects",
+        lambda: [{"id": 1, "slug": "project", "human_key": str(project)}],
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "list_sessions",
+        lambda: [{"name": "demo", "status": "running", "directory": str(session_dir)}],
+    )
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "demo", "pane_id": "w1:p1", "cwd": str(project),
+            "agent": "codex",
+        }]},
+    )
+    seen = []
+    monkeypatch.setattr(
+        server, "_identity_record",
+        lambda cwd, agent, instance=None: seen.append((cwd, agent, instance)) or {
+            "name": "ExactMailbox", "program": "codex", "model": "gpt",
+        },
+    )
+
+    response = TestClient(server.app).get(
+        "/api/herdr/pane/demo/w1:p1/identity",
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["instance_id"] == instance_id
+    assert response.json()["name"] == "ExactMailbox"
+    assert seen == [(str(project), "codex", instance_id)]
+
+
+def test_tell_identity_uses_exact_managed_instance(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    instance_id = "i-cccccccccccccccccccccccccc"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p3", name=instance_id, kind="codex",
+        args=[], agent="codex", instance_id=instance_id, display_name="同名",
+    )
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "demo", "pane_id": "w1:p3", "cwd": str(project),
+            "agent": "codex",
+        }]},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _name: {"bound": True, "project": str(project)},
+    )
+    seen = []
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda cwd, agent, instance=None: seen.append((cwd, agent, instance))
+        or "ExactMailbox",
+    )
+    sent = []
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+
+    result = server.api_herdr_pane_tell_identity("demo", "w1:p3")
+
+    assert result["instance_id"] == instance_id
+    assert seen == [(str(project), "codex", instance_id)]
+    assert f"--instance {instance_id}" in sent[0][2]
+
+
 def test_identity_endpoint_requests_project_selection_instead_of_guessing(
     monkeypatch, tmp_path,
 ):
@@ -389,6 +481,54 @@ def test_init_mail_explicitly_binds_and_passes_project_argument(monkeypatch, tmp
     assert str(project) in sent[0][2]
 
 
+def test_init_mail_registers_managed_pane_by_exact_instance(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    instance_id = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p2", name=instance_id, kind="opencode",
+        args=[], agent="opencode", instance_id=instance_id, display_name="zcode-cockpit",
+    )
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _name: {"bound": True, "project": str(project)},
+    )
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"sessions": [{
+            "session": "demo",
+            "panes": [{"pane_id": "w1:p2", "agent": "opencode"}],
+        }]},
+    )
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("managed pane 不得注册 legacy main 身份")
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        server, "_started_agent_mail_identity",
+        lambda session, pane_id, agent, instance, notify=True, project_hint=None: calls.append(
+            (session, pane_id, agent, instance, notify, project_hint)
+        ) or {
+            "registered": True, "notified": True, "name": "ExactMailbox",
+            "instance_id": instance,
+        },
+    )
+
+    result = server.api_herdr_session_init_mail("demo")
+
+    assert result["ok"] is True
+    assert result["notified"] == ["opencode(w1:p2)→ExactMailbox"]
+    assert calls == [
+        ("demo", "w1:p2", "opencode", instance_id, True, str(project)),
+    ]
+
+
 def test_missing_registered_identity_is_not_fabricated(monkeypatch):
     monkeypatch.setattr(server.db, "identity_by_cwd", lambda *_: None)
 
@@ -451,8 +591,12 @@ def test_setup_binds_canonical_project_before_registration(monkeypatch, tmp_path
     )
 
     assert response.status_code == 200
-    assert response.json()["mail_project"] == str(canonical)
-    assert calls[0][0] == [str(init_script), "--project", str(canonical)]
+    body = response.json()
+    assert body["mail_project"] == str(canonical)
+    assert calls[0][0] == [
+        str(init_script), "--project", str(canonical), "--instance",
+        body["started_instance_ids"][0], "--only", "codex",
+    ]
     assert calls[0][1]["cwd"] == str(canonical)
 
 

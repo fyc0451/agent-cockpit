@@ -2116,10 +2116,12 @@ def _fake_herdr(monkeypatch, panes):
     )
 
 
-def _move_result(*, changed=True, reason=None):
+def _move_result(*, changed=True, reason=None, pane=None):
     move = {"changed": changed}
     if reason:
         move["reason"] = reason
+    if pane:
+        move["pane"] = pane
     return 'data: {"result":{"move_result":%s}}' % __import__("json").dumps(move)
 
 
@@ -2187,6 +2189,101 @@ def test_detach_pane_moves_to_new_tab(monkeypatch):
     assert calls[0][2:] == ["pane", "move", "w1:p3", "--new-tab"]
 
 
+def test_detach_pane_restores_display_name_and_tracks_changed_pane_id(monkeypatch):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p3", name=instance_id, kind="opencode",
+        args=[], agent="opencode", instance_id=instance_id, display_name="夜班负责人",
+    )
+    _fake_herdr(monkeypatch, [
+        {"pane_id": "w1:p1", "tab_id": "w1:t2"},
+        {
+            "pane_id": "w1:p3", "tab_id": "w1:t2", "workspace_id": "w1",
+            "agent": "opencode", "label": instance_id,
+        },
+    ])
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if args[2:4] == ["pane", "move"]:
+            return _move_result(pane={
+                "pane_id": "w1:p8", "tab_id": "w1:t8", "workspace_id": "w1",
+            })
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    moved = herdr_client.detach_pane("demo", "w1:p3")
+
+    assert moved == "w1:p8"
+    assert ["--session", "demo", "pane", "rename", "w1:p8", "夜班负责人"] in calls
+    assert ["--session", "demo", "tab", "rename", "w1:t8", "夜班负责人"] in calls
+    descriptor = herdr_client.get_launch_descriptor("demo", "w1:p8")
+    assert descriptor["instance_id"] == instance_id
+    assert herdr_client.get_launch_descriptor("demo", "w1:p3") is None
+
+
+def test_detach_pane_uses_snapshot_label_before_agent_kind(monkeypatch):
+    _fake_herdr(monkeypatch, [
+        {"pane_id": "w1:p1", "tab_id": "w1:t2"},
+        {
+            "pane_id": "w1:p3", "tab_id": "w1:t2", "workspace_id": "w1",
+            "agent": "opencode", "label": "zcode-cockpit",
+        },
+    ])
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if args[2:4] == ["pane", "move"]:
+            return _move_result(pane={
+                "pane_id": "w1:p3", "tab_id": "w1:t8", "workspace_id": "w1",
+            })
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    herdr_client.detach_pane("demo", "w1:p3")
+
+    assert ["--session", "demo", "pane", "rename", "w1:p3", "zcode-cockpit"] in calls
+
+
+def test_detach_pane_reports_new_id_when_descriptor_migration_fails(monkeypatch):
+    instance_id = "i-dddddddddddddddddddddddddd"
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p3", name=instance_id, kind="codex",
+        args=[], agent="codex", instance_id=instance_id, display_name="负责人",
+    )
+    _fake_herdr(monkeypatch, [
+        {"pane_id": "w1:p1", "tab_id": "w1:t2"},
+        {
+            "pane_id": "w1:p3", "tab_id": "w1:t2", "workspace_id": "w1",
+            "agent": "codex",
+        },
+    ])
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if args[2:4] == ["pane", "move"]:
+            return _move_result(pane={
+                "pane_id": "w1:p8", "tab_id": "w1:t8", "workspace_id": "w1",
+            })
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(
+        herdr_client, "update_launch_descriptor_by_instance",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="w1:p8.*descriptor.*disk full"):
+        herdr_client.detach_pane("demo", "w1:p3")
+
+    assert ["--session", "demo", "pane", "rename", "w1:p8", "负责人"] in calls
+
+
 def test_untile_tab_moves_all_but_first(monkeypatch):
     panes = [
         {"pane_id": "w1:p1", "tab_id": "w1:t2"},
@@ -2204,8 +2301,9 @@ def test_untile_tab_moves_all_but_first(monkeypatch):
     moved = herdr_client.untile_tab("demo", "w1:t2")
 
     assert moved == ["w1:p2", "w1:p3"]
-    assert calls[0][2:] == ["pane", "move", "w1:p2", "--new-tab"]
-    assert calls[1][2:] == ["pane", "move", "w1:p3", "--new-tab"]
+    moves = [call for call in calls if call[2:4] == ["pane", "move"]]
+    assert moves[0][2:] == ["pane", "move", "w1:p2", "--new-tab"]
+    assert moves[1][2:] == ["pane", "move", "w1:p3", "--new-tab"]
 
 
 def test_compose_pane_placement_order(monkeypatch):
@@ -2223,7 +2321,7 @@ def test_compose_pane_placement_order(monkeypatch):
         )
         herdr_client.compose_panes(
             "demo", ["w1:p1", "w1:p2", "w1:p3", "w1:p4"], orientation)
-        return [tuple(c[2:]) for c in calls]
+        return [tuple(c[2:]) for c in calls if c[2:4] == ["pane", "move"]]
 
     assert compose("horizontal") == [
         ("pane", "move", "w1:p2", "--tab", "w1:t1", "--target-pane", "w1:p1", "--split", "right", "--ratio", "0.25"),
@@ -2235,6 +2333,62 @@ def test_compose_pane_placement_order(monkeypatch):
         ("pane", "move", "w1:p3", "--tab", "w1:t1", "--target-pane", "w1:p2", "--split", "down", "--ratio", "0.333333"),
         ("pane", "move", "w1:p4", "--tab", "w1:t1", "--target-pane", "w1:p3", "--split", "down", "--ratio", "0.5"),
     ]
+
+
+def test_compose_panes_tracks_moved_ids_and_restores_each_label(monkeypatch):
+    second = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+    third = "i-cccccccccccccccccccccccccc"
+    panes = [
+        {
+            "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1",
+            "agent": "codex", "label": "负责人",
+        },
+        {
+            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+            "agent": "codex", "label": second,
+        },
+        {
+            "pane_id": "w1:p3", "tab_id": "w1:t3", "workspace_id": "w1",
+            "agent": "opencode", "label": third,
+        },
+    ]
+    for pane_id, instance_id, display_name, agent in (
+        ("w1:p2", second, "同名", "codex"),
+        ("w1:p3", third, "同名", "opencode"),
+    ):
+        herdr_client.save_launch_descriptor(
+            session="demo", pane_id=pane_id, name=instance_id, kind=agent,
+            args=[], agent=agent, instance_id=instance_id, display_name=display_name,
+        )
+    _fake_herdr(monkeypatch, panes)
+    move_results = iter([
+        _move_result(pane={
+            "pane_id": "w1:p8", "tab_id": "w1:t1", "workspace_id": "w1",
+        }),
+        _move_result(pane={
+            "pane_id": "w1:p9", "tab_id": "w1:t1", "workspace_id": "w1",
+        }),
+    ])
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if args[2:4] == ["pane", "move"]:
+            return next(move_results)
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    assert herdr_client.compose_panes(
+        "demo", ["w1:p1", "w1:p2", "w1:p3"], "horizontal",
+    ) == "w1:p1"
+
+    moves = [call for call in calls if call[2:4] == ["pane", "move"]]
+    assert "w1:p8" in moves[1]
+    assert ["--session", "demo", "pane", "rename", "w1:p8", "同名"] in calls
+    assert ["--session", "demo", "pane", "rename", "w1:p9", "同名"] in calls
+    assert herdr_client.get_launch_descriptor("demo", "w1:p8")["instance_id"] == second
+    assert herdr_client.get_launch_descriptor("demo", "w1:p9")["instance_id"] == third
 
 
 def test_compose_panes_rejects_bad_input(monkeypatch):

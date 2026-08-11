@@ -166,6 +166,7 @@ def _b0_scope_enabled(scope_kind: str, scope_id: str) -> bool:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
+    global _identity_retirement_task
     state_enabled = _h0_state_enabled()
     b0_runtime_active = _b0_runtime_active()
     if state_enabled and not _open_state_clients():
@@ -185,6 +186,7 @@ async def lifespan(_: FastAPI):
     _poller_task = asyncio.create_task(_poll_live_state())
     _message_poller_task = asyncio.create_task(_poll_message_state())
     _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
+    _identity_retirement_task = asyncio.create_task(_identity_retirement_loop())
     # T1:pending 重启恢复。单任务失败只记日志；列库失败可重试一次，不拖垮启动。
     try:
         recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
@@ -209,6 +211,7 @@ async def lifespan(_: FastAPI):
     finally:
         background_tasks = (
             _poller_task, _message_poller_task, _worktree_cleanup_task,
+            _identity_retirement_task,
         )
         for task in background_tasks:
             if task is not None:
@@ -240,6 +243,7 @@ async def lifespan(_: FastAPI):
             _poller_task = None
             _message_poller_task = None
             _worktree_cleanup_task = None
+            _identity_retirement_task = None
 
 
 app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
@@ -445,6 +449,7 @@ def _refresh_message_state() -> None:
 ROOT_DIR = Path(__file__).resolve().parent
 AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
+AM_RETIRE_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-retire"
 MAIL_SEND_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-send"
 MAIL_RECV_SCRIPT = AGENT_MAIL_TOOLS_DIR / "mail-recv"
 TASK_REPORT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "task-report"
@@ -460,6 +465,8 @@ TERM_WS_INVALID_CODE = 4004
 _TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
 _TERM_INPUT_NOTE_TASKS: dict[str, asyncio.Task[None]] = {}
 _TERM_INPUT_NOTE_PENDING: set[str] = set()
+_IDENTITY_RETIRE_LOCK = threading.Lock()
+IDENTITY_RETIRE_RETRY_INTERVAL_S = 60.0
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
     "收到停止/转向时，在完成当前原子操作并保存状态后立即停手汇报；"
@@ -1085,7 +1092,7 @@ class StartAgentReq(BaseModel):
     workdir: str
     agent: str = "codex"  # codex | kimi | qodercli
     model: str | None = None
-    name: str | None = None  # 工作区内唯一的本地实例名；为空时保留旧版复用语义
+    name: str | None = None  # 用户可见显示名；可重复，不参与实例寻址
     layout: str = "tab"
     workspace: str = "shared"  # shared(兼容旧调用) | isolated(新建/复用 worktree)
     args: str = Field(default="", max_length=herdr_client.MAX_AGENT_ARGS_LENGTH)
@@ -1094,7 +1101,7 @@ class StartAgentReq(BaseModel):
 class WorkspaceParticipantReq(BaseModel):
     """协作工作区里的一个 Agent。"""
     id: str = ""
-    name: str = ""  # 当前 Herdr 工作区内唯一的本地实例名
+    name: str = ""  # 用户可见显示名；可重复，不参与实例寻址
     agent: str
     role: str = "developer"
     task: str = ""
@@ -4060,7 +4067,15 @@ def api_herdr_pane_identity(session: str, pane_id: str):
             **state,
         }
     project = state["project"]
-    ident = _identity_record(project, agent_type)
+    descriptor = herdr_client.get_launch_descriptor(session, pane_id)
+    instance_id = (
+        str(descriptor.get("instance_id"))
+        if descriptor and descriptor.get("instance_id") else None
+    )
+    ident = (
+        _identity_record(project, agent_type, instance_id)
+        if instance_id else _identity_record(project, agent_type)
+    )
     if not ident:
         return {
             "found": False,
@@ -4068,7 +4083,7 @@ def api_herdr_pane_identity(session: str, pane_id: str):
             "reason": "该通信项目下没有此 agent 的有效身份（未注册或已 retired）",
             "project": project,
         }
-    return {
+    result = {
         "found": True,
         "name": ident["name"],
         "program": ident["program"],
@@ -4078,6 +4093,10 @@ def api_herdr_pane_identity(session: str, pane_id: str):
         "cwd": cwd,
         "mail_hint": _collaborator_hint(ident["name"], project),
     }
+    if instance_id:
+        result["instance_id"] = instance_id
+        result["display_name"] = descriptor.get("display_name") or agent_type
+    return result
 
 
 @app.post("/api/herdr/pane/{session}/{pane_id}/send")
@@ -4092,7 +4111,7 @@ def api_herdr_pane_send(session: str, pane_id: str, req: PaneSendReq):
 
 def _started_agent_mail_identity(
     session: str, pane_id: str, agent_type: str, instance_id: str,
-    *, notify: bool = True,
+    *, notify: bool = True, project_hint: str | None = None,
 ) -> dict[str, Any]:
     """为新增 managed instance 注册精确身份并发送身份告知。"""
     base: dict[str, Any] = {
@@ -4102,12 +4121,18 @@ def _started_agent_mail_identity(
     mail_agent = MAIL_AGENT_NAMES.get(agent_type, agent_type)
     try:
         herdr_client.validate_agent_instance_id(instance_id)
-        state = _mail_project_state(session)
     except Exception as exc:
         return {**base, "warning": f"读取 Agent Mail 通信项目失败: {exc}"}
-    if not state.get("bound") or not state.get("project"):
-        return {**base, "warning": "该 session 尚未绑定 Agent Mail 通信项目"}
-    project = str(state["project"])
+    if project_hint:
+        project = str(Path(project_hint).expanduser().resolve())
+    else:
+        try:
+            state = _mail_project_state(session)
+        except Exception as exc:
+            return {**base, "warning": f"读取 Agent Mail 通信项目失败: {exc}"}
+        if not state.get("bound") or not state.get("project"):
+            return {**base, "warning": "该 session 尚未绑定 Agent Mail 通信项目"}
+        project = str(state["project"])
     status = {**base, "project": project}
     name = _identity_name(project, agent_type, instance_id)
     if not name:
@@ -4162,6 +4187,134 @@ def _started_agent_mail_identity(
         }
     status["notified"] = True
     return status
+
+
+def _retire_agent_instance(
+    instance_id: str, *, project_hint: str | None = None,
+) -> dict[str, Any]:
+    """把一个 pending descriptor 精确退休到 Hub，并保留本地 tombstone。"""
+    try:
+        opaque_id = herdr_client.validate_agent_instance_id(instance_id)
+    except ValueError as exc:
+        return {"instance_id": str(instance_id), "retired": False, "error": str(exc)}
+
+    with _IDENTITY_RETIRE_LOCK:
+        descriptor = herdr_client.get_launch_descriptor_by_instance(
+            opaque_id, include_retired=True,
+        )
+        if not descriptor:
+            return {
+                "instance_id": opaque_id, "retired": False,
+                "error": "launch descriptor 不存在，无法证明退休目标",
+            }
+        if descriptor.get("state") == "retired":
+            return {"instance_id": opaque_id, "retired": True}
+        if descriptor.get("state") != "retirement_pending":
+            return {
+                "instance_id": opaque_id, "retired": False,
+                "error": "launch descriptor 尚未进入 retirement_pending",
+            }
+
+        agent_type = str(descriptor.get("agent") or "").strip()
+        mail_agent = str(
+            descriptor.get("mail_agent")
+            or MAIL_AGENT_NAMES.get(agent_type, agent_type)
+            or ""
+        ).strip()
+        project = str(descriptor.get("mail_project") or project_hint or "").strip()
+        if not mail_agent or not project:
+            error = "缺少精确的 Mail agent 或 project，保留 pending 等待修复"
+            try:
+                herdr_client.fail_launch_descriptor_retirement(opaque_id, error)
+            except (OSError, ValueError):
+                pass
+            return {"instance_id": opaque_id, "retired": False, "error": error}
+
+        # 路由在 unbind 前提供 project_hint；先持久化，保证进程重启后仍可重试。
+        if not descriptor.get("mail_project") or not descriptor.get("mail_agent"):
+            try:
+                herdr_client.update_launch_descriptor_by_instance(
+                    opaque_id, mail_agent=mail_agent, mail_instance=opaque_id,
+                    mail_project=project,
+                )
+            except (OSError, ValueError) as exc:
+                error = f"退休目标保存失败: {exc}"
+                try:
+                    herdr_client.fail_launch_descriptor_retirement(opaque_id, error)
+                except (OSError, ValueError):
+                    pass
+                return {"instance_id": opaque_id, "retired": False, "error": error}
+
+        if not AM_RETIRE_SCRIPT.is_file():
+            error = "Agent Mail 退休工具未安装"
+            try:
+                herdr_client.fail_launch_descriptor_retirement(opaque_id, error)
+            except (OSError, ValueError):
+                pass
+            return {"instance_id": opaque_id, "retired": False, "error": error}
+
+        try:
+            retired = subprocess.run(
+                [
+                    str(AM_RETIRE_SCRIPT), "--agent", mail_agent,
+                    "--instance", opaque_id, "--project", project,
+                ],
+                cwd=str(ROOT_DIR), capture_output=True, text=True, timeout=60,
+            )
+            if retired.returncode != 0:
+                detail = (retired.stderr or retired.stdout)[-500:].strip()
+                raise RuntimeError(detail or f"am-retire 退出码 {retired.returncode}")
+            finalized = herdr_client.finalize_launch_descriptor_retirement(opaque_id)
+            if not finalized:
+                raise RuntimeError("Hub 已退休，但本地 descriptor 不存在")
+        except Exception as exc:
+            error = str(exc)[:500] or type(exc).__name__
+            try:
+                herdr_client.fail_launch_descriptor_retirement(opaque_id, error)
+            except (OSError, ValueError):
+                pass
+            return {"instance_id": opaque_id, "retired": False, "error": error}
+        return {"instance_id": opaque_id, "retired": True}
+
+
+def _retire_pending_agent_instances(
+    instance_ids: list[str], *, project_hint: str | None = None,
+) -> dict[str, Any]:
+    requested = list(dict.fromkeys(str(item) for item in instance_ids if item))
+    retired: list[str] = []
+    pending: list[str] = []
+    errors: dict[str, str] = {}
+    for instance_id in requested:
+        result = _retire_agent_instance(instance_id, project_hint=project_hint)
+        if result.get("retired"):
+            retired.append(instance_id)
+        else:
+            pending.append(instance_id)
+            errors[instance_id] = str(result.get("error") or "退休失败")
+    return {
+        "requested": requested, "retired": retired, "pending": pending,
+        "errors": errors, "complete": not pending,
+    }
+
+
+def _retry_pending_agent_retirements() -> dict[str, Any]:
+    pending = herdr_client.pending_launch_descriptor_retirements()
+    return _retire_pending_agent_instances([
+        str(item.get("instance_id") or "") for item in pending
+    ])
+
+
+def _attach_identity_retirement(
+    result: dict[str, Any], *, project_hint: str | None = None,
+) -> dict[str, Any]:
+    pending = result.get("retirement_pending")
+    if not isinstance(pending, list) or not pending:
+        return result
+    retirement = _retire_pending_agent_instances(pending, project_hint=project_hint)
+    result["identity_retirement"] = retirement
+    if not retirement["complete"]:
+        result["partial"] = True
+    return result
 
 
 def _start_agent(req: StartAgentReq) -> dict[str, Any]:
@@ -4274,6 +4427,24 @@ def api_herdr_pane_restart(session: str, pane_id: str, resume: bool = False):
     return herdr_client.restart_pane(session, pane_id, resume=resume)
 
 
+@app.delete("/api/herdr/pane/{session}/{pane_id}")
+def api_herdr_pane_delete(session: str, pane_id: str):
+    """显式关闭 pane；managed identity 仅在关闭成功后进入退休流程。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
+    result = herdr_client.close_pane(session, pane_id)
+    if result.get("closed"):
+        project_hint = None
+        try:
+            state = _mail_project_state(session)
+            if state.get("bound") and state.get("project"):
+                project_hint = str(state["project"])
+        except (OSError, ValueError, HTTPException):
+            pass
+        _attach_identity_retirement(result, project_hint=project_hint)
+    return result
+
+
 @app.post("/api/herdr/session/{name}/stop")
 def api_herdr_session_stop(name: str):
     """停止 herdr session。"""
@@ -4288,8 +4459,16 @@ def api_herdr_session_stop(name: str):
 def api_herdr_session_delete(name: str):
     """删除已停止的 herdr session。"""
     _validate_session_name(name)
+    project_hint = None
+    try:
+        state = _mail_project_state(name)
+        if state.get("bound") and state.get("project"):
+            project_hint = str(state["project"])
+    except (OSError, ValueError, HTTPException):
+        pass
     result = herdr_client.delete_session(name)
     if result.get("deleted"):
+        _attach_identity_retirement(result, project_hint=project_hint)
         coordination.close_session(name, "deleted")
         mail_projects.unbind(name)
     return result
@@ -4317,12 +4496,12 @@ def api_herdr_pane_layout_detach(session: str, pane_id: str):
     _validate_session_name(session)
     _validate_pane_id(pane_id)
     try:
-        herdr_client.detach_pane(session, pane_id)
+        moved_pane_id = herdr_client.detach_pane(session, pane_id) or pane_id
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
-    return {"detached": pane_id}
+    return {"detached": moved_pane_id}
 
 
 @app.post("/api/herdr/session/{name}/layout/untile")
@@ -5261,7 +5440,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
                 continue
             identity = _started_agent_mail_identity(
                 req.session, pane_id, plan["agent"], plan["instance_id"],
-                notify=False,
+                notify=False, project_hint=canonical_project,
             )
             result["agent_mail"] = identity
             registration_results.append((result, identity))
@@ -5384,7 +5563,15 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
             **state,
         }
     project = state["project"]
-    my_name = _identity_name(project, agent_type)
+    descriptor = herdr_client.get_launch_descriptor(session, pane_id)
+    instance_id = (
+        str(descriptor.get("instance_id"))
+        if descriptor and descriptor.get("instance_id") else None
+    )
+    my_name = (
+        _identity_name(project, agent_type, instance_id)
+        if instance_id else _identity_name(project, agent_type)
+    )
     if not my_name:
         return {
             "ok": False,
@@ -5392,10 +5579,18 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
             "project": project,
             "error": "该通信项目下没有此 agent 的有效身份（未注册或已 retired）",
         }
-    hint = _identity_hint(my_name, project, agent_type)
+    hint = _identity_hint(
+        my_name, project, agent_type, instance_id=instance_id,
+    )
     result = herdr_client.pane_send(session, pane_id, hint, "prompt")
-    return {"ok": "error" not in result, "pane_id": pane_id, "agent": agent_type,
-            "name": my_name, "project": project, "result": result}
+    response = {
+        "ok": "error" not in result, "pane_id": pane_id, "agent": agent_type,
+        "name": my_name, "project": project, "result": result,
+    }
+    if instance_id:
+        response["instance_id"] = instance_id
+        response["display_name"] = descriptor.get("display_name") or agent_type
+    return response
 
 
 @app.get("/api/herdr/session/{name}/mail-project")
@@ -5428,20 +5623,53 @@ def api_herdr_session_init_mail(name: str, req: MailProjectReq | None = None):
     if not AGENT_MAIL_INIT_SCRIPT.is_file():
         return {"ok": False, "unavailable": True, "error": "Agent Mail 未安装"}
     try:
-        r = subprocess.run(
-            [str(AGENT_MAIL_INIT_SCRIPT), "--project", project], cwd=project,
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode != 0:
-            detail = (r.stderr or r.stdout)[-300:]
-            return {"ok": False, "project": project, "error": detail or "am-init-project 失败"}
-        # 注册成功后,通知各 agent pane 它们的身份
+        panes = [
+            p for p in sess.get("panes", [])
+            if p.get("agent") and p.get("pane_id")
+        ]
+        managed: dict[str, dict[str, Any]] = {}
+        legacy = []
+        for pane in panes:
+            pane_id = str(pane["pane_id"])
+            descriptor = herdr_client.get_launch_descriptor(name, pane_id)
+            if descriptor and descriptor.get("instance_id"):
+                managed[pane_id] = descriptor
+            else:
+                legacy.append(pane)
+
+        output = ""
+        if legacy:
+            r = subprocess.run(
+                [str(AGENT_MAIL_INIT_SCRIPT), "--project", project], cwd=project,
+                capture_output=True, text=True, timeout=60,
+            )
+            if r.returncode != 0:
+                detail = (r.stderr or r.stdout)[-300:]
+                return {
+                    "ok": False, "project": project,
+                    "error": detail or "am-init-project 失败",
+                }
+            output = r.stdout[-300:] if r.stdout else ""
+
         notified = []
         missing_identities = []
-        for p in sess.get("panes", []):
+        identity_status = []
+        for p in panes:
             agent_type = p.get("agent")
-            pane_id = p.get("pane_id")
-            if not agent_type or not pane_id:
+            pane_id = str(p["pane_id"])
+            descriptor = managed.get(pane_id)
+            if descriptor:
+                instance_id = str(descriptor["instance_id"])
+                status = _started_agent_mail_identity(
+                    name, pane_id, str(agent_type), instance_id, notify=True,
+                    project_hint=project,
+                )
+                identity_status.append(status)
+                my_name = status.get("name")
+                if status.get("registered") and status.get("notified") and my_name:
+                    notified.append(f"{agent_type}({pane_id})→{my_name}")
+                else:
+                    missing_identities.append(f"{agent_type}({instance_id})")
                 continue
             my_name = _identity_name(project, agent_type)
             if not my_name:
@@ -5450,11 +5678,17 @@ def api_herdr_session_init_mail(name: str, req: MailProjectReq | None = None):
             hint = _identity_hint(my_name, project, agent_type, registered=True)
             herdr_client.pane_send(name, pane_id, hint, "prompt")
             notified.append(f"{agent_type}({pane_id})→{my_name}")
+        managed_failures = [
+            status for status in identity_status
+            if not status.get("registered") or not status.get("notified")
+        ]
         return {
-            "ok": True, "project": project,
+            "ok": not managed_failures, "project": project,
             "notified": notified,
             "missing_identities": missing_identities,
-            "output": r.stdout[-300:] if r.stdout else "",
+            "identity_status": identity_status,
+            "partial": bool(notified and managed_failures),
+            "output": output,
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -6507,6 +6741,7 @@ _live_state: dict[str, Any] = {
 _poller_task: asyncio.Task | None = None
 _message_poller_task: asyncio.Task | None = None
 _worktree_cleanup_task: asyncio.Task | None = None
+_identity_retirement_task: asyncio.Task | None = None
 # 过期 task worktree 后台清理：启动后立即跑一轮，之后每 6 小时一轮。
 WORKTREE_CLEANUP_INTERVAL_S = 6 * 3600
 WORKTREE_CLEANUP_MAX_AGE_HOURS = 48.0
@@ -6536,6 +6771,24 @@ async def _worktree_cleanup_loop() -> None:
             await _wait_worktree_cleanup_interval()
         except asyncio.CancelledError:
             raise
+
+
+async def _wait_identity_retirement_interval() -> None:
+    await asyncio.sleep(IDENTITY_RETIRE_RETRY_INTERVAL_S)
+
+
+async def _identity_retirement_loop() -> None:
+    """周期重试 Hub 退休；先等待一轮，避免测试/短生命周期启动触碰外部状态。"""
+    while True:
+        await _wait_identity_retirement_interval()
+        try:
+            result = await asyncio.to_thread(_retry_pending_agent_retirements)
+            if result.get("pending"):
+                logger.warning("identity retirement retry incomplete: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("identity retirement retry failed")
 
 
 async def _poll_live_state() -> None:

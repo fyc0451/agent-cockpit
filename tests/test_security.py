@@ -1,4 +1,5 @@
 import asyncio
+import re
 import pytest
 import threading
 from pydantic import ValidationError
@@ -274,7 +275,7 @@ def test_herdr_pane_send_rejects_unknown_mode(monkeypatch):
     assert response.status_code == 400
 
 
-def test_start_agent_accepts_unique_local_name_for_same_runtime(monkeypatch, tmp_path):
+def test_start_agent_accepts_display_name_and_generates_opaque_instance(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server, "_agent_mail_requirement", lambda: None)
     calls = []
@@ -298,24 +299,30 @@ def test_start_agent_accepts_unique_local_name_for_same_runtime(monkeypatch, tmp
     )
 
     assert response.status_code == 200
-    assert response.json()["label"] == "codex-2"
-    assert calls[0][1] == {"layout": "right", "label": "codex-2", "args": ""}
-    assert client.post(
-        "/api/herdr/start",
-        headers=headers,
-        json={
-            "session": "demo", "workdir": str(tmp_path), "agent": "codex",
-            "name": "bad name",
-        },
-    ).status_code == 400
-    assert client.post(
-        "/api/herdr/start",
-        headers=headers,
-        json={
-            "session": "demo", "workdir": str(tmp_path), "agent": "codex",
-            "name": "Codex-2",
-        },
-    ).status_code == 400
+    body = response.json()
+    kwargs = dict(calls[0][1])
+    assert body["label"] == "codex-2"
+    assert body["instance_id"] == kwargs.pop("instance_id")
+    assert re.fullmatch(r"i-[a-z2-7]{26}", body["instance_id"])
+    assert kwargs == {"layout": "right", "label": "codex-2", "args": ""}
+    for display_name in ("bad name", "Codex-2", "夜班 负责人"):
+        assert client.post(
+            "/api/herdr/start",
+            headers=headers,
+            json={
+                "session": "demo", "workdir": str(tmp_path), "agent": "codex",
+                "name": display_name,
+            },
+        ).status_code == 200
+    for invalid_name in ("bad\nname", "x" * 65):
+        assert client.post(
+            "/api/herdr/start",
+            headers=headers,
+            json={
+                "session": "demo", "workdir": str(tmp_path), "agent": "codex",
+                "name": invalid_name,
+            },
+        ).status_code == 400
     assert client.post(
         "/api/herdr/start",
         headers=headers,
