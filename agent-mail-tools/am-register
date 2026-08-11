@@ -382,7 +382,7 @@ def main() -> None:
             })
             if not isinstance(profile, dict):
                 raise SystemExit("whois 返回格式无效，无法确认身份状态")
-            if profile.get("retired_at"):
+            if profile.get("status") == "retired" or profile.get("retired_at"):
                 raise SystemExit(
                     "Hub 身份已退休，禁止恢复或复用；请创建新的 opaque instance id"
                 )

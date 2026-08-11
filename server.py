@@ -465,7 +465,8 @@ TERM_WS_INVALID_CODE = 4004
 _TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
 _TERM_INPUT_NOTE_TASKS: dict[str, asyncio.Task[None]] = {}
 _TERM_INPUT_NOTE_PENDING: set[str] = set()
-_IDENTITY_RETIRE_LOCK = threading.Lock()
+_IDENTITY_RETIRE_LOCKS: dict[str, threading.Lock] = {}
+_IDENTITY_RETIRE_LOCKS_GUARD = threading.Lock()
 IDENTITY_RETIRE_RETRY_INTERVAL_S = 60.0
 MAIL_COORDINATION_GUIDE = (
     "协作通信约定:长任务每完成一个里程碑检查一次未读消息；多封消息按时间顺序处理；"
@@ -4198,7 +4199,10 @@ def _retire_agent_instance(
     except ValueError as exc:
         return {"instance_id": str(instance_id), "retired": False, "error": str(exc)}
 
-    with _IDENTITY_RETIRE_LOCK:
+    with _IDENTITY_RETIRE_LOCKS_GUARD:
+        retire_lock = _IDENTITY_RETIRE_LOCKS.setdefault(opaque_id, threading.Lock())
+
+    with retire_lock:
         descriptor = herdr_client.get_launch_descriptor_by_instance(
             opaque_id, include_retired=True,
         )

@@ -407,7 +407,13 @@ def test_register_atomic_write_preserves_existing_on_failure(tmp_path, monkeypat
     assert [p.name for p in tmp_path.iterdir()] == ["identity.json"]
 
 
-def test_register_reuse_rejects_retired_identity(tmp_path, monkeypatch):
+@pytest.mark.parametrize("retired_marker", [
+    {"retired_at": "2026-08-02T00:00:00Z"},
+    {"status": "retired"},
+])
+def test_register_reuse_rejects_retired_identity(
+    tmp_path, monkeypatch, retired_marker,
+):
     """retired identity 不得恢复，否则同名新实例会收到旧收件箱。"""
     module = _load_am_register()
     module.REGISTRY_DIR = tmp_path
@@ -429,7 +435,7 @@ def test_register_reuse_rejects_retired_identity(tmp_path, monkeypatch):
     def tool(_hub, _token, name, args):
         calls.append((name, args))
         if name == "whois":
-            return {"name": "codex-main", "retired_at": "2026-08-02T00:00:00Z"}
+            return {"name": "codex-main", **retired_marker}
         raise AssertionError(name)
 
     monkeypatch.setattr(module, "mcp_tool", tool)

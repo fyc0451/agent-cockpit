@@ -1,5 +1,6 @@
 import asyncio
 import subprocess
+import threading
 
 import pytest
 import server
@@ -8,22 +9,24 @@ import server
 INSTANCE_ID = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
-def _pending_descriptor(monkeypatch, tmp_path):
+def _pending_descriptor(
+    monkeypatch, tmp_path, *, instance_id=INSTANCE_ID, pane_id="w1:p2",
+):
     project = tmp_path / "project"
-    project.mkdir()
+    project.mkdir(exist_ok=True)
     monkeypatch.setenv(
         "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
     )
     server.herdr_client.save_launch_descriptor(
-        session="demo", pane_id="w1:p2", name=INSTANCE_ID, kind="codex",
-        args=[], agent="codex", workdir=str(project), instance_id=INSTANCE_ID,
+        session="demo", pane_id=pane_id, name=instance_id, kind="codex",
+        args=[], agent="codex", workdir=str(project), instance_id=instance_id,
         display_name="夜班",
     )
     server.herdr_client.update_launch_descriptor_by_instance(
-        INSTANCE_ID, mail_agent="codex", mail_instance=INSTANCE_ID,
+        instance_id, mail_agent="codex", mail_instance=instance_id,
         mail_name="FreshMailbox", mail_project=str(project),
     )
-    server.herdr_client.mark_launch_descriptor_retirement_pending("demo", "w1:p2")
+    server.herdr_client.mark_launch_descriptor_retirement_pending("demo", pane_id)
     return project
 
 
@@ -86,6 +89,58 @@ def test_retire_agent_instance_failure_stays_pending_for_retry(
     assert descriptor["state"] == "retirement_pending"
     assert descriptor["retirement_attempts"] == 1
     assert "hub down" in descriptor["retirement_error"]
+
+
+def test_slow_retirement_does_not_block_another_instance(monkeypatch, tmp_path):
+    second_id = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+    _pending_descriptor(monkeypatch, tmp_path)
+    _pending_descriptor(
+        monkeypatch, tmp_path, instance_id=second_id, pane_id="w1:p3",
+    )
+    retire_script = tmp_path / "am-retire"
+    retire_script.touch()
+    monkeypatch.setattr(server, "AM_RETIRE_SCRIPT", retire_script)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    def run(args, **_kwargs):
+        instance_id = args[args.index("--instance") + 1]
+        if instance_id == INSTANCE_ID:
+            first_started.set()
+            release_first.wait(timeout=2)
+        else:
+            second_started.set()
+        return subprocess.CompletedProcess(args, 0, "retired", "")
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    results = {}
+    first = threading.Thread(
+        target=lambda: results.setdefault(
+            INSTANCE_ID, server._retire_agent_instance(INSTANCE_ID),
+        )
+    )
+    second = threading.Thread(
+        target=lambda: results.setdefault(
+            second_id, server._retire_agent_instance(second_id),
+        )
+    )
+
+    first.start()
+    assert first_started.wait(timeout=1)
+    second.start()
+    second_was_independent = second_started.wait(timeout=1)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert second_was_independent
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert results == {
+        INSTANCE_ID: {"instance_id": INSTANCE_ID, "retired": True},
+        second_id: {"instance_id": second_id, "retired": True},
+    }
 
 
 def test_delete_session_reports_partial_when_identity_retirement_fails(monkeypatch):
