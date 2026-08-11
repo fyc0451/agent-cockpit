@@ -12,6 +12,8 @@ import upgrade_journal as journal
 
 DIGEST = "d" * 64
 REQUEST = "request-1"
+SOURCE = "a" * 40
+PREVIOUS = f"{'b' * 40}-{'e' * 64}"
 
 
 def _create(tmp_path: Path) -> Path:
@@ -25,12 +27,21 @@ def _create(tmp_path: Path) -> Path:
 
 
 def _advance(root: Path, intent: str, stage: str) -> dict[str, object]:
-    current = journal.record_intent(
-        root=root,
-        request_id=REQUEST,
-        target_digest=DIGEST,
-        intent=intent,
-    )
+    if intent == journal.INTENT_SWITCH_CURRENT:
+        current = journal.record_switch_intent(
+            root=root,
+            request_id=REQUEST,
+            target_digest=DIGEST,
+            target_source_sha=SOURCE,
+            previous_generation=PREVIOUS,
+        )
+    else:
+        current = journal.record_intent(
+            root=root,
+            request_id=REQUEST,
+            target_digest=DIGEST,
+            intent=intent,
+        )
     assert current["intent"] == intent
     return journal.advance_journal(
         root=root,
@@ -77,6 +88,9 @@ def test_schema_is_fixed_and_canonical(tmp_path: Path) -> None:
         "engine",
         "request_id",
         "target_digest",
+        "target_source_sha",
+        "target_generation",
+        "previous_generation",
         "stage",
         "intent",
         "revision",
@@ -179,6 +193,128 @@ def test_next_mutation_requires_a_durable_matching_intent(tmp_path: Path) -> Non
     assert wrong_intent.value.code == "journal_transition_invalid"
 
 
+def test_switch_intent_freezes_exact_recovery_identity_before_crash_window(
+    tmp_path: Path,
+) -> None:
+    root = _create(tmp_path)
+    journal.advance_journal(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        stage="services_stopped",
+    )
+    durable = journal.record_switch_intent(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        target_source_sha=SOURCE,
+        previous_generation=PREVIOUS,
+    )
+    # Simulate current replace succeeding and the process crashing before advance.
+    recovered = journal.load_journal(root=root)
+    assert recovered == durable
+    assert recovered["stage"] == "services_stopped"
+    assert recovered["intent"] == journal.INTENT_SWITCH_CURRENT
+    assert recovered["target_source_sha"] == SOURCE
+    assert recovered["target_generation"] == f"{SOURCE}-{DIGEST}"
+    assert recovered["previous_generation"] == PREVIOUS
+
+
+def test_first_switch_can_freeze_null_previous_generation(tmp_path: Path) -> None:
+    root = _create(tmp_path)
+    journal.advance_journal(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        stage="services_stopped",
+    )
+    value = journal.record_switch_intent(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        target_source_sha=SOURCE,
+        previous_generation=None,
+    )
+    assert value["previous_generation"] is None
+
+
+def test_switch_identity_is_strict_and_immutable(tmp_path: Path) -> None:
+    root = _create(tmp_path)
+    journal.advance_journal(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        stage="services_stopped",
+    )
+    for source, previous in (("A" * 40, PREVIOUS), (SOURCE, "../escape"), (SOURCE, True)):
+        with pytest.raises(journal.UpgradeJournalError) as invalid:
+            journal.record_switch_intent(
+                root=root,
+                request_id=REQUEST,
+                target_digest=DIGEST,
+                target_source_sha=source,
+                previous_generation=previous,  # type: ignore[arg-type]
+            )
+        assert invalid.value.code == "journal_identity_invalid"
+    journal.record_switch_intent(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        target_source_sha=SOURCE,
+        previous_generation=PREVIOUS,
+    )
+    with pytest.raises(journal.UpgradeJournalError) as changed:
+        journal.record_switch_intent(
+            root=root,
+            request_id=REQUEST,
+            target_digest=DIGEST,
+            target_source_sha="c" * 40,
+            previous_generation=PREVIOUS,
+        )
+    assert changed.value.code == "journal_identity_mismatch"
+
+    class ExplosiveDigest:
+        def __str__(self) -> str:
+            raise AssertionError("digest must not be stringified before validation")
+
+    with pytest.raises(journal.UpgradeJournalError) as wrong_type:
+        journal.record_switch_intent(
+            root=root,
+            request_id=REQUEST,
+            target_digest=ExplosiveDigest(),  # type: ignore[arg-type]
+            target_source_sha=SOURCE,
+            previous_generation=PREVIOUS,
+        )
+    assert wrong_type.value.code == "journal_identity_invalid"
+
+
+def test_load_rejects_tampered_derived_target_generation(tmp_path: Path) -> None:
+    root = _create(tmp_path)
+    journal.advance_journal(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        stage="services_stopped",
+    )
+    journal.record_switch_intent(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        target_source_sha=SOURCE,
+        previous_generation=PREVIOUS,
+    )
+    path = root / journal.JOURNAL_NAME
+    value = json.loads(path.read_bytes())
+    value["target_generation"] = f"{'c' * 40}-{DIGEST}"
+    path.write_bytes(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+    path.chmod(0o600)
+    with pytest.raises(journal.UpgradeJournalError) as exc:
+        journal.load_journal(root=root)
+    assert exc.value.code == "journal_invalid"
+
+
 def test_rollback_preserves_sanitized_primary_and_rollback_codes(tmp_path: Path) -> None:
     root = _create(tmp_path)
     value = journal.record_intent(
@@ -196,6 +332,27 @@ def test_rollback_preserves_sanitized_primary_and_rollback_codes(tmp_path: Path)
         rollback_error_code="restart_old_failed",
     )
     assert value["rollback_error_code"] == "restart_old_failed"
+    with pytest.raises(journal.UpgradeJournalError) as unresolved:
+        journal.advance_journal(
+            root=root,
+            request_id=REQUEST,
+            target_digest=DIGEST,
+            stage="rolled_back",
+        )
+    assert unresolved.value.code == "journal_transition_invalid"
+    failed_revision = value["revision"]
+    value = journal.begin_rollback_retry(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+    )
+    assert value["rollback_error_code"] is None
+    assert value["revision"] == failed_revision + 1
+    assert journal.begin_rollback_retry(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+    ) == value
     value = journal.advance_journal(
         root=root,
         request_id=REQUEST,
@@ -204,7 +361,35 @@ def test_rollback_preserves_sanitized_primary_and_rollback_codes(tmp_path: Path)
     )
     assert value["stage"] == "rolled_back"
     assert value["primary_error_code"] == "stop_failed"
-    assert value["rollback_error_code"] == "restart_old_failed"
+    assert value["rollback_error_code"] is None
+
+
+def test_load_rejects_rolled_back_with_unresolved_rollback_error(tmp_path: Path) -> None:
+    root = _create(tmp_path)
+    journal.record_intent(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        intent=journal.INTENT_ROLLBACK,
+        primary_error_code="stop_failed",
+    )
+    journal.record_rollback_error(
+        root=root,
+        request_id=REQUEST,
+        target_digest=DIGEST,
+        rollback_error_code="restart_old_failed",
+    )
+    path = root / journal.JOURNAL_NAME
+    value = json.loads(path.read_bytes())
+    value["stage"] = "rolled_back"
+    value["intent"] = None
+    path.write_bytes(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+    path.chmod(0o600)
+    with pytest.raises(journal.UpgradeJournalError) as exc:
+        journal.load_journal(root=root)
+    assert exc.value.code == "journal_invalid"
 
 
 @pytest.mark.parametrize(
@@ -297,6 +482,20 @@ def test_terminal_stage_cannot_be_reopened(tmp_path: Path) -> None:
             intent=journal.INTENT_STOP_SERVICES,
         )
     assert exc.value.code == "journal_transition_invalid"
+
+
+def test_load_rejects_primary_error_outside_rollback(tmp_path: Path) -> None:
+    root = _create(tmp_path)
+    path = root / journal.JOURNAL_NAME
+    value = json.loads(path.read_bytes())
+    value["primary_error_code"] = "stop_failed"
+    path.write_bytes(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+    path.chmod(0o600)
+    with pytest.raises(journal.UpgradeJournalError) as exc:
+        journal.load_journal(root=root)
+    assert exc.value.code == "journal_invalid"
 
 
 @pytest.mark.parametrize("corruption", ["truncated", "duplicate", "extra"])
@@ -431,3 +630,29 @@ def test_file_fsync_failure_preserves_previous_durable_journal(
     assert exc.value.code == "journal_io_error"
     assert (root / journal.JOURNAL_NAME).read_bytes() == before
     assert list(root.glob(f".{journal.JOURNAL_NAME}.*.tmp")) == []
+
+
+def test_directory_fsync_failure_requires_reload_and_reconcile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _create(tmp_path)
+    real_fsync = journal.os.fsync
+
+    def fail_directory_fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("directory durability uncertain")
+        real_fsync(fd)
+
+    monkeypatch.setattr(journal.os, "fsync", fail_directory_fsync)
+    with pytest.raises(journal.UpgradeJournalError) as exc:
+        journal.advance_journal(
+            root=root,
+            request_id=REQUEST,
+            target_digest=DIGEST,
+            stage="services_stopped",
+        )
+    assert exc.value.code == "journal_io_error"
+    # Replace already happened: callers must reload instead of assuming old/new.
+    visible = journal.load_journal(root=root)
+    assert visible["stage"] == "services_stopped"
+    assert visible["intent"] is None

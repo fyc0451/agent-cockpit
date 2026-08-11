@@ -1,4 +1,8 @@
-"""Durable minimal journal for the maintenance-window upgrade controller."""
+"""Durable minimal journal for the maintenance-window upgrade controller.
+
+An I/O error after atomic replace has an ambiguous durability result: callers
+must reload and reconcile the journal before retrying any external mutation.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +42,9 @@ _FIELDS = frozenset(
         "engine",
         "request_id",
         "target_digest",
+        "target_source_sha",
+        "target_generation",
+        "previous_generation",
         "stage",
         "intent",
         "revision",
@@ -53,6 +60,8 @@ _NEXT_STAGE = {
 }
 _NORMAL_INTENT = {stage: intent for stage, (intent, _next) in _NEXT_STAGE.items()}
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_SOURCE_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+_GENERATION_RE = re.compile(r"[0-9a-f]{40}-[0-9a-f]{64}\Z")
 _ERROR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _DIRECTORY_FLAGS = (
     os.O_RDONLY
@@ -225,6 +234,27 @@ def _valid_error_code(value: Any) -> bool:
     )
 
 
+def _valid_generation_identity(value: dict[str, Any]) -> bool:
+    source_sha = value.get("target_source_sha")
+    target_generation = value.get("target_generation")
+    previous_generation = value.get("previous_generation")
+    if source_sha is None:
+        return target_generation is None and previous_generation is None
+    return (
+        type(source_sha) is str
+        and _SOURCE_SHA_RE.fullmatch(source_sha) is not None
+        and type(target_generation) is str
+        and target_generation == f"{source_sha}-{value['target_digest']}"
+        and (
+            previous_generation is None
+            or (
+                type(previous_generation) is str
+                and _GENERATION_RE.fullmatch(previous_generation) is not None
+            )
+        )
+    )
+
+
 def _validate(value: Any) -> dict[str, Any]:
     if type(value) is not dict or set(value) != _FIELDS:
         _reject("journal_invalid")
@@ -233,6 +263,7 @@ def _validate(value: Any) -> dict[str, Any]:
         or value["schema_version"] != SCHEMA_VERSION
         or value["engine"] != ENGINE
         or not _valid_identity(value)
+        or not _valid_generation_identity(value)
         or type(value["stage"]) is not str
         or value["stage"] not in STAGES
         or type(value["revision"]) is not int
@@ -251,13 +282,27 @@ def _validate(value: Any) -> dict[str, Any]:
         _reject("journal_invalid")
     if intent not in allowed_intents:
         _reject("journal_invalid")
+    if value["rollback_error_code"] is not None and intent != INTENT_ROLLBACK:
+        _reject("journal_invalid")
+    if intent == INTENT_ROLLBACK and value["primary_error_code"] is None:
+        _reject("journal_invalid")
     if (
-        value["rollback_error_code"] is not None
+        value["primary_error_code"] is not None
         and intent != INTENT_ROLLBACK
         and stage != "rolled_back"
     ):
         _reject("journal_invalid")
-    if intent == INTENT_ROLLBACK and value["primary_error_code"] is None:
+    identity_bound = value["target_generation"] is not None
+    if stage == "prepared" and identity_bound:
+        _reject("journal_invalid")
+    if intent == INTENT_SWITCH_CURRENT and not identity_bound:
+        _reject("journal_invalid")
+    if stage == "services_stopped" and identity_bound and intent not in {
+        INTENT_SWITCH_CURRENT,
+        INTENT_ROLLBACK,
+    }:
+        _reject("journal_invalid")
+    if stage in {"switched", "services_started", "committed"} and not identity_bound:
         _reject("journal_invalid")
     if stage == "committed" and (
         value["primary_error_code"] is not None
@@ -394,6 +439,9 @@ def create_journal(*, root: Path, request_id: str, target_digest: str) -> dict[s
             "engine": ENGINE,
             "request_id": request_id,
             "target_digest": target_digest,
+            "target_source_sha": None,
+            "target_generation": None,
+            "previous_generation": None,
             "stage": "prepared",
             "intent": INTENT_STOP_SERVICES,
             "revision": 0,
@@ -436,6 +484,8 @@ def record_intent(
         allowed = {_NORMAL_INTENT[stage], INTENT_ROLLBACK}
         if intent not in allowed:
             _reject("journal_transition_invalid")
+        if intent == INTENT_SWITCH_CURRENT:
+            _reject("journal_transition_invalid")
         if intent == INTENT_ROLLBACK:
             if not _valid_error_code(primary_error_code) or primary_error_code is None:
                 _reject("journal_error_code_invalid")
@@ -453,6 +503,62 @@ def record_intent(
             revision=value["revision"] + 1,
             primary_error_code=primary_error_code,
             rollback_error_code=None,
+        )
+        _atomic_write(root_fd, updated)
+        return updated
+    finally:
+        os.close(root_fd)
+
+
+def record_switch_intent(
+    *,
+    root: Path,
+    request_id: str,
+    target_digest: str,
+    target_source_sha: str,
+    previous_generation: str | None,
+) -> dict[str, Any]:
+    """Atomically freeze exact switch identities and the durable switch intent."""
+    if (
+        type(target_source_sha) is not str
+        or _SOURCE_SHA_RE.fullmatch(target_source_sha) is None
+        or (
+            previous_generation is not None
+            and (
+                type(previous_generation) is not str
+                or _GENERATION_RE.fullmatch(previous_generation) is None
+            )
+        )
+    ):
+        _reject("journal_identity_invalid")
+    path = _path(root)
+    root_fd = _open_root(path, create=False)
+    try:
+        value = _read_from_fd(root_fd)
+        _check_identity(value, request_id, target_digest)
+        target_generation = f"{target_source_sha}-{target_digest}"
+        if value["stage"] != "services_stopped" or value["intent"] not in {
+            None,
+            INTENT_SWITCH_CURRENT,
+        }:
+            _reject("journal_transition_invalid")
+        frozen = (
+            value["target_source_sha"],
+            value["target_generation"],
+            value["previous_generation"],
+        )
+        requested = (target_source_sha, target_generation, previous_generation)
+        if frozen == requested and value["intent"] == INTENT_SWITCH_CURRENT:
+            return dict(value)
+        if frozen != (None, None, None):
+            _reject("journal_identity_mismatch")
+        updated = dict(value)
+        updated.update(
+            target_source_sha=target_source_sha,
+            target_generation=target_generation,
+            previous_generation=previous_generation,
+            intent=INTENT_SWITCH_CURRENT,
+            revision=value["revision"] + 1,
         )
         _atomic_write(root_fd, updated)
         return updated
@@ -488,6 +594,28 @@ def record_rollback_error(
         os.close(root_fd)
 
 
+def begin_rollback_retry(
+    *, root: Path, request_id: str, target_digest: str
+) -> dict[str, Any]:
+    """Clear a recorded rollback failure before a new recovery mutation."""
+    path = _path(root)
+    root_fd = _open_root(path, create=False)
+    try:
+        value = _read_from_fd(root_fd)
+        _check_identity(value, request_id, target_digest)
+        if value["stage"] in TERMINAL_STAGES or value["intent"] != INTENT_ROLLBACK:
+            _reject("journal_transition_invalid")
+        if value["rollback_error_code"] is None:
+            return dict(value)
+        updated = dict(value)
+        updated["rollback_error_code"] = None
+        updated["revision"] += 1
+        _atomic_write(root_fd, updated)
+        return updated
+    finally:
+        os.close(root_fd)
+
+
 def advance_journal(
     *, root: Path, request_id: str, target_digest: str, stage: str
 ) -> dict[str, Any]:
@@ -502,7 +630,10 @@ def advance_journal(
                 return dict(value)
             _reject("journal_transition_invalid")
         if stage == "rolled_back":
-            valid = value["intent"] == INTENT_ROLLBACK
+            valid = (
+                value["intent"] == INTENT_ROLLBACK
+                and value["rollback_error_code"] is None
+            )
         else:
             required_intent, expected_stage = _NEXT_STAGE[value["stage"]]
             valid = value["intent"] == required_intent and stage == expected_stage
@@ -532,8 +663,10 @@ __all__ = [
     "TERMINAL_STAGES",
     "UpgradeJournalError",
     "advance_journal",
+    "begin_rollback_retry",
     "create_journal",
     "load_journal",
     "record_intent",
     "record_rollback_error",
+    "record_switch_intent",
 ]
