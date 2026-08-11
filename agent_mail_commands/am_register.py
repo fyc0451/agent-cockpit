@@ -396,6 +396,9 @@ def main(argv: list[str] | None = None) -> None:
                 "已有身份无效且无法自动恢复；不会覆盖本地 registry。"
                 f"如需重新注册，请显式追加 --force。\n原始错误: {exc}"
             ) from exc
+        if identity.get("status") != "active":
+            identity["status"] = "active"
+            _atomic_write_identity(registry_file, identity)
         print(f"已注册（复用）: {identity['name']}  @ {project_key}")
         print(f"inbox: {len(probe) if isinstance(probe, list) else 'ok'}")
         print(f"registry: {registry_file}")
@@ -432,6 +435,7 @@ def main(argv: list[str] | None = None) -> None:
         "program": registered.get("program"),
         "model": registered.get("model"),
         "hub": hub,
+        "status": "active",
     }
     _atomic_write_identity(registry_file, identity)
     print(f"注册成功: {registered['name']}  ({agent}--{instance} @ {project_key})")

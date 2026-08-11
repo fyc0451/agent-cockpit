@@ -292,7 +292,7 @@ def test_agent_mail_helpers_are_packaged_and_safely_linked():
     tools = ROOT / "agent-mail-tools"
     for name in (
         "am-register", "am-retire", "am-init-project", "mail-send", "mail-recv",
-        "mail-identity-inject",
+        "mail-identity-inject", "mail-hook-check",
     ):
         path = tools / name
         assert path.is_file(), f"missing Agent Mail helper: {name}"
@@ -314,7 +314,7 @@ def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path
     tools.mkdir(parents=True)
     for name in (
         "am-register", "am-retire", "am-init-project", "mail-send", "mail-recv",
-        "mail-identity-inject",
+        "mail-identity-inject", "mail-hook-check",
     ):
         path = tools / name
         path.write_text("#!/usr/bin/env bash\n")

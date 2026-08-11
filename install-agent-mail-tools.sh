@@ -5,7 +5,7 @@ INSTALL_DIR="${1:-$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
 
-for name in am-register am-retire am-init-project mail-send mail-recv mail-identity-inject task-report; do
+for name in am-register am-retire am-init-project mail-send mail-recv mail-identity-inject mail-hook-check task-report; do
   source="$INSTALL_DIR/agent-mail-tools/$name"
   target="$BIN_DIR/$name"
   if [[ ! -x "$source" ]]; then
@@ -79,5 +79,26 @@ if [[ -d "$legacy_dir" && -x "$source_hook" \
     fi
   else
     echo "警告: 保留用户已有 Hook 文件，不覆盖: $legacy_hook" >&2
+  fi
+fi
+
+plugin_source="$INSTALL_DIR/agent-mail-tools/agent-mail.opencode-plugin.js"
+plugin_dir="$HOME/.config/opencode/plugins"
+plugin_target="$plugin_dir/agent-mail.js"
+if [[ -f "$plugin_source" ]]; then
+  mkdir -p "$plugin_dir"
+  if [[ ! -e "$plugin_target" && ! -L "$plugin_target" ]]; then
+    ln -s "$plugin_source" "$plugin_target" 2>/dev/null || \
+      echo "警告: 无法创建 agent-mail 插件软链" >&2
+  elif [[ -L "$plugin_target" ]]; then
+    current="$(readlink "$plugin_target")"
+    case "$current" in
+      "$plugin_source"|"$HOME/agent-cockpit/agent-mail-tools/agent-mail.opencode-plugin.js")
+        ln -sfn "$plugin_source" "$plugin_target" 2>/dev/null || \
+          echo "警告: 无法更新 agent-mail 插件软链" >&2 ;;
+      *) echo "警告: 保留用户已有 agent-mail 插件软链: $plugin_target" >&2 ;;
+    esac
+  else
+    echo "警告: 保留用户已有 agent-mail 插件文件: $plugin_target" >&2
   fi
 fi

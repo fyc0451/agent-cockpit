@@ -801,6 +801,8 @@ def _registry_identity_for_instance(
         identity.get("project_key") != project
         or identity.get("agent") != mail_agent
         or identity.get("instance") != opaque_id
+        or identity.get("status") not in (None, "active")
+        or identity.get("retired_at")
     ):
         return None
     return identity
