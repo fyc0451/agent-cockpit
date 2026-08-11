@@ -277,6 +277,11 @@ header .spacer{flex:1}
 .attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap;flex:none}
 .attention-toolbar .spacer{flex:1}
 .attention-toolbar .team-mode-tabs{display:flex}
+.runtime-band{display:flex;align-items:center;min-height:31px;padding:0 12px;background:var(--bg);border-bottom:1px solid var(--bd);white-space:nowrap;flex:none}
+.runtime-item{display:flex;align-items:baseline;gap:5px;min-width:0;padding:5px 12px;border-right:1px solid var(--bd);font-size:11px}
+.runtime-item:first-child{padding-left:0}.runtime-item:last-child{border-right:0}
+.runtime-label{color:var(--fg3)}.runtime-value{color:var(--fg2);font-weight:600;overflow-wrap:anywhere}
+.runtime-state{color:var(--fg3);font-size:11px;padding:5px 0}
 .task-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex:none}
 .task-stat{min-width:0;padding:2px 12px;border-left:1px solid var(--bd)}
 .task-stat:first-child{border-left:0;padding-left:0}
@@ -507,6 +512,7 @@ header .spacer{flex:1}
 @media(max-width:860px){
   .msgs-body{display:flex;flex-direction:column}
   .files-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
+  .runtime-band{flex-wrap:wrap;white-space:normal}
   .msg-filters .mf select,.msg-filters .mf input{max-width:100%;min-width:0;width:100%}
   .msg-filters .mf-actions{margin-left:0;width:100%}
   .sidebar,.file-tree{max-height:25vh}
@@ -522,6 +528,9 @@ header .spacer{flex:1}
   .stat-pill{padding:3px 6px}
   .board-wrap{padding:8px}
   .attention-list{padding:7px}
+  .runtime-band{flex-wrap:wrap;white-space:normal;padding:3px 8px}
+  .runtime-item{flex:1 1 auto;padding:3px 7px;border-right:0}
+  .runtime-item:first-child{padding-left:7px}
   .task-stats{grid-template-columns:repeat(2,minmax(0,1fr));padding:7px 8px;row-gap:8px}
   .task-stat{padding:2px 8px}
   .task-stat:nth-child(odd){border-left:0;padding-left:0}
@@ -658,6 +667,7 @@ header .spacer{flex:1}
       <button class="sm" id="taskReportBtn" onclick="refreshTaskReports()" data-i18n="attention.report">请求上报</button>
       <button class="icon" onclick="attRefresh()" title="刷新" data-i18n-title="common.refresh">↻</button>
     </div>
+    <div id="runtimeStatus" class="runtime-band"><span class="runtime-state" role="status">运行状态加载中…</span></div>
     <div class="task-stats" id="taskStats" aria-live="polite"><div class="task-stats-state">历史任务统计加载中…</div></div>
     <div class="attention-list" id="attentionList" aria-busy="false"><div class="empty" data-i18n="common.loading">加载中…</div></div>
     <div id="sessionsPane" style="display:none;flex:1;min-height:0;flex-direction:column">
@@ -1122,7 +1132,7 @@ let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null
 let FILE_LOAD_SEQ=0, FILE_APPLIED_CWD=null;
 let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
 let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=null;
-let ATTENTION_LOAD_SEQ=0, ATTENTION_TASK_SEQ=0, TASK_STATS_LOAD_SEQ=0, BOARD_LOAD_SEQ=0;
+let ATTENTION_LOAD_SEQ=0, ATTENTION_TASK_SEQ=0, TASK_STATS_LOAD_SEQ=0, RUNTIME_STATS_LOAD_SEQ=0, BOARD_LOAD_SEQ=0;
 let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
@@ -2082,6 +2092,56 @@ function renderTaskStats(stats,state='ready'){
     <div class="task-stat"><div class="task-stat-label">完成 / 失败 / 取消</div><div class="task-stat-value">${done} / ${failed} / ${cancelled}</div><div class="task-stat-meta">终态任务</div></div>
     <div class="task-stat"><div class="task-stat-label">典型耗时</div><div class="task-stat-value">${median}</div><div class="task-stat-meta">P95 ${p95} · ${durationCount} 条有效</div></div>`;
 }
+function runtimeCount(value){
+  if(typeof value!=='number'||!Number.isFinite(value)||value<0)return 0;
+  return Math.min(Number.MAX_SAFE_INTEGER,Math.trunc(value));
+}
+function fmtRuntimeUptime(value){
+  const seconds=runtimeCount(value),days=Math.floor(seconds/86400),hours=Math.floor(seconds%86400/3600),minutes=Math.floor(seconds%3600/60),rest=seconds%60;
+  if(days)return days+' 天 '+hours+' 小时';
+  if(hours)return hours+' 小时 '+minutes+' 分钟';
+  if(minutes)return minutes+' 分钟 '+rest+' 秒';
+  return rest+' 秒';
+}
+function fmtRuntimeBytes(value){
+  const bytes=runtimeCount(value),unit=bytes>=1048576?'MiB':'KiB',divisor=unit==='MiB'?1048576:1024;
+  const amount=Math.round(bytes/divisor*10)/10;
+  return amount+' '+unit;
+}
+function renderRuntimeStats(stats,state='ready'){
+  const box=document.getElementById('runtimeStatus');if(!box)return;
+  box.replaceChildren();
+  if(state==='error'){
+    const error=document.createElement('span');error.className='runtime-state';error.setAttribute('role','status');error.textContent='运行状态暂不可用';box.append(error);return;
+  }
+  const process=stats&&typeof stats.process==='object'&&stats.process||{};
+  const connections=stats&&typeof stats.connections==='object'&&stats.connections||{};
+  const terminals=stats&&typeof stats.terminal_sessions==='object'&&stats.terminal_sessions||{};
+  const buffers=stats&&typeof stats.task_output_buffers==='object'&&stats.task_output_buffers||{};
+  const items=[
+    ['运行时长',fmtRuntimeUptime(process.uptime_seconds)],
+    ['SSE',String(runtimeCount(connections.sse))],
+    ['终端 WS',String(runtimeCount(connections.terminal_websocket))],
+    ['终端存活',runtimeCount(terminals.alive)+' / '+runtimeCount(terminals.total)],
+    ['输出缓存',fmtRuntimeBytes(buffers.utf8_bytes)+' · '+runtimeCount(buffers.lines).toLocaleString('zh-CN')+' 行'],
+  ];
+  for(const [label,value] of items){
+    const item=document.createElement('span'),name=document.createElement('span'),text=document.createElement('span');
+    item.className='runtime-item';name.className='runtime-label';text.className='runtime-value';
+    name.textContent=label;text.textContent=value;item.append(name,text);box.append(item);
+  }
+}
+async function loadRuntimeStats(){
+  const seq=++RUNTIME_STATS_LOAD_SEQ;
+  try{
+    const stats=await api('/api/runtime/stats');
+    if(seq!==RUNTIME_STATS_LOAD_SEQ)return;
+    renderRuntimeStats(stats);
+  }catch(e){
+    if(seq!==RUNTIME_STATS_LOAD_SEQ)return;
+    renderRuntimeStats(null,'error');
+  }
+}
 async function loadTaskStats(){
   const seq=++TASK_STATS_LOAD_SEQ;
   try{
@@ -2094,6 +2154,7 @@ async function loadTaskStats(){
   }
 }
 async function loadAttention(payload){
+  void loadRuntimeStats();
   void loadTaskStats();
   const list=document.getElementById('attentionList');
   const seq=++ATTENTION_LOAD_SEQ;
@@ -4782,7 +4843,10 @@ function attShowSessions(){
   document.getElementById('sessionsPane').style.display='flex';
   loadSessionsView();
 }
-function attRefresh(){ATT_MODE==='sessions'?loadSessionsView():loadAttention()}
+function attRefresh(){
+  if(ATT_MODE==='sessions'){void loadRuntimeStats();loadSessionsView()}
+  else loadAttention();
+}
 async function loadSessionsView(){
   const el=document.getElementById('sessionsList');
   el.innerHTML='<div class="muted">加载中…</div>';

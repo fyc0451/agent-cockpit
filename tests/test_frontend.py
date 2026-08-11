@@ -2961,6 +2961,109 @@ def test_task_stats_bar_has_empty_failure_and_responsive_contracts():
     assert "await loadTaskStats" not in attention
 
 
+def test_runtime_status_band_has_loading_failure_and_responsive_contracts():
+    js = _inline_js()
+    assert 'id="runtimeStatus" class="runtime-band"' in HTML
+    assert "运行状态加载中…" in HTML
+    assert "运行状态暂不可用" in HTML
+    assert "运行时长" in HTML
+    assert "SSE" in HTML
+    assert "终端 WS" in HTML
+    assert "终端存活" in HTML
+    assert "输出缓存" in HTML
+    assert " 行" in HTML
+    assert 'id="runtimeStatus" class="runtime-band" aria-live=' not in HTML
+    assert 'class="runtime-state" role="status"' in HTML
+    assert "error.setAttribute('role','status')" in js
+
+    narrow = HTML.split("@media(max-width:860px){", 1)[1].split(
+        "@media(max-width:560px){", 1
+    )[0]
+    assert ".runtime-band{flex-wrap:wrap;white-space:normal}" in narrow
+    phone = HTML.split("@media(max-width:560px){", 1)[1].split("</style>", 1)[0]
+    assert re.search(
+        r"\.runtime-band\{[^}]*flex-wrap:wrap;[^}]*white-space:normal",
+        phone,
+    )
+    assert ".runtime-item{flex:" in phone
+
+    load = js.split("async function loadRuntimeStats(){", 1)[1].split(
+        "async function loadTaskStats", 1
+    )[0]
+    assert "const seq=++RUNTIME_STATS_LOAD_SEQ" in load
+    assert "if(seq!==RUNTIME_STATS_LOAD_SEQ)return" in load
+    assert "api('/api/runtime/stats')" in load
+    assert "renderRuntimeStats(null,'error')" in load
+    attention = js.split("async function loadAttention(payload){", 1)[1].split(
+        "async function refreshTaskReports", 1
+    )[0]
+    assert "void loadRuntimeStats()" in attention
+    refresh = js.split("function attRefresh(){", 1)[1].split(
+        "async function loadSessionsView", 1
+    )[0]
+    assert "void loadRuntimeStats()" in refresh
+
+
+def test_runtime_status_formatters_normalize_invalid_values():
+    js = _inline_js()
+    source = js.split("function runtimeCount(value){", 1)[1].split(
+        "function renderRuntimeStats", 1
+    )[0]
+    out = _run_node(
+        "function runtimeCount(value){" + source + textwrap.dedent(
+            r"""
+            const values=[
+              runtimeCount(-1),runtimeCount('bad'),runtimeCount(Infinity),
+              runtimeCount(3.9),runtimeCount(Number.MAX_VALUE),
+            ];
+            if(JSON.stringify(values)!==JSON.stringify([0,0,0,3,Number.MAX_SAFE_INTEGER]))process.exit(1);
+            if(fmtRuntimeUptime(-1)!=='0 秒'||fmtRuntimeUptime(3661)!=='1 小时 1 分钟')process.exit(2);
+            if(fmtRuntimeBytes(-1)!=='0 KiB'||fmtRuntimeBytes(1536)!=='1.5 KiB')process.exit(3);
+            if(fmtRuntimeBytes(1572864)!=='1.5 MiB')process.exit(4);
+            console.log('ok');
+            """
+        )
+    )
+    assert "ok" in out
+
+
+def test_runtime_status_node_behavior_drops_stale_response():
+    js = _inline_js()
+    load = "async function loadRuntimeStats(){" + js.split(
+        "async function loadRuntimeStats(){", 1
+    )[1].split("async function loadTaskStats", 1)[0]
+    out = _run_node(
+        textwrap.dedent(
+            r"""
+            let RUNTIME_STATS_LOAD_SEQ=0,calls=0,resolveFirst;
+            const rendered=[];
+            async function api(url){
+              if(url!=='/api/runtime/stats')process.exit(1);
+              calls++;
+              if(calls===1)return new Promise(resolve=>{resolveFirst=resolve});
+              return {tag:'new'};
+            }
+            function renderRuntimeStats(stats,state='ready'){
+              rendered.push(state==='error'?'error':stats.tag);
+            }
+            """
+        )
+        + load
+        + textwrap.dedent(
+            r"""
+            const first=loadRuntimeStats();
+            await Promise.resolve();
+            await loadRuntimeStats();
+            resolveFirst({tag:'old'});
+            await first;
+            if(JSON.stringify(rendered)!==JSON.stringify(['new']))process.exit(2);
+            console.log('ok');
+            """
+        )
+    )
+    assert "ok" in out
+
+
 def test_mail_deep_link_uses_one_load_and_preserves_focus_request():
     js = _inline_js()
     mail = js.split("async function openMailAttention(slug,messageId){", 1)[1].split(
