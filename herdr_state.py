@@ -210,21 +210,51 @@ class HerdrSocket:
             )
         return result
 
+    # close() 跨线程时，macOS 上长 timeout 的 recv 不一定立刻被 shutdown 唤醒。
+    # 用短片段轮询，在保持 overall deadline 语义的前提下检查 _closed。
+    _READ_POLL_SLICE_S = 0.1
+
     def read_line(self, timeout: float | None = None) -> dict[str, Any] | None:
         """读一行并解析 JSON。EOF 返回 None；超时抛 HerdrSocketIdleTimeout；
-        畸形抛 HerdrSocketError。timeout=None 无限阻塞。"""
-        sock = self._sock  # 局部快照：close 并发时以已关闭 fd 失败而非崩溃
-        if sock is None:
-            raise HerdrSocketError("socket 未连接")
-        sock.settimeout(timeout)
+        畸形抛 HerdrSocketError。timeout=None 无限阻塞（短片段轮询，便于 close 唤醒）。
+
+        overall timeout 仍由 monotonic deadline 决定；片段 timeout 不抬升 IdleTimeout。
+        """
+        if self._closed or self._sock is None:
+            raise HerdrSocketError("socket 未连接" if not self._closed else "herdr socket 已关闭")
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
         while b"\n" not in self._buf:
+            if self._closed:
+                raise HerdrSocketError("herdr socket 已关闭")
+            sock = self._sock  # 局部快照：close 并发时以已关闭 fd 失败而非崩溃
+            if sock is None:
+                raise HerdrSocketError("herdr socket 已关闭")
+            if deadline is None:
+                slice_timeout = self._READ_POLL_SLICE_S
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise HerdrSocketIdleTimeout(
+                        f"herdr socket 读空闲超时(>{timeout}s)"
+                    )
+                slice_timeout = min(remaining, self._READ_POLL_SLICE_S)
+            sock.settimeout(slice_timeout)
             try:
                 chunk = sock.recv(4096)
-            except socket.timeout as exc:
-                raise HerdrSocketIdleTimeout(
-                    f"herdr socket 读空闲超时(>{timeout}s)"
-                ) from exc
+            except socket.timeout:
+                # 仅片段超时：若对端已 close 则快速失败；否则看 overall deadline。
+                if self._closed or self._sock is None:
+                    raise HerdrSocketError("herdr socket 已关闭")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise HerdrSocketIdleTimeout(
+                        f"herdr socket 读空闲超时(>{timeout}s)"
+                    )
+                continue
             except OSError as exc:
+                if self._closed or self._sock is None:
+                    raise HerdrSocketError("herdr socket 已关闭") from exc
                 raise HerdrSocketError(f"herdr socket 读失败: {exc}") from exc
             if not chunk:
                 break  # EOF
