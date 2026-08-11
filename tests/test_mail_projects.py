@@ -342,6 +342,55 @@ def test_managed_identity_endpoint_uses_exact_descriptor_instance(monkeypatch, t
     assert seen == [(str(project), "codex", instance_id)]
 
 
+def test_managed_zcode_identity_endpoint_uses_descriptor_product(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    session_dir = tmp_path / "session"
+    project.mkdir()
+    session_dir.mkdir()
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name=instance_id, kind="opencode",
+        args=[], agent="zcode", instance_id=instance_id, display_name="ZCode",
+    )
+    mail_projects.bind("demo", str(session_dir), str(project))
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
+    monkeypatch.setattr(
+        server.db, "list_projects",
+        lambda: [{"id": 1, "slug": "project", "human_key": str(project)}],
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "list_sessions",
+        lambda: [{"name": "demo", "status": "running", "directory": str(session_dir)}],
+    )
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "demo", "pane_id": "w1:p1", "cwd": str(project),
+            "agent": "opencode",
+        }]},
+    )
+    seen = []
+    monkeypatch.setattr(
+        server, "_identity_record",
+        lambda cwd, agent, instance=None: seen.append((cwd, agent, instance)) or {
+            "name": "ZCodeMailbox", "program": "zcode", "model": "unknown",
+        },
+    )
+
+    response = TestClient(server.app).get(
+        "/api/herdr/pane/demo/w1:p1/identity",
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "ZCodeMailbox"
+    assert seen == [(str(project), "zcode", instance_id)]
+
+
 def test_tell_identity_uses_exact_managed_instance(monkeypatch, tmp_path):
     project = tmp_path / "project"
     project.mkdir()

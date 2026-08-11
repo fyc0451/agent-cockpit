@@ -839,6 +839,17 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
     projects: dict[str, str | None] = {}
     identities: dict[tuple[str, str, str], str | None] = {}
+    descriptors: dict[tuple[str, str], dict[str, Any] | None] = {}
+    legacy_counts: dict[tuple[str, str], int] = {}
+    for pane in snapshot.get("panes", []):
+        session = str(pane.get("session") or "")
+        pane_id = str(pane.get("pane_id") or "")
+        agent = str(pane.get("agent") or "")
+        descriptor = herdr_client.get_launch_descriptor(session, pane_id)
+        descriptors[(session, pane_id)] = descriptor
+        if not descriptor and session and agent:
+            key = (session, agent)
+            legacy_counts[key] = legacy_counts.get(key, 0) + 1
     for pane in snapshot.get("panes", []):
         session = str(pane.get("session") or "")
         agent = str(pane.get("agent") or "")
@@ -846,13 +857,19 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
         session_dir = session_dirs.get(session)
         if not agent or not session_dir:
             continue
-        descriptor = herdr_client.get_launch_descriptor(session, pane_id)
+        descriptor = descriptors.get((session, pane_id))
         instance_id = ""
+        mail_agent = agent
         if descriptor and descriptor.get("instance_id"):
             instance_id = str(descriptor["instance_id"])
+            mail_agent = str(descriptor.get("agent") or "")
+            if not mail_agent:
+                continue
             pane["instance_id"] = instance_id
             pane["display_name"] = descriptor.get("display_name") or agent
             pane["runtime_name"] = descriptor.get("name")
+        elif legacy_counts.get((session, agent), 0) != 1:
+            continue
         if session not in projects:
             try:
                 projects[session] = mail_projects.get(session, session_dir)
@@ -861,11 +878,11 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
         project = projects[session]
         if not project:
             continue
-        key = (project, agent, instance_id)
+        key = (project, mail_agent, instance_id)
         if key not in identities:
             identities[key] = (
-                _identity_name(project, agent, instance_id)
-                if instance_id else _identity_name(project, agent)
+                _identity_name(project, mail_agent, instance_id)
+                if instance_id else _identity_name(project, mail_agent)
             )
         if identities[key]:
             pane["mail_name"] = identities[key]
@@ -4110,9 +4127,19 @@ def api_herdr_pane_identity(session: str, pane_id: str):
         str(descriptor.get("instance_id"))
         if descriptor and descriptor.get("instance_id") else None
     )
+    mail_agent = (
+        str(descriptor.get("agent") or "") if instance_id else str(agent_type)
+    )
+    if instance_id and not mail_agent:
+        return {
+            "found": False,
+            "needs_registration": True,
+            "reason": "managed descriptor 缺少 product agent",
+            "project": project,
+        }
     ident = (
-        _identity_record(project, agent_type, instance_id)
-        if instance_id else _identity_record(project, agent_type)
+        _identity_record(project, mail_agent, instance_id)
+        if instance_id else _identity_record(project, mail_agent)
     )
     if not ident:
         return {

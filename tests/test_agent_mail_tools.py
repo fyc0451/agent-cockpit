@@ -194,6 +194,19 @@ def test_managed_notification_requires_unique_exact_live_runtime(monkeypatch, tm
     ]
 
 
+def test_managed_notification_malformed_descriptor_root_fails_empty(
+    monkeypatch, tmp_path,
+):
+    module = _load_mail_send()
+    descriptors = tmp_path / "descriptors.json"
+    descriptors.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(module, "LAUNCH_DESCRIPTORS_PATH", str(descriptors))
+
+    assert module._managed_notify_target(
+        [], PROJECT, "Luna", "zcode", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ) == []
+
+
 def test_duplicate_managed_descriptors_are_ambiguous(monkeypatch, tmp_path):
     module = _load_mail_send()
     descriptors = tmp_path / "descriptors.json"

@@ -544,7 +544,9 @@ def _managed_notify_target(
         data = json.loads(Path(LAUNCH_DESCRIPTORS_PATH).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
         return []
-    descriptors = data.get("descriptors") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return []
+    descriptors = data.get("descriptors")
     if data.get("schema") != 2 or not isinstance(descriptors, dict):
         return []
     matches = [
