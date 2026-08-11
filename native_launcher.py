@@ -6,6 +6,8 @@ import os
 import sys
 from collections.abc import Sequence
 
+import native_helper_install
+
 
 HELPER_COMMANDS = {
     "am-register": "agent_mail_commands.am_register",
@@ -42,6 +44,8 @@ def main(
     basename = os.path.basename(sys.argv[0] if program is None else program)
     if basename in HELPER_COMMANDS:
         return dispatch_helper(basename, args)
+    if args and args[0] == "install-helpers":
+        return native_helper_install.main(args[1:])
     if args and args[0] == "helper":
         if len(args) >= 2 and args[1] in HELPER_COMMANDS:
             return dispatch_helper(args[1], args[2:])
