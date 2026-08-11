@@ -606,7 +606,160 @@ def test_render_validate_plan_pipeline(deploy_layout: dict[str, Path]) -> None:
 
 
 def test_no_tautology_or_true_in_adapter_module() -> None:
-    """B3：适配层源码不得含恒真 `or True` 断言残留。"""
+    """源码不得含恒真 `or True` 断言残留。"""
     src = Path(sa.__file__).read_text(encoding="utf-8")
     needle = "or" + " True"
     assert needle not in src
+
+
+# ── S0 R2：四项 exact contract 反例 ──────────────────────────────
+
+
+class TestR2ContractGaps:
+    """OpenCode BLOCK 四项：先可执行反例，再由实现关闭。"""
+
+    def test_b1_controller_rejects_resolved_generation_path(
+        self, tmp_path: Path
+    ) -> None:
+        """B1：current → generations/g1 时，generation 内路径不得冒充 release 外 controller。"""
+        root = tmp_path / "deploy"
+        gen = root / "generations" / "g1"
+        gen.mkdir(parents=True)
+        current = root / "current"
+        current.symlink_to(gen)
+        # 字面不在 current/ 下，但 resolve 后落在 generation 内
+        fake_controller = gen / "nested-controller"
+        fake_controller.mkdir()
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_controller_path(fake_controller, current=current)
+        assert exc.value.reason == "controller_inside_current"
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.render_mac_controller_plist(
+                controller_dir=fake_controller,
+                program_arguments=[(fake_controller / "bin").as_posix()],
+                current_dir=current,
+            )
+        assert exc2.value.reason == "controller_inside_current"
+        # 真正 release 外仍可通过
+        outside = tmp_path / "controller-install"
+        outside.mkdir()
+        assert sa.validate_controller_path(outside, current=current) == outside
+
+    def test_b2_launcher_rejects_subdir_symlink_escape(
+        self, tmp_path: Path
+    ) -> None:
+        """B2：argv[0] 字面在 current 下，但 current/bin → 外部 时 resolve 逃逸须拒绝。"""
+        root = tmp_path / "deploy"
+        gen = root / "generations" / "g1"
+        gen.mkdir(parents=True)
+        current = root / "current"
+        current.symlink_to(gen)
+        evil = tmp_path / "evil-bin"
+        evil.mkdir()
+        (evil / "agent-cockpit").write_text("#!/bin/sh\n", encoding="utf-8")
+        # current/bin 字面在 current 下，实为指向外部的 symlink
+        bin_link = current / "bin"
+        # current 是 symlink，写到 gen/bin 作为链接目标更稳：在 gen 上建 bin → evil
+        (gen / "bin").symlink_to(evil)
+        assert bin_link.is_symlink() or (gen / "bin").is_symlink()
+        literal_launcher = f"{current.as_posix()}/bin/agent-cockpit"
+        assert literal_launcher.startswith(current.as_posix() + "/")
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_launcher_argv(
+                [literal_launcher],
+                current_dir=current,
+                deploy_root=root,
+            )
+        assert exc.value.reason == "launcher_symlink_escape"
+        # 合法：artifact 内真实文件，字面 current/... 且 resolve 在 generation 内
+        real_bin = gen / "realbin"
+        real_bin.mkdir()
+        (real_bin / "agent-cockpit").write_text("x", encoding="utf-8")
+        ok = f"{current.as_posix()}/realbin/agent-cockpit"
+        got = sa.normalize_launcher_argv(
+            [ok, "serve"], current_dir=current, deploy_root=root
+        )
+        assert got[0] == ok  # 输出保持 current 字面，不 resolve 成 generation
+
+    def test_b3_systemd_rejects_wrong_section_and_duplicate_keys(self) -> None:
+        """B3：KillMode/ExecStart 等仅允许在 [Service]；重复键拒绝。"""
+        misplaced = (
+            "[Unit]\n"
+            "Description=x\n"
+            "KillMode=process\n"
+            "[Service]\n"
+            "WorkingDirectory=/tmp/x/current\n"
+            'ExecStart="/tmp/x/current/bin/app"\n'
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.parse_linux_unit_contract(misplaced)
+        assert exc.value.reason == "unit_key_wrong_section"
+
+        duplicate = (
+            "[Service]\n"
+            "KillMode=process\n"
+            "WorkingDirectory=/tmp/x/current\n"
+            'ExecStart="/tmp/x/current/bin/app"\n'
+            "KillMode=control-group\n"
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.parse_linux_unit_contract(duplicate)
+        assert exc2.value.reason == "unit_duplicate_key"
+
+        # 合法 section 布局仍可通过 parse
+        good = (
+            "[Unit]\n"
+            "Description=ok\n"
+            "After=network.target\n"
+            "\n"
+            "[Service]\n"
+            "Type=simple\n"
+            "KillMode=process\n"
+            "WorkingDirectory=/tmp/x/current\n"
+            'ExecStart="/tmp/x/current/bin/app"\n'
+            "\n"
+            "[Install]\n"
+            "WantedBy=default.target\n"
+        )
+        c = sa.parse_linux_unit_contract(good)
+        assert c.kill_mode == "process"
+
+    def test_b4_macos_rejects_program_key_and_unknown_top_level(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        """B4：顶层键精确 allowlist；Program 可覆盖 ProgramArguments，必须拒绝。"""
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        base = sa.render_mac_main_plist(
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
+        )
+        # 注入 Program 键（launchd 会优先于 ProgramArguments）
+        evil = base.replace(
+            "  <key>ProgramArguments</key>\n",
+            "  <key>Program</key>\n"
+            "  <string>/tmp/evil-override</string>\n"
+            "  <key>ProgramArguments</key>\n",
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.parse_mac_plist_contract(evil)
+        assert exc.value.reason == "plist_program_key_forbidden"
+
+        unknown = base.replace(
+            "  <key>ThrottleInterval</key>\n",
+            "  <key>UserName</key>\n"
+            "  <string>root</string>\n"
+            "  <key>ThrottleInterval</key>\n",
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.parse_mac_plist_contract(unknown)
+        assert exc2.value.reason == "plist_key_not_allowlisted"
+
+        # 干净渲染仍可解析
+        sa.validate_mac_plist_contract(
+            base,
+            expected_label=sa.MAC_MAIN_LABEL,
+            expected_working_directory=cur,
+            program_arguments=argv,
+            current_dir=cur,
+            deploy_root=deploy_layout["root"],
+        )

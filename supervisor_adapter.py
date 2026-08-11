@@ -157,12 +157,24 @@ def validate_controller_path(
     *,
     current: str | Path | None = None,
 ) -> Path:
-    """Controller 安装根：绝对路径；不得落在 ``current`` 或其 generation 内。"""
+    """Controller 安装根：绝对路径；不得落在 ``current`` 或其 generation 内。
+
+    同时检查：
+    - 字面量路径不得为 ``current`` 或其子路径；
+    - resolve 后不得落在 ``current.resolve()``（即 generation）边界内，
+      防止 ``current → generations/g1`` 时把 generation 内路径冒充 release 外 controller。
+    """
     path = validate_absolute_path(controller, role="controller")
     if current is not None:
         cur = validate_absolute_path(current, role="current")
-        # controller 不得等于 current，也不得是 current 的子路径
         if path == cur or _is_relative_to(path, cur):
+            raise SupervisorAdapterError("controller_inside_current")
+        try:
+            path_res = path.resolve(strict=False)
+            cur_res = cur.resolve(strict=False)
+        except OSError as exc:
+            raise SupervisorAdapterError("controller_path_unresolvable") from exc
+        if path_res == cur_res or _is_relative_to(path_res, cur_res):
             raise SupervisorAdapterError("controller_inside_current")
     return path
 
@@ -256,14 +268,43 @@ def normalize_launcher_argv(
         if i == 0:
             launcher = validate_absolute_path(arg, role="launcher")
             literal = launcher.as_posix()
+            # 输出 / 合同字面量必须挂在 current 字面路径下（不 resolve 成 generation）
             if not (literal == cur or literal.startswith(cur + "/")):
                 raise SupervisorAdapterError("launcher_outside_current", literal)
+            # 若路径（含中间 symlink）可解析，resolved 必须仍在 current/deploy 边界内
+            _assert_launcher_resolved_inside(
+                launcher, current=current, deploy_root=deploy_root
+            )
             out.append(literal)
         else:
             if arg.startswith("/"):
                 validate_absolute_path(arg, role=f"program_arg[{i}]")
             out.append(arg)
     return tuple(out)
+
+
+def _assert_launcher_resolved_inside(
+    launcher: Path,
+    *,
+    current: Path,
+    deploy_root: str | Path | None,
+) -> None:
+    """拒 ``current/bin → /evil`` 一类子 symlink 逃逸；字面量仍保留 current 前缀。"""
+    try:
+        resolved = launcher.resolve(strict=False)
+        cur_res = current.resolve(strict=False)
+    except OSError as exc:
+        raise SupervisorAdapterError("launcher_unresolvable") from exc
+    if not (resolved == cur_res or _is_relative_to(resolved, cur_res)):
+        raise SupervisorAdapterError("launcher_symlink_escape")
+    if deploy_root is not None:
+        root = validate_absolute_path(deploy_root, role="deploy_root")
+        try:
+            root_res = root.resolve(strict=False)
+        except OSError as exc:
+            raise SupervisorAdapterError("launcher_unresolvable") from exc
+        if not (resolved == root_res or _is_relative_to(resolved, root_res)):
+            raise SupervisorAdapterError("launcher_symlink_escape")
 
 
 def _format_exec_start(argv: Sequence[str]) -> str:
@@ -469,36 +510,82 @@ def render_mac_controller_plist(
 # ── 解析 / 校验合同 ──────────────────────────────────────────────
 
 
-def _parse_unit_assignments(text: str) -> dict[str, str]:
-    """Allowlisted key=value 解析；忽略注释与 section 头。"""
-    allowed = {
-        "Type",
-        "KillMode",
+# systemd section → allowlisted keys（关键服务键仅允许在 [Service]）
+_UNIT_SECTION_KEYS: dict[str, frozenset[str]] = {
+    "Unit": frozenset({"Description", "After"}),
+    "Service": frozenset(
+        {
+            "Type",
+            "KillMode",
+            "WorkingDirectory",
+            "ExecStart",
+            "Restart",
+            "RestartSec",
+            "Environment",
+            "EnvironmentFile",
+            "NoNewPrivileges",
+            "UMask",
+        }
+    ),
+    "Install": frozenset({"WantedBy"}),
+}
+_SERVICE_REQUIRED_KEYS = frozenset({"KillMode", "WorkingDirectory", "ExecStart"})
+
+# macOS LaunchAgent 顶层键精确 allowlist；Program 可覆盖 ProgramArguments，显式拒绝
+MAC_PLIST_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "Label",
+        "ProgramArguments",
         "WorkingDirectory",
-        "ExecStart",
-        "Restart",
-        "RestartSec",
-        "Environment",
-        "EnvironmentFile",
-        "Description",
-        "After",
-        "WantedBy",
-        "NoNewPrivileges",
-        "UMask",
+        "RunAtLoad",
+        "KeepAlive",
+        "ThrottleInterval",
+        "StandardOutPath",
+        "StandardErrorPath",
     }
-    out: dict[str, str] = {}
+)
+MAC_PLIST_FORBIDDEN_KEYS: frozenset[str] = frozenset({"Program"})
+
+
+def _parse_unit_by_section(text: str) -> dict[str, str]:
+    """按 section 解析 unit；关键键仅在 [Service]；拒绝错位与重复。"""
+    section: str | None = None
+    # (section, key) → value；再投影 service 字段
+    seen: set[tuple[str, str]] = set()
+    service_fields: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("["):
+        if not line or line.startswith("#"):
             continue
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1].strip()
+            if name not in _UNIT_SECTION_KEYS:
+                raise SupervisorAdapterError("unit_section_not_allowlisted", name)
+            section = name
+            continue
+        if section is None:
+            raise SupervisorAdapterError("unit_key_outside_section", line[:40])
         if "=" not in line:
             raise SupervisorAdapterError("unit_malformed_line", line[:40])
         key, _, value = line.partition("=")
         key = key.strip()
+        allowed = _UNIT_SECTION_KEYS[section]
         if key not in allowed:
+            # 服务关键键出现在错误 section 时给出更精确 reason
+            if key in _UNIT_SECTION_KEYS["Service"] and section != "Service":
+                raise SupervisorAdapterError("unit_key_wrong_section", f"{key} in [{section}]")
             raise SupervisorAdapterError("unit_key_not_allowlisted", key)
-        out[key] = value  # 保留右侧原样（可含空格）
-    return out
+        sk = (section, key)
+        if sk in seen:
+            raise SupervisorAdapterError("unit_duplicate_key", f"[{section}] {key}")
+        seen.add(sk)
+        if section == "Service":
+            service_fields[key] = value
+        elif section == "Unit" and key == "Description":
+            service_fields.setdefault("_description", value)
+        elif section == "Install" and key == "WantedBy":
+            service_fields.setdefault("_wanted_by", value)
+    return service_fields
 
 
 def parse_linux_unit_contract(text: str) -> LinuxUnitContract:
@@ -507,8 +594,8 @@ def parse_linux_unit_contract(text: str) -> LinuxUnitContract:
         stripped = text.replace("\n", "").replace("\r", "").replace("\t", "")
         if _has_control_chars(stripped):
             raise SupervisorAdapterError("control_char_in_unit")
-    fields = _parse_unit_assignments(text)
-    for required in ("KillMode", "WorkingDirectory", "ExecStart"):
+    fields = _parse_unit_by_section(text)
+    for required in _SERVICE_REQUIRED_KEYS:
         if required not in fields:
             raise SupervisorAdapterError("unit_missing_field", required)
     env_file = fields.get("EnvironmentFile")
@@ -598,7 +685,7 @@ def parse_mac_plist_contract(text: str) -> MacPlistContract:
     dict_el = root.find("dict")
     if dict_el is None:
         raise SupervisorAdapterError("plist_missing_dict")
-    mapping = _plist_dict_to_map(dict_el)
+    mapping = _plist_dict_to_map(dict_el, top_level=True)
     label = mapping.get("Label")
     if not isinstance(label, str):
         raise SupervisorAdapterError("plist_missing_label")
@@ -617,8 +704,13 @@ def parse_mac_plist_contract(text: str) -> MacPlistContract:
     )
 
 
-def _plist_dict_to_map(dict_el: ET.Element) -> dict[str, object]:
-    """最小 plist dict 解析（string / array / true / false / integer）。"""
+def _plist_dict_to_map(
+    dict_el: ET.Element, *, top_level: bool = False
+) -> dict[str, object]:
+    """最小 plist dict 解析（string / array / true / false / integer）。
+
+    顶层 dict 执行精确 key allowlist，并显式拒绝 ``Program``。
+    """
     out: dict[str, object] = {}
     children = list(dict_el)
     i = 0
@@ -630,6 +722,13 @@ def _plist_dict_to_map(dict_el: ET.Element) -> dict[str, object]:
         if i + 1 >= len(children):
             raise SupervisorAdapterError("plist_dict_malformed")
         val_el = children[i + 1]
+        if top_level:
+            if key in MAC_PLIST_FORBIDDEN_KEYS or key == "Program":
+                raise SupervisorAdapterError("plist_program_key_forbidden", key)
+            if key not in MAC_PLIST_ALLOWED_KEYS:
+                raise SupervisorAdapterError("plist_key_not_allowlisted", key)
+            if key in out:
+                raise SupervisorAdapterError("plist_duplicate_key", key)
         out[key] = _plist_value(val_el)
         i += 2
     return out
@@ -795,6 +894,8 @@ __all__ = [
     "LINUX_UNIT_NAME",
     "MAC_CONTROLLER_LABEL",
     "MAC_MAIN_LABEL",
+    "MAC_PLIST_ALLOWED_KEYS",
+    "MAC_PLIST_FORBIDDEN_KEYS",
     "LinuxUnitContract",
     "MacPlistContract",
     "PlannedCommand",
