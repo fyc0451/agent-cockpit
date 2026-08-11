@@ -1274,13 +1274,12 @@ def apply_opencode_mode_to_pane(
 
         def _target_mode(screen: str) -> str | None:
             region = _opencode_popup_region_at(screen, popup)
-            if region is None:
+            if region is None or region.query != "Switch to":
                 return None
-            for target in ("light", "dark"):
-                if _opencode_popup_has_selected_label(
-                    region, "Switch to", f"Switch to {target} mode",
-                ):
-                    return target
+            for row in region.rows:
+                match = re.fullmatch(r"Switch to (light|dark) mode", row)
+                if match is not None:
+                    return match.group(1)
             return None
 
         output = _wait_opencode_visible(
