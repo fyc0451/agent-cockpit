@@ -169,7 +169,6 @@ def _validate_asset(asset: Any) -> dict[str, Any]:
         type(launcher["size"]) is not int
         or launcher["size"] <= 0
         or launcher["size"] > MAX_LAUNCHER_BYTES
-        or launcher["size"] > asset["size"]
     ):
         _reject()
     _require_string(launcher["sha256"], _SHA256_RE)

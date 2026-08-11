@@ -186,19 +186,14 @@ def test_public_server_extract_rejects_missing_launcher_metadata(
     assert not destination.exists()
 
 
-def test_public_server_extract_rejects_launcher_larger_than_artifact(
-    tmp_path: Path,
-) -> None:
-    artifact, asset, destination = _ready_server(tmp_path, b"\x7fELFserver")
-    asset["launcher"]["size"] = asset["size"] + 1  # type: ignore[index,operator]
+def test_accepts_compressible_launcher_larger_than_gzip_artifact(tmp_path: Path) -> None:
+    launcher = b"\x7fELF" + (b"\0" * 4096)
+    artifact, asset, destination = _ready_server(tmp_path, launcher)
+    assert asset["launcher"]["size"] > asset["size"]  # type: ignore[index,operator]
 
-    _assert_code(
-        "launcher_invalid",
-        lambda: artifact_extract.extract_verified_tarball(
-            artifact, asset, destination
-        ),
-    )
-    assert not destination.exists()
+    assert artifact_extract.extract_verified_tarball(
+        artifact, asset, destination
+    ) == destination
 
 
 @pytest.mark.parametrize(

@@ -175,9 +175,7 @@ def _validate_asset(asset: Any) -> tuple[str, int, str]:
     return name, size, digest
 
 
-def _validate_launcher(
-    launcher: Any, *, max_size: int | None = None
-) -> tuple[tuple[str, ...], int, str, str]:
+def _validate_launcher(launcher: Any) -> tuple[tuple[str, ...], int, str, str]:
     if type(launcher) is not dict or set(launcher) != _LAUNCHER_FIELDS:
         _reject("launcher_invalid")
     path = launcher["path"]
@@ -186,12 +184,7 @@ def _validate_launcher(
     launcher_format = launcher["format"]
     if type(path) is not str or path != SERVER_LAUNCHER_PATH:
         _reject("launcher_invalid")
-    if (
-        type(size) is not int
-        or size <= 0
-        or size > MAX_LAUNCHER_BYTES
-        or (max_size is not None and size > max_size)
-    ):
+    if type(size) is not int or size <= 0 or size > MAX_LAUNCHER_BYTES:
         _reject("launcher_invalid")
     if type(digest) is not str or _SHA256_RE.fullmatch(digest) is None:
         _reject("launcher_invalid")
@@ -808,7 +801,7 @@ def _extract_verified_archive(
     _asset_name, expected_size, expected_digest = _validate_asset(asset)
     launcher = asset.get("launcher") if type(asset) is dict else None
     if launcher is not None:
-        _validate_launcher(launcher, max_size=expected_size)
+        _validate_launcher(launcher)
     (
         artifact_fd,
         artifact_signature,

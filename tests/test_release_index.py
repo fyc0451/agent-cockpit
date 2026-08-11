@@ -39,7 +39,7 @@ def _index() -> dict[str, object]:
                 "sha256": "a" * 64,
                 "launcher": {
                     "path": SERVER_LAUNCHER_PATH,
-                    "size": 45678,
+                    "size": 456789,
                     "sha256": "c" * 64,
                     "format": "elf",
                 },
@@ -53,7 +53,7 @@ def _index() -> dict[str, object]:
                 "sha256": "b" * 64,
                 "launcher": {
                     "path": SERVER_LAUNCHER_PATH,
-                    "size": 56789,
+                    "size": 567890,
                     "sha256": "d" * 64,
                     "format": "mach-o",
                 },
@@ -180,16 +180,6 @@ def test_rejects_invalid_linux_launcher_contract(
     data = _index()
     launcher = data["assets"][0]["launcher"]  # type: ignore[index]
     mutation(launcher)  # type: ignore[operator]
-
-    _assert_code("invalid_target", lambda: _verify(data, signing_key))
-
-
-def test_rejects_launcher_larger_than_its_artifact(
-    signing_key: Ed25519PrivateKey,
-) -> None:
-    data = _index()
-    asset = data["assets"][0]  # type: ignore[index]
-    asset["launcher"]["size"] = asset["size"] + 1
 
     _assert_code("invalid_target", lambda: _verify(data, signing_key))
 
