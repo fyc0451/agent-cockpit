@@ -1058,7 +1058,9 @@ class _OpenCodePopupRegion(NamedTuple):
     title: str
     header_line: int
     header_column: int
+    query: str
     rows: tuple[str, ...]
+    selected_labels: tuple[str, ...]
 
 
 _OPENCODE_POPUP_WIDTH = 54
@@ -1077,6 +1079,7 @@ def _opencode_popup_regions(
     for index, line in enumerate(lines):
         for match in header_pattern.finditer(line):
             header_column = match.start()
+            crop_left = max(0, header_column - _OPENCODE_POPUP_TITLE_OFFSET)
             crop_right = header_column + (
                 _OPENCODE_POPUP_WIDTH - _OPENCODE_POPUP_TITLE_OFFSET
             )
@@ -1100,6 +1103,7 @@ def _opencode_popup_regions(
                 continue
 
             rows = [query.strip()]
+            selected_labels = []
             blank_run = 0
             for row in lines[index + 4:index + 25]:
                 content = content_at(row)
@@ -1113,9 +1117,15 @@ def _opencode_popup_regions(
                 if content != content.lstrip():
                     break
                 blank_run = 0
-                rows.append(content.strip())
+                label = content.strip()
+                rows.append(label)
+                if row[crop_left:header_column] == "● ":
+                    selected_labels.append(label)
             regions.append(
-                _OpenCodePopupRegion(title, index, header_column, tuple(rows)),
+                _OpenCodePopupRegion(
+                    title, index, header_column, query.strip(), tuple(rows),
+                    tuple(selected_labels),
+                ),
             )
     return tuple(regions)
 
@@ -1153,6 +1163,12 @@ def _opencode_popup_label(row: str) -> str:
 
 def _opencode_popup_has_label(region: _OpenCodePopupRegion, label: str) -> bool:
     return any(_opencode_popup_label(row) == label for row in region.rows)
+
+
+def _opencode_popup_has_selected_label(
+    region: _OpenCodePopupRegion, query: str, label: str,
+) -> bool:
+    return region.query == query and label in region.selected_labels
 
 
 def _opencode_new_popup_region(
@@ -1201,7 +1217,9 @@ def apply_opencode_theme_to_pane(
             prefix, pane_id,
             lambda screen: (
                 (region := _opencode_popup_region_at(screen, popup)) is not None
-                and _opencode_popup_has_label(region, theme_name)
+                and _opencode_popup_has_selected_label(
+                    region, theme_name, theme_name,
+                )
             ),
             f"OpenCode 主题候选未出现: {theme_name}",
         )
@@ -1259,8 +1277,8 @@ def apply_opencode_mode_to_pane(
             if region is None:
                 return None
             for target in ("light", "dark"):
-                if _opencode_popup_has_label(
-                    region, f"Switch to {target} mode",
+                if _opencode_popup_has_selected_label(
+                    region, "Switch to", f"Switch to {target} mode",
                 ):
                     return target
             return None

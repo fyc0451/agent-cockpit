@@ -58,7 +58,7 @@ COMMANDS_FILTERED_54 = "\n".join([
     "     Switch to",
     "",
     "     System",
-    "     Switch to dark mode",
+    "   ● Switch to dark mode",
     "",
     "     Agent",
     "     Switch model                       ctrl+x m",
@@ -142,6 +142,29 @@ def test_popup_region_accepts_bordered_rows_with_bare_spacers(
 
     assert len(regions) == 1
     assert herdr_client._opencode_popup_has_label(regions[0], label) is True
+
+
+@pytest.mark.parametrize(
+    ("title", "screen", "query", "label"),
+    [
+        ("Themes", _split_popup(THEME_FILTERED_54), "palenight", "palenight"),
+        (
+            "Commands", _split_popup(COMMANDS_FILTERED_54), "Switch to",
+            "Switch to dark mode",
+        ),
+    ],
+)
+def test_popup_selected_label_requires_matching_query(
+    title, screen, query, label,
+):
+    region = herdr_client._opencode_popup_regions(screen, title)[0]
+
+    assert herdr_client._opencode_popup_has_selected_label(
+        region, query, label,
+    ) is True
+    assert herdr_client._opencode_popup_has_selected_label(
+        region, "different query", label,
+    ) is False
 
 
 def test_popup_region_requires_query_at_overlay_column():
@@ -324,6 +347,40 @@ def test_opencode_theme_picker_uses_shortcut_without_touching_composer(monkeypat
     assert all("/themes" not in arg for call in calls for arg in call)
 
 
+def test_opencode_theme_picker_rejects_unselected_vertical_tail(monkeypatch):
+    calls = []
+    read_count = 0
+
+    def fake_run(args, timeout=10):
+        nonlocal read_count
+        calls.append(list(args))
+        if "read" in args:
+            read_count += 1
+            if read_count == 1:
+                return "preserved draft"
+            if read_count == 2:
+                return "preserved draft\n" + THEME_INITIAL_54
+            if read_count == 3:
+                return "preserved draft\n" + _popup(
+                    "Themes", "palenight", "● aura", "palenight",
+                )
+            raise RuntimeError("vertical tail must not confirm theme")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_theme_to_pane(
+        "demo", "w1:p4", "palenight",
+    )
+
+    assert result == {"error": "vertical tail must not confirm theme"}
+    assert not any(call[-1:] == ["Enter"] for call in calls)
+    assert calls[-1] == [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "esc",
+    ]
+
+
 def test_opencode_theme_picker_closes_its_dialog_after_filter_failure(monkeypatch):
     calls = []
     read_count = 0
@@ -457,6 +514,36 @@ def test_opencode_mode_picker_switches_to_requested_mode_without_touching_compos
     ] in calls
 
 
+def test_opencode_mode_picker_rejects_unselected_vertical_tail(monkeypatch):
+    calls = []
+    screens = iter([
+        "preserved draft",
+        "preserved draft\n" + COMMANDS_INITIAL_54,
+        "preserved draft\n" + _popup(
+            "Commands", "Switch to", "● Switch to dark mode",
+            "Switch to light mode",
+        ),
+        "preserved draft",
+    ])
+
+    def fake_run(args, timeout=10):
+        calls.append(list(args))
+        if "read" in args:
+            return next(screens)
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_mode_to_pane("demo", "w1:p4", "light")
+
+    assert result["changed"] is False
+    assert not any(call[-1:] == ["Enter"] for call in calls)
+    assert [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "esc",
+    ] in calls
+
+
 def test_opencode_mode_picker_is_idempotent(monkeypatch):
     calls = []
     screens = iter([
@@ -531,7 +618,7 @@ def test_opencode_mode_picker_rejects_full_dialog_left_after_action(monkeypatch)
                 1: "preserved draft",
                 2: "preserved draft\n" + full_dialog,
                 3: "preserved draft\n" + _popup(
-                    "Commands", "Switch to", "System", "Switch to dark mode",
+                    "Commands", "Switch to", "System", "● Switch to dark mode",
                 ),
                 4: "preserved draft\n" + full_dialog,
             }
@@ -573,13 +660,13 @@ def test_opencode_mode_picker_rejects_flipped_action_left_after_enter(monkeypatc
                 3: (
                     "preserved draft\n"
                     + _popup(
-                        "Commands", "Switch to", "System", "Switch to dark mode",
+                        "Commands", "Switch to", "System", "● Switch to dark mode",
                     )
                 ),
                 4: (
                     "preserved draft\n"
                     + _popup(
-                        "Commands", "Switch to", "System", "Switch to light mode",
+                        "Commands", "Switch to", "System", "● Switch to light mode",
                     )
                 ),
             }
