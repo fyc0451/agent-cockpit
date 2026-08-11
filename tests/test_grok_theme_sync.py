@@ -50,6 +50,10 @@ def test_opencode_theme_picker_uses_shortcut_without_touching_composer(monkeypat
 
     def fake_run(args, timeout=10):
         calls.append(list(args))
+        if "wait-output" in args and "Themes" in " ".join(args):
+            pattern = args[args.index("--regex") + 1]
+            assert re.search(pattern, "  ┃       Themes                  esc")
+            assert args[args.index("--timeout") + 1] == "5000"
         if "pane" in args and "read" in args:
             return "  ┃  preserved draft\n  ┃  Build · model\n"
         return ""
@@ -106,6 +110,10 @@ def test_opencode_mode_picker_switches_to_requested_mode_without_touching_compos
 
     def fake_run(args, timeout=10):
         calls.append(list(args))
+        if "wait-output" in args and "Commands" in " ".join(args):
+            pattern = args[args.index("--regex") + 1]
+            assert re.search(pattern, "  ┃       Commands                esc")
+            assert args[args.index("--timeout") + 1] == "5000"
         if "wait-output" in args and "Switch to" in " ".join(args):
             line = "  ┃                                   Switch to light mode"
             pattern = args[args.index("--regex") + 1]

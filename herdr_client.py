@@ -956,7 +956,7 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
 def grok_theme_slash(mode: str) -> str:
     """Web light/dark → Grok /theme 目标（见 grok user-guide 06-theming）。
 
-    Grok 4.5 只接受主题 key；light/dark 会返回 ``Unknown theme``。
+    Grok 4.5 会拒绝 dark 别名；canonical 主题 key 在当前版本稳定可用。
     """
     if mode not in ("light", "dark"):
         raise ValueError("mode 必须是 light 或 dark")
@@ -1044,11 +1044,11 @@ def apply_opencode_theme_to_pane(
         _run(
             prefix + [
                 "wait-output", pane_id,
-                "--regex", r"^\s*Themes\s+esc\s*$",
+                "--regex", r"Themes\s+esc",
                 "--source", "visible", "--lines", "60",
-                "--timeout", "2000", "--raw",
+                "--timeout", "5000", "--raw",
             ],
-            timeout=3,
+            timeout=6,
         )
         dialog_open = True
         _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
@@ -1105,11 +1105,11 @@ def apply_opencode_mode_to_pane(
         _run(
             prefix + [
                 "wait-output", pane_id,
-                "--regex", r"^\s*Commands\s+esc\s*$",
+                "--regex", r"Commands\s+esc",
                 "--source", "visible", "--lines", "60",
-                "--timeout", "2000", "--raw",
+                "--timeout", "5000", "--raw",
             ],
-            timeout=3,
+            timeout=6,
         )
         dialog_open = True
         _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
