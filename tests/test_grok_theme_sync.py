@@ -61,6 +61,40 @@ COMMANDS_FILTERED_54 = "\n".join([
 ])
 
 
+def _split_popup(screen):
+    return "\n".join("  ┃" + line if line else "" for line in screen.splitlines())
+
+
+@pytest.mark.parametrize(
+    ("title", "screen", "label"),
+    [
+        ("Themes", _split_popup(THEME_INITIAL_54), "orng"),
+        ("Themes", _split_popup(THEME_FILTERED_54), "palenight"),
+        (
+            "Commands", _split_popup(COMMANDS_INITIAL_54),
+            "Switch session                     ctrl+x l",
+        ),
+        ("Commands", _split_popup(COMMANDS_FILTERED_54), "Switch to dark mode"),
+    ],
+)
+def test_popup_region_accepts_bordered_rows_with_bare_spacers(
+    title, screen, label,
+):
+    regions = herdr_client._opencode_popup_regions(screen, title)
+
+    assert len(regions) == 1
+    assert herdr_client._opencode_popup_has_label(regions[0], label) is True
+
+
+def test_popup_region_still_requires_border_on_nonempty_split_rows():
+    lines = _split_popup(THEME_INITIAL_54).splitlines()
+    lines[2] = "     Search"
+
+    assert herdr_client._opencode_popup_regions(
+        "\n".join(lines), "Themes",
+    ) == ()
+
+
 def test_theme_popup_region_ignores_background_marker_changes():
     before = THEME_INITIAL_54 + "\nold transcript"
     current = before + " now mentions cobalt2"

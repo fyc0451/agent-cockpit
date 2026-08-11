@@ -1076,16 +1076,12 @@ def _opencode_popup_regions(
         header_indent = len(prefix[border_column + 1:]) if border_column >= 0 else len(prefix)
         # Real OpenCode popups start with: header, spacer, Search/filter, spacer.
         # Split panes repeat their vertical border; single-pane output has none.
-        bordered = (
-            border_column >= 0
-            and any(
-                len(row) > border_column and row[border_column] == "┃"
-                for row in lines[index + 1:index + 4]
-            )
-        )
+        bordered = border_column >= 0
 
         def content_at(row: str) -> str | None:
             if bordered:
+                if not row.strip():
+                    return ""
                 if len(row) <= border_column or row[border_column] != "┃":
                     return None
                 return row[border_column + 1:]
