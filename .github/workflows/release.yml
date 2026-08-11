@@ -1,11 +1,12 @@
 name: release
 
-# 推送 tag 时构建 GitHub Release；tag 必须等于 v + VERSION（如 v0.2.0），
+# 推送 tag 时构建 GitHub Release；tag 必须等于 agent-cockpit-v + VERSION
+#（如 agent-cockpit-v0.2.0），
 # 且 tag 指向的 commit 必须是 origin/main 的祖先（禁止任意分支同版本发版）。
 on:
   push:
     tags:
-      - "v*"
+      - "agent-cockpit-v*"
 
 permissions:
   contents: write
@@ -34,7 +35,7 @@ jobs:
       - name: Verify tag matches VERSION
         run: |
           set -euo pipefail
-          expected="v$(tr -d '[:space:]' < VERSION)"
+          expected="agent-cockpit-v$(tr -d '[:space:]' < VERSION)"
           actual="${GITHUB_REF_NAME}"
           echo "expected=${expected} actual=${actual}"
           test "${actual}" = "${expected}"

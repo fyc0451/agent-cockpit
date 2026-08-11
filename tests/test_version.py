@@ -96,11 +96,12 @@ def test_parse_release_same_newer_older(monkeypatch, tmp_path):
     ver = tmp_path / "VERSION"
     ver.write_text("0.2.0", encoding="utf-8")
 
-    def apply(tag: str, expected_status: str):
+    def apply(tag: str, expected_status: str, expected_version: str):
         version.clear_cache()
+        payload = _release(tag)
         monkeypatch.setattr(
             version, "_http_get_latest",
-            lambda: version._parse_release_payload(_release(tag)),
+            lambda: version._parse_release_payload(payload),
         )
         info = version.get_version_info(version_path=ver)
         assert info["current"]["version"] == "0.2.0"
@@ -108,14 +109,14 @@ def test_parse_release_same_newer_older(monkeypatch, tmp_path):
         if expected_status == "unavailable":
             assert info["latest"] is None
         else:
-            assert info["latest"]["version"] == version.format_semver(
-                version.parse_semver(tag)
-            )
+            assert info["latest"]["version"] == expected_version
+            assert info["latest"]["url"] == payload["html_url"]
 
-    apply("v0.2.0", "up_to_date")
-    apply("0.2.0", "up_to_date")
-    apply("v0.3.0", "update_available")
-    apply("v0.1.9", "up_to_date")  # 本地更新 → 无需升级
+    apply("v0.2.0", "up_to_date", "0.2.0")
+    apply("0.2.0", "up_to_date", "0.2.0")
+    apply("v0.3.0", "update_available", "0.3.0")
+    apply("agent-cockpit-v0.3.0", "update_available", "0.3.0")
+    apply("agent-cockpit-v0.1.9", "up_to_date", "0.1.9")
 
 
 def test_invalid_tag_json_url_yields_unavailable(monkeypatch, tmp_path):
@@ -124,6 +125,9 @@ def test_invalid_tag_json_url_yields_unavailable(monkeypatch, tmp_path):
 
     cases = [
         _release("not-a-semver"),
+        _release("other-product-v0.3.0"),
+        _release("agent-cockpit-vv0.3.0"),
+        _release("agent-cockpit-v 0.3.0"),
         _release(
             "v0.3.0",
             url="https://evil.example/releases/tag/v0.3.0",

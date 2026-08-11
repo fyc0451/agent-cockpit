@@ -765,7 +765,9 @@ def test_release_workflow_gates_tag_and_checks():
     assert "contents: write" in raw
     assert "generate_release_notes: true" in raw
     assert "tags:" in raw
-    assert "v*" in raw
+    assert '"agent-cockpit-v*"' in raw
+    assert 'expected="agent-cockpit-v$(tr -d \'[:space:]\' < VERSION)"' in raw
+    assert '\n      - "v*"' not in raw
     # tag commit 必须是 origin/main 祖先
     assert "merge-base --is-ancestor" in raw
     assert "origin/main" in raw

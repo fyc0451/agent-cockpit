@@ -100,7 +100,14 @@ def _parse_release_payload(data: Any) -> dict[str, Any] | None:
     if data.get("draft") is True or data.get("prerelease") is True:
         return None
     tag = data.get("tag_name")
-    parts = parse_semver(str(tag) if tag is not None else "")
+    release_tag = str(tag) if tag is not None else ""
+    if release_tag.startswith("agent-cockpit-v"):
+        release_tag = release_tag.removeprefix("agent-cockpit-v")
+        parts = parse_semver(release_tag)
+        if parts is None or release_tag != format_semver(parts):
+            return None
+    else:
+        parts = parse_semver(release_tag)
     if parts is None:
         return None
     html_url = data.get("html_url")
