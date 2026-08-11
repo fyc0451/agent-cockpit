@@ -189,7 +189,7 @@ def test_server_main_disables_access_log_and_uses_install_dir():
     root = Path(__file__).resolve().parents[1]
     server = (root / "server.py").read_text(encoding="utf-8")
     assert "access_log=False" in server
-    assert "Path(__file__).resolve().parent" in server
+    assert "_install_dir = ROOT_DIR" in server
     assert "os.environ.get(\"COCKPIT_LOG_DIR\"" not in server
     assert "os.environ[\"COCKPIT_LOG_DIR\"]" not in server
 

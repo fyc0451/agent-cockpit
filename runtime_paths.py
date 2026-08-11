@@ -29,6 +29,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from artifact_root import resolve_artifact_root
+
 
 class PathResolutionError(RuntimeError):
     """路径校验失败;reason 机器可读。detail 只含 env 名,不含敏感路径。"""
@@ -39,8 +41,8 @@ class PathResolutionError(RuntimeError):
         self.env_name = env_name
 
 
-# 应用 bundle 根(本文件所在目录):持久路径禁止落在其中或其祖先。
-INSTALL_ROOT = Path(__file__).resolve().parent
+# 应用 bundle/generation 根:持久路径禁止落在其中或其祖先。
+INSTALL_ROOT = resolve_artifact_root()
 _HOME_ROOT = Path.home().resolve()
 
 ENV_DATA_DIR = "COCKPIT_DATA_DIR"

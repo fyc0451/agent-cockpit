@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import ipaddress
 
 import runtime_paths
+from artifact_root import resolve_artifact_root
 
 COMPAT_FAMILY = "0.3.x"
 
@@ -1022,7 +1023,7 @@ def required_manifest_digest_paths(root: Path | None = None) -> tuple[str, ...]:
     Includes VERSION + every regular file under static/ (fonts, vendor, sw,
     webmanifest, index). Tests must call this rather than hard-coding the set.
     """
-    base = root if root is not None else Path(__file__).resolve().parent
+    base = root if root is not None else resolve_artifact_root()
     paths: list[str] = []
     version = base / "VERSION"
     if version.is_file():
@@ -1056,7 +1057,7 @@ def probe_manifest(
             "state": "not_applicable",
             "reason": REASON_NOT_APPLICABLE,
         }
-    root = root if root is not None else Path(__file__).resolve().parent
+    root = root if root is not None else resolve_artifact_root()
     manifest = root / "release-manifest.json"
     if not manifest.exists():
         return {

@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 import runtime_paths
 import store_schema
+from artifact_root import resolve_artifact_root
 
 EVIDENCE_PATH_ENV = "COCKPIT_SCHEMA_EVIDENCE_PATH"
 EVIDENCE_SHA256_ENV = "COCKPIT_SCHEMA_EVIDENCE_SHA256"
@@ -802,7 +803,7 @@ def probe_server_evidence(
             artifact_root=(
                 artifact_root
                 if artifact_root is not None
-                else Path(__file__).resolve().parent
+                else resolve_artifact_root()
             ),
             environ=environ if environ is not None else os.environ,
         )

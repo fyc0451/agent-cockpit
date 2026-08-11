@@ -17,7 +17,10 @@ from urllib.parse import urlparse
 
 import httpx
 
-VERSION_PATH = Path(__file__).resolve().parent / "VERSION"
+from artifact_root import resolve_artifact_root
+
+
+VERSION_PATH = resolve_artifact_root() / "VERSION"
 GITHUB_LATEST_API = (
     "https://api.github.com/repos/fyc0451/agent-cockpit/releases/latest"
 )

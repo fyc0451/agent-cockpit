@@ -52,7 +52,11 @@ import version
 import upgrade_core
 import web_push
 import settings
+from artifact_root import resolve_artifact_root
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
+
+
+ROOT_DIR = resolve_artifact_root()
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
@@ -247,7 +251,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
-STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR = ROOT_DIR / "static"
 COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
 AUTH_COOKIE = "cockpit_session"
 TEAM_AUTH_COOKIE = "cockpit_team_human_session"
@@ -446,7 +450,6 @@ def _refresh_message_state() -> None:
         "signatures": signatures,
         "changes": changes,
     }
-ROOT_DIR = Path(__file__).resolve().parent
 AGENT_MAIL_TOOLS_DIR = ROOT_DIR / "agent-mail-tools"
 AGENT_MAIL_INIT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-init-project"
 AM_RETIRE_SCRIPT = AGENT_MAIL_TOOLS_DIR / "am-retire"
@@ -3484,7 +3487,7 @@ def _team_inbox_reply_command(
     reply_key = "team-inbox-" + hashlib.sha256(
         f"{binding.get('hub')}\0{binding.get('human_id')}\0{remote_id}".encode()
     ).hexdigest()[:32]
-    mail_send = Path(__file__).resolve().parent / "agent-mail-tools" / "mail-send"
+    mail_send = MAIL_SEND_SCRIPT
     args = [
         str(mail_send),
         "--agent", agent,
@@ -7145,8 +7148,8 @@ if __name__ == "__main__":
 
     from log_config import LogConfigError, configure_logging
 
-    # Fixed install root = package directory (not process cwd).
-    _install_dir = Path(__file__).resolve().parent
+    # Fixed install root = generation/package directory (not process cwd).
+    _install_dir = ROOT_DIR
     try:
         level_name = configure_logging(install_dir=_install_dir)
     except LogConfigError as exc:
