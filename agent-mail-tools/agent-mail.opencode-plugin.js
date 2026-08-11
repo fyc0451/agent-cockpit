@@ -6,10 +6,10 @@ const TOOLS = path.join(os.homedir(), ".local", "bin");
 const INJECT = path.join(TOOLS, "mail-identity-inject");
 const CHECK = path.join(TOOLS, "mail-hook-check");
 
-function contextFrom(command) {
+function contextFrom(command, args) {
   let raw;
   try {
-    raw = execFileSync(command, [], {
+    raw = execFileSync(command, args, {
       timeout: 12000, encoding: "utf-8", cwd: process.cwd(), shell: false,
     });
   } catch {
@@ -37,7 +37,7 @@ export const AgentMailPlugin = async ({ client }) => ({
     if (event?.type !== "session.created") return;
     const info = event?.properties?.info;
     if (!info?.id || info.parentID) return;
-    const context = contextFrom(INJECT);
+    const context = contextFrom(INJECT, ["opencode"]);
     if (!context) return;
     try {
       await client.session.prompt({
@@ -49,7 +49,7 @@ export const AgentMailPlugin = async ({ client }) => ({
     }
   },
   "chat.message": async () => {
-    const context = contextFrom(CHECK);
+    const context = contextFrom(CHECK, ["opencode", "main"]);
     if (context) {
       return { message: { parts: [{ type: "text", text: context }] } };
     }

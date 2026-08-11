@@ -21,6 +21,7 @@ HERDR_BIN = shutil.which("herdr") or str(Path.home() / ".local" / "bin" / "herdr
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 PANE_ID_RE = re.compile(r"^[A-Za-z0-9_]+:[A-Za-z0-9_]+$")
 INSTANCE_ID_RE = re.compile(r"^i-[a-z2-7]{26}$")
+LEGACY_INSTANCE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 PRODUCT_KINDS = {
     "codex": "codex", "kimi": "kimi", "claude": "claude",
     "qoder": "qodercli", "qodercli": "qodercli", "qodercn": "qodercli",
@@ -290,25 +291,46 @@ def _has_managed_descriptor_candidate() -> bool:
     return False
 
 
-def _legacy_identity(agent: str) -> ManagedIdentity | None:
+def legacy_selector(
+    args: list[str], *, default_instance: bool = False,
+) -> tuple[str, str] | None:
+    if len(args) == 1 and default_instance:
+        args = [args[0], "main"]
+    if len(args) != 2:
+        return None
+    agent = AGENT_ALIASES.get(args[0], args[0])
+    known_agents = {
+        "codex", "kimi", "claude", "qodercn", "grok", "opencode", "zcode",
+    }
+    instance = args[1]
+    if (
+        agent not in known_agents
+        or not LEGACY_INSTANCE_RE.fullmatch(instance)
+        or instance.startswith("i-")
+    ):
+        return None
+    return agent, instance
+
+
+def resolve_legacy_identity(agent: str, instance: str) -> ManagedIdentity | None:
     project = _canonical_project(
         os.getcwd(), os.environ.get("HERDR_SESSION", ""), MAIL_PROJECTS_PATH,
         os.environ.get("HERDR_SOCKET_PATH", ""),
     )
     identity = _safe_read_json(
-        REGISTRY_DIR / slugify(project) / f"{agent}--main.json"
+        REGISTRY_DIR / slugify(project) / f"{agent}--{instance}.json"
     )
     if not identity or (
         identity.get("project_key") != project
         or identity.get("agent") != agent
-        or identity.get("instance") != "main"
+        or identity.get("instance") != instance
         or not isinstance(identity.get("name"), str)
         or not identity["name"]
         or identity.get("status") == "retired"
         or bool(identity.get("retired_at"))
     ):
         return None
-    return ManagedIdentity(project, agent, "main", identity)
+    return ManagedIdentity(project, agent, instance, identity)
 
 
 def _context(resolved: ManagedIdentity) -> str:
@@ -328,12 +350,15 @@ def main(argv: list[str] | None = None) -> None:
     if args and args[0] in {"-h", "--help"}:
         print("usage: mail-identity-inject [<agent>|--print-identity]")
         return
-    if len(args) > 1:
-        return
     resolved = resolve_managed_identity()
     if resolved is None:
-        if args and args != ["--print-identity"] and not _has_managed_descriptor_candidate():
-            resolved = _legacy_identity(AGENT_ALIASES.get(args[0], args[0]))
+        selector = (
+            legacy_selector(args, default_instance=True)
+            if args != ["--print-identity"] and not _has_managed_descriptor_candidate()
+            else None
+        )
+        if selector:
+            resolved = resolve_legacy_identity(*selector)
         if resolved is None:
             return
     if args == ["--print-identity"]:

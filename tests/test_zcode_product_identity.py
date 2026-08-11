@@ -148,7 +148,9 @@ def test_identity_reader_requires_exact_live_pane_not_stale_registry(
     assert mail_identity_inject.resolve_managed_identity() is None
 
 
-def _legacy_identity_fixture(monkeypatch, tmp_path, *, schema=2, status="active"):
+def _legacy_identity_fixture(
+    monkeypatch, tmp_path, *, schema=2, status="active", agent="codex", instance="main",
+):
     home = tmp_path / "home"
     project = tmp_path / "project"
     workdir = tmp_path / "worktree"
@@ -162,9 +164,9 @@ def _legacy_identity_fixture(monkeypatch, tmp_path, *, schema=2, status="active"
         "session_dir": str(session_dir), "project": str(project),
     }}})
     _secure_json(descriptors, {"schema": schema, "descriptors": {
-        "demo|codex": {
-            "session": "demo", "pane_id": "w1:p1", "name": "codex",
-            "agent": "codex", "kind": "codex", "args": [],
+        f"demo|{agent}": {
+            "session": "demo", "pane_id": "w1:p1", "name": agent,
+            "agent": agent, "kind": mail_identity_inject.PRODUCT_KINDS[agent], "args": [],
         },
         f"instance|{INSTANCE}": {
             "session": "other", "pane_id": "w1:p9", "name": INSTANCE,
@@ -173,10 +175,10 @@ def _legacy_identity_fixture(monkeypatch, tmp_path, *, schema=2, status="active"
         },
     }})
     _secure_json(
-        registry / mail_identity_inject.slugify(str(project)) / "codex--main.json",
+        registry / mail_identity_inject.slugify(str(project)) / f"{agent}--{instance}.json",
         {
-            "project_key": str(project), "agent": "codex", "instance": "main",
-            "name": "LegacyMailbox", "status": status,
+            "project_key": str(project), "agent": agent, "instance": instance,
+            "name": f"{agent}-{instance}-mailbox", "status": status,
             **({"retired_at": "2026-08-12T00:00:00Z"} if status == "retired" else {}),
         },
     )
@@ -188,7 +190,7 @@ def _legacy_identity_fixture(monkeypatch, tmp_path, *, schema=2, status="active"
     monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
     monkeypatch.setenv("HERDR_SOCKET_PATH", str(session_dir / "herdr.sock"))
     monkeypatch.chdir(workdir)
-    return descriptors
+    return descriptors, str(project)
 
 
 def test_legacy_hook_argument_accepts_mixed_schema2_legacy_descriptor(
@@ -200,7 +202,7 @@ def test_legacy_hook_argument_accepts_mixed_schema2_legacy_descriptor(
 
     payload = json.loads(capsys.readouterr().out)
     context = payload["hookSpecificOutput"]["additionalContext"]
-    assert "LegacyMailbox" in context
+    assert "codex-main-mailbox" in context
     assert "--agent codex --instance main" in context
 
 
@@ -211,13 +213,13 @@ def test_legacy_hook_argument_accepts_schema1_descriptor(
 
     mail_identity_inject.main(["codex"])
 
-    assert "LegacyMailbox" in capsys.readouterr().out
+    assert "codex-main-mailbox" in capsys.readouterr().out
 
 
 def test_instance_key_without_instance_id_blocks_legacy_fallback(
     monkeypatch, tmp_path, capsys,
 ):
-    descriptors = _legacy_identity_fixture(monkeypatch, tmp_path)
+    descriptors, _ = _legacy_identity_fixture(monkeypatch, tmp_path)
     value = json.loads(descriptors.read_text(encoding="utf-8"))
     value["descriptors"] = {
         f"instance|{INSTANCE}": {
@@ -235,7 +237,7 @@ def test_instance_key_without_instance_id_blocks_legacy_fallback(
 def test_unknown_descriptor_schema_blocks_legacy_fallback(
     monkeypatch, tmp_path, capsys,
 ):
-    descriptors = _legacy_identity_fixture(monkeypatch, tmp_path, schema=999)
+    descriptors, _ = _legacy_identity_fixture(monkeypatch, tmp_path, schema=999)
     assert descriptors.exists()
 
     mail_identity_inject.main(["codex"])
@@ -249,6 +251,24 @@ def test_retired_legacy_identity_is_not_injected(monkeypatch, tmp_path, capsys):
     mail_identity_inject.main(["codex"])
 
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("agent", "instance"),
+    [("codex", "winjd"), ("claude", "main"), ("opencode", "main")],
+)
+def test_legacy_hook_arguments_resolve_exact_registry_identity(
+    monkeypatch, tmp_path, capsys, agent, instance,
+):
+    _legacy_identity_fixture(
+        monkeypatch, tmp_path, agent=agent, instance=instance,
+    )
+
+    mail_identity_inject.main([agent, instance])
+
+    context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert f"{agent}-{instance}-mailbox" in context
+    assert f"--agent {agent} --instance {instance}" in context
 
 
 def test_invalid_managed_identity_never_falls_back_to_legacy_main(
@@ -348,14 +368,20 @@ def test_session_created_injects_context_through_opencode_client(tmp_path):
     bin_dir.mkdir(parents=True)
     inject = bin_dir / "mail-identity-inject"
     inject.write_text(
-        "#!/bin/sh\nprintf '%s\\n' '{\"hookSpecificOutput\":"
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/inject-args\"\n"
+        "printf '%s\\n' '{\"hookSpecificOutput\":"
         "{\"hookEventName\":\"SessionStart\","
         "\"additionalContext\":\"trusted identity\"}}'\n",
         encoding="utf-8",
     )
     inject.chmod(0o700)
     check = bin_dir / "mail-hook-check"
-    check.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    check.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/check-args\"\n"
+        "printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":"
+        "\"UserPromptSubmit\",\"additionalContext\":\"unread\"}}'\n",
+        encoding="utf-8",
+    )
     check.chmod(0o700)
     plugin = tmp_path / "plugin.mjs"
     plugin.write_text(
@@ -370,6 +396,7 @@ def test_session_created_injects_context_through_opencode_client(tmp_path):
         "const calls=[];\n"
         "const hooks=await AgentMailPlugin({client:{session:{prompt:async (v)=>calls.push(v)}}});\n"
         "await hooks.event({event:{type:'session.created',properties:{info:{id:'s1'}}}});\n"
+        "await hooks['chat.message']();\n"
         "console.log(JSON.stringify(calls));\n",
         encoding="utf-8",
     )
@@ -387,15 +414,31 @@ def test_session_created_injects_context_through_opencode_client(tmp_path):
             "parts": [{"type": "text", "text": "trusted identity"}],
         },
     }]
+    assert (home / "inject-args").read_text().splitlines() == ["opencode"]
+    assert (home / "check-args").read_text().splitlines() == ["opencode", "main"]
 
 
-def test_mail_hook_check_rejects_external_identity_arguments():
-    result = subprocess.run(
-        [str(ROOT / "agent-mail-tools" / "mail-hook-check"), "zcode", INSTANCE],
-        capture_output=True, text=True,
+@pytest.mark.parametrize(
+    ("agent", "instance"),
+    [
+        ("codex", INSTANCE),
+        ("codex", "同名"),
+        ("unknown", "main"),
+    ],
+)
+def test_legacy_hook_rejects_opaque_display_and_unknown_arguments(
+    monkeypatch, capsys, agent, instance,
+):
+    monkeypatch.setattr(mail_identity_inject, "resolve_managed_identity", lambda: None)
+    monkeypatch.setattr(mail_identity_inject, "_has_managed_descriptor_candidate", lambda: False)
+    monkeypatch.setattr(
+        mail_hook_check.mail_recv, "main",
+        lambda _argv: (_ for _ in ()).throw(AssertionError("invalid legacy不得查未读")),
     )
-    assert result.returncode != 0
-    assert result.stdout == ""
+
+    mail_identity_inject.main([agent, instance])
+    assert capsys.readouterr().out == ""
+    assert mail_hook_check.main([agent, instance]) == 2
 
 
 def test_mail_hook_check_uses_only_resolved_exact_identity(monkeypatch):
@@ -414,11 +457,60 @@ def test_mail_hook_check_uses_only_resolved_exact_identity(monkeypatch):
         lambda argv: seen.append(argv) or print("--- #1 [-] sender @ now"),
     )
 
-    assert mail_hook_check.main([]) == 0
+    assert mail_hook_check.main(["claude", "main"]) == 0
     assert seen == [[
         "--agent", "zcode", "--instance", INSTANCE,
         "--project", "/project", "--unread", "--peek",
     ]]
+
+
+def test_managed_identity_inject_ignores_spoofed_legacy_arguments(monkeypatch, capsys):
+    resolved = mail_identity_inject.ManagedIdentity(
+        "/project", "zcode", INSTANCE, {"name": "FreshMailbox"},
+    )
+    monkeypatch.setattr(
+        mail_identity_inject, "resolve_managed_identity", lambda: resolved,
+    )
+
+    mail_identity_inject.main(["claude", "main"])
+
+    context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "FreshMailbox" in context
+    assert f"--agent zcode --instance {INSTANCE}" in context
+
+
+@pytest.mark.parametrize(
+    ("agent", "instance"),
+    [("codex", "winjd"), ("claude", "main"), ("opencode", "main")],
+)
+def test_mail_hook_check_restores_legacy_unread_identity(
+    monkeypatch, tmp_path, agent, instance,
+):
+    _, project = _legacy_identity_fixture(
+        monkeypatch, tmp_path, agent=agent, instance=instance,
+    )
+    seen = []
+    monkeypatch.setattr(
+        mail_hook_check.mail_recv, "main",
+        lambda argv: seen.append(argv) or print("--- #1 [-] sender @ now"),
+    )
+
+    assert mail_hook_check.main([agent, instance]) == 0
+    assert seen == [[
+        "--agent", agent, "--instance", instance,
+        "--project", project, "--unread", "--peek",
+    ]]
+
+
+def test_invalid_managed_hook_check_never_falls_back_to_legacy(monkeypatch):
+    monkeypatch.setattr(mail_identity_inject, "resolve_managed_identity", lambda: None)
+    monkeypatch.setattr(mail_identity_inject, "_has_managed_descriptor_candidate", lambda: True)
+    monkeypatch.setattr(
+        mail_hook_check.mail_recv, "main",
+        lambda _argv: (_ for _ in ()).throw(AssertionError("invalid managed不得查legacy")),
+    )
+
+    assert mail_hook_check.main(["codex", "winjd"]) == 0
 
 
 def test_mail_hook_check_peek_does_not_create_or_change_receipt(

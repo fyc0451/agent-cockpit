@@ -9,11 +9,17 @@ from . import mail_identity_inject, mail_recv
 
 
 def main(argv: list[str] | None = None) -> int:
-    if argv:
-        return 2
+    args = list(argv or [])
     resolved = mail_identity_inject.resolve_managed_identity()
     if resolved is None:
-        return 0
+        if mail_identity_inject._has_managed_descriptor_candidate():
+            return 0
+        selector = mail_identity_inject.legacy_selector(args)
+        if selector is None:
+            return 2
+        resolved = mail_identity_inject.resolve_legacy_identity(*selector)
+        if resolved is None:
+            return 0
     output = io.StringIO()
     try:
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
