@@ -362,13 +362,16 @@ def test_drain_requires_real_proof(
     prev = leader_binding.get_binding(ISSUER, "user", "default", "agent-a")
     assert prev["previous_state"] in ("pending", "draining")
     # 场景 B：Hub 空但 receipt 有未 processed 认领 → 不得 drain
+    # project_key 必须与 coordination.receipt / b0 drain 同语义 canonical
+    # （macOS 上 /tmp → /private/tmp）；手写 '/tmp/...' 会导致写读 key 分裂。
+    project_key = str(Path("/tmp/proj-x").expanduser().resolve())
     con = coordination._connect()
     now = time.time()
     con.execute(
         "INSERT INTO receipts(project_key,recipient,message_id,intent,"
         "importance,state,ack_pending,created_ts,updated_ts) "
-        "VALUES('/tmp/proj-x','agent-a',51,'info','normal','claimed',1,?,?)",
-        (now, now),
+        "VALUES(?,?,51,'info','normal','claimed',1,?,?)",
+        (project_key, "agent-a", now, now),
     )
     con.commit()
     con.close()
