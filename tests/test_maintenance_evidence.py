@@ -834,8 +834,8 @@ def test_real_server_health_ready_reads_activated_environment(
         "get_release_identity",
         lambda: {**identity, "instance_id": "server-test", "pid": 123},
     )
-    monkeypatch.setattr(release_readiness, "__file__", str(artifact / "probe.py"))
-    monkeypatch.setattr(store_schema, "__file__", str(artifact / "schema.py"))
+    monkeypatch.setattr(release_readiness, "resolve_artifact_root", lambda: artifact)
+    monkeypatch.setattr(store_schema, "resolve_artifact_root", lambda: artifact)
 
     body = server.health_ready()
 
