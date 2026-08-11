@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,13 @@ import maintenance_evidence
 import maintenance_executor as executor
 import maintenance_services
 import upgrade_journal
+
+
+@pytest.fixture(autouse=True)
+def _pin_linux_platform_for_executor_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """execute() 门禁要求 linux；纯 fake 测试在 darwin runner 上固定为 linux。"""
+    monkeypatch.setattr(executor.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
 
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "1" * 64)

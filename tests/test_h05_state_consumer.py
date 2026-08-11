@@ -897,13 +897,27 @@ def _alive_state_threads(name):
     ]
 
 
-def _wait_fd_at_most(baseline, timeout=3.0):
-    """FD 数有瞬态(握手临时 socket),有界等待回落到基线内。"""
+def _fd_dir() -> str:
+    """列出当前进程 fd 的目录：Linux 用 /proc/self/fd，macOS 等回退 /dev/fd。"""
     import os
 
+    for path in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(path):
+            return path
+    raise RuntimeError("no process fd directory (/proc/self/fd or /dev/fd)")
+
+
+def _fd_count() -> int:
+    import os
+
+    return len(os.listdir(_fd_dir()))
+
+
+def _wait_fd_at_most(baseline, timeout=3.0):
+    """FD 数有瞬态(握手临时 socket),有界等待回落到基线内。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if len(os.listdir("/proc/self/fd")) <= baseline:
+        if _fd_count() <= baseline:
             return True
         time.sleep(0.05)
     return False
@@ -1271,7 +1285,7 @@ def test_deferred_stop_intent_blocks_until_retry(monkeypatch):
             token=next(server._inflight_token), client=cand,
         )
         server._state_inflight["r10"] = owner
-    fd_before = len(os.listdir("/proc/self/fd"))
+    fd_before = _fd_count()
     out: dict[str, object] = {}
     t = threading.Thread(
         target=lambda: out.setdefault("first", server._stop_state_client())
@@ -1296,7 +1310,7 @@ def test_deferred_stop_intent_blocks_until_retry(monkeypatch):
     assert server._stop_state_client() == []
     assert not server._state_stop_tickets
     assert server._open_state_clients() is True
-    assert len(os.listdir("/proc/self/fd")) <= fd_before
+    assert _fd_count() <= fd_before
 
 
 def test_deferred_stop_intent_when_reaper_holds_lock(monkeypatch):
@@ -1481,14 +1495,14 @@ def test_retiring_removed_session_real_thread_fd(monkeypatch, tmp_path):
     _fake_discovery(monkeypatch, {"rm": str(srv.path)})
     server._reconcile_state_client()
     assert "rm" in server._state_clients
-    fd_before = len(os.listdir("/proc/self/fd"))
+    fd_before = _fd_count()
     _fake_discovery(monkeypatch, {})  # session 消失
     server._reconcile_state_client()
     assert server._state_clients == {}
     assert server._state_retiring == {}  # 真正停成功才摘
     assert server._state_survivors == {}
     assert _alive_state_threads("rm") == []
-    assert len(os.listdir("/proc/self/fd")) <= fd_before
+    assert _fd_count() <= fd_before
     srv.stop()
 
 
@@ -1506,7 +1520,7 @@ def test_retiring_swap_old_client_real_thread_fd(monkeypatch, tmp_path):
     server._reconcile_state_client()
     old = server._state_clients["sw"]
     assert _wait_client_ready("sw")  # 稳态后再取 FD 基线
-    fd_before = len(os.listdir("/proc/self/fd"))
+    fd_before = _fd_count()
     _fake_discovery(monkeypatch, {"sw": str(srv_b.path)})
     server._reconcile_state_client()
     assert server._state_clients["sw"] is not old
@@ -1532,7 +1546,7 @@ def test_retiring_timeout_candidate_real_thread_fd(monkeypatch, tmp_path):
     server._reconcile_state_client()
     old = server._state_clients["to"]
     assert _wait_client_ready("to")  # 稳态后再取 FD 基线
-    fd_before = len(os.listdir("/proc/self/fd"))
+    fd_before = _fd_count()
     _fake_discovery(monkeypatch, {"to": "/nonexistent/to-dead.sock"})
     server._reconcile_state_client()  # 候选永不就绪→timeout 弃新留旧
     assert server._state_clients["to"] is old
@@ -1601,7 +1615,7 @@ def test_real_inflight_candidate_stop_no_thread_fd_leak(monkeypatch):
     _install(monkeypatch, names=("race",))  # 旧 published 为 Fake
     _fake_discovery(monkeypatch, {"race": "/nonexistent/race-new.sock"})
     monkeypatch.setattr(server, "STATE_SWAP_READY_TIMEOUT_S", 30.0)
-    fd_before = len(os.listdir("/proc/self/fd"))
+    fd_before = _fd_count()
     worker = threading.Thread(target=server._reconcile_state_client)
     worker.start()
     deadline = time.monotonic() + 5
@@ -1618,7 +1632,7 @@ def test_real_inflight_candidate_stop_no_thread_fd_leak(monkeypatch):
         t for t in threading.enumerate()
         if t.name.startswith("cockpit-state-race") and t.is_alive()
     ]
-    assert len(os.listdir("/proc/self/fd")) <= fd_before
+    assert _fd_count() <= fd_before
     worker.join(5)
     assert not worker.is_alive()  # wait 循环观察取消立即退出
     assert server._state_clients == {}  # late worker 未 publish

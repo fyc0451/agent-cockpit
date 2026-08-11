@@ -59,7 +59,11 @@ jobs:
       - name: Full pytest including real onedir smoke
         env:
           P3A_BUILD_PYTHON: python
-        run: pytest -q
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p /tmp/agent-cockpit-pytest
+          pytest -q --basetemp=/tmp/agent-cockpit-pytest
 
       - name: py_compile / AST parse
         run: |

@@ -26,7 +26,14 @@ jobs:
         with:
           node-version: "22"
       - run: pip install -r requirements-dev.txt
-      - run: pytest -q
+      # Hermetic CI: match production-private modes (umask 077) and keep basetemp
+      # short enough for AF_UNIX sockets on macOS runners (/var/folders/... is long).
+      - name: Pytest (hermetic umask + basetemp)
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p /tmp/agent-cockpit-pytest
+          pytest -q --basetemp=/tmp/agent-cockpit-pytest
       - run: |
           for file in *.py tests/*.py; do
             python - "$file" <<'PY'

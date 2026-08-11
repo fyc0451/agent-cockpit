@@ -12,6 +12,12 @@ import maintenance_services as services
 Result = subprocess.CompletedProcess[str]
 
 
+@pytest.fixture(autouse=True)
+def _pin_linux_platform_for_service_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """纯 fake 路径在 macOS runner 上也应走 Linux 契约；darwin 拒绝用例自行改 platform。"""
+    monkeypatch.setattr(services.sys, "platform", "linux")
+
+
 def _result(argv: list[str], returncode: int = 0, stdout: str = "") -> Result:
     return subprocess.CompletedProcess(argv, returncode, stdout, "secret stderr")
 
