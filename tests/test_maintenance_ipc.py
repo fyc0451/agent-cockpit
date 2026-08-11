@@ -67,6 +67,7 @@ def _expected_argv(
 ) -> tuple[str, ...]:
     return (
         str(controller_launcher),
+        "maintenance-controller",
         "execute",
         "--state-root", str(plan.state_root),
         "--deploy-root", str(plan.deploy_root),
@@ -117,6 +118,25 @@ def test_spawns_detached_canonical_controller_with_fixed_argv(tmp_path: Path) ->
         receipt.pid = 9  # type: ignore[misc]
 
 
+def test_fixed_argv_composes_with_l8_native_dispatch_contract(tmp_path: Path) -> None:
+    plan, prepared, launcher = _layout(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    maintenance_ipc.spawn_maintenance_controller(
+        plan=plan,
+        prepared=prepared,
+        request_id="request-1",
+        controller_launcher=launcher,
+        popen=lambda argv, **_kwargs: (
+            calls.append(argv) or type("Process", (), {"pid": 123})()
+        ),
+    )
+
+    assert calls[0][:3] == (
+        str(launcher), "maintenance-controller", "execute",
+    )
+
+
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
@@ -125,6 +145,8 @@ def test_spawns_detached_canonical_controller_with_fixed_argv(tmp_path: Path) ->
         ("request", "request_invalid"),
         ("launcher", "launcher_invalid"),
         ("launcher_mode", "launcher_invalid"),
+        ("launcher_symlink", "launcher_invalid"),
+        ("launcher_hardlink", "launcher_invalid"),
     ],
 )
 def test_rejects_invalid_inputs_before_spawn(
@@ -147,8 +169,15 @@ def test_rejects_invalid_inputs_before_spawn(
             launcher = tmp_path / "outside-controller"
             launcher.write_bytes(b"outside")
             launcher.chmod(0o700)
-        else:
+        elif mutation == "launcher_mode":
             launcher.chmod(0o722)
+        elif mutation == "launcher_symlink":
+            real = launcher.with_name("real-controller")
+            launcher.rename(real)
+            launcher.symlink_to(real)
+        else:
+            hardlink = launcher.with_name("hardlinked-controller")
+            hardlink.hardlink_to(launcher)
 
     with pytest.raises(maintenance_ipc.MaintenanceIpcError, match=code):
         maintenance_ipc.spawn_maintenance_controller(
