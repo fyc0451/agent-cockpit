@@ -16,6 +16,13 @@ import maintenance_request
 import supervisor_adapter
 
 
+_LAUNCHER_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
 class MaintenanceIpcError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -55,19 +62,33 @@ def _argv(
 ) -> tuple[str, ...]:
     if not isinstance(controller_launcher, Path):
         raise MaintenanceIpcError("launcher_invalid")
+    launcher_fd = -1
     try:
-        info = controller_launcher.stat(follow_symlinks=True)
+        before = controller_launcher.lstat()
+        launcher_fd = os.open(controller_launcher, _LAUNCHER_FLAGS)
+        opened = os.fstat(launcher_fd)
+        after = controller_launcher.lstat()
     except OSError as exc:
         raise MaintenanceIpcError("launcher_invalid") from exc
-    if (
-        not stat.S_ISREG(info.st_mode)
-        or info.st_uid != os.getuid()
-        or not info.st_mode & 0o100
-        or stat.S_IMODE(info.st_mode) & 0o022
+    finally:
+        if launcher_fd >= 0:
+            os.close(launcher_fd)
+    identities = {
+        (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink)
+        for info in (before, opened, after)
+    }
+    if len(identities) != 1:
+        raise MaintenanceIpcError("launcher_invalid")
+    if not (
+        stat.S_ISREG(opened.st_mode)
+        and opened.st_uid == os.getuid()
+        and stat.S_IMODE(opened.st_mode) == 0o700
+        and opened.st_nlink == 1
     ):
         raise MaintenanceIpcError("launcher_invalid")
     raw = (
         str(controller_launcher),
+        "maintenance-controller",
         "execute",
         "--state-root", str(plan.state_root),
         "--deploy-root", str(plan.deploy_root),
