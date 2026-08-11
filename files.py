@@ -182,9 +182,10 @@ def _persisted_custom_root(value: Any) -> Path:
     return resolved
 
 
-def _read_custom_roots() -> list[Path]:
-    target = _custom_roots_file()
-    if target == runtime_paths.store("file_roots"):
+def _read_custom_roots(target: Path | None = None) -> list[Path]:
+    explicit_target = target is not None
+    target = target if explicit_target else _custom_roots_file()
+    if not explicit_target:
         try:
             runtime_paths.validate_store("file_roots")
         except runtime_paths.PathResolutionError:

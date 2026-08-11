@@ -243,8 +243,9 @@ _JSON_VERSIONED: dict[str, int] = {
 
 # upgrade/ is V1 diagnostic — excluded from ready inventory.
 _APP_OWNED_STORES = (
-    "settings", "tasks", "coordination", "push", "vapid",
-    "mail_projects", "team_sessions", "inbox_route", "typing", "file_roots",
+    "tasks", "push", "coordination", "delivery_outbox", "leader_binding",
+    "settings", "mail_projects", "team_sessions", "inbox_route", "typing",
+    "file_roots", "vapid",
 )
 
 
@@ -419,8 +420,9 @@ def _check_sqlite(
     expected_defaults: dict[str, dict[str, str]] | None = None,
     expected_indexes: dict[str, frozenset[tuple[str, int, tuple[str, ...]]]] | None = None,
     expected_fks: dict[str, frozenset[tuple[str, str, str]]] | None = None,
+    path: Path | None = None,
 ) -> dict[str, Any]:
-    path = runtime_paths.store(name)
+    path = path if path is not None else runtime_paths.store(name)
     if not path.exists():
         if _path_creatable(path):
             return _store_result(name, "absent", REASON_MISSING_CREATABLE)
@@ -611,14 +613,14 @@ def _service_url_ok(value: Any, *, allow_empty: bool) -> bool:
     return True
 
 
-def _check_settings() -> dict[str, Any]:
+def _check_settings(path: Path | None = None) -> dict[str, Any]:
     """Sparse settings: only validate keys that appear (writer sparse store).
 
     Unknown keys → unknown_fields. Present keys: type/range equivalent to
     settings._validate, without calling the writer module. Never raises.
     """
     name = "settings"
-    path = runtime_paths.store(name)
+    path = path if path is not None else runtime_paths.store(name)
     if not path.exists():
         reason = REASON_MISSING_CREATABLE if _path_creatable(path) else REASON_MISSING_BLOCKED
         return _store_result(name, "absent", reason)
@@ -696,9 +698,13 @@ _JSON_SHAPES: dict[str, frozenset[str]] = {
 }
 
 
-def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, Any]:
+def _check_versioned_json(
+    name: str,
+    version_key: str = "version",
+    path: Path | None = None,
+) -> dict[str, Any]:
     expected_v = _JSON_VERSIONED[name]
-    path = runtime_paths.store(name)
+    path = path if path is not None else runtime_paths.store(name)
     if not path.exists():
         reason = REASON_MISSING_CREATABLE if _path_creatable(path) else REASON_MISSING_BLOCKED
         return _store_result(name, "absent", reason)
@@ -871,18 +877,18 @@ def _check_versioned_json(name: str, version_key: str = "version") -> dict[str, 
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
-def _check_file_roots() -> dict[str, Any]:
+def _check_file_roots(path: Path | None = None) -> dict[str, Any]:
     """Validate persisted custom roots with same policy as files reader (fail-closed)."""
     name = "file_roots"
     # Path must match production reader (files._custom_roots_file → runtime_paths.store).
     import files  # local module; no server import
 
-    path = files._custom_roots_file()  # noqa: SLF001
+    path = path if path is not None else files._custom_roots_file()  # noqa: SLF001
     if not path.exists():
         reason = REASON_MISSING_CREATABLE if _path_creatable(path) else REASON_MISSING_BLOCKED
         return _store_result(name, "absent", reason)
     try:
-        files._read_custom_roots()  # noqa: SLF001 — intentional contract probe
+        files._read_custom_roots(path)  # noqa: SLF001 — intentional contract probe
     except files.CustomRootsError as exc:
         reason = getattr(exc, "reason", None)
         code = getattr(reason, "value", None) or "unreadable"
@@ -898,10 +904,10 @@ def _check_file_roots() -> dict[str, Any]:
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
-def _check_vapid() -> dict[str, Any]:
+def _check_vapid(path: Path | None = None) -> dict[str, Any]:
     """True EC P-256 PKCS8 parse (no generate; no marker-only accept)."""
     name = "vapid"
-    path = runtime_paths.store(name)
+    path = path if path is not None else runtime_paths.store(name)
     if not path.exists():
         reason = REASON_MISSING_CREATABLE if _path_creatable(path) else REASON_MISSING_BLOCKED
         return _store_result(name, "absent", reason)
@@ -936,10 +942,10 @@ def _check_vapid() -> dict[str, Any]:
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
-def _check_typing() -> dict[str, Any]:
+def _check_typing(path: Path | None = None) -> dict[str, Any]:
     """typing.json: legacy session→float or session→{panes, unknown?} (terminal writer)."""
     name = "typing"
-    path = runtime_paths.store(name)
+    path = path if path is not None else runtime_paths.store(name)
     if not path.exists():
         reason = REASON_MISSING_CREATABLE if _path_creatable(path) else REASON_MISSING_BLOCKED
         return _store_result(name, "absent", reason)
@@ -1036,6 +1042,7 @@ def required_manifest_digest_paths(root: Path | None = None) -> tuple[str, ...]:
 def probe_manifest(
     edition: str,
     identity: dict[str, Any] | None = None,
+    root: Path | None = None,
 ) -> dict[str, Any]:
     """Artifact/release manifest gate (production fail-closed; source N/A).
 
@@ -1049,7 +1056,7 @@ def probe_manifest(
             "state": "not_applicable",
             "reason": REASON_NOT_APPLICABLE,
         }
-    root = Path(__file__).resolve().parent
+    root = root if root is not None else Path(__file__).resolve().parent
     manifest = root / "release-manifest.json"
     if not manifest.exists():
         return {
@@ -1158,6 +1165,23 @@ def probe_manifest(
             "state": "error",
             "reason": REASON_FINGERPRINT_MISMATCH,
         }
+    static_root = root / "static"
+    try:
+        static_paths = (static_root, *static_root.rglob("*"))
+        if any(path.is_symlink() for path in static_paths):
+            return {
+                "name": "release_manifest",
+                "compat_family": COMPAT_FAMILY,
+                "state": "error",
+                "reason": REASON_UNSAFE,
+            }
+    except OSError:
+        return {
+            "name": "release_manifest",
+            "compat_family": COMPAT_FAMILY,
+            "state": "error",
+            "reason": REASON_UNREADABLE,
+        }
     required = set(required_manifest_digest_paths(root))
     if not required:
         return {
@@ -1261,6 +1285,169 @@ def probe_manifest(
     }
 
 
+def _sqlite_probe_specs(
+    *, include_leader_binding: bool,
+) -> list[tuple[
+    str,
+    dict[str, tuple[tuple[str, str, int, int], ...]],
+    dict[str, dict[str, str]],
+    dict[str, frozenset[tuple[str, int, tuple[str, ...]]]],
+    dict[str, frozenset[tuple[str, str, str]]],
+]]:
+    specs = [
+        (
+            "tasks",
+            {"tasks": _TASKS_COLUMNS},
+            {"tasks": _TASKS_DEFAULTS},
+            {"tasks": _TASKS_INDEXES},
+            {"tasks": frozenset()},
+        ),
+        (
+            "push",
+            {"subscriptions": _PUSH_COLUMNS},
+            {"subscriptions": _PUSH_DEFAULTS},
+            {"subscriptions": _PUSH_INDEXES},
+            {"subscriptions": frozenset()},
+        ),
+        (
+            "coordination",
+            _COORD_TABLES,
+            _COORD_DEFAULTS,
+            _COORD_INDEXES,
+            _COORD_FKS,
+        ),
+        (
+            "delivery_outbox",
+            {"delivery_jobs": _DELIVERY_OUTBOX_COLUMNS},
+            _DELIVERY_OUTBOX_DEFAULTS,
+            _DELIVERY_OUTBOX_INDEXES,
+            _DELIVERY_OUTBOX_FKS,
+        ),
+    ]
+    if include_leader_binding:
+        specs.append((
+            "leader_binding",
+            _LEADER_BINDING_TABLES,
+            _LEADER_BINDING_DEFAULTS,
+            _LEADER_BINDING_INDEXES,
+            _LEADER_BINDING_FKS,
+        ))
+    return specs
+
+
+def _snapshot_root_is_safe(root: Path) -> bool:
+    if not root.is_absolute() or Path(os.path.abspath(root)) != root:
+        return False
+    if _path_has_symlink_component(root):
+        return False
+    try:
+        info = root.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and (stat.S_IMODE(info.st_mode) & 0o077) == 0
+    )
+
+
+def _snapshot_file_gate(
+    name: str,
+    root: Path,
+    path: Path,
+) -> dict[str, Any] | None:
+    """Validate a controller-owned backup file before parsing it."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return _store_result(name, "error", REASON_UNSAFE)
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        try:
+            parent_info = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError:
+            return _store_result(name, "error", REASON_UNREADABLE)
+        if (
+            not stat.S_ISDIR(parent_info.st_mode)
+            or parent_info.st_uid != os.getuid()
+            or (stat.S_IMODE(parent_info.st_mode) & 0o077) != 0
+        ):
+            return _store_result(name, "error", REASON_UNSAFE)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return _store_result(name, "absent", REASON_MISSING_CREATABLE)
+    except OSError:
+        return _store_result(name, "error", REASON_UNREADABLE)
+    if (
+        _path_has_symlink_component(path)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        return _store_result(name, "error", REASON_UNSAFE)
+    return None
+
+
+def probe_snapshot_stores(snapshot_root: Path) -> list[dict[str, Any]]:
+    """Probe a sealed backup tree without consulting active runtime stores.
+
+    The controller supplies ``data/``, ``config/`` and ``state/`` below one
+    user-owned root. Existing files must be regular, non-symlink and mode 0600.
+    Missing named stores represent stores that were absent in the complete
+    backup inventory and remain compatible with first boot.
+    """
+    root = Path(snapshot_root)
+    if not _snapshot_root_is_safe(root):
+        return [
+            _store_result(name, "error", REASON_UNSAFE)
+            for name in _APP_OWNED_STORES
+        ]
+
+    sqlite_specs = {
+        name: (tables, defaults, indexes, fks)
+        for name, tables, defaults, indexes, fks in _sqlite_probe_specs(
+            include_leader_binding=True,
+        )
+    }
+    results: list[dict[str, Any]] = []
+    for name in _APP_OWNED_STORES:
+        root_name, rel = runtime_paths.STORES[name][0:2]
+        path = root / root_name / rel
+        blocked = _snapshot_file_gate(name, root, path)
+        if blocked is not None:
+            results.append(blocked)
+            continue
+        try:
+            if name in sqlite_specs:
+                tables, defaults, indexes, fks = sqlite_specs[name]
+                result = _check_sqlite(
+                    name,
+                    tables,
+                    expected_defaults=defaults,
+                    expected_indexes=indexes,
+                    expected_fks=fks,
+                    path=path,
+                )
+            elif name == "settings":
+                result = _check_settings(path)
+            elif name in _JSON_VERSIONED:
+                result = _check_versioned_json(name, path=path)
+            elif name == "typing":
+                result = _check_typing(path)
+            elif name == "file_roots":
+                result = _check_file_roots(path)
+            else:
+                result = _check_vapid(path)
+        except Exception:
+            result = _store_result(name, "error", REASON_UNREADABLE)
+        results.append(result)
+    return results
+
+
 def probe_all_stores() -> list[dict[str, Any]]:
     """Probe every app-owned store; pure-read, never creates files."""
     results: list[dict[str, Any]] = []
@@ -1303,44 +1490,12 @@ def probe_all_stores() -> list[dict[str, Any]]:
         results.append(probe())
 
     # SQLite
-    sqlite_specs = [
-        (
-            "tasks",
-            {"tasks": _TASKS_COLUMNS},
-            {"tasks": _TASKS_DEFAULTS},
-            {"tasks": _TASKS_INDEXES},
-            {"tasks": frozenset()},
-        ),
-        (
-            "push",
-            {"subscriptions": _PUSH_COLUMNS},
-            {"subscriptions": _PUSH_DEFAULTS},
-            {"subscriptions": _PUSH_INDEXES},
-            {"subscriptions": frozenset()},
-        ),
-        (
-            "coordination",
-            _COORD_TABLES,
-            _COORD_DEFAULTS,
-            _COORD_INDEXES,
-            _COORD_FKS,
-        ),
-        (
-            "delivery_outbox",
-            {"delivery_jobs": _DELIVERY_OUTBOX_COLUMNS},
-            _DELIVERY_OUTBOX_DEFAULTS,
-            _DELIVERY_OUTBOX_INDEXES,
-            _DELIVERY_OUTBOX_FKS,
-        ),
-    ]
-    if (os.environ.get("COCKPIT_B0_MODE") or "off").strip().lower() != "off":
-        sqlite_specs.append((
-            "leader_binding",
-            _LEADER_BINDING_TABLES,
-            _LEADER_BINDING_DEFAULTS,
-            _LEADER_BINDING_INDEXES,
-            _LEADER_BINDING_FKS,
-        ))
+    include_leader_binding = (
+        (os.environ.get("COCKPIT_B0_MODE") or "off").strip().lower() != "off"
+    )
+    sqlite_specs = _sqlite_probe_specs(
+        include_leader_binding=include_leader_binding,
+    )
     for name, tables, defaults, indexes, fks in sqlite_specs:
         gated(
             name,
@@ -1367,9 +1522,13 @@ def evaluate_ready(identity: dict[str, Any]) -> dict[str, Any]:
     Does not raise; caller maps to HTTP 200/503.
     """
     edition = str(identity.get("edition") or "source")
-    stores = probe_all_stores()
     manifest = probe_manifest(edition, identity=identity)
-    items = list(stores) + [manifest]
+    if edition == "server":
+        import release_readiness
+
+        items = [manifest, release_readiness.probe_server_evidence(identity)]
+    else:
+        items = list(probe_all_stores()) + [manifest]
 
     not_ready_reasons: list[str] = []
     for item in items:
