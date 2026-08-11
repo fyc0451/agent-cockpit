@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -273,6 +274,47 @@ def test_rejects_declared_pax_and_gnu_metadata_bombs_before_destination(
 @pytest.mark.parametrize("payload", [b"not gzip", b"\x1f\x8btruncated"])
 def test_rejects_non_gzip_and_corrupt_gzip(tmp_path: Path, payload: bytes) -> None:
     artifact, asset, destination = _ready(tmp_path, payload)
+
+    _assert_code(
+        "archive_invalid", lambda: extract_verified_tarball(artifact, asset, destination)
+    )
+    assert not destination.exists()
+
+
+def test_tarfile_open_zlib_error_is_archive_invalid_before_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact, asset, destination = _ready(tmp_path, _tar([("file", b"x", None)]))
+    monkeypatch.setattr(
+        artifact_extract.tarfile,
+        "open",
+        lambda **_kwargs: (_ for _ in ()).throw(zlib.error("open corrupt")),
+    )
+
+    _assert_code(
+        "archive_invalid", lambda: extract_verified_tarball(artifact, asset, destination)
+    )
+    assert not destination.exists()
+
+
+def test_archive_iterator_zlib_error_is_archive_invalid_before_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact, asset, destination = _ready(tmp_path, _tar([("file", b"x", None)]))
+
+    class BrokenArchive:
+        def __enter__(self) -> "BrokenArchive":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def __iter__(self) -> object:
+            raise zlib.error("extension metadata corrupt")
+
+    monkeypatch.setattr(
+        artifact_extract.tarfile, "open", lambda **_kwargs: BrokenArchive()
+    )
 
     _assert_code(
         "archive_invalid", lambda: extract_verified_tarball(artifact, asset, destination)

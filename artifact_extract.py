@@ -358,7 +358,7 @@ def _scan_members(archive: tarfile.TarFile) -> list[tuple[tarfile.TarInfo, tuple
             scanned.append((member, parts))
     except ArtifactExtractError:
         raise
-    except (tarfile.TarError, EOFError, OSError, ValueError):
+    except (tarfile.TarError, EOFError, OSError, ValueError, zlib.error):
         _reject("archive_invalid")
     return scanned
 
@@ -680,7 +680,7 @@ def extract_verified_tarball(
                 )
             except ArtifactExtractError:
                 raise
-            except (tarfile.TarError, EOFError, OSError, ValueError):
+            except (tarfile.TarError, EOFError, OSError, ValueError, zlib.error):
                 _reject("archive_invalid")
             with archive:
                 members = _scan_members(archive)
