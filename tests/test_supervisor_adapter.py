@@ -365,6 +365,169 @@ class TestLauncherArgv:
 
 
 class TestLinuxUnit:
+    def test_evidence_unit_preserves_user_env_then_requires_active_selector(
+        self, deploy_layout: dict[str, Path], tmp_path: Path,
+    ) -> None:
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        state = tmp_path / "controller-state"
+        evidence_env = state / "server-evidence.env"
+        text = sa.render_linux_unit(
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+            evidence_environment_file=evidence_env,
+        )
+
+        user_line = f"EnvironmentFile=-{cur.as_posix()}/.env"
+        evidence_line = f"EnvironmentFile={evidence_env.as_posix()}"
+        assert text.count("EnvironmentFile=") == 2
+        assert text.index(user_line) < text.index(evidence_line)
+        contract = sa.validate_linux_unit_contract(
+            text,
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+            evidence_environment_file=evidence_env,
+        )
+        assert contract.environment_files == (
+            (f"{cur.as_posix()}/.env", True),
+            (evidence_env.as_posix(), False),
+        )
+
+    @pytest.mark.parametrize("mutation", ["missing", "duplicate", "unknown", "reversed"])
+    def test_evidence_unit_rejects_nonexact_environment_files(
+        self, deploy_layout: dict[str, Path], tmp_path: Path, mutation: str,
+    ) -> None:
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        evidence_env = tmp_path / "controller-state" / "server-evidence.env"
+        text = sa.render_linux_unit(
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+            evidence_environment_file=evidence_env,
+        )
+        user = f"EnvironmentFile=-{cur.as_posix()}/.env\n"
+        evidence = f"EnvironmentFile={evidence_env.as_posix()}\n"
+        if mutation == "missing":
+            bad = text.replace(evidence, "")
+        elif mutation == "duplicate":
+            bad = text.replace(evidence, evidence + evidence)
+        elif mutation == "unknown":
+            bad = text.replace(evidence, evidence + "EnvironmentFile=/tmp/evil.env\n")
+        else:
+            bad = text.replace(user + evidence, evidence + user)
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_linux_unit_contract(
+                bad,
+                current_dir=cur,
+                program_arguments=argv,
+                deploy_root=deploy_layout["root"],
+                evidence_environment_file=evidence_env,
+            )
+        assert exc.value.reason in {
+            "environment_file_mismatch",
+            "environment_file_duplicate",
+            "environment_file_count_invalid",
+        }
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            "escaped_evidence",
+            "escaped_user",
+            "optional_evidence",
+            "required_user",
+            "leading_space",
+            "spaced_key",
+            "trailing_space",
+        ],
+    )
+    def test_evidence_unit_rejects_noncanonical_raw_directive(
+        self,
+        deploy_layout: dict[str, Path],
+        tmp_path: Path,
+        mutation: str,
+    ) -> None:
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        evidence_env = tmp_path / "controller-state" / "server-evidence.env"
+        text = sa.render_linux_unit(
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+            evidence_environment_file=evidence_env,
+        )
+        user = f"EnvironmentFile=-{cur.as_posix()}/.env"
+        evidence = f"EnvironmentFile={evidence_env.as_posix()}"
+        if mutation == "escaped_evidence":
+            bad = text.replace(
+                evidence,
+                "EnvironmentFile=\\/" + evidence_env.as_posix().lstrip("/"),
+            )
+        elif mutation == "escaped_user":
+            bad = text.replace(
+                user,
+                "EnvironmentFile=-\\/" + f"{cur.as_posix()}/.env".lstrip("/"),
+            )
+        elif mutation == "optional_evidence":
+            bad = text.replace(evidence, f"EnvironmentFile=-{evidence_env.as_posix()}")
+        elif mutation == "required_user":
+            bad = text.replace(user, f"EnvironmentFile={cur.as_posix()}/.env")
+        elif mutation == "leading_space":
+            bad = text.replace(evidence, " " + evidence)
+        elif mutation == "spaced_key":
+            bad = text.replace(evidence, evidence.replace("=", " =", 1))
+        else:
+            bad = text.replace(evidence, evidence + " ")
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_linux_unit_contract(
+                bad,
+                current_dir=cur,
+                program_arguments=argv,
+                deploy_root=deploy_layout["root"],
+                evidence_environment_file=evidence_env,
+            )
+        assert exc.value.reason in {
+            "environment_file_mismatch",
+            "environment_file_noncanonical",
+        }
+
+    def test_evidence_environment_file_must_be_release_external(
+        self, deploy_layout: dict[str, Path],
+    ) -> None:
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.render_linux_unit(
+                current_dir=deploy_layout["current"],
+                program_arguments=deploy_layout["main_argv"],
+                deploy_root=deploy_layout["root"],
+                evidence_environment_file=(
+                    deploy_layout["root"] / "server-evidence.env"
+                ),
+            )
+        assert exc.value.reason == "evidence_environment_inside_release_tree"
+
+    @pytest.mark.parametrize("component", ["bad path", "bad#path", "bad%path", 'bad"path'])
+    def test_evidence_environment_file_rejects_systemd_ambiguous_path(
+        self,
+        deploy_layout: dict[str, Path],
+        tmp_path: Path,
+        component: str,
+    ) -> None:
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.render_linux_unit(
+                current_dir=deploy_layout["current"],
+                program_arguments=deploy_layout["main_argv"],
+                deploy_root=deploy_layout["root"],
+                evidence_environment_file=(
+                    tmp_path / component / "server-evidence.env"
+                ),
+            )
+        assert exc.value.reason == "evidence_environment_path_unsupported"
+
     def test_render_killmode_process_and_same_current(
         self, deploy_layout: dict[str, Path]
     ) -> None:
