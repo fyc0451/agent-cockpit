@@ -455,6 +455,19 @@ def task_stats() -> dict[str, Any]:
     }
 
 
+def output_buffer_stats() -> dict[str, int]:
+    """Return aggregate in-memory output sizes without task IDs or content."""
+    with _tasks_lock:
+        buffers = list(_output_buffers.values())
+        return {
+            "tasks": len(buffers),
+            "lines": sum(len(buffer) for buffer in buffers),
+            "utf8_bytes": sum(
+                len(line.encode("utf-8")) for buffer in buffers for line in buffer
+            ),
+        }
+
+
 def get_task(task_id: str) -> dict[str, Any] | None:
     with _db() as con:
         row = con.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()

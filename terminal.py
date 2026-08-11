@@ -922,3 +922,14 @@ def list_terms() -> list[dict[str, Any]]:
                 "label": t.get("label"),
             })
     return result
+
+
+def session_stats() -> dict[str, int]:
+    """Return terminal pool counts without session IDs or process metadata."""
+    with _lock:
+        items = list(_terms.values())
+    alive = 0
+    for term in items:
+        with term["lock"]:
+            alive += int(_check_alive(term))
+    return {"total": len(items), "alive": alive}

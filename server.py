@@ -37,6 +37,7 @@ import coordination
 import hub_client
 import herdr_client
 import release_identity
+import runtime_stats
 import herdr_state
 import leader_binding
 import b0_wiring
@@ -3666,6 +3667,16 @@ def api_task_stats():
     return tasks.task_stats()
 
 
+@app.get("/api/runtime/stats")
+def api_runtime_stats():
+    return {
+        "process": runtime_stats.process_stats(),
+        "connections": runtime_stats.connection_stats(),
+        "terminal_sessions": terminal.session_stats(),
+        "task_output_buffers": tasks.output_buffer_stats(),
+    }
+
+
 @app.get("/api/tasks/{task_id}")
 def api_task(task_id: str):
     t = tasks.get_task(task_id)
@@ -5523,6 +5534,7 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
         )
         return
     connection = await _claim_term_websocket(term_id, websocket)
+    connection_lease = runtime_stats.open_connection("terminal_websocket")
     pump_task = None
     try:
         if not _term_websocket_is_current(term_id, connection):
@@ -5619,13 +5631,16 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
     except Exception:
         logger.exception("terminal websocket failed: %s", term_id)
     finally:
-        if pump_task:
-            pump_task.cancel()
-            with suppress(asyncio.CancelledError, WebSocketDisconnect):
-                await pump_task
-        _release_term_websocket(term_id, connection)
-        with suppress(Exception):
-            await websocket.close()
+        try:
+            if pump_task:
+                pump_task.cancel()
+                with suppress(asyncio.CancelledError, WebSocketDisconnect):
+                    await pump_task
+            _release_term_websocket(term_id, connection)
+            with suppress(Exception):
+                await websocket.close()
+        finally:
+            connection_lease.close()
 
 
 # ── SSE 实时推送(看板状态变化) ────────────────────────────────
@@ -6585,13 +6600,19 @@ async def _poll_message_state() -> None:
         await asyncio.sleep(1)
 
 
+async def _track_sse_events(events):
+    with runtime_stats.track_connection("sse"):
+        async for event in events:
+            yield event
+
+
 @app.get("/api/events")
 async def api_events(request: Request):
     """把共享轮询缓存中的变化推送给浏览器。"""
     last_revision = -1
     last_message_revision = -1
 
-    async def event_gen():
+    async def event_stream():
         nonlocal last_revision, last_message_revision
         while not await request.is_disconnected():
             state = _live_state
@@ -6637,6 +6658,10 @@ async def api_events(request: Request):
                 }
                 last_message_revision = message_state["revision"]
             await asyncio.sleep(1)
+
+    async def event_gen():
+        async for event in _track_sse_events(event_stream()):
+            yield event
 
     return EventSourceResponse(event_gen())
 
