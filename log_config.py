@@ -151,6 +151,8 @@ def _chmod_file_strict(path: Path, mode: int = 0o600) -> None:
         raise LogConfigError(f"日志文件不是普通文件: {path}")
     if info.st_uid != os.getuid():
         raise LogConfigError(f"日志文件 owner 不正确: {path}")
+    if info.st_nlink != 1:
+        raise LogConfigError(f"日志文件不得为硬链接: {path}")
     if stat.S_IMODE(info.st_mode) != mode:
         try:
             os.chmod(path, mode)
@@ -160,12 +162,16 @@ def _chmod_file_strict(path: Path, mode: int = 0o600) -> None:
             after = path.lstat()
         except OSError as exc:
             raise LogConfigError(f"无法复验日志文件权限: {path}") from exc
-        if stat.S_IMODE(after.st_mode) != mode or after.st_uid != os.getuid():
+        if (
+            stat.S_IMODE(after.st_mode) != mode
+            or after.st_uid != os.getuid()
+            or after.st_nlink != 1
+        ):
             raise LogConfigError(f"日志文件权限复验失败: {path}")
 
 
 def _prepare_app_log_file(path: Path) -> None:
-    """Ensure app log is a regular 0600 file owned by current uid (no symlink)."""
+    """Ensure app log is a regular 0600 nlink=1 file owned by current uid."""
     path = Path(path)
     _reject_symlink_components(path if path.exists() or path.is_symlink() else path.parent)
     if path.is_symlink():
@@ -186,6 +192,7 @@ def _prepare_app_log_file(path: Path) -> None:
             not stat.S_ISREG(info.st_mode)
             or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
         ):
             raise LogConfigError(f"应用日志文件不安全: {path}")
     except OSError as exc:
@@ -199,11 +206,46 @@ def _prepare_app_log_file(path: Path) -> None:
     _chmod_file_strict(path, 0o600)
 
 
-def _precheck_rotate_slot(path: Path, *, role: str) -> None:
-    """If path exists, require current-uid regular file (mode may be tightened later).
+class _PrivateRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that re-secures the base file after every rollover."""
 
-    Symlink (including broken), directory, FIFO, socket, or wrong owner → error.
-    Must run before any rename/unlink so base and slots stay unchanged on failure.
+    def doRollover(self) -> None:  # noqa: N802 — logging API
+        super().doRollover()
+        self._secure_base_after_rollover()
+
+    def _secure_base_after_rollover(self) -> None:
+        path = Path(self.baseFilename)
+        stream = self.stream
+        if stream is not None:
+            try:
+                os.fchmod(stream.fileno(), 0o600)
+            except OSError as exc:
+                raise LogConfigError(
+                    f"rollover 后无法 fchmod 应用日志: {path}"
+                ) from exc
+        try:
+            _chmod_file_strict(path, 0o600)
+        except LogConfigError:
+            raise
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise LogConfigError(f"rollover 后无法复验应用日志: {path}") from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise LogConfigError(f"rollover 后应用日志不安全: {path}")
+
+
+def _precheck_rotate_slot(path: Path, *, role: str) -> None:
+    """If path exists, require current-uid regular file with nlink==1.
+
+    Symlink (including broken), directory, FIFO, socket, hardlink, or wrong
+    owner → error. Must run before any rename/unlink so base/slots stay
+    unchanged on failure. Mode may be tightened only after precheck passes.
     """
     try:
         info = path.lstat()
@@ -217,6 +259,8 @@ def _precheck_rotate_slot(path: Path, *, role: str) -> None:
         raise LogConfigError(f"bootstrap {role} 必须是普通文件: {path}")
     if info.st_uid != os.getuid():
         raise LogConfigError(f"bootstrap {role} owner 不正确: {path}")
+    if info.st_nlink != 1:
+        raise LogConfigError(f"bootstrap {role} 不得为硬链接: {path}")
 
 
 def rotate_file_if_needed(
@@ -231,20 +275,30 @@ def rotate_file_if_needed(
         raise LogConfigError("轮转参数无效")
     if path.is_symlink():
         raise LogConfigError(f"bootstrap 日志不得为符号链接: {path}")
-    # Preflight every backup slot before any rename/unlink (zero mutation on fail).
+    # Preflight every backup slot before any mutation (zero change on fail).
     for index in range(1, backup_count + 1):
         _precheck_rotate_slot(Path(f"{path}.{index}"), role=f"轮转副本 .{index}")
-    if not path.is_file():
+    # Missing base is OK; existing non-regular base must fail closed.
+    try:
+        path.lstat()
+    except FileNotFoundError:
         return
+    _precheck_rotate_slot(path, role="当前日志")
     try:
         size = path.stat().st_size
     except OSError as exc:
         raise LogConfigError(f"无法读取 bootstrap 日志大小: {path}") from exc
     if size < max_bytes:
+        # Even without rollover, tighten base + retained backups to exact 0600.
         _chmod_file_strict(path, 0o600)
+        for index in range(1, backup_count + 1):
+            slot = Path(f"{path}.{index}")
+            try:
+                slot.lstat()
+            except FileNotFoundError:
+                continue
+            _chmod_file_strict(slot, 0o600)
         return
-    # Current file must also be a current-uid regular file before we move it.
-    _precheck_rotate_slot(path, role="当前日志")
     try:
         oldest = Path(f"{path}.{backup_count}")
         try:
@@ -328,7 +382,7 @@ def configure_logging(
         app_path = directory / APP_LOG_NAME
         try:
             _prepare_app_log_file(app_path)
-            handler = RotatingFileHandler(
+            handler = _PrivateRotatingFileHandler(
                 app_path,
                 maxBytes=MAC_MAX_BYTES,
                 backupCount=MAC_BACKUP_COUNT,

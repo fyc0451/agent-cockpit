@@ -66,6 +66,7 @@ def test_configure_logging_macos_rotating_file_mode_from_creation(tmp_path, monk
     assert len(root.handlers) == 1
     from logging.handlers import RotatingFileHandler
     assert isinstance(root.handlers[0], RotatingFileHandler)
+    assert type(root.handlers[0]).__name__ == "_PrivateRotatingFileHandler"
     assert root.handlers[0].maxBytes == log_config.MAC_MAX_BYTES
     assert root.handlers[0].backupCount == log_config.MAC_BACKUP_COUNT
     logging.getLogger("agent-cockpit").info("hello-o3")
@@ -279,6 +280,104 @@ def test_rotate_rejects_backup_symlinks_including_broken(tmp_path):
         log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
     # original must remain (fail closed, no silent keep-and-rotate)
     assert path.read_bytes() == b"x" * 100
+
+
+def test_rotate_rejects_hardlinked_base_or_backup(tmp_path):
+    path = tmp_path / "launchd.stderr.log"
+    path.write_bytes(b"x" * 100)
+    os.chmod(path, 0o600)
+    link = tmp_path / "hard-alias"
+    os.link(path, link)
+    assert path.stat().st_nlink == 2
+    with pytest.raises(log_config.LogConfigError) as exc:
+        log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
+    assert "硬链接" in str(exc.value)
+    assert path.read_bytes() == b"x" * 100
+    # backup hardlink
+    path2 = tmp_path / "launchd.stdout.log"
+    path2.write_bytes(b"y" * 100)
+    os.chmod(path2, 0o600)
+    b1 = tmp_path / "launchd.stdout.log.1"
+    b1.write_bytes(b"old")
+    os.chmod(b1, 0o600)
+    os.link(b1, tmp_path / "b1-alias")
+    with pytest.raises(log_config.LogConfigError):
+        log_config.rotate_file_if_needed(path2, max_bytes=50, backup_count=3)
+    assert path2.read_bytes() == b"y" * 100
+    assert b1.read_bytes() == b"old"
+
+
+def test_rotate_rejects_existing_directory_base(tmp_path):
+    path = tmp_path / "launchd.stderr.log"
+    path.mkdir()
+    with pytest.raises(log_config.LogConfigError) as exc:
+        log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
+    assert "普通文件" in str(exc.value)
+    assert path.is_dir()
+
+
+def test_rotate_tightens_retained_backups_when_under_threshold(tmp_path):
+    path = tmp_path / "launchd.stderr.log"
+    path.write_bytes(b"small")
+    os.chmod(path, 0o644)
+    b1 = tmp_path / "launchd.stderr.log.1"
+    b1.write_bytes(b"backup1")
+    os.chmod(b1, 0o644)
+    b2 = tmp_path / "launchd.stderr.log.2"
+    b2.write_bytes(b"backup2")
+    os.chmod(b2, 0o640)
+    log_config.rotate_file_if_needed(path, max_bytes=10_000, backup_count=3)
+    assert path.read_bytes() == b"small"
+    assert b1.read_bytes() == b"backup1"
+    assert b2.read_bytes() == b"backup2"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(b1.stat().st_mode) == 0o600
+    assert stat.S_IMODE(b2.stat().st_mode) == 0o600
+
+
+def test_app_handler_rollover_forces_0600_under_umask_022(tmp_path, monkeypatch):
+    monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
+    install = tmp_path / "install"
+    install.mkdir()
+    # Simulate permissive umask for new files created during rollover.
+    old_umask = os.umask(0o022)
+    try:
+        log_config.configure_logging(platform="darwin", install_dir=install)
+        app = install / "logs" / log_config.APP_LOG_NAME
+        handler = logging.getLogger().handlers[0]
+        assert isinstance(handler, logging.handlers.RotatingFileHandler)
+        handler.maxBytes = 64
+        handler.backupCount = 2
+        logger = logging.getLogger("agent-cockpit")
+        for _ in range(20):
+            logger.info("x" * 40)
+            for h in logging.getLogger().handlers:
+                h.flush()
+        assert app.is_file()
+        assert stat.S_IMODE(app.stat().st_mode) == 0o600
+        assert app.stat().st_nlink == 1
+        # At least one rotated backup may exist after forced small maxBytes.
+        rotated = install / "logs" / f"{log_config.APP_LOG_NAME}.1"
+        if rotated.is_file():
+            assert stat.S_IMODE(rotated.stat().st_mode) in {0o600, 0o644}
+            # base must still be private even if backup mode varies from stdlib
+            assert stat.S_IMODE(app.stat().st_mode) == 0o600
+    finally:
+        os.umask(old_umask)
+
+
+def test_prepare_app_log_rejects_hardlink(tmp_path, monkeypatch):
+    monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
+    install = tmp_path / "install"
+    install.mkdir()
+    log_dir = log_config.ensure_private_log_dir(install / "logs")
+    app = log_dir / log_config.APP_LOG_NAME
+    app.write_bytes(b"data")
+    os.chmod(app, 0o600)
+    os.link(app, log_dir / "alias")
+    with pytest.raises(log_config.LogConfigError) as exc:
+        log_config.configure_logging(platform="darwin", install_dir=install)
+    assert "硬链接" in str(exc.value) or "不安全" in str(exc.value)
 
 
 def test_rotate_rejects_directory_slot_with_existing_backup_unchanged(tmp_path):
