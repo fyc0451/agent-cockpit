@@ -1064,22 +1064,30 @@ def _opencode_option_count(screen: str, label: str) -> int:
     ))
 
 
+_OPENCODE_THEME_LIST_MARKERS = (
+    "catppuccin-frappe", "catppuccin-macchiato", "tokyonight",
+    "nightowl", "cobalt2", "lucent-orng",
+)
+_OPENCODE_COMMAND_LIST_MARKERS = (
+    "Switch session", "New session", "Switch model", "Open editor",
+)
+
+
+def _opencode_marker_count(screen: str, markers: tuple[str, ...]) -> int:
+    return sum(marker in screen for marker in markers)
+
+
 def _opencode_theme_list_visible(screen: str) -> bool:
-    markers = (
-        "catppuccin-frappe", "catppuccin-macchiato", "tokyonight",
-        "nightowl", "cobalt2", "lucent-orng",
-    )
     return (
         _opencode_header_visible(screen, "Themes")
-        and sum(marker in screen for marker in markers) >= 2
+        and _opencode_marker_count(screen, _OPENCODE_THEME_LIST_MARKERS) >= 2
     )
 
 
 def _opencode_command_list_visible(screen: str) -> bool:
-    markers = ("Switch session", "New session", "Switch model", "Open editor")
     return (
         _opencode_header_visible(screen, "Commands")
-        and sum(marker in screen for marker in markers) >= 2
+        and _opencode_marker_count(screen, _OPENCODE_COMMAND_LIST_MARKERS) >= 2
     )
 
 
@@ -1095,11 +1103,20 @@ def apply_opencode_theme_to_pane(
     try:
         before = _opencode_visible(prefix, pane_id)
         option_before = _opencode_option_count(before, theme_name)
+        markers_before = _opencode_marker_count(
+            before, _OPENCODE_THEME_LIST_MARKERS,
+        )
         # Ctrl+X,T 直接打开独立主题弹层，OpenCode 会保留已有 composer 草稿。
         _run(prefix + ["send-keys", pane_id, "ctrl+x", "t"], timeout=5)
         _wait_opencode_visible(
             prefix, pane_id,
-            lambda screen: screen != before and _opencode_theme_list_visible(screen),
+            lambda screen: (
+                screen != before
+                and _opencode_theme_list_visible(screen)
+                and _opencode_marker_count(
+                    screen, _OPENCODE_THEME_LIST_MARKERS,
+                ) > markers_before
+            ),
             "OpenCode 主题弹层未打开",
         )
         dialog_open = True
@@ -1117,10 +1134,12 @@ def apply_opencode_theme_to_pane(
         _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: not (
-                _opencode_theme_list_visible(screen)
-                or (
-                    _opencode_header_visible(screen, "Themes")
-                    and _opencode_option_count(screen, theme_name) > option_before
+                _opencode_header_visible(screen, "Themes")
+                and (
+                    _opencode_marker_count(
+                        screen, _OPENCODE_THEME_LIST_MARKERS,
+                    ) > markers_before
+                    or _opencode_option_count(screen, theme_name) > option_before
                 )
             ),
             "OpenCode 主题弹层确认后未关闭", timeout=1.0,
@@ -1156,10 +1175,19 @@ def apply_opencode_mode_to_pane(
             )
             for target in ("light", "dark")
         }
+        markers_before = _opencode_marker_count(
+            before, _OPENCODE_COMMAND_LIST_MARKERS,
+        )
         _run(prefix + ["send-keys", pane_id, "ctrl+p"], timeout=5)
         _wait_opencode_visible(
             prefix, pane_id,
-            lambda screen: screen != before and _opencode_command_list_visible(screen),
+            lambda screen: (
+                screen != before
+                and _opencode_command_list_visible(screen)
+                and _opencode_marker_count(
+                    screen, _OPENCODE_COMMAND_LIST_MARKERS,
+                ) > markers_before
+            ),
             "OpenCode 命令弹层未打开",
         )
         dialog_open = True
@@ -1189,10 +1217,12 @@ def apply_opencode_mode_to_pane(
         _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: not (
-                _opencode_command_list_visible(screen)
-                or (
-                    _opencode_header_visible(screen, "Commands")
-                    and _opencode_option_count(
+                _opencode_header_visible(screen, "Commands")
+                and (
+                    _opencode_marker_count(
+                        screen, _OPENCODE_COMMAND_LIST_MARKERS,
+                    ) > markers_before
+                    or _opencode_option_count(
                         screen, f"Switch to {target_mode} mode",
                     ) > option_before[target_mode]
                 )

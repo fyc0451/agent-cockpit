@@ -114,6 +114,68 @@ def test_opencode_theme_picker_closes_its_dialog_after_filter_failure(monkeypatc
     assert all("/themes" not in arg for call in calls for arg in call)
 
 
+def test_opencode_theme_picker_does_not_trust_unchanged_dialog_like_history(
+    monkeypatch,
+):
+    calls = []
+    read_count = 0
+    background = (
+        "Themes                  esc\ntokyonight\nnightowl\nold transcript"
+    )
+
+    def fake_run(args, timeout=10):
+        nonlocal read_count
+        calls.append(list(args))
+        if "read" in args:
+            read_count += 1
+            if read_count <= 2:
+                return background
+            raise RuntimeError("screen did not change")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_theme_to_pane("demo", "w1:p4", "aura")
+
+    assert result == {"error": "screen did not change"}
+    assert not any("send-text" in call for call in calls)
+    assert not any(call[-1:] == ["esc"] for call in calls)
+
+
+def test_opencode_theme_picker_rejects_full_dialog_left_after_enter(monkeypatch):
+    calls = []
+    read_count = 0
+    full_dialog = "Themes                  esc\ntokyonight\nnightowl"
+
+    def fake_run(args, timeout=10):
+        nonlocal read_count
+        calls.append(list(args))
+        if "read" in args:
+            read_count += 1
+            screens = {
+                1: "preserved draft",
+                2: "preserved draft\n" + full_dialog,
+                3: "preserved draft\nThemes                  esc\n       aura",
+                4: "preserved draft\n" + full_dialog,
+            }
+            if read_count in screens:
+                return screens[read_count]
+            raise RuntimeError("dialog stayed open")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_theme_to_pane("demo", "w1:p4", "aura")
+
+    assert result == {"error": "dialog stayed open"}
+    assert any(call[-1:] == ["Enter"] for call in calls)
+    assert calls[-1] == [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "esc",
+    ]
+
+
 def test_opencode_mode_picker_switches_to_requested_mode_without_touching_composer(monkeypatch):
     calls = []
     baseline = "       Commands                esc\n       Switch to light mode\n  ┃  preserved draft"
