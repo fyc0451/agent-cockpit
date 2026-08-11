@@ -23,8 +23,13 @@ PANE_ID_RE = re.compile(r"^[A-Za-z0-9_]+:[A-Za-z0-9_]+$")
 INSTANCE_ID_RE = re.compile(r"^i-[a-z2-7]{26}$")
 PRODUCT_KINDS = {
     "codex": "codex", "kimi": "kimi", "claude": "claude",
-    "qodercli": "qodercli", "qodercn": "qodercli", "grok": "grok",
+    "qoder": "qodercli", "qodercli": "qodercli", "qodercn": "qodercli",
+    "qoderclicn": "qodercli", "grok": "grok",
     "opencode": "opencode", "zcode": "opencode",
+}
+AGENT_ALIASES = {
+    "codex-cli": "codex", "kimi-work": "kimi", "claude-code": "claude",
+    "qoder": "qodercn", "qodercli": "qodercn", "qoder-cn": "qodercn",
 }
 
 
@@ -262,6 +267,50 @@ def resolve_managed_identity() -> ManagedIdentity | None:
     return ManagedIdentity(project, agent, instance_id, identity)
 
 
+def _has_managed_descriptor_candidate() -> bool:
+    session = os.environ.get("HERDR_SESSION", "")
+    pane_id = os.environ.get("HERDR_PANE_ID", "")
+    if not SESSION_RE.fullmatch(session) or not PANE_ID_RE.fullmatch(pane_id):
+        return False
+    if not os.path.lexists(DESCRIPTORS_PATH):
+        return False
+    data = _safe_read_json(DESCRIPTORS_PATH)
+    if (
+        not data
+        or data.get("schema") not in {1, 2}
+        or not isinstance(data.get("descriptors"), dict)
+    ):
+        return True
+    for key, record in data["descriptors"].items():
+        if not isinstance(key, str) or not isinstance(record, dict):
+            return True
+        if record.get("session") != session or record.get("pane_id") != pane_id:
+            continue
+        return key.startswith("instance|") or record.get("instance_id") is not None
+    return False
+
+
+def _legacy_identity(agent: str) -> ManagedIdentity | None:
+    project = _canonical_project(
+        os.getcwd(), os.environ.get("HERDR_SESSION", ""), MAIL_PROJECTS_PATH,
+        os.environ.get("HERDR_SOCKET_PATH", ""),
+    )
+    identity = _safe_read_json(
+        REGISTRY_DIR / slugify(project) / f"{agent}--main.json"
+    )
+    if not identity or (
+        identity.get("project_key") != project
+        or identity.get("agent") != agent
+        or identity.get("instance") != "main"
+        or not isinstance(identity.get("name"), str)
+        or not identity["name"]
+        or identity.get("status") == "retired"
+        or bool(identity.get("retired_at"))
+    ):
+        return None
+    return ManagedIdentity(project, agent, "main", identity)
+
+
 def _context(resolved: ManagedIdentity) -> str:
     send = helper_command("mail-send")
     recv = helper_command("mail-recv")
@@ -277,13 +326,16 @@ def _context(resolved: ManagedIdentity) -> str:
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] in {"-h", "--help"}:
-        print("usage: mail-identity-inject [--print-identity]")
+        print("usage: mail-identity-inject [<agent>|--print-identity]")
         return
-    if args not in ([], ["--print-identity"]):
+    if len(args) > 1:
         return
     resolved = resolve_managed_identity()
     if resolved is None:
-        return
+        if args and args != ["--print-identity"] and not _has_managed_descriptor_candidate():
+            resolved = _legacy_identity(AGENT_ALIASES.get(args[0], args[0]))
+        if resolved is None:
+            return
     if args == ["--print-identity"]:
         print(f"{resolved.agent}\t{resolved.instance_id}")
         return

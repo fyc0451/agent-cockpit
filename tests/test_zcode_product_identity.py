@@ -148,6 +148,131 @@ def test_identity_reader_requires_exact_live_pane_not_stale_registry(
     assert mail_identity_inject.resolve_managed_identity() is None
 
 
+def _legacy_identity_fixture(monkeypatch, tmp_path, *, schema=2, status="active"):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    workdir = tmp_path / "worktree"
+    session_dir = home / ".config" / "herdr" / "sessions" / "demo"
+    for path in (home, project, workdir, session_dir):
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    bindings = home / "dashboard-data" / "mail-projects.json"
+    descriptors = home / "dashboard-data" / "launch-descriptors.json"
+    registry = home / ".agent-mail" / "registry"
+    _secure_json(bindings, {"sessions": {"demo": {
+        "session_dir": str(session_dir), "project": str(project),
+    }}})
+    _secure_json(descriptors, {"schema": schema, "descriptors": {
+        "demo|codex": {
+            "session": "demo", "pane_id": "w1:p1", "name": "codex",
+            "agent": "codex", "kind": "codex", "args": [],
+        },
+        f"instance|{INSTANCE}": {
+            "session": "other", "pane_id": "w1:p9", "name": INSTANCE,
+            "agent": "zcode", "kind": "opencode", "instance_id": INSTANCE,
+            "state": "active", "args": [],
+        },
+    }})
+    _secure_json(
+        registry / mail_identity_inject.slugify(str(project)) / "codex--main.json",
+        {
+            "project_key": str(project), "agent": "codex", "instance": "main",
+            "name": "LegacyMailbox", "status": status,
+            **({"retired_at": "2026-08-12T00:00:00Z"} if status == "retired" else {}),
+        },
+    )
+    monkeypatch.setattr(mail_identity_inject.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(mail_identity_inject, "MAIL_PROJECTS_PATH", bindings)
+    monkeypatch.setattr(mail_identity_inject, "DESCRIPTORS_PATH", descriptors)
+    monkeypatch.setattr(mail_identity_inject, "REGISTRY_DIR", registry)
+    monkeypatch.setenv("HERDR_SESSION", "demo")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
+    monkeypatch.setenv("HERDR_SOCKET_PATH", str(session_dir / "herdr.sock"))
+    monkeypatch.chdir(workdir)
+    return descriptors
+
+
+def test_legacy_hook_argument_accepts_mixed_schema2_legacy_descriptor(
+    monkeypatch, tmp_path, capsys,
+):
+    _legacy_identity_fixture(monkeypatch, tmp_path)
+
+    mail_identity_inject.main(["codex"])
+
+    payload = json.loads(capsys.readouterr().out)
+    context = payload["hookSpecificOutput"]["additionalContext"]
+    assert "LegacyMailbox" in context
+    assert "--agent codex --instance main" in context
+
+
+def test_legacy_hook_argument_accepts_schema1_descriptor(
+    monkeypatch, tmp_path, capsys,
+):
+    _legacy_identity_fixture(monkeypatch, tmp_path, schema=1)
+
+    mail_identity_inject.main(["codex"])
+
+    assert "LegacyMailbox" in capsys.readouterr().out
+
+
+def test_instance_key_without_instance_id_blocks_legacy_fallback(
+    monkeypatch, tmp_path, capsys,
+):
+    descriptors = _legacy_identity_fixture(monkeypatch, tmp_path)
+    value = json.loads(descriptors.read_text(encoding="utf-8"))
+    value["descriptors"] = {
+        f"instance|{INSTANCE}": {
+            "session": "demo", "pane_id": "w1:p1", "name": INSTANCE,
+            "agent": "zcode", "kind": "opencode", "state": "active", "args": [],
+        },
+    }
+    _secure_json(descriptors, value)
+
+    mail_identity_inject.main(["codex"])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_unknown_descriptor_schema_blocks_legacy_fallback(
+    monkeypatch, tmp_path, capsys,
+):
+    descriptors = _legacy_identity_fixture(monkeypatch, tmp_path, schema=999)
+    assert descriptors.exists()
+
+    mail_identity_inject.main(["codex"])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_retired_legacy_identity_is_not_injected(monkeypatch, tmp_path, capsys):
+    _legacy_identity_fixture(monkeypatch, tmp_path, status="retired")
+
+    mail_identity_inject.main(["codex"])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_invalid_managed_identity_never_falls_back_to_legacy_main(
+    monkeypatch, tmp_path, capsys,
+):
+    _, project, _, _, exact_registry = _identity_fixture(monkeypatch, tmp_path)
+    exact = json.loads(exact_registry.read_text(encoding="utf-8"))
+    exact.update({"status": "retired", "retired_at": "2026-08-12T00:00:00Z"})
+    _secure_json(exact_registry, exact)
+    _secure_json(exact_registry.parent / "zcode--main.json", {
+        "project_key": str(project), "agent": "zcode", "instance": "main",
+        "name": "StaleLegacyMailbox", "status": "active",
+    })
+
+    mail_identity_inject.main(["zcode"])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_product_kind_aliases_match_herdr_qoder_aliases():
+    for alias in ("qoder", "qodercli", "qodercn", "qoderclicn"):
+        assert mail_identity_inject.PRODUCT_KINDS[alias] == herdr_client.AGENT_KIND_ALIASES[alias]
+
+
 def test_live_pane_match_rejects_stale_same_display_name(monkeypatch, tmp_path):
     workdir = tmp_path.resolve()
     monkeypatch.setattr(mail_identity_inject, "_snapshot", lambda _session: {

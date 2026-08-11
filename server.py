@@ -4137,6 +4137,22 @@ def api_herdr_pane_identity(session: str, pane_id: str):
             "reason": "managed descriptor 缺少 product agent",
             "project": project,
         }
+    if not instance_id:
+        legacy_count = sum(
+            1 for candidate in snap.get("panes", [])
+            if candidate.get("session") == session
+            and candidate.get("agent") == agent_type
+            and not herdr_client.get_launch_descriptor(
+                session, str(candidate.get("pane_id") or ""),
+            )
+        )
+        if legacy_count != 1:
+            return {
+                "found": False,
+                "needs_registration": True,
+                "reason": "同 session 存在多个无 descriptor 的同类型 agent",
+                "project": project,
+            }
     ident = (
         _identity_record(project, mail_agent, instance_id)
         if instance_id else _identity_record(project, mail_agent)
@@ -5636,9 +5652,19 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
         str(descriptor.get("instance_id"))
         if descriptor and descriptor.get("instance_id") else None
     )
+    mail_agent = (
+        str(descriptor.get("agent") or "") if instance_id else str(agent_type)
+    )
+    if instance_id and not mail_agent:
+        return {
+            "ok": False,
+            "needs_registration": True,
+            "project": project,
+            "error": "managed descriptor 缺少 product agent",
+        }
     my_name = (
-        _identity_name(project, agent_type, instance_id)
-        if instance_id else _identity_name(project, agent_type)
+        _identity_name(project, mail_agent, instance_id)
+        if instance_id else _identity_name(project, mail_agent)
     )
     if not my_name:
         return {
@@ -5648,7 +5674,7 @@ def api_herdr_pane_tell_identity(session: str, pane_id: str):
             "error": "该通信项目下没有此 agent 的有效身份（未注册或已 retired）",
         }
     hint = _identity_hint(
-        my_name, project, agent_type, instance_id=instance_id,
+        my_name, project, mail_agent, instance_id=instance_id,
     )
     result = herdr_client.pane_send(session, pane_id, hint, "prompt")
     response = {
@@ -5728,8 +5754,18 @@ def api_herdr_session_init_mail(name: str, req: MailProjectReq | None = None):
             descriptor = managed.get(pane_id)
             if descriptor:
                 instance_id = str(descriptor["instance_id"])
+                mail_agent = str(descriptor.get("agent") or "")
+                if not mail_agent:
+                    status = {
+                        "registered": False, "notified": False,
+                        "instance_id": instance_id,
+                        "warning": "managed descriptor 缺少 product agent",
+                    }
+                    identity_status.append(status)
+                    missing_identities.append(f"{agent_type}({instance_id})")
+                    continue
                 status = _started_agent_mail_identity(
-                    name, pane_id, str(agent_type), instance_id, notify=True,
+                    name, pane_id, mail_agent, instance_id, notify=True,
                     project_hint=project,
                 )
                 identity_status.append(status)
