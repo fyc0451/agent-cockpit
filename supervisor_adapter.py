@@ -227,23 +227,113 @@ def assert_fixed_mac_label(label: str) -> str:
     return label
 
 
+# ── launcher argv（调用方显式提供；不猜 .venv / launchd.sh） ──────
+
+
+def normalize_launcher_argv(
+    program_arguments: Sequence[str],
+    *,
+    current_dir: str | Path,
+    deploy_root: str | Path | None = None,
+) -> tuple[str, ...]:
+    """规范化主进程 launcher argv。
+
+    - 非空；每个元素为非空 str，无控制字符。
+    - ``argv[0]`` 必须是落在受控 ``current`` **字面量路径**下的绝对路径
+      （保留 ``.../current/...``，不 resolve 成 generation）。
+    - 不猜测 artifact 内文件名（无默认 ``.venv`` / ``launchd.sh``）。
+    """
+    if not program_arguments:
+        raise SupervisorAdapterError("empty_program_arguments")
+    current = validate_current_path(current_dir, deploy_root=deploy_root)
+    cur = current.as_posix()
+    out: list[str] = []
+    for i, arg in enumerate(program_arguments):
+        if not isinstance(arg, str) or not arg:
+            raise SupervisorAdapterError("invalid_program_argument", str(i))
+        if _has_control_chars(arg):
+            raise SupervisorAdapterError("control_char_in_argument", str(i))
+        if i == 0:
+            launcher = validate_absolute_path(arg, role="launcher")
+            literal = launcher.as_posix()
+            if not (literal == cur or literal.startswith(cur + "/")):
+                raise SupervisorAdapterError("launcher_outside_current", literal)
+            out.append(literal)
+        else:
+            if arg.startswith("/"):
+                validate_absolute_path(arg, role=f"program_arg[{i}]")
+            out.append(arg)
+    return tuple(out)
+
+
+def _format_exec_start(argv: Sequence[str]) -> str:
+    """将 argv 格式化为 ExecStart= 右侧；参数一律双引号 + systemd exec 转义。"""
+    return " ".join(f'"{escape_systemd_exec_value(a)}"' for a in argv)
+
+
+def _parse_exec_start_argv(exec_start: str) -> tuple[str, ...]:
+    """解析 ExecStart 右侧为 argv（仅支持双引号参数序列，与渲染器对称）。
+
+    引号内保留转义原文，统一交给 ``_unescape_systemd_exec_value``，避免双重反转义。
+    """
+    s = exec_start.strip()
+    if not s:
+        raise SupervisorAdapterError("exec_start_empty")
+    args: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        while i < n and s[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        if s[i] != '"':
+            raise SupervisorAdapterError("exec_start_unquoted_token")
+        i += 1
+        raw: list[str] = []
+        while i < n:
+            ch = s[i]
+            if ch == "\\" and i + 1 < n:
+                raw.append(ch)
+                raw.append(s[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                i += 1
+                break
+            raw.append(ch)
+            i += 1
+        else:
+            raise SupervisorAdapterError("exec_start_unclosed_quote")
+        args.append(_unescape_systemd_exec_value("".join(raw)))
+    if not args:
+        raise SupervisorAdapterError("exec_start_empty")
+    return tuple(args)
+
+
 # ── 渲染 ──────────────────────────────────────────────────────────
 
 
 def render_linux_unit(
     *,
     current_dir: str | Path,
+    program_arguments: Sequence[str],
     deploy_root: str | Path | None = None,
     description: str = "Agent Cockpit (FastAPI :8790)",
 ) -> str:
-    """渲染固定 user unit，指向受控 current；强制 KillMode=process。"""
+    """渲染固定 user unit，指向受控 current；强制 KillMode=process。
+
+    ``program_arguments`` 必须由调用方显式提供（自含 artifact 入口），
+    适配层不默认 ``.venv/bin/python`` 或源码 ``server.py``。
+    """
     current = validate_current_path(current_dir, deploy_root=deploy_root)
+    argv = normalize_launcher_argv(
+        program_arguments, current_dir=current, deploy_root=deploy_root
+    )
     cur = current.as_posix()
     wd = escape_systemd_value(cur)
-    exec_dir = escape_systemd_exec_value(cur)
     env_file = escape_systemd_value(f"{cur}/.env")
-    # ExecStart：与现网 agent-cockpit.service 同形——env 包装 python，cwd=current
-    exec_start = f'/usr/bin/env "{exec_dir}/.venv/bin/python" server.py'
+    exec_start = _format_exec_start(argv)
     return (
         "[Unit]\n"
         f"Description={description}\n"
@@ -270,16 +360,25 @@ def render_linux_unit(
 def render_mac_main_plist(
     *,
     current_dir: str | Path,
+    program_arguments: Sequence[str],
     deploy_root: str | Path | None = None,
 ) -> str:
-    """固定主 LaunchAgent：label 仅允许 MAC_MAIN_LABEL，路径指向 current。"""
+    """固定主 LaunchAgent：label 仅允许 MAC_MAIN_LABEL，路径指向 current。
+
+    ``program_arguments`` 必须由调用方显式提供；不默认 ``launchd.sh run``。
+    """
     current = validate_current_path(current_dir, deploy_root=deploy_root)
+    argv = normalize_launcher_argv(
+        program_arguments, current_dir=current, deploy_root=deploy_root
+    )
     cur = current.as_posix()
-    launchd_sh = escape_plist_xml(f"{cur}/launchd.sh")
     wd = escape_plist_xml(cur)
     stdout = escape_plist_xml(f"{cur}/agent-cockpit.stdout.log")
     stderr = escape_plist_xml(f"{cur}/agent-cockpit.stderr.log")
     label = escape_plist_xml(MAC_MAIN_LABEL)
+    args_xml = "\n".join(
+        f"    <string>{escape_plist_xml(a)}</string>" for a in argv
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -290,8 +389,7 @@ def render_mac_main_plist(
         f"  <string>{label}</string>\n"
         "  <key>ProgramArguments</key>\n"
         "  <array>\n"
-        f"    <string>{launchd_sh}</string>\n"
-        "    <string>run</string>\n"
+        f"{args_xml}\n"
         "  </array>\n"
         "  <key>WorkingDirectory</key>\n"
         f"  <string>{wd}</string>\n"
@@ -429,54 +527,31 @@ def validate_linux_unit_contract(
     text: str,
     *,
     current_dir: str | Path,
+    program_arguments: Sequence[str],
     deploy_root: str | Path | None = None,
 ) -> LinuxUnitContract:
-    """KillMode=process；WD 与 ExecStart 内路径均指向同一 current。"""
+    """KillMode=process；WD 与 ExecStart argv 精确对齐调用方 launcher，同源 current。"""
     current = validate_current_path(current_dir, deploy_root=deploy_root)
+    expected = normalize_launcher_argv(
+        program_arguments, current_dir=current, deploy_root=deploy_root
+    )
     cur = current.as_posix()
     contract = parse_linux_unit_contract(text)
     if contract.kill_mode.lower() != "process":
         raise SupervisorAdapterError("killmode_not_process", contract.kill_mode)
-    if contract.working_directory != cur:
-        # 允许转义后的等价形式：反解常见转义再比
-        if _unescape_systemd_value(contract.working_directory) != cur:
-            raise SupervisorAdapterError("working_directory_mismatch")
-    # ExecStart 必须引用同一 current（字面或转义后）
-    escaped_cur = escape_systemd_exec_value(cur)
-    if cur not in contract.exec_start and escaped_cur not in contract.exec_start:
-        raise SupervisorAdapterError("exec_start_not_current")
-    # ExecStart 不得指向其它绝对根：解析引号内路径（引号内可能含 \"）
-    exec_path = _first_quoted_exec_path(contract.exec_start)
-    if exec_path is not None:
-        if not (
-            exec_path == f"{cur}/.venv/bin/python"
-            or exec_path.startswith(cur + "/")
-        ):
-            raise SupervisorAdapterError("exec_start_outside_current")
+    wd = _unescape_systemd_value(contract.working_directory)
+    if wd != cur:
+        raise SupervisorAdapterError("working_directory_mismatch")
+    actual = _parse_exec_start_argv(contract.exec_start)
+    if actual != expected:
+        raise SupervisorAdapterError("exec_start_argv_mismatch")
+    if not (actual[0] == cur or actual[0].startswith(cur + "/")):
+        raise SupervisorAdapterError("launcher_outside_current", actual[0])
     if contract.environment_file is not None:
         ef = _unescape_systemd_value(contract.environment_file)
         if ef != f"{cur}/.env":
             raise SupervisorAdapterError("environment_file_mismatch")
     return contract
-
-
-def _first_quoted_exec_path(exec_start: str) -> str | None:
-    """从 ExecStart 取出第一个双引号参数并反转义；无引号则 None。"""
-    if '"' not in exec_start:
-        return None
-    out: list[str] = []
-    i = exec_start.index('"') + 1
-    while i < len(exec_start):
-        ch = exec_start[i]
-        if ch == "\\" and i + 1 < len(exec_start):
-            out.append(exec_start[i + 1])
-            i += 2
-            continue
-        if ch == '"':
-            return _unescape_systemd_exec_value("".join(out))
-        out.append(ch)
-        i += 1
-    raise SupervisorAdapterError("exec_start_unclosed_quote")
 
 
 def _unescape_systemd_value(value: str) -> str:
@@ -581,7 +656,15 @@ def validate_mac_plist_contract(
     *,
     expected_label: str,
     expected_working_directory: str | Path,
+    program_arguments: Sequence[str] | None = None,
+    current_dir: str | Path | None = None,
+    deploy_root: str | Path | None = None,
 ) -> MacPlistContract:
+    """校验固定 label、WD，以及（若提供）精确 program argv。
+
+    主 LA（``MAC_MAIN_LABEL``）必须提供 ``program_arguments`` 与 ``current_dir``，
+    以验证 argv[0] 落在 current 字面路径下。controller 仅要求 argv 非空且路径合法。
+    """
     assert_fixed_mac_label(expected_label)
     wd = validate_absolute_path(expected_working_directory, role="working_directory")
     contract = parse_mac_plist_contract(text)
@@ -590,15 +673,22 @@ def validate_mac_plist_contract(
         raise SupervisorAdapterError("label_mismatch", contract.label)
     if contract.working_directory != wd.as_posix():
         raise SupervisorAdapterError("working_directory_mismatch")
-    # ProgramArguments 中绝对路径不得含控制字符；首路径应在 WD 下（main）或为绝对可执行
     for arg in contract.program_arguments:
         if _has_control_chars(arg):
             raise SupervisorAdapterError("control_char_in_argument")
         if arg.startswith("/"):
-            try:
-                validate_absolute_path(arg, role="program_arg")
-            except SupervisorAdapterError:
-                raise
+            validate_absolute_path(arg, role="program_arg")
+    if expected_label == MAC_MAIN_LABEL:
+        if program_arguments is None or current_dir is None:
+            raise SupervisorAdapterError("main_launcher_required")
+        expected = normalize_launcher_argv(
+            program_arguments, current_dir=current_dir, deploy_root=deploy_root
+        )
+        if contract.program_arguments != expected:
+            raise SupervisorAdapterError("program_arguments_mismatch")
+    elif program_arguments is not None:
+        if tuple(program_arguments) != contract.program_arguments:
+            raise SupervisorAdapterError("program_arguments_mismatch")
     return contract
 
 
@@ -714,6 +804,7 @@ __all__ = [
     "escape_systemd_exec_value",
     "escape_systemd_value",
     "is_forbidden_mac_label",
+    "normalize_launcher_argv",
     "parse_linux_unit_contract",
     "parse_mac_plist_contract",
     "plan_linux_install_unit",

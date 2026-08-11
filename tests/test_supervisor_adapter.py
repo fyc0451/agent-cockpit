@@ -1,7 +1,8 @@
-"""U2 S0：固定 systemd/launchd supervisor 纯适配层测试。
+"""U2 S0 / R1：固定 systemd/launchd supervisor 纯适配层测试。
 
-覆盖：空格/中文路径、控制字符、恶意 XML、错误 label/KillMode/current、
-symlink 逃逸、命令计划不执行、禁止 upgrade.<job> 动态 label。
+覆盖：显式 launcher argv（无 .venv/launchd 默认）、空格/中文路径、控制字符、
+恶意 XML、错误 label/KillMode/current、launcher 逃出 current、空 argv、
+symlink 逃逸、命令计划不执行、禁止 upgrade.<job>、无恒真断言。
 """
 
 from __future__ import annotations
@@ -19,23 +20,30 @@ import supervisor_adapter as sa
 
 @pytest.fixture
 def deploy_layout(tmp_path: Path) -> dict[str, Path]:
+    """自含 artifact 布局：不依赖 .venv 或源码 launchd.sh。"""
     root = tmp_path / "deploy"
     gen = root / "generations" / "abc123"
     gen.mkdir(parents=True)
-    (gen / ".venv" / "bin").mkdir(parents=True)
-    (gen / ".venv" / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    (gen / "server.py").write_text("# stub\n", encoding="utf-8")
-    (gen / "launchd.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher = gen / "bin" / "agent-cockpit"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     current = root / "current"
     current.symlink_to(gen)
     controller = tmp_path / "controller-install"
     controller.mkdir()
+    # 字面量 current 下的 launcher 路径（不 resolve 成 generation）
+    main_argv = (f"{current.as_posix()}/bin/agent-cockpit", "serve")
     return {
         "root": root,
         "gen": gen,
         "current": current,
         "controller": controller,
+        "main_argv": main_argv,
     }
+
+
+def _main_argv(current: Path, *extra: str) -> tuple[str, ...]:
+    return (f"{current.as_posix()}/bin/agent-cockpit", *extra)
 
 
 # ── path validation ──────────────────────────────────────────────
@@ -130,6 +138,74 @@ class TestEscaping:
         ).replace("&quot;", "")
 
 
+# ── launcher argv ────────────────────────────────────────────────
+
+
+class TestLauncherArgv:
+    def test_empty_argv_rejected(self, deploy_layout: dict[str, Path]) -> None:
+        cur = deploy_layout["current"]
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_launcher_argv([], current_dir=cur)
+        assert exc.value.reason == "empty_program_arguments"
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.render_linux_unit(
+                current_dir=cur,
+                program_arguments=[],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc2.value.reason == "empty_program_arguments"
+        with pytest.raises(sa.SupervisorAdapterError) as exc3:
+            sa.render_mac_main_plist(
+                current_dir=cur,
+                program_arguments=[],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc3.value.reason == "empty_program_arguments"
+
+    def test_launcher_outside_current_rejected(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        cur = deploy_layout["current"]
+        outside = "/tmp/evil-bin"
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_launcher_argv([outside], current_dir=cur)
+        assert exc.value.reason == "launcher_outside_current"
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.render_linux_unit(
+                current_dir=cur,
+                program_arguments=[outside, "serve"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc2.value.reason == "launcher_outside_current"
+
+    def test_no_default_venv_or_source_launchd(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        """调用方不传 argv 时 API 失败；渲染结果不出现隐式 .venv/launchd.sh。"""
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        unit = sa.render_linux_unit(
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
+        )
+        mac = sa.render_mac_main_plist(
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
+        )
+        assert ".venv" not in unit
+        assert "launchd.sh" not in unit
+        assert "server.py" not in unit
+        assert ".venv" not in mac
+        assert "launchd.sh" not in mac
+        assert f"{cur.as_posix()}/bin/agent-cockpit" in unit
+        assert f"{cur.as_posix()}/bin/agent-cockpit" in mac
+
+    def test_control_char_in_argv_rejected(self, deploy_layout: dict[str, Path]) -> None:
+        cur = deploy_layout["current"]
+        bad = f"{cur.as_posix()}/bin/agent\ncockpit"
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_launcher_argv([bad], current_dir=cur)
+        assert exc.value.reason == "control_char_in_argument"
+
+
 # ── linux unit render + validate ─────────────────────────────────
 
 
@@ -138,17 +214,19 @@ class TestLinuxUnit:
         self, deploy_layout: dict[str, Path]
     ) -> None:
         cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
         text = sa.render_linux_unit(
             current_dir=cur,
+            program_arguments=argv,
             deploy_root=deploy_layout["root"],
         )
         assert "KillMode=process" in text
         assert f"WorkingDirectory={cur.as_posix()}" in text
-        assert cur.as_posix() in text
-        assert f"{cur.as_posix()}/.venv/bin/python" in text
+        assert argv[0] in text
         contract = sa.validate_linux_unit_contract(
             text,
             current_dir=cur,
+            program_arguments=argv,
             deploy_root=deploy_layout["root"],
         )
         assert contract.kill_mode == "process"
@@ -160,41 +238,72 @@ class TestLinuxUnit:
         gen.mkdir(parents=True)
         current = root / "current"
         current.symlink_to(gen)
-        text = sa.render_linux_unit(current_dir=current, deploy_root=root)
+        argv = _main_argv(current, "serve")
+        text = sa.render_linux_unit(
+            current_dir=current, program_arguments=argv, deploy_root=root
+        )
         assert "我的 部署" in text
-        sa.validate_linux_unit_contract(text, current_dir=current, deploy_root=root)
+        sa.validate_linux_unit_contract(
+            text, current_dir=current, program_arguments=argv, deploy_root=root
+        )
 
     def test_wrong_killmode_rejected(self, deploy_layout: dict[str, Path]) -> None:
         cur = deploy_layout["current"]
-        text = sa.render_linux_unit(current_dir=cur, deploy_root=deploy_layout["root"])
+        argv = deploy_layout["main_argv"]
+        text = sa.render_linux_unit(
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
+        )
         bad = text.replace("KillMode=process", "KillMode=control-group")
         with pytest.raises(sa.SupervisorAdapterError) as exc:
             sa.validate_linux_unit_contract(
-                bad, current_dir=cur, deploy_root=deploy_layout["root"]
+                bad,
+                current_dir=cur,
+                program_arguments=argv,
+                deploy_root=deploy_layout["root"],
             )
         assert exc.value.reason == "killmode_not_process"
 
     def test_wrong_current_in_wd_rejected(self, deploy_layout: dict[str, Path]) -> None:
         cur = deploy_layout["current"]
-        text = sa.render_linux_unit(current_dir=cur, deploy_root=deploy_layout["root"])
-        other = deploy_layout["root"] / "other-current"
-        # basename must be current for validate_current_path of expected — mutate WD only
+        argv = deploy_layout["main_argv"]
+        text = sa.render_linux_unit(
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
+        )
         bad = text.replace(
             f"WorkingDirectory={cur.as_posix()}",
             "WorkingDirectory=/tmp/evil/current",
         )
         with pytest.raises(sa.SupervisorAdapterError) as exc:
             sa.validate_linux_unit_contract(
-                bad, current_dir=cur, deploy_root=deploy_layout["root"]
+                bad,
+                current_dir=cur,
+                program_arguments=argv,
+                deploy_root=deploy_layout["root"],
             )
         assert exc.value.reason == "working_directory_mismatch"
+
+    def test_argv_mismatch_rejected(self, deploy_layout: dict[str, Path]) -> None:
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        text = sa.render_linux_unit(
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
+        )
+        other = _main_argv(cur, "other-mode")
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_linux_unit_contract(
+                text,
+                current_dir=cur,
+                program_arguments=other,
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "exec_start_argv_mismatch"
 
     def test_unknown_unit_key_rejected(self) -> None:
         text = (
             "[Service]\n"
             "KillMode=process\n"
             "WorkingDirectory=/tmp/x/current\n"
-            "ExecStart=/usr/bin/true\n"
+            'ExecStart="/usr/bin/true"\n'
             "ExecStop=/bin/evil\n"
         )
         with pytest.raises(sa.SupervisorAdapterError) as exc:
@@ -207,10 +316,16 @@ class TestLinuxUnit:
         gen.mkdir(parents=True)
         current = root / "current"
         current.symlink_to(gen)
-        text = sa.render_linux_unit(current_dir=current, deploy_root=root)
-        # $ → $$ ; % → %% ; " → \"
-        assert "$$" in text or "%" in str(root)
-        sa.validate_linux_unit_contract(text, current_dir=current, deploy_root=root)
+        argv = _main_argv(current, "serve")
+        text = sa.render_linux_unit(
+            current_dir=current, program_arguments=argv, deploy_root=root
+        )
+        # path 含 $ % " → exec 转义
+        assert "$$" in text
+        assert "%%" in text
+        sa.validate_linux_unit_contract(
+            text, current_dir=current, program_arguments=argv, deploy_root=root
+        )
 
 
 # ── mac plist ────────────────────────────────────────────────────
@@ -219,18 +334,23 @@ class TestLinuxUnit:
 class TestMacPlist:
     def test_main_fixed_label(self, deploy_layout: dict[str, Path]) -> None:
         cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
         text = sa.render_mac_main_plist(
-            current_dir=cur, deploy_root=deploy_layout["root"]
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
         )
         assert sa.MAC_MAIN_LABEL in text
         assert ".upgrade." not in text
+        assert "launchd.sh" not in text
         contract = sa.validate_mac_plist_contract(
             text,
             expected_label=sa.MAC_MAIN_LABEL,
             expected_working_directory=cur,
+            program_arguments=argv,
+            current_dir=cur,
+            deploy_root=deploy_layout["root"],
         )
         assert contract.label == sa.MAC_MAIN_LABEL
-        assert contract.program_arguments[0].endswith("/launchd.sh")
+        assert contract.program_arguments == argv
         assert contract.keep_alive is True
 
     def test_controller_fixed_label_outside_current(
@@ -239,19 +359,22 @@ class TestMacPlist:
         ctrl = deploy_layout["controller"]
         prog = ctrl / "controller.bin"
         prog.write_text("x", encoding="utf-8")
+        argv = (prog.as_posix(), "run")
         text = sa.render_mac_controller_plist(
             controller_dir=ctrl,
-            program_arguments=[prog.as_posix(), "run"],
+            program_arguments=argv,
             current_dir=deploy_layout["current"],
         )
-        assert sa.MAC_CONTROLLER_LABEL in text
-        assert sa.MAC_MAIN_LABEL not in text or True  # main may appear only if path collides
+        assert f"<string>{sa.MAC_CONTROLLER_LABEL}</string>" in text
+        assert f"<string>{sa.MAC_MAIN_LABEL}</string>" not in text
         contract = sa.validate_mac_plist_contract(
             text,
             expected_label=sa.MAC_CONTROLLER_LABEL,
             expected_working_directory=ctrl,
+            program_arguments=argv,
         )
         assert contract.label == sa.MAC_CONTROLLER_LABEL
+        assert contract.program_arguments == argv
 
     def test_forbidden_upgrade_job_label(self) -> None:
         dynamic = "io.github.fyc0451.agent-cockpit.upgrade.abc"
@@ -281,13 +404,15 @@ class TestMacPlist:
     def test_malicious_raw_angle_brackets_escaped_on_render(
         self, tmp_path: Path
     ) -> None:
-        # path containing <>& must be escaped in plist text
         root = tmp_path / "a<b>&c"
         gen = root / "generations" / "g"
         gen.mkdir(parents=True)
         current = root / "current"
         current.symlink_to(gen)
-        text = sa.render_mac_main_plist(current_dir=current, deploy_root=root)
+        argv = _main_argv(current)
+        text = sa.render_mac_main_plist(
+            current_dir=current, program_arguments=argv, deploy_root=root
+        )
         assert "<b>" not in text
         assert "&lt;" in text
         assert "&amp;" in text
@@ -295,12 +420,16 @@ class TestMacPlist:
             text,
             expected_label=sa.MAC_MAIN_LABEL,
             expected_working_directory=current,
+            program_arguments=argv,
+            current_dir=current,
+            deploy_root=root,
         )
 
     def test_label_mismatch_rejected(self, deploy_layout: dict[str, Path]) -> None:
         cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
         text = sa.render_mac_main_plist(
-            current_dir=cur, deploy_root=deploy_layout["root"]
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
         )
         with pytest.raises(sa.SupervisorAdapterError) as exc:
             sa.validate_mac_plist_contract(
@@ -316,13 +445,35 @@ class TestMacPlist:
         gen.mkdir(parents=True)
         current = root / "current"
         current.symlink_to(gen)
-        text = sa.render_mac_main_plist(current_dir=current, deploy_root=root)
+        argv = _main_argv(current, "serve")
+        text = sa.render_mac_main_plist(
+            current_dir=current, program_arguments=argv, deploy_root=root
+        )
         assert "Mac 部署 dir" in text
         sa.validate_mac_plist_contract(
             text,
             expected_label=sa.MAC_MAIN_LABEL,
             expected_working_directory=current,
+            program_arguments=argv,
+            current_dir=current,
+            deploy_root=root,
         )
+
+    def test_main_requires_launcher_for_validate(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        text = sa.render_mac_main_plist(
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_mac_plist_contract(
+                text,
+                expected_label=sa.MAC_MAIN_LABEL,
+                expected_working_directory=cur,
+            )
+        assert exc.value.reason == "main_launcher_required"
 
 
 # ── command plans (no execution) ─────────────────────────────────
@@ -348,9 +499,13 @@ class TestCommandPlans:
         tools = sa.planned_argv_tools(plans)
         assert tools == frozenset({"launchctl"})
         assert any("bootstrap" in p.argv for p in plans)
-        assert all(sa.MAC_MAIN_LABEL in " ".join(p.argv) or p.argv[1] in {
-            "bootout", "bootstrap", "enable", "kickstart",
-        } for p in plans)
+        joined = " ".join(" ".join(p.argv) for p in plans)
+        assert sa.MAC_MAIN_LABEL in joined
+        assert all(
+            p.argv[0] == "launchctl"
+            and p.argv[1] in {"bootout", "bootstrap", "enable", "kickstart"}
+            for p in plans
+        )
 
     def test_mac_plan_rejects_upgrade_label(self, tmp_path: Path) -> None:
         plist = tmp_path / "x.plist"
@@ -363,17 +518,18 @@ class TestCommandPlans:
         assert exc.value.reason == "forbidden_dynamic_upgrade_label"
 
     def test_module_never_imports_subprocess_for_supervisor(self) -> None:
-        # 适配层自身不得 import subprocess（防误执行）
         import importlib
-        import sys
 
         mod = importlib.import_module("supervisor_adapter")
         src = Path(mod.__file__).read_text(encoding="utf-8")
         assert "import subprocess" not in src
-        assert "systemctl" not in src.split("plan_")[0] or True  # constants ok in plans
-        # 更强：模块命名空间无 Popen / run
+        assert "from subprocess" not in src
+        assert "os.system" not in src
+        assert "Popen" not in src
         assert not hasattr(mod, "subprocess")
-        assert "subprocess" not in sys.modules.get("supervisor_adapter", mod).__dict__
+        # systemctl/launchctl 仅作为 PlannedCommand 数据字符串出现
+        assert "def execute" not in src
+        assert "subprocess.run" not in src
 
     def test_plans_are_data_not_executed(self, tmp_path: Path, monkeypatch) -> None:
         """即使 PATH 上有假 systemctl，plan API 也不得调用它。"""
@@ -400,11 +556,23 @@ class TestCommandPlans:
 def test_render_validate_plan_pipeline(deploy_layout: dict[str, Path]) -> None:
     cur = deploy_layout["current"]
     root = deploy_layout["root"]
-    unit = sa.render_linux_unit(current_dir=cur, deploy_root=root)
-    sa.validate_linux_unit_contract(unit, current_dir=cur, deploy_root=root)
-    main = sa.render_mac_main_plist(current_dir=cur, deploy_root=root)
+    argv = deploy_layout["main_argv"]
+    unit = sa.render_linux_unit(
+        current_dir=cur, program_arguments=argv, deploy_root=root
+    )
+    sa.validate_linux_unit_contract(
+        unit, current_dir=cur, program_arguments=argv, deploy_root=root
+    )
+    main = sa.render_mac_main_plist(
+        current_dir=cur, program_arguments=argv, deploy_root=root
+    )
     sa.validate_mac_plist_contract(
-        main, expected_label=sa.MAC_MAIN_LABEL, expected_working_directory=cur
+        main,
+        expected_label=sa.MAC_MAIN_LABEL,
+        expected_working_directory=cur,
+        program_arguments=argv,
+        current_dir=cur,
+        deploy_root=root,
     )
     ctrl_bin = deploy_layout["controller"] / "run.sh"
     ctrl_bin.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -417,6 +585,7 @@ def test_render_validate_plan_pipeline(deploy_layout: dict[str, Path]) -> None:
         ctrl,
         expected_label=sa.MAC_CONTROLLER_LABEL,
         expected_working_directory=deploy_layout["controller"],
+        program_arguments=[ctrl_bin.as_posix()],
     )
     plans = (
         sa.plan_linux_install_unit(unit_path=root / "agent-cockpit.service")
@@ -434,3 +603,10 @@ def test_render_validate_plan_pipeline(deploy_layout: dict[str, Path]) -> None:
     tools = sa.planned_argv_tools(plans)
     assert tools <= frozenset({"systemctl", "launchctl"})
     assert not any(".upgrade." in " ".join(p.argv) for p in plans)
+
+
+def test_no_tautology_or_true_in_adapter_module() -> None:
+    """B3：适配层源码不得含恒真 `or True` 断言残留。"""
+    src = Path(sa.__file__).read_text(encoding="utf-8")
+    needle = "or" + " True"
+    assert needle not in src
