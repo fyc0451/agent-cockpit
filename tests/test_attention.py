@@ -866,9 +866,10 @@ def test_prepare_parallel_workspace_creates_isolated_and_review_worktrees(tmp_pa
 
     assert warnings == []
     assert [plan["strategy"] for plan in plans] == ["isolated", "isolated", "review"]
-    assert plans[0]["branch"] == "agent-cockpit/demo/codex-1"
-    assert plans[1]["branch"] == "agent-cockpit/demo/kimi-1"
+    assert plans[0]["branch"] == f"agent-cockpit/demo/{plans[0]['instance_id']}"
+    assert plans[1]["branch"] == f"agent-cockpit/demo/{plans[1]['instance_id']}"
     assert plans[2]["branch"] is None
+    assert len({plan["instance_id"] for plan in plans}) == 3
     assert all((Path(plan["workdir"]) / "README.md").is_file() for plan in plans)
     detached = subprocess.run(
         ["git", "-C", plans[2]["workdir"], "symbolic-ref", "-q", "HEAD"],
@@ -906,7 +907,7 @@ def test_prepare_parallel_workspace_allows_two_codex_instances(tmp_path):
     assert plans[0]["workdir"] != plans[1]["workdir"]
 
 
-def test_prepare_workspace_rejects_duplicate_instance_names(tmp_path):
+def test_prepare_workspace_allows_duplicate_display_names_with_distinct_ids(tmp_path):
     req = server.SetupWorkspaceReq(
         session="duplicate-name",
         workdir=str(tmp_path),
@@ -923,13 +924,11 @@ def test_prepare_workspace_rejects_duplicate_instance_names(tmp_path):
         ],
     )
 
-    try:
-        server._prepare_workspace(req)
-    except server.HTTPException as exc:
-        assert exc.status_code == 400
-        assert "实例名称不能重复" in exc.detail
-    else:
-        raise AssertionError("同一工作区不应接受重复实例名称")
+    plans, warnings = server._prepare_workspace(req)
+
+    assert warnings == []
+    assert [plan["name"] for plan in plans] == ["codex-main", "codex-main"]
+    assert plans[0]["instance_id"] != plans[1]["instance_id"]
 
 
 def test_prepare_parallel_workspace_rejects_non_git_directory(tmp_path):
@@ -1050,6 +1049,10 @@ def test_setup_workspace_keeps_launch_success_when_coordination_context_fails(
     monkeypatch.setattr(server, "_canonical_mail_project", lambda _: str(tmp_path))
     monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
     monkeypatch.setattr(server.mail_projects, "bind", lambda *_: None)
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _: {"bound": True, "project": str(tmp_path)},
+    )
     plan = {
         "id": "lead", "name": "codex", "agent": "codex", "role": "lead",
         "task": "实现", "workdir": str(tmp_path), "strategy": "shared", "args": "",
@@ -1244,7 +1247,7 @@ def test_setup_workspace_rejects_reused_agent_with_unknown_or_different_cwd(
         assert body["notified"] == []
 
 
-def test_prepare_workspace_resumes_old_branch_and_warns_after_prune(tmp_path):
+def test_prepare_workspace_same_display_name_creates_new_identity_after_prune(tmp_path):
     repo = tmp_path / "demo"
     repo.mkdir()
     _init_git_repo(repo)
@@ -1272,18 +1275,19 @@ def test_prepare_workspace_resumes_old_branch_and_warns_after_prune(tmp_path):
         check=True, capture_output=True,
     )
 
-    resumed, warnings = server._prepare_workspace(req)
+    recreated, warnings = server._prepare_workspace(req)
 
-    assert resumed[0]["resumed"] is True
-    assert Path(resumed[0]["worktree"]).is_dir()
+    assert recreated[0]["resumed"] is False
+    assert recreated[0]["instance_id"] != first[0]["instance_id"]
+    assert Path(recreated[0]["worktree"]).is_dir()
     assert subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", resumed[0]["branch"]],
+        ["git", "-C", str(repo), "rev-parse", first[0]["branch"]],
         check=True, capture_output=True, text=True,
     ).stdout.strip() == old_branch_head
-    assert any("恢复" in warning and "新 session" in warning for warning in warnings)
+    assert not any("恢复" in warning for warning in warnings)
 
 
-def test_prepare_workspace_warns_when_reusing_dirty_worktree(tmp_path):
+def test_prepare_workspace_same_display_name_does_not_reuse_dirty_identity(tmp_path):
     repo = tmp_path / "demo"
     repo.mkdir()
     _init_git_repo(repo)
@@ -1301,11 +1305,13 @@ def test_prepare_workspace_warns_when_reusing_dirty_worktree(tmp_path):
     first, _ = server._prepare_workspace(req)
     (Path(first[0]["workdir"]) / "local.txt").write_text("keep me\n", encoding="utf-8")
 
-    reused, warnings = server._prepare_workspace(req)
+    recreated, warnings = server._prepare_workspace(req)
 
-    assert reused[0]["reused"] is True
-    assert reused[0]["dirty"] is True
-    assert any("未提交改动" in warning and "原样保留" in warning for warning in warnings)
+    assert recreated[0]["reused"] is False
+    assert recreated[0]["instance_id"] != first[0]["instance_id"]
+    assert (Path(first[0]["workdir"]) / "local.txt").read_text() == "keep me\n"
+    assert not (Path(recreated[0]["workdir"]) / "local.txt").exists()
+    assert not any("原样保留" in warning for warning in warnings)
 
 
 def test_prepare_workspace_rolls_back_new_worktrees_after_partial_failure(monkeypatch, tmp_path):
@@ -1347,7 +1353,7 @@ def test_prepare_workspace_rolls_back_new_worktrees_after_partial_failure(monkey
     assert branch.returncode == 1
 
 
-def test_prepare_workspace_reuses_legacy_index_named_worktree(tmp_path):
+def test_prepare_workspace_does_not_bind_new_identity_to_legacy_named_worktree(tmp_path):
     repo = tmp_path / "demo"
     repo.mkdir()
     _init_git_repo(repo)
@@ -1366,9 +1372,9 @@ def test_prepare_workspace_reuses_legacy_index_named_worktree(tmp_path):
     plans, _ = server._prepare_workspace(req)
 
     assert plans[0]["name"] == "codex-1"
-    assert plans[0]["reused"] is True
-    assert plans[0]["worktree"] == legacy["worktree"]
-    assert plans[0]["branch"] == "agent-cockpit/legacy/1-codex"
+    assert plans[0]["reused"] is False
+    assert plans[0]["worktree"] != legacy["worktree"]
+    assert plans[0]["branch"] == f"agent-cockpit/legacy/{plans[0]['instance_id']}"
 
 
 def test_inspect_workspace_reports_git_capabilities(monkeypatch, tmp_path):
@@ -1396,10 +1402,12 @@ def test_inspect_workspace_reports_git_capabilities(monkeypatch, tmp_path):
 
 
 def test_start_agent_can_create_named_isolated_worktree(monkeypatch, tmp_path):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
     repo = tmp_path / "demo"
     repo.mkdir()
     _init_git_repo(repo)
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "new_agent_instance_id", lambda: instance_id)
     calls = []
     monkeypatch.setattr(
         server.herdr_client,
@@ -1422,12 +1430,15 @@ def test_start_agent_can_create_named_isolated_worktree(monkeypatch, tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["workspace"]["strategy"] == "isolated"
-    assert body["workspace"]["branch"] == "agent-cockpit/demo/codex-2"
+    assert body["instance_id"] == instance_id
+    assert body["display_name"] == "codex-2"
+    assert body["workspace"]["branch"] == f"agent-cockpit/demo/{instance_id}"
     assert Path(body["workspace"]["worktree"]).is_dir()
     assert calls[0][0][1] == body["workspace"]["workdir"]
     assert calls[0][1] == {
         "layout": "right", "label": "codex-2",
         "args": "--model 'gpt 5' ';'",
+        "instance_id": instance_id,
     }
 
 
@@ -1464,6 +1475,7 @@ def test_start_agent_rejects_invalid_args_before_creating_worktree(
 def test_start_agent_registers_and_notifies_unique_qoder_identity(
     monkeypatch, tmp_path,
 ):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
     workdir = tmp_path / "worktree"
     canonical = tmp_path / "project"
     workdir.mkdir()
@@ -1472,6 +1484,7 @@ def test_start_agent_registers_and_notifies_unique_qoder_identity(
     init_script.touch()
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", init_script)
+    monkeypatch.setattr(server.herdr_client, "new_agent_instance_id", lambda: instance_id)
     monkeypatch.setattr(
         server.herdr_client, "start_agent",
         lambda *args, **kwargs: {"available": True, "pane_id": "w1:pA"},
@@ -1489,9 +1502,10 @@ def test_start_agent_registers_and_notifies_unique_qoder_identity(
     registered = {"value": False}
     monkeypatch.setattr(
         server, "_identity_name",
-        lambda project, agent: (
+        lambda project, agent, instance: (
             "qodercn-main"
-            if registered["value"] and project == str(canonical) and agent == "qodercli"
+            if registered["value"] and project == str(canonical)
+            and agent == "qodercli" and instance == instance_id
             else None
         ),
     )
@@ -1530,16 +1544,19 @@ def test_start_agent_registers_and_notifies_unique_qoder_identity(
     assert mail == {
         "project": str(canonical), "name": "qodercn-main",
         "registered": True, "registered_now": True, "notified": True,
+        "instance_id": instance_id,
     }
     assert init_calls[0][0] == [
-        str(init_script), "--project", str(canonical), "--only", "qodercn",
+        str(init_script), "--project", str(canonical),
+        "--instance", instance_id, "--only", "qodercn",
     ]
     assert init_calls[0][1]["cwd"] == str(canonical)
     assert sent[0][0:2] == ("demo", "w1:pA")
     assert "项目=" + str(canonical) in sent[0][2]
     assert "--agent qodercn" in sent[0][2]
+    assert f"--instance {instance_id}" in sent[0][2]
     assert joined == [{
-        "session": "demo", "participant_id": "qodercli-1",
+        "session": "demo", "participant_id": instance_id,
         "agent": "qodercli", "pane_id": "w1:pA", "workdir": str(workdir),
         "mail_name": "qodercn-main",
     }]
@@ -1594,10 +1611,12 @@ def test_start_agent_keeps_launch_success_when_identity_registration_fails(
     assert "hub down" in body["agent_mail"]["warning"]
 
 
-def test_start_agent_skips_ambiguous_same_type_mail_identity(monkeypatch, tmp_path):
+def test_start_agent_binds_duplicate_same_type_to_exact_instance(monkeypatch, tmp_path):
+    instance_id = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
     workdir = tmp_path / "worktree"
     workdir.mkdir()
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "new_agent_instance_id", lambda: instance_id)
     monkeypatch.setattr(
         server.herdr_client, "start_agent",
         lambda *args, **kwargs: {"available": True, "pane_id": "w1:p4"},
@@ -1611,7 +1630,19 @@ def test_start_agent_skips_ambiguous_same_type_mail_identity(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         server, "_mail_project_state",
-        lambda _: (_ for _ in ()).throw(AssertionError("不应绑定重复类型身份")),
+        lambda _: {"bound": True, "project": str(workdir)},
+    )
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda project, agent, instance: (
+            "codex-second" if instance == instance_id else None
+        ),
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send", lambda *args: {"available": True},
+    )
+    monkeypatch.setattr(
+        server.coordination, "add_participant", lambda **kwargs: {"joined": True},
     )
 
     response = TestClient(server.app).post(
@@ -1625,13 +1656,16 @@ def test_start_agent_skips_ambiguous_same_type_mail_identity(monkeypatch, tmp_pa
 
     assert response.status_code == 200
     mail = response.json()["agent_mail"]
-    assert mail["skipped"] == "ambiguous_same_type"
-    assert "同类型多实例" in mail["warning"]
+    assert mail["registered"] is True
+    assert mail["name"] == "codex-second"
+    assert mail["instance_id"] == instance_id
+    assert "skipped" not in mail
 
 
 def test_start_agent_from_existing_worktree_creates_sibling_at_primary_repo(
     monkeypatch, tmp_path,
 ):
+    instance_id = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
     repo = tmp_path / "demo"
     repo.mkdir()
     _init_git_repo(repo)
@@ -1643,6 +1677,7 @@ def test_start_agent_from_existing_worktree_creates_sibling_at_primary_repo(
         0, detached=False, slug="codex-1",
     )
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.herdr_client, "new_agent_instance_id", lambda: instance_id)
     monkeypatch.setattr(
         server.herdr_client, "start_agent",
         lambda *args, **kwargs: {"available": True, "pane_id": "w1:p3"},
@@ -1658,7 +1693,7 @@ def test_start_agent_from_existing_worktree_creates_sibling_at_primary_repo(
     )
 
     assert response.status_code == 200
-    expected = tmp_path / ".demo-cockpit-worktrees" / "demo" / "codex-2"
+    expected = tmp_path / ".demo-cockpit-worktrees" / "demo" / instance_id
     assert Path(response.json()["workspace"]["worktree"]) == expected.resolve()
     assert expected.is_dir()
 

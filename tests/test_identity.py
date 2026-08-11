@@ -1,3 +1,5 @@
+import json
+import re
 import sqlite3
 import threading
 
@@ -141,6 +143,106 @@ def test_server_identity_name_uses_registered_identity(monkeypatch):
     assert server._identity_name("/project", "claude") == "GentleCompass"
 
 
+def test_managed_identity_lookup_is_exact_by_opaque_instance(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    registry_root = tmp_path / "registry"
+    registry_dir = registry_root / re.sub(
+        r"[^A-Za-z0-9]+", "-", str(project.resolve()),
+    ).strip("-").lower()
+    registry_dir.mkdir(parents=True)
+    identity_file = registry_dir / f"codex--{instance_id}.json"
+    identity_file.write_text(json.dumps({
+        "project_key": str(project),
+        "project_slug": "project",
+        "agent": "codex",
+        "instance": instance_id,
+        "name": "FreshMailbox",
+        "registration_token": "secret",
+        "program": "codex-cli",
+        "model": "gpt",
+        "hub": "http://127.0.0.1:8765",
+    }))
+    identity_file.chmod(0o600)
+    monkeypatch.setattr(server, "_REGISTRY_ROOT", registry_root)
+    seen = []
+    monkeypatch.setattr(
+        server.db,
+        "identity_by_cwd",
+        lambda cwd, program, name=None: seen.append((cwd, program, name)) or (
+            {"name": name, "program": "codex-cli", "human_key": cwd}
+            if name == "FreshMailbox" else None
+        ),
+    )
+
+    assert server._identity_name(str(project), "codex", instance_id) == "FreshMailbox"
+    assert seen == [(str(project), "codex", "FreshMailbox")]
+
+
+def test_managed_identity_lookup_separates_two_instances_and_rejects_mismatch(
+    monkeypatch, tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    registry_root = tmp_path / "registry"
+    registry_dir = registry_root / re.sub(
+        r"[^A-Za-z0-9]+", "-", str(project.resolve()),
+    ).strip("-").lower()
+    registry_dir.mkdir(parents=True)
+    first = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    second = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    def write(instance_id, name, **overrides):
+        data = {
+            "project_key": str(project), "project_slug": "project",
+            "agent": "codex", "instance": instance_id, "name": name,
+            "registration_token": "secret", "program": "codex-cli",
+            "model": "gpt", "hub": "http://127.0.0.1:8765",
+        }
+        data.update(overrides)
+        path = registry_dir / f"codex--{instance_id}.json"
+        path.write_text(json.dumps(data))
+        path.chmod(0o600)
+        return path
+
+    write(first, "MailboxA")
+    second_path = write(second, "MailboxB")
+    monkeypatch.setattr(server, "_REGISTRY_ROOT", registry_root)
+    seen = []
+    monkeypatch.setattr(
+        server.db,
+        "identity_by_cwd",
+        lambda cwd, program, name=None: seen.append(name) or (
+            {"name": name, "program": program, "human_key": cwd}
+            if name in {"MailboxA", "MailboxB"} else None
+        ),
+    )
+
+    assert server._identity_name(str(project), "codex", first) == "MailboxA"
+    assert server._identity_name(str(project), "codex", second) == "MailboxB"
+    assert server._identity_name(
+        str(project), "codex", "i-cccccccccccccccccccccccccc",
+    ) is None
+    assert seen == ["MailboxA", "MailboxB"]
+
+    bad = json.loads(second_path.read_text())
+    bad["instance"] = first
+    second_path.write_text(json.dumps(bad))
+    second_path.chmod(0o600)
+    assert server._identity_name(str(project), "codex", second) is None
+
+
+def test_identity_hint_uses_opaque_instance_not_display_name():
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    hint = server._identity_hint(
+        "FreshMailbox", "/tmp/project", "codex", instance_id=instance_id,
+    )
+
+    assert f"--instance {instance_id}" in hint
+    assert "--instance main" not in hint
+
+
 def test_server_identity_does_not_guess_a_main_worktree(monkeypatch):
     seen = []
     monkeypatch.setattr(
@@ -211,6 +313,49 @@ def test_board_snapshot_omits_identity_without_binding(monkeypatch):
     )
 
     assert "mail_name" not in server._board_snapshot()["panes"][0]
+
+
+def test_board_snapshot_keeps_same_kind_managed_instances_separate(monkeypatch, tmp_path):
+    first = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    second = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    for pane_id, instance_id, display_name in (
+        ("w1:p1", first, "同名"), ("w1:p2", second, "同名"),
+    ):
+        server.herdr_client.save_launch_descriptor(
+            session="demo", pane_id=pane_id, name=instance_id, kind="codex",
+            args=[], agent="codex", instance_id=instance_id,
+            display_name=display_name,
+        )
+    monkeypatch.setattr(
+        server,
+        "_herdr_runtime_snapshot",
+        lambda: {
+            "sessions": [{"session": "demo", "directory": "/sessions/demo"}],
+            "panes": [
+                {"session": "demo", "pane_id": "w1:p1", "agent": "codex"},
+                {"session": "demo", "pane_id": "w1:p2", "agent": "codex"},
+            ],
+        },
+    )
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_: "/project")
+    seen = []
+    monkeypatch.setattr(
+        server,
+        "_identity_name",
+        lambda project, agent, instance_id: (
+            seen.append((project, agent, instance_id)) or f"mail-{instance_id[-1]}"
+        ),
+    )
+
+    result = server._board_snapshot()
+
+    assert [pane["instance_id"] for pane in result["panes"]] == [first, second]
+    assert [pane["display_name"] for pane in result["panes"]] == ["同名", "同名"]
+    assert [pane["mail_name"] for pane in result["panes"]] == ["mail-a", "mail-b"]
+    assert seen == [("/project", "codex", first), ("/project", "codex", second)]
 
 
 def test_agent_mail_db_prefers_new_xdg_install_path(monkeypatch, tmp_path):

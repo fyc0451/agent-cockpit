@@ -164,6 +164,27 @@ def test_validate_agent_name_rejects_names_herdr_cannot_own(name):
         herdr_client.validate_agent_name(name)
 
 
+def test_display_name_is_user_text_and_may_repeat():
+    assert herdr_client.validate_display_name(" codex terra ") == "codex terra"
+    assert herdr_client.validate_display_name("夜班负责人") == "夜班负责人"
+    with pytest.raises(ValueError, match="不能为空"):
+        herdr_client.validate_display_name("   ")
+    with pytest.raises(ValueError, match="控制字符"):
+        herdr_client.validate_display_name("bad\nname")
+    with pytest.raises(ValueError, match="最长 64"):
+        herdr_client.validate_display_name("x" * 65)
+
+
+def test_new_agent_instance_id_is_opaque_unique_and_herdr_safe():
+    first = herdr_client.new_agent_instance_id()
+    second = herdr_client.new_agent_instance_id()
+
+    assert first != second
+    assert len(first) == 28 and first.startswith("i-")
+    assert set(first[2:]) <= set("abcdefghijklmnopqrstuvwxyz234567")
+    assert herdr_client.validate_agent_name(first) == first
+
+
 def test_resolve_unique_agent_name_checks_live_names_without_reusing_labels():
     agents = [{"name": "codex-1"}, {"name": "reviewer"}]
 
@@ -1140,6 +1161,81 @@ def test_start_agent_keeps_distinct_descriptors_for_same_kind_instances(monkeypa
     assert d1 != d2
 
 
+def test_managed_start_allows_duplicate_display_names_but_uses_opaque_runtime_id(
+    monkeypatch,
+):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {
+            "panes": [{
+                "pane_id": "w1:p1", "agent": "codex", "cwd": "/tmp/project",
+                "label": "同名",
+            }],
+            "agents": [{"name": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"}],
+        },
+        {"panes": [
+            {"pane_id": "w1:p1", "agent": "codex", "cwd": "/tmp/project", "label": "同名"},
+            {"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1"},
+        ]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent(
+        "demo", "/tmp/project", "codex", layout="tab", label="同名",
+        instance_id=instance_id,
+    )
+
+    assert result.get("reused") is not True
+    assert result["instance_id"] == instance_id
+    assert result["name"] == instance_id
+    assert result["display_name"] == "同名"
+    assert call(
+        ["--session", "demo", "agent", "start", instance_id,
+         "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000"],
+        timeout=15,
+    ) in calls
+    descriptor = herdr_client.get_launch_descriptor("demo", "w1:p2")
+    assert descriptor["instance_id"] == instance_id
+    assert descriptor["display_name"] == "同名"
+
+
+def test_managed_descriptors_keep_duplicate_display_names_separate_and_tombstoned():
+    first = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    second = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name=first, kind="codex", args=[],
+        agent="codex", instance_id=first, display_name="同名",
+    )
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p2", name=second, kind="codex", args=[],
+        agent="codex", instance_id=second, display_name="同名",
+    )
+
+    assert herdr_client.get_launch_descriptor_by_instance(first)["pane_id"] == "w1:p1"
+    assert herdr_client.get_launch_descriptor_by_instance(second)["pane_id"] == "w1:p2"
+
+    pending = herdr_client.mark_launch_descriptor_retirement_pending("demo", "w1:p1")
+    assert pending["instance_ids"] == [first]
+    herdr_client.finalize_launch_descriptor_retirement(first)
+
+    assert herdr_client.get_launch_descriptor("demo", "w1:p1") is None
+    tombstone = herdr_client.get_launch_descriptor_by_instance(first, include_retired=True)
+    assert tombstone["state"] == "retired"
+    assert herdr_client.get_launch_descriptor("demo", "w1:p2")["instance_id"] == second
+
+
 def test_get_launch_descriptor_returns_none_without_guessing(monkeypatch, tmp_path):
     """无契约时返回 None；调用方（restart）不得据此猜测 name/kind/args。"""
     monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "none.json"))
@@ -1260,6 +1356,53 @@ def test_close_pane_clears_its_descriptor_only_on_success(monkeypatch):
     assert ok["closed"] == "w1:p2"
     assert ok["descriptors_cleared"] == 1
     assert herdr_client.get_launch_descriptor("demo", "w1:p2") is None
+
+
+def test_close_managed_pane_preserves_pending_retirement_tombstone(monkeypatch):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p2", name=instance_id, kind="codex",
+        args=[], agent="codex", instance_id=instance_id, display_name="同名",
+    )
+    flag = {"fail": True}
+
+    def fake_run(args, timeout=10):
+        if flag["fail"]:
+            raise RuntimeError("herdr failed: busy")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    assert herdr_client.close_pane("demo", "w1:p2")["error"] == "herdr failed: busy"
+    assert herdr_client.get_launch_descriptor_by_instance(instance_id) is not None
+
+    flag["fail"] = False
+    result = herdr_client.close_pane("demo", "w1:p2")
+    assert result["retirement_pending"] == [instance_id]
+    assert herdr_client.get_launch_descriptor_by_instance(instance_id) is None
+    tombstone = herdr_client.get_launch_descriptor_by_instance(
+        instance_id, include_retired=True,
+    )
+    assert tombstone["state"] == "retirement_pending"
+
+
+def test_delete_session_marks_each_managed_instance_pending(monkeypatch):
+    first = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    second = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: "")
+    for pane_id, instance_id in (("w1:p1", first), ("w1:p2", second)):
+        herdr_client.save_launch_descriptor(
+            session="demo", pane_id=pane_id, name=instance_id, kind="codex",
+            args=[], agent="codex", instance_id=instance_id, display_name="同名",
+        )
+
+    result = herdr_client.delete_session("demo")
+
+    assert result["retirement_pending"] == [first, second]
+    assert {item["instance_id"] for item in herdr_client.pending_launch_descriptor_retirements()} == {
+        first, second,
+    }
 
 
 def test_descriptor_cleanup_failure_is_surfaced_not_silent(monkeypatch):
@@ -1397,6 +1540,40 @@ def test_restart_pane_rebuilds_original_managed_identity_on_same_pane(monkeypatc
     ) in calls
     assert not any(c.args[0][2:4] == ["pane", "run"] for c in calls)
     assert not any("close" in c.args[0] for c in calls)
+
+
+def test_restart_pane_preserves_opaque_instance_id(monkeypatch):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name=instance_id, kind="opencode",
+        args=[], agent="opencode", instance_id=instance_id, display_name="夜班",
+    )
+    snapshots = iter([
+        _managed_restart_snapshot(name=instance_id),
+        _managed_restart_snapshot(running=False, name=instance_id),
+    ])
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
+    )
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        return _shell_process_info() if "process-info" in args else ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["restarted"] is True
+    assert result["instance_id"] == instance_id
+    assert result["display_name"] == "夜班"
+    assert call(
+        ["--session", "demo", "agent", "start", instance_id,
+         "--kind", "opencode", "--pane", "w1:p5", "--timeout", "10000"],
+        timeout=15,
+    ) in calls
 
 
 def test_restart_pane_rejects_unknown_pane_before_sending_keys(monkeypatch):

@@ -8,9 +8,11 @@ herdr 以多个 session 运行,每个 session 有独立 socket。本模块遍历
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -18,6 +20,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import lru_cache
 from pathlib import Path
@@ -76,6 +79,8 @@ AGENT_KIND_ALIASES = {
     "qoderclicn": "qodercli",
 }
 _AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_AGENT_INSTANCE_ID_RE = re.compile(r"^i-[a-z2-7]{26}$")
+MAX_DISPLAY_NAME_LENGTH = 64
 _RESTART_GUARD = threading.Lock()
 _RESTARTING_PANES: set[tuple[str, str]] = set()
 
@@ -99,6 +104,33 @@ def validate_agent_name(name: str) -> str:
             "实例名称必须以小写字母开头，且只能包含小写字母、数字、_、-，最长 32 位"
         )
     return name
+
+
+def validate_display_name(name: str) -> str:
+    """校验用户可见名称；它不参与任何运行时或邮箱身份选择。"""
+    if not isinstance(name, str):
+        raise ValueError("显示名称不能为空")
+    value = name.strip()
+    if not value:
+        raise ValueError("显示名称不能为空")
+    if len(value) > MAX_DISPLAY_NAME_LENGTH:
+        raise ValueError(f"显示名称最长 {MAX_DISPLAY_NAME_LENGTH} 个字符")
+    if any(unicodedata.category(char).startswith("C") for char in value):
+        raise ValueError("显示名称不能包含控制字符")
+    return value
+
+
+def validate_agent_instance_id(instance_id: str) -> str:
+    """验证 Cockpit 生成的 128-bit opaque 实例 ID。"""
+    if not isinstance(instance_id, str) or not _AGENT_INSTANCE_ID_RE.fullmatch(instance_id):
+        raise ValueError("agent instance id 格式无效")
+    return instance_id
+
+
+def new_agent_instance_id() -> str:
+    """生成兼容 Herdr live agent name 语法的不可复用实例 ID。"""
+    encoded = base64.b32encode(secrets.token_bytes(16)).decode("ascii").rstrip("=")
+    return f"i-{encoded.lower()}"
 
 
 def resolve_unique_agent_name(
@@ -1550,13 +1582,14 @@ def _save_launch_descriptors(data: dict[str, Any]) -> None:
 def save_launch_descriptor(
     *, session: str, pane_id: str, name: str, kind: str, args: list[str],
     agent: str | None = None, workdir: str | None = None,
+    instance_id: str | None = None, display_name: str | None = None,
 ) -> dict[str, Any]:
     """原生启动成功后持久化权威 launch 契约；返回写入的规范化记录。
 
     name 是 resolve_unique_agent_name 给出的 session 内唯一运行时名；kind 是
     canonical Herdr kind；args 是传给 `--` 的原生 argv 列表（保留空格/分号等原样）。
     """
-    record = {
+    record: dict[str, Any] = {
         "session": str(session),
         "name": str(name),
         "kind": str(kind),
@@ -1565,11 +1598,28 @@ def save_launch_descriptor(
         "pane_id": str(pane_id),
         "workdir": workdir,
     }
+    key = f"{session}|{name}"
+    if instance_id is not None:
+        opaque_id = validate_agent_instance_id(instance_id)
+        if name != opaque_id:
+            raise ValueError("managed runtime name 必须等于 agent instance id")
+        record.update({
+            "instance_id": opaque_id,
+            "display_name": validate_display_name(display_name or agent or name),
+            "state": "active",
+        })
+        key = f"instance|{opaque_id}"
     with _LAUNCH_DESCRIPTOR_LOCK:
         data = _load_launch_descriptors()
-        data["descriptors"][f"{session}|{name}"] = record
+        if instance_id is not None:
+            data["schema"] = 2
+        data["descriptors"][key] = record
         _save_launch_descriptors(data)
     return dict(record)
+
+
+def _launch_descriptor_is_active(record: dict[str, Any]) -> bool:
+    return record.get("state", "active") == "active"
 
 
 def get_launch_descriptor(session: str, pane_id: str) -> dict[str, Any] | None:
@@ -1579,6 +1629,7 @@ def get_launch_descriptor(session: str, pane_id: str) -> dict[str, Any] | None:
     for record in data["descriptors"].values():
         if (
             isinstance(record, dict)
+            and _launch_descriptor_is_active(record)
             and record.get("session") == session
             and record.get("pane_id") == pane_id
         ):
@@ -1591,7 +1642,152 @@ def get_launch_descriptor_by_name(session: str, name: str) -> dict[str, Any] | N
     with _LAUNCH_DESCRIPTOR_LOCK:
         data = _load_launch_descriptors()
     record = data["descriptors"].get(f"{session}|{name}")
-    return dict(record) if isinstance(record, dict) else None
+    if isinstance(record, dict) and _launch_descriptor_is_active(record):
+        return dict(record)
+    for candidate in data["descriptors"].values():
+        if (
+            isinstance(candidate, dict)
+            and _launch_descriptor_is_active(candidate)
+            and candidate.get("session") == session
+            and candidate.get("name") == name
+        ):
+            return dict(candidate)
+    return None
+
+
+def get_launch_descriptor_by_instance(
+    instance_id: str, *, include_retired: bool = False,
+) -> dict[str, Any] | None:
+    """按 opaque instance ID 精确取回 descriptor；默认只返回 active。"""
+    opaque_id = validate_agent_instance_id(instance_id)
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+    record = data["descriptors"].get(f"instance|{opaque_id}")
+    if not isinstance(record, dict):
+        return None
+    if not include_retired and not _launch_descriptor_is_active(record):
+        return None
+    return dict(record)
+
+
+def update_launch_descriptor_by_instance(
+    instance_id: str, **changes: Any,
+) -> dict[str, Any] | None:
+    """更新 managed descriptor 的运行位置或 Mail 映射。"""
+    opaque_id = validate_agent_instance_id(instance_id)
+    allowed = {
+        "pane_id", "session", "display_name", "mail_agent", "mail_instance",
+        "mail_name", "mail_project", "retirement_error",
+    }
+    unknown = set(changes) - allowed
+    if unknown:
+        raise ValueError("不支持的 launch descriptor 字段: " + ", ".join(sorted(unknown)))
+    if "display_name" in changes:
+        changes["display_name"] = validate_display_name(changes["display_name"])
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        record = data["descriptors"].get(f"instance|{opaque_id}")
+        if not isinstance(record, dict):
+            return None
+        record.update(changes)
+        _save_launch_descriptors(data)
+        return dict(record)
+
+
+def pending_launch_descriptor_retirements() -> list[dict[str, Any]]:
+    """返回待同步到 Agent Mail Hub 的退休 tombstone。"""
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+    return [
+        dict(record) for record in data["descriptors"].values()
+        if isinstance(record, dict) and record.get("state") == "retirement_pending"
+    ]
+
+
+def _mark_launch_descriptors_retirement_pending(
+    predicate: Callable[[dict[str, Any]], bool],
+) -> dict[str, Any]:
+    """把匹配的 managed descriptor 转成 pending；legacy 记录直接清理。"""
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        descriptors = data["descriptors"]
+        instance_ids: list[str] = []
+        legacy_keys: list[str] = []
+        changed = False
+        for key, record in descriptors.items():
+            if not isinstance(record, dict) or not predicate(record):
+                continue
+            instance_id = record.get("instance_id")
+            if isinstance(instance_id, str) and _AGENT_INSTANCE_ID_RE.fullmatch(instance_id):
+                if record.get("state", "active") == "retired":
+                    continue
+                record["state"] = "retirement_pending"
+                record["retirement_pending_at"] = time.time()
+                record.pop("retirement_error", None)
+                changed = True
+                instance_ids.append(instance_id)
+            else:
+                legacy_keys.append(key)
+        for key in legacy_keys:
+            del descriptors[key]
+            changed = True
+        if changed:
+            try:
+                _save_launch_descriptors(data)
+            except OSError as exc:
+                return {"cleared": 0, "instance_ids": [], "error": str(exc)}
+        return {
+            "cleared": len(instance_ids) + len(legacy_keys),
+            "instance_ids": instance_ids,
+        }
+
+
+def mark_launch_descriptor_retirement_pending(
+    session: str, pane_id: str,
+) -> dict[str, Any]:
+    return _mark_launch_descriptors_retirement_pending(
+        lambda record: record.get("session") == session and record.get("pane_id") == pane_id
+    )
+
+
+def mark_launch_descriptors_retirement_pending(session: str) -> dict[str, Any]:
+    return _mark_launch_descriptors_retirement_pending(
+        lambda record: record.get("session") == session
+    )
+
+
+def finalize_launch_descriptor_retirement(instance_id: str) -> dict[str, Any] | None:
+    """Hub retire 成功后保留不可复用的 retired tombstone。"""
+    opaque_id = validate_agent_instance_id(instance_id)
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        record = data["descriptors"].get(f"instance|{opaque_id}")
+        if not isinstance(record, dict):
+            return None
+        record["state"] = "retired"
+        record["retired_at"] = time.time()
+        record.pop("retirement_error", None)
+        _save_launch_descriptors(data)
+        return dict(record)
+
+
+def fail_launch_descriptor_retirement(
+    instance_id: str, error: str,
+) -> dict[str, Any] | None:
+    """记录可重试退休失败，不把身份误标成已退休。"""
+    opaque_id = validate_agent_instance_id(instance_id)
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        record = data["descriptors"].get(f"instance|{opaque_id}")
+        if not isinstance(record, dict):
+            return None
+        if record.get("state") == "retired":
+            return dict(record)
+        record["state"] = "retirement_pending"
+        record["retirement_error"] = str(error)[:500]
+        record["retirement_attempts"] = int(record.get("retirement_attempts") or 0) + 1
+        _save_launch_descriptors(data)
+        return dict(record)
 
 
 def clear_launch_descriptors(session: str) -> dict[str, Any]:
@@ -1677,6 +1873,7 @@ def _rename_agent_context(
 def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
     layout: str = "tab", label: str | None = None, args: str = "",
+    instance_id: str | None = None,
 ) -> dict[str, Any]:
     """在指定 session 里启动一个 agent pane(新建 tab/pane 跑 agent)。
 
@@ -1687,10 +1884,15 @@ def start_agent(
     """
     if not is_available():
         return {"available": False}
+    managed = instance_id is not None
+    display_name: str | None = None
     try:
         require_herdr_capabilities()
         normalize_agent_kind(agent)
-        if label is not None:
+        if managed:
+            instance_id = validate_agent_instance_id(instance_id)
+            display_name = validate_display_name(label or agent)
+        elif label is not None:
             validate_agent_name(label)
     except HerdrCapabilityError as exc:
         return {
@@ -1729,7 +1931,9 @@ def start_agent(
         p for p in panes
         if p.get("agent") == agent and matching_cwd(p)
     ]
-    if label:
+    if managed:
+        existing = None
+    elif label:
         existing = next((p for p in matching if p.get("label") == label), None)
         if existing is None:
             collision = next(
@@ -1783,7 +1987,19 @@ def start_agent(
     # label 缺省时分配 agent-N，避免裸名与已有同 kind live agent 冲突，导致 pane 已
     # 创建却在 agent start 时因 live name 唯一约束失败回滚。
     try:
-        runtime_name = resolve_unique_agent_name(agent, label, snap.get("agents", []))
+        if managed:
+            assert instance_id is not None
+            live_names = {
+                str(item.get("name")) for item in snap.get("agents", [])
+                if isinstance(item, dict) and item.get("name")
+            }
+            if instance_id in live_names:
+                raise ValueError(f"agent instance id 已被 live agent 使用: {instance_id}")
+            if get_launch_descriptor_by_instance(instance_id, include_retired=True):
+                raise ValueError(f"agent instance id 已存在，不能复用: {instance_id}")
+            runtime_name = instance_id
+        else:
+            runtime_name = resolve_unique_agent_name(agent, label, snap.get("agents", []))
     except ValueError as exc:
         return {"available": True, "error": str(exc)}
     canonical_kind = normalize_agent_kind(agent)
@@ -1885,7 +2101,7 @@ def start_agent(
         # tab_id/workspace_id，无需再取一次 snapshot。展示名用唯一 runtime_name。
         _rename_agent_context(
             session, created_pane or {"pane_id": new_pid}, agent, effective_layout,
-            runtime_name,
+            display_name or runtime_name,
         )
         # 持久化权威 launch 契约 {name, kind, args}：Herdr 不保留原始 start argv，
         # 故由启动路径落盘，供 restart 按 session+pane/name 精确取回原参数重建，
@@ -1895,6 +2111,7 @@ def start_agent(
             save_launch_descriptor(
                 session=session, pane_id=new_pid, name=runtime_name,
                 kind=canonical_kind, args=agent_args, agent=agent, workdir=workdir,
+                instance_id=instance_id, display_name=display_name,
             )
         except OSError as exc:
             descriptor_error = str(exc)
@@ -1906,8 +2123,11 @@ def start_agent(
             "kind": canonical_kind,
             "layout": effective_layout,
         }
+        if managed:
+            result["instance_id"] = instance_id
+            result["display_name"] = display_name
         if label:
-            result["label"] = label
+            result["label"] = display_name or label
         if descriptor_error:
             result["descriptor_error"] = descriptor_error
         return result
@@ -1937,12 +2157,14 @@ def close_pane(session: str, pane_id: str) -> dict[str, Any]:
         return {"available": True, "error": str(e)}
     # pane 已关闭：清理该 pane 的 launch descriptor。Herdr 可能复用 opaque pane ID，
     # 不清理会让后续复用该 ID 的新 agent 误读旧契约。
-    cleanup = clear_launch_descriptor_by_pane(session, pane_id)
+    cleanup = mark_launch_descriptor_retirement_pending(session, pane_id)
     result: dict[str, Any] = {"available": True, "closed": pane_id}
     if cleanup.get("error"):
         result["descriptor_cleanup_error"] = cleanup["error"]
     else:
         result["descriptors_cleared"] = cleanup.get("cleared", 0)
+        if cleanup.get("instance_ids"):
+            result["retirement_pending"] = cleanup["instance_ids"]
     return result
 
 
@@ -2367,11 +2589,15 @@ def restart_pane(
                     else "restart_start_failed"
                 )
                 return _restart_error(code, str(exc), pane_id)
-        return {
+        result = {
             "available": True, "restarted": True, "preserved": True,
             "pane_id": pane_id, "agent": product_agent, "name": name,
             "kind": kind, "args": native_args, "resume": resume,
         }
+        if descriptor.get("instance_id"):
+            result["instance_id"] = descriptor["instance_id"]
+            result["display_name"] = descriptor.get("display_name") or product_agent
+        return result
     finally:
         with _RESTART_GUARD:
             _RESTARTING_PANES.discard(key)
@@ -2399,10 +2625,12 @@ def delete_session(session: str) -> dict[str, Any]:
     # session 已删除：清理该 session 的 launch descriptor，避免同名 session 重建后
     # 把上一代 args 误当当前权威契约（workspace/pane/name ID 会被 Herdr 重新分配）。
     # 清理失败不复活 session，但必须结构化暴露，不静默宣告 descriptor 已安全。
-    cleanup = clear_launch_descriptors(session)
+    cleanup = mark_launch_descriptors_retirement_pending(session)
     result: dict[str, Any] = {"available": True, "deleted": session}
     if cleanup.get("error"):
         result["descriptor_cleanup_error"] = cleanup["error"]
     else:
         result["descriptors_cleared"] = cleanup.get("cleared", 0)
+        if cleanup.get("instance_ids"):
+            result["retirement_pending"] = cleanup["instance_ids"]
     return result

@@ -761,16 +761,50 @@ def _validate_pane_id(pane_id: str) -> None:
         raise HTTPException(400, "pane id 格式无效")
 
 
-def _identity_record(cwd: str, agent_type: str) -> dict[str, Any] | None:
+def _registry_identity_for_instance(
+    cwd: str, agent_type: str, instance_id: str,
+) -> dict[str, Any] | None:
+    """从本机 registry 精确读取一个 Cockpit managed instance。"""
+    try:
+        opaque_id = herdr_client.validate_agent_instance_id(instance_id)
+        project = str(Path(cwd).expanduser().resolve())
+        mail_agent = MAIL_AGENT_NAMES.get(agent_type, agent_type)
+        project_dir = re.sub(
+            r"[^A-Za-z0-9]+", "-", project,
+        ).strip("-").lower() or "root"
+        filename = f"{mail_agent}--{opaque_id}.json"
+        root = _REGISTRY_ROOT.resolve()
+        identity = _read_registry_entry(root / project_dir / filename, root)
+    except (OSError, ValueError):
+        return None
+    if not identity or (
+        identity.get("project_key") != project
+        or identity.get("agent") != mail_agent
+        or identity.get("instance") != opaque_id
+    ):
+        return None
+    return identity
+
+
+def _identity_record(
+    cwd: str, agent_type: str, instance_id: str | None = None,
+) -> dict[str, Any] | None:
     """只按已确定的 Agent Mail human key 查真实身份。"""
     try:
+        if instance_id is not None:
+            identity = _registry_identity_for_instance(cwd, agent_type, instance_id)
+            if not identity:
+                return None
+            return db.identity_by_cwd(cwd, agent_type, identity["name"])
         return db.identity_by_cwd(cwd, agent_type)
     except Exception:
         return None
 
 
-def _identity_name(cwd: str, agent_type: str) -> str | None:
-    ident = _identity_record(cwd, agent_type)
+def _identity_name(
+    cwd: str, agent_type: str, instance_id: str | None = None,
+) -> str | None:
+    ident = _identity_record(cwd, agent_type, instance_id)
     return ident["name"] if ident else None
 
 
@@ -782,13 +816,21 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
         if item.get("session") and item.get("directory")
     }
     projects: dict[str, str | None] = {}
-    identities: dict[tuple[str, str], str | None] = {}
+    identities: dict[tuple[str, str, str], str | None] = {}
     for pane in snapshot.get("panes", []):
         session = str(pane.get("session") or "")
         agent = str(pane.get("agent") or "")
+        pane_id = str(pane.get("pane_id") or "")
         session_dir = session_dirs.get(session)
         if not agent or not session_dir:
             continue
+        descriptor = herdr_client.get_launch_descriptor(session, pane_id)
+        instance_id = ""
+        if descriptor and descriptor.get("instance_id"):
+            instance_id = str(descriptor["instance_id"])
+            pane["instance_id"] = instance_id
+            pane["display_name"] = descriptor.get("display_name") or agent
+            pane["runtime_name"] = descriptor.get("name")
         if session not in projects:
             try:
                 projects[session] = mail_projects.get(session, session_dir)
@@ -797,9 +839,12 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
         project = projects[session]
         if not project:
             continue
-        key = (project, agent)
+        key = (project, agent, instance_id)
         if key not in identities:
-            identities[key] = _identity_name(project, agent)
+            identities[key] = (
+                _identity_name(project, agent, instance_id)
+                if instance_id else _identity_name(project, agent)
+            )
         if identities[key]:
             pane["mail_name"] = identities[key]
     return snapshot
@@ -812,20 +857,25 @@ def _board_snapshot() -> dict[str, Any]:
 def _identity_hint(
     name: str, project: str, agent_type: str, *, roster: str = "", registered: bool = False,
     coordination_context: dict[str, Any] | None = None,
+    instance_id: str | None = None,
 ) -> str:
     send = shlex.quote(str(MAIL_SEND_SCRIPT))
     recv = shlex.quote(str(MAIL_RECV_SCRIPT))
     project_arg = shlex.quote(project)
     mail_agent = MAIL_AGENT_NAMES.get(agent_type, agent_type)
+    mail_instance = instance_id or "main"
+    if instance_id is not None:
+        herdr_client.validate_agent_instance_id(instance_id)
+    instance_arg = shlex.quote(mail_instance)
     prefix = (
         "[agent-mail 身份告知] 你的邮箱身份已注册:"
         if registered else "[agent-mail 身份告知] "
     )
     hint = (
         f"{prefix}花名={name},项目={project}。"
-        f"发消息: {send} --agent {mail_agent} --instance main --project {project_arg} "
+        f"发消息: {send} --agent {mail_agent} --instance {instance_arg} --project {project_arg} "
         "--to <花名> --subject \"...\" --body \"...\";"
-        f"收消息: {recv} --agent {mail_agent} --instance main --project {project_arg} --unread。"
+        f"收消息: {recv} --agent {mail_agent} --instance {instance_arg} --project {project_arg} --unread。"
     )
     if roster:
         hint += f"协作者身份: {roster}。"
@@ -4041,31 +4091,17 @@ def api_herdr_pane_send(session: str, pane_id: str, req: PaneSendReq):
 
 
 def _started_agent_mail_identity(
-    session: str, pane_id: str, agent_type: str,
+    session: str, pane_id: str, agent_type: str, instance_id: str,
+    *, notify: bool = True,
 ) -> dict[str, Any]:
-    """为新增的唯一类型 Agent 注册 canonical 身份并发送身份告知。"""
+    """为新增 managed instance 注册精确身份并发送身份告知。"""
     base: dict[str, Any] = {
         "registered": False, "registered_now": False, "notified": False,
+        "instance_id": instance_id,
     }
     mail_agent = MAIL_AGENT_NAMES.get(agent_type, agent_type)
     try:
-        # H0.5 保留 CLI:agent start mutation 后需即时看到新 pane 做同类型
-        # 数量判定,socket 缓存可能滞后一个事件窗口。
-        panes = [
-            pane for pane in herdr_client.snapshot().get("panes", [])
-            if pane.get("session") == session
-            and MAIL_AGENT_NAMES.get(
-                str(pane.get("agent") or ""), str(pane.get("agent") or "")
-            ) == mail_agent
-        ]
-    except Exception as exc:
-        return {**base, "warning": f"无法确认同类型 Agent 数量，已跳过身份绑定: {exc}"}
-    if len(panes) > 1:
-        return {
-            **base, "skipped": "ambiguous_same_type",
-            "warning": "同类型多实例共用邮箱身份会产生通知歧义，已跳过自动绑定",
-        }
-    try:
+        herdr_client.validate_agent_instance_id(instance_id)
         state = _mail_project_state(session)
     except Exception as exc:
         return {**base, "warning": f"读取 Agent Mail 通信项目失败: {exc}"}
@@ -4073,7 +4109,7 @@ def _started_agent_mail_identity(
         return {**base, "warning": "该 session 尚未绑定 Agent Mail 通信项目"}
     project = str(state["project"])
     status = {**base, "project": project}
-    name = _identity_name(project, agent_type)
+    name = _identity_name(project, agent_type, instance_id)
     if not name:
         if not AGENT_MAIL_INIT_SCRIPT.is_file():
             return {**status, "warning": "Agent Mail 注册工具未安装"}
@@ -4081,7 +4117,7 @@ def _started_agent_mail_identity(
             registered = subprocess.run(
                 [
                     str(AGENT_MAIL_INIT_SCRIPT), "--project", project,
-                    "--only", mail_agent,
+                    "--instance", instance_id, "--only", mail_agent,
                 ],
                 cwd=project, capture_output=True, text=True, timeout=60,
             )
@@ -4093,15 +4129,28 @@ def _started_agent_mail_identity(
                 **status,
                 "warning": f"Agent Mail 身份注册失败: {detail or 'am-init-project 失败'}",
             }
-        name = _identity_name(project, agent_type)
+        name = _identity_name(project, agent_type, instance_id)
         if not name:
             return {**status, "warning": "Agent Mail 注册完成但未查到有效身份"}
         status["registered_now"] = True
     status.update({"registered": True, "name": name})
     try:
+        herdr_client.update_launch_descriptor_by_instance(
+            instance_id, mail_agent=mail_agent, mail_instance=instance_id,
+            mail_name=name, mail_project=project,
+        )
+    except (OSError, ValueError) as exc:
+        status["descriptor_warning"] = str(exc)
+    if not notify:
+        return status
+    try:
         notified = herdr_client.pane_send(
             session, pane_id,
-            _identity_hint(name, project, agent_type, registered=True), "prompt",
+            _identity_hint(
+                name, project, agent_type, registered=True,
+                instance_id=instance_id,
+            ),
+            "prompt",
         )
     except Exception as exc:
         return {**status, "warning": f"身份已注册，但告知发送失败: {exc}"}
@@ -4125,12 +4174,11 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     mail_requirement = _agent_mail_requirement()
     if mail_requirement:
         raise HTTPException(503, mail_requirement["error"])
-    name = req.name.strip() if req.name else None
-    if name:
-        try:
-            herdr_client.validate_agent_name(name)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+    try:
+        display_name = herdr_client.validate_display_name(req.name or req.agent)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    instance_id = herdr_client.new_agent_instance_id()
     try:
         normalized_args = herdr_client.normalize_agent_args(req.args)
     except ValueError as exc:
@@ -4141,37 +4189,38 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     }
     git_root = None
     if req.workspace == "isolated":
-        if not name:
-            raise HTTPException(400, "创建独立 worktree 时必须填写实例名称")
         git_root, source_dir = _worktree_source(project_dir)
         if not git_root or not source_dir:
             raise HTTPException(400, "该目录不是 Git 仓库，不能创建独立 worktree")
         participant = WorkspaceParticipantReq(
-            id=name, name=name, agent=req.agent, role="developer",
+            id=instance_id, name=display_name, agent=req.agent, role="developer",
             task="", workspace="isolated",
         )
         try:
             workspace = _ensure_worktree(
                 git_root, source_dir, req.session, participant, 0,
-                detached=False, slug=name,
+                detached=False, slug=instance_id,
             )
         except ValueError as exc:
-            raise HTTPException(400, f"创建 {name} worktree 失败: {exc}") from exc
+            raise HTTPException(400, f"创建 {display_name} worktree 失败: {exc}") from exc
 
     try:
         result = herdr_client.start_agent(
             req.session, workspace["workdir"], req.agent, req.model,
-            layout=req.layout, label=name, args=normalized_args,
+            layout=req.layout, label=display_name, args=normalized_args,
+            instance_id=instance_id,
         )
     except Exception as exc:
         cleanup_errors = (
             _rollback_worktrees(git_root, [workspace])
             if git_root and workspace.get("created") else []
         )
-        detail = f"启动 {name or req.agent} 失败: {exc}"
+        detail = f"启动 {display_name} 失败: {exc}"
         if cleanup_errors:
             detail += "；回滚异常: " + "；".join(cleanup_errors)
         raise HTTPException(500, detail) from exc
+    result.setdefault("instance_id", instance_id)
+    result.setdefault("display_name", display_name)
     result["workspace"] = workspace
     launch_failed = bool(result.get("error")) or result.get("available", True) is False
     if launch_failed and git_root and workspace.get("created"):
@@ -4184,12 +4233,12 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
         and isinstance(result.get("pane_id"), str) and result["pane_id"]
     ):
         result["agent_mail"] = _started_agent_mail_identity(
-            req.session, result["pane_id"], req.agent
+            req.session, result["pane_id"], req.agent, instance_id,
         )
         try:
             result["coordination"] = coordination.add_participant(
                 session=req.session,
-                participant_id=name or result["pane_id"],
+                participant_id=instance_id,
                 agent=req.agent,
                 pane_id=result["pane_id"],
                 workdir=workspace["workdir"],
@@ -4711,6 +4760,7 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
 
     ids = []
     names = []
+    instance_ids = []
     agent_counts: dict[str, int] = {}
     for i, p in enumerate(participants):
         pid = p.id or f"agent-{i + 1}"
@@ -4720,14 +4770,13 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         agent_counts[p.agent] = agent_counts.get(p.agent, 0) + 1
         name = p.name.strip() or f"{p.agent}-{agent_counts[p.agent]}"
         try:
-            herdr_client.validate_agent_name(name)
+            name = herdr_client.validate_display_name(name)
         except ValueError as exc:
-            raise HTTPException(400, f"无效的实例名称: {name}（{exc}）") from exc
+            raise HTTPException(400, f"无效的显示名称: {name}（{exc}）") from exc
         names.append(name)
+        instance_ids.append(herdr_client.new_agent_instance_id())
     if len(set(ids)) != len(ids):
         raise HTTPException(400, "participant id 不能重复")
-    if len({name.casefold() for name in names}) != len(names):
-        raise HTTPException(400, "实例名称不能重复")
     roles_by_id = {pid: p.role for p, pid in zip(participants, ids)}
     for p, pid in zip(participants, ids):
         if p.review_target and (p.review_target not in ids or p.review_target == pid):
@@ -4762,8 +4811,8 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
 
     plans = []
     created_workspaces: list[dict[str, Any]] = []
-    for index, (participant, pid, name, normalized_args) in enumerate(
-        zip(participants, ids, names, normalized_agent_args)
+    for index, (participant, pid, name, instance_id, normalized_args) in enumerate(
+        zip(participants, ids, names, instance_ids, normalized_agent_args)
     ):
         strategy = participant.workspace
         if strategy == "auto":
@@ -4783,8 +4832,7 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
             try:
                 workspace = _ensure_worktree(
                     git_root, project_dir, req.session, participant, index,
-                    detached=strategy == "review", slug=name,
-                    legacy_slug=f"{index + 1}-{participant.agent}",
+                    detached=strategy == "review", slug=instance_id,
                 )
             except ValueError as exc:
                 cleanup_errors = _rollback_worktrees(git_root, created_workspaces)
@@ -4805,6 +4853,7 @@ def _prepare_workspace(req: SetupWorkspaceReq) -> tuple[list[dict[str, Any]], li
         plans.append({
             "id": pid,
             "name": name,
+            "instance_id": instance_id,
             "agent": participant.agent,
             "role": participant.role,
             "task": participant.task.strip(),
@@ -4995,6 +5044,9 @@ def _setup_workspace(req: SetupWorkspaceReq):
             "started": [],
         }
     plans, warnings = _prepare_workspace(req)
+    for plan in plans:
+        if not plan.get("instance_id"):
+            plan["instance_id"] = herdr_client.new_agent_instance_id()
     base_pane_ids: list[str] = []
     if not session_started:
         # 用 PTY 终端创建 session(herdr --session 需要 TTY)
@@ -5088,6 +5140,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
     results = []
     started = []
     started_instances = []
+    started_instance_ids = []
     reused = []
     reused_instances = []
     failed = []
@@ -5098,9 +5151,11 @@ def _setup_workspace(req: SetupWorkspaceReq):
         r = herdr_client.start_agent(
             req.session, plan["workdir"], agent_type, layout=req.layout,
             label=plan["name"], args=plan.get("args", ""),
+            instance_id=plan["instance_id"],
         )
         results.append({
-            "agent": agent_type, "name": plan["name"], "plan": plan, "start": r,
+            "agent": agent_type, "name": plan["name"],
+            "instance_id": plan["instance_id"], "plan": plan, "start": r,
         })
         error = r.get("error")
         if req.participants is not None and r.get("reused"):
@@ -5123,6 +5178,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
         elif not r.get("reused"):
             started.append(agent_type)
             started_instances.append(plan["name"])
+            started_instance_ids.append(plan["instance_id"])
             time.sleep(2)  # 等新 Agent 启动
     # 1.5 清理建 session 时 TUI 自带的空白 shell pane(至少一个 agent 在跑才清,避免空 session)
     closed_panes = []
@@ -5152,10 +5208,11 @@ def _setup_workspace(req: SetupWorkspaceReq):
             "task": plan["task"], "workdir": plan["workdir"],
             "pane_id": pane_id,
             "local_name": plan["name"],
+            "instance_id": plan["instance_id"],
             "mail_name": (
-                _identity_name(canonical_project, plan["agent"])
-                if sum(1 for p in plans if p["agent"] == plan["agent"]) == 1
-                else None
+                _identity_name(
+                    canonical_project, plan["agent"], plan["instance_id"],
+                )
             ),
         })
     if run_participants:
@@ -5172,7 +5229,7 @@ def _setup_workspace(req: SetupWorkspaceReq):
     if req.participants is not None:
         for result in results:
             pane_id = result["start"].get("pane_id")
-            should_brief = result["plan"]["name"] in started_instances
+            should_brief = result["plan"]["instance_id"] in started_instance_ids
             if result.get("error") or not should_brief or not pane_id:
                 continue
             plan = result["plan"]
@@ -5185,87 +5242,84 @@ def _setup_workspace(req: SetupWorkspaceReq):
             else:
                 briefed.append(plan["agent"])
                 briefed_instances.append(plan["name"])
-    # 3. 注册身份(am-init-project)
-    reg_ok = False
-    mail_status: dict[str, Any]
+    # 3. 每个 managed instance 独立注册；同类型实例不再共享 main 身份。
+    registration_results: list[tuple[dict[str, Any], dict[str, Any]]] = []
     if not mail_binding_ok:
-        mail_status = {"available": False, "reason": "通信项目绑定未保存，已跳过身份注册"}
+        mail_status: dict[str, Any] = {
+            "available": False, "reason": "通信项目绑定未保存，已跳过身份注册",
+        }
     elif not AGENT_MAIL_INIT_SCRIPT.is_file():
         mail_status = {"available": False, "reason": "Agent Mail 未安装，已跳过身份注册"}
     else:
-        try:
-            r = subprocess.run(
-                [str(AGENT_MAIL_INIT_SCRIPT), "--project", canonical_project],
-                cwd=canonical_project,
-                capture_output=True, text=True, timeout=60,
-            )
-            reg_ok = r.returncode == 0
-            registration_error = (r.stderr or r.stdout)[-300:]
-            mail_status = {
-                "available": reg_ok,
-                "reason": None if reg_ok else (registration_error or "am-init-project 失败"),
-            }
-        except Exception as exc:
-            mail_status = {"available": False, "reason": str(exc)}
-    # 4. Agent Mail 注册成功后才查询身份并通知 pane。
-    notified = []
-    if reg_ok:
-        time.sleep(2)
-        duplicate_agent_types = {
-            plan["agent"] for plan in plans
-            if sum(1 for item in plans if item["agent"] == plan["agent"]) > 1
-        }
-        if duplicate_agent_types:
-            warnings.append(
-                "同类型多实例仅使用本地实例名，已跳过自动 Agent Mail 身份绑定: "
-                + "、".join(sorted(duplicate_agent_types))
-            )
-        identities = {
-            plan["agent"]: _identity_name(canonical_project, plan["agent"])
-            for plan in plans if plan["agent"] not in duplicate_agent_types
-        }
-        roster = "；".join(
-            f"{agent}={identity}"
-            for agent, identity in identities.items() if identity
-        )
         for result in results:
             plan = result["plan"]
-            atype = plan["agent"]
-            pid = result["start"].get("pane_id")
+            pane_id = result["start"].get("pane_id")
             if (
-                result.get("error") or plan["name"] not in started_instances
-                or atype in duplicate_agent_types or not pid
+                result.get("error") or not pane_id
+                or plan["instance_id"] not in started_instance_ids
             ):
                 continue
-            my_name = _identity_name(canonical_project, atype)
-            if not my_name:
-                warnings.append(f"{atype} 身份未注册或已 retired，未发送身份告知")
-                continue
-            context = None
-            if coordination_run:
-                try:
-                    coordination.bind_identity(
-                        coordination_run["run_id"], plan["id"], my_name, pid
-                    )
-                    context = coordination.run_context(
-                        coordination_run["run_id"], my_name
-                    )
-                except Exception:
-                    logger.exception(
-                        "coordination identity context failed: %s/%s",
-                        req.session, plan["id"],
-                    )
-                    warnings.append(f"{atype} 可靠消息身份上下文建立失败")
-            hint = _identity_hint(
-                my_name, canonical_project, atype, roster=roster,
-                coordination_context=context,
+            identity = _started_agent_mail_identity(
+                req.session, pane_id, plan["agent"], plan["instance_id"],
+                notify=False,
             )
-            herdr_client.pane_send(req.session, pid, hint, "prompt")
-            notified.append(f"{atype}→{my_name}")
+            result["agent_mail"] = identity
+            registration_results.append((result, identity))
+            if identity.get("warning"):
+                warnings.append(f"{plan['name']} Agent Mail: {identity['warning']}")
+        failed_registration = [
+            identity.get("warning") or "身份未注册"
+            for _, identity in registration_results if not identity.get("registered")
+        ]
+        reg_ok = bool(registration_results) and not failed_registration
+        mail_status = {
+            "available": reg_ok,
+            "reason": "；".join(str(item) for item in failed_registration) or None,
+        }
+
+    # 4. 精确身份注册完成后建立 coordination 绑定并通知各自 pane。
+    notified = []
+    roster = "；".join(
+        f"{result['plan']['name']}[{result['plan']['instance_id'][-6:]}]={identity['name']}"
+        for result, identity in registration_results if identity.get("registered")
+    )
+    for result, identity in registration_results:
+        if not identity.get("registered"):
+            continue
+        plan = result["plan"]
+        pane_id = result["start"]["pane_id"]
+        my_name = str(identity["name"])
+        context = None
+        if coordination_run:
+            try:
+                coordination.bind_identity(
+                    coordination_run["run_id"], plan["id"], my_name, pane_id
+                )
+                context = coordination.run_context(
+                    coordination_run["run_id"], my_name
+                )
+            except Exception:
+                logger.exception(
+                    "coordination identity context failed: %s/%s",
+                    req.session, plan["id"],
+                )
+                warnings.append(f"{plan['name']} 可靠消息身份上下文建立失败")
+        hint = _identity_hint(
+            my_name, canonical_project, plan["agent"], roster=roster,
+            coordination_context=context, instance_id=plan["instance_id"],
+        )
+        sent = herdr_client.pane_send(req.session, pane_id, hint, "prompt")
+        if sent.get("available", True) is False or sent.get("error"):
+            warnings.append(f"{plan['name']} 身份告知发送失败")
+            continue
+        identity["notified"] = True
+        notified.append(f"{plan['name']}→{my_name}")
+    reg_ok = mail_status.get("available") is True
     return {
         "ok": not failed, "session": req.session, "workdir": req.workdir,
         "session_created": session_created, "session_started": session_started,
         "started": started, "started_instances": started_instances,
+        "started_instance_ids": started_instance_ids,
         "reused": reused, "reused_instances": reused_instances,
         "failed": failed, "failed_instances": failed_instances, "results": results,
         "idempotent": bool(reused and not started and not failed), "registered": reg_ok,

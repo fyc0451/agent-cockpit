@@ -282,7 +282,9 @@ _PROGRAM_ALIASES = {
 }
 
 
-def identity_by_cwd(cwd: str, program: str) -> dict[str, Any] | None:
+def identity_by_cwd(
+    cwd: str, program: str, name: str | None = None,
+) -> dict[str, Any] | None:
     """按工作目录 + program 类型查 agent-mail 身份(@ 注入协作者信息用)。
 
     herdr agent 的 cwd → project_key(human_key),program(codex/kimi/...)→ agent。
@@ -292,12 +294,16 @@ def identity_by_cwd(cwd: str, program: str) -> dict[str, Any] | None:
     normalized = program.strip().lower()
     candidates = _PROGRAM_ALIASES.get(normalized, (normalized,))
     placeholders = ", ".join("?" for _ in candidates)
+    name_clause = " AND a.name = ?" if name is not None else ""
+    params = (cwd, *candidates, name, normalized) if name is not None else (
+        cwd, *candidates, normalized,
+    )
     return _one(
         "SELECT a.name, a.program, a.model, p.human_key "
         "FROM agents a JOIN projects p ON p.id = a.project_id "
         f"WHERE p.human_key = ? AND a.program IN ({placeholders}) "
-        "AND a.retired_at IS NULL "
+        f"AND a.retired_at IS NULL{name_clause} "
         "ORDER BY CASE WHEN a.program = ? THEN 0 ELSE 1 END, "
         "a.inception_ts DESC LIMIT 1",
-        (cwd, *candidates, normalized),
+        params,
     )
