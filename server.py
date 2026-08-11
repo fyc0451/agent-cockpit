@@ -58,6 +58,7 @@ import team_sessions
 import terminal
 import version
 import upgrade_core
+import upgrade_service
 import web_push
 import settings
 from artifact_root import resolve_artifact_root
@@ -2336,15 +2337,38 @@ def api_version(refresh: bool = Query(False)):
 
 @app.get("/api/upgrade/status")
 def api_upgrade_status():
-    """升级状态（需认证）。V1 升级引擎已退役：固定只读 retired 契约，
-    不 reconcile、不拉起 worker、无任何状态写副作用。"""
-    return upgrade_core.retired_status()
+    """Pure-read V2 status when explicitly enabled; otherwise retain V1 retirement."""
+    if not upgrade_service.is_enabled():
+        return upgrade_core.retired_status()
+    try:
+        return upgrade_service.get_status()
+    except Exception:
+        raise HTTPException(503, {"error_code": "status_unavailable"})
+
+
+_UPGRADE_ERROR_STATUS = {
+    "upgrade_busy": 409,
+    "already_current": 409,
+    "request_invalid": 400,
+    "controller_unavailable": 503,
+    "trust_unavailable": 503,
+    "release_unavailable": 503,
+    "platform_unsupported": 503,
+}
 
 
 @app.post("/api/upgrade")
 def api_upgrade_start():
-    """V1 升级引擎已退役；认证后忽略请求体并稳定返回 retired。"""
-    return upgrade_core.retired_start_response()
+    """Prepare and detach the signed V2 controller when explicitly enabled."""
+    if not upgrade_service.is_enabled():
+        return upgrade_core.retired_start_response()
+    try:
+        receipt = upgrade_service.start_latest()
+    except upgrade_service.UpgradeServiceError as exc:
+        status_code = _UPGRADE_ERROR_STATUS.get(exc.code, 500)
+        code = exc.code if status_code != 500 else "upgrade_failed"
+        raise HTTPException(status_code, {"error_code": code})
+    return JSONResponse(status_code=202, content=receipt)
 
 
 # ── 设置路由 ────────────────────────────────────────────────────
