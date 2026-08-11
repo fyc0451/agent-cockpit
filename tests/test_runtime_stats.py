@@ -91,7 +91,9 @@ def test_sse_tracking_cleans_up_on_close_and_exception():
             yield {"event": "ready"}
             await asyncio.Event().wait()
 
-        tracked = server._track_sse_events(waiting_events())
+        lease = runtime_stats.try_open_connection("sse")
+        assert lease is not None
+        tracked = server._track_sse_events(waiting_events(), lease)
         assert await anext(tracked) == {"event": "ready"}
         assert runtime_stats.connection_stats()["sse"] == 1
         await tracked.aclose()
@@ -101,7 +103,9 @@ def test_sse_tracking_cleans_up_on_close_and_exception():
             yield {"event": "ready"}
             raise RuntimeError("stream failed")
 
-        tracked = server._track_sse_events(failing_events())
+        lease = runtime_stats.try_open_connection("sse")
+        assert lease is not None
+        tracked = server._track_sse_events(failing_events(), lease)
         await anext(tracked)
         assert runtime_stats.connection_stats()["sse"] == 1
         with pytest.raises(RuntimeError, match="stream failed"):
@@ -211,3 +215,124 @@ def test_process_uptime_is_nonnegative_integer(monkeypatch):
     monkeypatch.setattr(runtime_stats.time, "monotonic", lambda: 112.99)
 
     assert runtime_stats.process_stats() == {"uptime_seconds": 12}
+
+
+def test_max_sse_connections_is_fixed_constant():
+    assert runtime_stats.MAX_SSE_CONNECTIONS == 64
+    with pytest.raises(ValueError):
+        runtime_stats.try_open_connection("not-a-kind")
+    with pytest.raises(ValueError):
+        runtime_stats.open_connection("not-a-kind")
+
+
+def test_sse_limit_boundary_64th_ok_65th_rejected():
+    leases = []
+    for _ in range(runtime_stats.MAX_SSE_CONNECTIONS):
+        lease = runtime_stats.try_open_connection("sse")
+        assert lease is not None
+        leases.append(lease)
+    assert runtime_stats.connection_stats()["sse"] == 64
+    assert runtime_stats.try_open_connection("sse") is None
+    assert runtime_stats.connection_stats()["sse"] == 64
+    # terminal unlimited still works at SSE cap
+    term = runtime_stats.try_open_connection("terminal_websocket")
+    assert term is not None
+    assert runtime_stats.connection_stats()["terminal_websocket"] == 1
+    term.close()
+    for lease in leases:
+        lease.close()
+    assert runtime_stats.connection_stats()["sse"] == 0
+
+
+def test_sse_limit_concurrent_race_never_exceeds_cap():
+    accepted = []
+    barrier = threading.Barrier(80)
+
+    def worker():
+        barrier.wait(2)
+        lease = runtime_stats.try_open_connection("sse")
+        if lease is not None:
+            accepted.append(lease)
+
+    threads = [threading.Thread(target=worker) for _ in range(80)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(3)
+        assert not t.is_alive()
+    assert len(accepted) == runtime_stats.MAX_SSE_CONNECTIONS
+    assert runtime_stats.connection_stats()["sse"] == 64
+    for lease in accepted:
+        lease.close()
+    assert runtime_stats.connection_stats()["sse"] == 0
+
+
+def test_api_events_returns_429_without_slot_and_no_internal_leak(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    # Fill SSE cap without going through HTTP
+    leases = [
+        runtime_stats.try_open_connection("sse")
+        for _ in range(runtime_stats.MAX_SSE_CONNECTIONS)
+    ]
+    assert all(leases)
+    client = TestClient(server.app)
+    # Auth first: unauthenticated still 401 (no reserve side-effect beyond middleware)
+    assert client.get("/api/events").status_code == 401
+    # Authenticated but full → 429 before stream
+    response = client.get(
+        "/api/events",
+        headers={"authorization": "Bearer secret"},
+    )
+    assert response.status_code == 429
+    assert response.headers.get("retry-after") == "5"
+    body = response.text
+    assert "64" not in body
+    assert "sse" not in body.lower() or "streams" in body.lower()
+    # stable public detail only
+    assert response.json() == {"detail": "too many concurrent event streams"}
+    assert runtime_stats.connection_stats()["sse"] == 64
+    for lease in leases:
+        lease.close()
+
+
+def test_api_events_auth_before_reservation(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    # Without auth: 401 and zero SSE reservations
+    assert client.get("/api/events").status_code == 401
+    assert runtime_stats.connection_stats()["sse"] == 0
+
+
+def test_sse_lease_released_exactly_once_on_cancel():
+    async def exercise():
+        async def waiting_events():
+            yield {"event": "ready"}
+            await asyncio.Event().wait()
+
+        lease = runtime_stats.try_open_connection("sse")
+        assert lease is not None
+        tracked = server._track_sse_events(waiting_events(), lease)
+        await anext(tracked)
+        assert runtime_stats.connection_stats()["sse"] == 1
+        await tracked.aclose()
+        assert runtime_stats.connection_stats()["sse"] == 0
+        # second close is no-op
+        lease.close()
+        assert runtime_stats.connection_stats()["sse"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_terminal_websocket_not_subject_to_sse_cap():
+    leases = [
+        runtime_stats.try_open_connection("sse")
+        for _ in range(runtime_stats.MAX_SSE_CONNECTIONS)
+    ]
+    assert all(leases)
+    # many terminal connections still allowed
+    terms = [runtime_stats.open_connection("terminal_websocket") for _ in range(10)]
+    assert runtime_stats.connection_stats()["terminal_websocket"] == 10
+    for t in terms:
+        t.close()
+    for lease in leases:
+        lease.close()

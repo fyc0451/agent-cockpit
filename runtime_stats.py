@@ -10,6 +10,8 @@ from typing import Iterator
 
 
 _CONNECTION_KINDS = ("sse", "terminal_websocket")
+# Fixed hard cap for concurrent SSE streams (no env/config).
+MAX_SSE_CONNECTIONS = 64
 _PROCESS_STARTED = time.monotonic()
 _lock = threading.Lock()
 _connection_counts = {kind: 0 for kind in _CONNECTION_KINDS}
@@ -28,12 +30,31 @@ class _ConnectionLease:
             _connection_counts[self.kind] -= 1
 
 
-def open_connection(kind: str) -> _ConnectionLease:
+def try_open_connection(kind: str) -> _ConnectionLease | None:
+    """Atomically check SSE limit and reserve a slot under one lock.
+
+    Returns None only when kind is ``sse`` and the fixed cap is full.
+    Terminal websocket leases are unlimited (same as before).
+    """
     if kind not in _CONNECTION_KINDS:
         raise ValueError("invalid connection kind")
     with _lock:
+        if kind == "sse" and _connection_counts["sse"] >= MAX_SSE_CONNECTIONS:
+            return None
         _connection_counts[kind] += 1
     return _ConnectionLease(kind)
+
+
+def open_connection(kind: str) -> _ConnectionLease:
+    """Reserve a connection slot; raises ValueError for unknown kinds.
+
+    For SSE, raises RuntimeError if the fixed concurrent cap is exhausted.
+    Prefer ``try_open_connection`` at the HTTP boundary to map full → 429.
+    """
+    lease = try_open_connection(kind)
+    if lease is None:
+        raise RuntimeError("sse_connection_limit")
+    return lease
 
 
 @contextmanager
@@ -56,8 +77,10 @@ def connection_stats() -> dict[str, int]:
 
 
 __all__ = [
+    "MAX_SSE_CONNECTIONS",
     "connection_stats",
     "open_connection",
     "process_stats",
     "track_connection",
+    "try_open_connection",
 ]
