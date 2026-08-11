@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             mail_recv.main([
                 "--agent", resolved.agent, "--instance", resolved.instance_id,
-                "--project", resolved.project, "--unread",
+                "--project", resolved.project, "--unread", "--peek",
             ])
     except SystemExit:
         return 0

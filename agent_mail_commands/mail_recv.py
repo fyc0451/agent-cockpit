@@ -54,6 +54,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--project", default=os.getcwd())
     parser.add_argument("--ack", action="store_true")
     parser.add_argument("--unread", action="store_true")
+    parser.add_argument(
+        "--peek", action="store_true",
+        help="只读查看未读摘要，不创建或更新 coordination receipt",
+    )
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--message", type=int, help="只 claim 指定 message_id")
     actions = parser.add_mutually_exclusive_group()
@@ -68,6 +72,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--unsafe-in-flight", action="store_true")
     parser.add_argument("--claim-token", default="")
     args = parser.parse_args(argv)
+    if args.peek and (
+        args.ack
+        or args.message is not None
+        or any(
+            value is not None
+            for value in (args.complete, args.resume, args.fail, args.checkpoint)
+        )
+    ):
+        raise SystemExit("error: --peek 不能与 claim/ack/receipt 操作混用")
 
     identity, hub, token = load_identity(args.agent, args.instance, args.project)
     mcp_call(hub, token, "initialize", {
@@ -145,7 +158,7 @@ def main(argv: list[str] | None = None) -> None:
         "registration_token": identity["registration_token"],
         "limit": max(args.limit, 100 if args.message is not None else args.limit),
         "unread_only": args.unread,
-        "include_bodies": True,
+        "include_bodies": not args.peek,
     })
     messages = inbox if isinstance(inbox, list) else (inbox.get("messages") or [])
     if args.message is not None:
@@ -153,6 +166,22 @@ def main(argv: list[str] | None = None) -> None:
     messages.sort(key=coordination.message_timestamp)
     if not messages:
         print("(no messages)")
+        return
+
+    if args.peek:
+        for message in messages:
+            timestamp = coordination.message_timestamp(message)
+            stamp = (
+                time.strftime("%m-%d %H:%M", time.localtime(timestamp))
+                if timestamp else str(message.get("created_at") or "-")
+            )
+            print(
+                f"--- #{_terminal_text(message.get('id'))} "
+                f"[{_terminal_text(message.get('thread_id') or '-')}] "
+                f"{_terminal_text(message.get('from'))} @ {_terminal_text(stamp)}  "
+                f"({_terminal_text(message.get('importance'))})"
+            )
+            print(f"    subject: {_terminal_text(message.get('subject'))}")
         return
 
     coordination.observe_messages(identity["project_key"], identity["name"], messages)

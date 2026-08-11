@@ -85,6 +85,8 @@ fi
 plugin_source="$INSTALL_DIR/agent-mail-tools/agent-mail.opencode-plugin.js"
 plugin_dir="$HOME/.config/opencode/plugins"
 plugin_target="$plugin_dir/agent-mail.js"
+legacy_plugin_sha256="143e3a4bbd2e87d754cafb7125808acd2321e203352c1735950bc51e2ffebb22"
+plugin_backup="$plugin_dir/agent-mail.js.pre-zcode-r5"
 if [[ -f "$plugin_source" ]]; then
   mkdir -p "$plugin_dir"
   if [[ ! -e "$plugin_target" && ! -L "$plugin_target" ]]; then
@@ -98,7 +100,27 @@ if [[ -f "$plugin_source" ]]; then
           echo "警告: 无法更新 agent-mail 插件软链" >&2 ;;
       *) echo "警告: 保留用户已有 agent-mail 插件软链: $plugin_target" >&2 ;;
     esac
+  elif [[ -f "$plugin_target" ]]; then
+    current_hash="$(python3 - "$plugin_target" <<'PY' 2>/dev/null || true
+import hashlib
+import sys
+from pathlib import Path
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+    if [[ "$current_hash" != "$legacy_plugin_sha256" ]]; then
+      echo "ACTIVATION_BLOCK: 保留未知 regular agent-mail 插件: $plugin_target" >&2
+    elif [[ -e "$plugin_backup" || -L "$plugin_backup" ]]; then
+      echo "ACTIVATION_BLOCK: rollback 备份已存在: $plugin_backup" >&2
+    elif mv "$plugin_target" "$plugin_backup"; then
+      if ! ln -s "$plugin_source" "$plugin_target"; then
+        mv "$plugin_backup" "$plugin_target" 2>/dev/null || true
+        echo "ACTIVATION_BLOCK: 插件激活失败，已尝试回滚" >&2
+      fi
+    else
+      echo "ACTIVATION_BLOCK: 无法创建 plugin rollback 备份" >&2
+    fi
   else
-    echo "警告: 保留用户已有 agent-mail 插件文件: $plugin_target" >&2
+    echo "ACTIVATION_BLOCK: 保留用户已有 agent-mail 插件路径: $plugin_target" >&2
   fi
 fi

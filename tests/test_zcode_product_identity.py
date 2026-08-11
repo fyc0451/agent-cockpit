@@ -8,7 +8,7 @@ import herdr_client
 import pytest
 import server
 
-from agent_mail_commands import mail_identity_inject
+from agent_mail_commands import am_retire, mail_hook_check, mail_identity_inject
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -214,6 +214,7 @@ def test_installer_preserves_existing_regular_plugin(tmp_path):
     assert result.returncode == 0
     assert plugin.is_file() and not plugin.is_symlink()
     assert plugin.read_text(encoding="utf-8") == "user owned\n"
+    assert "ACTIVATION_BLOCK" in result.stderr
 
 
 def test_session_created_injects_context_through_opencode_client(tmp_path):
@@ -273,8 +274,6 @@ def test_mail_hook_check_rejects_external_identity_arguments():
 
 
 def test_mail_hook_check_uses_only_resolved_exact_identity(monkeypatch):
-    from agent_mail_commands import mail_hook_check
-
     resolved = mail_identity_inject.ManagedIdentity(
         "/project", "zcode", INSTANCE, {"name": "FreshMailbox"},
     )
@@ -293,8 +292,49 @@ def test_mail_hook_check_uses_only_resolved_exact_identity(monkeypatch):
     assert mail_hook_check.main([]) == 0
     assert seen == [[
         "--agent", "zcode", "--instance", INSTANCE,
-        "--project", "/project", "--unread",
+        "--project", "/project", "--unread", "--peek",
     ]]
+
+
+def test_mail_hook_check_peek_does_not_create_or_change_receipt(
+    monkeypatch, tmp_path, capsys,
+):
+    import coordination
+
+    project = tmp_path / "project"
+    project.mkdir()
+    resolved = mail_identity_inject.ManagedIdentity(
+        str(project), "zcode", INSTANCE, {"name": "FreshMailbox"},
+    )
+    monkeypatch.setattr(
+        mail_hook_check.mail_identity_inject,
+        "resolve_managed_identity",
+        lambda: resolved,
+    )
+    monkeypatch.setattr(
+        mail_hook_check.mail_recv, "load_identity",
+        lambda *_args: (
+            {
+                "project_key": str(project), "name": "FreshMailbox",
+                "registration_token": "token",
+            },
+            "http://hub", "hub-token",
+        ),
+    )
+    monkeypatch.setattr(mail_hook_check.mail_recv, "mcp_call", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        mail_hook_check.mail_recv, "mcp_tool",
+        lambda *_a, **_k: [{
+            "id": 701, "from": "Sender", "subject": "review",
+            "importance": "normal", "created_at": "2026-08-12T00:00:00Z",
+            "body_md": "must remain unclaimed",
+        }],
+    )
+
+    assert coordination.receipt(str(project), "FreshMailbox", 701) is None
+    assert mail_hook_check.main([]) == 0
+    assert coordination.receipt(str(project), "FreshMailbox", 701) is None
+    assert "#701" in capsys.readouterr().out
 
 
 def test_restart_retire_and_same_name_rebuild_keep_mailboxes_isolated(
@@ -342,3 +382,64 @@ def test_restart_retire_and_same_name_rebuild_keep_mailboxes_isolated(
     assert resolved.instance_id == NEW_INSTANCE
     assert resolved.identity["name"] == "FreshMailbox"
     assert old_registry.exists()
+
+
+def test_server_retire_chain_writes_registry_tombstone_before_descriptor_finalizes(
+    monkeypatch, tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    descriptors = tmp_path / "descriptors.json"
+    registry_root = tmp_path / "registry"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(descriptors))
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name=INSTANCE, kind="opencode",
+        args=[], agent="zcode", workdir=str(project), instance_id=INSTANCE,
+        display_name="同名",
+    )
+    herdr_client.update_launch_descriptor_by_instance(
+        INSTANCE, mail_agent="zcode", mail_instance=INSTANCE,
+        mail_name="OldMailbox", mail_project=str(project),
+    )
+    herdr_client.mark_launch_descriptor_retirement_pending("demo", "w1:p1")
+    registry_file = (
+        registry_root / am_retire.slugify(str(project)) / f"zcode--{INSTANCE}.json"
+    )
+    _secure_json(registry_file, {
+        "project_key": str(project), "project_slug": am_retire.slugify(str(project)),
+        "agent": "zcode", "instance": INSTANCE, "name": "OldMailbox",
+        "registration_token": "registration-token", "program": "zcode",
+        "model": "unknown", "hub": "http://hub", "status": "active",
+    })
+    monkeypatch.setattr(am_retire, "REGISTRY_DIR", registry_root)
+    monkeypatch.setattr(am_retire, "load_client_config", lambda: ("http://hub", "token"))
+    monkeypatch.setattr(am_retire, "mcp_call", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        am_retire, "mcp_tool",
+        lambda _hub, _token, name, _args: (
+            {"status": "retired", "retired_at": "2026-08-12T00:00:00Z"}
+            if name == "retire_agent" else
+            {"name": "OldMailbox", "retired_at": "2026-08-12T00:00:00Z"}
+        ),
+    )
+    retire_script = tmp_path / "am-retire"
+    retire_script.touch()
+    monkeypatch.setattr(server, "AM_RETIRE_SCRIPT", retire_script)
+
+    def run_retire(argv, **_kwargs):
+        assert argv[0] == str(retire_script)
+        am_retire.main(list(argv[1:]))
+        return subprocess.CompletedProcess(argv, 0, "retired", "")
+
+    monkeypatch.setattr(server.subprocess, "run", run_retire)
+
+    assert server._retire_agent_instance(INSTANCE) == {
+        "instance_id": INSTANCE, "retired": True,
+    }
+    tombstone = json.loads(registry_file.read_text(encoding="utf-8"))
+    assert tombstone["status"] == "retired"
+    assert tombstone["retired_at"]
+    descriptor = herdr_client.get_launch_descriptor_by_instance(
+        INSTANCE, include_retired=True,
+    )
+    assert descriptor["state"] == "retired"

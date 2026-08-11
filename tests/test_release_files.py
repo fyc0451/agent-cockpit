@@ -360,6 +360,44 @@ def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path
     assert (legacy_dir / "mail-identity-inject.pre-cockpit").is_file()
 
 
+def test_agent_mail_plugin_known_legacy_hash_activates_with_rollback_backup(tmp_path):
+    installer = (ROOT / "install-agent-mail-tools.sh").read_text(encoding="utf-8")
+    assert "143e3a4bbd2e87d754cafb7125808acd2321e203352c1735950bc51e2ffebb22" in installer
+    assert "agent-mail.js.pre-zcode-r5" in installer
+    assert "ACTIVATION_BLOCK" in installer
+
+    install_dir = tmp_path / "install"
+    shutil.copytree(ROOT / "agent-mail-tools", install_dir / "agent-mail-tools")
+    home = tmp_path / "home"
+    plugin = home / ".config" / "opencode" / "plugins" / "agent-mail.js"
+    plugin.parent.mkdir(parents=True)
+    legacy = ROOT / "tests" / "fixtures" / "agent-mail-legacy.js"
+    plugin.write_bytes(legacy.read_bytes())
+    plugin.chmod(0o600)
+    before = plugin.read_bytes()
+    env = {**os.environ, "HOME": str(home)}
+
+    first = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert first.returncode == 0
+    backup = plugin.parent / "agent-mail.js.pre-zcode-r5"
+    assert plugin.is_symlink()
+    assert plugin.resolve() == install_dir / "agent-mail-tools" / "agent-mail.opencode-plugin.js"
+    assert backup.is_file() and not backup.is_symlink()
+    assert backup.read_bytes() == before
+    assert (backup.stat().st_mode & 0o777) == 0o600
+
+    second = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert second.returncode == 0
+    assert plugin.is_symlink()
+    assert backup.read_bytes() == before
+
+
 def test_doctor_detects_pending_herdr_onboarding():
     doctor = (ROOT / "doctor.sh").read_text()
 

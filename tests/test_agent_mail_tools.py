@@ -117,6 +117,186 @@ def test_notification_resolves_registered_instance(tmp_path):
     )
 
 
+def test_notification_identity_rejects_retired_registry(tmp_path):
+    module = _load_mail_send()
+    module.REGISTRY_DIR = tmp_path
+    registry = tmp_path / module.slugify(PROJECT)
+    registry.mkdir()
+    (registry / "zcode--i-aaaaaaaaaaaaaaaaaaaaaaaaaa.json").write_text(json.dumps({
+        "project_key": PROJECT, "name": "Luna", "agent": "zcode",
+        "instance": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "status": "retired",
+        "retired_at": "2026-08-12T00:00:00Z",
+    }))
+
+    assert module._notification_identity("Luna", PROJECT) is None
+
+
+@pytest.mark.parametrize(
+    "descriptor_change",
+    [
+        {"state": "retired"},
+        {"mail_name": "StaleLuna"},
+        {"mail_project": "/other/project"},
+        {"mail_instance": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"},
+        {"mail_agent": "opencode"},
+    ],
+)
+def test_managed_notification_never_falls_back_from_invalid_descriptor(
+    monkeypatch, tmp_path, descriptor_change,
+):
+    module = _load_mail_send()
+    descriptors = tmp_path / "descriptors.json"
+    instance = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    record = {
+        "session": "demo", "pane_id": "w1:p1", "agent": "zcode",
+        "kind": "opencode", "instance_id": instance, "name": instance,
+        "state": "active", "workdir": "/worktree", "mail_agent": "zcode",
+        "mail_instance": instance, "mail_name": "Luna", "mail_project": PROJECT,
+    }
+    record.update(descriptor_change)
+    descriptors.write_text(json.dumps({
+        "schema": 2, "descriptors": {f"instance|{instance}": record},
+    }))
+    monkeypatch.setattr(module, "LAUNCH_DESCRIPTORS_PATH", str(descriptors), raising=False)
+    monkeypatch.setattr(
+        module, "_select_notify_targets",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("managed identity不得降级到legacy fallback")
+        ),
+    )
+
+    candidates = [("demo", "w1:p1", "/worktree", True, True, instance, "opencode")]
+    assert module._managed_notify_target(
+        candidates, PROJECT, "Luna", "zcode", instance,
+    ) == []
+
+
+def test_managed_notification_requires_unique_exact_live_runtime(monkeypatch, tmp_path):
+    module = _load_mail_send()
+    descriptors = tmp_path / "descriptors.json"
+    instance = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    descriptor = {
+        "session": "demo", "pane_id": "w1:p1", "agent": "zcode",
+        "kind": "opencode", "instance_id": instance, "name": instance,
+        "state": "active", "workdir": "/worktree", "mail_agent": "zcode",
+        "mail_instance": instance, "mail_name": "Luna", "mail_project": PROJECT,
+    }
+    descriptors.write_text(json.dumps({
+        "schema": 2, "descriptors": {f"instance|{instance}": descriptor},
+    }))
+    monkeypatch.setattr(module, "LAUNCH_DESCRIPTORS_PATH", str(descriptors), raising=False)
+    stale = [("demo", "w1:p1", "/worktree", True, True, "old-name", "opencode")]
+    exact = [("demo", "w1:p1", "/worktree", True, True, instance, "opencode")]
+
+    assert module._managed_notify_target(stale, PROJECT, "Luna", "zcode", instance) == []
+    assert module._managed_notify_target(exact, PROJECT, "Luna", "zcode", instance) == [
+        ("demo", "w1:p1", "/worktree", False)
+    ]
+
+
+def test_duplicate_managed_descriptors_are_ambiguous(monkeypatch, tmp_path):
+    module = _load_mail_send()
+    descriptors = tmp_path / "descriptors.json"
+    instance = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    record = {
+        "session": "demo", "pane_id": "w1:p1", "agent": "zcode",
+        "kind": "opencode", "instance_id": instance, "name": instance,
+        "state": "active", "workdir": "/worktree", "mail_agent": "zcode",
+        "mail_instance": instance, "mail_name": "Luna", "mail_project": PROJECT,
+    }
+    duplicate = {**record, "session": "other", "pane_id": "w1:p2"}
+    descriptors.write_text(json.dumps({
+        "schema": 2,
+        "descriptors": {f"instance|{instance}": record, "duplicate": duplicate},
+    }))
+    monkeypatch.setattr(module, "LAUNCH_DESCRIPTORS_PATH", str(descriptors), raising=False)
+    candidates = [
+        ("demo", "w1:p1", "/worktree", True, True, instance, "opencode"),
+        ("other", "w1:p2", "/worktree", True, True, instance, "opencode"),
+    ]
+
+    assert module._managed_notify_target(
+        candidates, PROJECT, "Luna", "zcode", instance,
+    ) == []
+
+
+def test_notify_pane_managed_identity_prompts_only_exact_live_runtime(
+    monkeypatch, tmp_path,
+):
+    module = _load_mail_send()
+    herdr = tmp_path / "herdr"
+    herdr.touch()
+    project = tmp_path / "project"
+    worktree = tmp_path / "worktree"
+    session_dir = tmp_path / "session"
+    for path in (project, worktree, session_dir):
+        path.mkdir()
+    instance = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    descriptors = tmp_path / "descriptors.json"
+    descriptors.write_text(json.dumps({"schema": 2, "descriptors": {
+        f"instance|{instance}": {
+            "session": "demo", "pane_id": "w1:p1", "agent": "zcode",
+            "kind": "opencode", "instance_id": instance, "name": instance,
+            "state": "active", "workdir": str(worktree),
+            "mail_agent": "zcode", "mail_instance": instance,
+            "mail_name": "Luna", "mail_project": str(project),
+        },
+    }}))
+    monkeypatch.setattr(module, "HERDR_BIN", str(herdr))
+    monkeypatch.setattr(module, "LAUNCH_DESCRIPTORS_PATH", str(descriptors))
+    monkeypatch.setattr(module, "_load_bindings", lambda: {})
+    monkeypatch.setattr(module, "_recipient_typing", lambda *_args: False)
+    monkeypatch.setattr(
+        module, "_session_rows",
+        lambda _env: [{"name": "demo", "running": True, "directory": str(session_dir)}],
+    )
+    prompts = []
+    runtime_name = {"value": "stale-luna"}
+
+    def run(args, **_kwargs):
+        if args[-2:] == ["api", "snapshot"]:
+            return module.subprocess.CompletedProcess(args, 0, json.dumps({
+                "result": {"snapshot": {
+                    "panes": [{
+                        "pane_id": "w1:p1", "agent": "opencode",
+                        "cwd": str(worktree), "agent_status": "idle",
+                    }],
+                    "agents": [{
+                        "pane_id": "w1:p1", "agent": "opencode",
+                        "name": runtime_name["value"],
+                    }],
+                }},
+            }), "")
+        if "prompt" in args:
+            prompts.append(args)
+            return module.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    module._notify_pane(
+        "zcode", instance, 900, "stale", str(project),
+        mail_name="Luna",
+    )
+    assert prompts == []
+
+    runtime_name["value"] = instance
+    pane = module._session_panes("demo", module._herdr_env())[0]
+    assert pane["_runtime_name"] == instance
+    assert pane["_runtime_kind"] == "opencode"
+    assert module._managed_notify_target(
+        [("demo", "w1:p1", str(worktree), False, False,
+          pane["_runtime_name"], pane["_runtime_kind"])],
+        str(project), "Luna", "zcode", instance,
+    ) == [("demo", "w1:p1", str(worktree), False)]
+    module._notify_pane(
+        "zcode", instance, 901, "exact", str(project),
+        mail_name="Luna",
+    )
+    assert len(prompts) == 1
+    assert prompts[0][3:6] == ["agent", "prompt", "w1:p1"]
+
+
 def test_mcp_call_parses_multiline_sse(monkeypatch):
     module = _load_am_common()
     urls = []
