@@ -1074,7 +1074,7 @@ _OPENCODE_COMMAND_LIST_MARKERS = (
 
 
 def _opencode_marker_count(screen: str, markers: tuple[str, ...]) -> int:
-    return sum(marker in screen for marker in markers)
+    return sum(screen.count(marker) for marker in markers)
 
 
 def _opencode_theme_list_visible(screen: str) -> bool:
@@ -1222,9 +1222,7 @@ def apply_opencode_mode_to_pane(
                     _opencode_marker_count(
                         screen, _OPENCODE_COMMAND_LIST_MARKERS,
                     ) > markers_before
-                    or _opencode_option_count(
-                        screen, f"Switch to {target_mode} mode",
-                    ) > option_before[target_mode]
+                    or _target_mode(screen) is not None
                 )
             ),
             "OpenCode 命令弹层未关闭", timeout=1.0,

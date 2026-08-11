@@ -303,6 +303,47 @@ def test_opencode_mode_picker_rejects_full_dialog_left_after_action(monkeypatch)
     ]
 
 
+def test_opencode_mode_picker_rejects_flipped_action_left_after_enter(monkeypatch):
+    calls = []
+    read_count = 0
+
+    def fake_run(args, timeout=10):
+        nonlocal read_count
+        calls.append(list(args))
+        if "read" in args:
+            read_count += 1
+            screens = {
+                1: "preserved draft",
+                2: (
+                    "preserved draft\nCommands                esc"
+                    "\nSwitch session\nNew session"
+                ),
+                3: (
+                    "preserved draft\nCommands                esc"
+                    "\nSwitch to dark mode"
+                ),
+                4: (
+                    "preserved draft\nCommands                esc"
+                    "\nSwitch to light mode"
+                ),
+            }
+            if read_count in screens:
+                return screens[read_count]
+            raise RuntimeError("flipped action popup stayed open")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    monkeypatch.setattr(herdr_client.time, "sleep", lambda _seconds: None)
+
+    result = herdr_client.apply_opencode_mode_to_pane("demo", "w1:p4", "dark")
+
+    assert result == {"error": "flipped action popup stayed open"}
+    assert any(call[-1:] == ["Enter"] for call in calls)
+    assert calls[-1] == [
+        "--session", "demo", "pane", "send-keys", "w1:p4", "esc",
+    ]
+
+
 def test_opencode_mode_picker_rejects_invalid_mode(monkeypatch):
     calls = []
     monkeypatch.setattr(
