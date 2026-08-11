@@ -270,18 +270,27 @@ def _load_matching(request: MaintenanceRequest) -> dict[str, Any]:
     return value
 
 
-def _load_existing(request: MaintenanceRequest) -> dict[str, Any] | None:
+def _load_existing(
+    request: MaintenanceRequest, *, allow_other_terminal_request: bool = False,
+) -> dict[str, Any] | None:
     try:
         value = upgrade_journal.load_journal(root=request.plan.journal_root)
     except upgrade_journal.UpgradeJournalError as exc:
         if exc.code == "journal_missing":
             return None
         _fail("journal_failed")
-    if (
-        value.get("request_id") != request.request_id
-        or value.get("target_digest") != request.target.artifact_digest
+    identity_matches = (
+        value.get("request_id") == request.request_id
+        and value.get("target_digest") == request.target.artifact_digest
+    )
+    if not identity_matches and not (
+        allow_other_terminal_request
+        and value.get("request_id") != request.request_id
+        and value.get("stage") in upgrade_journal.TERMINAL_STAGES
     ):
         _fail("journal_failed")
+    if not identity_matches:
+        return value
     bound = (
         value.get("target_source_sha"),
         value.get("target_generation"),
@@ -566,14 +575,21 @@ def _rollback(
     _advance(request, "rolled_back")
 
 
-def _entry_journal(request: MaintenanceRequest) -> dict[str, Any] | None:
-    journal = _load_existing(request)
+def _entry_journal(
+    request: MaintenanceRequest,
+) -> tuple[dict[str, Any] | None, bool]:
+    journal = _load_existing(request, allow_other_terminal_request=True)
     if journal is None:
         if inspect_current_generation(request.plan) != request.previous:
             _fail("current_drift")
-        return None
+        return None, False
+    other_terminal_request = journal["request_id"] != request.request_id
+    if other_terminal_request:
+        if inspect_current_generation(request.plan) != request.previous:
+            _fail("current_drift")
+        return journal, True
     if journal["stage"] in upgrade_journal.TERMINAL_STAGES:
-        return journal
+        return journal, False
     current = inspect_current_generation(request.plan)
     stage = journal["stage"]
     intent = journal["intent"]
@@ -594,7 +610,7 @@ def _entry_journal(request: MaintenanceRequest) -> dict[str, Any] | None:
         )
         if current != expected:
             _fail("current_drift")
-    return journal
+    return journal, False
 
 
 def _drive(
@@ -719,22 +735,34 @@ def _execute_with_lease(
     maintenance_controller.require_controller_lease(
         plan=request.plan, lease=controller_lease
     )
-    journal = _entry_journal(request)
-    if journal is not None and journal["stage"] == "committed":
+    journal, archive_previous = _entry_journal(request)
+    if not archive_previous and journal is not None and journal["stage"] == "committed":
         target_binding = _read_binding(request, "target", read_binding)
         return {
             "journal": journal,
             "evidence_path": target_binding.evidence_path,
             "evidence_sha256": target_binding.evidence_sha256,
         }
-    if journal is not None and journal["stage"] == "rolled_back":
+    if not archive_previous and journal is not None and journal["stage"] == "rolled_back":
         primary = journal.get("primary_error_code")
         if type(primary) is not str:
             _fail("journal_failed")
         raise _RolledBackError(primary)
     _read_binding(request, "previous", read_binding)
-    if journal is None:
+    if journal is None or archive_previous:
         _read_active_binding(request, "previous", read_binding)
+    if archive_previous:
+        assert journal is not None
+        try:
+            upgrade_journal.archive_terminal_journal(
+                root=request.plan.journal_root,
+                request_id=journal["request_id"],
+                target_digest=journal["target_digest"],
+            )
+        except upgrade_journal.UpgradeJournalError:
+            _fail("journal_failed")
+        journal = None
+    if journal is None:
         journal = _create_journal(request)
     try:
         journal = _drive(

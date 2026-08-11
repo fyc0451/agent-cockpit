@@ -19,6 +19,7 @@ import upgrade_journal
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "1" * 64)
 PREVIOUS = generation_switch.GenerationIdentity("b" * 40, "2" * 64)
+NEXT_TARGET = generation_switch.GenerationIdentity("c" * 40, "3" * 64)
 
 
 def _request(tmp_path: Path, request_id: str = "request-1") -> executor.MaintenanceRequest:
@@ -52,6 +53,31 @@ def _request(tmp_path: Path, request_id: str = "request-1") -> executor.Maintena
             request_id=request_id,
             role="target",
             generation=TARGET,
+        ),
+    )
+
+
+def _next_request(
+    previous: executor.MaintenanceRequest,
+    *,
+    request_id: str = "request-2",
+) -> executor.MaintenanceRequest:
+    target_root = previous.plan.deploy_root / "generations" / NEXT_TARGET.generation_id
+    target_root.mkdir(mode=0o700)
+    return executor.MaintenanceRequest(
+        plan=previous.plan,
+        request_id=request_id,
+        target_version="3.0.0",
+        target=NEXT_TARGET,
+        previous_version=previous.target_version,
+        previous=previous.target,
+        target_root=target_root,
+        snapshot_root=previous.plan.state_root / executor.SNAPSHOT_DIR_NAME / request_id,
+        evidence_path=maintenance_evidence.evidence_binding_path(
+            plan=previous.plan,
+            request_id=request_id,
+            role="target",
+            generation=NEXT_TARGET,
         ),
     )
 
@@ -850,6 +876,79 @@ def test_terminal_response_loss_reentry_is_idempotent_without_mutation(
     assert harness.calls == []
     assert ("prepare_target", None) not in harness.binding_calls
     assert not any(call[0] == "activate" for call in harness.binding_calls)
+    assert list(request.plan.journal_root.glob("upgrade-journal-*.json")) == []
+
+
+def test_two_consecutive_successful_upgrades_archive_first_terminal(
+    tmp_path: Path,
+) -> None:
+    first = _request(tmp_path)
+    first_result = _execute(first, Harness(first))
+    second = _next_request(first)
+    second_result = _execute(second, Harness(second))
+
+    assert first_result["journal"]["stage"] == "committed"
+    assert second_result["journal"]["stage"] == "committed"
+    archived = first.plan.journal_root / upgrade_journal.archive_journal_name(
+        first.request_id, first.target.artifact_digest,
+    )
+    assert archived.is_file()
+    assert upgrade_journal.load_journal(root=first.plan.journal_root)["request_id"] == (
+        second.request_id
+    )
+    assert executor.inspect_current_generation(first.plan) == NEXT_TARGET
+
+
+def test_second_upgrade_rollback_keeps_first_terminal_archive(
+    tmp_path: Path,
+) -> None:
+    first = _request(tmp_path)
+    _execute(first, Harness(first))
+    second = _next_request(first)
+    harness = Harness(second)
+    harness.fail_once = ("start", maintenance_services.MAIL_UNIT)
+
+    with pytest.raises(executor.MaintenanceExecutorError) as exc:
+        _execute(second, harness)
+
+    assert exc.value.code == "start_services_failed"
+    fixed = upgrade_journal.load_journal(root=first.plan.journal_root)
+    assert fixed["request_id"] == second.request_id
+    assert fixed["stage"] == "rolled_back"
+    archived = first.plan.journal_root / upgrade_journal.archive_journal_name(
+        first.request_id, first.target.artifact_digest,
+    )
+    assert archived.is_file()
+    assert executor.inspect_current_generation(first.plan) == first.target
+
+
+def test_terminal_archive_runs_under_injected_controller_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _request(tmp_path)
+    _execute(first, Harness(first))
+    second = _next_request(first)
+    harness = Harness(second)
+    archived_under_lease = False
+    real_archive = upgrade_journal.archive_terminal_journal
+
+    with maintenance_controller.controller_lock(first.plan) as lease:
+        def checked_archive(**kwargs):
+            nonlocal archived_under_lease
+            maintenance_controller.require_controller_lease(
+                plan=first.plan, lease=lease,
+            )
+            archived_under_lease = True
+            return real_archive(**kwargs)
+
+        monkeypatch.setattr(
+            executor.upgrade_journal, "archive_terminal_journal", checked_archive,
+        )
+        assert _execute_with_lease(second, harness, lease)["journal"]["stage"] == (
+            "committed"
+        )
+
+    assert archived_under_lease is True
 
 
 def test_previous_binding_precheck_precedes_fresh_journal_and_external_mutation(
@@ -1036,11 +1135,38 @@ def test_mismatched_existing_journal_has_zero_runner_or_binding_calls(
         target_digest=request.target.artifact_digest,
     )
     harness = Harness(request)
+    fixed = request.plan.journal_root / upgrade_journal.JOURNAL_NAME
+    before = fixed.stat()
 
     with pytest.raises(executor.MaintenanceExecutorError) as exc:
         _execute(request, harness)
 
     assert exc.value.code == "journal_failed"
+    assert harness.calls == []
+    assert harness.binding_calls == []
+    after = fixed.stat()
+    assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+    assert list(request.plan.journal_root.glob("upgrade-journal-*.json")) == []
+
+
+def test_damaged_different_request_journal_is_never_archived(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    upgrade_journal.create_journal(
+        root=request.plan.journal_root,
+        request_id="other-request",
+        target_digest=request.target.artifact_digest,
+    )
+    fixed = request.plan.journal_root / upgrade_journal.JOURNAL_NAME
+    fixed.write_bytes(b"not canonical journal\n")
+    fixed.chmod(0o600)
+    harness = Harness(request)
+
+    with pytest.raises(executor.MaintenanceExecutorError) as exc:
+        _execute(request, harness)
+
+    assert exc.value.code == "journal_failed"
+    assert fixed.read_bytes() == b"not canonical journal\n"
+    assert list(request.plan.journal_root.glob("upgrade-journal-*.json")) == []
     assert harness.calls == []
     assert harness.binding_calls == []
 
