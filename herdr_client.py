@@ -1098,7 +1098,8 @@ def apply_opencode_theme_to_pane(
         # Ctrl+X,T 直接打开独立主题弹层，OpenCode 会保留已有 composer 草稿。
         _run(prefix + ["send-keys", pane_id, "ctrl+x", "t"], timeout=5)
         _wait_opencode_visible(
-            prefix, pane_id, _opencode_theme_list_visible,
+            prefix, pane_id,
+            lambda screen: screen != before and _opencode_theme_list_visible(screen),
             "OpenCode 主题弹层未打开",
         )
         dialog_open = True
@@ -1116,8 +1117,11 @@ def apply_opencode_theme_to_pane(
         _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: not (
-                _opencode_header_visible(screen, "Themes")
-                and _opencode_option_count(screen, theme_name) > option_before
+                _opencode_theme_list_visible(screen)
+                or (
+                    _opencode_header_visible(screen, "Themes")
+                    and _opencode_option_count(screen, theme_name) > option_before
+                )
             ),
             "OpenCode 主题弹层确认后未关闭", timeout=1.0,
         )
@@ -1154,7 +1158,8 @@ def apply_opencode_mode_to_pane(
         }
         _run(prefix + ["send-keys", pane_id, "ctrl+p"], timeout=5)
         _wait_opencode_visible(
-            prefix, pane_id, _opencode_command_list_visible,
+            prefix, pane_id,
+            lambda screen: screen != before and _opencode_command_list_visible(screen),
             "OpenCode 命令弹层未打开",
         )
         dialog_open = True
@@ -1184,10 +1189,13 @@ def apply_opencode_mode_to_pane(
         _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: not (
-                _opencode_header_visible(screen, "Commands")
-                and _opencode_option_count(
-                    screen, f"Switch to {target_mode} mode",
-                ) > option_before[target_mode]
+                _opencode_command_list_visible(screen)
+                or (
+                    _opencode_header_visible(screen, "Commands")
+                    and _opencode_option_count(
+                        screen, f"Switch to {target_mode} mode",
+                    ) > option_before[target_mode]
+                )
             ),
             "OpenCode 命令弹层未关闭", timeout=1.0,
         )
