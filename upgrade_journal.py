@@ -6,6 +6,7 @@ must reload and reconcile the journal before retrying any external mutation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -418,6 +419,88 @@ def _check_identity(value: dict[str, Any], request_id: Any, target_digest: Any) 
         _reject("journal_identity_mismatch")
 
 
+def archive_journal_name(request_id: str, target_digest: str) -> str:
+    """Return the bounded terminal archive name for one exact journal identity."""
+    identity = {"request_id": request_id, "target_digest": target_digest}
+    if not _valid_identity(identity):
+        _reject("journal_identity_invalid")
+    request_hash = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+    return f"upgrade-journal-{request_hash}-{target_digest}.json"
+
+
+def archive_terminal_journal(
+    *, root: Path, request_id: str, target_digest: str
+) -> Path:
+    """Atomically move one exact terminal journal to its immutable archive name."""
+    archive_name = archive_journal_name(request_id, target_digest)
+    path = _path(root)
+    root_fd = _open_root(path, create=False)
+    try:
+        value = _read_from_fd(root_fd)
+        _check_identity(value, request_id, target_digest)
+        if value["stage"] not in TERMINAL_STAGES:
+            _reject("journal_transition_invalid")
+        try:
+            source_before = os.stat(
+                JOURNAL_NAME, dir_fd=root_fd, follow_symlinks=False
+            )
+            os.stat(archive_name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            if exc.filename == archive_name:
+                pass
+            else:
+                _reject("journal_unsafe")
+        except OSError:
+            _reject("journal_unsafe")
+        else:
+            _reject("journal_archive_exists")
+        try:
+            source_after = os.stat(
+                JOURNAL_NAME, dir_fd=root_fd, follow_symlinks=False
+            )
+        except OSError:
+            _reject("journal_unsafe")
+        signature_before = (
+            source_before.st_dev,
+            source_before.st_ino,
+            source_before.st_uid,
+            source_before.st_mode,
+            source_before.st_nlink,
+            source_before.st_size,
+            source_before.st_mtime_ns,
+            source_before.st_ctime_ns,
+        )
+        signature_after = (
+            source_after.st_dev,
+            source_after.st_ino,
+            source_after.st_uid,
+            source_after.st_mode,
+            source_after.st_nlink,
+            source_after.st_size,
+            source_after.st_mtime_ns,
+            source_after.st_ctime_ns,
+        )
+        if (
+            not _secure_file(source_before)
+            or not _secure_file(source_after)
+            or signature_before != signature_after
+        ):
+            _reject("journal_unsafe")
+        try:
+            os.rename(
+                JOURNAL_NAME,
+                archive_name,
+                src_dir_fd=root_fd,
+                dst_dir_fd=root_fd,
+            )
+            os.fsync(root_fd)
+        except OSError:
+            _reject("journal_io_error")
+        return path / archive_name
+    finally:
+        os.close(root_fd)
+
+
 def create_journal(*, root: Path, request_id: str, target_digest: str) -> dict[str, Any]:
     """Create ``prepared`` with the durable stop-services intent."""
     identity = {"request_id": request_id, "target_digest": target_digest}
@@ -663,6 +746,8 @@ __all__ = [
     "TERMINAL_STAGES",
     "UpgradeJournalError",
     "advance_journal",
+    "archive_journal_name",
+    "archive_terminal_journal",
     "begin_rollback_retry",
     "create_journal",
     "load_journal",
