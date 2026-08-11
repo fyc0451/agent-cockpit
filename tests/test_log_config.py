@@ -356,28 +356,101 @@ def test_app_handler_rollover_forces_0600_under_umask_022(tmp_path, monkeypatch)
         assert app.is_file()
         assert stat.S_IMODE(app.stat().st_mode) == 0o600
         assert app.stat().st_nlink == 1
-        # At least one rotated backup may exist after forced small maxBytes.
-        rotated = install / "logs" / f"{log_config.APP_LOG_NAME}.1"
-        if rotated.is_file():
-            assert stat.S_IMODE(rotated.stat().st_mode) in {0o600, 0o644}
-            # base must still be private even if backup mode varies from stdlib
-            assert stat.S_IMODE(app.stat().st_mode) == 0o600
+        # All retained app backups must be exact 0600 / nlink1 after rollover.
+        found_backup = False
+        for index in range(1, handler.backupCount + 1):
+            rotated = install / "logs" / f"{log_config.APP_LOG_NAME}.{index}"
+            if not rotated.exists():
+                continue
+            found_backup = True
+            assert rotated.is_file() and not rotated.is_symlink()
+            assert stat.S_IMODE(rotated.stat().st_mode) == 0o600
+            assert rotated.stat().st_nlink == 1
+        assert found_backup, "expected at least one rotated backup under small maxBytes"
     finally:
         os.umask(old_umask)
 
 
-def test_prepare_app_log_rejects_hardlink(tmp_path, monkeypatch):
+def test_prepare_app_log_rejects_hardlink_without_changing_alias_mode(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
     install = tmp_path / "install"
     install.mkdir()
     log_dir = log_config.ensure_private_log_dir(install / "logs")
     app = log_dir / log_config.APP_LOG_NAME
     app.write_bytes(b"data")
-    os.chmod(app, 0o600)
-    os.link(app, log_dir / "alias")
+    os.chmod(app, 0o644)
+    alias = log_dir / "alias"
+    os.link(app, alias)
+    before_mode = stat.S_IMODE(alias.stat().st_mode)
+    assert before_mode == 0o644
     with pytest.raises(log_config.LogConfigError) as exc:
         log_config.configure_logging(platform="darwin", install_dir=install)
-    assert "硬链接" in str(exc.value) or "不安全" in str(exc.value)
+    assert "硬链接" in str(exc.value)
+    # Must not fchmod the shared inode before rejecting.
+    assert stat.S_IMODE(alias.stat().st_mode) == before_mode == 0o644
+    assert stat.S_IMODE(app.stat().st_mode) == 0o644
+
+
+def test_app_rollover_precheck_rejects_hardlinked_backup_zero_mutation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
+    install = tmp_path / "install"
+    install.mkdir()
+    log_config.configure_logging(platform="darwin", install_dir=install)
+    log_dir = install / "logs"
+    app = log_dir / log_config.APP_LOG_NAME
+    base_bytes = app.read_bytes()
+    slot1 = log_dir / f"{log_config.APP_LOG_NAME}.1"
+    slot1.write_bytes(b"backup-one")
+    os.chmod(slot1, 0o600)
+    os.link(slot1, log_dir / "slot1-alias")
+    handler = logging.getLogger().handlers[0]
+    with pytest.raises(log_config.LogConfigError):
+        handler.doRollover()
+    assert app.read_bytes() == base_bytes
+    assert slot1.read_bytes() == b"backup-one"
+    assert slot1.stat().st_nlink == 2
+
+
+def test_app_rollover_precheck_rejects_directory_slot_with_valid_sibling(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
+    install = tmp_path / "install"
+    install.mkdir()
+    log_config.configure_logging(platform="darwin", install_dir=install)
+    log_dir = install / "logs"
+    app = log_dir / log_config.APP_LOG_NAME
+    base_bytes = app.read_bytes()
+    slot1 = log_dir / f"{log_config.APP_LOG_NAME}.1"
+    slot1.write_bytes(b"valid-backup")
+    os.chmod(slot1, 0o600)
+    slot2 = log_dir / f"{log_config.APP_LOG_NAME}.2"
+    slot2.mkdir()
+    handler = logging.getLogger().handlers[0]
+    with pytest.raises(log_config.LogConfigError):
+        handler.doRollover()
+    assert app.read_bytes() == base_bytes
+    assert slot1.read_bytes() == b"valid-backup"
+    assert slot2.is_dir()
+    assert not (log_dir / f"{log_config.APP_LOG_NAME}.3").exists()
+
+
+def test_configure_rejects_preexisting_unsafe_app_backup(tmp_path, monkeypatch):
+    monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
+    install = tmp_path / "install"
+    install.mkdir()
+    log_dir = log_config.ensure_private_log_dir(install / "logs")
+    app = log_dir / log_config.APP_LOG_NAME
+    app.write_bytes(b"ok")
+    os.chmod(app, 0o600)
+    bad = log_dir / f"{log_config.APP_LOG_NAME}.1"
+    bad.mkdir()
+    with pytest.raises(log_config.LogConfigError):
+        log_config.configure_logging(platform="darwin", install_dir=install)
 
 
 def test_rotate_rejects_directory_slot_with_existing_backup_unchanged(tmp_path):
