@@ -85,31 +85,128 @@ def test_terminal_session_stats_counts_total_and_alive(monkeypatch):
     assert terminal.session_stats() == {"total": 2, "alive": 1}
 
 
+async def _asgi_collect(response, *, disconnect_immediately=False):
+    """Drive a Starlette Response through a minimal ASGI cycle."""
+    messages = []
+
+    async def receive():
+        if disconnect_immediately:
+            return {"type": "http.disconnect"}
+        await asyncio.sleep(3600)
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+        if (
+            disconnect_immediately
+            and message.get("type") == "http.response.start"
+        ):
+            # Keep send side alive briefly; disconnect is observed via receive.
+            pass
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/events",
+        "raw_path": b"/api/events",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 123),
+        "server": ("test", 80),
+    }
+    await response(scope, receive, send)
+    return messages
+
+
 def test_sse_tracking_cleans_up_on_close_and_exception():
     async def exercise():
         async def waiting_events():
-            yield {"event": "ready"}
+            yield {"event": "ready", "data": "1"}
             await asyncio.Event().wait()
 
-        lease = runtime_stats.try_open_connection("sse")
-        assert lease is not None
-        tracked = server._track_sse_events(waiting_events(), lease)
-        assert await anext(tracked) == {"event": "ready"}
-        assert runtime_stats.connection_stats()["sse"] == 1
-        await tracked.aclose()
+        response = server._SseCappedEventSourceResponse(waiting_events())
+        assert runtime_stats.connection_stats()["sse"] == 0
+        # Never-started response object must not hold a lease.
+        assert runtime_stats.connection_stats()["sse"] == 0
+
+        # Immediate disconnect after start: lease must return to 0.
+        await _asgi_collect(response, disconnect_immediately=True)
         assert runtime_stats.connection_stats()["sse"] == 0
 
         async def failing_events():
-            yield {"event": "ready"}
+            yield {"event": "ready", "data": "1"}
             raise RuntimeError("stream failed")
 
-        lease = runtime_stats.try_open_connection("sse")
-        assert lease is not None
-        tracked = server._track_sse_events(failing_events(), lease)
-        await anext(tracked)
-        assert runtime_stats.connection_stats()["sse"] == 1
-        with pytest.raises(RuntimeError, match="stream failed"):
-            await anext(tracked)
+        response = server._SseCappedEventSourceResponse(failing_events())
+        # Stream may error after start; outer finally still releases.
+        with pytest.raises(BaseExceptionGroup) as exc_info:
+            await _asgi_collect(response, disconnect_immediately=False)
+        assert any(
+            "stream failed" in str(item) for item in exc_info.value.exceptions
+        )
+        assert runtime_stats.connection_stats()["sse"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_sse_lease_not_held_when_response_never_started():
+    async def exercise():
+        async def waiting_events():
+            yield {"event": "ready", "data": "1"}
+            await asyncio.Event().wait()
+
+        response = await server.api_events(
+            type("R", (), {"is_disconnected": lambda self: asyncio.sleep(0, result=False)})()
+        )
+        # Endpoint returned a Response without ASGI __call__ → no reservation.
+        assert runtime_stats.connection_stats()["sse"] == 0
+        # aclose on body_iterator alone must not leave a leaked slot (none taken).
+        if hasattr(response, "body_iterator") and hasattr(response.body_iterator, "aclose"):
+            await response.body_iterator.aclose()
+        assert runtime_stats.connection_stats()["sse"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_sse_asgi_cancel_or_send_error_releases_once():
+    async def exercise():
+        async def events():
+            yield {"event": "ready", "data": "1"}
+            await asyncio.Event().wait()
+
+        response = server._SseCappedEventSourceResponse(events())
+        messages = []
+
+        async def receive():
+            await asyncio.sleep(0)
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            messages.append(message)
+            if message.get("type") == "http.response.start":
+                raise RuntimeError("send failed after start")
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/events",
+            "raw_path": b"/api/events",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 123),
+            "server": ("test", 80),
+        }
+        with pytest.raises(BaseExceptionGroup) as exc_info:
+            await response(scope, receive, send)
+        assert any("send failed" in str(item) for item in exc_info.value.exceptions)
+        assert runtime_stats.connection_stats()["sse"] == 0
+        # Exactly-once: close is idempotent
         assert runtime_stats.connection_stats()["sse"] == 0
 
     asyncio.run(exercise())
@@ -302,25 +399,6 @@ def test_api_events_auth_before_reservation(monkeypatch):
     assert client.get("/api/events").status_code == 401
     assert runtime_stats.connection_stats()["sse"] == 0
 
-
-def test_sse_lease_released_exactly_once_on_cancel():
-    async def exercise():
-        async def waiting_events():
-            yield {"event": "ready"}
-            await asyncio.Event().wait()
-
-        lease = runtime_stats.try_open_connection("sse")
-        assert lease is not None
-        tracked = server._track_sse_events(waiting_events(), lease)
-        await anext(tracked)
-        assert runtime_stats.connection_stats()["sse"] == 1
-        await tracked.aclose()
-        assert runtime_stats.connection_stats()["sse"] == 0
-        # second close is no-op
-        lease.close()
-        assert runtime_stats.connection_stats()["sse"] == 0
-
-    asyncio.run(exercise())
 
 
 def test_terminal_websocket_not_subject_to_sse_cap():

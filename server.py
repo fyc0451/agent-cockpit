@@ -6600,27 +6600,43 @@ async def _poll_message_state() -> None:
         await asyncio.sleep(1)
 
 
-async def _track_sse_events(events, lease):
-    """Yield SSE events while holding a pre-acquired connection lease."""
-    try:
-        async for event in events:
-            yield event
-    finally:
-        lease.close()
+class _SseCappedEventSourceResponse(EventSourceResponse):
+    """EventSourceResponse whose SSE lease is owned by the full ASGI call.
+
+    Reservation happens inside ``__call__`` (not in the endpoint body) so a
+    response object that is never started cannot leak a slot. The outer
+    ``finally`` always releases exactly once, including cancel/disconnect and
+    failures before the body iterator is entered.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        lease = runtime_stats.try_open_connection("sse")
+        if lease is None:
+            body = b'{"detail":"too many concurrent event streams"}'
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 429,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"retry-after", b"5"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            lease.close()
 
 
 @app.get("/api/events")
 async def api_events(request: Request):
     """把共享轮询缓存中的变化推送给浏览器。"""
-    # Auth already enforced by middleware; reserve SSE slot before streaming.
-    sse_lease = runtime_stats.try_open_connection("sse")
-    if sse_lease is None:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "too many concurrent event streams"},
-            headers={"Retry-After": "5"},
-        )
-
+    # Auth already enforced by middleware. SSE slot is reserved only when the
+    # ASGI response actually starts (see _SseCappedEventSourceResponse).
     last_revision = -1
     last_message_revision = -1
 
@@ -6671,11 +6687,7 @@ async def api_events(request: Request):
                 last_message_revision = message_state["revision"]
             await asyncio.sleep(1)
 
-    async def event_gen():
-        async for event in _track_sse_events(event_stream(), sse_lease):
-            yield event
-
-    return EventSourceResponse(event_gen())
+    return _SseCappedEventSourceResponse(event_stream())
 
 
 # ── 静态前端 ────────────────────────────────────────────────────
