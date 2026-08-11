@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,13 @@ import maintenance_runtime
 import maintenance_services
 import upgrade_journal
 import upgrade_snapshot
+
+
+@pytest.fixture(autouse=True)
+def _pin_linux_platform_for_runtime_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """execute() requires linux; pure fakes must pin under darwin runners."""
+    monkeypatch.setattr(maintenance_executor.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
 
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "1" * 64)
