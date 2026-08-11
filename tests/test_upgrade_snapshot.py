@@ -94,6 +94,7 @@ def test_empty_sources_seal_exact_canonical_closed_inventory(
     for name, reason in upgrade_snapshot.PRESERVE_REASONS.items():
         row = _entry(result, name)
         assert row["policy"] == "preserve_in_place"
+        assert row["kind"] == "dir"
         assert row["reason"] == reason
         assert row["snapshot_relpath"] is None
 
@@ -128,7 +129,7 @@ def test_sqlite_online_backup_keeps_live_wal_sidecars_unchanged(
     writer.execute("CREATE TABLE tasks(id INTEGER PRIMARY KEY, value TEXT)")
     writer.execute("INSERT INTO tasks(value) VALUES ('kept')")
     writer.commit()
-    os.chmod(source, 0o600)
+    os.chmod(source, 0o644)
     wal = Path(f"{source}-wal")
     shm = Path(f"{source}-shm")
     before_wal = (wal.read_bytes(), wal.stat().st_mtime_ns)
@@ -141,6 +142,7 @@ def test_sqlite_online_backup_keeps_live_wal_sidecars_unchanged(
     row = _entry(result, "tasks")
     target = result["snapshot_root"] / row["snapshot_relpath"]
     assert row["capture"] == "sqlite_backup"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert not Path(f"{target}-wal").exists()
     assert not Path(f"{target}-shm").exists()
     with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as copied:
@@ -179,14 +181,30 @@ def test_preserve_directories_are_recorded_but_never_copied(
     upgrade = runtime_tree["data"] / "upgrade"
     for directory in (worktrees, upgrade, runtime_tree["uploads"]):
         directory.mkdir(exist_ok=True, mode=0o700)
-        os.chmod(directory, 0o700)
+        os.chmod(directory, 0o775 if directory == runtime_tree["uploads"] else 0o755)
         (directory / "must-stay-live").write_text("live", encoding="ascii")
 
     result = _create(runtime_tree)
 
     assert not list(result["snapshot_root"].rglob("must-stay-live"))
     for name in upgrade_snapshot.PRESERVE_REASONS:
-        assert _entry(result, name)["source_state"] == "present"
+        row = _entry(result, name)
+        assert row["source_state"] == "present"
+        assert row["kind"] == "dir"
+
+
+def test_undeclared_source_mode_rejects_writable_but_allows_readable(
+    runtime_tree: dict[str, Path],
+) -> None:
+    tasks = runtime_tree["data"] / "tasks.sqlite3"
+    with sqlite3.connect(tasks) as connection:
+        connection.execute("CREATE TABLE tasks(id INTEGER PRIMARY KEY)")
+    os.chmod(tasks, 0o666)
+
+    with pytest.raises(upgrade_snapshot.SnapshotError) as exc_info:
+        _create(runtime_tree)
+
+    assert exc_info.value.code == "backup_snapshot_unsafe"
 
 
 @pytest.mark.parametrize("unsafe", ["symlink", "mode", "directory"])
@@ -264,6 +282,49 @@ def test_entry_limit_and_inventory_inputs_reject_bool_or_oversize(
             source_sha=SOURCE_SHA,
             target_digest=TARGET_DIGEST,
         )
+    assert exc_info.value.code == "backup_inventory_invalid"
+
+
+def test_controller_ids_follow_h1_bounded_string_contract(
+    runtime_tree: dict[str, Path],
+) -> None:
+    result = upgrade_snapshot.create_backup_snapshot(
+        snapshot_root=runtime_tree["data"].parent / "snapshot",
+        snapshot_id="controller snapshot 42",
+        request_id="job:42/no-prefix-required",
+        source_sha=SOURCE_SHA,
+        target_digest=TARGET_DIGEST,
+    )
+    assert result["inventory"]["snapshot_id"] == "controller snapshot 42"
+    assert result["inventory"]["request_id"] == "job:42/no-prefix-required"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("snapshot_id", True),
+        ("request_id", True),
+        ("snapshot_id", "bad\nvalue"),
+        ("request_id", "bad\x00value"),
+        ("snapshot_id", "x" * 201),
+        ("request_id", "x" * 201),
+        ("snapshot_id", ""),
+        ("request_id", ""),
+    ],
+)
+def test_controller_ids_reject_bool_control_empty_or_oversize(
+    runtime_tree: dict[str, Path], field: str, value: object
+) -> None:
+    kwargs = {
+        "snapshot_root": runtime_tree["data"].parent / "snapshot",
+        "snapshot_id": "safe-snapshot",
+        "request_id": "safe-request",
+        "source_sha": SOURCE_SHA,
+        "target_digest": TARGET_DIGEST,
+    }
+    kwargs[field] = value
+    with pytest.raises(upgrade_snapshot.SnapshotError) as exc_info:
+        upgrade_snapshot.create_backup_snapshot(**kwargs)
     assert exc_info.value.code == "backup_inventory_invalid"
 
 

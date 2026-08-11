@@ -33,9 +33,6 @@ SQLITE_BACKUP_DEADLINE_SECONDS = 30.0
 
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-_SNAPSHOT_ID_RE = re.compile(r"snapshot-[A-Za-z0-9][A-Za-z0-9._-]{0,119}\Z")
-_REQUEST_ID_RE = re.compile(r"request-[A-Za-z0-9][A-Za-z0-9._-]{0,119}\Z")
-
 _EXPECTED_STORE_LAYOUT = {
     "settings": ("data", "settings.json", "file"),
     "tasks": ("data", "tasks.sqlite3", "file"),
@@ -143,6 +140,19 @@ def _directory_is_private(path: Path) -> bool:
     )
 
 
+def _source_directory_is_safe(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and not path.is_symlink()
+        and not info.st_mode & 0o022
+    )
+
+
 def _owned_directory_identity(path: Path) -> tuple[int, int] | None:
     try:
         info = path.lstat()
@@ -190,14 +200,21 @@ def _validate_directory_chain(boundary: Path, parent: Path) -> None:
             return
         except OSError:
             _reject("backup_snapshot_unsafe")
-        if not _directory_is_private(current):
+        if not _source_directory_is_safe(current):
             _reject("backup_snapshot_unsafe")
 
 
-def _leaf_info(path: Path, boundary: Path, *, kind: str) -> os.stat_result | None:
+def _source_mode(name: str) -> int | None:
+    return runtime_paths.STORES[name][4]
+
+
+def _leaf_info(
+    path: Path, boundary: Path, *, kind: str, name: str
+) -> os.stat_result | None:
     if not _canonical_absolute(path):
         _reject("backup_snapshot_unsafe")
-    _validate_directory_chain(boundary, path.parent if kind == "file" else path)
+    if kind == "file" or path != boundary:
+        _validate_directory_chain(boundary, path.parent)
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -205,12 +222,14 @@ def _leaf_info(path: Path, boundary: Path, *, kind: str) -> os.stat_result | Non
     except OSError:
         _reject("backup_snapshot_unsafe")
     expected_type = stat.S_ISREG if kind == "file" else stat.S_ISDIR
-    expected_mode = 0o600 if kind == "file" else 0o700
+    mode = stat.S_IMODE(info.st_mode)
+    declared_mode = _source_mode(name) if kind == "file" else None
     if (
         not expected_type(info.st_mode)
         or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != expected_mode
         or (kind == "file" and info.st_nlink != 1)
+        or (kind == "file" and declared_mode is not None and mode != declared_mode)
+        or (kind == "file" and declared_mode is None and bool(mode & 0o022))
     ):
         _reject("backup_snapshot_unsafe")
     return info
@@ -292,7 +311,9 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def _safe_file_info(fd: int, path: Path, *, max_bytes: int) -> os.stat_result:
+def _safe_file_info(
+    fd: int, path: Path, *, max_bytes: int, source_mode: int | None
+) -> os.stat_result:
     info = os.fstat(fd)
     try:
         current = path.lstat()
@@ -301,9 +322,10 @@ def _safe_file_info(fd: int, path: Path, *, max_bytes: int) -> os.stat_result:
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o600
         or info.st_nlink != 1
         or info.st_size > max_bytes
+        or (source_mode is not None and stat.S_IMODE(info.st_mode) != source_mode)
+        or (source_mode is None and bool(stat.S_IMODE(info.st_mode) & 0o022))
     ):
         if info.st_size > max_bytes:
             _reject("snapshot_limit_exceeded")
@@ -314,7 +336,7 @@ def _safe_file_info(fd: int, path: Path, *, max_bytes: int) -> os.stat_result:
 
 
 def _copy_stable_file_once(
-    source: Path, destination: Path, *, max_bytes: int
+    source: Path, destination: Path, *, max_bytes: int, source_mode: int | None
 ) -> tuple[int, str]:
     source_flags = (
         os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -326,7 +348,9 @@ def _copy_stable_file_once(
     temp_fd = -1
     temp_path: Path | None = None
     try:
-        before = _safe_file_info(source_fd, source, max_bytes=max_bytes)
+        before = _safe_file_info(
+            source_fd, source, max_bytes=max_bytes, source_mode=source_mode
+        )
         temp_fd, raw_temp = tempfile.mkstemp(
             prefix=f".{destination.name}.", dir=destination.parent
         )
@@ -392,11 +416,16 @@ def _copy_stable_file_once(
 
 
 def _copy_stable_file(
-    source: Path, destination: Path, *, max_bytes: int
+    source: Path, destination: Path, *, max_bytes: int, source_mode: int | None
 ) -> tuple[int, str]:
     for _attempt in range(STABLE_FILE_ATTEMPTS):
         try:
-            return _copy_stable_file_once(source, destination, max_bytes=max_bytes)
+            return _copy_stable_file_once(
+                source,
+                destination,
+                max_bytes=max_bytes,
+                source_mode=source_mode,
+            )
         except _SourceChanged:
             continue
     _reject("snapshot_source_unstable")
@@ -437,7 +466,11 @@ def _hash_owned_file(path: Path, *, max_bytes: int) -> tuple[int, str]:
 
 
 def _backup_sqlite(
-    source: Path, destination: Path, *, source_info: os.stat_result
+    source: Path,
+    destination: Path,
+    *,
+    source_info: os.stat_result,
+    source_mode: int | None,
 ) -> tuple[int, str]:
     if source_info.st_size > MAX_SQLITE_BYTES:
         _reject("snapshot_limit_exceeded")
@@ -447,7 +480,12 @@ def _backup_sqlite(
     source_fd = -1
     try:
         source_fd = os.open(source, source_flags)
-        opened = _safe_file_info(source_fd, source, max_bytes=MAX_SQLITE_BYTES)
+        opened = _safe_file_info(
+            source_fd,
+            source,
+            max_bytes=MAX_SQLITE_BYTES,
+            source_mode=source_mode,
+        )
     except OSError as exc:
         if source_fd >= 0:
             os.close(source_fd)
@@ -536,10 +574,10 @@ def _backup_sqlite(
 
 def _entry_base(name: str) -> dict[str, Any]:
     if name == "uploads":
-        logical_root, rel, kind = "uploads", ".", "directory"
+        logical_root, rel, kind = "uploads", ".", "dir"
     else:
         logical_root, rel, runtime_kind = _EXPECTED_STORE_LAYOUT[name]
-        kind = "directory" if runtime_kind == "dir" else _file_kind(name)
+        kind = "dir" if runtime_kind == "dir" else _file_kind(name)
     return {
         "name": name,
         "logical_root": logical_root,
@@ -597,11 +635,16 @@ def _validate_inputs(
     source_sha: Any,
     target_digest: Any,
 ) -> Path:
+    def valid_id(value: Any) -> bool:
+        return (
+            type(value) is str
+            and 0 < len(value) <= 200
+            and not any(ord(character) < 32 for character in value)
+        )
+
     if (
-        type(snapshot_id) is not str
-        or _SNAPSHOT_ID_RE.fullmatch(snapshot_id) is None
-        or type(request_id) is not str
-        or _REQUEST_ID_RE.fullmatch(request_id) is None
+        not valid_id(snapshot_id)
+        or not valid_id(request_id)
         or type(source_sha) is not str
         or _GIT_SHA_RE.fullmatch(source_sha) is None
         or type(target_digest) is not str
@@ -689,7 +732,11 @@ def create_backup_snapshot(
     for name in sorted(set(_EXPECTED_STORE_LAYOUT) | {"uploads"}):
         path, boundary = _source_path(name, roots)
         kind = "dir" if name in PRESERVE_REASONS else "file"
-        sources[name] = (path, boundary, _leaf_info(path, boundary, kind=kind))
+        sources[name] = (
+            path,
+            boundary,
+            _leaf_info(path, boundary, kind=kind, name=name),
+        )
     _space_precheck(sources, root.parent)
 
     try:
@@ -714,12 +761,12 @@ def create_backup_snapshot(
         for name in sorted(set(_EXPECTED_STORE_LAYOUT) | {"uploads"}):
             source, boundary, initial_info = sources[name]
             if name in PRESERVE_REASONS:
-                current = _leaf_info(source, boundary, kind="dir")
+                current = _leaf_info(source, boundary, kind="dir", name=name)
                 entries.append(
                     _preserve_entry(name, "present" if current else "absent")
                 )
                 continue
-            current = _leaf_info(source, boundary, kind="file")
+            current = _leaf_info(source, boundary, kind="file", name=name)
             if current is None:
                 entries.append(_absent_entry(name))
                 continue
@@ -729,12 +776,14 @@ def create_backup_snapshot(
                     source,
                     destination,
                     source_info=current,
+                    source_mode=_source_mode(name),
                 )
             else:
                 size, digest = _copy_stable_file(
                     source,
                     destination,
                     max_bytes=_file_limit(name),
+                    source_mode=_source_mode(name),
                 )
             total += size
             if total > MAX_TOTAL_SNAPSHOT_BYTES:
