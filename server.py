@@ -3660,6 +3660,11 @@ def api_tasks():
     return tasks.list_tasks()
 
 
+@app.get("/api/tasks/stats")
+def api_task_stats():
+    return tasks.task_stats()
+
+
 @app.get("/api/tasks/{task_id}")
 def api_task(task_id: str):
     t = tasks.get_task(task_id)

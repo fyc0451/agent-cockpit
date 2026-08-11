@@ -277,6 +277,13 @@ header .spacer{flex:1}
 .attention-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex-wrap:wrap;flex:none}
 .attention-toolbar .spacer{flex:1}
 .attention-toolbar .team-mode-tabs{display:flex}
+.task-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--bd);flex:none}
+.task-stat{min-width:0;padding:2px 12px;border-left:1px solid var(--bd)}
+.task-stat:first-child{border-left:0;padding-left:0}
+.task-stat-label{color:var(--fg3);font-size:10px;margin-bottom:2px}
+.task-stat-value{color:var(--fg);font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.task-stat-meta{color:var(--fg3);font-size:10px;margin-top:1px;overflow-wrap:anywhere}
+.task-stats-state{grid-column:1/-1;color:var(--fg3);font-size:11px;text-align:center;padding:4px}
 .attention-list{flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
 .task-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px;align-items:start}
 .task-session{background:var(--bg2);border:1px solid var(--bd);border-radius:11px;overflow:hidden}
@@ -515,6 +522,9 @@ header .spacer{flex:1}
   .stat-pill{padding:3px 6px}
   .board-wrap{padding:8px}
   .attention-list{padding:7px}
+  .task-stats{grid-template-columns:repeat(2,minmax(0,1fr));padding:7px 8px;row-gap:8px}
+  .task-stat{padding:2px 8px}
+  .task-stat:nth-child(odd){border-left:0;padding-left:0}
   .task-board{grid-template-columns:minmax(0,1fr);gap:7px}
   .task-agent{grid-template-columns:24px minmax(0,1fr) auto;gap:5px 7px;padding:8px 10px}
   .task-agent-icon{grid-row:1 / 3}
@@ -648,6 +658,7 @@ header .spacer{flex:1}
       <button class="sm" id="taskReportBtn" onclick="refreshTaskReports()" data-i18n="attention.report">请求上报</button>
       <button class="icon" onclick="attRefresh()" title="刷新" data-i18n-title="common.refresh">↻</button>
     </div>
+    <div class="task-stats" id="taskStats" aria-live="polite"><div class="task-stats-state">历史任务统计加载中…</div></div>
     <div class="attention-list" id="attentionList" aria-busy="false"><div class="empty" data-i18n="common.loading">加载中…</div></div>
     <div id="sessionsPane" style="display:none;flex:1;min-height:0;flex-direction:column">
       <div style="display:flex;gap:8px;padding:8px;align-items:center;border-bottom:1px solid var(--bd);flex-wrap:wrap">
@@ -1111,7 +1122,7 @@ let BOARD=null, CURRENT_TERM=null, FILE_CWD=null, FILE_PATH=null, FILE_ORIG=null
 let FILE_LOAD_SEQ=0, FILE_APPLIED_CWD=null;
 let CURRENT_PROJ=null, CURRENT_MSG_AGENT=null, SSE=null;
 let ATTENTION=null, CAPABILITIES={}, ATTENTION_TASK_ID=null, PUSH_SUBSCRIPTION=null;
-let ATTENTION_LOAD_SEQ=0, ATTENTION_TASK_SEQ=0, BOARD_LOAD_SEQ=0;
+let ATTENTION_LOAD_SEQ=0, ATTENTION_TASK_SEQ=0, TASK_STATS_LOAD_SEQ=0, BOARD_LOAD_SEQ=0;
 let SERVICE_CLIPBOARD='';
 let LAUNCH_SESSION_DIRS={};
 let SETUP_MODE='develop_review', SETUP_PARTICIPANTS=[], SETUP_AGENT_SEQ=0;
@@ -2051,7 +2062,39 @@ const ATTENTION_ACTION={pane_blocked:'去回复',task_failed:'看错误',task_re
 const TASK_STATUS_LABEL={blocked:'待处理',working:'工作中',done:'已完成',idle:'空闲',unknown:'未知',empty:'无 Agent'};
 const TASK_ROLE_LABEL={lead:'负责人',developer:'开发',reviewer:'复核',researcher:'调研'};
 function taskStatusKey(value,total){return total===0?'empty':(Object.prototype.hasOwnProperty.call(TASK_STATUS_LABEL,value)?value:'unknown')}
+function taskStatCount(value){const n=Number(value);return Number.isFinite(n)&&n>=0?Math.trunc(n):0}
+function fmtTaskDuration(value){
+  const seconds=Number(value);if(!Number.isFinite(seconds)||seconds<0)return'—';
+  if(seconds<60)return(Math.round(seconds*10)/10)+' 秒';
+  if(seconds<3600)return(Math.round(seconds/6)/10)+' 分钟';
+  return(Math.round(seconds/360)/10)+' 小时';
+}
+function renderTaskStats(stats,state='ready'){
+  const box=document.getElementById('taskStats');if(!box)return;
+  if(state==='error'){box.innerHTML='<div class="task-stats-state">统计暂不可用</div>';return}
+  const total=taskStatCount(stats&&stats.total);
+  if(!total){box.innerHTML='<div class="task-stats-state">暂无历史任务</div>';return}
+  const counts=stats.status_counts||{},done=taskStatCount(counts.done),failed=taskStatCount(counts.failed),cancelled=taskStatCount(counts.cancelled);
+  const rawRate=Number(stats.completion_rate),rate=stats.completion_rate!==null&&Number.isFinite(rawRate)?Math.round(Math.min(1,Math.max(0,rawRate))*100)+'%':'—';
+  const durationCount=taskStatCount(stats.duration_count),median=durationCount?fmtTaskDuration(stats.median_duration_seconds):'暂无有效耗时',p95=durationCount?fmtTaskDuration(stats.p95_duration_seconds):'—';
+  box.innerHTML=`<div class="task-stat"><div class="task-stat-label">总数</div><div class="task-stat-value">${total}</div><div class="task-stat-meta">全部历史任务</div></div>
+    <div class="task-stat"><div class="task-stat-label">完成率</div><div class="task-stat-value">${rate}</div><div class="task-stat-meta">已完成 / 终态</div></div>
+    <div class="task-stat"><div class="task-stat-label">完成 / 失败 / 取消</div><div class="task-stat-value">${done} / ${failed} / ${cancelled}</div><div class="task-stat-meta">终态任务</div></div>
+    <div class="task-stat"><div class="task-stat-label">典型耗时</div><div class="task-stat-value">${median}</div><div class="task-stat-meta">P95 ${p95} · ${durationCount} 条有效</div></div>`;
+}
+async function loadTaskStats(){
+  const seq=++TASK_STATS_LOAD_SEQ;
+  try{
+    const stats=await api('/api/tasks/stats');
+    if(seq!==TASK_STATS_LOAD_SEQ)return;
+    renderTaskStats(stats);
+  }catch(e){
+    if(seq!==TASK_STATS_LOAD_SEQ)return;
+    renderTaskStats(null,'error');
+  }
+}
 async function loadAttention(payload){
+  void loadTaskStats();
   const list=document.getElementById('attentionList');
   const seq=++ATTENTION_LOAD_SEQ;
   if(!payload){list?.setAttribute('aria-busy','true');document.getElementById('attentionInfo').textContent='正在刷新…'}
@@ -4726,6 +4769,7 @@ function attShowTasks(){
   document.getElementById('attTasksBtn').classList.add('active');
   document.getElementById('attSessionsBtn').classList.remove('active');
   document.getElementById('attentionList').style.display='';
+  document.getElementById('taskStats').style.display='';
   document.getElementById('sessionsPane').style.display='none';
   loadAttention();
 }
@@ -4734,6 +4778,7 @@ function attShowSessions(){
   document.getElementById('attSessionsBtn').classList.add('active');
   document.getElementById('attTasksBtn').classList.remove('active');
   document.getElementById('attentionList').style.display='none';
+  document.getElementById('taskStats').style.display='none';
   document.getElementById('sessionsPane').style.display='flex';
   loadSessionsView();
 }

@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -400,6 +401,58 @@ def list_tasks(limit: int = 50) -> list[dict[str, Any]]:
             buf = _output_buffers.get(t["id"], [])
             t["output_lines"] = len(buf)
     return out
+
+
+def task_stats() -> dict[str, Any]:
+    """Aggregate durable task history without the task-list display limit."""
+    status_counts = {
+        "pending": 0,
+        "running": 0,
+        "done": 0,
+        "failed": 0,
+        "cancelled": 0,
+    }
+    durations: list[float] = []
+    unknown_count = 0
+    with _db() as con:
+        rows = con.execute(
+            "SELECT status, started_ts, finished_ts FROM tasks"
+        ).fetchall()
+
+    for row in rows:
+        status = row["status"]
+        if status in status_counts:
+            status_counts[status] += 1
+        else:
+            unknown_count += 1
+
+        started = row["started_ts"]
+        finished = row["finished_ts"]
+        if not isinstance(started, (int, float)) or not isinstance(finished, (int, float)):
+            continue
+        if not math.isfinite(started) or not math.isfinite(finished) or finished < started:
+            continue
+        durations.append(finished - started)
+
+    terminal_count = sum(status_counts[state] for state in ("done", "failed", "cancelled"))
+    durations.sort()
+    duration_count = len(durations)
+    return {
+        "total": len(rows),
+        "status_counts": status_counts,
+        "unknown_count": unknown_count,
+        "terminal_count": terminal_count,
+        "completion_rate": (
+            status_counts["done"] / terminal_count if terminal_count else None
+        ),
+        "duration_count": duration_count,
+        "median_duration_seconds": (
+            durations[math.ceil(duration_count * 0.5) - 1] if duration_count else None
+        ),
+        "p95_duration_seconds": (
+            durations[math.ceil(duration_count * 0.95) - 1] if duration_count else None
+        ),
+    }
 
 
 def get_task(task_id: str) -> dict[str, Any] | None:

@@ -2932,6 +2932,35 @@ def test_async_generations_bind_task_actions_and_drop_old_reads():
     assert "aria-busy','false'" in sse
 
 
+def test_task_stats_bar_has_empty_failure_and_responsive_contracts():
+    assert 'id="taskStats"' in HTML
+    assert "暂无历史任务" in HTML
+    assert "统计暂不可用" in HTML
+    assert "总数" in HTML
+    assert "完成率" in HTML
+    assert "完成 / 失败 / 取消" in HTML
+    assert "典型耗时" in HTML
+    assert re.search(
+        r"@media\(max-width:560px\).*?\.task-stats\s*\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)",
+        HTML,
+        re.S,
+    )
+
+    js = _inline_js()
+    load = js.split("async function loadTaskStats(){", 1)[1].split(
+        "async function loadAttention", 1
+    )[0]
+    assert "const seq=++TASK_STATS_LOAD_SEQ" in load
+    assert "if(seq!==TASK_STATS_LOAD_SEQ)return" in load
+    assert "renderTaskStats(null,'error')" in load
+    assert "stats.completion_rate!==null" in js
+    attention = js.split("async function loadAttention(payload){", 1)[1].split(
+        "async function refreshTaskReports", 1
+    )[0]
+    assert "void loadTaskStats()" in attention
+    assert "await loadTaskStats" not in attention
+
+
 def test_mail_deep_link_uses_one_load_and_preserves_focus_request():
     js = _inline_js()
     mail = js.split("async function openMailAttention(slug,messageId){", 1)[1].split(

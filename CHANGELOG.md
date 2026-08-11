@@ -31,6 +31,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A compact historical task-statistics strip in the workbench, backed by an
+  unbounded read-only aggregate for status, completion, and duration percentiles.
 - A read-only project workbench API that combines durable coordination
   assignments with exactly bound, field-restricted Herdr session summaries and
   degrades safely when live Herdr state is unavailable.
