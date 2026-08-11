@@ -5,6 +5,65 @@ import herdr_client
 import pytest
 
 
+def _popup(title, *rows):
+    return "\n".join([
+        f"  ┃       {title}                  esc",
+        *(f"  ┃       {row}" for row in rows),
+    ])
+
+
+def test_theme_popup_region_ignores_background_marker_changes():
+    before = _popup("Themes", "tokyonight", "nightowl") + "\nold transcript"
+    current = before + " now mentions cobalt2"
+    regions = herdr_client._opencode_popup_regions(before, "Themes")
+
+    assert herdr_client._opencode_new_popup_region(
+        current, "Themes", regions, herdr_client._opencode_theme_region_valid,
+    ) is None
+
+
+def test_theme_popup_region_stays_open_when_option_changes():
+    opened = "background\n" + _popup(
+        "Themes", "orng", "osaka-jade", "● palenight", "rosepine", "solarized",
+    )
+    popup = herdr_client._opencode_popup_regions(opened, "Themes")[0]
+    filtered = "background\n" + _popup("Themes", "● aura")
+
+    assert herdr_client._opencode_theme_region_valid(popup) is True
+    assert herdr_client._opencode_popup_header_at(filtered, popup) is True
+    assert herdr_client._opencode_popup_has_label(
+        herdr_client._opencode_popup_region_at(filtered, popup), "aura",
+    ) is True
+
+
+def test_command_popup_region_ignores_background_marker_changes():
+    before = _popup("Commands", "Switch session", "New session") + "\nold transcript"
+    current = before + " now mentions Open editor"
+    regions = herdr_client._opencode_popup_regions(before, "Commands")
+
+    assert herdr_client._opencode_new_popup_region(
+        current, "Commands", regions, herdr_client._opencode_command_region_valid,
+    ) is None
+
+
+def test_command_popup_region_stays_open_when_history_rolls_and_action_flips():
+    opened = (
+        "Switch to light mode\nold history\n"
+        + _popup("Commands", "Switch to dark mode")
+    )
+    popup = herdr_client._opencode_popup_regions(opened, "Commands")[0]
+    flipped = (
+        "new history\nanother line\n"
+        + _popup("Commands", "Switch to light mode")
+    )
+
+    assert herdr_client._opencode_popup_header_at(flipped, popup) is True
+    assert herdr_client._opencode_popup_has_label(
+        herdr_client._opencode_popup_region_at(flipped, popup),
+        "Switch to light mode",
+    ) is True
+
+
 def test_grok_theme_slash_and_launch_args():
     assert herdr_client.grok_theme_slash("light") == "/theme grokday"
     assert herdr_client.grok_theme_slash("dark") == "/theme groknight"
@@ -114,23 +173,23 @@ def test_opencode_theme_picker_closes_its_dialog_after_filter_failure(monkeypatc
     assert all("/themes" not in arg for call in calls for arg in call)
 
 
-def test_opencode_theme_picker_does_not_trust_unchanged_dialog_like_history(
+def test_opencode_theme_picker_does_not_trust_background_marker_changes(
     monkeypatch,
 ):
     calls = []
     read_count = 0
-    background = (
-        "Themes                  esc\ntokyonight\nnightowl\nold transcript"
-    )
+    background = "Themes                  esc\ntokyonight\nnightowl\nold transcript"
 
     def fake_run(args, timeout=10):
         nonlocal read_count
         calls.append(list(args))
         if "read" in args:
             read_count += 1
-            if read_count <= 2:
+            if read_count == 1:
                 return background
-            raise RuntimeError("screen did not change")
+            if read_count == 2:
+                return background + " now mentions cobalt2"
+            raise RuntimeError("popup did not open")
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
@@ -138,7 +197,7 @@ def test_opencode_theme_picker_does_not_trust_unchanged_dialog_like_history(
 
     result = herdr_client.apply_opencode_theme_to_pane("demo", "w1:p4", "aura")
 
-    assert result == {"error": "screen did not change"}
+    assert result == {"error": "popup did not open"}
     assert not any("send-text" in call for call in calls)
     assert not any(call[-1:] == ["esc"] for call in calls)
 
@@ -241,23 +300,23 @@ def test_opencode_mode_picker_is_idempotent(monkeypatch):
     assert not any(call[-1:] == ["Enter"] for call in calls)
 
 
-def test_opencode_mode_picker_does_not_trust_unchanged_dialog_like_history(
+def test_opencode_mode_picker_does_not_trust_background_marker_changes(
     monkeypatch,
 ):
     calls = []
     read_count = 0
-    background = (
-        "Commands                esc\nSwitch session\nNew session\nold transcript"
-    )
+    background = "Commands                esc\nSwitch session\nNew session\nold transcript"
 
     def fake_run(args, timeout=10):
         nonlocal read_count
         calls.append(list(args))
         if "read" in args:
             read_count += 1
-            if read_count <= 2:
+            if read_count == 1:
                 return background
-            raise RuntimeError("screen did not change")
+            if read_count == 2:
+                return background + " now mentions Open editor"
+            raise RuntimeError("popup did not open")
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
@@ -265,7 +324,7 @@ def test_opencode_mode_picker_does_not_trust_unchanged_dialog_like_history(
 
     result = herdr_client.apply_opencode_mode_to_pane("demo", "w1:p4", "dark")
 
-    assert result == {"error": "screen did not change"}
+    assert result == {"error": "popup did not open"}
     assert not any("send-text" in call for call in calls)
     assert not any(call[-1:] == ["esc"] for call in calls)
 

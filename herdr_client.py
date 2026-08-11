@@ -21,7 +21,7 @@ import tomllib
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 # herdr 二进制:优先用环境变量,其次 PATH 探测,最后试 ~/.local/bin
 _HERDR_ENV = os.environ.get("HERDR_BIN")
@@ -1054,40 +1054,118 @@ def _wait_opencode_visible(
         time.sleep(min(0.1, remaining))
 
 
-def _opencode_header_visible(screen: str, title: str) -> bool:
-    return bool(re.search(rf"{re.escape(title)}\s{{2,}}esc", screen))
-
-
-def _opencode_option_count(screen: str, label: str) -> int:
-    return len(re.findall(
-        rf"(?m)^\s*(?:●\s+)?{re.escape(label)}\s*$", screen,
-    ))
-
-
-_OPENCODE_THEME_LIST_MARKERS = (
-    "catppuccin-frappe", "catppuccin-macchiato", "tokyonight",
-    "nightowl", "cobalt2", "lucent-orng",
-)
 _OPENCODE_COMMAND_LIST_MARKERS = (
     "Switch session", "New session", "Switch model", "Open editor",
 )
 
 
-def _opencode_marker_count(screen: str, markers: tuple[str, ...]) -> int:
-    return sum(screen.count(marker) for marker in markers)
+class _OpenCodePopupRegion(NamedTuple):
+    title: str
+    header_line: int
+    header_prefix: str
+    rows: tuple[str, ...]
 
 
-def _opencode_theme_list_visible(screen: str) -> bool:
+def _opencode_popup_regions(
+    screen: str, title: str,
+) -> tuple[_OpenCodePopupRegion, ...]:
+    lines = screen.splitlines()
+    header_pattern = re.compile(rf"{re.escape(title)}\s{{2,}}esc\s*$")
+    regions: list[_OpenCodePopupRegion] = []
+    for index, line in enumerate(lines):
+        match = header_pattern.search(line)
+        if match is None:
+            continue
+        prefix = line[:match.start()]
+        border_column = prefix.rfind("┃")
+        header_indent = len(prefix[border_column + 1:]) if border_column >= 0 else len(prefix)
+        # Split panes repeat their vertical border on every row. Single-pane output
+        # has no border, so in that case the contiguous non-empty rows are the region.
+        bordered = (
+            border_column >= 0
+            and index + 1 < len(lines)
+            and len(lines[index + 1]) > border_column
+            and lines[index + 1][border_column] == "┃"
+        )
+        rows: list[str] = []
+        for row in lines[index + 1:index + 25]:
+            if bordered:
+                if len(row) <= border_column or row[border_column] != "┃":
+                    break
+                content = row[border_column + 1:]
+            else:
+                content = row
+            if not content.strip() or header_pattern.search(content):
+                break
+            indent = len(content) - len(content.lstrip())
+            if indent < max(0, header_indent - 2):
+                break
+            rows.append(content.strip())
+        if rows:
+            regions.append(_OpenCodePopupRegion(title, index, prefix, tuple(rows)))
+    return tuple(regions)
+
+
+def _opencode_popup_region_at(
+    screen: str, expected: _OpenCodePopupRegion,
+) -> _OpenCodePopupRegion | None:
+    for region in _opencode_popup_regions(screen, expected.title):
+        if (
+            region.header_line == expected.header_line
+            and region.header_prefix == expected.header_prefix
+        ):
+            return region
+    return None
+
+
+def _opencode_popup_header_at(
+    screen: str, expected: _OpenCodePopupRegion,
+) -> bool:
+    lines = screen.splitlines()
+    if expected.header_line >= len(lines):
+        return False
+    pattern = re.compile(rf"{re.escape(expected.title)}\s{{2,}}esc\s*$")
+    match = pattern.search(lines[expected.header_line])
     return (
-        _opencode_header_visible(screen, "Themes")
-        and _opencode_marker_count(screen, _OPENCODE_THEME_LIST_MARKERS) >= 2
+        match is not None
+        and lines[expected.header_line][:match.start()] == expected.header_prefix
     )
 
 
-def _opencode_command_list_visible(screen: str) -> bool:
-    return (
-        _opencode_header_visible(screen, "Commands")
-        and _opencode_marker_count(screen, _OPENCODE_COMMAND_LIST_MARKERS) >= 2
+def _opencode_popup_label(row: str) -> str:
+    return re.sub(r"^●\s+", "", row.strip())
+
+
+def _opencode_popup_has_label(region: _OpenCodePopupRegion, label: str) -> bool:
+    return any(_opencode_popup_label(row) == label for row in region.rows)
+
+
+def _opencode_theme_region_valid(region: _OpenCodePopupRegion) -> bool:
+    candidates = sum(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", _opencode_popup_label(row))
+        is not None
+        for row in region.rows
+    )
+    return candidates >= 2
+
+
+def _opencode_command_region_valid(region: _OpenCodePopupRegion) -> bool:
+    labels = {_opencode_popup_label(row) for row in region.rows}
+    return len(labels.intersection(_OPENCODE_COMMAND_LIST_MARKERS)) >= 2
+
+
+def _opencode_new_popup_region(
+    screen: str,
+    title: str,
+    before: tuple[_OpenCodePopupRegion, ...],
+    valid: Callable[[_OpenCodePopupRegion], bool],
+) -> _OpenCodePopupRegion | None:
+    old_anchors = {(region.header_line, region.header_prefix) for region in before}
+    return next(
+        (region for region in _opencode_popup_regions(screen, title)
+         if (region.header_line, region.header_prefix) not in old_anchors
+         and valid(region)),
+        None,
     )
 
 
@@ -1102,46 +1180,36 @@ def apply_opencode_theme_to_pane(
     dialog_open = False
     try:
         before = _opencode_visible(prefix, pane_id)
-        option_before = _opencode_option_count(before, theme_name)
-        markers_before = _opencode_marker_count(
-            before, _OPENCODE_THEME_LIST_MARKERS,
-        )
+        before_regions = _opencode_popup_regions(before, "Themes")
         # Ctrl+X,T 直接打开独立主题弹层，OpenCode 会保留已有 composer 草稿。
         _run(prefix + ["send-keys", pane_id, "ctrl+x", "t"], timeout=5)
-        _wait_opencode_visible(
+        opened = _wait_opencode_visible(
             prefix, pane_id,
-            lambda screen: (
-                screen != before
-                and _opencode_theme_list_visible(screen)
-                and _opencode_marker_count(
-                    screen, _OPENCODE_THEME_LIST_MARKERS,
-                ) > markers_before
-            ),
+            lambda screen: _opencode_new_popup_region(
+                screen, "Themes", before_regions, _opencode_theme_region_valid,
+            ) is not None,
             "OpenCode 主题弹层未打开",
         )
+        popup = _opencode_new_popup_region(
+            opened, "Themes", before_regions, _opencode_theme_region_valid,
+        )
+        if popup is None:
+            raise RuntimeError("OpenCode 主题弹层未打开")
         dialog_open = True
         _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
         _run(prefix + ["send-text", pane_id, theme_name], timeout=5)
         _wait_opencode_visible(
             prefix, pane_id,
             lambda screen: (
-                _opencode_header_visible(screen, "Themes")
-                and _opencode_option_count(screen, theme_name) > option_before
+                (region := _opencode_popup_region_at(screen, popup)) is not None
+                and _opencode_popup_has_label(region, theme_name)
             ),
             f"OpenCode 主题候选未出现: {theme_name}",
         )
         _run(prefix + ["send-keys", pane_id, "Enter"], timeout=5)
         _wait_opencode_visible(
             prefix, pane_id,
-            lambda screen: not (
-                _opencode_header_visible(screen, "Themes")
-                and (
-                    _opencode_marker_count(
-                        screen, _OPENCODE_THEME_LIST_MARKERS,
-                    ) > markers_before
-                    or _opencode_option_count(screen, theme_name) > option_before
-                )
-            ),
+            lambda screen: not _opencode_popup_header_at(screen, popup),
             "OpenCode 主题弹层确认后未关闭", timeout=1.0,
         )
         dialog_open = False
@@ -1169,36 +1237,32 @@ def apply_opencode_mode_to_pane(
     dialog_open = False
     try:
         before = _opencode_visible(prefix, pane_id)
-        option_before = {
-            target: _opencode_option_count(
-                before, f"Switch to {target} mode",
-            )
-            for target in ("light", "dark")
-        }
-        markers_before = _opencode_marker_count(
-            before, _OPENCODE_COMMAND_LIST_MARKERS,
-        )
+        before_regions = _opencode_popup_regions(before, "Commands")
         _run(prefix + ["send-keys", pane_id, "ctrl+p"], timeout=5)
-        _wait_opencode_visible(
+        opened = _wait_opencode_visible(
             prefix, pane_id,
-            lambda screen: (
-                screen != before
-                and _opencode_command_list_visible(screen)
-                and _opencode_marker_count(
-                    screen, _OPENCODE_COMMAND_LIST_MARKERS,
-                ) > markers_before
-            ),
+            lambda screen: _opencode_new_popup_region(
+                screen, "Commands", before_regions, _opencode_command_region_valid,
+            ) is not None,
             "OpenCode 命令弹层未打开",
         )
+        popup = _opencode_new_popup_region(
+            opened, "Commands", before_regions, _opencode_command_region_valid,
+        )
+        if popup is None:
+            raise RuntimeError("OpenCode 命令弹层未打开")
         dialog_open = True
         _run(prefix + ["send-keys", pane_id, "ctrl+u"], timeout=5)
         _run(prefix + ["send-text", pane_id, "Switch to"], timeout=5)
 
         def _target_mode(screen: str) -> str | None:
+            region = _opencode_popup_region_at(screen, popup)
+            if region is None:
+                return None
             for target in ("light", "dark"):
-                if _opencode_option_count(
-                    screen, f"Switch to {target} mode",
-                ) > option_before[target]:
+                if _opencode_popup_has_label(
+                    region, f"Switch to {target} mode",
+                ):
                     return target
             return None
 
@@ -1216,15 +1280,7 @@ def apply_opencode_mode_to_pane(
         )
         _wait_opencode_visible(
             prefix, pane_id,
-            lambda screen: not (
-                _opencode_header_visible(screen, "Commands")
-                and (
-                    _opencode_marker_count(
-                        screen, _OPENCODE_COMMAND_LIST_MARKERS,
-                    ) > markers_before
-                    or _target_mode(screen) is not None
-                )
-            ),
+            lambda screen: not _opencode_popup_header_at(screen, popup),
             "OpenCode 命令弹层未关闭", timeout=1.0,
         )
         dialog_open = False
