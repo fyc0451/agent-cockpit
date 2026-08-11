@@ -465,11 +465,12 @@ def _hash_owned_file(path: Path, *, max_bytes: int) -> tuple[int, str]:
         os.close(fd)
 
 
-def _sqlite_fd_uri(fd: int) -> str:
-    """Bind sqlite URI to an already-open fd via /proc/self/fd or /dev/fd.
+def _try_sqlite_fd_uri(fd: int) -> str | None:
+    """Best-effort URI for an already-open fd via /proc/self/fd or /dev/fd.
 
-    macOS /dev/fd/N often has Path.stat() metadata that does not match fstat(fd);
-    re-open the descriptor path and compare fstat results before accepting it.
+    Returns None when the OS cannot expose a matching path (common on macOS:
+    sqlite often cannot open /dev/fd/N even when fstat agrees). Callers must
+    fall back to a path URI fenced by the held fd's (dev,ino).
     """
     opened = os.fstat(fd)
     candidates: list[Path] = []
@@ -486,7 +487,6 @@ def _sqlite_fd_uri(fd: int) -> str:
             opened.st_ino,
         ):
             return f"{descriptor_path.as_uri()}?mode=ro"
-        # Darwin: path.stat() can disagree; open the path and fstat the probe.
         probe = -1
         probed: os.stat_result | None = None
         try:
@@ -505,7 +505,56 @@ def _sqlite_fd_uri(fd: int) -> str:
             opened.st_ino,
         ):
             return f"{descriptor_path.as_uri()}?mode=ro"
-    _reject("backup_snapshot_unsafe")
+    return None
+
+
+def _fd_identity_bound(fd: int, expected: os.stat_result) -> None:
+    current = os.fstat(fd)
+    if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+        _reject("snapshot_source_unstable")
+
+
+def _connect_sqlite_readonly_source(
+    source: Path, source_fd: int, opened: os.stat_result,
+) -> sqlite3.Connection:
+    """Open a query-only sqlite connection for Connection.backup.
+
+    Holds ``source_fd`` (O_NOFOLLOW) as the identity fence for the whole
+    backup window. Prefer an fd-backed URI when the OS provides one; otherwise
+    open the verified path with ``mode=ro`` only after lstat matches the held
+    fd and re-check fstat after connect. Live ``-wal``/``-shm`` sidecars are
+    never opened or copied — only sqlite's backup API transfers pages.
+    """
+    _fd_identity_bound(source_fd, opened)
+    fd_uri = _try_sqlite_fd_uri(source_fd)
+    if fd_uri is not None:
+        try:
+            connection = sqlite3.connect(fd_uri, uri=True, timeout=5.0)
+        except sqlite3.Error:
+            connection = None
+        else:
+            _fd_identity_bound(source_fd, opened)
+            return connection
+    # Path-bound fallback (macOS): path must still be the same regular inode.
+    try:
+        path_info = source.lstat()
+    except OSError:
+        _reject("snapshot_source_unstable")
+    if (
+        not stat.S_ISREG(path_info.st_mode)
+        or (path_info.st_dev, path_info.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        _reject("snapshot_source_unstable")
+    try:
+        connection = sqlite3.connect(
+            source.resolve(strict=False).as_uri() + "?mode=ro",
+            uri=True,
+            timeout=5.0,
+        )
+    except sqlite3.Error:
+        _reject("sqlite_snapshot_invalid")
+    _fd_identity_bound(source_fd, opened)
+    return connection
 
 
 def _backup_sqlite(
@@ -550,10 +599,8 @@ def _backup_sqlite(
     source_connection: sqlite3.Connection | None = None
     destination_connection: sqlite3.Connection | None = None
     try:
-        source_connection = sqlite3.connect(
-            _sqlite_fd_uri(source_fd),
-            uri=True,
-            timeout=5.0,
+        source_connection = _connect_sqlite_readonly_source(
+            source, source_fd, opened,
         )
         source_connection.execute("PRAGMA query_only=ON")
         source_connection.execute("PRAGMA busy_timeout=5000")
