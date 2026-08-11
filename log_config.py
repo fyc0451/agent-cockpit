@@ -430,9 +430,9 @@ def configure_logging(
         directory = ensure_private_log_dir(default_log_dir(install_dir))
         app_path = directory / APP_LOG_NAME
         try:
-            _prepare_app_log_file(app_path)
-            # Existing app backups must be safe before handler can ever rollover.
+            # Backup slots first: illegal .1..N must not create/chmod base.
             _precheck_app_backup_slots(app_path, backup_count=MAC_BACKUP_COUNT)
+            _prepare_app_log_file(app_path)
             handler = _PrivateRotatingFileHandler(
                 app_path,
                 maxBytes=MAC_MAX_BYTES,

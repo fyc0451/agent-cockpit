@@ -453,6 +453,53 @@ def test_configure_rejects_preexisting_unsafe_app_backup(tmp_path, monkeypatch):
         log_config.configure_logging(platform="darwin", install_dir=install)
 
 
+def test_configure_illegal_backup_does_not_mutate_existing_base(tmp_path, monkeypatch):
+    """Existing base 0644+bytes + illegal .1/.2: base mode/bytes and all slots unchanged."""
+    monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
+    install = tmp_path / "install"
+    install.mkdir()
+    log_dir = log_config.ensure_private_log_dir(install / "logs")
+    app = log_dir / log_config.APP_LOG_NAME
+    base_bytes = b"keep-these-bytes"
+    app.write_bytes(base_bytes)
+    os.chmod(app, 0o644)
+    slot1 = log_dir / f"{log_config.APP_LOG_NAME}.1"
+    slot1.write_bytes(b"slot1-ok")
+    os.chmod(slot1, 0o640)
+    slot2 = log_dir / f"{log_config.APP_LOG_NAME}.2"
+    slot2.mkdir()  # illegal
+    before = {
+        "base": app.read_bytes(),
+        "base_mode": stat.S_IMODE(app.stat().st_mode),
+        "s1": slot1.read_bytes(),
+        "s1_mode": stat.S_IMODE(slot1.stat().st_mode),
+        "s2_dir": slot2.is_dir(),
+    }
+    with pytest.raises(log_config.LogConfigError):
+        log_config.configure_logging(platform="darwin", install_dir=install)
+    assert app.read_bytes() == before["base"] == base_bytes
+    assert stat.S_IMODE(app.stat().st_mode) == before["base_mode"] == 0o644
+    assert slot1.read_bytes() == before["s1"] == b"slot1-ok"
+    assert stat.S_IMODE(slot1.stat().st_mode) == before["s1_mode"] == 0o640
+    assert slot2.is_dir() is True
+
+
+def test_configure_illegal_backup_does_not_create_missing_base(tmp_path, monkeypatch):
+    """Missing base + illegal backup: must not create base."""
+    monkeypatch.setenv("COCKPIT_LOG_LEVEL", "INFO")
+    install = tmp_path / "install"
+    install.mkdir()
+    log_dir = log_config.ensure_private_log_dir(install / "logs")
+    app = log_dir / log_config.APP_LOG_NAME
+    assert not app.exists()
+    bad = log_dir / f"{log_config.APP_LOG_NAME}.1"
+    bad.symlink_to(tmp_path / "missing-target")
+    with pytest.raises(log_config.LogConfigError):
+        log_config.configure_logging(platform="darwin", install_dir=install)
+    assert not app.exists()
+    assert bad.is_symlink()
+
+
 def test_rotate_rejects_directory_slot_with_existing_backup_unchanged(tmp_path):
     """Directory in a slot + another valid backup: fail closed, zero mutation."""
     path = tmp_path / "launchd.stderr.log"
