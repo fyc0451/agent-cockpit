@@ -886,6 +886,10 @@ header .spacer{flex:1}
           <button class="sm" type="button" onclick="checkUpdate()" data-i18n="upd.check">检查更新</button>
         </div>
         <div id="setVerStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
+        <div class="set-version-row">
+          <button class="primary sm" id="setUpgradeBtn" type="button" onclick="startUpgrade()" data-i18n="upd.start" style="display:none" disabled>⬆ 升级到新版本</button>
+          <span id="setUpgradeStatus" class="muted" style="font-size:12px" role="status" aria-live="polite"></span>
+        </div>
       </div>
       <div class="set-card">
         <h3 data-i18n="set.dirs">可访问目录</h3>
@@ -1251,7 +1255,7 @@ en:{
 'set.hub':'Local Agent Mail Hub address','set.hub.hint':'Controls only local agent collaboration and messages, not the Team Hub. The token is never read or shown; a saved address takes effect immediately.','set.hub.ok':'Hub is reachable','set.hub.bad':'Hub is unavailable: ','set.hub.fix.token':'Fix: write the HTTP_BEARER_TOKEN used by the local Hub to the token= line in ~/.agent-mail/client.env, then run chmod 600 ~/.agent-mail/client.env. Keep hub= pointed at the local Hub, then click Save here or restart Cockpit.','set.hub.fix.conn':'Fix: make sure the local Hub process is running and listening on the expected port, then verify the hub= address in ~/.agent-mail/client.env. After editing it, click Save here or restart Cockpit.','set.teamhub':'Team Hub connection','set.teamhub.hint':'Applied immediately. Company-private IPs may use HTTP; public endpoints must use HTTPS.',
 'set.termfont':'Terminal font size','set.termfont.hint':'Applies to this device only, effective immediately.',
 'set.shortcuts':'Global shortcuts','set.shortcuts.on':'Enable keyboard shortcuts','set.shortcuts.hint':'g b Workspace · g t Dev · g f Files · g m Messages · g s Settings · / Search · r Refresh',
-'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ','upd.banner':'Update available: {cur} → {lat}','upd.view':'Release notes','upd.dismiss':'Dismiss','upd.card':'Version & updates','upd.current':'Current version','upd.check':'Check for updates','upd.checking':'Checking…','upd.uptodate':'You are on the latest version.','upd.unavailable':'Version check is unavailable.','upd.latest':'Latest: {lat}',
+'toast.copied':'Copied to clipboard','toast.staged':'Text staged in Herdr — tap Copy in the toolbar','toast.noclip':'Browser cannot write clipboard; use Fill input instead','toast.sent':'Sent ✓','toast.sendfail':'Send failed: ','toast.uploaded':'Uploaded: ','toast.uploadfail':'Upload failed: ','upd.banner':'Update available: {cur} → {lat}','upd.view':'Release notes','upd.dismiss':'Dismiss','upd.card':'Version & updates','upd.current':'Current version','upd.check':'Check for updates','upd.checking':'Checking…','upd.uptodate':'You are on the latest version.','upd.unavailable':'Version check is unavailable.','upd.latest':'Latest: {lat}','upd.start':'⬆ Upgrade to new version','upd.service_checking':'Checking upgrade service…','upd.service_ready':'Upgrade is ready.','upd.service_unavailable':'Upgrade service is unavailable.','upd.service_retired':'In-app upgrade is not enabled.','upd.in_progress':'Upgrade in progress…','upd.submitted':'Upgrade request submitted.','upd.start_failed':'Upgrade request failed; checking status only.',
 },
 ja:{
 'nav.menu':'メニュー','nav.board':'ボード','nav.attention':'ワークスペース','nav.term':'開発','nav.herdrflow':'モバイル','nav.sessions':'セッション','nav.msgs':'メッセージ','nav.team':'チーム','nav.files':'ファイル','nav.settings':'設定',
@@ -1276,7 +1280,7 @@ ja:{
 'set.hub':'ローカル Agent Mail Hub アドレス','set.hub.hint':'ローカル agent の連携とメッセージだけを制御し、Team Hub は切り替えません。Token は表示せず、保存後すぐ反映されます。','set.hub.ok':'Hub に接続できます','set.hub.bad':'Hub を利用できません: ','set.hub.fix.token':'修復: ローカル Hub の起動に使った HTTP_BEARER_TOKEN を ~/.agent-mail/client.env の token= 行へ書き込み、chmod 600 ~/.agent-mail/client.env を実行してください。hub= はローカル Hub を指すままにして、この画面で「保存」を押すか Cockpit を再起動します。','set.hub.fix.conn':'修復: ローカル Hub プロセスが起動して想定ポートを listen していることと、~/.agent-mail/client.env の hub= アドレスを確認してください。変更後、この画面で「保存」を押すか Cockpit を再起動します。','set.teamhub':'Team Hub 接続','set.teamhub.hint':'保存後すぐ反映されます。社内プライベート IP は HTTP を使用でき、公開アドレスには HTTPS が必要です。',
 'set.termfont':'端末フォントサイズ','set.termfont.hint':'このデバイスのみに適用され、即時反映されます。',
 'set.shortcuts':'グローバルショートカット','set.shortcuts.on':'キーボードショートカットを有効化','set.shortcuts.hint':'g b ワークスペース · g t 開発 · g f ファイル · g m メッセージ · g s 設定 · / 検索 · r 更新',
-'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ','upd.banner':'新バージョンがあります: {cur} → {lat}','upd.view':'リリースノート','upd.dismiss':'閉じる','upd.card':'バージョンと更新','upd.current':'現在のバージョン','upd.check':'更新を確認','upd.checking':'確認中…','upd.uptodate':'最新バージョンです。','upd.unavailable':'バージョン確認は利用できません。','upd.latest':'最新: {lat}',
+'toast.copied':'クリップボードにコピーしました','toast.staged':'Herdr に一時保存しました。ツールバーの「コピー」をタップ','toast.noclip':'ブラウザからクリップボードに書けません。「入力欄へ」を使ってください','toast.sent':'送信しました ✓','toast.sendfail':'送信失敗: ','toast.uploaded':'アップロード完了: ','toast.uploadfail':'アップロード失敗: ','upd.banner':'新バージョンがあります: {cur} → {lat}','upd.view':'リリースノート','upd.dismiss':'閉じる','upd.card':'バージョンと更新','upd.current':'現在のバージョン','upd.check':'更新を確認','upd.checking':'確認中…','upd.uptodate':'最新バージョンです。','upd.unavailable':'バージョン確認は利用できません。','upd.latest':'最新: {lat}','upd.start':'⬆ 新しいバージョンへ更新','upd.service_checking':'アップグレードサービスを確認中…','upd.service_ready':'アップグレードできます。','upd.service_unavailable':'アップグレードサービスを利用できません。','upd.service_retired':'アプリ内アップグレードは有効ではありません。','upd.in_progress':'アップグレード中…','upd.submitted':'アップグレードを受け付けました。','upd.start_failed':'要求に失敗しました。状態確認のみ継続します。',
 }};
 let LANG=localStorage.getItem('cockpit-lang')||'zh';
 function t(key,zh,vars){const m=I18N[LANG];let s=(m&&m[key])??zh??key;if(vars)for(const[k,v]of Object.entries(vars))s=s.replaceAll('{'+k+'}',v);return s}
@@ -1431,6 +1435,7 @@ function renderSettings(){
   document.getElementById('setIdleTtl').value=S.term?.idle_ttl??1800;
   document.getElementById('setWriteTimeout').value=S.term?.write_timeout??2;
   renderShortcutSetting();
+  renderVersionCard(VERSION_LOAD_FAILED);renderUpgradeControl();
 }
 function setToggleAgent(cb){
   const list=SETTINGS_EDIT.enabled_agents||[];
@@ -5554,7 +5559,7 @@ function connectSSE(){
   SSE_LINK='reconnecting';
   updateSseLiveUi();
   SSE=new EventSource('/api/events',{withCredentials:true});
-  SSE.onopen=()=>{markSseEventOk()};
+  SSE.onopen=()=>{if(UPGRADE_START_SENT)void loadUpgradeStatus();markSseEventOk()};
   SSE.addEventListener('board',e=>{
     // 必须先成功 JSON.parse，再标在线；畸形事件不得回绿、不抛全局
     let d;
@@ -5605,6 +5610,7 @@ function recoverPageState(){
   // 浏览器会自行恢复仍存活的 EventSource/WebSocket。切回页面时不要主动刷新
   // Herdr 输出或发送 PTY resize（SIGWINCH 会让 TUI 整屏重绘）；只救真正关闭的连接。
   if(!SSE||SSE.readyState===2)connectSSE();
+  if(UPGRADE_START_SENT)void loadUpgradeStatus();
   const activeView=document.querySelector('#nav button.active')?.dataset.view;
   if(activeView==='msgs'){
     const slug=document.getElementById('msgProj')?.value||'';
@@ -5965,8 +5971,11 @@ function handleGlobalShortcut(e){
 }
 
 // ============ init ============
-// ============ 版本与升级提示(只读 /api/version;只引导查看官方 Release,不提供升级执行) ============
+// ============ 版本提示 + /api/version 与 upgrade status 双门升级入口 ============
 let VERSION_INFO=null, UPDATE_DISMISSED=false;
+let VERSION_LOADING=false, VERSION_LOAD_FAILED=false;
+let UPGRADE_STATUS=null, UPGRADE_STATUS_FAILED=false, UPGRADE_STATUS_LOADING=false;
+let UPGRADE_START_SENT=false, UPGRADE_START_ERROR=false, UPGRADE_STATUS_TIMER=null;
 function safeReleaseUrl(u){
   // Release URL 是不可信输入:严格限定 https + github.com + 官方 releases 前缀
   try{const p=new URL(String(u||''));return p.protocol==='https:'&&p.hostname==='github.com'&&p.pathname.startsWith('/fyc0451/agent-cockpit/releases/')}
@@ -6000,16 +6009,64 @@ function renderVersionCard(failed){
     }
   }
 }
+function upgradeStartAvailable(){
+  return !VERSION_LOADING&&!VERSION_LOAD_FAILED&&VERSION_INFO?.status==='update_available'&&UPGRADE_STATUS?.available===true
+}
+function renderUpgradeControl(){
+  const btn=document.getElementById('setUpgradeBtn'),st=document.getElementById('setUpgradeStatus');
+  if(!btn||!st)return;
+  const updateAvailable=!VERSION_LOADING&&!VERSION_LOAD_FAILED&&VERSION_INFO?.status==='update_available';
+  const canStart=upgradeStartAvailable();
+  btn.style.display=canStart?'':'none';
+  btn.disabled=!canStart||UPGRADE_START_SENT||UPGRADE_STATUS?.active===true;
+  if(!updateAvailable){st.textContent='';return}
+  if(UPGRADE_STATUS_FAILED){st.textContent=t('upd.service_unavailable','升级服务暂不可用');return}
+  if(!UPGRADE_STATUS){st.textContent=t('upd.service_checking','正在检查升级服务…');return}
+  if(UPGRADE_STATUS.state==='retired'||UPGRADE_STATUS.error_code==='upgrade_engine_retired'){
+    st.textContent=t('upd.service_retired','应用内升级未启用');return
+  }
+  if(UPGRADE_STATUS.available!==true){st.textContent=t('upd.service_unavailable','升级服务暂不可用');return}
+  if(UPGRADE_STATUS.active===true){st.textContent=t('upd.in_progress','升级进行中…');return}
+  if(UPGRADE_START_ERROR){st.textContent=t('upd.start_failed','升级请求失败，仅继续检查状态');return}
+  if(UPGRADE_START_SENT){st.textContent=t('upd.submitted','升级请求已提交');return}
+  st.textContent=t('upd.service_ready','可以升级到新版本')
+}
+function scheduleUpgradeStatusPoll(){
+  if(UPGRADE_STATUS_TIMER){clearTimeout(UPGRADE_STATUS_TIMER);UPGRADE_STATUS_TIMER=null}
+  if(!UPGRADE_START_SENT)return;
+  UPGRADE_STATUS_TIMER=setTimeout(()=>{UPGRADE_STATUS_TIMER=null;void loadUpgradeStatus()},2000)
+}
+async function loadUpgradeStatus(){
+  if(UPGRADE_STATUS_LOADING)return;
+  UPGRADE_STATUS_LOADING=true;
+  try{
+    UPGRADE_STATUS=await api('/api/upgrade/status');UPGRADE_STATUS_FAILED=false
+  }catch(e){
+    UPGRADE_STATUS=null;UPGRADE_STATUS_FAILED=true
+  }finally{
+    UPGRADE_STATUS_LOADING=false;renderUpgradeControl();scheduleUpgradeStatusPoll()
+  }
+}
+async function startUpgrade(){
+  if(UPGRADE_START_SENT||!upgradeStartAvailable())return;
+  UPGRADE_START_SENT=true;UPGRADE_START_ERROR=false;renderUpgradeControl();
+  try{await api('/api/upgrade',{method:'POST'})}
+  catch(e){UPGRADE_START_ERROR=true}
+  await loadUpgradeStatus()
+}
 async function loadVersion(refresh){
+  VERSION_LOADING=true;renderUpgradeControl();
   try{
     VERSION_INFO=await api('/api/version'+(refresh?'?refresh=true':''));
+    VERSION_LOAD_FAILED=false;
     UPDATE_DISMISSED=false; // 新结果重置关闭态:刷新/重登/重新检查后,提示条可再次出现
-    renderUpdateBanner();renderVersionCard()
+    renderUpdateBanner();renderVersionCard();await loadUpgradeStatus()
   }catch(e){
     // 刷新失败:必须隐藏旧 banner,避免继续虚假宣称仍有更新;版本卡片仍温和降级
+    VERSION_LOAD_FAILED=true;
     const bar=document.getElementById('updateBanner');if(bar)bar.style.display='none';
     renderVersionCard(true)
-  }
+  }finally{VERSION_LOADING=false;renderUpgradeControl()}
 }
 function checkUpdate(){const st=document.getElementById('setVerStatus');if(st)st.textContent=t('upd.checking','检查中…');loadVersion(true)}
 function dismissUpdate(){UPDATE_DISMISSED=true;renderUpdateBanner()}

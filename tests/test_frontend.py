@@ -2412,11 +2412,66 @@ def test_release_url_whitelist_is_strict():
     assert "'/fyc0451/agent-cockpit/releases/'" in js
 
 
-def test_no_upgrade_executor_button():
-    """本批无升级执行器:严禁'立即升级'等误导已可升级的按钮/文案。"""
-    for bad in ["立即升级", "立即更新", "upgrade now", "Upgrade now",
-                "install now", "Install now", "一键升级"]:
-        assert bad not in HTML, f"出现禁止的升级执行按钮/文案: {bad}"
+def test_upgrade_button_is_hidden_by_default_and_has_stable_target():
+    """L15 只在双门通过后显示固定按钮，HTML 初始必须隐藏且禁用。"""
+    assert 'id="setUpgradeBtn"' in HTML
+    button = HTML.split('id="setUpgradeBtn"', 1)[1].split("</button>", 1)[0]
+    assert 'style="display:none"' in button
+    assert " disabled" in button
+    assert 'onclick="startUpgrade()"' in button
+    assert 'id="setUpgradeStatus"' in HTML
+
+
+def test_upgrade_button_requires_version_and_service_dual_gate():
+    js = _inline_js()
+    gate = js.split("function upgradeStartAvailable(){", 1)[1].split("}", 1)[0]
+    assert "VERSION_INFO" in gate
+    assert "status==='update_available'" in gate
+    assert "UPGRADE_STATUS" in gate
+    assert "available===true" in gate
+    assert "VERSION_LOADING" in gate
+    assert "VERSION_LOAD_FAILED" in gate
+
+
+def test_upgrade_click_is_single_post_and_immediately_latched():
+    js = _inline_js()
+    start = js.split("async function startUpgrade(){", 1)[1].split("\n}", 1)[0]
+    assert "if(UPGRADE_START_SENT" in start
+    assert start.index("UPGRADE_START_SENT=true") < start.index(
+        "api('/api/upgrade',{method:'POST'})"
+    )
+    assert js.count("api('/api/upgrade',{method:'POST'})") == 1
+    assert "UPGRADE_START_SENT=false" not in start
+
+
+def test_upgrade_poll_and_reconnect_are_get_only_and_not_persisted():
+    js = _inline_js()
+    poll = js.split("async function loadUpgradeStatus(){", 1)[1].split(
+        "async function startUpgrade", 1,
+    )[0]
+    assert "api('/api/upgrade/status')" in poll
+    assert "method:'POST'" not in poll
+    assert "scheduleUpgradeStatusPoll" in poll
+    connect = js.split("function connectSSE(){", 1)[1].split(
+        "window.addEventListener('beforeunload'", 1,
+    )[0]
+    onopen = connect.split("SSE.onopen=", 1)[1].split(";", 1)[0]
+    assert "loadUpgradeStatus" in onopen
+    assert "startUpgrade" not in onopen
+    assert "localStorage.setItem('upgrade" not in js
+    assert "localStorage.getItem('upgrade" not in js
+
+
+def test_upgrade_retired_disabled_and_error_states_degrade_truthfully():
+    js = _inline_js()
+    render = js.split("function renderUpgradeControl(){", 1)[1].split(
+        "function scheduleUpgradeStatusPoll", 1,
+    )[0]
+    assert "state==='retired'" in render
+    assert "upgrade_engine_retired" in render
+    assert "available!==true" in render
+    assert "UPGRADE_STATUS_FAILED" in render
+    assert "btn.style.display=canStart?'':'none'" in render
 
 
 def test_version_strings_escape_via_textcontent():
@@ -2449,6 +2504,15 @@ def test_update_i18n_en_and_ja():
     assert "'upd.banner':'新バージョンがあります" in HTML
     assert "'upd.view':'Release notes'" in HTML
     assert "'upd.view':'リリースノート'" in HTML
+
+
+def test_upgrade_action_i18n_zh_en_ja():
+    assert 'data-i18n="upd.start"' in HTML
+    assert "升级到新版本" in HTML
+    assert "'upd.start':'⬆ Upgrade to new version'" in HTML
+    assert "'upd.start':'⬆ 新しいバージョンへ更新'" in HTML
+    assert "'upd.service_unavailable':'Upgrade service is unavailable.'" in HTML
+    assert "'upd.service_unavailable':'アップグレードサービスを利用できません。'" in HTML
 
 
 def test_update_banner_dismissible_and_reshows():
