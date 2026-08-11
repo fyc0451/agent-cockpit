@@ -299,6 +299,22 @@ def test_board_card_displays_escaped_agent_mail_name():
     assert '@${p.mail_name}' not in card
 
 
+def test_identity_board_uses_display_name_and_disambiguates_duplicates():
+    js = _inline_js()
+    card = js.split("function cardHtml(p){", 1)[1].split(
+        "// ============ 终端抽屉", 1,
+    )[0]
+
+    assert "function paneDisplayName(p)" in js
+    assert "function paneInstanceId(p)" in js
+    assert "function shortInstanceId(value)" in js
+    assert "function paneDisplayMeta(p)" in js
+    assert "esc(paneDisplayName(p))" in card
+    assert "esc(paneDisplayMeta(p))" in card
+    assert "p.display_name" not in card
+    assert "p.instance_id" not in card
+
+
 def test_board_degraded_banner_consumes_reason_and_state_status():
     # Wiki16-19 前端场景3:renderBoard 消费 board degraded/reason 与
     # sessions[].state_status/state_reason,Hub/socket 降级原因可见且全部转义
@@ -514,7 +530,7 @@ def test_setup_workspace_allows_optional_tasks_and_keeps_success_locked():
     assert "工作区正在启动中" in close
 
 
-def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
+def test_setup_workspace_allows_repeated_agent_types_and_display_names():
     js = _inline_js()
     fields = js.split("function renderSetupAgents(){", 1)[1].split(
         "function setupFieldChanged", 1,
@@ -527,16 +543,39 @@ def test_setup_workspace_allows_repeated_agent_types_with_unique_local_names():
     )[0]
 
     assert 'data-field="name"' in fields
-    assert "setupNextAgentName" in js
+    assert "setupNextAgentName" not in js
     assert "find(a=>!SETUP_PARTICIPANTS.some(p=>p.agent===a))" not in add
     assert "同一种 Agent 不能重复" not in errors
-    assert "实例名称不能重复" in errors
+    assert "实例名称不能重复" not in errors
     assert 'id="lnName"' in HTML
     assert 'id="lnLayout"' in HTML
     assert 'id="lnWorkspace"' in HTML
     assert "function launchSessionChanged" in js
     assert "const preferredSession=(TERM_ID&&TERM_SESSIONS[TERM_ID])||CURRENT_TERM?.session||''" in js
     assert "await loadSessions(preferredSession)" in js
+
+
+def test_identity_frontend_never_generates_or_submits_instance_id():
+    js = _inline_js()
+    launch = js.split("async function startAgent(){", 1)[1].split(
+        "// ============ 消息 view", 1,
+    )[0]
+    fields = js.split("function renderSetupAgents(){", 1)[1].split(
+        "function setupFieldChanged", 1,
+    )[0]
+    errors = js.split("function setupErrors(){", 1)[1].split(
+        "function setupInspectWorkspace", 1,
+    )[0]
+
+    assert 'placeholder="显示名"' in HTML
+    assert "lnInstanceId" not in HTML
+    assert "instance_id" not in launch
+    assert "JSON.stringify({session,workdir,agent,name,layout,workspace,args})" in launch
+    assert 'data-field="name"' in fields
+    assert 'placeholder="显示名"' in fields
+    assert "实例名称只能包含" not in errors
+    assert "实例名称不能重复" not in errors
+    assert "显示名不能为空" in errors
 
 
 def test_agent_launch_args_are_available_only_in_on_demand_forms():
@@ -2330,10 +2369,11 @@ def test_launch_modal_worktree_preview_and_source_fix():
     preview = js[start:js.index("function ", start + 10)]
     assert "LAUNCH_SESSION_DIRS" not in preview
     assert "cockpit-worktrees" not in preview
-    # 三语走 {session}/{name} 占位符 + vars,不显示字面占位符
-    assert "{session:session,name:name}" in preview
+    # opaque ID 由服务端生成，预览不得拿显示名预测实例目录。
+    assert "lnName" not in preview
+    assert "{session:session,name:name}" not in preview
     assert HTML.count("'launch.wtpreview':") == 2  # en + ja 各一项
-    assert HTML.count("'{session}/{name}'") >= 2 or HTML.count("{session}/{name}") >= 3
+    assert "{session}/{name}" not in HTML
     assert "<session>/<name>" not in HTML
     # 程序化实例名刷新(agent 切换/自动命名)后同步预览,且无递归
     refresh = js[js.index("function launchRefreshName"):]

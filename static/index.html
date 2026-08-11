@@ -962,7 +962,7 @@ header .spacer{flex:1}
         <option value="kimi">kimi</option>
         <option value="qodercli">qoder</option>
       </select>
-      <input id="lnName" placeholder="实例名称 如 codex-2" aria-label="本地实例名称" oninput="this.dataset.auto='0';launchWorktreePreview()" style="max-width:155px">
+      <input id="lnName" placeholder="显示名" aria-label="显示名" oninput="this.dataset.auto='0'" style="max-width:155px">
       <select id="lnLayout" aria-label="新 pane 位置"><option value="tab">新 tab</option><option value="right">右侧 pane</option><option value="down">下方 pane</option></select>
       <select id="lnWorkspace" aria-label="工作目录策略" onchange="launchSessionChanged(false);launchWorktreePreview()"><option value="isolated">独立 worktree</option><option value="shared">共享目录</option></select>
       <input id="lnWorkdir" placeholder="工作目录 如 /home/you/my-project" data-i18n-ph="launch.workdir.ph" oninput="this.dataset.auto='0';launchPreselectAgent();launchWorktreePreview()" style="flex:1;min-width:160px">
@@ -1237,7 +1237,7 @@ en:{
 'st.working':'Working','st.needs_you':'Needs you','st.done':'Done','st.done.short':'Done','st.idle':'Idle','st.blocked':'Blocked','st.failed':'Failed','st.unknown':'Unknown','st.unavailable':'Unavailable','st.running':'Running','st.connecting':'Connecting','st.starting':'Starting','st.swap_pending':'Socket swap pending','st.reconnecting':'Reconnecting',
 'attention.title':'Task board','attention.push':'Enable notifications','attention.report':'Request reports','common.refresh':'Refresh','common.loading':'Loading…',
 'team.title':'Team center',
-'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent','launch.wtpreview':'Isolated mode: a new isolated worktree "{session}/{name}" is auto-created from the source repo above (workdir editable to any existing repo path).',
+'launch.label':'🚀 Launch','launch.workdir.ph':'Workdir, e.g. /home/you/my-project','launch.start':'+ New agent','launch.wtpreview':'Isolated mode: Cockpit creates a system-named worktree from the source repo above.',
 'files.addroot':'＋ Add directory','files.workspace':'🚀 New workspace here','files.search.ph':'Search filenames under current directory','files.search':'Search','files.clear':'Clear','files.empty':'Select a file on the left','files.uptop':'‥ (Up)',
 'files.guide':'<b>How to use:</b> pick a project under Accessible locations, then click a directory or file; search matches names in the current directory tree. Text files are editable, others can be downloaded with ⬇️.',
 'term.new':'+ New terminal','term.addagent':'＋ Add Agent','term.tbcollapse':'Collapse/expand toolbar','term.upload':'📎Upload','term.collab':'@Collab','term.back':'📜 Flow view','term.copymac':'📋 Copy','term.close':'✕ Close','term.help':'herdr: Ctrl-b switch pane / d detach / ? keys','term.input.ph':'Command for current agent…(@mention collaborator / @path file ref)','term.input.ph.agent':'Message {agent}…','term.layout':'🧱 Layout',
@@ -1262,7 +1262,7 @@ ja:{
 'st.working':'実行中','st.needs_you':'対応必要','st.done':'完了','st.done.short':'完了','st.idle':'待機','st.blocked':'ブロック','st.failed':'失敗','st.unknown':'不明','st.unavailable':'利用不可','st.running':'実行中','st.connecting':'接続中','st.starting':'起動中','st.swap_pending':'ソケット切替保留中','st.reconnecting':'再接続中',
 'attention.title':'タスクボード','attention.push':'通知を有効化','attention.report':'進捗報告を依頼','common.refresh':'更新','common.loading':'読み込み中…',
 'team.title':'チームセンター',
-'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント','launch.wtpreview':'独立モード：上のソースリポジトリから新しい隔離 worktree「{session}/{name}」を自動作成（workdir は任意の既存リポジトリパスに変更可）。',
+'launch.label':'🚀 起動','launch.workdir.ph':'作業ディレクトリ 例 /home/you/my-project','launch.start':'+ 新規エージェント','launch.wtpreview':'独立モード：上のソースリポジトリからシステム名の worktree を作成します。',
 'files.addroot':'＋ ディレクトリ追加','files.workspace':'🚀 ここでワークスペース','files.search.ph':'現在のディレクトリ以下のファイル名を検索','files.search':'検索','files.clear':'クリア','files.empty':'左のファイルを選択','files.uptop':'‥ (上へ)',
 'files.guide':'<b>使い方:</b> まず「アクセス可能ディレクトリ」でプロジェクトを選び、ディレクトリやファイルをクリック。検索は現在のディレクトリ以下を名前で検索します。テキストは編集保存、その他は ⬇️ でダウンロード。',
 'term.new':'+ 新規ターミナル','term.addagent':'＋ Agent 追加','term.tbcollapse':'ツールバー折りたたみ/展開','term.upload':'📎アップロード','term.collab':'@連携','term.back':'📜 フロー表示','term.copymac':'📋 コピー','term.close':'✕ 閉じる','term.help':'herdr: Ctrl-b で pane 切替 / d でデタッチ / ? でキー一覧','term.input.ph':'現在の agent への指示…(@で連携先 / @パスでファイル参照)','term.input.ph.agent':'{agent} へ指示…','term.layout':'🧱 レイアウト',
@@ -1527,14 +1527,8 @@ function launchPreselectAgent(){
 function launchRefreshName(force=false){
   const input=document.getElementById('lnName');if(!input)return;
   if(!force&&input.dataset.auto==='0')return;
-  const session=document.getElementById('lnSession')?.value||'';
   const agent=document.getElementById('lnAgent')?.value||'codex';
-  const panes=(BOARD?.panes||[]).filter(p=>p.session===session&&p.agent===agent);
-  const used=new Set();let legacy=0;
-  panes.forEach(p=>{const label=String(p.label||'').trim();if(label&&label!==agent)used.add(label.toLowerCase());else legacy++});
-  for(let i=1;i<=legacy;i++)used.add(`${agent}-${i}`.toLowerCase());
-  let index=1,name='';do{name=`${agent}-${index++}`}while(used.has(name.toLowerCase()));
-  input.value=name;input.dataset.auto='1';launchWorktreePreview();
+  input.value=agent;input.dataset.auto='1';launchWorktreePreview();
 }
 
 
@@ -2541,6 +2535,22 @@ function renderBoard(d){
   if(CURRENT_TERM)syncPaneSelect();
 }
 
+function paneDisplayName(p){
+  return String(p.display_name||p.label||p.agent||p.terminal_title||p.pane_id||'');
+}
+function paneInstanceId(p){
+  return String(p.instance_id||p.runtime_name||p.agent_name||p.pane_id||'');
+}
+function shortInstanceId(value){
+  const id=String(value||'');
+  return id.length>12?id.slice(0,4)+'...'+id.slice(-4):id;
+}
+function paneDisplayMeta(p){
+  const display=paneDisplayName(p);
+  const duplicate=(BOARD?.panes||[]).filter(x=>x.agent&&paneDisplayName(x)===display).length>1;
+  if(!duplicate)return'';
+  return [p.agent||'',shortInstanceId(paneInstanceId(p))].filter(Boolean).join(' · ');
+}
 function cardHtml(p){
   const ag=p.agent||'none';
   const cls=classify(p.agent_status,p.agent,boardSessionState(p.session));
@@ -2548,7 +2558,7 @@ function cardHtml(p){
   return `<div class="card ${cls}" data-action="openFlow" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}" role="button" tabindex="0">
     <div class="card-top">
       <div class="agent-icon ${esc(ag)}">${emoji}</div>
-      <div class="card-name"><span class="card-name-main">${esc(p.agent||p.terminal_title||p.pane_id)}</span>${p.mail_name?`<span class="card-alias">@${esc(p.mail_name)}</span>`:''}</div>
+      <div class="card-name"><span class="card-name-main">${esc(paneDisplayName(p))}</span>${paneDisplayMeta(p)?`<span class="card-alias">${esc(paneDisplayMeta(p))}</span>`:''}${p.mail_name?`<span class="card-alias">@${esc(p.mail_name)}</span>`:''}</div>
       <button class="icon" style="padding:2px 6px;font-size:13px" title="接管 TUI(xterm)" data-action="openTerm" data-session="${esc(p.session)}" data-pane="${esc(p.pane_id)}" data-agent="${esc(ag)}">🖥</button>
       <span class="status-dot ${cls}"></span>
     </div>
@@ -2575,7 +2585,7 @@ function syncPaneSelect(){
     panes.unshift({pane_id:CURRENT_TERM.paneId,agent:CURRENT_TERM.agent||''});
   }
   sel.replaceChildren(...panes.map(p=>new Option(
-    (p.agent||'shell')+' · '+p.pane_id+(p.focused?' · 当前':''),p.pane_id
+    [paneDisplayName(p),paneDisplayMeta(p),p.pane_id,p.focused?'当前':''].filter(Boolean).join(' · '),p.pane_id
   )));
   sel.value=CURRENT_TERM.paneId;
   wrap.hidden=panes.length<2;
@@ -2830,18 +2840,14 @@ function launchSessionChanged(forceDir=false){
   input.value=workdir;input.dataset.auto='1';launchPreselectAgent();launchWorktreePreview();
 }
 function launchWorktreePreview(){
-  // 方案 A：不承诺完整路径（服务端 base 取决于 _git_root(workdir)，前端无法
-  // 精确预知），只说明会从上方源仓库自动创建以会话/实例名命名的隔离 worktree。
+  // opaque instance id 由服务端生成，前端不预测最终目录名。
   const el=document.getElementById('lnWorktreePreview');if(!el)return;
   const ws=document.getElementById('lnWorkspace')?.value||'isolated';
   const session=document.getElementById('lnSession')?.value||'';
-  const name=(document.getElementById('lnName')?.value||'').trim();
   const workdir=document.getElementById('lnWorkdir').value.trim();
-  if(ws!=='isolated'||!session||!workdir
-    ||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name)){el.style.display='none';return}
+  if(ws!=='isolated'||!session||!workdir){el.style.display='none';return}
   el.textContent=t('launch.wtpreview',
-    '独立模式：将从上方源仓库自动创建隔离 worktree「{session}/{name}」（工作目录可改为任意已有仓库路径）',
-    {session:session,name:name});
+    '独立模式：从上方源仓库创建系统命名的隔离 worktree');
   el.style.display='';
 }
 async function startAgent(){
@@ -2856,8 +2862,9 @@ async function startAgent(){
   if(mailError){toast(mailError,5000);return}
   if(!session){toast(t('launch.nosession','还没有 session,先创建一个工作区'));showSetupModal();return}
   if(!workdir){toast('填工作目录');return}
-  if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name)){toast('实例名称只能包含字母、数字、_、-，最长 32 位');return}
-  const sharedPeers=(BOARD?.panes||[]).filter(p=>p.session===session&&p.cwd===workdir&&p.label!==name);
+  if(!name){toast('显示名不能为空');return}
+  if(Array.from(name).length>64||/\p{C}/u.test(name)){toast('显示名最长 64 个字符，且不能包含控制字符');return}
+  const sharedPeers=(BOARD?.panes||[]).filter(p=>p.session===session&&p.cwd===workdir);
   if(workspace==='shared'&&sharedPeers.length&&!confirm(`当前目录已被 ${sharedPeers.length} 个 pane 使用。继续会共享工作目录，并发写入可能冲突；是否继续？`))return;
   const button=document.getElementById('lnStartBtn');
   const qoderSlow=['qoder','qodercli','qodercn'].includes(agent);
@@ -4956,16 +4963,10 @@ function setupKnownAgents(){
   const enabled=SETTINGS?.enabled_agents||known;
   return known.filter(a=>enabled.includes(a));
 }
-function setupNextAgentName(agent,excludeId=null){
-  const used=new Set(SETUP_PARTICIPANTS.filter(p=>p.id!==excludeId).map(p=>String(p.name||'').toLowerCase()));
-  let index=1,name='';
-  do{name=`${agent}-${index++}`}while(used.has(name.toLowerCase()));
-  return name;
-}
 function setupParticipant(agent,role,task,reviewTarget=null,args=''){
   SETUP_AGENT_SEQ++;
   const id='agent-'+SETUP_AGENT_SEQ;
-  return {id,name:setupNextAgentName(agent),agent,role,task,args,workspace:'auto',review_target:reviewTarget};
+  return {id,name:agent,auto_name:true,agent,role,task,args,workspace:'auto',review_target:reviewTarget};
 }
 function setupMode(mode){
   SETUP_MODE=mode;
@@ -5003,7 +5004,7 @@ function renderSetupAgents(){
     const review=p.role==='reviewer'?`<div class="setup-agent-review"><span>复核对象</span><select data-id="${esc(p.id)}" data-field="review_target"><option value="">自动分配</option>${targets.map(x=>`<option value="${esc(x.id)}"${x.id===p.review_target?' selected':''}>${esc(x.name)} · ${esc(x.agent)} · ${esc(SETUP_ROLE_LABELS[x.role])}</option>`).join('')}</select></div>`:'';
     return `<div class="setup-agent">
       <div class="setup-agent-head">
-        <input data-id="${esc(p.id)}" data-field="name" value="${esc(p.name)}" placeholder="实例名称" aria-label="实例名称">
+        <input data-id="${esc(p.id)}" data-field="name" value="${esc(p.name)}" placeholder="显示名" aria-label="显示名">
         <select data-id="${esc(p.id)}" data-field="agent" aria-label="Agent">${setupAgentOptions(p.agent)}</select>
         <select data-id="${esc(p.id)}" data-field="role" aria-label="角色">${setupRoleOptions(p.role)}</select>
         <button class="icon" data-action="setupRemove" data-id="${esc(p.id)}" title="移除 Agent"${SETUP_PARTICIPANTS.length===1?' disabled':''}>✕</button>
@@ -5020,8 +5021,10 @@ function renderSetupAgents(){
 function setupFieldChanged(input){
   const p=SETUP_PARTICIPANTS.find(x=>x.id===input.dataset.id);if(!p)return;
   p[input.dataset.field]=input.value;
+  if(input.dataset.field==='name')p.auto_name=false;
   if(input.dataset.field==='agent'){
-    p.name=setupNextAgentName(p.agent,p.id);renderSetupAgents();return
+    if(p.auto_name)p.name=p.agent;
+    renderSetupAgents();return
   }
   if(input.dataset.field==='role'){
     p.review_target=p.role==='reviewer'?(SETUP_PARTICIPANTS.find(x=>x.id!==p.id&&['lead','developer'].includes(x.role))?.id||null):null;
@@ -5058,8 +5061,8 @@ function setupErrors(){
   if(!workdir)errors.push('请填写工作目录');
   if(!session)errors.push('请填写 session 名');else if(!validSessionName(session))errors.push('session 名只能包含字母、数字、_、-');
   if(!SETUP_PARTICIPANTS.length)errors.push('至少添加一个 Agent');
-  if(SETUP_PARTICIPANTS.some(p=>!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(p.name||'')))errors.push('实例名称只能包含字母、数字、_、-，最长 32 位');
-  if(new Set(SETUP_PARTICIPANTS.map(p=>(p.name||'').toLowerCase())).size!==SETUP_PARTICIPANTS.length)errors.push('实例名称不能重复');
+  if(SETUP_PARTICIPANTS.some(p=>!String(p.name||'').trim()))errors.push('显示名不能为空');
+  if(SETUP_PARTICIPANTS.some(p=>Array.from(String(p.name||'').trim()).length>64||/\p{C}/u.test(String(p.name||''))))errors.push('显示名最长 64 个字符，且不能包含控制字符');
   // task 选填(前后端均已放开)
   if(SETUP_MODE==='develop_review'&&(!writers.length||!SETUP_PARTICIPANTS.some(p=>p.role==='reviewer')))errors.push('开发 + 复核需要开发者和 Reviewer');
   if(SETUP_MODE==='parallel'&&writers.length<2)errors.push('并行开发至少需要两名写入者');
@@ -5182,7 +5185,7 @@ async function doSetupWorkspace(){
   setSetupBusy(true);
   renderSetupPreview();
   let setupSucceeded=false;
-  const participants=SETUP_PARTICIPANTS.map(p=>({...p,task:p.task.trim(),args:(p.args||'').trim()}));
+  const participants=SETUP_PARTICIPANTS.map(({auto_name,...p})=>({...p,name:p.name.trim(),task:p.task.trim(),args:(p.args||'').trim()}));
   const agents=participants.map(p=>p.agent);
   const qoderSlow=participants.some(p=>['qoder','qodercli','qodercn'].includes(p.agent));
   const res=document.getElementById('suResult');
