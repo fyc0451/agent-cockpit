@@ -32,6 +32,12 @@ def dispatch_schema_probe(argv: Sequence[str]) -> int:
     return 0 if result is None else int(result)
 
 
+def dispatch_maintenance_controller(argv: Sequence[str]) -> int:
+    module = importlib.import_module("maintenance_cli")
+    result = module.main(list(argv))
+    return 0 if result is None else int(result)
+
+
 def _usage() -> None:
     commands = "|".join(HELPER_COMMANDS)
     print(f"usage: agent-cockpit helper <{commands}> [args ...]", file=sys.stderr)
@@ -53,4 +59,6 @@ def main(
         return 2
     if args and args[0] == "schema-probe":
         return dispatch_schema_probe(args[1:])
+    if args and args[0] == "maintenance-controller":
+        return dispatch_maintenance_controller(args[1:])
     return None

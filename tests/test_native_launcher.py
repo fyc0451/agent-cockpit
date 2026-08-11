@@ -46,6 +46,19 @@ def _record_schema_dispatch(monkeypatch):
     return calls
 
 
+def _record_maintenance_dispatch(monkeypatch):
+    calls = []
+
+    def fake_dispatch(argv):
+        calls.append(argv)
+        return 29
+
+    monkeypatch.setattr(
+        native_launcher, "dispatch_maintenance_controller", fake_dispatch,
+    )
+    return calls
+
+
 def test_fixed_helper_command_set():
     assert set(native_launcher.HELPER_COMMANDS) == COMMANDS
 
@@ -77,6 +90,22 @@ def test_explicit_schema_probe_dispatch_preserves_exact_arguments(monkeypatch):
     assert calls == [argv[1:]]
 
 
+def test_explicit_maintenance_controller_dispatch_preserves_exact_arguments(
+    monkeypatch,
+):
+    calls = _record_maintenance_dispatch(monkeypatch)
+    argv = [
+        "maintenance-controller", "status",
+        "--state-root", "/state",
+        "--deploy-root", "/deploy",
+        "--current", "/deploy/current",
+        "--controller-root", "/run/controller",
+    ]
+
+    assert native_launcher.main(argv, program="agent-cockpit") == 29
+    assert calls == [argv[1:]]
+
+
 @pytest.mark.parametrize(("result", "expected"), [(None, 0), (23, 23)])
 def test_schema_probe_dispatch_calls_release_readiness_main_with_exact_argv(
     monkeypatch, result, expected,
@@ -99,6 +128,30 @@ def test_schema_probe_dispatch_calls_release_readiness_main_with_exact_argv(
     assert native_launcher.dispatch_schema_probe(["--version", "2.0.0"]) == expected
     assert imports == ["release_readiness"]
     assert calls == [["--version", "2.0.0"]]
+
+
+@pytest.mark.parametrize(("result", "expected"), [(None, 0), (31, 31)])
+def test_maintenance_dispatch_calls_cli_main_with_exact_argv(
+    monkeypatch, result, expected,
+):
+    calls = []
+    imports = []
+
+    class Controller:
+        @staticmethod
+        def main(argv):
+            calls.append(argv)
+            return result
+
+    def fake_import(name):
+        imports.append(name)
+        return Controller
+
+    monkeypatch.setattr(native_launcher.importlib, "import_module", fake_import)
+
+    assert native_launcher.dispatch_maintenance_controller(["status"]) == expected
+    assert imports == ["maintenance_cli"]
+    assert calls == [["status"]]
 
 
 @pytest.mark.parametrize("command", sorted(COMMANDS))
