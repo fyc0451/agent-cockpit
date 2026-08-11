@@ -407,6 +407,20 @@ def _binding_name(
     return f"{_request_hash(request_id)}-{role}-{generation.generation_id}.json"
 
 
+def evidence_binding_path(
+    *,
+    plan: maintenance_controller.ControllerPlan,
+    request_id: str,
+    role: str,
+    generation: generation_switch.GenerationIdentity,
+) -> Path:
+    """Return the deterministic release-external path without touching storage."""
+    _validate_plan(plan)
+    return plan.state_root / EVIDENCE_DIR_NAME / _binding_name(
+        request_id, role, generation
+    )
+
+
 def _validate_expected(
     plan: maintenance_controller.ControllerPlan,
     *,
@@ -513,7 +527,13 @@ def load_schema_evidence(
         generation=expected_generation,
         artifact_root=artifact_root,
     )
-    name = _binding_name(request_id, role, expected_generation)
+    path = evidence_binding_path(
+        plan=plan,
+        request_id=request_id,
+        role=role,
+        generation=expected_generation,
+    )
+    name = path.name
     state_fd = _open_state(plan)
     evidence_fd = -1
     try:
@@ -526,7 +546,7 @@ def load_schema_evidence(
             max_bytes=release_readiness.MAX_EVIDENCE_BYTES,
         )
         binding = EvidenceBinding(
-            path=plan.state_root / EVIDENCE_DIR_NAME / name,
+            path=path,
             sha256=hashlib.sha256(raw).hexdigest(),
             request_id=request_id,
             role=role,
@@ -581,7 +601,13 @@ def publish_schema_evidence(
         raw = release_readiness.canonical_evidence_bytes(evidence)
     except release_readiness.ReadinessEvidenceError:
         _fail("evidence_invalid")
-    name = _binding_name(request_id, role, expected_generation)
+    path = evidence_binding_path(
+        plan=plan,
+        request_id=request_id,
+        role=role,
+        generation=expected_generation,
+    )
+    name = path.name
     state_fd = _open_state(plan)
     evidence_fd = -1
     try:
@@ -602,7 +628,7 @@ def publish_schema_evidence(
             if existing != raw:
                 _fail("evidence_conflict")
         binding = EvidenceBinding(
-            path=plan.state_root / EVIDENCE_DIR_NAME / name,
+            path=path,
             sha256=hashlib.sha256(raw).hexdigest(),
             request_id=request_id,
             role=role,
@@ -1008,6 +1034,7 @@ __all__ = [
     "EvidenceBinding",
     "EvidenceEnvironmentError",
     "activate_server_evidence",
+    "evidence_binding_path",
     "environment_mapping",
     "freeze_active_server_evidence",
     "freeze_active_server_evidence_under_lease",

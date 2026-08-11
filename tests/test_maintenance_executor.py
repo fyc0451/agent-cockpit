@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from dataclasses import replace
@@ -10,6 +11,7 @@ import pytest
 
 import generation_switch
 import maintenance_controller
+import maintenance_evidence
 import maintenance_executor as executor
 import maintenance_services
 import upgrade_journal
@@ -45,8 +47,11 @@ def _request(tmp_path: Path, request_id: str = "request-1") -> executor.Maintena
         previous=PREVIOUS,
         target_root=generations / TARGET.generation_id,
         snapshot_root=state / executor.SNAPSHOT_DIR_NAME / request_id,
-        evidence_path=(
-            state / executor.EVIDENCE_DIR_NAME / request_id / "target.json"
+        evidence_path=maintenance_evidence.evidence_binding_path(
+            plan=plan,
+            request_id=request_id,
+            role="target",
+            generation=TARGET,
         ),
     )
 
@@ -65,24 +70,34 @@ class Harness:
         self.reject_target_ready = False
         self.binding_calls: list[tuple[str, str | None]] = []
         self.active_role = "previous"
+        self.active_override: executor.EvidenceBinding | None = None
         self.invalid_binding = False
         self.fail_prepare_after_persist = False
         self.fail_activate_after_persist = False
         self.prepare_observations: list[dict[str, object]] = []
-        root = request.plan.state_root / executor.EVIDENCE_DIR_NAME / request.request_id
         self.bindings = {
             "previous": executor.EvidenceBinding(
                 request.request_id,
                 "previous",
                 request.previous,
-                root / "previous.json",
+                maintenance_evidence.evidence_binding_path(
+                    plan=request.plan,
+                    request_id=request.request_id,
+                    role="previous",
+                    generation=request.previous,
+                ),
                 "d" * 64,
             ),
             "target": executor.EvidenceBinding(
                 request.request_id,
                 "target",
                 request.target,
-                root / "target.json",
+                maintenance_evidence.evidence_binding_path(
+                    plan=request.plan,
+                    request_id=request.request_id,
+                    role="target",
+                    generation=request.target,
+                ),
                 "e" * 64,
             ),
         }
@@ -149,6 +164,10 @@ class Harness:
     def read(self, request_id: str, role: str) -> executor.EvidenceBinding:
         assert request_id == self.request.request_id
         self.binding_calls.append(("read", role))
+        if role == "active" and self.active_override is not None:
+            binding = self.active_override
+            self.active_override = None
+            return binding
         selected = self.active_role if role == "active" else role
         binding = self.bindings[selected]
         if self.invalid_binding:
@@ -344,6 +363,123 @@ def test_happy_path_commits_with_fixed_service_order(tmp_path: Path) -> None:
         ("start", maintenance_services.MAIL_UNIT),
         ("start", maintenance_services.COCKPIT_UNIT),
     ]
+
+
+def test_real_flat_binding_paths_are_accepted(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+
+    def flat(role: str, identity: generation_switch.GenerationIdentity) -> Path:
+        name = (
+            hashlib.sha256(request.request_id.encode("utf-8")).hexdigest()
+            + f"-{role}-{identity.generation_id}.json"
+        )
+        return request.plan.state_root / executor.EVIDENCE_DIR_NAME / name
+
+    request = replace(request, evidence_path=flat("target", request.target))
+    harness = Harness(request)
+    harness.bindings["previous"] = replace(
+        harness.bindings["previous"],
+        evidence_path=flat("previous", request.previous),
+    )
+    harness.bindings["target"] = replace(
+        harness.bindings["target"],
+        evidence_path=request.evidence_path,
+    )
+
+    assert _execute(request, harness)["journal"]["stage"] == "committed"
+
+
+def test_legacy_nested_binding_paths_are_rejected(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    nested_root = request.plan.state_root / executor.EVIDENCE_DIR_NAME / request.request_id
+    legacy = replace(request, evidence_path=nested_root / "target.json")
+    harness = Harness(legacy)
+    harness.bindings["previous"] = replace(
+        harness.bindings["previous"], evidence_path=nested_root / "previous.json"
+    )
+    harness.bindings["target"] = replace(
+        harness.bindings["target"], evidence_path=nested_root / "target.json"
+    )
+
+    with pytest.raises(executor.MaintenanceExecutorError) as exc:
+        _execute(legacy, harness)
+
+    assert exc.value.code == "request_invalid"
+    assert not legacy.plan.journal_root.exists()
+    assert harness.calls == []
+    assert harness.binding_calls == []
+
+
+def test_legacy_nested_previous_binding_is_rejected_before_journal(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    harness = Harness(request)
+    previous = harness.bindings["previous"]
+    harness.bindings["previous"] = replace(
+        previous,
+        evidence_path=request.plan.state_root
+        / executor.EVIDENCE_DIR_NAME
+        / request.request_id
+        / "previous.json",
+    )
+
+    with pytest.raises(executor.MaintenanceExecutorError) as exc:
+        _execute(request, harness)
+
+    assert exc.value.code == "binding_invalid"
+    assert not request.plan.journal_root.exists()
+    assert harness.calls == []
+
+
+def test_legacy_nested_target_binding_is_rejected_and_rolled_back(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    harness = Harness(request)
+    target = harness.bindings["target"]
+    harness.bindings["target"] = replace(
+        target,
+        evidence_path=request.plan.state_root
+        / executor.EVIDENCE_DIR_NAME
+        / request.request_id
+        / "target.json",
+    )
+
+    with pytest.raises(executor.MaintenanceExecutorError) as exc:
+        _execute(request, harness)
+
+    assert exc.value.code == "binding_invalid"
+    assert upgrade_journal.load_journal(root=request.plan.journal_root)["stage"] == (
+        "rolled_back"
+    )
+    assert executor.inspect_current_generation(request.plan) == request.previous
+
+
+def test_legacy_nested_active_binding_is_rejected_and_rolled_back(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    _journal_at(request, "services_started", None)
+    harness = Harness(request)
+    harness.active_role = "target"
+    target = harness.bindings["target"]
+    harness.active_override = replace(
+        target,
+        evidence_path=request.plan.state_root
+        / executor.EVIDENCE_DIR_NAME
+        / request.request_id
+        / "target.json",
+    )
+
+    with pytest.raises(executor.MaintenanceExecutorError) as exc:
+        _execute(request, harness)
+
+    assert exc.value.code == "binding_invalid"
+    assert upgrade_journal.load_journal(root=request.plan.journal_root)["stage"] == (
+        "rolled_back"
+    )
+    assert executor.inspect_current_generation(request.plan) == request.previous
 
 
 def test_cold_snapshot_and_target_gate_only_after_both_services_inactive(
@@ -919,15 +1055,19 @@ def test_request_bound_paths_allow_a_second_upgrade_without_collision(
         snapshot_root=first.plan.state_root
         / executor.SNAPSHOT_DIR_NAME
         / "request-2",
-        evidence_path=first.plan.state_root
-        / executor.EVIDENCE_DIR_NAME
-        / "request-2"
-        / "target.json",
+        evidence_path=maintenance_evidence.evidence_binding_path(
+            plan=first.plan,
+            request_id="request-2",
+            role="target",
+            generation=first.target,
+        ),
     )
 
     assert first.evidence_path != second.evidence_path
-    assert first.evidence_path.parent.name == "request-1"
-    assert second.evidence_path.parent.name == "request-2"
+    assert first.evidence_path.parent == second.evidence_path.parent
+    assert first.evidence_path.name.split("-", 1)[0] != second.evidence_path.name.split(
+        "-", 1
+    )[0]
     assert Harness(first).bindings["target"].evidence_path == first.evidence_path
     assert Harness(second).bindings["target"].evidence_path == second.evidence_path
 

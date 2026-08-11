@@ -150,6 +150,66 @@ def _read(
     )
 
 
+@pytest.mark.parametrize(
+    ("request_id", "role", "generation"),
+    [
+        ("request-one", "previous", PREVIOUS),
+        ("request-one", "target", TARGET),
+        ("request-two", "target", TARGET),
+    ],
+)
+def test_evidence_binding_path_is_deterministic_and_pure_read(
+    tmp_path: Path,
+    request_id: str,
+    role: str,
+    generation: generation_switch.GenerationIdentity,
+) -> None:
+    plan = _plan(tmp_path)
+    before = (plan.state_root.stat().st_mtime_ns, tuple(plan.state_root.iterdir()))
+
+    path = maintenance_evidence.evidence_binding_path(
+        plan=plan,
+        request_id=request_id,
+        role=role,
+        generation=generation,
+    )
+
+    expected = (
+        hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        + f"-{role}-{generation.generation_id}.json"
+    )
+    assert path == plan.state_root / maintenance_evidence.EVIDENCE_DIR_NAME / expected
+    assert (plan.state_root.stat().st_mtime_ns, tuple(plan.state_root.iterdir())) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("request_id", "", "request_id_invalid"),
+        ("role", "active", "evidence_role_invalid"),
+        ("generation", object(), "generation_invalid"),
+    ],
+)
+def test_evidence_binding_path_invalid_input_has_no_side_effect(
+    tmp_path: Path, field: str, value: object, code: str
+) -> None:
+    plan = _plan(tmp_path)
+    values: dict[str, object] = {
+        "plan": plan,
+        "request_id": "request-one",
+        "role": "target",
+        "generation": TARGET,
+    }
+    values[field] = value
+    before = (plan.state_root.stat().st_mtime_ns, tuple(plan.state_root.iterdir()))
+
+    with pytest.raises(maintenance_evidence.EvidenceEnvironmentError) as exc:
+        maintenance_evidence.evidence_binding_path(**values)  # type: ignore[arg-type]
+
+    assert exc.value.code == code
+    assert (plan.state_root.stat().st_mtime_ns, tuple(plan.state_root.iterdir())) == before
+
+
 def test_publish_is_release_external_private_durable_and_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

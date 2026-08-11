@@ -14,11 +14,12 @@ from typing import Any
 
 import generation_switch
 import maintenance_controller
+import maintenance_evidence
 import maintenance_services
 import upgrade_journal
 
 
-EVIDENCE_DIR_NAME = "schema-evidence"
+EVIDENCE_DIR_NAME = maintenance_evidence.EVIDENCE_DIR_NAME
 SNAPSHOT_DIR_NAME = "upgrade-snapshots"
 READY_URL = "http://127.0.0.1:8790/health/ready"
 READY_TIMEOUT_SECONDS = 30.0
@@ -85,6 +86,24 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _expected_binding_path(
+    request: MaintenanceRequest,
+    role: str,
+    *,
+    request_entry: bool = False,
+) -> Path:
+    identity = request.previous if role == "previous" else request.target
+    try:
+        return maintenance_evidence.evidence_binding_path(
+            plan=request.plan,
+            request_id=request.request_id,
+            role=role,
+            generation=identity,
+        )
+    except maintenance_evidence.EvidenceEnvironmentError:
+        _fail("request_invalid" if request_entry else "binding_invalid")
+
+
 def _validate(request: MaintenanceRequest) -> None:
     if not isinstance(request, MaintenanceRequest):
         _fail("request_invalid")
@@ -110,10 +129,7 @@ def _validate(request: MaintenanceRequest) -> None:
         or request.snapshot_root
         != plan.state_root / SNAPSHOT_DIR_NAME / request.request_id
         or request.evidence_path
-        != plan.state_root
-        / EVIDENCE_DIR_NAME
-        / request.request_id
-        / "target.json"
+        != _expected_binding_path(request, "target", request_entry=True)
         or request.ready_url != READY_URL
         or any(".." in path.parts for path in paths)
         or _inside(request.snapshot_root, plan.deploy_root)
@@ -179,12 +195,7 @@ def _read_binding(
     except Exception:
         _fail("binding_unavailable")
     expected = request.previous if role == "previous" else request.target
-    expected_path = (
-        request.plan.state_root
-        / EVIDENCE_DIR_NAME
-        / request.request_id
-        / f"{role}.json"
-    )
+    expected_path = _expected_binding_path(request, role)
     if (
         type(binding) is not EvidenceBinding
         or binding.request_id != request.request_id
@@ -208,12 +219,7 @@ def _read_active_binding(
     except Exception:
         _fail("binding_unavailable")
     expected = request.previous if expected_role == "previous" else request.target
-    expected_path = (
-        request.plan.state_root
-        / EVIDENCE_DIR_NAME
-        / request.request_id
-        / f"{expected_role}.json"
-    )
+    expected_path = _expected_binding_path(request, expected_role)
     if (
         type(binding) is not EvidenceBinding
         or binding.request_id != request.request_id
