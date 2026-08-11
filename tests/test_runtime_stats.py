@@ -154,21 +154,123 @@ def test_sse_tracking_cleans_up_on_close_and_exception():
 
 def test_sse_lease_not_held_when_response_never_started():
     async def exercise():
-        async def waiting_events():
-            yield {"event": "ready", "data": "1"}
-            await asyncio.Event().wait()
+        class FakeRequest:
+            async def is_disconnected(self) -> bool:
+                return False
 
-        response = await server.api_events(
-            type("R", (), {"is_disconnected": lambda self: asyncio.sleep(0, result=False)})()
-        )
+        response = await server.api_events(FakeRequest())
         # Endpoint returned a Response without ASGI __call__ → no reservation.
         assert runtime_stats.connection_stats()["sse"] == 0
-        # aclose on body_iterator alone must not leave a leaked slot (none taken).
-        if hasattr(response, "body_iterator") and hasattr(response.body_iterator, "aclose"):
+        if hasattr(response, "body_iterator") and hasattr(
+            response.body_iterator, "aclose"
+        ):
             await response.body_iterator.aclose()
         assert runtime_stats.connection_stats()["sse"] == 0
 
     asyncio.run(exercise())
+
+
+def test_asgi_cancel_before_body_iteration_closes_lease_once(monkeypatch):
+    """Frozen gate: reserve happened, parent blocked, real task.cancel → close once."""
+    close_count = {"n": 0}
+    real_try = runtime_stats.try_open_connection
+
+    def spy_try_open(kind: str):
+        lease = real_try(kind)
+        if lease is None:
+            return None
+        original_close = lease.close
+
+        def counted_close() -> None:
+            close_count["n"] += 1
+            original_close()
+
+        lease.close = counted_close  # type: ignore[method-assign]
+        return lease
+
+    monkeypatch.setattr(runtime_stats, "try_open_connection", spy_try_open)
+    entered = asyncio.Event()
+
+    async def blocking_parent(self, scope, receive, send):  # noqa: ANN001
+        # Prove super() was entered (lease already reserved) without consuming body.
+        entered.set()
+        await asyncio.Event().wait()  # block until cancelled
+
+    monkeypatch.setattr(server.EventSourceResponse, "__call__", blocking_parent)
+
+    async def exercise():
+        body_iterated = {"n": 0}
+
+        async def body():
+            body_iterated["n"] += 1
+            yield {"event": "ready", "data": "1"}
+            raise AssertionError("body must not run while parent blocks")
+
+        response = server._SseCappedEventSourceResponse(body())
+        assert runtime_stats.connection_stats()["sse"] == 0
+        assert close_count["n"] == 0
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/events",
+            "raw_path": b"/api/events",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 123),
+            "server": ("test", 80),
+        }
+
+        async def receive():
+            await asyncio.sleep(3600)
+            return {"type": "http.disconnect"}
+
+        async def send(_message):
+            return None
+
+        task = asyncio.create_task(response(scope, receive, send))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        # Reserved under outer __call__, but body generator not started.
+        assert runtime_stats.connection_stats()["sse"] == 1
+        assert close_count["n"] == 0
+        assert body_iterated["n"] == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert close_count["n"] == 1
+        assert runtime_stats.connection_stats()["sse"] == 0
+        assert body_iterated["n"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_response_constructor_failure_never_opens_sse_slot(monkeypatch):
+    """Constructor boom must not call try_open (lease only in ASGI __call__)."""
+    open_calls: list[str] = []
+    real_try = runtime_stats.try_open_connection
+
+    def counting_try(kind: str):
+        open_calls.append(kind)
+        return real_try(kind)
+
+    monkeypatch.setattr(runtime_stats, "try_open_connection", counting_try)
+
+    def boom_init(self, *args, **kwargs):  # noqa: ANN001
+        raise RuntimeError("constructor failed")
+
+    monkeypatch.setattr(server.EventSourceResponse, "__init__", boom_init)
+
+    async def body():
+        yield {"event": "ready", "data": "1"}
+
+    with pytest.raises(RuntimeError, match="constructor failed"):
+        server._SseCappedEventSourceResponse(body())
+    assert open_calls == []
+    assert runtime_stats.connection_stats()["sse"] == 0
 
 
 def test_sse_asgi_cancel_or_send_error_releases_once():
@@ -178,14 +280,12 @@ def test_sse_asgi_cancel_or_send_error_releases_once():
             await asyncio.Event().wait()
 
         response = server._SseCappedEventSourceResponse(events())
-        messages = []
 
         async def receive():
             await asyncio.sleep(0)
             return {"type": "http.disconnect"}
 
         async def send(message):
-            messages.append(message)
             if message.get("type") == "http.response.start":
                 raise RuntimeError("send failed after start")
 
@@ -205,8 +305,6 @@ def test_sse_asgi_cancel_or_send_error_releases_once():
         with pytest.raises(BaseExceptionGroup) as exc_info:
             await response(scope, receive, send)
         assert any("send failed" in str(item) for item in exc_info.value.exceptions)
-        assert runtime_stats.connection_stats()["sse"] == 0
-        # Exactly-once: close is idempotent
         assert runtime_stats.connection_stats()["sse"] == 0
 
     asyncio.run(exercise())
