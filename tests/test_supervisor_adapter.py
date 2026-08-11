@@ -763,3 +763,165 @@ class TestR2ContractGaps:
             current_dir=cur,
             deploy_root=deploy_layout["root"],
         )
+
+
+# ── S0 R3：inactive generation / repeated section / Mac exact ────
+
+
+class TestR3ContractGaps:
+    def test_r3_inactive_generation_and_release_tree_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """R3-1：拒全部 deploy/generations/**（含 inactive），controller 须在 release tree 外。"""
+        root = tmp_path / "deploy"
+        active = root / "generations" / "g-active"
+        inactive = root / "generations" / "g-old"
+        active.mkdir(parents=True)
+        inactive.mkdir(parents=True)
+        current = root / "current"
+        current.symlink_to(active)
+        # inactive generation 内 — 不在 current.resolve 下，但在 generations/**
+        fake = inactive / "controller-lookalike"
+        fake.mkdir()
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.validate_controller_path(fake, current=current, deploy_root=root)
+        assert exc.value.reason == "controller_inside_generations"
+        # release tree 内其它路径（非 generations）也拒
+        under_release = root / "misc-controller"
+        under_release.mkdir()
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.validate_controller_path(under_release, current=current, deploy_root=root)
+        assert exc2.value.reason == "controller_inside_release_tree"
+        # release 外 OK
+        outside = tmp_path / "controller-install"
+        outside.mkdir()
+        assert (
+            sa.validate_controller_path(outside, current=current, deploy_root=root)
+            == outside
+        )
+        # 仅 current 也可推导 deploy_root
+        with pytest.raises(sa.SupervisorAdapterError) as exc3:
+            sa.validate_controller_path(fake, current=current)
+        assert exc3.value.reason == "controller_inside_generations"
+
+    def test_r3_repeated_service_section_rejected(self) -> None:
+        """R3-2：重复 [Service]/[Unit]/[Install] section 不得拼接合同。"""
+        stitched = (
+            "[Unit]\n"
+            "Description=a\n"
+            "[Service]\n"
+            "KillMode=process\n"
+            "WorkingDirectory=/tmp/x/current\n"
+            'ExecStart="/tmp/x/current/bin/app"\n'
+            "[Service]\n"
+            "KillMode=control-group\n"
+            "[Install]\n"
+            "WantedBy=default.target\n"
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.parse_linux_unit_contract(stitched)
+        assert exc.value.reason == "unit_duplicate_section"
+        # 重复 Unit 同样拒绝
+        dup_unit = (
+            "[Unit]\nDescription=a\n"
+            "[Unit]\nDescription=b\n"
+            "[Service]\n"
+            "KillMode=process\n"
+            "WorkingDirectory=/tmp/x/current\n"
+            'ExecStart="/tmp/x/current/bin/app"\n'
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.parse_linux_unit_contract(dup_unit)
+        assert exc2.value.reason == "unit_duplicate_section"
+
+    def test_r3_mac_exact_fields_and_same_origin_logs(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        """R3-3：禁止 bool 强转；RunAtLoad/KeepAlive/Throttle/logs exact；拒 /tmp/evil。"""
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        base = sa.render_mac_main_plist(
+            current_dir=cur, program_arguments=argv, deploy_root=deploy_layout["root"]
+        )
+        # 缺失 RunAtLoad 不得被 bool(None)=False 悄悄通过 parse 后 validate
+        missing = base.replace(
+            "  <key>RunAtLoad</key>\n  <true/>\n",
+            "",
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.parse_mac_plist_contract(missing)
+        assert exc.value.reason == "plist_field_type"
+
+        # KeepAlive 为 false — type ok 但 exact value 失败
+        ka_false = base.replace(
+            "  <key>KeepAlive</key>\n  <true/>\n",
+            "  <key>KeepAlive</key>\n  <false/>\n",
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc2:
+            sa.validate_mac_plist_contract(
+                ka_false,
+                expected_label=sa.MAC_MAIN_LABEL,
+                expected_working_directory=cur,
+                program_arguments=argv,
+                current_dir=cur,
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc2.value.reason == "plist_keep_alive_not_true"
+
+        # ThrottleInterval 非 3
+        thr = base.replace(
+            "  <key>ThrottleInterval</key>\n  <integer>3</integer>\n",
+            "  <key>ThrottleInterval</key>\n  <integer>99</integer>\n",
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc3:
+            sa.validate_mac_plist_contract(
+                thr,
+                expected_label=sa.MAC_MAIN_LABEL,
+                expected_working_directory=cur,
+                program_arguments=argv,
+                current_dir=cur,
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc3.value.reason == "plist_throttle_interval_not_3"
+
+        # 日志路径逃到 /tmp/evil
+        evil_log = base.replace(
+            f"{cur.as_posix()}/agent-cockpit.stdout.log",
+            "/tmp/evil.stdout.log",
+        )
+        with pytest.raises(sa.SupervisorAdapterError) as exc4:
+            sa.validate_mac_plist_contract(
+                evil_log,
+                expected_label=sa.MAC_MAIN_LABEL,
+                expected_working_directory=cur,
+                program_arguments=argv,
+                current_dir=cur,
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc4.value.reason == "plist_stdout_path_mismatch"
+
+        # 干净主 LA + controller 仍通过
+        sa.validate_mac_plist_contract(
+            base,
+            expected_label=sa.MAC_MAIN_LABEL,
+            expected_working_directory=cur,
+            program_arguments=argv,
+            current_dir=cur,
+            deploy_root=deploy_layout["root"],
+        )
+        ctrl = deploy_layout["controller"]
+        prog = (ctrl / "run.sh").as_posix()
+        Path(prog).write_text("#!/bin/sh\n", encoding="utf-8")
+        ctrl_plist = sa.render_mac_controller_plist(
+            controller_dir=ctrl,
+            program_arguments=[prog],
+            current_dir=cur,
+            deploy_root=deploy_layout["root"],
+        )
+        sa.validate_mac_plist_contract(
+            ctrl_plist,
+            expected_label=sa.MAC_CONTROLLER_LABEL,
+            expected_working_directory=ctrl,
+            program_arguments=[prog],
+            deploy_root=deploy_layout["root"],
+        )

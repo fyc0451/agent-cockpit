@@ -79,6 +79,9 @@ class MacPlistContract:
     working_directory: str
     run_at_load: bool
     keep_alive: bool
+    throttle_interval: int
+    standard_out_path: str
+    standard_error_path: str
 
 
 # ── 路径校验 ──────────────────────────────────────────────────────
@@ -152,30 +155,72 @@ def validate_current_path(
     return path
 
 
+def derive_deploy_root(
+    *,
+    current: str | Path | None = None,
+    deploy_root: str | Path | None = None,
+) -> Path | None:
+    """显式 deploy_root 优先；否则由 ``.../current`` 推导父目录为 release root。"""
+    if deploy_root is not None:
+        return validate_absolute_path(deploy_root, role="deploy_root")
+    if current is not None:
+        cur = validate_absolute_path(current, role="current")
+        if cur.name == "current":
+            return cur.parent
+    return None
+
+
 def validate_controller_path(
     controller: str | Path,
     *,
     current: str | Path | None = None,
+    deploy_root: str | Path | None = None,
 ) -> Path:
-    """Controller 安装根：绝对路径；不得落在 ``current`` 或其 generation 内。
+    """Controller 安装根：绝对路径；必须在 release tree 外。
 
-    同时检查：
-    - 字面量路径不得为 ``current`` 或其子路径；
-    - resolve 后不得落在 ``current.resolve()``（即 generation）边界内，
-      防止 ``current → generations/g1`` 时把 generation 内路径冒充 release 外 controller。
+    - 字面 / resolve 不得落在 ``current`` 或其 active generation 内；
+    - 拒全部 ``{deploy_root}/generations/**``（含 inactive generation）；
+    - 拒整个 release tree（``deploy_root`` 及其子路径）。
+    ``deploy_root`` 可显式传入，或由 ``current`` 推导。
     """
     path = validate_absolute_path(controller, role="controller")
+    root = derive_deploy_root(current=current, deploy_root=deploy_root)
+    cur: Path | None = None
     if current is not None:
         cur = validate_absolute_path(current, role="current")
         if path == cur or _is_relative_to(path, cur):
             raise SupervisorAdapterError("controller_inside_current")
+    try:
+        path_res = path.resolve(strict=False)
+    except OSError as exc:
+        raise SupervisorAdapterError("controller_path_unresolvable") from exc
+    if cur is not None:
         try:
-            path_res = path.resolve(strict=False)
             cur_res = cur.resolve(strict=False)
         except OSError as exc:
             raise SupervisorAdapterError("controller_path_unresolvable") from exc
         if path_res == cur_res or _is_relative_to(path_res, cur_res):
             raise SupervisorAdapterError("controller_inside_current")
+    if root is not None:
+        gens = root / "generations"
+        if (
+            path == gens
+            or _is_relative_to(path, gens)
+            or path_res == gens.resolve(strict=False)
+            or _is_relative_to(path_res, gens.resolve(strict=False))
+        ):
+            raise SupervisorAdapterError("controller_inside_generations")
+        try:
+            root_res = root.resolve(strict=False)
+        except OSError as exc:
+            raise SupervisorAdapterError("controller_path_unresolvable") from exc
+        if (
+            path == root
+            or _is_relative_to(path, root)
+            or path_res == root_res
+            or _is_relative_to(path_res, root_res)
+        ):
+            raise SupervisorAdapterError("controller_inside_release_tree")
     return path
 
 
@@ -454,11 +499,14 @@ def render_mac_controller_plist(
     controller_dir: str | Path,
     program_arguments: Sequence[str],
     current_dir: str | Path | None = None,
+    deploy_root: str | Path | None = None,
     stdout_name: str = "controller.stdout.log",
     stderr_name: str = "controller.stderr.log",
 ) -> str:
     """固定 controller LaunchAgent（release 外）；禁止 upgrade.<job> label。"""
-    controller = validate_controller_path(controller_dir, current=current_dir)
+    controller = validate_controller_path(
+        controller_dir, current=current_dir, deploy_root=deploy_root
+    )
     if not program_arguments:
         raise SupervisorAdapterError("empty_program_arguments")
     args: list[str] = []
@@ -548,8 +596,9 @@ MAC_PLIST_FORBIDDEN_KEYS: frozenset[str] = frozenset({"Program"})
 
 
 def _parse_unit_by_section(text: str) -> dict[str, str]:
-    """按 section 解析 unit；关键键仅在 [Service]；拒绝错位与重复。"""
+    """按 section 解析 unit；关键键仅在 [Service]；拒绝错位、键重复与 section 重复。"""
     section: str | None = None
+    seen_sections: set[str] = set()
     # (section, key) → value；再投影 service 字段
     seen: set[tuple[str, str]] = set()
     service_fields: dict[str, str] = {}
@@ -561,6 +610,9 @@ def _parse_unit_by_section(text: str) -> dict[str, str]:
             name = line[1:-1].strip()
             if name not in _UNIT_SECTION_KEYS:
                 raise SupervisorAdapterError("unit_section_not_allowlisted", name)
+            if name in seen_sections:
+                raise SupervisorAdapterError("unit_duplicate_section", name)
+            seen_sections.add(name)
             section = name
             continue
         if section is None:
@@ -687,21 +739,43 @@ def parse_mac_plist_contract(text: str) -> MacPlistContract:
         raise SupervisorAdapterError("plist_missing_dict")
     mapping = _plist_dict_to_map(dict_el, top_level=True)
     label = mapping.get("Label")
-    if not isinstance(label, str):
+    if type(label) is not str:
         raise SupervisorAdapterError("plist_missing_label")
     args = mapping.get("ProgramArguments")
-    if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
+    if not isinstance(args, list) or not args or not all(type(a) is str for a in args):
         raise SupervisorAdapterError("plist_missing_program_arguments")
     wd = mapping.get("WorkingDirectory")
-    if not isinstance(wd, str):
+    if type(wd) is not str:
         raise SupervisorAdapterError("plist_missing_working_directory")
+    # 禁止 bool() 强转：缺省 / 错类型直接 fail-closed
+    run_at_load = mapping.get("RunAtLoad", _MISSING)
+    keep_alive = mapping.get("KeepAlive", _MISSING)
+    throttle = mapping.get("ThrottleInterval", _MISSING)
+    stdout = mapping.get("StandardOutPath", _MISSING)
+    stderr = mapping.get("StandardErrorPath", _MISSING)
+    if run_at_load is _MISSING or type(run_at_load) is not bool:
+        raise SupervisorAdapterError("plist_field_type", "RunAtLoad")
+    if keep_alive is _MISSING or type(keep_alive) is not bool:
+        raise SupervisorAdapterError("plist_field_type", "KeepAlive")
+    if throttle is _MISSING or type(throttle) is not int or isinstance(throttle, bool):
+        raise SupervisorAdapterError("plist_field_type", "ThrottleInterval")
+    if stdout is _MISSING or type(stdout) is not str:
+        raise SupervisorAdapterError("plist_field_type", "StandardOutPath")
+    if stderr is _MISSING or type(stderr) is not str:
+        raise SupervisorAdapterError("plist_field_type", "StandardErrorPath")
     return MacPlistContract(
         label=label,
         program_arguments=tuple(args),
         working_directory=wd,
-        run_at_load=bool(mapping.get("RunAtLoad")),
-        keep_alive=bool(mapping.get("KeepAlive")),
+        run_at_load=run_at_load,
+        keep_alive=keep_alive,
+        throttle_interval=throttle,
+        standard_out_path=stdout,
+        standard_error_path=stderr,
     )
+
+
+_MISSING = object()
 
 
 def _plist_dict_to_map(
@@ -758,8 +832,10 @@ def validate_mac_plist_contract(
     program_arguments: Sequence[str] | None = None,
     current_dir: str | Path | None = None,
     deploy_root: str | Path | None = None,
+    stdout_name: str | None = None,
+    stderr_name: str | None = None,
 ) -> MacPlistContract:
-    """校验固定 label、WD，以及（若提供）精确 program argv。
+    """校验固定 label、WD、exact bool/int 字段与同源 log 路径。
 
     主 LA（``MAC_MAIN_LABEL``）必须提供 ``program_arguments`` 与 ``current_dir``，
     以验证 argv[0] 落在 current 字面路径下。controller 仅要求 argv 非空且路径合法。
@@ -772,6 +848,27 @@ def validate_mac_plist_contract(
         raise SupervisorAdapterError("label_mismatch", contract.label)
     if contract.working_directory != wd.as_posix():
         raise SupervisorAdapterError("working_directory_mismatch")
+    # exact type+value（禁止 bool 强转后的假阳性）
+    if contract.run_at_load is not True:
+        raise SupervisorAdapterError("plist_run_at_load_not_true")
+    if contract.keep_alive is not True:
+        raise SupervisorAdapterError("plist_keep_alive_not_true")
+    if type(contract.throttle_interval) is not int or contract.throttle_interval != 3:
+        raise SupervisorAdapterError("plist_throttle_interval_not_3")
+    if expected_label == MAC_MAIN_LABEL:
+        out_name = stdout_name or "agent-cockpit.stdout.log"
+        err_name = stderr_name or "agent-cockpit.stderr.log"
+    else:
+        out_name = stdout_name or "controller.stdout.log"
+        err_name = stderr_name or "controller.stderr.log"
+    expected_out = f"{wd.as_posix()}/{out_name}"
+    expected_err = f"{wd.as_posix()}/{err_name}"
+    if contract.standard_out_path != expected_out:
+        raise SupervisorAdapterError("plist_stdout_path_mismatch")
+    if contract.standard_error_path != expected_err:
+        raise SupervisorAdapterError("plist_stderr_path_mismatch")
+    validate_absolute_path(contract.standard_out_path, role="stdout")
+    validate_absolute_path(contract.standard_error_path, role="stderr")
     for arg in contract.program_arguments:
         if _has_control_chars(arg):
             raise SupervisorAdapterError("control_char_in_argument")
@@ -901,6 +998,7 @@ __all__ = [
     "PlannedCommand",
     "SupervisorAdapterError",
     "assert_fixed_mac_label",
+    "derive_deploy_root",
     "escape_plist_xml",
     "escape_systemd_exec_value",
     "escape_systemd_value",
