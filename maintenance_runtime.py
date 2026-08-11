@@ -14,12 +14,15 @@ import maintenance_executor
 import upgrade_snapshot
 
 
-TargetProbe = Callable[[maintenance_executor.MaintenanceRequest], dict[str, object]]
+TargetProbe = Callable[
+    [maintenance_executor.MaintenanceRequest, Path, str], dict[str, object]
+]
 
 _REQUEST_RE = re.compile(r"[A-Za-z0-9._-]{1,200}\Z")
 _VERSION_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
 )
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class MaintenanceRuntimeError(RuntimeError):
@@ -182,14 +185,26 @@ def execute_maintenance(
         else:
             return
         request.snapshot_root.parent.mkdir(mode=0o700, exist_ok=True)
-        upgrade_snapshot.create_backup_snapshot(
+        snapshot = upgrade_snapshot.create_backup_snapshot(
             snapshot_root=request.snapshot_root,
             snapshot_id=request.request_id,
             request_id=request.request_id,
             source_sha=request.previous.source_sha,
             target_digest=request.target.artifact_digest,
         )
-        evidence = target_probe(request)
+        if not isinstance(snapshot, dict):
+            _fail("snapshot_invalid")
+        inventory_path = snapshot.get("inventory_path")
+        inventory_sha256 = snapshot.get("inventory_sha256")
+        if (
+            not isinstance(inventory_path, Path)
+            or inventory_path
+            != request.snapshot_root / upgrade_snapshot.INVENTORY_NAME
+            or type(inventory_sha256) is not str
+            or _SHA256_RE.fullmatch(inventory_sha256) is None
+        ):
+            _fail("snapshot_invalid")
+        evidence = target_probe(request, inventory_path, inventory_sha256)
         if not isinstance(evidence, dict):
             _fail("target_probe_invalid")
         maintenance_evidence.publish_schema_evidence(

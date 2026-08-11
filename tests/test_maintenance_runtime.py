@@ -15,6 +15,7 @@ import maintenance_executor
 import maintenance_runtime
 import maintenance_services
 import upgrade_journal
+import upgrade_snapshot
 
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "1" * 64)
@@ -73,6 +74,7 @@ class Harness:
         self.active_role = "target"
         self.probe_error = False
         self.probe_invalid = False
+        self.snapshot_override: object | None = None
         self.lock_entries = 0
 
         real_lock = maintenance_controller.controller_lock
@@ -228,12 +230,24 @@ class Harness:
             "target_digest": self.request.target.artifact_digest,
         }
         self.events.append(("snapshot", None))
-        return {"snapshot_root": self.request.snapshot_root}
+        if self.snapshot_override is not None:
+            return self.snapshot_override  # type: ignore[return-value]
+        return {
+            "snapshot_root": self.request.snapshot_root,
+            "inventory_path": self.request.snapshot_root
+            / upgrade_snapshot.INVENTORY_NAME,
+            "inventory_sha256": "f" * 64,
+        }
 
     def target_probe(
-        self, request: maintenance_executor.MaintenanceRequest
+        self,
+        request: maintenance_executor.MaintenanceRequest,
+        inventory_path: Path,
+        inventory_sha256: str,
     ) -> dict[str, object]:
         assert request == self.request
+        assert inventory_path == request.snapshot_root / upgrade_snapshot.INVENTORY_NAME
+        assert inventory_sha256 == "f" * 64
         assert set(self.states.values()) == {"inactive"}
         self.events.append(("probe", None))
         if self.probe_error:
@@ -455,6 +469,43 @@ def test_invalid_target_probe_result_uses_executor_rollback(
     assert exc.value.code == "binding_unavailable"
     assert upgrade_journal.load_journal(root=request.plan.journal_root)["stage"] == "rolled_back"
     assert maintenance_executor.inspect_current_generation(request.plan) == request.previous
+
+
+@pytest.mark.parametrize(
+    "snapshot_result",
+    [
+        [],
+        {},
+        {"inventory_path": Path("/tmp/wrong.json"), "inventory_sha256": "f" * 64},
+        {
+            "inventory_path": Path("/placeholder"),
+            "inventory_sha256": "invalid",
+        },
+    ],
+)
+def test_invalid_snapshot_metadata_uses_executor_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_result: object,
+) -> None:
+    request = _request(tmp_path)
+    harness = Harness(request, monkeypatch)
+    if (
+        isinstance(snapshot_result, dict)
+        and snapshot_result.get("inventory_path") == Path("/placeholder")
+    ):
+        snapshot_result = {
+            **snapshot_result,
+            "inventory_path": request.snapshot_root / upgrade_snapshot.INVENTORY_NAME,
+        }
+    harness.snapshot_override = snapshot_result
+
+    with pytest.raises(maintenance_executor.MaintenanceExecutorError) as exc:
+        harness.execute()
+
+    assert exc.value.code == "binding_unavailable"
+    assert upgrade_journal.load_journal(root=request.plan.journal_root)["stage"] == "rolled_back"
+    assert not any(name in {"probe", "publish"} for name, _ in harness.events)
 
 
 @pytest.mark.parametrize("invalid", [None, False, 1, "probe"])
