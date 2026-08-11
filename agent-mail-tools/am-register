@@ -18,6 +18,7 @@ from am_common import REGISTRY_DIR, load_client_config, mcp_call, mcp_tool, slug
 # 用于 registry 文件名的 agent/instance 组件只允许安全字符,
 # 禁止 /、\、..、空格等,防止路径穿越或文件名注入。
 _COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_OPAQUE_INSTANCE_RE = re.compile(r"^i-[a-z2-7]{26}$")
 
 
 def _validate_component(name: str, label: str) -> str:
@@ -331,6 +332,14 @@ def main() -> None:
             safe = {key: value for key, value in identity.items() if key != "registration_token"}
             print(json.dumps(safe, ensure_ascii=False, indent=2))
             return
+        if identity.get("status") == "retired" or identity.get("retired_at"):
+            raise SystemExit(
+                "该 instance 已退休，禁止恢复或复用；请创建新的 opaque instance id"
+            )
+        if args.force and _OPAQUE_INSTANCE_RE.fullmatch(instance):
+            raise SystemExit(
+                "opaque instance 已存在，--force 也不能覆盖；请创建新的 instance id"
+            )
     elif args.show:
         raise SystemExit(f"尚未注册: {agent}--{instance} @ {project_key}")
 
@@ -374,14 +383,8 @@ def main() -> None:
             if not isinstance(profile, dict):
                 raise SystemExit("whois 返回格式无效，无法确认身份状态")
             if profile.get("retired_at"):
-                mcp_tool(hub, token, "unretire_agent", {
-                    "project_key": project_key,
-                    "agent_name": identity["name"],
-                    "registration_token": identity["registration_token"],
-                })
-                print(
-                    f"注意：已自动恢复 retired 身份 {identity['name']}",
-                    file=sys.stderr,
+                raise SystemExit(
+                    "Hub 身份已退休，禁止恢复或复用；请创建新的 opaque instance id"
                 )
             probe = mcp_tool(hub, token, "fetch_inbox", {
                 "project_key": project_key,

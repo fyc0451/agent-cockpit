@@ -344,7 +344,7 @@ def test_register_does_not_fabricate_agent_main_name():
     assert 'f"{args.agent}-{args.instance}"' not in source
     assert 'if args.name:' in source
     assert 'mcp_tool(hub, token, "whois"' in source
-    assert 'mcp_tool(hub, token, "unretire_agent"' in source
+    assert 'mcp_tool(hub, token, "unretire_agent"' not in source
     assert "--force" in source
 
 
@@ -407,8 +407,8 @@ def test_register_atomic_write_preserves_existing_on_failure(tmp_path, monkeypat
     assert [p.name for p in tmp_path.iterdir()] == ["identity.json"]
 
 
-def test_register_reuse_restores_retired_identity(tmp_path, monkeypatch, capsys):
-    """registry 中的 token 应自动恢复 retired 身份后再复用。"""
+def test_register_reuse_rejects_retired_identity(tmp_path, monkeypatch):
+    """retired identity 不得恢复，否则同名新实例会收到旧收件箱。"""
     module = _load_am_register()
     module.REGISTRY_DIR = tmp_path
     project = tmp_path / "proj"
@@ -430,10 +430,6 @@ def test_register_reuse_restores_retired_identity(tmp_path, monkeypatch, capsys)
         calls.append((name, args))
         if name == "whois":
             return {"name": "codex-main", "retired_at": "2026-08-02T00:00:00Z"}
-        if name == "unretire_agent":
-            return {"status": "active"}
-        if name == "fetch_inbox":
-            return []
         raise AssertionError(name)
 
     monkeypatch.setattr(module, "mcp_tool", tool)
@@ -441,13 +437,11 @@ def test_register_reuse_restores_retired_identity(tmp_path, monkeypatch, capsys)
         "am-register", "--agent", "codex", "--project", str(project),
     ])
 
-    module.main()
+    with pytest.raises(SystemExit, match="禁止恢复或复用"):
+        module.main()
 
-    assert [name for name, _args in calls] == ["whois", "unretire_agent", "fetch_inbox"]
+    assert [name for name, _args in calls] == ["whois"]
     assert calls[0][1]["include_recent_commits"] is False
-    captured = capsys.readouterr()
-    assert "已自动恢复 retired 身份 codex-main" in captured.err
-    assert "已注册（复用）: codex-main" in captured.out
 
 
 def test_register_reuse_does_not_unretire_active_identity(tmp_path, monkeypatch):

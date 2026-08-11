@@ -32,6 +32,7 @@ from am_common import (  # noqa: E402
 )
 
 _COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_OPAQUE_INSTANCE_RE = re.compile(r"^i-[a-z2-7]{26}$")
 
 
 def _validate_component(name: str, label: str) -> str:
@@ -63,7 +64,7 @@ def _secure_read_identity(path: Path, label: str = "身份文件") -> dict:
         raise SystemExit(f"{label}不是普通文件: {path}（capability 值不会输出）")
     if info.st_uid != os.getuid():
         raise SystemExit(f"{label}属主不是当前用户: {path}（capability 值不会输出）")
-    if info.st_mode & 0o077:
+    if stat.S_IMODE(info.st_mode) != 0o600:
         raise SystemExit(
             f"{label}权限过宽（要求 0600）: {path}（capability 值不会输出）"
         )
@@ -149,6 +150,8 @@ def main(argv: list[str] | None = None) -> None:
 
     agent = _validate_component(args.agent, "agent")
     instance = _validate_component(args.instance, "instance")
+    if not _OPAQUE_INSTANCE_RE.fullmatch(instance):
+        raise SystemExit("instance 必须是 Cockpit 生成的 opaque id（i- + 26 位 base32）")
     project_key = str(Path(args.project).resolve())
     registry_file = REGISTRY_DIR / slugify(project_key) / f"{agent}--{instance}.json"
 
@@ -170,11 +173,11 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("身份文件缺少 name（capability 值不会输出）")
     if not isinstance(registration_token, str) or not registration_token:
         raise SystemExit("身份文件缺少 registration_token（capability 值不会输出）")
-    if identity.get("agent") not in (None, agent):
+    if identity.get("agent") != agent:
         raise SystemExit(
             f"身份文件 agent 字段与请求不一致: {identity.get('agent')!r} != {agent!r}"
         )
-    if identity.get("instance") not in (None, instance):
+    if identity.get("instance") != instance:
         raise SystemExit(
             f"身份文件 instance 字段与请求不一致: "
             f"{identity.get('instance')!r} != {instance!r}"
@@ -220,12 +223,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         # 本地标 retired 但 Hub 仍 active：继续强制 retire（收敛）
 
-    try:
-        result = _hub_retire(
-            hub, token, project_key, agent_name, registration_token,
-        )
-    except SystemExit:
-        raise
+    _hub_retire(hub, token, project_key, agent_name, registration_token)
 
     retired_at = None
     # Hub 当前仅返回 status；用 whois 补 retired_at（任何失败不阻断，用本地时钟）
@@ -238,7 +236,7 @@ def main(argv: list[str] | None = None) -> None:
         })
         if isinstance(profile, dict) and profile.get("retired_at"):
             retired_at = str(profile["retired_at"])
-    except Exception:
+    except (Exception, SystemExit):
         retired_at = None
 
     _write_tombstone(registry_file, identity, retired_at=retired_at)

@@ -291,7 +291,7 @@ def test_agent_mail_is_documented_and_diagnosed_as_required():
 def test_agent_mail_helpers_are_packaged_and_safely_linked():
     tools = ROOT / "agent-mail-tools"
     for name in (
-        "am-register", "am-init-project", "mail-send", "mail-recv",
+        "am-register", "am-retire", "am-init-project", "mail-send", "mail-recv",
         "mail-identity-inject",
     ):
         path = tools / name
@@ -313,7 +313,7 @@ def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path
     tools = install_dir / "agent-mail-tools"
     tools.mkdir(parents=True)
     for name in (
-        "am-register", "am-init-project", "mail-send", "mail-recv",
+        "am-register", "am-retire", "am-init-project", "mail-send", "mail-recv",
         "mail-identity-inject",
     ):
         path = tools / name

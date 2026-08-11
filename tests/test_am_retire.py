@@ -27,7 +27,7 @@ def _load_am_retire():
     return module
 
 
-def _seed_registry(module, tmp_path: Path, *, instance: str = "opaque-a1b2c3d4"):
+def _seed_registry(module, tmp_path: Path, *, instance: str = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"):
     project = tmp_path / "proj"
     project.mkdir()
     project_key = str(project.resolve())
@@ -65,15 +65,25 @@ def test_retire_requires_exact_registry_path(tmp_path, monkeypatch):
     project.mkdir()
     project_key = str(project.resolve())
     (tmp_path / module.slugify(project_key)).mkdir()
-    # 存在 main，但请求 opaque-x → 未注册
+    # 存在 main，但请求 i-bbbbbbbbbbbbbbbbbbbbbbbbbb → 未注册
     monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "tok"))
     monkeypatch.setattr(module.sys, "argv", [
         "am-retire",
         "--agent", "codex",
-        "--instance", "opaque-x",
+        "--instance", "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
         "--project", project_key,
     ])
     with pytest.raises(SystemExit, match="身份未注册|尚未注册"):
+        module.main()
+
+
+def test_retire_rejects_safe_but_non_opaque_instance(monkeypatch):
+    module = _load_am_retire()
+    monkeypatch.setattr(module.sys, "argv", [
+        "am-retire", "--agent", "codex", "--instance", "main",
+        "--project", "/tmp/project",
+    ])
+    with pytest.raises(SystemExit, match="opaque id"):
         module.main()
 
 
@@ -105,7 +115,7 @@ def test_retire_hub_success_writes_tombstone_keeps_file(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(module, "mcp_tool", tool)
     monkeypatch.setattr(module.sys, "argv", [
-        "am-retire", "--agent", "codex", "--instance", "opaque-a1b2c3d4",
+        "am-retire", "--agent", "codex", "--instance", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "--project", project_key,
     ])
     module.main()
@@ -115,7 +125,7 @@ def test_retire_hub_success_writes_tombstone_keeps_file(tmp_path, monkeypatch, c
     assert registry_file.is_file()
     data = json.loads(registry_file.read_text(encoding="utf-8"))
     assert data["name"] == "FlowerCodex"
-    assert data["instance"] == "opaque-a1b2c3d4"
+    assert data["instance"] == "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert data["registration_token"] == "registration-token"
     assert data.get("status") == "retired"
     assert data.get("retired_at")
@@ -158,7 +168,7 @@ def test_retire_idempotent_when_already_retired_locally(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(module, "mcp_tool", tool)
     monkeypatch.setattr(module.sys, "argv", [
-        "am-retire", "--agent", "codex", "--instance", "opaque-a1b2c3d4",
+        "am-retire", "--agent", "codex", "--instance", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "--project", project_key,
     ])
     module.main()
@@ -184,7 +194,7 @@ def test_retire_hub_failure_does_not_tombstone(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "mcp_tool", tool)
     monkeypatch.setattr(module.sys, "argv", [
-        "am-retire", "--agent", "codex", "--instance", "opaque-a1b2c3d4",
+        "am-retire", "--agent", "codex", "--instance", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "--project", project_key,
     ])
     with pytest.raises(SystemExit):
@@ -217,7 +227,7 @@ def test_retire_hub_success_local_write_fail_no_success_claim(
 
     monkeypatch.setattr(module, "_atomic_write_identity", boom)
     monkeypatch.setattr(module.sys, "argv", [
-        "am-retire", "--agent", "codex", "--instance", "opaque-a1b2c3d4",
+        "am-retire", "--agent", "codex", "--instance", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "--project", project_key,
     ])
     with pytest.raises(SystemExit, match="Hub|本地|tombstone|落盘"):
@@ -239,11 +249,11 @@ def test_retire_rejects_symlink_registry(tmp_path, monkeypatch):
     real = tmp_path / "outside.json"
     real.write_text("{}")
     real.chmod(0o600)
-    link = reg_dir / "codex--opaque-a1b2c3d4.json"
+    link = reg_dir / "codex--i-aaaaaaaaaaaaaaaaaaaaaaaaaa.json"
     link.symlink_to(real)
     monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "tok"))
     monkeypatch.setattr(module.sys, "argv", [
-        "am-retire", "--agent", "codex", "--instance", "opaque-a1b2c3d4",
+        "am-retire", "--agent", "codex", "--instance", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "--project", project_key,
     ])
     with pytest.raises(SystemExit, match="symlink|拒绝"):
@@ -260,8 +270,36 @@ def test_retire_rejects_project_mismatch(tmp_path, monkeypatch):
     registry_file.chmod(0o600)
     monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "tok"))
     monkeypatch.setattr(module.sys, "argv", [
-        "am-retire", "--agent", "codex", "--instance", "opaque-a1b2c3d4",
+        "am-retire", "--agent", "codex", "--instance", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "--project", project_key,
     ])
     with pytest.raises(SystemExit, match="项目不匹配"):
         module.main()
+
+
+@pytest.mark.parametrize(("field", "value"), [("agent", None), ("instance", None)])
+def test_retire_requires_exact_registry_identity_fields(
+    field, value, tmp_path, monkeypatch,
+):
+    module = _load_am_retire()
+    module.REGISTRY_DIR = tmp_path
+    project_key, registry_file, identity = _seed_registry(module, tmp_path)
+    identity[field] = value
+    registry_file.write_text(json.dumps(identity), encoding="utf-8")
+    registry_file.chmod(0o600)
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "tok"))
+    monkeypatch.setattr(module.sys, "argv", [
+        "am-retire", "--agent", "codex",
+        "--instance", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "--project", project_key,
+    ])
+    with pytest.raises(SystemExit, match=f"{field} 字段"):
+        module.main()
+
+
+def test_retire_requires_exact_registry_mode(tmp_path):
+    module = _load_am_retire()
+    path = tmp_path / "identity.json"
+    path.write_text("{}", encoding="utf-8")
+    path.chmod(0o640)
+    with pytest.raises(SystemExit, match="0600"):
+        module._secure_read_identity(path)
