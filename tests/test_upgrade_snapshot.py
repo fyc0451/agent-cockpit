@@ -150,6 +150,56 @@ def test_sqlite_online_backup_keeps_live_wal_sidecars_unchanged(
         assert copied.execute("SELECT value FROM tasks").fetchone() == ("kept",)
 
 
+def test_sqlite_backup_uses_verified_fd_when_path_is_replaced_then_restored(
+    runtime_tree: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = runtime_tree["data"] / "tasks.sqlite3"
+    replacement = runtime_tree["data"] / "replacement.sqlite3"
+    held = runtime_tree["data"] / "held.sqlite3"
+    real_connect = sqlite3.connect
+
+    for path, marker in ((source, "original"), (replacement, "replacement")):
+        with real_connect(path) as connection:
+            connection.execute("CREATE TABLE marker(value TEXT)")
+            connection.execute("INSERT INTO marker VALUES (?)", (marker,))
+        os.chmod(path, 0o644)
+
+    swapped = False
+
+    def swapping_connect(database: object, *args: object, **kwargs: object):
+        nonlocal swapped
+        if (
+            not swapped
+            and isinstance(database, str)
+            and database.startswith("file:")
+            and "/fd/" in database
+        ):
+            source.rename(held)
+            replacement.rename(source)
+            try:
+                connection = real_connect(database, *args, **kwargs)
+            finally:
+                source.rename(replacement)
+                held.rename(source)
+            swapped = True
+            return connection
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(upgrade_snapshot.sqlite3, "connect", swapping_connect)
+
+    result = _create(runtime_tree)
+
+    assert swapped is True
+    row = _entry(result, "tasks")
+    target = result["snapshot_root"] / row["snapshot_relpath"]
+    with real_connect(target) as copied:
+        assert copied.execute("SELECT value FROM marker").fetchone() == ("original",)
+    with real_connect(source) as live:
+        assert live.execute("SELECT value FROM marker").fetchone() == ("original",)
+    with real_connect(replacement) as other:
+        assert other.execute("SELECT value FROM marker").fetchone() == ("replacement",)
+
+
 def test_external_coordination_source_uses_fixed_snapshot_layout(
     runtime_tree: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

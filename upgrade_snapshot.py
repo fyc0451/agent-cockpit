@@ -465,6 +465,19 @@ def _hash_owned_file(path: Path, *, max_bytes: int) -> tuple[int, str]:
         os.close(fd)
 
 
+def _sqlite_fd_uri(fd: int) -> str:
+    opened = os.fstat(fd)
+    for directory in (Path("/proc/self/fd"), Path("/dev/fd")):
+        descriptor_path = directory / str(fd)
+        try:
+            current = descriptor_path.stat()
+        except OSError:
+            continue
+        if (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+            return f"{descriptor_path.as_uri()}?mode=ro"
+    _reject("backup_snapshot_unsafe")
+
+
 def _backup_sqlite(
     source: Path,
     destination: Path,
@@ -508,7 +521,7 @@ def _backup_sqlite(
     destination_connection: sqlite3.Connection | None = None
     try:
         source_connection = sqlite3.connect(
-            f"{source.as_uri()}?mode=ro",
+            _sqlite_fd_uri(source_fd),
             uri=True,
             timeout=5.0,
         )
