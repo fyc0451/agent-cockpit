@@ -17,18 +17,29 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 class ServiceMutationError(RuntimeError):
-    def __init__(self, code: str, completed: Sequence[str] = ()) -> None:
+    def __init__(
+        self,
+        code: str,
+        completed: Sequence[str] = (),
+        affected: Sequence[str] = (),
+    ) -> None:
         self.code = code
         self.completed = tuple(completed)
+        self.affected = tuple(affected)
         super().__init__(code)
 
 
-def _fail(code: str, completed: Sequence[str]) -> None:
-    raise ServiceMutationError(code, completed)
+def _fail(
+    code: str, completed: Sequence[str], affected: Sequence[str] = ()
+) -> None:
+    raise ServiceMutationError(code, completed, affected)
 
 
 def _run(
-    argv: list[str], runner: Runner, completed: Sequence[str]
+    argv: list[str],
+    runner: Runner,
+    completed: Sequence[str],
+    affected: Sequence[str],
 ) -> subprocess.CompletedProcess[str]:
     try:
         result = runner(
@@ -40,13 +51,13 @@ def _run(
             timeout=COMMAND_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        _fail("service_timeout", completed)
+        _fail("service_timeout", completed, affected)
     except Exception:
-        _fail("service_runner_error", completed)
+        _fail("service_runner_error", completed, affected)
     if type(getattr(result, "returncode", None)) is not int:
-        _fail("service_runner_error", completed)
+        _fail("service_runner_error", completed, affected)
     if result.returncode != 0:
-        _fail("service_nonzero", completed)
+        _fail("service_nonzero", completed, affected)
     return result
 
 
@@ -69,16 +80,19 @@ def _mutate(
         _fail("service_platform_unsupported", ())
     execute = subprocess.run if runner is None else runner
     completed: list[str] = []
+    affected: list[str] = []
     expected_state = "inactive" if action == "stop" else "active"
     for unit in units:
-        _run([SYSTEMCTL, "--user", action, unit], execute, completed)
+        affected.append(unit)
+        _run([SYSTEMCTL, "--user", action, unit], execute, completed, affected)
         status = _run(
             [SYSTEMCTL, "--user", "show", unit, "--property=ActiveState", "--value"],
             execute,
             completed,
+            affected,
         )
         if type(status.stdout) is not str or status.stdout.strip() != expected_state:
-            _fail("service_state_mismatch", completed)
+            _fail("service_state_mismatch", completed, affected)
         completed.append(unit)
     return tuple(completed)
 

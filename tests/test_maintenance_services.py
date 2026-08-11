@@ -56,25 +56,60 @@ def test_fixed_order_argv_timeout_and_state_verification(
 
 
 @pytest.mark.parametrize(
-    ("failure", "code"),
+    ("failure_call", "failure", "code", "completed", "affected"),
     [
-        (subprocess.TimeoutExpired(cmd="fixed", timeout=10), "service_timeout"),
-        (OSError("private details"), "service_runner_error"),
+        (1, "timeout", "service_timeout", (), (services.COCKPIT_UNIT,)),
+        (1, "nonzero", "service_nonzero", (), (services.COCKPIT_UNIT,)),
+        (1, "exception", "service_runner_error", (), (services.COCKPIT_UNIT,)),
+        (3, "timeout", "service_timeout", (services.COCKPIT_UNIT,), services.STOP_ORDER),
+        (3, "nonzero", "service_nonzero", (services.COCKPIT_UNIT,), services.STOP_ORDER),
+        (3, "exception", "service_runner_error", (services.COCKPIT_UNIT,), services.STOP_ORDER),
+        (2, "timeout", "service_timeout", (), (services.COCKPIT_UNIT,)),
+        (2, "nonzero", "service_nonzero", (), (services.COCKPIT_UNIT,)),
+        (2, "mismatch", "service_state_mismatch", (), (services.COCKPIT_UNIT,)),
+        (4, "timeout", "service_timeout", (services.COCKPIT_UNIT,), services.STOP_ORDER),
+        (4, "nonzero", "service_nonzero", (services.COCKPIT_UNIT,), services.STOP_ORDER),
+        (4, "mismatch", "service_state_mismatch", (services.COCKPIT_UNIT,), services.STOP_ORDER),
     ],
 )
-def test_runner_failures_are_stable_and_do_not_leak(
-    failure: Exception, code: str
+def test_failures_track_verified_completed_and_possibly_changed_affected(
+    failure_call: int,
+    failure: str,
+    code: str,
+    completed: tuple[str, ...],
+    affected: tuple[str, ...],
 ) -> None:
-    def runner(_argv: list[str], **_kwargs: object) -> Result:
-        raise failure
+    calls = 0
+
+    def runner(argv: list[str], **_kwargs: object) -> Result:
+        nonlocal calls
+        calls += 1
+        if calls == failure_call and failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=10)
+        if calls == failure_call and failure == "exception":
+            raise OSError("private details")
+        return _result(
+            argv,
+            returncode=1 if calls == failure_call and failure == "nonzero" else 0,
+            stdout=(
+                "failed\n"
+                if calls == failure_call and failure == "mismatch"
+                else "inactive\n" if "show" in argv else ""
+            ),
+        )
 
     with pytest.raises(services.ServiceMutationError) as exc:
         services.stop_services(runner=runner)
-    assert (exc.value.code, exc.value.completed, str(exc.value)) == (code, (), code)
+    assert (exc.value.code, exc.value.completed, exc.value.affected) == (
+        code,
+        completed,
+        affected,
+    )
+    assert str(exc.value) == code
     assert "private" not in str(exc.value)
 
 
-def test_timeout_after_one_verified_unit_preserves_partial_completion() -> None:
+def test_start_failure_affected_follows_mail_then_cockpit_order() -> None:
     calls = 0
 
     def runner(argv: list[str], **_kwargs: object) -> Result:
@@ -82,54 +117,14 @@ def test_timeout_after_one_verified_unit_preserves_partial_completion() -> None:
         calls += 1
         if calls == 3:
             raise subprocess.TimeoutExpired(cmd=argv, timeout=10)
-        return _result(argv, stdout="inactive\n" if "show" in argv else "")
+        return _result(argv, stdout="active\n" if "show" in argv else "")
 
     with pytest.raises(services.ServiceMutationError) as exc:
-        services.stop_services(runner=runner)
-    assert (exc.value.code, exc.value.completed) == (
-        "service_timeout",
-        (services.COCKPIT_UNIT,),
+        services.start_services(runner=runner)
+    assert (exc.value.completed, exc.value.affected) == (
+        (services.MAIL_UNIT,),
+        services.START_ORDER,
     )
-
-
-@pytest.mark.parametrize(
-    ("failure_call", "completed"),
-    [(2, ()), (3, (services.COCKPIT_UNIT,))],
-)
-def test_nonzero_preserves_only_verified_completed_units(
-    failure_call: int, completed: tuple[str, ...]
-) -> None:
-    calls = 0
-
-    def runner(argv: list[str], **_kwargs: object) -> Result:
-        nonlocal calls
-        calls += 1
-        return _result(
-            argv,
-            returncode=1 if calls == failure_call else 0,
-            stdout="inactive\n" if "show" in argv else "",
-        )
-
-    with pytest.raises(services.ServiceMutationError) as exc:
-        services.stop_services(runner=runner)
-    assert exc.value.code == "service_nonzero"
-    assert exc.value.completed == completed
-    assert str(exc.value) == "service_nonzero"
-
-
-def test_abnormal_state_is_not_counted_as_completed() -> None:
-    calls = 0
-
-    def runner(argv: list[str], **_kwargs: object) -> Result:
-        nonlocal calls
-        calls += 1
-        state = "inactive" if calls == 2 else "failed"
-        return _result(argv, stdout=f"{state}\n" if "show" in argv else "")
-
-    with pytest.raises(services.ServiceMutationError) as exc:
-        services.stop_services(runner=runner)
-    assert exc.value.code == "service_state_mismatch"
-    assert exc.value.completed == (services.COCKPIT_UNIT,)
 
 
 @pytest.mark.parametrize(
@@ -152,7 +147,11 @@ def test_arbitrary_action_unit_or_order_is_rejected_without_execution(
 
     with pytest.raises(services.ServiceMutationError) as exc:
         services._mutate(action, units, runner=runner)
-    assert (exc.value.code, exc.value.completed) == ("service_request_invalid", ())
+    assert (exc.value.code, exc.value.completed, exc.value.affected) == (
+        "service_request_invalid",
+        (),
+        (),
+    )
     assert not called
 
 
@@ -191,7 +190,8 @@ def test_non_linux_platform_is_rejected_without_execution(
 
     with pytest.raises(services.ServiceMutationError) as exc:
         services.stop_services(runner=runner)
-    assert (exc.value.code, exc.value.completed) == (
+    assert (exc.value.code, exc.value.completed, exc.value.affected) == (
         "service_platform_unsupported",
+        (),
         (),
     )
