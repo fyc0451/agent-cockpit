@@ -26,6 +26,7 @@ from typing import Iterable, Mapping, Sequence
 LINUX_UNIT_NAME = "agent-cockpit.service"
 MAC_MAIN_LABEL = "io.github.fyc0451.agent-cockpit"
 MAC_CONTROLLER_LABEL = "io.github.fyc0451.agent-cockpit-controller"
+FIXED_SERVER_LAUNCHER_RELATIVE_PATH = "bin/agent-cockpit"
 
 # 允许的固定 Mac labels（V1 动态 upgrade.<job> 一律禁止）
 FIXED_MAC_LABELS: frozenset[str] = frozenset({MAC_MAIN_LABEL, MAC_CONTROLLER_LABEL})
@@ -398,6 +399,39 @@ def normalize_launcher_argv(
                 validate_absolute_path(arg, role=f"program_arg[{i}]")
             out.append(arg)
     return tuple(out)
+
+
+def normalize_fixed_server_launcher_argv(
+    program_arguments: Sequence[str],
+    *,
+    current_dir: str | Path,
+    deploy_root: str | Path,
+) -> tuple[str, ...]:
+    """Require the signed server launcher's one canonical literal argv[0].
+
+    This helper never guesses an interpreter, PATH entry, virtualenv, source
+    script, or generation path. Existing broad supervisor adapters keep using
+    ``normalize_launcher_argv`` until the upgrade controller is wired.
+    """
+    root, current = require_canonical_current_and_deploy(
+        current=current_dir, deploy_root=deploy_root
+    )
+    normalized = normalize_launcher_argv(
+        program_arguments, current_dir=current, deploy_root=root
+    )
+    expected = f"{current.as_posix()}/{FIXED_SERVER_LAUNCHER_RELATIVE_PATH}"
+    if normalized[0] != expected:
+        raise SupervisorAdapterError("fixed_launcher_argv0_mismatch")
+    try:
+        resolved = Path(normalized[0]).resolve(strict=False)
+        expected_resolved = (
+            current.resolve(strict=False) / FIXED_SERVER_LAUNCHER_RELATIVE_PATH
+        )
+    except OSError as exc:
+        raise SupervisorAdapterError("launcher_unresolvable") from exc
+    if resolved != expected_resolved:
+        raise SupervisorAdapterError("fixed_launcher_resolve_mismatch")
+    return normalized
 
 
 def _assert_launcher_resolved_inside(
@@ -1080,6 +1114,7 @@ def planned_argv_tools(commands: Iterable[PlannedCommand]) -> frozenset[str]:
 
 __all__ = [
     "FIXED_MAC_LABELS",
+    "FIXED_SERVER_LAUNCHER_RELATIVE_PATH",
     "LINUX_UNIT_NAME",
     "MAC_CONTROLLER_LABEL",
     "MAC_MAIN_LABEL",
@@ -1101,6 +1136,7 @@ __all__ = [
     "escape_systemd_value",
     "is_forbidden_mac_label",
     "normalize_controller_argv",
+    "normalize_fixed_server_launcher_argv",
     "normalize_launcher_argv",
     "parse_linux_unit_contract",
     "parse_mac_plist_contract",

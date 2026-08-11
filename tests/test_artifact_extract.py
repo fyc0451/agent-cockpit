@@ -16,6 +16,7 @@ import pytest
 
 import artifact_extract
 from artifact_extract import ArtifactExtractError, extract_verified_tarball
+from release_index import SERVER_LAUNCHER_PATH
 
 
 def _tar(entries: list[tuple[str, bytes | None, bytes | None]]) -> bytes:
@@ -62,6 +63,32 @@ def _ready(
     return artifact, asset, staging / "generation"
 
 
+def _launcher_contract(payload: bytes, launcher_format: str = "elf") -> dict[str, object]:
+    return {
+        "path": SERVER_LAUNCHER_PATH,
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "format": launcher_format,
+    }
+
+
+def _ready_server(
+    tmp_path: Path,
+    launcher_payload: bytes,
+    *,
+    launcher_format: str = "elf",
+    extra_entries: list[tuple[str, bytes | None, bytes | None]] | None = None,
+) -> tuple[Path, dict[str, object], Path]:
+    entries = [
+        ("bin/", None, tarfile.DIRTYPE),
+        (SERVER_LAUNCHER_PATH, launcher_payload, None),
+        *((extra_entries or [])),
+    ]
+    artifact, asset, destination = _ready(tmp_path, _tar(entries))
+    asset["launcher"] = _launcher_contract(launcher_payload, launcher_format)
+    return artifact, asset, destination
+
+
 def _assert_code(code: str, call: object) -> None:
     with pytest.raises(ArtifactExtractError) as exc_info:
         call()  # type: ignore[operator]
@@ -86,6 +113,209 @@ def test_extracts_happy_tree_with_fixed_modes_and_content(tmp_path: Path) -> Non
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700
     for file_path in (destination / "app/bin/server", destination / "VERSION"):
         assert stat.S_IMODE(file_path.stat().st_mode) == 0o600
+
+
+def test_signed_server_launcher_is_the_only_executable_file(tmp_path: Path) -> None:
+    launcher = b"\x7fELFnative-server"
+    artifact, asset, destination = _ready_server(
+        tmp_path,
+        launcher,
+        extra_entries=[("VERSION", b"1.2.3\n", None)],
+    )
+
+    assert extract_verified_tarball(artifact, asset, destination) == destination
+
+    launcher_path = destination / SERVER_LAUNCHER_PATH
+    assert launcher_path.read_bytes() == launcher
+    assert stat.S_IMODE(launcher_path.stat().st_mode) == 0o700
+    assert stat.S_IMODE((destination / "VERSION").stat().st_mode) == 0o600
+    assert artifact_extract.verify_server_launcher(
+        destination, asset["launcher"]  # type: ignore[arg-type,index]
+    ) == launcher_path
+
+
+def test_accepts_signed_mach_o_server_launcher(tmp_path: Path) -> None:
+    launcher = b"\xcf\xfa\xed\xfe" + b"native-macos-server"
+    artifact, asset, destination = _ready_server(
+        tmp_path, launcher, launcher_format="mach-o"
+    )
+
+    assert extract_verified_tarball(artifact, asset, destination) == destination
+    assert stat.S_IMODE(
+        (destination / SERVER_LAUNCHER_PATH).stat().st_mode
+    ) == 0o700
+
+
+def test_rejects_archive_missing_signed_server_launcher(tmp_path: Path) -> None:
+    expected = b"\x7fELFmissing"
+    artifact, asset, destination = _ready(
+        tmp_path, _tar([("VERSION", b"1.2.3\n", None)])
+    )
+    asset["launcher"] = _launcher_contract(expected)
+
+    _assert_code(
+        "launcher_missing",
+        lambda: extract_verified_tarball(artifact, asset, destination),
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        (lambda value: value.update(path="app/agent-cockpit"), "launcher_invalid"),
+        (lambda value: value.update(size=True), "launcher_invalid"),
+        (lambda value: value.update(size=0), "launcher_invalid"),
+        (lambda value: value.update(sha256="A" * 64), "launcher_invalid"),
+        (lambda value: value.update(format="pe"), "launcher_invalid"),
+        (lambda value: value.update(extra=True), "launcher_invalid"),
+        (lambda value: value.pop("format"), "launcher_invalid"),
+    ],
+)
+def test_rejects_invalid_signed_launcher_metadata(
+    tmp_path: Path, mutation: object, code: str
+) -> None:
+    artifact, asset, destination = _ready_server(tmp_path, b"\x7fELFserver")
+    mutation(asset["launcher"])  # type: ignore[index,operator]
+
+    _assert_code(code, lambda: extract_verified_tarball(artifact, asset, destination))
+
+
+@pytest.mark.parametrize(
+    ("launcher_payload", "launcher_format"),
+    [
+        (b"not-elf", "elf"),
+        (b"\x7fELFnot-macho", "mach-o"),
+    ],
+)
+def test_rejects_launcher_with_wrong_native_format(
+    tmp_path: Path, launcher_payload: bytes, launcher_format: str
+) -> None:
+    artifact, asset, destination = _ready_server(
+        tmp_path, launcher_payload, launcher_format=launcher_format
+    )
+
+    _assert_code(
+        "launcher_mismatch",
+        lambda: extract_verified_tarball(artifact, asset, destination),
+    )
+    assert stat.S_IMODE((destination / SERVER_LAUNCHER_PATH).stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("mutation", ["mode", "hardlink", "symlink", "tamper"])
+def test_rejects_launcher_changed_after_full_tree_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    artifact, asset, destination = _ready_server(tmp_path, b"\x7fELFserver")
+    original = artifact_extract._verify_written_tree
+
+    def mutate_after_verify(*args: object, **kwargs: object) -> None:
+        original(*args, **kwargs)
+        launcher = destination / SERVER_LAUNCHER_PATH
+        if mutation == "mode":
+            launcher.chmod(0o644)
+        elif mutation == "hardlink":
+            os.link(launcher, destination / "launcher-link")
+        elif mutation == "symlink":
+            held = destination / "held-launcher"
+            launcher.rename(held)
+            launcher.symlink_to(held)
+        else:
+            launcher.write_bytes(b"\x7fELFattack")
+            launcher.chmod(0o600)
+
+    monkeypatch.setattr(artifact_extract, "_verify_written_tree", mutate_after_verify)
+
+    _assert_code(
+        "launcher_unsafe",
+        lambda: extract_verified_tarball(artifact, asset, destination),
+    )
+
+
+@pytest.mark.parametrize("race", ["before_open", "after_open"])
+def test_rejects_launcher_inode_replacement_during_bound_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, race: str
+) -> None:
+    launcher_payload = b"\x7fELFserver"
+    artifact, asset, destination = _ready_server(tmp_path, launcher_payload)
+    original_verify = artifact_extract._verify_written_tree
+    real_open = artifact_extract.os.open
+    armed = False
+    raced = False
+
+    def arm_after_verify(*args: object, **kwargs: object) -> None:
+        nonlocal armed
+        original_verify(*args, **kwargs)
+        armed = True
+
+    def racing_open(
+        path: object, flags: int, *args: object, **kwargs: object
+    ) -> int:
+        nonlocal raced
+        is_launcher_read = (
+            armed
+            and not raced
+            and path == "agent-cockpit"
+            and flags == artifact_extract._READ_FLAGS
+        )
+        launcher = destination / SERVER_LAUNCHER_PATH
+        held = destination / "held-launcher"
+        if is_launcher_read and race == "before_open":
+            launcher.rename(held)
+            launcher.write_bytes(launcher_payload)
+            launcher.chmod(0o600)
+            raced = True
+        fd = real_open(path, flags, *args, **kwargs)
+        if is_launcher_read and race == "after_open":
+            launcher.rename(held)
+            launcher.write_bytes(launcher_payload)
+            launcher.chmod(0o600)
+            raced = True
+        return fd
+
+    monkeypatch.setattr(artifact_extract, "_verify_written_tree", arm_after_verify)
+    monkeypatch.setattr(artifact_extract.os, "open", racing_open)
+
+    _assert_code(
+        "launcher_unsafe",
+        lambda: extract_verified_tarball(artifact, asset, destination),
+    )
+    assert raced is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("content", "launcher_mismatch"),
+        ("mode", "launcher_unsafe"),
+        ("hardlink", "launcher_unsafe"),
+        ("symlink", "launcher_unsafe"),
+    ],
+)
+def test_post_promotion_verifier_rejects_launcher_drift(
+    tmp_path: Path, mutation: str, code: str
+) -> None:
+    launcher = b"\x7fELFserver"
+    artifact, asset, destination = _ready_server(tmp_path, launcher)
+    extract_verified_tarball(artifact, asset, destination)
+    launcher_path = destination / SERVER_LAUNCHER_PATH
+    if mutation == "content":
+        launcher_path.write_bytes(b"\x7fELFattack")
+        launcher_path.chmod(0o700)
+    elif mutation == "mode":
+        launcher_path.chmod(0o600)
+    elif mutation == "hardlink":
+        os.link(launcher_path, destination / "launcher-link")
+    else:
+        held = destination / "held-launcher"
+        launcher_path.rename(held)
+        launcher_path.symlink_to(held)
+
+    _assert_code(
+        code,
+        lambda: artifact_extract.verify_server_launcher(
+            destination, asset["launcher"]  # type: ignore[arg-type,index]
+        ),
+    )
 
 
 @pytest.mark.parametrize(
