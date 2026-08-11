@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -422,12 +424,24 @@ def normalize_fixed_server_launcher_argv(
     expected = f"{current.as_posix()}/{FIXED_SERVER_LAUNCHER_RELATIVE_PATH}"
     if normalized[0] != expected:
         raise SupervisorAdapterError("fixed_launcher_argv0_mismatch")
+    launcher = Path(normalized[0])
     try:
-        resolved = Path(normalized[0]).resolve(strict=False)
+        leaf = launcher.lstat()
+    except OSError as exc:
+        raise SupervisorAdapterError("fixed_launcher_missing") from exc
+    if (
+        not stat.S_ISREG(leaf.st_mode)
+        or leaf.st_uid != os.getuid()
+        or stat.S_IMODE(leaf.st_mode) != 0o700
+        or leaf.st_nlink != 1
+    ):
+        raise SupervisorAdapterError("fixed_launcher_unsafe")
+    try:
+        resolved = launcher.resolve(strict=True)
         expected_resolved = (
             current.resolve(strict=False) / FIXED_SERVER_LAUNCHER_RELATIVE_PATH
         )
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise SupervisorAdapterError("launcher_unresolvable") from exc
     if resolved != expected_resolved:
         raise SupervisorAdapterError("fixed_launcher_resolve_mismatch")
@@ -444,7 +458,7 @@ def _assert_launcher_resolved_inside(
     try:
         resolved = launcher.resolve(strict=False)
         cur_res = current.resolve(strict=False)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise SupervisorAdapterError("launcher_unresolvable") from exc
     if not (resolved == cur_res or _is_relative_to(resolved, cur_res)):
         raise SupervisorAdapterError("launcher_symlink_escape")

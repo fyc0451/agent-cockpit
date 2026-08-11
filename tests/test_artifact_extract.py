@@ -15,8 +15,13 @@ from pathlib import Path
 import pytest
 
 import artifact_extract
-from artifact_extract import ArtifactExtractError, extract_verified_tarball
+from artifact_extract import ArtifactExtractError
 from release_index import SERVER_LAUNCHER_PATH
+
+
+# Historical tests exercise the shared archive core without making a server
+# generation promotable. The public server entry point is tested explicitly.
+extract_verified_tarball = artifact_extract._extract_verified_archive
 
 
 def _tar(entries: list[tuple[str, bytes | None, bytes | None]]) -> bytes:
@@ -123,7 +128,9 @@ def test_signed_server_launcher_is_the_only_executable_file(tmp_path: Path) -> N
         extra_entries=[("VERSION", b"1.2.3\n", None)],
     )
 
-    assert extract_verified_tarball(artifact, asset, destination) == destination
+    assert artifact_extract.extract_verified_tarball(
+        artifact, asset, destination
+    ) == destination
 
     launcher_path = destination / SERVER_LAUNCHER_PATH
     assert launcher_path.read_bytes() == launcher
@@ -140,7 +147,9 @@ def test_accepts_signed_mach_o_server_launcher(tmp_path: Path) -> None:
         tmp_path, launcher, launcher_format="mach-o"
     )
 
-    assert extract_verified_tarball(artifact, asset, destination) == destination
+    assert artifact_extract.extract_verified_tarball(
+        artifact, asset, destination
+    ) == destination
     assert stat.S_IMODE(
         (destination / SERVER_LAUNCHER_PATH).stat().st_mode
     ) == 0o700
@@ -155,8 +164,41 @@ def test_rejects_archive_missing_signed_server_launcher(tmp_path: Path) -> None:
 
     _assert_code(
         "launcher_missing",
-        lambda: extract_verified_tarball(artifact, asset, destination),
+        lambda: artifact_extract.extract_verified_tarball(
+            artifact, asset, destination
+        ),
     )
+
+
+def test_public_server_extract_rejects_missing_launcher_metadata(
+    tmp_path: Path,
+) -> None:
+    artifact, asset, destination = _ready(
+        tmp_path, _tar([("VERSION", b"1.2.3\n", None)])
+    )
+
+    _assert_code(
+        "launcher_invalid",
+        lambda: artifact_extract.extract_verified_tarball(
+            artifact, asset, destination
+        ),
+    )
+    assert not destination.exists()
+
+
+def test_public_server_extract_rejects_launcher_larger_than_artifact(
+    tmp_path: Path,
+) -> None:
+    artifact, asset, destination = _ready_server(tmp_path, b"\x7fELFserver")
+    asset["launcher"]["size"] = asset["size"] + 1  # type: ignore[index,operator]
+
+    _assert_code(
+        "launcher_invalid",
+        lambda: artifact_extract.extract_verified_tarball(
+            artifact, asset, destination
+        ),
+    )
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize(
@@ -177,7 +219,12 @@ def test_rejects_invalid_signed_launcher_metadata(
     artifact, asset, destination = _ready_server(tmp_path, b"\x7fELFserver")
     mutation(asset["launcher"])  # type: ignore[index,operator]
 
-    _assert_code(code, lambda: extract_verified_tarball(artifact, asset, destination))
+    _assert_code(
+        code,
+        lambda: artifact_extract.extract_verified_tarball(
+            artifact, asset, destination
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -196,7 +243,9 @@ def test_rejects_launcher_with_wrong_native_format(
 
     _assert_code(
         "launcher_mismatch",
-        lambda: extract_verified_tarball(artifact, asset, destination),
+        lambda: artifact_extract.extract_verified_tarball(
+            artifact, asset, destination
+        ),
     )
     assert stat.S_IMODE((destination / SERVER_LAUNCHER_PATH).stat().st_mode) == 0o600
 
@@ -227,7 +276,9 @@ def test_rejects_launcher_changed_after_full_tree_validation(
 
     _assert_code(
         "launcher_unsafe",
-        lambda: extract_verified_tarball(artifact, asset, destination),
+        lambda: artifact_extract.extract_verified_tarball(
+            artifact, asset, destination
+        ),
     )
 
 
@@ -277,7 +328,46 @@ def test_rejects_launcher_inode_replacement_during_bound_open(
 
     _assert_code(
         "launcher_unsafe",
-        lambda: extract_verified_tarball(artifact, asset, destination),
+        lambda: artifact_extract.extract_verified_tarball(
+            artifact, asset, destination
+        ),
+    )
+    assert raced is True
+
+
+def test_rejects_launcher_replacement_during_bound_fchmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher_payload = b"\x7fELFserver"
+    artifact, asset, destination = _ready_server(tmp_path, launcher_payload)
+    original_verify = artifact_extract._verify_written_tree
+    real_fchmod = artifact_extract.os.fchmod
+    armed = False
+    raced = False
+
+    def arm_after_verify(*args: object, **kwargs: object) -> None:
+        nonlocal armed
+        original_verify(*args, **kwargs)
+        armed = True
+
+    def racing_fchmod(fd: int, mode: int) -> None:
+        nonlocal raced
+        real_fchmod(fd, mode)
+        if armed and not raced and mode == 0o700:
+            launcher = destination / SERVER_LAUNCHER_PATH
+            launcher.rename(destination / "held-launcher")
+            launcher.write_bytes(launcher_payload)
+            launcher.chmod(0o700)
+            raced = True
+
+    monkeypatch.setattr(artifact_extract, "_verify_written_tree", arm_after_verify)
+    monkeypatch.setattr(artifact_extract.os, "fchmod", racing_fchmod)
+
+    _assert_code(
+        "launcher_unsafe",
+        lambda: artifact_extract.extract_verified_tarball(
+            artifact, asset, destination
+        ),
     )
     assert raced is True
 
@@ -296,7 +386,7 @@ def test_post_promotion_verifier_rejects_launcher_drift(
 ) -> None:
     launcher = b"\x7fELFserver"
     artifact, asset, destination = _ready_server(tmp_path, launcher)
-    extract_verified_tarball(artifact, asset, destination)
+    artifact_extract.extract_verified_tarball(artifact, asset, destination)
     launcher_path = destination / SERVER_LAUNCHER_PATH
     if mutation == "content":
         launcher_path.write_bytes(b"\x7fELFattack")

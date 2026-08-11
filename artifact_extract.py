@@ -175,7 +175,9 @@ def _validate_asset(asset: Any) -> tuple[str, int, str]:
     return name, size, digest
 
 
-def _validate_launcher(launcher: Any) -> tuple[tuple[str, ...], int, str, str]:
+def _validate_launcher(
+    launcher: Any, *, max_size: int | None = None
+) -> tuple[tuple[str, ...], int, str, str]:
     if type(launcher) is not dict or set(launcher) != _LAUNCHER_FIELDS:
         _reject("launcher_invalid")
     path = launcher["path"]
@@ -184,7 +186,12 @@ def _validate_launcher(launcher: Any) -> tuple[tuple[str, ...], int, str, str]:
     launcher_format = launcher["format"]
     if type(path) is not str or path != SERVER_LAUNCHER_PATH:
         _reject("launcher_invalid")
-    if type(size) is not int or size <= 0 or size > MAX_LAUNCHER_BYTES:
+    if (
+        type(size) is not int
+        or size <= 0
+        or size > MAX_LAUNCHER_BYTES
+        or (max_size is not None and size > max_size)
+    ):
         _reject("launcher_invalid")
     if type(digest) is not str or _SHA256_RE.fullmatch(digest) is None:
         _reject("launcher_invalid")
@@ -787,7 +794,7 @@ def verify_server_launcher(generation: Path, launcher: dict[str, Any]) -> Path:
     return generation / SERVER_LAUNCHER_PATH
 
 
-def extract_verified_tarball(
+def _extract_verified_archive(
     artifact_path: Path, asset: dict[str, Any], destination: Path
 ) -> Path:
     """Verify one cached gzip tarball and extract it into a new staging directory.
@@ -801,7 +808,7 @@ def extract_verified_tarball(
     _asset_name, expected_size, expected_digest = _validate_asset(asset)
     launcher = asset.get("launcher") if type(asset) is dict else None
     if launcher is not None:
-        _validate_launcher(launcher)
+        _validate_launcher(launcher, max_size=expected_size)
     (
         artifact_fd,
         artifact_signature,
@@ -944,6 +951,15 @@ def extract_verified_tarball(
             os.close(destination_parent_fd)
         os.close(artifact_fd)
         os.close(artifact_parent_fd)
+
+
+def extract_verified_tarball(
+    artifact_path: Path, asset: dict[str, Any], destination: Path
+) -> Path:
+    """Extract a verified server artifact with a mandatory signed launcher."""
+    if type(asset) is not dict or "launcher" not in asset:
+        _reject("launcher_invalid")
+    return _extract_verified_archive(artifact_path, asset, destination)
 
 
 __all__ = [

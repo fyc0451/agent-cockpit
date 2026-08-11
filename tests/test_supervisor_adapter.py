@@ -7,6 +7,7 @@ symlink 逃逸、命令计划不执行、禁止 upgrade.<job>、无恒真断言�
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def deploy_layout(tmp_path: Path) -> dict[str, Path]:
     launcher = gen / "bin" / "agent-cockpit"
     launcher.parent.mkdir(parents=True)
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o700)
     current = root / "current"
     current.symlink_to(gen)
     controller = tmp_path / "controller-install"
@@ -201,7 +203,86 @@ class TestLauncherArgv:
                 current_dir=deploy_layout["current"],
                 deploy_root=deploy_layout["root"],
             )
-        assert exc.value.reason == "fixed_launcher_resolve_mismatch"
+        assert exc.value.reason == "fixed_launcher_unsafe"
+
+    def test_fixed_server_launcher_rejects_missing_path(
+        self, deploy_layout: dict[str, Path]
+    ) -> None:
+        launcher = deploy_layout["gen"] / "bin" / "agent-cockpit"
+        launcher.unlink()
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "fixed_launcher_missing"
+
+    @pytest.mark.parametrize("mutation", ["mode", "hardlink"])
+    def test_fixed_server_launcher_rejects_unsafe_leaf(
+        self, deploy_layout: dict[str, Path], mutation: str
+    ) -> None:
+        launcher = deploy_layout["gen"] / "bin" / "agent-cockpit"
+        if mutation == "mode":
+            launcher.chmod(0o600)
+        else:
+            os.link(launcher, launcher.with_name("other-link"))
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "fixed_launcher_unsafe"
+
+    @pytest.mark.parametrize("leaf_kind", ["directory", "fifo", "symlink_loop"])
+    def test_fixed_server_launcher_rejects_non_regular_leaf_types(
+        self, deploy_layout: dict[str, Path], leaf_kind: str
+    ) -> None:
+        launcher = deploy_layout["gen"] / "bin" / "agent-cockpit"
+        launcher.unlink()
+        if leaf_kind == "directory":
+            launcher.mkdir(mode=0o700)
+        elif leaf_kind == "fifo":
+            os.mkfifo(launcher, 0o700)
+        else:
+            launcher.symlink_to(launcher.name)
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        expected = (
+            "launcher_unresolvable"
+            if leaf_kind == "symlink_loop"
+            else "fixed_launcher_unsafe"
+        )
+        assert exc.value.reason == expected
+
+    def test_fixed_server_launcher_redacts_resolve_runtime_error(
+        self, deploy_layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        launcher = deploy_layout["current"] / "bin" / "agent-cockpit"
+        real_resolve = Path.resolve
+
+        def broken_resolve(path: Path, strict: bool = False) -> Path:
+            if path == launcher:
+                raise RuntimeError("symlink loop detail")
+            return real_resolve(path, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", broken_resolve)
+
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.normalize_fixed_server_launcher_argv(
+                deploy_layout["main_argv"],
+                current_dir=deploy_layout["current"],
+                deploy_root=deploy_layout["root"],
+            )
+        assert exc.value.reason == "launcher_unresolvable"
 
     def test_existing_launcher_normalizer_compatibility_is_unchanged(
         self, deploy_layout: dict[str, Path]
