@@ -83,9 +83,44 @@ class TestPostUpgrade:
             "spawn_rollback_worker": 0, "reconcile_stale_state": 0,
         }
 
-    def test_invalid_target_still_validated(self, client: TestClient) -> None:
-        r = client.post("/api/upgrade", headers=_auth(), json={"target": "x" * 64})
-        assert r.status_code == 422  # UpgradeReq 校验保留（稳定无效输入契约）
+    @pytest.mark.parametrize(
+        "request_kwargs",
+        [
+            {},
+            {"content": b"null", "headers": {"content-type": "application/json"}},
+            {"json": {}},
+            {"json": {"target": None}},
+            {"json": {"target": 123}},
+            {"json": {"target": ["0.3.0"]}},
+            {"json": {"target": ""}},
+            {"json": {"target": "x" * 64}},
+            {"json": {"target": "../../release"}},
+            {"json": {"target": "0.3.0\nignored"}},
+            {"json": {"anything": "is ignored"}},
+            {"content": b'{"target":', "headers": {"content-type": "application/json"}},
+        ],
+    )
+    def test_any_authenticated_body_returns_same_retired_contract(
+        self, client: TestClient, request_kwargs: dict[str, Any],
+    ) -> None:
+        kwargs = dict(request_kwargs)
+        headers = {**_auth(), **kwargs.pop("headers", {})}
+
+        response = client.post(
+            "/api/upgrade", headers=headers, **kwargs,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json() == upgrade_core.retired_start_response()
+
+    def test_auth_precedes_malformed_body(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/upgrade",
+            content=b'{"target":',
+            headers={"content-type": "application/json"},
+        )
+
+        assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +171,66 @@ class TestUpgradeStatus:
         payload = str(upgrade_core.retired_status())
         for secret in ("token", "password", "secret", "BEGIN", "api_key"):
             assert secret.lower() not in payload.lower()
+
+
+class TestRetiredPythonEntrypoints:
+    class _ExplodingBool:
+        def __bool__(self) -> bool:
+            raise AssertionError("retired entrypoint evaluated a mutable flag")
+
+    @pytest.mark.parametrize("retired_flag", [False, _ExplodingBool()])
+    def test_all_internal_entrypoints_refuse_before_side_effects(
+        self, monkeypatch: Any, tmp_path: Path, retired_flag: object,
+    ) -> None:
+        def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("retired entrypoint reached a side effect")
+
+        monkeypatch.setattr(
+            upgrade_core, "UPGRADE_ENGINE_RETIRED", retired_flag, raising=False,
+        )
+        for name in (
+            "read_state", "write_state", "_ensure_dirs", "fetch_official_release",
+            "precheck_install_dir", "_worker_alive", "_run_job_locked",
+        ):
+            monkeypatch.setattr(upgrade_core, name, forbidden)
+        monkeypatch.setattr(upgrade_core.subprocess, "run", forbidden)
+        monkeypatch.setattr(upgrade_core.subprocess, "Popen", forbidden)
+        monkeypatch.setattr(
+            upgrade_core,
+            "_hooks",
+            {
+                "spawn_worker": forbidden,
+                "spawn_rollback_worker": forbidden,
+                "fetch_release": forbidden,
+            },
+        )
+
+        assert upgrade_core.start_upgrade("anything") == (
+            upgrade_core.retired_start_response()
+        )
+        assert upgrade_core.public_status({"state": "installing"}) == (
+            upgrade_core.retired_status()
+        )
+        assert upgrade_core.reconcile_stale_state({"state": "installing"}) == (
+            upgrade_core.retired_status()
+        )
+        with pytest.raises(RuntimeError, match="^upgrade_engine_retired$"):
+            upgrade_core.spawn_worker("job", tmp_path, tmp_path / "worker.log")
+        with pytest.raises(RuntimeError, match="^upgrade_engine_retired$"):
+            upgrade_core.spawn_rollback_worker(
+                {"job_id": "job", "install_dir": str(tmp_path)},
+            )
+        assert upgrade_core.run_job("job", install_dir=tmp_path) == 1
+
+    def test_production_modules_do_not_reference_legacy_entrypoints(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        offenders = []
+        for path in root.glob("*.py"):
+            if path.name == "upgrade_core.py":
+                continue
+            if "upgrade_core._legacy_" in path.read_text(encoding="utf-8"):
+                offenders.append(path.name)
+        assert offenders == []
 
 
 # ---------------------------------------------------------------------------

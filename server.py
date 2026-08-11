@@ -2263,11 +2263,6 @@ def api_version(refresh: bool = Query(False)):
     return version.get_version_info(refresh=refresh)
 
 
-class UpgradeReq(BaseModel):
-    """管理员显式升级目标（x.y.z 或 vx.y.z）。"""
-    target: str = Field(..., min_length=1, max_length=32)
-
-
 @app.get("/api/upgrade/status")
 def api_upgrade_status():
     """升级状态（需认证）。V1 升级引擎已退役：固定只读 retired 契约，
@@ -2276,9 +2271,8 @@ def api_upgrade_status():
 
 
 @app.post("/api/upgrade")
-def api_upgrade_start(req: UpgradeReq):
-    """V1 升级引擎已退役（fail-closed）。稳定返回 retired 契约；
-    不调用 upgrade_core.start_upgrade，不 spawn worker。"""
+def api_upgrade_start():
+    """V1 升级引擎已退役；认证后忽略请求体并稳定返回 retired。"""
     return upgrade_core.retired_start_response()
 
 

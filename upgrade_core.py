@@ -131,12 +131,6 @@ ERROR_MESSAGES = {
     "upgrade_engine_retired": "升级引擎已退役，请使用受管人工发布流程",
 }
 
-# Wiki13 J0：V1 升级引擎退役门。生产入口（server API 路由、worker 入口、
-# upgrade.sh）一律短路到 retired 契约；旧引擎代码保留供审计与历史测试，
-# 但生产路径不可达。
-UPGRADE_ENGINE_RETIRED = True
-
-
 def retired_status() -> dict[str, Any]:
     """V1 升级引擎固定退役契约。纯只读：不 reconcile、不读 state、
     不查 worker、无任何状态写副作用。"""
@@ -384,6 +378,13 @@ def _created_ts(created: Any) -> float:
 
 
 def reconcile_stale_state(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """V1 状态入口已退役；参数保留仅为调用兼容。"""
+    return retired_status()
+
+
+def _legacy_reconcile_stale_state(
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """死 worker / 超时 handshake：failed 或触发 rollback-only。
 
     状态 CAS 在 UpgradeLock 内完成；spawn 在放锁后执行，避免与 run_job 抢锁死锁。
@@ -409,7 +410,7 @@ def reconcile_stale_state(state: dict[str, Any] | None = None) -> dict[str, Any]
         lock.release()
     if spawn_payload is not None:
         try:
-            spawn_rollback_worker(spawn_payload)
+            _legacy_spawn_rollback_worker(spawn_payload)
         except Exception as exc:
             logger.exception("spawn rollback worker failed: %s", type(exc).__name__)
             lock2 = UpgradeLock()
@@ -490,6 +491,11 @@ def _reconcile_stale_locked() -> tuple[dict[str, Any], dict[str, Any] | None]:
 
 
 def spawn_rollback_worker(state: dict[str, Any]) -> int:
+    """V1 rollback worker 入口已退役。"""
+    raise RuntimeError("upgrade_engine_retired")
+
+
+def _legacy_spawn_rollback_worker(state: dict[str, Any]) -> int:
     """半成品自动恢复：独立 worker 仅执行 rollback。"""
     job_id = str(state.get("job_id") or "")
     install_dir = Path(str(state.get("install_dir") or INSTALL_DIR))
@@ -512,7 +518,7 @@ def spawn_rollback_worker(state: dict[str, Any]) -> int:
         write_state(latest)
     if "spawn_rollback_worker" in _hooks:
         return int(_hooks["spawn_rollback_worker"](job_id, install_dir, log_path))
-    return spawn_worker(job_id, install_dir, log_path, rollback_only=True)
+    return _legacy_spawn_worker(job_id, install_dir, log_path, rollback_only=True)
 
 
 # ── 目标 / Release ──────────────────────────────────────────────
@@ -1297,7 +1303,12 @@ def fetch_and_checkout(install_dir: Path, tag: str, sha: str) -> None:
 # ── 公开状态 / API ──────────────────────────────────────────────
 
 def public_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
-    st = reconcile_stale_state(state)
+    """V1 状态入口已退役；参数保留仅为调用兼容。"""
+    return retired_status()
+
+
+def _legacy_public_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    st = _legacy_reconcile_stale_state(state)
     code = st.get("error_code")
     msg = ERROR_MESSAGES.get(str(code), None) if code else None
     return {
@@ -1322,15 +1333,22 @@ def public_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def start_upgrade(target: str, *, install_dir: Path | None = None) -> dict[str, Any]:
-    """管理员触发升级。accepted 只表示排队/进行中，不代表成功。"""
+    """V1 升级入口已退役；参数保留仅为调用兼容。"""
+    return retired_start_response()
+
+
+def _legacy_start_upgrade(
+    target: str, *, install_dir: Path | None = None,
+) -> dict[str, Any]:
+    """历史升级算法，仅供隔离测试，生产代码不得调用。"""
     root = install_dir or INSTALL_DIR
     # 无锁快速路径：仅用于快速返回；真正决策在锁内
-    st0 = reconcile_stale_state()
+    st0 = _legacy_reconcile_stale_state()
     if st0.get("state") in ACTIVE_STATES:
         return {
             "accepted": False,
             "reason": "upgrade_in_progress",
-            "status": public_status(st0),
+            "status": _legacy_public_status(st0),
         }
 
     try:
@@ -1358,21 +1376,21 @@ def start_upgrade(target: str, *, install_dir: Path | None = None) -> dict[str, 
 
     lock = UpgradeLock()
     if not lock.acquire(blocking=False):
-        st2 = reconcile_stale_state()
+        st2 = _legacy_reconcile_stale_state()
         return {
             "accepted": False,
             "reason": "upgrade_locked",
-            "status": public_status(st2),
+            "status": _legacy_public_status(st2),
         }
 
     try:
         # 关键：获锁后重新 reconcile，再原子写 queued
-        st = reconcile_stale_state()
+        st = _legacy_reconcile_stale_state()
         if st.get("state") in ACTIVE_STATES:
             return {
                 "accepted": False,
                 "reason": "upgrade_in_progress",
-                "status": public_status(st),
+                "status": _legacy_public_status(st),
             }
 
         job_id = uuid.uuid4().hex[:12]
@@ -1402,7 +1420,7 @@ def start_upgrade(target: str, *, install_dir: Path | None = None) -> dict[str, 
         lock.release()
 
     try:
-        pid = spawn_worker(job_id, root, log_path)
+        pid = _legacy_spawn_worker(job_id, root, log_path)
         state = merge_spawn_identity(job_id, pid)
     except Exception as exc:
         logger.exception("spawn worker failed")
@@ -1419,7 +1437,7 @@ def start_upgrade(target: str, *, install_dir: Path | None = None) -> dict[str, 
         "reason": "queued"
         if state.get("state") in ACTIVE_STATES or state.get("state") == "queued"
         else str(state.get("state") or "queued"),
-        "status": public_status(state),
+        "status": _legacy_public_status(state),
     }
 
 
@@ -1618,6 +1636,18 @@ def spawn_worker(
     *,
     rollback_only: bool = False,
 ) -> int:
+    """V1 worker spawn 入口已退役。"""
+    raise RuntimeError("upgrade_engine_retired")
+
+
+def _legacy_spawn_worker(
+    job_id: str,
+    install_dir: Path,
+    log_path: Path,
+    *,
+    rollback_only: bool = False,
+) -> int:
+    """历史 worker spawn 算法，仅供隔离测试。"""
     if "spawn_worker" in _hooks:
         return int(_hooks["spawn_worker"](job_id, install_dir, log_path))
     _ensure_dirs()
@@ -1687,7 +1717,12 @@ def spawn_worker(
 # ── Worker ──────────────────────────────────────────────────────
 
 def run_job(job_id: str, install_dir: Path | None = None) -> int:
-    """worker 入口；**必须**获锁，否则拒绝执行。"""
+    """V1 worker 执行入口已退役。"""
+    return 1
+
+
+def _legacy_run_job(job_id: str, install_dir: Path | None = None) -> int:
+    """历史 worker 算法，仅供隔离测试。"""
     root = Path(install_dir) if install_dir else INSTALL_DIR
     lock = UpgradeLock()
     if not lock.acquire(blocking=False):

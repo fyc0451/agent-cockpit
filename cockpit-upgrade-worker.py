@@ -2,8 +2,7 @@
 """服务外升级执行器入口（Wiki13 J0 已退役）。
 
 V1 升级引擎 fail-closed：入口一律拒绝执行，生产路径不可达。
-旧引擎代码（upgrade_core.run_job 等）保留供审计与历史测试，但不再有
-任何可执行入口能触发它。
+旧引擎算法保留供审计与隔离测试，但不再有任何生产入口能触发它。
 """
 from __future__ import annotations
 

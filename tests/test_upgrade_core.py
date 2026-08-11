@@ -143,7 +143,7 @@ def test_toctou_exactly_one_accepted(install_tree):
     results: list[dict] = []
 
     def worker():
-        results.append(upgrade_core.start_upgrade("0.3.0", install_dir=root))
+        results.append(upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root))
 
     t1 = threading.Thread(target=worker)
     t1.start()
@@ -179,7 +179,7 @@ def test_run_job_refuses_without_lock(install_tree):
         st.update({"job_id": "job1", "state": "queued", "target_tag": "v0.3.0",
                    "target_sha": "a" * 40, "from_sha": "b" * 40})
         upgrade_core.write_state(st)
-        rc = upgrade_core.run_job("job1", install_dir=root)
+        rc = upgrade_core._legacy_run_job("job1", install_dir=root)
         assert rc == 99
         assert entered["n"] == 0
         lock.release()
@@ -198,7 +198,7 @@ def test_stale_worker_reconcile_allows_retry(install_tree):
         "created_at": upgrade_core._utc_iso(),
     })
     upgrade_core.write_state(st)
-    pub = upgrade_core.public_status()
+    pub = upgrade_core._legacy_public_status()
     assert pub["state"] == "failed"
     assert pub["error_code"] == "stale_worker"
     assert pub["active"] is False
@@ -208,7 +208,7 @@ def test_stale_worker_reconcile_allows_retry(install_tree):
     events = _hooks_success(root, rel_sha)
 
     def spawn(job_id, install_dir, log_path):
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     upgrade_core.configure_hooks(
@@ -228,7 +228,7 @@ def test_stale_worker_reconcile_allows_retry(install_tree):
         worker_alive=lambda *a: True,
     )
     # after stale, state failed — start should accept
-    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    r = upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root)
     assert r["accepted"] is True
 
 
@@ -239,7 +239,7 @@ def test_successful_upgrade_via_hooks(install_tree):
     _hooks_success(root, rel_sha, events)
 
     def spawn(job_id, install_dir, log_path):
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     upgrade_core.configure_hooks(
@@ -261,7 +261,7 @@ def test_successful_upgrade_via_hooks(install_tree):
         proc_start_time=lambda pid: "tick1",
         boot_id=lambda: "boot1",
     )
-    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    r = upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root)
     assert r["accepted"] is True
     st = upgrade_core.read_state()
     assert st["state"] == "succeeded"
@@ -281,7 +281,7 @@ def test_health_failure_rolls_back_with_stop(install_tree):
         return health_n["n"] >= 2
 
     def spawn(job_id, install_dir, log_path):
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     upgrade_core.configure_hooks(
@@ -299,7 +299,7 @@ def test_health_failure_rolls_back_with_stop(install_tree):
         proc_start_time=lambda pid: "t",
         boot_id=lambda: "b",
     )
-    r = upgrade_core.start_upgrade("v0.3.0", install_dir=root)
+    r = upgrade_core._legacy_start_upgrade("v0.3.0", install_dir=root)
     assert r["accepted"] is True
     st = upgrade_core.read_state()
     assert st["state"] in ("rolled_back", "failed")
@@ -338,7 +338,7 @@ def test_public_error_sanitized_no_paths(install_tree, monkeypatch):
     upgrade_core.write_state(st)
     loaded = upgrade_core.read_state()
     assert "error" not in loaded or loaded.get("error") is None
-    pub = upgrade_core.public_status(loaded)
+    pub = upgrade_core._legacy_public_status(loaded)
     assert pub["error_code"] == "precheck_dirty"
     assert pub["error_message"]
     assert "/home/" not in str(pub)
@@ -534,7 +534,7 @@ def test_spawn_prefers_start_new_session(install_tree, monkeypatch):
     monkeypatch.setattr(upgrade_core.shutil, "which", lambda n: None)
     monkeypatch.setattr(upgrade_core, "_linux_unit_killmode_process_live", lambda: True)
     upgrade_core.clear_hooks()
-    pid = upgrade_core.spawn_worker(
+    pid = upgrade_core._legacy_spawn_worker(
         "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "t.log",
     )
     assert pid == 111
@@ -574,7 +574,7 @@ def test_r1_merge_spawn_identity_never_clobber_with_zero(install_tree):
     assert loaded["state"] == "prechecking"
     # 非空身份存在时 public_status 不得因 pid=0 历史判死
     upgrade_core.configure_hooks(worker_alive=lambda *a: True)
-    pub = upgrade_core.public_status()
+    pub = upgrade_core._legacy_public_status()
     assert pub["state"] == "prechecking"
     assert pub["active"] is True
 
@@ -614,7 +614,7 @@ def test_r2_install_fail_after_checkout_rolls_back(install_tree):
     stops: list[int] = []
 
     def spawn(job_id, install_dir, log_path):
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     upgrade_core.configure_hooks(
@@ -632,7 +632,7 @@ def test_r2_install_fail_after_checkout_rolls_back(install_tree):
         proc_start_time=lambda pid: "t",
         boot_id=lambda: "b",
     )
-    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    r = upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root)
     assert r["accepted"] is True
     st = upgrade_core.read_state()
     assert st["state"] == "rolled_back", st
@@ -663,7 +663,7 @@ def test_r2_switch_second_rename_fail_restores_live(install_tree, monkeypatch):
         return real_rename(src, dst)
 
     def spawn(job_id, install_dir, log_path):
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     def do_install(d):
@@ -688,7 +688,7 @@ def test_r2_switch_second_rename_fail_restores_live(install_tree, monkeypatch):
         proc_start_time=lambda pid: "t",
         boot_id=lambda: "b",
     )
-    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    r = upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root)
     assert r["accepted"] is True
     st = upgrade_core.read_state()
     assert st["state"] in ("rolled_back", "failed"), st
@@ -703,7 +703,7 @@ def test_r3_stop_fail_closed_not_rolled_back(install_tree):
     rel_sha = install_tree["rel_sha"]
 
     def spawn(job_id, install_dir, log_path):
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     upgrade_core.configure_hooks(
@@ -721,7 +721,7 @@ def test_r3_stop_fail_closed_not_rolled_back(install_tree):
         proc_start_time=lambda pid: "t",
         boot_id=lambda: "b",
     )
-    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    r = upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root)
     assert r["accepted"] is True
     st = upgrade_core.read_state()
     assert st["state"] == "failed"
@@ -735,7 +735,7 @@ def test_r3_restore_code_fail_not_rolled_back(install_tree):
     rel_sha = install_tree["rel_sha"]
 
     def spawn(job_id, install_dir, log_path):
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     upgrade_core.configure_hooks(
@@ -754,7 +754,7 @@ def test_r3_restore_code_fail_not_rolled_back(install_tree):
         proc_start_time=lambda pid: "t",
         boot_id=lambda: "b",
     )
-    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    r = upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root)
     assert r["accepted"] is True
     st = upgrade_core.read_state()
     assert st["state"] == "failed"
@@ -768,7 +768,7 @@ def test_r3_verify_head_mismatch_not_rolled_back(install_tree):
     rel_sha = install_tree["rel_sha"]
 
     def spawn(job_id, install_dir, log_path):
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     upgrade_core.configure_hooks(
@@ -787,7 +787,7 @@ def test_r3_verify_head_mismatch_not_rolled_back(install_tree):
         proc_start_time=lambda pid: "t",
         boot_id=lambda: "b",
     )
-    r = upgrade_core.start_upgrade("0.3.0", install_dir=root)
+    r = upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root)
     assert r["accepted"] is True
     st = upgrade_core.read_state()
     assert st["state"] == "failed"
@@ -830,7 +830,7 @@ def test_r4_dead_worker_after_checkout_spawns_rollback(install_tree):
         st2["rollback_only"] = True
         st2["rollback_requested"] = True
         upgrade_core.write_state(st2)
-        upgrade_core.run_job(job_id, install_dir=install_dir)
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
         return os.getpid()
 
     upgrade_core.configure_hooks(
@@ -842,7 +842,7 @@ def test_r4_dead_worker_after_checkout_spawns_rollback(install_tree):
         proc_start_time=lambda pid: "1",
         boot_id=lambda: "x",
     )
-    pub = upgrade_core.public_status()
+    pub = upgrade_core._legacy_public_status()
     assert spawned, "must auto-spawn rollback-only worker"
     st_final = upgrade_core.read_state()
     assert st_final["state"] == "rolled_back", st_final
@@ -868,7 +868,7 @@ def test_r4_spawn_passes_rollback_only_flag(install_tree, monkeypatch):
     monkeypatch.setenv("COCKPIT_PORT", "9876")
     monkeypatch.setenv("COCKPIT_HOST", "127.0.0.1")
     upgrade_core.clear_hooks()
-    pid = upgrade_core.spawn_worker(
+    pid = upgrade_core._legacy_spawn_worker(
         "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "t.log",
         rollback_only=True,
     )
@@ -1037,7 +1037,7 @@ def test_r5_systemd_run_fail_without_killmode_spawn_failed(install_tree, monkeyp
 
     monkeypatch.setattr(upgrade_core.subprocess, "Popen", FakePopen)
     with pytest.raises(RuntimeError, match="spawn_failed"):
-        upgrade_core.spawn_worker(
+        upgrade_core._legacy_spawn_worker(
             "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "z.log",
         )
     assert popen == []
@@ -1105,7 +1105,7 @@ def test_r6_concurrent_reconcile_single_rollback_spawn(install_tree):
 
     def worker():
         barrier.wait(timeout=3)
-        upgrade_core.reconcile_stale_state()
+        upgrade_core._legacy_reconcile_stale_state()
 
     t1 = threading.Thread(target=worker)
     t2 = threading.Thread(target=worker)
@@ -1152,7 +1152,7 @@ def test_r7_rollback_worker_death_retries_then_exhausted(install_tree):
         worker_alive=lambda *a: False,
     )
     # 第 2 次补投
-    out = upgrade_core.reconcile_stale_state()
+    out = upgrade_core._legacy_reconcile_stale_state()
     assert len(spawned) == 1
     assert out["state"] == "rolling_back"
     assert int(out["rollback_spawn_count"]) == 2
@@ -1160,14 +1160,14 @@ def test_r7_rollback_worker_death_retries_then_exhausted(install_tree):
     st = upgrade_core.read_state()
     st["worker_pid"] = 777777
     upgrade_core.write_state(st)
-    out2 = upgrade_core.reconcile_stale_state()
+    out2 = upgrade_core._legacy_reconcile_stale_state()
     assert len(spawned) == 2
     assert int(out2["rollback_spawn_count"]) == 3
     # 第 4 次应耗尽（MAX=3）
     st = upgrade_core.read_state()
     st["worker_pid"] = 666666
     upgrade_core.write_state(st)
-    out3 = upgrade_core.reconcile_stale_state()
+    out3 = upgrade_core._legacy_reconcile_stale_state()
     assert len(spawned) == 2  # 不再 spawn
     assert out3["state"] == "failed"
     assert out3["error_code"] == "rollback_failed"
@@ -1333,7 +1333,7 @@ def test_r8_darwin_oneshot_fail_no_setsid_fallback(install_tree, monkeypatch):
 
     monkeypatch.setattr(upgrade_core.subprocess, "Popen", FakePopen)
     with pytest.raises(RuntimeError, match="spawn_failed"):
-        upgrade_core.spawn_worker(
+        upgrade_core._legacy_spawn_worker(
             "j", install_tree["root"], install_tree["data"] / "upgrade" / "logs" / "x.log",
         )
     assert popen_calls == []
