@@ -193,13 +193,26 @@ def test_server_main_disables_access_log_and_uses_install_dir():
     assert "os.environ[\"COCKPIT_LOG_DIR\"]" not in server
 
 
-def test_plist_template_uses_logs_launchd_paths():
+def test_plist_template_uses_logs_launchd_paths_and_umask():
     root = Path(__file__).resolve().parents[1]
-    plist = ET.parse(root / "agent-cockpit.plist")
+    tree = ET.parse(root / "agent-cockpit.plist")
+    plist = tree.getroot()
     values = [node.text for node in plist.findall(".//string")]
     assert "__INSTALL_DIR__/logs/launchd.stdout.log" in values
     assert "__INSTALL_DIR__/logs/launchd.stderr.log" in values
     assert not any(v and v.endswith("agent-cockpit.stdout.log") for v in values if v)
+    # launchd Umask: integer 63 == 077 octal (applied before Standard*Path open)
+    keys = [k.text for k in plist.findall("./dict/key")]
+    assert "Umask" in keys
+    # sibling integer after Umask key
+    children = list(plist.find("dict"))
+    umask_val = None
+    for i, node in enumerate(children):
+        if node.tag == "key" and node.text == "Umask":
+            umask_val = children[i + 1]
+            break
+    assert umask_val is not None and umask_val.tag == "integer"
+    assert umask_val.text == "63"
 
 
 def test_launchd_sh_no_shell_mkdir_and_sys_path():
@@ -214,6 +227,9 @@ def test_launchd_sh_no_shell_mkdir_and_sys_path():
     assert "|| true" not in prepare_body
     assert "umask 077" in text
     assert '[[ -L "$INSTALL_DIR/logs" ]]' in text
+    assert "Path(sys.argv[1]).resolve()" not in text
+    assert "install.is_absolute()" in text or "is_absolute()" in text
+    assert "install.is_symlink()" in text or "is_symlink()" in text
 
 
 def test_arbitrary_cwd_prepare_uses_install_sys_path(tmp_path, monkeypatch):
@@ -251,3 +267,26 @@ def test_exception_handler_does_not_log_query_or_body():
     chunk = server.split("unhandled exception")[1][:500]
     assert "request.url.query" not in chunk
     assert "await request.body" not in chunk
+
+
+def test_rotate_rejects_backup_symlinks_including_broken(tmp_path):
+    path = tmp_path / "launchd.stderr.log"
+    path.write_bytes(b"x" * 100)
+    os.chmod(path, 0o600)
+    # broken symlink in .1 slot
+    (tmp_path / "launchd.stderr.log.1").symlink_to(tmp_path / "missing-target")
+    with pytest.raises(log_config.LogConfigError):
+        log_config.rotate_file_if_needed(path, max_bytes=50, backup_count=3)
+    # original must remain (fail closed, no silent keep-and-rotate)
+    assert path.read_bytes() == b"x" * 100
+
+
+def test_prepare_rejects_relative_and_symlink_install(tmp_path):
+    with pytest.raises(log_config.LogConfigError):
+        log_config.prepare_macos_log_dir("relative-install")
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(log_config.LogConfigError):
+        log_config.prepare_macos_log_dir(link)

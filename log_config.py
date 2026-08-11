@@ -211,6 +211,11 @@ def rotate_file_if_needed(
         raise LogConfigError("轮转参数无效")
     if path.is_symlink():
         raise LogConfigError(f"bootstrap 日志不得为符号链接: {path}")
+    # Reject every backup slot (including broken symlinks) before any rename/unlink.
+    for index in range(1, backup_count + 1):
+        backup = Path(f"{path}.{index}")
+        if backup.is_symlink():
+            raise LogConfigError(f"bootstrap 轮转副本不得为符号链接: {backup}")
     if not path.is_file():
         return
     try:
@@ -223,12 +228,16 @@ def rotate_file_if_needed(
     try:
         oldest = Path(f"{path}.{backup_count}")
         if oldest.exists():
+            if oldest.is_symlink():
+                raise LogConfigError(f"bootstrap 轮转副本不得为符号链接: {oldest}")
             oldest.unlink()
         for index in range(backup_count - 1, 0, -1):
             src = Path(f"{path}.{index}")
             dst = Path(f"{path}.{index + 1}")
-            if src.is_symlink():
-                raise LogConfigError(f"bootstrap 轮转副本不得为符号链接: {src}")
+            if src.is_symlink() or dst.is_symlink():
+                raise LogConfigError(
+                    f"bootstrap 轮转副本不得为符号链接: {src if src.is_symlink() else dst}"
+                )
             if src.is_file():
                 src.replace(dst)
                 _chmod_file_strict(dst, 0o600)

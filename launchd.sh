@@ -82,7 +82,7 @@ uninstall_service() {
 }
 
 prepare_logs() {
-  # umask 077 so bootstrap stdio files start private (plist has no Umask key).
+  # Shell umask for any non-launchd file creation; plist Umask covers Standard*Path.
   umask 077
   if [[ -L "$INSTALL_DIR/logs" ]]; then
     echo "日志目录不得为符号链接: $INSTALL_DIR/logs" >&2
@@ -90,13 +90,21 @@ prepare_logs() {
   fi
   if [[ -x "$INSTALL_DIR/.venv/bin/python" ]]; then
     # Prefer Python: full parent-chain checks + launchd bootstrap rotation.
-    # INSTALL_DIR is injected on sys.path so cwd does not matter (F4).
+    # Pass absolute literal only (no Path.resolve — would hide install symlink).
     "$INSTALL_DIR/.venv/bin/python" - "$INSTALL_DIR" <<'PY'
 import sys
 from pathlib import Path
 
-install = Path(sys.argv[1]).resolve()
-sys.path.insert(0, str(install))
+raw = sys.argv[1]
+install = Path(raw)
+if not install.is_absolute():
+    print(f"install_dir 必须是绝对路径: {raw!r}", file=sys.stderr)
+    raise SystemExit(2)
+if install.is_symlink():
+    print(f"install_dir 不得为符号链接: {raw}", file=sys.stderr)
+    raise SystemExit(2)
+# Literal path only — do not resolve(); chain checks see real symlink names.
+sys.path.insert(0, raw)
 from log_config import LogConfigError, prepare_macos_log_dir
 
 try:
