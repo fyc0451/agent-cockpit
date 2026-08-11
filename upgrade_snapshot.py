@@ -514,47 +514,104 @@ def _fd_identity_bound(fd: int, expected: os.stat_result) -> None:
         _reject("snapshot_source_unstable")
 
 
+def _sqlite_live_wal_sidecars_present(source: Path) -> bool:
+    """True when live -wal/-shm exist next to the main DB file.
+
+    Connection.backup resolves sidecars from the connection's database name.
+    fd-backed names (/dev/fd/N, /proc/self/fd/N) can connect and run PRAGMA
+    yet fail at backup with "unable to open database file" because they cannot
+    open the path-named sidecars (observed on Darwin). Prefer path open then.
+    """
+    return Path(f"{source}-wal").exists() or Path(f"{source}-shm").exists()
+
+
+def _close_sqlite_quietly(connection: sqlite3.Connection | None) -> None:
+    if connection is None:
+        return
+    try:
+        connection.close()
+    except sqlite3.Error:
+        pass
+
+
+def _connect_sqlite_path_readonly(
+    source: Path, source_fd: int, opened: os.stat_result,
+) -> sqlite3.Connection:
+    """Open source by verified path URI, fenced by held fd identity.
+
+    Pre- and post-connect lstat must match the held fd's (dev,ino). On any
+    failure after a connection is opened, close it before fail-closed reject.
+    """
+    connection: sqlite3.Connection | None = None
+    try:
+        try:
+            path_info = source.lstat()
+        except OSError:
+            _reject("snapshot_source_unstable")
+        if (
+            not stat.S_ISREG(path_info.st_mode)
+            or (path_info.st_dev, path_info.st_ino)
+            != (opened.st_dev, opened.st_ino)
+        ):
+            _reject("snapshot_source_unstable")
+        _fd_identity_bound(source_fd, opened)
+        try:
+            connection = sqlite3.connect(
+                source.resolve(strict=False).as_uri() + "?mode=ro",
+                uri=True,
+                timeout=5.0,
+            )
+        except sqlite3.Error:
+            _reject("sqlite_snapshot_invalid")
+        _fd_identity_bound(source_fd, opened)
+        try:
+            path_after = source.lstat()
+        except OSError:
+            _reject("snapshot_source_unstable")
+        if (path_after.st_dev, path_after.st_ino) != (
+            opened.st_dev,
+            opened.st_ino,
+        ):
+            _reject("snapshot_source_unstable")
+        return connection
+    except Exception:
+        _close_sqlite_quietly(connection)
+        raise
+
+
 def _connect_sqlite_readonly_source(
     source: Path, source_fd: int, opened: os.stat_result,
 ) -> sqlite3.Connection:
     """Open a query-only sqlite connection for Connection.backup.
 
     Holds ``source_fd`` (O_NOFOLLOW) as the identity fence for the whole
-    backup window. Prefer an fd-backed URI when the OS provides one; otherwise
-    open the verified path with ``mode=ro`` only after lstat matches the held
-    fd and re-check fstat after connect. Live ``-wal``/``-shm`` sidecars are
-    never opened or copied — only sqlite's backup API transfers pages.
+    backup window. Prefer an fd-backed URI when the OS provides one *and*
+    live WAL sidecars are absent (fd names cannot resolve path-named
+    -wal/-shm at backup time on Darwin even when connect succeeds). Otherwise
+    open the verified path with ``mode=ro`` after lstat matches the held fd
+    and re-check identity after connect. Live ``-wal``/``-shm`` sidecars are
+    never opened or copied by us — only sqlite's backup API transfers pages.
     """
     _fd_identity_bound(source_fd, opened)
-    fd_uri = _try_sqlite_fd_uri(source_fd)
-    if fd_uri is not None:
-        try:
-            connection = sqlite3.connect(fd_uri, uri=True, timeout=5.0)
-        except sqlite3.Error:
-            connection = None
-        else:
-            _fd_identity_bound(source_fd, opened)
-            return connection
-    # Path-bound fallback (macOS): path must still be the same regular inode.
-    try:
-        path_info = source.lstat()
-    except OSError:
-        _reject("snapshot_source_unstable")
-    if (
-        not stat.S_ISREG(path_info.st_mode)
-        or (path_info.st_dev, path_info.st_ino) != (opened.st_dev, opened.st_ino)
-    ):
-        _reject("snapshot_source_unstable")
-    try:
-        connection = sqlite3.connect(
-            source.resolve(strict=False).as_uri() + "?mode=ro",
-            uri=True,
-            timeout=5.0,
-        )
-    except sqlite3.Error:
-        _reject("sqlite_snapshot_invalid")
-    _fd_identity_bound(source_fd, opened)
-    return connection
+    # Do not rely on connect() raising: Darwin /dev/fd connect+PRAGMA succeed
+    # then backup() fails when sidecars are present.
+    if not _sqlite_live_wal_sidecars_present(source):
+        fd_uri = _try_sqlite_fd_uri(source_fd)
+        if fd_uri is not None:
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = sqlite3.connect(fd_uri, uri=True, timeout=5.0)
+            except sqlite3.Error:
+                _close_sqlite_quietly(connection)
+                connection = None
+            else:
+                try:
+                    _fd_identity_bound(source_fd, opened)
+                except Exception:
+                    _close_sqlite_quietly(connection)
+                    raise
+                return connection
+    return _connect_sqlite_path_readonly(source, source_fd, opened)
 
 
 def _backup_sqlite(
