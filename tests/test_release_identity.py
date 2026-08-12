@@ -4,6 +4,7 @@ R3 覆盖：ReleaseIdentityError allowlist + 任意异常脱敏 + 无 fork 平�
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -17,10 +18,113 @@ import release_identity
 import server
 
 _VALID_SHA = "a" * 40  # 40 位小写 hex
+_ARTIFACT_SHA = "b" * 64
 
 
 def _reset():
     release_identity.reset_cache()
+
+
+def _frozen_generation(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    generation = tmp_path / f"{_VALID_SHA}-{_ARTIFACT_SHA}"
+    generation.mkdir()
+    version = generation / "VERSION"
+    version.write_text("1.2.3\n", encoding="ascii")
+    manifest = generation / "release-manifest.json"
+    manifest.write_text(json.dumps({
+        "version": "1.2.3",
+        "source_sha": _VALID_SHA,
+        "edition": "server",
+        "digests": {"VERSION": "c" * 64},
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(release_identity, "resolve_artifact_root", lambda: generation)
+    _reset()
+    return generation, manifest
+
+
+def test_frozen_identity_comes_from_generation_not_stale_env(tmp_path, monkeypatch):
+    _frozen_generation(tmp_path, monkeypatch)
+    monkeypatch.setenv("COCKPIT_EDITION", "desktop")
+    monkeypatch.setenv("COCKPIT_SOURCE_SHA", "d" * 40)
+
+    identity = release_identity.get_release_identity()
+
+    assert identity["edition"] == "server"
+    assert identity["source_sha"] == _VALID_SHA
+    assert identity["version"] == "1.2.3"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("missing", "native_manifest_missing"),
+        ("symlink", "native_manifest_unsafe"),
+        ("missing_field", "native_manifest_invalid"),
+        ("extra_field", "native_manifest_invalid"),
+        ("wrong_edition", "native_manifest_invalid"),
+        ("wrong_sha", "native_source_sha_mismatch"),
+        ("wrong_version", "native_version_mismatch"),
+    ],
+)
+def test_frozen_manifest_fail_closed(tmp_path, monkeypatch, mutation, reason):
+    generation, manifest = _frozen_generation(tmp_path, monkeypatch)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    if mutation == "missing":
+        manifest.unlink()
+    elif mutation == "symlink":
+        target = generation / "manifest-target.json"
+        manifest.rename(target)
+        manifest.symlink_to(target)
+    elif mutation == "extra_field":
+        value["unexpected"] = True
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+    elif mutation == "missing_field":
+        value.pop("digests")
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+    elif mutation == "wrong_edition":
+        value["edition"] = "source"
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+    elif mutation == "wrong_sha":
+        value["source_sha"] = "d" * 40
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+    elif mutation == "wrong_version":
+        value["version"] = "9.9.9"
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(release_identity.ReleaseIdentityError, match=reason):
+        release_identity.get_release_identity()
+
+
+def test_frozen_generation_name_fail_closed(tmp_path, monkeypatch):
+    generation, _manifest = _frozen_generation(tmp_path, monkeypatch)
+    invalid = generation.with_name("not-a-canonical-generation")
+    generation.rename(invalid)
+    monkeypatch.setattr(release_identity, "resolve_artifact_root", lambda: invalid)
+    _reset()
+
+    with pytest.raises(
+        release_identity.ReleaseIdentityError, match="native_generation_invalid",
+    ):
+        release_identity.get_release_identity()
+
+
+def test_health_live_frozen_identity_ignores_stale_env(tmp_path, monkeypatch):
+    _frozen_generation(tmp_path, monkeypatch)
+    monkeypatch.setenv("COCKPIT_EDITION", "source")
+    monkeypatch.setenv("COCKPIT_SOURCE_SHA", "d" * 40)
+    from fastapi.testclient import TestClient
+
+    response = TestClient(server.app).get("/health/live")
+
+    assert response.status_code == 200
+    assert response.json()["identity"] == {
+        "version": "1.2.3",
+        "source_sha": _VALID_SHA,
+        "edition": "server",
+        "instance_id": response.json()["identity"]["instance_id"],
+        "pid": os.getpid(),
+    }
 
 
 def test_identity_stable_within_process(monkeypatch):

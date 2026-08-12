@@ -12,19 +12,29 @@ R3 修复：
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import stat
+import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
+from artifact_root import resolve_artifact_root
 from version import read_current_version
 
 _VALID_EDITIONS = frozenset({"server", "desktop", "source"})
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_GENERATION_RE = re.compile(r"^([0-9a-f]{40})-([0-9a-f]{64})$")
+_NATIVE_MANIFEST_KEYS = frozenset({"version", "source_sha", "edition", "digests"})
 # R3: 受控 reason allowlist——/health/live 只暴露这些固定 reason
 _ALLOWED_REASONS = frozenset({
     "invalid_edition", "missing_source_sha", "malformed_source_sha",
-    "version_unavailable", "unexpected",
+    "version_unavailable", "native_generation_invalid",
+    "native_manifest_missing", "native_manifest_unsafe",
+    "native_manifest_invalid", "native_source_sha_mismatch",
+    "native_version_mismatch", "unexpected",
 })
 _instance_id: str = uuid.uuid4().hex
 _cached: dict[str, Any] | None = None
@@ -41,7 +51,56 @@ class ReleaseIdentityError(ValueError):
         self.reason = reason
 
 
-def _compute_identity() -> dict[str, Any]:
+def _compute_frozen_identity() -> dict[str, Any]:
+    try:
+        root = resolve_artifact_root()
+    except Exception as exc:
+        raise ReleaseIdentityError("native_generation_invalid") from exc
+    match = _GENERATION_RE.fullmatch(root.name)
+    if match is None:
+        raise ReleaseIdentityError("native_generation_invalid")
+
+    manifest_path = root / "release-manifest.json"
+    try:
+        info = manifest_path.lstat()
+    except FileNotFoundError as exc:
+        raise ReleaseIdentityError("native_manifest_missing") from exc
+    except OSError as exc:
+        raise ReleaseIdentityError("native_manifest_unsafe") from exc
+    if not stat.S_ISREG(info.st_mode) or manifest_path.is_symlink():
+        raise ReleaseIdentityError("native_manifest_unsafe")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ReleaseIdentityError("native_manifest_invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != _NATIVE_MANIFEST_KEYS
+        or manifest.get("edition") != "server"
+        or not isinstance(manifest.get("source_sha"), str)
+        or not _GIT_SHA_RE.fullmatch(manifest["source_sha"])
+        or not isinstance(manifest.get("version"), str)
+        or not isinstance(manifest.get("digests"), dict)
+    ):
+        raise ReleaseIdentityError("native_manifest_invalid")
+    if manifest["source_sha"] != match.group(1):
+        raise ReleaseIdentityError("native_source_sha_mismatch")
+    try:
+        version = read_current_version(root / "VERSION")
+    except Exception as exc:
+        raise ReleaseIdentityError("version_unavailable") from exc
+    if manifest["version"] != version:
+        raise ReleaseIdentityError("native_version_mismatch")
+    return {
+        "version": version,
+        "source_sha": manifest["source_sha"],
+        "edition": "server",
+        "instance_id": _instance_id,
+        "pid": os.getpid(),
+    }
+
+
+def _compute_source_identity() -> dict[str, Any]:
     edition = os.environ.get("COCKPIT_EDITION", "source")
     if edition not in _VALID_EDITIONS:
         raise ReleaseIdentityError("invalid_edition")
@@ -68,6 +127,12 @@ def _compute_identity() -> dict[str, Any]:
         "instance_id": _instance_id,
         "pid": os.getpid(),
     }
+
+
+def _compute_identity() -> dict[str, Any]:
+    if getattr(sys, "frozen", False):
+        return _compute_frozen_identity()
+    return _compute_source_identity()
 
 
 def get_release_identity() -> dict[str, Any]:

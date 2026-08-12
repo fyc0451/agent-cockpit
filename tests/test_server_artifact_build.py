@@ -262,8 +262,6 @@ def test_real_pyinstaller_onedir_runs_from_random_cwd(tmp_path: Path) -> None:
             "HOME": str(home),
             "COCKPIT_PORT": str(port),
             "COCKPIT_HOST": "127.0.0.1",
-            "COCKPIT_EDITION": "server",
-            "COCKPIT_SOURCE_SHA": source_sha,
             "COCKPIT_HERDR_STATE_MODE": "off",
             "COCKPIT_B0_MODE": "off",
         },
