@@ -6,7 +6,7 @@
   "baseline": {
     "main_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
     "production_version": "0.3.3",
-    "production_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
+    "production_source_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
   },
   "limits": {
     "writer_wip": 2,
@@ -19,8 +19,8 @@
       "title": "Writer 1",
       "status": "in_progress",
       "depends_on": [],
-      "scope": ["docs/**"],
-      "acceptance": ["true"],
+      "scope": ["docs"],
+      "acceptance": [{"command": "true", "passed": true}],
       "rollback": "git checkout HEAD -- docs/",
       "production_impact": "none",
       "owner_instance_id": "RusticSpring",
@@ -29,15 +29,16 @@
       "fixed_sha": null,
       "cross_module_block_count": 0,
       "release_started_at": null,
-      "user_acceptance_required": false
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
     },
     {
       "id": "car-writer-2",
       "title": "Writer 2",
       "status": "in_progress",
       "depends_on": [],
-      "scope": ["tests/**"],
-      "acceptance": ["true"],
+      "scope": ["tests"],
+      "acceptance": [{"command": "true", "passed": true}],
       "rollback": "git checkout HEAD -- tests/",
       "production_impact": "none",
       "owner_instance_id": "JadeWaterfall",
@@ -46,15 +47,16 @@
       "fixed_sha": null,
       "cross_module_block_count": 0,
       "release_started_at": null,
-      "user_acceptance_required": false
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
     },
     {
       "id": "car-writer-3",
       "title": "Writer 3 - 超过 WIP 限制",
       "status": "in_progress",
       "depends_on": [],
-      "scope": ["scripts/**"],
-      "acceptance": ["true"],
+      "scope": ["scripts"],
+      "acceptance": [{"command": "true", "passed": true}],
       "rollback": "git checkout HEAD -- scripts/",
       "production_impact": "none",
       "owner_instance_id": "MistyPeak",
@@ -63,7 +65,8 @@
       "fixed_sha": null,
       "cross_module_block_count": 0,
       "release_started_at": null,
-      "user_acceptance_required": false
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
     }
   ]
 }

@@ -27,7 +27,7 @@
 |------|------|------|------|
 | `main_sha` | string | ✅ | 开工时 main 分支 exact 40 位 SHA |
 | `production_version` | string | ✅ | 生产版本号（如 `0.3.3`） |
-| `production_sha` | string | ✅ | 生产 artifact exact 40 位 SHA |
+| `production_source_sha` | string | ✅ | 生产 source exact 40 位 SHA |
 
 ### 1.3 Limits 字段
 
@@ -45,8 +45,8 @@
 | `title` | string | ✅ | 人类可读标题 |
 | `status` | enum | ✅ | 状态（见下表） |
 | `depends_on` | string[] | ✅ | 依赖的车 ID 数组，无依赖为 `[]` |
-| `scope` | string[] | ✅ | 允许改动的路径边界（glob 模式） |
-| `acceptance` | string[] | ✅ | 可执行验收命令数组 |
+| `scope` | string[] | ✅ | 允许改动的路径前缀（相对 repo 根的精确文件或目录，非 glob） |
+| `acceptance` | object[] | ✅ | 验收证据数组，每项为 `{"command": string, "passed": boolean}` |
 | `rollback` | string | ✅ | 可执行或明确的回退方式 |
 | `production_impact` | enum | ✅ | 生产影响级别（见下表） |
 | `owner_instance_id` | string\|null | ✅ | opaque instance ID，未领取时为 `null` |
@@ -56,6 +56,7 @@
 | `cross_module_block_count` | integer | ✅ | 跨模块 BLOCK 次数计数 |
 | `release_started_at` | string\|null | ✅ | ISO 8601 时间戳，releasing 时必填 |
 | `user_acceptance_required` | boolean | ✅ | 是否需要用户验收 |
+| `user_acceptance_evidence` | string\|null | ✅ | 用户验收证据（user_acceptance_required 且状态为 user_accepted 时必填） |
 
 ### 2.1 Status 枚举
 
@@ -99,7 +100,7 @@ planned -> in_progress -> review -> accepted -> releasing -> canary -> user_acce
 
 ### 3.3 进入 accepted
 - 所有依赖（`depends_on`）必须处于 `accepted` 或 `user_accepted` 状态
-- 所有 `acceptance` 命令执行成功
+- 所有 `acceptance` 证据的 `passed` 为 `true`（CLI 只校验证据，不执行命令）
 - 候选 diff 不超出声明的 `scope`
 
 ### 3.4 进入 releasing
@@ -122,43 +123,40 @@ planned -> in_progress -> review -> accepted -> releasing -> canary -> user_acce
 `delivery_gate.py check` 必须以稳定 error code 拒绝以下情况：
 
 ### 4.1 结构校验
-- ❌ 未知字段
-- ❌ 重复 car ID
-- ❌ 未知依赖（依赖的车不存在）
-- ❌ DAG 成环（直接或间接依赖循环）
+- ❌ **unknown_field**: 未知字段
+- ❌ **duplicate_car_id**: 重复 car ID
+- ❌ **unknown_dependency**: 未知依赖（依赖的车不存在）
+- ❌ **dependency_cycle**: DAG 成环（直接或间接依赖循环）
 
 ### 4.2 必填字段校验
-- ❌ 缺少 `scope`
-- ❌ 缺少 `acceptance`
-- ❌ 缺少 `rollback`
-- ❌ 缺少 `production_impact`
+- ❌ **missing_field**: 缺少必填字段（scope、acceptance、rollback、production_impact、user_acceptance_evidence）
+- ❌ **invalid_scope**: scope 不是有效的路径前缀
 
 ### 4.3 人员校验
-- ❌ `in_progress` 状态但无 `owner_instance_id`（非 null）
-- ❌ `review` 状态但无独立 `reviewer_instance_id`（与 owner 相同或为 null）
+- ❌ **owner_required**: `in_progress` 状态但无 `owner_instance_id`（非 null）
+- ❌ **independent_reviewer_required**: `review` 状态但无独立 `reviewer_instance_id`（与 owner 相同或为 null）
 
 ### 4.4 SHA 校验
-- ❌ `review` 或 `accepted` 状态但无 exact base/fixed SHA
-- ❌ `fixed_sha` 不存在于仓库中
+- ❌ **exact_sha_required**: `review` 或 `accepted` 状态但无 exact base/fixed SHA
+- ❌ **fixed_sha_not_found**: `fixed_sha` 不存在于仓库中
 
 ### 4.5 Scope 校验
-- ❌ 候选 diff（base_sha 到 fixed_sha）越出声明的 `scope`
+- ❌ **scope_violation**: 候选 diff（base_sha 到 fixed_sha）越出声明的 `scope`
 
 ### 4.6 依赖校验
-- ❌ 依赖车未完成（非 `accepted`/`user_accepted`）却标记当前车为 `accepted`/`releasing`
+- ❌ **dependency_not_satisfied**: 依赖车未完成（非 `accepted`/`user_accepted`）却标记当前车为 `accepted`/`releasing`
 
 ### 4.7 WIP 校验
-- ❌ 同时处于 `in_progress` 或 `review` 状态的 writer 超过 `writer_wip` 限制
+- ❌ **writer_wip_exceeded**: 同时处于 `in_progress` 或 `review` 状态的 writer 超过 `writer_wip` 限制
 
 ### 4.8 发布时长校验
-- ❌ `releasing` 状态超过 `release_minutes` 上限（硬错）
+- ❌ **release_timeout**: `releasing` 状态超过 `release_minutes` 上限（硬错）
 
 ### 4.9 跨模块 BLOCK 校验
-- ❌ `cross_module_block_count >= 2` 时仍继续 `review` 或 `releasing`
-- ❌ 第二次跨模块 BLOCK 后未停止（必须 blocked/cancelled）
+- ❌ **reslice_required**: `cross_module_block_count >= 2` 时仍继续 `review` 或 `releasing`
 
 ### 4.10 用户验收校验
-- ❌ `user_acceptance_required=true` 的车被 agent 直接标记为 `user_accepted`
+- ❌ **user_acceptance_evidence_required**: `user_acceptance_required=true` 且状态为 `user_accepted` 但缺少 `user_acceptance_evidence`
 
 ## 五、命令输出格式
 

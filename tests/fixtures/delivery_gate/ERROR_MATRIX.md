@@ -1,6 +1,6 @@
 # Delivery Gate 错误矩阵
 
-本文档列出了所有无效 fixture 及其对应的机器拦截错误类型。
+本文档列出了所有无效 fixture 及其对应的机器拦截错误类型和稳定错误 code。
 
 ## 有效 Fixture
 
@@ -12,75 +12,98 @@
 
 ### 4.1 结构校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_01_unknown_field.json` | 未知字段 | `unknown_field_should_be_rejected` |
-| `invalid_02_duplicate_car_id.json` | 重复 car ID | `duplicate-car` 出现两次 |
-| `invalid_03_unknown_dependency.json` | 未知依赖 | 依赖 `non-existent-car-id` 不存在 |
-| `invalid_04_dag_cycle.json` | DAG 成环 | `car-a` 依赖 `car-b`，`car-b` 依赖 `car-a` |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_01_unknown_field.json` | 未知字段 | `unknown_field` |
+| `invalid_02_duplicate_car_id.json` | 重复 car ID | `duplicate_car_id` |
+| `invalid_03_unknown_dependency.json` | 未知依赖 | `unknown_dependency` |
+| `invalid_04_dag_cycle.json` | DAG 成环 | `dependency_cycle` |
 
 ### 4.2 必填字段校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_05_missing_scope.json` | 缺少 scope | `car-05` 缺少 `scope` 字段 |
-| `invalid_06_missing_acceptance.json` | 缺少 acceptance | `car-06` 缺少 `acceptance` 字段 |
-| `invalid_07_missing_rollback.json` | 缺少 rollback | `car-07` 缺少 `rollback` 字段 |
-| `invalid_11_missing_production_impact.json` | 缺少 production_impact | `car-11` 缺少 `production_impact` 字段 |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_05_missing_scope.json` | 缺少 scope | `missing_field` |
+| `invalid_06_missing_acceptance.json` | 缺少 acceptance | `missing_field` |
+| `invalid_07_missing_rollback.json` | 缺少 rollback | `missing_field` |
+| `invalid_11_missing_production_impact.json` | 缺少 production_impact | `missing_field` |
 
 ### 4.3 人员校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_08_in_progress_without_owner.json` | in_progress 无 owner | `car-08` 状态为 `in_progress` 但 `owner_instance_id` 为 null |
-| `invalid_09_review_without_reviewer.json` | review 无独立 reviewer | `car-09` 状态为 `review` 但 `reviewer_instance_id` 与 `owner_instance_id` 相同 |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_08_in_progress_without_owner.json` | in_progress 无 owner | `owner_required` |
+| `invalid_09_review_without_reviewer.json` | review 无独立 reviewer | `independent_reviewer_required` |
 
 ### 4.4 SHA 校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_10_review_without_sha.json` | review 无 SHA | `car-10` 状态为 `review` 但 `base_sha`/`fixed_sha` 为 null |
-| `invalid_12_fixed_sha_not_exist.json` | fixed_sha 不存在 | `ffffffffffffffffffffffffffffffffffffffff` 不在仓库中 |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_10_review_without_sha.json` | review 无 SHA | `exact_sha_required` |
+| `invalid_12_fixed_sha_not_exist.json` | fixed_sha 不存在 | `fixed_sha_not_found` |
 
 ### 4.5 Scope 校验
 
 > 注意：此类别需要实际 git diff，fixture 仅作结构示例，实际校验在 F1 实现时完成
+>
+> 稳定错误 code: `invalid_scope` (scope 不是有效的路径前缀) / `scope_violation` (diff 越出声明的 scope)
 
 ### 4.6 依赖校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_13_accepted_with_blocked_dep.json` | 未完成依赖却标记 accepted | `car-13` 标记为 `accepted` 但依赖 `car-dependency` 仍为 `in_progress` |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_13_accepted_with_blocked_dep.json` | 未完成依赖却标记 accepted | `dependency_not_satisfied` |
 
 ### 4.7 WIP 校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_14_exceed_wip_limit.json` | WIP 超过限制 | 3 个车处于 `in_progress` 状态，超过 `writer_wip=2` 限制 |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_14_exceed_wip_limit.json` | WIP 超过限制 | `writer_wip_exceeded` |
 
 ### 4.8 发布时长校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_15_release_timeout.json` | 发布超时 | `release_started_at` 为 `2026-08-12T20:00:00Z`，已超过 15 分钟上限 |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_15_release_timeout.json` | 发布超时 | `release_timeout` |
 
 ### 4.9 跨模块 BLOCK 校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_16_second_block_continue.json` | 第二次 BLOCK 后继续 | `cross_module_block_count=2` 但状态仍为 `review` |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_16_second_block_continue.json` | 第二次 BLOCK 后继续 | `reslice_required` |
 
 ### 4.10 用户验收校验
 
-| 文件 | 错误类型 | 预期错误信息 |
-|------|----------|--------------|
-| `invalid_17_agent_marks_user_accepted.json` | agent 直接标记 user_accepted | `user_acceptance_required=true` 但状态为 `user_accepted`（只能由用户设置） |
+| 文件 | 错误类型 | 稳定错误 code |
+|------|----------|----------------|
+| `invalid_17_agent_marks_user_accepted.json` | 缺少 user_acceptance_evidence | `user_acceptance_evidence_required` |
 
 ## 覆盖统计
 
 - **有效 fixtures**: 1
 - **无效 fixtures**: 17
 - **覆盖反例类别**: 10/10 ✅
+
+## 稳定错误 code 列表
+
+| Code | 说明 |
+|------|------|
+| `unknown_field` | 未知字段 |
+| `duplicate_car_id` | 重复 car ID |
+| `unknown_dependency` | 未知依赖 |
+| `dependency_cycle` | DAG 成环 |
+| `missing_field` | 缺少必填字段 |
+| `invalid_scope` | scope 不是有效的路径前缀 |
+| `owner_required` | in_progress 无 owner |
+| `independent_reviewer_required` | review 无独立 reviewer |
+| `exact_sha_required` | review/accepted 缺少 exact SHA |
+| `fixed_sha_not_found` | fixed_sha 不存在于仓库 |
+| `scope_violation` | diff 越出声明的 scope |
+| `dependency_not_satisfied` | 依赖未完成 |
+| `writer_wip_exceeded` | WIP 超过限制 |
+| `release_timeout` | 发布超时 |
+| `reslice_required` | 第二次跨模块 BLOCK 后仍继续 |
+| `user_acceptance_evidence_required` | user_accepted 缺少验收证据 |
 
 ## 使用方式
 

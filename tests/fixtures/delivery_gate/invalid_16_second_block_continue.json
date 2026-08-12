@@ -6,7 +6,7 @@
   "baseline": {
     "main_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
     "production_version": "0.3.3",
-    "production_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
+    "production_source_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
   },
   "limits": {
     "writer_wip": 2,
@@ -19,8 +19,8 @@
       "title": "第二次跨模块 BLOCK 后仍在 review",
       "status": "review",
       "depends_on": [],
-      "scope": ["docs/**"],
-      "acceptance": ["true"],
+      "scope": ["docs"],
+      "acceptance": [{"command": "true", "passed": true}],
       "rollback": "git checkout HEAD -- docs/",
       "production_impact": "none",
       "owner_instance_id": "RusticSpring",
@@ -29,7 +29,8 @@
       "fixed_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
       "cross_module_block_count": 2,
       "release_started_at": null,
-      "user_acceptance_required": false
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
     }
   ]
 }

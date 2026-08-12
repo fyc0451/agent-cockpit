@@ -10,7 +10,7 @@
   "baseline": {
     "main_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
     "production_version": "0.3.3",
-    "production_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
+    "production_source_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
   },
   "limits": {
     "writer_wip": 2,
@@ -25,12 +25,12 @@
       "depends_on": [],
       "scope": [
         "docs/delivery-contract.md",
-        "tests/fixtures/delivery_gate/**"
+        "tests/fixtures/delivery_gate"
       ],
       "acceptance": [
-        "test -f docs/delivery-contract.md",
-        "test -d tests/fixtures/delivery_gate",
-        "ls tests/fixtures/delivery_gate/invalid_*.json | wc -l | grep -q 10"
+        {"command": "test -f docs/delivery-contract.md", "passed": true},
+        {"command": "test -d tests/fixtures/delivery_gate", "passed": true},
+        {"command": "ls tests/fixtures/delivery_gate/invalid_*.json | wc -l | grep -q 17", "passed": true}
       ],
       "rollback": "git checkout HEAD -- docs/delivery-contract.md tests/fixtures/delivery_gate/",
       "production_impact": "none",
@@ -40,7 +40,8 @@
       "fixed_sha": null,
       "cross_module_block_count": 0,
       "release_started_at": null,
-      "user_acceptance_required": false
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
     }
   ]
 }
