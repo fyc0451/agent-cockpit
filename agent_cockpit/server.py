@@ -274,6 +274,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
 STATIC_DIR = ROOT_DIR / "static"
+NEXT_WEB_DIR = ROOT_DIR / "web" / "dist"
 COCKPIT_TOKEN = os.environ.get("COCKPIT_TOKEN", "")
 AUTH_COOKIE = "cockpit_session"
 TEAM_AUTH_COOKIE = "cockpit_team_human_session"
@@ -7157,6 +7158,44 @@ async def api_events(request: Request):
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+def _next_web_file(relative: str) -> Path | None:
+    """Resolve one regular build file without following symlink components."""
+    parts = relative.split("/")
+    if any(
+        not part or part in {".", ".."} or "\\" in part or "\x00" in part
+        for part in parts
+    ):
+        return None
+    target = NEXT_WEB_DIR.joinpath(*parts)
+    try:
+        relative_to_root = target.relative_to(ROOT_DIR)
+        current = ROOT_DIR
+        if current.is_symlink():
+            return None
+        for part in relative_to_root.parts:
+            current /= part
+            if current.is_symlink():
+                return None
+        if not current.is_file():
+            return None
+    except (OSError, ValueError):
+        return None
+    return current
+
+
+@app.get("/assets/{asset_path:path}")
+def next_web_asset(asset_path: str):
+    if not next_profile.enabled():
+        raise HTTPException(404, "Not Found")
+    target = _next_web_file(f"assets/{asset_path}")
+    if target is None:
+        raise HTTPException(404, "Not Found")
+    return FileResponse(
+        target,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 @app.get("/sw.js")
 def service_worker():
     return FileResponse(STATIC_DIR / "sw.js", media_type="application/javascript")
@@ -7173,6 +7212,11 @@ def web_manifest():
 @app.get("/")
 def index():
     # no-cache:手机端浏览器常启发式缓存首页,新功能(如上传类型放开)必须能及时下发
+    if next_profile.enabled():
+        next_index = _next_web_file("index.html")
+        if next_index is None:
+            raise HTTPException(503, "next_web_build_unavailable")
+        return FileResponse(next_index, headers={"Cache-Control": "no-cache"})
     return FileResponse(
         STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"}
     )
