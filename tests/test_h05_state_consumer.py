@@ -1288,19 +1288,25 @@ class _GatedZombie(FakeStateClient):
 def test_deferred_stop_intent_blocks_until_retry(monkeypatch):
     """REAP 被前一 stop 持有→本 stop deferred:shutdown intent 持久——
     open=False、reconcile 零新增;含 published client+真实 inflight 候选;
-    retry stop 完成后 open 才放行;真实线程最终零。"""
-    import os
+    retry stop 完成后 open 才放行;真实线程最终零。
 
-    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.15)
+    D-fix:用 entered+release Events 证明 first 已进入并保持在 stop/REAP,
+    主线程见到 entered 后再发 second;second 得 deferred 后才 release first。
+    不用 sleep 竞态证明持锁。"""
+    # first 用较长预算,second 单独缩预算,保证 second 在 REAP 上明确 deferred
+    # 后 first 仍有剩余窗口完成回收。
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 1.0)
+    entered, release = threading.Event(), threading.Event()
 
-    class VerySlowStop(FakeStateClient):
+    class GatedStop(FakeStateClient):
         def stop(self, join_timeout=5.0):
             self.request_stop()
-            time.sleep(0.3)
+            entered.set()
+            assert release.wait(5), "first stop release timed out"
             self.stopped = True
             return True
 
-    slow = VerySlowStop({"s": "/tmp/s.sock"})
+    slow = GatedStop({"s": "/tmp/s.sock"})
     slow.start()
     monkeypatch.setattr(server, "_state_clients", {"s": slow})
     monkeypatch.setattr(server, "_state_sessions_meta", {
@@ -1326,11 +1332,17 @@ def test_deferred_stop_intent_blocks_until_retry(monkeypatch):
         target=lambda: out.setdefault("first", server._stop_state_client())
     )
     t.start()
-    time.sleep(0.05)  # 前一 stop 持 REAP join 中
-    r2 = server._stop_state_client()  # 预算耗尽 → deferred
-    assert r2[0]["deferred"] is True
+    assert entered.wait(5), "first stop never entered client.stop (REAP held)"
+    # first 已持 REAP 并阻塞在 stop;缩短 second 预算以快速明确 deferred
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.1)
+    r2 = server._stop_state_client()
+    assert r2 and r2[0].get("deferred") is True
+    assert r2[0].get("reason") == "reap_lock_timeout"
     assert server._state_stop_tickets  # intent 未丢
+    # second 已 deferred:放行 first 完成回收
+    release.set()
     t.join(5)
+    assert not t.is_alive()
     assert out["first"] == []
     assert slow.stopped and server._state_clients == {}  # 旧 client 已停
     assert _alive_state_threads("r10") == []  # inflight 候选线程已回收
@@ -1342,6 +1354,7 @@ def test_deferred_stop_intent_blocks_until_retry(monkeypatch):
     assert "new" not in server._state_clients
     assert server._state_inflight == {}
     # retry stop 完成(更晚 ticket 覆盖更早 intent)→ open 放行
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 1.0)
     assert server._stop_state_client() == []
     assert not server._state_stop_tickets
     assert server._open_state_clients() is True
@@ -1906,56 +1919,104 @@ def test_opencode_injection_removed_from_server_source():
 class TestPhase2BoundedClientR12:
     """#1883: phase2 CLIENT reacquire bounded by absolute_deadline;另一线程
     持 CLIENT 至 >budget → _reap_owner/survivor 转移在 remaining 内返回
-    False(deferred),不阻塞;ownership 保留在 retiring。"""
+    False(deferred),不阻塞;ownership 保留在 retiring。
 
-    def _hold_client(self, hold_s: float):
-        """起一线程持 _STATE_CLIENT_LOCK hold_s 秒。"""
+    D-fix:acquired Event 证明 holder 已持 CLIENT;RecordingLock 记录
+    acquire(timeout=…) 并断言 timeout≤budget;返回时 holder 仍持锁/owner
+    仍保留。不用贴边 wall-clock(budget+0.08);宽松 watchdog 仅防挂死。"""
+
+    class _RecordingClientLock:
+        """代理 RLock:记录 timeout>=0 的 acquire 实参(RLock.acquire 只读不可补丁)。"""
+
+        def __init__(self):
+            self._inner = threading.RLock()
+            self.timeouts: list[float] = []
+
+        def acquire(self, blocking=True, timeout=-1):
+            if timeout is not None and timeout >= 0:
+                self.timeouts.append(float(timeout))
+            return self._inner.acquire(blocking=blocking, timeout=timeout)
+
+        def release(self):
+            return self._inner.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+            return False
+
+    def _install_recording_client_lock(self, monkeypatch):
+        lock = self._RecordingClientLock()
+        monkeypatch.setattr(server, "_STATE_CLIENT_LOCK", lock)
+        return lock
+
+    def _hold_client(self, hold_s: float = 5.0):
+        """起一线程持 _STATE_CLIENT_LOCK,acquired 表示已进入临界区。"""
+        acquired = threading.Event()
         release = threading.Event()
 
         def hold():
             with server._STATE_CLIENT_LOCK:
+                acquired.set()
                 release.wait(hold_s)
 
         t = threading.Thread(target=hold, daemon=True)
         t.start()
-        return release, t
+        return acquired, release, t
 
     def test_reap_returns_within_budget_when_client_held_stop_true(self, monkeypatch):
-        """stop=True 后 CLIENT reacquire 被另一线程持有→_reap_owner 在剩余
-        窗口内返回 False(deferred);owner 保留在 retiring;wall-clock <= budget+容差。"""
+        """stop=True 后 CLIENT reacquire 被另一线程持有→_reap_owner 返回
+        False(deferred);owner 保留;holder 仍持锁;acquire timeout≤budget。"""
+        lock = self._install_recording_client_lock(monkeypatch)
         client = FakeStateClient({"s1": "/tmp/x.sock"})
         with server._STATE_CLIENT_LOCK:
             owner = server._retire_client_locked("s1", server._state_epoch, client)
-        release, holder = self._hold_client(0.5)
-        time.sleep(0.05)  # 确保持有
+        acquired, release, holder = self._hold_client()
+        assert acquired.wait(5), "holder never acquired CLIENT"
+        lock.timeouts.clear()  # 只统计 reacquire 阶段
         budget = 0.1
         deadline = time.monotonic() + budget
+        watchdog = budget + 2.0  # hang guard only
         start = time.monotonic()
         result = server._reap_owner(owner, deadline)
         elapsed = time.monotonic() - start
-        release.set(); holder.join(timeout=2)
         assert result is False  # deferred
-        assert elapsed < budget + 0.08  # bounded (容差 for scheduling)
-        assert owner.token in server._state_retiring  # ownership 保留
+        assert owner.token in server._state_retiring
+        assert holder.is_alive()
+        assert not server._STATE_CLIENT_LOCK.acquire(blocking=False)
+        assert lock.timeouts, "expected CLIENT.acquire(timeout=remaining) during reacquire"
+        assert all(t <= budget + 1e-9 for t in lock.timeouts), lock.timeouts
+        assert elapsed < watchdog
+        release.set()
+        holder.join(timeout=2)
+        assert not holder.is_alive()
 
     def test_survivor_transfer_deferred_when_client_held_stop_false(self, monkeypatch):
         """stop=False 后 phase2 survivor 转移用 bounded CLIENT;拿不到→deferred,
-        owner 保留在 retiring(不转 survivor);wall-clock <= budget+容差。"""
+        owner 保留在 retiring;acquire timeout≤budget;返回时 holder 仍持锁。"""
         class FailStop(FakeStateClient):
             def stop(self, join_timeout=5.0):
                 return False
+
+        lock = self._install_recording_client_lock(monkeypatch)
         client = FailStop({"s1": "/tmp/x.sock"})
         with server._STATE_CLIENT_LOCK:
             owner = server._retire_client_locked("s1", server._state_epoch, client)
-        release, holder = self._hold_client(0.5)
-        time.sleep(0.05)
+        acquired, release, holder = self._hold_client()
+        assert acquired.wait(5), "holder never acquired CLIENT"
+        lock.timeouts.clear()
         budget = 0.1
         deadline = time.monotonic() + budget
+        watchdog = budget + 2.0
         start = time.monotonic()
         survived = []
         # 模拟 phase2 loop（_stop_state_client 内的逻辑）
         if not server._reap_owner(owner, deadline):
             remaining = max(0.0, deadline - time.monotonic())
+            assert remaining <= budget + 1e-9
             if server._STATE_CLIENT_LOCK.acquire(timeout=remaining):
                 try:
                     if server._state_retiring.get(owner.token) is owner:
@@ -1965,24 +2026,33 @@ class TestPhase2BoundedClientR12:
                 finally:
                     server._STATE_CLIENT_LOCK.release()
         elapsed = time.monotonic() - start
-        release.set(); holder.join(timeout=2)
         assert len(survived) == 0  # deferred:未转移
         assert owner.token in server._state_retiring  # 保留在 retiring
-        assert elapsed < budget + 0.08  # bounded
+        assert holder.is_alive()
+        assert not server._STATE_CLIENT_LOCK.acquire(blocking=False)
+        assert lock.timeouts, "expected CLIENT.acquire(timeout=remaining) for survivor transfer"
+        assert all(t <= budget + 1e-9 for t in lock.timeouts), lock.timeouts
+        assert elapsed < watchdog
+        release.set()
+        holder.join(timeout=2)
+        assert not holder.is_alive()
 
     def test_reap_succeeds_after_client_released_retry(self, monkeypatch):
         """retry:CLIENT 释放后 _reap_owner 正常摘除(stop=True)。"""
+        self._install_recording_client_lock(monkeypatch)
         client = FakeStateClient({"s1": "/tmp/x.sock"})
         with server._STATE_CLIENT_LOCK:
             owner = server._retire_client_locked("s1", server._state_epoch, client)
         # 第一轮:CLIENT 被持有→deferred
-        release, holder = self._hold_client(0.3)
-        time.sleep(0.05)
+        acquired, release, holder = self._hold_client()
+        assert acquired.wait(5), "holder never acquired CLIENT"
         assert not server._reap_owner(owner, time.monotonic() + 0.1)
         assert owner.token in server._state_retiring
+        assert holder.is_alive()
         # holder 释放后 retry
-        release.set(); holder.join(timeout=2)
-        time.sleep(0.05)  # 确保 holder 退出
+        release.set()
+        holder.join(timeout=2)
+        assert not holder.is_alive()
         assert server._reap_owner(owner, time.monotonic() + 1.0) is True
         assert owner.token not in server._state_retiring  # 摘除成功
 
