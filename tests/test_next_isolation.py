@@ -26,10 +26,15 @@ def module():
     return value
 
 
-def test_example_is_complete_and_valid_for_declared_home() -> None:
+def test_example_is_complete_and_valid_for_declared_home(tmp_path: Path) -> None:
     gate = module()
-    values = gate.load_env(ROOT / ".env.next.example", home=Path.home())
-    assert gate.validate(values, repo=ROOT) == values
+    values = gate.load_env(ROOT / ".env.next.example", home=tmp_path)
+    repo = Path(values["COCKPIT_NEXT_WORKTREE"])
+    repo.mkdir(parents=True)
+    (repo / ".agent-memory-project").write_text(
+        "agent-cockpit-next\n", encoding="ascii",
+    )
+    assert gate.validate(values, repo=repo, home=tmp_path, check_git=False) == values
 
 
 @pytest.mark.parametrize(
@@ -173,14 +178,21 @@ def test_systemd_check_fails_closed_on_command_error(monkeypatch: pytest.MonkeyP
     assert gate._unit_not_installed() is False
 
 
-def test_git_check_fails_closed_on_command_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_git_check_fails_closed_on_command_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     gate = module()
-    values = gate.expected()
+    values = gate.expected(tmp_path)
+    repo = Path(values["COCKPIT_NEXT_WORKTREE"])
+    repo.mkdir(parents=True)
+    (repo / ".agent-memory-project").write_text(
+        "agent-cockpit-next\n", encoding="ascii",
+    )
     monkeypatch.setattr(
         gate.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(OSError()),
     )
     with pytest.raises(gate.IsolationError, match="git_unavailable"):
-        gate.validate(values, repo=ROOT)
+        gate.validate(values, repo=repo, home=tmp_path)
 
 
 def test_start_execs_next_venv_with_sanitized_environment(
@@ -313,7 +325,12 @@ def test_next_source_entry_requires_exact_profile() -> None:
     assert result.returncode == 2
     assert "next_profile_required" in result.stderr
 
-    env = {**env, **_next_environment(), "COCKPIT_PORT": "8790"}
+    env = {
+        **env,
+        **_next_environment(),
+        "COCKPIT_NEXT_WORKTREE": str(ROOT),
+        "COCKPIT_PORT": "8790",
+    }
     result = subprocess.run(
         [sys.executable, "server.py"], cwd=ROOT, env=env,
         capture_output=True, text=True, timeout=5,
@@ -323,8 +340,13 @@ def test_next_source_entry_requires_exact_profile() -> None:
 
     valid_env = {**env, **_next_environment()}
     valid_env.pop("COCKPIT_NEXT_LOCK_FD", None)
+    entry = (
+        "from agent_cockpit import next_profile; "
+        "next_profile.validate_server_environment=lambda *_args, **_kwargs: None; "
+        "import runpy; runpy.run_path('server.py', run_name='__main__')"
+    )
     result = subprocess.run(
-        [sys.executable, "server.py"], cwd=ROOT, env=valid_env,
+        [sys.executable, "-c", entry], cwd=ROOT, env=valid_env,
         capture_output=True, text=True, timeout=5,
     )
     assert result.returncode == 2
@@ -333,7 +355,7 @@ def test_next_source_entry_requires_exact_profile() -> None:
     for forged_fd in ("not-a-fd", "02", "2", "999999"):
         valid_env["COCKPIT_NEXT_LOCK_FD"] = forged_fd
         result = subprocess.run(
-            [sys.executable, "server.py"], cwd=ROOT, env=valid_env,
+            [sys.executable, "-c", entry], cwd=ROOT, env=valid_env,
             capture_output=True, text=True, timeout=5,
         )
         assert result.returncode == 2
@@ -460,7 +482,7 @@ def test_next_linked_worktree_keeps_exact_mail_project(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_next_environment(monkeypatch)
-    assert server._canonical_mail_project(ROOT) == str(ROOT)
+    assert server._canonical_mail_project(ROOT) == os.environ["AGENT_MAIL_PROJECT"]
     with pytest.raises(Exception) as exc:
         server._canonical_mail_project(Path("/home/fyc/github/agent-cockpit"))
     assert getattr(exc.value, "status_code", None) == 403

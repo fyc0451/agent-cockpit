@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from agent_cockpit import instance_lock
 
@@ -224,6 +225,22 @@ def test_adopt_rejects_forged_fd_while_another_owner_holds_lock(
         terminate(holder)
 
 
+def _stub_lifespan_dependencies(monkeypatch: pytest.MonkeyPatch, server: object) -> None:
+    async def waiting_loop() -> None:
+        import asyncio
+
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(server, "H0_STATE_MODE", "off")
+    monkeypatch.setattr(server, "B0_MODE", "off")
+    monkeypatch.setattr(server, "_poll_live_state", waiting_loop)
+    monkeypatch.setattr(server, "_poll_message_state", waiting_loop)
+    monkeypatch.setattr(server, "_worktree_cleanup_loop", waiting_loop)
+    monkeypatch.setattr(server, "_identity_retirement_loop", waiting_loop)
+    monkeypatch.setattr(server.tasks, "recover_pending_tasks", lambda: {"skipped": True})
+    monkeypatch.setattr(server, "_release_all_zoom_leases", lambda: None)
+
+
 def test_next_lifespan_requires_adopted_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -231,8 +248,10 @@ def test_next_lifespan_requires_adopted_owner(
 
     monkeypatch.setenv("COCKPIT_NEXT_PROFILE", "1")
     monkeypatch.setattr(server, "_next_instance_lock_owner", None)
-    with pytest.raises(RuntimeError, match="next_instance_lock_required"):
-        server._require_next_instance_lock()
+    with pytest.raises(RuntimeError, match="next_instance_lock_required"), TestClient(
+        server.app,
+    ):
+        pass
 
     values = profile(tmp_path)
     owner = instance_lock.InstanceLock(values).acquire()
@@ -240,8 +259,10 @@ def test_next_lifespan_requires_adopted_owner(
     fd, owner.fd = owner.fd, None
     adopted = instance_lock.InstanceLock.adopt_inherited(values, fd)
     monkeypatch.setattr(server, "_next_instance_lock_owner", adopted)
+    _stub_lifespan_dependencies(monkeypatch, server)
     try:
-        server._require_next_instance_lock()
+        with TestClient(server.app):
+            pass
     finally:
         adopted.release()
 
@@ -253,7 +274,9 @@ def test_production_lifespan_does_not_require_next_owner(
 
     monkeypatch.delenv("COCKPIT_NEXT_PROFILE", raising=False)
     monkeypatch.setattr(server, "_next_instance_lock_owner", None)
-    server._require_next_instance_lock()
+    _stub_lifespan_dependencies(monkeypatch, server)
+    with TestClient(server.app):
+        pass
 
 
 @pytest.mark.parametrize("field", ("pid", "process_starttime", "profile_id"))

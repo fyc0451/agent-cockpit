@@ -4720,9 +4720,25 @@ def _canonical_mail_project(workdir: Path) -> str:
         scope_path = Path(scoped)
         try:
             resolved.relative_to(scope_path)
-        except ValueError as exc:
-            raise HTTPException(403, "Agent Mail 项目超出 Next 隔离范围") from exc
-        return scoped
+            return scoped
+        except ValueError:
+            resolved_root = _git_root(resolved)
+            resolved_common = _git_common_dir(resolved)
+            scoped_common = _git_common_dir(scope_path)
+            primary_root = (
+                resolved_common.parent.resolve()
+                if resolved_common is not None and resolved_common.name == ".git"
+                else None
+            )
+            if (
+                resolved_root is not None
+                and resolved_common is not None
+                and scoped_common is not None
+                and resolved_common == scoped_common
+                and resolved_root != primary_root
+            ):
+                return scoped
+            raise HTTPException(403, "Agent Mail 项目超出 Next 隔离范围")
     common_dir = _git_common_dir(resolved)
     if common_dir is None:
         return str(resolved)
