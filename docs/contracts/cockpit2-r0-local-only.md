@@ -89,21 +89,22 @@ Existing read authorities remain valid while new adapters are introduced:
   ticket;
 - events: existing SSE is an invalidation channel, not a second authority.
 
-The new Project phase adds only the contracts below before Workspace side
-effects:
+The new Project phase keeps the existing `/api` prefix and adds only the
+contracts below before Workspace side effects. Project Registry reads use a
+distinct resource path because legacy `/api/projects/{slug}` remains active:
 
 ```text
-GET  /api/v2/runtime-nodes
-GET  /api/v2/runtime-nodes/{nodeId}/roots
-GET  /api/v2/runtime-nodes/{nodeId}/directories
-POST /api/v2/project-discovery
-GET  /api/v2/projects
-POST /api/v2/projects
-GET  /api/v2/projects/{projectId}
-GET  /api/v2/projects/{projectId}/repo-locations
-POST /api/v2/projects/{projectId}/repo-locations
-GET  /api/v2/projects/{projectId}/workspaces
-GET  /api/v2/projects/{projectId}/workspaces/{workspaceId}
+GET  /api/runtime-nodes
+GET  /api/runtime-nodes/{nodeId}/roots
+GET  /api/runtime-nodes/{nodeId}/directories
+POST /api/project-discovery
+GET  /api/project-registry/projects
+POST /api/project-registry/projects
+GET  /api/project-registry/projects/{projectId}
+GET  /api/project-registry/projects/{projectId}/repo-locations
+POST /api/project-registry/projects/{projectId}/repo-locations
+GET  /api/project-registry/projects/{projectId}/workspaces
+GET  /api/project-registry/projects/{projectId}/workspaces/{workspaceId}
 ```
 
 Local directory endpoints accept `root_id + relative path`; they reject an
@@ -132,11 +133,17 @@ lock and trust-boundary work must not hide or defer this prerequisite.
 ## Writer concurrency
 
 W1 retains the machine-enforced limit of two writers: one bounded backend car
-and `WEB-001`. Reviewer and analyst work is read-only. Raising the limit is a
-separate delivery car that must first prove module, Store, migration, and API
-ownership in tests. The intended ceiling is three writers after the Project
-boundary is accepted and four only after Runtime/Event/Memory boundaries no
-longer share Store or entrypoint hotspots.
+and `WEB-001`. Reviewer and analyst work is read-only. The current plan remains
+at exactly two writers; the limit must never be raised by editing it manually.
+
+`DELIVERY-002-wip3-gate` is the only path from two to three writers. It first
+proves Project Store, migration, API, and module ownership with non-overlapping
+car scopes and negative delivery fixtures. `DELIVERY-003-wip4-gate` is a
+separate path from three to four writers after the Local slice; it first proves
+that Operation, Runtime Provider, Event, and Memory ownership no longer shares
+Store migrations or entrypoint hotspots. Each gate changes the validator and
+plan schema only in its own accepted commit. A rejected or reverted gate leaves
+the previous writer limit in force.
 
 ## R0 acceptance
 

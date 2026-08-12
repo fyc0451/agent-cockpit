@@ -168,7 +168,7 @@
       "title": "Add the Project RepoLocation and Workspace registry store",
       "status": "planned",
       "depends_on": ["RUNTIME-001-profile-lock", "SEC-002-remote-inbox"],
-      "scope": ["agent_cockpit/contracts", "agent_cockpit/domain", "agent_cockpit/infrastructure", "agent_cockpit/runtime_paths.py", "agent_cockpit/store_schema.py", "tests/test_project_registry.py", "docs/contracts"],
+      "scope": ["agent_cockpit/project_registry_contracts.py", "agent_cockpit/project_registry_domain.py", "agent_cockpit/project_registry_store.py", "agent_cockpit/runtime_paths.py", "agent_cockpit/store_schema.py", "tests/test_project_registry.py", "docs/contracts/project-registry-v1.md"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_project_registry.py", "passed": false}
       ],
@@ -187,8 +187,8 @@
       "id": "PROJ-002-local-discovery",
       "title": "Discover an existing directory under an allowlisted Local root",
       "status": "planned",
-      "depends_on": ["PROJ-001-registry-store"],
-      "scope": ["agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/infrastructure", "tests/test_project_discovery.py", "docs/contracts"],
+      "depends_on": ["DELIVERY-002-wip3-gate"],
+      "scope": ["agent_cockpit/project_discovery.py", "agent_cockpit/project_discovery_service.py", "tests/test_project_discovery.py", "docs/contracts/project-discovery-v1.md"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_project_discovery.py", "passed": false}
       ],
@@ -207,8 +207,8 @@
       "id": "PROJ-003-legacy-import",
       "title": "Import legacy Agent Mail Herdr and Coordination evidence read-only",
       "status": "planned",
-      "depends_on": ["PROJ-001-registry-store"],
-      "scope": ["agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/infrastructure", "tests", "docs/contracts"],
+      "depends_on": ["DELIVERY-002-wip3-gate"],
+      "scope": ["agent_cockpit/project_legacy_import.py", "tests/test_project_legacy_import.py", "docs/contracts/project-legacy-import-v1.md"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_project_legacy_import.py", "passed": false}
       ],
@@ -225,14 +225,14 @@
     },
     {
       "id": "PROJ-004-project-api",
-      "title": "Expose versioned Project and RepoLocation read and registration APIs",
+      "title": "Expose Project Registry and RepoLocation read and registration APIs",
       "status": "planned",
       "depends_on": ["PROJ-001-registry-store", "PROJ-002-local-discovery"],
-      "scope": ["agent_cockpit/api", "agent_cockpit/application", "agent_cockpit/contracts", "tests/test_project_registry_api.py", "docs/contracts"],
+      "scope": ["agent_cockpit/project_registry_api.py", "tests/test_project_registry_api.py", "docs/contracts/project-registry-api-v1.md"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_project_registry_api.py", "passed": false}
       ],
-      "rollback": "Disable the versioned Project routes and revert the API commit without changing legacy endpoints",
+      "rollback": "Disable the Project Registry routes and revert the API commit without changing legacy endpoints",
       "production_impact": "none",
       "owner_instance_id": null,
       "reviewer_instance_id": null,
@@ -248,7 +248,7 @@
       "title": "Bind legacy workbench reads to the new Project identity without mutating legacy stores",
       "status": "planned",
       "depends_on": ["PROJ-003-legacy-import", "PROJ-004-project-api"],
-      "scope": ["agent_cockpit/api", "agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/server.py", "tests/test_project_workbench.py", "tests/test_project_compatibility.py", "docs/contracts"],
+      "scope": ["agent_cockpit/project_workbench_adapter.py", "agent_cockpit/server.py", "tests/test_project_workbench.py", "tests/test_project_compatibility.py", "docs/contracts/project-compatibility-v1.md"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_project_workbench.py tests/test_project_compatibility.py", "passed": false}
       ],
@@ -264,16 +264,16 @@
       "user_acceptance_evidence": null
     },
     {
-      "id": "DELIVERY-002-phased-wip",
-      "title": "Permit three writers only after module Store and API ownership gates pass",
+      "id": "DELIVERY-002-wip3-gate",
+      "title": "Permit three writers only after Project ownership gates pass",
       "status": "planned",
       "depends_on": ["RUNTIME-001-profile-lock", "WEB-001-app-shell", "PROJ-001-registry-store"],
-      "scope": [".delivery", "docs/delivery-contract.md", "scripts/delivery_gate.py", "tests/test_delivery_gate.py", "tests/fixtures/delivery_gate"],
+      "scope": [".delivery/cockpit-product-v3.json", "docs/delivery-contract.md", "scripts/delivery_gate.py", "tests/test_delivery_gate.py", "tests/fixtures/delivery_gate"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py", "passed": false},
         {"command": ".venv/bin/python scripts/delivery_gate.py check .delivery/cockpit-product-v3.json", "passed": false}
       ],
-      "rollback": "Revert the phased WIP gate and keep the hard writer limit at two",
+      "rollback": "Revert the WIP3 gate and keep the machine-enforced writer limit at two",
       "production_impact": "none",
       "owner_instance_id": null,
       "reviewer_instance_id": null,
@@ -306,10 +306,31 @@
       "user_acceptance_evidence": null
     },
     {
+      "id": "DELIVERY-003-wip4-gate",
+      "title": "Permit four writers only after Operation Runtime Event and Memory ownership gates pass",
+      "status": "planned",
+      "depends_on": ["DELIVERY-002-wip3-gate", "SLICE-001-local-readonly"],
+      "scope": [".delivery/cockpit-product-v3.json", "docs/delivery-contract.md", "docs/contracts/provider-ownership-v1.md", "scripts/delivery_gate.py", "tests/test_delivery_gate.py", "tests/fixtures/delivery_gate"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py", "passed": false},
+        {"command": ".venv/bin/python scripts/delivery_gate.py check .delivery/cockpit-product-v3.json", "passed": false}
+      ],
+      "rollback": "Revert the WIP4 gate and keep the machine-enforced writer limit at three",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
       "id": "LATER-001-capability-expansion",
       "title": "Add Memory Remote Herdr Automation Browser GitHub and Electron after the Local core",
       "status": "planned",
-      "depends_on": ["SLICE-001-local-readonly"],
+      "depends_on": ["DELIVERY-003-wip4-gate"],
       "scope": ["agent_cockpit", "web", "tests", "docs"],
       "acceptance": [
         {"command": "python3 -m pytest -q", "passed": false}
