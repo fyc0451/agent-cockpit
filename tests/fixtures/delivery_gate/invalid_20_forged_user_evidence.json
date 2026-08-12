@@ -2,7 +2,7 @@
   "schema_version": 1,
   "goal_id": "test-20",
   "user_journey": "测试 JSON 伪造用户验收证据拦截",
-  "non_goals": [],
+  "non_goals": ["production deployment"],
   "baseline": {
     "main_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
     "production_version": "0.3.3",

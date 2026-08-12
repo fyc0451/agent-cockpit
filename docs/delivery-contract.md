@@ -128,7 +128,7 @@ planned -> in_progress -> review -> accepted -> releasing -> canary -> user_acce
 - ❌ **unknown_dependency**: 未知依赖（依赖的车不存在）
 - ❌ **dependency_cycle**: DAG 成环（直接或间接依赖循环）
 - ❌ **duplicate_json_key**: JSON 任意层存在重复 key
-- ❌ **wrong_types**: 字段类型不匹配（如布尔值冒充整数）
+- 字段类型不匹配使用对应字段的稳定错误 code（如布尔值冒充整数返回 `invalid_block_count`）
 
 ### 4.2 必填字段校验
 - ❌ **missing_field**: 缺少必填字段（scope、acceptance、rollback、production_impact、user_acceptance_evidence）
@@ -153,13 +153,14 @@ planned -> in_progress -> review -> accepted -> releasing -> canary -> user_acce
 
 ### 4.8 发布时长校验
 - ❌ **release_timeout**: `releasing` 状态超过 `release_minutes` 上限（硬错）
+- ❌ **release_start_in_future**: `release_started_at` 晚于当前 UTC 时间
 
 ### 4.9 跨模块 BLOCK 校验
 - ❌ **reslice_required**: `cross_module_block_count >= 2` 时仍继续 `review` 或 `releasing`
 
 ### 4.10 用户验收校验
 - ❌ **user_acceptance_evidence_required**: `user_acceptance_required=true` 且状态为 `user_accepted` 但缺少 `user_acceptance_evidence`
-- ❌ **forged_user_evidence**: Foundation v1 没有可信用户证据源，任何仅凭 JSON 的 `user_accepted` 都 fail-closed
+- ❌ **user_acceptance_evidence_required**: Foundation v1 没有可信用户证据源，任何仅凭 JSON 的 `user_accepted` 都 fail-closed
 
 **重要**: Foundation v1 阶段，CLI 不执行 acceptance 命令，只校验已记录的证据。`user_acceptance_evidence` 必须来自外部可信源（不在 JSON 中），仅凭 JSON 字段的 user_accepted 状态将被拒绝。
 

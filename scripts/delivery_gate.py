@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,20 @@ ROOT_FIELDS = {
 BASELINE_FIELDS = {"main_sha", "production_version", "production_source_sha"}
 LIMIT_FIELDS = {"writer_wip", "release_minutes", "cross_module_blocks_before_reslice"}
 ACCEPTANCE_FIELDS = {"command", "passed"}
+INSTANCE_ID_RE = re.compile(r"^i-[a-z2-7]{26}$")
+
+
+def unique_object(pairs: list[tuple[str, object]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(key)
+        value[key] = item
+    return value
+
+
+def invalid_constant(value: str) -> None:
+    raise json.JSONDecodeError("invalid constant", value, 0)
 
 
 def issue(code: str, *, car_id: str | None = None, detail: str = "") -> dict:
@@ -65,10 +80,22 @@ def is_sha(value: object) -> bool:
     return isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value)
 
 
+def is_instance(value: object) -> bool:
+    return isinstance(value, str) and bool(INSTANCE_ID_RE.fullmatch(value))
+
+
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(root), *args], text=True, capture_output=True, check=False,
     )
+
+
+def repo_root(path: Path) -> Path:
+    for root in (path.resolve().parent, Path.cwd()):
+        result = git(root, "rev-parse", "--show-toplevel")
+        if result.returncode == 0:
+            return Path(result.stdout.strip())
+    return path.resolve().parent
 
 
 def parse_time(value: object) -> dt.datetime | None:
@@ -83,8 +110,15 @@ def parse_time(value: object) -> dt.datetime | None:
 
 def load(path: Path) -> tuple[dict | None, list[dict]]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=unique_object,
+            parse_constant=invalid_constant,
+        )
+    except json.JSONDecodeError as exc:
+        return None, [issue("invalid_json", detail=str(exc))]
+    except ValueError as exc:
+        return None, [issue("duplicate_json_key", detail=str(exc))]
+    except (OSError, UnicodeError) as exc:
         return None, [issue("invalid_json", detail=str(exc))]
     if not isinstance(value, dict):
         return None, [issue("invalid_root", detail="expected object")]
@@ -95,7 +129,7 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
     errors: list[dict] = []
     if not exact_fields(plan, ROOT_FIELDS, "invalid_root", errors):
         return errors
-    if plan["schema_version"] != 1:
+    if type(plan["schema_version"]) is not int or plan["schema_version"] != 1:
         errors.append(issue("unsupported_schema_version"))
     for field in ("goal_id", "user_journey"):
         if not isinstance(plan[field], str) or not plan[field].strip():
@@ -103,17 +137,21 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
     if not strings(plan["non_goals"]):
         errors.append(issue("invalid_field", detail="non_goals"))
     baseline = plan["baseline"]
-    if exact_fields(baseline, BASELINE_FIELDS, "invalid_baseline", errors):
-        if not is_sha(baseline["main_sha"]) or not is_sha(baseline["production_source_sha"]):
-            errors.append(issue("invalid_baseline_sha"))
-        if not isinstance(baseline["production_version"], str) or not baseline["production_version"]:
-            errors.append(issue("invalid_field", detail="baseline.production_version"))
+    if not exact_fields(baseline, BASELINE_FIELDS, "invalid_baseline", errors):
+        return errors
+    if not is_sha(baseline["main_sha"]) or not is_sha(baseline["production_source_sha"]):
+        errors.append(issue("invalid_baseline_sha"))
+    if not isinstance(baseline["production_version"], str) or not baseline["production_version"].strip():
+        errors.append(issue("invalid_field", detail="baseline.production_version"))
     limits = plan["limits"]
-    if exact_fields(limits, LIMIT_FIELDS, "invalid_limits", errors):
-        expected = {"writer_wip": 2, "release_minutes": 15, "cross_module_blocks_before_reslice": 2}
-        for field, value in expected.items():
-            if limits[field] != value:
-                errors.append(issue("invalid_limit", detail=f"{field}={limits[field]!r}"))
+    if not exact_fields(limits, LIMIT_FIELDS, "invalid_limits", errors):
+        return errors
+    expected = {"writer_wip": 2, "release_minutes": 15, "cross_module_blocks_before_reslice": 2}
+    for field, value in expected.items():
+        if type(limits[field]) is not int or limits[field] != value:
+            errors.append(issue("invalid_limit", detail=f"{field}={limits[field]!r}"))
+    if any(type(limits[field]) is not int or limits[field] != value for field, value in expected.items()):
+        return errors
     cars = plan["cars"]
     if not isinstance(cars, list) or not cars:
         errors.append(issue("invalid_cars"))
@@ -125,47 +163,54 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
         car_id = car.get("id") if isinstance(car, dict) and isinstance(car.get("id"), str) else f"#{index}"
         if not exact_fields(car, CAR_FIELDS, "invalid_car", errors, car_id=car_id):
             continue
-        if not car_id or car_id.startswith("#"):
+        id_valid = bool(car_id) and not car_id.startswith("#") and not car_id.isspace()
+        if not id_valid:
             errors.append(issue("invalid_car_id", car_id=car_id))
         elif car_id in ids:
             errors.append(issue("duplicate_car_id", car_id=car_id))
         ids.add(car_id)
-        structurally_valid = True
-        if car["status"] not in STATUSES:
+        if not isinstance(car["title"], str) or not car["title"].strip():
+            errors.append(issue("invalid_field", car_id=car_id, detail="title"))
+        status_valid = isinstance(car["status"], str) and car["status"] in STATUSES
+        if not status_valid:
             errors.append(issue("invalid_status", car_id=car_id))
-        if not strings(car["depends_on"], allow_empty=True):
+        depends_valid = strings(car["depends_on"], allow_empty=True)
+        if not depends_valid:
             errors.append(issue("invalid_depends_on", car_id=car_id))
-            structurally_valid = False
-        if not strings(car["scope"]) or any(Path(p).is_absolute() or ".." in Path(p).parts for p in car["scope"]):
+        scope_valid = strings(car["scope"]) and not any(
+            Path(p).is_absolute() or ".." in Path(p).parts or not Path(p).parts for p in car["scope"]
+        )
+        if not scope_valid:
             errors.append(issue("invalid_scope", car_id=car_id))
         acceptance = car["acceptance"]
+        acceptance_valid = isinstance(acceptance, list) and bool(acceptance)
         if not isinstance(acceptance, list) or not acceptance:
             errors.append(issue("missing_acceptance", car_id=car_id))
-            structurally_valid = False
         else:
             for item in acceptance:
                 if not exact_fields(item, ACCEPTANCE_FIELDS, "invalid_acceptance", errors, car_id=car_id):
-                    structurally_valid = False
+                    acceptance_valid = False
                     continue
                 if not isinstance(item["command"], str) or not item["command"].strip() or not isinstance(item["passed"], bool):
                     errors.append(issue("invalid_acceptance", car_id=car_id))
-                    structurally_valid = False
+                    acceptance_valid = False
         if not isinstance(car["rollback"], str) or not car["rollback"].strip():
             errors.append(issue("missing_rollback", car_id=car_id))
-        if car["production_impact"] not in {"none", "dark", "canary", "release"}:
+        if not isinstance(car["production_impact"], str) or car["production_impact"] not in {"none", "dark", "canary", "release"}:
             errors.append(issue("invalid_production_impact", car_id=car_id))
-        for field in ("owner_instance_id", "reviewer_instance_id", "base_sha", "fixed_sha", "release_started_at", "user_acceptance_evidence"):
+        for field in ("base_sha", "fixed_sha", "release_started_at", "user_acceptance_evidence"):
             if car[field] is not None and (not isinstance(car[field], str) or not car[field].strip()):
                 errors.append(issue("invalid_field", car_id=car_id, detail=field))
-        if not isinstance(car["cross_module_block_count"], int) or car["cross_module_block_count"] < 0:
+        for field in ("owner_instance_id", "reviewer_instance_id"):
+            if car[field] is not None and not is_instance(car[field]):
+                errors.append(issue("invalid_instance_id", car_id=car_id, detail=field))
+        block_valid = type(car["cross_module_block_count"]) is int and car["cross_module_block_count"] >= 0
+        if not block_valid:
             errors.append(issue("invalid_block_count", car_id=car_id))
-            structurally_valid = False
-        if not isinstance(car["user_acceptance_required"], bool):
+        user_flag_valid = isinstance(car["user_acceptance_required"], bool)
+        if not user_flag_valid:
             errors.append(issue("invalid_field", car_id=car_id, detail="user_acceptance_required"))
-            structurally_valid = False
-        if not isinstance(car["status"], str):
-            structurally_valid = False
-        if structurally_valid:
+        if id_valid and status_valid and depends_valid and scope_valid and acceptance_valid and block_valid and user_flag_valid:
             valid_cars.append(car)
 
     by_id = {car["id"]: car for car in valid_cars if isinstance(car["id"], str)}
@@ -174,10 +219,10 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
         unknown = sorted(set(car["depends_on"]) - by_id.keys())
         if unknown:
             errors.append(issue("unknown_dependency", car_id=car_id, detail=",".join(unknown)))
-        if status in ACTIVE | SHA_STATUSES and not car["owner_instance_id"]:
+        if status in ACTIVE | SHA_STATUSES and not is_instance(car["owner_instance_id"]):
             errors.append(issue("owner_required", car_id=car_id))
         if status in SHA_STATUSES:
-            if not car["reviewer_instance_id"] or car["reviewer_instance_id"] == car["owner_instance_id"]:
+            if not is_instance(car["reviewer_instance_id"]) or car["reviewer_instance_id"] == car["owner_instance_id"]:
                 errors.append(issue("independent_reviewer_required", car_id=car_id))
             if not is_sha(car["base_sha"]) or not is_sha(car["fixed_sha"]):
                 errors.append(issue("exact_sha_required", car_id=car_id))
@@ -205,27 +250,32 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
                 errors.append(issue("release_start_required", car_id=car_id))
             else:
                 current = now or dt.datetime.now(dt.timezone.utc)
-                if current.astimezone(dt.timezone.utc) - started.astimezone(dt.timezone.utc) > dt.timedelta(minutes=limits["release_minutes"]):
+                elapsed = current.astimezone(dt.timezone.utc) - started.astimezone(dt.timezone.utc)
+                if elapsed < dt.timedelta(0):
+                    errors.append(issue("release_start_in_future", car_id=car_id))
+                elif elapsed > dt.timedelta(minutes=limits["release_minutes"]):
                     errors.append(issue("release_timeout", car_id=car_id))
         if car["cross_module_block_count"] >= limits["cross_module_blocks_before_reslice"] and status not in {"blocked", "cancelled"}:
             errors.append(issue("reslice_required", car_id=car_id))
         if status == "user_accepted":
-            if not car["user_acceptance_required"] or not car["user_acceptance_evidence"]:
-                errors.append(issue("user_acceptance_evidence_required", car_id=car_id))
+            errors.append(issue("user_acceptance_evidence_required", car_id=car_id))
 
-    visiting: set[str] = set()
-    visited: set[str] = set()
-    def visit(car_id: str) -> bool:
-        if car_id in visiting:
-            return True
-        if car_id in visited:
-            return False
-        visiting.add(car_id)
-        cycle = any(dep in by_id and visit(dep) for dep in by_id[car_id]["depends_on"])
-        visiting.remove(car_id)
-        visited.add(car_id)
-        return cycle
-    if any(visit(car_id) for car_id in by_id):
+    indegree = {car_id: 0 for car_id in by_id}
+    followers = {car_id: [] for car_id in by_id}
+    for car_id, car in by_id.items():
+        for dependency in car["depends_on"]:
+            if dependency in by_id:
+                indegree[car_id] += 1
+                followers[dependency].append(car_id)
+    pending = [car_id for car_id, count in indegree.items() if count == 0]
+    visited = 0
+    while pending:
+        visited += 1
+        for follower in followers[pending.pop()]:
+            indegree[follower] -= 1
+            if indegree[follower] == 0:
+                pending.append(follower)
+    if visited != len(by_id):
         errors.append(issue("dependency_cycle"))
     if sum(car["status"] in ACTIVE for car in valid_cars) > limits["writer_wip"]:
         errors.append(issue("writer_wip_exceeded"))
@@ -259,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     plan, errors = load(args.plan)
     if plan is not None:
-        errors.extend(validate(plan, args.plan.resolve().parent.parent))
+        errors.extend(validate(plan, repo_root(args.plan)))
     result: dict = {"ok": not errors, "errors": errors}
     if not errors and args.command == "ready":
         result["ready"], result["waiting"] = readiness(plan)
