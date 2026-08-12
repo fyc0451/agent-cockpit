@@ -172,6 +172,18 @@ def test_identity_reader_rejects_unknown_lifecycle_status(monkeypatch, tmp_path)
     assert mail_identity_inject.resolve_managed_identity() is None
 
 
+def test_identity_reader_rejects_legacy_record_with_retirement_timestamp(
+    monkeypatch, tmp_path,
+):
+    _, _, _, _, registry_file = _identity_fixture(monkeypatch, tmp_path)
+    value = json.loads(registry_file.read_text(encoding="utf-8"))
+    value.pop("status")
+    value["retired_at"] = "2026-08-12T00:00:00Z"
+    _secure_json(registry_file, value)
+
+    assert mail_identity_inject.resolve_managed_identity() is None
+
+
 def _legacy_identity_fixture(
     monkeypatch, tmp_path, *, schema=2, status="active", agent="codex", instance="main",
 ):
