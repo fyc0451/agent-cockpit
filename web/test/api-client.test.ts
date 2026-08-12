@@ -80,11 +80,33 @@ describe('api client（G3 错误模型）', () => {
     expect(stateKindFromError(await apiGet('/api/x').catch((e) => e))).toBe('stale')
   })
 
-  it('无 envelope / 无 meta 时按正常渲染数据', async () => {
+  it('G3 strict：裸对象（无 data/meta 键）→ ProtocolError，不透传', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => mockResponse(200, { hello: 'world' })))
-    const res = await apiGet<{ hello: string }>('/api/x')
-    expect(res.data).toEqual({ hello: 'world' })
-    expect(res.meta).toBeNull()
+    const err = await apiGet('/api/x').catch((e) => e)
+    expect(err).toBeInstanceOf(ProtocolError)
+    expect(err.code).toBe('protocol_error')
+  })
+
+  it('G3 strict：数组 / null / 非 JSON 都 → ProtocolError', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => mockResponse(200, [1, 2])))
+    expect((await apiGet('/api/x').catch((e) => e)).code).toBe('protocol_error')
+
+    vi.stubGlobal('fetch', vi.fn(async () => mockResponse(200, null)))
+    expect((await apiGet('/api/x').catch((e) => e)).code).toBe('protocol_error')
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError('Unexpected token')
+        },
+      }) as unknown as Response),
+    )
+    const err = await apiGet('/api/x').catch((e) => e)
+    expect(err).toBeInstanceOf(ProtocolError)
+    expect(err.message).toContain('JSON')
   })
 
   it('data/meta envelope 透出 meta（partial / sources 保留）', async () => {

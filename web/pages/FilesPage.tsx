@@ -5,15 +5,16 @@ import { StatusState } from '../components/StatusState'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
 import { routeHrefs } from '../app/routes'
-import { useCapability } from '../state/capabilities'
+import { projectScope, useCapability } from '../state/capabilities'
 
 /**
  * W1 文件页：files.read 默认关闭 → forbidden 整页，**不发出任何 /api/files 请求**
  * （禁止回退全局 legacy /api/files/roots|search）。server 权威值声明可用后，
  * 也只渲染占位空态，等 Workspace 文件门面 UI 接入。
  */
-function FilesBody({ workspace }: { project: Project; workspace: Workspace }) {
-  const cap = useCapability('files.read')
+function FilesBody({ project, workspace }: { project: Project; workspace: Workspace }) {
+  // W1 server caps 经由 project-scoped query meta 到达，读取 project scope
+  const cap = useCapability('files.read', projectScope(project.slug ?? ''))
 
   return (
     <>

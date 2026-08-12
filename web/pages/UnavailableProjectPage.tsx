@@ -3,7 +3,7 @@ import { PageHeader } from '../components/PageHeader'
 import { StatusState } from '../components/StatusState'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
-import { useCapability, type CapabilityKey } from '../state/capabilities'
+import { projectScope, useCapability, type CapabilityKey } from '../state/capabilities'
 
 /** project scope 下未接通能力整页：保留页面头 + forbidden 态 + 真实原因 + 文档入口 */
 export function UnavailableProjectPage({
@@ -16,7 +16,7 @@ export function UnavailableProjectPage({
   capKey: CapabilityKey
 }) {
   const { projectSlug } = useParams<{ projectSlug: string }>()
-  const cap = useCapability(capKey)
+  const cap = useCapability(capKey, projectScope(projectSlug!))
   return (
     <ProjectScope slug={projectSlug!}>
       {() => (
@@ -40,7 +40,7 @@ export function UnavailableWorkspacePage({
   capKey: CapabilityKey
 }) {
   const { projectSlug } = useParams<{ projectSlug: string }>()
-  const cap = useCapability(capKey)
+  const cap = useCapability(capKey, projectScope(projectSlug!))
   return (
     <ProjectScope slug={projectSlug!}>
       {(project) => (

@@ -30,6 +30,19 @@ describe('meta.capabilities 权威合并层（item 6）', () => {
     expect(parsed['junk']).toBeUndefined()
   })
 
+  it('server cap available=false 缺 reason → 合成稳定可读 reason（P2-9）', () => {
+    const parsed = parseServerCapabilities({
+      a: { available: false },
+      b: { available: false, reason: '' },
+      c: false,
+      d: { available: true },
+    })
+    expect(parsed['a'].reason).toBe('服务端未提供原因（fail-closed）')
+    expect(parsed['b'].reason).toBe('服务端未提供原因（fail-closed）')
+    expect(parsed['c'].reason).toBe('服务端未提供原因（fail-closed）')
+    expect(parsed['d'].reason).toBeNull()
+  })
+
   it('server meta.capabilities 标记 files.read=false → 页面保持关闭', async () => {
     stubWithProjectCaps({ 'files.read': false })
     const { container } = renderApp('/projects/p1/workspaces/w1/files')
@@ -38,15 +51,16 @@ describe('meta.capabilities 权威合并层（item 6）', () => {
     })
   })
 
-  it('server 声明 terminal.pty 可用 → 控制按钮放开、disconnected banner 消失', async () => {
+  it('server 声明 terminal.pty 可用 → banner 转为可用提示，但控制按钮仍 disabled（terminal.control.ui 恒 false，P1-4）', async () => {
     stubWithProjectCaps({ 'terminal.pty': { available: true, reason: null } })
     const { container } = renderApp('/projects/p1/workspaces/w1/terminal')
-    const interrupt = await screen.findByRole('button', { name: '中断' })
-    await waitFor(() => {
-      expect(interrupt).not.toHaveAttribute('aria-disabled')
-    })
-    expect(screen.getByRole('button', { name: '重连' })).not.toHaveAttribute('aria-disabled')
+    // loading 期间 disconnected banner 也不存在，必须先等可用 banner 出现
+    await screen.findByText(/已由服务端 capability 标记为可用/)
     expect(container.querySelector('[data-state="disconnected"]')).not.toBeInTheDocument()
+    // W1 UI 未接线：server cap=true 也不得放开按钮
+    for (const name of ['中断', '重连', '重启']) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('aria-disabled', 'true')
+    }
   })
 
   it('server 未提及的 key 保持 fail-closed', async () => {

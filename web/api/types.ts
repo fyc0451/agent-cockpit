@@ -20,6 +20,7 @@ export interface Workspace {
   id?: string
   name?: string
   location?: string
+  runtime?: string
   branch?: string
   status?: string
 }

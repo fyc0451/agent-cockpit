@@ -1,3 +1,4 @@
+import { useId } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import type { Project, Workspace } from '../api/types'
 import { routes } from '../app/routes'
@@ -6,7 +7,7 @@ import { PageHeader } from '../components/PageHeader'
 import { Tag, toneForLocation, toneForStatus } from '../components/Tag'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
-import { useCapability, type CapabilityKey } from '../state/capabilities'
+import { projectScope, useCapability, type CapabilityKey } from '../state/capabilities'
 
 interface CardDef {
   label: string
@@ -33,15 +34,29 @@ function NavCard({
   projectId: string
   workspaceId: string
 }) {
-  const cap = useCapability(card.capKey ?? 'browser')
+  const descId = useId()
+  const cap = useCapability(card.capKey ?? 'browser', projectScope(projectId))
   const enabled = card.capKey == null || cap.available
   if (!enabled || card.build == null) {
     const reason = cap.reason ?? '未接通'
+    // 可聚焦 + aria-disabled + aria-describedby 关联可见 reason 节点；Enter/Space/click 拦截
     return (
-      <div className="card card--disabled" title={reason} aria-disabled="true">
+      <div
+        className="card card--disabled"
+        title={reason}
+        aria-disabled="true"
+        aria-describedby={descId}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            e.stopPropagation()
+          }
+        }}
+      >
         <span className="card-icon" aria-hidden="true">{card.icon}</span>
         <span className="card-label">{card.label}</span>
-        <span className="card-reason ellipsis">{reason}</span>
+        <span id={descId} className="card-reason ellipsis">{reason}</span>
       </div>
     )
   }
@@ -54,7 +69,7 @@ function NavCard({
 }
 
 function WorkspaceBody({ project, workspace }: { project: Project; workspace: Workspace }) {
-  const delCap = useCapability('workspace.delete')
+  const delCap = useCapability('workspace.delete', projectScope(project.slug ?? ''))
   const projectId = project.slug ?? ''
   const workspaceId = workspace.id ?? ''
 

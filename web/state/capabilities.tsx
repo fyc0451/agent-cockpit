@@ -1,7 +1,10 @@
 // Capability 权威合并层（本车核心红线）：
 // - 静态 registry 是 fail-closed fallback（全部 available=false + 真实 reason）；
-// - 任何 query 返回的 meta.capabilities 是权威值，经 useReportCapabilities 推入
-//   CapabilitiesProvider store；读取顺序：server 值 → 静态 fallback → 未声明 fail-closed。
+// - 任何 query 返回的 meta.capabilities 是权威值，按 scope key 存储：
+//   'global' / 'p:<slug>' / 'w:<slug>/<wid>'。hooks 上报时携带所属 scope（从 query key 取），
+//   同一 scope 的 snapshot 为 replace 语义；离开 scope 即失效（读取只查当前 scope），
+//   不存在跨 project 泄漏与全局永久 merge。
+// - useCapability(key, scope) 读取顺序：当前 scope 的 server 值 → 静态 fail-closed fallback。
 // 页面渲染只能用 useCapability/capability 读，不得按路径/颜色猜能力。
 
 import {
@@ -65,6 +68,11 @@ const staticRegistry = {
     reason: 'PTY 未接通：W1 仅终端外壳，不写任何假输出',
     docsRoute: DOCTOR,
   },
+  'terminal.control.ui': {
+    available: false,
+    reason: '终端控制 UI 未接线（W1 恒 disabled，不发 POST/WebSocket）',
+    docsRoute: DOCTOR,
+  },
   'search.server': {
     available: false,
     reason: '服务端搜索未接通，仅支持页面导航',
@@ -118,18 +126,58 @@ const FALLBACK_CLOSED: Capability = {
   docsRoute: DOCTOR,
 }
 
-/** 宽容解析 meta.capabilities：支持 boolean 与 { available, reason?, docsRoute? } 两种形态 */
+// ---------- scope ----------
+
+export type CapabilityScope =
+  | { kind: 'global' }
+  | { kind: 'project'; slug: string }
+  | { kind: 'workspace'; slug: string; workspaceId: string }
+
+export const GLOBAL_SCOPE: CapabilityScope = { kind: 'global' }
+
+export function projectScope(slug: string): CapabilityScope {
+  return { kind: 'project', slug }
+}
+
+export function workspaceScope(slug: string, workspaceId: string): CapabilityScope {
+  return { kind: 'workspace', slug, workspaceId }
+}
+
+export function scopeKey(scope: CapabilityScope): string {
+  switch (scope.kind) {
+    case 'global':
+      return 'global'
+    case 'project':
+      return `p:${scope.slug}`
+    case 'workspace':
+      return `w:${scope.slug}/${scope.workspaceId}`
+  }
+}
+
+// ---------- server 值解析 ----------
+
+const SYNTHESIZED_REASON = '服务端未提供原因（fail-closed）'
+
+/** 宽容解析 meta.capabilities：boolean / { available, reason?, docsRoute? }；
+ *  available=false 缺 reason 时合成稳定可读 reason，不得为 null */
 export function parseServerCapabilities(raw: unknown): Record<string, Capability> {
   if (!raw || typeof raw !== 'object') return {}
   const out: Record<string, Capability> = {}
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof v === 'boolean') {
-      out[k] = { available: v, reason: v ? null : '服务端标记该能力不可用' }
+      out[k] = { available: v, reason: v ? null : SYNTHESIZED_REASON }
     } else if (v && typeof v === 'object') {
       const o = v as { available?: unknown; reason?: unknown; docsRoute?: unknown }
+      const available = o.available === true
+      const reason =
+        typeof o.reason === 'string' && o.reason.trim() !== ''
+          ? o.reason
+          : available
+            ? null
+            : SYNTHESIZED_REASON
       out[k] = {
-        available: o.available === true,
-        reason: typeof o.reason === 'string' ? o.reason : null,
+        available,
+        reason,
         docsRoute: typeof o.docsRoute === 'string' ? o.docsRoute : undefined,
       }
     }
@@ -137,45 +185,59 @@ export function parseServerCapabilities(raw: unknown): Record<string, Capability
   return out
 }
 
+// ---------- provider ----------
+
 interface CapabilitiesStore {
-  server: Record<string, Capability>
-  merge: (raw: unknown) => void
-  get: (key: string) => Capability
+  scopes: Record<string, Record<string, Capability>>
+  report: (scope: CapabilityScope, raw: unknown) => void
+  get: (key: string, scope: CapabilityScope) => Capability
 }
 
 const CapabilitiesContext = createContext<CapabilitiesStore | null>(null)
 
 export function CapabilitiesProvider({ children }: { children: ReactNode }) {
-  const [server, setServer] = useState<Record<string, Capability>>({})
+  const [scopes, setScopes] = useState<Record<string, Record<string, Capability>>>({})
 
-  const merge = useCallback((raw: unknown) => {
+  // 同一 scope 的 snapshot 为 replace 语义（仅当该 meta 携带 capabilities 字段时）；
+  // 不跨 scope merge——离开 scope 即失效
+  const report = useCallback((scope: CapabilityScope, raw: unknown) => {
     const parsed = parseServerCapabilities(raw)
     if (Object.keys(parsed).length === 0) return
-    setServer((prev) => ({ ...prev, ...parsed }))
+    const key = scopeKey(scope)
+    setScopes((prev) => ({ ...prev, [key]: parsed }))
   }, [])
 
   const get = useCallback(
-    (key: string): Capability => server[key] ?? (staticRegistry as Record<string, Capability>)[key] ?? FALLBACK_CLOSED,
-    [server],
+    (key: string, scope: CapabilityScope): Capability =>
+      scopes[scopeKey(scope)]?.[key] ??
+      (staticRegistry as Record<string, Capability>)[key] ??
+      FALLBACK_CLOSED,
+    [scopes],
   )
 
-  const value = useMemo<CapabilitiesStore>(() => ({ server, merge, get }), [server, merge, get])
+  const value = useMemo<CapabilitiesStore>(() => ({ scopes, report, get }), [scopes, report, get])
   return <CapabilitiesContext.Provider value={value}>{children}</CapabilitiesContext.Provider>
 }
 
-/** React 读取入口：server 权威值 → 静态 fail-closed → 未声明 fail-closed */
-export function useCapability(key: CapabilityKey): Capability {
+/** React 读取入口：当前 scope 的 server 值 → 静态 fail-closed → 未声明 fail-closed */
+export function useCapability(key: CapabilityKey, scope: CapabilityScope = GLOBAL_SCOPE): Capability {
   const ctx = useContext(CapabilitiesContext)
   // provider 外（如孤立组件单测）回退静态 fail-closed
   if (!ctx) return capability(key)
-  return ctx.get(key)
+  return ctx.get(key, scope)
 }
 
-/** API hooks 在拿到 meta 时调用：把 meta.capabilities（权威值）推入 provider store */
-export function useReportCapabilities(meta: ResponseMeta | null | undefined): void {
+/** API hooks 在拿到 meta 时调用：把 meta.capabilities（权威值）按所属 scope 推入 store */
+export function useReportCapabilities(
+  meta: ResponseMeta | null | undefined,
+  scope: CapabilityScope = GLOBAL_SCOPE,
+): void {
   const ctx = useContext(CapabilitiesContext)
-  const merge = ctx?.merge
+  const report = ctx?.report
+  const key = scopeKey(scope)
   useEffect(() => {
-    if (merge && meta?.capabilities) merge(meta.capabilities)
-  }, [merge, meta])
+    if (report && meta?.capabilities) report(scope, meta.capabilities)
+    // scope key 变化即换 snapshot 目标；report 引用稳定
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [report, key, meta])
 }

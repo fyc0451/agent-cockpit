@@ -42,19 +42,35 @@ export function OverviewPage() {
           }
         />
       ) : null}
-      {items.length === 0 ? (
+      {attention.isError ? (
+        // attention 源失败：区块级 partial/degraded，不得显示 empty/0 假成功
         <StatusState
-          kind="empty"
-          title="还没有可汇总的工作"
-          description="连接项目与 Runtime 后，待决定事项会聚合到这里。"
-          children={
-            <div className="state-actions">
-              <Link className="btn btn--primary" to={routes.settings()}>
-                开始设置
-              </Link>
-            </div>
-          }
+          kind="degraded"
+          title="Attention 摘要不可用"
+          description="该来源暂不可用，以上列表不完整或暂缺。"
         />
+      ) : items.length === 0 ? (
+        // empty 只在真无数据（无 degraded）时出现
+        degraded ? (
+          <StatusState
+            kind="degraded"
+            title="部分数据不可用"
+            description="部分来源失败，当前没有可展示的完整数据。"
+          />
+        ) : (
+          <StatusState
+            kind="empty"
+            title="还没有可汇总的工作"
+            description="连接项目与 Runtime 后，待决定事项会聚合到这里。"
+            children={
+              <div className="state-actions">
+                <Link className="btn btn--primary" to={routes.settings()}>
+                  开始设置
+                </Link>
+              </div>
+            }
+          />
+        )
       ) : (
         <ul className="list">
           {items.map((item, i) => (

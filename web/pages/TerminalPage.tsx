@@ -9,7 +9,7 @@ import { PageHeader } from '../components/PageHeader'
 import { StatusState } from '../components/StatusState'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
-import { useCapability } from '../state/capabilities'
+import { capability, projectScope, useCapability } from '../state/capabilities'
 
 function TerminalSurface() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -47,10 +47,16 @@ function TerminalSurface() {
   return <div ref={containerRef} className="terminal-surface" data-testid="terminal-surface" />
 }
 
-function TerminalBody({ workspace }: { project: Project; workspace: Workspace }) {
-  const ptyCap = useCapability('terminal.pty')
+function TerminalBody({ project, workspace }: { project: Project; workspace: Workspace }) {
+  // 分层：terminal.pty（server 能力，project scope）× terminal.control.ui（前端接线，W1 恒 false，
+  // 不走 server 权威——本车按钮恒 disabled，不发 POST/WebSocket）
+  const ptyCap = useCapability('terminal.pty', projectScope(project.slug ?? ''))
+  const controlUi = capability('terminal.control.ui')
+  const controlsEnabled = ptyCap.available && controlUi.available
   const btnTitle = (action: string) =>
-    ptyCap.available ? undefined : `${ptyCap.reason ?? 'PTY 未接通'}（${action}不可用）`
+    controlsEnabled
+      ? undefined
+      : `${ptyCap.available ? controlUi.reason : (ptyCap.reason ?? 'PTY 未接通')}（${action}不可用）`
 
   return (
     <>
@@ -59,13 +65,13 @@ function TerminalBody({ workspace }: { project: Project; workspace: Workspace })
         sub={workspace.name ?? workspace.id}
         actions={
           <>
-            <Button variant="secondary" disabled={!ptyCap.available} title={btnTitle('中断')}>
+            <Button variant="secondary" disabled={!controlsEnabled} title={btnTitle('中断')}>
               中断
             </Button>
-            <Button variant="secondary" disabled={!ptyCap.available} title={btnTitle('重连')}>
+            <Button variant="secondary" disabled={!controlsEnabled} title={btnTitle('重连')}>
               重连
             </Button>
-            <Button variant="danger" disabled={!ptyCap.available} title={btnTitle('重启')}>
+            <Button variant="danger" disabled={!controlsEnabled} title={btnTitle('重启')}>
               重启
             </Button>
           </>

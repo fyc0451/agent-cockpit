@@ -1,6 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
 import { api, ApiError } from './client'
-import { useReportCapabilities } from '../state/capabilities'
+import {
+  GLOBAL_SCOPE,
+  projectScope,
+  useReportCapabilities,
+  workspaceScope,
+  type CapabilityScope,
+} from '../state/capabilities'
 import type { ApiResult } from './client'
 import type {
   Attention,
@@ -19,9 +25,9 @@ function shouldRetry(failureCount: number, error: unknown): boolean {
 
 const retry = { retry: shouldRetry }
 
-/** meta.capabilities 是能力权威值：每个 hook 拿到 meta 后推入 CapabilitiesProvider */
-function useMeta<T>(q: { data?: ApiResult<T> }) {
-  useReportCapabilities(q.data?.meta)
+/** meta.capabilities 是能力权威值：每个 hook 拿到 meta 后按所属 scope（从 query key 取）上报 */
+function useMeta<T>(q: { data?: ApiResult<T> }, scope: CapabilityScope = GLOBAL_SCOPE) {
+  useReportCapabilities(q.data?.meta, scope)
 }
 
 export function useOverview() {
@@ -54,7 +60,7 @@ export function useProject(slug: string | null) {
     staleTime: 30_000,
     ...retry,
   })
-  useMeta(q)
+  useMeta(q, slug ? projectScope(slug) : GLOBAL_SCOPE)
   return q
 }
 
@@ -66,7 +72,7 @@ export function useWorkbench(slug: string | null) {
     staleTime: 15_000,
     ...retry,
   })
-  useMeta(q)
+  useMeta(q, slug ? projectScope(slug) : GLOBAL_SCOPE)
   return q
 }
 
@@ -115,6 +121,13 @@ export function useTasks(filter: { project?: string; workspace?: string }) {
     staleTime: 10_000,
     ...retry,
   })
-  useMeta(q)
+  useMeta(
+    q,
+    filter.project && filter.workspace
+      ? workspaceScope(filter.project, filter.workspace)
+      : filter.project
+        ? projectScope(filter.project)
+        : GLOBAL_SCOPE,
+  )
   return q
 }

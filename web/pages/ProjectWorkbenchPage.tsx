@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { useParams } from 'react-router-dom'
 import { useWorkbench } from '../api/hooks'
+import { degradedSources } from '../api/normalize'
 import type { Project } from '../api/types'
 import { PageHeader } from '../components/PageHeader'
 import { QueryErrorState } from '../components/QueryErrorState'
@@ -50,9 +51,21 @@ function WorkbenchBody({ project }: { project: Project }) {
   if (q.isError) return <QueryErrorState error={q.error} onRetry={() => q.refetch()} />
 
   const wb = q.data?.data ?? {}
+  // meta.sources 含非 available → 区块级 degraded，不得忽略
+  const badSources = degradedSources(q.data?.meta)
 
   return (
     <div className="stack">
+      {badSources.length > 0 ? (
+        <StatusState
+          kind="degraded"
+          banner
+          title="部分数据源不可用"
+          description={badSources
+            .map((s) => `${s.name ?? 'unknown'}：${s.reason ?? s.status ?? '不可用'}`)
+            .join('；')}
+        />
+      ) : null}
       <Section
         title="Agents"
         value={wb.agents}

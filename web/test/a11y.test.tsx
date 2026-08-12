@@ -4,14 +4,20 @@ import { Button } from '../components/Button'
 import { renderApp, stubDefaultFetch } from './helpers'
 
 describe('A11y（item 7）', () => {
-  it('skip link 指向 #main-content，主内容区存在且 tabindex=-1', () => {
+  it('skip link（button 形态）聚焦主内容，不改写业务 hash', async () => {
     stubDefaultFetch()
+    const user = userEvent.setup()
     const { container } = renderApp('/overview')
-    const skip = screen.getByRole('link', { name: '跳到主内容' })
-    expect(skip).toHaveAttribute('href', '#main-content')
+    const skip = screen.getByRole('button', { name: '跳到主内容' })
+    // 不是 anchor——HashRouter 下 href="#main-content" 会改写业务 hash
+    expect(skip.tagName).toBe('BUTTON')
+    await user.click(skip)
     const main = container.querySelector('#main-content')
     expect(main).not.toBeNull()
     expect(main).toHaveAttribute('tabindex', '-1')
+    expect(document.activeElement).toBe(main)
+    // 页面仍停留在 overview（URL/路由未被改写）
+    expect(await screen.findByText('需要你处理', { selector: '.page-title' })).toBeInTheDocument()
   })
 
   it('settings tabs：roving tabindex + ArrowRight/Home/End（激活跟随焦点）', async () => {
@@ -48,9 +54,9 @@ describe('A11y（item 7）', () => {
     expect(doctor).toHaveFocus()
   })
 
-  it('aria-disabled 按钮可聚焦、读屏可读原因、激活无效', async () => {
+  it('aria-disabled 按钮可聚焦、aria-describedby 关联 reason 节点、激活无效', async () => {
     const onClick = vi.fn()
-    render(
+    const { container } = render(
       <Button disabled title="Workspace 删除未开放（W1 只读骨架）" onClick={onClick}>
         删除
       </Button>,
@@ -58,6 +64,12 @@ describe('A11y（item 7）', () => {
     const btn = screen.getByRole('button', { name: '删除' })
     expect(btn).toHaveAttribute('aria-disabled', 'true')
     expect(btn).toHaveAttribute('title', 'Workspace 删除未开放（W1 只读骨架）')
+    // reason 不只靠 title：aria-describedby 关联的节点存在且含 reason 文本
+    const descId = btn.getAttribute('aria-describedby')
+    expect(descId).toBeTruthy()
+    const desc = container.querySelector(`#${CSS.escape(descId!)}`)
+    expect(desc).not.toBeNull()
+    expect(desc?.textContent).toContain('Workspace 删除未开放')
     ;(btn as HTMLElement).focus()
     expect(btn).toHaveFocus()
 

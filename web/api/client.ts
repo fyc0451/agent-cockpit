@@ -85,10 +85,11 @@ export async function apiGet<T>(path: string): Promise<ApiResult<T>> {
   }
 
   let body: unknown = null
+  let jsonOk = true
   try {
     body = await res.json()
   } catch {
-    body = null
+    jsonOk = false
   }
 
   if (isObject(body) && 'error' in body && (body as ErrorEnvelope).error) {
@@ -112,19 +113,24 @@ export async function apiGet<T>(path: string): Promise<ApiResult<T>> {
     })
   }
 
-  if (isObject(body) && ('data' in body || 'meta' in body)) {
-    // envelope 严格校验：data/meta 出现任一键，两者就都必须存在
-    if (!('data' in body)) {
-      throw new ProtocolError('响应 envelope 缺少 data 键', { status: res.status })
-    }
-    if (!('meta' in body)) {
-      throw new ProtocolError('响应 envelope 缺少 meta 键', { status: res.status })
-    }
-    const env = body as DataEnvelope<T>
-    return { data: env.data as T, meta: env.meta ?? null }
+  // G3 严格校验（无 legacy allowlist）：2xx 必须是完整 { data, meta } envelope
+  if (!jsonOk) {
+    throw new ProtocolError('响应不是合法 JSON', { status: res.status })
   }
-  // legacy 容忍路径：完全不含 data/meta 键的裸响应（非 envelope），整个 body 按 data 透传
-  return { data: body as T, meta: null }
+  if (!isObject(body) || Array.isArray(body)) {
+    throw new ProtocolError('响应不是 G3 envelope（裸 body 不允许透传）', { status: res.status })
+  }
+  if (!('data' in body) && !('meta' in body)) {
+    throw new ProtocolError('响应不是 G3 envelope（缺 data 与 meta）', { status: res.status })
+  }
+  if (!('data' in body)) {
+    throw new ProtocolError('响应 envelope 缺少 data 键', { status: res.status })
+  }
+  if (!('meta' in body)) {
+    throw new ProtocolError('响应 envelope 缺少 meta 键', { status: res.status })
+  }
+  const env = body as DataEnvelope<T>
+  return { data: env.data as T, meta: env.meta ?? null }
 }
 
 export const api = { get: apiGet }

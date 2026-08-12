@@ -13,10 +13,12 @@ export const projectP1: Project = {
   ],
 }
 
+/** 完整 G3 聚合元数据（data+meta+sources/capabilities） */
 export const metaOk = {
   request_id: 'req-test-1',
   generated_at: '2026-08-12T00:00:00Z',
   sources: [{ name: 'herdr', status: 'available', observed_at: '2026-08-12T00:00:00Z', reason: null }],
+  capabilities: {},
 }
 
 export const overviewPayload = {

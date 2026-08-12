@@ -25,11 +25,17 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [])
 
+  const focusMain = useCallback(() => {
+    // 不用 href="#main-content"：HashRouter 下会改写业务 hash。
+    // 拦截 click 直接聚焦主内容（main 已有 tabIndex=-1），URL 保持不变。
+    document.getElementById('main-content')?.focus()
+  }, [])
+
   return (
     <div className="app-shell">
-      <a href="#main-content" className="skip-link">
+      <button type="button" className="skip-link" onClick={focusMain}>
         跳到主内容
-      </a>
+      </button>
       <Rail />
       <div className="main">
         <TopBar

@@ -21,5 +21,7 @@ export default defineConfig({
     globals: true,
     setupFiles: './test/setup.ts',
     css: false,
+    // e2e/ 是 Playwright 规格，不属于 Vitest
+    exclude: ['e2e/**', 'node_modules/**', 'dist/**'],
   },
 })

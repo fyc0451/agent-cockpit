@@ -1,4 +1,9 @@
-import type { Attention, AttentionItem, ResponseMeta, SourceMeta } from './types'
+import type { Attention, AttentionItem, ResponseMeta, SourceMeta, Workspace } from './types'
+
+/** remote 判定：workspace 载荷的 location/runtime 字段 */
+export function isRemoteWorkspace(w: Workspace): boolean {
+  return (w.location ?? w.runtime ?? '').toLowerCase() === 'remote'
+}
 
 /** 宽容提取 attention 列表：支持 {items:[...]}、直接数组、overview.attention 内嵌 */
 export function attentionItems(attention: Attention | AttentionItem[] | null | undefined): AttentionItem[] {

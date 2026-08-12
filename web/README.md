@@ -11,6 +11,7 @@ npm --prefix web install
 npm --prefix web run dev      # vite dev，/api 代理到 http://127.0.0.1:18790（生产用相对路径）
 npm --prefix web run build    # tsc --noEmit && vite build → web/dist（base: './'）
 npm --prefix web test         # vitest（jsdom + testing-library）
+npm --prefix web run test:e2e # playwright + axe（vite preview 起静态服务，/api 全部 page.route 拦截，不接真实后端）
 ```
 
 ## 目录
@@ -33,11 +34,13 @@ web/
 
 `state/capabilities.tsx` 是能力权威合并层：静态 registry 全部 fail-closed
 （`available=false` + 真实 reason），任何 query 返回的 `meta.capabilities` 经
-`useReportCapabilities` 推入 `CapabilitiesProvider` 后是权威值；读取顺序为
-server 值 → 静态 fallback → 未声明 fail-closed。React 组件用 `useCapability(key)` 读，
+`useReportCapabilities(meta, scope)` 按 scope key（`global` / `p:<slug>` / `w:<slug>/<wid>`，
+从 query key 取）推入 `CapabilitiesProvider`；同 scope snapshot 为 replace 语义，
+离开 scope 即失效（无跨 project 泄漏）。读取顺序为当前 scope 的 server 值 →
+静态 fallback → 未声明 fail-closed。React 组件用 `useCapability(key, scope)` 读，
 不得按路径/颜色猜。`available=false` 时整页或区块渲染 forbidden/unavailable 状态 +
-真实原因 + 文档入口；写按钮一律 `aria-disabled` + title 原因（可聚焦、激活无效）。
-W1 没有真写操作，全部禁用。
+真实原因 + 文档入口；写按钮一律 `aria-disabled` + `aria-describedby` reason
+（可聚焦、激活无效）。W1 没有真写操作，全部禁用。
 
 ## 深链合同（G1）
 
