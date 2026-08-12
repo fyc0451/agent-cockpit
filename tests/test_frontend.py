@@ -1936,7 +1936,9 @@ def test_terminal_loading_waits_for_tui_quiet_period_and_browser_paint():
     )[0]
     assert "if(!binary){" in websocket
     assert "if(!binary&&awaitingReplay)" not in websocket
-    assert "inst.replayComplete=true;settleTermLoading(id)" in websocket
+    assert "inst.replayComplete=true" in websocket
+    assert "armTermInstanceInputGate(id,300)" in websocket
+    assert "settleTermLoading(id)" in websocket
     pump = js.split("function pumpTermRender(id){", 1)[1].split(
         "function queueTermRender", 1
     )[0]
@@ -3644,9 +3646,27 @@ def test_theme_switch_inplace_single_herdr_notify_and_input_gate():
     websocket = js.split("function openTermWS(id,xterm,replay){", 1)[1].split(
         "function showTermInstance", 1
     )[0]
-    assert "armTermInputGate" not in websocket
+    # 回放路径允许短门禁；主题切换门禁仍只在 setTheme/overlay，不在默认 sendAll 广播。
+    assert "if(replay)armTermInstanceInputGate(id,400)" in websocket
+    assert "armTermInstanceInputGate(id,300)" in websocket
+    assert "armTermInputGate(" not in websocket
+    # 重连只加输入门禁，不改写可能包含合法启动命令的 pending queue。
+    assert "pendingInput=" not in websocket
     assert "isTermMouseReport" in js
     assert "isTermProtocolReply" in js
+
+
+def test_terminal_replay_input_gate_is_scoped_to_its_instance():
+    gate = HTML.split("function armTermInstanceInputGate(id,ms){", 1)[1].split(
+        "function termUserInputBlocked", 1
+    )[0]
+    blocked = HTML.split("function termUserInputBlocked(id){", 1)[1].split(
+        "function flushTermInput", 1
+    )[0]
+    assert "const inst=TERM_INSTANCES[id]" in gate
+    assert "inst.inputGateUntil" in gate
+    assert "inst.inputGateUntil" in blocked
+    assert "inputGateUntil:0" in HTML
 
 
 def test_layout_quick_pair_and_empty_shell_controls_are_separated():

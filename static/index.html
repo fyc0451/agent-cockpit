@@ -4330,11 +4330,17 @@ function armTermInputGate(ms=1200){
   const until=performance.now()+Math.max(0,Number(ms)||0);
   if(until>TERM_INPUT_GATE_UNTIL)TERM_INPUT_GATE_UNTIL=until;
 }
+function armTermInstanceInputGate(id,ms){
+  const inst=TERM_INSTANCES[id];if(!inst)return;
+  const until=performance.now()+Math.max(0,Number(ms)||0);
+  if(until>(inst.inputGateUntil||0))inst.inputGateUntil=until;
+}
 function termUserInputBlocked(id){
   if(TERM_THEME_OVERLAYING)return true;
   if(performance.now()<TERM_INPUT_GATE_UNTIL)return true;
   const inst=TERM_INSTANCES[id];
   if(!inst||inst.closing||inst.initializing)return true;
+  if(performance.now()<(inst.inputGateUntil||0))return true;
   if(!inst.replayComplete||inst.loadingEl||inst.loadingWaitForTui)return true;
   return false;
 }
@@ -4628,6 +4634,8 @@ function openTermWS(id,xterm,replay){
   let awaitingReplay=!!replay;
   ws.onopen=()=>{
     const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws)inst.reconnectDelay=1000;
+    // 回放/重连窗口：再挡一会用户输入，避免「假死后点击全部灌进 TUI」。
+    if(replay)armTermInstanceInputGate(id,400);
     // 首次挂载时 Herdr 命令还在输入队列里，不能先把 Mode 2031 写给登录 shell。
     // 重连挂到已运行的 TUI 时才通知；两种情况都会更新 OSC 10/11 回复色。
     sendTermColorScheme(id,ws,!replay);
@@ -4645,7 +4653,13 @@ function openTermWS(id,xterm,replay){
         const control=JSON.parse(ev.data);
         if(control?.type==='replay_complete'){
           awaitingReplay=false;
-          const inst=TERM_INSTANCES[id];if(inst&&inst.ws===ws){inst.replayComplete=true;settleTermLoading(id)}
+          const inst=TERM_INSTANCES[id];
+          if(inst&&inst.ws===ws){
+            inst.replayComplete=true;
+            // 回放刚结束、TUI 可能仍在吃历史/重绘：再挡短输入，防连点重放。
+            armTermInstanceInputGate(id,300);
+            settleTermLoading(id);
+          }
           return;
         }
       }catch(e){}
@@ -4789,7 +4803,7 @@ function termMount(id){
   }
   TERM_INSTANCES[id]={xterm,fit,ws:null,el,webgl:null,initializing:true,reconnectDelay:1000,reconnectTimer:null,closing:false,pendingInput:'',pendingNotice:'',resizeObserver:null,
     historyChunks:[],historyBytes:0,historyHiddenBytes:0,historyLoading:false,pendingTheme:null,
-    renderQueue:[],rendering:false,renderGeneration:0,replayComplete:false,loadingEl,loadingWaitForTui:false,
+    renderQueue:[],rendering:false,renderGeneration:0,replayComplete:false,inputGateUntil:0,loadingEl,loadingWaitForTui:false,
     loadingLastOutputAt:performance.now(),loadingTimer:null,loadingDeadlineTimer:null,loadingPaintPending:false};
   // 输入/resize 永远发往该终端"当前"的 ws(重连后自动指向新 ws)
   // loading/主题重绘期用户输入丢弃，不入队；xterm 协议应答单独放行。
