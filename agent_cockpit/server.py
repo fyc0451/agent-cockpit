@@ -61,6 +61,11 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, f
 
 ROOT_DIR = resolve_artifact_root()
 _next_instance_lock_owner: instance_lock.InstanceLock | None = None
+if next_profile.enabled():
+    try:
+        _next_instance_lock_owner = instance_lock.require_registered_owner()
+    except instance_lock.LockError as exc:
+        raise RuntimeError("next_instance_lock_required") from exc
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"

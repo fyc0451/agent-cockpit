@@ -20,7 +20,12 @@ if __name__ == "__main__":
         raise SystemExit(2) from exc
 
     if next_profile.enabled():
-        from agent_cockpit.instance_lock import LOCK_FD_ENV, InstanceLock, LockError
+        from agent_cockpit.instance_lock import (
+            LOCK_FD_ENV,
+            InstanceLock,
+            LockError,
+            register_adopted_owner,
+        )
 
         try:
             raw_lock_fd = os.environ.pop(LOCK_FD_ENV, None)
@@ -34,6 +39,7 @@ if __name__ == "__main__":
             _next_instance_lock_owner = InstanceLock.adopt_inherited(
                 os.environ, int(raw_lock_fd),
             )
+            register_adopted_owner(_next_instance_lock_owner)
         except LockError as exc:
             print(str(exc), file=sys.stderr)
             raise SystemExit(2) from exc

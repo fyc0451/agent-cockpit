@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -277,6 +278,143 @@ def test_production_lifespan_does_not_require_next_owner(
     _stub_lifespan_dependencies(monkeypatch, server)
     with TestClient(server.app):
         pass
+
+
+def test_direct_uvicorn_lifespan_off_fails_before_listening(tmp_path: Path) -> None:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(ROOT),
+        "HOME": str(tmp_path),
+        "TMPDIR": str(tmp_path),
+        "COCKPIT_NEXT_PROFILE": "1",
+    }
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "uvicorn", "agent_cockpit.server:app",
+            "--lifespan", "off", "--host", "127.0.0.1", "--port", "0",
+        ],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=10,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "next_instance_lock_required" in output
+    assert "Started server process" not in output
+    assert "Uvicorn running" not in output
+
+
+def test_owner_registry_rejects_invalid_and_replacement(tmp_path: Path) -> None:
+    values = profile(tmp_path)
+    launcher = instance_lock.InstanceLock(values).acquire()
+    with pytest.raises(instance_lock.LockError, match="lock_owner_invalid"):
+        instance_lock.register_adopted_owner(instance_lock.InstanceLock(values))
+    assert launcher.fd is not None
+    fd, launcher.fd = launcher.fd, None
+    owner = instance_lock.InstanceLock.adopt_inherited(values, fd)
+    previous = instance_lock._adopted_owner
+    instance_lock._adopted_owner = None
+    try:
+        instance_lock.register_adopted_owner(owner)
+        assert instance_lock.require_registered_owner() is owner
+        replacement_values = profile(tmp_path, "replacement")
+        replacement_launcher = instance_lock.InstanceLock(replacement_values).acquire()
+        assert replacement_launcher.fd is not None
+        replacement_fd, replacement_launcher.fd = replacement_launcher.fd, None
+        replacement = instance_lock.InstanceLock.adopt_inherited(
+            replacement_values, replacement_fd,
+        )
+        try:
+            with pytest.raises(
+                instance_lock.LockError, match="lock_owner_already_registered",
+            ):
+                instance_lock.register_adopted_owner(replacement)
+        finally:
+            replacement.release()
+    finally:
+        instance_lock._adopted_owner = previous
+        owner.release()
+
+
+def test_launcher_exec_server_imports_and_binds_with_adopted_owner(
+    tmp_path: Path,
+) -> None:
+    gate_spec = importlib.util.spec_from_file_location("next_dev", NEXT_DEV)
+    assert gate_spec and gate_spec.loader
+    gate = importlib.util.module_from_spec(gate_spec)
+    gate_spec.loader.exec_module(gate)
+    values = gate.expected(tmp_path)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as port_probe:
+        port_probe.bind(("127.0.0.1", 0))
+        port = port_probe.getsockname()[1]
+    values["COCKPIT_PORT"] = str(port)
+    Path(values["COCKPIT_DATA_DIR"]).mkdir(parents=True)
+    Path(values["COCKPIT_CONFIG_DIR"]).mkdir(parents=True)
+    env_file = tmp_path / "next.env"
+    env_file.write_text("ignored=1\n", encoding="ascii")
+    child_code = """
+import os, runpy
+from agent_cockpit import next_profile
+next_profile.validate_server_environment = lambda *_args, **_kwargs: None
+runpy.run_path(os.environ["NEXT_SERVER"], run_name="__main__")
+"""
+    launcher_code = """
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location(
+    "next_dev_handoff", os.environ["NEXT_DEV"],
+)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+values = json.loads(os.environ["LOCK_PROFILE"])
+gate.validate = lambda *_args, **_kwargs: values
+gate._unit_not_installed = lambda: True
+gate._port_available = lambda *_args: True
+gate.ensure_runtime_roots = lambda _values: None
+gate.Path.is_file = lambda _path: True
+real_execve = os.execve
+def exec_server(_executable, _argv, environment):
+    real_execve(
+        sys.executable,
+        [sys.executable, "-c", os.environ["CHILD_CODE"]],
+        environment,
+    )
+gate.os.execve = exec_server
+raise SystemExit(gate.main(["start", "--env-file", os.environ["LOCK_ENV_FILE"]]))
+"""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(ROOT),
+        "HOME": str(tmp_path),
+        "TMPDIR": str(tmp_path),
+        "LOCK_PROFILE": json.dumps(values),
+        "LOCK_ENV_FILE": str(env_file),
+        "NEXT_DEV": str(NEXT_DEV),
+        "NEXT_SERVER": str(ROOT / "server.py"),
+        "CHILD_CODE": child_code,
+    }
+    process = subprocess.Popen(
+        [sys.executable, "-c", launcher_code],
+        cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        import time
+
+        deadline = time.monotonic() + 15
+        connected = False
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    connected = True
+                    break
+            except OSError:
+                time.sleep(0.05)
+        assert connected, process.stderr.read() if process.stderr else ""
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        stdout, stderr = process.communicate(timeout=10)
+    assert "Uvicorn running" in stdout + stderr
 
 
 @pytest.mark.parametrize("field", ("pid", "process_starttime", "profile_id"))

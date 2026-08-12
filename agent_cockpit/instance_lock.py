@@ -15,6 +15,7 @@ LOCK_NAME = "instance.lock"
 LOCK_FD_ENV = "COCKPIT_NEXT_LOCK_FD"
 METADATA_VERSION = 1
 MAX_METADATA_BYTES = 4096
+_adopted_owner: InstanceLock | None = None
 
 
 class LockError(RuntimeError):
@@ -289,3 +290,21 @@ class InstanceLock:
 
     def __exit__(self, *_args: object) -> None:
         self.release()
+
+
+def register_adopted_owner(owner: InstanceLock) -> None:
+    global _adopted_owner
+    if not isinstance(owner, InstanceLock) or owner.fd is None:
+        raise LockError("lock_owner_invalid")
+    owner.read_metadata(current_owner=True)
+    if _adopted_owner is not None and _adopted_owner is not owner:
+        raise LockError("lock_owner_already_registered")
+    _adopted_owner = owner
+
+
+def require_registered_owner() -> InstanceLock:
+    owner = _adopted_owner
+    if not isinstance(owner, InstanceLock) or owner.fd is None:
+        raise LockError("lock_owner_required")
+    owner.read_metadata(current_owner=True)
+    return owner
