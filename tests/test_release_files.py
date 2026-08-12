@@ -2,6 +2,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 import http.server
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -922,11 +923,13 @@ def test_agent_mail_hub_probe_rejects_unrelated_http_200(tmp_path):
 
 # ── U1a：VERSION / Release workflow 门禁 ─────────────────────────
 
-def test_version_file_is_exactly_0_2_0():
+def test_version_file_is_canonical_semver():
     text = (ROOT / "VERSION").read_text(encoding="utf-8")
-    assert text.strip() == "0.2.0"
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    assert lines == ["0.2.0"]
+    match = re.fullmatch(
+        r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\n",
+        text,
+    )
+    assert match is not None
 
 
 def test_release_workflow_gates_tag_and_checks():

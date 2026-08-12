@@ -49,8 +49,9 @@ def test_read_current_version_from_file_without_git(tmp_path):
     assert version.read_current_version(path) == "0.2.0"
 
 
-def test_repo_version_file_is_0_2_0():
-    assert version.read_current_version() == "0.2.0"
+def test_repo_version_reader_matches_canonical_file():
+    canonical = version.VERSION_PATH.read_text(encoding="utf-8").removesuffix("\n")
+    assert version.read_current_version() == canonical
 
 
 @pytest.mark.parametrize(
