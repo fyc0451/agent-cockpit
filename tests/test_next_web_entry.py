@@ -97,6 +97,8 @@ def test_next_assets_reject_unknown_directory_traversal_and_symlink(
 
     for path in (
         "/assets/missing.js",
+        "/assets",
+        "/assets/",
         "/assets/directory",
         "/assets/escape.js",
         "/assets/linked/nested.js",
@@ -104,7 +106,7 @@ def test_next_assets_reject_unknown_directory_traversal_and_symlink(
         "/assets/%2e%2e%2fsecret.js",
     ):
         response = client.get(path, follow_redirects=False)
-        assert response.status_code in {404, 405}, path
+        assert response.status_code == 404, path
         assert "secret" not in response.text
 
 
@@ -139,3 +141,7 @@ def test_next_web_routes_do_not_shadow_api_or_health(web_roots, monkeypatch):
     assert live.status_code in {200, 503}
     assert live.headers["content-type"].startswith("application/json")
     assert '<div id="root">' not in live.text
+    ready = client.get("/health/ready")
+    assert ready.status_code in {200, 503}
+    assert ready.headers["content-type"].startswith("application/json")
+    assert '<div id="root">' not in ready.text

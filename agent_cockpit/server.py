@@ -7196,6 +7196,12 @@ def next_web_asset(asset_path: str):
     )
 
 
+@app.api_route("/assets", methods=["GET", "HEAD"])
+def next_web_assets_root():
+    """Keep the asset mount root invalid instead of redirecting it."""
+    raise HTTPException(404, "Not Found")
+
+
 @app.get("/sw.js")
 def service_worker():
     return FileResponse(STATIC_DIR / "sw.js", media_type="application/javascript")
