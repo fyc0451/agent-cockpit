@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "goal_id": "test-04",
+  "user_journey": "测试 DAG 成环拦截",
+  "non_goals": [],
+  "baseline": {
+    "main_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
+    "production_version": "0.3.3",
+    "production_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
+  },
+  "limits": {
+    "writer_wip": 2,
+    "release_minutes": 15,
+    "cross_module_blocks_before_reslice": 2
+  },
+  "cars": [
+    {
+      "id": "car-a",
+      "title": "车 A",
+      "status": "planned",
+      "depends_on": ["car-b"],
+      "scope": ["docs/**"],
+      "acceptance": ["true"],
+      "rollback": "git checkout HEAD -- docs/",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false
+    },
+    {
+      "id": "car-b",
+      "title": "车 B",
+      "status": "planned",
+      "depends_on": ["car-a"],
+      "scope": ["tests/**"],
+      "acceptance": ["true"],
+      "rollback": "git checkout HEAD -- tests/",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false
+    }
+  ]
+}

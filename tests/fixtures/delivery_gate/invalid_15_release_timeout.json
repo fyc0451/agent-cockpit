@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "goal_id": "test-15",
+  "user_journey": "测试发布超时拦截",
+  "non_goals": [],
+  "baseline": {
+    "main_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
+    "production_version": "0.3.3",
+    "production_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
+  },
+  "limits": {
+    "writer_wip": 2,
+    "release_minutes": 15,
+    "cross_module_blocks_before_reslice": 2
+  },
+  "cars": [
+    {
+      "id": "car-15",
+      "title": "发布超过 15 分钟",
+      "status": "releasing",
+      "depends_on": [],
+      "scope": ["docs/**"],
+      "acceptance": ["true"],
+      "rollback": "git checkout HEAD -- docs/",
+      "production_impact": "canary",
+      "owner_instance_id": "RusticSpring",
+      "reviewer_instance_id": "JadeWaterfall",
+      "base_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
+      "fixed_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
+      "cross_module_block_count": 0,
+      "release_started_at": "2026-08-12T20:00:00Z",
+      "user_acceptance_required": false
+    }
+  ]
+}
