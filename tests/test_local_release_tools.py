@@ -34,6 +34,13 @@ def test_publish_local_release_help_is_read_only() -> None:
     assert "--release-id" in result.stdout
 
 
+def test_publish_requires_native_build_dependency(monkeypatch) -> None:
+    module = _module()
+    monkeypatch.setattr(module.importlib.util, "find_spec", lambda _name: None)
+    with pytest.raises(module.LocalReleaseError, match="build_dependency_missing"):
+        module._require_build_dependencies()
+
+
 def test_private_key_reader_rejects_mode_symlink_and_hardlink(tmp_path: Path) -> None:
     module = _module()
     path = tmp_path / "key"

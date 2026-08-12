@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -163,6 +164,11 @@ def _validate_source(source: Path, candidate: str) -> tuple[str, str, int]:
     return version, tag, int(epoch_raw)
 
 
+def _require_build_dependencies() -> None:
+    if importlib.util.find_spec("PyInstaller") is None:
+        _fail("build_dependency_missing")
+
+
 def _release_absent(tag: str, source: Path) -> None:
     result = _run(
         ["gh", "release", "view", tag, "-R", REPOSITORY],
@@ -224,6 +230,7 @@ def publish(source: Path, candidate: str, release_id: str) -> dict[str, Any]:
         _fail("release_id_invalid")
     source = source.resolve(strict=True)
     version, tag, source_date_epoch = _validate_source(source, candidate)
+    _require_build_dependencies()
     _release_absent(tag, source)
     private = _private_file(PRIVATE_KEY, 32)
     public = _private_file(PUBLIC_KEY, 32)

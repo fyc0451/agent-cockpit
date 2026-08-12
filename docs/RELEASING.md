@@ -71,6 +71,7 @@ Linux release host instead:
    present at `origin/main`:
 
    ```bash
+   .venv/bin/pip install -r requirements-build.txt
    .venv/bin/python scripts/publish_local_release.py \
      --candidate <40-character-origin-main-sha> \
      --release-id <unique-non-secret-id>
