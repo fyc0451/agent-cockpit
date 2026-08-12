@@ -46,6 +46,15 @@ def test_readme_and_ci_have_no_release_placeholders():
     assert "timeout-minutes:" in workflow
 
 
+def test_hosted_test_matrix_is_manual_only():
+    workflow = (ROOT / ".github/workflows/test.yml").read_text()
+    trigger = workflow.split("permissions:", 1)[0]
+
+    assert "workflow_dispatch:" in trigger
+    assert "push:" not in trigger
+    assert "pull_request:" not in trigger
+
+
 def test_installers_migrate_legacy_service_name():
     # install.sh 承担全新安装与服务迁移
     install = (ROOT / "install.sh").read_text()
