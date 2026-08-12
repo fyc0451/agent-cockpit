@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,7 +11,15 @@ from typing import Any
 from artifact_download import Transport, download_verified_artifact
 from artifact_extract import extract_verified_tarball
 from generation_switch import GenerationIdentity
-from release_index import verify_release_index
+from release_index import (
+    PERSISTED_INDEX_NAME,
+    PERSISTED_SIGNATURE_NAME,
+    verify_release_index,
+)
+
+
+class GenerationPrepareError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -20,6 +30,35 @@ class PreparedGeneration:
     generation_id: str
     generation_path: Path
     launcher_path: Path
+
+
+def _persist_verified_release(
+    generation_path: Path, index_bytes: bytes, signature_bytes: bytes,
+) -> None:
+    """Persist the already-verified canonical index + signature inside the
+    generation (mode 0600, atomic + fsync). Raises on any failure so that
+    ``prepare_generation`` never returns a half-prepared generation."""
+    for name, payload in (
+        (PERSISTED_INDEX_NAME, index_bytes),
+        (PERSISTED_SIGNATURE_NAME, signature_bytes),
+    ):
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=name + ".", dir=generation_path)
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, generation_path / name)
+            tmp = None
+        except BaseException:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            raise GenerationPrepareError(f"persist_failed:{name}")
 
 
 def prepare_generation(
@@ -55,6 +94,7 @@ def prepare_generation(
         asset,
         deploy_root / "generations" / identity.generation_id,
     )
+    _persist_verified_release(generation_path, index_bytes, signature_bytes)
     launcher_path = generation_path / asset["launcher"]["path"]
     return PreparedGeneration(
         version=verified["version"],
@@ -66,4 +106,4 @@ def prepare_generation(
     )
 
 
-__all__ = ["PreparedGeneration", "prepare_generation"]
+__all__ = ["GenerationPrepareError", "PreparedGeneration", "prepare_generation"]

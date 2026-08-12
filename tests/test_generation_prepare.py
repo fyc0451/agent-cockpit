@@ -14,7 +14,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import generation_prepare
 from artifact_extract import ArtifactExtractError
-from release_index import canonical_bytes
+from release_index import (
+    PERSISTED_INDEX_NAME,
+    PERSISTED_SIGNATURE_NAME,
+    canonical_bytes,
+)
 
 
 SOURCE_SHA = "a" * 40
@@ -151,6 +155,12 @@ def test_real_primitives_prepare_once_and_cache_reuse_fails_closed(
     assert receipt.launcher_path.read_bytes() == launcher
     assert stat.S_IMODE(receipt.launcher_path.stat().st_mode) == 0o700
     assert stat.S_IMODE((receipt.generation_path / "VERSION").stat().st_mode) == 0o600
+    persisted_index = receipt.generation_path / PERSISTED_INDEX_NAME
+    persisted_sig = receipt.generation_path / PERSISTED_SIGNATURE_NAME
+    assert persisted_index.is_file() and persisted_index.read_bytes() == index_bytes
+    assert persisted_sig.is_file() and persisted_sig.read_bytes() == signature
+    assert stat.S_IMODE(persisted_index.stat().st_mode) == 0o600
+    assert stat.S_IMODE(persisted_sig.stat().st_mode) == 0o600
     assert (deploy_root / "artifact-cache" / artifact_digest).is_file()
     assert len(calls) == 1
     assert not (deploy_root / "current").exists()
@@ -330,3 +340,10 @@ def test_extraction_failure_leaves_forensic_destination_and_never_activates(
     generation = deploy_root / "generations" / f"{SOURCE_SHA}-{ARTIFACT_DIGEST}"
     assert (generation / "partial").read_bytes() == b"evidence"
     assert not (deploy_root / "current").exists()
+
+
+def test_persist_verified_release_raises_when_generation_unwritable(tmp_path: Path) -> None:
+    with pytest.raises(generation_prepare.GenerationPrepareError):
+        generation_prepare._persist_verified_release(
+            tmp_path / "does-not-exist", b"{}", b"\x00" * 64,
+        )

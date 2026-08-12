@@ -19,6 +19,10 @@ MAX_ASSET_NAME_BYTES = 128
 MAX_LAUNCHER_BYTES = 8 * 1024 * 1024 * 1024
 SERVER_LAUNCHER_PATH = "bin/agent-cockpit"
 SERVER_LAUNCHER_FORMATS = {"linux": "elf", "macos": "mach-o"}
+# Fixed filenames persisted inside a generation so the install verifier can
+# re-verify the signed release-index without an external trust channel.
+PERSISTED_INDEX_NAME = ".release-index.json"
+PERSISTED_SIGNATURE_NAME = ".release-index.json.sig"
 
 _INDEX_FIELDS = {
     "schema_version",
@@ -256,6 +260,8 @@ __all__ = [
     "MAX_INDEX_BYTES",
     "MAX_LAUNCHER_BYTES",
     "OFFICIAL_RELEASE_DOWNLOAD_PREFIX",
+    "PERSISTED_INDEX_NAME",
+    "PERSISTED_SIGNATURE_NAME",
     "ReleaseIndexError",
     "SERVER_LAUNCHER_FORMATS",
     "SERVER_LAUNCHER_PATH",
