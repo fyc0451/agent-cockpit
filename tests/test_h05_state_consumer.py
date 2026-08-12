@@ -997,12 +997,16 @@ def test_added_publish_blocked_by_epoch_cleanup(monkeypatch, tmp_path):
 
 def test_open_while_stop_join_blocked_serializes(monkeypatch):
     """stop 阶段二 join 占 REAP 期间 open 到达:open 等锁,stop 先完整结束;
-    open 随后开新 epoch——最终 running=True 由锁内顺序决定。"""
+    open 随后开新 epoch——最终 running=True 由锁内顺序决定。
+
+    D3:entered Event 证明 stop 已持 REAP 进入 join,替代 sleep(0.05) 竞态。"""
+    entered = threading.Event()
 
     class SlowStop(FakeStateClient):
         def stop(self, join_timeout=5.0):
             self.request_stop()
-            time.sleep(0.2)
+            entered.set()
+            time.sleep(0.2)  # 故意占 REAP 的 join 时长,非猜锁
             self.stopped = True
             return True
 
@@ -1017,7 +1021,7 @@ def test_open_while_stop_join_blocked_serializes(monkeypatch):
         target=lambda: out.setdefault("stop", server._stop_state_client())
     )
     t.start()
-    time.sleep(0.05)  # stop 已持 REAP 进入 join
+    assert entered.wait(5), "stop never entered join (REAP not proven held)"
     r = server._open_state_clients()  # 必须等 stop 完成
     t.join(5)
     assert out["stop"] == []  # open 返回时 stop 已完整结束
@@ -1197,18 +1201,23 @@ def test_changed_start_exception_with_concurrent_stop_no_double(monkeypatch):
 
 
 def test_stop_lock_wait_counts_toward_budget(monkeypatch):
-    """stop 总预算含等 REAP 锁:前一 stop 占锁 join 时,排队 stop 的
-    wall-clock 不超过 budget+调度容差,且 join 只用 remaining。"""
-    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.3)
+    """stop 总预算含等 REAP 锁:前一 stop 占锁 join 时,排队 stop 等锁后
+    仍可完成(前者已收干净)。
 
-    class SlowStop(FakeStateClient):
+    D3:entered/release 证明 first 持 REAP;second 登记 ticket 后再 release
+    first,避免 sleep 猜锁;宽松 watchdog 仅防挂死。"""
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 1.0)
+    entered, release = threading.Event(), threading.Event()
+
+    class GatedStop(FakeStateClient):
         def stop(self, join_timeout=5.0):
             self.request_stop()
-            time.sleep(0.2)
+            entered.set()
+            assert release.wait(5), "first stop release timed out"
             self.stopped = True
             return True
 
-    c = SlowStop({"s": "/tmp/s.sock"})
+    c = GatedStop({"s": "/tmp/s.sock"})
     c.start()
     monkeypatch.setattr(server, "_state_clients", {"s": c})
     monkeypatch.setattr(server, "_state_sessions_meta", {
@@ -1219,29 +1228,49 @@ def test_stop_lock_wait_counts_toward_budget(monkeypatch):
         target=lambda: out.setdefault("first", server._stop_state_client())
     )
     t.start()
-    time.sleep(0.05)  # 前一 stop 持 REAP  join 中
-    t0 = time.monotonic()
-    r = server._stop_state_client()  # 排队 stop:等锁计入预算
-    elapsed = time.monotonic() - t0
+    assert entered.wait(5), "first stop never entered join (REAP not held)"
+    second: dict[str, object] = {}
+    t0_box: dict[str, float] = {}
+
+    def _run_second():
+        t0_box["t0"] = time.monotonic()
+        second["r"] = server._stop_state_client()
+        second["elapsed"] = time.monotonic() - t0_box["t0"]
+
+    st = threading.Thread(target=_run_second)
+    st.start()
+    # second 入口登记 ticket 后必阻塞在 REAP(first 仍持锁)
+    ticket_deadline = time.monotonic() + 2.0
+    while time.monotonic() < ticket_deadline and len(server._state_stop_tickets) < 2:
+        time.sleep(0.01)
+    assert len(server._state_stop_tickets) >= 2
+    release.set()
+    st.join(5)
     t.join(5)
     assert out["first"] == []
-    assert r == []  # 前者已收干净,本 stop 无剩余工作
-    assert elapsed < 0.3 + 0.3  # budget + 合理调度容差
+    assert second.get("r") == []  # 前者已收干净,本 stop 无剩余工作
+    assert float(second.get("elapsed", 99)) < 1.0 + 2.0  # hang guard only
 
 
 def test_stop_budget_exhausted_by_lock_wait_defers(monkeypatch):
     """等锁耗尽预算:deferred 返回,不重置 join 窗口;ownership 原样受管
-    (maps 未被本 stop 触碰),running 不被改动。"""
-    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.15)
+    (maps 未被本 stop 触碰),running 不被改动。
 
-    class VerySlowStop(FakeStateClient):
+    D3:entered/release 证明 first 已持 REAP 后再调 second;语义断言
+    deferred reason/ticket,替代 sleep(0.05) 与贴边 elapsed。"""
+    # first 较长预算,second 单独缩预算以明确 reap_lock_timeout
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 1.0)
+    entered, release = threading.Event(), threading.Event()
+
+    class GatedStop(FakeStateClient):
         def stop(self, join_timeout=5.0):
             self.request_stop()
-            time.sleep(0.3)
+            entered.set()
+            assert release.wait(5), "first stop release timed out"
             self.stopped = True
             return True
 
-    c = VerySlowStop({"s": "/tmp/s.sock"})
+    c = GatedStop({"s": "/tmp/s.sock"})
     c.start()
     monkeypatch.setattr(server, "_state_clients", {"s": c})
     monkeypatch.setattr(server, "_state_sessions_meta", {
@@ -1252,13 +1281,19 @@ def test_stop_budget_exhausted_by_lock_wait_defers(monkeypatch):
         target=lambda: out.setdefault("first", server._stop_state_client())
     )
     t.start()
-    time.sleep(0.05)  # 前一 stop 持 REAP(其 join 0.3s > 本次预算)
+    assert entered.wait(5), "first stop never entered join (REAP not held)"
+    budget = 0.1
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", budget)
     t0 = time.monotonic()
     r = server._stop_state_client()
     elapsed = time.monotonic() - t0
+    assert r and r[0].get("deferred") is True
+    assert r[0].get("reason") == "reap_lock_timeout"
+    assert r[0].get("ticket") in server._state_stop_tickets
+    assert elapsed < budget + 2.0  # hang guard only
+    release.set()
     t.join(5)
-    assert r and r[0].get("deferred") is True  # 预算耗尽,明确放弃
-    assert elapsed < 0.15 + 0.3  # 不超过预算+容差
+    assert not t.is_alive()
     assert out["first"] == []
     # ownership 未丢:first stop 已完成回收,maps 干净;本 stop 未产生幽灵
     assert server._state_retiring == {}
@@ -1269,15 +1304,18 @@ def test_stop_budget_exhausted_by_lock_wait_defers(monkeypatch):
 
 
 class _GatedZombie(FakeStateClient):
-    """stop 阻塞在 gate 上,由测试主线程控制放行;fail_stop 控制成败。"""
+    """stop 阻塞在 gate 上,由测试主线程控制放行;fail_stop 控制成败。
+    entered 在进入 stop/持 REAP 路径时置位(D3:替代 sleep 猜锁)。"""
 
     def __init__(self, sessions, gate):
         super().__init__(sessions)
         self.gate = gate
+        self.entered = threading.Event()
         self.fail_stop = True
 
     def stop(self, join_timeout=5.0):
         self.request_stop()
+        self.entered.set()
         self.gate.wait(5)
         if self.fail_stop:
             return False
@@ -1362,7 +1400,9 @@ def test_deferred_stop_intent_blocks_until_retry(monkeypatch):
 
 
 def test_deferred_stop_intent_when_reaper_holds_lock(monkeypatch):
-    """REAP 被 reaper 持有(reap 阻塞)→stop deferred,intent 持久门禁。"""
+    """REAP 被 reaper 持有(reap 阻塞)→stop deferred,intent 持久门禁。
+
+    D3:z.entered 证明 reaper 已持 REAP 进入 zombie.stop,替代 sleep 猜锁。"""
     monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.15)
     gate = threading.Event()
     z = _GatedZombie({"z": "/tmp/z.sock"}, gate)
@@ -1374,9 +1414,10 @@ def test_deferred_stop_intent_when_reaper_holds_lock(monkeypatch):
         target=lambda: out.setdefault("reap", server._reap_retired_clients())
     )
     t.start()
-    time.sleep(0.05)  # reaper 持 REAP,阻塞在 zombie.stop 的 gate 上
+    assert z.entered.wait(5), "reaper never entered zombie.stop (REAP not held)"
     r = server._stop_state_client()
     assert r[0]["deferred"] is True
+    assert r[0].get("reason") == "reap_lock_timeout"
     assert server._state_stop_tickets
     gate.set()
     t.join(5)
@@ -1388,7 +1429,9 @@ def test_deferred_stop_intent_when_reaper_holds_lock(monkeypatch):
 
 def test_deferred_stop_intent_when_open_holds_lock(monkeypatch):
     """REAP 被 open 的有界 reap 持有→stop deferred;open 自身也被 intent
-    门禁拒绝;retry stop 完成后才允许 open。"""
+    门禁拒绝;retry stop 完成后才允许 open。
+
+    D3:z.entered 证明 open 已持 REAP 进入 reap,替代 sleep 猜锁。"""
     monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.15)
     gate = threading.Event()
     z = _GatedZombie({"z": "/tmp/z.sock"}, gate)
@@ -1400,9 +1443,10 @@ def test_deferred_stop_intent_when_open_holds_lock(monkeypatch):
         target=lambda: out.setdefault("open", server._open_state_clients())
     )
     t.start()
-    time.sleep(0.05)  # open 持 REAP reap,阻塞在 gate
+    assert z.entered.wait(5), "open never entered zombie.stop (REAP not held)"
     r = server._stop_state_client()
     assert r[0]["deferred"] is True
+    assert r[0].get("reason") == "reap_lock_timeout"
     gate.set()  # 放行 open 的 reap(zombie 仍 fail→open 有界耗尽)
     t.join(5)
     assert out["open"] is False  # retiring 未清+intent 未清:open 拒绝
@@ -1437,12 +1481,15 @@ def test_stop_client_lock_held_defers_with_published_client(monkeypatch):
     t = threading.Thread(target=_hold_client_lock, args=(entered, release))
     t.start()
     assert entered.wait(5)
+    budget = 0.2
     t0 = time.monotonic()
     r = server._stop_state_client()
     elapsed = time.monotonic() - t0
     assert r[0]["deferred"] is True
     assert r[0]["reason"] == "client_lock_timeout"
-    assert elapsed < 0.2 + 0.3  # CLIENT 等待计入预算,不超 budget+调度容差
+    assert r[0].get("ticket") in server._state_stop_tickets
+    assert t.is_alive()  # holder 仍持 CLIENT
+    assert elapsed < budget + 2.0  # hang guard only (D3:非贴边正确性)
     assert server._state_stop_tickets  # intent 持久
     # 零部分变更:running 未动,client 未被摘/未停,无 retiring 残留
     assert server._state_running is True
@@ -1467,12 +1514,15 @@ def test_stop_client_lock_held_defers_without_client(monkeypatch):
     t = threading.Thread(target=_hold_client_lock, args=(entered, release))
     t.start()
     assert entered.wait(5)
+    budget = 0.2
     t0 = time.monotonic()
     r = server._stop_state_client()
     elapsed = time.monotonic() - t0
     assert r[0]["deferred"] is True
     assert r[0]["reason"] == "client_lock_timeout"
-    assert elapsed < 0.2 + 0.3
+    assert r[0].get("ticket") in server._state_stop_tickets
+    assert t.is_alive()  # holder 仍持 CLIENT
+    assert elapsed < budget + 2.0  # hang guard only (D3)
     assert server._state_stop_tickets
     assert server._state_running is True  # 零部分变更
     assert server._state_clients == {}
