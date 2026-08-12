@@ -82,6 +82,59 @@ if [[ -d "$legacy_dir" && -x "$source_hook" \
   fi
 fi
 
+# 早期 UserPromptSubmit hook 固定调用 $HOME/agent-mail-tools/mail-hook-check（旧 bash 版）。
+# 仅识别精确 SHA256 的旧版，备份后切到稳定软链；未知文件绝不覆盖，失败回滚，二次执行幂等。
+legacy_hook_check="$legacy_dir/mail-hook-check"
+compat_hook_check="$BIN_DIR/mail-hook-check"
+source_hook_check="$INSTALL_DIR/agent-mail-tools/mail-hook-check"
+legacy_hook_check_sha256="493f9bde787d8fa5fbadcee5690a436b9654d2c2f5be9861dff3203f4fddda7e"
+hook_check_backup="$legacy_dir/mail-hook-check.pre-cockpit"
+resolved_compat_hc="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' \
+  "$compat_hook_check" 2>/dev/null || true)"
+resolved_source_hc="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' \
+  "$source_hook_check" 2>/dev/null || true)"
+if [[ -d "$legacy_dir" && -x "$source_hook_check" \
+  && -n "$resolved_compat_hc" && "$resolved_compat_hc" == "$resolved_source_hc" ]]; then
+  if [[ -L "$legacy_hook_check" ]]; then
+    current="$(readlink "$legacy_hook_check")"
+    case "$current" in
+      "$compat_hook_check") ;;
+      "$source_hook_check"|"$HOME/agent-cockpit/agent-mail-tools/mail-hook-check")
+        ln -sfn "$compat_hook_check" "$legacy_hook_check" || \
+          echo "警告: 无法更新旧 mail-hook-check 软链: $legacy_hook_check" >&2
+        ;;
+      *) echo "警告: 保留用户已有 mail-hook-check 软链: $legacy_hook_check -> $current" >&2 ;;
+    esac
+  elif [[ ! -e "$legacy_hook_check" ]]; then
+    ln -s "$compat_hook_check" "$legacy_hook_check" || \
+      echo "警告: 无法创建旧 mail-hook-check 兼容入口: $legacy_hook_check" >&2
+  elif [[ -f "$legacy_hook_check" ]]; then
+    current_hash="$(python3 - "$legacy_hook_check" <<'PY' 2>/dev/null || true
+import hashlib
+import sys
+from pathlib import Path
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+    if [[ "$current_hash" != "$legacy_hook_check_sha256" ]]; then
+      echo "ACTIVATION_BLOCK: 保留未知 mail-hook-check 文件: $legacy_hook_check" >&2
+    elif [[ -e "$hook_check_backup" || -L "$hook_check_backup" ]]; then
+      echo "ACTIVATION_BLOCK: mail-hook-check rollback 备份已存在: $hook_check_backup" >&2
+    elif mv "$legacy_hook_check" "$hook_check_backup"; then
+      if ! ln -s "$compat_hook_check" "$legacy_hook_check"; then
+        mv "$hook_check_backup" "$legacy_hook_check" 2>/dev/null || true
+        echo "ACTIVATION_BLOCK: mail-hook-check 激活失败，已尝试回滚" >&2
+      else
+        echo "已迁移旧 mail-hook-check 入口: ${legacy_hook_check}（备份: ${hook_check_backup}）"
+      fi
+    else
+      echo "ACTIVATION_BLOCK: 无法创建 mail-hook-check rollback 备份" >&2
+    fi
+  else
+    echo "ACTIVATION_BLOCK: 保留用户已有 mail-hook-check 路径: $legacy_hook_check" >&2
+  fi
+fi
+
 plugin_source="$INSTALL_DIR/agent-mail-tools/agent-mail.opencode-plugin.js"
 plugin_dir="$HOME/.config/opencode/plugins"
 plugin_target="$plugin_dir/agent-mail.js"

@@ -10,6 +10,9 @@ from . import mail_identity_inject, mail_recv
 
 def main(argv: list[str] | None = None) -> int:
     args = list(argv or [])
+    if args and args[0] in {"-h", "--help"}:
+        print("usage: mail-hook-check [<agent> [instance]]")
+        return 0
     resolved = mail_identity_inject.resolve_managed_identity()
     if resolved is None:
         if mail_identity_inject._has_managed_descriptor_candidate():

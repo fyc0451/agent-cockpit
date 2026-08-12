@@ -398,6 +398,65 @@ def test_agent_mail_plugin_known_legacy_hash_activates_with_rollback_backup(tmp_
     assert backup.read_bytes() == before
 
 
+def test_agent_mail_legacy_hook_check_known_hash_migrates_with_rollback_backup(tmp_path):
+    installer = (ROOT / "install-agent-mail-tools.sh").read_text(encoding="utf-8")
+    assert "493f9bde787d8fa5fbadcee5690a436b9654d2c2f5be9861dff3203f4fddda7e" in installer
+    assert "mail-hook-check.pre-cockpit" in installer
+
+    install_dir = tmp_path / "install"
+    shutil.copytree(ROOT / "agent-mail-tools", install_dir / "agent-mail-tools")
+    legacy_fixture = ROOT / "tests" / "fixtures" / "mail-hook-check.legacy.sh"
+    home = tmp_path / "home"
+    legacy_dir = home / "agent-mail-tools"
+    legacy_dir.mkdir(parents=True)
+    hook = legacy_dir / "mail-hook-check"
+    hook.write_bytes(legacy_fixture.read_bytes())
+    hook.chmod(0o755)
+    before = hook.read_bytes()
+    env = {**os.environ, "HOME": str(home)}
+
+    first = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert first.returncode == 0, first.stderr
+    backup = legacy_dir / "mail-hook-check.pre-cockpit"
+    assert hook.is_symlink()
+    assert hook.resolve() == install_dir / "agent-mail-tools" / "mail-hook-check"
+    assert backup.is_file() and not backup.is_symlink()
+    assert backup.read_bytes() == before
+
+    second = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert second.returncode == 0, second.stderr
+    assert hook.is_symlink()
+    assert backup.read_bytes() == before
+
+
+def test_agent_mail_legacy_hook_check_unknown_hash_is_preserved(tmp_path):
+    install_dir = tmp_path / "install"
+    shutil.copytree(ROOT / "agent-mail-tools", install_dir / "agent-mail-tools")
+    home = tmp_path / "home"
+    legacy_dir = home / "agent-mail-tools"
+    legacy_dir.mkdir(parents=True)
+    hook = legacy_dir / "mail-hook-check"
+    hook.write_text("#!/usr/bin/env bash\necho user-custom hook\n")
+    hook.chmod(0o755)
+    before = hook.read_bytes()
+
+    result = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env={**os.environ, "HOME": str(home)}, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert hook.is_file() and not hook.is_symlink()
+    assert hook.read_bytes() == before
+    assert "ACTIVATION_BLOCK" in result.stderr
+    assert not (legacy_dir / "mail-hook-check.pre-cockpit").exists()
+
+
 def test_doctor_detects_pending_herdr_onboarding():
     doctor = (ROOT / "doctor.sh").read_text()
 

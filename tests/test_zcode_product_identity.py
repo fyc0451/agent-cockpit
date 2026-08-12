@@ -441,6 +441,12 @@ def test_legacy_hook_rejects_opaque_display_and_unknown_arguments(
     assert mail_hook_check.main([agent, instance]) == 2
 
 
+def test_mail_hook_check_help_returns_zero(capsys):
+    assert mail_hook_check.main(["--help"]) == 0
+    assert mail_hook_check.main(["-h"]) == 0
+    assert "usage: mail-hook-check" in capsys.readouterr().out
+
+
 def test_mail_hook_check_uses_only_resolved_exact_identity(monkeypatch):
     resolved = mail_identity_inject.ManagedIdentity(
         "/project", "zcode", INSTANCE, {"name": "FreshMailbox"},
