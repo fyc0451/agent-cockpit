@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import artifact_extract
+from generation_switch import GenerationIdentity
 from release_index import canonical_bytes, verify_release_index
 
 
@@ -116,8 +117,12 @@ def _install_artifact(
     cached = cache / selected["sha256"]
     cached.write_bytes(archive_path.read_bytes())
     cached.chmod(0o600)
+    identity = GenerationIdentity(
+        source_sha=verified["source_sha"],
+        artifact_digest=selected["sha256"],
+    )
     extracted = artifact_extract.extract_verified_tarball(
-        cached, selected, staging / "installed",
+        cached, selected, staging / identity.generation_id,
     )
     return extracted, selected
 
