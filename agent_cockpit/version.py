@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .artifact_root import resolve_artifact_root
+from .github_release_auth import load_github_release_token
 
 
 VERSION_PATH = resolve_artifact_root() / "VERSION"
@@ -135,13 +136,18 @@ def _parse_release_payload(data: Any) -> dict[str, Any] | None:
 def _http_get_latest() -> dict[str, Any] | None:
     """发起一次外部请求；任何失败返回 None（调用方标 unavailable）。"""
     try:
+        token = load_github_release_token()
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "agent-cockpit-version-check",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
         with httpx.Client(timeout=HTTP_TIMEOUT_S) as client:
             response = client.get(
                 GITHUB_LATEST_API,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": "agent-cockpit-version-check",
-                },
+                headers=headers,
             )
         if response.status_code != 200:
             return None

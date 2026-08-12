@@ -1,10 +1,9 @@
 name: release
 
-# Formal releases are built from tags matching agent-cockpit-v + VERSION.
+# Hosted release is opt-in. Dispatch this workflow with an
+# agent-cockpit-v* tag ref; local signed releases do not use Actions minutes.
 on:
-  push:
-    tags:
-      - "agent-cockpit-v*"
+  workflow_dispatch:
 
 permissions:
   contents: read

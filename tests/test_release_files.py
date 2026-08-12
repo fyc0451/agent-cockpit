@@ -953,8 +953,9 @@ def test_release_workflow_gates_tag_and_checks():
     assert "node --check" in raw
     assert "contents: write" in raw
     assert "--generate-notes" in raw
-    assert "tags:" in raw
-    assert '"agent-cockpit-v*"' in raw
+    trigger = raw.split("permissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger
+    assert "push:" not in trigger
     assert 'expected="agent-cockpit-v$(tr -d \'[:space:]\' < VERSION)"' in raw
     assert '\n      - "v*"' not in raw
     # tag commit 必须是 origin/main 祖先

@@ -32,6 +32,13 @@ def _python_blocks() -> list[str]:
     return result
 
 
+def test_hosted_release_is_manual_only() -> None:
+    trigger = _workflow().split("permissions:", 1)[0]
+
+    assert "workflow_dispatch:" in trigger
+    assert "push:" not in trigger
+
+
 def test_release_workflow_builds_and_transfers_only_unsigned_native_assets() -> None:
     raw = _workflow()
 

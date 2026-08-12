@@ -209,6 +209,30 @@ def test_http_timeout_and_rate_limit_unavailable(monkeypatch, tmp_path):
     assert "rate limit" not in json.dumps(info)
 
 
+def test_latest_private_release_uses_bearer_without_exposing_token(monkeypatch):
+    seen: dict[str, str] = {}
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, _url, *, headers):
+            seen.update(headers)
+            return httpx.Response(200, json=_release("agent-cockpit-v0.3.1"))
+
+    monkeypatch.setattr(version, "load_github_release_token", lambda: "secret-token-value-123")
+    monkeypatch.setattr(version.httpx, "Client", Client)
+
+    assert version._http_get_latest()["version"] == "0.3.1"
+    assert seen["Authorization"] == "Bearer secret-token-value-123"
+
+
 def test_bad_json_unavailable(monkeypatch, tmp_path):
     ver = tmp_path / "VERSION"
     ver.write_text("0.2.0", encoding="utf-8")

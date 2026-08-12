@@ -19,6 +19,14 @@ CDN_URL = (
     "https://objects.githubusercontent.com/github-production-release-asset-2e65be/"
     "123/release-index.json?download=1"
 )
+ASSET_API_URL = (
+    "https://api.github.com/repos/fyc0451/agent-cockpit/releases/assets/123"
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_github_token(monkeypatch) -> None:
+    monkeypatch.setattr(release_fetch, "load_github_release_token", lambda: None)
 
 
 class Response:
@@ -75,16 +83,44 @@ def test_fetches_exact_release_payloads_and_returns_reusable_transport() -> None
 
 
 def test_default_transport_accepts_one_github_asset_cdn_redirect(monkeypatch) -> None:
-    opened: list[tuple[str, bool]] = []
+    opened: list[tuple[str, bool, dict[str, str]]] = []
+    metadata_headers: dict[str, str] = {}
     responses = [
         Response(302, headers={"location": CDN_URL}),
         Response(200, [b"payload"], headers={"content-length": "7"}),
     ]
 
     def stream(_method: str, url: str, **kwargs):
-        opened.append((url, kwargs["follow_redirects"]))
+        opened.append((url, kwargs["follow_redirects"], kwargs["headers"]))
         return responses.pop(0)
 
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, _url: str, *, headers: dict[str, str]):
+            metadata_headers.update(headers)
+            return __import__("httpx").Response(200, json={
+                "tag_name": TAG,
+                "draft": False,
+                "prerelease": False,
+                "assets": [{
+                    "name": "release-index.json",
+                    "url": ASSET_API_URL,
+                    "browser_download_url": INDEX_URL,
+                }],
+            })
+
+    monkeypatch.setattr(
+        release_fetch, "load_github_release_token", lambda: "secret-token-value-123",
+    )
+    monkeypatch.setattr(release_fetch.httpx, "Client", Client)
     monkeypatch.setattr(release_fetch.httpx, "stream", stream)
     transport = release_fetch.GitHubReleaseTransport()
 
@@ -92,7 +128,11 @@ def test_default_transport_accepts_one_github_asset_cdn_redirect(monkeypatch) ->
         assert response.status_code == 200
         assert b"".join(response.iter_bytes()) == b"payload"
 
-    assert opened == [(INDEX_URL, False), (CDN_URL, False)]
+    assert metadata_headers["Authorization"] == "Bearer secret-token-value-123"
+    assert opened[0][0:2] == (ASSET_API_URL, False)
+    assert opened[0][2]["Authorization"] == "Bearer secret-token-value-123"
+    assert opened[1][0:2] == (CDN_URL, False)
+    assert "Authorization" not in opened[1][2]
 
 
 def test_default_transport_is_reusable_by_artifact_downloader(monkeypatch, tmp_path) -> None:
@@ -103,6 +143,7 @@ def test_default_transport_is_reusable_by_artifact_downloader(monkeypatch, tmp_p
         Response(302, headers={"location": CDN_URL}),
         Response(200, [payload], headers={"content-length": str(len(payload))}),
     ]
+    monkeypatch.setattr(release_fetch, "load_github_release_token", lambda: None)
     monkeypatch.setattr(
         release_fetch.httpx, "stream", lambda *_args, **_kwargs: responses.pop(0),
     )
@@ -127,6 +168,7 @@ def test_transport_preserves_artifact_downloader_verification_errors(
     payload = b"wrong archive"
     asset_name = "agent-cockpit-server-1.2.3-linux-x86_64.tar.gz"
     responses = [Response(200, [payload], headers={"content-length": str(len(payload))})]
+    monkeypatch.setattr(release_fetch, "load_github_release_token", lambda: None)
     monkeypatch.setattr(
         release_fetch.httpx, "stream", lambda *_args, **_kwargs: responses.pop(0),
     )
@@ -178,6 +220,7 @@ def test_rejects_invalid_tag_before_transport(tag) -> None:
 def test_default_transport_rejects_non_final_or_invalid_redirect(
     monkeypatch, response: Response, code: str,
 ) -> None:
+    monkeypatch.setattr(release_fetch, "load_github_release_token", lambda: None)
     monkeypatch.setattr(
         release_fetch.httpx, "stream", lambda *_args, **_kwargs: response,
     )
@@ -192,6 +235,7 @@ def test_default_transport_rejects_second_redirect(monkeypatch) -> None:
         Response(302, headers={"location": CDN_URL}),
         Response(302, headers={"location": CDN_URL}),
     ]
+    monkeypatch.setattr(release_fetch, "load_github_release_token", lambda: None)
     monkeypatch.setattr(
         release_fetch.httpx, "stream", lambda *_args, **_kwargs: responses.pop(0),
     )
