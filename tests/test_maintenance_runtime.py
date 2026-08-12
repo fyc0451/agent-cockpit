@@ -28,6 +28,7 @@ def _pin_linux_platform_for_runtime_fakes(monkeypatch: pytest.MonkeyPatch) -> No
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "1" * 64)
 PREVIOUS = generation_switch.GenerationIdentity("b" * 40, "2" * 64)
+NEXT_TARGET = generation_switch.GenerationIdentity("c" * 40, "3" * 64)
 
 
 def _request(tmp_path: Path) -> maintenance_executor.MaintenanceRequest:
@@ -62,6 +63,33 @@ def _request(tmp_path: Path) -> maintenance_executor.MaintenanceRequest:
             request_id="request-1",
             role="target",
             generation=TARGET,
+        ),
+    )
+
+
+def _next_request(
+    previous: maintenance_executor.MaintenanceRequest,
+) -> maintenance_executor.MaintenanceRequest:
+    generation = previous.plan.deploy_root / "generations" / NEXT_TARGET.generation_id
+    generation.mkdir(mode=0o700)
+    return maintenance_executor.MaintenanceRequest(
+        plan=previous.plan,
+        request_id="request-2",
+        target_version="3.0.0",
+        target=NEXT_TARGET,
+        previous_version=previous.target_version,
+        previous=previous.target,
+        target_root=generation,
+        snapshot_root=(
+            previous.plan.state_root
+            / maintenance_executor.SNAPSHOT_DIR_NAME
+            / "request-2"
+        ),
+        evidence_path=maintenance_evidence.evidence_binding_path(
+            plan=previous.plan,
+            request_id="request-2",
+            role="target",
+            generation=NEXT_TARGET,
         ),
     )
 
@@ -379,6 +407,27 @@ def test_committed_reentry_skips_freeze_and_all_target_preparation(
     assert result["journal"]["stage"] == "committed"
     assert not any(name in {"freeze", "snapshot", "probe", "publish"} for name, _ in harness.events)
     assert harness.active_role == "target"
+
+
+def test_next_request_after_commit_rebinds_previous_and_archives_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _request(tmp_path)
+    assert Harness(first, monkeypatch).execute()["journal"]["stage"] == "committed"
+    second = _next_request(first)
+    harness = Harness(second, monkeypatch)
+
+    result = harness.execute()
+
+    assert result["journal"]["stage"] == "committed"
+    assert ("freeze", second.request_id) in harness.events
+    archived = first.plan.journal_root / upgrade_journal.archive_journal_name(
+        first.request_id, first.target.artifact_digest,
+    )
+    assert archived.is_file()
+    assert upgrade_journal.load_journal(root=first.plan.journal_root)["request_id"] == (
+        second.request_id
+    )
 
 
 def test_idle_reentry_after_previous_activation_reuses_binding_without_refreeze(

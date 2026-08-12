@@ -11,6 +11,7 @@ from . import generation_switch
 from . import maintenance_controller
 from . import maintenance_evidence
 from . import maintenance_executor
+from . import upgrade_journal
 from . import upgrade_snapshot
 
 
@@ -271,7 +272,12 @@ def execute_maintenance(
     try:
         with maintenance_controller.controller_lock(request.plan) as lease:
             status = maintenance_controller.read_controller_status(request.plan)
-            if status["state"] == "idle":
+            journal = status["journal"]
+            if status["state"] == "idle" or (
+                isinstance(journal, dict)
+                and journal.get("request_id") != request.request_id
+                and status["state"] in upgrade_journal.TERMINAL_STAGES
+            ):
                 initialize_previous(lease)
             return maintenance_executor.execute_prepared_generation(
                 request,
