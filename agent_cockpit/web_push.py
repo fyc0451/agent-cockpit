@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +28,26 @@ def _db() -> sqlite3.Connection:
     runtime_paths.validate_store("push")  # R3-B:symlink 逃逸 fail-closed
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS subscriptions ("
-        "endpoint TEXT PRIMARY KEY, payload TEXT NOT NULL, created_ts REAL NOT NULL)"
-    )
-    return con
+    try:
+        con.row_factory = sqlite3.Row
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS subscriptions ("
+            "endpoint TEXT PRIMARY KEY, payload TEXT NOT NULL, created_ts REAL NOT NULL)"
+        )
+        return con
+    except BaseException:
+        con.close()
+        raise
+
+
+@contextmanager
+def _managed_db():
+    con = _db()
+    try:
+        with con:
+            yield con
+    finally:
+        con.close()
 
 
 def _validated(subscription: dict[str, Any]) -> dict[str, Any]:
@@ -56,7 +71,7 @@ def _validated(subscription: dict[str, Any]) -> dict[str, Any]:
 
 def save_subscription(subscription: dict[str, Any]) -> dict[str, bool]:
     value = _validated(subscription)
-    with _db() as con:
+    with _managed_db() as con:
         con.execute(
             "INSERT INTO subscriptions(endpoint, payload, created_ts) VALUES (?, ?, ?) "
             "ON CONFLICT(endpoint) DO UPDATE SET payload=excluded.payload",
@@ -67,13 +82,13 @@ def save_subscription(subscription: dict[str, Any]) -> dict[str, bool]:
 
 
 def list_subscriptions() -> list[dict[str, Any]]:
-    with _db() as con:
+    with _managed_db() as con:
         rows = con.execute("SELECT payload FROM subscriptions ORDER BY created_ts").fetchall()
     return [json.loads(row["payload"]) for row in rows]
 
 
 def delete_subscription(endpoint: str) -> bool:
-    with _db() as con:
+    with _managed_db() as con:
         cursor = con.execute("DELETE FROM subscriptions WHERE endpoint = ?", (endpoint,))
         con.commit()
     return cursor.rowcount > 0

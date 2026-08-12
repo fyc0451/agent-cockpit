@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -75,7 +76,7 @@ def message_project_signatures() -> dict[str, tuple[tuple[Any, ...], ...]]:
     """按项目返回不含正文的 receipt 行签名，供消息页revision检测。"""
     if not DB_PATH.is_file():
         return {}
-    with _connect() as con:
+    with _managed_connection() as con:
         rows = con.execute(
             "SELECT project_key,recipient,message_id,state,reason,ack_pending,updated_ts "
             "FROM receipts ORDER BY project_key,recipient,message_id"
@@ -220,14 +221,28 @@ def _connect() -> sqlite3.Connection:
             with _CONNECT_INIT_LOCK:
                 _initialize_connection(con)
             return con
-        except sqlite3.OperationalError as exc:
+        except BaseException as exc:
             if con is not None:
                 con.close()
-            if "locked" not in str(exc).lower() or attempt == CONNECT_RETRIES - 1:
+            if (
+                not isinstance(exc, sqlite3.OperationalError)
+                or "locked" not in str(exc).lower()
+                or attempt == CONNECT_RETRIES - 1
+            ):
                 raise
             time.sleep(delay)
             delay *= 2
     raise RuntimeError("coordination DB 连接重试耗尽")
+
+
+@contextmanager
+def _managed_connection():
+    con = _connect()
+    try:
+        with con:
+            yield con
+    finally:
+        con.close()
 
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -566,7 +581,7 @@ def bind_identity(
     *, now: float | None = None,
 ) -> bool:
     current = time.time() if now is None else now
-    with _connect() as con:
+    with _managed_connection() as con:
         cur = con.execute(
             "UPDATE participants SET mail_name=?, pane_id=COALESCE(?,pane_id), "
             "updated_ts=? WHERE run_id=? AND participant_id=?",
@@ -659,7 +674,7 @@ def add_participant(
 
 
 def run_participants(run_id: str) -> list[dict[str, Any]]:
-    with _connect() as con:
+    with _managed_connection() as con:
         return [
             dict(row) for row in con.execute(
                 "SELECT * FROM participants WHERE run_id=? ORDER BY participant_id",
@@ -677,7 +692,7 @@ def panes_by_mail_name(project_key: str, mail_name: str) -> dict[str, set]:
     if not mail_name:
         return {}
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    with _managed_connection() as con:
         rows = con.execute(
             "SELECT r.session, p.pane_id FROM runs r "
             "JOIN participants p ON p.run_id = r.run_id "
@@ -695,7 +710,7 @@ def panes_by_mail_name(project_key: str, mail_name: str) -> dict[str, set]:
 
 def active_context(project_key: str, mail_name: str) -> dict[str, Any] | None:
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    with _managed_connection() as con:
         rows = con.execute(
             "SELECT r.*,p.participant_id,p.agent_type,p.mail_name,p.pane_id,p.role,"
             "p.task_text,p.task_revision,p.workdir,p.state AS participant_state "
@@ -707,7 +722,7 @@ def active_context(project_key: str, mail_name: str) -> dict[str, Any] | None:
 
 
 def run_context(run_id: str, mail_name: str) -> dict[str, Any] | None:
-    with _connect() as con:
+    with _managed_connection() as con:
         return _dict(con.execute(
             "SELECT r.*,p.participant_id,p.agent_type,p.mail_name,p.pane_id,p.role,"
             "p.task_text,p.task_revision,p.workdir,p.state AS participant_state "
@@ -755,7 +770,7 @@ def prepare_metadata(
             "run_id": context["run_id"], "run_revision": context["revision"],
             "targets": {},
         })
-        with _connect() as con:
+        with _managed_connection() as con:
             for recipient in recipients:
                 target = con.execute(
                     "SELECT participant_id,task_revision FROM participants "
@@ -799,7 +814,7 @@ def register_message(
 ) -> None:
     current = time.time() if now is None else now
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    with _managed_connection() as con:
         con.execute(
             "INSERT INTO message_meta VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(project_key,message_id) DO UPDATE SET "
@@ -843,7 +858,7 @@ def observe_messages(
     current = time.time() if now is None else now
     project = str(Path(project_key).expanduser().resolve())
     batch = {int(message["id"]): message for message in messages}
-    with _connect() as con:
+    with _managed_connection() as con:
         for message in messages:
             _, meta, trusted_user = _trusted_metadata(con, project, message)
             sender = str(message.get("from") or message.get("sender_name") or "")
@@ -1146,7 +1161,7 @@ def request_pause(
     project = str(Path(project_key).expanduser().resolve())
     checkpoint = _automatic_checkpoint(cwd)
     checkpoint["step_state"] = "uncertain" if hard else "safe_point_requested"
-    with _connect() as con:
+    with _managed_connection() as con:
         meta_row = con.execute(
             "SELECT meta_json,sender FROM message_meta WHERE project_key=? AND message_id=?",
             (project, int(message_id)),
@@ -1202,7 +1217,7 @@ def dismiss_message(
     """人在 UI 中确认后归档，防止同一消息随后又被 Agent 执行。"""
     current = time.time() if now is None else now
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    with _managed_connection() as con:
         con.execute(
             "INSERT INTO receipts(project_key,recipient,message_id,intent,importance,state,"
             "reason,ack_pending,created_ts,updated_ts) "
@@ -1393,7 +1408,7 @@ def fail_message(
 
 def mark_acked(project_key: str, recipient: str, message_id: int) -> None:
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    with _managed_connection() as con:
         con.execute(
             "UPDATE receipts SET ack_pending=0 WHERE project_key=? AND recipient=? "
             "AND message_id=?",
@@ -1403,7 +1418,7 @@ def mark_acked(project_key: str, recipient: str, message_id: int) -> None:
 
 def receipt(project_key: str, recipient: str, message_id: int) -> dict[str, Any] | None:
     project = str(Path(project_key).expanduser().resolve())
-    with _connect() as con:
+    with _managed_connection() as con:
         return _dict(con.execute(
             "SELECT * FROM receipts WHERE project_key=? AND recipient=? AND message_id=?",
             (project, recipient, int(message_id)),
@@ -1418,7 +1433,7 @@ def maintain_live_claims(snapshot: dict[str, Any], *, now: float | None = None) 
         if pane.get("pane_id") and pane.get("agent_status") not in ("done", "unknown")
     }
     renewed = 0
-    with _connect() as con:
+    with _managed_connection() as con:
         rows = con.execute(
             "SELECT q.project_key,q.recipient,q.message_id,r.session,p.pane_id "
             "FROM receipts q JOIN runs r ON r.run_id=q.run_id "
@@ -1460,7 +1475,7 @@ def close_session(
     session: str, state: str = "completed", *, now: float | None = None,
 ) -> int:
     current = time.time() if now is None else now
-    with _connect() as con:
+    with _managed_connection() as con:
         rows = con.execute(
             "SELECT run_id FROM runs WHERE session=? AND state='active'", (session,)
         ).fetchall()
@@ -1477,7 +1492,7 @@ def close_session(
 
 
 def run_by_session(session: str) -> dict[str, Any] | None:
-    with _connect() as con:
+    with _managed_connection() as con:
         run = _dict(con.execute(
             "SELECT * FROM runs WHERE session=? ORDER BY revision DESC LIMIT 1",
             (session,),
@@ -1499,7 +1514,7 @@ def _task_report_result(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def task_report(session: str, pane_id: str) -> dict[str, Any] | None:
-    with _connect() as con:
+    with _managed_connection() as con:
         row = con.execute(
             "SELECT * FROM task_reports WHERE session=? AND pane_id=?",
             (session, pane_id),
@@ -1508,7 +1523,7 @@ def task_report(session: str, pane_id: str) -> dict[str, Any] | None:
 
 
 def task_reports(session: str) -> dict[str, dict[str, Any]]:
-    with _connect() as con:
+    with _managed_connection() as con:
         rows = con.execute(
             "SELECT * FROM task_reports WHERE session=?", (session,),
         ).fetchall()
@@ -1525,7 +1540,7 @@ def request_task_report(
     """登记最新上报请求；同一 pane 换 Agent 时清掉旧 Agent 的报告。"""
     current = time.time() if now is None else now
     request_id = request_id or uuid.uuid4().hex
-    with _connect() as con:
+    with _managed_connection() as con:
         con.execute("BEGIN IMMEDIATE")
         previous = con.execute(
             "SELECT agent_type,mail_name FROM task_reports "
@@ -1567,7 +1582,7 @@ def request_task_report(
 def fail_task_report_request(
     session: str, pane_id: str, request_id: str, error: str,
 ) -> bool:
-    with _connect() as con:
+    with _managed_connection() as con:
         changed = con.execute(
             "UPDATE task_reports SET request_error=? WHERE session=? AND pane_id=? "
             "AND request_id=?",
@@ -1601,7 +1616,7 @@ def submit_task_report(
     next_step = _task_report_text(next_step, "next_step")
     blocker = _task_report_text(blocker, "blocker")
     current = time.time() if now is None else now
-    with _connect() as con:
+    with _managed_connection() as con:
         con.execute("BEGIN IMMEDIATE")
         row = con.execute(
             "SELECT request_id FROM task_reports WHERE session=? AND pane_id=?",

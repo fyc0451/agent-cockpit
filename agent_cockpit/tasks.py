@@ -30,6 +30,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -85,14 +86,28 @@ def _db() -> sqlite3.Connection:
     runtime_paths.validate_store("tasks")  # R3-B:symlink 逃逸 fail-closed
     TASKS_DB.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(TASKS_DB)
-    con.row_factory = sqlite3.Row
-    _ensure_schema(con)
-    if not _db_swept:
-        with _db_init_lock:
-            if not _db_swept:
-                _mark_interrupted(con)
-                _db_swept = True
-    return con
+    try:
+        con.row_factory = sqlite3.Row
+        _ensure_schema(con)
+        if not _db_swept:
+            with _db_init_lock:
+                if not _db_swept:
+                    _mark_interrupted(con)
+                    _db_swept = True
+        return con
+    except BaseException:
+        con.close()
+        raise
+
+
+@contextmanager
+def _managed_db():
+    con = _db()
+    try:
+        with con:
+            yield con
+    finally:
+        con.close()
 
 
 def _ensure_schema(con: sqlite3.Connection) -> None:
@@ -171,14 +186,14 @@ def _migrate_db(con: sqlite3.Connection) -> None:
 
 def _clear_run_workdir(task_id: str) -> None:
     """清空 DB 中任务的 run_workdir 字段。"""
-    with _db() as con:
+    with _managed_db() as con:
         con.execute("UPDATE tasks SET run_workdir=NULL WHERE id=?", (task_id,))
         con.commit()
 
 
 def _delete_task(task_id: str) -> None:
     """从 DB 中删除任务记录。"""
-    with _db() as con:
+    with _managed_db() as con:
         con.execute("DELETE FROM tasks WHERE id=?", (task_id,))
         con.commit()
 
@@ -359,7 +374,7 @@ def cleanup_worktrees(max_age_hours: float = 48) -> dict[str, Any]:
     cutoff = time.time() - max_age_hours * 3600
     removed: list[str] = []
     errors: list[str] = []
-    with _db() as con:
+    with _managed_db() as con:
         rows = con.execute(
             "SELECT id, workdir, run_workdir FROM tasks "
             "WHERE run_workdir IS NOT NULL AND finished_ts IS NOT NULL "
@@ -386,7 +401,7 @@ def cleanup_worktrees(max_age_hours: float = 48) -> dict[str, Any]:
 # ── Public API ──────────────────────────────────────────────────
 
 def list_tasks(limit: int = 50) -> list[dict[str, Any]]:
-    with _db() as con:
+    with _managed_db() as con:
         rows = con.execute(
             "SELECT id, workdir, source_workdir, base_sha, run_workdir, preview_hash, "
             "prompt, model, status, pid, exit_code, "
@@ -414,7 +429,7 @@ def task_stats() -> dict[str, Any]:
     }
     durations: list[float] = []
     unknown_count = 0
-    with _db() as con:
+    with _managed_db() as con:
         rows = con.execute(
             "SELECT status, started_ts, finished_ts FROM tasks"
         ).fetchall()
@@ -469,7 +484,7 @@ def output_buffer_stats() -> dict[str, int]:
 
 
 def get_task(task_id: str) -> dict[str, Any] | None:
-    with _db() as con:
+    with _managed_db() as con:
         row = con.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if not row:
             return None
@@ -506,7 +521,7 @@ def start_task(
     # worktree 创建成功后,DB insert / Thread / start 任一失败都需清理
     try:
         now = time.time()
-        with _db() as con:
+        with _managed_db() as con:
             con.execute(
                 "INSERT INTO tasks (id, workdir, source_workdir, base_sha, run_workdir, "
                 "prompt, images, model, status, created_ts) "
@@ -598,7 +613,7 @@ def _fail_task_closed(task_id: str, reason: str) -> None:
     msg = f"[ERROR] {reason}"
     finished = time.time()
     try:
-        with _db() as con:
+        with _managed_db() as con:
             con.execute(
                 "UPDATE tasks SET status='failed', exit_code=-1, finished_ts=?, "
                 "output_tail=CASE WHEN output_tail IS NULL OR output_tail='' THEN ? "
@@ -744,7 +759,7 @@ def recover_pending_tasks() -> dict[str, Any]:
             }
         # 列库必须在置 done 之前;失败保持未完成以便重试
         try:
-            with _db() as con:
+            with _managed_db() as con:
                 rows = con.execute(
                     "SELECT * FROM tasks WHERE status = 'pending' "
                     "ORDER BY created_ts ASC"
@@ -845,7 +860,7 @@ def _run_codex(
 
         started = time.time()
         try:
-            with _db() as con:
+            with _managed_db() as con:
                 cur = con.execute(
                     "UPDATE tasks SET status='running', started_ts=? "
                     "WHERE id=? AND status='pending'",
@@ -883,7 +898,7 @@ def _run_codex(
                     with _tasks_lock:
                         _active_processes[task_id] = proc
                         cancelled = task_id in _cancel_requested
-                    with _db() as con:
+                    with _managed_db() as con:
                         con.execute(
                             "UPDATE tasks SET pid=? WHERE id=?",
                             (proc.pid, task_id),
@@ -968,7 +983,7 @@ def _run_codex(
             status = "done" if exit_code == 0 else "failed"
         with _tasks_lock:
             tail = "\n".join(_output_buffers.get(task_id, [])[-50:])
-        with _db() as con:
+        with _managed_db() as con:
             con.execute(
                 "UPDATE tasks SET status=?, exit_code=?, finished_ts=?, "
                 "output_tail=? WHERE id=?",
@@ -1014,7 +1029,7 @@ def task_diff(task_id: str) -> dict[str, Any]:
         diff_bytes = _stage_and_diff(Path(run_workdir))
         preview_hash = _compute_diff_hash(diff_bytes)
 
-        with _db() as con:
+        with _managed_db() as con:
             con.execute(
                 "UPDATE tasks SET preview_hash=? WHERE id=?", (preview_hash, task_id)
             )
