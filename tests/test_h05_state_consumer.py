@@ -1465,12 +1465,40 @@ def _hold_client_lock(entered, release):
         release.wait(5)
 
 
+class _RecordingClientLock:
+    """R11/D3:代理 CLIENT RLock,记录 acquire(timeout>=0)。"""
+
+    def __init__(self):
+        self._inner = threading.RLock()
+        self.timeouts: list[float] = []
+
+    def acquire(self, blocking=True, timeout=-1):
+        if timeout is not None and timeout >= 0:
+            self.timeouts.append(float(timeout))
+        return self._inner.acquire(blocking=blocking, timeout=timeout)
+
+    def release(self):
+        return self._inner.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+
 def test_stop_client_lock_held_defers_with_published_client(monkeypatch):
     """R11:有 published client 时 CLIENT 锁被持有 > budget→stop 在总预算
-    内 deferred(client_lock_timeout),wall-clock<=budget+容差;ticket
-    持久,running/ownership 零部分变更;释放后 open 仍 False,retry stop
-    完成后 open True。"""
-    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.2)
+    内 deferred(client_lock_timeout);ticket 持久,running/ownership 零部分
+    变更;释放后 open 仍 False,retry stop 完成后 open True。
+
+    D3:RecordingLock timeout≤budget + holder 仍持锁 + 宽松 watchdog。"""
+    budget = 0.2
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", budget)
+    lock = _RecordingClientLock()
+    monkeypatch.setattr(server, "_STATE_CLIENT_LOCK", lock)
     c = FakeStateClient({"s": "/tmp/s.sock"})
     c.start()
     monkeypatch.setattr(server, "_state_clients", {"s": c})
@@ -1481,7 +1509,7 @@ def test_stop_client_lock_held_defers_with_published_client(monkeypatch):
     t = threading.Thread(target=_hold_client_lock, args=(entered, release))
     t.start()
     assert entered.wait(5)
-    budget = 0.2
+    lock.timeouts.clear()
     t0 = time.monotonic()
     r = server._stop_state_client()
     elapsed = time.monotonic() - t0
@@ -1489,7 +1517,10 @@ def test_stop_client_lock_held_defers_with_published_client(monkeypatch):
     assert r[0]["reason"] == "client_lock_timeout"
     assert r[0].get("ticket") in server._state_stop_tickets
     assert t.is_alive()  # holder 仍持 CLIENT
-    assert elapsed < budget + 2.0  # hang guard only (D3:非贴边正确性)
+    assert not server._STATE_CLIENT_LOCK.acquire(blocking=False)
+    assert lock.timeouts, "expected CLIENT.acquire(timeout=remaining)"
+    assert all(x <= budget + 1e-9 for x in lock.timeouts), lock.timeouts
+    assert elapsed < budget + 2.0  # hang guard only
     assert server._state_stop_tickets  # intent 持久
     # 零部分变更:running 未动,client 未被摘/未停,无 retiring 残留
     assert server._state_running is True
@@ -1508,13 +1539,18 @@ def test_stop_client_lock_held_defers_with_published_client(monkeypatch):
 
 def test_stop_client_lock_held_defers_without_client(monkeypatch):
     """R11:无 published client 时 CLIENT 锁被持有 > budget 同样在预算内
-    deferred、零部分变更;释放后 open 仍 False,retry 后 open True。"""
-    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.2)
+    deferred、零部分变更;释放后 open 仍 False,retry 后 open True。
+
+    D3:RecordingLock timeout≤budget + holder 仍持锁 + 宽松 watchdog。"""
+    budget = 0.2
+    monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", budget)
+    lock = _RecordingClientLock()
+    monkeypatch.setattr(server, "_STATE_CLIENT_LOCK", lock)
     entered, release = threading.Event(), threading.Event()
     t = threading.Thread(target=_hold_client_lock, args=(entered, release))
     t.start()
     assert entered.wait(5)
-    budget = 0.2
+    lock.timeouts.clear()
     t0 = time.monotonic()
     r = server._stop_state_client()
     elapsed = time.monotonic() - t0
@@ -1522,7 +1558,10 @@ def test_stop_client_lock_held_defers_without_client(monkeypatch):
     assert r[0]["reason"] == "client_lock_timeout"
     assert r[0].get("ticket") in server._state_stop_tickets
     assert t.is_alive()  # holder 仍持 CLIENT
-    assert elapsed < budget + 2.0  # hang guard only (D3)
+    assert not server._STATE_CLIENT_LOCK.acquire(blocking=False)
+    assert lock.timeouts, "expected CLIENT.acquire(timeout=remaining)"
+    assert all(x <= budget + 1e-9 for x in lock.timeouts), lock.timeouts
+    assert elapsed < budget + 2.0  # hang guard only
     assert server._state_stop_tickets
     assert server._state_running is True  # 零部分变更
     assert server._state_clients == {}
