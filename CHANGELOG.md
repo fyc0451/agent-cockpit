@@ -8,6 +8,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Accept pane-scoped `typing.json` in sealed upgrade snapshots so a valid
+  terminal input-avoidance state cannot block native upgrades.
 - Set OpenCode's light/dark mode explicitly in addition to selecting its theme,
   so the light Web theme renders a genuinely light OpenCode background.
 - Switch live OpenCode themes through its dedicated theme dialog so rapid

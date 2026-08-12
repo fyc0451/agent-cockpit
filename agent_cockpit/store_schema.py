@@ -1435,10 +1435,10 @@ def probe_snapshot_stores(snapshot_root: Path) -> list[dict[str, Any]]:
                 )
             elif name == "settings":
                 result = _check_settings(path)
-            elif name in _JSON_VERSIONED:
-                result = _check_versioned_json(name, path=path)
             elif name == "typing":
                 result = _check_typing(path)
+            elif name in _JSON_VERSIONED:
+                result = _check_versioned_json(name, path=path)
             elif name == "file_roots":
                 result = _check_file_roots(path)
             else:

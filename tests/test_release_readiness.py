@@ -654,6 +654,34 @@ def test_snapshot_probe_requires_controller_owned_0600_files(tmp_path):
     assert result["settings"]["reason"] == store_schema.REASON_UNSAFE
 
 
+def test_snapshot_probe_accepts_pane_scoped_typing_state(tmp_path):
+    snapshot = _make_snapshot(tmp_path)
+    state = snapshot / "state"
+    state.mkdir(mode=0o700)
+    typing = state / "typing.json"
+    typing.write_text(
+        json.dumps({
+            "github-agent-cockpit": {
+                "panes": {"w1:p2": 1_786_536_286.0},
+                "unknown": 1_786_536_287.0,
+            },
+        }),
+        encoding="ascii",
+    )
+    os.chmod(typing, 0o600)
+
+    result = {
+        item["name"]: item for item in store_schema.probe_snapshot_stores(snapshot)
+    }
+
+    assert result["typing"] == {
+        "name": "typing",
+        "compat_family": store_schema.COMPAT_FAMILY,
+        "state": "compatible",
+        "reason": store_schema.REASON_COMPATIBLE,
+    }
+
+
 def test_server_ready_uses_evidence_without_opening_active_stores(monkeypatch):
     monkeypatch.setattr(
         store_schema,
