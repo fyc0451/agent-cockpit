@@ -16,7 +16,7 @@ Doctor -> Project -> Workbench -> Local Workspace -> Files or Terminal
 Hash routes carry stable identities and survive refresh:
 
 ```text
-#/settings/doctor
+#/settings?view=doctor
 #/projects/:projectSlug/workbench
 #/projects/:projectSlug/workspaces/:workspaceId
 #/projects/:projectSlug/workspaces/:workspaceId/files
