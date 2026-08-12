@@ -47,6 +47,13 @@ Start the source development service only after the checks pass:
 .venv/bin/python scripts/next_dev.py start --env-file .env.next
 ```
 
+This `start` command is the only supported entry point for the Next backend. It
+holds a per-profile process lock across the server `execve`; direct ASGI server
+invocations and other external entry points are not protected by that lock.
+Symlink aliases of the same data and config roots share one lock identity, while
+profiles with different real roots may run concurrently. Lock metadata is only
+diagnostic and is never used to signal or terminate a process.
+
 The service is expected at `http://127.0.0.1:18790`. Do not run `install.sh`,
 `upgrade.sh`, `launchd.sh`, or any command targeting `agent-cockpit.service`
 from this worktree.

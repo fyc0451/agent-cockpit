@@ -13,6 +13,10 @@ import sys
 from pathlib import Path
 from typing import Mapping
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from agent_cockpit.instance_lock import InstanceLock, LockError
+
 
 BASE_SHA = "169d0af7751b568e813d2cbca285a9f147e86001"
 NEXT_SESSION = "github-agent-cockpit-next"
@@ -269,6 +273,29 @@ def _unit_not_installed() -> bool:
     return result.returncode == 0 and result.stdout.strip() == "not-found"
 
 
+def _prepare_exec_fds(lock_fd: int | None) -> None:
+    if lock_fd is None:
+        raise IsolationError("lock_fd_missing")
+    try:
+        entries = os.listdir("/proc/self/fd")
+    except OSError as exc:
+        raise IsolationError("fd_inventory_unavailable") from exc
+    for entry in entries:
+        if not entry.isdecimal():
+            continue
+        fd = int(entry)
+        if fd <= 2 or fd == lock_fd:
+            continue
+        try:
+            os.set_inheritable(fd, False)
+        except OSError as exc:
+            try:
+                os.fstat(fd)
+            except OSError:
+                continue
+            raise IsolationError("fd_sanitize_failed") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("check", "start"))
@@ -289,12 +316,17 @@ def main(argv: list[str] | None = None) -> int:
                 raise IsolationError("venv_missing")
             environment = sanitized_environment(values)
             environment["VIRTUAL_ENV"] = str(repo / ".venv")
-            os.chdir(repo)
-            os.execve(
-                str(python),
-                [str(python), str(repo / "server.py")],
-                environment,
-            )
+            try:
+                with InstanceLock(values) as lock:
+                    _prepare_exec_fds(lock.fd)
+                    os.chdir(repo)
+                    os.execve(
+                        str(python),
+                        [str(python), str(repo / "server.py")],
+                        environment,
+                    )
+            except LockError as exc:
+                raise IsolationError(exc.code) from exc
     except IsolationError as exc:
         result = {"ok": False, "error": exc.code}
         if args.json:
