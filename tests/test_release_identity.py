@@ -65,6 +65,8 @@ def test_frozen_identity_comes_from_generation_not_stale_env(tmp_path, monkeypat
         ("wrong_edition", "native_manifest_invalid"),
         ("wrong_sha", "native_source_sha_mismatch"),
         ("wrong_version", "native_version_mismatch"),
+        ("version_symlink", "native_version_unsafe"),
+        ("version_directory", "native_version_unsafe"),
     ],
 )
 def test_frozen_manifest_fail_closed(tmp_path, monkeypatch, mutation, reason):
@@ -91,6 +93,15 @@ def test_frozen_manifest_fail_closed(tmp_path, monkeypatch, mutation, reason):
     elif mutation == "wrong_version":
         value["version"] = "9.9.9"
         manifest.write_text(json.dumps(value), encoding="utf-8")
+    elif mutation == "version_symlink":
+        version = generation / "VERSION"
+        external = generation.parent / "external-VERSION"
+        version.rename(external)
+        version.symlink_to(external)
+    elif mutation == "version_directory":
+        version = generation / "VERSION"
+        version.unlink()
+        version.mkdir()
 
     with pytest.raises(release_identity.ReleaseIdentityError, match=reason):
         release_identity.get_release_identity()

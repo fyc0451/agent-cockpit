@@ -18,7 +18,6 @@ import re
 import stat
 import sys
 import uuid
-from pathlib import Path
 from typing import Any
 
 from artifact_root import resolve_artifact_root
@@ -34,7 +33,7 @@ _ALLOWED_REASONS = frozenset({
     "version_unavailable", "native_generation_invalid",
     "native_manifest_missing", "native_manifest_unsafe",
     "native_manifest_invalid", "native_source_sha_mismatch",
-    "native_version_mismatch", "unexpected",
+    "native_version_unsafe", "native_version_mismatch", "unexpected",
 })
 _instance_id: str = uuid.uuid4().hex
 _cached: dict[str, Any] | None = None
@@ -85,8 +84,17 @@ def _compute_frozen_identity() -> dict[str, Any]:
         raise ReleaseIdentityError("native_manifest_invalid")
     if manifest["source_sha"] != match.group(1):
         raise ReleaseIdentityError("native_source_sha_mismatch")
+    version_path = root / "VERSION"
     try:
-        version = read_current_version(root / "VERSION")
+        version_info = version_path.lstat()
+    except FileNotFoundError as exc:
+        raise ReleaseIdentityError("version_unavailable") from exc
+    except OSError as exc:
+        raise ReleaseIdentityError("native_version_unsafe") from exc
+    if not stat.S_ISREG(version_info.st_mode) or version_path.is_symlink():
+        raise ReleaseIdentityError("native_version_unsafe")
+    try:
+        version = read_current_version(version_path)
     except Exception as exc:
         raise ReleaseIdentityError("version_unavailable") from exc
     if manifest["version"] != version:
