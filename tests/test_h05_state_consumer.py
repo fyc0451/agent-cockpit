@@ -2078,14 +2078,43 @@ class TestDurableStopTicketR15:
                 self.stopped = True
             return self.stop_ok
 
+    class _RecordingLock:
+        """代理 Lock/RLock:记录 timeout>=0 的 acquire(timeout=) 实参。"""
+
+        def __init__(self, *, rlock: bool = False):
+            self._inner = threading.RLock() if rlock else threading.Lock()
+            self.timeouts: list[float] = []
+
+        def acquire(self, blocking=True, timeout=-1):
+            if timeout is not None and timeout >= 0:
+                self.timeouts.append(float(timeout))
+            return self._inner.acquire(blocking=blocking, timeout=timeout)
+
+        def release(self):
+            return self._inner.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+            return False
+
     @pytest.mark.parametrize("initial_stop_ok", [True, False])
     def test_phase2_client_barrier_requires_retry_global_stop(
         self, monkeypatch, initial_stop_ok,
     ):
         """完整 stop=True/False phase2 barrier：预算内明确 deferred，
         ticket/owner 持久；仅 reaper 摘 owner 后 direct open 仍拒绝，retry
-        global stop identity-safe 完成后才消费并允许 explicit open。"""
-        monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.1)
+        global stop identity-safe 完成后才消费并允许 explicit open。
+
+        D2:用 Recording CLIENT lock + holder 仍持锁/ticket 未消费语义，
+        替代贴边 wall-clock(budget+0.15)。"""
+        budget = 0.1
+        monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", budget)
+        client_lock = self._RecordingLock(rlock=True)
+        monkeypatch.setattr(server, "_STATE_CLIENT_LOCK", client_lock)
         entered, holder_has, release = (
             threading.Event(), threading.Event(), threading.Event()
         )
@@ -2107,13 +2136,20 @@ class TestDurableStopTicketR15:
 
         holder = threading.Thread(target=hold_client_after_stop)
         holder.start()
+        client_lock.timeouts.clear()
         start = time.monotonic()
         result = server._stop_state_client()
         elapsed = time.monotonic() - start
-        assert elapsed < 0.1 + 0.15
         assert result and result[0]["deferred"] is True
         assert result[0]["reason"] == "phase2_state_lock_timeout"
-        assert server._state_stop_tickets == {result[0]["ticket"]}
+        ticket = result[0]["ticket"]
+        assert server._state_stop_tickets == {ticket}
+        # 语义:返回时 holder 仍持 CLIENT；bounded acquire timeout≤budget
+        assert holder.is_alive()
+        assert not server._STATE_CLIENT_LOCK.acquire(blocking=False)
+        assert client_lock.timeouts, "expected bounded CLIENT.acquire during phase2"
+        assert all(t <= budget + 1e-9 for t in client_lock.timeouts), client_lock.timeouts
+        assert elapsed < budget + 2.0  # hang guard only
         release.set()
         holder.join(5)
         assert not holder.is_alive()
@@ -2134,8 +2170,14 @@ class TestDurableStopTicketR15:
 
     def test_ticket_consume_barrier_defers_and_preserves_intent(self, monkeypatch):
         """phase2 已回收后完成消费 TICKET 锁被持有：same deadline 内
-        deferred，ticket 持久；释放后仍需 retry global stop。"""
-        monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", 0.1)
+        deferred，ticket 持久；释放后仍需 retry global stop。
+
+        D2:Recording TICKET lock + holder 仍持锁/ticket 未消费语义，
+        替代贴边 wall-clock(0.1+0.15；macOS 3.14 曾 0.254>0.25)。"""
+        budget = 0.1
+        monkeypatch.setattr(server, "STATE_STOP_JOIN_TIMEOUT_S", budget)
+        ticket_lock = self._RecordingLock(rlock=False)
+        monkeypatch.setattr(server, "_STATE_TICKET_LOCK", ticket_lock)
         entered, holder_has, release = (
             threading.Event(), threading.Event(), threading.Event()
         )
@@ -2156,13 +2198,20 @@ class TestDurableStopTicketR15:
 
         holder = threading.Thread(target=hold_ticket_after_stop)
         holder.start()
+        ticket_lock.timeouts.clear()
         start = time.monotonic()
         result = server._stop_state_client()
         elapsed = time.monotonic() - start
-        assert elapsed < 0.1 + 0.15
         assert result and result[0]["deferred"] is True
         assert result[0]["reason"] == "ticket_consume_timeout"
         ticket = result[0]["ticket"]
+        # 语义:TICKET 未消费；holder 仍持锁；consume 的 timeout≤budget
+        assert server._state_stop_tickets == {ticket}
+        assert holder.is_alive()
+        assert not server._STATE_TICKET_LOCK.acquire(blocking=False)
+        assert ticket_lock.timeouts, "expected TICKET.acquire(timeout=remaining) at consume"
+        assert all(t <= budget + 1e-9 for t in ticket_lock.timeouts), ticket_lock.timeouts
+        assert elapsed < budget + 2.0  # hang guard only
         release.set()
         holder.join(5)
         assert not holder.is_alive()
