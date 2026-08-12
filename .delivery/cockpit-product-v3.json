@@ -164,6 +164,27 @@
       "user_acceptance_evidence": null
     },
     {
+      "id": "WEB-002-next-static-entry",
+      "title": "Serve the React build only from the isolated Next profile",
+      "status": "in_progress",
+      "depends_on": ["RUNTIME-001-profile-lock", "WEB-001-app-shell"],
+      "scope": ["agent_cockpit/server.py", "tests/test_next_web_entry.py"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_next_web_entry.py tests/test_web_push.py tests/test_artifact_root.py", "passed": false},
+        {"command": "npm --prefix web run build", "passed": false}
+      ],
+      "rollback": "Revert the Next Web entry commit; keep the isolated Next service stopped until a validated React build is available",
+      "production_impact": "none",
+      "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
       "id": "PROJ-001-registry-store",
       "title": "Add the Project RepoLocation and Workspace registry store",
       "status": "planned",
