@@ -6,6 +6,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Publish version 0.3.3 without runtime or frontend changes so the signed native
+  release and GUI upgrade flow can be exercised end to end by the operator.
+
 ### Fixed
 
 - Accept pane-scoped `typing.json` in sealed upgrade snapshots so a valid
