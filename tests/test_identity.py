@@ -358,6 +358,59 @@ def test_board_snapshot_keeps_same_kind_managed_instances_separate(monkeypatch, 
     assert seen == [("/project", "codex", first), ("/project", "codex", second)]
 
 
+def test_board_snapshot_uses_descriptor_product_for_zcode_registry(monkeypatch, tmp_path):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name=instance_id, kind="opencode",
+        args=[], agent="zcode", instance_id=instance_id, display_name="ZCode",
+    )
+    snapshot = {
+        "sessions": [{"session": "demo", "directory": "/sessions/demo"}],
+        "panes": [{
+            "session": "demo", "pane_id": "w1:p1", "agent": "opencode",
+        }],
+    }
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_args: "/project")
+    seen = []
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda project, agent, instance: seen.append((project, agent, instance))
+        or "ZCodeMailbox",
+    )
+
+    result = server._enrich_board_identities(snapshot)
+
+    assert result["panes"][0]["mail_name"] == "ZCodeMailbox"
+    assert seen == [("/project", "zcode", instance_id)]
+
+
+def test_board_snapshot_omits_ambiguous_legacy_main_for_same_type(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    snapshot = {
+        "sessions": [{"session": "demo", "directory": "/sessions/demo"}],
+        "panes": [
+            {"session": "demo", "pane_id": "w1:p1", "agent": "codex"},
+            {"session": "demo", "pane_id": "w1:p2", "agent": "codex"},
+        ],
+    }
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_args: "/project")
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("多个无 descriptor pane不得共享 legacy main")
+        ),
+    )
+
+    result = server._enrich_board_identities(snapshot)
+
+    assert all("mail_name" not in pane for pane in result["panes"])
+
+
 def test_agent_mail_db_prefers_new_xdg_install_path(monkeypatch, tmp_path):
     data_home = tmp_path / "share"
     new_db = data_home / "mcp_agent_mail" / "storage.sqlite3"

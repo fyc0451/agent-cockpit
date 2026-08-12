@@ -292,7 +292,7 @@ def test_agent_mail_helpers_are_packaged_and_safely_linked():
     tools = ROOT / "agent-mail-tools"
     for name in (
         "am-register", "am-retire", "am-init-project", "mail-send", "mail-recv",
-        "mail-identity-inject",
+        "mail-identity-inject", "mail-hook-check",
     ):
         path = tools / name
         assert path.is_file(), f"missing Agent Mail helper: {name}"
@@ -314,7 +314,7 @@ def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path
     tools.mkdir(parents=True)
     for name in (
         "am-register", "am-retire", "am-init-project", "mail-send", "mail-recv",
-        "mail-identity-inject",
+        "mail-identity-inject", "mail-hook-check",
     ):
         path = tools / name
         path.write_text("#!/usr/bin/env bash\n")
@@ -358,6 +358,183 @@ def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path
     assert (bin_dir / "mail-identity-inject").resolve() == tools / "mail-identity-inject"
     assert legacy_hook.resolve() == tools / "mail-identity-inject"
     assert (legacy_dir / "mail-identity-inject.pre-cockpit").is_file()
+
+
+def test_agent_mail_plugin_known_legacy_hash_activates_with_rollback_backup(tmp_path):
+    installer = (ROOT / "install-agent-mail-tools.sh").read_text(encoding="utf-8")
+    assert "143e3a4bbd2e87d754cafb7125808acd2321e203352c1735950bc51e2ffebb22" in installer
+    assert "agent-mail.js.pre-zcode-r5" in installer
+    assert "ACTIVATION_BLOCK" in installer
+
+    install_dir = tmp_path / "install"
+    shutil.copytree(ROOT / "agent-mail-tools", install_dir / "agent-mail-tools")
+    home = tmp_path / "home"
+    plugin = home / ".config" / "opencode" / "plugins" / "agent-mail.js"
+    plugin.parent.mkdir(parents=True)
+    legacy = ROOT / "tests" / "fixtures" / "agent-mail-legacy.js"
+    plugin.write_bytes(legacy.read_bytes())
+    plugin.chmod(0o600)
+    before = plugin.read_bytes()
+    env = {**os.environ, "HOME": str(home)}
+
+    first = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert first.returncode == 0
+    backup = plugin.parent / "agent-mail.js.pre-zcode-r5"
+    assert plugin.is_symlink()
+    assert plugin.resolve() == install_dir / "agent-mail-tools" / "agent-mail.opencode-plugin.js"
+    assert backup.is_file() and not backup.is_symlink()
+    assert backup.read_bytes() == before
+    assert (backup.stat().st_mode & 0o777) == 0o600
+
+    second = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert second.returncode == 0
+    assert plugin.is_symlink()
+    assert backup.read_bytes() == before
+
+
+def test_agent_mail_legacy_hook_check_known_hash_migrates_with_rollback_backup(tmp_path):
+    installer = (ROOT / "install-agent-mail-tools.sh").read_text(encoding="utf-8")
+    assert "493f9bde787d8fa5fbadcee5690a436b9654d2c2f5be9861dff3203f4fddda7e" in installer
+    assert "mail-hook-check.pre-cockpit" in installer
+
+    install_dir = tmp_path / "install"
+    shutil.copytree(ROOT / "agent-mail-tools", install_dir / "agent-mail-tools")
+    legacy_fixture = ROOT / "tests" / "fixtures" / "mail-hook-check.legacy.sh"
+    home = tmp_path / "home"
+    legacy_dir = home / "agent-mail-tools"
+    legacy_dir.mkdir(parents=True)
+    hook = legacy_dir / "mail-hook-check"
+    hook.write_bytes(legacy_fixture.read_bytes())
+    hook.chmod(0o755)
+    before = hook.read_bytes()
+    env = {**os.environ, "HOME": str(home)}
+
+    first = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert first.returncode == 0, first.stderr
+    backup = legacy_dir / "mail-hook-check.pre-cockpit"
+    assert hook.is_symlink()
+    assert hook.resolve() == install_dir / "agent-mail-tools" / "mail-hook-check"
+    assert backup.is_file() and not backup.is_symlink()
+    assert backup.read_bytes() == before
+
+    second = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert second.returncode == 0, second.stderr
+    assert hook.is_symlink()
+    assert backup.read_bytes() == before
+
+
+def test_agent_mail_legacy_hook_check_unknown_hash_is_preserved(tmp_path):
+    install_dir = tmp_path / "install"
+    shutil.copytree(ROOT / "agent-mail-tools", install_dir / "agent-mail-tools")
+    home = tmp_path / "home"
+    legacy_dir = home / "agent-mail-tools"
+    legacy_dir.mkdir(parents=True)
+    hook = legacy_dir / "mail-hook-check"
+    hook.write_text("#!/usr/bin/env bash\necho user-custom hook\n")
+    hook.chmod(0o755)
+    before = hook.read_bytes()
+
+    result = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env={**os.environ, "HOME": str(home)}, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert hook.is_file() and not hook.is_symlink()
+    assert hook.read_bytes() == before
+    assert "ACTIVATION_BLOCK" in result.stderr
+    assert not (legacy_dir / "mail-hook-check.pre-cockpit").exists()
+
+
+def test_agent_mail_legacy_hook_check_ln_failure_restores_original(tmp_path):
+    install_dir = tmp_path / "install"
+    shutil.copytree(ROOT / "agent-mail-tools", install_dir / "agent-mail-tools")
+    legacy_fixture = ROOT / "tests" / "fixtures" / "mail-hook-check.legacy.sh"
+    home = tmp_path / "home"
+    legacy_dir = home / "agent-mail-tools"
+    legacy_dir.mkdir(parents=True)
+    hook = legacy_dir / "mail-hook-check"
+    hook.write_bytes(legacy_fixture.read_bytes())
+    hook.chmod(0o755)
+    before_bytes = hook.read_bytes()
+    before_mode = hook.stat().st_mode & 0o777
+    backup = legacy_dir / "mail-hook-check.pre-cockpit"
+
+    # 定向 fake ln：仅拒绝 legacy mail-hook-check 链接，其余调用委托真实 ln
+    real_ln = shutil.which("ln") or "/usr/bin/ln"
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    fake_script = (
+        "#!/usr/bin/env bash\n"
+        'last="${@: -1}"\n'
+        'if [[ "$last" == "__FAIL_TARGET__" ]]; then\n'
+        '  echo "fake-ln: refuse $last" >&2\n'
+        "  exit 1\n"
+        'fi\n'
+        'exec "__REAL_LN__" "$@"\n'
+    ).replace("__FAIL_TARGET__", str(hook)).replace("__REAL_LN__", real_ln)
+    (fake_bin / "ln").write_text(fake_script)
+    (fake_bin / "ln").chmod(0o755)
+    env = {
+        **os.environ, "HOME": str(home),
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+    }
+
+    result = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    # 旧 regular 文件内容/hash/mode 原样恢复
+    assert hook.is_file() and not hook.is_symlink()
+    assert hook.read_bytes() == before_bytes
+    assert (hook.stat().st_mode & 0o777) == before_mode
+    # 回滚后备份不得残留
+    assert not backup.exists() and not backup.is_symlink()
+    assert "ACTIVATION_BLOCK" in result.stderr
+    assert "回滚" in result.stderr
+
+
+def test_agent_mail_legacy_hook_check_existing_backup_is_not_overwritten(tmp_path):
+    install_dir = tmp_path / "install"
+    shutil.copytree(ROOT / "agent-mail-tools", install_dir / "agent-mail-tools")
+    legacy_fixture = ROOT / "tests" / "fixtures" / "mail-hook-check.legacy.sh"
+    home = tmp_path / "home"
+    legacy_dir = home / "agent-mail-tools"
+    legacy_dir.mkdir(parents=True)
+    hook = legacy_dir / "mail-hook-check"
+    hook.write_bytes(legacy_fixture.read_bytes())
+    hook.chmod(0o755)
+    hook_before = hook.read_bytes()
+    backup = legacy_dir / "mail-hook-check.pre-cockpit"
+    backup.write_bytes(b"prior-backup-do-not-touch\n")
+    backup.chmod(0o600)
+    backup_before = backup.read_bytes()
+
+    result = subprocess.run(
+        [str(ROOT / "install-agent-mail-tools.sh"), str(install_dir)],
+        env={**os.environ, "HOME": str(home)}, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    # legacy 保持原样，未转软链
+    assert hook.is_file() and not hook.is_symlink()
+    assert hook.read_bytes() == hook_before
+    # 已有备份未被覆盖
+    assert backup.is_file() and not backup.is_symlink()
+    assert backup.read_bytes() == backup_before
+    assert "ACTIVATION_BLOCK" in result.stderr
+    assert "备份已存在" in result.stderr
 
 
 def test_doctor_detects_pending_herdr_onboarding():

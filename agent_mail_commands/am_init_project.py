@@ -15,6 +15,7 @@ AGENTS = (
     ("claude", "claude-code", "unknown"),
     ("qodercn", "qoder-cn", "unknown"),
     ("opencode", "opencode", "unknown"),
+    ("zcode", "zcode", "unknown"),
     ("grok", "grok", "unknown"),
 )
 

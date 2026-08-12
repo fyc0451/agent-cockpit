@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
 
 from artifact_root import resolve_artifact_root
 
@@ -29,6 +30,9 @@ import coordination  # noqa: E402
 HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
 MAIL_RECV_BIN = helper_command("mail-recv")
 MAIL_PROJECTS_PATH = os.path.expanduser("~/dashboard-data/mail-projects.json")
+LAUNCH_DESCRIPTORS_PATH = os.path.expanduser(
+    "~/dashboard-data/launch-descriptors.json"
+)
 # Cockpit 落盘的用户输入状态(session → 墙钟时间):正在输入时不注入
 # pane 通知,避免消息追加到未提交草稿后被一起提交。
 TYPING_STATE_PATH = os.path.expanduser(
@@ -41,9 +45,15 @@ PROG_TO_AGENT = {
     "qoder-cn": "qodercn", "qoder": "qodercn",
     "qodercli": "qodercn", "qodercn": "qodercn",
     "claude": "claude", "claude-code": "claude",
-    "grok": "grok", "opencode": "opencode",
+    "grok": "grok", "opencode": "opencode", "zcode": "zcode",
 }
 _GENERATION_ID_RE = re.compile(r"^[0-9a-f]{40}-[0-9a-f]{64}$")
+_OPAQUE_INSTANCE_RE = re.compile(r"^i-[a-z2-7]{26}$")
+_PRODUCT_KINDS = {
+    "codex": "codex", "kimi": "kimi", "claude": "claude",
+    "qodercli": "qodercli", "qodercn": "qodercli", "grok": "grok",
+    "opencode": "opencode", "zcode": "opencode",
+}
 
 
 def _config_root() -> str | None:
@@ -92,6 +102,11 @@ def _agent_types_match(left: str, right: str) -> bool:
     return PROG_TO_AGENT.get(left, left) == PROG_TO_AGENT.get(right, right)
 
 
+def _runtime_kind(agent: str) -> str:
+    product = PROG_TO_AGENT.get(agent, agent)
+    return _PRODUCT_KINDS.get(product, product)
+
+
 def _agent_mail_db_path() -> str:
     configured = os.environ.get("AGENT_MAIL_DB_PATH")
     if configured:
@@ -126,6 +141,7 @@ def _notification_identity(name: str, project_key: str) -> tuple[str, str] | Non
     directory = REGISTRY_DIR / slugify(project_key)
     if not directory.is_dir():
         return None
+    matches = []
     for path in sorted(directory.glob("*.json")):
         try:
             identity = json.loads(path.read_text(encoding="utf-8"))
@@ -135,11 +151,20 @@ def _notification_identity(name: str, project_key: str) -> tuple[str, str] | Non
             continue
         if identity.get("name") != name:
             continue
+        if identity.get("retired_at") or identity.get("status") == "retired":
+            continue
         agent = identity.get("agent")
         instance = identity.get("instance")
-        if isinstance(agent, str) and isinstance(instance, str) and agent and instance:
-            return agent, instance
-    return None
+        if (
+            isinstance(agent, str) and isinstance(instance, str)
+            and agent and instance
+            and (
+                not _OPAQUE_INSTANCE_RE.fullmatch(instance)
+                or identity.get("status") == "active"
+            )
+        ):
+            matches.append((agent, instance))
+    return matches[0] if len(matches) == 1 else None
 
 
 def _registry_identities(project_key: str) -> list[dict]:
@@ -152,7 +177,16 @@ def _registry_identities(project_key: str) -> list[dict]:
             identity = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError):
             continue
-        if isinstance(identity, dict) and identity.get("project_key") == project_key:
+        if (
+            isinstance(identity, dict)
+            and identity.get("project_key") == project_key
+            and not identity.get("retired_at")
+            and identity.get("status") != "retired"
+            and (
+                not _OPAQUE_INSTANCE_RE.fullmatch(str(identity.get("instance") or ""))
+                or identity.get("status") == "active"
+            )
+        ):
             identities.append(identity)
     return identities
 
@@ -479,13 +513,92 @@ def _session_panes(session_name: str, env: dict) -> list[dict]:
             raw = line[5:].strip()
             break
     try:
-        return json.loads(raw).get("result", {}).get("snapshot", {}).get("panes", [])
+        snapshot = json.loads(raw).get("result", {}).get("snapshot", {})
     except (ValueError, json.JSONDecodeError):
         return []
+    panes = snapshot.get("panes", []) if isinstance(snapshot, dict) else []
+    agents = snapshot.get("agents", []) if isinstance(snapshot, dict) else []
+    by_pane: dict[str, list[dict]] = {}
+    for agent in agents:
+        if isinstance(agent, dict) and agent.get("pane_id"):
+            by_pane.setdefault(str(agent["pane_id"]), []).append(agent)
+    enriched = []
+    for pane in panes:
+        if not isinstance(pane, dict):
+            continue
+        item = dict(pane)
+        live = by_pane.get(str(item.get("pane_id") or ""), [])
+        if len(live) == 1:
+            item["_runtime_name"] = live[0].get("name")
+            item["_runtime_kind"] = live[0].get("agent")
+        enriched.append(item)
+    return enriched
+
+
+def _managed_notify_target(
+    candidates: list[tuple], project_key: str, mail_name: str,
+    agent_type: str, instance: str,
+) -> list[tuple]:
+    """Resolve an opaque mailbox only through one exact active live descriptor."""
+    try:
+        data = json.loads(Path(LAUNCH_DESCRIPTORS_PATH).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    descriptors = data.get("descriptors")
+    if data.get("schema") != 2 or not isinstance(descriptors, dict):
+        return []
+    matches = [
+        (key, record) for key, record in descriptors.items()
+        if isinstance(record, dict) and record.get("instance_id") == instance
+    ]
+    if len(matches) != 1:
+        return []
+    key, record = matches[0]
+    kind = _PRODUCT_KINDS.get(agent_type)
+    if (
+        key != f"instance|{instance}"
+        or record.get("state") != "active"
+        or record.get("name") != instance
+        or record.get("agent") != agent_type
+        or record.get("kind") != kind
+        or record.get("mail_agent") != agent_type
+        or record.get("mail_instance") != instance
+        or record.get("mail_name") != mail_name
+        or not isinstance(record.get("mail_project"), str)
+        or os.path.realpath(os.path.expanduser(record["mail_project"]))
+        != os.path.realpath(os.path.expanduser(project_key))
+        or not isinstance(record.get("workdir"), str)
+    ):
+        return []
+    exact = []
+    for candidate in candidates:
+        session, pane_id, cwd = candidate[:3]
+        runtime_name = candidate[5] if len(candidate) > 5 else None
+        runtime_kind = candidate[6] if len(candidate) > 6 else None
+        if (
+            session == record.get("session")
+            and pane_id == record.get("pane_id")
+            and runtime_name == instance
+            and runtime_kind == kind
+            and bool(cwd)
+            and os.path.realpath(os.path.expanduser(cwd))
+            == os.path.realpath(os.path.expanduser(record["workdir"]))
+        ):
+            exact.append(candidate)
+    if len(exact) != 1:
+        return []
+    session, pane_id, cwd = exact[0][:3]
+    is_project_root = (
+        os.path.realpath(os.path.expanduser(cwd))
+        == os.path.realpath(os.path.expanduser(project_key))
+    )
+    return [(session, pane_id, cwd, is_project_root)]
 
 
 def resolve_explicit_target(
-    session_name: str, pane_id: str, agent_type: str,
+    session_name: str, pane_id: str, agent_type: str, instance: str = "",
 ) -> tuple[str, str, str, str]:
     """校验显式通知目标，返回目标与解析时的 Agent 状态。"""
     if not session_name or not pane_id:
@@ -504,11 +617,21 @@ def resolve_explicit_target(
     if pane is None:
         raise ValueError(f"pane 不存在: {session_name}/{pane_id}")
     pane_agent = str(pane.get("agent") or "")
-    if not _agent_types_match(agent_type, pane_agent):
+    managed = bool(_OPAQUE_INSTANCE_RE.fullmatch(instance))
+    matches_type = (
+        _runtime_kind(agent_type) == _runtime_kind(pane_agent)
+        if managed else _agent_types_match(agent_type, pane_agent)
+    )
+    if not matches_type:
         raise ValueError(
             f"pane {session_name}/{pane_id} 的 agent 类型为 "
             f"{pane_agent or '空'}，与收件人类型 {agent_type} 不兼容"
         )
+    if _OPAQUE_INSTANCE_RE.fullmatch(instance) and (
+        pane.get("_runtime_name") != instance
+        or pane.get("_runtime_kind") != _PRODUCT_KINDS.get(agent_type)
+    ):
+        raise ValueError("pane live runtime 与 opaque identity 不匹配")
     cwd = str(pane.get("cwd") or pane.get("foreground_cwd") or "")
     return session_name, pane_id, cwd, str(pane.get("agent_status") or "")
 
@@ -543,19 +666,29 @@ def _notify_pane(
             os.path.expanduser(bound_project)
         ) == os.path.realpath(os.path.expanduser(project_key))
         for pane in panes:
-            if (
-                not _agent_types_match(agent_type, str(pane.get("agent") or ""))
-                or not pane.get("pane_id")
-            ):
+            pane_agent = str(pane.get("agent") or "")
+            matches_type = (
+                _runtime_kind(agent_type) == _runtime_kind(pane_agent)
+                if _OPAQUE_INSTANCE_RE.fullmatch(instance)
+                else _agent_types_match(agent_type, pane_agent)
+            )
+            if not matches_type or not pane.get("pane_id"):
                 continue
             cwd = pane.get("cwd") or pane.get("foreground_cwd") or ""
             agent_statuses[(session["name"], pane["pane_id"])] = str(
                 pane.get("agent_status") or ""
             )
             candidates.append((
-                session["name"], pane["pane_id"], cwd, bound, bool(bound_project)
+                session["name"], pane["pane_id"], cwd, bound, bool(bound_project),
+                pane.get("_runtime_name"), pane.get("_runtime_kind"),
             ))
-    targets = _select_notify_targets(candidates, project_key, mail_name=mail_name)
+    targets = (
+        _managed_notify_target(
+            candidates, project_key, mail_name, agent_type, instance,
+        )
+        if _OPAQUE_INSTANCE_RE.fullmatch(instance)
+        else _select_notify_targets(candidates, project_key, mail_name=mail_name)
+    )
     if not targets:
         if candidates:
             detail = "; ".join(
@@ -703,7 +836,9 @@ def main(argv: list[str] | None = None) -> None:
                     "身份无法解析，不能静默忽略显式目标（消息未发送）")
             try:
                 explicit_resolved[recipient] = resolve_explicit_target(
-                    explicit_target[0], explicit_target[1], cli_identity[0])
+                    explicit_target[0], explicit_target[1],
+                    cli_identity[0], cli_identity[1],
+                )
             except (ValueError, RuntimeError) as exc:
                 raise SystemExit(
                     f"error: 显式通知目标不可用: {exc}（不回退自动选路，消息未发送）"

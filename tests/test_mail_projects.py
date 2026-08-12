@@ -342,6 +342,84 @@ def test_managed_identity_endpoint_uses_exact_descriptor_instance(monkeypatch, t
     assert seen == [(str(project), "codex", instance_id)]
 
 
+def test_managed_zcode_identity_endpoint_uses_descriptor_product(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    session_dir = tmp_path / "session"
+    project.mkdir()
+    session_dir.mkdir()
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name=instance_id, kind="opencode",
+        args=[], agent="zcode", instance_id=instance_id, display_name="ZCode",
+    )
+    mail_projects.bind("demo", str(session_dir), str(project))
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
+    monkeypatch.setattr(
+        server.db, "list_projects",
+        lambda: [{"id": 1, "slug": "project", "human_key": str(project)}],
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "list_sessions",
+        lambda: [{"name": "demo", "status": "running", "directory": str(session_dir)}],
+    )
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "demo", "pane_id": "w1:p1", "cwd": str(project),
+            "agent": "opencode",
+        }]},
+    )
+    seen = []
+    monkeypatch.setattr(
+        server, "_identity_record",
+        lambda cwd, agent, instance=None: seen.append((cwd, agent, instance)) or {
+            "name": "ZCodeMailbox", "program": "zcode", "model": "unknown",
+        },
+    )
+
+    response = TestClient(server.app).get(
+        "/api/herdr/pane/demo/w1:p1/identity",
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "ZCodeMailbox"
+    assert seen == [(str(project), "zcode", instance_id)]
+
+
+def test_identity_endpoint_omits_ambiguous_legacy_main(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _session: {"bound": True, "project": str(project)},
+    )
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [
+            {"session": "demo", "pane_id": "w1:p1", "cwd": str(project), "agent": "codex"},
+            {"session": "demo", "pane_id": "w1:p2", "cwd": str(project), "agent": "codex"},
+        ]},
+    )
+    monkeypatch.setattr(server.herdr_client, "get_launch_descriptor", lambda *_args: None)
+    monkeypatch.setattr(
+        server, "_identity_record",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("多个无 descriptor pane不得共享 legacy main")
+        ),
+    )
+
+    result = server.api_herdr_pane_identity("demo", "w1:p1")
+
+    assert result["found"] is False
+    assert result["needs_registration"] is True
+
+
 def test_tell_identity_uses_exact_managed_instance(monkeypatch, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -382,6 +460,45 @@ def test_tell_identity_uses_exact_managed_instance(monkeypatch, tmp_path):
     assert result["instance_id"] == instance_id
     assert seen == [(str(project), "codex", instance_id)]
     assert f"--instance {instance_id}" in sent[0][2]
+
+
+def test_tell_identity_uses_zcode_descriptor_product(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    instance_id = "i-dddddddddddddddddddddddddd"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p4", name=instance_id, kind="opencode",
+        args=[], agent="zcode", instance_id=instance_id, display_name="ZCode",
+    )
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": [{
+        "session": "demo", "pane_id": "w1:p4", "cwd": str(project),
+        "agent": "opencode",
+    }]})
+    monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _name: {"bound": True, "project": str(project)},
+    )
+    seen = []
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda cwd, agent, instance=None: seen.append((cwd, agent, instance))
+        or "ZCodeMailbox",
+    )
+    sent = []
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+
+    result = server.api_herdr_pane_tell_identity("demo", "w1:p4")
+
+    assert result["name"] == "ZCodeMailbox"
+    assert seen == [(str(project), "zcode", instance_id)]
+    assert "--agent zcode" in sent[0][2]
 
 
 def test_identity_endpoint_requests_project_selection_instead_of_guessing(
@@ -526,6 +643,44 @@ def test_init_mail_registers_managed_pane_by_exact_instance(monkeypatch, tmp_pat
     assert result["notified"] == ["opencode(w1:p2)→ExactMailbox"]
     assert calls == [
         ("demo", "w1:p2", "opencode", instance_id, True, str(project)),
+    ]
+
+
+def test_init_mail_registers_managed_zcode_by_descriptor_product(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    instance_id = "i-eeeeeeeeeeeeeeeeeeeeeeeeee"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name=instance_id, kind="opencode",
+        args=[], agent="zcode", instance_id=instance_id, display_name="ZCode",
+    )
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _name: {"bound": True, "project": str(project)},
+    )
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"sessions": [{
+        "session": "demo",
+        "panes": [{"pane_id": "w1:p5", "agent": "opencode"}],
+    }]})
+    calls = []
+    monkeypatch.setattr(
+        server, "_started_agent_mail_identity",
+        lambda session, pane_id, agent, instance, notify=True, project_hint=None: calls.append(
+            (session, pane_id, agent, instance, notify, project_hint)
+        ) or {
+            "registered": True, "notified": True, "name": "ZCodeMailbox",
+            "instance_id": instance,
+        },
+    )
+
+    result = server.api_herdr_session_init_mail("demo")
+
+    assert result["ok"] is True
+    assert calls == [
+        ("demo", "w1:p5", "zcode", instance_id, True, str(project)),
     ]
 
 

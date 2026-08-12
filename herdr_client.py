@@ -72,6 +72,7 @@ AGENT_KIND_ALIASES = {
     "claude": "claude",
     "kimi": "kimi",
     "opencode": "opencode",
+    "zcode": "opencode",
     "grok": "grok",
     "qoder": "qodercli",
     "qodercli": "qodercli",
@@ -81,6 +82,7 @@ AGENT_KIND_ALIASES = {
 _AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _AGENT_INSTANCE_ID_RE = re.compile(r"^i-[a-z2-7]{26}$")
 MAX_DISPLAY_NAME_LENGTH = 64
+_ATTACH_ONLY_PRODUCTS = frozenset({"zcode"})
 _RESTART_GUARD = threading.Lock()
 _RESTARTING_PANES: set[tuple[str, str]] = set()
 
@@ -221,6 +223,8 @@ def _agent_start_timeout(agent: str) -> float:
 
 def _find_agent_bin(name: str) -> str:
     """探测 agent 二进制完整路径(shutil.which → 已知安装路径 fallback)。"""
+    if name in _ATTACH_ONLY_PRODUCTS:
+        return ""
     found = shutil.which(name)
     if found:
         return found
@@ -1882,6 +1886,12 @@ def start_agent(
     agent: codex | claude | kimi | opencode | grok | qoder(cli/cn)。
     返回新 pane 信息；启动失败回滚本次 pane，返回结构化 error，不回退键盘模拟。
     """
+    if agent in _ATTACH_ONLY_PRODUCTS:
+        return {
+            "available": True,
+            "error_code": "attach_only_agent",
+            "error": f"{agent} 仅支持绑定已有 pane，不能由 Cockpit 启动",
+        }
     if not is_available():
         return {"available": False}
     managed = instance_id is not None
@@ -2526,6 +2536,10 @@ def restart_pane(
         ):
             return _restart_error(
                 "restart_identity_invalid", "managed launch descriptor 无效", pane_id,
+            )
+        if product_agent in _ATTACH_ONLY_PRODUCTS:
+            return _restart_error(
+                "attach_only_agent", f"{product_agent} 仅支持外部运行时重启", pane_id,
             )
         try:
             if normalize_agent_kind(product_agent) != kind:
