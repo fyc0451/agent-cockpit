@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,28 @@ class PreparedGeneration:
     generation_id: str
     generation_path: Path
     launcher_path: Path
+
+
+def _prepare_generations_dir(deploy_root: Path) -> Path:
+    generations = deploy_root / "generations"
+    try:
+        generations.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise GenerationPrepareError("generations_invalid") from exc
+    try:
+        info = generations.lstat()
+    except OSError as exc:
+        raise GenerationPrepareError("generations_invalid") from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise GenerationPrepareError("generations_invalid")
+    return generations
 
 
 def _persist_verified_release(
@@ -89,10 +112,11 @@ def prepare_generation(
         deploy_root / "artifact-cache",
         transport=transport,
     )
+    generations = _prepare_generations_dir(deploy_root)
     generation_path = extract_verified_tarball(
         artifact_path,
         asset,
-        deploy_root / "generations" / identity.generation_id,
+        generations / identity.generation_id,
     )
     _persist_verified_release(generation_path, index_bytes, signature_bytes)
     launcher_path = generation_path / asset["launcher"]["path"]

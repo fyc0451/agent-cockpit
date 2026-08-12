@@ -175,6 +175,39 @@ class FakeHealth:
         return self.sha
 
 
+def test_url_health_probe_waits_for_service_readiness(monkeypatch):
+    calls = 0
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps({
+                "identity": {"source_sha": SOURCE_SHA},
+            }).encode("ascii")
+
+    def delayed_urlopen(_request, *, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionRefusedError("service is still starting")
+        return Response()
+
+    monkeypatch.setattr(source_native_migrate.urllib.request, "urlopen", delayed_urlopen)
+    probe = source_native_migrate.UrlHealthProbe(
+        "http://127.0.0.1:8790/health/live",
+        timeout=0.01,
+        retry_interval=0,
+    )
+
+    assert probe.live_source_sha() == SOURCE_SHA
+    assert calls == 2
+
+
 def test_plan_is_default_and_does_not_mutate(tmp_path: Path):
     inputs = _inputs(tmp_path)
     before = inputs.source_unit_path.read_bytes()

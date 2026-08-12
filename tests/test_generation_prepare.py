@@ -99,7 +99,9 @@ def _layout(tmp_path: Path) -> Path:
 def test_real_primitives_prepare_once_and_cache_reuse_fails_closed(
     tmp_path: Path,
 ) -> None:
-    deploy_root = _layout(tmp_path)
+    deploy_root = tmp_path / "deploy"
+    deploy_root.mkdir(mode=0o700)
+    assert not (deploy_root / "generations").exists()
     launcher = b"\x7fELF" + b"native-server"
     payload = _archive(launcher)
     artifact_digest = hashlib.sha256(payload).hexdigest()

@@ -18,6 +18,7 @@ import os
 import secrets
 import shutil
 import stat
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -1263,24 +1264,38 @@ class LiveServiceOps:
 
 
 class UrlHealthProbe:
-    def __init__(self, url: str, timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        timeout: float = 1.0,
+        attempts: int = 50,
+        retry_interval: float = 0.2,
+    ) -> None:
         self.url = url
         self.timeout = timeout
+        self.attempts = attempts
+        self.retry_interval = retry_interval
 
     def live_source_sha(self) -> str:
-        try:
-            req = urllib.request.Request(self.url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read(64 * 1024)
-            payload = json.loads(raw.decode("utf-8"))
-            sha = payload.get("identity", {}).get("source_sha")
-            if type(sha) is not str or len(sha) != 40:
-                _fail("health_payload_invalid")
-            return sha
-        except MigrationError:
-            raise
-        except Exception as exc:
-            raise MigrationError("health_unavailable") from exc
+        for attempt in range(self.attempts):
+            try:
+                req = urllib.request.Request(
+                    self.url, headers={"Accept": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    raw = resp.read(64 * 1024)
+                payload = json.loads(raw.decode("utf-8"))
+                sha = payload.get("identity", {}).get("source_sha")
+                if type(sha) is not str or len(sha) != 40:
+                    _fail("health_payload_invalid")
+                return sha
+            except MigrationError:
+                raise
+            except Exception as exc:
+                if attempt + 1 >= self.attempts:
+                    raise MigrationError("health_unavailable") from exc
+                time.sleep(self.retry_interval)
+        raise MigrationError("health_unavailable")
 
 
 def default_deploy_root(*, home: Path | None = None) -> Path:
