@@ -41,6 +41,32 @@ def test_publish_requires_native_build_dependency(monkeypatch) -> None:
         module._require_build_dependencies()
 
 
+def test_release_endpoint_accepts_exact_repository_api_url() -> None:
+    module = _module()
+    assert module._release_endpoint(
+        "https://api.github.com/repos/fyc0451/agent-cockpit/releases/369230730"
+    ) == "repos/fyc0451/agent-cockpit/releases/369230730"
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    [
+        None,
+        "http://api.github.com/repos/fyc0451/agent-cockpit/releases/1",
+        "https://example.com/repos/fyc0451/agent-cockpit/releases/1",
+        "https://api.github.com/repos/other/agent-cockpit/releases/1",
+        "https://api.github.com/repos/fyc0451/agent-cockpit/releases/draft",
+        "https://api.github.com/repos/fyc0451/agent-cockpit/releases/0",
+        "https://api.github.com/repos/fyc0451/agent-cockpit/releases/+1",
+        "https://api.github.com/repos/fyc0451/agent-cockpit/releases/1?draft=true",
+    ],
+)
+def test_release_endpoint_rejects_untrusted_api_url(api_url: object) -> None:
+    module = _module()
+    with pytest.raises(module.LocalReleaseError, match="remote_draft_invalid"):
+        module._release_endpoint(api_url)
+
+
 def test_private_key_reader_rejects_mode_symlink_and_hardlink(tmp_path: Path) -> None:
     module = _module()
     path = tmp_path / "key"

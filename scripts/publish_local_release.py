@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -186,6 +187,24 @@ def _release_absent(tag: str, source: Path) -> None:
         _fail("tag_exists")
 
 
+def _release_endpoint(api_url: object) -> str:
+    if not isinstance(api_url, str):
+        _fail("remote_draft_invalid")
+    parsed = urlsplit(api_url)
+    prefix = f"/repos/{REPOSITORY}/releases/"
+    release_id = parsed.path.removeprefix(prefix)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "api.github.com"
+        or parsed.path != f"{prefix}{release_id}"
+        or parsed.query
+        or parsed.fragment
+        or re.fullmatch(r"[1-9][0-9]*", release_id) is None
+    ):
+        _fail("remote_draft_invalid")
+    return f"repos/{REPOSITORY}/releases/{release_id}"
+
+
 def _verify_assets(
     root: Path,
     *,
@@ -307,7 +326,7 @@ def publish(source: Path, candidate: str, release_id: str) -> dict[str, Any]:
         remote = json.loads(_output(
             [
                 "gh", "release", "view", tag, "-R", REPOSITORY,
-                "--json", "isDraft,isPrerelease,tagName,name,assets",
+                "--json", "apiUrl,isDraft,isPrerelease,tagName,name,assets",
             ],
             cwd=source,
         ))
@@ -321,6 +340,7 @@ def publish(source: Path, candidate: str, release_id: str) -> dict[str, Any]:
             or set(remote_names) != {archive_name, "release-index.json", "release-index.json.sig"}
         ):
             _fail("remote_draft_invalid")
+        release_endpoint = _release_endpoint(remote.get("apiUrl"))
 
         remote_assets = state / "remote-assets"
         remote_assets.mkdir(mode=0o700)
@@ -339,16 +359,10 @@ def publish(source: Path, candidate: str, release_id: str) -> dict[str, Any]:
             verify_root=state / "remote-verify",
         )
 
-        release_api = json.loads(_output(
-            ["gh", "api", f"repos/{REPOSITORY}/releases/tags/{tag}"], cwd=source,
-        ))
-        release_numeric_id = release_api.get("id")
-        if type(release_numeric_id) is not int or release_api.get("draft") is not True:
-            _fail("remote_draft_invalid")
         published = _output(
             [
                 "gh", "api", "--method", "PATCH",
-                f"repos/{REPOSITORY}/releases/{release_numeric_id}",
+                release_endpoint,
                 "-F", "draft=false", "-f", "make_latest=true",
                 "--jq", ".draft == false",
             ],

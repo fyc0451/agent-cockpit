@@ -15,6 +15,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Publish draft GitHub Releases through their validated numeric API endpoint so
+  the local signed release lane can complete without manual reconciliation.
 - Rebind previous-generation evidence after a completed maintenance request so a
   later native upgrade can start from the newly active generation.
 - Accept pane-scoped `typing.json` in sealed upgrade snapshots so a valid
