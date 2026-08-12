@@ -30,6 +30,7 @@ MAC_MAIN_LABEL = "io.github.fyc0451.agent-cockpit"
 MAC_CONTROLLER_LABEL = "io.github.fyc0451.agent-cockpit-controller"
 FIXED_SERVER_LAUNCHER_RELATIVE_PATH = "bin/agent-cockpit"
 LINUX_EVIDENCE_ENV_NAME = "server-evidence.env"
+LINUX_SERVER_ENV_NAME = "server.env"
 _SYSTEMD_SAFE_ENVIRONMENT_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 
 # 允许的固定 Mac labels（V1 动态 upgrade.<job> 一律禁止）
@@ -566,6 +567,44 @@ def validate_release_external_environment_file(
     return path
 
 
+def validate_release_external_server_environment_file(
+    value: str | Path,
+    *,
+    deploy_root: str | Path | None,
+) -> Path:
+    """Validate fixed release-external Server config (``server.env``).
+
+    Immutable generations must not own host secrets; this path must sit outside
+    ``deploy_root`` / ``current`` and must not be a symlink chain.
+    """
+    path = validate_absolute_path(value, role="server_environment_file")
+    if _SYSTEMD_SAFE_ENVIRONMENT_PATH_RE.fullmatch(path.as_posix()) is None:
+        raise SupervisorAdapterError("server_environment_path_unsupported")
+    if path.name != LINUX_SERVER_ENV_NAME:
+        raise SupervisorAdapterError("server_environment_name_mismatch")
+    if deploy_root is None:
+        raise SupervisorAdapterError("deploy_root_required")
+    root = validate_absolute_path(deploy_root, role="deploy_root")
+    if path == root or _is_relative_to(path, root):
+        raise SupervisorAdapterError("server_environment_inside_release_tree")
+    try:
+        path_resolved = path.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise SupervisorAdapterError("server_environment_unresolvable") from exc
+    if path_resolved == root_resolved or _is_relative_to(path_resolved, root_resolved):
+        raise SupervisorAdapterError("server_environment_inside_release_tree")
+    current = Path(path.anchor)
+    try:
+        for part in path.parts[1:]:
+            current /= part
+            if current.is_symlink():
+                raise SupervisorAdapterError("server_environment_symlink")
+    except OSError as exc:
+        raise SupervisorAdapterError("server_environment_unresolvable") from exc
+    return path
+
+
 # ── 渲染 ──────────────────────────────────────────────────────────
 
 
@@ -575,12 +614,19 @@ def render_linux_unit(
     program_arguments: Sequence[str],
     deploy_root: str | Path | None = None,
     evidence_environment_file: str | Path | None = None,
+    server_environment_file: str | Path | None = None,
     description: str = "Agent Cockpit (FastAPI :8790)",
 ) -> str:
     """渲染固定 user unit，指向受控 current；强制 KillMode=process。
 
     ``program_arguments`` 必须由调用方显式提供（自含 artifact 入口），
     适配层不默认 ``.venv/bin/python`` 或源码 ``server.py``。
+
+    EnvironmentFile 合同：
+    - 默认（兼容旧 native unit）：``EnvironmentFile=-<current>/.env``。
+    - 若提供 ``server_environment_file``：只使用 release-external ``server.env``
+      （optional 前缀 ``-``），**不得**再引用 ``current/.env``。
+    - ``evidence_environment_file`` 仍为 required 的 release-external selector（无 ``-``）。
     """
     current = validate_current_path(current_dir, deploy_root=deploy_root)
     argv = normalize_launcher_argv(
@@ -588,7 +634,16 @@ def render_linux_unit(
     )
     cur = current.as_posix()
     wd = escape_systemd_value(cur)
-    env_file = escape_systemd_value(f"{cur}/.env")
+    if server_environment_file is not None:
+        server_path = validate_release_external_server_environment_file(
+            server_environment_file,
+            deploy_root=deploy_root,
+        )
+        server_line = (
+            f"EnvironmentFile=-{escape_systemd_value(server_path.as_posix())}\n"
+        )
+    else:
+        server_line = f"EnvironmentFile=-{escape_systemd_value(f'{cur}/.env')}\n"
     evidence_line = ""
     if evidence_environment_file is not None:
         evidence_path = validate_release_external_environment_file(
@@ -613,7 +668,7 @@ def render_linux_unit(
         "Restart=always\n"
         "RestartSec=3\n"
         "Environment=PYTHONUNBUFFERED=1\n"
-        f"EnvironmentFile=-{env_file}\n"
+        f"{server_line}"
         f"{evidence_line}"
         "NoNewPrivileges=true\n"
         "UMask=0077\n"
@@ -863,6 +918,7 @@ def validate_linux_unit_contract(
     program_arguments: Sequence[str],
     deploy_root: str | Path | None = None,
     evidence_environment_file: str | Path | None = None,
+    server_environment_file: str | Path | None = None,
 ) -> LinuxUnitContract:
     """KillMode=process；固定安全字段精确；WD 与 ExecStart argv 同源 current。"""
     current = validate_current_path(current_dir, deploy_root=deploy_root)
@@ -886,9 +942,24 @@ def validate_linux_unit_contract(
         raise SupervisorAdapterError("exec_start_argv_mismatch")
     if not (actual[0] == cur or actual[0].startswith(cur + "/")):
         raise SupervisorAdapterError("launcher_outside_current", actual[0])
-    expected_raw_environment_files = (
-        f"-{escape_systemd_value(f'{cur}/.env')}",
-    )
+    if server_environment_file is not None:
+        server_path = validate_release_external_server_environment_file(
+            server_environment_file,
+            deploy_root=deploy_root,
+        )
+        expected_raw_environment_files = (
+            f"-{escape_systemd_value(server_path.as_posix())}",
+        )
+        expected_environment_files: tuple[tuple[str, bool], ...] = (
+            (server_path.as_posix(), True),
+        )
+    else:
+        expected_raw_environment_files = (
+            f"-{escape_systemd_value(f'{cur}/.env')}",
+        )
+        expected_environment_files = (
+            (f"{cur}/.env", True),
+        )
     if evidence_environment_file is not None:
         evidence_path = validate_release_external_environment_file(
             evidence_environment_file,
@@ -897,6 +968,7 @@ def validate_linux_unit_contract(
         expected_raw_environment_files += (
             escape_systemd_value(evidence_path.as_posix()),
         )
+        expected_environment_files += ((evidence_path.as_posix(), False),)
     raw_environment_files = fields.get("EnvironmentFile", [])
     if not isinstance(raw_environment_files, list) or tuple(
         raw_environment_files
@@ -906,13 +978,16 @@ def validate_linux_unit_contract(
         (_unescape_systemd_value(path), optional)
         for path, optional in contract.environment_files
     )
-    expected_environment_files: tuple[tuple[str, bool], ...] = (
-        (f"{cur}/.env", True),
-    )
-    if evidence_environment_file is not None:
-        expected_environment_files += ((evidence_path.as_posix(), False),)
     if actual_environment_files != expected_environment_files:
         raise SupervisorAdapterError("environment_file_mismatch")
+    # Native migration contract: never pin generation-local .env when
+    # release-external server env is configured.
+    if server_environment_file is not None:
+        if any(
+            path == f"{cur}/.env" or path.endswith("/.env") and "current" in path
+            for path, _opt in actual_environment_files
+        ):
+            raise SupervisorAdapterError("environment_file_mismatch")
     return contract
 
 
@@ -1230,6 +1305,7 @@ __all__ = [
     "FIXED_MAC_LABELS",
     "FIXED_SERVER_LAUNCHER_RELATIVE_PATH",
     "LINUX_EVIDENCE_ENV_NAME",
+    "LINUX_SERVER_ENV_NAME",
     "LINUX_UNIT_NAME",
     "MAC_CONTROLLER_LABEL",
     "MAC_MAIN_LABEL",
@@ -1269,5 +1345,6 @@ __all__ = [
     "validate_current_path",
     "validate_linux_unit_contract",
     "validate_release_external_environment_file",
+    "validate_release_external_server_environment_file",
     "validate_mac_plist_contract",
 ]

@@ -653,6 +653,73 @@ class TestLinuxUnit:
 # ── mac plist ────────────────────────────────────────────────────
 
 
+    def test_server_environment_file_uses_release_external_only(
+        self, deploy_layout: dict[str, Path], tmp_path: Path,
+    ) -> None:
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        server_env = tmp_path / "config" / "agent-cockpit" / "server.env"
+        text = sa.render_linux_unit(
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+            server_environment_file=server_env,
+        )
+        assert f"EnvironmentFile=-{server_env.as_posix()}" in text
+        assert f"EnvironmentFile=-{cur.as_posix()}/.env" not in text
+        assert text.count("EnvironmentFile=") == 1
+        contract = sa.validate_linux_unit_contract(
+            text,
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+            server_environment_file=server_env,
+        )
+        assert contract.environment_files == ((server_env.as_posix(), True),)
+
+    def test_server_environment_file_with_evidence_selector(
+        self, deploy_layout: dict[str, Path], tmp_path: Path,
+    ) -> None:
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        server_env = tmp_path / "config" / "agent-cockpit" / "server.env"
+        evidence_env = tmp_path / "controller-state" / "server-evidence.env"
+        text = sa.render_linux_unit(
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+            server_environment_file=server_env,
+            evidence_environment_file=evidence_env,
+        )
+        assert f"EnvironmentFile=-{server_env.as_posix()}" in text
+        assert f"EnvironmentFile={evidence_env.as_posix()}" in text
+        assert f"{cur.as_posix()}/.env" not in text
+        assert text.count("EnvironmentFile=") == 2
+        sa.validate_linux_unit_contract(
+            text,
+            current_dir=cur,
+            program_arguments=argv,
+            deploy_root=deploy_layout["root"],
+            server_environment_file=server_env,
+            evidence_environment_file=evidence_env,
+        )
+
+    def test_server_environment_rejects_inside_deploy_root(
+        self, deploy_layout: dict[str, Path],
+    ) -> None:
+        cur = deploy_layout["current"]
+        argv = deploy_layout["main_argv"]
+        bad = deploy_layout["root"] / "server.env"
+        with pytest.raises(sa.SupervisorAdapterError) as exc:
+            sa.render_linux_unit(
+                current_dir=cur,
+                program_arguments=argv,
+                deploy_root=deploy_layout["root"],
+                server_environment_file=bad,
+            )
+        assert exc.value.reason == "server_environment_inside_release_tree"
+
+
 class TestMacPlist:
     def test_main_fixed_label(self, deploy_layout: dict[str, Path]) -> None:
         cur = deploy_layout["current"]
