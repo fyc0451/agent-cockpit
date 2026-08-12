@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from agent_cockpit.artifact_root import resolve_artifact_root
+from agent_cockpit import next_profile
 
 
 CLIENT_ENV = Path.home() / ".agent-mail" / "client.env"
@@ -117,7 +118,10 @@ def save_client_hub(value: str) -> str:
 
 
 def load_identity(agent: str, instance: str, project: str) -> tuple[dict, str, str]:
-    project_key = str(Path(project).resolve())
+    try:
+        project_key = next_profile.require_project(project)
+    except next_profile.NextProfileError as exc:
+        raise SystemExit(str(exc)) from exc
     registry_file = REGISTRY_DIR / slugify(project_key) / f"{agent}--{instance}.json"
     if not registry_file.is_file():
         raise SystemExit(

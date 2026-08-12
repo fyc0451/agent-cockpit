@@ -12,11 +12,27 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_cockpit import next_profile
+
 from .common import REGISTRY_DIR, helper_command, slugify
 
 
-MAIL_PROJECTS_PATH = Path.home() / "dashboard-data" / "mail-projects.json"
-DESCRIPTORS_PATH = Path.home() / "dashboard-data" / "launch-descriptors.json"
+next_profile.require_helper_environment((
+    "COCKPIT_DATA_DIR",
+    "COCKPIT_STATE_DIR",
+    "COCKPIT_LAUNCH_DESCRIPTORS_PATH",
+))
+
+_COCKPIT_DATA_DIR = Path(
+    os.environ.get("COCKPIT_DATA_DIR", str(Path.home() / "dashboard-data"))
+).expanduser()
+MAIL_PROJECTS_PATH = _COCKPIT_DATA_DIR / "mail-projects.json"
+DESCRIPTORS_PATH = Path(
+    os.environ.get(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH",
+        str(_COCKPIT_DATA_DIR / "launch-descriptors.json"),
+    )
+).expanduser()
 HERDR_BIN = shutil.which("herdr") or str(Path.home() / ".local" / "bin" / "herdr")
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 PANE_ID_RE = re.compile(r"^[A-Za-z0-9_]+:[A-Za-z0-9_]+$")
@@ -104,6 +120,24 @@ def _safe_read_json(path: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def _expected_session_dir(session: str, socket_path: str) -> Path:
+    config = Path(
+        os.environ.get("HERDR_CONFIG_PATH", "~/.config/herdr/config.toml")
+    ).expanduser().resolve()
+    expected = config.parent / "sessions" / session
+    if next_profile.enabled():
+        next_profile.require_session(session)
+        if socket_path and (
+            Path(socket_path).expanduser().resolve() != expected / "herdr.sock"
+        ):
+            raise next_profile.NextProfileError("next_herdr_socket_forbidden")
+        return expected
+    return (
+        Path(socket_path).expanduser().resolve().parent
+        if socket_path else expected
+    )
+
+
 def _bound_project(session: str, socket_path: str) -> str | None:
     state = _safe_read_json(MAIL_PROJECTS_PATH)
     if not state or not SESSION_RE.fullmatch(session):
@@ -114,11 +148,7 @@ def _bound_project(session: str, socket_path: str) -> str | None:
     try:
         session_dir = Path(str(entry["session_dir"])).expanduser()
         project = Path(str(entry["project"])).expanduser()
-        expected = (
-            Path(socket_path).expanduser().resolve().parent
-            if socket_path else
-            (Path.home() / ".config" / "herdr" / "sessions" / session).resolve()
-        )
+        expected = _expected_session_dir(session, socket_path)
         if (
             not session_dir.is_absolute()
             or str(session_dir) != str(session_dir.resolve())
@@ -130,7 +160,10 @@ def _bound_project(session: str, socket_path: str) -> str | None:
             return None
     except (KeyError, OSError, RuntimeError, ValueError):
         return None
-    return str(project)
+    try:
+        return next_profile.require_project(str(project))
+    except next_profile.NextProfileError:
+        return None
 
 
 def _canonical_project(
@@ -140,11 +173,7 @@ def _canonical_project(
         data = json.loads(state_path.read_text(encoding="utf-8"))
         entry = data.get("sessions", {}).get(session, {})
         bound_dir = Path(str(entry.get("session_dir") or "")).expanduser().resolve()
-        expected = (
-            Path(socket_path).expanduser().resolve().parent
-            if socket_path else
-            (Path.home() / ".config" / "herdr" / "sessions" / session).resolve()
-        )
+        expected = _expected_session_dir(session, socket_path)
         project = Path(str(entry.get("project") or "")).expanduser().resolve()
         if SESSION_RE.fullmatch(session) and bound_dir == expected and project.is_dir():
             return str(project)
@@ -154,6 +183,10 @@ def _canonical_project(
 
 
 def _snapshot(session: str) -> dict | None:
+    try:
+        next_profile.require_session(session)
+    except next_profile.NextProfileError:
+        return None
     try:
         result = subprocess.run(
             [HERDR_BIN, "--session", session, "api", "snapshot"],
@@ -209,6 +242,10 @@ def resolve_managed_identity() -> ManagedIdentity | None:
     session = os.environ.get("HERDR_SESSION", "")
     pane_id = os.environ.get("HERDR_PANE_ID", "")
     if not SESSION_RE.fullmatch(session) or not PANE_ID_RE.fullmatch(pane_id):
+        return None
+    try:
+        next_profile.require_session(session)
+    except next_profile.NextProfileError:
         return None
     project = _bound_project(session, os.environ.get("HERDR_SOCKET_PATH", ""))
     if project is None:
@@ -273,6 +310,10 @@ def _has_managed_descriptor_candidate() -> bool:
     pane_id = os.environ.get("HERDR_PANE_ID", "")
     if not SESSION_RE.fullmatch(session) or not PANE_ID_RE.fullmatch(pane_id):
         return False
+    try:
+        next_profile.require_session(session)
+    except next_profile.NextProfileError:
+        return False
     if not os.path.lexists(DESCRIPTORS_PATH):
         return False
     data = _safe_read_json(DESCRIPTORS_PATH)
@@ -313,10 +354,14 @@ def legacy_selector(
 
 
 def resolve_legacy_identity(agent: str, instance: str) -> ManagedIdentity | None:
-    project = _canonical_project(
-        os.getcwd(), os.environ.get("HERDR_SESSION", ""), MAIL_PROJECTS_PATH,
-        os.environ.get("HERDR_SOCKET_PATH", ""),
-    )
+    try:
+        next_profile.require_session(os.environ.get("HERDR_SESSION", ""))
+        project = next_profile.require_project(_canonical_project(
+            os.getcwd(), os.environ.get("HERDR_SESSION", ""), MAIL_PROJECTS_PATH,
+            os.environ.get("HERDR_SOCKET_PATH", ""),
+        ))
+    except next_profile.NextProfileError:
+        return None
     identity = _safe_read_json(
         REGISTRY_DIR / slugify(project) / f"{agent}--{instance}.json"
     )

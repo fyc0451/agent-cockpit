@@ -6,6 +6,15 @@ import sys
 
 
 if __name__ == "__main__":
+    from agent_cockpit import next_profile
+    from agent_cockpit.artifact_root import resolve_artifact_root
+
+    try:
+        next_profile.validate_server_environment(resolve_artifact_root())
+    except next_profile.NextProfileError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from exc
+
     from agent_cockpit import native_launcher
 
     _helper_result = native_launcher.main()

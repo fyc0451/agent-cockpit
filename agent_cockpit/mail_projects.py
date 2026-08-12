@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from . import next_profile
 from . import runtime_paths
 
 
@@ -55,13 +56,16 @@ def _write(data: dict[str, Any]) -> None:
 
 def get(session: str, session_dir: str) -> str | None:
     """仅在 session 名和 session_dir 都一致时返回绑定。"""
+    next_profile.require_session(session)
     generation = _absolute(session_dir, "session_dir")
     with _lock:
         entry = _load()["sessions"].get(session)
     if not isinstance(entry, dict) or entry.get("session_dir") != generation:
         return None
     project = entry.get("project")
-    return project if isinstance(project, str) and project else None
+    if not isinstance(project, str) or not project:
+        return None
+    return next_profile.require_project(project)
 
 
 def bind(
@@ -72,8 +76,9 @@ def bind(
     replace: bool = False,
 ) -> str:
     """写入绑定；同一代 session 改项目必须显式 replace。"""
+    next_profile.require_session(session)
     generation = _absolute(session_dir, "session_dir")
-    project_key = _absolute(project, "Agent Mail 项目")
+    project_key = next_profile.require_project(_absolute(project, "Agent Mail 项目"))
     with _lock:
         data = _load()
         current = data["sessions"].get(session)
@@ -96,6 +101,7 @@ def bind(
 
 def unbind(session: str, session_dir: str | None = None) -> bool:
     """删除绑定；提供 session_dir 时只删除同一代 session。"""
+    next_profile.require_session(session)
     generation = _absolute(session_dir, "session_dir") if session_dir else None
     with _lock:
         data = _load()

@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from agent_cockpit import next_profile
+
 from .common import REGISTRY_DIR, load_client_config, mcp_call, mcp_tool, slugify
 
 # 用于 registry 文件名的 agent/instance 组件只允许安全字符,
@@ -312,9 +314,13 @@ def main(argv: list[str] | None = None) -> None:
     rotate_group.add_argument("--recover", action="store_true", help="收敛未完成的轮换（探测新旧值并 promote/rollback）")
     args = parser.parse_args(argv)
 
+    try:
+        next_profile.require_helper_environment(())
+        project_key = next_profile.require_project(args.project)
+    except next_profile.NextProfileError as exc:
+        raise SystemExit(str(exc)) from exc
     agent = _validate_component(args.agent, "agent")
     instance = _validate_component(args.instance, "instance")
-    project_key = str(Path(args.project).resolve())
     registry_file = REGISTRY_DIR / slugify(project_key) / f"{agent}--{instance}.json"
 
     if (args.rotate or args.recover) and (args.force or args.show):

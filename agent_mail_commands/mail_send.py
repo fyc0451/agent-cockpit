@@ -24,20 +24,34 @@ TOOLS_DIR = os.path.join(INSTALL_ROOT, "agent-mail-tools")
 from .common import (
     REGISTRY_DIR, helper_command, load_identity, mcp_call, mcp_tool, slugify,
 )
-from agent_cockpit import coordination  # noqa: E402
+from agent_cockpit import coordination, next_profile  # noqa: E402
+
+
+next_profile.require_helper_environment((
+    "COCKPIT_DATA_DIR",
+    "COCKPIT_STATE_DIR",
+    "COCKPIT_LAUNCH_DESCRIPTORS_PATH",
+))
 
 
 HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
 MAIL_RECV_BIN = helper_command("mail-recv")
-MAIL_PROJECTS_PATH = os.path.expanduser("~/dashboard-data/mail-projects.json")
+_COCKPIT_DATA_DIR = os.path.expanduser(
+    os.environ.get("COCKPIT_DATA_DIR", "~/dashboard-data")
+)
+_COCKPIT_STATE_DIR = os.path.expanduser(
+    os.environ.get("COCKPIT_STATE_DIR", "~/.local/state/agent-cockpit")
+)
+MAIL_PROJECTS_PATH = os.path.join(_COCKPIT_DATA_DIR, "mail-projects.json")
 LAUNCH_DESCRIPTORS_PATH = os.path.expanduser(
-    "~/dashboard-data/launch-descriptors.json"
+    os.environ.get(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH",
+        os.path.join(_COCKPIT_DATA_DIR, "launch-descriptors.json"),
+    )
 )
 # Cockpit 落盘的用户输入状态(session → 墙钟时间):正在输入时不注入
 # pane 通知,避免消息追加到未提交草稿后被一起提交。
-TYPING_STATE_PATH = os.path.expanduser(
-    "~/.local/state/agent-cockpit/typing.json"
-)
+TYPING_STATE_PATH = os.path.join(_COCKPIT_STATE_DIR, "typing.json")
 TYPING_DEFER_WINDOW = 30.0
 PROG_TO_AGENT = {
     "codex-cli": "codex", "codex": "codex",
@@ -293,20 +307,38 @@ def _load_bindings() -> dict:
 
 
 def _session_rows(env: dict) -> list[dict]:
+    def scoped(rows: list[dict]) -> list[dict]:
+        session = next_profile.session()
+        if session is None:
+            return rows
+        config = Path(os.environ["HERDR_CONFIG_PATH"]).expanduser().resolve()
+        expected = config.parent / "sessions" / session
+        return [
+            row for row in rows
+            if row.get("name") == session
+            and Path(str(row.get("directory") or "")).expanduser().resolve(
+                strict=False
+            ) == expected
+            and Path(str(row.get("socket") or "")).expanduser().resolve(
+                strict=False
+            ) == expected / "herdr.sock"
+        ]
+
     try:
         result = subprocess.run(
             [HERDR_BIN, "session", "list", "--json"],
             capture_output=True, text=True, timeout=5, env=env,
         )
         data = json.loads(result.stdout)
-        return [
+        return scoped([
             {
                 "name": str(row.get("name", "")),
                 "running": bool(row.get("running")),
                 "directory": str(row.get("session_dir", "")),
+                "socket": str(row.get("socket_path", "")),
             }
             for row in data.get("sessions", []) if isinstance(row, dict) and row.get("name")
-        ]
+        ])
     except Exception:
         pass
     try:
@@ -324,8 +356,9 @@ def _session_rows(env: dict) -> list[dict]:
                 "name": parts[0],
                 "running": parts[1] == "running",
                 "directory": " ".join(parts[2:-1]),
+                "socket": parts[-1],
             })
-    return rows
+    return scoped(rows)
 
 
 def _session_mail_project(bindings: dict, session: dict) -> str | None:
@@ -503,6 +536,7 @@ def _herdr_env() -> dict:
 
 def _session_panes(session_name: str, env: dict) -> list[dict]:
     """读取某 session 的 pane 快照（SSE data: 行优先）。"""
+    next_profile.require_session(session_name)
     result = subprocess.run(
         [HERDR_BIN, "--session", session_name, "api", "snapshot"],
         capture_output=True, text=True, timeout=5, env=env,
@@ -603,6 +637,7 @@ def resolve_explicit_target(
     """校验显式通知目标，返回目标与解析时的 Agent 状态。"""
     if not session_name or not pane_id:
         raise ValueError("显式目标需要同时提供 session 与 pane")
+    next_profile.require_session(session_name)
     env = _herdr_env()
     running = {
         str(row.get("name")) for row in _session_rows(env) if row.get("running")
@@ -642,6 +677,11 @@ def _notify_pane(
     mail_name: str = "", explicit: tuple | None = None,
 ) -> None:
     if not os.path.isfile(HERDR_BIN) or not project_key:
+        return
+    try:
+        next_profile.require_project(project_key)
+    except next_profile.NextProfileError as exc:
+        print(f"warning: 跳过越界 Herdr 通知: {exc}", file=sys.stderr)
         return
     env = _herdr_env()
     if explicit is not None:
@@ -714,6 +754,12 @@ def _deliver_notify_note(
     msg_id: int, subject: str, agent_type: str, instance: str,
     project_key: str, intent: str, agent_status: str = "",
 ) -> None:
+    try:
+        next_profile.require_session(session)
+        next_profile.require_project(project_key)
+    except next_profile.NextProfileError as exc:
+        print(f"warning: 跳过越界 Herdr 通知: {exc}", file=sys.stderr)
+        return
     # Herdr prompt 会被 CLI 当成新的用户输入；Agent 正在生成时直接 prompt
     # 会取消当前 turn。此时只保留持久未读消息，等对方空闲或里程碑自查。
     if agent_status == "working":

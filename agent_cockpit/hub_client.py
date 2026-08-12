@@ -17,6 +17,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from . import next_profile
 from . import settings
 
 from agent_mail_commands.common import load_client_config, save_client_hub
@@ -469,6 +470,7 @@ def send_message(
     importance: str = "normal",
     ack_required: bool = False,
 ) -> Any:
+    next_profile.require_project(project_key)
     _ensure_init()
     return _tool("send_message", {
         "project_key": project_key,
@@ -491,6 +493,7 @@ def acknowledge_message(
     registration_token: str,
     message_id: int,
 ) -> Any:
+    next_profile.require_project(project_key)
     _ensure_init()
     return _tool("acknowledge_message", {
         "project_key": project_key,

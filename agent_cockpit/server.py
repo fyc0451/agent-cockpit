@@ -46,6 +46,7 @@ from . import team_inbox_router
 from . import uploads
 from . import files
 from . import mail_projects
+from . import next_profile
 from . import team_sessions
 from . import terminal
 from . import version
@@ -766,6 +767,10 @@ def _validate_bind(host: str) -> None:
 def _validate_session_name(name: str) -> None:
     if not SESSION_NAME_RE.fullmatch(name):
         raise HTTPException(400, "session 名仅允许字母、数字、下划线和连字符")
+    try:
+        next_profile.require_session(name)
+    except next_profile.NextProfileError as exc:
+        raise HTTPException(404, "session 不存在") from exc
 
 
 def _validate_pane_id(pane_id: str) -> None:
@@ -805,6 +810,7 @@ def _identity_record(
 ) -> dict[str, Any] | None:
     """只按已确定的 Agent Mail human key 查真实身份。"""
     try:
+        cwd = next_profile.require_project(cwd)
         if instance_id is not None:
             identity = _registry_identity_for_instance(cwd, agent_type, instance_id)
             if not identity:
@@ -2741,6 +2747,9 @@ def _read_registry_entry(entry: Path, resolved_root: Path) -> dict[str, Any] | N
         data = json.loads(resolved.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return None
+        scoped_project = next_profile.project()
+        if scoped_project is not None and data.get("project_key") != scoped_project:
+            return None
         hub = data.get("hub")
         if not isinstance(hub, str) or not hub:
             return None
@@ -4197,7 +4206,10 @@ def _started_agent_mail_identity(
     except Exception as exc:
         return {**base, "warning": f"读取 Agent Mail 通信项目失败: {exc}"}
     if project_hint:
-        project = str(Path(project_hint).expanduser().resolve())
+        try:
+            project = next_profile.require_project(project_hint)
+        except next_profile.NextProfileError as exc:
+            return {**base, "warning": str(exc)}
     else:
         try:
             state = _mail_project_state(session)
@@ -4413,6 +4425,8 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     project_dir = Path(req.workdir).expanduser().resolve()
+    if next_profile.enabled():
+        _canonical_mail_project(project_dir)
     workspace: dict[str, Any] = {
         "strategy": "shared", "workdir": str(project_dir),
     }
@@ -4686,6 +4700,14 @@ def _worktree_source(project_dir: Path) -> tuple[Path | None, Path | None]:
 def _canonical_mail_project(workdir: Path) -> str:
     """同一 clone 的 linked worktree 统一映射到主 worktree root。"""
     resolved = workdir.expanduser().resolve()
+    scoped = next_profile.project()
+    if scoped is not None:
+        scope_path = Path(scoped)
+        try:
+            resolved.relative_to(scope_path)
+        except ValueError as exc:
+            raise HTTPException(403, "Agent Mail 项目超出 Next 隔离范围") from exc
+        return scoped
     common_dir = _git_common_dir(resolved)
     if common_dir is None:
         return str(resolved)
@@ -5243,8 +5265,10 @@ def _setup_workspace(req: SetupWorkspaceReq):
     """
     if req.layout not in VALID_LAYOUTS:
         raise HTTPException(400, f"不支持的布局: {req.layout}")
-    if not Path(req.workdir).expanduser().resolve().is_dir():
+    resolved_workdir = Path(req.workdir).expanduser().resolve()
+    if not resolved_workdir.is_dir():
         raise HTTPException(400, "工作目录不存在")
+    canonical_project = _canonical_mail_project(resolved_workdir)
     if not herdr_client.is_available():
         return {
             "ok": False,
@@ -5269,7 +5293,6 @@ def _setup_workspace(req: SetupWorkspaceReq):
     )
     session_created = req.session not in states
     session_started = states.get(req.session) == "running"
-    canonical_project = _canonical_mail_project(Path(req.workdir))
     initial_session_dir = (
         (active_session_record or {}).get("directory")
         or str(Path(req.workdir).expanduser().resolve())
@@ -7236,6 +7259,12 @@ def main() -> int:
     import uvicorn
 
     from .log_config import LogConfigError, configure_logging
+
+    try:
+        next_profile.validate_server_environment(ROOT_DIR)
+    except next_profile.NextProfileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     # Fixed install root = generation/package directory (not process cwd).
     _install_dir = ROOT_DIR

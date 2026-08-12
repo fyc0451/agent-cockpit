@@ -8,9 +8,9 @@
     "Do not start R0 before the isolated successor passes N0"
   ],
   "baseline": {
-    "main_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
-    "production_version": "0.3.3",
-    "production_source_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
+    "main_sha": "169d0af7751b568e813d2cbca285a9f147e86001",
+    "production_version": "0.3.4",
+    "production_source_sha": "169d0af7751b568e813d2cbca285a9f147e86001"
   },
   "limits": {
     "writer_wip": 2,
@@ -21,13 +21,16 @@
     {
       "id": "N0-isolated-successor",
       "title": "Isolate the successor worktree and runtime",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [],
-      "scope": [".agent-memory-project", ".delivery", "docs", "scripts", "tests"],
-      "acceptance": [{"command": "python3 scripts/delivery_gate.py check .delivery/cockpit-next.json", "passed": false}],
+      "scope": [".agent-memory-project", ".delivery", ".env.next.example", ".gitignore", "agent_cockpit", "agent_mail_commands", "docs", "scripts", "server.py", "tests"],
+      "acceptance": [
+        {"command": "python3 scripts/delivery_gate.py check .delivery/cockpit-next.json", "passed": false},
+        {"command": "python3 -m pytest -q tests/test_next_isolation.py", "passed": false}
+      ],
       "rollback": "Remove the next worktree and its isolated runtime roots; leave main and port 8790 unchanged",
       "production_impact": "none",
-      "owner_instance_id": null,
+      "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
       "reviewer_instance_id": null,
       "base_sha": null,
       "fixed_sha": null,

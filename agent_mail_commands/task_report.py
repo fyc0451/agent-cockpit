@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from agent_cockpit import coordination
+from agent_cockpit import coordination, next_profile
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -18,8 +18,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--blocker", default="")
     args = parser.parse_args(argv)
     try:
+        next_profile.require_helper_environment(())
+        session = next_profile.require_session(args.session)
         report = coordination.submit_task_report(
-            session=args.session,
+            session=session,
             pane_id=args.pane,
             request_id=args.request_id,
             progress=args.progress,
@@ -27,7 +29,7 @@ def main(argv: list[str] | None = None) -> None:
             next_step=args.next_step,
             blocker=args.blocker,
         )
-    except ValueError as exc:
+    except (ValueError, next_profile.NextProfileError) as exc:
         parser.error(str(exc))
     print(json.dumps({
         "ok": True,

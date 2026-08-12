@@ -6,6 +6,8 @@ import contextlib
 import io
 from pathlib import Path
 
+from agent_cockpit import next_profile
+
 from . import am_register
 
 
@@ -27,7 +29,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", default="")
     args = parser.parse_args(argv)
 
-    project = Path(args.project).resolve()
+    try:
+        next_profile.require_helper_environment(())
+        project = Path(next_profile.require_project(args.project))
+    except next_profile.NextProfileError as exc:
+        parser.error(str(exc))
     if not project.is_dir():
         parser.error(f"项目目录不存在：{args.project}")
     selected = set(filter(None, args.only.split(","))) if args.only else None

@@ -22,6 +22,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_cockpit import next_profile
+
 from .common import (
     REGISTRY_DIR,
     load_client_config,
@@ -147,11 +149,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--project", default=str(Path.cwd()))
     args = parser.parse_args(argv)
 
+    try:
+        next_profile.require_helper_environment(())
+        project_key = next_profile.require_project(args.project)
+    except next_profile.NextProfileError as exc:
+        raise SystemExit(str(exc)) from exc
     agent = _validate_component(args.agent, "agent")
     instance = _validate_component(args.instance, "instance")
     if not _OPAQUE_INSTANCE_RE.fullmatch(instance):
         raise SystemExit("instance 必须是 Cockpit 生成的 opaque id（i- + 26 位 base32）")
-    project_key = str(Path(args.project).resolve())
     registry_file = REGISTRY_DIR / slugify(project_key) / f"{agent}--{instance}.json"
 
     if not registry_file.exists():

@@ -26,6 +26,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from . import next_profile
+
 # herdr 二进制:优先用环境变量,其次 PATH 探测,最后试 ~/.local/bin
 _HERDR_ENV = os.environ.get("HERDR_BIN")
 HERDR_BIN = _HERDR_ENV or shutil.which("herdr") or str(Path.home() / ".local" / "bin" / "herdr")
@@ -325,6 +327,11 @@ def reload_config(timeout: int = 10) -> dict[str, Any]:
     except Exception:
         sessions = []
     if not sessions:
+        if next_profile.enabled():
+            return {
+                "ok": False, "reloaded": [],
+                "errors": ["next_session_not_running"],
+            }
         try:
             _run(["server", "reload-config"], timeout=timeout)
             return {"ok": True, "reloaded": [], "errors": []}
@@ -445,6 +452,14 @@ def set_theme_for_web_mode(
 
 def _run(args: list[str], timeout: float = 10) -> str:
     """跑 herdr 子命令,注入 PATH,返回 stdout。失败抛 RuntimeError。"""
+    if "--session" in args:
+        index = args.index("--session")
+        if index + 1 >= len(args):
+            raise RuntimeError("herdr --session 缺少值")
+        try:
+            next_profile.require_session(args[index + 1])
+        except next_profile.NextProfileError as exc:
+            raise RuntimeError(str(exc)) from exc
     extra_path = _HERDR_DIR + (":" + os.environ.get("PATH", "") if os.environ.get("PATH") else "")
     env = {**os.environ, "PATH": extra_path or os.environ.get("PATH", "/usr/bin:/bin")}
     try:
@@ -551,7 +566,7 @@ def list_sessions() -> list[dict[str, Any]]:
         rows = data.get("sessions", [])
         if not isinstance(rows, list):
             raise ValueError("sessions 不是列表")
-        return [
+        sessions = [
             {
                 "name": str(row.get("name", "")),
                 "status": "running" if row.get("running") else "stopped",
@@ -560,6 +575,17 @@ def list_sessions() -> list[dict[str, Any]]:
             }
             for row in rows
             if isinstance(row, dict) and row.get("name")
+        ]
+        scoped = next_profile.session()
+        if scoped is None:
+            return sessions
+        config_root = herdr_config_path().parent.resolve()
+        session_root = config_root / "sessions" / scoped
+        return [
+            row for row in sessions
+            if row["name"] == scoped
+            and Path(row["directory"]).resolve(strict=False) == session_root
+            and Path(row["socket"]).resolve(strict=False) == session_root / "herdr.sock"
         ]
     except (RuntimeError, ValueError, json.JSONDecodeError):
         # 兼容尚未支持 --json 的旧版 herdr；新版使用稳定 JSON，避免表格
@@ -580,7 +606,17 @@ def list_sessions() -> list[dict[str, Any]]:
                 "directory": parts[2] if len(parts) > 2 else "",
                 "socket": parts[-1],
             })
-    return sessions
+    scoped = next_profile.session()
+    if scoped is None:
+        return sessions
+    config_root = herdr_config_path().parent.resolve()
+    session_root = config_root / "sessions" / scoped
+    return [
+        row for row in sessions
+        if row["name"] == scoped
+        and Path(row["directory"]).resolve(strict=False) == session_root
+        and Path(row["socket"]).resolve(strict=False) == session_root / "herdr.sock"
+    ]
 
 
 def _slim_layout(layout: dict[str, Any]) -> dict[str, Any]:
@@ -2706,6 +2742,10 @@ def restart_pane(
 
 def stop_session(session: str) -> dict[str, Any]:
     """停止一个 herdr session。"""
+    try:
+        next_profile.require_session(session)
+    except next_profile.NextProfileError as exc:
+        return {"available": True, "error": str(exc)}
     if not is_available():
         return {"available": False}
     try:
@@ -2717,6 +2757,10 @@ def stop_session(session: str) -> dict[str, Any]:
 
 def delete_session(session: str) -> dict[str, Any]:
     """删除一个已停止的 session。"""
+    try:
+        next_profile.require_session(session)
+    except next_profile.NextProfileError as exc:
+        return {"available": True, "error": str(exc)}
     if not is_available():
         return {"available": False}
     try:
