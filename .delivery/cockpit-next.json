@@ -3,7 +3,7 @@
   "goal_id": "agent-cockpit-next",
   "user_journey": "settings -> click -> progress -> reconnect -> result",
   "non_goals": [
-    "Do not deploy Foundation to the current 8790 service",
+    "Do not let an agent trigger the production upgrade or record user acceptance",
     "Do not modify the current production runtime or data",
     "Do not start R0 before the isolated successor passes N0"
   ],

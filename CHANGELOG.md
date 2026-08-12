@@ -8,11 +8,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Publish version 0.3.4 with the versioned delivery framework and the native
+  consecutive-upgrade evidence fix.
 - Publish version 0.3.3 without runtime or frontend changes so the signed native
   release and GUI upgrade flow can be exercised end to end by the operator.
 
 ### Fixed
 
+- Rebind previous-generation evidence after a completed maintenance request so a
+  later native upgrade can start from the newly active generation.
 - Accept pane-scoped `typing.json` in sealed upgrade snapshots so a valid
   terminal input-avoidance state cannot block native upgrades.
 - Set OpenCode's light/dark mode explicitly in addition to selecting its theme,
@@ -38,6 +42,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A strict versioned delivery contract and read-only gate with stable validation
+  codes, dependency readiness reporting, release checks, and adversarial fixtures.
 - A compact historical task-statistics strip in the workbench, backed by an
   unbounded read-only aggregate for status, completion, and duration percentiles.
 - A read-only project workbench API that combines durable coordination
