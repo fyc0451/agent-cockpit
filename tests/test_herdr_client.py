@@ -5,7 +5,7 @@ import threading
 import time
 from unittest.mock import call
 
-import herdr_client
+from agent_cockpit import herdr_client
 import pytest
 
 

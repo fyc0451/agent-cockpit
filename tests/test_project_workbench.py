@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 import pytest
 
-import mail_projects
+from agent_cockpit import mail_projects
 import server
 
 

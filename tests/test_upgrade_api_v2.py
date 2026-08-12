@@ -4,8 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
-import upgrade_core
-import upgrade_service
+from agent_cockpit import upgrade_core
+from agent_cockpit import upgrade_service
 
 
 def _auth() -> dict[str, str]:

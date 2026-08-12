@@ -12,12 +12,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-import artifact_download
-import maintenance_ipc
-import native_controller_install
-import release_index
-import release_prepare
-import upgrade_layout
+from agent_cockpit import artifact_download
+from agent_cockpit import maintenance_ipc
+from agent_cockpit import native_controller_install
+from agent_cockpit import release_index
+from agent_cockpit import release_prepare
+from agent_cockpit import upgrade_layout
 
 
 TAG = "agent-cockpit-v1.2.3"

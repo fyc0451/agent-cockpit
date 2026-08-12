@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import runtime_paths
-import store_schema
+from agent_cockpit import runtime_paths
+from agent_cockpit import store_schema
 
 
 @pytest.fixture()
@@ -44,7 +44,7 @@ def test_missing_stores_are_creatable_no_writes(isolated_roots, tmp_path):
 
 
 def test_delivery_outbox_current_store_fingerprint_compatible(isolated_roots, monkeypatch):
-    import delivery_outbox
+    from agent_cockpit import delivery_outbox
 
     path = runtime_paths.store("delivery_outbox")
     monkeypatch.setattr(delivery_outbox, "DB_PATH", path)
@@ -88,7 +88,7 @@ def test_b0_legacy_store_requires_migration(isolated_roots, monkeypatch):
 
 
 def test_b0_current_store_fingerprint_compatible(isolated_roots, monkeypatch):
-    import leader_binding
+    from agent_cockpit import leader_binding
 
     monkeypatch.setenv("COCKPIT_B0_MODE", "canary")
     path = runtime_paths.store("leader_binding")
@@ -163,7 +163,7 @@ def test_tasks_fingerprint_compatible(isolated_roots):
 def test_coordination_assignment_schema_migrates_existing_store(
     isolated_roots, monkeypatch,
 ):
-    import coordination
+    from agent_cockpit import coordination
 
     path = runtime_paths.store("coordination")
     monkeypatch.setattr(coordination, "DB_PATH", path)
@@ -481,7 +481,7 @@ def test_path_gate_blocks_non_sqlite_symlink_escape(isolated_roots, monkeypatch)
 
 
 def test_file_roots_unsafe_slash(isolated_roots):
-    import files
+    from agent_cockpit import files
     # Must use the same path the production reader uses (conftest may redirect it).
     path = files._custom_roots_file()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -503,7 +503,7 @@ def test_manifest_production_missing(monkeypatch):
 
 def test_manifest_wrong_identity_binding_fail_closed():
     """Lead R2 counter-example (3): WRONG version / not-a-sha → not compatible."""
-    root = Path(store_schema.__file__).resolve().parent
+    root = runtime_paths.INSTALL_ROOT
     man = root / "release-manifest.json"
     payload = {
         "version": "WRONG",
@@ -569,7 +569,7 @@ def test_health_ready_production_manifest_503(isolated_roots, monkeypatch):
     monkeypatch.setenv("COCKPIT_EDITION", "server")
     monkeypatch.setenv("COCKPIT_SOURCE_SHA", "a" * 40)
     import importlib
-    import release_identity
+    from agent_cockpit import release_identity
     import server
     release_identity._cached = None  # noqa: SLF001
     runtime_paths.reset_cache()
@@ -649,7 +649,7 @@ def test_delivery_outbox_missing_column_mismatch(isolated_roots):
 def test_delivery_outbox_legacy_migration_then_compatible(
     isolated_roots, monkeypatch,
 ):
-    import delivery_outbox
+    from agent_cockpit import delivery_outbox
 
     path = runtime_paths.store("delivery_outbox")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -682,7 +682,7 @@ def test_delivery_outbox_legacy_migration_then_compatible(
 def test_delivery_outbox_legacy_migration_failure_atomic(
     isolated_roots, monkeypatch,
 ):
-    import delivery_outbox
+    from agent_cockpit import delivery_outbox
 
     path = runtime_paths.store("delivery_outbox")
     path.parent.mkdir(parents=True, exist_ok=True)

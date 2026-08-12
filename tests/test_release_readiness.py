@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-import release_readiness
-import runtime_paths
-import store_schema
+from agent_cockpit import release_readiness
+from agent_cockpit import runtime_paths
+from agent_cockpit import store_schema
 
 
 IDENTITY = {
@@ -691,11 +691,11 @@ def test_candidate_cli_outputs_evidence_and_never_writes_it(tmp_path):
     artifact = _make_artifact(tmp_path)
     snapshot = _make_snapshot(tmp_path)
     inventory_path, inventory_digest = _write_inventory(snapshot)
-    script = Path(release_readiness.__file__).resolve()
     result = subprocess.run(
         [
             sys.executable,
-            str(script),
+            "-m",
+            "agent_cockpit.release_readiness",
             "--snapshot-root", str(snapshot),
             "--artifact-root", str(artifact),
             "--version", "1.2.3",
@@ -714,7 +714,8 @@ def test_candidate_cli_outputs_evidence_and_never_writes_it(tmp_path):
     invalid = subprocess.run(
         [
             sys.executable,
-            str(script),
+            "-m",
+            "agent_cockpit.release_readiness",
             "--snapshot-root", str(snapshot),
             "--artifact-root", str(artifact),
             "--version", "1.2.3",

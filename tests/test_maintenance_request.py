@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-import generation_prepare
-import generation_switch
-import maintenance_controller
-import maintenance_evidence
-import maintenance_executor
-import maintenance_request
+from agent_cockpit import generation_prepare
+from agent_cockpit import generation_switch
+from agent_cockpit import maintenance_controller
+from agent_cockpit import maintenance_evidence
+from agent_cockpit import maintenance_executor
+from agent_cockpit import maintenance_request
 
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "1" * 64)

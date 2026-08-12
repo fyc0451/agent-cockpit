@@ -22,7 +22,7 @@ def _launcher(tmp_path: Path) -> tuple[Path, Path]:
 def test_source_root_is_module_root_and_ignores_process_context(
     tmp_path, monkeypatch,
 ):
-    import artifact_root
+    from agent_cockpit import artifact_root
 
     monkeypatch.delattr(sys, "frozen", raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
@@ -35,7 +35,7 @@ def test_source_root_is_module_root_and_ignores_process_context(
 def test_frozen_root_uses_canonical_fixed_launcher_layout(
     tmp_path, monkeypatch,
 ):
-    import artifact_root
+    from agent_cockpit import artifact_root
 
     generation, launcher = _launcher(tmp_path)
     elsewhere = tmp_path / "elsewhere"
@@ -51,7 +51,7 @@ def test_frozen_root_uses_canonical_fixed_launcher_layout(
 
 @pytest.mark.parametrize("layout", ["relative", "wrong-parent", "wrong-name"])
 def test_invalid_frozen_layout_fails_stably(tmp_path, monkeypatch, layout):
-    import artifact_root
+    from agent_cockpit import artifact_root
 
     generation, launcher = _launcher(tmp_path)
     if layout == "relative":
@@ -71,7 +71,7 @@ def test_invalid_frozen_layout_fails_stably(tmp_path, monkeypatch, layout):
 
 
 def test_invalid_frozen_layout_does_not_create_files(tmp_path, monkeypatch):
-    import artifact_root
+    from agent_cockpit import artifact_root
 
     missing = tmp_path / "generation" / "bin" / "agent-cockpit"
     before = tuple(tmp_path.rglob("*"))
@@ -117,7 +117,8 @@ sys.frozen = True
 sys.executable = sys.argv[1]
 sys._MEIPASS = sys.argv[2]
 os.chdir(sys.argv[3])
-import release_readiness, runtime_paths, server, store_schema, version
+from agent_cockpit import release_readiness, runtime_paths, store_schema, version
+import server
 seen = {}
 def capture(identity, *, artifact_root, environ):
     seen["readiness_root"] = str(artifact_root)
@@ -165,11 +166,11 @@ print(json.dumps({
 
 
 def test_source_consumers_keep_repository_root(monkeypatch):
-    import release_readiness
-    import runtime_paths
+    from agent_cockpit import release_readiness
+    from agent_cockpit import runtime_paths
     import server
-    import store_schema
-    import version
+    from agent_cockpit import store_schema
+    from agent_cockpit import version
 
     seen = {}
 

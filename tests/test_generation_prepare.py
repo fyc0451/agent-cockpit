@@ -12,9 +12,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-import generation_prepare
-from artifact_extract import ArtifactExtractError
-from release_index import (
+from agent_cockpit import generation_prepare
+from agent_cockpit.artifact_extract import ArtifactExtractError
+from agent_cockpit.release_index import (
     PERSISTED_INDEX_NAME,
     PERSISTED_SIGNATURE_NAME,
     canonical_bytes,

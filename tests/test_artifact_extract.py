@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-import artifact_extract
-from artifact_extract import ArtifactExtractError
-from release_index import SERVER_LAUNCHER_PATH
+from agent_cockpit import artifact_extract
+from agent_cockpit.artifact_extract import ArtifactExtractError
+from agent_cockpit.release_index import SERVER_LAUNCHER_PATH
 
 
 # Historical tests exercise the shared archive core without making a server

@@ -226,16 +226,10 @@ localStorage。session 的 Agent Mail 通信项目绑定存在
 
 ```
 agent-cockpit/
-├── server.py              FastAPI 应用:路由、SSE、静态资源
-├── db.py                  只读查询 hub 的 SQLite
-├── herdr_client.py        多 session herdr CLI 封装(看板数据源)
-├── tasks.py               codex exec 后台任务 + diff/apply
-├── files.py               沙箱文件浏览/编辑
-├── hub_client.py          MCP 写代理(发消息 / 已读)
-├── web_push.py            VAPID 密钥、订阅与推送
-├── uploads.py             文件/截图上传
-├── settings.py            用户配置存储
-├── terminal.py            浏览器 PTY 终端
+├── server.py              兼容启动入口
+├── source_native_migrate.py / release_lane.py  受管发布入口
+├── agent_cockpit/         应用实现(服务、终端、通信、升级)
+├── agent_mail_commands/    Agent Mail 命令实现
 ├── static/index.html      单文件前端(看板 + 待办 + 终端 + 各标签页)
 ├── static/sw.js           Web Push service worker 与深链跳转
 ├── static/manifest.webmanifest  PWA 元数据

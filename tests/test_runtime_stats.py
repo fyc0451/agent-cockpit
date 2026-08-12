@@ -4,10 +4,10 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-import runtime_stats
+from agent_cockpit import runtime_stats
 import server
-import tasks
-import terminal
+from agent_cockpit import tasks
+from agent_cockpit import terminal
 
 
 @pytest.fixture(autouse=True)

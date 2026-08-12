@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-import leader_binding
+from agent_cockpit import leader_binding
 
 ISSUER = "issuer-1"
 

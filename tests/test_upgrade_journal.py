@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-import upgrade_journal as journal
+from agent_cockpit import upgrade_journal as journal
 
 
 DIGEST = "d" * 64

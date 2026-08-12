@@ -19,12 +19,16 @@ from pathlib import Path
 
 import pytest
 
-import runtime_paths
+from agent_cockpit import runtime_paths
 
 MODULES = [
-    "runtime_paths", "settings", "tasks", "coordination", "web_push",
-    "mail_projects", "team_sessions", "team_inbox_router", "terminal",
-    "uploads", "files", "db", "delivery_outbox", "server",
+    "agent_cockpit.runtime_paths", "agent_cockpit.settings",
+    "agent_cockpit.tasks", "agent_cockpit.coordination",
+    "agent_cockpit.web_push", "agent_cockpit.mail_projects",
+    "agent_cockpit.team_sessions", "agent_cockpit.team_inbox_router",
+    "agent_cockpit.terminal", "agent_cockpit.uploads", "agent_cockpit.files",
+    "agent_cockpit.db", "agent_cockpit.delivery_outbox",
+    "agent_cockpit.server",
 ]
 
 REPO_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -285,7 +289,7 @@ class TestProfileIsolation:
     def test_custom_profile_does_not_expose_legacy_roots(
         self, fake_home, monkeypatch, tmp_path,
     ):
-        import files
+        from agent_cockpit import files
         alt_data, alt_up = tmp_path / "p-data", tmp_path / "p-uploads"
         monkeypatch.setenv("COCKPIT_DATA_DIR", str(alt_data))
         monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(alt_up))
@@ -412,7 +416,7 @@ class TestR3SymlinkEscape:
         assert entry["ready"] is True and entry["reason"] == "ok"
 
     def test_writer_guard_raises_before_ddl(self, fake_home, tmp_path, monkeypatch):
-        import tasks
+        from agent_cockpit import tasks
         data = self._data(fake_home)
         outside = tmp_path / "victim.sqlite3"
         link = data / "tasks.sqlite3"
@@ -479,7 +483,7 @@ class TestR3WorktreeEscape:
     def test_create_worktree_fails_closed_before_git(
         self, fake_home, tmp_path, monkeypatch, git_source,
     ):
-        import tasks
+        from agent_cockpit import tasks
         data = fake_home / "dashboard-data"
         data.mkdir(exist_ok=True)
         victim = tmp_path / "victim-outside"
@@ -502,7 +506,7 @@ class TestR3WorktreeEscape:
     def test_remove_worktree_fails_closed_before_rmtree(
         self, fake_home, tmp_path, monkeypatch,
     ):
-        import tasks
+        from agent_cockpit import tasks
         data = fake_home / "dashboard-data"
         data.mkdir(exist_ok=True)
         victim = tmp_path / "victim-dir"
@@ -521,7 +525,7 @@ class TestR3WorktreeEscape:
     def test_validate_worktree_path_rejects_symlink_leaf(
         self, fake_home, tmp_path, monkeypatch,
     ):
-        import tasks
+        from agent_cockpit import tasks
         data = fake_home / "dashboard-data"
         (data / "worktrees").mkdir(parents=True)
         target = tmp_path / "real-dir"
@@ -540,7 +544,7 @@ class TestR3WorktreeEscape:
 
 class TestTasksConcurrentFirstUse:
     def test_first_db_concurrent_barrier(self, tmp_path, monkeypatch):
-        import tasks
+        from agent_cockpit import tasks
         monkeypatch.setattr(tasks, "TASKS_DB", tmp_path / "tasks.sqlite3")
         monkeypatch.setattr(tasks, "_db_swept", False)
         errors: list[BaseException] = []

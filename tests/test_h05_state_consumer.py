@@ -53,10 +53,10 @@ import time
 
 import pytest
 
-import herdr_client
-import herdr_state
+from agent_cockpit import herdr_client
+from agent_cockpit import herdr_state
 import server
-import team_inbox_router
+from agent_cockpit import team_inbox_router
 
 _REAL_STATE_CLIENT = herdr_state.HerdrStateClient
 

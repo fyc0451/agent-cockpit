@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-import b0_wiring
-import leader_binding
+from agent_cockpit import b0_wiring
+from agent_cockpit import leader_binding
 
 from tests.test_b0_wiring import (  # noqa: F401
     ISSUER, _RecordingAdapter, binding_db, registry,

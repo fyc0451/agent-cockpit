@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import files
+from agent_cockpit import files
 import server
 
 
@@ -20,7 +20,7 @@ def fake_home(tmp_path, monkeypatch):
     agent-mail-tools 兼容根。R2-E 后白名单不再硬编码 legacy home 存储,
     因此把 data/uploads/config 根都指到 tmp_path,保证隔离目录可浏览。
     """
-    import runtime_paths
+    from agent_cockpit import runtime_paths
     monkeypatch.setenv("COCKPIT_DATA_DIR", str(tmp_path / "dashboard-data"))
     monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(tmp_path / "dashboard-uploads"))
     monkeypatch.setenv("COCKPIT_CONFIG_DIR", str(tmp_path / ".config" / "agent-cockpit"))
@@ -221,7 +221,7 @@ def test_persisted_roots_reject_missing_and_non_directory_paths(tmp_path):
 
 
 def test_persisted_roots_reject_broad_sensitive_and_runtime_roots(tmp_path):
-    import runtime_paths
+    from agent_cockpit import runtime_paths
 
     sensitive_home = [
         _mkdirs(tmp_path / name)

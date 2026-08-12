@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import generation_switch
-from generation_switch import (
+from agent_cockpit import generation_switch
+from agent_cockpit.generation_switch import (
     GenerationIdentity,
     GenerationSwitchError,
     activate_generation,

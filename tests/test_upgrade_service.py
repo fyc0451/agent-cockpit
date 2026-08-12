@@ -5,10 +5,10 @@ from typing import Any
 
 import pytest
 
-import generation_prepare
-import maintenance_ipc
-import upgrade_layout
-import upgrade_service
+from agent_cockpit import generation_prepare
+from agent_cockpit import maintenance_ipc
+from agent_cockpit import upgrade_layout
+from agent_cockpit import upgrade_service
 
 
 SOURCE_SHA = "a" * 40

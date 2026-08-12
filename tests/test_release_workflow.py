@@ -10,7 +10,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from release_index import canonical_bytes, verify_release_index
+from agent_cockpit.release_index import canonical_bytes, verify_release_index
 
 
 ROOT = Path(__file__).resolve().parents[1]

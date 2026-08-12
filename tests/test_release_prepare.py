@@ -12,10 +12,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-import release_prepare
-from generation_prepare import PreparedGeneration
-from release_fetch import ReleasePayloads
-from release_index import OFFICIAL_RELEASE_DOWNLOAD_PREFIX, canonical_bytes
+from agent_cockpit import release_prepare
+from agent_cockpit.generation_prepare import PreparedGeneration
+from agent_cockpit.release_fetch import ReleasePayloads
+from agent_cockpit.release_index import OFFICIAL_RELEASE_DOWNLOAD_PREFIX, canonical_bytes
 
 
 TAG = "agent-cockpit-v1.2.3"

@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
-import hub_client
+from agent_cockpit import hub_client
 import server
-import team_sessions
+from agent_cockpit import team_sessions
 
 
 HUB = "http://team.example"

@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from artifact_root import resolve_artifact_root
+from agent_cockpit.artifact_root import resolve_artifact_root
 
 
 CLIENT_ENV = Path.home() / ".agent-mail" / "client.env"

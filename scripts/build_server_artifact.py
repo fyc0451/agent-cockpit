@@ -18,9 +18,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from release_index import SERVER_LAUNCHER_PATH, canonical_bytes  # noqa: E402
-from store_schema import required_manifest_digest_paths  # noqa: E402
-from version import format_semver, parse_semver  # noqa: E402
+from agent_cockpit.release_index import SERVER_LAUNCHER_PATH, canonical_bytes  # noqa: E402
+from agent_cockpit.store_schema import required_manifest_digest_paths  # noqa: E402
+from agent_cockpit.version import format_semver, parse_semver  # noqa: E402
 
 
 _SOURCE_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")

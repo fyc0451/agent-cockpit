@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
-import upgrade_core
+from agent_cockpit import upgrade_core
 
 
 def _auth(token: str = "secret-token-xyz") -> dict[str, str]:

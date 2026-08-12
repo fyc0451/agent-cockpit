@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import coordination
+from agent_cockpit import coordination
 
 
 def main(argv: list[str] | None = None) -> None:

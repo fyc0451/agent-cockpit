@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-import coordination
+from agent_cockpit import coordination
 import server
 
 

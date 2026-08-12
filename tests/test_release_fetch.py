@@ -7,9 +7,9 @@ from typing import Iterator
 
 import pytest
 
-import release_fetch
-from artifact_download import ArtifactDownloadError, download_verified_artifact
-from release_index import MAX_INDEX_BYTES, OFFICIAL_RELEASE_DOWNLOAD_PREFIX
+from agent_cockpit import release_fetch
+from agent_cockpit.artifact_download import ArtifactDownloadError, download_verified_artifact
+from agent_cockpit.release_index import MAX_INDEX_BYTES, OFFICIAL_RELEASE_DOWNLOAD_PREFIX
 
 
 TAG = "agent-cockpit-v1.2.3"

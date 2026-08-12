@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import delivery_outbox
-import runtime_paths
+from agent_cockpit import delivery_outbox
+from agent_cockpit import runtime_paths
 
 
 @pytest.fixture()

@@ -16,9 +16,9 @@ from typing import Any
 
 import pytest
 
-import b0_wiring
-import coordination
-import leader_binding
+from agent_cockpit import b0_wiring
+from agent_cockpit import coordination
+from agent_cockpit import leader_binding
 
 from tests.test_b0_wiring import (
     AUTH, ISSUER, _RecordingAdapter, _make_coordinator, _msg, _stub_fetch,
@@ -139,7 +139,7 @@ def test_control_message_carries_stable_event_id(
         b0_wiring, "active_run_participants",
         lambda: [("/tmp/proj-x", "dev-a")],
     )
-    import hub_client
+    from agent_cockpit import hub_client
     monkeypatch.setattr(
         hub_client, "send_message",
         lambda **kw: calls.append(kw) or {"deliveries": []},

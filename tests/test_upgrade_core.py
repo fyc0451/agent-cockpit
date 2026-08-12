@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import upgrade_core
+from agent_cockpit import upgrade_core
 
 
 def _git(cwd: Path, *args: str) -> str:

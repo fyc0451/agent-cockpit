@@ -18,8 +18,8 @@ from typing import Any, Callable
 
 import pytest
 
-import herdr_state
-from herdr_client import HERDR_MIN_PROTOCOL
+from agent_cockpit import herdr_state
+from agent_cockpit.herdr_client import HERDR_MIN_PROTOCOL
 
 
 # ---------------------------------------------------------------------------

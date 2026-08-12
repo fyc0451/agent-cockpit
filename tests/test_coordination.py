@@ -1,7 +1,7 @@
 import json
 import threading
 
-import coordination
+from agent_cockpit import coordination
 import pytest
 
 

@@ -9,8 +9,8 @@ sys.path.insert(
 )
 
 import am_common
-import hub_client
-import settings
+from agent_cockpit import hub_client
+from agent_cockpit import settings
 
 
 def _write_client_env(monkeypatch, tmp_path, content: str) -> None:

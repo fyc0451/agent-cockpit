@@ -8,8 +8,8 @@ from typing import Iterator
 
 import pytest
 
-import artifact_download
-from artifact_download import ArtifactDownloadError, download_verified_artifact
+from agent_cockpit import artifact_download
+from agent_cockpit.artifact_download import ArtifactDownloadError, download_verified_artifact
 
 
 class FakeResponse:

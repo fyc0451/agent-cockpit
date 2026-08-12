@@ -8,14 +8,14 @@ from typing import Any
 
 import pytest
 
-import generation_switch
-import maintenance_controller
-import maintenance_evidence
-import maintenance_executor
-import maintenance_schema_probe
-import release_readiness
-import store_schema
-import upgrade_snapshot
+from agent_cockpit import generation_switch
+from agent_cockpit import maintenance_controller
+from agent_cockpit import maintenance_evidence
+from agent_cockpit import maintenance_executor
+from agent_cockpit import maintenance_schema_probe
+from agent_cockpit import release_readiness
+from agent_cockpit import store_schema
+from agent_cockpit import upgrade_snapshot
 
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "1" * 64)

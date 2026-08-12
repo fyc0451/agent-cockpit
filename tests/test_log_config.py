@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-import log_config
+from agent_cockpit import log_config
 
 
 def test_resolve_level_default_and_valid(monkeypatch):
@@ -187,7 +187,7 @@ def test_access_logger_does_not_record_secret_query(tmp_path, monkeypatch):
 
 def test_server_main_disables_access_log_and_uses_install_dir():
     root = Path(__file__).resolve().parents[1]
-    server = (root / "server.py").read_text(encoding="utf-8")
+    server = (root / "agent_cockpit" / "server.py").read_text(encoding="utf-8")
     assert "access_log=False" in server
     assert "_install_dir = ROOT_DIR" in server
     assert "os.environ.get(\"COCKPIT_LOG_DIR\"" not in server
@@ -237,11 +237,14 @@ def test_arbitrary_cwd_prepare_uses_install_sys_path(tmp_path, monkeypatch):
     """prepare_macos_log_dir import must not depend on process cwd."""
     install = tmp_path / "install"
     install.mkdir()
-    # Copy minimal module so sys.path=[install] works like launchd.sh
+    # Copy the minimal package so sys.path=[install] works like launchd.sh.
     import shutil
 
     root = Path(__file__).resolve().parents[1]
-    shutil.copy(root / "log_config.py", install / "log_config.py")
+    package = install / "agent_cockpit"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="ascii")
+    shutil.copy(root / "agent_cockpit" / "log_config.py", package / "log_config.py")
     other = tmp_path / "other"
     other.mkdir()
     monkeypatch.chdir(other)
@@ -253,7 +256,7 @@ def test_arbitrary_cwd_prepare_uses_install_sys_path(tmp_path, monkeypatch):
         "import sys\n"
         f"sys.path.insert(0, {str(install)!r})\n"
         "from pathlib import Path\n"
-        "from log_config import prepare_macos_log_dir\n"
+        "from agent_cockpit.log_config import prepare_macos_log_dir\n"
         f"prepare_macos_log_dir(Path({str(install)!r}))\n"
     )
     subprocess.run([sys.executable, "-c", script], check=True, cwd=tmp_path / "other")
@@ -263,7 +266,7 @@ def test_arbitrary_cwd_prepare_uses_install_sys_path(tmp_path, monkeypatch):
 
 def test_exception_handler_does_not_log_query_or_body():
     root = Path(__file__).resolve().parents[1]
-    server = (root / "server.py").read_text(encoding="utf-8")
+    server = (root / "agent_cockpit" / "server.py").read_text(encoding="utf-8")
     assert 'logger.exception(\n        "unhandled exception method=%s path=%s"' in server
     chunk = server.split("unhandled exception")[1][:500]
     assert "request.url.query" not in chunk

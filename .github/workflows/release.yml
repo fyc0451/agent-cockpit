@@ -68,7 +68,7 @@ jobs:
       - name: py_compile / AST parse
         run: |
           set -euo pipefail
-          for file in *.py scripts/*.py tests/*.py; do
+          for file in *.py agent_cockpit/*.py agent_mail_commands/*.py scripts/*.py tests/*.py; do
             python - "$file" <<'PY'
           import ast, pathlib, sys
           path = pathlib.Path(sys.argv[1])
@@ -179,7 +179,7 @@ jobs:
           import base64, os, pathlib
           from cryptography.hazmat.primitives import serialization
           from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-          from release_index import verify_release_index
+          from agent_cockpit.release_index import verify_release_index
 
           encoded = os.environ.pop("SERVER_RELEASE_ED25519_PRIVATE_KEY_B64", "")
           try:
@@ -257,8 +257,8 @@ jobs:
 
           python - "${asset_name}" <<'PY'
           import os, pathlib, shutil, sys
-          import artifact_extract
-          from release_index import verify_release_index
+          from agent_cockpit import artifact_extract
+          from agent_cockpit.release_index import verify_release_index
 
           expected_names = {sys.argv[1], "release-index.json", "release-index.json.sig"}
           local_root = pathlib.Path("release-assets")

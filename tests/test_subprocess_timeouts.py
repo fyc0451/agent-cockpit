@@ -2,8 +2,8 @@ import subprocess
 
 import pytest
 
-import herdr_client
-import tasks
+from agent_cockpit import herdr_client
+from agent_cockpit import tasks
 
 
 def test_herdr_timeout_becomes_runtime_error(monkeypatch):

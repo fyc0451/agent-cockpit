@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
-import maintenance_services as services
+from agent_cockpit import maintenance_services as services
 
 
 Result = subprocess.CompletedProcess[str]

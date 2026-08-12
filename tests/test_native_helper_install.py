@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import native_helper_install
+from agent_cockpit import native_helper_install
 
 
 COMMANDS = tuple(native_helper_install.HELPER_COMMANDS)

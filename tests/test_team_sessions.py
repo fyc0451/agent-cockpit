@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-import team_sessions
+from agent_cockpit import team_sessions
 
 
 def _bind(**overrides):

@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
-import version
+from agent_cockpit import version
 
 
 def _release(

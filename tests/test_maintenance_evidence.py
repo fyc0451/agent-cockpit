@@ -10,13 +10,13 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-import generation_switch
-import maintenance_controller
-import maintenance_evidence
-import release_identity
-import release_readiness
+from agent_cockpit import generation_switch
+from agent_cockpit import maintenance_controller
+from agent_cockpit import maintenance_evidence
+from agent_cockpit import release_identity
+from agent_cockpit import release_readiness
 import server
-import store_schema
+from agent_cockpit import store_schema
 
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "b" * 64)

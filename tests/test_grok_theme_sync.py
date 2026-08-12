@@ -1,7 +1,7 @@
 
 import json
 
-import herdr_client
+from agent_cockpit import herdr_client
 import pytest
 
 

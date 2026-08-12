@@ -6,7 +6,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from release_index import (
+from agent_cockpit.release_index import (
     MAX_LAUNCHER_BYTES,
     OFFICIAL_RELEASE_DOWNLOAD_PREFIX,
     ReleaseIndexError,

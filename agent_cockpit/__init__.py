@@ -1,0 +1,1 @@
+"""Agent Cockpit application package."""

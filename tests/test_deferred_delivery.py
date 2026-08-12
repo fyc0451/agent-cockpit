@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-import deferred_delivery as dd
+from agent_cockpit import deferred_delivery as dd
 
 
 class RecordingAdapter:

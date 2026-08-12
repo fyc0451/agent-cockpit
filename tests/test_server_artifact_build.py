@@ -15,9 +15,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-import artifact_extract
-from generation_switch import GenerationIdentity
-from release_index import canonical_bytes, verify_release_index
+from agent_cockpit import artifact_extract
+from agent_cockpit.generation_switch import GenerationIdentity
+from agent_cockpit.release_index import canonical_bytes, verify_release_index
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,11 +54,18 @@ def _fake_elf() -> bytes:
 
 
 def test_native_server_entry_dispatches_helpers_before_app_imports() -> None:
-    source = (ROOT / "server.py").read_text(encoding="utf-8")
+    entry_source = (ROOT / "server.py").read_text(encoding="utf-8")
+    app_source = (ROOT / "agent_cockpit" / "server.py").read_text(
+        encoding="utf-8"
+    )
     dispatch = "native_launcher.main()"
 
-    assert dispatch in source
-    assert source.index(dispatch) < source.index("from fastapi import")
+    assert dispatch in entry_source
+    assert entry_source.index(dispatch) < entry_source.index(
+        "from agent_cockpit import server as _implementation"
+    )
+    assert "from fastapi import" not in entry_source
+    assert "from fastapi import" in app_source
 
 
 def test_pyinstaller_collects_all_dynamic_helper_modules() -> None:
@@ -74,7 +81,7 @@ def test_pyinstaller_collects_dynamic_maintenance_cli() -> None:
         encoding="utf-8"
     )
 
-    assert '"maintenance_cli"' in spec
+    assert '"agent_cockpit.maintenance_cli"' in spec
 
 
 def _source_tree(tmp_path: Path) -> Path:

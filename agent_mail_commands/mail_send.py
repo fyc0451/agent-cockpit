@@ -16,7 +16,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from artifact_root import resolve_artifact_root
+from agent_cockpit.artifact_root import resolve_artifact_root
 
 ARTIFACT_ROOT = resolve_artifact_root()
 INSTALL_ROOT = str(ARTIFACT_ROOT)
@@ -24,7 +24,7 @@ TOOLS_DIR = os.path.join(INSTALL_ROOT, "agent-mail-tools")
 from .common import (
     REGISTRY_DIR, helper_command, load_identity, mcp_call, mcp_tool, slugify,
 )
-import coordination  # noqa: E402
+from agent_cockpit import coordination  # noqa: E402
 
 
 HERDR_BIN = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")

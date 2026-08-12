@@ -15,12 +15,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-import generation_prepare
-import generation_switch
+from agent_cockpit import generation_prepare
+from agent_cockpit import generation_switch
 import source_native_migrate
-import supervisor_adapter
-from generation_switch import GenerationIdentity
-from release_index import canonical_bytes
+from agent_cockpit import supervisor_adapter
+from agent_cockpit.generation_switch import GenerationIdentity
+from agent_cockpit.release_index import canonical_bytes
 
 
 SOURCE_SHA = "a" * 40

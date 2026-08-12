@@ -3,7 +3,7 @@ from io import BytesIO
 
 import pytest
 
-import uploads
+from agent_cockpit import uploads
 
 
 class AsyncReader:

@@ -23,9 +23,9 @@ from typing import Any
 
 import pytest
 
-import b0_wiring
-import hub_client
-import leader_binding
+from agent_cockpit import b0_wiring
+from agent_cockpit import hub_client
+from agent_cockpit import leader_binding
 
 from tests.test_b0_wiring import (
     AUTH, ISSUER, _RecordingAdapter, _make_coordinator, _msg, _stub_fetch,

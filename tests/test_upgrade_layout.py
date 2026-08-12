@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-import maintenance_controller
-import upgrade_layout
+from agent_cockpit import maintenance_controller
+from agent_cockpit import upgrade_layout
 
 
 def _installed(tmp_path: Path) -> tuple[upgrade_layout.UpgradeLayout, bytes]:

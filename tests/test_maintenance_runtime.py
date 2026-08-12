@@ -9,14 +9,14 @@ from typing import Any, Iterator
 
 import pytest
 
-import generation_switch
-import maintenance_controller
-import maintenance_evidence
-import maintenance_executor
-import maintenance_runtime
-import maintenance_services
-import upgrade_journal
-import upgrade_snapshot
+from agent_cockpit import generation_switch
+from agent_cockpit import maintenance_controller
+from agent_cockpit import maintenance_evidence
+from agent_cockpit import maintenance_executor
+from agent_cockpit import maintenance_runtime
+from agent_cockpit import maintenance_services
+from agent_cockpit import upgrade_journal
+from agent_cockpit import upgrade_snapshot
 
 
 @pytest.fixture(autouse=True)

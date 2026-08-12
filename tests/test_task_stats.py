@@ -6,9 +6,9 @@ import math
 import pytest
 from fastapi.testclient import TestClient
 
-import runtime_paths
+from agent_cockpit import runtime_paths
 import server
-import tasks
+from agent_cockpit import tasks
 
 
 @pytest.fixture()

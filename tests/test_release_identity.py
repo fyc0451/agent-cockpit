@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-import release_identity
+from agent_cockpit import release_identity
 import server
 
 _VALID_SHA = "a" * 40  # 40 位小写 hex
@@ -299,7 +299,10 @@ def test_health_live_version_missing_503(monkeypatch):
     _reset()
     monkeypatch.setenv("COCKPIT_EDITION", "source")
     monkeypatch.delenv("COCKPIT_SOURCE_SHA", raising=False)
-    with patch("release_identity.read_current_version", side_effect=FileNotFoundError):
+    with patch(
+        "agent_cockpit.release_identity.read_current_version",
+        side_effect=FileNotFoundError,
+    ):
         with patch.object(release_identity, "_cached", None):
             from fastapi.testclient import TestClient
             client = TestClient(server.app)
@@ -322,7 +325,7 @@ def test_module_imports_without_register_at_fork():
         "if hasattr(os, 'fork'):\n"
         "    delattr(os, 'fork')\n"
         "sys.path.insert(0, '.')\n"
-        "import release_identity\n"
+        "from agent_cockpit import release_identity\n"
         "release_identity.reset_cache()\n"
         "os.environ['COCKPIT_EDITION'] = 'source'\n"
         "os.environ.pop('COCKPIT_SOURCE_SHA', None)\n"
@@ -405,7 +408,7 @@ def test_no_external_dependency_calls(monkeypatch):
     monkeypatch.delenv("COCKPIT_SOURCE_SHA", raising=False)
     with patch("subprocess.run") as mock_run, \
          patch("httpx.Client") as mock_httpx, \
-         patch("herdr_client.is_available") as mock_herdr:
+         patch("agent_cockpit.herdr_client.is_available") as mock_herdr:
         identity = release_identity.get_release_identity()
         assert not mock_run.called
         assert not mock_httpx.called

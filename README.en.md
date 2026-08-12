@@ -241,16 +241,10 @@ Run the test suite with `.venv/bin/pip install -r requirements-dev.txt` followed
 
 ```
 agent-cockpit/
-├── server.py              FastAPI app: routes, SSE, static serving
-├── db.py                  Read-only queries against the hub's SQLite
-├── herdr_client.py        Multi-session herdr CLI wrapper (board data source)
-├── tasks.py               codex exec task runner + diff/apply
-├── files.py               Sandboxed file browser/editor
-├── hub_client.py          MCP write proxy (send_message / ack)
-├── web_push.py            VAPID keys, subscriptions, and push delivery
-├── uploads.py             File/screenshot upload sink
-├── settings.py            User settings storage
-├── terminal.py            Browser PTY terminals
+├── server.py              Compatibility server entry point
+├── source_native_migrate.py / release_lane.py  Managed release entry points
+├── agent_cockpit/         Application implementation (server, terminal, mail, upgrade)
+├── agent_mail_commands/    Agent Mail command implementation
 ├── static/index.html      Single-file frontend (kanban + Inbox + terminal + tabs)
 ├── static/sw.js           Web Push service worker and deep-link handler
 ├── static/manifest.webmanifest  Root-scope installable Web App metadata

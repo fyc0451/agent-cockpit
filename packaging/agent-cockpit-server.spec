@@ -16,7 +16,7 @@ analysis = Analysis(
         "agent_mail_commands.mail_recv",
         "agent_mail_commands.mail_send",
         "agent_mail_commands.task_report",
-        "maintenance_cli",
+        "agent_cockpit.maintenance_cli",
         "uvicorn.lifespan.on",
         "uvicorn.logging",
         "uvicorn.loops.auto",

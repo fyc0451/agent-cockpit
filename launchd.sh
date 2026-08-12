@@ -105,7 +105,7 @@ if install.is_symlink():
     raise SystemExit(2)
 # Literal path only — do not resolve(); chain checks see real symlink names.
 sys.path.insert(0, raw)
-from log_config import LogConfigError, prepare_macos_log_dir
+from agent_cockpit.log_config import LogConfigError, prepare_macos_log_dir
 
 try:
     prepare_macos_log_dir(install)

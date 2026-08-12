@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-import maintenance_controller as controller
-import upgrade_journal
+from agent_cockpit import maintenance_controller as controller
+from agent_cockpit import upgrade_journal
 
 
 def _layout(tmp_path: Path) -> tuple[controller.ControllerPlan, Path]:

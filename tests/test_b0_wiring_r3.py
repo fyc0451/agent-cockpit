@@ -19,9 +19,9 @@ from typing import Any
 
 import pytest
 
-import b0_wiring
-import hub_client
-import leader_binding
+from agent_cockpit import b0_wiring
+from agent_cockpit import hub_client
+from agent_cockpit import leader_binding
 
 from tests.test_b0_wiring import (
     AUTH, ISSUER, _RecordingAdapter, _make_coordinator, _msg, _stub_fetch,
@@ -201,7 +201,7 @@ def send_client(binding_db: Path, monkeypatch: pytest.MonkeyPatch):
             )
 
         def __getattr__(self, name):
-            import db as real_db
+            from agent_cockpit import db as real_db
             return getattr(real_db, name)
 
     monkeypatch.setattr(server, "db", _Db())
@@ -286,7 +286,7 @@ def test_no_second_outbox_module() -> None:
 def test_restart_skip_uses_receipt_authority(
     binding_db: Path, registry: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import coordination
+    from agent_cockpit import coordination
 
     coord, adapter = _make_coordinator(binding_db, registry)
     _stub_fetch(monkeypatch, [_msg(41)])
@@ -343,7 +343,7 @@ def test_ancestor_dir_0775_rejected_even_own_uid(
 def test_drain_requires_real_proof(
     binding_db: Path, registry: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import coordination
+    from agent_cockpit import coordination
 
     coord, adapter = _make_coordinator(binding_db, registry)
     _write_identity(registry, "proj-x/b--main.json", name="agent-b", token="rt-b")

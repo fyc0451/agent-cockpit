@@ -8,8 +8,8 @@ import sys
 
 import pytest
 
-import native_launcher
-import native_helper_install
+from agent_cockpit import native_launcher
+from agent_cockpit import native_helper_install
 from agent_mail_commands import common
 
 
@@ -126,7 +126,7 @@ def test_schema_probe_dispatch_calls_release_readiness_main_with_exact_argv(
     monkeypatch.setattr(native_launcher.importlib, "import_module", fake_import)
 
     assert native_launcher.dispatch_schema_probe(["--version", "2.0.0"]) == expected
-    assert imports == ["release_readiness"]
+    assert imports == ["agent_cockpit.release_readiness"]
     assert calls == [["--version", "2.0.0"]]
 
 
@@ -150,7 +150,7 @@ def test_maintenance_dispatch_calls_cli_main_with_exact_argv(
     monkeypatch.setattr(native_launcher.importlib, "import_module", fake_import)
 
     assert native_launcher.dispatch_maintenance_controller(["status"]) == expected
-    assert imports == ["maintenance_cli"]
+    assert imports == ["agent_cockpit.maintenance_cli"]
     assert calls == [["status"]]
 
 

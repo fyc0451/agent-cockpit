@@ -7,11 +7,11 @@ from typing import Any
 
 import pytest
 
-import generation_prepare
-import generation_switch
-import maintenance_cli
-import maintenance_controller
-import maintenance_executor
+from agent_cockpit import generation_prepare
+from agent_cockpit import generation_switch
+from agent_cockpit import maintenance_cli
+from agent_cockpit import maintenance_controller
+from agent_cockpit import maintenance_executor
 
 
 TARGET = generation_switch.GenerationIdentity("a" * 40, "1" * 64)

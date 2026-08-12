@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import tasks
+from agent_cockpit import tasks
 
 
 # ── Fixtures ────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ import tasks
 @pytest.fixture
 def temp_data(tmp_path, monkeypatch):
     """将 tasks 数据目录和 DB 重定向到 tmp_path。"""
-    import runtime_paths
+    from agent_cockpit import runtime_paths
     monkeypatch.setenv("COCKPIT_DATA_DIR", str(tmp_path))
     runtime_paths.reset_cache()
     monkeypatch.setattr(tasks, "DATA_DIR", tmp_path)
@@ -475,7 +475,7 @@ def test_discard_already_removed(task_with_worktree):
 
 def test_check_workdir_allowed_within_roots(tmp_path, monkeypatch):
     """allowed_roots 内的路径通过校验。"""
-    import files
+    from agent_cockpit import files
     monkeypatch.setattr(files, "_load_roots", lambda: [tmp_path.resolve()])
     d = tmp_path / "project"
     d.mkdir()
@@ -484,7 +484,7 @@ def test_check_workdir_allowed_within_roots(tmp_path, monkeypatch):
 
 def test_check_workdir_allowed_outside_roots(tmp_path, monkeypatch):
     """allowed_roots 外的路径被拒绝。"""
-    import files
+    from agent_cockpit import files
     allowed = tmp_path / "allowed"
     allowed.mkdir()
     outside = tmp_path / "outside"
@@ -791,7 +791,7 @@ def test_apply_serialized_same_source(temp_data, git_repo, monkeypatch):
 
 def test_validate_image_paths_valid(tmp_path, monkeypatch):
     """有效上传目录下的文件通过校验。"""
-    import uploads
+    from agent_cockpit import uploads
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     monkeypatch.setattr(uploads, "UPLOAD_DIR", upload_dir)
@@ -805,7 +805,7 @@ def test_validate_image_paths_valid(tmp_path, monkeypatch):
 
 def test_validate_image_paths_rejects_outside(tmp_path, monkeypatch):
     """上传目录外的路径被拒绝。"""
-    import uploads
+    from agent_cockpit import uploads
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     outside = tmp_path / "outside"
@@ -820,7 +820,7 @@ def test_validate_image_paths_rejects_outside(tmp_path, monkeypatch):
 
 def test_validate_image_paths_rejects_nonexistent(tmp_path, monkeypatch):
     """不存在的文件被拒绝。"""
-    import uploads
+    from agent_cockpit import uploads
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     monkeypatch.setattr(uploads, "UPLOAD_DIR", upload_dir)
@@ -831,7 +831,7 @@ def test_validate_image_paths_rejects_nonexistent(tmp_path, monkeypatch):
 
 def test_validate_image_paths_rejects_directory(tmp_path, monkeypatch):
     """目录(非普通文件)被拒绝。"""
-    import uploads
+    from agent_cockpit import uploads
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     sub = upload_dir / "subdir"
@@ -845,7 +845,7 @@ def test_validate_image_paths_rejects_directory(tmp_path, monkeypatch):
 def test_start_task_rejects_bad_image(temp_data, git_repo, monkeypatch):
     """start_task 拒绝非法 image 路径。"""
     monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
-    import uploads
+    from agent_cockpit import uploads
     monkeypatch.setattr(uploads, "UPLOAD_DIR", temp_data / "uploads")
     with pytest.raises(ValueError, match="不在上传目录范围|不存在"):
         tasks.start_task(
@@ -1694,7 +1694,7 @@ def _json_images(*paths):
 
 def test_recover_fail_closed_bad_images(temp_data, git_repo, monkeypatch):
     monkeypatch.setattr(tasks, "_check_workdir_allowed", lambda w: None)
-    import uploads
+    from agent_cockpit import uploads
     monkeypatch.setattr(uploads, "UPLOAD_DIR", temp_data / "uploads")
     (temp_data / "uploads").mkdir(exist_ok=True)
     task = _insert_pending_recoverable(

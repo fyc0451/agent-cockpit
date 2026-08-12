@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-import generation_prepare
-import generation_switch
-import native_controller_install
-import upgrade_layout
+from agent_cockpit import generation_prepare
+from agent_cockpit import generation_switch
+from agent_cockpit import native_controller_install
+from agent_cockpit import upgrade_layout
 
 
 def _prepared(

@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-import db
+from agent_cockpit import db
 import server
 
 

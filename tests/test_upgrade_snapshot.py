@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-import runtime_paths
-import upgrade_snapshot
+from agent_cockpit import runtime_paths
+from agent_cockpit import upgrade_snapshot
 
 
 SOURCE_SHA = "a" * 40

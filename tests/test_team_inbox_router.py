@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-import team_inbox_router
+from agent_cockpit import team_inbox_router
 
 
 @pytest.fixture(autouse=True)

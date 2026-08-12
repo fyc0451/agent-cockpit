@@ -11,7 +11,7 @@ import logging
 import pytest
 
 import server
-import tasks
+from agent_cockpit import tasks
 
 
 def test_worktree_cleanup_loop_runs_immediately_then_waits(monkeypatch):

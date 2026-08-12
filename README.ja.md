@@ -248,16 +248,10 @@ token は含みません。
 
 ```
 agent-cockpit/
-├── server.py              FastAPI アプリ:ルーティング、SSE、静的配信
-├── db.py                  hub の SQLite への読み取り専用クエリ
-├── herdr_client.py        マルチセッション herdr CLI ラッパー(ボードのデータ源)
-├── tasks.py               codex exec タスクランナー + diff/apply
-├── files.py               サンドボックス化されたファイルブラウザ/エディタ
-├── hub_client.py          MCP 書き込みプロキシ(send_message / ack)
-├── web_push.py            VAPID キー、購読、プッシュ配信
-├── uploads.py             ファイル/スクリーンショットのアップロード
-├── settings.py            ユーザー設定ストレージ
-├── terminal.py            ブラウザ PTY 端末
+├── server.py              互換サーバーエントリポイント
+├── source_native_migrate.py / release_lane.py  管理リリースエントリポイント
+├── agent_cockpit/         アプリ実装(サーバー、端末、通信、更新)
+├── agent_mail_commands/    Agent Mail コマンド実装
 ├── static/index.html      単一ファイルフロントエンド(ボード + Inbox + 端末 + タブ)
 ├── static/sw.js           Web Push service worker とディープリンク
 ├── static/manifest.webmanifest  PWA メタデータ

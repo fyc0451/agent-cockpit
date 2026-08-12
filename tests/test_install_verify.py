@@ -2,10 +2,10 @@ import hashlib
 import json
 import os
 
-import native_helper_install
+from agent_cockpit import native_helper_install
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from release_index import (
+from agent_cockpit.release_index import (
     PERSISTED_INDEX_NAME,
     PERSISTED_SIGNATURE_NAME,
     canonical_bytes,
@@ -20,7 +20,7 @@ GEN_ID = f"{SOURCE_SHA}-{ARTIFACT_DIGEST}"
 
 
 def _digests_for(root):
-    from store_schema import required_manifest_digest_paths
+    from agent_cockpit.store_schema import required_manifest_digest_paths
 
     return {
         rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()

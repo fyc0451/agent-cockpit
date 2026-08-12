@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-import coordination
+from agent_cockpit import coordination
 
 
 def _create(tmp_path, **overrides):

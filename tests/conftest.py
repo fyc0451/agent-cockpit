@@ -5,13 +5,13 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _isolate_settings(tmp_path, monkeypatch):
-    import coordination
-    import files
-    import mail_projects
-    import settings
-    import team_inbox_router
-    import team_sessions
-    import upgrade_service
+    from agent_cockpit import coordination
+    from agent_cockpit import files
+    from agent_cockpit import mail_projects
+    from agent_cockpit import settings
+    from agent_cockpit import team_inbox_router
+    from agent_cockpit import team_sessions
+    from agent_cockpit import upgrade_service
     monkeypatch.delenv(upgrade_service.ENABLE_ENV, raising=False)
     monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(settings, "DATA_DIR", tmp_path)

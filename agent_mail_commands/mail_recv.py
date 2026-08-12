@@ -12,7 +12,7 @@ import time
 import unicodedata
 
 from .common import helper_command, load_identity, mcp_call, mcp_tool
-import coordination
+from agent_cockpit import coordination
 
 
 def _ack_message(hub, token, identity, message_id):

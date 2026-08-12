@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-import supervisor_adapter as sa
+from agent_cockpit import supervisor_adapter as sa
 
 
 # ── fixtures ─────────────────────────────────────────────────────
@@ -912,7 +912,7 @@ class TestCommandPlans:
     def test_module_never_imports_subprocess_for_supervisor(self) -> None:
         import importlib
 
-        mod = importlib.import_module("supervisor_adapter")
+        mod = importlib.import_module("agent_cockpit.supervisor_adapter")
         src = Path(mod.__file__).read_text(encoding="utf-8")
         assert "import subprocess" not in src
         assert "from subprocess" not in src

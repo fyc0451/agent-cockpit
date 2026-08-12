@@ -1,9 +1,9 @@
 """GET /api/env-check 环境自检接口测试(设置页首次引导用)。"""
 from fastapi.testclient import TestClient
 
-import herdr_client
+from agent_cockpit import herdr_client
 import server
-import settings
+from agent_cockpit import settings
 
 
 def _client(monkeypatch, herdr_ok=True):

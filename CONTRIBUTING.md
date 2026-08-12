@@ -15,7 +15,7 @@ check the inline frontend script:
 
 ```bash
 .venv/bin/pytest -q
-python -m compileall -q *.py tests
+python -m compileall -q *.py agent_cockpit agent_mail_commands scripts tests
 sed -n '/<script>$/,/^<\/script>$/p' static/index.html | sed '1d;$d' | node --check -
 git diff --check
 ```

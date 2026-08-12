@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-import settings
-import terminal
-import uploads
+from agent_cockpit import settings
+from agent_cockpit import terminal
+from agent_cockpit import uploads
 
 
 @pytest.fixture(autouse=True)

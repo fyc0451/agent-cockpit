@@ -27,13 +27,13 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-import native_helper_install
-from native_helper_install import (
+from agent_cockpit import native_helper_install
+from agent_cockpit.native_helper_install import (
     HELPER_COMMANDS,
     HELPER_TARGET,
     RECEIPT_NAME,
 )
-from release_index import (
+from agent_cockpit.release_index import (
     PERSISTED_INDEX_NAME,
     PERSISTED_SIGNATURE_NAME,
     SERVER_LAUNCHER_FORMATS,
@@ -119,7 +119,7 @@ def _runtime_arch() -> str:
 
 def _required_manifest_digest_paths(root: Path) -> tuple[str, ...]:
     try:
-        from store_schema import required_manifest_digest_paths
+        from agent_cockpit.store_schema import required_manifest_digest_paths
     except Exception:
         pass
     else:
@@ -151,7 +151,7 @@ def detect_layout(deploy_root: Path) -> str | None:
 
 def resolve_default_deploy_root(home: Path) -> Path | None:
     try:
-        from upgrade_layout import default_upgrade_layout
+        from agent_cockpit.upgrade_layout import default_upgrade_layout
 
         layout = default_upgrade_layout(home=home)
         if (layout.deploy_root / "current").is_symlink():
@@ -271,7 +271,7 @@ def _check_signed_release(root, gen_source_sha, artifact_digest, launcher, home,
     if not _require_owned_regular(signature_path, "index_signature", findings):
         return
     try:
-        from upgrade_layout import UpgradeLayoutError, default_upgrade_layout, load_release_public_key
+        from agent_cockpit.upgrade_layout import UpgradeLayoutError, default_upgrade_layout, load_release_public_key
 
         public_key = load_release_public_key(default_upgrade_layout(home=home))
     except UpgradeLayoutError as exc:

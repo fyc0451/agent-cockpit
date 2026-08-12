@@ -763,7 +763,7 @@ def test_packaged_tools_do_not_contain_client_credentials():
 def test_task_report_cli_submits_structured_progress(
     monkeypatch, tmp_path, capsys,
 ):
-    import coordination
+    from agent_cockpit import coordination
 
     module = _load_task_report()
     monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
@@ -790,7 +790,7 @@ def test_task_report_cli_submits_structured_progress(
 def test_mail_recv_ack_failure_keeps_processed_receipt_and_retry_suppresses_body(
     monkeypatch, tmp_path, capsys,
 ):
-    import coordination
+    from agent_cockpit import coordination
 
     module = _load_mail_recv()
     monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
@@ -1332,7 +1332,7 @@ def test_coordination_identity_binding_takes_priority(tmp_path):
 
 
 def test_panes_by_mail_name_reads_active_runs(tmp_path):
-    import coordination
+    from agent_cockpit import coordination
     coordination.start_run(
         project_key=str(tmp_path), session="demo",
         session_dir=str(tmp_path),
@@ -1349,7 +1349,7 @@ def test_panes_by_mail_name_reads_active_runs(tmp_path):
 
 def test_panes_by_mail_name_isolated_by_project(tmp_path):
     """花名是项目内身份：两个项目同花名时只返回目标项目的绑定 pane。"""
-    import coordination
+    from agent_cockpit import coordination
     project_a = tmp_path / "proj-a"
     project_b = tmp_path / "proj-b"
     project_a.mkdir()

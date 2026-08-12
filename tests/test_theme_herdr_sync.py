@@ -1,7 +1,7 @@
 import tomllib
 import threading
 
-import herdr_client
+from agent_cockpit import herdr_client
 import server
 import pytest
 from fastapi.testclient import TestClient

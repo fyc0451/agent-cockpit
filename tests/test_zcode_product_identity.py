@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import herdr_client
+from agent_cockpit import herdr_client
 import pytest
 import server
 
@@ -600,7 +600,7 @@ def test_invalid_managed_hook_check_never_falls_back_to_legacy(monkeypatch):
 def test_mail_hook_check_peek_does_not_create_or_change_receipt(
     monkeypatch, tmp_path, capsys,
 ):
-    import coordination
+    from agent_cockpit import coordination
 
     project = tmp_path / "project"
     project.mkdir()

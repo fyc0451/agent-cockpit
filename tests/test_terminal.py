@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-import terminal
+from agent_cockpit import terminal
 
 
 @pytest.fixture(autouse=True)
@@ -523,7 +523,9 @@ def test_read_fd_records_output_for_browser_replay(monkeypatch):
 
 
 def test_websocket_pump_uses_bursts_without_per_chunk_sleep():
-    source = (Path(__file__).resolve().parents[1] / "server.py").read_text()
+    source = (
+        Path(__file__).resolve().parents[1] / "agent_cockpit" / "server.py"
+    ).read_text()
     pump = source.split("async def pump_out():", 1)[1].split(
         "pump_task = asyncio.create_task", 1
     )[0]
@@ -1026,18 +1028,18 @@ def test_websocket_records_typing_off_event_loop():
     note_user_input 必须在事件循环线程之外执行;但为避免每按键 fork herdr
     拖慢回显,它现在由合并调度器发后即忘,不 await 阻塞 write_term。
     """
-    source = (Path(__file__).resolve().parent.parent / "server.py").read_text(
-        encoding="utf-8"
-    )
+    source = (
+        Path(__file__).resolve().parent.parent / "agent_cockpit" / "server.py"
+    ).read_text(encoding="utf-8")
     assert "_schedule_term_input_note(term_id)" in source
     assert "await asyncio.to_thread(terminal.note_user_input, term_id)" in source
     assert "terminal.write_term" in source
 
 
 def test_websocket_theme_control_bypasses_user_input_accounting():
-    source = (Path(__file__).resolve().parent.parent / "server.py").read_text(
-        encoding="utf-8"
-    )
+    source = (
+        Path(__file__).resolve().parent.parent / "agent_cockpit" / "server.py"
+    ).read_text(encoding="utf-8")
     theme = source.split('ctrl.get("type") == "theme"', 1)[1].split(
         "except json.JSONDecodeError", 1
     )[0]

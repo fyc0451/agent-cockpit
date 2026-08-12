@@ -2,8 +2,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import files
-import runtime_paths
+from agent_cockpit import files
+from agent_cockpit import runtime_paths
 import server
 
 
