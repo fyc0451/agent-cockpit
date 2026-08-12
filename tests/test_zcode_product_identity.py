@@ -483,6 +483,48 @@ def test_mail_hook_check_help_returns_zero(capsys):
     assert "usage: mail-hook-check" in capsys.readouterr().out
 
 
+def test_mail_hook_check_normal_paths_do_not_load_install_verifier(tmp_path):
+    sitecustomize = tmp_path / "sitecustomize.py"
+    sitecustomize.write_text(
+        """\
+import builtins
+
+_original_import = builtins.__import__
+
+def _without_cryptography(name, *args, **kwargs):
+    if name == "cryptography" or name.startswith("cryptography."):
+        raise ModuleNotFoundError("blocked optional verifier dependency")
+    return _original_import(name, *args, **kwargs)
+
+builtins.__import__ = _without_cryptography
+""",
+        encoding="utf-8",
+    )
+    helper = ROOT / "agent-mail-tools" / "mail-hook-check"
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(ROOT)))
+    for name in (
+        "HERDR_ENV", "HERDR_SESSION", "HERDR_WORKSPACE_ID",
+        "HERDR_PANE_ID", "HERDR_SOCKET_PATH",
+    ):
+        env.pop(name, None)
+
+    help_result = subprocess.run(
+        [sys.executable, str(helper), "--help"], env=env,
+        text=True, capture_output=True, check=False,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    assert "usage: mail-hook-check" in help_result.stdout
+
+    normal_result = subprocess.run(
+        [sys.executable, str(helper), "unknown", "main"], env=env,
+        text=True, capture_output=True, check=False,
+    )
+    assert normal_result.returncode == 2, normal_result.stderr
+    assert "blocked optional verifier dependency" not in normal_result.stderr
+
+
 def test_mail_hook_check_uses_only_resolved_exact_identity(monkeypatch):
     resolved = mail_identity_inject.ManagedIdentity(
         "/project", "zcode", INSTANCE, {"name": "FreshMailbox"},

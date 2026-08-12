@@ -7,10 +7,12 @@ import json
 import sys
 from pathlib import Path
 
-from . import install_verify, mail_identity_inject, mail_recv
+from . import mail_identity_inject, mail_recv
 
 
 def _verify_install(rest: list[str]) -> int:
+    from . import install_verify
+
     deploy_root_arg: str | None = None
     index = 0
     while index < len(rest):
