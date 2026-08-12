@@ -148,6 +148,30 @@ def test_identity_reader_requires_exact_live_pane_not_stale_registry(
     assert mail_identity_inject.resolve_managed_identity() is None
 
 
+def test_identity_reader_accepts_pre_lifecycle_active_record_without_status(
+    monkeypatch, tmp_path,
+):
+    _, _, _, _, registry_file = _identity_fixture(monkeypatch, tmp_path)
+    value = json.loads(registry_file.read_text(encoding="utf-8"))
+    value.pop("status")
+    _secure_json(registry_file, value)
+
+    resolved = mail_identity_inject.resolve_managed_identity()
+
+    assert resolved is not None
+    assert resolved.instance_id == INSTANCE
+    assert resolved.identity["name"] == "ZCodeMailbox"
+
+
+def test_identity_reader_rejects_unknown_lifecycle_status(monkeypatch, tmp_path):
+    _, _, _, _, registry_file = _identity_fixture(monkeypatch, tmp_path)
+    value = json.loads(registry_file.read_text(encoding="utf-8"))
+    value["status"] = "unknown"
+    _secure_json(registry_file, value)
+
+    assert mail_identity_inject.resolve_managed_identity() is None
+
+
 def _legacy_identity_fixture(
     monkeypatch, tmp_path, *, schema=2, status="active", agent="codex", instance="main",
 ):

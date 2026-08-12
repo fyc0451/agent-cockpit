@@ -261,7 +261,7 @@ def resolve_managed_identity() -> ManagedIdentity | None:
         or identity.get("instance") != instance_id
         or not isinstance(identity.get("name"), str)
         or not identity["name"]
-        or identity.get("status") != "active"
+        or identity.get("status") not in (None, "active")
         or identity.get("retired_at")
     ):
         return None
