@@ -56,9 +56,11 @@ export function TopBar({
         className="btn btn--secondary topbar-search"
         onClick={onOpenPalette}
         aria-haspopup="dialog"
+        aria-label="搜索或运行命令"
+        title="搜索或运行命令"
       >
         <span className="ellipsis">搜索或运行命令</span>
-        <kbd className="kbd">⌘K</kbd>
+        <span className="topbar-search-icon" aria-hidden="true">⌕</span>
       </button>
       <button
         type="button"

@@ -40,7 +40,7 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
     return { ...utils, nav: () => nav! }
   }
 
-  it('A(terminal.pty=true) → 切 B 同 workspaceId：B fail-closed，loading 期间不显示 A 的值', async () => {
+  it('Project A 的 terminal.pty=true 不泄漏到其 Workspace 或 Project B', async () => {
     stubFetch({
       ...defaultFetchMap(),
       // A project：server cap terminal.pty=true
@@ -53,17 +53,17 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
     })
     const { nav } = renderWithNav('/projects/p1/workspaces/w1/terminal')
 
-    // A 的 server 值生效：banner 转为可用提示（按钮仍 disabled，见 P1-4）
-    await screen.findByText(/已由服务端 capability 标记为可用/)
+    await screen.findByText('PTY 未接通')
+    expect(screen.queryByText(/已由服务端 capability 标记为可用/)).not.toBeInTheDocument()
 
     await act(async () => {
       nav()('/projects/p2/workspaces/w1/terminal')
     })
 
-    // B loading 期间：不得显示 A 的 server 值
+    // B loading 与解析完成后都不得显示 A 的 Project 值
     expect(screen.queryByText(/已由服务端 capability 标记为可用/)).not.toBeInTheDocument()
 
-    // B 解析后：p:p2 scope 无 server 值 → 静态 fail-closed
+    // B 解析后：w:p2/w1 scope 无 server 值 → 静态 fail-closed
     await screen.findByText('B 工作区')
     await waitFor(() => {
       expect(screen.getByText('PTY 未接通')).toBeInTheDocument()
@@ -73,7 +73,7 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
     }
   })
 
-  it('B 404：scope 无 server 值且 project 不存在 → typed error', async () => {
+  it('B 404：Workspace scope 无 server 值且 project 不存在 → typed error', async () => {
     stubFetch({
       ...defaultFetchMap(),
       '/api/projects/p1': {
@@ -83,7 +83,7 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
       // p9 未配置 → 404 envelope
     })
     const { nav } = renderWithNav('/projects/p1/workspaces/w1/terminal')
-    await screen.findByText(/已由服务端 capability 标记为可用/)
+    await screen.findByText('PTY 未接通')
 
     await act(async () => {
       nav()('/projects/p9/workspaces/w1/terminal')

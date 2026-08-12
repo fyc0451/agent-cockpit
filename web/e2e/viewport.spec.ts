@@ -55,3 +55,29 @@ test('390px：触控目标 >= 44x44（P1-7）', async ({ page }) => {
   expect(searchBox!.height).toBeGreaterThanOrEqual(44)
   expectGatesClean(g)
 })
+
+test('390px：Workspace Files/Terminal 底栏滚动不扩大文档宽度', async ({ page }) => {
+  const g = attachGates(page)
+  await stubApi(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+
+  for (const [hash, title] of [
+    ['/#/projects/p1/workspaces/w1/files', '文件'],
+    ['/#/projects/p1/workspaces/w1/terminal', '终端'],
+  ] as const) {
+    await page.goto(hash)
+    await expect(page.locator('.page-title')).toHaveText(title)
+    const widths = await page.evaluate(() => ({
+      scroll: document.documentElement.scrollWidth,
+      client: document.documentElement.clientWidth,
+      railScroll: document.querySelector('.rail-scroll')?.scrollWidth ?? 0,
+      railClient: document.querySelector('.rail-scroll')?.clientWidth ?? 0,
+    }))
+    expect(widths.scroll).toBeLessThanOrEqual(widths.client + 1)
+    expect(widths.railScroll, '底栏应保留自身横向滚动以访问全部导航').toBeGreaterThan(
+      widths.railClient,
+    )
+  }
+
+  expectGatesClean(g)
+})

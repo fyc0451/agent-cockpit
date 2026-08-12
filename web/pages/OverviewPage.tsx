@@ -20,10 +20,18 @@ export function OverviewPage() {
   }
 
   const items = attentionItems(attention.data?.data)
-  const meta = attention.data?.meta ?? overview.data?.meta
-  const badSources = degradedSources(meta)
+  const metas = [overview.data?.meta, attention.data?.meta]
+  const badSources = metas.flatMap((meta) => degradedSources(meta))
+  const badSourceMessages = [
+    ...new Set(
+      badSources.map(
+        (source) =>
+          `${source.name ?? 'unknown'}：${source.reason ?? source.status ?? '不可用'}`,
+      ),
+    ),
+  ]
   const degraded =
-    isDegraded(meta) || overview.isError || attention.isError
+    metas.some((meta) => isDegraded(meta)) || overview.isError || attention.isError
 
   return (
     <>
@@ -34,10 +42,8 @@ export function OverviewPage() {
           banner
           title="部分数据源不可用"
           description={
-            badSources.length > 0
-              ? badSources
-                  .map((s) => `${s.name ?? 'unknown'}：${s.reason ?? s.status ?? '不可用'}`)
-                  .join('；')
+            badSourceMessages.length > 0
+              ? badSourceMessages.join('；')
               : '部分数据源暂不可用，以下结果可能不完整。'
           }
         />

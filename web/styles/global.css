@@ -7,19 +7,20 @@
   --panel-3: #eef1f5;
   --text: #172033;
   --text-2: #3e4a60;
-  --muted: #738096;
+  --muted: #5f6c82;
+  --nav-muted: #7c899e;
   --line: #e1e5eb;
   --line-2: #ccd3de;
   --nav: #101827;
   --nav-text: #b9c4d5;
-  --accent: #4968e8;
+  --accent: #3f5ed8;
   --accent-2: #eef1ff;
   --accent-3: #dbe2ff;
-  --success: #21835c;
+  --success: #1b7651;
   --success-2: #eaf7f0;
-  --warning: #b86a08;
+  --warning: #925000;
   --warning-2: #fff4e4;
-  --danger: #c54655;
+  --danger: #b63b4b;
   --danger-2: #fff0f2;
   --purple: #7656d8;
   --purple-2: #f2efff;
@@ -36,7 +37,8 @@
   --panel-3: #202b3a;
   --text: #e6ebf3;
   --text-2: #bdc7d6;
-  --muted: #8290a5;
+  --muted: #8b99ae;
+  --nav-muted: #8b99ae;
   --line: #263244;
   --line-2: #344258;
   --nav: #080d14;
@@ -214,7 +216,7 @@ pre {
 
 .rail-version {
   font-size: 10px;
-  color: var(--muted);
+  color: var(--nav-muted);
 }
 
 .rail-scroll {
@@ -232,7 +234,7 @@ pre {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--muted);
+  color: var(--nav-muted);
   padding: 8px 10px 4px;
 }
 
@@ -244,7 +246,7 @@ pre {
 
 .rail-branch {
   font-weight: 400;
-  color: var(--muted);
+  color: var(--nav-muted);
   font-size: 11px;
 }
 
@@ -334,7 +336,7 @@ pre {
 
 .runtime-mini-reason {
   font-size: 10px;
-  color: var(--muted);
+  color: var(--nav-muted);
 }
 
 /* ---------- 顶栏 ---------- */
@@ -377,13 +379,8 @@ pre {
   font-weight: 400;
 }
 
-.kbd {
-  font-size: 10px;
-  color: var(--muted);
-  background: var(--panel-3);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 1px 5px;
+.topbar-search-icon {
+  display: none;
 }
 
 .avatar {
@@ -1057,7 +1054,9 @@ pre {
     order: 2;
     flex-direction: row;
     align-items: center;
-    overflow-x: auto;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .rail-brand,
@@ -1071,8 +1070,12 @@ pre {
   .rail-scroll {
     display: flex;
     flex-direction: row;
+    position: relative;
+    min-width: 0;
+    width: auto;
     gap: 2px;
-    overflow: visible;
+    overflow-x: auto;
+    overflow-y: hidden;
     padding: 4px;
   }
 
@@ -1094,10 +1097,40 @@ pre {
   }
 
   .topbar-search {
-    min-width: 0;
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+    flex: none;
+    justify-content: center;
   }
 
   .topbar-search .ellipsis {
+    display: none;
+  }
+
+  .topbar-search-icon {
+    display: inline;
+    font-size: 18px;
+  }
+
+  .topbar {
+    gap: 4px;
+    padding-inline: 8px;
+  }
+
+  .topbar-switcher {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: none;
+    padding-inline: 6px;
+  }
+
+  .topbar-switcher-name {
+    max-width: none;
+  }
+
+  .topbar-branch,
+  .topbar-spacer {
     display: none;
   }
 
@@ -1109,6 +1142,7 @@ pre {
   .btn--icon {
     width: 44px;
     min-height: 44px;
+    flex: none;
   }
 
   .rail-item {

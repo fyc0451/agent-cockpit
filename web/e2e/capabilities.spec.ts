@@ -29,7 +29,7 @@ test('terminal cap=false：disconnected banner + 按钮 disabled，POST=0，WS=0
   expectGatesClean(g)
 })
 
-test('terminal cap=true（server）：按钮仍 disabled（terminal.control.ui 未接线），POST=0，WS=0', async ({ page }) => {
+test('Project cap terminal.pty=true 不得开启 Workspace PTY，POST=0，WS=0', async ({ page }) => {
   const g = attachGates(page)
   await stubApi(page, {
     '/api/projects/p1': {
@@ -38,12 +38,30 @@ test('terminal cap=true（server）：按钮仍 disabled（terminal.control.ui �
     },
   })
   await page.goto('/#/projects/p1/workspaces/w1/terminal')
-  await expect(page.getByText(/已由服务端 capability 标记为可用/)).toBeVisible()
+  await expect(page.locator('[data-state="disconnected"]')).toBeVisible()
+  await expect(page.getByText(/已由服务端 capability 标记为可用/)).toHaveCount(0)
   for (const name of ['中断', '重连', '重启']) {
     await expect(page.getByRole('button', { name })).toHaveAttribute('aria-disabled', 'true')
   }
   expect(g.postRequests).toEqual([])
   expect(g.wsCount).toBe(0)
+  expectGatesClean(g)
+})
+
+test('Project cap files.read=true 不得开启同 Project 任一 Workspace 文件能力', async ({ page }) => {
+  const g = attachGates(page)
+  await stubApi(page, {
+    '/api/projects/p1': {
+      data: projectP1,
+      meta: { ...metaOk, capabilities: { 'files.read': { available: true, reason: null } } },
+    },
+  })
+  for (const workspaceId of ['w1', 'w2']) {
+    await page.goto(`/#/projects/p1/workspaces/${workspaceId}/files`)
+    await expect(page.locator('[data-state="forbidden"]')).toBeVisible()
+    await expect(page.locator('[data-state="empty"]')).toHaveCount(0)
+  }
+  expect(apiCalls(g, '/api/files')).toEqual([])
   expectGatesClean(g)
 })
 

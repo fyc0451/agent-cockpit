@@ -43,24 +43,48 @@ describe('meta.capabilities 权威合并层（item 6）', () => {
     expect(parsed['d'].reason).toBeNull()
   })
 
-  it('server meta.capabilities 标记 files.read=false → 页面保持关闭', async () => {
-    stubWithProjectCaps({ 'files.read': false })
+  it('Project meta 标记 files.read=true 也不得开启 Workspace 文件能力', async () => {
+    stubWithProjectCaps({ 'files.read': true })
     const { container } = renderApp('/projects/p1/workspaces/w1/files')
     await waitFor(() => {
       expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
     })
+    expect(screen.getByText(/Workspace 文件 facade API 未接通/)).toBeInTheDocument()
   })
 
-  it('server 声明 terminal.pty 可用 → banner 转为可用提示，但控制按钮仍 disabled（terminal.control.ui 恒 false，P1-4）', async () => {
+  it('Project meta 声明 terminal.pty=true 也不得开启 Workspace PTY', async () => {
     stubWithProjectCaps({ 'terminal.pty': { available: true, reason: null } })
     const { container } = renderApp('/projects/p1/workspaces/w1/terminal')
-    // loading 期间 disconnected banner 也不存在，必须先等可用 banner 出现
-    await screen.findByText(/已由服务端 capability 标记为可用/)
-    expect(container.querySelector('[data-state="disconnected"]')).not.toBeInTheDocument()
-    // W1 UI 未接线：server cap=true 也不得放开按钮
+    await waitFor(() => {
+      expect(container.querySelector('[data-state="disconnected"]')).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/已由服务端 capability 标记为可用/)).not.toBeInTheDocument()
     for (const name of ['中断', '重连', '重启']) {
       expect(screen.getByRole('button', { name })).toHaveAttribute('aria-disabled', 'true')
     }
+  })
+
+  it('Project meta 不得开启 Workspace unavailable 页与首页操作', async () => {
+    stubWithProjectCaps({
+      'git.integration': { available: true, reason: 'Project Git 可用' },
+      'editor.embedded': { available: true, reason: 'Project Editor 可用' },
+      browser: { available: true, reason: 'Project Browser 可用' },
+      'workspace.delete': { available: true, reason: 'Project Delete 可用' },
+    })
+
+    const git = renderApp('/projects/p1/workspaces/w1/git')
+    expect(await screen.findByText('Git 集成 API 未接通（W1）')).toBeInTheDocument()
+    expect(screen.queryByText('Project Git 可用')).not.toBeInTheDocument()
+    git.unmount()
+
+    const home = renderApp('/projects/p1/workspaces/w1')
+    const del = await screen.findByRole('button', { name: '删除 Workspace' })
+    expect(del).toHaveAttribute('aria-disabled', 'true')
+    expect(del).toHaveAttribute('title', 'Workspace 删除未开放（W1 只读骨架）')
+    expect(screen.getByText('内嵌编辑器规划在后续迭代接通')).toBeInTheDocument()
+    expect(screen.getByText('嵌入式浏览器规划在后续迭代接通')).toBeInTheDocument()
+    expect(screen.queryByText(/Project (Editor|Browser|Delete) 可用/)).not.toBeInTheDocument()
+    home.unmount()
   })
 
   it('server 未提及的 key 保持 fail-closed', async () => {

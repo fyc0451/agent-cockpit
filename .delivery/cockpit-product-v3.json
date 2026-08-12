@@ -145,19 +145,19 @@
     {
       "id": "WEB-001-app-shell",
       "title": "Build the React TypeScript Web shell and explicit capability states",
-      "status": "in_progress",
+      "status": "accepted",
       "depends_on": ["LEAD-001-contract"],
       "scope": ["web"],
       "acceptance": [
-        {"command": "npm --prefix web run build", "passed": false},
-        {"command": "npm --prefix web test -- --run", "passed": false}
+        {"command": "npm --prefix web run build", "passed": true},
+        {"command": "npm --prefix web test -- --run", "passed": true}
       ],
       "rollback": "Revert the web shell commit; the legacy static UI remains the served compatibility UI",
       "production_impact": "none",
       "owner_instance_id": "i-lmzsi3liwhtbxsswx4pxjt5gve",
-      "reviewer_instance_id": null,
-      "base_sha": null,
-      "fixed_sha": null,
+      "reviewer_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
+      "base_sha": "a38fb35b9e5b308466a0c202041314cddf153503",
+      "fixed_sha": "58314d6c48de8f496ea252a3b53aca17a7b07862",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
@@ -166,19 +166,19 @@
     {
       "id": "WEB-002-next-static-entry",
       "title": "Serve the React build only from the isolated Next profile",
-      "status": "in_progress",
+      "status": "accepted",
       "depends_on": ["RUNTIME-001-profile-lock", "WEB-001-app-shell"],
       "scope": ["agent_cockpit/server.py", "tests/test_next_web_entry.py"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_next_web_entry.py tests/test_web_push.py tests/test_artifact_root.py", "passed": false},
-        {"command": "npm --prefix web run build", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_next_web_entry.py tests/test_web_push.py tests/test_artifact_root.py", "passed": true},
+        {"command": "npm --prefix web run build", "passed": true}
       ],
       "rollback": "Revert the Next Web entry commit; keep the isolated Next service stopped until a validated React build is available",
       "production_impact": "none",
       "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
-      "reviewer_instance_id": null,
-      "base_sha": null,
-      "fixed_sha": null,
+      "reviewer_instance_id": "i-v4mmixwv2ss5beq4egdeg3x5jq",
+      "base_sha": "b5b31923665d47b4bab3ae322dc3ad055741f23b",
+      "fixed_sha": "95c154e7b79a989eaa7f4457e2b5eb782226f038",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,

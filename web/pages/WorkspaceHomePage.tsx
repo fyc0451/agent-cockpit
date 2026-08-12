@@ -7,7 +7,7 @@ import { PageHeader } from '../components/PageHeader'
 import { Tag, toneForLocation, toneForStatus } from '../components/Tag'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
-import { projectScope, useCapability, type CapabilityKey } from '../state/capabilities'
+import { useCapability, workspaceScope, type CapabilityKey } from '../state/capabilities'
 
 interface CardDef {
   label: string
@@ -35,7 +35,10 @@ function NavCard({
   workspaceId: string
 }) {
   const descId = useId()
-  const cap = useCapability(card.capKey ?? 'browser', projectScope(projectId))
+  const cap = useCapability(
+    card.capKey ?? 'browser',
+    workspaceScope(projectId, workspaceId),
+  )
   const enabled = card.capKey == null || cap.available
   if (!enabled || card.build == null) {
     const reason = cap.reason ?? '未接通'
@@ -69,9 +72,9 @@ function NavCard({
 }
 
 function WorkspaceBody({ project, workspace }: { project: Project; workspace: Workspace }) {
-  const delCap = useCapability('workspace.delete', projectScope(project.slug ?? ''))
   const projectId = project.slug ?? ''
   const workspaceId = workspace.id ?? ''
+  const delCap = useCapability('workspace.delete', workspaceScope(projectId, workspaceId))
 
   return (
     <>

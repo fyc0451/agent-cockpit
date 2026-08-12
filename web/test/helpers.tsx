@@ -25,7 +25,7 @@ export function stubFetch(
       : (url) => {
           // 最长前缀匹配，保证 /api/projects/p1/workbench 优先于 /api/projects/p1
           const key = Object.keys(handlerOrMap)
-            .filter((k) => url === k || url.startsWith(`${k}?`) || url.startsWith(k))
+            .filter((k) => url === k || url.startsWith(`${k}?`))
             .sort((a, b) => b.length - a.length)[0]
           return key ? { body: (handlerOrMap as Record<string, unknown>)[key] } : undefined
         }

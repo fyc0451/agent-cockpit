@@ -9,7 +9,7 @@ import { PageHeader } from '../components/PageHeader'
 import { StatusState } from '../components/StatusState'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
-import { capability, projectScope, useCapability } from '../state/capabilities'
+import { capability, useCapability, workspaceScope } from '../state/capabilities'
 
 function TerminalSurface() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -48,9 +48,12 @@ function TerminalSurface() {
 }
 
 function TerminalBody({ project, workspace }: { project: Project; workspace: Workspace }) {
-  // 分层：terminal.pty（server 能力，project scope）× terminal.control.ui（前端接线，W1 恒 false，
+  // 分层：terminal.pty（server 能力，workspace scope）× terminal.control.ui（前端接线，W1 恒 false，
   // 不走 server 权威——本车按钮恒 disabled，不发 POST/WebSocket）
-  const ptyCap = useCapability('terminal.pty', projectScope(project.slug ?? ''))
+  const ptyCap = useCapability(
+    'terminal.pty',
+    workspaceScope(project.slug ?? '', workspace.id ?? ''),
+  )
   const controlUi = capability('terminal.control.ui')
   const controlsEnabled = ptyCap.available && controlUi.available
   const btnTitle = (action: string) =>

@@ -17,9 +17,12 @@ export async function stubApi(page: Page, overrides: Record<string, unknown> = {
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
-    const key = Object.keys(map)
-      .filter((k) => path === k || path.startsWith(k))
-      .sort((a, b) => b.length - a.length)[0]
+    const pathAndQuery = `${path}${url.search}`
+    const key = Object.prototype.hasOwnProperty.call(map, pathAndQuery)
+      ? pathAndQuery
+      : Object.prototype.hasOwnProperty.call(map, path)
+        ? path
+        : undefined
     if (!key) {
       return route.fulfill({
         status: 404,
@@ -47,18 +50,47 @@ export async function stubApi(page: Page, overrides: Record<string, unknown> = {
 
 export interface Gates {
   pageErrors: string[]
-  consoleErrors: string[]
+  consoleErrors: ConsoleError[]
   apiRequests: string[]
+  apiFailures: ApiFailure[]
   postRequests: string[]
   wsCount: number
+  expectedHttpErrors: ExpectedHttpError[]
+}
+
+interface ConsoleError {
+  text: string
+  url: string
+}
+
+export interface ExpectedHttpError {
+  url: string
+  status: number
+  method?: string
+}
+
+interface ApiFailure {
+  url: string
+  status: number
+  method: string
 }
 
 /** pageerror / console.error / request 计数 / WebSocket 计数，全程开启 */
-export function attachGates(page: Page): Gates {
-  const g: Gates = { pageErrors: [], consoleErrors: [], apiRequests: [], postRequests: [], wsCount: 0 }
+export function attachGates(page: Page, expectedHttpErrors: ExpectedHttpError[] = []): Gates {
+  const g: Gates = {
+    pageErrors: [],
+    consoleErrors: [],
+    apiRequests: [],
+    apiFailures: [],
+    postRequests: [],
+    wsCount: 0,
+    expectedHttpErrors,
+  }
   page.on('pageerror', (e) => g.pageErrors.push(String(e)))
   page.on('console', (m) => {
-    if (m.type() === 'error') g.consoleErrors.push(m.text())
+    if (m.type() === 'error') {
+      g.consoleErrors.push({ text: m.text(), url: m.location().url })
+    }
   })
   page.on('request', (r) => {
     const u = new URL(r.url())
@@ -67,21 +99,43 @@ export function attachGates(page: Page): Gates {
       if (r.method() === 'POST') g.postRequests.push(u.pathname)
     }
   })
+  page.on('response', (response) => {
+    const url = new URL(response.url())
+    if (url.pathname.startsWith('/api/') && response.status() >= 400) {
+      g.apiFailures.push({
+        url: `${url.pathname}${url.search}`,
+        status: response.status(),
+        method: response.request().method(),
+      })
+    }
+  })
   page.on('websocket', () => {
     g.wsCount += 1
   })
   return g
 }
 
-// console.error 白名单（新增条目必须注释理由）：
-// - 状态测试故意模拟 4xx/5xx API 错误（transport_lost/conflict/data_stale），浏览器会把
-//   失败响应的网络加载记为 console.error，与应用层处理无关；应用层表现由 data-state 断言。
-const CONSOLE_WHITELIST: RegExp[] = [
-  /Failed to load resource: the server responded with a status of \d{3}/,
-]
+function isExpectedHttpError(error: ConsoleError, expected: ExpectedHttpError): boolean {
+  if (!new RegExp(`status of ${expected.status}\\b`).test(error.text)) return false
+  try {
+    const url = new URL(error.url)
+    return `${url.pathname}${url.search}` === expected.url
+  } catch {
+    return false
+  }
+}
 
 export function expectGatesClean(g: Gates) {
-  const filtered = g.consoleErrors.filter((t) => !CONSOLE_WHITELIST.some((w) => w.test(t)))
+  const actualFailures = g.apiFailures
+    .map(({ method, url, status }) => `${method} ${url} ${status}`)
+    .sort()
+  const expectedFailures = g.expectedHttpErrors
+    .map(({ method = 'GET', url, status }) => `${method} ${url} ${status}`)
+    .sort()
+  expect(actualFailures, 'API failure 集合必须与测试声明精确一致').toEqual(expectedFailures)
+  const filtered = g.consoleErrors.filter(
+    (error) => !g.expectedHttpErrors.some((expected) => isExpectedHttpError(error, expected)),
+  )
   expect(filtered, 'console.error 应为空').toEqual([])
   expect(g.pageErrors, 'pageerror 应为空').toEqual([])
 }

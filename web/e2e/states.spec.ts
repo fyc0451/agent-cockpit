@@ -44,8 +44,31 @@ test('partial-degraded：source failed → degraded + 数据仍在，无 empty�
   expectGatesClean(g)
 })
 
-test('disconnected：transport_lost → disconnected 态', async ({ page }) => {
+test('partial-degraded：overview source failed 不得被正常 attention meta 吞掉', async ({ page }) => {
   const g = attachGates(page)
+  await stubApi(page, {
+    '/api/overview': {
+      data: { projects: [] },
+      meta: {
+        ...metaOk,
+        partial: true,
+        sources: [{ name: 'registry', status: 'failed', observed_at: null, reason: 'Registry 超时' }],
+      },
+    },
+    '/api/attention': { data: { items: [] }, meta: metaOk },
+  })
+  await page.goto('/#/overview')
+  await expect(page.getByText(/Registry 超时/)).toBeVisible()
+  await expect(page.locator('[data-state="degraded"]')).toHaveCount(2)
+  await expect(page.locator('[data-state="empty"]')).toHaveCount(0)
+  expectGatesClean(g)
+})
+
+test('disconnected：transport_lost → disconnected 态', async ({ page }) => {
+  const g = attachGates(page, [
+    { url: '/api/overview', status: 502 },
+    { url: '/api/attention', status: 502 },
+  ])
   await stubApi(page, {
     '/api/overview': {
       __status: 502,
@@ -78,7 +101,7 @@ test('stale：doctor 源 data_stale → stale 态', async ({ page }) => {
 })
 
 test('conflict：workbench 409 → conflict 态', async ({ page }) => {
-  const g = attachGates(page)
+  const g = attachGates(page, [{ url: '/api/projects/p1/workbench', status: 409 }])
   await stubApi(page, {
     '/api/projects/p1/workbench': {
       __status: 409,
@@ -88,6 +111,22 @@ test('conflict：workbench 409 → conflict 态', async ({ page }) => {
   await page.goto('/#/projects/p1/workbench')
   await expect(page.locator('[data-state="conflict"]')).toBeVisible()
   expectGatesClean(g)
+})
+
+test('console gate：已知 502 不能掩盖未知 API 子路径 404', async ({ page }) => {
+  const g = attachGates(page, [{ url: '/api/overview', status: 502 }])
+  await stubApi(page, {
+    '/api/overview': {
+      __status: 502,
+      __payload: { error: { code: 'transport_lost', message: '连接中断', retryable: false } },
+    },
+  })
+  await page.goto('/#/overview')
+  await expect(page.locator('[data-state="degraded"]').first()).toBeVisible()
+  const status = await page.evaluate(() => fetch('/api/tasks/unexpected').then((r) => r.status))
+  expect(status, '未知子路径不得前缀命中 /api/tasks fixture').toBe(404)
+  await expect.poll(() => g.apiFailures.length).toBe(2)
+  expect(() => expectGatesClean(g)).toThrow()
 })
 
 test('forbidden：files.read 关闭 → forbidden 态（负断言：无 empty）', async ({ page }) => {

@@ -64,6 +64,71 @@ describe('页面级九态（P1-6）', () => {
     expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
   })
 
+  it('overview source failed + attention normal → 保留 overview 降级原因', async () => {
+    stubFetch({
+      ...defaultFetchMap(),
+      '/api/overview': {
+        data: { projects: [] },
+        meta: {
+          ...metaOk,
+          partial: true,
+          sources: [{ name: 'registry', status: 'failed', observed_at: null, reason: 'Registry 超时' }],
+        },
+      },
+    })
+    const { container } = renderApp('/overview')
+    await waitFor(() => {
+      expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/Registry 超时/)).toBeInTheDocument()
+    expect(screen.getByText('ReviewPacket 待决定')).toBeInTheDocument()
+  })
+
+  it('两个 query 的 source failure 同时保留', async () => {
+    stubFetch({
+      ...defaultFetchMap(),
+      '/api/overview': {
+        data: { projects: [] },
+        meta: {
+          ...metaOk,
+          sources: [{ name: 'registry', status: 'failed', observed_at: null, reason: 'Registry 超时' }],
+        },
+      },
+      '/api/attention': {
+        data: attentionPayload.data,
+        meta: {
+          ...metaOk,
+          sources: [{ name: 'mail', status: 'failed', observed_at: null, reason: 'Mail 超时' }],
+        },
+      },
+    })
+    renderApp('/overview')
+    expect(await screen.findByText(/Registry 超时.*Mail 超时/)).toBeInTheDocument()
+  })
+
+  it('两个 query 的同一 source failure 只展示一次', async () => {
+    const sharedSource = {
+      name: 'herdr',
+      status: 'failed',
+      observed_at: null,
+      reason: 'Herdr 超时',
+    }
+    stubFetch({
+      ...defaultFetchMap(),
+      '/api/overview': {
+        data: { projects: [] },
+        meta: { ...metaOk, sources: [sharedSource] },
+      },
+      '/api/attention': {
+        data: attentionPayload.data,
+        meta: { ...metaOk, sources: [sharedSource] },
+      },
+    })
+    renderApp('/overview')
+    const banner = (await screen.findByText(/Herdr 超时/)).closest('[data-state="degraded"]')
+    expect(banner?.textContent?.match(/Herdr 超时/g)).toHaveLength(1)
+  })
+
   it('degraded 且无数据 → degraded 区块而非 empty（banner 与 empty 不得同屏）', async () => {
     stubFetch({
       ...defaultFetchMap(),
@@ -81,6 +146,22 @@ describe('页面级九态（P1-6）', () => {
     })
     expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
     expect(screen.queryByText('还没有可汇总的工作')).not.toBeInTheDocument()
+  })
+
+  it('overview degraded + attention 空数组 → degraded 而非 empty', async () => {
+    stubFetch({
+      ...defaultFetchMap(),
+      '/api/overview': {
+        data: { projects: [] },
+        meta: { ...metaOk, partial: true },
+      },
+      '/api/attention': { data: { items: [] }, meta: metaOk },
+    })
+    const { container } = renderApp('/overview')
+    await waitFor(() => {
+      expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
+    })
+    expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
   })
 
   it('disconnected：transport_lost → disconnected 态（页面级）', async () => {
