@@ -18,6 +18,8 @@
 | `invalid_02_duplicate_car_id.json` | 重复 car ID | `duplicate_car_id` |
 | `invalid_03_unknown_dependency.json` | 未知依赖 | `unknown_dependency` |
 | `invalid_04_dag_cycle.json` | DAG 成环 | `dependency_cycle` |
+| `invalid_18_duplicate_json_key.json` | JSON 重复 key | `duplicate_json_key` |
+| `invalid_19_wrong_types.json` | 类型错误（布尔冒充整数） | `wrong_types` |
 
 ### 4.2 必填字段校验
 
@@ -34,6 +36,10 @@
 |------|----------|----------------|
 | `invalid_08_in_progress_without_owner.json` | in_progress 无 owner | `owner_required` |
 | `invalid_09_review_without_reviewer.json` | review 无独立 reviewer | `independent_reviewer_required` |
+
+> **Opaque Instance ID 格式**: Cockpit 格式为 `i-` 开头 + 26 位小写 base32（`[a-z2-7]`）
+> 正则: `^i-[a-z2-7]{26}$`
+> ❌ **invalid_instance_id**: 格式不符合要求
 
 ### 4.4 SHA 校验
 
@@ -77,12 +83,15 @@
 | 文件 | 错误类型 | 稳定错误 code |
 |------|----------|----------------|
 | `invalid_17_agent_marks_user_accepted.json` | 缺少 user_acceptance_evidence | `user_acceptance_evidence_required` |
+| `invalid_20_forged_user_evidence.json` | JSON 伪造用户验收证据 | `forged_user_evidence` |
+
+> **Foundation v1 用户验收**: 没有可信用户证据源，任何仅凭 JSON 的 `user_accepted` 都 fail-closed
 
 ## 覆盖统计
 
 - **有效 fixtures**: 1
-- **无效 fixtures**: 17
-- **覆盖反例类别**: 10/10 ✅
+- **无效 fixtures**: 20
+- **覆盖反例类别**: 13/13 ✅
 
 ## 稳定错误 code 列表
 
@@ -92,8 +101,11 @@
 | `duplicate_car_id` | 重复 car ID |
 | `unknown_dependency` | 未知依赖 |
 | `dependency_cycle` | DAG 成环 |
+| `duplicate_json_key` | JSON 任意层存在重复 key |
+| `wrong_types` | 字段类型不匹配（如布尔值冒充整数） |
 | `missing_field` | 缺少必填字段 |
 | `invalid_scope` | scope 不是有效的路径前缀 |
+| `invalid_instance_id` | instance ID 格式不符合 `i-[a-z2-7]{26}` |
 | `owner_required` | in_progress 无 owner |
 | `independent_reviewer_required` | review 无独立 reviewer |
 | `exact_sha_required` | review/accepted 缺少 exact SHA |
@@ -104,6 +116,7 @@
 | `release_timeout` | 发布超时 |
 | `reslice_required` | 第二次跨模块 BLOCK 后仍继续 |
 | `user_acceptance_evidence_required` | user_accepted 缺少验收证据 |
+| `forged_user_evidence` | Foundation v1 仅凭 JSON 的 user_accepted |
 
 ## 使用方式
 

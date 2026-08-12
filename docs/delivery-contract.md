@@ -127,6 +127,8 @@ planned -> in_progress -> review -> accepted -> releasing -> canary -> user_acce
 - ❌ **duplicate_car_id**: 重复 car ID
 - ❌ **unknown_dependency**: 未知依赖（依赖的车不存在）
 - ❌ **dependency_cycle**: DAG 成环（直接或间接依赖循环）
+- ❌ **duplicate_json_key**: JSON 任意层存在重复 key
+- ❌ **wrong_types**: 字段类型不匹配（如布尔值冒充整数）
 
 ### 4.2 必填字段校验
 - ❌ **missing_field**: 缺少必填字段（scope、acceptance、rollback、production_impact、user_acceptance_evidence）
@@ -157,6 +159,9 @@ planned -> in_progress -> review -> accepted -> releasing -> canary -> user_acce
 
 ### 4.10 用户验收校验
 - ❌ **user_acceptance_evidence_required**: `user_acceptance_required=true` 且状态为 `user_accepted` 但缺少 `user_acceptance_evidence`
+- ❌ **forged_user_evidence**: Foundation v1 没有可信用户证据源，任何仅凭 JSON 的 `user_accepted` 都 fail-closed
+
+**重要**: Foundation v1 阶段，CLI 不执行 acceptance 命令，只校验已记录的证据。`user_acceptance_evidence` 必须来自外部可信源（不在 JSON 中），仅凭 JSON 字段的 user_accepted 状态将被拒绝。
 
 ## 五、命令输出格式
 
@@ -194,9 +199,19 @@ python3 scripts/delivery_gate.py release-check .delivery/cockpit-next.json <car-
 
 ## 六、Opaque Instance ID
 
-- 必须使用 Agent Mail 注册后的 opaque identity（如 `RusticSpring`）
+### 6.1 格式要求
+- **Cockpit opaque instance 格式**: `i-` 开头，后跟 26 位小写 base32 字符
+- 正则表达式: `^i-[a-z2-7]{26}$`
+- 示例: `i-2k24eo3a5i4hgmdawy5xuyrsba`
+
+### 6.2 字段使用
+- `owner_instance_id`: 领取车后必填，格式必须符合 Cockpit opaque instance
+- `reviewer_instance_id`: review 状态必填，格式必须符合 Cockpit opaque instance
 - 不得使用 display name、花名或可重复的临时 ID
 - 通过 `am-register` 获取并写入注册文件
+
+### 6.3 校验
+- ❌ **invalid_instance_id**: instance ID 格式不符合 `i-[a-z2-7]{26}`
 
 ## 七、Foundation MVP 发布车
 
