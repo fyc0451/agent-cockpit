@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "goal_id": "agent-cockpit-product-v3",
+  "user_journey": "doctor -> project -> workbench -> local workspace -> files or terminal -> assignment or inbox -> review or operation",
+  "non_goals": [
+    "Do not modify, restart, deploy to, or route traffic to the frozen production service on port 8790",
+    "Do not replace the accepted N0 isolation baseline or repurpose the upgrade R0-R6 plan",
+    "Do not expose Remote Herdr, Memory, Automation, Browser, GitHub, or Electron writes in the first Local-only slice",
+    "Do not report an unavailable capability as successful"
+  ],
+  "baseline": {
+    "main_sha": "a38fb35b9e5b308466a0c202041314cddf153503",
+    "production_version": "0.3.4",
+    "production_source_sha": "169d0af7751b568e813d2cbca285a9f147e86001"
+  },
+  "limits": {
+    "writer_wip": 2,
+    "release_minutes": 15,
+    "cross_module_blocks_before_reslice": 2
+  },
+  "cars": [
+    {
+      "id": "N0-reference",
+      "title": "Reference the accepted isolated successor baseline",
+      "status": "accepted",
+      "depends_on": [],
+      "scope": [".agent-memory-project", ".delivery", ".env.next.example", ".gitignore", "agent_cockpit", "agent_mail_commands", "docs", "scripts", "server.py", "tests"],
+      "acceptance": [
+        {"command": "python3 scripts/delivery_gate.py check .delivery/cockpit-next.json", "passed": true},
+        {"command": "python3 -m pytest -q tests/test_next_isolation.py", "passed": true}
+      ],
+      "rollback": "Remove only the isolated Next worktree and Next runtime roots; leave production and port 8790 unchanged",
+      "production_impact": "none",
+      "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
+      "reviewer_instance_id": "i-v4mmixwv2ss5beq4egdeg3x5jq",
+      "base_sha": "169d0af7751b568e813d2cbca285a9f147e86001",
+      "fixed_sha": "b80ad7632321663b34df73016d33ffb2319778b3",
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "LEAD-001-contract",
+      "title": "Freeze the product route, domain ownership, and Local-only R0 contract",
+      "status": "planned",
+      "depends_on": ["N0-reference"],
+      "scope": [".delivery/cockpit-product-v3.json", "docs/architecture", "docs/contracts"],
+      "acceptance": [
+        {"command": "python3 scripts/delivery_gate.py check .delivery/cockpit-product-v3.json", "passed": false},
+        {"command": "git diff --check", "passed": false}
+      ],
+      "rollback": "Revert the product contract commit without changing the accepted N0 baseline",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "RUNTIME-001-profile-lock",
+      "title": "Fail closed when a second process opens the same canonical Next profile",
+      "status": "planned",
+      "depends_on": ["LEAD-001-contract"],
+      "scope": ["agent_cockpit/instance_lock.py", "scripts/next_dev.py", "tests/test_next_instance_lock.py", "docs/NEXT-DEVELOPMENT.md"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_next_instance_lock.py tests/test_next_isolation.py", "passed": false},
+        {"command": ".venv/bin/python scripts/next_dev.py check --env-file .env.next", "passed": false}
+      ],
+      "rollback": "Revert the profile lock commit; keep the Next service stopped until the previous single-process launch path is restored",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "SEC-001-loopback-origin",
+      "title": "Freeze no-token HTTP Host Origin and WebSocket loopback trust",
+      "status": "planned",
+      "depends_on": ["RUNTIME-001-profile-lock"],
+      "scope": ["agent_cockpit", "tests", "docs/contracts/security-boundary-v1.md"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_security.py", "passed": false}
+      ],
+      "rollback": "Revert the trust-boundary commit and keep Next bound to loopback with no external exposure",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "SEC-002-remote-inbox",
+      "title": "Keep untrusted remote message bodies out of pane prompts",
+      "status": "planned",
+      "depends_on": ["SEC-001-loopback-origin"],
+      "scope": ["agent_cockpit/team_inbox_router.py", "agent_cockpit/server.py", "tests/test_team_inbox_router.py", "tests/test_team_agent_reply.py", "docs/contracts/security-boundary-v1.md"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_team_inbox_router.py tests/test_team_agent_reply.py", "passed": false}
+      ],
+      "rollback": "Revert the remote inbox commit and disable Team remote message ingestion in Next",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "WEB-001-app-shell",
+      "title": "Build the React TypeScript Web shell and explicit capability states",
+      "status": "planned",
+      "depends_on": ["LEAD-001-contract"],
+      "scope": ["web"],
+      "acceptance": [
+        {"command": "npm --prefix web run build", "passed": false},
+        {"command": "npm --prefix web test -- --run", "passed": false}
+      ],
+      "rollback": "Revert the web shell commit; the legacy static UI remains the served compatibility UI",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "PROJ-001-registry",
+      "title": "Add the Project RepoLocation and Workspace registry contracts and store",
+      "status": "planned",
+      "depends_on": ["RUNTIME-001-profile-lock", "SEC-002-remote-inbox"],
+      "scope": ["agent_cockpit/api", "agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/domain", "agent_cockpit/infrastructure", "tests", "docs/contracts"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_project_registry.py", "passed": false}
+      ],
+      "rollback": "Disable the new registry routes and revert the registry commit without changing legacy stores",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "PROJ-002-local-discovery",
+      "title": "Discover and idempotently register an existing Local directory",
+      "status": "planned",
+      "depends_on": ["PROJ-001-registry"],
+      "scope": ["agent_cockpit/api", "agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/domain", "agent_cockpit/infrastructure", "tests", "docs/contracts"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_project_discovery.py tests/test_project_registry_api.py", "passed": false}
+      ],
+      "rollback": "Disable the discovery routes and revert the commit; do not remove user directories or legacy projects",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "PROJ-003-legacy-import",
+      "title": "Import legacy Agent Mail Herdr and Coordination identities read-only",
+      "status": "planned",
+      "depends_on": ["PROJ-002-local-discovery"],
+      "scope": ["agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/infrastructure", "tests", "docs/contracts"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_project_legacy_import.py", "passed": false}
+      ],
+      "rollback": "Revert imported registry mappings from the isolated Next snapshot; never mutate legacy authorities",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "DELIVERY-002-phased-wip",
+      "title": "Permit three writers only after module Store and API ownership gates pass",
+      "status": "planned",
+      "depends_on": ["RUNTIME-001-profile-lock", "WEB-001-app-shell", "PROJ-001-registry"],
+      "scope": [".delivery", "docs/delivery-contract.md", "scripts/delivery_gate.py", "tests/test_delivery_gate.py", "tests/fixtures/delivery_gate"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py", "passed": false},
+        {"command": ".venv/bin/python scripts/delivery_gate.py check .delivery/cockpit-product-v3.json", "passed": false}
+      ],
+      "rollback": "Revert the phased WIP gate and keep the hard writer limit at two",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "SLICE-001-local-readonly",
+      "title": "Deliver the first real Local-only read path from Doctor to Files and Terminal",
+      "status": "planned",
+      "depends_on": ["WEB-001-app-shell", "PROJ-003-legacy-import"],
+      "scope": ["agent_cockpit/api", "agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/domain", "agent_cockpit/infrastructure", "web", "tests", "docs/contracts"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_cockpit2_local_slice.py", "passed": false},
+        {"command": "npm --prefix web run test:e2e", "passed": false}
+      ],
+      "rollback": "Disable the Cockpit 2 routes and Web entry while retaining the accepted safety and registry stores",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "LATER-001-capability-expansion",
+      "title": "Add Memory Remote Herdr Automation Browser GitHub and Electron after the Local core",
+      "status": "planned",
+      "depends_on": ["SLICE-001-local-readonly"],
+      "scope": ["agent_cockpit", "web", "tests", "docs"],
+      "acceptance": [
+        {"command": "python3 -m pytest -q", "passed": false}
+      ],
+      "rollback": "Keep each provider disabled independently and retain the Local-only core",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    }
+  ]
+}
