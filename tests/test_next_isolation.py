@@ -184,13 +184,31 @@ def test_git_check_fails_closed_on_command_error(monkeypatch: pytest.MonkeyPatch
 
 
 def test_start_execs_next_venv_with_sanitized_environment(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = module()
     captured: dict[str, object] = {}
+    values = gate.expected(tmp_path)
+
+    class StubLock:
+        fd = 42
+
+        def __init__(self, received: dict[str, str]) -> None:
+            assert received == values
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    monkeypatch.setattr(gate, "validate", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "InstanceLock", StubLock)
     monkeypatch.setattr(gate, "_unit_not_installed", lambda: True)
     monkeypatch.setattr(gate, "_port_available", lambda host, port: True)
     monkeypatch.setattr(gate, "ensure_runtime_roots", lambda values: None)
+    monkeypatch.setattr(gate, "_prepare_exec_fds", lambda fd: None)
+    monkeypatch.setattr(gate.Path, "is_file", lambda _self: True)
     monkeypatch.setattr(gate.os, "chdir", lambda path: captured.update(cwd=path))
     monkeypatch.setattr(
         gate.os,
@@ -200,14 +218,18 @@ def test_start_execs_next_venv_with_sanitized_environment(
         ),
     )
     monkeypatch.setenv("PYTHONPATH", "/production/python")
+    monkeypatch.setenv("COCKPIT_NEXT_LOCK_FD", "999")
 
-    assert gate.main(["start", "--env-file", str(ROOT / ".env.next.example")]) == 0
+    env_file = tmp_path / "next.env"
+    env_file.write_text("ignored=1\n", encoding="ascii")
+    assert gate.main(["start", "--env-file", str(env_file)]) == 0
     assert captured["cwd"] == ROOT
     assert captured["executable"] == str(ROOT / ".venv" / "bin" / "python")
     environment = captured["env"]
     assert isinstance(environment, dict)
     assert environment["COCKPIT_PORT"] == "18790"
     assert environment["VIRTUAL_ENV"] == str(ROOT / ".venv")
+    assert environment["COCKPIT_NEXT_LOCK_FD"] == "42"
     assert "PYTHONPATH" not in environment
 
 
@@ -298,6 +320,24 @@ def test_next_source_entry_requires_exact_profile() -> None:
     )
     assert result.returncode == 2
     assert "next_profile_invalid:COCKPIT_PORT" in result.stderr
+
+    valid_env = {**env, **_next_environment()}
+    valid_env.pop("COCKPIT_NEXT_LOCK_FD", None)
+    result = subprocess.run(
+        [sys.executable, "server.py"], cwd=ROOT, env=valid_env,
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 2
+    assert result.stderr == "lock_fd_invalid\n"
+
+    for forged_fd in ("not-a-fd", "02", "2", "999999"):
+        valid_env["COCKPIT_NEXT_LOCK_FD"] = forged_fd
+        result = subprocess.run(
+            [sys.executable, "server.py"], cwd=ROOT, env=valid_env,
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 2
+        assert result.stderr == "lock_fd_invalid\n"
 
 
 def test_next_herdr_scope_filters_and_rejects_foreign_sessions(

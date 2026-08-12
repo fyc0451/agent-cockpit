@@ -12,6 +12,7 @@ from typing import Mapping
 
 
 LOCK_NAME = "instance.lock"
+LOCK_FD_ENV = "COCKPIT_NEXT_LOCK_FD"
 METADATA_VERSION = 1
 MAX_METADATA_BYTES = 4096
 
@@ -56,7 +57,9 @@ def _process_starttime() -> str:
     return value
 
 
-def _validate_metadata(value: object, expected_profile: str) -> dict[str, object]:
+def _validate_metadata(
+    value: object, expected_profile: str, *, current_owner: bool = False,
+) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != {
         "version", "pid", "process_starttime", "profile_id",
     }:
@@ -85,6 +88,10 @@ def _validate_metadata(value: object, expected_profile: str) -> dict[str, object
         or any(char not in "0123456789abcdef" for char in digest)
     ):
         raise LockError("lock_metadata_invalid")
+    if current_owner and (
+        pid != os.getpid() or starttime != _process_starttime()
+    ):
+        raise LockError("lock_owner_mismatch")
     return value
 
 
@@ -120,6 +127,22 @@ class InstanceLock:
         except BaseException:
             os.close(fd)
             raise
+
+    @staticmethod
+    def _validate_file(fd: int) -> os.stat_result:
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            raise LockError("lock_fd_invalid") from exc
+        if (
+            fd <= 2
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise LockError("lock_file_unsafe")
+        return info
 
     @staticmethod
     def _write_all(fd: int, payload: bytes) -> None:
@@ -168,7 +191,7 @@ class InstanceLock:
         self.fd = fd
         return self
 
-    def read_metadata(self) -> dict[str, object]:
+    def read_metadata(self, *, current_owner: bool = False) -> dict[str, object]:
         if self.fd is None:
             raise LockError("lock_not_held")
         try:
@@ -189,7 +212,72 @@ class InstanceLock:
             raise
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise LockError("lock_metadata_invalid") from exc
-        return _validate_metadata(value, self.profile_id)
+        return _validate_metadata(
+            value, self.profile_id, current_owner=current_owner,
+        )
+
+    @classmethod
+    def adopt_inherited(
+        cls, values: Mapping[str, str], fd: int,
+    ) -> "InstanceLock":
+        lock: InstanceLock | None = None
+        try:
+            inherited = cls._validate_file(fd)
+            lock = cls(values)
+            try:
+                path_info = lock.path.stat()
+            except OSError as exc:
+                raise LockError("lock_path_invalid") from exc
+            if (inherited.st_dev, inherited.st_ino) != (
+                path_info.st_dev, path_info.st_ino,
+            ):
+                raise LockError("lock_fd_wrong_file")
+            lock.fd = fd
+            lock.read_metadata(current_owner=True)
+
+            probe = lock._open()
+            try:
+                try:
+                    probe_info = os.fstat(probe)
+                except OSError as exc:
+                    raise LockError("lock_probe_failed") from exc
+                if (probe_info.st_dev, probe_info.st_ino) != (
+                    inherited.st_dev, inherited.st_ino,
+                ):
+                    raise LockError("lock_fd_wrong_file")
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                except OSError as exc:
+                    raise LockError("lock_probe_failed") from exc
+                else:
+                    fcntl.flock(probe, fcntl.LOCK_UN)
+                    raise LockError("lock_not_held")
+            finally:
+                try:
+                    os.close(probe)
+                except OSError:
+                    pass
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise LockError("lock_fd_forged") from exc
+            except OSError as exc:
+                raise LockError("lock_fd_relock_failed") from exc
+            try:
+                os.set_inheritable(fd, False)
+            except OSError as exc:
+                raise LockError("lock_fd_cloexec_failed") from exc
+            return lock
+        except BaseException:
+            if lock is not None:
+                lock.fd = None
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
 
     def release(self) -> None:
         fd, self.fd = self.fd, None

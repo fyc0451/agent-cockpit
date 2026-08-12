@@ -45,6 +45,7 @@ from . import tasks
 from . import team_inbox_router
 from . import uploads
 from . import files
+from . import instance_lock
 from . import mail_projects
 from . import next_profile
 from . import team_sessions
@@ -59,6 +60,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, f
 
 
 ROOT_DIR = resolve_artifact_root()
+_next_instance_lock_owner: instance_lock.InstanceLock | None = None
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
@@ -169,10 +171,23 @@ def _b0_scope_enabled(scope_kind: str, scope_id: str) -> bool:
     )
 
 
+def _require_next_instance_lock() -> None:
+    if not next_profile.enabled():
+        return
+    owner = _next_instance_lock_owner
+    if not isinstance(owner, instance_lock.InstanceLock) or owner.fd is None:
+        raise RuntimeError("next_instance_lock_required")
+    try:
+        owner.read_metadata(current_owner=True)
+    except instance_lock.LockError as exc:
+        raise RuntimeError("next_instance_lock_invalid") from exc
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
     global _identity_retirement_task
+    _require_next_instance_lock()
     state_enabled = _h0_state_enabled()
     b0_runtime_active = _b0_runtime_active()
     if state_enabled and not _open_state_clients():

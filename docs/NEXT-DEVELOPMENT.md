@@ -48,11 +48,15 @@ Start the source development service only after the checks pass:
 ```
 
 This `start` command is the only supported entry point for the Next backend. It
-holds a per-profile process lock across the server `execve`; direct ASGI server
-invocations and other external entry points are not protected by that lock.
-Symlink aliases of the same data and config roots share one lock identity, while
+hands a per-profile process lock to the server across `execve`; direct Next
+server invocation without that validated launcher handoff fails closed. The N0
+profile continues to reject symlinked runtime roots. Internally, canonical
+identity resolution maps aliases of the same roots to one identity, while
 profiles with different real roots may run concurrently. Lock metadata is only
-diagnostic and is never used to signal or terminate a process.
+diagnostic and is never used to signal or terminate a process. Server handoff
+requires both a conflicting independent lock probe and successful nonblocking
+lock reassertion on the inherited descriptor; its lifespan refuses to start
+without the adopted owner.
 
 The service is expected at `http://127.0.0.1:18790`. Do not run `install.sh`,
 `upgrade.sh`, `launchd.sh`, or any command targeting `agent-cockpit.service`

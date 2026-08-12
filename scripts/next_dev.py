@@ -15,7 +15,7 @@ from typing import Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_cockpit.instance_lock import InstanceLock, LockError
+from agent_cockpit.instance_lock import LOCK_FD_ENV, InstanceLock, LockError
 
 
 BASE_SHA = "169d0af7751b568e813d2cbca285a9f147e86001"
@@ -27,7 +27,7 @@ SANITIZED_PREFIXES = ("COCKPIT_", "AGENT_COCKPIT_", "HERDR_")
 SANITIZED_KEYS = frozenset({
     "AGENT_MAIL_DB_PATH", "AGENT_MAIL_PROJECT", "HERDR_SESSION",
     "HUMAN_AUTH_URL", "TEAM_HUB_URL", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-    "XDG_STATE_HOME", "HERDR_CONFIG_PATH",
+    "XDG_STATE_HOME", "HERDR_CONFIG_PATH", LOCK_FD_ENV,
 })
 PYTHON_ENV_KEYS = frozenset({
     "LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV",
@@ -319,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 with InstanceLock(values) as lock:
                     _prepare_exec_fds(lock.fd)
+                    environment[LOCK_FD_ENV] = str(lock.fd)
                     os.chdir(repo)
                     os.execve(
                         str(python),

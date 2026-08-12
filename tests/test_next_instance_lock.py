@@ -168,6 +168,199 @@ def test_stale_metadata_is_replaced_when_kernel_lock_is_free(tmp_path: Path) -> 
         lock.release()
 
 
+def test_adopt_inherited_validates_owner_and_sets_close_on_exec(tmp_path: Path) -> None:
+    values = profile(tmp_path)
+    launcher = instance_lock.InstanceLock(values).acquire()
+    assert launcher.fd is not None
+    fd, launcher.fd = launcher.fd, None
+    owner = instance_lock.InstanceLock.adopt_inherited(values, fd)
+    try:
+        assert owner.fd == fd
+        assert not os.get_inheritable(fd)
+        assert owner.read_metadata(current_owner=True)["pid"] == os.getpid()
+        with pytest.raises(instance_lock.LockError, match="instance_locked"):
+            instance_lock.InstanceLock(values).acquire()
+    finally:
+        owner.release()
+
+
+def test_adopt_rejects_forged_unlocked_fd(tmp_path: Path) -> None:
+    values = profile(tmp_path)
+    lock = instance_lock.InstanceLock(values).acquire()
+    assert lock.fd is not None
+    lock.release()
+    fd = os.open(
+        Path(values["COCKPIT_DATA_DIR"]) / instance_lock.LOCK_NAME,
+        os.O_RDWR,
+    )
+    with pytest.raises(instance_lock.LockError, match="lock_not_held"):
+        instance_lock.InstanceLock.adopt_inherited(values, fd)
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
+def test_adopt_rejects_forged_fd_while_another_owner_holds_lock(
+    tmp_path: Path,
+) -> None:
+    values = profile(tmp_path)
+    holder = run_helper(values, "hold")
+    try:
+        wait_acquired(holder)
+        path = Path(values["COCKPIT_DATA_DIR"]) / instance_lock.LOCK_NAME
+        forged_fd = os.open(path, os.O_RDWR)
+        metadata = {
+            "version": 1,
+            "pid": os.getpid(),
+            "process_starttime": instance_lock._process_starttime(),
+            "profile_id": instance_lock.profile_id(values),
+        }
+        os.ftruncate(forged_fd, 0)
+        os.write(forged_fd, json.dumps(metadata).encode("ascii"))
+        with pytest.raises(instance_lock.LockError, match="lock_fd_forged"):
+            instance_lock.InstanceLock.adopt_inherited(values, forged_fd)
+        with pytest.raises(OSError):
+            os.fstat(forged_fd)
+    finally:
+        terminate(holder)
+
+
+def test_next_lifespan_requires_adopted_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_cockpit import server
+
+    monkeypatch.setenv("COCKPIT_NEXT_PROFILE", "1")
+    monkeypatch.setattr(server, "_next_instance_lock_owner", None)
+    with pytest.raises(RuntimeError, match="next_instance_lock_required"):
+        server._require_next_instance_lock()
+
+    values = profile(tmp_path)
+    owner = instance_lock.InstanceLock(values).acquire()
+    assert owner.fd is not None
+    fd, owner.fd = owner.fd, None
+    adopted = instance_lock.InstanceLock.adopt_inherited(values, fd)
+    monkeypatch.setattr(server, "_next_instance_lock_owner", adopted)
+    try:
+        server._require_next_instance_lock()
+    finally:
+        adopted.release()
+
+
+def test_production_lifespan_does_not_require_next_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_cockpit import server
+
+    monkeypatch.delenv("COCKPIT_NEXT_PROFILE", raising=False)
+    monkeypatch.setattr(server, "_next_instance_lock_owner", None)
+    server._require_next_instance_lock()
+
+
+@pytest.mark.parametrize("field", ("pid", "process_starttime", "profile_id"))
+def test_adopt_rejects_owner_metadata_mismatch(
+    tmp_path: Path, field: str,
+) -> None:
+    values = profile(tmp_path)
+    launcher = instance_lock.InstanceLock(values).acquire()
+    assert launcher.fd is not None
+    metadata = launcher.read_metadata()
+    fd, launcher.fd = launcher.fd, None
+    metadata[field] = {
+        "pid": os.getpid() + 1,
+        "process_starttime": "1",
+        "profile_id": "sha256:" + "0" * 64,
+    }[field]
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, json.dumps(metadata).encode("ascii"))
+    with pytest.raises(instance_lock.LockError):
+        instance_lock.InstanceLock.adopt_inherited(values, fd)
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
+def test_exec_handoff_does_not_leak_lock_to_exec_child(tmp_path: Path) -> None:
+    values = profile(tmp_path)
+    values.update(COCKPIT_HOST="127.0.0.1", COCKPIT_PORT="1")
+    code = """
+import importlib.util, json, os, sys, time
+from agent_cockpit.instance_lock import LOCK_FD_ENV, InstanceLock
+values = json.loads(os.environ["LOCK_PROFILE"])
+if os.environ.get("LOCK_STAGE") == "launcher":
+    spec = importlib.util.spec_from_file_location("next_dev_handoff", os.environ["NEXT_DEV"])
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    gate.validate = lambda *_args, **_kwargs: values
+    gate._unit_not_installed = lambda: True
+    gate._port_available = lambda *_args: True
+    gate.ensure_runtime_roots = lambda _values: None
+    gate.Path.is_file = lambda _path: True
+    real_execve = os.execve
+    def exec_helper(_executable, _argv, environment):
+        environment["LOCK_STAGE"] = "owner"
+        real_execve(sys.executable, [sys.executable, "-c", environment["LOCK_CODE"]], environment)
+    gate.os.execve = exec_helper
+    raise SystemExit(gate.main(["start", "--env-file", os.environ["LOCK_ENV_FILE"]]))
+fd = int(os.environ.pop(LOCK_FD_ENV))
+owner = InstanceLock.adopt_inherited(values, fd)
+child = os.fork()
+if child == 0:
+    null_fd = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null_fd, 1)
+    os.dup2(null_fd, 2)
+    os.close(null_fd)
+    os.execve(sys.executable, [sys.executable, "-c", "import time; time.sleep(30)"], os.environ)
+print(json.dumps({"pid": os.getpid(), "child": child, "inheritable": os.get_inheritable(fd)}), flush=True)
+time.sleep(30)
+"""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(ROOT),
+        "HOME": str(tmp_path),
+        "TMPDIR": str(tmp_path),
+        "LOCK_PROFILE": json.dumps(values),
+        "LOCK_STAGE": "launcher",
+        "LOCK_CODE": code,
+        "LOCK_ENV_FILE": str(tmp_path / "next.env"),
+        "NEXT_DEV": str(NEXT_DEV),
+        instance_lock.LOCK_FD_ENV: "999999",
+    }
+    Path(env["LOCK_ENV_FILE"]).write_text("ignored=1\n", encoding="ascii")
+    owner = subprocess.Popen(
+        [sys.executable, "-c", code], cwd=ROOT, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    child_pid = None
+    try:
+        assert owner.stdout is not None
+        output = owner.stdout.readline()
+        if not output:
+            _, stderr = owner.communicate(timeout=5)
+            pytest.fail(f"launcher handoff failed: {stderr}")
+        handoff = json.loads(output)
+        child_pid = handoff["child"]
+        assert handoff["inheritable"] is False
+        contender = run_helper(values, "hold")
+        stdout, _ = contender.communicate(timeout=5)
+        assert contender.returncode == 23
+        assert stdout.strip() == "instance_locked"
+
+        owner.kill()
+        owner.wait(timeout=5)
+        replacement = run_helper(values, "hold")
+        try:
+            wait_acquired(replacement)
+        finally:
+            terminate(replacement)
+    finally:
+        terminate(owner)
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_metadata_partial_writes_are_completed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
