@@ -17,10 +17,10 @@ Hash routes carry stable identities and survive refresh:
 
 ```text
 #/settings/doctor
-#/projects/:projectId/workbench
-#/projects/:projectId/workspaces/:workspaceId
-#/projects/:projectId/workspaces/:workspaceId/files
-#/projects/:projectId/workspaces/:workspaceId/terminal
+#/projects/:projectSlug/workbench
+#/projects/:projectSlug/workspaces/:workspaceId
+#/projects/:projectSlug/workspaces/:workspaceId/files
+#/projects/:projectSlug/workspaces/:workspaceId/terminal
 ```
 
 The Web shell may render these routes before all backends exist, but it must
@@ -35,15 +35,22 @@ Every source-backed view distinguishes data from source state:
 {
   "data": null,
   "meta": {
-    "partial": false,
+    "request_id": "req-...",
+    "generated_at": "2026-08-13T03:00:00+08:00",
     "sources": [
       {
-        "id": "project_registry",
-        "available": false,
-        "freshness": "unavailable",
+        "name": "project_registry",
+        "status": "unavailable",
+        "observed_at": null,
         "reason": "not_implemented"
       }
-    ]
+    ],
+    "capabilities": {
+      "remote_herdr": {
+        "available": false,
+        "reason": "deferred_after_local_core"
+      }
+    }
   }
 }
 ```
@@ -86,23 +93,41 @@ The new Project phase adds only the contracts below before Workspace side
 effects:
 
 ```text
-GET  /api/runtime-nodes
-GET  /api/runtime-nodes/{nodeId}/roots
-GET  /api/runtime-nodes/{nodeId}/directories
-POST /api/project-discovery
-GET  /api/projects
-POST /api/projects
-GET  /api/projects/{projectId}
-GET  /api/projects/{projectId}/repo-locations
-POST /api/projects/{projectId}/repo-locations
-GET  /api/projects/{projectId}/workspaces
-GET  /api/projects/{projectId}/workspaces/{workspaceId}
+GET  /api/v2/runtime-nodes
+GET  /api/v2/runtime-nodes/{nodeId}/roots
+GET  /api/v2/runtime-nodes/{nodeId}/directories
+POST /api/v2/project-discovery
+GET  /api/v2/projects
+POST /api/v2/projects
+GET  /api/v2/projects/{projectId}
+GET  /api/v2/projects/{projectId}/repo-locations
+POST /api/v2/projects/{projectId}/repo-locations
+GET  /api/v2/projects/{projectId}/workspaces
+GET  /api/v2/projects/{projectId}/workspaces/{workspaceId}
 ```
 
 Local directory endpoints accept `root_id + relative path`; they reject an
 absolute path. Retriable POSTs require `Idempotency-Key`, and aggregate writes
 use expected versions. Project registration never creates a Workspace, Agent,
 run, pane, branch, or worktree.
+
+New APIs use only opaque `project_id`; immutable `project_slug` remains the
+browser route and legacy compatibility key. The server never accepts a token
+that may ambiguously mean either one.
+
+## Safety car order
+
+Before Project implementation, the single backend writer completes these cars
+in order:
+
+```text
+FD-001 -> RUNTIME-001 -> SEC-001 -> SEC-002
+```
+
+`FD-001` deterministically closes application-owned SQLite connections while
+preserving transaction semantics. Its tests disable garbage collection and
+prove descriptor counts stay stable using only temporary databases. Profile
+lock and trust-boundary work must not hide or defer this prerequisite.
 
 ## Writer concurrency
 

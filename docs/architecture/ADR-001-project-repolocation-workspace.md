@@ -27,8 +27,11 @@ identities, but its `human_key` is not the Project Registry authority.
 
 - `project_id`, `repo_location_id`, and `workspace_id` are opaque and never
   recomputed from a path, display name, pane, or session.
-- `project_slug` is immutable after creation and exists for URLs and legacy API
-  compatibility.
+- `project_slug` is immutable after creation and exists for browser Hash routes
+  and legacy API compatibility. New versioned APIs use only `project_id`.
+- The server never guesses whether one path token is an ID or a slug. Legacy
+  `/api/projects/{slug}` remains explicit; new routes live under
+  `/api/v2/projects/{project_id}`.
 - `(node_id, canonical_path)` is unique among active RepoLocations.
 - A matching Git remote or fingerprint is only a possible-project hint. It
   never merges projects automatically.
