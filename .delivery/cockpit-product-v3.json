@@ -84,19 +84,19 @@
     {
       "id": "RUNTIME-001-profile-lock",
       "title": "Fail closed when a second process opens the same canonical Next profile",
-      "status": "in_progress",
+      "status": "accepted",
       "depends_on": ["FD-001-sqlite-lifecycle"],
       "scope": ["agent_cockpit/instance_lock.py", "agent_cockpit/server.py", "scripts/next_dev.py", "server.py", "tests/test_next_instance_lock.py", "tests/test_next_isolation.py", "docs/NEXT-DEVELOPMENT.md"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_next_instance_lock.py tests/test_next_isolation.py", "passed": false},
-        {"command": ".venv/bin/python scripts/next_dev.py check --env-file .env.next", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_next_instance_lock.py tests/test_next_isolation.py", "passed": true},
+        {"command": ".venv/bin/python scripts/next_dev.py check --env-file .env.next", "passed": true}
       ],
       "rollback": "Revert the profile lock commit; keep the Next service stopped until the previous single-process launch path is restored",
       "production_impact": "none",
       "owner_instance_id": "i-ac4mbdpyttxouq6op4tesfzyhy",
-      "reviewer_instance_id": null,
-      "base_sha": null,
-      "fixed_sha": null,
+      "reviewer_instance_id": "i-gzy6byrcie47tprardahrpmwbq",
+      "base_sha": "de4044d4dff8169dba1837d9b2f802060754d165",
+      "fixed_sha": "b70651286dad75461aaf084cf3a0bd0fc71074f1",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
