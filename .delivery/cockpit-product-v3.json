@@ -84,7 +84,7 @@
     {
       "id": "RUNTIME-001-profile-lock",
       "title": "Fail closed when a second process opens the same canonical Next profile",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": ["FD-001-sqlite-lifecycle"],
       "scope": ["agent_cockpit/instance_lock.py", "scripts/next_dev.py", "tests/test_next_instance_lock.py", "docs/NEXT-DEVELOPMENT.md"],
       "acceptance": [
@@ -93,7 +93,7 @@
       ],
       "rollback": "Revert the profile lock commit; keep the Next service stopped until the previous single-process launch path is restored",
       "production_impact": "none",
-      "owner_instance_id": null,
+      "owner_instance_id": "i-ac4mbdpyttxouq6op4tesfzyhy",
       "reviewer_instance_id": null,
       "base_sha": null,
       "fixed_sha": null,
