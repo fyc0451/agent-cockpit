@@ -40,12 +40,13 @@ closed. Directory listing includes only direct real
 directories; it does not recurse or follow symlink entries. Every entry always
 contains `registered_project`, either an exact active `(node_id, canonical_path)`
 match or explicit `null`. Listing also exposes `complete`, inverse `partial`,
-successful `sources`, and stable `warnings`. Registry failure retains Local
-entries but sets `partial=true`, removes unavailable Registry from `sources`,
-and reports `project_registry_unavailable`; under that state a null match is
-unknown, not proof that the directory is unregistered. Each child identity is
-rechecked after Registry lookup so a replacement cannot inherit stale match
-evidence.
+successful `sources`, and stable `warnings`. Any Registry lookup failure — total
+or partial/mixed — retains Local entries but sets `partial=true`, omits
+`project_registry` from successful `sources`, and reports
+`project_registry_unavailable`; `project_registry` appears in `sources` only when
+every entry lookup succeeded. Under that partial state a null match is unknown,
+not proof that the directory is unregistered. Each child identity is rechecked
+after Registry lookup so a replacement cannot inherit stale match evidence.
 
 Stable discovery errors are:
 
@@ -65,7 +66,11 @@ The public result contains the normalized locator, safe display path,
 `canonical_path_digest`, VCS observation, exact and possible Project matches,
 `discovery_fingerprint`, observation time, completeness, sources, and stable
 warnings. The raw canonical path is available only as an explicit trusted
-application-service property and is excluded from public serialization.
+application-service property and is excluded from public serialization. `sources`
+names only the data sources that produced evidence for this result
+(`local_files`, `local_git`, and on success `project_registry`); a Registry
+failure degrades the result to `complete=false`, clears matches, reports
+`project_registry_unavailable`, and omits `project_registry` from `sources`.
 
 `exact_match` means an active Registry RepoLocation has the same
 `(node_id, canonical_path)`. `possible_projects` is an advisory repository

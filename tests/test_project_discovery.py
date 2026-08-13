@@ -47,6 +47,26 @@ class FakeRegistryMatchReader:
         return self.exact, self.possible
 
 
+@dataclass
+class FailableRegistryMatchReader:
+    """Registry that resolves exact matches by entry name and fails for a set."""
+
+    exact_by_name: dict[str, RegistryMatch] = field(default_factory=dict)
+    fail_names: set[str] = field(default_factory=set)
+
+    def match_discovery(
+        self,
+        *,
+        node_id: str,
+        canonical_path: str,
+        repository_fingerprint: str | None,
+    ) -> tuple[RegistryMatch | None, tuple[RegistryMatch, ...]]:
+        name = Path(canonical_path).name
+        if name in self.fail_names:
+            raise RuntimeError("private registry detail")
+        return self.exact_by_name.get(name), ()
+
+
 def _service(
     root: Path,
     registry: FakeRegistryMatchReader | None = None,
@@ -764,3 +784,46 @@ def test_invalid_registry_match_values_degrade_instead_of_escaping(
     assert result.warnings == ("project_registry_unavailable",)
     assert result.exact_match is None
     assert result.possible_projects == ()
+
+
+def test_directory_listing_mixed_registry_failure_omits_project_registry_source(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "projects"
+    (root / "available").mkdir(parents=True)
+    (root / "unavailable").mkdir()
+    match = RegistryMatch("prj_1", "available", "Available")
+    registry = FailableRegistryMatchReader(
+        exact_by_name={"available": match}, fail_names={"unavailable"}
+    )
+    service = LocalProjectDiscoveryService(FakeRootReader((root,)), registry)
+    root_id = service.list_roots()[0].root_id
+
+    public = service.list_directories(
+        ProjectLocator("local", root_id, "")
+    ).to_public_dict()
+
+    assert public["complete"] is False
+    assert public["partial"] is True
+    assert public["sources"] == ["local_files"]
+    assert public["warnings"] == ["project_registry_unavailable"]
+
+
+def test_discovery_registry_failure_omits_project_registry_source(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "projects"
+    (root / "plain").mkdir(parents=True)
+    registry = FailableRegistryMatchReader(fail_names={"plain"})
+    service = LocalProjectDiscoveryService(FakeRootReader((root,)), registry)
+    root_id = service.list_roots()[0].root_id
+
+    public = service.discover(
+        ProjectLocator("local", root_id, "plain")
+    ).to_public_dict()
+
+    assert public["complete"] is False
+    assert public["exact_match"] is None
+    assert public["possible_projects"] == []
+    assert "project_registry" not in public["sources"]
+    assert public["warnings"] == ["project_registry_unavailable"]

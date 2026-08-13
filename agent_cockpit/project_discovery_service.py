@@ -293,7 +293,6 @@ class LocalProjectDiscoveryService:
 
         entries: list[contract.DirectoryEntry] = []
         complete = True
-        registry_succeeded = False
         try:
             for entry, canonical_path, expected_identity, child_fd in candidates:
                 registered_project = None
@@ -306,7 +305,6 @@ class LocalProjectDiscoveryService:
                     registered_project, _ = _normalize_matches(
                         registered_project, ()
                     )
-                    registry_succeeded = True
                 except Exception:
                     complete = False
                 try:
@@ -334,7 +332,7 @@ class LocalProjectDiscoveryService:
             os.close(target_fd)
             os.close(root_fd)
         sources = ("local_files",)
-        if registry_succeeded:
+        if candidates and complete:
             sources += ("project_registry",)
         return contract.DirectoryListing(
             locator=locator,
@@ -361,6 +359,7 @@ class LocalProjectDiscoveryService:
 
             complete = True
             warnings: tuple[str, ...] = ()
+            registry_ok = True
             try:
                 exact, possible = self._registry.match_discovery(
                     node_id="local",
@@ -374,6 +373,7 @@ class LocalProjectDiscoveryService:
                 exact, possible = None, ()
                 complete = False
                 warnings = ("project_registry_unavailable",)
+                registry_ok = False
 
             self._require_unchanged(
                 locator, root, target, root_identity, target_identity,
@@ -382,6 +382,9 @@ class LocalProjectDiscoveryService:
             canonical_digest = contract.sha256_text(
                 "canonical-local-path-v1", str(target)
             )
+            sources = ("local_files", "local_git")
+            if registry_ok:
+                sources += ("project_registry",)
             evidence = {
                 "locator": locator.to_public_dict(),
                 "canonical_path_digest": canonical_digest,
@@ -403,6 +406,7 @@ class LocalProjectDiscoveryService:
                 discovery_fingerprint=contract.discovery_fingerprint(evidence),
                 observed_at=datetime.now(UTC).isoformat(),
                 complete=complete,
+                sources=sources,
                 warnings=warnings,
                 _canonical_path=str(target),
             )
