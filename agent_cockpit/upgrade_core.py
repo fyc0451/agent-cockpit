@@ -94,6 +94,7 @@ ALLOWED_DIRTY_PREFIXES = (
 DATA_MANIFEST = (
     "settings.json",
     "tasks.sqlite3",
+    "project-registry.sqlite3",
     "coordination.sqlite3",
     "push.sqlite3",
     "mail-projects.json",

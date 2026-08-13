@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import threading
 import time
@@ -307,12 +308,12 @@ def test_health_failure_rolls_back_with_stop(install_tree):
     assert _git(root, "rev-parse", "HEAD") == base_sha
 
 
-def test_sqlite_backup_fail_closed(install_tree, monkeypatch, tmp_path):
+@pytest.mark.parametrize("name", ["tasks.sqlite3", "project-registry.sqlite3"])
+def test_sqlite_backup_fail_closed(install_tree, monkeypatch, name):
     root = install_tree["root"]
     data = install_tree["data"]
-    db = data / "tasks.sqlite3"
+    db = data / name
     # create a real sqlite file
-    import sqlite3
     con = sqlite3.connect(str(db))
     con.execute("create table t(x int)")
     con.commit()
@@ -324,6 +325,81 @@ def test_sqlite_backup_fail_closed(install_tree, monkeypatch, tmp_path):
     monkeypatch.setattr(upgrade_core, "_sqlite_backup_strict", boom_backup)
     with pytest.raises(ValueError, match="backup_failed"):
         upgrade_core.create_backup(root, "j1")
+
+
+def test_project_registry_backup_and_rollback_restore(install_tree):
+    root = install_tree["root"]
+    db = install_tree["data"] / "project-registry.sqlite3"
+    with sqlite3.connect(db) as con:
+        con.execute("create table marker(value text not null)")
+        con.execute("insert into marker values ('before-upgrade')")
+
+    meta = upgrade_core.create_backup(root, "registry")
+    assert "project-registry.sqlite3" in meta["files"]
+    backup = upgrade_core.BACKUP_ROOT / meta["backup_id"] / db.name
+    with sqlite3.connect(f"file:{backup}?mode=ro", uri=True) as con:
+        assert con.execute("select value from marker").fetchone() == ("before-upgrade",)
+
+    with sqlite3.connect(db) as con:
+        con.execute("update marker set value = 'after-upgrade'")
+    upgrade_core.restore_data_files(meta["backup_id"])
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as con:
+        assert con.execute("select value from marker").fetchone() == ("before-upgrade",)
+
+
+def test_project_registry_is_restored_by_legacy_job_rollback(install_tree):
+    root = install_tree["root"]
+    rel_sha = install_tree["rel_sha"]
+    db = install_tree["data"] / "project-registry.sqlite3"
+    with sqlite3.connect(db) as con:
+        con.execute("create table marker(value text not null)")
+        con.execute("insert into marker values ('before-upgrade')")
+
+    def fetch_and_mutate(install_dir, _tag, sha):
+        _git(install_dir, "checkout", "-f", sha)
+        with sqlite3.connect(db) as con:
+            con.execute("update marker set value = 'after-upgrade'")
+
+    def spawn(job_id, install_dir, _log_path):
+        upgrade_core._legacy_run_job(job_id, install_dir=install_dir)
+        return os.getpid()
+
+    upgrade_core.configure_hooks(
+        skip_venv_check=lambda: True,
+        preflight_supervisor=lambda: True,
+        fetch_release=lambda _tag: _rel(rel_sha),
+        verify_tag_sha=lambda *_args, **_kwargs: None,
+        fetch_and_checkout=fetch_and_mutate,
+        install_deps_staging=lambda _install_dir: (
+            _ for _ in ()
+        ).throw(ValueError("install_failed")),
+        stop_cockpit=lambda: None,
+        restart_cockpit=lambda: None,
+        health_check=lambda: True,
+        spawn_worker=spawn,
+        proc_start_time=lambda _pid: "t",
+        boot_id=lambda: "b",
+    )
+
+    result = upgrade_core._legacy_start_upgrade("0.3.0", install_dir=root)
+    assert result["accepted"] is True
+    assert upgrade_core.read_state()["state"] == "rolled_back"
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as con:
+        assert con.execute("select value from marker").fetchone() == ("before-upgrade",)
+
+
+def test_project_registry_rollback_missing_snapshot_fails_closed(install_tree):
+    root = install_tree["root"]
+    db = install_tree["data"] / "project-registry.sqlite3"
+    with sqlite3.connect(db) as con:
+        con.execute("create table marker(value text not null)")
+        con.execute("insert into marker values ('before-upgrade')")
+
+    meta = upgrade_core.create_backup(root, "registry-missing")
+    backup = upgrade_core.BACKUP_ROOT / meta["backup_id"] / db.name
+    backup.unlink(missing_ok=True)
+    with pytest.raises(ValueError, match="backup_failed"):
+        upgrade_core.restore_data_files(meta["backup_id"])
 
 
 def test_public_error_sanitized_no_paths(install_tree, monkeypatch):
