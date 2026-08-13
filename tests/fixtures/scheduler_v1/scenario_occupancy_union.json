@@ -1,0 +1,79 @@
+{
+  "id": "scenario_occupancy_union",
+  "kind": "case",
+  "cwd_label": "/tmp/irrelevant-a",
+  "evaluated_at": "2026-08-13T09:00:00+00:00",
+  "previous": null,
+  "snapshot": {
+    "schema_version": 1,
+    "project_id": "agent-cockpit-next",
+    "source": {
+      "repository_id": "agent-cockpit-next",
+      "plan_path": ".delivery/cockpit-product-v3.json",
+      "git_head": "a75e8c46920d57d947a4caebec379d8d54e9015e",
+      "git_dirty": false,
+      "plan_sha256": "sha256:b555dd4f36fa1ed3cdfe6ef22f338d26efdeb4a1f42d577f2f8fb202ab991c54",
+      "status": "available",
+      "observed_at": "2026-08-13T09:00:00+00:00",
+      "freshness_deadline": "2026-08-13T09:05:00+00:00",
+      "reason_codes": []
+    },
+    "capacity": {
+      "effective_writer_wip": 1,
+      "active_writer_count": 0,
+      "remaining_writer_capacity": 0,
+      "revision": "cap:1:1:0"
+    },
+    "work": [
+      {
+        "source_kind": "delivery_car",
+        "source_id": "C1",
+        "source_revision": "rev-1",
+        "phase": "writer",
+        "state": "ready",
+        "waiting_on": [],
+        "author_agent_instance_id": null,
+        "sensitivity": "ordinary",
+        "typed_links": [],
+        "reason_codes": []
+      },
+      {
+        "source_kind": "delivery_car",
+        "source_id": "C2",
+        "source_revision": "rev-1",
+        "phase": "writer",
+        "state": "ready",
+        "waiting_on": [],
+        "author_agent_instance_id": null,
+        "sensitivity": "ordinary",
+        "typed_links": [],
+        "reason_codes": []
+      }
+    ],
+    "agents": [],
+    "assignments": [],
+    "active_leases": [
+      {
+        "lease_id": "offer-c1",
+        "project_id": "agent-cockpit-next",
+        "workspace_id": "ws-local",
+        "source_kind": "delivery_car",
+        "source_id": "C1",
+        "source_revision": "R1",
+        "phase": "writer",
+        "agent_instance_id": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "offered"
+      }
+    ],
+    "active_dispatch_count": 0
+  },
+  "expected": {
+    "occupancy": 1,
+    "second_offer_allowed": false,
+    "capacity": {
+      "effective": 1,
+      "active": 1,
+      "remaining": 0
+    }
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "id": "scenario_unlinked_authorities",
+  "kind": "case",
+  "cwd_label": "/tmp/irrelevant-a",
+  "evaluated_at": "2026-08-13T09:00:00+00:00",
+  "previous": null,
+  "snapshot": {
+    "schema_version": 1,
+    "project_id": "agent-cockpit-next",
+    "source": {
+      "repository_id": "agent-cockpit-next",
+      "plan_path": ".delivery/cockpit-product-v3.json",
+      "git_head": "a75e8c46920d57d947a4caebec379d8d54e9015e",
+      "git_dirty": false,
+      "plan_sha256": "sha256:b555dd4f36fa1ed3cdfe6ef22f338d26efdeb4a1f42d577f2f8fb202ab991c54",
+      "status": "available",
+      "observed_at": "2026-08-13T09:00:00+00:00",
+      "freshness_deadline": "2026-08-13T09:05:00+00:00",
+      "reason_codes": []
+    },
+    "capacity": {
+      "effective_writer_wip": 3,
+      "active_writer_count": 1,
+      "remaining_writer_capacity": 2,
+      "revision": "cap:3:1:2"
+    },
+    "work": [
+      {
+        "source_kind": "delivery_car",
+        "source_id": "CAR-C",
+        "source_revision": "rev-1",
+        "phase": "writer",
+        "state": "ready",
+        "waiting_on": [],
+        "author_agent_instance_id": null,
+        "sensitivity": "ordinary",
+        "typed_links": [],
+        "reason_codes": []
+      }
+    ],
+    "agents": [],
+    "assignments": [
+      {
+        "assignment_id": "ASN-A",
+        "source_revision": "asn-1",
+        "status": "assigned",
+        "assignee": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "typed_links": []
+      }
+    ],
+    "active_leases": [],
+    "active_dispatch_count": 0
+  },
+  "expected": {
+    "unlinked_authorities": true,
+    "keep_objects": [
+      "CAR-C",
+      "ASN-A"
+    ],
+    "reason_codes": [
+      "dispatch_dependency_missing",
+      "readonly_projection_only",
+      "timing_unavailable",
+      "unlinked_authorities"
+    ],
+    "assignment_status": "assigned"
+  }
+}

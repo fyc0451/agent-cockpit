@@ -1,0 +1,109 @@
+{
+  "id": "pinned_parent_0bbbc56",
+  "kind": "case",
+  "cwd_label": "/tmp/irrelevant-a",
+  "evaluated_at": "2026-08-13T09:00:00+00:00",
+  "previous": null,
+  "snapshot": {
+    "schema_version": 1,
+    "project_id": "agent-cockpit-next",
+    "source": {
+      "repository_id": "agent-cockpit-next",
+      "plan_path": ".delivery/cockpit-product-v3.json",
+      "git_head": "0bbbc561f9347649fb0901c527e6f812bac9696f",
+      "git_dirty": false,
+      "plan_sha256": "sha256:50102e76d621fe3cb30bd9266929ac053dd36d7cf2bce9e24d7fef362619525c",
+      "status": "available",
+      "observed_at": "2026-08-13T09:00:00+00:00",
+      "freshness_deadline": "2026-08-13T09:05:00+00:00",
+      "reason_codes": []
+    },
+    "capacity": {
+      "effective_writer_wip": 3,
+      "active_writer_count": 2,
+      "remaining_writer_capacity": 1,
+      "revision": "cap:3:2:1"
+    },
+    "work": [
+      {
+        "source_kind": "delivery_car",
+        "source_id": "PROJ-003-legacy-import",
+        "source_revision": "rev-1",
+        "phase": "writer",
+        "state": "active",
+        "waiting_on": [],
+        "author_agent_instance_id": null,
+        "sensitivity": "unclassified",
+        "typed_links": [],
+        "reason_codes": []
+      },
+      {
+        "source_kind": "delivery_car",
+        "source_id": "PROJ-004A-project-api-store",
+        "source_revision": "rev-1",
+        "phase": "writer",
+        "state": "review",
+        "waiting_on": [],
+        "author_agent_instance_id": null,
+        "sensitivity": "unclassified",
+        "typed_links": [],
+        "reason_codes": []
+      },
+      {
+        "source_kind": "delivery_car",
+        "source_id": "PROJ-004-project-api",
+        "source_revision": "rev-1",
+        "phase": "writer",
+        "state": "waiting",
+        "waiting_on": [
+          "PROJ-004A-project-api-store"
+        ],
+        "author_agent_instance_id": null,
+        "sensitivity": "unclassified",
+        "typed_links": [],
+        "reason_codes": []
+      },
+      {
+        "source_kind": "delivery_car",
+        "source_id": "SCHED-001-authority-contract",
+        "source_revision": "rev-1",
+        "phase": "writer",
+        "state": "ready",
+        "waiting_on": [],
+        "author_agent_instance_id": null,
+        "sensitivity": "unclassified",
+        "typed_links": [],
+        "reason_codes": []
+      }
+    ],
+    "agents": [],
+    "assignments": [],
+    "active_leases": [],
+    "active_dispatch_count": 0
+  },
+  "expected": {
+    "git_head": "0bbbc561f9347649fb0901c527e6f812bac9696f",
+    "plan_sha256": "sha256:50102e76d621fe3cb30bd9266929ac053dd36d7cf2bce9e24d7fef362619525c",
+    "source_status": "available",
+    "source_freshness": "fresh",
+    "capacity": {
+      "effective": 3,
+      "active": 2,
+      "remaining": 1
+    },
+    "ready_ids": [
+      "SCHED-001-authority-contract"
+    ],
+    "waiting": {
+      "PROJ-004-project-api": [
+        "PROJ-004A-project-api-store"
+      ]
+    },
+    "dispatch_available": false,
+    "eligible_pair_count": 0,
+    "must_not_share_fingerprint_with": "pinned_a75e8c4",
+    "must_not_contain": [
+      "ready_agent_idle_undispatched"
+    ]
+  }
+}

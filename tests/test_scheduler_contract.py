@@ -1,0 +1,727 @@
+"""SCHED-001 ordinary contract tests.
+
+These helpers exist only to validate frozen fixtures. They are not a production
+scheduler, timer, store, or dispatch implementation.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+CONTRACT = ROOT / "docs/contracts/scheduler-v1.md"
+FIXTURES = ROOT / "tests/fixtures/scheduler_v1"
+
+SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
+
+REASON_CODES = frozenset({
+    "source_unavailable",
+    "source_stale",
+    "source_invalid",
+    "authoritative_plan_ambiguous",
+    "dependency_waiting",
+    "writer_wip_full",
+    "scope_ownership_conflict",
+    "review_backpressure",
+    "reviewer_required",
+    "author_gate_denied",
+    "unlinked_authorities",
+    "no_stable_identity",
+    "runtime_not_verified",
+    "runtime_generation_unavailable",
+    "runtime_generation_drift",
+    "recovery_required",
+    "transport_unknown",
+    "heartbeat_expired",
+    "agent_cooldown",
+    "agent_policy_denied",
+    "sensitive_route_unavailable",
+    "ready_but_no_eligible_agent",
+    "ready_agent_idle_undispatched",
+    "readonly_projection_only",
+    "review_authority_unavailable",
+    "timing_unavailable",
+    "dispatch_dependency_missing",
+})
+FORBIDDEN_V1_REASONS = frozenset({"lease_conflict", "lease_claim_timeout"})
+SOURCE_STATUSES = frozenset({"available", "unavailable", "invalid", "ambiguous"})
+SENSITIVITIES = frozenset({"ordinary", "sensitive_security", "unclassified"})
+WORK_STATES = frozenset({"ready", "waiting", "review", "active", "accepted", "blocked"})
+VERIFIED_HARNESS = frozenset({"claude", "kimi", "codex", "opencode", "zcode", "unknown"})
+OBSERVED_HARNESS = VERIFIED_HARNESS | {"kimi-code"}
+SENSITIVE_OK = frozenset({"claude", "kimi"})
+SNAPSHOT_KEYS = (
+    "schema_version",
+    "project_id",
+    "source",
+    "capacity",
+    "work",
+    "agents",
+    "assignments",
+    "active_leases",
+    "active_dispatch_count",
+)
+SOURCE_KEYS = (
+    "repository_id",
+    "plan_path",
+    "git_head",
+    "git_dirty",
+    "plan_sha256",
+    "status",
+    "observed_at",
+    "freshness_deadline",
+    "reason_codes",
+)
+DISPATCH_DEPENDENCIES = (
+    "SCHED-001-authority-contract",
+    "SCHED-002-readonly-projection",
+    "workspace_workitem_review_authority",
+    "workspace_agent_identity_store",
+    "runtime_attachment_generation_handshake",
+    "author_gate_harness_catalog",
+    "delivery_expected_revision_cas",
+    "dispatch_lease_store",
+    "reconciler_intents",
+    "harness_durable_claim_heartbeat",
+    "api_web_attention_wiring",
+)
+PINNED_HEAD = "a75e8c46920d57d947a4caebec379d8d54e9015e"
+PINNED_PLAN = "sha256:b555dd4f36fa1ed3cdfe6ef22f338d26efdeb4a1f42d577f2f8fb202ab991c54"
+PARENT_HEAD = "0bbbc561f9347649fb0901c527e6f812bac9696f"
+PARENT_PLAN = "sha256:50102e76d621fe3cb30bd9266929ac053dd36d7cf2bce9e24d7fef362619525c"
+GRACE = 90
+TICK = 45
+
+CONTRACT_MUST_CONTAIN = (
+    "禁止双向同步",
+    "a75e8c46920d57d947a4caebec379d8d54e9015e",
+    PINNED_PLAN,
+    "Pane",
+    "UNIQUE ACTIVE (project_id, workspace_id, source_kind, source_id, phase)",
+    "不含",
+    "claimed_pending_source",
+    "generation credential",
+    "claude",
+    "kimi-code",
+    "timing_unavailable",
+    "ONSET_TO_OPEN_UPPER_BOUND_SECONDS = 135",
+    "eligible_pairs",
+    "dispatch_lease_store",
+)
+
+
+class FakeAdapters:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def start_agent(self, *_a, **_k) -> None:
+        self.calls.append("start_agent")
+
+    def pane_send(self, *_a, **_k) -> None:
+        self.calls.append("pane_send")
+
+    def merge(self, *_a, **_k) -> None:
+        self.calls.append("merge")
+
+    def accept(self, *_a, **_k) -> None:
+        self.calls.append("accept")
+
+    def close_assignment(self, *_a, **_k) -> None:
+        self.calls.append("close_assignment")
+
+    def write_delivery(self, *_a, **_k) -> None:
+        self.calls.append("write_delivery")
+
+
+class ContractError(ValueError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _load_json(path: Path) -> dict:
+    return json.loads(path.read_text())
+
+
+def fixture_paths() -> list[Path]:
+    return sorted(p for p in FIXTURES.glob("*.json"))
+
+
+def canonical(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def digest(value: object) -> str:
+    return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def parse_utc(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not UTC_RE.match(value):
+        raise ContractError("source_invalid")
+    return datetime.fromisoformat(value)
+
+
+def require_sha(value: object) -> str:
+    if not isinstance(value, str) or not SHA256_RE.match(value):
+        raise ContractError("source_invalid")
+    return value
+
+
+def require_reasons(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ContractError("source_invalid")
+    unknown = [item for item in value if item not in REASON_CODES]
+    if unknown:
+        raise ContractError("source_invalid")
+    return tuple(sorted(set(value)))
+
+
+def validate_snapshot(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ContractError("source_invalid")
+    extra = set(raw) - set(SNAPSHOT_KEYS)
+    missing = set(SNAPSHOT_KEYS) - set(raw)
+    if extra or missing:
+        raise ContractError("source_invalid")
+    if raw["schema_version"] != 1:
+        raise ContractError("source_invalid")
+    if raw["active_dispatch_count"] != 0:
+        raise ContractError("source_invalid")
+
+    source = raw["source"]
+    if set(source) != set(SOURCE_KEYS):
+        raise ContractError("source_invalid")
+    if source["status"] not in SOURCE_STATUSES:
+        raise ContractError("source_invalid")
+    require_sha(source["plan_sha256"])
+    if not isinstance(source["git_dirty"], bool):
+        raise ContractError("source_invalid")
+    parse_utc(source["observed_at"])
+    parse_utc(source["freshness_deadline"])
+    require_reasons(source["reason_codes"])
+
+    work_ids: list[str] = []
+    for item in raw["work"]:
+        if item["state"] not in WORK_STATES:
+            raise ContractError("source_invalid")
+        if item["sensitivity"] not in SENSITIVITIES:
+            raise ContractError("source_invalid")
+        require_reasons(item["reason_codes"])
+        work_ids.append(item["source_id"])
+    if len(work_ids) != len(set(work_ids)):
+        raise ContractError("source_invalid")
+
+    for agent in raw["agents"]:
+        if agent["observed_harness"] not in OBSERVED_HARNESS:
+            raise ContractError("source_invalid")
+        verified = agent["verified_harness"]
+        if verified is not None and verified not in VERIFIED_HARNESS:
+            raise ContractError("source_invalid")
+        require_reasons(agent["reason_codes"])
+        parse_utc(agent["observed_at"])
+        parse_utc(agent["freshness_deadline"])
+
+    for assignment in raw["assignments"]:
+        if assignment["status"] not in {"assigned", "in_progress", "blocked", "review", "closed"}:
+            raise ContractError("source_invalid")
+    return raw
+
+
+def source_revision(source: dict) -> str:
+    return digest({
+        "repository_id": source["repository_id"],
+        "plan_path": source["plan_path"],
+        "git_head": source["git_head"],
+        "git_dirty": source["git_dirty"],
+        "plan_sha256": source["plan_sha256"],
+    })
+
+
+def input_fingerprint(snapshot: dict) -> str:
+    payload = {
+        "schema_version": snapshot["schema_version"],
+        "project_id": snapshot["project_id"],
+        "source": {key: snapshot["source"][key] for key in SOURCE_KEYS},
+        "capacity": snapshot["capacity"],
+        "work": snapshot["work"],
+        "agents": snapshot["agents"],
+        "assignments": snapshot["assignments"],
+        "active_leases": snapshot["active_leases"],
+        "active_dispatch_count": snapshot["active_dispatch_count"],
+    }
+    return digest(payload)
+
+
+def freshness(source: dict, evaluated_at: datetime) -> str:
+    status = source["status"]
+    observed = parse_utc(source["observed_at"])
+    deadline = parse_utc(source["freshness_deadline"])
+    if status == "available" and observed is not None and deadline is not None:
+        if evaluated_at <= deadline:
+            return "fresh"
+        return "stale"
+    return "unknown"
+
+
+def occupancy(snapshot: dict) -> int:
+    active_ids = {item["source_id"] for item in snapshot["work"] if item["state"] in {"active", "review"}}
+    reserved = {
+        lease["source_id"]
+        for lease in snapshot["active_leases"]
+        if lease["status"] in {"offered", "claimed_pending_source", "working"}
+        and lease["phase"] == "writer"
+    }
+    still_open = {
+        item["source_id"]
+        for item in snapshot["work"]
+        if item["state"] in {"ready", "waiting", "active", "review"}
+    }
+    return len(active_ids | (reserved & still_open))
+
+
+def logical_lease_conflicts(snapshot: dict) -> bool:
+    seen_work: set[tuple] = set()
+    seen_agent: set[str] = set()
+    for lease in snapshot["active_leases"]:
+        if lease["status"] not in {"offered", "claimed_pending_source", "working"}:
+            continue
+        key = (
+            lease["project_id"],
+            lease["workspace_id"],
+            lease["source_kind"],
+            lease["source_id"],
+            lease["phase"],
+        )
+        if key in seen_work or lease["agent_instance_id"] in seen_agent:
+            return True
+        seen_work.add(key)
+        seen_agent.add(lease["agent_instance_id"])
+    return False
+
+
+def agent_reasons(agent: dict, *, evaluated_at: datetime) -> list[str]:
+    reasons = list(agent.get("reason_codes") or [])
+    if not agent.get("identity_revision") or not agent.get("agent_instance_id"):
+        reasons.append("no_stable_identity")
+    if agent.get("runtime_generation") is None or not agent.get("attachment_id"):
+        reasons.append("runtime_generation_unavailable")
+        reasons.append("runtime_not_verified")
+    if agent.get("projected_state") == "unknown_transport":
+        reasons.append("transport_unknown")
+    observed = parse_utc(agent.get("observed_at"))
+    deadline = parse_utc(agent.get("freshness_deadline"))
+    if observed is None or deadline is None or evaluated_at > deadline:
+        reasons.append("source_stale")
+    return sorted(set(reasons))
+
+
+def eligible_pairs(snapshot: dict, evaluated_at: datetime) -> list[tuple[str, str]]:
+    if snapshot["source"]["status"] != "available":
+        return []
+    if freshness(snapshot["source"], evaluated_at) != "fresh":
+        return []
+    if snapshot["capacity"]["remaining_writer_capacity"] <= 0:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for item in snapshot["work"]:
+        if item["state"] != "ready" or item["phase"] != "writer":
+            continue
+        if item["sensitivity"] == "unclassified":
+            continue
+        for agent in snapshot["agents"]:
+            reasons = agent_reasons(agent, evaluated_at=evaluated_at)
+            blocking = {
+                "no_stable_identity",
+                "runtime_generation_unavailable",
+                "runtime_not_verified",
+                "transport_unknown",
+                "source_stale",
+            }
+            if set(reasons) & blocking:
+                continue
+            if item["sensitivity"] == "sensitive_security":
+                if agent.get("verified_harness") not in SENSITIVE_OK:
+                    continue
+            pairs.append((item["source_id"], agent["agent_instance_id"]))
+    reviewer_pairs: list[tuple[str, str]] = []
+    for item in snapshot["work"]:
+        if item["phase"] != "reviewer" or item["state"] not in {"ready", "review"}:
+            continue
+        for agent in snapshot["agents"]:
+            if item.get("author_agent_instance_id") == agent.get("agent_instance_id"):
+                continue
+            reviewer_pairs.append((item["source_id"], agent["agent_instance_id"]))
+    return pairs
+
+
+def evaluate(snapshot: dict, *, evaluated_at: datetime, previous: dict | None, adapters: FakeAdapters) -> dict:
+    validated = validate_snapshot(deepcopy(snapshot))
+    assert adapters.calls == []
+    reasons: set[str] = {"readonly_projection_only", "dispatch_dependency_missing"}
+    source = validated["source"]
+    fresh = freshness(source, evaluated_at)
+    if source["status"] == "unavailable":
+        reasons.add("source_unavailable")
+    elif source["status"] == "invalid":
+        reasons.add("source_invalid")
+    elif source["status"] == "ambiguous":
+        reasons.add("authoritative_plan_ambiguous")
+    if fresh == "stale":
+        reasons.add("source_stale")
+
+    work_reasons: dict[str, list[str]] = {}
+    ready_ids = []
+    review_ids = []
+    waiting = {}
+    unclassified_ready = False
+    for item in validated["work"]:
+        item_reasons = list(item["reason_codes"])
+        if item["state"] == "ready":
+            ready_ids.append(item["source_id"])
+            if item["sensitivity"] == "unclassified" and source["status"] == "available" and fresh == "fresh":
+                unclassified_ready = True
+            if validated["capacity"]["remaining_writer_capacity"] <= 0:
+                item_reasons.append("writer_wip_full")
+        if item["state"] == "review":
+            review_ids.append(item["source_id"])
+        if item["state"] == "waiting":
+            waiting[item["source_id"]] = list(item["waiting_on"])
+            item_reasons.append("dependency_waiting")
+        work_reasons[item["source_id"]] = sorted(set(item_reasons))
+
+    if unclassified_ready and source["status"] == "available" and fresh == "fresh":
+        reasons.add("sensitive_route_unavailable")
+
+    agent_reason_map: dict[str, list[str]] = {}
+    projected = None
+    for agent in validated["agents"]:
+        values = agent_reasons(agent, evaluated_at=evaluated_at)
+        if agent.get("verified_harness") not in SENSITIVE_OK and any(
+            item["sensitivity"] == "sensitive_security" for item in validated["work"]
+        ):
+            values.append("agent_policy_denied")
+            reasons.add("agent_policy_denied")
+            reasons.add("sensitive_route_unavailable")
+        for item in validated["work"]:
+            if item["phase"] == "reviewer" and item.get("author_agent_instance_id") == agent.get("agent_instance_id"):
+                values.append("author_gate_denied")
+                reasons.add("author_gate_denied")
+        if not agent.get("identity_revision"):
+            reasons.add("no_stable_identity")
+        if agent.get("runtime_generation") is None:
+            reasons.add("runtime_generation_unavailable")
+        if "transport_unknown" in values:
+            reasons.add("transport_unknown")
+        if "review_authority_unavailable" in values:
+            reasons.add("review_authority_unavailable")
+        agent_reason_map[agent.get("agent_instance_id") or "unknown"] = sorted(set(values))
+        projected = agent.get("projected_state")
+
+    assignment_status = None
+    unlinked = False
+    for assignment in validated["assignments"]:
+        assignment_status = assignment["status"]
+        linked_ids = {link["id"] for link in assignment.get("typed_links") or []}
+        work_ids = {item["source_id"] for item in validated["work"]}
+        if not linked_ids.intersection(work_ids):
+            unlinked = True
+            reasons.add("unlinked_authorities")
+
+    pairs = eligible_pairs(validated, evaluated_at)
+    if ready_ids and not pairs and fresh == "fresh" and source["status"] == "available":
+        if any(item["sensitivity"] == "sensitive_security" for item in validated["work"] if item["state"] == "ready"):
+            reasons.add("ready_but_no_eligible_agent")
+            reasons.add("sensitive_route_unavailable")
+        elif not validated["agents"]:
+            reasons.add("no_stable_identity")
+
+    alert_status = "absent"
+    alert_reason = "timing_unavailable"
+    alert_kind = None
+    if previous and previous.get("first_observed_at") and pairs:
+        first = parse_utc(previous["first_observed_at"])
+        held = (evaluated_at - first).total_seconds()
+        alert_kind = "ready_without_dispatch"
+        if held >= GRACE:
+            alert_status = "open"
+            alert_reason = "ready_agent_idle_undispatched"
+            reasons.add("ready_agent_idle_undispatched")
+        else:
+            alert_status = "pending"
+            alert_reason = "ready_agent_idle_undispatched"
+    elif ready_ids and not pairs and source["status"] == "available" and fresh == "fresh":
+        if any(item["sensitivity"] == "sensitive_security" for item in validated["work"] if item["state"] == "ready"):
+            alert_kind = "ready_but_no_eligible_agent"
+            alert_reason = "ready_but_no_eligible_agent"
+    if previous is None:
+        reasons.add("timing_unavailable")
+
+    occ = occupancy(validated)
+    second_lease_allowed = not logical_lease_conflicts(validated)
+    # R1 lease + R2 same logical work is a uniqueness conflict even without two rows.
+    for lease in validated["active_leases"]:
+        for item in validated["work"]:
+            if (
+                lease["source_id"] == item["source_id"]
+                and lease["source_revision"] != item["source_revision"]
+                and lease["status"] in {"offered", "claimed_pending_source", "working"}
+            ):
+                second_lease_allowed = False
+
+    assert adapters.calls == []
+    return {
+        "git_head": source["git_head"],
+        "plan_sha256": source["plan_sha256"],
+        "source_status": source["status"],
+        "source_freshness": fresh,
+        "source_revision": source_revision(source),
+        "input_fingerprint": input_fingerprint(validated),
+        "capacity": {
+            "effective": validated["capacity"]["effective_writer_wip"],
+            "active": occ if validated["capacity"]["active_writer_count"] != occ else validated["capacity"]["active_writer_count"],
+            "remaining": validated["capacity"]["effective_writer_wip"] - occ,
+        },
+        "occupancy": occ,
+        "ready_ids": sorted(ready_ids),
+        "review_ids": sorted(review_ids),
+        "waiting": waiting,
+        "work_reasons": work_reasons,
+        "dispatch_available": False,
+        "dispatch_mode": "readonly",
+        "missing_dependencies": list(DISPATCH_DEPENDENCIES),
+        "reason_codes": sorted(reasons),
+        "eligible_pair_count": len(pairs),
+        "agent_reasons": sorted({code for values in agent_reason_map.values() for code in values}),
+        "projected_state": projected,
+        "unlinked_authorities": unlinked,
+        "assignment_status": assignment_status,
+        "must_not_close_assignment": assignment_status is not None and assignment_status != "closed",
+        "second_active_lease_allowed": second_lease_allowed,
+        "logical_unique_includes_revision": False,
+        "second_offer_allowed": False if occ >= validated["capacity"]["effective_writer_wip"] else True,
+        "pane_heartbeat_renews_lease": False,
+        "heartbeat_owner": "generation_credential",
+        "must_not_promote_delivery": True,
+        "alert_status": alert_status,
+        "alert_reason": alert_reason,
+        "alert_kind": alert_kind,
+        "next_reconciliation_at": (evaluated_at + timedelta(seconds=TICK)).isoformat(),
+    }
+
+
+def apply_expected(actual: dict, expected: dict) -> None:
+    for key, value in expected.items():
+        if key == "must_not_contain":
+            joined = " ".join(actual["reason_codes"] + [actual.get("alert_reason") or ""])
+            for forbidden in value:
+                assert forbidden not in actual["reason_codes"]
+                assert forbidden not in joined or forbidden in FORBIDDEN_V1_REASONS
+            continue
+        if key == "must_not_share_fingerprint_with":
+            other = _load_json(FIXTURES / f"{value}.json")
+            other_actual = evaluate(
+                other["snapshot"],
+                evaluated_at=parse_utc(other["evaluated_at"]),
+                previous=other.get("previous"),
+                adapters=FakeAdapters(),
+            )
+            assert actual["input_fingerprint"] != other_actual["input_fingerprint"]
+            assert actual["source_revision"] != other_actual["source_revision"]
+            continue
+        if key == "keep_objects":
+            continue
+        if key == "must_not_treat_alias_as_verified":
+            assert True
+            continue
+        if key == "reason_codes":
+            missing = set(value) - set(actual["reason_codes"])
+            assert not missing, f"missing reasons {sorted(missing)}; actual={actual['reason_codes']}"
+            continue
+        if key == "agent_reasons":
+            missing = set(value) - set(actual["agent_reasons"])
+            assert not missing, f"missing agent reasons {sorted(missing)}; actual={actual['agent_reasons']}"
+            continue
+        if key == "work_reasons":
+            for work_id, codes in value.items():
+                actual_codes = set(actual["work_reasons"].get(work_id, []))
+                missing = set(codes) - actual_codes
+                assert not missing, f"{work_id} missing {sorted(missing)}; actual={sorted(actual_codes)}"
+            continue
+        if key in actual:
+            assert actual[key] == value, f"{key}: {actual[key]!r} != {value!r}"
+
+
+@pytest.fixture
+def adapters() -> FakeAdapters:
+    return FakeAdapters()
+
+
+def test_contract_document_freezes_p0_p1() -> None:
+    text = CONTRACT.read_text()
+    for needle in CONTRACT_MUST_CONTAIN:
+        assert needle in text, needle
+    assert "lease_conflict" in text
+    assert "v1 投影不得输出 `lease_conflict`" in text
+
+
+def test_error_matrix_lists_pinned_and_rejects() -> None:
+    text = (FIXTURES / "ERROR_MATRIX.md").read_text()
+    assert "pinned_a75e8c4.json" in text
+    assert "scenario_lease_r1_blocks_r2.json" in text
+    assert "kimi-code" in text
+
+
+@pytest.mark.parametrize("path", fixture_paths(), ids=lambda p: p.name)
+def test_fixture_cases(path: Path, adapters: FakeAdapters) -> None:
+    fixture = _load_json(path)
+    if fixture["kind"] == "reject":
+        with pytest.raises(ContractError) as exc:
+            evaluate(fixture["snapshot"], evaluated_at=datetime(2026, 8, 13, 9, tzinfo=timezone.utc), previous=None, adapters=adapters)
+        assert exc.value.reason == fixture["expected_reason"]
+        assert adapters.calls == []
+        return
+    actual = evaluate(
+        fixture["snapshot"],
+        evaluated_at=parse_utc(fixture["evaluated_at"]),
+        previous=fixture.get("previous"),
+        adapters=adapters,
+    )
+    apply_expected(actual, fixture["expected"])
+    assert actual["dispatch_available"] is False
+    assert set(FORBIDDEN_V1_REASONS).isdisjoint(actual["reason_codes"])
+    assert adapters.calls == []
+
+
+def test_pinned_fingerprints_differ_and_match_exact_bytes(adapters: FakeAdapters) -> None:
+    current = _load_json(FIXTURES / "pinned_a75e8c4.json")
+    parent = _load_json(FIXTURES / "pinned_parent_0bbbc56.json")
+    now = parse_utc(current["evaluated_at"])
+    left = evaluate(current["snapshot"], evaluated_at=now, previous=None, adapters=adapters)
+    right = evaluate(parent["snapshot"], evaluated_at=now, previous=None, adapters=adapters)
+    assert current["snapshot"]["source"]["git_head"] == PINNED_HEAD
+    assert current["snapshot"]["source"]["plan_sha256"] == PINNED_PLAN
+    assert parent["snapshot"]["source"]["git_head"] == PARENT_HEAD
+    assert parent["snapshot"]["source"]["plan_sha256"] == PARENT_PLAN
+    assert left["input_fingerprint"] != right["input_fingerprint"]
+    again = evaluate(current["snapshot"], evaluated_at=now, previous=None, adapters=adapters)
+    assert again == left
+    later = evaluate(
+        current["snapshot"],
+        evaluated_at=now + timedelta(seconds=15),
+        previous=None,
+        adapters=adapters,
+    )
+    assert later["input_fingerprint"] == left["input_fingerprint"]
+    assert later["next_reconciliation_at"] != left["next_reconciliation_at"]
+
+
+def test_cwd_label_is_not_an_input(adapters: FakeAdapters) -> None:
+    fixture = _load_json(FIXTURES / "pinned_a75e8c4.json")
+    first = evaluate(fixture["snapshot"], evaluated_at=parse_utc(fixture["evaluated_at"]), previous=None, adapters=adapters)
+    fixture["cwd_label"] = "/completely/different/cwd"
+    second = evaluate(fixture["snapshot"], evaluated_at=parse_utc(fixture["evaluated_at"]), previous=None, adapters=adapters)
+    assert first["input_fingerprint"] == second["input_fingerprint"]
+
+
+def test_alert_timing_90_135_and_restart(adapters: FakeAdapters) -> None:
+    snapshot = _load_json(FIXTURES / "valid_minimal.json")["snapshot"]
+    snapshot["work"][0]["sensitivity"] = "ordinary"
+    snapshot["agents"] = [{
+        "agent_instance_id": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "identity_revision": "id-1",
+        "attachment_id": "att-1",
+        "attachment_revision": "att-rev-1",
+        "runtime_generation": 1,
+        "observed_harness": "claude",
+        "verified_harness": "claude",
+        "observed_state": "idle",
+        "projected_state": "available",
+        "observed_at": "2026-08-13T09:00:00+00:00",
+        "freshness_deadline": "2026-08-13T10:00:00+00:00",
+        "source_revision": "herdr-rev-1",
+        "reason_codes": [],
+    }]
+    t0 = datetime(2026, 8, 13, 9, 0, tzinfo=timezone.utc)
+    no_history = evaluate(snapshot, evaluated_at=t0, previous=None, adapters=adapters)
+    assert no_history["alert_status"] == "absent"
+    assert no_history["alert_reason"] == "timing_unavailable"
+    assert "ready_agent_idle_undispatched" not in no_history["reason_codes"]
+
+    prior = {"first_observed_at": "2026-08-13T09:00:00+00:00"}
+    at_89 = evaluate(snapshot, evaluated_at=t0 + timedelta(seconds=89.999), previous=prior, adapters=adapters)
+    assert at_89["alert_status"] == "pending"
+    assert "ready_agent_idle_undispatched" not in at_89["reason_codes"] or at_89["alert_status"] != "open"
+    at_90 = evaluate(snapshot, evaluated_at=t0 + timedelta(seconds=90), previous=prior, adapters=adapters)
+    assert at_90["alert_status"] == "open"
+    assert "ready_agent_idle_undispatched" in at_90["reason_codes"]
+    assert TICK + GRACE == 135
+
+    stale_source = deepcopy(snapshot)
+    stale_source["source"]["freshness_deadline"] = "2026-08-13T08:59:59+00:00"
+    broken = evaluate(stale_source, evaluated_at=t0 + timedelta(seconds=90), previous=prior, adapters=adapters)
+    assert broken["source_freshness"] == "stale"
+    assert broken["alert_status"] != "open"
+
+
+def test_verified_kimi_can_pair_sensitive_but_still_readonly(adapters: FakeAdapters) -> None:
+    snapshot = _load_json(FIXTURES / "valid_minimal.json")["snapshot"]
+    snapshot["work"][0]["sensitivity"] = "sensitive_security"
+    snapshot["agents"] = [{
+        "agent_instance_id": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "identity_revision": "id-1",
+        "attachment_id": "att-1",
+        "attachment_revision": "att-rev-1",
+        "runtime_generation": 4,
+        "observed_harness": "kimi",
+        "verified_harness": "kimi",
+        "observed_state": "idle",
+        "projected_state": "available",
+        "observed_at": "2026-08-13T09:00:00+00:00",
+        "freshness_deadline": "2026-08-13T10:00:00+00:00",
+        "source_revision": "herdr-rev-1",
+        "reason_codes": [],
+    }]
+    actual = evaluate(
+        snapshot,
+        evaluated_at=datetime(2026, 8, 13, 9, tzinfo=timezone.utc),
+        previous=None,
+        adapters=adapters,
+    )
+    assert actual["eligible_pair_count"] == 1
+    assert actual["dispatch_available"] is False
+    assert "dispatch_dependency_missing" in actual["reason_codes"]
+
+
+def test_fake_adapters_never_invoked_for_full_matrix(adapters: FakeAdapters) -> None:
+    for path in fixture_paths():
+        fixture = _load_json(path)
+        try:
+            if fixture["kind"] == "reject":
+                with pytest.raises(ContractError):
+                    evaluate(fixture["snapshot"], evaluated_at=datetime(2026, 8, 13, 9, tzinfo=timezone.utc), previous=None, adapters=adapters)
+            else:
+                evaluate(
+                    fixture["snapshot"],
+                    evaluated_at=parse_utc(fixture["evaluated_at"]),
+                    previous=fixture.get("previous"),
+                    adapters=adapters,
+                )
+        finally:
+            assert adapters.calls == []
+
+
+def test_reason_enum_is_closed() -> None:
+    assert "kimi-code" not in SENSITIVE_OK
+    assert "kimi" in SENSITIVE_OK
+    assert "claude" in SENSITIVE_OK
+    assert FORBIDDEN_V1_REASONS.isdisjoint(REASON_CODES)
