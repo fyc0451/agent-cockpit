@@ -434,19 +434,19 @@
     {
       "id": "SCHED-002-readonly-projection",
       "title": "Implement deterministic read-only scheduler and alert intent projection",
-      "status": "review",
+      "status": "in_progress",
       "depends_on": ["SCHED-001-authority-contract"],
       "scope": ["agent_cockpit/scheduler_projection.py", "tests/test_scheduler_projection.py"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_scheduler_contract.py tests/test_scheduler_projection.py", "passed": true},
-        {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py tests/test_coordination.py tests/test_coordination_assignments.py tests/test_attention.py tests/test_herdr_state.py", "passed": true}
+        {"command": ".venv/bin/python -m pytest -q tests/test_scheduler_contract.py tests/test_scheduler_projection.py", "passed": false},
+        {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py tests/test_coordination.py tests/test_coordination_assignments.py tests/test_attention.py tests/test_herdr_state.py", "passed": false}
       ],
       "rollback": "Revert the standalone pure projection and tests; it has no timer persistence API prompt or dispatch path",
       "production_impact": "none",
-      "owner_instance_id": "i-dovierut5tq55gvxn5mhdgyah4",
-      "reviewer_instance_id": "i-cebqn5p7znunmxwpneduptrtou",
+      "owner_instance_id": "i-cax3gvoakewhwftbbtkuk45mqe",
+      "reviewer_instance_id": null,
       "base_sha": "7ad159283aca54c7d1e9ce3870c513199e618bf9",
-      "fixed_sha": "97c751bd939898e9b3cc8cdbf485779914b2d677",
+      "fixed_sha": null,
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
