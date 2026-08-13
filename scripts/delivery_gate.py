@@ -30,9 +30,12 @@ ROOT_FIELDS = {
     "limits", "cars",
 }
 BASELINE_FIELDS = {"main_sha", "production_version", "production_source_sha"}
-LIMIT_FIELDS = {"writer_wip", "release_minutes", "cross_module_blocks_before_reslice"}
+LIMIT_FIELDS_V1 = {"writer_wip", "release_minutes", "cross_module_blocks_before_reslice"}
+LIMIT_FIELDS_V2 = LIMIT_FIELDS_V1 | {"writer_wip_gates"}
+WRITER_WIP_GATE_FIELDS = {"car_id", "from", "to"}
 ACCEPTANCE_FIELDS = {"command", "passed"}
 INSTANCE_ID_RE = re.compile(r"^i-[a-z2-7]{26}$")
+WRITER_WIP_GATE_ID_RE = re.compile(r"^DELIVERY-[0-9]{3}-wip([0-9]+)-gate$")
 
 
 def unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -108,6 +111,40 @@ def parse_time(value: object) -> dt.datetime | None:
         return None
 
 
+def scope_parts(value: str) -> tuple[str, ...]:
+    return tuple(part for part in Path(value).parts if part not in {"", "."})
+
+
+def scopes_overlap(left: str, right: str) -> bool:
+    left_parts = scope_parts(left)
+    right_parts = scope_parts(right)
+    shared = min(len(left_parts), len(right_parts))
+    return left_parts[:shared] == right_parts[:shared]
+
+
+def effective_writer_wip(plan: dict, by_id: dict[str, dict] | None = None) -> int:
+    limits = plan["limits"]
+    effective = limits["writer_wip"]
+    if plan["schema_version"] != 2:
+        return effective
+    cars = by_id if by_id is not None else {car["id"]: car for car in plan["cars"]}
+    for gate in limits.get("writer_wip_gates", []):
+        if not isinstance(gate, dict) or set(gate) != WRITER_WIP_GATE_FIELDS:
+            break
+        if (
+            not isinstance(gate["car_id"], str)
+            or type(gate["from"]) is not int
+            or type(gate["to"]) is not int
+            or effective != gate["from"]
+        ):
+            break
+        car = cars.get(gate["car_id"])
+        if not car or car["status"] not in SATISFIED:
+            break
+        effective = gate["to"]
+    return effective
+
+
 def load(path: Path) -> tuple[dict | None, list[dict]]:
     try:
         value = json.loads(
@@ -129,7 +166,8 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
     errors: list[dict] = []
     if not exact_fields(plan, ROOT_FIELDS, "invalid_root", errors):
         return errors
-    if type(plan["schema_version"]) is not int or plan["schema_version"] != 1:
+    schema_version = plan["schema_version"]
+    if type(schema_version) is not int or schema_version not in {1, 2}:
         errors.append(issue("unsupported_schema_version"))
     for field in ("goal_id", "user_journey"):
         if not isinstance(plan[field], str) or not plan[field].strip():
@@ -144,7 +182,12 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
     if not isinstance(baseline["production_version"], str) or not baseline["production_version"].strip():
         errors.append(issue("invalid_field", detail="baseline.production_version"))
     limits = plan["limits"]
-    if not exact_fields(limits, LIMIT_FIELDS, "invalid_limits", errors):
+    limit_fields = LIMIT_FIELDS_V2 if schema_version == 2 else LIMIT_FIELDS_V1
+    if not exact_fields(limits, limit_fields, "invalid_limits", errors):
+        if schema_version == 2 and (
+            not isinstance(limits, dict) or "writer_wip_gates" not in limits
+        ):
+            errors.append(issue("writer_wip_gate_required"))
         return errors
     expected = {"writer_wip": 2, "release_minutes": 15, "cross_module_blocks_before_reslice": 2}
     for field, value in expected.items():
@@ -152,6 +195,35 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
             errors.append(issue("invalid_limit", detail=f"{field}={limits[field]!r}"))
     if any(type(limits[field]) is not int or limits[field] != value for field, value in expected.items()):
         return errors
+    writer_wip_gates: list[dict] = []
+    if schema_version == 2:
+        gates = limits["writer_wip_gates"]
+        if not isinstance(gates, list) or not gates:
+            errors.append(issue("writer_wip_gate_required"))
+            return errors
+        expected_from = limits["writer_wip"]
+        seen_gate_ids: set[str] = set()
+        for gate in gates:
+            if not exact_fields(gate, WRITER_WIP_GATE_FIELDS, "invalid_writer_wip_gate", errors):
+                errors.append(issue("writer_wip_gate_required"))
+                continue
+            car_id = gate["car_id"]
+            match = WRITER_WIP_GATE_ID_RE.fullmatch(car_id) if isinstance(car_id, str) else None
+            transition_valid = (
+                type(gate["from"]) is int
+                and type(gate["to"]) is int
+                and gate["from"] == expected_from
+                and gate["to"] == gate["from"] + 1
+                and match is not None
+                and match.group(1) == str(gate["to"])
+                and car_id not in seen_gate_ids
+            )
+            if not transition_valid:
+                errors.append(issue("writer_wip_gate_required"))
+                continue
+            writer_wip_gates.append(gate)
+            seen_gate_ids.add(car_id)
+            expected_from = gate["to"]
     cars = plan["cars"]
     if not isinstance(cars, list) or not cars:
         errors.append(issue("invalid_cars"))
@@ -177,8 +249,20 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
         depends_valid = strings(car["depends_on"], allow_empty=True)
         if not depends_valid:
             errors.append(issue("invalid_depends_on", car_id=car_id))
-        scope_valid = strings(car["scope"]) and not any(
-            Path(p).is_absolute() or ".." in Path(p).parts or not Path(p).parts for p in car["scope"]
+        scope_valid = (
+            strings(car["scope"])
+            and not any(
+                Path(p).is_absolute()
+                or ".." in Path(p).parts
+                or not scope_parts(p)
+                for p in car["scope"]
+            )
+            and len({scope_parts(p) for p in car["scope"]}) == len(car["scope"])
+            and not any(
+                scopes_overlap(left, right)
+                for index, left in enumerate(car["scope"])
+                for right in car["scope"][index + 1:]
+            )
         )
         if not scope_valid:
             errors.append(issue("invalid_scope", car_id=car_id))
@@ -214,6 +298,12 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
             valid_cars.append(car)
 
     by_id = {car["id"]: car for car in valid_cars if isinstance(car["id"], str)}
+    for index, gate in enumerate(writer_wip_gates):
+        car = by_id.get(gate["car_id"])
+        if car is None:
+            errors.append(issue("writer_wip_gate_required", detail=gate["car_id"]))
+        elif index and writer_wip_gates[index - 1]["car_id"] not in car["depends_on"]:
+            errors.append(issue("writer_wip_gate_required", car_id=gate["car_id"], detail="gate_chain"))
     for car in valid_cars:
         car_id, status = car["id"], car["status"]
         unknown = sorted(set(car["depends_on"]) - by_id.keys())
@@ -234,7 +324,8 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
                     errors.append(issue("diff_unavailable", car_id=car_id))
                 else:
                     outside = sorted(p for p in changed.stdout.splitlines() if not any(
-                        p == scope.rstrip("/") or p.startswith(scope.rstrip("/") + "/") for scope in car["scope"]
+                        scopes_overlap(p, scope) and len(scope_parts(scope)) <= len(scope_parts(p))
+                        for scope in car["scope"]
                     ))
                     if outside:
                         errors.append(issue("scope_violation", car_id=car_id, detail=",".join(outside)))
@@ -268,16 +359,45 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
                 indegree[car_id] += 1
                 followers[dependency].append(car_id)
     pending = [car_id for car_id, count in indegree.items() if count == 0]
+    order: list[str] = []
     visited = 0
     while pending:
+        current = pending.pop()
+        order.append(current)
         visited += 1
-        for follower in followers[pending.pop()]:
+        for follower in followers[current]:
             indegree[follower] -= 1
             if indegree[follower] == 0:
                 pending.append(follower)
     if visited != len(by_id):
         errors.append(issue("dependency_cycle"))
-    if sum(car["status"] in ACTIVE for car in valid_cars) > limits["writer_wip"]:
+    else:
+        positions = {car_id: index for index, car_id in enumerate(order)}
+        ancestors = {car_id: 0 for car_id in by_id}
+        for car_id in order:
+            for dependency in by_id[car_id]["depends_on"]:
+                if dependency in by_id:
+                    ancestors[car_id] |= ancestors[dependency] | (1 << positions[dependency])
+        candidates = sorted(valid_cars, key=lambda car: car["id"])
+        for index, left in enumerate(candidates):
+            for right in candidates[index + 1:]:
+                both_active = left["status"] in ACTIVE and right["status"] in ACTIVE
+                both_runnable = left["status"] in ACTIVE | {"planned"} and right["status"] in ACTIVE | {"planned"}
+                ordered = (
+                    bool(ancestors[left["id"]] & (1 << positions[right["id"]]))
+                    or bool(ancestors[right["id"]] & (1 << positions[left["id"]]))
+                )
+                if not both_active and (not both_runnable or ordered):
+                    continue
+                for left_scope in sorted(set(left["scope"])):
+                    for right_scope in sorted(set(right["scope"])):
+                        if scopes_overlap(left_scope, right_scope):
+                            errors.append(issue(
+                                "scope_ownership_overlap",
+                                car_id=left["id"],
+                                detail=f"{right['id']}:{left_scope}:{right_scope}",
+                            ))
+    if sum(car["status"] in ACTIVE for car in valid_cars) > effective_writer_wip(plan, by_id):
         errors.append(issue("writer_wip_exceeded"))
     return errors
 
@@ -286,11 +406,12 @@ def readiness(plan: dict) -> tuple[list[dict], list[dict]]:
     by_id = {car["id"]: car for car in plan["cars"]}
     ready, waiting = [], []
     active = sum(car["status"] in ACTIVE for car in plan["cars"])
+    writer_wip = effective_writer_wip(plan, by_id)
     for car in plan["cars"]:
         if car["status"] != "planned":
             continue
         blockers = [dep for dep in car["depends_on"] if by_id[dep]["status"] not in SATISFIED]
-        if active >= plan["limits"]["writer_wip"]:
+        if active >= writer_wip:
             blockers.append("writer_wip")
         item = {"id": car["id"], "waiting_on": blockers}
         (ready if not blockers else waiting).append(item)

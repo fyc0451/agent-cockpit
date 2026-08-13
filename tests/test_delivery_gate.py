@@ -38,6 +38,44 @@ def plan() -> dict:
     }
 
 
+def gated_plan(*, gate_status: str = "review", extra_gates: int = 0) -> dict:
+    value = plan()
+    value["schema_version"] = 2
+    value["limits"]["writer_wip_gates"] = [
+        {"car_id": "DELIVERY-002-wip3-gate", "from": 2, "to": 3},
+    ]
+    head = value["baseline"]["main_sha"]
+    gate = dict(
+        value["cars"][0],
+        id="DELIVERY-002-wip3-gate",
+        status=gate_status,
+        scope=["scripts/delivery_gate.py"],
+        owner_instance_id="i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        reviewer_instance_id="i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
+        base_sha=head,
+        fixed_sha=head,
+        acceptance=[{"command": "true", "passed": gate_status == "accepted"}],
+    )
+    value["cars"] = [gate]
+    if extra_gates:
+        value["limits"]["writer_wip_gates"].append(
+            {"car_id": "DELIVERY-003-wip4-gate", "from": 3, "to": 4},
+        )
+        value["cars"].append(dict(
+            gate,
+            id="DELIVERY-003-wip4-gate",
+            status="planned",
+            depends_on=["DELIVERY-002-wip3-gate"],
+            scope=["docs/provider-ownership.md"],
+            owner_instance_id=None,
+            reviewer_instance_id=None,
+            base_sha=None,
+            fixed_sha=None,
+            acceptance=[{"command": "true", "passed": False}],
+        ))
+    return value
+
+
 def codes(value: dict, *, now=None) -> set[str]:
     return {item["code"] for item in module().validate(value, ROOT, now=now)}
 
@@ -53,6 +91,29 @@ def test_valid_plan_and_ready_output(tmp_path: Path) -> None:
     assert json.loads(result.stdout) == {
         "errors": [], "ok": True, "ready": [{"id": "N0", "waiting_on": []}], "waiting": [],
     }
+
+    gated = subprocess.run(
+        [sys.executable, str(SCRIPT), "check", str(ROOT / "tests/fixtures/delivery_gate/valid_wip3_gated.json"), "--json"],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    assert gated.returncode == 0
+    assert json.loads(gated.stdout) == {"errors": [], "ok": True}
+
+
+def test_new_negative_fixtures_have_stable_codes() -> None:
+    cases = {
+        "invalid_21_overlapping_scope_ownership.json": "scope_ownership_overlap",
+        "invalid_22_ungated_wip3.json": "writer_wip_gate_required",
+    }
+    fixture_root = ROOT / "tests/fixtures/delivery_gate"
+    for name, code in cases.items():
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "check", str(fixture_root / name), "--json"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        assert result.returncode == 1
+        assert code in {item["code"] for item in json.loads(result.stdout)["errors"]}
+        assert result.stderr == ""
 
 
 def test_release_check_json_is_stable(tmp_path: Path) -> None:
@@ -112,6 +173,11 @@ def test_missing_delivery_controls_are_rejected() -> None:
     value = plan()
     value["cars"][0].update(scope=[], acceptance=[], rollback="", production_impact="maybe")
     assert {"invalid_scope", "missing_acceptance", "missing_rollback", "invalid_production_impact"} <= codes(value)
+
+    for scope in (["."], ["docs", "docs/"], ["docs", "docs"]):
+        value = plan()
+        value["cars"][0]["scope"] = scope
+        assert "invalid_scope" in codes(value)
 
 
 def test_malformed_nested_types_return_codes_instead_of_crashing(tmp_path: Path) -> None:
@@ -191,6 +257,167 @@ def test_active_owner_reviewer_sha_and_wip_gates() -> None:
     value["cars"] = [dict(car, id=f"C{i}") for i in range(3)]
     found = codes(value)
     assert {"independent_reviewer_required", "exact_sha_required", "writer_wip_exceeded"} <= found
+
+
+def test_wip_capacity_is_gated_and_extensible() -> None:
+    value = gated_plan()
+    assert module().effective_writer_wip(value) == 2
+
+    gate = value["cars"][0]
+    template = dict(
+        gate,
+        status="in_progress",
+        reviewer_instance_id=None,
+        base_sha=None,
+        fixed_sha=None,
+        acceptance=[{"command": "true", "passed": False}],
+    )
+    value["cars"].extend([
+        dict(template, id=f"writer-{name}", depends_on=[gate["id"]], scope=[f"agent_cockpit/{name}.py"])
+        for name in ("a", "b", "c")
+    ])
+    assert "writer_wip_exceeded" in codes(value)
+
+    gate["status"] = "accepted"
+    gate["acceptance"][0]["passed"] = True
+    assert module().effective_writer_wip(value) == 3
+    assert "writer_wip_exceeded" not in codes(value)
+    ready, waiting = module().readiness(value)
+    assert ready == waiting == []
+
+    value = gated_plan(gate_status="accepted", extra_gates=1)
+    assert module().effective_writer_wip(value) == 3
+    second = value["cars"][1]
+    second.update(
+        status="accepted",
+        owner_instance_id="i-cccccccccccccccccccccccccc",
+        reviewer_instance_id="i-dddddddddddddddddddddddddd",
+        base_sha=value["baseline"]["main_sha"],
+        fixed_sha=value["baseline"]["main_sha"],
+        acceptance=[{"command": "true", "passed": True}],
+    )
+    assert module().effective_writer_wip(value) == 4
+
+
+def test_readiness_uses_effective_capacity_before_and_after_acceptance() -> None:
+    value = gated_plan()
+    gate = value["cars"][0]
+    active = dict(
+        gate,
+        id="active",
+        status="in_progress",
+        depends_on=[],
+        scope=["agent_cockpit/active.py"],
+        owner_instance_id="i-cccccccccccccccccccccccccc",
+        reviewer_instance_id=None,
+        base_sha=None,
+        fixed_sha=None,
+        acceptance=[{"command": "true", "passed": False}],
+    )
+    planned = dict(
+        active,
+        id="planned",
+        status="planned",
+        depends_on=[],
+        scope=["agent_cockpit/planned.py"],
+        owner_instance_id=None,
+    )
+    value["cars"].extend([active, planned])
+    _, waiting = module().readiness(value)
+    assert waiting == [{"id": "planned", "waiting_on": ["writer_wip"]}]
+
+    gate["status"] = "accepted"
+    gate["acceptance"][0]["passed"] = True
+    ready, waiting = module().readiness(value)
+    assert ready == [{"id": "planned", "waiting_on": []}]
+    assert waiting == []
+
+
+def test_ungated_or_malformed_capacity_is_rejected() -> None:
+    value = gated_plan()
+    value["limits"].pop("writer_wip_gates")
+    assert "writer_wip_gate_required" in codes(value)
+
+    for bad in (
+        [],
+        [{"car_id": "DELIVERY-002-wip3-gate", "from": 2, "to": 4}],
+        [{"car_id": "OTHER", "from": 2, "to": 3}],
+        [{"car_id": "DELIVERY-002-wip3-gate", "from": True, "to": 3}],
+        [{"car_id": "DELIVERY-002-wip3-gate", "from": 2, "to": 3, "extra": 4}],
+    ):
+        value = gated_plan()
+        value["limits"]["writer_wip_gates"] = bad
+        assert "writer_wip_gate_required" in codes(value)
+
+
+def test_oversized_gate_id_fails_closed_for_every_cli_command(tmp_path: Path) -> None:
+    value = gated_plan()
+    value["limits"]["writer_wip_gates"][0]["car_id"] = (
+        "DELIVERY-002-wip" + "9" * 5000 + "-gate"
+    )
+    path = tmp_path / "oversized-gate.json"
+    path.write_text(json.dumps(value))
+    for command in ("check", "ready"):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), command, str(path), "--json"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        assert result.returncode == 1
+        assert result.stderr == ""
+        assert "writer_wip_gate_required" in {
+            item["code"] for item in json.loads(result.stdout)["errors"]
+        }
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "release-check", str(path), "missing", "--json"],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert "writer_wip_gate_required" in {
+        item["code"] for item in json.loads(result.stdout)["errors"]
+    }
+
+
+def test_scope_ownership_rejects_parallel_prefix_overlap() -> None:
+    value = plan()
+    template = value["cars"][0]
+    value["cars"] = [
+        dict(template, id="discovery", scope=["agent_cockpit/project"]),
+        dict(template, id="legacy", scope=["agent_cockpit/project/import.py"]),
+    ]
+    errors = module().validate(value, ROOT)
+    assert {
+        (item.get("car_id"), item.get("detail"))
+        for item in errors if item["code"] == "scope_ownership_overlap"
+    } == {("discovery", "legacy:agent_cockpit/project:agent_cockpit/project/import.py")}
+
+
+def test_scope_ownership_allows_serial_reuse_but_not_two_active_writers() -> None:
+    value = plan()
+    template = value["cars"][0]
+    value["cars"] = [
+        dict(template, id="first", scope=["docs/contracts"]),
+        dict(template, id="second", depends_on=["first"], scope=["docs/contracts/file.md"]),
+    ]
+    assert "scope_ownership_overlap" not in codes(value)
+
+    for car, owner in zip(value["cars"], ("i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "i-bbbbbbbbbbbbbbbbbbbbbbbbbb")):
+        car.update(status="in_progress", owner_instance_id=owner)
+    assert "scope_ownership_overlap" in codes(value)
+
+
+def test_scope_comparison_uses_path_parts_not_string_prefixes() -> None:
+    value = plan()
+    template = value["cars"][0]
+    value["cars"] = [
+        dict(template, id="api", scope=["agent_cockpit/project_registry_api.py"]),
+        dict(template, id="store", scope=["agent_cockpit/project_registry_store.py"]),
+    ]
+    assert "scope_ownership_overlap" not in codes(value)
+
+    value["cars"][1]["scope"] = ["agent_cockpit/project_registry_api.py/generated"]
+    assert "scope_ownership_overlap" in codes(value)
 
 
 def test_dependency_acceptance_reslice_and_user_gates() -> None:

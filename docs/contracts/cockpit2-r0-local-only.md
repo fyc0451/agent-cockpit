@@ -132,9 +132,11 @@ lock and trust-boundary work must not hide or defer this prerequisite.
 
 ## Writer concurrency
 
-W1 retains the machine-enforced limit of two writers: one bounded backend car
-and `WEB-001`. Reviewer and analyst work is read-only. The current plan remains
-at exactly two writers; the limit must never be raised by editing it manually.
+W1 starts from a machine-enforced capacity of two active writer cars: one
+bounded backend car and `WEB-001`. Reviewer, analyst, and test-only work does
+not consume writer capacity. Two is the fail-closed baseline, not a permanent
+limit; capacity changes only through accepted Delivery gates and must never be
+raised by editing a number manually.
 
 `DELIVERY-002-wip3-gate` is the only path from two to three writers. It first
 proves Project Store, migration, API, and module ownership with non-overlapping
@@ -142,8 +144,10 @@ car scopes and negative delivery fixtures. `DELIVERY-003-wip4-gate` is a
 separate path from three to four writers after the Local slice; it first proves
 that Operation, Runtime Provider, Event, and Memory ownership no longer shares
 Store migrations or entrypoint hotspots. Each gate changes the validator and
-plan schema only in its own accepted commit. A rejected or reverted gate leaves
-the previous writer limit in force.
+plan schema only for the initial schema-v2 transition; later gates extend the
+validated capacity chain without rewriting the validator. A rejected or
+reverted gate leaves the previous accepted capacity in force. All potentially
+parallel cars remain subject to machine-checked non-overlapping scope ownership.
 
 ## R0 acceptance
 

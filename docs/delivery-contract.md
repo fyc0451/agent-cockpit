@@ -1,6 +1,6 @@
 # Agent Cockpit 交付框架合同 (Delivery Contract)
 
-> **版本**: 1
+> **版本**: 2（兼容 schema v1）
 > **项目**: agent-cockpit
 > **生效日期**: 2026-08-12
 > **Foundation SHA**: 待定 (F3 完成后记录)
@@ -13,7 +13,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `schema_version` | integer | ✅ | 固定值 `1` |
+| `schema_version` | integer | ✅ | `1` 或 `2`；v1 保持原行为，v2 启用门控扩容 |
 | `goal_id` | string | ✅ | 稳定机器 ID（如 `foundation-f0`） |
 | `user_journey` | string | ✅ | 一句话用户旅程 |
 | `non_goals` | string[] | ✅ | 明确不做项 |
@@ -34,8 +34,26 @@
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `writer_wip` | integer | ✅ | 2 | 同时处于 in_progress/review 的 writer 最大数 |
+| `writer_wip_gates` | object[] | v2 必填 | - | 依次声明已规划的 `n -> n+1` writer 容量 gate |
 | `release_minutes` | integer | ✅ | 15 | 单车发布时间上限（分钟） |
 | `cross_module_blocks_before_reslice` | integer | ✅ | 2 | 跨模块 BLOCK 后必须停止的阈值 |
+
+`writer_wip=2` 是无扩容证据时的 fail-closed 基线，不是永久人数上限。schema v2
+通过 `writer_wip_gates` 形成连续容量链：
+
+```json
+{
+  "writer_wip": 2,
+  "writer_wip_gates": [
+    {"car_id": "DELIVERY-002-wip3-gate", "from": 2, "to": 3},
+    {"car_id": "DELIVERY-003-wip4-gate", "from": 3, "to": 4}
+  ]
+}
+```
+
+每个 gate 必须引用同名 `DELIVERY-NNN-wipM-gate` car，且只允许连续增加 1；后续 gate car
+必须依赖前一个 gate car。只有该 car 进入 `accepted` 或 `user_accepted` 后，对应容量才生效。
+`planned`、`in_progress`、`review`、`blocked`、`cancelled` 均保留上一个已验收容量。
 
 ## 二、Release Car 必填字段
 
@@ -144,12 +162,22 @@ planned -> in_progress -> review -> accepted -> releasing -> canary -> user_acce
 
 ### 4.5 Scope 校验
 - ❌ **scope_violation**: 候选 diff（base_sha 到 fixed_sha）越出声明的 `scope`
+- ❌ **scope_ownership_overlap**: 可能并行或同时 active 的 car 声明了相交的路径 ownership
+
+scope 是 repo-relative 精确文件或目录前缀，不是 glob。两个 scope 的路径组件完全相同，或其中
+一个是另一个的祖先目录，即视为相交。同一 car 内重复、等价或祖先/后代 scope 也属于
+`invalid_scope`。有 DAG 先后关系且未同时 active 的 car 可以串行复用同一 scope；两个同时
+active 的 car 即使声明了依赖也不得重叠。
 
 ### 4.6 依赖校验
 - ❌ **dependency_not_satisfied**: 依赖车未完成（非 `accepted`/`user_accepted`）却标记当前车为 `accepted`/`releasing`
 
 ### 4.7 WIP 校验
 - ❌ **writer_wip_exceeded**: 同时处于 `in_progress` 或 `review` 状态的 writer 超过 `writer_wip` 限制
+- ❌ **writer_wip_gate_required**: schema v2 的 gate 缺失、跳级、命名不匹配、重复或未形成依赖链
+
+`check` 和 `ready` 必须共享同一个有效容量计算。评审、分析、测试以及其他不拥有写入 car 的
+工作不计入 writer WIP；限制对象是 active writer car，不是已启动的 agent 数量。
 
 ### 4.8 发布时长校验
 - ❌ **release_timeout**: `releasing` 状态超过 `release_minutes` 上限（硬错）

@@ -6,7 +6,8 @@
 
 | 文件 | 说明 |
 |------|------|
-| `valid_minimal.json` | 最小有效交付单，符合所有校验规则 |
+| `valid_minimal.json` | 最小有效 schema v1 交付单，符合所有校验规则 |
+| `valid_wip3_gated.json` | 最小有效 schema v2 容量 gate 交付单 |
 
 ## 无效 Fixture 错误矩阵
 
@@ -20,6 +21,7 @@
 | `invalid_04_dag_cycle.json` | DAG 成环 | `dependency_cycle` |
 | `invalid_18_duplicate_json_key.json` | JSON 重复 key | `duplicate_json_key` |
 | `invalid_19_wrong_types.json` | 类型错误（布尔冒充整数） | `invalid_block_count` |
+| `invalid_22_ungated_wip3.json` | schema v2 缺少连续容量 gate | `writer_wip_gate_required` |
 
 ### 4.2 必填字段校验
 
@@ -50,9 +52,8 @@
 
 ### 4.5 Scope 校验
 
-> 注意：此类别需要实际 git diff，fixture 仅作结构示例，实际校验在 F1 实现时完成
->
-> 稳定错误 code: `invalid_scope` (scope 不是有效的路径前缀) / `scope_violation` (diff 越出声明的 scope)
+稳定错误 code: `invalid_scope`（scope 不是有效路径前缀或单车内重复/包含）、
+`scope_violation`（diff 越出声明 scope）、`scope_ownership_overlap`（可并行 car 的 scope 相交）。
 
 ### 4.6 依赖校验
 
@@ -65,6 +66,7 @@
 | 文件 | 错误类型 | 稳定错误 code |
 |------|----------|----------------|
 | `invalid_14_exceed_wip_limit.json` | WIP 超过限制 | `writer_wip_exceeded` |
+| `invalid_21_overlapping_scope_ownership.json` | 可并行 car 的路径 ownership 相交 | `scope_ownership_overlap` |
 
 ### 4.8 发布时长校验
 
@@ -89,9 +91,9 @@
 
 ## 覆盖统计
 
-- **有效 fixtures**: 1
-- **无效 fixtures**: 20
-- **覆盖反例类别**: 13/13 ✅
+- **有效 fixtures**: 2
+- **无效 fixtures**: 22
+- **覆盖反例类别**: 15/15
 
 ## 稳定错误 code 列表
 
@@ -110,8 +112,10 @@
 | `exact_sha_required` | review/accepted 缺少 exact SHA |
 | `fixed_sha_not_found` | fixed_sha 不存在于仓库 |
 | `scope_violation` | diff 越出声明的 scope |
+| `scope_ownership_overlap` | 可并行或同时 active car 的 scope ownership 相交 |
 | `dependency_not_satisfied` | 依赖未完成 |
 | `writer_wip_exceeded` | WIP 超过限制 |
+| `writer_wip_gate_required` | schema v2 缺少合法连续的容量 gate |
 | `release_timeout` | 发布超时 |
 | `release_start_in_future` | 发布开始时间晚于当前 UTC 时间 |
 | `reslice_required` | 第二次跨模块 BLOCK 后仍继续 |
@@ -128,4 +132,5 @@ for f in tests/fixtures/delivery_gate/invalid_*.json; do
 done
 
 python3 scripts/delivery_gate.py check tests/fixtures/delivery_gate/valid_minimal.json || echo "❌ 有效单被拒绝"
+python3 scripts/delivery_gate.py check tests/fixtures/delivery_gate/valid_wip3_gated.json || echo "❌ 有效单被拒绝"
 ```

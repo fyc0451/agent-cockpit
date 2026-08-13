@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "goal_id": "agent-cockpit-product-v3",
   "user_journey": "doctor -> project -> workbench -> local workspace -> files or terminal -> assignment or inbox -> review or operation",
   "non_goals": [
@@ -15,6 +15,10 @@
   },
   "limits": {
     "writer_wip": 2,
+    "writer_wip_gates": [
+      {"car_id": "DELIVERY-002-wip3-gate", "from": 2, "to": 3},
+      {"car_id": "DELIVERY-003-wip4-gate", "from": 3, "to": 4}
+    ],
     "release_minutes": 15,
     "cross_module_blocks_before_reslice": 2
   },
@@ -309,12 +313,12 @@
       "title": "Permit three writers only after Project ownership gates pass",
       "status": "planned",
       "depends_on": ["RUNTIME-001-profile-lock", "WEB-001-app-shell", "PROJ-001-registry-store"],
-      "scope": [".delivery/cockpit-product-v3.json", "docs/delivery-contract.md", "scripts/delivery_gate.py", "tests/test_delivery_gate.py", "tests/fixtures/delivery_gate"],
+      "scope": [".delivery/cockpit-product-v3.json", "docs/delivery-contract.md", "docs/contracts/cockpit2-r0-local-only.md", "scripts/delivery_gate.py", "tests/test_delivery_gate.py", "tests/fixtures/delivery_gate/valid_wip3_gated.json", "tests/fixtures/delivery_gate/invalid_21_overlapping_scope_ownership.json", "tests/fixtures/delivery_gate/invalid_22_ungated_wip3.json", "tests/fixtures/delivery_gate/ERROR_MATRIX.md"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py", "passed": false},
         {"command": ".venv/bin/python scripts/delivery_gate.py check .delivery/cockpit-product-v3.json", "passed": false}
       ],
-      "rollback": "Revert the WIP3 gate and keep the machine-enforced writer limit at two",
+      "rollback": "Revert the schema-v2 capacity gate and keep the last accepted machine-enforced writer capacity",
       "production_impact": "none",
       "owner_instance_id": null,
       "reviewer_instance_id": null,

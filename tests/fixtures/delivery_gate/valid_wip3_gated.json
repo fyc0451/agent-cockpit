@@ -1,0 +1,75 @@
+{
+  "schema_version": 2,
+  "goal_id": "delivery-wip3",
+  "user_journey": "通过已验收 gate 将 active writer car 容量从 2 提升到 3",
+  "non_goals": ["production deployment"],
+  "baseline": {
+    "main_sha": "3d97740d1c6c86e0a26bb7a8037da19cbf415be6",
+    "production_version": "0.3.3",
+    "production_source_sha": "1e1e6839147b1dbadbc272435a4d1043d1ba3286"
+  },
+  "limits": {
+    "writer_wip": 2,
+    "writer_wip_gates": [
+      {"car_id": "DELIVERY-002-wip3-gate", "from": 2, "to": 3}
+    ],
+    "release_minutes": 15,
+    "cross_module_blocks_before_reslice": 2
+  },
+  "cars": [
+    {
+      "id": "DELIVERY-002-wip3-gate",
+      "title": "Enable three non-overlapping writer cars",
+      "status": "planned",
+      "depends_on": [],
+      "scope": ["scripts/delivery_gate.py"],
+      "acceptance": [{"command": "python3 -m pytest -q tests/test_delivery_gate.py", "passed": false}],
+      "rollback": "Revert the schema-v2 gate and retain the last accepted writer capacity",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "writer-a",
+      "title": "Writer A",
+      "status": "planned",
+      "depends_on": ["DELIVERY-002-wip3-gate"],
+      "scope": ["agent_cockpit/a.py"],
+      "acceptance": [{"command": "true", "passed": false}],
+      "rollback": "Revert writer A",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "writer-b",
+      "title": "Writer B",
+      "status": "planned",
+      "depends_on": ["DELIVERY-002-wip3-gate"],
+      "scope": ["agent_cockpit/b.py"],
+      "acceptance": [{"command": "true", "passed": false}],
+      "rollback": "Revert writer B",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    }
+  ]
+}
