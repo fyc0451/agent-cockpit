@@ -656,19 +656,19 @@
     {
       "id": "P0-WORKSPACE-001-F",
       "title": "Create a shared Workspace from the Project workbench and open its Files path",
-      "status": "in_progress",
+      "status": "review",
       "depends_on": ["DELIVERY-003-wip4-gate", "P0-WORKSPACE-001-B"],
       "scope": ["web/api/workspaceCreate.ts", "web/e2e/workspace-create.spec.ts", "web/features/workspace-wizard/WorkspaceWizard.tsx", "web/pages/ProjectWorkbenchPage.tsx", "web/test/workspace-create.test.tsx"],
       "acceptance": [
-        {"command": "npm --prefix web test -- --run workspace-create.test.tsx", "passed": false},
-        {"command": "npm --prefix web run build", "passed": false}
+        {"command": "npm --prefix web test -- --run workspace-create.test.tsx", "passed": true},
+        {"command": "npm --prefix web run build", "passed": true}
       ],
       "rollback": "Revert the Workspace creation UI and leave the persisted read-only Workspace surfaces available",
       "production_impact": "none",
       "owner_instance_id": "i-lmzsi3liwhtbxsswx4pxjt5gve",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
       "base_sha": "13929110bdf5e9161ac6dc1e632ff943b9661d77",
-      "fixed_sha": null,
+      "fixed_sha": "c894fee74f606d2f32185d0bee8d54ee4e9bf4f6",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
