@@ -548,3 +548,15 @@ def test_c9_non_available_source_is_unknown_even_when_dirty():
         assert result.source.freshness == "unknown"
         assert reason in result.reason_codes
         assert result.source.freshness != "dirty"
+
+
+def test_c10_unclassified_empty_previous_emits_timing_unavailable_alert():
+    snapshot = stamp_revisions(_snap("valid_minimal.json"))
+    assert eligible_pairs(snapshot, T0) == ()
+    result = project_scheduler_projection(snapshot, evaluated_at=T0, previous={})
+    assert "ready_but_no_eligible_agent" in result.reason_codes
+    assert any(
+        alert.status == "absent" and alert.reason_code == "timing_unavailable"
+        for alert in result.alerts
+    )
+    assert any(alert.reason_code == "ready_but_no_eligible_agent" for alert in result.alerts)

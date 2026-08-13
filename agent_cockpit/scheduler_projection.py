@@ -770,7 +770,10 @@ def project_scheduler_projection(
         )]
     if first_observed is None:
         reasons.add("timing_unavailable")
-        if not alerts:
+        if not any(
+            alert.status == "absent" and alert.reason_code == "timing_unavailable"
+            for alert in alerts
+        ):
             alerts.append(SchedulerAlertIntent(
                 kind="ready_without_dispatch", severity="info",
                 dedupe_key="timing_unavailable", status="absent",
