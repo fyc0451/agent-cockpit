@@ -494,6 +494,153 @@ def test_legacy_provenance_is_authority_scoped_and_idempotent(registry):
     assert _code(conflict) == "legacy_binding_conflict"
 
 
+def test_list_legacy_bindings_returns_none_empty_and_all_kinds_in_stable_order(registry):
+    assert registry.list_legacy_bindings("prj_" + "0" * 32) is None
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    assert registry.list_legacy_bindings(project.project_id) == ()
+
+    inserted = (
+        registry.bind_legacy_source(
+            project_id=project.project_id, source_kind="herdr_session",
+            source_key="session-z", source_digest="sha256:z",
+        ),
+        registry.bind_legacy_source(
+            project_id=project.project_id, source_kind="agent_mail_project",
+            source_key="project-z", source_digest="sha256:a",
+        ),
+        registry.bind_legacy_source(
+            project_id=project.project_id, source_kind="coordination_run",
+            source_key="run-a", source_digest="sha256:c",
+        ),
+        registry.bind_legacy_source(
+            project_id=project.project_id, source_kind="mail_projects_session",
+            source_key="session-a", source_digest="sha256:m",
+        ),
+    )
+
+    assert registry.list_legacy_bindings(project.project_id) == tuple(sorted(
+        inserted, key=lambda binding: (binding.source_kind, binding.source_key),
+    ))
+
+
+def test_list_legacy_bindings_reads_live_commits_not_uncommitted_writes(
+    registry, db_path: Path,
+):
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    writer = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "INSERT INTO legacy_project_bindings VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "bnd_" + "a" * 32, project.project_id, "herdr_session",
+                "session-alpha", "sha256:live", "2026-08-13T00:00:00Z",
+            ),
+        )
+        assert registry.list_legacy_bindings(project.project_id) == ()
+        writer.execute("COMMIT")
+    finally:
+        if writer.in_transaction:
+            writer.execute("ROLLBACK")
+        writer.close()
+
+    visible = registry.list_legacy_bindings(project.project_id)
+    assert visible is not None
+    assert [(binding.source_kind, binding.source_key) for binding in visible] == [
+        ("herdr_session", "session-alpha"),
+    ]
+
+
+def test_list_legacy_bindings_is_query_only_read_snapshot_and_closes_connection(
+    registry, db_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    registry.bind_legacy_source(
+        project_id=project.project_id, source_kind="herdr_session",
+        source_key="session-alpha", source_digest="sha256:read",
+    )
+    real_connect = registry_store.sqlite3.connect
+    captured = []
+    opened = []
+
+    class CapturedConnection:
+        def __init__(self, connection):
+            object.__setattr__(self, "connection", connection)
+            object.__setattr__(self, "statements", [])
+            object.__setattr__(self, "closed", False)
+
+        def __setattr__(self, name, value):
+            if name in {"connection", "statements", "closed"}:
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self.connection, name, value)
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, sql, parameters=()):
+            self.statements.append(sql)
+            return self.connection.execute(sql, parameters)
+
+        def close(self):
+            self.connection.close()
+            self.closed = True
+
+    def capture(*args, **kwargs):
+        opened.append((args, kwargs))
+        wrapper = CapturedConnection(real_connect(*args, **kwargs))
+        captured.append(wrapper)
+        return wrapper
+
+    before = db_path.read_bytes()
+    monkeypatch.setattr(registry_store.sqlite3, "connect", capture)
+    assert registry.list_legacy_bindings(project.project_id)
+    assert len(captured) == 1
+    assert "?mode=ro" in opened[0][0][0]
+    assert opened[0][1]["uri"] is True
+    assert "PRAGMA query_only=ON" in captured[0].statements
+    assert "BEGIN" in captured[0].statements
+    assert captured[0].closed is True
+    assert db_path.read_bytes() == before
+    assert not Path(f"{db_path}-wal").exists()
+    assert not Path(f"{db_path}-shm").exists()
+
+
+@pytest.mark.parametrize("project_id", [None, "", "project with spaces", "prj_" + "x" * 65])
+def test_list_legacy_bindings_rejects_non_opaque_project_id(registry, project_id):
+    with pytest.raises(registry_store.ProjectRegistryError) as invalid:
+        registry.list_legacy_bindings(project_id)
+    assert _code(invalid) == "invalid_argument"
+
+
+def test_list_legacy_bindings_sanitizes_corrupt_row_and_sqlite_failure(
+    registry, monkeypatch: pytest.MonkeyPatch,
+):
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    registry.bind_legacy_source(
+        project_id=project.project_id, source_kind="herdr_session",
+        source_key="session-alpha", source_digest="sha256:read",
+    )
+    monkeypatch.setattr(
+        registry_store, "_binding_record", lambda _row: (_ for _ in ()).throw(KeyError("corrupt row")),
+    )
+    with pytest.raises(registry_store.ProjectRegistryError) as corrupt:
+        registry.list_legacy_bindings(project.project_id)
+    _assert_sanitized_error(corrupt, "store_read_failed", "corrupt row")
+
+    class FailingReadConnection:
+        def execute(self, _sql, _parameters=()):
+            raise sqlite3.OperationalError("sqlite read failure")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(registry_store, "_connect_live_read", lambda _path: FailingReadConnection())
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry.list_legacy_bindings(project.project_id)
+    _assert_sanitized_error(failure, "store_read_failed", "sqlite read failure")
+
+
 def _legacy_sources(*values: tuple[str, str, str]):
     return tuple(
         registry_domain.LegacySourceInput(

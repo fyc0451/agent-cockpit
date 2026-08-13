@@ -88,6 +88,20 @@ Workspace 禁止物理 `DELETE`；同 Project active Workspace name 使用 parti
 `legacy_binding_conflict`。写 provenance 不修改任何 legacy source。
 Ledger row 只允许首次插入，不允许改写或删除。
 
+### Store-owned legacy binding read
+
+`list_legacy_bindings(project_id)` 只接受 Registry 的 opaque `project_id`，使用单个
+`mode=ro`、`query_only` live SQLite connection 和显式 `BEGIN` snapshot。它先在同一
+snapshot 确认 Project：未知 Project 返回 `None`，已知 Project 即使没有 provenance
+row 也返回空 tuple。已知 Project 的返回值是不可变 `LegacyBindingRecord` tuple，包含
+该 Project 的所有 source kind，固定按 `(source_kind, source_key)` 排序；调用方不能
+输入 kind filter。
+
+该 primitive 不读取原始 session 或其他 legacy identity，不计算 source hash，不调用
+`initialize`、migration 或 WAL，也不写入任何 Store/legacy authority。SQLite 或 binding
+row materialization 失败统一为脱敏 `store_read_failed`，不保留异常链；无论返回、失败或
+未知 Project，connection 均关闭。
+
 ### Store-owned legacy import
 
 `import_legacy_project(...)` 是 importer 唯一可用的 aggregate write primitive。它不接受数据库连接，

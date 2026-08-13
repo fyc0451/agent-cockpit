@@ -545,6 +545,33 @@ class ProjectRegistryStore:
             if connection is not None:
                 connection.close()
 
+    def list_legacy_bindings(
+        self, project_id: str,
+    ) -> tuple[domain.LegacyBindingRecord, ...] | None:
+        project_id = _validate(domain.opaque, project_id, maximum=64)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            connection.execute("BEGIN")
+            project = connection.execute(
+                "SELECT 1 FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            if project is None:
+                return None
+            rows = connection.execute(
+                "SELECT * FROM legacy_project_bindings WHERE project_id=? "
+                "ORDER BY source_kind, source_key",
+                (project_id,),
+            ).fetchall()
+            return tuple(_binding_record(row) for row in rows)
+        except ProjectRegistryError:
+            raise
+        except (sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
     def match_discovery(
         self, *, node_id: str, canonical_path: str,
         repository_fingerprint: str | None,
