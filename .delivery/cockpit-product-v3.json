@@ -720,22 +720,23 @@
     },
     {
       "id": "WEB-004A-e2e-fixtures",
-      "title": "Align Playwright legacy endpoint fixtures with the accepted bare response contracts",
+      "title": "Align legacy endpoint fixtures and fix the exposed Settings accessibility defect",
       "status": "in_progress",
       "depends_on": ["WEB-004-legacy-adapters"],
-      "scope": ["web/fixtures/api.ts", "web/e2e/axe.spec.ts", "web/e2e/deeplink.spec.ts", "web/e2e/states.spec.ts"],
+      "scope": ["web/fixtures/api.ts", "web/e2e/axe.spec.ts", "web/e2e/deeplink.spec.ts", "web/e2e/states.spec.ts", "web/pages/SettingsPage.tsx"],
       "acceptance": [
+        {"command": "npm --prefix web run test:e2e -- e2e/axe.spec.ts --grep settings", "passed": false},
         {"command": "npm --prefix web run test:e2e", "passed": false},
         {"command": "npm --prefix web test -- --run", "passed": false},
         {"command": "npm --prefix web run build", "passed": false}
       ],
-      "rollback": "Revert only the Playwright legacy fixture alignment and keep production legacy guards unchanged",
+      "rollback": "Revert the fixture alignment and the Settings raw JSON focusability fix together",
       "production_impact": "none",
       "owner_instance_id": "i-cebqn5p7znunmxwpneduptrtou",
       "reviewer_instance_id": null,
       "base_sha": "514aa18c0d89f26b1651b3cbf1886f5ee552046e",
       "fixed_sha": null,
-      "cross_module_block_count": 0,
+      "cross_module_block_count": 1,
       "release_started_at": null,
       "user_acceptance_required": false,
       "user_acceptance_evidence": null
