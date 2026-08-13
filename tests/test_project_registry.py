@@ -621,12 +621,37 @@ def test_list_legacy_bindings_sanitizes_corrupt_row_and_sqlite_failure(
         project_id=project.project_id, source_kind="herdr_session",
         source_key="session-alpha", source_digest="sha256:read",
     )
+    real_connect = registry_store._connect_live_read
+    captured = []
+
+    class TrackedReadConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.closed = False
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def close(self):
+            self.connection.close()
+            self.closed = True
+
+    def tracked_connect(path: Path):
+        connection = TrackedReadConnection(real_connect(path))
+        captured.append(connection)
+        return connection
+
+    monkeypatch.setattr(registry_store, "_connect_live_read", tracked_connect)
     monkeypatch.setattr(
-        registry_store, "_binding_record", lambda _row: (_ for _ in ()).throw(KeyError("corrupt row")),
+        registry_store,
+        "_binding_record",
+        lambda _row: (_ for _ in ()).throw(IndexError("No item with that key")),
     )
     with pytest.raises(registry_store.ProjectRegistryError) as corrupt:
         registry.list_legacy_bindings(project.project_id)
-    _assert_sanitized_error(corrupt, "store_read_failed", "corrupt row")
+    _assert_sanitized_error(corrupt, "store_read_failed", "No item with that key")
+    assert len(captured) == 1
+    assert captured[0].closed is True
 
     class FailingReadConnection:
         def execute(self, _sql, _parameters=()):

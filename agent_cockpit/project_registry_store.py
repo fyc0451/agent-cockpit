@@ -566,7 +566,7 @@ class ProjectRegistryStore:
             return tuple(_binding_record(row) for row in rows)
         except ProjectRegistryError:
             raise
-        except (sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+        except (sqlite3.Error, IndexError, KeyError, TypeError, ValueError) as exc:
             _fail("store_read_failed", exc)
         finally:
             if connection is not None:
