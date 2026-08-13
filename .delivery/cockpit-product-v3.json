@@ -478,7 +478,7 @@
     {
       "id": "DELIVERY-003-wip4-gate",
       "title": "Permit four writers only after Operation Runtime Event and Memory ownership gates pass",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-002-wip3-gate", "SLICE-001-local-readonly"],
       "scope": [".delivery/cockpit-product-v3.json", ".delivery/provider-ownership-v1.json", "docs/delivery-contract.md", "docs/contracts/provider-ownership-v1.md", "scripts/delivery_gate.py", "tests/test_delivery_gate.py", "tests/fixtures/delivery_gate/ERROR_MATRIX.md"],
       "acceptance": [
