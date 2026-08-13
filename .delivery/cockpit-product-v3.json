@@ -656,7 +656,7 @@
     {
       "id": "P0-WORKSPACE-001-F",
       "title": "Create a shared Workspace from the Project workbench and open its Files path",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-003-wip4-gate", "P0-WORKSPACE-001-B"],
       "scope": ["web/api/workspaceCreate.ts", "web/e2e/workspace-create.spec.ts", "web/features/workspace-wizard/WorkspaceWizard.tsx", "web/pages/ProjectWorkbenchPage.tsx", "web/test/workspace-create.test.tsx"],
       "acceptance": [
