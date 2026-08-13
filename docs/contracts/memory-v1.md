@@ -41,18 +41,25 @@ event. Any failure rolls back every change.
 
 ## Stored Values
 
-Identifiers and timestamps are bounded and canonical. SQLite integers stay in
-the signed 64-bit range. Fact values and local event summaries are bounded to
-16 KiB canonical JSON objects containing only JSON values. Typed source,
-proposer, actor, and decision references are exactly `{type,id}`. Materialized
-rows revalidate identifiers, enums, versions, timestamps, JSON, candidate
-request digests, Fact-head bindings, and Candidate-decision-result bindings;
-invalid persisted data is `store_corrupt`.
+Identifiers and timestamps are bounded and canonical. Timestamps use UTC
+`YYYY-MM-DDTHH:MM:SSZ` or `YYYY-MM-DDTHH:MM:SS.ffffffZ`; offsets, spaces,
+redundant zero fractions, and fractions other than exactly six digits are
+invalid rather than normalized. SQLite integers stay in the signed 64-bit
+range. Fact values and local event summaries are bounded to 16 KiB canonical
+JSON objects containing only JSON values. Typed source, proposer, actor, and
+decision references are exactly `{type,id}`. Materialized rows revalidate
+identifiers, enums, versions, timestamps, JSON, candidate request digests,
+Fact-head bindings, and Candidate-decision-result bindings; invalid persisted
+data is `store_corrupt`. Candidate-create replay fully materializes and
+validates the stored Candidate before comparing its request digest.
 
-Memory values do not store credentials, tokens, passwords, authorization,
-environment dumps, terminal output or scrollback, hidden reasoning, full file
-content, or full message bodies. They store summaries, stable identifiers, and
-source references. Checkpoints and Context Packs are entirely deferred.
+Memory values reject case-insensitive keys `token`/`tokens`,
+`password`/`passwords`, `credential`/`credentials`, `secret`/`secrets`,
+`authorization`, `cookie`, `private_key`, `api_key`, and `scrollback` at every
+nested object depth, including objects inside lists. They also do not store
+environment dumps, terminal output, hidden reasoning, full file content, or
+full message bodies. They store summaries, stable identifiers, and source
+references. Checkpoints and Context Packs are entirely deferred.
 
 `memory_events` is a local audit track committed atomically with Memory state.
 It is not EVENT-001 and the Store never imports or calls the Domain Event

@@ -33,6 +33,7 @@ def _append_fact(
     fact_key: str = "goal.current", expected_version: int = 0,
     summary: str = "Current goal", value: dict | None = None,
     kind: str = "state", status: str = "current",
+    verified_at: str | None = None,
 ) -> memory_store.FactRecord:
     return store.append_fact(
         project_id=project_id,
@@ -43,6 +44,7 @@ def _append_fact(
         value=value or {"goal": summary},
         source=SOURCE,
         actor=ACTOR,
+        verified_at=verified_at,
         expected_version=expected_version,
     )
 
@@ -401,6 +403,74 @@ def test_invalid_json_integer_and_query_inputs_fail_before_write(store) -> None:
             operation()
         assert invalid.value.code == "invalid_argument"
     assert store.summary(PROJECT_A).revision == 0
+
+
+@pytest.mark.parametrize("key", [
+    "token", "ToKeNs", "password", "PASSWORDS", "credential", "Credentials",
+    "secret", "SeCrEtS", "authorization", "COOKIE", "private_key", "API_KEY",
+    "scrollback",
+])
+@pytest.mark.parametrize("target", ["fact", "candidate"])
+def test_forbidden_keys_are_case_insensitive_recursive_and_write_nothing(
+    store, key: str, target: str,
+) -> None:
+    value = {"safe": [{"nested": {key: "never"}}]}
+    if target == "fact":
+        operation = lambda: _append_fact(store, value=value)
+    else:
+        operation = lambda: _candidate(store, value=value)
+
+    with pytest.raises(memory_store.MemoryStoreError) as invalid:
+        operation()
+    assert invalid.value.code == "invalid_argument"
+    assert store.summary(PROJECT_A).revision == 0
+    assert store.list_facts(project_id=PROJECT_A)[0] == ()
+    assert store.list_candidates(project_id=PROJECT_A)[0] == ()
+    assert store.timeline(project_id=PROJECT_A)[0] == ()
+
+
+@pytest.mark.parametrize("verified_at", [
+    "2026-08-14T01:02:03Z",
+    "2026-08-14T01:02:03.120000Z",
+])
+def test_verified_at_accepts_only_canonical_utc_forms(store, verified_at: str) -> None:
+    assert _append_fact(store, verified_at=verified_at).verified_at == verified_at
+
+
+@pytest.mark.parametrize("verified_at", [
+    "2026-08-14 01:02:03Z",
+    "2026-08-14T01:02:03+00:00",
+    "2026-08-14T01:02:03.1Z",
+    "2026-08-14T01:02:03.1234560Z",
+    "2026-08-14T01:02:03.000000Z",
+    "2026-08-14T01:02:03z",
+])
+def test_noncanonical_verified_at_is_rejected_without_write(
+    store, verified_at: str,
+) -> None:
+    with pytest.raises(memory_store.MemoryStoreError) as invalid:
+        _append_fact(store, verified_at=verified_at)
+    assert invalid.value.code == "invalid_argument"
+    assert store.summary(PROJECT_A).revision == 0
+    assert store.list_facts(project_id=PROJECT_A)[0] == ()
+    assert store.timeline(project_id=PROJECT_A)[0] == ()
+
+
+def test_candidate_replay_validates_stored_row_before_digest_comparison(
+    store, path: Path,
+) -> None:
+    candidate = _candidate(store)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE memory_candidates SET created_at=? WHERE candidate_id=?",
+            ("2026-08-14 01:02:03Z", candidate.candidate_id),
+        )
+
+    with pytest.raises(memory_store.MemoryStoreError) as corrupt:
+        _candidate(store, summary="A different request")
+    assert corrupt.value.code == "store_corrupt"
+    assert store.summary(PROJECT_A).revision == 1
+    assert len(store.timeline(project_id=PROJECT_A)[0]) == 1
 
 
 @pytest.mark.parametrize("corruption", ["missing_fact_revision", "candidate_json"])

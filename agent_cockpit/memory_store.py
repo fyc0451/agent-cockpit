@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -32,11 +33,16 @@ FACT_STATUSES = frozenset({"current", "stale", "conflict", "retired"})
 CANDIDATE_STATUSES = frozenset({"pending", "approved", "rejected", "merged"})
 DECISIONS = frozenset({"approve", "reject", "merge"})
 _FORBIDDEN_JSON_KEYS = frozenset({
-    "authorization", "credential", "credentials", "env", "environment",
-    "file_body", "file_content", "hidden_reasoning", "message_body",
-    "password", "reasoning", "secret", "secrets", "terminal_output",
-    "terminal_scroll", "token",
+    "api_key", "authorization", "cookie", "credential", "credentials",
+    "env", "environment", "file_body", "file_content", "hidden_reasoning",
+    "message_body", "password", "passwords", "private_key", "reasoning",
+    "scrollback", "secret", "secrets", "terminal_output", "terminal_scroll",
+    "token", "tokens",
 })
+_CANONICAL_UTC_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{6})?Z"
+)
 
 _SCHEMA = """
 CREATE TABLE memory_projects (
@@ -203,11 +209,13 @@ def _timestamp(value: object, *, nullable: bool = False) -> str | None:
     if value is None and nullable:
         return None
     value = _text(value, maximum=40)
+    if _CANONICAL_UTC_TIMESTAMP.fullmatch(value) is None:
+        _fail("invalid_argument")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         _fail("invalid_argument")
-    if parsed.tzinfo is None:
+    if parsed.tzinfo != UTC or parsed.isoformat().replace("+00:00", "Z") != value:
         _fail("invalid_argument")
     return value
 
@@ -1116,9 +1124,10 @@ class MemoryStore:
                 (candidate_id,),
             ).fetchone()
             if existing is not None:
-                if str(existing["request_digest"]) != request_digest:
+                existing_candidate = _candidate(connection, existing)
+                if _stored_digest(existing["request_digest"]) != request_digest:
                     _fail("idempotency_conflict")
-                return _candidate(connection, existing)
+                return existing_candidate
             actual, existing_kind = _current_fact_version(
                 connection, project_id, target_fact_key,
             )
