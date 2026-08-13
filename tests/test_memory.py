@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import traceback
 from pathlib import Path
@@ -16,6 +17,19 @@ PROJECT_B = "prj_" + "b" * 32
 ACTOR = {"type": "human", "id": "boss-local"}
 SOURCE = {"type": "user", "id": "boss-local"}
 PROPOSER = {"type": "agent", "id": "agent-1"}
+FORBIDDEN_MEMORY_KEYS = (
+    "token", "ToKeNs", "password", "PASSWORDS", "credential", "Credentials",
+    "secret", "SeCrEtS", "authorization", "COOKIE", "private_key", "API_KEY",
+    "env", "environment", "env_dump", "env_dumps", "environment_dump",
+    "environment_dumps", "terminal_output", "terminal_outputs",
+    "terminal_scroll", "terminal_scrolls", "scrollback", "scrollbacks",
+    "terminal_scrollback", "terminal_scrollbacks", "TeRmInAl_ScRoLlBaCkS",
+    "ENVIRONMENT_DUMPS", "file_body", "file_bodies",
+    "file_content", "file_contents", "full_file_body", "full_file_bodies",
+    "full_file_content", "full_file_contents", "FuLl_FiLe_CoNtEnTs", "message_body",
+    "message_bodies", "full_message_body", "full_message_bodies",
+    "FuLl_MeSsAgE_BoDiEs", "reasoning", "hidden_reasoning",
+)
 
 
 @pytest.fixture()
@@ -405,11 +419,7 @@ def test_invalid_json_integer_and_query_inputs_fail_before_write(store) -> None:
     assert store.summary(PROJECT_A).revision == 0
 
 
-@pytest.mark.parametrize("key", [
-    "token", "ToKeNs", "password", "PASSWORDS", "credential", "Credentials",
-    "secret", "SeCrEtS", "authorization", "COOKIE", "private_key", "API_KEY",
-    "scrollback",
-])
+@pytest.mark.parametrize("key", FORBIDDEN_MEMORY_KEYS)
 @pytest.mark.parametrize("target", ["fact", "candidate"])
 def test_forbidden_keys_are_case_insensitive_recursive_and_write_nothing(
     store, key: str, target: str,
@@ -427,6 +437,53 @@ def test_forbidden_keys_are_case_insensitive_recursive_and_write_nothing(
     assert store.list_facts(project_id=PROJECT_A)[0] == ()
     assert store.list_candidates(project_id=PROJECT_A)[0] == ()
     assert store.timeline(project_id=PROJECT_A)[0] == ()
+
+
+@pytest.mark.parametrize("key", [
+    "terminal_scrollback", "environment_dump", "full_file_content",
+    "full_message_body",
+])
+def test_restart_and_api_reject_preexisting_forbidden_memory_values(
+    store, path: Path, key: str,
+) -> None:
+    private = f"must-not-appear-{key}"
+    candidate = _candidate(store)
+    persisted = json.dumps(
+        {"safe": [{"nested": {key: private}}]},
+        sort_keys=True, separators=(",", ":"),
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE memory_candidates SET value_json=? WHERE candidate_id=?",
+            (persisted, candidate.candidate_id),
+        )
+
+    store.close()
+    reopened = memory_store.open_existing(path)
+    with pytest.raises(memory_store.MemoryStoreError) as corrupt:
+        reopened.list_candidates(project_id=PROJECT_A)
+    assert corrupt.value.code == "store_corrupt"
+
+    app = FastAPI()
+    memory_api.install(app, memory_api.MemoryApiService(lambda: reopened))
+    response = TestClient(app).get(
+        f"/api/projects/{PROJECT_A}/memory/candidates"
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "store_corrupt"
+    assert private not in response.text
+
+
+def test_forbidden_memory_keys_use_exact_enumeration_not_substrings(store) -> None:
+    value = {
+        "token_count": 0,
+        "password_policy": "external",
+        "environment_name": "local",
+        "terminal_output_digest": "sha256:summary",
+        "file_content_digest": "sha256:summary",
+        "message_body_summary": "summary only",
+    }
+    assert _append_fact(store, value=value).value == value
 
 
 @pytest.mark.parametrize("verified_at", [

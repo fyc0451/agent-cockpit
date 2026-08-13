@@ -34,10 +34,15 @@ CANDIDATE_STATUSES = frozenset({"pending", "approved", "rejected", "merged"})
 DECISIONS = frozenset({"approve", "reject", "merge"})
 _FORBIDDEN_JSON_KEYS = frozenset({
     "api_key", "authorization", "cookie", "credential", "credentials",
-    "env", "environment", "file_body", "file_content", "hidden_reasoning",
-    "message_body", "password", "passwords", "private_key", "reasoning",
-    "scrollback", "secret", "secrets", "terminal_output", "terminal_scroll",
-    "token", "tokens",
+    "env", "env_dump", "env_dumps", "environment", "environment_dump",
+    "environment_dumps", "file_bodies", "file_body", "file_content",
+    "file_contents", "full_file_bodies", "full_file_body",
+    "full_file_content", "full_file_contents", "full_message_bodies",
+    "full_message_body", "hidden_reasoning", "message_bodies", "message_body",
+    "password", "passwords", "private_key", "reasoning", "scrollback",
+    "scrollbacks", "secret", "secrets", "terminal_output",
+    "terminal_outputs", "terminal_scroll", "terminal_scrollback",
+    "terminal_scrollbacks", "terminal_scrolls", "token", "tokens",
 })
 _CANONICAL_UTC_TIMESTAMP = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"

@@ -53,13 +53,27 @@ Fact-head bindings, and Candidate-decision-result bindings; invalid persisted
 data is `store_corrupt`. Candidate-create replay fully materializes and
 validates the stored Candidate before comparing its request digest.
 
-Memory values reject case-insensitive keys `token`/`tokens`,
-`password`/`passwords`, `credential`/`credentials`, `secret`/`secrets`,
-`authorization`, `cookie`, `private_key`, `api_key`, and `scrollback` at every
-nested object depth, including objects inside lists. They also do not store
-environment dumps, terminal output, hidden reasoning, full file content, or
-full message bodies. They store summaries, stable identifiers, and source
-references. Checkpoints and Context Packs are entirely deferred.
+Memory values reject a fixed key enumeration after ASCII case folding at every
+nested object depth, including objects inside lists. The exact enumeration is:
+
+- credentials: `token`, `tokens`, `password`, `passwords`, `credential`,
+  `credentials`, `secret`, `secrets`, `authorization`, `cookie`, `private_key`,
+  and `api_key`;
+- environment: `env`, `environment`, `env_dump`, `env_dumps`,
+  `environment_dump`, and `environment_dumps`;
+- terminal: `terminal_output`, `terminal_outputs`, `terminal_scroll`,
+  `terminal_scrolls`, `scrollback`, `scrollbacks`, `terminal_scrollback`, and
+  `terminal_scrollbacks`;
+- file content: `file_body`, `file_bodies`, `file_content`, `file_contents`,
+  `full_file_body`, `full_file_bodies`, `full_file_content`, and
+  `full_file_contents`;
+- message content: `message_body`, `message_bodies`, `full_message_body`, and
+  `full_message_bodies`;
+- reasoning: `reasoning` and `hidden_reasoning`.
+
+This is an exact enumeration, not substring or heuristic matching. Memory
+stores summaries, stable identifiers, and source references. Checkpoints and
+Context Packs are entirely deferred.
 
 `memory_events` is a local audit track committed atomically with Memory state.
 It is not EVENT-001 and the Store never imports or calls the Domain Event
