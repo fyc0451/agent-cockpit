@@ -351,10 +351,30 @@
       "user_acceptance_evidence": null
     },
     {
+      "id": "PROJ-005A-legacy-binding-read",
+      "title": "Add a Store-owned read primitive for immutable legacy provenance bindings",
+      "status": "planned",
+      "depends_on": ["PROJ-003A-legacy-import-store", "PROJ-004A-project-api-store"],
+      "scope": ["agent_cockpit/project_registry_store.py", "tests/test_project_registry.py", "docs/contracts/project-registry-v1.md"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_project_registry.py", "passed": false}
+      ],
+      "rollback": "Revert only the legacy binding read primitive; retain every append-only provenance row and all legacy authorities",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
       "id": "PROJ-005-compatibility",
       "title": "Bind legacy workbench reads to the new Project identity without mutating legacy stores",
       "status": "planned",
-      "depends_on": ["PROJ-003-legacy-import", "PROJ-004-project-api"],
+      "depends_on": ["PROJ-003-legacy-import", "PROJ-004-project-api", "PROJ-005A-legacy-binding-read"],
       "scope": ["agent_cockpit/project_workbench_adapter.py", "agent_cockpit/server.py", "tests/test_project_workbench.py", "tests/test_project_compatibility.py", "docs/contracts/project-compatibility-v1.md"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_project_workbench.py tests/test_project_compatibility.py", "passed": false}
