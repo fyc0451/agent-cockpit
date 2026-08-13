@@ -35,7 +35,7 @@ export interface RootDescriptor {
   display_name: string
 }
 export interface RootsData {
-  roots: RootDescriptor[]
+  items: RootDescriptor[]
 }
 
 // ---------- directories（冻结 W3 + c11844d 状态字段） ----------
@@ -327,7 +327,7 @@ export function assertRuntimeNodesData(raw: unknown): RuntimeNodesData {
 export function assertRootsData(raw: unknown): RootsData {
   const o = reqObj(raw, 'roots')
   return {
-    roots: reqArray(o.roots, 'roots.roots').map((r) => {
+    items: reqArray(o.items, 'roots.items').map((r) => {
       const root = reqObj(r, 'root')
       return {
         node_id: reqString(root.node_id, 'root.node_id'),
