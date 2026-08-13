@@ -61,6 +61,28 @@ COORDINATION_RUNS_FINGERPRINT = (
     (8, "closed_ts", "REAL", 0, None, 0),
 )
 
+HERDR_V3_ROOT_FIELDS = frozenset({
+    "version",
+    "workspaces",
+    "active",
+    "selected",
+    "sidebar_width",
+    "sidebar_section_split",
+    "collapsed_space_keys",
+})
+
+HERDR_V3_WORKSPACE_FIELDS = frozenset({
+    "id",
+    "custom_name",
+    "identity_cwd",
+    "public_pane_numbers",
+    "next_public_pane_number",
+    "public_tab_numbers",
+    "next_public_tab_number",
+    "tabs",
+    "active_tab",
+})
+
 
 # ── canonicalization (frozen; vectors in tests assert exact sha256) ────────
 def canonical_json(value: Any) -> str:
@@ -259,7 +281,9 @@ class HerdrSessionReader:
             return SourceReadResult(self.kind, "unavailable", detail_code=SOURCE_NOT_FOUND)
         records: list[dict[str, Any]] = []
         try:
-            files = sorted(p for p in directory.glob("*.json") if p.is_file())
+            files = sorted(
+                p for p in directory.glob("*/session.json") if p.is_file()
+            )
         except OSError:
             return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
         for f in files:
@@ -267,33 +291,24 @@ class HerdrSessionReader:
                 data = json.loads(f.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys)
             except (OSError, UnicodeError, ValueError):
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-            if not isinstance(data, dict) or set(data) != {
-                "session", "session_dir", "version", "workspaces"
-            }:
+            if not isinstance(data, dict) or set(data) != HERDR_V3_ROOT_FIELDS:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-            session = data.get("session")
-            session_dir = data.get("session_dir")
+            session = f.parent.name
+            session_dir = str(f.parent)
             version = data.get("version")
             workspaces = data.get("workspaces")
-            if (
-                not isinstance(session, str) or not session
-                or not isinstance(session_dir, str) or not session_dir
-            ):
+            if not session or not session_dir:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
             if type(version) is not int or version != 3:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-            if not isinstance(workspaces, list):
+            if not _valid_herdr_v3_root(data) or not isinstance(workspaces, list):
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
             normalized_ws: list[dict[str, str]] = []
             for w in workspaces:
-                if not isinstance(w, dict):
+                if not _valid_herdr_v3_workspace(w):
                     return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-                if set(w) != {"workspace_id", "identity_cwd"}:
-                    return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-                wid = w["workspace_id"]
+                wid = w["id"]
                 cwd = w["identity_cwd"]
-                if not isinstance(wid, str) or not isinstance(cwd, str) or not wid or not cwd:
-                    return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
                 normalized_ws.append({"workspace_id": wid, "identity_cwd": cwd})
             normalized_ws.sort(key=lambda x: (x["workspace_id"], x["identity_cwd"]))
             records.append(
@@ -305,6 +320,46 @@ class HerdrSessionReader:
                 }
             )
         return SourceReadResult(self.kind, "ok", records=tuple(records))
+
+
+def _is_json_number(value: Any) -> bool:
+    return type(value) in (int, float)
+
+
+def _valid_herdr_v3_root(data: Mapping[str, Any]) -> bool:
+    return (
+        type(data.get("active")) is int
+        and type(data.get("selected")) is int
+        and _is_json_number(data.get("sidebar_width"))
+        and _is_json_number(data.get("sidebar_section_split"))
+        and isinstance(data.get("collapsed_space_keys"), list)
+        and all(isinstance(value, str) for value in data["collapsed_space_keys"])
+    )
+
+
+def _valid_herdr_v3_workspace(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != HERDR_V3_WORKSPACE_FIELDS:
+        return False
+    pane_numbers = value.get("public_pane_numbers")
+    tab_numbers = value.get("public_tab_numbers")
+    return (
+        isinstance(value.get("id"), str)
+        and bool(value["id"])
+        and isinstance(value.get("custom_name"), str)
+        and isinstance(value.get("identity_cwd"), str)
+        and bool(value["identity_cwd"])
+        and isinstance(pane_numbers, dict)
+        and all(
+            isinstance(key, str) and type(number) is int
+            for key, number in pane_numbers.items()
+        )
+        and type(value.get("next_public_pane_number")) is int
+        and isinstance(tab_numbers, list)
+        and all(type(number) is int for number in tab_numbers)
+        and type(value.get("next_public_tab_number")) is int
+        and isinstance(value.get("tabs"), list)
+        and type(value.get("active_tab")) is int
+    )
 
 
 class CoordinationRunReader:

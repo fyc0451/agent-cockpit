@@ -56,14 +56,41 @@ def _make_mail_projects(tmp_path: Path, sessions: dict[str, Any] | None) -> Path
     return path
 
 
-def _make_herdr_session(tmp_path: Path, session: str, session_dir: str,
+def _herdr_v3_workspace(workspace_id: str, identity_cwd: str) -> dict[str, Any]:
+    return {
+        "id": workspace_id,
+        "custom_name": "Workspace",
+        "identity_cwd": identity_cwd,
+        "public_pane_numbers": {"pane-1": 1},
+        "next_public_pane_number": 2,
+        "public_tab_numbers": [1],
+        "next_public_tab_number": 2,
+        "tabs": [],
+        "active_tab": 0,
+    }
+
+
+def _make_herdr_session(tmp_path: Path, session: str, _session_dir: str,
                         workspaces: list[dict[str, str]], version: int = 3) -> Path:
     directory = tmp_path / "herdr-sessions"
     directory.mkdir(exist_ok=True)
-    fname = f"{session}.json"
-    (directory / fname).write_text(
+    session_directory = directory / session
+    session_directory.mkdir(exist_ok=True)
+    persisted_workspaces = [
+        _herdr_v3_workspace(w["workspace_id"], w["identity_cwd"])
+        for w in workspaces
+    ]
+    (session_directory / "session.json").write_text(
         json.dumps(
-            {"session": session, "session_dir": session_dir, "version": version, "workspaces": workspaces}
+            {
+                "version": version,
+                "workspaces": persisted_workspaces,
+                "active": 0,
+                "selected": 0,
+                "sidebar_width": 240,
+                "sidebar_section_split": 0.5,
+                "collapsed_space_keys": [],
+            }
         ),
         encoding="utf-8",
     )
@@ -101,9 +128,10 @@ HERDR_SD = "/var/lib/herdr/sessions/alpha-dev"
 
 def _full_roots(tmp_path: Path, *, boundary: Path | None = None) -> pli.LegacyRoots:
     am = _make_agent_mail_db(tmp_path, [{"id": 17, "slug": "alpha", "human_key": ALPHA}])
+    herdr_session_dir = str(tmp_path / "herdr-sessions" / "alpha-dev")
     mp = _make_mail_projects(
         tmp_path,
-        {"alpha-dev": {"session_dir": HERDR_SD, "project": ALPHA}},
+        {"alpha-dev": {"session_dir": herdr_session_dir, "project": ALPHA}},
     )
     hr = _make_herdr_session(
         tmp_path, "alpha-dev", HERDR_SD,
@@ -112,7 +140,7 @@ def _full_roots(tmp_path: Path, *, boundary: Path | None = None) -> pli.LegacyRo
     cr = _make_coordination_db(
         tmp_path,
         [{"run_id": "run_01JABCDEF0123456789ABCDEF", "project_key": ALPHA,
-          "session": "alpha-dev", "session_dir": HERDR_SD, "revision": 1}],
+          "session": "alpha-dev", "session_dir": herdr_session_dir, "revision": 1}],
     )
     return pli.LegacyRoots(
         agent_mail_db=am, mail_projects_json=mp, herdr_sessions_dir=hr,
@@ -250,17 +278,76 @@ def test_mail_projects_reader_rejects_non_exact_root_schema(tmp_path, payload):
 @pytest.mark.parametrize(
     "payload",
     [
-        {"session": "alpha-dev", "session_dir": HERDR_SD, "version": 99, "workspaces": []},
-        {"session": "alpha-dev", "session_dir": HERDR_SD, "version": True, "workspaces": []},
-        {"session": "alpha-dev", "session_dir": HERDR_SD, "version": 3,
-         "workspaces": [], "future": "field"},
+        {"version": 99, "workspaces": [], "active": 0, "selected": 0,
+         "sidebar_width": 240, "sidebar_section_split": 0.5,
+         "collapsed_space_keys": []},
+        {"version": True, "workspaces": [], "active": 0, "selected": 0,
+         "sidebar_width": 240, "sidebar_section_split": 0.5,
+         "collapsed_space_keys": []},
+        {"version": 3, "workspaces": [], "active": 0, "selected": 0,
+         "sidebar_width": 240, "sidebar_section_split": 0.5,
+         "collapsed_space_keys": [], "future": "field"},
     ],
 )
 def test_herdr_reader_rejects_non_exact_root_schema(tmp_path, payload):
     directory = tmp_path / "herdr-sessions"
-    directory.mkdir()
-    (directory / "alpha-dev.json").write_text(json.dumps(payload), encoding="utf-8")
+    descriptor_dir = directory / "alpha-dev"
+    descriptor_dir.mkdir(parents=True)
+    (descriptor_dir / "session.json").write_text(json.dumps(payload), encoding="utf-8")
     result = pli.HerdrSessionReader().read(pli.LegacyRoots(herdr_sessions_dir=directory))
+    assert result.state == "error"
+    assert result.detail_code == pli.SOURCE_CORRUPT
+
+
+def test_herdr_reader_accepts_real_v3_persisted_shape_and_normalizes_evidence(tmp_path):
+    directory = _make_herdr_session(
+        tmp_path, "alpha-dev", "ignored-by-authority-scanner",
+        [{"workspace_id": "workspace-1", "identity_cwd": ALPHA}],
+    )
+
+    result = pli.HerdrSessionReader().read(
+        pli.LegacyRoots(herdr_sessions_dir=directory)
+    )
+
+    assert result.state == "ok"
+    assert result.records == ({
+        "session": "alpha-dev",
+        "session_dir": str(directory / "alpha-dev"),
+        "version": 3,
+        "workspaces": ({
+            "workspace_id": "workspace-1",
+            "identity_cwd": ALPHA,
+        },),
+    },)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda workspace: workspace.update({"id": ""}),
+        lambda workspace: workspace.update({"workspace_id": workspace.pop("id")}),
+        lambda workspace: workspace.update({"future": "field"}),
+        lambda workspace: workspace.update({"next_public_pane_number": True}),
+        lambda workspace: workspace.update({"public_tab_numbers": [True]}),
+        lambda workspace: workspace.update({"tabs": {}}),
+    ],
+)
+def test_herdr_reader_rejects_non_exact_persisted_workspace_schema(
+    tmp_path, mutation,
+):
+    directory = _make_herdr_session(
+        tmp_path, "alpha-dev", "ignored-by-authority-scanner",
+        [{"workspace_id": "workspace-1", "identity_cwd": ALPHA}],
+    )
+    descriptor = directory / "alpha-dev" / "session.json"
+    payload = json.loads(descriptor.read_text(encoding="utf-8"))
+    mutation(payload["workspaces"][0])
+    descriptor.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = pli.HerdrSessionReader().read(
+        pli.LegacyRoots(herdr_sessions_dir=directory)
+    )
+
     assert result.state == "error"
     assert result.detail_code == pli.SOURCE_CORRUPT
 
@@ -695,14 +782,14 @@ def test_legacy_authorities_byte_for_byte_unchanged(tmp_path):
         "am": _signature(roots.agent_mail_db),
         "mp": _signature(roots.mail_projects_json),
         "cr": _signature(roots.coordination_db),
-        "hr": _signature(sorted(roots.herdr_sessions_dir.glob("*.json"))[0]),
+        "hr": _signature(sorted(roots.herdr_sessions_dir.glob("*/session.json"))[0]),
     }
     pli.import_legacy(_registry(tmp_path), roots)
     after = {
         "am": _signature(roots.agent_mail_db),
         "mp": _signature(roots.mail_projects_json),
         "cr": _signature(roots.coordination_db),
-        "hr": _signature(sorted(roots.herdr_sessions_dir.glob("*.json"))[0]),
+        "hr": _signature(sorted(roots.herdr_sessions_dir.glob("*/session.json"))[0]),
     }
     assert before == after
 

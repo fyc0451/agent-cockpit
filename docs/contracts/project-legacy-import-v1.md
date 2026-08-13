@@ -19,7 +19,7 @@ and does not claim Git facts.
 |---|---|---|---|---|
 | Agent Mail `projects` | `agent_mail_project` | mail project, messages, identities | `{"project_id": <id>}` | `human_key` |
 | `mail-projects.json` | `mail_projects_session` | session↔mail binding | `{"session","session_dir"}` | `project` |
-| Herdr persisted session | `herdr_session` | session/workspace/pane/runtime | `{"session","session_dir"}` | workspace `identity_cwd` |
+| Herdr v3 persisted session | `herdr_session` | session/workspace/pane/runtime | `{"session","session_dir"}` derived from scan context | workspace `identity_cwd` |
 | Coordination `runs` | `coordination_run` | run/participant/assignment state | `{"run_id"}` | `project_key` |
 
 The importer copies only the normalized evidence above. It does **not** copy messages,
@@ -42,9 +42,23 @@ The accepted source schemas are exact, not required-column subsets:
   fingerprint check.
 - `mail-projects.json` has exactly `version` and `sessions`; `version` is an integer
   (a JSON boolean is not an integer) equal to `1`, and `sessions` is an object.
-- A Herdr session has exactly `session`, `session_dir`, `version`, and `workspaces`;
-  `version` is an integer equal to `3`. Each workspace has exactly `workspace_id` and
-  `identity_cwd` string fields.
+- `herdr_sessions_dir` is the persisted sessions parent. The reader deterministically scans
+  `sessions/<session>/session.json`; trusted scanner context derives `session` from the direct
+  child directory name and `session_dir` from that directory. Neither field is accepted from
+  JSON payload. A descriptor has exactly `version`, `workspaces`, `active`, `selected`,
+  `sidebar_width`, `sidebar_section_split`, and `collapsed_space_keys`; `version` is an integer
+  equal to `3`. `active`/`selected` are integers, sidebar values are JSON numbers, and collapsed
+  keys are strings. Each persisted workspace has exactly `id`, `custom_name`, `identity_cwd`,
+  `public_pane_numbers`, `next_public_pane_number`, `public_tab_numbers`,
+  `next_public_tab_number`, `tabs`, and `active_tab`, with the committed v3 scalar/container
+  types. Workspace identity is read from `id`, not `workspace_id`.
+
+Persisted authority schema and normalized import evidence are deliberately distinct. After
+strict authority validation, the reader emits only
+`{"session","session_dir","version","workspaces"}`; each normalized workspace contains
+exactly `{"workspace_id": persisted.id, "identity_cwd"}`. Mutable layout, tabs, pane numbering,
+selection, sidebar and display fields are validated as authority shape but are not copied into
+Project Registry provenance.
 
 Extra, missing, reordered SQLite columns, changed declared types/constraints, unknown JSON
 fields, future versions, and wrong JSON container types are `source_corrupt`. A valid empty
@@ -56,7 +70,7 @@ sessions object/list of Herdr workspaces remains distinct from malformed input.
 `source_digest = "sha256:" + sha256(canonical_json(evidence))`, where `canonical_json`
 delegates to the accepted Registry domain canonicalizer: sorted keys, `(",",":")`
 separators, ASCII, `allow_nan=False`, and non-string mapping keys rejected. Unordered rows
-(Herdr workspaces) are sorted by `(workspace_id, identity_cwd)` before hashing.
+(normalized Herdr workspaces) are sorted by `(workspace_id, identity_cwd)` before hashing.
 
 Provenance identity is the full `(source_kind, source_key)` pair. A candidate may retain
 multiple distinct keys of the same kind; its complete source tuple is sorted by that pair.
