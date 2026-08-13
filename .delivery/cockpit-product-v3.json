@@ -645,7 +645,7 @@
       "rollback": "Revert the Workspace create code without deleting or rewriting append-only Registry records",
       "production_impact": "none",
       "owner_instance_id": "i-cebqn5p7znunmxwpneduptrtou",
-      "reviewer_instance_id": "i-yjsczsmi6uhwwhsygmqxcahkj4",
+      "reviewer_instance_id": "i-gzy6byrcie47tprardahrpmwbq",
       "base_sha": "13929110bdf5e9161ac6dc1e632ff943b9661d77",
       "fixed_sha": "30bb7c9efca40ab030448e1064760dfd9e575b24",
       "cross_module_block_count": 0,
