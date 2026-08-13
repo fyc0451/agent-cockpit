@@ -16,7 +16,8 @@
       "status": "available",
       "observed_at": "2026-08-13T09:00:00+00:00",
       "freshness_deadline": "2026-08-13T09:05:00+00:00",
-      "reason_codes": []
+      "reason_codes": [],
+      "revision": "sha256:40287d6dbb8b37a0c7463a9bd5f956e8b00f6317248035c37ecd3956413374c3"
     },
     "capacity": {
       "effective_writer_wip": 2,
@@ -41,7 +42,8 @@
     "agents": [],
     "assignments": [],
     "active_leases": [],
-    "active_dispatch_count": 0
+    "active_dispatch_count": 0,
+    "evaluated_input_revision": "sha256:1e048777385501fd343d0050d0603381c0fae369385ebc008b2b8c6d1c574425"
   },
   "expected": {
     "capacity": {

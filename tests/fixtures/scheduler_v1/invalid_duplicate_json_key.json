@@ -1,0 +1,5 @@
+{
+  "id": "invalid_duplicate_json_key",
+  "kind": "reject",
+  "kind": "case"
+}

@@ -16,7 +16,8 @@
       "status": "available",
       "observed_at": "2026-08-13T09:00:00+00:00",
       "freshness_deadline": "2026-08-13T09:05:00+00:00",
-      "reason_codes": []
+      "reason_codes": [],
+      "revision": "sha256:c69d7f6c56133ab6ae139abde2642f819ac8d738d2bdce0fccba0e23cd6da6ba"
     },
     "capacity": {
       "effective_writer_wip": 3,
@@ -79,7 +80,8 @@
     "agents": [],
     "assignments": [],
     "active_leases": [],
-    "active_dispatch_count": 0
+    "active_dispatch_count": 0,
+    "evaluated_input_revision": "sha256:68d9b95a333e28ab23fc570acb46463fc53ba8c0397c8f1e82424aa594c1ca8b"
   },
   "expected": {
     "git_head": "0bbbc561f9347649fb0901c527e6f812bac9696f",

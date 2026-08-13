@@ -25,6 +25,7 @@ UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
 REASON_CODES = frozenset({
     "source_unavailable",
     "source_stale",
+    "source_dirty",
     "source_invalid",
     "authoritative_plan_ambiguous",
     "dependency_waiting",
@@ -68,6 +69,7 @@ SNAPSHOT_KEYS = (
     "assignments",
     "active_leases",
     "active_dispatch_count",
+    "evaluated_input_revision",
 )
 SOURCE_KEYS = (
     "repository_id",
@@ -78,8 +80,32 @@ SOURCE_KEYS = (
     "status",
     "observed_at",
     "freshness_deadline",
+    "revision",
     "reason_codes",
 )
+CAPACITY_KEYS = (
+    "effective_writer_wip", "active_writer_count", "remaining_writer_capacity", "revision",
+)
+WORK_KEYS = (
+    "source_kind", "source_id", "source_revision", "phase", "state", "waiting_on",
+    "author_agent_instance_id", "sensitivity", "typed_links", "reason_codes",
+)
+AGENT_KEYS = (
+    "agent_instance_id", "identity_revision", "attachment_id", "attachment_revision",
+    "runtime_generation", "observed_harness", "verified_harness", "observed_state",
+    "projected_state", "observed_at", "freshness_deadline", "source_revision", "reason_codes",
+)
+ASSIGNMENT_KEYS = ("assignment_id", "source_revision", "status", "assignee", "typed_links")
+LEASE_KEYS = (
+    "lease_id", "project_id", "workspace_id", "source_kind", "source_id",
+    "source_revision", "phase", "agent_instance_id", "status",
+)
+LINK_KEYS = ("kind", "id")
+SOURCE_KINDS = frozenset({"delivery_car", "work_item", "review_packet", "assignment"})
+PHASES = frozenset({"writer", "reviewer"})
+LEASE_STATUSES = frozenset({"offered", "claimed_pending_source", "working", "compensating", "terminal"})
+OBSERVED_STATES = frozenset({"working", "blocked", "done", "idle", "unknown"})
+PROJECTED_STATES = frozenset({"available", "working", "blocked", "paused", "recovery_required", "unknown_transport", "unavailable"})
 DISPATCH_DEPENDENCIES = (
     "SCHED-001-authority-contract",
     "SCHED-002-readonly-projection",
@@ -148,7 +174,22 @@ class ContractError(ValueError):
 
 
 def _load_json(path: Path) -> dict:
-    return json.loads(path.read_text())
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ContractError("source_invalid")
+            value[key] = item
+        return value
+    try:
+        value = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("source_invalid") from None
+    if not isinstance(value, dict):
+        raise ContractError("source_invalid")
+    return value
 
 
 def fixture_paths() -> list[Path]:
@@ -186,6 +227,26 @@ def require_reasons(value: object) -> tuple[str, ...]:
     return tuple(sorted(set(value)))
 
 
+def require_text(value: object, *, nullable: bool = False) -> str | None:
+    if value is None and nullable:
+        return None
+    if type(value) is not str or not value:
+        raise ContractError("source_invalid")
+    return value
+
+
+def require_exact(value: object, keys: tuple[str, ...]) -> dict:
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise ContractError("source_invalid")
+    return value
+
+
+def require_list(value: object) -> list:
+    if not isinstance(value, list):
+        raise ContractError("source_invalid")
+    return value
+
+
 def validate_snapshot(raw: dict) -> dict:
     if not isinstance(raw, dict):
         raise ContractError("source_invalid")
@@ -193,14 +254,15 @@ def validate_snapshot(raw: dict) -> dict:
     missing = set(SNAPSHOT_KEYS) - set(raw)
     if extra or missing:
         raise ContractError("source_invalid")
-    if raw["schema_version"] != 1:
+    if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
         raise ContractError("source_invalid")
-    if raw["active_dispatch_count"] != 0:
+    require_text(raw["project_id"])
+    if type(raw["active_dispatch_count"]) is not int or raw["active_dispatch_count"] != 0:
         raise ContractError("source_invalid")
 
-    source = raw["source"]
-    if set(source) != set(SOURCE_KEYS):
-        raise ContractError("source_invalid")
+    source = require_exact(raw["source"], SOURCE_KEYS)
+    for key in ("repository_id", "plan_path", "git_head", "revision"):
+        require_text(source[key])
     if source["status"] not in SOURCE_STATUSES:
         raise ContractError("source_invalid")
     require_sha(source["plan_sha256"])
@@ -209,9 +271,31 @@ def validate_snapshot(raw: dict) -> dict:
     parse_utc(source["observed_at"])
     parse_utc(source["freshness_deadline"])
     require_reasons(source["reason_codes"])
+    if source["revision"] != source_revision(source):
+        raise ContractError("source_invalid")
+
+    capacity = require_exact(raw["capacity"], CAPACITY_KEYS)
+    for key in ("effective_writer_wip", "active_writer_count", "remaining_writer_capacity"):
+        if type(capacity[key]) is not int or capacity[key] < 0:
+            raise ContractError("source_invalid")
+    require_text(capacity["revision"])
+    if capacity["remaining_writer_capacity"] != capacity["effective_writer_wip"] - capacity["active_writer_count"]:
+        raise ContractError("source_invalid")
 
     work_ids: list[str] = []
-    for item in raw["work"]:
+    work = require_list(raw["work"])
+    for item in work:
+        item = require_exact(item, WORK_KEYS)
+        if item["source_kind"] not in SOURCE_KINDS or item["phase"] not in PHASES:
+            raise ContractError("source_invalid")
+        for key in ("source_id", "source_revision"):
+            require_text(item[key])
+        if item["author_agent_instance_id"] is not None:
+            require_text(item["author_agent_instance_id"])
+        require_list(item["waiting_on"])
+        if any(type(value) is not str or not value for value in item["waiting_on"]):
+            raise ContractError("source_invalid")
+        _validate_links(item["typed_links"])
         if item["state"] not in WORK_STATES:
             raise ContractError("source_invalid")
         if item["sensitivity"] not in SENSITIVITIES:
@@ -221,8 +305,24 @@ def validate_snapshot(raw: dict) -> dict:
     if len(work_ids) != len(set(work_ids)):
         raise ContractError("source_invalid")
 
-    for agent in raw["agents"]:
+    agents = require_list(raw["agents"])
+    agent_ids: set[str] = set()
+    for agent in agents:
+        agent = require_exact(agent, AGENT_KEYS)
+        for key in ("identity_revision", "attachment_id", "attachment_revision", "source_revision"):
+            require_text(agent[key], nullable=True)
+        if agent["agent_instance_id"] is not None:
+            require_text(agent["agent_instance_id"])
+            if agent["agent_instance_id"] in agent_ids:
+                raise ContractError("source_invalid")
+            agent_ids.add(agent["agent_instance_id"])
+        if agent["runtime_generation"] is not None and (
+            type(agent["runtime_generation"]) is not int or agent["runtime_generation"] < 0
+        ):
+            raise ContractError("source_invalid")
         if agent["observed_harness"] not in OBSERVED_HARNESS:
+            raise ContractError("source_invalid")
+        if agent["observed_state"] not in OBSERVED_STATES or agent["projected_state"] not in PROJECTED_STATES:
             raise ContractError("source_invalid")
         verified = agent["verified_harness"]
         if verified is not None and verified not in VERIFIED_HARNESS:
@@ -231,10 +331,51 @@ def validate_snapshot(raw: dict) -> dict:
         parse_utc(agent["observed_at"])
         parse_utc(agent["freshness_deadline"])
 
-    for assignment in raw["assignments"]:
+    assignments = require_list(raw["assignments"])
+    assignment_ids: set[str] = set()
+    for assignment in assignments:
+        assignment = require_exact(assignment, ASSIGNMENT_KEYS)
+        require_text(assignment["assignment_id"])
+        require_text(assignment["source_revision"])
+        require_text(assignment["assignee"], nullable=True)
+        _validate_links(assignment["typed_links"])
+        if assignment["assignment_id"] in assignment_ids:
+            raise ContractError("source_invalid")
+        assignment_ids.add(assignment["assignment_id"])
         if assignment["status"] not in {"assigned", "in_progress", "blocked", "review", "closed"}:
             raise ContractError("source_invalid")
+    leases = require_list(raw["active_leases"])
+    for lease in leases:
+        lease = require_exact(lease, LEASE_KEYS)
+        for key in ("lease_id", "project_id", "workspace_id", "source_kind", "source_id", "source_revision", "agent_instance_id"):
+            require_text(lease[key])
+        if lease["source_kind"] not in SOURCE_KINDS or lease["phase"] not in PHASES or lease["status"] not in LEASE_STATUSES:
+            raise ContractError("source_invalid")
+    _validate_reference_closure(work, assignments, leases)
+    if raw["evaluated_input_revision"] != input_fingerprint(raw):
+        raise ContractError("source_invalid")
     return raw
+
+
+def _validate_links(value: object) -> None:
+    for link in require_list(value):
+        link = require_exact(link, LINK_KEYS)
+        if link["kind"] not in SOURCE_KINDS or type(link["id"]) is not str or not link["id"]:
+            raise ContractError("source_invalid")
+
+
+def _validate_reference_closure(work: list, assignments: list, leases: list) -> None:
+    work_by_id = {item["source_id"]: item for item in work}
+    assignment_ids = {item["assignment_id"] for item in assignments}
+    for item in [*work, *assignments]:
+        for link in item["typed_links"]:
+            known_ids = assignment_ids if link["kind"] == "assignment" else work_by_id
+            if link["id"] not in known_ids:
+                raise ContractError("source_invalid")
+    for lease in leases:
+        source = work_by_id.get(lease["source_id"])
+        if source is None or lease["source_kind"] != source["source_kind"]:
+            raise ContractError("source_invalid")
 
 
 def source_revision(source: dict) -> str:
@@ -266,7 +407,11 @@ def freshness(source: dict, evaluated_at: datetime) -> str:
     status = source["status"]
     observed = parse_utc(source["observed_at"])
     deadline = parse_utc(source["freshness_deadline"])
-    if status == "available" and observed is not None and deadline is not None:
+    if status != "available":
+        return "unknown"
+    if source["git_dirty"]:
+        return "dirty"
+    if observed is not None and deadline is not None:
         if evaluated_at <= deadline:
             return "fresh"
         return "stale"
@@ -354,14 +499,58 @@ def eligible_pairs(snapshot: dict, evaluated_at: datetime) -> list[tuple[str, st
                     continue
             pairs.append((item["source_id"], agent["agent_instance_id"]))
     reviewer_pairs: list[tuple[str, str]] = []
+    leased_agents = {
+        lease["agent_instance_id"]
+        for lease in snapshot["active_leases"]
+        if lease["status"] in {"offered", "claimed_pending_source", "working"}
+    }
     for item in snapshot["work"]:
         if item["phase"] != "reviewer" or item["state"] not in {"ready", "review"}:
             continue
         for agent in snapshot["agents"]:
             if item.get("author_agent_instance_id") == agent.get("agent_instance_id"):
                 continue
+            if agent.get("agent_instance_id") in leased_agents:
+                continue
+            if set(agent_reasons(agent, evaluated_at=evaluated_at)) & {
+                "no_stable_identity", "runtime_generation_unavailable", "runtime_not_verified",
+                "transport_unknown", "source_stale",
+            }:
+                continue
             reviewer_pairs.append((item["source_id"], agent["agent_instance_id"]))
-    return pairs
+    return pairs + reviewer_pairs
+
+
+def apply_lease_heartbeat(lease_state: dict, event: dict) -> dict:
+    """Contract-only pure transition; it never writes a lease authority."""
+    before = deepcopy(lease_state)
+    if event.get("kind") != "generation_credential":
+        return before
+    if event.get("lease_id") != before.get("lease_id"):
+        return before
+    if event.get("runtime_generation") != before.get("runtime_generation"):
+        return before
+    expires_at = event.get("expires_at")
+    if parse_utc(expires_at) is None:
+        return before
+    before["expires_at"] = expires_at
+    return before
+
+
+def reconcile_linked_authorities(assignments: list[dict], adapters: FakeAdapters) -> list[dict]:
+    """Read-only projection deliberately returns the observed authority unchanged."""
+    assert adapters.calls == []
+    observed = deepcopy(assignments)
+    assert adapters.calls == []
+    return observed
+
+
+def refresh_snapshot_revisions(snapshot: dict) -> dict:
+    """Fixture/test builder only: derive both contract revision fields."""
+    refreshed = deepcopy(snapshot)
+    refreshed["source"]["revision"] = source_revision(refreshed["source"])
+    refreshed["evaluated_input_revision"] = input_fingerprint(refreshed)
+    return refreshed
 
 
 def evaluate(snapshot: dict, *, evaluated_at: datetime, previous: dict | None, adapters: FakeAdapters) -> dict:
@@ -378,6 +567,8 @@ def evaluate(snapshot: dict, *, evaluated_at: datetime, previous: dict | None, a
         reasons.add("authoritative_plan_ambiguous")
     if fresh == "stale":
         reasons.add("source_stale")
+    elif fresh == "dirty":
+        reasons.add("source_dirty")
 
     work_reasons: dict[str, list[str]] = {}
     ready_ids = []
@@ -478,6 +669,7 @@ def evaluate(snapshot: dict, *, evaluated_at: datetime, previous: dict | None, a
             ):
                 second_lease_allowed = False
 
+    observed_assignments = reconcile_linked_authorities(validated["assignments"], adapters)
     assert adapters.calls == []
     return {
         "git_head": source["git_head"],
@@ -505,12 +697,11 @@ def evaluate(snapshot: dict, *, evaluated_at: datetime, previous: dict | None, a
         "projected_state": projected,
         "unlinked_authorities": unlinked,
         "assignment_status": assignment_status,
-        "must_not_close_assignment": assignment_status is not None and assignment_status != "closed",
+        "observed_assignment_statuses": [item["status"] for item in observed_assignments],
+        "must_not_close_assignment": observed_assignments == validated["assignments"],
         "second_active_lease_allowed": second_lease_allowed,
         "logical_unique_includes_revision": False,
         "second_offer_allowed": False if occ >= validated["capacity"]["effective_writer_wip"] else True,
-        "pane_heartbeat_renews_lease": False,
-        "heartbeat_owner": "generation_credential",
         "must_not_promote_delivery": True,
         "alert_status": alert_status,
         "alert_reason": alert_reason,
@@ -583,6 +774,10 @@ def test_error_matrix_lists_pinned_and_rejects() -> None:
 
 @pytest.mark.parametrize("path", fixture_paths(), ids=lambda p: p.name)
 def test_fixture_cases(path: Path, adapters: FakeAdapters) -> None:
+    if path.name == "invalid_duplicate_json_key.json":
+        with pytest.raises(ContractError, match="source_invalid"):
+            _load_json(path)
+        return
     fixture = _load_json(path)
     if fixture["kind"] == "reject":
         with pytest.raises(ContractError) as exc:
@@ -651,6 +846,7 @@ def test_alert_timing_90_135_and_restart(adapters: FakeAdapters) -> None:
         "source_revision": "herdr-rev-1",
         "reason_codes": [],
     }]
+    snapshot = refresh_snapshot_revisions(snapshot)
     t0 = datetime(2026, 8, 13, 9, 0, tzinfo=timezone.utc)
     no_history = evaluate(snapshot, evaluated_at=t0, previous=None, adapters=adapters)
     assert no_history["alert_status"] == "absent"
@@ -668,6 +864,7 @@ def test_alert_timing_90_135_and_restart(adapters: FakeAdapters) -> None:
 
     stale_source = deepcopy(snapshot)
     stale_source["source"]["freshness_deadline"] = "2026-08-13T08:59:59+00:00"
+    stale_source = refresh_snapshot_revisions(stale_source)
     broken = evaluate(stale_source, evaluated_at=t0 + timedelta(seconds=90), previous=prior, adapters=adapters)
     assert broken["source_freshness"] == "stale"
     assert broken["alert_status"] != "open"
@@ -692,7 +889,7 @@ def test_verified_kimi_can_pair_sensitive_but_still_readonly(adapters: FakeAdapt
         "reason_codes": [],
     }]
     actual = evaluate(
-        snapshot,
+        refresh_snapshot_revisions(snapshot),
         evaluated_at=datetime(2026, 8, 13, 9, tzinfo=timezone.utc),
         previous=None,
         adapters=adapters,
@@ -704,8 +901,12 @@ def test_verified_kimi_can_pair_sensitive_but_still_readonly(adapters: FakeAdapt
 
 def test_fake_adapters_never_invoked_for_full_matrix(adapters: FakeAdapters) -> None:
     for path in fixture_paths():
-        fixture = _load_json(path)
         try:
+            if path.name == "invalid_duplicate_json_key.json":
+                with pytest.raises(ContractError, match="source_invalid"):
+                    _load_json(path)
+                continue
+            fixture = _load_json(path)
             if fixture["kind"] == "reject":
                 with pytest.raises(ContractError):
                     evaluate(fixture["snapshot"], evaluated_at=datetime(2026, 8, 13, 9, tzinfo=timezone.utc), previous=None, adapters=adapters)
@@ -725,3 +926,81 @@ def test_reason_enum_is_closed() -> None:
     assert "kimi" in SENSITIVE_OK
     assert "claude" in SENSITIVE_OK
     assert FORBIDDEN_V1_REASONS.isdisjoint(REASON_CODES)
+
+
+def test_nested_schema_and_revision_negative_matrix(adapters: FakeAdapters) -> None:
+    snapshot = _load_json(FIXTURES / "valid_minimal.json")["snapshot"]
+    variants = []
+    future_version = deepcopy(snapshot)
+    future_version["schema_version"] = 2
+    variants.append(future_version)
+    nested_extra = deepcopy(snapshot)
+    nested_extra["work"][0]["future_field"] = "nope"
+    variants.append(nested_extra)
+    bool_capacity = deepcopy(snapshot)
+    bool_capacity["capacity"]["effective_writer_wip"] = True
+    variants.append(bool_capacity)
+    bool_generation = deepcopy(snapshot)
+    bool_generation["agents"] = [{
+        "agent_instance_id": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "identity_revision": "id-1",
+        "attachment_id": "att-1", "attachment_revision": "att-rev-1", "runtime_generation": True,
+        "observed_harness": "claude", "verified_harness": "claude", "observed_state": "idle",
+        "projected_state": "available", "observed_at": "2026-08-13T09:00:00+00:00",
+        "freshness_deadline": "2026-08-13T10:00:00+00:00", "source_revision": "herdr-rev-1", "reason_codes": [],
+    }]
+    variants.append(bool_generation)
+    typed_link = deepcopy(snapshot)
+    typed_link["work"][0]["typed_links"] = [{"kind": "assignment", "id": "missing"}]
+    variants.append(typed_link)
+    wrong_revision = deepcopy(snapshot)
+    wrong_revision["source"]["revision"] = "wrong"
+    variants.append(wrong_revision)
+    wrong_input_revision = deepcopy(snapshot)
+    wrong_input_revision["evaluated_input_revision"] = "wrong"
+    variants.append(wrong_input_revision)
+    for variant in variants:
+        with pytest.raises(ContractError, match="source_invalid"):
+            evaluate(refresh_snapshot_revisions(variant) if variant is not wrong_revision and variant is not wrong_input_revision else variant,
+                     evaluated_at=datetime(2026, 8, 13, 9, tzinfo=timezone.utc), previous=None, adapters=adapters)
+
+
+def test_dirty_source_fails_closed_without_invalidating_revision(adapters: FakeAdapters) -> None:
+    snapshot = _load_json(FIXTURES / "valid_minimal.json")["snapshot"]
+    snapshot["source"]["git_dirty"] = True
+    snapshot["work"][0]["sensitivity"] = "ordinary"
+    snapshot["agents"] = [{
+        "agent_instance_id": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "identity_revision": "id-1",
+        "attachment_id": "att-1", "attachment_revision": "att-rev-1", "runtime_generation": 1,
+        "observed_harness": "claude", "verified_harness": "claude", "observed_state": "idle",
+        "projected_state": "available", "observed_at": "2026-08-13T09:00:00+00:00",
+        "freshness_deadline": "2026-08-13T10:00:00+00:00", "source_revision": "herdr-rev-1", "reason_codes": [],
+    }]
+    actual = evaluate(refresh_snapshot_revisions(snapshot), evaluated_at=datetime(2026, 8, 13, 9, tzinfo=timezone.utc), previous=None, adapters=adapters)
+    assert actual["source_freshness"] == "dirty"
+    assert actual["eligible_pair_count"] == 0
+    assert "source_dirty" in actual["reason_codes"]
+
+
+def test_heartbeat_and_linked_authorities_are_state_transitions(adapters: FakeAdapters) -> None:
+    lease = {"lease_id": "lease-1", "runtime_generation": 3, "expires_at": "2026-08-13T09:01:00+00:00", "fencing_token": "f1"}
+    pane = apply_lease_heartbeat(lease, {"kind": "pane", "lease_id": "lease-1", "runtime_generation": 3, "expires_at": "2026-08-13T09:10:00+00:00"})
+    old_generation = apply_lease_heartbeat(lease, {"kind": "generation_credential", "lease_id": "lease-1", "runtime_generation": 2, "expires_at": "2026-08-13T09:10:00+00:00"})
+    renewed = apply_lease_heartbeat(lease, {"kind": "generation_credential", "lease_id": "lease-1", "runtime_generation": 3, "expires_at": "2026-08-13T09:10:00+00:00"})
+    assert pane == lease == old_generation
+    assert renewed["expires_at"] == "2026-08-13T09:10:00+00:00"
+    assignments = [{"assignment_id": "ASN-1", "status": "in_progress"}, {"assignment_id": "ASN-2", "status": "closed"}]
+    assert reconcile_linked_authorities(assignments, adapters) == assignments
+    assert adapters.calls == []
+
+
+def test_reviewer_is_not_author_or_cross_phase_leased(adapters: FakeAdapters) -> None:
+    snapshot = _load_json(FIXTURES / "valid_minimal.json")["snapshot"]
+    snapshot["work"][0].update({"phase": "reviewer", "state": "review", "author_agent_instance_id": "i-author", "sensitivity": "ordinary"})
+    snapshot["agents"] = [
+        {"agent_instance_id": "i-author", "identity_revision": "id-a", "attachment_id": "att-a", "attachment_revision": "r-a", "runtime_generation": 1, "observed_harness": "claude", "verified_harness": "claude", "observed_state": "idle", "projected_state": "available", "observed_at": "2026-08-13T09:00:00+00:00", "freshness_deadline": "2026-08-13T10:00:00+00:00", "source_revision": "s-a", "reason_codes": []},
+        {"agent_instance_id": "i-leased", "identity_revision": "id-l", "attachment_id": "att-l", "attachment_revision": "r-l", "runtime_generation": 1, "observed_harness": "claude", "verified_harness": "claude", "observed_state": "idle", "projected_state": "available", "observed_at": "2026-08-13T09:00:00+00:00", "freshness_deadline": "2026-08-13T10:00:00+00:00", "source_revision": "s-l", "reason_codes": []},
+        {"agent_instance_id": "i-reviewer", "identity_revision": "id-r", "attachment_id": "att-r", "attachment_revision": "r-r", "runtime_generation": 1, "observed_harness": "claude", "verified_harness": "claude", "observed_state": "idle", "projected_state": "available", "observed_at": "2026-08-13T09:00:00+00:00", "freshness_deadline": "2026-08-13T10:00:00+00:00", "source_revision": "s-r", "reason_codes": []},
+    ]
+    snapshot["active_leases"] = [{"lease_id": "lease-1", "project_id": "agent-cockpit-next", "workspace_id": "ws-1", "source_kind": "delivery_car", "source_id": "CAR-READY", "source_revision": "rev-1", "phase": "writer", "agent_instance_id": "i-leased", "status": "working"}]
+    pairs = eligible_pairs(refresh_snapshot_revisions(snapshot), datetime(2026, 8, 13, 9, tzinfo=timezone.utc))
+    assert pairs == [("CAR-READY", "i-reviewer")]

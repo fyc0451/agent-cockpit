@@ -83,6 +83,11 @@ repository_id, plan_path, git_head, git_dirty, plan_sha256
 fingerprint。authoritative location 有多个候选时必须
 `authoritative_plan_ambiguous`。
 
+`git_dirty=true` 的 revision 仍是合法且可审计的输入，但 v1 必须输出
+`source_dirty`，并把 fresh source 视为不可派：不得形成 eligible pair、ready
+dispatch 或 ready-without-dispatch alert。它不是 `source_invalid`，也不得被静默
+当作 fresh。
+
 ### 3.1 钉死的普通金样（禁止浮动“当前 Lead Delivery”）
 
 本车普通金样固定到 writer base，不得引用未钉死的 Lead HEAD：
@@ -144,6 +149,21 @@ evaluated_input_revision: str
 
 `active_dispatch_count` 不是从 Coordination claim、Pane 或 Assignment 推导的。
 负数或非零均为 `source_invalid`。未来 lease authority 落地必须升级合同版本。
+
+### 4.1.1 严格输入闭集
+
+所有 DTO（包括嵌套 `capacity`、work、agent、assignment、lease 和
+`TypedAuthorityLink`）均为 exact-key object：缺字段、额外字段、未知 enum、非
+list collection 或错误 strict type 都是 `source_invalid`。整数必须是 JSON integer，
+boolean 不能作为整数接受。每个 `TypedAuthorityLink.kind/id` 必须指向同一 snapshot
+中对应 kind 的对象；work、assignment、agent ID 必须唯一。lease 必须引用同 source
+ID/kind 的 work；旧 revision lease 可以存在以表示 fencing 反例，但不能释放 logical
+uniqueness。
+
+JSON object 出现重复 key 必须在 decode 时拒绝为 `source_invalid`，不得接受最后一个值。
+`source.revision` 必须等于第 3 节的 canonical digest；`evaluated_input_revision`
+必须等于整个 snapshot（不含它自身）的 canonical digest。未知 `schema_version` 必须
+fail-closed，不能按 v1 猜测解释。
 
 ### 4.2 DeliverySourceSnapshot
 
@@ -303,6 +323,7 @@ SCHED-001/002 不持久化 observation 或 alert row。无 previous / 无显式
 ```text
 source_unavailable
 source_stale
+source_dirty
 source_invalid
 authoritative_plan_ambiguous
 dependency_waiting
@@ -336,7 +357,8 @@ authority。未知枚举必须变成 `source_invalid`。
 ## 6. Freshness
 
 - `fresh`：`status=available`，`observed_at` 与 `freshness_deadline` 都存在，
-  且 `evaluated_at <= freshness_deadline`。
+  且 `evaluated_at <= freshness_deadline`，且 `git_dirty=false`。
+- `dirty`：`git_dirty=true`；保留可审计 revision，但不可派并附 `source_dirty`。
 - `stale`：曾经 available，但 `evaluated_at > freshness_deadline`；必须附
   `source_stale`。ready / review / available-agent 均不得形成可派工结论。
 - `unknown`：时间缺失、倒置、非 UTC，或来源非 available；按来源状态附
@@ -458,6 +480,11 @@ heartbeat 所有权：
   标成 blocked / planned / accepted
 - 重新派同一 writer work 前必须完成 source owner handoff / CAS
 
+合同状态反例必须比较 heartbeat 前后 lease 状态：Pane event、不同 lease ID 或旧
+generation credential 对 expiry/fence 零变化；只有当前 lease ID + generation
+credential 才能更新 expiry。该反例是纯 projection helper，不实现或调用 runtime
+lease store。
+
 现有 `coordination.maintain_live_claims` 只能保留消息 receipt 语义，不能复用
 为工作 lease。
 
@@ -487,6 +514,11 @@ Pane `done` 或后台 task `done` 不得制造 ReviewPacket，不得把仍为
 `in_progress` 的 car 推进到 review。Reviewer 必须与作者 identity 不同，且
 该 Agent 不得已有任一 phase 的 active lease。给 review car 派 reviewer 不得
 把 writer occupancy 减 1。
+
+合同反例必须同时给出作者、已有 writer/reviewer lease 的候选和可用 reviewer：前二者
+没有 pair，后者保留 pair，不能用“pair 数为零”的常量断言代替。linked
+Delivery/Assignment 的投影必须返回原 observed status（包含 `in_progress` 与
+`closed`）；不得调用 close/write adapter，也不得靠常量字段证明 no-writeback。
 
 ## 13. 无自动启动 / 无自动合并
 

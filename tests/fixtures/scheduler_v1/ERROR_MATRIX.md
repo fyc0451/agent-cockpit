@@ -22,6 +22,8 @@
 | `invalid_active_dispatch_negative.json` | 负数 dispatch count |
 | `invalid_unknown_sensitivity.json` | 非冻结 sensitivity 枚举 |
 | `invalid_kimi_code_as_verified.json` | 把观察别名 `kimi-code` 标成 verified harness |
+| 内存 nested schema matrix | future version、nested extra、capacity/generation bool-as-int、悬空 typed link、source/input revision mismatch 均拒绝 |
+| `invalid_duplicate_json_key.json` | JSON decode 遇到重复 key 即拒绝，不采用最后值 |
 
 ## 来源四态
 
@@ -31,6 +33,7 @@
 | `source_invalid.json` | `source_invalid` |
 | `source_ambiguous.json` | `authoritative_plan_ambiguous` |
 | `source_stale.json` | `source_stale` |
+| 内存 dirty-source case | `git_dirty=true` 是合法 revision，但 `source_dirty` 且 eligible=0 |
 
 ## P0/P1 状态机反例
 
@@ -50,6 +53,7 @@
 | `scenario_lease_r1_blocks_r2.json` | 逻辑唯一键不含 revision |
 | `scenario_occupancy_union.json` | offer 占用并集，拒绝第二 offer |
 | `scenario_occupancy_no_double_count.json` | 同 car + lease 只计一次 |
-| `scenario_heartbeat_pane_ignored.json` | Pane 事件不续 dispatch heartbeat |
-| `scenario_author_cannot_review.json` | 作者不得审自己 |
+| heartbeat state transition | Pane/旧 generation 不改 lease；当前 generation 才更新 expiry |
+| reviewer state transition | 作者与任一 active-lease Agent 均不可审；独立 reviewer 可配对 |
+| linked-authority state transition | in_progress/closed 原样保留，close/write adapter 零调用 |
 | `scenario_wip2_ungated.json` | gate 未 accepted 时 effective=2 |
