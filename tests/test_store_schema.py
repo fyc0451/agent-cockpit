@@ -124,12 +124,24 @@ def test_project_registry_strict_schema_damage_fails_closed(
                 "SELECT name FROM sqlite_master WHERE type='trigger'"
             )
         }
+        assert existing_triggers == (
+            project_registry_contracts.PROJECT_REGISTRY_TRIGGERS
+        )
         trigger_names = sorted(
             existing_triggers & project_registry_contracts.PROJECT_REGISTRY_TRIGGERS
         )
         assert trigger_names, "project registry has no contract trigger to damage"
         trigger_name = trigger_names[0]
         connection.execute(f'DROP TRIGGER "{trigger_name}"')
+        remaining_triggers = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        assert remaining_triggers == (
+            project_registry_contracts.PROJECT_REGISTRY_TRIGGERS - {trigger_name}
+        )
     else:
         connection.execute("DROP INDEX repo_locations_active_node_path")
         connection.execute(
