@@ -455,7 +455,7 @@
     {
       "id": "SLICE-001-local-readonly",
       "title": "Deliver the first real Local-only read path from Doctor to persisted Workspace Files",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["WEB-003-project-registry-ui", "PROJ-005-compatibility", "SCHED-002-readonly-projection"],
       "scope": ["agent_cockpit/project_registry_store.py", "agent_cockpit/files.py", "agent_cockpit/local_readonly_api.py", "agent_cockpit/server.py", "tests/test_cockpit2_local_slice.py", "tests/test_project_registry.py", "docs/contracts/cockpit2-local-slice-v1.md", "web/api/localSlice.ts", "web/api/registry.ts", "web/api/types.ts", "web/features/ProjectScope.tsx", "web/features/WorkspaceScope.tsx", "web/pages/SettingsPage.tsx", "web/pages/ProjectsPage.tsx", "web/pages/ProjectWorkbenchPage.tsx", "web/pages/WorkspaceHomePage.tsx", "web/pages/FilesPage.tsx", "web/fixtures/api.ts", "web/test/local-slice.test.tsx", "web/test/deeplinks.test.tsx", "web/test/web003-registry.test.tsx", "web/test/capabilities.test.tsx", "web/e2e/local-slice.spec.ts"],
       "acceptance": [
