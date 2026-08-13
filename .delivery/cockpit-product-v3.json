@@ -454,13 +454,15 @@
     },
     {
       "id": "SLICE-001-local-readonly",
-      "title": "Deliver the first real Local-only read path from Doctor to Files and Terminal",
+      "title": "Deliver the first real Local-only read path from Doctor to persisted Workspace Files",
       "status": "planned",
       "depends_on": ["WEB-003-project-registry-ui", "PROJ-005-compatibility", "SCHED-002-readonly-projection"],
-      "scope": ["agent_cockpit/api", "agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/domain", "agent_cockpit/infrastructure", "web", "tests", "docs/contracts"],
+      "scope": ["agent_cockpit/project_registry_store.py", "agent_cockpit/local_readonly_api.py", "agent_cockpit/server.py", "tests/test_cockpit2_local_slice.py", "tests/test_project_registry.py", "docs/contracts/cockpit2-local-slice-v1.md", "web/api/localSlice.ts", "web/pages/SettingsPage.tsx", "web/pages/ProjectWorkbenchPage.tsx", "web/pages/WorkspaceHomePage.tsx", "web/pages/FilesPage.tsx", "web/fixtures/api.ts", "web/test/local-slice.test.tsx", "web/e2e/local-slice.spec.ts"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_cockpit2_local_slice.py", "passed": false},
-        {"command": "npm --prefix web run test:e2e", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_cockpit2_local_slice.py tests/test_project_registry.py", "passed": false},
+        {"command": "npm --prefix web test -- --run web/test/local-slice.test.tsx", "passed": false},
+        {"command": "npm --prefix web run test:e2e -- web/e2e/local-slice.spec.ts", "passed": false},
+        {"command": "npm --prefix web run build", "passed": false}
       ],
       "rollback": "Disable the Cockpit 2 routes and Web entry while retaining the accepted safety and registry stores",
       "production_impact": "none",
