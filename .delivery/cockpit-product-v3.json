@@ -301,7 +301,7 @@
       ],
       "rollback": "Revert only the importer code; retain append-only registry provenance and never mutate legacy authorities",
       "production_impact": "none",
-      "owner_instance_id": "i-v4mmixwv2ss5beq4egdeg3x5jq",
+      "owner_instance_id": "i-esfeeieqrcsgnmf46hx5kfwyau",
       "reviewer_instance_id": null,
       "base_sha": "62c0aa2a1dbc33a551ba33149aa7b7efd0b2eaca",
       "fixed_sha": null,
