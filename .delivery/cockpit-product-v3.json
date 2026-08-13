@@ -313,7 +313,7 @@
     {
       "id": "PROJ-004A-project-api-store",
       "title": "Add atomic Project Registry reads and registration primitives for the Project API",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": ["PROJ-001-registry-store"],
       "scope": ["agent_cockpit/project_registry_domain.py", "agent_cockpit/project_registry_store.py", "tests/test_project_registry.py", "docs/contracts/project-registry-v1.md"],
       "acceptance": [
@@ -321,9 +321,9 @@
       ],
       "rollback": "Revert only the Project API Store primitives; retain append-only Project Registry rows and idempotency receipts",
       "production_impact": "none",
-      "owner_instance_id": null,
+      "owner_instance_id": "i-v4mmixwv2ss5beq4egdeg3x5jq",
       "reviewer_instance_id": null,
-      "base_sha": null,
+      "base_sha": "709c2b617ef205260f26a6afd455db446bfbec64",
       "fixed_sha": null,
       "cross_module_block_count": 0,
       "release_started_at": null,
