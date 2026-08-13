@@ -1,6 +1,8 @@
 """Strict, dormant SQLite repository for Project Registry v1."""
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -137,7 +139,11 @@ def _prepare_parent(path: Path, *, create: bool) -> None:
     _reject_symlink_components(path)
 
 
-def _leaf_signature(path: Path, *, must_exist: bool) -> tuple[int, int, int, int]:
+FileSignature = tuple[int, int, int, int, int]
+SidecarSignature = tuple[int, int, int, int, int, int]
+
+
+def _leaf_signature(path: Path, *, must_exist: bool) -> FileSignature:
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -149,13 +155,14 @@ def _leaf_signature(path: Path, *, must_exist: bool) -> tuple[int, int, int, int
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) & 0o077
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
     ):
         _fail("store_unsafe")
-    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode)
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink)
 
 
-def _check_path(path: Path, *, must_exist: bool) -> tuple[int, int, int, int]:
+def _check_path(path: Path, *, must_exist: bool) -> FileSignature:
     try:
         _prepare_parent(path, create=False)
         return _leaf_signature(path, must_exist=must_exist)
@@ -165,7 +172,7 @@ def _check_path(path: Path, *, must_exist: bool) -> tuple[int, int, int, int]:
         _fail("store_unsafe", exc)
 
 
-def _create_leaf(path: Path) -> tuple[int, int, int, int]:
+def _create_leaf(path: Path) -> FileSignature:
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -182,57 +189,85 @@ def _create_leaf(path: Path) -> tuple[int, int, int, int]:
             not stat.S_ISREG(opened.st_mode)
             or opened.st_uid != os.getuid()
             or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
         ):
             _fail("store_unsafe")
+        opened_signature = (
+            opened.st_dev, opened.st_ino, opened.st_uid,
+            opened.st_mode, opened.st_nlink,
+        )
     finally:
         os.close(fd)
     _reject_symlink_components(path)
-    return _leaf_signature(path, must_exist=True)
+    if _leaf_signature(path, must_exist=True) != opened_signature:
+        _fail("store_unsafe")
+    return opened_signature
 
 
-def _discard_unpublished_leaf(
-    path: Path, created_signature: tuple[int, int, int, int]
+def _sidecar_paths(path: Path) -> tuple[Path, Path, Path]:
+    return (
+        Path(f"{path}-journal"),
+        Path(f"{path}-wal"),
+        Path(f"{path}-shm"),
+    )
+
+
+def _snapshot_sidecars(path: Path) -> dict[Path, SidecarSignature]:
+    snapshot: dict[Path, SidecarSignature] = {}
+    for sidecar in _sidecar_paths(path):
+        try:
+            info = sidecar.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _fail("store_unsafe", exc)
+        snapshot[sidecar] = (
+            info.st_dev, info.st_ino, info.st_uid, info.st_mode,
+            info.st_nlink, info.st_size,
+        )
+    return snapshot
+
+
+def _require_no_sidecars(path: Path) -> None:
+    current = _snapshot_sidecars(path)
+    if current:
+        _fail("store_unsafe")
+
+
+def _require_leaf_signature(
+    path: Path, expected: FileSignature
 ) -> None:
-    """Remove only the empty inode created by this initialize call."""
+    if _check_path(path, must_exist=True) != expected:
+        _fail("store_unsafe")
+
+
+def _discard_created_leaf(
+    path: Path, created_signature: FileSignature
+) -> None:
+    """Remove only the exact inode explicitly created by this call."""
+    try:
+        if _snapshot_sidecars(path):
+            return
+    except ProjectRegistryError:
+        return
     try:
         leaf = path.lstat()
     except OSError:
         return
     if (
-        (leaf.st_dev, leaf.st_ino, leaf.st_uid, leaf.st_mode) != created_signature
+        (leaf.st_dev, leaf.st_ino, leaf.st_uid, leaf.st_mode, leaf.st_nlink)
+        != created_signature
         or not stat.S_ISREG(leaf.st_mode)
         or leaf.st_uid != os.getuid()
         or leaf.st_nlink != 1
-        or leaf.st_size != 0
     ):
         return
-    for candidate in (
-        Path(f"{path}-journal"), Path(f"{path}-wal"), Path(f"{path}-shm")
-    ):
-        try:
-            info = candidate.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_nlink != 1
-            or info.st_size != 0
-        ):
-            return
-        try:
-            candidate.unlink()
-        except OSError:
-            return
     try:
         current = path.lstat()
         if (
             (current.st_dev, current.st_ino, current.st_uid, current.st_mode)
-            == created_signature
+            + (current.st_nlink,) == created_signature
             and current.st_nlink == 1
-            and current.st_size == 0
         ):
             path.unlink()
     except OSError:
@@ -268,6 +303,70 @@ def _connect_read(path: Path) -> sqlite3.Connection:
     except BaseException:
         connection.close()
         raise
+
+
+def _fsync_file(path: Path, expected: FileSignature) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        _fail("store_unsafe", exc)
+    try:
+        info = os.fstat(fd)
+        actual = (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink)
+        if actual != expected:
+            _fail("store_unsafe")
+        os.fsync(fd)
+    except OSError as exc:
+        _fail("store_unsafe", exc)
+    finally:
+        os.close(fd)
+    _require_leaf_signature(path, expected)
+
+
+def _fsync_directory(path: Path) -> None:
+    _validate_directory(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        _fail("store_unsafe", exc)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            _fail("store_unsafe")
+        os.fsync(fd)
+    except OSError as exc:
+        _fail("store_unsafe", exc)
+    finally:
+        os.close(fd)
+    _validate_directory(path)
+
+
+def _publish_noreplace(source: Path, destination: Path) -> bool:
+    """Atomically rename a complete same-directory temp without overwrite."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+    except AttributeError:
+        _fail("store_unsafe")
+    renameat2.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100, os.fsencode(source), -100, os.fsencode(destination), 1
+    )
+    if result == 0:
+        return True
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        return False
+    _fail("store_unsafe", OSError(error_number, os.strerror(error_number)))
 
 
 def _validate_schema(connection: sqlite3.Connection) -> None:
@@ -522,22 +621,31 @@ def _binding_record(row: sqlite3.Row) -> domain.LegacyBindingRecord:
 def initialize(path: Path) -> ProjectRegistryStore:
     path = _absolute_path(path)
     _prepare_parent(path, create=True)
-    created_signature: tuple[int, int, int, int] | None = None
+    initial_sidecars = _snapshot_sidecars(path)
     try:
         path.lstat()
     except FileNotFoundError:
-        created_signature = _create_leaf(path)
+        pass
     except OSError as exc:
         _fail("store_unsafe", exc)
     else:
         return open_existing(path)
+
+    temp_path = path.parent / f".{path.name}.init-{secrets.token_hex(16)}.tmp"
+    temp_signature = _create_leaf(temp_path)
+
+    connection: sqlite3.Connection | None = None
+    built = False
     try:
-        connection = _connect_write(path)
+        _require_no_sidecars(temp_path)
+        _require_leaf_signature(temp_path, temp_signature)
+        connection = _connect_write(temp_path)
+        _require_leaf_signature(temp_path, temp_signature)
     except BaseException:
-        assert created_signature is not None
-        _discard_unpublished_leaf(path, created_signature)
+        if connection is not None:
+            connection.close()
+        _discard_created_leaf(temp_path, temp_signature)
         raise
-    published = False
     try:
         connection.execute("BEGIN IMMEDIATE")
         for statement in contracts.SCHEMA_STATEMENTS:
@@ -550,8 +658,9 @@ def initialize(path: Path) -> ProjectRegistryStore:
         connection.execute(f"PRAGMA user_version={contracts.SCHEMA_VERSION}")
         _after_schema_hook(connection)
         _validate_schema(connection)
+        _require_leaf_signature(temp_path, temp_signature)
         connection.execute("COMMIT")
-        published = True
+        built = True
     except BaseException:
         try:
             connection.execute("ROLLBACK")
@@ -560,16 +669,37 @@ def initialize(path: Path) -> ProjectRegistryStore:
         raise
     finally:
         connection.close()
-        if created_signature is not None and not published:
-            _discard_unpublished_leaf(path, created_signature)
-    return ProjectRegistryStore(path)
+        if not built:
+            _discard_created_leaf(temp_path, temp_signature)
+
+    try:
+        _require_leaf_signature(temp_path, temp_signature)
+        _require_no_sidecars(temp_path)
+        _fsync_file(temp_path, temp_signature)
+        if initial_sidecars:
+            if _snapshot_sidecars(path) != initial_sidecars:
+                _fail("store_unsafe")
+            _fail("store_unsafe")
+        _require_no_sidecars(path)
+        published = _publish_noreplace(temp_path, path)
+        if published:
+            _require_leaf_signature(path, temp_signature)
+            _require_no_sidecars(path)
+            _fsync_directory(path.parent)
+            return ProjectRegistryStore(path)
+        _discard_created_leaf(temp_path, temp_signature)
+        winner = open_existing(path)
+        _fsync_directory(path.parent)
+        return winner
+    except BaseException:
+        _discard_created_leaf(temp_path, temp_signature)
+        raise
 
 
 def open_existing(path: Path) -> ProjectRegistryStore:
     path = _absolute_path(path)
     _check_path(path, must_exist=True)
-    if Path(f"{path}-wal").exists() or Path(f"{path}-shm").exists():
-        _fail("store_unsafe")
+    _require_no_sidecars(path)
     try:
         connection = _connect_read(path)
     except sqlite3.DatabaseError as exc:

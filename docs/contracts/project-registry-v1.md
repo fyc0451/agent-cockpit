@@ -14,12 +14,16 @@ detach、transfer、Workspace plan/execute、Git、Herdr、Mail 或文件系统�
 
 - `SCHEMA_VERSION = 1`，migration ID 为 `project-registry-v1`。
 - `schema_migrations` 是 DDL ledger；`legacy_project_bindings` 是 provenance ledger，两者不得混用。
+  两者与 `idempotency_records` 都由数据库 trigger 保证 append-only，任何 `UPDATE`/`DELETE` 均拒绝。
 - 空路径只能由显式 `initialize(path)` 创建 v1 schema；既有非 v1 Store 不做推测修补或破坏性迁移。
 - `open_existing(path)` 是纯读验证：不创建、不 migration、不启用 WAL、不留下 `-wal/-shm`。
 - future version 返回 `future_schema`；旧 version 返回 `migration_required`；当前 version 的 table、
   trigger、index、FK、migration receipt 或 DDL fingerprint 不一致返回
   `schema_fingerprint_mismatch`。
 - 初始化的 DDL、migration receipt、`PRAGMA user_version=1` 和校验处于同一事务；失败全部回滚。
+- 首次初始化先在目标同目录的私有随机 temp 中完成事务、schema 校验和 file `fsync`，再以
+  no-replace 原子发布并 `fsync` 父目录；最终路径从不暴露半初始化 DB，并发初始化复用先发布的
+  完整 winner。预存或新出现的 `-journal/-wal/-shm` 一律 fail closed，不删除或改写。
 - 每个写连接启用 `PRAGMA foreign_keys=ON`，写事务使用 `BEGIN IMMEDIATE`；Store 文件模式为 `0600`。
 - 公开 readiness fingerprint 常量在 `agent_cockpit.project_registry_contracts`：
   `PROJECT_REGISTRY_TABLES`、`PROJECT_REGISTRY_DEFAULTS`、`PROJECT_REGISTRY_INDEXES`、
@@ -29,14 +33,18 @@ detach、transfer、Workspace plan/execute、Git、Herdr、Mail 或文件系统�
 ## Project
 
 `project_id` 是服务端生成的 `prj_` + 128-bit random opaque ID，不由 slug 或路径派生。slug 必须是
-1 到 64 字符的 normalized ASCII lower-kebab，创建后不可变，并由无条件 `UNIQUE` 保证全生命周期
-不复用。`display_name` 和 `goal` 不参与 identity。lifecycle 仅为 `active|archived`，version 从 1 开始。
+1 到 64 字符的 normalized ASCII lower-kebab。`project_id` 与 slug 创建后不可变，并由无条件
+`UNIQUE` 和禁止物理 `DELETE` 的数据库 trigger 保证 slug 全生命周期不复用。`display_name` 和
+`goal` 不参与 identity。lifecycle 仅为 `active|archived`，version 从 1 开始。
 
 ## RepoLocation
 
 `repo_location_id` 是服务端生成 opaque ID。identity 是目标 node 上 provider 已规范化的
 `(node_id, canonical_path)`；Store 不对 remote path 调用本机 `Path.resolve()`，也不按 Git remote、
 inode 或 basename 合并。
+
+`repo_location_id`、owner `project_id`、`node_id` 和 `canonical_path` 创建后不可变；RepoLocation
+禁止物理 `DELETE`，生命周期变更是释放 active 槽的唯一机制。
 
 RepoLocation lifecycle 为 `active|archived`，availability 为独立观测态
 `available|offline|missing|unknown`。唯一槽由 partial unique index 精确定义：
@@ -61,7 +69,8 @@ REFERENCES repo_locations(project_id, repo_location_id)
 ```
 
 Repository 对未知 location 和其他 Project 的 location 统一返回 `repo_location_not_found`，避免成为
-跨 Project existence oracle。同 Project active Workspace name 使用 partial unique index。
+跨 Project existence oracle。`workspace_id`、owner `project_id` 和 `repo_location_id` 创建后不可变，
+Workspace 禁止物理 `DELETE`；同 Project active Workspace name 使用 partial unique index。
 
 ## Legacy provenance
 
@@ -69,6 +78,7 @@ Repository 对未知 location 和其他 Project 的 location 统一返回 `repo_
 `agent_mail_project`、`mail_projects_session`、`herdr_session`、`coordination_run`；不同 authority
 中的相同 source key 不冲突。同一 pair 仅在 project 和 digest 都相同时幂等重放，否则返回
 `legacy_binding_conflict`。写 provenance 不修改任何 legacy source。
+Ledger row 只允许首次插入，不允许改写或删除。
 
 ## Idempotency
 
@@ -76,6 +86,7 @@ Repository 对未知 location 和其他 Project 的 location 统一返回 `repo_
 精确重放首次持久化的 status/response/opaque IDs；不同 digest 返回 `idempotency_conflict`。
 aggregate mutation 和 `idempotency_records` 写入同一 `BEGIN IMMEDIATE` 事务，mutation 失败不留下
 reservation，ledger 写失败也不留下 aggregate。
+首次 receipt 持久化后不允许改写或删除。
 
 ## 稳定错误
 

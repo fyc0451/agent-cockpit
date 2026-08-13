@@ -14,6 +14,12 @@ SCHEMA_STATEMENTS = (
         schema_digest TEXT NOT NULL CHECK(length(schema_digest) = 64),
         applied_at TEXT NOT NULL
     )""",
+    """CREATE TRIGGER schema_migrations_update_forbidden
+        BEFORE UPDATE ON schema_migrations
+        BEGIN SELECT RAISE(ABORT, 'schema_migrations_append_only'); END""",
+    """CREATE TRIGGER schema_migrations_delete_forbidden
+        BEFORE DELETE ON schema_migrations
+        BEGIN SELECT RAISE(ABORT, 'schema_migrations_append_only'); END""",
     """CREATE TABLE projects (
         project_id TEXT NOT NULL PRIMARY KEY CHECK(
             length(project_id) = 36 AND substr(project_id, 1, 4) = 'prj_' AND
@@ -33,10 +39,13 @@ SCHEMA_STATEMENTS = (
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )""",
-    """CREATE TRIGGER projects_slug_immutable
-        BEFORE UPDATE OF slug ON projects
-        WHEN NEW.slug <> OLD.slug
-        BEGIN SELECT RAISE(ABORT, 'project_slug_immutable'); END""",
+    """CREATE TRIGGER projects_identity_immutable
+        BEFORE UPDATE OF project_id, slug ON projects
+        WHEN NEW.project_id <> OLD.project_id OR NEW.slug <> OLD.slug
+        BEGIN SELECT RAISE(ABORT, 'project_identity_immutable'); END""",
+    """CREATE TRIGGER projects_delete_forbidden
+        BEFORE DELETE ON projects
+        BEGIN SELECT RAISE(ABORT, 'project_delete_forbidden'); END""",
     """CREATE TABLE repo_locations (
         repo_location_id TEXT NOT NULL PRIMARY KEY CHECK(
             length(repo_location_id) = 36 AND
@@ -74,6 +83,17 @@ SCHEMA_STATEMENTS = (
         FOREIGN KEY(project_id) REFERENCES projects(project_id),
         UNIQUE(project_id, repo_location_id)
     )""",
+    """CREATE TRIGGER repo_locations_identity_immutable
+        BEFORE UPDATE OF repo_location_id, project_id, node_id, canonical_path
+        ON repo_locations
+        WHEN NEW.repo_location_id <> OLD.repo_location_id OR
+             NEW.project_id <> OLD.project_id OR
+             NEW.node_id <> OLD.node_id OR
+             NEW.canonical_path <> OLD.canonical_path
+        BEGIN SELECT RAISE(ABORT, 'repo_location_identity_immutable'); END""",
+    """CREATE TRIGGER repo_locations_delete_forbidden
+        BEFORE DELETE ON repo_locations
+        BEGIN SELECT RAISE(ABORT, 'repo_location_delete_forbidden'); END""",
     """CREATE UNIQUE INDEX repo_locations_active_node_path
         ON repo_locations(node_id, canonical_path)
         WHERE lifecycle = 'active'""",
@@ -102,6 +122,15 @@ SCHEMA_STATEMENTS = (
         FOREIGN KEY(project_id, repo_location_id)
             REFERENCES repo_locations(project_id, repo_location_id)
     )""",
+    """CREATE TRIGGER workspaces_identity_immutable
+        BEFORE UPDATE OF workspace_id, project_id, repo_location_id ON workspaces
+        WHEN NEW.workspace_id <> OLD.workspace_id OR
+             NEW.project_id <> OLD.project_id OR
+             NEW.repo_location_id <> OLD.repo_location_id
+        BEGIN SELECT RAISE(ABORT, 'workspace_identity_immutable'); END""",
+    """CREATE TRIGGER workspaces_delete_forbidden
+        BEFORE DELETE ON workspaces
+        BEGIN SELECT RAISE(ABORT, 'workspace_delete_forbidden'); END""",
     """CREATE UNIQUE INDEX workspaces_active_project_name
         ON workspaces(project_id, name)
         WHERE lifecycle = 'active'""",
@@ -120,6 +149,12 @@ SCHEMA_STATEMENTS = (
         imported_at TEXT NOT NULL,
         UNIQUE(source_kind, source_key)
     )""",
+    """CREATE TRIGGER legacy_project_bindings_update_forbidden
+        BEFORE UPDATE ON legacy_project_bindings
+        BEGIN SELECT RAISE(ABORT, 'legacy_project_bindings_append_only'); END""",
+    """CREATE TRIGGER legacy_project_bindings_delete_forbidden
+        BEFORE DELETE ON legacy_project_bindings
+        BEGIN SELECT RAISE(ABORT, 'legacy_project_bindings_append_only'); END""",
     """CREATE TABLE idempotency_records (
         scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 128),
         idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) BETWEEN 1 AND 128),
@@ -129,6 +164,12 @@ SCHEMA_STATEMENTS = (
         created_at TEXT NOT NULL,
         PRIMARY KEY(scope, idempotency_key)
     )""",
+    """CREATE TRIGGER idempotency_records_update_forbidden
+        BEFORE UPDATE ON idempotency_records
+        BEGIN SELECT RAISE(ABORT, 'idempotency_records_append_only'); END""",
+    """CREATE TRIGGER idempotency_records_delete_forbidden
+        BEFORE DELETE ON idempotency_records
+        BEGIN SELECT RAISE(ABORT, 'idempotency_records_append_only'); END""",
 )
 
 SCHEMA_DIGEST = hashlib.sha256(
@@ -219,7 +260,20 @@ PROJECT_REGISTRY_FOREIGN_KEYS = {
     "idempotency_records": frozenset(),
 }
 
-PROJECT_REGISTRY_TRIGGERS = frozenset({"projects_slug_immutable"})
+PROJECT_REGISTRY_TRIGGERS = frozenset({
+    "schema_migrations_update_forbidden",
+    "schema_migrations_delete_forbidden",
+    "projects_identity_immutable",
+    "projects_delete_forbidden",
+    "repo_locations_identity_immutable",
+    "repo_locations_delete_forbidden",
+    "workspaces_identity_immutable",
+    "workspaces_delete_forbidden",
+    "legacy_project_bindings_update_forbidden",
+    "legacy_project_bindings_delete_forbidden",
+    "idempotency_records_update_forbidden",
+    "idempotency_records_delete_forbidden",
+})
 PROJECT_REGISTRY_MIGRATION_RECEIPT = (
     MIGRATION_ID,
     SCHEMA_VERSION,

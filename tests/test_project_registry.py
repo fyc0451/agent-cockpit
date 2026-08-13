@@ -4,6 +4,8 @@ import hashlib
 import os
 import secrets
 import sqlite3
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -184,6 +186,143 @@ def test_slug_is_immutable_and_never_reused(registry, db_path):
     with pytest.raises(registry_store.ProjectRegistryError) as conflict:
         registry.create_project(slug="stable-slug", display_name="Again", goal=None)
     assert _code(conflict) == "project_slug_conflict"
+
+
+def test_aggregate_rows_reject_physical_delete(registry, db_path: Path):
+    project = registry.create_project(
+        slug="durable", display_name="Durable", goal=None
+    )
+    location = registry.add_repo_location(
+        project_id=project.project_id,
+        node_id="local",
+        canonical_path="/repo/durable",
+        vcs_kind="none",
+        availability="available",
+    )
+    workspace = registry.create_workspace(
+        project_id=project.project_id,
+        repo_location_id=location.repo_location_id,
+        name="durable",
+        goal=None,
+        isolation_kind="shared",
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        for table, identity, value in (
+            ("workspaces", "workspace_id", workspace.workspace_id),
+            ("repo_locations", "repo_location_id", location.repo_location_id),
+            ("projects", "project_id", project.project_id),
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {identity}=?", (value,)
+                )
+
+
+@pytest.mark.parametrize(
+    ("table", "identity", "column", "replacement"),
+    [
+        ("projects", "project_id", "project_id", "prj_" + "f" * 32),
+        ("projects", "project_id", "slug", "rebound"),
+        (
+            "repo_locations", "repo_location_id", "repo_location_id",
+            "loc_" + "f" * 32,
+        ),
+        ("repo_locations", "repo_location_id", "project_id", "prj_" + "f" * 32),
+        ("repo_locations", "repo_location_id", "node_id", "other-node"),
+        ("repo_locations", "repo_location_id", "canonical_path", "/repo/rebound"),
+        ("workspaces", "workspace_id", "workspace_id", "ws_" + "f" * 32),
+        ("workspaces", "workspace_id", "project_id", "prj_" + "f" * 32),
+        (
+            "workspaces", "workspace_id", "repo_location_id",
+            "loc_" + "f" * 32,
+        ),
+    ],
+)
+def test_aggregate_identity_and_ownership_reject_direct_sql_rebinding(
+    registry,
+    db_path: Path,
+    table: str,
+    identity: str,
+    column: str,
+    replacement: str,
+):
+    project = registry.create_project(
+        slug="identity", display_name="Identity", goal=None
+    )
+    location = registry.add_repo_location(
+        project_id=project.project_id,
+        node_id="local",
+        canonical_path="/repo/identity",
+        vcs_kind="none",
+        availability="available",
+    )
+    workspace = registry.create_workspace(
+        project_id=project.project_id,
+        repo_location_id=location.repo_location_id,
+        name="identity",
+        goal=None,
+        isolation_kind="shared",
+    )
+    row_identity = {
+        "projects": project.project_id,
+        "repo_locations": location.repo_location_id,
+        "workspaces": workspace.workspace_id,
+    }[table]
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                f"UPDATE {table} SET {column}=? WHERE {identity}=?",
+                (replacement, row_identity),
+            )
+
+
+@pytest.mark.parametrize(
+    ("table", "update_sql", "delete_sql"),
+    [
+        (
+            "schema_migrations",
+            "UPDATE schema_migrations SET schema_digest='" + "0" * 64 + "'",
+            "DELETE FROM schema_migrations",
+        ),
+        (
+            "legacy_project_bindings",
+            "UPDATE legacy_project_bindings SET source_digest='sha256:forged'",
+            "DELETE FROM legacy_project_bindings",
+        ),
+        (
+            "idempotency_records",
+            "UPDATE idempotency_records SET status_code=204",
+            "DELETE FROM idempotency_records",
+        ),
+    ],
+)
+def test_ledgers_reject_update_and_delete(
+    registry, db_path: Path, table: str, update_sql: str, delete_sql: str
+):
+    project = registry.create_project(
+        slug="ledger", display_name="Ledger", goal=None
+    )
+    registry.bind_legacy_source(
+        project_id=project.project_id,
+        source_kind="agent_mail_project",
+        source_key="project:ledger",
+        source_digest="sha256:original",
+    )
+    registry.idempotent_create_project(
+        scope="project.create",
+        idempotency_key="ledger",
+        payload={"slug": "ledger-created", "display_name": "Ledger Created"},
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(update_sql)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(delete_sql)
 
 
 @pytest.mark.parametrize(
@@ -415,19 +554,26 @@ def test_open_existing_rejects_unknown_current_schema_without_writes(db_path: Pa
 
 
 @pytest.mark.parametrize(
-    "tamper",
+    "tamper_statements",
     [
-        "UPDATE schema_migrations SET schema_digest='" + "0" * 64 + "'",
-        "CREATE TRIGGER unknown_trigger AFTER INSERT ON projects BEGIN SELECT 1; END",
-        "CREATE INDEX unknown_index ON projects(display_name)",
+        (
+            "DROP TRIGGER schema_migrations_update_forbidden",
+            "UPDATE schema_migrations SET schema_digest='" + "0" * 64 + "'",
+        ),
+        (
+            "CREATE TRIGGER unknown_trigger AFTER INSERT ON projects "
+            "BEGIN SELECT 1; END",
+        ),
+        ("CREATE INDEX unknown_index ON projects(display_name)",),
     ],
 )
 def test_open_existing_rejects_ledger_and_schema_fingerprint_tampering(
-    db_path: Path, tamper: str
+    db_path: Path, tamper_statements: tuple[str, ...]
 ):
     registry_store.initialize(db_path).close()
     with sqlite3.connect(db_path) as connection:
-        connection.execute(tamper)
+        for statement in tamper_statements:
+            connection.execute(statement)
     before = hashlib.sha256(db_path.read_bytes()).hexdigest()
     with pytest.raises(registry_store.ProjectRegistryError) as failure:
         registry_store.open_existing(db_path)
@@ -620,3 +766,125 @@ def test_post_connect_setup_failure_closes_connection(
     assert wrappers[0].closed is True
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         wrappers[0].connection.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+def test_initialize_preserves_preexisting_sidecar(
+    tmp_path: Path, suffix: str
+):
+    path = tmp_path / "project-registry.sqlite3"
+    sidecar = Path(f"{path}{suffix}")
+    sidecar.write_bytes(b"preexisting-sidecar")
+    os.chmod(sidecar, 0o600)
+    before = sidecar.lstat()
+
+    with pytest.raises(registry_store.ProjectRegistryError) as unsafe:
+        registry_store.initialize(path)
+    assert _code(unsafe) == "store_unsafe"
+    after = sidecar.lstat()
+    assert (
+        after.st_dev, after.st_ino, after.st_uid, after.st_mode,
+        after.st_nlink, after.st_size,
+    ) == (
+        before.st_dev, before.st_ino, before.st_uid, before.st_mode,
+        before.st_nlink, before.st_size,
+    )
+    assert sidecar.read_bytes() == b"preexisting-sidecar"
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+def test_connect_failure_preserves_preexisting_empty_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
+):
+    path = tmp_path / "project-registry.sqlite3"
+    sidecar = Path(f"{path}{suffix}")
+    sidecar.write_bytes(b"")
+    os.chmod(sidecar, 0o600)
+    before = sidecar.lstat()
+
+    def fail_connect(_path: Path):
+        raise RuntimeError("injected connection setup failure")
+
+    monkeypatch.setattr(registry_store, "_connect_write", fail_connect)
+    with pytest.raises(RuntimeError, match="injected connection setup failure"):
+        registry_store.initialize(path)
+    after = sidecar.lstat()
+    assert (
+        after.st_dev, after.st_ino, after.st_uid, after.st_mode,
+        after.st_nlink, after.st_size,
+    ) == (
+        before.st_dev, before.st_ino, before.st_uid, before.st_mode,
+        before.st_nlink, before.st_size,
+    )
+    assert not path.exists()
+
+
+def test_connect_failure_never_removes_concurrently_created_final_leaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "project-registry.sqlite3"
+    replacement = b"concurrent-final-leaf"
+
+    def fail_after_replacement(_temp_path: Path):
+        path.write_bytes(replacement)
+        os.chmod(path, 0o600)
+        raise RuntimeError("injected connection setup failure")
+
+    monkeypatch.setattr(registry_store, "_connect_write", fail_after_replacement)
+    with pytest.raises(RuntimeError, match="injected connection setup failure"):
+        registry_store.initialize(path)
+    assert path.read_bytes() == replacement
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("mode", [0o400, 0o700, 0o644])
+def test_existing_registry_requires_exact_0600_mode(db_path: Path, mode: int):
+    registry_store.initialize(db_path).close()
+    before = db_path.read_bytes()
+    os.chmod(db_path, mode)
+
+    with pytest.raises(registry_store.ProjectRegistryError) as unsafe:
+        registry_store.open_existing(db_path)
+    assert _code(unsafe) == "store_unsafe"
+    assert db_path.read_bytes() == before
+    assert db_path.stat().st_mode & 0o777 == mode
+
+
+def test_initialize_crash_before_temp_connect_never_publishes_partial_store(
+    tmp_path: Path,
+):
+    path = tmp_path / "project-registry.sqlite3"
+    script = "\n".join((
+        "import os",
+        "from pathlib import Path",
+        "from agent_cockpit import project_registry_store as store",
+        "store._connect_write = lambda _path: os._exit(73)",
+        f"store.initialize(Path({str(path)!r}))",
+    ))
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        check=False,
+    )
+
+    assert result.returncode == 73
+    assert not path.exists()
+    registry_store.initialize(path).close()
+    registry_store.open_existing(path).close()
+
+
+def test_concurrent_initialize_publishes_one_complete_registry(tmp_path: Path):
+    path = tmp_path / "project-registry.sqlite3"
+
+    def initialize_once(_index: int) -> None:
+        registry_store.initialize(path).close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(initialize_once, range(2)))
+
+    registry_store.open_existing(path).close()
+    assert not Path(f"{path}-journal").exists()
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
