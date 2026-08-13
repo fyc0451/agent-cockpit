@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -345,7 +346,7 @@ def _resolve(rel: str) -> Path:
     raise ValueError(f"路径不在允许范围内: {path}")
 
 
-def _resolve_trusted_root(root: str | Path, relative: str) -> Path:
+def _trusted_relative_parts(relative: str) -> tuple[str, ...]:
     if not isinstance(relative, str):
         raise TrustedRootError("invalid_relative_path")
     if relative:
@@ -355,28 +356,192 @@ def _resolve_trusted_root(root: str | Path, relative: str) -> Path:
             or any(ord(char) < 32 or ord(char) == 127 for char in relative)
         ):
             raise TrustedRootError("invalid_relative_path")
-        parts = relative.split("/")
+        parts = tuple(relative.split("/"))
         if any(not part or part in {".", ".."} or part.startswith("~") for part in parts):
             raise TrustedRootError("invalid_relative_path")
     else:
-        parts = []
+        parts = ()
+    return parts
+
+
+def _close_trusted_fd(fd: int) -> None:
     try:
-        lexical_root = Path(root)
-        if not lexical_root.is_absolute():
-            raise TrustedRootError("local_files_unavailable")
-        resolved_root = lexical_root.resolve(strict=True)
-        if not resolved_root.is_dir():
-            raise TrustedRootError("local_files_unavailable")
-        target = resolved_root.joinpath(*parts).resolve(strict=False)
+        os.close(fd)
+    except OSError:
+        # POSIX close errors leave ownership indeterminate; never retry this fd.
+        raise TrustedRootError("local_files_unavailable") from None
+
+
+def _transfer_trusted_fd(parent_fd: int, child_fd: int) -> int:
+    try:
+        os.close(parent_fd)
+    except OSError:
         try:
-            target.relative_to(resolved_root)
-        except ValueError:
-            raise TrustedRootError("invalid_relative_path") from None
-        return target
+            os.close(child_fd)
+        except OSError:
+            pass
+        raise TrustedRootError("local_files_unavailable") from None
+    return child_fd
+
+
+def _open_trusted_root(root: str | Path) -> tuple[int, Path]:
+    lexical_root = Path(root)
+    if not lexical_root.is_absolute() or ".." in lexical_root.parts:
+        raise TrustedRootError("local_files_unavailable")
+    required = ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+    if (
+        any(not hasattr(os, name) for name in required)
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
+        or os.stat not in os.supports_follow_symlinks
+    ):
+        raise TrustedRootError("local_files_unavailable")
+    flags = (
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        current = os.open("/", flags)
+    except OSError:
+        raise TrustedRootError("local_files_unavailable") from None
+    for part in lexical_root.parts[1:]:
+        try:
+            child = os.open(part, flags, dir_fd=current)
+        except OSError:
+            _close_trusted_fd(current)
+            raise TrustedRootError("local_files_unavailable") from None
+        current = _transfer_trusted_fd(current, child)
+    return current, lexical_root
+
+
+def _relative_open_error(parent_fd: int, name: str, exc: OSError) -> TrustedRootError:
+    if exc.errno == errno.ELOOP:
+        return TrustedRootError("invalid_relative_path")
+    if exc.errno == errno.ENOTDIR:
+        try:
+            mode = os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode
+        except OSError:
+            return TrustedRootError("file_not_found")
+        if stat.S_ISLNK(mode):
+            return TrustedRootError("invalid_relative_path")
+        return TrustedRootError("file_not_found")
+    if exc.errno in {errno.ENOENT, errno.ENXIO}:
+        return TrustedRootError("file_not_found")
+    return TrustedRootError("local_files_unavailable")
+
+
+def _open_from_bound_root(
+    root_fd: int, parts: tuple[str, ...], *, directory: bool = False,
+) -> int:
+    try:
+        current = os.dup(root_fd)
+    except OSError:
+        raise TrustedRootError("local_files_unavailable") from None
+    try:
+        for index, part in enumerate(parts):
+            flags = (
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            if index < len(parts) - 1 or directory:
+                flags |= os.O_DIRECTORY
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except OSError as exc:
+                mapped = _relative_open_error(current, part, exc)
+                _close_trusted_fd(current)
+                raise mapped from None
+            current = _transfer_trusted_fd(current, child)
+        return current
     except TrustedRootError:
         raise
-    except (OSError, RuntimeError, ValueError):
+
+
+def _open_trusted_target(root: str | Path, relative: str) -> tuple[int, Path]:
+    parts = _trusted_relative_parts(relative)
+    root_fd, lexical_root = _open_trusted_root(root)
+    try:
+        target_fd = _open_from_bound_root(root_fd, parts)
+    except TrustedRootError:
+        _close_trusted_fd(root_fd)
+        raise
+    return (
+        _transfer_trusted_fd(root_fd, target_fd),
+        lexical_root.joinpath(*parts),
+    )
+
+
+def _fd_is_text(fd: int, name: str) -> bool:
+    path = Path(name)
+    if path.name in {".gitignore", ".dockerignore", ".env", ".editorconfig",
+                     "Makefile", "Dockerfile", "Gemfile", "Rakefile"}:
+        return True
+    ext = path.suffix.lower()
+    if ext in BINARY_EXT:
+        return False
+    if ext in TEXT_EXT:
+        return True
+    try:
+        os.pread(fd, 2048, 0).decode("utf-8")
+        return True
+    except (UnicodeDecodeError, OSError):
+        return False
+
+
+def _entry_modifiable(parent_fd: int, name: str, st: os.stat_result) -> bool:
+    if st.st_size > MAX_EDIT_SIZE:
+        return False
+    path = Path(name)
+    if path.name in {".gitignore", ".dockerignore", ".env", ".editorconfig",
+                     "Makefile", "Dockerfile", "Gemfile", "Rakefile"}:
+        return True
+    ext = path.suffix.lower()
+    if ext in BINARY_EXT:
+        return False
+    if ext in TEXT_EXT:
+        return True
+    try:
+        fd = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_fd,
+        )
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EPERM}:
+            return False
+        if exc.errno == errno.ELOOP:
+            return False
         raise TrustedRootError("local_files_unavailable") from None
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+            raise TrustedRootError("local_files_unavailable")
+        return stat.S_ISREG(opened.st_mode) and _fd_is_text(fd, name)
+    finally:
+        _close_trusted_fd(fd)
+
+
+def _bound_directory_entries(
+    fd: int, *, skip_git_prefix: bool = False,
+) -> list[tuple[str, str, os.stat_result]]:
+    try:
+        names = os.listdir(fd)
+    except OSError:
+        raise TrustedRootError("local_files_unavailable") from None
+    entries: list[tuple[str, str, os.stat_result]] = []
+    for name in names:
+        if skip_git_prefix and name.startswith(".git"):
+            continue
+        try:
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            raise TrustedRootError("local_files_unavailable") from None
+        if stat.S_ISDIR(st.st_mode):
+            entries.append((name, "dir", st))
+        elif stat.S_ISREG(st.st_mode):
+            entries.append((name, "file", st))
+    return sorted(entries, key=lambda item: (item[1] != "dir", item[0].casefold()))
 
 
 def _is_text(path: Path) -> bool:
@@ -412,14 +577,41 @@ def list_dir(rel: str) -> dict[str, Any]:
 
 
 def list_dir_from_trusted_root(root: str | Path, relative: str) -> dict[str, Any]:
-    """List from a Registry-authorized root without consulting global roots."""
-    path = _resolve_trusted_root(root, relative)
-    if not path.exists():
-        raise TrustedRootError("file_not_found")
+    """List from a Registry-authorized root through a bound descriptor."""
+    fd, path = _open_trusted_target(root, relative)
     try:
-        return _list_dir_path(path)
-    except ValueError:
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISREG(mode):
+            st = os.fstat(fd)
+            return {
+                "path": str(path),
+                "type": "file",
+                "entries": [{
+                    "name": path.name,
+                    "type": "file",
+                    "size": st.st_size,
+                    "modifiable": (
+                        _fd_is_text(fd, path.name) and st.st_size <= MAX_EDIT_SIZE
+                    ),
+                    "ext": path.suffix.lower().lstrip("."),
+                }],
+            }
+        if not stat.S_ISDIR(mode):
+            raise TrustedRootError("file_not_found")
+        entries = [{
+            "name": name,
+            "type": kind,
+            "size": st.st_size if kind == "file" else 0,
+            "modifiable": kind == "file" and _entry_modifiable(fd, name, st),
+            "ext": Path(name).suffix.lower().lstrip("."),
+        } for name, kind, st in _bound_directory_entries(fd, skip_git_prefix=True)]
+        return {"path": str(path), "entries": entries}
+    except TrustedRootError:
+        raise
+    except OSError:
         raise TrustedRootError("local_files_unavailable") from None
+    finally:
+        _close_trusted_fd(fd)
 
 
 def _list_dir_path(path: Path) -> dict[str, Any]:
@@ -456,14 +648,71 @@ def search_files(rel: str, query: str, limit: int = 100) -> dict[str, Any]:
 def search_files_from_trusted_root(
     root: str | Path, relative: str, query: str, limit: int = 100,
 ) -> dict[str, Any]:
-    """Search from a Registry-authorized root using the existing traversal."""
-    path = _resolve_trusted_root(root, relative)
-    if not path.is_dir():
-        raise TrustedRootError("file_not_found")
+    """Search a Registry-authorized tree without resolving descriptor paths."""
+    query = query.strip()
+    if not query or len(query) > 128 or not 1 <= limit <= MAX_SEARCH_RESULTS:
+        raise TrustedRootError("local_files_unavailable")
+    parts = _trusted_relative_parts(relative)
+    root_fd, root_path = _open_trusted_root(root)
     try:
-        return _search_files_path(path, query, limit)
-    except ValueError:
+        start_fd = _open_from_bound_root(root_fd, parts, directory=True)
+        _close_trusted_fd(start_fd)
+        path = root_path.joinpath(*parts)
+        needle = query.casefold()
+        results: list[dict[str, Any]] = []
+        scanned = 0
+        truncated = False
+        pending: list[tuple[str, ...]] = [parts]
+        while pending:
+            current_parts = pending.pop()
+            directory_fd = _open_from_bound_root(root_fd, current_parts, directory=True)
+            try:
+                child_dirs: list[tuple[str, ...]] = []
+                for name, kind, st in _bound_directory_entries(directory_fd):
+                    if kind == "dir" and name in SEARCH_SKIP_DIRS:
+                        continue
+                    scanned += 1
+                    if scanned > MAX_SEARCH_ENTRIES:
+                        truncated = True
+                        break
+                    item_parts = (*current_parts, name)
+                    if needle in name.casefold():
+                        relative_parts = item_parts[len(parts):]
+                        results.append({
+                            "name": name,
+                            "path": str(root_path.joinpath(*item_parts)),
+                            "relative": "/".join(relative_parts),
+                            "type": kind,
+                            "size": st.st_size if kind == "file" else 0,
+                            "modifiable": (
+                                kind == "file"
+                                and _entry_modifiable(directory_fd, name, st)
+                            ),
+                            "ext": Path(name).suffix.lower().lstrip("."),
+                        })
+                        if len(results) > limit:
+                            results.pop()
+                            truncated = True
+                            break
+                    if kind == "dir":
+                        child_dirs.append(item_parts)
+            finally:
+                _close_trusted_fd(directory_fd)
+            if truncated:
+                break
+            pending.extend(reversed(child_dirs))
+        return {
+            "path": str(path),
+            "query": query,
+            "results": results,
+            "truncated": truncated,
+        }
+    except TrustedRootError:
+        raise
+    except OSError:
         raise TrustedRootError("local_files_unavailable") from None
+    finally:
+        _close_trusted_fd(root_fd)
 
 
 def _search_files_path(root: Path, query: str, limit: int = 100) -> dict[str, Any]:
@@ -567,14 +816,41 @@ def read_file(rel: str) -> dict[str, Any]:
 
 
 def read_file_from_trusted_root(root: str | Path, relative: str) -> dict[str, Any]:
-    """Read from a Registry-authorized root using existing size/text rules."""
-    path = _resolve_trusted_root(root, relative)
-    if not path.is_file():
-        raise TrustedRootError("file_not_found")
+    """Read a Registry-authorized file through its bound descriptor."""
+    fd, path = _open_trusted_target(root, relative)
     try:
-        return _read_file_path(path)
-    except ValueError:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise TrustedRootError("file_not_found")
+        if st.st_size > 10 * MAX_EDIT_SIZE:
+            raise TrustedRootError("local_files_unavailable")
+        if not _fd_is_text(fd, path.name):
+            return {
+                "path": str(path), "binary": True, "size": st.st_size,
+                "modifiable": False,
+            }
+        data = bytearray()
+        while len(data) <= 10 * MAX_EDIT_SIZE:
+            chunk = os.read(fd, min(64 * 1024, 10 * MAX_EDIT_SIZE + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > 10 * MAX_EDIT_SIZE:
+            raise TrustedRootError("local_files_unavailable")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise TrustedRootError("local_files_unavailable") from None
+        return {
+            "path": str(path), "text": text, "size": st.st_size,
+            "binary": False, "modifiable": st.st_size <= MAX_EDIT_SIZE,
+        }
+    except TrustedRootError:
+        raise
+    except OSError:
         raise TrustedRootError("local_files_unavailable") from None
+    finally:
+        _close_trusted_fd(fd)
 
 
 def _read_file_path(path: Path) -> dict[str, Any]:

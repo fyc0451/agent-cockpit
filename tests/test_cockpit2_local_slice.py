@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from agent_cockpit import files
 from agent_cockpit import local_readonly_api
 from agent_cockpit import project_registry_store
 from agent_cockpit import server
@@ -412,3 +414,211 @@ def test_server_local_get_opens_existing_store_without_initialize(
 
     _error(response, 503, "schema_missing")
     assert not missing.exists()
+
+
+def test_trusted_root_file_operations_stay_on_descriptor_helpers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "root"
+    (root / "docs").mkdir(parents=True)
+    (root / "README.md").write_text("hello\n", encoding="utf-8")
+    (root / "docs" / "guide.txt").write_text("guide\n", encoding="utf-8")
+    monkeypatch.setattr(
+        files, "_list_dir_path", lambda *_: pytest.fail("legacy path list")
+    )
+    monkeypatch.setattr(
+        files, "_read_file_path", lambda *_: pytest.fail("legacy path read")
+    )
+    monkeypatch.setattr(
+        files, "_search_files_path", lambda *_: pytest.fail("legacy path search")
+    )
+
+    listed = files.list_dir_from_trusted_root(root, "")
+    content = files.read_file_from_trusted_root(root, "README.md")
+    searched = files.search_files_from_trusted_root(root, "", "guide", 10)
+
+    assert [(item["name"], item["type"]) for item in listed["entries"]] == [
+        ("docs", "dir"),
+        ("README.md", "file"),
+    ]
+    assert content["text"] == "hello\n"
+    assert [(item["relative"], item["type"]) for item in searched["results"]] == [
+        ("docs/guide.txt", "file"),
+    ]
+
+
+def test_trusted_root_descriptor_errors_use_stable_codes(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+
+    with pytest.raises(files.TrustedRootError) as missing_entry:
+        files.read_file_from_trusted_root(root, "missing.txt")
+    assert missing_entry.value.code == "file_not_found"
+
+    with pytest.raises(files.TrustedRootError) as missing_root:
+        files.list_dir_from_trusted_root(tmp_path / "missing-root", "")
+    assert missing_root.value.code == "local_files_unavailable"
+
+    (root / "plain.txt").write_text("plain\n", encoding="utf-8")
+    with pytest.raises(files.TrustedRootError) as intermediate_file:
+        files.read_file_from_trusted_root(root, "plain.txt/child")
+    assert intermediate_file.value.code == "file_not_found"
+
+
+def test_trusted_root_search_preserves_order_and_limit_semantics(tmp_path: Path):
+    root = tmp_path / "root"
+    (root / "A-match-dir").mkdir(parents=True)
+    (root / "b-match-dir").mkdir()
+    (root / ".github").mkdir()
+    (root / "A-match.txt").write_text("a\n", encoding="utf-8")
+    (root / "b-match.txt").write_text("b\n", encoding="utf-8")
+    (root / ".gitignore").write_text("cache\n", encoding="utf-8")
+
+    exact = files.search_files_from_trusted_root(root, "", "match", 4)
+    overflow = files.search_files_from_trusted_root(root, "", "match", 3)
+
+    assert [(item["name"], item["type"]) for item in exact["results"]] == [
+        ("A-match-dir", "dir"),
+        ("b-match-dir", "dir"),
+        ("A-match.txt", "file"),
+        ("b-match.txt", "file"),
+    ]
+    assert exact["truncated"] is False
+    assert len(overflow["results"]) == 3
+    assert overflow["truncated"] is True
+    dot_git = files.search_files_from_trusted_root(root, "", ".git", 10)
+    assert [(item["name"], item["type"]) for item in dot_git["results"]] == [
+        (".github", "dir"),
+        (".gitignore", "file"),
+    ]
+
+
+def test_trusted_root_static_metadata_does_not_open_known_files_or_fifo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    known = root / "known.txt"
+    known.write_text("known\n", encoding="utf-8")
+    known.chmod(0)
+    fifo = root / "pipe"
+    os.mkfifo(fifo)
+    real_open = files.os.open
+
+    def checked_open(path, flags, *args, **kwargs):
+        if path == "known.txt":
+            pytest.fail("known text metadata must not open the file")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(files.os, "open", checked_open)
+    monkeypatch.setattr(
+        files.os, "supports_dir_fd", files.os.supports_dir_fd | {checked_open}
+    )
+    try:
+        listed = files.list_dir_from_trusted_root(root, "")
+        searched = files.search_files_from_trusted_root(root, "", "known", 10)
+    finally:
+        known.chmod(0o600)
+
+    assert [(item["name"], item["modifiable"]) for item in listed["entries"]] == [
+        ("known.txt", True),
+    ]
+    assert [item["name"] for item in searched["results"]] == ["known.txt"]
+
+
+def test_trusted_root_search_uses_iterative_descriptor_walk(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    current = root
+    for index in range(180):
+        current /= f"d{index:03d}"
+        current.mkdir()
+    (current / "needle.txt").write_text("needle\n", encoding="utf-8")
+
+    result = files.search_files_from_trusted_root(root, "", "needle", 10)
+
+    assert len(result["results"]) == 1
+    assert result["results"][0]["relative"].endswith("/needle.txt")
+
+
+def test_trusted_root_requires_descriptor_platform_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.delattr(files.os, "O_NOFOLLOW")
+
+    with pytest.raises(files.TrustedRootError) as unavailable:
+        files.list_dir_from_trusted_root(root, "")
+
+    assert unavailable.value.code == "local_files_unavailable"
+
+
+def test_trusted_root_dup_failure_uses_stable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(
+        files.os, "dup", lambda _fd: (_ for _ in ()).throw(OSError("dup failed"))
+    )
+
+    with pytest.raises(files.TrustedRootError) as unavailable:
+        files.list_dir_from_trusted_root(root, "")
+
+    assert unavailable.value.code == "local_files_unavailable"
+
+
+def test_trusted_root_close_failure_cleans_open_child_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    opened = iter((10, 11))
+    close_calls: list[int] = []
+
+    def fake_open(*_args, **_kwargs):
+        return next(opened)
+
+    def fake_close(fd: int):
+        close_calls.append(fd)
+        if fd == 10:
+            raise OSError("parent close failed")
+
+    monkeypatch.setattr(files.os, "open", fake_open)
+    monkeypatch.setattr(files.os, "close", fake_close)
+    monkeypatch.setattr(
+        files.os, "supports_dir_fd", files.os.supports_dir_fd | {fake_open}
+    )
+
+    with pytest.raises(files.TrustedRootError) as unavailable:
+        files.list_dir_from_trusted_root(Path("/root"), "")
+
+    assert unavailable.value.code == "local_files_unavailable"
+    assert close_calls == [10, 11]
+
+
+def test_trusted_relative_close_failure_cleans_child_and_root_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    opened = iter((20, 22))
+    close_calls: list[int] = []
+
+    def fake_open(*_args, **_kwargs):
+        return next(opened)
+
+    def fake_close(fd: int):
+        close_calls.append(fd)
+        if fd == 21:
+            raise OSError("parent close failed")
+
+    monkeypatch.setattr(files.os, "open", fake_open)
+    monkeypatch.setattr(files.os, "dup", lambda _fd: 21)
+    monkeypatch.setattr(files.os, "close", fake_close)
+    monkeypatch.setattr(
+        files.os, "supports_dir_fd", files.os.supports_dir_fd | {fake_open}
+    )
+
+    with pytest.raises(files.TrustedRootError) as unavailable:
+        files.read_file_from_trusted_root(Path("/"), "file.txt")
+
+    assert unavailable.value.code == "local_files_unavailable"
+    assert close_calls == [21, 22, 20]
