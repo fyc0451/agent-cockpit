@@ -727,8 +727,14 @@ def project_scheduler_projection(
             reasons.add("unlinked_authorities")
 
     pairs = eligible_pairs(validated, evaluated_at)
-    ready_ids = [item.source_id for item in work_items["ready"]]
-    if ready_ids and not pairs and fresh == "fresh" and source["status"] == "available" and remaining > 0:
+    ready_writer_ids = {
+        item["source_id"]
+        for item in validated["work"]
+        if item["state"] == "ready" and item["phase"] == "writer"
+    }
+    writer_pairs = tuple(pair for pair in pairs if pair[0] in ready_writer_ids)
+    writer_ready_unpaired = ready_writer > 0 and not writer_pairs
+    if writer_ready_unpaired and fresh == "fresh" and source["status"] == "available" and remaining > 0:
         reasons.add("ready_but_no_eligible_agent")
         if any(item["sensitivity"] == "sensitive_security" for item in validated["work"] if item["state"] == "ready"):
             reasons.add("sensitive_route_unavailable")
@@ -739,7 +745,7 @@ def project_scheduler_projection(
     first_observed = _first_observed(previous)
     idle_undispatched = (
         ready_writer > 0
-        and bool(pairs)
+        and bool(writer_pairs)
         and fresh == "fresh"
         and remaining > 0
         and source["status"] == "available"
@@ -761,7 +767,7 @@ def project_scheduler_projection(
                 first_observed_at=first_observed, observed_for_seconds=held,
                 reason_code="ready_agent_idle_undispatched", evidence_refs=(),
             ))
-    elif ready_ids and not pairs and source["status"] == "available" and fresh == "fresh" and remaining > 0:
+    elif writer_ready_unpaired and source["status"] == "available" and fresh == "fresh" and remaining > 0:
         alerts.append(SchedulerAlertIntent(
             kind="ready_but_no_eligible_agent", severity="info",
             dedupe_key="ready_but_no_eligible_agent", status="absent",

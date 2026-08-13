@@ -632,6 +632,42 @@ def test_f2_reviewer_only_does_not_open_idle_alert_at_90s():
     assert resolved.alerts[0].first_observed_at is None
 
 
+def test_f2_mixed_unpairable_writer_and_pairable_reviewer():
+    snapshot = _snap("valid_minimal.json")
+    template = snapshot["work"][0]
+    snapshot["work"] = [
+        {**template, "source_id": "CAR-WRITE", "phase": "writer", "state": "ready",
+         "sensitivity": "sensitive_security"},
+        {**template, "source_id": "CAR-REVIEW", "phase": "reviewer", "state": "ready",
+         "sensitivity": "ordinary", "author_agent_instance_id": "i-author"},
+    ]
+    snapshot["agents"] = [
+        _ready_agent(instance="i-reviewer", verified="opencode", observed="opencode"),
+    ]
+    snapshot = stamp_revisions(snapshot)
+    evaluated = T0 + timedelta(seconds=90)
+    pairs = eligible_pairs(snapshot, evaluated)
+    assert pairs == (("CAR-REVIEW", "i-reviewer"),)
+    result = project_scheduler_projection(
+        snapshot, evaluated_at=evaluated,
+        previous={"first_observed_at": "2026-08-13T09:00:00+00:00"},
+    )
+    assert all(alert.status not in {"pending", "open"} for alert in result.alerts)
+    assert "ready_agent_idle_undispatched" not in result.reason_codes
+    assert "ready_but_no_eligible_agent" in result.reason_codes
+    assert any(alert.reason_code == "ready_but_no_eligible_agent" for alert in result.alerts)
+    assert [item.source_id for item in result.work.ready] == ["CAR-REVIEW", "CAR-WRITE"]
+    writer = _ordinary_ready(agents=[_ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa")])
+    opened = project_scheduler_projection(
+        writer, evaluated_at=evaluated,
+        previous={"first_observed_at": "2026-08-13T09:00:00+00:00"},
+    )
+    assert any(alert.status == "open" for alert in opened.alerts)
+    mixed_resolved = project_scheduler_projection(snapshot, evaluated_at=evaluated, previous=opened)
+    assert [alert.status for alert in mixed_resolved.alerts] == ["resolved"]
+    assert mixed_resolved.alerts[0].first_observed_at is None
+
+
 def test_f3_observed_after_deadline_is_unknown():
     snapshot = _snap("valid_minimal.json")
     snapshot["source"]["observed_at"] = "2026-08-13T09:00:00+00:00"
