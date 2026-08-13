@@ -18,7 +18,8 @@ MAX_PAYLOAD_BYTES = 16_384
 MAX_RECEIPTS = 32
 MAX_SQLITE_INTEGER = 2**63 - 1
 _FORBIDDEN_PAYLOAD_KEYS = frozenset({
-    "secret", "secrets", "token", "password", "credential", "authorization",
+    "secret", "secrets", "token", "tokens", "password", "passwords",
+    "credential", "credentials", "authorization",
     "terminal_output", "terminal_scroll", "hidden_reasoning", "reasoning",
     "file_body", "file_content", "message_body", "full_message_body",
 })

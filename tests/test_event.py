@@ -89,6 +89,17 @@ def test_malformed_or_forbidden_envelopes_fail_before_write(store, change):
     assert store.list(project_id="prj_" + "a" * 32)[0] == ()
 
 
+@pytest.mark.parametrize("key", ["CrEdEnTiAlS", "ToKeNs", "PASSWORDS"])
+def test_forbidden_plural_payload_keys_are_case_insensitive_deep_and_atomic(
+    store, key: str,
+):
+    payload = {"outer": [{"nested": {key: "never"}}]}
+    with pytest.raises(event_store.EventStoreError) as invalid:
+        store.append(_event(payload=payload))
+    assert invalid.value.code == "invalid_argument"
+    assert store.list(project_id="prj_" + "a" * 32)[0] == ()
+
+
 def test_payload_size_and_invalid_queries_fail_closed(store):
     with pytest.raises(event_store.EventStoreError) as payload:
         store.append(_event(payload={"summary": "x" * (event_store.MAX_PAYLOAD_BYTES + 1)}))
