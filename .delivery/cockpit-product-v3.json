@@ -187,18 +187,18 @@
     {
       "id": "PROJ-001A-upgrade-manifest",
       "title": "Include the Project Registry in legacy upgrade backup and rollback",
-      "status": "in_progress",
+      "status": "accepted",
       "depends_on": ["RUNTIME-001-profile-lock", "SEC-002-remote-inbox"],
       "scope": ["agent_cockpit/upgrade_core.py", "tests/test_upgrade_core.py"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_upgrade_core.py", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_upgrade_core.py", "passed": true}
       ],
       "rollback": "Revert the manifest extension and keep Next stopped without deleting any Project Registry database",
       "production_impact": "none",
       "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
-      "reviewer_instance_id": null,
-      "base_sha": null,
-      "fixed_sha": null,
+      "reviewer_instance_id": "i-cax3gvoakewhwftbbtkuk45mqe",
+      "base_sha": "ef45edaddc25b17f150b3e8f2ae589d6aa9ab34a",
+      "fixed_sha": "50765cc86ded475983d11f10671bb782f505205f",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
@@ -219,7 +219,7 @@
       "reviewer_instance_id": null,
       "base_sha": null,
       "fixed_sha": null,
-      "cross_module_block_count": 1,
+      "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
       "user_acceptance_evidence": null
