@@ -30,7 +30,13 @@ def _fail(code: str, cause: BaseException | None = None):
     error = ProjectRegistryError(code)
     if cause is None:
         raise error
-    raise error from cause
+    try:
+        raise error from None
+    except ProjectRegistryError:
+        error.__cause__ = None
+        error.__context__ = None
+        error.__suppress_context__ = True
+        raise
 
 
 def _now() -> str:
@@ -797,7 +803,18 @@ class _Transaction:
     def __exit__(self, exc_type, exc, traceback) -> bool:
         assert self.connection is not None
         try:
-            self.connection.execute("ROLLBACK" if exc_type else "COMMIT")
+            if exc_type:
+                self.connection.execute("ROLLBACK")
+            else:
+                try:
+                    self.connection.execute("COMMIT")
+                except BaseException:
+                    if self.connection.in_transaction:
+                        try:
+                            self.connection.execute("ROLLBACK")
+                        except BaseException:
+                            pass
+                    raise
         finally:
             self.connection.close()
         return False

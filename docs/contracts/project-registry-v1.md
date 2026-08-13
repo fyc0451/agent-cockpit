@@ -117,7 +117,8 @@ reservation，ledger 写失败也不留下 aggregate。
 ## 稳定错误
 
 所有产品错误派生自 `ProjectRegistryError`，只暴露 ASCII `code`，不泄漏 SQLite SQL、约束原文、
-路径或 payload：
+路径或 payload。公开异常的 `__cause__` 与 `__context__` 均为空，格式化 traceback 也不得包含
+底层 SQLite、文件系统或输入错误原文：
 
 `schema_missing`、`migration_required`、`future_schema`、`schema_fingerprint_mismatch`、
 `store_corrupt`、`store_unsafe`、`invalid_argument`、`project_not_found`、

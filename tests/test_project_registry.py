@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -21,6 +22,20 @@ from agent_cockpit import project_registry_store as registry_store
 
 def _code(exc_info: pytest.ExceptionInfo[BaseException]) -> str | None:
     return getattr(exc_info.value, "code", None)
+
+
+def _assert_sanitized_error(
+    exc_info: pytest.ExceptionInfo[registry_store.ProjectRegistryError],
+    code: str,
+    *secrets: str,
+) -> None:
+    assert exc_info.value.code == code
+    assert str(exc_info.value) == code
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    rendered = "".join(traceback.format_exception(exc_info.value))
+    for secret in secrets:
+        assert secret not in rendered
 
 
 @pytest.fixture()
@@ -850,11 +865,34 @@ def test_legacy_import_failure_after_first_append_rolls_back_without_delete(
                 ("herdr_session", "session:alpha", "sha256:herdr"),
             ),
         )
-    assert _code(failure) == "store_write_failed"
-    assert str(failure.value) == "store_write_failed"
+    _assert_sanitized_error(
+        failure, "store_write_failed", "sensitive injected sqlite detail"
+    )
     assert _registry_counts(db_path) == {
         "projects": 0, "repo_locations": 0, "legacy_project_bindings": 0,
     }
+
+
+def test_live_read_failure_clears_sqlite_error_chain(
+    registry, monkeypatch: pytest.MonkeyPatch,
+):
+    class FailingReadConnection:
+        def execute(self, _sql, _parameters=()):
+            raise sqlite3.OperationalError("sensitive SELECT path detail")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        registry_store, "_connect_live_read", lambda _path: FailingReadConnection()
+    )
+
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry.get_project_by_slug("alpha")
+
+    _assert_sanitized_error(
+        failure, "store_read_failed", "sensitive SELECT path detail"
+    )
 
 
 def test_legacy_import_commit_failure_is_sanitized_and_rolls_back(
@@ -865,23 +903,27 @@ def test_legacy_import_commit_failure_is_sanitized_and_rolls_back(
     class CommitFailingConnection:
         def __init__(self, connection: sqlite3.Connection):
             object.__setattr__(self, "connection", connection)
+            object.__setattr__(self, "statements", [])
+            object.__setattr__(self, "closed", False)
 
         def __setattr__(self, name, value):
             setattr(self.connection, name, value)
 
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
         def execute(self, sql, parameters=()):
+            self.statements.append(sql)
             if sql == "COMMIT":
                 raise sqlite3.OperationalError("sensitive commit detail")
             return self.connection.execute(sql, parameters)
 
         def close(self):
             self.connection.close()
+            object.__setattr__(self, "closed", True)
 
-    monkeypatch.setattr(
-        registry_store,
-        "_connect_write",
-        lambda path: CommitFailingConnection(real_connect(path)),
-    )
+    wrapped = CommitFailingConnection(real_connect(db_path))
+    monkeypatch.setattr(registry_store, "_connect_write", lambda _path: wrapped)
     with pytest.raises(registry_store.ProjectRegistryError) as failure:
         registry.import_legacy_project(
             slug="alpha", display_name="Alpha", goal=None, node_id="local",
@@ -890,8 +932,60 @@ def test_legacy_import_commit_failure_is_sanitized_and_rolls_back(
                 ("agent_mail_project", "project:alpha", "sha256:mail"),
             ),
         )
-    assert _code(failure) == "store_write_failed"
-    assert str(failure.value) == "store_write_failed"
+    _assert_sanitized_error(failure, "store_write_failed", "sensitive commit detail")
+    assert wrapped.statements[-2:] == ["COMMIT", "ROLLBACK"]
+    assert wrapped.closed is True
+    assert _registry_counts(db_path) == {
+        "projects": 0, "repo_locations": 0, "legacy_project_bindings": 0,
+    }
+
+
+def test_legacy_import_commit_and_rollback_failure_is_sanitized_and_writes_nothing(
+    registry, db_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    real_connect = registry_store._connect_write
+
+    class CommitAndRollbackFailingConnection:
+        def __init__(self, connection: sqlite3.Connection):
+            self.connection = connection
+            self.statements: list[str] = []
+            self.closed = False
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, sql, parameters=()):
+            self.statements.append(sql)
+            if sql == "COMMIT":
+                raise sqlite3.OperationalError("sensitive commit detail")
+            if sql == "ROLLBACK":
+                raise sqlite3.OperationalError("sensitive rollback detail")
+            return self.connection.execute(sql, parameters)
+
+        def close(self):
+            self.connection.close()
+            self.closed = True
+
+    wrapped = CommitAndRollbackFailingConnection(real_connect(db_path))
+    monkeypatch.setattr(registry_store, "_connect_write", lambda _path: wrapped)
+
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry.import_legacy_project(
+            slug="alpha", display_name="Alpha", goal=None, node_id="local",
+            canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+            sources=_legacy_sources(
+                ("agent_mail_project", "project:alpha", "sha256:mail"),
+            ),
+        )
+
+    _assert_sanitized_error(
+        failure,
+        "store_write_failed",
+        "sensitive commit detail",
+        "sensitive rollback detail",
+    )
+    assert wrapped.statements[-2:] == ["COMMIT", "ROLLBACK"]
+    assert wrapped.closed is True
     assert _registry_counts(db_path) == {
         "projects": 0, "repo_locations": 0, "legacy_project_bindings": 0,
     }
@@ -920,8 +1014,7 @@ def test_legacy_import_begin_failure_is_sanitized_and_writes_nothing(
                     ("agent_mail_project", "project:alpha", "sha256:mail"),
                 ),
             )
-        assert _code(failure) == "store_write_failed"
-        assert str(failure.value) == "store_write_failed"
+        _assert_sanitized_error(failure, "store_write_failed", "database is locked")
     finally:
         blocker.execute("ROLLBACK")
         blocker.close()
