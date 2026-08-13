@@ -594,9 +594,10 @@
       "title": "Adapt the consumed legacy read endpoints without weakening G3 validation",
       "status": "in_progress",
       "depends_on": ["DELIVERY-003-wip4-gate", "SLICE-001-local-readonly"],
-      "scope": ["web/api/hooks.ts", "web/api/localSlice.ts", "web/api/types.ts", "web/pages/InboxPage.tsx", "web/pages/OverviewPage.tsx", "web/pages/WelcomePage.tsx", "web/shell/Rail.tsx", "web/test/local-slice.test.tsx"],
+      "scope": ["web/api/hooks.ts", "web/api/localSlice.ts", "web/api/types.ts", "web/pages/InboxPage.tsx", "web/pages/OverviewPage.tsx", "web/pages/WelcomePage.tsx", "web/shell/Rail.tsx", "web/test/a11y.test.tsx", "web/test/deeplinks.test.tsx", "web/test/local-slice.test.tsx", "web/test/page-states.test.tsx", "web/test/query-error.test.tsx", "web/test/selection.test.tsx"],
       "acceptance": [
         {"command": "npm --prefix web test -- --run local-slice.test.tsx", "passed": false},
+        {"command": "npm --prefix web test -- --run", "passed": false},
         {"command": "npm --prefix web run build", "passed": false}
       ],
       "rollback": "Revert the narrow legacy adapters and keep affected Cockpit 2 views fail-closed",
