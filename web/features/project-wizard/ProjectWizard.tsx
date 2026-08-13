@@ -21,13 +21,19 @@ import type {
   RegisterProjectRequest,
   RuntimeNode,
 } from '../../api/registry'
+import type { ResponseMeta } from '../../api/types'
 import { routes } from '../../app/routes'
 import { Button } from '../../components/Button'
 import { QueryErrorState } from '../../components/QueryErrorState'
 import { StatusState } from '../../components/StatusState'
 import { Tag } from '../../components/Tag'
 import { useDialog } from '../../components/useDialog'
-import { GLOBAL_SCOPE, useCapability } from '../../state/capabilities'
+import {
+  projectScope,
+  useCapability,
+  useReportCapabilities,
+  type CapabilityScope,
+} from '../../state/capabilities'
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/
 
@@ -52,6 +58,8 @@ interface WizardState {
   path: string
   selected: DirectoryEntry | null
   probe: DiscoveryResultData | null
+  probeMeta: ResponseMeta | null
+  probeRevision: number
   probeDegraded: boolean
   probeError: ApiError | null
   displayName: string
@@ -70,6 +78,8 @@ const initialState: WizardState = {
   path: '',
   selected: null,
   probe: null,
+  probeMeta: null,
+  probeRevision: 0,
   probeDegraded: false,
   probeError: null,
   displayName: '',
@@ -89,8 +99,8 @@ type Action =
   | { type: 'up-dir' }
   | { type: 'select-dir'; entry: DirectoryEntry }
   | { type: 'probe-start' }
-  | { type: 'probe-ok'; result: DiscoveryResultData; degraded: boolean }
-  | { type: 'probe-err'; error: ApiError }
+  | { type: 'probe-ok'; revision: number; result: DiscoveryResultData; meta: ResponseMeta | null; degraded: boolean }
+  | { type: 'probe-err'; revision: number; error: ApiError }
   | { type: 'back-to-dir' }
   | { type: 'set-display-name'; value: string }
   | { type: 'set-slug'; value: string }
@@ -101,35 +111,39 @@ type Action =
 function reducer(state: WizardState, action: Action): WizardState {
   switch (action.type) {
     case 'reset':
-      return initialState
+      return { ...initialState, probeRevision: state.probeRevision + 1 }
     case 'select-node':
-      return { ...state, step: 'dir', nodeId: action.nodeId, rootId: null, path: '', selected: null }
+      return { ...state, step: 'dir', nodeId: action.nodeId, rootId: null, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
     case 'select-root':
-      return { ...state, rootId: action.rootId, path: '', selected: null }
+      return { ...state, rootId: action.rootId, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
     case 'reset-root':
-      return { ...state, rootId: null, path: '', selected: null }
+      return { ...state, rootId: null, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
     case 'enter-dir':
-      return { ...state, path: action.path, selected: null }
+      return { ...state, path: action.path, selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
     case 'up-dir': {
       const parent = state.path.includes('/') ? state.path.slice(0, state.path.lastIndexOf('/')) : ''
-      return { ...state, path: parent, selected: null }
+      return { ...state, path: parent, selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
     }
     case 'select-dir':
-      return { ...state, selected: action.entry }
+      return { ...state, selected: action.entry, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
     case 'probe-start':
       // PROBING 在途停留在目录步（识别按钮 disabled，重复触发 0 请求）；probe 状态清空
       return {
         ...state,
         probe: null,
+        probeMeta: null,
+        probeRevision: state.probeRevision + 1,
         probeError: null,
         submitError: null,
         succeeded: null,
       }
     case 'probe-ok':
+      if (action.revision !== state.probeRevision) return state
       return {
         ...state,
         step: 'probe',
         probe: action.result,
+        probeMeta: action.meta,
         probeDegraded: action.degraded,
         probeError: null,
         // 新 probe 完成 → 旧幂等绑定作废
@@ -138,10 +152,11 @@ function reducer(state: WizardState, action: Action): WizardState {
         slug: deriveSlug(state.selected?.name ?? ''),
       }
     case 'probe-err':
-      return { ...state, step: 'probe', probe: null, probeError: action.error }
+      if (action.revision !== state.probeRevision) return state
+      return { ...state, step: 'probe', probe: null, probeMeta: null, probeError: action.error }
     case 'back-to-dir':
       // T6/T12/T13：回目录步；改选目录后必须重新 probe（旧指纹随 probe 清空作废）
-      return { ...state, step: 'dir', probe: null, probeError: null, submitError: null, selected: null }
+      return { ...state, step: 'dir', probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, probeError: null, submitError: null, selected: null }
     case 'set-display-name':
       return { ...state, displayName: action.value }
     case 'set-slug':
@@ -229,6 +244,7 @@ export function ProjectWizard({
   onRegistered: (p: { project_id: string; slug: string }) => void
 }) {
   const ref = useRef<HTMLElement>(null)
+  const capabilityNamespace = useId()
   const navigate = useNavigate()
   const [state, dispatch] = useReducer(reducer, initialState)
   const nodes = useRuntimeNodes()
@@ -240,6 +256,10 @@ export function ProjectWizard({
   )
   const discovery = useProjectDiscovery()
   const register = useRegisterProject()
+  const probeScope = projectScope(
+    `discovery:${capabilityNamespace}:${state.probeRevision}:${state.probe?.discovery_fingerprint ?? 'none'}`,
+  )
+  useReportCapabilities(state.probeMeta, probeScope)
 
   useDialog(ref, open, onClose)
 
@@ -252,6 +272,7 @@ export function ProjectWizard({
 
   const startProbe = () => {
     if (!state.selected || discovery.isPending) return
+    const revision = state.probeRevision + 1
     dispatch({ type: 'probe-start' })
     const locator = {
       node_id: state.nodeId!,
@@ -262,9 +283,9 @@ export function ProjectWizard({
       onSuccess: (res) => {
         const degraded =
           res.data.complete === false || res.data.warnings.length > 0 || res.meta?.partial === true
-        dispatch({ type: 'probe-ok', result: res.data, degraded })
+        dispatch({ type: 'probe-ok', revision, result: res.data, meta: res.meta, degraded })
       },
-      onError: (err) => dispatch({ type: 'probe-err', error: err as ApiError }),
+      onError: (err) => dispatch({ type: 'probe-err', revision, error: err as ApiError }),
     })
   }
 
@@ -356,7 +377,7 @@ export function ProjectWizard({
               <QueryErrorState error={roots.error} onRetry={() => roots.refetch()} />
             ) : (
               <ul className="list">
-                {roots.data!.data.roots.map((r) => (
+                {roots.data!.data.items.map((r) => (
                   <li key={r.root_id} className="list-row">
                     <button
                       type="button"
@@ -449,6 +470,7 @@ export function ProjectWizard({
         {state.step === 'probe' ? (
           <ProbeStep
             state={state}
+            probeScope={probeScope}
             probing={discovery.isPending}
             onProbeRetry={startProbe}
             onBack={() => dispatch({ type: 'back-to-dir' })}
@@ -468,6 +490,7 @@ export function ProjectWizard({
 
 function ProbeStep({
   state,
+  probeScope,
   probing,
   onProbeRetry,
   onBack,
@@ -478,6 +501,7 @@ function ProbeStep({
   onSetDisplayName,
 }: {
   state: WizardState
+  probeScope: CapabilityScope
   probing: boolean
   onProbeRetry: () => void
   onBack: () => void
@@ -489,7 +513,7 @@ function ProbeStep({
 }) {
   // B3：登记提交消费写 capability（server meta.capabilities 权威；静态 fallback false → disabled）。
   // hook 必须在所有 early return 之前调用。
-  const writeCap = useCapability('projectRegistry.write', GLOBAL_SCOPE)
+  const writeCap = useCapability('projectRegistry.write', probeScope)
   if (probing) return <StatusState kind="loading" title="正在识别目录…" />
   if (state.probeError) {
     const err = state.probeError

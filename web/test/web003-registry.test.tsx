@@ -1,7 +1,7 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ProtocolError } from '../api/client'
-import { assertDirectoryListingData, assertDiscoveryResultData } from '../api/registry'
+import { assertDirectoryListingData, assertDiscoveryResultData, assertRootsData } from '../api/registry'
 import {
   defaultFetchMap,
   directoriesPartialPayload,
@@ -15,7 +15,7 @@ import {
   registerCreatedPayload,
   registryProjectsEmptyPayload,
   registryProjectsPayload,
-  registryProjectsWritablePayload,
+  rootsPayload,
 } from '../fixtures/api'
 import { renderApp, stubFetch, type MockResponseSpec } from './helpers'
 
@@ -62,11 +62,10 @@ function stubWizardFetch(opts: {
       spec = h ? await h(call) : undefined
     } else {
       gets.push(call)
-      // B3：默认列表载荷带 server 权威 write=true（多数用例要走到提交）；
-      // 需要「写关闭」语义的用例用 opts.gets 显式覆盖回 registryProjectsPayload/Empty
+      // 项目列表保持只读；Wizard 写权限只能由本次 discovery response 自举。
       const map: Record<string, unknown> = {
         ...defaultFetchMap(),
-        '/api/project-registry/projects': registryProjectsWritablePayload,
+        '/api/project-registry/projects': registryProjectsPayload,
         ...opts.gets,
       }
       const key = Object.keys(map)
@@ -107,6 +106,13 @@ async function toProbeResult(user: ReturnType<typeof userEvent.setup>, dirName =
 
 const discoveryOk = () => ({ body: discoveryGitPayload })
 const registerOk = () => ({ body: registerCreatedPayload })
+
+describe('WEB-005 roots 与 discovery capability bootstrap', () => {
+  it('roots 只接受 data.items，旧 data.roots fail-closed', () => {
+    expect(assertRootsData(rootsPayload.data)).toEqual(rootsPayload.data)
+    expect(() => assertRootsData({ roots: rootsPayload.data.items })).toThrow(ProtocolError)
+  })
+})
 
 describe('WEB-003 列表（V1–V6）', () => {
   it('V1 列表 ready：display_name + availability tag + canonical_path，无 branch/remote 文本', async () => {
@@ -381,11 +387,13 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     expect(dialog.textContent).not.toContain('未登记')
   })
 
-  it('B3a write=false（静态 fail-closed）：向导可全程浏览，提交 disabled 且 0 register POST', async () => {
+  it('B3a discovery write=false：向导可全程浏览，提交 disabled 且 0 register POST', async () => {
+    const readOnlyDiscovery = {
+      ...discoveryGitPayload,
+      meta: { ...metaOk, capabilities: { 'projectRegistry.write': false } },
+    }
     const stub = stubWizardFetch({
-      // 显式覆盖回写关闭载荷（默认 map 是 writable）
-      gets: { '/api/project-registry/projects': registryProjectsPayload },
-      discovery: discoveryOk,
+      discovery: () => ({ body: readOnlyDiscovery }),
       register: registerOk,
     })
     const user = userEvent.setup()
@@ -400,7 +408,7 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     expect(stub.posts.filter((p) => p.url.startsWith('/api/project-registry/projects'))).toEqual([])
   })
 
-  it('B3b server 权威 write=true 后才允许提交', async () => {
+  it('B3b readonly 项目列表下，本次 discovery write=true 自举提交权限', async () => {
     const stub = stubWizardFetch({ discovery: discoveryOk, register: registerOk })
     const user = userEvent.setup()
     renderApp('/projects')
@@ -411,6 +419,32 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     await user.click(submit)
     await screen.findByText('登记成功')
     expect(stub.posts.filter((p) => p.url.startsWith('/api/project-registry/projects')).length).toBe(1)
+  })
+
+  it('B3c 返回目录后旧 discovery capability 不授权新 fingerprint', async () => {
+    let discoveryCount = 0
+    const readOnlySecondDiscovery = {
+      ...discoveryGitPayload,
+      data: {
+        ...discoveryGitPayload.data,
+        discovery_fingerprint: `sha256:${'9'.repeat(64)}`,
+      },
+      meta: { ...metaOk, capabilities: { 'projectRegistry.write': false } },
+    }
+    const stub = stubWizardFetch({
+      discovery: () => ({ body: discoveryCount++ === 0 ? discoveryGitPayload : readOnlySecondDiscovery }),
+      register: registerOk,
+    })
+    const user = userEvent.setup()
+    renderApp('/projects')
+    await toProbeResult(user)
+    expect(await screen.findByRole('button', { name: '确认添加 Project' })).not.toHaveAttribute('aria-disabled')
+
+    await user.click(screen.getByRole('button', { name: '返回选择目录' }))
+    await user.click(screen.getByRole('button', { name: /^alpha/ }))
+    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+    expect(await screen.findByRole('button', { name: '确认添加 Project' })).toHaveAttribute('aria-disabled', 'true')
+    expect(stub.posts.filter((p) => p.url.startsWith('/api/project-registry/projects'))).toEqual([])
   })
 
   it('V17 slug 前端校验：Foo / -a / a--b / 65 字符即时拒绝，0 请求', async () => {
@@ -597,6 +631,25 @@ describe('WEB-003 零请求硬门与取消（V18–V19）', () => {
     resolveDiscovery()
     await screen.findByText('新 Git 项目')
     expect(stub.posts.filter((p) => p.url.startsWith('/api/project-discovery')).length).toBe(1)
+  })
+
+  it('WEB-005 probe 在途改选目录后丢弃旧 response 与 capability', async () => {
+    let resolveDiscovery: (spec: MockResponseSpec) => void = () => {}
+    const stub = stubWizardFetch({
+      discovery: () => new Promise<MockResponseSpec>((resolve) => { resolveDiscovery = resolve }),
+      register: registerOk,
+    })
+    const user = userEvent.setup()
+    renderApp('/projects')
+    await toDirStep(user)
+    await user.click(screen.getByRole('button', { name: /^alpha/ }))
+    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+    await user.click(screen.getByRole('button', { name: /^beta/ }))
+    resolveDiscovery({ body: discoveryGitPayload })
+
+    await waitFor(() => expect(stub.posts.filter((p) => p.url.startsWith('/api/project-discovery'))).toHaveLength(1))
+    expect(screen.queryByText('新 Git 项目')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '确认添加 Project' })).not.toBeInTheDocument()
   })
 
   it('V19 取消：Esc 0 写请求 + 焦点恢复触发按钮；重开后 Idempotency-Key 重新生成', async () => {

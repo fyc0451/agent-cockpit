@@ -412,7 +412,7 @@ export const runtimeNodesPayload = {
 
 export const rootsPayload = {
   data: {
-    roots: [
+    items: [
       { node_id: 'local', root_id: REG_ROOT_CODE, display_name: '代码' },
       { node_id: 'local', root_id: REG_ROOT_DOCS, display_name: '文档' },
     ],
@@ -493,7 +493,7 @@ export const discoveryGitPayload = {
     sources: ['local_files', 'local_git', 'project_registry'],
     warnings: [],
   },
-  meta: metaOk,
+  meta: { ...metaOk, capabilities: { 'projectRegistry.write': true } },
 }
 
 export const discoveryPlainPayload = {
@@ -504,7 +504,7 @@ export const discoveryPlainPayload = {
     vcs: { ...vcsGit, kind: 'none', git_root_digest: null, repository_fingerprint: null, head: null, branch_present: false, refs_count: 0 },
     discovery_fingerprint: `sha256:${'b'.repeat(64)}`,
   },
-  meta: metaOk,
+  meta: { ...metaOk, capabilities: { 'projectRegistry.write': true } },
 }
 
 export const discoveryDegradedPayload = {
@@ -514,7 +514,7 @@ export const discoveryDegradedPayload = {
     warnings: ['project_registry_unavailable'],
     discovery_fingerprint: `sha256:${'d'.repeat(64)}`,
   },
-  meta: metaOk,
+  meta: { ...metaOk, capabilities: { 'projectRegistry.write': false } },
 }
 
 export const discoveryExactMatchPayload = {
