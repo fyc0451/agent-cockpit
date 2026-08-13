@@ -1,12 +1,17 @@
+import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useLegacyWorkbench, useWorkspaceList, workspaceLocation } from '../api/localSlice'
+import { useProjectRegistryList } from '../api/registry'
+import { gateWorkspaceCreate } from '../api/workspaceCreate'
 import type { Project } from '../api/types'
 import { routes } from '../app/routes'
+import { Button } from '../components/Button'
 import { PageHeader } from '../components/PageHeader'
 import { QueryErrorState } from '../components/QueryErrorState'
 import { StatusState } from '../components/StatusState'
 import { Tag, toneForLocation, toneForStatus } from '../components/Tag'
 import { ProjectScope } from '../features/ProjectScope'
+import { WorkspaceWizard } from '../features/workspace-wizard/WorkspaceWizard'
 
 function text(v: unknown): string {
   return typeof v === 'string' ? v : v == null ? '' : String(v)
@@ -15,9 +20,27 @@ function text(v: unknown): string {
 /** persisted workspaces 深链列表（Registry 权威，非 fixture 嵌入数组） */
 function WorkspacesSection({ project }: { project: Project }) {
   const q = useWorkspaceList(project.project_id ?? null, project.slug ?? null)
+  // P0-WORKSPACE-001-F：创建按钮可用性 = Registry 列表内嵌 repo_locations 数据驱动
+  // fail-closed（与 ProjectScope 同 queryKey，缓存命中零额外请求）；无 capability 臆造。
+  const registry = useProjectRegistryList()
+  const [wizardOpen, setWizardOpen] = useState(false)
+  const gate = useMemo(() => {
+    const rp = registry.data?.data.items.find((p) => p.project_id === project.project_id)
+    return gateWorkspaceCreate(rp?.repo_locations)
+  }, [registry.data, project.project_id])
   return (
     <section className="panel">
-      <h2 className="panel-title">Workspaces</h2>
+      <div className="drawer-head">
+        <h2 className="panel-title">Workspaces</h2>
+        <Button
+          variant="primary"
+          disabled={!gate.available}
+          title={gate.reason ?? undefined}
+          onClick={() => setWizardOpen(true)}
+        >
+          创建 Workspace
+        </Button>
+      </div>
       {q.isPending ? (
         <StatusState kind="loading" title="正在加载 Workspaces…" />
       ) : q.isError ? (
@@ -44,6 +67,13 @@ function WorkspacesSection({ project }: { project: Project }) {
           ))}
         </ul>
       )}
+      <WorkspaceWizard
+        open={wizardOpen}
+        onClose={() => setWizardOpen(false)}
+        projectSlug={project.slug ?? ''}
+        projectId={project.project_id ?? ''}
+        repos={gate.eligible}
+      />
     </section>
   )
 }
