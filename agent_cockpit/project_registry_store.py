@@ -982,6 +982,75 @@ class ProjectRegistryStore:
         except sqlite3.Error as exc:
             _fail("store_write_failed", exc)
 
+    def idempotent_create_workspace(
+        self, *, scope: str, idempotency_key: str, payload: object,
+        project_id: str, repo_location_id: str, name: str,
+        goal: str | None, isolation_kind: str, response_meta: dict[str, object],
+    ) -> domain.CommandResult:
+        scope, idempotency_key, request_digest = _idempotency_identity(
+            scope, idempotency_key, payload,
+        )
+        project_id = _validate(domain.opaque, project_id, maximum=64)
+        repo_location_id = _validate(domain.opaque, repo_location_id, maximum=64)
+        if not isinstance(name, str) or not 1 <= len(name) <= 256:
+            _fail("invalid_argument")
+        goal = _validate(domain.optional_text, goal, maximum=4096)
+        if isolation_kind != "shared":
+            _fail("unsupported_isolation_kind")
+        response_meta_json = _validate(domain.canonical_json, response_meta)
+        response_meta = json.loads(response_meta_json)
+        try:
+            with self._transaction() as connection:
+                project = connection.execute(
+                    "SELECT 1 FROM projects WHERE project_id=? AND lifecycle='active'",
+                    (project_id,),
+                ).fetchone()
+                if project is None:
+                    _fail("project_not_found")
+                location_row = connection.execute(
+                    "SELECT * FROM repo_locations WHERE project_id=? "
+                    "AND repo_location_id=? AND lifecycle='active'",
+                    (project_id, repo_location_id),
+                ).fetchone()
+                if location_row is None:
+                    _fail("repo_location_not_found")
+                location = _repo_location_record(location_row)
+                if location.node_id != "local":
+                    _fail("repo_location_not_local")
+                if location.availability != "available":
+                    _fail("repo_location_unavailable")
+                replay = _idempotency_replay(
+                    connection, scope, idempotency_key, request_digest,
+                )
+                if replay is not None:
+                    return replay
+                workspace_id = _id("ws_")
+                now = _now()
+                try:
+                    connection.execute(
+                        "INSERT INTO workspaces VALUES "
+                        "(?, ?, ?, ?, ?, 'shared', 'active', NULL, 1, ?, ?)",
+                        (workspace_id, project_id, repo_location_id, name, goal, now, now),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    _fail("workspace_name_conflict", exc)
+                workspace = domain.WorkspaceRecord(
+                    workspace_id, project_id, repo_location_id, name, goal,
+                    "shared", "active", None, 1, now, now,
+                )
+                response = json.loads(domain.canonical_json({
+                    "data": _workspace_response(workspace, location),
+                    "meta": response_meta,
+                }))
+                _store_idempotency_receipt(
+                    connection, scope, idempotency_key, request_digest, 201, response,
+                )
+                return domain.CommandResult(201, response)
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_write_failed", exc)
+
     @staticmethod
     def _import_legacy_project(
         connection: sqlite3.Connection, *, slug: str, display_name: str,
@@ -1201,6 +1270,28 @@ def _store_idempotency_receipt(
         "INSERT INTO idempotency_records VALUES (?, ?, ?, ?, ?, ?)",
         (scope, idempotency_key, request_digest, status_code, response_json, _now()),
     )
+
+
+def _workspace_response(
+    workspace: domain.WorkspaceRecord, location: domain.RepoLocationRecord,
+) -> dict[str, object]:
+    return {
+        "workspace_id": workspace.workspace_id,
+        "project_id": workspace.project_id,
+        "repo_location_id": workspace.repo_location_id,
+        "name": workspace.name,
+        "goal": workspace.goal,
+        "isolation_kind": workspace.isolation_kind,
+        "lifecycle": workspace.lifecycle,
+        "active_run_id": workspace.active_run_id,
+        "version": workspace.version,
+        "created_at": workspace.created_at,
+        "updated_at": workspace.updated_at,
+        "repo_location": {
+            "node_id": location.node_id,
+            "availability": location.availability,
+        },
+    }
 
 
 def _insert_repo_location(

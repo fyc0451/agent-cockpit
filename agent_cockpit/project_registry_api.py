@@ -18,6 +18,7 @@ from . import project_registry_store as registry_store
 
 CREATE_SCOPE = "project-registry.projects.create.v1"
 ATTACH_SCOPE = "project-registry.repo-locations.create.v1"
+WORKSPACE_SCOPE = "project-registry.workspaces.create.v1"
 _REQUEST_ID_STATE = "project_registry_request_id"
 _RETRYABLE = frozenset({"discovery_unavailable", "store_read_failed", "store_write_failed"})
 _STATUS = {
@@ -29,12 +30,17 @@ _STATUS = {
     "root_forbidden": 403,
     "node_not_found": 404,
     "project_not_found": 404,
+    "repo_location_not_found": 404,
     "discovery_stale": 409,
     "project_slug_conflict": 409,
     "location_already_registered": 409,
     "version_conflict": 409,
     "repository_identity_unproven": 409,
     "idempotency_conflict": 409,
+    "repo_location_not_local": 409,
+    "repo_location_unavailable": 409,
+    "workspace_name_conflict": 409,
+    "unsupported_isolation_kind": 400,
     "capability_unavailable": 412,
     "discovery_unavailable": 503,
     "store_read_failed": 503,
@@ -233,6 +239,47 @@ def install(app: FastAPI, service: ApiService) -> None:
             )
         return await _run_async(operation, request)
 
+    @app.post("/api/project-registry/projects/{project_id}/workspaces")
+    async def create_workspace(project_id: str, request: Request):
+        async def operation():
+            body = await _body(request, {
+                "repo_location_id", "name", "goal", "isolation_kind",
+            })
+            _validate_workspace_body(project_id, body)
+            key = _idempotency_key(request)
+            registry = service.registry_provider()
+            project = registry.get_project_by_id(project_id)
+            if project is None or project.project.lifecycle != "active":
+                raise ApiError("project_not_found")
+            locations = registry.list_repo_locations(project_id)
+            location = next(
+                (item for item in locations or ()
+                 if item.repo_location_id == body["repo_location_id"]
+                 and item.lifecycle == "active"),
+                None,
+            )
+            if location is None:
+                raise ApiError("repo_location_not_found")
+            if location.node_id != "local":
+                raise ApiError("repo_location_not_local")
+            if location.availability != "available":
+                raise ApiError("repo_location_unavailable")
+            payload = {"project_id": project_id, **body}
+            registry.preflight_idempotency(
+                scope=WORKSPACE_SCOPE, idempotency_key=key, payload=payload,
+            )
+            created = registry.idempotent_create_workspace(
+                scope=WORKSPACE_SCOPE, idempotency_key=key, payload=payload,
+                project_id=project_id, repo_location_id=body["repo_location_id"],
+                name=body["name"], goal=body["goal"],
+                isolation_kind=body["isolation_kind"],
+                response_meta=_meta(request, write_available=True),
+            )
+            return JSONResponse(
+                status_code=created.status_code, content=created.response,
+            )
+        return await _run_async(operation, request)
+
 
 async def _body(request: Request, fields: set[str]) -> dict[str, Any]:
     try:
@@ -295,6 +342,28 @@ def _validate_attach_body(project_id: str, body: Mapping[str, Any]) -> None:
     if type(body.get("expected_project_version")) is not int or body["expected_project_version"] < 1:
         raise ApiError("invalid_argument")
     _locator(body["locator"])
+
+
+def _validate_workspace_body(project_id: str, body: Mapping[str, Any]) -> None:
+    try:
+        registry_domain.opaque(project_id, maximum=64)
+        repo_location_id = registry_domain.opaque(
+            body["repo_location_id"], maximum=64,
+        )
+        registry_domain.optional_text(body["goal"], maximum=4096)
+    except (KeyError, ValueError):
+        raise ApiError("invalid_argument") from None
+    name = body.get("name")
+    if (
+        not isinstance(name, str)
+        or not 1 <= len(name) <= 256
+        or len(repo_location_id) != 36
+        or not repo_location_id.startswith("loc_")
+        or any(char not in "0123456789abcdef" for char in repo_location_id[4:])
+    ):
+        raise ApiError("invalid_argument")
+    if body.get("isolation_kind") != "shared":
+        raise ApiError("unsupported_isolation_kind")
 
 
 def _secondary_discovery(service: ApiService, body: Mapping[str, Any], *, require_unowned: bool):
