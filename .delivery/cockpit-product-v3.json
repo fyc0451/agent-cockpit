@@ -392,10 +392,51 @@
       "user_acceptance_evidence": null
     },
     {
+      "id": "SCHED-001-authority-contract",
+      "title": "Freeze scheduler authority identity generation lease and alert contracts",
+      "status": "planned",
+      "depends_on": ["DELIVERY-002-wip3-gate"],
+      "scope": ["docs/contracts/scheduler-v1.md", "tests/test_scheduler_contract.py", "tests/fixtures/scheduler_v1"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_scheduler_contract.py", "passed": false}
+      ],
+      "rollback": "Revert only the scheduler contract tests and fixtures; no dispatch runtime Store Agent or service state exists to roll back",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
+      "id": "SCHED-002-readonly-projection",
+      "title": "Implement deterministic read-only scheduler and alert intent projection",
+      "status": "planned",
+      "depends_on": ["SCHED-001-authority-contract"],
+      "scope": ["agent_cockpit/scheduler_projection.py", "tests/test_scheduler_projection.py"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_scheduler_contract.py tests/test_scheduler_projection.py", "passed": false},
+        {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py tests/test_coordination.py tests/test_coordination_assignments.py tests/test_attention.py tests/test_herdr_state.py", "passed": false}
+      ],
+      "rollback": "Revert the standalone pure projection and tests; it has no timer persistence API prompt or dispatch path",
+      "production_impact": "none",
+      "owner_instance_id": null,
+      "reviewer_instance_id": null,
+      "base_sha": null,
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
       "id": "SLICE-001-local-readonly",
       "title": "Deliver the first real Local-only read path from Doctor to Files and Terminal",
       "status": "planned",
-      "depends_on": ["WEB-003-project-registry-ui", "PROJ-005-compatibility"],
+      "depends_on": ["WEB-003-project-registry-ui", "PROJ-005-compatibility", "SCHED-002-readonly-projection"],
       "scope": ["agent_cockpit/api", "agent_cockpit/application", "agent_cockpit/contracts", "agent_cockpit/domain", "agent_cockpit/infrastructure", "web", "tests", "docs/contracts"],
       "acceptance": [
         {"command": ".venv/bin/python -m pytest -q tests/test_cockpit2_local_slice.py", "passed": false},
