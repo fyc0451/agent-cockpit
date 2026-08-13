@@ -4,7 +4,7 @@ import { renderApp, stubFetch, type MockResponseSpec } from './helpers'
 
 function overviewSpec(spec: MockResponseSpec) {
   return stubFetch((url) => {
-    if (url.startsWith('/api/overview')) return spec
+    if (url.startsWith('/api/project-registry/projects')) return spec
     if (url.startsWith('/api/attention')) return { body: { data: { items: [] }, meta: {} } }
     if (url.startsWith('/api/herdr/status')) return { body: { data: { name: 'Herdr' }, meta: {} } }
     return undefined
