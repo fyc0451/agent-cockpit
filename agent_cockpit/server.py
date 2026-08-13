@@ -55,6 +55,11 @@ from . import upgrade_core
 from . import upgrade_service
 from . import web_push
 from . import settings
+from . import project_discovery
+from . import project_discovery_service
+from . import project_registry_api
+from . import project_registry_store
+from . import runtime_paths
 from .artifact_root import resolve_artifact_root
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
@@ -193,6 +198,7 @@ async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
     global _identity_retirement_task
     _require_next_instance_lock()
+    project_registry_api_service().prepare()
     state_enabled = _h0_state_enabled()
     b0_runtime_active = _b0_runtime_active()
     if state_enabled and not _open_state_clients():
@@ -296,6 +302,52 @@ logger = logging.getLogger("agent-cockpit")
 INTERNAL_ERROR_DETAIL = "服务器内部错误，请稍后重试"
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 PANE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$")
+
+
+_project_registry_store: project_registry_store.ProjectRegistryStore | None = None
+
+
+class _RegistryDiscoveryReader:
+    def match_discovery(
+        self, *, node_id: str, canonical_path: str, repository_fingerprint: str | None,
+    ) -> tuple[project_discovery.RegistryMatch | None, tuple[project_discovery.RegistryMatch, ...]]:
+        exact, possible = _project_registry().match_discovery(
+            node_id=node_id,
+            canonical_path=canonical_path,
+            repository_fingerprint=repository_fingerprint,
+        )
+        def convert(value):
+            if value is None:
+                return None
+            return project_discovery.RegistryMatch(
+                value.project_id, value.slug, value.display_name,
+            )
+        return convert(exact), tuple(convert(value) for value in possible)
+
+
+def _project_registry() -> project_registry_store.ProjectRegistryStore:
+    global _project_registry_store
+    if _project_registry_store is None:
+        _project_registry_store = project_registry_store.initialize(
+            runtime_paths.store("project_registry")
+        )
+    return _project_registry_store
+
+
+def _project_discovery_service() -> project_discovery_service.LocalProjectDiscoveryService:
+    return project_discovery_service.LocalProjectDiscoveryService(
+        registry_match_reader=_RegistryDiscoveryReader(),
+    )
+
+
+def project_registry_api_service() -> project_registry_api.ApiService:
+    return project_registry_api.ApiService(
+        registry_provider=_project_registry,
+        discovery_provider=_project_discovery_service,
+    )
+
+
+project_registry_api.install(app, project_registry_api_service())
 
 
 @app.exception_handler(HTTPException)
