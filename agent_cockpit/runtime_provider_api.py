@@ -204,7 +204,10 @@ def _snapshot(value: object, session: dict[str, object]) -> dict[str, object]:
     row = _exact(value, {"session_id", "process_state", "agent_count"})
     if row["session_id"] != session["session_id"]:
         _fail("source_malformed")
-    if row["process_state"] not in {"running", "stopped", "unknown"}:
+    if (
+        type(row["process_state"]) is not str
+        or row["process_state"] not in {"running", "stopped", "unknown"}
+    ):
         _fail("source_malformed")
     if type(row["agent_count"]) is not int or row["agent_count"] < 0:
         _fail("source_malformed")

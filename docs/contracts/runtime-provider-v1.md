@@ -84,3 +84,10 @@ Operation, Event, Memory, terminal, token, or absolute runtime path data.
 watermark. `open_existing()` and `get_observation()` use SQLite read-only mode; they
 never initialize, migrate, create, or update the database. Missing or mismatched
 schema fails closed rather than appearing as an empty observation.
+
+The database leaf is explicitly created as an owner-owned regular `0600` file with
+one link, independent of process umask. Every open revalidates regular-file kind,
+owner, exact mode, link count, and stable leaf identity. Schema validation compares a
+canonical fingerprint derived from the owned DDL: normalized `sqlite_master` objects,
+column name/type/null/default/primary-key/hidden metadata, indexes and indexed
+columns, foreign keys, and triggers. Extra or changed schema objects fail closed.

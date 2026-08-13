@@ -1,7 +1,9 @@
 """Provider-owned identity observations for Runtime Provider v1."""
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +30,48 @@ _SCHEMA = (
     installed_at TEXT NOT NULL
 );""",
 )
+
+
+def _canonical_sql(value: str | None) -> str:
+    return " ".join((value or "").split()).lower()
+
+
+def _schema_fingerprint(connection: sqlite3.Connection) -> tuple[object, ...]:
+    objects = tuple(
+        (str(kind), str(name), str(table), _canonical_sql(sql))
+        for kind, name, table, sql in connection.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+        ).fetchall()
+    )
+    tables = []
+    for table in sorted(_TABLES):
+        columns = tuple(connection.execute(f"PRAGMA table_xinfo({table})").fetchall())
+        indexes = tuple(connection.execute(f"PRAGMA index_list({table})").fetchall())
+        index_columns = tuple(
+            (str(row[1]), tuple(connection.execute(
+                f"PRAGMA index_xinfo({row[1]})"
+            ).fetchall()))
+            for row in indexes
+        )
+        foreign_keys = tuple(connection.execute(
+            f"PRAGMA foreign_key_list({table})"
+        ).fetchall())
+        tables.append((table, columns, indexes, index_columns, foreign_keys))
+    return objects, tuple(tables)
+
+
+def _expected_schema_fingerprint() -> tuple[object, ...]:
+    connection = sqlite3.connect(":memory:")
+    try:
+        for statement in _SCHEMA:
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+_EXPECTED_SCHEMA_FINGERPRINT = _expected_schema_fingerprint()
 
 
 class RuntimeProviderStoreError(RuntimeError):
@@ -144,8 +188,19 @@ def initialize(path: Path, *, installed_at: str) -> RuntimeProviderStore:
     path = _absolute(path)
     installed_at = _utc_timestamp(installed_at)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    existed = path.exists()
-    connection = sqlite3.connect(path, isolation_level=None)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        existed = False
+    except OSError:
+        _fail("store_unsafe")
+    else:
+        existed = True
+    if existed:
+        _leaf_signature(path)
+    else:
+        _create_leaf(path)
+    connection = _connect(path, readonly=False)
     try:
         if existed:
             _validate_schema(connection)
@@ -186,14 +241,23 @@ def open_existing(path: Path) -> RuntimeProviderStore:
 
 
 def _connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
-    if readonly and not path.is_file():
-        _fail("schema_missing")
+    before = _leaf_signature(path)
     try:
         if readonly:
-            return sqlite3.connect(f"file:{path}?mode=ro", uri=True, isolation_level=None)
-        return sqlite3.connect(path, isolation_level=None)
+            connection = sqlite3.connect(
+                f"file:{path}?mode=ro", uri=True, isolation_level=None
+            )
+        else:
+            connection = sqlite3.connect(path, isolation_level=None)
     except sqlite3.Error:
         _fail("store_read_failed" if readonly else "store_write_failed")
+    try:
+        if _leaf_signature(path) != before:
+            _fail("store_unsafe")
+    except RuntimeProviderStoreError:
+        connection.close()
+        raise
+    return connection
 
 
 def _validate_schema(connection: sqlite3.Connection) -> None:
@@ -202,17 +266,13 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
         metadata = connection.execute(
             "SELECT schema_version, schema_name FROM schema_metadata"
         ).fetchall()
-        tables = frozenset(
-            str(row[0]) for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            ).fetchall()
-        )
+        fingerprint = _schema_fingerprint(connection)
     except sqlite3.Error:
         _fail("schema_missing")
     if (
         version != SCHEMA_VERSION
         or metadata != [(SCHEMA_VERSION, "runtime_provider")]
-        or tables != _TABLES
+        or fingerprint != _EXPECTED_SCHEMA_FINGERPRINT
     ):
         _fail("schema_mismatch")
 
@@ -222,6 +282,52 @@ def _absolute(path: Path) -> Path:
     if not value.is_absolute() or ".." in value.parts:
         _fail("store_unsafe")
     return value
+
+
+def _leaf_signature(path: Path) -> tuple[int, int, int, int, int]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        _fail("schema_missing")
+    except OSError:
+        _fail("store_unsafe")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        _fail("store_unsafe")
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink)
+
+
+def _create_leaf(path: Path) -> tuple[int, int, int, int, int]:
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        _fail("store_unsafe")
+    try:
+        os.fchmod(fd, 0o600)
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+        ):
+            _fail("store_unsafe")
+        signature = (
+            opened.st_dev, opened.st_ino, opened.st_uid,
+            opened.st_mode, opened.st_nlink,
+        )
+    finally:
+        os.close(fd)
+    if _leaf_signature(path) != signature:
+        _fail("store_unsafe")
+    return signature
 
 
 def _identity(value: object, field: str, *, maximum: int = 64) -> str:

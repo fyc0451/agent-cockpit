@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -242,6 +244,23 @@ def test_malformed_individual_snapshot_is_partial(tmp_path: Path):
     }]
 
 
+@pytest.mark.parametrize("process_state", ([], {}, ["running"]))
+def test_malformed_process_state_is_normalized_as_partial(
+    tmp_path: Path, process_state: object,
+):
+    transport = FakeTransport(snapshots={"alpha": {
+        "session_id": "session-1", "process_state": process_state, "agent_count": 1,
+    }})
+    provider, _ = _verified(tmp_path, transport)
+    payload = provider.list_sessions()
+    assert payload["meta"]["partial"] is True
+    assert payload["meta"]["sources"][0]["status"] == "partial"
+    assert payload["data"]["sessions"][0]["state"] == "unavailable"
+    assert payload["data"]["session_errors"] == [{
+        "session_id": "session-1", "code": "source_malformed",
+    }]
+
+
 def test_non_local_provider_fails_closed_before_transport():
     transport = FakeTransport()
     _error(api.LocalHerdrProvider(transport, node_id="remote").capabilities, "invalid_node", 404)
@@ -276,6 +295,39 @@ def test_initialize_is_idempotent_and_store_schema_is_narrow(tmp_path: Path):
         "terminal", "token", "absolute_path",
     ):
         assert forbidden not in objects
+
+
+def test_initialize_creates_exact_private_regular_leaf_under_open_umask(tmp_path: Path):
+    path = tmp_path / "provider.sqlite3"
+    previous = os.umask(0)
+    try:
+        store.initialize(path, installed_at=NOW).close()
+    finally:
+        os.umask(previous)
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode)
+    assert info.st_uid == os.getuid()
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    assert info.st_nlink == 1
+
+
+@pytest.mark.parametrize("mutation", ("mode", "hardlink"))
+@pytest.mark.parametrize("operation", ("initialize", "open_existing"))
+def test_existing_leaf_safety_drift_fails_closed(
+    tmp_path: Path, mutation: str, operation: str,
+):
+    path = tmp_path / "provider.sqlite3"
+    store.initialize(path, installed_at=NOW).close()
+    if mutation == "mode":
+        path.chmod(0o640)
+    else:
+        os.link(path, tmp_path / "provider-copy.sqlite3")
+    with pytest.raises(store.RuntimeProviderStoreError) as unsafe:
+        if operation == "initialize":
+            store.initialize(path, installed_at=NOW)
+        else:
+            store.open_existing(path)
+    assert unsafe.value.code == "store_unsafe"
 
 
 def test_observation_watermark_is_provider_owned_and_atomic(tmp_path: Path):
@@ -355,6 +407,54 @@ def test_extra_schema_object_is_rejected_without_writes(tmp_path: Path):
     store.initialize(path, installed_at=NOW).close()
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE unexpected(value TEXT)")
+    before = path.read_bytes()
+    with pytest.raises(store.RuntimeProviderStoreError) as mismatch:
+        store.open_existing(path)
+    assert mismatch.value.code == "schema_mismatch"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "ddl",
+    (
+        "CREATE INDEX unexpected_index ON provider_identity_observations(observed_at)",
+        "CREATE TRIGGER unexpected_trigger AFTER UPDATE ON provider_identity_observations BEGIN SELECT 1; END",
+    ),
+)
+def test_extra_index_or_trigger_is_rejected_without_writes(tmp_path: Path, ddl: str):
+    path = tmp_path / "provider.sqlite3"
+    store.initialize(path, installed_at=NOW).close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(ddl)
+    before = path.read_bytes()
+    with pytest.raises(store.RuntimeProviderStoreError) as mismatch:
+        store.open_existing(path)
+    assert mismatch.value.code == "schema_mismatch"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "watermark TEXT NOT NULL CHECK (watermark >= 1)",
+        "watermark INTEGER CHECK (watermark >= 1)",
+        "watermark INTEGER NOT NULL DEFAULT 1 CHECK (watermark >= 1)",
+    ),
+)
+def test_column_type_null_and_default_drift_is_rejected(
+    tmp_path: Path, replacement: str,
+):
+    path = tmp_path / "provider.sqlite3"
+    store.initialize(path, installed_at=NOW).close()
+    with sqlite3.connect(path) as connection:
+        original = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='provider_identity_observations'"
+        ).fetchone()[0]
+        connection.execute("ALTER TABLE provider_identity_observations RENAME TO old_observations")
+        connection.execute(str(original).replace(
+            "watermark INTEGER NOT NULL CHECK (watermark >= 1)", replacement,
+        ))
+        connection.execute("DROP TABLE old_observations")
     before = path.read_bytes()
     with pytest.raises(store.RuntimeProviderStoreError) as mismatch:
         store.open_existing(path)
