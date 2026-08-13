@@ -125,18 +125,18 @@
     {
       "id": "SEC-002-remote-inbox",
       "title": "Keep untrusted remote message bodies out of pane prompts",
-      "status": "in_progress",
+      "status": "accepted",
       "depends_on": ["SEC-001-loopback-origin"],
       "scope": ["agent_cockpit/team_inbox_router.py", "agent_cockpit/server.py", "tests/test_team_inbox_router.py", "tests/test_team_agent_reply.py", "tests/test_team_session_bindings.py", "tests/test_h05_state_consumer.py", "static/index.html", "tests/test_frontend.py", "docs/contracts/security-boundary-v1.md"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_team_inbox_router.py tests/test_team_agent_reply.py", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_team_inbox_router.py tests/test_team_agent_reply.py", "passed": true}
       ],
       "rollback": "Revert the remote inbox commit and disable Team remote message ingestion in Next",
       "production_impact": "none",
       "owner_instance_id": "i-ac4mbdpyttxouq6op4tesfzyhy",
-      "reviewer_instance_id": null,
-      "base_sha": null,
-      "fixed_sha": null,
+      "reviewer_instance_id": "i-v4mmixwv2ss5beq4egdeg3x5jq",
+      "base_sha": "b376cd663d6d33b2eeced59c4232e34f281c5599",
+      "fixed_sha": "e9f69448f3c7fa3cfabf06eae94497513362512e",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
