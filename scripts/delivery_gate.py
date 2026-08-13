@@ -9,6 +9,7 @@ import json
 import re
 import subprocess
 import sys
+from typing import NamedTuple
 from pathlib import Path
 
 
@@ -36,6 +37,33 @@ WRITER_WIP_GATE_FIELDS = {"car_id", "from", "to"}
 ACCEPTANCE_FIELDS = {"command", "passed"}
 INSTANCE_ID_RE = re.compile(r"^i-[a-z2-7]{26}$")
 WRITER_WIP_GATE_ID_RE = re.compile(r"^DELIVERY-[0-9]{3}-wip([0-9]+)-gate$")
+WIP4_GATE_ID = "DELIVERY-003-wip4-gate"
+PROVIDER_OWNERSHIP_PATH = ".delivery/provider-ownership-v1.json"
+DELIVERY_PLAN_PATH = ".delivery/cockpit-product-v3.json"
+PROVIDER_OWNERSHIP_FIELDS = {
+    "schema_version", "gate_id", "transition", "global_hotspots", "partitions",
+}
+PROVIDER_TRANSITION_FIELDS = {"from", "to"}
+PROVIDER_PARTITION_FIELDS = {
+    "id", "car_id", "scopes", "store_migration_scope", "entrypoint_scope",
+}
+PROVIDER_PARTITIONS = (
+    ("operation", "OPERATION-001-journal"),
+    ("runtime_provider", "RUNTIME-002-provider"),
+    ("event", "EVENT-001-journal"),
+    ("memory", "MEMORY-001-store"),
+)
+GLOBAL_HOTSPOTS = (
+    "agent_cockpit/runtime_paths.py",
+    "agent_cockpit/server.py",
+    "agent_cockpit/store_schema.py",
+    "server.py",
+)
+
+
+class WriterWipEvaluation(NamedTuple):
+    effective: int
+    errors: tuple[dict, ...]
 
 
 def unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -122,27 +150,248 @@ def scopes_overlap(left: str, right: str) -> bool:
     return left_parts[:shared] == right_parts[:shared]
 
 
-def effective_writer_wip(plan: dict, by_id: dict[str, dict] | None = None) -> int:
+def _valid_scope_list(value: object) -> bool:
+    return (
+        strings(value)
+        and value == sorted(value)
+        and not any(
+            Path(item).is_absolute() or ".." in Path(item).parts or not scope_parts(item)
+            for item in value
+        )
+        and len({scope_parts(item) for item in value}) == len(value)
+        and not any(
+            scopes_overlap(left, right)
+            for index, left in enumerate(value)
+            for right in value[index + 1:]
+        )
+    )
+
+
+def _valid_car_scopes(value: object) -> bool:
+    return (
+        strings(value)
+        and not any(
+            Path(item).is_absolute() or ".." in Path(item).parts or not scope_parts(item)
+            for item in value
+        )
+        and len({scope_parts(item) for item in value}) == len(value)
+        and not any(
+            scopes_overlap(left, right)
+            for index, left in enumerate(value)
+            for right in value[index + 1:]
+        )
+    )
+
+
+def _valid_scope_path(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and not Path(value).is_absolute()
+        and ".." not in Path(value).parts
+        and value == "/".join(Path(value).parts)
+    )
+
+
+def _git_json(repo: Path, revision: str, path: str) -> object:
+    result = git(repo, "show", f"{revision}:{path}")
+    if result.returncode:
+        raise OSError(path)
+    return json.loads(
+        result.stdout, object_pairs_hook=unique_object, parse_constant=invalid_constant,
+    )
+
+
+def _provider_evidence(
+    plan: dict, repo: Path | None, by_id: dict[str, dict], gate_car: dict,
+) -> tuple[dict, ...]:
+    required = issue("provider_ownership_evidence_required", car_id=WIP4_GATE_ID)
+    if repo is None:
+        return (required,)
+    base_sha, fixed_sha = gate_car.get("base_sha"), gate_car.get("fixed_sha")
+    if not is_sha(base_sha) or not is_sha(fixed_sha) or base_sha == fixed_sha:
+        return (required,)
+    if (
+        git(repo, "cat-file", "-e", f"{base_sha}^{{commit}}").returncode
+        or git(repo, "cat-file", "-e", f"{fixed_sha}^{{commit}}").returncode
+        or git(repo, "merge-base", "--is-ancestor", base_sha, fixed_sha).returncode
+    ):
+        return (required,)
+    fixed_blob = git(repo, "rev-parse", f"{fixed_sha}:{PROVIDER_OWNERSHIP_PATH}")
+    if fixed_blob.returncode:
+        return (required,)
+    base_blob = git(repo, "rev-parse", f"{base_sha}:{PROVIDER_OWNERSHIP_PATH}")
+    if base_blob.returncode == 0 and base_blob.stdout.strip() == fixed_blob.stdout.strip():
+        return (required,)
+    try:
+        evidence = _git_json(repo, fixed_sha, PROVIDER_OWNERSHIP_PATH)
+        fixed_plan = _git_json(repo, fixed_sha, DELIVERY_PLAN_PATH)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return (issue("invalid_provider_ownership_evidence", car_id=WIP4_GATE_ID),)
+    invalid = issue("invalid_provider_ownership_evidence", car_id=WIP4_GATE_ID)
+    if not isinstance(evidence, dict) or set(evidence) != PROVIDER_OWNERSHIP_FIELDS:
+        return (invalid,)
+    transition = evidence["transition"]
+    partitions = evidence["partitions"]
+    if (
+        type(evidence["schema_version"]) is not int
+        or evidence["schema_version"] != 1
+        or evidence["gate_id"] != WIP4_GATE_ID
+        or not isinstance(transition, dict)
+        or set(transition) != PROVIDER_TRANSITION_FIELDS
+        or type(transition["from"]) is not int
+        or type(transition["to"]) is not int
+        or transition != {"from": 3, "to": 4}
+        or evidence["global_hotspots"] != list(GLOBAL_HOTSPOTS)
+        or not isinstance(partitions, list)
+        or len(partitions) != len(PROVIDER_PARTITIONS)
+        or not isinstance(fixed_plan, dict)
+        or not isinstance(fixed_plan.get("cars"), list)
+    ):
+        return (invalid,)
+    fixed_ids: list[str] = []
+    for car in fixed_plan["cars"]:
+        if (
+            not isinstance(car, dict)
+            or not isinstance(car.get("id"), str)
+            or not isinstance(car.get("status"), str)
+            or car["status"] not in STATUSES
+            or not strings(car.get("depends_on"), allow_empty=True)
+            or not _valid_car_scopes(car.get("scope"))
+        ):
+            return (invalid,)
+        fixed_ids.append(car["id"])
+    if len(set(fixed_ids)) != len(fixed_ids):
+        return (invalid,)
+    fixed_by_id = {car["id"]: car for car in fixed_plan["cars"]}
+    all_scopes: list[tuple[str, str]] = []
+    migration_scopes: list[tuple[str, str]] = []
+    entrypoint_scopes: list[tuple[str, str]] = []
+    for partition, expected in zip(partitions, PROVIDER_PARTITIONS):
+        if (
+            not isinstance(partition, dict)
+            or set(partition) != PROVIDER_PARTITION_FIELDS
+            or (partition.get("id"), partition.get("car_id")) != expected
+            or not _valid_scope_list(partition.get("scopes"))
+            or not _valid_scope_path(partition.get("store_migration_scope"))
+            or not _valid_scope_path(partition.get("entrypoint_scope"))
+        ):
+            return (invalid,)
+        owner = partition["car_id"]
+        all_scopes.extend((owner, scope) for scope in partition["scopes"])
+        migration_scopes.append((owner, partition["store_migration_scope"]))
+        entrypoint_scopes.append((owner, partition["entrypoint_scope"]))
+
+    overlap = issue("provider_ownership_overlap", car_id=WIP4_GATE_ID)
+    for values in (all_scopes, migration_scopes, entrypoint_scopes):
+        if any(
+            left_owner != right_owner and scopes_overlap(left, right)
+            for index, (left_owner, left) in enumerate(values)
+            for right_owner, right in values[index + 1:]
+        ):
+            return (overlap,)
+    if any(
+        scopes_overlap(scope, hotspot)
+        for _owner, scope in all_scopes
+        for hotspot in GLOBAL_HOTSPOTS
+    ):
+        return (overlap,)
+    if any(
+        not any(
+            scopes_overlap(value, scope)
+            and len(scope_parts(scope)) <= len(scope_parts(value))
+            for scope in partition["scopes"]
+        )
+        for partition in partitions
+        for value in (
+            partition["store_migration_scope"], partition["entrypoint_scope"],
+        )
+    ):
+        return (invalid,)
+
+    mismatch = issue("provider_ownership_car_mismatch", car_id=WIP4_GATE_ID)
+    provider_ids = {partition["car_id"] for partition in partitions}
+    for partition in partitions:
+        fixed_car = fixed_by_id.get(partition["car_id"])
+        current_car = by_id.get(partition["car_id"])
+        if (
+            not isinstance(fixed_car, dict)
+            or fixed_car.get("status") != "planned"
+            or fixed_car.get("depends_on") != [WIP4_GATE_ID]
+            or fixed_car.get("scope") != partition["scopes"]
+            or not isinstance(current_car, dict)
+            or current_car.get("depends_on") != [WIP4_GATE_ID]
+            or current_car.get("scope") != partition["scopes"]
+        ):
+            return (mismatch,)
+
+    for current_by_id in (fixed_by_id, by_id):
+        runnable = [
+            car for car in current_by_id.values()
+            if car.get("id") not in provider_ids | {WIP4_GATE_ID}
+            and (
+                car.get("status") in ACTIVE
+                or (
+                    car.get("status") == "planned"
+                    and all(
+                        current_by_id.get(dependency, {}).get("status") in SATISFIED
+                        for dependency in car.get("depends_on", [])
+                    )
+                )
+            )
+        ]
+        if any(
+            scopes_overlap(provider_scope, other_scope)
+            for _owner, provider_scope in all_scopes
+            for car in runnable
+            for other_scope in car.get("scope", [])
+        ):
+            return (overlap,)
+    return ()
+
+
+def evaluate_writer_wip(
+    plan: dict, repo: Path | None = None, by_id: dict[str, dict] | None = None,
+) -> WriterWipEvaluation:
     limits = plan["limits"]
     effective = limits["writer_wip"]
     if plan["schema_version"] != 2:
-        return effective
+        return WriterWipEvaluation(effective, ())
     cars = by_id if by_id is not None else {car["id"]: car for car in plan["cars"]}
+    errors: tuple[dict, ...] = ()
+    seen_gate_ids: set[str] = set()
     for gate in limits.get("writer_wip_gates", []):
         if not isinstance(gate, dict) or set(gate) != WRITER_WIP_GATE_FIELDS:
             break
+        gate_id = gate["car_id"]
+        match = WRITER_WIP_GATE_ID_RE.fullmatch(gate_id) if isinstance(gate_id, str) else None
         if (
-            not isinstance(gate["car_id"], str)
+            match is None
             or type(gate["from"]) is not int
             or type(gate["to"]) is not int
             or effective != gate["from"]
+            or gate["to"] != gate["from"] + 1
+            or match.group(1) != str(gate["to"])
+            or gate_id in seen_gate_ids
+            or (gate["to"] == 4 and gate["car_id"] != WIP4_GATE_ID)
         ):
             break
+        seen_gate_ids.add(gate_id)
         car = cars.get(gate["car_id"])
-        if not car or car["status"] not in SATISFIED:
+        if not car:
+            break
+        if gate["car_id"] == WIP4_GATE_ID and car.get("status") in SHA_STATUSES:
+            errors = _provider_evidence(plan, repo, cars, car)
+        if car.get("status") not in SATISFIED or errors:
             break
         effective = gate["to"]
-    return effective
+    return WriterWipEvaluation(effective, errors)
+
+
+def effective_writer_wip(
+    plan: dict, repo: Path | None = None, by_id: dict[str, dict] | None = None,
+) -> int:
+    return evaluate_writer_wip(plan, repo, by_id).effective
 
 
 def load(path: Path) -> tuple[dict | None, list[dict]]:
@@ -216,6 +465,7 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
                 and gate["to"] == gate["from"] + 1
                 and match is not None
                 and match.group(1) == str(gate["to"])
+                and (gate["to"] != 4 or car_id == WIP4_GATE_ID)
                 and car_id not in seen_gate_ids
             )
             if not transition_valid:
@@ -397,16 +647,18 @@ def validate(plan: dict, repo: Path, now: dt.datetime | None = None) -> list[dic
                                 car_id=left["id"],
                                 detail=f"{right['id']}:{left_scope}:{right_scope}",
                             ))
-    if sum(car["status"] in ACTIVE for car in valid_cars) > effective_writer_wip(plan, by_id):
+    wip = evaluate_writer_wip(plan, repo, by_id)
+    errors.extend(wip.errors)
+    if sum(car["status"] in ACTIVE for car in valid_cars) > wip.effective:
         errors.append(issue("writer_wip_exceeded"))
     return errors
 
 
-def readiness(plan: dict) -> tuple[list[dict], list[dict]]:
+def readiness(plan: dict, repo: Path | None = None) -> tuple[list[dict], list[dict]]:
     by_id = {car["id"]: car for car in plan["cars"]}
     ready, waiting = [], []
     active = sum(car["status"] in ACTIVE for car in plan["cars"])
-    writer_wip = effective_writer_wip(plan, by_id)
+    writer_wip = evaluate_writer_wip(plan, repo, by_id).effective
     for car in plan["cars"]:
         if car["status"] != "planned":
             continue
@@ -429,11 +681,12 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     plan, errors = load(args.plan)
+    repo = repo_root(args.plan)
     if plan is not None:
-        errors.extend(validate(plan, repo_root(args.plan)))
+        errors.extend(validate(plan, repo))
     result: dict = {"ok": not errors, "errors": errors}
     if not errors and args.command == "ready":
-        result["ready"], result["waiting"] = readiness(plan)
+        result["ready"], result["waiting"] = readiness(plan, repo)
     if not errors and args.command == "release-check":
         matches = [car for car in plan["cars"] if car["id"] == args.car_id]
         if not matches:

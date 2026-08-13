@@ -116,6 +116,10 @@
 | `dependency_not_satisfied` | 依赖未完成 |
 | `writer_wip_exceeded` | WIP 超过限制 |
 | `writer_wip_gate_required` | schema v2 缺少合法连续的容量 gate |
+| `provider_ownership_evidence_required` | WIP4 immutable Git-tree证据缺失、no-op、未提交、未变化或非后代 |
+| `invalid_provider_ownership_evidence` | Provider Ownership v1 sidecar schema无效 |
+| `provider_ownership_car_mismatch` | fixed/current Delivery car与sidecar不一致 |
+| `provider_ownership_overlap` | provider、migration、entrypoint、global hotspot或active/runnable writer ownership相交 |
 | `release_timeout` | 发布超时 |
 | `release_start_in_future` | 发布开始时间晚于当前 UTC 时间 |
 | `reslice_required` | 第二次跨模块 BLOCK 后仍继续 |

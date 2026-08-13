@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +77,590 @@ def gated_plan(*, gate_status: str = "review", extra_gates: int = 0) -> dict:
             acceptance=[{"command": "true", "passed": False}],
         ))
     return value
+
+
+PARTITIONS = (
+    ("operation", "OPERATION-001-journal", "operation"),
+    ("runtime_provider", "RUNTIME-002-provider", "runtime_provider"),
+    ("event", "EVENT-001-journal", "event"),
+    ("memory", "MEMORY-001-store", "memory"),
+)
+GLOBAL_HOTSPOTS = [
+    "agent_cockpit/runtime_paths.py",
+    "agent_cockpit/server.py",
+    "agent_cockpit/store_schema.py",
+    "server.py",
+]
+
+
+def provider_sidecar() -> dict:
+    return {
+        "schema_version": 1,
+        "gate_id": "DELIVERY-003-wip4-gate",
+        "transition": {"from": 3, "to": 4},
+        "global_hotspots": GLOBAL_HOTSPOTS,
+        "partitions": [
+            {
+                "id": partition_id,
+                "car_id": car_id,
+                "scopes": sorted([
+                    f"agent_cockpit/{stem}_api.py",
+                    f"agent_cockpit/{stem}_store.py",
+                    f"docs/contracts/{stem.replace('_', '-')}-v1.md",
+                    f"tests/test_{stem}.py",
+                ]),
+                "store_migration_scope": f"agent_cockpit/{stem}_store.py",
+                "entrypoint_scope": f"agent_cockpit/{stem}_api.py",
+            }
+            for partition_id, car_id, stem in PARTITIONS
+        ],
+    }
+
+
+def _run_git(repo: Path, *args: str) -> str:
+    return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+
+def _commit(repo: Path, message: str) -> str:
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", message], cwd=repo, check=True,
+    )
+    return _run_git(repo, "rev-parse", "HEAD")
+
+
+def _future_car(template: dict, partition: dict) -> dict:
+    return dict(
+        template,
+        id=partition["car_id"],
+        title=f"Plan {partition['id']} ownership without implementing it",
+        status="planned",
+        depends_on=["DELIVERY-003-wip4-gate"],
+        scope=list(partition["scopes"]),
+        owner_instance_id=None,
+        reviewer_instance_id=None,
+        base_sha=None,
+        fixed_sha=None,
+        acceptance=[{"command": "true", "passed": False}],
+    )
+
+
+def _candidate_plan(base_sha: str, evidence: dict) -> dict:
+    value = gated_plan(gate_status="accepted", extra_gates=1)
+    value["baseline"]["main_sha"] = base_sha
+    first, second = value["cars"]
+    first.update(base_sha=base_sha, fixed_sha=base_sha)
+    second.update(
+        status="in_progress",
+        depends_on=["DELIVERY-002-wip3-gate"],
+        scope=[
+            ".delivery/cockpit-product-v3.json",
+            ".delivery/provider-ownership-v1.json",
+        ],
+        owner_instance_id="i-cccccccccccccccccccccccccc",
+        reviewer_instance_id=None,
+        base_sha=base_sha,
+        fixed_sha=None,
+        acceptance=[{"command": "true", "passed": False}],
+    )
+    value["cars"].extend(
+        _future_car(second, partition) for partition in evidence["partitions"]
+    )
+    return value
+
+
+def wip4_repo(
+    tmp_path: Path, *, status: str = "review", evidence: object = None,
+    base_evidence: object = None, mutate_candidate=None,
+) -> tuple[Path, dict, str, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Delivery Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "delivery@example.invalid"], cwd=repo, check=True)
+    delivery = repo / ".delivery"
+    delivery.mkdir()
+    (repo / "seed").write_text("base\n", encoding="utf-8")
+    if base_evidence is not None:
+        (delivery / "provider-ownership-v1.json").write_text(
+            json.dumps(base_evidence), encoding="utf-8",
+        )
+    base_sha = _commit(repo, "base")
+
+    sidecar = provider_sidecar() if evidence is None else evidence
+    candidate = _candidate_plan(base_sha, provider_sidecar())
+    if mutate_candidate is not None:
+        mutate_candidate(candidate)
+    (delivery / "cockpit-product-v3.json").write_text(
+        json.dumps(candidate), encoding="utf-8",
+    )
+    if sidecar is not False:
+        (delivery / "provider-ownership-v1.json").write_text(
+            json.dumps(sidecar), encoding="utf-8",
+        )
+    fixed_sha = _commit(repo, "fixed")
+
+    current = copy.deepcopy(candidate)
+    gate = next(car for car in current["cars"] if car["id"] == "DELIVERY-003-wip4-gate")
+    gate.update(
+        status=status,
+        reviewer_instance_id="i-dddddddddddddddddddddddddd",
+        fixed_sha=fixed_sha,
+        acceptance=[{"command": "true", "passed": status in {"accepted", "user_accepted"}}],
+    )
+    (delivery / "cockpit-product-v3.json").write_text(
+        json.dumps(current), encoding="utf-8",
+    )
+    return repo, current, base_sha, fixed_sha
+
+
+def _wip4_gate(value: dict) -> dict:
+    return next(car for car in value["cars"] if car["id"] == "DELIVERY-003-wip4-gate")
+
+
+def _evaluation(value: dict, repo: Path):
+    gate = module()
+    by_id = {car["id"]: car for car in value["cars"]}
+    return gate.evaluate_writer_wip(value, repo, by_id)
+
+
+def test_wip4_valid_fixed_tree_evidence_enables_four_only_after_acceptance(
+    tmp_path: Path,
+) -> None:
+    repo, value, _base, _fixed = wip4_repo(tmp_path, status="review")
+    gate = module()
+    evaluation = _evaluation(value, repo)
+    assert evaluation.effective == 3
+    assert evaluation.errors == ()
+
+    _wip4_gate(value)["status"] = "accepted"
+    _wip4_gate(value)["acceptance"][0]["passed"] = True
+    evaluation = _evaluation(value, repo)
+    assert evaluation.effective == 4
+    assert evaluation.errors == ()
+
+    template = value["cars"][-1]
+    value["cars"].extend([
+        dict(
+            template,
+            id=f"active-{index}",
+            status="in_progress",
+            depends_on=[],
+            scope=[f"active/{index}"],
+            owner_instance_id=f"i-{'efg'[index] * 26}",
+        )
+        for index in range(3)
+    ])
+    ready, waiting = gate.readiness(value, repo)
+    assert any(item["id"] == "OPERATION-001-journal" for item in ready)
+    assert not any(
+        item["id"] == "OPERATION-001-journal" and "writer_wip" in item["waiting_on"]
+        for item in waiting
+    )
+
+
+def test_wip4_preserves_v1_and_wip3_capacity(tmp_path: Path) -> None:
+    gate = module()
+    assert gate.effective_writer_wip(plan(), ROOT) == 2
+    wip3 = gated_plan(gate_status="accepted")
+    assert gate.effective_writer_wip(wip3, ROOT) == 3
+    repo, value, _base, _fixed = wip4_repo(tmp_path, status="review")
+    assert gate.effective_writer_wip(value, repo) == 3
+
+
+def test_wip4_transition_cannot_bypass_evidence_with_another_delivery_id() -> None:
+    value = gated_plan(gate_status="accepted", extra_gates=1)
+    value["limits"]["writer_wip_gates"][1]["car_id"] = "DELIVERY-999-wip4-gate"
+    value["cars"][1]["id"] = "DELIVERY-999-wip4-gate"
+    value["cars"][1].update(
+        status="accepted",
+        owner_instance_id="i-cccccccccccccccccccccccccc",
+        reviewer_instance_id="i-dddddddddddddddddddddddddd",
+        base_sha=value["baseline"]["main_sha"],
+        fixed_sha=value["baseline"]["main_sha"],
+        acceptance=[{"command": "true", "passed": True}],
+    )
+    gate = module()
+    assert "writer_wip_gate_required" in {
+        item["code"] for item in gate.validate(value, ROOT)
+    }
+    assert gate.effective_writer_wip(value, ROOT) == 3
+
+
+@pytest.mark.parametrize(
+    "transition",
+    (
+        {"car_id": "DELIVERY-003-wip4-gate", "from": 2, "to": 4},
+        {"car_id": "DELIVERY-003-wip4-gate", "from": 3, "to": 5},
+        {"car_id": "DELIVERY-003-wip4-gate", "from": True, "to": 4},
+    ),
+)
+def test_shared_evaluator_rejects_malformed_wip4_transition_directly(
+    tmp_path: Path, transition: dict,
+) -> None:
+    repo, value, _base, _fixed = wip4_repo(tmp_path, status="accepted")
+    value["limits"]["writer_wip_gates"][1] = transition
+    gate = module()
+    assert gate.effective_writer_wip(value, repo) == 3
+    template = value["cars"][-1]
+    value["cars"].extend([
+        dict(template, id=f"active-{index}", status="in_progress", depends_on=[],
+             scope=[f"active/{index}"], owner_instance_id=f"i-{'efg'[index] * 26}")
+        for index in range(3)
+    ])
+    _ready, waiting = gate.readiness(value, repo)
+    assert any(
+        item["id"] == "OPERATION-001-journal" and "writer_wip" in item["waiting_on"]
+        for item in waiting
+    )
+
+
+def test_wip4_rejects_noop_base_fixed_sha(tmp_path: Path) -> None:
+    repo, value, base, _fixed = wip4_repo(tmp_path, status="accepted")
+    _wip4_gate(value)["fixed_sha"] = base
+    evaluation = _evaluation(value, repo)
+    assert evaluation.effective == 3
+    assert {item["code"] for item in evaluation.errors} == {
+        "provider_ownership_evidence_required"
+    }
+
+
+def test_wip4_rejects_uncommitted_and_unchanged_sidecar(tmp_path: Path) -> None:
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path / "uncommitted", status="accepted", evidence=False,
+    )
+    (repo / ".delivery/provider-ownership-v1.json").write_text(
+        json.dumps(provider_sidecar()), encoding="utf-8",
+    )
+    assert _evaluation(value, repo).effective == 3
+    assert {item["code"] for item in _evaluation(value, repo).errors} == {
+        "provider_ownership_evidence_required"
+    }
+
+    evidence = provider_sidecar()
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path / "unchanged", status="accepted",
+        evidence=evidence, base_evidence=evidence,
+    )
+    assert _evaluation(value, repo).effective == 3
+    assert {item["code"] for item in _evaluation(value, repo).errors} == {
+        "provider_ownership_evidence_required"
+    }
+
+
+@pytest.mark.parametrize("base_sha", ["f" * 40, "non-descendant"])
+def test_wip4_rejects_missing_or_non_descendant_base(
+    tmp_path: Path, base_sha: str,
+) -> None:
+    repo, value, _base, _fixed = wip4_repo(tmp_path, status="accepted")
+    if base_sha == "non-descendant":
+        subprocess.run(["git", "checkout", "--orphan", "other"], cwd=repo, check=True,
+                       stdout=subprocess.DEVNULL)
+        (repo / "other").write_text("other\n", encoding="utf-8")
+        base_sha = _commit(repo, "other")
+    _wip4_gate(value)["base_sha"] = base_sha
+    evaluation = _evaluation(value, repo)
+    assert evaluation.effective == 3
+    assert "provider_ownership_evidence_required" in {
+        item["code"] for item in evaluation.errors
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda value: [],
+        lambda value: {**value, "extra": True},
+        lambda value: {key: item for key, item in value.items() if key != "gate_id"},
+        lambda value: {**value, "schema_version": True},
+        lambda value: {**value, "gate_id": "OTHER"},
+        lambda value: {**value, "transition": {"from": 3, "to": 5}},
+        lambda value: {**value, "partitions": value["partitions"][:3]},
+        lambda value: {**value, "partitions": list(reversed(value["partitions"]))},
+        lambda value: {**value, "global_hotspots": value["global_hotspots"][:-1]},
+    ),
+)
+def test_wip4_provider_ownership_schema_is_strict(
+    tmp_path: Path, mutation,
+) -> None:
+    evidence = mutation(provider_sidecar())
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path, status="accepted", evidence=evidence,
+    )
+    evaluation = _evaluation(value, repo)
+    assert evaluation.effective == 3
+    assert "invalid_provider_ownership_evidence" in {
+        item["code"] for item in evaluation.errors
+    }
+
+
+def test_wip4_duplicate_sidecar_key_is_invalid(tmp_path: Path) -> None:
+    repo, value, _base, _fixed = wip4_repo(tmp_path, status="accepted")
+    sidecar = repo / ".delivery/provider-ownership-v1.json"
+    sidecar.write_text(
+        '{"schema_version":1,"schema_version":1}', encoding="utf-8",
+    )
+    fixed = _commit(repo, "duplicate sidecar key")
+    _wip4_gate(value)["fixed_sha"] = fixed
+    assert "invalid_provider_ownership_evidence" in {
+        item["code"] for item in _evaluation(value, repo).errors
+    }
+
+
+@pytest.mark.parametrize("overlap", ["partition", "migration", "entrypoint", "hotspot"])
+def test_wip4_rejects_partition_migration_entrypoint_and_global_hotspot_overlap(
+    tmp_path: Path, overlap: str,
+) -> None:
+    evidence = provider_sidecar()
+    if overlap == "partition":
+        evidence["partitions"][1]["scopes"][0] = evidence["partitions"][0]["scopes"][0]
+        evidence["partitions"][1]["scopes"].sort()
+    elif overlap == "migration":
+        evidence["partitions"][1]["store_migration_scope"] = evidence["partitions"][0]["store_migration_scope"]
+    elif overlap == "entrypoint":
+        evidence["partitions"][1]["entrypoint_scope"] = evidence["partitions"][0]["entrypoint_scope"]
+    else:
+        evidence["partitions"][0]["scopes"][0] = GLOBAL_HOTSPOTS[1]
+        evidence["partitions"][0]["scopes"].sort()
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path, status="accepted", evidence=evidence,
+    )
+    evaluation = _evaluation(value, repo)
+    assert evaluation.effective == 3
+    assert "provider_ownership_overlap" in {
+        item["code"] for item in evaluation.errors
+    }
+
+
+@pytest.mark.parametrize("mismatch", ["missing", "dependency", "status", "scope", "drift"])
+def test_wip4_rejects_future_car_binding_and_current_plan_drift(
+    tmp_path: Path, mismatch: str,
+) -> None:
+    def fixed_status(candidate: dict) -> None:
+        target = next(car for car in candidate["cars"] if car["id"] == "MEMORY-001-store")
+        target["status"] = "accepted"
+
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path, status="accepted",
+        mutate_candidate=fixed_status if mismatch == "status" else None,
+    )
+    target = next(car for car in value["cars"] if car["id"] == "MEMORY-001-store")
+    if mismatch == "missing":
+        value["cars"].remove(target)
+    elif mismatch == "dependency":
+        target["depends_on"] = []
+    elif mismatch != "status":
+        target["scope"] = [*target["scope"], "memory-extra"]
+    evaluation = _evaluation(value, repo)
+    assert evaluation.effective == 3
+    assert "provider_ownership_car_mismatch" in {
+        item["code"] for item in evaluation.errors
+    }
+
+
+@pytest.mark.parametrize("where", ["fixed", "current"])
+def test_wip4_rejects_extra_or_drifted_future_car_dependencies(
+    tmp_path: Path, where: str,
+) -> None:
+    def fixed_extra(candidate: dict) -> None:
+        candidate["cars"].append(dict(
+            candidate["cars"][-1], id="PREREQ", status="accepted",
+            depends_on=[], scope=["prereq"],
+            owner_instance_id="i-eeeeeeeeeeeeeeeeeeeeeeeeee",
+            reviewer_instance_id="i-ffffffffffffffffffffffffff",
+            base_sha=candidate["baseline"]["main_sha"],
+            fixed_sha=candidate["baseline"]["main_sha"],
+            acceptance=[{"command": "true", "passed": True}],
+        ))
+        target = next(car for car in candidate["cars"] if car["id"] == "MEMORY-001-store")
+        target["depends_on"] = ["DELIVERY-003-wip4-gate", "PREREQ"]
+
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path, status="accepted", mutate_candidate=fixed_extra if where == "fixed" else None,
+    )
+    if where == "current":
+        value["cars"].append(dict(
+            value["cars"][-1], id="PREREQ", status="accepted",
+            depends_on=[], scope=["prereq"],
+            owner_instance_id="i-eeeeeeeeeeeeeeeeeeeeeeeeee",
+            reviewer_instance_id="i-ffffffffffffffffffffffffff",
+            base_sha=value["baseline"]["main_sha"], fixed_sha=value["baseline"]["main_sha"],
+            acceptance=[{"command": "true", "passed": True}],
+        ))
+        target = next(car for car in value["cars"] if car["id"] == "MEMORY-001-store")
+        target["depends_on"] = ["DELIVERY-003-wip4-gate", "PREREQ"]
+    assert "provider_ownership_car_mismatch" in {
+        item["code"] for item in _evaluation(value, repo).errors
+    }
+
+
+def test_wip4_rejects_duplicate_fixed_tree_car_ids(tmp_path: Path) -> None:
+    def duplicate(candidate: dict) -> None:
+        target = next(car for car in candidate["cars"] if car["id"] == "MEMORY-001-store")
+        candidate["cars"].insert(0, dict(target, scope=["agent_cockpit/server.py"]))
+
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path, status="accepted", mutate_candidate=duplicate,
+    )
+    assert "invalid_provider_ownership_evidence" in {
+        item["code"] for item in _evaluation(value, repo).errors
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    (("status", []), ("depends_on", None), ("scope", None), ("scope", "agent_cockpit/operation_api.py")),
+)
+def test_wip4_rejects_malformed_fixed_tree_runnable_car_shape(
+    tmp_path: Path, field: str, bad: object,
+) -> None:
+    def malformed(candidate: dict) -> None:
+        template = candidate["cars"][-1]
+        candidate["cars"].append(dict(
+            template,
+            id="OTHER-001",
+            status="in_progress",
+            depends_on=[],
+            scope=[provider_sidecar()["partitions"][0]["scopes"][0]],
+            owner_instance_id="i-eeeeeeeeeeeeeeeeeeeeeeeeee",
+        ))
+        candidate["cars"][-1][field] = bad
+
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path, status="accepted", mutate_candidate=malformed,
+    )
+    evaluation = _evaluation(value, repo)
+    assert evaluation.effective == 3
+    assert "invalid_provider_ownership_evidence" in {
+        item["code"] for item in evaluation.errors
+    }
+
+
+@pytest.mark.parametrize("status", ["in_progress", "review", "accepted"])
+def test_wip4_current_provider_status_may_advance_without_scope_drift(
+    tmp_path: Path, status: str,
+) -> None:
+    repo, value, _base, _fixed = wip4_repo(tmp_path, status="accepted")
+    target = next(car for car in value["cars"] if car["id"] == "MEMORY-001-store")
+    target["status"] = status
+    assert _evaluation(value, repo).effective == 4
+
+
+def test_wip4_ignores_historical_accepted_wide_scope_but_rejects_runnable_conflict(
+    tmp_path: Path,
+) -> None:
+    def accepted_wide(candidate: dict) -> None:
+        template = candidate["cars"][-1]
+        candidate["cars"].append(dict(
+            template,
+            id="HISTORY-001",
+            status="accepted",
+            depends_on=[],
+            scope=["agent_cockpit"],
+            owner_instance_id="i-eeeeeeeeeeeeeeeeeeeeeeeeee",
+            reviewer_instance_id="i-ffffffffffffffffffffffffff",
+            base_sha=candidate["baseline"]["main_sha"],
+            fixed_sha=candidate["baseline"]["main_sha"],
+            acceptance=[{"command": "true", "passed": True}],
+        ))
+
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path / "history", status="accepted", mutate_candidate=accepted_wide,
+    )
+    assert _evaluation(value, repo).effective == 4
+
+    def planned_conflict(candidate: dict) -> None:
+        template = candidate["cars"][-1]
+        candidate["cars"].append(dict(
+            template,
+            id="OTHER-001",
+            status="planned",
+            depends_on=[],
+            scope=[provider_sidecar()["partitions"][0]["scopes"][0]],
+            owner_instance_id=None,
+            reviewer_instance_id=None,
+            base_sha=None,
+            fixed_sha=None,
+            acceptance=[{"command": "true", "passed": False}],
+        ))
+
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path / "runnable", status="accepted", mutate_candidate=planned_conflict,
+    )
+    assert _evaluation(value, repo).effective == 3
+    assert "provider_ownership_overlap" in {
+        item["code"] for item in _evaluation(value, repo).errors
+    }
+
+
+def test_wip4_ignores_planned_scope_conflict_with_unsatisfied_dependency(
+    tmp_path: Path,
+) -> None:
+    def blocked_plan(candidate: dict) -> None:
+        template = candidate["cars"][-1]
+        candidate["cars"].append(dict(
+            template, id="BLOCKER", status="planned", depends_on=[], scope=["blocker"],
+            owner_instance_id=None, reviewer_instance_id=None, base_sha=None, fixed_sha=None,
+        ))
+        candidate["cars"].append(dict(
+            template, id="FUTURE", status="planned", depends_on=["BLOCKER"],
+            scope=[provider_sidecar()["partitions"][0]["scopes"][0]],
+            owner_instance_id=None, reviewer_instance_id=None, base_sha=None, fixed_sha=None,
+        ))
+
+    repo, value, _base, _fixed = wip4_repo(
+        tmp_path, status="accepted", mutate_candidate=blocked_plan,
+    )
+    assert _evaluation(value, repo).effective == 4
+
+
+def test_validate_effective_and_readiness_share_wip4_evaluation(tmp_path: Path) -> None:
+    repo, value, base, _fixed = wip4_repo(tmp_path, status="accepted")
+    _wip4_gate(value)["fixed_sha"] = base
+    gate = module()
+    assert "provider_ownership_evidence_required" in {
+        item["code"] for item in gate.validate(value, repo)
+    }
+    assert gate.effective_writer_wip(value, repo) == 3
+    template = value["cars"][-1]
+    value["cars"].extend([
+        dict(template, id=f"active-{index}", status="in_progress", depends_on=[],
+             scope=[f"active/{index}"], owner_instance_id=f"i-{'efg'[index] * 26}")
+        for index in range(3)
+    ])
+    ready, waiting = gate.readiness(value, repo)
+    assert not any(item["id"] == "OPERATION-001-journal" for item in ready)
+    assert any(
+        item["id"] == "OPERATION-001-journal" and "writer_wip" in item["waiting_on"]
+        for item in waiting
+    )
+
+
+def test_wip4_evidence_error_is_stable_for_all_cli_commands(tmp_path: Path) -> None:
+    repo, value, base, _fixed = wip4_repo(tmp_path, status="accepted")
+    _wip4_gate(value)["fixed_sha"] = base
+    path = repo / ".delivery/cockpit-product-v3.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    for command in ("check", "ready"):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), command, str(path), "--json"],
+            cwd=repo, text=True, capture_output=True,
+        )
+        assert result.returncode == 1
+        assert result.stderr == ""
+        assert "provider_ownership_evidence_required" in {
+            item["code"] for item in json.loads(result.stdout)["errors"]
+        }
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "release-check", str(path),
+         "DELIVERY-003-wip4-gate", "--json"],
+        cwd=repo, text=True, capture_output=True,
+    )
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert "provider_ownership_evidence_required" in {
+        item["code"] for item in json.loads(result.stdout)["errors"]
+    }
 
 
 def codes(value: dict, *, now=None) -> set[str]:
@@ -296,7 +883,7 @@ def test_wip_capacity_is_gated_and_extensible() -> None:
         fixed_sha=value["baseline"]["main_sha"],
         acceptance=[{"command": "true", "passed": True}],
     )
-    assert module().effective_writer_wip(value) == 4
+    assert module().effective_writer_wip(value, ROOT) == 3
 
 
 def test_readiness_uses_effective_capacity_before_and_after_acceptance() -> None:

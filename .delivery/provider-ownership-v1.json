@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "gate_id": "DELIVERY-003-wip4-gate",
+  "transition": {"from": 3, "to": 4},
+  "global_hotspots": [
+    "agent_cockpit/runtime_paths.py",
+    "agent_cockpit/server.py",
+    "agent_cockpit/store_schema.py",
+    "server.py"
+  ],
+  "partitions": [
+    {
+      "id": "operation",
+      "car_id": "OPERATION-001-journal",
+      "scopes": [
+        "agent_cockpit/operation_api.py",
+        "agent_cockpit/operation_store.py",
+        "docs/contracts/operation-v1.md",
+        "tests/test_operation.py"
+      ],
+      "store_migration_scope": "agent_cockpit/operation_store.py",
+      "entrypoint_scope": "agent_cockpit/operation_api.py"
+    },
+    {
+      "id": "runtime_provider",
+      "car_id": "RUNTIME-002-provider",
+      "scopes": [
+        "agent_cockpit/runtime_provider_api.py",
+        "agent_cockpit/runtime_provider_store.py",
+        "docs/contracts/runtime-provider-v1.md",
+        "tests/test_runtime_provider.py"
+      ],
+      "store_migration_scope": "agent_cockpit/runtime_provider_store.py",
+      "entrypoint_scope": "agent_cockpit/runtime_provider_api.py"
+    },
+    {
+      "id": "event",
+      "car_id": "EVENT-001-journal",
+      "scopes": [
+        "agent_cockpit/event_api.py",
+        "agent_cockpit/event_store.py",
+        "docs/contracts/event-v1.md",
+        "tests/test_event.py"
+      ],
+      "store_migration_scope": "agent_cockpit/event_store.py",
+      "entrypoint_scope": "agent_cockpit/event_api.py"
+    },
+    {
+      "id": "memory",
+      "car_id": "MEMORY-001-store",
+      "scopes": [
+        "agent_cockpit/memory_api.py",
+        "agent_cockpit/memory_store.py",
+        "docs/contracts/memory-v1.md",
+        "tests/test_memory.py"
+      ],
+      "store_migration_scope": "agent_cockpit/memory_store.py",
+      "entrypoint_scope": "agent_cockpit/memory_api.py"
+    }
+  ]
+}
