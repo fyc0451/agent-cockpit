@@ -511,6 +511,14 @@ def test_initialize_rejects_unsafe_parent_mode_without_writing(tmp_path: Path):
     assert not path.exists()
 
 
+def test_initialize_rejects_parent_alias_without_writing(tmp_path: Path):
+    path = tmp_path / "private" / ".." / "project-registry.sqlite3"
+    with pytest.raises(registry_store.ProjectRegistryError) as unsafe:
+        registry_store.initialize(path)
+    assert _code(unsafe) == "store_unsafe"
+    assert not (tmp_path / "project-registry.sqlite3").exists()
+
+
 def test_initialize_rejects_parent_and_existing_leaf_owner_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -572,3 +580,43 @@ def test_transaction_begin_failure_closes_connection_and_store_recovers(
     blocker.close()
     project = registry.create_project(slug="recovered", display_name="Recovered", goal=None)
     assert project.slug == "recovered"
+
+
+@pytest.mark.parametrize("connector", ["_connect_write", "_connect_read"])
+def test_post_connect_setup_failure_closes_connection(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, connector: str
+):
+    registry_store.initialize(db_path).close()
+    real_connect = registry_store.sqlite3.connect
+    wrappers = []
+
+    class FailingConnection:
+        def __init__(self, connection):
+            object.__setattr__(self, "connection", connection)
+            object.__setattr__(self, "closed", False)
+
+        def __setattr__(self, name, value):
+            if name in {"connection", "closed"}:
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self.connection, name, value)
+
+        def execute(self, _sql, _parameters=()):
+            raise RuntimeError("injected setup failure")
+
+        def close(self):
+            object.__setattr__(self, "closed", True)
+            self.connection.close()
+
+    def failing_connect(*args, **kwargs):
+        wrapper = FailingConnection(real_connect(*args, **kwargs))
+        wrappers.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr(registry_store.sqlite3, "connect", failing_connect)
+    with pytest.raises(RuntimeError, match="injected setup failure"):
+        getattr(registry_store, connector)(db_path)
+    assert len(wrappers) == 1
+    assert wrappers[0].closed is True
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        wrappers[0].connection.execute("SELECT 1")

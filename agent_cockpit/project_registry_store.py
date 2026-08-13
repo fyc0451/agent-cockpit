@@ -75,7 +75,7 @@ _EXPECTED_SCHEMA_OBJECTS = _expected_schema_objects()
 
 def _absolute_path(path: Path) -> Path:
     path = Path(path)
-    if not path.is_absolute():
+    if not path.is_absolute() or ".." in path.parts:
         _fail("store_unsafe")
     return path
 
@@ -242,26 +242,32 @@ def _discard_unpublished_leaf(
 def _connect_write(path: Path) -> sqlite3.Connection:
     before = _check_path(path, must_exist=True)
     connection = sqlite3.connect(path, isolation_level=None, timeout=5.0)
-    if _check_path(path, must_exist=True) != before:
+    try:
+        if _check_path(path, must_exist=True) != before:
+            _fail("store_unsafe")
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=5000")
+        return connection
+    except BaseException:
         connection.close()
-        _fail("store_unsafe")
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA busy_timeout=5000")
-    return connection
+        raise
 
 
 def _connect_read(path: Path) -> sqlite3.Connection:
     before = _check_path(path, must_exist=True)
     uri = path.as_uri() + "?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True, timeout=1.0)
-    if _check_path(path, must_exist=True) != before:
+    try:
+        if _check_path(path, must_exist=True) != before:
+            _fail("store_unsafe")
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+    except BaseException:
         connection.close()
-        _fail("store_unsafe")
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=ON")
-    connection.execute("PRAGMA foreign_keys=ON")
-    return connection
+        raise
 
 
 def _validate_schema(connection: sqlite3.Connection) -> None:
