@@ -721,14 +721,14 @@
     {
       "id": "WEB-004A-e2e-fixtures",
       "title": "Align legacy endpoint fixtures and fix the exposed Settings accessibility defect",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["WEB-004-legacy-adapters"],
       "scope": ["web/fixtures/api.ts", "web/e2e/axe.spec.ts", "web/e2e/deeplink.spec.ts", "web/e2e/states.spec.ts", "web/pages/SettingsPage.tsx"],
       "acceptance": [
-        {"command": "npm --prefix web run test:e2e -- e2e/axe.spec.ts --grep settings", "passed": false},
-        {"command": "npm --prefix web run test:e2e", "passed": false},
-        {"command": "npm --prefix web test -- --run", "passed": false},
-        {"command": "npm --prefix web run build", "passed": false}
+        {"command": "npm --prefix web run test:e2e -- e2e/axe.spec.ts --grep settings", "passed": true},
+        {"command": "npm --prefix web run test:e2e", "passed": true},
+        {"command": "npm --prefix web test -- --run", "passed": true},
+        {"command": "npm --prefix web run build", "passed": true}
       ],
       "rollback": "Revert the fixture alignment and the Settings raw JSON focusability fix together",
       "production_impact": "none",
