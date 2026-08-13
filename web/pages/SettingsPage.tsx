@@ -38,7 +38,7 @@ function HarnessTab() {
       ) : q.isError ? (
         <QueryErrorState error={q.error} onRetry={() => q.refetch()} />
       ) : (
-        <pre className="raw-json">{JSON.stringify(q.data?.data ?? {}, null, 2)}</pre>
+        <pre className="raw-json" tabIndex={0}>{JSON.stringify(q.data?.data ?? {}, null, 2)}</pre>
       )}
       <div className="state-actions">
         <Button variant="primary" disabled title={writeCap.reason ?? 'W1 只读'}>
