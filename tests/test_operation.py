@@ -179,11 +179,14 @@ def test_initialize_requires_private_parent_and_cleans_fault(tmp_path: Path, mon
     def fail(_connection):
         raise RuntimeError("injected")
 
-    monkeypatch.setattr(store_module, "_after_schema_hook", fail)
-    with pytest.raises(RuntimeError, match="injected"):
-        store_module.initialize(path)
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_after_schema_hook", fail)
+        with pytest.raises(RuntimeError, match="injected"):
+            store_module.initialize(path)
     assert not path.exists()
-    assert not root.exists()
+    assert root.is_dir()
+    assert len(list(root.glob(".operation.sqlite3.init-*.tmp"))) == 1
+    assert store_module.initialize(path).path == path
 
 
 def test_initialize_cleans_directories_when_preflight_fails(tmp_path: Path, monkeypatch):
@@ -193,11 +196,13 @@ def test_initialize_cleans_directories_when_preflight_fails(tmp_path: Path, monk
     def fail(_path):
         raise store_module.OperationError("store_unsafe")
 
-    monkeypatch.setattr(store_module, "_require_no_sidecars", fail)
-    with _error("store_unsafe"):
-        store_module.initialize(path)
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_require_no_sidecars", fail)
+        with _error("store_unsafe"):
+            store_module.initialize(path)
     assert not path.exists()
-    assert not (tmp_path / "one").exists()
+    assert root.is_dir()
+    assert store_module.initialize(path).path == path
 
 
 def test_initialize_cleans_directory_when_chmod_fails(tmp_path: Path, monkeypatch):
@@ -207,10 +212,131 @@ def test_initialize_cleans_directory_when_chmod_fails(tmp_path: Path, monkeypatc
     def fail(_path, _mode):
         raise OSError("injected")
 
-    monkeypatch.setattr(store_module.os, "chmod", fail)
-    with _error("store_unsafe"):
-        store_module.initialize(path)
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.os, "chmod", fail)
+        with _error("store_unsafe"):
+            store_module.initialize(path)
     assert not root.exists()
+    assert len(list(tmp_path.glob(".private.operation-init-*.tmp"))) == 1
+    assert store_module.initialize(path).path == path
+
+
+def test_initialize_cleans_directory_when_validate_fails_then_retries(
+    tmp_path: Path, monkeypatch,
+):
+    root = tmp_path / "private"
+    path = root / "operation.sqlite3"
+    original = store_module._validate_directory
+
+    def fail(candidate, *, exact_private=False):
+        if candidate == root and exact_private:
+            raise store_module.OperationError("store_unsafe")
+        return original(candidate, exact_private=exact_private)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_validate_directory", fail)
+        with _error("store_unsafe"):
+            store_module.initialize(path)
+    assert root.is_dir()
+    assert store_module.initialize(path).path == path
+
+
+def test_initialize_does_not_remove_concurrently_replaced_directory(
+    tmp_path: Path, monkeypatch,
+):
+    root = tmp_path / "private"
+    path = root / "operation.sqlite3"
+    original = store_module._validate_directory
+
+    def replace(candidate, *, exact_private=False):
+        if candidate == root and exact_private:
+            candidate.rmdir()
+            candidate.mkdir(mode=0o700)
+            candidate.chmod(0o700)
+            raise store_module.OperationError("store_unsafe")
+        return original(candidate, exact_private=exact_private)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_validate_directory", replace)
+        with _error("store_unsafe"):
+            store_module.initialize(path)
+    assert root.is_dir()
+    assert store_module.initialize(path).path == path
+
+
+def test_initialize_never_removes_concurrent_temp_directory_replacement(
+    tmp_path: Path, monkeypatch,
+):
+    root = tmp_path / "private"
+    path = root / "operation.sqlite3"
+    original = tmp_path / "original-temp-directory"
+    replacement: Path | None = None
+    validate = store_module._validate_directory
+
+    def replace(candidate, *, exact_private=False):
+        nonlocal replacement
+        if candidate.name.startswith(".private.operation-init-") and exact_private:
+            replacement = candidate
+            candidate.rename(original)
+            candidate.mkdir(mode=0o700)
+            candidate.chmod(0o700)
+            raise store_module.OperationError("store_unsafe")
+        return validate(candidate, exact_private=exact_private)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_validate_directory", replace)
+        with _error("store_unsafe"):
+            store_module.initialize(path)
+    assert replacement is not None and replacement.is_dir()
+    assert original.is_dir()
+    assert store_module.initialize(path).path == path
+
+
+def test_initialize_never_removes_concurrent_temp_leaf_replacement(
+    tmp_path: Path, monkeypatch,
+):
+    root = tmp_path / "private"
+    path = root / "operation.sqlite3"
+    original = root / "original-temp.sqlite3"
+    replacement = b"temp leaf replacement"
+
+    def replace(_connection):
+        [temp] = root.glob(".operation.sqlite3.init-*.tmp")
+        temp.rename(original)
+        temp.write_bytes(replacement)
+        temp.chmod(0o600)
+        raise store_module.OperationError("store_unsafe")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_after_schema_hook", replace)
+        with _error("store_unsafe"):
+            store_module.initialize(path)
+    [replacement_path] = root.glob(".operation.sqlite3.init-*.tmp")
+    assert replacement_path.read_bytes() == replacement
+    assert original.exists()
+    assert store_module.initialize(path).path == path
+
+
+def test_initialize_never_unlinks_concurrent_final_leaf_replacement(
+    tmp_path: Path, monkeypatch,
+):
+    root = tmp_path / "private"
+    path = root / "operation.sqlite3"
+    original = root / "original.sqlite3"
+    replacement = b"concurrent replacement"
+
+    def replace(published: Path):
+        published.rename(original)
+        published.write_bytes(replacement)
+        published.chmod(0o600)
+        raise store_module.OperationError("store_unsafe")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_after_publish_hook", replace)
+        with _error("store_unsafe"):
+            store_module.initialize(path)
+    assert path.read_bytes() == replacement
+    assert original.exists()
 
 
 def test_create_projection_saves_typed_fences_without_reading_domain(store):
@@ -273,6 +399,134 @@ def test_create_invalid_input_is_rejected_without_partial_rows(store):
         connection.close()
 
 
+def test_sqlite_integer_inputs_are_bounded_before_bind(store):
+    maximum = 2**63 - 1
+    valid = store.create_operation(
+        scope="scope_max", idempotency_key="key_max", request={}, kind="kind",
+        subject_type="workspace", subject_id="ws_max", plan_digest=_sha("max"),
+        approval_required=False,
+        preconditions=(store_module.Precondition(
+            "revision", "workspace", "ws_max", expected_revision=maximum,
+        ),),
+        steps=(store_module.Step("step_max", "kind"),),
+    )
+    assert valid.projection["preconditions"][0]["expected_revision"] == maximum
+
+    for index, invalid in enumerate((True, -1, 2**63)):
+        with _error("invalid_argument"):
+            store.create_operation(
+                scope="scope_int", idempotency_key=f"key_{index}", request={}, kind="kind",
+                subject_type="workspace", subject_id="ws", plan_digest=_sha("int"),
+                approval_required=False,
+                preconditions=(store_module.Precondition(
+                    "revision", "workspace", "ws", expected_revision=invalid,
+                ),),
+            )
+
+    operation_id = _create(store, key="revision-bounds").operation_id
+    before = store.get_operation(operation_id)
+    for invalid in (True, 0, 2**63):
+        with _error("invalid_argument"):
+            store.transition(
+                operation_id, expected_operation_revision=invalid, status="running",
+            )
+        assert store.get_operation(operation_id) == before
+
+    store.transition(operation_id, expected_operation_revision=1, status="running")
+    running = store.get_operation(operation_id)
+    with _error("invalid_argument"):
+        store.prepare_attempt(
+            operation_id, "allocate", expected_operation_revision=2,
+            expected_step_revision=2**63, mode="execute", provider_kind="runtime",
+        )
+    assert store.get_operation(operation_id) == running
+
+    connection = sqlite3.connect(store.path)
+    try:
+        assert connection.execute(
+            "SELECT count(*) FROM operations WHERE scope='scope_int'"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_revision_and_attempt_number_exhaustion_are_stable_zero_change(store):
+    maximum = 2**63 - 1
+    operation_id = _create(store).operation_id
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            "UPDATE operations SET revision=? WHERE operation_id=?",
+            (maximum, operation_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with _error("revision_exhausted"):
+        store.transition(
+            operation_id, expected_operation_revision=maximum, status="running",
+        )
+    connection = sqlite3.connect(store.path)
+    try:
+        assert connection.execute(
+            "SELECT revision,status FROM operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone() == (maximum, "planned")
+    finally:
+        connection.close()
+
+    operation_id = _create(store, key="step-exhaustion").operation_id
+    store.transition(operation_id, expected_operation_revision=1, status="running")
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            "UPDATE operation_steps SET revision=? WHERE operation_id=? AND step_id='allocate'",
+            (maximum, operation_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with _error("revision_exhausted"):
+        store.prepare_attempt(
+            operation_id, "allocate", expected_operation_revision=2,
+            expected_step_revision=maximum, mode="execute", provider_kind="runtime",
+        )
+    connection = sqlite3.connect(store.path)
+    try:
+        assert connection.execute(
+            "SELECT count(*) FROM operation_attempts WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()[0] == 0
+        connection.execute(
+            "UPDATE operation_steps SET revision=1 WHERE operation_id=? AND step_id='allocate'",
+            (operation_id,),
+        )
+        connection.execute(
+            "INSERT INTO operation_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                operation_id, "allocate", maximum, "exec_max_attempt", "execute",
+                "failed", "runtime", None, "confirmed", "2026-08-14T00:00:00Z",
+                "2026-08-14T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with _error("attempt_number_exhausted"):
+        store.prepare_attempt(
+            operation_id, "allocate", expected_operation_revision=2,
+            expected_step_revision=1, mode="execute", provider_kind="runtime",
+        )
+    connection = sqlite3.connect(store.path)
+    try:
+        assert connection.execute(
+            "SELECT count(*) FROM operation_attempts WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
 def test_state_machine_cas_and_terminal_immutability(store):
     operation_id = _create(store).operation_id
     running = store.transition(operation_id, expected_operation_revision=1, status="running")
@@ -280,9 +534,15 @@ def test_state_machine_cas_and_terminal_immutability(store):
     assert running["operation"]["status"] == "running"
     before = json.dumps(running, sort_keys=True)
     with _error("revision_conflict"):
-        store.transition(operation_id, expected_operation_revision=1, status="succeeded")
+        store.transition(
+            operation_id, expected_operation_revision=1, status="failed",
+            failure_code="confirmed",
+        )
     assert json.dumps(store.get_operation(operation_id), sort_keys=True) == before
-    terminal = store.transition(operation_id, expected_operation_revision=2, status="succeeded")
+    terminal = store.transition(
+        operation_id, expected_operation_revision=2, status="failed",
+        failure_code="confirmed",
+    )
     assert terminal["operation"]["revision"] == 3
     assert terminal["operation"]["terminal_at"] is not None
     with _error("invalid_transition"):
@@ -623,6 +883,16 @@ def test_unknown_settles_prepared_sibling_as_locally_not_dispatched(store):
         expected_step_revision=1, mode="execute", provider_kind="registry",
     )
     before = store.get_operation(operation_id)
+    with _error("invalid_argument"):
+        store.record_attempt_outcome(
+            operation_id, first.step_execution_id,
+            expected_operation_revision=5, expected_step_revision=2,
+            expected_prepared_step_revisions={"persist": 2**63},
+            receipt_id="receipt_unknown_with_prepared", receipt_type="provider_response_lost",
+            outcome="outcome_unknown", evidence_kind="provider_execution",
+            evidence_digest=_sha("unknown-with-prepared"),
+        )
+    assert store.get_operation(operation_id) == before
     with _error("revision_conflict"):
         store.record_attempt_outcome(
             operation_id, first.step_execution_id,
@@ -649,6 +919,67 @@ def test_unknown_settles_prepared_sibling_as_locally_not_dispatched(store):
     assert {item["outcome"] for item in unknown["receipts"]} == {
         "outcome_unknown", "not_executed",
     }
+
+
+def test_sibling_settlement_races_dispatch_with_one_atomic_winner(store):
+    operation_id = _create(store).operation_id
+    store.transition(operation_id, expected_operation_revision=1, status="running")
+    first = store.prepare_attempt(
+        operation_id, "allocate", expected_operation_revision=2,
+        expected_step_revision=1, mode="execute", provider_kind="runtime",
+    )
+    store.dispatch_attempt(operation_id, first.step_execution_id, expected_operation_revision=3)
+    second = store.prepare_attempt(
+        operation_id, "persist", expected_operation_revision=4,
+        expected_step_revision=1, mode="execute", provider_kind="registry",
+    )
+
+    def settle():
+        try:
+            store.record_attempt_outcome(
+                operation_id, first.step_execution_id,
+                expected_operation_revision=5, expected_step_revision=2,
+                expected_prepared_step_revisions={"persist": 2},
+                receipt_id="receipt_race_unknown",
+                receipt_type="provider_response_lost",
+                outcome="outcome_unknown", evidence_kind="provider_execution",
+                evidence_digest=_sha("race-unknown"),
+            )
+            return "settled"
+        except store_module.OperationError as exc:
+            return exc.code
+
+    def dispatch():
+        try:
+            store.dispatch_attempt(
+                operation_id, second.step_execution_id,
+                expected_operation_revision=5,
+            )
+            return "dispatched"
+        except store_module.OperationError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = (pool.submit(settle), pool.submit(dispatch))
+        results = sorted(future.result() for future in futures)
+    assert results in (
+        ["dispatched", "revision_conflict"],
+        ["attempt_conflict", "settled"],
+        ["revision_conflict", "settled"],
+    )
+    projection = store.get_operation(operation_id)
+    assert projection["operation"]["revision"] == 6
+    by_execution = {item["step_execution_id"]: item for item in projection["attempts"]}
+    if "settled" in results:
+        assert projection["operation"]["status"] == "needs_attention"
+        assert by_execution[first.step_execution_id]["status"] == "outcome_unknown"
+        assert by_execution[second.step_execution_id]["status"] == "failed"
+        assert len(projection["receipts"]) == 2
+    else:
+        assert projection["operation"]["status"] == "running"
+        assert by_execution[first.step_execution_id]["status"] == "dispatched"
+        assert by_execution[second.step_execution_id]["status"] == "dispatched"
+        assert projection["receipts"] == []
 
 
 def test_compensation_not_executed_restores_succeeded_step(store):
@@ -810,3 +1141,104 @@ def test_api_schema_drift_is_stable_503(tmp_path: Path):
     assert response.json()["error"]["code"] == "schema_fingerprint_mismatch"
     assert "unknown_table" not in response.text
     assert str(path) not in response.text
+
+
+@pytest.mark.parametrize(
+    ("assignment", "corrupt_value"),
+    [
+        ("request_digest=?", "not-a-digest"),
+        ("created_at=?", "not-a-timestamp"),
+    ],
+)
+def test_materialized_scalar_corruption_is_store_corrupt_and_api_503(
+    tmp_path: Path, assignment: str, corrupt_value: str,
+):
+    path = tmp_path / "operation.sqlite3"
+    store = store_module.initialize(path)
+    operation_id = _create(store).operation_id
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            f"UPDATE operations SET {assignment} WHERE operation_id=?",
+            (corrupt_value, operation_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with _error("store_corrupt"):
+        store.get_operation(operation_id)
+    client, _ = _client(lambda: store)
+    response = client.get(f"/api/operations/{operation_id}")
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "store_corrupt"
+    assert set(error) == {"code", "message", "retryable", "request_id", "details"}
+    assert corrupt_value not in response.text
+    assert str(path) not in response.text
+
+
+def test_materialized_cross_row_corruption_is_store_corrupt_and_api_503(
+    tmp_path: Path,
+):
+    path = tmp_path / "operation.sqlite3"
+    store = store_module.initialize(path)
+    operation_id = _create(store).operation_id
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "UPDATE operation_steps SET status='running',active_attempt_no=99 "
+            "WHERE operation_id=? AND step_id='allocate'",
+            (operation_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with _error("store_corrupt"):
+        store.get_operation(operation_id)
+    client, _ = _client(lambda: store)
+    response = client.get(f"/api/operations/{operation_id}")
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "store_corrupt"
+    assert str(path) not in response.text
+
+
+@pytest.mark.parametrize("corruption", ["reverse-active", "receipt-outcome"])
+def test_materialized_legal_scalar_contradictions_fail_closed(
+    tmp_path: Path, corruption: str,
+):
+    path = tmp_path / "operation.sqlite3"
+    store = store_module.initialize(path)
+    operation_id = _create(store).operation_id
+    store.transition(operation_id, expected_operation_revision=1, status="running")
+    prepared = store.prepare_attempt(
+        operation_id, "allocate", expected_operation_revision=2,
+        expected_step_revision=1, mode="execute", provider_kind="runtime",
+    )
+    connection = sqlite3.connect(path)
+    try:
+        if corruption == "reverse-active":
+            connection.execute(
+                "UPDATE operation_steps SET status='pending',active_attempt_no=NULL "
+                "WHERE operation_id=? AND step_id='allocate'",
+                (operation_id,),
+            )
+        else:
+            connection.execute(
+                "UPDATE operation_attempts SET status='succeeded',finished_at=? "
+                "WHERE step_execution_id=?",
+                ("2026-08-14T00:00:01Z", prepared.step_execution_id),
+            )
+            connection.execute(
+                "UPDATE operation_steps SET status='succeeded',active_attempt_no=NULL "
+                "WHERE operation_id=? AND step_id='allocate'",
+                (operation_id,),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+    with _error("store_corrupt"):
+        store.get_operation(operation_id)
+    client, _ = _client(lambda: store)
+    response = client.get(f"/api/operations/{operation_id}")
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "store_corrupt"

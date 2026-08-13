@@ -35,6 +35,15 @@ Schema v1 consists of `operations`, `operation_preconditions`,
 entire `sqlite_master` object set, migration ID, version, and digest form the
 strict schema fingerprint.
 
+Missing parent components are created and validated under unpredictable private
+temporary names, then atomically published without replacement. Initialization
+never removes a published final directory on failure; clean retry reuses it.
+Failure paths do not remove temporary or final pathnames, because compare-then-
+delete cannot prove identity across the deletion window. An unguessable private
+temporary object may remain quarantined; clean retry uses a new name. This
+ensures cleanup cannot delete a concurrent replacement of a parent, temp leaf,
+or final database leaf.
+
 ## Identity and idempotency
 
 `operations` has unique `(scope, idempotency_key)`. Creation computes a
@@ -55,6 +64,10 @@ Every mutation requires `expected_operation_revision` and executes under one
 revision exactly once. Step mutations also compare and increment the step
 revision. Stale revisions, illegal transitions, and active-attempt conflicts
 produce zero state change.
+
+Every Python integer is validated before SQLite binding. Boolean values are
+never integers for this contract. Nullable or zero-allowing fields accept only
+`0..2**63-1`; revisions and attempt numbers accept only `1..2**63-1`.
 
 An outcome mutation that may settle locally prepared siblings must carry the
 expected revision for every such sibling step. The exact step-ID set and every
@@ -122,6 +135,13 @@ operations.execute   = false / operation_executor_not_wired
 operations.retry     = false / operation_executor_not_wired
 operations.reconcile = false / operation_executor_not_wired
 ```
+
+Before projection, the Journal validates every materialized operation,
+precondition, step, attempt, and receipt field plus critical references and
+active-attempt relationships. Invalid scalar types, enums, signed-64 integers,
+timestamps, digests, IDs, receipt references, ordinals, or cross-row state fail
+closed as `store_corrupt`; the G3 boundary returns a sanitized `503` rather than
+partially projecting persisted bytes.
 
 Unknown operation IDs return `operation_not_found`. Missing, unsafe, drifted,
 or unreadable stores return a stable `503` error envelope without paths, SQL,

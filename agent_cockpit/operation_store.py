@@ -1,12 +1,15 @@
 """Durable, dormant Operation Journal v1 backed by a private SQLite store."""
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import secrets
 import sqlite3
 import stat
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,10 +75,20 @@ _TRANSITIONS = {
 _TERMINAL = frozenset({"succeeded", "failed", "compensated", "needs_attention"})
 _ATTEMPT_MODES = frozenset({"execute", "compensate"})
 _ATTEMPT_OUTCOMES = frozenset({"succeeded", "failed", "outcome_unknown"})
+_ATTEMPT_STATUSES = frozenset({
+    "prepared", "dispatched", "succeeded", "failed", "outcome_unknown",
+})
+_STEP_STATUSES = frozenset({
+    "pending", "running", "succeeded", "failed", "compensated", "outcome_unknown",
+})
 _RECEIPT_TYPES = frozenset({
     "provider_outcome", "provider_response_lost", "provider_reconciliation",
 })
 _EVIDENCE_KINDS = frozenset({"opaque_digest", "provider_execution", "provider_query"})
+_RECEIPT_OUTCOMES = frozenset({
+    "succeeded", "failed", "outcome_unknown", "not_executed",
+})
+_SQLITE_INT_MAX = 2**63 - 1
 
 
 _SCHEMA_STATEMENTS = (
@@ -303,7 +316,11 @@ def _sha256(value: object) -> str:
 
 
 def _revision(value: object) -> int:
-    if type(value) is not int or value < 1:
+    return _sqlite_integer(value, minimum=1)
+
+
+def _sqlite_integer(value: object, *, minimum: int = 0) -> int:
+    if type(value) is not int or not minimum <= value <= _SQLITE_INT_MAX:
         _fail("invalid_argument")
     return value
 
@@ -345,8 +362,8 @@ def _validate_directory(path: Path, *, exact_private: bool = False) -> None:
 
 
 def _prepare_parent(
-    path: Path, *, create: bool, created: list[Path] | None = None,
-) -> tuple[Path, ...]:
+    path: Path, *, create: bool,
+) -> None:
     _reject_symlinks(path)
     current = path.parent
     missing: list[Path] = []
@@ -356,21 +373,54 @@ def _prepare_parent(
     _validate_directory(current)
     if missing and not create:
         _fail("schema_missing")
-    created_directories: list[Path] = []
     for directory in reversed(missing):
+        temp = directory.parent / (
+            f".{directory.name}.operation-init-{secrets.token_hex(16)}.tmp"
+        )
         try:
-            os.mkdir(directory, 0o700)
-            created_directories.append(directory)
-            if created is not None:
-                created.append(directory)
-            os.chmod(directory, 0o700)
+            os.mkdir(temp, 0o700)
+            os.chmod(temp, 0o700)
         except OSError:
             _fail("store_unsafe")
-        _validate_directory(directory, exact_private=True)
+        _validate_directory(temp, exact_private=True)
+        if not _publish_noreplace(temp, directory):
+            _validate_directory(directory, exact_private=True)
     _reject_symlinks(path)
     if path.parent.exists():
         _validate_directory(path.parent, exact_private=True)
-    return tuple(created_directories)
+
+
+def _publish_noreplace(source: Path, destination: Path) -> bool:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError:
+            _fail("store_unsafe")
+        rename.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        result = rename(
+            -100, os.fsencode(source), -100, os.fsencode(destination), 1,
+        )
+    elif sys.platform == "darwin":
+        try:
+            rename = libc.renamex_np
+        except AttributeError:
+            _fail("store_unsafe")
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        result = rename(os.fsencode(source), os.fsencode(destination), 0x00000004)
+    else:
+        _fail("store_unsafe")
+    if result == 0:
+        return True
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        return False
+    _fail("store_unsafe")
 
 
 FileSignature = tuple[int, int, int, int, int]
@@ -504,6 +554,10 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
 
 def _after_schema_hook(_connection: sqlite3.Connection) -> None:
     """Ordinary-test fault injection point before initialization commit."""
+
+
+def _after_publish_hook(_path: Path) -> None:
+    """Ordinary-test fault injection point after anonymous inode publication."""
 
 
 class _Transaction:
@@ -640,7 +694,7 @@ class OperationStore:
         except sqlite3.DatabaseError:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
-            _fail("store_read_failed")
+            _fail("store_corrupt")
         finally:
             connection.close()
 
@@ -676,14 +730,27 @@ class OperationStore:
             ).fetchone()[0])
             if active_attempts:
                 _fail("attempt_active")
+            step_statuses = [str(item[0]) for item in connection.execute(
+                "SELECT status FROM operation_steps WHERE operation_id=? ORDER BY ordinal",
+                (operation_id,),
+            ).fetchall()]
+            if status == "succeeded" and any(
+                value != "succeeded" for value in step_statuses
+            ):
+                _fail("invalid_transition")
+            if status == "compensated" and any(
+                value not in {"succeeded", "compensated"} for value in step_statuses
+            ):
+                _fail("invalid_transition")
             timestamp = _now()
             terminal_at = timestamp if status in _TERMINAL else None
+            new_revision = _increment_revision(expected)
             changed = connection.execute(
-                "UPDATE operations SET status=?,revision=revision+1,failure_code=?,"
+                "UPDATE operations SET status=?,revision=?,failure_code=?,"
                 "attention_reason=?,updated_at=?,terminal_at=? "
                 "WHERE operation_id=? AND revision=?",
                 (
-                    status, failure_code, attention_reason, timestamp, terminal_at,
+                    status, new_revision, failure_code, attention_reason, timestamp, terminal_at,
                     operation_id, expected,
                 ),
             ).rowcount
@@ -734,11 +801,15 @@ class OperationStore:
             )
             if not valid_step:
                 _fail("invalid_transition")
-            attempt_no = int(connection.execute(
-                "SELECT COALESCE(MAX(attempt_no),0)+1 FROM operation_attempts "
+            maximum_attempt = connection.execute(
+                "SELECT COALESCE(MAX(attempt_no),0) FROM operation_attempts "
                 "WHERE operation_id=? AND step_id=?",
                 (operation_id, step_id),
-            ).fetchone()[0])
+            ).fetchone()[0]
+            maximum_attempt = _sqlite_integer(maximum_attempt)
+            if maximum_attempt == _SQLITE_INT_MAX:
+                _fail("attempt_number_exhausted")
+            attempt_no = maximum_attempt + 1
             execution_id = _new_id("exec_")
             connection.execute(
                 "INSERT INTO operation_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -747,10 +818,11 @@ class OperationStore:
                     "prepared", provider_kind, None, None, _now(), None,
                 ),
             )
+            new_step_revision = _increment_revision(step_revision)
             if connection.execute(
-                "UPDATE operation_steps SET status='running',revision=revision+1,"
+                "UPDATE operation_steps SET status='running',revision=?,"
                 "active_attempt_no=? WHERE operation_id=? AND step_id=? AND revision=?",
-                (attempt_no, operation_id, step_id, step_revision),
+                (new_step_revision, attempt_no, operation_id, step_id, step_revision),
             ).rowcount != 1:
                 _fail("revision_conflict")
             _bump_operation(connection, operation_id, operation_revision)
@@ -928,10 +1000,14 @@ class OperationStore:
                     terminal_at = timestamp
                     failure_code = None
                 active = attempt["attempt_no"] if outcome == "outcome_unknown" else None
+                new_step_revision = _increment_revision(step_revision)
                 connection.execute(
-                    "UPDATE operation_steps SET status=?,revision=revision+1,"
+                    "UPDATE operation_steps SET status=?,revision=?,"
                     "active_attempt_no=? WHERE operation_id=? AND step_id=? AND revision=?",
-                    (step_status, active, operation_id, attempt["step_id"], step_revision),
+                    (
+                        step_status, new_step_revision, active, operation_id,
+                        attempt["step_id"], step_revision,
+                    ),
                 )
                 connection.execute(
                     "INSERT INTO operation_receipts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -944,12 +1020,14 @@ class OperationStore:
                 if operation_status is None:
                     _bump_operation(connection, operation_id, expected)
                 else:
+                    new_revision = _increment_revision(expected)
                     changed = connection.execute(
-                        "UPDATE operations SET status=?,revision=revision+1,failure_code=?,"
+                        "UPDATE operations SET status=?,revision=?,failure_code=?,"
                         "attention_reason=?,updated_at=?,terminal_at=? "
                         "WHERE operation_id=? AND revision=?",
                         (
                             operation_status,
+                            new_revision,
                             failure_code if operation_status == "failed" else None,
                             attention_reason, timestamp,
                             terminal_at, operation_id, expected,
@@ -1042,9 +1120,12 @@ class OperationStore:
                     (timestamp, execution_id),
                 )
                 if connection.execute(
-                    "UPDATE operation_steps SET status=?,revision=revision+1,"
+                    "UPDATE operation_steps SET status=?,revision=?,"
                     "active_attempt_no=NULL WHERE operation_id=? AND step_id=? AND revision=?",
-                    (restored_step_status, operation_id, attempt["step_id"], step_revision),
+                    (
+                        restored_step_status, _increment_revision(step_revision), operation_id,
+                        attempt["step_id"], step_revision,
+                    ),
                 ).rowcount != 1:
                     _fail("revision_conflict")
                 _bump_operation(connection, operation_id, expected)
@@ -1071,12 +1152,20 @@ def _operation_for_update(
 def _bump_operation(
     connection: sqlite3.Connection, operation_id: str, expected_revision: int,
 ) -> None:
+    new_revision = _increment_revision(expected_revision)
     if connection.execute(
-        "UPDATE operations SET revision=revision+1,updated_at=? "
+        "UPDATE operations SET revision=?,updated_at=? "
         "WHERE operation_id=? AND revision=?",
-        (_now(), operation_id, expected_revision),
+        (new_revision, _now(), operation_id, expected_revision),
     ).rowcount != 1:
         _fail("revision_conflict")
+
+
+def _increment_revision(value: int) -> int:
+    value = _revision(value)
+    if value == _SQLITE_INT_MAX:
+        _fail("revision_exhausted")
+    return value + 1
 
 
 def _settle_prepared_siblings(
@@ -1127,10 +1216,11 @@ def _settle_prepared_siblings(
             (timestamp, attempt["step_execution_id"]),
         )
         if connection.execute(
-            "UPDATE operation_steps SET status=?,revision=revision+1,active_attempt_no=NULL "
+            "UPDATE operation_steps SET status=?,revision=?,active_attempt_no=NULL "
             "WHERE operation_id=? AND step_id=? AND active_attempt_no=? AND revision=?",
             (
-                restored_status, operation_id, attempt["step_id"],
+                restored_status, _increment_revision(expected_revision),
+                operation_id, attempt["step_id"],
                 attempt["attempt_no"], expected_revision,
             ),
         ).rowcount != 1:
@@ -1161,8 +1251,8 @@ def _preconditions(values: Iterable[Precondition]) -> tuple[Precondition, ...]:
         if not isinstance(item, Precondition):
             _fail("invalid_argument")
         revision = item.expected_revision
-        if revision is not None and (type(revision) is not int or revision < 0):
-            _fail("invalid_argument")
+        if revision is not None:
+            revision = _sqlite_integer(revision)
         result.append(Precondition(
             _opaque(item.precondition_type),
             _opaque(item.subject_type),
@@ -1203,6 +1293,291 @@ def _row(row: sqlite3.Row, *, booleans: Iterable[str] = ()) -> dict[str, object]
     return result
 
 
+def _stored_integer(value: object, *, minimum: int = 0) -> int:
+    if type(value) is not int or not minimum <= value <= _SQLITE_INT_MAX:
+        _fail("store_corrupt")
+    return value
+
+
+def _stored_text(
+    value: object, *, maximum: int = 256, nullable: bool = False,
+) -> str | None:
+    if nullable and value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        _fail("store_corrupt")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        _fail("store_corrupt")
+    return value
+
+
+def _stored_opaque(value: object, *, nullable: bool = False) -> str | None:
+    value = _stored_text(value, nullable=nullable)
+    if value is None:
+        return None
+    if not all(character.isalnum() or character in "._:-" for character in value):
+        _fail("store_corrupt")
+    return value
+
+
+def _stored_digest(value: object, *, nullable: bool = False) -> str | None:
+    value = _stored_text(value, maximum=71, nullable=nullable)
+    if value is None:
+        return None
+    if len(value) != 71 or not value.startswith("sha256:"):
+        _fail("store_corrupt")
+    try:
+        int(value[7:], 16)
+    except ValueError:
+        _fail("store_corrupt")
+    if value != value.lower():
+        _fail("store_corrupt")
+    return value
+
+
+def _stored_timestamp(value: object, *, nullable: bool = False) -> str | None:
+    value = _stored_text(value, maximum=40, nullable=nullable)
+    if value is None:
+        return None
+    if not value.endswith("Z"):
+        _fail("store_corrupt")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        _fail("store_corrupt")
+    if parsed.tzinfo != UTC:
+        _fail("store_corrupt")
+    return value
+
+
+def _parsed_timestamp(value: object, *, nullable: bool = False) -> datetime | None:
+    stored = _stored_timestamp(value, nullable=nullable)
+    if stored is None:
+        return None
+    return datetime.fromisoformat(stored[:-1] + "+00:00")
+
+
+def _validate_materialized_projection(
+    operation: sqlite3.Row,
+    preconditions: Sequence[sqlite3.Row],
+    steps: Sequence[sqlite3.Row],
+    attempts: Sequence[sqlite3.Row],
+    receipts: Sequence[sqlite3.Row],
+) -> None:
+    operation_id = _stored_opaque(operation["operation_id"])
+    _stored_opaque(operation["scope"])
+    _stored_opaque(operation["idempotency_key"])
+    _stored_digest(operation["request_digest"])
+    _stored_opaque(operation["kind"])
+    _stored_opaque(operation["project_id"], nullable=True)
+    _stored_opaque(operation["workspace_id"], nullable=True)
+    _stored_opaque(operation["subject_type"])
+    _stored_opaque(operation["subject_id"])
+    status = _stored_opaque(operation["status"])
+    if status not in _OPERATION_STATUSES:
+        _fail("store_corrupt")
+    _stored_integer(operation["revision"], minimum=1)
+    _stored_digest(operation["plan_digest"])
+    if operation["approval_required"] not in (0, 1):
+        _fail("store_corrupt")
+    failure_code = _stored_opaque(operation["failure_code"], nullable=True)
+    attention_reason = _stored_text(
+        operation["attention_reason"], maximum=512, nullable=True,
+    )
+    created_at = _parsed_timestamp(operation["created_at"])
+    updated_at = _parsed_timestamp(operation["updated_at"])
+    terminal_at = _parsed_timestamp(operation["terminal_at"], nullable=True)
+    assert created_at is not None and updated_at is not None
+    if created_at > updated_at or (
+        terminal_at is not None
+        and not created_at <= terminal_at <= updated_at
+    ):
+        _fail("store_corrupt")
+    if (status == "failed") != (failure_code is not None):
+        _fail("store_corrupt")
+    if (status == "needs_attention") != (attention_reason is not None):
+        _fail("store_corrupt")
+    if (status in _TERMINAL) != (terminal_at is not None):
+        _fail("store_corrupt")
+
+    for ordinal, row in enumerate(preconditions):
+        if row["operation_id"] != operation_id or _stored_integer(row["ordinal"]) != ordinal:
+            _fail("store_corrupt")
+        _stored_opaque(row["precondition_type"])
+        _stored_opaque(row["subject_type"])
+        _stored_opaque(row["subject_id"])
+        if row["expected_revision"] is not None:
+            _stored_integer(row["expected_revision"])
+        _stored_opaque(row["expected_generation"], nullable=True)
+        _stored_opaque(row["expected_epoch"], nullable=True)
+        _stored_digest(row["expected_digest"], nullable=True)
+
+    step_by_id: dict[str, sqlite3.Row] = {}
+    for ordinal, row in enumerate(steps):
+        if row["operation_id"] != operation_id or _stored_integer(row["ordinal"]) != ordinal:
+            _fail("store_corrupt")
+        step_id = _stored_opaque(row["step_id"])
+        if step_id in step_by_id:
+            _fail("store_corrupt")
+        step_by_id[step_id] = row
+        _stored_opaque(row["kind"])
+        if _stored_opaque(row["status"]) not in _STEP_STATUSES:
+            _fail("store_corrupt")
+        _stored_integer(row["revision"], minimum=1)
+        _stored_opaque(row["compensation_kind"], nullable=True)
+        if row["active_attempt_no"] is not None:
+            _stored_integer(row["active_attempt_no"], minimum=1)
+
+    attempt_by_identity: dict[tuple[str, int, str], sqlite3.Row] = {}
+    attempt_by_step_no: dict[tuple[str, int], sqlite3.Row] = {}
+    attempts_by_step: dict[str, list[sqlite3.Row]] = {}
+    execution_ids: set[str] = set()
+    for row in attempts:
+        if row["operation_id"] != operation_id:
+            _fail("store_corrupt")
+        step_id = _stored_opaque(row["step_id"])
+        if step_id not in step_by_id:
+            _fail("store_corrupt")
+        attempt_no = _stored_integer(row["attempt_no"], minimum=1)
+        execution_id = _stored_opaque(row["step_execution_id"])
+        if execution_id in execution_ids:
+            _fail("store_corrupt")
+        execution_ids.add(execution_id)
+        mode = _stored_opaque(row["mode"])
+        attempt_status = _stored_opaque(row["status"])
+        if mode not in _ATTEMPT_MODES or attempt_status not in _ATTEMPT_STATUSES:
+            _fail("store_corrupt")
+        _stored_opaque(row["provider_kind"])
+        _stored_opaque(row["provider_operation_ref"], nullable=True)
+        failure = _stored_opaque(row["failure_code"], nullable=True)
+        started = _parsed_timestamp(row["started_at"])
+        finished = _parsed_timestamp(row["finished_at"], nullable=True)
+        assert started is not None
+        if finished is not None and started > finished:
+            _fail("store_corrupt")
+        if (attempt_status in {"prepared", "dispatched"}) != (finished is None):
+            _fail("store_corrupt")
+        if attempt_status == "failed" and failure is None:
+            _fail("store_corrupt")
+        if attempt_status != "failed" and failure is not None:
+            _fail("store_corrupt")
+        identity = (step_id, attempt_no, execution_id)
+        attempt_by_identity[identity] = row
+        attempt_by_step_no[(step_id, attempt_no)] = row
+        attempts_by_step.setdefault(step_id, []).append(row)
+
+    for step_id, step in step_by_id.items():
+        active_no = step["active_attempt_no"]
+        if active_no is None:
+            continue
+        attempt = attempt_by_step_no.get((step_id, int(active_no)))
+        if attempt is None or attempt["status"] not in {
+            "prepared", "dispatched", "outcome_unknown",
+        }:
+            _fail("store_corrupt")
+        expected_step_status = (
+            "outcome_unknown" if attempt["status"] == "outcome_unknown" else "running"
+        )
+        if step["status"] != expected_step_status:
+            _fail("store_corrupt")
+
+    active_attempts = [
+        row for row in attempts
+        if row["status"] in {"prepared", "dispatched", "outcome_unknown"}
+    ]
+    for attempt in active_attempts:
+        step = step_by_id[str(attempt["step_id"])]
+        if int(step["active_attempt_no"] or 0) != int(attempt["attempt_no"]):
+            _fail("store_corrupt")
+    if status in {"succeeded", "failed", "compensated"} and active_attempts:
+        _fail("store_corrupt")
+    if status in {"planned", "waiting_approval"} and attempts:
+        _fail("store_corrupt")
+
+    for step_id, step in step_by_id.items():
+        values = sorted(
+            attempts_by_step.get(step_id, []), key=lambda item: int(item["attempt_no"]),
+        )
+        if not values:
+            if step["status"] != "pending":
+                _fail("store_corrupt")
+            continue
+        latest = values[-1]
+        latest_status = str(latest["status"])
+        latest_mode = str(latest["mode"])
+        if latest_status in {"prepared", "dispatched"}:
+            expected_status = "running"
+        elif latest_status == "outcome_unknown":
+            expected_status = "outcome_unknown"
+        elif latest_status == "succeeded":
+            expected_status = "succeeded" if latest_mode == "execute" else "compensated"
+        elif latest["failure_code"] in {"not_executed", "not_dispatched"}:
+            expected_status = "pending" if latest_mode == "execute" else "succeeded"
+        else:
+            expected_status = "failed"
+        if step["status"] != expected_status:
+            _fail("store_corrupt")
+
+    receipt_ids: set[str] = set()
+    outcomes_by_execution: dict[str, set[str]] = {}
+    for row in receipts:
+        if row["operation_id"] != operation_id:
+            _fail("store_corrupt")
+        receipt_id = _stored_opaque(row["receipt_id"])
+        if receipt_id in receipt_ids:
+            _fail("store_corrupt")
+        receipt_ids.add(receipt_id)
+        step_id = _stored_opaque(row["step_id"])
+        attempt_no = _stored_integer(row["attempt_no"], minimum=1)
+        execution_id = _stored_opaque(row["step_execution_id"])
+        if (step_id, attempt_no, execution_id) not in attempt_by_identity:
+            _fail("store_corrupt")
+        if _stored_opaque(row["receipt_type"]) not in _RECEIPT_TYPES:
+            _fail("store_corrupt")
+        receipt_outcome = _stored_opaque(row["outcome"])
+        if receipt_outcome not in _RECEIPT_OUTCOMES:
+            _fail("store_corrupt")
+        outcomes_by_execution.setdefault(execution_id, set()).add(receipt_outcome)
+        if _stored_opaque(row["evidence_kind"]) not in _EVIDENCE_KINDS:
+            _fail("store_corrupt")
+        _stored_opaque(row["evidence_ref"], nullable=True)
+        _stored_digest(row["evidence_digest"])
+        if row["summary"] is not None:
+            _fail("store_corrupt")
+        recorded = _parsed_timestamp(row["recorded_at"])
+        attempt = attempt_by_identity[(step_id, attempt_no, execution_id)]
+        started = _parsed_timestamp(attempt["started_at"])
+        assert recorded is not None and started is not None
+        if recorded < started:
+            _fail("store_corrupt")
+
+    for row in attempts:
+        execution_id = str(row["step_execution_id"])
+        attempt_status = str(row["status"])
+        failure = row["failure_code"]
+        outcomes = outcomes_by_execution.get(execution_id, set())
+        if attempt_status in {"prepared", "dispatched"} and outcomes:
+            _fail("store_corrupt")
+        if attempt_status == "succeeded" and outcomes != {"succeeded"}:
+            _fail("store_corrupt")
+        if attempt_status == "outcome_unknown" and outcomes != {"outcome_unknown"}:
+            _fail("store_corrupt")
+        if attempt_status == "failed":
+            expected = (
+                {"not_executed"}
+                if failure == "not_dispatched"
+                else {"outcome_unknown", "not_executed"}
+                if failure == "not_executed"
+                else {"failed"}
+            )
+            if outcomes != expected:
+                _fail("store_corrupt")
+    if status == "succeeded" and any(
+        step["status"] != "succeeded" for step in steps
+    ):
+        _fail("store_corrupt")
+
+
 def _projection(connection: sqlite3.Connection, operation: sqlite3.Row) -> dict[str, object]:
     operation_id = operation["operation_id"]
     preconditions = connection.execute(
@@ -1223,6 +1598,9 @@ def _projection(connection: sqlite3.Connection, operation: sqlite3.Row) -> dict[
         "ORDER BY recorded_at,receipt_id",
         (operation_id,),
     ).fetchall()
+    _validate_materialized_projection(
+        operation, preconditions, steps, attempts, receipts,
+    )
     public_operation = _row(operation, booleans=("approval_required",))
     public_operation.pop("idempotency_key")
     return {
@@ -1236,16 +1614,12 @@ def _projection(connection: sqlite3.Connection, operation: sqlite3.Row) -> dict[
 
 def initialize(path: Path) -> OperationStore:
     path = _absolute_path(path)
-    created_directories: list[Path] = []
     temp: Path | None = None
     connection: sqlite3.Connection | None = None
-    published = False
-    completed = False
     try:
-        _prepare_parent(path, create=True, created=created_directories)
+        _prepare_parent(path, create=True)
         _require_no_sidecars(path)
         if path.exists() or path.is_symlink():
-            completed = True
             return open_existing(path)
         temp = path.parent / f".{path.name}.init-{secrets.token_hex(16)}.tmp"
         _create_leaf(temp)
@@ -1265,15 +1639,11 @@ def initialize(path: Path) -> OperationStore:
         connection = None
         with temp.open("rb") as stream:
             os.fsync(stream.fileno())
-        try:
-            os.link(temp, path, follow_symlinks=False)
-        except FileExistsError:
+        if not _publish_noreplace(temp, path):
             return open_existing(path)
-        published = True
-        temp.unlink()
         _leaf_signature(path, must_exist=True)
+        _after_publish_hook(path)
         _fsync_directory(path.parent)
-        completed = True
         return OperationStore(path)
     except OperationError:
         raise
@@ -1282,22 +1652,6 @@ def initialize(path: Path) -> OperationStore:
     finally:
         if connection is not None:
             connection.close()
-        if temp is not None:
-            try:
-                temp.unlink()
-            except FileNotFoundError:
-                pass
-        if published and not completed:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-        if not path.exists():
-            for directory in reversed(tuple(created_directories)):
-                try:
-                    directory.rmdir()
-                except OSError:
-                    break
 
 
 def open_existing(path: Path) -> OperationStore:
