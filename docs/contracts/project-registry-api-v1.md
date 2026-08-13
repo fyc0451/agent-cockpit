@@ -34,11 +34,18 @@ Every 2xx response is `{data, meta}`. `meta` has fresh `request_id`, `generated_
 `{error:{code,message,retryable,request_id,details}}`. New endpoints do not use legacy
 `detail` responses.
 
+`server.py` keeps a scoped G3 bridge for the nine routes only. Auth middleware early
+returns, `HTTPException`, `RequestValidationError`, and unhandled exceptions on those
+paths share the same request-scoped `request_id` and the five-field error object.
+Legacy `/api/projects/{slug}` and other existing APIs keep their `{detail:...}` shape.
+
 Public Project/RepoLocation DTOs never include canonical filesystem path, root absolute
 path, Git remote URL, Git stderr, Store exception text, request body, or idempotency
-key. Discovery preserves its existing safe locator/display/path-digest/VCS DTO.
-Remote Herdr, Memory, Automation, Browser, GitHub, and Electron remain explicitly
-unavailable. Registry read and write capability are independently reported.
+key. Create, attach, and receipt replay must explicitly project `_project` /
+`_location` fields and must not forward a Store receipt as-is. Discovery preserves
+its existing safe locator/display/path-digest/VCS DTO. Remote Herdr, Memory,
+Automation, Browser, GitHub, and Electron remain explicitly unavailable. Registry
+read and write capability are independently reported.
 
 ## Reads and discovery
 
@@ -73,8 +80,9 @@ creates a Workspace, Agent, Run, pane, branch, worktree, or Mail identity.
 
 ## Stable HTTP errors
 
-400: `invalid_argument`, `invalid_locator`, `idempotency_key_required`; 403:
-`root_forbidden`; 404: `node_not_found`, `project_not_found`; 409:
+400: `invalid_argument`, `invalid_locator`, `idempotency_key_required`; 401:
+`unauthenticated`; 403: `forbidden`, `root_forbidden`; 404: `node_not_found`,
+`project_not_found`; 409:
 `discovery_stale`, `project_slug_conflict`, `location_already_registered`,
 `version_conflict`, `repository_identity_unproven`, `idempotency_conflict`; 412:
 `capability_unavailable`; 503: discovery/Store availability or schema safety errors;

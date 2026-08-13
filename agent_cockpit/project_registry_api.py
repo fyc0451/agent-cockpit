@@ -18,11 +18,14 @@ from . import project_registry_store as registry_store
 
 CREATE_SCOPE = "project-registry.projects.create.v1"
 ATTACH_SCOPE = "project-registry.repo-locations.create.v1"
+_REQUEST_ID_STATE = "project_registry_request_id"
 _RETRYABLE = frozenset({"discovery_unavailable", "store_read_failed", "store_write_failed"})
 _STATUS = {
     "invalid_argument": 400,
     "invalid_locator": 400,
     "idempotency_key_required": 400,
+    "unauthenticated": 401,
+    "forbidden": 403,
     "root_forbidden": 403,
     "node_not_found": 404,
     "project_not_found": 404,
@@ -80,7 +83,7 @@ def install(app: FastAPI, service: ApiService) -> None:
     def runtime_nodes(request: Request):
         return _run(lambda: _success(
             {"nodes": [{"node_id": "local", "display_name": "Local", "kind": "local"}]},
-            _meta(), request,
+            _meta(request), request,
         ), request)
 
     @app.get("/api/runtime-nodes/{node_id}/roots")
@@ -89,7 +92,7 @@ def install(app: FastAPI, service: ApiService) -> None:
             if node_id != "local":
                 raise ApiError("capability_unavailable")
             values = [item.to_public_dict() for item in service.discovery_provider().list_roots()]
-            return _success({"items": values}, _meta(), request)
+            return _success({"items": values}, _meta(request), request)
         return _run(operation, request)
 
     @app.get("/api/runtime-nodes/{node_id}/directories")
@@ -104,7 +107,7 @@ def install(app: FastAPI, service: ApiService) -> None:
             listing = service.discovery_provider().list_directories(locator, query)
             data = listing.to_public_dict()
             return _success(data, _meta(
-                partial=data["partial"], sources=data["sources"], warnings=data["warnings"],
+                request, partial=data["partial"], sources=data["sources"], warnings=data["warnings"],
                 write_available=not data["partial"],
             ), request)
         return _run(operation, request)
@@ -117,7 +120,7 @@ def install(app: FastAPI, service: ApiService) -> None:
             result = service.discovery_provider().discover(locator)
             data = result.to_public_dict()
             return _success(data, _meta(
-                partial=not result.complete, sources=result.sources, warnings=result.warnings,
+                request, partial=not result.complete, sources=result.sources, warnings=result.warnings,
                 write_available=result.complete and not result.warnings and "project_registry" in result.sources,
             ), request)
         return await _run_async(operation, request)
@@ -144,7 +147,7 @@ def install(app: FastAPI, service: ApiService) -> None:
             return _success({
                 "items": [_snapshot(item) for item in page.items],
                 "next_cursor": next_cursor,
-            }, _meta(), request)
+            }, _meta(request), request)
         return _run(operation, request)
 
     @app.get("/api/project-registry/projects/{project_id}")
@@ -153,7 +156,7 @@ def install(app: FastAPI, service: ApiService) -> None:
             snapshot = service.registry_provider().get_project_by_id(project_id)
             if snapshot is None:
                 raise ApiError("project_not_found")
-            return _success(_snapshot(snapshot), _meta(), request)
+            return _success(_snapshot(snapshot), _meta(request), request)
         return _run(operation, request)
 
     @app.get("/api/project-registry/projects/{project_id}/repo-locations")
@@ -162,7 +165,7 @@ def install(app: FastAPI, service: ApiService) -> None:
             locations = service.registry_provider().list_repo_locations(project_id)
             if locations is None:
                 raise ApiError("project_not_found")
-            return _success({"items": [_location(item) for item in locations]}, _meta(), request)
+            return _success({"items": [_location(item) for item in locations]}, _meta(request), request)
         return _run(operation, request)
 
     @app.post("/api/project-registry/projects")
@@ -178,7 +181,10 @@ def install(app: FastAPI, service: ApiService) -> None:
                 scope=CREATE_SCOPE, idempotency_key=key, payload=body,
             )
             if replay is not None:
-                return _success(dict(replay.response), _meta(write_available=True), request, replay.status_code)
+                return _success(
+                    _public_write_receipt(replay.response),
+                    _meta(request, write_available=True), request, replay.status_code,
+                )
             result = _secondary_discovery(service, body, require_unowned=True)
             created = registry.idempotent_register_project(
                 scope=CREATE_SCOPE, idempotency_key=key, payload=body,
@@ -187,7 +193,10 @@ def install(app: FastAPI, service: ApiService) -> None:
                 vcs_kind=result.vcs.kind, availability="available",
                 git_remote_fingerprint=result.vcs.remote_fingerprint,
             )
-            return _success(dict(created.response), _meta(write_available=True), request, created.status_code)
+            return _success(
+                _public_write_receipt(created.response),
+                _meta(request, write_available=True), request, created.status_code,
+            )
         return await _run_async(operation, request)
 
     @app.post("/api/project-registry/projects/{project_id}/repo-locations")
@@ -204,7 +213,10 @@ def install(app: FastAPI, service: ApiService) -> None:
                 scope=ATTACH_SCOPE, idempotency_key=key, payload=payload,
             )
             if replay is not None:
-                return _success(dict(replay.response), _meta(write_available=True), request, replay.status_code)
+                return _success(
+                    _public_write_receipt(replay.response),
+                    _meta(request, write_available=True), request, replay.status_code,
+                )
             result = _secondary_discovery(service, body, require_unowned=True)
             if result.vcs.kind != "git" or result.vcs.remote_fingerprint is None:
                 raise ApiError("repository_identity_unproven")
@@ -215,7 +227,10 @@ def install(app: FastAPI, service: ApiService) -> None:
                 vcs_kind=result.vcs.kind, availability="available",
                 git_remote_fingerprint=result.vcs.remote_fingerprint,
             )
-            return _success(dict(attached.response), _meta(write_available=True), request, attached.status_code)
+            return _success(
+                _public_write_receipt(attached.response),
+                _meta(request, write_available=True), request, attached.status_code,
+            )
         return await _run_async(operation, request)
 
 
@@ -321,19 +336,53 @@ def _project(record: registry_domain.ProjectRecord) -> dict[str, object]:
 
 
 def _location(record: registry_domain.RepoLocationRecord) -> dict[str, object]:
-    return {
+    return _public_location({
         "repo_location_id": record.repo_location_id, "project_id": record.project_id,
         "node_id": record.node_id, "lifecycle": record.lifecycle,
         "vcs_kind": record.vcs_kind, "availability": record.availability,
         "version": record.version,
+    })
+
+
+def _public_location(value: Mapping[str, Any]) -> dict[str, object]:
+    return {
+        "repo_location_id": value["repo_location_id"],
+        "project_id": value["project_id"],
+        "node_id": value["node_id"],
+        "lifecycle": value["lifecycle"],
+        "vcs_kind": value["vcs_kind"],
+        "availability": value["availability"],
+        "version": value["version"],
     }
+
+
+def _public_write_receipt(receipt: Mapping[str, Any]) -> dict[str, object]:
+    """Explicit public write DTO. Never forward a Store receipt as-is."""
+    public: dict[str, object] = {}
+    if "project_id" in receipt:
+        public["project_id"] = receipt["project_id"]
+    if "slug" in receipt:
+        public["slug"] = receipt["slug"]
+    if "project" in receipt and isinstance(receipt["project"], Mapping):
+        project = receipt["project"]
+        public["project"] = {
+            "project_id": project["project_id"], "slug": project["slug"],
+            "display_name": project["display_name"], "goal": project["goal"],
+            "lifecycle": project["lifecycle"], "version": project["version"],
+            "created_at": project["created_at"], "updated_at": project["updated_at"],
+        }
+    if "repo_location" in receipt and isinstance(receipt["repo_location"], Mapping):
+        public["repo_location"] = _public_location(receipt["repo_location"])
+    if "replayed" in receipt:
+        public["replayed"] = receipt["replayed"]
+    return public
 
 
 def _snapshot(snapshot: registry_domain.ProjectSnapshot) -> dict[str, object]:
     return {"project": _project(snapshot.project), "repo_locations": [_location(item) for item in snapshot.repo_locations]}
 
 
-def _meta(*, partial: bool = False, sources: tuple[str, ...] | list[str] = (), warnings: tuple[str, ...] | list[str] = (), write_available: bool = False) -> dict[str, object]:
+def _meta(request: Request, *, partial: bool = False, sources: tuple[str, ...] | list[str] = (), warnings: tuple[str, ...] | list[str] = (), write_available: bool = False) -> dict[str, object]:
     source_items = [
         {"name": name, "status": "available", "observed_at": None, "reason": None}
         for name in sources
@@ -359,52 +408,105 @@ def _meta(*, partial: bool = False, sources: tuple[str, ...] | list[str] = (), w
         "electron": {"available": False, "reason": "deferred_after_local_core"},
     }
     return {
-        "request_id": _request_id(), "generated_at": datetime.now(UTC).isoformat(),
+        "request_id": request_id_for(request), "generated_at": datetime.now(UTC).isoformat(),
         "partial": partial, "sources": source_items, "warnings": list(warnings),
         "capabilities": capabilities,
     }
 
 
-def _request_id() -> str:
-    return "req_" + secrets.token_hex(16)
+def is_scoped_registry_path(path: str) -> bool:
+    if path in {"/api/runtime-nodes", "/api/project-discovery"}:
+        return True
+    if path.startswith("/api/runtime-nodes/"):
+        return True
+    return path == "/api/project-registry/projects" or path.startswith("/api/project-registry/projects/")
+
+
+def request_id_for(request: Request) -> str:
+    current = getattr(request.state, _REQUEST_ID_STATE, None)
+    if isinstance(current, str) and current.startswith("req_"):
+        return current
+    value = "req_" + secrets.token_hex(16)
+    setattr(request.state, _REQUEST_ID_STATE, value)
+    return value
+
+
+def g3_error(
+    request: Request, *, status: int, code: str, message: str,
+    retryable: bool = False, details: Mapping[str, object] | None = None,
+) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"error": {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+        "request_id": request_id_for(request),
+        "details": dict(details or {}),
+    }})
+
+
+def bridge_http_exception(request: Request, status_code: int, detail: object) -> JSONResponse:
+    if status_code == 401:
+        code = "unauthenticated"
+    elif status_code == 403:
+        code = "forbidden"
+    elif 400 <= status_code < 500:
+        code = "invalid_argument"
+    else:
+        code = "internal_error"
+    message = detail if isinstance(detail, str) and detail else code.replace("_", " ")
+    return g3_error(
+        request, status=status_code, code=code, message=message,
+        retryable=code in _RETRYABLE,
+    )
+
+
+def bridge_validation_error(request: Request) -> JSONResponse:
+    return g3_error(
+        request, status=400, code="invalid_argument", message="invalid argument",
+    )
+
+
+def bridge_unhandled(request: Request) -> JSONResponse:
+    return g3_error(
+        request, status=500, code="internal_error", message="internal error",
+    )
 
 
 def _success(data: object, meta: dict[str, object], _request: Request, status: int = 200) -> JSONResponse:
     return JSONResponse(status_code=status, content={"data": data, "meta": meta})
 
 
-def _error(code: str) -> JSONResponse:
+def _error(request: Request, code: str) -> JSONResponse:
     status = _STATUS.get(code, 500)
     public_code = code if code in _STATUS else "internal_error"
-    return JSONResponse(status_code=status, content={"error": {
-        "code": public_code,
-        "message": public_code.replace("_", " "),
-        "retryable": public_code in _RETRYABLE,
-        "request_id": _request_id(), "details": {},
-    }})
+    return g3_error(
+        request, status=status, code=public_code,
+        message=public_code.replace("_", " "),
+        retryable=public_code in _RETRYABLE,
+    )
 
 
-def _run(operation: Callable[[], JSONResponse], _request: Request) -> JSONResponse:
+def _run(operation: Callable[[], JSONResponse], request: Request) -> JSONResponse:
     try:
         return operation()
     except ApiError as exc:
-        return _error(exc.code)
+        return _error(request, exc.code)
     except discovery_contract.DiscoveryError as exc:
-        return _error(exc.code)
+        return _error(request, exc.code)
     except registry_store.ProjectRegistryError as exc:
-        return _error(exc.code)
+        return _error(request, exc.code)
     except Exception:
-        return _error("internal_error")
+        return _error(request, "internal_error")
 
 
 async def _run_async(operation: Callable[[], Any], request: Request) -> JSONResponse:
     try:
         return await operation()
     except ApiError as exc:
-        return _error(exc.code)
+        return _error(request, exc.code)
     except discovery_contract.DiscoveryError as exc:
-        return _error(exc.code)
+        return _error(request, exc.code)
     except registry_store.ProjectRegistryError as exc:
-        return _error(exc.code)
+        return _error(request, exc.code)
     except Exception:
-        return _error("internal_error")
+        return _error(request, "internal_error")

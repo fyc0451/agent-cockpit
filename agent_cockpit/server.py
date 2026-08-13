@@ -27,6 +27,8 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 from fastapi import Body, FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -350,9 +352,15 @@ def project_registry_api_service() -> project_registry_api.ApiService:
 project_registry_api.install(app, project_registry_api_service())
 
 
+def _scoped_registry_request(request: Request) -> bool:
+    return project_registry_api.is_scoped_registry_path(str(request.scope.get("path") or request.url.path))
+
+
 @app.exception_handler(HTTPException)
 async def _http_exception_handler(request: Request, exc: HTTPException):
     """规范化 HTTPException 响应；仅 500 强制通用文案，4xx/502/503 等保持原 detail。"""
+    if _scoped_registry_request(request):
+        return project_registry_api.bridge_http_exception(request, exc.status_code, exc.detail)
     if exc.status_code == 500:
         return JSONResponse(
             status_code=500,
@@ -366,6 +374,13 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
+@app.exception_handler(RequestValidationError)
+async def _request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    if _scoped_registry_request(request):
+        return project_registry_api.bridge_validation_error(request)
+    return await request_validation_exception_handler(request, exc)
+
+
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception):
     """未捕获异常：记 stack + method/path，响应仅通用 500（不记 body/鉴权/query）。"""
@@ -374,6 +389,8 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         request.method,
         request.url.path,
     )
+    if _scoped_registry_request(request):
+        return project_registry_api.bridge_unhandled(request)
     return JSONResponse(
         status_code=500,
         content={"detail": INTERNAL_ERROR_DETAIL},
@@ -1185,6 +1202,9 @@ async def protect_api(request: Request, call_next):
         not _request_authenticated(request)
         or not _no_token_scope_trusted(request.scope, require_origin=False)
     ):
+        path = str(request.scope.get("path") or "")
+        if project_registry_api.is_scoped_registry_path(path):
+            return project_registry_api.bridge_http_exception(request, 403, LOCAL_ONLY_AUTH_DETAIL)
         return JSONResponse({"detail": LOCAL_ONLY_AUTH_DETAIL}, status_code=403)
     path = str(request.scope.get("path") or "")
     protected = path.startswith("/api/") or path in {
@@ -1205,6 +1225,8 @@ async def protect_api(request: Request, call_next):
     if not _request_authenticated(request):
         status = 401 if COCKPIT_TOKEN else 403
         detail = "未认证" if COCKPIT_TOKEN else LOCAL_ONLY_AUTH_DETAIL
+        if project_registry_api.is_scoped_registry_path(path):
+            return project_registry_api.bridge_http_exception(request, status, detail)
         return JSONResponse(
             {"detail": detail}, status_code=status,
             headers={"WWW-Authenticate": "Bearer"} if status == 401 else None,
@@ -1218,6 +1240,8 @@ async def protect_api(request: Request, call_next):
             request.headers.get("authorization")
         ):
             if not _same_origin(origin, request.headers.get("host")):
+                if project_registry_api.is_scoped_registry_path(path):
+                    return project_registry_api.bridge_http_exception(request, 403, "Origin 校验失败")
                 return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
     return await call_next(request)
 

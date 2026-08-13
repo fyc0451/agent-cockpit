@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from agent_cockpit import project_discovery as discovery
 from agent_cockpit import project_registry_api as api
@@ -155,11 +159,14 @@ def test_create_preflights_before_discovery_and_replays_receipt(client):
     first_data = _assert_g3(first)["data"]
     assert first.status_code == 201
     assert first_data["project_id"]
+    assert "canonical_path" not in first.text
+    assert "canonical_path" not in first_data.get("repo_location", {})
     assert _assert_g3(first)["meta"]["capabilities"]["projectRegistry.write"]["available"] is True
     assert service.calls == 1
     replay = http.post("/api/project-registry/projects", json=_body(), headers={"Idempotency-Key": "same"})
     assert replay.status_code == 201
     assert _assert_g3(replay)["data"] == first_data
+    assert "canonical_path" not in replay.text
     assert service.calls == 1
     changed = _body() | {"display_name": "Changed"}
     _assert_error(http.post("/api/project-registry/projects", json=changed, headers={"Idempotency-Key": "same"}), 409, "idempotency_conflict")
@@ -207,7 +214,10 @@ def test_attach_requires_discovery_then_returns_incremented_project(client, regi
     }
     attached = http.post(f"/api/project-registry/projects/{project_id}/repo-locations", json=body, headers={"Idempotency-Key": "attach"})
     assert attached.status_code == 201
-    assert _assert_g3(attached)["data"]["project"]["version"] == 2
+    attached_data = _assert_g3(attached)["data"]
+    assert attached_data["project"]["version"] == 2
+    assert "canonical_path" not in attached.text
+    assert "canonical_path" not in attached_data.get("repo_location", {})
 
 
 def test_detail_locations_and_discovery_routes_are_g3(client):
@@ -224,3 +234,68 @@ def test_detail_locations_and_discovery_routes_are_g3(client):
     assert root["data"]["nodes"][0]["node_id"] == "local"
     public = _assert_g3(http.post("/api/project-discovery", json={"locator": _body()["locator"]}))
     assert "/private" not in str(public)
+
+
+def _asgi_request(path: str, method: str = "GET") -> Request:
+    return Request({
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 9),
+        "server": ("testserver", 80),
+    })
+
+
+def _run(operation):
+    return asyncio.run(operation)
+
+
+def test_real_server_app_auth_validation_and_unhandled_use_scoped_g3(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "owned-token")
+
+    async def forbidden_next(_request):
+        raise AssertionError("auth early return must not reach the endpoint")
+
+    registry_request = _asgi_request("/api/project-registry/projects")
+    auth = _run(server.protect_api(registry_request, forbidden_next))
+    assert auth.status_code == 401
+    error = json.loads(auth.body)
+    assert set(error["error"]) == {"code", "message", "retryable", "request_id", "details"}
+    assert error["error"]["code"] == "unauthenticated"
+    assert error["error"]["request_id"] == api.request_id_for(registry_request)
+
+    discovery_auth = _run(server.protect_api(_asgi_request("/api/project-discovery", "POST"), forbidden_next))
+    assert discovery_auth.status_code == 401
+    assert json.loads(discovery_auth.body)["error"]["code"] == "unauthenticated"
+
+    legacy = _run(server.protect_api(_asgi_request("/api/projects/alpha"), forbidden_next))
+    assert legacy.status_code == 401
+    assert json.loads(legacy.body) == {"detail": "未认证"}
+
+    http_exc = _run(server._http_exception_handler(registry_request, HTTPException(409, "conflict")))
+    assert http_exc.status_code == 409
+    http_payload = json.loads(http_exc.body)
+    assert set(http_payload["error"]) == {"code", "message", "retryable", "request_id", "details"}
+    assert http_payload["error"]["request_id"] == api.request_id_for(registry_request)
+
+    legacy_http = _run(server._http_exception_handler(_asgi_request("/api/projects/alpha"), HTTPException(404, "missing")))
+    assert json.loads(legacy_http.body) == {"detail": "missing"}
+
+    validation = _run(server._request_validation_exception_handler(
+        registry_request,
+        RequestValidationError([{"type": "missing", "loc": ("body", "slug"), "msg": "Field required", "input": {}}]),
+    ))
+    assert validation.status_code == 400
+    assert json.loads(validation.body)["error"]["code"] == "invalid_argument"
+
+    unhandled = _run(server._unhandled_exception_handler(registry_request, RuntimeError("boom")))
+    assert unhandled.status_code == 500
+    assert json.loads(unhandled.body)["error"]["code"] == "internal_error"
+    legacy_unhandled = _run(server._unhandled_exception_handler(_asgi_request("/api/projects/alpha"), RuntimeError("boom")))
+    assert json.loads(legacy_unhandled.body) == {"detail": server.INTERNAL_ERROR_DETAIL}
