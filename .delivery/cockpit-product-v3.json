@@ -635,7 +635,7 @@
     {
       "id": "P0-WORKSPACE-001-B",
       "title": "Create a shared persisted Workspace through an idempotent trusted API",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-003-wip4-gate", "PROJ-004-project-api", "SLICE-001-local-readonly"],
       "scope": ["agent_cockpit/project_registry_api.py", "agent_cockpit/project_registry_store.py", "docs/contracts/workspace-create-v1.md", "tests/test_workspace_create_api.py"],
       "acceptance": [
