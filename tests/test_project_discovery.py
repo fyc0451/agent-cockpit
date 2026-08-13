@@ -212,6 +212,55 @@ def test_root_id_is_stable_but_does_not_disclose_absolute_path(tmp_path: Path) -
     assert str(root) not in first.list_roots()[0].root_id
 
 
+def test_allowlisted_non_git_root_can_be_discovered(tmp_path: Path) -> None:
+    root = tmp_path / "plain-root"
+    root.mkdir()
+    (root / "notes.txt").write_text("plain root\n", encoding="utf-8")
+    service, root_id, registry = _service(root)
+    before = _tree_digest(root)
+
+    result = service.discover(ProjectLocator("local", root_id, ""))
+
+    assert result.locator.path == ""
+    assert result.display_path == root.name
+    assert result.vcs.kind == "none"
+    assert result.complete is True
+    assert str(root) not in repr(result.to_public_dict())
+    assert registry.calls == [("local", str(root.resolve()), None)]
+    assert _tree_digest(root) == before
+
+
+def test_allowlisted_git_root_can_be_discovered(tmp_path: Path) -> None:
+    root = tmp_path / "git-root"
+    head = _init_git_repo(root)
+    service, root_id, registry = _service(root)
+
+    result = service.discover(ProjectLocator("local", root_id, ""))
+
+    assert result.locator.path == ""
+    assert result.display_path == root.name
+    assert result.vcs.kind == "git"
+    assert result.vcs.head == head
+    assert registry.calls[0][0:2] == ("local", str(root.resolve()))
+    assert registry.calls[0][2] == result.vcs.repository_fingerprint
+    assert str(root) not in repr(result.to_public_dict())
+
+
+def test_git_subdirectory_remains_invalid_when_git_root_is_allowlisted(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "git-root"
+    _init_git_repo(root)
+    (root / "nested").mkdir()
+    service, root_id, registry = _service(root)
+
+    with pytest.raises(DiscoveryError) as error:
+        service.discover(ProjectLocator("local", root_id, "nested"))
+
+    assert _code(error) == "invalid_locator"
+    assert registry.calls == []
+
+
 @pytest.mark.parametrize(
     "path",
     ["/absolute", "../escape", "a/../escape", "./repo", "a//b", "repo/", "a\\b", "bad\x00path"],

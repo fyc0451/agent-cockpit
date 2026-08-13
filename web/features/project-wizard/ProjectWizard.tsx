@@ -51,12 +51,18 @@ function deriveSlug(name: string): string {
 
 type Step = 'node' | 'dir' | 'probe'
 
+interface DirectorySelection {
+  name: string
+  path: string
+}
+
 interface WizardState {
   step: Step
   nodeId: string | null
   rootId: string | null
+  rootDisplayName: string | null
   path: string
-  selected: DirectoryEntry | null
+  selected: DirectorySelection | null
   probe: DiscoveryResultData | null
   probeMeta: ResponseMeta | null
   probeRevision: number
@@ -75,6 +81,7 @@ const initialState: WizardState = {
   step: 'node',
   nodeId: null,
   rootId: null,
+  rootDisplayName: null,
   path: '',
   selected: null,
   probe: null,
@@ -93,11 +100,12 @@ const initialState: WizardState = {
 type Action =
   | { type: 'reset' }
   | { type: 'select-node'; nodeId: string }
-  | { type: 'select-root'; rootId: string }
+  | { type: 'select-root'; rootId: string; displayName: string }
   | { type: 'reset-root' }
   | { type: 'enter-dir'; path: string }
   | { type: 'up-dir' }
   | { type: 'select-dir'; entry: DirectoryEntry }
+  | { type: 'select-current-root' }
   | { type: 'probe-start' }
   | { type: 'probe-ok'; revision: number; result: DiscoveryResultData; meta: ResponseMeta | null; degraded: boolean }
   | { type: 'probe-err'; revision: number; error: ApiError }
@@ -113,19 +121,22 @@ function reducer(state: WizardState, action: Action): WizardState {
     case 'reset':
       return { ...initialState, probeRevision: state.probeRevision + 1 }
     case 'select-node':
-      return { ...state, step: 'dir', nodeId: action.nodeId, rootId: null, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
+      return { ...state, step: 'dir', nodeId: action.nodeId, rootId: null, rootDisplayName: null, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     case 'select-root':
-      return { ...state, rootId: action.rootId, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
+      return { ...state, rootId: action.rootId, rootDisplayName: action.displayName, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     case 'reset-root':
-      return { ...state, rootId: null, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
+      return { ...state, rootId: null, rootDisplayName: null, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     case 'enter-dir':
-      return { ...state, path: action.path, selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
+      return { ...state, path: action.path, selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     case 'up-dir': {
       const parent = state.path.includes('/') ? state.path.slice(0, state.path.lastIndexOf('/')) : ''
-      return { ...state, path: parent, selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
+      return { ...state, path: parent, selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     }
     case 'select-dir':
-      return { ...state, selected: action.entry, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1 }
+      return { ...state, selected: action.entry, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
+    case 'select-current-root':
+      if (state.path !== '' || !state.rootDisplayName) return state
+      return { ...state, selected: { name: state.rootDisplayName, path: '' }, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     case 'probe-start':
       // PROBING 在途停留在目录步（识别按钮 disabled，重复触发 0 请求）；probe 状态清空
       return {
@@ -156,7 +167,7 @@ function reducer(state: WizardState, action: Action): WizardState {
       return { ...state, step: 'probe', probe: null, probeMeta: null, probeError: action.error }
     case 'back-to-dir':
       // T6/T12/T13：回目录步；改选目录后必须重新 probe（旧指纹随 probe 清空作废）
-      return { ...state, step: 'dir', probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, probeError: null, submitError: null, selected: null }
+      return { ...state, step: 'dir', probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, probeError: null, submitError: null, submitBinding: null, selected: null }
     case 'set-display-name':
       return { ...state, displayName: action.value }
     case 'set-slug':
@@ -383,7 +394,7 @@ export function ProjectWizard({
                       type="button"
                       className="drawer-item"
                       data-root-id={r.root_id}
-                      onClick={() => dispatch({ type: 'select-root', rootId: r.root_id })}
+                      onClick={() => dispatch({ type: 'select-root', rootId: r.root_id, displayName: r.display_name })}
                     >
                       {r.display_name}
                     </button>
@@ -404,6 +415,22 @@ export function ProjectWizard({
                 ) : null}
                 <Tag tone="neutral">{state.path === '' ? '/' : state.path}</Tag>
               </div>
+              {state.path === '' && state.rootDisplayName ? (
+                <ul className="list">
+                  <li className="list-row">
+                    <button
+                      type="button"
+                      className="drawer-item"
+                      aria-label={`选择当前 root ${state.rootDisplayName}`}
+                      onClick={() => dispatch({ type: 'select-current-root' })}
+                    >
+                      <span className="ellipsis drawer-item-name">{state.rootDisplayName}</span>
+                      <Tag tone="neutral">当前 root</Tag>
+                      {state.selected?.path === '' ? <Tag tone="accent">已选择</Tag> : null}
+                    </button>
+                  </li>
+                </ul>
+              ) : null}
               {dirs.isPending ? (
                 <StatusState kind="loading" title="正在加载目录…" />
               ) : dirs.isError ? (

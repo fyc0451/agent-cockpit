@@ -348,13 +348,13 @@ class LocalProjectDiscoveryService:
         return _sanitized_call(lambda: self._discover(locator))
 
     def _discover(self, locator: contract.ProjectLocator) -> contract.DiscoveryResult:
-        opened = self._open_locator(locator, allow_empty=False)
+        opened = self._open_locator(locator, allow_empty=True)
         root, target, root_identity, target_identity, root_fd, target_fd = opened
         try:
             vcs = self._discover_vcs(root.path, target, target_fd)
             self._require_unchanged(
                 locator, root, target, root_identity, target_identity,
-                root_fd, target_fd, allow_empty=False,
+                root_fd, target_fd, allow_empty=True,
             )
 
             complete = True
@@ -377,7 +377,7 @@ class LocalProjectDiscoveryService:
 
             self._require_unchanged(
                 locator, root, target, root_identity, target_identity,
-                root_fd, target_fd, allow_empty=False,
+                root_fd, target_fd, allow_empty=True,
             )
             canonical_digest = contract.sha256_text(
                 "canonical-local-path-v1", str(target)

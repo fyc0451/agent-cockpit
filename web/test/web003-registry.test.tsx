@@ -107,6 +107,16 @@ async function toProbeResult(user: ReturnType<typeof userEvent.setup>, dirName =
 const discoveryOk = () => ({ body: discoveryGitPayload })
 const registerOk = () => ({ body: registerCreatedPayload })
 
+const rootDiscoveryPayload = {
+  ...discoveryGitPayload,
+  data: {
+    ...discoveryGitPayload.data,
+    locator: { ...discoveryGitPayload.data.locator, path: '' },
+    display_path: '代码',
+    discovery_fingerprint: `sha256:${'6'.repeat(64)}`,
+  },
+}
+
 describe('WEB-005 roots 与 discovery capability bootstrap', () => {
   it('roots 只接受 data.items，旧 data.roots fail-closed', () => {
     expect(assertRootsData(rootsPayload.data)).toEqual(rootsPayload.data)
@@ -300,6 +310,62 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
       expect(dirCalls.some((c) => c.url.includes('path=alpha'))).toBe(true)
       expect(dirCalls.every((c) => !c.url.includes('/repos'))).toBe(true)
     })
+  })
+
+  it('PROJ-006 当前 root 可 discovery/register，两个 POST 都精确提交 path 空串', async () => {
+    const stub = stubWizardFetch({
+      discovery: () => ({ body: rootDiscoveryPayload }),
+      register: registerOk,
+    })
+    const user = userEvent.setup()
+    renderApp('/projects')
+    await toDirStep(user)
+
+    await user.click(screen.getByRole('button', { name: '选择当前 root 代码' }))
+    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+    await screen.findByText('新 Git 项目')
+    expect(screen.getByLabelText('项目名称')).toHaveValue('代码')
+    expect(screen.getByLabelText('Slug')).toHaveValue('project')
+
+    const probe = stub.posts.find((call) => call.url.startsWith('/api/project-discovery'))
+    expect(JSON.parse(probe!.body).locator).toEqual({
+      node_id: 'local',
+      root_id: expect.stringMatching(ROOT_ID_RE),
+      path: '',
+    })
+    expect(probe!.body).not.toContain('/repos')
+
+    await user.click(screen.getByRole('button', { name: '确认添加 Project' }))
+    await screen.findByText('登记成功')
+    const register = stub.posts.find((call) => call.url.startsWith('/api/project-registry/projects'))
+    expect(JSON.parse(register!.body).locator).toEqual({
+      node_id: 'local',
+      root_id: expect.stringMatching(ROOT_ID_RE),
+      path: '',
+    })
+    expect(register!.body).not.toContain('/repos')
+  })
+
+  it('PROJ-006 进入子目录再返回会清空旧选择，当前 root 可重新选择', async () => {
+    const stub = stubWizardFetch({ discovery: () => ({ body: rootDiscoveryPayload }), register: registerOk })
+    const user = userEvent.setup()
+    renderApp('/projects')
+    await toDirStep(user)
+
+    const root = screen.getByRole('button', { name: '选择当前 root 代码' })
+    await user.click(root)
+    expect(root.textContent).toContain('已选择')
+    await user.click(screen.getByRole('button', { name: '进入 alpha' }))
+    await user.click(await screen.findByRole('button', { name: '上级目录' }))
+
+    const returnedRoot = await screen.findByRole('button', { name: '选择当前 root 代码' })
+    expect(returnedRoot.textContent).not.toContain('已选择')
+    await user.click(returnedRoot)
+    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+    await screen.findByText('新 Git 项目')
+    const probes = stub.posts.filter((call) => call.url.startsWith('/api/project-discovery'))
+    expect(probes).toHaveLength(1)
+    expect(JSON.parse(probes[0].body).locator.path).toBe('')
   })
 
   it('V9 discovery complete=true git → NEW_GIT，提交按钮可用；分支只布尔表达', async () => {
