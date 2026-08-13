@@ -183,13 +183,16 @@ def test_r07_five_source_states_do_not_mix():
         "source_unavailable.json": ("unavailable", "unknown", "source_unavailable"),
         "source_invalid.json": ("invalid", "unknown", "source_invalid"),
         "source_ambiguous.json": ("ambiguous", "unknown", "authoritative_plan_ambiguous"),
-        "source_stale.json": ("available", "stale", "source_stale"),
+        "source_stale.json": ("available", "unknown", None),
     }
     for name, (status, freshness, reason) in mapping.items():
         result = _project(_snap(name))
         assert result.source.status == status
         assert result.source.freshness == freshness
-        assert reason in result.reason_codes
+        if reason is not None:
+            assert reason in result.reason_codes
+        else:
+            assert "source_stale" not in result.reason_codes
         assert eligible_pairs(stamp_revisions(_snap(name)), T0) == ()
         assert result.dispatch.available is False
     dirty = stamp_revisions(_snap("valid_minimal.json") | {})
@@ -240,7 +243,7 @@ def test_r11_source_gap_resets_alert_age():
     snapshot["source"]["freshness_deadline"] = "2026-08-13T08:59:59+00:00"
     prior = {"first_observed_at": "2026-08-13T09:00:00+00:00"}
     result = _project(snapshot, evaluated_at=T0 + timedelta(seconds=90), previous=prior)
-    assert result.source.freshness == "stale"
+    assert result.source.freshness == "unknown"
     assert all(alert.status != "open" for alert in result.alerts)
 
 
@@ -560,3 +563,97 @@ def test_c10_unclassified_empty_previous_emits_timing_unavailable_alert():
         for alert in result.alerts
     )
     assert any(alert.reason_code == "ready_but_no_eligible_agent" for alert in result.alerts)
+
+
+def test_f1_resolved_recovery_requires_new_onset():
+    snapshot = _ordinary_ready(agents=[_ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa")])
+    opened = project_scheduler_projection(
+        snapshot, evaluated_at=T0 + timedelta(seconds=90),
+        previous={"first_observed_at": "2026-08-13T09:00:00+00:00"},
+    )
+    assert any(alert.status == "open" for alert in opened.alerts)
+    disappeared = deepcopy(snapshot)
+    disappeared["source"]["freshness_deadline"] = "2026-08-13T09:01:29+00:00"
+    disappeared = stamp_revisions(disappeared)
+    resolved = project_scheduler_projection(
+        disappeared, evaluated_at=T0 + timedelta(seconds=90), previous=opened,
+    )
+    assert [alert.status for alert in resolved.alerts] == ["resolved"]
+    assert resolved.alerts[0].first_observed_at is None
+    recovered = project_scheduler_projection(
+        snapshot, evaluated_at=T0 + timedelta(seconds=180), previous=resolved,
+    )
+    assert any(
+        alert.status == "absent" and alert.reason_code == "timing_unavailable"
+        for alert in recovered.alerts
+    )
+    assert all(alert.status != "open" for alert in recovered.alerts)
+    assert "ready_agent_idle_undispatched" not in recovered.reason_codes
+    restarted = project_scheduler_projection(
+        snapshot, evaluated_at=T0 + timedelta(seconds=270),
+        previous={"first_observed_at": "2026-08-13T09:03:00+00:00"},
+    )
+    assert restarted.alerts[0].status == "open"
+    assert "ready_agent_idle_undispatched" in restarted.reason_codes
+
+
+def test_f2_reviewer_only_does_not_open_idle_alert_at_90s():
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0].update({
+        "phase": "reviewer", "state": "review",
+        "author_agent_instance_id": "i-author", "sensitivity": "ordinary",
+    })
+    snapshot["agents"] = [_ready_agent(instance="i-reviewer")]
+    snapshot = stamp_revisions(snapshot)
+    evaluated = T0 + timedelta(seconds=90)
+    assert eligible_pairs(snapshot, evaluated) == (("CAR-READY", "i-reviewer"),)
+    result = project_scheduler_projection(
+        snapshot, evaluated_at=evaluated,
+        previous={"first_observed_at": "2026-08-13T09:00:00+00:00"},
+    )
+    assert all(alert.status not in {"pending", "open"} for alert in result.alerts)
+    assert "ready_agent_idle_undispatched" not in result.reason_codes
+    writer = _ordinary_ready(agents=[_ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa")])
+    opened = project_scheduler_projection(
+        writer, evaluated_at=evaluated,
+        previous={"first_observed_at": "2026-08-13T09:00:00+00:00"},
+    )
+    assert any(alert.status == "open" for alert in opened.alerts)
+    reviewer_only = deepcopy(writer)
+    reviewer_only["work"][0].update({
+        "phase": "reviewer", "state": "review",
+        "author_agent_instance_id": "i-author",
+    })
+    reviewer_only = stamp_revisions(reviewer_only)
+    resolved = project_scheduler_projection(
+        reviewer_only, evaluated_at=evaluated, previous=opened,
+    )
+    assert [alert.status for alert in resolved.alerts] == ["resolved"]
+    assert resolved.alerts[0].first_observed_at is None
+
+
+def test_f3_observed_after_deadline_is_unknown():
+    snapshot = _snap("valid_minimal.json")
+    snapshot["source"]["observed_at"] = "2026-08-13T09:00:00+00:00"
+    snapshot["source"]["freshness_deadline"] = "2026-08-13T08:59:59+00:00"
+    snapshot = stamp_revisions(snapshot)
+    result = project_scheduler_projection(snapshot, evaluated_at=T0)
+    assert result.source.status == "available"
+    assert result.source.freshness == "unknown"
+    assert "source_stale" not in result.reason_codes
+    assert result.source.freshness != "stale"
+
+
+def test_f3_evaluated_before_observed_is_unknown():
+    snapshot = stamp_revisions(_snap("valid_minimal.json"))
+    result = project_scheduler_projection(
+        snapshot, evaluated_at=T0 - timedelta(seconds=1),
+    )
+    assert result.source.status == "available"
+    assert result.source.freshness == "unknown"
+    assert "source_stale" not in result.reason_codes
+    coherent = project_scheduler_projection(
+        snapshot, evaluated_at=T0 + timedelta(minutes=5, seconds=1),
+    )
+    assert coherent.source.freshness == "stale"
+    assert "source_stale" in coherent.reason_codes

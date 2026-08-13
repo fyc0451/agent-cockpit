@@ -444,11 +444,13 @@ def freshness(source: Mapping[str, Any], evaluated_at: datetime) -> str:
         return "dirty"
     observed = _parse_utc(source["observed_at"])
     deadline = _parse_utc(source["freshness_deadline"])
-    if observed is not None and deadline is not None:
-        if evaluated_at <= deadline:
-            return "fresh"
-        return "stale"
-    return "unknown"
+    if observed is None or deadline is None:
+        return "unknown"
+    if observed > deadline or evaluated_at < observed:
+        return "unknown"
+    if evaluated_at <= deadline:
+        return "fresh"
+    return "stale"
 
 
 def occupancy(snapshot: Mapping[str, Any]) -> int:
@@ -604,6 +606,8 @@ def _first_observed(previous: object) -> datetime | None:
         return _parse_utc(previous["first_observed_at"])
     if isinstance(previous, SchedulerProjection):
         for alert in previous.alerts:
+            if alert.status == "resolved":
+                continue
             if alert.first_observed_at is not None:
                 return alert.first_observed_at
     return None
@@ -733,7 +737,14 @@ def project_scheduler_projection(
 
     alerts: list[SchedulerAlertIntent] = []
     first_observed = _first_observed(previous)
-    if pairs and first_observed is not None and fresh == "fresh" and remaining > 0:
+    idle_undispatched = (
+        ready_writer > 0
+        and bool(pairs)
+        and fresh == "fresh"
+        and remaining > 0
+        and source["status"] == "available"
+    )
+    if idle_undispatched and first_observed is not None:
         held = int((evaluated_at - first_observed).total_seconds())
         if (evaluated_at - first_observed).total_seconds() >= READY_WITHOUT_DISPATCH_GRACE_SECONDS:
             alerts.append(SchedulerAlertIntent(
@@ -758,14 +769,15 @@ def project_scheduler_projection(
             reason_code="ready_but_no_eligible_agent", evidence_refs=(),
         ))
     previous_open = isinstance(previous, SchedulerProjection) and any(
-        alert.status == "open" for alert in previous.alerts
+        alert.status == "open" and alert.reason_code == "ready_agent_idle_undispatched"
+        for alert in previous.alerts
     )
-    condition_holds = bool(pairs) and fresh == "fresh" and remaining > 0 and source["status"] == "available"
+    condition_holds = idle_undispatched
     if previous_open and not condition_holds:
         alerts = [SchedulerAlertIntent(
             kind="ready_without_dispatch", severity="warning",
             dedupe_key="ready_agent_idle_undispatched", status="resolved",
-            first_observed_at=_first_observed(previous), observed_for_seconds=0,
+            first_observed_at=None, observed_for_seconds=0,
             reason_code="ready_agent_idle_undispatched", evidence_refs=(),
         )]
     if first_observed is None:
