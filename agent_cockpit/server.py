@@ -1129,12 +1129,12 @@ def _agent_mail_requirement() -> dict[str, Any] | None:
 
 @app.middleware("http")
 async def protect_api(request: Request, call_next):
-    path = request.url.path
     if not COCKPIT_TOKEN and (
         not _request_authenticated(request)
         or not _no_token_scope_trusted(request.scope, require_origin=False)
     ):
         return JSONResponse({"detail": LOCAL_ONLY_AUTH_DETAIL}, status_code=403)
+    path = str(request.scope.get("path") or "")
     protected = path.startswith("/api/") or path in {
         "/docs", "/redoc", "/openapi.json", "/health.poll",
     }
