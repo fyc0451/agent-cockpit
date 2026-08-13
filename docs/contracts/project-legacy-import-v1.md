@@ -28,13 +28,43 @@ agents, pane/layout, participants, assignments, terminal output, or mutable runt
 rejected; `mail_projects._load` is intentionally not used because it silently converts
 corruption into an empty store).
 
+The accepted source schemas are exact, not required-column subsets:
+
+- Agent Mail `PRAGMA table_info(projects)` is
+  `id INTEGER NOT NULL PRIMARY KEY`, `slug VARCHAR(255) NOT NULL`,
+  `human_key VARCHAR(255) NOT NULL`, `created_at DATETIME NOT NULL`, and nullable
+  `archived_at DATETIME`, in that order.
+- Coordination `PRAGMA table_info(runs)` is `run_id TEXT PRIMARY KEY`, followed by
+  non-null `project_key TEXT`, `session TEXT`, `session_dir TEXT`, `revision INTEGER`,
+  `state TEXT`, `config_hash TEXT`, `started_ts REAL`, and nullable `closed_ts REAL`,
+  in that order. The authority DDL also has `UNIQUE(session, session_dir, revision)`;
+  that table-level index is not exposed by `PRAGMA table_info` and is outside this
+  fingerprint check.
+- `mail-projects.json` has exactly `version` and `sessions`; `version` is an integer
+  (a JSON boolean is not an integer) equal to `1`, and `sessions` is an object.
+- A Herdr session has exactly `session`, `session_dir`, `version`, and `workspaces`;
+  `version` is an integer equal to `3`. Each workspace has exactly `workspace_id` and
+  `identity_cwd` string fields.
+
+Extra, missing, reordered SQLite columns, changed declared types/constraints, unknown JSON
+fields, future versions, and wrong JSON container types are `source_corrupt`. A valid empty
+sessions object/list of Herdr workspaces remains distinct from malformed input.
+
 ## Deterministic provenance
 
 `source_key = "sha256:" + sha256(canonical_json(identity))` and
 `source_digest = "sha256:" + sha256(canonical_json(evidence))`, where `canonical_json`
-uses sorted keys, `(",",":")` separators, ASCII, `allow_nan=False`. Unordered rows
-(Herdr workspaces) are sorted by `(workspace_id, identity_cwd)` before hashing. Enumeration
-order and JSON key order do not change key/digest.
+delegates to the accepted Registry domain canonicalizer: sorted keys, `(",",":")`
+separators, ASCII, `allow_nan=False`, and non-string mapping keys rejected. Unordered rows
+(Herdr workspaces) are sorted by `(workspace_id, identity_cwd)` before hashing.
+
+Provenance identity is the full `(source_kind, source_key)` pair. A candidate may retain
+multiple distinct keys of the same kind; its complete source tuple is sorted by that pair.
+Repeating the same pair with the same digest is idempotent. Repeating it with different
+digests is `evidence_conflict`: the source is `error`, affected paths produce no candidate,
+and the Store is not called for them. Source/row enumeration order and JSON key order do not
+change the candidate or Store input. When multiple Agent Mail identities name one exact path,
+candidate metadata is selected by the same stable identity order rather than query order.
 
 ## Candidate model
 
@@ -46,6 +76,14 @@ candidate whose path matches a workspace `identity_cwd`. Herdr alone creates no 
 **none** (it must not bind one `herdr_session` key — `UNIQUE(source_kind, source_key)` — to
 multiple projects, and must not arbitrarily pick the first path).
 
+`(session, session_dir)` is the exact session-generation relation shared by Mail,
+Coordination, and Herdr. Before creating groups, all available Mail/Coordination ownership
+paths and a Herdr generation with one unambiguous workspace path must agree. More than one
+path for a generation is `authority_disagreement`: every participating source is `error`,
+the conflicting generation's paths produce no candidate, Herdr evidence is not attached,
+and the Store receives zero calls for those candidates. The generation key is never reduced
+to session name alone.
+
 No candidate may be merged by basename, Git remote, display name, session name, or pane cwd.
 Invalid paths (relative, root, trailing/`//`/`.`/`..` components, NUL) and paths outside the
 configured `local_boundary` are skipped (`unverified_path`); the importer does not call
@@ -56,8 +94,9 @@ configured `local_boundary` are skipped (`unverified_path`); the importer does n
 A missing optional source is `unavailable`; a corrupt/future-schema/truncated source is
 `error`; a valid empty source is `ok` with count 0. The three are distinct: empty valid
 sources must not be reported `unavailable`. Any source `error` makes `ImportReport.complete`
-`False`; already-imported exact candidates may still replay, but the report never claims a
-complete scan.
+`False`. Normalization errors `evidence_conflict` and `authority_disagreement` are also
+source errors. Unaffected exact candidates may still import or replay, but the report never
+claims a complete scan.
 
 ## Orchestration and replay
 
@@ -79,5 +118,7 @@ updates append-only `legacy_project_bindings` rows and **never** mutates a legac
 
 `tests/test_project_legacy_import.py` covers ordinary functional behavior: frozen
 source key/digest vectors, source availability separation, exact-path grouping (no heuristic
-merge), per-candidate single Store call, idempotent replay, path safety, and read-only
-authority immutability. Adversarial/security harnesses are owned by separate reviewers.
+merge), complete same-kind provenance, generation agreement, strict source schemas,
+deterministic Store inputs, per-candidate single Store call, and idempotent replay. Sensitive
+path/adversarial, leakage, runtime-state, and authority-immutability gates are owned and run
+separately by Claude/Kimi reviewers.

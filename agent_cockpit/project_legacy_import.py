@@ -22,9 +22,8 @@ leave earlier candidates committed but never a half candidate (rerun converges).
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -38,17 +37,34 @@ SOURCE_CORRUPT = "source_corrupt"
 SOURCE_NOT_FOUND = "source_not_found"
 UNVERIFIED_PATH = "unverified_path"
 EMPTY_SOURCES = "empty_sources"
+EVIDENCE_CONFLICT = "evidence_conflict"
+AUTHORITY_DISAGREEMENT = "authority_disagreement"
+
+
+AGENT_MAIL_PROJECTS_FINGERPRINT = (
+    (0, "id", "INTEGER", 1, None, 1),
+    (1, "slug", "VARCHAR(255)", 1, None, 0),
+    (2, "human_key", "VARCHAR(255)", 1, None, 0),
+    (3, "created_at", "DATETIME", 1, None, 0),
+    (4, "archived_at", "DATETIME", 0, None, 0),
+)
+
+COORDINATION_RUNS_FINGERPRINT = (
+    (0, "run_id", "TEXT", 0, None, 1),
+    (1, "project_key", "TEXT", 1, None, 0),
+    (2, "session", "TEXT", 1, None, 0),
+    (3, "session_dir", "TEXT", 1, None, 0),
+    (4, "revision", "INTEGER", 1, None, 0),
+    (5, "state", "TEXT", 1, None, 0),
+    (6, "config_hash", "TEXT", 1, None, 0),
+    (7, "started_ts", "REAL", 1, None, 0),
+    (8, "closed_ts", "REAL", 0, None, 0),
+)
 
 
 # ── canonicalization (frozen; vectors in tests assert exact sha256) ────────
 def canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    )
+    return domain.canonical_json(value)
 
 
 def _sha256_uri(value: Any) -> str:
@@ -164,9 +180,10 @@ class AgentMailProjectReader:
         except sqlite3.Error:
             return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
         try:
-            cols = {r[1] for r in con.execute("PRAGMA table_info(projects)")}
-            need = {"id", "slug", "human_key", "archived_at"}
-            if not need.issubset(cols):
+            fingerprint = tuple(
+                tuple(r) for r in con.execute("PRAGMA table_info(projects)").fetchall()
+            )
+            if fingerprint != AGENT_MAIL_PROJECTS_FINGERPRINT:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
             rows = con.execute(
                 "SELECT id, slug, human_key FROM projects WHERE archived_at IS NULL"
@@ -177,12 +194,15 @@ class AgentMailProjectReader:
             con.close()
         records: list[dict[str, Any]] = []
         for row in rows:
-            try:
-                pid = int(row[0])
-            except (TypeError, ValueError):
+            if type(row[0]) is not int:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-            slug = str(row[1]) if row[1] is not None else ""
-            human_key = str(row[2]) if row[2] is not None else ""
+            pid = row[0]
+            if row[1] is not None and not isinstance(row[1], str):
+                return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
+            if row[2] is not None and not isinstance(row[2], str):
+                return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
+            slug = row[1] or ""
+            human_key = row[2] or ""
             if not human_key:
                 continue
             records.append({"project_id": pid, "slug": slug, "human_key": human_key})
@@ -203,16 +223,18 @@ class MailProjectsJsonReader:
             data = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
         except (OSError, UnicodeError, ValueError):
             return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or set(data) != {"version", "sessions"}:
             return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-        if data.get("version") != 1:
+        if type(data["version"]) is not int or data["version"] != 1:
             return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-        sessions = data.get("sessions")
-        if not isinstance(sessions, dict) or not sessions:
+        sessions = data["sessions"]
+        if not isinstance(sessions, dict):
+            return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
+        if not sessions:
             return SourceReadResult(self.kind, "ok", records=())
         records: list[dict[str, Any]] = []
         for name, entry in sessions.items():
-            if not isinstance(name, str) or not isinstance(entry, dict):
+            if not isinstance(name, str) or not name or not isinstance(entry, dict):
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
             if set(entry) != {"session_dir", "project"}:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
@@ -245,15 +267,20 @@ class HerdrSessionReader:
                 data = json.loads(f.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys)
             except (OSError, UnicodeError, ValueError):
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or set(data) != {
+                "session", "session_dir", "version", "workspaces"
+            }:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
             session = data.get("session")
             session_dir = data.get("session_dir")
             version = data.get("version")
             workspaces = data.get("workspaces")
-            if not isinstance(session, str) or not isinstance(session_dir, str) or not session_dir:
+            if (
+                not isinstance(session, str) or not session
+                or not isinstance(session_dir, str) or not session_dir
+            ):
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
-            if not isinstance(version, int):
+            if type(version) is not int or version != 3:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
             if not isinstance(workspaces, list):
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
@@ -294,9 +321,10 @@ class CoordinationRunReader:
         except sqlite3.Error:
             return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
         try:
-            cols = {r[1] for r in con.execute("PRAGMA table_info(runs)")}
-            need = {"run_id", "project_key", "session", "session_dir", "revision"}
-            if not need.issubset(cols):
+            fingerprint = tuple(
+                tuple(r) for r in con.execute("PRAGMA table_info(runs)").fetchall()
+            )
+            if fingerprint != COORDINATION_RUNS_FINGERPRINT:
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
             rows = con.execute(
                 "SELECT run_id, project_key, session, session_dir, revision FROM runs"
@@ -311,12 +339,13 @@ class CoordinationRunReader:
             project_key = row[1]
             session = row[2]
             session_dir = row[3]
-            try:
-                revision = int(row[4])
-            except (TypeError, ValueError):
+            if type(row[4]) is not int:
+                return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
+            revision = row[4]
+            if not all(isinstance(v, str) for v in (run_id, project_key, session, session_dir)):
                 return SourceReadResult(self.kind, "error", detail_code=SOURCE_CORRUPT)
             if not all(
-                isinstance(v, str) and v
+                v
                 for v in (run_id, project_key, session, session_dir)
             ):
                 continue
@@ -391,30 +420,64 @@ def build_candidates(
     reads: Mapping[str, SourceReadResult],
     *,
     local_boundary: Path | None,
-) -> tuple[list[CandidateProject], list[SourceStatus], dict[str, dict[str, LegacySourceEvidence]]]:
+) -> tuple[
+    list[CandidateProject],
+    list[SourceStatus],
+    dict[str, dict[tuple[str, str], LegacySourceEvidence]],
+]:
     """Group by exact canonical local path. Ownership sources: agent_mail /
     mail_projects / coordination. Herdr is observational: attaches to an existing
     candidate whose path matches a workspace identity_cwd; a session spanning
     multiple candidate paths is ambiguous and attaches to none."""
-    sources_status: list[SourceStatus] = []
-    for kind in ("agent_mail_project", "mail_projects_session", "herdr_session", "coordination_run"):
+    source_kinds = (
+        "agent_mail_project",
+        "mail_projects_session",
+        "herdr_session",
+        "coordination_run",
+    )
+    status_by_kind: dict[str, SourceStatus] = {}
+    for kind in source_kinds:
         r = reads.get(kind)
         if r is None:
-            sources_status.append(SourceStatus(kind, "unavailable", SOURCE_NOT_FOUND))
+            status_by_kind[kind] = SourceStatus(kind, "unavailable", SOURCE_NOT_FOUND)
         elif r.state == "ok":
-            sources_status.append(SourceStatus(kind, "ok", None, len(r.records)))
+            status_by_kind[kind] = SourceStatus(kind, "ok", None, len(r.records))
         else:
-            sources_status.append(SourceStatus(kind, r.state, r.detail_code))
+            status_by_kind[kind] = SourceStatus(kind, r.state, r.detail_code)
 
-    # path -> { source_kind -> evidence }; ownership sources create the group
-    groups: dict[str, dict[str, LegacySourceEvidence]] = {}
-    meta: dict[str, dict[str, Any]] = {}
+    def _mark_source_error(kind: str, code: str) -> None:
+        current = status_by_kind[kind]
+        if current.state != "error":
+            status_by_kind[kind] = SourceStatus(kind, "error", code)
 
-    def _ensure(path: str) -> dict[str, LegacySourceEvidence]:
-        if path not in groups:
-            groups[path] = {}
-            meta[path] = {"paths": set()}
-        return groups[path]
+    # Normalize all evidence before grouping so identity conflicts cannot hide
+    # behind different paths or source enumeration order.
+    ownership: list[
+        tuple[
+            str,
+            LegacySourceEvidence,
+            tuple[str, str] | None,
+            str | None,
+        ]
+    ] = []
+    herdr_rows: list[
+        tuple[tuple[str, ...], LegacySourceEvidence, tuple[str, str]]
+    ] = []
+    evidence_by_pair: dict[tuple[str, str], LegacySourceEvidence] = {}
+    paths_by_pair: dict[tuple[str, str], set[str]] = {}
+    conflicting_pairs: set[tuple[str, str]] = set()
+
+    def _register_evidence(
+        evidence: LegacySourceEvidence, paths: Sequence[str]
+    ) -> None:
+        pair = (evidence.source_kind, evidence.source_key)
+        paths_by_pair.setdefault(pair, set()).update(paths)
+        existing = evidence_by_pair.get(pair)
+        if existing is None:
+            evidence_by_pair[pair] = evidence
+        elif existing.source_digest != evidence.source_digest:
+            conflicting_pairs.add(pair)
+            _mark_source_error(evidence.source_kind, EVIDENCE_CONFLICT)
 
     am = reads.get("agent_mail_project")
     if am and am.state == "ok":
@@ -424,9 +487,9 @@ def build_candidates(
                 cpath = _validate_candidate_path(path, local_boundary)
             except _ImportError:
                 continue
-            _ensure(cpath)[am.kind] = LegacySourceEvidence(am.kind, _sha256_uri(ident), _sha256_uri(ev))
-            meta[cpath].setdefault("slug", rec["slug"] or _slug_from_path(cpath))
-            meta[cpath].setdefault("display_name", _basename(cpath))
+            evidence = LegacySourceEvidence(am.kind, _sha256_uri(ident), _sha256_uri(ev))
+            _register_evidence(evidence, (cpath,))
+            ownership.append((cpath, evidence, None, rec["slug"] or _slug_from_path(cpath)))
 
     mp = reads.get("mail_projects_session")
     if mp and mp.state == "ok":
@@ -436,9 +499,10 @@ def build_candidates(
                 cpath = _validate_candidate_path(path, local_boundary)
             except _ImportError:
                 continue
-            g = _ensure(cpath)
-            g.setdefault(mp.kind, LegacySourceEvidence(mp.kind, _sha256_uri(ident), _sha256_uri(ev)))
-            meta[cpath].setdefault("display_name", _basename(cpath))
+            evidence = LegacySourceEvidence(mp.kind, _sha256_uri(ident), _sha256_uri(ev))
+            _register_evidence(evidence, (cpath,))
+            generation = (str(rec["session"]), str(rec["session_dir"]))
+            ownership.append((cpath, evidence, generation, None))
 
     cr = reads.get("coordination_run")
     if cr and cr.state == "ok":
@@ -448,34 +512,96 @@ def build_candidates(
                 cpath = _validate_candidate_path(path, local_boundary)
             except _ImportError:
                 continue
-            g = _ensure(cpath)
-            g.setdefault(cr.kind, LegacySourceEvidence(cr.kind, _sha256_uri(ident), _sha256_uri(ev)))
-            meta[cpath].setdefault("display_name", _basename(cpath))
+            evidence = LegacySourceEvidence(cr.kind, _sha256_uri(ident), _sha256_uri(ev))
+            _register_evidence(evidence, (cpath,))
+            generation = (str(rec["session"]), str(rec["session_dir"]))
+            ownership.append((cpath, evidence, generation, None))
 
-    # Herdr observational: attach to existing candidate(s) matching identity_cwd.
     hr = reads.get("herdr_session")
     if hr and hr.state == "ok":
         for rec in hr.records:
             ident, ev, cwds = _herdr_evidence(rec)
-            targets = [c for c in cwds if c in groups]
-            if len(targets) != 1:
-                # 0 → no ownership candidate (Herdr cannot create); >1 → ambiguous
-                continue
-            groups[targets[0]].setdefault(
-                hr.kind, LegacySourceEvidence(hr.kind, _sha256_uri(ident), _sha256_uri(ev))
-            )
+            canonical_cwds: list[str] = []
+            for cwd in cwds:
+                try:
+                    canonical_cwds.append(_validate_candidate_path(cwd, local_boundary))
+                except _ImportError:
+                    continue
+            evidence = LegacySourceEvidence(hr.kind, _sha256_uri(ident), _sha256_uri(ev))
+            _register_evidence(evidence, canonical_cwds)
+            generation = (str(rec["session"]), str(rec["session_dir"]))
+            herdr_rows.append((tuple(sorted(set(canonical_cwds))), evidence, generation))
+
+    blocked_paths = {
+        path
+        for pair in conflicting_pairs
+        for path in paths_by_pair.get(pair, ())
+    }
+
+    generation_paths: dict[tuple[str, str], set[str]] = {}
+    generation_kinds: dict[tuple[str, str], set[str]] = {}
+    for cpath, evidence, generation, _slug in ownership:
+        pair = (evidence.source_kind, evidence.source_key)
+        if generation is None or pair in conflicting_pairs:
+            continue
+        generation_paths.setdefault(generation, set()).add(cpath)
+        generation_kinds.setdefault(generation, set()).add(evidence.source_kind)
+    for cwds, evidence, generation in herdr_rows:
+        pair = (evidence.source_kind, evidence.source_key)
+        if pair in conflicting_pairs or len(cwds) != 1:
+            continue
+        generation_paths.setdefault(generation, set()).add(cwds[0])
+        generation_kinds.setdefault(generation, set()).add(evidence.source_kind)
+
+    conflicting_generations = {
+        generation
+        for generation, paths in generation_paths.items()
+        if len(paths) > 1
+    }
+    for generation in sorted(conflicting_generations):
+        blocked_paths.update(generation_paths[generation])
+        for kind in sorted(generation_kinds[generation]):
+            _mark_source_error(kind, AUTHORITY_DISAGREEMENT)
+
+    # path -> {(source_kind, source_key) -> evidence}; ownership sources create
+    # groups, and every distinct provenance identity is retained.
+    groups: dict[str, dict[tuple[str, str], LegacySourceEvidence]] = {}
+    slug_choices: dict[str, dict[tuple[str, str], str]] = {}
+    for cpath, evidence, generation, slug in ownership:
+        pair = (evidence.source_kind, evidence.source_key)
+        if (
+            pair in conflicting_pairs
+            or cpath in blocked_paths
+            or generation in conflicting_generations
+        ):
+            continue
+        groups.setdefault(cpath, {})[pair] = evidence
+        if slug is not None:
+            slug_choices.setdefault(cpath, {})[pair] = slug
+
+    # Herdr observational: attach to existing candidate(s) matching identity_cwd.
+    for cwds, evidence, generation in herdr_rows:
+        pair = (evidence.source_kind, evidence.source_key)
+        if pair in conflicting_pairs or generation in conflicting_generations:
+            continue
+        targets = [cpath for cpath in cwds if cpath in groups]
+        if len(targets) != 1:
+            # 0 -> no ownership candidate (Herdr cannot create); >1 -> ambiguous
+            continue
+        groups[targets[0]][pair] = evidence
 
     candidates: list[CandidateProject] = []
     for cpath in sorted(groups):
         ev_map = groups[cpath]
         if not ev_map:
             continue
-        sources = tuple(ev_map[k] for k in sorted(ev_map))
-        slug = meta[cpath].get("slug") or _slug_from_path(cpath)
+        sources = tuple(ev_map[pair] for pair in sorted(ev_map))
+        choices = slug_choices.get(cpath, {})
+        slug = choices[min(choices)] if choices else _slug_from_path(cpath)
         candidates.append(
             CandidateProject(
                 slug=slug,
-                display_name=meta[cpath].get("display_name") or _basename(cpath),
+                display_name=_basename(cpath),
                 goal=None,
                 node_id="local",
                 canonical_path=cpath,
@@ -484,7 +610,7 @@ def build_candidates(
                 sources=sources,
             )
         )
-    return candidates, sources_status, groups
+    return candidates, [status_by_kind[kind] for kind in source_kinds], groups
 
 
 def _slug_from_path(path: str) -> str:

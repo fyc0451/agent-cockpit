@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -36,8 +35,9 @@ def _make_agent_mail_db(tmp_path: Path, projects: list[dict[str, Any]]) -> Path:
     db = tmp_path / "agent-mail.db"
     con = sqlite3.connect(db)
     con.execute(
-        "CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT, "
-        "created_at TEXT, archived_at TEXT)"
+        "CREATE TABLE projects (id INTEGER NOT NULL PRIMARY KEY, "
+        "slug VARCHAR(255) NOT NULL, human_key VARCHAR(255) NOT NULL, "
+        "created_at DATETIME NOT NULL, archived_at DATETIME)"
     )
     for p in projects:
         con.execute(
@@ -74,15 +74,17 @@ def _make_coordination_db(tmp_path: Path, runs: list[dict[str, Any]]) -> Path:
     db = tmp_path / "coordination.sqlite3"
     con = sqlite3.connect(db)
     con.execute(
-        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, project_key TEXT, session TEXT, "
-        "session_dir TEXT, revision INTEGER, state TEXT, config_hash TEXT, "
-        "started_ts REAL, closed_ts REAL)"
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, "
+        "session TEXT NOT NULL, session_dir TEXT NOT NULL, revision INTEGER NOT NULL, "
+        "state TEXT NOT NULL, config_hash TEXT NOT NULL, started_ts REAL NOT NULL, "
+        "closed_ts REAL, UNIQUE(session, session_dir, revision))"
     )
     for r in runs:
         con.execute(
-            "INSERT INTO runs (run_id, project_key, session, session_dir, revision, state) "
-            "VALUES (?,?,?,?,?,?)",
-            (r["run_id"], r["project_key"], r["session"], r["session_dir"], r["revision"], "running"),
+            "INSERT INTO runs (run_id, project_key, session, session_dir, revision, state, "
+            "config_hash, started_ts) VALUES (?,?,?,?,?,?,?,?)",
+            (r["run_id"], r["project_key"], r["session"], r["session_dir"],
+             r["revision"], "running", "fixture-config", 1.0),
         )
     con.commit()
     con.close()
@@ -162,6 +164,11 @@ def test_digest_ordering_invariants():
     )
 
 
+def test_canonical_json_rejects_non_string_mapping_keys():
+    with pytest.raises(ValueError):
+        pli.canonical_json({1: "value"})
+
+
 # ── 2. Reader round-trip + availability separation ─────────────────────────
 def test_agent_mail_reader_reads_unarchived_only(tmp_path):
     db = _make_agent_mail_db(
@@ -224,6 +231,90 @@ def test_future_schema_source_is_error(tmp_path):
     assert next(s for s in report.sources if s.kind == "mail_projects_session").state == "error"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": True, "sessions": {}},
+        {"version": 1, "sessions": []},
+        {"version": 1, "sessions": {}, "future": "field"},
+    ],
+)
+def test_mail_projects_reader_rejects_non_exact_root_schema(tmp_path, payload):
+    path = tmp_path / "mail-projects.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = pli.MailProjectsJsonReader().read(pli.LegacyRoots(mail_projects_json=path))
+    assert result.state == "error"
+    assert result.detail_code == pli.SOURCE_CORRUPT
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"session": "alpha-dev", "session_dir": HERDR_SD, "version": 99, "workspaces": []},
+        {"session": "alpha-dev", "session_dir": HERDR_SD, "version": True, "workspaces": []},
+        {"session": "alpha-dev", "session_dir": HERDR_SD, "version": 3,
+         "workspaces": [], "future": "field"},
+    ],
+)
+def test_herdr_reader_rejects_non_exact_root_schema(tmp_path, payload):
+    directory = tmp_path / "herdr-sessions"
+    directory.mkdir()
+    (directory / "alpha-dev.json").write_text(json.dumps(payload), encoding="utf-8")
+    result = pli.HerdrSessionReader().read(pli.LegacyRoots(herdr_sessions_dir=directory))
+    assert result.state == "error"
+    assert result.detail_code == pli.SOURCE_CORRUPT
+
+
+@pytest.mark.parametrize(
+    "ddl",
+    [
+        "CREATE TABLE projects (id INTEGER NOT NULL PRIMARY KEY, "
+        "slug VARCHAR(255) NOT NULL, human_key VARCHAR(255) NOT NULL, "
+        "created_at DATETIME NOT NULL, archived_at DATETIME, future TEXT)",
+        "CREATE TABLE projects (id INTEGER NOT NULL PRIMARY KEY, "
+        "slug VARCHAR(255) NOT NULL, human_key VARCHAR(255) NOT NULL, "
+        "archived_at DATETIME)",
+        "CREATE TABLE projects (id INTEGER NOT NULL PRIMARY KEY, "
+        "slug VARCHAR(255), human_key VARCHAR(255) NOT NULL, "
+        "created_at DATETIME NOT NULL, archived_at DATETIME)",
+    ],
+)
+def test_agent_mail_reader_rejects_non_exact_table_fingerprint(tmp_path, ddl):
+    db = tmp_path / "agent-mail-invalid.db"
+    con = sqlite3.connect(db)
+    con.execute(ddl)
+    con.close()
+    result = pli.AgentMailProjectReader().read(pli.LegacyRoots(agent_mail_db=db))
+    assert result.state == "error"
+    assert result.detail_code == pli.SOURCE_CORRUPT
+
+
+@pytest.mark.parametrize(
+    "ddl",
+    [
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, "
+        "session TEXT NOT NULL, session_dir TEXT NOT NULL, revision INTEGER NOT NULL, "
+        "state TEXT NOT NULL, config_hash TEXT NOT NULL, started_ts REAL NOT NULL, "
+        "closed_ts REAL, future TEXT)",
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, "
+        "session TEXT NOT NULL, session_dir TEXT NOT NULL, revision INTEGER NOT NULL, "
+        "state TEXT NOT NULL, config_hash TEXT NOT NULL, started_ts REAL NOT NULL)",
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, project_key TEXT, "
+        "session TEXT NOT NULL, session_dir TEXT NOT NULL, revision INTEGER NOT NULL, "
+        "state TEXT NOT NULL, config_hash TEXT NOT NULL, started_ts REAL NOT NULL, "
+        "closed_ts REAL)",
+    ],
+)
+def test_coordination_reader_rejects_non_exact_table_fingerprint(tmp_path, ddl):
+    db = tmp_path / "coordination-invalid.sqlite3"
+    con = sqlite3.connect(db)
+    con.execute(ddl)
+    con.close()
+    result = pli.CoordinationRunReader().read(pli.LegacyRoots(coordination_db=db))
+    assert result.state == "error"
+    assert result.detail_code == pli.SOURCE_CORRUPT
+
+
 # ── 3. Exact-path grouping, no heuristic merge ─────────────────────────────
 def test_full_evidence_converges_to_one_candidate_four_bindings(tmp_path):
     # A01: all four sources agree on path → one candidate, one Store call, 4 bindings
@@ -238,6 +329,238 @@ def test_full_evidence_converges_to_one_candidate_four_bindings(tmp_path):
         "SELECT source_kind FROM legacy_project_bindings").fetchall())
     con.close()
     assert kinds == ["agent_mail_project", "coordination_run", "herdr_session", "mail_projects_session"]
+
+
+def _capture_import(
+    tmp_path: Path, results: list[pli.SourceReadResult], *, reverse: bool = False,
+) -> tuple[pli.ImportReport, list[dict[str, Any]]]:
+    calls: list[dict[str, Any]] = []
+
+    class Reader:
+        def __init__(self, result: pli.SourceReadResult) -> None:
+            self.result = result
+            self.kind = result.kind
+
+        def read(self, roots: pli.LegacyRoots) -> pli.SourceReadResult:
+            return self.result
+
+    class Store:
+        def import_legacy_project(self, **kwargs):
+            calls.append(kwargs)
+            return type("Result", (), {"replayed": False})()
+
+    ordered = list(reversed(results)) if reverse else results
+    readers = [Reader(result) for result in ordered]
+    report = pli.import_legacy(Store(), pli.LegacyRoots(), readers=readers)  # type: ignore[arg-type]
+    return report, calls
+
+
+def test_two_mail_sessions_on_one_path_preserve_stable_bindings(tmp_path):
+    records = (
+        {"session": "alpha-a", "session_dir": "/var/lib/herdr/sessions/alpha-a",
+         "project": ALPHA, "version": 1},
+        {"session": "alpha-b", "session_dir": "/var/lib/herdr/sessions/alpha-b",
+         "project": ALPHA, "version": 1},
+    )
+    forward = pli.SourceReadResult("mail_projects_session", "ok", records)
+    backward = pli.SourceReadResult("mail_projects_session", "ok", tuple(reversed(records)))
+
+    forward_report, forward_calls = _capture_import(tmp_path, [forward])
+    backward_report, backward_calls = _capture_import(tmp_path, [backward])
+
+    assert forward_report == backward_report
+    assert forward_calls == backward_calls
+    assert len(forward_calls) == 1
+    assert len(forward_calls[0]["sources"]) == 2
+    assert {source.source_kind for source in forward_calls[0]["sources"]} == {
+        "mail_projects_session"
+    }
+
+
+def test_two_agent_mail_projects_on_one_path_preserve_stable_bindings(tmp_path):
+    records = (
+        {"project_id": 17, "slug": "alpha-primary", "human_key": ALPHA},
+        {"project_id": 18, "slug": "alpha-secondary", "human_key": ALPHA},
+    )
+    forward = pli.SourceReadResult("agent_mail_project", "ok", records)
+    backward = pli.SourceReadResult("agent_mail_project", "ok", tuple(reversed(records)))
+
+    forward_report, forward_calls = _capture_import(tmp_path, [forward])
+    backward_report, backward_calls = _capture_import(tmp_path, [backward])
+
+    assert forward_report == backward_report
+    assert forward_calls == backward_calls
+    assert len(forward_calls) == 1
+    assert len(forward_calls[0]["sources"]) == 2
+    assert {source.source_kind for source in forward_calls[0]["sources"]} == {
+        "agent_mail_project"
+    }
+
+
+def test_two_coordination_runs_on_one_path_preserve_stable_bindings(tmp_path):
+    records = (
+        {"run_id": "run_alpha_a", "project_key": ALPHA, "session": "alpha-dev",
+         "session_dir": HERDR_SD, "revision": 1},
+        {"run_id": "run_alpha_b", "project_key": ALPHA, "session": "alpha-dev",
+         "session_dir": HERDR_SD, "revision": 2},
+    )
+    forward = pli.SourceReadResult("coordination_run", "ok", records)
+    backward = pli.SourceReadResult("coordination_run", "ok", tuple(reversed(records)))
+
+    forward_report, forward_calls = _capture_import(tmp_path, [forward])
+    backward_report, backward_calls = _capture_import(tmp_path, [backward])
+
+    assert forward_report == backward_report
+    assert forward_calls == backward_calls
+    assert len(forward_calls) == 1
+    assert len(forward_calls[0]["sources"]) == 2
+    assert {source.source_kind for source in forward_calls[0]["sources"]} == {
+        "coordination_run"
+    }
+
+
+def test_two_herdr_sessions_on_one_candidate_preserve_stable_bindings(tmp_path):
+    owner = pli.SourceReadResult(
+        "agent_mail_project", "ok",
+        ({"project_id": 17, "slug": "alpha", "human_key": ALPHA},),
+    )
+    records = (
+        {"session": "alpha-a", "session_dir": "/var/lib/herdr/sessions/alpha-a",
+         "version": 3,
+         "workspaces": ({"workspace_id": "w1", "identity_cwd": ALPHA},)},
+        {"session": "alpha-b", "session_dir": "/var/lib/herdr/sessions/alpha-b",
+         "version": 3,
+         "workspaces": ({"workspace_id": "w2", "identity_cwd": ALPHA},)},
+    )
+    forward = pli.SourceReadResult("herdr_session", "ok", records)
+    backward = pli.SourceReadResult("herdr_session", "ok", tuple(reversed(records)))
+
+    forward_report, forward_calls = _capture_import(tmp_path, [owner, forward])
+    backward_report, backward_calls = _capture_import(tmp_path, [owner, backward])
+
+    assert forward_report == backward_report
+    assert forward_calls == backward_calls
+    assert len(forward_calls) == 1
+    assert len(forward_calls[0]["sources"]) == 3
+    assert sum(
+        source.source_kind == "herdr_session"
+        for source in forward_calls[0]["sources"]
+    ) == 2
+
+
+def test_source_reader_enumeration_order_is_stable(tmp_path):
+    results = [
+        pli.SourceReadResult(
+            "agent_mail_project", "ok",
+            ({"project_id": 17, "slug": "alpha", "human_key": ALPHA},),
+        ),
+        pli.SourceReadResult(
+            "mail_projects_session", "ok",
+            ({"session": "alpha-dev", "session_dir": HERDR_SD,
+              "project": ALPHA, "version": 1},),
+        ),
+        pli.SourceReadResult(
+            "coordination_run", "ok",
+            ({"run_id": "run_alpha", "project_key": ALPHA,
+              "session": "alpha-dev", "session_dir": HERDR_SD, "revision": 1},),
+        ),
+    ]
+
+    forward_report, forward_calls = _capture_import(tmp_path, results)
+    backward_report, backward_calls = _capture_import(tmp_path, results, reverse=True)
+
+    assert forward_report == backward_report
+    assert forward_calls == backward_calls
+
+
+def test_same_source_identity_with_changed_digest_fails_closed_stably(tmp_path):
+    records = (
+        {"project_id": 17, "slug": "alpha", "human_key": ALPHA},
+        {"project_id": 17, "slug": "renamed-alpha", "human_key": ALPHA},
+    )
+    forward = pli.SourceReadResult("agent_mail_project", "ok", records)
+    backward = pli.SourceReadResult("agent_mail_project", "ok", tuple(reversed(records)))
+
+    forward_report, forward_calls = _capture_import(tmp_path, [forward])
+    backward_report, backward_calls = _capture_import(tmp_path, [backward])
+
+    assert forward_calls == backward_calls == []
+    assert forward_report == backward_report
+    status = next(s for s in forward_report.sources if s.kind == "agent_mail_project")
+    assert status == pli.SourceStatus("agent_mail_project", "error", pli.EVIDENCE_CONFLICT)
+    assert forward_report.complete is False
+
+
+def test_same_source_identity_and_digest_is_idempotent(tmp_path):
+    record = {"project_id": 17, "slug": "alpha", "human_key": ALPHA}
+    source = pli.SourceReadResult("agent_mail_project", "ok", (record, dict(record)))
+
+    report, calls = _capture_import(tmp_path, [source])
+
+    assert report.complete is True
+    assert len(calls) == 1
+    assert len(calls[0]["sources"]) == 1
+
+
+def test_mail_coordination_generation_disagreement_fails_closed(tmp_path):
+    mail = pli.SourceReadResult(
+        "mail_projects_session", "ok",
+        ({"session": "shared", "session_dir": HERDR_SD,
+          "project": ALPHA, "version": 1},),
+    )
+    coordination = pli.SourceReadResult(
+        "coordination_run", "ok",
+        ({"run_id": "run_shared", "project_key": "/srv/repos/beta",
+          "session": "shared", "session_dir": HERDR_SD, "revision": 1},),
+    )
+    herdr = pli.SourceReadResult(
+        "herdr_session", "ok",
+        ({"session": "shared", "session_dir": HERDR_SD, "version": 3,
+          "workspaces": ({"workspace_id": "w1", "identity_cwd": ALPHA},)},),
+    )
+
+    report, calls = _capture_import(tmp_path, [mail, coordination, herdr])
+    reverse_report, reverse_calls = _capture_import(
+        tmp_path, [mail, coordination, herdr], reverse=True,
+    )
+
+    assert calls == reverse_calls == []
+    assert report == reverse_report
+    assert report.candidates == ()
+    assert report.complete is False
+    statuses = {status.kind: status for status in report.sources}
+    assert statuses["mail_projects_session"].detail_code == pli.AUTHORITY_DISAGREEMENT
+    assert statuses["coordination_run"].detail_code == pli.AUTHORITY_DISAGREEMENT
+    assert statuses["mail_projects_session"].state == "error"
+    assert statuses["coordination_run"].state == "error"
+
+
+def test_herdr_generation_disagreement_fails_closed(tmp_path):
+    mail = pli.SourceReadResult(
+        "mail_projects_session", "ok",
+        ({"session": "shared", "session_dir": HERDR_SD,
+          "project": ALPHA, "version": 1},),
+    )
+    coordination = pli.SourceReadResult(
+        "coordination_run", "ok",
+        ({"run_id": "run_shared", "project_key": ALPHA,
+          "session": "shared", "session_dir": HERDR_SD, "revision": 1},),
+    )
+    herdr = pli.SourceReadResult(
+        "herdr_session", "ok",
+        ({"session": "shared", "session_dir": HERDR_SD, "version": 3,
+          "workspaces": ({"workspace_id": "w1", "identity_cwd": "/srv/repos/beta"},)},),
+    )
+
+    report, calls = _capture_import(tmp_path, [mail, coordination, herdr])
+
+    assert calls == []
+    assert report.candidates == ()
+    assert report.complete is False
+    statuses = {status.kind: status for status in report.sources}
+    for kind in ("mail_projects_session", "coordination_run", "herdr_session"):
+        assert statuses[kind].state == "error"
+        assert statuses[kind].detail_code == pli.AUTHORITY_DISAGREEMENT
 
 
 def test_no_merge_by_basename_or_session(tmp_path):
