@@ -614,7 +614,7 @@
     {
       "id": "WEB-005-project-bootstrap",
       "title": "Align Local roots and bind Project registration write authority to discovery",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-003-wip4-gate", "PROJ-004-project-api", "SLICE-001-local-readonly"],
       "scope": ["web/api/registry.ts", "web/features/project-wizard/ProjectWizard.tsx", "web/fixtures/api.ts", "web/test/web003-registry.test.tsx"],
       "acceptance": [
