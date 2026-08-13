@@ -105,18 +105,18 @@
     {
       "id": "SEC-001-loopback-origin",
       "title": "Freeze no-token HTTP Host Origin and WebSocket loopback trust",
-      "status": "in_progress",
+      "status": "accepted",
       "depends_on": ["RUNTIME-001-profile-lock"],
       "scope": ["agent_cockpit", "tests", "docs/contracts/security-boundary-v1.md"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_security.py", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_security.py", "passed": true}
       ],
       "rollback": "Revert the trust-boundary commit and keep Next bound to loopback with no external exposure",
       "production_impact": "none",
       "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
-      "reviewer_instance_id": null,
-      "base_sha": null,
-      "fixed_sha": null,
+      "reviewer_instance_id": "i-v4mmixwv2ss5beq4egdeg3x5jq",
+      "base_sha": "f0acc317c87944c196dd1bde56cc4f9b65f4cb19",
+      "fixed_sha": "5fbfb574d4ffaf24714dc80af9083b07dd99dc46",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
