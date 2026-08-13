@@ -197,41 +197,64 @@ def _workspace(
     }
 
 
-def _tree(result: dict[str, object], relative: str) -> dict[str, object]:
+def _tree(result: object, relative: str) -> dict[str, object]:
+    if not isinstance(result, dict):
+        raise ApiError("local_files_unavailable")
     entries = result.get("entries")
     if not isinstance(entries, list):
         raise ApiError("local_files_unavailable")
+    public = []
+    for item in entries:
+        if not isinstance(item, dict) or not _valid_file_item(item):
+            raise ApiError("local_files_unavailable")
+        public.append({key: item[key] for key in ("name", "type", "size", "ext")})
     return {
         "path": relative,
-        "entries": [{
-            key: item[key]
-            for key in ("name", "type", "size", "ext")
-        } for item in entries if isinstance(item, dict)],
+        "entries": public,
     }
 
 
-def _content(result: dict[str, object], relative: str) -> dict[str, object]:
+def _content(result: object, relative: str) -> dict[str, object]:
+    if not isinstance(result, dict):
+        raise ApiError("local_files_unavailable")
+    size = result.get("size")
+    binary = result.get("binary")
+    if not _nonnegative_int(size) or not isinstance(binary, bool):
+        raise ApiError("local_files_unavailable")
     public = {
         "path": relative,
-        "size": result["size"],
-        "binary": result["binary"],
+        "size": size,
+        "binary": binary,
     }
-    if result.get("binary") is False:
-        public["text"] = result["text"]
+    if not binary:
+        text = result.get("text")
+        if not isinstance(text, str):
+            raise ApiError("local_files_unavailable")
+        public["text"] = text
     return public
 
 
-def _search(result: dict[str, object], root: Path) -> dict[str, object]:
+def _search(result: object, root: Path) -> dict[str, object]:
+    if not isinstance(result, dict):
+        raise ApiError("local_files_unavailable")
+    result_path = result.get("path")
+    query = result.get("query")
     values = result.get("results")
-    if not isinstance(values, list):
+    truncated = result.get("truncated")
+    if (
+        not isinstance(result_path, str)
+        or not isinstance(query, str)
+        or not isinstance(values, list)
+        or not isinstance(truncated, bool)
+    ):
         raise ApiError("local_files_unavailable")
     public = []
     for item in values:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or not _valid_file_item(item, path=True):
             raise ApiError("local_files_unavailable")
         try:
-            relative = Path(str(item["path"])).relative_to(root).as_posix()
-        except (KeyError, ValueError):
+            relative = Path(item["path"]).relative_to(root).as_posix()
+        except ValueError:
             raise ApiError("local_files_unavailable") from None
         public.append({
             "name": item["name"],
@@ -240,13 +263,35 @@ def _search(result: dict[str, object], root: Path) -> dict[str, object]:
             "size": item["size"],
             "ext": item["ext"],
         })
+    try:
+        public_path = "" if Path(result_path) == root else Path(
+            result_path
+        ).relative_to(root).as_posix()
+    except ValueError:
+        raise ApiError("local_files_unavailable") from None
     return {
-        "path": Path(str(result["path"])).relative_to(root).as_posix()
-        if Path(str(result["path"])) != root else "",
-        "query": result["query"],
+        "path": public_path,
+        "query": query,
         "results": public,
-        "truncated": result["truncated"],
+        "truncated": truncated,
     }
+
+
+def _valid_file_item(value: dict[str, object], *, path: bool = False) -> bool:
+    required = ("name", "type", "size", "ext")
+    return (
+        all(key in value for key in required)
+        and isinstance(value["name"], str)
+        and isinstance(value["type"], str)
+        and value["type"] in {"dir", "file"}
+        and _nonnegative_int(value["size"])
+        and isinstance(value["ext"], str)
+        and (not path or isinstance(value.get("path"), str))
+    )
+
+
+def _nonnegative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
 
 
 def _single_query(request: Request, key: str, default: str | None) -> str | None:
