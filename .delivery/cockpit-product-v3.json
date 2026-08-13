@@ -677,7 +677,7 @@
     {
       "id": "P0-WORKBENCH-001-unblock",
       "title": "Keep shared Workspace creation reachable when the legacy runtime workbench is unavailable",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["P0-WORKSPACE-001-F"],
       "scope": ["web/pages/ProjectWorkbenchPage.tsx", "web/test/workspace-create.test.tsx", "web/e2e/workspace-create.spec.ts"],
       "acceptance": [
