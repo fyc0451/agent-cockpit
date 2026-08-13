@@ -319,9 +319,15 @@ def test_ledgers_reject_update_and_delete(
 
     with sqlite3.connect(db_path) as connection:
         assert connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match=f"^{table}_update_forbidden$",
+        ):
             connection.execute(update_sql)
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match=f"^{table}_delete_forbidden$",
+        ):
             connection.execute(delete_sql)
 
 

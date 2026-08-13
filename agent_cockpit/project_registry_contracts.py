@@ -16,10 +16,10 @@ SCHEMA_STATEMENTS = (
     )""",
     """CREATE TRIGGER schema_migrations_update_forbidden
         BEFORE UPDATE ON schema_migrations
-        BEGIN SELECT RAISE(ABORT, 'schema_migrations_append_only'); END""",
+        BEGIN SELECT RAISE(ABORT, 'schema_migrations_update_forbidden'); END""",
     """CREATE TRIGGER schema_migrations_delete_forbidden
         BEFORE DELETE ON schema_migrations
-        BEGIN SELECT RAISE(ABORT, 'schema_migrations_append_only'); END""",
+        BEGIN SELECT RAISE(ABORT, 'schema_migrations_delete_forbidden'); END""",
     """CREATE TABLE projects (
         project_id TEXT NOT NULL PRIMARY KEY CHECK(
             length(project_id) = 36 AND substr(project_id, 1, 4) = 'prj_' AND
@@ -151,10 +151,10 @@ SCHEMA_STATEMENTS = (
     )""",
     """CREATE TRIGGER legacy_project_bindings_update_forbidden
         BEFORE UPDATE ON legacy_project_bindings
-        BEGIN SELECT RAISE(ABORT, 'legacy_project_bindings_append_only'); END""",
+        BEGIN SELECT RAISE(ABORT, 'legacy_project_bindings_update_forbidden'); END""",
     """CREATE TRIGGER legacy_project_bindings_delete_forbidden
         BEFORE DELETE ON legacy_project_bindings
-        BEGIN SELECT RAISE(ABORT, 'legacy_project_bindings_append_only'); END""",
+        BEGIN SELECT RAISE(ABORT, 'legacy_project_bindings_delete_forbidden'); END""",
     """CREATE TABLE idempotency_records (
         scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 128),
         idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) BETWEEN 1 AND 128),
@@ -166,10 +166,10 @@ SCHEMA_STATEMENTS = (
     )""",
     """CREATE TRIGGER idempotency_records_update_forbidden
         BEFORE UPDATE ON idempotency_records
-        BEGIN SELECT RAISE(ABORT, 'idempotency_records_append_only'); END""",
+        BEGIN SELECT RAISE(ABORT, 'idempotency_records_update_forbidden'); END""",
     """CREATE TRIGGER idempotency_records_delete_forbidden
         BEFORE DELETE ON idempotency_records
-        BEGIN SELECT RAISE(ABORT, 'idempotency_records_append_only'); END""",
+        BEGIN SELECT RAISE(ABORT, 'idempotency_records_delete_forbidden'); END""",
 )
 
 SCHEMA_DIGEST = hashlib.sha256(
