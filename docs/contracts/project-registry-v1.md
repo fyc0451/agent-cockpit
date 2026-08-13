@@ -22,8 +22,12 @@ detach、transfer、Workspace plan/execute、Git、Herdr、Mail 或文件系统�
   `schema_fingerprint_mismatch`。
 - 初始化的 DDL、migration receipt、`PRAGMA user_version=1` 和校验处于同一事务；失败全部回滚。
 - 首次初始化先在目标同目录的私有随机 temp 中完成事务、schema 校验和 file `fsync`，再以
-  no-replace 原子发布并 `fsync` 父目录；最终路径从不暴露半初始化 DB，并发初始化复用先发布的
-  完整 winner。预存或新出现的 `-journal/-wal/-shm` 一律 fail closed，不删除或改写。
+  no-replace 原子发布（Linux/WSL `renameat2(RENAME_NOREPLACE)`，macOS
+  `renamex_np(RENAME_EXCL)`）并 `fsync` 父目录；最终路径从不暴露半初始化 DB，并发初始化复用先
+  发布的完整 winner。预存或新出现的 `-journal/-wal/-shm` 一律 fail closed，不删除或改写。失败路径不对
+  已发布为 pathname 的 temp 执行有 TOCTOU 风险的清理；128-bit 随机、`0600` 的私有 temp 可以
+  遗留，但运行时不扫描、复用或纳入 Registry catalog，也绝不因此删除并发 replacement。残留只可
+  由后续受信任、具备独立安全判定的 maintenance 流程处理。
 - 每个写连接启用 `PRAGMA foreign_keys=ON`，写事务使用 `BEGIN IMMEDIATE`；Store 文件模式为 `0600`。
 - 公开 readiness fingerprint 常量在 `agent_cockpit.project_registry_contracts`：
   `PROJECT_REGISTRY_TABLES`、`PROJECT_REGISTRY_DEFAULTS`、`PROJECT_REGISTRY_INDEXES`、

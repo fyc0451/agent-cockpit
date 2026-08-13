@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import os
 import secrets
@@ -8,6 +10,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -606,6 +609,64 @@ def test_initialize_failure_rolls_back_schema_and_ledger(db_path: Path, monkeypa
     registry_store.open_existing(db_path).close()
 
 
+def test_initialize_failure_leaves_isolated_private_temp_without_unlink(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    unlinked: list[Path] = []
+
+    def reject_unlink(path: Path, *args, **kwargs):
+        unlinked.append(path)
+        raise AssertionError("initialize must not unlink an exposed pathname")
+
+    def fail_schema(_connection: sqlite3.Connection) -> None:
+        raise RuntimeError("injected schema failure")
+
+    monkeypatch.setattr(Path, "unlink", reject_unlink)
+    monkeypatch.setattr(registry_store, "_after_schema_hook", fail_schema)
+
+    with pytest.raises(RuntimeError, match="injected schema failure"):
+        registry_store.initialize(db_path)
+
+    leftovers = list(db_path.parent.glob(f".{db_path.name}.init-*.tmp"))
+    assert unlinked == []
+    assert not db_path.exists()
+    assert len(leftovers) == 1
+    token = leftovers[0].name.removeprefix(
+        f".{db_path.name}.init-"
+    ).removesuffix(".tmp")
+    assert len(token) == 32
+    assert int(token, 16) >= 0
+    assert leftovers[0].stat().st_uid == os.getuid()
+    assert leftovers[0].stat().st_mode & 0o777 == 0o600
+    assert leftovers[0].stat().st_nlink == 1
+    assert not any(
+        Path(f"{leftovers[0]}{suffix}").exists()
+        for suffix in ("-journal", "-wal", "-shm")
+    )
+
+
+def test_repeated_failed_initializations_do_not_block_clean_retry(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    def fail_schema(_connection: sqlite3.Connection) -> None:
+        raise RuntimeError("injected schema failure")
+
+    monkeypatch.setattr(registry_store, "_after_schema_hook", fail_schema)
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="injected schema failure"):
+            registry_store.initialize(db_path)
+
+    leftovers = list(db_path.parent.glob(f".{db_path.name}.init-*.tmp"))
+    assert len(leftovers) == 2
+    assert len({leftover.name for leftover in leftovers}) == 2
+    assert not db_path.exists()
+
+    monkeypatch.setattr(registry_store, "_after_schema_hook", lambda _connection: None)
+    registry_store.initialize(db_path).close()
+    registry_store.open_existing(db_path).close()
+    assert set(db_path.parent.glob(f".{db_path.name}.init-*.tmp")) == set(leftovers)
+
+
 @pytest.mark.parametrize("version", [0, 999])
 def test_initialize_never_deletes_or_mutates_existing_versioned_store(
     db_path: Path, version: int
@@ -805,7 +866,7 @@ def test_initialize_preserves_preexisting_sidecar(
 
 
 @pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
-def test_connect_failure_preserves_preexisting_empty_sidecar(
+def test_preexisting_empty_sidecar_fails_before_temp_creation_or_connect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
 ):
     path = tmp_path / "project-registry.sqlite3"
@@ -814,12 +875,13 @@ def test_connect_failure_preserves_preexisting_empty_sidecar(
     os.chmod(sidecar, 0o600)
     before = sidecar.lstat()
 
-    def fail_connect(_path: Path):
-        raise RuntimeError("injected connection setup failure")
+    def unexpected_connect(_path: Path):
+        raise AssertionError("sidecar must fail before connecting")
 
-    monkeypatch.setattr(registry_store, "_connect_write", fail_connect)
-    with pytest.raises(RuntimeError, match="injected connection setup failure"):
+    monkeypatch.setattr(registry_store, "_connect_write", unexpected_connect)
+    with pytest.raises(registry_store.ProjectRegistryError) as unsafe:
         registry_store.initialize(path)
+    assert _code(unsafe) == "store_unsafe"
     after = sidecar.lstat()
     assert (
         after.st_dev, after.st_ino, after.st_uid, after.st_mode,
@@ -829,6 +891,7 @@ def test_connect_failure_preserves_preexisting_empty_sidecar(
         before.st_nlink, before.st_size,
     )
     assert not path.exists()
+    assert list(tmp_path.glob(f".{path.name}.init-*.tmp")) == []
 
 
 def test_connect_failure_never_removes_concurrently_created_final_leaf(
@@ -847,6 +910,96 @@ def test_connect_failure_never_removes_concurrently_created_final_leaf(
         registry_store.initialize(path)
     assert path.read_bytes() == replacement
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_publish_loser_rejects_incomplete_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "project-registry.sqlite3"
+    replacement = b"incomplete-concurrent-winner"
+
+    def lose_publish(_source: Path, destination: Path) -> bool:
+        destination.write_bytes(replacement)
+        os.chmod(destination, 0o600)
+        return False
+
+    monkeypatch.setattr(registry_store, "_publish_noreplace", lose_publish)
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry_store.initialize(path)
+
+    assert _code(failure) == "store_corrupt"
+    assert path.read_bytes() == replacement
+    leftovers = list(tmp_path.glob(f".{path.name}.init-*.tmp"))
+    assert len(leftovers) == 1
+    registry_store.open_existing(leftovers[0]).close()
+
+
+@pytest.mark.parametrize(
+    ("result", "error_number", "expected"),
+    [(0, 0, True), (-1, errno.EEXIST, False)],
+)
+def test_publish_noreplace_uses_darwin_rename_excl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    result: int, error_number: int, expected: bool,
+):
+    calls: list[tuple[bytes, bytes, int]] = []
+
+    class FakeRename:
+        argtypes = None
+        restype = None
+
+        def __call__(self, source: bytes, destination: bytes, flags: int) -> int:
+            calls.append((source, destination, flags))
+            ctypes.set_errno(error_number)
+            return result
+
+    rename = FakeRename()
+    libc = type("FakeLibc", (), {"renamex_np": rename})()
+    monkeypatch.setattr(registry_store.sys, "platform", "darwin")
+    monkeypatch.setattr(registry_store.ctypes, "CDLL", lambda *_args, **_kwargs: libc)
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+
+    assert registry_store._publish_noreplace(source, destination) is expected
+    assert calls == [(os.fsencode(source), os.fsencode(destination), 0x00000004)]
+    assert rename.argtypes == (
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint,
+    )
+    assert rename.restype is ctypes.c_int
+
+
+def test_publish_noreplace_darwin_fails_closed_on_other_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class FakeRename:
+        argtypes = None
+        restype = None
+
+        def __call__(self, *_args) -> int:
+            ctypes.set_errno(errno.EIO)
+            return -1
+
+    libc = type("FakeLibc", (), {"renamex_np": FakeRename()})()
+    monkeypatch.setattr(registry_store.sys, "platform", "darwin")
+    monkeypatch.setattr(registry_store.ctypes, "CDLL", lambda *_args, **_kwargs: libc)
+
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry_store._publish_noreplace(tmp_path / "source", tmp_path / "destination")
+    assert _code(failure) == "store_unsafe"
+
+
+def test_publish_noreplace_darwin_requires_native_exclusive_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(registry_store.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        registry_store.ctypes, "CDLL",
+        lambda *_args, **_kwargs: type("FakeLibc", (), {})(),
+    )
+
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry_store._publish_noreplace(tmp_path / "source", tmp_path / "destination")
+    assert _code(failure) == "store_unsafe"
 
 
 @pytest.mark.parametrize("mode", [0o400, 0o700, 0o644])
@@ -886,8 +1039,15 @@ def test_initialize_crash_before_temp_connect_never_publishes_partial_store(
     registry_store.open_existing(path).close()
 
 
-def test_concurrent_initialize_publishes_one_complete_registry(tmp_path: Path):
+def test_concurrent_initialize_publishes_one_complete_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     path = tmp_path / "project-registry.sqlite3"
+    both_built = Barrier(2)
+    monkeypatch.setattr(
+        registry_store, "_after_schema_hook",
+        lambda _connection: both_built.wait(timeout=5),
+    )
 
     def initialize_once(_index: int) -> None:
         registry_store.initialize(path).close()
@@ -896,6 +1056,9 @@ def test_concurrent_initialize_publishes_one_complete_registry(tmp_path: Path):
         list(executor.map(initialize_once, range(2)))
 
     registry_store.open_existing(path).close()
+    leftovers = list(tmp_path.glob(f".{path.name}.init-*.tmp"))
+    assert len(leftovers) == 1
+    registry_store.open_existing(leftovers[0]).close()
     assert not Path(f"{path}-journal").exists()
     assert not Path(f"{path}-wal").exists()
     assert not Path(f"{path}-shm").exists()

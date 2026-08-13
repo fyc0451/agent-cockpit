@@ -9,6 +9,7 @@ import os
 import secrets
 import sqlite3
 import stat
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -241,39 +242,6 @@ def _require_leaf_signature(
         _fail("store_unsafe")
 
 
-def _discard_created_leaf(
-    path: Path, created_signature: FileSignature
-) -> None:
-    """Remove only the exact inode explicitly created by this call."""
-    try:
-        if _snapshot_sidecars(path):
-            return
-    except ProjectRegistryError:
-        return
-    try:
-        leaf = path.lstat()
-    except OSError:
-        return
-    if (
-        (leaf.st_dev, leaf.st_ino, leaf.st_uid, leaf.st_mode, leaf.st_nlink)
-        != created_signature
-        or not stat.S_ISREG(leaf.st_mode)
-        or leaf.st_uid != os.getuid()
-        or leaf.st_nlink != 1
-    ):
-        return
-    try:
-        current = path.lstat()
-        if (
-            (current.st_dev, current.st_ino, current.st_uid, current.st_mode)
-            + (current.st_nlink,) == created_signature
-            and current.st_nlink == 1
-        ):
-            path.unlink()
-    except OSError:
-        return
-
-
 def _connect_write(path: Path) -> sqlite3.Connection:
     before = _check_path(path, must_exist=True)
     connection = sqlite3.connect(path, isolation_level=None, timeout=5.0)
@@ -349,18 +317,29 @@ def _fsync_directory(path: Path) -> None:
 def _publish_noreplace(source: Path, destination: Path) -> bool:
     """Atomically rename a complete same-directory temp without overwrite."""
     libc = ctypes.CDLL(None, use_errno=True)
-    try:
-        renameat2 = libc.renameat2
-    except AttributeError:
+    if sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError:
+            _fail("store_unsafe")
+        rename.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        result = rename(
+            -100, os.fsencode(source), -100, os.fsencode(destination), 1
+        )
+    elif sys.platform == "darwin":
+        try:
+            rename = libc.renamex_np
+        except AttributeError:
+            _fail("store_unsafe")
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        result = rename(os.fsencode(source), os.fsencode(destination), 0x00000004)
+    else:
         _fail("store_unsafe")
-    renameat2.argtypes = (
-        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    result = renameat2(
-        -100, os.fsencode(source), -100, os.fsencode(destination), 1
-    )
     if result == 0:
         return True
     error_number = ctypes.get_errno()
@@ -621,7 +600,8 @@ def _binding_record(row: sqlite3.Row) -> domain.LegacyBindingRecord:
 def initialize(path: Path) -> ProjectRegistryStore:
     path = _absolute_path(path)
     _prepare_parent(path, create=True)
-    initial_sidecars = _snapshot_sidecars(path)
+    if _snapshot_sidecars(path):
+        _fail("store_unsafe")
     try:
         path.lstat()
     except FileNotFoundError:
@@ -635,7 +615,6 @@ def initialize(path: Path) -> ProjectRegistryStore:
     temp_signature = _create_leaf(temp_path)
 
     connection: sqlite3.Connection | None = None
-    built = False
     try:
         _require_no_sidecars(temp_path)
         _require_leaf_signature(temp_path, temp_signature)
@@ -644,7 +623,6 @@ def initialize(path: Path) -> ProjectRegistryStore:
     except BaseException:
         if connection is not None:
             connection.close()
-        _discard_created_leaf(temp_path, temp_signature)
         raise
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -660,7 +638,6 @@ def initialize(path: Path) -> ProjectRegistryStore:
         _validate_schema(connection)
         _require_leaf_signature(temp_path, temp_signature)
         connection.execute("COMMIT")
-        built = True
     except BaseException:
         try:
             connection.execute("ROLLBACK")
@@ -669,31 +646,20 @@ def initialize(path: Path) -> ProjectRegistryStore:
         raise
     finally:
         connection.close()
-        if not built:
-            _discard_created_leaf(temp_path, temp_signature)
 
-    try:
-        _require_leaf_signature(temp_path, temp_signature)
-        _require_no_sidecars(temp_path)
-        _fsync_file(temp_path, temp_signature)
-        if initial_sidecars:
-            if _snapshot_sidecars(path) != initial_sidecars:
-                _fail("store_unsafe")
-            _fail("store_unsafe")
+    _require_leaf_signature(temp_path, temp_signature)
+    _require_no_sidecars(temp_path)
+    _fsync_file(temp_path, temp_signature)
+    _require_no_sidecars(path)
+    published = _publish_noreplace(temp_path, path)
+    if published:
+        _require_leaf_signature(path, temp_signature)
         _require_no_sidecars(path)
-        published = _publish_noreplace(temp_path, path)
-        if published:
-            _require_leaf_signature(path, temp_signature)
-            _require_no_sidecars(path)
-            _fsync_directory(path.parent)
-            return ProjectRegistryStore(path)
-        _discard_created_leaf(temp_path, temp_signature)
-        winner = open_existing(path)
         _fsync_directory(path.parent)
-        return winner
-    except BaseException:
-        _discard_created_leaf(temp_path, temp_signature)
-        raise
+        return ProjectRegistryStore(path)
+    winner = open_existing(path)
+    _fsync_directory(path.parent)
+    return winner
 
 
 def open_existing(path: Path) -> ProjectRegistryStore:
