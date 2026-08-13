@@ -158,6 +158,41 @@ test('窄屏 390：向导可用且无水平溢出；取消零 POST', async ({ pa
   expectGatesClean(g)
 })
 
+test('legacy runtime 503：typed 显示不伪装空，Workspace 区块与创建入口仍可用', async ({
+  page,
+}) => {
+  // retryable 503：初次 + 2 次 backoff 重试，共 3 次相同失败，需精确声明
+  const wb503 = { url: '/api/projects/alpha/workbench', status: 503 }
+  const g = attachGates(page, [wb503, wb503, wb503])
+  const calls = await stubAlphaWorld(page, {
+    status: 201,
+    body: { data: createdWorkspace, meta: metaOk },
+  })
+  await page.route('**/api/projects/alpha/workbench', (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Agent Mail 不可用' }),
+    }),
+  )
+  await page.goto('/#/projects/alpha/workbench')
+  // runtime typed 错误（retryable 有 backoff 重试，等待放宽）
+  await expect(page.getByText('Agent Mail 不可用')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('暂无任务')).toHaveCount(0)
+  // Workspace 区块独立可达，创建入口不受 legacy 故障影响
+  await expect(page.getByText('暂无 Workspace')).toBeVisible()
+  const btn = page.getByRole('button', { name: '创建 Workspace' })
+  await expect(btn).not.toHaveAttribute('aria-disabled', 'true')
+  await btn.click()
+  const dialog = page.getByRole('dialog', { name: '创建 Workspace' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: '取消' }).click()
+  expect(calls).toHaveLength(0)
+  expect(g.postRequests).toEqual([])
+  expect(apiCalls(g, '/api/files')).toEqual([])
+  expectGatesClean(g)
+})
+
 test('wizard 在 workbench 之外零 legacy files 回退', async ({ page }) => {
   const g = attachGates(page)
   await stubAlphaWorld(page, {

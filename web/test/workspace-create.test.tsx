@@ -30,6 +30,8 @@ const CREATE_RE = /^\/api\/project-registry\/projects\/[^/]+\/workspaces$/
 function stubCreateFetch(opts: {
   gets?: Record<string, unknown>
   create?: PostHandler
+  /** 这些 URL 的 GET 永不落定（loading 态用例） */
+  pendingUrls?: string[]
 }): { posts: CapturedCall[]; gets: CapturedCall[] } {
   const posts: CapturedCall[] = []
   const gets: CapturedCall[] = []
@@ -48,11 +50,20 @@ function stubCreateFetch(opts: {
       spec = CREATE_RE.test(url) && opts.create ? await opts.create(call) : undefined
     } else {
       gets.push(call)
+      if (opts.pendingUrls?.some((p) => url.startsWith(p))) {
+        return new Promise<Response>(() => {})
+      }
       const map: Record<string, unknown> = { ...defaultFetchMap(), ...alphaGets(), ...opts.gets }
       const key = Object.keys(map)
         .filter((k) => url === k || url.startsWith(`${k}?`))
         .sort((a, b) => b.length - a.length)[0]
-      spec = key ? { body: map[key] } : undefined
+      const v = key ? map[key] : undefined
+      if (v !== null && typeof v === 'object' && '__status' in v) {
+        const ov = v as { __status: number; __payload: unknown }
+        spec = { status: ov.__status, body: ov.__payload }
+      } else {
+        spec = v !== undefined ? { body: v } : undefined
+      }
     }
     spec ??= {
       status: 404,
@@ -116,7 +127,7 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const stub = stubCreateFetch({})
     const user = userEvent.setup()
     renderApp('/projects/p1/workbench')
-    await screen.findByText('本机工作区')
+    expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
     const btn = screen.getByRole('button', { name: '创建 Workspace' })
     expect(btn).toHaveAttribute('aria-disabled', 'true')
     expect(btn).toHaveAttribute('title', expect.stringContaining('RepoLocation'))
@@ -324,5 +335,47 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     expect(resolveSelectedRepo([a, b], 'loc_b')).toBe(b)
     expect(resolveSelectedRepo([a], 'loc_b')).toBeNull()
     expect(resolveSelectedRepo([], null)).toBeNull()
+  })
+})
+
+// ---------- P0-WORKBENCH-001-unblock：legacy runtime 故障不阻断 Registry Workspace 区块 ----------
+
+describe('P0-WORKBENCH-001-unblock', () => {
+  const WB_503 = { __status: 503, __payload: { detail: 'Agent Mail 不可用' } }
+  // useLegacyWorkbench 对 retryable 错误带 backoff 重试（默认 retryDelay 1s/2s），等待放宽
+  const SLOW = { timeout: 8000 }
+
+  it('U1 legacy 503（p1）：runtime typed 错误，Workspaces 区块与列表仍渲染', async () => {
+    const stub = stubCreateFetch({ gets: { '/api/projects/p1/workbench': WB_503 } })
+    renderApp('/projects/p1/workbench')
+    // runtime 区块 typed 显示，不伪装为空
+    expect(await screen.findByText('Agent Mail 不可用', undefined, SLOW)).toBeInTheDocument()
+    expect(screen.queryByText('暂无任务')).toBeNull()
+    // Workspaces 区块独立可达
+    expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
+    const btn = screen.getByRole('button', { name: '创建 Workspace' })
+    expect(btn).toHaveAttribute('aria-disabled', 'true') // p1 无合格 repo
+    expect(stub.posts).toHaveLength(0)
+  })
+
+  it('U2 legacy 503（alpha）：创建按钮 enabled 且向导可开，零 legacy /api/files', async () => {
+    const stub = stubCreateFetch({ gets: { '/api/projects/alpha/workbench': WB_503 } })
+    const user = userEvent.setup()
+    renderApp('/projects/alpha/workbench')
+    expect(await screen.findByText('Agent Mail 不可用', undefined, SLOW)).toBeInTheDocument()
+    expect(await screen.findByText('暂无 Workspace')).toBeInTheDocument()
+    const btn = screen.getByRole('button', { name: '创建 Workspace' })
+    expect(btn).not.toHaveAttribute('aria-disabled', 'true')
+    await user.click(btn)
+    expect(await screen.findByRole('dialog', { name: '创建 Workspace' })).toBeInTheDocument()
+    expect(stub.gets.filter((c) => c.url.startsWith('/api/files'))).toHaveLength(0)
+    expect(stub.posts).toHaveLength(0)
+  })
+
+  it('U3 legacy 永不落定：runtime loading 不阻断 Workspaces 区块', async () => {
+    stubCreateFetch({ pendingUrls: ['/api/projects/p1/workbench'] })
+    renderApp('/projects/p1/workbench')
+    expect(await screen.findByText('正在加载运行时…')).toBeInTheDocument()
+    expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
   })
 })

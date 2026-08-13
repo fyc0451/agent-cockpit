@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useLegacyWorkbench, useWorkspaceList, workspaceLocation } from '../api/localSlice'
+import type { LegacyWorkbench } from '../api/localSlice'
 import { useProjectRegistryList } from '../api/registry'
 import { gateWorkspaceCreate } from '../api/workspaceCreate'
 import type { Project } from '../api/types'
@@ -78,16 +79,39 @@ function WorkspacesSection({ project }: { project: Project }) {
   )
 }
 
+/**
+ * P0-WORKBENCH-001-unblock：legacy runtime（任务/Sessions）独立成区块，
+ * 其 loading/error/degraded 只影响本区块；Registry 权威的 WorkspacesSection 与
+ * 创建入口始终独立渲染，legacy 503（Agent Mail 不可用）typed 显示、不伪装为空。
+ */
 function WorkbenchBody({ project }: { project: Project }) {
   const q = useLegacyWorkbench(project.slug ?? null)
 
-  if (q.isPending) return <StatusState kind="loading" title="正在加载工作台…" />
-  if (q.isError) return <QueryErrorState error={q.error} onRetry={() => q.refetch()} />
-
-  const wb = q.data!
-
   return (
     <div className="stack">
+      <div role="group" aria-label="运行时">
+        {q.isPending ? (
+          <section className="panel">
+            <h2 className="panel-title">运行时</h2>
+            <StatusState kind="loading" title="正在加载运行时…" />
+          </section>
+        ) : q.isError ? (
+          <section className="panel">
+            <h2 className="panel-title">运行时</h2>
+            <QueryErrorState error={q.error} onRetry={() => q.refetch()} />
+          </section>
+        ) : (
+          <RuntimeData wb={q.data!} />
+        )}
+      </div>
+      <WorkspacesSection project={project} />
+    </div>
+  )
+}
+
+function RuntimeData({ wb }: { wb: LegacyWorkbench }) {
+  return (
+    <>
       {wb.source.degraded ? (
         <StatusState
           kind="degraded"
@@ -142,8 +166,7 @@ function WorkbenchBody({ project }: { project: Project }) {
           </ul>
         )}
       </section>
-      <WorkspacesSection project={project} />
-    </div>
+    </>
   )
 }
 
