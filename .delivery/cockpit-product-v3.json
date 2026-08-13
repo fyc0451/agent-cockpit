@@ -394,11 +394,11 @@
     {
       "id": "SCHED-001-authority-contract",
       "title": "Freeze scheduler authority identity generation lease and alert contracts",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-002-wip3-gate"],
       "scope": ["docs/contracts/scheduler-v1.md", "tests/test_scheduler_contract.py", "tests/fixtures/scheduler_v1"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_scheduler_contract.py", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_scheduler_contract.py", "passed": true}
       ],
       "rollback": "Revert only the scheduler contract tests and fixtures; no dispatch runtime Store Agent or service state exists to roll back",
       "production_impact": "none",
