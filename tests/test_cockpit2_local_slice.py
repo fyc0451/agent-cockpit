@@ -211,6 +211,139 @@ def test_relative_tree_content_and_search_are_read_only_public_projections(local
     assert "modifiable" not in rendered
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        [],
+        {"entries": {}},
+        {"entries": ["not-an-item"]},
+        {"entries": [{"name": "a", "type": "file", "size": 1}]},
+        {"entries": [{"name": 1, "type": "file", "size": 1, "ext": "txt"}]},
+        {"entries": [{"name": "a", "type": 1, "size": 1, "ext": "txt"}]},
+        {"entries": [{"name": "a", "type": "file", "size": True, "ext": "txt"}]},
+        {"entries": [{"name": "a", "type": "file", "size": 1, "ext": 1}]},
+    ),
+)
+def test_tree_malformed_source_shape_is_fixed_g3_error(
+    local_slice, monkeypatch: pytest.MonkeyPatch, malformed: object,
+):
+    client, project, workspace, _other, _root = local_slice
+    monkeypatch.setattr(
+        local_readonly_api.files,
+        "list_dir_from_trusted_root",
+        lambda *_args: malformed,
+    )
+    response = client.get(
+        f"/api/project-registry/projects/{project.project_id}/workspaces/"
+        f"{workspace.workspace_id}/files",
+        params={"path": ""},
+    )
+    _error(response, 503, "local_files_unavailable")
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        [],
+        {"binary": False, "text": "value"},
+        {"size": -1, "binary": False, "text": "value"},
+        {"size": True, "binary": False, "text": "value"},
+        {"size": 1, "binary": "false", "text": "value"},
+        {"size": 1, "binary": False},
+        {"size": 1, "binary": False, "text": 1},
+    ),
+)
+def test_content_malformed_source_shape_is_fixed_g3_error(
+    local_slice, monkeypatch: pytest.MonkeyPatch, malformed: object,
+):
+    client, project, workspace, _other, _root = local_slice
+    monkeypatch.setattr(
+        local_readonly_api.files,
+        "read_file_from_trusted_root",
+        lambda *_args: malformed,
+    )
+    response = client.get(
+        f"/api/project-registry/projects/{project.project_id}/workspaces/"
+        f"{workspace.workspace_id}/files/content",
+        params={"path": "README.md"},
+    )
+    _error(response, 503, "local_files_unavailable")
+
+
+def test_binary_content_never_forwards_source_text(
+    local_slice, monkeypatch: pytest.MonkeyPatch,
+):
+    client, project, workspace, _other, _root = local_slice
+    monkeypatch.setattr(
+        local_readonly_api.files,
+        "read_file_from_trusted_root",
+        lambda *_args: {"size": 2, "binary": True, "text": "not public"},
+    )
+    payload = _g3(client.get(
+        f"/api/project-registry/projects/{project.project_id}/workspaces/"
+        f"{workspace.workspace_id}/files/content",
+        params={"path": "image.bin"},
+    ))
+    assert payload["data"] == {"path": "image.bin", "size": 2, "binary": True}
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed"),
+    (
+        ("result", []),
+        ("path", 1),
+        ("query", 1),
+        ("results", {}),
+        ("truncated", 0),
+        ("item", "not-an-item"),
+        ("item-path", 1),
+        ("item-name", 1),
+        ("item-type", 1),
+        ("item-size", True),
+        ("item-ext", 1),
+        ("item-missing", None),
+    ),
+)
+def test_search_malformed_source_shape_is_fixed_g3_error(
+    local_slice, monkeypatch: pytest.MonkeyPatch, field: str, malformed: object,
+):
+    client, project, workspace, _other, root = local_slice
+    item = {
+        "path": str(root / "README.md"),
+        "name": "README.md",
+        "type": "file",
+        "size": 1,
+        "ext": "md",
+    }
+    result: object = {
+        "path": str(root),
+        "query": "readme",
+        "results": [item],
+        "truncated": False,
+    }
+    if field == "result":
+        result = malformed
+    elif field == "item":
+        result["results"] = [malformed]
+    elif field == "item-missing":
+        item.pop("ext")
+    elif field.startswith("item-"):
+        item[field.removeprefix("item-")] = malformed
+    else:
+        result[field] = malformed
+    monkeypatch.setattr(
+        local_readonly_api.files,
+        "search_files_from_trusted_root",
+        lambda *_args: result,
+    )
+    response = client.get(
+        f"/api/project-registry/projects/{project.project_id}/workspaces/"
+        f"{workspace.workspace_id}/files/search",
+        params={"path": "", "q": "readme", "limit": "10"},
+    )
+    _error(response, 503, "local_files_unavailable")
+
+
 def test_files_cross_project_mismatch_and_benign_invalid_path_are_g3(local_slice):
     client, project, workspace, other, _root = local_slice
     mismatch = (
