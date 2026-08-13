@@ -414,7 +414,7 @@
     {
       "id": "SCHED-002-readonly-projection",
       "title": "Implement deterministic read-only scheduler and alert intent projection",
-      "status": "review",
+      "status": "in_progress",
       "depends_on": ["SCHED-001-authority-contract"],
       "scope": ["agent_cockpit/scheduler_projection.py", "tests/test_scheduler_projection.py"],
       "acceptance": [
@@ -424,9 +424,9 @@
       "rollback": "Revert the standalone pure projection and tests; it has no timer persistence API prompt or dispatch path",
       "production_impact": "none",
       "owner_instance_id": "i-dovierut5tq55gvxn5mhdgyah4",
-      "reviewer_instance_id": "i-t54gjj3konyre5iis4ectmncku",
+      "reviewer_instance_id": null,
       "base_sha": "7ad159283aca54c7d1e9ce3870c513199e618bf9",
-      "fixed_sha": "685d6769eb3b2b02b8bfbfbe084ee98044e98905",
+      "fixed_sha": null,
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
