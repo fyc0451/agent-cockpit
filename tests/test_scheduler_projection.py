@@ -693,3 +693,91 @@ def test_f3_evaluated_before_observed_is_unknown():
     )
     assert coherent.source.freshness == "stale"
     assert "source_stale" in coherent.reason_codes
+
+
+def _reviewer_work(snapshot: dict, *, sensitivity: str = "ordinary", state: str = "review") -> dict:
+    snapshot["work"][0].update({
+        "phase": "reviewer", "state": state,
+        "author_agent_instance_id": "i-author", "sensitivity": sensitivity,
+    })
+    return snapshot
+
+
+def test_reviewer_sensitive_denies_codex_allows_kimi():
+    base = _reviewer_work(_snap("valid_minimal.json"), sensitivity="sensitive_security")
+    denied = [
+        _ready_agent(instance="i-codex", verified="codex", observed="codex"),
+        _ready_agent(instance="i-opencode", verified="opencode", observed="opencode"),
+        _ready_agent(instance="i-unknown", verified="unknown", observed="claude"),
+    ]
+    for agent in denied:
+        snapshot = stamp_revisions({**deepcopy(base), "agents": [agent]})
+        result = project_scheduler_projection(snapshot, evaluated_at=T0)
+        assert eligible_pairs(snapshot, T0) == ()
+        assert "agent_policy_denied" in result.reason_codes
+        assert "sensitive_route_unavailable" in result.reason_codes
+    allowed = stamp_revisions({
+        **deepcopy(base),
+        "agents": [_ready_agent(instance="i-kimi", verified="kimi", observed="kimi")],
+    })
+    assert eligible_pairs(allowed, T0) == (("CAR-READY", "i-kimi"),)
+
+
+def test_reviewer_unknown_identity_does_not_pair():
+    snapshot = _reviewer_work(_snap("valid_minimal.json"), sensitivity="ordinary")
+    snapshot["agents"] = [
+        _ready_agent(instance="i-reviewer", identity="unknown"),
+    ]
+    snapshot = stamp_revisions(snapshot)
+    result = project_scheduler_projection(snapshot, evaluated_at=T0)
+    assert eligible_pairs(snapshot, T0) == ()
+    assert "no_stable_identity" in result.reason_codes
+    assert result.agents.available_count == 0
+    assert result.agents.states[0].projected_state != "available"
+
+
+def test_reviewer_generation_mismatch_does_not_pair():
+    missing = _reviewer_work(_snap("valid_minimal.json"))
+    missing["agents"] = [_ready_agent(instance="i-reviewer", generation=None)]
+    missing = stamp_revisions(missing)
+    assert eligible_pairs(missing, T0) == ()
+    drifted = _reviewer_work(_snap("valid_minimal.json"))
+    agent = _ready_agent(instance="i-reviewer", generation=2)
+    agent["reason_codes"] = ["runtime_generation_drift"]
+    drifted["agents"] = [agent]
+    drifted = stamp_revisions(drifted)
+    result = project_scheduler_projection(drifted, evaluated_at=T0)
+    assert eligible_pairs(drifted, T0) == ()
+    assert result.agents.available_count == 0
+    assert "runtime_generation_drift" in result.agents.states[0].reason_codes
+
+
+def test_mixed_writer_reviewer_sensitivity_identity_generation():
+    snapshot = _snap("valid_minimal.json")
+    template = snapshot["work"][0]
+    snapshot["work"] = [
+        {**template, "source_id": "CAR-WRITE", "phase": "writer", "state": "ready",
+         "sensitivity": "sensitive_security"},
+        {**template, "source_id": "CAR-REVIEW", "phase": "reviewer", "state": "ready",
+         "sensitivity": "sensitive_security", "author_agent_instance_id": "i-writer"},
+    ]
+    snapshot["agents"] = [
+        _ready_agent(instance="i-writer"),
+        _ready_agent(instance="i-codex", verified="codex", observed="codex"),
+        _ready_agent(instance="i-unknown-id", identity="unknown"),
+        _ready_agent(instance="i-stale-gen", generation=None),
+        _ready_agent(instance="i-kimi", verified="kimi", observed="kimi"),
+    ]
+    snapshot = stamp_revisions(snapshot)
+    assert eligible_pairs(snapshot, T0) == (
+        ("CAR-WRITE", "i-writer"),
+        ("CAR-WRITE", "i-kimi"),
+        ("CAR-REVIEW", "i-kimi"),
+    )
+    result = project_scheduler_projection(snapshot, evaluated_at=T0)
+    paired_agents = {agent for _work, agent in eligible_pairs(snapshot, T0)}
+    assert "i-codex" not in paired_agents
+    assert "i-unknown-id" not in paired_agents
+    assert "i-stale-gen" not in paired_agents
+    assert "agent_policy_denied" in result.reason_codes
+    assert any(item.source_id == "CAR-REVIEW" for item in result.work.ready)

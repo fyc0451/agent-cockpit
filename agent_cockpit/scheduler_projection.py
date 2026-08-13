@@ -493,9 +493,15 @@ def second_active_lease_allowed(snapshot: Mapping[str, Any]) -> bool:
     return True
 
 
+def _stable_identity(agent: Mapping[str, Any]) -> bool:
+    identity = agent.get("identity_revision")
+    instance = agent.get("agent_instance_id")
+    return bool(identity) and identity != "unknown" and bool(instance) and instance != "unknown"
+
+
 def _agent_reasons(agent: Mapping[str, Any], evaluated_at: datetime) -> list[str]:
     reasons = list(agent.get("reason_codes") or [])
-    if not agent.get("identity_revision") or not agent.get("agent_instance_id"):
+    if not _stable_identity(agent):
         reasons.append("no_stable_identity")
     if agent.get("runtime_generation") is None or not agent.get("attachment_id"):
         reasons.append("runtime_generation_unavailable")
@@ -513,8 +519,31 @@ def _agent_reasons(agent: Mapping[str, Any], evaluated_at: datetime) -> list[str
 
 _BLOCKING = {
     "no_stable_identity", "runtime_generation_unavailable", "runtime_not_verified",
-    "transport_unknown", "source_stale",
+    "runtime_generation_drift", "transport_unknown", "source_stale",
 }
+
+
+def _passes_pair_gates(
+    item: Mapping[str, Any],
+    agent: Mapping[str, Any],
+    evaluated_at: datetime,
+    leased: set[str],
+) -> bool:
+    if agent.get("observed_state") != "idle":
+        return False
+    if set(_agent_reasons(agent, evaluated_at)) & _BLOCKING:
+        return False
+    instance = agent.get("agent_instance_id")
+    if not instance or instance == "unknown" or instance in leased:
+        return False
+    if item["sensitivity"] == "unclassified":
+        return False
+    if item["sensitivity"] == "sensitive_security":
+        if agent.get("verified_harness") not in SENSITIVE_OK:
+            return False
+    elif agent.get("verified_harness") in {None, "unknown"}:
+        return False
+    return True
 
 
 def eligible_pairs(snapshot: Mapping[str, Any], evaluated_at: datetime) -> tuple[tuple[str, str], ...]:
@@ -541,25 +570,12 @@ def eligible_pairs(snapshot: Mapping[str, Any], evaluated_at: datetime) -> tuple
         for item in snapshot["work"]:
             if item["state"] != "ready" or item["phase"] != "writer":
                 continue
-            if item["sensitivity"] == "unclassified":
-                continue
             if (item["source_id"], item["phase"]) in leased_work:
                 continue
             for agent in snapshot["agents"]:
-                if agent.get("observed_state") != "idle":
+                if not _passes_pair_gates(item, agent, evaluated_at, leased):
                     continue
-                reasons = _agent_reasons(agent, evaluated_at)
-                if set(reasons) & _BLOCKING:
-                    continue
-                instance = agent.get("agent_instance_id")
-                if not instance or instance in leased:
-                    continue
-                if item["sensitivity"] == "sensitive_security":
-                    if agent.get("verified_harness") not in SENSITIVE_OK:
-                        continue
-                elif agent.get("verified_harness") in {None, "unknown"}:
-                    continue
-                pairs.append((item["source_id"], instance))
+                pairs.append((item["source_id"], agent["agent_instance_id"]))
     for item in snapshot["work"]:
         if item["phase"] != "reviewer" or item["state"] not in {"ready", "review"}:
             continue
@@ -567,15 +583,9 @@ def eligible_pairs(snapshot: Mapping[str, Any], evaluated_at: datetime) -> tuple
             continue
         for agent in snapshot["agents"]:
             instance = agent.get("agent_instance_id")
-            if not instance:
-                continue
-            if agent.get("observed_state") != "idle":
-                continue
             if item.get("author_agent_instance_id") == instance:
                 continue
-            if instance in leased:
-                continue
-            if set(_agent_reasons(agent, evaluated_at)) & _BLOCKING:
+            if not _passes_pair_gates(item, agent, evaluated_at, leased):
                 continue
             pairs.append((item["source_id"], instance))
     return tuple(pairs)
@@ -684,7 +694,7 @@ def project_scheduler_projection(
             if item["phase"] == "reviewer" and item.get("author_agent_instance_id") == agent.get("agent_instance_id"):
                 values.append("author_gate_denied")
                 reasons.add("author_gate_denied")
-        if not agent.get("identity_revision"):
+        if not _stable_identity(agent):
             reasons.add("no_stable_identity")
         if agent.get("runtime_generation") is None:
             reasons.add("runtime_generation_unavailable")
@@ -694,11 +704,12 @@ def project_scheduler_projection(
             reasons.add("review_authority_unavailable")
         projected = "unavailable"
         if (
-            agent.get("identity_revision")
+            _stable_identity(agent)
             and agent.get("runtime_generation") is not None
             and agent.get("attachment_id")
             and agent.get("verified_harness") not in {None, "unknown"}
             and "source_stale" not in values
+            and "runtime_generation_drift" not in values
             and "transport_unknown" not in values
             and "runtime_not_verified" not in values
         ):
