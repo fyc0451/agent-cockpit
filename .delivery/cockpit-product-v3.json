@@ -253,18 +253,18 @@
     {
       "id": "PROJ-002-local-discovery",
       "title": "Discover an existing directory under an allowlisted Local root",
-      "status": "in_progress",
+      "status": "accepted",
       "depends_on": ["DELIVERY-002-wip3-gate"],
       "scope": ["agent_cockpit/project_discovery.py", "agent_cockpit/project_discovery_service.py", "tests/test_project_discovery.py", "docs/contracts/project-discovery-v1.md"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_project_discovery.py", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_project_discovery.py", "passed": true}
       ],
       "rollback": "Disable the discovery routes and revert the commit; do not remove user directories or legacy projects",
       "production_impact": "none",
       "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-gzy6byrcie47tprardahrpmwbq",
       "base_sha": "20e2af0ac8b4ee0503bc2278841c7d130faf8273",
-      "fixed_sha": null,
+      "fixed_sha": "a162b9b2897bb10c5a1173b0a7ad0cb97b84d2c7",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
