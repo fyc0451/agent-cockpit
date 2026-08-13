@@ -70,6 +70,9 @@ _ROOT_DEFAULTS: dict[str, Path] = {
 STORES: dict[str, tuple[str, str, str, str, int | None]] = {
     "settings": ("data", "settings.json", "file", "server", 0o600),
     "tasks": ("data", "tasks.sqlite3", "file", "server", None),
+    "project_registry": (
+        "data", "project-registry.sqlite3", "file", "server", 0o600,
+    ),
     "worktrees": ("data", "worktrees", "dir", "server", None),
     "coordination": ("data", "coordination.sqlite3", "file", "server+tools", None),
     "leader_binding": ("data", "leader-binding.sqlite3", "file", "server", None),

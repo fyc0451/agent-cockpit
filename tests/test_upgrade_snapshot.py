@@ -62,6 +62,14 @@ def _write_file(path: Path, data: bytes, mode: int = 0o600) -> None:
     os.chmod(path, mode)
 
 
+def test_project_registry_is_a_closed_inventory_sqlite_store() -> None:
+    assert upgrade_snapshot._EXPECTED_STORE_LAYOUT["project_registry"] == (
+        "data", "project-registry.sqlite3", "file",
+    )
+    assert "project_registry" in upgrade_snapshot.SQLITE_STORE_NAMES
+    assert "project_registry" in upgrade_snapshot.SNAPSHOT_STORE_NAMES
+
+
 def test_empty_sources_seal_exact_canonical_closed_inventory(
     runtime_tree: dict[str, Path],
 ) -> None:
@@ -76,11 +84,12 @@ def test_empty_sources_seal_exact_canonical_closed_inventory(
     assert raw == upgrade_snapshot.canonical_inventory_bytes(result["inventory"])
     assert hashlib.sha256(raw).hexdigest() == result["inventory_sha256"]
     inventory = result["inventory"]
-    assert inventory["entry_count"] == 15
+    assert inventory["schema_version"] == 2
+    assert inventory["entry_count"] == 16
     assert inventory["total_snapshot_bytes"] == 0
     names = [row["name"] for row in inventory["entries"]]
     assert names == sorted(set(runtime_paths.STORES) | {"uploads"})
-    assert len(names) == len(set(names)) == 15
+    assert len(names) == len(set(names)) == 16
     assert inventory["consistency_scope"] == "per_store_atomic"
 
     for name in upgrade_snapshot.SNAPSHOT_STORE_NAMES:

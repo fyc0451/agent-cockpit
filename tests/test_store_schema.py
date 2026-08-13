@@ -35,6 +35,7 @@ def test_missing_stores_are_creatable_no_writes(isolated_roots, tmp_path):
     before = {p: p.stat().st_mtime_ns for p in tmp_path.rglob("*") if p.is_file()}
     results = {r["name"]: r for r in store_schema.probe_all_stores()}
     assert results["tasks"]["reason"] == store_schema.REASON_MISSING_CREATABLE
+    assert results["project_registry"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["coordination"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["delivery_outbox"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     after_files = list(tmp_path.rglob("*"))
@@ -56,6 +57,81 @@ def test_delivery_outbox_current_store_fingerprint_compatible(isolated_roots, mo
         row["name"]: row for row in store_schema.probe_all_stores()
     }["delivery_outbox"]
     assert result["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def _project_registry_check(**kwargs):
+    from agent_cockpit import project_registry_contracts
+
+    return store_schema._check_sqlite(
+        "project_registry",
+        project_registry_contracts.PROJECT_REGISTRY_TABLES,
+        expected_defaults=project_registry_contracts.PROJECT_REGISTRY_DEFAULTS,
+        expected_indexes=project_registry_contracts.PROJECT_REGISTRY_INDEXES,
+        expected_fks=project_registry_contracts.PROJECT_REGISTRY_FOREIGN_KEYS,
+        expected_user_version=project_registry_contracts.SCHEMA_VERSION,
+        expected_schema_statements=project_registry_contracts.SCHEMA_STATEMENTS,
+        expected_migration=(
+            project_registry_contracts.PROJECT_REGISTRY_MIGRATION_RECEIPT
+        ),
+        **kwargs,
+    )
+
+
+def test_project_registry_current_store_fingerprint_compatible(isolated_roots):
+    from agent_cockpit import project_registry_store
+
+    path = runtime_paths.store("project_registry")
+    project_registry_store.initialize(path).close()
+    assert _project_registry_check()["reason"] == store_schema.REASON_COMPATIBLE
+
+
+@pytest.mark.parametrize("damage", ["receipt", "trigger", "partial_index"])
+def test_project_registry_strict_schema_damage_fails_closed(
+    isolated_roots, damage,
+):
+    from agent_cockpit import project_registry_store
+
+    path = runtime_paths.store("project_registry")
+    project_registry_store.initialize(path).close()
+    connection = sqlite3.connect(path)
+    if damage == "receipt":
+        connection.execute(
+            "UPDATE schema_migrations SET schema_digest=?", ("0" * 64,),
+        )
+    elif damage == "trigger":
+        connection.execute("DROP TRIGGER projects_slug_immutable")
+    else:
+        connection.execute("DROP INDEX repo_locations_active_node_path")
+        connection.execute(
+            "CREATE UNIQUE INDEX repo_locations_active_node_path "
+            "ON repo_locations(node_id, canonical_path)"
+        )
+    connection.commit()
+    connection.close()
+    result = _project_registry_check()
+    assert result["state"] == "error"
+    assert result["reason"] == store_schema.REASON_FINGERPRINT_MISMATCH
+
+
+def test_future_project_registry_schema_is_pure_read_fail_closed(isolated_roots):
+    path = runtime_paths.store("project_registry")
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE future_only (value TEXT)")
+    connection.execute("PRAGMA user_version=999")
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+    before = path.read_bytes()
+
+    result = {
+        row["name"]: row for row in store_schema.probe_all_stores()
+    }["project_registry"]
+
+    assert result["state"] == "future"
+    assert result["reason"] == store_schema.REASON_FUTURE_SCHEMA
+    assert path.read_bytes() == before
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
 
 
 def test_b0_store_is_conditional_and_missing_creatable(
@@ -158,6 +234,83 @@ def test_tasks_fingerprint_compatible(isolated_roots):
     _mk_tasks_db(path)
     r = _tasks_check()
     assert r["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_foreign_key_fingerprint_preserves_composite_identity(tmp_path):
+    composite_path = tmp_path / "composite.sqlite3"
+    independent_path = tmp_path / "independent.sqlite3"
+    for path, clause in (
+        (
+            composite_path,
+            "FOREIGN KEY(project_id, location_id) "
+            "REFERENCES locations(project_id, location_id)",
+        ),
+        (
+            independent_path,
+            "FOREIGN KEY(project_id) REFERENCES locations(project_id), "
+            "FOREIGN KEY(location_id) REFERENCES locations(location_id)",
+        ),
+    ):
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            "CREATE TABLE locations ("
+            "project_id TEXT NOT NULL, location_id TEXT NOT NULL, "
+            "UNIQUE(project_id, location_id), UNIQUE(location_id)); "
+            f"CREATE TABLE workspaces (project_id TEXT, location_id TEXT, {clause});"
+        )
+        connection.close()
+
+    composite = sqlite3.connect(composite_path)
+    independent = sqlite3.connect(independent_path)
+    try:
+        expected = frozenset({
+            (
+                ("project_id", "locations", "project_id"),
+                ("location_id", "locations", "location_id"),
+            ),
+        })
+        assert store_schema._foreign_keys(composite, "workspaces") == expected
+        assert store_schema._foreign_keys(independent, "workspaces") != expected
+    finally:
+        composite.close()
+        independent.close()
+
+
+def test_index_fingerprint_preserves_partial_predicate_flag(tmp_path):
+    partial_path = tmp_path / "partial.sqlite3"
+    unconditional_path = tmp_path / "unconditional.sqlite3"
+    for path, predicate in (
+        (partial_path, " WHERE lifecycle='active'"),
+        (unconditional_path, ""),
+    ):
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            "CREATE TABLE locations (node_id TEXT, path TEXT, lifecycle TEXT); "
+            "CREATE UNIQUE INDEX active_location ON locations(node_id, path)"
+            f"{predicate};"
+        )
+        connection.close()
+
+    partial = sqlite3.connect(partial_path)
+    unconditional = sqlite3.connect(unconditional_path)
+    try:
+        expected = frozenset({
+            ("active_location", 1, 1, ("node_id", "path")),
+        })
+        assert store_schema._named_indexes(partial, "locations") == expected
+        assert store_schema._named_indexes(unconditional, "locations") != expected
+    finally:
+        partial.close()
+        unconditional.close()
+
+
+def test_sqlite_expected_user_version_is_store_specific(isolated_roots):
+    path = runtime_paths.store("tasks")
+    _mk_tasks_db(path, user_version=1)
+    current = _tasks_check(expected_user_version=1)
+    assert current["reason"] == store_schema.REASON_COMPATIBLE
+    older = _tasks_check(expected_user_version=2)
+    assert older["reason"] == store_schema.REASON_MIGRATION_REQUIRED
 
 
 def test_coordination_assignment_schema_migrates_existing_store(

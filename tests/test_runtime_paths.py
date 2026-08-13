@@ -313,6 +313,7 @@ class TestDefaultCompat:
         expect = {
             "settings": "dashboard-data/settings.json",
             "tasks": "dashboard-data/tasks.sqlite3",
+            "project_registry": "dashboard-data/project-registry.sqlite3",
             "worktrees": "dashboard-data/worktrees",
             "coordination": "dashboard-data/coordination.sqlite3",
             "leader_binding": "dashboard-data/leader-binding.sqlite3",

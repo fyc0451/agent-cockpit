@@ -88,13 +88,18 @@ def _inventory_entry(name: str) -> dict:
     }
 
 
-def _inventory() -> dict:
+def _inventory(*, schema_version: int = 2) -> dict:
+    names = (
+        release_readiness._V1_INVENTORY_NAMES
+        if schema_version == 1
+        else release_readiness._EXPECTED_INVENTORY_NAMES
+    )
     entries = [
         _inventory_entry(name)
-        for name in release_readiness._EXPECTED_INVENTORY_NAMES
+        for name in names
     ]
     return {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "engine": "immutable-upgrade-controller",
         "snapshot_id": "snapshot-1",
         "request_id": "request-1",
@@ -248,7 +253,7 @@ def test_inventory_digest_and_canonical_encoding_are_required(tmp_path):
 
 
 @pytest.mark.parametrize("case", ["missing", "extra", "duplicate"])
-def test_inventory_requires_exact_fifteen_entry_closed_set(tmp_path, case):
+def test_inventory_requires_exact_closed_set(tmp_path, case):
     snapshot = _make_snapshot(tmp_path)
     inventory = _inventory()
     if case == "missing":
@@ -256,6 +261,58 @@ def test_inventory_requires_exact_fifteen_entry_closed_set(tmp_path, case):
         inventory["entry_count"] -= 1
     elif case == "extra":
         inventory["entries"].append({**inventory["entries"][-1], "name": "unknown"})
+        inventory["entry_count"] += 1
+    else:
+        inventory["entries"][-1] = dict(inventory["entries"][-2])
+    path, digest = _write_inventory(snapshot, inventory)
+    with pytest.raises(release_readiness.ReadinessEvidenceError) as error:
+        _build_with_inventory(tmp_path, snapshot, path, digest)
+    assert error.value.reason == release_readiness.REASON_INVENTORY_INCOMPLETE
+
+
+def test_project_registry_is_a_readiness_sqlite_store() -> None:
+    assert "project_registry" in release_readiness._SQLITE_STORES
+    assert "project_registry" in release_readiness._EXPECTED_INVENTORY_NAMES
+    assert (
+        release_readiness._EXPECTED_INVENTORY_NAMES
+        == release_readiness._V2_INVENTORY_NAMES
+    )
+
+
+def test_legacy_v1_inventory_accepts_exact_fifteen_entry_catalog(tmp_path):
+    snapshot = _make_snapshot(tmp_path)
+    inventory = _inventory(schema_version=1)
+    assert inventory["entry_count"] == 15
+    assert "project_registry" not in {
+        entry["name"] for entry in inventory["entries"]
+    }
+    path, digest = _write_inventory(snapshot, inventory)
+    evidence = _build_with_inventory(tmp_path, snapshot, path, digest)
+    assert [item["name"] for item in evidence["stores"]] == list(
+        store_schema._APP_OWNED_STORES,
+    )
+    registry = next(
+        item for item in evidence["stores"]
+        if item["name"] == "project_registry"
+    )
+    assert registry["state"] == "absent"
+    assert registry["reason"] == store_schema.REASON_MISSING_CREATABLE
+
+
+@pytest.mark.parametrize("damage", ["missing", "extra", "duplicate"])
+def test_v2_inventory_requires_exact_registry_catalog(tmp_path, damage):
+    snapshot = _make_snapshot(tmp_path)
+    inventory = _inventory(schema_version=2)
+    if damage == "missing":
+        inventory["entries"] = [
+            entry for entry in inventory["entries"]
+            if entry["name"] != "project_registry"
+        ]
+        inventory["entry_count"] -= 1
+    elif damage == "extra":
+        inventory["entries"].append(
+            {**inventory["entries"][-1], "name": "unknown"}
+        )
         inventory["entry_count"] += 1
     else:
         inventory["entries"][-1] = dict(inventory["entries"][-2])

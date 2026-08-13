@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import urlsplit
 import ipaddress
 
+from . import project_registry_contracts
 from . import runtime_paths
 from .artifact_root import resolve_artifact_root
 
@@ -85,14 +86,19 @@ _DELIVERY_OUTBOX_COLUMNS: tuple[tuple[str, str, int, int], ...] = (
 _DELIVERY_OUTBOX_DEFAULTS: dict[str, dict[str, str]] = {
     "delivery_jobs": {"attempt": "0", "status": "pending"},
 }
-_DELIVERY_OUTBOX_INDEXES: dict[
-    str, frozenset[tuple[str, int, tuple[str, ...]]]
-] = {
+_IndexFingerprint = tuple[str, int, int, tuple[str, ...]]
+_ForeignKeyColumn = tuple[str, str, str]
+_ForeignKeyFingerprint = tuple[_ForeignKeyColumn, ...]
+
+
+_DELIVERY_OUTBOX_INDEXES: dict[str, frozenset[_IndexFingerprint]] = {
     "delivery_jobs": frozenset(
-        {("delivery_jobs_idempotency", 1, ("idempotency_key",))}
+        {("delivery_jobs_idempotency", 1, 0, ("idempotency_key",))}
     ),
 }
-_DELIVERY_OUTBOX_FKS: dict[str, frozenset[tuple[str, str, str]]] = {
+
+
+_DELIVERY_OUTBOX_FKS: dict[str, frozenset[_ForeignKeyFingerprint]] = {
     "delivery_jobs": frozenset(),
 }
 _COORD_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
@@ -245,6 +251,7 @@ _JSON_VERSIONED: dict[str, int] = {
 # upgrade/ is V1 diagnostic — excluded from ready inventory.
 _APP_OWNED_STORES = (
     "tasks", "push", "coordination", "delivery_outbox", "leader_binding",
+    "project_registry",
     "settings", "mail_projects", "team_sessions", "inbox_route", "typing",
     "file_roots", "vapid",
 )
@@ -332,30 +339,65 @@ def _table_columns(con: sqlite3.Connection, table: str) -> dict[str, tuple[str, 
     return out
 
 
-def _named_indexes(con: sqlite3.Connection, table: str) -> frozenset[tuple[str, int, tuple[str, ...]]]:
-    """Non-autoindex indexes: (name, unique, columns)."""
-    items: list[tuple[str, int, tuple[str, ...]]] = []
+def _named_indexes(
+    con: sqlite3.Connection, table: str,
+) -> frozenset[_IndexFingerprint]:
+    """Non-autoindex indexes: (name, unique, partial, ordered columns)."""
+    items: list[_IndexFingerprint] = []
     for row in con.execute(f"PRAGMA index_list({table})").fetchall():
         # seq, name, unique, origin, partial
         name = str(row[1])
         if name.startswith("sqlite_autoindex_"):
             continue
         unique = int(row[2])
+        partial = int(row[4])
         cols = tuple(
             str(c[2])
             for c in con.execute(f"PRAGMA index_info({name})").fetchall()
         )
-        items.append((name, unique, cols))
+        items.append((name, unique, partial, cols))
     return frozenset(items)
 
 
-def _foreign_keys(con: sqlite3.Connection, table: str) -> frozenset[tuple[str, str, str]]:
-    """(from_col, ref_table, to_col)."""
-    items: list[tuple[str, str, str]] = []
+def _foreign_keys(
+    con: sqlite3.Connection, table: str,
+) -> frozenset[_ForeignKeyFingerprint]:
+    """Group by PRAGMA id and order by seq to preserve composite identity."""
+    groups: dict[int, list[tuple[int, _ForeignKeyColumn]]] = {}
     for row in con.execute(f"PRAGMA foreign_key_list({table})").fetchall():
         # id, seq, table, from, to, on_update, on_delete, match
-        items.append((str(row[3]), str(row[2]), str(row[4])))
-    return frozenset(items)
+        groups.setdefault(int(row[0]), []).append((
+            int(row[1]), (str(row[3]), str(row[2]), str(row[4])),
+        ))
+    return frozenset(
+        tuple(column for _seq, column in sorted(group))
+        for group in groups.values()
+    )
+
+
+def _schema_objects(
+    con: sqlite3.Connection,
+) -> tuple[tuple[str, str, str, str], ...]:
+    return tuple(
+        (str(kind), str(name), str(table), " ".join(str(sql).split()).lower())
+        for kind, name, table, sql in con.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+    )
+
+
+def _expected_schema_objects(
+    statements: tuple[str, ...],
+) -> tuple[tuple[str, str, str, str], ...]:
+    con = sqlite3.connect(":memory:")
+    try:
+        con.execute("PRAGMA foreign_keys=ON")
+        for statement in statements:
+            con.execute(statement)
+        return _schema_objects(con)
+    finally:
+        con.close()
 
 
 # Expected defaults / indexes / FKs for current writers (user_version=0).
@@ -366,20 +408,22 @@ _COORD_DEFAULTS: dict[str, dict[str, str]] = {
     "receipts": {"ack_pending": "0"},
     "assignments": {"status": "assigned", "version": "1"},
 }
-_COORD_INDEXES: dict[str, frozenset[tuple[str, int, tuple[str, ...]]]] = {
-    "runs": frozenset({("runs_project_state", 0, ("project_key", "state"))}),
-    "participants": frozenset({("participants_mail", 0, ("mail_name", "run_id"))}),
+_COORD_INDEXES: dict[str, frozenset[_IndexFingerprint]] = {
+    "runs": frozenset({("runs_project_state", 0, 0, ("project_key", "state"))}),
+    "participants": frozenset({("participants_mail", 0, 0, ("mail_name", "run_id"))}),
     "message_meta": frozenset(),
-    "receipts": frozenset({("receipts_claims", 0, ("state", "claim_expires_ts"))}),
+    "receipts": frozenset({("receipts_claims", 0, 0, ("state", "claim_expires_ts"))}),
     "task_reports": frozenset(),
     "assignments": frozenset({
-        ("assignments_project_status", 0, ("project_key", "status", "deadline")),
-        ("assignments_assignee_status", 0, ("assignee", "status", "deadline")),
+        ("assignments_project_status", 0, 0, ("project_key", "status", "deadline")),
+        ("assignments_assignee_status", 0, 0, ("assignee", "status", "deadline")),
     }),
 }
-_COORD_FKS: dict[str, frozenset[tuple[str, str, str]]] = {
+_COORD_FKS: dict[str, frozenset[_ForeignKeyFingerprint]] = {
     "runs": frozenset(),
-    "participants": frozenset({("run_id", "runs", "run_id")}),
+    "participants": frozenset({
+        (("run_id", "runs", "run_id"),),
+    }),
     "message_meta": frozenset(),
     "receipts": frozenset(),
     "task_reports": frozenset(),
@@ -394,24 +438,22 @@ _LEADER_BINDING_DEFAULTS: dict[str, dict[str, str]] = {
     "binding_migrations": {},
     "control_events": {"fanned_out": "0"},
 }
-_LEADER_BINDING_INDEXES: dict[
-    str, frozenset[tuple[str, int, tuple[str, ...]]]
-] = {
+_LEADER_BINDING_INDEXES: dict[str, frozenset[_IndexFingerprint]] = {
     "leader_bindings": frozenset({
-        ("leader_bindings_active_once", 1, ("issuer", "scope_kind", "scope_id")),
-        ("leader_bindings_scope", 0, ("issuer", "scope_kind", "scope_id", "state")),
+        ("leader_bindings_active_once", 1, 1, ("issuer", "scope_kind", "scope_id")),
+        ("leader_bindings_scope", 0, 0, ("issuer", "scope_kind", "scope_id", "state")),
     }),
     "binding_migrations": frozenset(),
     "control_events": frozenset({
-        ("control_events_scope", 0, ("issuer", "scope_kind", "scope_id", "seq")),
-        ("control_events_pending", 0, ("fanned_out", "seq")),
+        ("control_events_scope", 0, 0, ("issuer", "scope_kind", "scope_id", "seq")),
+        ("control_events_pending", 0, 0, ("fanned_out", "seq")),
     }),
 }
 _LEADER_BINDING_FKS = {
     name: frozenset() for name in _LEADER_BINDING_TABLES
 }
-_TASKS_INDEXES: frozenset[tuple[str, int, tuple[str, ...]]] = frozenset()
-_PUSH_INDEXES: frozenset[tuple[str, int, tuple[str, ...]]] = frozenset()
+_TASKS_INDEXES: frozenset[_IndexFingerprint] = frozenset()
+_PUSH_INDEXES: frozenset[_IndexFingerprint] = frozenset()
 
 
 def _check_sqlite(
@@ -419,8 +461,11 @@ def _check_sqlite(
     expected_tables: dict[str, tuple[tuple[str, str, int, int], ...]],
     *,
     expected_defaults: dict[str, dict[str, str]] | None = None,
-    expected_indexes: dict[str, frozenset[tuple[str, int, tuple[str, ...]]]] | None = None,
-    expected_fks: dict[str, frozenset[tuple[str, str, str]]] | None = None,
+    expected_indexes: dict[str, frozenset[_IndexFingerprint]] | None = None,
+    expected_fks: dict[str, frozenset[_ForeignKeyFingerprint]] | None = None,
+    expected_user_version: int = 0,
+    expected_schema_statements: tuple[str, ...] | None = None,
+    expected_migration: tuple[str, int, str] | None = None,
     path: Path | None = None,
 ) -> dict[str, Any]:
     path = path if path is not None else runtime_paths.store(name)
@@ -455,12 +500,31 @@ def _check_sqlite(
             return _store_result(name, "error", REASON_CORRUPT)
         if user_version < 0:
             return _store_result(name, "error", REASON_CORRUPT)
-        # Current writers freeze user_version=0. Known previous → migration_required;
-        # any other non-zero is future_schema (never compatible).
+        # Most current writers freeze user_version=0; versioned stores pass
+        # their explicit current version. Known previous values remain a
+        # migration requirement and higher values fail closed as future.
         if user_version in _PREVIOUS_USER_VERSIONS:
             return _store_result(name, "migration_required", REASON_MIGRATION_REQUIRED)
-        if user_version != 0:
+        if user_version < expected_user_version:
+            return _store_result(name, "migration_required", REASON_MIGRATION_REQUIRED)
+        if user_version > expected_user_version:
             return _store_result(name, "future", REASON_FUTURE_SCHEMA)
+        if (
+            expected_schema_statements is not None
+            and _schema_objects(con)
+            != _expected_schema_objects(expected_schema_statements)
+        ):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        if expected_migration is not None:
+            try:
+                receipts = con.execute(
+                    "SELECT migration_id, schema_version, schema_digest "
+                    "FROM schema_migrations"
+                ).fetchall()
+            except sqlite3.Error:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if [tuple(row) for row in receipts] != [expected_migration]:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
         # Discover tables (exclude sqlite_*)
         names = {
             str(r[0])
@@ -1292,8 +1356,11 @@ def _sqlite_probe_specs(
     str,
     dict[str, tuple[tuple[str, str, int, int], ...]],
     dict[str, dict[str, str]],
-    dict[str, frozenset[tuple[str, int, tuple[str, ...]]]],
-    dict[str, frozenset[tuple[str, str, str]]],
+    dict[str, frozenset[_IndexFingerprint]],
+    dict[str, frozenset[_ForeignKeyFingerprint]],
+    int,
+    tuple[str, ...] | None,
+    tuple[str, int, str] | None,
 ]]:
     specs = [
         (
@@ -1302,6 +1369,7 @@ def _sqlite_probe_specs(
             {"tasks": _TASKS_DEFAULTS},
             {"tasks": _TASKS_INDEXES},
             {"tasks": frozenset()},
+            0, None, None,
         ),
         (
             "push",
@@ -1309,6 +1377,7 @@ def _sqlite_probe_specs(
             {"subscriptions": _PUSH_DEFAULTS},
             {"subscriptions": _PUSH_INDEXES},
             {"subscriptions": frozenset()},
+            0, None, None,
         ),
         (
             "coordination",
@@ -1316,6 +1385,7 @@ def _sqlite_probe_specs(
             _COORD_DEFAULTS,
             _COORD_INDEXES,
             _COORD_FKS,
+            0, None, None,
         ),
         (
             "delivery_outbox",
@@ -1323,6 +1393,17 @@ def _sqlite_probe_specs(
             _DELIVERY_OUTBOX_DEFAULTS,
             _DELIVERY_OUTBOX_INDEXES,
             _DELIVERY_OUTBOX_FKS,
+            0, None, None,
+        ),
+        (
+            "project_registry",
+            project_registry_contracts.PROJECT_REGISTRY_TABLES,
+            project_registry_contracts.PROJECT_REGISTRY_DEFAULTS,
+            project_registry_contracts.PROJECT_REGISTRY_INDEXES,
+            project_registry_contracts.PROJECT_REGISTRY_FOREIGN_KEYS,
+            project_registry_contracts.SCHEMA_VERSION,
+            project_registry_contracts.SCHEMA_STATEMENTS,
+            project_registry_contracts.PROJECT_REGISTRY_MIGRATION_RECEIPT,
         ),
     ]
     if include_leader_binding:
@@ -1332,6 +1413,7 @@ def _sqlite_probe_specs(
             _LEADER_BINDING_DEFAULTS,
             _LEADER_BINDING_INDEXES,
             _LEADER_BINDING_FKS,
+            0, None, None,
         ))
     return specs
 
@@ -1409,8 +1491,10 @@ def probe_snapshot_stores(snapshot_root: Path) -> list[dict[str, Any]]:
         ]
 
     sqlite_specs = {
-        name: (tables, defaults, indexes, fks)
-        for name, tables, defaults, indexes, fks in _sqlite_probe_specs(
+        name: (tables, defaults, indexes, fks, version, statements, migration)
+        for (
+            name, tables, defaults, indexes, fks, version, statements, migration
+        ) in _sqlite_probe_specs(
             include_leader_binding=True,
         )
     }
@@ -1424,13 +1508,18 @@ def probe_snapshot_stores(snapshot_root: Path) -> list[dict[str, Any]]:
             continue
         try:
             if name in sqlite_specs:
-                tables, defaults, indexes, fks = sqlite_specs[name]
+                (
+                    tables, defaults, indexes, fks, version, statements, migration,
+                ) = sqlite_specs[name]
                 result = _check_sqlite(
                     name,
                     tables,
                     expected_defaults=defaults,
                     expected_indexes=indexes,
                     expected_fks=fks,
+                    expected_user_version=version,
+                    expected_schema_statements=statements,
+                    expected_migration=migration,
                     path=path,
                 )
             elif name == "settings":
@@ -1497,14 +1586,20 @@ def probe_all_stores() -> list[dict[str, Any]]:
     sqlite_specs = _sqlite_probe_specs(
         include_leader_binding=include_leader_binding,
     )
-    for name, tables, defaults, indexes, fks in sqlite_specs:
+    for (
+        name, tables, defaults, indexes, fks, version, statements, migration,
+    ) in sqlite_specs:
         gated(
             name,
-            lambda n=name, t=tables, d=defaults, i=indexes, f=fks: _check_sqlite(
+            lambda n=name, t=tables, d=defaults, i=indexes, f=fks,
+            v=version, s=statements, m=migration: _check_sqlite(
                 n, t,
                 expected_defaults=d,
                 expected_indexes=i,
                 expected_fks=f,
+                expected_user_version=v,
+                expected_schema_statements=s,
+                expected_migration=m,
             ),
         )
 

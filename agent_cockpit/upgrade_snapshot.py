@@ -20,7 +20,7 @@ from . import runtime_paths
 
 
 INVENTORY_NAME = "backup-inventory.json"
-INVENTORY_SCHEMA_VERSION = 1
+INVENTORY_SCHEMA_VERSION = 2
 INVENTORY_ENGINE = "immutable-upgrade-controller"
 MAX_INVENTORY_BYTES = 256 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -36,6 +36,7 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _EXPECTED_STORE_LAYOUT = {
     "settings": ("data", "settings.json", "file"),
     "tasks": ("data", "tasks.sqlite3", "file"),
+    "project_registry": ("data", "project-registry.sqlite3", "file"),
     "worktrees": ("data", "worktrees", "dir"),
     "coordination": ("data", "coordination.sqlite3", "file"),
     "leader_binding": ("data", "leader-binding.sqlite3", "file"),
@@ -52,6 +53,7 @@ _EXPECTED_STORE_LAYOUT = {
 SQLITE_STORE_NAMES = frozenset(
     {
         "tasks",
+        "project_registry",
         "coordination",
         "leader_binding",
         "push",
@@ -865,7 +867,7 @@ def create_backup_snapshot(
     source_sha: str,
     target_digest: str,
 ) -> dict[str, Any]:
-    """Create and atomically publish one canonical inventory v1 snapshot."""
+    """Create and atomically publish one canonical inventory v2 snapshot."""
     root = _validate_inputs(
         snapshot_root,
         snapshot_id,

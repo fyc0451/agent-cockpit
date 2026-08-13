@@ -67,7 +67,8 @@ _INVENTORY_ENTRY_KEYS = frozenset({
     "mode", "reason",
 })
 _SQLITE_STORES = frozenset({
-    "tasks", "coordination", "leader_binding", "push", "delivery_outbox",
+    "tasks", "project_registry", "coordination", "leader_binding", "push",
+    "delivery_outbox",
 })
 _JSON_STORES = frozenset({
     "settings", "mail_projects", "team_sessions", "inbox_route", "typing",
@@ -79,6 +80,21 @@ _PRESERVED = {
     "uploads": "live_upload_payloads",
 }
 _EXPECTED_INVENTORY_NAMES = tuple(sorted((*runtime_paths.STORES, "uploads")))
+_V1_INVENTORY_NAMES = (
+    "coordination", "delivery_outbox", "file_roots", "inbox_route",
+    "leader_binding", "mail_projects", "push", "settings", "tasks",
+    "team_sessions", "typing", "upgrade", "uploads", "vapid", "worktrees",
+)
+_V2_INVENTORY_NAMES = (
+    "coordination", "delivery_outbox", "file_roots", "inbox_route",
+    "leader_binding", "mail_projects", "project_registry", "push", "settings",
+    "tasks", "team_sessions", "typing", "upgrade", "uploads", "vapid",
+    "worktrees",
+)
+_INVENTORY_CATALOGS = {
+    1: _V1_INVENTORY_NAMES,
+    2: _V2_INVENTORY_NAMES,
+}
 _UTC_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
 
@@ -324,11 +340,13 @@ def _validate_inventory_entry(entry: Any, expected_name: str) -> None:
         raise ReadinessEvidenceError(REASON_SNAPSHOT_LIMIT_EXCEEDED)
 
 
-def _validate_inventory(value: dict[str, Any]) -> None:
+def _validate_inventory(value: dict[str, Any]) -> tuple[str, ...]:
     if set(value) != _INVENTORY_KEYS:
         raise ReadinessEvidenceError(REASON_INVENTORY_INVALID)
-    if type(value.get("schema_version")) is not int or value["schema_version"] != 1:
+    version = value.get("schema_version")
+    if type(version) is not int or version not in _INVENTORY_CATALOGS:
         raise ReadinessEvidenceError(REASON_INVENTORY_INVALID)
+    expected_names = _INVENTORY_CATALOGS[version]
     if value.get("engine") != "immutable-upgrade-controller":
         raise ReadinessEvidenceError(REASON_INVENTORY_INVALID)
     for key in ("snapshot_id", "request_id"):
@@ -348,16 +366,16 @@ def _validate_inventory(value: dict[str, Any]) -> None:
         raise ReadinessEvidenceError(REASON_INVENTORY_INVALID)
     if value.get("consistency_scope") != "per_store_atomic":
         raise ReadinessEvidenceError(REASON_INVENTORY_INVALID)
-    if type(value.get("entry_count")) is not int or value["entry_count"] != len(_EXPECTED_INVENTORY_NAMES):
+    if type(value.get("entry_count")) is not int or value["entry_count"] != len(expected_names):
         raise ReadinessEvidenceError(REASON_INVENTORY_INCOMPLETE)
     entries = value.get("entries")
-    if not isinstance(entries, list) or len(entries) != len(_EXPECTED_INVENTORY_NAMES):
+    if not isinstance(entries, list) or len(entries) != len(expected_names):
         raise ReadinessEvidenceError(REASON_INVENTORY_INCOMPLETE)
     if [item.get("name") if isinstance(item, dict) else None for item in entries] != list(
-        _EXPECTED_INVENTORY_NAMES
+        expected_names
     ):
         raise ReadinessEvidenceError(REASON_INVENTORY_INCOMPLETE)
-    for entry, expected_name in zip(entries, _EXPECTED_INVENTORY_NAMES, strict=True):
+    for entry, expected_name in zip(entries, expected_names, strict=True):
         _validate_inventory_entry(entry, expected_name)
     total = value.get("total_snapshot_bytes")
     calculated = sum(
@@ -369,6 +387,7 @@ def _validate_inventory(value: dict[str, Any]) -> None:
         raise ReadinessEvidenceError(REASON_INVENTORY_INVALID)
     if total > MAX_SNAPSHOT_BYTES:
         raise ReadinessEvidenceError(REASON_SNAPSHOT_LIMIT_EXCEEDED)
+    return expected_names
 
 
 def _sha256_regular_file(path: Path, *, max_bytes: int | None = None) -> str:
@@ -490,13 +509,14 @@ def _snapshot_file_signature(
 def _validate_snapshot_layout(
     root: Path,
     inventory: dict[str, Any],
+    expected_names: tuple[str, ...],
 ) -> tuple[dict[Path, tuple[int, int, int, int]], tuple[Path, ...]]:
     entries = {entry["name"]: entry for entry in inventory["entries"]}
     signatures: dict[Path, tuple[int, int, int, int]] = {}
     absent: list[Path] = []
     expected_files = {root / INVENTORY_NAME}
 
-    for name in _EXPECTED_INVENTORY_NAMES:
+    for name in expected_names:
         entry = entries[name]
         if entry["policy"] == "preserve_in_place":
             logical_root, rel, _, _, _ = _expected_entry(name)
@@ -599,8 +619,10 @@ def _verify_backup_inventory(
     if not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), backup_inventory_sha256):
         raise ReadinessEvidenceError(REASON_INVENTORY_DIGEST_MISMATCH)
     inventory = _parse_inventory(raw)
-    _validate_inventory(inventory)
-    signatures, absent = _validate_snapshot_layout(root, inventory)
+    expected_names = _validate_inventory(inventory)
+    signatures, absent = _validate_snapshot_layout(
+        root, inventory, expected_names,
+    )
     return root, signatures, absent
 
 
