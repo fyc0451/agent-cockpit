@@ -1430,14 +1430,26 @@ def test_team_chat_shares_support_history_and_can_reply():
     assert "所有 active 成员都能查看历史" in js
 
 
-def test_team_inbox_routes_to_session_lead_on_load_poll_and_manual_retry():
+def test_team_inbox_legacy_route_ui_removed_durable_inbox_kept():
     js = _inline_js()
-    assert "/api/team-auth/inbox-route/route" in js
-    assert "/api/team-auth/inbox-route/status" in js
-    assert "await teamRouteInboxNow();" in js
-    assert "await teamRouteInboxNow(true);" in js
-    assert "action==='teamInboxRouteNow')teamRunInboxRoute()" in js
-    assert "远程 Human Inbox → 已绑定 Session 的 lead" in js
+    # SEC-002: legacy inbox-route 路径（登录/轮询/打开 Inbox/手动按钮触发 route）已全部删除
+    assert "/api/team-auth/inbox-route/route" not in js
+    assert "/api/team-auth/inbox-route/status" not in js
+    assert "teamRouteInboxNow" not in js
+    assert "teamRunInboxRoute" not in js
+    assert "teamLoadInboxRoute" not in js
+    assert "teamInboxRouteNow" not in js
+    assert "立即路由" not in js
+    assert "已投递" not in js
+    assert "本机路由" not in js
+    # durable Inbox 查看保留：打开 Inbox 仍加载并渲染收件箱
+    assert "function teamShowInbox()" in js
+    assert "async function teamLoadInbox(throwOnError=false)" in js
+    assert "teamApi('inbox')" in js
+    assert "function teamInboxPanel()" in js
+    show_inbox = js.split("async function teamShowInbox(){", 1)[1].split("function ", 1)[0]
+    assert "await teamLoadInbox()" in show_inbox
+    assert "teamRender()" in show_inbox
 
 
 def test_team_human_jwt_uses_http_only_cookie_and_hub_text_is_escaped():

@@ -1149,7 +1149,7 @@ const MSG_DIRTY_GENERATIONS=new Map();
 let ATTENTION_TASK_ACTION_BUSY=false;
 let OPEN_DIALOG=null,LAST_FOCUS=null;
 const HF_SENDING={};
-let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',inboxRoute:null,chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
+let TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
 let TEAM_COLLAB_TARGET=null, TEAM_COLLAB_SENDING=false;
 let TEAM_CHAT_SENDING=false;
 let TEAM_POLL_TIMER=null, TEAM_POLL_BACKOFF=30000, TEAM_POLL_FAILURES=0;
@@ -1668,7 +1668,7 @@ async function teamConnect(){
 async function teamDisconnect(){
   teamPollStop();
   try{await api('/api/team-auth/logout',{method:'POST'})}catch(e){}
-  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',inboxRoute:null,chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
+  TEAM={authenticated:false,profile:null,human:null,projects:[],selected:'',membership:null,agents:[],members:[],sessions:[],sessionBindings:[],authUsers:[],inviteCode:'',inbox:[],inboxError:'',chat:[],chatError:'',mode:'projects',loading:false,inboxLoading:false,chatLoading:false,mutating:false};
   try{sessionStorage.removeItem('cockpit-team-project')}catch(e){}
   const navBadge=document.getElementById('teamNavBadge');if(navBadge)navBadge.style.display='none';
   teamLoginHtml();
@@ -1696,30 +1696,6 @@ async function teamLoadInbox(throwOnError=false){
   TEAM.inboxLoading=true;TEAM.inboxError='';
   try{const data=await teamApi('inbox');TEAM.inbox=Array.isArray(data.items)?data.items:[]}
   catch(e){TEAM.inboxError=String(e);if(throwOnError)throw e}finally{TEAM.inboxLoading=false}
-}
-async function teamLoadInboxRoute(throwOnError=false){
-  try{
-    const data=await api('/api/team-auth/inbox-route/status');
-    TEAM.inboxRoute=(data&&typeof data==='object')?data:null;
-  }catch(e){
-    if(throwOnError)throw e;
-    TEAM.inboxRoute=null;
-  }
-}
-async function teamRouteInboxNow(throwOnError=false){
-  try{
-    const data=await api('/api/team-auth/inbox-route/route',{method:'POST'});
-    return (data&&typeof data==='object')?data:null;
-  }catch(e){
-    if(throwOnError)throw e;
-    return null;
-  }
-}
-async function teamRunInboxRoute(){
-  const result=await teamRouteInboxNow();
-  await teamLoadInboxRoute();
-  teamRender();
-  if(result)toast(`本机路由完成：${Number(result.delivered)||0} 条已送达，${Number(result.pending)||0} 条待处理`);
 }
 async function teamLoadChat(throwOnError=false){
   if(TEAM.chatLoading)return;
@@ -1755,8 +1731,6 @@ async function teamLoad(force=false){
     try{TEAM.selected?sessionStorage.setItem('cockpit-team-project',TEAM.selected):sessionStorage.removeItem('cockpit-team-project')}catch(e){}
     await teamLoadSelection();
     await teamLoadInbox();
-    await teamRouteInboxNow();
-    await teamLoadInboxRoute();
     if(TEAM.mode==='chat')await teamLoadChat();
     try{await teamLoadAccounts()}catch(e){TEAM.authUsers=[];toast('账号列表加载失败: '+e,5000)}
     teamRender();
@@ -1839,15 +1813,6 @@ function teamProjectPanel(project){
     ${admin?`<div class="team-section"><div class="team-section-title">管理员 · 成员审批 <span>${TEAM.members.length} 人</span></div>${teamMemberRows()}</div>`:''}
   </div>`;
 }
-function teamInboxRouteBlock(){
-  const route=TEAM.inboxRoute;
-  if(!route)return '';
-  const bindings=Array.isArray(route.bindings)?route.bindings:[];
-  const pending=Array.isArray(route.pending)?route.pending:[];
-  const pendingRows=pending.map(item=>`<div class="team-inbox-item unread"><div class="team-inbox-head"><span class="team-badge">${esc(item.project_slug||'unknown')}</span><b>${esc(item.subject||'（无主题）')}</b></div><div class="team-inbox-meta">本机 Session ${esc(item.session||'')} 未在线，已保留待处理${item.deliver_error?' · '+esc(item.deliver_error):''}</div></div>`).join('');
-  const bindingRows=bindings.map(binding=>`<div class="team-inbox-head"><span class="team-badge">${esc(binding.project_slug||'unknown')}</span><b>${esc(binding.session||'')}</b><span class="team-badge active">已绑定</span></div>`).join('');
-  return `<div class="team-section"><div class="team-section-title">本机路由 <span>远程 Human Inbox → 已绑定 Session 的 lead；仅投递文本，不执行动作</span></div>${bindingRows?`<div class="team-inbox-meta">${bindingRows}</div>`:'<div class="team-inbox-meta">暂无已绑定 Session</div>'}${pendingRows?`<div class="team-inbox-tools"><b>待处理 ${pending.length}</b></div>${pendingRows}`:''}<div class="team-inbox-tools"><span>已投递 ${Number(route.delivered_count)||0} 条</span><span class="spacer"></span><button class="sm" data-action="teamInboxRouteNow">立即路由</button></div></div>`;
-}
 function teamInboxPanel(){
   const items=TEAM.inbox.filter(item=>item&&typeof item==='object');
   const unread=items.filter(item=>!item.read_ts);
@@ -1857,7 +1822,7 @@ function teamInboxPanel(){
     return `<article class="team-inbox-item${item.read_ts?'':' unread'}"><div class="team-inbox-head"><span class="team-badge">${esc(item.project_slug||'unknown')}</span><b>${esc(item.subject||'（无主题）')}</b><time>${esc(fmtTime(item.created_ts))}</time></div><div class="team-inbox-meta">来自 Agent · ${esc(item.sender_name||'unknown')}${item.importance&&item.importance!=='normal'?' · '+esc(item.importance):''}</div><div class="team-inbox-body">${esc(item.body_md||'')}</div>${canMark?`<div class="team-inbox-actions"><button class="sm" data-action="teamInboxRead" data-inbox-id="${itemId}">标为已读</button></div>`:''}</article>`;
   }).join('');
   const body=TEAM.inboxError?`<div class="team-status warn">人工收件箱加载失败：${esc(TEAM.inboxError)}</div>`:(rows||'<div class="empty">暂无人工消息。@你的消息会在没有可用 Session 负责人时出现在这里。</div>');
-  return `<div class="team-panel-head"><h3>人工收件箱</h3><span class="team-badge${unread.length?' invited':''}">${unread.length} 未读</span></div>${teamInboxRouteBlock()}<div class="team-inbox-tools"><span>消息归 Human 所有，不会自动启动 Agent 或本地任务。</span><span class="spacer"></span>${unread.length?'<button class="sm" data-action="teamInboxReadAll">全部标为已读</button>':''}</div><div class="team-inbox-list">${body}</div>`;
+  return `<div class="team-panel-head"><h3>人工收件箱</h3><span class="team-badge${unread.length?' invited':''}">${unread.length} 未读</span></div><div class="team-inbox-tools"><span>消息归 Human 所有，不会自动启动 Agent 或本地任务。</span><span class="spacer"></span>${unread.length?'<button class="sm" data-action="teamInboxReadAll">全部标为已读</button>':''}</div><div class="team-inbox-list">${body}</div>`;
 }
 function teamChatPanel(){
   const project=teamSelectedProject();
@@ -1922,8 +1887,6 @@ async function teamPollTick(){
   if(document.visibilityState==='hidden'){TEAM_POLL_TIMER=setTimeout(teamPollTick,TEAM_POLL_BACKOFF);return}
   try{
     await teamLoadInbox(true);
-    await teamRouteInboxNow(true);
-    await teamLoadInboxRoute(true);
     if(TEAM.mode==='chat')await teamLoadChat(true);
     teamUpdateModeUi();
     if(TEAM.mode==='inbox'||TEAM.mode==='chat')teamRender();
@@ -1948,7 +1911,7 @@ function teamRender(){
 }
 function teamShowProjects(){TEAM.mode='projects';teamRender()}
 async function teamShowChat(){TEAM.mode='chat';document.getElementById('teamContent').innerHTML='<div class="empty">加载群聊…</div>';await teamLoadChat();teamRender();requestAnimationFrame(teamChatScrollBottom)}
-async function teamShowInbox(){TEAM.mode='inbox';document.getElementById('teamContent').innerHTML='<div class="empty">加载人工收件箱…</div>';await teamLoadInbox();await teamRouteInboxNow();await teamLoadInboxRoute();teamRender()}
+async function teamShowInbox(){TEAM.mode='inbox';document.getElementById('teamContent').innerHTML='<div class="empty">加载人工收件箱…</div>';await teamLoadInbox();teamRender()}
 async function teamShowAccounts(){if(!teamIsGlobalAdmin())return;TEAM.mode='accounts';document.getElementById('teamContent').innerHTML='<div class="empty">加载账号…</div>';try{await teamLoadAccounts();teamRender()}catch(e){toast('账号加载失败: '+e,5000);TEAM.mode='projects';teamRender()}}
 async function teamSelect(slug){const keepChat=TEAM.mode==='chat';TEAM.mode=keepChat?'chat':'projects';TEAM.selected=slug;try{sessionStorage.setItem('cockpit-team-project',slug)}catch(e){};document.getElementById('teamContent').innerHTML='<div class="empty">加载项目…</div>';try{await teamLoadSelection();if(keepChat)await teamLoadChat();teamRender();if(keepChat)requestAnimationFrame(teamChatScrollBottom)}catch(e){toast('项目加载失败: '+e,4500);teamRender()}}
 function teamShowError(msg){
@@ -5891,7 +5854,6 @@ function bindDelegation(){
     else if(action==='teamChatRefresh')teamShowChat();
     else if(action==='teamInboxRead')teamMarkInboxRead([Number(it.dataset.inboxId)]);
     else if(action==='teamInboxReadAll')teamMarkInboxRead(TEAM.inbox.filter(item=>!item.read_ts).map(item=>Number(item.id)).filter(id=>Number.isInteger(id)&&id>0));
-    else if(action==='teamInboxRouteNow')teamRunInboxRoute();
     else if(action==='teamGotoSettings')showView('settings');
     else if(action==='teamGotoSessions'){showView('attention');attShowSessions()}
     else if(action==='teamGotoTerm'){document.querySelector('#nav button[data-view="term"]')?.click()}
