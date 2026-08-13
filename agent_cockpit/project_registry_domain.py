@@ -10,6 +10,7 @@ from typing import Any
 
 SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 OPAQUE_RE = re.compile(r"^[A-Za-z0-9._:@/-]+$")
+SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 LEGACY_SOURCE_KINDS = frozenset({
     "agent_mail_project", "mail_projects_session", "herdr_session",
     "coordination_run",
@@ -66,6 +67,21 @@ class LegacyBindingRecord:
 
 
 @dataclass(frozen=True)
+class LegacySourceInput:
+    source_kind: str
+    source_key: str
+    source_digest: str
+
+
+@dataclass(frozen=True)
+class LegacyImportResult:
+    project: ProjectRecord
+    repo_location: RepoLocationRecord
+    bindings: tuple[LegacyBindingRecord, ...]
+    replayed: bool
+
+
+@dataclass(frozen=True)
 class CommandResult:
     status_code: int
     response: Mapping[str, Any]
@@ -98,6 +114,13 @@ def opaque(value: object, *, maximum: int) -> str:
     value = text(value, maximum=maximum)
     if not OPAQUE_RE.fullmatch(value):
         raise ValueError("invalid opaque identity")
+    return value
+
+
+def sha256_ref(value: object) -> str:
+    value = text(value, maximum=71)
+    if not SHA256_RE.fullmatch(value):
+        raise ValueError("invalid sha256 reference")
     return value
 
 

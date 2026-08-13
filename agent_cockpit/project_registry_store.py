@@ -273,6 +273,22 @@ def _connect_read(path: Path) -> sqlite3.Connection:
         raise
 
 
+def _connect_live_read(path: Path) -> sqlite3.Connection:
+    before = _check_path(path, must_exist=True)
+    uri = path.as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=1.0)
+    try:
+        if _check_path(path, must_exist=True) != before:
+            _fail("store_unsafe")
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+    except BaseException:
+        connection.close()
+        raise
+
+
 def _fsync_file(path: Path, expected: FileSignature) -> None:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
@@ -382,6 +398,12 @@ def _after_schema_hook(_connection: sqlite3.Connection) -> None:
     """Test injection point inside the migration transaction."""
 
 
+def _after_legacy_binding_insert(
+    _connection: sqlite3.Connection, _binding: domain.LegacyBindingRecord,
+) -> None:
+    """Test injection point inside the legacy import transaction."""
+
+
 class ProjectRegistryStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -417,6 +439,45 @@ class ProjectRegistryStore:
         return domain.ProjectRecord(
             project_id, slug, display_name, goal, "active", 1, now, now
         )
+
+    def get_project_by_slug(self, slug: str) -> domain.ProjectRecord | None:
+        slug = _validate(domain.slug, slug)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            row = connection.execute(
+                "SELECT * FROM projects WHERE slug=?", (slug,)
+            ).fetchone()
+            return None if row is None else _project_record(row)
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_active_repo_location(
+        self, node_id: str, canonical_path: str,
+    ) -> domain.RepoLocationRecord | None:
+        node_id = _validate(domain.opaque, node_id, maximum=128)
+        canonical_path = _validate(domain.canonical_path, canonical_path)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            row = connection.execute(
+                "SELECT * FROM repo_locations WHERE node_id=? AND canonical_path=? "
+                "AND lifecycle='active'",
+                (node_id, canonical_path),
+            ).fetchone()
+            return None if row is None else _repo_location_record(row)
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
 
     def add_repo_location(
         self, *, project_id: str, node_id: str, canonical_path: str,
@@ -527,6 +588,158 @@ class ProjectRegistryStore:
                 source_digest, imported_at,
             )
 
+    def import_legacy_project(
+        self, *, slug: str, display_name: str, goal: str | None,
+        node_id: str, canonical_path: str, vcs_kind: str, availability: str,
+        sources: tuple[domain.LegacySourceInput, ...],
+    ) -> domain.LegacyImportResult:
+        slug = _validate(domain.slug, slug)
+        display_name = _validate(domain.text, display_name, maximum=256)
+        goal = _validate(domain.optional_text, goal, maximum=4096)
+        node_id = _validate(domain.opaque, node_id, maximum=128)
+        canonical_path = _validate(domain.canonical_path, canonical_path)
+        vcs_kind = _validate(domain.enum, vcs_kind, frozenset({"git", "none"}))
+        availability = _validate(
+            domain.enum, availability,
+            frozenset({"available", "offline", "missing", "unknown"}),
+        )
+        sources = _validated_legacy_sources(sources)
+
+        try:
+            with self._transaction() as connection:
+                return self._import_legacy_project(
+                    connection,
+                    slug=slug,
+                    display_name=display_name,
+                    goal=goal,
+                    node_id=node_id,
+                    canonical_path=canonical_path,
+                    vcs_kind=vcs_kind,
+                    availability=availability,
+                    sources=sources,
+                )
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_write_failed", exc)
+
+    @staticmethod
+    def _import_legacy_project(
+        connection: sqlite3.Connection, *, slug: str, display_name: str,
+        goal: str | None, node_id: str, canonical_path: str, vcs_kind: str,
+        availability: str, sources: tuple[domain.LegacySourceInput, ...],
+    ) -> domain.LegacyImportResult:
+        binding_rows: dict[tuple[str, str], sqlite3.Row] = {}
+        owner_ids: set[str] = set()
+        for source in sources:
+            row = connection.execute(
+                "SELECT * FROM legacy_project_bindings "
+                "WHERE source_kind=? AND source_key=?",
+                (source.source_kind, source.source_key),
+            ).fetchone()
+            if row is None:
+                continue
+            if row["source_digest"] != source.source_digest:
+                _fail("legacy_import_conflict")
+            binding_rows[(source.source_kind, source.source_key)] = row
+            owner_ids.add(row["project_id"])
+
+        location_row = connection.execute(
+            "SELECT * FROM repo_locations WHERE node_id=? AND canonical_path=? "
+            "AND lifecycle='active'",
+            (node_id, canonical_path),
+        ).fetchone()
+        if location_row is not None:
+            owner_ids.add(location_row["project_id"])
+
+        slug_row = connection.execute(
+            "SELECT * FROM projects WHERE slug=?", (slug,)
+        ).fetchone()
+        if slug_row is not None:
+            owner_ids.add(slug_row["project_id"])
+        if len(owner_ids) > 1:
+            _fail("legacy_import_conflict")
+
+        changed = False
+        if owner_ids:
+            owner_id = next(iter(owner_ids))
+            project_row = connection.execute(
+                "SELECT * FROM projects WHERE project_id=?", (owner_id,)
+            ).fetchone()
+            if (
+                project_row is None
+                or project_row["slug"] != slug
+                or project_row["lifecycle"] != "active"
+            ):
+                _fail("legacy_import_conflict")
+            project = _project_record(project_row)
+        else:
+            try:
+                project = ProjectRegistryStore._insert_project(
+                    connection, slug, display_name, goal
+                )
+            except ProjectRegistryError as exc:
+                if exc.code == "project_slug_conflict":
+                    _fail("legacy_import_conflict", exc)
+                raise
+            owner_id = project.project_id
+            changed = True
+
+        if location_row is None:
+            location_id = _id("loc_")
+            now = _now()
+            try:
+                connection.execute(
+                    "INSERT INTO repo_locations "
+                    "(repo_location_id, project_id, node_id, canonical_path, lifecycle, "
+                    "vcs_kind, git_root, git_remote_fingerprint, default_ref_observed, "
+                    "availability, version, created_at, updated_at) VALUES "
+                    "(?, ?, ?, ?, 'active', ?, NULL, NULL, NULL, ?, 1, ?, ?)",
+                    (location_id, owner_id, node_id, canonical_path, vcs_kind,
+                     availability, now, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                _fail("legacy_import_conflict", exc)
+            location = domain.RepoLocationRecord(
+                location_id, owner_id, node_id, canonical_path, "active", vcs_kind,
+                availability, 1,
+            )
+            changed = True
+        else:
+            location = _repo_location_record(location_row)
+
+        bindings: list[domain.LegacyBindingRecord] = []
+        for source in sources:
+            key = (source.source_kind, source.source_key)
+            row = binding_rows.get(key)
+            if row is not None:
+                binding = _binding_record(row)
+                if binding.project_id != owner_id:
+                    _fail("legacy_import_conflict")
+            else:
+                binding = domain.LegacyBindingRecord(
+                    _id("bnd_"), owner_id, source.source_kind, source.source_key,
+                    source.source_digest, _now(),
+                )
+                try:
+                    connection.execute(
+                        "INSERT INTO legacy_project_bindings VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            binding.binding_id, binding.project_id,
+                            binding.source_kind, binding.source_key,
+                            binding.source_digest, binding.imported_at,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    _fail("legacy_import_conflict", exc)
+                _after_legacy_binding_insert(connection, binding)
+                changed = True
+            bindings.append(binding)
+
+        return domain.LegacyImportResult(
+            project, location, tuple(bindings), replayed=not changed,
+        )
+
     def idempotent_create_project(
         self, *, scope: str, idempotency_key: str, payload: dict[str, object]
     ) -> domain.CommandResult:
@@ -595,6 +808,50 @@ def _binding_record(row: sqlite3.Row) -> domain.LegacyBindingRecord:
         row["binding_id"], row["project_id"], row["source_kind"],
         row["source_key"], row["source_digest"], row["imported_at"],
     )
+
+
+def _project_record(row: sqlite3.Row) -> domain.ProjectRecord:
+    return domain.ProjectRecord(
+        row["project_id"], row["slug"], row["display_name"], row["goal"],
+        row["lifecycle"], int(row["version"]), row["created_at"], row["updated_at"],
+    )
+
+
+def _repo_location_record(row: sqlite3.Row) -> domain.RepoLocationRecord:
+    return domain.RepoLocationRecord(
+        row["repo_location_id"], row["project_id"], row["node_id"],
+        row["canonical_path"], row["lifecycle"], row["vcs_kind"],
+        row["availability"], int(row["version"]),
+    )
+
+
+def _validated_legacy_sources(
+    sources: tuple[domain.LegacySourceInput, ...],
+) -> tuple[domain.LegacySourceInput, ...]:
+    try:
+        values = tuple(sources)
+    except TypeError as exc:
+        _fail("invalid_argument", exc)
+    if not values:
+        _fail("invalid_argument")
+    validated: list[domain.LegacySourceInput] = []
+    identities: set[tuple[str, str]] = set()
+    for source in values:
+        if not isinstance(source, domain.LegacySourceInput):
+            _fail("invalid_argument")
+        source_kind = _validate(
+            domain.enum, source.source_kind, domain.LEGACY_SOURCE_KINDS,
+        )
+        source_key = _validate(domain.sha256_ref, source.source_key)
+        source_digest = _validate(domain.sha256_ref, source.source_digest)
+        identity = (source_kind, source_key)
+        if identity in identities:
+            _fail("invalid_argument")
+        identities.add(identity)
+        validated.append(domain.LegacySourceInput(*identity, source_digest))
+    return tuple(sorted(validated, key=lambda source: (
+        source.source_kind, source.source_key,
+    )))
 
 
 def initialize(path: Path) -> ProjectRegistryStore:

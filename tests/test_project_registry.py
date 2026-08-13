@@ -15,6 +15,7 @@ from threading import Barrier
 import pytest
 
 from agent_cockpit import project_registry_contracts as contracts
+from agent_cockpit import project_registry_domain as registry_domain
 from agent_cockpit import project_registry_store as registry_store
 
 
@@ -476,6 +477,483 @@ def test_legacy_provenance_is_authority_scoped_and_idempotent(registry):
             source_digest="sha256:c",
         )
     assert _code(conflict) == "legacy_binding_conflict"
+
+
+def _legacy_sources(*values: tuple[str, str, str]):
+    return tuple(
+        registry_domain.LegacySourceInput(
+            source_kind,
+            _sha256_ref(source_key),
+            _sha256_ref(source_digest),
+        )
+        for source_kind, source_key, source_digest in values
+    )
+
+
+def _sha256_ref(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("ascii")).hexdigest()
+
+
+def _registry_counts(db_path: Path) -> dict[str, int]:
+    with sqlite3.connect(db_path) as connection:
+        return {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("projects", "repo_locations", "legacy_project_bindings")
+        }
+
+
+def test_store_owned_project_and_active_location_queries(registry, db_path: Path):
+    assert registry.get_project_by_slug("alpha") is None
+    assert registry.get_active_repo_location("local", "/repo/alpha") is None
+
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    location = registry.add_repo_location(
+        project_id=project.project_id,
+        node_id="local",
+        canonical_path="/repo/alpha",
+        vcs_kind="git",
+        availability="available",
+    )
+
+    assert registry.get_project_by_slug("alpha") == project
+    assert registry.get_active_repo_location("local", "/repo/alpha") == location
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE repo_locations SET lifecycle='archived' WHERE repo_location_id=?",
+            (location.repo_location_id,),
+        )
+    assert registry.get_active_repo_location("local", "/repo/alpha") is None
+
+
+def test_live_queries_observe_commits_without_reading_uncommitted_journal(
+    registry, db_path: Path,
+):
+    project_id = "prj_" + "1" * 32
+    timestamp = "2026-08-13T00:00:00Z"
+    writer = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "INSERT INTO projects VALUES (?, 'journaled', 'Journaled', NULL, "
+            "'active', 1, ?, ?)",
+            (project_id, timestamp, timestamp),
+        )
+        assert Path(f"{db_path}-journal").exists()
+        assert registry.get_project_by_slug("journaled") is None
+        writer.execute("COMMIT")
+    finally:
+        if writer.in_transaction:
+            writer.execute("ROLLBACK")
+        writer.close()
+
+    visible = registry.get_project_by_slug("journaled")
+    assert visible is not None
+    assert visible.project_id == project_id
+
+
+def test_legacy_import_creates_atomically_sorts_sources_and_exactly_replays(
+    registry, db_path: Path,
+):
+    reverse_sources = _legacy_sources(
+        ("herdr_session", "session:alpha", "sha256:herdr"),
+        ("agent_mail_project", "project:alpha", "sha256:mail"),
+    )
+    first = registry.import_legacy_project(
+        slug="alpha",
+        display_name="Legacy Alpha",
+        goal=None,
+        node_id="local",
+        canonical_path="/repo/alpha",
+        vcs_kind="git",
+        availability="available",
+        sources=reverse_sources,
+    )
+
+    assert first.project.slug == "alpha"
+    assert first.repo_location.project_id == first.project.project_id
+    assert first.repo_location.canonical_path == "/repo/alpha"
+    assert tuple(
+        (binding.source_kind, binding.source_key) for binding in first.bindings
+    ) == (
+        ("agent_mail_project", _sha256_ref("project:alpha")),
+        ("herdr_session", _sha256_ref("session:alpha")),
+    )
+    assert {binding.project_id for binding in first.bindings} == {
+        first.project.project_id
+    }
+    assert first.replayed is False
+    assert _registry_counts(db_path) == {
+        "projects": 1, "repo_locations": 1, "legacy_project_bindings": 2,
+    }
+
+    replay = registry.import_legacy_project(
+        slug="alpha",
+        display_name="Legacy Alpha",
+        goal=None,
+        node_id="local",
+        canonical_path="/repo/alpha",
+        vcs_kind="git",
+        availability="available",
+        sources=tuple(reversed(reverse_sources)),
+    )
+    assert replay.project == first.project
+    assert replay.repo_location == first.repo_location
+    assert replay.bindings == first.bindings
+    assert replay.replayed is True
+    assert _registry_counts(db_path) == {
+        "projects": 1, "repo_locations": 1, "legacy_project_bindings": 2,
+    }
+
+
+def test_legacy_import_can_complete_one_existing_owner_without_rewriting_it(
+    registry, db_path: Path,
+):
+    existing = registry.create_project(
+        slug="alpha", display_name="User-owned label", goal="User-owned goal"
+    )
+    existing_binding = registry.bind_legacy_source(
+        project_id=existing.project_id,
+        source_kind="agent_mail_project",
+        source_key=_sha256_ref("project:alpha"),
+        source_digest=_sha256_ref("project"),
+    )
+    imported = registry.import_legacy_project(
+        slug="alpha",
+        display_name="Legacy label",
+        goal=None,
+        node_id="local",
+        canonical_path="/repo/alpha",
+        vcs_kind="git",
+        availability="available",
+        sources=(
+            registry_domain.LegacySourceInput(
+                existing_binding.source_kind,
+                existing_binding.source_key,
+                existing_binding.source_digest,
+            ),
+            *_legacy_sources(
+            ("mail_projects_session", "session:alpha", "sha256:session"),
+            ),
+        ),
+    )
+
+    assert imported.project == existing
+    assert imported.repo_location.project_id == existing.project_id
+    assert imported.bindings[0] == existing_binding
+    assert {binding.project_id for binding in imported.bindings} == {
+        existing.project_id
+    }
+    assert imported.replayed is False
+    assert _registry_counts(db_path) == {
+        "projects": 1, "repo_locations": 1, "legacy_project_bindings": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        (),
+        _legacy_sources(
+            ("agent_mail_project", "project:alpha", "sha256:first"),
+            ("agent_mail_project", "project:alpha", "sha256:second"),
+        ),
+    ],
+)
+def test_legacy_import_rejects_empty_or_duplicate_source_identity_without_writes(
+    registry, db_path: Path, sources,
+):
+    with pytest.raises(registry_store.ProjectRegistryError) as invalid:
+        registry.import_legacy_project(
+            slug="alpha",
+            display_name="Alpha",
+            goal=None,
+            node_id="local",
+            canonical_path="/repo/alpha",
+            vcs_kind="git",
+            availability="available",
+            sources=sources,
+        )
+    assert _code(invalid) == "invalid_argument"
+    assert _registry_counts(db_path) == {
+        "projects": 0, "repo_locations": 0, "legacy_project_bindings": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        registry_domain.LegacySourceInput(
+            "agent_mail_project", "project:alpha", _sha256_ref("digest"),
+        ),
+        registry_domain.LegacySourceInput(
+            "agent_mail_project", _sha256_ref("key"), "sha256:short",
+        ),
+        registry_domain.LegacySourceInput(
+            "agent_mail_project", "sha256:" + "A" * 64, _sha256_ref("digest"),
+        ),
+        registry_domain.LegacySourceInput(
+            "agent_mail_project", _sha256_ref("key"), "sha256:" + "A" * 64,
+        ),
+    ],
+)
+def test_legacy_import_rejects_malformed_hashed_source_values_without_writes(
+    registry, db_path: Path, source: registry_domain.LegacySourceInput,
+):
+    with pytest.raises(registry_store.ProjectRegistryError) as invalid:
+        registry.import_legacy_project(
+            slug="alpha", display_name="Alpha", goal=None, node_id="local",
+            canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+            sources=(source,),
+        )
+    assert _code(invalid) == "invalid_argument"
+    assert _registry_counts(db_path) == {
+        "projects": 0, "repo_locations": 0, "legacy_project_bindings": 0,
+    }
+
+
+def test_legacy_import_changed_digest_conflicts_without_writes(registry, db_path: Path):
+    original = _legacy_sources(
+        ("agent_mail_project", "project:alpha", "sha256:original"),
+    )
+    registry.import_legacy_project(
+        slug="alpha", display_name="Alpha", goal=None, node_id="local",
+        canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+        sources=original,
+    )
+    before = _registry_counts(db_path)
+
+    with pytest.raises(registry_store.ProjectRegistryError) as conflict:
+        registry.import_legacy_project(
+            slug="alpha", display_name="Alpha", goal=None, node_id="local",
+            canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+            sources=_legacy_sources(
+                ("agent_mail_project", "project:alpha", "sha256:changed"),
+            ),
+        )
+    assert _code(conflict) == "legacy_import_conflict"
+    assert _registry_counts(db_path) == before
+
+
+def test_legacy_import_requires_source_path_and_slug_evidence_to_share_owner(
+    registry, db_path: Path,
+):
+    alpha = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    beta = registry.create_project(slug="beta", display_name="Beta", goal=None)
+    registry.add_repo_location(
+        project_id=beta.project_id,
+        node_id="local",
+        canonical_path="/repo/occupied",
+        vcs_kind="git",
+        availability="available",
+    )
+    source = registry.bind_legacy_source(
+        project_id=alpha.project_id,
+        source_kind="agent_mail_project",
+        source_key=_sha256_ref("project:alpha"),
+        source_digest=_sha256_ref("alpha"),
+    )
+    before = _registry_counts(db_path)
+
+    with pytest.raises(registry_store.ProjectRegistryError) as conflict:
+        registry.import_legacy_project(
+            slug="beta", display_name="Beta", goal=None, node_id="local",
+            canonical_path="/repo/occupied", vcs_kind="git",
+            availability="available",
+            sources=(
+                registry_domain.LegacySourceInput(
+                    source.source_kind, source.source_key, source.source_digest,
+                ),
+            ),
+        )
+    assert _code(conflict) == "legacy_import_conflict"
+    assert _registry_counts(db_path) == before
+
+
+def test_legacy_import_rejects_slug_and_path_cross_owner_aliases(registry, db_path: Path):
+    alpha = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    beta = registry.create_project(slug="beta", display_name="Beta", goal=None)
+    registry.add_repo_location(
+        project_id=beta.project_id,
+        node_id="local",
+        canonical_path="/repo/beta",
+        vcs_kind="git",
+        availability="available",
+    )
+    before = _registry_counts(db_path)
+
+    with pytest.raises(registry_store.ProjectRegistryError) as occupied_path:
+        registry.import_legacy_project(
+            slug="alpha", display_name="Alpha", goal=None, node_id="local",
+            canonical_path="/repo/beta", vcs_kind="git", availability="available",
+            sources=_legacy_sources(
+                ("agent_mail_project", "project:alpha", "sha256:alpha"),
+            ),
+        )
+    assert _code(occupied_path) == "legacy_import_conflict"
+
+    with pytest.raises(registry_store.ProjectRegistryError) as different_slug:
+        registry.import_legacy_project(
+            slug="gamma", display_name="Gamma", goal=None, node_id="local",
+            canonical_path="/repo/beta", vcs_kind="git", availability="available",
+            sources=_legacy_sources(
+                ("agent_mail_project", "project:gamma", "sha256:gamma"),
+            ),
+        )
+    assert _code(different_slug) == "legacy_import_conflict"
+    assert _registry_counts(db_path) == before
+
+
+def test_legacy_import_rejects_archived_slug_without_reviving_or_writing(
+    registry, db_path: Path,
+):
+    archived = registry.create_project(
+        slug="alpha", display_name="Archived Alpha", goal=None,
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE projects SET lifecycle='archived' WHERE project_id=?",
+            (archived.project_id,),
+        )
+    before = _registry_counts(db_path)
+
+    with pytest.raises(registry_store.ProjectRegistryError) as conflict:
+        registry.import_legacy_project(
+            slug="alpha", display_name="Alpha", goal=None, node_id="local",
+            canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+            sources=_legacy_sources(
+                ("agent_mail_project", "project:alpha", "sha256:alpha"),
+            ),
+        )
+    assert _code(conflict) == "legacy_import_conflict"
+    assert _registry_counts(db_path) == before
+
+
+def test_legacy_import_failure_after_first_append_rolls_back_without_delete(
+    registry, db_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    calls = 0
+
+    def fail_after_first_append(_connection, _binding):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("sensitive injected sqlite detail")
+
+    monkeypatch.setattr(registry_store, "_after_legacy_binding_insert", fail_after_first_append)
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry.import_legacy_project(
+            slug="alpha", display_name="Alpha", goal=None, node_id="local",
+            canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+            sources=_legacy_sources(
+                ("agent_mail_project", "project:alpha", "sha256:mail"),
+                ("herdr_session", "session:alpha", "sha256:herdr"),
+            ),
+        )
+    assert _code(failure) == "store_write_failed"
+    assert str(failure.value) == "store_write_failed"
+    assert _registry_counts(db_path) == {
+        "projects": 0, "repo_locations": 0, "legacy_project_bindings": 0,
+    }
+
+
+def test_legacy_import_commit_failure_is_sanitized_and_rolls_back(
+    registry, db_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    real_connect = registry_store._connect_write
+
+    class CommitFailingConnection:
+        def __init__(self, connection: sqlite3.Connection):
+            object.__setattr__(self, "connection", connection)
+
+        def __setattr__(self, name, value):
+            setattr(self.connection, name, value)
+
+        def execute(self, sql, parameters=()):
+            if sql == "COMMIT":
+                raise sqlite3.OperationalError("sensitive commit detail")
+            return self.connection.execute(sql, parameters)
+
+        def close(self):
+            self.connection.close()
+
+    monkeypatch.setattr(
+        registry_store,
+        "_connect_write",
+        lambda path: CommitFailingConnection(real_connect(path)),
+    )
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry.import_legacy_project(
+            slug="alpha", display_name="Alpha", goal=None, node_id="local",
+            canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+            sources=_legacy_sources(
+                ("agent_mail_project", "project:alpha", "sha256:mail"),
+            ),
+        )
+    assert _code(failure) == "store_write_failed"
+    assert str(failure.value) == "store_write_failed"
+    assert _registry_counts(db_path) == {
+        "projects": 0, "repo_locations": 0, "legacy_project_bindings": 0,
+    }
+
+
+def test_legacy_import_begin_failure_is_sanitized_and_writes_nothing(
+    registry, db_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    blocker = sqlite3.connect(db_path, isolation_level=None)
+    blocker.execute("BEGIN EXCLUSIVE")
+    real_connect = registry_store._connect_write
+
+    def short_timeout(path: Path) -> sqlite3.Connection:
+        connection = real_connect(path)
+        connection.execute("PRAGMA busy_timeout=1")
+        return connection
+
+    monkeypatch.setattr(registry_store, "_connect_write", short_timeout)
+    try:
+        with pytest.raises(registry_store.ProjectRegistryError) as failure:
+            registry.import_legacy_project(
+                slug="alpha", display_name="Alpha", goal=None, node_id="local",
+                canonical_path="/repo/alpha", vcs_kind="git",
+                availability="available",
+                sources=_legacy_sources(
+                    ("agent_mail_project", "project:alpha", "sha256:mail"),
+                ),
+            )
+        assert _code(failure) == "store_write_failed"
+        assert str(failure.value) == "store_write_failed"
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+    assert _registry_counts(db_path) == {
+        "projects": 0, "repo_locations": 0, "legacy_project_bindings": 0,
+    }
+
+
+def test_concurrent_legacy_import_creates_once_then_replays(registry, db_path: Path):
+    barrier = Barrier(2)
+    sources = _legacy_sources(
+        ("agent_mail_project", "project:alpha", "sha256:mail"),
+        ("coordination_run", "run:alpha", "sha256:run"),
+    )
+
+    def import_once():
+        barrier.wait()
+        return registry.import_legacy_project(
+            slug="alpha", display_name="Alpha", goal=None, node_id="local",
+            canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+            sources=sources,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first, second = list(executor.map(lambda _index: import_once(), range(2)))
+    assert sorted((first.replayed, second.replayed)) == [False, True]
+    assert first.project == second.project
+    assert first.repo_location == second.repo_location
+    assert first.bindings == second.bindings
+    assert _registry_counts(db_path) == {
+        "projects": 1, "repo_locations": 1, "legacy_project_bindings": 2,
+    }
 
 
 def test_idempotency_replay_and_conflict_are_atomic(registry, db_path):

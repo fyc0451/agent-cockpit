@@ -4,9 +4,10 @@
 
 Project Registry 是独立的 app-owned SQLite Store。v1 只提供 schema、领域校验和以下持久化
 primitive：创建 Project、登记 RepoLocation、创建 Workspace identity、写入 legacy provenance、
-以及带持久幂等账的 Project 创建。
+带持久幂等账的 Project 创建，以及供 legacy importer 调用的 Store-owned 原子导入 primitive。
 
-本 car 不扫描或导入 legacy authority，不发现目录，不提供 HTTP API，也不执行 archive、restore、
+Store 不扫描或读取 legacy authority；importer 只向它传入已规范化的 source key/digest 和
+RepoLocation identity。Store 不发现目录，不提供 HTTP API，也不执行 archive、restore、
 detach、transfer、Workspace plan/execute、Git、Herdr、Mail 或文件系统副作用。表中 lifecycle 字段
 只冻结持久状态与数据库不变量，不代表这些 lifecycle 操作已经公开。
 
@@ -17,6 +18,8 @@ detach、transfer、Workspace plan/execute、Git、Herdr、Mail 或文件系统�
   两者与 `idempotency_records` 都由数据库 trigger 保证 append-only，任何 `UPDATE`/`DELETE` 均拒绝。
 - 空路径只能由显式 `initialize(path)` 创建 v1 schema；既有非 v1 Store 不做推测修补或破坏性迁移。
 - `open_existing(path)` 是纯读验证：不创建、不 migration、不启用 WAL、不留下 `-wal/-shm`。
+- `open_existing(path)` 的无 sidecar schema 指纹探针使用 `immutable=1`；业务 lookup 每次新开
+  `mode=ro` + `query_only` live read，遵循 SQLite journal 并看见最近一次已提交事务，不读取未提交行。
 - future version 返回 `future_schema`；旧 version 返回 `migration_required`；当前 version 的 table、
   trigger、index、FK、migration receipt 或 DDL fingerprint 不一致返回
   `schema_fingerprint_mismatch`。
@@ -84,6 +87,25 @@ Workspace 禁止物理 `DELETE`；同 Project active Workspace name 使用 parti
 `legacy_binding_conflict`。写 provenance 不修改任何 legacy source。
 Ledger row 只允许首次插入，不允许改写或删除。
 
+### Store-owned legacy import
+
+`import_legacy_project(...)` 是 importer 唯一可用的 aggregate write primitive。它不接受数据库连接，
+也不允许调用方先查后逐行写；Project、active RepoLocation 和全部 provenance binding 始终在同一个
+`BEGIN IMMEDIATE` 中决策和提交。sources 必须非空，`(source_kind, source_key)` 不得重复，Store
+按该 pair 规范排序。每个 `source_key` 和 `source_digest` 都必须是 importer 生成的
+`sha256:` + 64 位 lowercase hex；Store 不接受原始 authority identity 或宽松摘要文本。
+
+事务内 owner evidence 的固定判定顺序是：existing source bindings、active
+`(node_id, canonical_path)`、immutable slug。所有既有 evidence 必须指向同一个 active Project，
+否则返回 `legacy_import_conflict` 且零写。没有 owner 时才创建 Project 与 RepoLocation；已有 owner
+可以补入缺失的 exact active location 或 provenance。完整 exact replay 返回首次的 opaque IDs 与
+ledger rows，并标记 `replayed=true`，不更新 display metadata、availability 或 VCS observation。
+
+changed source digest/owner、同 slug 指向其他 owner 占用的 path、同 path 搭配其他 slug 均返回
+`legacy_import_conflict`。任意 SQLite 写失败返回脱敏的 `store_write_failed` 并回滚整个事务；回滚
+依靠 SQLite transaction，不对 append-only ledger 执行补偿 `DELETE`。Store 不读取 legacy DB/JSON，
+不调用 `Path.resolve()`、Git、CLI、Herdr 或 Mail。
+
 ## Idempotency
 
 幂等 identity 为 `(scope, idempotency_key)`，请求使用 canonical JSON SHA-256 digest。相同 digest
@@ -100,4 +122,5 @@ reservation，ledger 写失败也不留下 aggregate。
 `schema_missing`、`migration_required`、`future_schema`、`schema_fingerprint_mismatch`、
 `store_corrupt`、`store_unsafe`、`invalid_argument`、`project_not_found`、
 `project_slug_conflict`、`location_already_registered`、`repo_location_not_found`、
-`workspace_name_conflict`、`legacy_binding_conflict`、`idempotency_conflict`。
+`workspace_name_conflict`、`legacy_binding_conflict`、`legacy_import_conflict`、
+`idempotency_conflict`、`store_read_failed`、`store_write_failed`。
