@@ -455,21 +455,21 @@
     {
       "id": "SLICE-001-local-readonly",
       "title": "Deliver the first real Local-only read path from Doctor to persisted Workspace Files",
-      "status": "in_progress",
+      "status": "review",
       "depends_on": ["WEB-003-project-registry-ui", "PROJ-005-compatibility", "SCHED-002-readonly-projection"],
       "scope": ["agent_cockpit/project_registry_store.py", "agent_cockpit/files.py", "agent_cockpit/local_readonly_api.py", "agent_cockpit/server.py", "tests/test_cockpit2_local_slice.py", "tests/test_project_registry.py", "docs/contracts/cockpit2-local-slice-v1.md", "web/api/localSlice.ts", "web/api/registry.ts", "web/api/types.ts", "web/features/ProjectScope.tsx", "web/features/WorkspaceScope.tsx", "web/pages/SettingsPage.tsx", "web/pages/ProjectsPage.tsx", "web/pages/ProjectWorkbenchPage.tsx", "web/pages/WorkspaceHomePage.tsx", "web/pages/FilesPage.tsx", "web/fixtures/api.ts", "web/test/local-slice.test.tsx", "web/test/deeplinks.test.tsx", "web/test/web003-registry.test.tsx", "web/test/capabilities.test.tsx", "web/e2e/local-slice.spec.ts"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_cockpit2_local_slice.py tests/test_project_registry.py", "passed": false},
-        {"command": "npm --prefix web test -- --run test/local-slice.test.tsx", "passed": false},
-        {"command": "npm --prefix web run test:e2e -- e2e/local-slice.spec.ts", "passed": false},
-        {"command": "npm --prefix web run build", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_cockpit2_local_slice.py tests/test_project_registry.py", "passed": true},
+        {"command": "npm --prefix web test -- --run test/local-slice.test.tsx", "passed": true},
+        {"command": "npm --prefix web run test:e2e -- e2e/local-slice.spec.ts", "passed": true},
+        {"command": "npm --prefix web run build", "passed": true}
       ],
       "rollback": "Disable the Cockpit 2 routes and Web entry while retaining the accepted safety and registry stores",
       "production_impact": "none",
       "owner_instance_id": "i-cebqn5p7znunmxwpneduptrtou",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-lmzsi3liwhtbxsswx4pxjt5gve",
       "base_sha": "fe99776b648c009d7ae0c13e073fa36644018c49",
-      "fixed_sha": null,
+      "fixed_sha": "a51ea3607c5d3d21b78a4f18e86cdc4657dfbaff",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
