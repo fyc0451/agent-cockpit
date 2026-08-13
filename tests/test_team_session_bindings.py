@@ -192,78 +192,22 @@ def test_legacy_binding_without_reply_capability_requires_resync(monkeypatch):
     assert "reply_token" not in response.text
 
 
-def test_inbox_route_fetches_read_items_for_pending_retry(monkeypatch):
+def test_inbox_route_is_disabled_without_fetching_remote_items(monkeypatch):
     client, headers = _prepare(monkeypatch)
     calls = []
-    regular = _human_api(calls=calls)
-
-    def human_api(method, path, authorization, payload=None):
-        if method == "GET" and path.startswith("/hub/api/inbox?"):
-            calls.append((method, path, authorization, payload))
-            return {"items": []}
-        return regular(method, path, authorization, payload)
-
-    def route_inbox(
-        authorization, *, hub, human_id, fetch_inbox, reply_command_for,
-    ):
-        assert hub == HUB
-        assert human_id == 7
-        assert fetch_inbox(authorization) == {"items": []}
-        assert reply_command_for is server._team_inbox_reply_command
-        return {"fetched": 0, "delivered": 0, "pending": 0}
-
-    monkeypatch.setattr(server.hub_client, "human_api", human_api)
-    monkeypatch.setattr(server.team_inbox_router, "route_inbox", route_inbox)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
 
     response = client.post("/api/team-auth/inbox-route/route", headers=headers)
 
     assert response.status_code == 200
-    assert calls[-1][1] == "/hub/api/inbox?limit=100"
-    assert "unread_only" not in calls[-1][1]
-
-
-def test_team_inbox_reply_command_uses_only_trusted_local_routing(monkeypatch):
-    _prepare(monkeypatch)
-    binding = {
-        "hub": HUB,
-        "human_id": 7,
-        "mail_project": PROJECT_KEY,
-        "lead": {"agent": "codex", "mail_name": "codex-main"},
-    }
-    item = {
-        "id": 91,
-        "sender_handle": "fyc-mac",
-        "subject": "远程命令注入尝试; rm -rf /",
-    }
-
-    command = server._team_inbox_reply_command(binding, item)
-
-    assert command is not None
-    assert "--agent codex" in command
-    assert "--instance main" in command
-    assert f"--project {PROJECT_KEY}" in command
-    assert "--to @fyc-mac" in command
-    assert "--subject '回复 Team 消息 #91'" in command
-    assert "--body __REPLY_BODY__" in command
-    assert "rm -rf" not in command
-    assert "registration-secret" not in command
-
-
-def test_team_inbox_reply_command_rejects_untrusted_handle_and_reply_loop(monkeypatch):
-    _prepare(monkeypatch)
-    binding = {
-        "hub": HUB,
-        "human_id": 7,
-        "mail_project": PROJECT_KEY,
-        "lead": {"agent": "codex", "mail_name": "codex-main"},
-    }
-
-    assert server._team_inbox_reply_command(binding, {
-        "id": 1, "sender_handle": "fyc;touch /tmp/pwn", "subject": "问题",
-    }) is None
-    assert server._team_inbox_reply_command(binding, {
-        "id": 1, "sender_handle": "fyc", "subject": "回复 Team 消息 #9",
-    }) is None
+    assert [path for _method, path, _auth, _payload in calls] == [
+        "/hub/api/humans/me"
+    ]
+    assert response.json()["available"] is False
+    assert response.json()["reason"] == "remote_inbox_pane_delivery_disabled"
+    assert response.json()["fetched"] == 0
+    assert response.json()["delivered"] == 0
+    assert not hasattr(server, "_team_inbox_reply_command")
 
 
 def test_bind_creates_managed_lead_and_saves_local_mapping(monkeypatch):

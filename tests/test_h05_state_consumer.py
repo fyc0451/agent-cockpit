@@ -1865,8 +1865,8 @@ def test_poll_loop_revision_follows_degraded_both_directions(monkeypatch):
     assert server._live_state["revision"] == 3  # 每轮状态翻转都 +1
 
 
-def test_team_router_uses_cache_provider_no_fork(monkeypatch, tmp_path):
-    """R2:team router 走共享缓存;10 条 pending 只读回归,一轮零 fork。"""
+def test_disabled_team_router_uses_no_provider_fetch_pane_or_fork(monkeypatch, tmp_path):
+    """SEC-002:兼容 route 不读取远端正文，也不接触任何 Pane 状态或命令。"""
     _no_cli_fork(monkeypatch)
     assert not hasattr(team_inbox_router, "snapshot")  # CLI 兼容残留已删
     monkeypatch.setattr(
@@ -1876,54 +1876,47 @@ def test_team_router_uses_cache_provider_no_fork(monkeypatch, tmp_path):
         team_inbox_router, "ROUTE_STATE", tmp_path / "route.json"
     )
     calls = []
-
-    def _provider():
-        calls.append(1)
-        return {"available": True, "sessions": [], "panes": []}  # lead 离线
-
-    team_inbox_router.set_snapshot_provider(_provider)
-    try:
-        _tt_write_bindings(
-            tmp_path / "ts.json",
-            [_tt_binding(project_slug="acme", session="s1", pane_id="p1")],
-        )
-        items = [_tt_item(item_id=1000 + i) for i in range(10)]
-        result = team_inbox_router.route_inbox(
-            "Bearer x",
-            hub="http://hub:8765",
-            human_id=7,
-            fetch_inbox=lambda auth: {"items": items},
-        )
-        assert result["matched"] == 10
-        assert result["pending"] == 10
-        assert result["delivered"] == 0
-        assert len(calls) == 10  # 全部读缓存,零 CLI fork
-    finally:
-        team_inbox_router.set_snapshot_provider(server._state_client_snapshot)
+    monkeypatch.setattr(
+        team_inbox_router, "_snapshot_provider",
+        lambda: calls.append("provider"), raising=False,
+    )
+    monkeypatch.setattr(
+        team_inbox_router, "pane_send",
+        lambda *_args, **_kwargs: calls.append("pane"), raising=False,
+    )
+    _tt_write_bindings(
+        tmp_path / "ts.json",
+        [_tt_binding(project_slug="acme", session="s1", pane_id="p1")],
+    )
+    result = team_inbox_router.route_inbox(
+        "Bearer x",
+        hub="http://hub:8765",
+        human_id=7,
+        fetch_inbox=lambda _auth: calls.append("fetch"),
+    )
+    assert calls == []
+    assert result["available"] is False
+    assert result["fetched"] == 0
+    assert result["delivered"] == 0
 
 
-def test_team_router_without_provider_is_safe_offline(tmp_path, monkeypatch):
-    """未注入 provider 时安全默认:lead 离线、消息留 pending、不投递。"""
+def test_disabled_team_router_does_not_require_provider(tmp_path, monkeypatch):
+    """SEC-002:无 provider 时同样显式 unavailable，不形成本机 pending。"""
     monkeypatch.setattr(
         team_inbox_router.team_sessions, "STATE_PATH", tmp_path / "ts.json"
     )
     monkeypatch.setattr(team_inbox_router, "ROUTE_STATE", tmp_path / "route.json")
-    team_inbox_router.set_snapshot_provider(None)
-    try:
-        _tt_write_bindings(
-            tmp_path / "ts.json",
-            [_tt_binding(project_slug="acme", session="s1", pane_id="p1")],
-        )
-        result = team_inbox_router.route_inbox(
-            "Bearer x",
-            hub="http://hub:8765",
-            human_id=7,
-            fetch_inbox=lambda auth: {"items": [_tt_item()]},
-        )
-        assert result["pending"] == 1
-        assert result["delivered"] == 0
-    finally:
-        team_inbox_router.set_snapshot_provider(server._state_client_snapshot)
+    calls = []
+    result = team_inbox_router.route_inbox(
+        "Bearer x",
+        hub="http://hub:8765",
+        human_id=7,
+        fetch_inbox=lambda _auth: calls.append("fetch"),
+    )
+    assert calls == []
+    assert result["available"] is False
+    assert result["pending"] == 0
+    assert result["delivered"] == 0
 
 
 def test_pane_identity_reads_cache(monkeypatch):

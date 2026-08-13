@@ -45,3 +45,22 @@ This boundary adds no Host or proxy-header restriction when `COCKPIT_TOKEN` is
 configured. Existing bearer and cookie authentication, cookie-write CSRF, and
 WebSocket cookie/origin behavior remain authoritative. Public health and Web
 entries also retain their existing token-mode behavior.
+
+## Remote Team Inbox
+
+Remote Team message metadata and bodies are untrusted durable Inbox content.
+They may be displayed by the explicit Human Inbox read API, but the server must
+not fetch them for delivery to an Agent, format them as a prompt, submit them to
+Herdr, or derive a local command from them. This prohibition applies regardless
+of binding state, lead availability, token mode, or message contents.
+
+The legacy Inbox route and status endpoints remain only as fail-closed
+compatibility surfaces. They report `available=false`, use reason
+`remote_inbox_pane_delivery_disabled`, report zero fetched and delivered
+messages, and never invoke a Hub Inbox fetch or a Pane operation. Stale local
+route state is not consumed or exposed.
+
+`POST /api/agent/team-reply` is a separate explicit outbound action. It remains
+loopback-only and requires the existing local registry identity, active Session
+generation, binding, and reply capability checks. Disabling remote body-to-Pane
+delivery does not weaken or retire those checks.
