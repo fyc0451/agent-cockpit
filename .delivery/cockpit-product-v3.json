@@ -538,7 +538,7 @@
     {
       "id": "RUNTIME-002-provider",
       "title": "Implement the Local Herdr Runtime Provider read contract",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-003-wip4-gate"],
       "scope": ["agent_cockpit/runtime_provider_api.py", "agent_cockpit/runtime_provider_store.py", "docs/contracts/runtime-provider-v1.md", "tests/test_runtime_provider.py"],
       "acceptance": [{"command": "python3 -m pytest -q tests/test_runtime_provider.py", "passed": true}],
