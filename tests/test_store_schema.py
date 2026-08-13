@@ -96,10 +96,27 @@ def test_project_registry_strict_schema_damage_fails_closed(
     project_registry_store.initialize(path).close()
     connection = sqlite3.connect(path)
     if damage == "receipt":
+        damaged_digest = "0" * 64
         connection.execute("DROP TRIGGER schema_migrations_update_forbidden")
         connection.execute(
-            "UPDATE schema_migrations SET schema_digest=?", ("0" * 64,),
+            "UPDATE schema_migrations SET schema_digest=?", (damaged_digest,),
         )
+        update_guard = next(
+            statement
+            for statement in project_registry_contracts.SCHEMA_STATEMENTS
+            if "CREATE TRIGGER schema_migrations_update_forbidden" in statement
+        )
+        connection.execute(update_guard)
+        actual_triggers = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        assert actual_triggers == project_registry_contracts.PROJECT_REGISTRY_TRIGGERS
+        assert connection.execute(
+            "SELECT schema_digest FROM schema_migrations"
+        ).fetchone() == (damaged_digest,)
     elif damage == "trigger":
         existing_triggers = {
             row[0]
