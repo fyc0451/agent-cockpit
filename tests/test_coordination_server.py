@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from agent_cockpit import coordination
+from agent_cockpit import leader_binding
 import server
 
 
@@ -26,6 +27,14 @@ def _run(tmp_path):
 
 def _mail(monkeypatch, tmp_path, message_id=70):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    # P0-B0-test-isolation：本文件测 legacy 协调流，与 B0 授权门正交。
+    # pin B0_MODE=off 并把 leader_binding store 隔离到 tmp（必须是 Path），
+    # 否则 COCKPIT_B0_MODE=on 且机器真实 store 有 active binding 时，
+    # 控制消息会被 canonical-leader 门按设计 403（fixture 依赖机器状态）。
+    monkeypatch.setattr(server, "B0_MODE", "off")
+    monkeypatch.setattr(
+        leader_binding, "DB_PATH", tmp_path / "leader-binding.db",
+    )
     monkeypatch.setattr(
         server, "_agent_mail_status",
         lambda: {"available": True, "write_available": True, "write_reason": None},
@@ -117,6 +126,38 @@ def test_hard_stop_is_user_only_explicit_and_sends_ctrl_c_before_prompt(
     ]
     checkpoint = coordination.receipt(str(tmp_path), "kimi-main", 71)["checkpoint_json"]
     assert '"step_state": "uncertain"' in checkpoint
+
+
+def test_b0_on_rejects_non_canonical_control_sender(monkeypatch, tmp_path):
+    """授权负例（固化 #3457 诊断）：B0=on 且隔离 binding DB 中存在他人 active
+    binding 时，非 canonical sender 的控制消息必须 403，且授权门在 Hub/pane
+    之前——pane_send 零调用。"""
+    _run(tmp_path)
+    _mail(monkeypatch, tmp_path, 73)
+    monkeypatch.setattr(server, "B0_MODE", "on")
+    # 隔离 store（_mail 已 pin DB_PATH 到 tmp_path）中种一条非 sender 的 active binding
+    leader_binding.bind_leader(
+        "local", "user", "default", mail_name="someone-else",
+        session="s1", pane_id="p1", registry_selector="x/a.json",
+        expected_version=0,
+    )
+    pane_calls = []
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: pane_calls.append(args) or {"available": True},
+    )
+
+    response = TestClient(server.app).post(
+        "/api/send", headers={"authorization": "Bearer secret"},
+        json={
+            "project_id": 1, "sender_name": "codex-main", "to": ["kimi-main"],
+            "subject": "停止", "body": "停止旧任务", "intent": "stop", "hard": True,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "控制消息发送者不是 active canonical Leader"
+    assert pane_calls == []
 
 
 def test_ui_ack_marks_local_stale_before_hub_ack(tmp_path, monkeypatch):
