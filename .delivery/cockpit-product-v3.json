@@ -373,7 +373,7 @@
     {
       "id": "PROJ-005-compatibility",
       "title": "Bind legacy workbench reads to the new Project identity without mutating legacy stores",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": ["PROJ-003-legacy-import", "PROJ-004-project-api", "PROJ-005A-legacy-binding-read"],
       "scope": ["agent_cockpit/project_workbench_adapter.py", "agent_cockpit/server.py", "tests/test_project_workbench.py", "tests/test_project_compatibility.py", "docs/contracts/project-compatibility-v1.md"],
       "acceptance": [
@@ -381,9 +381,9 @@
       ],
       "rollback": "Disable the compatibility binding and retain both legacy reads and the isolated registry",
       "production_impact": "none",
-      "owner_instance_id": null,
+      "owner_instance_id": "i-cebqn5p7znunmxwpneduptrtou",
       "reviewer_instance_id": null,
-      "base_sha": null,
+      "base_sha": "382a9b858b084ab2ebd42251a4a4d1273990b4f0",
       "fixed_sha": null,
       "cross_module_block_count": 0,
       "release_started_at": null,
