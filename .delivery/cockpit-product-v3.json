@@ -105,7 +105,7 @@
     {
       "id": "SEC-001-loopback-origin",
       "title": "Freeze no-token HTTP Host Origin and WebSocket loopback trust",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": ["RUNTIME-001-profile-lock"],
       "scope": ["agent_cockpit", "tests", "docs/contracts/security-boundary-v1.md"],
       "acceptance": [
@@ -113,7 +113,7 @@
       ],
       "rollback": "Revert the trust-boundary commit and keep Next bound to loopback with no external exposure",
       "production_impact": "none",
-      "owner_instance_id": null,
+      "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
       "reviewer_instance_id": null,
       "base_sha": null,
       "fixed_sha": null,
