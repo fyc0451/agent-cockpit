@@ -462,6 +462,82 @@ def test_workspace_requires_location_from_same_project(registry, db_path):
             )
 
 
+def test_list_and_get_workspaces_read_only_persisted_project_membership(registry):
+    first = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    second = registry.create_project(slug="beta", display_name="Beta", goal=None)
+    location = registry.add_repo_location(
+        project_id=first.project_id,
+        node_id="local",
+        canonical_path="/repo/alpha",
+        vcs_kind="none",
+        availability="available",
+    )
+    workspace = registry.create_workspace(
+        project_id=first.project_id,
+        repo_location_id=location.repo_location_id,
+        name="main",
+        goal=None,
+        isolation_kind="shared",
+    )
+
+    assert registry.list_workspaces(first.project_id) == (workspace,)
+    assert registry.list_workspaces(second.project_id) == ()
+    assert registry.list_workspaces("prj_" + "0" * 32) is None
+    assert registry.get_workspace(first.project_id, workspace.workspace_id) == workspace
+    assert registry.get_workspace(second.project_id, workspace.workspace_id) is None
+    assert registry.get_workspace(first.project_id, "ws_" + "0" * 32) is None
+
+
+def test_workspace_reads_use_mode_ro_query_only_and_close(
+    registry, db_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    real_connect = registry_store.sqlite3.connect
+    captured = []
+    opened = []
+
+    class CapturedConnection:
+        def __init__(self, connection):
+            object.__setattr__(self, "connection", connection)
+            object.__setattr__(self, "statements", [])
+            object.__setattr__(self, "closed", False)
+
+        def __setattr__(self, name, value):
+            if name in {"connection", "statements", "closed"}:
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self.connection, name, value)
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, sql, parameters=()):
+            self.statements.append(sql)
+            return self.connection.execute(sql, parameters)
+
+        def close(self):
+            self.connection.close()
+            self.closed = True
+
+    def capture(*args, **kwargs):
+        opened.append((args, kwargs))
+        wrapper = CapturedConnection(real_connect(*args, **kwargs))
+        captured.append(wrapper)
+        return wrapper
+
+    before = db_path.read_bytes()
+    monkeypatch.setattr(registry_store.sqlite3, "connect", capture)
+    assert registry.list_workspaces(project.project_id) == ()
+    assert registry.get_workspace(project.project_id, "ws_" + "0" * 32) is None
+    assert len(captured) == 2
+    assert all("?mode=ro" in call[0][0] for call in opened)
+    assert all(call[1]["uri"] is True for call in opened)
+    assert all("PRAGMA query_only=ON" in item.statements for item in captured)
+    assert all("BEGIN" in item.statements for item in captured)
+    assert all(item.closed is True for item in captured)
+    assert db_path.read_bytes() == before
+
+
 def test_legacy_provenance_is_authority_scoped_and_idempotent(registry):
     first = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
     second = registry.create_project(slug="beta", display_name="Beta", goal=None)

@@ -92,6 +92,14 @@ class CustomRootsError(RuntimeError):
         super().__init__(f"custom_roots_invalid:{reason.value}")
 
 
+class TrustedRootError(RuntimeError):
+    """Stable error for Registry-authorized read-only roots."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
 def _custom_roots_file() -> Path:
     return runtime_paths.store("file_roots")
 
@@ -337,6 +345,40 @@ def _resolve(rel: str) -> Path:
     raise ValueError(f"路径不在允许范围内: {path}")
 
 
+def _resolve_trusted_root(root: str | Path, relative: str) -> Path:
+    if not isinstance(relative, str):
+        raise TrustedRootError("invalid_relative_path")
+    if relative:
+        if (
+            relative.startswith(("/", "~"))
+            or "\\" in relative
+            or any(ord(char) < 32 or ord(char) == 127 for char in relative)
+        ):
+            raise TrustedRootError("invalid_relative_path")
+        parts = relative.split("/")
+        if any(not part or part in {".", ".."} or part.startswith("~") for part in parts):
+            raise TrustedRootError("invalid_relative_path")
+    else:
+        parts = []
+    try:
+        lexical_root = Path(root)
+        if not lexical_root.is_absolute():
+            raise TrustedRootError("local_files_unavailable")
+        resolved_root = lexical_root.resolve(strict=True)
+        if not resolved_root.is_dir():
+            raise TrustedRootError("local_files_unavailable")
+        target = resolved_root.joinpath(*parts).resolve(strict=False)
+        try:
+            target.relative_to(resolved_root)
+        except ValueError:
+            raise TrustedRootError("invalid_relative_path") from None
+        return target
+    except TrustedRootError:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        raise TrustedRootError("local_files_unavailable") from None
+
+
 def _is_text(path: Path) -> bool:
     """判断是否可作为文本编辑。"""
     if path.name in {".gitignore", ".dockerignore", ".env", ".editorconfig",
@@ -366,7 +408,21 @@ def _looks_text(path: Path) -> bool:
 
 def list_dir(rel: str) -> dict[str, Any]:
     """列目录。返回 {path, entries:[{name,type,size,modifiable}]}。"""
-    path = _resolve(rel)
+    return _list_dir_path(_resolve(rel))
+
+
+def list_dir_from_trusted_root(root: str | Path, relative: str) -> dict[str, Any]:
+    """List from a Registry-authorized root without consulting global roots."""
+    path = _resolve_trusted_root(root, relative)
+    if not path.exists():
+        raise TrustedRootError("file_not_found")
+    try:
+        return _list_dir_path(path)
+    except ValueError:
+        raise TrustedRootError("local_files_unavailable") from None
+
+
+def _list_dir_path(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ValueError(f"不存在: {path}")
     if path.is_file():
@@ -394,6 +450,23 @@ def list_dir(rel: str) -> dict[str, Any]:
 
 def search_files(rel: str, query: str, limit: int = 100) -> dict[str, Any]:
     """在白名单目录内递归按名称搜索文件和目录。"""
+    return _search_files_path(_resolve(rel), query, limit)
+
+
+def search_files_from_trusted_root(
+    root: str | Path, relative: str, query: str, limit: int = 100,
+) -> dict[str, Any]:
+    """Search from a Registry-authorized root using the existing traversal."""
+    path = _resolve_trusted_root(root, relative)
+    if not path.is_dir():
+        raise TrustedRootError("file_not_found")
+    try:
+        return _search_files_path(path, query, limit)
+    except ValueError:
+        raise TrustedRootError("local_files_unavailable") from None
+
+
+def _search_files_path(root: Path, query: str, limit: int = 100) -> dict[str, Any]:
     query = query.strip()
     if not query:
         raise ValueError("搜索关键词为空")
@@ -402,7 +475,6 @@ def search_files(rel: str, query: str, limit: int = 100) -> dict[str, Any]:
     if not 1 <= limit <= MAX_SEARCH_RESULTS:
         raise ValueError(f"搜索结果范围必须为 1-{MAX_SEARCH_RESULTS}")
 
-    root = _resolve(rel)
     if not root.is_dir():
         raise ValueError(f"搜索范围不是目录: {root}")
 
@@ -491,7 +563,21 @@ def _info_file(path: Path) -> dict[str, Any]:
 
 def read_file(rel: str) -> dict[str, Any]:
     """读文件内容。文本返回 text,二进制返回 {binary:true, size}。"""
-    path = _resolve(rel)
+    return _read_file_path(_resolve(rel))
+
+
+def read_file_from_trusted_root(root: str | Path, relative: str) -> dict[str, Any]:
+    """Read from a Registry-authorized root using existing size/text rules."""
+    path = _resolve_trusted_root(root, relative)
+    if not path.is_file():
+        raise TrustedRootError("file_not_found")
+    try:
+        return _read_file_path(path)
+    except ValueError:
+        raise TrustedRootError("local_files_unavailable") from None
+
+
+def _read_file_path(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise ValueError(f"不是文件: {path}")
     st = path.stat()

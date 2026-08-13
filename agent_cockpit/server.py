@@ -59,6 +59,7 @@ from . import web_push
 from . import settings
 from . import project_discovery
 from . import project_discovery_service
+from . import local_readonly_api
 from . import project_registry_api
 from . import project_registry_store
 from . import project_workbench_adapter
@@ -359,6 +360,7 @@ def project_registry_api_service() -> project_registry_api.ApiService:
 
 
 project_registry_api.install(app, project_registry_api_service())
+local_readonly_api.install(app, local_readonly_api.ApiService(_project_workbench_registry))
 
 
 def _scoped_registry_request(request: Request) -> bool:
