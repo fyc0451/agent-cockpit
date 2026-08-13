@@ -17,9 +17,11 @@ interface CardDef {
   capKey: CapabilityKey | null
 }
 
+// SLICE-001：文件卡由 files.read、终端卡由 terminal.pty 的 server 权威值控制；
+// 未接通能力一律 fail-closed（禁用 + 可见 reason + 零请求）
 const CARDS: CardDef[] = [
-  { label: '文件', icon: '🗀', build: routes.workspace.files, capKey: null },
-  { label: '终端', icon: '▸', build: routes.workspace.terminal, capKey: null },
+  { label: '文件', icon: '🗀', build: routes.workspace.files, capKey: 'files.read' },
+  { label: '终端', icon: '▸', build: routes.workspace.terminal, capKey: 'terminal.pty' },
   { label: '任务', icon: '☑', build: routes.workspace.tasks, capKey: null },
   { label: '编辑器', icon: '✎', build: null, capKey: 'editor.embedded' },
   { label: '浏览器', icon: '◎', build: null, capKey: 'browser' },
@@ -39,8 +41,8 @@ function NavCard({
     card.capKey ?? 'browser',
     workspaceScope(projectId, workspaceId),
   )
-  const enabled = card.capKey == null || cap.available
-  if (!enabled || card.build == null) {
+  const enabled = card.capKey == null ? card.build != null : cap.available && card.build != null
+  if (!enabled) {
     const reason = cap.reason ?? '未接通'
     // 可聚焦 + aria-disabled + aria-describedby 关联可见 reason 节点；Enter/Space/click 拦截
     return (
@@ -64,7 +66,7 @@ function NavCard({
     )
   }
   return (
-    <Link className="card" to={card.build(projectId, workspaceId)}>
+    <Link className="card" to={card.build!(projectId, workspaceId)}>
       <span className="card-icon" aria-hidden="true">{card.icon}</span>
       <span className="card-label">{card.label}</span>
     </Link>
@@ -90,14 +92,16 @@ function WorkspaceBody({ project, workspace }: { project: Project; workspace: Wo
       <section className="panel">
         <h2 className="panel-title">元信息</h2>
         <div className="kv-grid">
+          <span className="kv-key">Workspace ID</span>
+          <span className="ellipsis">{workspace.workspace_id ?? workspace.id ?? '—'}</span>
           <span className="kv-key">位置</span>
           <span>
             <Tag tone={toneForLocation(workspace.location)}>
-              {workspace.location === 'remote' ? '远程' : workspace.location === 'local' ? '本机 Local' : workspace.location ?? '未知'}
+              {workspace.location === 'remote' ? '远程' : '本机 Local'}
             </Tag>
           </span>
-          <span className="kv-key">Branch</span>
-          <span className="ellipsis">{workspace.branch ?? '—'}</span>
+          <span className="kv-key">隔离</span>
+          <span className="ellipsis">{workspace.isolation_kind ?? '—'}</span>
           <span className="kv-key">状态</span>
           <span>
             {workspace.status ? <Tag tone={toneForStatus(workspace.status)}>{workspace.status}</Tag> : '—'}

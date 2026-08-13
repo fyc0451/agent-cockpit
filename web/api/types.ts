@@ -23,6 +23,12 @@ export interface Workspace {
   runtime?: string
   branch?: string
   status?: string
+  /** SLICE-001：Registry persisted workspace 权威身份与公开 DTO 字段（不含 canonical root） */
+  workspace_id?: string
+  isolation_kind?: string
+  lifecycle?: string
+  goal?: string | null
+  version?: number
 }
 
 export interface Project {
@@ -31,6 +37,8 @@ export interface Project {
   branch?: string
   path?: string
   workspaces?: Workspace[]
+  /** SLICE-001：Registry 权威 opaque project_id（slug 仅作 URL/legacy 键） */
+  project_id?: string
 }
 
 export interface AttentionItem {

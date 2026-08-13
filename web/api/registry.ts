@@ -99,11 +99,11 @@ export interface DiscoveryResultData {
 }
 
 // ---------- registry projects（冻结 + optional 内嵌） ----------
+// accepted _public_location 精确七键；canonical_path 属内部根表示，禁止进入 public DTO
 export interface RepoLocationSummary {
   repo_location_id: string
   project_id: string
   node_id: string
-  canonical_path: string
   vcs_kind: 'git' | 'none'
   availability: 'available' | 'offline' | 'missing' | 'unknown'
   lifecycle: 'active' | 'archived'
@@ -222,6 +222,50 @@ export function assertLocator(raw: unknown, ctx = 'locator'): ProjectLocator {
   }
 }
 
+/** public repo location 守卫：accepted 精确七键 fail-closed（多键少键都拒绝，禁 canonical_path） */
+const REPO_LOCATION_KEYS = [
+  'repo_location_id',
+  'project_id',
+  'node_id',
+  'lifecycle',
+  'vcs_kind',
+  'availability',
+  'version',
+] as const
+
+export function assertRepoLocationSummary(raw: unknown, ctx = 'repo_location'): RepoLocationSummary {
+  const o = reqObj(raw, ctx)
+  const actual = Object.keys(o).sort()
+  const expected = [...REPO_LOCATION_KEYS].sort()
+  if (actual.length !== expected.length || actual.some((k, i) => k !== expected[i])) {
+    fail(`${ctx} 键集`)
+  }
+  const vcsKind = o.vcs_kind
+  if (vcsKind !== 'git' && vcsKind !== 'none') fail(`${ctx}.vcs_kind`)
+  const availability = o.availability
+  if (
+    availability !== 'available' && availability !== 'offline' &&
+    availability !== 'missing' && availability !== 'unknown'
+  ) {
+    fail(`${ctx}.availability`)
+  }
+  const lifecycle = o.lifecycle
+  if (lifecycle !== 'active' && lifecycle !== 'archived') fail(`${ctx}.lifecycle`)
+  return {
+    repo_location_id: reqString(o.repo_location_id, `${ctx}.repo_location_id`),
+    project_id: reqString(o.project_id, `${ctx}.project_id`),
+    node_id: reqString(o.node_id, `${ctx}.node_id`),
+    vcs_kind: vcsKind,
+    availability,
+    lifecycle,
+    version: reqInt(o.version, `${ctx}.version`),
+  }
+}
+
+function reqRepoLocationArray(raw: unknown, ctx: string): RepoLocationSummary[] {
+  return reqArray(raw, ctx).map((item, i) => assertRepoLocationSummary(item, `${ctx}[${i}]`))
+}
+
 export function assertRegistryProject(raw: unknown): RegistryProject {
   const o = reqObj(raw, 'project')
   const project: RegistryProject = {
@@ -235,15 +279,31 @@ export function assertRegistryProject(raw: unknown): RegistryProject {
     updated_at: typeof o.updated_at === 'string' ? o.updated_at : '',
   }
   if (o.repo_locations !== undefined) {
-    project.repo_locations = reqArray(o.repo_locations, 'project.repo_locations') as RepoLocationSummary[]
+    project.repo_locations = reqRepoLocationArray(o.repo_locations, 'project.repo_locations')
   }
   return project
+}
+
+/**
+ * SLICE-001：真实 data.items 元素是 { project, repo_locations } 嵌套快照
+ * （GET /api/project-registry/projects 的 _snapshot 形状）。解析后摊平成
+ * RegistryProject（repo_locations 内嵌），页面消费形态不变。
+ */
+export function assertProjectListItem(raw: unknown, ctx: string): RegistryProject {
+  const o = reqObj(raw, ctx)
+  const project = assertRegistryProject(o.project)
+  const locations = o.repo_locations !== undefined
+    ? reqRepoLocationArray(o.repo_locations, `${ctx}.repo_locations`)
+    : project.repo_locations
+  return { ...project, repo_locations: locations ?? [] }
 }
 
 export function assertProjectListData(raw: unknown): ProjectListData {
   const o = reqObj(raw, 'projects')
   return {
-    items: reqArray(o.items, 'projects.items').map(assertRegistryProject),
+    items: reqArray(o.items, 'projects.items').map((item, i) =>
+      assertProjectListItem(item, `projects.items[${i}]`),
+    ),
     next_cursor: typeof o.next_cursor === 'string' ? o.next_cursor : null,
   }
 }

@@ -96,8 +96,12 @@ export function ProjectsPage() {
                       <Link className="ellipsis list-title list-link" to={routes.project.workbench(p.slug)}>
                         {p.display_name}
                       </Link>
-                      {/* B4：只渲染已冻结的 canonical_path，不访问 display_path */}
-                      {loc ? <span className="ellipsis list-sub">{loc.canonical_path}</span> : null}
+                      {/* SLICE-001：public location 无 canonical_path；Local/Remote 由 node_id 明示 */}
+                      {loc ? (
+                        <span className="ellipsis list-sub">
+                          {loc.node_id === 'local' ? '本机 Local' : `远程 ${loc.node_id}`}
+                        </span>
+                      ) : null}
                     </div>
                     {loc ? (
                       <Tag tone={AVAILABILITY_TONE[loc.availability] ?? 'neutral'}>{loc.availability}</Tag>

@@ -116,8 +116,9 @@ describe('WEB-003 列表（V1–V6）', () => {
     expect(screen.getByText('Beta 项目')).toBeInTheDocument()
     expect(screen.getByText('available')).toBeInTheDocument()
     expect(screen.getByText('offline')).toBeInTheDocument()
-    // B4：行只渲染已冻结的 canonical_path
-    expect(screen.getByText('/repos/alpha')).toBeInTheDocument()
+    // SLICE-001：行只渲染公开 node_id（本机 Local），无 canonical_path
+    expect(screen.getAllByText('本机 Local')).toHaveLength(2)
+    expect(container.querySelector('.list')?.textContent).not.toContain('/repos')
     // 不再有 branch/remote/workspaces 计数等旧字段文本
     expect(container.querySelector('.list')?.textContent).not.toContain('main')
     expect(container.querySelector('.list')?.textContent).not.toContain('workspaces')
@@ -341,9 +342,13 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     expect(screen.queryByRole('button', { name: '确认添加 Project' })).not.toBeInTheDocument()
     const postsBefore = stub.posts.length
     await user.click(openExisting)
-    // 纯导航：无新增写请求；导航到 beta workbench（无 stub → 项目不存在 typed error 页）
+    // 纯导航：无新增写请求；SLICE-001 起 ProjectScope 用 Registry 权威解析，beta 在列表中 →
+    // 进入其 workbench 并恢复 selection（不再因 legacy 未 stub 假报「项目不存在」）
     expect(stub.posts.length).toBe(postsBefore)
-    await screen.findByText('项目不存在')
+    await waitFor(() => {
+      expect(screen.getByTitle('切换项目')).toHaveTextContent('Beta 项目')
+    })
+    expect(screen.queryByText('项目不存在')).not.toBeInTheDocument()
   })
 
   it('V13 possible_projects 命中 → FINGERPRINT_MATCH：attach 按钮 disabled + reason', async () => {
