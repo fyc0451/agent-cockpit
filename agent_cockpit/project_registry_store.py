@@ -545,6 +545,54 @@ class ProjectRegistryStore:
             if connection is not None:
                 connection.close()
 
+    def list_workspaces(
+        self, project_id: str,
+    ) -> tuple[domain.WorkspaceRecord, ...] | None:
+        project_id = _validate(domain.opaque, project_id, maximum=64)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            connection.execute("BEGIN")
+            project = connection.execute(
+                "SELECT 1 FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            if project is None:
+                return None
+            rows = connection.execute(
+                "SELECT * FROM workspaces WHERE project_id=? ORDER BY workspace_id",
+                (project_id,),
+            ).fetchall()
+            return tuple(_workspace_record(row) for row in rows)
+        except ProjectRegistryError:
+            raise
+        except (sqlite3.Error, IndexError, KeyError, TypeError, ValueError) as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_workspace(
+        self, project_id: str, workspace_id: str,
+    ) -> domain.WorkspaceRecord | None:
+        project_id = _validate(domain.opaque, project_id, maximum=64)
+        workspace_id = _validate(domain.opaque, workspace_id, maximum=64)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT * FROM workspaces WHERE project_id=? AND workspace_id=?",
+                (project_id, workspace_id),
+            ).fetchone()
+            return None if row is None else _workspace_record(row)
+        except ProjectRegistryError:
+            raise
+        except (sqlite3.Error, IndexError, KeyError, TypeError, ValueError) as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
     def list_legacy_bindings(
         self, project_id: str,
     ) -> tuple[domain.LegacyBindingRecord, ...] | None:
@@ -1301,6 +1349,15 @@ def _repo_location_record(row: sqlite3.Row) -> domain.RepoLocationRecord:
         row["repo_location_id"], row["project_id"], row["node_id"],
         row["canonical_path"], row["lifecycle"], row["vcs_kind"],
         row["availability"], int(row["version"]),
+    )
+
+
+def _workspace_record(row: sqlite3.Row) -> domain.WorkspaceRecord:
+    return domain.WorkspaceRecord(
+        row["workspace_id"], row["project_id"], row["repo_location_id"],
+        row["name"], row["goal"], row["isolation_kind"], row["lifecycle"],
+        row["active_run_id"], int(row["version"]), row["created_at"],
+        row["updated_at"],
     )
 
 
