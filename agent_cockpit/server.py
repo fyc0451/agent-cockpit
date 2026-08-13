@@ -61,6 +61,7 @@ from . import project_discovery
 from . import project_discovery_service
 from . import project_registry_api
 from . import project_registry_store
+from . import project_workbench_adapter
 from . import runtime_paths
 from .artifact_root import resolve_artifact_root
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
@@ -334,6 +335,14 @@ def _project_registry() -> project_registry_store.ProjectRegistryStore:
             runtime_paths.store("project_registry")
         )
     return _project_registry_store
+
+
+def _project_workbench_registry() -> project_registry_store.ProjectRegistryStore:
+    if _project_registry_store is not None:
+        return _project_registry_store
+    return project_registry_store.open_existing(
+        runtime_paths.store("project_registry")
+    )
 
 
 def _project_discovery_service() -> project_discovery_service.LocalProjectDiscoveryService:
@@ -1547,100 +1556,22 @@ def api_project(slug: str, limit: int = 50):
     }
 
 
-WORKBENCH_ASSIGNMENT_FIELDS = (
-    "assignment_id",
-    "assignment",
-    "assignee",
-    "expected_reply",
-    "deadline",
-    "status",
-    "closed_at",
-    "version",
-    "created_at",
-    "updated_at",
-)
-WORKBENCH_PANE_FIELDS = (
-    "pane_id", "agent", "agent_status", "focused", "revision",
-)
-
-
 @app.get("/api/projects/{slug}/workbench")
 def api_project_workbench(slug: str):
-    """聚合项目任务与同一绑定代 Herdr session 的只读摘要。"""
+    """聚合 Registry 证明的 legacy Project、Assignment 与 live session。"""
     try:
-        mail_status = _agent_mail_status()
-    except Exception:
-        raise HTTPException(503, "Agent Mail 查询失败")
-    if not mail_status.get("available"):
-        raise HTTPException(503, mail_status.get("reason") or "Agent Mail 不可用")
-    try:
-        project = db.project_by_slug(slug)
-    except Exception:
-        raise HTTPException(503, "Agent Mail 查询失败")
-    if not project:
-        raise HTTPException(404, f"项目不存在: {slug}")
-
-    project_key = str(project["human_key"])
-    try:
-        assignment_rows = coordination.list_assignments(project_key)
-    except Exception:
-        raise HTTPException(503, "Coordination 查询失败")
-    assignments = [
-        {field: item.get(field) for field in WORKBENCH_ASSIGNMENT_FIELDS}
-        for item in assignment_rows
-    ]
-    observed_at = time.time()
-    try:
-        snapshot = _herdr_runtime_snapshot()
-    except Exception:
-        logger.warning("project workbench Herdr snapshot unavailable")
-        snapshot = {"available": False, "degraded": True}
-    if not isinstance(snapshot, dict):
-        snapshot = {"available": False, "degraded": True}
-    available = snapshot.get("available") is True
-    degraded = not available or snapshot.get("degraded") is True
-
-    sessions: list[dict[str, Any]] = []
-    if not degraded:
-        for item in snapshot.get("sessions") or []:
-            if not isinstance(item, dict):
-                continue
-            session = item.get("session")
-            directory = item.get("directory")
-            if not session or not directory:
-                continue
-            try:
-                bound_project = mail_projects.get(str(session), str(directory))
-            except (OSError, ValueError):
-                continue
-            if bound_project != project_key:
-                continue
-            panes = [
-                {field: pane.get(field) for field in WORKBENCH_PANE_FIELDS}
-                for pane in item.get("panes") or []
-                if isinstance(pane, dict)
-            ]
-            sessions.append({
-                "session": session,
-                "status": item.get("status"),
-                "focused_pane_id": item.get("focused_pane_id"),
-                "panes": panes,
-            })
-
-    return {
-        "project": {
-            "id": project["id"],
-            "slug": project["slug"],
-            "created_at": project.get("created_at"),
-        },
-        "assignments": assignments,
-        "sessions": sessions,
-        "source": {
-            "available": available,
-            "degraded": degraded,
-            "observed_at": observed_at,
-        },
-    }
+        return project_workbench_adapter.read_workbench(
+            slug,
+            mail_status_provider=_agent_mail_status,
+            legacy_project_provider=db.project_by_slug,
+            registry_provider=_project_workbench_registry,
+            assignments_provider=coordination.list_assignments,
+            runtime_snapshot_provider=_herdr_runtime_snapshot,
+            live_binding_provider=mail_projects.get,
+            observed_at=time.time(),
+        )
+    except project_workbench_adapter.WorkbenchReadError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from None
 
 
 def _assignment_project_key(slug: str) -> str:

@@ -1,4 +1,7 @@
 from fastapi.testclient import TestClient
+import hashlib
+import json
+from types import SimpleNamespace
 import pytest
 
 from agent_cockpit import mail_projects
@@ -15,12 +18,48 @@ def _project(project_dir):
     }
 
 
-def _setup(monkeypatch, project_dir, assignments=None):
+def _source_key(value):
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+class _Registry:
+    def __init__(self, session_provenance=()):
+        self.project = SimpleNamespace(project_id="prj_" + "a" * 32, slug="demo")
+        self.bindings = [
+            SimpleNamespace(
+                source_kind="agent_mail_project",
+                source_key=_source_key({"project_id": 7}),
+            ),
+            *[
+                SimpleNamespace(
+                    source_kind="herdr_session",
+                    source_key=_source_key({"session": session, "session_dir": session_dir}),
+                )
+                for session, session_dir in session_provenance
+            ],
+        ]
+
+    def get_project_by_slug(self, slug):
+        return self.project if slug == "demo" else None
+
+    def list_legacy_bindings(self, project_id):
+        assert project_id == self.project.project_id
+        return tuple(self.bindings)
+
+
+def _setup(monkeypatch, project_dir, assignments=None, session_provenance=()):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(
         server, "_agent_mail_status", lambda: {"available": True, "reason": None},
     )
     monkeypatch.setattr(server.db, "project_by_slug", lambda _slug: _project(project_dir))
+    monkeypatch.setattr(
+        server, "_project_workbench_registry", lambda: _Registry(session_provenance),
+    )
     monkeypatch.setattr(
         server.coordination,
         "list_assignments",
@@ -41,13 +80,15 @@ def test_workbench_returns_503_when_agent_mail_is_unreadable(monkeypatch):
     monkeypatch.setattr(
         server,
         "_agent_mail_status",
-        lambda: {"available": False, "reason": "mail unavailable"},
+        lambda: {"available": False, "reason": "private/path token=secret"},
     )
 
     response = _get(TestClient(server.app))
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "mail unavailable"}
+    assert response.json() == {"detail": "Agent Mail 不可用"}
+    assert "private/path" not in response.text
+    assert "secret" not in response.text
 
 
 def test_workbench_returns_503_when_agent_mail_query_fails(monkeypatch):
@@ -119,7 +160,10 @@ def test_workbench_only_returns_exactly_bound_project_sessions(monkeypatch, tmp_
         "created_at": 100.0,
         "updated_at": 110.0,
     }]
-    client = _setup(monkeypatch, project_dir, assignments)
+    client = _setup(
+        monkeypatch, project_dir, assignments,
+        session_provenance=(("target", str(target_session_dir)),),
+    )
     monkeypatch.setattr(
         server,
         "_herdr_runtime_snapshot",
@@ -296,7 +340,10 @@ def test_workbench_response_uses_strict_field_allowlists(monkeypatch, tmp_path):
     project_dir.mkdir()
     session_dir.mkdir()
     mail_projects.bind("demo", str(session_dir), str(project_dir))
-    client = _setup(monkeypatch, project_dir)
+    client = _setup(
+        monkeypatch, project_dir,
+        session_provenance=(("demo", str(session_dir)),),
+    )
     monkeypatch.setattr(
         server,
         "_herdr_runtime_snapshot",
