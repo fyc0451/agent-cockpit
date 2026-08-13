@@ -333,7 +333,7 @@
     {
       "id": "PROJ-004-project-api",
       "title": "Expose Project Registry and RepoLocation read and registration APIs",
-      "status": "in_progress",
+      "status": "review",
       "depends_on": ["PROJ-002-local-discovery", "PROJ-004A-project-api-store"],
       "scope": ["agent_cockpit/project_registry_api.py", "agent_cockpit/server.py", "tests/test_project_registry_api.py", "docs/contracts/project-registry-api-v1.md"],
       "acceptance": [
@@ -342,9 +342,9 @@
       "rollback": "Disable the Project Registry routes and revert the API commit without changing legacy endpoints",
       "production_impact": "none",
       "owner_instance_id": "i-dovierut5tq55gvxn5mhdgyah4",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-t54gjj3konyre5iis4ectmncku",
       "base_sha": "a75e8c46920d57d947a4caebec379d8d54e9015e",
-      "fixed_sha": null,
+      "fixed_sha": "6c3454270053d8a80449b2ae9b3ff33bf69158c8",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
