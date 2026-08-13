@@ -613,19 +613,19 @@
     {
       "id": "WEB-005-project-bootstrap",
       "title": "Align Local roots and bind Project registration write authority to discovery",
-      "status": "in_progress",
+      "status": "review",
       "depends_on": ["DELIVERY-003-wip4-gate", "PROJ-004-project-api", "SLICE-001-local-readonly"],
       "scope": ["web/api/registry.ts", "web/features/project-wizard/ProjectWizard.tsx", "web/fixtures/api.ts", "web/test/web003-registry.test.tsx"],
       "acceptance": [
-        {"command": "npm --prefix web test -- --run web003-registry.test.tsx", "passed": false},
-        {"command": "npm --prefix web run build", "passed": false}
+        {"command": "npm --prefix web test -- --run web003-registry.test.tsx", "passed": true},
+        {"command": "npm --prefix web run build", "passed": true}
       ],
       "rollback": "Revert the roots and discovery-capability binding while keeping Project registration fail-closed",
       "production_impact": "none",
       "owner_instance_id": "i-esfeeieqrcsgnmf46hx5kfwyau",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-gzy6byrcie47tprardahrpmwbq",
       "base_sha": "13929110bdf5e9161ac6dc1e632ff943b9661d77",
-      "fixed_sha": null,
+      "fixed_sha": "439e93bd56e333b42f82e8367dc86e0bdd606732",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
