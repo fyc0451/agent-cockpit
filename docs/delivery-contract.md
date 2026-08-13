@@ -55,6 +55,12 @@
 必须依赖前一个 gate car。只有该 car 进入 `accepted` 或 `user_accepted` 后，对应容量才生效。
 `planned`、`in_progress`、`review`、`blocked`、`cancelled` 均保留上一个已验收容量。
 
+`DELIVERY-003-wip4-gate` 还必须通过 Provider Ownership v1。review 状态验证
+`fixed_sha` Git tree中的sidecar但effective WIP仍为3；accepted或user_accepted且证据有效时才
+升至4。validator不得读取工作树sidecar。no-op SHA、非后代candidate、缺失/未提交/未变化证据、
+strict schema或car binding不匹配、provider/migration/entrypoint/global-hotspot/runnable-writer
+overlap全部fail closed到3。`validate`、`effective_writer_wip`与`readiness`共享同一个evaluator。
+
 ## 二、Release Car 必填字段
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -175,6 +181,10 @@ active 的 car 即使声明了依赖也不得重叠。
 ### 4.7 WIP 校验
 - ❌ **writer_wip_exceeded**: 同时处于 `in_progress` 或 `review` 状态的 writer 超过 `writer_wip` 限制
 - ❌ **writer_wip_gate_required**: schema v2 的 gate 缺失、跳级、命名不匹配、重复或未形成依赖链
+- ❌ **provider_ownership_evidence_required**: WIP4 immutable Git-tree证据缺失、no-op、未提交、未变化或不是base后代
+- ❌ **invalid_provider_ownership_evidence**: WIP4 sidecar不符合Provider Ownership v1 strict schema
+- ❌ **provider_ownership_car_mismatch**: fixed/current Delivery car与sidecar ownership不一致
+- ❌ **provider_ownership_overlap**: provider、migration、entrypoint、global hotspot或active/runnable writer ownership相交
 
 `check` 和 `ready` 必须共享同一个有效容量计算。评审、分析、测试以及其他不拥有写入 car 的
 工作不计入 writer WIP；限制对象是 active writer car，不是已启动的 agent 数量。
