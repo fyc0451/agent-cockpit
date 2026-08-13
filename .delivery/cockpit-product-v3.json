@@ -191,20 +191,20 @@
     {
       "id": "WEB-003-project-registry-ui",
       "title": "Build the Project Registry list and Local registration wizard",
-      "status": "in_progress",
+      "status": "review",
       "depends_on": ["WEB-001-app-shell"],
       "scope": ["web/api/registry.ts", "web/pages/ProjectsPage.tsx", "web/features/project-wizard/ProjectWizard.tsx", "web/fixtures/api.ts", "web/test/web003-registry.test.tsx", "web/test/query-error.test.tsx", "web/e2e/project-registry.spec.ts"],
       "acceptance": [
-        {"command": "npm --prefix web run build", "passed": false},
-        {"command": "npm --prefix web test -- --run web003-registry.test.tsx", "passed": false},
-        {"command": "npm --prefix web run test:e2e -- project-registry.spec.ts", "passed": false}
+        {"command": "npm --prefix web run build", "passed": true},
+        {"command": "npm --prefix web test -- --run web003-registry.test.tsx", "passed": true},
+        {"command": "npm --prefix web run test:e2e -- project-registry.spec.ts", "passed": true}
       ],
       "rollback": "Revert the Project Registry UI commit; keep the accepted Web shell and render unavailable backend states fail-closed",
       "production_impact": "none",
       "owner_instance_id": "i-lmzsi3liwhtbxsswx4pxjt5gve",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-gzy6byrcie47tprardahrpmwbq",
       "base_sha": "20e2af0ac8b4ee0503bc2278841c7d130faf8273",
-      "fixed_sha": null,
+      "fixed_sha": "331c300ce493b09fec810167017d7254ab5e83f9",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
@@ -301,7 +301,7 @@
       ],
       "rollback": "Revert only the importer code; retain append-only registry provenance and never mutate legacy authorities",
       "production_impact": "none",
-      "owner_instance_id": "i-cax3gvoakewhwftbbtkuk45mqe",
+      "owner_instance_id": "i-v4mmixwv2ss5beq4egdeg3x5jq",
       "reviewer_instance_id": null,
       "base_sha": "62c0aa2a1dbc33a551ba33149aa7b7efd0b2eaca",
       "fixed_sha": null,
@@ -313,18 +313,18 @@
     {
       "id": "PROJ-004A-project-api-store",
       "title": "Add atomic Project Registry reads and registration primitives for the Project API",
-      "status": "in_progress",
+      "status": "review",
       "depends_on": ["PROJ-001-registry-store"],
       "scope": ["agent_cockpit/project_registry_domain.py", "agent_cockpit/project_registry_store.py", "tests/test_project_registry.py", "docs/contracts/project-registry-v1.md"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_project_registry.py", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_project_registry.py", "passed": true}
       ],
       "rollback": "Revert only the Project API Store primitives; retain append-only Project Registry rows and idempotency receipts",
       "production_impact": "none",
       "owner_instance_id": "i-v4mmixwv2ss5beq4egdeg3x5jq",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-ac4mbdpyttxouq6op4tesfzyhy",
       "base_sha": "709c2b617ef205260f26a6afd455db446bfbec64",
-      "fixed_sha": null,
+      "fixed_sha": "41c69c5eddcd6f3e073bfc1876e45d29d975588c",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
