@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import sqlite3
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -72,28 +73,178 @@ def _expected_schema_objects() -> tuple[tuple[str, str, str, str], ...]:
 _EXPECTED_SCHEMA_OBJECTS = _expected_schema_objects()
 
 
-def _check_path(path: Path, *, must_exist: bool) -> None:
-    try:
-        if must_exist and not path.exists():
-            _fail("schema_missing")
-        if path.exists():
-            stat = path.lstat()
-            if not path.is_file() or path.is_symlink():
-                _fail("store_unsafe")
-            if stat.st_uid != os.getuid() and os.getuid() != 0:
-                _fail("store_unsafe")
-            if stat.st_mode & 0o077:
-                _fail("store_unsafe")
-        elif path.parent.exists() and path.parent.is_symlink():
+def _absolute_path(path: Path) -> Path:
+    path = Path(path)
+    if not path.is_absolute():
+        _fail("store_unsafe")
+    return path
+
+
+def _reject_symlink_components(path: Path) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _fail("store_unsafe", exc)
+        if stat.S_ISLNK(info.st_mode):
             _fail("store_unsafe")
+
+
+def _validate_directory(path: Path, *, created: bool = False) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        _fail("store_unsafe", exc)
+    mode = stat.S_IMODE(info.st_mode)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or mode & 0o022
+        or (created and mode != 0o700)
+    ):
+        _fail("store_unsafe")
+
+
+def _prepare_parent(path: Path, *, create: bool) -> None:
+    _reject_symlink_components(path)
+    anchor = path.parent
+    missing: list[Path] = []
+    while True:
+        try:
+            anchor.lstat()
+            break
+        except FileNotFoundError:
+            missing.append(anchor)
+            if anchor.parent == anchor:
+                _fail("store_unsafe")
+            anchor = anchor.parent
+        except OSError as exc:
+            _fail("store_unsafe", exc)
+    _validate_directory(anchor)
+    if missing and not create:
+        _fail("schema_missing")
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, 0o700)
+            os.chmod(directory, 0o700)
+        except OSError as exc:
+            _fail("store_unsafe", exc)
+        _validate_directory(directory, created=True)
+    _reject_symlink_components(path)
+
+
+def _leaf_signature(path: Path, *, must_exist: bool) -> tuple[int, int, int, int]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if must_exist:
+            _fail("schema_missing")
+        return ()
+    except OSError as exc:
+        _fail("store_unsafe", exc)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        _fail("store_unsafe")
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode)
+
+
+def _check_path(path: Path, *, must_exist: bool) -> tuple[int, int, int, int]:
+    try:
+        _prepare_parent(path, create=False)
+        return _leaf_signature(path, must_exist=must_exist)
     except ProjectRegistryError:
         raise
     except OSError as exc:
         _fail("store_unsafe", exc)
 
 
+def _create_leaf(path: Path) -> tuple[int, int, int, int]:
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        _fail("store_unsafe")
+    except OSError as exc:
+        _fail("store_unsafe", exc)
+    try:
+        os.fchmod(fd, 0o600)
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+        ):
+            _fail("store_unsafe")
+    finally:
+        os.close(fd)
+    _reject_symlink_components(path)
+    return _leaf_signature(path, must_exist=True)
+
+
+def _discard_unpublished_leaf(
+    path: Path, created_signature: tuple[int, int, int, int]
+) -> None:
+    """Remove only the empty inode created by this initialize call."""
+    try:
+        leaf = path.lstat()
+    except OSError:
+        return
+    if (
+        (leaf.st_dev, leaf.st_ino, leaf.st_uid, leaf.st_mode) != created_signature
+        or not stat.S_ISREG(leaf.st_mode)
+        or leaf.st_uid != os.getuid()
+        or leaf.st_nlink != 1
+        or leaf.st_size != 0
+    ):
+        return
+    for candidate in (
+        Path(f"{path}-journal"), Path(f"{path}-wal"), Path(f"{path}-shm")
+    ):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_size != 0
+        ):
+            return
+        try:
+            candidate.unlink()
+        except OSError:
+            return
+    try:
+        current = path.lstat()
+        if (
+            (current.st_dev, current.st_ino, current.st_uid, current.st_mode)
+            == created_signature
+            and current.st_nlink == 1
+            and current.st_size == 0
+        ):
+            path.unlink()
+    except OSError:
+        return
+
+
 def _connect_write(path: Path) -> sqlite3.Connection:
+    before = _check_path(path, must_exist=True)
     connection = sqlite3.connect(path, isolation_level=None, timeout=5.0)
+    if _check_path(path, must_exist=True) != before:
+        connection.close()
+        _fail("store_unsafe")
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA busy_timeout=5000")
@@ -101,8 +252,12 @@ def _connect_write(path: Path) -> sqlite3.Connection:
 
 
 def _connect_read(path: Path) -> sqlite3.Connection:
-    uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
+    before = _check_path(path, must_exist=True)
+    uri = path.as_uri() + "?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True, timeout=1.0)
+    if _check_path(path, must_exist=True) != before:
+        connection.close()
+        _fail("store_unsafe")
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -334,8 +489,13 @@ class _Transaction:
     def __enter__(self) -> sqlite3.Connection:
         _check_path(self.path, must_exist=True)
         self.connection = _connect_write(self.path)
-        self.connection.execute("BEGIN IMMEDIATE")
-        return self.connection
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            return self.connection
+        except BaseException:
+            self.connection.close()
+            self.connection = None
+            raise
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         assert self.connection is not None
@@ -354,17 +514,25 @@ def _binding_record(row: sqlite3.Row) -> domain.LegacyBindingRecord:
 
 
 def initialize(path: Path) -> ProjectRegistryStore:
-    path = Path(path)
-    _check_path(path, must_exist=False)
+    path = _absolute_path(path)
+    _prepare_parent(path, create=True)
+    created_signature: tuple[int, int, int, int] | None = None
     try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.lstat()
+    except FileNotFoundError:
+        created_signature = _create_leaf(path)
     except OSError as exc:
         _fail("store_unsafe", exc)
-    if path.exists():
+    else:
         return open_existing(path)
-    connection = _connect_write(path)
     try:
-        os.chmod(path, 0o600)
+        connection = _connect_write(path)
+    except BaseException:
+        assert created_signature is not None
+        _discard_unpublished_leaf(path, created_signature)
+        raise
+    published = False
+    try:
         connection.execute("BEGIN IMMEDIATE")
         for statement in contracts.SCHEMA_STATEMENTS:
             connection.execute(statement)
@@ -377,6 +545,7 @@ def initialize(path: Path) -> ProjectRegistryStore:
         _after_schema_hook(connection)
         _validate_schema(connection)
         connection.execute("COMMIT")
+        published = True
     except BaseException:
         try:
             connection.execute("ROLLBACK")
@@ -385,11 +554,13 @@ def initialize(path: Path) -> ProjectRegistryStore:
         raise
     finally:
         connection.close()
+        if created_signature is not None and not published:
+            _discard_unpublished_leaf(path, created_signature)
     return ProjectRegistryStore(path)
 
 
 def open_existing(path: Path) -> ProjectRegistryStore:
-    path = Path(path)
+    path = _absolute_path(path)
     _check_path(path, must_exist=True)
     if Path(f"{path}-wal").exists() or Path(f"{path}-shm").exists():
         _fail("store_unsafe")

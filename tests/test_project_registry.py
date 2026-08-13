@@ -439,11 +439,29 @@ def test_initialize_failure_rolls_back_schema_and_ledger(db_path: Path, monkeypa
     monkeypatch.setattr(registry_store, "_after_schema_hook", lambda _connection: 1 / 0)
     with pytest.raises(ZeroDivisionError):
         registry_store.initialize(db_path)
+    assert not db_path.exists()
+    assert not Path(f"{db_path}-journal").exists()
+    assert not Path(f"{db_path}-wal").exists()
+    assert not Path(f"{db_path}-shm").exists()
+
+    monkeypatch.setattr(registry_store, "_after_schema_hook", lambda _connection: None)
+    registry_store.initialize(db_path).close()
+    registry_store.open_existing(db_path).close()
+
+
+@pytest.mark.parametrize("version", [0, 999])
+def test_initialize_never_deletes_or_mutates_existing_versioned_store(
+    db_path: Path, version: int
+):
     with sqlite3.connect(db_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
-        assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall() == []
+        connection.execute("CREATE TABLE marker(value TEXT)")
+        connection.execute(f"PRAGMA user_version={version}")
+    os.chmod(db_path, 0o600)
+    before = db_path.read_bytes()
+
+    with pytest.raises(registry_store.ProjectRegistryError):
+        registry_store.initialize(db_path)
+    assert db_path.read_bytes() == before
 
 
 def test_open_missing_and_unsafe_store_fail_closed(db_path: Path):
@@ -456,3 +474,101 @@ def test_open_missing_and_unsafe_store_fail_closed(db_path: Path):
     with pytest.raises(registry_store.ProjectRegistryError) as unsafe:
         registry_store.open_existing(db_path)
     assert _code(unsafe) == "store_unsafe"
+
+
+def test_initialize_rejects_ancestor_and_direct_symlinks(tmp_path: Path):
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    ancestor_link = tmp_path / "linked-parent"
+    ancestor_link.symlink_to(real, target_is_directory=True)
+    through_ancestor = ancestor_link / "nested" / "project-registry.sqlite3"
+
+    with pytest.raises(registry_store.ProjectRegistryError) as ancestor:
+        registry_store.initialize(through_ancestor)
+    assert _code(ancestor) == "store_unsafe"
+    assert not (real / "nested").exists()
+
+    target = real / "target.sqlite3"
+    target.write_bytes(b"do-not-touch")
+    os.chmod(target, 0o600)
+    direct_link = tmp_path / "project-registry.sqlite3"
+    direct_link.symlink_to(target)
+    with pytest.raises(registry_store.ProjectRegistryError) as direct:
+        registry_store.initialize(direct_link)
+    assert _code(direct) == "store_unsafe"
+    assert target.read_bytes() == b"do-not-touch"
+
+
+def test_initialize_rejects_unsafe_parent_mode_without_writing(tmp_path: Path):
+    parent = tmp_path / "unsafe"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o777)
+    path = parent / "project-registry.sqlite3"
+
+    with pytest.raises(registry_store.ProjectRegistryError) as unsafe:
+        registry_store.initialize(path)
+    assert _code(unsafe) == "store_unsafe"
+    assert not path.exists()
+
+
+def test_initialize_rejects_parent_and_existing_leaf_owner_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    parent_path = tmp_path / "parent-owner" / "project-registry.sqlite3"
+    fake_uid = os.getuid() + 1
+    monkeypatch.setattr(registry_store.os, "getuid", lambda: fake_uid)
+    with pytest.raises(registry_store.ProjectRegistryError) as parent:
+        registry_store.initialize(parent_path)
+    assert _code(parent) == "store_unsafe"
+    assert not parent_path.exists()
+
+    monkeypatch.undo()
+    existing = tmp_path / "existing.sqlite3"
+    registry_store.initialize(existing).close()
+    before = existing.read_bytes()
+    monkeypatch.setattr(registry_store.os, "getuid", lambda: fake_uid)
+    with pytest.raises(registry_store.ProjectRegistryError) as leaf:
+        registry_store.open_existing(existing)
+    assert _code(leaf) == "store_unsafe"
+    assert existing.read_bytes() == before
+
+
+def test_initialize_creates_private_parent_chain_and_reopens_existing_leaf(
+    tmp_path: Path,
+):
+    first = tmp_path / "private-a"
+    second = first / "private-b"
+    path = second / "project-registry.sqlite3"
+    registry_store.initialize(path).close()
+
+    assert first.stat().st_mode & 0o777 == 0o700
+    assert second.stat().st_mode & 0o777 == 0o700
+    assert path.stat().st_mode & 0o777 == 0o600
+    registry_store.open_existing(path).close()
+
+
+def test_transaction_begin_failure_closes_connection_and_store_recovers(
+    registry, db_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    blocker = sqlite3.connect(db_path, isolation_level=None)
+    blocker.execute("BEGIN EXCLUSIVE")
+    real_connect = registry_store._connect_write
+    captured: list[sqlite3.Connection] = []
+
+    def capture_connection(path: Path) -> sqlite3.Connection:
+        connection = real_connect(path)
+        connection.execute("PRAGMA busy_timeout=1")
+        captured.append(connection)
+        return connection
+
+    monkeypatch.setattr(registry_store, "_connect_write", capture_connection)
+    with pytest.raises(sqlite3.OperationalError):
+        registry.create_project(slug="locked", display_name="Locked", goal=None)
+    assert len(captured) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        captured[0].execute("SELECT 1")
+
+    blocker.execute("ROLLBACK")
+    blocker.close()
+    project = registry.create_project(slug="recovered", display_name="Recovered", goal=None)
+    assert project.slug == "recovered"
