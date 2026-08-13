@@ -89,17 +89,30 @@ def test_project_registry_current_store_fingerprint_compatible(isolated_roots):
 def test_project_registry_strict_schema_damage_fails_closed(
     isolated_roots, damage,
 ):
+    from agent_cockpit import project_registry_contracts
     from agent_cockpit import project_registry_store
 
     path = runtime_paths.store("project_registry")
     project_registry_store.initialize(path).close()
     connection = sqlite3.connect(path)
     if damage == "receipt":
+        connection.execute("DROP TRIGGER schema_migrations_update_forbidden")
         connection.execute(
             "UPDATE schema_migrations SET schema_digest=?", ("0" * 64,),
         )
     elif damage == "trigger":
-        connection.execute("DROP TRIGGER projects_slug_immutable")
+        existing_triggers = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        trigger_names = sorted(
+            existing_triggers & project_registry_contracts.PROJECT_REGISTRY_TRIGGERS
+        )
+        assert trigger_names, "project registry has no contract trigger to damage"
+        trigger_name = trigger_names[0]
+        connection.execute(f'DROP TRIGGER "{trigger_name}"')
     else:
         connection.execute("DROP INDEX repo_locations_active_node_path")
         connection.execute(
