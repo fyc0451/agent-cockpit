@@ -592,7 +592,7 @@
     {
       "id": "WEB-004-legacy-adapters",
       "title": "Adapt the consumed legacy read endpoints without weakening G3 validation",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-003-wip4-gate", "SLICE-001-local-readonly"],
       "scope": ["web/api/hooks.ts", "web/api/localSlice.ts", "web/api/types.ts", "web/pages/InboxPage.tsx", "web/pages/OverviewPage.tsx", "web/pages/WelcomePage.tsx", "web/shell/Rail.tsx", "web/test/a11y.test.tsx", "web/test/deeplinks.test.tsx", "web/test/local-slice.test.tsx", "web/test/page-states.test.tsx", "web/test/query-error.test.tsx", "web/test/selection.test.tsx"],
       "acceptance": [
