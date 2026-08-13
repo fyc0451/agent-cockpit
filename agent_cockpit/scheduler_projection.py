@@ -512,7 +512,16 @@ def _agent_reasons(agent: Mapping[str, Any], evaluated_at: datetime) -> list[str
         reasons.append("transport_unknown")
     observed = _parse_utc(agent.get("observed_at"))
     deadline = _parse_utc(agent.get("freshness_deadline"))
-    if observed is None or deadline is None or evaluated_at > deadline:
+    # Mirrors source freshness(): missing, future (observed past its own deadline),
+    # or inverted (evaluated before observed) observations are not coherent and
+    # cannot support an available/pairable agent, exactly like a stale one.
+    if (
+        observed is None
+        or deadline is None
+        or evaluated_at > deadline
+        or observed > deadline
+        or evaluated_at < observed
+    ):
         reasons.append("source_stale")
     return sorted(set(reasons))
 
@@ -520,6 +529,7 @@ def _agent_reasons(agent: Mapping[str, Any], evaluated_at: datetime) -> list[str
 _BLOCKING = {
     "no_stable_identity", "runtime_generation_unavailable", "runtime_not_verified",
     "runtime_generation_drift", "transport_unknown", "source_stale",
+    "agent_cooldown", "heartbeat_expired", "recovery_required",
 }
 
 
@@ -712,6 +722,9 @@ def project_scheduler_projection(
             and "runtime_generation_drift" not in values
             and "transport_unknown" not in values
             and "runtime_not_verified" not in values
+            and "agent_cooldown" not in values
+            and "heartbeat_expired" not in values
+            and "recovery_required" not in values
         ):
             if agent.get("observed_state") == "idle":
                 projected = "available"

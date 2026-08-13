@@ -781,3 +781,94 @@ def test_mixed_writer_reviewer_sensitivity_identity_generation():
     assert "i-stale-gen" not in paired_agents
     assert "agent_policy_denied" in result.reason_codes
     assert any(item.source_id == "CAR-REVIEW" for item in result.work.ready)
+
+
+# ── P0-1: explicit non-dispatchable agent reasons block writer AND reviewer ──
+@pytest.mark.parametrize("code", ["agent_cooldown", "heartbeat_expired", "recovery_required"])
+def test_p01_writer_blocking_reason_blocks_pair_and_availability(code):
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0]["sensitivity"] = "ordinary"  # phase=writer, state=ready
+    agent = _ready_agent(instance="i-reviewer")
+    agent["reason_codes"] = [code]
+    snapshot["agents"] = [agent]
+    result = _project(snapshot)
+    assert eligible_pairs(stamp_revisions(snapshot), T0) == ()
+    by_id = {a.agent_instance_id: a for a in result.agents.states}
+    assert by_id["i-reviewer"].projected_state != "available"
+    assert code in by_id["i-reviewer"].reason_codes
+
+
+@pytest.mark.parametrize("code", ["agent_cooldown", "heartbeat_expired", "recovery_required"])
+def test_p01_reviewer_blocking_reason_blocks_pair(code):
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0].update({
+        "phase": "reviewer", "state": "review",
+        "author_agent_instance_id": "i-author", "sensitivity": "ordinary",
+    })
+    reviewer = _ready_agent(instance="i-reviewer")
+    reviewer["reason_codes"] = [code]
+    snapshot["agents"] = [_ready_agent(instance="i-author"), reviewer]
+    result = _project(snapshot)
+    assert eligible_pairs(stamp_revisions(snapshot), T0) == ()
+    by_id = {a.agent_instance_id: a for a in result.agents.states}
+    assert by_id["i-reviewer"].projected_state != "available"
+    assert code in by_id["i-reviewer"].reason_codes
+
+
+# ── P0-2: agent observation uses the same freshness coherence as source ────
+def test_p02_writer_observed_after_deadline_blocks_pair_and_availability():
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0]["sensitivity"] = "ordinary"
+    agent = _ready_agent(instance="i-reviewer")
+    agent["observed_at"] = "2026-08-13T10:30:00+00:00"  # > freshness_deadline 10:00
+    snapshot["agents"] = [agent]
+    result = _project(snapshot)
+    assert eligible_pairs(stamp_revisions(snapshot), T0) == ()
+    by_id = {a.agent_instance_id: a for a in result.agents.states}
+    assert by_id["i-reviewer"].projected_state != "available"
+    assert "source_stale" in by_id["i-reviewer"].reason_codes
+
+
+def test_p02_writer_evaluated_before_observed_blocks_pair_and_availability():
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0]["sensitivity"] = "ordinary"
+    agent = _ready_agent(instance="i-reviewer")
+    agent["observed_at"] = "2026-08-13T09:01:00+00:00"  # > evaluated_at T0 09:00
+    snapshot["agents"] = [agent]
+    result = _project(snapshot)
+    assert eligible_pairs(stamp_revisions(snapshot), T0) == ()
+    by_id = {a.agent_instance_id: a for a in result.agents.states}
+    assert by_id["i-reviewer"].projected_state != "available"
+    assert "source_stale" in by_id["i-reviewer"].reason_codes
+
+
+def test_p02_reviewer_observed_after_deadline_blocks_pair():
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0].update({
+        "phase": "reviewer", "state": "review",
+        "author_agent_instance_id": "i-author", "sensitivity": "ordinary",
+    })
+    reviewer = _ready_agent(instance="i-reviewer")
+    reviewer["observed_at"] = "2026-08-13T10:30:00+00:00"  # > freshness_deadline 10:00
+    snapshot["agents"] = [_ready_agent(instance="i-author"), reviewer]
+    result = _project(snapshot)
+    assert eligible_pairs(stamp_revisions(snapshot), T0) == ()
+    by_id = {a.agent_instance_id: a for a in result.agents.states}
+    assert by_id["i-reviewer"].projected_state != "available"
+    assert "source_stale" in by_id["i-reviewer"].reason_codes
+
+
+def test_p02_reviewer_evaluated_before_observed_blocks_pair():
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0].update({
+        "phase": "reviewer", "state": "review",
+        "author_agent_instance_id": "i-author", "sensitivity": "ordinary",
+    })
+    reviewer = _ready_agent(instance="i-reviewer")
+    reviewer["observed_at"] = "2026-08-13T09:01:00+00:00"  # > evaluated_at T0 09:00
+    snapshot["agents"] = [_ready_agent(instance="i-author"), reviewer]
+    result = _project(snapshot)
+    assert eligible_pairs(stamp_revisions(snapshot), T0) == ()
+    by_id = {a.agent_instance_id: a for a in result.agents.states}
+    assert by_id["i-reviewer"].projected_state != "available"
+    assert "source_stale" in by_id["i-reviewer"].reason_codes
