@@ -29,7 +29,10 @@ describe('selection 原子清空（item 3）', () => {
 
     stubFetch({
       ...defaultFetchMap(),
-      '/api/overview': { data: { projects: [projectP1, projectP2] }, meta: metaOk },
+      '/api/overview': { projects: [projectP1, projectP2], total_unread: 0, total_projects: 2, total_agents: 0, agent_mail: { available: true } },
+      '/api/attention': { items: [], sessions: [], count: 0, mail_unread: 0, capabilities: {} },
+      '/api/herdr/status': { available: true, binary: '/usr/local/bin/herdr' },
+      '/api/settings': { language: 'zh', known_agents: ['claude'], languages: ['zh', 'en'] },
       '/api/projects/p2': { data: projectP2, meta: metaOk },
       '/api/projects/p2/workbench': { data: {}, meta: metaOk },
     })

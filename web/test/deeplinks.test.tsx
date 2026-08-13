@@ -2,6 +2,13 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { projectP1 } from '../fixtures/api'
 import { renderApp, stubDefaultFetch, stubFetch } from './helpers'
 
+// Bare legacy shapes matching real server.py (WEB-004 hooks use legacyGet)
+const legacyOverview = { projects: [], total_unread: 0, total_projects: 0, total_agents: 0, agent_mail: { available: true, reason: null } }
+const legacyAttention = { sessions: [], items: [{ id: 'a1', kind: 'review', title: 'ReviewPacket 待决定', summary: 'run r-9 变更需要人工决定', status: 'needs-action', project: 'p1' }, { id: 'a2', kind: 'note', title: '恢复提醒', summary: 'w2 可恢复会话', status: 'info', project: 'p1' }], count: 2, mail_unread: 0, capabilities: {} }
+const legacyHerdr = { available: true, binary: '/usr/local/bin/herdr' }
+const legacySettings = { language: 'zh', known_agents: ['codex', 'kimi', 'claude'], languages: ['zh', 'en'] }
+const legacyOverrides = { '/api/overview': legacyOverview, '/api/attention': legacyAttention, '/api/herdr/status': legacyHerdr, '/api/settings': legacySettings }
+
 describe('深链恢复（G1）', () => {
   it('从 #/projects/p1/workspaces/w1/files 冷启动恢复 selection Context', async () => {
     stubDefaultFetch()
@@ -28,8 +35,10 @@ describe('深链恢复（G1）', () => {
 
   it('无效 project slug（404 envelope）显示 typed error 态，不得用 empty', async () => {
     stubFetch({
-      '/api/attention': { data: { items: [] }, meta: { request_id: 'r-1' } },
-      '/api/herdr/status': { data: { name: 'Herdr' }, meta: { request_id: 'r-2' } },
+      '/api/attention': { items: [], sessions: [], count: 0, mail_unread: 0, capabilities: {} },
+      '/api/herdr/status': { available: true, binary: '/usr/local/bin/herdr' },
+      '/api/overview': legacyOverview,
+      '/api/settings': legacySettings,
       // /api/projects/nope 未配置 → 404 envelope
     })
     const { container } = renderApp('/projects/nope/workbench')
@@ -52,7 +61,7 @@ describe('深链恢复（G1）', () => {
   })
 
   it('未知路由重定向 #/overview', async () => {
-    stubDefaultFetch()
+    stubDefaultFetch(legacyOverrides)
     renderApp('/no/such/route')
     expect(await screen.findByText('需要你处理', { selector: '.page-title' })).toBeInTheDocument()
   })
@@ -74,7 +83,7 @@ describe('深链恢复（G1）', () => {
   })
 
   it('#/inbox?view=needs-action 从 query 恢复筛选', async () => {
-    stubDefaultFetch()
+    stubDefaultFetch(legacyOverrides)
     renderApp('/inbox?view=needs-action')
     const tab = await screen.findByRole('tab', { name: '需要你处理' })
     expect(tab).toHaveAttribute('aria-selected', 'true')

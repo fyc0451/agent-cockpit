@@ -3,9 +3,16 @@ import userEvent from '@testing-library/user-event'
 import { Button } from '../components/Button'
 import { renderApp, stubDefaultFetch } from './helpers'
 
+const legacyOverrides = {
+  '/api/overview': { projects: [], total_unread: 0, total_projects: 0, total_agents: 0, agent_mail: { available: true } },
+  '/api/attention': { sessions: [], items: [], count: 0, mail_unread: 0, capabilities: {} },
+  '/api/herdr/status': { available: true, binary: '/usr/local/bin/herdr' },
+  '/api/settings': { language: 'zh', known_agents: ['claude'], languages: ['zh', 'en'] },
+}
+
 describe('A11y（item 7）', () => {
   it('skip link（button 形态）聚焦主内容，不改写业务 hash', async () => {
-    stubDefaultFetch()
+    stubDefaultFetch(legacyOverrides)
     const user = userEvent.setup()
     const { container } = renderApp('/overview')
     const skip = screen.getByRole('button', { name: '跳到主内容' })

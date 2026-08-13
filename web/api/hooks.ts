@@ -4,20 +4,19 @@ import {
   GLOBAL_SCOPE,
   projectScope,
   useReportCapabilities,
-  workspaceScope,
   type CapabilityScope,
 } from '../state/capabilities'
 import type { ApiResult } from './client'
-import type {
-  Attention,
-  EnvCheck,
-  HerdrStatus,
-  Overview,
-  Project,
-  Settings,
-  Tasks,
-  Workbench,
-} from './types'
+import type { Project, Workbench } from './types'
+import {
+  legacyGet,
+  assertLegacyOverview,
+  assertLegacyAttention,
+  assertLegacySettings,
+  assertLegacyHerdrStatus,
+  assertLegacyEnvCheck,
+  assertLegacyTasks,
+} from './localSlice'
 
 function shouldRetry(failureCount: number, error: unknown): boolean {
   return error instanceof ApiError && error.retryable && failureCount < 2
@@ -30,27 +29,31 @@ function useMeta<T>(q: { data?: ApiResult<T> }, scope: CapabilityScope = GLOBAL_
   useReportCapabilities(q.data?.meta, scope)
 }
 
+// ---- WEB-004: legacy endpoints return bare dict, not G3 {data,meta}.
+//      Use legacyGet + shape guard; return {data, meta:null} (no fabricated meta).
+//      Do NOT call useMeta (legacy has no real capabilities to report).
+
 export function useOverview() {
   const q = useQuery({
     queryKey: ['overview'],
-    queryFn: () => api.get<Overview>('/api/overview'),
+    queryFn: async () => ({ data: assertLegacyOverview(await legacyGet('/api/overview')), meta: null }),
     staleTime: 15_000,
     ...retry,
   })
-  useMeta(q)
   return q
 }
 
 export function useAttention() {
   const q = useQuery({
     queryKey: ['attention'],
-    queryFn: () => api.get<Attention>('/api/attention'),
+    queryFn: async () => ({ data: assertLegacyAttention(await legacyGet('/api/attention')), meta: null }),
     staleTime: 10_000,
     ...retry,
   })
-  useMeta(q)
   return q
 }
+
+// ---- Unchanged: useProject/useWorkbench not consumed by production pages ----
 
 export function useProject(slug: string | null) {
   const q = useQuery({
@@ -76,37 +79,36 @@ export function useWorkbench(slug: string | null) {
   return q
 }
 
+// ---- WEB-004 legacy adapters (continued) ----
+
 export function useSettings() {
   const q = useQuery({
     queryKey: ['settings'],
-    queryFn: () => api.get<Settings>('/api/settings'),
+    queryFn: async () => ({ data: assertLegacySettings(await legacyGet('/api/settings')), meta: null }),
     staleTime: 30_000,
     ...retry,
   })
-  useMeta(q)
   return q
 }
 
 export function useEnvCheck() {
   const q = useQuery({
     queryKey: ['env-check'],
-    queryFn: () => api.get<EnvCheck>('/api/env-check'),
+    queryFn: async () => ({ data: assertLegacyEnvCheck(await legacyGet('/api/env-check')), meta: null }),
     staleTime: 60_000,
     ...retry,
   })
-  useMeta(q)
   return q
 }
 
 export function useHerdrStatus() {
   const q = useQuery({
     queryKey: ['herdr-status'],
-    queryFn: () => api.get<HerdrStatus>('/api/herdr/status'),
+    queryFn: async () => ({ data: assertLegacyHerdrStatus(await legacyGet('/api/herdr/status')), meta: null }),
     staleTime: 15_000,
     refetchInterval: 30_000,
     ...retry,
   })
-  useMeta(q)
   return q
 }
 
@@ -117,17 +119,9 @@ export function useTasks(filter: { project?: string; workspace?: string }) {
   const qs = params.toString()
   const q = useQuery({
     queryKey: ['tasks', filter.project ?? null, filter.workspace ?? null],
-    queryFn: () => api.get<Tasks>(`/api/tasks${qs ? `?${qs}` : ''}`),
+    queryFn: async () => ({ data: assertLegacyTasks(await legacyGet(`/api/tasks${qs ? `?${qs}` : ''}`)), meta: null }),
     staleTime: 10_000,
     ...retry,
   })
-  useMeta(
-    q,
-    filter.project && filter.workspace
-      ? workspaceScope(filter.project, filter.workspace)
-      : filter.project
-        ? projectScope(filter.project)
-        : GLOBAL_SCOPE,
-  )
   return q
 }
