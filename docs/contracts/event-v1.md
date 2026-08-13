@@ -14,7 +14,8 @@ server wiring, shared schema, runtime path, or projection.
 `correlation_id`, `causation_id`, `occurred_at`, `payload`, and `receipt_refs`.
 `actor` is exactly `{type,id}`; `source` is exactly `{type,source_event_id}`; every receipt
 is exactly `{type,id}`. `event_version` and `aggregate_version` are positive JSON integers,
-not booleans. `recorded_at` and a journal-monotonic positive `cursor` are assigned by Store.
+not booleans, within SQLite's signed 64-bit integer range. `recorded_at` and a
+journal-monotonic positive `cursor` are assigned by Store.
 
 `(source.type, source.source_event_id)` is the external idempotency identity. Exact canonical
 replay returns the first immutable event and cursor; a changed envelope returns
@@ -27,10 +28,15 @@ Receipt refs are stable identifiers only; they do not copy receipt payloads.
 
 ## Store and Reads
 
-`initialize(path)` is explicit and creates a private `0600` SQLite leaf. The Store validates
-an owned v1 fingerprint on every open. Missing Store reads return `schema_missing` without
-creating a DB; unknown/future/drift schema fails closed. A live read uses `mode=ro`,
+`initialize(path)` is explicit. It creates and validates a private `0600` temporary SQLite
+leaf in the target directory, fsyncs it, and publishes without replacing an existing target.
+Failure removes only that invocation's temporary leaf, so a clean retry remains possible.
+The Store validates an owned v1 fingerprint on every open. Missing Store reads return
+`schema_missing` without creating a DB; unknown/future/drift schema (including extra tables,
+indexes, views, or triggers) fails closed. A live read uses `mode=ro`,
 `query_only`, and an explicit snapshot; it never initializes, migrates, enables WAL, or writes.
+Every materialized row is revalidated as a complete envelope, including its canonical request
+digest, assigned timestamp, and cursor; malformed persisted content returns `store_corrupt`.
 
 `list(project_id, workspace_id, after_cursor, types, limit)` requires project scope, supports
 only a stable type tuple and `1..100` limit, orders by ascending cursor, and returns the last

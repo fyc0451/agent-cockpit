@@ -16,6 +16,7 @@ from typing import Any, Mapping
 SCHEMA_VERSION = 1
 MAX_PAYLOAD_BYTES = 16_384
 MAX_RECEIPTS = 32
+MAX_SQLITE_INTEGER = 2**63 - 1
 _FORBIDDEN_PAYLOAD_KEYS = frozenset({
     "secret", "secrets", "token", "password", "credential", "authorization",
     "terminal_output", "terminal_scroll", "hidden_reasoning", "reasoning",
@@ -52,30 +53,47 @@ CREATE TABLE event_schema (
 );
 """
 _SCHEMA_DIGEST = hashlib.sha256(_SCHEMA.encode("utf-8")).hexdigest()
+_TABLES = ("event_schema", "events")
 
 
-def _schema_objects(connection: sqlite3.Connection) -> tuple[tuple[str, str, str, str], ...]:
-    return tuple(
-        (str(row["type"]), str(row["name"]), str(row["tbl_name"]), str(row["sql"]))
-        for row in connection.execute(
+def _canonical_sql(value: str | None) -> str:
+    return " ".join((value or "").split()).lower()
+
+
+def _schema_fingerprint(connection: sqlite3.Connection) -> tuple[object, ...]:
+    def rows(sql: str) -> tuple[tuple[object, ...], ...]:
+        return tuple(tuple(row) for row in connection.execute(sql).fetchall())
+
+    objects = tuple(
+        (str(kind), str(name), str(table), _canonical_sql(sql))
+        for kind, name, table, sql in connection.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_master "
-            "WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' "
-            "ORDER BY type, name"
-        )
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
     )
+    tables = []
+    for table in _TABLES:
+        columns = rows(f"PRAGMA table_xinfo({table})")
+        indexes = rows(f"PRAGMA index_list({table})")
+        index_columns = tuple(
+            (str(row[1]), rows(f"PRAGMA index_xinfo({row[1]})"))
+            for row in indexes
+        )
+        foreign_keys = rows(f"PRAGMA foreign_key_list({table})")
+        tables.append((table, columns, indexes, index_columns, foreign_keys))
+    return objects, tuple(tables)
 
 
-def _expected_schema_objects() -> tuple[tuple[str, str, str, str], ...]:
+def _expected_schema_fingerprint() -> tuple[object, ...]:
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
     try:
         connection.executescript(_SCHEMA)
-        return _schema_objects(connection)
+        return _schema_fingerprint(connection)
     finally:
         connection.close()
 
 
-_EXPECTED_SCHEMA_OBJECTS = _expected_schema_objects()
+_EXPECTED_SCHEMA_FINGERPRINT = _expected_schema_fingerprint()
 
 
 class EventStoreError(RuntimeError):
@@ -159,6 +177,12 @@ def _timestamp(value: object) -> str:
     return value
 
 
+def _integer(value: object, *, minimum: int) -> int:
+    if type(value) is not int or not minimum <= value <= MAX_SQLITE_INTEGER:
+        _fail("invalid_argument")
+    return value
+
+
 def _object(value: object, keys: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != keys:
         _fail("invalid_argument")
@@ -210,8 +234,7 @@ def _input(value: Mapping[str, Any]) -> dict[str, Any]:
     for key in ("event_type", "project_id", "aggregate_type", "aggregate_id"):
         _text(value[key], maximum=256)
     for key in ("event_version", "aggregate_version"):
-        if type(value[key]) is not int or value[key] < 1:
-            _fail("invalid_argument")
+        _integer(value[key], minimum=1)
     actor = _object(value["actor"], {"type", "id"})
     source = _object(value["source"], {"type", "source_event_id"})
     output = dict(value)
@@ -255,6 +278,20 @@ def _leaf(path: Path, *, missing_code: str) -> None:
         _fail("store_unsafe")
 
 
+def _create_private_leaf(path: Path) -> None:
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        _fail("store_write_failed", exc)
+    _leaf(path, missing_code="schema_missing")
+
+
 def _private_parent(path: Path) -> None:
     try:
         details = path.parent.lstat()
@@ -296,7 +333,7 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
             or count is None
             or int(count[0]) != 1
             or str(digest[0]) != _SCHEMA_DIGEST
-            or _schema_objects(connection) != _EXPECTED_SCHEMA_OBJECTS
+            or _schema_fingerprint(connection) != _EXPECTED_SCHEMA_FINGERPRINT
         ):
             _fail("schema_fingerprint_mismatch")
     except EventStoreError:
@@ -305,15 +342,73 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
         _fail("schema_fingerprint_mismatch", exc)
 
 
+def _initialize_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        "BEGIN IMMEDIATE;" + _SCHEMA
+        + "INSERT INTO event_schema VALUES ('schema_digest', '"
+        + _SCHEMA_DIGEST + "');"
+        + "PRAGMA user_version=1;COMMIT;"
+    )
+
+
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_parent(path: Path) -> None:
+    descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _record(row: sqlite3.Row) -> EventRecord:
     try:
+        actor = json.loads(row["actor_json"])
+        payload = json.loads(row["payload_json"])
+        receipt_refs = json.loads(row["receipt_refs_json"])
+        event = _input({
+            "event_id": row["event_id"], "event_type": row["event_type"],
+            "event_version": row["event_version"], "project_id": row["project_id"],
+            "workspace_id": row["workspace_id"],
+            "aggregate_type": row["aggregate_type"],
+            "aggregate_id": row["aggregate_id"],
+            "aggregate_version": row["aggregate_version"], "actor": actor,
+            "source": {
+                "type": row["source_type"],
+                "source_event_id": row["source_event_id"],
+            },
+            "correlation_id": row["correlation_id"],
+            "causation_id": row["causation_id"],
+            "occurred_at": row["occurred_at"], "payload": payload,
+            "receipt_refs": receipt_refs,
+        })
+        cursor = _integer(row["cursor"], minimum=1)
+        recorded_at = _timestamp(row["recorded_at"])
+        request_digest = row["request_digest"]
+        if (
+            type(request_digest) is not str or len(request_digest) != 64
+            or any(char not in "0123456789abcdef" for char in request_digest)
+            or request_digest != hashlib.sha256(
+                _canonical(event).encode("ascii")
+            ).hexdigest()
+        ):
+            _fail("store_corrupt")
         return EventRecord(
-            row["event_id"], row["event_type"], int(row["event_version"]), row["project_id"],
-            row["workspace_id"], row["aggregate_type"], row["aggregate_id"], int(row["aggregate_version"]),
-            json.loads(row["actor_json"]), row["source_type"], row["source_event_id"], row["correlation_id"],
-            row["causation_id"], row["occurred_at"], row["recorded_at"], int(row["cursor"]),
-            json.loads(row["payload_json"]), tuple(json.loads(row["receipt_refs_json"])),
+            event["event_id"], event["event_type"], event["event_version"],
+            event["project_id"], event["workspace_id"], event["aggregate_type"],
+            event["aggregate_id"], event["aggregate_version"], event["actor"],
+            event["source"]["type"], event["source"]["source_event_id"],
+            event["correlation_id"], event["causation_id"], event["occurred_at"],
+            recorded_at, cursor, event["payload"], tuple(event["receipt_refs"]),
         )
+    except EventStoreError as exc:
+        _fail("store_corrupt", exc)
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         _fail("store_corrupt", exc)
 
@@ -347,18 +442,20 @@ class EventStore:
                 (event["source"]["type"], event["source"]["source_event_id"]),
             ).fetchone()
             if existing is not None:
+                record = _materialize(existing)
                 if existing["request_digest"] != digest:
                     _fail("event_dedup_conflict")
                 connection.execute("COMMIT")
-                return _materialize(existing)
+                return record
             recorded_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
             connection.execute(
                 "INSERT INTO events (event_id,event_type,event_version,project_id,workspace_id,aggregate_type,aggregate_id,aggregate_version,actor_json,source_type,source_event_id,correlation_id,causation_id,occurred_at,recorded_at,payload_json,receipt_refs_json,request_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (event["event_id"], event["event_type"], event["event_version"], event["project_id"], event["workspace_id"], event["aggregate_type"], event["aggregate_id"], event["aggregate_version"], _canonical(event["actor"]), event["source"]["type"], event["source"]["source_event_id"], event["correlation_id"], event["causation_id"], event["occurred_at"], recorded_at, _canonical(event["payload"]), _canonical(event["receipt_refs"]), digest),
             )
             row = connection.execute("SELECT * FROM events WHERE event_id=?", (event["event_id"],)).fetchone()
+            record = _materialize(row)
             connection.execute("COMMIT")
-            return _materialize(row)
+            return record
         except EventStoreError:
             _rollback(connection)
             raise
@@ -379,7 +476,9 @@ class EventStore:
     def list(self, *, project_id: str, workspace_id: str | None = None, after_cursor: int = 0, types: tuple[str, ...] = (), limit: int = 50) -> tuple[tuple[EventRecord, ...], int | None]:
         _text(project_id)
         _text(workspace_id, nullable=True)
-        if type(after_cursor) is not int or after_cursor < 0 or type(limit) is not int or not 1 <= limit <= 100 or not isinstance(types, tuple):
+        _integer(after_cursor, minimum=0)
+        _integer(limit, minimum=1)
+        if limit > 100 or not isinstance(types, tuple):
             _fail("invalid_argument")
         if any(_text(value) is None for value in types) or len(set(types)) != len(types):
             _fail("invalid_argument")
@@ -417,27 +516,45 @@ class EventStore:
 
 def initialize(path: Path) -> EventStore:
     path = _path(path)
-    if path.exists():
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _fail("store_unsafe", exc)
+    else:
         return open_existing(path)
     _private_parent(path)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(16)}.tmp")
+    connection: sqlite3.Connection | None = None
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(descriptor)
-        os.chmod(path, 0o600)
-        _leaf(path, missing_code="schema_missing")
-        connection = _connect(path, write=True)
+        _create_private_leaf(temporary)
+        connection = _connect(temporary, write=True)
         try:
-            connection.executescript(
-                "BEGIN IMMEDIATE;" + _SCHEMA +
-                "INSERT INTO event_schema VALUES ('schema_digest', '" + _SCHEMA_DIGEST + "');"
-                "PRAGMA user_version=1;COMMIT;"
-            )
+            _initialize_schema(connection)
+            _validate_schema(connection)
         finally:
             connection.close()
+            connection = None
+        _fsync_file(temporary)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            return open_existing(path)
+        temporary.unlink()
+        _leaf(path, missing_code="schema_missing")
+        _fsync_parent(path)
     except EventStoreError:
         raise
     except (OSError, sqlite3.Error) as exc:
         _fail("store_write_failed", exc)
+    finally:
+        if connection is not None:
+            connection.close()
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
     return open_existing(path)
 
 

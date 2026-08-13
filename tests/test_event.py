@@ -101,6 +101,18 @@ def test_payload_size_and_invalid_queries_fail_closed(store):
     assert duplicate_types.value.code == "invalid_argument"
 
 
+@pytest.mark.parametrize("call", [
+    lambda store: store.append(_event(event_version=2**63)),
+    lambda store: store.append(_event(aggregate_version=2**63)),
+    lambda store: store.list(project_id="prj_" + "a" * 32, after_cursor=2**63),
+    lambda store: store.list(project_id="prj_" + "a" * 32, limit=2**63),
+])
+def test_sqlite_integer_overflow_is_stable_invalid_argument(store, call):
+    with pytest.raises(event_store.EventStoreError) as invalid:
+        call(store)
+    assert invalid.value.code == "invalid_argument"
+
+
 def test_read_never_initializes_and_schema_drift_fails_closed(path: Path):
     with pytest.raises(event_store.EventStoreError) as missing:
         event_store.open_existing(path)
@@ -117,6 +129,42 @@ def test_read_never_initializes_and_schema_drift_fails_closed(path: Path):
     assert drift.value.code == "schema_fingerprint_mismatch"
     assert drifted != before
     assert path.read_bytes() == drifted
+
+
+@pytest.mark.parametrize("ddl", [
+    "CREATE VIEW extra_event_view AS SELECT event_id FROM events",
+    "CREATE TRIGGER extra_event_trigger AFTER INSERT ON events BEGIN SELECT 1; END",
+    "CREATE INDEX extra_event_index ON events(event_type)",
+    "ALTER TABLE events ADD COLUMN extra_event_column TEXT",
+])
+def test_complete_schema_fingerprint_rejects_unknown_objects(path: Path, ddl: str):
+    event_store.initialize(path).close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(ddl)
+    with pytest.raises(event_store.EventStoreError) as drift:
+        event_store.open_existing(path)
+    assert drift.value.code == "schema_fingerprint_mismatch"
+
+
+def test_initialize_failure_removes_private_temp_and_retry_succeeds(
+    path: Path, monkeypatch,
+):
+    real_initialize = event_store._initialize_schema
+
+    def fail_initialize(_connection):
+        raise sqlite3.OperationalError("private initialization failure")
+
+    monkeypatch.setattr(event_store, "_initialize_schema", fail_initialize)
+    with pytest.raises(event_store.EventStoreError) as failed:
+        event_store.initialize(path)
+    _sanitized(failed, "store_write_failed", "private initialization failure")
+    assert not path.exists()
+    assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
+
+    monkeypatch.setattr(event_store, "_initialize_schema", real_initialize)
+    store = event_store.initialize(path)
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert store.list(project_id="prj_" + "a" * 32)[0] == ()
 
 
 def test_store_errors_are_sanitized_and_connection_is_closed(store, monkeypatch):
@@ -146,6 +194,30 @@ def test_store_errors_are_sanitized_and_connection_is_closed(store, monkeypatch)
         store.append(_event())
     _sanitized(failure, "store_corrupt", "private sqlite detail")
     assert captured[0].closed is True
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(("column", "value"), [
+    ("actor_json", "[]"),
+    ("actor_json", '{"type":"system"}'),
+    ("payload_json", "[]"),
+    ("receipt_refs_json", "{}"),
+    ("event_version", "not-an-integer"),
+    ("request_digest", "0" * 64),
+])
+def test_materialized_envelope_corruption_fails_closed(store, column: str, value: str):
+    record = store.append(_event())
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            f"UPDATE events SET {column}=? WHERE event_id=?",
+            (value, record.event_id),
+        )
+    with pytest.raises(event_store.EventStoreError) as corrupt:
+        store.get(record.event_id)
+    assert corrupt.value.code == "store_corrupt"
+    assert corrupt.value.__cause__ is None
+    assert corrupt.value.__context__ is None
 
 
 def test_read_uses_query_only_and_does_not_write_sidecars(store, monkeypatch, path: Path):
