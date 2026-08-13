@@ -30,49 +30,75 @@ export const metaOk = {
   capabilities: {},
 }
 
+export const agentMailStatus = {
+  available: true,
+  reason: null,
+  read_available: true,
+  write_available: true,
+  write_reason: null,
+}
+
 export const overviewPayload = {
-  data: { projects: [projectP1] },
-  meta: metaOk,
+  projects: [{
+    id: 1,
+    slug: 'p1',
+    human_key: '/repos/p1',
+    agent_count: 0,
+    active_agent_count: 0,
+    message_count: 0,
+    last_activity: null,
+    unread: 0,
+  }],
+  total_unread: 0,
+  total_projects: 1,
+  total_agents: 0,
+  agent_mail: agentMailStatus,
 }
 
 export const attentionPayload = {
-  data: {
-    items: [
-      {
-        id: 'a1',
-        kind: 'review',
-        title: 'ReviewPacket 待决定',
-        summary: 'run r-9 的变更需要人工决定',
-        status: 'needs-action',
-        project: 'p1',
-      },
-      {
-        id: 'a2',
-        kind: 'note',
-        title: '恢复提醒',
-        summary: 'workspace w2 有可恢复会话',
-        status: 'info',
-        project: 'p1',
-      },
-    ],
-  },
-  meta: metaOk,
+  sessions: [],
+  items: [],
+  count: 0,
+  mail_unread: 0,
+  capabilities: { agent_mail: agentMailStatus },
 }
 
 export const settingsPayload = {
-  data: { harness: { default: 'kimi' }, runtime: { mode: 'source' }, nodes: [] },
-  meta: metaOk,
+  language: 'zh',
+  dir_agents: {},
+  enabled_agents: ['codex', 'kimi', 'claude', 'qodercli', 'grok', 'opencode'],
+  upload_max_mb: 100,
+  team_hub_url: '',
+  human_auth_url: '',
+  term: { max_terms: 16, idle_ttl: 1800, write_timeout: 2.0 },
+  known_agents: ['codex', 'kimi', 'claude', 'qodercli', 'grok', 'opencode'],
+  languages: ['zh', 'en', 'ja'],
 }
 
 export const herdrStatusPayload = {
-  data: { status: 'running', name: 'Herdr', healthy: true },
-  meta: metaOk,
+  available: true,
+  binary: '/usr/local/bin/herdr',
 }
 
-export const tasksPayload = {
-  data: { items: [{ id: 't1', title: '修复登录回归', status: 'in_progress', kind: 'task' }] },
-  meta: metaOk,
-}
+export const tasksPayload = [
+  {
+    id: 'task-e2e-1',
+    workdir: '/repos/p1',
+    source_workdir: '/repos/p1',
+    base_sha: '0123456789abcdef0123456789abcdef01234567',
+    run_workdir: '/repos/.agent-cockpit-worktrees/task-e2e-1',
+    preview_hash: null,
+    prompt: '修复登录回归',
+    model: 'codex',
+    status: 'pending',
+    pid: null,
+    exit_code: null,
+    created_ts: 1,
+    started_ts: null,
+    finished_ts: null,
+    output_lines: 0,
+  },
+]
 
 // ================= SLICE-001：真实 Registry 身份 =================
 
