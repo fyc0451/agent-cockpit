@@ -293,7 +293,7 @@
     {
       "id": "PROJ-003-legacy-import",
       "title": "Import legacy Agent Mail Herdr and Coordination evidence read-only",
-      "status": "in_progress",
+      "status": "review",
       "depends_on": ["PROJ-003A-legacy-import-store"],
       "scope": ["agent_cockpit/project_legacy_import.py", "tests/test_project_legacy_import.py", "docs/contracts/project-legacy-import-v1.md"],
       "acceptance": [
@@ -302,9 +302,9 @@
       "rollback": "Revert only the importer code; retain append-only registry provenance and never mutate legacy authorities",
       "production_impact": "none",
       "owner_instance_id": "i-esfeeieqrcsgnmf46hx5kfwyau",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-ac4mbdpyttxouq6op4tesfzyhy",
       "base_sha": "62c0aa2a1dbc33a551ba33149aa7b7efd0b2eaca",
-      "fixed_sha": null,
+      "fixed_sha": "8c865f3a5bb84c45e6bf2623f285565abdf358d6",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
