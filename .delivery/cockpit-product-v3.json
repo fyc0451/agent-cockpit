@@ -699,7 +699,7 @@
     {
       "id": "P0-B0-test-isolation",
       "title": "Isolate coordination hard-stop tests from host Leader bindings",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["P0-WORKBENCH-001-unblock"],
       "scope": ["tests/test_coordination_server.py"],
       "acceptance": [
