@@ -191,7 +191,7 @@
     {
       "id": "WEB-003-project-registry-ui",
       "title": "Build the Project Registry list and Local registration wizard",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["WEB-001-app-shell"],
       "scope": ["web/api/registry.ts", "web/pages/ProjectsPage.tsx", "web/features/project-wizard/ProjectWizard.tsx", "web/fixtures/api.ts", "web/test/web003-registry.test.tsx", "web/test/query-error.test.tsx", "web/e2e/project-registry.spec.ts"],
       "acceptance": [
