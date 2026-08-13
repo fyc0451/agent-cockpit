@@ -2,6 +2,11 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   assertLegacyEnvCheck,
+  assertLegacyHerdrStatus,
+  assertLegacyOverview,
+  assertLegacyAttention,
+  assertLegacySettings,
+  assertLegacyTasks,
   assertLegacyWorkbench,
   assertWorkspaceFileContentData,
   assertWorkspaceFileSearchData,
@@ -407,3 +412,145 @@ describe('SLICE-001 页面纵切', () => {
     expect(calls.filter((u) => u === '/api/projects/ghost')).toEqual([])
   })
 })
+
+// ===== WEB-004 legacy narrow adapter shape guards =====
+
+describe('WEB-004 legacy shape guards', () => {
+  test('assertLegacyHerdrStatus: valid {available, binary}', () => {
+    const r = assertLegacyHerdrStatus({ available: true, binary: '/usr/bin/herdr' })
+    expect(r.available).toBe(true)
+    expect(r.binary).toBe('/usr/bin/herdr')
+  })
+
+  test('assertLegacyHerdrStatus: rejects missing key', () => {
+    expect(() => assertLegacyHerdrStatus({ available: true })).toThrow(ProtocolError)
+    expect(() => assertLegacyHerdrStatus({ binary: 'x' })).toThrow(ProtocolError)
+  })
+
+  test('assertLegacyHerdrStatus: rejects wrong type', () => {
+    expect(() => assertLegacyHerdrStatus({ available: 'yes', binary: 'x' })).toThrow(ProtocolError)
+    expect(() => assertLegacyHerdrStatus(null)).toThrow(ProtocolError)
+    expect(() => assertLegacyHerdrStatus([])).toThrow(ProtocolError)
+  })
+
+  test('assertLegacyOverview: accepts bare object', () => {
+    const r = assertLegacyOverview({ projects: [], total_unread: 0, total_projects: 0, total_agents: 0, agent_mail: {} })
+    expect(r.projects).toEqual([])
+  })
+
+  test('assertLegacyOverview: optional project strings accept empty object and reject wrong types', () => {
+    const base = { total_unread: 0, total_projects: 1, total_agents: 0, agent_mail: {} }
+    expect(assertLegacyOverview({ ...base, projects: [{}] }).projects).toEqual([{}])
+    expect(() => assertLegacyOverview({ ...base, projects: [null] })).toThrow(ProtocolError)
+    expect(() => assertLegacyOverview({ ...base, projects: [[]] })).toThrow(ProtocolError)
+    expect(() => assertLegacyOverview({ ...base, projects: [{ slug: null }] })).toThrow(ProtocolError)
+    expect(() => assertLegacyOverview({ ...base, projects: [{ slug: undefined }] })).toThrow(ProtocolError)
+    expect(() => assertLegacyOverview({ ...base, projects: [{ name: [] }] })).toThrow(ProtocolError)
+    expect(() => assertLegacyOverview({ ...base, projects: [{ branch: 1 }] })).toThrow(ProtocolError)
+  })
+
+  test('assertLegacyOverview: rejects non-object', () => {
+    expect(() => assertLegacyOverview(null)).toThrow(ProtocolError)
+    expect(() => assertLegacyOverview('string')).toThrow(ProtocolError)
+    expect(() => assertLegacyOverview([])).toThrow(ProtocolError)
+  })
+
+  test('assertLegacyAttention: accepts bare object', () => {
+    const r = assertLegacyAttention({ sessions: [], items: [], count: 0, mail_unread: 0, capabilities: {} })
+    expect(r.items).toEqual([])
+  })
+
+  test('assertLegacyAttention: optional item strings accept empty object and reject wrong types', () => {
+    const base = { sessions: [], count: 1, mail_unread: 0, capabilities: {} }
+    expect(assertLegacyAttention({ ...base, items: [{}] }).items).toEqual([{}])
+    expect(() => assertLegacyAttention({ ...base, items: [null] })).toThrow(ProtocolError)
+    expect(() => assertLegacyAttention({ ...base, items: [[]] })).toThrow(ProtocolError)
+    expect(() => assertLegacyAttention({ ...base, items: [{ id: 1 }] })).toThrow(ProtocolError)
+    expect(() => assertLegacyAttention({ ...base, items: [{ title: {} }] })).toThrow(ProtocolError)
+    expect(() => assertLegacyAttention({ ...base, items: [{ title: undefined }] })).toThrow(ProtocolError)
+    for (const field of ['kind', 'summary', 'status', 'project', 'workspace', 'created_at', 'url']) {
+      expect(() => assertLegacyAttention({ ...base, items: [{ [field]: null }] })).toThrow(ProtocolError)
+    }
+  })
+
+  test('assertLegacyAttention: rejects non-object', () => {
+    expect(() => assertLegacyAttention(42)).toThrow(ProtocolError)
+  })
+
+  test('assertLegacySettings: accepts bare object', () => {
+    const r = assertLegacySettings({ language: 'zh', known_agents: ['claude'], languages: ['zh', 'en'] })
+    expect(r.known_agents).toEqual(['claude'])
+  })
+
+  test('assertLegacySettings: rejects non-object', () => {
+    expect(() => assertLegacySettings('nope')).toThrow(ProtocolError)
+  })
+
+  test('assertLegacyTasks: accepts bare array', () => {
+    const r = assertLegacyTasks([])
+    expect(r.tasks).toEqual([])
+  })
+
+  test('assertLegacyTasks: optional strings accept empty object and reject wrong types', () => {
+    expect(assertLegacyTasks([{}]).tasks).toEqual([{}])
+    expect(() => assertLegacyTasks([null])).toThrow(ProtocolError)
+    expect(() => assertLegacyTasks([[]])).toThrow(ProtocolError)
+    expect(() => assertLegacyTasks([{ id: 1 }])).toThrow(ProtocolError)
+    expect(() => assertLegacyTasks([{ title: {} }])).toThrow(ProtocolError)
+    expect(() => assertLegacyTasks([{ title: undefined }])).toThrow(ProtocolError)
+    for (const field of ['status', 'kind', 'project', 'workspace', 'updated_at']) {
+      expect(() => assertLegacyTasks([{ [field]: null }])).toThrow(ProtocolError)
+    }
+  })
+
+  test('assertLegacyTasks: rejects non-object', () => {
+    expect(() => assertLegacyTasks(null)).toThrow(ProtocolError)
+  expect(() => assertLegacyTasks({})).toThrow(ProtocolError)
+  expect(() => assertLegacyTasks('nope')).toThrow(ProtocolError)
+  })
+})
+
+  test('assertLegacyOverview: rejects array agent_mail', () => {
+    expect(() => assertLegacyOverview({ projects: [], total_unread: 0, total_projects: 0, total_agents: 0, agent_mail: [] })).toThrow(ProtocolError)
+  })
+  test('assertLegacyOverview: rejects missing total_unread', () => {
+    expect(() => assertLegacyOverview({ projects: [], total_projects: 0, total_agents: 0, agent_mail: {} })).toThrow(ProtocolError)
+  })
+  test('assertLegacyAttention: rejects array capabilities', () => {
+    expect(() => assertLegacyAttention({ sessions: [], items: [], count: 0, mail_unread: 0, capabilities: [] })).toThrow(ProtocolError)
+  })
+  test('assertLegacyAttention: rejects missing items', () => {
+    expect(() => assertLegacyAttention({ sessions: [], count: 0, mail_unread: 0, capabilities: {} })).toThrow(ProtocolError)
+  })
+  test('assertLegacySettings: rejects non-string known_agents', () => {
+    expect(() => assertLegacySettings({ language: 'zh', known_agents: [1, 2], languages: ['zh'] })).toThrow(ProtocolError)
+  })
+  test('assertLegacySettings: rejects missing languages', () => {
+    expect(() => assertLegacySettings({ language: 'zh', known_agents: ['claude'] })).toThrow(ProtocolError)
+  })
+  test('assertLegacyTasks: empty array stays valid', () => {
+    const r = assertLegacyTasks([])
+    expect(r.tasks).toEqual([])
+  })
+  test('assertLegacyTasks: rejects object (not array)', () => {
+    expect(() => assertLegacyTasks({ tasks: [] })).toThrow(ProtocolError)
+  })
+
+  test('assertLegacyOverview: rejects null project element', () => {
+    expect(() => assertLegacyOverview({ projects: [null], total_unread: 0, total_projects: 1, total_agents: 0, agent_mail: {} })).toThrow(ProtocolError)
+  })
+  test('assertLegacyOverview: rejects array project element', () => {
+    expect(() => assertLegacyOverview({ projects: [[]], total_unread: 0, total_projects: 1, total_agents: 0, agent_mail: {} })).toThrow(ProtocolError)
+  })
+  test('assertLegacyAttention: rejects null item element', () => {
+    expect(() => assertLegacyAttention({ sessions: [], items: [null], count: 1, mail_unread: 0, capabilities: {} })).toThrow(ProtocolError)
+  })
+  test('assertLegacyTasks: rejects null element', () => {
+    expect(() => assertLegacyTasks([null])).toThrow(ProtocolError)
+  })
+  test('assertLegacyTasks: rejects numeric id', () => {
+    expect(() => assertLegacyTasks([{ id: 1, status: 'running' }])).toThrow(ProtocolError)
+  })
+  test('assertLegacyTasks: missing optional status stays valid', () => {
+    expect(assertLegacyTasks([{ id: 't1' }]).tasks).toEqual([{ id: 't1' }])
+  })

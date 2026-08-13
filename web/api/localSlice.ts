@@ -208,6 +208,13 @@ function optBool(v: unknown, field: string): boolean | undefined {
   return reqBool(v, field)
 }
 
+function optString(o: Record<string, unknown>, key: string, field: string): string | undefined {
+  if (!Object.prototype.hasOwnProperty.call(o, key)) return undefined
+  const v = o[key]
+  if (typeof v !== 'string') fail(field)
+  return v
+}
+
 /** 非负整数（type 精确 int，bool 不算） */
 function reqNonNegativeInt(v: unknown, field: string): number {
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) fail(field)
@@ -659,4 +666,84 @@ export function useLegacyEnvCheck() {
     staleTime: 60_000,
     retry: shouldRetry,
   })
+}
+
+// ---------- WEB-004 legacy narrow adapters ----------
+
+import type { Overview, Attention, Settings, Tasks } from './types'
+
+
+export interface LegacyHerdrStatus {
+  available: boolean
+  binary: string
+}
+
+/** /api/herdr/status → { available: boolean, binary: string } */
+export function assertLegacyHerdrStatus(raw: unknown): LegacyHerdrStatus {
+  const o = reqObj(raw, 'herdr-status')
+  return {
+    available: reqBool(o.available, 'herdr-status.available'),
+    binary: reqString(o.binary, 'herdr-status.binary'),
+  }
+}
+
+/** /api/overview → { projects, total_unread, total_projects, total_agents, agent_mail } */
+export function assertLegacyOverview(raw: unknown): Overview {
+  const o = reqObj(raw, 'overview')
+  if (!Array.isArray(o.projects)) fail('overview.projects')
+  for (let i = 0; i < o.projects.length; i++) {
+    const p = o.projects[i]
+    const project = reqObj(p, `overview.projects[${i}]`)
+    for (const field of ['slug', 'name', 'branch'] as const) {
+      optString(project, field, `overview.projects[${i}].${field}`)
+    }
+  }
+  reqNonNegativeInt(o.total_unread, 'overview.total_unread')
+  reqNonNegativeInt(o.total_projects, 'overview.total_projects')
+  reqNonNegativeInt(o.total_agents, 'overview.total_agents')
+  if (typeof o.agent_mail !== 'object' || o.agent_mail === null || Array.isArray(o.agent_mail)) fail('overview.agent_mail')
+  return o as unknown as Overview
+}
+
+/** /api/attention → { sessions, items, count, mail_unread, capabilities } */
+export function assertLegacyAttention(raw: unknown): Attention {
+  const o = reqObj(raw, 'attention')
+  if (!Array.isArray(o.sessions)) fail('attention.sessions')
+  if (!Array.isArray(o.items)) fail('attention.items')
+  for (let i = 0; i < o.items.length; i++) {
+    const item = reqObj(o.items[i], `attention.items[${i}]`)
+    for (const field of [
+      'id', 'kind', 'title', 'summary', 'status', 'project', 'workspace',
+      'created_at', 'url',
+    ] as const) {
+      optString(item, field, `attention.items[${i}].${field}`)
+    }
+  }
+  reqNonNegativeInt(o.count, 'attention.count')
+  reqNonNegativeInt(o.mail_unread, 'attention.mail_unread')
+  if (typeof o.capabilities !== 'object' || o.capabilities === null || Array.isArray(o.capabilities)) fail('attention.capabilities')
+  return o as unknown as Attention
+}
+
+/** /api/settings → merged settings + known_agents + languages */
+export function assertLegacySettings(raw: unknown): Settings {
+  const o = reqObj(raw, 'settings')
+  if (!Array.isArray(o.known_agents) || !o.known_agents.every((v: unknown) => typeof v === 'string')) fail('settings.known_agents')
+  if (!Array.isArray(o.languages) || !o.languages.every((v: unknown) => typeof v === 'string')) fail('settings.languages')
+  return o as unknown as Settings
+}
+
+/** /api/tasks → bare array from tasks.list_tasks(); wrapped as {items: [...]} */
+export function assertLegacyTasks(raw: unknown): Tasks {
+  if (!Array.isArray(raw)) fail('tasks (expected array)')
+  const tasks = raw as unknown[]
+  for (let i = 0; i < tasks.length; i++) {
+    const task = reqObj(tasks[i], `tasks[${i}]`)
+    for (const field of [
+      'id', 'title', 'status', 'kind', 'project', 'workspace', 'updated_at',
+    ] as const) {
+      optString(task, field, `tasks[${i}].${field}`)
+    }
+  }
+  return { tasks: tasks as Tasks['tasks'] }
 }

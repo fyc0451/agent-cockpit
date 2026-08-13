@@ -15,8 +15,30 @@ export function WelcomePage() {
     return <Navigate to={routes.overview()} replace />
   }
 
-  const checks = envCheck.data?.data.checks ?? []
-  const failed = checks.filter((c) => c.ok === false || c.status === 'fail').length
+  // Legacy env-check shape: { herdr: {installed, path}, agents: {...}, agent_mail: {...} }
+  const ec = envCheck.data?.data
+  const checks: { name: string; ok: boolean }[] = []
+  if (ec) {
+    for (const key of ['herdr'] as const) {
+      const item = ec[key]
+      if (item && typeof item === 'object' && 'installed' in item) {
+        checks.push({ name: key, ok: (item as { installed: boolean }).installed })
+      }
+    }
+    // agent_mail uses .available (not .installed)
+    const mailItem = ec.agent_mail
+    if (mailItem && typeof mailItem === 'object' && 'available' in mailItem) {
+      checks.push({ name: 'agent_mail', ok: (mailItem as { available: boolean }).available })
+    }
+    if (ec.agents && typeof ec.agents === 'object') {
+      for (const [name, item] of Object.entries(ec.agents as Record<string, unknown>)) {
+        if (item && typeof item === 'object' && 'installed' in item) {
+          checks.push({ name, ok: (item as { installed: boolean }).installed })
+        }
+      }
+    }
+  }
+  const failed = checks.filter((c) => !c.ok).length
 
   return (
     <>

@@ -82,8 +82,7 @@ type RuntimeTone = 'muted' | 'success' | 'warning' | 'danger'
  */
 function RuntimeMini() {
   const q = useHerdrStatus()
-  const name = q.data?.data.name ?? 'Herdr'
-  const herdrSource = q.data?.meta?.sources?.find((s) => s.name === 'herdr')
+  const available = q.data?.data.available
 
   let tone: RuntimeTone
   let line1: string
@@ -91,26 +90,18 @@ function RuntimeMini() {
 
   if (q.isPending) {
     tone = 'muted'
-    line1 = `${name} 检查中…`
+    line1 = 'Herdr 检查中…'
   } else if (q.isError) {
     tone = 'danger'
-    line1 = `${name} degraded`
+    line1 = 'Herdr degraded'
     line2 = q.error instanceof ApiError ? q.error.message : '状态查询失败'
-  } else if (herdrSource && herdrSource.status === 'stale') {
-    tone = 'warning'
-    line1 = `${name} 数据可能不是最新`
-    line2 = herdrSource.observed_at ? `上次更新：${herdrSource.observed_at}` : null
-  } else if (herdrSource && herdrSource.status != null && herdrSource.status !== 'available') {
+  } else if (available === false) {
     tone = 'danger'
-    line1 = `${name} degraded`
-    line2 = herdrSource.reason ?? herdrSource.status ?? null
-  } else if (q.data?.data.healthy === false) {
-    tone = 'danger'
-    line1 = `${name} 异常`
-    line2 = q.data.data.message ?? null
+    line1 = 'Herdr degraded'
+    line2 = '本地 Herdr 二进制不可用'
   } else {
     tone = 'success'
-    line1 = name
+    line1 = 'Herdr'
   }
 
   return (

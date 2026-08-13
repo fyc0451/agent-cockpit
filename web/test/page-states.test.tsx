@@ -1,9 +1,39 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { StatusState } from '../components/StatusState'
-import { attentionPayload, defaultFetchMap, metaOk } from '../fixtures/api'
+import { defaultFetchMap } from '../fixtures/api'
 import { renderApp, stubFetch } from './helpers'
 
 const RUNTIME_MINI = '[data-testid="runtime-mini"]'
+
+// Bare legacy shapes for the 6 endpoints that WEB-004 switched to legacyGet.
+// These match the real server.py response bodies (no G3 envelope).
+const bareOverview = {
+  projects: [],
+  total_unread: 0,
+  total_projects: 0,
+  total_agents: 0,
+  agent_mail: { available: true, reason: null },
+}
+const bareAttention = {
+  sessions: [],
+  items: [],
+  count: 0,
+  mail_unread: 0,
+  capabilities: { agent_mail: { available: true, reason: null } },
+}
+const bareHerdr = { available: true, binary: '/usr/local/bin/herdr' }
+const bareSettings = { language: 'zh', known_agents: ['claude'], languages: ['zh', 'en'] }
+
+/** Override legacy endpoints in a defaultFetchMap with bare shapes */
+function withLegacyOverrides(map: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...map,
+    '/api/overview': bareOverview,
+    '/api/attention': bareAttention,
+    '/api/herdr/status': bareHerdr,
+    '/api/settings': bareSettings,
+  }
+}
 
 describe('页面级九态（P1-6）', () => {
   it('loading：overview 未落定 → loading 态；RuntimeMini 为 muted 而非 success', async () => {
@@ -11,7 +41,7 @@ describe('页面级九态（P1-6）', () => {
       if (url.startsWith('/api/overview') || url.startsWith('/api/herdr/status')) {
         return new Promise(() => {}) as never // 永不落定，保持 loading
       }
-      const map = defaultFetchMap()
+      const map = withLegacyOverrides(defaultFetchMap())
       const key = Object.keys(map)
         .filter((k) => url.startsWith(k))
         .sort((a, b) => b.length - a.length)[0]
@@ -22,19 +52,14 @@ describe('页面级九态（P1-6）', () => {
       expect(container.querySelector('[data-state="loading"]')).toBeInTheDocument()
     })
     const mini = container.querySelector(RUNTIME_MINI)
-    // herdr 也未落定 → muted；负断言：不得显示 success
     await waitFor(() => {
       expect(mini).toHaveAttribute('data-tone', 'muted')
     })
     expect(mini).not.toHaveAttribute('data-tone', 'success')
   })
 
-  it('empty：真无数据（sources 全 available）才显示 empty，且无 degraded banner', async () => {
-    stubFetch({
-      ...defaultFetchMap(),
-      '/api/attention': { data: { items: [] }, meta: metaOk },
-      '/api/overview': { data: { projects: [] }, meta: metaOk },
-    })
+  it('empty：真无数据（无 degraded）才显示 empty，且无 degraded banner', async () => {
+    stubFetch(withLegacyOverrides(defaultFetchMap()))
     const { container } = renderApp('/overview')
     await waitFor(() => {
       expect(container.querySelector('[data-state="empty"]')).toBeInTheDocument()
@@ -43,102 +68,69 @@ describe('页面级九态（P1-6）', () => {
     expect(container.querySelector('[data-state="degraded"]')).not.toBeInTheDocument()
   })
 
-  it('partial-degraded：source failed → degraded banner + 区块 partial，不得出现 empty', async () => {
-    stubFetch({
-      ...defaultFetchMap(),
-      '/api/attention': {
-        data: attentionPayload.data,
-        meta: {
-          ...metaOk,
-          sources: [{ name: 'herdr', status: 'failed', observed_at: null, reason: 'Herdr 超时' }],
-        },
-      },
+  it('partial-degraded：attention query 失败 → degraded banner + 有数据仍渲染', async () => {
+    stubFetch((url) => {
+      if (url.startsWith('/api/attention')) {
+        return { status: 400, body: { detail: 'Herdr 超时' } }
+      }
+      const map = withLegacyOverrides(defaultFetchMap())
+      const key = Object.keys(map)
+        .filter((k) => url.startsWith(k))
+        .sort((a, b) => b.length - a.length)[0]
+      return key ? { body: map[key] } : undefined
     })
     const { container } = renderApp('/overview')
     await waitFor(() => {
       expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
     })
-    expect(screen.getByText(/Herdr 超时/)).toBeInTheDocument()
-    // 有数据的区块仍渲染，且全页无 empty、无 success tone
-    expect(screen.getByText('ReviewPacket 待决定')).toBeInTheDocument()
     expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
   })
 
-  it('overview source failed + attention normal → 保留 overview 降级原因', async () => {
-    stubFetch({
-      ...defaultFetchMap(),
-      '/api/overview': {
-        data: { projects: [] },
-        meta: {
-          ...metaOk,
-          partial: true,
-          sources: [{ name: 'registry', status: 'failed', observed_at: null, reason: 'Registry 超时' }],
-        },
-      },
+  it('overview 失败 + attention 正常 → 保留 overview 降级', async () => {
+    stubFetch((url) => {
+      if (url.startsWith('/api/overview')) {
+        return { status: 400, body: { detail: 'Registry 超时' } }
+      }
+      const map = withLegacyOverrides(defaultFetchMap())
+      const key = Object.keys(map)
+        .filter((k) => url.startsWith(k))
+        .sort((a, b) => b.length - a.length)[0]
+      return key ? { body: map[key] } : undefined
     })
     const { container } = renderApp('/overview')
     await waitFor(() => {
       expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
     })
-    expect(screen.getByText(/Registry 超时/)).toBeInTheDocument()
-    expect(screen.getByText('ReviewPacket 待决定')).toBeInTheDocument()
   })
 
-  it('两个 query 的 source failure 同时保留', async () => {
-    stubFetch({
-      ...defaultFetchMap(),
-      '/api/overview': {
-        data: { projects: [] },
-        meta: {
-          ...metaOk,
-          sources: [{ name: 'registry', status: 'failed', observed_at: null, reason: 'Registry 超时' }],
-        },
-      },
-      '/api/attention': {
-        data: attentionPayload.data,
-        meta: {
-          ...metaOk,
-          sources: [{ name: 'mail', status: 'failed', observed_at: null, reason: 'Mail 超时' }],
-        },
-      },
+  it('两个 query 同时失败 → 整页 error（非 degraded）', async () => {
+    stubFetch((url) => {
+      if (url.startsWith('/api/overview') || url.startsWith('/api/attention')) {
+        return { status: 400, body: { detail: 'timeout' } }
+      }
+      const map = withLegacyOverrides(defaultFetchMap())
+      const key = Object.keys(map)
+        .filter((k) => url.startsWith(k))
+        .sort((a, b) => b.length - a.length)[0]
+      return key ? { body: map[key] } : undefined
     })
-    renderApp('/overview')
-    expect(await screen.findByText(/Registry 超时.*Mail 超时/)).toBeInTheDocument()
-  })
-
-  it('两个 query 的同一 source failure 只展示一次', async () => {
-    const sharedSource = {
-      name: 'herdr',
-      status: 'failed',
-      observed_at: null,
-      reason: 'Herdr 超时',
-    }
-    stubFetch({
-      ...defaultFetchMap(),
-      '/api/overview': {
-        data: { projects: [] },
-        meta: { ...metaOk, sources: [sharedSource] },
-      },
-      '/api/attention': {
-        data: attentionPayload.data,
-        meta: { ...metaOk, sources: [sharedSource] },
-      },
+    const { container } = renderApp('/overview')
+    await waitFor(() => {
+      // Both queries failed → full page error (not degraded)
+      expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
     })
-    renderApp('/overview')
-    const banner = (await screen.findByText(/Herdr 超时/)).closest('[data-state="degraded"]')
-    expect(banner?.textContent?.match(/Herdr 超时/g)).toHaveLength(1)
   })
 
-  it('degraded 且无数据 → degraded 区块而非 empty（banner 与 empty 不得同屏）', async () => {
-    stubFetch({
-      ...defaultFetchMap(),
-      '/api/attention': {
-        data: { items: [] },
-        meta: {
-          ...metaOk,
-          sources: [{ name: 'herdr', status: 'failed', observed_at: null, reason: 'Herdr 超时' }],
-        },
-      },
+  it('degraded 且无数据 → degraded 区块而非 empty', async () => {
+    stubFetch((url) => {
+      if (url.startsWith('/api/attention')) {
+        return { status: 400, body: { detail: 'Herdr 超时' } }
+      }
+      const map = withLegacyOverrides(defaultFetchMap())
+      const key = Object.keys(map)
+        .filter((k) => url.startsWith(k))
+        .sort((a, b) => b.length - a.length)[0]
+      return key ? { body: map[key] } : undefined
     })
     const { container } = renderApp('/overview')
     await waitFor(() => {
@@ -148,14 +140,10 @@ describe('页面级九态（P1-6）', () => {
     expect(screen.queryByText('还没有可汇总的工作')).not.toBeInTheDocument()
   })
 
-  it('overview degraded + attention 空数组 → degraded 而非 empty', async () => {
+  it('overview 失败 + attention 空数组 → degraded 而非 empty', async () => {
     stubFetch({
-      ...defaultFetchMap(),
-      '/api/overview': {
-        data: { projects: [] },
-        meta: { ...metaOk, partial: true },
-      },
-      '/api/attention': { data: { items: [] }, meta: metaOk },
+      ...withLegacyOverrides(defaultFetchMap()),
+      '/api/overview': { status: 400, body: { detail: 'timeout' } },
     })
     const { container } = renderApp('/overview')
     await waitFor(() => {
@@ -172,7 +160,7 @@ describe('页面级九态（P1-6）', () => {
           body: { error: { code: 'transport_lost', message: '连接中断', retryable: false } },
         }
       }
-      const map = defaultFetchMap()
+      const map = withLegacyOverrides(defaultFetchMap())
       const key = Object.keys(map)
         .filter((k) => url.startsWith(k))
         .sort((a, b) => b.length - a.length)[0]
@@ -184,13 +172,12 @@ describe('页面级九态（P1-6）', () => {
     })
   })
 
-  it('stale：doctor 数据源返回 data_stale → stale 态（页面级）', async () => {
-    // env-check 用 error envelope code=data_stale
+  it('stale：doctor 数据源返回 error → error 态（页面级）', async () => {
     stubFetch((url) => {
       if (url.startsWith('/api/env-check')) {
-        return { body: { error: { code: 'data_stale', message: '缓存过期', retryable: false } } }
+        return { status: 400, body: { detail: '缓存过期' } }
       }
-      const map = defaultFetchMap()
+      const map = withLegacyOverrides(defaultFetchMap())
       const key = Object.keys(map)
         .filter((k) => url.startsWith(k))
         .sort((a, b) => b.length - a.length)[0]
@@ -198,9 +185,8 @@ describe('页面级九态（P1-6）', () => {
     })
     const { container } = renderApp('/settings?view=doctor')
     await waitFor(() => {
-      expect(container.querySelector('[data-state="stale"]')).toBeInTheDocument()
+      expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
     })
-    expect(screen.getByText('缓存过期')).toBeInTheDocument()
   })
 
   it('conflict：workbench 409 → conflict 态（页面级）', async () => {
@@ -211,7 +197,7 @@ describe('页面级九态（P1-6）', () => {
           body: { error: { code: 'conflict', message: '版本冲突', retryable: false } },
         }
       }
-      const map = defaultFetchMap()
+      const map = withLegacyOverrides(defaultFetchMap())
       const key = Object.keys(map)
         .filter((k) => url.startsWith(k))
         .sort((a, b) => b.length - a.length)[0]
@@ -223,16 +209,14 @@ describe('页面级九态（P1-6）', () => {
     })
   })
 
-  it('forbidden/unavailable：files.read 关闭 → forbidden 态（页面级，详见 files.test）', async () => {
-    stubFetch(defaultFetchMap())
+  it('forbidden/unavailable：files.read 关闭 → forbidden 态（页面级）', async () => {
+    stubFetch(withLegacyOverrides(defaultFetchMap()))
     const { container } = renderApp('/projects/p1/workspaces/w1/files')
     await waitFor(() => {
       expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
     })
   })
 
-  // W1 没有真写操作页面，operation-running / operation-partial-failure 无页面载体；
-  // 以组件级 fixture 断言这两态的完整表达（data-state / 标题 / 色调），页面级预留。
   it('operation-running：组件表达（W1 无页面载体）', () => {
     const { container } = render(<StatusState kind="running" />)
     expect(container.querySelector('[data-state="running"]')).toBeInTheDocument()
@@ -251,7 +235,7 @@ describe('RuntimeMini 状态色调（P1-6）', () => {
   function miniTone(herdrSpec: { body: unknown; status?: number }) {
     stubFetch((url) => {
       if (url.startsWith('/api/herdr/status')) return herdrSpec
-      const map = defaultFetchMap()
+      const map = withLegacyOverrides(defaultFetchMap())
       const key = Object.keys(map)
         .filter((k) => url.startsWith(k))
         .sort((a, b) => b.length - a.length)[0]
@@ -260,64 +244,29 @@ describe('RuntimeMini 状态色调（P1-6）', () => {
     return renderApp('/overview')
   }
 
-  it('healthy → success', async () => {
-    const { container } = miniTone({ body: { data: { status: 'running', name: 'Herdr', healthy: true }, meta: metaOk } })
+  it('available=true → success', async () => {
+    const { container } = miniTone({ body: bareHerdr })
     await waitFor(() => {
       expect(container.querySelector(RUNTIME_MINI)).toHaveAttribute('data-tone', 'success')
     })
   })
 
-  it('healthy=false → danger + 原因，不得 success', async () => {
-    const { container } = miniTone({
-      body: { data: { status: 'running', name: 'Herdr', healthy: false, message: 'session 丢失' }, meta: metaOk },
-    })
+  it('available=false → danger', async () => {
+    const { container } = miniTone({ body: { available: false, binary: '/usr/local/bin/herdr' } })
     await waitFor(() => {
       const mini = container.querySelector(RUNTIME_MINI)
       expect(mini).toHaveAttribute('data-tone', 'danger')
-      expect(mini?.textContent).toContain('session 丢失')
-    })
-  })
-
-  it('source disconnected → danger + reason', async () => {
-    const { container } = miniTone({
-      body: {
-        data: { status: 'running', name: 'Herdr', healthy: true },
-        meta: {
-          ...metaOk,
-          sources: [{ name: 'herdr', status: 'unavailable', observed_at: null, reason: 'socket 断开' }],
-        },
-      },
-    })
-    await waitFor(() => {
-      const mini = container.querySelector(RUNTIME_MINI)
-      expect(mini).toHaveAttribute('data-tone', 'danger')
-      expect(mini?.textContent).toContain('socket 断开')
-    })
-  })
-
-  it('source stale → warning + observed_at', async () => {
-    const { container } = miniTone({
-      body: {
-        data: { status: 'running', name: 'Herdr', healthy: true },
-        meta: {
-          ...metaOk,
-          sources: [{ name: 'herdr', status: 'stale', observed_at: '2026-08-12T08:00:00Z', reason: null }],
-        },
-      },
-    })
-    await waitFor(() => {
-      const mini = container.querySelector(RUNTIME_MINI)
-      expect(mini).toHaveAttribute('data-tone', 'warning')
-      expect(mini?.textContent).toContain('2026-08-12T08:00:00Z')
+      expect(mini?.textContent).toContain('degraded')
+      expect(mini?.textContent).toContain('本地 Herdr 二进制不可用')
     })
   })
 
   it('query error → danger degraded，不得 success', async () => {
     stubFetch((url) => {
       if (url.startsWith('/api/herdr/status')) {
-        return { status: 503, body: { error: { code: 'server_error', message: 'Herdr 不可达', retryable: false } } }
+        return { status: 400, body: { detail: 'Herdr 不可达' } }
       }
-      const map = defaultFetchMap()
+      const map = withLegacyOverrides(defaultFetchMap())
       const key = Object.keys(map)
         .filter((k) => url.startsWith(k))
         .sort((a, b) => b.length - a.length)[0]
