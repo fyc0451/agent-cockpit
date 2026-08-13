@@ -801,6 +801,8 @@ def _origin_authority(value: str) -> tuple[str, str, int] | None:
         not value
         or len(value) > 2048
         or value != value.strip()
+        or "?" in value
+        or "#" in value
         or any(ord(char) <= 32 or ord(char) == 127 for char in value)
     ):
         return None
@@ -849,7 +851,7 @@ def _no_token_scope_trusted(
             return False
         name, value = header
         name = name.lower()
-        if name in UNTRUSTED_PROXY_HEADERS:
+        if name in UNTRUSTED_PROXY_HEADERS or name.startswith(b"x-forwarded-"):
             return False
         if name == b"host":
             host_values.append(value)

@@ -160,6 +160,8 @@ def test_no_token_http_accepts_canonical_loopback_authorities(
         ("localhost:8790", "https://evil.example"),
         ("localhost:8790", "null"),
         ("localhost:8790", "http://localhost:8790/path"),
+        ("localhost:8790", "http://localhost:8790?"),
+        ("localhost:8790", "http://localhost:8790#"),
         ("localhost:8790", "http://user@localhost:8790"),
     ],
 )
@@ -208,7 +210,8 @@ def test_no_token_http_rejects_proxy_headers_instead_of_trusting_them(monkeypatc
 
     for header in (
         "forwarded", "x-forwarded-for", "x-forwarded-host",
-        "x-forwarded-port", "x-forwarded-proto", "x-real-ip",
+        "x-forwarded-port", "x-forwarded-proto", "x-forwarded-client-cert",
+        "x-forwarded-prefix", "x-real-ip",
     ):
         response = client.get(
             "/api/auth/status",
