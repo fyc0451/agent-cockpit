@@ -272,7 +272,12 @@ def test_aggregate_identity_and_ownership_reject_direct_sql_rebinding(
 
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        with pytest.raises(sqlite3.IntegrityError):
+        error_code = {
+            "projects": "project_identity_frozen",
+            "repo_locations": "repo_location_identity_frozen",
+            "workspaces": "workspace_identity_frozen",
+        }[table]
+        with pytest.raises(sqlite3.IntegrityError, match=f"^{error_code}$"):
             connection.execute(
                 f"UPDATE {table} SET {column}=? WHERE {identity}=?",
                 (replacement, row_identity),

@@ -42,7 +42,7 @@ SCHEMA_STATEMENTS = (
     """CREATE TRIGGER projects_identity_immutable
         BEFORE UPDATE OF project_id, slug ON projects
         WHEN NEW.project_id <> OLD.project_id OR NEW.slug <> OLD.slug
-        BEGIN SELECT RAISE(ABORT, 'project_identity_immutable'); END""",
+        BEGIN SELECT RAISE(ABORT, 'project_identity_frozen'); END""",
     """CREATE TRIGGER projects_delete_forbidden
         BEFORE DELETE ON projects
         BEGIN SELECT RAISE(ABORT, 'project_delete_forbidden'); END""",
@@ -90,7 +90,7 @@ SCHEMA_STATEMENTS = (
              NEW.project_id <> OLD.project_id OR
              NEW.node_id <> OLD.node_id OR
              NEW.canonical_path <> OLD.canonical_path
-        BEGIN SELECT RAISE(ABORT, 'repo_location_identity_immutable'); END""",
+        BEGIN SELECT RAISE(ABORT, 'repo_location_identity_frozen'); END""",
     """CREATE TRIGGER repo_locations_delete_forbidden
         BEFORE DELETE ON repo_locations
         BEGIN SELECT RAISE(ABORT, 'repo_location_delete_forbidden'); END""",
@@ -127,7 +127,7 @@ SCHEMA_STATEMENTS = (
         WHEN NEW.workspace_id <> OLD.workspace_id OR
              NEW.project_id <> OLD.project_id OR
              NEW.repo_location_id <> OLD.repo_location_id
-        BEGIN SELECT RAISE(ABORT, 'workspace_identity_immutable'); END""",
+        BEGIN SELECT RAISE(ABORT, 'workspace_identity_frozen'); END""",
     """CREATE TRIGGER workspaces_delete_forbidden
         BEFORE DELETE ON workspaces
         BEGIN SELECT RAISE(ABORT, 'workspace_delete_forbidden'); END""",
