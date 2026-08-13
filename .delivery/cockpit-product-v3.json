@@ -72,7 +72,7 @@
       ],
       "rollback": "Revert the managed SQLite connection contexts and keep Next stopped if descriptor growth returns",
       "production_impact": "none",
-      "owner_instance_id": "i-ac4mbdpyttxouq6op4tesfzyhy",
+      "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
       "reviewer_instance_id": "i-gzy6byrcie47tprardahrpmwbq",
       "base_sha": "db029bf165692f7b01124c75931e9a613123634d",
       "fixed_sha": "0f564c4b0cbdd8feecd4d49b21676e6a1cbc5a14",
