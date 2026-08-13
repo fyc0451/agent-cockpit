@@ -602,7 +602,7 @@
       ],
       "rollback": "Revert the narrow legacy adapters and keep affected Cockpit 2 views fail-closed",
       "production_impact": "none",
-      "owner_instance_id": "i-yjsczsmi6uhwwhsygmqxcahkj4",
+      "owner_instance_id": "i-gzy6byrcie47tprardahrpmwbq",
       "reviewer_instance_id": null,
       "base_sha": "13929110bdf5e9161ac6dc1e632ff943b9661d77",
       "fixed_sha": null,
