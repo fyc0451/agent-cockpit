@@ -1,0 +1,458 @@
+from __future__ import annotations
+
+import hashlib
+import os
+import secrets
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+from agent_cockpit import project_registry_contracts as contracts
+from agent_cockpit import project_registry_store as registry_store
+
+
+def _code(exc_info: pytest.ExceptionInfo[BaseException]) -> str | None:
+    return getattr(exc_info.value, "code", None)
+
+
+@pytest.fixture()
+def db_path(tmp_path: Path) -> Path:
+    return tmp_path / "project-registry.sqlite3"
+
+
+@pytest.fixture()
+def registry(db_path: Path):
+    return registry_store.initialize(db_path)
+
+
+def test_initialize_creates_strict_v1_schema_and_mode(db_path: Path):
+    registry_store.initialize(db_path).close()
+
+    assert db_path.stat().st_mode & 0o777 == 0o600
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        receipt = connection.execute(
+            "SELECT migration_id, schema_version, schema_digest "
+            "FROM schema_migrations"
+        ).fetchone()
+    assert receipt == (
+        contracts.MIGRATION_ID,
+        contracts.SCHEMA_VERSION,
+        contracts.SCHEMA_DIGEST,
+    )
+    assert receipt == contracts.PROJECT_REGISTRY_MIGRATION_RECEIPT
+    with sqlite3.connect(db_path) as connection:
+        triggers = frozenset(
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            ).fetchall()
+        )
+    assert triggers == contracts.PROJECT_REGISTRY_TRIGGERS
+
+
+def test_active_location_uniqueness_is_node_path_pair(registry):
+    first = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    second = registry.create_project(slug="beta", display_name="Beta", goal=None)
+    registry.add_repo_location(
+        project_id=first.project_id,
+        node_id="local",
+        canonical_path="/repo/a",
+        vcs_kind="none",
+        availability="available",
+    )
+    registry.add_repo_location(
+        project_id=first.project_id,
+        node_id="local",
+        canonical_path="/repo/b",
+        vcs_kind="none",
+        availability="available",
+    )
+    registry.add_repo_location(
+        project_id=second.project_id,
+        node_id="remote-1",
+        canonical_path="/repo/a",
+        vcs_kind="git",
+        availability="offline",
+    )
+
+    with pytest.raises(registry_store.ProjectRegistryError) as conflict:
+        registry.add_repo_location(
+            project_id=second.project_id,
+            node_id="local",
+            canonical_path="/repo/a",
+            vcs_kind="none",
+            availability="missing",
+        )
+    assert _code(conflict) == "location_already_registered"
+
+
+@pytest.mark.parametrize("availability", ["missing", "offline"])
+def test_archived_location_releases_slot_but_unavailable_does_not(
+    registry, db_path, availability: str
+):
+    first = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    second = registry.create_project(slug="beta", display_name="Beta", goal=None)
+    old = registry.add_repo_location(
+        project_id=first.project_id,
+        node_id="local",
+        canonical_path="/repo/shared",
+        vcs_kind="none",
+        availability="available",
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE repo_locations SET availability=? "
+            "WHERE repo_location_id=?",
+            (availability, old.repo_location_id),
+        )
+    with pytest.raises(registry_store.ProjectRegistryError) as unavailable:
+        registry.add_repo_location(
+            project_id=second.project_id,
+            node_id="local",
+            canonical_path="/repo/shared",
+            vcs_kind="none",
+            availability="available",
+        )
+    assert _code(unavailable) == "location_already_registered"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE repo_locations SET lifecycle='archived' "
+            "WHERE repo_location_id=?",
+            (old.repo_location_id,),
+        )
+    replacement = registry.add_repo_location(
+        project_id=second.project_id,
+        node_id="local",
+        canonical_path="/repo/shared",
+        vcs_kind="none",
+        availability="available",
+    )
+    assert replacement.repo_location_id != old.repo_location_id
+
+    with sqlite3.connect(db_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE repo_locations SET lifecycle='active' "
+                "WHERE repo_location_id=?",
+                (old.repo_location_id,),
+            )
+
+
+def test_concurrent_registration_creates_one_active_location(registry, db_path):
+    first = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    second = registry.create_project(slug="beta", display_name="Beta", goal=None)
+
+    def register(project_id: str):
+        try:
+            return registry.add_repo_location(
+                project_id=project_id,
+                node_id="local",
+                canonical_path="/repo/race",
+                vcs_kind="none",
+                availability="available",
+            ).repo_location_id
+        except registry_store.ProjectRegistryError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(register, (first.project_id, second.project_id)))
+    assert outcomes.count("location_already_registered") == 1
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM repo_locations WHERE lifecycle='active'"
+        ).fetchone()[0] == 1
+
+
+def test_slug_is_immutable_and_never_reused(registry, db_path):
+    project = registry.create_project(slug="stable-slug", display_name="Stable", goal=None)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE projects SET lifecycle='archived' WHERE project_id=?",
+            (project.project_id,),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE projects SET slug='changed' WHERE project_id=?",
+                (project.project_id,),
+            )
+
+    with pytest.raises(registry_store.ProjectRegistryError) as conflict:
+        registry.create_project(slug="stable-slug", display_name="Again", goal=None)
+    assert _code(conflict) == "project_slug_conflict"
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "malformed"),
+    [
+        ("projects", "project_id", "prj_a" + "Z" * 31),
+        ("repo_locations", "repo_location_id", "loc_a" + "Z" * 31),
+        ("workspaces", "workspace_id", "ws_a" + "Z" * 31),
+        ("legacy_project_bindings", "binding_id", "bnd_a" + "Z" * 31),
+    ],
+)
+def test_opaque_id_checks_reject_non_hex_suffix(
+    registry, db_path: Path, table: str, column: str, malformed: str
+):
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    location = registry.add_repo_location(
+        project_id=project.project_id,
+        node_id="local",
+        canonical_path="/repo/a",
+        vcs_kind="none",
+        availability="available",
+    )
+    statements = {
+        "projects": (
+            "INSERT INTO projects VALUES (?, 'beta', 'Beta', NULL, 'active', 1, "
+            "'2026-08-13T00:00:00Z', '2026-08-13T00:00:00Z')",
+            (malformed,),
+        ),
+        "repo_locations": (
+            "INSERT INTO repo_locations VALUES (?, ?, 'local', '/repo/b', 'active', "
+            "'none', NULL, NULL, NULL, 'available', 1, "
+            "'2026-08-13T00:00:00Z', '2026-08-13T00:00:00Z')",
+            (malformed, project.project_id),
+        ),
+        "workspaces": (
+            "INSERT INTO workspaces VALUES (?, ?, ?, 'bad-id', NULL, 'shared', "
+            "'active', NULL, 1, '2026-08-13T00:00:00Z', "
+            "'2026-08-13T00:00:00Z')",
+            (malformed, project.project_id, location.repo_location_id),
+        ),
+        "legacy_project_bindings": (
+            "INSERT INTO legacy_project_bindings VALUES (?, ?, "
+            "'agent_mail_project', 'bad-id', 'sha256:x', '2026-08-13T00:00:00Z')",
+            (malformed, project.project_id),
+        ),
+    }
+    sql, params = statements[table]
+    assert column.endswith("_id")
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(sql, params)
+
+
+def test_database_checks_reject_null_ids_and_path_aliases(registry, db_path):
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO projects VALUES (NULL, 'null-id', 'Null', NULL, "
+                "'active', 1, '2026-08-13T00:00:00Z', '2026-08-13T00:00:00Z')"
+            )
+        for path in ("/repo//a", "/repo/./a", "/repo/../a", "/repo/.."):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO repo_locations VALUES "
+                    "(?, ?, 'local', ?, 'active', 'none', NULL, NULL, NULL, "
+                    "'available', 1, '2026-08-13T00:00:00Z', "
+                    "'2026-08-13T00:00:00Z')",
+                    ("loc_" + secrets.token_hex(16), project.project_id, path),
+                )
+
+
+def test_workspace_requires_location_from_same_project(registry, db_path):
+    first = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    second = registry.create_project(slug="beta", display_name="Beta", goal=None)
+    location = registry.add_repo_location(
+        project_id=first.project_id,
+        node_id="local",
+        canonical_path="/repo/a",
+        vcs_kind="none",
+        availability="available",
+    )
+    with pytest.raises(registry_store.ProjectRegistryError) as mismatch:
+        registry.create_workspace(
+            project_id=second.project_id,
+            repo_location_id=location.repo_location_id,
+            name="escape",
+            goal=None,
+            isolation_kind="shared",
+        )
+    assert _code(mismatch) == "repo_location_not_found"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO workspaces "
+                "(workspace_id, project_id, repo_location_id, name, goal, "
+                "isolation_kind, lifecycle, active_run_id, version, "
+                "created_at, updated_at) VALUES "
+                "('ws_00000000000000000000000000000000', ?, ?, 'escape', NULL, "
+                "'shared', 'active', NULL, 1, '2026-08-13T00:00:00Z', "
+                "'2026-08-13T00:00:00Z')",
+                (second.project_id, location.repo_location_id),
+            )
+
+
+def test_legacy_provenance_is_authority_scoped_and_idempotent(registry):
+    first = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    second = registry.create_project(slug="beta", display_name="Beta", goal=None)
+    original = registry.bind_legacy_source(
+        project_id=first.project_id,
+        source_kind="agent_mail_project",
+        source_key="project:17",
+        source_digest="sha256:a",
+    )
+    replay = registry.bind_legacy_source(
+        project_id=first.project_id,
+        source_kind="agent_mail_project",
+        source_key="project:17",
+        source_digest="sha256:a",
+    )
+    assert replay == original
+    registry.bind_legacy_source(
+        project_id=first.project_id,
+        source_kind="coordination_run",
+        source_key="project:17",
+        source_digest="sha256:b",
+    )
+    with pytest.raises(registry_store.ProjectRegistryError) as conflict:
+        registry.bind_legacy_source(
+            project_id=second.project_id,
+            source_kind="agent_mail_project",
+            source_key="project:17",
+            source_digest="sha256:c",
+        )
+    assert _code(conflict) == "legacy_binding_conflict"
+
+
+def test_idempotency_replay_and_conflict_are_atomic(registry, db_path):
+    payload = {"slug": "alpha", "display_name": "Alpha"}
+    first = registry.idempotent_create_project(
+        scope="project.create", idempotency_key="same", payload=payload
+    )
+    assert registry.idempotent_create_project(
+        scope="project.create", idempotency_key="same", payload=payload
+    ) == first
+    with pytest.raises(registry_store.ProjectRegistryError) as conflict:
+        registry.idempotent_create_project(
+            scope="project.create",
+            idempotency_key="same",
+            payload={"slug": "beta"},
+        )
+    assert _code(conflict) == "idempotency_conflict"
+
+    registry.create_project(slug="taken", display_name="Taken", goal=None)
+    with pytest.raises(registry_store.ProjectRegistryError) as duplicate:
+        registry.idempotent_create_project(
+            scope="project.create",
+            idempotency_key="failed",
+            payload={"slug": "taken"},
+        )
+    assert _code(duplicate) == "project_slug_conflict"
+    with sqlite3.connect(db_path) as connection:
+        counts = {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("projects", "idempotency_records")
+        }
+    assert counts == {"projects": 2, "idempotency_records": 1}
+
+
+def test_validation_rejects_unknown_enums_and_noncanonical_identity(registry):
+    with pytest.raises(registry_store.ProjectRegistryError) as bad_slug:
+        registry.create_project(slug="Not Normal", display_name="Name", goal=None)
+    assert _code(bad_slug) == "invalid_argument"
+    project = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    with pytest.raises(registry_store.ProjectRegistryError) as bad_path:
+        registry.add_repo_location(
+            project_id=project.project_id,
+            node_id="local",
+            canonical_path="relative/repo",
+            vcs_kind="none",
+            availability="available",
+        )
+    assert _code(bad_path) == "invalid_argument"
+    with pytest.raises(registry_store.ProjectRegistryError) as bad_enum:
+        registry.add_repo_location(
+            project_id=project.project_id,
+            node_id="local",
+            canonical_path="/repo/a",
+            vcs_kind="svn",
+            availability="available",
+        )
+    assert _code(bad_enum) == "invalid_argument"
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [(0, "migration_required"), (999, "future_schema")],
+)
+def test_open_existing_versions_are_read_only(
+    db_path: Path, version: int, expected: str
+):
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE marker(value TEXT)")
+        connection.execute(f"PRAGMA user_version={version}")
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry_store.open_existing(db_path)
+    assert _code(failure) == expected
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before
+    assert not Path(f"{db_path}-wal").exists()
+    assert not Path(f"{db_path}-shm").exists()
+
+
+def test_open_existing_rejects_unknown_current_schema_without_writes(db_path: Path):
+    registry_store.initialize(db_path).close()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE unknown_extension(value TEXT)")
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry_store.open_existing(db_path)
+    assert _code(failure) == "schema_fingerprint_mismatch"
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before
+    assert not Path(f"{db_path}-wal").exists()
+    assert not Path(f"{db_path}-shm").exists()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "UPDATE schema_migrations SET schema_digest='" + "0" * 64 + "'",
+        "CREATE TRIGGER unknown_trigger AFTER INSERT ON projects BEGIN SELECT 1; END",
+        "CREATE INDEX unknown_index ON projects(display_name)",
+    ],
+)
+def test_open_existing_rejects_ledger_and_schema_fingerprint_tampering(
+    db_path: Path, tamper: str
+):
+    registry_store.initialize(db_path).close()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(tamper)
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    with pytest.raises(registry_store.ProjectRegistryError) as failure:
+        registry_store.open_existing(db_path)
+    assert _code(failure) == "schema_fingerprint_mismatch"
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before
+
+
+def test_initialize_failure_rolls_back_schema_and_ledger(db_path: Path, monkeypatch):
+    monkeypatch.setattr(registry_store, "_after_schema_hook", lambda _connection: 1 / 0)
+    with pytest.raises(ZeroDivisionError):
+        registry_store.initialize(db_path)
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall() == []
+
+
+def test_open_missing_and_unsafe_store_fail_closed(db_path: Path):
+    with pytest.raises(registry_store.ProjectRegistryError) as missing:
+        registry_store.open_existing(db_path)
+    assert _code(missing) == "schema_missing"
+
+    registry_store.initialize(db_path).close()
+    os.chmod(db_path, 0o644)
+    with pytest.raises(registry_store.ProjectRegistryError) as unsafe:
+        registry_store.open_existing(db_path)
+    assert _code(unsafe) == "store_unsafe"
