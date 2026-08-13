@@ -556,7 +556,7 @@
     {
       "id": "EVENT-001-journal",
       "title": "Implement the durable dormant Domain Event journal contract",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-003-wip4-gate"],
       "scope": ["agent_cockpit/event_api.py", "agent_cockpit/event_store.py", "docs/contracts/event-v1.md", "tests/test_event.py"],
       "acceptance": [{"command": "python3 -m pytest -q tests/test_event.py", "passed": true}],
