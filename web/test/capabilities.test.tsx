@@ -58,9 +58,11 @@ describe('capability registry（静态 fail-closed 表）', () => {
     expect(editorCard).toHaveClass('card--disabled')
     expect(editorCard).toHaveAttribute('aria-disabled', 'true')
     expect(editorCard?.textContent).toContain('内嵌编辑器规划在后续迭代接通')
-    // 已接通（文件/终端/任务）渲染为链接
+    // SLICE-001：文件卡由 files.read capability 控制；默认世界 server 未声明 → fail-closed disabled
     const filesCard = cards.find((c) => c.textContent?.includes('文件'))
-    expect(filesCard).toHaveAttribute('href', '/projects/p1/workspaces/w1/files')
+    expect(filesCard).toHaveClass('card--disabled')
+    expect(filesCard).toHaveAttribute('aria-disabled', 'true')
+    expect(filesCard?.textContent).toContain('Workspace 文件 facade API 未接通')
   })
 
   it('设置写按钮 aria-disabled（W1 只读）', async () => {

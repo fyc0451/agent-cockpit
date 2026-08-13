@@ -68,8 +68,8 @@ describe('深链恢复（G1）', () => {
       'aria-selected',
       'false',
     )
-    // doctor 数据源真实渲染
-    expect(await screen.findByText('python')).toBeInTheDocument()
+    // doctor 数据源真实渲染（裸 legacy env-check：agents + herdr 失败原因）
+    expect(await screen.findByText('codex')).toBeInTheDocument()
     expect(screen.getByText('Herdr 未运行')).toBeInTheDocument()
   })
 
