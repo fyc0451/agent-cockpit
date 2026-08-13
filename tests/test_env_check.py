@@ -13,7 +13,11 @@ def _client(monkeypatch, herdr_ok=True):
     monkeypatch.setattr(
         server, "_agent_mail_status", lambda: {"available": False, "reason": "未安装"}
     )
-    return TestClient(server.app, client=("127.0.0.1", 50000))
+    return TestClient(
+        server.app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    )
 
 
 def test_env_check_reports_component_status(monkeypatch, tmp_path):

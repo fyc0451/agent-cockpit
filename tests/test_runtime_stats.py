@@ -314,7 +314,14 @@ def test_terminal_websocket_tracking_cleans_up_on_early_exit(monkeypatch):
     observed = []
 
     class FakeWebSocket:
-        headers = {"origin": "http://testserver", "host": "testserver"}
+        headers = {"origin": "http://127.0.0.1", "host": "127.0.0.1"}
+        scope = {
+            "scheme": "ws",
+            "headers": [
+                (b"host", b"127.0.0.1"),
+                (b"origin", b"http://127.0.0.1"),
+            ],
+        }
         query_params = {}
 
         async def accept(self):

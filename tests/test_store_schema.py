@@ -554,7 +554,11 @@ def test_health_ready_endpoint_200(isolated_roots, monkeypatch):
     runtime_paths.reset_cache()
     importlib.reload(store_schema)
     importlib.reload(server)
-    client = TestClient(server.app)
+    client = TestClient(
+        server.app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    )
     resp = client.get("/health/ready")
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -575,7 +579,11 @@ def test_health_ready_production_manifest_503(isolated_roots, monkeypatch):
     runtime_paths.reset_cache()
     importlib.reload(store_schema)
     importlib.reload(server)
-    client = TestClient(server.app)
+    client = TestClient(
+        server.app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    )
     resp = client.get("/health/ready")
     assert resp.status_code == 503
     detail = resp.json().get("detail", resp.json())
@@ -588,7 +596,11 @@ def test_health_degraded_still_200(monkeypatch):
     import importlib
     import server
     importlib.reload(server)
-    client = TestClient(server.app)
+    client = TestClient(
+        server.app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    )
     # Even if herdr unavailable, /health stays 200
     resp = client.get("/health")
     assert resp.status_code == 200

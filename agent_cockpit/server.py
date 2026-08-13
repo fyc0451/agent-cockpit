@@ -283,6 +283,14 @@ PUBLIC_PATHS = {
     "/api/agent/team-reply",
 }
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+UNTRUSTED_PROXY_HEADERS = frozenset({
+    b"forwarded",
+    b"x-forwarded-for",
+    b"x-forwarded-host",
+    b"x-forwarded-port",
+    b"x-forwarded-proto",
+    b"x-real-ip",
+})
 logger = logging.getLogger("agent-cockpit")
 # 对外 500 统一文案：不回显异常类型/正文/路径/token 等内部细节（O2）。
 INTERNAL_ERROR_DETAIL = "服务器内部错误，请稍后重试"
@@ -725,12 +733,143 @@ def _b0_rebuild_on_start() -> None:
 def _is_loopback(host: str | None) -> bool:
     if not host:
         return False
-    if host == "localhost":
+    if host.lower() == "localhost":
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _loopback_authority(value: str, scheme: str) -> tuple[str, int] | None:
+    if (
+        not value
+        or len(value) > 255
+        or value != value.strip()
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+        or "@" in value
+    ):
+        return None
+    if value.startswith("["):
+        match = re.fullmatch(r"\[([^\]]+)\](?::([0-9]+))?", value)
+        if not match:
+            return None
+        host, port_text = match.groups()
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return None
+        if address.version != 6 or "%" in host or not address.is_loopback:
+            return None
+        normalized_host = address.compressed
+    else:
+        if value.count(":") > 1:
+            return None
+        host, separator, port_text = value.partition(":")
+        if not separator:
+            port_text = None
+        if not host:
+            return None
+        if host.lower() == "localhost":
+            normalized_host = "localhost"
+        else:
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                return None
+            if address.version != 4 or not address.is_loopback:
+                return None
+            normalized_host = address.compressed
+    if port_text is None:
+        port = 443 if scheme == "https" else 80
+    elif (
+        not port_text
+        or not port_text.isascii()
+        or not port_text.isdecimal()
+        or port_text != str(int(port_text))
+    ):
+        return None
+    else:
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            return None
+    return normalized_host, port
+
+
+def _origin_authority(value: str) -> tuple[str, str, int] | None:
+    if (
+        not value
+        or len(value) > 2048
+        or value != value.strip()
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+    ):
+        return None
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.lower()
+        if (
+            scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None
+        authority = _loopback_authority(parsed.netloc, scheme)
+    except ValueError:
+        return None
+    if authority is None:
+        return None
+    return scheme, *authority
+
+
+def _no_token_scope_trusted(
+    scope: dict[str, Any], *, require_origin: bool,
+) -> bool:
+    scheme = {
+        "http": "http",
+        "https": "https",
+        "ws": "http",
+        "wss": "https",
+    }.get(scope.get("scheme"))
+    raw_headers = scope.get("headers")
+    if scheme is None or not isinstance(raw_headers, (list, tuple)):
+        return False
+    host_values: list[bytes] = []
+    origin_values: list[bytes] = []
+    for header in raw_headers:
+        if (
+            not isinstance(header, (list, tuple))
+            or len(header) != 2
+            or not isinstance(header[0], bytes)
+            or not isinstance(header[1], bytes)
+        ):
+            return False
+        name, value = header
+        name = name.lower()
+        if name in UNTRUSTED_PROXY_HEADERS:
+            return False
+        if name == b"host":
+            host_values.append(value)
+        elif name == b"origin":
+            origin_values.append(value)
+    if len(host_values) != 1 or len(origin_values) > 1:
+        return False
+    if require_origin and len(origin_values) != 1:
+        return False
+    try:
+        host_value = host_values[0].decode("ascii")
+        origin_value = origin_values[0].decode("ascii") if origin_values else None
+    except UnicodeDecodeError:
+        return False
+    host = _loopback_authority(host_value, scheme)
+    if host is None:
+        return False
+    if origin_value is None:
+        return True
+    return _origin_authority(origin_value) == (scheme, *host)
 
 
 def _session_value() -> str:
@@ -989,6 +1128,11 @@ def _agent_mail_requirement() -> dict[str, Any] | None:
 @app.middleware("http")
 async def protect_api(request: Request, call_next):
     path = request.url.path
+    if not COCKPIT_TOKEN and (
+        not _request_authenticated(request)
+        or not _no_token_scope_trusted(request.scope, require_origin=False)
+    ):
+        return JSONResponse({"detail": LOCAL_ONLY_AUTH_DETAIL}, status_code=403)
     protected = path.startswith("/api/") or path in {
         "/docs", "/redoc", "/openapi.json", "/health.poll",
     }
@@ -1013,14 +1157,10 @@ async def protect_api(request: Request, call_next):
         )
     cookie_auth = _valid_cookie(request.cookies.get(AUTH_COOKIE))
     if request.method not in SAFE_METHODS:
-        # CSRF 防护:无 Token 模式认证只看 client IP,恶意站点可诱导浏览器
-        # 向 localhost 发跨源写请求;对存在的 Origin 一律要求同源。无 Origin
-        # 的 CLI/curl 不受影响,保留原有行为。
+        # Token cookie 写请求继续执行既有同源 CSRF 校验。无 Token 模式
+        # 已在全入口门校验 Host 和可选 Origin；缺 Origin 仅为本机 CLI 保留。
         origin = request.headers.get("origin")
-        if not COCKPIT_TOKEN:
-            if origin and not _same_origin(origin, request.headers.get("host")):
-                return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
-        elif cookie_auth and not _valid_bearer(
+        if COCKPIT_TOKEN and cookie_auth and not _valid_bearer(
             request.headers.get("authorization")
         ):
             if not _same_origin(origin, request.headers.get("host")):
@@ -5951,9 +6091,16 @@ def _schedule_term_input_note(term_id: str) -> None:
 @app.websocket("/api/term/{term_id}")
 async def api_term_ws(websocket: WebSocket, term_id: str):
     """终端 WebSocket 双向桥接:浏览器↔PTY。"""
-    if not _websocket_authenticated(websocket) or not _same_origin(
-        websocket.headers.get("origin"), websocket.headers.get("host")
-    ):
+    trusted = _websocket_authenticated(websocket)
+    if not COCKPIT_TOKEN:
+        trusted = trusted and _no_token_scope_trusted(
+            websocket.scope, require_origin=True,
+        )
+    else:
+        trusted = trusted and _same_origin(
+            websocket.headers.get("origin"), websocket.headers.get("host")
+        )
+    if not trusted:
         await websocket.close(code=1008)
         return
     await websocket.accept()
@@ -7368,6 +7515,7 @@ def main() -> int:
         app,
         host=host,
         port=port,
+        proxy_headers=bool(COCKPIT_TOKEN),
         log_level=level_name.lower(),
         log_config=None,
         access_log=False,

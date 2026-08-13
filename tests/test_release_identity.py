@@ -25,6 +25,15 @@ def _reset():
     release_identity.reset_cache()
 
 
+def _client():
+    from fastapi.testclient import TestClient
+    return TestClient(
+        server.app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    )
+
+
 def _frozen_generation(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     generation = tmp_path / f"{_VALID_SHA}-{_ARTIFACT_SHA}"
     generation.mkdir()
@@ -124,9 +133,7 @@ def test_health_live_frozen_identity_ignores_stale_env(tmp_path, monkeypatch):
     _frozen_generation(tmp_path, monkeypatch)
     monkeypatch.setenv("COCKPIT_EDITION", "source")
     monkeypatch.setenv("COCKPIT_SOURCE_SHA", "d" * 40)
-    from fastapi.testclient import TestClient
-
-    response = TestClient(server.app).get("/health/live")
+    response = _client().get("/health/live")
 
     assert response.status_code == 200
     assert response.json()["identity"] == {
@@ -231,8 +238,7 @@ def test_health_live_arbitrary_value_error_no_leak(monkeypatch):
     _reset()
     with patch.object(release_identity, "get_release_identity",
                       side_effect=ValueError("secret-MARKER/path")):
-        from fastapi.testclient import TestClient
-        client = TestClient(server.app)
+        client = _client()
         response = client.get("/health/live")
     assert response.status_code == 503
     body = response.text
@@ -248,8 +254,7 @@ def test_health_live_arbitrary_exception_no_leak(monkeypatch):
     _reset()
     with patch.object(release_identity, "get_release_identity",
                       side_effect=RuntimeError("evil/data")):
-        from fastapi.testclient import TestClient
-        client = TestClient(server.app)
+        client = _client()
         response = client.get("/health/live")
     assert response.status_code == 503
     assert "evil" not in response.text.lower()
@@ -261,8 +266,7 @@ def test_health_live_known_reason_precise(monkeypatch):
     _reset()
     monkeypatch.setenv("COCKPIT_EDITION", "server")
     monkeypatch.delenv("COCKPIT_SOURCE_SHA", raising=False)
-    from fastapi.testclient import TestClient
-    client = TestClient(server.app)
+    client = _client()
     response = client.get("/health/live")
     assert response.status_code == 503
     assert "missing_source_sha" in response.text
@@ -272,8 +276,7 @@ def test_health_live_no_raw_env_in_error(monkeypatch):
     """恶意 edition 字符串不出现在 503 响应中。"""
     _reset()
     monkeypatch.setenv("COCKPIT_EDITION", "evil/path/../token")
-    from fastapi.testclient import TestClient
-    client = TestClient(server.app)
+    client = _client()
     response = client.get("/health/live")
     assert response.status_code == 503
     body = response.text
@@ -286,8 +289,7 @@ def test_health_live_malicious_sha_not_leaked(monkeypatch):
     _reset()
     monkeypatch.setenv("COCKPIT_EDITION", "server")
     monkeypatch.setenv("COCKPIT_SOURCE_SHA", "evil-secret-token")
-    from fastapi.testclient import TestClient
-    client = TestClient(server.app)
+    client = _client()
     response = client.get("/health/live")
     assert response.status_code == 503
     assert "evil" not in response.text
@@ -304,8 +306,7 @@ def test_health_live_version_missing_503(monkeypatch):
         side_effect=FileNotFoundError,
     ):
         with patch.object(release_identity, "_cached", None):
-            from fastapi.testclient import TestClient
-            client = TestClient(server.app)
+            client = _client()
             response = client.get("/health/live")
     assert response.status_code == 503
     assert "version_unavailable" in response.text
@@ -461,8 +462,7 @@ def test_health_live_200(monkeypatch):
     _reset()
     monkeypatch.setenv("COCKPIT_EDITION", "source")
     monkeypatch.delenv("COCKPIT_SOURCE_SHA", raising=False)
-    from fastapi.testclient import TestClient
-    client = TestClient(server.app)
+    client = _client()
     response = client.get("/health/live")
     assert response.status_code == 200
     body = response.json()
@@ -475,8 +475,7 @@ def test_health_live_no_auth(monkeypatch):
     _reset()
     monkeypatch.setenv("COCKPIT_EDITION", "source")
     monkeypatch.delenv("COCKPIT_SOURCE_SHA", raising=False)
-    from fastapi.testclient import TestClient
-    client = TestClient(server.app)
+    client = _client()
     response = client.get("/health/live")
     assert response.status_code == 200
 
@@ -484,7 +483,6 @@ def test_health_live_no_auth(monkeypatch):
 def test_health_live_invalid_edition_503(monkeypatch):
     _reset()
     monkeypatch.setenv("COCKPIT_EDITION", "bogus")
-    from fastapi.testclient import TestClient
-    client = TestClient(server.app)
+    client = _client()
     response = client.get("/health/live")
     assert response.status_code == 503

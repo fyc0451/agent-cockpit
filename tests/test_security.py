@@ -1,12 +1,15 @@
 import asyncio
+import httpx
 import re
 import pytest
 import threading
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+import uvicorn
 
 import server
+from agent_cockpit import log_config
 
 
 @pytest.mark.parametrize("model", ["-danger", "gpt 5", "gpt/5", "a" * 65, ""])
@@ -94,16 +97,204 @@ def test_api_requires_auth_when_token_configured(monkeypatch):
 def test_no_token_allows_loopback_and_rejects_lan_or_remote_client(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
 
-    local = TestClient(server.app, client=("127.0.0.1", 50000))
+    local = TestClient(
+        server.app,
+        client=("127.0.0.1", 50000),
+        headers={"host": "127.0.0.1"},
+    )
     assert local.get("/api/files/roots").status_code == 200
     for host in ("10.18.160.11", "172.16.0.8", "192.168.1.8", "192.0.2.10"):
-        client = TestClient(server.app, client=(host, 50000))
+        client = TestClient(
+            server.app,
+            client=(host, 50000),
+            headers={"host": "127.0.0.1"},
+        )
         response = client.get("/api/files/roots")
         assert response.status_code == 403
         assert "COCKPIT_TOKEN" in response.json()["detail"]
         login = client.post("/api/auth/login", json={"token": ""})
         assert login.status_code == 403
         assert "COCKPIT_TOKEN" in login.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("host", "origin"),
+    [
+        ("localhost", "http://localhost"),
+        ("LOCALHOST:8790", "http://localhost:8790"),
+        ("127.0.0.1", "http://127.0.0.1"),
+        ("127.20.30.40:8790", "http://127.20.30.40:8790"),
+        ("[::1]", "http://[::1]"),
+        ("[0:0:0:0:0:0:0:1]:8790", "http://[::1]:8790"),
+        ("localhost", "http://localhost:80"),
+        ("localhost:80", "http://localhost"),
+    ],
+)
+def test_no_token_http_accepts_canonical_loopback_authorities(
+    monkeypatch, host, origin,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    client = TestClient(server.app, client=("127.0.0.1", 50000))
+
+    response = client.get(
+        "/api/auth/status", headers={"host": host, "origin": origin},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("host", "origin"),
+    [
+        ("evil.example", None),
+        ("localhost.example", None),
+        ("192.168.1.8:8790", None),
+        ("localhost:08790", None),
+        ("localhost:", None),
+        ("localhost:0", None),
+        ("localhost:65536", None),
+        ("user@localhost", None),
+        ("::1", None),
+        ("localhost:8790", "http://localhost:8791"),
+        ("localhost:8790", "https://localhost:8790"),
+        ("localhost:8790", "https://evil.example"),
+        ("localhost:8790", "null"),
+        ("localhost:8790", "http://localhost:8790/path"),
+        ("localhost:8790", "http://user@localhost:8790"),
+    ],
+)
+def test_no_token_http_rejects_malformed_or_untrusted_authorities(
+    monkeypatch, host, origin,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    headers = {"host": host}
+    if origin is not None:
+        headers["origin"] = origin
+
+    response = TestClient(
+        server.app, client=("127.0.0.1", 50000),
+    ).get("/api/auth/status", headers=headers)
+
+    assert response.status_code == 403
+
+
+def test_no_token_http_rejects_missing_or_repeated_host_and_origin(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    assert not server._no_token_scope_trusted(
+        {"scheme": "http", "headers": []}, require_origin=False,
+    )
+    client = TestClient(server.app, client=("127.0.0.1", 50000))
+
+    duplicate_host = client.get(
+        "/api/auth/status",
+        headers=[("host", "127.0.0.1"), ("host", "evil.example")],
+    )
+    duplicate_origin = client.get(
+        "/api/auth/status",
+        headers=[
+            ("host", "127.0.0.1"),
+            ("origin", "http://127.0.0.1"),
+            ("origin", "https://evil.example"),
+        ],
+    )
+
+    assert duplicate_host.status_code == 403
+    assert duplicate_origin.status_code == 403
+
+
+def test_no_token_http_rejects_proxy_headers_instead_of_trusting_them(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    client = TestClient(server.app, client=("127.0.0.1", 50000))
+
+    for header in (
+        "forwarded", "x-forwarded-for", "x-forwarded-host",
+        "x-forwarded-port", "x-forwarded-proto", "x-real-ip",
+    ):
+        response = client.get(
+            "/api/auth/status",
+            headers={"host": "127.0.0.1", header: "127.0.0.1"},
+        )
+        assert response.status_code == 403, header
+
+
+def test_no_token_host_gate_covers_public_health_and_static_entries(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    client = TestClient(server.app, client=("127.0.0.1", 50000))
+
+    for path in ("/", "/static/missing", "/health/live"):
+        rejected = client.get(path, headers={"host": "evil.example"})
+        assert rejected.status_code == 403, path
+
+        allowed = client.get(path, headers={"host": "127.0.0.1:8790"})
+        assert allowed.status_code != 403, path
+
+
+def test_no_token_closes_lead_http_reproductions(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    client = TestClient(server.app, client=("127.0.0.1", 50000))
+
+    status = client.get("/api/auth/status", headers={"host": "evil.example"})
+    logout = client.post(
+        "/api/auth/logout",
+        headers={"host": "evil.example", "origin": "http://evil.example"},
+    )
+
+    assert status.status_code == 403
+    assert logout.status_code == 403
+
+
+def test_token_mode_keeps_non_loopback_host_and_proxy_behavior(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    response = TestClient(server.app, client=("192.0.2.10", 50000)).get(
+        "/api/auth/status",
+        headers={
+            "authorization": "Bearer secret",
+            "host": "cockpit.example",
+            "x-forwarded-host": "proxy.example",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["authenticated"] is True
+
+
+def test_token_mode_keeps_public_health_and_static_entries(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(
+        server.app,
+        client=("192.0.2.10", 50000),
+        headers={"host": "cockpit.example"},
+    )
+
+    for path in ("/", "/static/missing", "/health/live"):
+        assert client.get(path).status_code != 403, path
+
+
+@pytest.mark.parametrize(("token", "proxy_headers"), [("", False), ("secret", True)])
+def test_server_main_configures_proxy_headers_by_auth_mode(
+    monkeypatch, token, proxy_headers,
+):
+    run_calls = []
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", token, raising=False)
+    monkeypatch.setattr(
+        server.next_profile, "validate_server_environment", lambda _root: None,
+    )
+    monkeypatch.setattr(
+        log_config, "configure_logging", lambda **_kwargs: "INFO",
+    )
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: run_calls.append(kwargs))
+    monkeypatch.setenv("COCKPIT_HOST", "127.0.0.1")
+    monkeypatch.setenv("COCKPIT_PORT", "18790")
+
+    assert server.main() == 0
+    assert run_calls == [{
+        "host": "127.0.0.1",
+        "port": 18790,
+        "proxy_headers": proxy_headers,
+        "log_level": "info",
+        "log_config": None,
+        "access_log": False,
+    }]
 
 
 def test_no_token_loopback_write_rejects_cross_origin(monkeypatch):
@@ -113,13 +304,17 @@ def test_no_token_loopback_write_rejects_cross_origin(monkeypatch):
     发跨源 POST;必须对存在的 Origin 校验同源,同时保留无 Origin 的 CLI。
     """
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
-    client = TestClient(server.app, client=("127.0.0.1", 50000))
+    client = TestClient(
+        server.app,
+        client=("127.0.0.1", 50000),
+        headers={"host": "127.0.0.1"},
+    )
 
     # 无 Origin(CLI/curl)放行
     assert client.post("/api/auth/logout").status_code == 200
     # 同源 Origin 放行
     assert client.post(
-        "/api/auth/logout", headers={"origin": "http://testserver"}
+        "/api/auth/logout", headers={"origin": "http://127.0.0.1"}
     ).status_code == 200
     # 跨源 Origin 拒绝(CSRF 防护)
     assert client.post(
@@ -182,6 +377,71 @@ def test_websocket_rejects_missing_auth(monkeypatch):
             "/api/term/missing", headers={"origin": "http://testserver"}
         ):
             pass
+
+
+@pytest.mark.parametrize(
+    ("host", "origin"),
+    [
+        ("localhost:8790", "http://localhost:8790"),
+        ("127.0.0.1", "http://127.0.0.1"),
+        ("[::1]:8790", "http://[0:0:0:0:0:0:0:1]:8790"),
+    ],
+)
+def test_no_token_websocket_accepts_loopback_host_and_origin(
+    monkeypatch, host, origin,
+):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    monkeypatch.setattr(server.terminal, "list_terms", lambda: [])
+    client = TestClient(server.app, client=("127.0.0.1", 50000))
+
+    with client.websocket_connect(
+        "/api/term/missing", headers={"host": host, "origin": origin},
+    ) as websocket:
+        assert "终端会话不存在" in websocket.receive_text()
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"host": "evil.example", "origin": "http://evil.example"},
+        {"host": "localhost:8790"},
+        {"host": "localhost:8790", "origin": "https://localhost:8790"},
+        {"host": "localhost:8790", "origin": "http://localhost:8791"},
+        {
+            "host": "localhost:8790",
+            "origin": "http://localhost:8790",
+            "x-forwarded-host": "localhost:8790",
+        },
+    ],
+)
+def test_no_token_websocket_rejects_untrusted_handshakes(monkeypatch, headers):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    client = TestClient(server.app, client=("127.0.0.1", 50000))
+
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with client.websocket_connect("/api/term/missing", headers=headers):
+            pass
+
+    assert closed.value.code == 1008
+
+
+def test_no_token_websocket_rejects_repeated_origin(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "", raising=False)
+    headers = httpx.Headers(
+        [
+            ("host", "localhost:8790"),
+            ("origin", "http://localhost:8790"),
+            ("origin", "http://localhost:8790"),
+        ]
+    )
+
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with TestClient(
+            server.app, client=("127.0.0.1", 50000),
+        ).websocket_connect("/api/term/missing", headers=headers):
+            pass
+
+    assert closed.value.code == 1008
 
 
 def test_websocket_marks_missing_terminal_as_non_reconnectable(monkeypatch):

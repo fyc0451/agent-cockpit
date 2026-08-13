@@ -122,8 +122,10 @@ def test_task_stats_route_precedes_dynamic_task_route(monkeypatch):
         raise AssertionError("/api/tasks/stats was swallowed by {task_id}")
 
     monkeypatch.setattr(server.tasks, "get_task", dynamic_route_must_not_run)
-    response = TestClient(server.app, client=("127.0.0.1", 50000)).get(
-        "/api/tasks/stats"
-    )
+    response = TestClient(
+        server.app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    ).get("/api/tasks/stats")
     assert response.status_code == 200
     assert response.json() == expected

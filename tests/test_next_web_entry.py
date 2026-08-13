@@ -30,7 +30,11 @@ def web_roots(tmp_path: Path, monkeypatch):
 
 
 def _client() -> TestClient:
-    return TestClient(server.app, client=("127.0.0.1", 50000))
+    return TestClient(
+        server.app,
+        base_url="http://127.0.0.1:8790",
+        client=("127.0.0.1", 50000),
+    )
 
 
 def test_next_profile_serves_react_index_and_hashed_assets(web_roots, monkeypatch):

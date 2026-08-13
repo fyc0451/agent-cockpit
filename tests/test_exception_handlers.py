@@ -12,7 +12,12 @@ import server
 
 def _client() -> TestClient:
     # 按真实 500 路径：不要把服务端异常冒泡成客户端未捕获异常
-    return TestClient(server.app, raise_server_exceptions=False)
+    return TestClient(
+        server.app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+        raise_server_exceptions=False,
+    )
 
 
 def _mount(path: str, handler):
