@@ -697,6 +697,28 @@
       "user_acceptance_evidence": null
     },
     {
+      "id": "P0-B0-test-isolation",
+      "title": "Isolate coordination hard-stop tests from host Leader bindings",
+      "status": "in_progress",
+      "depends_on": ["P0-WORKBENCH-001-unblock"],
+      "scope": ["tests/test_coordination_server.py"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_coordination_server.py", "passed": false},
+        {"command": ".venv/bin/python -m pytest -q tests/test_b0_runtime_mode.py tests/test_b0_wiring_r4.py", "passed": false},
+        {"command": ".venv/bin/python -m pytest -q", "passed": false}
+      ],
+      "rollback": "Revert only the hermetic test fixture and retain the production canonical Leader authorization gate unchanged",
+      "production_impact": "none",
+      "owner_instance_id": "i-lmzsi3liwhtbxsswx4pxjt5gve",
+      "reviewer_instance_id": null,
+      "base_sha": "00fd9804063024dd68306ae10e7d621eed5a468e",
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
+    },
+    {
       "id": "WEB-004A-e2e-fixtures",
       "title": "Align Playwright legacy endpoint fixtures with the accepted bare response contracts",
       "status": "in_progress",
