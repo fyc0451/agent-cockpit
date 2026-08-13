@@ -19,6 +19,7 @@ from agent_cockpit.scheduler_projection import (
     project_scheduler_projection,
     second_active_lease_allowed,
     stamp_revisions,
+    validate_snapshot,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -400,3 +401,150 @@ def test_r24_output_is_deterministically_sorted():
         "i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "i-zzzzzzzzzzzzzzzzzzzzzzzzzz",
     ]
     assert list(result.reason_codes) == sorted(result.reason_codes)
+
+
+def _ordinary_ready(extra_work=None, agents=None, leases=None) -> dict:
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0]["sensitivity"] = "ordinary"
+    if extra_work:
+        snapshot["work"].extend(extra_work)
+    snapshot["agents"] = agents or []
+    snapshot["active_leases"] = leases or []
+    return stamp_revisions(snapshot)
+
+
+def test_c1_writer_pairing_requires_idle():
+    for state in ("working", "blocked", "done", "unknown"):
+        snapshot = _ordinary_ready(agents=[_ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa", state=state)])
+        assert eligible_pairs(snapshot, T0) == ()
+        result = project_scheduler_projection(snapshot, evaluated_at=T0)
+        assert ("CAR-READY", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa") not in eligible_pairs(snapshot, T0)
+        assert result.dispatch.available is False
+    idle = _ordinary_ready(agents=[_ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa", state="idle")])
+    assert eligible_pairs(idle, T0) == (("CAR-READY", "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"),)
+
+
+def test_c2_agent_is_single_active_across_work_and_phase():
+    other = {
+        **_snap("valid_minimal.json")["work"][0],
+        "source_id": "OTHER-CAR",
+        "state": "active",
+        "sensitivity": "ordinary",
+    }
+    snapshot = _ordinary_ready(
+        extra_work=[other],
+        agents=[_ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa")],
+        leases=[{
+            "lease_id": "lease-other", "project_id": "agent-cockpit-next", "workspace_id": "ws-1",
+            "source_kind": "delivery_car", "source_id": "OTHER-CAR", "source_revision": "rev-1",
+            "phase": "writer", "agent_instance_id": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "status": "working",
+        }],
+    )
+    assert eligible_pairs(snapshot, T0) == ()
+
+
+def test_c3_work_with_active_lease_does_not_pair_another_agent():
+    snapshot = _ordinary_ready(
+        agents=[
+            _ready_agent(instance="i-firstaaaaaaaaaaaaaaaaaaaaaaa"),
+            _ready_agent(instance="i-secondaaaaaaaaaaaaaaaaaaaaaa"),
+        ],
+        leases=[{
+            "lease_id": "offer-1", "project_id": "agent-cockpit-next", "workspace_id": "ws-1",
+            "source_kind": "delivery_car", "source_id": "CAR-READY", "source_revision": "rev-1",
+            "phase": "writer", "agent_instance_id": "i-firstaaaaaaaaaaaaaaaaaaaaaaa", "status": "offered",
+        }],
+    )
+    pairs = eligible_pairs(snapshot, T0)
+    assert "i-secondaaaaaaaaaaaaaaaaaaaaaa" not in {agent for _work, agent in pairs}
+    assert pairs == ()
+
+
+def test_c4_missing_verified_harness_is_not_available_or_paired():
+    snapshot = _ordinary_ready(agents=[
+        _ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa", verified=None),
+    ])
+    result = project_scheduler_projection(snapshot, evaluated_at=T0)
+    assert eligible_pairs(snapshot, T0) == ()
+    assert result.agents.available_count == 0
+    assert result.agents.states[0].projected_state != "available"
+    assert "runtime_not_verified" in result.agents.states[0].reason_codes
+
+
+def test_c5_typed_link_requires_matching_kind_and_id():
+    snapshot = _snap("valid_minimal.json")
+    snapshot["work"][0]["typed_links"] = [{"kind": "review_packet", "id": "CAR-READY"}]
+    with pytest.raises(ProjectionError, match="source_invalid"):
+        validate_snapshot(stamp_revisions(snapshot))
+    with pytest.raises(ProjectionError, match="source_invalid"):
+        project_scheduler_projection(stamp_revisions(snapshot), evaluated_at=T0)
+    assignment_as_work = _snap("valid_minimal.json")
+    assignment_as_work["assignments"] = [{
+        "assignment_id": "ASN-A", "source_revision": "asn-1", "status": "assigned",
+        "assignee": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "typed_links": [{"kind": "assignment", "id": "CAR-READY"}],
+    }]
+    with pytest.raises(ProjectionError, match="source_invalid"):
+        validate_snapshot(stamp_revisions(assignment_as_work))
+
+
+def test_c6_previous_without_onset_is_absent_timing_unavailable():
+    snapshot = _ordinary_ready(agents=[_ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa")])
+    for previous in (None, {}, SchedulerProjection(
+        schema_version=1, project_id="agent-cockpit-next", input_fingerprint="sha256:" + "0" * 64,
+        evaluated_at=T0, next_reconciliation_at=T0 + timedelta(seconds=45),
+        source=project_scheduler_projection(snapshot, evaluated_at=T0).source,
+        capacity=project_scheduler_projection(snapshot, evaluated_at=T0).capacity,
+        work=project_scheduler_projection(snapshot, evaluated_at=T0).work,
+        agents=project_scheduler_projection(snapshot, evaluated_at=T0).agents,
+        dispatch=project_scheduler_projection(snapshot, evaluated_at=T0).dispatch,
+        alerts=(),
+        reason_codes=("readonly_projection_only",),
+    )):
+        result = project_scheduler_projection(snapshot, evaluated_at=T0, previous=previous)
+        assert any(alert.status == "absent" and alert.reason_code == "timing_unavailable" for alert in result.alerts)
+        assert "timing_unavailable" in result.reason_codes
+        assert all(alert.status != "open" for alert in result.alerts)
+
+
+def test_c7_open_condition_disappearance_emits_one_resolved():
+    snapshot = _ordinary_ready(agents=[_ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa")])
+    opened = project_scheduler_projection(
+        snapshot, evaluated_at=T0 + timedelta(seconds=90),
+        previous={"first_observed_at": "2026-08-13T09:00:00+00:00"},
+    )
+    assert any(alert.status == "open" for alert in opened.alerts)
+    stale = deepcopy(snapshot)
+    stale["source"]["freshness_deadline"] = "2026-08-13T08:59:59+00:00"
+    stale = stamp_revisions(stale)
+    resolved = project_scheduler_projection(stale, evaluated_at=T0 + timedelta(seconds=90), previous=opened)
+    assert [alert.status for alert in resolved.alerts] == ["resolved"]
+    assert resolved.alerts[0].status == "resolved"
+    assert all(alert.status != "open" for alert in resolved.alerts)
+
+
+def test_c8_ordinary_ready_without_eligible_agent_emits_reason():
+    snapshot = _ordinary_ready(agents=[
+        _ready_agent(instance="i-aaaaaaaaaaaaaaaaaaaaaaaaaa", identity=None),
+    ])
+    result = project_scheduler_projection(snapshot, evaluated_at=T0)
+    assert eligible_pairs(snapshot, T0) == ()
+    assert "ready_but_no_eligible_agent" in result.reason_codes
+    assert "ready_agent_idle_undispatched" not in result.reason_codes
+    assert result.capacity.remaining > 0
+
+
+def test_c9_non_available_source_is_unknown_even_when_dirty():
+    for status, reason in (
+        ("unavailable", "source_unavailable"),
+        ("invalid", "source_invalid"),
+        ("ambiguous", "authoritative_plan_ambiguous"),
+    ):
+        snapshot = _snap("valid_minimal.json")
+        snapshot["source"]["status"] = status
+        snapshot["source"]["git_dirty"] = True
+        snapshot = stamp_revisions(snapshot)
+        result = project_scheduler_projection(snapshot, evaluated_at=T0)
+        assert result.source.freshness == "unknown"
+        assert reason in result.reason_codes
+        assert result.source.freshness != "dirty"

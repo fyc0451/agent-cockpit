@@ -413,8 +413,12 @@ def validate_snapshot(raw: Mapping[str, Any]) -> dict[str, Any]:
     work_by_id = {item["source_id"]: item for item in work}
     for item in [*work, *assignments]:
         for link in item["typed_links"]:
-            known = assignment_ids if link["kind"] == "assignment" else set(work_by_id)
-            if link["id"] not in known:
+            if link["kind"] == "assignment":
+                if link["id"] not in assignment_ids:
+                    _fail()
+                continue
+            target = work_by_id.get(link["id"])
+            if target is None or target["source_kind"] != link["kind"]:
                 _fail()
     for lease in leases:
         leased = work_by_id.get(lease["source_id"])
@@ -434,12 +438,13 @@ def validate_snapshot(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def freshness(source: Mapping[str, Any], evaluated_at: datetime) -> str:
+    if source["status"] != "available":
+        return "unknown"
     if source["git_dirty"] is True:
         return "dirty"
-    status = source["status"]
     observed = _parse_utc(source["observed_at"])
     deadline = _parse_utc(source["freshness_deadline"])
-    if status == "available" and observed is not None and deadline is not None:
+    if observed is not None and deadline is not None:
         if evaluated_at <= deadline:
             return "fresh"
         return "stale"
@@ -493,6 +498,8 @@ def _agent_reasons(agent: Mapping[str, Any], evaluated_at: datetime) -> list[str
     if agent.get("runtime_generation") is None or not agent.get("attachment_id"):
         reasons.append("runtime_generation_unavailable")
         reasons.append("runtime_not_verified")
+    if agent.get("verified_harness") is None:
+        reasons.append("runtime_not_verified")
     if agent.get("projected_state") == "unknown_transport" or agent.get("observed_state") == "unknown":
         reasons.append("transport_unknown")
     observed = _parse_utc(agent.get("observed_at"))
@@ -518,36 +525,49 @@ def eligible_pairs(snapshot: Mapping[str, Any], evaluated_at: datetime) -> tuple
     else:
         writer_ok = True
     pairs: list[tuple[str, str]] = []
+    leased = {
+        lease["agent_instance_id"]
+        for lease in snapshot["active_leases"]
+        if lease["status"] in ACTIVE_LEASE
+    }
+    leased_work = {
+        (lease["source_id"], lease["phase"])
+        for lease in snapshot["active_leases"]
+        if lease["status"] in ACTIVE_LEASE
+    }
     if writer_ok:
         for item in snapshot["work"]:
             if item["state"] != "ready" or item["phase"] != "writer":
                 continue
             if item["sensitivity"] == "unclassified":
                 continue
+            if (item["source_id"], item["phase"]) in leased_work:
+                continue
             for agent in snapshot["agents"]:
+                if agent.get("observed_state") != "idle":
+                    continue
                 reasons = _agent_reasons(agent, evaluated_at)
                 if set(reasons) & _BLOCKING:
+                    continue
+                instance = agent.get("agent_instance_id")
+                if not instance or instance in leased:
                     continue
                 if item["sensitivity"] == "sensitive_security":
                     if agent.get("verified_harness") not in SENSITIVE_OK:
                         continue
                 elif agent.get("verified_harness") in {None, "unknown"}:
                     continue
-                instance = agent.get("agent_instance_id")
-                if not instance:
-                    continue
                 pairs.append((item["source_id"], instance))
-    leased = {
-        lease["agent_instance_id"]
-        for lease in snapshot["active_leases"]
-        if lease["status"] in ACTIVE_LEASE
-    }
     for item in snapshot["work"]:
         if item["phase"] != "reviewer" or item["state"] not in {"ready", "review"}:
+            continue
+        if (item["source_id"], item["phase"]) in leased_work:
             continue
         for agent in snapshot["agents"]:
             instance = agent.get("agent_instance_id")
             if not instance:
+                continue
+            if agent.get("observed_state") != "idle":
                 continue
             if item.get("author_agent_instance_id") == instance:
                 continue
@@ -673,8 +693,10 @@ def project_scheduler_projection(
             agent.get("identity_revision")
             and agent.get("runtime_generation") is not None
             and agent.get("attachment_id")
+            and agent.get("verified_harness") not in {None, "unknown"}
             and "source_stale" not in values
             and "transport_unknown" not in values
+            and "runtime_not_verified" not in values
         ):
             if agent.get("observed_state") == "idle":
                 projected = "available"
@@ -702,9 +724,9 @@ def project_scheduler_projection(
 
     pairs = eligible_pairs(validated, evaluated_at)
     ready_ids = [item.source_id for item in work_items["ready"]]
-    if ready_ids and not pairs and fresh == "fresh" and source["status"] == "available":
+    if ready_ids and not pairs and fresh == "fresh" and source["status"] == "available" and remaining > 0:
+        reasons.add("ready_but_no_eligible_agent")
         if any(item["sensitivity"] == "sensitive_security" for item in validated["work"] if item["state"] == "ready"):
-            reasons.add("ready_but_no_eligible_agent")
             reasons.add("sensitive_route_unavailable")
         elif not validated["agents"]:
             reasons.add("no_stable_identity")
@@ -728,15 +750,25 @@ def project_scheduler_projection(
                 first_observed_at=first_observed, observed_for_seconds=held,
                 reason_code="ready_agent_idle_undispatched", evidence_refs=(),
             ))
-    elif ready_ids and not pairs and source["status"] == "available" and fresh == "fresh":
-        if any(item["sensitivity"] == "sensitive_security" for item in validated["work"] if item["state"] == "ready"):
-            alerts.append(SchedulerAlertIntent(
-                kind="ready_but_no_eligible_agent", severity="info",
-                dedupe_key="ready_but_no_eligible_agent", status="absent",
-                first_observed_at=None, observed_for_seconds=0,
-                reason_code="ready_but_no_eligible_agent", evidence_refs=(),
-            ))
-    if previous is None:
+    elif ready_ids and not pairs and source["status"] == "available" and fresh == "fresh" and remaining > 0:
+        alerts.append(SchedulerAlertIntent(
+            kind="ready_but_no_eligible_agent", severity="info",
+            dedupe_key="ready_but_no_eligible_agent", status="absent",
+            first_observed_at=None, observed_for_seconds=0,
+            reason_code="ready_but_no_eligible_agent", evidence_refs=(),
+        ))
+    previous_open = isinstance(previous, SchedulerProjection) and any(
+        alert.status == "open" for alert in previous.alerts
+    )
+    condition_holds = bool(pairs) and fresh == "fresh" and remaining > 0 and source["status"] == "available"
+    if previous_open and not condition_holds:
+        alerts = [SchedulerAlertIntent(
+            kind="ready_without_dispatch", severity="warning",
+            dedupe_key="ready_agent_idle_undispatched", status="resolved",
+            first_observed_at=_first_observed(previous), observed_for_seconds=0,
+            reason_code="ready_agent_idle_undispatched", evidence_refs=(),
+        )]
+    if first_observed is None:
         reasons.add("timing_unavailable")
         if not alerts:
             alerts.append(SchedulerAlertIntent(
