@@ -673,6 +673,28 @@
       "release_started_at": null,
       "user_acceptance_required": false,
       "user_acceptance_evidence": null
+    },
+    {
+      "id": "P0-WORKBENCH-001-unblock",
+      "title": "Keep shared Workspace creation reachable when the legacy runtime workbench is unavailable",
+      "status": "in_progress",
+      "depends_on": ["P0-WORKSPACE-001-F"],
+      "scope": ["web/pages/ProjectWorkbenchPage.tsx", "web/test/workspace-create.test.tsx", "web/e2e/workspace-create.spec.ts"],
+      "acceptance": [
+        {"command": "npm --prefix web test -- --run workspace-create.test.tsx", "passed": false},
+        {"command": "npm --prefix web run test:e2e -- workspace-create.spec.ts", "passed": false},
+        {"command": "npm --prefix web run build", "passed": false}
+      ],
+      "rollback": "Revert the runtime and Workspace section split while preserving the accepted Workspace creation UI",
+      "production_impact": "none",
+      "owner_instance_id": "i-lmzsi3liwhtbxsswx4pxjt5gve",
+      "reviewer_instance_id": null,
+      "base_sha": "86231535908b19fe1da7c4049ec73c35a78be67f",
+      "fixed_sha": null,
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
     }
   ]
 }
