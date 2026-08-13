@@ -478,19 +478,20 @@
     {
       "id": "DELIVERY-003-wip4-gate",
       "title": "Permit four writers only after Operation Runtime Event and Memory ownership gates pass",
-      "status": "in_progress",
+      "status": "review",
       "depends_on": ["DELIVERY-002-wip3-gate", "SLICE-001-local-readonly"],
       "scope": [".delivery/cockpit-product-v3.json", ".delivery/provider-ownership-v1.json", "docs/delivery-contract.md", "docs/contracts/provider-ownership-v1.md", "scripts/delivery_gate.py", "tests/test_delivery_gate.py", "tests/fixtures/delivery_gate/ERROR_MATRIX.md"],
       "acceptance": [
-        {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py", "passed": false},
-        {"command": ".venv/bin/python scripts/delivery_gate.py check .delivery/cockpit-product-v3.json", "passed": false}
+        {"command": ".venv/bin/python -m pytest -q tests/test_delivery_gate.py", "passed": true},
+        {"command": ".venv/bin/python scripts/delivery_gate.py check .delivery/cockpit-product-v3.json --json", "passed": true},
+        {"command": ".venv/bin/python scripts/delivery_gate.py ready .delivery/cockpit-product-v3.json --json", "passed": true}
       ],
       "rollback": "Revert the WIP4 gate and keep the machine-enforced writer limit at three",
       "production_impact": "none",
       "owner_instance_id": "i-cebqn5p7znunmxwpneduptrtou",
-      "reviewer_instance_id": null,
+      "reviewer_instance_id": "i-gzy6byrcie47tprardahrpmwbq",
       "base_sha": "607ed4fa47486ef43c764424d8cd259f9b040a52",
-      "fixed_sha": null,
+      "fixed_sha": "79aab7dcd7e433ef3bc4068968739f517090ff3f",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
