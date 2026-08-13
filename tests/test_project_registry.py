@@ -517,6 +517,18 @@ def _registry_counts(db_path: Path) -> dict[str, int]:
         }
 
 
+def _remote(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("ascii")).hexdigest()
+
+
+def _aggregate_counts(db_path: Path) -> dict[str, int]:
+    with sqlite3.connect(db_path) as connection:
+        return {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("projects", "repo_locations", "idempotency_records")
+        }
+
+
 def test_store_owned_project_and_active_location_queries(registry, db_path: Path):
     assert registry.get_project_by_slug("alpha") is None
     assert registry.get_active_repo_location("local", "/repo/alpha") is None
@@ -1079,6 +1091,246 @@ def test_idempotency_replay_and_conflict_are_atomic(registry, db_path):
             for table in ("projects", "idempotency_records")
         }
     assert counts == {"projects": 2, "idempotency_records": 1}
+
+
+def test_project_api_store_reads_use_stable_order_and_consistent_snapshots(
+    registry, db_path: Path,
+):
+    alpha = registry.create_project(slug="alpha", display_name="Alpha", goal=None)
+    beta = registry.create_project(slug="beta", display_name="Beta", goal="Goal")
+    first_location = registry.add_repo_location(
+        project_id=alpha.project_id, node_id="local", canonical_path="/repo/a",
+        vcs_kind="git", availability="available",
+    )
+    second_location = registry.add_repo_location(
+        project_id=alpha.project_id, node_id="remote", canonical_path="/repo/a",
+        vcs_kind="git", availability="offline",
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE projects SET lifecycle='archived' WHERE project_id=?",
+            (beta.project_id,),
+        )
+
+    detail = registry.get_project_by_id(alpha.project_id)
+    assert detail is not None
+    assert detail.project == alpha
+    assert detail.repo_locations == tuple(sorted(
+        (first_location, second_location), key=lambda item: item.repo_location_id,
+    ))
+    assert registry.get_project_by_id("prj_" + "0" * 32) is None
+    assert registry.list_repo_locations(alpha.project_id) == detail.repo_locations
+    assert registry.list_repo_locations("prj_" + "0" * 32) is None
+
+    active = registry.list_projects(lifecycle="active", limit=1)
+    assert active.items == (detail,)
+    assert active.next_project_id is None
+    archived = registry.list_projects(lifecycle="archived", limit=1)
+    assert archived.items[0].project.project_id == beta.project_id
+    assert archived.next_project_id is None
+
+
+def test_project_api_store_page_cursor_is_last_visible_project(registry):
+    projects = [
+        registry.create_project(slug=f"project-{index}", display_name=str(index), goal=None)
+        for index in range(3)
+    ]
+    ordered_ids = sorted(project.project_id for project in projects)
+    first = registry.list_projects(limit=2)
+    assert [item.project.project_id for item in first.items] == ordered_ids[:2]
+    assert first.next_project_id == ordered_ids[1]
+    second = registry.list_projects(after_project_id=first.next_project_id, limit=2)
+    assert [item.project.project_id for item in second.items] == ordered_ids[2:]
+    assert second.next_project_id is None
+
+
+def test_project_api_store_discovery_matches_only_active_exact_and_remote_advisory(
+    registry, db_path: Path,
+):
+    alpha = registry.idempotent_register_project(
+        scope="project-registry.projects.create.v1", idempotency_key="alpha",
+        payload={"slug": "alpha", "path": "/repo/alpha"}, slug="alpha",
+        display_name="Alpha", goal=None, node_id="local",
+        canonical_path="/repo/alpha", vcs_kind="git", availability="available",
+        git_remote_fingerprint=_remote("origin"),
+    )
+    beta = registry.idempotent_register_project(
+        scope="project-registry.projects.create.v1", idempotency_key="beta",
+        payload={"slug": "beta", "path": "/repo/beta"}, slug="beta",
+        display_name="Beta", goal=None, node_id="local",
+        canonical_path="/repo/beta", vcs_kind="git", availability="available",
+        git_remote_fingerprint=_remote("origin"),
+    )
+    alpha_id = alpha.response["project_id"]
+    beta_id = beta.response["project_id"]
+    exact, possible = registry.match_discovery(
+        node_id="local", canonical_path="/repo/alpha",
+        repository_fingerprint=_remote("origin"),
+    )
+    assert exact is not None and exact.project_id == alpha_id
+    assert [item.project_id for item in possible] == [beta_id]
+    assert registry.match_discovery(
+        node_id="local", canonical_path="/repo/unknown",
+        repository_fingerprint=None,
+    ) == (None, ())
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE repo_locations SET lifecycle='archived' WHERE project_id=?",
+            (beta_id,),
+        )
+    assert registry.match_discovery(
+        node_id="local", canonical_path="/repo/unknown",
+        repository_fingerprint=_remote("origin"),
+    ) == (
+        None,
+        (registry_domain.DiscoveryMatch(alpha_id, "alpha", "Alpha"),),
+    )
+
+
+def test_registration_preflight_replay_and_conflict_are_receipt_owned(
+    registry, db_path: Path,
+):
+    payload = {"slug": "alpha", "locator": {"path": "alpha"}}
+    assert registry.preflight_idempotency(
+        scope="project-registry.projects.create.v1", idempotency_key="same",
+        payload=payload,
+    ) is None
+    first = registry.idempotent_register_project(
+        scope="project-registry.projects.create.v1", idempotency_key="same",
+        payload=payload, slug="alpha", display_name="Alpha", goal=None,
+        node_id="local", canonical_path="/repo/alpha", vcs_kind="git",
+        availability="available", git_remote_fingerprint=_remote("origin"),
+    )
+    replay = registry.preflight_idempotency(
+        scope="project-registry.projects.create.v1", idempotency_key="same",
+        payload={"locator": {"path": "alpha"}, "slug": "alpha"},
+    )
+    assert replay == first
+    assert registry.idempotent_register_project(
+        scope="project-registry.projects.create.v1", idempotency_key="same",
+        payload=payload, slug="changed", display_name="Changed", goal=None,
+        node_id="local", canonical_path="/repo/changed", vcs_kind="none",
+        availability="available", git_remote_fingerprint=None,
+    ) == first
+    with pytest.raises(registry_store.ProjectRegistryError) as conflict:
+        registry.preflight_idempotency(
+            scope="project-registry.projects.create.v1", idempotency_key="same",
+            payload={"slug": "beta"},
+        )
+    assert _code(conflict) == "idempotency_conflict"
+    assert _aggregate_counts(db_path) == {
+        "projects": 1, "repo_locations": 1, "idempotency_records": 1,
+    }
+
+
+def test_registration_is_atomic_for_slug_and_location_conflicts(registry, db_path: Path):
+    registry.create_project(slug="taken", display_name="Taken", goal=None)
+    before = _aggregate_counts(db_path)
+    with pytest.raises(registry_store.ProjectRegistryError) as slug_conflict:
+        registry.idempotent_register_project(
+            scope="project-registry.projects.create.v1", idempotency_key="slug",
+            payload={"slug": "taken"}, slug="taken", display_name="Taken",
+            goal=None, node_id="local", canonical_path="/repo/taken",
+            vcs_kind="none", availability="available", git_remote_fingerprint=None,
+        )
+    assert _code(slug_conflict) == "project_slug_conflict"
+    assert _aggregate_counts(db_path) == before
+
+    owner = registry.idempotent_register_project(
+        scope="project-registry.projects.create.v1", idempotency_key="owner",
+        payload={"slug": "owner"}, slug="owner", display_name="Owner", goal=None,
+        node_id="local", canonical_path="/repo/occupied", vcs_kind="none",
+        availability="available", git_remote_fingerprint=None,
+    )
+    before = _aggregate_counts(db_path)
+    with pytest.raises(registry_store.ProjectRegistryError) as location_conflict:
+        registry.idempotent_register_project(
+            scope="project-registry.projects.create.v1", idempotency_key="occupied",
+            payload={"slug": "other"}, slug="other", display_name="Other", goal=None,
+            node_id="local", canonical_path="/repo/occupied", vcs_kind="none",
+            availability="available", git_remote_fingerprint=None,
+        )
+    assert _code(location_conflict) == "location_already_registered"
+    assert owner.response["project_id"]
+    assert _aggregate_counts(db_path) == before
+
+
+def test_concurrent_exact_registration_creates_once_then_replays(registry, db_path: Path):
+    barrier = Barrier(2)
+    payload = {"slug": "alpha", "locator": {"path": "alpha"}}
+
+    def register_once():
+        barrier.wait()
+        return registry.idempotent_register_project(
+            scope="project-registry.projects.create.v1", idempotency_key="same",
+            payload=payload, slug="alpha", display_name="Alpha", goal=None,
+            node_id="local", canonical_path="/repo/alpha", vcs_kind="git",
+            availability="available", git_remote_fingerprint=_remote("origin"),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first, second = list(executor.map(lambda _index: register_once(), range(2)))
+    assert first == second
+    assert _aggregate_counts(db_path) == {
+        "projects": 1, "repo_locations": 1, "idempotency_records": 1,
+    }
+
+
+def test_attach_repo_location_requires_active_version_and_remote_identity(
+    registry, db_path: Path,
+):
+    created = registry.idempotent_register_project(
+        scope="project-registry.projects.create.v1", idempotency_key="project",
+        payload={"slug": "alpha"}, slug="alpha", display_name="Alpha", goal=None,
+        node_id="local", canonical_path="/repo/alpha", vcs_kind="git",
+        availability="available", git_remote_fingerprint=_remote("origin"),
+    )
+    project_id = created.response["project_id"]
+    attached = registry.idempotent_add_repo_location(
+        scope="project-registry.repo-locations.create.v1", idempotency_key="attach",
+        payload={"project_id": project_id, "path": "clone"}, project_id=project_id,
+        expected_project_version=1, node_id="local", canonical_path="/repo/clone",
+        vcs_kind="git", availability="available", git_remote_fingerprint=_remote("origin"),
+    )
+    assert attached.status_code == 201
+    assert attached.response["project"]["version"] == 2
+    assert registry.idempotent_add_repo_location(
+        scope="project-registry.repo-locations.create.v1", idempotency_key="attach",
+        payload={"path": "clone", "project_id": project_id}, project_id=project_id,
+        expected_project_version=1, node_id="local", canonical_path="/repo/clone",
+        vcs_kind="git", availability="available", git_remote_fingerprint=_remote("origin"),
+    ) == attached
+    assert _aggregate_counts(db_path) == {
+        "projects": 1, "repo_locations": 2, "idempotency_records": 2,
+    }
+
+    before = _aggregate_counts(db_path)
+    with pytest.raises(registry_store.ProjectRegistryError) as stale:
+        registry.idempotent_add_repo_location(
+            scope="project-registry.repo-locations.create.v1", idempotency_key="stale",
+            payload={"project_id": project_id, "path": "stale"}, project_id=project_id,
+            expected_project_version=1, node_id="local", canonical_path="/repo/stale",
+            vcs_kind="git", availability="available", git_remote_fingerprint=_remote("origin"),
+        )
+    assert _code(stale) == "version_conflict"
+    with pytest.raises(registry_store.ProjectRegistryError) as no_remote:
+        registry.idempotent_add_repo_location(
+            scope="project-registry.repo-locations.create.v1", idempotency_key="none",
+            payload={"project_id": project_id, "path": "none"}, project_id=project_id,
+            expected_project_version=2, node_id="local", canonical_path="/repo/none",
+            vcs_kind="none", availability="available", git_remote_fingerprint=None,
+        )
+    assert _code(no_remote) == "repository_identity_unproven"
+    with pytest.raises(registry_store.ProjectRegistryError) as wrong_remote:
+        registry.idempotent_add_repo_location(
+            scope="project-registry.repo-locations.create.v1", idempotency_key="wrong",
+            payload={"project_id": project_id, "path": "wrong"}, project_id=project_id,
+            expected_project_version=2, node_id="local", canonical_path="/repo/wrong",
+            vcs_kind="git", availability="available", git_remote_fingerprint=_remote("other"),
+        )
+    assert _code(wrong_remote) == "repository_identity_unproven"
+    assert _aggregate_counts(db_path) == before
 
 
 def test_validation_rejects_unknown_enums_and_noncanonical_identity(registry):

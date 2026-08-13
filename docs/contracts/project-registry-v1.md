@@ -4,7 +4,8 @@
 
 Project Registry 是独立的 app-owned SQLite Store。v1 只提供 schema、领域校验和以下持久化
 primitive：创建 Project、登记 RepoLocation、创建 Workspace identity、写入 legacy provenance、
-带持久幂等账的 Project 创建，以及供 legacy importer 调用的 Store-owned 原子导入 primitive。
+带持久幂等账的 Project 创建、Project/RepoLocation 原子登记与关联、以及供 legacy importer 调用的
+Store-owned 原子导入 primitive。
 
 Store 不扫描或读取 legacy authority；importer 只向它传入已规范化的 source key/digest 和
 RepoLocation identity。Store 不发现目录，不提供 HTTP API，也不执行 archive、restore、
@@ -114,6 +115,31 @@ aggregate mutation 和 `idempotency_records` 写入同一 `BEGIN IMMEDIATE` 事�
 reservation，ledger 写失败也不留下 aggregate。
 首次 receipt 持久化后不允许改写或删除。
 
+### Project API Store primitives
+
+Project API 只能使用以下 Store-owned primitive；Application Service 不得自行拼接 Project、
+RepoLocation 与 receipt SQL：
+
+- `get_project_by_id`、`list_projects` 与 `list_repo_locations` 使用一个 `mode=ro`、`query_only`
+  SQLite read transaction。列表按 immutable `project_id` 排序，Store 固定接受 `1..100` 的 limit，
+  读取 `limit + 1` 并返回最后一个可见 `project_id` 作为下一页锚点；cursor 的编码和 HTTP 参数仍属于
+  API car。每个 Project item 内嵌按 `repo_location_id` 排序的 RepoLocation snapshot。
+- `match_discovery(node_id, canonical_path, repository_fingerprint)` 只返回 active Project 的 exact
+  `(node_id, canonical_path)` match。possible advisory 仅来自 active RepoLocation 已持久化的
+  `git_remote_fingerprint`，按 `project_id` 去重排序、排除 exact match，最多 100 项；路径、basename、
+  slug、legacy provenance、非 remote 的 root-commit fingerprint 均不得作为自动关联证明。
+- `preflight_idempotency` 以 `(scope, idempotency_key)` 读取 receipt。相同 canonical JSON digest
+  返回原 `status_code/response`，不同 digest 返回 `idempotency_conflict`，不存在才返回 `None`；它不写入
+  reservation。最终写事务仍须 recheck receipt，preflight 不是并发权威。
+- `idempotent_register_project` 在同一 `BEGIN IMMEDIATE` 内 recheck receipt、创建 Project、创建第一个
+  active RepoLocation、持久化完整成功 response。Git remote fingerprint 仅在 `vcs_kind=git` 时写入已有
+  `git_remote_fingerprint` 字段；无 remote/non-Git 可登记独立 Project，但不能作为后续关联证明。
+- `idempotent_add_repo_location` 在同一事务内 recheck receipt、要求 target Project 为 active 且
+  `expected_project_version` 精确相等、证明该 Project 已有 active RepoLocation 使用同一 non-null Git
+  remote fingerprint、占用 active path slot、插入新 location、递增 Project version 并写 receipt。
+  无 Git remote 或无相同持久化 remote proof 返回 `repository_identity_unproven`；过期版本返回
+  `version_conflict`。任一失败都不留下 Project version、location 或 receipt 的半状态。
+
 ## 稳定错误
 
 所有产品错误派生自 `ProjectRegistryError`，只暴露 ASCII `code`，不泄漏 SQLite SQL、约束原文、
@@ -124,4 +150,5 @@ reservation，ledger 写失败也不留下 aggregate。
 `store_corrupt`、`store_unsafe`、`invalid_argument`、`project_not_found`、
 `project_slug_conflict`、`location_already_registered`、`repo_location_not_found`、
 `workspace_name_conflict`、`legacy_binding_conflict`、`legacy_import_conflict`、
-`idempotency_conflict`、`store_read_failed`、`store_write_failed`。
+`idempotency_conflict`、`version_conflict`、`repository_identity_unproven`、`store_read_failed`、
+`store_write_failed`。

@@ -42,6 +42,25 @@ class RepoLocationRecord:
 
 
 @dataclass(frozen=True)
+class ProjectSnapshot:
+    project: ProjectRecord
+    repo_locations: tuple[RepoLocationRecord, ...]
+
+
+@dataclass(frozen=True)
+class ProjectPage:
+    items: tuple[ProjectSnapshot, ...]
+    next_project_id: str | None
+
+
+@dataclass(frozen=True)
+class DiscoveryMatch:
+    project_id: str
+    slug: str
+    display_name: str
+
+
+@dataclass(frozen=True)
 class WorkspaceRecord:
     workspace_id: str
     project_id: str

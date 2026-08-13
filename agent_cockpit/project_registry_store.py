@@ -463,6 +463,164 @@ class ProjectRegistryStore:
             if connection is not None:
                 connection.close()
 
+    def get_project_by_id(self, project_id: str) -> domain.ProjectSnapshot | None:
+        project_id = _validate(domain.opaque, project_id, maximum=64)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT * FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            return _project_snapshot(connection, row)
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_projects(
+        self, *, lifecycle: str = "active", after_project_id: str | None = None,
+        limit: int = 50,
+    ) -> domain.ProjectPage:
+        lifecycle = _validate(
+            domain.enum, lifecycle, frozenset({"active", "archived"}),
+        )
+        if after_project_id is not None:
+            after_project_id = _validate(
+                domain.opaque, after_project_id, maximum=64,
+            )
+        if type(limit) is not int or not 1 <= limit <= 100:
+            _fail("invalid_argument")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            connection.execute("BEGIN")
+            rows = connection.execute(
+                "SELECT * FROM projects WHERE lifecycle=? "
+                "AND (? IS NULL OR project_id > ?) "
+                "ORDER BY project_id LIMIT ?",
+                (lifecycle, after_project_id, after_project_id, limit + 1),
+            ).fetchall()
+            visible = rows[:limit]
+            return domain.ProjectPage(
+                tuple(_project_snapshot(connection, row) for row in visible),
+                str(visible[-1]["project_id"]) if len(rows) > limit else None,
+            )
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_repo_locations(
+        self, project_id: str,
+    ) -> tuple[domain.RepoLocationRecord, ...] | None:
+        project_id = _validate(domain.opaque, project_id, maximum=64)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT 1 FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            rows = connection.execute(
+                "SELECT * FROM repo_locations WHERE project_id=? "
+                "ORDER BY repo_location_id", (project_id,),
+            ).fetchall()
+            return tuple(_repo_location_record(row) for row in rows)
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def match_discovery(
+        self, *, node_id: str, canonical_path: str,
+        repository_fingerprint: str | None,
+    ) -> tuple[domain.DiscoveryMatch | None, tuple[domain.DiscoveryMatch, ...]]:
+        node_id = _validate(domain.opaque, node_id, maximum=128)
+        canonical_path = _validate(domain.canonical_path, canonical_path)
+        if repository_fingerprint is not None:
+            repository_fingerprint = _validate(
+                domain.sha256_ref, repository_fingerprint,
+            )
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            connection.execute("BEGIN")
+            exact_row = connection.execute(
+                "SELECT p.project_id, p.slug, p.display_name "
+                "FROM repo_locations r JOIN projects p ON p.project_id=r.project_id "
+                "WHERE r.node_id=? AND r.canonical_path=? "
+                "AND r.lifecycle='active' AND p.lifecycle='active'",
+                (node_id, canonical_path),
+            ).fetchone()
+            exact = None if exact_row is None else _discovery_match(exact_row)
+            if repository_fingerprint is None:
+                return exact, ()
+            rows = connection.execute(
+                "SELECT DISTINCT p.project_id, p.slug, p.display_name "
+                "FROM repo_locations r JOIN projects p ON p.project_id=r.project_id "
+                "WHERE r.lifecycle='active' AND p.lifecycle='active' "
+                "AND r.git_remote_fingerprint=? "
+                "ORDER BY p.project_id LIMIT 101",
+                (repository_fingerprint,),
+            ).fetchall()
+            possible = tuple(
+                _discovery_match(row) for row in rows
+                if exact is None or row["project_id"] != exact.project_id
+            )
+            return exact, possible[:100]
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def preflight_idempotency(
+        self, *, scope: str, idempotency_key: str, payload: object,
+    ) -> domain.CommandResult | None:
+        scope = _validate(domain.text, scope, maximum=128)
+        idempotency_key = _validate(domain.text, idempotency_key, maximum=128)
+        request_digest = _request_digest(payload)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect_live_read(self.path)
+            row = connection.execute(
+                "SELECT request_digest, status_code, response_json "
+                "FROM idempotency_records WHERE scope=? AND idempotency_key=?",
+                (scope, idempotency_key),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["request_digest"] != request_digest:
+                _fail("idempotency_conflict")
+            return domain.CommandResult(
+                int(row["status_code"]), json.loads(row["response_json"]),
+            )
+        except ProjectRegistryError:
+            raise
+        except json.JSONDecodeError as exc:
+            _fail("store_corrupt", exc)
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
     def get_active_repo_location(
         self, node_id: str, canonical_path: str,
     ) -> domain.RepoLocationRecord | None:
@@ -629,6 +787,126 @@ class ProjectRegistryStore:
         except sqlite3.Error as exc:
             _fail("store_write_failed", exc)
 
+    def idempotent_register_project(
+        self, *, scope: str, idempotency_key: str, payload: object,
+        slug: str, display_name: str, goal: str | None, node_id: str,
+        canonical_path: str, vcs_kind: str, availability: str,
+        git_remote_fingerprint: str | None,
+    ) -> domain.CommandResult:
+        scope, idempotency_key, request_digest = _idempotency_identity(
+            scope, idempotency_key, payload,
+        )
+        slug = _validate(domain.slug, slug)
+        display_name = _validate(domain.text, display_name, maximum=256)
+        goal = _validate(domain.optional_text, goal, maximum=4096)
+        node_id, canonical_path, vcs_kind, availability, remote = _location_input(
+            node_id=node_id,
+            canonical_path=canonical_path,
+            vcs_kind=vcs_kind,
+            availability=availability,
+            git_remote_fingerprint=git_remote_fingerprint,
+        )
+        try:
+            with self._transaction() as connection:
+                replay = _idempotency_replay(
+                    connection, scope, idempotency_key, request_digest,
+                )
+                if replay is not None:
+                    return replay
+                project = self._insert_project(connection, slug, display_name, goal)
+                location = _insert_repo_location(
+                    connection,
+                    project_id=project.project_id,
+                    node_id=node_id,
+                    canonical_path=canonical_path,
+                    vcs_kind=vcs_kind,
+                    availability=availability,
+                    git_remote_fingerprint=remote,
+                )
+                response = _registration_response(project, location)
+                _store_idempotency_receipt(
+                    connection, scope, idempotency_key, request_digest, 201, response,
+                )
+                return domain.CommandResult(201, response)
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_write_failed", exc)
+
+    def idempotent_add_repo_location(
+        self, *, scope: str, idempotency_key: str, payload: object,
+        project_id: str, expected_project_version: int, node_id: str,
+        canonical_path: str, vcs_kind: str, availability: str,
+        git_remote_fingerprint: str | None,
+    ) -> domain.CommandResult:
+        scope, idempotency_key, request_digest = _idempotency_identity(
+            scope, idempotency_key, payload,
+        )
+        project_id = _validate(domain.opaque, project_id, maximum=64)
+        if type(expected_project_version) is not int or expected_project_version < 1:
+            _fail("invalid_argument")
+        node_id, canonical_path, vcs_kind, availability, remote = _location_input(
+            node_id=node_id,
+            canonical_path=canonical_path,
+            vcs_kind=vcs_kind,
+            availability=availability,
+            git_remote_fingerprint=git_remote_fingerprint,
+        )
+        if vcs_kind != "git" or remote is None:
+            _fail("repository_identity_unproven")
+        try:
+            with self._transaction() as connection:
+                replay = _idempotency_replay(
+                    connection, scope, idempotency_key, request_digest,
+                )
+                if replay is not None:
+                    return replay
+                project_row = connection.execute(
+                    "SELECT * FROM projects WHERE project_id=?", (project_id,)
+                ).fetchone()
+                if project_row is None or project_row["lifecycle"] != "active":
+                    _fail("project_not_found")
+                if int(project_row["version"]) != expected_project_version:
+                    _fail("version_conflict")
+                proof = connection.execute(
+                    "SELECT 1 FROM repo_locations WHERE project_id=? "
+                    "AND lifecycle='active' AND git_remote_fingerprint=? LIMIT 1",
+                    (project_id, remote),
+                ).fetchone()
+                if proof is None:
+                    _fail("repository_identity_unproven")
+                location = _insert_repo_location(
+                    connection,
+                    project_id=project_id,
+                    node_id=node_id,
+                    canonical_path=canonical_path,
+                    vcs_kind=vcs_kind,
+                    availability=availability,
+                    git_remote_fingerprint=remote,
+                )
+                updated_at = _now()
+                updated = connection.execute(
+                    "UPDATE projects SET version=version+1, updated_at=? "
+                    "WHERE project_id=? AND version=?",
+                    (updated_at, project_id, expected_project_version),
+                )
+                if updated.rowcount != 1:
+                    _fail("version_conflict")
+                updated_row = connection.execute(
+                    "SELECT * FROM projects WHERE project_id=?", (project_id,)
+                ).fetchone()
+                assert updated_row is not None
+                project = _project_record(updated_row)
+                response = _attach_response(project, location)
+                _store_idempotency_receipt(
+                    connection, scope, idempotency_key, request_digest, 201, response,
+                )
+                return domain.CommandResult(201, response)
+        except ProjectRegistryError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_write_failed", exc)
+
     @staticmethod
     def _import_legacy_project(
         connection: sqlite3.Connection, *, slug: str, display_name: str,
@@ -784,6 +1062,144 @@ class ProjectRegistryStore:
             return domain.CommandResult(201, response)
 
 
+def _request_digest(payload: object) -> str:
+    request_json = _validate(domain.canonical_json, payload)
+    return hashlib.sha256(request_json.encode("ascii")).hexdigest()
+
+
+def _idempotency_identity(
+    scope: str, idempotency_key: str, payload: object,
+) -> tuple[str, str, str]:
+    return (
+        _validate(domain.text, scope, maximum=128),
+        _validate(domain.text, idempotency_key, maximum=128),
+        _request_digest(payload),
+    )
+
+
+def _location_input(
+    *, node_id: str, canonical_path: str, vcs_kind: str, availability: str,
+    git_remote_fingerprint: str | None,
+) -> tuple[str, str, str, str, str | None]:
+    node_id = _validate(domain.opaque, node_id, maximum=128)
+    canonical_path = _validate(domain.canonical_path, canonical_path)
+    vcs_kind = _validate(domain.enum, vcs_kind, frozenset({"git", "none"}))
+    availability = _validate(
+        domain.enum, availability,
+        frozenset({"available", "offline", "missing", "unknown"}),
+    )
+    if git_remote_fingerprint is not None:
+        git_remote_fingerprint = _validate(
+            domain.sha256_ref, git_remote_fingerprint,
+        )
+    if vcs_kind != "git" and git_remote_fingerprint is not None:
+        _fail("invalid_argument")
+    return node_id, canonical_path, vcs_kind, availability, git_remote_fingerprint
+
+
+def _idempotency_replay(
+    connection: sqlite3.Connection, scope: str, idempotency_key: str,
+    request_digest: str,
+) -> domain.CommandResult | None:
+    row = connection.execute(
+        "SELECT request_digest, status_code, response_json "
+        "FROM idempotency_records WHERE scope=? AND idempotency_key=?",
+        (scope, idempotency_key),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["request_digest"] != request_digest:
+        _fail("idempotency_conflict")
+    try:
+        response = json.loads(row["response_json"])
+    except json.JSONDecodeError as exc:
+        _fail("store_corrupt", exc)
+    return domain.CommandResult(int(row["status_code"]), response)
+
+
+def _store_idempotency_receipt(
+    connection: sqlite3.Connection, scope: str, idempotency_key: str,
+    request_digest: str, status_code: int, response: dict[str, object],
+) -> None:
+    response_json = domain.canonical_json(response)
+    connection.execute(
+        "INSERT INTO idempotency_records VALUES (?, ?, ?, ?, ?, ?)",
+        (scope, idempotency_key, request_digest, status_code, response_json, _now()),
+    )
+
+
+def _insert_repo_location(
+    connection: sqlite3.Connection, *, project_id: str, node_id: str,
+    canonical_path: str, vcs_kind: str, availability: str,
+    git_remote_fingerprint: str | None,
+) -> domain.RepoLocationRecord:
+    location_id = _id("loc_")
+    now = _now()
+    try:
+        connection.execute(
+            "INSERT INTO repo_locations "
+            "(repo_location_id, project_id, node_id, canonical_path, lifecycle, "
+            "vcs_kind, git_root, git_remote_fingerprint, default_ref_observed, "
+            "availability, version, created_at, updated_at) VALUES "
+            "(?, ?, ?, ?, 'active', ?, NULL, ?, NULL, ?, 1, ?, ?)",
+            (location_id, project_id, node_id, canonical_path, vcs_kind,
+             git_remote_fingerprint, availability, now, now),
+        )
+    except sqlite3.IntegrityError as exc:
+        _fail("location_already_registered", exc)
+    return domain.RepoLocationRecord(
+        location_id, project_id, node_id, canonical_path, "active", vcs_kind,
+        availability, 1,
+    )
+
+
+def _registration_response(
+    project: domain.ProjectRecord, location: domain.RepoLocationRecord,
+) -> dict[str, object]:
+    return {
+        "project_id": project.project_id,
+        "slug": project.slug,
+        "project": _project_response(project),
+        "repo_location": _repo_location_response(location),
+        "replayed": False,
+    }
+
+
+def _attach_response(
+    project: domain.ProjectRecord, location: domain.RepoLocationRecord,
+) -> dict[str, object]:
+    return {
+        "project": _project_response(project),
+        "repo_location": _repo_location_response(location),
+    }
+
+
+def _project_response(project: domain.ProjectRecord) -> dict[str, object]:
+    return {
+        "project_id": project.project_id,
+        "slug": project.slug,
+        "display_name": project.display_name,
+        "goal": project.goal,
+        "lifecycle": project.lifecycle,
+        "version": project.version,
+        "created_at": project.created_at,
+        "updated_at": project.updated_at,
+    }
+
+
+def _repo_location_response(location: domain.RepoLocationRecord) -> dict[str, object]:
+    return {
+        "repo_location_id": location.repo_location_id,
+        "project_id": location.project_id,
+        "node_id": location.node_id,
+        "canonical_path": location.canonical_path,
+        "lifecycle": location.lifecycle,
+        "vcs_kind": location.vcs_kind,
+        "availability": location.availability,
+        "version": location.version,
+    }
+
+
 class _Transaction:
     def __init__(self, path: Path):
         self.path = path
@@ -831,6 +1247,25 @@ def _project_record(row: sqlite3.Row) -> domain.ProjectRecord:
     return domain.ProjectRecord(
         row["project_id"], row["slug"], row["display_name"], row["goal"],
         row["lifecycle"], int(row["version"]), row["created_at"], row["updated_at"],
+    )
+
+
+def _project_snapshot(
+    connection: sqlite3.Connection, project_row: sqlite3.Row,
+) -> domain.ProjectSnapshot:
+    locations = connection.execute(
+        "SELECT * FROM repo_locations WHERE project_id=? ORDER BY repo_location_id",
+        (project_row["project_id"],),
+    ).fetchall()
+    return domain.ProjectSnapshot(
+        _project_record(project_row),
+        tuple(_repo_location_record(row) for row in locations),
+    )
+
+
+def _discovery_match(row: sqlite3.Row) -> domain.DiscoveryMatch:
+    return domain.DiscoveryMatch(
+        row["project_id"], row["slug"], row["display_name"],
     )
 
 
