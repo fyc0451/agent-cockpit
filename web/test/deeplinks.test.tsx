@@ -23,7 +23,7 @@ describe('深链恢复（G1）', () => {
     const rail = screen.getByRole('navigation', { name: '主导航' })
     await waitFor(() => {
       expect(within(rail).getByText('当前项目')).toBeInTheDocument()
-      expect(within(rail).getByText('当前 Workspace')).toBeInTheDocument()
+      expect(within(rail).getByText('当前工作空间')).toBeInTheDocument()
       expect(within(rail).getByText('Project One')).toBeInTheDocument()
       expect(within(rail).getAllByText('本机工作区').length).toBeGreaterThan(0)
     })
