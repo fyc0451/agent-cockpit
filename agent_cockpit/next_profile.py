@@ -1,16 +1,40 @@
 """Fail-closed runtime scope for the isolated Cockpit Next source tree."""
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import stat
 from pathlib import Path
 from typing import Mapping
 
 
 PROFILE_ENV = "COCKPIT_NEXT_PROFILE"
+FIXED_PROFILE = "1"
+EPHEMERAL_PROFILE = "ephemeral"
 PROJECT_MARKER = "agent-cockpit-next"
 SESSION = "github-agent-cockpit-next"
 HOST = "127.0.0.1"
 PORT = "18790"
+EPHEMERAL_ROOT_ENV = "COCKPIT_EPHEMERAL_ROOT"
+EPHEMERAL_LISTEN_FD_ENV = "COCKPIT_EPHEMERAL_LISTEN_FD"
+EPHEMERAL_READY_TOKEN_ENV = "COCKPIT_EPHEMERAL_READY_TOKEN"
+EPHEMERAL_MARKER = ".cockpit-ephemeral-root.json"
+EPHEMERAL_CATALOG = ".cockpit-ephemeral-catalog.json"
+_EPHEMERAL_MUTABLE_LEASE = "data/instance.lock"
+_EPHEMERAL_SCHEMA_VERSION = 1
+_MAX_EPHEMERAL_CATALOG_BYTES = 1024 * 1024
+EPHEMERAL_LAYOUT = {
+    "COCKPIT_DATA_DIR": "data",
+    "COCKPIT_CONFIG_DIR": "config",
+    "COCKPIT_STATE_DIR": "state",
+    "COCKPIT_UPLOADS_DIR": "uploads",
+    "AGENT_MAIL_DB_PATH": "mail/storage.sqlite3",
+    "AGENT_COCKPIT_RELEASE_STATE_DIR": "release",
+    "HERDR_CONFIG_PATH": "herdr/config.toml",
+    "HOME": "home",
+    "TMPDIR": "tmp",
+}
 FULL_ENV_NAMES = (
     "COCKPIT_NEXT_WORKTREE",
     "COCKPIT_HOST",
@@ -43,9 +67,286 @@ class NextProfileError(RuntimeError):
     pass
 
 
+def _ephemeral_error(code: str) -> NextProfileError:
+    return NextProfileError(f"ephemeral_catalog_{code}")
+
+
+def _strict_json(payload: bytes, code: str) -> object:
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("constant")),
+        )
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise _ephemeral_error(code) from exc
+
+
+def _private_file(path: Path, *, required: bool = True) -> bytes | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if not required:
+            return None
+        raise _ephemeral_error("invalid") from None
+    except OSError as exc:
+        raise _ephemeral_error("invalid") from exc
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+        or info.st_size > _MAX_EPHEMERAL_CATALOG_BYTES
+    ):
+        raise _ephemeral_error("invalid")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise _ephemeral_error("invalid") from exc
+
+
+def _write_private_json(path: Path, value: object) -> bytes:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError("short private write")
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        return payload
+    except OSError as exc:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise _ephemeral_error("write_failed") from exc
+
+
+def _root_marker(root: Path, *, require_ready: bool) -> dict[str, object]:
+    payload = _private_file(root / EPHEMERAL_MARKER)
+    assert payload is not None
+    value = _strict_json(payload, "invalid")
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "root_id", "state", "catalog_sha256",
+    }:
+        raise _ephemeral_error("invalid")
+    root_id = value["root_id"]
+    digest = value["catalog_sha256"]
+    if (
+        value["schema_version"] != _EPHEMERAL_SCHEMA_VERSION
+        or isinstance(value["schema_version"], bool)
+        or not isinstance(root_id, str)
+        or len(root_id) != 64
+        or any(character not in "0123456789abcdef" for character in root_id)
+        or value["state"] not in {"initializing", "running", "ready"}
+        or (digest is not None and (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ))
+        or (value["state"] in {"initializing", "running"} and digest is not None)
+        or (value["state"] == "ready" and digest is None)
+        or (require_ready and value["state"] != "ready")
+    ):
+        raise _ephemeral_error("invalid")
+    return value
+
+
+def _catalog_entries(root: Path) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for current, directories, filenames in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        names = sorted([*directories, *filenames])
+        for name in names:
+            path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            if relative in {EPHEMERAL_MARKER, EPHEMERAL_CATALOG}:
+                continue
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise _ephemeral_error("invalid") from exc
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+                raise _ephemeral_error("invalid")
+            if stat.S_ISDIR(info.st_mode):
+                result.append({
+                    "path": relative,
+                    "type": "directory",
+                    "mode": stat.S_IMODE(info.st_mode),
+                    "uid": info.st_uid,
+                    "sha256": None,
+                })
+            elif stat.S_ISREG(info.st_mode):
+                if info.st_nlink != 1:
+                    raise _ephemeral_error("invalid")
+                if relative == _EPHEMERAL_MUTABLE_LEASE:
+                    digest = None
+                else:
+                    with path.open("rb") as opened:
+                        digest = hashlib.file_digest(opened, "sha256").hexdigest()
+                result.append({
+                    "path": relative,
+                    "type": "file",
+                    "mode": stat.S_IMODE(info.st_mode),
+                    "uid": info.st_uid,
+                    "sha256": digest,
+                })
+            else:
+                raise _ephemeral_error("invalid")
+    return sorted(result, key=lambda entry: str(entry["path"]))
+
+
+def _valid_catalog_entries(value: object, root_id: str) -> list[dict[str, object]]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "root_id", "entries",
+    }:
+        raise _ephemeral_error("invalid")
+    if (
+        value["schema_version"] != _EPHEMERAL_SCHEMA_VERSION
+        or isinstance(value["schema_version"], bool)
+        or value["root_id"] != root_id
+        or not isinstance(value["entries"], list)
+    ):
+        raise _ephemeral_error("invalid")
+    entries: list[dict[str, object]] = []
+    previous = ""
+    for entry in value["entries"]:
+        if not isinstance(entry, dict) or set(entry) != {
+            "path", "type", "mode", "uid", "sha256",
+        }:
+            raise _ephemeral_error("invalid")
+        path = entry["path"]
+        entry_type = entry["type"]
+        mode = entry["mode"]
+        owner = entry["uid"]
+        digest = entry["sha256"]
+        if (
+            not isinstance(path, str)
+            or not path
+            or path != Path(path).as_posix()
+            or path.startswith("/")
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or path in {EPHEMERAL_MARKER, EPHEMERAL_CATALOG}
+            or path <= previous
+            or entry_type not in {"directory", "file"}
+            or not isinstance(mode, int)
+            or isinstance(mode, bool)
+            or not 0 <= mode <= 0o777
+            or owner != os.getuid()
+            or isinstance(owner, bool)
+            or (entry_type == "directory" and digest is not None)
+            or (path == _EPHEMERAL_MUTABLE_LEASE and digest is not None)
+            or (entry_type == "file" and (
+                path != _EPHEMERAL_MUTABLE_LEASE and (
+                    not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                )
+            ))
+        ):
+            raise _ephemeral_error("invalid")
+        previous = path
+        entries.append(entry)
+    return entries
+
+
+def initialize_empty_ephemeral_runtime_root(root: Path) -> bool:
+    """Bind a completely empty caller-owned root before its first launch."""
+    try:
+        entries = list(root.iterdir())
+    except OSError as exc:
+        raise _ephemeral_error("invalid") from exc
+    if not entries:
+        marker = {
+            "schema_version": _EPHEMERAL_SCHEMA_VERSION,
+            "root_id": os.urandom(32).hex(),
+            "state": "initializing",
+            "catalog_sha256": None,
+        }
+        _write_private_json(root / EPHEMERAL_MARKER, marker)
+        return True
+    return False
+
+
+def prepare_ephemeral_runtime_root(root: Path) -> None:
+    """Verify a non-empty root was produced by this harness's clean stop."""
+    try:
+        if not list(root.iterdir()):
+            raise _ephemeral_error("invalid")
+    except OSError as exc:
+        raise _ephemeral_error("invalid") from exc
+    marker = _root_marker(root, require_ready=True)
+    payload = _private_file(root / EPHEMERAL_CATALOG)
+    assert payload is not None
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != marker["catalog_sha256"]:
+        raise _ephemeral_error("invalid")
+    expected = _valid_catalog_entries(_strict_json(payload, "invalid"), marker["root_id"])
+    if _catalog_entries(root) != expected:
+        raise _ephemeral_error("invalid")
+
+
+def activate_ephemeral_runtime_root(root: Path) -> None:
+    """Invalidate restart evidence before the launcher can exec the server."""
+    marker = _root_marker(root, require_ready=False)
+    if marker["state"] not in {"initializing", "ready"}:
+        raise _ephemeral_error("invalid")
+    marker["state"] = "running"
+    marker["catalog_sha256"] = None
+    _write_private_json(root / EPHEMERAL_MARKER, marker)
+
+
+def finalize_ephemeral_runtime_root(
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Record the exact clean-stop layout before a same-root restart is allowed."""
+    env = os.environ if environment is None else environment
+    root = _ephemeral_root(env)
+    marker = _root_marker(root, require_ready=False)
+    if marker["state"] != "running":
+        raise _ephemeral_error("invalid")
+    entries = _catalog_entries(root)
+    catalog = {
+        "schema_version": _EPHEMERAL_SCHEMA_VERSION,
+        "root_id": marker["root_id"],
+        "entries": entries,
+    }
+    payload = _write_private_json(root / EPHEMERAL_CATALOG, catalog)
+    marker["state"] = "ready"
+    marker["catalog_sha256"] = hashlib.sha256(payload).hexdigest()
+    _write_private_json(root / EPHEMERAL_MARKER, marker)
+
+
 def enabled(environment: Mapping[str, str] | None = None) -> bool:
     env = os.environ if environment is None else environment
-    return env.get(PROFILE_ENV) == "1"
+    return env.get(PROFILE_ENV) in {FIXED_PROFILE, EPHEMERAL_PROFILE}
+
+
+def is_ephemeral(environment: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if environment is None else environment
+    return env.get(PROFILE_ENV) == EPHEMERAL_PROFILE
 
 
 def is_next_source(root: Path) -> bool:
@@ -68,6 +369,16 @@ def _required(name: str, environment: Mapping[str, str] | None = None) -> str:
 def project(environment: Mapping[str, str] | None = None) -> str | None:
     if not enabled(environment):
         return None
+    if is_ephemeral(environment):
+        env = os.environ if environment is None else environment
+        project = _required("AGENT_MAIL_PROJECT", env)
+        worktree = _required("COCKPIT_NEXT_WORKTREE", env)
+        try:
+            if Path(project).resolve(strict=True) != Path(worktree).resolve(strict=True):
+                raise NextProfileError("next_profile_invalid:AGENT_MAIL_PROJECT")
+        except OSError as exc:
+            raise NextProfileError("next_profile_invalid:AGENT_MAIL_PROJECT") from exc
+        return project
     raw = _required("AGENT_MAIL_PROJECT", environment)
     path = Path(raw).expanduser()
     wanted = Path.home().resolve() / "github" / "agent-cockpit-next"
@@ -94,6 +405,11 @@ def session(environment: Mapping[str, str] | None = None) -> str | None:
     if not enabled(environment):
         return None
     value = _required("HERDR_SESSION", environment)
+    if is_ephemeral(environment):
+        token = _required(EPHEMERAL_READY_TOKEN_ENV, environment)
+        if value != f"ephemeral-{token}":
+            raise NextProfileError("next_profile_invalid:HERDR_SESSION")
+        return value
     if value != SESSION:
         raise NextProfileError("next_profile_invalid:HERDR_SESSION")
     return value
@@ -121,7 +437,7 @@ def require_helper_environment(
     )
 
 
-def validate_server_environment(
+def _validate_fixed_server_environment(
     root: Path, environment: Mapping[str, str] | None = None,
 ) -> None:
     env = os.environ if environment is None else environment
@@ -174,3 +490,127 @@ def validate_server_environment(
             raise NextProfileError(f"next_profile_invalid:{name}")
     project(env)
     session(env)
+
+
+def _ephemeral_root(environment: Mapping[str, str]) -> Path:
+    raw = _required(EPHEMERAL_ROOT_ENV, environment)
+    path = Path(raw)
+    try:
+        resolved = path.resolve(strict=True)
+        info = resolved.lstat()
+    except OSError as exc:
+        raise NextProfileError("ephemeral_root_invalid") from exc
+    if (
+        not path.is_absolute()
+        or path != resolved
+        or not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise NextProfileError("ephemeral_root_invalid")
+    return resolved
+
+
+def _ephemeral_token(environment: Mapping[str, str]) -> str:
+    token = _required(EPHEMERAL_READY_TOKEN_ENV, environment)
+    if (
+        len(token) != 32
+        or any(character not in "0123456789abcdef" for character in token)
+    ):
+        raise NextProfileError("ephemeral_token_invalid")
+    return token
+
+
+def ephemeral_runtime(
+    environment: Mapping[str, str] | None = None, *, include_listener: bool = True,
+) -> dict[str, object] | None:
+    if not is_ephemeral(environment):
+        return None
+    env = os.environ if environment is None else environment
+    token = _ephemeral_token(env)
+    port_text = _required("COCKPIT_PORT", env)
+    if (
+        not port_text.isdecimal()
+        or port_text != str(int(port_text))
+        or not 1 <= int(port_text) <= 65535
+        or port_text in {"8790", PORT}
+    ):
+        raise NextProfileError("ephemeral_port_invalid")
+    result: dict[str, object] = {"port": int(port_text), "ready_token": token}
+    if include_listener:
+        raw_fd = _required(EPHEMERAL_LISTEN_FD_ENV, env)
+        if (
+            not raw_fd.isdecimal()
+            or raw_fd != str(int(raw_fd))
+            or int(raw_fd) <= 2
+        ):
+            raise NextProfileError("ephemeral_listen_fd_invalid")
+        result["listen_fd"] = int(raw_fd)
+    return result
+
+
+def validate_ephemeral_environment(
+    root: Path, environment: Mapping[str, str] | None = None,
+) -> None:
+    env = os.environ if environment is None else environment
+    if not is_ephemeral(env) or not is_next_source(root):
+        raise NextProfileError("ephemeral_profile_invalid")
+    try:
+        worktree = Path(_required("COCKPIT_NEXT_WORKTREE", env)).resolve(strict=True)
+    except OSError as exc:
+        raise NextProfileError("ephemeral_worktree_invalid") from exc
+    if worktree != root.resolve():
+        raise NextProfileError("ephemeral_worktree_invalid")
+    runtime_root = _ephemeral_root(env)
+    for name, relative in EPHEMERAL_LAYOUT.items():
+        if _required(name, env) != str(runtime_root / relative):
+            raise NextProfileError(f"ephemeral_path_invalid:{name}")
+    for name in (
+        "COCKPIT_DATA_DIR", "COCKPIT_CONFIG_DIR", "COCKPIT_STATE_DIR",
+        "COCKPIT_UPLOADS_DIR", "HOME", "TMPDIR",
+    ):
+        try:
+            info = Path(_required(name, env)).lstat()
+        except OSError as exc:
+            raise NextProfileError(f"ephemeral_path_invalid:{name}") from exc
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise NextProfileError(f"ephemeral_path_invalid:{name}")
+    token = _ephemeral_token(env)
+    expected = {
+        "COCKPIT_HOST": HOST,
+        "COCKPIT_COORDINATION_DB": str(runtime_root / "data/coordination.sqlite3"),
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH": str(runtime_root / "data/launch-descriptors.json"),
+        "AGENT_MAIL_PROJECT": str(worktree),
+        "HERDR_SESSION": f"ephemeral-{token}",
+        "COCKPIT_SYSTEMD_UNIT": "agent-cockpit-next-ephemeral.service",
+        "COCKPIT_UPGRADE_V2_ENABLED": "0",
+        "COCKPIT_B0_MODE": "off",
+        "COCKPIT_HERDR_STATE_MODE": "off",
+        "COCKPIT_EDITION": "source",
+        "XDG_DATA_HOME": str(runtime_root / "data"),
+        "XDG_CONFIG_HOME": str(runtime_root / "config"),
+        "XDG_STATE_HOME": str(runtime_root / "state"),
+        "TEAM_HUB_URL": "http://127.0.0.1:9",
+        "HUMAN_AUTH_URL": "http://127.0.0.1:9",
+    }
+    for name, value in expected.items():
+        if _required(name, env) != value:
+            raise NextProfileError(f"ephemeral_value_invalid:{name}")
+    ephemeral_runtime(env)
+    project(env)
+    session(env)
+
+
+def validate_server_environment(
+    root: Path, environment: Mapping[str, str] | None = None,
+) -> None:
+    if is_ephemeral(environment):
+        validate_ephemeral_environment(root, environment)
+        return
+    _validate_fixed_server_environment(root, environment)

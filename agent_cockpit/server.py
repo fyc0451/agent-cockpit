@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -71,6 +72,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, f
 
 ROOT_DIR = resolve_artifact_root()
 _next_instance_lock_owner: instance_lock.InstanceLock | None = None
+_ephemeral_ready = False
 runtime_provider_store = None
 event_store = None
 operation_store = None
@@ -210,6 +212,33 @@ def _require_next_instance_lock() -> None:
         raise RuntimeError("next_instance_lock_invalid") from exc
 
 
+def _adopt_ephemeral_listener() -> socket.socket:
+    runtime = next_profile.ephemeral_runtime()
+    if runtime is None:
+        raise RuntimeError("ephemeral_listener_unavailable")
+    raw_fd = os.environ.pop(next_profile.EPHEMERAL_LISTEN_FD_ENV, None)
+    if raw_fd != str(runtime["listen_fd"]):
+        raise RuntimeError("ephemeral_listen_fd_invalid")
+    listener: socket.socket | None = None
+    try:
+        listener = socket.socket(fileno=int(runtime["listen_fd"]))
+        info = os.fstat(listener.fileno())
+        if (
+            info.st_uid != os.getuid()
+            or listener.family != socket.AF_INET
+            or listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+            or not listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+            or listener.getsockname() != ("127.0.0.1", runtime["port"])
+        ):
+            raise RuntimeError("ephemeral_listen_fd_invalid")
+        listener.set_inheritable(False)
+        return listener
+    except Exception:
+        if listener is not None:
+            listener.close()
+        raise RuntimeError("ephemeral_listen_fd_invalid") from None
+
+
 _foundation_bundle: tuple[Any, Any, Any, Any, Any] | None = None
 
 
@@ -337,10 +366,11 @@ def _local_terminal_capability(workspace, location):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
-    global _identity_retirement_task, workspace_terminal_controller
+    global _identity_retirement_task, workspace_terminal_controller, _ephemeral_ready
     _require_next_instance_lock()
     project_registry_api_service().prepare()
     foundation_enabled = next_profile.enabled()
+    ephemeral = next_profile.is_ephemeral()
     try:
         if foundation_enabled:
             _initialize_foundation_stores()
@@ -353,78 +383,84 @@ async def lifespan(_: FastAPI):
                 ticket_provider=_terminal_ticket_provider,
                 operation_provider=_operation_journal_provider,
             )
-        state_enabled = _h0_state_enabled()
-        b0_runtime_active = _b0_runtime_active()
-        if state_enabled and not _open_state_clients():
-            raise RuntimeError("herdr state clients not fully reaped; refusing start")
-        if state_enabled:
-            await asyncio.to_thread(_reconcile_state_client)
-        if b0_runtime_active:
-            b0_wiring.install_claim_gate(
-                issuer=B0_ISSUER,
-                scope_filter=_b0_scope_enabled,
-                enforce_all=B0_MODE == "on",
-            )
-            await asyncio.to_thread(_b0_rebuild_on_start)
-        else:
-            b0_wiring.uninstall_claim_gate()
-        _poller_task = asyncio.create_task(_poll_live_state())
-        _message_poller_task = asyncio.create_task(_poll_message_state())
-        _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
-        _identity_retirement_task = asyncio.create_task(_identity_retirement_loop())
-        try:
-            recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
-            if recovery.get("retryable"):
-                logger.warning(
-                    "pending task recovery list failed; retrying once: %s", recovery
+        state_enabled = False
+        b0_runtime_active = False
+        if not ephemeral:
+            state_enabled = _h0_state_enabled()
+            b0_runtime_active = _b0_runtime_active()
+            if state_enabled and not _open_state_clients():
+                raise RuntimeError("herdr state clients not fully reaped; refusing start")
+            if state_enabled:
+                await asyncio.to_thread(_reconcile_state_client)
+            if b0_runtime_active:
+                b0_wiring.install_claim_gate(
+                    issuer=B0_ISSUER,
+                    scope_filter=_b0_scope_enabled,
+                    enforce_all=B0_MODE == "on",
                 )
+                await asyncio.to_thread(_b0_rebuild_on_start)
+            else:
+                b0_wiring.uninstall_claim_gate()
+            _poller_task = asyncio.create_task(_poll_live_state())
+            _message_poller_task = asyncio.create_task(_poll_message_state())
+            _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
+            _identity_retirement_task = asyncio.create_task(_identity_retirement_loop())
+            try:
                 recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
-            if recovery.get("failed") or recovery.get("error"):
-                logger.warning("pending task recovery incomplete: %s", recovery)
-            elif not recovery.get("skipped"):
-                logger.info(
-                    "pending task recovery: recovered=%s failed=%s total=%s",
-                    recovery.get("recovered"), recovery.get("failed"),
-                    recovery.get("total"),
-                )
-        except Exception:
-            logger.exception("pending task recovery crashed; continuing startup")
+                if recovery.get("retryable"):
+                    logger.warning(
+                        "pending task recovery list failed; retrying once: %s", recovery
+                    )
+                    recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
+                if recovery.get("failed") or recovery.get("error"):
+                    logger.warning("pending task recovery incomplete: %s", recovery)
+                elif not recovery.get("skipped"):
+                    logger.info(
+                        "pending task recovery: recovered=%s failed=%s total=%s",
+                        recovery.get("recovered"), recovery.get("failed"),
+                        recovery.get("total"),
+                    )
+            except Exception:
+                logger.exception("pending task recovery crashed; continuing startup")
+        _ephemeral_ready = ephemeral
         try:
             yield
         finally:
-            background_tasks = (
-                _poller_task, _message_poller_task, _worktree_cleanup_task,
-                _identity_retirement_task,
-            )
-            for task in background_tasks:
-                if task is not None:
-                    task.cancel()
-            for task in background_tasks:
-                if task is not None:
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception:
-                        logger.exception("background task failed during shutdown")
-            if b0_runtime_active:
-                b0_wiring.uninstall_claim_gate()
-            try:
-                await asyncio.to_thread(_release_all_zoom_leases)
-            finally:
-                survivors = (
-                    await asyncio.to_thread(_stop_state_client)
-                    if state_enabled else []
+            _ephemeral_ready = False
+            if not ephemeral:
+                background_tasks = (
+                    _poller_task, _message_poller_task, _worktree_cleanup_task,
+                    _identity_retirement_task,
                 )
-                if state_enabled and survivors:
-                    logger.error("herdr state clients survived stop: %s", survivors)
-                    raise RuntimeError(
-                        f"herdr state clients survived stop: {len(survivors)}"
+                for task in background_tasks:
+                    if task is not None:
+                        task.cancel()
+                for task in background_tasks:
+                    if task is not None:
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            logger.exception("background task failed during shutdown")
+                if b0_runtime_active:
+                    b0_wiring.uninstall_claim_gate()
+                try:
+                    await asyncio.to_thread(_release_all_zoom_leases)
+                finally:
+                    survivors = (
+                        await asyncio.to_thread(_stop_state_client)
+                        if state_enabled else []
                     )
-                _poller_task = None
-                _message_poller_task = None
-                _worktree_cleanup_task = None
-                _identity_retirement_task = None
+                    if state_enabled and survivors:
+                        logger.error("herdr state clients survived stop: %s", survivors)
+                        raise RuntimeError(
+                            f"herdr state clients survived stop: {len(survivors)}"
+                        )
+                    _poller_task = None
+                    _message_poller_task = None
+                    _worktree_cleanup_task = None
+                    _identity_retirement_task = None
     finally:
         if workspace_terminal_controller is not None:
             try:
@@ -435,6 +471,12 @@ async def lifespan(_: FastAPI):
                 workspace_terminal_controller = None
         if foundation_enabled:
             _close_foundation_stores()
+        if ephemeral:
+            try:
+                next_profile.finalize_ephemeral_runtime_root()
+            except next_profile.NextProfileError as exc:
+                logger.error("ephemeral runtime catalog failed: %s", exc)
+                raise RuntimeError("ephemeral_runtime_catalog_failed") from exc
 
 
 app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
@@ -7491,6 +7533,7 @@ def health():
         "hub": bool(mail_status.get("write_available")),
         "push": bool(push_status.get("available")),
     }
+
     if B0_MODE == "off":
         b0_state = {
             "active": False, "available": True,
@@ -7520,6 +7563,20 @@ def health():
         **external,
         "external": external,
     }
+
+
+if next_profile.is_ephemeral():
+    @app.get("/health/ephemeral")
+    def health_ephemeral():
+        runtime = next_profile.ephemeral_runtime(include_listener=False)
+        if not _ephemeral_ready or runtime is None:
+            raise HTTPException(503, "Not Ready")
+        return {
+            "ready": True,
+            "ready_token": runtime["ready_token"],
+            "pid": os.getpid(),
+            "port": runtime["port"],
+        }
 
 
 @app.get("/health/live")
@@ -7615,15 +7672,29 @@ def main() -> int:
     _validate_bind(host)
     # log_config=None avoids a second uvicorn config; access_log=False blocks
     # full_path/query leakage from uvicorn.access (see O3 R1 F1).
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        proxy_headers=bool(COCKPIT_TOKEN),
-        log_level=level_name.lower(),
-        log_config=None,
-        access_log=False,
-    )
+    if next_profile.is_ephemeral():
+        listener = _adopt_ephemeral_listener()
+        try:
+            config = uvicorn.Config(
+                app,
+                proxy_headers=bool(COCKPIT_TOKEN),
+                log_level=level_name.lower(),
+                log_config=None,
+                access_log=False,
+            )
+            uvicorn.Server(config).run(sockets=[listener])
+        finally:
+            listener.close()
+    else:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            proxy_headers=bool(COCKPIT_TOKEN),
+            log_level=level_name.lower(),
+            log_config=None,
+            access_log=False,
+        )
     return 0
 
 
