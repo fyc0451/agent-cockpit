@@ -56,7 +56,7 @@ test('390px：触控目标 >= 44x44（P1-7）', async ({ page }) => {
   expectGatesClean(g)
 })
 
-test('390px：Workspace Files/Terminal 底栏滚动不扩大文档宽度', async ({ page }) => {
+test('390px：项目/文件/终端核心导航完整容纳且不扩大文档宽度', async ({ page }) => {
   const g = attachGates(page)
   await stubApi(page)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -67,6 +67,10 @@ test('390px：Workspace Files/Terminal 底栏滚动不扩大文档宽度', async
   ] as const) {
     await page.goto(hash)
     await expect(page.locator('.page-title')).toHaveText(title)
+    const rail = page.getByRole('navigation', { name: '主导航' })
+    for (const label of ['项目', '文件', '终端']) {
+      await expect(rail.getByRole('link', { name: label, exact: true })).toBeVisible()
+    }
     const widths = await page.evaluate(() => ({
       scroll: document.documentElement.scrollWidth,
       client: document.documentElement.clientWidth,
@@ -74,9 +78,7 @@ test('390px：Workspace Files/Terminal 底栏滚动不扩大文档宽度', async
       railClient: document.querySelector('.rail-scroll')?.clientWidth ?? 0,
     }))
     expect(widths.scroll).toBeLessThanOrEqual(widths.client + 1)
-    expect(widths.railScroll, '底栏应保留自身横向滚动以访问全部导航').toBeGreaterThan(
-      widths.railClient,
-    )
+    expect(widths.railScroll).toBeLessThanOrEqual(widths.railClient + 1)
   }
 
   expectGatesClean(g)

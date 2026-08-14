@@ -72,15 +72,12 @@ export function ProjectsPage() {
             <StatusState
               kind="empty"
               title="还没有项目"
-              description="选择一个本地目录登记为 Project，或先完成初始设置。"
+              description="选择代码目录，添加第一个项目。"
               children={
                 <div className="state-actions">
                   <Button variant="primary" onClick={() => setWizardOpen(true)}>
                     选择代码目录
                   </Button>
-                  <Link className="btn btn--ghost" to={routes.welcome()}>
-                    查看引导
-                  </Link>
                 </div>
               }
             />
@@ -102,7 +99,7 @@ export function ProjectsPage() {
                       {/* SLICE-001：public location 无 canonical_path；Local/Remote 由 node_id 明示 */}
                       {loc ? (
                         <span className="ellipsis list-sub">
-                          {loc.node_id === 'local' ? '本机 Local' : `远程 ${loc.node_id}`}
+                          {loc.node_id === 'local' ? '本机' : `远程 ${loc.node_id}`}
                         </span>
                       ) : null}
                     </div>

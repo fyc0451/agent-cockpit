@@ -105,7 +105,6 @@ type Action =
   | { type: 'enter-dir'; path: string }
   | { type: 'up-dir' }
   | { type: 'select-dir'; entry: DirectoryEntry }
-  | { type: 'select-current-root' }
   | { type: 'probe-start' }
   | { type: 'probe-ok'; revision: number; result: DiscoveryResultData; meta: ResponseMeta | null; degraded: boolean }
   | { type: 'probe-err'; revision: number; error: ApiError }
@@ -134,9 +133,6 @@ function reducer(state: WizardState, action: Action): WizardState {
     }
     case 'select-dir':
       return { ...state, selected: action.entry, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
-    case 'select-current-root':
-      if (state.path !== '' || !state.rootDisplayName) return state
-      return { ...state, selected: { name: state.rootDisplayName, path: '' }, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     case 'probe-start':
       // PROBING 在途停留在目录步（识别按钮 disabled，重复触发 0 请求）；probe 状态清空
       return {
@@ -451,22 +447,6 @@ export function ProjectWizard({
                 ) : null}
                 <Tag tone="neutral">{state.path === '' ? '/' : state.path}</Tag>
               </div>
-              {state.path === '' && state.rootDisplayName ? (
-                <ul className="list">
-                  <li className="list-row">
-                    <button
-                      type="button"
-                      className="drawer-item"
-                      aria-label={`选择当前目录 ${state.rootDisplayName}`}
-                      onClick={() => dispatch({ type: 'select-current-root' })}
-                    >
-                      <span className="ellipsis drawer-item-name">{state.rootDisplayName}</span>
-                      <Tag tone="neutral">当前目录</Tag>
-                      {state.selected?.path === '' ? <Tag tone="accent">已选择</Tag> : null}
-                    </button>
-                  </li>
-                </ul>
-              ) : null}
               {dirs.isPending ? (
                 <StatusState kind="loading" title="正在加载目录…" />
               ) : dirs.isError ? (

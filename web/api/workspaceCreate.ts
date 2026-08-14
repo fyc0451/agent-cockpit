@@ -41,7 +41,7 @@ export function gateWorkspaceCreate(
   if (locations === undefined) {
     return {
       available: false,
-      reason: 'RepoLocation 数据不可用，无法确认创建条件',
+      reason: '无法读取项目代码目录，暂时不能创建工作空间。',
       eligible: [],
     }
   }
@@ -50,11 +50,11 @@ export function gateWorkspaceCreate(
   )
   if (eligible.length > 0) return { available: true, reason: null, eligible }
   if (locations.length === 0) {
-    return { available: false, reason: '该项目没有已登记的 RepoLocation', eligible: [] }
+    return { available: false, reason: '这个项目还没有可用的代码目录。', eligible: [] }
   }
   return {
     available: false,
-    reason: '无满足「active · 本机 Local · 可用」条件的 RepoLocation',
+    reason: '这个项目的本机代码目录当前不可用。',
     eligible: [],
   }
 }

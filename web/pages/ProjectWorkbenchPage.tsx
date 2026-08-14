@@ -20,10 +20,6 @@ function text(v: unknown): string {
 }
 
 /** persisted workspaces 深链列表（Registry 权威，非 fixture 嵌入数组） */
-function userFacingGateReason(reason: string | null): string | null {
-  return reason?.replace(/RepoLocation/g, '项目目录') ?? null
-}
-
 function WorkspacesSection({
   project,
   createRequested,
@@ -42,7 +38,7 @@ function WorkspacesSection({
     const rp = registry.data?.data.items.find((p) => p.project_id === project.project_id)
     return gateWorkspaceCreate(rp?.repo_locations)
   }, [registry.data, project.project_id])
-  const gateReason = userFacingGateReason(gate.reason)
+  const gateReason = gate.reason
 
   useEffect(() => {
     if (!createRequested) return
@@ -89,10 +85,9 @@ function WorkspacesSection({
                 >
                   {w.name}
                 </Link>
-                <span className="ellipsis list-sub">{w.workspace_id}</span>
               </div>
               <Tag tone={toneForLocation(workspaceLocation(w))}>
-                {workspaceLocation(w) === 'remote' ? '远程' : '本机 Local'}
+                {workspaceLocation(w) === 'remote' ? '远程' : '本机'}
               </Tag>
             </li>
           ))}

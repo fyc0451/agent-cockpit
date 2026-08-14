@@ -90,7 +90,7 @@ test('E2 remote 节点 fail-closed：reason 可读，Enter 后 0 请求', async 
   await page.keyboard.press('Space')
   expect(g.apiRequests.length).toBe(callsBefore)
   // 仍停留在节点选择步
-  await expect(dialog.getByRole('button', { name: /本机/ })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '本机 local', exact: true })).toBeVisible()
   expectGatesClean(g)
 })
 

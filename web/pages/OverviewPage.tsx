@@ -3,6 +3,7 @@ import { useAttention, useOverview } from '../api/hooks'
 import { attentionItems, degradedSources, isDegraded } from '../api/normalize'
 import { useProjectRegistryList } from '../api/registry'
 import { routes } from '../app/routes'
+import { Button } from '../components/Button'
 import { PageHeader } from '../components/PageHeader'
 import { QueryErrorState } from '../components/QueryErrorState'
 import { StatusState } from '../components/StatusState'
@@ -41,6 +42,25 @@ export function OverviewPage() {
   return (
     <>
       <PageHeader title="需要你处理" sub="跨项目聚合的待决定、待回复与提醒" />
+      {registry.isError ? (
+        <StatusState
+          kind="degraded"
+          banner
+          title="项目列表暂不可用"
+          description="无法确认是否已添加项目。请重试后继续。"
+          children={
+            <div className="state-actions">
+              <Button
+                variant="ghost"
+                disabled={registry.isFetching}
+                onClick={() => registry.refetch()}
+              >
+                {registry.isFetching ? '正在重试…' : '重试'}
+              </Button>
+            </div>
+          }
+        />
+      ) : null}
       {noProjects ? (
         <StatusState
           kind="empty"

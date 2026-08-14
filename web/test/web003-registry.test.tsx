@@ -108,16 +108,6 @@ async function toProbeResult(user: ReturnType<typeof userEvent.setup>, dirName =
 const discoveryOk = () => ({ body: discoveryGitPayload })
 const registerOk = () => ({ body: registerCreatedPayload })
 
-const rootDiscoveryPayload = {
-  ...discoveryGitPayload,
-  data: {
-    ...discoveryGitPayload.data,
-    locator: { ...discoveryGitPayload.data.locator, path: '' },
-    display_path: '代码',
-    discovery_fingerprint: `sha256:${'6'.repeat(64)}`,
-  },
-}
-
 describe('WEB-005 roots 与 discovery capability bootstrap', () => {
   it('roots 只接受 data.items，旧 data.roots fail-closed', () => {
     expect(assertRootsData(rootsPayload.data)).toEqual(rootsPayload.data)
@@ -133,8 +123,9 @@ describe('WEB-003 列表（V1–V6）', () => {
     expect(screen.getByText('Beta 项目')).toBeInTheDocument()
     expect(screen.getByText('available')).toBeInTheDocument()
     expect(screen.getByText('offline')).toBeInTheDocument()
-    // SLICE-001：行只渲染公开 node_id（本机 Local），无 canonical_path
-    expect(screen.getAllByText('本机 Local')).toHaveLength(2)
+    // SLICE-001：行只渲染用户可理解的位置，无 canonical_path / 内部 node_id
+    expect(screen.getAllByText('本机')).toHaveLength(2)
+    expect(container.querySelector('.list')?.textContent).not.toContain('Local')
     expect(container.querySelector('.list')?.textContent).not.toContain('/repos')
     // 不再有 branch/remote/workspaces 计数等旧字段文本
     expect(container.querySelector('.list')?.textContent).not.toContain('main')
@@ -146,7 +137,8 @@ describe('WEB-003 列表（V1–V6）', () => {
     const { container } = renderApp('/projects')
     await waitFor(() => expect(container.querySelector('[data-state="empty"]')).toBeInTheDocument())
     expect(screen.getByRole('button', { name: '选择代码目录' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '查看引导' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '查看引导' })).toBeNull()
+    expect(container).not.toHaveTextContent('Project')
   })
 
   it('V3 列表 degraded：partial=true → banner，无 empty 无 0 计数', async () => {
@@ -313,60 +305,19 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     })
   })
 
-  it('PROJ-006 当前 root 可 discovery/register，两个 POST 都精确提交 path 空串', async () => {
-    const stub = stubWizardFetch({
-      discovery: () => ({ body: rootDiscoveryPayload }),
-      register: registerOk,
-    })
+  it('代码位置本身不可选择，只允许从其子目录开始登记', async () => {
+    const stub = stubWizardFetch({ discovery: discoveryOk, register: registerOk })
     const user = userEvent.setup()
     renderApp('/projects')
     await toDirStep(user)
 
-    await user.click(screen.getByRole('button', { name: '选择当前目录 代码' }))
-    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
-    await screen.findByText('新 Git 项目')
-    expect(screen.getByLabelText('项目名称')).toHaveValue('代码')
-    expect(screen.getByLabelText('Slug')).toHaveValue('project')
-
-    const probe = stub.posts.find((call) => call.url.startsWith('/api/project-discovery'))
-    expect(JSON.parse(probe!.body).locator).toEqual({
-      node_id: 'local',
-      root_id: expect.stringMatching(ROOT_ID_RE),
-      path: '',
-    })
-    expect(probe!.body).not.toContain('/repos')
-
-    await user.click(screen.getByRole('button', { name: '确认添加' }))
-    await screen.findByText('登记成功')
-    const register = stub.posts.find((call) => call.url.startsWith('/api/project-registry/projects'))
-    expect(JSON.parse(register!.body).locator).toEqual({
-      node_id: 'local',
-      root_id: expect.stringMatching(ROOT_ID_RE),
-      path: '',
-    })
-    expect(register!.body).not.toContain('/repos')
-  })
-
-  it('PROJ-006 进入子目录再返回会清空旧选择，当前 root 可重新选择', async () => {
-    const stub = stubWizardFetch({ discovery: () => ({ body: rootDiscoveryPayload }), register: registerOk })
-    const user = userEvent.setup()
-    renderApp('/projects')
-    await toDirStep(user)
-
-    const root = screen.getByRole('button', { name: '选择当前目录 代码' })
-    await user.click(root)
-    expect(root.textContent).toContain('已选择')
+    expect(screen.queryByText('当前目录')).toBeNull()
+    expect(screen.queryByRole('button', { name: /选择当前目录/ })).toBeNull()
+    expect(screen.getByRole('button', { name: '识别所选目录' })).toHaveAttribute('aria-disabled', 'true')
     await user.click(screen.getByRole('button', { name: '进入 alpha' }))
     await user.click(await screen.findByRole('button', { name: '上级目录' }))
-
-    const returnedRoot = await screen.findByRole('button', { name: '选择当前目录 代码' })
-    expect(returnedRoot.textContent).not.toContain('已选择')
-    await user.click(returnedRoot)
-    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
-    await screen.findByText('新 Git 项目')
-    const probes = stub.posts.filter((call) => call.url.startsWith('/api/project-discovery'))
-    expect(probes).toHaveLength(1)
-    expect(JSON.parse(probes[0].body).locator.path).toBe('')
+    expect(await screen.findByRole('button', { name: /^alpha/ })).toBeInTheDocument()
+    expect(stub.posts).toHaveLength(0)
   })
 
   it('V9 discovery complete=true git → NEW_GIT，提交按钮可用；分支只布尔表达', async () => {
@@ -979,9 +930,7 @@ describe('黄金路径：识别失败可恢复（用户语言）', () => {
     })
     const user = userEvent.setup()
     renderApp('/projects')
-    await toDirStep(user)
-    await user.click(screen.getByRole('button', { name: '选择当前目录 代码' }))
-    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+    await toProbeResult(user)
     expect(await screen.findByText('不能登记这个代码位置本身')).toBeInTheDocument()
     expect(screen.getByText(/同一代码位置内直接包含 \.git 的仓库目录/)).toBeInTheDocument()
     // 恢复动作：返回选择目录后目录行重新可选
@@ -1038,6 +987,29 @@ describe('黄金路径：四入口汇聚同一个向导', () => {
     await screen.findByText('需要你处理')
     await waitFor(() => expect(screen.queryByText('正在汇总工作…')).toBeNull())
     expect(screen.queryByRole('link', { name: '选择代码目录' })).toBeNull()
+  })
+
+  it('G8b Overview 无法读取项目列表时显示明确重试，并可恢复首用入口', async () => {
+    let recovered = false
+    const map = defaultFetchMap()
+    stubFetch((url) => {
+      if (url.startsWith('/api/project-registry/projects')) {
+        if (!recovered) {
+          return {
+            status: 403,
+            body: { error: { code: 'forbidden', message: '项目列表不可用', retryable: false } },
+          }
+        }
+        return { body: registryProjectsEmptyPayload }
+      }
+      return url in map ? { body: map[url] } : undefined
+    })
+    const user = userEvent.setup()
+    renderApp('/overview')
+    expect(await screen.findByText('项目列表暂不可用')).toBeInTheDocument()
+    recovered = true
+    await user.click(screen.getByRole('button', { name: '重试' }))
+    expect(await screen.findByRole('link', { name: '选择代码目录' })).toBeInTheDocument()
   })
 
   it('G9 Welcome 主按钮 → 同一个向导入口', async () => {

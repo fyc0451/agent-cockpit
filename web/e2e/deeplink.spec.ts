@@ -73,7 +73,7 @@ test('A→B 同 workspaceId 切换：DOM 无旧 workspace 残留', async ({ page
   await expect(rail.getByText('本机工作区').first()).toBeVisible()
 
   await page.getByTitle('切换项目').click()
-  await page.getByRole('dialog', { name: '项目切换' }).getByRole('button', { name: 'p2' }).click()
+  await page.getByRole('dialog', { name: '项目切换' }).getByRole('button', { name: 'Project Two' }).click()
 
   await expect(rail.getByText('Project Two')).toBeVisible()
   // A 的 workspace 痕迹（名称/顶栏）必须全部消失

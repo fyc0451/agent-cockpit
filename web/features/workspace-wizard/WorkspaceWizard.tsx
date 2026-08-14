@@ -215,6 +215,20 @@ export function WorkspaceWizard({
 }
 
 function SubmitErrorNote({ error, onRetry }: { error: ApiError; onRetry: () => void }) {
+  if (
+    error.code === 'repo_location_not_found' ||
+    error.code === 'repo_location_not_local' ||
+    error.code === 'repo_location_unavailable'
+  ) {
+    return (
+      <StatusState
+        kind="conflict"
+        banner
+        title="项目目录不可用"
+        description="项目目录状态已变化，请返回项目后重试。"
+      />
+    )
+  }
   if (error.status === 409) {
     if (error.code === 'workspace_name_conflict') {
       return (
@@ -222,7 +236,7 @@ function SubmitErrorNote({ error, onRetry }: { error: ApiError; onRetry: () => v
           kind="conflict"
           banner
           title="同名工作空间已存在"
-          description={error.message}
+          description="请换一个名称后再创建。"
         />
       )
     }
@@ -231,8 +245,8 @@ function SubmitErrorNote({ error, onRetry }: { error: ApiError; onRetry: () => v
         <StatusState
           kind="error"
           banner
-          title="提交冲突（程序错误）"
-          description="同一 Idempotency-Key 提交了不同内容；请取消后重开向导再试。"
+          title="提交状态冲突"
+          description="请关闭窗口后重新创建。"
         />
       )
     }

@@ -13,7 +13,11 @@ function isOverrideSpec(v: unknown): v is OverrideSpec {
 
 /** 拦截所有 /api/**：fixture 复刻完整 G3 envelope，未命中的路径回 404 envelope */
 export async function stubApi(page: Page, overrides: Record<string, unknown> = {}) {
-  const map: Record<string, unknown> = { ...defaultFetchMap(), ...overrides }
+  const map: Record<string, unknown> = {
+    '/api/auth/status': { required: false, authenticated: true, local_only: true },
+    ...defaultFetchMap(),
+    ...overrides,
+  }
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname

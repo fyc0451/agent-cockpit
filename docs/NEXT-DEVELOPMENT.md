@@ -55,10 +55,10 @@ cp .env.next.example .env.next
 ```
 
 `COCKPIT_PROJECT_ROOT` must be an existing canonical directory narrower than
-the whole Home directory. Do not set it to `/`, `/home`, or `${HOME}`. It is a
-container for user repositories and is independent of the Cockpit checkout;
-for example, Cockpit may be installed under `/home/alice/agent-cockpit-next`
-while projects live under `/mnt/data/projects`. The browser receives only an
+the whole Home directory. Do not set it to `/`, `/home`, or `${HOME}`. The
+fixed Next profile requires the Cockpit checkout at
+`${HOME}/github/agent-cockpit-next`; only the container holding user repositories
+is configurable, for example `/mnt/data/projects`. The browser receives only an
 opaque `root_id` and a relative locator; it never submits this absolute path.
 Missing or unsafe configuration fails the launcher check with a stable
 `project_root_*` error instead of falling back to Home or `/`.
@@ -68,6 +68,24 @@ Start the source development service only after the checks pass:
 ```bash
 .venv/bin/python scripts/next_dev.py start --env-file .env.next
 ```
+
+## First use
+
+1. Open `http://127.0.0.1:18790`. If the instance is exposed on a private LAN
+   and shows a login page, enter the access token provided by the operator. Do
+   not put that token in chat, logs, or project files.
+2. On the empty overview, choose **选择代码目录**. Cockpit skips location choices
+   when there is only one usable local node and one configured code root.
+3. Choose the directory that directly contains the repository's `.git`
+   directory, then choose **识别所选目录** and **确认添加**. The configured code
+   root is only a container and is not itself a project.
+4. Choose **继续创建工作空间**. Keep the default `main` name or enter a clearer
+   name, then choose **创建并打开**.
+5. The new workspace opens at **文件**. Select a file to inspect it, then use
+   **打开终端** and **新终端** to run commands in that workspace.
+
+After this path works, returning users can choose a project from the project
+switcher, open an existing workspace, and continue from Files or Terminal.
 
 To enable token authentication, create the private file before `check` and
 `start` (the no-clobber setting refuses to overwrite an existing token):
