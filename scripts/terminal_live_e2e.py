@@ -49,7 +49,7 @@ def _temporary_repo_root(path: Path) -> Iterator[Path]:
 LAUNCHER = ROOT / "scripts" / "next_ephemeral_server.py"
 WEB = ROOT / "web"
 RESERVED_PORTS = {8790, 18790}
-DECLARED_WEB_EXACT = "268cc574ad18293c811111acc02e84c89d1be737"
+DECLARED_WEB_EXACT = "9606f2f2f936c75eab11651bca1225a63d7b50f5"
 WEB_PROVENANCE_PATHS = (
     "web/api/terminals.ts",
     "web/pages/TerminalPage.tsx",

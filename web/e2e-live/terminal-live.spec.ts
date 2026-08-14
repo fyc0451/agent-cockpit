@@ -5,7 +5,7 @@ import { expect, test, type Page, type Request } from '@playwright/test'
 
 /**
  * One ordinary live journey on one ephemeral server.
- * Selectors locked to Web exact 268cc574ad18293c811111acc02e84c89d1be737:
+ * Selectors locked to Web exact 9606f2f2f936c75eab11651bca1225a63d7b50f5:
  *   新终端 / 中断 / 重连 / 重启 / 全屏 (exact) / 退出全屏 (exact) / 关闭标签页 / 关闭会话
  *   testids: terminal-tabs, terminal-tab-{id}, terminal-surface-{id}, terminal-runtime-state
  *   overlay: .terminal-fullscreen (not data-testid=terminal-fullscreen-overlay)
@@ -14,7 +14,7 @@ import { expect, test, type Page, type Request } from '@playwright/test'
  * Missing Project / Workspace / TERM-003 controls fail. No blocked-return.
  */
 
-const WEB_EXACT = '268cc574ad18293c811111acc02e84c89d1be737'
+const WEB_EXACT = '9606f2f2f936c75eab11651bca1225a63d7b50f5'
 const FORBIDDEN = /\b(cwd|command|pid|env|herdr_session|herdr_pane|HERDR_SESSION|HERDR_PANE_ID|HERDR_ENV)\b/
 const OUTPUT_LIVE = 'out.live.7a3c91'
 const OUTPUT_390 = 'out.w390.b82e04'
