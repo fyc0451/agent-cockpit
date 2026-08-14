@@ -13,9 +13,9 @@ describe('capability registry（静态 fail-closed 表）', () => {
       expect(capabilities[k].reason).toBeTruthy()
     }
     expect(capability('terminal.control.ui').available).toBe(true)
-    expect(capability('memory.local').reason).toContain('W4')
+    expect(capability('memory.local').reason).toContain('项目记忆暂未开放')
     expect(capability('terminal.pty').available).toBe(false)
-    expect(capability('files.read').reason).toContain('禁止回退全局 legacy')
+    expect(capability('files.read').reason).toContain('不影响终端使用')
   })
 
   it('memory 页面整页 forbidden + 原因 + 文档入口', async () => {
@@ -24,7 +24,7 @@ describe('capability registry（静态 fail-closed 表）', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
     })
-    expect(screen.getByText('Memory/Context Pack 规划在 W4 接通')).toBeInTheDocument()
+    expect(screen.getByText('项目记忆暂未开放，不影响文件与终端的使用')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '查看路线图' })).toHaveAttribute(
       'href',
       '#/settings?view=doctor',
@@ -39,7 +39,7 @@ describe('capability registry（静态 fail-closed 表）', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
     })
-    expect(screen.getByText('Git 集成 API 未接通（W1）')).toBeInTheDocument()
+    expect(screen.getByText('Git 集成暂未开放，可在终端中继续使用 Git')).toBeInTheDocument()
   })
 
   it('危险写按钮 aria-disabled + title 原因，可聚焦', async () => {
@@ -47,7 +47,7 @@ describe('capability registry（静态 fail-closed 表）', () => {
     renderApp('/projects/p1/workspaces/w1')
     const del = await screen.findByRole('button', { name: '删除工作空间' })
     expect(del).toHaveAttribute('aria-disabled', 'true')
-    expect(del).toHaveAttribute('title', 'Workspace 删除未开放（W1 只读骨架）')
+    expect(del).toHaveAttribute('title', '工作空间删除暂未开放')
     ;(del as HTMLElement).focus()
     expect(del).toHaveFocus()
   })
@@ -60,20 +60,20 @@ describe('capability registry（静态 fail-closed 表）', () => {
     const editorCard = cards.find((c) => c.textContent?.includes('编辑器'))
     expect(editorCard).toHaveClass('card--disabled')
     expect(editorCard).toHaveAttribute('aria-disabled', 'true')
-    expect(editorCard?.textContent).toContain('内嵌编辑器规划在后续迭代接通')
+    expect(editorCard?.textContent).toContain('内嵌编辑器暂未开放，可继续使用文件浏览与终端')
     // SLICE-001：文件卡由 files.read capability 控制；默认世界 server 未声明 → fail-closed disabled
     const filesCard = cards.find((c) => c.textContent?.includes('文件'))
     expect(filesCard).toHaveClass('card--disabled')
     expect(filesCard).toHaveAttribute('aria-disabled', 'true')
-    expect(filesCard?.textContent).toContain('Workspace 文件 facade API 未接通')
+    expect(filesCard?.textContent).toContain('文件浏览暂未接通')
   })
 
-  it('设置写按钮 aria-disabled（W1 只读）', async () => {
+  it('设置写按钮 aria-disabled（只读原因可见）', async () => {
     stubDefaultFetch()
     renderApp('/settings')
     const save = await screen.findByRole('button', { name: '保存设置' })
     expect(save).toHaveAttribute('aria-disabled', 'true')
-    expect(save).toHaveAttribute('title', '设置写操作未开放（W1 只读）')
+    expect(save).toHaveAttribute('title', '设置当前为只读，修改暂不能保存')
   })
 
   it('终端页 PTY 未接通 banner + 控制按钮 aria-disabled', async () => {

@@ -41,11 +41,11 @@ describe('G6 公共状态组件（9 类）', () => {
     render(
       <StatusState
         kind="forbidden"
-        reason="Memory/Context Pack 规划在 W4 接通"
+        reason="项目记忆暂未开放，不影响文件与终端的使用"
         docsRoute="#/settings?view=doctor"
       />,
     )
-    expect(screen.getByText('Memory/Context Pack 规划在 W4 接通')).toBeInTheDocument()
+    expect(screen.getByText('项目记忆暂未开放，不影响文件与终端的使用')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '查看路线图' })).toHaveAttribute(
       'href',
       '#/settings?view=doctor',

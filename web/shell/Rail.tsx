@@ -197,7 +197,7 @@ export function Rail() {
                     key={w.id}
                     icon="☁"
                     label={w.name ?? w.id}
-                    reason={remoteHerdrCap.reason ?? '远程 Herdr 控制未接通'}
+                    reason={remoteHerdrCap.reason ?? '远程控制暂未接通'}
                     mobileHidden
                   />
                 )

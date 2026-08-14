@@ -7,7 +7,7 @@ test('files.read 关闭：forbidden 可见，/api/files 请求=0，WS=0', async 
   await stubApi(page)
   await page.goto('/#/projects/p1/workspaces/w1/files')
   await expect(page.locator('[data-state="forbidden"]')).toBeVisible()
-  await expect(page.getByText(/Workspace 文件 facade API 未接通/)).toBeVisible()
+  await expect(page.getByText(/文件浏览暂未接通/)).toBeVisible()
   // 等 project 等其它请求落地
   await expect(page.locator('.topbar')).toContainText('Project One')
   expect(apiCalls(g, '/api/files')).toEqual([])
@@ -71,14 +71,14 @@ test('Remote workspace disabled：点击 0 请求且不跳转', async ({ page })
   await page.goto('/#/projects/p1/workspaces/w1')
   await expect(page.locator('.page-title')).toHaveText('本机工作区')
 
-  await page.getByTitle('切换 Workspace').click()
-  const dialog = page.getByRole('dialog', { name: 'Workspace 切换' })
+  await page.getByTitle('切换工作空间').click()
+  const dialog = page.getByRole('dialog', { name: '工作空间切换' })
   const remoteBtn = dialog.getByRole('button', { name: /远程 GPU/ })
   await expect(remoteBtn).toHaveAttribute('aria-disabled', 'true')
   // 原因可读（aria-describedby）
   const descId = await remoteBtn.getAttribute('aria-describedby')
   expect(descId).toBeTruthy()
-  await expect(dialog.locator(`[id="${descId}"]`)).toContainText('远程 Herdr 控制未接通')
+  await expect(dialog.locator(`[id="${descId}"]`)).toContainText('远程控制暂未接通')
 
   const hashBefore = page.url()
   const callsBefore = g.apiRequests.length

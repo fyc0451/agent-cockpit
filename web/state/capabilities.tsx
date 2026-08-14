@@ -30,42 +30,42 @@ const DOCTOR = routeHrefs.doctor()
 const staticRegistry = {
   'memory.local': {
     available: false,
-    reason: 'Memory/Context Pack 规划在 W4 接通',
+    reason: '项目记忆暂未开放，不影响文件与终端的使用',
     docsRoute: DOCTOR,
   },
   'recovery.review': {
     available: false,
-    reason: '恢复审核 API 未接通（W1）',
+    reason: '变更审核暂未开放，不影响文件与终端的使用',
     docsRoute: DOCTOR,
   },
   'activity.feed': {
     available: false,
-    reason: '项目/Workspace 活动流 API 未接通（W1）',
+    reason: '动态暂未开放，不影响其他功能的使用',
     docsRoute: DOCTOR,
   },
   'git.integration': {
     available: false,
-    reason: 'Git 集成 API 未接通（W1）',
+    reason: 'Git 集成暂未开放，可在终端中继续使用 Git',
     docsRoute: DOCTOR,
   },
   'editor.embedded': {
     available: false,
-    reason: '内嵌编辑器规划在后续迭代接通',
+    reason: '内嵌编辑器暂未开放，可继续使用文件浏览与终端',
     docsRoute: DOCTOR,
   },
   browser: {
     available: false,
-    reason: '嵌入式浏览器规划在后续迭代接通',
+    reason: '内嵌浏览器暂未开放，不影响其他功能的使用',
     docsRoute: DOCTOR,
   },
   automation: {
     available: false,
-    reason: '自动化 API 未接通（W1）',
+    reason: '通信暂未开放，不影响文件与终端的使用',
     docsRoute: DOCTOR,
   },
   'terminal.pty': {
     available: false,
-    reason: '服务端未声明该 Workspace 的终端能力（terminal.pty 由 workspace detail meta 权威下发）',
+    reason: '该工作空间的终端暂不可用；可稍后重试，或联系管理员确认服务配置',
     docsRoute: DOCTOR,
   },
   'terminal.control.ui': {
@@ -76,37 +76,37 @@ const staticRegistry = {
   },
   'search.server': {
     available: false,
-    reason: '服务端搜索未接通，仅支持页面导航',
+    reason: '搜索暂未接通，可继续用页面导航查找',
     docsRoute: DOCTOR,
   },
   remoteHerdr: {
     available: false,
-    reason: '远程 Herdr 控制未接通（W1）',
+    reason: '远程控制暂未接通，远程工作空间暂不可用',
     docsRoute: DOCTOR,
   },
   harnessCatalog: {
     available: false,
-    reason: 'Harness 目录 API 未接通',
+    reason: '环境自检目录暂未接通，可稍后重试',
     docsRoute: DOCTOR,
   },
   'projectRegistry.write': {
     available: false,
-    reason: '项目注册写操作未开放（W1 只读）',
+    reason: '项目登记当前不可用，请稍后重试',
     docsRoute: DOCTOR,
   },
   'files.read': {
     available: false,
-    reason: 'Workspace 文件 facade API 未接通（后端 Workspace 文件门面未就绪，W1 禁止回退全局 legacy /api/files/*）',
+    reason: '文件浏览暂未接通，不影响终端使用；请稍后重试',
     docsRoute: DOCTOR,
   },
   'workspace.delete': {
     available: false,
-    reason: 'Workspace 删除未开放（W1 只读骨架）',
+    reason: '工作空间删除暂未开放',
     docsRoute: DOCTOR,
   },
   'settings.write': {
     available: false,
-    reason: '设置写操作未开放（W1 只读）',
+    reason: '设置当前为只读，修改暂不能保存',
     docsRoute: DOCTOR,
   },
 } satisfies Record<string, Capability>
@@ -123,7 +123,7 @@ export function capability(key: CapabilityKey): Capability {
 
 const FALLBACK_CLOSED: Capability = {
   available: false,
-  reason: '能力未声明，默认关闭（fail-closed）',
+  reason: '该能力尚未声明，暂不可用',
   docsRoute: DOCTOR,
 }
 
@@ -157,7 +157,7 @@ export function scopeKey(scope: CapabilityScope): string {
 
 // ---------- server 值解析 ----------
 
-const SYNTHESIZED_REASON = '服务端未提供原因（fail-closed）'
+const SYNTHESIZED_REASON = '服务端未说明原因，该能力暂不可用'
 
 /** 宽容解析 meta.capabilities：boolean / { available, reason?, docsRoute? }；
  *  available=false 缺 reason 时合成稳定可读 reason，不得为 null */

@@ -10,7 +10,7 @@ describe('Files 页（files.read 关闭，item 1）', () => {
       expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
     })
     expect(
-      screen.getByText(/Workspace 文件 facade API 未接通/),
+      screen.getByText(/文件浏览暂未接通/),
     ).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '查看路线图' })).toHaveAttribute(
       'href',

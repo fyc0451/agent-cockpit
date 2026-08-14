@@ -41,7 +41,7 @@ function HarnessTab() {
         <pre className="raw-json" tabIndex={0}>{JSON.stringify(q.data?.data ?? {}, null, 2)}</pre>
       )}
       <div className="state-actions">
-        <Button variant="primary" disabled title={writeCap.reason ?? 'W1 只读'}>
+        <Button variant="primary" disabled title={writeCap.reason ?? '暂不可保存'}>
           保存设置
         </Button>
       </div>
@@ -137,7 +137,7 @@ export function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="设置" sub="W1 只读：写操作将在后续迭代开放" />
+      <PageHeader title="设置" sub="当前为只读：修改将在后续版本开放" />
       <Tabs
         tabs={TABS}
         active={tab}

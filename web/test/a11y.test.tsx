@@ -64,19 +64,19 @@ describe('A11y（item 7）', () => {
   it('aria-disabled 按钮可聚焦、aria-describedby 关联 reason 节点、激活无效', async () => {
     const onClick = vi.fn()
     const { container } = render(
-      <Button disabled title="Workspace 删除未开放（W1 只读骨架）" onClick={onClick}>
+      <Button disabled title="工作空间删除暂未开放" onClick={onClick}>
         删除
       </Button>,
     )
     const btn = screen.getByRole('button', { name: '删除' })
     expect(btn).toHaveAttribute('aria-disabled', 'true')
-    expect(btn).toHaveAttribute('title', 'Workspace 删除未开放（W1 只读骨架）')
+    expect(btn).toHaveAttribute('title', '工作空间删除暂未开放')
     // reason 不只靠 title：aria-describedby 关联的节点存在且含 reason 文本
     const descId = btn.getAttribute('aria-describedby')
     expect(descId).toBeTruthy()
     const desc = container.querySelector(`#${CSS.escape(descId!)}`)
     expect(desc).not.toBeNull()
-    expect(desc?.textContent).toContain('Workspace 删除未开放')
+    expect(desc?.textContent).toContain('工作空间删除暂未开放')
     ;(btn as HTMLElement).focus()
     expect(btn).toHaveFocus()
 

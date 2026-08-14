@@ -275,7 +275,7 @@ describe('SLICE-001 页面纵切', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
     })
-    expect(screen.getByText('Workspace 不存在或不属于当前项目')).toBeInTheDocument()
+    expect(screen.getByText('工作空间不存在或不属于当前项目')).toBeInTheDocument()
     expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
   })
 
@@ -288,7 +288,7 @@ describe('SLICE-001 页面纵切', () => {
       },
     })
     renderApp('/projects/p1/workspaces/w1')
-    expect(await screen.findByText('Workspace 不存在或不属于当前项目')).toBeInTheDocument()
+    expect(await screen.findByText('工作空间不存在或不属于当前项目')).toBeInTheDocument()
   })
 
   it('WorkspaceHome：files.read 开 → 文件卡可用链接；terminal.pty 关 → 禁用卡带冻结 reason', async () => {

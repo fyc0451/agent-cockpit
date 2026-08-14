@@ -111,11 +111,11 @@ export function WorkspaceSwitcher({ open, onClose }: { open: boolean; onClose: (
         className="modal modal--switcher"
         role="dialog"
         aria-modal="true"
-        aria-label="Workspace 切换"
+        aria-label="工作空间切换"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="drawer-head">
-          <h2 className="panel-title">切换 Workspace</h2>
+          <h2 className="panel-title">切换工作空间</h2>
           <button type="button" className="btn btn--icon" aria-label="关闭" onClick={close}>
             ×
           </button>
@@ -123,8 +123,8 @@ export function WorkspaceSwitcher({ open, onClose }: { open: boolean; onClose: (
         {workspaces.length === 0 ? (
           <StatusState
             kind="empty"
-            title="没有可用 Workspace"
-            description="当前项目尚未提供 Workspaces 数据。"
+            title="没有可用工作空间"
+            description="当前项目尚未提供工作空间数据。"
           />
         ) : (
           <ul className="drawer-list" ref={listRef} onKeyDown={onListKeyDown}>

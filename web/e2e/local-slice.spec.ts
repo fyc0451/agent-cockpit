@@ -92,7 +92,7 @@ test('Workspace mismatch：跨项目/未知 workspace → typed error，非 empt
   const g = attachGates(page, [{ url: `${WS_BASE}/w9`, status: 404 }])
   await stubApi(page)
   await page.goto('/#/projects/p1/workspaces/w9')
-  await expect(page.getByText('Workspace 不存在或不属于当前项目')).toBeVisible()
+  await expect(page.getByText('工作空间不存在或不属于当前项目')).toBeVisible()
   await expect(page.locator('[data-state="empty"]')).toHaveCount(0)
   expectGatesClean(g)
 })
@@ -121,7 +121,9 @@ test('WorkspaceHome：terminal 卡 disabled 带冻结 reason，文件卡受 file
   await expect(page.locator('.page-title')).toHaveText('本机工作区')
   const main = page.locator('main')
   await expect(main.getByRole('link', { name: /文件/ })).toBeVisible()
-  const terminalCard = main.locator('.card--disabled', { hasText: '终端' })
+  const terminalCard = main
+    .locator('.card--disabled')
+    .filter({ has: page.getByText('终端', { exact: true }) })
   await expect(terminalCard).toHaveAttribute('aria-disabled', 'true')
   await expect(terminalCard).toContainText('workspace_terminal_ticket_deferred')
   // 禁用卡激活零请求

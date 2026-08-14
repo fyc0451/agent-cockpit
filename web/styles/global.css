@@ -121,6 +121,10 @@ body {
   font-size: 12px;
 }
 
+.auth-hint {
+  line-height: 1.6;
+}
+
 .auth-label {
   display: block;
   margin-bottom: 6px;

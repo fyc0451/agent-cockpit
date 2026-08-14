@@ -126,6 +126,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
         <div className="auth-heading">
           <h1 id="auth-title">Agent Cockpit</h1>
           <p>此实例需要访问令牌</p>
+          <p className="auth-hint">
+            这不是账号密码：令牌由运行 Cockpit 的电脑管理员提供；本机操作者可在该电脑的
+            ~/.config/agent-cockpit-next/cockpit.token 查看。请勿把令牌发到聊天或项目文件中。
+          </p>
         </div>
         <form onSubmit={submit}>
           <label className="auth-label" htmlFor="cockpit-token">访问令牌</label>

@@ -57,7 +57,7 @@ test('E1 键盘整轮登记：空态 CTA → root → 目录 → 识别 → 改 
 
   // Slug 收在高级选项里
   await dialog.getByText('高级选项').click()
-  const slug = dialog.getByLabel('Slug')
+  const slug = dialog.getByLabel('标识符')
   await slug.focus()
   await slug.fill('alpha-proj')
   const submit = dialog.getByRole('button', { name: '确认添加' })

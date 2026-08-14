@@ -54,7 +54,7 @@ export function WorkspaceScope({
     setWorkspaceScope(ws)
   }, [ws, setWorkspaceScope])
 
-  if (q.isPending) return <StatusState kind="loading" title="正在加载 Workspace…" />
+  if (q.isPending) return <StatusState kind="loading" title="正在加载工作空间…" />
   if (q.isError || mismatch) {
     const isNotFound =
       mismatch ||
@@ -64,12 +64,12 @@ export function WorkspaceScope({
       return (
         <StatusState
           kind="error"
-          title="Workspace 不存在或不属于当前项目"
-          description={`项目「${project.name ?? project.slug}」下没有 ID 为「${workspaceId}」的 Workspace。`}
+          title="工作空间不存在或不属于当前项目"
+          description={`项目「${project.name ?? project.slug}」下没有 ID 为「${workspaceId}」的工作空间。`}
           children={
             <div className="state-actions">
               <Link className="btn btn--primary" to={routes.project.workbench(project.slug ?? '')}>
-                返回项目工作台
+                返回项目概览
               </Link>
             </div>
           }
@@ -78,6 +78,6 @@ export function WorkspaceScope({
     }
     return <QueryErrorState error={q.error} onRetry={() => q.refetch()} />
   }
-  if (!ws) return <StatusState kind="loading" title="正在加载 Workspace…" />
+  if (!ws) return <StatusState kind="loading" title="正在加载工作空间…" />
   return <>{children(ws)}</>
 }

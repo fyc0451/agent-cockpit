@@ -23,7 +23,7 @@ function TasksBody({ project, workspace }: { project: Project; workspace: Worksp
     <>
       <PageHeader title="任务" sub={`${workspace.name ?? workspace.id} · 只读`} />
       {tasks.length === 0 ? (
-        <StatusState kind="empty" title="暂无任务" description="该 Workspace 当前没有任务记录。" />
+        <StatusState kind="empty" title="暂无任务" description="该工作空间当前没有任务记录。" />
       ) : (
         <ul className="list">
           {tasks.map((t, i) => (

@@ -42,6 +42,11 @@ describe('AuthGate', () => {
 
     render(<AuthGate><div>应用已加载</div></AuthGate>)
     const input = await screen.findByLabelText('访问令牌')
+    // 零知识 LAN 用户可行动说明：非账号密码、管理员提供、本机获取路径、禁止外发
+    expect(screen.getByText(/这不是账号密码/)).toBeInTheDocument()
+    expect(screen.getByText(/管理员提供/)).toBeInTheDocument()
+    expect(screen.getByText(/cockpit\.token/)).toBeInTheDocument()
+    expect(screen.getByText(/请勿把令牌发到聊天或项目文件中/)).toBeInTheDocument()
     await user.type(input, 'test-token-value')
     await user.click(screen.getByRole('button', { name: '登录' }))
 

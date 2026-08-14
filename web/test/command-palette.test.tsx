@@ -16,7 +16,7 @@ describe('命令面板（Dialog 语义）', () => {
     // autofocus：输入框获得焦点
     expect(screen.getByLabelText('命令输入框')).toHaveFocus()
     // 底部注明服务端搜索未接通
-    expect(screen.getByText(/服务端搜索未接通，仅支持页面导航/)).toBeInTheDocument()
+    expect(screen.getByText(/搜索暂未接通，可继续用页面导航查找/)).toBeInTheDocument()
 
     await user.keyboard('{Escape}')
     await waitFor(() => {
@@ -53,7 +53,7 @@ describe('命令面板（Dialog 语义）', () => {
       expect(screen.queryByRole('dialog', { name: '命令面板' })).not.toBeInTheDocument()
     })
     // 已导航到项目列表页
-    expect(await screen.findByText('选择项目进入工作台')).toBeInTheDocument()
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
   })
 
   it('输入筛选列表', async () => {

@@ -137,7 +137,7 @@ function UnavailableBody({ project, workspace }: { project: Project; workspace: 
         kind="disconnected"
         banner
         title="终端未接通"
-        description={ptyCap.reason ?? '服务端未声明该工作区的终端能力。'}
+        description={ptyCap.reason ?? '服务端未声明该工作空间的终端能力，请稍后重试或联系管理员。'}
         docsRoute={ptyCap.docsRoute}
       />
       <div ref={containerRef} className="terminal-surface" data-testid="terminal-surface" />
@@ -312,7 +312,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
             streamsRef.current.delete(ticketId)
             patchTab(ticketId, {
               phase: 'error',
-              error: `终端流协议违反（${why}）：连接已关闭，输入保持关闭`,
+              error: `连接被服务端拒绝（${why}），无法再输入`,
             })
           },
           onClose: (code, reason) => {

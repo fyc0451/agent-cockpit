@@ -7,9 +7,9 @@ test('WorkspaceSwitcher 键盘流：ArrowDown/Up roving、Enter 选中、Esc 恢
   await page.goto('/#/projects/p1/workspaces/w1')
   await expect(page.locator('.page-title')).toHaveText('本机工作区')
 
-  const trigger = page.getByTitle('切换 Workspace')
+  const trigger = page.getByTitle('切换工作空间')
   await trigger.click()
-  const dialog = page.getByRole('dialog', { name: 'Workspace 切换' })
+  const dialog = page.getByRole('dialog', { name: '工作空间切换' })
   await expect(dialog).toBeVisible()
 
   const items = dialog.locator('.drawer-item')
@@ -33,9 +33,9 @@ test('WorkspaceSwitcher 键盘流：ArrowDown/Up roving、Enter 选中、Esc 恢
 
   // 重新打开，Esc 关闭并恢复焦点到触发按钮
   await trigger.click()
-  await expect(page.getByRole('dialog', { name: 'Workspace 切换' })).toBeVisible()
+  await expect(page.getByRole('dialog', { name: '工作空间切换' })).toBeVisible()
   await page.keyboard.press('Escape')
-  await expect(page.getByRole('dialog', { name: 'Workspace 切换' })).toHaveCount(0)
+  await expect(page.getByRole('dialog', { name: '工作空间切换' })).toHaveCount(0)
   await expect(trigger).toBeFocused()
   expectGatesClean(g)
 })

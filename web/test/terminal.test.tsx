@@ -689,7 +689,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       act(() => {
         ws.serverRaw('not-json-at-all')
       })
-      await screen.findByText(/终端流协议违反/)
+      await screen.findByText(/连接被服务端拒绝/)
       await waitFor(() =>
         expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('连接：错误'),
       )
@@ -791,7 +791,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       act(() => {
         ws.serverJson({ type: 'replay_complete', revision: 1, generation: 1, cursor: 0, truncated: false })
       })
-      await screen.findByText(/终端流协议违反/)
+      await screen.findByText(/连接被服务端拒绝/)
       // stdin 保持关闭：输入不产生任何 WS 帧
       await waitFor(() => expect(inputCb).not.toBeNull())
       const before = ws.sent.length

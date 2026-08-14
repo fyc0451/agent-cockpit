@@ -38,7 +38,7 @@ export function TopBar({
           className="btn btn--ghost topbar-switcher"
           onClick={onOpenWorkspaces}
           aria-haspopup="dialog"
-          title="切换 Workspace"
+          title="切换工作空间"
         >
           <span
             className={`ws-dot ${workspace?.location === 'remote' ? 'ws-dot--remote' : 'ws-dot--local'}`}

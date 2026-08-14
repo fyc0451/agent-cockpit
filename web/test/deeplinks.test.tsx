@@ -30,7 +30,7 @@ describe('深链恢复（G1）', () => {
 
     // 顶栏 switcher 同样恢复
     expect(screen.getByTitle('切换项目')).toHaveTextContent('Project One')
-    expect(screen.getByTitle('切换 Workspace')).toHaveTextContent('本机工作区')
+    expect(screen.getByTitle('切换工作空间')).toHaveTextContent('本机工作区')
   })
 
   it('无效 project slug（404 envelope）显示 typed error 态，不得用 empty', async () => {
@@ -57,7 +57,7 @@ describe('深链恢复（G1）', () => {
       expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
     })
     expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
-    expect(screen.getByText('Workspace 不存在或不属于当前项目')).toBeInTheDocument()
+    expect(screen.getByText('工作空间不存在或不属于当前项目')).toBeInTheDocument()
   })
 
   it('未知路由重定向 #/overview', async () => {

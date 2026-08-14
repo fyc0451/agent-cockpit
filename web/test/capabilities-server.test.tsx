@@ -37,9 +37,9 @@ describe('meta.capabilities 权威合并层（item 6）', () => {
       c: false,
       d: { available: true },
     })
-    expect(parsed['a'].reason).toBe('服务端未提供原因（fail-closed）')
-    expect(parsed['b'].reason).toBe('服务端未提供原因（fail-closed）')
-    expect(parsed['c'].reason).toBe('服务端未提供原因（fail-closed）')
+    expect(parsed['a'].reason).toBe('服务端未说明原因，该能力暂不可用')
+    expect(parsed['b'].reason).toBe('服务端未说明原因，该能力暂不可用')
+    expect(parsed['c'].reason).toBe('服务端未说明原因，该能力暂不可用')
     expect(parsed['d'].reason).toBeNull()
   })
 
@@ -49,7 +49,7 @@ describe('meta.capabilities 权威合并层（item 6）', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
     })
-    expect(screen.getByText(/Workspace 文件 facade API 未接通/)).toBeInTheDocument()
+    expect(screen.getByText(/文件浏览暂未接通/)).toBeInTheDocument()
   })
 
   it('Project meta 声明 terminal.pty=true 也不得开启 Workspace PTY', async () => {
@@ -73,16 +73,16 @@ describe('meta.capabilities 权威合并层（item 6）', () => {
     })
 
     const git = renderApp('/projects/p1/workspaces/w1/git')
-    expect(await screen.findByText('Git 集成 API 未接通（W1）')).toBeInTheDocument()
+    expect(await screen.findByText('Git 集成暂未开放，可在终端中继续使用 Git')).toBeInTheDocument()
     expect(screen.queryByText('Project Git 可用')).not.toBeInTheDocument()
     git.unmount()
 
     const home = renderApp('/projects/p1/workspaces/w1')
     const del = await screen.findByRole('button', { name: '删除工作空间' })
     expect(del).toHaveAttribute('aria-disabled', 'true')
-    expect(del).toHaveAttribute('title', 'Workspace 删除未开放（W1 只读骨架）')
-    expect(screen.getByText('内嵌编辑器规划在后续迭代接通')).toBeInTheDocument()
-    expect(screen.getByText('嵌入式浏览器规划在后续迭代接通')).toBeInTheDocument()
+    expect(del).toHaveAttribute('title', '工作空间删除暂未开放')
+    expect(screen.getByText('内嵌编辑器暂未开放，可继续使用文件浏览与终端')).toBeInTheDocument()
+    expect(screen.getByText('内嵌浏览器暂未开放，不影响其他功能的使用')).toBeInTheDocument()
     expect(screen.queryByText(/Project (Editor|Browser|Delete) 可用/)).not.toBeInTheDocument()
     home.unmount()
   })

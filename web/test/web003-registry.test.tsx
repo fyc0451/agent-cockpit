@@ -471,12 +471,12 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     renderApp('/projects')
     await toProbeResult(user)
     await screen.findByText('新 Git 项目')
-    const slugInput = screen.getByLabelText('Slug')
+    const slugInput = screen.getByLabelText('标识符')
     for (const bad of ['Foo', '-a', 'a--b', 'a'.repeat(65)]) {
       await user.clear(slugInput)
       await user.type(slugInput, bad)
       // role=alert 的校验提示（提交按钮的 sr-only reason 也含同文案，故用 role 收窄）
-      expect(screen.getByRole('alert').textContent).toMatch(/Slug 格式无效/)
+      expect(screen.getByRole('alert').textContent).toMatch(/标识符格式无效/)
       expect(screen.getByRole('button', { name: '确认添加' })).toHaveAttribute('aria-disabled', 'true')
     }
     expect(stub.posts.filter((p) => p.url.includes('/api/project-registry'))).toEqual([])
@@ -554,7 +554,7 @@ describe('WEB-003 提交（V14–V16）', () => {
     await toProbeResult(user)
     await screen.findByText('新 Git 项目')
     await user.click(screen.getByRole('button', { name: '确认添加' }))
-    await screen.findByText(/改名/)
+    await screen.findByText(/换一个名称/)
     expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument()
   })
 
@@ -832,7 +832,7 @@ describe('返修4：幂等键绑定序列化 body', () => {
     await screen.findByText('新 Git 项目')
     await user.click(screen.getByRole('button', { name: '确认添加' }))
     await screen.findByRole('button', { name: '重试' })
-    const slugInput = screen.getByLabelText('Slug')
+    const slugInput = screen.getByLabelText('标识符')
     await user.clear(slugInput)
     await user.type(slugInput, 'alpha-2')
     await user.click(screen.getByRole('button', { name: '重试' }))
@@ -969,7 +969,7 @@ describe('黄金路径：登记成功导航', () => {
     expect(dialog.textContent).not.toContain('Workbench 将在')
     await user.click(screen.getByRole('button', { name: '继续创建工作空间' }))
     // 导航到该项目 Workbench（createWorkspace 意图由 URL 携带，见 routes.test.ts 合同断言）
-    expect(await screen.findByText('项目工作台')).toBeInTheDocument()
+    expect(await screen.findByText('项目概览', { selector: '.page-sub' })).toBeInTheDocument()
   })
 })
 

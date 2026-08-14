@@ -235,7 +235,7 @@ export function ProjectWorkbenchPage() {
     <ProjectScope slug={projectSlug!}>
       {(project) => (
         <>
-          <PageHeader title={project.name ?? project.slug} sub="项目工作台" />
+          <PageHeader title={project.name ?? project.slug} sub="项目概览" />
           <WorkbenchBody
             project={project}
             createRequested={createRequested}

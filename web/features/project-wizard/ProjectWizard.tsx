@@ -190,10 +190,10 @@ function probeSubstate(probe: DiscoveryResultData): 'ALREADY_REGISTERED' | 'FING
 }
 
 function nodeDisabledReason(node: RuntimeNode): string | null {
-  if (node.kind !== undefined && node.kind !== 'local') return '非 local 节点未接通（W1 fail-closed）'
+  if (node.kind !== undefined && node.kind !== 'local') return '仅支持本机节点，该节点暂不可用'
   if (node.availability !== undefined && node.availability !== 'available')
     return node.reason ?? '节点离线/不可用'
-  if (node.kind === undefined && node.node_id !== 'local') return '非 local 节点未接通（W1 fail-closed）'
+  if (node.kind === undefined && node.node_id !== 'local') return '仅支持本机节点，该节点暂不可用'
   return null
 }
 
@@ -641,7 +641,7 @@ function ProbeStep({
       : !nameOk
         ? '请填写项目名称'
         : !slugOk
-          ? 'Slug 格式无效'
+          ? '标识符格式无效'
           : state.submitting
             ? '登记在途，请稍候'
             : null
@@ -708,12 +708,12 @@ function ProbeStep({
             <summary>高级选项</summary>
             <div className="kv-grid">
               <label className="kv-key" htmlFor="wizard-slug">
-                Slug
+                标识符
               </label>
               <input
                 id="wizard-slug"
                 className="input"
-                aria-label="Slug"
+                aria-label="标识符"
                 value={state.slug}
                 onChange={(e) => onSetSlug(e.target.value)}
               />
@@ -721,7 +721,7 @@ function ProbeStep({
           </details>
           {state.slug !== '' && !slugOk ? (
             <p className="state-reason" role="alert">
-              Slug 格式无效：小写字母/数字/中划线，首尾非中划线，不含连续中划线，最长 64
+              标识符格式无效：小写字母/数字/中划线，首尾非中划线，不含连续中划线，最长 64
             </p>
           ) : null}
 
@@ -761,7 +761,7 @@ function SubmitErrorNote({
 }) {
   if (error.status === 409) {
     if (error.code === 'project_slug_conflict') {
-      return <StatusState kind="conflict" banner title="Slug 已被占用" description="请改名后继续提交。" />
+      return <StatusState kind="conflict" banner title="该标识符已被占用" description="请换一个名称后继续。" />
     }
     if (error.code === 'location_already_registered') {
       return (
@@ -784,7 +784,7 @@ function SubmitErrorNote({
           kind="error"
           banner
           title="提交冲突（程序错误）"
-          description="同一 Idempotency-Key 提交了不同内容；请取消后重开向导再试。"
+          description="提交内容发生冲突；请取消后重开向导再试。"
         />
       )
     }

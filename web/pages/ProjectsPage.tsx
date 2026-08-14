@@ -131,7 +131,7 @@ export function ProjectsPage() {
 
   return (
     <>
-      <PageHeader title="项目" sub="选择项目进入工作台" actions={openWizard} />
+      <PageHeader title="项目" sub="选择项目进入概览" actions={openWizard} />
       {body}
       <ProjectWizard
         open={wizardOpen}

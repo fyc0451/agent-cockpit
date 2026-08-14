@@ -9,22 +9,22 @@ describe('Remote workspace fail-closed（P1-5）+ switcher roving keyboard（P2-
     renderApp('/projects/p1/workspaces/w1')
     await screen.findByRole('button', { name: '删除工作空间' })
 
-    await user.click(screen.getByTitle('切换 Workspace'))
-    const dialog = await screen.findByRole('dialog', { name: 'Workspace 切换' })
+    await user.click(screen.getByTitle('切换工作空间'))
+    const dialog = await screen.findByRole('dialog', { name: '工作空间切换' })
     const remoteBtn = within(dialog).getByRole('button', { name: /远程 GPU/ })
     expect(remoteBtn).toHaveAttribute('aria-disabled', 'true')
     // 原因不只靠 title：aria-describedby 节点存在且含 reason
     const descId = remoteBtn.getAttribute('aria-describedby')
     expect(descId).toBeTruthy()
     const desc = dialog.querySelector(`#${CSS.escape(descId!)}`)
-    expect(desc?.textContent).toContain('远程 Herdr 控制未接通')
+    expect(desc?.textContent).toContain('远程控制暂未接通')
 
     const callsBefore = fetchSpy.mock.calls.length
     await user.click(remoteBtn)
     await user.keyboard('{Enter}')
     // 零请求、不跳转、dialog 仍开着
     expect(fetchSpy.mock.calls.length).toBe(callsBefore)
-    expect(screen.getByRole('dialog', { name: 'Workspace 切换' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '工作空间切换' })).toBeInTheDocument()
     expect(screen.getByText('本机工作区', { selector: '.page-title' })).toBeInTheDocument()
   })
 
@@ -46,9 +46,9 @@ describe('Remote workspace fail-closed（P1-5）+ switcher roving keyboard（P2-
     stubDefaultFetch()
     const user = userEvent.setup()
     renderApp('/projects/p1/workspaces/w1')
-    const trigger = await screen.findByTitle('切换 Workspace')
+    const trigger = await screen.findByTitle('切换工作空间')
     await user.click(trigger)
-    const dialog = await screen.findByRole('dialog', { name: 'Workspace 切换' })
+    const dialog = await screen.findByRole('dialog', { name: '工作空间切换' })
     const items = within(dialog).getAllByRole('button').filter((b) => b.className.includes('drawer-item'))
     expect(items.length).toBe(2)
 
@@ -58,7 +58,7 @@ describe('Remote workspace fail-closed（P1-5）+ switcher roving keyboard（P2-
     expect(items[1]).toHaveFocus()
     // Enter 在 disabled 项上被拦截，dialog 不关
     await user.keyboard('{Enter}')
-    expect(screen.getByRole('dialog', { name: 'Workspace 切换' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '工作空间切换' })).toBeInTheDocument()
     // End/Home 跳首尾
     await user.keyboard('{Home}')
     expect(items[0]).toHaveFocus()
@@ -70,7 +70,7 @@ describe('Remote workspace fail-closed（P1-5）+ switcher roving keyboard（P2-
     // Esc 关闭并恢复焦点到触发按钮
     await user.keyboard('{Escape}')
     await waitFor(() => {
-      expect(screen.queryByRole('dialog', { name: 'Workspace 切换' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('dialog', { name: '工作空间切换' })).not.toBeInTheDocument()
     })
     expect(trigger).toHaveFocus()
   })
