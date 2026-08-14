@@ -29,6 +29,7 @@ export const routePatterns = {
   workspaceActivity: `${WORKSPACE_BASE_PATTERN}/activity`,
   workspaceFiles: `${WORKSPACE_BASE_PATTERN}/files`,
   workspaceTerminal: `${WORKSPACE_BASE_PATTERN}/terminal`,
+  workspaceAgent: `${WORKSPACE_BASE_PATTERN}/agent`,
   workspaceTasks: `${WORKSPACE_BASE_PATTERN}/tasks`,
   workspaceGit: `${WORKSPACE_BASE_PATTERN}/git`,
   workspaceEditor: `${WORKSPACE_BASE_PATTERN}/editor`,
@@ -83,6 +84,8 @@ export const routes = {
     activity: (project: string, workspace: string): string => `${workspaceBasePath(project, workspace)}/activity`,
     files: (project: string, workspace: string): string => `${workspaceBasePath(project, workspace)}/files`,
     terminal: (project: string, workspace: string): string => `${workspaceBasePath(project, workspace)}/terminal`,
+    agent: (project: string, workspace: string, opts: { agentId?: string } = {}): string =>
+      withQuery(`${workspaceBasePath(project, workspace)}/agent`, { agent: opts.agentId }),
     tasks: (project: string, workspace: string): string => `${workspaceBasePath(project, workspace)}/tasks`,
     git: (project: string, workspace: string): string => `${workspaceBasePath(project, workspace)}/git`,
     editor: (project: string, workspace: string): string => `${workspaceBasePath(project, workspace)}/editor`,

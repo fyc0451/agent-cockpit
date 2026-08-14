@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
+import { AgentPage } from '../pages/AgentPage'
 import { FilesPage } from '../pages/FilesPage'
 import { InboxPage } from '../pages/InboxPage'
 import { OverviewPage } from '../pages/OverviewPage'
@@ -49,6 +50,7 @@ export default function App() {
         />
         <Route path={routePatterns.workspaceFiles} element={<FilesPage />} />
         <Route path={routePatterns.workspaceTerminal} element={<TerminalPage />} />
+        <Route path={routePatterns.workspaceAgent} element={<AgentPage />} />
         <Route path={routePatterns.workspaceTasks} element={<TasksPage />} />
         <Route
           path={routePatterns.workspaceGit}

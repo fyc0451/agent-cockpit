@@ -144,6 +144,8 @@ export function Rail() {
   const memoryCap = useCapability('memory.local', scope)
   const inboxBadge = needsActionCount(attention.data?.data)
   const noProjects = registry.data?.data.items.length === 0
+  // 移动端底栏（workspace 上下文）：只保留能完整显示的核心入口，global 三项让位（桌面不变）
+  const inWorkspace = workspaceId != null
 
   return (
     <nav className="rail" aria-label="主导航">
@@ -163,12 +165,13 @@ export function Rail() {
             icon="◉"
             label={noProjects ? '开始使用' : '需要你处理'}
             badge={noProjects ? undefined : inboxBadge}
+            mobileHidden={inWorkspace}
           />
           <RailLink to={routes.projects()} icon="▦" label="项目" mobileCore />
           {noProjects ? null : (
-            <RailLink to={routes.inbox()} icon="✉" label="提问与回复" badge={inboxBadge} />
+            <RailLink to={routes.inbox()} icon="✉" label="提问与回复" badge={inboxBadge} mobileHidden={inWorkspace} />
           )}
-          <RailLink to={routes.settings()} icon="⚙" label="设置" />
+          <RailLink to={routes.settings()} icon="⚙" label="设置" mobileHidden={inWorkspace} />
         </div>
 
         {projectSlug ? (
@@ -224,6 +227,7 @@ export function Rail() {
             <RailLink to={routes.workspace.home(projectSlug, workspaceId)} end icon="▣" label="工作空间概览" mobileHidden />
             <RailLink to={routes.workspace.files(projectSlug, workspaceId)} icon="🗀" label="文件" mobileCore />
             <RailLink to={routes.workspace.terminal(projectSlug, workspaceId)} icon="▸" label="终端" mobileCore />
+            <RailLink to={routes.workspace.agent(projectSlug, workspaceId)} icon="A" label="Agent" mobileCore />
           </div>
         ) : null}
       </div>

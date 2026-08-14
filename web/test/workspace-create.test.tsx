@@ -1,6 +1,6 @@
 // P0-WORKSPACE-001-F：Workbench 创建 Workspace（shared-only）纵切测试。
 // 合同：/tmp/p0-workspace001-claude/REPORT.md r2 §3（严格 body 四键、Idempotency-Key
-// 绑定序列化 body、active+local+available 数据驱动 fail-closed、成功 invalidate+深链 home）。
+// 绑定序列化 body、active+local+available 数据驱动 fail-closed、成功 invalidate+深链 Agent composer）。
 // 纪律：无 workspace.create capability（按钮可用性纯数据驱动）；取消/禁用零请求；
 // 409/404/503 原地 typed 表达，不 toast 假成功；envelope/DTO 守卫 fail-closed。
 
@@ -162,7 +162,7 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
-  it('C3 happy path：严格四键 body + Idempotency-Key + 201 → invalidate 并深链 workspace home', async () => {
+  it('C3 happy path：严格四键 body + Idempotency-Key + 201 → invalidate 并深链 Agent composer', async () => {
     const stub = stubCreateFetch({
       create: () => ({ status: 201, body: { data: createdWorkspace, meta: metaOk } }),
     })
@@ -190,9 +190,11 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     await waitFor(() =>
       expect(stub.gets.filter((c) => c.url === WS_LIST_URL).length).toBeGreaterThanOrEqual(2),
     )
-    // 深链 Workspace Files（WorkspaceScope detail → 名称；files.read 默认关 → forbidden 态）
+    // 深链 Agent composer（默认落点不再是 Files）：任务输入 + 主按钮 + 已安装类型选择
     expect((await screen.findAllByText('新工作区')).length).toBeGreaterThanOrEqual(1)
-    expect(await screen.findByText('文件浏览暂不可用')).toBeInTheDocument()
+    expect(await screen.findByLabelText('任务')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '开始任务' })).toBeInTheDocument()
+    expect((await screen.findByLabelText('Agent 类型')) as HTMLSelectElement).toHaveValue('codex')
   })
 
   it('C4 goal 填写→原样提交；isolation 固定 shared 无选择器', async () => {
@@ -205,7 +207,7 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const nameInput = within(dialog).getByLabelText('工作空间名称')
     await user.clear(nameInput)
     await user.type(nameInput, '新工作区')
-    await user.type(within(dialog).getByLabelText('本次任务（可选）'), '验证 goal')
+    await user.type(within(dialog).getByLabelText('工作空间说明（可选）'), '验证 goal')
     await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await waitFor(() => expect(stub.posts).toHaveLength(1))
     expect(JSON.parse(stub.posts[0].body).goal).toBe('验证 goal')
@@ -338,7 +340,7 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const nameInput = within(dialog).getByLabelText('工作空间名称')
     await user.clear(nameInput)
     await user.type(nameInput, '  间隔 名字  ')
-    await user.type(within(dialog).getByLabelText('本次任务（可选）'), '  带空格  ')
+    await user.type(within(dialog).getByLabelText('工作空间说明（可选）'), '  带空格  ')
     await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await waitFor(() => expect(stub.posts).toHaveLength(1))
     expect(JSON.parse(stub.posts[0].body)).toEqual({
@@ -438,7 +440,7 @@ describe('P0-WORKBENCH-001-unblock', () => {
     expect(screen.getByRole('button', { name: '创建工作空间' })).toBeInTheDocument()
   })
 
-  it('U7 工作空间首页只突出可用文件与终端，其他能力进入低优先级说明', async () => {
+  it('U7 工作空间首页突出「开始任务」与可用文件/终端，其他能力进入低优先级说明', async () => {
     stubCreateFetch({
       gets: {
         [`${WS_LIST_URL}/ws_new1`]: {
@@ -459,9 +461,11 @@ describe('P0-WORKBENCH-001-unblock', () => {
     const cards = Array.from(main.querySelectorAll('.workspace-primary-actions .card'))
     expect(cards.map((card) => card.querySelector('.card-label')?.textContent)).toEqual(['文件', '终端'])
     expect(main).not.toHaveTextContent('ws_new1')
-    expect(within(main).queryByRole('link', { name: /任务/ })).toBeNull()
+    // Agent 工作页主行动：突出且直达 /agent 路由
+    const cta = within(main).getByRole('link', { name: /开始任务/ })
+    expect(cta).toHaveAttribute('href', '/projects/alpha/workspaces/ws_new1/agent')
     expect(within(main).queryByRole('link', { name: /编辑器|浏览器/ })).toBeNull()
-    expect(within(main).getByText(/任务、编辑器、浏览器/)).toBeInTheDocument()
+    expect(within(main).getByText(/编辑器、浏览器/)).toBeInTheDocument()
   })
 
   it('U8 工作空间列表隐藏内部 ID，并用用户语言显示本机位置', async () => {

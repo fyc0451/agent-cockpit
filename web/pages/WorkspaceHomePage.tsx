@@ -39,6 +39,10 @@ function WorkspaceBody({ project, workspace }: { project: Project; workspace: Wo
   return (
     <>
       <PageHeader title={workspace.name ?? workspace.id} sub={`${project.name ?? project.slug} 的工作空间`} />
+      <Link className="card card--primary" to={routes.workspace.agent(projectSlug, workspaceId)}>
+        <span className="card-label">开始任务</span>
+        <span className="card-reason">选择已安装的 Agent，交代任务并在这里查看回复</span>
+      </Link>
       <div className="card-grid workspace-primary-actions">
         {filesCap.available ? (
           <ToolCard to={routes.workspace.files(projectSlug, workspaceId)} icon="🗀" label="文件" />
@@ -66,7 +70,7 @@ function WorkspaceBody({ project, workspace }: { project: Project; workspace: Wo
 
       <details className="workspace-secondary">
         <summary>其他能力</summary>
-        <p className="list-sub">任务、编辑器、浏览器、通信与连接尚未开放。</p>
+        <p className="list-sub">编辑器、浏览器、通信与连接尚未开放。</p>
         {!filesCap.available ? (
           <UnavailableTool label="文件" reason={filesCap.reason ?? '文件能力尚未开放'} />
         ) : null}

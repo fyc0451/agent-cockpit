@@ -117,7 +117,7 @@ export function WorkspaceWizard({
         onSuccess: (res) => {
           void queryClient.invalidateQueries({ queryKey: ['local-ws-list', projectId] })
           onClose()
-          navigate(routes.workspace.files(projectSlug, res.data.workspace_id))
+          navigate(routes.workspace.agent(projectSlug, res.data.workspace_id))
         },
         onError: (err) => setSubmitError(err as ApiError),
       },
@@ -173,12 +173,12 @@ export function WorkspaceWizard({
             onChange={(e) => setName(e.target.value)}
           />
           <label className="kv-key" htmlFor="ws-create-goal">
-            本次任务（可选）
+            工作空间说明（可选）
           </label>
           <input
             id="ws-create-goal"
             className="input"
-            aria-label="本次任务（可选）"
+            aria-label="工作空间说明（可选）"
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
           />

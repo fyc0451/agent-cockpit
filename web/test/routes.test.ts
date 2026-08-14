@@ -65,6 +65,11 @@ describe('routes 单一权威模块', () => {
         { [PROJECT_PARAM]: 'p1', [WORKSPACE_PARAM]: 'w1' },
       ],
       [
+        routePatterns.workspaceAgent,
+        routes.workspace.agent('p1', 'w1'),
+        { [PROJECT_PARAM]: 'p1', [WORKSPACE_PARAM]: 'w1' },
+      ],
+      [
         routePatterns.workspaceTasks,
         routes.workspace.tasks('p1', 'w1'),
         { [PROJECT_PARAM]: 'p1', [WORKSPACE_PARAM]: 'w1' },

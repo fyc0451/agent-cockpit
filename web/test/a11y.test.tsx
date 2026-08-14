@@ -87,13 +87,13 @@ describe('A11y（item 7）', () => {
     expect(onClick).not.toHaveBeenCalled()
   })
 
-  it('390 核心 Rail 与 Workspace 主导航只保留工作空间概览、文件、终端', async () => {
+  it('390 核心 Rail 与 Workspace 主导航只保留工作空间概览、文件、终端、Agent', async () => {
     stubDefaultFetch()
     renderApp('/projects/p1/workspaces/w1/files')
     const rail = screen.getByRole('navigation', { name: '主导航' })
     await waitFor(() => expect(within(rail).getByTitle('文件')).toBeInTheDocument())
 
-    for (const title of ['项目', '文件', '终端']) {
+    for (const title of ['项目', '文件', '终端', 'Agent']) {
       const item = within(rail).getByTitle(title)
       expect(item).toHaveClass('rail-item--mobile-core')
       expect(item.querySelector('.rail-mobile-label')).toHaveTextContent(title)
@@ -105,6 +105,6 @@ describe('A11y（item 7）', () => {
       Array.from(workspaceSection!.querySelectorAll<HTMLElement>('.rail-item')).map(
         (item) => item.title,
       ),
-    ).toEqual(['工作空间概览', '文件', '终端'])
+    ).toEqual(['工作空间概览', '文件', '终端', 'Agent'])
   })
 })
