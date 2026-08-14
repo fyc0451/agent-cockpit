@@ -17,8 +17,10 @@ finite non-negative `reconnect_cursor`, typed `{type,id}` receipt references, `r
 and Store-assigned timestamps. Receipt references are opaque identifiers only.
 
 `create(value, idempotency_key)` uses `(project_id, workspace_id, idempotency_key)`.
-Exact canonical replay returns the original immutable record; a changed request returns
-`idempotency_conflict`. `update(... expected_revision, value)` is compare-and-swap and
+Exact canonical replay returns the original immutable revision-1 result even after a later
+ticket update; each receipt binds the create method, request digest, ticket ID, project,
+workspace, and canonical original result. A changed request returns `idempotency_conflict`.
+`update(... expected_revision, value)` is compare-and-swap and
 increments revision exactly once; `engine_generation` cannot regress; a missing, stale,
 or generation-regressing row returns `revision_conflict`.
 The Store never treats an ID outside its supplied project/workspace as visible.
@@ -32,8 +34,11 @@ initialize, migrate, enable WAL, or write. `list` is scoped to one project/works
 orders by opaque ticket ID, has a `1..100` limit, and returns a next cursor only when more
 matching records exist.
 
-All Store errors expose a stable `TerminalTicketError` code only and suppress raw SQLite,
-path, record, and materialization details. Connections always close.
+Every persisted ticket and idempotency receipt is fully revalidated before restart, get,
+list, or replay: exact keys/types, state, Registry/ticket/reference IDs, signed-64 bounds,
+canonical timestamps and their ordering, canonical JSON/digest, and scope bindings. Any
+corruption fails closed as `store_corrupt`. All Store errors suppress raw SQLite, path,
+record, and materialization details. Connections always close.
 
 ## Injectable Read API
 
