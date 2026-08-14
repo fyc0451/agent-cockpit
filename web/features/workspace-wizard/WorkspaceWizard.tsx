@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { ApiError } from '../../api/client'
+import { newIdempotencyKey } from '../../api/idempotency'
 import { useCreateWorkspace, type CreateWorkspaceRequest } from '../../api/workspaceCreate'
 import type { RepoLocationSummary } from '../../api/registry'
 import { routes } from '../../app/routes'
@@ -107,7 +108,7 @@ export function WorkspaceWizard({
     const binding =
       submitBinding && submitBinding.serializedBody === serializedBody
         ? submitBinding
-        : { serializedBody, idempotencyKey: crypto.randomUUID() }
+        : { serializedBody, idempotencyKey: newIdempotencyKey() }
     setSubmitBinding(binding)
     setSubmitError(null)
     create.mutate(

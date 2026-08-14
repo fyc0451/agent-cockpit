@@ -8,6 +8,7 @@
 import { useEffect, useId, useReducer, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ApiError } from '../../api/client'
+import { newIdempotencyKey } from '../../api/idempotency'
 import {
   useNodeDirectories,
   useNodeRoots,
@@ -339,7 +340,7 @@ export function ProjectWizard({
     const binding =
       state.submitBinding && state.submitBinding.serializedBody === serializedBody
         ? state.submitBinding
-        : { serializedBody, idempotencyKey: crypto.randomUUID() }
+        : { serializedBody, idempotencyKey: newIdempotencyKey() }
     dispatch({ type: 'submit-start', binding })
     register.mutate(
       { req, idempotencyKey: binding.idempotencyKey },
