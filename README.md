@@ -10,7 +10,57 @@
 
 [English](README.en.md) | [日本語](README.ja.md)
 
-📖 **[用户手册（安装到团队协作全流程）](docs/USER-GUIDE.md)**
+## Cockpit Next 2.0（当前本地预览入口）
+
+Next 2.0 是当前体验入口，但目前只作为本地 `next` 预览提供。启动需要
+Git、Python 3.12+、Node.js 20+（含 npm），并要求运行服务的管理员已将本地
+`next` checkout/worktree 同步到 `$HOME/github/agent-cockpit-next`。固定 profile
+不接受其他 checkout 路径或分支。
+
+```bash
+cd "$HOME/github/agent-cockpit-next"
+
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+npm ci --prefix web
+npm run --prefix web build
+
+cp .env.next.example .env.next
+# 按需编辑 COCKPIT_PROJECT_ROOT：它必须是现存的代码仓库容器目录，不能是整个 Home。
+.venv/bin/python scripts/next_dev.py check --env-file .env.next
+.venv/bin/python scripts/next_dev.py start --env-file .env.next
+```
+
+`start` 在前台运行；保持该终端打开，在浏览器访问
+`http://127.0.0.1:18790`。本机默认无需登录。首次使用按以下五步完成：
+
+1. 在空首页选择 **选择代码目录**。
+2. 选择直接包含项目 `.git` 的目录，点击 **检查并继续**，再点击 **确认添加**。
+3. 点击 **继续创建工作空间**。
+4. 保留默认名称 `main` 或填写更清楚的名称，点击 **创建并打开**。
+5. 在 **文件** 中选择文件；需要运行命令时点击 **打开终端**，再点击 **新终端**。
+
+完整的 Next profile、局域网登录和开发说明见
+[Cockpit Next development runtime](docs/NEXT-DEVELOPMENT.md)。
+
+### 公共发布阻塞
+
+当前 reviewed 2.0 exact 尚未发布到公共 `origin/next`。下面的 clone
+命令**现在不能作为安装入口**；只有在 reviewed `next` 分支正式发布，并验证
+远端确实包含 reviewed exact 后才可使用：
+
+```bash
+mkdir -p "$HOME/github"
+git clone --branch next https://github.com/fyc0451/agent-cockpit.git \
+  "$HOME/github/agent-cockpit-next"
+```
+
+## Legacy 0.3.x（旧版）
+
+以下功能、安装和使用说明属于旧版 `0.3.x`，入口为 `8790`。它不是 Next
+2.0 的默认安装路径；不要用旧版 `install.sh` 启动上面的 Next checkout。
+
+📖 **[旧版 0.3.x 用户手册](docs/USER-GUIDE.md)**
 
 <p align="center">
   <img src="docs/screenshots/board-desktop.png" alt="看板(桌面端)" width="74%">
@@ -53,7 +103,7 @@ Agent Cockpit(FastAPI,与 herdr 同机)
 Agent Mail 是新建工作区和添加 Agent 的前置条件；hub 暂时挂掉时禁止新增，已有消息只读，
 现有看板、终端、文件、任务、待办和推送仍可查看与操作。
 
-## 安装
+## Legacy 0.3.x 安装（旧版）
 
 ### 依赖
 
@@ -114,7 +164,7 @@ set -a; source .env; set +a
 .venv/bin/python server.py
 ```
 
-## 首次使用(5 分钟上手)
+## Legacy 0.3.x 首次使用（旧版）
 
 1. 浏览器打开 `http://localhost:8790`。
 2. 看板是空的很正常——点空态里的 **🚀 创建第一个工作区**(或「会话」页的

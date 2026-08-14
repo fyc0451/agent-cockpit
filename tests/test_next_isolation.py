@@ -21,6 +21,44 @@ SCRIPT = ROOT / "scripts" / "next_dev.py"
 EPHEMERAL_SCRIPT = ROOT / "scripts" / "next_ephemeral_server.py"
 
 
+def test_fresh_install_docs_order_next_before_legacy() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    next_doc = (ROOT / "docs" / "NEXT-DEVELOPMENT.md").read_text(
+        encoding="utf-8"
+    )
+    commands = (
+        'cd "$HOME/github/agent-cockpit-next"',
+        "python3 -m venv .venv",
+        "npm ci --prefix web",
+        "npm run --prefix web build",
+        "scripts/next_dev.py check",
+        "scripts/next_dev.py start",
+        "http://127.0.0.1:18790",
+    )
+
+    for document in (readme, next_doc):
+        positions = [document.index(marker) for marker in commands]
+        assert positions == sorted(positions)
+        for label in (
+            "选择代码目录",
+            "检查并继续",
+            "确认添加",
+            "继续创建工作空间",
+            "创建并打开",
+            "打开终端",
+            "新终端",
+        ):
+            assert label in document
+
+    assert readme.index("Cockpit Next 2.0") < readme.index("Legacy 0.3.x")
+    for document in (readme, next_doc):
+        assert "origin/next" in document
+        assert "reviewed" in document
+        assert document.index("scripts/next_dev.py start") < document.index(
+            "git clone --branch next"
+        )
+
+
 def module():
     spec = importlib.util.spec_from_file_location("next_dev", SCRIPT)
     assert spec and spec.loader
@@ -429,6 +467,57 @@ def test_systemd_check_fails_closed_on_command_error(monkeypatch: pytest.MonkeyP
     assert gate._unit_not_installed() is False
 
 
+def test_web_build_readiness_requires_index_and_assets(tmp_path: Path) -> None:
+    gate = module()
+    dist = tmp_path / "web" / "dist"
+
+    with pytest.raises(gate.IsolationError, match="next_web_build_unavailable"):
+        gate._validate_web_build(tmp_path)
+
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+    with pytest.raises(gate.IsolationError, match="next_web_build_unavailable"):
+        gate._validate_web_build(tmp_path)
+
+    assets = dist / "assets"
+    assets.mkdir()
+    with pytest.raises(gate.IsolationError, match="next_web_build_unavailable"):
+        gate._validate_web_build(tmp_path)
+
+    (assets / "index.js").write_text("export {}\n", encoding="utf-8")
+    gate._validate_web_build(tmp_path)
+
+    (dist / "index.html").unlink()
+    with pytest.raises(gate.IsolationError, match="next_web_build_unavailable"):
+        gate._validate_web_build(tmp_path)
+
+
+@pytest.mark.parametrize("command", ("check", "start"))
+def test_check_and_start_fail_closed_without_web_build(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    monkeypatch.setattr(gate, "load_env", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "validate", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "load_cockpit_token", lambda _values: None)
+    monkeypatch.setattr(
+        gate,
+        "_validate_web_build",
+        lambda _repo: (_ for _ in ()).throw(
+            gate.IsolationError("next_web_build_unavailable")
+        ),
+    )
+
+    assert gate.main([command]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "next_web_build_unavailable\n"
+
+
 def test_git_check_fails_closed_on_command_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -472,6 +561,7 @@ def test_start_execs_next_venv_with_sanitized_environment(
     monkeypatch.setattr(gate, "_port_available", lambda host, port: True)
     monkeypatch.setattr(gate, "ensure_runtime_roots", lambda values: None)
     monkeypatch.setattr(gate, "load_cockpit_token", lambda values: "t" * 64)
+    monkeypatch.setattr(gate, "_validate_web_build", lambda _repo: None)
     monkeypatch.setattr(gate, "_prepare_exec_fds", lambda fd: None)
     monkeypatch.setattr(gate.Path, "is_file", lambda _self: True)
     monkeypatch.setattr(gate.os, "chdir", lambda path: captured.update(cwd=path))

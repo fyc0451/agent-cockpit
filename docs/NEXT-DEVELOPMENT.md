@@ -1,7 +1,10 @@
 # Cockpit Next development runtime
 
-Cockpit Next is developed from `/home/fyc/github/agent-cockpit-next` while the
+Cockpit Next is developed from `${HOME}/github/agent-cockpit-next` while the
 deployed `0.3.4` service remains frozen on `127.0.0.1:8790`.
+The reviewed 2.0 tree is currently a local `next` preview: at this checkpoint,
+the reviewed 2.0 exact has not been published to `origin/next`, so a public
+clone does not contain it yet.
 
 ## N0 boundary
 
@@ -48,11 +51,17 @@ pinned to `127.0.0.1`.
 
 ## Commands
 
-Create an independent virtual environment and validate the profile:
+The fixed profile requires Git, Python 3.12+, and Node.js 20+ with npm. An
+operator must first synchronize a local `next` checkout/worktree at the fixed
+path. From that existing checkout, create independent Python and Web
+dependencies, build the production Web app, and validate the profile:
 
 ```bash
+cd "$HOME/github/agent-cockpit-next"
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
+npm ci --prefix web
+npm run --prefix web build
 cp .env.next.example .env.next
 # Edit COCKPIT_PROJECT_ROOT to the concrete directory containing your Git repositories.
 .venv/bin/python scripts/next_dev.py check --env-file .env.next
@@ -67,6 +76,9 @@ is configurable, for example `/mnt/data/projects`. The browser receives only an
 opaque `root_id` and a relative locator; it never submits this absolute path.
 Missing or unsafe configuration fails the launcher check with a stable
 `project_root_*` error instead of falling back to Home or `/`.
+Both `check` and `start` also require `web/dist/index.html` and built assets;
+missing output fails closed with `next_web_build_unavailable`. Run
+`npm run --prefix web build` again after changing the Web app.
 
 Start the source development service only after the checks pass:
 
@@ -82,7 +94,7 @@ Start the source development service only after the checks pass:
 2. On the empty overview, choose **选择代码目录**. Cockpit skips location choices
    when there is only one usable local node and one configured code root.
 3. Choose the directory that directly contains the repository's `.git`
-   directory, then choose **识别所选目录** and **确认添加**. The configured code
+   directory, then choose **检查并继续** and **确认添加**. The configured code
    root is only a container and is not itself a project.
 4. Choose **继续创建工作空间**. Keep the default `main` name or enter a clearer
    name, then choose **创建并打开**.
@@ -91,6 +103,19 @@ Start the source development service only after the checks pass:
 
 After this path works, returning users can choose a project from the project
 switcher, open an existing workspace, and continue from Files or Terminal.
+
+## Public release blocker
+
+The reviewed 2.0 exact has not been published to the public `origin/next`
+branch. Do not present a public clone as a current installation path. Only
+after the reviewed `next` branch is published and the remote is verified to
+contain that exact may a new user run:
+
+```bash
+mkdir -p "$HOME/github"
+git clone --branch next https://github.com/fyc0451/agent-cockpit.git \
+  "$HOME/github/agent-cockpit-next"
+```
 
 To enable token authentication, create the private file before `check` and
 `start` (the no-clobber setting refuses to overwrite an existing token):

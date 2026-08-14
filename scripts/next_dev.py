@@ -276,6 +276,22 @@ def validate_host_token(values: Mapping[str, str], token: str | None) -> None:
         raise IsolationError("lan_host_token_required")
 
 
+def _validate_web_build(repo: Path) -> None:
+    dist = repo / "web" / "dist"
+    index = dist / "index.html"
+    assets = dist / "assets"
+    try:
+        ready = (
+            index.is_file()
+            and assets.is_dir()
+            and any(path.is_file() for path in assets.iterdir())
+        )
+    except OSError:
+        ready = False
+    if not ready:
+        raise IsolationError("next_web_build_unavailable")
+
+
 def sanitized_environment(values: Mapping[str, str]) -> dict[str, str]:
     clean = {
         key: value
@@ -345,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         values = validate(load_env(args.env_file), repo=repo)
         token = load_cockpit_token(values)
         validate_host_token(values, token)
+        _validate_web_build(repo)
         if args.command == "start":
             if not _unit_not_installed():
                 raise IsolationError("next_unit_installed")
