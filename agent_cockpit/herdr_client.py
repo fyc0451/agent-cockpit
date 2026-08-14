@@ -54,6 +54,8 @@ _SNAPSHOT_EXECUTOR_LOCK = threading.RLock()
 _SNAPSHOT_EXECUTOR: ThreadPoolExecutor | None = None
 _SNAPSHOT_FUTURES: set[Future[dict[str, Any]]] = set()
 SNAPSHOT_MAX_QUEUED = 64
+SESSION_BOOTSTRAP_TIMEOUT_S = 10.0
+SESSION_BOOTSTRAP_POLL_S = 0.1
 HERDR_MIN_VERSION = (0, 8, 0)
 HERDR_MIN_PROTOCOL = 19
 HERDR_MIN_SCHEMA_VERSION = 1
@@ -87,6 +89,8 @@ MAX_DISPLAY_NAME_LENGTH = 64
 _ATTACH_ONLY_PRODUCTS = frozenset({"zcode"})
 _RESTART_GUARD = threading.Lock()
 _RESTARTING_PANES: set[tuple[str, str]] = set()
+_SESSION_BOOTSTRAP_LOCK = threading.RLock()
+_SESSION_BOOTSTRAP_PROCESSES: dict[str, subprocess.Popen[bytes]] = {}
 
 
 class HerdrCapabilityError(RuntimeError):
@@ -310,6 +314,33 @@ def herdr_config_path() -> Path:
     return Path(
         os.environ.get("HERDR_CONFIG_PATH", "~/.config/herdr/config.toml")
     ).expanduser()
+
+
+def _herdr_sessions_root() -> Path:
+    configured = os.environ.get("XDG_CONFIG_HOME")
+    if not isinstance(configured, str) or not configured:
+        raise ValueError("XDG_CONFIG_HOME required for scoped Herdr session")
+    root = Path(configured).expanduser()
+    if not root.is_absolute():
+        raise ValueError("XDG_CONFIG_HOME must be absolute")
+    return root.resolve(strict=False) / "herdr" / "sessions"
+
+
+def _scoped_session_rows(
+    sessions: list[dict[str, Any]], scoped: str,
+) -> list[dict[str, Any]]:
+    try:
+        session_root = _herdr_sessions_root() / scoped
+        return [
+            row for row in sessions
+            if row["name"] == scoped
+            and Path(row["directory"]).resolve(strict=False) == session_root
+            and Path(row["socket"]).resolve(strict=False)
+            == session_root / "herdr.sock"
+        ]
+    except (OSError, ValueError):
+        _LIST_SESSIONS_FAILED.value = True
+        return []
 
 
 def reload_config(timeout: int = 10) -> dict[str, Any]:
@@ -579,14 +610,7 @@ def list_sessions() -> list[dict[str, Any]]:
         scoped = next_profile.session()
         if scoped is None:
             return sessions
-        config_root = herdr_config_path().parent.resolve()
-        session_root = config_root / "sessions" / scoped
-        return [
-            row for row in sessions
-            if row["name"] == scoped
-            and Path(row["directory"]).resolve(strict=False) == session_root
-            and Path(row["socket"]).resolve(strict=False) == session_root / "herdr.sock"
-        ]
+        return _scoped_session_rows(sessions, scoped)
     except (RuntimeError, ValueError, json.JSONDecodeError):
         # 兼容尚未支持 --json 的旧版 herdr；新版使用稳定 JSON，避免表格
         # 列宽、路径空格或展示格式变化导致 running session 被误判为缺失。
@@ -609,14 +633,7 @@ def list_sessions() -> list[dict[str, Any]]:
     scoped = next_profile.session()
     if scoped is None:
         return sessions
-    config_root = herdr_config_path().parent.resolve()
-    session_root = config_root / "sessions" / scoped
-    return [
-        row for row in sessions
-        if row["name"] == scoped
-        and Path(row["directory"]).resolve(strict=False) == session_root
-        and Path(row["socket"]).resolve(strict=False) == session_root / "herdr.sock"
-    ]
+    return _scoped_session_rows(sessions, scoped)
 
 
 def _slim_layout(layout: dict[str, Any]) -> dict[str, Any]:
@@ -706,6 +723,16 @@ def _snapshot_session(session: str) -> dict[str, Any]:
         "status": "running",
         "panes": slim,
         "agents": snap.get("agents", []) if isinstance(snap.get("agents", []), list) else [],
+        "tabs": [
+            {
+                "tab_id": item.get("tab_id"),
+                "workspace_id": item.get("workspace_id"),
+                "label": item.get("label"),
+                "pane_count": item.get("pane_count"),
+            }
+            for item in snap.get("tabs", [])
+            if isinstance(item, dict)
+        ] if isinstance(snap.get("tabs", []), list) else [],
         "focused_pane_id": snap.get("focused_pane_id"),
         # 各 tab 的 zoom 状态与几何(窄屏 attach 判断单 pane 聚焦用)
         "layouts": [
@@ -1623,12 +1650,15 @@ def save_launch_descriptor(
     *, session: str, pane_id: str, name: str, kind: str, args: list[str],
     agent: str | None = None, workdir: str | None = None,
     instance_id: str | None = None, display_name: str | None = None,
+    project_id: str | None = None, workspace_id: str | None = None,
 ) -> dict[str, Any]:
     """原生启动成功后持久化权威 launch 契约；返回写入的规范化记录。
 
     name 是 resolve_unique_agent_name 给出的 session 内唯一运行时名；kind 是
     canonical Herdr kind；args 是传给 `--` 的原生 argv 列表（保留空格/分号等原样）。
     """
+    if instance_id is None and (project_id is not None or workspace_id is not None):
+        raise ValueError("workspace authority 仅适用于 managed descriptor")
     record: dict[str, Any] = {
         "session": str(session),
         "name": str(name),
@@ -1643,11 +1673,23 @@ def save_launch_descriptor(
         opaque_id = validate_agent_instance_id(instance_id)
         if name != opaque_id:
             raise ValueError("managed runtime name 必须等于 agent instance id")
+        if (project_id is None) != (workspace_id is None):
+            raise ValueError("project/workspace authority 必须成对提供")
+        if project_id is not None and (
+            not re.fullmatch(r"prj_[0-9a-f]{32}", project_id)
+            or not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id or "")
+        ):
+            raise ValueError("project/workspace authority 格式无效")
         record.update({
             "instance_id": opaque_id,
             "display_name": validate_display_name(display_name or agent or name),
             "state": "active",
         })
+        if project_id is not None:
+            record.update({
+                "project_id": project_id,
+                "workspace_id": workspace_id,
+            })
         key = f"instance|{opaque_id}"
     with _LAUNCH_DESCRIPTOR_LOCK:
         data = _load_launch_descriptors()
@@ -1660,6 +1702,120 @@ def save_launch_descriptor(
 
 def _launch_descriptor_is_active(record: dict[str, Any]) -> bool:
     return record.get("state", "active") == "active"
+
+
+def _workspace_launch_label(instance_id: str) -> str:
+    return "cockpit-launch-" + validate_agent_instance_id(instance_id)
+
+
+def _load_launch_descriptors_strict() -> dict[str, Any]:
+    path = launch_descriptors_path()
+    if not path.is_file():
+        return {"schema": 2, "descriptors": {}}
+    try:
+        data = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_launch_object,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("launch descriptor store 损坏") from exc
+    if (
+        not isinstance(data, dict)
+        or data.get("schema") not in {1, 2}
+        or not isinstance(data.get("descriptors"), dict)
+    ):
+        raise ValueError("launch descriptor store 损坏")
+    return data
+
+
+def reserve_workspace_launch_descriptor(
+    *, session: str, name: str, kind: str, agent: str, workdir: str,
+    instance_id: str, display_name: str, project_id: str, workspace_id: str,
+) -> dict[str, Any]:
+    """Persist exact Workspace authority before any managed launch mutation."""
+    opaque_id = validate_agent_instance_id(instance_id)
+    if name != opaque_id:
+        raise ValueError("managed runtime name 必须等于 agent instance id")
+    if (
+        not re.fullmatch(r"prj_[0-9a-f]{32}", project_id)
+        or not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id)
+        or not isinstance(workdir, str)
+        or not workdir
+    ):
+        raise ValueError("project/workspace authority 格式无效")
+    record = {
+        "session": session,
+        "name": opaque_id,
+        "kind": kind,
+        "args": [],
+        "agent": agent,
+        "pane_id": "",
+        "workdir": workdir,
+        "instance_id": opaque_id,
+        "display_name": validate_display_name(display_name),
+        "launch_label": _workspace_launch_label(opaque_id),
+        "state": "pending",
+        "project_id": project_id,
+        "workspace_id": workspace_id,
+    }
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors_strict()
+        key = f"instance|{opaque_id}"
+        if key in data["descriptors"]:
+            raise ValueError("agent instance id 已存在，不能复用")
+        data["schema"] = 2
+        data["descriptors"][key] = record
+        _save_launch_descriptors(data)
+    return dict(record)
+
+
+def bind_pending_workspace_launch_descriptor(
+    instance_id: str, pane_id: str,
+) -> dict[str, Any]:
+    opaque_id = validate_agent_instance_id(instance_id)
+    if not isinstance(pane_id, str) or not pane_id:
+        raise ValueError("pane id 格式无效")
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors_strict()
+        record = data["descriptors"].get(f"instance|{opaque_id}")
+        if not isinstance(record, dict) or record.get("state") != "pending":
+            raise ValueError("pending launch descriptor 不存在")
+        if record.get("pane_id") not in {"", pane_id}:
+            raise ValueError("pending launch descriptor pane 冲突")
+        record["pane_id"] = pane_id
+        _save_launch_descriptors(data)
+        return dict(record)
+
+
+def activate_pending_workspace_launch_descriptor(
+    instance_id: str, pane_id: str,
+) -> dict[str, Any]:
+    opaque_id = validate_agent_instance_id(instance_id)
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors_strict()
+        record = data["descriptors"].get(f"instance|{opaque_id}")
+        if (
+            not isinstance(record, dict)
+            or record.get("state") != "pending"
+            or record.get("pane_id") != pane_id
+        ):
+            raise ValueError("pending launch descriptor authority 不匹配")
+        record["state"] = "active"
+        _save_launch_descriptors(data)
+        return dict(record)
+
+
+def discard_pending_workspace_launch_descriptor(instance_id: str) -> bool:
+    opaque_id = validate_agent_instance_id(instance_id)
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors_strict()
+        key = f"instance|{opaque_id}"
+        record = data["descriptors"].get(key)
+        if not isinstance(record, dict) or record.get("state") != "pending":
+            return False
+        del data["descriptors"][key]
+        _save_launch_descriptors(data)
+        return True
 
 
 def get_launch_descriptor(session: str, pane_id: str) -> dict[str, Any] | None:
@@ -1708,6 +1864,336 @@ def get_launch_descriptor_by_instance(
     if not include_retired and not _launch_descriptor_is_active(record):
         return None
     return dict(record)
+
+
+def list_workspace_launch_descriptors(
+    session: str, project_id: str, workspace_id: str,
+) -> tuple[dict[str, Any], ...]:
+    """List active managed descriptors bound to one exact Registry authority."""
+    if (
+        not isinstance(session, str)
+        or not session
+        or not isinstance(project_id, str)
+        or not re.fullmatch(r"prj_[0-9a-f]{32}", project_id)
+        or not isinstance(workspace_id, str)
+        or not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id)
+    ):
+        raise ValueError("workspace launch descriptor authority 格式无效")
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors_strict()
+    values: list[dict[str, Any]] = []
+    for key, record in data["descriptors"].items():
+        if not isinstance(record, dict):
+            continue
+        has_authority = (
+            "project_id" in record or "workspace_id" in record
+        )
+        if not has_authority:
+            continue
+        instance_id = record.get("instance_id")
+        valid = (
+            isinstance(instance_id, str)
+            and _AGENT_INSTANCE_ID_RE.fullmatch(instance_id) is not None
+            and key == f"instance|{instance_id}"
+            and record.get("name") == instance_id
+            and isinstance(record.get("project_id"), str)
+            and re.fullmatch(
+                r"prj_[0-9a-f]{32}", record["project_id"],
+            ) is not None
+            and isinstance(record.get("workspace_id"), str)
+            and re.fullmatch(
+                r"ws_[0-9a-f]{32}", record["workspace_id"],
+            ) is not None
+            and isinstance(record.get("session"), str)
+            and bool(record.get("session"))
+            and isinstance(record.get("workdir"), str)
+            and bool(record.get("workdir"))
+            and isinstance(record.get("kind"), str)
+            and record.get("agent") == record.get("kind")
+            and record.get("args") == []
+            and record.get("state") in {
+                "active", "pending", "retired", "retirement_pending",
+            }
+            and (
+                record.get("state") != "pending"
+                or record.get("launch_label") == _workspace_launch_label(instance_id)
+            )
+        )
+        if not valid:
+            raise ValueError("workspace launch descriptor 损坏")
+        if (
+            not _launch_descriptor_is_active(record)
+            or record.get("session") != session
+            or record.get("project_id") != project_id
+            or record.get("workspace_id") != workspace_id
+        ):
+            continue
+        values.append(dict(record))
+    return tuple(sorted(values, key=lambda item: item["instance_id"]))
+
+
+def _strict_launch_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate launch descriptor key")
+        value[key] = item
+    return value
+
+
+def recover_workspace_launch_descriptors(
+    session: str, project_id: str, workspace_id: str,
+) -> None:
+    """Promote exact live pending agents or verify cleanup before discarding."""
+    if (
+        not re.fullmatch(r"prj_[0-9a-f]{32}", project_id)
+        or not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id)
+    ):
+        raise ValueError("project/workspace authority 格式无效")
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors_strict()
+        pending = [
+            dict(record) for record in data["descriptors"].values()
+            if isinstance(record, dict)
+            and record.get("state") == "pending"
+            and record.get("session") == session
+            and record.get("project_id") == project_id
+            and record.get("workspace_id") == workspace_id
+        ]
+    if not pending:
+        return
+    snapshot_value = session_snapshot(session)
+    if snapshot_value.get("error") is not None:
+        raise RuntimeError("pending descriptor snapshot unavailable")
+    panes = snapshot_value.get("panes")
+    agents = snapshot_value.get("agents")
+    if not isinstance(panes, list) or not isinstance(agents, list):
+        raise RuntimeError("pending descriptor snapshot invalid")
+    for record in pending:
+        instance_id = record.get("instance_id")
+        pane_id = record.get("pane_id")
+        kind = record.get("kind")
+        workdir = record.get("workdir")
+        launch_label = record.get("launch_label")
+        if launch_label != _workspace_launch_label(str(instance_id)):
+            raise RuntimeError("pending descriptor launch label invalid")
+        if not pane_id:
+            tabs = snapshot_value.get("tabs")
+            if not isinstance(tabs, list):
+                raise RuntimeError("pending descriptor tab snapshot invalid")
+            matching_tabs = [
+                item for item in tabs
+                if isinstance(item, dict) and item.get("label") == launch_label
+            ]
+            if not matching_tabs:
+                if any(
+                    isinstance(item, dict) and item.get("name") == instance_id
+                    for item in agents
+                ) or any(
+                    isinstance(item, dict) and item.get("label") == launch_label
+                    for item in panes
+                ):
+                    raise RuntimeError("pending descriptor launch identity conflict")
+                discard_pending_workspace_launch_descriptor(str(instance_id))
+                continue
+            if len(matching_tabs) != 1:
+                raise RuntimeError("pending descriptor launch label ambiguous")
+            matched_tab = matching_tabs[0]
+            tab_id = matched_tab.get("tab_id")
+            if (
+                not isinstance(tab_id, str)
+                or not tab_id
+                or isinstance(matched_tab.get("pane_count"), bool)
+                or matched_tab.get("pane_count") != 1
+            ):
+                raise RuntimeError("pending descriptor launch tab invalid")
+            matching_panes = [
+                item for item in panes
+                if isinstance(item, dict) and item.get("tab_id") == tab_id
+            ]
+            if len(matching_panes) != 1:
+                raise RuntimeError("pending descriptor launch pane ambiguous")
+            matched_pane = matching_panes[0]
+            recovered_pane_id = matched_pane.get("pane_id")
+            if (
+                not isinstance(recovered_pane_id, str)
+                or not recovered_pane_id
+                or matched_pane.get("cwd") != workdir
+                or matched_pane.get("agent") not in {None, ""}
+                or any(
+                    isinstance(item, dict)
+                    and (
+                        item.get("name") == instance_id
+                        or item.get("pane_id") == recovered_pane_id
+                    )
+                    for item in agents
+                )
+            ):
+                raise RuntimeError("pending descriptor launch authority mismatch")
+            bind_pending_workspace_launch_descriptor(
+                str(instance_id), recovered_pane_id,
+            )
+            pane_id = recovered_pane_id
+        live_agents = [
+            item for item in agents
+            if isinstance(item, dict) and item.get("name") == instance_id
+        ]
+        live_panes = [
+            item for item in panes
+            if isinstance(item, dict) and item.get("pane_id") == pane_id
+        ] if pane_id else []
+        if len(live_agents) == 1 and len(live_panes) == 1:
+            live_agent = live_agents[0]
+            live_pane = live_panes[0]
+            if (
+                live_agent.get("pane_id") != pane_id
+                or live_agent.get("kind", live_agent.get("agent")) != kind
+                or live_pane.get("agent") != kind
+                or live_pane.get("cwd") != workdir
+            ):
+                raise RuntimeError("pending descriptor live authority mismatch")
+            activate_pending_workspace_launch_descriptor(instance_id, pane_id)
+            continue
+        if live_agents:
+            raise RuntimeError("pending descriptor live identity ambiguous")
+        if pane_id and live_panes:
+            if not _close_created_pane_verified(session, pane_id, str(instance_id)):
+                raise RuntimeError("pending descriptor cleanup incomplete")
+        discard_pending_workspace_launch_descriptor(instance_id)
+
+
+def session_snapshot(session: str) -> dict[str, Any]:
+    """Return one Herdr session snapshot for stable instance reconciliation."""
+    next_profile.require_session(session)
+    return _snapshot_session(session)
+
+
+def ensure_session(session: str) -> dict[str, Any]:
+    """Ensure the fixed Next Herdr session exists before a managed launch."""
+    next_profile.require_session(session)
+    if not is_available():
+        return {"available": False}
+    with _SESSION_BOOTSTRAP_LOCK:
+        deadline = time.monotonic() + SESSION_BOOTSTRAP_TIMEOUT_S
+        owned = _SESSION_BOOTSTRAP_PROCESSES.get(session)
+        if owned is not None and owned.poll() is not None:
+            _SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
+            owned = None
+        if _session_bootstrap_ready(session, deadline):
+            return {"available": True, "session": session, "created": False}
+        if getattr(_LIST_SESSIONS_FAILED, "value", False):
+            return {"available": False, "error": "session bootstrap failed"}
+
+        created = False
+        if owned is None:
+            if time.monotonic() >= deadline:
+                return {"available": False, "error": "session bootstrap failed"}
+            extra_path = _HERDR_DIR + (
+                ":" + os.environ.get("PATH", "")
+                if os.environ.get("PATH") else ""
+            )
+            environment = {
+                **os.environ,
+                "PATH": extra_path or os.environ.get("PATH", "/usr/bin:/bin"),
+            }
+            try:
+                owned = subprocess.Popen(
+                    [HERDR_BIN, "--session", session, "server"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    start_new_session=True,
+                    env=environment,
+                )
+            except OSError:
+                return {"available": False, "error": "session bootstrap failed"}
+            _SESSION_BOOTSTRAP_PROCESSES[session] = owned
+            created = True
+
+        while time.monotonic() < deadline:
+            if owned.poll() is not None:
+                break
+            if _session_bootstrap_ready(session, deadline):
+                return {
+                    "available": True, "session": session, "created": created,
+                }
+            time.sleep(min(
+                SESSION_BOOTSTRAP_POLL_S,
+                max(0.0, deadline - time.monotonic()),
+            ))
+
+        if created:
+            if _terminate_bootstrap_process(owned):
+                _SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
+            else:
+                return {
+                    "available": False,
+                    "error_code": "session_cleanup_incomplete",
+                    "error": "session bootstrap cleanup incomplete",
+                }
+        return {"available": False, "error": "session bootstrap failed"}
+
+
+def _session_bootstrap_ready(session: str, deadline: float) -> bool:
+    _SNAPSHOT_DEADLINE.value = deadline
+    try:
+        sessions = list_sessions()
+    finally:
+        try:
+            del _SNAPSHOT_DEADLINE.value
+        except AttributeError:
+            pass
+    if getattr(_LIST_SESSIONS_FAILED, "value", False):
+        return False
+    try:
+        expected_root = _herdr_sessions_root() / session
+    except (OSError, ValueError):
+        _LIST_SESSIONS_FAILED.value = True
+        return False
+    matches = [
+        item for item in sessions
+        if item.get("name") == session and item.get("status") == "running"
+    ]
+    if len(matches) != 1:
+        return False
+    row = matches[0]
+    try:
+        directory = Path(str(row.get("directory") or "")).resolve(strict=False)
+        socket_path = Path(str(row.get("socket") or "")).resolve(strict=False)
+    except OSError:
+        return False
+    if directory != expected_root or socket_path != expected_root / "herdr.sock":
+        return False
+    _SNAPSHOT_DEADLINE.value = deadline
+    try:
+        snapshot_value = _snapshot_session(session)
+    finally:
+        try:
+            del _SNAPSHOT_DEADLINE.value
+        except AttributeError:
+            pass
+    return (
+        snapshot_value.get("session") == session
+        and snapshot_value.get("error") is None
+        and isinstance(snapshot_value.get("panes"), list)
+        and isinstance(snapshot_value.get("agents"), list)
+    )
+
+
+def _terminate_bootstrap_process(process: subprocess.Popen[bytes]) -> bool:
+    if process.poll() is not None:
+        return True
+    process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            return False
+    return process.poll() is not None
 
 
 def update_launch_descriptor_by_instance(
@@ -1910,10 +2396,34 @@ def _rename_agent_context(
             pass
 
 
+def _close_created_pane_verified(
+    session: str, pane_id: str, instance_id: str,
+) -> bool:
+    try:
+        _run(["--session", session, "pane", "close", pane_id], timeout=5)
+    except RuntimeError:
+        pass
+    snapshot_value = _snapshot_session(session)
+    if snapshot_value.get("error") is not None:
+        return False
+    panes = snapshot_value.get("panes")
+    agents = snapshot_value.get("agents")
+    if not isinstance(panes, list) or not isinstance(agents, list):
+        return False
+    return not any(
+        isinstance(item, dict) and item.get("pane_id") == pane_id
+        for item in panes
+    ) and not any(
+        isinstance(item, dict) and item.get("name") == instance_id
+        for item in agents
+    )
+
+
 def start_agent(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
     layout: str = "tab", label: str | None = None, args: str = "",
     instance_id: str | None = None,
+    project_id: str | None = None, workspace_id: str | None = None,
 ) -> dict[str, Any]:
     """在指定 session 里启动一个 agent pane(新建 tab/pane 跑 agent)。
 
@@ -1931,13 +2441,23 @@ def start_agent(
     if not is_available():
         return {"available": False}
     managed = instance_id is not None
+    workspace_managed = managed and project_id is not None
     display_name: str | None = None
     try:
         require_herdr_capabilities()
         normalize_agent_kind(agent)
+        if not managed and (project_id is not None or workspace_id is not None):
+            raise ValueError("workspace authority 仅适用于 managed agent")
         if managed:
             instance_id = validate_agent_instance_id(instance_id)
             display_name = validate_display_name(label or agent)
+            if (project_id is None) != (workspace_id is None):
+                raise ValueError("project/workspace authority 必须成对提供")
+            if project_id is not None and (
+                not re.fullmatch(r"prj_[0-9a-f]{32}", project_id)
+                or not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id or "")
+            ):
+                raise ValueError("project/workspace authority 格式无效")
         elif label is not None:
             validate_agent_name(label)
     except HerdrCapabilityError as exc:
@@ -1951,7 +2471,7 @@ def start_agent(
     normalized_args = normalize_agent_args(args)
     agent_args = shlex.split(normalized_args) if normalized_args else []
     # Grok 自绘 TUI 默认暗色；Web 浅色时启动加 --light（运行中切主题走 /theme slash）
-    if agent == "grok":
+    if agent == "grok" and not workspace_managed:
         for flag in grok_launch_theme_args(current_web_theme_mode()):
             if flag not in agent_args:
                 agent_args = [flag, *agent_args]
@@ -2049,6 +2569,46 @@ def start_agent(
     except ValueError as exc:
         return {"available": True, "error": str(exc)}
     canonical_kind = normalize_agent_kind(agent)
+    pending_reserved = False
+    if workspace_managed:
+        assert instance_id is not None
+        assert project_id is not None and workspace_id is not None
+        if agent_args:
+            return {
+                "available": True,
+                "error_code": "workspace_agent_args_forbidden",
+                "error": "workspace managed agent args must be empty",
+            }
+        if layout != "tab":
+            return {
+                "available": True,
+                "error_code": "workspace_agent_layout_forbidden",
+                "error": "workspace managed agent layout must be tab",
+            }
+        launch_label = _workspace_launch_label(instance_id)
+        if any(
+            isinstance(item, dict) and item.get("label") == launch_label
+            for item in snap.get("tabs", [])
+        ):
+            return {
+                "available": True,
+                "error_code": "descriptor_prepare_failed",
+                "error": "workspace launch authority unavailable",
+            }
+        try:
+            reserve_workspace_launch_descriptor(
+                session=session, name=instance_id, kind=canonical_kind,
+                agent=agent, workdir=workdir, instance_id=instance_id,
+                display_name=display_name or agent, project_id=project_id,
+                workspace_id=workspace_id,
+            )
+            pending_reserved = True
+        except (OSError, ValueError):
+            return {
+                "available": True,
+                "error_code": "descriptor_prepare_failed",
+                "error": "workspace launch authority unavailable",
+            }
     before_ids = {
         str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
     }
@@ -2061,7 +2621,10 @@ def start_agent(
         if effective_layout == "tab":
             # 多页:每个 agent 一个新 tab
             create_out = _run(
-                ["--session", session, "tab", "create", "--cwd", workdir],
+                [
+                    "--session", session, "tab", "create", "--cwd", workdir,
+                    *(["--label", launch_label] if workspace_managed else []),
+                ],
                 timeout=5,
             )
         else:
@@ -2113,6 +2676,29 @@ def start_agent(
             time.sleep(AGENT_POLL_INTERVAL)
         if not new_pid:
             raise RuntimeError("split/tab 后找不到本次创建的新 pane")
+        if workspace_managed:
+            assert instance_id is not None
+            try:
+                bind_pending_workspace_launch_descriptor(instance_id, new_pid)
+            except (OSError, ValueError):
+                cleaned = _close_created_pane_verified(
+                    session, new_pid, instance_id,
+                )
+                if cleaned:
+                    try:
+                        discard_pending_workspace_launch_descriptor(instance_id)
+                    except (OSError, ValueError):
+                        pass
+                return {
+                    "available": True,
+                    "error_code": (
+                        "descriptor_bind_failed"
+                        if cleaned else "descriptor_cleanup_incomplete"
+                    ),
+                    "error": "workspace launch authority unavailable",
+                    "pane_id": new_pid,
+                    "rolled_back": cleaned,
+                }
         start_timeout = _agent_start_timeout(agent)
         # 全部受支持 agent 统一用原生 agent start：Herdr 按 --kind 解析 canonical
         # 可执行文件、在 pane 的交互 shell 内启动，并在 --timeout 内等待 readiness。
@@ -2152,15 +2738,40 @@ def start_agent(
         # 持久化权威 launch 契约 {name, kind, args}：Herdr 不保留原始 start argv，
         # 故由启动路径落盘，供 restart 按 session+pane/name 精确取回原参数重建，
         # 绝不从进程 argv/label/类型默认值猜测。落盘失败不杀已成功启动的 agent。
-        descriptor_error: str | None = None
-        try:
-            save_launch_descriptor(
-                session=session, pane_id=new_pid, name=runtime_name,
-                kind=canonical_kind, args=agent_args, agent=agent, workdir=workdir,
-                instance_id=instance_id, display_name=display_name,
-            )
-        except OSError as exc:
-            descriptor_error = str(exc)
+        descriptor_error = False
+        if workspace_managed:
+            assert instance_id is not None
+            try:
+                activate_pending_workspace_launch_descriptor(instance_id, new_pid)
+            except (OSError, ValueError):
+                descriptor_error = True
+                cleaned = _close_created_pane_verified(
+                    session, new_pid, instance_id,
+                )
+                if cleaned:
+                    try:
+                        discard_pending_workspace_launch_descriptor(instance_id)
+                    except (OSError, ValueError):
+                        pass
+                if not cleaned:
+                    return {
+                        "available": True,
+                        "error_code": "descriptor_cleanup_incomplete",
+                        "error": "workspace launch cleanup incomplete",
+                        "pane_id": new_pid,
+                        "instance_id": instance_id,
+                        "rolled_back": False,
+                    }
+        else:
+            try:
+                save_launch_descriptor(
+                    session=session, pane_id=new_pid, name=runtime_name,
+                    kind=canonical_kind, args=agent_args, agent=agent,
+                    workdir=workdir, instance_id=instance_id,
+                    display_name=display_name,
+                )
+            except OSError:
+                descriptor_error = True
         result = {
             "available": True,
             "pane_id": new_pid,
@@ -2175,16 +2786,40 @@ def start_agent(
         if label:
             result["label"] = display_name or label
         if descriptor_error:
-            result["descriptor_error"] = descriptor_error
+            result["descriptor_error"] = "launch descriptor unavailable"
+            result["rolled_back"] = workspace_managed
         return result
     except RuntimeError as e:
         rolled_back = False
         if new_pid:
-            try:
-                _run(["--session", session, "pane", "close", new_pid], timeout=5)
-                rolled_back = True
-            except RuntimeError:
-                pass
+            if workspace_managed:
+                rolled_back = _close_created_pane_verified(
+                    session, new_pid, str(instance_id),
+                )
+            else:
+                try:
+                    _run(
+                        ["--session", session, "pane", "close", new_pid],
+                        timeout=5,
+                    )
+                    rolled_back = True
+                except RuntimeError:
+                    pass
+        if workspace_managed and pending_reserved and instance_id is not None:
+            if rolled_back or new_pid is None:
+                try:
+                    discard_pending_workspace_launch_descriptor(instance_id)
+                except (OSError, ValueError):
+                    pass
+            elif new_pid is not None:
+                return {
+                    "available": True,
+                    "error_code": "descriptor_cleanup_incomplete",
+                    "error": "workspace launch cleanup incomplete",
+                    "pane_id": new_pid,
+                    "instance_id": instance_id,
+                    "rolled_back": False,
+                }
         return {
             "available": True,
             "error": str(e),

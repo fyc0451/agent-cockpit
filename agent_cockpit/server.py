@@ -81,6 +81,9 @@ memory_store = None
 terminal_ticket_store = None
 workspace_terminal = None
 workspace_terminal_controller = None
+workspace_agent = None
+workspace_agent_api = None
+workspace_agent_controller = None
 if next_profile.enabled():
     try:
         _next_instance_lock_owner = instance_lock.require_registered_owner()
@@ -91,6 +94,7 @@ if next_profile.enabled():
     from . import operation_api, operation_store
     from . import runtime_provider_store
     from . import terminal_ticket_api, terminal_ticket_store, workspace_terminal
+    from . import workspace_agent, workspace_agent_api
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
@@ -357,6 +361,15 @@ def _workspace_terminal_provider():
     return workspace_terminal_controller
 
 
+def _workspace_agent_provider():
+    agent_module = workspace_agent
+    if agent_module is None:
+        from . import workspace_agent as agent_module
+    if workspace_agent_controller is None or not workspace_agent_controller.ready():
+        raise agent_module.WorkspaceAgentError("workspace_agent_unavailable")
+    return workspace_agent_controller
+
+
 def _local_terminal_capability(workspace, location):
     controller = workspace_terminal_controller
     if controller is None:
@@ -367,7 +380,8 @@ def _local_terminal_capability(workspace, location):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
-    global _identity_retirement_task, workspace_terminal_controller, _ephemeral_ready
+    global _identity_retirement_task, workspace_terminal_controller
+    global workspace_agent_controller, _ephemeral_ready
     _require_next_instance_lock()
     project_registry_api_service().prepare()
     foundation_enabled = next_profile.enabled()
@@ -383,6 +397,12 @@ async def lifespan(_: FastAPI):
                 registry_provider=_project_workbench_registry,
                 ticket_provider=_terminal_ticket_provider,
                 operation_provider=_operation_journal_provider,
+            )
+            agent_module = workspace_agent
+            if agent_module is None:
+                from . import workspace_agent as agent_module
+            workspace_agent_controller = agent_module.WorkspaceAgentController(
+                registry_provider=_project_workbench_registry,
             )
         state_enabled = False
         b0_runtime_active = False
@@ -463,6 +483,13 @@ async def lifespan(_: FastAPI):
                     _worktree_cleanup_task = None
                     _identity_retirement_task = None
     finally:
+        if workspace_agent_controller is not None:
+            try:
+                workspace_agent_controller.close()
+            except Exception:
+                logger.exception("workspace agent controller failed during shutdown")
+            finally:
+                workspace_agent_controller = None
         if workspace_terminal_controller is not None:
             try:
                 workspace_terminal_controller.close()
@@ -572,10 +599,21 @@ if next_profile.enabled():
             lambda websocket: _websocket_trusted(websocket),
         ),
     )
+    assert workspace_agent_api is not None
+    workspace_agent_api.install(
+        app, workspace_agent_api.ApiService(_workspace_agent_provider),
+    )
+
+
+def _scoped_g3_path(path: str) -> bool:
+    return project_registry_api.is_scoped_registry_path(path) or (
+        workspace_agent_api is not None
+        and workspace_agent_api.is_scoped_agent_path(path)
+    )
 
 
 def _scoped_registry_request(request: Request) -> bool:
-    return project_registry_api.is_scoped_registry_path(str(request.scope.get("path") or request.url.path))
+    return _scoped_g3_path(str(request.scope.get("path") or request.url.path))
 
 
 @app.exception_handler(HTTPException)
@@ -1439,7 +1477,7 @@ async def protect_api(request: Request, call_next):
         or not _no_token_scope_trusted(request.scope, require_origin=False)
     ):
         path = str(request.scope.get("path") or "")
-        if project_registry_api.is_scoped_registry_path(path):
+        if _scoped_g3_path(path):
             return project_registry_api.bridge_http_exception(request, 403, LOCAL_ONLY_AUTH_DETAIL)
         return JSONResponse({"detail": LOCAL_ONLY_AUTH_DETAIL}, status_code=403)
     path = str(request.scope.get("path") or "")
@@ -1461,7 +1499,7 @@ async def protect_api(request: Request, call_next):
     if not _request_authenticated(request):
         status = 401 if COCKPIT_TOKEN else 403
         detail = "未认证" if COCKPIT_TOKEN else LOCAL_ONLY_AUTH_DETAIL
-        if project_registry_api.is_scoped_registry_path(path):
+        if _scoped_g3_path(path):
             return project_registry_api.bridge_http_exception(request, status, detail)
         return JSONResponse(
             {"detail": detail}, status_code=status,
@@ -1476,7 +1514,7 @@ async def protect_api(request: Request, call_next):
             request.headers.get("authorization")
         ):
             if not _same_origin(origin, request.headers.get("host")):
-                if project_registry_api.is_scoped_registry_path(path):
+                if _scoped_g3_path(path):
                     return project_registry_api.bridge_http_exception(request, 403, "Origin 校验失败")
                 return JSONResponse({"detail": "Origin 校验失败"}, status_code=403)
     return await call_next(request)
