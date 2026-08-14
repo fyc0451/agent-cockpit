@@ -9,7 +9,8 @@ deployed `0.3.4` service remains frozen on `127.0.0.1:8790`.
 - Project key and Agent Mail project: `agent-cockpit-next` and the exact Next
   worktree path.
 - Reserved Herdr session: `github-agent-cockpit-next`.
-- Web endpoint: `127.0.0.1:18790`.
+- Web endpoint: `127.0.0.1:18790` by default; fixed Next may instead bind
+  `0.0.0.0:18790` only with a valid private token file.
 - Runtime roots: `~/.local/share/agent-cockpit-next-data`,
   `~/.config/agent-cockpit-next`, `~/.local/state/agent-cockpit-next`, and
   `~/.local/share/agent-cockpit-next-uploads`.
@@ -38,8 +39,12 @@ regular file owned by the current user, have mode `0600`, have exactly one hard
 link, and contain one 32-256 character ASCII token using letters, digits, `_`,
 or `-`. The launcher reads it through a no-follow descriptor after isolation
 validation and injects only `COCKPIT_TOKEN` into the server process. A missing
-file preserves local-only mode. Do not add the token to `.env.next`, the shell
-environment, Git, logs, or test reports.
+file preserves local-only mode and requires `COCKPIT_HOST=127.0.0.1`. Setting
+`COCKPIT_HOST=0.0.0.0` requires this file; the launcher and server both fail
+closed unless the injected token exactly matches it. No other host, IP, or
+hostname is accepted. Do not add the token to `.env.next`, the shell
+environment, Git, logs, or test reports. Ephemeral test servers always remain
+pinned to `127.0.0.1`.
 
 ## Commands
 
@@ -97,10 +102,13 @@ install -d -m 700 "$HOME/.config/agent-cockpit-next"
 ```
 
 Changing this file and restarting rotates the authentication state. Use HTTPS,
-an SSH tunnel, or another authenticated private transport for non-loopback
-clients; plain HTTP exposes the reusable login cookie to observers. N0 continues
-to bind `127.0.0.1:18790`; a host-level forwarding layer may publish that
-endpoint but must not publish it to the public Internet.
+an SSH tunnel, Tailscale, or another authenticated private transport for
+non-loopback clients. Direct `0.0.0.0` binding serves plain HTTP: another party
+on the LAN can observe and replay the reusable login cookie. Prefer an HTTPS
+reverse proxy or Tailscale, restrict the trusted network, and never publish the
+endpoint to the public Internet. To opt into direct LAN binding after creating
+the token, set `COCKPIT_HOST=0.0.0.0` in `.env.next`; changing either the host or
+token requires a restart.
 
 This `start` command is the only supported entry point for the Next backend. It
 hands a per-profile process lock to the server across `execve`; direct Next
@@ -113,6 +121,8 @@ requires both a conflicting independent lock probe and successful nonblocking
 lock reassertion on the inherited descriptor; its lifespan refuses to start
 without the adopted owner.
 
-The service is expected at `http://127.0.0.1:18790`. Do not run `install.sh`,
+The service is expected at `http://127.0.0.1:18790` by default, or at the
+machine's private LAN address on port `18790` after the explicit `0.0.0.0`
+opt-in. Do not run `install.sh`,
 `upgrade.sh`, `launchd.sh`, or any command targeting `agent-cockpit.service`
 from this worktree.

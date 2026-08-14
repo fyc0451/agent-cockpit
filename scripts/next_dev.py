@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import socket
 import stat
 import subprocess
@@ -17,7 +16,7 @@ from typing import Mapping
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_cockpit.instance_lock import LOCK_FD_ENV, InstanceLock, LockError
-from agent_cockpit import next_profile
+from agent_cockpit import auth_token, next_profile
 
 
 BASE_SHA = "169d0af7751b568e813d2cbca285a9f147e86001"
@@ -25,9 +24,11 @@ NEXT_SESSION = "github-agent-cockpit-next"
 NEXT_UNIT = "agent-cockpit-next.service"
 PRODUCTION_UNIT = "agent-cockpit.service"
 PRODUCTION_PORT = "8790"
-TOKEN_FILE_NAME = "cockpit.token"
-MAX_TOKEN_BYTES = 256
-TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
+ALLOWED_HOSTS = next_profile.FIXED_HOSTS
+TOKEN_FILE_NAME = auth_token.TOKEN_FILE_NAME
+MAX_TOKEN_BYTES = auth_token.MAX_TOKEN_BYTES
+TOKEN_RE = auth_token.TOKEN_RE
+_token_file_signature = auth_token._token_file_signature
 SANITIZED_PREFIXES = ("COCKPIT_", "AGENT_COCKPIT_", "HERDR_")
 SANITIZED_KEYS = frozenset({
     "AGENT_MAIL_DB_PATH", "AGENT_MAIL_PROJECT", "HERDR_SESSION",
@@ -104,6 +105,8 @@ def load_env(path: Path, *, home: Path | None = None) -> dict[str, str]:
             or key in values
         ):
             raise IsolationError("env_invalid")
+        if key == "COCKPIT_HOST" and raw != line:
+            raise IsolationError("env_invalid")
         value = value.replace("${HOME}", home_text)
         if "$" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise IsolationError("env_invalid")
@@ -158,6 +161,8 @@ def validate(
         raise IsolationError("production_port")
     if values["COCKPIT_SYSTEMD_UNIT"] == PRODUCTION_UNIT:
         raise IsolationError("production_unit")
+    if values["COCKPIT_HOST"] not in ALLOWED_HOSTS:
+        raise IsolationError("value_mismatch:COCKPIT_HOST")
 
     home_path = (Path.home() if home is None else home).resolve()
     roots = [
@@ -178,7 +183,7 @@ def validate(
             if root == protected or _inside(root, protected) or _inside(protected, root):
                 raise IsolationError("production_path")
     for key, wanted in expected_values.items():
-        if key == next_profile.PROJECT_ROOT_ENV:
+        if key in {next_profile.PROJECT_ROOT_ENV, "COCKPIT_HOST"}:
             continue
         if values.get(key) != wanted:
             raise IsolationError(f"value_mismatch:{key}")
@@ -256,81 +261,19 @@ def ensure_runtime_roots(values: Mapping[str, str]) -> None:
 
 
 def token_file_path(values: Mapping[str, str]) -> Path:
-    return Path(values["COCKPIT_CONFIG_DIR"]) / TOKEN_FILE_NAME
-
-
-def _token_file_signature(info: os.stat_result) -> tuple[int, ...]:
-    return (
-        info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
-        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
-    )
+    return auth_token.token_file_path(values)
 
 
 def load_cockpit_token(values: Mapping[str, str]) -> str | None:
-    path = token_file_path(values)
     try:
-        before = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise IsolationError("token_file_unavailable") from exc
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or before.st_uid != os.getuid()
-        or stat.S_IMODE(before.st_mode) != 0o600
-        or before.st_nlink != 1
-        or before.st_size < 32
-        or before.st_size > MAX_TOKEN_BYTES + 1
-    ):
-        raise IsolationError("token_file_unsafe")
+        return auth_token.load_cockpit_token(values)
+    except auth_token.TokenFileError as exc:
+        raise IsolationError(exc.code) from exc
 
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        fd = os.open(path, flags)
-    except OSError as exc:
-        raise IsolationError("token_file_unavailable") from exc
-    try:
-        opened = os.fstat(fd)
-        if _token_file_signature(opened) != _token_file_signature(before):
-            raise IsolationError("token_file_unsafe")
-        chunks: list[bytes] = []
-        remaining = MAX_TOKEN_BYTES + 2
-        while remaining:
-            chunk = os.read(fd, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if os.read(fd, 1):
-            raise IsolationError("token_file_unsafe")
-        after = os.fstat(fd)
-        if _token_file_signature(after) != _token_file_signature(opened):
-            raise IsolationError("token_file_unsafe")
-        try:
-            current = path.lstat()
-        except OSError as exc:
-            raise IsolationError("token_file_unsafe") from exc
-        if _token_file_signature(current) != _token_file_signature(after):
-            raise IsolationError("token_file_unsafe")
-    except OSError as exc:
-        raise IsolationError("token_file_unavailable") from exc
-    finally:
-        os.close(fd)
 
-    raw = b"".join(chunks)
-    if raw.endswith(b"\n"):
-        raw = raw[:-1]
-    try:
-        token = raw.decode("ascii")
-    except UnicodeDecodeError as exc:
-        raise IsolationError("token_file_invalid") from exc
-    if TOKEN_RE.fullmatch(token) is None:
-        raise IsolationError("token_file_invalid")
-    return token
+def validate_host_token(values: Mapping[str, str], token: str | None) -> None:
+    if values["COCKPIT_HOST"] == "0.0.0.0" and token is None:
+        raise IsolationError("lan_host_token_required")
 
 
 def sanitized_environment(values: Mapping[str, str]) -> dict[str, str]:
@@ -401,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         values = validate(load_env(args.env_file), repo=repo)
         token = load_cockpit_token(values)
+        validate_host_token(values, token)
         if args.command == "start":
             if not _unit_not_installed():
                 raise IsolationError("next_unit_installed")

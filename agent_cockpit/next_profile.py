@@ -8,6 +8,8 @@ import stat
 from pathlib import Path
 from typing import Mapping
 
+from agent_cockpit import auth_token
+
 
 PROFILE_ENV = "COCKPIT_NEXT_PROFILE"
 PROJECT_ROOT_ENV = "COCKPIT_PROJECT_ROOT"
@@ -16,6 +18,7 @@ EPHEMERAL_PROFILE = "ephemeral"
 PROJECT_MARKER = "agent-cockpit-next"
 SESSION = "github-agent-cockpit-next"
 HOST = "127.0.0.1"
+FIXED_HOSTS = frozenset({HOST, "0.0.0.0"})
 PORT = "18790"
 EPHEMERAL_ROOT_ENV = "COCKPIT_EPHEMERAL_ROOT"
 EPHEMERAL_LISTEN_FD_ENV = "COCKPIT_EPHEMERAL_LISTEN_FD"
@@ -507,7 +510,6 @@ def _validate_fixed_server_environment(
     worktree = Path(_required("COCKPIT_NEXT_WORKTREE", env))
     expected = {
         "COCKPIT_NEXT_WORKTREE": str(root.resolve()),
-        "COCKPIT_HOST": HOST,
         "COCKPIT_PORT": PORT,
         "COCKPIT_DATA_DIR": str(home / ".local/share/agent-cockpit-next-data"),
         "COCKPIT_CONFIG_DIR": str(home / ".config/agent-cockpit-next"),
@@ -539,9 +541,21 @@ def _validate_fixed_server_environment(
     }
     if not worktree.is_absolute() or worktree.resolve(strict=False) != root.resolve():
         raise NextProfileError("next_profile_invalid:COCKPIT_NEXT_WORKTREE")
+    host = env.get("COCKPIT_HOST")
+    if host not in FIXED_HOSTS:
+        raise NextProfileError("next_profile_invalid:COCKPIT_HOST")
     for name, wanted in expected.items():
         if env.get(name) != wanted:
             raise NextProfileError(f"next_profile_invalid:{name}")
+    if host == "0.0.0.0":
+        try:
+            token = auth_token.load_cockpit_token(env)
+        except auth_token.TokenFileError as exc:
+            raise NextProfileError(exc.code) from exc
+        if token is None:
+            raise NextProfileError("next_profile_invalid:LAN_HOST_TOKEN_REQUIRED")
+        if env.get("COCKPIT_TOKEN") != token:
+            raise NextProfileError("next_profile_invalid:LAN_HOST_TOKEN_MISMATCH")
     configured_project_root(env)
     project(env)
     session(env)

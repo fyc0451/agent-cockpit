@@ -18,10 +18,21 @@ import server
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "next_dev.py"
+EPHEMERAL_SCRIPT = ROOT / "scripts" / "next_ephemeral_server.py"
 
 
 def module():
     spec = importlib.util.spec_from_file_location("next_dev", SCRIPT)
+    assert spec and spec.loader
+    value = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(value)
+    return value
+
+
+def ephemeral_module():
+    spec = importlib.util.spec_from_file_location(
+        "next_ephemeral_server", EPHEMERAL_SCRIPT,
+    )
     assert spec and spec.loader
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
@@ -228,6 +239,106 @@ def test_optional_next_token_file_is_absent_or_loaded(tmp_path: Path) -> None:
     assert gate.load_cockpit_token(values) == "a" * 64
 
 
+@pytest.mark.parametrize(
+    "host", ("::1", "localhost", "192.168.1.5", "0.0.0.0 "),
+)
+def test_fixed_next_host_is_locked_to_loopback_or_all_ipv4(
+    host: str, tmp_path: Path,
+) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    values["COCKPIT_HOST"] = host
+    repo = Path(values["COCKPIT_NEXT_WORKTREE"])
+    repo.mkdir(parents=True)
+    (repo / ".agent-memory-project").write_text(
+        "agent-cockpit-next\n", encoding="ascii",
+    )
+    with pytest.raises(gate.IsolationError, match="value_mismatch:COCKPIT_HOST"):
+        gate.validate(values, repo=repo, home=tmp_path, check_git=False)
+
+
+def test_host_source_value_is_not_whitespace_normalized(tmp_path: Path) -> None:
+    gate = module()
+    env_file = tmp_path / "next.env"
+    env_file.write_text("COCKPIT_HOST=0.0.0.0 \n", encoding="ascii")
+    with pytest.raises(gate.IsolationError, match="env_invalid"):
+        gate.load_env(env_file, home=tmp_path)
+
+
+def test_lan_host_requires_token_but_loopback_remains_optional(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    gate = module()
+    loopback = gate.expected()
+    gate.validate_host_token(loopback, None)
+
+    lan = {**loopback, "COCKPIT_HOST": "0.0.0.0"}
+    with pytest.raises(gate.IsolationError, match="lan_host_token_required"):
+        gate.validate_host_token(lan, None)
+    gate.validate_host_token(lan, "a" * 32)
+
+    monkeypatch.setattr(gate, "load_env", lambda *_args, **_kwargs: lan)
+    monkeypatch.setattr(gate, "validate", lambda *_args, **_kwargs: lan)
+    monkeypatch.setattr(gate, "load_cockpit_token", lambda _values: None)
+    for command in ("check", "start"):
+        assert gate.main([command]) == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "lan_host_token_required\n"
+
+
+def test_fixed_server_lan_host_requires_matching_private_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = module()
+    home = tmp_path / "home"
+    checkout = home / "github" / "agent-cockpit-next"
+    checkout.mkdir(parents=True)
+    (checkout / ".agent-memory-project").write_text(
+        "agent-cockpit-next\n", encoding="ascii",
+    )
+    values = gate.expected(home)
+    values["COCKPIT_HOST"] = "0.0.0.0"
+    Path(values["COCKPIT_PROJECT_ROOT"]).mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        next_profile.Path, "home", classmethod(lambda _cls: home),
+    )
+
+    for invalid_host in ("::1", "localhost", "192.168.1.5", "0.0.0.0 "):
+        values["COCKPIT_HOST"] = invalid_host
+        with pytest.raises(
+            next_profile.NextProfileError,
+            match="next_profile_invalid:COCKPIT_HOST",
+        ):
+            next_profile.validate_server_environment(checkout, values)
+
+    values["COCKPIT_HOST"] = "0.0.0.0"
+    with pytest.raises(
+        next_profile.NextProfileError,
+        match="next_profile_invalid:LAN_HOST_TOKEN_REQUIRED",
+    ):
+        next_profile.validate_server_environment(checkout, values)
+
+    token_path = gate.token_file_path(values)
+    token_path.parent.mkdir(parents=True, mode=0o700)
+    token_path.write_text("a" * 64 + "\n", encoding="ascii")
+    token_path.chmod(0o600)
+    with pytest.raises(
+        next_profile.NextProfileError,
+        match="next_profile_invalid:LAN_HOST_TOKEN_MISMATCH",
+    ):
+        next_profile.validate_server_environment(checkout, values)
+
+    values["COCKPIT_TOKEN"] = "a" * 64
+    next_profile.validate_server_environment(checkout, values)
+
+
+def test_ephemeral_environment_remains_loopback_only(tmp_path: Path) -> None:
+    environment = ephemeral_module()._environment(tmp_path, 12345, "a" * 32)
+    assert environment["COCKPIT_HOST"] == "127.0.0.1"
+    assert "COCKPIT_TOKEN" not in environment
+
+
 def test_next_token_file_rejects_unsafe_metadata_and_content(tmp_path: Path) -> None:
     gate = module()
     values = gate.expected(tmp_path)
@@ -247,6 +358,13 @@ def test_next_token_file_rejects_unsafe_metadata_and_content(tmp_path: Path) -> 
     path.write_text("a" * 31 + "!\n", encoding="ascii")
     with pytest.raises(gate.IsolationError, match="token_file_invalid"):
         gate.load_cockpit_token(values)
+
+    path.write_text("b" * 64 + "\n", encoding="ascii")
+    hardlink = tmp_path / "hardlink.token"
+    os.link(path, hardlink)
+    with pytest.raises(gate.IsolationError, match="token_file_unsafe"):
+        gate.load_cockpit_token(values)
+    hardlink.unlink()
 
     path.unlink()
     target = tmp_path / "target.token"
@@ -334,6 +452,7 @@ def test_start_execs_next_venv_with_sanitized_environment(
     gate = module()
     captured: dict[str, object] = {}
     values = gate.expected(tmp_path)
+    values["COCKPIT_HOST"] = "0.0.0.0"
 
     class StubLock:
         fd = 42
@@ -373,6 +492,7 @@ def test_start_execs_next_venv_with_sanitized_environment(
     assert captured["executable"] == str(ROOT / ".venv" / "bin" / "python")
     environment = captured["env"]
     assert isinstance(environment, dict)
+    assert environment["COCKPIT_HOST"] == "0.0.0.0"
     assert environment["COCKPIT_PORT"] == "18790"
     assert environment["COCKPIT_PROJECT_ROOT"] == str(tmp_path / "github")
     assert environment["VIRTUAL_ENV"] == str(ROOT / ".venv")
