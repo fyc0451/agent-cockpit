@@ -20,6 +20,9 @@ and Store-assigned timestamps. Receipt references are opaque identifiers only.
 Exact canonical replay returns the original immutable revision-1 result even after a later
 ticket update; each receipt binds the create method, request digest, ticket ID, project,
 workspace, and canonical original result. A changed request returns `idempotency_conflict`.
+The idempotency key is a nonempty 1..128 visible-token string: whitespace and control
+characters are invalid. Each persisted ticket has exactly one persisted create receipt;
+missing, duplicate, malformed, or cross-bound receipts are corruption, never a fresh create.
 `update(... expected_revision, value)` is compare-and-swap and
 increments revision exactly once; `engine_generation` cannot regress; a missing, stale,
 or generation-regressing row returns `revision_conflict`.

@@ -69,6 +69,15 @@ def _text(value: object, *, nullable: bool = False, maximum: int = 128) -> str |
     return value
 
 
+def _idempotency_key(value: object, *, persisted: bool = False) -> str:
+    try:
+        return _text(value, maximum=128)
+    except TerminalTicketError as exc:
+        if persisted:
+            _fail("store_corrupt", exc)
+        raise
+
+
 def _opaque(value: object, *, prefix: str | None = None) -> str:
     result = _text(value, maximum=36)
     if prefix not in {"prj_", "ws_"} or not _REGISTRY_ID.fullmatch(result) or not result.startswith(prefix):
@@ -320,6 +329,7 @@ def _ticket_from_public(value: object) -> TerminalTicket:
 def _validate_persisted(connection: sqlite3.Connection) -> None:
     try:
         records: dict[str, TerminalTicket] = {}
+        receipt_counts: dict[str, int] = {}
         for row in connection.execute("SELECT * FROM terminal_tickets").fetchall():
             ticket = _materialize(row)
             if ticket.ticket_id in records:
@@ -327,12 +337,16 @@ def _validate_persisted(connection: sqlite3.Connection) -> None:
             records[ticket.ticket_id] = ticket
         for row in connection.execute("SELECT * FROM terminal_ticket_idempotency").fetchall():
             project_id, workspace_id, key, digest = row["project_id"], row["workspace_id"], row["idempotency_key"], row["request_digest"]
-            if not isinstance(project_id, str) or not isinstance(workspace_id, str) or not isinstance(key, str) or not isinstance(digest, str):
+            if not isinstance(project_id, str) or not isinstance(workspace_id, str) or not isinstance(digest, str):
                 _fail("store_corrupt")
+            key = _idempotency_key(key, persisted=True)
             receipt = _receipt(row, project_id=project_id, workspace_id=workspace_id, key=key, digest=digest)
             current = records.get(receipt.ticket_id)
             if current is None or current.project_id != receipt.project_id or current.workspace_id != receipt.workspace_id:
                 _fail("store_corrupt")
+            receipt_counts[receipt.ticket_id] = receipt_counts.get(receipt.ticket_id, 0) + 1
+        if set(receipt_counts) != set(records) or any(count != 1 for count in receipt_counts.values()):
+            _fail("store_corrupt")
     except TerminalTicketError:
         raise
     except (sqlite3.Error, IndexError, KeyError, TypeError, ValueError) as exc:
@@ -355,7 +369,7 @@ class TerminalTicketStore:
     def close(self) -> None: pass
 
     def create(self, value: Mapping[str, Any], *, idempotency_key: str) -> TerminalTicket:
-        ticket = _input(value, creating=True); key = _text(idempotency_key, maximum=128)
+        ticket = _input(value, creating=True); key = _idempotency_key(idempotency_key)
         digest = hashlib.sha256(_canonical(ticket).encode()).hexdigest(); connection = None
         try:
             connection = _connect(self.path, write=True); _schema(connection); connection.execute("BEGIN IMMEDIATE")

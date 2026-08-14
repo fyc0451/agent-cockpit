@@ -179,6 +179,47 @@ def test_materialization_checks_all_ticket_fields(store, path: Path):
         item = store.create(_input(), idempotency_key="first")
 
 
+@pytest.mark.parametrize("key", ["", "x" * 129, "bad key", "bad\tkey", "bad\nkey", "bad\x01key"])
+@pytest.mark.parametrize("target", ["restart", "get", "list", "replay"])
+def test_persisted_idempotency_key_is_fully_validated(store, path: Path, key: str, target: str):
+    item = store.create(_input(), idempotency_key="first")
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE terminal_ticket_idempotency SET idempotency_key=?", (key,))
+    with pytest.raises(tickets.TerminalTicketError) as corrupt:
+        if target == "restart":
+            tickets.open_existing(path)
+        elif target == "get":
+            store.get(project_id=item.project_id, workspace_id=item.workspace_id, ticket_id=item.ticket_id)
+        elif target == "list":
+            store.list(project_id=item.project_id, workspace_id=item.workspace_id)
+        else:
+            store.create(_input(), idempotency_key="first")
+    assert corrupt.value.code == "store_corrupt"
+
+
+@pytest.mark.parametrize("kind", ["missing", "duplicate", "malformed"])
+@pytest.mark.parametrize("target", ["restart", "get", "list", "replay"])
+def test_ticket_receipt_cardinality_fails_closed(store, path: Path, kind: str, target: str):
+    item = store.create(_input(), idempotency_key="first")
+    with sqlite3.connect(path) as connection:
+        if kind == "missing":
+            connection.execute("DELETE FROM terminal_ticket_idempotency")
+        elif kind == "duplicate":
+            connection.execute("INSERT INTO terminal_ticket_idempotency SELECT project_id,workspace_id,'second','create',request_digest,ticket_id,result_json FROM terminal_ticket_idempotency")
+        else:
+            connection.execute("UPDATE terminal_ticket_idempotency SET result_json='{}'")
+    with pytest.raises(tickets.TerminalTicketError) as corrupt:
+        if target == "restart":
+            tickets.open_existing(path)
+        elif target == "get":
+            store.get(project_id=item.project_id, workspace_id=item.workspace_id, ticket_id=item.ticket_id)
+        elif target == "list":
+            store.list(project_id=item.project_id, workspace_id=item.workspace_id)
+        else:
+            store.create(_input(), idempotency_key="first")
+    assert corrupt.value.code == "store_corrupt"
+
+
 def test_injected_g3_get_is_scoped(store):
     item = store.create(_input(), idempotency_key="first")
     app = FastAPI(); api.install(app, api.TerminalTicketApiService(lambda: store)); http = TestClient(app)
