@@ -7,7 +7,7 @@ describe('Remote workspace fail-closed（P1-5）+ switcher roving keyboard（P2-
     const fetchSpy = stubDefaultFetch()
     const user = userEvent.setup()
     renderApp('/projects/p1/workspaces/w1')
-    await screen.findByRole('button', { name: '删除 Workspace' })
+    await screen.findByRole('button', { name: '删除工作空间' })
 
     await user.click(screen.getByTitle('切换 Workspace'))
     const dialog = await screen.findByRole('dialog', { name: 'Workspace 切换' })

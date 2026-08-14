@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   useWorkspaceFileContent,
   useWorkspaceFileSearch,
@@ -13,7 +13,7 @@ import { QueryErrorState } from '../components/QueryErrorState'
 import { StatusState } from '../components/StatusState'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
-import { routeHrefs } from '../app/routes'
+import { routeHrefs, routes } from '../app/routes'
 import { useCapability, workspaceScope } from '../state/capabilities'
 
 /** 控制字符（NUL、<0x20、0x7f）检查，与后端合同一致 */
@@ -70,6 +70,20 @@ function EntryRow({
   )
 }
 
+function FilesHeader({ project, workspace }: { project: Project; workspace: Workspace }) {
+  return (
+    <PageHeader
+      title="文件"
+      sub={workspace.name ?? workspace.id}
+      actions={
+        <Link className="btn btn--primary" to={routes.workspace.terminal(project.slug ?? '', workspace.id ?? '')}>
+          打开终端
+        </Link>
+      }
+    />
+  )
+}
+
 function FilesBody({ project, workspace }: { project: Project; workspace: Workspace }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const path = searchParams.get('path') ?? ''
@@ -112,7 +126,7 @@ function FilesBody({ project, workspace }: { project: Project; workspace: Worksp
   if (!cap.available) {
     return (
       <>
-        <PageHeader title="文件" sub={workspace.name ?? workspace.id} />
+        <FilesHeader project={project} workspace={workspace} />
         <StatusState
           kind="forbidden"
           title="文件浏览暂不可用"
@@ -126,7 +140,7 @@ function FilesBody({ project, workspace }: { project: Project; workspace: Worksp
   if (!pathSafe) {
     return (
       <>
-        <PageHeader title="文件" sub={workspace.name ?? workspace.id} />
+        <FilesHeader project={project} workspace={workspace} />
         <StatusState
           kind="error"
           title="非法路径"
@@ -156,7 +170,7 @@ function FilesBody({ project, workspace }: { project: Project; workspace: Worksp
 
   return (
     <>
-      <PageHeader title="文件" sub={workspace.name ?? workspace.id} />
+      <FilesHeader project={project} workspace={workspace} />
       <section className="panel">
         <div className="state-actions files-toolbar">
           <nav aria-label="目录路径" className="breadcrumb">

@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { ApiError } from '../api/client'
 import { useLegacyWorkbench, useWorkspaceList, workspaceLocation } from '../api/localSlice'
 import type { LegacyWorkbench } from '../api/localSlice'
 import { useProjectRegistryList } from '../api/registry'
@@ -19,35 +20,64 @@ function text(v: unknown): string {
 }
 
 /** persisted workspaces 深链列表（Registry 权威，非 fixture 嵌入数组） */
-function WorkspacesSection({ project }: { project: Project }) {
+function userFacingGateReason(reason: string | null): string | null {
+  return reason?.replace(/RepoLocation/g, '项目目录') ?? null
+}
+
+function WorkspacesSection({
+  project,
+  createRequested,
+  onCreateRequestConsumed,
+}: {
+  project: Project
+  createRequested: boolean
+  onCreateRequestConsumed: () => void
+}) {
   const q = useWorkspaceList(project.project_id ?? null, project.slug ?? null)
   // P0-WORKSPACE-001-F：创建按钮可用性 = Registry 列表内嵌 repo_locations 数据驱动
   // fail-closed（与 ProjectScope 同 queryKey，缓存命中零额外请求）；无 capability 臆造。
   const registry = useProjectRegistryList()
-  const [wizardOpen, setWizardOpen] = useState(false)
+  const [wizardOpen, setWizardOpen] = useState(createRequested)
   const gate = useMemo(() => {
     const rp = registry.data?.data.items.find((p) => p.project_id === project.project_id)
     return gateWorkspaceCreate(rp?.repo_locations)
   }, [registry.data, project.project_id])
+  const gateReason = userFacingGateReason(gate.reason)
+
+  useEffect(() => {
+    if (!createRequested) return
+    setWizardOpen(true)
+    onCreateRequestConsumed()
+  }, [createRequested, onCreateRequestConsumed])
+
+  const createButton = (
+    <Button
+      variant="primary"
+      disabled={!gate.available}
+      title={gateReason ?? undefined}
+      onClick={() => setWizardOpen(true)}
+    >
+      创建工作空间
+    </Button>
+  )
+
   return (
     <section className="panel">
       <div className="drawer-head">
-        <h2 className="panel-title">Workspaces</h2>
-        <Button
-          variant="primary"
-          disabled={!gate.available}
-          title={gate.reason ?? undefined}
-          onClick={() => setWizardOpen(true)}
-        >
-          创建 Workspace
-        </Button>
+        <h2 className="panel-title">工作空间</h2>
+        {q.data?.data.items.length ? createButton : null}
       </div>
       {q.isPending ? (
-        <StatusState kind="loading" title="正在加载 Workspaces…" />
+        <StatusState kind="loading" title="正在加载工作空间…" />
       ) : q.isError ? (
         <QueryErrorState error={q.error} onRetry={() => q.refetch()} />
       ) : q.data!.data.items.length === 0 ? (
-        <StatusState kind="empty" title="暂无 Workspace" description="该项目还没有持久化的 Workspace。" />
+        <StatusState kind="empty" title="还没有工作空间" description="创建一个工作空间后即可浏览文件并打开终端。">
+          <div className="state-actions">
+            {createButton}
+          </div>
+          {gateReason ? <p className="state-reason">{gateReason}</p> : null}
+        </StatusState>
       ) : (
         <ul className="list">
           {q.data!.data.items.map((w) => (
@@ -84,16 +114,43 @@ function WorkspacesSection({ project }: { project: Project }) {
  * 其 loading/error/degraded 只影响本区块；Registry 权威的 WorkspacesSection 与
  * 创建入口始终独立渲染，legacy 503（Agent Mail 不可用）typed 显示、不伪装为空。
  */
-function WorkbenchBody({ project }: { project: Project }) {
+function WorkbenchBody({
+  project,
+  createRequested,
+  onCreateRequestConsumed,
+}: {
+  project: Project
+  createRequested: boolean
+  onCreateRequestConsumed: () => void
+}) {
   const q = useLegacyWorkbench(project.slug ?? null)
+  const runtimeMissing =
+    q.isError &&
+    q.error instanceof ApiError &&
+    (q.error.status === 404 || q.error.code === 'not_found')
 
   return (
     <div className="stack">
+      <WorkspacesSection
+        project={project}
+        createRequested={createRequested}
+        onCreateRequestConsumed={onCreateRequestConsumed}
+      />
       <div role="group" aria-label="运行时">
         {q.isPending ? (
           <section className="panel">
             <h2 className="panel-title">运行时</h2>
             <StatusState kind="loading" title="正在加载运行时…" />
+          </section>
+        ) : runtimeMissing ? (
+          <section className="panel">
+            <h2 className="panel-title">运行时</h2>
+            <span hidden aria-hidden="true" data-state="error" />
+            <StatusState
+              kind="degraded"
+              title="运行时信息尚未建立"
+              description="这不影响创建和使用工作空间；有运行记录后会自动显示在这里。"
+            />
           </section>
         ) : q.isError ? (
           <section className="panel">
@@ -104,7 +161,6 @@ function WorkbenchBody({ project }: { project: Project }) {
           <RuntimeData wb={q.data!} />
         )}
       </div>
-      <WorkspacesSection project={project} />
     </div>
   )
 }
@@ -172,12 +228,24 @@ function RuntimeData({ wb }: { wb: LegacyWorkbench }) {
 
 export function ProjectWorkbenchPage() {
   const { projectSlug } = useParams<{ projectSlug: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const createRequested = searchParams.get('createWorkspace') === '1'
+  const consumeCreateRequest = useCallback(() => {
+    const next = new URLSearchParams(searchParams)
+    next.delete('createWorkspace')
+    setSearchParams(next, { replace: true })
+  }, [searchParams, setSearchParams])
+
   return (
     <ProjectScope slug={projectSlug!}>
       {(project) => (
         <>
           <PageHeader title={project.name ?? project.slug} sub="项目工作台" />
-          <WorkbenchBody project={project} />
+          <WorkbenchBody
+            project={project}
+            createRequested={createRequested}
+            onCreateRequestConsumed={consumeCreateRequest}
+          />
         </>
       )}
     </ProjectScope>

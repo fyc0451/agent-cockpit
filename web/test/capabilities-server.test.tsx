@@ -78,7 +78,7 @@ describe('meta.capabilities 权威合并层（item 6）', () => {
     git.unmount()
 
     const home = renderApp('/projects/p1/workspaces/w1')
-    const del = await screen.findByRole('button', { name: '删除 Workspace' })
+    const del = await screen.findByRole('button', { name: '删除工作空间' })
     expect(del).toHaveAttribute('aria-disabled', 'true')
     expect(del).toHaveAttribute('title', 'Workspace 删除未开放（W1 只读骨架）')
     expect(screen.getByText('内嵌编辑器规划在后续迭代接通')).toBeInTheDocument()
@@ -90,7 +90,7 @@ describe('meta.capabilities 权威合并层（item 6）', () => {
   it('server 未提及的 key 保持 fail-closed', async () => {
     stubWithProjectCaps({ 'terminal.pty': { available: true, reason: null } })
     const { container } = renderApp('/projects/p1/workspaces/w1')
-    const del = await screen.findByRole('button', { name: '删除 Workspace' })
+    const del = await screen.findByRole('button', { name: '删除工作空间' })
     expect(del).toHaveAttribute('aria-disabled', 'true')
     const cards = Array.from(container.querySelectorAll('.card'))
     const editorCard = cards.find((c) => c.textContent?.includes('编辑器'))

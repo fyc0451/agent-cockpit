@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Button } from '../components/Button'
 import { renderApp, stubDefaultFetch } from './helpers'
@@ -85,5 +85,20 @@ describe('A11y（item 7）', () => {
     await user.keyboard('{Enter}')
     await user.keyboard(' ')
     expect(onClick).not.toHaveBeenCalled()
+  })
+
+  it('390 核心 Rail 标记只保留项目、文件、终端短文字，非核心项可隐藏', async () => {
+    stubDefaultFetch()
+    renderApp('/projects/p1/workspaces/w1/files')
+    const rail = screen.getByRole('navigation', { name: '主导航' })
+    await waitFor(() => expect(within(rail).getByTitle('文件')).toBeInTheDocument())
+
+    for (const title of ['项目', '文件', '终端']) {
+      const item = within(rail).getByTitle(title)
+      expect(item).toHaveClass('rail-item--mobile-core')
+      expect(item.querySelector('.rail-mobile-label')).toHaveTextContent(title)
+    }
+    expect(within(rail).getByTitle('需要你处理')).not.toHaveClass('rail-item--mobile-core')
+    expect(within(rail).getByText('通信').closest('.rail-item')).toHaveClass('rail-item--mobile-hidden')
   })
 })

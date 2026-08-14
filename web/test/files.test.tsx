@@ -16,6 +16,10 @@ describe('Files 页（files.read 关闭，item 1）', () => {
       'href',
       '#/settings?view=doctor',
     )
+    expect(screen.getByRole('link', { name: '打开终端' })).toHaveAttribute(
+      'href',
+      '/projects/p1/workspaces/w1/terminal',
+    )
 
     // 等 project/herdr 等其它请求全部落地，再断言没有任何 files 相关调用
     await waitFor(() => {

@@ -111,13 +111,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 async function openAlphaWorkbench() {
   const user = userEvent.setup()
   renderApp('/projects/alpha/workbench')
-  await screen.findByText('暂无 Workspace')
+  await screen.findByText('还没有工作空间')
   return user
 }
 
 async function openWizard(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: '创建 Workspace' }))
-  return await screen.findByRole('dialog', { name: '创建 Workspace' })
+  await user.click(screen.getByRole('button', { name: '创建工作空间' }))
+  return await screen.findByRole('dialog', { name: '创建工作空间' })
 }
 
 // ---------- 用例 ----------
@@ -128,9 +128,9 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const user = userEvent.setup()
     renderApp('/projects/p1/workbench')
     expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
-    const btn = screen.getByRole('button', { name: '创建 Workspace' })
+    const btn = screen.getByRole('button', { name: '创建工作空间' })
     expect(btn).toHaveAttribute('aria-disabled', 'true')
-    expect(btn).toHaveAttribute('title', expect.stringContaining('RepoLocation'))
+    expect(btn).toHaveAttribute('title', expect.stringContaining('项目目录'))
     await user.click(btn)
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(stub.posts).toHaveLength(0)
@@ -153,8 +153,8 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     stubCreateFetch({ gets: { '/api/project-registry/projects': registry } })
     const user = userEvent.setup()
     renderApp('/projects/alpha/workbench')
-    await screen.findByText('暂无 Workspace')
-    const btn = screen.getByRole('button', { name: '创建 Workspace' })
+    await screen.findByText('还没有工作空间')
+    const btn = screen.getByRole('button', { name: '创建工作空间' })
     expect(btn).toHaveAttribute('aria-disabled', 'true')
     await user.click(btn)
     expect(screen.queryByRole('dialog')).toBeNull()
@@ -166,8 +166,12 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     })
     const user = await openAlphaWorkbench()
     const dialog = await openWizard(user)
-    await user.type(within(dialog).getByLabelText('Workspace 名称'), '新工作区')
-    await user.click(within(dialog).getByRole('button', { name: '确认创建' }))
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    expect(nameInput).toHaveValue('main')
+    expect(dialog).not.toHaveTextContent(ALPHA_LOC)
+    await user.clear(nameInput)
+    await user.type(nameInput, '新工作区')
+    await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
 
     await waitFor(() => expect(stub.posts).toHaveLength(1))
     const call = stub.posts[0]
@@ -196,9 +200,11 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const user = await openAlphaWorkbench()
     const dialog = await openWizard(user)
     expect(within(dialog).queryByLabelText('隔离模式')).toBeNull()
-    await user.type(within(dialog).getByLabelText('Workspace 名称'), '新工作区')
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    await user.clear(nameInput)
+    await user.type(nameInput, '新工作区')
     await user.type(within(dialog).getByLabelText('目标（可选）'), '验证 goal')
-    await user.click(within(dialog).getByRole('button', { name: '确认创建' }))
+    await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await waitFor(() => expect(stub.posts).toHaveLength(1))
     expect(JSON.parse(stub.posts[0].body).goal).toBe('验证 goal')
   })
@@ -212,9 +218,10 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     })
     const user = await openAlphaWorkbench()
     const dialog = await openWizard(user)
-    const nameInput = within(dialog).getByLabelText('Workspace 名称')
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    await user.clear(nameInput)
     await user.type(nameInput, '新工作区')
-    await user.click(within(dialog).getByRole('button', { name: '确认创建' }))
+    await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await screen.findByText('后端暂不可用')
     await user.click(within(dialog).getByRole('button', { name: '重试' }))
     await waitFor(() => expect(stub.posts).toHaveLength(2))
@@ -222,7 +229,7 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     expect(stub.posts[1].body).toBe(stub.posts[0].body)
     // 改名称 → 必须换新 key
     await user.type(nameInput, '改')
-    await user.click(within(dialog).getByRole('button', { name: '确认创建' }))
+    await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await waitFor(() => expect(stub.posts).toHaveLength(3))
     expect(stub.posts[2].headers['Idempotency-Key']).not.toBe(
       stub.posts[0].headers['Idempotency-Key'],
@@ -238,8 +245,10 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     })
     const user = await openAlphaWorkbench()
     const dialog = await openWizard(user)
-    await user.type(within(dialog).getByLabelText('Workspace 名称'), '新工作区')
-    await user.click(within(dialog).getByRole('button', { name: '确认创建' }))
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    await user.clear(nameInput)
+    await user.type(nameInput, '新工作区')
+    await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     expect((await within(dialog).findAllByText('同名 Workspace 已存在')).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByRole('dialog')).toBe(dialog)
     expect(stub.posts).toHaveLength(1)
@@ -254,8 +263,10 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     })
     const user = await openAlphaWorkbench()
     const dialog = await openWizard(user)
-    await user.type(within(dialog).getByLabelText('Workspace 名称'), '新工作区')
-    await user.click(within(dialog).getByRole('button', { name: '确认创建' }))
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    await user.clear(nameInput)
+    await user.type(nameInput, '新工作区')
+    await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await within(dialog).findByText('RepoLocation 当前不可用')
     expect(within(dialog).queryByRole('button', { name: '重试' })).toBeNull()
     expect(stub.posts).toHaveLength(1)
@@ -265,12 +276,14 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const stub = stubCreateFetch({})
     const user = await openAlphaWorkbench()
     let dialog = await openWizard(user)
-    await user.type(within(dialog).getByLabelText('Workspace 名称'), '半途')
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    await user.clear(nameInput)
+    await user.type(nameInput, '半途')
     await user.click(within(dialog).getByRole('button', { name: '取消' }))
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(stub.posts).toHaveLength(0)
     dialog = await openWizard(user)
-    expect(within(dialog).getByLabelText('Workspace 名称')).toHaveValue('')
+    expect(within(dialog).getByLabelText('工作空间名称')).toHaveValue('main')
   })
 
   it('C9 Escape 关闭零请求', async () => {
@@ -286,9 +299,11 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const stub = stubCreateFetch({})
     const user = await openAlphaWorkbench()
     const dialog = await openWizard(user)
-    const submit = within(dialog).getByRole('button', { name: '确认创建' })
+    const submit = within(dialog).getByRole('button', { name: '创建并打开' })
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    await user.clear(nameInput)
     expect(submit).toHaveAttribute('aria-disabled', 'true')
-    await user.type(within(dialog).getByLabelText('Workspace 名称'), 'x'.repeat(257))
+    await user.type(nameInput, 'x'.repeat(257))
     expect(submit).toHaveAttribute('aria-disabled', 'true')
     await user.click(submit)
     expect(stub.posts).toHaveLength(0)
@@ -300,8 +315,10 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     })
     const user = await openAlphaWorkbench()
     const dialog = await openWizard(user)
-    await user.type(within(dialog).getByLabelText('Workspace 名称'), '新工作区')
-    await user.click(within(dialog).getByRole('button', { name: '确认创建' }))
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    await user.clear(nameInput)
+    await user.type(nameInput, '新工作区')
+    await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await within(dialog).findByText(/meta/)
     expect(screen.getByRole('dialog')).toBe(dialog)
   })
@@ -312,9 +329,11 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     })
     const user = await openAlphaWorkbench()
     const dialog = await openWizard(user)
-    await user.type(within(dialog).getByLabelText('Workspace 名称'), '  间隔 名字  ')
+    const nameInput = within(dialog).getByLabelText('工作空间名称')
+    await user.clear(nameInput)
+    await user.type(nameInput, '  间隔 名字  ')
     await user.type(within(dialog).getByLabelText('目标（可选）'), '  带空格  ')
-    await user.click(within(dialog).getByRole('button', { name: '确认创建' }))
+    await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await waitFor(() => expect(stub.posts).toHaveLength(1))
     expect(JSON.parse(stub.posts[0].body)).toEqual({
       repo_location_id: ALPHA_LOC,
@@ -353,7 +372,7 @@ describe('P0-WORKBENCH-001-unblock', () => {
     expect(screen.queryByText('暂无任务')).toBeNull()
     // Workspaces 区块独立可达
     expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
-    const btn = screen.getByRole('button', { name: '创建 Workspace' })
+    const btn = screen.getByRole('button', { name: '创建工作空间' })
     expect(btn).toHaveAttribute('aria-disabled', 'true') // p1 无合格 repo
     expect(stub.posts).toHaveLength(0)
   })
@@ -363,11 +382,11 @@ describe('P0-WORKBENCH-001-unblock', () => {
     const user = userEvent.setup()
     renderApp('/projects/alpha/workbench')
     expect(await screen.findByText('Agent Mail 不可用', undefined, SLOW)).toBeInTheDocument()
-    expect(await screen.findByText('暂无 Workspace')).toBeInTheDocument()
-    const btn = screen.getByRole('button', { name: '创建 Workspace' })
+    expect(await screen.findByText('还没有工作空间')).toBeInTheDocument()
+    const btn = screen.getByRole('button', { name: '创建工作空间' })
     expect(btn).not.toHaveAttribute('aria-disabled', 'true')
     await user.click(btn)
-    expect(await screen.findByRole('dialog', { name: '创建 Workspace' })).toBeInTheDocument()
+    expect(await screen.findByRole('dialog', { name: '创建工作空间' })).toBeInTheDocument()
     expect(stub.gets.filter((c) => c.url.startsWith('/api/files'))).toHaveLength(0)
     expect(stub.posts).toHaveLength(0)
   })
@@ -377,5 +396,65 @@ describe('P0-WORKBENCH-001-unblock', () => {
     renderApp('/projects/p1/workbench')
     expect(await screen.findByText('正在加载运行时…')).toBeInTheDocument()
     expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('U4 createWorkspace=1 自动打开向导，取消后不因残留 query 重开', async () => {
+    stubCreateFetch({})
+    const user = userEvent.setup()
+    renderApp('/projects/alpha/workbench?createWorkspace=1')
+    const dialog = await screen.findByRole('dialog', { name: '创建工作空间' })
+    expect(within(dialog).getByLabelText('工作空间名称')).toHaveValue('main')
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '创建工作空间' })).toBeNull())
+  })
+
+  it('U5 工作空间区块始终排在 legacy runtime 前', async () => {
+    stubCreateFetch({ pendingUrls: ['/api/projects/alpha/workbench'] })
+    renderApp('/projects/alpha/workbench')
+    await screen.findByText('正在加载运行时…')
+    const headings = screen.getAllByRole('heading', { level: 2 })
+    expect(headings[0]).toHaveTextContent('工作空间')
+  })
+
+  it('U6 legacy 404/not_found 降级说明，不渲染红色项目不存在', async () => {
+    stubCreateFetch({
+      gets: {
+        '/api/projects/alpha/workbench': {
+          __status: 404,
+          __payload: { error: { code: 'not_found', message: '项目不存在', retryable: false } },
+        },
+      },
+    })
+    const { container } = renderApp('/projects/alpha/workbench')
+    expect(await screen.findByText('运行时信息尚未建立')).toBeInTheDocument()
+    expect(screen.queryByText('项目不存在')).toBeNull()
+    expect(container.querySelector('[data-state="error"]:not([hidden])')).toBeNull()
+    expect(screen.getByRole('button', { name: '创建工作空间' })).toBeInTheDocument()
+  })
+
+  it('U7 工作空间首页只突出可用文件与终端，其他能力进入低优先级说明', async () => {
+    stubCreateFetch({
+      gets: {
+        [`${WS_LIST_URL}/ws_new1`]: {
+          data: createdWorkspace,
+          meta: {
+            ...metaOk,
+            capabilities: {
+              'files.read': { available: true, reason: null },
+              'terminal.pty': { available: true, reason: null },
+            },
+          },
+        },
+      },
+    })
+    const { container } = renderApp('/projects/alpha/workspaces/ws_new1')
+    await screen.findByText('其他能力')
+    const main = container.querySelector('main')!
+    const cards = Array.from(main.querySelectorAll('.workspace-primary-actions .card'))
+    expect(cards.map((card) => card.querySelector('.card-label')?.textContent)).toEqual(['文件', '终端'])
+    expect(main).not.toHaveTextContent('ws_new1')
+    expect(within(main).queryByRole('link', { name: /任务/ })).toBeNull()
+    expect(within(main).queryByRole('link', { name: /编辑器|浏览器/ })).toBeNull()
+    expect(within(main).getByText(/任务、编辑器、浏览器/)).toBeInTheDocument()
   })
 })

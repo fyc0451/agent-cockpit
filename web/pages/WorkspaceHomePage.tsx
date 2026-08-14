@@ -1,4 +1,3 @@
-import { useId } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import type { Project, Workspace } from '../api/types'
 import { routes } from '../app/routes'
@@ -7,112 +6,88 @@ import { PageHeader } from '../components/PageHeader'
 import { Tag, toneForLocation, toneForStatus } from '../components/Tag'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
-import { useCapability, workspaceScope, type CapabilityKey } from '../state/capabilities'
+import { useCapability, workspaceScope } from '../state/capabilities'
 
-interface CardDef {
-  label: string
-  icon: string
-  /** 已接通卡片的深链 builder；null 表示未接通 */
-  build: ((project: string, workspace: string) => string) | null
-  capKey: CapabilityKey | null
-}
-
-// SLICE-001：文件卡由 files.read、终端卡由 terminal.pty 的 server 权威值控制；
-// 未接通能力一律 fail-closed（禁用 + 可见 reason + 零请求）
-const CARDS: CardDef[] = [
-  { label: '文件', icon: '🗀', build: routes.workspace.files, capKey: 'files.read' },
-  { label: '终端', icon: '▸', build: routes.workspace.terminal, capKey: 'terminal.pty' },
-  { label: '任务', icon: '☑', build: routes.workspace.tasks, capKey: null },
-  { label: '编辑器', icon: '✎', build: null, capKey: 'editor.embedded' },
-  { label: '浏览器', icon: '◎', build: null, capKey: 'browser' },
-]
-
-function NavCard({
-  card,
-  projectId,
-  workspaceId,
-}: {
-  card: CardDef
-  projectId: string
-  workspaceId: string
-}) {
-  const descId = useId()
-  const cap = useCapability(
-    card.capKey ?? 'browser',
-    workspaceScope(projectId, workspaceId),
-  )
-  const enabled = card.capKey == null ? card.build != null : cap.available && card.build != null
-  if (!enabled) {
-    const reason = cap.reason ?? '未接通'
-    // 可聚焦 + aria-disabled + aria-describedby 关联可见 reason 节点；Enter/Space/click 拦截
-    return (
-      <div
-        className="card card--disabled"
-        title={reason}
-        aria-disabled="true"
-        aria-describedby={descId}
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            e.stopPropagation()
-          }
-        }}
-      >
-        <span className="card-icon" aria-hidden="true">{card.icon}</span>
-        <span className="card-label">{card.label}</span>
-        <span id={descId} className="card-reason ellipsis">{reason}</span>
-      </div>
-    )
-  }
+function ToolCard({ to, icon, label }: { to: string; icon: string; label: string }) {
   return (
-    <Link className="card" to={card.build!(projectId, workspaceId)}>
-      <span className="card-icon" aria-hidden="true">{card.icon}</span>
-      <span className="card-label">{card.label}</span>
+    <Link className="card" to={to}>
+      <span className="card-icon" aria-hidden="true">{icon}</span>
+      <span className="card-label">{label}</span>
     </Link>
   )
 }
 
+function UnavailableTool({ label, reason }: { label: string; reason: string }) {
+  return (
+    <div className="card card--disabled workspace-secondary-item" aria-disabled="true">
+      <span className="card-label">{label}</span>
+      <span className="card-reason">{reason}</span>
+    </div>
+  )
+}
+
 function WorkspaceBody({ project, workspace }: { project: Project; workspace: Workspace }) {
-  const projectId = project.slug ?? ''
+  const projectSlug = project.slug ?? ''
   const workspaceId = workspace.id ?? ''
-  const delCap = useCapability('workspace.delete', workspaceScope(projectId, workspaceId))
+  const scope = workspaceScope(projectSlug, workspaceId)
+  const filesCap = useCapability('files.read', scope)
+  const terminalCap = useCapability('terminal.pty', scope)
+  const editorCap = useCapability('editor.embedded', scope)
+  const browserCap = useCapability('browser', scope)
+  const delCap = useCapability('workspace.delete', scope)
 
   return (
     <>
-      <PageHeader
-        title={workspace.name ?? workspace.id}
-        sub={`${project.name ?? project.slug} 的 Workspace`}
-        actions={
-          <Button variant="danger" disabled title={delCap.reason ?? '未开放'}>
-            删除 Workspace
-          </Button>
-        }
-      />
+      <PageHeader title={workspace.name ?? workspace.id} sub={`${project.name ?? project.slug} 的工作空间`} />
+      <div className="card-grid workspace-primary-actions">
+        {filesCap.available ? (
+          <ToolCard to={routes.workspace.files(projectSlug, workspaceId)} icon="🗀" label="文件" />
+        ) : null}
+        {terminalCap.available ? (
+          <ToolCard to={routes.workspace.terminal(projectSlug, workspaceId)} icon="▸" label="终端" />
+        ) : null}
+      </div>
+
       <section className="panel">
-        <h2 className="panel-title">元信息</h2>
+        <h2 className="panel-title">工作空间信息</h2>
         <div className="kv-grid">
-          <span className="kv-key">Workspace ID</span>
-          <span className="ellipsis">{workspace.workspace_id ?? workspace.id ?? '—'}</span>
           <span className="kv-key">位置</span>
           <span>
             <Tag tone={toneForLocation(workspace.location)}>
-              {workspace.location === 'remote' ? '远程' : '本机 Local'}
+              {workspace.location === 'remote' ? '远程' : '本机'}
             </Tag>
           </span>
-          <span className="kv-key">隔离</span>
-          <span className="ellipsis">{workspace.isolation_kind ?? '—'}</span>
           <span className="kv-key">状态</span>
           <span>
             {workspace.status ? <Tag tone={toneForStatus(workspace.status)}>{workspace.status}</Tag> : '—'}
           </span>
         </div>
       </section>
-      <div className="card-grid">
-        {CARDS.map((card) => (
-          <NavCard key={card.label} card={card} projectId={projectId} workspaceId={workspaceId} />
-        ))}
-      </div>
+
+      <details className="workspace-secondary">
+        <summary>其他能力</summary>
+        <p className="list-sub">任务、编辑器、浏览器、通信与连接尚未开放。</p>
+        {!filesCap.available ? (
+          <UnavailableTool label="文件" reason={filesCap.reason ?? '文件能力尚未开放'} />
+        ) : null}
+        {!terminalCap.available ? (
+          <UnavailableTool label="终端" reason={terminalCap.reason ?? '终端能力尚未开放'} />
+        ) : null}
+        {!editorCap.available ? (
+          <UnavailableTool label="编辑器" reason={editorCap.reason ?? '编辑器尚未开放'} />
+        ) : null}
+        {!browserCap.available ? (
+          <UnavailableTool label="浏览器" reason={browserCap.reason ?? '浏览器尚未开放'} />
+        ) : null}
+        <Button
+          variant="ghost"
+          disabled
+          aria-label="删除工作空间"
+          title={delCap.reason ?? '删除工作空间尚未开放'}
+        >
+          删除工作空间
+        </Button>
+      </details>
     </>
   )
 }

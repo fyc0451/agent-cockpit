@@ -104,7 +104,7 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
       },
     })
     const { container } = renderWithNav('/projects/p1/workspaces/w1')
-    const del = await screen.findByRole('button', { name: '删除 Workspace' })
+    const del = await screen.findByRole('button', { name: '删除工作空间' })
     expect(del).toHaveAttribute('aria-disabled', 'true')
     const cards = Array.from(container.querySelectorAll('.card'))
     expect(cards.find((c) => c.textContent?.includes('编辑器'))).toHaveClass('card--disabled')

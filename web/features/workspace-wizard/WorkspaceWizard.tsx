@@ -54,7 +54,7 @@ export function WorkspaceWizard({
   const create = useCreateWorkspace()
 
   const [repoId, setRepoId] = useState<string | null>(null)
-  const [name, setName] = useState('')
+  const [name, setName] = useState('main')
   const [goal, setGoal] = useState('')
   const [submitBinding, setSubmitBinding] = useState<{
     serializedBody: string
@@ -68,7 +68,7 @@ export function WorkspaceWizard({
   useEffect(() => {
     if (open) {
       setRepoId(null)
-      setName('')
+      setName('main')
       setGoal('')
       setSubmitBinding(null)
       setSubmitError(null)
@@ -84,10 +84,10 @@ export function WorkspaceWizard({
   const nameOk = name.length >= 1 && name.length <= NAME_MAX
   const goalOk = goal.length <= GOAL_MAX
   const submitReason = !selected
-    ? '所选 RepoLocation 已不可用'
+    ? '所选项目目录已不可用'
     : !nameOk
       ? name.length === 0
-        ? '请填写 Workspace 名称'
+        ? '请填写工作空间名称'
         : `名称最长 ${NAME_MAX} 字符`
       : !goalOk
         ? `目标最长 ${GOAL_MAX} 字符`
@@ -131,11 +131,11 @@ export function WorkspaceWizard({
         className="modal"
         role="dialog"
         aria-modal="true"
-        aria-label="创建 Workspace"
+        aria-label="创建工作空间"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="drawer-head">
-          <h2 className="panel-title">创建 Workspace</h2>
+          <h2 className="panel-title">创建工作空间</h2>
           <button type="button" className="btn btn--icon" aria-label="关闭" onClick={onClose}>
             ×
           </button>
@@ -145,35 +145,30 @@ export function WorkspaceWizard({
           {repos.length > 1 ? (
             <>
               <label className="kv-key" htmlFor="ws-create-repo">
-                RepoLocation
+                项目目录
               </label>
               <select
                 id="ws-create-repo"
                 className="input"
-                aria-label="RepoLocation"
+                aria-label="项目目录"
                 value={selected?.repo_location_id ?? ''}
                 onChange={(e) => setRepoId(e.target.value)}
               >
-                {repos.map((r) => (
+                {repos.map((r, index) => (
                   <option key={r.repo_location_id} value={r.repo_location_id}>
-                    {r.repo_location_id}（{r.vcs_kind}）
+                    项目目录 {index + 1}（{r.vcs_kind === 'git' ? 'Git' : '普通目录'}）
                   </option>
                 ))}
               </select>
             </>
-          ) : (
-            <>
-              <span className="kv-key">RepoLocation</span>
-              <span className="ellipsis">{selected?.repo_location_id ?? '无可用项'}</span>
-            </>
-          )}
+          ) : null}
           <label className="kv-key" htmlFor="ws-create-name">
-            Workspace 名称
+            工作空间名称
           </label>
           <input
             id="ws-create-name"
             className="input"
-            aria-label="Workspace 名称"
+            aria-label="工作空间名称"
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
@@ -189,7 +184,7 @@ export function WorkspaceWizard({
           />
           <span className="kv-key">隔离</span>
           <span>
-            <Tag tone="neutral">shared 共享目录（worktree 后续增量开放）</Tag>
+            <Tag tone="neutral">使用共享项目目录</Tag>
           </span>
         </div>
 
@@ -208,7 +203,7 @@ export function WorkspaceWizard({
             title={submitReason ?? undefined}
             onClick={submit}
           >
-            {create.isPending ? '创建中…' : '确认创建'}
+            {create.isPending ? '创建中…' : '创建并打开'}
           </Button>
           <Button variant="ghost" onClick={onClose}>
             取消
@@ -226,7 +221,7 @@ function SubmitErrorNote({ error, onRetry }: { error: ApiError; onRetry: () => v
         <StatusState
           kind="conflict"
           banner
-          title="同名 Workspace 已存在"
+          title="同名工作空间已存在"
           description={error.message}
         />
       )

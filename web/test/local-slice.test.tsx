@@ -246,8 +246,8 @@ describe('SLICE-001 页面纵切', () => {
     renderApp('/projects/p1/workbench')
     expect(await screen.findByText('修复登录回归')).toBeInTheDocument()
     expect(screen.getByText('main')).toBeInTheDocument() // session 名
-    // persisted workspace 深链（rail 也有同名链接，取 Workspaces 面板内的）
-    await screen.findByText('Workspaces')
+    // persisted workspace 深链（rail 也有同名链接，取工作空间面板内的）
+    await screen.findByText('工作空间')
     const links = await screen.findAllByRole('link', { name: '本机工作区' })
     expect(
       links.some((l) => l.getAttribute('href')?.includes('/projects/p1/workspaces/w1')),
@@ -295,7 +295,7 @@ describe('SLICE-001 页面纵切', () => {
     stubOpenFetch()
     const { container } = renderApp('/projects/p1/workspaces/w1')
     // 等 workspace home 主体落地（rail 有同名链接，必须锚定主区）
-    await screen.findByRole('button', { name: '删除 Workspace' })
+    await screen.findByRole('button', { name: '删除工作空间' })
     const main = container.querySelector('main')!
     const filesCard = within(main).getByRole('link', { name: /文件/ })
     expect(filesCard).toHaveAttribute('href', expect.stringContaining('/projects/p1/workspaces/w1/files'))

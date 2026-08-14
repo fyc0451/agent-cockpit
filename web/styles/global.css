@@ -366,6 +366,10 @@ pre {
   flex: none;
 }
 
+.rail-mobile-label {
+  display: none;
+}
+
 .runtime-mini {
   display: flex;
   align-items: center;
@@ -627,6 +631,35 @@ pre {
 .card-reason {
   font-size: 10px;
   color: var(--muted);
+}
+
+.workspace-primary-actions:empty {
+  display: none;
+}
+
+.workspace-secondary {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workspace-secondary summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.workspace-secondary-item {
+  gap: 3px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.workspace-secondary .btn {
+  margin-top: 8px;
 }
 
 .raw-json {
@@ -1269,9 +1302,10 @@ pre {
     flex-direction: row;
     position: relative;
     min-width: 0;
-    width: auto;
+    width: 0;
+    flex: 1 1 auto;
     gap: 2px;
-    overflow-x: auto;
+    overflow-x: hidden;
     overflow-y: hidden;
     padding: 4px;
   }
@@ -1285,6 +1319,23 @@ pre {
 
   .rail-item {
     padding: 8px;
+  }
+
+  .rail-item--mobile-hidden {
+    display: none;
+  }
+
+  .rail-item--mobile-core {
+    gap: 4px;
+    padding-inline: 7px;
+  }
+
+  .rail-item--mobile-core .rail-mobile-label {
+    display: inline;
+    max-width: 3em;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 11px;
   }
 
   .runtime-mini {
