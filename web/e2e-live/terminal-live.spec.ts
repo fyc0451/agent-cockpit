@@ -344,7 +344,6 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     await page.getByRole('button', { name: '选择代码目录' }).click()
     const projectDialog = page.getByRole('dialog', { name: '添加项目' })
     await expect(projectDialog).toBeVisible()
-    await projectDialog.getByRole('button', { name: /Local/ }).click()
     const uploadsRoot = projectDialog.getByRole('button', { name: /^uploads$/i })
     await expect(uploadsRoot, 'runner-owned uploads root must be listed').toBeVisible()
     await uploadsRoot.click()
