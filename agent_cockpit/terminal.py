@@ -30,6 +30,7 @@ import pty
 import select
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import tempfile
@@ -71,6 +72,9 @@ _replace_label_lock = threading.Lock()
 
 SHELL = os.environ.get("SHELL", "/bin/bash")
 HOME = os.path.expanduser("~")
+WORKSPACE_SHELL = "/bin/bash"
+WORKSPACE_HOME = "/nonexistent"
+WORKSPACE_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 # 窗口尺寸合法范围(防 ioctl 异常值/资源消耗)
 MIN_COLS, MAX_COLS = 1, 500
@@ -157,6 +161,13 @@ def _get(term_id: str) -> dict[str, Any] | None:
         return _terms.get(term_id)
 
 
+def _get_owned(term_id: str, owner_kind: str) -> dict[str, Any] | None:
+    value = _get(term_id)
+    if value is None or value.get("owner_kind", "legacy") != owner_kind:
+        return None
+    return value
+
+
 def _active_count() -> int:
     with _lock:
         return sum(1 for t in _terms.values() if t.get("alive"))
@@ -184,6 +195,98 @@ def create_term(
     初始化提示；普通 Web 终端仍启动登录 shell。尺寸非法抛 ValueError；活跃终端
     达上限抛 RuntimeError。
     """
+    return _create_term(
+        cwd=cwd,
+        root_fd=None,
+        cols=cols,
+        rows=rows,
+        label=label,
+        command=command,
+        owner_kind="legacy",
+    )
+
+
+def create_bound_term(
+    root_fd: int,
+    cols: int = 80,
+    rows: int = 24,
+) -> dict[str, Any]:
+    """Create a fixed-shell PTY rooted at an already-authorized directory FD.
+
+    The caller retains ownership of ``root_fd``.  The browser cannot select the
+    shell, argv, environment, path, or the internal returned terminal ID.
+    """
+    if type(root_fd) is not int or root_fd < 0:
+        raise ValueError("Workspace root descriptor is invalid")
+    try:
+        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            raise ValueError("Workspace root descriptor is not a directory")
+        os.set_inheritable(root_fd, False)
+    except OSError as exc:
+        raise ValueError("Workspace root descriptor is unavailable") from exc
+    cols, rows = validate_workspace_dimensions(cols, rows)
+    return _create_term(
+        cwd=None,
+        root_fd=root_fd,
+        cols=cols,
+        rows=rows,
+        label=None,
+        command=None,
+        owner_kind="workspace",
+    )
+
+
+def _workspace_shell_argv() -> tuple[str, ...]:
+    return (WORKSPACE_SHELL, "--noprofile", "--norc", "-i")
+
+
+def _workspace_shell_env(shell: str) -> dict[str, str]:
+    """Return the closed environment passed to Workspace shells."""
+    return {
+        "HOME": WORKSPACE_HOME,
+        "PATH": WORKSPACE_PATH,
+        "SHELL": shell,
+        "TERM": "xterm-256color",
+    }
+
+
+def validate_workspace_dimensions(cols: Any, rows: Any) -> tuple[int, int]:
+    """Validate the exact integer dimensions accepted by Workspace PTYs."""
+    if (
+        type(cols) is not int
+        or type(rows) is not int
+        or not MIN_COLS <= cols <= MAX_COLS
+        or not MIN_ROWS <= rows <= MAX_ROWS
+    ):
+        raise ValueError("Workspace terminal dimensions are invalid")
+    return cols, rows
+
+
+def _child_failed(status_fd: int) -> None:
+    try:
+        os.write(status_fd, b"1")
+    except OSError:
+        pass
+    os._exit(127)
+
+
+def _legacy_chdir(workdir: str) -> None:
+    try:
+        os.chdir(workdir)
+    except OSError:
+        os.chdir(HOME)
+
+
+def _create_term(
+    *,
+    cwd: str | None,
+    root_fd: int | None,
+    cols: int,
+    rows: int,
+    label: str | None,
+    command: list[str] | None,
+    owner_kind: str,
+) -> dict[str, Any]:
     cols, rows = _valid_dims(cols, rows)
     label = _valid_label(label)
     if command is not None:
@@ -201,30 +304,87 @@ def create_term(
     if _active_count() >= max_terms:
         raise RuntimeError(f"活跃终端数已达上限 {max_terms}")
 
+    status_read, status_write = os.pipe2(getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.set_inheritable(status_read, False)
+        os.set_inheritable(status_write, False)
+    except BaseException:
+        for status_fd in (status_read, status_write):
+            try:
+                os.close(status_fd)
+            except OSError:
+                pass
+        raise
     # pty.fork:子进程返回 0,父进程返回 master_fd + pid
     with _fork_lock:
-        pid, master_fd = pty.fork()
+        try:
+            pid, master_fd = pty.fork()
+        except BaseException:
+            os.close(status_read)
+            os.close(status_write)
+            raise
         if pid == 0:
+            os.close(status_read)
             # ── 子进程:exec 登录 shell 或服务端指定的交互程序 ──
             try:
-                os.chdir(workdir)
-            except OSError:
-                os.chdir(HOME)
-            os.environ["TERM"] = "xterm-256color"
-            argv = command or [SHELL, "-l"]
-            os.execv(argv[0], argv)
-            os._exit(127)  # execv 失败才到这
+                if root_fd is not None:
+                    os.fchdir(root_fd)
+                    argv = _workspace_shell_argv()
+                    os.execve(argv[0], list(argv), _workspace_shell_env(argv[0]))
+                else:
+                    _legacy_chdir(workdir)
+                    os.environ["TERM"] = "xterm-256color"
+                    argv = command or [SHELL, "-l"]
+                    os.execv(argv[0], argv)
+            except BaseException:
+                _child_failed(status_write)
+            _child_failed(status_write)
+        try:
+            os.close(status_write)
+        except OSError:
+            try:
+                _kill_child_exact(pid, master_fd)
+            finally:
+                try:
+                    os.close(status_read)
+                except OSError:
+                    pass
+            raise
         try:
             os.set_inheritable(master_fd, False)
         except OSError:
-            _kill_child(pid, master_fd)
+            try:
+                _kill_child_exact(pid, master_fd)
+            finally:
+                try:
+                    os.close(status_read)
+                except OSError:
+                    pass
             raise
+        try:
+            child_failed = os.read(status_read, 1) != b""
+            os.close(status_read)
+        except OSError:
+            try:
+                _kill_child_exact(pid, master_fd)
+            finally:
+                try:
+                    os.close(status_read)
+                except OSError:
+                    pass
+            raise
+        if child_failed:
+            _kill_child(pid, master_fd)
+            raise OSError("PTY child setup failed")
     # ── 父进程 ──
     try:
         # 设非阻塞,便于 select 轮询
         flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
         fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-        _set_size(master_fd, cols, rows)
+        if owner_kind == "workspace":
+            _set_size_exact(master_fd, cols, rows)
+        else:
+            _set_size(master_fd, cols, rows)
     except OSError:
         _kill_child(pid, master_fd)
         raise
@@ -241,6 +401,7 @@ def create_term(
                 "lock": threading.Lock(), "write_lock": threading.Lock(),
                 "created_ts": now, "last_active": now,
                 "dead_ts": None, "label": label, "output_history": bytearray(),
+                "output_history_truncated": False, "owner_kind": owner_kind,
                 "color_scheme": "dark",
                 "startup_color_query": _new_startup_color_query_state(now),
                 "startup_color_replies": [],
@@ -315,10 +476,14 @@ def _kill_child(pid: int, master_fd: int) -> None:
 def _set_size(fd: int, cols: int, rows: int) -> None:
     """设 PTY 窗口大小。"""
     try:
-        winsize = struct.pack("HHHH", rows, cols, 0, 0)
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+        _set_size_exact(fd, cols, rows)
     except OSError:
         pass
+
+
+def _set_size_exact(fd: int, cols: int, rows: int) -> None:
+    winsize = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
 
 def resize_term(term_id: str, cols: int, rows: int) -> None:
@@ -327,7 +492,7 @@ def resize_term(term_id: str, cols: int, rows: int) -> None:
         cols, rows = _valid_dims(cols, rows)
     except ValueError:
         return
-    t = _get(term_id)
+    t = _get_owned(term_id, "legacy")
     if not t:
         return
     with t["lock"]:
@@ -335,11 +500,23 @@ def resize_term(term_id: str, cols: int, rows: int) -> None:
             _set_size(t["master_fd"], cols, rows)
 
 
+def _resize_workspace_term(term_id: str, cols: int, rows: int) -> bool:
+    cols, rows = validate_workspace_dimensions(cols, rows)
+    t = _get_owned(term_id, "workspace")
+    if t is None:
+        return False
+    with t["lock"]:
+        if not t.get("alive"):
+            return False
+        _set_size_exact(t["master_fd"], cols, rows)
+        return True
+
+
 def set_color_scheme(term_id: str, mode: Any, *, notify: bool = False) -> bool:
     """更新 PTY host 明暗主题；运行期只向带 Herdr 标签的终端发 Mode 2031 报告。"""
     if not isinstance(mode, str) or mode not in _COLOR_SCHEME_QUERY_REPLIES:
         return False
-    t = _get(term_id)
+    t = _get_owned(term_id, "legacy")
     if not t:
         return False
     with t["lock"]:
@@ -359,7 +536,7 @@ def set_color_scheme(term_id: str, mode: Any, *, notify: bool = False) -> bool:
 
 def term_label(term_id: str) -> str | None:
     """返回终端的受校验 label；供上层把 Herdr 控制限定到对应 session。"""
-    t = _get(term_id)
+    t = _get_owned(term_id, "legacy")
     if not t:
         return None
     with t["lock"]:
@@ -378,19 +555,23 @@ def write_term(term_id: str, data: str) -> None:
     master_fd 引用,另一线程 kill_term 关 fd 后该 fd 号可能被系统复用于
     新文件,锁外 os.write 就写到了错误对象上;副本杜绝 fd 复用误写。
     """
-    t = _get(term_id)
+    _write_owned(term_id, data, "legacy")
+
+
+def _write_owned(term_id: str, data: str, owner_kind: str) -> bool:
+    t = _get_owned(term_id, owner_kind)
     if not t:
-        return
+        return False
     buf = data.encode("utf-8")
     if not buf:
-        return
+        return False
     total = len(buf)
     with t["write_lock"]:
         write_timeout = float(_term_cfg("write_timeout", WRITE_TIMEOUT))
         deadline = time.monotonic() + write_timeout
         with t["lock"]:
             if not t.get("alive"):
-                return
+                return False
             # dup 一份 fd 副本:锁外写副本。若直接持有 master_fd 引用，另一线程
             # kill_term 关 fd 后该 fd 号可能被系统复用于新文件，锁外 os.write 就
             # 写到了错误对象上；副本杜绝 fd 复用误写。
@@ -424,6 +605,10 @@ def write_term(term_id: str, data: str) -> None:
                         f"write_term 失败(终端可能已关闭):"
                         f"已写入 {total - len(buf)}/{total} 字节: {e}"
                     ) from e
+                if n <= 0:
+                    raise ConnectionError(
+                        "write_term 未写入任何字节: PTY 已不可用"
+                    )
                 buf = buf[n:]
                 t["last_active"] = time.monotonic()
         finally:
@@ -431,6 +616,7 @@ def write_term(term_id: str, data: str) -> None:
                 os.close(fd)
             except OSError:
                 pass
+    return True
 
 
 def _remember_output(t: dict[str, Any], data: bytes) -> None:
@@ -439,8 +625,10 @@ def _remember_output(t: dict[str, Any], data: bytes) -> None:
     history = t.setdefault("output_history", bytearray())
     history.extend(data)
     if OUTPUT_HISTORY_MAX <= 0:
+        t["output_history_truncated"] = bool(history)
         history.clear()
     elif len(history) > OUTPUT_HISTORY_MAX:
+        t["output_history_truncated"] = True
         del history[:-OUTPUT_HISTORY_MAX]
 
 
@@ -537,14 +725,16 @@ def _take_startup_color_replies(t: dict[str, Any]) -> list[bytes]:
     return replies
 
 
-def _send_startup_color_replies(term_id: str, replies: list[bytes]) -> None:
+def _send_startup_color_replies(
+    term_id: str, replies: list[bytes], owner_kind: str,
+) -> None:
     if not replies:
         return
     # 让查询程序完成 raw-mode 切换，避免回复被行规程回显成可见文本。
     time.sleep(STARTUP_COLOR_REPLY_DELAY)
     for reply in replies:
         try:
-            write_term(term_id, reply.decode("ascii"))
+            _write_owned(term_id, reply.decode("ascii"), owner_kind)
         except OSError:
             return
 
@@ -572,23 +762,36 @@ def read_output(term_id: str, timeout: float = 0.1) -> bytes:
 
     进程退出(alive=False)后仍可读:内核保留 PTY 缓冲,直到 EIO 读尽。
     """
-    t = _get(term_id)
+    t = _get_owned(term_id, "legacy")
     if not t:
         return b""
     with t["lock"]:
         data = _read_fd(t, timeout)
         replies = _take_startup_color_replies(t)
-    _send_startup_color_replies(term_id, replies)
+    _send_startup_color_replies(term_id, replies, "legacy")
     return data
 
 
 def output_history(term_id: str) -> bytes:
     """返回浏览器新 xterm 重建屏幕所需的有界尾输出。"""
-    t = _get(term_id)
+    t = _get_owned(term_id, "legacy")
     if not t:
         return b""
     with t["lock"]:
         return bytes(t.get("output_history") or b"")
+
+
+def _output_snapshot_owned(
+    term_id: str, owner_kind: str,
+) -> tuple[bytes | None, bool]:
+    t = _get_owned(term_id, owner_kind)
+    if not t:
+        return None, False
+    with t["lock"]:
+        return (
+            bytes(t.get("output_history") or b""),
+            bool(t.get("output_history_truncated")),
+        )
 
 
 def read_available(
@@ -602,7 +805,13 @@ def read_available(
     使用 timeout，后续用零等待排空并设置软上限，减少 WebSocket 消息和前端
     xterm.write 次数；全程持状态锁，避免 kill/close 后读取复用 fd。
     """
-    t = _get(term_id)
+    return _read_available_owned(term_id, timeout, max_bytes, "legacy")
+
+
+def _read_available_owned(
+    term_id: str, timeout: float, max_bytes: int, owner_kind: str,
+) -> bytes:
+    t = _get_owned(term_id, owner_kind)
     if not t or max_bytes <= 0:
         return b""
     chunks: list[bytes] = []
@@ -621,7 +830,7 @@ def read_available(
                 chunks.append(data)
                 total += len(data)
             replies = _take_startup_color_replies(t)
-    _send_startup_color_replies(term_id, replies)
+    _send_startup_color_replies(term_id, replies, owner_kind)
     return b"".join(chunks)
 
 
@@ -631,7 +840,11 @@ def drain_output(term_id: str, timeout: float = 0.5) -> bytes:
     契约:server pump 在 is_alive 返回 False 后应立即调用本函数取尾输出。
     sweep_idle 对已退出进程留有 DEAD_GRACE 宽限;宽限过后 fd 关闭,无法再读。
     """
-    t = _get(term_id)
+    return _drain_output_owned(term_id, timeout, "legacy")
+
+
+def _drain_output_owned(term_id: str, timeout: float, owner_kind: str) -> bytes:
+    t = _get_owned(term_id, owner_kind)
     if not t:
         return b""
     output = bytearray()
@@ -647,7 +860,7 @@ def drain_output(term_id: str, timeout: float = 0.5) -> bytes:
             if overflow > 0:
                 del output[:overflow]
         replies = _take_startup_color_replies(t)
-    _send_startup_color_replies(term_id, replies)
+    _send_startup_color_replies(term_id, replies, owner_kind)
     return bytes(output)
 
 
@@ -675,7 +888,11 @@ def _check_alive(t: dict[str, Any]) -> bool:
 
 def is_alive(term_id: str) -> bool:
     """终端子进程是否还在。"""
-    t = _get(term_id)
+    return _is_alive_owned(term_id, "legacy")
+
+
+def _is_alive_owned(term_id: str, owner_kind: str) -> bool:
+    t = _get_owned(term_id, owner_kind)
     if not t:
         return False
     with t["lock"]:
@@ -685,7 +902,12 @@ def is_alive(term_id: str) -> bool:
 def kill_term(term_id: str, *, superseded: bool = False) -> None:
     """关闭终端:杀进程组 + 关 fd + waitpid 回收 + 移出池。"""
     with _lock:
-        t = _terms.pop(term_id, None)
+        current = _terms.get(term_id)
+        t = (
+            _terms.pop(term_id, None)
+            if current is not None and current.get("owner_kind", "legacy") == "legacy"
+            else None
+        )
         if t and superseded:
             _superseded_terms[term_id] = time.monotonic()
     if not t:
@@ -696,6 +918,93 @@ def kill_term(term_id: str, *, superseded: bool = False) -> None:
         with t["lock"]:
             t["alive"] = False
             _kill_child(t["pid"], t["master_fd"])
+
+
+def _kill_child_exact(pid: int, master_fd: int) -> bool:
+    if type(pid) is not int or pid <= 1:
+        return False
+    try:
+        result, _ = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        result = pid
+    except OSError:
+        return False
+    if result == 0:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                return False
+    try:
+        os.close(master_fd)
+        closed = True
+    except OSError:
+        closed = False
+    if result == 0:
+        try:
+            waited, _ = os.waitpid(pid, 0)
+        except (ChildProcessError, OSError):
+            return False
+        if waited != pid:
+            return False
+    return closed
+
+
+def _kill_workspace_term(term_id: str) -> bool:
+    t = _get_owned(term_id, "workspace")
+    if t is None:
+        return False
+    with t["write_lock"]:
+        with t["lock"]:
+            if not _kill_child_exact(t["pid"], t["master_fd"]):
+                return False
+            t["alive"] = False
+    with _lock:
+        if _terms.get(term_id) is t:
+            _terms.pop(term_id, None)
+    return True
+
+
+class _WorkspaceTerminalEngine:
+    create_bound_term = staticmethod(create_bound_term)
+    validate_dimensions = staticmethod(validate_workspace_dimensions)
+
+    @staticmethod
+    def resize_term_exact(term_id: str, cols: int, rows: int) -> bool:
+        return _resize_workspace_term(term_id, cols, rows)
+
+    @staticmethod
+    def write_term(term_id: str, data: str) -> bool:
+        return _write_owned(term_id, data, "workspace")
+
+    @staticmethod
+    def interrupt_term(term_id: str) -> bool:
+        return _write_owned(term_id, "\x03", "workspace")
+
+    @staticmethod
+    def output_snapshot(term_id: str) -> tuple[bytes, bool]:
+        return _output_snapshot_owned(term_id, "workspace")
+
+    @staticmethod
+    def read_available(term_id: str, timeout: float, max_bytes: int) -> bytes:
+        return _read_available_owned(term_id, timeout, max_bytes, "workspace")
+
+    @staticmethod
+    def drain_output(term_id: str, timeout: float = 0.5) -> bytes:
+        return _drain_output_owned(term_id, timeout, "workspace")
+
+    @staticmethod
+    def is_alive(term_id: str) -> bool:
+        return _is_alive_owned(term_id, "workspace")
+
+    @staticmethod
+    def kill_term(term_id: str) -> bool:
+        return _kill_workspace_term(term_id)
+
+
+workspace_engine = _WorkspaceTerminalEngine()
 
 
 def was_superseded(term_id: str) -> bool:
@@ -735,19 +1044,23 @@ def sweep_idle(max_idle: float | None = None) -> int:
         for term_id in expired_superseded:
             _superseded_terms.pop(term_id, None)
         items = list(_terms.items())
-    victims = []
+    victims: list[tuple[str, str]] = []
     for tid, t in items:
+        owner_kind = str(t.get("owner_kind", "legacy"))
         with t["lock"]:
             alive = _check_alive(t)
             idle_for = now - t.get("last_active", now)
             dead_ts = t.get("dead_ts")
             dead_for = (now - dead_ts) if dead_ts is not None else None
-        if idle_for > max_idle and alive:
-            victims.append(tid)
+        if owner_kind == "legacy" and idle_for > max_idle and alive:
+            victims.append((tid, owner_kind))
         elif not alive and (dead_for is None or dead_for > DEAD_GRACE):
-            victims.append(tid)
-    for tid in victims:
-        kill_term(tid)
+            victims.append((tid, owner_kind))
+    for tid, owner_kind in victims:
+        if owner_kind == "workspace":
+            _kill_workspace_term(tid)
+        else:
+            kill_term(tid)
     return len(victims)
 
 
@@ -908,12 +1221,14 @@ def user_typing_recently(session: str, pane_id: str | None = None) -> bool:
 
 
 def list_terms() -> list[dict[str, Any]]:
-    """列出所有终端会话。"""
+    """列出 legacy 终端会话；Workspace PTY 不暴露内部 ID/PID。"""
     now = time.monotonic()
     with _lock:
         items = list(_terms.items())
     result = []
     for tid, t in items:
+        if t.get("owner_kind", "legacy") != "legacy":
+            continue
         with t["lock"]:
             alive = _check_alive(t)
             result.append({

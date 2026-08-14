@@ -19,8 +19,16 @@ from agent_cockpit import terminal
 @pytest.fixture(autouse=True)
 def cleanup_terms():
     yield
-    for t in terminal.list_terms():
-        terminal.kill_term(t["id"])
+    with terminal._lock:
+        terms = [
+            (term_id, state.get("owner_kind", "legacy"))
+            for term_id, state in terminal._terms.items()
+        ]
+    for term_id, owner_kind in terms:
+        if owner_kind == "workspace":
+            terminal.workspace_engine.kill_term(term_id)
+        else:
+            terminal.kill_term(term_id)
     with terminal._lock:
         terminal._superseded_terms.clear()
         terminal._session_pane_input.clear()
@@ -106,6 +114,178 @@ def test_create_stores_safe_display_label():
     for label in ("", " ", "x" * 65, "bad\nname", "bad\x7fname"):
         with pytest.raises(ValueError, match="名称"):
             terminal.create_term(label=label)
+
+
+def test_workspace_shell_policy_is_fixed_and_closed():
+    assert terminal._workspace_shell_argv() == (
+        "/bin/bash", "--noprofile", "--norc", "-i",
+    )
+    assert terminal._workspace_shell_env("/bin/bash") == {
+        "HOME": "/nonexistent",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "SHELL": "/bin/bash",
+        "TERM": "xterm-256color",
+    }
+
+
+def test_legacy_chdir_failure_keeps_home_fallback(monkeypatch):
+    calls = []
+
+    def chdir(path):
+        calls.append(path)
+        if path == "/missing":
+            raise OSError("missing")
+
+    monkeypatch.setattr(terminal.os, "chdir", chdir)
+    monkeypatch.setattr(terminal, "HOME", "/legacy-home")
+    terminal._legacy_chdir("/missing")
+    assert calls == ["/missing", "/legacy-home"]
+
+
+@pytest.mark.parametrize("failure", ("status_write_close", "status_read"))
+def test_parent_status_pipe_failure_reaps_and_closes_pty(monkeypatch, failure):
+    master_fd = os.open("/dev/null", os.O_RDONLY)
+    original_close = terminal.os.close
+    closed = []
+    calls = {"close": 0}
+
+    def fake_close(fd):
+        calls["close"] += 1
+        if failure == "status_write_close" and calls["close"] == 1:
+            original_close(fd)
+            closed.append(fd)
+            raise OSError("status write close failed")
+        original_close(fd)
+        closed.append(fd)
+
+    monkeypatch.setattr(terminal.pty, "fork", lambda: (4321, master_fd))
+    monkeypatch.setattr(terminal.os, "close", fake_close)
+    monkeypatch.setattr(terminal.os, "waitpid", lambda *_args: (4321, 0))
+    if failure == "status_read":
+        monkeypatch.setattr(
+            terminal.os, "read", lambda *_args: (_ for _ in ()).throw(OSError("read failed")),
+        )
+    with pytest.raises(OSError):
+        terminal._create_term(
+            cwd=None, root_fd=None, cols=80, rows=24, label=None,
+            command=None, owner_kind="legacy",
+        )
+    assert master_fd in closed
+    with pytest.raises(OSError):
+        os.fstat(master_fd)
+
+
+def test_status_pipe_inheritable_failure_closes_both_descriptors(monkeypatch):
+    original_pipe2 = terminal.os.pipe2
+    descriptors = []
+
+    def pipe2(flags):
+        pair = original_pipe2(flags)
+        descriptors.extend(pair)
+        return pair
+
+    monkeypatch.setattr(terminal.os, "pipe2", pipe2)
+    monkeypatch.setattr(
+        terminal.os,
+        "set_inheritable",
+        lambda *_args: (_ for _ in ()).throw(OSError("injected inheritable failure")),
+    )
+    with pytest.raises(OSError, match="injected inheritable failure"):
+        terminal.create_term()
+    for fd in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_zero_byte_workspace_write_fails_without_retaining_write_lock(monkeypatch):
+    master_fd = os.open("/dev/null", os.O_WRONLY)
+    state = {
+        "master_fd": master_fd,
+        "alive": True,
+        "lock": threading.Lock(),
+        "write_lock": threading.Lock(),
+        "owner_kind": "workspace",
+    }
+    monkeypatch.setattr(terminal, "_get", lambda _term_id: state)
+    monkeypatch.setattr(terminal.os, "write", lambda _fd, _data: 0)
+    with pytest.raises(ConnectionError, match="未写入"):
+        terminal.workspace_engine.write_term("term", "input")
+    assert state["write_lock"].acquire(blocking=False)
+    state["write_lock"].release()
+    os.close(master_fd)
+
+
+def test_workspace_term_uses_bound_cwd_and_is_hidden_from_legacy_list(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    root_fd = os.open(
+        root,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        result = terminal.create_bound_term(root_fd)
+    finally:
+        os.close(root_fd)
+
+    terminal.workspace_engine.write_term(result["id"], "pwd\n")
+    output = b""
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and str(root).encode() not in output:
+        output += terminal.workspace_engine.read_available(result["id"], 0.05, 65536)
+
+    assert str(root).encode() in output
+    assert all(item["id"] != result["id"] for item in terminal.list_terms())
+    assert terminal.session_stats() == {"total": 1, "alive": 1}
+
+
+def test_workspace_term_counts_toward_global_limit(tmp_path, monkeypatch):
+    root_fd = os.open(
+        tmp_path,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0),
+    )
+    monkeypatch.setattr(
+        terminal, "_term_cfg", lambda key, default: 1 if key == "max_terms" else default,
+    )
+    try:
+        terminal.create_bound_term(root_fd)
+        with pytest.raises(RuntimeError, match="上限"):
+            terminal.create_term()
+    finally:
+        os.close(root_fd)
+
+
+def test_workspace_exec_failure_is_reported_before_registration(tmp_path, monkeypatch):
+    root_fd = os.open(
+        tmp_path,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0),
+    )
+    monkeypatch.setattr(terminal, "WORKSPACE_SHELL", "/definitely/missing/bash")
+    try:
+        with pytest.raises(OSError, match="PTY child setup failed"):
+            terminal.create_bound_term(root_fd)
+    finally:
+        os.close(root_fd)
+    with terminal._lock:
+        assert terminal._terms == {}
+
+
+def test_legacy_controls_cannot_operate_workspace_owner(tmp_path):
+    root_fd = os.open(
+        tmp_path,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        created = terminal.create_bound_term(root_fd)
+    finally:
+        os.close(root_fd)
+    term_id = created["id"]
+
+    assert terminal.write_term(term_id, "exit\n") is None
+    assert terminal.kill_term(term_id) is None
+    assert terminal.output_history(term_id) == b""
+    assert terminal.is_alive(term_id) is False
+    assert terminal.workspace_engine.is_alive(term_id) is True
+    assert terminal.workspace_engine.kill_term(term_id) is True
 
 
 def test_user_typing_window_tracks_labeled_web_terminal(monkeypatch, tmp_path):
@@ -511,6 +691,69 @@ def test_output_history_is_bounded_and_keeps_latest_bytes(monkeypatch):
     terminal._remember_output(state, b"ghijkl")
 
     assert bytes(state["output_history"]) == b"efghijkl"
+    assert state["output_history_truncated"] is True
+
+
+def test_output_snapshot_reports_truncation(monkeypatch):
+    state = {
+        "lock": threading.Lock(),
+        "output_history": bytearray(b"tail"),
+        "output_history_truncated": True,
+        "owner_kind": "workspace",
+    }
+    monkeypatch.setattr(terminal, "_get", lambda _term_id: state)
+
+    assert terminal.workspace_engine.output_snapshot("term") == (b"tail", True)
+
+
+def test_workspace_snapshot_distinguishes_missing_from_empty_history(monkeypatch):
+    state = {
+        "lock": threading.Lock(),
+        "output_history": bytearray(),
+        "output_history_truncated": False,
+        "owner_kind": "workspace",
+    }
+    monkeypatch.setattr(
+        terminal, "_get", lambda term_id: state if term_id == "present" else None,
+    )
+    assert terminal.workspace_engine.output_snapshot("present") == (b"", False)
+    assert terminal.workspace_engine.output_snapshot("missing") == (None, False)
+
+
+def test_sweep_marks_exited_workspace_out_of_global_capacity(monkeypatch):
+    master_fd = os.open("/dev/null", os.O_RDONLY)
+    state = {
+        "master_fd": master_fd,
+        "pid": 4321,
+        "alive": True,
+        "dead_ts": None,
+        "lock": threading.Lock(),
+        "write_lock": threading.Lock(),
+        "last_active": time.monotonic(),
+        "owner_kind": "workspace",
+    }
+    monkeypatch.setattr(terminal.os, "waitpid", lambda *_args: (4321, 0))
+    with terminal._lock:
+        terminal._terms["workspace-exited"] = state
+    try:
+        terminal.sweep_idle()
+        assert state["alive"] is False
+        assert terminal._active_count() == 0
+    finally:
+        with terminal._lock:
+            terminal._terms.pop("workspace-exited", None)
+        os.close(master_fd)
+
+
+def test_exact_workspace_controls_report_delivery(monkeypatch):
+    delivered = []
+    monkeypatch.setattr(
+        terminal,
+        "_write_owned",
+        lambda term_id, data, owner: delivered.append((term_id, data, owner)) or True,
+    )
+    assert terminal.workspace_engine.interrupt_term("internal") is True
+    assert delivered == [("internal", "\x03", "workspace")]
 
 
 def test_read_fd_records_output_for_browser_replay(monkeypatch):

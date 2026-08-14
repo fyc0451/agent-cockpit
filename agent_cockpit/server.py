@@ -76,6 +76,8 @@ event_store = None
 operation_store = None
 memory_store = None
 terminal_ticket_store = None
+workspace_terminal = None
+workspace_terminal_controller = None
 if next_profile.enabled():
     try:
         _next_instance_lock_owner = instance_lock.require_registered_owner()
@@ -85,7 +87,7 @@ if next_profile.enabled():
     from . import memory_api, memory_store
     from . import operation_api, operation_store
     from . import runtime_provider_store
-    from . import terminal_ticket_api, terminal_ticket_store
+    from . import terminal_ticket_api, terminal_ticket_store, workspace_terminal
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
@@ -312,16 +314,45 @@ def _terminal_ticket_provider():
     return bundle[4]
 
 
+def _workspace_terminal_provider():
+    terminal_module = workspace_terminal
+    if terminal_module is None:
+        from . import workspace_terminal as terminal_module
+    if workspace_terminal_controller is None:
+        if _foundation_bundle is None:
+            raise terminal_module.WorkspaceTerminalError("schema_missing")
+        raise terminal_module.WorkspaceTerminalError("terminal_io_unavailable")
+    if not workspace_terminal_controller.ready():
+        raise terminal_module.WorkspaceTerminalError("terminal_io_unavailable")
+    return workspace_terminal_controller
+
+
+def _local_terminal_capability(workspace, location):
+    controller = workspace_terminal_controller
+    if controller is None:
+        return False, "workspace_terminal_unavailable"
+    return controller.capability(workspace, location)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
-    global _identity_retirement_task
+    global _identity_retirement_task, workspace_terminal_controller
     _require_next_instance_lock()
     project_registry_api_service().prepare()
     foundation_enabled = next_profile.enabled()
-    if foundation_enabled:
-        _initialize_foundation_stores()
     try:
+        if foundation_enabled:
+            _initialize_foundation_stores()
+            terminal_module = workspace_terminal
+            if terminal_module is None:
+                from . import workspace_terminal as terminal_module
+
+            workspace_terminal_controller = terminal_module.WorkspaceTerminalController(
+                registry_provider=_project_workbench_registry,
+                ticket_provider=_terminal_ticket_provider,
+                operation_provider=_operation_journal_provider,
+            )
         state_enabled = _h0_state_enabled()
         b0_runtime_active = _b0_runtime_active()
         if state_enabled and not _open_state_clients():
@@ -395,6 +426,13 @@ async def lifespan(_: FastAPI):
                 _worktree_cleanup_task = None
                 _identity_retirement_task = None
     finally:
+        if workspace_terminal_controller is not None:
+            try:
+                workspace_terminal_controller.close()
+            except Exception:
+                logger.exception("workspace terminal controller failed during shutdown")
+            finally:
+                workspace_terminal_controller = None
         if foundation_enabled:
             _close_foundation_stores()
 
@@ -477,13 +515,19 @@ def project_registry_api_service() -> project_registry_api.ApiService:
 
 
 project_registry_api.install(app, project_registry_api_service())
-local_readonly_api.install(app, local_readonly_api.ApiService(_project_workbench_registry))
+local_readonly_api.install(app, local_readonly_api.ApiService(
+    _project_workbench_registry, _local_terminal_capability,
+))
 if next_profile.enabled():
     event_api.install(app, event_api.EventApiService(_event_journal_provider))
     operation_api.install(app, operation_api.ApiService(_operation_journal_provider))
     memory_api.install(app, memory_api.MemoryApiService(_project_memory_provider))
-    terminal_ticket_api.install(
-        app, terminal_ticket_api.TerminalTicketApiService(_terminal_ticket_provider),
+    workspace_terminal.install(
+        app,
+        workspace_terminal.ApiService(
+            _workspace_terminal_provider,
+            lambda websocket: _websocket_trusted(websocket),
+        ),
     )
 
 
@@ -1109,6 +1153,17 @@ def _websocket_authenticated(websocket: WebSocket) -> bool:
     if not COCKPIT_TOKEN:
         return _is_loopback(websocket.client.host if websocket.client else None)
     return _valid_cookie(websocket.cookies.get(AUTH_COOKIE))
+
+
+def _websocket_trusted(websocket: WebSocket) -> bool:
+    trusted = _websocket_authenticated(websocket)
+    if not COCKPIT_TOKEN:
+        return trusted and _no_token_scope_trusted(
+            websocket.scope, require_origin=True,
+        )
+    return trusted and _same_origin(
+        websocket.headers.get("origin"), websocket.headers.get("host"),
+    )
 
 
 def _same_origin(origin: str | None, host: str | None) -> bool:
@@ -6151,16 +6206,7 @@ def _schedule_term_input_note(term_id: str) -> None:
 @app.websocket("/api/term/{term_id}")
 async def api_term_ws(websocket: WebSocket, term_id: str):
     """终端 WebSocket 双向桥接:浏览器↔PTY。"""
-    trusted = _websocket_authenticated(websocket)
-    if not COCKPIT_TOKEN:
-        trusted = trusted and _no_token_scope_trusted(
-            websocket.scope, require_origin=True,
-        )
-    else:
-        trusted = trusted and _same_origin(
-            websocket.headers.get("origin"), websocket.headers.get("host")
-        )
-    if not trusted:
+    if not _websocket_trusted(websocket):
         await websocket.close(code=1008)
         return
     await websocket.accept()

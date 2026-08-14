@@ -39,6 +39,7 @@ def local_slice(tmp_path: Path):
     )
     other = registry.create_project(slug="beta", display_name="Beta", goal=None)
     app = FastAPI()
+    app.state.registry = registry
     local_readonly_api.install(app, local_readonly_api.ApiService(lambda: registry))
     yield TestClient(app), project, workspace, other, root
     registry.close()
@@ -172,6 +173,23 @@ def test_workspace_detail_cross_project_and_unknown_are_same_404(local_slice):
     _error(client.get(
         f"{base}/prj_{'0' * 32}/workspaces"
     ), 404, "project_not_found")
+
+
+def test_next_terminal_capability_uses_controller_authority(local_slice):
+    client, project, workspace, _other, _root = local_slice
+    app = FastAPI()
+    local_readonly_api.install(app, local_readonly_api.ApiService(
+        lambda: client.app.state.registry,
+        lambda _workspace, _location: (True, None),
+    ))
+    payload = TestClient(app).get(
+        f"/api/project-registry/projects/{project.project_id}/workspaces/"
+        f"{workspace.workspace_id}"
+    ).json()
+    assert payload["meta"]["capabilities"]["terminal.pty"] == {
+        "available": True,
+        "reason": None,
+    }
 
 
 def test_relative_tree_content_and_search_are_read_only_public_projections(local_slice):

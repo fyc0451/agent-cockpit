@@ -46,6 +46,7 @@ class ApiError(RuntimeError):
 @dataclass(frozen=True)
 class ApiService:
     registry_provider: Callable[[], project_registry_store.ProjectRegistryStore]
+    terminal_capability: Callable[[domain.WorkspaceRecord, domain.RepoLocationRecord], tuple[bool, str | None]] | None = None
 
 
 def install(app: FastAPI, service: ApiService) -> None:
@@ -74,6 +75,7 @@ def install(app: FastAPI, service: ApiService) -> None:
         def operation():
             value, location = _workspace_context(service, project_id, workspace_id)
             available, reason = _files_capability(value, location)
+            terminal_available, terminal_reason = _terminal_capability(service, value, location)
             return _success(_workspace(value, {
                 location.repo_location_id: location,
             }), _meta(
@@ -81,6 +83,8 @@ def install(app: FastAPI, service: ApiService) -> None:
                 files_source=False,
                 files_available=available,
                 files_reason=reason,
+                terminal_available=terminal_available,
+                terminal_reason=terminal_reason,
             ))
         return _run(operation, request)
 
@@ -90,10 +94,13 @@ def install(app: FastAPI, service: ApiService) -> None:
     def file_tree(project_id: str, workspace_id: str, request: Request):
         def operation():
             relative = _single_query(request, "path", "")
+            workspace, location = _workspace_context(service, project_id, workspace_id)
+            terminal_available, terminal_reason = _terminal_capability(service, workspace, location)
             root = _files_root(service, project_id, workspace_id)
             result = files.list_dir_from_trusted_root(root, relative)
             return _success(_tree(result, relative), _meta(
                 request, files_source=True, files_available=True,
+                terminal_available=terminal_available, terminal_reason=terminal_reason,
             ))
         return _run(operation, request)
 
@@ -103,10 +110,13 @@ def install(app: FastAPI, service: ApiService) -> None:
     def file_content(project_id: str, workspace_id: str, request: Request):
         def operation():
             relative = _single_query(request, "path", "")
+            workspace, location = _workspace_context(service, project_id, workspace_id)
+            terminal_available, terminal_reason = _terminal_capability(service, workspace, location)
             root = _files_root(service, project_id, workspace_id)
             result = files.read_file_from_trusted_root(root, relative)
             return _success(_content(result, relative), _meta(
                 request, files_source=True, files_available=True,
+                terminal_available=terminal_available, terminal_reason=terminal_reason,
             ))
         return _run(operation, request)
 
@@ -120,13 +130,18 @@ def install(app: FastAPI, service: ApiService) -> None:
             limit = _limit(_single_query(request, "limit", "100"))
             if query is None or not query.strip() or len(query.strip()) > 128:
                 raise ApiError("invalid_argument")
+            workspace, location = _workspace_context(service, project_id, workspace_id)
+            terminal_available, terminal_reason = _terminal_capability(service, workspace, location)
             root = _files_root(service, project_id, workspace_id)
             result = files.search_files_from_trusted_root(
                 root, relative, query, limit,
             )
             return _success(
                 _search(result, Path(root).resolve(strict=True)),
-                _meta(request, files_source=True, files_available=True),
+                _meta(
+                    request, files_source=True, files_available=True,
+                    terminal_available=terminal_available, terminal_reason=terminal_reason,
+                ),
             )
         return _run(operation, request)
 
@@ -169,6 +184,14 @@ def _files_capability(
     if location.availability != "available":
         return False, "repo_location_unavailable"
     return True, None
+
+
+def _terminal_capability(
+    service: ApiService, workspace: domain.WorkspaceRecord, location: domain.RepoLocationRecord,
+) -> tuple[bool, str | None]:
+    if service.terminal_capability is None:
+        return False, "workspace_terminal_ticket_deferred"
+    return service.terminal_capability(workspace, location)
 
 
 def _workspace(
@@ -314,6 +337,8 @@ def _limit(value: str | None) -> int:
 def _meta(
     request: Request, *, files_source: bool, files_available: bool,
     files_reason: str | None = None,
+    terminal_available: bool = False,
+    terminal_reason: str | None = "workspace_terminal_ticket_deferred",
 ) -> dict[str, object]:
     names = ["project_registry"]
     if files_source:
@@ -335,8 +360,8 @@ def _meta(
                 "reason": files_reason,
             },
             "terminal.pty": {
-                "available": False,
-                "reason": "workspace_terminal_ticket_deferred",
+                "available": terminal_available,
+                "reason": terminal_reason,
             },
         },
     }

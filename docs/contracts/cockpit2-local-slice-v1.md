@@ -3,8 +3,9 @@
 ## Scope
 
 This contract adds the first persisted Workspace to local Files read path. It
-does not change the legacy `GET /api/projects/{slug}/workbench` response, and it
-does not add terminal, write, POST, or WebSocket behavior.
+does not change the legacy `GET /api/projects/{slug}/workbench` response. The
+Local Slice itself creates no PTY, write, POST, or WebSocket behavior; the
+Next-only Workspace Terminal controller supplies that separate capability.
 
 ## Routes
 
@@ -80,5 +81,7 @@ is local and available. Stable unavailable reasons are `workspace_not_active`,
 `repo_location_not_active`, `repo_location_not_local`, and
 `repo_location_unavailable`. Successful Files routes report it available.
 
-Terminal remains unavailable. This slice performs no PTY operation, file
-write, POST, or WebSocket connection.
+In the Next profile, `terminal.pty` is supplied by the Workspace Terminal controller using
+the same active/shared/local/available Workspace authority as its routes. Outside that
+profile it remains unavailable with `workspace_terminal_ticket_deferred`. This Local Slice
+still performs no terminal action itself.

@@ -90,12 +90,23 @@ def test_next_on_installs_only_accepted_reads_and_prestart_is_sanitized_503() ->
     result = _subprocess("""
 import json
 from fastapi.testclient import TestClient
+from fastapi.routing import APIRoute, APIWebSocketRoute
 from agent_cockpit import instance_lock, next_profile
 next_profile.enabled = lambda *args, **kwargs: True
 instance_lock.require_registered_owner = lambda: object()
 from agent_cockpit import server
-routes = sorted(
+http_routes = sorted(
     (route.path, sorted(route.methods or ())) for route in server.app.routes
+    if isinstance(route, APIRoute) and "GET" in (route.methods or ()) and (
+        route.path.startswith('/api/events/')
+        or route.path.startswith('/api/operations/')
+        or '/memory/' in route.path
+        or '/terminal-tickets/' in route.path
+    )
+)
+ws_routes = sorted(
+    route.path for route in server.app.routes
+    if isinstance(route, APIWebSocketRoute)
     if route.path.startswith('/api/events/')
     or route.path.startswith('/api/operations/')
     or '/memory/' in route.path
@@ -110,10 +121,14 @@ requests = (
 )
 responses = [(response.status_code, response.json()) for response in map(client.get, requests)]
 paths = [route.path for route in server.app.routes]
-print(json.dumps({'routes': routes, 'responses': responses, 'paths': paths, 'public': sorted(server.PUBLIC_PATHS)}))
+print(json.dumps({'http_routes': http_routes, 'ws_routes': ws_routes, 'responses': responses, 'paths': paths, 'public': sorted(server.PUBLIC_PATHS)}))
 """)
-    assert len(result["routes"]) == 7
-    assert all(methods == ["GET"] for _path, methods in result["routes"])
+    assert len(result["http_routes"]) == 7
+    assert all(methods == ["GET"] for _path, methods in result["http_routes"])
+    assert result["ws_routes"] == [
+        "/api/projects/{project_id}/workspaces/{workspace_id}/terminal-tickets/"
+        "{ticket_id}/stream"
+    ]
     assert all(status == 503 for status, _body in result["responses"])
     for _status, body in result["responses"]:
         assert body["error"]["code"] == "schema_missing"
