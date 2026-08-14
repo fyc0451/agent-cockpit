@@ -766,7 +766,7 @@
     {
       "id": "TERM-001-workspace-ticket-core",
       "title": "Persist Workspace-scoped terminal tickets without runtime process authority",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-003-wip4-gate", "PROJ-006-root-locator", "SLICE-001-local-readonly"],
       "scope": ["agent_cockpit/terminal_ticket_store.py", "agent_cockpit/terminal_ticket_api.py", "docs/contracts/workspace-terminal-ticket-v1.md", "tests/test_terminal_ticket.py"],
       "acceptance": [{"command": ".venv/bin/python -m pytest -q tests/test_terminal_ticket.py", "passed": true}],
