@@ -1118,6 +1118,18 @@ pre {
   .terminal-fullscreen-bar {
     margin-bottom: 4px;
   }
+
+  /* 窄屏下页头换行：标题保留整行宽度，动作按钮独占一行并按视口换行，
+     避免终端页 7 个按钮溢出视口或把标题挤压成竖排 */
+  .page-header {
+    flex-wrap: wrap;
+  }
+
+  .page-actions {
+    flex: 1 1 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
 }
 
 /* ---------- 响应式 ---------- */
