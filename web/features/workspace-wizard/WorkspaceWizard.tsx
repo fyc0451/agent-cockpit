@@ -172,12 +172,12 @@ export function WorkspaceWizard({
             onChange={(e) => setName(e.target.value)}
           />
           <label className="kv-key" htmlFor="ws-create-goal">
-            目标（可选）
+            本次任务（可选）
           </label>
           <input
             id="ws-create-goal"
             className="input"
-            aria-label="目标（可选）"
+            aria-label="本次任务（可选）"
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
           />

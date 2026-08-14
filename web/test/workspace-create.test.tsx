@@ -205,7 +205,7 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const nameInput = within(dialog).getByLabelText('工作空间名称')
     await user.clear(nameInput)
     await user.type(nameInput, '新工作区')
-    await user.type(within(dialog).getByLabelText('目标（可选）'), '验证 goal')
+    await user.type(within(dialog).getByLabelText('本次任务（可选）'), '验证 goal')
     await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await waitFor(() => expect(stub.posts).toHaveLength(1))
     expect(JSON.parse(stub.posts[0].body).goal).toBe('验证 goal')
@@ -338,7 +338,7 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     const nameInput = within(dialog).getByLabelText('工作空间名称')
     await user.clear(nameInput)
     await user.type(nameInput, '  间隔 名字  ')
-    await user.type(within(dialog).getByLabelText('目标（可选）'), '  带空格  ')
+    await user.type(within(dialog).getByLabelText('本次任务（可选）'), '  带空格  ')
     await user.click(within(dialog).getByRole('button', { name: '创建并打开' }))
     await waitFor(() => expect(stub.posts).toHaveLength(1))
     expect(JSON.parse(stub.posts[0].body)).toEqual({

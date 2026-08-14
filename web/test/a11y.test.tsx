@@ -87,7 +87,7 @@ describe('A11y（item 7）', () => {
     expect(onClick).not.toHaveBeenCalled()
   })
 
-  it('390 核心 Rail 与 Workspace 主导航只保留工作台、文件、终端', async () => {
+  it('390 核心 Rail 与 Workspace 主导航只保留工作空间概览、文件、终端', async () => {
     stubDefaultFetch()
     renderApp('/projects/p1/workspaces/w1/files')
     const rail = screen.getByRole('navigation', { name: '主导航' })
@@ -105,6 +105,6 @@ describe('A11y（item 7）', () => {
       Array.from(workspaceSection!.querySelectorAll<HTMLElement>('.rail-item')).map(
         (item) => item.title,
       ),
-    ).toEqual(['工作台', '文件', '终端'])
+    ).toEqual(['工作空间概览', '文件', '终端'])
   })
 })

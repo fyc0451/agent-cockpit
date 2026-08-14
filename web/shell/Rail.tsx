@@ -178,7 +178,7 @@ export function Rail() {
               {project?.name ?? projectSlug}
               {project?.branch ? <span className="rail-branch"> · {project.branch}</span> : null}
             </p>
-            <RailLink to={routes.project.workbench(projectSlug)} icon="▣" label="工作台" mobileHidden />
+            <RailLink to={routes.project.workbench(projectSlug)} icon="▣" label="项目概览" mobileHidden />
             {recoveryCap.available ? (
               <RailLink to={routes.project.recovery(projectSlug)} icon="⛨" label="变更审核" mobileHidden />
             ) : null}
@@ -221,7 +221,7 @@ export function Rail() {
             <p className="rail-context rail-label ellipsis" title={workspace?.name ?? workspaceId}>
               {workspace?.name ?? workspaceId}
             </p>
-            <RailLink to={routes.workspace.home(projectSlug, workspaceId)} end icon="▣" label="工作台" mobileHidden />
+            <RailLink to={routes.workspace.home(projectSlug, workspaceId)} end icon="▣" label="工作空间概览" mobileHidden />
             <RailLink to={routes.workspace.files(projectSlug, workspaceId)} icon="🗀" label="文件" mobileCore />
             <RailLink to={routes.workspace.terminal(projectSlug, workspaceId)} icon="▸" label="终端" mobileCore />
           </div>

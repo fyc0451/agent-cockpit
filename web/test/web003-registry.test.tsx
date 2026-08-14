@@ -102,7 +102,7 @@ async function toDirStep(user: ReturnType<typeof userEvent.setup>) {
 async function toProbeResult(user: ReturnType<typeof userEvent.setup>, dirName = 'alpha') {
   await toDirStep(user)
   await user.click(screen.getByRole('button', { name: new RegExp(`^${dirName}`) }))
-  await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+  await user.click(screen.getByRole('button', { name: '检查并继续' }))
 }
 
 const discoveryOk = () => ({ body: discoveryGitPayload })
@@ -313,7 +313,7 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
 
     expect(screen.queryByText('当前目录')).toBeNull()
     expect(screen.queryByRole('button', { name: /选择当前目录/ })).toBeNull()
-    expect(screen.getByRole('button', { name: '识别所选目录' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('button', { name: '检查并继续' })).toHaveAttribute('aria-disabled', 'true')
     await user.click(screen.getByRole('button', { name: '进入 alpha' }))
     await user.click(await screen.findByRole('button', { name: '上级目录' }))
     expect(await screen.findByRole('button', { name: /^alpha/ })).toBeInTheDocument()
@@ -356,13 +356,13 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     expect(screen.getByRole('button', { name: '确认添加' })).toHaveAttribute('aria-disabled', 'true')
   })
 
-  it('V12 exact_match → ALREADY_REGISTERED：主按钮「打开现有 Project」，登记按钮隐藏，0 写请求', async () => {
+  it('V12 exact_match → ALREADY_REGISTERED：主按钮「打开现有项目」，登记按钮隐藏，0 写请求', async () => {
     const stub = stubWizardFetch({ discovery: () => ({ body: discoveryExactMatchPayload }), register: registerOk })
     const user = userEvent.setup()
     renderApp('/projects')
     await toProbeResult(user)
     await screen.findByText('已登记')
-    const openExisting = screen.getByRole('button', { name: '打开现有 Project' })
+    const openExisting = screen.getByRole('button', { name: '打开现有项目' })
     expect(screen.queryByRole('button', { name: '确认添加' })).not.toBeInTheDocument()
     const postsBefore = stub.posts.length
     await user.click(openExisting)
@@ -460,7 +460,7 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
 
     await user.click(screen.getByRole('button', { name: '返回选择目录' }))
     await user.click(screen.getByRole('button', { name: /^alpha/ }))
-    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+    await user.click(screen.getByRole('button', { name: '检查并继续' }))
     expect(await screen.findByRole('button', { name: '确认添加' })).toHaveAttribute('aria-disabled', 'true')
     expect(stub.posts.filter((p) => p.url.startsWith('/api/project-registry/projects'))).toEqual([])
   })
@@ -490,7 +490,10 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     await screen.findByText('新 Git 项目')
     expect(Number.isNaN(Date.parse(discoveryGitPayload.data.observed_at))).toBe(false)
     expect(discoveryGitPayload.data.observed_at).toContain('+00:00')
-    expect(screen.getByText(/识别时间/).textContent?.trim().length).toBeGreaterThan(5)
+    // 结果行只显示项目目录 + Git 信息（不渲染 locale 时间）
+    const info = screen.getByText(/项目目录：/)
+    expect(info.textContent).toContain(discoveryGitPayload.data.display_path)
+    expect(info.textContent).toContain('Git 仓库')
   })
 })
 
@@ -555,7 +558,7 @@ describe('WEB-003 提交（V14–V16）', () => {
     expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument()
   })
 
-  it('V16b 409 location_already_registered → 「打开现有 Project」', async () => {
+  it('V16b 409 location_already_registered → 「打开现有项目」', async () => {
     stubWizardFetch({
       discovery: discoveryOk,
       register: () => ({ status: 409, body: { error: { code: 'location_already_registered', message: '目录已登记', retryable: false } } }),
@@ -565,7 +568,7 @@ describe('WEB-003 提交（V14–V16）', () => {
     await toProbeResult(user)
     await screen.findByText('新 Git 项目')
     await user.click(screen.getByRole('button', { name: '确认添加' }))
-    await screen.findByRole('button', { name: '打开现有 Project' })
+    await screen.findByRole('button', { name: '打开现有项目' })
     expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument()
   })
 
@@ -646,7 +649,7 @@ describe('WEB-003 零请求硬门与取消（V18–V19）', () => {
     renderApp('/projects')
     await toDirStep(user)
     await user.click(screen.getByRole('button', { name: /^alpha/ }))
-    const probeBtn = screen.getByRole('button', { name: '识别所选目录' })
+    const probeBtn = screen.getByRole('button', { name: '检查并继续' })
     await user.click(probeBtn)
     // 在途：按钮 disabled，重复点击无效
     expect(probeBtn).toHaveAttribute('aria-disabled', 'true')
@@ -666,7 +669,7 @@ describe('WEB-003 零请求硬门与取消（V18–V19）', () => {
     renderApp('/projects')
     await toDirStep(user)
     await user.click(screen.getByRole('button', { name: /^alpha/ }))
-    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+    await user.click(screen.getByRole('button', { name: '检查并继续' }))
     await user.click(screen.getByRole('button', { name: /^beta/ }))
     resolveDiscovery({ body: discoveryGitPayload })
 
@@ -858,7 +861,7 @@ describe('返修4：幂等键绑定序列化 body', () => {
     await user.click(screen.getByRole('button', { name: '确认添加' }))
     await user.click(await screen.findByRole('button', { name: '重新探测' }))
     await user.click(await screen.findByRole('button', { name: /^beta/ }))
-    await user.click(screen.getByRole('button', { name: '识别所选目录' }))
+    await user.click(screen.getByRole('button', { name: '检查并继续' }))
     await screen.findByText('新 Git 项目')
     await user.click(screen.getByRole('button', { name: '确认添加' }))
     await screen.findByText('登记成功')

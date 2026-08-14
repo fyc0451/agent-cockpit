@@ -63,7 +63,7 @@ function EntryRow({
     <li className="list-row">
       <button type="button" className="list-row-main list-link btn-link" onClick={onOpen}>
         <span className="ellipsis list-title">{type === 'dir' ? `${name}/` : name}</span>
-        <span className="ellipsis list-sub">{fullPath}</span>
+        {fullPath !== name ? <span className="ellipsis list-sub">{fullPath}</span> : null}
       </button>
       <span className="list-sub">{type === 'dir' ? '目录' : '文件'}</span>
     </li>
@@ -203,7 +203,7 @@ function FilesBody({ project, workspace }: { project: Project; workspace: Worksp
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
             />
-            <button type="submit" className="btn btn--primary">
+            <button type="submit" className="btn btn--secondary">
               搜索
             </button>
             {searching ? (

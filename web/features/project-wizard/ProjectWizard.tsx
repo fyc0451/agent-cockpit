@@ -1,4 +1,4 @@
-// WEB-003 Local registration wizard：三步向导（选择位置 → 选择目录 → 自动识别）。
+// WEB-003 Local registration wizard：三步向导（选择位置 → 选择目录 → 确认项目）。
 // 状态机按 proj-registration-wizard-state-kimi §2 精简（8 主状态合并进单个 useReducer；
 // PROBE_RESULT 六子态由 discovery 响应派生）。纪律：
 // I1 从不提交绝对路径（只有 {node_id, root_id, path}）；I2 提交必须带 Idempotency-Key +
@@ -238,7 +238,7 @@ function NodeCard({ node, onSelect }: { node: RuntimeNode; onSelect: (id: string
 const STEPS: { key: Step; label: string }[] = [
   { key: 'node', label: '1 选择位置' },
   { key: 'dir', label: '2 选择目录' },
-  { key: 'probe', label: '3 自动识别' },
+  { key: 'probe', label: '3 确认项目' },
 ]
 
 export function ProjectWizard({
@@ -503,7 +503,7 @@ export function ProjectWizard({
                   }
                   onClick={startProbe}
                 >
-                  识别所选目录
+                  检查并继续
                 </Button>
               </div>
             </>
@@ -664,15 +664,15 @@ function ProbeStep({
       {sub === 'ALREADY_REGISTERED' ? <Tag tone="success">已登记</Tag> : null}
       {sub === 'FINGERPRINT_MATCH' ? <Tag tone="success">与已登记项目同源</Tag> : null}
       <p className="list-sub">
-        识别时间：{new Date(probe.observed_at).toLocaleString()} · {probe.display_path}
+        项目目录：{probe.display_path}
         {/* B1：分支只用布尔表达，不渲染 raw branch/upstream 名 */}
-        {probe.vcs.kind === 'git' ? ` · 分支：${probe.vcs.branch_present ? '存在分支' : '未命名分支'}` : ''}
+        {probe.vcs.kind === 'git' ? ` · Git 仓库（${probe.vcs.branch_present ? '存在分支' : '未命名分支'}）` : ''}
       </p>
 
       {sub === 'ALREADY_REGISTERED' ? (
         <div className="state-actions" style={{ justifyContent: 'flex-start' }}>
           <Button variant="primary" onClick={() => onOpenExisting(probe.exact_match!.slug)}>
-            打开现有 Project
+            打开现有项目
           </Button>
           <Button variant="ghost" onClick={onBack}>
             返回选择目录
@@ -769,7 +769,7 @@ function SubmitErrorNote({
           <StatusState kind="conflict" banner title="该目录已经登记" description={error.message} />
           <div className="state-actions" style={{ justifyContent: 'flex-start' }}>
             <Button variant="primary" onClick={onOpenExisting}>
-              打开现有 Project
+              打开现有项目
             </Button>
             <Button variant="ghost" onClick={onBack}>
               返回选择目录

@@ -554,3 +554,25 @@ describe('WEB-004 legacy shape guards', () => {
   test('assertLegacyTasks: missing optional status stays valid', () => {
     expect(assertLegacyTasks([{ id: 't1' }]).tasks).toEqual([{ id: 't1' }])
   })
+
+describe('Files 行渲染（首用可理解性）', () => {
+  it('根目录行 name==fullPath 不重复副行，且仍可点击预览', async () => {
+    stubOpenFetch()
+    const user = userEvent.setup()
+    renderApp('/projects/p1/workspaces/w1/files')
+    const row = await screen.findByRole('button', { name: 'README.md' })
+    // 标题与副行不再重复同一文本
+    expect(row.textContent?.match(/README\.md/g)).toHaveLength(1)
+    await user.click(row)
+    expect(await screen.findByLabelText('文件预览 README.md')).toBeInTheDocument()
+  })
+
+  it('搜索提交按钮为 secondary（不抢占主行动）', async () => {
+    stubOpenFetch()
+    renderApp('/projects/p1/workspaces/w1/files')
+    await screen.findByRole('button', { name: 'README.md' })
+    const submit = screen.getByRole('button', { name: '搜索' })
+    expect(submit).toHaveClass('btn--secondary')
+    expect(submit).not.toHaveClass('btn--primary')
+  })
+})

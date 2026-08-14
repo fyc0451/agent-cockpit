@@ -50,7 +50,7 @@ test('E1 键盘整轮登记：空态 CTA → root → 目录 → 识别 → 改 
   const dir = dialog.getByRole('button', { name: /^alpha/ })
   await dir.focus()
   await page.keyboard.press('Enter')
-  const probe = dialog.getByRole('button', { name: '识别所选目录' })
+  const probe = dialog.getByRole('button', { name: '检查并继续' })
   await probe.focus()
   await page.keyboard.press('Enter')
   await expect(dialog.getByText('新 Git 项目')).toBeVisible()
@@ -113,7 +113,7 @@ test('E3 stale 路径：提交注入 409 → 「重新探测」可见 → 点击
   // 唯一可用 local 节点 → 位置步自动跳过
   await dialog.getByRole('button', { name: '代码' }).click()
   await dialog.getByRole('button', { name: /^alpha/ }).click()
-  await dialog.getByRole('button', { name: '识别所选目录' }).click()
+  await dialog.getByRole('button', { name: '检查并继续' }).click()
   await expect(dialog.getByText('新 Git 项目')).toBeVisible()
   await dialog.getByRole('button', { name: '确认添加' }).click()
   const reProbe = dialog.getByRole('button', { name: '重新探测' })
@@ -197,7 +197,7 @@ test('E6 axe：列表 empty、向导三步、成功卡片无 serious/critical', 
   await expect(dialog.getByRole('button', { name: /^alpha/ })).toBeVisible()
   expect(clean((await run()).violations)).toEqual([]) // 目录步
   await dialog.getByRole('button', { name: /^alpha/ }).click()
-  await dialog.getByRole('button', { name: '识别所选目录' }).click()
+  await dialog.getByRole('button', { name: '检查并继续' }).click()
   await expect(dialog.getByText('新 Git 项目')).toBeVisible()
   expect(clean((await run()).violations)).toEqual([]) // 识别结果
   await dialog.getByRole('button', { name: '确认添加' }).click()

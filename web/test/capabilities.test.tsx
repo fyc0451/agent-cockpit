@@ -89,11 +89,11 @@ describe('capability registry（静态 fail-closed 表）', () => {
 })
 
 describe('rail 项目段 capability 门控', () => {
-  it('unavailable 的 变更审核/动态/项目记忆 不作主导航展示；工作台保留', async () => {
+  it('unavailable 的 变更审核/动态/项目记忆 不作主导航展示；项目概览保留', async () => {
     stubDefaultFetch()
     renderApp('/projects/p1/workbench')
     const rail = await screen.findByRole('navigation', { name: '主导航' })
-    await within(rail).findByRole('link', { name: '工作台' })
+    await within(rail).findByRole('link', { name: '项目概览' })
     expect(within(rail).queryByRole('link', { name: '变更审核' })).toBeNull()
     expect(within(rail).queryByRole('link', { name: '动态' })).toBeNull()
     expect(within(rail).queryByRole('link', { name: '项目记忆' })).toBeNull()
