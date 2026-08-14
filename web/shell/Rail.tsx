@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { useAttention, useHerdrStatus } from '../api/hooks'
 import { isRemoteWorkspace, needsActionCount } from '../api/normalize'
+import { useProjectRegistryList } from '../api/registry'
 import { routes } from '../app/routes'
 import { GLOBAL_SCOPE, projectScope, useCapability } from '../state/capabilities'
 import { useSelection } from '../state/selection'
@@ -134,10 +135,11 @@ function RuntimeMini() {
 export function Rail() {
   const { projectSlug, workspaceId, project, workspace } = useSelection()
   const attention = useAttention()
+  const registry = useProjectRegistryList()
   const scope = projectSlug ? projectScope(projectSlug) : GLOBAL_SCOPE
-  const automationCap = useCapability('automation', scope)
   const remoteHerdrCap = useCapability('remoteHerdr', scope)
   const inboxBadge = needsActionCount(attention.data?.data)
+  const noProjects = registry.data?.data.items.length === 0
 
   return (
     <nav className="rail" aria-label="主导航">
@@ -152,9 +154,16 @@ export function Rail() {
 
       <div className="rail-scroll">
         <div className="rail-section">
-          <RailLink to={routes.overview()} icon="◉" label="需要你处理" badge={inboxBadge} />
+          <RailLink
+            to={routes.overview()}
+            icon="◉"
+            label={noProjects ? '开始使用' : '需要你处理'}
+            badge={noProjects ? undefined : inboxBadge}
+          />
           <RailLink to={routes.projects()} icon="▦" label="项目" mobileCore />
-          <RailLink to={routes.inbox()} icon="✉" label="提问与回复" badge={inboxBadge} />
+          {noProjects ? null : (
+            <RailLink to={routes.inbox()} icon="✉" label="提问与回复" badge={inboxBadge} />
+          )}
           <RailLink to={routes.settings()} icon="⚙" label="设置" />
         </div>
 
@@ -205,11 +214,6 @@ export function Rail() {
             <RailLink to={routes.workspace.home(projectSlug, workspaceId)} end icon="▣" label="工作台" mobileHidden />
             <RailLink to={routes.workspace.files(projectSlug, workspaceId)} icon="🗀" label="文件" mobileCore />
             <RailLink to={routes.workspace.terminal(projectSlug, workspaceId)} icon="▸" label="终端" mobileCore />
-            <DisabledRailItem icon="✉" label="通信" reason={automationCap.reason ?? '未接通'} mobileHidden />
-            <RailLink to={routes.workspace.tasks(projectSlug, workspaceId)} icon="☑" label="任务" mobileHidden />
-            <RailLink to={routes.workspace.editor(projectSlug, workspaceId)} icon="✎" label="编辑器" mobileHidden />
-            <RailLink to={routes.workspace.browser(projectSlug, workspaceId)} icon="◎" label="浏览器" mobileHidden />
-            <DisabledRailItem icon="⛁" label="连接" reason={remoteHerdrCap.reason ?? '未接通'} mobileHidden />
           </div>
         ) : null}
       </div>

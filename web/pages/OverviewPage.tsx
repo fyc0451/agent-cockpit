@@ -41,7 +41,10 @@ export function OverviewPage() {
 
   return (
     <>
-      <PageHeader title="需要你处理" sub="跨项目聚合的待决定、待回复与提醒" />
+      <PageHeader
+        title={noProjects ? '添加第一个项目' : '需要你处理'}
+        sub={noProjects ? '选择一个代码目录即可开始' : '跨项目聚合的待决定、待回复与提醒'}
+      />
       {registry.isError ? (
         <StatusState
           kind="degraded"
@@ -65,7 +68,7 @@ export function OverviewPage() {
         <StatusState
           kind="empty"
           title="还没有项目"
-          description="选择一个代码目录登记后，待决定事项会聚合到这里。"
+          description="选择一个代码目录即可开始。"
           children={
             <div className="state-actions">
               <Link className="btn btn--primary" to={routes.projects({ wizard: true })}>
@@ -87,7 +90,7 @@ export function OverviewPage() {
           }
         />
       ) : null}
-      {attention.isError ? (
+      {noProjects ? null : attention.isError ? (
         // attention 源失败：区块级 partial/degraded，不得显示 empty/0 假成功
         <StatusState
           kind="degraded"

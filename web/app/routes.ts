@@ -112,5 +112,4 @@ export const NAV_ROUTES: readonly NavRouteMeta[] = [
     keywords: 'doctor env check diagnostics',
     to: () => routes.settings({ view: 'doctor' }),
   },
-  { name: '欢迎页', keywords: 'welcome onboarding', to: routes.welcome },
 ]

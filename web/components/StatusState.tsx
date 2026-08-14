@@ -55,7 +55,7 @@ const DEFAULT_TITLE: Record<StateKind, string> = {
 }
 
 const ICON_BY_KIND: Partial<Record<StateKind, string>> = {
-  empty: '✓',
+  empty: '○',
   forbidden: '!',
   degraded: '!',
   stale: '!',

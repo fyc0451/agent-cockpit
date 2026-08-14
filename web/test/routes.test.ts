@@ -128,5 +128,6 @@ describe('routes 单一权威模块', () => {
     // doctor 深链保持冻结形态
     const doctor = NAV_ROUTES.find((t) => t.name.includes('Doctor'))
     expect(doctor?.to()).toBe('/settings?view=doctor')
+    expect(NAV_ROUTES.some((t) => t.name === '欢迎页')).toBe(false)
   })
 })

@@ -52,7 +52,7 @@ describe('G6 公共状态组件（9 类）', () => {
     )
   })
 
-  it('empty 渲染 ✓ 图标 + 标题 + 说明 + 主 CTA', () => {
+  it('empty 渲染中性图标 + 标题 + 说明 + 主 CTA', () => {
     render(
       <StatusState
         kind="empty"
@@ -64,7 +64,8 @@ describe('G6 公共状态组件（9 类）', () => {
     expect(screen.getByText('还没有可汇总的工作')).toBeInTheDocument()
     expect(screen.getByText('连接项目后聚合到这里')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '开始设置' })).toBeInTheDocument()
-    expect(screen.getByText('✓')).toBeInTheDocument()
+    expect(screen.getByText('○')).toBeInTheDocument()
+    expect(screen.queryByText('✓')).not.toBeInTheDocument()
   })
 
   it('conflict 使用 danger 色调', () => {
