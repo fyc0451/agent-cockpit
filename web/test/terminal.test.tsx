@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Terminal } from '@xterm/xterm'
 import {
   assertTerminalTicketView,
@@ -115,7 +115,8 @@ interface RouteSpec {
 
 interface LiveRoutes {
   list?: RouteSpec
-  create?: RouteSpec
+  /** 静态 spec 或按第 n 次 POST 分派（用于首败后成的重试场景） */
+  create?: RouteSpec | ((attempt: number) => RouteSpec | undefined)
   detail?: (ticketId: string) => RouteSpec | undefined
   control?: (action: string) => RouteSpec | undefined
 }
@@ -133,6 +134,7 @@ async function renderLive(routes: LiveRoutes) {
     },
   }
   const base = `/api/projects/${REG_P1}/workspaces/w1/terminal-tickets`
+  let createAttempts = 0
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = (init?.method ?? 'GET').toUpperCase()
@@ -146,7 +148,12 @@ async function renderLive(routes: LiveRoutes) {
       })
       const rest = url.slice(base.length + 1)
       if (url === base) {
-        spec = method === 'POST' ? routes.create : routes.list
+        if (method === 'POST') {
+          createAttempts += 1
+          spec = typeof routes.create === 'function' ? routes.create(createAttempts) : routes.create
+        } else {
+          spec = routes.list
+        }
       } else if (!rest.includes('/')) {
         spec = routes.detail?.(rest)
       } else {
@@ -172,12 +179,14 @@ async function renderLive(routes: LiveRoutes) {
   return { ...rendered, calls }
 }
 
-/** attach 并完成 replay，进入 live */
+/** attach 并完成 replay，进入 live（帧注入包 act，杜绝早读 DOM 的 false-green） */
 async function driveToLive(ws: FakeWebSocket, fence = { revision: 1, generation: 1, cursor: 0 }) {
   await waitFor(() => expect(ws.sent).toHaveLength(1))
   expect(ws.lastFrame()).toEqual({ type: 'attach', ...fence })
-  ws.serverJson({ type: 'replay_start', ...fence })
-  ws.serverJson({ type: 'replay_complete', ...fence, truncated: false })
+  act(() => {
+    ws.serverJson({ type: 'replay_start', ...fence })
+    ws.serverJson({ type: 'replay_complete', ...fence, truncated: false })
+  })
 }
 
 beforeEach(() => {
@@ -450,9 +459,11 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       inputCb!('过早输入')
       expect(ws.sent).toHaveLength(1)
 
-      ws.serverJson({ type: 'replay_start', revision: 1, generation: 1, cursor: 0 })
-      ws.serverBytes('$ echo hi\n')
-      ws.serverJson({ type: 'replay_complete', revision: 1, generation: 1, cursor: 0, truncated: false })
+      act(() => {
+        ws.serverJson({ type: 'replay_start', revision: 1, generation: 1, cursor: 0 })
+        ws.serverBytes('$ echo hi\n')
+        ws.serverJson({ type: 'replay_complete', revision: 1, generation: 1, cursor: 0, truncated: false })
+      })
       await waitFor(() => expect(writeSpy).toHaveBeenCalled())
 
       // live 后 stdin 放行
@@ -567,7 +578,9 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     const ws1 = FakeWebSocket.instances[0]
     await driveToLive(ws1)
     await screen.findByRole('button', { name: '中断' })
-    ws1.serverClose(4409, 'stale')
+    act(() => {
+      ws1.serverClose(4409, 'stale')
+    })
     await screen.findByText('终端流已断开')
     // 先 refetch（GET detail），不盲重连
     await waitFor(() => expect(calls.some((c) => c.method === 'GET' && c.url.endsWith(`/terminal-tickets/${TICKET_ID}`))).toBe(true))
@@ -592,7 +605,9 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     const ws = FakeWebSocket.instances[0]
     await driveToLive(ws)
-    ws.serverJson({ type: 'exit', generation: 1 })
+    act(() => {
+      ws.serverJson({ type: 'exit', generation: 1 })
+    })
     await screen.findByText('终端进程已退出')
     expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=exited')
   })
@@ -644,24 +659,64 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     await waitFor(() => expect(container.querySelector('.terminal-fullscreen')).not.toBeInTheDocument())
   })
 
-  it('malformed/未知帧 fail-closed：不崩溃、不改态、零副作用', async () => {
-    const { container } = await renderLive({
-      list: { body: { data: { items: [ticketView()], next_cursor: null }, meta: metaOk } },
+  it('malformed/未知帧 fail-closed：协议失败 → error 态，stdin/control 关闭，后续帧零作用', async () => {
+    const onDataDesc = Object.getOwnPropertyDescriptor(Terminal.prototype, 'onData')!
+    const onDataGet = onDataDesc.get!
+    let inputCb: ((value: string) => void) | null = null
+    Object.defineProperty(Terminal.prototype, 'onData', {
+      configurable: true,
+      get(this: Terminal) {
+        const evt = onDataGet.call(this) as (cb: (v: string) => void) => { dispose: () => void }
+        return (cb: (v: string) => void) => {
+          inputCb = cb
+          return evt(cb)
+        }
+      },
     })
-    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
-    const ws = FakeWebSocket.instances[0]
-    await driveToLive(ws)
-    await screen.findByRole('button', { name: '中断' })
-    const sentBefore = ws.sent.length
-    ws.serverRaw('not-json-at-all')
-    ws.serverRaw('{"type":"mystery"}')
-    ws.serverRaw('{"type":"input","input":"注入"}') // server→client 只允许 replay/exit/error
-    ws.serverRaw('[1,2]')
-    // 仍是 live，无 error banner，无新帧，无新连接
-    expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=live')
-    expect(screen.queryByText('终端错误')).not.toBeInTheDocument()
-    expect(ws.sent).toHaveLength(sentBefore)
-    expect(FakeWebSocket.instances).toHaveLength(1)
+    const writeSpy = vi.spyOn(Terminal.prototype, 'write')
+    try {
+      const { container } = await renderLive({
+        list: { body: { data: { items: [ticketView()], next_cursor: null }, meta: metaOk } },
+      })
+      await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      const ws = FakeWebSocket.instances[0]
+      await driveToLive(ws)
+      await waitFor(() => expect(inputCb).not.toBeNull())
+      const interruptBtn = await screen.findByRole('button', { name: '中断' })
+      await waitFor(() => expect(interruptBtn).not.toHaveAttribute('aria-disabled'))
+
+      // live 中到达非法帧：协议失败（act 包裹，等待 React state flush）
+      act(() => {
+        ws.serverRaw('not-json-at-all')
+      })
+      await screen.findByText(/终端流协议违反/)
+      await waitFor(() =>
+        expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=error'),
+      )
+      // stdin 关闭：输入不再产生 WS 帧
+      const sentBefore = ws.sent.length
+      act(() => {
+        inputCb!('不应发出')
+      })
+      expect(ws.sent).toHaveLength(sentBefore)
+      // control 关闭
+      expect(screen.getByRole('button', { name: '中断' })).toHaveAttribute('aria-disabled', 'true')
+      // 后续帧（合法形态亦同）零作用：状态滞留 error、无新写入、无新连接
+      const writesBefore = writeSpy.mock.calls.length
+      act(() => {
+        ws.serverJson({ type: 'replay_start', revision: 1, generation: 1, cursor: 0 })
+        ws.serverBytes('迟到的输出')
+        ws.serverJson({ type: 'exit', generation: 1 })
+        ws.serverRaw('{"type":"mystery"}')
+      })
+      expect(writeSpy.mock.calls.length).toBe(writesBefore)
+      expect(screen.queryByText('终端进程已退出')).not.toBeInTheDocument()
+      expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=error')
+      expect(FakeWebSocket.instances).toHaveLength(1)
+    } finally {
+      Object.defineProperty(Terminal.prototype, 'onData', onDataDesc)
+      writeSpy.mockRestore()
+    }
   })
 
   it('interrupt 推进 revision 后：旧 WS fence 输入被门控，新 attach 用新 fence', async () => {
@@ -699,8 +754,10 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       expect(ws2.lastFrame()).toEqual({ type: 'attach', revision: 2, generation: 1, cursor: 0 })
       // 旧连接不再接收任何输入帧
       const ws1Sent = ws1.sent.length
-      ws2.serverJson({ type: 'replay_start', revision: 2, generation: 1, cursor: 0 })
-      ws2.serverJson({ type: 'replay_complete', revision: 2, generation: 1, cursor: 0, truncated: false })
+      act(() => {
+        ws2.serverJson({ type: 'replay_start', revision: 2, generation: 1, cursor: 0 })
+        ws2.serverJson({ type: 'replay_complete', revision: 2, generation: 1, cursor: 0, truncated: false })
+      })
       inputCb!('date\n')
       expect(ws1.sent).toHaveLength(ws1Sent)
       expect(ws2.lastFrame()).toEqual({ type: 'input', revision: 2, generation: 1, cursor: 0, input: 'date\n' })
@@ -731,7 +788,9 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       const ws = FakeWebSocket.instances[0]
       await waitFor(() => expect(ws.sent).toHaveLength(1))
       // 未 replay_start 直接 replay_complete：协议违反
-      ws.serverJson({ type: 'replay_complete', revision: 1, generation: 1, cursor: 0, truncated: false })
+      act(() => {
+        ws.serverJson({ type: 'replay_complete', revision: 1, generation: 1, cursor: 0, truncated: false })
+      })
       await screen.findByText(/终端流协议违反/)
       // stdin 保持关闭：输入不产生任何 WS 帧
       await waitFor(() => expect(inputCb).not.toBeNull())
@@ -778,8 +837,10 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       expect(screen.queryByText(/终端流错误/)).not.toBeInTheDocument()
       expect(screen.queryByText('终端流已断开')).not.toBeInTheDocument()
       // 新连接正常完成 replay → live
-      ws2.serverJson({ type: 'replay_start', revision: 2, generation: 1, cursor: 0 })
-      ws2.serverJson({ type: 'replay_complete', revision: 2, generation: 1, cursor: 0, truncated: false })
+      act(() => {
+        ws2.serverJson({ type: 'replay_start', revision: 2, generation: 1, cursor: 0 })
+        ws2.serverJson({ type: 'replay_complete', revision: 2, generation: 1, cursor: 0, truncated: false })
+      })
       await waitFor(() =>
         expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=live'),
       )
@@ -788,25 +849,41 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     }
   })
 
-  it('P1-4：create 失败后重试复用同一 key + byte-equivalent body（窗口 resize 不影响）', async () => {
-    let attempt = 0
+  it('P1-4：create 首次失败 → viewport 变化 → 重试复用同一 key + byte-equivalent body', async () => {
     const { calls } = await renderLive({
       list: EMPTY_LIST,
-      create: undefined,
+      create: (attempt) =>
+        attempt === 1
+          ? { status: 503, body: { error: { code: 'terminal_io_unavailable', message: 'io', retryable: true } } }
+          : { status: 201, body: { data: ticketView(), meta: metaOk } },
     })
-    // 第一次 503、第二次 201：通过覆盖 fetch 实现
-    void attempt
-    // 直接两阶段：先失败
+    // 第一次创建：503 失败
     const firstBtn = (await screen.findAllByRole('button', { name: '新终端' }))[0]
-    // 让 create 第一次失败
-    // （renderLive 的 create spec 为 undefined → 404 envelope → ApiError）
-    firstBtn.click()
+    await act(async () => {
+      firstBtn.click()
+    })
     await screen.findByText('终端不可用')
-    // 恢复列表后重试：同一 intent 复用 key/body
-    // 重新 renderLive 世界太绕，这里直接断言首次请求形状已冻结记录
-    const first = calls.find((c) => c.method === 'POST')!
-    expect(first.headers['Idempotency-Key']).toBeTruthy()
-    expect(Object.keys(first.body!).sort()).toEqual(['cols', 'revision', 'rows'])
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1)
+    // 重试按钮恢复列表 → 空态
+    await act(async () => {
+      screen.getByRole('button', { name: '重试' }).click()
+    })
+    await screen.findByText('该 Workspace 还没有终端')
+    // 两次点击之间改变 viewport
+    act(() => {
+      ;(window as { innerWidth: number }).innerWidth = 500
+      window.dispatchEvent(new Event('resize'))
+    })
+    // 第二次创建：成功
+    const secondBtn = (await screen.findAllByRole('button', { name: '新终端' }))[0]
+    await act(async () => {
+      secondBtn.click()
+    })
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const posts = calls.filter((c) => c.method === 'POST')
+    expect(posts).toHaveLength(2)
+    expect(posts[1].headers['Idempotency-Key']).toBe(posts[0].headers['Idempotency-Key'])
+    expect(JSON.stringify(posts[1].body)).toBe(JSON.stringify(posts[0].body))
   })
 
   it('P1-4：控制失败保留 phase 与同 intent；同按钮重试复用同一 key/body', async () => {
