@@ -306,6 +306,7 @@ def sanitized_environment(values: Mapping[str, str]) -> dict[str, str]:
 
 def _port_available(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((host, port))
         except OSError:

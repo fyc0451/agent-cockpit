@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -467,6 +468,35 @@ def test_systemd_check_fails_closed_on_command_error(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(gate.subprocess, "run", lambda *args, **kwargs: Result())
     assert gate._unit_not_installed() is False
+
+
+def test_port_probe_allows_immediate_restart_after_reusable_listener_closes() -> None:
+    gate = module()
+    host = "127.0.0.1"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, 0))
+        port = listener.getsockname()[1]
+        listener.listen(1)
+        with socket.create_connection((host, port)) as client:
+            accepted, _ = listener.accept()
+            listener.close()
+            with accepted:
+                accepted.shutdown(socket.SHUT_WR)
+                assert client.recv(1) == b""
+
+    assert gate._port_available(host, port) is True
+
+
+def test_port_probe_rejects_active_listener_with_reuseaddr() -> None:
+    gate = module()
+    host = "127.0.0.1"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, 0))
+        listener.listen(1)
+
+        assert gate._port_available(host, listener.getsockname()[1]) is False
 
 
 def test_web_build_readiness_requires_index_and_assets(tmp_path: Path) -> None:
