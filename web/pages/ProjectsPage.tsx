@@ -17,6 +17,18 @@ const AVAILABILITY_TONE: Record<string, TagTone> = {
   unknown: 'neutral',
 }
 
+/** 内部 availability 枚举 → 自然中文（不直出 raw 值） */
+const AVAILABILITY_LABEL: Record<string, string> = {
+  available: '可用',
+  offline: '离线',
+  missing: '目录不存在',
+  unknown: '状态未知',
+}
+
+function availabilityLabel(value: string): string {
+  return AVAILABILITY_LABEL[value] ?? '状态未知'
+}
+
 function locationSummary(p: { repo_locations?: RepoLocationSummary[] }): RepoLocationSummary | null {
   return p.repo_locations?.[0] ?? null
 }
@@ -104,7 +116,9 @@ export function ProjectsPage() {
                       ) : null}
                     </div>
                     {loc ? (
-                      <Tag tone={AVAILABILITY_TONE[loc.availability] ?? 'neutral'}>{loc.availability}</Tag>
+                      <Tag tone={AVAILABILITY_TONE[loc.availability] ?? 'neutral'}>
+                        {availabilityLabel(loc.availability)}
+                      </Tag>
                     ) : null}
                   </li>
                 )

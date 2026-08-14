@@ -16,7 +16,6 @@ import type { RepoLocationSummary } from '../../api/registry'
 import { routes } from '../../app/routes'
 import { Button } from '../../components/Button'
 import { StatusState } from '../../components/StatusState'
-import { Tag } from '../../components/Tag'
 import { useDialog } from '../../components/useDialog'
 
 const NAME_MAX = 256
@@ -182,10 +181,6 @@ export function WorkspaceWizard({
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
           />
-          <span className="kv-key">隔离</span>
-          <span>
-            <Tag tone="neutral">使用共享项目目录</Tag>
-          </span>
         </div>
 
         {name.length > NAME_MAX ? (

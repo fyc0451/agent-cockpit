@@ -63,6 +63,26 @@ interface TerminalHandle {
   fit: FitAddon
 }
 
+/** 运行状态/连接阶段 → 用户语言（不直出 runtime/generation/revision 等内部值） */
+const RUNTIME_STATE_LABEL: Record<string, string> = {
+  running: '运行中',
+  exited: '已退出',
+  unknown: '状态未知',
+  stopped: '已停止',
+}
+
+const PHASE_LABEL: Record<string, string> = {
+  attaching: '连接中',
+  replaying: '回放中',
+  live: '已连接',
+  reconnecting: '已断开',
+  exited: '已退出',
+  process_unknown: '状态未知',
+  stopped: '已停止',
+  error: '错误',
+  detached: '未连接',
+}
+
 /** 不可用（capability fail-closed）：保持只读外壳，零 POST/WS */
 function UnavailableBody({ project, workspace }: { project: Project; workspace: Workspace }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -92,7 +112,7 @@ function UnavailableBody({ project, workspace }: { project: Project; workspace: 
     }
   }, [])
 
-  const btnTitle = (action: string) => `${ptyCap.reason ?? 'PTY 未接通'}（${action}不可用）`
+  const btnTitle = (action: string) => `${ptyCap.reason ?? '终端未接通'}（${action}不可用）`
 
   return (
     <>
@@ -116,8 +136,8 @@ function UnavailableBody({ project, workspace }: { project: Project; workspace: 
       <StatusState
         kind="disconnected"
         banner
-        title="PTY 未接通"
-        description={ptyCap.reason ?? '服务端未声明该 Workspace 的终端能力。'}
+        title="终端未接通"
+        description={ptyCap.reason ?? '服务端未声明该工作区的终端能力。'}
         docsRoute={ptyCap.docsRoute}
       />
       <div ref={containerRef} className="terminal-surface" data-testid="terminal-surface" />
@@ -330,7 +350,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
               return
             }
             if (code === STREAM_CLOSE.NOT_FOUND) {
-              patchTab(ticketId, { phase: 'error', error: '终端 ticket 不存在或已被移除（4404）。' })
+              patchTab(ticketId, { phase: 'error', error: '终端会话不存在或已被移除（4404）。' })
               return
             }
             patchTab(ticketId, { phase: 'reconnecting', error: reason || `终端流断开（${code}）` })
@@ -676,28 +696,28 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
         sub={workspace.name ?? workspace.id}
         actions={
           <>
-            <Button variant="primary" disabled={createPending} title={createPending ? '创建进行中' : '创建新终端会话'} onClick={onNewTerminal}>
+            <Button variant="primary" disabled={createPending} title={createPending ? '正在创建…' : '新建一个终端'} onClick={onNewTerminal}>
               新终端
             </Button>
-            <Button variant="secondary" disabled={!canInterrupt} title={canInterrupt ? '发送中断（SIGINT）' : '仅 live 流可中断'} onClick={onInterrupt}>
+            <Button variant="secondary" disabled={!canInterrupt} title={canInterrupt ? '中断正在运行的命令' : '只有正在运行的终端可以中断'} onClick={onInterrupt}>
               中断
             </Button>
-            <Button variant="secondary" disabled={!canReconnect} title={canReconnect ? '断线重连并续播' : '仅在断开后可重连'} onClick={onReconnect}>
+            <Button variant="secondary" disabled={!canReconnect} title={canReconnect ? '重新连接并恢复输出' : '只有断开连接的终端可以重连'} onClick={onReconnect}>
               重连
             </Button>
-            <Button variant="danger" disabled={!canRestart} title={canRestart ? '杀死当前 generation 并重启' : '无可重启的终端'} onClick={onRestart}>
+            <Button variant="danger" disabled={!canRestart} title={canRestart ? '结束当前进程并重新启动' : '无可重启的终端'} onClick={onRestart}>
               重启
             </Button>
-            <Button variant="secondary" disabled={!selectedTab} title="切换终端区域全屏" onClick={onFullscreen}>
+            <Button variant="secondary" disabled={!selectedTab} title="切换全屏" onClick={onFullscreen}>
               全屏
             </Button>
-            <Button variant="secondary" disabled={!selectedTab} title="复制 project/workspace/ticket 公开 identity" onClick={onCopyIdentity}>
-              {copied ? '已复制' : '复制 identity'}
+            <Button variant="secondary" disabled={!selectedTab} title="复制该终端的公开标识（项目/工作区/会话 ID）" onClick={onCopyIdentity}>
+              {copied ? '已复制' : '复制标识'}
             </Button>
             <Button
               variant="danger"
               disabled={!canCloseSession}
-              title={canCloseSession ? '确认后杀死 PTY 并关闭 ticket' : '无可关闭的会话'}
+              title={canCloseSession ? '确认后结束终端进程并关闭会话' : '无可关闭的会话'}
               onClick={onCloseSession}
             >
               关闭会话
@@ -710,7 +730,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
           kind="conflict"
           banner
           title="确认关闭会话？"
-          description="该操作会终止真实 PTY 进程并把 ticket 置为 stopped（恰好一次 POST /close）。仅关闭视图请用 tab 上的「关闭标签页」。"
+          description="该操作会结束终端进程并关闭会话。只想收起页面的话，请用标签页上的「×」。"
         >
           <div className="state-actions">
             <Button variant="danger" onClick={onCloseSession}>
@@ -726,8 +746,8 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
         <StatusState
           kind="empty"
           banner
-          title="该 Workspace 还没有终端"
-          description="创建一个真实 Workspace 终端（/bin/bash 交互式 PTY，身份由服务端 authority 决定）。"
+          title="还没有终端"
+          description="新建一个终端，即可在这里运行命令。"
         >
           <div className="state-actions">
             <Button variant="primary" disabled={createPending} onClick={onNewTerminal}>
@@ -738,11 +758,12 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
       ) : (
         <>
           <div className="terminal-tabs" data-testid="terminal-tabs" role="tablist">
-            {tickets.map((item) => {
+            {tickets.map((item, index) => {
               const id = item.ticket.ticket_id
               const tab = tabs[id]
               const isOpen = tab?.open === true
               const isSelected = selected === id && isOpen
+              const tabLabel = `终端 ${index + 1}`
               return (
                 <div
                   key={id}
@@ -754,17 +775,17 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
                   <button
                     type="button"
                     className="terminal-tab-label"
-                    title={isOpen ? `ticket ${id}` : `ticket ${id}（未连接，点击重新接管）`}
+                    title={isOpen ? tabLabel : `${tabLabel}（未连接，点击重新连接）`}
                     onClick={() => openTab(item)}
                   >
-                    {id.slice(-6)}
+                    {tabLabel}
                   </button>
                   {isOpen && (
                     <button
                       type="button"
                       className="terminal-tab-close"
                       aria-label="关闭标签页"
-                      title="关闭标签页（只断开本页连接，不杀 PTY）"
+                      title="关闭标签页（只断开本页连接，终端进程继续运行）"
                       onClick={() => onCloseViewTab(id)}
                     >
                       ×
@@ -776,7 +797,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
           </div>
           {selectedTab && (
             <div className="terminal-runtime-state" data-testid="terminal-runtime-state">
-              runtime={selectedTab.view.runtime.state} · 流={selectedTab.phase} · generation={selectedTab.view.ticket.engine_generation} · revision={selectedTab.view.ticket.revision}
+              状态：{RUNTIME_STATE_LABEL[selectedTab.view.runtime.state] ?? '状态未知'} · 连接：{PHASE_LABEL[selectedTab.phase] ?? selectedTab.phase}
             </div>
           )}
           {selectedTab?.phase === 'attaching' && (
@@ -789,16 +810,16 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
             <StatusState kind="degraded" banner title="回放历史已截断" description="输出历史超过保留上界，仅回放最近片段。" />
           )}
           {selectedTab?.phase === 'reconnecting' && (
-            <StatusState kind="stale" banner title="终端流已断开" description={selectedTab.error ?? '连接被接管或游标过期；重连将从最近游标续播。'} />
+            <StatusState kind="stale" banner title="终端连接已断开" description={selectedTab.error ?? '连接中断，或已被其他页面接管；重连后将恢复输出。'} />
           )}
           {selectedTab?.phase === 'exited' && (
-            <StatusState kind="degraded" banner title="终端进程已退出" description="进程自然退出并已持久化退出回执；可重启新 generation 或关闭会话。" />
+            <StatusState kind="degraded" banner title="终端进程已退出" description="进程已退出。可以重启一个新的终端进程，或关闭会话。" />
           )}
           {selectedTab?.phase === 'process_unknown' && (
-            <StatusState kind="degraded" banner title="终端进程状态未知" description="服务重启后无当前 boot binding；不会自动恢复进程，请显式重启或关闭会话。" />
+            <StatusState kind="degraded" banner title="终端进程状态未知" description="服务重启后无法确认终端进程状态；不会自动恢复，请显式重启或关闭会话。" />
           )}
           {selectedTab?.phase === 'stopped' && (
-            <StatusState kind="empty" banner title="终端会话已停止" description="ticket 已停止；可重启新 generation。" />
+            <StatusState kind="empty" banner title="终端会话已停止" description="会话已停止；可以重启一个新的终端进程。" />
           )}
           {selectedTab?.error && selectedTab.phase !== 'error' && (
             <StatusState kind="degraded" banner title="终端操作未完成" description={selectedTab.error} />

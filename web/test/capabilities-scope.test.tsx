@@ -53,7 +53,7 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
     })
     const { nav } = renderWithNav('/projects/p1/workspaces/w1/terminal')
 
-    await screen.findByText('PTY 未接通')
+    await screen.findByText('终端未接通')
     expect(screen.queryByText(/已由服务端 capability 标记为可用/)).not.toBeInTheDocument()
 
     await act(async () => {
@@ -66,7 +66,7 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
     // B 解析后：w:p2/w1 scope 无 server 值 → 静态 fail-closed
     await screen.findByText('B 工作区')
     await waitFor(() => {
-      expect(screen.getByText('PTY 未接通')).toBeInTheDocument()
+      expect(screen.getByText('终端未接通')).toBeInTheDocument()
     })
     for (const name of ['中断', '重连', '重启']) {
       expect(screen.getByRole('button', { name })).toHaveAttribute('aria-disabled', 'true')
@@ -83,7 +83,7 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
       // p9 未配置 → 404 envelope
     })
     const { nav } = renderWithNav('/projects/p1/workspaces/w1/terminal')
-    await screen.findByText('PTY 未接通')
+    await screen.findByText('终端未接通')
 
     await act(async () => {
       nav()('/projects/p9/workspaces/w1/terminal')

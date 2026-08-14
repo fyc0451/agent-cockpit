@@ -474,7 +474,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       expect(container.querySelector('[data-testid="terminal-tabs"]')).toBeInTheDocument()
       expect(container.querySelector(`[data-testid="terminal-tab-${TICKET_ID}"]`)).toBeInTheDocument()
       expect(container.querySelector(`[data-testid="terminal-surface-${TICKET_ID}"]`)).toBeInTheDocument()
-      expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('runtime=running')
+      expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('状态：运行中')
     } finally {
       Object.defineProperty(Terminal.prototype, 'onData', onDataDesc)
       writeSpy.mockRestore()
@@ -581,7 +581,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     act(() => {
       ws1.serverClose(4409, 'stale')
     })
-    await screen.findByText('终端流已断开')
+    await screen.findByText('终端连接已断开')
     // 先 refetch（GET detail），不盲重连
     await waitFor(() => expect(calls.some((c) => c.method === 'GET' && c.url.endsWith(`/terminal-tickets/${TICKET_ID}`))).toBe(true))
     expect(calls.some((c) => c.url.endsWith('/reconnect'))).toBe(false)
@@ -609,7 +609,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       ws.serverJson({ type: 'exit', generation: 1 })
     })
     await screen.findByText('终端进程已退出')
-    expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=exited')
+    expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('连接：已退出')
   })
 
   it('process_unknown → degraded 恢复提示；中断禁用、重启可用', async () => {
@@ -627,7 +627,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     expect(FakeWebSocket.instances).toHaveLength(0)
   })
 
-  it('复制 identity：只含公开 project/workspace/ticket ID', async () => {
+  it('复制标识：只含公开 project/workspace/ticket ID', async () => {
     const written: string[] = []
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText: (t: string) => (written.push(t), Promise.resolve()) },
@@ -637,7 +637,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       list: { body: { data: { items: [ticketView()], next_cursor: null }, meta: metaOk } },
     })
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
-    const copyBtn = await screen.findByRole('button', { name: '复制 identity' })
+    const copyBtn = await screen.findByRole('button', { name: '复制标识' })
     copyBtn.click()
     await waitFor(() => expect(written).toHaveLength(1))
     expect(written[0]).toBe(`project=${REG_P1} workspace=w1 ticket=${TICKET_ID}`)
@@ -691,7 +691,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       })
       await screen.findByText(/终端流协议违反/)
       await waitFor(() =>
-        expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=error'),
+        expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('连接：错误'),
       )
       // stdin 关闭：输入不再产生 WS 帧
       const sentBefore = ws.sent.length
@@ -711,7 +711,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       })
       expect(writeSpy.mock.calls.length).toBe(writesBefore)
       expect(screen.queryByText('终端进程已退出')).not.toBeInTheDocument()
-      expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=error')
+      expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('连接：错误')
       expect(FakeWebSocket.instances).toHaveLength(1)
     } finally {
       Object.defineProperty(Terminal.prototype, 'onData', onDataDesc)
@@ -832,17 +832,17 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
       ws1.serverClose(4409, 'taken over')
       // 零变化：无新写入、phase 仍是新连接的 attaching、无 exited/error 文案
       expect(writeSpy.mock.calls.length).toBe(writesBefore)
-      expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=attaching')
+      expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('连接：连接中')
       expect(screen.queryByText('终端进程已退出')).not.toBeInTheDocument()
       expect(screen.queryByText(/终端流错误/)).not.toBeInTheDocument()
-      expect(screen.queryByText('终端流已断开')).not.toBeInTheDocument()
+      expect(screen.queryByText('终端连接已断开')).not.toBeInTheDocument()
       // 新连接正常完成 replay → live
       act(() => {
         ws2.serverJson({ type: 'replay_start', revision: 2, generation: 1, cursor: 0 })
         ws2.serverJson({ type: 'replay_complete', revision: 2, generation: 1, cursor: 0, truncated: false })
       })
       await waitFor(() =>
-        expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=live'),
+        expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('连接：已连接'),
       )
     } finally {
       writeSpy.mockRestore()
@@ -868,7 +868,7 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     await act(async () => {
       screen.getByRole('button', { name: '重试' }).click()
     })
-    await screen.findByText('该 Workspace 还没有终端')
+    await screen.findByText('还没有终端')
     // 两次点击之间改变 viewport
     act(() => {
       ;(window as { innerWidth: number }).innerWidth = 500
@@ -964,5 +964,29 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     createBtn.click()
     await screen.findByText('终端不可用')
     expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+})
+
+// ---------- 首用可理解性：可见文案无内部术语 ----------
+describe('TerminalPage 首用可理解性（用户语言）', () => {
+  const BANNED = ['PTY', 'ticket', 'generation', 'revision', 'authority', 'identity', 'Workspace', 'POST']
+
+  it('空态：标题/描述/按钮无内部术语', async () => {
+    await renderLive({ list: EMPTY_LIST })
+    await screen.findByText('还没有终端')
+    const text = document.querySelector('main')?.textContent ?? ''
+    for (const banned of BANNED) expect(text).not.toContain(banned)
+  })
+
+  it('live happy path：tab 用「终端 N」人类标签，页面无内部术语', async () => {
+    await renderLive({
+      list: { body: { data: { items: [ticketView()], next_cursor: null }, meta: metaOk } },
+    })
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await driveToLive(FakeWebSocket.instances[0])
+    await screen.findByRole('button', { name: '中断' })
+    expect(screen.getByText('终端 1')).toBeInTheDocument()
+    const text = document.querySelector('main')?.textContent ?? ''
+    for (const banned of BANNED) expect(text).not.toContain(banned)
   })
 })

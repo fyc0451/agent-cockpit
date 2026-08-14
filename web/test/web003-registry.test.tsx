@@ -121,8 +121,8 @@ describe('WEB-003 列表（V1–V6）', () => {
     const { container } = renderApp('/projects')
     expect(await screen.findByText('Alpha 项目')).toBeInTheDocument()
     expect(screen.getByText('Beta 项目')).toBeInTheDocument()
-    expect(screen.getByText('available')).toBeInTheDocument()
-    expect(screen.getByText('offline')).toBeInTheDocument()
+    expect(screen.getByText('可用')).toBeInTheDocument()
+    expect(screen.getByText('离线')).toBeInTheDocument()
     // SLICE-001：行只渲染用户可理解的位置，无 canonical_path / 内部 node_id
     expect(screen.getAllByText('本机')).toHaveLength(2)
     expect(container.querySelector('.list')?.textContent).not.toContain('Local')
