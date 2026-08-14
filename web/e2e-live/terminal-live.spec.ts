@@ -174,7 +174,7 @@ async function expectNoHorizontalOverflow(page: Page) {
 
 async function expectEmptyProjects(page: Page) {
   await expect(page.getByText('还没有项目')).toBeVisible()
-  await expect(page.getByRole('button', { name: '选择项目目录' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '选择代码目录' })).toBeVisible()
   await expect(page.getByRole('navigation', { name: '主导航' })).toBeVisible()
   await expectNoHorizontalOverflow(page)
 }
@@ -341,7 +341,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     await expectEmptyProjects(page)
 
     await page.setViewportSize({ width: 1280, height: 800 })
-    await page.getByRole('button', { name: '选择项目目录' }).click()
+    await page.getByRole('button', { name: '选择代码目录' }).click()
     const projectDialog = page.getByRole('dialog', { name: '添加项目' })
     await expect(projectDialog).toBeVisible()
     await projectDialog.getByRole('button', { name: /Local/ }).click()
@@ -364,14 +364,14 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     const projectLink = page.locator('a.list-link, a.list-title').first()
     await expect(projectLink, 'registered Project must appear in the live list').toBeVisible()
     await projectLink.click()
-    const createWorkspace = page.getByRole('button', { name: '创建 Workspace' })
+    const createWorkspace = page.getByRole('button', { name: '创建工作空间' })
     await expect(createWorkspace).toBeVisible()
     await expect(createWorkspace, 'Workspace create must be enabled after a live RepoLocation exists').toBeEnabled()
     await createWorkspace.click()
-    const workspaceDialog = page.getByRole('dialog', { name: '创建 Workspace' })
+    const workspaceDialog = page.getByRole('dialog', { name: '创建工作空间' })
     await expect(workspaceDialog).toBeVisible()
-    await workspaceDialog.getByLabel('Workspace 名称').fill('live-terminal')
-    await workspaceDialog.getByRole('button', { name: '确认创建' }).click()
+    await workspaceDialog.getByLabel('工作空间名称').fill('live-terminal')
+    await workspaceDialog.getByRole('button', { name: '创建并打开' }).click()
     await expect(page).toHaveURL(/\/workspaces\/[^/]+\/files$/)
     const workspaceHome = page.getByRole('link', { name: 'live-terminal', exact: true })
     await expect(workspaceHome, 'sidebar must expose exact live-terminal home link').toBeVisible()
