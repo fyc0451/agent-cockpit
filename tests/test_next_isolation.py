@@ -124,6 +124,47 @@ def test_runtime_symlink_is_rejected(tmp_path: Path) -> None:
         gate.ensure_runtime_roots(values)
 
 
+def test_optional_next_token_file_is_absent_or_loaded(tmp_path: Path) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    assert gate.load_cockpit_token(values) is None
+
+    path = gate.token_file_path(values)
+    path.parent.mkdir(parents=True, mode=0o700)
+    path.write_text("a" * 64 + "\n", encoding="ascii")
+    path.chmod(0o600)
+    assert gate.load_cockpit_token(values) == "a" * 64
+
+
+def test_next_token_file_rejects_unsafe_metadata_and_content(tmp_path: Path) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    path = gate.token_file_path(values)
+    path.parent.mkdir(parents=True, mode=0o700)
+
+    path.write_text("a" * 64 + "\n", encoding="ascii")
+    path.chmod(0o644)
+    with pytest.raises(gate.IsolationError, match="token_file_unsafe"):
+        gate.load_cockpit_token(values)
+
+    path.chmod(0o600)
+    path.write_text("short\n", encoding="ascii")
+    with pytest.raises(gate.IsolationError, match="token_file_unsafe"):
+        gate.load_cockpit_token(values)
+
+    path.write_text("a" * 31 + "!\n", encoding="ascii")
+    with pytest.raises(gate.IsolationError, match="token_file_invalid"):
+        gate.load_cockpit_token(values)
+
+    path.unlink()
+    target = tmp_path / "target.token"
+    target.write_text("b" * 64 + "\n", encoding="ascii")
+    target.chmod(0o600)
+    path.symlink_to(target)
+    with pytest.raises(gate.IsolationError, match="token_file_unsafe"):
+        gate.load_cockpit_token(values)
+
+
 def test_start_environment_discards_inherited_production_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -219,6 +260,7 @@ def test_start_execs_next_venv_with_sanitized_environment(
     monkeypatch.setattr(gate, "_unit_not_installed", lambda: True)
     monkeypatch.setattr(gate, "_port_available", lambda host, port: True)
     monkeypatch.setattr(gate, "ensure_runtime_roots", lambda values: None)
+    monkeypatch.setattr(gate, "load_cockpit_token", lambda values: "t" * 64)
     monkeypatch.setattr(gate, "_prepare_exec_fds", lambda fd: None)
     monkeypatch.setattr(gate.Path, "is_file", lambda _self: True)
     monkeypatch.setattr(gate.os, "chdir", lambda path: captured.update(cwd=path))
@@ -242,6 +284,7 @@ def test_start_execs_next_venv_with_sanitized_environment(
     assert environment["COCKPIT_PORT"] == "18790"
     assert environment["VIRTUAL_ENV"] == str(ROOT / ".venv")
     assert environment["COCKPIT_NEXT_LOCK_FD"] == "42"
+    assert environment["COCKPIT_TOKEN"] == "t" * 64
     assert "PYTHONPATH" not in environment
 
 

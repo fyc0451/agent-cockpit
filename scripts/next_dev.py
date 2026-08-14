@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -23,6 +24,9 @@ NEXT_SESSION = "github-agent-cockpit-next"
 NEXT_UNIT = "agent-cockpit-next.service"
 PRODUCTION_UNIT = "agent-cockpit.service"
 PRODUCTION_PORT = "8790"
+TOKEN_FILE_NAME = "cockpit.token"
+MAX_TOKEN_BYTES = 256
+TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 SANITIZED_PREFIXES = ("COCKPIT_", "AGENT_COCKPIT_", "HERDR_")
 SANITIZED_KEYS = frozenset({
     "AGENT_MAIL_DB_PATH", "AGENT_MAIL_PROJECT", "HERDR_SESSION",
@@ -238,6 +242,84 @@ def ensure_runtime_roots(values: Mapping[str, str]) -> None:
             raise IsolationError("runtime_root_unsafe")
 
 
+def token_file_path(values: Mapping[str, str]) -> Path:
+    return Path(values["COCKPIT_CONFIG_DIR"]) / TOKEN_FILE_NAME
+
+
+def _token_file_signature(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def load_cockpit_token(values: Mapping[str, str]) -> str | None:
+    path = token_file_path(values)
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise IsolationError("token_file_unavailable") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+        or before.st_size < 32
+        or before.st_size > MAX_TOKEN_BYTES + 1
+    ):
+        raise IsolationError("token_file_unsafe")
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise IsolationError("token_file_unavailable") from exc
+    try:
+        opened = os.fstat(fd)
+        if _token_file_signature(opened) != _token_file_signature(before):
+            raise IsolationError("token_file_unsafe")
+        chunks: list[bytes] = []
+        remaining = MAX_TOKEN_BYTES + 2
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise IsolationError("token_file_unsafe")
+        after = os.fstat(fd)
+        if _token_file_signature(after) != _token_file_signature(opened):
+            raise IsolationError("token_file_unsafe")
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise IsolationError("token_file_unsafe") from exc
+        if _token_file_signature(current) != _token_file_signature(after):
+            raise IsolationError("token_file_unsafe")
+    except OSError as exc:
+        raise IsolationError("token_file_unavailable") from exc
+    finally:
+        os.close(fd)
+
+    raw = b"".join(chunks)
+    if raw.endswith(b"\n"):
+        raw = raw[:-1]
+    try:
+        token = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise IsolationError("token_file_invalid") from exc
+    if TOKEN_RE.fullmatch(token) is None:
+        raise IsolationError("token_file_invalid")
+    return token
+
+
 def sanitized_environment(values: Mapping[str, str]) -> dict[str, str]:
     clean = {
         key: value
@@ -305,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(__file__).resolve().parents[1]
     try:
         values = validate(load_env(args.env_file), repo=repo)
+        token = load_cockpit_token(values)
         if args.command == "start":
             if not _unit_not_installed():
                 raise IsolationError("next_unit_installed")
@@ -315,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
             if not python.is_file():
                 raise IsolationError("venv_missing")
             environment = sanitized_environment(values)
+            if token is not None:
+                environment["COCKPIT_TOKEN"] = token
             environment["VIRTUAL_ENV"] = str(repo / ".venv")
             try:
                 with InstanceLock(values) as lock:

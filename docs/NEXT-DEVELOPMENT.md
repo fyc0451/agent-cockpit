@@ -29,6 +29,15 @@ Agent Mail database path are then set explicitly; server-side queries and writes
 remain restricted to the exact Next project. The fixed SHA in the Gate
 intentionally cross-checks the independently versioned delivery baseline.
 
+The only optional secret input is
+`~/.config/agent-cockpit-next/cockpit.token`. When present, it must be a
+regular file owned by the current user, have mode `0600`, have exactly one hard
+link, and contain one 32-256 character ASCII token using letters, digits, `_`,
+or `-`. The launcher reads it through a no-follow descriptor after isolation
+validation and injects only `COCKPIT_TOKEN` into the server process. A missing
+file preserves local-only mode. Do not add the token to `.env.next`, the shell
+environment, Git, logs, or test reports.
+
 ## Commands
 
 Create an independent virtual environment and validate the profile:
@@ -46,6 +55,21 @@ Start the source development service only after the checks pass:
 ```bash
 .venv/bin/python scripts/next_dev.py start --env-file .env.next
 ```
+
+To enable token authentication, create the private file before `check` and
+`start` (the no-clobber setting refuses to overwrite an existing token):
+
+```bash
+install -d -m 700 "$HOME/.config/agent-cockpit-next"
+(umask 077; set -o noclobber; openssl rand -hex 32 > \
+  "$HOME/.config/agent-cockpit-next/cockpit.token")
+```
+
+Changing this file and restarting rotates the authentication state. Use HTTPS,
+an SSH tunnel, or another authenticated private transport for non-loopback
+clients; plain HTTP exposes the reusable login cookie to observers. N0 continues
+to bind `127.0.0.1:18790`; a host-level forwarding layer may publish that
+endpoint but must not publish it to the public Internet.
 
 This `start` command is the only supported entry point for the Next backend. It
 hands a per-profile process lock to the server across `execve`; direct Next
