@@ -2,28 +2,34 @@ import { expect, test, type Page, type Request } from '@playwright/test'
 
 /**
  * One ordinary live journey on one ephemeral server.
- * Empty-registry checks happen before any write, at both 1280 and 390.
- * After writes, both viewports are rechecked on that same populated state.
- * Missing Project / Workspace / TERM-003 controls fail the run. No blocked-return.
- * Browser must never submit cwd / command / PID / env / Herdr identifiers.
+ * Selectors locked to Web exact eb75ace0f202174fdcb018a09c68c9b5219a5c05:
+ *   新终端 / 中断 / 重连 / 重启 / 关闭标签页 / 关闭会话
+ *   testids: terminal-tabs, terminal-tab-{id}, terminal-surface-{id}, terminal-runtime-state
+ * Empty-registry is checked at 1280 and 390 before any write.
+ * After writes, 390 is rechecked on that same populated state.
+ * Missing Project / Workspace / TERM-003 controls fail. No blocked-return.
  */
 
 const FORBIDDEN = /\b(cwd|command|pid|env|herdr_session|herdr_pane|HERDR_SESSION|HERDR_PANE_ID|HERDR_ENV)\b/
 
 function attachLiveGates(page: Page) {
-  const posts: { url: string; body: string }[] = []
+  const posts: { url: string; method: string; body: string }[] = []
   const forbidden: string[] = []
   page.on('request', (request: Request) => {
     const url = request.url()
     const body = request.postData() ?? ''
     if (request.method() === 'POST' || request.method() === 'PUT' || request.method() === 'PATCH') {
-      posts.push({ url, body })
+      posts.push({ url, method: request.method(), body })
     }
     if (FORBIDDEN.test(url) || FORBIDDEN.test(body)) {
       forbidden.push(`${request.method()} ${url} ${body.slice(0, 200)}`)
     }
   })
   return { posts, forbidden }
+}
+
+function terminalPosts(gates: { posts: { url: string }[] }, since: number) {
+  return gates.posts.slice(since).filter((item) => item.url.includes('terminal-tickets'))
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -41,7 +47,20 @@ async function expectEmptyProjects(page: Page) {
   await expectNoHorizontalOverflow(page)
 }
 
-test('TERM-003 live journey: empty, register, workspace, terminal, both viewports', async ({
+async function expectLiveStream(page: Page) {
+  const state = page.getByTestId('terminal-runtime-state')
+  await expect(state, 'TERM-003 live stream must be visible').toBeVisible({ timeout: 20_000 })
+  await expect(state).toContainText('runtime=running')
+  await expect(state).toContainText('流=live')
+}
+
+async function visibleSurface(page: Page) {
+  const live = page.locator('[data-testid^="terminal-surface-"]:visible')
+  await expect(live, 'live ticket surface terminal-surface-{ticketId} is required').toBeVisible()
+  return live.first()
+}
+
+test('TERM-003 live journey: create, input, output, resize, reload/replay, interrupt, restart, close-view, close-session', async ({
   page,
 }) => {
   const gates = attachLiveGates(page)
@@ -58,18 +77,18 @@ test('TERM-003 live journey: empty, register, workspace, terminal, both viewport
   await page.getByRole('button', { name: '选择项目目录' }).click()
   const projectDialog = page.getByRole('dialog', { name: '添加项目' })
   await expect(projectDialog).toBeVisible()
-  await projectDialog.getByRole('button', { name: /Local|本机/i }).click()
-  const rootButtons = projectDialog.getByRole('button').filter({ hasNotText: /取消|关闭|上一步/ })
-  await expect(rootButtons.first(), 'live discovery must expose at least one root').toBeVisible()
-  await rootButtons.first().click()
-  const seed = projectDialog.getByRole('button', { name: /term003-live-seed/ })
-  await expect(seed, 'seeded directory must be listed; missing seed is a failed journey step').toBeVisible()
+  await projectDialog.getByRole('button', { name: /Local/ }).click()
+  const homeRoot = projectDialog.getByRole('button', { name: /^home$/i })
+  await expect(homeRoot, 'ephemeral HOME root must be listed as home').toBeVisible()
+  await homeRoot.click()
+  const seed = projectDialog.getByRole('button', { name: /term003-live-seed/ }).filter({ hasNotText: '进入' })
+  await expect(seed, 'select term003-live-seed, not 进入').toBeVisible()
   await seed.click()
-  await projectDialog.getByRole('button', { name: /识别/ }).click()
+  await projectDialog.getByRole('button', { name: '识别所选目录' }).click()
   const submit = projectDialog.getByRole('button', { name: '确认添加 Project' })
   await expect(submit, 'register submit must become enabled after probe').toBeEnabled()
   await submit.click()
-  await expect(projectDialog.getByText(/登记成功|已添加/)).toBeVisible({ timeout: 15_000 })
+  await expect(projectDialog.getByText('登记成功')).toBeVisible({ timeout: 15_000 })
 
   await page.goto('/#/projects')
   const projectLink = page.locator('a.list-link, a.list-title').first()
@@ -87,72 +106,122 @@ test('TERM-003 live journey: empty, register, workspace, terminal, both viewport
 
   const terminalCard = page.locator('.card', { hasText: '终端' }).first()
   await expect(terminalCard, 'Workspace home must expose a Terminal card').toBeVisible()
-  await expect(terminalCard, 'Terminal card must be enabled for TERM-003').not.toHaveAttribute(
+  await expect(terminalCard, 'terminal.pty must enable the Terminal card').not.toHaveAttribute(
     'aria-disabled',
     'true',
   )
   await terminalCard.click()
   await expect(page).toHaveURL(/\/terminal/)
-  await expect(page.getByTestId('terminal-surface')).toBeVisible()
+  await expect(page.getByText('PTY 未接通')).toHaveCount(0)
 
-  const start = page.getByRole('button', { name: /启动终端|新建终端|创建终端|打开终端/ })
+  const create = page.getByRole('button', { name: '新终端' }).first()
+  await expect(create, 'stable name 新终端 is required').toBeVisible()
+  await expect(create).toBeEnabled()
+  const createPostsBefore = gates.posts.length
+  await create.click()
+  await expect(page.getByTestId('terminal-tabs')).toBeVisible({ timeout: 20_000 })
+  await expect(page.locator('[data-testid^="terminal-tab-"]').first()).toBeVisible()
+  const createPosts = terminalPosts(gates, createPostsBefore)
+  expect(
+    createPosts.some((item) => /\/terminal-tickets$/.test(new URL(item.url).pathname)),
+    'create must POST /terminal-tickets',
+  ).toBe(true)
+
   await expect(
-    start,
-    'TERM-003 start/create control is required; W1 disabled shell is not acceptance',
-  ).toBeVisible()
-  await expect(start).toBeEnabled()
-  await start.click()
+    page.getByText('正在连接终端流…').or(page.getByText('正在回放终端历史…')).or(page.getByTestId('terminal-runtime-state')),
+  ).toBeVisible({ timeout: 20_000 })
+  await expectLiveStream(page)
+  const surface = await visibleSurface(page)
 
-  const surface = page.getByTestId('terminal-surface')
-  await surface.click()
-  await page.keyboard.type('printf TERM003-LIVE\\n')
+  const helper = page.locator('.xterm-helper-textarea')
+  if ((await helper.count()) > 0) {
+    await helper.focus()
+  } else {
+    await surface.click()
+  }
+  await page.keyboard.type('printf TERM003-LIVE')
   await page.keyboard.press('Enter')
-  await expect(surface, 'PTY must echo the stable command output').toContainText('TERM003-LIVE', {
-    timeout: 15_000,
-  })
+  await expect
+    .poll(
+      async () => {
+        const chunks = await page.locator('.xterm, .xterm-rows, [data-testid^="terminal-surface-"]').allInnerTexts()
+        return chunks.join('\n')
+      },
+      { timeout: 15_000, message: 'PTY must show TERM003-LIVE (canvas-only output is a remaining Web gap)' },
+    )
+    .toContain('TERM003-LIVE')
+  await expectLiveStream(page)
 
   const beforeBox = await surface.boundingBox()
   await page.setViewportSize({ width: 390, height: 844 })
   await expectNoHorizontalOverflow(page)
-  await expect(surface).toBeVisible()
-  const phoneBox = await surface.boundingBox()
+  const phoneSurface = await visibleSurface(page)
+  const phoneBox = await phoneSurface.boundingBox()
   expect(phoneBox, 'resize must keep a visible terminal surface').not.toBeNull()
   if (beforeBox && phoneBox) {
     expect(phoneBox.width, '390px surface width must change with viewport').not.toBe(beforeBox.width)
   }
+  await expectLiveStream(page)
 
   await page.reload()
   await expect(page).toHaveURL(/\/terminal/)
-  await expect(surface).toBeVisible()
-  const reconnect = page.getByRole('button', { name: '重连' })
-  await expect(reconnect, 'TERM-003 reconnect is required after reload').toBeVisible()
-  if (await reconnect.isEnabled()) {
+  await expect(
+    page.getByText('正在回放终端历史…').or(page.getByTestId('terminal-runtime-state')),
+  ).toBeVisible({ timeout: 20_000 })
+  const disconnected = page.getByText('终端流已断开')
+  if ((await disconnected.count()) > 0) {
+    const reconnect = page.getByRole('button', { name: '重连' })
+    await expect(reconnect, '重连 must be enabled after stream disconnect').toBeEnabled()
     await reconnect.click()
   }
-  await expect(surface).toBeVisible()
+  await expectLiveStream(page)
 
   const interrupt = page.getByRole('button', { name: '中断' })
-  const restart = page.getByRole('button', { name: '重启' })
-  await expect(interrupt, 'TERM-003 interrupt is required').toBeVisible()
-  await expect(restart, 'TERM-003 restart is required').toBeVisible()
-  await expect(interrupt).toBeEnabled()
+  await expect(interrupt).toBeVisible()
+  await expect(interrupt, '中断 is enabled only in live').toBeEnabled()
+  const interruptBefore = gates.posts.length
   await interrupt.click()
+  await expect
+    .poll(() => terminalPosts(gates, interruptBefore).some((item) => item.url.endsWith('/interrupt')))
+    .toBe(true)
+
+  const restart = page.getByRole('button', { name: '重启' })
+  await expect(restart).toBeVisible()
   await expect(restart).toBeEnabled()
+  const restartBefore = gates.posts.length
   await restart.click()
+  await expect
+    .poll(() => terminalPosts(gates, restartBefore).some((item) => item.url.endsWith('/restart')))
+    .toBe(true)
+  await expectLiveStream(page)
 
-  const closeViewPostsBefore = gates.posts.length
-  await page.goto('/#/projects')
-  const closeViewPosts = gates.posts.slice(closeViewPostsBefore)
+  const closeViewBefore = gates.posts.length
+  await page.getByRole('button', { name: '关闭标签页' }).click()
+  const closeViewPosts = terminalPosts(gates, closeViewBefore)
   expect(
-    closeViewPosts.filter((item) => /terminal/i.test(item.url)),
-    'leaving the terminal view must not POST',
+    closeViewPosts.filter((item) => item.url.endsWith('/close')),
+    '关闭标签页 must not POST /close',
   ).toEqual([])
+  await expect(page.locator('[data-testid^="terminal-tab-"]').first()).toHaveClass(/terminal-tab--detached/)
 
-  await page.goBack()
-  const close = page.getByRole('button', { name: '关闭' })
-  await expect(close, 'TERM-003 explicit close is required').toBeVisible()
-  await expect(close).toBeEnabled()
-  await close.click()
+  await page.locator('[data-testid^="terminal-tab-"] button.terminal-tab-label').first().click()
+  await expectLiveStream(page)
+
+  const headerClose = page.getByRole('button', { name: '关闭会话' }).first()
+  await expect(headerClose).toBeVisible()
+  await expect(headerClose).toBeEnabled()
+  const closeBefore = gates.posts.length
+  await headerClose.click()
+  await expect(page.getByText('确认关闭会话？')).toBeVisible()
+  expect(
+    terminalPosts(gates, closeBefore).filter((item) => item.url.endsWith('/close')),
+    'first 关闭会话 click is confirm-only',
+  ).toEqual([])
+  await page.getByRole('button', { name: '关闭会话' }).last().click()
+  await expect
+    .poll(() => terminalPosts(gates, closeBefore).filter((item) => item.url.endsWith('/close')).length)
+    .toBe(1)
+  await expect(page.getByText('终端会话已停止')).toBeVisible()
 
   await page.setViewportSize({ width: 1280, height: 800 })
   await expectNoHorizontalOverflow(page)
