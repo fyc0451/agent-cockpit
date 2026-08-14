@@ -192,7 +192,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
   }
   const streamsRef = useRef(new Map<string, StreamEntry>())
   const termsRef = useRef(new Map<string, TerminalHandle>())
-  const intentKeysRef = useRef<Record<string, string>>({})
+  const intentKeysRef = useRef<Record<string, { key: string; body: Record<string, unknown> }>>({})
   const selectedRef = useRef<string | null>(null)
 
   const projectId = project.project_id ?? ''
@@ -227,9 +227,14 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
     return FALLBACK_DIMS
   }, [])
 
-  /** 同一用户 intent 的幂等键在重试间复用；成功或换新 intent 即作废 */
-  const intentKey = useCallback((action: string) => {
-    return (intentKeysRef.current[action] ??= newIdempotencyKey())
+  /** P1-4：pending intent 冻结 {key, body}；同 intent 重试原样复用（byte-equivalent），
+   *  成功/明确 cancel/新 intent 才清除重建 */
+  const intentFor = useCallback((action: string, build: () => Record<string, unknown>) => {
+    const cached = intentKeysRef.current[action]
+    if (cached) return cached
+    const created = { key: newIdempotencyKey(), body: build() }
+    intentKeysRef.current[action] = created
+    return created
   }, [])
 
   const clearIntent = useCallback((action: string) => {
@@ -255,33 +260,48 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
       const entry = {} as StreamEntry
       entry.fence = fence
       streamsRef.current.set(ticketId, entry)
+      // P1-2：该 entry 的全部回调共用同一 guard；换 fence/关闭后旧 entry 一律静默
+      const isCurrent = () => streamsRef.current.get(ticketId) === entry
       const stream = connectTerminalStream(
         { projectId, workspaceId, ticketId },
         fence,
         {
           onReplayStart: () => {
+            if (!isCurrent()) return
             handle.term.reset()
             patchTab(ticketId, { phase: 'replaying' })
           },
           onData: (data) => {
+            if (!isCurrent()) return
             handle.term.write(data)
           },
           onReplayComplete: (truncated) => {
+            if (!isCurrent()) return
             patchTab(ticketId, { phase: 'live', truncated })
           },
           onExit: () => {
+            if (!isCurrent()) return
             patchTab(ticketId, { phase: 'exited' })
           },
           onError: (code) => {
+            if (!isCurrent()) return
             patchTab(ticketId, { error: `终端流错误：${code}` })
+          },
+          onProtocolError: (why) => {
+            if (!isCurrent()) return
+            streamsRef.current.delete(ticketId)
+            patchTab(ticketId, {
+              phase: 'error',
+              error: `终端流协议违反（${why}）：连接已关闭，输入保持关闭`,
+            })
           },
           onClose: (code, reason) => {
             // 只响应当前 stream 的关闭；被接管/已替换的旧连接事件直接忽略
-            if (streamsRef.current.get(ticketId) !== entry) return
+            if (!isCurrent()) return
             streamsRef.current.delete(ticketId)
             const current = tabsRef.current[ticketId]
             if (!current || !current.open) return
-            if (current.phase === 'stopped' || current.phase === 'detached') return
+            if (current.phase === 'stopped' || current.phase === 'detached' || current.phase === 'error') return
             if (current.phase === 'exited') return // exit 帧后的 4409 是自然退出收尾
             if (code === STREAM_CLOSE.CONFLICT || code === STREAM_CLOSE.UNAVAILABLE || code === 1006) {
               // stale/taken-over/stopped/authority-I/O：先 refetch 权威 projection，不盲重连
@@ -407,6 +427,9 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
   const onCloseViewTab = useCallback(
     (ticketId: string) => {
       closeStream(ticketId)
+      for (const key of Object.keys(intentKeysRef.current)) {
+        if (key.endsWith(`:${ticketId}`)) delete intentKeysRef.current[key]
+      }
       const next = { ...tabsRef.current }
       delete next[ticketId]
       syncTabs(next)
@@ -429,8 +452,8 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
         setTickets((prev) => prev.map((item) => (item.ticket.ticket_id === ticketId ? next : item)))
         after(next)
       } catch (err) {
+        // 非致命：保持当前 phase 与按钮可用，同 intent（同 key+body）可直接重试
         patchTab(ticketId, {
-          phase: 'error',
           error: err instanceof ApiError ? `${err.message}（${err.code}）` : '终端操作失败',
         })
       }
@@ -442,11 +465,11 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
   const selectedTicketId = selectedTab?.view.ticket.ticket_id ?? null
 
   const onNewTerminal = () => {
-    const size = dims()
     const action = 'create'
     setCreatePending(true)
-    const key = intentKey(action)
-    createTerminalTicket(projectId, workspaceId, workspace.version ?? 1, size.cols, size.rows, key)
+    const intent = intentFor(action, () => ({ revision: workspace.version ?? 1, ...dims() }))
+    const body = intent.body as { revision: number; cols: number; rows: number }
+    createTerminalTicket(projectId, workspaceId, body.revision, body.cols, body.rows, intent.key)
       .then((view) => {
         clearIntent(action)
         setCreatePending(false)
@@ -462,14 +485,16 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
 
   const onInterrupt = () => {
     if (!selectedTab || !selectedTicketId) return
-    const fence = {
+    const action = `interrupt:${selectedTicketId}`
+    const intent = intentFor(action, () => ({
       revision: selectedTab.view.ticket.revision,
       generation: selectedTab.view.ticket.engine_generation,
-    }
+    }))
+    const body = intent.body as { revision: number; generation: number }
     void runControl(
       selectedTicketId,
-      `interrupt:${selectedTicketId}`,
-      () => interruptTerminalTicket({ projectId, workspaceId, ticketId: selectedTicketId }, fence, intentKey(`interrupt:${selectedTicketId}`)),
+      action,
+      () => interruptTerminalTicket({ projectId, workspaceId, ticketId: selectedTicketId }, body, intent.key),
       (next) => attach(selectedTicketId, next),
     )
   }
@@ -496,19 +521,22 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
 
   const onRestart = () => {
     if (!selectedTab || !selectedTicketId) return
-    const size = dims()
+    const action = `restart:${selectedTicketId}`
+    const intent = intentFor(action, () => ({
+      revision: selectedTab.view.ticket.revision,
+      generation: selectedTab.view.ticket.engine_generation,
+      ...dims(),
+    }))
+    const body = intent.body as { revision: number; generation: number; cols: number; rows: number }
     void runControl(
       selectedTicketId,
-      `restart:${selectedTicketId}`,
+      action,
       () =>
         restartTerminalTicket(
           { projectId, workspaceId, ticketId: selectedTicketId },
-          {
-            revision: selectedTab.view.ticket.revision,
-            generation: selectedTab.view.ticket.engine_generation,
-          },
-          size,
-          intentKey(`restart:${selectedTicketId}`),
+          { revision: body.revision, generation: body.generation },
+          { cols: body.cols, rows: body.rows },
+          intent.key,
         ),
       (next) => attach(selectedTicketId, next),
     )
@@ -522,17 +550,20 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
       return
     }
     setConfirmingClose(false)
+    const action = `close:${selectedTicketId}`
+    const intent = intentFor(action, () => ({
+      revision: selectedTab.view.ticket.revision,
+      generation: selectedTab.view.ticket.engine_generation,
+    }))
+    const body = intent.body as { revision: number; generation: number }
     void runControl(
       selectedTicketId,
-      `close:${selectedTicketId}`,
+      action,
       () =>
         closeTerminalTicket(
           { projectId, workspaceId, ticketId: selectedTicketId },
-          {
-            revision: selectedTab.view.ticket.revision,
-            generation: selectedTab.view.ticket.engine_generation,
-          },
-          intentKey(`close:${selectedTicketId}`),
+          body,
+          intent.key,
         ),
       () => {
         closeStream(selectedTicketId)
@@ -555,14 +586,33 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
     }
   }
 
-  const onFullscreen = () => {
-    setFullscreen((prev) => !prev)
+  const fitSelected = useCallback(() => {
     requestAnimationFrame(() => {
       const id = selectedRef.current
       const handle = id ? termsRef.current.get(id) : undefined
       handle?.fit.fit()
     })
+  }, [])
+
+  const onFullscreen = () => {
+    setFullscreen((prev) => !prev)
+    fitSelected()
   }
+
+  // P1-5：overlay 内退出按钮之外的键盘退出路径
+  const exitFullscreen = useCallback(() => {
+    setFullscreen(false)
+    fitSelected()
+  }, [fitSelected])
+
+  useEffect(() => {
+    if (!fullscreen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') exitFullscreen()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [fullscreen, exitFullscreen])
 
   // 选中 tab 切换后补一次 fit（隐藏期间尺寸不可读）
   useEffect(() => {
@@ -750,6 +800,9 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
           {selectedTab?.phase === 'stopped' && (
             <StatusState kind="empty" banner title="终端会话已停止" description="ticket 已停止；可重启新 generation。" />
           )}
+          {selectedTab?.error && selectedTab.phase !== 'error' && (
+            <StatusState kind="degraded" banner title="终端操作未完成" description={selectedTab.error} />
+          )}
           {selectedTab?.phase === 'error' && (
             <StatusState kind="error" banner title="终端错误" description={selectedTab.error ?? '未知错误'}>
               <div className="state-actions">
@@ -760,6 +813,13 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
             </StatusState>
           )}
           <div className={fullscreen ? 'terminal-fullscreen' : undefined}>
+            {fullscreen && (
+              <div className="terminal-fullscreen-bar">
+                <Button variant="secondary" title="退出全屏（或按 Escape）" onClick={exitFullscreen}>
+                  退出全屏
+                </Button>
+              </div>
+            )}
             {Object.values(tabs)
               .filter((tab) => tab.open)
               .map((tab) => (

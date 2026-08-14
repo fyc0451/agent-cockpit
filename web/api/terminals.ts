@@ -130,19 +130,36 @@ const RUNTIME_STATES: readonly TerminalTicketState[] = [
   'process_unknown',
 ]
 
+/** Store 冻结状态闭集（terminal_ticket_store._STATES） */
+const TICKET_STATES = ['running', 'stopped', 'paused', 'recovery_required', 'unknown'] as const
+const RECEIPT_TYPES = ['operation', 'terminal_exit'] as const
+
 export function assertTerminalTicket(raw: unknown, ctx = 'terminal-ticket'): TerminalTicket {
   const o = reqObj(raw, ctx)
   reqExactKeys(o, TICKET_KEYS, ctx)
   if (!Array.isArray(o.receipt_refs)) fail(`${ctx}.receipt_refs`)
+  const refs = (o.receipt_refs as unknown[]).map((item, i) => {
+    const r = reqObj(item, `${ctx}.receipt_refs[${i}]`)
+    reqExactKeys(r, ['type', 'id'], `${ctx}.receipt_refs[${i}]`)
+    const kind = r.type
+    if (typeof kind !== 'string' || !RECEIPT_TYPES.includes(kind as (typeof RECEIPT_TYPES)[number])) {
+      fail(`${ctx}.receipt_refs[${i}].type`)
+    }
+    return { type: kind, id: reqString(r.id, `${ctx}.receipt_refs[${i}].id`) }
+  })
+  const desired = reqString(o.desired_state, `${ctx}.desired_state`)
+  const observed = reqString(o.observed_state, `${ctx}.observed_state`)
+  if (!TICKET_STATES.includes(desired as (typeof TICKET_STATES)[number])) fail(`${ctx}.desired_state 枚举`)
+  if (!TICKET_STATES.includes(observed as (typeof TICKET_STATES)[number])) fail(`${ctx}.observed_state 枚举`)
   return {
     ticket_id: reqString(o.ticket_id, `${ctx}.ticket_id`),
     project_id: reqString(o.project_id, `${ctx}.project_id`),
     workspace_id: reqString(o.workspace_id, `${ctx}.workspace_id`),
-    desired_state: reqString(o.desired_state, `${ctx}.desired_state`),
-    observed_state: reqString(o.observed_state, `${ctx}.observed_state`),
+    desired_state: desired,
+    observed_state: observed,
     engine_generation: reqPositiveInt(o.engine_generation, `${ctx}.engine_generation`),
     reconnect_cursor: reqNonNegativeInt(o.reconnect_cursor, `${ctx}.reconnect_cursor`),
-    receipt_refs: o.receipt_refs as TerminalTicket['receipt_refs'],
+    receipt_refs: refs,
     revision: reqPositiveInt(o.revision, `${ctx}.revision`),
     created_at: reqString(o.created_at, `${ctx}.created_at`),
     updated_at: reqString(o.updated_at, `${ctx}.updated_at`),
@@ -251,6 +268,14 @@ async function request<T>(method: string, path: string, body?: Record<string, un
   if (!isObj(parsed)) throw new ProtocolError('响应不是 G3 envelope（裸 body 不允许透传）', { status: res.status })
   if (!('data' in parsed)) throw new ProtocolError('响应 envelope 缺少 data 键', { status: res.status })
   if (!('meta' in parsed)) throw new ProtocolError('响应 envelope 缺少 meta 键', { status: res.status })
+  // 顶层 exact 闭集 {data,meta}；meta 必须是对象（拒绝额外顶层键与非对象 meta）
+  const topKeys = Object.keys(parsed).sort()
+  if (topKeys.length !== 2 || topKeys[0] !== 'data' || topKeys[1] !== 'meta') {
+    throw new ProtocolError('响应 envelope 顶层键集必须是精确 {data,meta}', { status: res.status })
+  }
+  if (!isObj((parsed as Record<string, unknown>).meta)) {
+    throw new ProtocolError('响应 envelope meta 必须是对象', { status: res.status })
+  }
   return (parsed as { data: T }).data
 }
 
@@ -366,6 +391,8 @@ export interface TerminalStreamHandlers {
   onReplayComplete: (truncated: boolean) => void
   onExit: (generation: number) => void
   onError: (code: string) => void
+  /** server 帧违反合同（键集/时序/fence/乱序）：stream 已被客户端关闭，stdin 保持关闭 */
+  onProtocolError: (why: string) => void
   /** 任何关闭都回报（含正常关闭）；code 见 STREAM_CLOSE */
   onClose: (code: number, reason: string) => void
 }
@@ -410,14 +437,47 @@ export function connectTerminalStream(
       }),
     )
   }
+  // P1-1：server 控制帧 exact-key + 严格时序 + fence 校验；任一非法/乱序帧 →
+  // 协议失败（关闭该 stream，stdin 保持关闭），绝不宽容放行。
+  type ServerPhase = 'awaiting_replay_start' | 'replaying' | 'live'
+  let serverPhase: ServerPhase = 'awaiting_replay_start'
+  let protocolFailed = false
+  const protocolError = (why: string) => {
+    if (protocolFailed) return
+    protocolFailed = true
+    closed = true
+    try {
+      ws.close()
+    } catch {
+      /* 已关闭 */
+    }
+    handlers.onProtocolError(why)
+  }
+  const exactKeys = (frame: Record<string, unknown>, keys: readonly string[]): boolean => {
+    const actual = Object.keys(frame).sort()
+    const expected = [...keys].sort()
+    return actual.length === expected.length && actual.every((k, i) => k === expected[i])
+  }
+  const fenceMatch = (frame: Record<string, unknown>): boolean =>
+    frame.revision === fence.revision &&
+    frame.generation === fence.generation &&
+    frame.cursor === fence.cursor
+  const FENCE_KEYS = ['type', 'revision', 'generation', 'cursor'] as const
+
   ws.onmessage = (event: MessageEvent) => {
+    if (protocolFailed) return
     if (typeof event.data !== 'string') {
-      // 二进制帧（replay 历史 / live 输出）；跨 realm 安全：不做 instanceof ArrayBuffer
+      // 二进制帧只允许出现在 replay_start 之后（replay 历史或 live 输出）；
+      // 跨 realm 安全：不做 instanceof ArrayBuffer
+      if (serverPhase === 'awaiting_replay_start') {
+        protocolError('unexpected_binary_before_replay_start')
+        return
+      }
       try {
         const bytes = new Uint8Array(event.data as ArrayBuffer)
         if (bytes.length > 0) handlers.onData(bytes)
       } catch {
-        /* 非二进制负载忽略 */
+        protocolError('invalid_binary_payload')
       }
       return
     }
@@ -425,23 +485,62 @@ export function connectTerminalStream(
     try {
       frame = JSON.parse(event.data)
     } catch {
+      protocolError('invalid_json_frame')
       return
     }
-    if (!isObj(frame) || typeof frame.type !== 'string') return
+    if (!isObj(frame) || typeof frame.type !== 'string') {
+      protocolError('invalid_frame_shape')
+      return
+    }
     switch (frame.type) {
       case 'replay_start':
+        if (serverPhase !== 'awaiting_replay_start') {
+          protocolError('out_of_order_replay_start')
+          return
+        }
+        if (!exactKeys(frame, FENCE_KEYS) || !fenceMatch(frame)) {
+          protocolError('replay_start_keys_or_fence')
+          return
+        }
+        serverPhase = 'replaying'
         handlers.onReplayStart()
         break
       case 'replay_complete':
-        handlers.onReplayComplete(frame.truncated === true)
+        if (serverPhase !== 'replaying') {
+          protocolError('out_of_order_replay_complete')
+          return
+        }
+        if (
+          !exactKeys(frame, [...FENCE_KEYS, 'truncated']) ||
+          !fenceMatch(frame) ||
+          typeof frame.truncated !== 'boolean'
+        ) {
+          protocolError('replay_complete_keys_or_fence')
+          return
+        }
+        serverPhase = 'live'
+        handlers.onReplayComplete(frame.truncated)
         break
       case 'exit':
-        handlers.onExit(typeof frame.generation === 'number' ? frame.generation : fence.generation)
+        if (serverPhase === 'awaiting_replay_start') {
+          protocolError('out_of_order_exit')
+          return
+        }
+        if (!exactKeys(frame, ['type', 'generation']) || frame.generation !== fence.generation) {
+          protocolError('exit_keys_or_generation')
+          return
+        }
+        handlers.onExit(fence.generation)
         break
       case 'error':
-        handlers.onError(typeof frame.code === 'string' ? frame.code : 'terminal_io_unavailable')
+        if (!exactKeys(frame, ['type', 'code']) || typeof frame.code !== 'string' || frame.code === '') {
+          protocolError('error_frame_shape')
+          return
+        }
+        handlers.onError(frame.code)
         break
       default:
+        protocolError('unknown_frame_type')
         break
     }
   }

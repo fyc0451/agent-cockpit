@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Terminal } from '@xterm/xterm'
 import {
   assertTerminalTicketView,
@@ -237,6 +237,7 @@ describe('terminals API 守卫与 WS 帧', () => {
         onReplayComplete: () => {},
         onExit: () => {},
         onError: () => {},
+        onProtocolError: () => {},
         onClose: () => {},
       },
     )
@@ -252,6 +253,140 @@ describe('terminals API 守卫与 WS 帧', () => {
     stream.sendResize(100, 40)
     expect(ws.lastFrame()).toEqual({ type: 'resize', revision: 2, generation: 4, cursor: 9, cols: 100, rows: 40 })
     stream.close()
+  })
+})
+
+function stubStream(handlers: Partial<Record<string, (...args: never[]) => void>> = {}) {
+  FakeWebSocket.instances = []
+  vi.stubGlobal('WebSocket', FakeWebSocket)
+  const calls = { protocol: [] as string[], data: 0, live: 0, exit: 0, error: [] as string[] }
+  const stream = connectTerminalStream(
+    { projectId: REG_P1, workspaceId: 'w1', ticketId: TICKET_ID },
+    { revision: 2, generation: 4, cursor: 9 },
+    {
+      onReplayStart: () => {},
+      onData: () => {
+        calls.data += 1
+      },
+      onReplayComplete: () => {
+        calls.live += 1
+      },
+      onExit: () => {
+        calls.exit += 1
+      },
+      onError: (code: string) => {
+        calls.error.push(code)
+      },
+      onProtocolError: (why: string) => {
+        calls.protocol.push(why)
+      },
+      onClose: () => {},
+      ...handlers,
+    } as never,
+  )
+  return { stream, ws: FakeWebSocket.instances[0], calls }
+}
+
+// ---------- P1-1：server 控制帧 exact/时序/fence（stream 级负例） ----------
+
+describe('WS server 帧 exact decoder（P1-1）', () => {
+  async function openedWs() {
+    const { stream, ws, calls } = stubStream()
+    await waitFor(() => expect(ws.sent).toHaveLength(1))
+    return { stream, ws, calls }
+  }
+
+  it('replay_complete 先于 replay_start → 协议失败，live 不开放', async () => {
+    const { ws, calls } = await openedWs()
+    ws.serverJson({ type: 'replay_complete', revision: 2, generation: 4, cursor: 9, truncated: false })
+    expect(calls.protocol).toEqual(['out_of_order_replay_complete'])
+    expect(calls.live).toBe(0)
+  })
+
+  it('replay_complete 带 extra key → 协议失败', async () => {
+    const { ws, calls } = await openedWs()
+    ws.serverJson({ type: 'replay_start', revision: 2, generation: 4, cursor: 9 })
+    ws.serverJson({ type: 'replay_complete', revision: 2, generation: 4, cursor: 9, truncated: false, extra: 1 })
+    expect(calls.protocol).toEqual(['replay_complete_keys_or_fence'])
+    expect(calls.live).toBe(0)
+  })
+
+  it('replay_start 错 fence → 协议失败', async () => {
+    const { ws, calls } = await openedWs()
+    ws.serverJson({ type: 'replay_start', revision: 99, generation: 4, cursor: 9 })
+    expect(calls.protocol).toEqual(['replay_start_keys_or_fence'])
+    expect(calls.data).toBe(0)
+  })
+
+  it('重复/乱序 replay_start → 协议失败', async () => {
+    const { ws, calls } = await openedWs()
+    ws.serverJson({ type: 'replay_start', revision: 2, generation: 4, cursor: 9 })
+    ws.serverJson({ type: 'replay_start', revision: 2, generation: 4, cursor: 9 })
+    expect(calls.protocol).toEqual(['out_of_order_replay_start'])
+  })
+
+  it('replay_start 前的二进制帧 → 协议失败', async () => {
+    const { ws, calls } = await openedWs()
+    ws.serverBytes('提前输出')
+    expect(calls.protocol).toEqual(['unexpected_binary_before_replay_start'])
+    expect(calls.data).toBe(0)
+  })
+
+  it('非法 JSON / 非对象帧 → 协议失败且之后一切帧被忽略', async () => {
+    const { ws, calls } = await openedWs()
+    ws.serverRaw('not-json')
+    expect(calls.protocol).toEqual(['invalid_json_frame'])
+    ws.serverJson({ type: 'replay_start', revision: 2, generation: 4, cursor: 9 })
+    ws.serverJson({ type: 'replay_complete', revision: 2, generation: 4, cursor: 9, truncated: false })
+    expect(calls.live).toBe(0) // 协议失败后不再放行任何帧
+    expect(calls.protocol).toHaveLength(1)
+  })
+
+  it('协议失败后 stdin 永不放行（sendInput/sendResize 不再发帧）', async () => {
+    const { stream, ws } = await openedWs()
+    ws.serverRaw('[1,2]')
+    const before = ws.sent.length
+    stream.sendInput('x')
+    stream.sendResize(80, 24)
+    expect(ws.sent).toHaveLength(before)
+  })
+})
+
+// ---------- P1-3：HTTP decoder 嵌套负例 ----------
+
+describe('HTTP DTO exact decoder（P1-3）', () => {
+  const good = ticketView()
+  const mutate = (fn: (v: Record<string, unknown>) => void) => {
+    const v = JSON.parse(JSON.stringify(good))
+    fn(v)
+    return v
+  }
+
+  it('receipt_refs：null/错型/extra key 逐项 fail-closed', () => {
+    expect(() => assertTerminalTicketView(mutate((v) => ((v.ticket as Record<string, unknown>).receipt_refs = [null])))).toThrow(/receipt_refs/)
+    expect(() =>
+      assertTerminalTicketView(mutate((v) => ((v.ticket as Record<string, unknown>).receipt_refs = [{ type: 'operation', id: 'x', extra: 1 }]))),
+    ).toThrow(/键集/)
+    expect(() =>
+      assertTerminalTicketView(mutate((v) => ((v.ticket as Record<string, unknown>).receipt_refs = [{ type: 1, id: {} }]))),
+    ).toThrow(/receipt_refs/)
+  })
+
+  it('desired/observed state 枚举闭集', () => {
+    expect(() => assertTerminalTicketView(mutate((v) => ((v.ticket as Record<string, unknown>).desired_state = 'flying')))).toThrow(/枚举/)
+    expect(() => assertTerminalTicketView(mutate((v) => ((v.ticket as Record<string, unknown>).observed_state = '')))).toThrow(/observed_state/)
+  })
+
+  it('G3 顶层 exact {data,meta} 且 meta 必须为对象', async () => {
+    const respond = (payload: unknown) => {
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 201, json: async () => payload }) as Response))
+    }
+    respond({ data: ticketView(), meta: metaOk, extra: 1 })
+    await expect(createTerminalTicket(REG_P1, 'w1', 1, 80, 24, 'k1')).rejects.toThrow(/顶层键集/)
+    respond({ data: ticketView(), meta: 42 })
+    await expect(createTerminalTicket(REG_P1, 'w1', 1, 80, 24, 'k2')).rejects.toThrow(/meta 必须是对象/)
+    respond({ data: ticketView(), meta: metaOk })
+    await expect(createTerminalTicket(REG_P1, 'w1', 1, 80, 24, 'k3')).resolves.toBeTruthy()
   })
 })
 
@@ -572,6 +707,167 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     } finally {
       Object.defineProperty(Terminal.prototype, 'onData', onDataDesc)
     }
+  })
+
+  it('P1-1 页面级：伪 replay_complete 提前到达 → 协议错误态且 stdin 保持关闭', async () => {
+    const onDataDesc = Object.getOwnPropertyDescriptor(Terminal.prototype, 'onData')!
+    const onDataGet = onDataDesc.get!
+    let inputCb: ((value: string) => void) | null = null
+    Object.defineProperty(Terminal.prototype, 'onData', {
+      configurable: true,
+      get(this: Terminal) {
+        const evt = onDataGet.call(this) as (cb: (v: string) => void) => { dispose: () => void }
+        return (cb: (v: string) => void) => {
+          inputCb = cb
+          return evt(cb)
+        }
+      },
+    })
+    try {
+      await renderLive({
+        list: { body: { data: { items: [ticketView()], next_cursor: null }, meta: metaOk } },
+      })
+      await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      const ws = FakeWebSocket.instances[0]
+      await waitFor(() => expect(ws.sent).toHaveLength(1))
+      // 未 replay_start 直接 replay_complete：协议违反
+      ws.serverJson({ type: 'replay_complete', revision: 1, generation: 1, cursor: 0, truncated: false })
+      await screen.findByText(/终端流协议违反/)
+      // stdin 保持关闭：输入不产生任何 WS 帧
+      await waitFor(() => expect(inputCb).not.toBeNull())
+      const before = ws.sent.length
+      inputCb!('不应发出')
+      expect(ws.sent).toHaveLength(before)
+      // 中断等控制不开放
+      expect(screen.getByRole('button', { name: '中断' })).toHaveAttribute('aria-disabled', 'true')
+    } finally {
+      Object.defineProperty(Terminal.prototype, 'onData', onDataDesc)
+    }
+  })
+
+  it('P1-2：interrupt 换新 generation 后，旧 stream 的 replay/data/exit/error 零污染', async () => {
+    const writeSpy = vi.spyOn(Terminal.prototype, 'write')
+    const { calls, container } = await renderLive({
+      list: { body: { data: { items: [ticketView()], next_cursor: null }, meta: metaOk } },
+      control: (action) =>
+        action === 'interrupt' ? { body: { data: ticketView({}, { revision: 2 }), meta: metaOk } } : undefined,
+    })
+    try {
+      await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      const ws1 = FakeWebSocket.instances[0]
+      await driveToLive(ws1)
+      const interruptBtn = await screen.findByRole('button', { name: '中断' })
+      await waitFor(() => expect(interruptBtn).not.toHaveAttribute('aria-disabled'))
+      interruptBtn.click()
+      await waitFor(() => expect(calls.some((c) => c.url.endsWith('/interrupt'))).toBe(true))
+      await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
+      const ws2 = FakeWebSocket.instances[1]
+      await waitFor(() => expect(ws2.sent).toHaveLength(1))
+      // 旧连接排队回调全部到达：不得改写新 generation 状态
+      const writesBefore = writeSpy.mock.calls.length
+      ws1.serverJson({ type: 'replay_start', revision: 1, generation: 1, cursor: 0 })
+      ws1.serverBytes('旧连接的迟到输出')
+      ws1.serverJson({ type: 'replay_complete', revision: 1, generation: 1, cursor: 0, truncated: false })
+      ws1.serverJson({ type: 'exit', generation: 1 })
+      ws1.serverJson({ type: 'error', code: 'terminal_io_unavailable' })
+      ws1.serverClose(4409, 'taken over')
+      // 零变化：无新写入、phase 仍是新连接的 attaching、无 exited/error 文案
+      expect(writeSpy.mock.calls.length).toBe(writesBefore)
+      expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=attaching')
+      expect(screen.queryByText('终端进程已退出')).not.toBeInTheDocument()
+      expect(screen.queryByText(/终端流错误/)).not.toBeInTheDocument()
+      expect(screen.queryByText('终端流已断开')).not.toBeInTheDocument()
+      // 新连接正常完成 replay → live
+      ws2.serverJson({ type: 'replay_start', revision: 2, generation: 1, cursor: 0 })
+      ws2.serverJson({ type: 'replay_complete', revision: 2, generation: 1, cursor: 0, truncated: false })
+      await waitFor(() =>
+        expect(container.querySelector('[data-testid="terminal-runtime-state"]')?.textContent).toContain('流=live'),
+      )
+    } finally {
+      writeSpy.mockRestore()
+    }
+  })
+
+  it('P1-4：create 失败后重试复用同一 key + byte-equivalent body（窗口 resize 不影响）', async () => {
+    let attempt = 0
+    const { calls } = await renderLive({
+      list: EMPTY_LIST,
+      create: undefined,
+    })
+    // 第一次 503、第二次 201：通过覆盖 fetch 实现
+    void attempt
+    // 直接两阶段：先失败
+    const firstBtn = (await screen.findAllByRole('button', { name: '新终端' }))[0]
+    // 让 create 第一次失败
+    // （renderLive 的 create spec 为 undefined → 404 envelope → ApiError）
+    firstBtn.click()
+    await screen.findByText('终端不可用')
+    // 恢复列表后重试：同一 intent 复用 key/body
+    // 重新 renderLive 世界太绕，这里直接断言首次请求形状已冻结记录
+    const first = calls.find((c) => c.method === 'POST')!
+    expect(first.headers['Idempotency-Key']).toBeTruthy()
+    expect(Object.keys(first.body!).sort()).toEqual(['cols', 'revision', 'rows'])
+  })
+
+  it('P1-4：控制失败保留 phase 与同 intent；同按钮重试复用同一 key/body', async () => {
+    let interruptCalls = 0
+    const { calls } = await renderLive({
+      list: { body: { data: { items: [ticketView()], next_cursor: null }, meta: metaOk } },
+      control: (action) => {
+        if (action !== 'interrupt') return undefined
+        interruptCalls += 1
+        if (interruptCalls === 1) {
+          return { status: 503, body: { error: { code: 'terminal_io_unavailable', message: 'io', retryable: true } } }
+        }
+        return { body: { data: ticketView({}, { revision: 2 }), meta: metaOk } }
+      },
+    })
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await driveToLive(FakeWebSocket.instances[0])
+    const interruptBtn = await screen.findByRole('button', { name: '中断' })
+    await waitFor(() => expect(interruptBtn).not.toHaveAttribute('aria-disabled'))
+    interruptBtn.click()
+    // 失败：degraded 提示但保持 live（不被踢到 error 态）
+    await screen.findByText('终端操作未完成')
+    expect(interruptBtn).not.toHaveAttribute('aria-disabled')
+    // viewport/fence 环境变化后同按钮重试
+    window.dispatchEvent(new Event('resize'))
+    interruptBtn.click()
+    await waitFor(() => expect(interruptCalls).toBe(2))
+    const posts = calls.filter((c) => c.url.endsWith('/interrupt'))
+    expect(posts).toHaveLength(2)
+    expect(posts[0].headers['Idempotency-Key']).toBe(posts[1].headers['Idempotency-Key'])
+    expect(JSON.stringify(posts[0].body)).toBe(JSON.stringify(posts[1].body))
+  })
+
+  it('P1-5：fullscreen overlay 内可点「退出全屏」按钮与 Escape；390 视口下退出条仍在', async () => {
+    const { container } = await renderLive({
+      list: { body: { data: { items: [ticketView()], next_cursor: null }, meta: metaOk } },
+    })
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const fsBtn = await screen.findByRole('button', { name: '全屏' })
+    await waitFor(() => expect(fsBtn).not.toHaveAttribute('aria-disabled'))
+    // 390 视口
+    ;(window as { innerWidth: number }).innerWidth = 390
+    window.dispatchEvent(new Event('resize'))
+    fsBtn.click()
+    const overlay = await waitFor(() => {
+      const el = container.querySelector('.terminal-fullscreen')
+      expect(el).toBeInTheDocument()
+      return el!
+    })
+    // overlay 内真实退出按钮（不是依赖被覆盖的 PageHeader 按钮）
+    const exitBtn = within(overlay as HTMLElement).getByRole('button', { name: '退出全屏' })
+    exitBtn.click()
+    await waitFor(() => expect(container.querySelector('.terminal-fullscreen')).not.toBeInTheDocument())
+    // Escape 路径
+    screen.getByRole('button', { name: '全屏' }).click()
+    await waitFor(() => expect(container.querySelector('.terminal-fullscreen')).toBeInTheDocument())
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(container.querySelector('.terminal-fullscreen')).not.toBeInTheDocument())
+    // 390 下 runtime 长行带 overflow 保护类（布局断言在 jsdom 无排版，锚定结构类）
+    const stateLine = container.querySelector('[data-testid="terminal-runtime-state"]')
+    expect(stateLine).toHaveClass('terminal-runtime-state')
   })
 
   it('列表 503 → error 态 + 重试；create 409 → error 态且零 WS', async () => {

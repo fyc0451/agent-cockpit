@@ -1064,6 +1064,9 @@ pre {
   color: var(--muted);
   margin: 4px 0 8px;
   font-family: SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+  /* 390 窄屏长行不撑破布局 */
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .terminal-surface--hidden {
@@ -1076,10 +1079,21 @@ pre {
   z-index: 60;
   background: #0c121b;
   padding: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-fullscreen-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+  flex: none;
 }
 
 .terminal-fullscreen .terminal-surface {
-  height: 100%;
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 @media (max-width: 420px) {
@@ -1094,6 +1108,15 @@ pre {
 
   .terminal-tab-label {
     font-size: 11px;
+  }
+
+  /* 全屏 overlay 在 390 下保留可见退出条且不溢出 */
+  .terminal-fullscreen {
+    padding: 6px;
+  }
+
+  .terminal-fullscreen-bar {
+    margin-bottom: 4px;
   }
 }
 
