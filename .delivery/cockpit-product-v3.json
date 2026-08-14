@@ -820,10 +820,10 @@
     {
       "id": "TEST-001-next-ephemeral-harness",
       "title": "Launch a real Cockpit Next server in an isolated ephemeral profile",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["CORE-001-foundation-wiring", "TERM-002-workspace-shell-backend"],
       "scope": ["agent_cockpit/next_profile.py", "agent_cockpit/server.py", "scripts/next_ephemeral_server.py", "tests/test_next_ephemeral_harness.py", "docs/testing/next-ephemeral-harness.md"],
-      "acceptance": [{"command": ".venv/bin/python -m pytest -q tests/test_next_ephemeral_harness.py tests/test_next_isolation.py tests/test_next_instance_lock.py", "passed": false}, {"command": "python3 scripts/delivery_gate.py check .delivery/cockpit-product-v3.json", "passed": false}],
+      "acceptance": [{"command": ".venv/bin/python -m pytest -q tests/test_next_ephemeral_harness.py tests/test_next_isolation.py tests/test_next_instance_lock.py", "passed": true}, {"command": "python3 scripts/delivery_gate.py check .delivery/cockpit-product-v3.json", "passed": true}],
       "rollback": "Revert only the ephemeral profile launcher and keep the accepted terminal backend dark",
       "production_impact": "none",
       "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
