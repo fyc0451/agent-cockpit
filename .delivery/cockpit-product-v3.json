@@ -840,7 +840,7 @@
       "title": "Deliver the live Workspace Shell journey across desktop and mobile",
       "status": "planned",
       "depends_on": ["TERM-002-workspace-shell-backend", "TEST-001-next-ephemeral-harness"],
-      "scope": ["web/api/terminals.ts", "web/pages/TerminalPage.tsx", "web/state/capabilities.tsx", "web/test/terminal.test.tsx", "web/test/capabilities.test.tsx", "web/test/capabilities-server.test.tsx", "web/test/capabilities-scope.test.tsx", "web/e2e-live/terminal-live.spec.ts", "web/playwright.live.config.ts", "scripts/terminal_live_e2e.py", "docs/testing/terminal-live-e2e.md"],
+      "scope": ["web/api/terminals.ts", "web/pages/TerminalPage.tsx", "web/state/capabilities.tsx", "web/styles/global.css", "web/test/terminal.test.tsx", "web/test/capabilities.test.tsx", "web/test/capabilities-server.test.tsx", "web/test/capabilities-scope.test.tsx", "web/e2e-live/terminal-live.spec.ts", "web/playwright.live.config.ts", "scripts/terminal_live_e2e.py", "docs/testing/terminal-live-e2e.md"],
       "acceptance": [{"command": "npm --prefix web test -- --run terminal.test.tsx capabilities.test.tsx capabilities-server.test.tsx capabilities-scope.test.tsx", "passed": false}, {"command": "npm --prefix web run build", "passed": false}, {"command": ".venv/bin/python scripts/terminal_live_e2e.py", "passed": false}],
       "rollback": "Revert the live Shell UI and leave the accepted backend dark",
       "production_impact": "none",
