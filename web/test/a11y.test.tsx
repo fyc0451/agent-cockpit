@@ -99,7 +99,7 @@ describe('A11y（item 7）', () => {
       expect(item.querySelector('.rail-mobile-label')).toHaveTextContent(title)
     }
     expect(within(rail).getByTitle('需要你处理')).not.toHaveClass('rail-item--mobile-core')
-    const workspaceSection = within(rail).getByText('当前 Workspace').closest('.rail-section')
+    const workspaceSection = within(rail).getByText('当前工作空间').closest('.rail-section')
     expect(workspaceSection).not.toBeNull()
     expect(
       Array.from(workspaceSection!.querySelectorAll<HTMLElement>('.rail-item')).map(
