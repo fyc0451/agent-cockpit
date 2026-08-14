@@ -207,7 +207,7 @@ export function Rail() {
 
         {projectSlug && workspaceId ? (
           <div className="rail-section">
-            <p className="rail-heading rail-label">当前 Workspace</p>
+            <p className="rail-heading rail-label">当前工作空间</p>
             <p className="rail-context rail-label ellipsis" title={workspace?.name ?? workspaceId}>
               {workspace?.name ?? workspaceId}
             </p>

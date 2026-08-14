@@ -40,4 +40,13 @@ describe('首用 Overview 与 Rail', () => {
     expect(within(rail).getByTitle('提问与回复')).toBeInTheDocument()
     expect(within(rail).queryByTitle('开始使用')).not.toBeInTheDocument()
   })
+
+  it('工作空间侧栏使用用户语言标题', async () => {
+    stubFetch(defaultFetchMap())
+    renderApp('/projects/p1/workspaces/w1')
+
+    const rail = screen.getByRole('navigation', { name: '主导航' })
+    expect(await within(rail).findByText('当前工作空间')).toBeInTheDocument()
+    expect(within(rail).queryByText('当前 Workspace')).not.toBeInTheDocument()
+  })
 })
