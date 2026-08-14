@@ -436,6 +436,19 @@ export const runtimeNodesPayload = {
   meta: metaOk,
 }
 
+/** 黄金路径：两个可用 local 节点（不触发自动跳过，位置步照常渲染）+ disabled 样本 */
+export const runtimeNodesMultiUsablePayload = {
+  data: {
+    nodes: [
+      { node_id: 'local', display_name: '本机', kind: 'local', availability: 'available', reason: null },
+      { node_id: 'local-2', display_name: '第二台本机', kind: 'local', availability: 'available', reason: null },
+      { node_id: 'gpu-1', display_name: '远程 GPU 节点', kind: 'ssh', availability: 'available', reason: null },
+      { node_id: 'wsl-1', display_name: 'WSL 节点', kind: 'wsl', availability: 'offline', reason: '节点离线' },
+    ],
+  },
+  meta: metaOk,
+}
+
 export const rootsPayload = {
   data: {
     items: [

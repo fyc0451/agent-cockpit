@@ -274,10 +274,38 @@ export function ProjectWizard({
 
   useDialog(ref, open, onClose)
 
+  // 唯一代码位置只在首次进入目录步自动展开；用户手动「更换代码位置」后不再自动跳
+  const autoRootRef = useRef(false)
+
   // 取消后重开从 NODE_SELECT 全新开始（不残留 fingerprint/idempotency key）
   useEffect(() => {
-    if (open) dispatch({ type: 'reset' })
+    if (open) {
+      autoRootRef.current = false
+      dispatch({ type: 'reset' })
+    }
   }, [open])
+
+  // 恰好一个可用 local 节点（其余 disabled remote/offline 不算可选）：自动进入目录步
+  useEffect(() => {
+    if (!open || state.step !== 'node') return
+    const ns = nodes.data?.data.nodes
+    if (!ns) return
+    const usable = ns.filter((n) => nodeDisabledReason(n) == null)
+    if (usable.length === 1) {
+      dispatch({ type: 'select-node', nodeId: usable[0].node_id })
+    }
+  }, [open, state.step, nodes.data])
+
+  // 唯一代码位置：自动展开其目录列表
+  useEffect(() => {
+    if (!open || state.step !== 'dir' || state.nodeId == null || state.rootId != null) return
+    if (autoRootRef.current) return
+    const items = roots.data?.data.items
+    if (items && items.length === 1) {
+      autoRootRef.current = true
+      dispatch({ type: 'select-root', rootId: items[0].root_id, displayName: items[0].display_name })
+    }
+  }, [open, state.step, state.nodeId, state.rootId, roots.data])
 
   if (!open) return null
 
@@ -332,6 +360,14 @@ export function ProjectWizard({
   const openExisting = (slug: string) => {
     onClose()
     navigate(routes.project.workbench(slug))
+  }
+
+  // 登记成功主按钮：进入该项目 Workbench，URL 合同 ?createWorkspace=1 携带
+  // 「自动打开 Workspace 创建」意图（深链/刷新可重放，后半链消费）
+  const openWorkbench = () => {
+    if (!state.succeeded) return
+    onClose()
+    navigate(routes.project.workbench(state.succeeded.slug, { createWorkspace: true }))
   }
 
   const footer = (
@@ -406,7 +442,7 @@ export function ProjectWizard({
             <>
               <div className="state-actions" style={{ justifyContent: 'flex-start', marginTop: 0 }}>
                 <Button variant="ghost" onClick={() => dispatch({ type: 'reset-root' })}>
-                  更换 root
+                  更换代码位置
                 </Button>
                 {state.path !== '' ? (
                   <Button variant="ghost" onClick={() => dispatch({ type: 'up-dir' })}>
@@ -421,11 +457,11 @@ export function ProjectWizard({
                     <button
                       type="button"
                       className="drawer-item"
-                      aria-label={`选择当前 root ${state.rootDisplayName}`}
+                      aria-label={`选择当前目录 ${state.rootDisplayName}`}
                       onClick={() => dispatch({ type: 'select-current-root' })}
                     >
                       <span className="ellipsis drawer-item-name">{state.rootDisplayName}</span>
-                      <Tag tone="neutral">当前 root</Tag>
+                      <Tag tone="neutral">当前目录</Tag>
                       {state.selected?.path === '' ? <Tag tone="accent">已选择</Tag> : null}
                     </button>
                   </li>
@@ -503,6 +539,7 @@ export function ProjectWizard({
             onBack={() => dispatch({ type: 'back-to-dir' })}
             onSubmit={submit}
             onOpenExisting={openExisting}
+            onOpenWorkbench={openWorkbench}
             onClose={onClose}
             onSetSlug={(v) => dispatch({ type: 'set-slug', value: v })}
             onSetDisplayName={(v) => dispatch({ type: 'set-display-name', value: v })}
@@ -515,6 +552,26 @@ export function ProjectWizard({
   )
 }
 
+/** 识别失败的原始错误码 → 用户语言 + 明确恢复动作（恢复按钮在调用处统一渲染） */
+function describeProbeError(err: ApiError): { title: string; description: string } | null {
+  const norm = `${err.code ?? ''} ${err.message}`.replace(/\s+/g, '_')
+  if (norm.includes('root_forbidden')) {
+    return {
+      title: '不能登记这个代码位置本身',
+      description:
+        '安全规则不允许把代码位置的根目录本身登记进来。请返回选择同一代码位置内直接包含 .git 的仓库目录；如果没有可选目录，请联系管理员调整代码位置配置。',
+    }
+  }
+  if (norm.includes('invalid_locator')) {
+    return {
+      title: '这个目录不能登记',
+      description:
+        '所选目录不在允许的代码位置内或已失效。如果这是 Git 项目，请返回选择直接包含 .git 的仓库根目录。',
+    }
+  }
+  return null
+}
+
 function ProbeStep({
   state,
   probeScope,
@@ -523,6 +580,7 @@ function ProbeStep({
   onBack,
   onSubmit,
   onOpenExisting,
+  onOpenWorkbench,
   onClose,
   onSetSlug,
   onSetDisplayName,
@@ -534,6 +592,7 @@ function ProbeStep({
   onBack: () => void
   onSubmit: () => void
   onOpenExisting: (slug: string) => void
+  onOpenWorkbench: () => void
   onClose: () => void
   onSetSlug: (v: string) => void
   onSetDisplayName: (v: string) => void
@@ -544,11 +603,13 @@ function ProbeStep({
   if (probing) return <StatusState kind="loading" title="正在识别目录…" />
   if (state.probeError) {
     const err = state.probeError
+    const mapped = describeProbeError(err)
     return (
       <>
         <StatusState
           kind={err.retryable ? 'disconnected' : 'error'}
-          description={err.message}
+          title={mapped?.title ?? '识别失败'}
+          description={mapped?.description ?? err.message}
           children={
             <div className="state-actions">
               {err.retryable ? (
@@ -574,14 +635,12 @@ function ProbeStep({
         <div className="kv-grid">
           <span className="kv-key">名称</span>
           <span className="ellipsis">{state.succeeded.displayName}</span>
-          <span className="kv-key">Slug</span>
-          <span>{state.succeeded.slug}</span>
-          <span className="kv-key">Project ID</span>
-          <span className="ellipsis">{state.succeeded.project_id}</span>
         </div>
-        <p className="list-sub">Workbench 将在 compatibility 接通后可用；本次登记不创建 Workspace/Agent。</p>
         <div className="state-actions" style={{ justifyContent: 'flex-start' }}>
-          <Button variant="primary" onClick={onClose}>
+          <Button variant="primary" onClick={onOpenWorkbench}>
+            继续创建工作空间
+          </Button>
+          <Button variant="ghost" onClick={onClose}>
             返回列表
           </Button>
         </div>
@@ -623,7 +682,7 @@ function ProbeStep({
       {sub === 'NEW_GIT' ? <Tag tone="success">新 Git 项目</Tag> : null}
       {sub === 'PLAIN_DIR' ? <Tag tone="warning">普通目录</Tag> : null}
       {sub === 'ALREADY_REGISTERED' ? <Tag tone="success">已登记</Tag> : null}
-      {sub === 'FINGERPRINT_MATCH' ? <Tag tone="success">指纹命中已登记项目</Tag> : null}
+      {sub === 'FINGERPRINT_MATCH' ? <Tag tone="success">与已登记项目同源</Tag> : null}
       <p className="list-sub">
         识别时间：{new Date(probe.observed_at).toLocaleString()} · {probe.display_path}
         {/* B1：分支只用布尔表达，不渲染 raw branch/upstream 名 */}
@@ -641,8 +700,8 @@ function ProbeStep({
         </div>
       ) : sub === 'FINGERPRINT_MATCH' ? (
         <div className="state-actions" style={{ justifyContent: 'flex-start' }}>
-          <Button variant="primary" disabled title="attach 在后续增量开放">
-            登记为新 RepoLocation
+          <Button variant="primary" disabled title="关联能力在后续版本开放">
+            关联到已登记项目
           </Button>
           <Button variant="ghost" onClick={onBack}>
             返回选择目录
@@ -651,7 +710,7 @@ function ProbeStep({
       ) : (
         <>
           {sub === 'PLAIN_DIR' ? (
-            <p className="state-reason">Git 能力不可用：非 Git 目录（Worktree/分支/Git Review 后续增量开放）</p>
+            <p className="state-reason">该目录不是 Git 仓库；Git 相关能力将在后续版本开放。</p>
           ) : null}
           <div className="kv-grid">
             <label className="kv-key" htmlFor="wizard-display-name">
@@ -664,17 +723,22 @@ function ProbeStep({
               value={state.displayName}
               onChange={(e) => onSetDisplayName(e.target.value)}
             />
-            <label className="kv-key" htmlFor="wizard-slug">
-              Slug
-            </label>
-            <input
-              id="wizard-slug"
-              className="input"
-              aria-label="Slug"
-              value={state.slug}
-              onChange={(e) => onSetSlug(e.target.value)}
-            />
           </div>
+          <details className="wizard-advanced">
+            <summary>高级选项</summary>
+            <div className="kv-grid">
+              <label className="kv-key" htmlFor="wizard-slug">
+                Slug
+              </label>
+              <input
+                id="wizard-slug"
+                className="input"
+                aria-label="Slug"
+                value={state.slug}
+                onChange={(e) => onSetSlug(e.target.value)}
+              />
+            </div>
+          </details>
           {state.slug !== '' && !slugOk ? (
             <p className="state-reason" role="alert">
               Slug 格式无效：小写字母/数字/中划线，首尾非中划线，不含连续中划线，最长 64
@@ -691,7 +755,7 @@ function ProbeStep({
                 title={submitReason ?? undefined}
                 onClick={onSubmit}
               >
-                {state.submitting ? '登记中…' : '确认添加 Project'}
+                {state.submitting ? '登记中…' : '确认添加'}
               </Button>
               <Button variant="ghost" onClick={onBack}>
                 返回选择目录

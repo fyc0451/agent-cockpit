@@ -60,8 +60,8 @@ export function WelcomePage() {
           </div>
         )}
         <div className="state-actions">
-          <Link className="btn btn--primary" to={routes.settings()}>
-            前往设置
+          <Link className="btn btn--primary" to={routes.projects({ wizard: true })}>
+            选择代码目录
           </Link>
         </div>
       </section>

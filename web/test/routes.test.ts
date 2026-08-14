@@ -34,6 +34,15 @@ describe('routes 单一权威模块', () => {
     expect(routes.inbox()).toBe('/inbox')
   })
 
+  it('黄金路径 URL 合同：projects?wizard=1 与 workbench?createWorkspace=1', () => {
+    expect(routes.projects()).toBe('/projects')
+    expect(routes.projects({ wizard: true })).toBe('/projects?wizard=1')
+    expect(routes.project.workbench('p1')).toBe('/projects/p1/workbench')
+    expect(routes.project.workbench('p1', { createWorkspace: true })).toBe(
+      '/projects/p1/workbench?createWorkspace=1',
+    )
+  })
+
   it('routePatterns ↔ builders 一致：generatePath 输出与 builder 相同', () => {
     const pairs: [pattern: string, built: string, params: Record<string, string>][] = [
       [routePatterns.projectWorkbench, routes.project.workbench('p1'), { [PROJECT_PARAM]: 'p1' }],

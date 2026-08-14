@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { useAttention, useOverview } from '../api/hooks'
 import { attentionItems, degradedSources, isDegraded } from '../api/normalize'
+import { useProjectRegistryList } from '../api/registry'
 import { routes } from '../app/routes'
 import { PageHeader } from '../components/PageHeader'
 import { QueryErrorState } from '../components/QueryErrorState'
@@ -10,6 +11,7 @@ import { Tag, toneForStatus } from '../components/Tag'
 export function OverviewPage() {
   const overview = useOverview()
   const attention = useAttention()
+  const registry = useProjectRegistryList()
 
   if (overview.isPending && attention.isPending) {
     return <StatusState kind="loading" title="正在汇总工作…" />
@@ -33,9 +35,26 @@ export function OverviewPage() {
   const degraded =
     metas.some((meta) => isDegraded(meta)) || overview.isError || attention.isError
 
+  // 首用 CTA 由 Registry 权威门控：零项目时即使有 Doctor/Runtime attention 也优先引导登记
+  const noProjects = registry.data?.data.items.length === 0
+
   return (
     <>
       <PageHeader title="需要你处理" sub="跨项目聚合的待决定、待回复与提醒" />
+      {noProjects ? (
+        <StatusState
+          kind="empty"
+          title="还没有项目"
+          description="选择一个代码目录登记后，待决定事项会聚合到这里。"
+          children={
+            <div className="state-actions">
+              <Link className="btn btn--primary" to={routes.projects({ wizard: true })}>
+                选择代码目录
+              </Link>
+            </div>
+          }
+        />
+      ) : null}
       {degraded ? (
         <StatusState
           kind="degraded"
@@ -56,8 +75,8 @@ export function OverviewPage() {
           description="该来源暂不可用，以上列表不完整或暂缺。"
         />
       ) : items.length === 0 ? (
-        // empty 只在真无数据（无 degraded）时出现
-        degraded ? (
+        // empty 只在真无数据（无 degraded）时出现；零项目时上面的首用 CTA 已引导，不重复渲染
+        noProjects ? null : degraded ? (
           <StatusState
             kind="degraded"
             title="部分数据不可用"
@@ -67,14 +86,7 @@ export function OverviewPage() {
           <StatusState
             kind="empty"
             title="还没有可汇总的工作"
-            description="连接项目与 Runtime 后，待决定事项会聚合到这里。"
-            children={
-              <div className="state-actions">
-                <Link className="btn btn--primary" to={routes.settings()}>
-                  开始设置
-                </Link>
-              </div>
-            }
+            description="待决定、待回复与提醒会聚合到这里。"
           />
         )
       ) : (

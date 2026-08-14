@@ -63,13 +63,17 @@ function withQuery(path: string, params: Record<string, string | undefined>): st
 export const routes = {
   overview: (): string => routePatterns.overview,
   welcome: (): string => routePatterns.welcome,
-  projects: (): string => routePatterns.projects,
+  projects: (opts: { wizard?: boolean } = {}): string =>
+    withQuery(routePatterns.projects, { wizard: opts.wizard ? '1' : undefined }),
   inbox: (opts: { view?: InboxView } = {}): string =>
     withQuery(routePatterns.inbox, { view: opts.view }),
   settings: (opts: { view?: SettingsView } = {}): string =>
     withQuery(routePatterns.settings, { view: opts.view }),
   project: {
-    workbench: (project: string): string => `${projectBasePath(project)}/workbench`,
+    workbench: (project: string, opts: { createWorkspace?: boolean } = {}): string =>
+      withQuery(`${projectBasePath(project)}/workbench`, {
+        createWorkspace: opts.createWorkspace ? '1' : undefined,
+      }),
     memory: (project: string): string => `${projectBasePath(project)}/memory`,
     recovery: (project: string): string => `${projectBasePath(project)}/recovery`,
     activity: (project: string): string => `${projectBasePath(project)}/activity`,

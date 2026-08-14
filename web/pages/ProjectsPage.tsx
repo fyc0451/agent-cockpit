@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
+import type { ReactNode } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useProjectRegistryList } from '../api/registry'
 import type { RepoLocationSummary } from '../api/registry'
 import { routes } from '../app/routes'
@@ -23,7 +23,10 @@ function locationSummary(p: { repo_locations?: RepoLocationSummary[] }): RepoLoc
 
 export function ProjectsPage() {
   const list = useProjectRegistryList()
-  const [wizardOpen, setWizardOpen] = useState(false)
+  // 四入口（Overview/Welcome/ProjectDrawer/本页）统一汇聚：?wizard=1 即打开同一个向导
+  const [searchParams, setSearchParams] = useSearchParams()
+  const wizardOpen = searchParams.get('wizard') === '1'
+  const setWizardOpen = (open: boolean) => setSearchParams(open ? { wizard: '1' } : {})
 
   const openWizard = (
     <Button variant="primary" onClick={() => setWizardOpen(true)}>
@@ -73,7 +76,7 @@ export function ProjectsPage() {
               children={
                 <div className="state-actions">
                   <Button variant="primary" onClick={() => setWizardOpen(true)}>
-                    选择项目目录
+                    选择代码目录
                   </Button>
                   <Link className="btn btn--ghost" to={routes.welcome()}>
                     查看引导

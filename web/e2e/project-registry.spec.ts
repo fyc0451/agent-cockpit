@@ -6,6 +6,7 @@ import {
   registryProjectsEmptyPayload,
   registryProjectsEmptyWritablePayload,
   registryProjectsWritablePayload,
+  runtimeNodesMultiUsablePayload,
 } from '../fixtures/api'
 import { attachGates, expectGatesClean, stubApi } from './helpers'
 
@@ -25,7 +26,7 @@ async function stubRegisterPost(page: Page, payload: unknown, status = 201) {
 
 const discoveryPostOverride = { '/api/project-discovery': discoveryGitPayload }
 
-test('E1 键盘整轮登记：空态 CTA → 节点 → root → 目录 → 识别 → 改 slug → 提交 → 成功卡片', async ({ page }) => {
+test('E1 键盘整轮登记：空态 CTA → root → 目录 → 识别 → 改 slug → 提交 → 成功卡片', async ({ page }) => {
   const g = attachGates(page)
   await stubApi(page, {
     '/api/project-registry/projects': registryProjectsEmptyWritablePayload,
@@ -36,15 +37,13 @@ test('E1 键盘整轮登记：空态 CTA → 节点 → root → 目录 → 识�
   await expect(page.locator('[data-state="empty"]')).toBeVisible()
 
   // 全程键盘激活（focus + Enter）
-  const cta = page.getByRole('button', { name: '选择项目目录' })
+  const cta = page.getByRole('button', { name: '选择代码目录' })
   await cta.focus()
   await page.keyboard.press('Enter')
   const dialog = page.getByRole('dialog', { name: '添加项目' })
   await expect(dialog).toBeVisible()
 
-  const localNode = dialog.getByRole('button', { name: /本机/ })
-  await localNode.focus()
-  await page.keyboard.press('Enter')
+  // 唯一可用 local 节点 → 位置步自动跳过，直接是代码位置列表
   const root = dialog.getByRole('button', { name: '代码' })
   await root.focus()
   await page.keyboard.press('Enter')
@@ -56,14 +55,16 @@ test('E1 键盘整轮登记：空态 CTA → 节点 → root → 目录 → 识�
   await page.keyboard.press('Enter')
   await expect(dialog.getByText('新 Git 项目')).toBeVisible()
 
+  // Slug 收在高级选项里
+  await dialog.getByText('高级选项').click()
   const slug = dialog.getByLabel('Slug')
   await slug.focus()
   await slug.fill('alpha-proj')
-  const submit = dialog.getByRole('button', { name: '确认添加 Project' })
+  const submit = dialog.getByRole('button', { name: '确认添加' })
   await submit.focus()
   await page.keyboard.press('Enter')
   await expect(dialog.getByText('登记成功')).toBeVisible()
-  await expect(dialog.getByText('alpha-proj')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '继续创建工作空间' })).toBeVisible()
   expectGatesClean(g)
 })
 
@@ -71,9 +72,11 @@ test('E2 remote 节点 fail-closed：reason 可读，Enter 后 0 请求', async 
   const g = attachGates(page)
   await stubApi(page, {
     '/api/project-registry/projects': registryProjectsEmptyPayload,
+    // 多可用节点：位置步不被自动跳过，disabled 卡片照常渲染
+    '/api/runtime-nodes': runtimeNodesMultiUsablePayload,
   })
   await page.goto('/#/projects')
-  await page.getByRole('button', { name: '选择项目目录' }).click()
+  await page.getByRole('button', { name: '选择代码目录' }).click()
   const dialog = page.getByRole('dialog', { name: '添加项目' })
   const remote = dialog.locator('[aria-disabled="true"]', { hasText: '远程 GPU 节点' })
   await expect(remote).toBeVisible()
@@ -107,12 +110,12 @@ test('E3 stale 路径：提交注入 409 → 「重新探测」可见 → 点击
   await page.goto('/#/projects')
   await page.getByRole('button', { name: '添加项目' }).click()
   const dialog = page.getByRole('dialog', { name: '添加项目' })
-  await dialog.getByRole('button', { name: /本机/ }).click()
+  // 唯一可用 local 节点 → 位置步自动跳过
   await dialog.getByRole('button', { name: '代码' }).click()
   await dialog.getByRole('button', { name: /^alpha/ }).click()
   await dialog.getByRole('button', { name: '识别所选目录' }).click()
   await expect(dialog.getByText('新 Git 项目')).toBeVisible()
-  await dialog.getByRole('button', { name: '确认添加 Project' }).click()
+  await dialog.getByRole('button', { name: '确认添加' }).click()
   const reProbe = dialog.getByRole('button', { name: '重新探测' })
   await expect(reProbe).toBeVisible()
   await reProbe.click()
@@ -164,9 +167,10 @@ for (const width of WIDTHS) {
       const addBtn = page.getByRole('button', { name: '添加项目' })
       const box = await addBtn.boundingBox()
       expect(box!.height).toBeGreaterThanOrEqual(44)
-      const nodeBtn = dialog.getByRole('button', { name: /本机/ })
-      const nodeBox = await nodeBtn.boundingBox()
-      expect(nodeBox!.height).toBeGreaterThanOrEqual(44)
+      // 唯一可用 local 节点自动跳过 → 首个可点是代码位置
+      const rootBtn = dialog.getByRole('button', { name: '代码' })
+      const rootBox = await rootBtn.boundingBox()
+      expect(rootBox!.height).toBeGreaterThanOrEqual(44)
     }
     expectGatesClean(g)
   })
@@ -186,18 +190,17 @@ test('E6 axe：列表 empty、向导三步、成功卡片无 serious/critical', 
     violations.filter((v) => v.impact === 'serious' || v.impact === 'critical')
 
   expect(clean((await run()).violations)).toEqual([]) // empty 列表
-  await page.getByRole('button', { name: '选择项目目录' }).click()
+  await page.getByRole('button', { name: '选择代码目录' }).click()
   const dialog = page.getByRole('dialog', { name: '添加项目' })
-  expect(clean((await run()).violations)).toEqual([]) // 第 1 步
-  await dialog.getByRole('button', { name: /本机/ }).click()
+  expect(clean((await run()).violations)).toEqual([]) // 代码位置列表（唯一可用节点自动跳过位置步）
   await dialog.getByRole('button', { name: '代码' }).click()
   await expect(dialog.getByRole('button', { name: /^alpha/ })).toBeVisible()
-  expect(clean((await run()).violations)).toEqual([]) // 第 2 步
+  expect(clean((await run()).violations)).toEqual([]) // 目录步
   await dialog.getByRole('button', { name: /^alpha/ }).click()
   await dialog.getByRole('button', { name: '识别所选目录' }).click()
   await expect(dialog.getByText('新 Git 项目')).toBeVisible()
-  expect(clean((await run()).violations)).toEqual([]) // 第 3 步
-  await dialog.getByRole('button', { name: '确认添加 Project' }).click()
+  expect(clean((await run()).violations)).toEqual([]) // 识别结果
+  await dialog.getByRole('button', { name: '确认添加' }).click()
   await expect(dialog.getByText('登记成功')).toBeVisible()
   expect(clean((await run()).violations)).toEqual([]) // 成功卡片
   expectGatesClean(g)
