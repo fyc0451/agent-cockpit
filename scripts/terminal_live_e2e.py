@@ -5,12 +5,16 @@ Starts one real Cockpit Next ephemeral process on a random loopback port with a
 private 0700 runtime root (data/config/state/uploads). Does not bind 8790/18790,
 does not fake the backend, and does not put cwd/command/PID/env/Herdr values
 into the browser. Cleanup always signals only the started process group.
+Never reuses a stale web/dist: run_suite always clean-builds and records
+Web/E2E/Lead provenance plus bundle hashes.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -26,6 +30,18 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "next_ephemeral_server.py"
 WEB = ROOT / "web"
 RESERVED_PORTS = {8790, 18790}
+DECLARED_WEB_EXACT = "720888fb320d284aa386aadb8e4a3f5e5f7f3265"
+WEB_PROVENANCE_PATHS = (
+    "web/pages/TerminalPage.tsx",
+    "web/api/terminals.ts",
+)
+E2E_PROVENANCE_PATHS = (
+    "web/e2e-live/terminal-live.spec.ts",
+    "web/playwright.live.config.ts",
+    "scripts/terminal_live_e2e.py",
+    "docs/testing/terminal-live-e2e.md",
+)
+HEX40 = re.compile(r"^[0-9a-f]{40}$")
 FORBIDDEN_BROWSER_KEYS = (
     "cwd",
     "command",
@@ -105,6 +121,91 @@ def _http_json(url: str, timeout: float = 2) -> dict[str, object]:
     return payload
 
 
+def _git(*args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(ROOT), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return (proc.stdout or "").strip()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_hashes(paths: tuple[str, ...]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for rel in paths:
+        path = ROOT / rel
+        if not path.is_file():
+            raise HarnessError(f"provenance_file_missing:{rel}")
+        hashes[rel] = _sha256_file(path)
+    return hashes
+
+
+def _bundle_hashes(dist: Path) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for path in sorted(dist.rglob("*")):
+        if not path.is_file():
+            continue
+        hashes[str(path.relative_to(dist))] = _sha256_file(path)
+    if not hashes:
+        raise HarnessError("bundle_hashes_empty")
+    return hashes
+
+
+def verify_web_blobs(web_exact: str) -> dict[str, str]:
+    blobs: dict[str, str] = {}
+    for rel in WEB_PROVENANCE_PATHS:
+        expected = _git("rev-parse", f"{web_exact}:{rel}")
+        actual = _git("hash-object", rel)
+        if expected != actual:
+            raise HarnessError(f"web_blob_mismatch:{rel}")
+        blobs[rel] = actual
+    return blobs
+
+
+def require_lead_exact() -> str:
+    lead = os.environ.get("TERM003_LEAD_EXACT", "").strip()
+    if not HEX40.fullmatch(lead):
+        raise HarnessError("lead_exact_missing")
+    return lead
+
+
+def require_web_exact() -> str:
+    declared = os.environ.get("TERM003_WEB_EXACT", DECLARED_WEB_EXACT).strip()
+    if declared != DECLARED_WEB_EXACT:
+        raise HarnessError("web_exact_mismatch")
+    return declared
+
+
+def record_provenance(
+    artifact: Path,
+    *,
+    verify_web: bool,
+    bundle_hashes: dict[str, str] | None,
+) -> dict[str, object]:
+    web_exact = require_web_exact() if verify_web else os.environ.get(
+        "TERM003_WEB_EXACT", DECLARED_WEB_EXACT
+    ).strip()
+    payload: dict[str, object] = {
+        "web_exact": web_exact,
+        "e2e_head": _git("rev-parse", "HEAD"),
+        "lead_exact": os.environ.get("TERM003_LEAD_EXACT", "").strip() or None,
+        "e2e_files": _file_hashes(E2E_PROVENANCE_PATHS),
+        "web_blobs": verify_web_blobs(web_exact) if verify_web else None,
+        "bundle_hashes": bundle_hashes,
+    }
+    _write_json(artifact / "provenance.json", payload)
+    return payload
+
+
 def wait_ready(descriptor: dict[str, object], timeout: float = 20) -> dict[str, object]:
     base_url = str(descriptor["base_url"])
     ready_path = str(descriptor["ready_path"])
@@ -117,6 +218,12 @@ def wait_ready(descriptor: dict[str, object], timeout: float = 20) -> dict[str, 
             last_error = type(exc).__name__
             time.sleep(0.05)
     raise HarnessError(f"ephemeral_not_ready:{last_error}")
+
+
+def require_ready(ready: dict[str, object]) -> dict[str, object]:
+    if ready.get("ready") is not True:
+        raise HarnessError("ephemeral_ready_false")
+    return ready
 
 
 def stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
@@ -196,9 +303,15 @@ def start_server(runtime_root: Path) -> tuple[subprocess.Popen[str], dict[str, o
 
 
 def seed_discoverable_project(runtime_root: Path) -> Path:
-    """Create a real git work inside ephemeral HOME. Browser never sees this path."""
-    home = runtime_root / "home"
-    sample = home / "term003-live-seed"
+    """Create a real git work under runner-owned uploads (allowlist system root).
+
+    Browser never sees this absolute path; the wizard only selects the public
+    `uploads` descriptor and the `term003-live-seed` child.
+    """
+    uploads = runtime_root / "uploads"
+    if not uploads.is_dir():
+        raise HarnessError("uploads_root_missing")
+    sample = uploads / "term003-live-seed"
     sample.mkdir(parents=True, exist_ok=True)
     (sample / "README.md").write_text("# TERM-003 live seed\n", encoding="utf-8")
     subprocess.run(
@@ -235,17 +348,21 @@ def seed_discoverable_project(runtime_root: Path) -> Path:
     return sample
 
 
-def ensure_web_build() -> None:
-    index = WEB / "dist" / "index.html"
-    if index.is_file():
-        return
+def ensure_web_build() -> dict[str, str]:
+    dist = WEB / "dist"
+    if dist.exists():
+        shutil.rmtree(dist)
     subprocess.run(
         ["npm", "--prefix", str(WEB), "run", "build"],
         cwd=str(ROOT),
         check=True,
     )
-    if not index.is_file():
+    if not (dist / "index.html").is_file():
         raise HarnessError("next_web_build_unavailable")
+    hashes = _bundle_hashes(dist)
+    if "index.html" not in hashes:
+        raise HarnessError("bundle_index_missing")
+    return hashes
 
 
 def empty_registry(base_url: str) -> dict[str, object]:
@@ -292,10 +409,10 @@ def self_check() -> None:
         process, descriptor, ready = start_server(runtime)
         seed_discoverable_project(runtime)
         empty_registry(str(descriptor["base_url"]))
-        if ready.get("ready") is not True:
-            raise HarnessError("ephemeral_ready_false")
+        require_ready(ready)
         _write_json(artifact / "descriptor.json", descriptor)
         _write_json(artifact / "ready.json", ready)
+        record_provenance(artifact, verify_web=False, bundle_hashes=None)
         print("SELF-CHECK PASS", flush=True)
     finally:
         if process is not None:
@@ -304,7 +421,10 @@ def self_check() -> None:
 
 
 def run_suite(*, keep_on_fail: bool) -> int:
-    ensure_web_build()
+    lead_exact = require_lead_exact()
+    web_exact = require_web_exact()
+    web_blobs = verify_web_blobs(web_exact)
+    bundle_hashes = ensure_web_build()
     artifact = Path(
         os.environ.get("TERM003_LIVE_ARTIFACT", f"/tmp/term003-live-{os.getpid()}")
     )
@@ -319,8 +439,20 @@ def run_suite(*, keep_on_fail: bool) -> int:
         process, descriptor, ready = start_server(runtime)
         seed_discoverable_project(runtime)
         empty_registry(str(descriptor["base_url"]))
+        require_ready(ready)
         _write_json(artifact / "descriptor.json", descriptor)
         _write_json(artifact / "ready.json", ready)
+        _write_json(
+            artifact / "provenance.json",
+            {
+                "web_exact": web_exact,
+                "e2e_head": _git("rev-parse", "HEAD"),
+                "lead_exact": lead_exact,
+                "e2e_files": _file_hashes(E2E_PROVENANCE_PATHS),
+                "web_blobs": web_blobs,
+                "bundle_hashes": bundle_hashes,
+            },
+        )
         code = run_playwright(base_url=str(descriptor["base_url"]), artifact_dir=artifact)
         if code != 0:
             failed = True

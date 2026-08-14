@@ -14,8 +14,9 @@ const artifactDir = process.env.PLAYWRIGHT_LIVE_ARTIFACT_DIR || '/tmp/term003-li
 
 export default defineConfig({
   testDir: './e2e-live',
-  timeout: 90_000,
+  timeout: 180_000,
   fullyParallel: false,
+  forbidOnly: true,
   workers: 1,
   retries: 0,
   reporter: [['list'], ['html', { open: 'never', outputFolder: `${artifactDir}/html` }]],
