@@ -30,11 +30,16 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "next_ephemeral_server.py"
 WEB = ROOT / "web"
 RESERVED_PORTS = {8790, 18790}
-DECLARED_WEB_EXACT = "720888fb320d284aa386aadb8e4a3f5e5f7f3265"
+DECLARED_WEB_EXACT = "173341dad1d8022aa42ae73f7463fe9ad706b209"
 WEB_PROVENANCE_PATHS = (
-    "web/pages/TerminalPage.tsx",
     "web/api/terminals.ts",
+    "web/pages/TerminalPage.tsx",
+    "web/state/capabilities.tsx",
+    "web/styles/global.css",
+    "web/test/terminal.test.tsx",
+    "web/test/capabilities.test.tsx",
 )
+PROVENANCE_SCHEMA = "term003-live-provenance-v1"
 E2E_PROVENANCE_PATHS = (
     "web/e2e-live/terminal-live.spec.ts",
     "web/playwright.live.config.ts",
@@ -42,6 +47,7 @@ E2E_PROVENANCE_PATHS = (
     "docs/testing/terminal-live-e2e.md",
 )
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FORBIDDEN_BROWSER_KEYS = (
     "cwd",
     "command",
@@ -121,14 +127,35 @@ def _http_json(url: str, timeout: float = 2) -> dict[str, object]:
     return payload
 
 
-def _git(*args: str) -> str:
-    proc = subprocess.run(
+def _run_git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         ["git", "-C", str(ROOT), *args],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
-    return (proc.stdout or "").strip()
+
+
+def git_head() -> str | None:
+    try:
+        proc = _run_git("rev-parse", "--verify", "HEAD")
+    except OSError:
+        return None
+    text = (proc.stdout or "").strip()
+    if proc.returncode == 0 and HEX40.fullmatch(text):
+        return text
+    return None
+
+
+def _git_text(*args: str) -> str:
+    try:
+        proc = _run_git(*args)
+    except OSError as exc:
+        raise HarnessError("e2e_provenance_mismatch") from exc
+    text = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not text:
+        raise HarnessError("e2e_provenance_mismatch")
+    return text
 
 
 def _sha256_file(path: Path) -> str:
@@ -163,8 +190,8 @@ def _bundle_hashes(dist: Path) -> dict[str, str]:
 def verify_web_blobs(web_exact: str) -> dict[str, str]:
     blobs: dict[str, str] = {}
     for rel in WEB_PROVENANCE_PATHS:
-        expected = _git("rev-parse", f"{web_exact}:{rel}")
-        actual = _git("hash-object", rel)
+        expected = _git_text("rev-parse", f"{web_exact}:{rel}")
+        actual = _git_text("hash-object", rel)
         if expected != actual:
             raise HarnessError(f"web_blob_mismatch:{rel}")
         blobs[rel] = actual
@@ -185,23 +212,119 @@ def require_web_exact() -> str:
     return declared
 
 
+def resolve_e2e_exact() -> tuple[str, str]:
+    """Return (e2e_exact, mode). Archive mode requires TERM003_E2E_EXACT."""
+    env_exact = os.environ.get("TERM003_E2E_EXACT", "").strip()
+    head = git_head()
+    if head is not None:
+        if env_exact:
+            if not HEX40.fullmatch(env_exact):
+                raise HarnessError("e2e_exact_missing")
+            if env_exact != head:
+                raise HarnessError("e2e_provenance_mismatch")
+            return env_exact, "worktree"
+        return head, "worktree"
+    if not HEX40.fullmatch(env_exact):
+        raise HarnessError("e2e_exact_missing")
+    return env_exact, "archive"
+
+
+def load_external_manifest() -> dict[str, object] | None:
+    raw = os.environ.get("TERM003_E2E_MANIFEST", "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HarnessError("e2e_provenance_mismatch") from exc
+    if not isinstance(payload, dict):
+        raise HarnessError("e2e_provenance_mismatch")
+    return payload
+
+
+def bind_e2e_manifest(
+    manifest: dict[str, object] | None,
+    *,
+    mode: str,
+    e2e_exact: str,
+    web_exact: str,
+    e2e_files: dict[str, str],
+) -> dict[str, object] | None:
+    if mode == "archive" and manifest is None:
+        raise HarnessError("e2e_provenance_mismatch")
+    if manifest is None:
+        return None
+    declared_e2e = manifest.get("e2e_exact")
+    if declared_e2e != e2e_exact:
+        raise HarnessError("e2e_provenance_mismatch")
+    declared_web = manifest.get("web_exact")
+    if declared_web is not None and declared_web != web_exact:
+        raise HarnessError("e2e_provenance_mismatch")
+    files = manifest.get("e2e_files")
+    if not isinstance(files, dict):
+        raise HarnessError("e2e_provenance_mismatch")
+    for rel in E2E_PROVENANCE_PATHS:
+        expected = files.get(rel)
+        if not isinstance(expected, str) or not HEX64.fullmatch(expected):
+            raise HarnessError("e2e_provenance_mismatch")
+        if expected != e2e_files[rel]:
+            raise HarnessError("e2e_provenance_mismatch")
+    return manifest
+
+
+def build_provenance(
+    *,
+    verify_web: bool,
+    bundle_hashes: dict[str, str] | None,
+    require_lead: bool,
+) -> dict[str, object]:
+    e2e_exact, mode = resolve_e2e_exact()
+    web_exact = require_web_exact() if verify_web else os.environ.get(
+        "TERM003_WEB_EXACT", DECLARED_WEB_EXACT
+    ).strip() or DECLARED_WEB_EXACT
+    if web_exact != DECLARED_WEB_EXACT:
+        raise HarnessError("web_exact_mismatch")
+    lead_exact = require_lead_exact() if require_lead else (
+        os.environ.get("TERM003_LEAD_EXACT", "").strip() or None
+    )
+    e2e_files = _file_hashes(E2E_PROVENANCE_PATHS)
+    manifest = bind_e2e_manifest(
+        load_external_manifest(),
+        mode=mode,
+        e2e_exact=e2e_exact,
+        web_exact=web_exact,
+        e2e_files=e2e_files,
+    )
+    if lead_exact is None and isinstance(manifest, dict):
+        declared_lead = manifest.get("lead_exact")
+        if isinstance(declared_lead, str) and HEX40.fullmatch(declared_lead):
+            lead_exact = declared_lead
+    return {
+        "schema": PROVENANCE_SCHEMA,
+        "mode": mode,
+        "web_exact": web_exact,
+        "e2e_exact": e2e_exact,
+        "lead_exact": lead_exact,
+        "e2e_files": e2e_files,
+        "web_blobs": verify_web_blobs(web_exact) if verify_web else None,
+        "bundle_hashes": bundle_hashes,
+        "manifest": os.environ.get("TERM003_E2E_MANIFEST", "").strip() or None,
+    }
+
+
 def record_provenance(
     artifact: Path,
     *,
     verify_web: bool,
     bundle_hashes: dict[str, str] | None,
+    require_lead: bool = False,
 ) -> dict[str, object]:
-    web_exact = require_web_exact() if verify_web else os.environ.get(
-        "TERM003_WEB_EXACT", DECLARED_WEB_EXACT
-    ).strip()
-    payload: dict[str, object] = {
-        "web_exact": web_exact,
-        "e2e_head": _git("rev-parse", "HEAD"),
-        "lead_exact": os.environ.get("TERM003_LEAD_EXACT", "").strip() or None,
-        "e2e_files": _file_hashes(E2E_PROVENANCE_PATHS),
-        "web_blobs": verify_web_blobs(web_exact) if verify_web else None,
-        "bundle_hashes": bundle_hashes,
-    }
+    payload = build_provenance(
+        verify_web=verify_web,
+        bundle_hashes=bundle_hashes,
+        require_lead=require_lead,
+    )
     _write_json(artifact / "provenance.json", payload)
     return payload
 
@@ -397,11 +520,19 @@ def run_playwright(*, base_url: str, artifact_dir: Path) -> int:
     return proc.returncode
 
 
+def provenance_check() -> None:
+    artifact = Path(os.environ.get("TERM003_LIVE_ARTIFACT", "/tmp/term003-live-provenance"))
+    artifact.mkdir(parents=True, exist_ok=True)
+    record_provenance(artifact, verify_web=False, bundle_hashes=None)
+    print("PROVENANCE-CHECK PASS", flush=True)
+
+
 def self_check() -> None:
     artifact = Path(os.environ.get("TERM003_LIVE_ARTIFACT", "/tmp/term003-live-self-check"))
     if artifact.exists():
         shutil.rmtree(artifact)
     artifact.mkdir(parents=True, exist_ok=True)
+    provenance = build_provenance(verify_web=False, bundle_hashes=None, require_lead=False)
     runtime = artifact / "runtime"
     runtime.mkdir(mode=0o700)
     process = None
@@ -412,7 +543,7 @@ def self_check() -> None:
         require_ready(ready)
         _write_json(artifact / "descriptor.json", descriptor)
         _write_json(artifact / "ready.json", ready)
-        record_provenance(artifact, verify_web=False, bundle_hashes=None)
+        _write_json(artifact / "provenance.json", provenance)
         print("SELF-CHECK PASS", flush=True)
     finally:
         if process is not None:
@@ -421,10 +552,9 @@ def self_check() -> None:
 
 
 def run_suite(*, keep_on_fail: bool) -> int:
-    lead_exact = require_lead_exact()
-    web_exact = require_web_exact()
-    web_blobs = verify_web_blobs(web_exact)
+    provenance = build_provenance(verify_web=True, bundle_hashes=None, require_lead=True)
     bundle_hashes = ensure_web_build()
+    provenance["bundle_hashes"] = bundle_hashes
     artifact = Path(
         os.environ.get("TERM003_LIVE_ARTIFACT", f"/tmp/term003-live-{os.getpid()}")
     )
@@ -442,17 +572,7 @@ def run_suite(*, keep_on_fail: bool) -> int:
         require_ready(ready)
         _write_json(artifact / "descriptor.json", descriptor)
         _write_json(artifact / "ready.json", ready)
-        _write_json(
-            artifact / "provenance.json",
-            {
-                "web_exact": web_exact,
-                "e2e_head": _git("rev-parse", "HEAD"),
-                "lead_exact": lead_exact,
-                "e2e_files": _file_hashes(E2E_PROVENANCE_PATHS),
-                "web_blobs": web_blobs,
-                "bundle_hashes": bundle_hashes,
-            },
-        )
+        _write_json(artifact / "provenance.json", provenance)
         code = run_playwright(base_url=str(descriptor["base_url"]), artifact_dir=artifact)
         if code != 0:
             failed = True
@@ -474,10 +594,14 @@ def run_suite(*, keep_on_fail: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--provenance-check", action="store_true")
     parser.add_argument("--keep-on-fail", action="store_true")
     args = parser.parse_args(argv)
     try:
         ensure_runtime_python()
+        if args.provenance_check:
+            provenance_check()
+            return 0
         if args.self_check:
             self_check()
             return 0

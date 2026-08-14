@@ -5,21 +5,21 @@ import { expect, test, type Page, type Request } from '@playwright/test'
 
 /**
  * One ordinary live journey on one ephemeral server.
- * Selectors locked to Web exact 720888fb320d284aa386aadb8e4a3f5e5f7f3265:
+ * Selectors locked to Web exact 173341dad1d8022aa42ae73f7463fe9ad706b209:
  *   新终端 / 中断 / 重连 / 重启 / 全屏 (exact) / 退出全屏 (exact) / 关闭标签页 / 关闭会话
  *   testids: terminal-tabs, terminal-tab-{id}, terminal-surface-{id}, terminal-runtime-state
- *   overlay: .terminal-fullscreen (720888f; not data-testid=terminal-fullscreen-overlay)
+ *   overlay: .terminal-fullscreen (173341d; not data-testid=terminal-fullscreen-overlay)
  * Empty-registry is checked at 1280 and 390 before any write.
  * After writes, 390 is rechecked on that same populated state.
  * Missing Project / Workspace / TERM-003 controls fail. No blocked-return.
  */
 
-const WEB_EXACT = '720888fb320d284aa386aadb8e4a3f5e5f7f3265'
+const WEB_EXACT = '173341dad1d8022aa42ae73f7463fe9ad706b209'
 const FORBIDDEN = /\b(cwd|command|pid|env|herdr_session|herdr_pane|HERDR_SESSION|HERDR_PANE_ID|HERDR_ENV)\b/
-const MARKER_LIVE = 'TERM003-LIVE'
-const MARKER_390 = 'TERM003-390'
-const MARKER_INT = 'TERM003-INT'
-const MARKER_RST = 'TERM003-RST'
+const OUTPUT_LIVE = 'out.live.7a3c91'
+const OUTPUT_390 = 'out.w390.b82e04'
+const OUTPUT_INT = 'out.int.d19f6a'
+const OUTPUT_RST = 'out.rst.e40c28'
 
 type GatePost = { url: string; method: string; body: string }
 type GateResponse = { url: string; status: number; ok: boolean }
@@ -222,7 +222,7 @@ async function enterFullscreen(page: Page) {
   await expect(enter, '全屏 control is required').toBeVisible()
   await expect(enter).toBeEnabled()
   await enter.click()
-  await expect(fullscreenOverlay(page), '720888f .terminal-fullscreen overlay is required').toBeVisible()
+  await expect(fullscreenOverlay(page), '173341d .terminal-fullscreen overlay is required').toBeVisible()
 }
 
 async function expectExitFullscreenClickable(page: Page) {
@@ -291,6 +291,15 @@ async function expectMarker(page: Page, marker: string) {
     .toContain(marker)
 }
 
+function decodePrintfCommand(output: string): string {
+  const encoded = Buffer.from(output, 'utf8').toString('base64')
+  const command = `printf '%s\\n' "$(printf %s ${encoded} | base64 -d)"`
+  if (command.includes(output)) {
+    throw new Error('output nonce leaked into typed command')
+  }
+  return command
+}
+
 async function typeCommand(page: Page, command: string, marker: string) {
   const surface = await visibleSurface(page)
   const helper = page.locator('.xterm-helper-textarea')
@@ -303,6 +312,10 @@ async function typeCommand(page: Page, command: string, marker: string) {
   await page.keyboard.press('Enter')
   await expectMarker(page, marker)
   await expectLiveStream(page)
+}
+
+async function typeDecodedOutput(page: Page, output: string) {
+  await typeCommand(page, decodePrintfCommand(output), output)
 }
 
 async function expectSuccessfulControl(gates: LiveGates, since: number, suffix: string) {
@@ -383,7 +396,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     ).toBeVisible({ timeout: 20_000 })
     await expectLiveStream(page)
     const ticketId = await readTicketId(page)
-    await typeCommand(page, `printf ${MARKER_LIVE}`, MARKER_LIVE)
+    await typeDecodedOutput(page, OUTPUT_LIVE)
 
     await enterFullscreen(page)
     await expectMainContainerUnobstructed(page)
@@ -419,7 +432,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     const phoneBox = await phoneSurface.boundingBox()
     expect(phoneBox, 'resize must keep a visible terminal surface').not.toBeNull()
     expect(phoneBox!.width, '390px surface width must change with viewport').not.toBe(beforeBox!.width)
-    await typeCommand(page, `printf ${MARKER_390}`, MARKER_390)
+    await typeDecodedOutput(page, OUTPUT_390)
 
     await enterFullscreen(page)
     await expectMainContainerUnobstructed(page)
@@ -442,7 +455,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     await expectLiveStream(page)
     expect(await readTicketId(page), 'reload must reopen the same ticket').toBe(ticketId)
     expect(createTicketPosts(gates).length, 'reload must not POST a replacement create').toBe(createsBeforeReload)
-    await expectMarker(page, MARKER_LIVE)
+    await expectMarker(page, OUTPUT_LIVE)
 
     const beforeInterrupt = await readAuthorityFence(page)
     const interrupt = page.getByRole('button', { name: '中断' })
@@ -458,7 +471,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
         afterInterrupt.revision !== beforeInterrupt.revision,
       `interrupt must change authority fence (${beforeInterrupt.text} -> ${afterInterrupt.text})`,
     ).toBe(true)
-    await typeCommand(page, `printf ${MARKER_INT}`, MARKER_INT)
+    await typeDecodedOutput(page, OUTPUT_INT)
 
     const beforeRestart = await readAuthorityFence(page)
     const restart = page.getByRole('button', { name: '重启' })
@@ -474,7 +487,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
       afterRestart.generation !== beforeRestart.generation || afterRestart.revision !== beforeRestart.revision,
       `restart must change authority fence (${beforeRestart.text} -> ${afterRestart.text})`,
     ).toBe(true)
-    await typeCommand(page, `printf ${MARKER_RST}`, MARKER_RST)
+    await typeDecodedOutput(page, OUTPUT_RST)
 
     const closeViewBefore = gates.posts.length
     await page.getByRole('button', { name: '关闭标签页' }).click()
