@@ -574,7 +574,7 @@
     {
       "id": "MEMORY-001-store",
       "title": "Implement the durable dormant Project Memory facts and candidates contract",
-      "status": "review",
+      "status": "accepted",
       "depends_on": ["DELIVERY-003-wip4-gate"],
       "scope": ["agent_cockpit/memory_api.py", "agent_cockpit/memory_store.py", "docs/contracts/memory-v1.md", "tests/test_memory.py"],
       "acceptance": [{"command": "python3 -m pytest -q tests/test_memory.py", "passed": true}],
