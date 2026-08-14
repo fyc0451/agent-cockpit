@@ -5,16 +5,16 @@ import { expect, test, type Page, type Request } from '@playwright/test'
 
 /**
  * One ordinary live journey on one ephemeral server.
- * Selectors locked to Web exact 173341dad1d8022aa42ae73f7463fe9ad706b209:
+ * Selectors locked to Web exact 268cc574ad18293c811111acc02e84c89d1be737:
  *   新终端 / 中断 / 重连 / 重启 / 全屏 (exact) / 退出全屏 (exact) / 关闭标签页 / 关闭会话
  *   testids: terminal-tabs, terminal-tab-{id}, terminal-surface-{id}, terminal-runtime-state
- *   overlay: .terminal-fullscreen (173341d; not data-testid=terminal-fullscreen-overlay)
+ *   overlay: .terminal-fullscreen (not data-testid=terminal-fullscreen-overlay)
  * Empty-registry is checked at 1280 and 390 before any write.
  * After writes, 390 is rechecked on that same populated state.
  * Missing Project / Workspace / TERM-003 controls fail. No blocked-return.
  */
 
-const WEB_EXACT = '173341dad1d8022aa42ae73f7463fe9ad706b209'
+const WEB_EXACT = '268cc574ad18293c811111acc02e84c89d1be737'
 const FORBIDDEN = /\b(cwd|command|pid|env|herdr_session|herdr_pane|HERDR_SESSION|HERDR_PANE_ID|HERDR_ENV)\b/
 const OUTPUT_LIVE = 'out.live.7a3c91'
 const OUTPUT_390 = 'out.w390.b82e04'
@@ -182,21 +182,26 @@ async function expectEmptyProjects(page: Page) {
 async function expectLiveStream(page: Page) {
   const state = page.getByTestId('terminal-runtime-state')
   await expect(state, 'TERM-003 live stream must be visible').toBeVisible({ timeout: 20_000 })
-  await expect(state).toContainText('runtime=running')
-  await expect(state).toContainText('流=live')
+  await expect(state).toContainText('状态：运行中')
+  await expect(state).toContainText('连接：已连接')
 }
 
-async function readAuthorityFence(page: Page) {
-  const text = await page.getByTestId('terminal-runtime-state').innerText()
-  const generation = /generation=(\d+)/.exec(text)
-  const revision = /revision=(\d+)/.exec(text)
-  expect(generation, `authority generation missing in ${text}`).not.toBeNull()
-  expect(revision, `authority revision missing in ${text}`).not.toBeNull()
-  return {
-    generation: Number(generation![1]),
-    revision: Number(revision![1]),
-    text,
+function readAuthorityFence(gates: LiveGates) {
+  for (let index = gates.wsSent.length - 1; index >= 0; index -= 1) {
+    const frame = parseJsonObject(gates.wsSent[index] ?? '')
+    if (
+      frame?.type === 'attach' &&
+      typeof frame.generation === 'number' &&
+      typeof frame.revision === 'number'
+    ) {
+      return {
+        generation: frame.generation,
+        revision: frame.revision,
+        text: JSON.stringify(frame),
+      }
+    }
   }
+  throw new Error('authority attach frame missing')
 }
 
 async function visibleSurface(page: Page) {
@@ -222,7 +227,7 @@ async function enterFullscreen(page: Page) {
   await expect(enter, '全屏 control is required').toBeVisible()
   await expect(enter).toBeEnabled()
   await enter.click()
-  await expect(fullscreenOverlay(page), '173341d .terminal-fullscreen overlay is required').toBeVisible()
+  await expect(fullscreenOverlay(page), '.terminal-fullscreen overlay is required').toBeVisible()
 }
 
 async function expectExitFullscreenClickable(page: Page) {
@@ -463,7 +468,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     expect(createTicketPosts(gates).length, 'reload must not POST a replacement create').toBe(createsBeforeReload)
     await expectMarker(page, OUTPUT_LIVE)
 
-    const beforeInterrupt = await readAuthorityFence(page)
+    const beforeInterrupt = readAuthorityFence(gates)
     const interrupt = page.getByRole('button', { name: '中断' })
     await expect(interrupt).toBeVisible()
     await expect(interrupt, '中断 is enabled only in live').toBeEnabled()
@@ -471,7 +476,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     await interrupt.click()
     await expectSuccessfulControl(gates, interruptSince, '/interrupt')
     await expectLiveStream(page)
-    const afterInterrupt = await readAuthorityFence(page)
+    const afterInterrupt = readAuthorityFence(gates)
     expect(
       afterInterrupt.generation !== beforeInterrupt.generation ||
         afterInterrupt.revision !== beforeInterrupt.revision,
@@ -479,7 +484,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     ).toBe(true)
     await typeDecodedOutput(page, OUTPUT_INT)
 
-    const beforeRestart = await readAuthorityFence(page)
+    const beforeRestart = readAuthorityFence(gates)
     const restart = page.getByRole('button', { name: '重启' })
     await expect(restart).toBeVisible()
     await expect(restart).toBeEnabled()
@@ -487,7 +492,7 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     await restart.click()
     await expectSuccessfulControl(gates, restartSince, '/restart')
     await expectLiveStream(page)
-    const afterRestart = await readAuthorityFence(page)
+    const afterRestart = readAuthorityFence(gates)
     expect(afterRestart.generation, 'restart must advance engine generation').toBeGreaterThan(beforeRestart.generation)
     expect(
       afterRestart.generation !== beforeRestart.generation || afterRestart.revision !== beforeRestart.revision,
