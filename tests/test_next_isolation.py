@@ -46,8 +46,8 @@ def test_fresh_install_docs_order_next_before_legacy() -> None:
             "确认添加",
             "继续创建工作空间",
             "创建并打开",
-            "打开终端",
-            "新终端",
+            "开始任务",
+            "继续输入下一条任务",
         ):
             assert label in document
 

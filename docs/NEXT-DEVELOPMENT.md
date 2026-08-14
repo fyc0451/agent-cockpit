@@ -98,11 +98,16 @@ Start the source development service only after the checks pass:
    root is only a container and is not itself a project.
 4. Choose **继续创建工作空间**. Keep the default `main` name or enter a clearer
    name, then choose **创建并打开**.
-5. The new workspace opens at **文件**. Select a file to inspect it, then use
-   **打开终端** and **新终端** to run commands in that workspace.
+5. Open **Agent**, choose an installed Agent, enter a concrete task, and choose
+   **开始任务**. Read its status and reply on the same page, then
+   **继续输入下一条任务** to keep working in the same conversation. Reloading the
+   page must preserve that conversation.
+
+**文件** is for inspecting project content and **终端** is for manual commands;
+neither is a prerequisite for starting an Agent task.
 
 After this path works, returning users can choose a project from the project
-switcher, open an existing workspace, and continue from Files or Terminal.
+switcher, open an existing workspace, and continue its Agent conversation.
 
 ## Public release blocker
 
