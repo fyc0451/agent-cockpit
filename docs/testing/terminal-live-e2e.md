@@ -24,7 +24,8 @@ Lead 临时合并树必须是 Lead exact + Web exact `173341d` + 本 live exact�
 worktree 与 Git-less archive 写入同一 `provenance.json` schema（`term003-live-provenance-v1`）。
 `integration_head` 是当前 Git HEAD（临时集成 SHA）；`e2e_exact` 是独立 E2E commit。二者不得互相替代。
 
-- worktree：`TERM003_E2E_EXACT` 可以指向独立 E2E commit，**不必**等于 integration HEAD。四个 `E2E_PROVENANCE_PATHS` 的当前工作树 blob 必须逐路径等于 `e2e_exact:<path>`；commit/path 不存在或任一文件漂移报 `e2e_provenance_mismatch`。未设置时才回退为 HEAD。
+- worktree：`TERM003_E2E_EXACT` 可以指向独立 E2E **commit**，**不必**等于 integration HEAD。显式值必须是 Git commit object（`cat-file -t` = `commit`），tree/blob 或对象不存在报 `e2e_provenance_mismatch`。四个 `E2E_PROVENANCE_PATHS` 的当前工作树 blob 必须逐路径等于 `e2e_exact:<path>`；path 不存在或任一文件漂移同样 `e2e_provenance_mismatch`。
+- 完整 `run_suite`（integration）必须显式提供 `TERM003_E2E_EXACT`，缺省报 `e2e_exact_missing`，禁止回退 integration HEAD。`--self-check` / `--provenance-check` 仍可无 env 回退 HEAD。
 - archive 没有 `.git`，必须同时提供 40-hex `TERM003_E2E_EXACT` 与 Lead 在 `/tmp` 生成的外置 manifest，并逐文件核验 SHA-256。`integration_head` 为 `null`。
 
 缺 40-hex `TERM003_E2E_EXACT` 报 `e2e_exact_missing`；manifest 缺失或 SHA-256 / blob 不一致报 `e2e_provenance_mismatch`。不得把裸 `command_failed:128` 当成 provenance 失败。
@@ -36,10 +37,10 @@ worktree 与 Git-less archive 写入同一 `provenance.json` schema（`term003-l
 | Web exact | `TERM003_WEB_EXACT` 缺省为 `173341dad1d8022aa42ae73f7463fe9ad706b209`；设成别的值直接失败 |
 | Web blobs | 权威六文件 `web/api/terminals.ts`、`web/pages/TerminalPage.tsx`、`web/state/capabilities.tsx`、`web/styles/global.css`、`web/test/terminal.test.tsx`、`web/test/capabilities.test.tsx` 必须等于 `173341d:<path>` |
 | Lead exact | 必须提供 `TERM003_LEAD_EXACT`（40 位 hex） |
-| E2E exact | worktree 允许独立 `TERM003_E2E_EXACT`，并对照四文件 blob；archive 核验 exact + 外置 manifest |
+| E2E exact | `run_suite` 必须显式 40-hex commit；worktree 对照四文件 blob；archive 核验 exact + 外置 manifest |
 | Bundle | clean build 后记录 `web/dist/**` SHA-256；缺 `index.html` 失败 |
 
-`--self-check` 先解析 provenance 再拉 ephemeral；不校验 Web blob、不 build、worktree 不要求 Lead exact / manifest。`--provenance-check` 只解析并写 provenance，不启动 server。`--provenance-cases` 重放 integration HEAD ≠ E2E exact、文件漂移、伪造 exact、archive 正反例。
+`--self-check` 先解析 provenance 再拉 ephemeral；不校验 Web blob、不 build、worktree 不要求 Lead exact / manifest。`--provenance-check` 只解析并写 provenance，不启动 server。`--provenance-cases` 重放 integration HEAD ≠ E2E exact、文件漂移、伪造/非 commit exact、full run 缺 exact、archive 正反例。
 
 ```bash
 python3 scripts/terminal_live_e2e.py --self-check

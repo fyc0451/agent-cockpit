@@ -230,12 +230,24 @@ def require_web_exact() -> str:
     return declared
 
 
-def resolve_e2e_exact() -> tuple[str, str, str | None]:
+def require_commit_object(oid: str) -> str:
+    """Explicit worktree exact must be a commit, not a tree/blob 40-hex."""
+    try:
+        kind = _git_text("cat-file", "-t", oid)
+    except HarnessError as exc:
+        raise HarnessError("e2e_provenance_mismatch") from exc
+    if kind != "commit":
+        raise HarnessError("e2e_provenance_mismatch")
+    return oid
+
+
+def resolve_e2e_exact(*, require_explicit: bool = False) -> tuple[str, str, str | None]:
     """Return (e2e_exact, mode, integration_head).
 
     Worktree may point TERM003_E2E_EXACT at an independent E2E commit; that
     value is not required to equal the temporary integration HEAD.
-    Archive mode still requires an explicit 40-hex TERM003_E2E_EXACT.
+    Full/integration runs (require_explicit) must set the env; component
+    self-check may fall back to HEAD. Archive always requires the env.
     """
     env_exact = os.environ.get("TERM003_E2E_EXACT", "").strip()
     head = git_head()
@@ -243,7 +255,10 @@ def resolve_e2e_exact() -> tuple[str, str, str | None]:
         if env_exact:
             if not HEX40.fullmatch(env_exact):
                 raise HarnessError("e2e_exact_missing")
+            require_commit_object(env_exact)
             return env_exact, "worktree", head
+        if require_explicit:
+            raise HarnessError("e2e_exact_missing")
         return head, "worktree", head
     if not HEX40.fullmatch(env_exact):
         raise HarnessError("e2e_exact_missing")
@@ -315,7 +330,7 @@ def build_provenance(
     bundle_hashes: dict[str, str] | None,
     require_lead: bool,
 ) -> dict[str, object]:
-    e2e_exact, mode, integration_head = resolve_e2e_exact()
+    e2e_exact, mode, integration_head = resolve_e2e_exact(require_explicit=require_lead)
     web_exact = require_web_exact() if verify_web else os.environ.get(
         "TERM003_WEB_EXACT", DECLARED_WEB_EXACT
     ).strip() or DECLARED_WEB_EXACT
@@ -673,6 +688,37 @@ def provenance_cases() -> None:
 
     _expect_harness("e2e_provenance_mismatch", missing_commit)
     _expect_harness("e2e_exact_missing", forged_exact)
+
+    def integration_missing_exact() -> None:
+        with _temporary_repo_root(repo):
+            _with_env(
+                {
+                    "TERM003_E2E_EXACT": None,
+                    "TERM003_E2E_MANIFEST": None,
+                    "TERM003_LEAD_EXACT": "f011cd57b8062192bb4ec08045536c146f322589",
+                },
+                lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=True),
+            )
+
+    def non_commit_tree() -> None:
+        tree = _git_fixture(repo, "rev-parse", f"{e2e_exact}^{{tree}}")
+        with _temporary_repo_root(repo):
+            _with_env(
+                {"TERM003_E2E_EXACT": tree, "TERM003_E2E_MANIFEST": None},
+                lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=False),
+            )
+
+    def non_commit_blob() -> None:
+        blob = _git_fixture(repo, "rev-parse", f"{e2e_exact}:{E2E_PROVENANCE_PATHS[0]}")
+        with _temporary_repo_root(repo):
+            _with_env(
+                {"TERM003_E2E_EXACT": blob, "TERM003_E2E_MANIFEST": None},
+                lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=False),
+            )
+
+    _expect_harness("e2e_exact_missing", integration_missing_exact)
+    _expect_harness("e2e_provenance_mismatch", non_commit_tree)
+    _expect_harness("e2e_provenance_mismatch", non_commit_blob)
 
     archive = base / "archive"
     archive.mkdir()
