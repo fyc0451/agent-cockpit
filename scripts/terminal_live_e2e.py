@@ -119,27 +119,40 @@ def wait_ready(descriptor: dict[str, object], timeout: float = 20) -> dict[str, 
     raise HarnessError(f"ephemeral_not_ready:{last_error}")
 
 
-def stop_process(process: subprocess.Popen[str]) -> str:
+def stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Signal the owned pgid first, then communicate. Never read pipes while live."""
     stdout = ""
+    stderr = ""
     try:
         if process.poll() is None:
             process_group = _owned_process_group(process)
             if process_group is not None:
                 os.killpg(process_group, signal.SIGTERM)
         try:
-            stdout, _ = process.communicate(timeout=5)
+            out, err = process.communicate(timeout=5)
+            stdout, stderr = out or "", err or ""
         except subprocess.TimeoutExpired:
             process_group = _owned_process_group(process)
             if process_group is not None:
                 os.killpg(process_group, signal.SIGKILL)
-            stdout, _ = process.communicate(timeout=5)
-        return stdout
+            out, err = process.communicate(timeout=5)
+            stdout, stderr = out or "", err or ""
+        return stdout, stderr
     finally:
         if process.poll() is None:
-            process_group = _owned_process_group(process)
+            try:
+                process_group = _owned_process_group(process)
+            except HarnessError:
+                process_group = None
             if process_group is not None:
                 os.killpg(process_group, signal.SIGKILL)
-            process.communicate(timeout=5)
+            try:
+                out, err = process.communicate(timeout=5)
+                stdout = stdout or out or ""
+                stderr = stderr or err or ""
+            except Exception:
+                pass
+    return stdout, stderr
 
 
 def start_server(runtime_root: Path) -> tuple[subprocess.Popen[str], dict[str, object], dict[str, object]]:
@@ -153,15 +166,15 @@ def start_server(runtime_root: Path) -> tuple[subprocess.Popen[str], dict[str, o
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    reaped = False
     try:
         if process.stdout is None:
             raise HarnessError("ephemeral_stdout_missing")
         readable, _, _ = select.select([process.stdout], [], [], 15)
         if not readable:
-            err = ""
-            if process.stderr is not None:
-                err = process.stderr.read()[:500]
-            raise HarnessError(f"ephemeral_descriptor_timeout:{err}")
+            _stdout, stderr = stop_process(process)
+            reaped = True
+            raise HarnessError(f"ephemeral_descriptor_timeout:{(stderr or '')[:500]}")
         line = process.stdout.readline()
         descriptor = json.loads(line)
         if set(descriptor) != {
@@ -177,7 +190,8 @@ def start_server(runtime_root: Path) -> tuple[subprocess.Popen[str], dict[str, o
         ready = wait_ready(descriptor)
         return process, descriptor, ready
     except BaseException:
-        stop_process(process)
+        if not reaped:
+            stop_process(process)
         raise
 
 
@@ -316,13 +330,9 @@ def run_suite(*, keep_on_fail: bool) -> int:
         raise
     finally:
         if process is not None:
-            if process.stderr is not None and failed:
-                try:
-                    err = process.stderr.read()
-                except OSError:
-                    err = ""
-                (artifact / "server.stderr.log").write_text(err or "", encoding="utf-8")
-            stop_process(process)
+            _stdout, stderr = stop_process(process)
+            if failed:
+                (artifact / "server.stderr.log").write_text(stderr or "", encoding="utf-8")
         if not (failed and keep_on_fail):
             shutil.rmtree(runtime, ignore_errors=True)
         elif failed:

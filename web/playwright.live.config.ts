@@ -22,18 +22,10 @@ export default defineConfig({
   outputDir: `${artifactDir}/test-results`,
   use: {
     baseURL,
+    browserName: 'chromium',
+    viewport: { width: 1280, height: 800 },
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
   },
-  projects: [
-    {
-      name: 'desktop',
-      use: { browserName: 'chromium', viewport: { width: 1280, height: 800 } },
-    },
-    {
-      name: 'phone-390',
-      use: { browserName: 'chromium', viewport: { width: 390, height: 844 } },
-    },
-  ],
 })
