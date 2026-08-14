@@ -77,6 +77,8 @@ interface FetchCall {
 
 const TICKET_ID = `ttk_${'c'.repeat(32)}`
 const TICKET_ID_2 = `ttk_${'d'.repeat(32)}`
+const TICKET_ID_3 = `ttk_${'e'.repeat(32)}`
+const TICKET_ID_4 = `ttk_${'f'.repeat(32)}`
 
 function ticketView(
   runtime: Partial<TerminalTicketView['runtime']> = {},
@@ -562,7 +564,83 @@ describe('TerminalPage live（server 开启 terminal.pty）', () => {
     const call = calls.find((c) => c.url.endsWith('/close'))!
     expect(call.body).toEqual({ revision: 1, generation: 1 })
     expect(call.headers['Idempotency-Key']).toBeTruthy()
-    await screen.findByText('终端会话已停止')
+    // 关闭成功后该 tab 立即移除；唯一会话关闭后回到空态
+    await screen.findByText('还没有终端')
+    expect(screen.queryByTestId(`terminal-tab-${TICKET_ID}`)).not.toBeInTheDocument()
+  })
+
+  it('首次 load 全是已关闭（desired_state=stopped）记录 → 空态「还没有终端」，不渲染 tab、零 WS', async () => {
+    const stopped = ticketView(
+      { state: 'stopped', replay_available: false },
+      { desired_state: 'stopped', observed_state: 'stopped' },
+    )
+    await renderLive({
+      list: { body: { data: { items: [stopped], next_cursor: null }, meta: metaOk } },
+    })
+    await screen.findByText('还没有终端')
+    expect(screen.queryByTestId('terminal-tabs')).not.toBeInTheDocument()
+    expect(screen.queryByTestId(`terminal-tab-${TICKET_ID}`)).not.toBeInTheDocument()
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  it('stopped(desired_state) ticket 不进活动 tab；exited/process_unknown 等仍需处理的会话保留', async () => {
+    const running = ticketView()
+    const exited = ticketView({ state: 'exited', replay_available: true }, { ticket_id: TICKET_ID_2 })
+    const unknown = ticketView(
+      { state: 'process_unknown', replay_available: false },
+      { ticket_id: TICKET_ID_3 },
+    )
+    const stopped = ticketView(
+      { state: 'stopped', replay_available: false },
+      { ticket_id: TICKET_ID_4, desired_state: 'stopped', observed_state: 'stopped' },
+    )
+    await renderLive({
+      list: { body: { data: { items: [running, exited, unknown, stopped], next_cursor: null }, meta: metaOk } },
+    })
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const tabs = screen.getByTestId('terminal-tabs')
+    expect(tabs.querySelector(`[data-testid="terminal-tab-${TICKET_ID}"]`)).toBeInTheDocument()
+    expect(tabs.querySelector(`[data-testid="terminal-tab-${TICKET_ID_2}"]`)).toBeInTheDocument()
+    expect(tabs.querySelector(`[data-testid="terminal-tab-${TICKET_ID_3}"]`)).toBeInTheDocument()
+    // 已明确关闭的会话不出现在活动 tab 列表
+    expect(tabs.querySelector(`[data-testid="terminal-tab-${TICKET_ID_4}"]`)).not.toBeInTheDocument()
+    expect(screen.queryByText('终端 4')).not.toBeInTheDocument()
+  })
+
+  it('关闭会话成功后该 tab 立即移除，选择切到剩余 tab', async () => {
+    const second = ticketView({}, { ticket_id: TICKET_ID_2 })
+    const { calls } = await renderLive({
+      list: { body: { data: { items: [ticketView(), second], next_cursor: null }, meta: metaOk } },
+      control: (action) =>
+        action === 'close'
+          ? {
+              body: {
+                data: ticketView(
+                  { state: 'stopped', replay_available: false },
+                  { ticket_id: TICKET_ID_2, revision: 2, desired_state: 'stopped', observed_state: 'stopped' },
+                ),
+                meta: metaOk,
+              },
+            }
+          : undefined,
+    })
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    // 切到第二个 tab（点击标签接管）
+    within(screen.getByTestId('terminal-tabs')).getByText('终端 2').click()
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
+    await waitFor(() =>
+      expect(screen.getByTestId(`terminal-tab-${TICKET_ID_2}`)).toHaveAttribute('aria-selected', 'true'),
+    )
+    // 关闭会话（选中第二个）：首次点击仅确认
+    screen.getByRole('button', { name: '关闭会话' }).click()
+    await screen.findByText('确认关闭会话？')
+    screen.getAllByRole('button', { name: '关闭会话' }).pop()!.click()
+    await waitFor(() => expect(calls.filter((c) => c.url.endsWith('/close'))).toHaveLength(1))
+    // tab 立即移除；选择切回剩余 tab
+    await waitFor(() =>
+      expect(screen.queryByTestId(`terminal-tab-${TICKET_ID_2}`)).not.toBeInTheDocument(),
+    )
+    expect(screen.getByTestId(`terminal-tab-${TICKET_ID}`)).toHaveAttribute('aria-selected', 'true')
   })
 
   it('WS 4409 → 先 refetch 权威 projection → reconnecting；重连 POST 精确形状 + 新 fence attach', async () => {

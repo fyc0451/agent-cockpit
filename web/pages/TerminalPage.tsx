@@ -390,9 +390,10 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
       const list = await listTerminalTickets(projectId, workspaceId)
       setTickets(list.items)
       setListPhase('ready')
-      if (list.items.length > 0) {
-        const first = list.items[0]
-        if (Object.keys(tabsRef.current).length === 0) openTab(first)
+      // desired_state=stopped 的已关闭会话只做审计持久化，不进活动 tab
+      const active = list.items.filter((item) => item.ticket.desired_state !== 'stopped')
+      if (active.length > 0) {
+        if (Object.keys(tabsRef.current).length === 0) openTab(active[0])
       }
     } catch (err) {
       setListError(err instanceof ApiError ? `${err.message}（${err.code}）` : '终端列表加载失败')
@@ -586,8 +587,9 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
           intent.key,
         ),
       () => {
-        closeStream(selectedTicketId)
-        patchTab(selectedTicketId, { phase: 'stopped' })
+        // 关闭成功：该 tab 立即移除（ticket 由 runControl 更新为 stopped，活动列表随之隐藏），
+        // 选择切到剩余 tab 或空态；ticket 后端保留持久审计，刷新后由 load 过滤，不会复现
+        onCloseViewTab(selectedTicketId)
       },
     )
   }
@@ -666,6 +668,9 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
   const canCloseSession =
     selectedTab != null && selectedTab.phase !== 'stopped' && selectedTab.view.ticket.desired_state !== 'stopped'
 
+  /** 活动 tab 列表：已明确关闭（desired_state=stopped）的会话不展示；exited/process_unknown 等保留 */
+  const activeTickets = tickets.filter((item) => item.ticket.desired_state !== 'stopped')
+
   if (listPhase === 'loading') {
     return (
       <>
@@ -742,7 +747,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
           </div>
         </StatusState>
       )}
-      {tickets.length === 0 ? (
+      {activeTickets.length === 0 ? (
         <StatusState
           kind="empty"
           banner
@@ -758,7 +763,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
       ) : (
         <>
           <div className="terminal-tabs" data-testid="terminal-tabs" role="tablist">
-            {tickets.map((item, index) => {
+            {activeTickets.map((item, index) => {
               const id = item.ticket.ticket_id
               const tab = tabs[id]
               const isOpen = tab?.open === true
