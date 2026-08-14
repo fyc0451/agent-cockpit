@@ -22,12 +22,12 @@ Lead 临时合并树必须是 Lead exact + Web exact `173341d` + 本 live exact�
 ## Provenance
 
 worktree 与 Git-less archive 写入同一 `provenance.json` schema（`term003-live-provenance-v1`）。
-worktree 可用 `git rev-parse HEAD` 作为 `e2e_exact`。archive 没有 `.git`，必须同时提供：
+`integration_head` 是当前 Git HEAD（临时集成 SHA）；`e2e_exact` 是独立 E2E commit。二者不得互相替代。
 
-- `TERM003_E2E_EXACT`：40 位 hex
-- `TERM003_E2E_MANIFEST`：Lead 在 `/tmp` 生成的外置 immutable JSON（含 `web_exact` / `e2e_exact` / 可选 `lead_exact`，以及四个 E2E 文件 SHA-256）
+- worktree：`TERM003_E2E_EXACT` 可以指向独立 E2E commit，**不必**等于 integration HEAD。四个 `E2E_PROVENANCE_PATHS` 的当前工作树 blob 必须逐路径等于 `e2e_exact:<path>`；commit/path 不存在或任一文件漂移报 `e2e_provenance_mismatch`。未设置时才回退为 HEAD。
+- archive 没有 `.git`，必须同时提供 40-hex `TERM003_E2E_EXACT` 与 Lead 在 `/tmp` 生成的外置 manifest，并逐文件核验 SHA-256。`integration_head` 为 `null`。
 
-缺 40-hex `TERM003_E2E_EXACT` 报 `e2e_exact_missing`；manifest 缺失或逐文件 SHA-256 不一致报 `e2e_provenance_mismatch`。不得把裸 `command_failed:128` 当成 provenance 失败。
+缺 40-hex `TERM003_E2E_EXACT` 报 `e2e_exact_missing`；manifest 缺失或 SHA-256 / blob 不一致报 `e2e_provenance_mismatch`。不得把裸 `command_failed:128` 当成 provenance 失败。
 
 `run_suite` fail-closed 条件：
 
@@ -36,15 +36,17 @@ worktree 可用 `git rev-parse HEAD` 作为 `e2e_exact`。archive 没有 `.git`�
 | Web exact | `TERM003_WEB_EXACT` 缺省为 `173341dad1d8022aa42ae73f7463fe9ad706b209`；设成别的值直接失败 |
 | Web blobs | 权威六文件 `web/api/terminals.ts`、`web/pages/TerminalPage.tsx`、`web/state/capabilities.tsx`、`web/styles/global.css`、`web/test/terminal.test.tsx`、`web/test/capabilities.test.tsx` 必须等于 `173341d:<path>` |
 | Lead exact | 必须提供 `TERM003_LEAD_EXACT`（40 位 hex） |
-| E2E exact | worktree 记 HEAD；archive 核验 `TERM003_E2E_EXACT` 与外置 manifest |
+| E2E exact | worktree 允许独立 `TERM003_E2E_EXACT`，并对照四文件 blob；archive 核验 exact + 外置 manifest |
 | Bundle | clean build 后记录 `web/dist/**` SHA-256；缺 `index.html` 失败 |
 
-`--self-check` 先解析 provenance 再拉 ephemeral；不校验 Web blob、不 build、worktree 不要求 Lead exact / manifest。`--provenance-check` 只解析并写 provenance，不启动 server。
+`--self-check` 先解析 provenance 再拉 ephemeral；不校验 Web blob、不 build、worktree 不要求 Lead exact / manifest。`--provenance-check` 只解析并写 provenance，不启动 server。`--provenance-cases` 重放 integration HEAD ≠ E2E exact、文件漂移、伪造 exact、archive 正反例。
 
 ```bash
 python3 scripts/terminal_live_e2e.py --self-check
+python3 scripts/terminal_live_e2e.py --provenance-cases
+TERM003_E2E_EXACT=<e2e-40-hex> python3 scripts/terminal_live_e2e.py --self-check
 TERM003_E2E_EXACT=<40-hex> TERM003_E2E_MANIFEST=/tmp/term003-e2e-manifest.json python3 scripts/terminal_live_e2e.py --self-check
-TERM003_LEAD_EXACT=<40-hex> python3 scripts/terminal_live_e2e.py --keep-on-fail
+TERM003_LEAD_EXACT=<40-hex> TERM003_E2E_EXACT=<e2e-40-hex> python3 scripts/terminal_live_e2e.py --keep-on-fail
 ```
 
 不要直接 `npx playwright test -c web/playwright.config.ts`。

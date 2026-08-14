@@ -23,10 +23,28 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_ROOT_OVERRIDE: Path | None = None
+
+
+def repo_root() -> Path:
+    return _ROOT_OVERRIDE if _ROOT_OVERRIDE is not None else ROOT
+
+
+@contextmanager
+def _temporary_repo_root(path: Path) -> Iterator[Path]:
+    global _ROOT_OVERRIDE
+    previous = _ROOT_OVERRIDE
+    _ROOT_OVERRIDE = path
+    try:
+        yield path
+    finally:
+        _ROOT_OVERRIDE = previous
 LAUNCHER = ROOT / "scripts" / "next_ephemeral_server.py"
 WEB = ROOT / "web"
 RESERVED_PORTS = {8790, 18790}
@@ -129,7 +147,7 @@ def _http_json(url: str, timeout: float = 2) -> dict[str, object]:
 
 def _run_git(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", "-C", str(ROOT), *args],
+        ["git", "-C", str(repo_root()), *args],
         check=False,
         capture_output=True,
         text=True,
@@ -169,7 +187,7 @@ def _sha256_file(path: Path) -> str:
 def _file_hashes(paths: tuple[str, ...]) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for rel in paths:
-        path = ROOT / rel
+        path = repo_root() / rel
         if not path.is_file():
             raise HarnessError(f"provenance_file_missing:{rel}")
         hashes[rel] = _sha256_file(path)
@@ -212,21 +230,39 @@ def require_web_exact() -> str:
     return declared
 
 
-def resolve_e2e_exact() -> tuple[str, str]:
-    """Return (e2e_exact, mode). Archive mode requires TERM003_E2E_EXACT."""
+def resolve_e2e_exact() -> tuple[str, str, str | None]:
+    """Return (e2e_exact, mode, integration_head).
+
+    Worktree may point TERM003_E2E_EXACT at an independent E2E commit; that
+    value is not required to equal the temporary integration HEAD.
+    Archive mode still requires an explicit 40-hex TERM003_E2E_EXACT.
+    """
     env_exact = os.environ.get("TERM003_E2E_EXACT", "").strip()
     head = git_head()
     if head is not None:
         if env_exact:
             if not HEX40.fullmatch(env_exact):
                 raise HarnessError("e2e_exact_missing")
-            if env_exact != head:
-                raise HarnessError("e2e_provenance_mismatch")
-            return env_exact, "worktree"
-        return head, "worktree"
+            return env_exact, "worktree", head
+        return head, "worktree", head
     if not HEX40.fullmatch(env_exact):
         raise HarnessError("e2e_exact_missing")
-    return env_exact, "archive"
+    return env_exact, "archive", None
+
+
+def verify_e2e_blobs(e2e_exact: str) -> dict[str, str]:
+    """Worktree blobs must equal the independent E2E exact, not integration HEAD."""
+    blobs: dict[str, str] = {}
+    for rel in E2E_PROVENANCE_PATHS:
+        try:
+            expected = _git_text("rev-parse", f"{e2e_exact}:{rel}")
+            actual = _git_text("hash-object", rel)
+        except HarnessError as exc:
+            raise HarnessError("e2e_provenance_mismatch") from exc
+        if expected != actual:
+            raise HarnessError("e2e_provenance_mismatch")
+        blobs[rel] = actual
+    return blobs
 
 
 def load_external_manifest() -> dict[str, object] | None:
@@ -279,7 +315,7 @@ def build_provenance(
     bundle_hashes: dict[str, str] | None,
     require_lead: bool,
 ) -> dict[str, object]:
-    e2e_exact, mode = resolve_e2e_exact()
+    e2e_exact, mode, integration_head = resolve_e2e_exact()
     web_exact = require_web_exact() if verify_web else os.environ.get(
         "TERM003_WEB_EXACT", DECLARED_WEB_EXACT
     ).strip() or DECLARED_WEB_EXACT
@@ -289,6 +325,7 @@ def build_provenance(
         os.environ.get("TERM003_LEAD_EXACT", "").strip() or None
     )
     e2e_files = _file_hashes(E2E_PROVENANCE_PATHS)
+    e2e_blobs = verify_e2e_blobs(e2e_exact) if mode == "worktree" else None
     manifest = bind_e2e_manifest(
         load_external_manifest(),
         mode=mode,
@@ -305,8 +342,10 @@ def build_provenance(
         "mode": mode,
         "web_exact": web_exact,
         "e2e_exact": e2e_exact,
+        "integration_head": integration_head,
         "lead_exact": lead_exact,
         "e2e_files": e2e_files,
+        "e2e_blobs": e2e_blobs,
         "web_blobs": verify_web_blobs(web_exact) if verify_web else None,
         "bundle_hashes": bundle_hashes,
         "manifest": os.environ.get("TERM003_E2E_MANIFEST", "").strip() or None,
@@ -520,6 +559,171 @@ def run_playwright(*, base_url: str, artifact_dir: Path) -> int:
     return proc.returncode
 
 
+def _git_fixture(root: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return (proc.stdout or "").strip()
+
+
+def _write_fixture_e2e_files(root: Path) -> None:
+    for rel in E2E_PROVENANCE_PATHS:
+        dest = root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes((ROOT / rel).read_bytes())
+
+
+def _init_fixture_repo(root: Path) -> tuple[str, str]:
+    root.mkdir(parents=True)
+    _git_fixture(root, "init", "--quiet", "-b", "main")
+    _git_fixture(root, "config", "user.email", "term003@local")
+    _git_fixture(root, "config", "user.name", "term003")
+    _write_fixture_e2e_files(root)
+    _git_fixture(root, "add", *E2E_PROVENANCE_PATHS)
+    _git_fixture(root, "commit", "--quiet", "-m", "e2e")
+    e2e_exact = _git_fixture(root, "rev-parse", "HEAD")
+    (root / "INTEGRATION_ONLY").write_text("integration head marker\n", encoding="utf-8")
+    _git_fixture(root, "add", "INTEGRATION_ONLY")
+    _git_fixture(root, "commit", "--quiet", "-m", "integration")
+    integration_head = _git_fixture(root, "rev-parse", "HEAD")
+    if integration_head == e2e_exact:
+        raise HarnessError("e2e_provenance_mismatch")
+    return e2e_exact, integration_head
+
+
+def _expect_harness(code: str, fn) -> None:
+    try:
+        fn()
+    except HarnessError as exc:
+        if exc.code == code:
+            return
+        raise HarnessError(f"e2e_provenance_mismatch") from exc
+    raise HarnessError("e2e_provenance_mismatch")
+
+
+def _with_env(mapping: dict[str, str | None], fn):
+    previous = {key: os.environ.get(key) for key in mapping}
+    try:
+        for key, value in mapping.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        return fn()
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def provenance_cases() -> None:
+    """Replayable ordinary evidence for integration-head vs E2E-exact split."""
+    base = Path(os.environ.get("TERM003_LIVE_ARTIFACT", "/tmp/term003-live-provenance-cases"))
+    if base.exists():
+        shutil.rmtree(base)
+    base.mkdir(parents=True, exist_ok=True)
+    repo = base / "integration"
+    e2e_exact, integration_head = _init_fixture_repo(repo)
+
+    def worktree_ok() -> dict[str, object]:
+        with _temporary_repo_root(repo):
+            return _with_env(
+                {
+                    "TERM003_E2E_EXACT": e2e_exact,
+                    "TERM003_E2E_MANIFEST": None,
+                    "TERM003_LEAD_EXACT": None,
+                },
+                lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=False),
+            )
+
+    payload = worktree_ok()
+    if (
+        payload.get("mode") != "worktree"
+        or payload.get("e2e_exact") != e2e_exact
+        or payload.get("integration_head") != integration_head
+        or payload.get("e2e_exact") == payload.get("integration_head")
+    ):
+        raise HarnessError("e2e_provenance_mismatch")
+    _write_json(base / "worktree-ok.json", payload)
+
+    tampered = repo / E2E_PROVENANCE_PATHS[0]
+    original = tampered.read_bytes()
+    tampered.write_bytes(original + b"\n# drift\n")
+    _expect_harness("e2e_provenance_mismatch", worktree_ok)
+    tampered.write_bytes(original)
+
+    def missing_commit() -> None:
+        with _temporary_repo_root(repo):
+            _with_env(
+                {"TERM003_E2E_EXACT": "0" * 40, "TERM003_E2E_MANIFEST": None},
+                lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=False),
+            )
+
+    def forged_exact() -> None:
+        with _temporary_repo_root(repo):
+            _with_env(
+                {"TERM003_E2E_EXACT": "not-an-exact", "TERM003_E2E_MANIFEST": None},
+                lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=False),
+            )
+
+    _expect_harness("e2e_provenance_mismatch", missing_commit)
+    _expect_harness("e2e_exact_missing", forged_exact)
+
+    archive = base / "archive"
+    archive.mkdir()
+    _write_fixture_e2e_files(archive)
+    hashes = {rel: _sha256_file(archive / rel) for rel in E2E_PROVENANCE_PATHS}
+    manifest_ok = base / "manifest-ok.json"
+    _write_json(
+        manifest_ok,
+        {
+            "web_exact": DECLARED_WEB_EXACT,
+            "e2e_exact": e2e_exact,
+            "e2e_files": hashes,
+        },
+    )
+    with _temporary_repo_root(archive):
+        archive_payload = _with_env(
+            {
+                "TERM003_E2E_EXACT": e2e_exact,
+                "TERM003_E2E_MANIFEST": str(manifest_ok),
+            },
+            lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=False),
+        )
+        if archive_payload.get("mode") != "archive" or archive_payload.get("integration_head") is not None:
+            raise HarnessError("e2e_provenance_mismatch")
+        _write_json(base / "archive-ok.json", archive_payload)
+
+        def archive_missing_exact() -> None:
+            _with_env(
+                {"TERM003_E2E_EXACT": None, "TERM003_E2E_MANIFEST": str(manifest_ok)},
+                lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=False),
+            )
+
+        def archive_bad_manifest() -> None:
+            bad = dict(hashes)
+            bad[E2E_PROVENANCE_PATHS[0]] = "0" * 64
+            bad_path = base / "manifest-bad.json"
+            _write_json(
+                bad_path,
+                {"web_exact": DECLARED_WEB_EXACT, "e2e_exact": e2e_exact, "e2e_files": bad},
+            )
+            _with_env(
+                {"TERM003_E2E_EXACT": e2e_exact, "TERM003_E2E_MANIFEST": str(bad_path)},
+                lambda: build_provenance(verify_web=False, bundle_hashes=None, require_lead=False),
+            )
+
+        _expect_harness("e2e_exact_missing", archive_missing_exact)
+        _expect_harness("e2e_provenance_mismatch", archive_bad_manifest)
+
+    print("PROVENANCE-CASES PASS", flush=True)
+
+
 def provenance_check() -> None:
     artifact = Path(os.environ.get("TERM003_LIVE_ARTIFACT", "/tmp/term003-live-provenance"))
     artifact.mkdir(parents=True, exist_ok=True)
@@ -595,10 +799,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--provenance-check", action="store_true")
+    parser.add_argument("--provenance-cases", action="store_true")
     parser.add_argument("--keep-on-fail", action="store_true")
     args = parser.parse_args(argv)
     try:
         ensure_runtime_python()
+        if args.provenance_cases:
+            provenance_cases()
+            return 0
         if args.provenance_check:
             provenance_check()
             return 0
