@@ -109,8 +109,8 @@ test('Workbench source degraded：banner + sessions 降级，不假 empty', asyn
   })
   await page.goto('/#/projects/p1/workbench')
   await expect(page.locator('[data-state="degraded"]').first()).toBeVisible()
-  await expect(page.getByText('Session 列表不可用')).toBeVisible()
-  await expect(page.getByText('暂无 session')).toHaveCount(0)
+  await expect(page.getByText('会话列表不可用')).toBeVisible()
+  await expect(page.getByText('暂无会话')).toHaveCount(0)
   expectGatesClean(g)
 })
 

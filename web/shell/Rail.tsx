@@ -138,6 +138,10 @@ export function Rail() {
   const registry = useProjectRegistryList()
   const scope = projectSlug ? projectScope(projectSlug) : GLOBAL_SCOPE
   const remoteHerdrCap = useCapability('remoteHerdr', scope)
+  // 项目段导航：仅 capability available 才展示（unavailable 不做主导航）
+  const recoveryCap = useCapability('recovery.review', scope)
+  const activityCap = useCapability('activity.feed', scope)
+  const memoryCap = useCapability('memory.local', scope)
   const inboxBadge = needsActionCount(attention.data?.data)
   const noProjects = registry.data?.data.items.length === 0
 
@@ -175,9 +179,15 @@ export function Rail() {
               {project?.branch ? <span className="rail-branch"> · {project.branch}</span> : null}
             </p>
             <RailLink to={routes.project.workbench(projectSlug)} icon="▣" label="工作台" mobileHidden />
-            <RailLink to={routes.project.recovery(projectSlug)} icon="⛨" label="变更审核" mobileHidden />
-            <RailLink to={routes.project.activity(projectSlug)} icon="≣" label="动态" mobileHidden />
-            <RailLink to={routes.project.memory(projectSlug)} icon="◈" label="项目记忆" mobileHidden />
+            {recoveryCap.available ? (
+              <RailLink to={routes.project.recovery(projectSlug)} icon="⛨" label="变更审核" mobileHidden />
+            ) : null}
+            {activityCap.available ? (
+              <RailLink to={routes.project.activity(projectSlug)} icon="≣" label="动态" mobileHidden />
+            ) : null}
+            {memoryCap.available ? (
+              <RailLink to={routes.project.memory(projectSlug)} icon="◈" label="项目记忆" mobileHidden />
+            ) : null}
             {(project?.workspaces ?? []).map((w) => {
               if (!w.id) return null
               // Remote fail-closed：remoteHerdr 关闭时远程 workspace 可见但 disabled

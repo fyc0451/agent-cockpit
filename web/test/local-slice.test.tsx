@@ -265,8 +265,8 @@ describe('SLICE-001 页面纵切', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
     })
-    expect(screen.getByText('Session 列表不可用')).toBeInTheDocument()
-    expect(screen.queryByText('暂无 session')).not.toBeInTheDocument()
+    expect(screen.getByText('会话列表不可用')).toBeInTheDocument()
+    expect(screen.queryByText('暂无会话')).not.toBeInTheDocument()
   })
 
   it('Workspace detail 跨项目/404 → typed error，非 empty', async () => {

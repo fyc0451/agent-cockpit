@@ -105,7 +105,7 @@ function WorkspacesSection({
 }
 
 /**
- * P0-WORKBENCH-001-unblock：legacy runtime（任务/Sessions）独立成区块，
+ * P0-WORKBENCH-001-unblock：legacy runtime（任务/会话）独立成区块，
  * 其 loading/error/degraded 只影响本区块；Registry 权威的 WorkspacesSection 与
  * 创建入口始终独立渲染，legacy 503（Agent Mail 不可用）typed 显示、不伪装为空。
  */
@@ -168,7 +168,7 @@ function RuntimeData({ wb }: { wb: LegacyWorkbench }) {
           kind="degraded"
           banner
           title="运行时数据源不可用"
-          description="Herdr 快照不可用，session 列表已降级为空（非真实为空）。"
+          description="Herdr 快照不可用，会话列表已降级为空（非真实为空）。"
         />
       ) : null}
       <section className="panel">
@@ -192,12 +192,12 @@ function RuntimeData({ wb }: { wb: LegacyWorkbench }) {
         )}
       </section>
       <section className="panel">
-        <h2 className="panel-title">Sessions</h2>
+        <h2 className="panel-title">会话</h2>
         {wb.sessions.length === 0 ? (
           wb.source.degraded ? (
-            <StatusState kind="degraded" title="Session 列表不可用" description="运行时快照降级，无法确认是否有 session。" />
+            <StatusState kind="degraded" title="会话列表不可用" description="运行时快照降级，无法确认是否有会话。" />
           ) : (
-            <StatusState kind="empty" title="暂无 session" />
+            <StatusState kind="empty" title="暂无会话" />
           )
         ) : (
           <ul className="list">

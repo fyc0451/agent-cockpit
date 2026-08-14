@@ -1,4 +1,5 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
+import { metaOk, REG_P1, workspaceListP1Payload } from '../fixtures/api'
 import { capabilities, capability } from '../state/capabilities'
 import { renderApp, stubDefaultFetch } from './helpers'
 
@@ -84,5 +85,38 @@ describe('capability registry（静态 fail-closed 表）', () => {
     for (const name of ['中断', '重连', '重启']) {
       expect(screen.getByRole('button', { name })).toHaveAttribute('aria-disabled', 'true')
     }
+  })
+})
+
+describe('rail 项目段 capability 门控', () => {
+  it('unavailable 的 变更审核/动态/项目记忆 不作主导航展示；工作台保留', async () => {
+    stubDefaultFetch()
+    renderApp('/projects/p1/workbench')
+    const rail = await screen.findByRole('navigation', { name: '主导航' })
+    await within(rail).findByRole('link', { name: '工作台' })
+    expect(within(rail).queryByRole('link', { name: '变更审核' })).toBeNull()
+    expect(within(rail).queryByRole('link', { name: '动态' })).toBeNull()
+    expect(within(rail).queryByRole('link', { name: '项目记忆' })).toBeNull()
+  })
+
+  it('server 声明 available 时对应导航出现', async () => {
+    stubDefaultFetch({
+      [`/api/project-registry/projects/${REG_P1}/workspaces`]: {
+        ...workspaceListP1Payload,
+        meta: {
+          ...metaOk,
+          capabilities: {
+            'recovery.review': { available: true, reason: null },
+            'activity.feed': { available: true, reason: null },
+            'memory.local': { available: true, reason: null },
+          },
+        },
+      },
+    })
+    renderApp('/projects/p1/workbench')
+    const rail = await screen.findByRole('navigation', { name: '主导航' })
+    await within(rail).findByRole('link', { name: '变更审核' })
+    expect(within(rail).getByRole('link', { name: '动态' })).toBeInTheDocument()
+    expect(within(rail).getByRole('link', { name: '项目记忆' })).toBeInTheDocument()
   })
 })

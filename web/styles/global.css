@@ -577,6 +577,21 @@ pre {
   color: var(--accent);
 }
 
+/* 列表行内的按钮式链接（Files 行/父目录）：reset 原生按钮灰框，
+   占满行宽、继承字体、左对齐；focus 可见性由全局 :focus-visible 规则提供 */
+.btn-link {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+
 .list-sub {
   font-size: 11px;
   color: var(--muted);
