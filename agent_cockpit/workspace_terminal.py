@@ -61,8 +61,9 @@ _RETRYABLE = frozenset({
 
 
 class WorkspaceTerminalError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, operation_id: str | None = None):
         self.code = code
+        self.operation_id = operation_id
         super().__init__(code)
 
 
@@ -265,13 +266,28 @@ class WorkspaceTerminalController:
                         ),
                         operation_store.Precondition(
                             "ticket.revision", "terminal_ticket", current.ticket_id,
-                            expected_revision=current.revision,
+                            expected_revision=original.revision,
                             expected_generation=str(current.engine_generation),
                         ),
                     ),
                     steps=(("start", "terminal.start", start),),
                 )
             except WorkspaceTerminalError as exc:
+                if (
+                    exc.code == "terminal_limit_reached"
+                    and exc.operation_id is not None
+                ):
+                    failed = self._current_ticket(current)
+                    if (
+                        failed.observed_state == "unknown"
+                        and self._bindings.get(failed.ticket_id) is None
+                    ):
+                        self._update_ticket(
+                            failed,
+                            desired_state="stopped",
+                            observed_state="stopped",
+                            operation_id=exc.operation_id,
+                        )
                 self._remember_replay(
                     "create", project_id, workspace_id, idempotency_key, request_data, exc,
                 )
@@ -736,6 +752,11 @@ class WorkspaceTerminalController:
             if status == "needs_attention":
                 raise WorkspaceTerminalError("terminal_process_unknown")
             if status == "failed":
+                failure_code = projection["operation"]["failure_code"]
+                if isinstance(failure_code, str) and failure_code in _STATUS:
+                    raise WorkspaceTerminalError(
+                        failure_code, operation_id=created.operation_id,
+                    )
                 raise WorkspaceTerminalError("terminal_io_unavailable")
             if status == "planned":
                 projection = journal.transition(
@@ -812,7 +833,9 @@ class WorkspaceTerminalController:
                         }),
                         failure_code=None if exc.uncertain else exc.code,
                     )
-                    raise WorkspaceTerminalError(exc.code) from None
+                    raise WorkspaceTerminalError(
+                        exc.code, operation_id=created.operation_id,
+                    ) from None
                 projection = journal.record_attempt_outcome(
                     created.operation_id,
                     execution_id,

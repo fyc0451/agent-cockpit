@@ -87,6 +87,88 @@ def test_invalid_create_dimensions_fail_before_ticket_or_root_side_effect():
     assert tickets.created == 0 and engine.dimension_calls == 1
 
 
+def test_create_limit_settles_ticket_and_replays_across_controllers(tmp_path):
+    tickets = terminal_ticket_store.initialize(tmp_path / "tickets.sqlite3")
+    journal = operation_store.initialize(tmp_path / "operations.sqlite3")
+
+    class LimitEngine:
+        def __init__(self):
+            self.creates = 0
+
+        def validate_dimensions(self, cols, rows):
+            if type(cols) is not int or type(rows) is not int:
+                raise ValueError("dimensions")
+
+        def create_bound_term(self, _root_fd, _cols, _rows):
+            self.creates += 1
+            raise RuntimeError("terminal limit")
+
+    engine = LimitEngine()
+
+    def new_controller():
+        controller = workspace_terminal.WorkspaceTerminalController(
+            registry_provider=lambda: None,
+            ticket_provider=lambda: tickets,
+            operation_provider=lambda: journal,
+            engine=engine,
+            root_opener=lambda _path: (
+                os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY), None,
+            ),
+        )
+        controller._authority = lambda *_args, **_kwargs: workspace_terminal._Authority(
+            None, str(tmp_path),
+        )
+        return controller
+
+    def create(controller, key):
+        with pytest.raises(workspace_terminal.WorkspaceTerminalError) as rejected:
+            controller.create(
+                PROJECT, WORKSPACE, workspace_revision=1, cols=80, rows=24,
+                idempotency_key=key,
+            )
+        assert rejected.value.code == "terminal_limit_reached"
+
+    first = new_controller()
+    create(first, "limit-key")
+    values, _cursor = tickets.list(project_id=PROJECT, workspace_id=WORKSPACE)
+    assert len(values) == 1
+    assert (values[0].desired_state, values[0].observed_state) == ("stopped", "stopped")
+    assert first.list_tickets(PROJECT, WORKSPACE)["items"][0]["runtime"]["state"] == "stopped"
+    operation_ref = values[0].receipt_refs[-1]
+    assert operation_ref["type"] == "operation"
+    projection = journal.get_operation(operation_ref["id"])
+    assert projection is not None
+    assert (projection["operation"]["status"], projection["operation"]["failure_code"]) == (
+        "failed", "terminal_limit_reached",
+    )
+    assert [(item["status"], item["failure_code"]) for item in projection["attempts"]] == [
+        ("failed", "terminal_limit_reached"),
+    ]
+    assert [(item["receipt_type"], item["outcome"]) for item in projection["receipts"]] == [
+        ("provider_outcome", "failed"),
+    ]
+    assert workspace_terminal._STATUS["terminal_limit_reached"] == 429
+
+    create(first, "limit-key")
+    assert engine.creates == 1
+    create(new_controller(), "limit-key")
+    assert engine.creates == 1
+    with sqlite3.connect(tickets.path) as connection:
+        assert connection.execute("SELECT count(*) FROM terminal_tickets").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM terminal_ticket_idempotency").fetchone()[0] == 1
+    with sqlite3.connect(journal.path) as connection:
+        assert connection.execute("SELECT count(*) FROM operations").fetchone()[0] == 1
+
+    create(new_controller(), "limit-key-2")
+    values, _cursor = tickets.list(project_id=PROJECT, workspace_id=WORKSPACE)
+    assert len(values) == 2
+    assert all(value.observed_state == "stopped" for value in values)
+    assert all(
+        item["runtime"]["state"] != "pending"
+        for item in new_controller().list_tickets(PROJECT, WORKSPACE)["items"]
+    )
+
+
 def test_boot_loss_is_process_unknown_and_does_not_fork():
     controller, _engine = _controller(ticket=_ticket())
     view = controller.list_tickets(PROJECT, WORKSPACE)["items"][0]
