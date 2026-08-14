@@ -3,8 +3,9 @@ import { expect, test, type Page, type Request } from '@playwright/test'
 /**
  * One ordinary live journey on one ephemeral server.
  * Selectors locked to Web exact eb75ace0f202174fdcb018a09c68c9b5219a5c05:
- *   新终端 / 中断 / 重连 / 重启 / 关闭标签页 / 关闭会话
- *   testids: terminal-tabs, terminal-tab-{id}, terminal-surface-{id}, terminal-runtime-state
+ *   新终端 / 中断 / 重连 / 重启 / 全屏 / 退出全屏 / 关闭标签页 / 关闭会话
+ *   testids: terminal-tabs, terminal-tab-{id}, terminal-surface-{id}, terminal-runtime-state,
+ *            terminal-fullscreen-overlay（即将到来的 Web rework contract）
  * Empty-registry is checked at 1280 and 390 before any write.
  * After writes, 390 is rechecked on that same populated state.
  * Missing Project / Workspace / TERM-003 controls fail. No blocked-return.
@@ -60,7 +61,69 @@ async function visibleSurface(page: Page) {
   return live.first()
 }
 
-test('TERM-003 live journey: create, input, output, resize, reload/replay, interrupt, restart, close-view, close-session', async ({
+function fullscreenOverlay(page: Page) {
+  return page.getByTestId('terminal-fullscreen-overlay')
+}
+
+async function enterFullscreen(page: Page) {
+  const enter = page.getByRole('button', { name: '全屏' })
+  await expect(enter, '全屏 control is required').toBeVisible()
+  await expect(enter).toBeEnabled()
+  await enter.click()
+  await expect(fullscreenOverlay(page), 'fullscreen overlay testid is required').toBeVisible()
+}
+
+async function expectExitFullscreenClickable(page: Page) {
+  const overlay = fullscreenOverlay(page)
+  const exitBtn = overlay.getByRole('button', { name: '退出全屏' })
+  await expect(exitBtn, 'overlay must contain a clickable 退出全屏').toBeVisible()
+  await expect(exitBtn).toBeEnabled()
+  const box = await exitBtn.boundingBox()
+  const vp = page.viewportSize()
+  expect(box, '退出全屏 must have a box').not.toBeNull()
+  expect(vp, 'viewport must be set').not.toBeNull()
+  if (!box || !vp) return
+  expect(box.width, '退出全屏 must be large enough to click').toBeGreaterThan(0)
+  expect(box.height, '退出全屏 must be large enough to click').toBeGreaterThan(0)
+  expect(box.x, '退出全屏 must stay in viewport').toBeGreaterThanOrEqual(0)
+  expect(box.y, '退出全屏 must stay in viewport').toBeGreaterThanOrEqual(0)
+  expect(box.x + box.width).toBeLessThanOrEqual(vp.width + 1)
+  expect(box.y + box.height).toBeLessThanOrEqual(vp.height + 1)
+  const clip = await exitBtn.evaluate((el) => ({
+    overflowX: getComputedStyle(el).overflowX,
+    textWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+    pointerEvents: getComputedStyle(el).pointerEvents,
+  }))
+  expect(clip.pointerEvents, '退出全屏 must receive clicks').not.toBe('none')
+  expect(clip.textWidth, '退出全屏 label must not be clipped').toBeLessThanOrEqual(clip.clientWidth + 1)
+  return exitBtn
+}
+
+async function expectMainContainerUnobstructed(page: Page) {
+  await expectNoHorizontalOverflow(page)
+  const overlay = fullscreenOverlay(page)
+  const metrics = await overlay.evaluate((el) => ({
+    sw: el.scrollWidth,
+    cw: el.clientWidth,
+    overflowX: getComputedStyle(el).overflowX,
+  }))
+  expect(metrics.sw, 'fullscreen overlay must not overflow horizontally').toBeLessThanOrEqual(metrics.cw + 1)
+}
+
+async function exitFullscreenViaButton(page: Page) {
+  const exitBtn = await expectExitFullscreenClickable(page)
+  await exitBtn!.click()
+  await expect(fullscreenOverlay(page)).toHaveCount(0)
+}
+
+async function exitFullscreenViaEscape(page: Page) {
+  await expect(fullscreenOverlay(page)).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(fullscreenOverlay(page)).toHaveCount(0)
+}
+
+test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/replay, interrupt, restart, close-view, close-session', async ({
   page,
 }) => {
   const gates = attachLiveGates(page)
@@ -152,9 +215,19 @@ test('TERM-003 live journey: create, input, output, resize, reload/replay, inter
     .toContain('TERM003-LIVE')
   await expectLiveStream(page)
 
+  await enterFullscreen(page)
+  await expectMainContainerUnobstructed(page)
+  await exitFullscreenViaButton(page)
+  await enterFullscreen(page)
+  await exitFullscreenViaEscape(page)
+
   const beforeBox = await surface.boundingBox()
   await page.setViewportSize({ width: 390, height: 844 })
   await expectNoHorizontalOverflow(page)
+  await enterFullscreen(page)
+  await expectMainContainerUnobstructed(page)
+  await expectExitFullscreenClickable(page)
+  await exitFullscreenViaButton(page)
   const phoneSurface = await visibleSurface(page)
   const phoneBox = await phoneSurface.boundingBox()
   expect(phoneBox, 'resize must keep a visible terminal surface').not.toBeNull()
