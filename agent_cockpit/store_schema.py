@@ -1,7 +1,8 @@
 """store_schema — pure-read app-owned store fingerprints for /health/ready (Wiki13 J1).
 
 Contract (decisions/2026-08-10-agent-cockpit-j1-ready-schema-policy.md):
-- No writer imports, no server import, no mkdir/DDL/WAL enable.
+- No server import and no mkdir/DDL/WAL enable. Accepted complex stores are
+  imported lazily only after missing/path/sidecar gates and opened read-only.
 - SQLite: URI mode=ro + query_only; WAL without SHM → probe_requires_quiescence.
 - Responses use stable reason enums only (no paths/exception text).
 - Missing stores may be creatable (parent safe) but probe never creates them.
@@ -252,8 +253,14 @@ _JSON_VERSIONED: dict[str, int] = {
 _APP_OWNED_STORES = (
     "tasks", "push", "coordination", "delivery_outbox", "leader_binding",
     "project_registry",
+    "runtime_provider", "event_journal", "operation_journal",
+    "project_memory", "terminal_ticket",
     "settings", "mail_projects", "team_sessions", "inbox_route", "typing",
     "file_roots", "vapid",
+)
+_ACCEPTED_SQLITE_STORES = (
+    "runtime_provider", "event_journal", "operation_journal",
+    "project_memory", "terminal_ticket",
 )
 
 
@@ -584,6 +591,70 @@ def _check_sqlite(
         return _store_result(name, "compatible", REASON_COMPATIBLE)
     finally:
         con.close()
+
+
+def _accepted_sqlite_opener(name: str):
+    if name == "runtime_provider":
+        from . import runtime_provider_store as module
+        return module.open_existing, module.RuntimeProviderStoreError
+    if name == "event_journal":
+        from . import event_store as module
+        return module.open_existing, module.EventStoreError
+    if name == "operation_journal":
+        from . import operation_store as module
+        return module.open_existing, module.OperationError
+    if name == "project_memory":
+        from . import memory_store as module
+        return module.open_existing, module.MemoryStoreError
+    if name == "terminal_ticket":
+        from . import terminal_ticket_store as module
+        return module.open_existing, module.TerminalTicketError
+    raise KeyError(name)
+
+
+def _check_accepted_sqlite(
+    name: str, path: Path | None = None,
+) -> dict[str, Any]:
+    path = path if path is not None else runtime_paths.store(name)
+    if not path.exists():
+        reason = REASON_MISSING_CREATABLE if _path_creatable(path) else REASON_MISSING_BLOCKED
+        return _store_result(name, "absent", reason)
+    try:
+        info = path.stat()
+    except OSError:
+        return _store_result(name, "error", REASON_UNREADABLE)
+    if (
+        not path.is_file()
+        or (info.st_uid != os.getuid() and os.getuid() != 0)
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        return _store_result(name, "error", REASON_UNSAFE)
+    quiet = _sqlite_wal_shm_state(path)
+    if quiet:
+        return _store_result(name, "blocked", quiet)
+    try:
+        opener, error_type = _accepted_sqlite_opener(name)
+    except Exception:
+        return _store_result(name, "error", REASON_UNREADABLE)
+    try:
+        opened = opener(path)
+        opened.close()
+    except error_type as exc:
+        code = getattr(exc, "code", "")
+        state, reason = {
+            "migration_required": ("migration_required", REASON_MIGRATION_REQUIRED),
+            "future_schema": ("future", REASON_FUTURE_SCHEMA),
+            "schema_fingerprint_mismatch": ("error", REASON_FINGERPRINT_MISMATCH),
+            "schema_mismatch": ("error", REASON_FINGERPRINT_MISMATCH),
+            "schema_missing": ("error", REASON_FINGERPRINT_MISMATCH),
+            "store_corrupt": ("error", REASON_CORRUPT),
+            "store_unsafe": ("error", REASON_UNSAFE),
+            "store_read_failed": ("error", REASON_UNREADABLE),
+        }.get(code, ("error", REASON_UNREADABLE))
+        return _store_result(name, state, reason)
+    except Exception:
+        return _store_result(name, "error", REASON_UNREADABLE)
+    return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 
 def _read_json_file(path: Path) -> Any:
@@ -1522,6 +1593,8 @@ def probe_snapshot_stores(snapshot_root: Path) -> list[dict[str, Any]]:
                     expected_migration=migration,
                     path=path,
                 )
+            elif name in _ACCEPTED_SQLITE_STORES:
+                result = _check_accepted_sqlite(name, path)
             elif name == "settings":
                 result = _check_settings(path)
             elif name == "typing":
@@ -1602,6 +1675,9 @@ def probe_all_stores() -> list[dict[str, Any]]:
                 expected_migration=m,
             ),
         )
+
+    for name in _ACCEPTED_SQLITE_STORES:
+        gated(name, lambda n=name: _check_accepted_sqlite(n))
 
     gated("settings", _check_settings)
     for jname in ("mail_projects", "team_sessions", "inbox_route"):

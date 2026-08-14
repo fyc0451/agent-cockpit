@@ -20,7 +20,7 @@ from . import runtime_paths
 
 
 INVENTORY_NAME = "backup-inventory.json"
-INVENTORY_SCHEMA_VERSION = 2
+INVENTORY_SCHEMA_VERSION = 3
 INVENTORY_ENGINE = "immutable-upgrade-controller"
 MAX_INVENTORY_BYTES = 256 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -37,6 +37,11 @@ _EXPECTED_STORE_LAYOUT = {
     "settings": ("data", "settings.json", "file"),
     "tasks": ("data", "tasks.sqlite3", "file"),
     "project_registry": ("data", "project-registry.sqlite3", "file"),
+    "runtime_provider": ("data", "runtime-provider.sqlite3", "file"),
+    "event_journal": ("data", "event-journal.sqlite3", "file"),
+    "operation_journal": ("data", "operation-journal.sqlite3", "file"),
+    "project_memory": ("data", "project-memory.sqlite3", "file"),
+    "terminal_ticket": ("data", "terminal-ticket.sqlite3", "file"),
     "worktrees": ("data", "worktrees", "dir"),
     "coordination": ("data", "coordination.sqlite3", "file"),
     "leader_binding": ("data", "leader-binding.sqlite3", "file"),
@@ -58,6 +63,11 @@ SQLITE_STORE_NAMES = frozenset(
         "leader_binding",
         "push",
         "delivery_outbox",
+        "runtime_provider",
+        "event_journal",
+        "operation_journal",
+        "project_memory",
+        "terminal_ticket",
     }
 )
 PRESERVE_REASONS = {
@@ -867,7 +877,7 @@ def create_backup_snapshot(
     source_sha: str,
     target_digest: str,
 ) -> dict[str, Any]:
-    """Create and atomically publish one canonical inventory v2 snapshot."""
+    """Create and atomically publish one canonical inventory v3 snapshot."""
     root = _validate_inputs(
         snapshot_root,
         snapshot_id,

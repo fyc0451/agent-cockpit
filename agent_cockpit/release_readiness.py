@@ -69,6 +69,8 @@ _INVENTORY_ENTRY_KEYS = frozenset({
 _SQLITE_STORES = frozenset({
     "tasks", "project_registry", "coordination", "leader_binding", "push",
     "delivery_outbox",
+    "runtime_provider", "event_journal", "operation_journal",
+    "project_memory", "terminal_ticket",
 })
 _JSON_STORES = frozenset({
     "settings", "mail_projects", "team_sessions", "inbox_route", "typing",
@@ -91,9 +93,17 @@ _V2_INVENTORY_NAMES = (
     "tasks", "team_sessions", "typing", "upgrade", "uploads", "vapid",
     "worktrees",
 )
+_V3_INVENTORY_NAMES = (
+    "coordination", "delivery_outbox", "event_journal", "file_roots",
+    "inbox_route", "leader_binding", "mail_projects", "operation_journal",
+    "project_memory", "project_registry", "push", "runtime_provider",
+    "settings", "tasks", "team_sessions", "terminal_ticket", "typing",
+    "upgrade", "uploads", "vapid", "worktrees",
+)
 _INVENTORY_CATALOGS = {
     1: _V1_INVENTORY_NAMES,
     2: _V2_INVENTORY_NAMES,
+    3: _V3_INVENTORY_NAMES,
 }
 _UTC_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 

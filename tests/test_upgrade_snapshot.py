@@ -68,6 +68,22 @@ def test_project_registry_is_a_closed_inventory_sqlite_store() -> None:
     )
     assert "project_registry" in upgrade_snapshot.SQLITE_STORE_NAMES
     assert "project_registry" in upgrade_snapshot.SNAPSHOT_STORE_NAMES
+    assert upgrade_snapshot.INVENTORY_SCHEMA_VERSION == 3
+    assert len(upgrade_snapshot.SQLITE_STORE_NAMES) == 11
+    assert len(upgrade_snapshot.SNAPSHOT_STORE_NAMES) == 18
+    expected = {
+        "runtime_provider": "runtime-provider.sqlite3",
+        "event_journal": "event-journal.sqlite3",
+        "operation_journal": "operation-journal.sqlite3",
+        "project_memory": "project-memory.sqlite3",
+        "terminal_ticket": "terminal-ticket.sqlite3",
+    }
+    for name, leaf in expected.items():
+        assert upgrade_snapshot._EXPECTED_STORE_LAYOUT[name] == (
+            "data", leaf, "file",
+        )
+        assert name in upgrade_snapshot.SQLITE_STORE_NAMES
+        assert name in upgrade_snapshot.SNAPSHOT_STORE_NAMES
 
 
 def test_empty_sources_seal_exact_canonical_closed_inventory(
@@ -84,12 +100,12 @@ def test_empty_sources_seal_exact_canonical_closed_inventory(
     assert raw == upgrade_snapshot.canonical_inventory_bytes(result["inventory"])
     assert hashlib.sha256(raw).hexdigest() == result["inventory_sha256"]
     inventory = result["inventory"]
-    assert inventory["schema_version"] == 2
-    assert inventory["entry_count"] == 16
+    assert inventory["schema_version"] == 3
+    assert inventory["entry_count"] == 21
     assert inventory["total_snapshot_bytes"] == 0
     names = [row["name"] for row in inventory["entries"]]
     assert names == sorted(set(runtime_paths.STORES) | {"uploads"})
-    assert len(names) == len(set(names)) == 16
+    assert len(names) == len(set(names)) == 21
     assert inventory["consistency_scope"] == "per_store_atomic"
 
     for name in upgrade_snapshot.SNAPSHOT_STORE_NAMES:

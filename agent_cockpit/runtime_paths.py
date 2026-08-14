@@ -73,6 +73,21 @@ STORES: dict[str, tuple[str, str, str, str, int | None]] = {
     "project_registry": (
         "data", "project-registry.sqlite3", "file", "server", 0o600,
     ),
+    "runtime_provider": (
+        "data", "runtime-provider.sqlite3", "file", "server", 0o600,
+    ),
+    "event_journal": (
+        "data", "event-journal.sqlite3", "file", "server", 0o600,
+    ),
+    "operation_journal": (
+        "data", "operation-journal.sqlite3", "file", "server", 0o600,
+    ),
+    "project_memory": (
+        "data", "project-memory.sqlite3", "file", "server", 0o600,
+    ),
+    "terminal_ticket": (
+        "data", "terminal-ticket.sqlite3", "file", "server", 0o600,
+    ),
     "worktrees": ("data", "worktrees", "dir", "server", None),
     "coordination": ("data", "coordination.sqlite3", "file", "server+tools", None),
     "leader_binding": ("data", "leader-binding.sqlite3", "file", "server", None),

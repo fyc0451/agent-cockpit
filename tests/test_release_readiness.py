@@ -88,12 +88,8 @@ def _inventory_entry(name: str) -> dict:
     }
 
 
-def _inventory(*, schema_version: int = 2) -> dict:
-    names = (
-        release_readiness._V1_INVENTORY_NAMES
-        if schema_version == 1
-        else release_readiness._EXPECTED_INVENTORY_NAMES
-    )
+def _inventory(*, schema_version: int = 3) -> dict:
+    names = release_readiness._INVENTORY_CATALOGS[schema_version]
     entries = [
         _inventory_entry(name)
         for name in names
@@ -275,8 +271,12 @@ def test_project_registry_is_a_readiness_sqlite_store() -> None:
     assert "project_registry" in release_readiness._EXPECTED_INVENTORY_NAMES
     assert (
         release_readiness._EXPECTED_INVENTORY_NAMES
-        == release_readiness._V2_INVENTORY_NAMES
+        == release_readiness._V3_INVENTORY_NAMES
     )
+    assert len(release_readiness._V1_INVENTORY_NAMES) == 15
+    assert len(release_readiness._V2_INVENTORY_NAMES) == 16
+    assert len(release_readiness._V3_INVENTORY_NAMES) == 21
+    assert len(release_readiness._SQLITE_STORES) == 11
 
 
 def test_legacy_v1_inventory_accepts_exact_fifteen_entry_catalog(tmp_path):
@@ -297,6 +297,24 @@ def test_legacy_v1_inventory_accepts_exact_fifteen_entry_catalog(tmp_path):
     )
     assert registry["state"] == "absent"
     assert registry["reason"] == store_schema.REASON_MISSING_CREATABLE
+
+
+def test_legacy_v2_inventory_accepts_exact_sixteen_entry_catalog(tmp_path):
+    snapshot = _make_snapshot(tmp_path)
+    inventory = _inventory(schema_version=2)
+    assert inventory["entry_count"] == 16
+    assert {entry["name"] for entry in inventory["entries"]} == set(
+        release_readiness._V2_INVENTORY_NAMES
+    )
+    path, digest = _write_inventory(snapshot, inventory)
+    evidence = _build_with_inventory(tmp_path, snapshot, path, digest)
+    assert [item["name"] for item in evidence["stores"]] == list(
+        store_schema._APP_OWNED_STORES,
+    )
+    for name in store_schema._ACCEPTED_SQLITE_STORES:
+        item = next(row for row in evidence["stores"] if row["name"] == name)
+        assert item["state"] == "absent"
+        assert item["reason"] == store_schema.REASON_MISSING_CREATABLE
 
 
 @pytest.mark.parametrize("damage", ["missing", "extra", "duplicate"])

@@ -314,6 +314,11 @@ class TestDefaultCompat:
             "settings": "dashboard-data/settings.json",
             "tasks": "dashboard-data/tasks.sqlite3",
             "project_registry": "dashboard-data/project-registry.sqlite3",
+            "runtime_provider": "dashboard-data/runtime-provider.sqlite3",
+            "event_journal": "dashboard-data/event-journal.sqlite3",
+            "operation_journal": "dashboard-data/operation-journal.sqlite3",
+            "project_memory": "dashboard-data/project-memory.sqlite3",
+            "terminal_ticket": "dashboard-data/terminal-ticket.sqlite3",
             "worktrees": "dashboard-data/worktrees",
             "coordination": "dashboard-data/coordination.sqlite3",
             "leader_binding": "dashboard-data/leader-binding.sqlite3",
@@ -329,6 +334,12 @@ class TestDefaultCompat:
         }
         for name, rel in expect.items():
             assert runtime_paths.store(name) == fake_home / rel, name
+        assert len(runtime_paths.STORES) == 20
+        for name in (
+            "runtime_provider", "event_journal", "operation_journal",
+            "project_memory", "terminal_ticket",
+        ):
+            assert runtime_paths.STORES[name][2:] == ("file", "server", 0o600)
 
 
 # ── tasks 首次并发 _db barrier ────────────────────────────────

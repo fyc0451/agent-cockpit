@@ -38,10 +38,86 @@ def test_missing_stores_are_creatable_no_writes(isolated_roots, tmp_path):
     assert results["project_registry"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["coordination"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["delivery_outbox"]["reason"] == store_schema.REASON_MISSING_CREATABLE
+    for name in store_schema._ACCEPTED_SQLITE_STORES:
+        assert results[name]["reason"] == store_schema.REASON_MISSING_CREATABLE
     after_files = list(tmp_path.rglob("*"))
     # probe must not create db/json/wal/shm
     created = [p for p in after_files if p.is_file() and p not in before]
     assert created == []
+
+
+def test_accepted_sqlite_stores_use_lazy_read_only_openers(
+    isolated_roots, monkeypatch,
+):
+    from agent_cockpit import event_store
+    from agent_cockpit import memory_store
+    from agent_cockpit import operation_store
+    from agent_cockpit import runtime_provider_store
+    from agent_cockpit import terminal_ticket_store
+
+    initializers = {
+        "runtime_provider": lambda path: runtime_provider_store.initialize(
+            path, installed_at="2026-08-14T00:00:00Z",
+        ),
+        "event_journal": event_store.initialize,
+        "operation_journal": operation_store.initialize,
+        "project_memory": memory_store.initialize,
+        "terminal_ticket": terminal_ticket_store.initialize,
+    }
+    for name, initialize in initializers.items():
+        initialize(runtime_paths.store(name)).close()
+        before = (
+            runtime_paths.store(name).read_bytes(),
+            runtime_paths.store(name).stat().st_mtime_ns,
+        )
+        result = store_schema._check_accepted_sqlite(name)
+        assert result["reason"] == store_schema.REASON_COMPATIBLE
+        assert (
+            runtime_paths.store(name).read_bytes(),
+            runtime_paths.store(name).stat().st_mtime_ns,
+        ) == before
+        assert not Path(f"{runtime_paths.store(name)}-wal").exists()
+        assert not Path(f"{runtime_paths.store(name)}-shm").exists()
+    assert len(store_schema._APP_OWNED_STORES) == 18
+
+
+def test_accepted_sqlite_sidecar_blocks_before_lazy_import(
+    isolated_roots, monkeypatch,
+):
+    path = runtime_paths.store("event_journal")
+    path.write_bytes(b"sqlite")
+    path.chmod(0o600)
+    Path(f"{path}-wal").write_bytes(b"live")
+    monkeypatch.setattr(
+        store_schema, "_accepted_sqlite_opener",
+        lambda _name: pytest.fail("opener must not be imported"),
+    )
+    result = store_schema._check_accepted_sqlite("event_journal")
+    assert result["reason"] == store_schema.REASON_PROBE_REQUIRES_QUIESCENCE
+
+
+def test_accepted_sqlite_lazy_import_failure_is_sanitized_zero_write(
+    isolated_roots, monkeypatch,
+):
+    path = runtime_paths.store("event_journal")
+    path.write_bytes(b"not-opened")
+    path.chmod(0o600)
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+
+    def fail(_name):
+        raise ImportError("private module detail")
+
+    monkeypatch.setattr(store_schema, "_accepted_sqlite_opener", fail)
+    result = store_schema._check_accepted_sqlite("event_journal")
+    assert result == {
+        "name": "event_journal",
+        "compat_family": store_schema.COMPAT_FAMILY,
+        "state": "error",
+        "reason": store_schema.REASON_UNREADABLE,
+    }
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
 
 
 def test_delivery_outbox_current_store_fingerprint_compatible(isolated_roots, monkeypatch):

@@ -22,6 +22,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -70,11 +71,21 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, f
 
 ROOT_DIR = resolve_artifact_root()
 _next_instance_lock_owner: instance_lock.InstanceLock | None = None
+runtime_provider_store = None
+event_store = None
+operation_store = None
+memory_store = None
+terminal_ticket_store = None
 if next_profile.enabled():
     try:
         _next_instance_lock_owner = instance_lock.require_registered_owner()
     except instance_lock.LockError as exc:
         raise RuntimeError("next_instance_lock_required") from exc
+    from . import event_api, event_store
+    from . import memory_api, memory_store
+    from . import operation_api, operation_store
+    from . import runtime_provider_store
+    from . import terminal_ticket_api, terminal_ticket_store
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
@@ -197,89 +208,195 @@ def _require_next_instance_lock() -> None:
         raise RuntimeError("next_instance_lock_invalid") from exc
 
 
+_foundation_bundle: tuple[Any, Any, Any, Any, Any] | None = None
+
+
+def _close_foundation_stores(stores: tuple[Any, ...] | None = None) -> None:
+    global _foundation_bundle
+    if stores is None:
+        bundle = _foundation_bundle
+        stores = tuple(reversed(bundle)) if bundle is not None else ()
+    _foundation_bundle = None
+    for store in stores:
+        try:
+            store.close()
+        except Exception:
+            logger.error("foundation store close failed")
+
+
+def _foundation_store_modules() -> tuple[Any, Any, Any, Any, Any]:
+    global runtime_provider_store, event_store, operation_store
+    global memory_store, terminal_ticket_store
+    if runtime_provider_store is None:
+        from . import runtime_provider_store as runtime_module
+        runtime_provider_store = runtime_module
+    if event_store is None:
+        from . import event_store as event_module
+        event_store = event_module
+    if operation_store is None:
+        from . import operation_store as operation_module
+        operation_store = operation_module
+    if memory_store is None:
+        from . import memory_store as memory_module
+        memory_store = memory_module
+    if terminal_ticket_store is None:
+        from . import terminal_ticket_store as terminal_module
+        terminal_ticket_store = terminal_module
+    return (
+        runtime_provider_store, event_store, operation_store, memory_store,
+        terminal_ticket_store,
+    )
+
+
+def _initialize_foundation_stores() -> None:
+    global _foundation_bundle
+    _close_foundation_stores()
+    paths = tuple(runtime_paths.validate_store(name) for name in (
+        "runtime_provider", "event_journal", "operation_journal",
+        "project_memory", "terminal_ticket",
+    ))
+    runtime_module, event_module, operation_module, memory_module, terminal_module = (
+        _foundation_store_modules()
+    )
+    opened: list[Any] = []
+    try:
+        runtime_store = runtime_module.initialize(
+            paths[0],
+            installed_at=datetime.now(UTC).isoformat(timespec="microseconds").replace(
+                "+00:00", "Z",
+            ),
+        )
+        opened.append(runtime_store)
+        event_journal = event_module.initialize(paths[1])
+        opened.append(event_journal)
+        operation_journal = operation_module.initialize(paths[2])
+        opened.append(operation_journal)
+        project_memory = memory_module.initialize(paths[3])
+        opened.append(project_memory)
+        terminal_ticket = terminal_module.initialize(paths[4])
+        opened.append(terminal_ticket)
+    except Exception:
+        _close_foundation_stores(tuple(reversed(opened)))
+        raise
+    _foundation_bundle = (
+        runtime_store, event_journal, operation_journal, project_memory,
+        terminal_ticket,
+    )
+
+
+def _event_journal_provider():
+    bundle = _foundation_bundle
+    if bundle is None:
+        raise _foundation_store_modules()[1].EventStoreError("schema_missing")
+    return bundle[1]
+
+
+def _operation_journal_provider():
+    bundle = _foundation_bundle
+    if bundle is None:
+        raise _foundation_store_modules()[2].OperationError("schema_missing")
+    return bundle[2]
+
+
+def _project_memory_provider():
+    bundle = _foundation_bundle
+    if bundle is None:
+        raise _foundation_store_modules()[3].MemoryStoreError("schema_missing")
+    return bundle[3]
+
+
+def _terminal_ticket_provider():
+    bundle = _foundation_bundle
+    if bundle is None:
+        raise _foundation_store_modules()[4].TerminalTicketError("schema_missing")
+    return bundle[4]
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
     global _identity_retirement_task
     _require_next_instance_lock()
     project_registry_api_service().prepare()
-    state_enabled = _h0_state_enabled()
-    b0_runtime_active = _b0_runtime_active()
-    if state_enabled and not _open_state_clients():
-        # R7 门禁:未决 retiring/survivors 未回收,fail-closed 拒绝启动
-        raise RuntimeError("herdr state clients not fully reaped; refusing start")
-    if state_enabled:
-        await asyncio.to_thread(_reconcile_state_client)
-    if b0_runtime_active:
-        b0_wiring.install_claim_gate(
-            issuer=B0_ISSUER,
-            scope_filter=_b0_scope_enabled,
-            enforce_all=B0_MODE == "on",
-        )
-        await asyncio.to_thread(_b0_rebuild_on_start)
-    else:
-        b0_wiring.uninstall_claim_gate()
-    _poller_task = asyncio.create_task(_poll_live_state())
-    _message_poller_task = asyncio.create_task(_poll_message_state())
-    _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
-    _identity_retirement_task = asyncio.create_task(_identity_retirement_loop())
-    # T1:pending 重启恢复。单任务失败只记日志；列库失败可重试一次，不拖垮启动。
+    foundation_enabled = next_profile.enabled()
+    if foundation_enabled:
+        _initialize_foundation_stores()
     try:
-        recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
-        if recovery.get("retryable"):
-            logger.warning(
-                "pending task recovery list failed; retrying once: %s", recovery
-            )
-            recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
-        if recovery.get("failed") or recovery.get("error"):
-            logger.warning("pending task recovery incomplete: %s", recovery)
-        elif not recovery.get("skipped"):
-            logger.info(
-                "pending task recovery: recovered=%s failed=%s total=%s",
-                recovery.get("recovered"),
-                recovery.get("failed"),
-                recovery.get("total"),
-            )
-    except Exception:
-        logger.exception("pending task recovery crashed; continuing startup")
-    try:
-        yield
-    finally:
-        background_tasks = (
-            _poller_task, _message_poller_task, _worktree_cleanup_task,
-            _identity_retirement_task,
-        )
-        for task in background_tasks:
-            if task is not None:
-                task.cancel()
-        for task in background_tasks:
-            if task is not None:
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    logger.exception("background task failed during shutdown")
+        state_enabled = _h0_state_enabled()
+        b0_runtime_active = _b0_runtime_active()
+        if state_enabled and not _open_state_clients():
+            raise RuntimeError("herdr state clients not fully reaped; refusing start")
+        if state_enabled:
+            await asyncio.to_thread(_reconcile_state_client)
         if b0_runtime_active:
-            b0_wiring.uninstall_claim_gate()
-        try:
-            await asyncio.to_thread(_release_all_zoom_leases)
-        finally:
-            survivors = (
-                await asyncio.to_thread(_stop_state_client)
-                if state_enabled else []
+            b0_wiring.install_claim_gate(
+                issuer=B0_ISSUER,
+                scope_filter=_b0_scope_enabled,
+                enforce_all=B0_MODE == "on",
             )
-            if state_enabled and survivors:
-                # deadline 耗尽仍有存活 state 线程:诊断已序列化,真实引用
-                # 保留在 _state_survivors;不得仅记日志后正常完成
-                logger.error("herdr state clients survived stop: %s", survivors)
-                raise RuntimeError(
-                    f"herdr state clients survived stop: {len(survivors)}"
+            await asyncio.to_thread(_b0_rebuild_on_start)
+        else:
+            b0_wiring.uninstall_claim_gate()
+        _poller_task = asyncio.create_task(_poll_live_state())
+        _message_poller_task = asyncio.create_task(_poll_message_state())
+        _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
+        _identity_retirement_task = asyncio.create_task(_identity_retirement_loop())
+        try:
+            recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
+            if recovery.get("retryable"):
+                logger.warning(
+                    "pending task recovery list failed; retrying once: %s", recovery
                 )
-            _poller_task = None
-            _message_poller_task = None
-            _worktree_cleanup_task = None
-            _identity_retirement_task = None
+                recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
+            if recovery.get("failed") or recovery.get("error"):
+                logger.warning("pending task recovery incomplete: %s", recovery)
+            elif not recovery.get("skipped"):
+                logger.info(
+                    "pending task recovery: recovered=%s failed=%s total=%s",
+                    recovery.get("recovered"), recovery.get("failed"),
+                    recovery.get("total"),
+                )
+        except Exception:
+            logger.exception("pending task recovery crashed; continuing startup")
+        try:
+            yield
+        finally:
+            background_tasks = (
+                _poller_task, _message_poller_task, _worktree_cleanup_task,
+                _identity_retirement_task,
+            )
+            for task in background_tasks:
+                if task is not None:
+                    task.cancel()
+            for task in background_tasks:
+                if task is not None:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.exception("background task failed during shutdown")
+            if b0_runtime_active:
+                b0_wiring.uninstall_claim_gate()
+            try:
+                await asyncio.to_thread(_release_all_zoom_leases)
+            finally:
+                survivors = (
+                    await asyncio.to_thread(_stop_state_client)
+                    if state_enabled else []
+                )
+                if state_enabled and survivors:
+                    logger.error("herdr state clients survived stop: %s", survivors)
+                    raise RuntimeError(
+                        f"herdr state clients survived stop: {len(survivors)}"
+                    )
+                _poller_task = None
+                _message_poller_task = None
+                _worktree_cleanup_task = None
+                _identity_retirement_task = None
+    finally:
+        if foundation_enabled:
+            _close_foundation_stores()
 
 
 app = FastAPI(title="Agent Cockpit", lifespan=lifespan)
@@ -361,6 +478,13 @@ def project_registry_api_service() -> project_registry_api.ApiService:
 
 project_registry_api.install(app, project_registry_api_service())
 local_readonly_api.install(app, local_readonly_api.ApiService(_project_workbench_registry))
+if next_profile.enabled():
+    event_api.install(app, event_api.EventApiService(_event_journal_provider))
+    operation_api.install(app, operation_api.ApiService(_operation_journal_provider))
+    memory_api.install(app, memory_api.MemoryApiService(_project_memory_provider))
+    terminal_ticket_api.install(
+        app, terminal_ticket_api.TerminalTicketApiService(_terminal_ticket_provider),
+    )
 
 
 def _scoped_registry_request(request: Request) -> bool:
