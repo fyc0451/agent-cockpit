@@ -811,7 +811,7 @@
       "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
       "reviewer_instance_id": "i-ac4mbdpyttxouq6op4tesfzyhy",
       "base_sha": "c49de125181f5408d94ff76abb11945fb029213a",
-      "fixed_sha": "0c9396953d7024980a1f5371e856cce938a29232",
+      "fixed_sha": "bcba57cf34784186b6a5c13058afa6301e51305c",
       "cross_module_block_count": 0,
       "release_started_at": null,
       "user_acceptance_required": false,
