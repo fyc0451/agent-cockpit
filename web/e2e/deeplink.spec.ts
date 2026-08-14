@@ -16,7 +16,7 @@ test('冷启动深链 tasks：内容渲染 + rail/topbar selection 恢复', asyn
   await expect(page.getByText('task-e2e-1')).toBeVisible()
   const rail = page.getByRole('navigation', { name: '主导航' })
   await expect(rail.getByText('当前项目')).toBeVisible()
-  await expect(rail.getByText('当前 Workspace')).toBeVisible()
+  await expect(rail.getByText('当前工作空间')).toBeVisible()
   await expect(rail.getByText('Project One')).toBeVisible()
   await expect(page.locator('.topbar')).toContainText('本机工作区')
   expectGatesClean(g)

@@ -20,7 +20,7 @@ const PAGES: [name: string, hash: string, ready: string][] = [
   ['workbench', '/#/projects/p1/workbench', 'Project One'],
   ['settings', '/#/settings', 'Harness / Runtime 与节点'],
   ['files(forbidden)', '/#/projects/p1/workspaces/w1/files', '文件浏览暂不可用'],
-  ['terminal', '/#/projects/p1/workspaces/w1/terminal', 'PTY 未接通'],
+  ['terminal', '/#/projects/p1/workspaces/w1/terminal', '终端未接通'],
 ]
 
 for (const theme of ['light', 'dark'] as const) {
