@@ -65,13 +65,14 @@ const staticRegistry = {
   },
   'terminal.pty': {
     available: false,
-    reason: 'PTY 未接通：W1 仅终端外壳，不写任何假输出',
+    reason: '服务端未声明该 Workspace 的终端能力（terminal.pty 由 workspace detail meta 权威下发）',
     docsRoute: DOCTOR,
   },
   'terminal.control.ui': {
-    available: false,
-    reason: '终端控制 UI 未接线（W1 恒 disabled，不发 POST/WebSocket）',
-    docsRoute: DOCTOR,
+    // TERM-003 本地实现开关：client/WS 状态机/controls 已完成，允许为 true；
+    // 真实可用性仍由 workspace scope 的 server terminal.pty 闸门（见 TerminalPage）
+    available: true,
+    reason: null,
   },
   'search.server': {
     available: false,

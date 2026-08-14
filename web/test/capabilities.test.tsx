@@ -3,13 +3,15 @@ import { capabilities, capability } from '../state/capabilities'
 import { renderApp, stubDefaultFetch } from './helpers'
 
 describe('capability registry（静态 fail-closed 表）', () => {
-  it('W1 静态表全部 available=false 且带真实原因', () => {
+  it('W1 静态表除 TERM-003 本地开关外全部 available=false 且带真实原因', () => {
     const keys = Object.keys(capabilities) as (keyof typeof capabilities)[]
     expect(keys.length).toBeGreaterThan(0)
     for (const k of keys) {
+      if (k === 'terminal.control.ui') continue // TERM-003 本地实现开关，见 capabilities.tsx 注释
       expect(capabilities[k].available).toBe(false)
       expect(capabilities[k].reason).toBeTruthy()
     }
+    expect(capability('terminal.control.ui').available).toBe(true)
     expect(capability('memory.local').reason).toContain('W4')
     expect(capability('terminal.pty').available).toBe(false)
     expect(capability('files.read').reason).toContain('禁止回退全局 legacy')
