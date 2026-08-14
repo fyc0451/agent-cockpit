@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -637,11 +638,20 @@ def _with_env(mapping: dict[str, str | None], fn):
 
 
 def provenance_cases() -> None:
-    """Replayable ordinary evidence for integration-head vs E2E-exact split."""
-    base = Path(os.environ.get("TERM003_LIVE_ARTIFACT", "/tmp/term003-live-provenance-cases"))
-    if base.exists():
-        shutil.rmtree(base)
-    base.mkdir(parents=True, exist_ok=True)
+    """Replayable ordinary evidence for integration-head vs E2E-exact split.
+
+    Uses only a runner-owned TemporaryDirectory. Never reads, writes, or
+    deletes TERM003_LIVE_ARTIFACT — that env belongs to self-check/run_suite.
+    """
+    with tempfile.TemporaryDirectory(
+        prefix="term003-live-provenance-cases-",
+        dir="/tmp",
+    ) as raw_base:
+        _run_provenance_cases(Path(raw_base))
+    print("PROVENANCE-CASES PASS", flush=True)
+
+
+def _run_provenance_cases(base: Path) -> None:
     repo = base / "integration"
     e2e_exact, integration_head = _init_fixture_repo(repo)
 
@@ -766,8 +776,6 @@ def provenance_cases() -> None:
 
         _expect_harness("e2e_exact_missing", archive_missing_exact)
         _expect_harness("e2e_provenance_mismatch", archive_bad_manifest)
-
-    print("PROVENANCE-CASES PASS", flush=True)
 
 
 def provenance_check() -> None:
