@@ -372,7 +372,11 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     await expect(workspaceDialog).toBeVisible()
     await workspaceDialog.getByLabel('Workspace 名称').fill('live-terminal')
     await workspaceDialog.getByRole('button', { name: '确认创建' }).click()
-    await expect(page).toHaveURL(/\/workspaces\/[^/]+/)
+    await expect(page).toHaveURL(/\/workspaces\/[^/]+\/files$/)
+    const workspaceHome = page.getByRole('link', { name: 'live-terminal', exact: true })
+    await expect(workspaceHome, 'sidebar must expose exact live-terminal home link').toBeVisible()
+    await workspaceHome.click()
+    await expect(page).toHaveURL(/\/workspaces\/[^/]+$/)
 
     const terminalCard = page.locator('.card', { hasText: '终端' }).first()
     await expect(terminalCard, 'Workspace home must expose a Terminal card').toBeVisible()
