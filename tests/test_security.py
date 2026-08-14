@@ -751,3 +751,121 @@ def test_websocket_completes_empty_replay(monkeypatch):
         "/api/term/term1?replay=1", headers={"origin": "http://testserver"}
     ) as websocket:
         assert websocket.receive_json() == {"type": "replay_complete"}
+
+
+# ── P1：服务端会话（logout 吊销 / 多会话 / 时效 / 非 ASCII 稳定 4xx）──────
+
+def _fresh_registry():
+    """每个用例独立注册表，避免跨用例会话泄漏。"""
+    registry = server.SessionRegistry()
+    monkey_target = server._auth_sessions
+    return registry, monkey_target
+
+
+def test_logout_revokes_replayed_cookie(monkeypatch):
+    """P1 核心：logout 后重放旧 cookie 必须 401，不能只靠 delete_cookie。"""
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    registry, _ = _fresh_registry()
+    monkeypatch.setattr(server, "_auth_sessions", registry)
+    login = TestClient(server.app)
+    resp = login.post("/api/auth/login", json={"token": "secret"})
+    assert resp.status_code == 200
+    cookie_value = resp.cookies[server.AUTH_COOKIE]
+
+    # 显式携带该 cookie logout（同源 Origin 满足 CSRF）
+    logout = TestClient(server.app, cookies={server.AUTH_COOKIE: cookie_value})
+    assert logout.post(
+        "/api/auth/logout", headers={"origin": "http://testserver"}
+    ).status_code == 200
+
+    # 重放旧 cookie：必须 401
+    replay = TestClient(server.app, cookies={server.AUTH_COOKIE: cookie_value})
+    assert replay.get("/api/files/roots").status_code == 401
+
+
+def test_multiple_browser_sessions_logout_revokes_only_current(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    registry, _ = _fresh_registry()
+    monkeypatch.setattr(server, "_auth_sessions", registry)
+    a = TestClient(server.app).post("/api/auth/login", json={"token": "secret"}).cookies[server.AUTH_COOKIE]
+    b = TestClient(server.app).post("/api/auth/login", json={"token": "secret"}).cookies[server.AUTH_COOKIE]
+    assert a != b
+    # 会话 A 登出
+    out = TestClient(server.app, cookies={server.AUTH_COOKIE: a})
+    assert out.post("/api/auth/logout", headers={"origin": "http://testserver"}).status_code == 200
+    # A 失效，B 仍有效
+    assert TestClient(server.app, cookies={server.AUTH_COOKIE: a}).get("/api/files/roots").status_code == 401
+    assert TestClient(server.app, cookies={server.AUTH_COOKIE: b}).get("/api/files/roots").status_code == 200
+
+
+def test_login_cookie_carries_finite_max_age(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    registry, _ = _fresh_registry()
+    monkeypatch.setattr(server, "_auth_sessions", registry)
+    resp = TestClient(server.app).post("/api/auth/login", json={"token": "secret"})
+    cookie = resp.headers["set-cookie"]
+    assert "HttpOnly" in cookie and "SameSite=strict" in cookie
+    assert f"Max-Age={server.DEFAULT_SESSION_TTL_SECONDS}" in cookie
+    assert "secret" not in cookie
+
+
+def test_non_ascii_bearer_stable_401(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    # 以原始 UTF-8 字节发送（真实线路形态；httpx str 头拒绝非 ASCII）
+    for bad in (
+        "Bearer ünïcødé".encode("utf-8"),
+        "Bearer 令牌".encode("utf-8"),
+        b"Bearer \xc3\x28invalid",
+    ):
+        resp = client.get("/api/files/roots", headers={"authorization": bad})
+        assert resp.status_code == 401, bad
+
+
+def test_non_ascii_login_token_stable_401(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app)
+    # 非 ASCII 经原始 JSON 字节；lone surrogate 经 \ud800 转义（服务端解码后
+    # str 无法 utf-8 编码，必须被捕获为 401 而非 500）
+    bodies = [
+        '{"token": "ünïcødé"}'.encode("utf-8"),
+        '{"token": "令牌错误的值"}'.encode("utf-8"),
+        b'{"token": "\ud800"}',
+    ]
+    for bad in bodies:
+        resp = client.post(
+            "/api/auth/login", content=bad,
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 401, bad
+        assert "secret" not in resp.text
+
+
+def test_non_ascii_cookie_stable_401(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    raw = f"{server.AUTH_COOKIE}=ünïcødé-令牌".encode("utf-8")
+    client = TestClient(server.app, headers={"cookie": raw})
+    assert client.get("/api/files/roots").status_code == 401
+
+
+def test_bearer_priority_over_cookie(monkeypatch):
+    """Bearer 优先策略保留：有效 Bearer + 无效 cookie 仍认证成功。"""
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    client = TestClient(server.app, cookies={server.AUTH_COOKIE: "garbage"})
+    resp = client.get(
+        "/api/files/roots", headers={"authorization": "Bearer secret"}
+    )
+    assert resp.status_code == 200
+
+
+def test_cookie_write_csrf_and_websocket_same_origin_preserved(monkeypatch):
+    """回归：cookie 写需同源；WS 同源放行（走服务端会话注册表路径）。"""
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    registry, _ = _fresh_registry()
+    monkeypatch.setattr(server, "_auth_sessions", registry)
+    client = TestClient(server.app)
+    client.post("/api/auth/login", json={"token": "secret"})
+    assert client.post("/api/auth/logout").status_code == 403
+    assert client.post(
+        "/api/auth/logout", headers={"origin": "http://evil.example"}
+    ).status_code == 403

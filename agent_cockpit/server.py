@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from . import db
+from .auth_session import DEFAULT_SESSION_TTL_SECONDS, SessionRegistry
 import httpx
 from . import coordination
 from . import hub_client
@@ -1164,23 +1165,26 @@ def _no_token_scope_trusted(
     return _origin_authority(origin_value) == (scheme, *host)
 
 
-def _session_value() -> str:
-    if not COCKPIT_TOKEN:
-        return ""
-    return hmac.new(
-        COCKPIT_TOKEN.encode("utf-8"), b"agent-cockpit-session", hashlib.sha256
-    ).hexdigest()
+# P1 修复：服务端会话注册表（进程内存；重启即全部失效，跨实例隔离）。
+# 会话 cookie 不再由 COCKPIT_TOKEN 派生静态值，而是每次登录经
+# SessionRegistry.issue() 签发随机 opaque token。
+_auth_sessions = SessionRegistry()
 
 
 def _valid_bearer(value: str | None) -> bool:
     if not COCKPIT_TOKEN or not value or not value.startswith("Bearer "):
         return False
-    return hmac.compare_digest(value[7:], COCKPIT_TOKEN)
+    try:
+        supplied = value[7:].encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(supplied, COCKPIT_TOKEN.encode("utf-8"))
 
 
 def _valid_cookie(value: str | None) -> bool:
-    expected = _session_value()
-    return bool(expected and value and hmac.compare_digest(value, expected))
+    if not COCKPIT_TOKEN:
+        return False
+    return _auth_sessions.validate(value)
 
 
 def _request_authenticated(request: Request) -> bool:
@@ -1702,18 +1706,28 @@ def api_auth_login(req: LoginReq, request: Request):
         if not _is_loopback(request.client.host if request.client else None):
             raise HTTPException(403, LOCAL_ONLY_AUTH_DETAIL)
         return {"ok": True, "required": False}
-    if not hmac.compare_digest(req.token, COCKPIT_TOKEN):
+    try:
+        supplied = req.token.encode("utf-8")
+    except UnicodeEncodeError:
+        raise HTTPException(401, "令牌错误") from None
+    if not hmac.compare_digest(supplied, COCKPIT_TOKEN.encode("utf-8")):
         raise HTTPException(401, "令牌错误")
+    # P1：每次登录签发独立会话；logout 仅吊销当前会话。
+    session_token, _expiry = _auth_sessions.issue()
     response = JSONResponse({"ok": True, "required": True})
     response.set_cookie(
-        AUTH_COOKIE, _session_value(), httponly=True,
+        AUTH_COOKIE, session_token, httponly=True,
         secure=request.url.scheme == "https", samesite="strict", path="/",
+        max_age=DEFAULT_SESSION_TTL_SECONDS,
     )
     return response
 
 
 @app.post("/api/auth/logout")
-def api_auth_logout():
+def api_auth_logout(request: Request):
+    if COCKPIT_TOKEN:
+        # P1：服务端吊销当前会话；重放旧 cookie 一律 401。
+        _auth_sessions.revoke(request.cookies.get(AUTH_COOKIE))
     response = JSONResponse({"ok": True})
     response.delete_cookie(AUTH_COOKIE, path="/")
     return response

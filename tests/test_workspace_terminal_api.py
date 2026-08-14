@@ -107,9 +107,19 @@ def test_workspace_stream_no_token_accepts_matching_loopback_origin(monkeypatch)
 
 def test_workspace_stream_token_mode_rejects_cross_origin(monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "test-token")
+    registry = server.SessionRegistry()
+    monkeypatch.setattr(server, "_auth_sessions", registry)
+    session_token, _ = registry.issue()
+    # 正向：真实有效会话 + 同源 Origin 必须信任（证明会话本身有效）
+    assert server._websocket_trusted(_websocket(
+        origin="http://127.0.0.1:18790", host="127.0.0.1:18790",
+        cookies={server.AUTH_COOKIE: session_token},
+    )) is True
+    # 反向：同一有效会话 + 跨源 Origin 必须拒绝（拒绝源于 Origin 校验，
+    # 而非未认证 false-green）
     assert server._websocket_trusted(_websocket(
         origin="https://evil.example", host="127.0.0.1:18790",
-        cookies={server.AUTH_COOKIE: server._session_value()},
+        cookies={server.AUTH_COOKIE: session_token},
     )) is False
 
 
