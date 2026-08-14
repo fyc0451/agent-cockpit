@@ -91,7 +91,7 @@ const staticRegistry = {
   },
   'projectRegistry.write': {
     available: false,
-    reason: '项目登记当前不可用，请稍后重试',
+    reason: '暂时无法添加项目，请稍后重试',
     docsRoute: DOCTOR,
   },
   'files.read': {

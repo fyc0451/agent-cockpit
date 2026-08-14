@@ -94,7 +94,7 @@ export function OverviewPage() {
         // attention 源失败：区块级 partial/degraded，不得显示 empty/0 假成功
         <StatusState
           kind="degraded"
-          title="Attention 摘要不可用"
+          title="待办摘要暂不可用"
           description="该来源暂不可用，以上列表不完整或暂缺。"
         />
       ) : items.length === 0 ? (

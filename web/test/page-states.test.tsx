@@ -256,7 +256,7 @@ describe('RuntimeMini 状态色调（P1-6）', () => {
     await waitFor(() => {
       const mini = container.querySelector(RUNTIME_MINI)
       expect(mini).toHaveAttribute('data-tone', 'danger')
-      expect(mini?.textContent).toContain('degraded')
+      expect(mini?.textContent).toContain('Herdr 状态异常')
       expect(mini?.textContent).toContain('本地 Herdr 二进制不可用')
     })
   })
@@ -276,7 +276,7 @@ describe('RuntimeMini 状态色调（P1-6）', () => {
     await waitFor(() => {
       const mini = container.querySelector(RUNTIME_MINI)
       expect(mini).toHaveAttribute('data-tone', 'danger')
-      expect(mini?.textContent).toContain('degraded')
+      expect(mini?.textContent).toContain('Herdr 状态异常')
     })
   })
 })

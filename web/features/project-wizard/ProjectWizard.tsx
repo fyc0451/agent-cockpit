@@ -459,7 +459,7 @@ export function ProjectWizard({
                       kind="degraded"
                       banner
                       title="部分数据源不可用"
-                      description="registry 匹配通道异常，目录的登记状态未知（不展示结论标记）。"
+                      description="暂时无法确认目录是否已添加；可继续浏览和选择目录，稍后重试确认。"
                     />
                   ) : null}
                   <ul className="list">
@@ -610,7 +610,7 @@ function ProbeStep({
     return (
       <section className="panel">
         <h2 className="panel-title">
-          <Tag tone="success">登记成功</Tag>
+          <Tag tone="success">添加成功</Tag>
         </h2>
         <div className="kv-grid">
           <span className="kv-key">名称</span>
@@ -637,13 +637,13 @@ function ProbeStep({
   const submitReason = degraded
     ? '探测结果不完整（需一次完整识别）'
     : !writeCap.available
-      ? (writeCap.reason ?? '项目注册写操作未开放')
+      ? (writeCap.reason ?? '暂时无法添加项目，请稍后重试')
       : !nameOk
         ? '请填写项目名称'
         : !slugOk
           ? '标识符格式无效'
           : state.submitting
-            ? '登记在途，请稍候'
+            ? '正在添加，请稍候'
             : null
   const canSubmit = (sub === 'NEW_GIT' || sub === 'PLAIN_DIR') && submitReason == null
 
@@ -656,7 +656,7 @@ function ProbeStep({
           kind="degraded"
           banner
           title="部分数据源不可用"
-          description="registry 匹配通道异常，匹配结论不展示；请稍后重试识别。"
+          description="暂时无法确认该目录是否已添加；请稍后重试。"
         />
       ) : null}
       {sub === 'NEW_GIT' ? <Tag tone="success">新 Git 项目</Tag> : null}
@@ -735,7 +735,7 @@ function ProbeStep({
                 title={submitReason ?? undefined}
                 onClick={onSubmit}
               >
-                {state.submitting ? '登记中…' : '确认添加'}
+                {state.submitting ? '添加中…' : '确认添加'}
               </Button>
               <Button variant="ghost" onClick={onBack}>
                 返回选择目录

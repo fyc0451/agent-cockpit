@@ -168,7 +168,7 @@ function RuntimeData({ wb }: { wb: LegacyWorkbench }) {
           kind="degraded"
           banner
           title="运行时数据源不可用"
-          description="Herdr 快照不可用，会话列表已降级为空（非真实为空）。"
+          description="运行状态暂不可用，无法确认是否有会话；这不影响工作空间、文件和终端。"
         />
       ) : null}
       <section className="panel">

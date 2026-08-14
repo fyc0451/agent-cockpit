@@ -63,7 +63,7 @@ test('E1 键盘整轮登记：空态 CTA → root → 目录 → 识别 → 改 
   const submit = dialog.getByRole('button', { name: '确认添加' })
   await submit.focus()
   await page.keyboard.press('Enter')
-  await expect(dialog.getByText('登记成功')).toBeVisible()
+  await expect(dialog.getByText('添加成功')).toBeVisible()
   await expect(dialog.getByRole('button', { name: '继续创建工作空间' })).toBeVisible()
   expectGatesClean(g)
 })
@@ -201,7 +201,7 @@ test('E6 axe：列表 empty、向导三步、成功卡片无 serious/critical', 
   await expect(dialog.getByText('新 Git 项目')).toBeVisible()
   expect(clean((await run()).violations)).toEqual([]) // 识别结果
   await dialog.getByRole('button', { name: '确认添加' }).click()
-  await expect(dialog.getByText('登记成功')).toBeVisible()
+  await expect(dialog.getByText('添加成功')).toBeVisible()
   expect(clean((await run()).violations)).toEqual([]) // 成功卡片
   expectGatesClean(g)
 })

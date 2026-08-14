@@ -359,9 +359,9 @@ test('TERM-003 live journey: create, input, output, fullscreen, resize, reload/r
     const submit = projectDialog.getByRole('button', { name: '确认添加' })
     await expect(submit, 'register submit must become enabled after probe').toBeEnabled()
     await submit.click()
-    await expect(projectDialog.getByText('登记成功')).toBeVisible({ timeout: 15_000 })
+    await expect(projectDialog.getByText('添加成功')).toBeVisible({ timeout: 15_000 })
     const backToList = projectDialog.getByRole('button', { name: '返回列表' })
-    await expect(backToList, '登记成功 must offer 返回列表').toBeVisible()
+    await expect(backToList, '添加成功 must offer 返回列表').toBeVisible()
     await backToList.click()
     await expect(projectDialog, 'add-project dialog must close before list click').toHaveCount(0)
 

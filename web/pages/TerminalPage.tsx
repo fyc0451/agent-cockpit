@@ -137,7 +137,7 @@ function UnavailableBody({ project, workspace }: { project: Project; workspace: 
         kind="disconnected"
         banner
         title="终端未接通"
-        description={ptyCap.reason ?? '服务端未声明该工作空间的终端能力，请稍后重试或联系管理员。'}
+        description={ptyCap.reason ?? '该工作空间暂时不能打开终端，请稍后重试或联系管理员。'}
         docsRoute={ptyCap.docsRoute}
       />
       <div ref={containerRef} className="terminal-surface" data-testid="terminal-surface" />

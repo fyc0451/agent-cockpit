@@ -51,6 +51,8 @@ def test_fresh_install_docs_order_next_before_legacy() -> None:
             assert label in document
 
     assert readme.index("Cockpit Next 2.0") < readme.index("Legacy 0.3.x")
+    assert "~/.config/agent-cockpit-next/cockpit.token" in readme
+    assert "不要使用下文旧版的 `COCKPIT_TOKEN`" in readme
     for document in (readme, next_doc):
         assert "origin/next" in document
         assert "reviewed" in document

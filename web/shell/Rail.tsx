@@ -110,11 +110,11 @@ function RuntimeMini() {
     line1 = 'Herdr 检查中…'
   } else if (q.isError) {
     tone = 'danger'
-    line1 = 'Herdr degraded'
+    line1 = 'Herdr 状态异常'
     line2 = q.error instanceof ApiError ? q.error.message : '状态查询失败'
   } else if (available === false) {
     tone = 'danger'
-    line1 = 'Herdr degraded'
+    line1 = 'Herdr 状态异常'
     line2 = '本地 Herdr 二进制不可用'
   } else {
     tone = 'success'

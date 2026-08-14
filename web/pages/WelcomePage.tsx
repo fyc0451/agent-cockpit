@@ -69,7 +69,7 @@ export function WelcomePage() {
         <StatusState
           kind="degraded"
           banner
-          title="Overview 数据不可用"
+          title="项目概览暂不可用"
           description="项目聚合数据暂时无法加载，不影响初始设置。"
         />
       ) : null}

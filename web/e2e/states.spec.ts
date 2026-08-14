@@ -66,7 +66,7 @@ test('partial-degraded：legacy attention 失败 → degraded，无 empty（负�
   })
   await page.goto('/#/overview')
   await expect(page.locator('[data-state="degraded"]').first()).toBeVisible({ timeout: 10_000 })
-  await expect(page.getByText('Attention 摘要不可用')).toBeVisible()
+  await expect(page.getByText('待办摘要暂不可用')).toBeVisible()
   await expect(page.locator('[data-state="empty"]')).toHaveCount(0)
   expectGatesClean(g)
 })
