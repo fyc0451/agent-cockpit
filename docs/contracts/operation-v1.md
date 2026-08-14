@@ -102,6 +102,13 @@ message bodies, or paths. Replaying the same receipt ID with
 the same canonical identity returns the stored result without another
 mutation; a different identity is `idempotency_conflict`.
 
+Receipt type and outcome are a closed compatibility pair. `provider_outcome`
+accepts only `succeeded` or `failed`; `provider_response_lost` accepts only
+`outcome_unknown`; `provider_reconciliation` accepts only `not_executed`. An
+execution has one outcome receipt,
+except that reconciliation of `outcome_unknown` to `not_executed` preserves the
+unknown receipt and appends exactly one terminal reconciliation receipt.
+
 A response-lost or otherwise unknown outcome is recorded as
 `outcome_unknown`, preserves the original execution ID, and moves the operation
 to `needs_attention`. It is never converted to confirmed failure and cannot
@@ -115,6 +122,11 @@ execution ID and releases its active slot. Already dispatched siblings remain
 eligible to append late receipts; their evidence cannot move the operation out
 of `needs_attention`. Normal parallel successes keep the operation `running`
 until the caller performs an explicit CAS transition to `succeeded`.
+
+Every replay and mutation validates the complete persisted projection for its
+operation inside the same write transaction before comparing replay identity or
+writing any row. Persisted scalar, timestamp, receipt-pair, lifecycle, or
+cross-row contradictions fail closed as `store_corrupt` with no mutation.
 
 ## Read projection
 

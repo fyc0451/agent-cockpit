@@ -59,6 +59,14 @@ def _error(code: str):
     return pytest.raises(store_module.OperationError, match=f"^{code}$")
 
 
+def _database_dump(path: Path) -> str:
+    connection = sqlite3.connect(path)
+    try:
+        return "\n".join(connection.iterdump())
+    finally:
+        connection.close()
+
+
 def test_initialize_is_private_strict_and_read_does_not_create(tmp_path: Path):
     root = tmp_path / "private"
     path = root / "operation.sqlite3"
@@ -383,6 +391,148 @@ def test_create_idempotency_replays_canonical_request_and_conflicts(store):
         connection.close()
 
 
+def test_corrupt_create_replay_validates_before_digest_comparison(store):
+    first = _create(store)
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            "UPDATE operations SET request_digest='not-a-digest' WHERE operation_id=?",
+            (first.operation_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with _error("store_corrupt"):
+        _create(store)
+    with _error("store_corrupt"):
+        _create(store, request={"different": True})
+
+
+def test_corrupt_transition_validates_before_any_mutation(store):
+    operation_id = _create(store).operation_id
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            "UPDATE operations SET created_at='not-a-timestamp' WHERE operation_id=?",
+            (operation_id,),
+        )
+        connection.commit()
+        before = connection.execute(
+            "SELECT status,revision,created_at FROM operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    with _error("store_corrupt"):
+        store.transition(operation_id, expected_operation_revision=1, status="running")
+    connection = sqlite3.connect(store.path)
+    try:
+        assert connection.execute(
+            "SELECT status,revision,created_at FROM operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone() == before
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "path_name",
+    [
+        "transition", "prepare", "dispatch", "outcome", "reconcile",
+        "outcome-replay", "reconcile-replay",
+    ],
+)
+def test_every_mutation_and_receipt_replay_validates_before_work(
+    tmp_path: Path, path_name: str,
+):
+    store = store_module.initialize(tmp_path / "operation.sqlite3")
+    operation_id = _create(store).operation_id
+    prepared = None
+    if path_name != "transition":
+        store.transition(operation_id, expected_operation_revision=1, status="running")
+    if path_name not in {"transition", "prepare"}:
+        prepared = store.prepare_attempt(
+            operation_id, "allocate", expected_operation_revision=2,
+            expected_step_revision=1, mode="execute", provider_kind="runtime",
+        )
+    if path_name not in {"transition", "prepare", "dispatch"}:
+        assert prepared is not None
+        store.dispatch_attempt(
+            operation_id, prepared.step_execution_id, expected_operation_revision=3,
+        )
+    if path_name in {"reconcile", "reconcile-replay"}:
+        assert prepared is not None
+        store.record_attempt_outcome(
+            operation_id, prepared.step_execution_id,
+            expected_operation_revision=4, expected_step_revision=2,
+            receipt_id="receipt_unknown", receipt_type="provider_response_lost",
+            outcome="outcome_unknown", evidence_kind="opaque_digest",
+            evidence_digest=_sha("unknown"),
+        )
+        if path_name == "reconcile-replay":
+            store.record_not_executed(
+                operation_id, prepared.step_execution_id,
+                expected_operation_revision=5, expected_step_revision=3,
+                receipt_id="receipt_not_executed",
+                evidence_digest=_sha("not-executed"),
+            )
+    elif path_name == "outcome-replay":
+        assert prepared is not None
+        store.record_attempt_outcome(
+            operation_id, prepared.step_execution_id,
+            expected_operation_revision=4, expected_step_revision=2,
+            receipt_id="receipt_succeeded", receipt_type="provider_outcome",
+            outcome="succeeded", evidence_kind="opaque_digest",
+            evidence_digest=_sha("succeeded"),
+        )
+
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            "UPDATE operations SET created_at='not-a-timestamp' WHERE operation_id=?",
+            (operation_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    before = _database_dump(store.path)
+
+    with _error("store_corrupt"):
+        if path_name == "transition":
+            store.transition(
+                operation_id, expected_operation_revision=1, status="running",
+            )
+        elif path_name == "prepare":
+            store.prepare_attempt(
+                operation_id, "allocate", expected_operation_revision=2,
+                expected_step_revision=1, mode="execute", provider_kind="runtime",
+            )
+        elif path_name == "dispatch":
+            assert prepared is not None
+            store.dispatch_attempt(
+                operation_id, prepared.step_execution_id,
+                expected_operation_revision=3,
+            )
+        elif path_name in {"outcome", "outcome-replay"}:
+            assert prepared is not None
+            store.record_attempt_outcome(
+                operation_id, prepared.step_execution_id,
+                expected_operation_revision=4, expected_step_revision=2,
+                receipt_id="receipt_succeeded", receipt_type="provider_outcome",
+                outcome="succeeded", evidence_kind="opaque_digest",
+                evidence_digest=_sha("succeeded"),
+            )
+        else:
+            assert prepared is not None
+            store.record_not_executed(
+                operation_id, prepared.step_execution_id,
+                expected_operation_revision=5, expected_step_revision=3,
+                receipt_id="receipt_not_executed",
+                evidence_digest=_sha("not-executed"),
+            )
+    assert _database_dump(store.path) == before
+
+
 def test_create_invalid_input_is_rejected_without_partial_rows(store):
     with _error("invalid_argument"):
         _create(store, key="bad key")
@@ -501,12 +651,22 @@ def test_revision_and_attempt_number_exhaustion_are_stable_zero_change(store):
             "UPDATE operation_steps SET revision=1 WHERE operation_id=? AND step_id='allocate'",
             (operation_id,),
         )
+        timestamp = connection.execute(
+            "SELECT updated_at FROM operations WHERE operation_id=?", (operation_id,),
+        ).fetchone()[0]
         connection.execute(
             "INSERT INTO operation_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 operation_id, "allocate", maximum, "exec_max_attempt", "execute",
-                "failed", "runtime", None, "confirmed", "2026-08-14T00:00:00Z",
-                "2026-08-14T00:00:01Z",
+                "failed", "runtime", None, "not_dispatched", timestamp, timestamp,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO operation_receipts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "receipt_max_attempt", operation_id, "allocate", maximum,
+                "exec_max_attempt", "provider_reconciliation", "not_executed",
+                "opaque_digest", None, _sha("max-attempt"), None, timestamp,
             ),
         )
         connection.commit()
@@ -1069,6 +1229,33 @@ def test_receipt_type_private_content_and_composite_attempt_identity_are_strict(
         connection.close()
 
 
+def test_receipt_type_and_outcome_pairs_are_strict_zero_change(store):
+    operation_id = _create(store).operation_id
+    store.transition(operation_id, expected_operation_revision=1, status="running")
+    prepared = store.prepare_attempt(
+        operation_id, "allocate", expected_operation_revision=2,
+        expected_step_revision=1, mode="execute", provider_kind="runtime",
+    )
+    store.dispatch_attempt(
+        operation_id, prepared.step_execution_id, expected_operation_revision=3,
+    )
+    before = store.get_operation(operation_id)
+    for receipt_type, outcome in (
+        ("provider_response_lost", "succeeded"),
+        ("provider_outcome", "outcome_unknown"),
+        ("provider_reconciliation", "succeeded"),
+    ):
+        with _error("invalid_argument"):
+            store.record_attempt_outcome(
+                operation_id, prepared.step_execution_id,
+                expected_operation_revision=4, expected_step_revision=2,
+                receipt_id="receipt_bad_pair", receipt_type=receipt_type,
+                outcome=outcome, evidence_kind="opaque_digest",
+                evidence_digest=_sha("bad-pair"),
+            )
+        assert store.get_operation(operation_id) == before
+
+
 def _client(provider):
     app = FastAPI()
     api.install(app, api.ApiService(provider))
@@ -1141,6 +1328,27 @@ def test_api_schema_drift_is_stable_503(tmp_path: Path):
     assert response.json()["error"]["code"] == "schema_fingerprint_mismatch"
     assert "unknown_table" not in response.text
     assert str(path) not in response.text
+
+
+def test_invalid_migration_applied_at_is_schema_corrupt(tmp_path: Path):
+    path = tmp_path / "operation.sqlite3"
+    store_module.initialize(path)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("DROP TRIGGER schema_migrations_no_update")
+        connection.execute(
+            "UPDATE schema_migrations SET applied_at='not-a-timestamp'"
+        )
+        connection.execute("""
+            CREATE TRIGGER schema_migrations_no_update
+            BEFORE UPDATE ON schema_migrations
+            BEGIN SELECT RAISE(ABORT, 'append_only'); END
+        """)
+        connection.commit()
+    finally:
+        connection.close()
+    with _error("store_corrupt"):
+        store_module.open_existing(path)
 
 
 @pytest.mark.parametrize(
@@ -1236,6 +1444,76 @@ def test_materialized_legal_scalar_contradictions_fail_closed(
         connection.commit()
     finally:
         connection.close()
+    with _error("store_corrupt"):
+        store.get_operation(operation_id)
+    client, _ = _client(lambda: store)
+    response = client.get(f"/api/operations/{operation_id}")
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "store_corrupt"
+
+
+@pytest.mark.parametrize(
+    "corruption", ["compensated-pending", "operation-time", "duplicate-terminal-receipt"],
+)
+def test_materialized_terminal_and_time_invariants_fail_closed(
+    tmp_path: Path, corruption: str,
+):
+    path = tmp_path / "operation.sqlite3"
+    store = store_module.initialize(path)
+    operation_id = _create(store).operation_id
+    if corruption == "compensated-pending":
+        connection = sqlite3.connect(path)
+        try:
+            now = "2026-08-14T00:00:01Z"
+            connection.execute(
+                "UPDATE operations SET status='compensated',updated_at=?,terminal_at=? "
+                "WHERE operation_id=?",
+                (now, now, operation_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    else:
+        store.transition(operation_id, expected_operation_revision=1, status="running")
+        prepared = store.prepare_attempt(
+            operation_id, "allocate", expected_operation_revision=2,
+            expected_step_revision=1, mode="execute", provider_kind="runtime",
+        )
+        store.dispatch_attempt(
+            operation_id, prepared.step_execution_id, expected_operation_revision=3,
+        )
+        store.record_attempt_outcome(
+            operation_id, prepared.step_execution_id,
+            expected_operation_revision=4, expected_step_revision=2,
+            receipt_id="receipt_success_once", receipt_type="provider_outcome",
+            outcome="succeeded", evidence_kind="opaque_digest",
+            evidence_digest=_sha("success-once"),
+        )
+        connection = sqlite3.connect(path)
+        try:
+            if corruption == "operation-time":
+                connection.execute(
+                    "UPDATE operations SET updated_at='2000-01-01T00:00:00Z' "
+                    "WHERE operation_id=?",
+                    (operation_id,),
+                )
+            else:
+                attempt = connection.execute(
+                    "SELECT step_id,attempt_no,step_execution_id,finished_at "
+                    "FROM operation_attempts WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+                connection.execute(
+                    "INSERT INTO operation_receipts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "receipt_success_twice", operation_id, attempt[0], attempt[1],
+                        attempt[2], "provider_outcome", "succeeded",
+                        "opaque_digest", None, _sha("success-twice"), None, attempt[3],
+                    ),
+                )
+            connection.commit()
+        finally:
+            connection.close()
     with _error("store_corrupt"):
         store.get_operation(operation_id)
     client, _ = _client(lambda: store)

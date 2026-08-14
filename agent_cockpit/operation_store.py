@@ -88,6 +88,12 @@ _EVIDENCE_KINDS = frozenset({"opaque_digest", "provider_execution", "provider_qu
 _RECEIPT_OUTCOMES = frozenset({
     "succeeded", "failed", "outcome_unknown", "not_executed",
 })
+_RECEIPT_PAIRS = frozenset({
+    ("provider_outcome", "succeeded"),
+    ("provider_outcome", "failed"),
+    ("provider_response_lost", "outcome_unknown"),
+    ("provider_reconciliation", "not_executed"),
+})
 _SQLITE_INT_MAX = 2**63 - 1
 
 
@@ -536,11 +542,15 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
             _fail("future_schema")
         if _schema_objects(connection) != _EXPECTED_SCHEMA_OBJECTS:
             _fail("schema_fingerprint_mismatch")
-        receipts = [tuple(row) for row in connection.execute(
-            "SELECT migration_id,schema_version,schema_digest FROM schema_migrations"
-        ).fetchall()]
-        if receipts != [(MIGRATION_ID, SCHEMA_VERSION, SCHEMA_DIGEST)]:
+        receipts = connection.execute(
+            "SELECT migration_id,schema_version,schema_digest,applied_at "
+            "FROM schema_migrations"
+        ).fetchall()
+        if len(receipts) != 1 or tuple(receipts[0][:3]) != (
+            MIGRATION_ID, SCHEMA_VERSION, SCHEMA_DIGEST,
+        ):
             _fail("schema_fingerprint_mismatch")
+        _stored_timestamp(receipts[0]["applied_at"])
         if connection.execute("PRAGMA foreign_key_check").fetchall():
             _fail("store_corrupt")
         quick = connection.execute("PRAGMA quick_check").fetchone()
@@ -641,6 +651,7 @@ class OperationStore:
                 (scope, idempotency_key),
             ).fetchone()
             if existing is not None:
+                _materialized_operation(connection, str(existing["operation_id"]))
                 if existing["request_digest"] != request_digest:
                     _fail("idempotency_conflict")
                 operation_id = str(existing["operation_id"])
@@ -892,6 +903,8 @@ class OperationStore:
             _fail("invalid_argument")
         if receipt_type not in _RECEIPT_TYPES or evidence_kind not in _EVIDENCE_KINDS:
             _fail("invalid_argument")
+        if (receipt_type, outcome) not in _RECEIPT_PAIRS:
+            _fail("invalid_argument")
         if (outcome == "failed") != (failure_code is not None):
             _fail("invalid_argument")
         receipt_identity = (
@@ -905,6 +918,7 @@ class OperationStore:
                 "WHERE r.receipt_id=?", (receipt_id,),
             ).fetchone()
             if existing is not None:
+                _materialized_operation(connection, str(existing["operation_id"]))
                 actual = (
                     existing["receipt_id"], existing["operation_id"],
                     existing["step_execution_id"], existing["receipt_type"],
@@ -1070,6 +1084,7 @@ class OperationStore:
                 "SELECT * FROM operation_receipts WHERE receipt_id=?", (receipt_id,),
             ).fetchone()
             if existing is not None:
+                _materialized_operation(connection, str(existing["operation_id"]))
                 actual = (
                     existing["receipt_id"], existing["operation_id"],
                     existing["step_execution_id"], existing["receipt_type"],
@@ -1139,14 +1154,27 @@ class OperationStore:
 def _operation_for_update(
     connection: sqlite3.Connection, operation_id: str, expected_revision: int,
 ) -> sqlite3.Row:
-    row = connection.execute(
-        "SELECT * FROM operations WHERE operation_id=?", (operation_id,),
-    ).fetchone()
-    if row is None:
-        _fail("operation_not_found")
+    row = _materialized_operation(connection, operation_id)
     if int(row["revision"]) != expected_revision:
         _fail("revision_conflict")
     return row
+
+
+def _materialized_operation(
+    connection: sqlite3.Connection, operation_id: str,
+) -> sqlite3.Row:
+    try:
+        row = connection.execute(
+            "SELECT * FROM operations WHERE operation_id=?", (operation_id,),
+        ).fetchone()
+        if row is None:
+            _fail("operation_not_found")
+        _projection(connection, row)
+        return row
+    except OperationError:
+        raise
+    except sqlite3.DatabaseError:
+        _fail("store_corrupt")
 
 
 def _bump_operation(
@@ -1447,6 +1475,8 @@ def _validate_materialized_projection(
         attempt_status = _stored_opaque(row["status"])
         if mode not in _ATTEMPT_MODES or attempt_status not in _ATTEMPT_STATUSES:
             _fail("store_corrupt")
+        if mode == "compensate" and step_by_id[step_id]["compensation_kind"] is None:
+            _fail("store_corrupt")
         _stored_opaque(row["provider_kind"])
         _stored_opaque(row["provider_operation_ref"], nullable=True)
         failure = _stored_opaque(row["failure_code"], nullable=True)
@@ -1502,6 +1532,12 @@ def _validate_materialized_projection(
             if step["status"] != "pending":
                 _fail("store_corrupt")
             continue
+        compensation_seen = False
+        for item in values:
+            if item["mode"] == "compensate":
+                compensation_seen = True
+            elif compensation_seen:
+                _fail("store_corrupt")
         latest = values[-1]
         latest_status = str(latest["status"])
         latest_mode = str(latest["mode"])
@@ -1520,6 +1556,9 @@ def _validate_materialized_projection(
 
     receipt_ids: set[str] = set()
     outcomes_by_execution: dict[str, set[str]] = {}
+    receipt_count_by_execution: dict[str, int] = {}
+    receipt_times_by_execution: dict[str, list[datetime]] = {}
+    terminal_receipts_by_execution: dict[str, int] = {}
     for row in receipts:
         if row["operation_id"] != operation_id:
             _fail("store_corrupt")
@@ -1532,12 +1571,22 @@ def _validate_materialized_projection(
         execution_id = _stored_opaque(row["step_execution_id"])
         if (step_id, attempt_no, execution_id) not in attempt_by_identity:
             _fail("store_corrupt")
-        if _stored_opaque(row["receipt_type"]) not in _RECEIPT_TYPES:
-            _fail("store_corrupt")
         receipt_outcome = _stored_opaque(row["outcome"])
         if receipt_outcome not in _RECEIPT_OUTCOMES:
             _fail("store_corrupt")
+        receipt_type = _stored_opaque(row["receipt_type"])
+        if receipt_type not in _RECEIPT_TYPES:
+            _fail("store_corrupt")
+        if (receipt_type, receipt_outcome) not in _RECEIPT_PAIRS:
+            _fail("store_corrupt")
         outcomes_by_execution.setdefault(execution_id, set()).add(receipt_outcome)
+        receipt_count_by_execution[execution_id] = (
+            receipt_count_by_execution.get(execution_id, 0) + 1
+        )
+        if receipt_outcome in {"succeeded", "failed", "not_executed"}:
+            terminal_receipts_by_execution[execution_id] = (
+                terminal_receipts_by_execution.get(execution_id, 0) + 1
+            )
         if _stored_opaque(row["evidence_kind"]) not in _EVIDENCE_KINDS:
             _fail("store_corrupt")
         _stored_opaque(row["evidence_ref"], nullable=True)
@@ -1548,19 +1597,35 @@ def _validate_materialized_projection(
         attempt = attempt_by_identity[(step_id, attempt_no, execution_id)]
         started = _parsed_timestamp(attempt["started_at"])
         assert recorded is not None and started is not None
-        if recorded < started:
+        if recorded < started or recorded > updated_at:
             _fail("store_corrupt")
+        receipt_times_by_execution.setdefault(execution_id, []).append(recorded)
 
     for row in attempts:
         execution_id = str(row["step_execution_id"])
         attempt_status = str(row["status"])
         failure = row["failure_code"]
         outcomes = outcomes_by_execution.get(execution_id, set())
+        started = _parsed_timestamp(row["started_at"])
+        finished = _parsed_timestamp(row["finished_at"], nullable=True)
+        assert started is not None
+        if started < created_at or started > updated_at:
+            _fail("store_corrupt")
+        if finished is not None and finished > updated_at:
+            _fail("store_corrupt")
+        receipt_times = receipt_times_by_execution.get(execution_id, [])
+        if finished is not None and (not receipt_times or finished != max(receipt_times)):
+            _fail("store_corrupt")
         if attempt_status in {"prepared", "dispatched"} and outcomes:
             _fail("store_corrupt")
-        if attempt_status == "succeeded" and outcomes != {"succeeded"}:
+        receipt_count = receipt_count_by_execution.get(execution_id, 0)
+        if attempt_status == "succeeded" and (
+            outcomes != {"succeeded"} or receipt_count != 1
+        ):
             _fail("store_corrupt")
-        if attempt_status == "outcome_unknown" and outcomes != {"outcome_unknown"}:
+        if attempt_status == "outcome_unknown" and (
+            outcomes != {"outcome_unknown"} or receipt_count != 1
+        ):
             _fail("store_corrupt")
         if attempt_status == "failed":
             expected = (
@@ -1570,10 +1635,17 @@ def _validate_materialized_projection(
                 if failure == "not_executed"
                 else {"failed"}
             )
-            if outcomes != expected:
+            expected_count = 2 if failure == "not_executed" else 1
+            if outcomes != expected or receipt_count != expected_count:
                 _fail("store_corrupt")
+        if terminal_receipts_by_execution.get(execution_id, 0) > 1:
+            _fail("store_corrupt")
     if status == "succeeded" and any(
         step["status"] != "succeeded" for step in steps
+    ):
+        _fail("store_corrupt")
+    if status == "compensated" and any(
+        step["status"] not in {"succeeded", "compensated"} for step in steps
     ):
         _fail("store_corrupt")
 
