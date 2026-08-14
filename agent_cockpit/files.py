@@ -24,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from . import runtime_paths
+from . import next_profile, runtime_paths
 
 # 最大可编辑文件大小(防止加载巨大文件拖垮前端)
 MAX_EDIT_SIZE = 2 * 1024 * 1024  # 2MB
@@ -223,6 +223,12 @@ def _read_custom_roots(target: Path | None = None) -> list[Path]:
     return roots
 
 
+def _configured_project_roots() -> list[Path]:
+    if not next_profile.enabled() or next_profile.is_ephemeral():
+        return []
+    return [next_profile.configured_project_root()]
+
+
 def _write_custom_roots(roots: list[Path]) -> None:
     target = _custom_roots_file()
     runtime_paths.validate_store("file_roots")  # R3-B:symlink 逃逸 fail-closed
@@ -251,7 +257,7 @@ def allowed_root_groups() -> dict[str, list[str]]:
     groups = {
         "system": _system_roots(),
         "projects": _registered_project_roots(),
-        "custom": _read_custom_roots(),
+        "custom": [*_configured_project_roots(), *_read_custom_roots()],
     }
     seen: set[Path] = set()
     result: dict[str, list[str]] = {}

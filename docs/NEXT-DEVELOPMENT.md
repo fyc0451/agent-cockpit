@@ -13,6 +13,9 @@ deployed `0.3.4` service remains frozen on `127.0.0.1:8790`.
 - Runtime roots: `~/.local/share/agent-cockpit-next-data`,
   `~/.config/agent-cockpit-next`, `~/.local/state/agent-cockpit-next`, and
   `~/.local/share/agent-cockpit-next-uploads`.
+- Project discovery root: the non-secret `COCKPIT_PROJECT_ROOT` value in
+  `.env.next` (the example uses `${HOME}/github`). Fixed Next exposes only this
+  root in the Project wizard; file browsing keeps its existing root groups.
 - Development uses a source process. It does not install a systemd unit. A
   future isolated unit may only be named `agent-cockpit-next.service`.
 - Upgrade V2, B0, and Herdr socket state are disabled in the N0 profile.
@@ -46,9 +49,19 @@ Create an independent virtual environment and validate the profile:
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
 cp .env.next.example .env.next
+# Edit COCKPIT_PROJECT_ROOT to the concrete directory containing your Git repositories.
 .venv/bin/python scripts/next_dev.py check --env-file .env.next
 .venv/bin/python -m pytest -q tests/test_next_isolation.py
 ```
+
+`COCKPIT_PROJECT_ROOT` must be an existing canonical directory narrower than
+the whole Home directory. Do not set it to `/`, `/home`, or `${HOME}`. It is a
+container for user repositories and is independent of the Cockpit checkout;
+for example, Cockpit may be installed under `/home/alice/agent-cockpit-next`
+while projects live under `/mnt/data/projects`. The browser receives only an
+opaque `root_id` and a relative locator; it never submits this absolute path.
+Missing or unsafe configuration fails the launcher check with a stable
+`project_root_*` error instead of falling back to Home or `/`.
 
 Start the source development service only after the checks pass:
 

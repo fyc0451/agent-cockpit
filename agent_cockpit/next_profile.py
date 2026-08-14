@@ -10,6 +10,7 @@ from typing import Mapping
 
 
 PROFILE_ENV = "COCKPIT_NEXT_PROFILE"
+PROJECT_ROOT_ENV = "COCKPIT_PROJECT_ROOT"
 FIXED_PROFILE = "1"
 EPHEMERAL_PROFILE = "ephemeral"
 PROJECT_MARKER = "agent-cockpit-next"
@@ -366,6 +367,59 @@ def _required(name: str, environment: Mapping[str, str] | None = None) -> str:
     return value
 
 
+def configured_project_root(
+    environment: Mapping[str, str] | None = None, *, home: Path | None = None,
+) -> Path:
+    """Return the one explicit, non-sensitive root exposed to fixed discovery."""
+    env = os.environ if environment is None else environment
+    raw = _required(PROJECT_ROOT_ENV, env)
+    lexical = Path(raw)
+    if (
+        not lexical.is_absolute()
+        or raw != str(lexical)
+        or ".." in lexical.parts
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+    ):
+        raise NextProfileError("project_root_invalid")
+    try:
+        resolved = lexical.resolve(strict=True)
+        info = lexical.lstat()
+    except FileNotFoundError:
+        raise NextProfileError("project_root_missing") from None
+    except (OSError, RuntimeError, ValueError):
+        raise NextProfileError("project_root_invalid") from None
+    if (
+        resolved != lexical
+        or not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+    ):
+        raise NextProfileError("project_root_invalid")
+
+    home_root = (Path.home() if home is None else home).resolve()
+    if resolved in {Path("/"), home_root, home_root.parent.resolve()}:
+        raise NextProfileError("project_root_unsafe")
+    blocked = [
+        Path("/etc"), Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
+        home_root / ".ssh", home_root / ".gnupg", home_root / ".agent-mail",
+        home_root / ".config" / "agent-cockpit",
+    ]
+    blocked.extend(
+        Path(value).resolve(strict=False)
+        for name in (
+            "COCKPIT_DATA_DIR", "COCKPIT_CONFIG_DIR", "COCKPIT_STATE_DIR",
+            "COCKPIT_UPLOADS_DIR",
+        )
+        if (value := env.get(name))
+    )
+    for root in blocked:
+        try:
+            resolved.relative_to(root.resolve(strict=False))
+        except ValueError:
+            continue
+        raise NextProfileError("project_root_unsafe")
+    return resolved
+
+
 def project(environment: Mapping[str, str] | None = None) -> str | None:
     if not enabled(environment):
         return None
@@ -488,6 +542,7 @@ def _validate_fixed_server_environment(
     for name, wanted in expected.items():
         if env.get(name) != wanted:
             raise NextProfileError(f"next_profile_invalid:{name}")
+    configured_project_root(env)
     project(env)
     session(env)
 

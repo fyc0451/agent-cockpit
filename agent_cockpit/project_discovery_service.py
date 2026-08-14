@@ -74,7 +74,10 @@ class FilesRootReader:
     """Read the existing allowlist without mutating custom-root state."""
 
     def local_roots(self) -> tuple[Path, ...]:
-        from . import files
+        from . import files, next_profile
+
+        if next_profile.enabled() and not next_profile.is_ephemeral():
+            return (next_profile.configured_project_root(),)
 
         groups = files.allowed_root_groups()
         return tuple(Path(value) for values in groups.values() for value in values)

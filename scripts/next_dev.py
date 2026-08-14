@@ -17,6 +17,7 @@ from typing import Mapping
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_cockpit.instance_lock import LOCK_FD_ENV, InstanceLock, LockError
+from agent_cockpit import next_profile
 
 
 BASE_SHA = "169d0af7751b568e813d2cbca285a9f147e86001"
@@ -56,6 +57,7 @@ def expected(home: Path | None = None) -> dict[str, str]:
     return {
         "COCKPIT_NEXT_PROFILE": "1",
         "COCKPIT_NEXT_WORKTREE": str(worktree),
+        "COCKPIT_PROJECT_ROOT": str(root / "github"),
         "COCKPIT_HOST": "127.0.0.1",
         "COCKPIT_PORT": "18790",
         "COCKPIT_DATA_DIR": str(data),
@@ -146,6 +148,10 @@ def validate(
     check_git: bool = True,
 ) -> dict[str, str]:
     expected_values = expected(home)
+    if next_profile.PROJECT_ROOT_ENV not in values:
+        raise IsolationError(
+            f"next_profile_missing:{next_profile.PROJECT_ROOT_ENV}"
+        )
     if set(values) != set(expected_values):
         raise IsolationError("env_keys_mismatch")
     if values["COCKPIT_PORT"] == PRODUCTION_PORT:
@@ -172,8 +178,15 @@ def validate(
             if root == protected or _inside(root, protected) or _inside(protected, root):
                 raise IsolationError("production_path")
     for key, wanted in expected_values.items():
+        if key == next_profile.PROJECT_ROOT_ENV:
+            continue
         if values.get(key) != wanted:
             raise IsolationError(f"value_mismatch:{key}")
+
+    try:
+        next_profile.configured_project_root(values, home=home_path)
+    except next_profile.NextProfileError as exc:
+        raise IsolationError(str(exc)) from None
 
     selected_repo = repo.resolve()
     if selected_repo != Path(values["COCKPIT_NEXT_WORKTREE"]):

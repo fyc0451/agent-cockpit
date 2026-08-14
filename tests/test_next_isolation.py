@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_cockpit import db, herdr_client, next_profile
+from agent_cockpit import (
+    db, files, herdr_client, next_profile, project_discovery_service,
+)
 import server
 
 
@@ -35,6 +37,88 @@ def test_example_is_complete_and_valid_for_declared_home(tmp_path: Path) -> None
         "agent-cockpit-next\n", encoding="ascii",
     )
     assert gate.validate(values, repo=repo, home=tmp_path, check_git=False) == values
+    assert values["COCKPIT_PROJECT_ROOT"] == str(tmp_path / "github")
+
+
+def test_project_root_configuration_reuses_custom_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "code"
+    root.mkdir()
+    monkeypatch.setenv("COCKPIT_NEXT_PROFILE", "1")
+    monkeypatch.setenv("COCKPIT_PROJECT_ROOT", str(root))
+
+    groups = files.allowed_root_groups()
+
+    assert groups["custom"] == [str(root)]
+    assert project_discovery_service.FilesRootReader().local_roots() == (root,)
+    assert groups["system"]
+
+
+@pytest.mark.parametrize("profile", (None, "ephemeral"))
+def test_project_root_configuration_does_not_change_non_fixed_allowlist(
+    profile: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "code"
+    root.mkdir()
+    if profile is None:
+        monkeypatch.delenv("COCKPIT_NEXT_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("COCKPIT_NEXT_PROFILE", profile)
+    monkeypatch.setenv("COCKPIT_PROJECT_ROOT", str(root))
+
+    assert str(root) not in files.allowed_root_groups()["custom"]
+
+
+def test_project_root_is_independent_of_cockpit_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = module()
+    home = tmp_path / "home"
+    checkout = home / "github" / "agent-cockpit-next"
+    project_root = tmp_path / "mounted-projects"
+    checkout.mkdir(parents=True)
+    project_root.mkdir()
+    (checkout / ".agent-memory-project").write_text(
+        "agent-cockpit-next\n", encoding="ascii",
+    )
+    values = gate.expected(home)
+    values["COCKPIT_PROJECT_ROOT"] = str(project_root)
+
+    assert gate.validate(
+        values, repo=checkout, home=home, check_git=False,
+    ) == values
+    monkeypatch.setattr(
+        next_profile.Path, "home", classmethod(lambda _cls: home),
+    )
+    next_profile.validate_server_environment(checkout, values)
+
+
+def test_project_root_configuration_fails_closed_for_invalid_values(
+    tmp_path: Path,
+) -> None:
+    gate = module()
+    repo = tmp_path / "code" / "agent-cockpit-next"
+    repo.mkdir(parents=True)
+    (repo / ".agent-memory-project").write_text(
+        "agent-cockpit-next\n", encoding="ascii",
+    )
+
+    cases = (
+        (str(tmp_path), "project_root_unsafe"),
+        (str(tmp_path / "missing"), "project_root_missing"),
+        (str(tmp_path / "plain.txt"), "project_root_invalid"),
+        ("relative/code", "project_root_invalid"),
+    )
+    (tmp_path / "plain.txt").write_text("not a directory\n", encoding="ascii")
+    for value, code in cases:
+        values = gate.expected(tmp_path)
+        values["COCKPIT_PROJECT_ROOT"] = value
+        with pytest.raises(gate.IsolationError, match=code):
+            gate.validate(values, repo=repo, home=tmp_path, check_git=False)
 
 
 @pytest.mark.parametrize(
@@ -64,6 +148,14 @@ def test_missing_and_unknown_env_keys_are_rejected() -> None:
     values = gate.expected()
     del values["COCKPIT_DATA_DIR"]
     with pytest.raises(gate.IsolationError, match="env_keys_mismatch"):
+        gate.validate(values, repo=ROOT, check_git=False)
+
+    values = gate.expected()
+    del values["COCKPIT_PROJECT_ROOT"]
+    with pytest.raises(
+        gate.IsolationError,
+        match="next_profile_missing:COCKPIT_PROJECT_ROOT",
+    ):
         gate.validate(values, repo=ROOT, check_git=False)
 
 
@@ -282,6 +374,7 @@ def test_start_execs_next_venv_with_sanitized_environment(
     environment = captured["env"]
     assert isinstance(environment, dict)
     assert environment["COCKPIT_PORT"] == "18790"
+    assert environment["COCKPIT_PROJECT_ROOT"] == str(tmp_path / "github")
     assert environment["VIRTUAL_ENV"] == str(ROOT / ".venv")
     assert environment["COCKPIT_NEXT_LOCK_FD"] == "42"
     assert environment["COCKPIT_TOKEN"] == "t" * 64

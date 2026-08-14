@@ -261,6 +261,37 @@ def test_git_subdirectory_remains_invalid_when_git_root_is_allowlisted(
     assert registry.calls == []
 
 
+def test_trusted_parent_root_probes_linked_worktree_without_weakening_failures(
+    tmp_path: Path,
+) -> None:
+    code_root = tmp_path / "code"
+    code_root.mkdir()
+    common_repo = code_root / "agent-cockpit"
+    head = _init_git_repo(common_repo)
+    linked = code_root / "agent-cockpit-next"
+    _git(common_repo, "worktree", "add", "--detach", str(linked), head)
+    (linked / "docs").mkdir()
+
+    narrow, narrow_root_id, _ = _service(linked)
+    with pytest.raises(DiscoveryError) as root_error:
+        narrow.discover(ProjectLocator("local", narrow_root_id, ""))
+    assert _code(root_error) == "root_forbidden"
+
+    with pytest.raises(DiscoveryError) as docs_error:
+        narrow.discover(ProjectLocator("local", narrow_root_id, "docs"))
+    assert _code(docs_error) == "invalid_locator"
+
+    service, root_id, registry = _service(code_root)
+    result = service.discover(
+        ProjectLocator("local", root_id, "agent-cockpit-next")
+    )
+
+    assert result.vcs.kind == "git"
+    assert result.vcs.head == head
+    assert result.locator.path == "agent-cockpit-next"
+    assert registry.calls[0][1] == str(linked)
+
+
 @pytest.mark.parametrize(
     "path",
     ["/absolute", "../escape", "a/../escape", "./repo", "a//b", "repo/", "a\\b", "bad\x00path"],
