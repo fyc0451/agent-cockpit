@@ -852,6 +852,27 @@
       "release_started_at": null,
       "user_acceptance_required": false,
       "user_acceptance_evidence": null
+    },
+    {
+      "id": "SEC-003-next-token-file",
+      "title": "Load Cockpit Next authentication from one private token file",
+      "status": "accepted",
+      "depends_on": ["RUNTIME-001-profile-lock", "SEC-001-loopback-origin", "TERM-003-web-live-journey"],
+      "scope": ["docs/NEXT-DEVELOPMENT.md", "scripts/next_dev.py", "tests/test_next_isolation.py"],
+      "acceptance": [
+        {"command": ".venv/bin/python -m pytest -q tests/test_next_isolation.py", "passed": true},
+        {"command": ".venv/bin/python -m pytest -q tests/test_security.py", "passed": true}
+      ],
+      "rollback": "Revert the optional token-file launcher commit and keep Cockpit Next in loopback-only no-token mode",
+      "production_impact": "none",
+      "owner_instance_id": "i-2k24eo3a5i4hgmdawy5xuyrsba",
+      "reviewer_instance_id": "i-lmzsi3liwhtbxsswx4pxjt5gve",
+      "base_sha": "94e5b1e09dbd145839f934e1ef0eb18bf55d4b7a",
+      "fixed_sha": "61e347c53de9a72834826ed7301228ecc050031b",
+      "cross_module_block_count": 0,
+      "release_started_at": null,
+      "user_acceptance_required": false,
+      "user_acceptance_evidence": null
     }
   ]
 }
