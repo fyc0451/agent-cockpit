@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -167,6 +168,98 @@ def test_create_limit_settles_ticket_and_replays_across_controllers(tmp_path):
         item["runtime"]["state"] != "pending"
         for item in new_controller().list_tickets(PROJECT, WORKSPACE)["items"]
     )
+
+
+def test_concurrent_cross_controller_limit_replay_keeps_original_error(tmp_path):
+    durable_tickets = terminal_ticket_store.initialize(tmp_path / "tickets.sqlite3")
+
+    class SettlementBarrierTickets:
+        def __init__(self):
+            self.path = durable_tickets.path
+            self.local = threading.local()
+            self.settlement_read = threading.Event()
+            self.settlement_barrier = threading.Barrier(2)
+
+        def create(self, *args, **kwargs):
+            return durable_tickets.create(*args, **kwargs)
+
+        def list(self, *args, **kwargs):
+            return durable_tickets.list(*args, **kwargs)
+
+        def get(self, *args, **kwargs):
+            value = durable_tickets.get(*args, **kwargs)
+            count = getattr(self.local, "get_count", 0) + 1
+            self.local.get_count = count
+            if count == 2:
+                self.settlement_read.set()
+                self.settlement_barrier.wait(timeout=5)
+            return value
+
+        def update(self, *args, **kwargs):
+            return durable_tickets.update(*args, **kwargs)
+
+    tickets = SettlementBarrierTickets()
+    journal = operation_store.initialize(tmp_path / "operations.sqlite3")
+
+    class LimitEngine:
+        def __init__(self):
+            self.creates = 0
+
+        def validate_dimensions(self, cols, rows):
+            assert type(cols) is int and type(rows) is int
+
+        def create_bound_term(self, _root_fd, _cols, _rows):
+            self.creates += 1
+            raise RuntimeError("terminal limit")
+
+    engine = LimitEngine()
+
+    def new_controller():
+        controller = workspace_terminal.WorkspaceTerminalController(
+            registry_provider=lambda: None,
+            ticket_provider=lambda: tickets,
+            operation_provider=lambda: journal,
+            engine=engine,
+            root_opener=lambda _path: (
+                os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY), None,
+            ),
+        )
+        controller._authority = lambda *_args, **_kwargs: workspace_terminal._Authority(
+            None, str(tmp_path),
+        )
+        return controller
+
+    outcomes = []
+    outcomes_lock = threading.Lock()
+
+    def create(controller):
+        try:
+            controller.create(
+                PROJECT, WORKSPACE, workspace_revision=1, cols=80, rows=24,
+                idempotency_key="same-limit-key",
+            )
+        except workspace_terminal.WorkspaceTerminalError as exc:
+            with outcomes_lock:
+                outcomes.append(exc.code)
+
+    first = threading.Thread(target=create, args=(new_controller(),), daemon=True)
+    first.start()
+    assert tickets.settlement_read.wait(timeout=5)
+    second = threading.Thread(target=create, args=(new_controller(),), daemon=True)
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert engine.creates == 1
+    values, _cursor = durable_tickets.list(project_id=PROJECT, workspace_id=WORKSPACE)
+    assert len(values) == 1
+    assert (values[0].desired_state, values[0].observed_state) == (
+        "stopped", "stopped",
+    )
+    with sqlite3.connect(journal.path) as connection:
+        assert connection.execute("SELECT count(*) FROM operations").fetchone()[0] == 1
+    assert sorted(outcomes) == ["terminal_limit_reached", "terminal_limit_reached"]
 
 
 def test_boot_loss_is_process_unknown_and_does_not_fork():

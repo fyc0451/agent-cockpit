@@ -277,17 +277,7 @@ class WorkspaceTerminalController:
                     exc.code == "terminal_limit_reached"
                     and exc.operation_id is not None
                 ):
-                    failed = self._current_ticket(current)
-                    if (
-                        failed.observed_state == "unknown"
-                        and self._bindings.get(failed.ticket_id) is None
-                    ):
-                        self._update_ticket(
-                            failed,
-                            desired_state="stopped",
-                            observed_state="stopped",
-                            operation_id=exc.operation_id,
-                        )
+                    self._settle_create_limit(current, exc.operation_id)
                 self._remember_replay(
                     "create", project_id, workspace_id, idempotency_key, request_data, exc,
                 )
@@ -1013,6 +1003,57 @@ class WorkspaceTerminalController:
             )
         except Exception as exc:
             self._translate_store_error(exc)
+
+    def _settle_create_limit(
+        self,
+        ticket: terminal_ticket_store.TerminalTicket,
+        operation_id: str,
+    ) -> None:
+        for _attempt in range(2):
+            current = self._current_ticket(ticket)
+            binding = self._bindings.get(current.ticket_id)
+            same_generation = current.engine_generation == ticket.engine_generation
+            if (
+                same_generation
+                and binding is None
+                and current.desired_state == "stopped"
+                and current.observed_state == "stopped"
+                and _has_operation_ref(current, operation_id)
+            ):
+                return
+            if (
+                not same_generation
+                or binding is not None
+                or current.desired_state != "running"
+                or current.observed_state != "unknown"
+                or any(
+                    item.get("type") == "operation"
+                    and item.get("id") != operation_id
+                    for item in current.receipt_refs
+                )
+            ):
+                raise WorkspaceTerminalError("revision_conflict")
+            try:
+                self._update_ticket(
+                    current,
+                    desired_state="stopped",
+                    observed_state="stopped",
+                    operation_id=operation_id,
+                )
+                return
+            except WorkspaceTerminalError as exc:
+                if exc.code != "revision_conflict":
+                    raise
+        current = self._current_ticket(ticket)
+        if (
+            current.engine_generation == ticket.engine_generation
+            and self._bindings.get(current.ticket_id) is None
+            and current.desired_state == "stopped"
+            and current.observed_state == "stopped"
+            and _has_operation_ref(current, operation_id)
+        ):
+            return
+        raise WorkspaceTerminalError("revision_conflict")
 
     def _view(
         self, ticket: terminal_ticket_store.TerminalTicket,
