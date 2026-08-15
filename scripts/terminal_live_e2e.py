@@ -440,11 +440,22 @@ def stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
     return stdout, stderr
 
 
-def start_server(runtime_root: Path) -> tuple[subprocess.Popen[str], dict[str, object], dict[str, object]]:
+def start_server(
+    runtime_root: Path, *, source_sha: str,
+) -> tuple[subprocess.Popen[str], dict[str, object], dict[str, object]]:
     if not runtime_root.is_absolute():
         raise HarnessError("runtime_root_not_absolute")
+    if not HEX40.fullmatch(source_sha):
+        raise HarnessError("ephemeral_source_sha_invalid")
     process = subprocess.Popen(
-        [sys.executable, str(LAUNCHER), "--runtime-root", str(runtime_root)],
+        [
+            sys.executable,
+            str(LAUNCHER),
+            "--runtime-root",
+            str(runtime_root),
+            "--source-sha",
+            source_sha,
+        ],
         cwd=str(ROOT),
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
         text=True,
@@ -795,7 +806,10 @@ def self_check() -> None:
     runtime.mkdir(mode=0o700)
     process = None
     try:
-        process, descriptor, ready = start_server(runtime)
+        source_sha = provenance.get("integration_head") or provenance.get("e2e_exact")
+        if not isinstance(source_sha, str):
+            raise HarnessError("ephemeral_source_sha_invalid")
+        process, descriptor, ready = start_server(runtime, source_sha=source_sha)
         seed_discoverable_project(runtime)
         empty_registry(str(descriptor["base_url"]))
         require_ready(ready)
@@ -824,7 +838,10 @@ def run_suite(*, keep_on_fail: bool) -> int:
     process = None
     failed = False
     try:
-        process, descriptor, ready = start_server(runtime)
+        source_sha = provenance.get("integration_head") or provenance.get("e2e_exact")
+        if not isinstance(source_sha, str):
+            raise HarnessError("ephemeral_source_sha_invalid")
+        process, descriptor, ready = start_server(runtime, source_sha=source_sha)
         seed_discoverable_project(runtime)
         empty_registry(str(descriptor["base_url"]))
         require_ready(ready)

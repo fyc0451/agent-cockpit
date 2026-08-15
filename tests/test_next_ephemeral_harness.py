@@ -16,11 +16,19 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "next_ephemeral_server.py"
 RESERVED_PORTS = {8790, 18790}
+SOURCE_SHA = "a" * 40
 
 
 def _spawn(runtime_root: Path) -> subprocess.Popen[str]:
     return subprocess.Popen(
-        [sys.executable, str(LAUNCHER), "--runtime-root", str(runtime_root)],
+        [
+            sys.executable,
+            str(LAUNCHER),
+            "--runtime-root",
+            str(runtime_root),
+            "--source-sha",
+            SOURCE_SHA,
+        ],
         cwd=ROOT,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
         text=True,
@@ -59,6 +67,13 @@ def _ready(descriptor: dict[str, object]) -> dict[str, object]:
         except OSError:
             time.sleep(0.05)
     raise AssertionError("ephemeral server did not become ready")
+
+
+def _live(descriptor: dict[str, object]) -> dict[str, object]:
+    base_url = descriptor["base_url"]
+    assert isinstance(base_url, str)
+    with urlopen(base_url + "/health/live", timeout=5) as response:
+        return json.loads(response.read())
 
 
 def _launch(
@@ -128,6 +143,12 @@ def test_ephemeral_launcher_runs_real_lifespan_and_reuses_known_root(
             "pid": descriptor["pid"],
             "port": _port(descriptor),
         }
+        live = _live(descriptor)
+        assert live["status"] == "live"
+        identity = live["identity"]
+        assert identity["edition"] == "source"
+        assert identity["source_sha"] == SOURCE_SHA
+        assert identity["pid"] == descriptor["pid"]
         running_marker = json.loads(
             (runtime_root / ".cockpit-ephemeral-root.json").read_text()
         )

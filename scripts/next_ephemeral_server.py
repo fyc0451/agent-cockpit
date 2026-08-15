@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import socket
 import stat
@@ -21,12 +22,21 @@ ROOT = Path(__file__).resolve().parents[1]
 LISTEN_FD_ENV = next_profile.EPHEMERAL_LISTEN_FD_ENV
 LAYOUT = ("data", "config", "state", "uploads", "mail", "release", "herdr", "home", "tmp")
 RESERVED_PORTS = {8790, 18790}
+SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class EphemeralError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+def _source_sha(raw: str | None) -> str:
+    if raw is None or raw == "":
+        raise EphemeralError("source_sha_missing")
+    if SOURCE_SHA_RE.fullmatch(raw) is None:
+        raise EphemeralError("source_sha_malformed")
+    return raw
 
 
 def _runtime_root(raw: str) -> Path:
@@ -97,7 +107,9 @@ def _listen() -> socket.socket:
     raise EphemeralError("ephemeral_port_exhausted")
 
 
-def _environment(root: Path, port: int, token: str) -> dict[str, str]:
+def _environment(
+    root: Path, port: int, token: str, *, source_sha: str,
+) -> dict[str, str]:
     clean = {
         name: value
         for name, value in os.environ.items()
@@ -129,6 +141,7 @@ def _environment(root: Path, port: int, token: str) -> dict[str, str]:
         "COCKPIT_B0_MODE": "off",
         "COCKPIT_HERDR_STATE_MODE": "off",
         "COCKPIT_EDITION": "source",
+        "COCKPIT_SOURCE_SHA": source_sha,
         "XDG_DATA_HOME": str(root / "data"),
         "XDG_CONFIG_HOME": str(root / "config"),
         "XDG_STATE_HOME": str(root / "state"),
@@ -174,17 +187,19 @@ def _prepare_exec_fds(*fds: int) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", required=True)
+    parser.add_argument("--source-sha")
     args = parser.parse_args(argv)
     listener: socket.socket | None = None
     lock: InstanceLock | None = None
     try:
+        source_sha = _source_sha(args.source_sha)
         os.setsid()
         root = _runtime_root(args.runtime_root)
         fresh = _initialize_layout(root)
         listener = _listen()
         port = listener.getsockname()[1]
         token = secrets.token_hex(16)
-        environment = _environment(root, port, token)
+        environment = _environment(root, port, token, source_sha=source_sha)
         lock = InstanceLock(environment).acquire()
         _prepare_layout(root, fresh=fresh)
         try:

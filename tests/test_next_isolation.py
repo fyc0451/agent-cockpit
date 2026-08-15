@@ -396,7 +396,9 @@ def test_ephemeral_config_failure_invalidates_ready_evidence_first(
     root = tmp_path / "runtime"
     root.mkdir(mode=0o700)
     token = "a" * 32
-    environment = launcher._environment(root, 12345, token)
+    environment = launcher._environment(
+        root, 12345, token, source_sha="a" * 40,
+    )
     old_catalog: bytes | None = None
     if ready_restart:
         assert launcher._initialize_layout(root) is True
@@ -424,7 +426,9 @@ def test_ephemeral_config_failure_invalidates_ready_evidence_first(
         launcher.next_profile, "ensure_private_herdr_config", fail_config,
     )
 
-    assert launcher.main(["--runtime-root", str(root)]) == 2
+    assert launcher.main([
+        "--runtime-root", str(root), "--source-sha", "a" * 40,
+    ]) == 2
     assert capsys.readouterr().err == "next_herdr_config_write_failed\n"
     marker = json.loads(
         (root / next_profile.EPHEMERAL_MARKER).read_text(encoding="ascii")
@@ -563,9 +567,43 @@ def test_fixed_server_lan_host_requires_matching_private_token(
     next_profile.validate_server_environment(checkout, values)
 
 
-def test_ephemeral_environment_remains_loopback_only(tmp_path: Path) -> None:
-    environment = ephemeral_module()._environment(tmp_path, 12345, "a" * 32)
+@pytest.mark.parametrize(
+    ("source_sha", "code"),
+    [
+        (None, "source_sha_missing"),
+        ("", "source_sha_missing"),
+        ("a" * 39, "source_sha_malformed"),
+        ("A" * 40, "source_sha_malformed"),
+        ("g" * 40, "source_sha_malformed"),
+    ],
+)
+def test_ephemeral_source_sha_fails_closed_before_runtime_setup(
+    source_sha: str | None,
+    code: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    launcher = ephemeral_module()
+    args = ["--runtime-root", str(tmp_path)]
+    if source_sha is not None:
+        args.extend(["--source-sha", source_sha])
+
+    assert launcher.main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{code}\n"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ephemeral_environment_remains_loopback_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COCKPIT_SOURCE_SHA", "b" * 40)
+    environment = ephemeral_module()._environment(
+        tmp_path, 12345, "a" * 32, source_sha="a" * 40,
+    )
     assert environment["COCKPIT_HOST"] == "127.0.0.1"
+    assert environment["COCKPIT_SOURCE_SHA"] == "a" * 40
     assert "COCKPIT_TOKEN" not in environment
 
 
