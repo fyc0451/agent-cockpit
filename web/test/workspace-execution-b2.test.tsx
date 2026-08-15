@@ -80,13 +80,16 @@ interface RecordedRequest {
 
 function stubB2(opts: {
   members?: unknown[]
+  membersError?: { status: number; code: string }
   prep?: unknown | null
   prepError?: { status: number; code: string }
   writeError?: { status: number; code: string }
+  dropFirstWrite?: string
 } = {}) {
   let items = [workAggregate()]
   let members = [...(opts.members ?? [])]
   let prep: unknown | null = opts.prep === undefined ? null : opts.prep
+  let droppedFirstWrite = false
   const calls: RecordedRequest[] = []
   const defaults = defaultFetchMap()
   vi.stubGlobal(
@@ -102,6 +105,10 @@ function stubB2(opts: {
         body: typeof init?.body === 'string' ? init.body : '',
       }
       calls.push(request)
+      if (method === 'POST' && opts.dropFirstWrite === url && !droppedFirstWrite) {
+        droppedFirstWrite = true
+        throw new TypeError('Failed to fetch')
+      }
       const ok = (data: unknown, status = 200) => ({
         ok: status >= 200 && status < 300,
         status,
@@ -126,6 +133,7 @@ function stubB2(opts: {
           members = [...members, created]
           return ok(created, 201)
         }
+        if (opts.membersError) return err(opts.membersError.status, opts.membersError.code)
         return ok({ items: members, next_cursor: null })
       }
       if (url === PREP_URL) {
@@ -320,5 +328,111 @@ describe('Checkpoint B2 执行准备卡', () => {
     expect(screen.getByText('尚未领取')).toBeInTheDocument()
     expect(first.some((call) => call.url === PREP_URL && call.method === 'GET')).toBe(true)
     expect(second.some((call) => call.url.endsWith('/attach'))).toBe(true)
+  })
+
+  it('prepare 首响应丢失后再次点击复用同 endpoint/body/key', async () => {
+    const calls = stubB2({ members: [memberAtlas], dropFirstWrite: PREP_URL })
+    renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    fireEvent.click(await screen.findByRole('radio', { name: 'Atlas' }))
+    fireEvent.click(screen.getByRole('button', { name: '准备执行' }))
+    expect(await screen.findByText(/当前无法连接服务/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '准备执行' }))
+    expect(await screen.findByText(/已准备/)).toBeInTheDocument()
+    const posts = calls.filter((call) => call.url === PREP_URL && call.method === 'POST')
+    expect(posts).toHaveLength(2)
+    expect(posts[0].idempotencyKey).toMatch(/./)
+    expect(posts[1].idempotencyKey).toBe(posts[0].idempotencyKey)
+    expect(posts[1].body).toBe(posts[0].body)
+    expect(JSON.parse(posts[0].body)).toEqual({ identity_id: 'idn_atlas' })
+  })
+
+  it('attach/detach 首响应丢失后再次点击复用同 endpoint/body/key', async () => {
+    const attachCalls = stubB2({
+      members: [memberAtlas],
+      prep: preparation(),
+      dropFirstWrite: `${PREP_URL}/attach`,
+    })
+    const attached = renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    fireEvent.click(await screen.findByRole('button', { name: '连接只读 Agent' }))
+    expect(await screen.findByText(/当前无法连接服务/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '连接只读 Agent' }))
+    expect(await screen.findByText(/已连接/)).toBeInTheDocument()
+    const attachPosts = attachCalls.filter((call) => call.url.endsWith('/attach') && call.method === 'POST')
+    expect(attachPosts).toHaveLength(2)
+    expect(attachPosts[1].idempotencyKey).toBe(attachPosts[0].idempotencyKey)
+    expect(attachPosts[1].body).toBe(attachPosts[0].body)
+    expect(JSON.parse(attachPosts[0].body)).toEqual({ expected_revision: 1 })
+    attached.unmount()
+
+    vi.unstubAllGlobals()
+    const detachCalls = stubB2({
+      members: [memberAtlas],
+      prep: preparation({
+        state: 'connected_readonly',
+        revision: 2,
+        attachment: {
+          attachment_id: 'att_b2',
+          status: 'connected_readonly',
+          provider: 'local_herdr',
+          harness: 'codex_terminal_managed_v1',
+          generation: 1,
+          identity_verified: true,
+          revision: 1,
+        },
+      }),
+      dropFirstWrite: `${PREP_URL}/detach`,
+    })
+    renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    fireEvent.click(await screen.findByRole('button', { name: '断开' }))
+    expect(await screen.findByText(/当前无法连接服务/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '断开' }))
+    expect(await screen.findByRole('button', { name: '连接只读 Agent' })).toBeInTheDocument()
+    const detachPosts = detachCalls.filter((call) => call.url.endsWith('/detach') && call.method === 'POST')
+    expect(detachPosts).toHaveLength(2)
+    expect(detachPosts[1].idempotencyKey).toBe(detachPosts[0].idempotencyKey)
+    expect(detachPosts[1].body).toBe(detachPosts[0].body)
+    expect(JSON.parse(detachPosts[0].body)).toEqual({ expected_revision: 2 })
+  })
+
+  it('换成员后 prepare 换新 key；加载 scope 404 不展示可写动作', async () => {
+    const memberBob = { ...memberAtlas, identity_id: 'idn_bob', display_name: 'Bob' }
+    const calls = stubB2({ members: [memberAtlas, memberBob], dropFirstWrite: PREP_URL })
+    const first = renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    fireEvent.click(await screen.findByRole('radio', { name: 'Atlas' }))
+    fireEvent.click(screen.getByRole('button', { name: '准备执行' }))
+    expect(await screen.findByText(/当前无法连接服务/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('radio', { name: 'Bob' }))
+    fireEvent.click(screen.getByRole('button', { name: '准备执行' }))
+    expect(await screen.findByText(/已准备/)).toBeInTheDocument()
+    const posts = calls.filter((call) => call.url === PREP_URL && call.method === 'POST')
+    expect(posts).toHaveLength(2)
+    expect(JSON.parse(posts[0].body)).toEqual({ identity_id: 'idn_atlas' })
+    expect(JSON.parse(posts[1].body)).toEqual({ identity_id: 'idn_bob' })
+    expect(posts[1].idempotencyKey).not.toBe(posts[0].idempotencyKey)
+    first.unmount()
+
+    vi.unstubAllGlobals()
+    stubB2({ membersError: { status: 404, code: 'project_not_found' } })
+    const missingProject = renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    expect(await screen.findByText(/无法完整读取执行准备/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '新建成员' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '准备执行' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('成员名称')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '连接只读 Agent' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '断开' })).not.toBeInTheDocument()
+    expect(screen.getByText('尚未领取')).toBeInTheDocument()
+    missingProject.unmount()
+
+    vi.unstubAllGlobals()
+    stubB2({
+      members: [memberAtlas],
+      prepError: { status: 404, code: 'work_item_not_found' },
+    })
+    renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    expect(await screen.findByText(/无法完整读取执行准备/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '新建成员' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '准备执行' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '连接只读 Agent' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '断开' })).not.toBeInTheDocument()
   })
 })

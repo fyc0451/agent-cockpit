@@ -33,6 +33,23 @@ function canAttach(state: string | undefined): boolean {
   return state === 'prepared' || state === 'detached' || state === 'outcome_unknown'
 }
 
+function isScopeNotFound(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 404) return false
+  return (
+    error.code === 'project_not_found' ||
+    error.code === 'workspace_not_found' ||
+    error.code === 'work_item_not_found'
+  )
+}
+
+function useIntentKey(binding: string): [string, () => void] {
+  const [state, setState] = useState(() => ({ binding, key: newIdempotencyKey() }))
+  if (state.binding !== binding) {
+    setState({ binding, key: newIdempotencyKey() })
+  }
+  return [state.key, () => setState({ binding, key: newIdempotencyKey() })]
+}
+
 export function WorkPreparation({
   projectId,
   workspaceId,
@@ -65,6 +82,10 @@ export function WorkPreparation({
 
   const members = membersQuery.data?.data.items ?? []
   const prep = prepQuery.data?.data ?? null
+  const scopeMissing = isScopeNotFound(membersQuery.error) || isScopeNotFound(prepQuery.error)
+  const [prepareKey, rotatePrepareKey] = useIntentKey(selectedId ?? '')
+  const [attachKey, rotateAttachKey] = useIntentKey(prep ? `a:${prep.revision}` : 'a')
+  const [detachKey, rotateDetachKey] = useIntentKey(prep ? `d:${prep.revision}` : 'd')
 
   useEffect(() => {
     if (prep?.identity.identity_id) setSelectedId(prep.identity.identity_id)
@@ -109,8 +130,9 @@ export function WorkPreparation({
     if (!selectedId) return
     void run(async () => {
       const result = await createWorkspacePreparation(
-        projectId, workspaceId, workItemId, selectedId, newIdempotencyKey(),
+        projectId, workspaceId, workItemId, selectedId, prepareKey,
       )
+      rotatePrepareKey()
       return result.data
     })
   }
@@ -119,8 +141,9 @@ export function WorkPreparation({
     if (!prep) return
     void run(async () => {
       const result = await attachWorkspacePreparation(
-        projectId, workspaceId, workItemId, prep.revision, newIdempotencyKey(),
+        projectId, workspaceId, workItemId, prep.revision, attachKey,
       )
+      rotateAttachKey()
       return result.data
     })
   }
@@ -129,8 +152,9 @@ export function WorkPreparation({
     if (!prep) return
     void run(async () => {
       const result = await detachWorkspacePreparation(
-        projectId, workspaceId, workItemId, prep.revision, newIdempotencyKey(),
+        projectId, workspaceId, workItemId, prep.revision, detachKey,
       )
+      rotateDetachKey()
       return result.data
     })
   }
@@ -149,7 +173,7 @@ export function WorkPreparation({
         <p className="focus-inline-error" role="alert">无法完整读取执行准备。已保留当前已知状态。</p>
       ) : null}
 
-      {!prep ? (
+      {scopeMissing ? null : !prep ? (
         <>
           <ul className="work-prep-members">
             {members.map((item) => (
@@ -160,7 +184,10 @@ export function WorkPreparation({
                     name="work-prep-member"
                     checked={selectedId === item.identity_id}
                     disabled={busy}
-                    onChange={() => setSelectedId(item.identity_id)}
+                    onChange={() => {
+                      setSelectedId(item.identity_id)
+                      setActionError(null)
+                    }}
                   />
                   <span>{item.display_name}</span>
                 </label>
