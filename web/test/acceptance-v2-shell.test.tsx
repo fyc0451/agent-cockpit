@@ -12,7 +12,8 @@ import { stubDefaultFetch } from './helpers'
 /**
  * 用户验收增强 · 壳层层级（冻结需求，对齐 550f9e9）：
  * 点击主导航「项目」主项不得改 URL、不得清空 Workspace/任务上下文。
- * 「管理项目」进项目页，「添加项目」打开真实向导；二者都不是项目主项。
+ * 「管理项目」进项目页。「添加项目」显式导航到 /projects?wizard=1 再开向导；
+ * 二者都不是项目主项，添加后不得再要求 Workspace 切换器仍在。
  * 工作/文件/终端必须挂在当前 Workspace 的 .rail-tree-workspace 内；
  * 不得再用「当前工作空间」重复标题或 rail 根上的 mobile title 当证据。
  * 本文件只做语义断言；390/bbox 由独立 Playwright 证明。
@@ -127,7 +128,7 @@ describe('验收 v2 · 项目层级与入口', () => {
     expect(screen.queryByTitle('切换工作空间')).not.toBeInTheDocument()
   })
 
-  it('点击「添加项目」打开真实向导，且该入口不是主导航「项目」主项', async () => {
+  it('点击「添加项目」显式导航到 /projects?wizard=1 并打开真实向导，且不是项目主项', async () => {
     const user = userEvent.setup()
     renderShell(HOME)
     await screen.findByLabelText('今天想推进什么？')
@@ -138,8 +139,8 @@ describe('验收 v2 · 项目层级与入口', () => {
     expect(add, '必须存在「添加项目」').not.toBeNull()
     expect(add).not.toBe(primary)
     await user.click(add)
-    expect(await screen.findByRole('dialog', { name: '添加项目' })).toBeInTheDocument()
-    expect(screen.getByTitle('切换工作空间')).toHaveTextContent('本机工作区')
+    expect(await screen.findByRole('dialog', { name: '添加项目' })).toBeVisible()
+    expect(screen.getByTestId('location').textContent).toBe('/projects?wizard=1')
   })
 
   it('文件/终端入口与无 Agent 语义仍在（尺寸由独立 Playwright 证明）', async () => {
