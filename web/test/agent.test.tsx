@@ -11,6 +11,11 @@ import { renderApp } from './helpers'
 
 // ---------- fixtures ----------
 
+// 每个测试等同一个全新浏览器：localStorage（P1-b 最近会话记录）跨用例清零
+beforeEach(() => {
+  window.localStorage.clear()
+})
+
 const AGENT_ID = 'ag_test1'
 const AGENTS_BASE = `/api/projects/${REG_P1}/workspaces/w1/agents`
 const AGENT_ROUTE = '/projects/p1/workspaces/w1/agent'
@@ -195,7 +200,7 @@ describe('AgentPage', () => {
   it('一个 CLI 都没装：明确提示先安装，不出表单、零 POST', async () => {
     const { calls } = await renderAgentWorld({ envCheck: envNonePayload })
     await screen.findByText('还没有可用的 Agent')
-    expect(screen.getByText(/请先安装/)).toBeInTheDocument()
+    expect(screen.getByText(/先安装一个受支持的/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '开始任务' })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('任务')).not.toBeInTheDocument()
     expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0)
@@ -851,5 +856,91 @@ describe('AgentPage R3（backend R3 冻结码）', () => {
     expect(btn).not.toHaveAttribute('aria-disabled')
     btn.click()
     await waitFor(() => expect(calls.filter((c) => c.url.endsWith('/prompts'))).toHaveLength(1))
+  })
+})
+
+// ---------- 首用恢复（P1-b）与无 Agent 出口 ----------
+
+describe('AgentPage 首用恢复（P1-b）与无 Agent 出口', () => {
+  const RECENT_KEY = 'cockpit.recentAgent.v1'
+  const RECENT_FIELD = `${REG_P1}/w1`
+  const seedRecent = (agentId: string) =>
+    window.localStorage.setItem(RECENT_KEY, JSON.stringify({ [RECENT_FIELD]: agentId }))
+  const readRecent = () =>
+    JSON.parse(window.localStorage.getItem(RECENT_KEY) ?? '{}') as Record<string, string>
+
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  it('无记录且无 ?agent=：空 composer，零 agent GET', async () => {
+    const { calls } = await renderAgentWorld({})
+    await screen.findByLabelText('任务')
+    await new Promise((r) => setTimeout(r, 300))
+    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(0)
+  })
+
+  it('有记录且无 ?agent=：自动转到最近会话并 GET 恢复', async () => {
+    seedRecent(AGENT_ID)
+    const { calls } = await renderAgentWorld({
+      detail: () => ({ body: { data: agentView({ transcript: '历史回复' }), meta: metaOk } }),
+    })
+    await screen.findByText('历史回复')
+    expect(calls.some((c) => c.method === 'GET' && c.url.endsWith(`/agents/${AGENT_ID}`))).toBe(true)
+    expect(screen.getByRole('button', { name: '发送' })).toBeInTheDocument()
+  })
+
+  it('stale 记录：agent_not_found → 清记录、回空 composer、断开提示、无恢复循环', async () => {
+    seedRecent(AGENT_ID)
+    const { calls } = await renderAgentWorld({
+      detail: () => ({
+        status: 404,
+        body: { error: { code: 'agent_not_found', message: 'gone', retryable: false } },
+      }),
+    })
+    await screen.findByText('Agent 会话已断开')
+    expect(readRecent()[RECENT_FIELD]).toBeUndefined()
+    expect(await screen.findByLabelText('Agent 类型')).toBeInTheDocument()
+    const gets = () => calls.filter((c) => c.method === 'GET').length
+    const at = gets()
+    await new Promise((r) => setTimeout(r, 1500))
+    expect(gets()).toBe(at)
+  })
+
+  it('恢复后显式「新任务」：清记录回空 composer，不再自动跳回', async () => {
+    seedRecent(AGENT_ID)
+    const { calls } = await renderAgentWorld({
+      detail: () => ({ body: { data: agentView({ transcript: '历史回复' }), meta: metaOk } }),
+    })
+    await screen.findByText('历史回复')
+    fireEvent.click(screen.getByRole('button', { name: '新任务' }))
+    expect(await screen.findByLabelText('Agent 类型')).toBeInTheDocument()
+    expect(readRecent()[RECENT_FIELD]).toBeUndefined()
+    const gets = () => calls.filter((c) => c.method === 'GET').length
+    const at = gets()
+    await new Promise((r) => setTimeout(r, 1200))
+    expect(gets()).toBe(at)
+  })
+
+  it('创建成功写入最近记录', async () => {
+    const { calls } = await renderAgentWorld({
+      create: () => ({ status: 201, body: { data: agentView(), meta: metaOk } }),
+      prompt: () => ({ body: { data: agentView({ status: 'working' }), meta: metaOk } }),
+      detail: () => ({ body: { data: agentView({ status: 'working' }), meta: metaOk } }),
+    })
+    fireEvent.change(await screen.findByLabelText('任务'), { target: { value: '任务X' } })
+    screen.getByRole('button', { name: '开始任务' }).click()
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith('/prompts'))).toBe(true))
+    expect(readRecent()[RECENT_FIELD]).toBe(AGENT_ID)
+  })
+
+  it('无受支持 Agent：动作化文案 + 「打开环境自检」出口，不泄露路径', async () => {
+    await renderAgentWorld({ envCheck: envNonePayload })
+    await screen.findByText('还没有可用的 Agent')
+    const link = screen.getByRole('link', { name: '打开环境自检' })
+    expect(link).toHaveAttribute('href', '#/settings?view=doctor')
+    expect(screen.getByRole('button', { name: '重新检查' })).toBeInTheDocument()
+    const text = document.querySelector('main')?.textContent ?? ''
+    expect(text).not.toMatch(/\/home|\.config|\/usr\/local/)
   })
 })

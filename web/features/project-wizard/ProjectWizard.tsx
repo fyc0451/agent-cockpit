@@ -101,6 +101,7 @@ const initialState: WizardState = {
 type Action =
   | { type: 'reset' }
   | { type: 'select-node'; nodeId: string }
+  | { type: 'reset-node' }
   | { type: 'select-root'; rootId: string; displayName: string }
   | { type: 'reset-root' }
   | { type: 'enter-dir'; path: string }
@@ -122,6 +123,9 @@ function reducer(state: WizardState, action: Action): WizardState {
       return { ...initialState, probeRevision: state.probeRevision + 1 }
     case 'select-node':
       return { ...state, step: 'dir', nodeId: action.nodeId, rootId: null, rootDisplayName: null, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
+    case 'reset-node':
+      // 从目录步返回位置步（roots 空态的恢复动作）；手动返回后不再自动跳过位置步
+      return { ...state, step: 'node', nodeId: null, rootId: null, rootDisplayName: null, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     case 'select-root':
       return { ...state, rootId: action.rootId, rootDisplayName: action.displayName, path: '', selected: null, probe: null, probeMeta: null, probeRevision: state.probeRevision + 1, submitBinding: null }
     case 'reset-root':
@@ -273,11 +277,14 @@ export function ProjectWizard({
 
   // 唯一代码位置只在首次进入目录步自动展开；用户手动「更换代码位置」后不再自动跳
   const autoRootRef = useRef(false)
+  // 唯一可用节点只在首次自动跳过位置步；用户手动「返回选择位置」后不再自动跳
+  const autoNodeRef = useRef(false)
 
   // 取消后重开从 NODE_SELECT 全新开始（不残留 fingerprint/idempotency key）
   useEffect(() => {
     if (open) {
       autoRootRef.current = false
+      autoNodeRef.current = false
       dispatch({ type: 'reset' })
     }
   }, [open])
@@ -285,10 +292,12 @@ export function ProjectWizard({
   // 恰好一个可用 local 节点（其余 disabled remote/offline 不算可选）：自动进入目录步
   useEffect(() => {
     if (!open || state.step !== 'node') return
+    if (autoNodeRef.current) return
     const ns = nodes.data?.data.nodes
     if (!ns) return
     const usable = ns.filter((n) => nodeDisabledReason(n) == null)
     if (usable.length === 1) {
+      autoNodeRef.current = true
       dispatch({ type: 'select-node', nodeId: usable[0].node_id })
     }
   }, [open, state.step, nodes.data])
@@ -404,6 +413,18 @@ export function ProjectWizard({
             <StatusState kind="loading" title="正在加载节点…" />
           ) : nodes.isError ? (
             <QueryErrorState error={nodes.error} onRetry={() => nodes.refetch()} />
+          ) : nodes.data!.data.nodes.length === 0 ? (
+            <StatusState
+              kind="empty"
+              title="没有发现可用的位置"
+              description="暂时没有可选择的计算位置；可以重新检查，或取消后稍后再试。"
+            >
+              <div className="state-actions">
+                <Button variant="primary" onClick={() => void nodes.refetch()}>
+                  重新检查
+                </Button>
+              </div>
+            </StatusState>
           ) : (
             <div className="card-grid">
               {nodes.data!.data.nodes.map((n) => (
@@ -419,6 +440,21 @@ export function ProjectWizard({
               <StatusState kind="loading" title="正在加载根目录…" />
             ) : roots.isError ? (
               <QueryErrorState error={roots.error} onRetry={() => roots.refetch()} />
+            ) : roots.data!.data.items.length === 0 ? (
+              <StatusState
+                kind="empty"
+                title="这个位置下没有代码位置"
+                description="可以重新检查，或返回重新选择位置。"
+              >
+                <div className="state-actions">
+                  <Button variant="primary" onClick={() => void roots.refetch()}>
+                    重新检查
+                  </Button>
+                  <Button variant="secondary" onClick={() => dispatch({ type: 'reset-node' })}>
+                    返回选择位置
+                  </Button>
+                </div>
+              </StatusState>
             ) : (
               <ul className="list">
                 {roots.data!.data.items.map((r) => (
@@ -452,6 +488,26 @@ export function ProjectWizard({
                 <StatusState kind="loading" title="正在加载目录…" />
               ) : dirs.isError ? (
                 <QueryErrorState error={dirs.error} onRetry={() => dirs.refetch()} />
+              ) : dirs.data!.data.entries.length === 0 ? (
+                <StatusState
+                  kind="empty"
+                  title="这里还没有可选择的项目目录"
+                  description="可以重新检查、返回上级目录或更换代码位置。"
+                >
+                  <div className="state-actions">
+                    <Button variant="primary" onClick={() => void dirs.refetch()}>
+                      重新检查
+                    </Button>
+                    {state.path !== '' ? (
+                      <Button variant="secondary" onClick={() => dispatch({ type: 'up-dir' })}>
+                        上级目录
+                      </Button>
+                    ) : null}
+                    <Button variant="secondary" onClick={() => dispatch({ type: 'reset-root' })}>
+                      更换代码位置
+                    </Button>
+                  </div>
+                </StatusState>
               ) : (
                 <>
                   {dirs.data!.data.partial || dirs.data!.data.warnings.length > 0 ? (

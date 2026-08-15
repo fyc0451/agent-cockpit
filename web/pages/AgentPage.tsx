@@ -5,12 +5,14 @@ import { createAgent, getAgent, sendAgentPrompt, SUPPORTED_AGENT_KINDS, type Age
 import { newIdempotencyKey } from '../api/idempotency'
 import { useLegacyEnvCheck } from '../api/localSlice'
 import type { Project, Workspace } from '../api/types'
+import { routeHrefs } from '../app/routes'
 import { Button } from '../components/Button'
 import { PageHeader } from '../components/PageHeader'
 import { QueryErrorState } from '../components/QueryErrorState'
 import { StatusState } from '../components/StatusState'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
+import { clearRecentAgent, lookupRecentAgent, rememberRecentAgent } from '../state/recentAgent'
 
 /** 状态词 → 用户语言（不直出内部状态机细节；闭集见 agents.ts AGENT_STATUSES） */
 const STATUS_LABEL: Record<string, string> = {
@@ -110,8 +112,8 @@ function AgentBody({ project, workspace }: { project: Project; workspace: Worksp
 
   useEffect(() => stopPolling, [stopPolling])
 
-  /** agent_not_found（任一路径）：停轮询、清旧 agent 与 query（杜绝继续 POST 旧 agent）、
-   *  保留任务文本，给出「Agent 会话已断开 / 开始新任务」出口 */
+  /** agent_not_found（任一路径）：停轮询、清旧 agent 与 query 与最近记录（杜绝继续 POST 旧 agent、
+   *  禁止恢复循环）、保留任务文本，给出「Agent 会话已断开 / 开始新任务」出口 */
   const onAgentGone = useCallback(() => {
     stopPolling()
     setAgent(null)
@@ -120,8 +122,9 @@ function AgentBody({ project, workspace }: { project: Project; workspace: Worksp
     setRestoreError(null)
     setPollExhausted(false)
     setGoneNotice(true)
+    clearRecentAgent(projectId, workspaceId)
     setSearchParams({}, { replace: true })
-  }, [stopPolling, setSearchParams])
+  }, [stopPolling, setSearchParams, projectId, workspaceId])
 
   /** 有界轮询 tick 停止语义：
    *  - working：无论 transcript 是否变化（部分输出）都继续，绝不早停；
@@ -192,6 +195,7 @@ function AgentBody({ project, workspace }: { project: Project; workspace: Worksp
         if (cancelled) return
         setAgent(view)
         setRestoring(false)
+        rememberRecentAgent(projectId, workspaceId, view.agent_id)
         if (view.status === 'idle' || view.status === 'working') {
           startPollWindow(view.agent_id, view.transcript)
         }
@@ -209,6 +213,14 @@ function AgentBody({ project, workspace }: { project: Project; workspace: Worksp
       cancelled = true
     }
   }, [agentParam, agent, projectId, workspaceId, startPollWindow, onAgentGone])
+
+  // P1-b：URL 无 ?agent= 时自动转到该工作区最近一次成功创建/恢复的会话；
+  // 记录失效由 onAgentGone/onStartNew 清除，不会形成恢复循环
+  useEffect(() => {
+    if (agentParam || agent != null) return
+    const recent = lookupRecentAgent(projectId, workspaceId)
+    if (recent) setSearchParams({ agent: recent }, { replace: true })
+  }, [agentParam, agent, projectId, workspaceId, setSearchParams])
 
   // 可提交类型 = 已安装 ∩ 本轮支持白名单（已安装但不支持的类型不进选项，避免 400）
   const installedAll = envCheck.data
@@ -277,8 +289,9 @@ function AgentBody({ project, workspace }: { project: Project; workspace: Worksp
         }
         createIntentRef.current = null
         setAgent(current)
-        // agent_id 落 URL query：刷新后 GET 恢复，不依赖仅内存状态
+        // agent_id 落 URL query：刷新后 GET 恢复，不依赖仅内存状态；并记为最近会话（P1-b）
         setSearchParams({ agent: current.agent_id }, { replace: true })
+        rememberRecentAgent(projectId, workspaceId, current.agent_id)
       }
       await doPrompt(current, text)
     })()
@@ -330,6 +343,7 @@ function AgentBody({ project, workspace }: { project: Project; workspace: Worksp
     setPollExhausted(false)
     setUncertain(null)
     setGoneNotice(false)
+    clearRecentAgent(projectId, workspaceId)
     setSearchParams({}, { replace: true })
   }
 
@@ -376,16 +390,32 @@ function AgentBody({ project, workspace }: { project: Project; workspace: Worksp
               <StatusState
                 kind="empty"
                 title="当前没有受支持的 Agent"
-                description={`这台电脑只安装了暂不受支持的 Agent（${installedAll.join('、')}）；本轮支持 codex、claude、kimi、opencode、grok，请安装其中之一后重新检查。`}
-                action={{ label: '重新检查', onClick: () => void envCheck.refetch() }}
-              />
+                description={`这台电脑只安装了暂不受支持的 Agent（${installedAll.join('、')}）；本轮支持 codex、claude、kimi、opencode、grok——先安装其中之一，然后重新检查。`}
+              >
+                <div className="state-actions">
+                  <a className="btn btn--primary" href={routeHrefs.doctor()}>
+                    打开环境自检
+                  </a>
+                  <Button variant="secondary" onClick={() => void envCheck.refetch()}>
+                    重新检查
+                  </Button>
+                </div>
+              </StatusState>
             ) : (
               <StatusState
                 kind="empty"
                 title="还没有可用的 Agent"
-                description="这台电脑还没有安装可用的 Agent CLI；请先安装（如 codex、kimi），装好后回到这里。"
-                action={{ label: '重新检查', onClick: () => void envCheck.refetch() }}
-              />
+                description="先安装一个受支持的 Agent CLI（如 codex、kimi），然后重新检查。"
+              >
+                <div className="state-actions">
+                  <a className="btn btn--primary" href={routeHrefs.doctor()}>
+                    打开环境自检
+                  </a>
+                  <Button variant="secondary" onClick={() => void envCheck.refetch()}>
+                    重新检查
+                  </Button>
+                </div>
+              </StatusState>
             )
           ) : (
             <>
@@ -439,6 +469,15 @@ function AgentBody({ project, workspace }: { project: Project; workspace: Worksp
                 {agent ? (
                   <Button variant="secondary" title="立即取回最新状态与回复" onClick={onRefresh}>
                     刷新
+                  </Button>
+                ) : null}
+                {agent ? (
+                  <Button
+                    variant="secondary"
+                    title="收起当前会话并开始全新任务（原会话不会被删除）"
+                    onClick={onStartNew}
+                  >
+                    新任务
                   </Button>
                 ) : null}
               </div>

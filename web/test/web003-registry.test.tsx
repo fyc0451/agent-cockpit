@@ -1064,3 +1064,59 @@ describe('黄金路径：四入口汇聚同一个向导', () => {
     expect(within(drawer).getByText('Project Two')).toBeInTheDocument()
   })
 })
+
+// ---------- 首用恢复：成功空数组的明确空态（不白屏） ----------
+
+describe('向导空态（成功空数组）', () => {
+  it('nodes 空数组：明确空态 + 重新检查 + 取消，不白屏', async () => {
+    stubWizardFetch({
+      gets: { '/api/runtime-nodes': { data: { nodes: [] }, meta: metaOk } },
+    })
+    const user = userEvent.setup()
+    renderApp('/projects')
+    await openWizard(user)
+    await screen.findByText('没有发现可用的位置')
+    expect(screen.getByRole('button', { name: '重新检查' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument()
+  })
+
+  it('roots 空数组：空态 + 重新检查 + 返回选择位置（不被自动跳过弹回）', async () => {
+    stubWizardFetch({
+      gets: { '/api/runtime-nodes/local/roots': { data: { items: [] }, meta: metaOk } },
+    })
+    const user = userEvent.setup()
+    renderApp('/projects')
+    const dialog = await openWizard(user)
+    await screen.findByText('这个位置下没有代码位置')
+    expect(screen.getByRole('button', { name: '重新检查' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '返回选择位置' }))
+    // 回到位置步且停留（手动返回后不再自动跳过）：本机节点卡片可见
+    await within(dialog).findByRole('button', { name: /本机/ })
+  })
+
+  it('directories 空数组：空态 + 重新检查 + 更换代码位置', async () => {
+    stubWizardFetch({
+      gets: {
+        '/api/runtime-nodes/local/directories': {
+          data: {
+            locator: { node_id: 'local', root_id: 'root_0123456789abcdef01234567', path: '' },
+            entries: [],
+            complete: true,
+            partial: false,
+            sources: ['local_files'],
+            warnings: [],
+          },
+          meta: metaOk,
+        },
+      },
+    })
+    const user = userEvent.setup()
+    renderApp('/projects')
+    await openWizard(user)
+    await user.click(await screen.findByRole('button', { name: '代码' }))
+    await screen.findByText('这里还没有可选择的项目目录')
+    expect(screen.getByRole('button', { name: '重新检查' })).toBeInTheDocument()
+    // 空态自带恢复动作（与列表头部既有 ghost 按钮同名，至少一处可用）
+    expect(screen.getAllByRole('button', { name: '更换代码位置' }).length).toBeGreaterThanOrEqual(1)
+  })
+})
