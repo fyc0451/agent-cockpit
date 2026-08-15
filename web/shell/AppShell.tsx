@@ -1,29 +1,24 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { CommandPalette } from './CommandPalette'
 import { ProjectDrawer } from './ProjectDrawer'
 import { Rail } from './Rail'
 import { TopBar } from './TopBar'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import { useSelection } from '../state/selection'
+import { rememberLastWorkspace } from '../state/workDraft'
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [projectsOpen, setProjectsOpen] = useState(false)
   const [workspacesOpen, setWorkspacesOpen] = useState(false)
-  const [paletteOpen, setPaletteOpen] = useState(false)
+  const { project, workspaceId } = useSelection()
 
-  const closePalette = useCallback(() => setPaletteOpen(false), [])
   const closeProjects = useCallback(() => setProjectsOpen(false), [])
   const closeWorkspaces = useCallback(() => setWorkspacesOpen(false), [])
 
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault()
-        setPaletteOpen(true)
-      }
+    if (project?.project_id && workspaceId) {
+      rememberLastWorkspace(project.project_id, workspaceId)
     }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [])
+  }, [project?.project_id, workspaceId])
 
   const focusMain = useCallback(() => {
     // 不用 href="#main-content"：HashRouter 下会改写业务 hash。
@@ -41,7 +36,6 @@ export function AppShell({ children }: { children: ReactNode }) {
         <TopBar
           onOpenProjects={() => setProjectsOpen(true)}
           onOpenWorkspaces={() => setWorkspacesOpen(true)}
-          onOpenPalette={() => setPaletteOpen(true)}
         />
         <main id="main-content" tabIndex={-1} className="page-scroll">
           <div className="page">{children}</div>
@@ -49,7 +43,6 @@ export function AppShell({ children }: { children: ReactNode }) {
       </div>
       <ProjectDrawer open={projectsOpen} onClose={closeProjects} />
       <WorkspaceSwitcher open={workspacesOpen} onClose={closeWorkspaces} />
-      <CommandPalette open={paletteOpen} onClose={closePalette} />
     </div>
   )
 }

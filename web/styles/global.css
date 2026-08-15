@@ -746,6 +746,158 @@ pre {
   margin-top: 8px;
 }
 
+/* ---------- Workspace Focus ---------- */
+
+.workspace-focus {
+  width: min(100%, 820px);
+  margin: 0 auto;
+  padding: 22px 0 40px;
+}
+
+.workspace-focus-heading {
+  margin-bottom: 34px;
+}
+
+.workspace-focus-heading p {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workspace-focus-heading h1 {
+  font-size: 18px;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.focus-conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+
+.focus-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.focus-prompt {
+  font-size: 22px;
+  line-height: 1.35;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.focus-textarea,
+.focus-details textarea {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.55;
+}
+
+.focus-textarea {
+  min-height: 132px;
+  padding: 12px;
+  font-size: 15px;
+}
+
+.focus-details {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.focus-details summary {
+  min-height: 32px;
+  color: var(--text-2);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.focus-details textarea {
+  min-height: 84px;
+  margin-top: 8px;
+  padding: 10px;
+}
+
+.focus-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.focus-draft-state {
+  min-height: 1.45em;
+  margin-right: auto;
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.focus-inline-error {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--danger-2);
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.focus-message {
+  padding: 4px 2px 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.focus-message-author {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.focus-message-body {
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.focus-message-note {
+  margin-top: 18px;
+}
+
+.focus-message-note h3 {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.focus-message-note p {
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.focus-saved {
+  margin-top: 20px;
+  color: var(--success);
+  font-size: 12px;
+}
+
 .raw-json {
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -1501,5 +1653,40 @@ pre {
   .avatar {
     width: 36px;
     height: 36px;
+  }
+
+  .page {
+    padding: 10px 12px 24px;
+  }
+
+  .workspace-focus {
+    padding: 10px 0 28px;
+  }
+
+  .workspace-focus-heading {
+    margin-bottom: 18px;
+  }
+
+  .focus-composer {
+    gap: 10px;
+    padding: 14px;
+  }
+
+  .focus-prompt {
+    font-size: 19px;
+  }
+
+  .focus-textarea {
+    min-height: 116px;
+  }
+
+  .focus-details summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .focus-composer-footer .btn {
+    min-width: 112px;
   }
 }

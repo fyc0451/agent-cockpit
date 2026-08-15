@@ -7,11 +7,9 @@ const THEME_LABEL: Record<ThemePref, string> = { system: '跟随系统', light: 
 export function TopBar({
   onOpenProjects,
   onOpenWorkspaces,
-  onOpenPalette,
 }: {
   onOpenProjects: () => void
   onOpenWorkspaces: () => void
-  onOpenPalette: () => void
 }) {
   const { projectSlug, workspaceId, project, workspace } = useSelection()
   const theme = useTheme()
@@ -40,28 +38,13 @@ export function TopBar({
           aria-haspopup="dialog"
           title="切换工作空间"
         >
-          <span
-            className={`ws-dot ${workspace?.location === 'remote' ? 'ws-dot--remote' : 'ws-dot--local'}`}
-            aria-hidden="true"
-          />
+          <span className="ws-dot ws-dot--local" aria-hidden="true" />
           <span className="ellipsis topbar-switcher-name">{workspace?.name ?? workspaceId}</span>
           <span aria-hidden="true">⌄</span>
         </button>
       ) : null}
 
       <div className="topbar-spacer" />
-
-      <button
-        type="button"
-        className="btn btn--secondary topbar-search"
-        onClick={onOpenPalette}
-        aria-haspopup="dialog"
-        aria-label="搜索或运行命令"
-        title="搜索或运行命令"
-      >
-        <span className="ellipsis">搜索或运行命令</span>
-        <span className="topbar-search-icon" aria-hidden="true">⌕</span>
-      </button>
       <button
         type="button"
         className="btn btn--icon"
@@ -71,9 +54,6 @@ export function TopBar({
       >
         <span aria-hidden="true">{THEME_ICON[theme.pref]}</span>
       </button>
-      <span className="avatar" title="用户（占位）" aria-label="用户（占位）">
-        C
-      </span>
     </header>
   )
 }
