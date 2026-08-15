@@ -84,6 +84,8 @@ workspace_terminal_controller = None
 workspace_agent = None
 workspace_agent_api = None
 workspace_agent_controller = None
+workspace_work_api = None
+workspace_work_store = None
 if next_profile.enabled():
     try:
         _next_instance_lock_owner = instance_lock.require_registered_owner()
@@ -95,6 +97,7 @@ if next_profile.enabled():
     from . import runtime_provider_store
     from . import terminal_ticket_api, terminal_ticket_store, workspace_terminal
     from . import workspace_agent, workspace_agent_api
+    from . import workspace_work_api, workspace_work_store
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
@@ -370,6 +373,46 @@ def _workspace_agent_provider():
     return workspace_agent_controller
 
 
+_workspace_work_store = None
+_WORKSPACE_WORK_PATH_RE = re.compile(
+    r"^/api/projects/[^/]+/workspaces/[^/]+/work-items$",
+)
+
+
+def _close_workspace_work_store() -> None:
+    global _workspace_work_store
+    store = _workspace_work_store
+    _workspace_work_store = None
+    if store is None:
+        return
+    try:
+        store.close()
+    except Exception:
+        logger.error("workspace work store close failed")
+
+
+def _initialize_workspace_work_store() -> None:
+    global _workspace_work_store, workspace_work_store
+    _close_workspace_work_store()
+    module = workspace_work_store
+    if module is None:
+        from . import workspace_work_store as module
+        workspace_work_store = module
+    _workspace_work_store = module.initialize(
+        runtime_paths.validate_store("workspace_work"),
+    )
+
+
+def _workspace_work_provider():
+    store = _workspace_work_store
+    if store is not None:
+        return store
+    module = workspace_work_store
+    if module is None:
+        from . import workspace_work_store as module
+    raise module.WorkspaceWorkError("workspace_work_schema_missing")
+
+
 def _local_terminal_capability(workspace, location):
     controller = workspace_terminal_controller
     if controller is None:
@@ -389,6 +432,7 @@ async def lifespan(_: FastAPI):
     try:
         if foundation_enabled:
             _initialize_foundation_stores()
+            _initialize_workspace_work_store()
             terminal_module = workspace_terminal
             if terminal_module is None:
                 from . import workspace_terminal as terminal_module
@@ -497,6 +541,7 @@ async def lifespan(_: FastAPI):
                 logger.exception("workspace terminal controller failed during shutdown")
             finally:
                 workspace_terminal_controller = None
+        _close_workspace_work_store()
         if foundation_enabled:
             _close_foundation_stores()
         if ephemeral:
@@ -603,13 +648,21 @@ if next_profile.enabled():
     workspace_agent_api.install(
         app, workspace_agent_api.ApiService(_workspace_agent_provider),
     )
+    assert workspace_work_api is not None
+    workspace_work_api.install(
+        app,
+        workspace_work_api.ApiService(
+            registry_provider=_project_registry,
+            store_provider=_workspace_work_provider,
+        ),
+    )
 
 
 def _scoped_g3_path(path: str) -> bool:
     return project_registry_api.is_scoped_registry_path(path) or (
         workspace_agent_api is not None
         and workspace_agent_api.is_scoped_agent_path(path)
-    )
+    ) or _WORKSPACE_WORK_PATH_RE.fullmatch(path) is not None
 
 
 def _scoped_registry_request(request: Request) -> bool:

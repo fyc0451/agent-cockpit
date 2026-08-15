@@ -20,7 +20,7 @@ from . import runtime_paths
 
 
 INVENTORY_NAME = "backup-inventory.json"
-INVENTORY_SCHEMA_VERSION = 3
+INVENTORY_SCHEMA_VERSION = 4
 INVENTORY_ENGINE = "immutable-upgrade-controller"
 MAX_INVENTORY_BYTES = 256 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -37,6 +37,7 @@ _EXPECTED_STORE_LAYOUT = {
     "settings": ("data", "settings.json", "file"),
     "tasks": ("data", "tasks.sqlite3", "file"),
     "project_registry": ("data", "project-registry.sqlite3", "file"),
+    "workspace_work": ("data", "workspace-work.sqlite3", "file"),
     "runtime_provider": ("data", "runtime-provider.sqlite3", "file"),
     "event_journal": ("data", "event-journal.sqlite3", "file"),
     "operation_journal": ("data", "operation-journal.sqlite3", "file"),
@@ -59,6 +60,7 @@ SQLITE_STORE_NAMES = frozenset(
     {
         "tasks",
         "project_registry",
+        "workspace_work",
         "coordination",
         "leader_binding",
         "push",

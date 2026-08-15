@@ -234,6 +234,67 @@ _LEADER_BINDING_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
         ("fanned_out", "INTEGER", 1, 0),
     ),
 }
+_WORKSPACE_WORK_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
+    "schema_migrations": (
+        ("migration_id", "TEXT", 1, 1),
+        ("schema_version", "INTEGER", 1, 0),
+        ("schema_digest", "TEXT", 1, 0),
+        ("applied_at", "TEXT", 1, 0),
+    ),
+    "message_threads": (
+        ("thread_id", "TEXT", 1, 1),
+        ("project_id", "TEXT", 1, 0),
+        ("workspace_id", "TEXT", 1, 0),
+        ("revision", "INTEGER", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+    ),
+    "messages": (
+        ("message_id", "TEXT", 1, 1),
+        ("thread_id", "TEXT", 1, 0),
+        ("author_kind", "TEXT", 1, 0),
+        ("author_ref", "TEXT", 0, 0),
+        ("body", "TEXT", 1, 0),
+    ),
+    "work_items": (
+        ("work_item_id", "TEXT", 1, 1),
+        ("source_message_id", "TEXT", 1, 0),
+        ("status", "TEXT", 1, 0),
+        ("acceptance", "TEXT", 0, 0),
+        ("constraints", "TEXT", 0, 0),
+    ),
+    "idempotency_records": (
+        ("project_id", "TEXT", 1, 1),
+        ("workspace_id", "TEXT", 1, 2),
+        ("idempotency_key", "TEXT", 1, 3),
+        ("request_digest", "TEXT", 1, 0),
+        ("response_json", "TEXT", 1, 0),
+    ),
+}
+_WORKSPACE_WORK_DEFAULTS: dict[str, dict[str, str]] = {
+    "schema_migrations": {},
+    "message_threads": {},
+    "messages": {},
+    "work_items": {},
+    "idempotency_records": {},
+}
+_WORKSPACE_WORK_INDEXES: dict[str, frozenset[_IndexFingerprint]] = {
+    "schema_migrations": frozenset(),
+    "message_threads": frozenset(),
+    "messages": frozenset(),
+    "work_items": frozenset(),
+    "idempotency_records": frozenset(),
+}
+_WORKSPACE_WORK_FKS: dict[str, frozenset[_ForeignKeyFingerprint]] = {
+    "schema_migrations": frozenset(),
+    "message_threads": frozenset(),
+    "messages": frozenset({
+        (("thread_id", "message_threads", "thread_id"),),
+    }),
+    "work_items": frozenset({
+        (("source_message_id", "messages", "message_id"),),
+    }),
+    "idempotency_records": frozenset(),
+}
 
 # Known previous user_version values (recognized but not ready).
 _PREVIOUS_USER_VERSIONS: frozenset[int] = frozenset()
@@ -252,7 +313,7 @@ _JSON_VERSIONED: dict[str, int] = {
 # upgrade/ is V1 diagnostic — excluded from ready inventory.
 _APP_OWNED_STORES = (
     "tasks", "push", "coordination", "delivery_outbox", "leader_binding",
-    "project_registry",
+    "project_registry", "workspace_work",
     "runtime_provider", "event_journal", "operation_journal",
     "project_memory", "terminal_ticket",
     "settings", "mail_projects", "team_sessions", "inbox_route", "typing",
@@ -1421,6 +1482,34 @@ def probe_manifest(
     }
 
 
+def _workspace_work_sqlite_spec() -> tuple[
+    str,
+    dict[str, tuple[tuple[str, str, int, int], ...]],
+    dict[str, dict[str, str]],
+    dict[str, frozenset[_IndexFingerprint]],
+    dict[str, frozenset[_ForeignKeyFingerprint]],
+    int,
+    tuple[str, ...] | None,
+    tuple[str, int, str] | None,
+]:
+    from . import workspace_work_store as work_store
+
+    return (
+        "workspace_work",
+        _WORKSPACE_WORK_TABLES,
+        _WORKSPACE_WORK_DEFAULTS,
+        _WORKSPACE_WORK_INDEXES,
+        _WORKSPACE_WORK_FKS,
+        work_store.SCHEMA_VERSION,
+        work_store._SCHEMA,
+        (
+            work_store.MIGRATION_ID,
+            work_store.SCHEMA_VERSION,
+            work_store.SCHEMA_DIGEST,
+        ),
+    )
+
+
 def _sqlite_probe_specs(
     *, include_leader_binding: bool,
 ) -> list[tuple[
@@ -1476,6 +1565,7 @@ def _sqlite_probe_specs(
             project_registry_contracts.SCHEMA_STATEMENTS,
             project_registry_contracts.PROJECT_REGISTRY_MIGRATION_RECEIPT,
         ),
+        _workspace_work_sqlite_spec(),
     ]
     if include_leader_binding:
         specs.append((

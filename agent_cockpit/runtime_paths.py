@@ -73,6 +73,9 @@ STORES: dict[str, tuple[str, str, str, str, int | None]] = {
     "project_registry": (
         "data", "project-registry.sqlite3", "file", "server", 0o600,
     ),
+    "workspace_work": (
+        "data", "workspace-work.sqlite3", "file", "server", 0o600,
+    ),
     "runtime_provider": (
         "data", "runtime-provider.sqlite3", "file", "server", 0o600,
     ),

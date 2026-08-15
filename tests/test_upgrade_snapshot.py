@@ -68,9 +68,14 @@ def test_project_registry_is_a_closed_inventory_sqlite_store() -> None:
     )
     assert "project_registry" in upgrade_snapshot.SQLITE_STORE_NAMES
     assert "project_registry" in upgrade_snapshot.SNAPSHOT_STORE_NAMES
-    assert upgrade_snapshot.INVENTORY_SCHEMA_VERSION == 3
-    assert len(upgrade_snapshot.SQLITE_STORE_NAMES) == 11
-    assert len(upgrade_snapshot.SNAPSHOT_STORE_NAMES) == 18
+    assert upgrade_snapshot.INVENTORY_SCHEMA_VERSION == 4
+    assert len(upgrade_snapshot.SQLITE_STORE_NAMES) == 12
+    assert len(upgrade_snapshot.SNAPSHOT_STORE_NAMES) == 19
+    assert upgrade_snapshot._EXPECTED_STORE_LAYOUT["workspace_work"] == (
+        "data", "workspace-work.sqlite3", "file",
+    )
+    assert "workspace_work" in upgrade_snapshot.SQLITE_STORE_NAMES
+    assert "workspace_work" in upgrade_snapshot.SNAPSHOT_STORE_NAMES
     expected = {
         "runtime_provider": "runtime-provider.sqlite3",
         "event_journal": "event-journal.sqlite3",
@@ -78,6 +83,7 @@ def test_project_registry_is_a_closed_inventory_sqlite_store() -> None:
         "project_memory": "project-memory.sqlite3",
         "terminal_ticket": "terminal-ticket.sqlite3",
     }
+    assert "workspace_work" not in expected
     for name, leaf in expected.items():
         assert upgrade_snapshot._EXPECTED_STORE_LAYOUT[name] == (
             "data", leaf, "file",
@@ -100,12 +106,12 @@ def test_empty_sources_seal_exact_canonical_closed_inventory(
     assert raw == upgrade_snapshot.canonical_inventory_bytes(result["inventory"])
     assert hashlib.sha256(raw).hexdigest() == result["inventory_sha256"]
     inventory = result["inventory"]
-    assert inventory["schema_version"] == 3
-    assert inventory["entry_count"] == 21
+    assert inventory["schema_version"] == 4
+    assert inventory["entry_count"] == 22
     assert inventory["total_snapshot_bytes"] == 0
     names = [row["name"] for row in inventory["entries"]]
     assert names == sorted(set(runtime_paths.STORES) | {"uploads"})
-    assert len(names) == len(set(names)) == 21
+    assert len(names) == len(set(names)) == 22
     assert inventory["consistency_scope"] == "per_store_atomic"
 
     for name in upgrade_snapshot.SNAPSHOT_STORE_NAMES:
