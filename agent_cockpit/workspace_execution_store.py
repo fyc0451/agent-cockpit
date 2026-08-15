@@ -462,6 +462,13 @@ class CheckoutInternal:
 
 
 @dataclass(frozen=True)
+class PrepareClaim:
+    status: str
+    checkout_id: str | None
+    item: PreparationView | None
+
+
+@dataclass(frozen=True)
 class AttachmentInternal:
     attachment_id: str
     pane_id: str | None
@@ -751,6 +758,97 @@ class WorkspaceExecutionStore:
         finally:
             connection.close()
 
+    def claim_prepare(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        identity_id: str,
+    ) -> PrepareClaim:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        identity_id = _opaque(identity_id, "idn_")
+        connection = _write_txn(self.path)
+        try:
+            identity = connection.execute(
+                "SELECT * FROM agent_identities WHERE project_id=? AND workspace_id=? "
+                "AND identity_id=?",
+                (project_id, workspace_id, identity_id),
+            ).fetchone()
+            if identity is None:
+                _fail("identity_not_found")
+            prep = connection.execute(
+                "SELECT * FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is not None:
+                if prep["identity_id"] != identity_id:
+                    _fail("checkout_conflict")
+                if prep["state"] == "preparing":
+                    connection.execute("COMMIT")
+                    return PrepareClaim("pending", prep["checkout_id"], None)
+                view = _load_preparation(
+                    connection, project_id, workspace_id, work_item_id,
+                )
+                connection.execute("COMMIT")
+                return PrepareClaim("ready", prep["checkout_id"], view)
+            now = _now()
+            checkout_id = _new_id("chk_")
+            connection.execute(
+                "INSERT INTO work_item_preparations VALUES "
+                "(?,?,?,?,?,1,?,NULL,NULL,'preparing',1,?,?)",
+                (
+                    _new_id("pre_"), project_id, workspace_id, work_item_id,
+                    identity_id, checkout_id, now, now,
+                ),
+            )
+            connection.execute("COMMIT")
+            return PrepareClaim("created", checkout_id, None)
+        except WorkspaceExecutionError:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection.in_transaction:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            _fail("store_write_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
+    def abort_prepare(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        checkout_id: str,
+    ) -> None:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        checkout_id = _opaque(checkout_id, "chk_")
+        connection = _write_txn(self.path)
+        try:
+            connection.execute(
+                "DELETE FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=? AND state='preparing' "
+                "AND checkout_id=?",
+                (project_id, workspace_id, work_item_id, checkout_id),
+            )
+            connection.execute("COMMIT")
+        except WorkspaceExecutionError:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection.in_transaction:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            _fail("store_write_failed", exc)
+        finally:
+            connection.close()
+
     def complete_preparation(
         self, *, project_id: str, workspace_id: str, work_item_id: str,
         identity_id: str, source_head: str, source_tree: str, internal_path: str,
@@ -766,14 +864,20 @@ class WorkspaceExecutionStore:
             _fail("invalid_argument")
         connection = _write_txn(self.path)
         try:
-            existing = _load_preparation(
-                connection, project_id, workspace_id, work_item_id,
-            )
-            if existing is not None:
-                if existing.identity.identity_id != identity_id:
-                    _fail("checkout_conflict")
+            prep = connection.execute(
+                "SELECT * FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is not None and prep["identity_id"] != identity_id:
+                _fail("checkout_conflict")
+            if prep is not None and prep["state"] != "preparing":
+                view = _load_preparation(
+                    connection, project_id, workspace_id, work_item_id,
+                )
+                assert view is not None
                 connection.execute("COMMIT")
-                return existing
+                return view
             identity = connection.execute(
                 "SELECT * FROM agent_identities WHERE project_id=? AND workspace_id=? "
                 "AND identity_id=?",
@@ -782,21 +886,32 @@ class WorkspaceExecutionStore:
             if identity is None:
                 _fail("identity_not_found")
             now = _now()
-            preparation_id = _new_id("pre_")
-            checkout_id = _new_id("chk_")
             lease_id = _new_id("les_")
+            if prep is None:
+                preparation_id = _new_id("pre_")
+                checkout_id = _new_id("chk_")
+                connection.execute(
+                    "INSERT INTO work_item_preparations VALUES "
+                    "(?,?,?,?,?,1,?,?,NULL,'prepared',1,?,?)",
+                    (
+                        preparation_id, project_id, workspace_id, work_item_id,
+                        identity_id, checkout_id, lease_id, now, now,
+                    ),
+                )
+            else:
+                preparation_id = prep["preparation_id"]
+                checkout_id = prep["checkout_id"]
+                if connection.execute(
+                    "UPDATE work_item_preparations SET lease_id=?, state='prepared', "
+                    "revision=revision+1, updated_at=? WHERE preparation_id=? "
+                    "AND state='preparing'",
+                    (lease_id, now, preparation_id),
+                ).rowcount != 1:
+                    _fail("checkout_conflict")
             fence = "sha256:" + _digest({
                 "checkout_id": checkout_id, "identity_id": identity_id,
                 "generation": 1, "nonce": secrets.token_hex(16),
             })
-            connection.execute(
-                "INSERT INTO work_item_preparations VALUES "
-                "(?,?,?,?,?,1,?,?,NULL,'prepared',1,?,?)",
-                (
-                    preparation_id, project_id, workspace_id, work_item_id,
-                    identity_id, checkout_id, lease_id, now, now,
-                ),
-            )
             connection.execute(
                 "INSERT INTO managed_checkouts VALUES (?,?,?,?,?,?,?,?,1,?)",
                 (
@@ -883,6 +998,70 @@ class WorkspaceExecutionStore:
             native_receipt=None,
         )
 
+    def fail_attach(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_revision: int,
+    ) -> PreparationView:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        expected_revision = _revision(expected_revision)
+        connection = _write_txn(self.path)
+        try:
+            prep = connection.execute(
+                "SELECT * FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is None:
+                _fail("preparation_not_found")
+            if int(prep["revision"]) != expected_revision:
+                _fail("stale_revision")
+            if prep["state"] != "attaching":
+                if prep["state"] == "prepared":
+                    view = _load_preparation(
+                        connection, project_id, workspace_id, work_item_id,
+                    )
+                    connection.execute("COMMIT")
+                    assert view is not None
+                    return view
+                _fail("lease_conflict")
+            now = _now()
+            new_revision = expected_revision + 1
+            if prep["attachment_id"]:
+                connection.execute(
+                    "UPDATE runtime_attachments SET status='detached', "
+                    "revision=revision+1, updated_at=? WHERE attachment_id=?",
+                    (now, prep["attachment_id"]),
+                )
+            if connection.execute(
+                "UPDATE work_item_preparations SET state='prepared', revision=?, "
+                "updated_at=? WHERE preparation_id=? AND revision=? "
+                "AND state='attaching'",
+                (new_revision, now, prep["preparation_id"], expected_revision),
+            ).rowcount != 1:
+                _fail("stale_revision")
+            view = _load_preparation(
+                connection, project_id, workspace_id, work_item_id,
+            )
+            assert view is not None
+            connection.execute("COMMIT")
+            return view
+        except WorkspaceExecutionError:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection.in_transaction:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            _fail("store_write_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
     def _transition_runtime(
         self, project_id: str, workspace_id: str, work_item_id: str,
         expected_revision: int, *, action: str, session_name: str | None,
@@ -911,15 +1090,10 @@ class WorkspaceExecutionStore:
             now = _now()
             new_revision = expected_revision + 1
             if action == "attach":
-                if prep["state"] not in {"prepared", "detached"} and not (
-                    prep["state"] == "connected_readonly"
-                ):
-                    if prep["state"] == "connected_readonly":
-                        pass
-                    elif prep["state"] in {"attaching", "outcome_unknown"}:
-                        _fail("lease_conflict")
-                    else:
-                        _fail("lease_conflict")
+                if prep["state"] not in {
+                    "prepared", "detached", "outcome_unknown", "connected_readonly",
+                }:
+                    _fail("lease_conflict")
                 if prep["state"] == "connected_readonly":
                     view = _load_preparation(
                         connection, project_id, workspace_id, work_item_id,

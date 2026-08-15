@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -92,19 +93,6 @@ class ExecutionService:
         )
         if identity is None:
             _fail("identity_not_found")
-        existing = self.store.get_preparation(
-            project_id=project_id, workspace_id=workspace_id,
-            work_item_id=work_item_id,
-        )
-        if existing is not None:
-            if existing.identity.identity_id != identity_id:
-                _fail("checkout_conflict")
-            self.store.remember(
-                project_id=project_id, workspace_id=workspace_id,
-                scope="preparation.create", idempotency_key=idempotency_key,
-                request=request, response=existing.public_dict(),
-            )
-            return existing.public_dict()
         source = self._source_path(project_id, workspace_id)
         try:
             exact = self.checkout.inspect_source(source)
@@ -112,29 +100,57 @@ class ExecutionService:
             _fail(exc.code)
         root = Path(self.worktrees_root)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        checkout_id = "chk_" + secrets.token_hex(16)
-        dest = root / "managed-checkouts" / checkout_id
-        created = self._saga(
-            kind="checkout.create",
-            subject_type="work_item",
-            subject_id=work_item_id,
-            project_id=project_id,
-            workspace_id=workspace_id,
-            request=request,
-            provider_kind="git",
-            step_id="create-worktree",
-            action=lambda: self.checkout.create_checkout(
-                source_path=source, checkout_path=dest, expected_head=exact.head,
-            ),
+        claim = self.store.claim_prepare(
+            project_id=project_id, workspace_id=workspace_id,
+            work_item_id=work_item_id, identity_id=identity_id,
         )
+        if claim.status == "ready" and claim.item is not None:
+            payload = claim.item.public_dict()
+            self.store.remember(
+                project_id=project_id, workspace_id=workspace_id,
+                scope="preparation.create", idempotency_key=idempotency_key,
+                request=request, response=payload,
+            )
+            return payload
+        if claim.status == "pending":
+            payload = self._await_prepared(
+                project_id, workspace_id, work_item_id,
+            )
+            self.store.remember(
+                project_id=project_id, workspace_id=workspace_id,
+                scope="preparation.create", idempotency_key=idempotency_key,
+                request=request, response=payload,
+            )
+            return payload
+        dest = root / "managed-checkouts" / str(claim.checkout_id)
         try:
+            created = self._saga(
+                kind="checkout.create",
+                subject_type="work_item",
+                subject_id=work_item_id,
+                project_id=project_id,
+                workspace_id=workspace_id,
+                request=request,
+                provider_kind="git",
+                step_id="create-worktree",
+                action=lambda: self.checkout.create_checkout(
+                    source_path=source, checkout_path=dest, expected_head=exact.head,
+                ),
+            )
             view = self.store.complete_preparation(
                 project_id=project_id, workspace_id=workspace_id,
                 work_item_id=work_item_id, identity_id=identity_id,
                 source_head=created.head, source_tree=created.tree,
                 internal_path=created.path, operation_id=None,
             )
-        except exec_store.WorkspaceExecutionError:
+        except (
+            checkout_mod.CheckoutError, exec_store.WorkspaceExecutionError,
+            ExecutionServiceError,
+        ):
+            self.store.abort_prepare(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, checkout_id=str(claim.checkout_id),
+            )
             checkout_mod._discard_unregistered(source, dest)
             raise
         payload = view.public_dict()
@@ -163,6 +179,20 @@ class ExecutionService:
         )
         if replay is not None:
             return replay
+        current = self.store.get_preparation(
+            project_id=project_id, workspace_id=workspace_id,
+            work_item_id=work_item_id,
+        )
+        if (
+            current is not None
+            and current.state == "attaching"
+            and current.revision == expected_revision
+        ):
+            current = self.store.fail_attach(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=expected_revision,
+            )
+            expected_revision = current.revision
         view, attachment, checkout = self.store.begin_attach(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id, expected_revision=expected_revision,
@@ -178,26 +208,45 @@ class ExecutionService:
             return payload
         spec = self.harness.build_launch_spec(Path(checkout.internal_path))
         spec.assert_readonly()
-        evidence = self._saga(
-            kind="runtime.attach",
-            subject_type="attachment",
-            subject_id=attachment.attachment_id,
-            project_id=project_id,
-            workspace_id=workspace_id,
-            request=request,
-            provider_kind="herdr",
-            step_id="attach-readonly",
-            action=lambda: self.harness.attach_readonly(
-                session=self.session_name,
-                checkout_path=Path(checkout.internal_path),
-                display_name=view.identity.display_name,
-            ),
-            on_unknown=lambda: self.store.mark_unknown(
+        try:
+            evidence = self._saga(
+                kind="runtime.attach",
+                subject_type="attachment",
+                subject_id=attachment.attachment_id,
+                project_id=project_id,
+                workspace_id=workspace_id,
+                request=request,
+                provider_kind="herdr",
+                step_id="attach-readonly",
+                action=lambda: self.harness.attach_readonly(
+                    session=self.session_name,
+                    checkout_path=Path(checkout.internal_path),
+                    display_name=view.identity.display_name,
+                ),
+                on_unknown=lambda: self.store.mark_unknown(
+                    project_id=project_id, workspace_id=workspace_id,
+                    work_item_id=work_item_id, expected_revision=view.revision,
+                ),
+            )
+        except ExecutionServiceError as exc:
+            if exc.code in {
+                "runtime_unavailable", "runtime_identity_unverified", "process_exited",
+            }:
+                latest = self.store.get_preparation(
+                    project_id=project_id, workspace_id=workspace_id,
+                    work_item_id=work_item_id,
+                )
+                if latest is not None and latest.state == "attaching":
+                    self.store.fail_attach(
+                        project_id=project_id, workspace_id=workspace_id,
+                        work_item_id=work_item_id, expected_revision=latest.revision,
+                    )
+            raise
+        if evidence.identity_verified is not True:
+            self.store.fail_attach(
                 project_id=project_id, workspace_id=workspace_id,
                 work_item_id=work_item_id, expected_revision=view.revision,
-            ),
-        )
-        if evidence.identity_verified is not True:
+            )
             _fail("runtime_identity_unverified")
         finished = self.store.finish_attach(
             project_id=project_id, workspace_id=workspace_id,
@@ -264,6 +313,23 @@ class ExecutionService:
             request=request, response=payload,
         )
         return payload
+
+    def _await_prepared(
+        self, project_id: str, workspace_id: str, work_item_id: str,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            item = self.store.get_preparation(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id,
+            )
+            if item is not None and item.state == "prepared":
+                return item.public_dict()
+            if item is None:
+                _fail("checkout_conflict")
+            time.sleep(0.02)
+        _fail("store_write_failed")
+        raise AssertionError("unreachable")
 
     def _close(self, attachment, checkout) -> dict[str, object]:
         if not attachment.pane_id or not attachment.session_name:

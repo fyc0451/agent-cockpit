@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -45,6 +47,9 @@ class _FakeHarness:
 
     def attach_readonly(self, *, session, checkout_path, instance_id=None, display_name="codex"):
         self.calls.append("attach")
+        if getattr(self, "fail_once", False):
+            self.fail_once = False
+            raise harness_mod.HarnessError("runtime_unavailable")
         pane = "pane-live"
         self.panes[pane] = str(checkout_path)
         return harness_mod.AttachmentEvidence(
@@ -168,3 +173,67 @@ def test_dirty_source_is_zero_write(tmp_path: Path) -> None:
     ) is None
     with sqlite3.connect(operations.path) as connection:
         assert connection.execute("SELECT count(*) FROM operations").fetchone()[0] == 0
+
+
+def test_concurrent_same_key_prepare_creates_one_worktree(tmp_path: Path) -> None:
+    service, project, workspace, item, source, _harness, _operations = _world(tmp_path)
+    member = service.create_member(
+        project.project_id, workspace.workspace_id, display_name="Atlas",
+        idempotency_key="member",
+    )
+    barrier = Barrier(2)
+
+    def worker():
+        barrier.wait()
+        return service.prepare(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            identity_id=member.item.identity_id, idempotency_key="same",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in [pool.submit(worker) for _ in range(2)]]
+    assert results[0] == results[1]
+    assert results[0]["state"] == "prepared"
+    root = tmp_path / "worktrees" / "managed-checkouts"
+    dests = [path for path in root.iterdir() if path.is_dir()]
+    assert len(dests) == 1
+    assert dests[0].name == results[0]["checkout"]["checkout_id"]
+    with sqlite3.connect(service.store.path) as connection:
+        assert connection.execute("SELECT count(*) FROM work_item_preparations").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM managed_checkouts").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM idempotency_records").fetchone()[0] == 2
+    after = checkout_mod.GitCheckoutProvider().inspect_source(source)
+    assert after.clean is True
+
+
+def test_known_attach_failure_returns_to_retryable_prepared(tmp_path: Path) -> None:
+    service, project, workspace, item, _source, harness, _operations = _world(tmp_path)
+    member = service.create_member(
+        project.project_id, workspace.workspace_id, display_name="Atlas",
+        idempotency_key="member",
+    )
+    prepared = service.prepare(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="prep",
+    )
+    harness.fail_once = True
+    with pytest.raises(service_mod.ExecutionServiceError) as failed:
+        service.attach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=prepared["revision"], idempotency_key="att-fail",
+        )
+    assert failed.value.code == "runtime_unavailable"
+    after_fail = service.get_preparation(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+    )
+    assert after_fail.state == "prepared"
+    assert after_fail.lease is not None
+    assert after_fail.lease.status == "reserved"
+    retried = service.attach(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        expected_revision=after_fail.revision, idempotency_key="att-retry",
+    )
+    assert retried["state"] == "connected_readonly"
+    assert retried["attachment"]["identity_verified"] is True
