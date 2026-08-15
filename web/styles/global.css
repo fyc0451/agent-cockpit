@@ -305,10 +305,16 @@ pre {
   margin-bottom: 14px;
 }
 
-.rail-section--nested {
-  margin: 6px 0 0;
-  padding-left: 10px;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+.rail-tree-workspace {
+  min-width: 0;
+}
+
+.rail-item--nested {
+  padding-left: 28px;
+}
+
+.rail-mobile-nav {
+  display: none;
 }
 
 .rail-heading {
@@ -365,7 +371,8 @@ button.rail-item {
   text-align: left;
 }
 
-.rail-section > button.rail-item {
+.rail-section > button.rail-item,
+.rail-scroll > button.rail-item {
   width: 100%;
 }
 
@@ -1669,12 +1676,6 @@ button.rail-item {
     margin: 0;
   }
 
-  .rail-section--nested {
-    margin: 0;
-    padding-left: 0;
-    border-left: 0;
-  }
-
   .rail-item {
     padding: 8px;
   }
@@ -1696,8 +1697,16 @@ button.rail-item {
     font-size: 11px;
   }
 
-  .rail-section > button.rail-item {
+  .rail-section > button.rail-item,
+  .rail-scroll > button.rail-item {
     width: auto;
+  }
+
+  .rail-mobile-nav {
+    display: flex;
+    flex-direction: row;
+    gap: 2px;
+    margin: 0;
   }
 
   .rail-tree {
