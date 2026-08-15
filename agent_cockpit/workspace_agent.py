@@ -15,6 +15,16 @@ from . import herdr_client, next_profile
 
 
 ALLOWED_KINDS = frozenset({"codex", "claude", "kimi", "opencode", "grok"})
+
+# P1：公共 transcript 的启动段（head）不得泄露 launcher 命令/argv/trust
+# override/canonical 路径。launcher echo 只出现在 pane 输出最前几行；对话
+# 正文（含用户/Agent 引用的命令与路径）逐字保留，不做全文粗暴过滤。
+_LAUNCHER_HEAD_LINES = 8
+_TRUST_SIGNATURE = ("projects={", "trust_level=")
+_LAUNCHER_PATH_CONTEXT_RE = re.compile(
+    r"(?i)working[ _]directory|workdir|cwd", re.UNICODE,
+)
+_LAUNCHER_CD_RE = re.compile(r"^\s*[$❯>%~]?\s*(?:cd|pushd)\b")
 MAX_PROMPT_LENGTH = 16_384
 _MAX_REPLAYS = 256
 _RETRYABLE_REPLAY = "__retryable_reconcile__"
@@ -343,7 +353,10 @@ class WorkspaceAgentController:
                 live = self._live(session, checked["instance_id"], checked["kind"])
                 if live is not None:
                     result = self._public(
-                        checked, live, self._transcript(session, live.pane_id),
+                        checked, live, self._transcript(
+                            session, live.pane_id,
+                            canonical_path=authority.canonical_path, kind=checked["kind"],
+                        ),
                     )
                     self._remember(replay_key, payload, result)
                     return result
@@ -387,7 +400,10 @@ class WorkspaceAgentController:
                 raise WorkspaceAgentError("agent_start_failed")
             result = self._public(
                 checked, live,
-                self._transcript(session, live.pane_id, required=False),
+                self._transcript(
+                    session, live.pane_id, required=False,
+                    canonical_path=authority.canonical_path, kind=checked["kind"],
+                ),
             )
             self._remember(replay_key, payload, result)
             return result
@@ -409,7 +425,10 @@ class WorkspaceAgentController:
             if live is None:
                 raise WorkspaceAgentError("agent_not_found")
             return self._public(
-                descriptor, live, self._transcript(session, live.pane_id),
+                descriptor, live, self._transcript(
+                    session, live.pane_id,
+                    canonical_path=authority.canonical_path, kind=descriptor["kind"],
+                ),
             )
 
     def prompt(
@@ -458,7 +477,10 @@ class WorkspaceAgentController:
                 raise WorkspaceAgentError("agent_send_outcome_unknown")
             result = self._public(
                 descriptor, live,
-                self._transcript(session, live.pane_id, required=False),
+                self._transcript(
+                    session, live.pane_id, required=False,
+                    canonical_path=authority.canonical_path, kind=descriptor["kind"],
+                ),
             )
             self._prompt_receipts.complete_success(
                 project_id, workspace_id, agent_id, key, payload, result,
@@ -620,6 +642,7 @@ class WorkspaceAgentController:
 
     def _transcript(
         self, session: str, pane_id: str, *, required: bool = True,
+        canonical_path: str | None = None, kind: str | None = None,
     ) -> str:
         try:
             value = self._read_provider(session, pane_id, lines=100, is_agent=True)
@@ -631,7 +654,41 @@ class WorkspaceAgentController:
             if not required:
                 return ""
             raise WorkspaceAgentError("workspace_agent_unavailable")
-        return value["output"]
+        return self._scrub_launcher_head(value["output"], canonical_path, kind)
+
+    @staticmethod
+    def _scrub_launcher_head(
+        text: str, canonical_path: str | None, kind: str | None,
+    ) -> str:
+        """Drop launcher-echo lines from the transcript head only.
+
+        启动 echo/banner 只出现在输出最前 _LAUNCHER_HEAD_LINES 行；命中规则：
+        含 trust override 签名（服务端专属 token）、canonical 路径与 kind/
+        目录字样同时出现、或 cd <path> 形态。对话正文不过滤，用户与 Agent
+        回复中的命令、路径逐字保留（增量轮询/刷新恢复走同一路径）。
+        """
+        if not text:
+            return text
+        path = (
+            canonical_path
+            if isinstance(canonical_path, str) and canonical_path
+            else None
+        )
+        kind_re = re.compile(r"\b" + re.escape(kind) + r"\b") if kind else None
+        lines = text.split("\n")
+        head, body = lines[:_LAUNCHER_HEAD_LINES], lines[_LAUNCHER_HEAD_LINES:]
+        kept: list[str] = []
+        for line in head:
+            if any(signature in line for signature in _TRUST_SIGNATURE):
+                continue
+            if path and path in line and (
+                (kind_re is not None and kind_re.search(line) is not None)
+                or _LAUNCHER_PATH_CONTEXT_RE.search(line) is not None
+                or _LAUNCHER_CD_RE.match(line) is not None
+            ):
+                continue
+            kept.append(line)
+        return "\n".join(kept + body)
 
     @staticmethod
     def _provider_success(value: object) -> bool:

@@ -85,6 +85,7 @@ class Runtime:
         self.send_error: object | None = None
         self.send_delay = 0.02
         self.read_error: object | None = None
+        self.read_output: str = "user\nassistant"
         self.send_active = 0
         self.max_send_active = 0
         self.recovery_calls: list[tuple[str, str, str]] = []
@@ -196,7 +197,7 @@ class Runtime:
             raise self.read_error
         if self.read_error is not None:
             return self.read_error
-        return {"available": True, "output": "user\nassistant"}
+        return {"available": True, "output": self.read_output}
 
 
 def controller(runtime: Runtime, *, registry: Registry | None = None):
@@ -1585,3 +1586,96 @@ def test_bootstrap_cleanup_keeps_process_owned_until_exit_is_confirmed(
         assert herdr_client._SESSION_BOOTSTRAP_PROCESSES[session] is process
     finally:
         herdr_client._SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
+
+
+# ── P1：公共 transcript 不得泄露 launcher 命令/argv/trust override/canonical 路径 ──
+
+_LAUNCHER_ECHO_SINGLE = (
+    "$ codex -c 'projects={\"/repo/shared\"={trust_level=\"trusted\"}}'\n"
+    "user: 你好\n"
+    "assistant: 已就绪\n"
+)
+_LAUNCHER_ECHO_SOFT_WRAP = (
+    "$ codex -c 'projects={\"/repo/shared\"\n"
+    "={trust_level=\"trusted\"}}'\n"
+    "user: 继续\n"
+    "assistant: 完成\n"
+)
+_LAUNCHER_ECHO_BANNER = (
+    "Working directory: /repo/shared\n"
+    "$ codex -C /repo/shared\n"
+    "user: hi\n"
+    "assistant: hello\n"
+)
+_CONVERSATION_WITH_COMMANDS = (
+    "user: 跑一下 $ codex --version 好吗\n"
+    "assistant: $ codex --version\ncodex-cli 0.147.0\n"
+    "assistant: 见 /repo/shared/README.md 第 3 行\n"
+)
+
+
+def _started_agent(runtime: Runtime):
+    ctrl = controller(runtime)
+    value = ctrl.start(
+        PROJECT, WORKSPACE_A, kind="codex", idempotency_key="leak-1",
+    )
+    agent_id = value["agent_id"]
+    return ctrl, agent_id
+
+
+def test_transcript_hides_single_line_launcher_echo_and_trust_override() -> None:
+    runtime = Runtime()
+    runtime.read_output = _LAUNCHER_ECHO_SINGLE
+    ctrl, agent_id = _started_agent(runtime)
+    value = ctrl.get(PROJECT, WORKSPACE_A, agent_id)
+    text = value["transcript"]
+    assert "projects={" not in text
+    assert "trust_level" not in text
+    assert PATH not in text
+    assert "user: 你好" in text and "assistant: 已就绪" in text
+
+
+def test_transcript_hides_soft_wrapped_trust_override() -> None:
+    runtime = Runtime()
+    runtime.read_output = _LAUNCHER_ECHO_SOFT_WRAP
+    ctrl, agent_id = _started_agent(runtime)
+    text = ctrl.get(PROJECT, WORKSPACE_A, agent_id)["transcript"]
+    assert "projects={" not in text and "trust_level" not in text
+    assert "user: 继续" in text and "assistant: 完成" in text
+
+
+def test_transcript_hides_startup_banner_paths_across_kinds() -> None:
+    runtime = Runtime()
+    runtime.read_output = _LAUNCHER_ECHO_BANNER
+    ctrl, agent_id = _started_agent(runtime)
+    text = ctrl.get(PROJECT, WORKSPACE_A, agent_id)["transcript"]
+    assert PATH not in text
+    assert "user: hi" in text and "assistant: hello" in text
+
+
+def test_transcript_preserves_conversation_with_commands_verbatim() -> None:
+    runtime = Runtime()
+    runtime.read_output = _CONVERSATION_WITH_COMMANDS
+    ctrl, agent_id = _started_agent(runtime)
+    text = ctrl.get(PROJECT, WORKSPACE_A, agent_id)["transcript"]
+    assert text == _CONVERSATION_WITH_COMMANDS
+
+
+def test_transcript_scrubbed_on_working_visible_fallback() -> None:
+    runtime = Runtime()
+    runtime.read_output = _LAUNCHER_ECHO_SINGLE
+    ctrl, agent_id = _started_agent(runtime)
+    runtime.live[agent_id]["status"] = "working"
+    text = ctrl.get(PROJECT, WORKSPACE_A, agent_id)["transcript"]
+    assert "projects={" not in text and "trust_level" not in text and PATH not in text
+
+
+def test_start_response_transcript_is_scrubbed_too() -> None:
+    runtime = Runtime()
+    runtime.read_output = _LAUNCHER_ECHO_SINGLE
+    ctrl = controller(runtime)
+    started = ctrl.start(
+        PROJECT, WORKSPACE_A, kind="codex", idempotency_key="leak-2b",
+    )
+    text = started["transcript"]
+    assert "projects={" not in text and "trust_level" not in text and PATH not in text
