@@ -185,8 +185,10 @@ function expectSelected(body: string) {
 }
 
 async function expectSavedWork(body: string) {
-  await screen.findByText('工作已保存')
-  expect(screen.getByText(body)).toHaveTextContent(body)
+  const status = await screen.findByRole('status')
+  expect(status).toHaveTextContent('工作已保存')
+  const article = screen.getByRole('article')
+  expect(within(article).getByText(body)).toBeVisible()
 }
 
 async function fillFields(fields: { body: string; acceptance: string; constraints: string }) {
@@ -216,13 +218,13 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
     renderWorkApp(HOME)
 
     await fillFields(FIRST)
-    fireEvent.click(screen.getByRole('button', { name: '保存工作' }))
+    await user.click(screen.getByRole('button', { name: '保存工作' }))
     await expectSavedWork(FIRST.body)
 
     const createAgain = await screen.findByRole('button', { name: '新建任务' })
     await user.click(createAgain)
     await fillFields(SECOND)
-    fireEvent.click(screen.getByRole('button', { name: '保存工作' }))
+    await user.click(screen.getByRole('button', { name: '保存工作' }))
     await expectSavedWork(SECOND.body)
 
     const posts = calls.filter((c) => c.method === 'POST' && c.url === WORK_ITEMS)
