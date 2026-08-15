@@ -514,6 +514,34 @@ class WorkspaceWorkStore:
             if connection is not None:
                 connection.close()
 
+    def get_work_item(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+    ) -> WorkItemAggregate | None:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = _connect(self.path, write=False)
+            _require_current_schema(connection)
+            connection.execute("BEGIN")
+            row = connection.execute(
+                _LIST_SQL.replace(
+                    "WHERE t.project_id = ? AND t.workspace_id = ?",
+                    "WHERE t.project_id = ? AND t.workspace_id = ? "
+                    "AND w.work_item_id = ?",
+                ),
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            return None if row is None else _row_to_aggregate(row)
+        except WorkspaceWorkError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
 
 def initialize(path: Path) -> WorkspaceWorkStore:
     path = _path(path)

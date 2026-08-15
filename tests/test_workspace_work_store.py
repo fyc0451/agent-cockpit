@@ -319,3 +319,26 @@ def test_commit_failure_leaves_zero_rows(store, path: Path, monkeypatch) -> None
     assert _counts(path) == {
         "message_threads": 0, "messages": 0, "work_items": 0, "idempotency_records": 0,
     }
+
+
+def test_get_work_item_is_scope_safe(store) -> None:
+    created = _create(store)
+    found = store.get_work_item(
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        work_item_id=created.item.work_item["work_item_id"],
+    )
+    assert found is not None
+    assert found.public_dict() == created.item.public_dict()
+    assert store.get_work_item(
+        project_id=OTHER_PROJECT, workspace_id=WORKSPACE,
+        work_item_id=created.item.work_item["work_item_id"],
+    ) is None
+    assert store.get_work_item(
+        project_id=PROJECT, workspace_id=OTHER_WORKSPACE,
+        work_item_id=created.item.work_item["work_item_id"],
+    ) is None
+    missing = store.get_work_item(
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        work_item_id="wrk_" + "e" * 32,
+    )
+    assert missing is None
