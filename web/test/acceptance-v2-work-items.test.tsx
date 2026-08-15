@@ -5,8 +5,8 @@ import { renderApp } from './helpers'
 
 /**
  * 用户验收增强 · 同一 Workspace 多项任务（冻结需求，base 上产品尚未实现）：
- * 保存第一项 -> 新建第二项 -> 列表可见并可来回切换；刷新从 GET 恢复；
- * URL 合法 work id 保持选择，非法 id 安全回退；失败保留草稿与同一 intent key；
+ * 保存第一项 -> 新建任务 -> 列表可见并可来回切换；刷新从 GET 恢复；
+ * URL 合法 work id 精确选中；HOME/非法 id 回退列表最新一项（items 最后一项）；
  * 双击不重复；零 Agent API。
  */
 
@@ -160,13 +160,13 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存工作' }))
     expect(await screen.findByText(FIRST.body)).toBeInTheDocument()
 
-    const createAgain = await screen.findByRole('button', { name: '新建工作' })
+    const createAgain = await screen.findByRole('button', { name: '新建任务' })
     await user.click(createAgain)
     await fillFields(SECOND)
     fireEvent.click(screen.getByRole('button', { name: '保存工作' }))
     expect(await screen.findByText(SECOND.body)).toBeInTheDocument()
 
-    const workList = await screen.findByRole('list', { name: /工作|任务/ })
+    const workList = await screen.findByRole('list', { name: '任务' })
     const entries = within(workList).getAllByRole('button')
     expect(entries.map((el) => el.textContent)).toEqual(
       expect.arrayContaining([expect.stringContaining(FIRST.body), expect.stringContaining(SECOND.body)]),
@@ -176,11 +176,19 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
     await user.click(within(workList).getByRole('button', { name: new RegExp(FIRST.body) }))
     expect(screen.getByText(FIRST.acceptance)).toBeInTheDocument()
     expect(screen.queryByText(SECOND.acceptance)).not.toBeInTheDocument()
+    expect(within(workList).getByRole('button', { name: new RegExp(FIRST.body) })).toHaveAttribute(
+      'aria-current',
+      'true',
+    )
 
     await user.click(within(workList).getByRole('button', { name: new RegExp(SECOND.body) }))
     expect(screen.getByText(SECOND.acceptance)).toBeInTheDocument()
     expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
-    expect(screen.queryByText(SECOND.constraints)).toBeInTheDocument()
+    expect(screen.getByText(SECOND.constraints)).toBeInTheDocument()
+    expect(within(workList).getByRole('button', { name: new RegExp(SECOND.body) })).toHaveAttribute(
+      'aria-current',
+      'true',
+    )
 
     expect(calls.some((c) => AGENT_URL.test(c.url))).toBe(false)
     expect(screen.queryByText(/正在执行|工作中|已完成任务/)).not.toBeInTheDocument()
@@ -194,21 +202,35 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
     expect(await screen.findByText(SECOND.body)).toBeInTheDocument()
     expect(screen.getByText(SECOND.acceptance)).toBeInTheDocument()
     expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
-    const selected = screen.getByRole('button', { name: new RegExp(SECOND.body) })
-    expect(selected).toHaveAttribute('aria-current', 'true')
+    expect(screen.getByRole('button', { name: new RegExp(SECOND.body) })).toHaveAttribute(
+      'aria-current',
+      'true',
+    )
 
     cleanup()
     renderApp(HOME)
-    const list = await screen.findByRole('list', { name: /工作|任务/ })
-    expect(within(list).getByRole('button', { name: new RegExp(FIRST.body) })).toBeInTheDocument()
-    expect(within(list).getByRole('button', { name: new RegExp(SECOND.body) })).toBeInTheDocument()
+    const homeList = await screen.findByRole('list', { name: '任务' })
+    expect(within(homeList).getByRole('button', { name: new RegExp(FIRST.body) })).toBeInTheDocument()
+    expect(within(homeList).getByRole('button', { name: new RegExp(SECOND.body) })).toBeInTheDocument()
+    expect(screen.getByText(SECOND.acceptance)).toBeInTheDocument()
+    expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
+    expect(within(homeList).getByRole('button', { name: new RegExp(SECOND.body) })).toHaveAttribute(
+      'aria-current',
+      'true',
+    )
 
     cleanup()
     renderApp(`${HOME}?work=not-a-real-id`)
-    expect(await screen.findByRole('list', { name: /工作|任务/ })).toBeInTheDocument()
+    const fallbackList = await screen.findByRole('list', { name: '任务' })
     expect(screen.queryByText('工作空间不存在或不属于当前项目')).not.toBeInTheDocument()
     expect(screen.queryByText(/no mock/i)).not.toBeInTheDocument()
-    expect(screen.getByText(FIRST.body)).toBeInTheDocument()
+    expect(screen.getByText(SECOND.body)).toBeInTheDocument()
+    expect(screen.getByText(SECOND.acceptance)).toBeInTheDocument()
+    expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
+    expect(within(fallbackList).getByRole('button', { name: new RegExp(SECOND.body) })).toHaveAttribute(
+      'aria-current',
+      'true',
+    )
     expect(calls.filter((c) => c.url.startsWith(WORK_ITEMS) && c.method === 'GET').length).toBeGreaterThan(0)
     expect(calls.some((c) => AGENT_URL.test(c.url))).toBe(false)
   })
