@@ -61,16 +61,16 @@ function currentWorkspaceNode() {
   const nodes = [...rail().querySelectorAll('.rail-tree-workspace')] as HTMLElement[]
   expect(nodes.length, '必须存在 .rail-tree-workspace').toBeGreaterThan(0)
   const current = nodes.find((node) =>
-    Boolean(within(node).queryByRole('link', { name: '本机工作区', exact: true })),
+    Boolean(within(node).queryByRole('link', { name: /^本机工作区$/ })),
   )
-  expect(current, '当前 Workspace「本机工作区」必须位于 .rail-tree-workspace').toBeTruthy()
-  return current as HTMLElement
+  if (!current) throw new Error('当前 Workspace「本机工作区」必须位于 .rail-tree-workspace')
+  return current
 }
 
 function expectWorkspaceFunctionLinks(ws: HTMLElement) {
-  const work = within(ws).getByRole('link', { name: '工作', exact: true })
-  const files = within(ws).getByRole('link', { name: '文件', exact: true })
-  const terminal = within(ws).getByRole('link', { name: '终端', exact: true })
+  const work = within(ws).getByRole('link', { name: /^工作$/ })
+  const files = within(ws).getByRole('link', { name: /^文件$/ })
+  const terminal = within(ws).getByRole('link', { name: /^终端$/ })
   expect(work).toBeVisible()
   expect(files).toBeVisible()
   expect(terminal).toBeVisible()
@@ -107,7 +107,7 @@ describe('验收 v2 · 项目层级与入口', () => {
     expect(within(nav).getByText('当前项目')).toBeInTheDocument()
     expect(within(nav).getByText('Project One')).toBeInTheDocument()
     const ws = currentWorkspaceNode()
-    expect(within(ws).getByRole('link', { name: '本机工作区', exact: true })).toBeVisible()
+    expect(within(ws).getByRole('link', { name: /^本机工作区$/ })).toBeVisible()
     expectWorkspaceFunctionLinks(ws)
     expect(within(nav).queryByTitle('Agent')).toBeNull()
   })
@@ -120,7 +120,7 @@ describe('验收 v2 · 项目层级与入口', () => {
     const manage =
       screen.queryByRole('button', { name: '管理项目' }) ??
       screen.queryByRole('link', { name: '管理项目' })
-    expect(manage, '必须存在「管理项目」').not.toBeNull()
+    if (!manage) throw new Error('必须存在「管理项目」')
     expect(manage).not.toBe(primary)
     await user.click(manage)
     expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
@@ -136,7 +136,7 @@ describe('验收 v2 · 项目层级与入口', () => {
     const add =
       screen.queryByRole('button', { name: '添加项目' }) ??
       screen.queryByRole('link', { name: '添加项目' })
-    expect(add, '必须存在「添加项目」').not.toBeNull()
+    if (!add) throw new Error('必须存在「添加项目」')
     expect(add).not.toBe(primary)
     await user.click(add)
     expect(await screen.findByRole('dialog', { name: '添加项目' })).toBeVisible()
