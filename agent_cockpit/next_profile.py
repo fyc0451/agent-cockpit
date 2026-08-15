@@ -206,10 +206,10 @@ def _read_bound_config(directory: int, expected: os.stat_result) -> bytes:
 
 
 def _write_bound_config(directory: int) -> None:
-    temporary = f".config.toml.tmp-{os.getpid()}-{os.urandom(8).hex()}"
     descriptor: int | None = None
     temporary_exists = False
     try:
+        temporary = f".config.toml.tmp-{os.getpid()}-{os.urandom(8).hex()}"
         descriptor = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW

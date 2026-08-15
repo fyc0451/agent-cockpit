@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import socket
 import sqlite3
@@ -326,6 +327,84 @@ def test_private_herdr_config_rejects_unsafe_file_and_parent(
     with pytest.raises(next_profile.NextProfileError, match="next_herdr_config_unsafe"):
         next_profile.ensure_private_herdr_config(values)
     assert not config.exists()
+
+
+def test_private_herdr_config_random_name_failure_is_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    gate.ensure_runtime_roots(values)
+    config = Path(values["HERDR_CONFIG_PATH"])
+    config.parent.mkdir(mode=0o700)
+    config.write_text("unchanged\n", encoding="ascii")
+    config.chmod(0o600)
+    monkeypatch.setattr(
+        next_profile.os,
+        "urandom",
+        lambda _size: (_ for _ in ()).throw(OSError("random unavailable")),
+    )
+
+    with pytest.raises(
+        next_profile.NextProfileError,
+        match="next_herdr_config_write_failed",
+    ):
+        next_profile.ensure_private_herdr_config(values)
+    assert config.read_text(encoding="ascii") == "unchanged\n"
+    assert list(config.parent.glob(".config.toml.tmp-*")) == []
+
+
+@pytest.mark.parametrize("ready_restart", (False, True))
+def test_ephemeral_config_failure_invalidates_ready_evidence_first(
+    ready_restart: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    launcher = ephemeral_module()
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o700)
+    token = "a" * 32
+    environment = launcher._environment(root, 12345, token)
+    old_catalog: bytes | None = None
+    if ready_restart:
+        assert launcher._initialize_layout(root) is True
+        lock = launcher.InstanceLock(environment).acquire()
+        lock.release()
+        config = root / "herdr" / "config.toml"
+        config.write_text("onboarding = false\n", encoding="ascii")
+        config.chmod(0o600)
+        next_profile.activate_ephemeral_runtime_root(root)
+        next_profile.finalize_ephemeral_runtime_root(environment)
+        old_catalog = (root / next_profile.EPHEMERAL_CATALOG).read_bytes()
+
+    observed_states: list[str] = []
+
+    def fail_config(_environment: dict[str, str]) -> None:
+        marker = json.loads(
+            (root / next_profile.EPHEMERAL_MARKER).read_text(encoding="ascii")
+        )
+        observed_states.append(marker["state"])
+        raise next_profile.NextProfileError("next_herdr_config_write_failed")
+
+    monkeypatch.setattr(launcher.os, "setsid", lambda: None)
+    monkeypatch.setattr(launcher.secrets, "token_hex", lambda _size: token)
+    monkeypatch.setattr(
+        launcher.next_profile, "ensure_private_herdr_config", fail_config,
+    )
+
+    assert launcher.main(["--runtime-root", str(root)]) == 2
+    assert capsys.readouterr().err == "next_herdr_config_write_failed\n"
+    marker = json.loads(
+        (root / next_profile.EPHEMERAL_MARKER).read_text(encoding="ascii")
+    )
+    assert observed_states == ["running"]
+    assert marker["state"] == "running"
+    assert marker["catalog_sha256"] is None
+    if old_catalog is None:
+        assert not (root / next_profile.EPHEMERAL_CATALOG).exists()
+    else:
+        assert (root / next_profile.EPHEMERAL_CATALOG).read_bytes() == old_catalog
 
 
 def test_runtime_symlink_is_rejected(tmp_path: Path) -> None:
