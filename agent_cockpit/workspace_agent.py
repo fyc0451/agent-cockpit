@@ -22,7 +22,7 @@ ALLOWED_KINDS = frozenset({"codex", "claude", "kimi", "opencode", "grok"})
 _LAUNCHER_HEAD_LINES = 8
 _TRUST_SIGNATURE = ("projects={", "trust_level=")
 _LAUNCHER_PATH_CONTEXT_RE = re.compile(
-    r"(?i)working[ _]directory|workdir|cwd", re.UNICODE,
+    r"(?i)working[ _]directory|workdir|\bcwd\b", re.UNICODE,
 )
 _LAUNCHER_CD_RE = re.compile(r"^\s*[$❯>%~]?\s*(?:cd|pushd)\b")
 MAX_PROMPT_LENGTH = 16_384

@@ -1679,3 +1679,33 @@ def test_start_response_transcript_is_scrubbed_too() -> None:
     )
     text = started["transcript"]
     assert "projects={" not in text and "trust_level" not in text and PATH not in text
+
+
+_LAUNCHER_ECHO_CWD_LINE = (
+    "cwd: /repo/shared\n"
+    "user: 开始\n"
+    "assistant: 好的\n"
+)
+_HEAD_CONVERSATION_COMMANDS = (
+    "user: 帮我跑 $ codex --version\n"
+    "assistant: $ codex --version\ncodex-cli 0.147.0\n"
+    "assistant: 配置见 /repo/shared/config.toml\n"
+    "user: 收到\n"
+)
+
+
+def test_transcript_hides_cwd_startup_line() -> None:
+    runtime = Runtime()
+    runtime.read_output = _LAUNCHER_ECHO_CWD_LINE
+    ctrl, agent_id = _started_agent(runtime)
+    text = ctrl.get(PROJECT, WORKSPACE_A, agent_id)["transcript"]
+    assert PATH not in text
+    assert "user: 开始" in text and "assistant: 好的" in text
+
+
+def test_head_normal_conversation_with_commands_and_paths_kept() -> None:
+    runtime = Runtime()
+    runtime.read_output = _HEAD_CONVERSATION_COMMANDS
+    ctrl, agent_id = _started_agent(runtime)
+    text = ctrl.get(PROJECT, WORKSPACE_A, agent_id)["transcript"]
+    assert text == _HEAD_CONVERSATION_COMMANDS
