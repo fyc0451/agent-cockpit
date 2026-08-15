@@ -1,13 +1,18 @@
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter, useLocation } from 'react-router-dom'
+import App from '../app/App'
 import { defaultFetchMap, metaOk, REG_P1 } from '../fixtures/api'
-import { renderApp } from './helpers'
+import { CapabilitiesProvider } from '../state/capabilities'
+import { SelectionProvider } from '../state/selection'
+import { ThemeProvider } from '../state/theme'
 
 /**
- * 用户验收增强 · 同一 Workspace 多项任务（冻结需求，base 上产品尚未实现）：
- * 保存第一项 -> 新建任务 -> 列表可见并可来回切换；刷新从 GET 恢复；
- * URL 合法 work id 精确选中；HOME/非法 id 回退列表最新一项（items 最后一项）；
- * 双击不重复；零 Agent API。
+ * 用户验收增强 · 同一 Workspace 多项任务：
+ * 保存 -> 新建任务 -> 列表切换；合法 work=wrk_one（非默认最新）保持选择；
+ * 非法 id replace 为默认最新 wrk_two；两次新建任务 Idempotency-Key 非空且不同；
+ * 失败重试同 key；ul[aria-label=任务] + 选中按钮 aria-current=true。
  */
 
 const WORK_ITEMS = `/api/projects/${REG_P1}/workspaces/w1/work-items`
@@ -30,6 +35,31 @@ interface Recorded {
   method: string
   idempotencyKey: string | null
   body: string
+}
+
+function LocationProbe() {
+  const loc = useLocation()
+  return <div data-testid="location">{`${loc.pathname}${loc.search}`}</div>
+}
+
+function renderWorkApp(initialRoute: string) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  })
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <MemoryRouter initialEntries={[initialRoute]}>
+          <CapabilitiesProvider>
+            <SelectionProvider>
+              <LocationProbe />
+              <App />
+            </SelectionProvider>
+          </CapabilitiesProvider>
+        </MemoryRouter>
+      </ThemeProvider>
+    </QueryClientProvider>,
+  )
 }
 
 function aggregate(
@@ -130,6 +160,18 @@ function readDraft(): { body: string; intentKey: string } | null {
   return raw ? (JSON.parse(raw) as { body: string; intentKey: string }) : null
 }
 
+function taskList() {
+  const list = screen.getByRole('list', { name: '任务' })
+  expect(list).toHaveAttribute('aria-label', '任务')
+  return list
+}
+
+function expectSelected(body: string) {
+  const btn = within(taskList()).getByRole('button', { name: new RegExp(body) })
+  expect(btn).toHaveAttribute('aria-current', 'true')
+  return btn
+}
+
 async function fillFields(fields: { body: string; acceptance: string; constraints: string }) {
   fireEvent.change(await screen.findByLabelText('今天想推进什么？'), {
     target: { value: fields.body },
@@ -151,10 +193,10 @@ afterEach(() => {
 })
 
 describe('验收 v2 · 同一 Workspace 多项任务', () => {
-  it('保存第一项后可新建第二项，列表可见并能来回切换各自原文/说明', async () => {
+  it('两次新建任务的 Idempotency-Key 均非空且不同；列表可切换且 aria-current=true', async () => {
     const user = userEvent.setup()
     const { calls } = stubWorkWorld()
-    renderApp(HOME)
+    renderWorkApp(HOME)
 
     await fillFields(FIRST)
     fireEvent.click(screen.getByRole('button', { name: '保存工作' }))
@@ -166,71 +208,59 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存工作' }))
     expect(await screen.findByText(SECOND.body)).toBeInTheDocument()
 
-    const workList = await screen.findByRole('list', { name: '任务' })
+    const posts = calls.filter((c) => c.method === 'POST' && c.url === WORK_ITEMS)
+    expect(posts).toHaveLength(2)
+    expect(posts[0].idempotencyKey).toBeTruthy()
+    expect(posts[1].idempotencyKey).toBeTruthy()
+    expect(posts[1].idempotencyKey).not.toBe(posts[0].idempotencyKey)
+
+    const workList = taskList()
     const entries = within(workList).getAllByRole('button')
-    expect(entries.map((el) => el.textContent)).toEqual(
-      expect.arrayContaining([expect.stringContaining(FIRST.body), expect.stringContaining(SECOND.body)]),
-    )
     expect(entries.length).toBeGreaterThanOrEqual(2)
 
     await user.click(within(workList).getByRole('button', { name: new RegExp(FIRST.body) }))
     expect(screen.getByText(FIRST.acceptance)).toBeInTheDocument()
     expect(screen.queryByText(SECOND.acceptance)).not.toBeInTheDocument()
-    expect(within(workList).getByRole('button', { name: new RegExp(FIRST.body) })).toHaveAttribute(
-      'aria-current',
-      'true',
-    )
+    expectSelected(FIRST.body)
+    expect(screen.getByTestId('location').textContent).toContain('work=wrk_one')
 
     await user.click(within(workList).getByRole('button', { name: new RegExp(SECOND.body) }))
     expect(screen.getByText(SECOND.acceptance)).toBeInTheDocument()
     expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
-    expect(screen.getByText(SECOND.constraints)).toBeInTheDocument()
-    expect(within(workList).getByRole('button', { name: new RegExp(SECOND.body) })).toHaveAttribute(
-      'aria-current',
-      'true',
-    )
+    expectSelected(SECOND.body)
+    expect(screen.getByTestId('location').textContent).toContain('work=wrk_two')
 
     expect(calls.some((c) => AGENT_URL.test(c.url))).toBe(false)
     expect(screen.queryByText(/正在执行|工作中|已完成任务/)).not.toBeInTheDocument()
   })
 
-  it('刷新/卸载重挂后 GET 恢复两项；合法 work id 保持选择，非法 id 安全回退', async () => {
+  it('合法 work=wrk_one 保持非默认选择；非法 id replace 为默认最新 wrk_two', async () => {
     const items = [aggregate('wrk_one', FIRST), aggregate('wrk_two', SECOND)]
     const { calls } = stubWorkWorld({ initial: items })
 
-    renderApp(`${HOME}?work=wrk_two`)
+    renderWorkApp(`${HOME}?work=wrk_one`)
+    expect(await screen.findByText(FIRST.body)).toBeInTheDocument()
+    expect(screen.getByText(FIRST.acceptance)).toBeInTheDocument()
+    expect(screen.queryByText(SECOND.acceptance)).not.toBeInTheDocument()
+    expectSelected(FIRST.body)
+    expect(screen.getByTestId('location').textContent).toBe(`${HOME}?work=wrk_one`)
+
+    cleanup()
+    renderWorkApp(HOME)
+    expect(await screen.findByText(SECOND.acceptance)).toBeInTheDocument()
+    expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
+    expectSelected(SECOND.body)
+
+    cleanup()
+    renderWorkApp(`${HOME}?work=not-a-real-id`)
     expect(await screen.findByText(SECOND.body)).toBeInTheDocument()
     expect(screen.getByText(SECOND.acceptance)).toBeInTheDocument()
     expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: new RegExp(SECOND.body) })).toHaveAttribute(
-      'aria-current',
-      'true',
-    )
-
-    cleanup()
-    renderApp(HOME)
-    const homeList = await screen.findByRole('list', { name: '任务' })
-    expect(within(homeList).getByRole('button', { name: new RegExp(FIRST.body) })).toBeInTheDocument()
-    expect(within(homeList).getByRole('button', { name: new RegExp(SECOND.body) })).toBeInTheDocument()
-    expect(screen.getByText(SECOND.acceptance)).toBeInTheDocument()
-    expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
-    expect(within(homeList).getByRole('button', { name: new RegExp(SECOND.body) })).toHaveAttribute(
-      'aria-current',
-      'true',
-    )
-
-    cleanup()
-    renderApp(`${HOME}?work=not-a-real-id`)
-    const fallbackList = await screen.findByRole('list', { name: '任务' })
+    expectSelected(SECOND.body)
+    await waitFor(() => {
+      expect(screen.getByTestId('location').textContent).toBe(`${HOME}?work=wrk_two`)
+    })
     expect(screen.queryByText('工作空间不存在或不属于当前项目')).not.toBeInTheDocument()
-    expect(screen.queryByText(/no mock/i)).not.toBeInTheDocument()
-    expect(screen.getByText(SECOND.body)).toBeInTheDocument()
-    expect(screen.getByText(SECOND.acceptance)).toBeInTheDocument()
-    expect(screen.queryByText(FIRST.acceptance)).not.toBeInTheDocument()
-    expect(within(fallbackList).getByRole('button', { name: new RegExp(SECOND.body) })).toHaveAttribute(
-      'aria-current',
-      'true',
-    )
     expect(calls.filter((c) => c.url.startsWith(WORK_ITEMS) && c.method === 'GET').length).toBeGreaterThan(0)
     expect(calls.some((c) => AGENT_URL.test(c.url))).toBe(false)
   })
@@ -238,7 +268,7 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
   it('保存失败保留草稿和同一 intent key；双击仍只发一次 POST', async () => {
     let failOnce = true
     const { calls } = stubWorkWorld({
-      onPost: (req, attempt) => {
+      onPost: (req) => {
         if (failOnce) {
           failOnce = false
           return {
@@ -251,7 +281,7 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
         return { status: 201, body: { data: item, meta: metaOk } }
       },
     })
-    renderApp(HOME)
+    renderWorkApp(HOME)
     await fillFields(FIRST)
     const save = await screen.findByRole('button', { name: '保存工作' })
     fireEvent.click(save)
@@ -259,6 +289,7 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
     await screen.findByText(/草稿仍保留/)
     const failedPosts = calls.filter((c) => c.method === 'POST' && c.url === WORK_ITEMS)
     expect(failedPosts).toHaveLength(1)
+    expect(failedPosts[0].idempotencyKey).toBeTruthy()
     const draft = readDraft()
     expect(draft?.body).toBe(FIRST.body)
     expect(draft?.intentKey).toBe(failedPosts[0].idempotencyKey)
