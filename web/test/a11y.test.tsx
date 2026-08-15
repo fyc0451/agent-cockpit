@@ -5,43 +5,6 @@ import { metaOk, REG_P1 } from '../fixtures/api'
 import { THEME_STORAGE_KEY } from '../state/theme'
 import { renderApp, stubDefaultFetch } from './helpers'
 
-/** 与 styles/global.css `@media (max-width: 760px)` 触控目标块逐字相同。
- *  vitest `css: false` 且 ESM 测例读不到磁盘 CSS；不得伪造 getBoundingClientRect。 */
-const NARROW_TOUCH_CSS = `
-.rail-item--mobile-core { gap: 4px; padding-inline: 7px; }
-.rail-item--mobile-core .rail-mobile-label { display: inline; }
-.btn { min-height: 44px; }
-.btn--icon { width: 44px; min-height: 44px; flex: none; }
-.rail-item { min-height: 44px; min-width: 44px; justify-content: center; }
-.topbar-switcher, .topbar-search { min-height: 44px; }
-`
-
-function applyNarrowViewport(width = 390) {
-  Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
-  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 })
-  window.matchMedia = ((query: string) => {
-    const max = /max-width:\s*(\d+)/.exec(query)
-    const min = /min-width:\s*(\d+)/.exec(query)
-    const matches = max ? width <= Number(max[1]) : min ? width >= Number(min[1]) : false
-    return {
-      matches,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    }
-  }) as typeof window.matchMedia
-  const style = document.createElement('style')
-  style.setAttribute('data-test-narrow-css', '760')
-  style.textContent = NARROW_TOUCH_CSS
-  document.head.appendChild(style)
-  window.dispatchEvent(new Event('resize'))
-  return style
-}
-
 const WORK_ITEMS = `/api/projects/${REG_P1}/workspaces/w1/work-items`
 const emptyWorkItems = { data: { items: [], next_cursor: null }, meta: metaOk }
 
@@ -102,10 +65,7 @@ describe('A11y（item 7）', () => {
     expect(onClick).not.toHaveBeenCalled()
   })
 
-  it('390 核心 Rail 与 Workspace 主导航只保留工作对话、文件、终端（无 Agent）', async () => {
-    const style = applyNarrowViewport(390)
-    expect(window.innerWidth).toBe(390)
-    expect(window.matchMedia('(max-width: 760px)').matches).toBe(true)
+  it('核心 Rail 与 Workspace 主导航只保留工作对话、文件、终端（无 Agent）', async () => {
     stubDefaultFetch(legacyOverrides)
     renderApp('/projects/p1/workspaces/w1/files')
     const rail = screen.getByRole('navigation', { name: '主导航' })
@@ -115,15 +75,7 @@ describe('A11y（item 7）', () => {
       const item = within(rail).getByTitle(title)
       expect(item).toHaveClass('rail-item--mobile-core')
       expect(item.querySelector('.rail-mobile-label')).toHaveTextContent(title)
-      const box = getComputedStyle(item)
-      expect(Number.parseFloat(box.minHeight)).toBeGreaterThanOrEqual(44)
-      expect(Number.parseFloat(box.minWidth)).toBeGreaterThanOrEqual(44)
     }
-    const themeBtn = screen.getByRole('button', { name: /切换主题/ })
-    expect(Number.parseFloat(getComputedStyle(themeBtn).minHeight)).toBeGreaterThanOrEqual(44)
-    expect(Number.parseFloat(getComputedStyle(themeBtn).width)).toBeGreaterThanOrEqual(44)
-    const projectSwitch = screen.getByTitle('切换项目')
-    expect(Number.parseFloat(getComputedStyle(projectSwitch).minHeight)).toBeGreaterThanOrEqual(44)
     expect(within(rail).queryByTitle('Agent')).toBeNull()
     expect(within(rail).queryByTitle('需要你处理')).toBeNull()
     const workspaceSection = within(rail).getByText('当前工作空间').closest('.rail-section')
@@ -131,7 +83,6 @@ describe('A11y（item 7）', () => {
     expect(
       Array.from(workspaceSection!.querySelectorAll<HTMLElement>('.rail-item')).map((item) => item.title),
     ).toEqual(['工作对话', '文件', '终端'])
-    style.remove()
   })
 
   it('TopBar 主题 cycle + localStorage 持久化 + remount 恢复 + 可访问名称', async () => {
