@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from . import herdr_client
+
 
 PROVIDER = "local_herdr"
 HARNESS = "codex_terminal_managed_v1"
@@ -82,19 +84,30 @@ class LocalCodexHarness:
     def __init__(
         self,
         *,
-        ensure_session: Callable[[str], Any],
-        start_agent: Callable[..., dict[str, Any]],
-        get_descriptor: Callable[..., dict[str, Any] | None],
-        snapshot: Callable[[str], dict[str, Any]],
-        close_pane: Callable[[str, str], dict[str, Any]],
-        new_instance_id: Callable[[], str],
+        ensure_session: Callable[..., Any] | None = None,
+        start_agent: Callable[..., dict[str, Any]] | None = None,
+        get_launch_descriptor: Callable[..., dict[str, Any] | None] | None = None,
+        get_launch_descriptor_by_instance: (
+            Callable[..., dict[str, Any] | None] | None
+        ) = None,
+        snapshot: Callable[..., dict[str, Any]] | None = None,
+        close_pane: Callable[..., dict[str, Any]] | None = None,
+        new_instance_id: Callable[[], str] | None = None,
     ) -> None:
-        self._ensure_session = ensure_session
-        self._start_agent = start_agent
-        self._get_descriptor = get_descriptor
-        self._snapshot = snapshot
-        self._close_pane = close_pane
-        self._new_instance_id = new_instance_id
+        self._ensure_session = ensure_session or herdr_client.ensure_session
+        self._start_agent = start_agent or herdr_client.start_agent
+        self._get_launch_descriptor = (
+            get_launch_descriptor or herdr_client.get_launch_descriptor
+        )
+        self._get_launch_descriptor_by_instance = (
+            get_launch_descriptor_by_instance
+            or herdr_client.get_launch_descriptor_by_instance
+        )
+        self._snapshot = snapshot or herdr_client.session_snapshot
+        self._close_pane = close_pane or herdr_client.close_pane
+        self._new_instance_id = (
+            new_instance_id or herdr_client.new_agent_instance_id
+        )
         for name in _FORBIDDEN:
             if hasattr(self, name):
                 _fail("invalid_argument")
@@ -112,18 +125,27 @@ class LocalCodexHarness:
     def attach_readonly(
         self, *, session: str, checkout_path: Path, instance_id: str | None = None,
         display_name: str = "codex",
+        project_id: str | None = None, workspace_id: str | None = None,
     ) -> AttachmentEvidence:
         spec = self.build_launch_spec(checkout_path)
         if instance_id is None:
             instance_id = self._new_instance_id()
+        if project_id is not None or workspace_id is not None:
+            _fail("invalid_argument")
         try:
-            self._ensure_session(session)
+            self._ensure_session(session=session)
         except Exception:
             _fail("runtime_unavailable")
         try:
             started = self._start_agent(
-                session, spec.cwd, KIND, spec.argv_text(), instance_id,
-                display_name,
+                session=session,
+                workdir=spec.cwd,
+                agent=KIND,
+                args=spec.argv_text(),
+                instance_id=instance_id,
+                label=display_name,
+                project_id=None,
+                workspace_id=None,
             )
         except Exception:
             _fail("runtime_unavailable")
@@ -145,7 +167,7 @@ class LocalCodexHarness:
     ) -> AttachmentEvidence:
         spec = self.build_launch_spec(checkout_path)
         try:
-            snap = self._snapshot(session)
+            snap = self._snapshot(session=session)
         except Exception:
             _fail("runtime_unavailable")
         panes = snap.get("panes") if isinstance(snap, dict) else None
@@ -161,27 +183,45 @@ class LocalCodexHarness:
         cwd = pane.get("cwd") or pane.get("foreground_cwd")
         if not isinstance(cwd, str) or Path(cwd) != Path(spec.cwd):
             _fail("runtime_identity_unverified")
-        try:
-            descriptor = self._get_descriptor(instance_id)
-        except Exception:
-            descriptor = None
-        if isinstance(descriptor, dict):
-            workdir = descriptor.get("workdir") or descriptor.get("cwd")
-            if workdir is not None and Path(str(workdir)) != Path(spec.cwd):
-                _fail("runtime_identity_unverified")
+        if not _descriptor_matches(
+            self._load_descriptors(session=session, pane_id=pane_id,
+                                   instance_id=instance_id),
+            session=session, pane_id=pane_id, instance_id=instance_id,
+            cwd=spec.cwd,
+        ):
+            _fail("runtime_identity_unverified")
         return AttachmentEvidence(
-            session, instance_id, pane_id, spec.cwd, PROVIDER, HARNESS, False,
+            session, instance_id, pane_id, spec.cwd, PROVIDER, HARNESS, True,
         )
+
+    def _load_descriptors(
+        self, *, session: str, pane_id: str, instance_id: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        try:
+            by_pane = self._get_launch_descriptor(session=session, pane_id=pane_id)
+        except Exception:
+            _fail("runtime_identity_unverified")
+        try:
+            by_instance = self._get_launch_descriptor_by_instance(
+                instance_id=instance_id,
+            )
+        except Exception:
+            _fail("runtime_identity_unverified")
+        if by_pane is not None and not isinstance(by_pane, dict):
+            _fail("runtime_identity_unverified")
+        if by_instance is not None and not isinstance(by_instance, dict):
+            _fail("runtime_identity_unverified")
+        return by_pane, by_instance
 
     def detach(self, *, session: str, pane_id: str) -> None:
         try:
-            closed = self._close_pane(session, pane_id)
+            closed = self._close_pane(session=session, pane_id=pane_id)
         except Exception:
             _fail("runtime_unavailable")
         if isinstance(closed, dict) and closed.get("available") is False:
             _fail("runtime_unavailable")
         try:
-            snap = self._snapshot(session)
+            snap = self._snapshot(session=session)
         except Exception:
             _fail("runtime_unavailable")
         panes = snap.get("panes") if isinstance(snap, dict) else None
@@ -189,3 +229,27 @@ class LocalCodexHarness:
             _fail("runtime_unavailable")
         if any(isinstance(pane, dict) and pane.get("pane_id") == pane_id for pane in panes):
             _fail("process_exited")
+
+
+def _descriptor_matches(
+    pair: tuple[dict[str, Any] | None, dict[str, Any] | None], *,
+    session: str, pane_id: str, instance_id: str, cwd: str,
+) -> bool:
+    by_pane, by_instance = pair
+    if by_pane is None and by_instance is None:
+        return False
+    for descriptor in (by_pane, by_instance):
+        if descriptor is None:
+            continue
+        workdir = descriptor.get("workdir") or descriptor.get("cwd")
+        if not isinstance(workdir, str) or Path(workdir) != Path(cwd):
+            return False
+        if descriptor.get("session") not in (None, session):
+            return False
+        if descriptor.get("pane_id") not in (None, "", pane_id):
+            return False
+        if descriptor.get("instance_id") not in (None, instance_id):
+            return False
+        if descriptor.get("kind") not in (None, KIND):
+            return False
+    return True

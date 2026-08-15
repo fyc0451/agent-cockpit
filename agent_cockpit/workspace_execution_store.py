@@ -495,12 +495,23 @@ def _lease_view(row: sqlite3.Row | None) -> LeaseView | None:
     )
 
 
+def _attachment_verified(row: sqlite3.Row) -> bool:
+    raw = row["native_receipt"]
+    if not isinstance(raw, str) or not raw.startswith("{"):
+        return False
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("identity_verified") is True
+
+
 def _attachment_view(row: sqlite3.Row | None) -> AttachmentView | None:
     if row is None:
         return None
     return AttachmentView(
         row["attachment_id"], row["status"], row["provider"], row["harness"],
-        int(row["generation"]), False, int(row["revision"]),
+        int(row["generation"]), _attachment_verified(row), int(row["revision"]),
     )
 
 
@@ -832,12 +843,16 @@ class WorkspaceExecutionStore:
     def finish_attach(
         self, *, project_id: str, workspace_id: str, work_item_id: str,
         expected_revision: int, pane_id: str, instance_id: str,
-        native_receipt: str,
+        native_receipt: str, identity_verified: bool,
     ) -> PreparationView:
+        if identity_verified is not True:
+            _fail("runtime_identity_unverified")
         return self._complete_runtime(
             project_id, workspace_id, work_item_id, expected_revision,
             status="connected_readonly", pane_id=pane_id, instance_id=instance_id,
-            native_receipt=native_receipt,
+            native_receipt=_canonical({
+                "identity_verified": True, "receipt": native_receipt,
+            }),
         )
 
     def begin_detach(

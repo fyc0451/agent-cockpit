@@ -197,10 +197,13 @@ class ExecutionService:
                 work_item_id=work_item_id, expected_revision=view.revision,
             ),
         )
+        if evidence.identity_verified is not True:
+            _fail("runtime_identity_unverified")
         finished = self.store.finish_attach(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id, expected_revision=view.revision,
             pane_id=evidence.pane_id, instance_id=evidence.instance_id,
+            identity_verified=True,
             native_receipt=_sha({
                 "session": evidence.session, "cwd": evidence.cwd,
             }),

@@ -47,13 +47,13 @@ class _FakeHarness:
         self.panes["pane-live"] = str(checkout_path)
         return harness_mod.AttachmentEvidence(
             session, instance_id or "inst-1", "pane-live", str(checkout_path),
-            "local_herdr", "codex_terminal_managed_v1", False,
+            "local_herdr", "codex_terminal_managed_v1", True,
         )
 
     def observe(self, *, session, instance_id, pane_id, checkout_path):
         return harness_mod.AttachmentEvidence(
             session, instance_id, pane_id, str(checkout_path),
-            "local_herdr", "codex_terminal_managed_v1", False,
+            "local_herdr", "codex_terminal_managed_v1", True,
         )
 
     def detach(self, *, session, pane_id):
@@ -152,6 +152,7 @@ def test_http_contract_prepare_attach_detach_and_hidden_fields(tmp_path: Path) -
     )
     assert attached.status_code == 200
     assert attached.json()["data"]["state"] == "connected_readonly"
+    assert attached.json()["data"]["attachment"]["identity_verified"] is True
     assert "pane-live" not in attached.text
     stale = http.post(
         prep_url + "/detach", json={"expected_revision": 1},

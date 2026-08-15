@@ -49,14 +49,14 @@ class _FakeHarness:
         self.panes[pane] = str(checkout_path)
         return harness_mod.AttachmentEvidence(
             session, instance_id or "inst-1", pane, str(checkout_path),
-            "local_herdr", "codex_terminal_managed_v1", False,
+            "local_herdr", "codex_terminal_managed_v1", True,
         )
 
     def observe(self, *, session, instance_id, pane_id, checkout_path):
         self.calls.append("observe")
         return harness_mod.AttachmentEvidence(
             session, instance_id, pane_id, str(checkout_path),
-            "local_herdr", "codex_terminal_managed_v1", False,
+            "local_herdr", "codex_terminal_managed_v1", True,
         )
 
     def detach(self, *, session, pane_id):
@@ -124,6 +124,7 @@ def test_prepare_attach_detach_leaves_source_and_operation_receipts(tmp_path: Pa
     )
     assert attached["state"] == "connected_readonly"
     assert attached["attachment"]["harness"] == "codex_terminal_managed_v1"
+    assert attached["attachment"]["identity_verified"] is True
     assert "pane-live" not in str(attached)
     detached = service.detach(
         project.project_id, workspace.workspace_id, item.work_item["work_item_id"],

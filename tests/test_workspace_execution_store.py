@@ -122,14 +122,23 @@ def test_stale_revision_rejects_attach(store, tmp_path: Path) -> None:
     assert view.state == "attaching"
     assert attachment.status == "attaching"
     assert checkout.internal_path == str(dest)
+    with pytest.raises(store_module.WorkspaceExecutionError) as unverified:
+        store.finish_attach(
+            project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=WORK,
+            expected_revision=view.revision, pane_id="hidden-pane",
+            instance_id="hidden-instance", native_receipt="secret",
+            identity_verified=False,
+        )
+    assert unverified.value.code == "runtime_identity_unverified"
     finished = store.finish_attach(
         project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=WORK,
         expected_revision=view.revision, pane_id="hidden-pane",
         instance_id="hidden-instance", native_receipt="secret",
+        identity_verified=True,
     )
     public = finished.public_dict()
     assert public["state"] == "connected_readonly"
     assert public["attachment"]["status"] == "connected_readonly"
-    assert public["attachment"]["identity_verified"] is False
+    assert public["attachment"]["identity_verified"] is True
     assert "hidden-pane" not in str(public)
     assert "secret" not in str(public)
