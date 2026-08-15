@@ -15,15 +15,18 @@ declare const process: { env: Record<string, string | undefined> }
  * Project/RepoLocation/Workspace，含 slug / display_name / workspaces）。
  * 任一未设置时整组 skip，不产出假绿。
  *
- * 运行配方：
+ * 运行配方（本文件位于 web/e2e-live，即 playwright.live.config.ts 的 testDir；
+ * 该 config 自身会校验 PLAYWRIGHT_LIVE_BASE_URL 存在且非 8790/18790）：
  *   1. runtime_root=$(mktemp -d) && chmod 700 "$runtime_root"
  *   2. scripts/next_ephemeral_server.py --runtime-root "$runtime_root" --source-sha <HEAD>
  *   3. agent_cockpit.project_registry_store 播种 1 个 Project 与 4 个 Workspace
  *      （nav / tasks / mobile / honesty），把 JSON 内联到 env
- *   4. npm --prefix web run build，再以 env 指向该 server 运行本文件。
+ *   4. npm --prefix web run build，然后在 web/ 下运行：
+ *      PLAYWRIGHT_LIVE_BASE_URL=<base_url> PLAYWRIGHT_LIVE_FOCUS_SEED=<seed> \
+ *        npx playwright test -c playwright.live.config.ts checkpoint-a-acceptance-v2.spec.ts
  *
- * 四个用例各自独占一个 Workspace，互不共享状态：默认
- * web/playwright.config.ts 的 fullyParallel=true 下也安全，不依赖文件顺序。
+ * 四个用例各自独占一个 Workspace，互不共享状态：任意 workers/parallelism
+ * 设置下都安全（playwright.live.config.ts 为 workers=1 串行），不依赖文件顺序。
  *
  * 选择器按最终 hierarchy 合同（550f9e9）分视口取「可见 role」：
  *   - 桌面（>760px）：工作/文件/终端 嵌套在项目树里，用
