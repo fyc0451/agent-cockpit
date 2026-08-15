@@ -350,6 +350,36 @@ pre {
   cursor: not-allowed;
 }
 
+button.rail-item {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.rail-section > button.rail-item {
+  width: 100%;
+}
+
+.rail-tree {
+  display: none;
+}
+
+.rail-tree--open,
+.rail-tree--context {
+  display: block;
+}
+
+.rail-tree-group {
+  min-width: 0;
+}
+
+.rail-tree-backdrop {
+  display: none;
+}
+
 .rail-icon {
   width: 16px;
   text-align: center;
@@ -896,6 +926,86 @@ pre {
   margin-top: 20px;
   color: var(--success);
   font-size: 12px;
+}
+
+.focus-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.focus-task-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.focus-task-list-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.focus-task-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.focus-task-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.focus-task-row--current {
+  border-color: var(--accent);
+  background: var(--accent-2);
+}
+
+.focus-task-row-body {
+  display: block;
+  width: 100%;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.focus-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.focus-task-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px 0 0;
+}
+
+.focus-task-links a {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .raw-json {
@@ -1572,6 +1682,51 @@ pre {
     overflow: hidden;
     white-space: nowrap;
     font-size: 11px;
+  }
+
+  .rail-section > button.rail-item {
+    width: auto;
+  }
+
+  .rail-tree {
+    display: none;
+  }
+
+  .rail-tree--open {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 56px;
+    z-index: 30;
+    max-height: min(70vh, 28rem);
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 10px 12px 14px;
+    background: var(--nav);
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 -12px 32px rgba(15, 23, 42, 0.18);
+  }
+
+  .rail-tree--open .rail-item,
+  .rail-tree--open .rail-item--mobile-hidden {
+    display: flex;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .rail-tree--open .rail-label {
+    display: inline;
+  }
+
+  .rail-tree-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0 0 56px;
+    z-index: 29;
+    border: 0;
+    background: rgba(15, 23, 42, 0.35);
   }
 
   .runtime-mini {

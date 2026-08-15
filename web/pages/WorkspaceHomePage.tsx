@@ -18,6 +18,8 @@ function WorkspaceBody({ project, workspace }: { project: Project; workspace: Wo
         key={`${projectId}/${workspaceId}`}
         projectId={projectId}
         workspaceId={workspaceId}
+        projectSlug={project.slug ?? ''}
+        workspaceRouteId={workspaceId}
       />
     </section>
   )

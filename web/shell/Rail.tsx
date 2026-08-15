@@ -1,5 +1,7 @@
-import { NavLink } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { NavLink, useLocation } from 'react-router-dom'
 import { isRemoteWorkspace } from '../api/normalize'
+import { useProjectRegistryList } from '../api/registry'
 import { routes } from '../app/routes'
 import { useSelection } from '../state/selection'
 
@@ -33,8 +35,27 @@ function RailLink({
   )
 }
 
+function localWorkspaces(
+  workspaces: { id?: string; name?: string; location?: string; runtime?: string }[] | undefined,
+) {
+  return (workspaces ?? []).filter((item) => !isRemoteWorkspace(item) && item.id)
+}
+
 export function Rail() {
+  const location = useLocation()
   const { projectSlug, workspaceId, project, workspace } = useSelection()
+  const registry = useProjectRegistryList()
+  const [treeOpen, setTreeOpen] = useState(false)
+
+  useEffect(() => {
+    setTreeOpen(false)
+  }, [location.pathname])
+
+  const projects = (registry.data?.data.items ?? []).filter((item) => item.lifecycle !== 'archived')
+  const treeProjects = projectSlug
+    ? projects.filter((item) => item.slug !== projectSlug)
+    : projects
+  const currentWorkspaces = localWorkspaces(project?.workspaces)
 
   return (
     <nav className="rail" aria-label="主导航">
@@ -45,7 +66,46 @@ export function Rail() {
 
       <div className="rail-scroll">
         <div className="rail-section">
-          <RailLink to={routes.projects()} icon="▦" label="项目" mobileCore />
+          <button
+            type="button"
+            className={`rail-item rail-item--mobile-core${treeOpen ? ' rail-item--active' : ''}`}
+            title="项目"
+            aria-expanded={treeOpen}
+            aria-controls="rail-project-tree"
+            onClick={() => setTreeOpen((open) => !open)}
+          >
+            <span className="rail-icon" aria-hidden="true">▦</span>
+            <span className="rail-label ellipsis">项目</span>
+            <span className="rail-mobile-label">项目</span>
+          </button>
+          {treeOpen ? (
+            <button
+              type="button"
+              className="rail-tree-backdrop"
+              aria-label="关闭项目列表"
+              onClick={() => setTreeOpen(false)}
+            />
+          ) : null}
+          <div
+            id="rail-project-tree"
+            className={`rail-tree${treeOpen ? ' rail-tree--open' : ''}${projectSlug ? ' rail-tree--context' : ''}`}
+          >
+            {treeOpen || projectSlug ? (
+              <>
+                {treeProjects.map((item) => (
+                  <RailLink
+                    key={item.project_id}
+                    to={routes.project.workbench(item.slug)}
+                    icon="▣"
+                    label={item.display_name}
+                    mobileHidden
+                  />
+                ))}
+                <RailLink to={routes.projects()} icon="☰" label="管理项目" mobileHidden />
+                <RailLink to={routes.projects({ wizard: true })} icon="+" label="添加项目" mobileHidden />
+              </>
+            ) : null}
+          </div>
         </div>
 
         {projectSlug ? (
@@ -54,17 +114,15 @@ export function Rail() {
             <p className="rail-context rail-label ellipsis" title={project?.name ?? projectSlug}>
               {project?.name ?? projectSlug}
             </p>
-            {(project?.workspaces ?? [])
-              .filter((item) => !isRemoteWorkspace(item))
-              .map((item) => item.id ? (
-                <RailLink
-                  key={item.id}
-                  to={routes.workspace.home(projectSlug, item.id)}
-                  icon="▹"
-                  label={item.name ?? item.id}
-                  mobileHidden
-                />
-              ) : null)}
+            {currentWorkspaces.map((item) => (
+              <RailLink
+                key={item.id}
+                to={routes.workspace.home(projectSlug, item.id!)}
+                icon="▹"
+                label={item.name ?? item.id!}
+                mobileHidden
+              />
+            ))}
           </div>
         ) : null}
 

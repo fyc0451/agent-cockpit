@@ -1,4 +1,5 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '../../api/client'
 import {
@@ -9,6 +10,7 @@ import {
   type WorkspaceWorkListData,
 } from '../../api/workspaceWork'
 import type { ApiResult } from '../../api/client'
+import { routes } from '../../app/routes'
 import { Button } from '../../components/Button'
 import { QueryErrorState } from '../../components/QueryErrorState'
 import { StatusState } from '../../components/StatusState'
@@ -23,11 +25,50 @@ import {
 
 const BODY_MAX = 32_768
 const NOTE_MAX = 8_192
+const WORK_QUERY = 'work'
 
-function SavedWork({ item }: { item: WorkspaceWorkAggregate }) {
+function workItemId(item: WorkspaceWorkAggregate): string {
+  const id = item.work_item.work_item_id
+  if (typeof id === 'string' && id !== '') return id
+  return item.root_message.message_id
+}
+
+function formatCreatedAt(value: unknown): string | null {
+  if (typeof value !== 'string' || value === '') return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function resolveSelected(
+  items: WorkspaceWorkAggregate[],
+  requested: string | null,
+): WorkspaceWorkAggregate | null {
+  if (items.length === 0) return null
+  if (requested) {
+    const match = items.find((item) => workItemId(item) === requested)
+    if (match) return match
+  }
+  return items[items.length - 1] ?? null
+}
+
+function SavedWork({
+  item,
+  filesTo,
+  terminalTo,
+}: {
+  item: WorkspaceWorkAggregate
+  filesTo?: string
+  terminalTo?: string
+}) {
+  const created = formatCreatedAt(item.thread.created_at)
   return (
     <article className="focus-message">
       <p className="focus-message-author">你</p>
+      <p className="focus-task-meta">
+        <span>未分配</span>
+        {created ? <span>{created}</span> : null}
+      </p>
       <p className="focus-message-body">{item.root_message.body}</p>
       {item.work_item.acceptance ? (
         <div className="focus-message-note">
@@ -40,6 +81,12 @@ function SavedWork({ item }: { item: WorkspaceWorkAggregate }) {
           <h3>需要特别注意什么？</h3>
           <p>{item.work_item.constraints}</p>
         </div>
+      ) : null}
+      {filesTo && terminalTo ? (
+        <p className="focus-task-links">
+          <Link to={filesTo}>文件</Link>
+          <Link to={terminalTo}>终端</Link>
+        </p>
       ) : null}
       <p className="focus-saved" role="status">工作已保存</p>
     </article>
@@ -62,12 +109,14 @@ function Composer({
   initialDraft,
   readError,
   onSaved,
+  onCancel,
 }: {
   projectId: string
   workspaceId: string
   initialDraft: WorkDraft
   readError?: unknown
   onSaved: (result: ApiResult<WorkspaceWorkAggregate>) => void
+  onCancel?: () => void
 }) {
   const [draft, setDraft] = useState(initialDraft)
   const [saveError, setSaveError] = useState<unknown>(null)
@@ -145,6 +194,11 @@ function Composer({
       </details>
       <div className="focus-composer-footer">
         <span className="focus-draft-state">{unsaved ? '未保存' : ''}</span>
+        {onCancel ? (
+          <Button type="button" onClick={onCancel} disabled={saving}>
+            取消
+          </Button>
+        ) : null}
         <Button
           variant="primary"
           type="submit"
@@ -162,18 +216,44 @@ function Composer({
 export function FocusConversation({
   projectId,
   workspaceId,
+  projectSlug,
+  workspaceRouteId,
 }: {
   projectId: string
   workspaceId: string
+  projectSlug: string
+  workspaceRouteId: string
 }) {
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
   const queryKey = ['workspace-work-items', projectId, workspaceId] as const
   const [draft] = useState(() => loadWorkDraft(projectId, workspaceId))
+  const [composing, setComposing] = useState(false)
   const query = useQuery({
     queryKey,
     queryFn: () => listWorkspaceWork(projectId, workspaceId),
     retry: (failureCount, error) => error instanceof ApiError && error.retryable && failureCount < 2,
   })
+
+  const items = query.data?.data.items ?? []
+  const requested = searchParams.get(WORK_QUERY)
+  const selected = resolveSelected(items, requested)
+  const selectedId = selected ? workItemId(selected) : null
+  const filesTo = projectSlug && workspaceRouteId
+    ? routes.workspace.files(projectSlug, workspaceRouteId)
+    : undefined
+  const terminalTo = projectSlug && workspaceRouteId
+    ? routes.workspace.terminal(projectSlug, workspaceRouteId)
+    : undefined
+
+  useEffect(() => {
+    if (query.isPending || query.isError) return
+    if (selectedId === requested) return
+    const next = new URLSearchParams(searchParams)
+    if (selectedId) next.set(WORK_QUERY, selectedId)
+    else next.delete(WORK_QUERY)
+    setSearchParams(next, { replace: true })
+  }, [query.isPending, query.isError, requested, selectedId, searchParams, setSearchParams])
 
   const onSaved = (result: ApiResult<WorkspaceWorkAggregate>) => {
     queryClient.setQueryData<ApiResult<WorkspaceWorkListData>>(queryKey, (current) => ({
@@ -183,31 +263,73 @@ export function FocusConversation({
       },
       meta: result.meta,
     }))
+    const next = new URLSearchParams(searchParams)
+    next.set(WORK_QUERY, workItemId(result.data))
+    setSearchParams(next, { replace: true })
+    setComposing(false)
+  }
+
+  const selectWork = (id: string) => {
+    const next = new URLSearchParams(searchParams)
+    next.set(WORK_QUERY, id)
+    setSearchParams(next, { replace: true })
+    setComposing(false)
   }
 
   if (query.isPending) return <StatusState kind="loading" title="正在加载工作对话…" />
 
-  const items = query.data?.data.items ?? []
-  if (query.isError && !hasDraftContent(draft)) {
+  if (query.isError && !hasDraftContent(draft) && items.length === 0) {
     return <QueryErrorState error={query.error} onRetry={() => query.refetch()} />
   }
+
+  const showComposer = items.length === 0 || composing
 
   return (
     <div className="focus-conversation">
       {query.data?.data.next_cursor != null || query.data?.meta?.partial === true ? (
         <StatusState kind="degraded" banner title="工作记录暂未完整加载" />
       ) : null}
-      {items.map((item) => (
-        <SavedWork key={item.root_message.message_id} item={item} />
-      ))}
-      {items.length === 0 ? (
+      {items.length > 0 ? (
+        <section className="focus-task-list" aria-label="已保存的工作">
+          <div className="focus-task-list-head">
+            <h2>任务</h2>
+            <Button type="button" onClick={() => setComposing(true)}>新建任务</Button>
+          </div>
+          <ul>
+            {items.map((item) => {
+              const id = workItemId(item)
+              const created = formatCreatedAt(item.thread.created_at)
+              const current = id === selectedId && !composing
+              return (
+                <li key={id}>
+                  <button
+                    type="button"
+                    className={`focus-task-row${current ? ' focus-task-row--current' : ''}`}
+                    title={item.root_message.body}
+                    onClick={() => selectWork(id)}
+                  >
+                    <span className="focus-task-row-body ellipsis">
+                      {`${item.root_message.body} · 未分配${created ? ` · ${created}` : ''}`}
+                    </span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      ) : null}
+      {showComposer ? (
         <Composer
+          key={`${projectId}/${workspaceId}/${composing ? 'new' : 'empty'}`}
           projectId={projectId}
           workspaceId={workspaceId}
-          initialDraft={draft}
+          initialDraft={loadWorkDraft(projectId, workspaceId)}
           readError={query.error}
           onSaved={onSaved}
+          onCancel={items.length > 0 ? () => setComposing(false) : undefined}
         />
+      ) : selected ? (
+        <SavedWork item={selected} filesTo={filesTo} terminalTo={terminalTo} />
       ) : null}
     </div>
   )
