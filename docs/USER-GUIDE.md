@@ -1,11 +1,17 @@
 # Agent Cockpit 用户手册
 
+> 本文是 **Legacy 0.3.x** 手册，入口为 `http://127.0.0.1:8790`。
+> 当前体验入口是 **Cockpit Next 2.0**：见仓库根 [`README.md`](../README.md)
+> 「Cockpit Next 2.0」与 [`NEXT-DEVELOPMENT.md`](NEXT-DEVELOPMENT.md)。
+> 不要用本文的 `install.sh` 或 `.env` 里的 `COCKPIT_TOKEN` 去启动 Next。
+>
 > 版本：2026-08-07（适配 Cockpit origin/main ≥ 6daf313；Team Hub ≥ f74fb58）。
 > 第 1–4 章人人需要；第 5 章团队模式；第 6–8 章移动端、排障与附录。
 
 ## 阅读指引
 
-- **第一次装**：按 2 → 3 章走一遍，第 4 章当日常手册。
+- **第一次装 Next 2.0**：不要继续本文，回到根 README。
+- **第一次装 Legacy 0.3.x**：按 2 → 3 章走一遍，第 4 章当日常手册。
 - **只加入已有团队**：看 5.1 概念表 + 5.4 成员上手，管理员操作不用管。
 - **搭团队的管理员**：5.1 → 5.3 → 5.5 按顺序读。
 - **出错先查第 7 章 FAQ**，按症状对号入座。

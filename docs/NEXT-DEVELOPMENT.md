@@ -59,14 +59,29 @@ dependencies, build the production Web app, and validate the profile:
 ```bash
 cd "$HOME/github/agent-cockpit-next"
 python3 -m venv .venv
-.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pip install -r requirements.txt
 npm ci --prefix web
 npm run --prefix web build
 cp .env.next.example .env.next
 # Edit COCKPIT_PROJECT_ROOT to the concrete directory containing your Git repositories.
 .venv/bin/python scripts/next_dev.py check --env-file .env.next
-.venv/bin/python -m pytest -q tests/test_next_isolation.py
+.venv/bin/python scripts/next_dev.py start --env-file .env.next
 ```
+
+Text-mode `check`/`start` print `http://127.0.0.1:18790`, the
+`cockpit.token` path (never the file contents), and the empty-overview next
+step **选择代码目录**. `--json` stays a two-key machine contract.
+Do not run `install.sh` against this worktree. Optional LAN bind:
+
+```bash
+install -d -m 700 "$HOME/.config/agent-cockpit-next"
+(umask 077; set -o noclobber; openssl rand -hex 32 > \
+  "$HOME/.config/agent-cockpit-next/cockpit.token")
+```
+
+Then set `COCKPIT_HOST=0.0.0.0` in `.env.next` and open
+`http://<本机局域网IP>:18790`. Ordinary tests use
+`pip install -r requirements-dev.txt` (it includes `requirements.txt`).
 
 `COCKPIT_PROJECT_ROOT` must be an existing canonical directory narrower than
 the whole Home directory. Do not set it to `/`, `/home`, or `${HOME}`. The
@@ -79,12 +94,6 @@ Missing or unsafe configuration fails the launcher check with a stable
 Both `check` and `start` also require `web/dist/index.html` and built assets;
 missing output fails closed with `next_web_build_unavailable`. Run
 `npm run --prefix web build` again after changing the Web app.
-
-Start the source development service only after the checks pass:
-
-```bash
-.venv/bin/python scripts/next_dev.py start --env-file .env.next
-```
 
 ## First use
 

@@ -12,11 +12,12 @@
 
 ## Cockpit Next 2.0（当前本地预览入口）
 
-Next 2.0 是当前体验入口，但目前只作为本地 `next` 预览提供。启动需要
-Git、Python 3.12+、Node.js 20+（含 npm）、正在运行的 Herdr，以及至少一个
+Next 2.0 是当前体验入口，但目前只作为本地 `next` 预览提供。不要对 Next 执行 `install.sh`、
+`upgrade.sh` 或 `launchd.sh`；那些只属于下文 Legacy 0.3.x。
+
+启动需要 Git、Python 3.12+、Node.js 20+（含 npm）、正在运行的 Herdr，以及至少一个
 已经安装并完成登录的 Agent CLI（Codex、Claude、Kimi、OpenCode 或 Grok）。
-运行服务的管理员还需要将本地 `next` checkout/worktree 同步到
-`$HOME/github/agent-cockpit-next`；固定 profile 不接受其他 checkout 路径或分支。
+checkout 必须在 `$HOME/github/agent-cockpit-next`，当前分支必须是 `next`。
 
 ```bash
 cd "$HOME/github/agent-cockpit-next"
@@ -32,23 +33,27 @@ cp .env.next.example .env.next
 .venv/bin/python scripts/next_dev.py start --env-file .env.next
 ```
 
-`start` 在前台运行；保持该终端打开，在浏览器访问
-`http://127.0.0.1:18790`。本机默认无需登录。局域网模式的访问令牌由管理员保存在
-`~/.config/agent-cockpit-next/cockpit.token`，登录时输入该文件内容；不要把令牌写入
-`.env.next`，也不要使用下文旧版的 `COCKPIT_TOKEN` 配置。首次使用按以下步骤完成：
+`start` 在前台运行。保持该终端打开，在浏览器访问 `http://127.0.0.1:18790`。
+本机默认无需登录。空首页选择 **选择代码目录**，选中带 `.git` 的目录后
+**检查并继续** → **确认添加** → **继续创建工作空间** → **创建并打开**，
+再打开 **Agent**，写下任务并点 **开始任务**。同一页查看回复，
+**继续输入下一条任务** 即可延续会话。
 
-1. 在空首页选择 **选择代码目录**。
-2. 选择直接包含项目 `.git` 的目录，点击 **检查并继续**，再点击 **确认添加**。
-3. 点击 **继续创建工作空间**。
-4. 保留默认名称 `main` 或填写更清楚的名称，点击 **创建并打开**。
-5. 打开 **Agent**，选择一个已安装的 Agent，写下要完成的任务，然后点击
-   **开始任务**。
-6. 在同一页查看状态和回复；继续输入下一条任务即可延续会话，刷新页面后也能继续。
+**文件** / **终端** 不是启动 Agent 的前置步骤。
 
-**文件** 用于查看项目内容，**终端** 用于需要手工运行命令的场景；它们不是启动
-Agent 的前置步骤。
+局域网（可选，仍用上面的 check/start，不要改端口）：
 
-完整的 Next profile、局域网登录和开发说明见
+```bash
+install -d -m 700 "$HOME/.config/agent-cockpit-next"
+(umask 077; set -o noclobber; openssl rand -hex 32 > \
+  "$HOME/.config/agent-cockpit-next/cockpit.token")
+```
+
+把 `.env.next` 改成 `COCKPIT_HOST=0.0.0.0` 后重新 `start`。浏览器打开
+`http://<本机局域网IP>:18790`，登录时粘贴 `~/.config/agent-cockpit-next/cockpit.token`
+的内容。不要把令牌写入 `.env.next`，也不要使用下文旧版的 `COCKPIT_TOKEN` 配置。
+
+完整的 Next profile 与开发说明见
 [Cockpit Next development runtime](docs/NEXT-DEVELOPMENT.md)。
 
 ### 公共发布阻塞

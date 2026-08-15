@@ -48,6 +48,66 @@ class IsolationError(RuntimeError):
         super().__init__(code)
 
 
+def error_hint(code: str, values: Mapping[str, str] | None = None) -> str:
+    """One-line Chinese next action for common launcher codes. Never includes secrets."""
+    token_path = (
+        str(token_file_path(values))
+        if values is not None and "COCKPIT_CONFIG_DIR" in values
+        else str(Path.home() / ".config" / "agent-cockpit-next" / TOKEN_FILE_NAME)
+    )
+    hints = {
+        "wrong_worktree": (
+            "必须在 $HOME/github/agent-cockpit-next 运行；固定 profile 不接受其他 checkout 路径。"
+        ),
+        "lan_host_token_required": (
+            f"先创建 {token_path}（0600，仅当前用户）。不要写入 .env.next。"
+        ),
+        "env_keys_mismatch": (
+            "只允许 .env.next.example 那一组键，不要增加 COCKPIT_TOKEN。"
+        ),
+        "next_port_in_use": (
+            "18790 已被占用；不要改端口，先停掉占用该口的 Next 进程后再 start。"
+        ),
+        "next_web_build_unavailable": (
+            "先运行 npm run --prefix web build，确认 web/dist/index.html 存在。"
+        ),
+        "git_baseline_mismatch": (
+            "当前分支必须是 next，且 HEAD 包含固定 baseline。"
+        ),
+        "value_mismatch:COCKPIT_HOST": (
+            "COCKPIT_HOST 只能是 127.0.0.1 或 0.0.0.0。"
+        ),
+        "env_invalid": "检查 .env.next 是否有非法字符、重复键或 HOST 行带空格。",
+        "production_port": "COCKPIT_PORT 不能是 8790；Next 固定为 18790。",
+        "token_file_unsafe": (
+            f"{token_path} 必须是当前用户、0600、非常规链接的普通文件。"
+        ),
+        "token_file_invalid": f"{token_path} 内容格式无效；不要把令牌写进日志。",
+        "token_file_unavailable": f"无法读取 {token_path}。",
+        "venv_missing": "先在仓库根创建 .venv 并 pip install -r requirements.txt。",
+        "next_unit_installed": "不要安装 agent-cockpit-next.service；只用 next_dev.py start。",
+    }
+    return hints.get(code, "")
+
+
+def success_guidance(values: Mapping[str, str]) -> list[str]:
+    """User-facing next steps. Prints token path only, never token contents."""
+    port = values["COCKPIT_PORT"]
+    if values["COCKPIT_HOST"] == "127.0.0.1":
+        open_line = f"打开 http://127.0.0.1:{port}"
+    else:
+        open_line = (
+            f"绑定 0.0.0.0:{port}；用本机局域网地址访问 "
+            f"http://<本机局域网IP>:{port}"
+        )
+    return [
+        "OK",
+        open_line,
+        f"令牌文件（不要打印内容）：{token_file_path(values)}",
+        "空首页下一步：选择代码目录",
+    ]
+
+
 def expected(home: Path | None = None) -> dict[str, str]:
     root = (Path.home() if home is None else home).resolve()
     worktree = root / "github" / "agent-cockpit-next"
@@ -358,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
+    values: dict[str, str] | None = None
     try:
         values = validate(load_env(args.env_file), repo=repo)
         token = load_cockpit_token(values)
@@ -385,11 +446,13 @@ def main(argv: list[str] | None = None) -> int:
                     _prepare_exec_fds(lock.fd)
                     environment[LOCK_FD_ENV] = str(lock.fd)
                     os.chdir(repo)
+                    _emit_success(args.json, values)
                     os.execve(
                         str(python),
                         [str(python), str(repo / "server.py")],
                         environment,
                     )
+                    return 0
             except LockError as exc:
                 raise IsolationError(exc.code) from exc
     except IsolationError as exc:
@@ -398,13 +461,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         else:
             print(exc.code, file=sys.stderr)
+            hint = error_hint(exc.code, values)
+            if hint:
+                print(hint, file=sys.stderr)
         return 1
-    result = {"ok": True, "profile": "agent-cockpit-next"}
-    if args.json:
-        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    else:
-        print("OK")
+    _emit_success(args.json, values)
     return 0
+
+
+def _emit_success(as_json: bool, values: Mapping[str, str]) -> None:
+    if as_json:
+        print(json.dumps(
+            {"ok": True, "profile": "agent-cockpit-next"},
+            sort_keys=True, separators=(",", ":"),
+        ))
+        return
+    print("\n".join(success_guidance(values)), flush=True)
 
 
 if __name__ == "__main__":

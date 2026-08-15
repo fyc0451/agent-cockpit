@@ -56,12 +56,43 @@ def test_fresh_install_docs_order_next_before_legacy() -> None:
     assert readme.index("Cockpit Next 2.0") < readme.index("Legacy 0.3.x")
     assert "~/.config/agent-cockpit-next/cockpit.token" in readme
     assert "不要使用下文旧版的 `COCKPIT_TOKEN`" in readme
+    next_section = readme.split("## Legacy 0.3.x", 1)[0]
+    legacy_section = readme.split("## Legacy 0.3.x", 1)[1]
+    assert "openssl rand -hex 32" in next_section
+    assert "COCKPIT_HOST=0.0.0.0" in next_section
+    assert "<本机局域网IP>" in next_section
+    assert "不要对 Next 执行 `install.sh`" in next_section
+    assert "pip install -r requirements.txt" in next_section
+    assert "openssl rand -hex 32" not in legacy_section
+    assert "`COCKPIT_TOKEN`" in legacy_section
+    assert "install.sh" in legacy_section
     for document in (readme, next_doc):
         assert "origin/next" in document
         assert "reviewed" in document
         assert document.index("scripts/next_dev.py start") < document.index(
             "git clone --branch next"
         )
+        assert document.index("openssl rand -hex 32") < document.index(
+            "git clone --branch next"
+        )
+
+
+def test_user_guide_declares_legacy_and_points_to_next() -> None:
+    guide = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
+    head = guide[:800]
+    assert "Legacy 0.3.x" in head
+    assert "8790" in head
+    assert "Cockpit Next 2.0" in head
+    assert "README.md" in head
+    assert "NEXT-DEVELOPMENT.md" in head
+
+
+def _assert_text_error(captured: pytest.CaptureFixture[str], code: str) -> None:
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert lines[0] == code
+    assert len(lines) >= 2
+    assert lines[1].strip()
 
 
 def module():
@@ -475,8 +506,15 @@ def test_lan_host_requires_token_but_loopback_remains_optional(
     for command in ("check", "start"):
         assert gate.main([command]) == 1
         captured = capsys.readouterr()
-        assert captured.out == ""
-        assert captured.err == "lan_host_token_required\n"
+        _assert_text_error(captured, "lan_host_token_required")
+        assert "cockpit.token" in captured.err
+        assert "t" * 64 not in captured.err
+        assert gate.main([command, "--json"]) == 1
+        json_captured = capsys.readouterr()
+        assert json.loads(json_captured.out) == {
+            "error": "lan_host_token_required", "ok": False,
+        }
+        assert json_captured.err == ""
 
 
 def test_fixed_server_lan_host_requires_matching_private_token(
@@ -697,8 +735,13 @@ def test_check_and_start_fail_closed_without_web_build(
 
     assert gate.main([command]) == 1
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "next_web_build_unavailable\n"
+    _assert_text_error(captured, "next_web_build_unavailable")
+    assert gate.main([command, "--json"]) == 1
+    json_captured = capsys.readouterr()
+    assert json.loads(json_captured.out) == {
+        "error": "next_web_build_unavailable", "ok": False,
+    }
+    assert json_captured.err == ""
 
 
 def test_git_check_fails_closed_on_command_error(
@@ -797,6 +840,105 @@ def test_check_does_not_write_private_herdr_config(
     )
 
     assert gate.main(["check"]) == 0
+
+
+def test_check_text_guidance_lists_url_token_path_and_next_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    secret = "t" * 64
+    monkeypatch.setattr(gate, "load_env", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "validate", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "load_cockpit_token", lambda _values: secret)
+    monkeypatch.setattr(gate, "_validate_web_build", lambda _repo: None)
+
+    assert gate.main(["check"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.splitlines()[0] == "OK"
+    assert "http://127.0.0.1:18790" in captured.out
+    token_path = str(gate.token_file_path(values))
+    assert token_path in captured.out
+    assert "选择代码目录" in captured.out
+    assert secret not in captured.out
+    assert "COCKPIT_TOKEN=" not in captured.out
+
+    assert gate.main(["check", "--json"]) == 0
+    json_captured = capsys.readouterr()
+    assert json.loads(json_captured.out) == {
+        "ok": True, "profile": "agent-cockpit-next",
+    }
+    assert json_captured.err == ""
+    assert token_path not in json_captured.out
+    assert secret not in json_captured.out
+
+
+def test_start_text_guidance_prints_before_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    gate = module()
+    values = {**gate.expected(tmp_path), "COCKPIT_HOST": "0.0.0.0"}
+    captured: dict[str, object] = {}
+
+    class StubLock:
+        fd = 42
+
+        def __init__(self, _values):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(gate, "load_env", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "validate", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "InstanceLock", StubLock)
+    monkeypatch.setattr(gate, "_unit_not_installed", lambda: True)
+    monkeypatch.setattr(gate, "_port_available", lambda host, port: True)
+    monkeypatch.setattr(gate, "ensure_runtime_roots", lambda values: None)
+    monkeypatch.setattr(
+        gate.next_profile, "ensure_private_herdr_config", lambda _values: None,
+    )
+    monkeypatch.setattr(gate, "load_cockpit_token", lambda values: "t" * 64)
+    monkeypatch.setattr(gate, "_validate_web_build", lambda _repo: None)
+    monkeypatch.setattr(gate, "_prepare_exec_fds", lambda fd: None)
+    monkeypatch.setattr(gate.Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(gate.os, "chdir", lambda path: None)
+    monkeypatch.setattr(
+        gate.os, "execve",
+        lambda executable, argv, env: captured.update(ran=True),
+    )
+
+    assert gate.main(["start"]) == 0
+    assert captured.get("ran") is True
+    text = capsys.readouterr()
+    assert text.err == ""
+    assert "0.0.0.0:18790" in text.out
+    assert "<本机局域网IP>" in text.out
+    assert str(gate.token_file_path(values)) in text.out
+    assert "选择代码目录" in text.out
+    assert "t" * 64 not in text.out
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        "wrong_worktree",
+        "env_keys_mismatch",
+        "next_port_in_use",
+        "git_baseline_mismatch",
+        "value_mismatch:COCKPIT_HOST",
+    ),
+)
+def test_common_error_codes_have_executable_chinese_hint(code: str) -> None:
+    gate = module()
+    hint = gate.error_hint(code)
+    assert hint
+    assert any("\u4e00" <= char <= "\u9fff" for char in hint)
+    assert "cockpit.token" in gate.error_hint("lan_host_token_required")
 
 
 @pytest.mark.parametrize(

@@ -495,7 +495,14 @@ time.sleep(30)
     child_pid = None
     try:
         assert owner.stdout is not None
-        output = owner.stdout.readline()
+        output = ""
+        for _ in range(8):
+            line = owner.stdout.readline()
+            if not line:
+                break
+            if line.lstrip().startswith("{"):
+                output = line
+                break
         if not output:
             _, stderr = owner.communicate(timeout=5)
             pytest.fail(f"launcher handoff failed: {stderr}")
