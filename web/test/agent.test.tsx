@@ -354,8 +354,13 @@ describe('AgentPage → Workspace Focus', () => {
     })
     await screen.findByText('第一轮回复内容')
     expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('任务')).not.toBeInTheDocument()
     expect(agentCalls(calls)).toHaveLength(0)
+    const taskList = screen.getByRole('list', { name: '任务' })
+    const current = within(taskList).getByRole('button', { name: /第一轮回复内容/ })
+    expect(current).toHaveAttribute('aria-current', 'true')
+    expect(screen.queryByLabelText('今天想推进什么？')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存工作' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '新建任务' })).toBeInTheDocument()
   })
 
   it('空任务：主按钮禁用且零 POST', async () => {
