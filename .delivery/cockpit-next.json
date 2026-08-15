@@ -42,7 +42,7 @@
     {
       "id": "R0-contract-e2e",
       "title": "Freeze the user journey and production-shaped red E2E",
-      "status": "planned",
+      "status": "cancelled",
       "depends_on": ["N0-isolated-successor"],
       "scope": ["docs", "tests"],
       "acceptance": [{"command": "python3 -m pytest -q tests/test_upgrade_e2e.py", "passed": false}],
@@ -60,7 +60,7 @@
     {
       "id": "R1-operation-api",
       "title": "Add durable operations and fast 202 plus GET and SSE",
-      "status": "planned",
+      "status": "cancelled",
       "depends_on": ["R0-contract-e2e"],
       "scope": ["agent_cockpit", "tests"],
       "acceptance": [{"command": "python3 -m pytest -q tests/test_upgrade_service.py", "passed": false}],
@@ -78,7 +78,7 @@
     {
       "id": "R2-reuse-retry",
       "title": "Handle exact generation reuse, consecutive evidence, and retry",
-      "status": "planned",
+      "status": "cancelled",
       "depends_on": ["R1-operation-api"],
       "scope": ["agent_cockpit", "tests"],
       "acceptance": [{"command": "python3 -m pytest -q tests/test_maintenance_executor.py tests/test_upgrade_service.py", "passed": false}],
@@ -96,7 +96,7 @@
     {
       "id": "R3-gui-progress",
       "title": "Show real progress and recover across refresh and reconnect",
-      "status": "planned",
+      "status": "cancelled",
       "depends_on": ["R2-reuse-retry"],
       "scope": ["static", "tests"],
       "acceptance": [{"command": "python3 -m pytest -q tests/test_playwright_upgrade.py", "passed": false}],
@@ -114,7 +114,7 @@
     {
       "id": "R4-release-gates",
       "title": "Add upgrade doctor, controller compatibility, and release gate",
-      "status": "planned",
+      "status": "cancelled",
       "depends_on": ["R3-gui-progress"],
       "scope": ["agent_cockpit", "scripts", "tests"],
       "acceptance": [{"command": "python3 -m pytest -q tests/test_install_verify.py tests/test_release_readiness.py", "passed": false}],
@@ -132,7 +132,7 @@
     {
       "id": "R5-isolated-canary",
       "title": "Run the next service canary without switching production",
-      "status": "planned",
+      "status": "cancelled",
       "depends_on": ["R4-release-gates"],
       "scope": ["docs", "scripts", "tests"],
       "acceptance": [{"command": "python3 scripts/upgrade-e2e.py --from 0.3.3 --to next", "passed": false}],
@@ -150,7 +150,7 @@
     {
       "id": "R6-remove-v1",
       "title": "Remove unused V1 and one-time migration remnants in next",
-      "status": "planned",
+      "status": "cancelled",
       "depends_on": ["R5-isolated-canary"],
       "scope": ["agent_cockpit", "scripts", "tests"],
       "acceptance": [{"command": "COCKPIT_B0_MODE=off python3 -m pytest -q", "passed": false}],
