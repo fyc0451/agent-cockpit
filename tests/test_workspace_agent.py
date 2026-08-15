@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -1127,9 +1128,93 @@ def test_workspace_managed_start_bootstraps_empty_session_before_descriptor(
         "--session", SESSION, "tab", "create", "--workspace", "w1",
         "--cwd", PATH, "--label", herdr_client._workspace_launch_label(AGENT_A),
     ] in calls
+    trust_args = herdr_client._workspace_codex_trust_args(PATH)
+    assert [
+        "--session", SESSION, "agent", "start", AGENT_A,
+        "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000",
+        "--", *trust_args,
+    ] in calls
     descriptor = herdr_client.get_launch_descriptor_by_instance(AGENT_A)
     assert descriptor is not None
     assert descriptor["workdir"] == PATH
+    assert descriptor["args"] == []
+
+
+@pytest.mark.parametrize(
+    "canonical_path",
+    [
+        "/repo/equals=inside",
+        "/repo/quoted-\"/backslash-\\/雪/new\nline",
+    ],
+)
+def test_workspace_codex_trust_override_is_one_structured_toml_value(
+    canonical_path: str,
+) -> None:
+    args = herdr_client._workspace_codex_trust_args(canonical_path)
+
+    assert isinstance(args, list)
+    assert args[0] == "-c"
+    assert len(args) == 2
+    key, value = args[1].split("=", 1)
+    assert key == "projects"
+    assert tomllib.loads(args[1]) == {
+        "projects": {canonical_path: {"trust_level": "trusted"}},
+    }
+    assert value.startswith("{") and value.endswith("}")
+    encoded = " ".join(args).lower()
+    for forbidden in ("approval", "sandbox", "hook", "dangerously-bypass"):
+        assert forbidden not in encoded
+
+
+@pytest.mark.parametrize("canonical_path", ["relative", "/repo/\x00", "/repo/\ud800"])
+def test_workspace_codex_trust_override_rejects_unencodable_paths(
+    canonical_path: str,
+) -> None:
+    with pytest.raises(ValueError, match="canonical path invalid"):
+        herdr_client._workspace_codex_trust_args(canonical_path)
+
+
+def test_workspace_codex_trust_encoding_failure_precedes_all_mutation(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    descriptor_path = tmp_path / "launch.json"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(descriptor_path))
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "require_herdr_capabilities", lambda: {})
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/true")
+    monkeypatch.setattr(
+        herdr_client,
+        "_snapshot_session",
+        lambda session: {
+            "session": session, "panes": [], "agents": [], "tabs": [],
+            "workspaces": [{"workspace_id": "w1", "focused": True}],
+            "focused_workspace_id": "w1",
+        },
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "_workspace_codex_trust_args",
+        lambda path: (_ for _ in ()).throw(ValueError("private path detail")),
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("trust failure must precede Herdr mutation")
+        ),
+    )
+
+    result = herdr_client.start_agent(
+        SESSION, PATH, "codex", layout="tab", label="codex", args="",
+        instance_id=AGENT_A, project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+
+    assert result == {
+        "available": True,
+        "error_code": "workspace_agent_trust_unavailable",
+        "error": "workspace agent trust unavailable",
+    }
+    assert not descriptor_path.exists()
 
 
 def test_snapshot_projects_workspace_authority_from_structured_json(
@@ -1220,7 +1305,7 @@ def test_workspace_managed_start_uses_existing_workspace_without_bootstrap(
 
     monkeypatch.setattr(herdr_client, "_run", run)
     result = herdr_client.start_agent(
-        SESSION, PATH, "codex", layout="tab", label="codex", args="",
+        SESSION, PATH, "claude", layout="tab", label="claude", args="",
         instance_id=AGENT_A, project_id=PROJECT, workspace_id=WORKSPACE_A,
     )
 
@@ -1230,6 +1315,10 @@ def test_workspace_managed_start_uses_existing_workspace_without_bootstrap(
         args[2:6] == ["tab", "create", "--workspace", "w7"]
         for args in calls
     )
+    assert [
+        "--session", SESSION, "agent", "start", AGENT_A,
+        "--kind", "claude", "--pane", "w7:p2", "--timeout", "10000",
+    ] in calls
 
 
 @pytest.mark.parametrize(

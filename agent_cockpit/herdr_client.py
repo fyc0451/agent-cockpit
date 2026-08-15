@@ -1722,6 +1722,57 @@ def _workspace_launch_label(instance_id: str) -> str:
     return "cockpit-launch-" + validate_agent_instance_id(instance_id)
 
 
+def _workspace_codex_trust_args(canonical_path: str) -> list[str]:
+    """Build one invocation-only Codex project trust override."""
+    if (
+        not isinstance(canonical_path, str)
+        or not canonical_path
+        or not Path(canonical_path).is_absolute()
+        or "\x00" in canonical_path
+        or any(0xD800 <= ord(char) <= 0xDFFF for char in canonical_path)
+    ):
+        raise ValueError("workspace canonical path invalid")
+    try:
+        quoted_path = json.dumps(canonical_path, ensure_ascii=False)
+        override = (
+            f"projects={{{quoted_path}={{trust_level=\"trusted\"}}}}"
+        )
+        override.encode("utf-8", errors="strict")
+        decoded = tomllib.loads(override)
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise ValueError("workspace trust override invalid") from exc
+    if decoded != {
+        "projects": {canonical_path: {"trust_level": "trusted"}},
+    }:
+        raise ValueError("workspace trust override invalid")
+    return ["-c", override]
+
+
+def _workspace_descriptor_internal_args(record: dict[str, Any]) -> list[str]:
+    has_authority = "project_id" in record or "workspace_id" in record
+    if not has_authority:
+        return []
+    instance_id = record.get("instance_id")
+    workdir = record.get("workdir")
+    kind = record.get("kind")
+    if (
+        not isinstance(instance_id, str)
+        or _AGENT_INSTANCE_ID_RE.fullmatch(instance_id) is None
+        or record.get("name") != instance_id
+        or not isinstance(record.get("project_id"), str)
+        or re.fullmatch(r"prj_[0-9a-f]{32}", record["project_id"]) is None
+        or not isinstance(record.get("workspace_id"), str)
+        or re.fullmatch(r"ws_[0-9a-f]{32}", record["workspace_id"]) is None
+        or not isinstance(workdir, str)
+        or not Path(workdir).is_absolute()
+        or record.get("args") != []
+        or record.get("agent") != kind
+        or record.get("state") != "active"
+    ):
+        raise ValueError("workspace launch descriptor invalid")
+    return _workspace_codex_trust_args(workdir) if kind == "codex" else []
+
+
 class _WorkspaceBootstrapResult(NamedTuple):
     workspace_id: str
     root_pane_id: str | None
@@ -2711,6 +2762,7 @@ def start_agent(
     pending_reserved = False
     workspace_target: str | None = None
     bootstrap_root_pane_id: str | None = None
+    internal_agent_args: list[str] = []
     if workspace_managed:
         assert instance_id is not None
         assert project_id is not None and workspace_id is not None
@@ -2726,6 +2778,15 @@ def start_agent(
                 "error_code": "workspace_agent_layout_forbidden",
                 "error": "workspace managed agent layout must be tab",
             }
+        if canonical_kind == "codex":
+            try:
+                internal_agent_args = _workspace_codex_trust_args(workdir)
+            except ValueError:
+                return {
+                    "available": True,
+                    "error_code": "workspace_agent_trust_unavailable",
+                    "error": "workspace agent trust unavailable",
+                }
         launch_label = _workspace_launch_label(instance_id)
         if any(
             isinstance(item, dict) and item.get("label") == launch_label
@@ -2873,8 +2934,9 @@ def start_agent(
             "--pane", new_pid,
             "--timeout", str(int(start_timeout * 1000)),
         ]
-        if agent_args:
-            start_argv += ["--", *agent_args]
+        native_agent_args = [*agent_args, *internal_agent_args]
+        if native_agent_args:
+            start_argv += ["--", *native_agent_args]
         # 新建 pane 的交互 shell 就绪有延迟，立即 agent start 会报
         # agent_pane_busy(not an available shell)；短窗内重试等待就绪。
         shell_deadline = time.monotonic() + 10
@@ -3378,6 +3440,7 @@ def restart_pane(
         try:
             if normalize_agent_kind(product_agent) != kind:
                 raise ValueError("kind 不匹配")
+            internal_agent_args = _workspace_descriptor_internal_args(descriptor)
         except ValueError as exc:
             return _restart_error("restart_identity_invalid", str(exc), pane_id)
         live = [
@@ -3495,9 +3558,10 @@ def restart_pane(
                 pane_id,
             )
 
-        native_args = list(launch_args)
+        public_args = list(launch_args)
         if resume:
-            native_args += ["resume", "--last"]
+            public_args += ["resume", "--last"]
+        native_args = [*internal_agent_args, *public_args]
         start_timeout = _agent_start_timeout(product_agent)
         start_argv = [
             "--session", session, "agent", "start", name,
@@ -3527,7 +3591,7 @@ def restart_pane(
         result = {
             "available": True, "restarted": True, "preserved": True,
             "pane_id": pane_id, "agent": product_agent, "name": name,
-            "kind": kind, "args": native_args, "resume": resume,
+            "kind": kind, "args": public_args, "resume": resume,
         }
         if descriptor.get("instance_id"):
             result["instance_id"] = descriptor["instance_id"]

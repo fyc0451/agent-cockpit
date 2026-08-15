@@ -2010,6 +2010,51 @@ def test_restart_pane_codex_resume_keeps_original_args(monkeypatch):
     ) in calls
 
 
+def test_restart_workspace_codex_rederives_trust_without_persisting_or_exposing_it(
+    monkeypatch,
+):
+    instance_id = "i-" + "a" * 26
+    workdir = "/tmp/project=trusted"
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name=instance_id, kind="codex",
+        args=[], agent="codex", workdir=workdir, instance_id=instance_id,
+        display_name="codex", project_id="prj_" + "a" * 32,
+        workspace_id="ws_" + "b" * 32,
+    )
+    snapshots = iter([
+        _managed_restart_snapshot(name=instance_id, kind="codex"),
+        _managed_restart_snapshot(running=False, name=instance_id, kind="codex"),
+    ])
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
+    )
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        return _shell_process_info() if "process-info" in args else ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    trust_args = herdr_client._workspace_codex_trust_args(workdir)
+    assert result["restarted"] is True
+    assert result["args"] == []
+    assert workdir not in repr(result)
+    assert "trust_level" not in repr(result)
+    assert call(
+        ["--session", "demo", "agent", "start", instance_id,
+         "--kind", "codex", "--pane", "w1:p5", "--timeout", "10000",
+         "--", *trust_args],
+        timeout=15,
+    ) in calls
+    descriptor = herdr_client.get_launch_descriptor_by_instance(instance_id)
+    assert descriptor is not None
+    assert descriptor["args"] == []
+
+
 def test_restart_pane_rejects_concurrent_request(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     key = ("demo", "w1:p5")
