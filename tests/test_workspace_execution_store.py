@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -142,3 +143,68 @@ def test_stale_revision_rejects_attach(store, tmp_path: Path) -> None:
     assert public["attachment"]["identity_verified"] is True
     assert "hidden-pane" not in str(public)
     assert "secret" not in str(public)
+
+
+def _schema_sql(path: Path, table: str) -> str:
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_schema_check_allows_detached_and_connected_must_be_verified(
+    store, tmp_path: Path,
+) -> None:
+    db = tmp_path / "workspace-execution.sqlite3"
+    ddl = _schema_sql(db, "work_item_preparations")
+    assert "detached" in ddl
+    assert "connected_readonly" in ddl
+    member = store.create_identity(
+        project_id=PROJECT, workspace_id=WORKSPACE, display_name="Atlas",
+        idempotency_key="m2",
+    )
+    dest = tmp_path / "checkout-2"
+    dest.mkdir()
+    store.complete_preparation(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=OTHER_WORK,
+        identity_id=member.item.identity_id, source_head="a" * 40,
+        source_tree="b" * 40, internal_path=str(dest), operation_id=None,
+    )
+    attaching, _attachment, _checkout = store.begin_attach(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=OTHER_WORK,
+        expected_revision=1, session_name="s",
+    )
+    connected = store.finish_attach(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=OTHER_WORK,
+        expected_revision=attaching.revision, pane_id="hidden-pane",
+        instance_id="hidden-instance", native_receipt="secret",
+        identity_verified=True,
+    )
+    assert connected.state == "connected_readonly"
+    assert connected.attachment is not None
+    assert connected.attachment.identity_verified is True
+    detaching, _live, _chk = store.begin_detach(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=OTHER_WORK,
+        expected_revision=connected.revision,
+    )
+    assert detaching.state == "detaching"
+    detached = store.finish_detach(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=OTHER_WORK,
+        expected_revision=detaching.revision,
+    )
+    assert detached.state == "detached"
+    assert detached.lease is not None
+    assert detached.lease.status == "revoked"
+    assert detached.checkout is not None
+    assert detached.identity.identity_id == member.item.identity_id
+    store.close()
+    reopened = store_module.open_existing(db)
+    loaded = reopened.get_preparation(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=OTHER_WORK,
+    )
+    assert loaded is not None
+    assert loaded.state == "detached"
+    reopened.close()
