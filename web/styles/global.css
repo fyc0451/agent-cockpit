@@ -935,6 +935,80 @@ button.rail-item {
   overflow-wrap: anywhere;
 }
 
+.work-prep {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  min-width: 0;
+}
+
+.work-prep-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.work-prep-status,
+.work-prep-phase,
+.work-prep-member-name {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.work-prep-members {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.work-prep-member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+.work-prep-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.work-prep-create input {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.work-prep-evidence {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.work-prep-evidence p {
+  overflow-wrap: anywhere;
+}
+
 .focus-saved {
   margin-top: 20px;
   color: var(--success);
@@ -2005,7 +2079,9 @@ button.rail-item {
   }
 
   .drawer-item,
-  .palette-item {
+  .palette-item,
+  .work-prep-member,
+  .work-prep-create input {
     min-height: 44px;
   }
 

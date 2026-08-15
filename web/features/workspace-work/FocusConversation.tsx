@@ -22,6 +22,7 @@ import {
   type WorkDraft,
   type WorkDraftField,
 } from '../../state/workDraft'
+import { WorkPreparation } from './WorkPreparation'
 
 const BODY_MAX = 32_768
 const NOTE_MAX = 8_192
@@ -342,7 +343,14 @@ export function FocusConversation({
           onCancel={items.length > 0 ? () => setComposing(false) : undefined}
         />
       ) : selected ? (
-        <SavedWork item={selected} filesTo={filesTo} terminalTo={terminalTo} />
+        <>
+          <SavedWork item={selected} filesTo={filesTo} terminalTo={terminalTo} />
+          <WorkPreparation
+            projectId={projectId}
+            workspaceId={workspaceId}
+            workItemId={workItemId(selected)}
+          />
+        </>
       ) : null}
     </div>
   )
