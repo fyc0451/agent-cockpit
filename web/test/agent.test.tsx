@@ -22,6 +22,8 @@ const WORK_ITEMS = `/api/projects/${REG_P1}/workspaces/w1/work-items`
 const FOCUS_ROUTE = '/projects/p1/workspaces/w1'
 const THREAD_ID = 'th_focus1'
 const MESSAGE_ID = 'msg_focus1'
+const WORK_ITEM_ID = 'wrk_focus1'
+const CREATED_AT = '2026-08-15T00:00:00+00:00'
 const AGENT_BANNED = ['Herdr', 'session', 'pane', 'cwd', 'PID', 'argv', 'workdir']
 const mainText = () => document.querySelector('main')?.textContent ?? ''
 
@@ -74,7 +76,7 @@ function workAggregate(over: {
   const threadId = over.threadId ?? THREAD_ID
   const messageId = over.messageId ?? MESSAGE_ID
   return {
-    thread: { thread_id: threadId },
+    thread: { thread_id: threadId, created_at: CREATED_AT },
     root_message: {
       message_id: messageId,
       thread_id: threadId,
@@ -83,6 +85,7 @@ function workAggregate(over: {
       body: over.body ?? '修复登录失败',
     },
     work_item: {
+      work_item_id: WORK_ITEM_ID,
       source_message_id: messageId,
       acceptance: over.acceptance === undefined ? '刷新后仍保持登录' : over.acceptance,
       constraints: over.constraints === undefined ? '不要修改现有会话格式' : over.constraints,
@@ -250,6 +253,33 @@ describe('agents API 守卫与请求形状', () => {
     const badAuthor = workAggregate()
     ;(badAuthor.root_message as { author_kind: string }).author_kind = 'agent'
     expect(() => assertWorkspaceWorkAggregate(badAuthor)).toThrow(/author_kind/)
+    const badSource = workAggregate()
+    badSource.work_item.source_message_id = 'msg_other'
+    expect(() => assertWorkspaceWorkAggregate(badSource)).toThrow(/source_message_id/)
+  })
+
+  it('workspace work 聚合 fail-closed：2xx 仍拒绝缺失/空 work_item_id 与缺失/空/非法 created_at', () => {
+    expect(assertWorkspaceWorkAggregate(workAggregate())).toBeTruthy()
+
+    const missingWorkItemId = workAggregate()
+    delete (missingWorkItemId.work_item as { work_item_id?: string }).work_item_id
+    expect(() => assertWorkspaceWorkAggregate(missingWorkItemId)).toThrow(/work_item_id/)
+
+    const emptyWorkItemId = workAggregate()
+    emptyWorkItemId.work_item.work_item_id = ''
+    expect(() => assertWorkspaceWorkAggregate(emptyWorkItemId)).toThrow(/work_item_id/)
+
+    const missingCreatedAt = workAggregate()
+    delete (missingCreatedAt.thread as { created_at?: string }).created_at
+    expect(() => assertWorkspaceWorkAggregate(missingCreatedAt)).toThrow(/created_at/)
+
+    const emptyCreatedAt = workAggregate()
+    emptyCreatedAt.thread.created_at = ''
+    expect(() => assertWorkspaceWorkAggregate(emptyCreatedAt)).toThrow(/created_at/)
+
+    const illegalCreatedAt = workAggregate()
+    ;(illegalCreatedAt.thread as { created_at: unknown }).created_at = 1755216000
+    expect(() => assertWorkspaceWorkAggregate(illegalCreatedAt)).toThrow(/created_at/)
   })
 })
 
