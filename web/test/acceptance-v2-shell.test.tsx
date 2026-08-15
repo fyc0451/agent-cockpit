@@ -23,23 +23,21 @@ function rail() {
 }
 
 describe('验收 v2 · 项目层级与入口', () => {
-  it('进入 Workspace 后「项目」不是跳到 /projects 并清空上下文的主链接', async () => {
+  it('进入 Workspace 后点击主导航「项目」主项不得清空 Workspace 上下文', async () => {
     const user = userEvent.setup()
     renderApp(HOME)
     expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
 
     const nav = rail()
-    const projectJump = within(nav)
-      .queryAllByRole('link')
-      .find((el) => el.getAttribute('title') === '项目' || /^项目$/.test(el.textContent ?? ''))
-    if (projectJump) {
-      expect(projectJump).not.toHaveAttribute('href', '/projects')
-    }
+    const projectHome = within(nav).getByTitle('项目')
+    await user.click(projectHome)
 
-    await user.click(screen.getByTitle('切换工作空间'))
-    expect(await screen.findByRole('dialog', { name: '工作空间切换' })).toBeInTheDocument()
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
     expect(screen.getByTitle('切换项目')).toHaveTextContent('Project One')
     expect(screen.getByTitle('切换工作空间')).toHaveTextContent('本机工作区')
+    expect(within(rail()).getByTitle('工作对话')).toBeInTheDocument()
+    expect(within(rail()).getByTitle('文件')).toBeInTheDocument()
+    expect(within(rail()).getByTitle('终端')).toBeInTheDocument()
   })
 
   it('当前项目、Workspace、工作/文件/终端层级可见', async () => {
@@ -56,18 +54,17 @@ describe('验收 v2 · 项目层级与入口', () => {
     expect(within(nav).queryByTitle('Agent')).toBeNull()
   })
 
-  it('Workspace 内存在真实「管理项目」或「添加项目」入口，而不是只靠清空上下文的项目主链', async () => {
+  it('Workspace 内存在与「项目」主项不同的「管理项目」或「添加项目」次级入口', async () => {
     renderApp(HOME)
     await screen.findByLabelText('今天想推进什么？')
+    const primary = within(rail()).getByTitle('项目')
     const manage =
       screen.queryByRole('button', { name: '管理项目' }) ??
       screen.queryByRole('link', { name: '管理项目' }) ??
       screen.queryByRole('button', { name: '添加项目' }) ??
       screen.queryByRole('link', { name: '添加项目' })
     expect(manage, 'Workspace 内必须能找到管理项目或添加项目').not.toBeNull()
-    if (manage?.tagName === 'A') {
-      expect(manage).not.toHaveAttribute('href', '/projects')
-    }
+    expect(manage).not.toBe(primary)
   })
 
   it('390 视口下层级与文件/终端入口仍在，结构不依赖复制生产 CSS', async () => {
