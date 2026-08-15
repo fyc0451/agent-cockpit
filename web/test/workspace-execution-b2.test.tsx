@@ -4,6 +4,8 @@ import { renderApp } from './helpers'
 import {
   assertWorkspaceExecutionMember,
   assertWorkspacePreparation,
+  getWorkspacePreparation,
+  listWorkspaceMembers,
 } from '../api/workspaceExecution'
 
 const WORK_ITEMS_URL = `/api/projects/${REG_P1}/workspaces/w1/work-items`
@@ -144,8 +146,8 @@ function stubB2(opts: {
           attachment: {
             attachment_id: 'att_b2',
             status: 'connected_readonly',
-            provider: 'local',
-            harness: 'codex',
+            provider: 'local_herdr',
+            harness: 'codex_terminal_managed_v1',
             generation: 1,
             identity_verified: true,
             revision: 1,
@@ -155,13 +157,13 @@ function stubB2(opts: {
       }
       if (url === `${PREP_URL}/detach` && method === 'POST') {
         prep = preparation({
-          state: 'prepared',
+          state: 'detached',
           revision: 3,
           attachment: {
             attachment_id: 'att_b2',
             status: 'detached',
-            provider: 'local',
-            harness: 'codex',
+            provider: 'local_herdr',
+            harness: 'codex_terminal_managed_v1',
             generation: 1,
             identity_verified: true,
             revision: 2,
@@ -198,6 +200,70 @@ describe('Checkpoint B2 公共 DTO', () => {
     expect(() =>
       assertWorkspacePreparation({ ...prepared, checkout: { ...(prepared.checkout as object), path: '/tmp' } }),
     ).toThrow()
+    const detached = assertWorkspacePreparation(preparation({
+      state: 'detached',
+      attachment: {
+        attachment_id: 'att_b2',
+        status: 'detached',
+        provider: 'local_herdr',
+        harness: 'codex_terminal_managed_v1',
+        generation: 1,
+        identity_verified: true,
+        revision: 2,
+      },
+    }))
+    expect(detached.state).toBe('detached')
+    expect(detached.attachment?.provider).toBe('local_herdr')
+    expect(detached.attachment?.harness).toBe('codex_terminal_managed_v1')
+  })
+
+  it('GET members 的 project/workspace 404 必须抛出，不得降成空列表', async () => {
+    const fail = (code: string) => {
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        json: async () => ({
+          error: { code, message: code, retryable: false, request_id: 'req-x', details: {} },
+        }),
+      })))
+    }
+    fail('project_not_found')
+    await expect(listWorkspaceMembers(REG_P1, 'w1')).rejects.toMatchObject({
+      code: 'project_not_found',
+      status: 404,
+    })
+    fail('workspace_not_found')
+    await expect(listWorkspaceMembers(REG_P1, 'w1')).rejects.toMatchObject({
+      code: 'workspace_not_found',
+      status: 404,
+    })
+  })
+
+  it('GET preparation 仅 preparation_not_found 返回 null，其他 404 保留 typed error', async () => {
+    const fail = (code: string) => {
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        json: async () => ({
+          error: { code, message: code, retryable: false, request_id: 'req-x', details: {} },
+        }),
+      })))
+    }
+    fail('preparation_not_found')
+    await expect(getWorkspacePreparation(REG_P1, 'w1', 'wrk_b2')).resolves.toMatchObject({ data: null })
+    fail('work_item_not_found')
+    await expect(getWorkspacePreparation(REG_P1, 'w1', 'wrk_b2')).rejects.toMatchObject({
+      code: 'work_item_not_found',
+      status: 404,
+    })
+    fail('project_not_found')
+    await expect(getWorkspacePreparation(REG_P1, 'w1', 'wrk_b2')).rejects.toMatchObject({
+      code: 'project_not_found',
+    })
+    fail('workspace_not_found')
+    await expect(getWorkspacePreparation(REG_P1, 'w1', 'wrk_b2')).rejects.toMatchObject({
+      code: 'workspace_not_found',
+    })
   })
 })
 
@@ -227,7 +293,7 @@ describe('Checkpoint B2 执行准备卡', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '断开' }))
     expect(await screen.findByRole('button', { name: '连接只读 Agent' })).toBeInTheDocument()
-    expect(screen.getByText('尚未领取')).toBeInTheDocument()
+    expect(calls.some((call) => call.url.endsWith('/detach'))).toBe(true)
     expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
     expect(screen.queryByText(/认领|回复|working|claim|reply/i)).not.toBeInTheDocument()
     expect(calls.some((call) => AGENT_API.test(call.url))).toBe(false)

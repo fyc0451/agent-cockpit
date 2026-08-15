@@ -212,15 +212,8 @@ export async function listWorkspaceMembers(
   projectId: string,
   workspaceId: string,
 ): Promise<ApiResult<WorkspaceMemberListData>> {
-  try {
-    const result = await apiGet<unknown>(WORKSPACE_EXECUTION_API.members(projectId, workspaceId))
-    return { ...result, data: assertWorkspaceMemberListData(result.data) }
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) {
-      return { data: { items: [], next_cursor: null }, meta: null }
-    }
-    throw error
-  }
+  const result = await apiGet<unknown>(WORKSPACE_EXECUTION_API.members(projectId, workspaceId))
+  return { ...result, data: assertWorkspaceMemberListData(result.data) }
 }
 
 export async function createWorkspaceMember(
@@ -248,7 +241,7 @@ export async function getWorkspacePreparation(
     )
     return { ...result, data: assertWorkspacePreparation(result.data) }
   } catch (error) {
-    if (error instanceof ApiError && error.status === 404) {
+    if (error instanceof ApiError && error.code === 'preparation_not_found') {
       return { data: null, meta: null }
     }
     throw error
