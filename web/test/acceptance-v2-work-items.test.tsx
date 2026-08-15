@@ -13,6 +13,7 @@ import { ThemeProvider } from '../state/theme'
  * 保存 -> 新建任务 -> 列表切换；合法 work=wrk_one（非默认最新）保持选择；
  * 非法 id replace 为默认最新 wrk_two；两次新建任务 Idempotency-Key 非空且不同；
  * 失败重试同 key；ul[aria-label=任务] + 选中按钮 aria-current=true。
+ * 严格 DTO：thread.created_at 必填，wrk_one 早于 wrk_two；work_item_id 保持。
  */
 
 const WORK_ITEMS = `/api/projects/${REG_P1}/workspaces/w1/work-items`
@@ -62,12 +63,23 @@ function renderWorkApp(initialRoute: string) {
   )
 }
 
+const CREATED_AT = {
+  wrk_one: '2026-08-15T10:00:00.000Z',
+  wrk_two: '2026-08-15T11:00:00.000Z',
+} as const
+
+function createdAtFor(id: string): string {
+  if (id === 'wrk_one') return CREATED_AT.wrk_one
+  if (id === 'wrk_two') return CREATED_AT.wrk_two
+  return '2026-08-15T12:00:00.000Z'
+}
+
 function aggregate(
   id: string,
   fields: { body: string; acceptance: string; constraints: string },
 ) {
   return {
-    thread: { thread_id: `thr_${id}` },
+    thread: { thread_id: `thr_${id}`, created_at: createdAtFor(id) },
     root_message: {
       message_id: `msg_${id}`,
       thread_id: `thr_${id}`,
@@ -236,6 +248,9 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
 
   it('合法 work=wrk_one 保持非默认选择；非法 id replace 为默认最新 wrk_two', async () => {
     const items = [aggregate('wrk_one', FIRST), aggregate('wrk_two', SECOND)]
+    expect(items[0].work_item.work_item_id).toBe('wrk_one')
+    expect(items[1].work_item.work_item_id).toBe('wrk_two')
+    expect(Date.parse(items[0].thread.created_at)).toBeLessThan(Date.parse(items[1].thread.created_at))
     const { calls } = stubWorkWorld({ initial: items })
 
     renderWorkApp(`${HOME}?work=wrk_one`)

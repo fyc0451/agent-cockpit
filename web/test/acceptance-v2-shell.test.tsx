@@ -10,9 +10,11 @@ import { ThemeProvider } from '../state/theme'
 import { stubDefaultFetch } from './helpers'
 
 /**
- * 用户验收增强 · 壳层层级（冻结需求）：
+ * 用户验收增强 · 壳层层级（冻结需求，对齐 550f9e9）：
  * 点击主导航「项目」主项不得改 URL、不得清空 Workspace/任务上下文。
  * 「管理项目」进项目页，「添加项目」打开真实向导；二者都不是项目主项。
+ * 工作/文件/终端必须挂在当前 Workspace 的 .rail-tree-workspace 内；
+ * 不得再用「当前工作空间」重复标题或 rail 根上的 mobile title 当证据。
  * 本文件只做语义断言；390/bbox 由独立 Playwright 证明。
  */
 
@@ -54,6 +56,31 @@ function rail() {
   return screen.getByRole('navigation', { name: '主导航' })
 }
 
+function currentWorkspaceNode() {
+  const nodes = [...rail().querySelectorAll('.rail-tree-workspace')] as HTMLElement[]
+  expect(nodes.length, '必须存在 .rail-tree-workspace').toBeGreaterThan(0)
+  const current = nodes.find((node) =>
+    Boolean(within(node).queryByRole('link', { name: '本机工作区', exact: true })),
+  )
+  expect(current, '当前 Workspace「本机工作区」必须位于 .rail-tree-workspace').toBeTruthy()
+  return current as HTMLElement
+}
+
+function expectWorkspaceFunctionLinks(ws: HTMLElement) {
+  const work = within(ws).getByRole('link', { name: '工作', exact: true })
+  const files = within(ws).getByRole('link', { name: '文件', exact: true })
+  const terminal = within(ws).getByRole('link', { name: '终端', exact: true })
+  expect(work).toBeVisible()
+  expect(files).toBeVisible()
+  expect(terminal).toBeVisible()
+  expect(work).toHaveAttribute('href', HOME)
+  expect(files).toHaveAttribute('href', `${HOME}/files`)
+  expect(terminal).toHaveAttribute('href', `${HOME}/terminal`)
+  expect(work.closest('.rail-tree-workspace')).toBe(ws)
+  expect(files.closest('.rail-tree-workspace')).toBe(ws)
+  expect(terminal.closest('.rail-tree-workspace')).toBe(ws)
+}
+
 describe('验收 v2 · 项目层级与入口', () => {
   it('点击主导航「项目」主项后精确 URL 不变，Workspace 与任务上下文仍在', async () => {
     const user = userEvent.setup()
@@ -69,9 +96,7 @@ describe('验收 v2 · 项目层级与入口', () => {
     expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
     expect(screen.getByTitle('切换项目')).toHaveTextContent('Project One')
     expect(screen.getByTitle('切换工作空间')).toHaveTextContent('本机工作区')
-    expect(within(rail()).getByTitle('工作对话')).toBeInTheDocument()
-    expect(within(rail()).getByTitle('文件')).toBeInTheDocument()
-    expect(within(rail()).getByTitle('终端')).toBeInTheDocument()
+    expectWorkspaceFunctionLinks(currentWorkspaceNode())
   })
 
   it('当前项目、Workspace、工作/文件/终端层级可见', async () => {
@@ -80,11 +105,9 @@ describe('验收 v2 · 项目层级与入口', () => {
     const nav = rail()
     expect(within(nav).getByText('当前项目')).toBeInTheDocument()
     expect(within(nav).getByText('Project One')).toBeInTheDocument()
-    expect(within(nav).getByText('当前工作空间')).toBeInTheDocument()
-    expect(within(nav).getAllByText('本机工作区').length).toBeGreaterThan(0)
-    expect(within(nav).getByTitle('工作对话')).toBeInTheDocument()
-    expect(within(nav).getByTitle('文件')).toHaveAttribute('href', `${HOME}/files`)
-    expect(within(nav).getByTitle('终端')).toHaveAttribute('href', `${HOME}/terminal`)
+    const ws = currentWorkspaceNode()
+    expect(within(ws).getByRole('link', { name: '本机工作区', exact: true })).toBeVisible()
+    expectWorkspaceFunctionLinks(ws)
     expect(within(nav).queryByTitle('Agent')).toBeNull()
   })
 
@@ -122,10 +145,7 @@ describe('验收 v2 · 项目层级与入口', () => {
   it('文件/终端入口与无 Agent 语义仍在（尺寸由独立 Playwright 证明）', async () => {
     renderShell(HOME)
     await screen.findByLabelText('今天想推进什么？')
-    const nav = rail()
-    expect(within(nav).getByTitle('工作对话')).toBeInTheDocument()
-    expect(within(nav).getByTitle('文件')).toHaveAttribute('href', `${HOME}/files`)
-    expect(within(nav).getByTitle('终端')).toHaveAttribute('href', `${HOME}/terminal`)
+    expectWorkspaceFunctionLinks(currentWorkspaceNode())
     expect(screen.getByRole('button', { name: '保存工作' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /开始任务|正在执行|已完成/ })).toBeNull()
   })
