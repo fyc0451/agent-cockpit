@@ -296,6 +296,9 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     // 向导内不得泄漏绝对路径（列表页的 canonical_path 是 registry 冻结字段，不在此范围）
     const dialog = screen.getByRole('dialog', { name: '添加项目' })
     expect(dialog.textContent).not.toContain('/repos')
+    const directoryList = within(dialog).getByRole('list', { name: '目录 /' })
+    expect(directoryList).toHaveClass('project-wizard-list')
+    expect(directoryList).toHaveAttribute('tabindex', '0')
     // 进入子目录的请求只带 root_id + 相对 path
     await user.click(screen.getByRole('button', { name: '进入 alpha' }))
     await waitFor(() => {

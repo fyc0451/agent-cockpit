@@ -456,7 +456,7 @@ export function ProjectWizard({
                 </div>
               </StatusState>
             ) : (
-              <ul className="list">
+              <ul className="list project-wizard-list" aria-label="代码位置" tabIndex={0}>
                 {roots.data!.data.items.map((r) => (
                   <li key={r.root_id} className="list-row">
                     <button
@@ -519,7 +519,11 @@ export function ProjectWizard({
                       description="暂时无法确认目录是否已添加；可继续浏览和选择目录，稍后重试确认。"
                     />
                   ) : null}
-                  <ul className="list">
+                  <ul
+                    className="list project-wizard-list"
+                    aria-label={`目录 ${state.path === '' ? '/' : state.path}`}
+                    tabIndex={0}
+                  >
                     {dirs.data!.data.entries.map((entry) => (
                       <li key={entry.path} className="list-row">
                         <button

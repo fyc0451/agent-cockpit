@@ -1033,6 +1033,160 @@ button.rail-item {
   word-break: break-all;
 }
 
+/* ---------- Files 工作台 ---------- */
+
+.files-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.files-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 14px;
+  height: min(68vh, 720px);
+  min-height: 440px;
+}
+
+.files-content-panel,
+.files-tree-panel {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.files-content-panel,
+.files-tree-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.files-content-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.files-content-head .panel-title {
+  margin: 0;
+}
+
+.files-content-path {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.files-content-scroll,
+.files-tree-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.files-content-scroll {
+  padding: 14px;
+}
+
+.files-content-code {
+  min-height: 100%;
+  max-height: none;
+  margin: 0;
+  border: 0;
+  background: transparent;
+}
+
+.files-tree-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.files-tree-toolbar .breadcrumb {
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.files-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+}
+
+.files-search input {
+  min-width: 0;
+}
+
+.files-tree-list {
+  border: 0;
+  border-radius: 0;
+}
+
+.files-tree-panel .list-row {
+  padding: 8px 10px;
+}
+
+.files-screen--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  padding: 14px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.files-screen--fullscreen .files-workbench {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+@media (max-width: 900px) {
+  .files-workbench {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(320px, 1fr) minmax(240px, 42vh);
+    height: auto;
+    min-height: 0;
+  }
+
+  .files-screen--fullscreen .files-workbench {
+    grid-template-rows: minmax(0, 1fr) minmax(200px, 42vh);
+  }
+}
+
+@media (max-width: 420px) {
+  .files-screen--fullscreen {
+    padding: 8px;
+  }
+
+  .files-workbench {
+    gap: 8px;
+  }
+
+  .files-search {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .files-search .btn--ghost {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
+
 /* ---------- Tag（六 tone pill） ---------- */
 
 .tag {
@@ -1312,6 +1466,20 @@ button.rail-item {
   gap: 10px;
   max-height: 86vh;
   overflow-y: auto;
+}
+
+.project-wizard-list {
+  min-height: 0;
+  max-height: min(50vh, 480px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.project-wizard-list:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .modal--switcher {

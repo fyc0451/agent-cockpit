@@ -340,6 +340,23 @@ describe('SLICE-001 页面纵切', () => {
     expect(fetchSpy.mock.calls.every((c) => (c[1]?.method ?? 'GET') === 'GET')).toBe(true)
   })
 
+  it('Files：内容在中间、目录树在右侧，并支持全屏与 Escape 退出', async () => {
+    stubOpenFetch()
+    const user = userEvent.setup()
+    const { container } = renderApp('/projects/p1/workspaces/w1/files')
+
+    const workbench = await screen.findByRole('region', { name: '文件工作台' })
+    expect(within(workbench).getByRole('region', { name: '文件内容' })).toBeInTheDocument()
+    expect(within(workbench).getByRole('complementary', { name: '目录树' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '全屏' }))
+    expect(container.querySelector('.files-screen--fullscreen')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '退出全屏' })).toBeInTheDocument()
+
+    await user.keyboard('{Escape}')
+    expect(container.querySelector('.files-screen--fullscreen')).toBeNull()
+  })
+
   it('Files：深链 ?path=&file= 刷新恢复同一 FileRef', async () => {
     stubOpenFetch()
     renderApp('/projects/p1/workspaces/w1/files?path=src&file=README.md')

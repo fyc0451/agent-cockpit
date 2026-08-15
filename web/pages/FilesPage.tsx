@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   useWorkspaceFileContent,
@@ -70,15 +70,32 @@ function EntryRow({
   )
 }
 
-function FilesHeader({ project, workspace }: { project: Project; workspace: Workspace }) {
+function FilesHeader({
+  project,
+  workspace,
+  fullscreen = false,
+  onToggleFullscreen,
+}: {
+  project: Project
+  workspace: Workspace
+  fullscreen?: boolean
+  onToggleFullscreen?: () => void
+}) {
   return (
     <PageHeader
       title="文件"
       sub={workspace.name ?? workspace.id}
       actions={
-        <Link className="btn btn--primary" to={routes.workspace.terminal(project.slug ?? '', workspace.id ?? '')}>
-          打开终端
-        </Link>
+        <>
+          <Link className="btn btn--secondary" to={routes.workspace.terminal(project.slug ?? '', workspace.id ?? '')}>
+            打开终端
+          </Link>
+          {onToggleFullscreen ? (
+            <button type="button" className="btn btn--secondary" onClick={onToggleFullscreen}>
+              {fullscreen ? '退出全屏' : '全屏'}
+            </button>
+          ) : null}
+        </>
       }
     />
   )
@@ -90,6 +107,16 @@ function FilesBody({ project, workspace }: { project: Project; workspace: Worksp
   const file = searchParams.get('file')
   const q = searchParams.get('q') ?? ''
   const [searchInput, setSearchInput] = useState(q)
+  const [fullscreen, setFullscreen] = useState(false)
+
+  useEffect(() => {
+    if (!fullscreen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setFullscreen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [fullscreen])
 
   const slug = project.slug ?? ''
   const workspaceId = workspace.id ?? ''
@@ -169,171 +196,185 @@ function FilesBody({ project, workspace }: { project: Project; workspace: Worksp
   const searching = q !== ''
 
   return (
-    <>
-      <FilesHeader project={project} workspace={workspace} />
-      <section className="panel">
-        <div className="state-actions files-toolbar">
-          <nav aria-label="目录路径" className="breadcrumb">
-            <button
-              type="button"
-              className="btn btn--ghost"
-              onClick={() => setSearchParams({})}
-              disabled={path === '' && !searching}
-            >
-              根目录
-            </button>
-            {crumbs.map((seg, i) => (
-              <span key={i}>
-                <span aria-hidden="true">/</span>
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => setSearchParams({ path: crumbs.slice(0, i + 1).join('/') })}
-                >
-                  {seg}
-                </button>
-              </span>
-            ))}
-          </nav>
-          <form role="search" onSubmit={submitSearch} className="state-actions">
-            <input
-              type="search"
-              aria-label="搜索文件"
-              placeholder="搜索文件名…"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-            />
-            <button type="submit" className="btn btn--secondary">
-              搜索
-            </button>
-            {searching ? (
+    <div className={`files-screen${fullscreen ? ' files-screen--fullscreen' : ''}`}>
+      <FilesHeader
+        project={project}
+        workspace={workspace}
+        fullscreen={fullscreen}
+        onToggleFullscreen={() => setFullscreen((value) => !value)}
+      />
+      <section className="files-workbench" aria-label="文件工作台">
+        <section className="files-content-panel" aria-label={file != null ? `文件预览 ${file}` : '文件内容'}>
+          <div className="files-content-head">
+            <h2 className="panel-title ellipsis">{file != null ? basename(file) : '文件内容'}</h2>
+            {file != null ? <span className="files-content-path ellipsis">{file}</span> : null}
+          </div>
+          <div className="files-content-scroll">
+            {file == null ? (
+              <StatusState kind="empty" title="选择文件" description="从右侧目录树选择一个文件，在这里查看内容。" />
+            ) : content.isPending ? (
+              <StatusState kind="loading" title="正在加载文件…" />
+            ) : content.isError ? (
+              <QueryErrorState error={content.error} onRetry={() => content.refetch()} />
+            ) : content.data!.data.binary ? (
+              <StatusState
+                kind="empty"
+                title="二进制文件不可预览"
+                description={`${basename(file)}（${content.data!.data.size} 字节）是二进制文件，本切片不提供预览。`}
+              />
+            ) : (
+              <>
+                <pre className="raw-json files-content-code">{content.data!.data.text}</pre>
+                <div className="state-actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => setSearchParams(searching ? { path, q } : { path })}
+                  >
+                    关闭预览
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+
+        <aside className="files-tree-panel" aria-label="目录树">
+          <div className="files-tree-toolbar">
+            <nav aria-label="目录路径" className="breadcrumb">
               <button
                 type="button"
                 className="btn btn--ghost"
-                onClick={() => {
-                  setSearchInput('')
-                  setSearchParams({ path })
-                }}
+                onClick={() => setSearchParams({})}
+                disabled={path === '' && !searching}
               >
-                清除
+                根目录
               </button>
-            ) : null}
-          </form>
-        </div>
-
-        {searching ? (
-          search.isPending ? (
-            <StatusState kind="loading" title="正在搜索…" />
-          ) : search.isError ? (
-            <QueryErrorState error={search.error} onRetry={() => search.refetch()} />
-          ) : (
-            <>
-              {search.data!.data.truncated ? (
-                <StatusState
-                  kind="degraded"
-                  banner
-                  title="搜索结果已截断"
-                  description="结果过多，仅显示前 50 条；请缩小目录或更换关键词。"
-                />
-              ) : null}
-              {search.data!.data.results.length === 0 ? (
-                <StatusState kind="empty" title="没有匹配的文件" description={`关键词「${q}」在当前目录下无结果。`} />
-              ) : (
-                <ul className="list" aria-label={`搜索 ${q} 的结果`}>
-                  {search.data!.data.results.map((entry) => (
-                    <EntryRow
-                      key={entry.path}
-                      name={entry.name}
-                      type={entry.type}
-                      fullPath={entry.path}
-                      onOpen={() => openEntry(entry, entry.path)}
-                    />
-                  ))}
-                </ul>
-              )}
-            </>
-          )
-        ) : list.isPending ? (
-          <StatusState kind="loading" title="正在加载目录…" />
-        ) : list.isError ? (
-          <QueryErrorState error={list.error} onRetry={() => list.refetch()} />
-        ) : (
-          <>
-            {isDegraded(list.data!.meta) ? (
-              <StatusState
-                kind="degraded"
-                banner
-                title="目录数据不完整"
-                description="部分来源不可用，列表可能不完整。"
+              {crumbs.map((seg, i) => (
+                <span key={i}>
+                  <span aria-hidden="true">/</span>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => setSearchParams({ path: crumbs.slice(0, i + 1).join('/') })}
+                  >
+                    {seg}
+                  </button>
+                </span>
+              ))}
+            </nav>
+            <form role="search" onSubmit={submitSearch} className="files-search">
+              <input
+                type="search"
+                aria-label="搜索文件"
+                placeholder="搜索文件名…"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
               />
-            ) : null}
-            {list.data!.data.entries.length === 0 ? (
-              isDegraded(list.data!.meta) ? (
-                <StatusState kind="degraded" title="部分数据不可用" description="来源异常，暂无可展示的完整数据。" />
-              ) : (
-                <StatusState kind="empty" title="空目录" />
-              )
-            ) : (
-              <ul className="list" aria-label={`目录 ${path || '/'}`}>
-                {path !== '' ? (
-                  <li className="list-row">
-                    <button
-                      type="button"
-                      className="list-row-main list-link btn-link"
-                      onClick={() => setSearchParams({ path: parentPath(path) })}
-                    >
-                      <span className="ellipsis list-title">../</span>
-                    </button>
-                  </li>
-                ) : null}
-                {list.data!.data.entries.map((entry) => {
-                  const fullPath = joinPath(path, entry.name)
-                  return (
-                    <EntryRow
-                      key={fullPath}
-                      name={entry.name}
-                      type={entry.type}
-                      fullPath={fullPath}
-                      onOpen={() => openEntry(entry, fullPath)}
-                    />
-                  )
-                })}
-              </ul>
-            )}
-          </>
-        )}
-      </section>
-
-      {file != null ? (
-        <section className="panel" aria-label={`文件预览 ${file}`}>
-          <h2 className="panel-title ellipsis">{basename(file)}</h2>
-          {content.isPending ? (
-            <StatusState kind="loading" title="正在加载文件…" />
-          ) : content.isError ? (
-            <QueryErrorState error={content.error} onRetry={() => content.refetch()} />
-          ) : content.data!.data.binary ? (
-            <StatusState
-              kind="empty"
-              title="二进制文件不可预览"
-              description={`${basename(file)}（${content.data!.data.size} 字节）是二进制文件，本切片不提供预览。`}
-            />
-          ) : (
-            <>
-              <pre className="raw-json">{content.data!.data.text}</pre>
-              <div className="state-actions">
+              <button type="submit" className="btn btn--secondary">
+                搜索
+              </button>
+              {searching ? (
                 <button
                   type="button"
                   className="btn btn--ghost"
-                  onClick={() => setSearchParams(searching ? { path, q } : { path })}
+                  onClick={() => {
+                    setSearchInput('')
+                    setSearchParams({ path })
+                  }}
                 >
-                  关闭预览
+                  清除
                 </button>
-              </div>
-            </>
-          )}
-        </section>
-      ) : null}
-    </>
+              ) : null}
+            </form>
+          </div>
+
+          <div className="files-tree-scroll">
+            {searching ? (
+              search.isPending ? (
+                <StatusState kind="loading" title="正在搜索…" />
+              ) : search.isError ? (
+                <QueryErrorState error={search.error} onRetry={() => search.refetch()} />
+              ) : (
+                <>
+                  {search.data!.data.truncated ? (
+                    <StatusState
+                      kind="degraded"
+                      banner
+                      title="搜索结果已截断"
+                      description="结果过多，仅显示前 50 条；请缩小目录或更换关键词。"
+                    />
+                  ) : null}
+                  {search.data!.data.results.length === 0 ? (
+                    <StatusState kind="empty" title="没有匹配的文件" description={`关键词「${q}」在当前目录下无结果。`} />
+                  ) : (
+                    <ul className="list files-tree-list" aria-label={`搜索 ${q} 的结果`}>
+                      {search.data!.data.results.map((entry) => (
+                        <EntryRow
+                          key={entry.path}
+                          name={entry.name}
+                          type={entry.type}
+                          fullPath={entry.path}
+                          onOpen={() => openEntry(entry, entry.path)}
+                        />
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )
+            ) : list.isPending ? (
+              <StatusState kind="loading" title="正在加载目录…" />
+            ) : list.isError ? (
+              <QueryErrorState error={list.error} onRetry={() => list.refetch()} />
+            ) : (
+              <>
+                {isDegraded(list.data!.meta) ? (
+                  <StatusState
+                    kind="degraded"
+                    banner
+                    title="目录数据不完整"
+                    description="部分来源不可用，列表可能不完整。"
+                  />
+                ) : null}
+                {list.data!.data.entries.length === 0 ? (
+                  isDegraded(list.data!.meta) ? (
+                    <StatusState kind="degraded" title="部分数据不可用" description="来源异常，暂无可展示的完整数据。" />
+                  ) : (
+                    <StatusState kind="empty" title="空目录" />
+                  )
+                ) : (
+                  <ul className="list files-tree-list" aria-label={`目录 ${path || '/'}`}>
+                    {path !== '' ? (
+                      <li className="list-row">
+                        <button
+                          type="button"
+                          className="list-row-main list-link btn-link"
+                          onClick={() => setSearchParams({ path: parentPath(path) })}
+                        >
+                          <span className="ellipsis list-title">../</span>
+                        </button>
+                      </li>
+                    ) : null}
+                    {list.data!.data.entries.map((entry) => {
+                      const fullPath = joinPath(path, entry.name)
+                      return (
+                        <EntryRow
+                          key={fullPath}
+                          name={entry.name}
+                          type={entry.type}
+                          fullPath={fullPath}
+                          onOpen={() => openEntry(entry, fullPath)}
+                        />
+                      )
+                    })}
+                  </ul>
+                )}
+              </>
+            )}
+          </div>
+        </aside>
+      </section>
+    </div>
   )
 }
 
