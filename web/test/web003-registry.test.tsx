@@ -957,7 +957,17 @@ describe('黄金路径：识别失败可恢复（用户语言）', () => {
 
 describe('黄金路径：登记成功导航', () => {
   it('G6 成功卡无 Project ID/Slug  jargon，主按钮进入 Workbench（?createWorkspace=1）', async () => {
-    stubWizardFetch({ discovery: discoveryOk, register: registerOk })
+    const alphaId = registryProjectsPayload.data.items[0].project.project_id
+    stubWizardFetch({
+      discovery: discoveryOk,
+      register: registerOk,
+      gets: {
+        [`/api/project-registry/projects/${alphaId}/workspaces`]: {
+          data: { items: [] },
+          meta: metaOk,
+        },
+      },
+    })
     const user = userEvent.setup()
     renderApp('/projects')
     await toProbeResult(user)
@@ -968,8 +978,8 @@ describe('黄金路径：登记成功导航', () => {
     expect(dialog.textContent).not.toContain('Project ID')
     expect(dialog.textContent).not.toContain('Workbench 将在')
     await user.click(screen.getByRole('button', { name: '继续创建工作空间' }))
-    // 导航到该项目 Workbench（createWorkspace 意图由 URL 携带，见 routes.test.ts 合同断言）
-    expect(await screen.findByText('项目概览', { selector: '.page-sub' })).toBeInTheDocument()
+    expect(await screen.findByRole('dialog', { name: '创建工作空间' })).toBeInTheDocument()
+    expect(screen.queryByText('项目概览', { selector: '.page-sub' })).not.toBeInTheDocument()
   })
 })
 
@@ -980,15 +990,17 @@ describe('黄金路径：四入口汇聚同一个向导', () => {
       '/api/project-registry/projects': registryProjectsEmptyPayload,
     })
     renderApp('/overview')
-    const cta = await screen.findByRole('link', { name: '选择代码目录' })
-    expect(cta.getAttribute('href')).toContain('/projects?wizard=1')
+    const cta = await screen.findByRole('button', { name: '选择代码目录' })
+    await userEvent.click(cta)
+    expect(await screen.findByRole('dialog', { name: '添加项目' })).toBeInTheDocument()
   })
 
   it('G8 Overview 有项目 → 不出现首用 CTA', async () => {
     stubFetch(defaultFetchMap())
     renderApp('/overview')
-    await screen.findByText('需要你处理')
-    await waitFor(() => expect(screen.queryByText('正在汇总工作…')).toBeNull())
+    await screen.findByText('选择项目进入概览')
+    expect(screen.queryByText('需要你处理')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '选择代码目录' })).toBeNull()
     expect(screen.queryByRole('link', { name: '选择代码目录' })).toBeNull()
   })
 
@@ -999,8 +1011,8 @@ describe('黄金路径：四入口汇聚同一个向导', () => {
       if (url.startsWith('/api/project-registry/projects')) {
         if (!recovered) {
           return {
-            status: 403,
-            body: { error: { code: 'forbidden', message: '项目列表不可用', retryable: false } },
+            status: 503,
+            body: { error: { code: 'server_error', message: '项目列表不可用', retryable: true } },
           }
         }
         return { body: registryProjectsEmptyPayload }
@@ -1009,26 +1021,21 @@ describe('黄金路径：四入口汇聚同一个向导', () => {
     })
     const user = userEvent.setup()
     renderApp('/overview')
-    expect(await screen.findByText('项目列表暂不可用')).toBeInTheDocument()
+    expect(await screen.findByText('项目列表不可用', undefined, { timeout: 8000 })).toBeInTheDocument()
     recovered = true
     await user.click(screen.getByRole('button', { name: '重试' }))
-    expect(await screen.findByRole('link', { name: '选择代码目录' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '选择代码目录' })).toBeInTheDocument()
   })
 
   it('G9 Welcome 主按钮 → 同一个向导入口', async () => {
     stubFetch({
       ...defaultFetchMap(),
-      '/api/overview': {
-        projects: [],
-        total_unread: 0,
-        total_projects: 0,
-        total_agents: 0,
-        agent_mail: { available: false, reason: 'none' },
-      },
+      '/api/project-registry/projects': registryProjectsEmptyPayload,
     })
     renderApp('/welcome')
-    const cta = await screen.findByRole('link', { name: '选择代码目录' })
-    expect(cta.getAttribute('href')).toContain('/projects?wizard=1')
+    const cta = await screen.findByRole('button', { name: '选择代码目录' })
+    await userEvent.click(cta)
+    expect(await screen.findByRole('dialog', { name: '添加项目' })).toBeInTheDocument()
   })
 
   it('G10 ?wizard=1 深链直接打开向导', async () => {

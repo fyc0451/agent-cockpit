@@ -10,6 +10,7 @@ import {
   defaultFetchMap,
   legacyWorkbenchPayload,
   metaOk,
+  REG_P1,
   registryProjectsPayload,
 } from '../fixtures/api'
 import { renderApp, type MockResponseSpec } from './helpers'
@@ -53,7 +54,15 @@ function stubCreateFetch(opts: {
       if (opts.pendingUrls?.some((p) => url.startsWith(p))) {
         return new Promise<Response>(() => {})
       }
-      const map: Record<string, unknown> = { ...defaultFetchMap(), ...alphaGets(), ...opts.gets }
+      const map: Record<string, unknown> = {
+        ...defaultFetchMap(),
+        [`/api/projects/${REG_P1}/workspaces/w1/work-items`]: {
+          data: { items: [], next_cursor: null },
+          meta: metaOk,
+        },
+        ...alphaGets(),
+        ...opts.gets,
+      }
       const key = Object.keys(map)
         .filter((k) => url === k || url.startsWith(`${k}?`))
         .sort((a, b) => b.length - a.length)[0]
@@ -103,6 +112,10 @@ function alphaGets(): Record<string, unknown> {
     '/api/projects/alpha/workbench': legacyWorkbenchPayload,
     [WS_LIST_URL]: { data: { items: [] }, meta: metaOk },
     [`${WS_LIST_URL}/ws_new1`]: { data: createdWorkspace, meta: metaOk },
+    [`/api/projects/${ALPHA_ID}/workspaces/ws_new1/work-items`]: {
+      data: { items: [], next_cursor: null },
+      meta: metaOk,
+    },
   }
 }
 
@@ -111,7 +124,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 async function openAlphaWorkbench() {
   const user = userEvent.setup()
   renderApp('/projects/alpha/workbench')
-  await screen.findByText('还没有工作空间')
+  await screen.findByText('还没有本机工作空间')
   return user
 }
 
@@ -124,10 +137,17 @@ async function openWizard(user: ReturnType<typeof userEvent.setup>) {
 
 describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
   it('C1 无合格 RepoLocation（p1 空列表）→ 按钮禁用 + 可见 reason + 点击零请求', async () => {
-    const stub = stubCreateFetch({})
+    const stub = stubCreateFetch({
+      gets: {
+        [`/api/project-registry/projects/${REG_P1}/workspaces`]: {
+          data: { items: [] },
+          meta: metaOk,
+        },
+      },
+    })
     const user = userEvent.setup()
     renderApp('/projects/p1/workbench')
-    expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
+    expect(await screen.findByText('还没有本机工作空间')).toBeInTheDocument()
     const btn = screen.getByRole('button', { name: '创建工作空间' })
     expect(btn).toHaveAttribute('aria-disabled', 'true')
     expect(btn).toHaveAttribute('title', expect.stringContaining('代码目录'))
@@ -154,7 +174,7 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     stubCreateFetch({ gets: { '/api/project-registry/projects': registry } })
     const user = userEvent.setup()
     renderApp('/projects/alpha/workbench')
-    await screen.findByText('还没有工作空间')
+    await screen.findByText('还没有本机工作空间')
     const btn = screen.getByRole('button', { name: '创建工作空间' })
     expect(btn).toHaveAttribute('aria-disabled', 'true')
     expect(btn).toHaveAttribute('title', '这个项目的本机代码目录当前不可用。')
@@ -190,11 +210,12 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
     await waitFor(() =>
       expect(stub.gets.filter((c) => c.url === WS_LIST_URL).length).toBeGreaterThanOrEqual(2),
     )
-    // 深链 Agent composer（默认落点不再是 Files）：任务输入 + 主按钮 + 已安装类型选择
+    // 深链 Workspace Focus（/agent 会 replace 回工作对话），不是 Agent composer
     expect((await screen.findAllByText('新工作区')).length).toBeGreaterThanOrEqual(1)
-    expect(await screen.findByLabelText('任务')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '开始任务' })).toBeInTheDocument()
-    expect((await screen.findByLabelText('Agent 类型')) as HTMLSelectElement).toHaveValue('codex')
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存工作' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Agent 类型')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '开始任务' })).not.toBeInTheDocument()
   })
 
   it('C4 goal 填写→原样提交；isolation 固定 shared 无选择器', async () => {
@@ -368,29 +389,26 @@ describe('P0-WORKSPACE-001-F 创建 Workspace', () => {
 // ---------- P0-WORKBENCH-001-unblock：legacy runtime 故障不阻断 Registry Workspace 区块 ----------
 
 describe('P0-WORKBENCH-001-unblock', () => {
-  const WB_503 = { __status: 503, __payload: { detail: 'Agent Mail 不可用' } }
-  // useLegacyWorkbench 对 retryable 错误带 backoff 重试（默认 retryDelay 1s/2s），等待放宽
-  const SLOW = { timeout: 8000 }
-
-  it('U1 legacy 503（p1）：runtime typed 错误，Workspaces 区块与列表仍渲染', async () => {
-    const stub = stubCreateFetch({ gets: { '/api/projects/p1/workbench': WB_503 } })
+  it('U1 legacy 503（p1）：不再请求/展示 Agent Mail runtime；本机工作空间仍可达', async () => {
+    const stub = stubCreateFetch({
+      gets: { '/api/projects/p1/workbench': { __status: 503, __payload: { detail: 'Agent Mail 不可用' } } },
+    })
     renderApp('/projects/p1/workbench')
-    // runtime 区块 typed 显示，不伪装为空
-    expect(await screen.findByText('Agent Mail 不可用', undefined, SLOW)).toBeInTheDocument()
-    expect(screen.queryByText('暂无任务')).toBeNull()
-    // Workspaces 区块独立可达
     expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
-    const btn = screen.getByRole('button', { name: '创建工作空间' })
-    expect(btn).toHaveAttribute('aria-disabled', 'true') // p1 无合格 repo
+    expect(screen.queryByText('Agent Mail 不可用')).toBeNull()
+    expect(screen.queryByText('暂无任务')).toBeNull()
+    expect(stub.gets.filter((c) => c.url.includes('/workbench'))).toHaveLength(0)
     expect(stub.posts).toHaveLength(0)
   })
 
   it('U2 legacy 503（alpha）：创建按钮 enabled 且向导可开，零 legacy /api/files', async () => {
-    const stub = stubCreateFetch({ gets: { '/api/projects/alpha/workbench': WB_503 } })
+    const stub = stubCreateFetch({
+      gets: { '/api/projects/alpha/workbench': { __status: 503, __payload: { detail: 'Agent Mail 不可用' } } },
+    })
     const user = userEvent.setup()
     renderApp('/projects/alpha/workbench')
-    expect(await screen.findByText('Agent Mail 不可用', undefined, SLOW)).toBeInTheDocument()
-    expect(await screen.findByText('还没有工作空间')).toBeInTheDocument()
+    expect(screen.queryByText('Agent Mail 不可用')).toBeNull()
+    expect(await screen.findByText('还没有本机工作空间')).toBeInTheDocument()
     const btn = screen.getByRole('button', { name: '创建工作空间' })
     expect(btn).not.toHaveAttribute('aria-disabled', 'true')
     await user.click(btn)
@@ -402,7 +420,7 @@ describe('P0-WORKBENCH-001-unblock', () => {
   it('U3 legacy 永不落定：runtime loading 不阻断 Workspaces 区块', async () => {
     stubCreateFetch({ pendingUrls: ['/api/projects/p1/workbench'] })
     renderApp('/projects/p1/workbench')
-    expect(await screen.findByText('正在加载运行时…')).toBeInTheDocument()
+    expect(screen.queryByText('正在加载运行时…')).toBeNull()
     expect((await screen.findAllByText('本机工作区')).length).toBeGreaterThanOrEqual(1)
   })
 
@@ -419,9 +437,9 @@ describe('P0-WORKBENCH-001-unblock', () => {
   it('U5 工作空间区块始终排在 legacy runtime 前', async () => {
     stubCreateFetch({ pendingUrls: ['/api/projects/alpha/workbench'] })
     renderApp('/projects/alpha/workbench')
-    await screen.findByText('正在加载运行时…')
-    const headings = screen.getAllByRole('heading', { level: 2 })
-    expect(headings[0]).toHaveTextContent('工作空间')
+    expect(await screen.findByText('还没有本机工作空间')).toBeInTheDocument()
+    expect(screen.queryByText('正在加载运行时…')).toBeNull()
+    expect(screen.queryByText('修复登录回归')).toBeNull()
   })
 
   it('U6 legacy 404/not_found 降级说明，不渲染红色项目不存在', async () => {
@@ -434,7 +452,8 @@ describe('P0-WORKBENCH-001-unblock', () => {
       },
     })
     const { container } = renderApp('/projects/alpha/workbench')
-    expect(await screen.findByText('运行时信息尚未建立')).toBeInTheDocument()
+    expect(await screen.findByText('还没有本机工作空间')).toBeInTheDocument()
+    expect(screen.queryByText('运行时信息尚未建立')).toBeNull()
     expect(screen.queryByText('项目不存在')).toBeNull()
     expect(container.querySelector('[data-state="error"]:not([hidden])')).toBeNull()
     expect(screen.getByRole('button', { name: '创建工作空间' })).toBeInTheDocument()
@@ -456,26 +475,31 @@ describe('P0-WORKBENCH-001-unblock', () => {
       },
     })
     const { container } = renderApp('/projects/alpha/workspaces/ws_new1')
-    await screen.findByText('其他能力')
     const main = container.querySelector('main')!
-    const cards = Array.from(main.querySelectorAll('.workspace-primary-actions .card'))
-    expect(cards.map((card) => card.querySelector('.card-label')?.textContent)).toEqual(['文件', '终端'])
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存工作' })).toBeInTheDocument()
     expect(main).not.toHaveTextContent('ws_new1')
-    // Agent 工作页主行动：突出且直达 /agent 路由
-    const cta = within(main).getByRole('link', { name: /开始任务/ })
-    expect(cta).toHaveAttribute('href', '/projects/alpha/workspaces/ws_new1/agent')
-    expect(within(main).queryByRole('link', { name: /编辑器|浏览器/ })).toBeNull()
-    expect(within(main).getByText(/编辑器、浏览器/)).toBeInTheDocument()
+    expect(within(main).queryByRole('link', { name: /开始任务/ })).toBeNull()
+    expect(screen.queryByText('其他能力')).toBeNull()
+    const rail = screen.getByRole('navigation', { name: '主导航' })
+    expect(within(rail).getByTitle('文件')).toHaveAttribute(
+      'href',
+      '/projects/alpha/workspaces/ws_new1/files',
+    )
+    expect(within(rail).getByTitle('终端')).toHaveAttribute(
+      'href',
+      '/projects/alpha/workspaces/ws_new1/terminal',
+    )
   })
 
   it('U8 工作空间列表隐藏内部 ID，并用用户语言显示本机位置', async () => {
     stubCreateFetch({})
-    renderApp('/projects/p1/workbench')
-    const heading = await screen.findByRole('heading', { name: '工作空间', level: 2 })
-    const section = heading.closest('section')!
-    expect(within(section).getByText('本机工作区')).toBeInTheDocument()
-    expect(section).not.toHaveTextContent('w1')
-    expect(within(section).getByText('本机')).toBeInTheDocument()
-    expect(section).not.toHaveTextContent('Local')
+    renderApp('/projects/p1/workspaces/w1')
+    const rail = screen.getByRole('navigation', { name: '主导航' })
+    expect((await within(rail).findAllByText('本机工作区')).length).toBeGreaterThan(0)
+    expect(rail).not.toHaveTextContent('w1')
+    expect(screen.getByTitle('切换工作空间')).toHaveTextContent('本机工作区')
+    expect(screen.getByTitle('切换工作空间')).not.toHaveTextContent('w1')
+    expect(rail).not.toHaveTextContent('Local')
   })
 })

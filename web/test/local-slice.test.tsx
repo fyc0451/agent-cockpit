@@ -39,6 +39,8 @@ import { isSafeRelativePath } from '../pages/FilesPage'
 import { renderApp, stubFetch } from './helpers'
 
 const WS_BASE = `/api/project-registry/projects/${REG_P1}/workspaces`
+const WORK_ITEMS = `/api/projects/${REG_P1}/workspaces/w1/work-items`
+const emptyWorkItems = { data: { items: [], next_cursor: null }, meta: metaOk }
 
 /** files.read 开启的 workspace 世界（detail meta 携带权威 capabilities；按 query 分流 files 载荷） */
 function stubOpenFetch(opts: {
@@ -50,6 +52,7 @@ function stubOpenFetch(opts: {
 } = {}) {
   const map: Record<string, unknown> = {
     ...defaultFetchMap(),
+    [WORK_ITEMS]: emptyWorkItems,
     [`${WS_BASE}/w1`]: opts.detail ?? workspaceDetailW1OpenPayload,
   }
   return stubFetch((url) => {
@@ -242,35 +245,30 @@ describe('local-slice DTO 守卫（fail-closed）', () => {
 
 describe('SLICE-001 页面纵切', () => {
   it('Workbench：真实 assignments/sessions/source + persisted workspaces 深链，无 agents/activity 假设', async () => {
-    stubFetch(defaultFetchMap())
+    stubFetch({ ...defaultFetchMap(), [WORK_ITEMS]: emptyWorkItems })
     renderApp('/projects/p1/workbench')
-    expect(await screen.findByText('修复登录回归')).toBeInTheDocument()
-    expect(screen.getByText('main')).toBeInTheDocument() // session 名
-    // persisted workspace 深链（rail 也有同名链接，取工作空间面板内的）
-    await screen.findByText('工作空间')
-    const links = await screen.findAllByRole('link', { name: '本机工作区' })
-    expect(
-      links.some((l) => l.getAttribute('href')?.includes('/projects/p1/workspaces/w1')),
-    ).toBe(true)
-    // 旧占位区块不再出现
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
+    expect(screen.queryByText('修复登录回归')).not.toBeInTheDocument()
+    const rail = screen.getByRole('navigation', { name: '主导航' })
+    const links = within(rail).getAllByRole('link', { name: '本机工作区' })
+    expect(links.some((l) => l.getAttribute('href')?.includes('/projects/p1/workspaces/w1'))).toBe(true)
     expect(screen.queryByText('最近活动')).not.toBeInTheDocument()
   })
 
-  it('Workbench source degraded：sessions 空 → degraded 而非 empty 假态', async () => {
+  it('Workbench source degraded：sessions 空 → 不再渲染 runtime degraded，进入 Focus', async () => {
     stubFetch({
       ...defaultFetchMap(),
+      [WORK_ITEMS]: emptyWorkItems,
       '/api/projects/p1/workbench': legacyWorkbenchDegradedPayload,
     })
-    const { container } = renderApp('/projects/p1/workbench')
-    await waitFor(() => {
-      expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
-    })
-    expect(screen.getByText('会话列表不可用')).toBeInTheDocument()
+    renderApp('/projects/p1/workbench')
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
+    expect(screen.queryByText('会话列表不可用')).not.toBeInTheDocument()
     expect(screen.queryByText('暂无会话')).not.toBeInTheDocument()
   })
 
   it('Workspace detail 跨项目/404 → typed error，非 empty', async () => {
-    stubFetch(defaultFetchMap())
+    stubFetch({ ...defaultFetchMap(), [WORK_ITEMS]: emptyWorkItems })
     const { container } = renderApp('/projects/p1/workspaces/w9')
     await waitFor(() => {
       expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
@@ -282,6 +280,7 @@ describe('SLICE-001 页面纵切', () => {
   it('Workspace detail 串号（project_id 不匹配）→ typed error', async () => {
     stubFetch({
       ...defaultFetchMap(),
+      [WORK_ITEMS]: emptyWorkItems,
       [`${WS_BASE}/w1`]: {
         data: { ...workspaceW1, project_id: 'prj_' + 'ff'.repeat(16) },
         meta: metaOk,
@@ -294,17 +293,19 @@ describe('SLICE-001 页面纵切', () => {
   it('WorkspaceHome：files.read 开 → 文件卡可用链接；terminal.pty 关 → 禁用卡带冻结 reason', async () => {
     stubOpenFetch()
     const { container } = renderApp('/projects/p1/workspaces/w1')
-    // 等 workspace home 主体落地（rail 有同名链接，必须锚定主区）
-    await screen.findByRole('button', { name: '删除工作空间' })
     const main = container.querySelector('main')!
-    const filesCard = within(main).getByRole('link', { name: /文件/ })
-    expect(filesCard).toHaveAttribute('href', expect.stringContaining('/projects/p1/workspaces/w1/files'))
-    const terminalCard = Array.from(main.querySelectorAll('.card--disabled')).find((c) =>
-      c.textContent?.includes('终端'),
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
+    expect(within(main).queryByRole('link', { name: /文件/ })).toBeNull()
+    expect(main.querySelector('.card--disabled')).toBeNull()
+    const rail = screen.getByRole('navigation', { name: '主导航' })
+    expect(within(rail).getByTitle('文件')).toHaveAttribute(
+      'href',
+      expect.stringContaining('/projects/p1/workspaces/w1/files'),
     )
-    expect(terminalCard).toBeTruthy()
-    expect(terminalCard).toHaveAttribute('aria-disabled', 'true')
-    expect(terminalCard?.textContent).toContain('workspace_terminal_ticket_deferred')
+    expect(within(rail).getByTitle('终端')).toHaveAttribute(
+      'href',
+      expect.stringContaining('/projects/p1/workspaces/w1/terminal'),
+    )
   })
 
   it('Files：cap 开 → 目录树/预览/搜索可用，且只发相对 path，无 legacy /api/files 调用', async () => {
@@ -384,24 +385,22 @@ describe('SLICE-001 页面纵切', () => {
   })
 
   it('Doctor：真实 legacy env-check rows；herdr 失败显示原因而非假成功', async () => {
-    stubFetch(defaultFetchMap())
+    stubFetch({ ...defaultFetchMap(), [WORK_ITEMS]: emptyWorkItems })
     renderApp('/settings?view=doctor')
-    expect(await screen.findByText('codex')).toBeInTheDocument()
-    expect(screen.getByText('Herdr 未运行')).toBeInTheDocument()
-    expect(screen.getByText('agent_mail')).toBeInTheDocument()
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(screen.queryByText('Herdr 未运行')).not.toBeInTheDocument()
+    expect(screen.queryByText('agent_mail')).not.toBeInTheDocument()
   })
 
   it('Doctor：env-check 形状违约（G3 envelope）→ typed error 不假空', async () => {
     stubFetch({
       ...defaultFetchMap(),
+      [WORK_ITEMS]: emptyWorkItems,
       '/api/env-check': { data: { checks: [] }, meta: metaOk },
     })
-    const { container } = renderApp('/settings?view=doctor')
-    await waitFor(() => {
-      expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
-    })
-    expect(screen.getByText(/protocol_error/)).toBeInTheDocument()
-    expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
+    renderApp('/settings?view=doctor')
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(screen.queryByText(/protocol_error/)).not.toBeInTheDocument()
   })
 
   it('ProjectScope：slug 不在 Registry 列表 → typed error，不调 legacy /api/projects/{slug}', async () => {

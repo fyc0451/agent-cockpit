@@ -1,12 +1,12 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { StatusState } from '../components/StatusState'
-import { defaultFetchMap } from '../fixtures/api'
+import { defaultFetchMap, metaOk, REG_P1, registryProjectsEmptyPayload } from '../fixtures/api'
 import { renderApp, stubFetch } from './helpers'
 
 const RUNTIME_MINI = '[data-testid="runtime-mini"]'
+const WORK_ITEMS = `/api/projects/${REG_P1}/workspaces/w1/work-items`
+const emptyWorkItems = { data: { items: [], next_cursor: null }, meta: metaOk }
 
-// Bare legacy shapes for the 6 endpoints that WEB-004 switched to legacyGet.
-// These match the real server.py response bodies (no G3 envelope).
 const bareOverview = {
   projects: [],
   total_unread: 0,
@@ -24,7 +24,6 @@ const bareAttention = {
 const bareHerdr = { available: true, binary: '/usr/local/bin/herdr' }
 const bareSettings = { language: 'zh', known_agents: ['claude'], languages: ['zh', 'en'] }
 
-/** Override legacy endpoints in a defaultFetchMap with bare shapes */
 function withLegacyOverrides(map: Record<string, unknown>): Record<string, unknown> {
   return {
     ...map,
@@ -32,14 +31,15 @@ function withLegacyOverrides(map: Record<string, unknown>): Record<string, unkno
     '/api/attention': bareAttention,
     '/api/herdr/status': bareHerdr,
     '/api/settings': bareSettings,
+    [WORK_ITEMS]: emptyWorkItems,
   }
 }
 
 describe('页面级九态（P1-6）', () => {
-  it('loading：overview 未落定 → loading 态；RuntimeMini 为 muted 而非 success', async () => {
+  it('loading：overview 未落定 → 项目列表 loading；无 RuntimeMini', async () => {
     stubFetch((url) => {
-      if (url.startsWith('/api/overview') || url.startsWith('/api/herdr/status')) {
-        return new Promise(() => {}) as never // 永不落定，保持 loading
+      if (url.startsWith('/api/project-registry/projects')) {
+        return new Promise(() => {}) as never
       }
       const map = withLegacyOverrides(defaultFetchMap())
       const key = Object.keys(map)
@@ -51,44 +51,43 @@ describe('页面级九态（P1-6）', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-state="loading"]')).toBeInTheDocument()
     })
-    const mini = container.querySelector(RUNTIME_MINI)
-    await waitFor(() => {
-      expect(mini).toHaveAttribute('data-tone', 'muted')
-    })
-    expect(mini).not.toHaveAttribute('data-tone', 'success')
+    expect(screen.getByText('正在加载项目列表…')).toBeInTheDocument()
+    expect(container.querySelector(RUNTIME_MINI)).toBeNull()
   })
 
   it('empty：真无数据（无 degraded）才显示 empty，且无 degraded banner', async () => {
-    stubFetch(withLegacyOverrides(defaultFetchMap()))
+    stubFetch({
+      ...withLegacyOverrides(defaultFetchMap()),
+      '/api/project-registry/projects': registryProjectsEmptyPayload,
+    })
     const { container } = renderApp('/overview')
     await waitFor(() => {
       expect(container.querySelector('[data-state="empty"]')).toBeInTheDocument()
     })
-    expect(screen.getByText('还没有可汇总的工作')).toBeInTheDocument()
+    expect(screen.getByText('还没有项目')).toBeInTheDocument()
+    expect(screen.queryByText('还没有可汇总的工作')).not.toBeInTheDocument()
     expect(container.querySelector('[data-state="degraded"]')).not.toBeInTheDocument()
   })
 
-  it('partial-degraded：attention query 失败 → degraded banner + 有数据仍渲染', async () => {
-    stubFetch((url) => {
-      if (url.startsWith('/api/attention')) {
-        return { status: 400, body: { detail: 'Herdr 超时' } }
-      }
-      const map = withLegacyOverrides(defaultFetchMap())
-      const key = Object.keys(map)
-        .filter((k) => url.startsWith(k))
-        .sort((a, b) => b.length - a.length)[0]
-      return key ? { body: map[key] } : undefined
+  it('partial-degraded：attention query 失败 → 改为项目列表 degraded，不渲染 Attention', async () => {
+    stubFetch({
+      ...withLegacyOverrides(defaultFetchMap()),
+      '/api/project-registry/projects': {
+        data: { items: [], next_cursor: null },
+        meta: { ...metaOk, partial: true },
+      },
     })
     const { container } = renderApp('/overview')
     await waitFor(() => {
       expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
     })
     expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
+    expect(screen.queryByText('还没有可汇总的工作')).not.toBeInTheDocument()
   })
 
-  it('overview 失败 + attention 正常 → 保留 overview 降级', async () => {
+  it('overview 失败 + attention 正常 → 项目列表 typed error，无 RuntimeMini', async () => {
     stubFetch((url) => {
-      if (url.startsWith('/api/overview')) {
+      if (url.startsWith('/api/project-registry/projects')) {
         return { status: 400, body: { detail: 'Registry 超时' } }
       }
       const map = withLegacyOverrides(defaultFetchMap())
@@ -99,13 +98,14 @@ describe('页面级九态（P1-6）', () => {
     })
     const { container } = renderApp('/overview')
     await waitFor(() => {
-      expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
+      expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
     })
+    expect(container.querySelector(RUNTIME_MINI)).toBeNull()
   })
 
   it('两个 query 同时失败 → 整页 error（非 degraded）', async () => {
     stubFetch((url) => {
-      if (url.startsWith('/api/overview') || url.startsWith('/api/attention')) {
+      if (url.startsWith('/api/project-registry/projects') || url.startsWith('/api/attention')) {
         return { status: 400, body: { detail: 'timeout' } }
       }
       const map = withLegacyOverrides(defaultFetchMap())
@@ -116,15 +116,32 @@ describe('页面级九态（P1-6）', () => {
     })
     const { container } = renderApp('/overview')
     await waitFor(() => {
-      // Both queries failed → full page error (not degraded)
       expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
     })
+    expect(container.querySelector('[data-state="degraded"]')).not.toBeInTheDocument()
   })
 
   it('degraded 且无数据 → degraded 区块而非 empty', async () => {
+    stubFetch({
+      ...withLegacyOverrides(defaultFetchMap()),
+      '/api/project-registry/projects': {
+        data: { items: [], next_cursor: null },
+        meta: { ...metaOk, partial: true },
+      },
+    })
+    const { container } = renderApp('/overview')
+    await waitFor(() => {
+      expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
+    })
+    expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
+    expect(screen.queryByText('还没有可汇总的工作')).not.toBeInTheDocument()
+    expect(screen.queryByText('还没有项目')).not.toBeInTheDocument()
+  })
+
+  it('overview 失败 + attention 空数组 → error 而非 empty', async () => {
     stubFetch((url) => {
-      if (url.startsWith('/api/attention')) {
-        return { status: 400, body: { detail: 'Herdr 超时' } }
+      if (url.startsWith('/api/project-registry/projects')) {
+        return { status: 400, body: { detail: 'timeout' } }
       }
       const map = withLegacyOverrides(defaultFetchMap())
       const key = Object.keys(map)
@@ -134,27 +151,14 @@ describe('页面级九态（P1-6）', () => {
     })
     const { container } = renderApp('/overview')
     await waitFor(() => {
-      expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
-    })
-    expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
-    expect(screen.queryByText('还没有可汇总的工作')).not.toBeInTheDocument()
-  })
-
-  it('overview 失败 + attention 空数组 → degraded 而非 empty', async () => {
-    stubFetch({
-      ...withLegacyOverrides(defaultFetchMap()),
-      '/api/overview': { status: 400, body: { detail: 'timeout' } },
-    })
-    const { container } = renderApp('/overview')
-    await waitFor(() => {
-      expect(container.querySelector('[data-state="degraded"]')).toBeInTheDocument()
+      expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
     })
     expect(container.querySelector('[data-state="empty"]')).not.toBeInTheDocument()
   })
 
   it('disconnected：transport_lost → disconnected 态（页面级）', async () => {
     stubFetch((url) => {
-      if (url.startsWith('/api/overview') || url.startsWith('/api/attention')) {
+      if (url.startsWith('/api/project-registry/projects')) {
         return {
           status: 502,
           body: { error: { code: 'transport_lost', message: '连接中断', retryable: false } },
@@ -172,26 +176,17 @@ describe('页面级九态（P1-6）', () => {
     })
   })
 
-  it('stale：doctor 数据源返回 error → error 态（页面级）', async () => {
-    stubFetch((url) => {
-      if (url.startsWith('/api/env-check')) {
-        return { status: 400, body: { detail: '缓存过期' } }
-      }
-      const map = withLegacyOverrides(defaultFetchMap())
-      const key = Object.keys(map)
-        .filter((k) => url.startsWith(k))
-        .sort((a, b) => b.length - a.length)[0]
-      return key ? { body: map[key] } : undefined
-    })
+  it('stale：doctor 数据源返回 error → /settings 回到项目列表，不渲染 Doctor', async () => {
+    stubFetch(withLegacyOverrides(defaultFetchMap()))
     const { container } = renderApp('/settings?view=doctor')
-    await waitFor(() => {
-      expect(container.querySelector('[data-state="error"]')).toBeInTheDocument()
-    })
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(container.querySelector('[data-state="error"]')).not.toBeInTheDocument()
+    expect(screen.queryByText('环境自检')).not.toBeInTheDocument()
   })
 
-  it('conflict：workbench 409 → conflict 态（页面级）', async () => {
+  it('conflict：workspace 列表 409 → conflict 态（页面级）', async () => {
     stubFetch((url) => {
-      if (url.startsWith('/api/projects/p1/workbench')) {
+      if (url === `/api/project-registry/projects/${REG_P1}/workspaces`) {
         return {
           status: 409,
           body: { error: { code: 'conflict', message: '版本冲突', retryable: false } },
@@ -232,51 +227,28 @@ describe('页面级九态（P1-6）', () => {
 })
 
 describe('RuntimeMini 状态色调（P1-6）', () => {
-  function miniTone(herdrSpec: { body: unknown; status?: number }) {
-    stubFetch((url) => {
-      if (url.startsWith('/api/herdr/status')) return herdrSpec
-      const map = withLegacyOverrides(defaultFetchMap())
-      const key = Object.keys(map)
-        .filter((k) => url.startsWith(k))
-        .sort((a, b) => b.length - a.length)[0]
-      return key ? { body: map[key] } : undefined
-    })
+  function renderProjects() {
+    stubFetch(withLegacyOverrides(defaultFetchMap()))
     return renderApp('/overview')
   }
 
-  it('available=true → success', async () => {
-    const { container } = miniTone({ body: bareHerdr })
-    await waitFor(() => {
-      expect(container.querySelector(RUNTIME_MINI)).toHaveAttribute('data-tone', 'success')
-    })
+  it('available=true → success → RuntimeMini 隐藏', async () => {
+    const { container } = renderProjects()
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(container.querySelector(RUNTIME_MINI)).toBeNull()
   })
 
-  it('available=false → danger', async () => {
-    const { container } = miniTone({ body: { available: false, binary: '/usr/local/bin/herdr' } })
-    await waitFor(() => {
-      const mini = container.querySelector(RUNTIME_MINI)
-      expect(mini).toHaveAttribute('data-tone', 'danger')
-      expect(mini?.textContent).toContain('Herdr 状态异常')
-      expect(mini?.textContent).toContain('本地 Herdr 二进制不可用')
-    })
+  it('available=false → danger → RuntimeMini 隐藏，无 Herdr 文案', async () => {
+    const { container } = renderProjects()
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(container.querySelector(RUNTIME_MINI)).toBeNull()
+    expect(screen.queryByText('Herdr 状态异常')).not.toBeInTheDocument()
   })
 
-  it('query error → danger degraded，不得 success', async () => {
-    stubFetch((url) => {
-      if (url.startsWith('/api/herdr/status')) {
-        return { status: 400, body: { detail: 'Herdr 不可达' } }
-      }
-      const map = withLegacyOverrides(defaultFetchMap())
-      const key = Object.keys(map)
-        .filter((k) => url.startsWith(k))
-        .sort((a, b) => b.length - a.length)[0]
-      return key ? { body: map[key] } : undefined
-    })
-    const { container } = renderApp('/overview')
-    await waitFor(() => {
-      const mini = container.querySelector(RUNTIME_MINI)
-      expect(mini).toHaveAttribute('data-tone', 'danger')
-      expect(mini?.textContent).toContain('Herdr 状态异常')
-    })
+  it('query error → danger degraded，不得 success → RuntimeMini 隐藏', async () => {
+    const { container } = renderProjects()
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(container.querySelector(RUNTIME_MINI)).toBeNull()
+    expect(screen.queryByText('Herdr 状态异常')).not.toBeInTheDocument()
   })
 })

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useNavigate, type NavigateFunction } from 'react-router-dom'
 import App from '../app/App'
-import { defaultFetchMap, metaOk, projectP1 } from '../fixtures/api'
+import { defaultFetchMap, metaOk, projectP1, REG_P1, REG_P2, workspaceW1 } from '../fixtures/api'
 import { CapabilitiesProvider } from '../state/capabilities'
 import { SelectionProvider } from '../state/selection'
 import { ThemeProvider } from '../state/theme'
@@ -43,6 +43,14 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
   it('Project A 的 terminal.pty=true 不泄漏到其 Workspace 或 Project B', async () => {
     stubFetch({
       ...defaultFetchMap(),
+      [`/api/projects/${REG_P1}/workspaces/w1/work-items`]: {
+        data: { items: [], next_cursor: null },
+        meta: metaOk,
+      },
+      [`/api/projects/${REG_P2}/workspaces/w1/work-items`]: {
+        data: { items: [], next_cursor: null },
+        meta: metaOk,
+      },
       // A project：server cap terminal.pty=true
       '/api/projects/p1': {
         data: projectP1,
@@ -76,6 +84,10 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
   it('B 404：Workspace scope 无 server 值且 project 不存在 → typed error', async () => {
     stubFetch({
       ...defaultFetchMap(),
+      [`/api/projects/${REG_P1}/workspaces/w1/work-items`]: {
+        data: { items: [], next_cursor: null },
+        meta: metaOk,
+      },
       '/api/projects/p1': {
         data: projectP1,
         meta: { ...metaOk, capabilities: { 'terminal.pty': { available: true, reason: null } } },
@@ -96,17 +108,37 @@ describe('capabilities 按 scope keyed snapshot（P1-3）', () => {
   })
 
   it('server 未声明的 key 在该 scope 保持 fail-closed', async () => {
-    stubFetch({
+    const fetchSpy = stubFetch({
       ...defaultFetchMap(),
-      '/api/projects/p1': {
-        data: projectP1,
-        meta: { ...metaOk, capabilities: { 'terminal.pty': { available: true, reason: null } } },
+      [`/api/projects/${REG_P1}/workspaces/w1/work-items`]: {
+        data: { items: [], next_cursor: null },
+        meta: metaOk,
+      },
+      [`/api/project-registry/projects/${REG_P1}/workspaces/w1`]: {
+        data: workspaceW1,
+        meta: {
+          ...metaOk,
+          capabilities: {
+            'terminal.pty': { available: true, reason: null },
+          },
+        },
       },
     })
-    const { container } = renderWithNav('/projects/p1/workspaces/w1')
-    const del = await screen.findByRole('button', { name: '删除工作空间' })
-    expect(del).toHaveAttribute('aria-disabled', 'true')
-    const cards = Array.from(container.querySelectorAll('.card'))
-    expect(cards.find((c) => c.textContent?.includes('编辑器'))).toHaveClass('card--disabled')
+    const { container, nav } = renderWithNav('/projects/p1/workspaces/w1')
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '删除工作空间' })).toBeNull()
+    expect(container.querySelectorAll('.card')).toHaveLength(0)
+    expect(screen.queryByLabelText('搜索文件')).not.toBeInTheDocument()
+
+    await act(async () => {
+      nav()('/projects/p1/workspaces/w1/files')
+    })
+    expect(await screen.findByText('文件浏览暂不可用')).toBeInTheDocument()
+    expect(screen.getByText(/文件浏览暂未接通/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('搜索文件')).not.toBeInTheDocument()
+    const fileCalls = fetchSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((url) => url.includes('/files'))
+    expect(fileCalls).toEqual([])
   })
 })

@@ -3,6 +3,10 @@ import { metaOk, REG_P1, workspaceListP1Payload } from '../fixtures/api'
 import { capabilities, capability } from '../state/capabilities'
 import { renderApp, stubDefaultFetch } from './helpers'
 
+const WORK_ITEMS = `/api/projects/${REG_P1}/workspaces/w1/work-items`
+const emptyWorkItems = { data: { items: [], next_cursor: null }, meta: metaOk }
+const focusStub = { [WORK_ITEMS]: emptyWorkItems }
+
 describe('capability registry（静态 fail-closed 表）', () => {
   it('W1 静态表除 TERM-003 本地开关外全部 available=false 且带真实原因', () => {
     const keys = Object.keys(capabilities) as (keyof typeof capabilities)[]
@@ -18,66 +22,50 @@ describe('capability registry（静态 fail-closed 表）', () => {
     expect(capability('files.read').reason).toContain('不影响终端使用')
   })
 
-  it('memory 页面整页 forbidden + 原因 + 文档入口', async () => {
-    stubDefaultFetch()
-    const { container } = renderApp('/projects/p1/memory')
-    await waitFor(() => {
-      expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
-    })
-    expect(screen.getByText('项目记忆暂未开放，不影响文件与终端的使用')).toBeInTheDocument()
+  it('memory 页面整页 forbidden + 原因 + 文档入口 → 路由隐藏，回到项目列表', async () => {
+    stubDefaultFetch(focusStub)
+    renderApp('/projects/p1/memory')
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(screen.queryByText('项目记忆暂未开放，不影响文件与终端的使用')).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: '查看路线图' })).toBeNull()
-    expect(screen.getByRole('link', { name: '返回项目概览' })).toHaveAttribute(
-      'href',
-      '/projects/p1/workbench',
-    )
-    // 页面头结构保留
-    expect(screen.getByText('项目记忆', { selector: '.page-title' })).toBeInTheDocument()
+    expect(screen.queryByText('项目记忆', { selector: '.page-title' })).not.toBeInTheDocument()
   })
 
-  it('git/editor/browser 整页 forbidden', async () => {
-    stubDefaultFetch()
-    const { container } = renderApp('/projects/p1/workspaces/w1/git')
-    await waitFor(() => {
-      expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
-    })
-    expect(screen.getByText('Git 集成暂未开放，可在终端中继续使用 Git')).toBeInTheDocument()
+  it('git/editor/browser 整页 forbidden → 路由隐藏，回到项目列表', async () => {
+    stubDefaultFetch(focusStub)
+    renderApp('/projects/p1/workspaces/w1/git')
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(screen.queryByText('Git 集成暂未开放，可在终端中继续使用 Git')).not.toBeInTheDocument()
   })
 
-  it('危险写按钮 aria-disabled + title 原因，可聚焦', async () => {
-    stubDefaultFetch()
+  it('危险写按钮不出现：删除工作空间不得假实现', async () => {
+    stubDefaultFetch(focusStub)
     renderApp('/projects/p1/workspaces/w1')
-    const del = await screen.findByRole('button', { name: '删除工作空间' })
-    expect(del).toHaveAttribute('aria-disabled', 'true')
-    expect(del).toHaveAttribute('title', '工作空间删除暂未开放')
-    ;(del as HTMLElement).focus()
-    expect(del).toHaveFocus()
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '删除工作空间' })).toBeNull()
   })
 
-  it('workspace 首页未接通卡片 disabled + 原因，已接通卡片可导航', async () => {
-    stubDefaultFetch()
+  it('workspace 首页是 Focus，不再用未接通卡片；文件/终端走 Rail', async () => {
+    stubDefaultFetch(focusStub)
     const { container } = renderApp('/projects/p1/workspaces/w1')
-    await screen.findByRole('button', { name: '删除工作空间' })
-    const cards = Array.from(container.querySelectorAll('.card'))
-    const editorCard = cards.find((c) => c.textContent?.includes('编辑器'))
-    expect(editorCard).toHaveClass('card--disabled')
-    expect(editorCard).toHaveAttribute('aria-disabled', 'true')
-    expect(editorCard?.textContent).toContain('内嵌编辑器暂未开放，可继续使用文件浏览与终端')
-    // SLICE-001：文件卡由 files.read capability 控制；默认世界 server 未声明 → fail-closed disabled
-    const filesCard = cards.find((c) => c.textContent?.includes('文件'))
-    expect(filesCard).toHaveClass('card--disabled')
-    expect(filesCard).toHaveAttribute('aria-disabled', 'true')
-    expect(filesCard?.textContent).toContain('文件浏览暂未接通')
+    expect(await screen.findByLabelText('今天想推进什么？')).toBeInTheDocument()
+    expect(container.querySelectorAll('.card')).toHaveLength(0)
+    expect(screen.queryByText('内嵌编辑器暂未开放，可继续使用文件浏览与终端')).not.toBeInTheDocument()
+    const rail = screen.getByRole('navigation', { name: '主导航' })
+    expect(within(rail).getByTitle('文件')).toHaveAttribute('href', '/projects/p1/workspaces/w1/files')
+    expect(within(rail).getByTitle('终端')).toHaveAttribute('href', '/projects/p1/workspaces/w1/terminal')
   })
 
-  it('设置页无永久 disabled 的保存按钮，只读说明可见', async () => {
-    stubDefaultFetch()
+  it('设置页无永久 disabled 的保存按钮，只读说明可见 → /settings 回到项目列表', async () => {
+    stubDefaultFetch(focusStub)
     renderApp('/settings')
-    expect(await screen.findByText('当前为只读：修改将在后续版本开放')).toBeInTheDocument()
+    expect(await screen.findByText('选择项目进入概览')).toBeInTheDocument()
+    expect(screen.queryByText('当前为只读：修改将在后续版本开放')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '保存设置' })).toBeNull()
   })
 
   it('终端页 PTY 未接通 banner + 控制按钮 aria-disabled', async () => {
-    stubDefaultFetch()
+    stubDefaultFetch(focusStub)
     const { container } = renderApp('/projects/p1/workspaces/w1/terminal')
     await waitFor(() => {
       expect(container.querySelector('[data-state="disconnected"]')).toBeInTheDocument()
@@ -90,17 +78,19 @@ describe('capability registry（静态 fail-closed 表）', () => {
 
 describe('rail 项目段 capability 门控', () => {
   it('unavailable 的 变更审核/动态/项目记忆 不作主导航展示；项目概览保留', async () => {
-    stubDefaultFetch()
+    stubDefaultFetch(focusStub)
     renderApp('/projects/p1/workbench')
     const rail = await screen.findByRole('navigation', { name: '主导航' })
-    await within(rail).findByRole('link', { name: '项目概览' })
+    expect(within(rail).queryByRole('link', { name: '项目概览' })).toBeNull()
     expect(within(rail).queryByRole('link', { name: '变更审核' })).toBeNull()
     expect(within(rail).queryByRole('link', { name: '动态' })).toBeNull()
     expect(within(rail).queryByRole('link', { name: '项目记忆' })).toBeNull()
+    expect(await within(rail).findByTitle('项目')).toBeInTheDocument()
   })
 
-  it('server 声明 available 时对应导航出现', async () => {
+  it('server 声明 available 时对应导航仍不出现（A 隐藏延期菜单）', async () => {
     stubDefaultFetch({
+      ...focusStub,
       [`/api/project-registry/projects/${REG_P1}/workspaces`]: {
         ...workspaceListP1Payload,
         meta: {
@@ -115,8 +105,8 @@ describe('rail 项目段 capability 门控', () => {
     })
     renderApp('/projects/p1/workbench')
     const rail = await screen.findByRole('navigation', { name: '主导航' })
-    await within(rail).findByRole('link', { name: '变更审核' })
-    expect(within(rail).getByRole('link', { name: '动态' })).toBeInTheDocument()
-    expect(within(rail).getByRole('link', { name: '项目记忆' })).toBeInTheDocument()
+    expect(within(rail).queryByRole('link', { name: '变更审核' })).toBeNull()
+    expect(within(rail).queryByRole('link', { name: '动态' })).toBeNull()
+    expect(within(rail).queryByRole('link', { name: '项目记忆' })).toBeNull()
   })
 })
