@@ -91,6 +91,8 @@ _RESTART_GUARD = threading.Lock()
 _RESTARTING_PANES: set[tuple[str, str]] = set()
 _SESSION_BOOTSTRAP_LOCK = threading.RLock()
 _SESSION_BOOTSTRAP_PROCESSES: dict[str, subprocess.Popen[bytes]] = {}
+_WORKSPACE_BOOTSTRAP_LOCK = threading.RLock()
+_WORKSPACE_BOOTSTRAP_LABEL = "Cockpit Next"
 
 
 class HerdrCapabilityError(RuntimeError):
@@ -733,7 +735,19 @@ def _snapshot_session(session: str) -> dict[str, Any]:
             for item in snap.get("tabs", [])
             if isinstance(item, dict)
         ] if isinstance(snap.get("tabs", []), list) else [],
+        "workspaces": [
+            {
+                "workspace_id": item.get("workspace_id"),
+                "active_tab_id": item.get("active_tab_id"),
+                "focused": item.get("focused", False),
+                "pane_count": item.get("pane_count"),
+                "tab_count": item.get("tab_count"),
+            }
+            if isinstance(item, dict) else None
+            for item in snap.get("workspaces", [])
+        ] if isinstance(snap.get("workspaces", []), list) else None,
         "focused_pane_id": snap.get("focused_pane_id"),
+        "focused_workspace_id": snap.get("focused_workspace_id"),
         # 各 tab 的 zoom 状态与几何(窄屏 attach 判断单 pane 聚焦用)
         "layouts": [
             _slim_layout(l) for l in snap.get("layouts", []) if isinstance(l, dict)
@@ -1708,6 +1722,121 @@ def _workspace_launch_label(instance_id: str) -> str:
     return "cockpit-launch-" + validate_agent_instance_id(instance_id)
 
 
+class _WorkspaceBootstrapResult(NamedTuple):
+    workspace_id: str
+    root_pane_id: str | None
+
+
+def _workspace_from_snapshot(snapshot_value: dict[str, Any]) -> str | None:
+    if snapshot_value.get("error") is not None:
+        raise ValueError("workspace snapshot unavailable")
+    workspaces = snapshot_value.get("workspaces")
+    if not isinstance(workspaces, list):
+        raise ValueError("workspace snapshot invalid")
+    parsed: list[tuple[str, bool]] = []
+    for item in workspaces:
+        if not isinstance(item, dict):
+            raise ValueError("workspace snapshot invalid")
+        workspace_id = item.get("workspace_id")
+        focused = item.get("focused", False)
+        if (
+            not isinstance(workspace_id, str)
+            or not workspace_id
+            or any(char.isspace() or ord(char) < 32 for char in workspace_id)
+            or type(focused) is not bool
+        ):
+            raise ValueError("workspace snapshot invalid")
+        parsed.append((workspace_id, focused))
+    if len({workspace_id for workspace_id, _focused in parsed}) != len(parsed):
+        raise ValueError("workspace snapshot invalid")
+    focused_workspace_id = snapshot_value.get("focused_workspace_id")
+    if focused_workspace_id is not None:
+        if (
+            not isinstance(focused_workspace_id, str)
+            or focused_workspace_id not in {item[0] for item in parsed}
+        ):
+            raise ValueError("workspace snapshot invalid")
+        marked = [workspace_id for workspace_id, focused in parsed if focused]
+        if marked and marked != [focused_workspace_id]:
+            raise ValueError("workspace snapshot invalid")
+        return focused_workspace_id
+    marked = [workspace_id for workspace_id, focused in parsed if focused]
+    if len(marked) == 1:
+        return marked[0]
+    if len(marked) > 1:
+        raise ValueError("workspace snapshot invalid")
+    if len(parsed) == 1:
+        return parsed[0][0]
+    if parsed:
+        raise ValueError("workspace snapshot unavailable")
+    return None
+
+
+def _workspace_managed_bootstrap(
+    session: str, workdir: str, snapshot_value: dict[str, Any],
+) -> _WorkspaceBootstrapResult:
+    """Ensure the headless session has a workspace before reserving authority."""
+    with _WORKSPACE_BOOTSTRAP_LOCK:
+        workspace_id = _workspace_from_snapshot(snapshot_value)
+        if workspace_id is not None:
+            return _WorkspaceBootstrapResult(workspace_id, None)
+
+        # A second snapshot under the process-wide lock closes the concurrent
+        # first-launch race without changing the existing-workspace fast path.
+        current = _snapshot_session(session)
+        workspace_id = _workspace_from_snapshot(current)
+        if workspace_id is not None:
+            return _WorkspaceBootstrapResult(workspace_id, None)
+
+        out = _run(
+            [
+                "--session", session, "workspace", "create", "--cwd", workdir,
+                "--label", _WORKSPACE_BOOTSTRAP_LABEL, "--no-focus",
+            ],
+            timeout=5,
+        )
+        data = _parse_data_json(out)
+        result = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(result, dict) or result.get("type") != "workspace_created":
+            raise ValueError("workspace create result invalid")
+        workspace = result.get("workspace")
+        tab = result.get("tab")
+        root_pane = result.get("root_pane")
+        if not all(isinstance(item, dict) for item in (workspace, tab, root_pane)):
+            raise ValueError("workspace create result invalid")
+        assert isinstance(workspace, dict)
+        assert isinstance(tab, dict)
+        assert isinstance(root_pane, dict)
+        workspace_id = workspace.get("workspace_id")
+        active_tab_id = workspace.get("active_tab_id")
+        tab_id = tab.get("tab_id")
+        pane_id = root_pane.get("pane_id")
+        root_cwd = root_pane.get("cwd")
+        if not all(
+            isinstance(value, str) and value
+            for value in (workspace_id, active_tab_id, tab_id, pane_id, root_cwd)
+        ):
+            raise ValueError("workspace create result invalid")
+        if (
+            active_tab_id != tab_id
+            or tab.get("workspace_id") != workspace_id
+            or root_pane.get("tab_id") != tab_id
+            or (
+                root_pane.get("workspace_id") is not None
+                and root_pane.get("workspace_id") != workspace_id
+            )
+        ):
+            raise ValueError("workspace create result invalid")
+        try:
+            actual_cwd = Path(root_cwd).expanduser().resolve()
+            expected_cwd = Path(workdir).expanduser().resolve()
+        except OSError as exc:
+            raise ValueError("workspace create result invalid") from exc
+        if actual_cwd != expected_cwd:
+            raise ValueError("workspace create result invalid")
+        return _WorkspaceBootstrapResult(workspace_id, pane_id)
+
+
 def _load_launch_descriptors_strict() -> dict[str, Any]:
     path = launch_descriptors_path()
     if not path.is_file():
@@ -2570,6 +2699,8 @@ def start_agent(
         return {"available": True, "error": str(exc)}
     canonical_kind = normalize_agent_kind(agent)
     pending_reserved = False
+    workspace_target: str | None = None
+    bootstrap_root_pane_id: str | None = None
     if workspace_managed:
         assert instance_id is not None
         assert project_id is not None and workspace_id is not None
@@ -2596,6 +2727,16 @@ def start_agent(
                 "error": "workspace launch authority unavailable",
             }
         try:
+            bootstrap = _workspace_managed_bootstrap(session, workdir, snap)
+            workspace_target = bootstrap.workspace_id
+            bootstrap_root_pane_id = bootstrap.root_pane_id
+        except (OSError, RuntimeError, ValueError):
+            return {
+                "available": True,
+                "error_code": "workspace_bootstrap_failed",
+                "error": "workspace bootstrap unavailable",
+            }
+        try:
             reserve_workspace_launch_descriptor(
                 session=session, name=instance_id, kind=canonical_kind,
                 agent=agent, workdir=workdir, instance_id=instance_id,
@@ -2612,6 +2753,8 @@ def start_agent(
     before_ids = {
         str(p.get("pane_id")) for p in snap.get("panes", []) if p.get("pane_id")
     }
+    if bootstrap_root_pane_id is not None:
+        before_ids.add(bootstrap_root_pane_id)
     # OpenCode/Bun 在窄 split 中可能直接 fatal signal 4；即使调用方仍传旧默认
     # right，也自动使用独立 tab。其他 agent 尊重显式布局。
     effective_layout = "tab" if agent == "opencode" else layout
@@ -2622,7 +2765,12 @@ def start_agent(
             # 多页:每个 agent 一个新 tab
             create_out = _run(
                 [
-                    "--session", session, "tab", "create", "--cwd", workdir,
+                    "--session", session, "tab", "create",
+                    *(
+                        ["--workspace", workspace_target]
+                        if workspace_target is not None else []
+                    ),
+                    "--cwd", workdir,
                     *(["--label", launch_label] if workspace_managed else []),
                 ],
                 timeout=5,
@@ -2637,19 +2785,24 @@ def start_agent(
             )
 
         reported_pid = None
-        for line in create_out.splitlines():
-            if not line.startswith("data:"):
-                continue
-            try:
-                data = json.loads(line[5:].strip())
-            except (ValueError, json.JSONDecodeError):
-                continue
-            result = data.get("result", {})
+        create_data = _parse_data_json(create_out)
+        create_result = (
+            create_data.get("result") if isinstance(create_data, dict) else None
+        )
+        if isinstance(create_result, dict):
+            result_pane = create_result.get("pane")
+            result_root_pane = create_result.get("root_pane")
+            result_tab = create_result.get("tab")
             reported_pid = (
-                result.get("pane", {}).get("pane_id")
-                or result.get("tab", {}).get("focused_pane_id")
+                result_pane.get("pane_id")
+                if isinstance(result_pane, dict) else None
+            ) or (
+                result_root_pane.get("pane_id")
+                if isinstance(result_root_pane, dict) else None
+            ) or (
+                result_tab.get("focused_pane_id")
+                if isinstance(result_tab, dict) else None
             )
-            break
 
         # 无论 Herdr 是否返回 id，都用前后 snapshot 验证它确实是本次新增 pane，
         # 并保留该 pane 的 tab/workspace id 供启动后改名复用（无需再取一次 snapshot）。

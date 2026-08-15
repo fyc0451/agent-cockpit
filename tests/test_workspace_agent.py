@@ -963,13 +963,23 @@ def test_workspace_managed_start_finalize_failure_closes_exact_live_agent(
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/true")
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
     snapshots = iter([
-        {"session": SESSION, "panes": [], "agents": []},
+        {
+            "session": SESSION, "panes": [], "agents": [],
+            "workspaces": [{"workspace_id": "w1", "focused": True}],
+            "focused_workspace_id": "w1",
+        },
         {
             "session": SESSION,
             "panes": [{"pane_id": "pane-new", "tab_id": "tab-new"}],
             "agents": [],
+            "workspaces": [{"workspace_id": "w1", "focused": True}],
+            "focused_workspace_id": "w1",
         },
-        {"session": SESSION, "panes": [], "agents": []},
+        {
+            "session": SESSION, "panes": [], "agents": [],
+            "workspaces": [{"workspace_id": "w1", "focused": True}],
+            "focused_workspace_id": "w1",
+        },
     ])
     monkeypatch.setattr(
         herdr_client, "_snapshot_session", lambda session: next(snapshots),
@@ -994,7 +1004,8 @@ def test_workspace_managed_start_finalize_failure_closes_exact_live_agent(
     assert result["descriptor_error"] == "launch descriptor unavailable"
     assert result["rolled_back"] is True
     assert [
-        "--session", SESSION, "tab", "create", "--cwd", PATH,
+        "--session", SESSION, "tab", "create", "--workspace", "w1",
+        "--cwd", PATH,
         "--label", herdr_client._workspace_launch_label(AGENT_A),
     ] in calls
     assert ["--session", SESSION, "pane", "close", "pane-new"] in calls
@@ -1035,6 +1046,233 @@ def test_workspace_managed_start_finalize_failure_closes_exact_live_agent(
     assert len(calls) == call_count
 
 
+def test_workspace_managed_start_bootstraps_empty_session_before_descriptor(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    descriptor_path = tmp_path / "launch.json"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(descriptor_path))
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "require_herdr_capabilities", lambda: {})
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/true")
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    root_pane = {
+        "pane_id": "w1:p1", "tab_id": "w1:t1",
+        "workspace_id": "w1", "cwd": PATH,
+    }
+    snapshots = iter([
+        {
+            "session": SESSION, "panes": [], "agents": [], "tabs": [],
+            "workspaces": [], "focused_workspace_id": None,
+        },
+        {
+            "session": SESSION, "panes": [], "agents": [], "tabs": [],
+            "workspaces": [], "focused_workspace_id": None,
+        },
+        {
+            "session": SESSION,
+            "panes": [root_pane, {
+                "pane_id": "w1:p2", "tab_id": "w1:t2",
+                "workspace_id": "w1", "cwd": PATH,
+            }],
+            "agents": [],
+            "tabs": [],
+            "workspaces": [{"workspace_id": "w1", "focused": False}],
+            "focused_workspace_id": None,
+        },
+    ])
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
+    )
+    calls: list[list[str]] = []
+
+    def run(args, timeout=10):
+        calls.append(args)
+        if args[2:4] == ["workspace", "create"]:
+            assert not descriptor_path.exists()
+            return json.dumps({
+                "result": {
+                    "type": "workspace_created",
+                    "workspace": {
+                        "workspace_id": "w1", "active_tab_id": "w1:t1",
+                    },
+                    "tab": {"tab_id": "w1:t1", "workspace_id": "w1"},
+                    "root_pane": root_pane,
+                },
+            })
+        if args[2:4] == ["tab", "create"]:
+            assert descriptor_path.is_file()
+            return json.dumps({
+                "result": {
+                    "tab": {"tab_id": "w1:t2", "workspace_id": "w1"},
+                    "root_pane": {
+                        "pane_id": "w1:p2", "tab_id": "w1:t2",
+                        "workspace_id": "w1", "cwd": PATH,
+                    },
+                },
+            })
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", run)
+    result = herdr_client.start_agent(
+        SESSION, PATH, "codex", layout="tab", label="codex", args="",
+        instance_id=AGENT_A, project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+
+    assert result["instance_id"] == AGENT_A
+    assert calls[0] == [
+        "--session", SESSION, "workspace", "create", "--cwd", PATH,
+        "--label", "Cockpit Next", "--no-focus",
+    ]
+    assert [
+        "--session", SESSION, "tab", "create", "--workspace", "w1",
+        "--cwd", PATH, "--label", herdr_client._workspace_launch_label(AGENT_A),
+    ] in calls
+    descriptor = herdr_client.get_launch_descriptor_by_instance(AGENT_A)
+    assert descriptor is not None
+    assert descriptor["workdir"] == PATH
+
+
+def test_snapshot_projects_workspace_authority_from_structured_json(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        herdr_client,
+        "_run",
+        lambda args, timeout=10: "data: " + json.dumps({
+            "result": {
+                "snapshot": {
+                    "panes": [],
+                    "agents": [],
+                    "tabs": [],
+                    "workspaces": [{
+                        "workspace_id": "w4", "active_tab_id": "w4:t1",
+                        "focused": True, "pane_count": 1, "tab_count": 1,
+                    }],
+                    "focused_workspace_id": "w4",
+                },
+            },
+        }),
+    )
+
+    result = herdr_client._snapshot_session(SESSION)
+
+    assert result["workspaces"] == [{
+        "workspace_id": "w4", "active_tab_id": "w4:t1",
+        "focused": True, "pane_count": 1, "tab_count": 1,
+    }]
+    assert result["focused_workspace_id"] == "w4"
+
+
+def test_workspace_managed_start_uses_existing_workspace_without_bootstrap(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "launch.json"),
+    )
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "require_herdr_capabilities", lambda: {})
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/true")
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    snapshots = iter([
+        {
+            "session": SESSION, "panes": [], "agents": [], "tabs": [],
+            "workspaces": [{"workspace_id": "w7", "focused": True}],
+            "focused_workspace_id": "w7",
+        },
+        {
+            "session": SESSION,
+            "panes": [{
+                "pane_id": "w7:p2", "tab_id": "w7:t2",
+                "workspace_id": "w7", "cwd": PATH,
+            }],
+            "agents": [], "tabs": [],
+            "workspaces": [{"workspace_id": "w7", "focused": True}],
+            "focused_workspace_id": "w7",
+        },
+    ])
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
+    )
+    calls: list[list[str]] = []
+
+    def run(args, timeout=10):
+        calls.append(args)
+        if args[2:4] == ["tab", "create"]:
+            return json.dumps({
+                "result": {
+                    "tab": {"tab_id": "w7:t2", "workspace_id": "w7"},
+                    "root_pane": {
+                        "pane_id": "w7:p2", "tab_id": "w7:t2",
+                        "workspace_id": "w7", "cwd": PATH,
+                    },
+                },
+            })
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", run)
+    result = herdr_client.start_agent(
+        SESSION, PATH, "codex", layout="tab", label="codex", args="",
+        instance_id=AGENT_A, project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+
+    assert result["instance_id"] == AGENT_A
+    assert not any(args[2:4] == ["workspace", "create"] for args in calls)
+    assert any(
+        args[2:6] == ["tab", "create", "--workspace", "w7"]
+        for args in calls
+    )
+
+
+@pytest.mark.parametrize(
+    "workspace_result",
+    [
+        {"result": {"type": "workspace_created"}},
+        {
+            "result": {
+                "type": "workspace_created",
+                "workspace": {"workspace_id": "w1", "active_tab_id": "w1:t1"},
+                "tab": {"tab_id": "w1:t1", "workspace_id": "w1"},
+                "root_pane": {
+                    "pane_id": "w1:p1", "tab_id": "w1:t1",
+                    "workspace_id": "w1", "cwd": "/wrong",
+                },
+            },
+        },
+    ],
+)
+def test_workspace_managed_bootstrap_failure_has_no_descriptor_or_tab_create(
+    monkeypatch, tmp_path: Path, workspace_result: dict[str, object],
+) -> None:
+    descriptor_path = tmp_path / "launch.json"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(descriptor_path))
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "require_herdr_capabilities", lambda: {})
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/true")
+    empty = {
+        "session": SESSION, "panes": [], "agents": [], "tabs": [],
+        "workspaces": [], "focused_workspace_id": None,
+    }
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: empty)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(args) or json.dumps(workspace_result),
+    )
+
+    result = herdr_client.start_agent(
+        SESSION, PATH, "codex", layout="tab", label="codex", args="",
+        instance_id=AGENT_A, project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+
+    assert result == {
+        "available": True,
+        "error_code": "workspace_bootstrap_failed",
+        "error": "workspace bootstrap unavailable",
+    }
+    assert not descriptor_path.exists()
+    assert not any(args[2:4] == ["tab", "create"] for args in calls)
+
+
 def test_workspace_managed_start_keeps_and_recovers_pending_when_cleanup_unknown(
     monkeypatch, tmp_path: Path,
 ) -> None:
@@ -1055,13 +1293,23 @@ def test_workspace_managed_start_keeps_and_recovers_pending_when_cleanup_unknown
         }],
     }
     snapshots = iter([
-        {"session": SESSION, "panes": [], "agents": []},
+        {
+            "session": SESSION, "panes": [], "agents": [],
+            "workspaces": [{"workspace_id": "w1", "focused": True}],
+            "focused_workspace_id": "w1",
+        },
         {
             "session": SESSION,
             "panes": [{"pane_id": "pane-new", "tab_id": "tab-new"}],
             "agents": [],
+            "workspaces": [{"workspace_id": "w1", "focused": True}],
+            "focused_workspace_id": "w1",
         },
-        live,
+        {
+            **live,
+            "workspaces": [{"workspace_id": "w1", "focused": True}],
+            "focused_workspace_id": "w1",
+        },
     ])
     monkeypatch.setattr(
         herdr_client, "_snapshot_session", lambda session: next(snapshots),
@@ -1113,10 +1361,12 @@ def test_real_absent_session_bootstrap_uses_scoped_headless_server(
     config_root = isolated_root / "x"
     state_root = isolated_root / "s"
     data_root = isolated_root / "d"
+    workdir = isolated_root / "repo"
     config_path = isolated_root / "h" / "config.toml"
     config_path.parent.mkdir(parents=True, mode=0o700)
     state_root.mkdir(mode=0o700)
     data_root.mkdir(mode=0o700)
+    workdir.mkdir(mode=0o700)
     config_path.write_text("onboarding = false\n", encoding="utf-8")
     monkeypatch.setenv("HERDR_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
@@ -1158,6 +1408,21 @@ def test_real_absent_session_bootstrap_uses_scoped_headless_server(
         snapshot = herdr_client.session_snapshot(session)
         assert snapshot["session"] == session
         assert snapshot.get("error") is None
+        assert snapshot["workspaces"] == []
+        created_workspace = herdr_client._workspace_managed_bootstrap(
+            session, str(workdir), snapshot,
+        )
+        assert created_workspace.workspace_id
+        assert created_workspace.root_pane_id
+        after = herdr_client.session_snapshot(session)
+        assert [
+            item["workspace_id"] for item in after["workspaces"]
+        ] == [created_workspace.workspace_id]
+        assert any(
+            pane.get("pane_id") == created_workspace.root_pane_id
+            and Path(str(pane.get("cwd"))).resolve() == workdir.resolve()
+            for pane in after["panes"]
+        )
     finally:
         environment = dict(os.environ)
         subprocess.run(
