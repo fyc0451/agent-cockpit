@@ -1524,15 +1524,35 @@ def test_real_absent_session_bootstrap_uses_scoped_headless_server(
         )
         assert created_workspace.workspace_id
         assert created_workspace.root_pane_id
-        after = herdr_client.session_snapshot(session)
-        assert [
-            item["workspace_id"] for item in after["workspaces"]
-        ] == [created_workspace.workspace_id]
-        assert any(
-            pane.get("pane_id") == created_workspace.root_pane_id
-            and Path(str(pane.get("cwd"))).resolve() == workdir.resolve()
-            for pane in after["panes"]
-        )
+        deadline = time.monotonic() + 1.0
+        attempts = 0
+        while True:
+            attempts += 1
+            after = herdr_client.session_snapshot(session)
+            workspace_ids = [
+                item["workspace_id"] for item in after["workspaces"]
+            ]
+            root_panes = [
+                pane for pane in after["panes"]
+                if pane.get("pane_id") == created_workspace.root_pane_id
+                and pane.get("workspace_id") == created_workspace.workspace_id
+            ]
+            root_cwd = root_panes[0].get("cwd") if len(root_panes) == 1 else None
+            if (
+                workspace_ids == [created_workspace.workspace_id]
+                and isinstance(root_cwd, str)
+                and Path(root_cwd).resolve() == workdir.resolve()
+            ):
+                break
+            if time.monotonic() >= deadline:
+                pytest.fail(
+                    "workspace root pane did not converge: "
+                    f"workspace_id={created_workspace.workspace_id!r} "
+                    f"root_pane_id={created_workspace.root_pane_id!r} "
+                    f"attempts={attempts} "
+                    f"last_snapshot={json.dumps(after, sort_keys=True)}"
+                )
+            time.sleep(0.01)
     finally:
         environment = dict(os.environ)
         subprocess.run(
