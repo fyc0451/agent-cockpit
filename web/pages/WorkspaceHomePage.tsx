@@ -12,7 +12,7 @@ function WorkspaceBody({ project, workspace }: { project: Project; workspace: Wo
     <section className="workspace-focus" aria-label="工作对话">
       <header className="workspace-focus-heading">
         <p>{project.name ?? project.slug}</p>
-        <h1>{workspace.name ?? workspaceId}</h1>
+        <h1>{workspace.name && workspace.name !== '' ? workspace.name : '工作空间'}</h1>
       </header>
       <FocusConversation
         key={`${projectId}/${workspaceId}`}

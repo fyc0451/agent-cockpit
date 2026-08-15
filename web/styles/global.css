@@ -305,6 +305,12 @@ pre {
   margin-bottom: 14px;
 }
 
+.rail-section--nested {
+  margin: 6px 0 0;
+  padding-left: 10px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 .rail-heading {
   font-size: 10px;
   text-transform: uppercase;
@@ -1661,6 +1667,12 @@ button.rail-item {
     flex-direction: row;
     gap: 2px;
     margin: 0;
+  }
+
+  .rail-section--nested {
+    margin: 0;
+    padding-left: 0;
+    border-left: 0;
   }
 
   .rail-item {

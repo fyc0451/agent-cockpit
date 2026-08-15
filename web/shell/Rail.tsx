@@ -41,6 +41,10 @@ function localWorkspaces(
   return (workspaces ?? []).filter((item) => !isRemoteWorkspace(item) && item.id)
 }
 
+function workspaceLabel(name: string | undefined): string {
+  return name && name !== '' ? name : '工作空间'
+}
+
 export function Rail() {
   const location = useLocation()
   const { projectSlug, workspaceId, project, workspace } = useSelection()
@@ -56,6 +60,7 @@ export function Rail() {
     ? projects.filter((item) => item.slug !== projectSlug)
     : projects
   const currentWorkspaces = localWorkspaces(project?.workspaces)
+  const currentProjectTitle = project?.name && project.name !== '' ? project.name : projectSlug
 
   return (
     <nav className="rail" aria-label="主导航">
@@ -111,30 +116,31 @@ export function Rail() {
         {projectSlug ? (
           <div className="rail-section">
             <p className="rail-heading rail-label">当前项目</p>
-            <p className="rail-context rail-label ellipsis" title={project?.name ?? projectSlug}>
-              {project?.name ?? projectSlug}
+            <p className="rail-context rail-label ellipsis" title={currentProjectTitle ?? undefined}>
+              {currentProjectTitle}
             </p>
             {currentWorkspaces.map((item) => (
               <RailLink
                 key={item.id}
                 to={routes.workspace.home(projectSlug, item.id!)}
                 icon="▹"
-                label={item.name ?? item.id!}
+                label={workspaceLabel(item.name)}
                 mobileHidden
               />
             ))}
-          </div>
-        ) : null}
-
-        {projectSlug && workspaceId ? (
-          <div className="rail-section">
-            <p className="rail-heading rail-label">当前工作空间</p>
-            <p className="rail-context rail-label ellipsis" title={workspace?.name ?? workspaceId}>
-              {workspace?.name ?? workspaceId}
-            </p>
-            <RailLink to={routes.workspace.home(projectSlug, workspaceId)} end icon="◉" label="工作对话" mobileCore />
-            <RailLink to={routes.workspace.files(projectSlug, workspaceId)} icon="🗀" label="文件" mobileCore />
-            <RailLink to={routes.workspace.terminal(projectSlug, workspaceId)} icon="▸" label="终端" mobileCore />
+            {workspaceId ? (
+              <div className="rail-section rail-section--nested">
+                <p className="rail-heading rail-label">当前工作空间</p>
+                {currentWorkspaces.some((item) => item.id === workspaceId) ? null : (
+                  <p className="rail-context rail-label ellipsis" title={workspaceLabel(workspace?.name)}>
+                    {workspaceLabel(workspace?.name)}
+                  </p>
+                )}
+                <RailLink to={routes.workspace.home(projectSlug, workspaceId)} end icon="◉" label="工作对话" mobileCore />
+                <RailLink to={routes.workspace.files(projectSlug, workspaceId)} icon="🗀" label="文件" mobileCore />
+                <RailLink to={routes.workspace.terminal(projectSlug, workspaceId)} icon="▸" label="终端" mobileCore />
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>

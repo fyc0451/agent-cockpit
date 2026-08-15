@@ -33,10 +33,24 @@ function workItemId(item: WorkspaceWorkAggregate): string {
   return item.root_message.message_id
 }
 
+function createdAtMs(item: WorkspaceWorkAggregate): number {
+  const value = item.thread.created_at
+  if (typeof value !== 'string' || value === '') return Number.NEGATIVE_INFINITY
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms
+}
+
+function latestItem(items: WorkspaceWorkAggregate[]): WorkspaceWorkAggregate | null {
+  if (items.length === 0) return null
+  return items.reduce((latest, item) => (
+    createdAtMs(item) >= createdAtMs(latest) ? item : latest
+  ))
+}
+
 function formatCreatedAt(value: unknown): string | null {
   if (typeof value !== 'string' || value === '') return null
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
+  if (Number.isNaN(date.getTime())) return null
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
@@ -49,7 +63,7 @@ function resolveSelected(
     const match = items.find((item) => workItemId(item) === requested)
     if (match) return match
   }
-  return items[items.length - 1] ?? null
+  return latestItem(items)
 }
 
 function SavedWork({
@@ -290,7 +304,7 @@ export function FocusConversation({
         <StatusState kind="degraded" banner title="工作记录暂未完整加载" />
       ) : null}
       {items.length > 0 ? (
-        <section className="focus-task-list" aria-label="已保存的工作">
+        <section className="focus-task-list" aria-label="已保存的任务">
           <div className="focus-task-list-head">
             <h2>任务</h2>
             <Button type="button" onClick={() => setComposing(true)}>新建任务</Button>
@@ -305,6 +319,7 @@ export function FocusConversation({
                   <button
                     type="button"
                     className={`focus-task-row${current ? ' focus-task-row--current' : ''}`}
+                    aria-current={current ? true : undefined}
                     title={item.root_message.body}
                     onClick={() => selectWork(id)}
                   >
