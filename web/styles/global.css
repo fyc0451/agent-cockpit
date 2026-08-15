@@ -1471,10 +1471,24 @@ button.rail-item {
 .project-wizard-list {
   min-height: 0;
   max-height: min(50vh, 480px);
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.project-wizard-list > .list-row {
+  min-width: 0;
+}
+
+.project-wizard-list > .list-row > .drawer-item {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.project-wizard-list > .list-row > .btn {
+  flex: none;
 }
 
 .project-wizard-list:focus-visible {

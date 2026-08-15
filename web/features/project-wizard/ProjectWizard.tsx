@@ -544,7 +544,7 @@ export function ProjectWizard({
                           aria-label={`进入 ${entry.name}`}
                           onClick={() => dispatch({ type: 'enter-dir', path: entry.path })}
                         >
-                          进入 {entry.name}
+                          进入
                         </Button>
                       </li>
                     ))}

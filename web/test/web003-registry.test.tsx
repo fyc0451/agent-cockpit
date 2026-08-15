@@ -299,8 +299,11 @@ describe('WEB-003 向导浏览与识别（V7–V13, V17, V20）', () => {
     const directoryList = within(dialog).getByRole('list', { name: '目录 /' })
     expect(directoryList).toHaveClass('project-wizard-list')
     expect(directoryList).toHaveAttribute('tabindex', '0')
+    const enterAlpha = screen.getByRole('button', { name: '进入 alpha' })
+    expect(enterAlpha).toHaveAttribute('aria-label', '进入 alpha')
+    expect(enterAlpha).toHaveTextContent(/^进入$/)
     // 进入子目录的请求只带 root_id + 相对 path
-    await user.click(screen.getByRole('button', { name: '进入 alpha' }))
+    await user.click(enterAlpha)
     await waitFor(() => {
       const dirCalls = stub.gets.filter((c) => c.url.includes('/directories'))
       expect(dirCalls.some((c) => c.url.includes('path=alpha'))).toBe(true)

@@ -2,6 +2,8 @@ import { AxeBuilder } from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
 import {
   discoveryGitPayload,
+  metaOk,
+  REG_ROOT_CODE,
   registerCreatedPayload,
   registryProjectsEmptyPayload,
   registryProjectsEmptyWritablePayload,
@@ -175,6 +177,103 @@ for (const width of WIDTHS) {
     expectGatesClean(g)
   })
 }
+
+test('390x844：添加项目目录列表无横溢，进入按钮落在 list 内且可纵向滚到底', async ({ page }) => {
+  const g = attachGates(page)
+  const longName = 'very-long-directory-name-that-used-to-clip-the-enter-control'
+  const tallListing = {
+    data: {
+      locator: { node_id: 'local', root_id: REG_ROOT_CODE, path: '' },
+      entries: Array.from({ length: 16 }, (_, i) => ({
+        name: i === 0 ? longName : `dir-${i}`,
+        path: i === 0 ? longName : `dir-${i}`,
+        kind: 'directory',
+        vcs_hint: i === 0 ? 'git' : 'unknown',
+        registered_project: null,
+      })),
+      complete: true,
+      partial: false,
+      sources: ['local_files', 'project_registry'],
+      warnings: [],
+    },
+    meta: metaOk,
+  }
+  await stubApi(page, { '/api/runtime-nodes/local/directories': tallListing })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/#/projects')
+  await page.getByRole('button', { name: '添加项目' }).click()
+  const dialog = page.getByRole('dialog', { name: '添加项目' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: '代码' }).click()
+  const list = dialog.getByRole('list', { name: '目录 /' })
+  await expect(list).toBeVisible()
+  await expect(dialog.getByRole('button', { name: `进入 ${longName}` })).toHaveText('进入')
+
+  const doc = await page.evaluate(() => ({
+    sw: document.documentElement.scrollWidth,
+    cw: document.documentElement.clientWidth,
+  }))
+  expect(doc.sw, `document scrollWidth(${doc.sw}) 必须等于 clientWidth(${doc.cw})`).toBe(doc.cw)
+
+  const listMetrics = await list.evaluate((el) => ({
+    sw: el.scrollWidth,
+    cw: el.clientWidth,
+    sh: el.scrollHeight,
+    ch: el.clientHeight,
+  }))
+  await test.info().attach('wizard-list-metrics.json', {
+    body: JSON.stringify({ doc, listMetrics }, null, 2),
+    contentType: 'application/json',
+  })
+  expect(
+    listMetrics.sw,
+    `list scrollWidth(${listMetrics.sw}) 必须等于 clientWidth(${listMetrics.cw})`,
+  ).toBe(listMetrics.cw)
+
+  const listBox = await list.boundingBox()
+  expect(listBox, '目录 list 必须有 bbox').not.toBeNull()
+  const controls = list.locator('button')
+  const count = await controls.count()
+  expect(count, '目录 list 内必须有可见控件').toBeGreaterThan(0)
+  for (let i = 0; i < count; i += 1) {
+    const control = controls.nth(i)
+    if (!(await control.isVisible())) continue
+    const box = await control.boundingBox()
+    expect(box, `控件 ${i} 必须有 bbox`).not.toBeNull()
+    expect(box!.x, `控件 ${i} 左缘不得超出 list`).toBeGreaterThanOrEqual(listBox!.x - 0.5)
+    expect(box!.x + box!.width, `控件 ${i} 右缘不得超出 list`).toBeLessThanOrEqual(
+      listBox!.x + listBox!.width + 0.5,
+    )
+    const fullyInView =
+      box!.y >= listBox!.y - 0.5 &&
+      box!.y + box!.height <= listBox!.y + listBox!.height + 0.5
+    if (fullyInView) {
+      expect(box!.y, `可见控件 ${i} 上缘不得超出 list`).toBeGreaterThanOrEqual(listBox!.y - 0.5)
+      expect(box!.y + box!.height, `可见控件 ${i} 下缘不得超出 list`).toBeLessThanOrEqual(
+        listBox!.y + listBox!.height + 0.5,
+      )
+    }
+  }
+
+  await list.evaluate((el) => {
+    el.scrollTop = el.scrollHeight
+  })
+  const afterScroll = await list.evaluate((el) => ({
+    top: el.scrollTop,
+    max: el.scrollHeight - el.clientHeight,
+    sw: el.scrollWidth,
+    cw: el.clientWidth,
+  }))
+  expect(afterScroll.top, '必须能滚到列表底部').toBeGreaterThanOrEqual(afterScroll.max - 1)
+  expect(afterScroll.sw, '滚到底后仍不得横向溢出').toBe(afterScroll.cw)
+  const last = controls.last()
+  const lastBox = await last.boundingBox()
+  const listBoxAfter = await list.boundingBox()
+  expect(lastBox, '最后一项必须有 bbox').not.toBeNull()
+  expect(listBoxAfter, '滚到底后 list 必须有 bbox').not.toBeNull()
+  expect(lastBox!.y + lastBox!.height).toBeLessThanOrEqual(listBoxAfter!.y + listBoxAfter!.height + 0.5)
+  expectGatesClean(g)
+})
 
 test('E6 axe：列表 empty、向导三步、成功卡片无 serious/critical', async ({ page }) => {
   const g = attachGates(page)
