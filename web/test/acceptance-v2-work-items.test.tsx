@@ -184,6 +184,11 @@ function expectSelected(body: string) {
   return btn
 }
 
+async function expectSavedWork(body: string) {
+  await screen.findByText('工作已保存')
+  expect(screen.getByText(body)).toHaveTextContent(body)
+}
+
 async function fillFields(fields: { body: string; acceptance: string; constraints: string }) {
   fireEvent.change(await screen.findByLabelText('今天想推进什么？'), {
     target: { value: fields.body },
@@ -212,13 +217,13 @@ describe('验收 v2 · 同一 Workspace 多项任务', () => {
 
     await fillFields(FIRST)
     fireEvent.click(screen.getByRole('button', { name: '保存工作' }))
-    expect(await screen.findByText(FIRST.body)).toBeInTheDocument()
+    await expectSavedWork(FIRST.body)
 
     const createAgain = await screen.findByRole('button', { name: '新建任务' })
     await user.click(createAgain)
     await fillFields(SECOND)
     fireEvent.click(screen.getByRole('button', { name: '保存工作' }))
-    expect(await screen.findByText(SECOND.body)).toBeInTheDocument()
+    await expectSavedWork(SECOND.body)
 
     const posts = calls.filter((c) => c.method === 'POST' && c.url === WORK_ITEMS)
     expect(posts).toHaveLength(2)
