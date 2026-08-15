@@ -1163,6 +1163,15 @@ def test_snapshot_projects_workspace_authority_from_structured_json(
     assert result["focused_workspace_id"] == "w4"
 
 
+@pytest.mark.parametrize("workspace_id", ["-1", "w\x7f", "工作区"])
+def test_workspace_snapshot_rejects_invalid_workspace_id(workspace_id: str) -> None:
+    with pytest.raises(ValueError, match="workspace snapshot invalid"):
+        herdr_client._workspace_from_snapshot({
+            "workspaces": [{"workspace_id": workspace_id}],
+            "focused_workspace_id": None,
+        })
+
+
 def test_workspace_managed_start_uses_existing_workspace_without_bootstrap(
     monkeypatch, tmp_path: Path,
 ) -> None:
@@ -1235,6 +1244,17 @@ def test_workspace_managed_start_uses_existing_workspace_without_bootstrap(
                 "root_pane": {
                     "pane_id": "w1:p1", "tab_id": "w1:t1",
                     "workspace_id": "w1", "cwd": "/wrong",
+                },
+            },
+        },
+        {
+            "result": {
+                "type": "workspace_created",
+                "workspace": {"workspace_id": "-1", "active_tab_id": "w1:t1"},
+                "tab": {"tab_id": "w1:t1", "workspace_id": "-1"},
+                "root_pane": {
+                    "pane_id": "w1:p1", "tab_id": "w1:t1",
+                    "workspace_id": "-1", "cwd": PATH,
                 },
             },
         },

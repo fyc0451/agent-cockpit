@@ -1727,6 +1727,19 @@ class _WorkspaceBootstrapResult(NamedTuple):
     root_pane_id: str | None
 
 
+def _valid_workspace_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 128
+        and value.isascii()
+        and not value.startswith("-")
+        and not any(
+            char.isspace() or ord(char) < 32 or ord(char) == 127
+            for char in value
+        )
+    )
+
+
 def _workspace_from_snapshot(snapshot_value: dict[str, Any]) -> str | None:
     if snapshot_value.get("error") is not None:
         raise ValueError("workspace snapshot unavailable")
@@ -1739,12 +1752,7 @@ def _workspace_from_snapshot(snapshot_value: dict[str, Any]) -> str | None:
             raise ValueError("workspace snapshot invalid")
         workspace_id = item.get("workspace_id")
         focused = item.get("focused", False)
-        if (
-            not isinstance(workspace_id, str)
-            or not workspace_id
-            or any(char.isspace() or ord(char) < 32 for char in workspace_id)
-            or type(focused) is not bool
-        ):
+        if not _valid_workspace_id(workspace_id) or type(focused) is not bool:
             raise ValueError("workspace snapshot invalid")
         parsed.append((workspace_id, focused))
     if len({workspace_id for workspace_id, _focused in parsed}) != len(parsed):
@@ -1816,6 +1824,8 @@ def _workspace_managed_bootstrap(
             isinstance(value, str) and value
             for value in (workspace_id, active_tab_id, tab_id, pane_id, root_cwd)
         ):
+            raise ValueError("workspace create result invalid")
+        if not _valid_workspace_id(workspace_id):
             raise ValueError("workspace create result invalid")
         if (
             active_tab_id != tab_id
