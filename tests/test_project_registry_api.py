@@ -173,6 +173,64 @@ def test_create_preflights_before_discovery_and_replays_receipt(client):
     _assert_error(http.post("/api/project-registry/projects", json=_body()), 400, "idempotency_key_required")
 
 
+def test_project_and_workspace_survive_store_and_api_restart(tmp_path: Path):
+    path = tmp_path / "project-registry.sqlite3"
+    first_store = store_module.initialize(path)
+    first_discovery = FakeDiscovery(_result())
+    first_app = FastAPI()
+    api.install(
+        first_app,
+        api.ApiService(lambda: first_store, lambda: first_discovery),
+    )
+
+    with TestClient(first_app) as first_http:
+        created = first_http.post(
+            "/api/project-registry/projects",
+            json=_body(),
+            headers={"Idempotency-Key": "restart-project"},
+        )
+        project = _assert_g3(created)["data"]
+        workspace = first_http.post(
+            f"/api/project-registry/projects/{project['project_id']}/workspaces",
+            json={
+                "repo_location_id": project["repo_location"]["repo_location_id"],
+                "name": "Main",
+                "goal": None,
+                "isolation_kind": "shared",
+            },
+            headers={"Idempotency-Key": "restart-workspace"},
+        )
+        assert workspace.status_code == 201
+        workspace_id = workspace.json()["data"]["workspace_id"]
+    first_store.close()
+
+    second_store = store_module.open_existing(path)
+    second_app = FastAPI()
+    api.install(
+        second_app,
+        api.ApiService(lambda: second_store, lambda: FakeDiscovery(_result())),
+    )
+    try:
+        with TestClient(second_app) as second_http:
+            listed = _assert_g3(second_http.get("/api/project-registry/projects"))
+        assert [
+            (item["project"]["project_id"], item["project"]["slug"])
+            for item in listed["data"]["items"]
+        ] == [
+            (project["project_id"], "alpha"),
+        ]
+        assert project["project_id"] != project["slug"]
+        locations = second_store.list_repo_locations(project["project_id"])
+        workspaces = second_store.list_workspaces(project["project_id"])
+        assert locations is not None and len(locations) == 1
+        assert workspaces is not None
+        assert [(item.workspace_id, item.name) for item in workspaces] == [
+            (workspace_id, "Main"),
+        ]
+    finally:
+        second_store.close()
+
+
 def test_invalid_write_input_does_not_run_preflight_or_discovery(client, registry):
     http, service = client
     invalid = _body() | {"slug": "Not valid"}
