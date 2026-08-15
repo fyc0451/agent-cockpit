@@ -188,6 +188,10 @@ def main(argv: list[str] | None = None) -> int:
         lock = InstanceLock(environment).acquire()
         _prepare_layout(root, fresh=fresh)
         try:
+            next_profile.ensure_private_herdr_config(environment)
+        except next_profile.NextProfileError as exc:
+            raise EphemeralError(str(exc)) from exc
+        try:
             next_profile.activate_ephemeral_runtime_root(root)
         except next_profile.NextProfileError as exc:
             raise EphemeralError("runtime_root_layout_invalid") from exc

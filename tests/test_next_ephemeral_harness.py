@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from hashlib import sha256
 from pathlib import Path
 from urllib.request import urlopen
@@ -142,11 +143,29 @@ def test_ephemeral_launcher_runs_real_lifespan_and_reuses_known_root(
     marker = json.loads((runtime_root / ".cockpit-ephemeral-root.json").read_text())
     catalog_bytes = (runtime_root / ".cockpit-ephemeral-catalog.json").read_bytes()
     catalog = json.loads(catalog_bytes)
+    herdr_config = runtime_root / "herdr" / "config.toml"
+    herdr_config_bytes = herdr_config.read_bytes()
+    assert tomllib.loads(herdr_config_bytes.decode("ascii")) == {
+        "onboarding": False,
+        "ui": {
+            "agent_panel_sort": "spaces",
+            "toast": {"delivery": "terminal"},
+        },
+        "theme": {"name": "catppuccin", "auto_switch": False},
+        "terminal": {"default_shell": "/bin/sh", "shell_mode": "non_login"},
+    }
+    assert herdr_config.stat().st_mode & 0o777 == 0o600
     assert marker["state"] == "ready"
     assert marker["catalog_sha256"] == sha256(catalog_bytes).hexdigest()
     assert {entry["path"] for entry in catalog["entries"]} >= {
         "config", "data", "herdr", "home", "mail", "release", "state", "tmp", "uploads",
     }
+    config_entry = next(
+        entry for entry in catalog["entries"]
+        if entry["path"] == "herdr/config.toml"
+    )
+    assert config_entry["mode"] == 0o600
+    assert config_entry["sha256"] == sha256(herdr_config_bytes).hexdigest()
 
     second, descriptor, ready = _launch(runtime_root)
     try:

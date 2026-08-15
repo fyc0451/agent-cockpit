@@ -71,6 +71,243 @@ class NextProfileError(RuntimeError):
     pass
 
 
+PRIVATE_HERDR_CONFIG = b'''onboarding = false
+
+[ui]
+agent_panel_sort = "spaces"
+
+[ui.toast]
+delivery = "terminal"
+
+[theme]
+name = "catppuccin"
+auto_switch = false
+
+[terminal]
+default_shell = "/bin/sh"
+shell_mode = "non_login"
+'''
+
+
+def _herdr_config_error(code: str, cause: OSError | None = None) -> NextProfileError:
+    error = NextProfileError(code)
+    if cause is not None:
+        error.__cause__ = cause
+    return error
+
+
+def _directory_flags() -> int:
+    required = ("O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required):
+        raise _herdr_config_error("next_herdr_config_unsafe")
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_bound_directory(path: Path) -> int:
+    if not path.is_absolute() or path != Path(os.path.normpath(path)):
+        raise _herdr_config_error("next_herdr_config_unsafe")
+    flags = _directory_flags()
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path.anchor, flags)
+        for component in path.parts[1:]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            parent = descriptor
+            descriptor = child
+            try:
+                os.close(parent)
+            except OSError:
+                try:
+                    os.close(child)
+                except OSError:
+                    pass
+                descriptor = None
+                raise
+        return descriptor
+    except OSError as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise _herdr_config_error("next_herdr_config_unsafe", exc)
+
+
+def _require_private_directory(descriptor: int) -> None:
+    try:
+        info = os.fstat(descriptor)
+    except OSError as exc:
+        raise _herdr_config_error("next_herdr_config_unsafe", exc)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise _herdr_config_error("next_herdr_config_unsafe")
+
+
+def _safe_config_info(directory: int) -> os.stat_result | None:
+    try:
+        info = os.stat("config.toml", dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _herdr_config_error("next_herdr_config_unsafe", exc)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        raise _herdr_config_error("next_herdr_config_unsafe")
+    return info
+
+
+def _read_bound_config(directory: int, expected: os.stat_result) -> bytes:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open("config.toml", flags, dir_fd=directory)
+        actual = os.fstat(descriptor)
+        if (
+            (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino)
+            or not stat.S_ISREG(actual.st_mode)
+            or actual.st_uid != os.getuid()
+            or stat.S_IMODE(actual.st_mode) != 0o600
+            or actual.st_nlink != 1
+        ):
+            raise _herdr_config_error("next_herdr_config_unsafe")
+        chunks: list[bytes] = []
+        remaining = len(PRIVATE_HERDR_CONFIG) + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    except NextProfileError:
+        raise
+    except OSError as exc:
+        raise _herdr_config_error("next_herdr_config_unsafe", exc)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise _herdr_config_error("next_herdr_config_unsafe", exc)
+
+
+def _write_bound_config(directory: int) -> None:
+    temporary = f".config.toml.tmp-{os.getpid()}-{os.urandom(8).hex()}"
+    descriptor: int | None = None
+    temporary_exists = False
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory,
+        )
+        temporary_exists = True
+        os.fchmod(descriptor, 0o600)
+        offset = 0
+        while offset < len(PRIVATE_HERDR_CONFIG):
+            written = os.write(descriptor, PRIVATE_HERDR_CONFIG[offset:])
+            if written <= 0:
+                raise OSError("short private Herdr config write")
+            offset += written
+        os.fsync(descriptor)
+        completed = descriptor
+        descriptor = None
+        os.close(completed)
+        os.replace(
+            temporary, "config.toml",
+            src_dir_fd=directory, dst_dir_fd=directory,
+        )
+        temporary_exists = False
+        os.fsync(directory)
+    except OSError as exc:
+        raise _herdr_config_error("next_herdr_config_write_failed", exc)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_exists:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError:
+                pass
+
+
+def ensure_private_herdr_config(environment: Mapping[str, str]) -> Path:
+    """Create the exact product-owned Herdr config before Herdr can start."""
+    try:
+        profile = environment.get(PROFILE_ENV)
+        if profile == FIXED_PROFILE:
+            authority = Path(_required("COCKPIT_CONFIG_DIR", environment))
+        elif profile == EPHEMERAL_PROFILE:
+            authority = _ephemeral_root(environment)
+        else:
+            raise _herdr_config_error("next_herdr_config_unsafe")
+        config = Path(_required("HERDR_CONFIG_PATH", environment))
+    except NextProfileError as exc:
+        if str(exc).startswith("next_herdr_config_"):
+            raise
+        raise _herdr_config_error("next_herdr_config_unsafe") from exc
+    expected = authority / "herdr" / "config.toml"
+    if config != expected:
+        raise _herdr_config_error("next_herdr_config_unsafe")
+
+    authority_fd: int | None = None
+    herdr_fd: int | None = None
+    try:
+        authority_fd = _open_bound_directory(authority)
+        _require_private_directory(authority_fd)
+        try:
+            os.mkdir("herdr", mode=0o700, dir_fd=authority_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise _herdr_config_error("next_herdr_config_write_failed", exc)
+        try:
+            herdr_fd = os.open("herdr", _directory_flags(), dir_fd=authority_fd)
+        except OSError as exc:
+            raise _herdr_config_error("next_herdr_config_unsafe", exc)
+        _require_private_directory(herdr_fd)
+        info = _safe_config_info(herdr_fd)
+        if info is not None and _read_bound_config(herdr_fd, info) == PRIVATE_HERDR_CONFIG:
+            return config
+        _write_bound_config(herdr_fd)
+        written = _safe_config_info(herdr_fd)
+        if (
+            written is None
+            or _read_bound_config(herdr_fd, written) != PRIVATE_HERDR_CONFIG
+        ):
+            raise _herdr_config_error("next_herdr_config_write_failed")
+        return config
+    finally:
+        close_error: OSError | None = None
+        for descriptor in (herdr_fd, authority_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    close_error = close_error or exc
+        if close_error is not None:
+            raise _herdr_config_error("next_herdr_config_write_failed", close_error)
+
+
 def _ephemeral_error(code: str) -> NextProfileError:
     return NextProfileError(f"ephemeral_catalog_{code}")
 

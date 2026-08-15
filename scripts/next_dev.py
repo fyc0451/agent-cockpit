@@ -369,6 +369,10 @@ def main(argv: list[str] | None = None) -> int:
             if not _port_available(values["COCKPIT_HOST"], int(values["COCKPIT_PORT"])):
                 raise IsolationError("next_port_in_use")
             ensure_runtime_roots(values)
+            try:
+                next_profile.ensure_private_herdr_config(values)
+            except next_profile.NextProfileError as exc:
+                raise IsolationError(str(exc)) from exc
             python = repo / ".venv" / "bin" / "python"
             if not python.is_file():
                 raise IsolationError("venv_missing")

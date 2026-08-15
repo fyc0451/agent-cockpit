@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import stat
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -254,6 +255,77 @@ def test_runtime_roots_are_private_and_distinct(tmp_path: Path) -> None:
     )]
     assert len(set(roots)) == 4
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in roots)
+
+
+def test_private_herdr_config_generation_upgrade_and_idempotency(
+    tmp_path: Path,
+) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    gate.ensure_runtime_roots(values)
+    config = Path(values["HERDR_CONFIG_PATH"])
+    config.parent.mkdir(mode=0o700)
+    config.write_text(
+        """onboarding = false
+
+[ui]
+agent_panel_sort = "spaces"
+
+[ui.toast]
+delivery = "terminal"
+
+[theme]
+name = "catppuccin"
+auto_switch = false
+""",
+        encoding="ascii",
+    )
+    config.chmod(0o600)
+
+    assert next_profile.ensure_private_herdr_config(values) == config
+    parsed = tomllib.loads(config.read_text(encoding="ascii"))
+    assert parsed == {
+        "onboarding": False,
+        "ui": {
+            "agent_panel_sort": "spaces",
+            "toast": {"delivery": "terminal"},
+        },
+        "theme": {"name": "catppuccin", "auto_switch": False},
+        "terminal": {"default_shell": "/bin/sh", "shell_mode": "non_login"},
+    }
+    info = config.lstat()
+    assert stat.S_ISREG(info.st_mode)
+    assert info.st_uid == os.getuid()
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    assert info.st_nlink == 1
+    assert stat.S_IMODE(config.parent.lstat().st_mode) == 0o700
+
+    before = (config.read_bytes(), info.st_ino, info.st_mtime_ns)
+    assert next_profile.ensure_private_herdr_config(values) == config
+    after = config.lstat()
+    assert (config.read_bytes(), after.st_ino, after.st_mtime_ns) == before
+
+
+def test_private_herdr_config_rejects_unsafe_file_and_parent(
+    tmp_path: Path,
+) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    gate.ensure_runtime_roots(values)
+    config = Path(values["HERDR_CONFIG_PATH"])
+    config.parent.mkdir(mode=0o700)
+    config.write_text("unchanged\n", encoding="ascii")
+    config.chmod(0o644)
+
+    with pytest.raises(next_profile.NextProfileError, match="next_herdr_config_unsafe"):
+        next_profile.ensure_private_herdr_config(values)
+    assert config.read_text(encoding="ascii") == "unchanged\n"
+
+    config.unlink()
+    config.parent.chmod(0o755)
+    with pytest.raises(next_profile.NextProfileError, match="next_herdr_config_unsafe"):
+        next_profile.ensure_private_herdr_config(values)
+    assert not config.exists()
 
 
 def test_runtime_symlink_is_rejected(tmp_path: Path) -> None:
@@ -592,6 +664,11 @@ def test_start_execs_next_venv_with_sanitized_environment(
     monkeypatch.setattr(gate, "_unit_not_installed", lambda: True)
     monkeypatch.setattr(gate, "_port_available", lambda host, port: True)
     monkeypatch.setattr(gate, "ensure_runtime_roots", lambda values: None)
+    monkeypatch.setattr(
+        gate.next_profile,
+        "ensure_private_herdr_config",
+        lambda received: captured.update(herdr_config=received),
+    )
     monkeypatch.setattr(gate, "load_cockpit_token", lambda values: "t" * 64)
     monkeypatch.setattr(gate, "_validate_web_build", lambda _repo: None)
     monkeypatch.setattr(gate, "_prepare_exec_fds", lambda fd: None)
@@ -621,6 +698,26 @@ def test_start_execs_next_venv_with_sanitized_environment(
     assert environment["COCKPIT_NEXT_LOCK_FD"] == "42"
     assert environment["COCKPIT_TOKEN"] == "t" * 64
     assert "PYTHONPATH" not in environment
+    assert captured["herdr_config"] == values
+
+
+def test_check_does_not_write_private_herdr_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = module()
+    values = gate.expected(tmp_path)
+    monkeypatch.setattr(gate, "load_env", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "validate", lambda *_args, **_kwargs: values)
+    monkeypatch.setattr(gate, "load_cockpit_token", lambda _values: None)
+    monkeypatch.setattr(gate, "_validate_web_build", lambda _repo: None)
+    monkeypatch.setattr(
+        gate.next_profile,
+        "ensure_private_herdr_config",
+        lambda _values: pytest.fail("check must remain read-only"),
+        raising=False,
+    )
+
+    assert gate.main(["check"]) == 0
 
 
 @pytest.mark.parametrize(

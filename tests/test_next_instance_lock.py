@@ -455,6 +455,7 @@ if os.environ.get("LOCK_STAGE") == "launcher":
     gate._unit_not_installed = lambda: True
     gate._port_available = lambda *_args: True
     gate.ensure_runtime_roots = lambda _values: None
+    gate.next_profile.ensure_private_herdr_config = lambda _values: None
     gate.Path.is_file = lambda _path: True
     real_execve = os.execve
     def exec_helper(_executable, _argv, environment):
