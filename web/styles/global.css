@@ -1734,6 +1734,7 @@ button.rail-item {
   .rail-tree--open .rail-item--mobile-hidden {
     display: flex;
     width: 100%;
+    min-height: 44px;
     justify-content: flex-start;
   }
 

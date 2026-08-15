@@ -28,9 +28,7 @@ const NOTE_MAX = 8_192
 const WORK_QUERY = 'work'
 
 function workItemId(item: WorkspaceWorkAggregate): string {
-  const id = item.work_item.work_item_id
-  if (typeof id === 'string' && id !== '') return id
-  return item.root_message.message_id
+  return item.work_item.work_item_id
 }
 
 function createdAtMs(item: WorkspaceWorkAggregate): number {
@@ -309,7 +307,7 @@ export function FocusConversation({
             <h2>任务</h2>
             <Button type="button" onClick={() => setComposing(true)}>新建任务</Button>
           </div>
-          <ul>
+          <ul aria-label="任务">
             {items.map((item) => {
               const id = workItemId(item)
               const created = formatCreatedAt(item.thread.created_at)

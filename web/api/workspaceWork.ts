@@ -15,6 +15,7 @@ export interface CreateWorkspaceWorkRequest {
 export interface WorkspaceWorkAggregate {
   thread: Record<string, unknown> & {
     thread_id: string
+    created_at: string
   }
   root_message: Record<string, unknown> & {
     message_id: string
@@ -24,6 +25,7 @@ export interface WorkspaceWorkAggregate {
     body: string
   }
   work_item: Record<string, unknown> & {
+    work_item_id: string
     source_message_id: string
     acceptance: string | null
     constraints: string | null
@@ -73,6 +75,7 @@ export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggrega
   const workItem = object(aggregate.work_item, 'item.work_item')
 
   const threadId = requiredId(thread.thread_id, 'item.thread.thread_id')
+  const createdAt = requiredId(thread.created_at, 'item.thread.created_at')
   const messageId = requiredId(rootMessage.message_id, 'item.root_message.message_id')
   const rootThreadId = requiredId(rootMessage.thread_id, 'item.root_message.thread_id')
   if (rootMessage.author_kind !== 'boss') fail('item.root_message.author_kind')
@@ -80,12 +83,13 @@ export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggrega
   if (typeof rootMessage.body !== 'string') fail('item.root_message.body')
   if (rootThreadId !== threadId) fail('item.root_message.thread_id')
 
+  const workItemId = requiredId(workItem.work_item_id, 'item.work_item.work_item_id')
   const sourceMessageId = requiredId(workItem.source_message_id, 'item.work_item.source_message_id')
   if (sourceMessageId !== messageId) fail('item.work_item.source_message_id')
   if (workItem.status !== 'unassigned') fail('item.work_item.status')
 
   return {
-    thread: { ...thread, thread_id: threadId },
+    thread: { ...thread, thread_id: threadId, created_at: createdAt },
     root_message: {
       ...rootMessage,
       message_id: messageId,
@@ -96,6 +100,7 @@ export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggrega
     },
     work_item: {
       ...workItem,
+      work_item_id: workItemId,
       source_message_id: sourceMessageId,
       acceptance: nullableString(workItem.acceptance, 'item.work_item.acceptance'),
       constraints: nullableString(workItem.constraints, 'item.work_item.constraints'),
