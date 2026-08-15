@@ -1,9 +1,10 @@
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { PageHeader } from '../components/PageHeader'
 import { StatusState } from '../components/StatusState'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
 import type { Project, Workspace } from '../api/types'
+import { routes } from '../app/routes'
 import {
   projectScope,
   useCapability,
@@ -11,7 +12,7 @@ import {
   type CapabilityKey,
 } from '../state/capabilities'
 
-/** project scope 下未接通能力整页：保留页面头 + forbidden 态 + 真实原因 + 文档入口 */
+/** project scope 下未接通能力整页：保留页面头 + forbidden 态 + 返回项目概览 */
 export function UnavailableProjectPage({
   title,
   sub,
@@ -28,7 +29,13 @@ export function UnavailableProjectPage({
       {() => (
         <>
           <PageHeader title={title} sub={sub} />
-          <StatusState kind="forbidden" title="该能力暂不可用" reason={cap.reason} docsRoute={cap.docsRoute} />
+          <StatusState kind="forbidden" title="该能力暂不可用" reason={cap.reason}>
+            <div className="state-actions">
+              <Link className="btn btn--primary" to={routes.project.workbench(projectSlug!)}>
+                返回项目概览
+              </Link>
+            </div>
+          </StatusState>
         </>
       )}
     </ProjectScope>
@@ -55,12 +62,16 @@ function UnavailableWorkspaceBody({
   return (
     <>
       <PageHeader title={title} sub={sub} />
-      <StatusState
-        kind="forbidden"
-        title="该能力暂不可用"
-        reason={cap.reason}
-        docsRoute={cap.docsRoute}
-      />
+      <StatusState kind="forbidden" title="该能力暂不可用" reason={cap.reason}>
+        <div className="state-actions">
+          <Link
+            className="btn btn--primary"
+            to={routes.workspace.home(project.slug ?? '', workspace.id ?? '')}
+          >
+            返回工作空间
+          </Link>
+        </div>
+      </StatusState>
     </>
   )
 }

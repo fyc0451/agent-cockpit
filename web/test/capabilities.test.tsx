@@ -25,9 +25,10 @@ describe('capability registry（静态 fail-closed 表）', () => {
       expect(container.querySelector('[data-state="forbidden"]')).toBeInTheDocument()
     })
     expect(screen.getByText('项目记忆暂未开放，不影响文件与终端的使用')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '查看路线图' })).toHaveAttribute(
+    expect(screen.queryByRole('link', { name: '查看路线图' })).toBeNull()
+    expect(screen.getByRole('link', { name: '返回项目概览' })).toHaveAttribute(
       'href',
-      '#/settings?view=doctor',
+      '/projects/p1/workbench',
     )
     // 页面头结构保留
     expect(screen.getByText('项目记忆', { selector: '.page-title' })).toBeInTheDocument()
@@ -68,12 +69,11 @@ describe('capability registry（静态 fail-closed 表）', () => {
     expect(filesCard?.textContent).toContain('文件浏览暂未接通')
   })
 
-  it('设置写按钮 aria-disabled（只读原因可见）', async () => {
+  it('设置页无永久 disabled 的保存按钮，只读说明可见', async () => {
     stubDefaultFetch()
     renderApp('/settings')
-    const save = await screen.findByRole('button', { name: '保存设置' })
-    expect(save).toHaveAttribute('aria-disabled', 'true')
-    expect(save).toHaveAttribute('title', '设置当前为只读，修改暂不能保存')
+    expect(await screen.findByText('当前为只读：修改将在后续版本开放')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存设置' })).toBeNull()
   })
 
   it('终端页 PTY 未接通 banner + 控制按钮 aria-disabled', async () => {

@@ -1,7 +1,6 @@
 import { useSearchParams } from 'react-router-dom'
 import { useSettings } from '../api/hooks'
 import { useLegacyEnvCheck } from '../api/localSlice'
-import { Button } from '../components/Button'
 import { PageHeader } from '../components/PageHeader'
 import { QueryErrorState } from '../components/QueryErrorState'
 import { StatusState } from '../components/StatusState'
@@ -25,11 +24,11 @@ function normalizeView(view: string | null): TabKey {
 
 function HarnessTab() {
   const q = useSettings()
-  const writeCap = useCapability('settings.write')
   const catalogCap = useCapability('harnessCatalog')
   return (
     <section className="panel">
       <h2 className="panel-title">Harness / Runtime 与节点</h2>
+      <p className="list-sub">设置当前只能查看，不能在此保存修改。</p>
       {!catalogCap.available ? (
         <StatusState kind="degraded" banner title="Harness 目录不可用" description={catalogCap.reason ?? undefined} />
       ) : null}
@@ -38,13 +37,13 @@ function HarnessTab() {
       ) : q.isError ? (
         <QueryErrorState error={q.error} onRetry={() => q.refetch()} />
       ) : (
-        <pre className="raw-json" tabIndex={0}>{JSON.stringify(q.data?.data ?? {}, null, 2)}</pre>
+        <details>
+          <summary>高级详情</summary>
+          <pre className="raw-json" tabIndex={0}>
+            {JSON.stringify(q.data?.data ?? {}, null, 2)}
+          </pre>
+        </details>
       )}
-      <div className="state-actions">
-        <Button variant="primary" disabled title={writeCap.reason ?? '暂不可保存'}>
-          保存设置
-        </Button>
-      </div>
     </section>
   )
 }
