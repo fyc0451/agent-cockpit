@@ -43,7 +43,11 @@ class _FakeHarness:
         spec.assert_readonly()
         return spec
 
-    def attach_readonly(self, *, session, checkout_path, instance_id=None, display_name="codex"):
+    def attach_readonly(
+        self, *, session, checkout_path, project_id, workspace_id,
+        instance_id=None, display_name="codex",
+    ):
+        self.authority = (project_id, workspace_id)
         self.panes["pane-live"] = str(checkout_path)
         return harness_mod.AttachmentEvidence(
             session, instance_id or "inst-1", "pane-live", str(checkout_path),

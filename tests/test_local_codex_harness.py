@@ -323,14 +323,12 @@ def test_attach_requires_paired_workspace_authority_and_does_not_invent_format(
         close_pane=lambda *, session, pane_id: {"available": True},
         new_instance_id=lambda: INSTANCE,
     )
-    with pytest.raises(harness_mod.HarnessError) as missing:
+    with pytest.raises(TypeError):
         harness.attach_readonly(session="s", checkout_path=checkout)
-    assert missing.value.code == "invalid_argument"
-    with pytest.raises(harness_mod.HarnessError) as half:
+    with pytest.raises(TypeError):
         harness.attach_readonly(
             session="s", checkout_path=checkout, project_id=PROJECT,
         )
-    assert half.value.code == "invalid_argument"
     assert started == []
 
     forged = "not-a-project-id"

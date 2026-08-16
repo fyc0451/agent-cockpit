@@ -69,8 +69,9 @@ class AgentHarnessAdapter(Protocol):
     def build_launch_spec(self, checkout_path: Path) -> LaunchSpec: ...
 
     def attach_readonly(
-        self, *, session: str, checkout_path: Path, instance_id: str,
-        display_name: str, project_id: str, workspace_id: str,
+        self, *, session: str, checkout_path: Path,
+        project_id: str, workspace_id: str,
+        instance_id: str | None = None, display_name: str = "codex",
     ) -> AttachmentEvidence: ...
 
     def observe(
@@ -129,9 +130,9 @@ class LocalCodexHarness:
         return spec
 
     def attach_readonly(
-        self, *, session: str, checkout_path: Path, instance_id: str | None = None,
-        display_name: str = "codex",
-        project_id: str | None = None, workspace_id: str | None = None,
+        self, *, session: str, checkout_path: Path,
+        project_id: str, workspace_id: str,
+        instance_id: str | None = None, display_name: str = "codex",
     ) -> AttachmentEvidence:
         spec = self.build_launch_spec(checkout_path)
         if instance_id is None:

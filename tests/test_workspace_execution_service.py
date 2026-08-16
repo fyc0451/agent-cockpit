@@ -46,8 +46,8 @@ class _FakeHarness:
         return spec
 
     def attach_readonly(
-        self, *, session, checkout_path, instance_id=None, display_name="codex",
-        project_id=None, workspace_id=None,
+        self, *, session, checkout_path, project_id, workspace_id,
+        instance_id=None, display_name="codex",
     ):
         self.calls.append("attach")
         self.authority = (project_id, workspace_id)
