@@ -253,3 +253,24 @@ def test_known_identity_failure_unknown_close_does_not_pretend(tmp_path: Path) -
     assert herdr.closed == 0
     assert list(herdr.panes) == ["pane-1"]
     assert getattr(error.value, "pane_id", None) == "pane-1"
+
+
+def test_detach_close_transport_loss_is_unknown(tmp_path: Path) -> None:
+    checkout = tmp_path / "chk"
+    checkout.mkdir()
+    herdr = _CountingHerdr(checkout, descriptors=True, close="raise")
+    herdr.panes["pane-1"] = str(checkout)
+    harness = harness_mod.LocalCodexHarness(
+        ensure_session=herdr.ensure_session,
+        start_agent=herdr.start_agent,
+        get_launch_descriptor=herdr.get_launch_descriptor,
+        get_launch_descriptor_by_instance=herdr.get_launch_descriptor_by_instance,
+        snapshot=herdr.session_snapshot,
+        close_pane=herdr.close_pane,
+        new_instance_id=lambda: INSTANCE,
+    )
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.detach(session="s", pane_id="pane-1")
+    assert error.value.code == "runtime_unavailable"
+    assert getattr(error.value, "unknown", False) is True
+    assert herdr.panes == {"pane-1": str(checkout)}

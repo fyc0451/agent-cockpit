@@ -513,6 +513,19 @@ def _attachment_verified(row: sqlite3.Row) -> bool:
     return isinstance(payload, dict) and payload.get("identity_verified") is True
 
 
+def _require_aligned_generation(
+    prep: sqlite3.Row, lease: sqlite3.Row | None, attachment: sqlite3.Row | None,
+) -> None:
+    generation = int(prep["generation"])
+    if lease is not None:
+        if int(lease["generation"]) != generation:
+            _fail("lease_conflict")
+        if lease["status"] == "reserved" and not lease["fence_digest"]:
+            _fail("lease_conflict")
+    if attachment is not None and int(attachment["generation"]) != generation:
+        _fail("lease_conflict")
+
+
 def _attachment_view(row: sqlite3.Row | None) -> AttachmentView | None:
     if row is None:
         return None
@@ -962,6 +975,9 @@ class WorkspaceExecutionStore:
     ) -> PreparationView:
         if identity_verified is not True:
             _fail("runtime_identity_unverified")
+        self._assert_current_fence(
+            project_id, workspace_id, work_item_id, expected_revision,
+        )
         return self._complete_runtime(
             project_id, workspace_id, work_item_id, expected_revision,
             status="connected_readonly", pane_id=pane_id, instance_id=instance_id,
@@ -998,6 +1014,37 @@ class WorkspaceExecutionStore:
             status="outcome_unknown", pane_id=pane_id, instance_id=instance_id,
             native_receipt=None,
         )
+
+    def _assert_current_fence(
+        self, project_id: str, workspace_id: str, work_item_id: str,
+        expected_revision: int,
+    ) -> None:
+        connection = _connect(self.path, write=False)
+        try:
+            _require_current_schema(connection)
+            connection.execute("BEGIN")
+            prep = connection.execute(
+                "SELECT * FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is None or int(prep["revision"]) != expected_revision:
+                _fail("stale_revision")
+            lease = None
+            if prep["lease_id"]:
+                lease = connection.execute(
+                    "SELECT * FROM writer_leases WHERE lease_id=?",
+                    (prep["lease_id"],),
+                ).fetchone()
+            attachment = None
+            if prep["attachment_id"]:
+                attachment = connection.execute(
+                    "SELECT * FROM runtime_attachments WHERE attachment_id=?",
+                    (prep["attachment_id"],),
+                ).fetchone()
+            _require_aligned_generation(prep, lease, attachment)
+        finally:
+            connection.close()
 
     def restore_connected(
         self, *, project_id: str, workspace_id: str, work_item_id: str,
@@ -1129,6 +1176,7 @@ class WorkspaceExecutionStore:
                     )
                 if prep["state"] == "outcome_unknown":
                     generation = int(prep["generation"])
+                    lease = None
                     if prep["lease_id"]:
                         lease = connection.execute(
                             "SELECT * FROM writer_leases WHERE lease_id=?",
@@ -1142,8 +1190,7 @@ class WorkspaceExecutionStore:
                     ).fetchone()
                     if attachment is None:
                         _fail("lease_conflict")
-                    if int(attachment["generation"]) != generation:
-                        _fail("lease_conflict")
+                    _require_aligned_generation(prep, lease, attachment)
                     if connection.execute(
                         "UPDATE runtime_attachments SET status='attaching', "
                         "revision=revision+1, updated_at=? WHERE attachment_id=?",
@@ -1181,6 +1228,7 @@ class WorkspaceExecutionStore:
                 )
                 if prep["state"] == "prepared":
                     generation = int(prep["generation"])
+                lease = None
                 if prep["lease_id"]:
                     lease = connection.execute(
                         "SELECT * FROM writer_leases WHERE lease_id=?",
@@ -1189,6 +1237,8 @@ class WorkspaceExecutionStore:
                     if lease is None or lease["status"] != "reserved":
                         if prep["state"] != "detached":
                             _fail("lease_conflict")
+                    elif prep["state"] != "detached":
+                        _require_aligned_generation(prep, lease, None)
                 if prep["state"] == "detached":
                     lease_id = _new_id("les_")
                     fence = "sha256:" + _digest({

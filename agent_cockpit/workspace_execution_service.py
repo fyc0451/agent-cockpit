@@ -226,7 +226,7 @@ class ExecutionService:
                     pane_id=attachment.pane_id,
                 )
             except harness_mod.HarnessError as exc:
-                if exc.code != "process_exited":
+                if exc.unknown or exc.code != "process_exited":
                     unknown = self.store.mark_unknown(
                         project_id=project_id, workspace_id=workspace_id,
                         work_item_id=work_item_id, expected_revision=view.revision,
@@ -237,7 +237,7 @@ class ExecutionService:
                         project_id, workspace_id, "preparation.attach",
                         idempotency_key, request, exc.code, unknown,
                     )
-                    _fail(exc.code, pane_id=attachment.pane_id)
+                    _fail(exc.code, pane_id=attachment.pane_id, unknown=exc.unknown)
             except Exception:
                 unknown = self.store.mark_unknown(
                     project_id=project_id, workspace_id=workspace_id,
@@ -249,7 +249,23 @@ class ExecutionService:
                     project_id, workspace_id, "preparation.attach",
                     idempotency_key, request, "runtime_unavailable", unknown,
                 )
-                _fail("runtime_unavailable", pane_id=attachment.pane_id)
+                _fail("runtime_unavailable", pane_id=attachment.pane_id, unknown=True)
+            if not self._pane_absent(
+                session=attachment.session_name or self.session_name,
+                pane_id=attachment.pane_id,
+                instance_id=attachment.instance_id,
+            ):
+                unknown = self.store.mark_unknown(
+                    project_id=project_id, workspace_id=workspace_id,
+                    work_item_id=work_item_id, expected_revision=view.revision,
+                    pane_id=attachment.pane_id,
+                    instance_id=attachment.instance_id,
+                )
+                self._remember_error(
+                    project_id, workspace_id, "preparation.attach",
+                    idempotency_key, request, "runtime_unavailable", unknown,
+                )
+                _fail("runtime_unavailable", pane_id=attachment.pane_id, unknown=True)
         try:
             evidence = self._saga(
                 kind="runtime.attach",
@@ -278,21 +294,49 @@ class ExecutionService:
                 work_item_id=work_item_id, expected_revision=view.revision,
             )
             _fail("runtime_identity_unverified")
-        finished = self.store.finish_attach(
-            project_id=project_id, workspace_id=workspace_id,
-            work_item_id=work_item_id, expected_revision=view.revision,
-            pane_id=evidence.pane_id, instance_id=evidence.instance_id,
-            identity_verified=True,
-            native_receipt=_sha({
-                "session": evidence.session, "cwd": evidence.cwd,
-            }),
-        )
+        try:
+            finished = self.store.finish_attach(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=view.revision,
+                pane_id=evidence.pane_id, instance_id=evidence.instance_id,
+                identity_verified=True,
+                native_receipt=_sha({
+                    "session": evidence.session, "cwd": evidence.cwd,
+                }),
+            )
+        except Exception as exc:
+            code = getattr(exc, "code", "store_write_failed")
+            if not isinstance(code, str):
+                code = "store_write_failed"
+            self._recover_attach(
+                project_id, workspace_id, work_item_id, view.revision,
+                idempotency_key, request,
+                ExecutionServiceError(
+                    code, pane_id=evidence.pane_id,
+                    instance_id=evidence.instance_id, unknown=True,
+                ),
+            )
+            _fail(code)
         payload = finished.public_dict()
-        self.store.remember(
-            project_id=project_id, workspace_id=workspace_id,
-            scope="preparation.attach", idempotency_key=idempotency_key,
-            request=request, response=payload,
-        )
+        try:
+            self.store.remember(
+                project_id=project_id, workspace_id=workspace_id,
+                scope="preparation.attach", idempotency_key=idempotency_key,
+                request=request, response=payload,
+            )
+        except Exception:
+            try:
+                self.store.remember(
+                    project_id=project_id, workspace_id=workspace_id,
+                    scope="preparation.attach", idempotency_key=idempotency_key,
+                    request=request, response=payload,
+                )
+            except Exception:
+                self._remember_error(
+                    project_id, workspace_id, "preparation.attach",
+                    idempotency_key, request, "store_write_failed", finished,
+                )
+                _fail("store_write_failed")
         return payload
 
     def detach(
@@ -403,6 +447,30 @@ class ExecutionService:
         )
         if latest is None or latest.state != "attaching":
             return
+        if exc.unknown and exc.pane_id:
+            unknown = self.store.mark_unknown(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=expected_revision,
+                pane_id=exc.pane_id, instance_id=exc.instance_id,
+            )
+            self._remember_error(
+                project_id, workspace_id, "preparation.attach",
+                idempotency_key, request, exc.code, unknown,
+            )
+            return
+        if exc.pane_id and self._try_close_confirmed(
+            session=self.session_name, pane_id=exc.pane_id,
+            instance_id=exc.instance_id,
+        ):
+            prepared = self.store.fail_attach(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=expected_revision,
+            )
+            self._remember_error(
+                project_id, workspace_id, "preparation.attach",
+                idempotency_key, request, exc.code, prepared,
+            )
+            return
         if exc.pane_id or exc.unknown:
             unknown = self.store.mark_unknown(
                 project_id=project_id, workspace_id=workspace_id,
@@ -421,6 +489,35 @@ class ExecutionService:
         self._remember_error(
             project_id, workspace_id, "preparation.attach",
             idempotency_key, request, exc.code, prepared,
+        )
+
+    def _pane_absent(
+        self, *, session: str, pane_id: str, instance_id: str | None,
+    ) -> bool:
+        confirm = getattr(self.harness, "confirm_absent", None)
+        if callable(confirm):
+            try:
+                return bool(
+                    confirm(
+                        session=session, pane_id=pane_id, instance_id=instance_id,
+                    )
+                )
+            except Exception:
+                return False
+        return False
+
+    def _try_close_confirmed(
+        self, *, session: str, pane_id: str, instance_id: str | None,
+    ) -> bool:
+        try:
+            self.harness.detach(session=session, pane_id=pane_id)
+        except harness_mod.HarnessError as exc:
+            if exc.unknown or exc.code != "process_exited":
+                return False
+        except Exception:
+            return False
+        return self._pane_absent(
+            session=session, pane_id=pane_id, instance_id=instance_id,
         )
 
     def _await_prepared(
@@ -561,6 +658,7 @@ class ExecutionService:
                 code,
                 pane_id=getattr(exc, "pane_id", None),
                 instance_id=getattr(exc, "instance_id", None),
+                unknown=bool(getattr(exc, "unknown", False)),
             )
         except Exception:
             self._record_outcome(

@@ -18,15 +18,17 @@ LAUNCH_ARGS = ("--sandbox", "read-only")
 class HarnessError(RuntimeError):
     def __init__(
         self, code: str, pane_id: str | None = None, instance_id: str | None = None,
+        unknown: bool = False,
     ):
         self.code = code
         self.pane_id = pane_id
         self.instance_id = instance_id
+        self.unknown = unknown
         super().__init__(code)
 
 
-def _fail(code: str) -> None:
-    raise HarnessError(code)
+def _fail(code: str, pane_id: str | None = None, unknown: bool = False) -> None:
+    raise HarnessError(code, pane_id=pane_id, unknown=unknown)
 
 
 @dataclass(frozen=True)
@@ -177,10 +179,12 @@ class LocalCodexHarness:
                 raise HarnessError(exc.code, pane_id=None, instance_id=str(live_id)) from None
             raise HarnessError(
                 exc.code, pane_id=pane_id, instance_id=str(live_id),
+                unknown=exc.unknown,
             ) from None
         except Exception:
             raise HarnessError(
                 "runtime_unavailable", pane_id=pane_id, instance_id=str(live_id),
+                unknown=True,
             ) from None
 
     def observe(
@@ -190,7 +194,7 @@ class LocalCodexHarness:
         try:
             snap = self._snapshot(session=session)
         except Exception:
-            _fail("runtime_unavailable")
+            _fail("runtime_unavailable", unknown=True)
         panes = snap.get("panes") if isinstance(snap, dict) else None
         if not isinstance(panes, list):
             _fail("runtime_unavailable")
@@ -238,18 +242,49 @@ class LocalCodexHarness:
         try:
             closed = self._close_pane(session=session, pane_id=pane_id)
         except Exception:
-            _fail("runtime_unavailable")
+            _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
         if isinstance(closed, dict) and closed.get("available") is False:
-            _fail("runtime_unavailable")
+            _fail("runtime_unavailable", pane_id=pane_id)
         try:
             snap = self._snapshot(session=session)
         except Exception:
-            _fail("runtime_unavailable")
+            _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
         panes = snap.get("panes") if isinstance(snap, dict) else None
         if not isinstance(panes, list):
-            _fail("runtime_unavailable")
+            _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
         if any(isinstance(pane, dict) and pane.get("pane_id") == pane_id for pane in panes):
-            _fail("process_exited")
+            _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+
+    def confirm_absent(
+        self, *, session: str, pane_id: str, instance_id: str | None,
+    ) -> bool:
+        try:
+            snap = self._snapshot(session=session)
+        except Exception:
+            return False
+        panes = snap.get("panes") if isinstance(snap, dict) else None
+        if not isinstance(panes, list):
+            return False
+        if any(isinstance(pane, dict) and pane.get("pane_id") == pane_id for pane in panes):
+            return False
+        try:
+            by_pane = self._get_launch_descriptor(session=session, pane_id=pane_id)
+        except Exception:
+            return False
+        if isinstance(by_pane, dict):
+            return False
+        if instance_id:
+            try:
+                by_instance = self._get_launch_descriptor_by_instance(
+                    instance_id=instance_id,
+                )
+            except Exception:
+                return False
+            if isinstance(by_instance, dict) and by_instance.get("pane_id") not in {
+                None, "",
+            }:
+                return False
+        return True
 
 
 def _descriptor_matches(

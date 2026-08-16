@@ -75,6 +75,9 @@ class _FakeHarness:
             raise harness_mod.HarnessError("process_exited")
         self.panes.pop(pane_id)
 
+    def confirm_absent(self, *, session, pane_id, instance_id=None) -> bool:
+        return pane_id not in self.panes
+
 
 def _world(tmp_path: Path):
     source = _repo(tmp_path / "repo")
@@ -270,7 +273,7 @@ class _WiredHerdr:
         }
 
     def get_launch_descriptor(self, session: str, pane_id: str) -> dict[str, object] | None:
-        if not self.descriptors:
+        if not self.descriptors or pane_id not in self.panes:
             return None
         return {
             "session": session, "pane_id": pane_id,
@@ -281,9 +284,9 @@ class _WiredHerdr:
     def get_launch_descriptor_by_instance(
         self, instance_id: str, *, include_retired: bool = False,
     ) -> dict[str, object] | None:
-        if not self.descriptors:
+        if not self.descriptors or not self.panes:
             return None
-        pane_id = next(iter(self.panes), "pane-1")
+        pane_id = next(iter(self.panes))
         return {
             "session": "cockpit-b-readonly", "pane_id": pane_id,
             "instance_id": instance_id, "workdir": self.panes.get(pane_id),
@@ -304,6 +307,9 @@ class _WiredHerdr:
             raise RuntimeError("close lost")
         if self.close == "fail":
             return {"available": False}
+        if self.close == "zombie":
+            self.closed += 1
+            return {"available": True, "closed": pane_id}
         self.closed += 1
         self.panes.pop(pane_id, None)
         return {"available": True, "closed": pane_id}
@@ -539,3 +545,147 @@ def test_detach_unknown_keeps_outcome_unknown_same_generation(tmp_path: Path) ->
     assert again.state == "outcome_unknown"
     assert again.principal["generation"] == 1
     assert "pane-live" in harness.panes
+
+
+def _member_prepared(service, project, workspace, item):
+    member = service.create_member(
+        project.project_id, workspace.workspace_id, display_name="Atlas",
+        idempotency_key="member",
+    )
+    prepared = service.prepare(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="prep",
+    )
+    return prepared
+
+
+def test_unknown_retry_zombie_close_does_not_start_second_pane(tmp_path: Path) -> None:
+    herdr = _WiredHerdr(descriptors=True, close="ok", explode=True)
+    service, project, workspace, item, herdr = _wired_world(tmp_path, herdr)
+    prepared = _member_prepared(service, project, workspace, item)
+    with pytest.raises(service_mod.ExecutionServiceError):
+        service.attach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=prepared["revision"], idempotency_key="att-lost",
+        )
+    first = service.get_preparation(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+    )
+    assert first.state == "outcome_unknown"
+    herdr.explode = False
+    herdr.close = "zombie"
+    with pytest.raises(service_mod.ExecutionServiceError) as blocked:
+        service.attach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=first.revision, idempotency_key="att-retry",
+        )
+    assert blocked.value.code == "runtime_unavailable"
+    after = service.get_preparation(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+    )
+    assert after.state == "outcome_unknown"
+    assert after.principal["generation"] == after.lease.generation == 1
+    assert herdr.started == 1
+    assert list(herdr.panes) == ["pane-1"]
+
+
+def test_finish_attach_write_failure_is_replayable_not_stale(tmp_path: Path, monkeypatch) -> None:
+    service, project, workspace, item, _source, harness, _operations = _world(tmp_path)
+    prepared = _member_prepared(service, project, workspace, item)
+    real = service.store.finish_attach
+
+    def boom(**kwargs):
+        raise exec_store.WorkspaceExecutionError("store_write_failed")
+
+    monkeypatch.setattr(service.store, "finish_attach", boom)
+    with pytest.raises(
+        (service_mod.ExecutionServiceError, exec_store.WorkspaceExecutionError),
+    ) as failed:
+        service.attach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=prepared["revision"], idempotency_key="att-write",
+        )
+    assert failed.value.code == "store_write_failed"
+    after = service.get_preparation(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+    )
+    assert after.state in {"prepared", "outcome_unknown"}
+    assert after.state != "attaching"
+    with pytest.raises(
+        (service_mod.ExecutionServiceError, exec_store.WorkspaceExecutionError),
+    ) as replay:
+        service.attach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=prepared["revision"], idempotency_key="att-write",
+        )
+    assert replay.value.code == "store_write_failed"
+    monkeypatch.setattr(service.store, "finish_attach", real)
+    if after.state == "prepared":
+        recovered = service.attach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=after.revision, idempotency_key="att-after",
+        )
+        assert recovered["state"] == "connected_readonly"
+        assert len(harness.panes) <= 1
+
+
+def test_stale_lease_generation_is_rejected_with_zero_side_effects(tmp_path: Path) -> None:
+    service, project, workspace, item, _source, harness, _operations = _world(tmp_path)
+    prepared = _member_prepared(service, project, workspace, item)
+    with sqlite3.connect(service.store.path) as connection:
+        connection.execute("UPDATE writer_leases SET generation=2")
+        connection.commit()
+    with pytest.raises(
+        (service_mod.ExecutionServiceError, exec_store.WorkspaceExecutionError),
+    ) as conflict:
+        service.attach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=prepared["revision"], idempotency_key="att-fence",
+        )
+    assert conflict.value.code == "lease_conflict"
+    after = service.get_preparation(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+    )
+    assert after.state == "prepared"
+    assert after.principal["generation"] == 1
+    assert after.lease.generation == 2
+    assert harness.panes == {}
+    assert "attach" not in harness.calls
+
+
+def test_real_harness_detach_transport_loss_is_outcome_unknown(tmp_path: Path) -> None:
+    herdr = _WiredHerdr(descriptors=True, close="ok")
+    service, project, workspace, item, herdr = _wired_world(tmp_path, herdr)
+    prepared = _member_prepared(service, project, workspace, item)
+    attached = service.attach(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        expected_revision=prepared["revision"], idempotency_key="att",
+    )
+    herdr.close = "raise"
+    with pytest.raises(service_mod.ExecutionServiceError) as failed:
+        service.detach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=attached["revision"], idempotency_key="det-loss",
+        )
+    assert failed.value.code == "runtime_unavailable"
+    after = service.get_preparation(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+    )
+    assert after.state == "outcome_unknown"
+    assert after.lease.status == "reserved"
+    assert after.principal["generation"] == after.lease.generation == 1
+    assert list(herdr.panes) == ["pane-1"]
+    with pytest.raises(service_mod.ExecutionServiceError) as replay:
+        service.detach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=attached["revision"], idempotency_key="det-loss",
+        )
+    assert replay.value.code == "runtime_unavailable"
