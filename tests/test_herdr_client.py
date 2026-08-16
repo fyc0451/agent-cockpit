@@ -322,6 +322,27 @@ def test_list_sessions_falls_back_for_old_herdr(monkeypatch):
     }]
 
 
+def test_scoped_sessions_resolve_bounded_config_alias(
+    monkeypatch, tmp_path,
+) -> None:
+    alias = tmp_path / "bounded-alias"
+    target = tmp_path / "runtime-config"
+    alias.mkdir(mode=0o700)
+    (target / "herdr" / "sessions" / "demo").mkdir(
+        parents=True, mode=0o700,
+    )
+    (alias / "herdr").symlink_to(target / "herdr", target_is_directory=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(alias))
+
+    rows = herdr_client._scoped_session_rows([{
+        "name": "demo", "status": "running",
+        "directory": str(target / "herdr" / "sessions" / "demo"),
+        "socket": str(target / "herdr" / "sessions" / "demo" / "herdr.sock"),
+    }], "demo")
+
+    assert len(rows) == 1
+
+
 def test_pane_read_forwards_line_limit_to_agent_and_plain_panes(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
@@ -595,6 +616,7 @@ def test_submit_agent_prompt_waits_for_working_and_is_the_receipt(
     assert result["state_change_seq"] == 2
     assert result["status"] == "working"
     verbs = [c.args[0][3] for c in calls if c.args[0][2] == "agent"]
+    assert verbs[0] == "focus"
     assert "explain" in verbs
     assert "focus" in verbs
     assert "prompt" in verbs
@@ -709,7 +731,7 @@ def test_submit_agent_prompt_auth_wall_is_typed_failure(monkeypatch) -> None:
     assert not any(c.args[0][2:4] == ["agent", "prompt"] for c in calls)
 
 
-def test_submit_agent_prompt_retries_enter_then_fails_closed(monkeypatch) -> None:
+def test_submit_agent_prompt_stall_fails_closed_without_keyboard_retry(monkeypatch) -> None:
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
 
@@ -721,8 +743,6 @@ def test_submit_agent_prompt_retries_enter_then_fails_closed(monkeypatch) -> Non
             return _idle_get()
         if args[2:4] == ["agent", "prompt"]:
             raise RuntimeError("agent prompt 失败: timeout")
-        if args[2:4] == ["agent", "wait"]:
-            raise RuntimeError("agent wait 失败: timeout")
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
@@ -736,14 +756,15 @@ def test_submit_agent_prompt_retries_enter_then_fails_closed(monkeypatch) -> Non
     assert result["executing"] is False
     assert result["error"]
     verbs = [c.args[0][3] for c in calls if c.args[0][2] == "agent"]
+    assert verbs[0] == "focus"
     assert "focus" in verbs
     assert "prompt" in verbs
-    assert "send-keys" in verbs
-    assert "wait" in verbs
+    assert "send-keys" not in verbs
+    assert "wait" not in verbs
     assert not any("send-text" in c.args[0] or "read" in c.args[0] for c in calls)
 
 
-def test_submit_agent_prompt_enter_retry_can_prove_working(monkeypatch) -> None:
+def test_submit_agent_prompt_never_uses_enter_to_manufacture_working(monkeypatch) -> None:
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
     working = {"n": False}
@@ -756,9 +777,6 @@ def test_submit_agent_prompt_enter_retry_can_prove_working(monkeypatch) -> None:
             return _working_get() if working["n"] else _idle_get()
         if args[2:4] == ["agent", "prompt"]:
             raise RuntimeError("agent prompt 失败: timeout")
-        if args[2:4] == ["agent", "send-keys"]:
-            working["n"] = True
-            return ""
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
@@ -767,13 +785,10 @@ def test_submit_agent_prompt_enter_retry_can_prove_working(monkeypatch) -> None:
         "demo", "w1:p2", "COCKPIT_WAKEUP_V1\nStart",
     )
 
-    assert result["submitted"] is True
-    assert result["executing"] is True
-    assert result.get("retried") is True
-    assert result["state_change_seq"] == 2
-    assert [c.args[0][3] for c in calls if c.args[0][2:4] == ["agent", "send-keys"]] == [
-        "send-keys",
-    ]
+    assert result["submitted"] is False
+    assert result["executing"] is False
+    assert result["error"]
+    assert not any(c.args[0][2:4] == ["agent", "send-keys"] for c in calls)
 
 
 def test_agent_wait_reports_timeout_without_keyboard_fallback(monkeypatch):
@@ -3750,14 +3765,14 @@ def test_codex_home_real_live_managed_start(
         shutil.rmtree(isolated, ignore_errors=True)
 
 
-_CODEX_RELAY_AUTH = Path("/home/fyc/.codex-cli/auth.json")
+_CODEX_PROVIDER_CONFIG = Path("/home/fyc/.codex/relay.config.toml")
 
 
 @pytest.mark.skipif(
     shutil.which("codex") is None
     or shutil.which("herdr") is None
-    or not _CODEX_RELAY_AUTH.is_file(),
-    reason="需要真实 herdr/codex 与已登录 relay auth",
+    or not _CODEX_PROVIDER_CONFIG.is_file(),
+    reason="需要真实 herdr/codex 与显式 host provider config",
 )
 def test_real_wakeup_prompt_receipt_requires_working(
     monkeypatch,
@@ -3793,28 +3808,18 @@ def test_real_wakeup_prompt_receipt_requires_working(
     workdir.mkdir(mode=0o700)
     home = isolated / "codex-home"
     home.mkdir(mode=0o700)
-    (home / "config.toml").write_text(
-        "\n".join([
-            'model_provider = "relay"',
-            'network_access = "enabled"',
-            "",
-            "[model_providers.relay]",
-            'name = "OpenAI Relay"',
-            'base_url = "https://ts.818.work"',
-            'wire_api = "responses"',
-            "",
-            "[model_providers.relay.auth]",
-            'command = "/usr/bin/jq"',
-            'args = ["-r", ".OPENAI_API_KEY", "/home/fyc/.codex-cli/auth.json"]',
-            "timeout_ms = 5000",
-            "",
-            f'[projects."{workdir}"]',
-            'trust_level = "trusted"',
-            "",
-        ]),
-        encoding="utf-8",
+    capability_root = isolated / "caps"
+    capability_root.mkdir(mode=0o700)
+    capability = capability_root / "probe.cap"
+    capability.write_text("{}", encoding="ascii")
+    os.chmod(capability, 0o600)
+    provenance = harness_mod._provider_auth_provenance_from_path(
+        _CODEX_PROVIDER_CONFIG,
     )
-    os.chmod(home / "config.toml", 0o600)
+    harness_mod._write_mcp_home_config(
+        home, capability, capability_root,
+        provenance=provenance, checkout=workdir,
+    )
     owned = None
     try:
         server_log = isolated / "server.log"

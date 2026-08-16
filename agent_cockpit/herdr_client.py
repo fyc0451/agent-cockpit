@@ -326,7 +326,7 @@ def _herdr_sessions_root() -> Path:
     root = Path(configured).expanduser()
     if not root.is_absolute():
         raise ValueError("XDG_CONFIG_HOME must be absolute")
-    return root.resolve(strict=False) / "herdr" / "sessions"
+    return (root / "herdr" / "sessions").resolve(strict=False)
 
 
 def _scoped_session_rows(
@@ -1180,10 +1180,11 @@ def _typed_status_failure(after: dict[str, Any]) -> str | None:
 def submit_agent_prompt_until_working(
     session: str, target: str, text: str,
 ) -> dict[str, Any]:
-    """Submit a prompt only after the pane is idle-ready, then prove working.
+    """Focus the pane, wait for idle readiness, submit, then prove working.
 
     Detection can mark Codex idle while it is still booting. Wait for
-    structured `visible_idle` without a blocker, focus the pane target, then
+    a safe focus first, then require structured `visible_idle` without a
+    blocker before
     `agent prompt --wait --until working|blocked`. Success requires status
     exactly working and an increased state_change_seq. blocked/idle/unknown
     are typed failures. Focus is a hard gate: failure stops before prompt.
@@ -1196,6 +1197,13 @@ def submit_agent_prompt_until_working(
     if not isinstance(text, str) or text == "":
         return {"available": True, "submitted": False, "executing": False,
                 "error": "invalid_argument"}
+    try:
+        _run(["--session", session, "agent", "focus", target], timeout=8)
+    except RuntimeError as exc:
+        return {
+            "available": True, "submitted": False, "executing": False,
+            "error": str(exc) or "agent_focus_failed", "target": target,
+        }
     ready = _wait_prompt_ready(session, target)
     if ready.get("ready") is not True:
         return {
@@ -1204,13 +1212,6 @@ def submit_agent_prompt_until_working(
             "target": target,
         }
     before_seq = ready.get("state_change_seq")
-    try:
-        _run(["--session", session, "agent", "focus", target], timeout=8)
-    except RuntimeError as exc:
-        return {
-            "available": True, "submitted": False, "executing": False,
-            "error": str(exc) or "agent_focus_failed", "target": target,
-        }
     prompt_argv = [
         "--session", session, "agent", "prompt", target, text,
         "--wait",
@@ -1238,34 +1239,11 @@ def submit_agent_prompt_until_working(
             "status": after.get("agent_status"),
             "state_change_seq": after.get("state_change_seq") or before_seq,
         }
-    try:
-        _run(
-            ["--session", session, "agent", "send-keys", target, "enter"],
-            timeout=5,
-        )
-    except RuntimeError as exc:
-        return {
-            "available": True, "submitted": False, "executing": False,
-            "error": str(exc) or first_error, "target": target,
-        }
-    waited = agent_wait(
-        session, target, until=list(_WAIT_CLASSIFY_STATES),
-        timeout_ms=AGENT_PROMPT_EXECUTE_TIMEOUT_MS,
-    )
-    after = inspect_agent(session, target)
-    if waited.get("matched") is True and _execution_proven(ready, after):
-        return {
-            "available": True, "submitted": True, "executing": True,
-            "retried": True, "status": after.get("agent_status"),
-            "state_change_seq": after.get("state_change_seq"),
-            "target": target,
-        }
     return {
         "available": True, "submitted": False, "executing": False,
         "error": (
             _typed_status_failure(after)
             or after.get("error")
-            or waited.get("error")
             or first_error
         ),
         "target": target,

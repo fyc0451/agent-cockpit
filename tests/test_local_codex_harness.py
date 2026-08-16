@@ -63,7 +63,8 @@ def _provider_provenance(
         encoding="utf-8",
     )
     os.chmod(config, 0o600)
-    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("COCKPIT_CODEX_PROVIDER_CONFIG_PATH", str(config))
     return {"home": home, "config": config, "authority": authority, "auth": auth}
 
 
@@ -93,6 +94,23 @@ def test_reference_defaults_bind_real_herdr_signatures() -> None:
     assert list(by_pane.parameters) == ["session", "pane_id"]
     by_instance = inspect.signature(herdr_client.get_launch_descriptor_by_instance)
     assert list(by_instance.parameters) == ["instance_id", "include_retired"]
+
+
+def test_default_adapter_captures_only_dedicated_provider_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("COCKPIT_CODEX_PROVIDER_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "untrusted-host-home"))
+    default = harness_mod.LocalCodexHarness(capability_root=tmp_path / "default")
+    assert default._provider_config_path is None
+    assert default._provider_required is True
+
+    custom = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "custom",
+        start_workspace_codex_home=lambda **_kwargs: {"available": True},
+    )
+    assert custom._provider_config_path is None
+    assert custom._provider_required is False
 
 
 def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
@@ -419,7 +437,11 @@ def _harness(tmp_path: Path, *, prompts: list[str] | None = None) -> harness_mod
 
     def prompt(session: str, pane_id: str, text: str) -> dict[str, object]:
         sent.append(text)
-        return {"available": True, "session": session, "pane_id": pane_id}
+        return {
+            "available": True, "submitted": True, "executing": True,
+            "status": "working", "state_change_seq": 2,
+            "session": session, "pane_id": pane_id,
+        }
 
     return harness_mod.LocalCodexHarness(
         capability_root=tmp_path / "caps",
@@ -485,8 +507,10 @@ def test_private_home_does_not_touch_user_codex_config_and_cap_is_0600(
     token = json.loads(secret)["token"]
     assert token not in text
     assert FENCE not in text
-    assert 'model_provider = "relay"' in text
-    assert str(_provider_provenance["auth"]) in text
+    assert "model_provider" not in text
+    assert "network_access" not in text
+    assert "trust_level" not in text
+    assert str(_provider_provenance["auth"]) not in text
     assert AUTH_BYTES_SENTINEL not in text
     assert not (home / "auth.json").exists()
     after = user_cfg.stat() if user_cfg.exists() else None
@@ -511,13 +535,88 @@ def test_provider_auth_reference_is_validated_without_reading_credential_bytes(
         return original_read(fd, size)
 
     monkeypatch.setattr(harness_mod.os, "read", guarded_read)
-    issued = _harness(tmp_path).issue_capability(
-        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
-        fence=FENCE, session="s", pane_id="pane-1",
+    config = _provider_provenance["config"]
+    assert harness_mod.validated_provider_config_path(config) == config
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://user@relay.invalid",
+        "https://user:password@relay.invalid",
+        "https://relay.invalid?token=secret",
+        "https://relay.invalid/#secret",
+        "https://relay.invalid/path#secret",
+    ],
+)
+def test_provider_metadata_rejects_url_secret_channels(
+    _provider_provenance: dict[str, Path], base_url: str,
+) -> None:
+    config = _provider_provenance["config"]
+    text = config.read_text(encoding="utf-8")
+    config.write_text(
+        text.replace(
+            'base_url = "https://relay.invalid"',
+            f"base_url = {json.dumps(base_url)}",
+        ),
+        encoding="utf-8",
     )
-    text = Path(issued["codex_home"], "config.toml").read_text(encoding="utf-8")
-    assert str(auth) in text
-    assert AUTH_BYTES_SENTINEL not in text
+    os.chmod(config, 0o600)
+
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod.validated_provider_config_path(config)
+
+    assert error.value.code == "runtime_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("section", "extra"),
+    [
+        ("[model_providers.relay]", 'secret = "forbidden"'),
+        ("[model_providers.relay.auth]", 'token = "forbidden"'),
+    ],
+)
+def test_provider_metadata_requires_exact_selected_key_sets(
+    _provider_provenance: dict[str, Path], section: str, extra: str,
+) -> None:
+    config = _provider_provenance["config"]
+    text = config.read_text(encoding="utf-8")
+    config.write_text(
+        text.replace(section, f"{section}\n{extra}"),
+        encoding="utf-8",
+    )
+    os.chmod(config, 0o600)
+
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod.validated_provider_config_path(config)
+
+    assert error.value.code == "runtime_unavailable"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        '["-r", ".OPENAI_API_KEY"]',
+        '["-r", ".OPENAI_API_KEY", "relative-auth.json"]',
+        '["-r", ".OPENAI_API_KEY // empty", "/tmp/auth.json"]',
+        '["-r", ".OPENAI_API_KEY", "/tmp/auth.json", "extra"]',
+    ],
+)
+def test_provider_metadata_requires_closed_auth_argv(
+    _provider_provenance: dict[str, Path], args: str,
+) -> None:
+    config = _provider_provenance["config"]
+    text = config.read_text(encoding="utf-8")
+    config.write_text(
+        re.sub(r"args = \[.*\]", f"args = {args}", text),
+        encoding="utf-8",
+    )
+    os.chmod(config, 0o600)
+
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod.validated_provider_config_path(config)
+
+    assert error.value.code == "runtime_unavailable"
 
 
 @pytest.mark.parametrize("failure", [
@@ -629,7 +728,10 @@ def test_provider_metadata_rejects_symlink_ancestor_before_start(
     home.rename(moved_home)
     linked_parent = tmp_path / "linked-metadata-parent"
     linked_parent.symlink_to(real_parent, target_is_directory=True)
-    monkeypatch.setenv("CODEX_HOME", str(linked_parent / home.name))
+    monkeypatch.setenv(
+        "COCKPIT_CODEX_PROVIDER_CONFIG_PATH",
+        str(linked_parent / home.name / "relay.config.toml"),
+    )
     started: list[dict[str, object]] = []
     harness, checkout, _calls, _generic, _panes = _attach_harness(tmp_path)
     harness._start_workspace_codex_home = lambda **kwargs: (
@@ -707,157 +809,6 @@ def test_retire_private_runtime_never_removes_external_auth_authority(
     assert (auth.stat().st_dev, auth.stat().st_ino) == identity
 
 
-_REAL_PROVIDER_HOME = Path(
-    os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),
-)
-
-
-@pytest.mark.skipif(
-    shutil.which("codex") is None
-    or shutil.which("herdr") is None
-    or not (_REAL_PROVIDER_HOME / "relay.config.toml").is_file(),
-    reason="需要真实 herdr/codex 与合法 custom-provider auth provenance",
-)
-def test_real_private_home_attach_and_fixed_wakeup_reaches_working(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import fcntl
-    import pty
-    import struct
-    import tempfile
-    import termios
-    import uuid
-
-    isolated = Path(tempfile.mkdtemp(prefix="e3-auth-", dir="/tmp"))
-    isolated.chmod(0o700)
-    session = "e3-auth-" + uuid.uuid4().hex[:8]
-    workdir = isolated / "checkout"
-    workdir.mkdir(mode=0o700)
-    config_dir = isolated / "herdr"
-    config_dir.mkdir(mode=0o700)
-    (config_dir / "config.toml").write_text(
-        "onboarding = false\n[update]\nmanifest_check = false\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CODEX_HOME", str(_REAL_PROVIDER_HOME))
-    real_provider_auth = harness_mod._provider_auth_provenance().authority
-    monkeypatch.setenv("HERDR_CONFIG_PATH", str(config_dir / "config.toml"))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated / "xdg-config"))
-    monkeypatch.setenv("XDG_STATE_HOME", str(isolated / "xdg-state"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(isolated / "xdg-data"))
-    monkeypatch.setenv(
-        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(isolated / "launch.json"),
-    )
-    monkeypatch.delenv("HERDR_SESSION", raising=False)
-    monkeypatch.delenv("HERDR_ENV", raising=False)
-    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
-    monkeypatch.setattr(
-        herdr_client.next_profile, "require_session", lambda value: value,
-    )
-    owned = None
-    client = None
-    master_fd = None
-    slave_fd = None
-    pane_id = None
-    log_handle = open(isolated / "herdr.log", "wb")
-    try:
-        owned = subprocess.Popen(
-            [herdr_client.HERDR_BIN, "--session", session, "server"],
-            stdin=subprocess.DEVNULL, stdout=log_handle,
-            stderr=subprocess.STDOUT, close_fds=True, start_new_session=True,
-        )
-        log_handle.close()
-        herdr_client._SESSION_BOOTSTRAP_PROCESSES[session] = owned
-        harness = harness_mod.LocalCodexHarness(
-            capability_root=isolated / "data" / "capabilities",
-        )
-        attached = harness.attach_readonly(
-            session=session, checkout_path=workdir,
-            project_id=PROJECT, workspace_id=WORKSPACE,
-            attachment_id=ATTACHMENT, identity_id=IDENTITY,
-            generation=1, fence=FENCE,
-        )
-        pane_id = attached.pane_id
-        private_home = isolated / "data" / "capabilities" / f"{ATTACHMENT}.home"
-        private_config = private_home / "config.toml"
-        assert private_home.stat().st_mode & 0o777 == 0o700
-        assert private_config.stat().st_mode & 0o777 == 0o600
-        assert str(real_provider_auth) in private_config.read_text(encoding="utf-8")
-        assert not (private_home / "auth.json").exists()
-        master_fd, slave_fd = pty.openpty()
-        fcntl.ioctl(
-            slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0),
-        )
-        client = subprocess.Popen(
-            [herdr_client.HERDR_BIN, "--session", session],
-            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-            close_fds=True, start_new_session=True,
-        )
-        os.close(slave_fd)
-        slave_fd = None
-        time.sleep(1)
-        assert client.poll() is None
-        herdr_client._run(
-            ["--session", session, "agent", "focus", pane_id], timeout=8,
-        )
-        herdr_client._run(
-            ["--session", session, "agent", "send-keys", pane_id, "enter"],
-            timeout=5,
-        )
-        deadline = time.monotonic() + 10
-        before = herdr_client.inspect_agent(session, pane_id)
-        while not before.get("visible_idle") and time.monotonic() < deadline:
-            time.sleep(0.2)
-            before = herdr_client.inspect_agent(session, pane_id)
-        assert before.get("agent_status") == "idle", before
-        assert before.get("visible_idle") is True, before
-        assert type(before.get("state_change_seq")) is int
-        receipt = harness.wakeup(ATTACHMENT)
-        after = herdr_client.inspect_agent(session, pane_id)
-        assert receipt == {
-            "digest": harness_mod.WAKEUP_DIGEST,
-            "text": harness_mod.WAKEUP_TEXT,
-        }
-        assert after.get("agent_status") == "working"
-        assert type(after.get("state_change_seq")) is int
-        assert type(before.get("state_change_seq")) is int
-        assert after["state_change_seq"] > before["state_change_seq"]
-    finally:
-        if client is not None:
-            if client.poll() is None:
-                client.terminate()
-                try:
-                    client.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    client.kill()
-                    client.wait(timeout=5)
-        if master_fd is not None:
-            os.close(master_fd)
-        if slave_fd is not None:
-            os.close(slave_fd)
-        if pane_id is not None:
-            try:
-                herdr_client.close_pane(session, pane_id)
-            except Exception:
-                pass
-        subprocess.run(
-            [herdr_client.HERDR_BIN, "--session", session, "session", "close"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if owned is not None:
-            if owned.poll() is None:
-                owned.terminate()
-                try:
-                    owned.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    owned.kill()
-                    owned.wait(timeout=5)
-        if not log_handle.closed:
-            log_handle.close()
-        herdr_client._SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
-        shutil.rmtree(isolated, ignore_errors=True)
-
-
 def test_wakeup_is_fixed_and_omits_boss_body(tmp_path: Path) -> None:
     expected_wakeup = (
         "COCKPIT_WAKEUP_V1\n"
@@ -927,7 +878,7 @@ def test_wakeup_requires_executing_receipt_from_default_submit(
         calls.append((session, target, text))
         return {
             "available": True, "submitted": True, "executing": True,
-            "status": "working", "target": target,
+            "status": "working", "state_change_seq": 2, "target": target,
         }
 
     monkeypatch.setattr(
@@ -982,6 +933,31 @@ def test_wakeup_idle_after_submit_is_typed_failure(
         close_pane=lambda *, session, pane_id: {"available": True},
         new_instance_id=lambda: INSTANCE,
     )
+    harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.wakeup(ATTACHMENT)
+    assert error.value.code == "runtime_unavailable"
+    assert error.value.unknown is False
+
+
+@pytest.mark.parametrize("receipt", [
+    {"available": True, "submitted": True, "executing": True,
+     "status": "working"},
+    {"available": True, "submitted": True, "executing": True,
+     "status": "idle", "state_change_seq": 2},
+    {"available": True, "submitted": True, "executing": True,
+     "status": "working", "state_change_seq": True},
+    {"available": True, "submitted": True, "executing": True,
+     "status": "working", "state_change_seq": 0},
+])
+def test_wakeup_rejects_unproven_working_receipt(
+    tmp_path: Path, receipt: dict[str, object],
+) -> None:
+    harness = _harness(tmp_path)
+    harness._wakeup_prompt = lambda _session, _pane_id, _text: receipt
     harness.issue_capability(
         attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
         fence=FENCE, session="s", pane_id="pane-1",
@@ -1142,13 +1118,17 @@ def _attach_harness(tmp_path: Path, *, start=None, descriptors: bool = True, clo
         close_pane=close_pane,
         new_instance_id=lambda: INSTANCE,
         wakeup_prompt=lambda session, pane_id, text: {
-            "available": True, "session": session, "pane_id": pane_id,
+            "available": True, "submitted": True, "executing": True,
+            "status": "working", "state_change_seq": 2,
+            "session": session, "pane_id": pane_id,
         },
     )
     return harness, checkout, started, generic, panes
 
 
-def test_attach_issues_private_home_and_never_calls_start_agent(tmp_path: Path) -> None:
+def test_attach_issues_private_home_and_never_calls_start_agent(
+    tmp_path: Path, _provider_provenance: dict[str, Path],
+) -> None:
     user_cfg = Path.home() / ".codex" / "config.toml"
     before = user_cfg.stat() if user_cfg.exists() else None
     harness, checkout, started, generic, panes = _attach_harness(tmp_path)
@@ -1182,7 +1162,23 @@ def test_attach_issues_private_home_and_never_calls_start_agent(tmp_path: Path) 
     assert record["instance_id"] == attached.instance_id == INSTANCE
     assert "token" not in str(started[0])
     assert "token" not in str(harness._get_launch_descriptor(session="s", pane_id="pane-1"))
-    assert SENTINEL not in config.read_text(encoding="utf-8")
+    config_text = config.read_text(encoding="utf-8")
+    config_value = tomllib.loads(config_text)
+    assert SENTINEL not in config_text
+    assert AUTH_BYTES_SENTINEL not in config_text
+    assert "network_access" not in config_value
+    assert config_value["sandbox_mode"] == "read-only"
+    assert config_value["model_provider"] == "relay"
+    assert set(config_value["model_providers"]["relay"]) == {
+        "name", "base_url", "wire_api", "auth",
+    }
+    assert config_value["model_providers"]["relay"]["auth"]["args"] == [
+        "-r", ".OPENAI_API_KEY", str(_provider_provenance["auth"]),
+    ]
+    assert config_value["projects"] == {
+        str(checkout.resolve()): {"trust_level": "trusted"},
+    }
+    assert not (home / "auth.json").exists()
     woken = harness.wakeup(ATTACHMENT)
     assert woken["text"] == harness_mod.WAKEUP_TEXT
     after = user_cfg.stat() if user_cfg.exists() else None

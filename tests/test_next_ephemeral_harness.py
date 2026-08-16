@@ -15,10 +15,12 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 
+from agent_cockpit import local_codex_harness as harness_mod
 from agent_cockpit import next_profile
 
 
@@ -26,18 +28,24 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "next_ephemeral_server.py"
 RESERVED_PORTS = {8790, 18790}
 SOURCE_SHA = "a" * 40
+REAL_PROVIDER_CONFIG = Path.home() / ".codex" / "relay.config.toml"
 
 
-def _spawn(runtime_root: Path) -> subprocess.Popen[str]:
+def _spawn(
+    runtime_root: Path, *, provider_config: Path | None = None,
+) -> subprocess.Popen[str]:
+    argv = [
+        sys.executable,
+        str(LAUNCHER),
+        "--runtime-root",
+        str(runtime_root),
+        "--source-sha",
+        SOURCE_SHA,
+    ]
+    if provider_config is not None:
+        argv.extend(["--codex-provider-config", str(provider_config)])
     return subprocess.Popen(
-        [
-            sys.executable,
-            str(LAUNCHER),
-            "--runtime-root",
-            str(runtime_root),
-            "--source-sha",
-            SOURCE_SHA,
-        ],
+        argv,
         cwd=ROOT,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
         text=True,
@@ -86,9 +94,9 @@ def _live(descriptor: dict[str, object]) -> dict[str, object]:
 
 
 def _launch(
-    runtime_root: Path,
+    runtime_root: Path, *, provider_config: Path | None = None,
 ) -> tuple[subprocess.Popen[str], dict[str, object], dict[str, object]]:
-    process = _spawn(runtime_root)
+    process = _spawn(runtime_root, provider_config=provider_config)
     try:
         assert process.stdout is not None
         readable, _, _ = select.select([process.stdout], [], [], 15)
@@ -129,6 +137,330 @@ def _registry(descriptor: dict[str, object]) -> dict[str, object]:
     assert isinstance(base_url, str)
     with urlopen(base_url + "/api/project-registry/projects", timeout=5) as response:
         return json.loads(response.read())
+
+
+def _request_json(
+    descriptor: dict[str, object], path: str, *, method: str = "GET",
+    body: dict[str, object] | None = None,
+    idempotency_key: str | None = None, timeout: float = 15,
+) -> tuple[int, dict[str, object]]:
+    base_url = descriptor["base_url"]
+    assert isinstance(base_url, str)
+    headers: dict[str, str] = {}
+    data = None
+    if body is not None:
+        data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    request = Request(
+        base_url + path, data=data, headers=headers, method=method,
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read())
+            assert isinstance(payload, dict)
+            return response.status, payload
+    except HTTPError as exc:
+        payload = json.loads(exc.read())
+        assert isinstance(payload, dict)
+        return exc.code, payload
+
+
+def _provider_config(tmp_path: Path) -> tuple[Path, Path]:
+    authority_dir = tmp_path / "external-authority"
+    provider_home = tmp_path / "provider-home"
+    authority_dir.mkdir(mode=0o700)
+    provider_home.mkdir(mode=0o700)
+    authority = authority_dir / "auth.json"
+    authority.write_bytes(b"credential-bytes-must-not-be-read")
+    authority.chmod(0o600)
+    config = provider_home / "relay.config.toml"
+    config.write_text(
+        "\n".join([
+            'model_provider = "relay"',
+            "[model_providers.relay]",
+            'name = "Fixture Relay"',
+            'base_url = "https://relay.invalid"',
+            'wire_api = "responses"',
+            "[model_providers.relay.auth]",
+            'command = "/usr/bin/jq"',
+            f'args = ["-r", ".OPENAI_API_KEY", {json.dumps(str(authority))}]',
+            "timeout_ms = 5000",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    config.chmod(0o600)
+    return config, authority
+
+
+def test_launcher_ignores_inherited_provider_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    monkeypatch.setenv(
+        "COCKPIT_CODEX_PROVIDER_CONFIG_PATH", "/inherited/not/authorized.toml",
+    )
+    monkeypatch.setenv("CODEX_HOME", "/inherited/not/authorized-home")
+    process, _descriptor, _ready_result = _launch(runtime_root)
+    try:
+        environment = _process_env(process.pid)
+        assert "COCKPIT_CODEX_PROVIDER_CONFIG_PATH" not in environment
+        assert "CODEX_HOME" not in environment
+    finally:
+        assert _stop(process) == ""
+
+
+def test_launcher_injects_only_explicit_validated_provider_reference(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    config, authority = _provider_config(tmp_path)
+    identity = (authority.stat().st_dev, authority.stat().st_ino)
+    process, _descriptor, _ready_result = _launch(
+        runtime_root, provider_config=config,
+    )
+    try:
+        environment = _process_env(process.pid)
+        assert environment["COCKPIT_CODEX_PROVIDER_CONFIG_PATH"] == str(config)
+        assert (authority.stat().st_dev, authority.stat().st_ino) == identity
+    finally:
+        assert _stop(process) == ""
+
+
+@pytest.mark.parametrize("failure", ["config_symlink", "authority_mode", "inside_runtime"])
+def test_launcher_rejects_invalid_explicit_provider_before_server_start(
+    tmp_path: Path, failure: str,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    config, authority = _provider_config(tmp_path)
+    if failure == "config_symlink":
+        target = config.with_name("provider-target.toml")
+        config.replace(target)
+        config.symlink_to(target)
+    elif failure == "authority_mode":
+        authority.chmod(0o640)
+    else:
+        inside = runtime_root / "provider.toml"
+        config.replace(inside)
+        config = inside
+
+    process = _spawn(runtime_root, provider_config=config)
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode == 2
+    assert stdout == ""
+    assert stderr.strip() == "provider_config_invalid"
+
+
+@pytest.mark.skipif(
+    shutil.which("codex") is None
+    or shutil.which("herdr") is None
+    or not REAL_PROVIDER_CONFIG.is_file(),
+    reason="需要真实 herdr/codex 与显式 host provider config",
+)
+def test_real_http_attach_dispatch_proves_working_without_prompt_bypass(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    process, descriptor, _ready_result = _launch(
+        runtime_root, provider_config=REAL_PROVIDER_CONFIG,
+    )
+    session = _session_from_marker(runtime_root)
+    prep_url: str | None = None
+    try:
+        source = runtime_root / "uploads" / "e3-http-source"
+        source.mkdir(mode=0o700)
+        (source / "README.md").write_text("isolated source\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main", str(source)], check=True,
+        )
+        subprocess.run(["git", "-C", str(source), "add", "README.md"], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(source), "-c", "user.name=E3 HTTP",
+                "-c", "user.email=e3-http.invalid", "commit", "-q", "-m", "seed",
+            ],
+            check=True,
+        )
+        source_head = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True,
+        ).strip()
+        source_tree = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], text=True,
+        ).strip()
+        source_readme = (source / "README.md").read_bytes()
+
+        status, roots = _request_json(
+            descriptor, "/api/runtime-nodes/local/roots",
+        )
+        assert status == 200
+        root = next(
+            item for item in roots["data"]["items"]
+            if item["display_name"] == "uploads"
+        )
+        locator = {
+            "node_id": "local", "root_id": root["root_id"],
+            "path": source.name,
+        }
+        status, discovered = _request_json(
+            descriptor, "/api/project-discovery", method="POST",
+            body={"locator": locator},
+        )
+        assert status == 200
+        discovery = discovered["data"]
+        assert discovery["complete"] is True
+
+        status, created_project = _request_json(
+            descriptor, "/api/project-registry/projects", method="POST",
+            body={
+                "display_name": "E3 HTTP", "slug": "e3-http", "goal": None,
+                "locator": locator,
+                "expected_discovery_fingerprint": discovery["discovery_fingerprint"],
+            },
+            idempotency_key="e3-http-project",
+        )
+        assert status == 201
+        project = created_project["data"]
+        project_id = project["project_id"]
+        location_id = project["repo_location"]["repo_location_id"]
+
+        status, created_workspace = _request_json(
+            descriptor,
+            f"/api/project-registry/projects/{project_id}/workspaces",
+            method="POST",
+            body={
+                "repo_location_id": location_id, "name": "E3 HTTP",
+                "goal": None, "isolation_kind": "shared",
+            },
+            idempotency_key="e3-http-workspace",
+        )
+        assert status == 201
+        workspace_id = created_workspace["data"]["workspace_id"]
+        work_url = (
+            f"/api/projects/{project_id}/workspaces/{workspace_id}/work-items"
+        )
+        status, created_work = _request_json(
+            descriptor, work_url, method="POST",
+            body={
+                "body": (
+                    "Create E3_HTTP_PROOF.txt containing exactly the single line "
+                    "http product chain, then complete the work."
+                ),
+                "acceptance": None,
+                "constraints": "Only change E3_HTTP_PROOF.txt in the managed checkout.",
+            },
+            idempotency_key="e3-http-work",
+        )
+        assert status == 201
+        work = created_work["data"]["work_item"]
+        work_item_id = work["work_item_id"]
+
+        members_url = (
+            f"/api/projects/{project_id}/workspaces/{workspace_id}/members"
+        )
+        status, member = _request_json(
+            descriptor, members_url, method="POST",
+            body={"display_name": "E3 HTTP Codex"},
+            idempotency_key="e3-http-member",
+        )
+        assert status == 201
+        prep_url = work_url + f"/{work_item_id}/preparation"
+        status, prepared = _request_json(
+            descriptor, prep_url, method="POST",
+            body={"identity_id": member["data"]["identity_id"]},
+            idempotency_key="e3-http-prepare",
+        )
+        assert status == 201
+        status, attached = _request_json(
+            descriptor, prep_url + "/attach", method="POST",
+            body={"expected_revision": prepared["data"]["revision"]},
+            idempotency_key="e3-http-attach", timeout=45,
+        )
+        assert status == 200, attached
+        assert attached["data"]["state"] == "connected_readonly"
+        detail_url = work_url + f"/{work_item_id}"
+        status, dispatch_detail = _request_json(descriptor, detail_url)
+        assert status == 200
+
+        status, dispatched = _request_json(
+            descriptor, work_url + f"/{work_item_id}/dispatch", method="POST",
+            body={
+                "expected_work_revision": dispatch_detail["data"]["work_item"][
+                    "revision"
+                ],
+                "expected_preparation_revision": attached["data"]["revision"],
+            },
+            idempotency_key="e3-http-dispatch", timeout=60,
+        )
+        assert status == 200
+        assert dispatched["data"]["outcome"] == "succeeded"
+        status, detail = _request_json(descriptor, detail_url)
+        assert status == 200
+        assert [item["outcome"] for item in detail["data"]["receipts"]] == [
+            "intent", "succeeded",
+        ]
+        assert detail["data"]["receipts"][-1]["evidence_digest"] == (
+            harness_mod.WAKEUP_DIGEST
+        )
+
+        assert subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True,
+        ).strip() == source_head
+        assert subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], text=True,
+        ).strip() == source_tree
+        assert subprocess.check_output(
+            ["git", "-C", str(source), "status", "--porcelain"], text=True,
+        ) == ""
+        assert (source / "README.md").read_bytes() == source_readme
+        managed = list((runtime_root / "data/worktrees/managed-checkouts").iterdir())
+        assert len(managed) == 1
+        assert subprocess.check_output(
+            ["git", "-C", str(managed[0]), "status", "--porcelain"], text=True,
+        ) == ""
+
+        status, current_prep = _request_json(descriptor, prep_url)
+        assert status == 200
+        status, detached = _request_json(
+            descriptor, prep_url + "/detach", method="POST",
+            body={"expected_revision": current_prep["data"]["revision"]},
+            idempotency_key="e3-http-detach",
+        )
+        assert status == 200
+        assert detached["data"]["state"] == "detached"
+        prep_url = None
+        status, stopped = _request_json(
+            descriptor, f"/api/herdr/session/{session}/stop", method="POST",
+        )
+        assert status == 200 and not stopped.get("error")
+        status, deleted = _request_json(
+            descriptor, f"/api/herdr/session/{session}", method="DELETE",
+        )
+        assert status == 200 and deleted.get("deleted") == session
+    finally:
+        if prep_url is not None:
+            try:
+                _status, current = _request_json(descriptor, prep_url)
+                _request_json(
+                    descriptor, prep_url + "/detach", method="POST",
+                    body={"expected_revision": current["data"]["revision"]},
+                    idempotency_key="e3-http-detach-finally",
+                )
+            except Exception:
+                pass
+        try:
+            _request_json(
+                descriptor, f"/api/herdr/session/{session}/stop", method="POST",
+            )
+        except Exception:
+            pass
+        assert _stop(process) == ""
 
 
 def test_ephemeral_launcher_runs_real_lifespan_and_reuses_known_root(

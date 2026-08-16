@@ -16,6 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_cockpit.instance_lock import LOCK_FD_ENV, InstanceLock, LockError
 from agent_cockpit import next_profile
+from agent_cockpit.local_codex_harness import (
+    HarnessError,
+    PROVIDER_CONFIG_ENV,
+    validated_provider_config_path,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,13 +114,17 @@ def _listen() -> socket.socket:
 
 def _environment(
     root: Path, port: int, token: str, *, source_sha: str,
+    provider_config: Path | None = None,
 ) -> dict[str, str]:
     clean = {
         name: value
         for name, value in os.environ.items()
         if not (
             name.startswith(("COCKPIT_", "AGENT_COCKPIT_", "AGENT_MAIL_", "HERDR_", "XDG_"))
-            or name in {"LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"}
+            or name in {
+                "CODEX_HOME", "LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME",
+                "PYTHONPATH", "VIRTUAL_ENV",
+            }
         )
     }
     session = next_profile.ephemeral_session_for_root(root)
@@ -152,6 +161,8 @@ def _environment(
         "TMPDIR": str(root / "tmp"),
         "PYTHONUNBUFFERED": "1",
     })
+    if provider_config is not None:
+        clean[PROVIDER_CONFIG_ENV] = str(provider_config)
     return clean
 
 
@@ -188,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", required=True)
     parser.add_argument("--source-sha")
+    parser.add_argument("--codex-provider-config")
     args = parser.parse_args(argv)
     listener: socket.socket | None = None
     lock: InstanceLock | None = None
@@ -196,11 +208,22 @@ def main(argv: list[str] | None = None) -> int:
         source_sha = _source_sha(args.source_sha)
         os.setsid()
         root = _runtime_root(args.runtime_root)
+        provider_config = None
+        if args.codex_provider_config is not None:
+            try:
+                provider_config = validated_provider_config_path(
+                    Path(args.codex_provider_config), forbidden_root=root,
+                )
+            except HarnessError as exc:
+                raise EphemeralError("provider_config_invalid") from exc
         fresh = _initialize_layout(root)
         listener = _listen()
         port = listener.getsockname()[1]
         token = secrets.token_hex(16)
-        environment = _environment(root, port, token, source_sha=source_sha)
+        environment = _environment(
+            root, port, token, source_sha=source_sha,
+            provider_config=provider_config,
+        )
         lock = InstanceLock(environment).acquire()
         _prepare_layout(root, fresh=fresh)
         try:

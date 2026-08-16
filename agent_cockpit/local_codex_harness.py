@@ -9,6 +9,7 @@ import secrets
 import stat
 import sys
 import tomllib
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -33,8 +34,8 @@ WAKEUP_TEXT = (
 WAKEUP_DIGEST = "sha256:" + hashlib.sha256(WAKEUP_TEXT.encode()).hexdigest()
 _ATTACHMENT_ID = re.compile(r"att_[0-9a-f]{32}\Z")
 _PROVIDER_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
-_PROVENANCE_FILE = "relay.config.toml"
 _MAX_PROVENANCE_BYTES = 64 * 1024
+PROVIDER_CONFIG_ENV = "COCKPIT_CODEX_PROVIDER_CONFIG_PATH"
 
 
 class HarnessError(RuntimeError):
@@ -147,6 +148,13 @@ class LocalCodexHarness:
         capability_root: Path | None = None,
         wakeup_prompt: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
+        provider_path = os.environ.get(PROVIDER_CONFIG_ENV)
+        self._provider_config_path = (
+            Path(provider_path)
+            if isinstance(provider_path, str) and provider_path != ""
+            else None
+        )
+        self._provider_required = start_workspace_codex_home is None
         self._ensure_session = ensure_session or herdr_client.ensure_session
         self._start_agent = start_agent or herdr_client.start_agent
         self._start_workspace_codex_home = (
@@ -190,7 +198,6 @@ class LocalCodexHarness:
         attachment_id = attachment_id_text(attachment_id)
         if root is None or generation < 1:
             _fail("invalid_argument")
-        provenance = _provider_auth_provenance()
         _private_dir(root)
         token = secrets.token_hex(32)
         payload = {
@@ -211,8 +218,7 @@ class LocalCodexHarness:
             _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
             _write_private(current, str(generation).encode() + b"\n")
             _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
-            _write_mcp_home_config(home, cap, root, provenance)
-            _validate_auth_reference(provenance.authority)
+            _write_mcp_home_config(home, cap, root)
         except HarnessError as exc:
             if exc.unknown:
                 self._retire_private_runtime(attachment_id)
@@ -230,9 +236,16 @@ class LocalCodexHarness:
         sent = self._wakeup_prompt(
             record["session"], record["pane_id"], WAKEUP_TEXT,
         )
-        if not isinstance(sent, dict) or sent.get("available") is False:
+        if not isinstance(sent, dict) or sent.get("available") is not True:
             _fail("runtime_unavailable")
-        if sent.get("error") or sent.get("executing") is False:
+        if (
+            sent.get("error")
+            or sent.get("submitted") is not True
+            or sent.get("executing") is not True
+            or sent.get("status") != "working"
+            or type(sent.get("state_change_seq")) is not int
+            or sent["state_change_seq"] < 1
+        ):
             _fail("runtime_unavailable")
         return {"digest": WAKEUP_DIGEST, "text": WAKEUP_TEXT}
 
@@ -258,7 +271,13 @@ class LocalCodexHarness:
         root = self._capability_root
         if root is None or generation < 1:
             _fail("invalid_argument")
-        provenance = _provider_auth_provenance()
+        provenance = None
+        if self._provider_config_path is not None:
+            provenance = _provider_auth_provenance_from_path(
+                self._provider_config_path,
+            )
+        elif self._provider_required:
+            _fail("runtime_unavailable")
         _private_dir(root)
         token = secrets.token_hex(32)
         payload = {
@@ -280,15 +299,21 @@ class LocalCodexHarness:
             _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
             _write_private(root / f"{attachment_id}.generation", str(generation).encode() + b"\n")
             _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
-            _write_mcp_home_config(home, cap, root, provenance)
-            _validate_auth_reference(provenance.authority)
+            _write_mcp_home_config(
+                home, cap, root, provenance=provenance,
+                checkout=(None if provenance is None else Path(checkout)),
+            )
+            if provenance is not None:
+                _validate_auth_reference(provenance.authority)
         except HarnessError as exc:
             if exc.unknown:
                 self._retire_private_runtime(attachment_id)
             raise
         return {
             "capability_path": cap, "codex_home": home, "generation": generation,
-            "_auth_reference": provenance.authority,
+            "_auth_reference": (
+                None if provenance is None else provenance.authority
+            ),
         }
 
     def _bind_private_runtime(
@@ -432,11 +457,13 @@ class LocalCodexHarness:
             raise
         pane_id: str | None = None
         live_id = instance_id
-        try:
-            _validate_auth_reference(Path(issued["_auth_reference"]))
-        except HarnessError:
-            self._retire_private_runtime(attachment_id)
-            raise
+        auth_reference = issued["_auth_reference"]
+        if auth_reference is not None:
+            try:
+                _validate_auth_reference(Path(auth_reference))
+            except HarnessError:
+                self._retire_private_runtime(attachment_id)
+                raise
         try:
             self._ensure_session(session=session)
         except Exception:
@@ -711,33 +738,51 @@ def _safe_public_path(path: Path) -> Path:
 
 def _write_mcp_home_config(
     home: Path, cap: Path, capability_root: Path,
-    provenance: ProviderAuthReference,
+    *, provenance: ProviderAuthReference | None = None,
+    checkout: Path | None = None,
 ) -> None:
     data_root = _safe_public_path(Path(capability_root).parent)
     interpreter = _safe_public_path(Path(sys.executable))
     module_root = _safe_public_path(Path(__file__).resolve().parent.parent)
     cap = _safe_public_path(cap)
-    auth_args = json.dumps(
-        list(provenance.args), ensure_ascii=True, separators=(",", ":"),
-    )
-    refresh = (
-        ""
-        if provenance.refresh_interval_ms is None
-        else f"refresh_interval_ms = {provenance.refresh_interval_ms}\n"
-    )
+    provider_selector = ""
+    provider_config = ""
+    project_config = ""
+    if (provenance is None) != (checkout is None):
+        _fail("invalid_argument")
+    if provenance is not None and checkout is not None:
+        auth_args = json.dumps(
+            list(provenance.args), ensure_ascii=True, separators=(",", ":"),
+        )
+        refresh = (
+            ""
+            if provenance.refresh_interval_ms is None
+            else f"refresh_interval_ms = {provenance.refresh_interval_ms}\n"
+        )
+        trusted_checkout = _safe_public_path(checkout)
+        provider_selector = (
+            f"model_provider = {_toml_basic(provenance.model_provider)}\n"
+        )
+        provider_config = (
+            f"[model_providers.{provenance.model_provider}]\n"
+            f"name = {_toml_basic(provenance.name)}\n"
+            f"base_url = {_toml_basic(provenance.base_url)}\n"
+            f"wire_api = {_toml_basic(provenance.wire_api)}\n"
+            f"[model_providers.{provenance.model_provider}.auth]\n"
+            f"command = {_toml_basic(provenance.command)}\n"
+            f"args = {auth_args}\n"
+            f"timeout_ms = {provenance.timeout_ms}\n"
+            f"{refresh}"
+        )
+        project_config = (
+            f"[projects.{_toml_basic(str(trusted_checkout))}]\n"
+            'trust_level = "trusted"\n'
+        )
     config = (
-        f"model_provider = {_toml_basic(provenance.model_provider)}\n"
-        'network_access = "enabled"\n'
         'sandbox_mode = "read-only"\n'
-        f"[model_providers.{provenance.model_provider}]\n"
-        f"name = {_toml_basic(provenance.name)}\n"
-        f"base_url = {_toml_basic(provenance.base_url)}\n"
-        f"wire_api = {_toml_basic(provenance.wire_api)}\n"
-        f"[model_providers.{provenance.model_provider}.auth]\n"
-        f"command = {_toml_basic(provenance.command)}\n"
-        f"args = {auth_args}\n"
-        f"timeout_ms = {provenance.timeout_ms}\n"
-        f"{refresh}"
+        f"{provider_selector}"
+        f"{provider_config}"
+        f"{project_config}"
         "[mcp_servers.cockpit]\n"
         f"command = {_toml_basic(str(interpreter))}\n"
         'args = ["-P", "-m", "agent_cockpit.workspace_mcp_entry"]\n'
@@ -865,25 +910,27 @@ def _nonnegative_int(value: object) -> int:
     return value
 
 
-def _provider_auth_provenance() -> ProviderAuthReference:
-    raw_home = os.environ.get("CODEX_HOME")
-    if not isinstance(raw_home, str) or raw_home == "":
-        _fail("runtime_unavailable")
-    home = Path(raw_home)
-    if not home.is_absolute() or ".." in home.parts:
-        _fail("runtime_unavailable")
-    metadata = home / _PROVENANCE_FILE
-    _safe_reference_ancestry(metadata)
+def _outside_root(path: Path, forbidden_root: Path | None) -> None:
+    if forbidden_root is None:
+        return
+    root = Path(forbidden_root)
     try:
-        home_info = home.lstat()
+        root = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
     except OSError:
         _fail("runtime_unavailable")
-    if (
-        stat.S_ISLNK(home_info.st_mode)
-        or not stat.S_ISDIR(home_info.st_mode)
-        or home_info.st_uid != os.getuid()
-    ):
+    if resolved == root or root in resolved.parents:
         _fail("runtime_unavailable")
+
+
+def _provider_auth_provenance_from_path(
+    metadata: Path, *, forbidden_root: Path | None = None,
+) -> ProviderAuthReference:
+    metadata = Path(metadata)
+    if not metadata.is_absolute() or ".." in metadata.parts:
+        _fail("runtime_unavailable")
+    _safe_reference_ancestry(metadata)
+    _outside_root(metadata, forbidden_root)
     try:
         value = tomllib.loads(
             _verified_metadata(metadata).decode("utf-8"),
@@ -902,21 +949,37 @@ def _provider_auth_provenance() -> ProviderAuthReference:
     ):
         _fail("runtime_unavailable")
     provider = providers[name]
-    if not {"name", "base_url", "wire_api", "auth"} <= set(provider):
+    if set(provider) != {"name", "base_url", "wire_api", "auth"}:
         _fail("runtime_unavailable")
     auth = provider["auth"]
-    if not isinstance(auth, dict) or not {"command", "args", "timeout_ms"} <= set(auth):
+    if (
+        not isinstance(auth, dict)
+        or set(auth) not in (
+            {"command", "args", "timeout_ms"},
+            {"command", "args", "timeout_ms", "refresh_interval_ms"},
+        )
+    ):
         _fail("runtime_unavailable")
     provider_name = provider["name"]
     base_url = provider["base_url"]
     wire_api = provider["wire_api"]
     command = auth["command"]
     args = auth["args"]
+    try:
+        parsed_url = urlsplit(base_url) if isinstance(base_url, str) else None
+    except ValueError:
+        parsed_url = None
     if (
         not all(isinstance(item, str) and item for item in (
             provider_name, base_url, wire_api, command,
         ))
-        or not base_url.startswith("https://")
+        or parsed_url is None
+        or parsed_url.scheme != "https"
+        or not parsed_url.hostname
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.query != ""
+        or parsed_url.fragment != ""
         or wire_api != "responses"
         or command != "/usr/bin/jq"
         or not isinstance(args, list)
@@ -926,7 +989,10 @@ def _provider_auth_provenance() -> ProviderAuthReference:
     ):
         _fail("runtime_unavailable")
     authority = Path(args[2])
+    if not authority.is_absolute() or ".." in authority.parts:
+        _fail("runtime_unavailable")
     _validate_auth_reference(authority)
+    _outside_root(authority, forbidden_root)
     refresh = auth.get("refresh_interval_ms")
     if refresh is not None:
         refresh = _nonnegative_int(refresh)
@@ -941,6 +1007,16 @@ def _provider_auth_provenance() -> ProviderAuthReference:
         refresh_interval_ms=refresh,
         authority=authority,
     )
+
+
+def validated_provider_config_path(
+    path: Path, *, forbidden_root: Path | None = None,
+) -> Path:
+    metadata = Path(path)
+    _provider_auth_provenance_from_path(
+        metadata, forbidden_root=forbidden_root,
+    )
+    return metadata
 
 
 def _unlink_owned(path: Path) -> None:
