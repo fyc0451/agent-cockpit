@@ -2125,3 +2125,117 @@ button.rail-item {
     min-width: 112px;
   }
 }
+
+/* ===== D-W1 执行时间线 ===== */
+.execution-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  min-width: 0;
+}
+
+.execution-timeline-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.execution-timeline-phase {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.execution-timeline-phase--dispatching,
+.execution-timeline-phase--delivered,
+.execution-timeline-phase--delivery_unknown {
+  color: var(--accent);
+}
+
+.execution-timeline-phase--working {
+  color: var(--warn, #b8860b);
+}
+
+.execution-timeline-phase--failed {
+  color: var(--danger);
+}
+
+.execution-timeline-phase--completed {
+  color: var(--ok, #2e7d32);
+}
+
+.execution-timeline-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+  min-width: 0;
+}
+
+.execution-timeline-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px;
+  border-left: 3px solid var(--line);
+  font-size: 12px;
+  min-width: 0;
+}
+
+.execution-timeline-entry--ok {
+  border-left-color: var(--ok, #2e7d32);
+}
+
+.execution-timeline-entry--pending {
+  border-left-color: var(--accent);
+}
+
+.execution-timeline-entry--failure {
+  border-left-color: var(--danger);
+}
+
+.execution-timeline-entry-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.execution-timeline-entry-detail {
+  color: var(--text-dim, var(--text));
+  overflow-wrap: anywhere;
+}
+
+.execution-timeline-replies {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.execution-timeline-reply {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg, var(--card));
+  min-width: 0;
+}
+
+.execution-timeline-reply .focus-message-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .execution-timeline {
+    padding: 12px;
+  }
+}

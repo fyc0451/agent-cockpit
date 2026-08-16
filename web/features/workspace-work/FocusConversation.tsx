@@ -23,6 +23,7 @@ import {
   type WorkDraftField,
 } from '../../state/workDraft'
 import { WorkPreparation } from './WorkPreparation'
+import { ExecutionTimeline } from './ExecutionTimeline'
 
 const BODY_MAX = 32_768
 const NOTE_MAX = 8_192
@@ -346,6 +347,12 @@ export function FocusConversation({
         <>
           <SavedWork item={selected} filesTo={filesTo} terminalTo={terminalTo} />
           <WorkPreparation
+            projectId={projectId}
+            workspaceId={workspaceId}
+            workItemId={workItemId(selected)}
+          />
+          <ExecutionTimeline
+            key={workItemId(selected)}
             projectId={projectId}
             workspaceId={workspaceId}
             workItemId={workItemId(selected)}
