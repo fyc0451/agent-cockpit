@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -182,15 +183,7 @@ class LocalCodexHarness:
         _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
         _write_private(current, str(generation).encode() + b"\n")
         _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
-        config = (
-            'sandbox_mode = "read-only"\n'
-            "[mcp_servers.cockpit]\n"
-            'command = "python"\n'
-            'args = ["-m", "agent_cockpit.private_codex_mcp"]\n'
-            "[mcp_servers.cockpit.env]\n"
-            f'COCKPIT_CAPABILITY_FILE = "{cap}"\n'
-        )
-        _write_private(home / "config.toml", config.encode())
+        _write_mcp_home_config(home, cap, root)
         return {
             "capability_path": cap,
             "codex_home": home,
@@ -249,15 +242,7 @@ class LocalCodexHarness:
         _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
         _write_private(root / f"{attachment_id}.generation", str(generation).encode() + b"\n")
         _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
-        config = (
-            'sandbox_mode = "read-only"\n'
-            "[mcp_servers.cockpit]\n"
-            'command = "python"\n'
-            'args = ["-m", "agent_cockpit.private_codex_mcp"]\n'
-            "[mcp_servers.cockpit.env]\n"
-            f'COCKPIT_CAPABILITY_FILE = "{cap}"\n'
-        )
-        _write_private(home / "config.toml", config.encode())
+        _write_mcp_home_config(home, cap, root)
         return {"capability_path": cap, "codex_home": home, "generation": generation}
 
     def _bind_private_runtime(
@@ -388,8 +373,16 @@ class LocalCodexHarness:
                     self._retire_private_runtime(attachment_id)
                     raise HarnessError(
                         "runtime_unavailable", pane_id=pane_id, instance_id=str(live_id),
+                        unknown=True,
                     ) from None
             self._retire_private_runtime(attachment_id)
+            if started.get("rolled_back") is False and not (
+                isinstance(pane_id, str) and pane_id
+            ):
+                raise HarnessError(
+                    "runtime_unavailable", pane_id=None, instance_id=str(live_id),
+                    unknown=True,
+                )
             _fail("runtime_unavailable")
         pane_id = started.get("pane_id")
         live_id = started.get("instance_id") or instance_id
@@ -599,8 +592,51 @@ def _private_dir(path: Path) -> None:
         _fail("invalid_argument")
 
 
+def _toml_basic(value: str) -> str:
+    if value == "" or any(
+        ord(char) < 32 or char in '"\\' for char in value
+    ):
+        _fail("invalid_argument")
+    return f'"{value}"'
+
+
+def _safe_public_path(path: Path) -> Path:
+    path = Path(path)
+    if not path.is_absolute() or ".." in path.parts:
+        _fail("invalid_argument")
+    try:
+        resolved = path.resolve()
+    except OSError:
+        _fail("invalid_argument")
+    text = str(resolved)
+    if text == "" or any(ord(char) < 32 or char in '"\\' for char in text):
+        _fail("invalid_argument")
+    return resolved
+
+
+def _write_mcp_home_config(home: Path, cap: Path, capability_root: Path) -> None:
+    data_root = _safe_public_path(Path(capability_root).parent)
+    interpreter = _safe_public_path(Path(sys.executable))
+    module_root = _safe_public_path(Path(__file__).resolve().parent.parent)
+    cap = _safe_public_path(cap)
+    config = (
+        'sandbox_mode = "read-only"\n'
+        "[mcp_servers.cockpit]\n"
+        f"command = {_toml_basic(str(interpreter))}\n"
+        'args = ["-P", "-m", "agent_cockpit.workspace_mcp_entry"]\n'
+        "[mcp_servers.cockpit.env]\n"
+        f"COCKPIT_CAPABILITY_FILE = {_toml_basic(str(cap))}\n"
+        f"COCKPIT_DATA_DIR = {_toml_basic(str(data_root))}\n"
+        f"PYTHONPATH = {_toml_basic(str(module_root))}\n"
+        'PYTHONNOUSERSITE = "1"\n'
+    )
+    _write_private(home / "config.toml", config.encode())
+
+
 def _write_private(path: Path, payload: bytes) -> None:
     _assert_private_ancestry(path)
+    parent = path.parent
+    tmp: Path | None = None
     try:
         try:
             info = path.lstat()
@@ -613,20 +649,60 @@ def _write_private(path: Path, payload: bytes) -> None:
             or info.st_uid != os.getuid()
         ):
             _fail("invalid_argument")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags, 0o600)
+        parent_info = parent.lstat()
+        if (
+            stat.S_ISLNK(parent_info.st_mode)
+            or not stat.S_ISDIR(parent_info.st_mode)
+            or parent_info.st_uid != os.getuid()
+        ):
+            _fail("invalid_argument")
+        tmp = parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
         try:
             os.write(fd, payload)
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.chmod(path, 0o600)
+        os.chmod(tmp, 0o600)
+        staged = tmp.lstat()
+        if (
+            stat.S_ISLNK(staged.st_mode)
+            or not stat.S_ISREG(staged.st_mode)
+            or staged.st_nlink != 1
+            or staged.st_uid != os.getuid()
+            or stat.S_IMODE(staged.st_mode) != 0o600
+        ):
+            _fail("invalid_argument")
+        os.replace(tmp, path)
+        tmp = None
+        dirfd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
         written = path.lstat()
-        if written.st_nlink != 1 or not stat.S_ISREG(written.st_mode):
+        if (
+            stat.S_ISLNK(written.st_mode)
+            or not stat.S_ISREG(written.st_mode)
+            or written.st_nlink != 1
+            or written.st_uid != os.getuid()
+            or stat.S_IMODE(written.st_mode) != 0o600
+        ):
             _fail("invalid_argument")
     except HarnessError:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
         raise
     except OSError:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
         _fail("invalid_argument")
 
 

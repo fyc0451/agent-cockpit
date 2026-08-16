@@ -3,6 +3,9 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -429,10 +432,14 @@ def test_private_home_does_not_touch_user_codex_config_and_cap_is_0600(
     text = config.read_text(encoding="utf-8")
     assert "mcp_servers" in text
     assert "cockpit" in text
+    assert "agent_cockpit.workspace_mcp_entry" in text
+    assert "private_codex_mcp" not in text
     assert str(issued["capability_path"]) in text
     assert SENTINEL not in text
     secret = issued["capability_path"].read_text(encoding="utf-8")
-    assert "token" in secret
+    token = json.loads(secret)["token"]
+    assert token not in text
+    assert FENCE not in text
     after = user_cfg.stat() if user_cfg.exists() else None
     if before is None:
         assert after is None
@@ -719,3 +726,201 @@ def test_old_generation_and_fence_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(harness_mod.HarnessError) as fence:
         harness.wakeup(ATTACHMENT)
     assert fence.value.code == "invalid_argument"
+
+
+def _parse_mcp_config(text: str) -> dict[str, object]:
+    command = re.search(r"^command = \"([^\"]+)\"$", text, re.M)
+    args = re.search(r"^args = (\[.*\])$", text, re.M)
+    env = dict(re.findall(r'^([A-Z_]+) = "([^"]*)"$', text, re.M))
+    env.pop("command", None)
+    assert command is not None and args is not None
+    return {
+        "command": command.group(1),
+        "args": json.loads(args.group(1)),
+        "env": env,
+    }
+
+
+def _rpc(*messages: dict[str, object]) -> str:
+    return "".join(json.dumps(item) + "\n" for item in messages)
+
+
+def _run_generated_mcp(tmp_path: Path, config_text: str, payload: str) -> subprocess.CompletedProcess[str]:
+    parsed = _parse_mcp_config(config_text)
+    isolated = tmp_path.parent / f"{tmp_path.name}-iso"
+    elsewhere = isolated / "cwd"
+    isolated_home = isolated / "home"
+    elsewhere.mkdir(parents=True)
+    isolated_home.mkdir(parents=True)
+    env = {
+        "HOME": str(isolated_home),
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+    }
+    env.update({key: str(value) for key, value in parsed["env"].items()})
+    return subprocess.run(
+        [str(parsed["command"]), *[str(item) for item in parsed["args"]]],
+        input=payload,
+        env=env,
+        cwd=elsewhere,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_generated_config_subprocess_lists_exact_three_tools(tmp_path: Path) -> None:
+    dashboard = Path.home() / "dashboard-data"
+    before = set(dashboard.rglob("*")) if dashboard.exists() else None
+    harness, checkout, _started, _generic, _panes = _attach_harness(tmp_path)
+    attached = harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+    )
+    config = Path(tmp_path / "caps" / f"{ATTACHMENT}.home" / "config.toml")
+    text = config.read_text(encoding="utf-8")
+    parsed = _parse_mcp_config(text)
+    assert parsed["command"] == str(Path(sys.executable).resolve())
+    assert parsed["args"] == ["-P", "-m", "agent_cockpit.workspace_mcp_entry"]
+    assert "private_codex_mcp" not in text
+    token = json.loads(
+        (tmp_path / "caps" / f"{ATTACHMENT}.cap").read_text(encoding="utf-8")
+    )["token"]
+    assert token not in text
+    assert FENCE not in text
+    assert SENTINEL not in text
+    assert attached.pane_id == "pane-1"
+    result = _run_generated_mcp(tmp_path, text, _rpc(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "claim_current", "arguments": {}},
+        },
+        {
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "run", "arguments": {}},
+        },
+        {
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "fail", "arguments": {}},
+        },
+    ))
+    assert result.returncode == 0, result.stderr
+    replies = [json.loads(line) for line in result.stdout.splitlines()]
+    by_id = {reply["id"]: reply for reply in replies}
+    names = [tool["name"] for tool in by_id[2]["result"]["tools"]]
+    assert names == ["claim_current", "apply_patch", "reply_complete"]
+    assert "run" not in names and "fail" not in names
+    assert by_id[3]["result"]["isError"] is True
+    assert by_id[3]["result"]["structuredContent"]["code"]
+    assert by_id[4]["result"]["isError"] is True
+    assert by_id[5]["result"]["isError"] is True
+    assert not list(tmp_path.rglob("*.sqlite3"))
+    if before is None:
+        assert not dashboard.exists()
+    else:
+        assert set(dashboard.rglob("*")) == before
+
+
+def test_generated_config_missing_stores_typed_fail_closed(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    text = Path(issued["codex_home"] / "config.toml").read_text(encoding="utf-8")
+    result = _run_generated_mcp(tmp_path, text, _rpc(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "claim_current", "arguments": {}},
+        },
+        {
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {
+                "name": "apply_patch",
+                "arguments": {"claim_revision": 1, "lease_revision": 1, "patch": ""},
+            },
+        },
+        {
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {
+                "name": "reply_complete",
+                "arguments": {"claim_revision": 1, "lease_revision": 1, "body": "x"},
+            },
+        },
+    ))
+    assert result.returncode == 0, result.stderr
+    replies = [json.loads(line) for line in result.stdout.splitlines()]
+    by_id = {reply["id"]: reply for reply in replies}
+    names = [tool["name"] for tool in by_id[2]["result"]["tools"]]
+    assert names == ["claim_current", "apply_patch", "reply_complete"]
+    for ident in (3, 4, 5):
+        denied = by_id[ident]["result"]
+        assert denied["isError"] is True
+        assert denied["structuredContent"]["code"] == "workspace_work_schema_missing"
+    assert not list(tmp_path.rglob("*.sqlite3"))
+
+
+def test_private_file_replace_keeps_old_bytes_on_fault(tmp_path: Path, monkeypatch) -> None:
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    cap = issued["capability_path"]
+    before = cap.read_bytes()
+    generation = tmp_path / "caps" / f"{ATTACHMENT}.generation"
+    fence = tmp_path / "caps" / f"{ATTACHMENT}.fence"
+    config = Path(issued["codex_home"]) / "config.toml"
+    before_gen = generation.read_bytes()
+    before_fence = fence.read_bytes()
+    before_config = config.read_bytes()
+
+    def boom(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        raise OSError("replace lost")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.issue_capability(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=2,
+            fence="sha256:" + "cd" * 32, session="s", pane_id="pane-1",
+        )
+    assert error.value.code == "invalid_argument"
+    assert cap.read_bytes() == before
+    assert generation.read_bytes() == before_gen
+    assert fence.read_bytes() == before_fence
+    assert config.read_bytes() == before_config
+    assert cap.stat().st_size > 0
+    assert list((tmp_path / "caps").glob(".*.tmp")) == []
+
+
+def test_start_unproven_rollback_without_pane_is_unknown(tmp_path: Path) -> None:
+    def fail(_kwargs, _panes):
+        return {
+            "available": True,
+            "error_code": "descriptor_cleanup_incomplete",
+            "error": "workspace launch cleanup incomplete",
+            "rolled_back": False,
+        }
+
+    harness, checkout, started, generic, panes = _attach_harness(tmp_path, start=fail)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+        )
+    assert error.value.code == "runtime_unavailable"
+    assert error.value.unknown is True
+    assert getattr(error.value, "pane_id", None) in {None, ""}
+    assert generic == []
+    assert started
+    assert panes == {}
+    assert not (tmp_path / "caps" / f"{ATTACHMENT}.cap").exists()
+    with pytest.raises(harness_mod.HarnessError) as wakeup:
+        harness.wakeup(ATTACHMENT)
+    assert wakeup.value.code == "invalid_argument"
