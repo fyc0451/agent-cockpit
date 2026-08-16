@@ -1559,7 +1559,13 @@ class WorkspaceExecutionStore:
                     ),
                 )
             if status == "detached" and prep["lease_id"]:
-                if connection.execute(
+                lease = connection.execute(
+                    "SELECT status FROM writer_leases WHERE lease_id=?",
+                    (prep["lease_id"],),
+                ).fetchone()
+                if lease is None or lease["status"] not in {"reserved", "revoked"}:
+                    _fail("lease_conflict")
+                if lease["status"] == "reserved" and connection.execute(
                     "UPDATE writer_leases SET status='revoked', "
                     "revision=revision+1 WHERE lease_id=? AND status='reserved'",
                     (prep["lease_id"],),

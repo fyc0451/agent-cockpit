@@ -73,7 +73,10 @@ class ExecutionService:
 
     def get_preparation(self, project_id: str, workspace_id: str, work_item_id: str):
         self._require_scope(project_id, workspace_id, write=False)
-        self._work_item(project_id, workspace_id, work_item_id)
+        self._work_item(
+            project_id, workspace_id, work_item_id,
+            allowed_statuses={"unassigned", "working", "completed", "failed"},
+        )
         item = self.store.get_preparation(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id,
@@ -353,7 +356,10 @@ class ExecutionService:
         expected_revision: object, idempotency_key: object,
     ):
         self._require_scope(project_id, workspace_id, write=True)
-        self._work_item(project_id, workspace_id, work_item_id)
+        self._work_item(
+            project_id, workspace_id, work_item_id,
+            allowed_statuses={"unassigned", "completed", "failed"},
+        )
         if type(expected_revision) is not int:
             _fail("invalid_argument")
         request = {
@@ -602,7 +608,10 @@ class ExecutionService:
             _fail("source_not_git")
         return Path(path)
 
-    def _work_item(self, project_id: str, workspace_id: str, work_item_id: str):
+    def _work_item(
+        self, project_id: str, workspace_id: str, work_item_id: str, *,
+        allowed_statuses: set[str] | None = None,
+    ):
         item = self.work_provider().get_work_item(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id,
@@ -610,7 +619,7 @@ class ExecutionService:
         if item is None:
             _fail("work_item_not_found")
         status = item.work_item.get("status")
-        if status != "unassigned":
+        if status not in (allowed_statuses or {"unassigned"}):
             _fail("invalid_argument")
         return item
 

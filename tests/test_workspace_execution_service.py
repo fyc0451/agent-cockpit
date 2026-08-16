@@ -116,6 +116,75 @@ def _world(tmp_path: Path):
     return service, project, workspace, created.item, source, harness, operations
 
 
+def _complete_attached_work(service, project, workspace, item, member, attached):
+    project_id = project.project_id
+    workspace_id = workspace.workspace_id
+    work_item_id = item.work_item["work_item_id"]
+    identity_id = member.item.identity_id
+    generation = attached["attachment"]["generation"]
+    attachment_id = attached["attachment"]["attachment_id"]
+    work = service.work_provider()
+    detail = work.get_work_item_detail(
+        project_id=project_id, workspace_id=workspace_id,
+        work_item_id=work_item_id,
+    )
+    assert detail is not None
+    work_revision = detail["work_item"]["revision"]
+    reserved = work.reserve_claim(
+        project_id=project_id, workspace_id=workspace_id,
+        work_item_id=work_item_id, identity_id=identity_id,
+        generation=generation, expected_revision=work_revision,
+        idempotency_key="complete-reserve",
+    )
+    claim_id = reserved["claim"]["claim_id"]
+    active_lease = service.store.activate_claim_lease(
+        project_id=project_id, workspace_id=workspace_id,
+        work_item_id=work_item_id,
+        expected_preparation_revision=attached["revision"],
+        expected_lease_revision=attached["lease"]["revision"],
+        attachment_id=attachment_id, identity_id=identity_id,
+        generation=generation, claim_id=claim_id,
+        idempotency_key="complete-lease",
+    )
+    active_work = work.activate_claim(
+        project_id=project_id, workspace_id=workspace_id,
+        work_item_id=work_item_id, claim_id=claim_id,
+        identity_id=identity_id, generation=generation,
+        expected_claim_revision=reserved["claim"]["revision"],
+        expected_work_revision=work_revision,
+        idempotency_key="complete-claim",
+    )
+    begun = service.store.begin_reply(
+        project_id=project_id, workspace_id=workspace_id,
+        work_item_id=work_item_id,
+        expected_preparation_revision=attached["revision"],
+        expected_lease_revision=active_lease["lease"]["revision"],
+        attachment_id=attachment_id, identity_id=identity_id,
+        generation=generation, claim_id=claim_id,
+        idempotency_key="complete-begin-reply",
+    )
+    replied = work.reply_complete(
+        project_id=project_id, workspace_id=workspace_id,
+        work_item_id=work_item_id, claim_id=claim_id,
+        identity_id=identity_id, generation=generation,
+        expected_claim_revision=active_work["claim"]["revision"],
+        expected_work_revision=active_work["work_item"]["revision"],
+        body="completed reply", idempotency_key="complete-reply",
+    )
+    finished = service.store.finish_reply(
+        project_id=project_id, workspace_id=workspace_id,
+        work_item_id=work_item_id,
+        expected_preparation_revision=attached["revision"],
+        expected_lease_revision=begun["lease"]["revision"],
+        attachment_id=attachment_id, identity_id=identity_id,
+        generation=generation, claim_id=claim_id,
+        idempotency_key="complete-finish-reply",
+    )
+    assert replied["work_item"]["status"] == "completed"
+    assert finished["lease"]["status"] == "revoked"
+    return replied
+
+
 def test_prepare_attach_detach_leaves_source_and_operation_receipts(tmp_path: Path) -> None:
     service, project, workspace, item, source, harness, operations = _world(tmp_path)
     before = checkout_mod.GitCheckoutProvider().inspect_source(source)
@@ -165,6 +234,91 @@ def test_prepare_attach_detach_leaves_source_and_operation_receipts(tmp_path: Pa
     assert "runtime.attach" in kinds
     assert "runtime.detach" in kinds
     assert receipts >= 3
+
+
+def test_completed_work_can_load_preparation_and_detach_without_losing_reply(
+    tmp_path: Path,
+) -> None:
+    service, project, workspace, item, _source, harness, _operations = _world(tmp_path)
+    member = service.create_member(
+        project.project_id, workspace.workspace_id, display_name="Atlas",
+        idempotency_key="completed-member",
+    )
+    prepared = service.prepare(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="completed-prep",
+    )
+    attached = service.attach(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        expected_revision=prepared["revision"], idempotency_key="completed-attach",
+    )
+    replied = _complete_attached_work(
+        service, project, workspace, item, member, attached,
+    )
+
+    current = service.get_preparation(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+    )
+    assert current.state == "connected_readonly"
+    assert current.lease is not None and current.lease.status == "revoked"
+    detached = service.detach(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        expected_revision=current.revision, idempotency_key="completed-detach",
+    )
+
+    assert detached["state"] == "detached"
+    assert detached["lease"]["status"] == "revoked"
+    assert harness.calls == ["attach", "detach"]
+    assert harness.panes == {}
+    detail = service.work_provider().get_work_item_detail(
+        project_id=project.project_id, workspace_id=workspace.workspace_id,
+        work_item_id=item.work_item["work_item_id"],
+    )
+    assert detail is not None
+    assert detail["work_item"]["status"] == replied["work_item"]["status"] == "completed"
+    assert detail["work_item"]["revision"] == replied["work_item"]["revision"]
+    assert [message["body"] for message in detail["thread"]["messages"]] == [
+        "Fix login", "completed reply",
+    ]
+    assert {receipt["kind"] for receipt in detail["receipts"]} >= {
+        "reply", "complete",
+    }
+
+
+def test_completed_detach_unknown_fails_closed(tmp_path: Path) -> None:
+    service, project, workspace, item, _source, harness, _operations = _world(tmp_path)
+    member = service.create_member(
+        project.project_id, workspace.workspace_id, display_name="Atlas",
+        idempotency_key="unknown-member",
+    )
+    prepared = service.prepare(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="unknown-prep",
+    )
+    attached = service.attach(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        expected_revision=prepared["revision"], idempotency_key="unknown-attach",
+    )
+    _complete_attached_work(service, project, workspace, item, member, attached)
+    harness.fail_detach = "unknown"
+
+    with pytest.raises(service_mod.ExecutionServiceError) as error:
+        service.detach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=attached["revision"],
+            idempotency_key="completed-detach-unknown",
+        )
+
+    assert error.value.code == "runtime_unavailable"
+    assert error.value.unknown is True
+    current = service.store.get_preparation(
+        project_id=project.project_id, workspace_id=workspace.workspace_id,
+        work_item_id=item.work_item["work_item_id"],
+    )
+    assert current is not None and current.state == "outcome_unknown"
+    assert current.lease is not None and current.lease.status == "revoked"
+    assert set(harness.panes) == {"pane-live"}
 
 
 def test_dirty_source_is_zero_write(tmp_path: Path) -> None:
