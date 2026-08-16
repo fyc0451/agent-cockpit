@@ -396,12 +396,12 @@ def test_ephemeral_config_failure_invalidates_ready_evidence_first(
     root = tmp_path / "runtime"
     root.mkdir(mode=0o700)
     token = "a" * 32
-    environment = launcher._environment(
-        root, 12345, token, source_sha="a" * 40,
-    )
     old_catalog: bytes | None = None
     if ready_restart:
         assert launcher._initialize_layout(root) is True
+        environment = launcher._environment(
+            root, 12345, token, source_sha="a" * 40,
+        )
         lock = launcher.InstanceLock(environment).acquire()
         lock.release()
         config = root / "herdr" / "config.toml"
@@ -599,6 +599,8 @@ def test_ephemeral_environment_remains_loopback_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("COCKPIT_SOURCE_SHA", "b" * 40)
+    tmp_path.chmod(0o700)
+    assert next_profile.initialize_empty_ephemeral_runtime_root(tmp_path)
     environment = ephemeral_module()._environment(
         tmp_path, 12345, "a" * 32, source_sha="a" * 40,
     )

@@ -118,7 +118,7 @@ def _environment(
             or name in {"LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"}
         )
     }
-    session = f"ephemeral-{token}"
+    session = next_profile.ephemeral_session_for_root(root)
     clean.update({
         "COCKPIT_NEXT_PROFILE": next_profile.EPHEMERAL_PROFILE,
         "COCKPIT_EPHEMERAL_ROOT": str(root),

@@ -26,6 +26,9 @@ EPHEMERAL_READY_TOKEN_ENV = "COCKPIT_EPHEMERAL_READY_TOKEN"
 EPHEMERAL_MARKER = ".cockpit-ephemeral-root.json"
 EPHEMERAL_CATALOG = ".cockpit-ephemeral-catalog.json"
 _EPHEMERAL_MUTABLE_LEASE = "data/instance.lock"
+_EPHEMERAL_SESSION_PREFIX = "ephemeral-"
+_AUTHORIZED_SOCKET_NAMES = frozenset({"herdr.sock", "herdr-client.sock"})
+_AUTHORIZED_LOG_NAMES = frozenset({"herdr-server.log"})
 _EPHEMERAL_SCHEMA_VERSION = 1
 _MAX_EPHEMERAL_CATALOG_BYTES = 1024 * 1024
 EPHEMERAL_LAYOUT = {
@@ -415,7 +418,52 @@ def _root_marker(root: Path, *, require_ready: bool) -> dict[str, object]:
     return value
 
 
+def ephemeral_session_name(root_id: str) -> str:
+    if (
+        not isinstance(root_id, str)
+        or len(root_id) != 64
+        or any(character not in "0123456789abcdef" for character in root_id)
+    ):
+        raise _ephemeral_error("invalid")
+    return f"{_EPHEMERAL_SESSION_PREFIX}{root_id[:32]}"
+
+
+def ephemeral_session_for_root(root: Path) -> str:
+    marker = _root_marker(root, require_ready=False)
+    return ephemeral_session_name(str(marker["root_id"]))
+
+
+def _authorized_session_prefix(root_id: str) -> str:
+    return f"config/herdr/sessions/{ephemeral_session_name(root_id)}"
+
+
+def _authorized_session_leaf(relative: str, root_id: str) -> str | None:
+    prefix = _authorized_session_prefix(root_id)
+    if relative == prefix:
+        return ""
+    head = f"{prefix}/"
+    if not relative.startswith(head):
+        return None
+    leaf = relative[len(head):]
+    if leaf == "" or "/" in leaf:
+        return None
+    return leaf
+
+
+def _is_authorized_socket(relative: str, root_id: str) -> bool:
+    return _authorized_session_leaf(relative, root_id) in _AUTHORIZED_SOCKET_NAMES
+
+
+def _is_authorized_log(relative: str, root_id: str) -> bool:
+    return _authorized_session_leaf(relative, root_id) in _AUTHORIZED_LOG_NAMES
+
+
+def _is_mutable_file(relative: str, root_id: str) -> bool:
+    return relative == _EPHEMERAL_MUTABLE_LEASE or _is_authorized_log(relative, root_id)
+
+
 def _catalog_entries(root: Path) -> list[dict[str, object]]:
+    root_id = str(_root_marker(root, require_ready=False)["root_id"])
     result: list[dict[str, object]] = []
     for current, directories, filenames in os.walk(root, topdown=True, followlinks=False):
         current_path = Path(current)
@@ -431,18 +479,35 @@ def _catalog_entries(root: Path) -> list[dict[str, object]]:
                 raise _ephemeral_error("invalid") from exc
             if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
                 raise _ephemeral_error("invalid")
+            mode = stat.S_IMODE(info.st_mode)
             if stat.S_ISDIR(info.st_mode):
                 result.append({
                     "path": relative,
                     "type": "directory",
-                    "mode": stat.S_IMODE(info.st_mode),
+                    "mode": mode,
+                    "uid": info.st_uid,
+                    "sha256": None,
+                })
+            elif stat.S_ISSOCK(info.st_mode):
+                if (
+                    not _is_authorized_socket(relative, root_id)
+                    or mode != 0o600
+                    or info.st_nlink != 1
+                ):
+                    raise _ephemeral_error("invalid")
+                result.append({
+                    "path": relative,
+                    "type": "socket",
+                    "mode": mode,
                     "uid": info.st_uid,
                     "sha256": None,
                 })
             elif stat.S_ISREG(info.st_mode):
                 if info.st_nlink != 1:
                     raise _ephemeral_error("invalid")
-                if relative == _EPHEMERAL_MUTABLE_LEASE:
+                if _is_authorized_log(relative, root_id) and mode != 0o600:
+                    raise _ephemeral_error("invalid")
+                if _is_mutable_file(relative, root_id):
                     digest = None
                 else:
                     with path.open("rb") as opened:
@@ -450,7 +515,7 @@ def _catalog_entries(root: Path) -> list[dict[str, object]]:
                 result.append({
                     "path": relative,
                     "type": "file",
-                    "mode": stat.S_IMODE(info.st_mode),
+                    "mode": mode,
                     "uid": info.st_uid,
                     "sha256": digest,
                 })
@@ -483,6 +548,7 @@ def _valid_catalog_entries(value: object, root_id: str) -> list[dict[str, object
         mode = entry["mode"]
         owner = entry["uid"]
         digest = entry["sha256"]
+        mutable_file = _is_mutable_file(path, root_id)
         if (
             not isinstance(path, str)
             or not path
@@ -491,20 +557,24 @@ def _valid_catalog_entries(value: object, root_id: str) -> list[dict[str, object
             or any(part in {"", ".", ".."} for part in path.split("/"))
             or path in {EPHEMERAL_MARKER, EPHEMERAL_CATALOG}
             or path <= previous
-            or entry_type not in {"directory", "file"}
+            or entry_type not in {"directory", "file", "socket"}
             or not isinstance(mode, int)
             or isinstance(mode, bool)
             or not 0 <= mode <= 0o777
             or owner != os.getuid()
             or isinstance(owner, bool)
             or (entry_type == "directory" and digest is not None)
-            or (path == _EPHEMERAL_MUTABLE_LEASE and digest is not None)
-            or (entry_type == "file" and (
-                path != _EPHEMERAL_MUTABLE_LEASE and (
-                    not isinstance(digest, str)
-                    or len(digest) != 64
-                    or any(character not in "0123456789abcdef" for character in digest)
-                )
+            or (entry_type == "socket" and (
+                not _is_authorized_socket(path, root_id)
+                or digest is not None
+                or mode != 0o600
+            ))
+            or (mutable_file and digest is not None)
+            or (entry_type == "file" and _is_authorized_log(path, root_id) and mode != 0o600)
+            or (entry_type == "file" and not mutable_file and (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
             ))
         ):
             raise _ephemeral_error("invalid")
@@ -700,9 +770,19 @@ def session(environment: Mapping[str, str] | None = None) -> str | None:
         return None
     value = _required("HERDR_SESSION", environment)
     if is_ephemeral(environment):
-        token = _required(EPHEMERAL_READY_TOKEN_ENV, environment)
-        if value != f"ephemeral-{token}":
+        env = os.environ if environment is None else environment
+        if (
+            not value.startswith(_EPHEMERAL_SESSION_PREFIX)
+            or len(value) != len(_EPHEMERAL_SESSION_PREFIX) + 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in value[len(_EPHEMERAL_SESSION_PREFIX):]
+            )
+        ):
             raise NextProfileError("next_profile_invalid:HERDR_SESSION")
+        if env.get(EPHEMERAL_ROOT_ENV):
+            if value != ephemeral_session_for_root(_ephemeral_root(env)):
+                raise NextProfileError("next_profile_invalid:HERDR_SESSION")
         return value
     if value != SESSION:
         raise NextProfileError("next_profile_invalid:HERDR_SESSION")
@@ -887,13 +967,13 @@ def validate_ephemeral_environment(
             or stat.S_IMODE(info.st_mode) != 0o700
         ):
             raise NextProfileError(f"ephemeral_path_invalid:{name}")
-    token = _ephemeral_token(env)
+    _ephemeral_token(env)
     expected = {
         "COCKPIT_HOST": HOST,
         "COCKPIT_COORDINATION_DB": str(runtime_root / "data/coordination.sqlite3"),
         "COCKPIT_LAUNCH_DESCRIPTORS_PATH": str(runtime_root / "data/launch-descriptors.json"),
         "AGENT_MAIL_PROJECT": str(worktree),
-        "HERDR_SESSION": f"ephemeral-{token}",
+        "HERDR_SESSION": ephemeral_session_for_root(runtime_root),
         "COCKPIT_SYSTEMD_UNIT": "agent-cockpit-next-ephemeral.service",
         "COCKPIT_UPGRADE_V2_ENABLED": "0",
         "COCKPIT_B0_MODE": "off",
