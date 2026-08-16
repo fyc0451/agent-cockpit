@@ -55,6 +55,22 @@ def _create(store, *, key: str = "request-1", request: object | None = None):
     )
 
 
+def _create_one_step(store, *, key: str):
+    return store.create_operation(
+        scope="project:prj_1",
+        idempotency_key=key,
+        request={"goal": key},
+        kind="workspace.create",
+        project_id="prj_1",
+        workspace_id="ws_1",
+        subject_type="workspace",
+        subject_id="ws_1",
+        plan_digest=_sha(f"plan:{key}"),
+        approval_required=False,
+        steps=(store_module.Step("allocate", "runtime.allocate"),),
+    )
+
+
 def _error(code: str):
     return pytest.raises(store_module.OperationError, match=f"^{code}$")
 
@@ -65,6 +81,85 @@ def _database_dump(path: Path) -> str:
         return "\n".join(connection.iterdump())
     finally:
         connection.close()
+
+
+def test_operation_writes_clamp_ongoing_clock_rollback_to_durable_time(
+    store, monkeypatch,
+):
+    future = "2035-01-02T03:04:05.000000Z"
+    past = "2001-01-02T03:04:05.000000Z"
+    monkeypatch.setattr(store_module, "_now", lambda: future)
+    operation_id = _create_one_step(store, key="rollback-success").operation_id
+    reopened = store_module.initialize(store.path)
+    monkeypatch.setattr(store_module, "_now", lambda: past)
+
+    running = reopened.transition(
+        operation_id, expected_operation_revision=1, status="running",
+    )
+    assert running["operation"]["updated_at"] == future
+    prepared = reopened.prepare_attempt(
+        operation_id, "allocate", expected_operation_revision=2,
+        expected_step_revision=1, mode="execute", provider_kind="runtime",
+    )
+    assert prepared.projection["attempts"][0]["started_at"] == future
+    assert prepared.projection["operation"]["updated_at"] == future
+    dispatched = reopened.dispatch_attempt(
+        operation_id, prepared.step_execution_id, expected_operation_revision=3,
+    )
+    assert dispatched["operation"]["updated_at"] == future
+    finished = reopened.record_attempt_outcome(
+        operation_id, prepared.step_execution_id,
+        expected_operation_revision=4, expected_step_revision=2,
+        receipt_id="receipt_rollback_success", receipt_type="provider_outcome",
+        outcome="succeeded", evidence_kind="opaque_digest",
+        evidence_digest=_sha("rollback-success"),
+    )
+    assert finished["attempts"][0]["finished_at"] == future
+    assert finished["receipts"][0]["recorded_at"] == future
+    assert finished["operation"]["updated_at"] == future
+    terminal = reopened.transition(
+        operation_id, expected_operation_revision=5, status="succeeded",
+    )
+    assert terminal["operation"]["terminal_at"] == future
+    assert terminal["operation"]["updated_at"] == future
+
+    second_future = "2040-06-07T08:09:10.000000Z"
+    second_past = "2002-06-07T08:09:10.000000Z"
+    monkeypatch.setattr(store_module, "_now", lambda: second_future)
+    reconcile_id = _create_one_step(reopened, key="rollback-reconcile").operation_id
+    monkeypatch.setattr(store_module, "_now", lambda: second_past)
+    reopened.transition(reconcile_id, expected_operation_revision=1, status="running")
+    uncertain = reopened.prepare_attempt(
+        reconcile_id, "allocate", expected_operation_revision=2,
+        expected_step_revision=1, mode="execute", provider_kind="runtime",
+    )
+    reopened.dispatch_attempt(
+        reconcile_id, uncertain.step_execution_id, expected_operation_revision=3,
+    )
+    unknown = reopened.record_attempt_outcome(
+        reconcile_id, uncertain.step_execution_id,
+        expected_operation_revision=4, expected_step_revision=2,
+        receipt_id="receipt_rollback_unknown",
+        receipt_type="provider_response_lost", outcome="outcome_unknown",
+        evidence_kind="opaque_digest", evidence_digest=_sha("rollback-unknown"),
+    )
+    assert unknown["operation"]["terminal_at"] == second_future
+    assert unknown["operation"]["updated_at"] == second_future
+    assert unknown["attempts"][0]["finished_at"] == second_future
+    assert unknown["receipts"][0]["recorded_at"] == second_future
+    reconciled = reopened.record_not_executed(
+        reconcile_id, uncertain.step_execution_id,
+        expected_operation_revision=5, expected_step_revision=3,
+        receipt_id="receipt_rollback_not_executed",
+        evidence_digest=_sha("rollback-not-executed"),
+    )
+    assert reconciled["operation"]["created_at"] == second_future
+    assert reconciled["operation"]["updated_at"] == second_future
+    assert reconciled["attempts"][0]["started_at"] == second_future
+    assert reconciled["attempts"][0]["finished_at"] == second_future
+    assert [receipt["recorded_at"] for receipt in reconciled["receipts"]] == [
+        second_future, second_future,
+    ]
 
 
 def test_initialize_is_private_strict_and_read_does_not_create(tmp_path: Path):

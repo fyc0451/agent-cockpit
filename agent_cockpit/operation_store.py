@@ -753,7 +753,7 @@ class OperationStore:
                 value not in {"succeeded", "compensated"} for value in step_statuses
             ):
                 _fail("invalid_transition")
-            timestamp = _now()
+            timestamp = _operation_write_timestamp(row)
             terminal_at = timestamp if status in _TERMINAL else None
             new_revision = _increment_revision(expected)
             changed = connection.execute(
@@ -812,6 +812,7 @@ class OperationStore:
             )
             if not valid_step:
                 _fail("invalid_transition")
+            timestamp = _operation_write_timestamp(operation)
             maximum_attempt = connection.execute(
                 "SELECT COALESCE(MAX(attempt_no),0) FROM operation_attempts "
                 "WHERE operation_id=? AND step_id=?",
@@ -826,7 +827,7 @@ class OperationStore:
                 "INSERT INTO operation_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     operation_id, step_id, attempt_no, execution_id, mode,
-                    "prepared", provider_kind, None, None, _now(), None,
+                    "prepared", provider_kind, None, None, timestamp, None,
                 ),
             )
             new_step_revision = _increment_revision(step_revision)
@@ -836,7 +837,9 @@ class OperationStore:
                 (new_step_revision, attempt_no, operation_id, step_id, step_revision),
             ).rowcount != 1:
                 _fail("revision_conflict")
-            _bump_operation(connection, operation_id, operation_revision)
+            _bump_operation(
+                connection, operation_id, operation_revision, timestamp,
+            )
         projection = self.get_operation(operation_id)
         assert projection is not None
         return AttemptResult(operation_id, execution_id, attempt_no, projection)
@@ -857,6 +860,7 @@ class OperationStore:
             operation = _operation_for_update(connection, operation_id, expected)
             if operation["status"] not in {"running", "compensating"}:
                 _fail("invalid_transition")
+            timestamp = _operation_write_timestamp(operation)
             changed = connection.execute(
                 "UPDATE operation_attempts SET status='dispatched',provider_operation_ref=? "
                 "WHERE operation_id=? AND step_execution_id=? AND status='prepared'",
@@ -864,7 +868,7 @@ class OperationStore:
             ).rowcount
             if changed != 1:
                 _fail("attempt_conflict")
-            _bump_operation(connection, operation_id, expected)
+            _bump_operation(connection, operation_id, expected, timestamp)
         result = self.get_operation(operation_id)
         assert result is not None
         return result
@@ -931,7 +935,7 @@ class OperationStore:
                     _fail("idempotency_conflict")
                 replay = True
             else:
-                _operation_for_update(connection, operation_id, expected)
+                operation = _operation_for_update(connection, operation_id, expected)
                 attempt = connection.execute(
                     "SELECT * FROM operation_attempts WHERE operation_id=? "
                     "AND step_execution_id=?",
@@ -952,10 +956,6 @@ class OperationStore:
                     or step["status"] != "running"
                 ):
                     _fail("revision_conflict")
-                operation = connection.execute(
-                    "SELECT * FROM operations WHERE operation_id=?", (operation_id,),
-                ).fetchone()
-                assert operation is not None
                 if operation["status"] not in {
                     "running", "compensating", "needs_attention",
                 }:
@@ -973,6 +973,7 @@ class OperationStore:
                 operation_status: str | None = None
                 attention_reason: str | None = None
                 terminal_at: str | None = None
+                timestamp = _operation_write_timestamp(operation)
                 if operation["status"] == "needs_attention":
                     operation_status = "needs_attention"
                     attention_reason = str(operation["attention_reason"])
@@ -980,7 +981,7 @@ class OperationStore:
                 elif outcome == "outcome_unknown":
                     operation_status = "needs_attention"
                     attention_reason = "provider_outcome_unknown"
-                    terminal_at = _now()
+                    terminal_at = timestamp
                 elif outcome == "failed":
                     operation_status = (
                         "failed" if operation["status"] == "running"
@@ -988,8 +989,7 @@ class OperationStore:
                     )
                     if operation_status == "needs_attention":
                         attention_reason = "compensation_failed"
-                    terminal_at = _now()
-                timestamp = _now()
+                    terminal_at = timestamp
                 connection.execute(
                     "UPDATE operation_attempts SET status=?,failure_code=?,finished_at=? "
                     "WHERE step_execution_id=?",
@@ -1032,7 +1032,7 @@ class OperationStore:
                     ),
                 )
                 if operation_status is None:
-                    _bump_operation(connection, operation_id, expected)
+                    _bump_operation(connection, operation_id, expected, timestamp)
                 else:
                     new_revision = _increment_revision(expected)
                     changed = connection.execute(
@@ -1117,7 +1117,7 @@ class OperationStore:
                     or int(step["active_attempt_no"] or 0) != int(attempt["attempt_no"])
                 ):
                     _fail("revision_conflict")
-                timestamp = _now()
+                timestamp = _operation_write_timestamp(operation)
                 restored_step_status = (
                     "pending" if attempt["mode"] == "execute" else "succeeded"
                 )
@@ -1143,7 +1143,7 @@ class OperationStore:
                     ),
                 ).rowcount != 1:
                     _fail("revision_conflict")
-                _bump_operation(connection, operation_id, expected)
+                _bump_operation(connection, operation_id, expected, timestamp)
                 replay = False
         result = self.get_operation(operation_id)
         assert result is not None
@@ -1179,14 +1179,23 @@ def _materialized_operation(
 
 def _bump_operation(
     connection: sqlite3.Connection, operation_id: str, expected_revision: int,
+    timestamp: str,
 ) -> None:
     new_revision = _increment_revision(expected_revision)
     if connection.execute(
         "UPDATE operations SET revision=?,updated_at=? "
         "WHERE operation_id=? AND revision=?",
-        (new_revision, _now(), operation_id, expected_revision),
+        (new_revision, timestamp, operation_id, expected_revision),
     ).rowcount != 1:
         _fail("revision_conflict")
+
+
+def _operation_write_timestamp(operation: sqlite3.Row) -> str:
+    persisted_time = _parsed_timestamp(operation["updated_at"])
+    current_time = _parsed_timestamp(_now())
+    assert persisted_time is not None and current_time is not None
+    timestamp = max(current_time, persisted_time)
+    return timestamp.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _increment_revision(value: int) -> int:

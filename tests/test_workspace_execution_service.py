@@ -21,6 +21,12 @@ def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
+def _git_status(cwd: Path) -> str:
+    return subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=cwd, text=True,
+    ).strip()
+
+
 def _repo(path: Path) -> Path:
     path.mkdir()
     _git(path, "init")
@@ -234,6 +240,105 @@ def test_prepare_attach_detach_leaves_source_and_operation_receipts(tmp_path: Pa
     assert "runtime.attach" in kinds
     assert "runtime.detach" in kinds
     assert receipts >= 3
+
+
+def test_three_independent_preparations_survive_third_operation_clock_rollback(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    registry = registry_store.initialize(tmp_path / "project-registry.sqlite3")
+    work = work_store.initialize(tmp_path / "workspace-work.sqlite3")
+    execution = exec_store.initialize(tmp_path / "workspace-execution.sqlite3")
+    operations = operation_mod.initialize(tmp_path / "ops" / "operation.sqlite3")
+    worktrees_root = tmp_path / "worktrees"
+    service = service_mod.ExecutionService(
+        registry_provider=lambda: registry,
+        work_provider=lambda: work,
+        store=execution,
+        operations=operations,
+        checkout=checkout_mod.GitCheckoutProvider(),
+        harness=_FakeHarness(),
+        worktrees_root=worktrees_root,
+    )
+    provider = checkout_mod.GitCheckoutProvider()
+    sources: list[Path] = []
+    source_snapshots = []
+    preparations = []
+
+    for index in range(3):
+        source = _repo(tmp_path / f"source-{index}")
+        sources.append(source)
+        source_snapshots.append(provider.inspect_source(source))
+        project = registry.create_project(
+            slug=f"project-{index}", display_name=f"Project {index}", goal=None,
+        )
+        location = registry.add_repo_location(
+            project_id=project.project_id, node_id="local",
+            canonical_path=str(source), vcs_kind="git", availability="available",
+        )
+        workspace = registry.create_workspace(
+            project_id=project.project_id,
+            repo_location_id=location.repo_location_id,
+            name=f"workspace-{index}", goal=None, isolation_kind="shared",
+        )
+        item = work.create_work_item(
+            project_id=project.project_id, workspace_id=workspace.workspace_id,
+            body=f"Prepare {index}", acceptance=None, constraints=None,
+            idempotency_key=f"work-{index}",
+        ).item
+        member = service.create_member(
+            project.project_id, workspace.workspace_id,
+            display_name=f"Member {index}", idempotency_key=f"member-{index}",
+        )
+        if index == 2:
+            values = iter([
+                "2035-01-02T03:04:05.000000Z",
+                "2001-01-02T03:04:05.000000Z",
+            ])
+            last = "2001-01-02T03:04:05.000000Z"
+            monkeypatch.setattr(operation_mod, "_now", lambda: next(values, last))
+        preparations.append(service.prepare(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            identity_id=member.item.identity_id,
+            idempotency_key=f"prepare-{index}",
+        ))
+
+    assert len({item["checkout"]["checkout_id"] for item in preparations}) == 3
+    assert len({item["lease"]["lease_id"] for item in preparations}) == 3
+    assert all(item["state"] == "prepared" for item in preparations)
+    assert all(item["lease"]["status"] == "reserved" for item in preparations)
+
+    with sqlite3.connect(execution.path) as connection:
+        assert connection.execute(
+            "SELECT count(*),count(DISTINCT preparation_id) "
+            "FROM work_item_preparations"
+        ).fetchone() == (3, 3)
+        assert connection.execute(
+            "SELECT count(*) FROM managed_checkouts"
+        ).fetchone()[0] == 3
+        assert connection.execute(
+            "SELECT count(*) FROM writer_leases"
+        ).fetchone()[0] == 3
+    with sqlite3.connect(operations.path) as connection:
+        assert connection.execute("SELECT count(*) FROM operations").fetchone()[0] == 3
+        assert connection.execute(
+            "SELECT count(*),count(DISTINCT step_execution_id) "
+            "FROM operation_attempts"
+        ).fetchone() == (3, 3)
+        assert connection.execute(
+            "SELECT count(*) FROM operation_receipts"
+        ).fetchone()[0] == 3
+        rows = connection.execute(
+            "SELECT created_at,updated_at FROM operations ORDER BY rowid"
+        ).fetchall()
+        assert all(created_at <= updated_at for created_at, updated_at in rows)
+
+    checkouts = sorted((worktrees_root / "managed-checkouts").iterdir())
+    assert len(checkouts) == 3
+    assert all(_git_status(path) == "" for path in checkouts)
+    for source, before in zip(sources, source_snapshots, strict=True):
+        assert provider.inspect_source(source) == before
+        assert _git_status(source) == ""
 
 
 def test_completed_work_can_load_preparation_and_detach_without_losing_reply(
