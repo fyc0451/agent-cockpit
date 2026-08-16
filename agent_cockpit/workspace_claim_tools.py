@@ -119,7 +119,8 @@ class WorkspaceClaimTools:
                     "p.identity_id,p.generation,p.state,p.revision,"
                     "p.lease_id,p.attachment_id,l.status AS lease_status,"
                     "l.generation AS lease_generation,l.revision AS lease_revision,"
-                    "l.fence_digest,a.identity_id AS attachment_identity,"
+                    "l.claim_id AS lease_claim_id,l.fence_digest,"
+                    "a.identity_id AS attachment_identity,"
                     "a.generation AS attachment_generation,"
                     "a.status AS attachment_status,a.pane_id,a.session_name,"
                     "a.native_receipt FROM work_item_preparations p "
@@ -139,7 +140,7 @@ class WorkspaceClaimTools:
         generation = int(row["generation"])
         if (
             row["state"] != "connected_readonly"
-            or row["lease_status"] != "reserved"
+            or row["lease_status"] not in {"reserved", "active"}
             or row["attachment_status"] != "connected_readonly"
             or row["native_receipt"] is None
             or row["identity_id"] != row["attachment_identity"]
@@ -179,6 +180,18 @@ class WorkspaceClaimTools:
             work_revision -= 1
         elif work.get("status") != "unassigned":
             _fail("claim_conflict")
+        lease_revision = int(row["lease_revision"])
+        if row["lease_status"] == "active":
+            if (
+                not isinstance(claim, dict)
+                or claim.get("state") not in {"pending_gate", "active"}
+                or claim.get("claim_id") != row["lease_claim_id"]
+                or claim.get("identity_id") != row["identity_id"]
+                or claim.get("generation") != generation
+                or lease_revision < 2
+            ):
+                _fail("runtime_capability_invalid")
+            lease_revision -= 1
         preparation = self.execution.get_preparation(
             project_id=row["project_id"], workspace_id=row["workspace_id"],
             work_item_id=row["work_item_id"],
@@ -202,6 +215,6 @@ class WorkspaceClaimTools:
             generation=generation, attachment_id=attachment_id,
             preparation_revision=int(row["revision"]),
             work_revision=work_revision, lease_id=row["lease_id"],
-            lease_revision=int(row["lease_revision"]),
+            lease_revision=lease_revision,
             fence_digest=row["fence_digest"],
         )
