@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ SANDBOX = "read-only"
 LAUNCH_ARGS = ("--sandbox", "read-only")
 WAKEUP_TEXT = "COCKPIT_WAKEUP_V1"
 WAKEUP_DIGEST = "sha256:" + hashlib.sha256(WAKEUP_TEXT.encode()).hexdigest()
+_ATTACHMENT_ID = re.compile(r"att_[0-9a-f]{32}\Z")
 
 
 class HarnessError(RuntimeError):
@@ -36,6 +38,12 @@ class HarnessError(RuntimeError):
 
 def _fail(code: str, pane_id: str | None = None, unknown: bool = False) -> None:
     raise HarnessError(code, pane_id=pane_id, unknown=unknown)
+
+
+def attachment_id_text(value: object) -> str:
+    if not isinstance(value, str) or _ATTACHMENT_ID.fullmatch(value) is None:
+        _fail("invalid_argument")
+    return value
 
 
 @dataclass(frozen=True)
@@ -147,7 +155,8 @@ class LocalCodexHarness:
         fence: str, session: str, pane_id: str,
     ) -> dict[str, Any]:
         root = self._capability_root
-        if root is None or not attachment_id or generation < 1:
+        attachment_id = attachment_id_text(attachment_id)
+        if root is None or generation < 1:
             _fail("invalid_argument")
         _private_dir(root)
         token = secrets.token_hex(32)
@@ -182,7 +191,7 @@ class LocalCodexHarness:
         }
 
     def wakeup(self, attachment_id: str, **extra: object) -> dict[str, str]:
-        if extra or not attachment_id:
+        if extra:
             _fail("invalid_argument")
         record = _read_capability(self._require_cap(attachment_id))
         sent = self._wakeup_prompt(
@@ -194,10 +203,16 @@ class LocalCodexHarness:
 
     def _require_cap(self, attachment_id: str) -> Path:
         root = self._capability_root
+        attachment_id = attachment_id_text(attachment_id)
         if root is None:
             _fail("invalid_argument")
+        _assert_private_ancestry(root)
         path = root / f"{attachment_id}.cap"
-        if not path.is_file():
+        try:
+            info = path.lstat()
+        except OSError:
+            _fail("invalid_argument")
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             _fail("invalid_argument")
         return path
 
@@ -390,10 +405,40 @@ def _default_wakeup_prompt(session: str, pane_id: str, text: str) -> dict[str, A
     return herdr_client.pane_send(session, pane_id, text, mode="prompt")
 
 
+def _assert_private_ancestry(path: Path) -> Path:
+    try:
+        path = Path(path)
+        if not path.is_absolute() or ".." in path.parts:
+            _fail("invalid_argument")
+        current = Path(path.anchor)
+        for part in path.parts[1:]:
+            current /= part
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                _fail("invalid_argument")
+            if current != path and not stat.S_ISDIR(info.st_mode):
+                _fail("invalid_argument")
+        return path
+    except HarnessError:
+        raise
+    except OSError:
+        _fail("invalid_argument")
+    raise AssertionError("unreachable")
+
+
 def _private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
-    info = path.lstat()
+    path = _assert_private_ancestry(path)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+        info = path.lstat()
+    except HarnessError:
+        raise
+    except OSError:
+        _fail("invalid_argument")
     if (
         stat.S_ISLNK(info.st_mode)
         or not stat.S_ISDIR(info.st_mode)
@@ -403,14 +448,34 @@ def _private_dir(path: Path) -> None:
 
 
 def _write_private(path: Path, payload: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
+    _assert_private_ancestry(path)
     try:
-        os.write(fd, payload)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.chmod(path, 0o600)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            info = None
+        if info is not None and (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.getuid()
+        ):
+            _fail("invalid_argument")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(path, 0o600)
+        written = path.lstat()
+        if written.st_nlink != 1 or not stat.S_ISREG(written.st_mode):
+            _fail("invalid_argument")
+    except HarnessError:
+        raise
+    except OSError:
+        _fail("invalid_argument")
 
 
 def _read_capability(path: Path) -> dict[str, Any]:
@@ -420,9 +485,13 @@ def _read_capability(path: Path) -> dict[str, Any]:
             not stat.S_ISREG(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
             or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+            or info.st_uid != os.getuid()
         ):
             _fail("invalid_argument")
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_bytes().decode("utf-8"))
+    except HarnessError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError):
         _fail("invalid_argument")
     if not isinstance(value, dict):
@@ -430,17 +499,26 @@ def _read_capability(path: Path) -> dict[str, Any]:
     return value
 
 
-def current_generation(capability_path: Path) -> int | None:
+def current_generation(capability_path: Path) -> int:
+    record = _read_capability(capability_path)
+    name = attachment_id_text(record.get("attachment_id"))
+    stamp = capability_path.parent / f"{name}.generation"
     try:
-        value = json.loads(capability_path.read_text(encoding="utf-8"))
-        name = value.get("attachment_id")
-        if not isinstance(name, str) or not name:
-            return None
-        raw = (capability_path.parent / f"{name}.generation").read_text(
-            encoding="ascii",
-        ).strip()
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    if not raw.isdigit():
-        return None
+        info = stamp.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.getuid()
+        ):
+            _fail("stale_generation")
+        raw = stamp.read_bytes().decode("ascii").strip()
+    except FileNotFoundError:
+        _fail("stale_generation")
+    except HarnessError:
+        raise
+    except OSError:
+        _fail("invalid_argument")
+    if not raw.isdigit() or int(raw) < 1:
+        _fail("stale_generation")
     return int(raw)

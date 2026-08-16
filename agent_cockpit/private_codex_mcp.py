@@ -37,8 +37,11 @@ def _capability_ok(path: Path | None) -> bool:
     generation = record.get("generation")
     if type(generation) is not int or generation < 1:
         return False
-    current = harness_mod.current_generation(path)
-    if current is not None and current != generation:
+    try:
+        current = harness_mod.current_generation(path)
+    except harness_mod.HarnessError:
+        return False
+    if current != generation:
         return False
     token = record.get("token")
     return isinstance(token, str) and len(token) == 64

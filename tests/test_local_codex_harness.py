@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 
 import pytest
@@ -442,3 +443,93 @@ def test_wakeup_is_fixed_and_omits_boss_body(tmp_path: Path) -> None:
     assert SENTINEL not in spec.argv_text()
     descriptor = harness._get_launch_descriptor(session="s", pane_id="pane-1")
     assert SENTINEL not in str(descriptor)
+
+
+def test_attachment_id_and_private_leaf_paths_fail_closed(tmp_path: Path) -> None:
+    outside = tmp_path / "ESCAPED-att.cap"
+    outside.write_bytes(SENTINEL.encode())
+    outside_stat = (outside.read_bytes(), outside.stat().st_size)
+    harness = _harness(tmp_path)
+    for bad in (
+        "../../../tmp/ESCAPED-att",
+        "x/../../ESCAPED-att",
+        "att_" + "c" * 31 + "\n",
+        "att_" + "c" * 16 + "/" + "d" * 15,
+        "att_" + "C" * 32,
+        "idn_" + "c" * 32,
+    ):
+        with pytest.raises(harness_mod.HarnessError) as error:
+            harness.issue_capability(
+                attachment_id=bad, identity_id=IDENTITY, generation=1,
+                fence="sha256:" + "ab" * 32, session="s", pane_id="pane-1",
+            )
+        assert error.value.code == "invalid_argument"
+        assert str(error.value) == "invalid_argument"
+        assert bad not in str(error.value)
+        with pytest.raises(harness_mod.HarnessError) as wakeup:
+            harness.wakeup(bad)
+        assert wakeup.value.code == "invalid_argument"
+        assert str(wakeup.value) == "invalid_argument"
+    assert list((tmp_path / "caps").glob("*") if (tmp_path / "caps").exists() else []) == []
+    assert (outside.read_bytes(), outside.stat().st_size) == outside_stat
+    assert not (tmp_path / "tmp").exists()
+
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence="sha256:" + "ab" * 32, session="s", pane_id="pane-1",
+    )
+    linked = tmp_path / "hard-outside.cap"
+    linked.write_bytes(SENTINEL.encode())
+    issued["capability_path"].unlink()
+    os.link(linked, issued["capability_path"])
+    with pytest.raises(harness_mod.HarnessError) as hardlink:
+        harness.issue_capability(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=2,
+            fence="sha256:" + "ab" * 32, session="s", pane_id="pane-1",
+        )
+    assert hardlink.value.code == "invalid_argument"
+    assert linked.read_bytes() == SENTINEL.encode()
+
+    issued["capability_path"].unlink()
+    issued["capability_path"].symlink_to(linked)
+    with pytest.raises(harness_mod.HarnessError) as leaf:
+        harness.wakeup(ATTACHMENT)
+    assert leaf.value.code == "invalid_argument"
+    assert str(leaf.value) == "invalid_argument"
+    assert linked.read_bytes() == SENTINEL.encode()
+
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "via-link"
+    alias.symlink_to(real)
+    escaped = harness_mod.LocalCodexHarness(capability_root=alias / "caps")
+    with pytest.raises(harness_mod.HarnessError) as ancestor:
+        escaped.issue_capability(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+            fence="sha256:" + "ab" * 32, session="s", pane_id="pane-1",
+        )
+    assert ancestor.value.code == "invalid_argument"
+    assert not (real / "caps").exists()
+
+    root_link = tmp_path / "caps-link"
+    (tmp_path / "caps-real").mkdir()
+    root_link.symlink_to(tmp_path / "caps-real")
+    linked_root = harness_mod.LocalCodexHarness(capability_root=root_link)
+    with pytest.raises(harness_mod.HarnessError) as root:
+        linked_root.issue_capability(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+            fence="sha256:" + "ab" * 32, session="s", pane_id="pane-1",
+        )
+    assert root.value.code == "invalid_argument"
+
+    issued["capability_path"].unlink()
+    restored = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=3,
+        fence="sha256:" + "ab" * 32, session="s", pane_id="pane-1",
+    )
+    sidecar = tmp_path / "caps" / f"{ATTACHMENT}.generation"
+    sidecar.unlink()
+    with pytest.raises(harness_mod.HarnessError) as missing:
+        harness_mod.current_generation(restored["capability_path"])
+    assert missing.value.code == "stale_generation"
+    assert str(missing.value) == "stale_generation"

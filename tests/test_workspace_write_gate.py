@@ -61,3 +61,19 @@ def test_old_generation_and_fence_are_rejected(tmp_path: Path) -> None:
             fence=FENCE, capability_path=missing, checkout_path=tmp_path,
         )
     assert cap.value.code == "runtime_capability_invalid"
+    with pytest.raises(gate_mod.WriteGateError) as bad_id:
+        gate.authorize(
+            attachment_id="../../../tmp/ESCAPED-att", identity_id=IDENTITY,
+            generation=2, fence=FENCE,
+            capability_path=issued["capability_path"], checkout_path=tmp_path,
+        )
+    assert bad_id.value.code == "invalid_argument"
+    sidecar = Path(issued["capability_path"]).with_name(f"{ATTACHMENT}.generation")
+    sidecar.unlink()
+    with pytest.raises(gate_mod.WriteGateError) as absent:
+        gate.authorize(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=2,
+            fence=FENCE, capability_path=issued["capability_path"],
+            checkout_path=tmp_path,
+        )
+    assert absent.value.code == "stale_generation"

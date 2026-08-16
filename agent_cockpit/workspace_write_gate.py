@@ -25,6 +25,10 @@ class WorkspaceWriteGate:
         if type(generation) is not int or generation < 1:
             _fail("invalid_argument")
         try:
+            attachment_id = harness_mod.attachment_id_text(attachment_id)
+        except harness_mod.HarnessError:
+            _fail("invalid_argument")
+        try:
             record = harness_mod._read_capability(path)
         except harness_mod.HarnessError:
             _fail("runtime_capability_invalid")
@@ -36,8 +40,13 @@ class WorkspaceWriteGate:
         stored = record.get("generation")
         if type(stored) is not int or stored != generation:
             _fail("stale_generation")
-        current = harness_mod.current_generation(path)
-        if current is not None and current != generation:
+        try:
+            current = harness_mod.current_generation(path)
+        except harness_mod.HarnessError as exc:
+            if exc.code == "stale_generation":
+                _fail("stale_generation")
+            _fail("runtime_capability_invalid")
+        if current != generation:
             _fail("stale_generation")
         if record.get("fence") != fence:
             _fail("fence_rejected")
