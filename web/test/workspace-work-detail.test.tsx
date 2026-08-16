@@ -91,12 +91,12 @@ function claimReceipt() {
   }
 }
 
-function replyMessage(id: string) {
+function replyMessage(id: string, body = '成员回复正文') {
   return {
     message_id: `msg_reply_${id}`, thread_id: `thr_${id}`, ordinal: 2,
     message_kind: 'reply', author_kind: 'agent', author_ref: 'idn_1',
     author_generation: 1, reply_to_message_id: `msg_root_${id}`,
-    body: '成员回复正文', created_at: '2026-08-16T10:05:00Z',
+    body, created_at: '2026-08-16T10:05:00Z',
   }
 }
 
@@ -528,14 +528,27 @@ describe('deriveExecutionTimeline 状态推导', () => {
 })
 
 describe('Focus 页执行时间线行为', () => {
-  function stubWorld(details: Record<string, unknown>, list: unknown[]) {
-    return stubFetch((url) => {
+  type Versioned<T> = T | ((call: number) => T)
+
+  function stubWorld(
+    details: Record<string, Versioned<unknown>>,
+    list: Versioned<unknown[]>,
+  ) {
+    let listGets = 0
+    const detailGets: Record<string, number> = {}
+    const fetchMock = stubFetch((url) => {
       const match = url.match(/\/work-items\/(wrk_[a-z0-9]+)$/)
       if (match && match[1] in details) {
-        return { body: { data: details[match[1]], meta } }
+        const id = match[1]
+        detailGets[id] = (detailGets[id] ?? 0) + 1
+        const source = details[id]
+        const payload = typeof source === 'function' ? source(detailGets[id]) : source
+        return { body: { data: payload, meta } }
       }
       if (url === LIST_URL || url.startsWith(`${LIST_URL}?`)) {
-        return { body: { data: { items: list, next_cursor: null }, meta } }
+        listGets += 1
+        const items = typeof list === 'function' ? list(listGets) : list
+        return { body: { data: { items, next_cursor: null }, meta } }
       }
       const key = Object.keys(defaultFetchMap())
         .filter((k) => url === k || url.startsWith(`${k}?`))
@@ -543,6 +556,58 @@ describe('Focus 页执行时间线行为', () => {
       if (key) return { body: (defaultFetchMap() as Record<string, unknown>)[key] }
       return undefined
     })
+    return {
+      fetchMock,
+      listGetCount: () => listGets,
+      detailGetCount: (id: string) => detailGets[id] ?? 0,
+    }
+  }
+
+  function requestLog(fetchMock: ReturnType<typeof vi.fn>) {
+    const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>
+    return calls.map(([input, init]) => ({
+      url: String(input),
+      method: (init?.method ?? 'GET').toUpperCase(),
+    }))
+  }
+
+  function executionWritePosts(fetchMock: ReturnType<typeof vi.fn>) {
+    return requestLog(fetchMock).filter(({ url, method }) => (
+      method === 'POST'
+      && (/\/members$|\/preparation$|\/attach$|\/dispatch$/).test(url)
+    ))
+  }
+
+  function workingDetail(id: string) {
+    const base = detail(id).data
+    return detail(id, {
+      receipts: [delivery('succeeded'), claimReceipt()],
+      work_item: { ...base.work_item, status: 'working', revision: 3 },
+      claim: {
+        claim_id: 'clm_1', work_item_id: id, identity_id: 'idn_1',
+        generation: 1, state: 'active', revision: 1,
+      },
+    }).data
+  }
+
+  function failedDetail(id: string) {
+    const base = detail(id).data
+    return detail(id, {
+      receipts: [
+        delivery('succeeded'), claimReceipt(),
+        {
+          receipt_id: `rct_failure_${id}`, kind: 'failure', outcome: 'failed',
+          reason: '执行失败证据', evidence_digest: 'sha256:x',
+          created_at: '2026-08-16T10:04:00Z', claim_id: 'clm_1',
+          message_id: null, identity_id: 'idn_1', generation: 1,
+        },
+      ],
+      work_item: { ...base.work_item, status: 'failed', revision: 4 },
+      claim: {
+        claim_id: 'clm_1', work_item_id: id, identity_id: 'idn_1',
+        generation: 1, state: 'closed', revision: 2,
+      },
+    }).data
   }
 
   it.each([
@@ -554,7 +619,12 @@ describe('Focus 页执行时间线行为', () => {
     window.localStorage.clear()
     const id = `wrk_${status}`
     const body = `状态任务-${status}`
-    stubWorld({}, [aggregate(id, body, status)])
+    const statusDetail = status === 'working'
+      ? workingDetail(id)
+      : status === 'failed'
+        ? failedDetail(id)
+        : detail(id).data
+    const world = stubWorld({ [id]: statusDetail }, [aggregate(id, body, status)])
     renderApp(`${HOME}?work=${id}`)
 
     const task = await screen.findByTitle(body)
@@ -567,8 +637,35 @@ describe('Focus 页执行时间线行为', () => {
       expect(within(preparation).queryAllByRole('button')).toHaveLength(0)
       expect(within(preparation).queryByRole('textbox')).not.toBeInTheDocument()
       expect(within(preparation).queryByRole('radio')).not.toBeInTheDocument()
+      expect(executionWritePosts(world.fetchMock)).toHaveLength(0)
+    }
+    if (status === 'working' || status === 'failed') {
+      const timeline = await screen.findByRole('region', { name: '执行时间线' })
+      expect(within(timeline).queryByText('已完成')).not.toBeInTheDocument()
+      expect(timeline.querySelectorAll('.execution-timeline-reply')).toHaveLength(0)
     }
   })
+
+  it.each(['status-only', 'malformed'] as const)(
+    'completed list + %s detail 必须错误态且零 reply',
+    async (kind) => {
+      window.localStorage.clear()
+      const id = `wrk_bad${kind.replace('-', '')}`
+      const base = detail(id).data
+      const statusOnly = {
+        ...base,
+        work_item: { ...base.work_item, status: 'completed', revision: 2 },
+      }
+      const payload = kind === 'status-only' ? statusOnly : { ...statusOnly, internal: true }
+      stubWorld({ [id]: payload }, [aggregate(id, `坏详情-${kind}`, 'completed')])
+      renderApp(`${HOME}?work=${id}`)
+
+      const timeline = await screen.findByRole('region', { name: '执行时间线' })
+      expect(await within(timeline).findByText('执行时间线暂不可用')).toBeVisible()
+      expect(timeline.querySelectorAll('.execution-timeline-reply')).toHaveLength(0)
+      expect(within(timeline).queryByText('已完成')).not.toBeInTheDocument()
+    },
+  )
 
   it('已派遣任务显示等待领取时间线；切换任务与 ?work 保持；无执行任务不渲染', async () => {
     window.localStorage.clear()
@@ -605,41 +702,44 @@ describe('Focus 页执行时间线行为', () => {
     ).toBeVisible()
   })
 
-  it('刷新（重挂载）后 completed 任务的 reply 正文与时间线保持', async () => {
+  it('真重挂载后二次 GET 使用新版 completed list/detail，不复用首版正文', async () => {
     window.localStorage.clear()
-    const done = detail('wrk_done', {
+    const completed = (replyBody: string, revision: number) => detail('wrk_done', {
       thread: {
         ...detail('wrk_done').data.thread,
-        messages: [
-          detail('wrk_done').data.thread.messages[0],
-          replyMessage('wrk_done'),
-        ],
+        revision,
+        messages: [detail('wrk_done').data.thread.messages[0], replyMessage('wrk_done', replyBody)],
       },
       receipts: [
         delivery('succeeded'), claimReceipt(),
         messageReceipt('wrk_done', 'reply'), messageReceipt('wrk_done', 'complete'),
       ],
       work_item: {
-        ...detail('wrk_done').data.work_item, status: 'completed', revision: 5,
+        ...detail('wrk_done').data.work_item, status: 'completed', revision,
       },
       claim: {
         claim_id: 'clm_1', work_item_id: 'wrk_done', identity_id: 'idn_1',
         generation: 1, state: 'closed', revision: 2,
       },
     }).data
-    stubWorld({ wrk_done: done }, [aggregate('wrk_done', '结果任务', 'completed')])
+    const world = stubWorld(
+      { wrk_done: (call: number) => completed(call === 1 ? '第一版成员回复' : '第二版成员回复', call + 4) },
+      (call: number) => [aggregate('wrk_done', call === 1 ? '第一版任务' : '第二版任务', 'completed')],
+    )
     const first = renderApp(`${HOME}?work=wrk_done`)
     const timeline = await screen.findByRole('region', { name: '执行时间线' })
     await waitFor(() => {
       expect(within(timeline).getByRole('status')).toHaveTextContent('已完成')
     })
-    expect(await within(timeline).findByText('成员回复正文')).toBeVisible()
+    expect(await within(timeline).findByText('第一版成员回复')).toBeVisible()
     expect(within(timeline).getByText('已领取')).toBeVisible()
     expect(within(timeline).getByText('已回复')).toBeVisible()
-    expect(screen.getByTitle('结果任务')).toHaveTextContent('已完成')
+    expect(screen.getByTitle('第一版任务')).toHaveTextContent('已完成')
     expect(document.querySelector('.focus-task-meta')).toHaveTextContent('已完成')
     expect(within(screen.getByRole('region', { name: '执行准备' })).queryAllByRole('button'))
       .toHaveLength(0)
+    expect(world.listGetCount()).toBe(1)
+    expect(world.detailGetCount('wrk_done')).toBe(1)
     first.unmount()
 
     const second = renderApp(`${HOME}?work=wrk_done`)
@@ -647,11 +747,15 @@ describe('Focus 页执行时间线行为', () => {
     await waitFor(() => {
       expect(within(timeline2).getByRole('status')).toHaveTextContent('已完成')
     })
-    expect(await within(timeline2).findByText('成员回复正文')).toBeVisible()
-    expect(screen.getByTitle('结果任务')).toHaveTextContent('已完成')
+    expect(await within(timeline2).findByText('第二版成员回复')).toBeVisible()
+    expect(screen.queryByText('第一版成员回复')).not.toBeInTheDocument()
+    expect(screen.getByTitle('第二版任务')).toHaveTextContent('已完成')
+    expect(screen.queryByTitle('第一版任务')).not.toBeInTheDocument()
     expect(document.querySelector('.focus-task-meta')).toHaveTextContent('已完成')
     expect(within(screen.getByRole('region', { name: '执行准备' })).queryAllByRole('button'))
       .toHaveLength(0)
+    expect(world.listGetCount()).toBe(2)
+    expect(world.detailGetCount('wrk_done')).toBe(2)
     second.unmount()
   })
 

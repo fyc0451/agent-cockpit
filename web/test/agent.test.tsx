@@ -289,32 +289,34 @@ describe('agents API 守卫与请求形状', () => {
 
     for (const status of [
       'working', 'completed', 'failed', 'UNASSIGNED', 'done', 'success',
-      'complete', 'unknown', null,
+      'complete', 'cancelled', 'unknown', null, '', 1, true, undefined,
     ]) {
       const value = workAggregate()
-      ;(value.work_item as { status: unknown }).status = status
-      expect(() => assertCreatedWorkspaceWorkAggregate(value)).toThrowError(ProtocolError)
-      expect(() => assertCreatedWorkspaceWorkAggregate(value)).toThrow(/item\.work_item\.status/)
+      if (status === undefined) delete (value.work_item as { status?: unknown }).status
+      else (value.work_item as { status: unknown }).status = status
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: true,
+        status: 201,
+        json: async () => ({ data: value, meta: metaOk }),
+      })))
+      await expect(createWorkspaceWork(
+        REG_P1,
+        'w1',
+        { body: '任务', acceptance: null, constraints: null },
+        `idem-create-${String(status)}`,
+      )).rejects.toBeInstanceOf(ProtocolError)
     }
 
-    const missing = workAggregate()
-    delete (missing.work_item as { status?: unknown }).status
-    expect(() => assertCreatedWorkspaceWorkAggregate(missing)).toThrowError(ProtocolError)
-    expect(() => assertCreatedWorkspaceWorkAggregate({ ...workAggregate(), internal: true }))
-      .toThrowError(ProtocolError)
-
-    const completed = workAggregate()
-    ;(completed.work_item as { status: unknown }).status = 'completed'
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       status: 201,
-      json: async () => ({ data: completed, meta: metaOk }),
+      json: async () => ({ data: { ...workAggregate(), internal: true }, meta: metaOk }),
     })))
     await expect(createWorkspaceWork(
       REG_P1,
       'w1',
       { body: '任务', acceptance: null, constraints: null },
-      'idem-create-status',
+      'idem-create-extra',
     )).rejects.toBeInstanceOf(ProtocolError)
   })
 
