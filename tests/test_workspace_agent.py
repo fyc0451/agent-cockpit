@@ -1141,6 +1141,209 @@ def test_workspace_managed_start_bootstraps_empty_session_before_descriptor(
     assert descriptor["args"] == []
 
 
+def _workspace_managed_snapshot_empty() -> dict[str, object]:
+    return {
+        "session": SESSION, "panes": [], "agents": [], "tabs": [],
+        "workspaces": [], "focused_workspace_id": None,
+    }
+
+
+def test_workspace_managed_codex_allows_exact_readonly_public_args(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    descriptor_path = tmp_path / "launch.json"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(descriptor_path))
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "require_herdr_capabilities", lambda: {})
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/true")
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    root_pane = {
+        "pane_id": "w1:p1", "tab_id": "w1:t1",
+        "workspace_id": "w1", "cwd": PATH,
+    }
+    snapshots = iter([
+        _workspace_managed_snapshot_empty(),
+        _workspace_managed_snapshot_empty(),
+        {
+            "session": SESSION,
+            "panes": [root_pane, {
+                "pane_id": "w1:p2", "tab_id": "w1:t2",
+                "workspace_id": "w1", "cwd": PATH,
+            }],
+            "agents": [], "tabs": [],
+            "workspaces": [{"workspace_id": "w1", "focused": False}],
+            "focused_workspace_id": None,
+        },
+    ])
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
+    )
+    calls: list[list[str]] = []
+
+    def run(args, timeout=10):
+        calls.append(args)
+        if args[2:4] == ["workspace", "create"]:
+            return json.dumps({
+                "result": {
+                    "type": "workspace_created",
+                    "workspace": {
+                        "workspace_id": "w1", "active_tab_id": "w1:t1",
+                    },
+                    "tab": {"tab_id": "w1:t1", "workspace_id": "w1"},
+                    "root_pane": root_pane,
+                },
+            })
+        if args[2:4] == ["tab", "create"]:
+            return json.dumps({
+                "result": {
+                    "tab": {"tab_id": "w1:t2", "workspace_id": "w1"},
+                    "root_pane": {
+                        "pane_id": "w1:p2", "tab_id": "w1:t2",
+                        "workspace_id": "w1", "cwd": PATH,
+                    },
+                },
+            })
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", run)
+    result = herdr_client.start_agent(
+        SESSION, PATH, "codex", layout="tab", label="codex",
+        args="--sandbox read-only",
+        instance_id=AGENT_A, project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+    assert result["instance_id"] == AGENT_A
+    assert calls[0][2:4] == ["workspace", "create"]
+    trust_args = herdr_client._workspace_codex_trust_args(PATH)
+    assert [
+        "--session", SESSION, "agent", "start", AGENT_A,
+        "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000",
+        "--", "--sandbox", "read-only", *trust_args,
+    ] in calls
+    descriptor = herdr_client.get_launch_descriptor_by_instance(AGENT_A)
+    assert descriptor is not None
+    assert descriptor["args"] == ["--sandbox", "read-only"]
+    assert herdr_client._workspace_descriptor_internal_args(descriptor) == trust_args
+
+
+@pytest.mark.parametrize(
+    "agent,args",
+    [
+        ("codex", "--sandbox workspace-write"),
+        ("codex", "read-only --sandbox"),
+        ("codex", "--sandbox read-only --sandbox"),
+        ("codex", "--sandbox read-only extra"),
+        ("claude", "--sandbox read-only"),
+        ("codex", "--approval never"),
+    ],
+)
+def test_workspace_managed_invalid_public_args_are_forbidden(
+    monkeypatch, tmp_path: Path, agent: str, args: str,
+) -> None:
+    descriptor_path = tmp_path / "launch.json"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(descriptor_path))
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "require_herdr_capabilities", lambda: {})
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/true")
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session",
+        lambda session: {
+            "session": session, "panes": [], "agents": [], "tabs": [],
+            "workspaces": [{"workspace_id": "w1", "focused": True}],
+            "focused_workspace_id": "w1",
+        },
+    )
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("forbidden args must not mutate Herdr")
+        ),
+    )
+    result = herdr_client.start_agent(
+        SESSION, PATH, agent, layout="tab", label=agent, args=args,
+        instance_id=AGENT_A, project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+    assert result["error_code"] == "workspace_agent_args_forbidden"
+    assert not descriptor_path.exists()
+
+
+def test_workspace_managed_readonly_descriptor_restarts_same_public_args(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    descriptor_path = tmp_path / "launch.json"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(descriptor_path))
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "require_herdr_capabilities", lambda: {})
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/true")
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    herdr_client.save_launch_descriptor(
+        session=SESSION, pane_id="pane-1", name=AGENT_A, kind="codex",
+        args=["--sandbox", "read-only"], agent="codex", workdir=PATH,
+        instance_id=AGENT_A, display_name="codex",
+        project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+    snapshots = [
+        {
+            "session": SESSION,
+            "panes": [{"pane_id": "pane-1", "agent": "codex", "cwd": PATH}],
+            "agents": [{"name": AGENT_A, "pane_id": "pane-1", "agent": "codex"}],
+        },
+        {
+            "session": SESSION,
+            "panes": [{"pane_id": "pane-1", "agent": None, "cwd": PATH}],
+            "agents": [],
+        },
+    ]
+
+    def snapshot(session):
+        if snapshots:
+            return snapshots[0]
+        return {
+            "session": session,
+            "panes": [{"pane_id": "pane-1", "agent": None, "cwd": PATH}],
+            "agents": [],
+        }
+
+    monkeypatch.setattr(herdr_client, "_snapshot_session", snapshot)
+    calls: list[list[str]] = []
+
+    def run(args, timeout=10):
+        calls.append(args)
+        if args[2:4] == ["agent", "send-keys"]:
+            snapshots.pop(0)
+            return ""
+        if args[2:4] == ["agent", "start"]:
+            return ""
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", run)
+    monkeypatch.setattr(herdr_client, "_pane_at_available_shell", lambda *_a, **_k: True)
+    result = herdr_client.restart_pane(SESSION, "pane-1")
+    assert result.get("available") is True
+    assert result.get("restarted") is True
+    trust_args = herdr_client._workspace_codex_trust_args(PATH)
+    start = next(item for item in calls if item[2:4] == ["agent", "start"])
+    assert start[4:10] == [AGENT_A, "--kind", "codex", "--pane", "pane-1", "--timeout"]
+    assert start[start.index("--") + 1:] == [*trust_args, "--sandbox", "read-only"]
+    descriptor = herdr_client.get_launch_descriptor_by_instance(AGENT_A)
+    assert descriptor is not None
+    assert descriptor["args"] == ["--sandbox", "read-only"]
+
+
+def test_workspace_descriptor_rejects_arbitrary_public_args(tmp_path: Path) -> None:
+    record = {
+        "instance_id": AGENT_A, "name": AGENT_A, "kind": "codex",
+        "project_id": PROJECT, "workspace_id": WORKSPACE_A,
+        "workdir": PATH, "args": ["--sandbox", "dangerously-bypass"],
+        "agent": "codex", "state": "active",
+    }
+    with pytest.raises(ValueError, match="workspace launch descriptor invalid"):
+        herdr_client._workspace_descriptor_internal_args(record)
+    record["args"] = []
+    assert herdr_client._workspace_descriptor_internal_args(record) == (
+        herdr_client._workspace_codex_trust_args(PATH)
+    )
+
+
 @pytest.mark.parametrize(
     "canonical_path",
     [

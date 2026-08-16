@@ -9,6 +9,8 @@ from agent_cockpit import herdr_client
 from agent_cockpit import local_codex_harness as harness_mod
 
 INSTANCE = "i-abcdefghijklmnopqrstuvwxyz"
+PROJECT = "prj_" + "a" * 32
+WORKSPACE = "ws_" + "b" * 32
 
 
 def test_reference_defaults_bind_real_herdr_signatures() -> None:
@@ -53,8 +55,8 @@ def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
         assert bound.arguments["args"] == "--sandbox read-only"
         assert bound.arguments["agent"] == "codex"
         assert Path(bound.arguments["workdir"]) == checkout
-        assert bound.arguments["project_id"] is None
-        assert bound.arguments["workspace_id"] is None
+        assert bound.arguments["project_id"] == PROJECT
+        assert bound.arguments["workspace_id"] == WORKSPACE
         panes["pane-1"] = bound.arguments["workdir"]
         return {
             "available": True, "pane_id": "pane-1",
@@ -106,12 +108,17 @@ def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
         close_pane=close_pane,
         new_instance_id=lambda: INSTANCE,
     )
-    attached = harness.attach_readonly(session="s", checkout_path=checkout)
+    attached = harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+    )
     assert attached.identity_verified is True
     assert attached.cwd == str(checkout)
     start_call = next(item for item in calls if item[0] == "start")[1]
     assert start_call["args"] == "--sandbox read-only"
     assert start_call["model"] is None
+    assert start_call["project_id"] == PROJECT
+    assert start_call["workspace_id"] == WORKSPACE
     assert next(item for item in calls if item[0] == "desc_pane")[1] == {
         "session": "s", "pane_id": "pane-1",
     }
@@ -136,7 +143,10 @@ def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
         new_instance_id=lambda: INSTANCE,
     )
     with pytest.raises(harness_mod.HarnessError) as unverified:
-        missing.attach_readonly(session="s", checkout_path=checkout)
+        missing.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+        )
     assert unverified.value.code == "runtime_identity_unverified"
 
     with pytest.raises(harness_mod.HarnessError) as bad:
@@ -225,7 +235,10 @@ def test_known_identity_failure_closes_live_pane(tmp_path: Path) -> None:
         new_instance_id=lambda: INSTANCE,
     )
     with pytest.raises(harness_mod.HarnessError) as error:
-        harness.attach_readonly(session="s", checkout_path=checkout)
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+        )
     assert error.value.code == "runtime_identity_unverified"
     assert herdr.started == 1
     assert herdr.closed == 1
@@ -247,7 +260,10 @@ def test_known_identity_failure_unknown_close_does_not_pretend(tmp_path: Path) -
         new_instance_id=lambda: INSTANCE,
     )
     with pytest.raises(harness_mod.HarnessError) as error:
-        harness.attach_readonly(session="s", checkout_path=checkout)
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+        )
     assert error.value.code == "runtime_unavailable"
     assert herdr.started == 1
     assert herdr.closed == 0
@@ -274,3 +290,55 @@ def test_detach_close_transport_loss_is_unknown(tmp_path: Path) -> None:
     assert error.value.code == "runtime_unavailable"
     assert getattr(error.value, "unknown", False) is True
     assert herdr.panes == {"pane-1": str(checkout)}
+
+
+def test_attach_requires_paired_workspace_authority_and_does_not_invent_format(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "chk"
+    checkout.mkdir()
+    started: list[dict[str, object]] = []
+
+    def start_agent(**kwargs):
+        started.append(kwargs)
+        return {
+            "available": True, "pane_id": "pane-1",
+            "instance_id": INSTANCE, "cwd": str(checkout),
+        }
+
+    harness = harness_mod.LocalCodexHarness(
+        ensure_session=lambda *, session: None,
+        start_agent=start_agent,
+        get_launch_descriptor=lambda *, session, pane_id: {
+            "session": session, "pane_id": pane_id, "instance_id": INSTANCE,
+            "workdir": str(checkout), "kind": "codex",
+        },
+        get_launch_descriptor_by_instance=lambda instance_id, **_kw: {
+            "session": "s", "pane_id": "pane-1", "instance_id": instance_id,
+            "workdir": str(checkout), "kind": "codex",
+        },
+        snapshot=lambda *, session: {
+            "panes": [{"pane_id": "pane-1", "cwd": str(checkout)}],
+        },
+        close_pane=lambda *, session, pane_id: {"available": True},
+        new_instance_id=lambda: INSTANCE,
+    )
+    with pytest.raises(harness_mod.HarnessError) as missing:
+        harness.attach_readonly(session="s", checkout_path=checkout)
+    assert missing.value.code == "invalid_argument"
+    with pytest.raises(harness_mod.HarnessError) as half:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout, project_id=PROJECT,
+        )
+    assert half.value.code == "invalid_argument"
+    assert started == []
+
+    forged = "not-a-project-id"
+    attached = harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=forged, workspace_id=WORKSPACE,
+    )
+    assert attached.identity_verified is True
+    assert started[-1]["project_id"] == forged
+    assert started[-1]["workspace_id"] == WORKSPACE
+    assert started[-1]["args"] == "--sandbox read-only"

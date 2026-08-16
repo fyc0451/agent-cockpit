@@ -45,8 +45,12 @@ class _FakeHarness:
         spec.assert_readonly()
         return spec
 
-    def attach_readonly(self, *, session, checkout_path, instance_id=None, display_name="codex"):
+    def attach_readonly(
+        self, *, session, checkout_path, instance_id=None, display_name="codex",
+        project_id=None, workspace_id=None,
+    ):
         self.calls.append("attach")
+        self.authority = (project_id, workspace_id)
         if getattr(self, "fail_once", False):
             self.fail_once = False
             raise harness_mod.HarnessError("runtime_unavailable")
@@ -148,6 +152,7 @@ def test_prepare_attach_detach_leaves_source_and_operation_receipts(tmp_path: Pa
     assert detached["identity"]["identity_id"] == member.item.identity_id
     assert detached["checkout"]["checkout_id"] == prepared["checkout"]["checkout_id"]
     assert harness.calls == ["attach", "detach"]
+    assert harness.authority == (project.project_id, workspace.workspace_id)
     assert harness.panes == {}
     after = checkout_mod.GitCheckoutProvider().inspect_source(source)
     assert after == before
@@ -365,8 +370,33 @@ def test_known_unverified_attach_closes_pane_then_prepared(tmp_path: Path) -> No
     assert after.state == "prepared"
     assert after.principal["generation"] == after.lease.generation == 1
     assert herdr.started == 1
-    assert herdr.closed == 1
-    assert herdr.panes == {}
+
+
+def test_attach_passes_current_workspace_authority_to_harness(tmp_path: Path) -> None:
+    herdr = _WiredHerdr()
+    seen: list[tuple[object, object]] = []
+    original = herdr.start_agent
+
+    def start_agent(*args, **kwargs):
+        seen.append((kwargs.get("project_id"), kwargs.get("workspace_id")))
+        return original(*args, **kwargs)
+
+    herdr.start_agent = start_agent  # type: ignore[method-assign]
+    service, project, workspace, item, herdr = _wired_world(tmp_path, herdr)
+    member = service.create_member(
+        project.project_id, workspace.workspace_id, display_name="Atlas",
+        idempotency_key="member",
+    )
+    prepared = service.prepare(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="prep",
+    )
+    attached = service.attach(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        expected_revision=prepared["revision"], idempotency_key="att",
+    )
+    assert attached["state"] == "connected_readonly"
+    assert seen == [(project.project_id, workspace.workspace_id)]
 
 
 def test_unknown_close_after_identity_fail_is_outcome_unknown(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import secrets
 import time
@@ -276,10 +277,11 @@ class ExecutionService:
                 request=request,
                 provider_kind="herdr",
                 step_id="attach-readonly",
-                action=lambda: self.harness.attach_readonly(
-                    session=self.session_name,
+                action=lambda: self._attach_readonly(
                     checkout_path=Path(checkout.internal_path),
                     display_name=view.identity.display_name,
+                    project_id=project_id,
+                    workspace_id=workspace_id,
                 ),
             )
         except ExecutionServiceError as exc:
@@ -536,6 +538,21 @@ class ExecutionService:
             time.sleep(0.02)
         _fail("store_write_failed")
         raise AssertionError("unreachable")
+
+    def _attach_readonly(
+        self, *, checkout_path: Path, display_name: str,
+        project_id: str, workspace_id: str,
+    ):
+        kwargs: dict[str, Any] = {
+            "session": self.session_name,
+            "checkout_path": checkout_path,
+            "display_name": display_name,
+        }
+        parameters = inspect.signature(self.harness.attach_readonly).parameters
+        if "project_id" in parameters and "workspace_id" in parameters:
+            kwargs["project_id"] = project_id
+            kwargs["workspace_id"] = workspace_id
+        return self.harness.attach_readonly(**kwargs)
 
     def _close(self, attachment, checkout) -> dict[str, object]:
         if not attachment.pane_id or not attachment.session_name:

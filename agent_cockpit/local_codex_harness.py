@@ -70,7 +70,7 @@ class AgentHarnessAdapter(Protocol):
 
     def attach_readonly(
         self, *, session: str, checkout_path: Path, instance_id: str,
-        display_name: str,
+        display_name: str, project_id: str, workspace_id: str,
     ) -> AttachmentEvidence: ...
 
     def observe(
@@ -136,7 +136,7 @@ class LocalCodexHarness:
         spec = self.build_launch_spec(checkout_path)
         if instance_id is None:
             instance_id = self._new_instance_id()
-        if project_id is not None or workspace_id is not None:
+        if project_id is None or workspace_id is None:
             _fail("invalid_argument")
         try:
             self._ensure_session(session=session)
@@ -150,8 +150,8 @@ class LocalCodexHarness:
                 args=spec.argv_text(),
                 instance_id=instance_id,
                 label=display_name,
-                project_id=None,
-                workspace_id=None,
+                project_id=project_id,
+                workspace_id=workspace_id,
             )
         except Exception:
             _fail("runtime_unavailable")

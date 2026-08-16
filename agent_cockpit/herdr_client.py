@@ -1722,6 +1722,9 @@ def _workspace_launch_label(instance_id: str) -> str:
     return "cockpit-launch-" + validate_agent_instance_id(instance_id)
 
 
+_WORKSPACE_CODEX_READONLY_PUBLIC_ARGS = ["--sandbox", "read-only"]
+
+
 def _workspace_codex_trust_args(canonical_path: str) -> list[str]:
     """Build one invocation-only Codex project trust override."""
     if (
@@ -1765,7 +1768,11 @@ def _workspace_descriptor_internal_args(record: dict[str, Any]) -> list[str]:
         or re.fullmatch(r"ws_[0-9a-f]{32}", record["workspace_id"]) is None
         or not isinstance(workdir, str)
         or not Path(workdir).is_absolute()
-        or record.get("args") != []
+        or record.get("args") not in ([], _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS)
+        or (
+            record.get("args") == _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS
+            and kind != "codex"
+        )
         or record.get("agent") != kind
         or record.get("state") != "active"
     ):
@@ -1921,23 +1928,27 @@ def _load_launch_descriptors_strict() -> dict[str, Any]:
 def reserve_workspace_launch_descriptor(
     *, session: str, name: str, kind: str, agent: str, workdir: str,
     instance_id: str, display_name: str, project_id: str, workspace_id: str,
+    args: list[str] | None = None,
 ) -> dict[str, Any]:
     """Persist exact Workspace authority before any managed launch mutation."""
     opaque_id = validate_agent_instance_id(instance_id)
     if name != opaque_id:
         raise ValueError("managed runtime name 必须等于 agent instance id")
+    public_args = list(args or [])
     if (
         not re.fullmatch(r"prj_[0-9a-f]{32}", project_id)
         or not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id)
         or not isinstance(workdir, str)
         or not workdir
+        or public_args not in ([], _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS)
+        or (public_args and kind != "codex")
     ):
         raise ValueError("project/workspace authority 格式无效")
     record = {
         "session": session,
         "name": opaque_id,
         "kind": kind,
-        "args": [],
+        "args": public_args,
         "agent": agent,
         "pane_id": "",
         "workdir": workdir,
@@ -2766,7 +2777,10 @@ def start_agent(
     if workspace_managed:
         assert instance_id is not None
         assert project_id is not None and workspace_id is not None
-        if agent_args:
+        if agent_args and (
+            canonical_kind != "codex"
+            or agent_args != _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS
+        ):
             return {
                 "available": True,
                 "error_code": "workspace_agent_args_forbidden",
@@ -2812,7 +2826,7 @@ def start_agent(
                 session=session, name=instance_id, kind=canonical_kind,
                 agent=agent, workdir=workdir, instance_id=instance_id,
                 display_name=display_name or agent, project_id=project_id,
-                workspace_id=workspace_id,
+                workspace_id=workspace_id, args=list(agent_args),
             )
             pending_reserved = True
         except (OSError, ValueError):
