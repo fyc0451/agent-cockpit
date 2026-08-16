@@ -74,7 +74,7 @@ def install(app: FastAPI, service: dispatch_mod.DispatchService) -> None:
                 ),
                 idempotency_key=key,
             )
-            return _success(request, result)
+            return _success(request, _public_dispatch(result))
         except (ApiError, dispatch_mod.DispatchError) as exc:
             return _error(request, exc.code)
         except Exception as exc:
@@ -140,6 +140,18 @@ def _meta(request: Request) -> dict[str, object]:
             "workspaceRuntime.dispatch": {"available": True, "reason": None},
         },
     }
+
+
+def _public_dispatch(data: object) -> dict[str, object]:
+    if not isinstance(data, dict):
+        raise ApiError("internal_error")
+    operation_id = data.get("operation_id")
+    outcome = data.get("outcome")
+    if not isinstance(operation_id, str) or operation_id == "":
+        raise ApiError("internal_error")
+    if not isinstance(outcome, str) or outcome == "":
+        raise ApiError("internal_error")
+    return {"operation_id": operation_id, "outcome": outcome}
 
 
 def _success(request: Request, data: object) -> JSONResponse:
