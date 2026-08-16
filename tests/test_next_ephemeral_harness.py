@@ -329,26 +329,20 @@ def _assert_authorized_socket_catalog(runtime_root: Path) -> None:
     next_profile.finalize_ephemeral_runtime_root(environment)
     next_profile.prepare_ephemeral_runtime_root(runtime_root)
     catalog = json.loads((runtime_root / next_profile.EPHEMERAL_CATALOG).read_text())
-    sockets = {
-        entry["path"]: entry
-        for entry in catalog["entries"]
-        if entry["type"] == "socket"
-    }
-    assert set(sockets) == {
+    assert catalog["schema_version"] == 1
+    assert set(catalog) == {"schema_version", "root_id", "entries"}
+    omitted = {
         f"config/herdr/sessions/{session}/herdr.sock",
         f"config/herdr/sessions/{session}/herdr-client.sock",
+        f"config/herdr/sessions/{session}/herdr-server.log",
     }
-    for entry in sockets.values():
-        assert entry["sha256"] is None
-        assert entry["mode"] == 0o600
-        assert entry["uid"] == os.getuid()
-    log_entry = next(
-        entry for entry in catalog["entries"]
-        if entry["path"] == f"config/herdr/sessions/{session}/herdr-server.log"
-    )
-    assert log_entry["type"] == "file"
-    assert log_entry["sha256"] is None
-    assert log_entry["mode"] == 0o600
+    paths = {entry["path"] for entry in catalog["entries"]}
+    assert omitted.isdisjoint(paths)
+    assert {entry["type"] for entry in catalog["entries"]} <= {"directory", "file"}
+    assert f"config/herdr/sessions/{session}" in paths
+    assert (session_dir / "herdr.sock").exists()
+    assert (session_dir / "herdr-client.sock").exists()
+    assert (session_dir / "herdr-server.log").exists()
 
 
 def test_foreign_herdr_session_socket_is_rejected() -> None:

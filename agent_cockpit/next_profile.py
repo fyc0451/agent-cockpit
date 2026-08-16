@@ -458,8 +458,8 @@ def _is_authorized_log(relative: str, root_id: str) -> bool:
     return _authorized_session_leaf(relative, root_id) in _AUTHORIZED_LOG_NAMES
 
 
-def _is_mutable_file(relative: str, root_id: str) -> bool:
-    return relative == _EPHEMERAL_MUTABLE_LEASE or _is_authorized_log(relative, root_id)
+def _omitted_runtime_leaf(relative: str, root_id: str) -> bool:
+    return _is_authorized_socket(relative, root_id) or _is_authorized_log(relative, root_id)
 
 
 def _catalog_entries(root: Path) -> list[dict[str, object]]:
@@ -480,6 +480,22 @@ def _catalog_entries(root: Path) -> list[dict[str, object]]:
             if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
                 raise _ephemeral_error("invalid")
             mode = stat.S_IMODE(info.st_mode)
+            if _is_authorized_socket(relative, root_id):
+                if (
+                    not stat.S_ISSOCK(info.st_mode)
+                    or mode != 0o600
+                    or info.st_nlink != 1
+                ):
+                    raise _ephemeral_error("invalid")
+                continue
+            if _is_authorized_log(relative, root_id):
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or mode != 0o600
+                    or info.st_nlink != 1
+                ):
+                    raise _ephemeral_error("invalid")
+                continue
             if stat.S_ISDIR(info.st_mode):
                 result.append({
                     "path": relative,
@@ -488,26 +504,10 @@ def _catalog_entries(root: Path) -> list[dict[str, object]]:
                     "uid": info.st_uid,
                     "sha256": None,
                 })
-            elif stat.S_ISSOCK(info.st_mode):
-                if (
-                    not _is_authorized_socket(relative, root_id)
-                    or mode != 0o600
-                    or info.st_nlink != 1
-                ):
-                    raise _ephemeral_error("invalid")
-                result.append({
-                    "path": relative,
-                    "type": "socket",
-                    "mode": mode,
-                    "uid": info.st_uid,
-                    "sha256": None,
-                })
             elif stat.S_ISREG(info.st_mode):
                 if info.st_nlink != 1:
                     raise _ephemeral_error("invalid")
-                if _is_authorized_log(relative, root_id) and mode != 0o600:
-                    raise _ephemeral_error("invalid")
-                if _is_mutable_file(relative, root_id):
+                if relative == _EPHEMERAL_MUTABLE_LEASE:
                     digest = None
                 else:
                     with path.open("rb") as opened:
@@ -548,7 +548,6 @@ def _valid_catalog_entries(value: object, root_id: str) -> list[dict[str, object
         mode = entry["mode"]
         owner = entry["uid"]
         digest = entry["sha256"]
-        mutable_file = _is_mutable_file(path, root_id)
         if (
             not isinstance(path, str)
             or not path
@@ -557,24 +556,21 @@ def _valid_catalog_entries(value: object, root_id: str) -> list[dict[str, object
             or any(part in {"", ".", ".."} for part in path.split("/"))
             or path in {EPHEMERAL_MARKER, EPHEMERAL_CATALOG}
             or path <= previous
-            or entry_type not in {"directory", "file", "socket"}
+            or _omitted_runtime_leaf(path, root_id)
+            or entry_type not in {"directory", "file"}
             or not isinstance(mode, int)
             or isinstance(mode, bool)
             or not 0 <= mode <= 0o777
             or owner != os.getuid()
             or isinstance(owner, bool)
             or (entry_type == "directory" and digest is not None)
-            or (entry_type == "socket" and (
-                not _is_authorized_socket(path, root_id)
-                or digest is not None
-                or mode != 0o600
-            ))
-            or (mutable_file and digest is not None)
-            or (entry_type == "file" and _is_authorized_log(path, root_id) and mode != 0o600)
-            or (entry_type == "file" and not mutable_file and (
-                not isinstance(digest, str)
-                or len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
+            or (path == _EPHEMERAL_MUTABLE_LEASE and digest is not None)
+            or (entry_type == "file" and (
+                path != _EPHEMERAL_MUTABLE_LEASE and (
+                    not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                )
             ))
         ):
             raise _ephemeral_error("invalid")
