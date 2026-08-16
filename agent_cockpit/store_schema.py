@@ -399,6 +399,10 @@ _WORKSPACE_EXECUTION_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = 
         ("fence_digest", "TEXT", 1, 0),
         ("revision", "INTEGER", 1, 0),
         ("created_at", "TEXT", 1, 0),
+        ("claim_id", "TEXT", 0, 0),
+        ("active_operation_id", "TEXT", 0, 0),
+        ("active_operation_digest", "TEXT", 0, 0),
+        ("updated_at", "TEXT", 1, 0),
     ),
     "runtime_attachments": (
         ("attachment_id", "TEXT", 1, 1),

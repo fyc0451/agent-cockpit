@@ -12,14 +12,155 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
-MIGRATION_ID = "workspace-execution-v1"
+SCHEMA_VERSION = 2
+V1_SCHEMA_VERSION = 1
+V1_MIGRATION_ID = "workspace-execution-v1"
+MIGRATION_ID = "workspace-execution-v2"
 ROLE = "member"
 PROVIDER = "local_herdr"
 HARNESS = "codex_terminal_managed_v1"
 REF_KIND = "detached"
+LEASE_STATES = frozenset({
+    "reserved", "active", "revoking", "revoked", "uncertain",
+})
+ACTIVATE_SCOPE = "workspace-execution.lease.activate.v1"
+BEGIN_TOOL_SCOPE = "workspace-execution.lease.begin-tool.v1"
+FINISH_TOOL_SCOPE = "workspace-execution.lease.finish-tool.v1"
+BEGIN_REPLY_SCOPE = "workspace-execution.lease.begin-reply.v1"
+FINISH_REPLY_SCOPE = "workspace-execution.lease.finish-reply.v1"
 
 _SCHEMA = (
+    """CREATE TABLE schema_migrations (
+        migration_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL,
+        schema_digest TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TRIGGER schema_migrations_no_update
+        BEFORE UPDATE ON schema_migrations
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+    """CREATE TRIGGER schema_migrations_no_delete
+        BEFORE DELETE ON schema_migrations
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+    """CREATE TABLE agent_identities (
+        identity_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role = 'member'),
+        lifecycle TEXT NOT NULL CHECK(lifecycle = 'active'),
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TABLE work_item_preparations (
+        preparation_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        work_item_id TEXT NOT NULL UNIQUE,
+        identity_id TEXT NOT NULL REFERENCES agent_identities(identity_id),
+        generation INTEGER NOT NULL CHECK(generation >= 1),
+        checkout_id TEXT,
+        lease_id TEXT,
+        attachment_id TEXT,
+        state TEXT NOT NULL CHECK(state IN (
+            'preparing','prepared','attaching','connected_readonly',
+            'detaching','detached','outcome_unknown'
+        )),
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TABLE managed_checkouts (
+        checkout_id TEXT PRIMARY KEY,
+        preparation_id TEXT NOT NULL REFERENCES work_item_preparations(preparation_id),
+        source_head TEXT NOT NULL,
+        source_tree TEXT NOT NULL,
+        internal_path TEXT NOT NULL,
+        ref_name TEXT,
+        preflight TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('ready','failed')),
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        created_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TABLE writer_leases (
+        lease_id TEXT PRIMARY KEY,
+        checkout_id TEXT NOT NULL REFERENCES managed_checkouts(checkout_id),
+        identity_id TEXT NOT NULL REFERENCES agent_identities(identity_id),
+        generation INTEGER NOT NULL CHECK(generation >= 1),
+        status TEXT NOT NULL CHECK(status IN (
+            'reserved','active','revoking','revoked','uncertain'
+        )),
+        fence_digest TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        created_at TEXT NOT NULL,
+        claim_id TEXT,
+        active_operation_id TEXT,
+        active_operation_digest TEXT,
+        updated_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TABLE runtime_attachments (
+        attachment_id TEXT PRIMARY KEY,
+        identity_id TEXT NOT NULL REFERENCES agent_identities(identity_id),
+        generation INTEGER NOT NULL CHECK(generation >= 1),
+        checkout_id TEXT NOT NULL REFERENCES managed_checkouts(checkout_id),
+        provider TEXT NOT NULL,
+        harness TEXT NOT NULL,
+        pane_id TEXT,
+        instance_id TEXT,
+        session_name TEXT,
+        native_receipt TEXT,
+        status TEXT NOT NULL CHECK(status IN (
+            'attaching','connected_readonly','detaching','detached','outcome_unknown'
+        )),
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TABLE idempotency_records (
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        PRIMARY KEY(project_id, workspace_id, scope, idempotency_key)
+    ) STRICT""",
+    """CREATE TRIGGER idempotency_records_no_update
+        BEFORE UPDATE ON idempotency_records
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+    """CREATE TRIGGER idempotency_records_no_delete
+        BEFORE DELETE ON idempotency_records
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+)
+
+
+def _canonical_sql(value: str | None) -> str:
+    return " ".join((value or "").split()).lower()
+
+
+def _schema_objects(connection: sqlite3.Connection) -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        (str(kind), str(name), str(table), _canonical_sql(sql))
+        for kind, name, table, sql in connection.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+        )
+    )
+
+
+def _expected_schema_objects() -> tuple[tuple[str, ...], ...]:
+    memory = sqlite3.connect(":memory:")
+    try:
+        memory.execute("PRAGMA foreign_keys=ON")
+        for statement in _SCHEMA:
+            memory.execute(statement)
+        return _schema_objects(memory)
+    finally:
+        memory.close()
+
+
+V1_SCHEMA = (
     """CREATE TABLE schema_migrations (
         migration_id TEXT PRIMARY KEY,
         schema_version INTEGER NOT NULL,
@@ -119,25 +260,11 @@ _SCHEMA = (
 )
 
 
-def _canonical_sql(value: str | None) -> str:
-    return " ".join((value or "").split()).lower()
-
-
-def _schema_objects(connection: sqlite3.Connection) -> tuple[tuple[str, ...], ...]:
-    return tuple(
-        (str(kind), str(name), str(table), _canonical_sql(sql))
-        for kind, name, table, sql in connection.execute(
-            "SELECT type,name,tbl_name,sql FROM sqlite_master "
-            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
-        )
-    )
-
-
-def _expected_schema_objects() -> tuple[tuple[str, ...], ...]:
+def _schema_objects_for(statements: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
     memory = sqlite3.connect(":memory:")
     try:
         memory.execute("PRAGMA foreign_keys=ON")
-        for statement in _SCHEMA:
+        for statement in statements:
             memory.execute(statement)
         return _schema_objects(memory)
     finally:
@@ -145,8 +272,12 @@ def _expected_schema_objects() -> tuple[tuple[str, ...], ...]:
 
 
 _EXPECTED = _expected_schema_objects()
+_V1_EXPECTED = _schema_objects_for(V1_SCHEMA)
 SCHEMA_DIGEST = "sha256:" + hashlib.sha256(
     json.dumps(_EXPECTED, separators=(",", ":")).encode()
+).hexdigest()
+V1_SCHEMA_DIGEST = "sha256:" + hashlib.sha256(
+    json.dumps(_V1_EXPECTED, separators=(",", ":")).encode()
 ).hexdigest()
 
 
@@ -306,9 +437,11 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
             "SELECT migration_id, schema_version, schema_digest "
             "FROM schema_migrations"
         ).fetchall()
-        if len(rows) != 1 or tuple(rows[0]) != (
-            MIGRATION_ID, SCHEMA_VERSION, SCHEMA_DIGEST,
-        ):
+        current = [
+            tuple(row) for row in rows
+            if row["migration_id"] == MIGRATION_ID
+        ]
+        if current != [(MIGRATION_ID, SCHEMA_VERSION, SCHEMA_DIGEST)]:
             _fail("schema_fingerprint_mismatch")
     except WorkspaceExecutionError:
         raise
@@ -387,6 +520,7 @@ class LeaseView:
     status: str
     generation: int
     revision: int
+    claim_id: str | None
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -394,6 +528,7 @@ class LeaseView:
             "status": self.status,
             "generation": self.generation,
             "revision": self.revision,
+            "claim_id": self.claim_id,
         }
 
 
@@ -499,6 +634,21 @@ def _lease_view(row: sqlite3.Row | None) -> LeaseView | None:
         return None
     return LeaseView(
         row["lease_id"], row["status"], int(row["generation"]), int(row["revision"]),
+        row["claim_id"],
+    )
+
+
+def _insert_reserved_lease(
+    connection: sqlite3.Connection, *, lease_id: str, checkout_id: str,
+    identity_id: str, generation: int, fence: str, now: str,
+) -> None:
+    connection.execute(
+        "INSERT INTO writer_leases ("
+        "lease_id, checkout_id, identity_id, generation, status, fence_digest, "
+        "revision, created_at, claim_id, active_operation_id, "
+        "active_operation_digest, updated_at) "
+        "VALUES (?,?,?,?, 'reserved',?,1,?,NULL,NULL,NULL,?)",
+        (lease_id, checkout_id, identity_id, generation, fence, now, now),
     )
 
 
@@ -520,7 +670,10 @@ def _require_aligned_generation(
     if lease is not None:
         if int(lease["generation"]) != generation:
             _fail("lease_conflict")
-        if lease["status"] == "reserved" and not lease["fence_digest"]:
+        if (
+            lease["status"] in {"reserved", "active", "revoking"}
+            and not lease["fence_digest"]
+        ):
             _fail("lease_conflict")
     if attachment is not None and int(attachment["generation"]) != generation:
         _fail("lease_conflict")
@@ -934,9 +1087,9 @@ class WorkspaceExecutionStore:
                     "ready", now,
                 ),
             )
-            connection.execute(
-                "INSERT INTO writer_leases VALUES (?,?,?,?, 'reserved',?,1,?)",
-                (lease_id, checkout_id, identity_id, 1, fence, now),
+            _insert_reserved_lease(
+                connection, lease_id=lease_id, checkout_id=checkout_id,
+                identity_id=identity_id, generation=1, fence=fence, now=now,
             )
             view = _load_preparation(
                 connection, project_id, workspace_id, work_item_id,
@@ -1247,12 +1400,11 @@ class WorkspaceExecutionStore:
                         "generation": generation,
                         "nonce": secrets.token_hex(16),
                     })
-                    connection.execute(
-                        "INSERT INTO writer_leases VALUES (?,?,?,?, 'reserved',?,1,?)",
-                        (
-                            lease_id, checkout["checkout_id"], prep["identity_id"],
-                            generation, fence, now,
-                        ),
+                    _insert_reserved_lease(
+                        connection, lease_id=lease_id,
+                        checkout_id=checkout["checkout_id"],
+                        identity_id=prep["identity_id"], generation=generation,
+                        fence=fence, now=now,
                     )
                 else:
                     lease_id = prep["lease_id"]
@@ -1411,6 +1563,417 @@ class WorkspaceExecutionStore:
         raise AssertionError("unreachable")
 
 
+    def activate_claim_lease(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_preparation_revision: object, expected_lease_revision: object,
+        attachment_id: object, identity_id: object, generation: object,
+        claim_id: object, idempotency_key: object,
+    ) -> dict[str, object]:
+        return self._mutate_lease(
+            project_id, workspace_id, work_item_id,
+            expected_preparation_revision=expected_preparation_revision,
+            expected_lease_revision=expected_lease_revision,
+            attachment_id=attachment_id, identity_id=identity_id,
+            generation=generation, claim_id=claim_id,
+            idempotency_key=idempotency_key, scope=ACTIVATE_SCOPE,
+            extra={"action": "activate"},
+            mutate=_activate_reserved_lease,
+        )
+
+    def begin_tool(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_preparation_revision: object, expected_lease_revision: object,
+        attachment_id: object, identity_id: object, generation: object,
+        claim_id: object, operation_id: object, operation_digest: object,
+        idempotency_key: object,
+    ) -> dict[str, object]:
+        operation_id = _opaque(operation_id, "op_")
+        if not isinstance(operation_digest, str) or not operation_digest:
+            _fail("invalid_argument")
+        return self._mutate_lease(
+            project_id, workspace_id, work_item_id,
+            expected_preparation_revision=expected_preparation_revision,
+            expected_lease_revision=expected_lease_revision,
+            attachment_id=attachment_id, identity_id=identity_id,
+            generation=generation, claim_id=claim_id,
+            idempotency_key=idempotency_key, scope=BEGIN_TOOL_SCOPE,
+            extra={
+                "action": "begin_tool",
+                "operation_digest": operation_digest,
+                "operation_id": operation_id,
+            },
+            mutate=lambda conn, lease, now, claim_id: _begin_active_tool(
+                conn, lease, now, claim_id=claim_id, operation_id=operation_id,
+                operation_digest=operation_digest,
+            ),
+        )
+
+    def finish_tool(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_preparation_revision: object, expected_lease_revision: object,
+        attachment_id: object, identity_id: object, generation: object,
+        claim_id: object, operation_id: object, outcome: object,
+        idempotency_key: object,
+    ) -> dict[str, object]:
+        operation_id = _opaque(operation_id, "op_")
+        if outcome not in {"succeeded", "failed", "outcome_unknown"}:
+            _fail("invalid_argument")
+        return self._mutate_lease(
+            project_id, workspace_id, work_item_id,
+            expected_preparation_revision=expected_preparation_revision,
+            expected_lease_revision=expected_lease_revision,
+            attachment_id=attachment_id, identity_id=identity_id,
+            generation=generation, claim_id=claim_id,
+            idempotency_key=idempotency_key, scope=FINISH_TOOL_SCOPE,
+            extra={
+                "action": "finish_tool",
+                "operation_id": operation_id,
+                "outcome": outcome,
+            },
+            allow_uncertain=True,
+            mutate=lambda conn, lease, now, claim_id: _finish_active_tool(
+                conn, lease, now, claim_id=claim_id, operation_id=operation_id,
+                outcome=str(outcome),
+            ),
+        )
+
+    def begin_reply(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_preparation_revision: object, expected_lease_revision: object,
+        attachment_id: object, identity_id: object, generation: object,
+        claim_id: object, idempotency_key: object,
+    ) -> dict[str, object]:
+        return self._mutate_lease(
+            project_id, workspace_id, work_item_id,
+            expected_preparation_revision=expected_preparation_revision,
+            expected_lease_revision=expected_lease_revision,
+            attachment_id=attachment_id, identity_id=identity_id,
+            generation=generation, claim_id=claim_id,
+            idempotency_key=idempotency_key, scope=BEGIN_REPLY_SCOPE,
+            extra={"action": "begin_reply"},
+            mutate=_begin_reply_lease,
+        )
+
+    def finish_reply(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_preparation_revision: object, expected_lease_revision: object,
+        attachment_id: object, identity_id: object, generation: object,
+        claim_id: object, idempotency_key: object,
+    ) -> dict[str, object]:
+        return self._mutate_lease(
+            project_id, workspace_id, work_item_id,
+            expected_preparation_revision=expected_preparation_revision,
+            expected_lease_revision=expected_lease_revision,
+            attachment_id=attachment_id, identity_id=identity_id,
+            generation=generation, claim_id=claim_id,
+            idempotency_key=idempotency_key, scope=FINISH_REPLY_SCOPE,
+            extra={"action": "finish_reply"},
+            mutate=_finish_reply_lease,
+        )
+
+    def find_preparation_for_attachment(
+        self, *, attachment_id: object,
+    ) -> PreparationView | None:
+        attachment_id = _opaque(attachment_id, "att_")
+        connection = _connect(self.path, write=False)
+        try:
+            _require_current_schema(connection)
+            connection.execute("BEGIN")
+            prep = connection.execute(
+                "SELECT * FROM work_item_preparations WHERE attachment_id=?",
+                (attachment_id,),
+            ).fetchone()
+            if prep is None:
+                return None
+            return _load_preparation(
+                connection, prep["project_id"], prep["workspace_id"],
+                prep["work_item_id"],
+            )
+        except WorkspaceExecutionError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
+    def lookup_attachment_scope(
+        self, *, attachment_id: object,
+    ) -> tuple[str, str, str]:
+        attachment_id = _opaque(attachment_id, "att_")
+        connection = _connect(self.path, write=False)
+        try:
+            _require_current_schema(connection)
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT project_id, workspace_id, work_item_id "
+                "FROM work_item_preparations WHERE attachment_id=?",
+                (attachment_id,),
+            ).fetchone()
+            if row is None:
+                _fail("preparation_not_found")
+            return (
+                str(row["project_id"]), str(row["workspace_id"]),
+                str(row["work_item_id"]),
+            )
+        except WorkspaceExecutionError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
+    def checkout_internal_path(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+    ) -> str:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        connection = _connect(self.path, write=False)
+        try:
+            _require_current_schema(connection)
+            connection.execute("BEGIN")
+            prep = connection.execute(
+                "SELECT checkout_id FROM work_item_preparations "
+                "WHERE project_id=? AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is None or not prep["checkout_id"]:
+                _fail("preparation_not_found")
+            checkout = connection.execute(
+                "SELECT internal_path FROM managed_checkouts WHERE checkout_id=?",
+                (prep["checkout_id"],),
+            ).fetchone()
+            if checkout is None:
+                _fail("preparation_not_found")
+            return str(checkout["internal_path"])
+        except WorkspaceExecutionError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
+    def _mutate_lease(
+        self, project_id: str, workspace_id: str, work_item_id: str, *,
+        expected_preparation_revision: object, expected_lease_revision: object,
+        attachment_id: object, identity_id: object, generation: object,
+        claim_id: object, idempotency_key: object, scope: str,
+        extra: dict[str, object], mutate, allow_uncertain: bool = False,
+    ) -> dict[str, object]:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        expected_preparation_revision = _revision(expected_preparation_revision)
+        expected_lease_revision = _revision(expected_lease_revision)
+        attachment_id = _opaque(attachment_id, "att_")
+        identity_id = _opaque(identity_id, "idn_")
+        generation = _revision(generation)
+        claim_id = _opaque(claim_id, "clm_")
+        key = _idempotency_key(idempotency_key)
+        digest = _digest({
+            "attachment_id": attachment_id,
+            "claim_id": claim_id,
+            "expected_lease_revision": expected_lease_revision,
+            "expected_preparation_revision": expected_preparation_revision,
+            "generation": generation,
+            "identity_id": identity_id,
+            "work_item_id": work_item_id,
+            **extra,
+        })
+        connection = _write_txn(self.path)
+        try:
+            replay = _replay(connection, project_id, workspace_id, scope, key, digest)
+            if replay is not None:
+                connection.execute("COMMIT")
+                return replay
+            prep, lease, attachment = _require_lease_authority(
+                connection, project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id,
+                expected_preparation_revision=expected_preparation_revision,
+                expected_lease_revision=expected_lease_revision,
+                attachment_id=attachment_id, identity_id=identity_id,
+                generation=generation, claim_id=claim_id,
+                allow_uncertain=allow_uncertain,
+            )
+            now = _now()
+            mutate(connection, lease, now, claim_id=claim_id)
+            view = _load_preparation(
+                connection, project_id, workspace_id, work_item_id,
+            )
+            assert view is not None
+            payload = {
+                "lease": None if view.lease is None else view.lease.public_dict(),
+                "state": view.state,
+                "revision": view.revision,
+            }
+            _remember(
+                connection, project_id, workspace_id, scope, key, digest, payload,
+            )
+            connection.execute("COMMIT")
+            return payload
+        except WorkspaceExecutionError:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection.in_transaction:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            _fail("store_write_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
+
+def _require_lease_authority(
+    connection: sqlite3.Connection, *, project_id: str, workspace_id: str,
+    work_item_id: str, expected_preparation_revision: int,
+    expected_lease_revision: int, attachment_id: str, identity_id: str,
+    generation: int, claim_id: str, allow_uncertain: bool = False,
+) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
+    prep = connection.execute(
+        "SELECT * FROM work_item_preparations WHERE project_id=? "
+        "AND workspace_id=? AND work_item_id=?",
+        (project_id, workspace_id, work_item_id),
+    ).fetchone()
+    if prep is None:
+        _fail("preparation_not_found")
+    if int(prep["revision"]) != expected_preparation_revision:
+        _fail("stale_revision")
+    if prep["identity_id"] != identity_id:
+        _fail("stale_generation")
+    if int(prep["generation"]) != generation:
+        _fail("stale_generation")
+    if prep["attachment_id"] != attachment_id:
+        _fail("runtime_identity_unverified")
+    if prep["lease_id"] is None:
+        _fail("lease_not_active")
+    if prep["state"] in {"detached", "outcome_unknown"}:
+        _fail("execution_terminal")
+    attachment = connection.execute(
+        "SELECT * FROM runtime_attachments WHERE attachment_id=?",
+        (attachment_id,),
+    ).fetchone()
+    if attachment is None or attachment["status"] != "connected_readonly":
+        _fail("runtime_identity_unverified")
+    if not _attachment_verified(attachment):
+        _fail("runtime_identity_unverified")
+    if int(attachment["generation"]) != generation:
+        _fail("stale_generation")
+    if attachment["identity_id"] != identity_id:
+        _fail("stale_generation")
+    lease = connection.execute(
+        "SELECT * FROM writer_leases WHERE lease_id=?",
+        (prep["lease_id"],),
+    ).fetchone()
+    if lease is None:
+        _fail("lease_not_active")
+    if int(lease["revision"]) != expected_lease_revision:
+        _fail("stale_revision")
+    if int(lease["generation"]) != generation or lease["identity_id"] != identity_id:
+        _fail("stale_generation")
+    if lease["status"] == "uncertain" and not allow_uncertain:
+        _fail("reconcile_required")
+    if lease["claim_id"] not in {None, claim_id}:
+        _fail("claim_not_active")
+    return prep, lease, attachment
+
+
+def _bump_lease(
+    connection: sqlite3.Connection, lease: sqlite3.Row, now: str, **fields: object,
+) -> None:
+    assignments = ", ".join(f"{name}=?" for name in fields)
+    values = list(fields.values())
+    new_revision = int(lease["revision"]) + 1
+    values.extend((now, new_revision, lease["lease_id"], int(lease["revision"])))
+    if connection.execute(
+        f"UPDATE writer_leases SET {assignments}, updated_at=?, revision=? "
+        "WHERE lease_id=? AND revision=?",
+        values,
+    ).rowcount != 1:
+        _fail("stale_revision")
+
+
+def _activate_reserved_lease(
+    connection: sqlite3.Connection, lease: sqlite3.Row, now: str, *, claim_id: str,
+) -> None:
+    if lease["status"] == "active" and lease["claim_id"] == claim_id:
+        return
+    if lease["status"] != "reserved":
+        _fail("lease_not_active")
+    _bump_lease(connection, lease, now, status="active", claim_id=claim_id)
+
+
+def _begin_active_tool(
+    connection: sqlite3.Connection, lease: sqlite3.Row, now: str, *,
+    claim_id: str, operation_id: str, operation_digest: str,
+) -> None:
+    if lease["status"] != "active" or lease["claim_id"] != claim_id:
+        _fail("lease_not_active")
+    if lease["active_operation_id"] not in {None, operation_id}:
+        _fail("reconcile_required")
+    if (
+        lease["active_operation_id"] == operation_id
+        and lease["active_operation_digest"] == operation_digest
+    ):
+        return
+    _bump_lease(
+        connection, lease, now,
+        active_operation_id=operation_id,
+        active_operation_digest=operation_digest,
+    )
+
+
+def _finish_active_tool(
+    connection: sqlite3.Connection, lease: sqlite3.Row, now: str, *,
+    claim_id: str, operation_id: str, outcome: str,
+) -> None:
+    if lease["claim_id"] != claim_id:
+        _fail("claim_not_active")
+    if lease["status"] not in {"active", "uncertain"}:
+        _fail("lease_not_active")
+    if lease["active_operation_id"] != operation_id:
+        _fail("reconcile_required")
+    if outcome == "outcome_unknown":
+        _bump_lease(
+            connection, lease, now, status="uncertain",
+            active_operation_id=operation_id,
+            active_operation_digest=lease["active_operation_digest"],
+        )
+        return
+    _bump_lease(
+        connection, lease, now, status="active",
+        active_operation_id=None, active_operation_digest=None,
+    )
+
+
+def _begin_reply_lease(
+    connection: sqlite3.Connection, lease: sqlite3.Row, now: str, *, claim_id: str,
+) -> None:
+    if lease["status"] == "revoking" and lease["claim_id"] == claim_id:
+        return
+    if lease["status"] != "active" or lease["claim_id"] != claim_id:
+        _fail("lease_not_active")
+    if lease["active_operation_id"] is not None:
+        _fail("reconcile_required")
+    _bump_lease(connection, lease, now, status="revoking")
+
+
+def _finish_reply_lease(
+    connection: sqlite3.Connection, lease: sqlite3.Row, now: str, *, claim_id: str,
+) -> None:
+    if lease["status"] == "revoked" and lease["claim_id"] == claim_id:
+        return
+    if lease["status"] != "revoking" or lease["claim_id"] != claim_id:
+        _fail("lease_not_active")
+    _bump_lease(connection, lease, now, status="revoked")
+
+
 def _replay(
     connection: sqlite3.Connection, project_id: str, workspace_id: str,
     scope: str, key: str, digest: str,
@@ -1480,6 +2043,84 @@ def _load_preparation(
     )
 
 
+def _validate_v1(connection: sqlite3.Connection) -> None:
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        rows = connection.execute(
+            "SELECT migration_id, schema_version, schema_digest "
+            "FROM schema_migrations"
+        ).fetchall()
+        if (
+            version != V1_SCHEMA_VERSION
+            or [tuple(row) for row in rows] != [
+                (V1_MIGRATION_ID, V1_SCHEMA_VERSION, V1_SCHEMA_DIGEST)
+            ]
+            or _schema_objects(connection) != _V1_EXPECTED
+        ):
+            _fail("schema_fingerprint_mismatch")
+    except WorkspaceExecutionError:
+        raise
+    except sqlite3.DatabaseError as exc:
+        _fail("store_corrupt", exc)
+    except sqlite3.Error as exc:
+        _fail("store_read_failed", exc)
+
+
+def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE writer_leases RENAME TO writer_leases_v1")
+    for statement in _SCHEMA:
+        if "CREATE TABLE writer_leases" in statement:
+            connection.execute(statement)
+    connection.execute(
+        "INSERT INTO writer_leases SELECT "
+        "lease_id, checkout_id, identity_id, generation, status, fence_digest, "
+        "revision, created_at, NULL, NULL, NULL, created_at FROM writer_leases_v1"
+    )
+    connection.execute("DROP TABLE writer_leases_v1")
+    connection.execute(
+        "INSERT INTO schema_migrations VALUES (?,?,?,?)",
+        (MIGRATION_ID, SCHEMA_VERSION, SCHEMA_DIGEST, _now()),
+    )
+    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _migrate_existing(path: Path) -> WorkspaceExecutionStore:
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = _connect(path, write=True)
+        connection.execute("BEGIN IMMEDIATE")
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version == SCHEMA_VERSION:
+            connection.execute("COMMIT")
+            _validate_schema(connection)
+            return WorkspaceExecutionStore(path)
+        if version != V1_SCHEMA_VERSION:
+            _fail("migration_required")
+        _validate_v1(connection)
+        _migrate_v1_to_v2(connection)
+        connection.execute("COMMIT")
+        _validate_schema(connection)
+        return WorkspaceExecutionStore(path)
+    except WorkspaceExecutionError:
+        if connection is not None and connection.in_transaction:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        raise
+    except sqlite3.Error as exc:
+        if connection is not None and connection.in_transaction:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        _fail("store_write_failed", exc)
+    finally:
+        if connection is not None:
+            connection.close()
+    raise AssertionError("unreachable")
+
+
 def initialize(path: Path) -> WorkspaceExecutionStore:
     path = _path(path)
     if path.exists():
@@ -1532,10 +2173,23 @@ def open_existing(path: Path) -> WorkspaceExecutionStore:
     connection: sqlite3.Connection | None = None
     try:
         connection = _connect(path, write=False)
-        _validate_schema(connection)
+        present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='schema_migrations'"
+        ).fetchone()
+        if present is None:
+            _fail("workspace_execution_schema_missing")
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version > SCHEMA_VERSION:
+            _fail("future_schema")
+        if version == SCHEMA_VERSION:
+            _validate_schema(connection)
+            return WorkspaceExecutionStore(path)
+        if version != V1_SCHEMA_VERSION:
+            _fail("migration_required")
     except sqlite3.DatabaseError as exc:
         _fail("store_corrupt", exc)
     finally:
         if connection is not None:
             connection.close()
-    return WorkspaceExecutionStore(path)
+    return _migrate_existing(path)
