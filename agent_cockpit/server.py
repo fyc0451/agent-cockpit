@@ -89,6 +89,8 @@ workspace_work_store = None
 workspace_execution_api = None
 workspace_execution_service = None
 workspace_execution_store = None
+workspace_runtime_api = None
+workspace_dispatch_service = None
 git_checkout_provider = None
 local_codex_harness = None
 if next_profile.enabled():
@@ -105,6 +107,7 @@ if next_profile.enabled():
     from . import workspace_work_api, workspace_work_store
     from . import workspace_execution_api, workspace_execution_service
     from . import workspace_execution_store
+    from . import workspace_runtime_api, workspace_dispatch_service
     from . import git_checkout_provider, local_codex_harness
 
 
@@ -425,7 +428,8 @@ _workspace_execution_store = None
 _workspace_execution_service = None
 _WORKSPACE_EXECUTION_PATH_RE = re.compile(
     r"^/api/projects/[^/]+/workspaces/[^/]+"
-    r"(?:/members|/work-items/[^/]+/preparation(?:/(?:attach|detach))?)$"
+    r"(?:/members|/work-items/[^/]+/preparation(?:/(?:attach|detach))?"
+    r"|/work-items/[^/]+/dispatch)$"
 )
 _AGENT_PROMPT_PATH_RE = re.compile(
     r"^/api/projects/[^/]+/workspaces/[^/]+/agents/[^/]+/prompts$",
@@ -434,9 +438,11 @@ _AGENT_PROMPT_PATH_RE = re.compile(
 
 def _close_workspace_execution_store() -> None:
     global _workspace_execution_store, _workspace_execution_service
+    global _workspace_dispatch_service
     store = _workspace_execution_store
     _workspace_execution_store = None
     _workspace_execution_service = None
+    _workspace_dispatch_service = None
     if store is None:
         return
     try:
@@ -462,6 +468,10 @@ def _workspace_execution_session_name() -> str:
     if scoped is None:
         raise next_profile.NextProfileError("next_session_forbidden")
     return next_profile.require_session(scoped)
+
+
+def _workspace_capability_root() -> Path:
+    return runtime_paths.data_root() / "workspace-capabilities"
 
 
 def _require_workspace_execution_service():
@@ -494,7 +504,9 @@ def _require_workspace_execution_service():
         store=store,
         operations=_operation_journal_provider(),
         checkout=checkout_module.GitCheckoutProvider(),
-        harness=harness_module.LocalCodexHarness(),
+        harness=harness_module.LocalCodexHarness(
+            capability_root=_workspace_capability_root(),
+        ),
         worktrees_root=runtime_paths.validate_store("worktrees"),
         session_name=_workspace_execution_session_name(),
     )
@@ -505,6 +517,47 @@ def _require_workspace_execution_service():
 class _DeferredExecutionService:
     def __getattr__(self, name: str):
         return getattr(_require_workspace_execution_service(), name)
+
+
+_workspace_dispatch_service = None
+
+
+def _require_workspace_dispatch_service():
+    global _workspace_dispatch_service
+    global workspace_dispatch_service, local_codex_harness
+    service = _workspace_dispatch_service
+    if service is not None:
+        return service
+    store = _workspace_execution_store
+    if store is None:
+        module = workspace_execution_store
+        if module is None:
+            from . import workspace_execution_store as module
+        raise module.WorkspaceExecutionError("workspace_execution_schema_missing")
+    service_module = workspace_dispatch_service
+    if service_module is None:
+        from . import workspace_dispatch_service as service_module
+        workspace_dispatch_service = service_module
+    harness_module = local_codex_harness
+    if harness_module is None:
+        from . import local_codex_harness as harness_module
+        local_codex_harness = harness_module
+    service = service_module.DispatchService(
+        registry_provider=_project_registry,
+        work_provider=_workspace_work_provider,
+        execution=store,
+        operations=_operation_journal_provider(),
+        harness=harness_module.LocalCodexHarness(
+            capability_root=_workspace_capability_root(),
+        ),
+    )
+    _workspace_dispatch_service = service
+    return service
+
+
+class _DeferredDispatchService:
+    def __getattr__(self, name: str):
+        return getattr(_require_workspace_dispatch_service(), name)
 
 
 def _local_terminal_capability(workspace, location):
@@ -754,6 +807,8 @@ if next_profile.enabled():
     )
     assert workspace_execution_api is not None
     workspace_execution_api.install(app, _DeferredExecutionService())
+    assert workspace_runtime_api is not None
+    workspace_runtime_api.install(app, _DeferredDispatchService())
 
 
 def _scoped_g3_path(path: str) -> bool:

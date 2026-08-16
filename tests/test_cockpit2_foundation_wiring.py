@@ -71,13 +71,14 @@ names = (
     'terminal_ticket_store','workspace_work_store','workspace_work_api',
     'workspace_execution_store','workspace_execution_api',
     'workspace_execution_service',
+    'workspace_runtime_api','workspace_dispatch_service',
 )
 paths = sorted(route.path for route in server.app.routes)
 print(json.dumps({
     'loaded': [name for name in names if f'agent_cockpit.{name}' in sys.modules],
     'foundation': [path for path in paths if path.startswith('/api/events/') or '/memory/' in path or path.startswith('/api/operations/') or '/terminal-tickets/' in path],
     'work_items': [path for path in paths if path.endswith('/work-items')],
-    'execution': [path for path in paths if '/workspaces/' in path and (path.endswith('/members') or path.endswith('/preparation') or path.endswith('/preparation/attach') or path.endswith('/preparation/detach'))],
+    'execution': [path for path in paths if '/workspaces/' in path and (path.endswith('/members') or path.endswith('/preparation') or path.endswith('/preparation/attach') or path.endswith('/preparation/detach') or path.endswith('/dispatch'))],
     'legacy_pane_send': any(path == '/api/herdr/pane/{session}/{pane_id}/send' for path in paths),
     'public': sorted(server.PUBLIC_PATHS),
     'api_routes': sum(path.startswith('/api/') for path in paths),
@@ -155,7 +156,12 @@ print(json.dumps({
             or route.path.endswith('/preparation')
             or route.path.endswith('/preparation/attach')
             or route.path.endswith('/preparation/detach')
+            or route.path.endswith('/dispatch')
         )
+    ),
+    'dispatch_scoped': server._scoped_g3_path(
+        '/api/projects/prj_' + 'a' * 32 + '/workspaces/ws_' + 'b' * 32
+        + '/work-items/wki_' + 'c' * 32 + '/dispatch'
     ),
     'legacy_pane_send': any(
         getattr(route, 'path', '') == '/api/herdr/pane/{session}/{pane_id}/send'
@@ -192,12 +198,18 @@ print(json.dumps({
     assert result["public"] == sorted(server.PUBLIC_PATHS)
     assert result["legacy_pane_send"] is True
     assert result["prompt_scoped"] is True
+    assert result["dispatch_scoped"] is True
     project = "{project_id}"
     workspace = "{workspace_id}"
     work_item = "{work_item_id}"
     assert result["execution"] == [
         [f"/api/projects/{project}/workspaces/{workspace}/members", ["GET"]],
         [f"/api/projects/{project}/workspaces/{workspace}/members", ["POST"]],
+        [
+            f"/api/projects/{project}/workspaces/{workspace}/work-items/"
+            f"{work_item}/dispatch",
+            ["POST"],
+        ],
         [
             f"/api/projects/{project}/workspaces/{workspace}/work-items/"
             f"{work_item}/preparation",
