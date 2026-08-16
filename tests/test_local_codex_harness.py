@@ -6,8 +6,11 @@ import os
 import secrets
 import stat
 import re
+import shutil
 import subprocess
 import sys
+import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -22,6 +25,46 @@ ATTACHMENT = "att_" + "c" * 32
 IDENTITY = "idn_" + "d" * 32
 SENTINEL = "BOSS-BODY-SENTINEL-9f3c"
 FENCE = "sha256:" + "ab" * 32
+AUTH_BYTES_SENTINEL = "AUTH-BYTES-SENTINEL-4e91"
+
+
+@pytest.fixture(autouse=True)
+def _provider_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Path]:
+    home = tmp_path / "provider-home"
+    authority = tmp_path / "provider-authority"
+    home.mkdir(mode=0o700)
+    authority.mkdir(mode=0o700)
+    auth = authority / "auth.json"
+    auth.write_text(AUTH_BYTES_SENTINEL, encoding="utf-8")
+    os.chmod(auth, 0o600)
+    config = home / "relay.config.toml"
+    config.write_text(
+        "\n".join([
+            'model_provider = "relay"',
+            'network_access = "enabled"',
+            "",
+            "[model_providers.relay]",
+            'name = "Fixture Relay"',
+            'base_url = "https://relay.invalid"',
+            'wire_api = "responses"',
+            "",
+            "[model_providers.relay.auth]",
+            'command = "/usr/bin/jq"',
+            f'args = ["-r", ".OPENAI_API_KEY", {json.dumps(str(auth))}]',
+            "timeout_ms = 5000",
+            "refresh_interval_ms = 300000",
+            "",
+            "[model_providers.unselected]",
+            f'api_key = "{AUTH_BYTES_SENTINEL}"',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    os.chmod(config, 0o600)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    return {"home": home, "config": config, "authority": authority, "auth": auth}
 
 
 def test_reference_defaults_bind_real_herdr_signatures() -> None:
@@ -415,7 +458,7 @@ def test_launch_spec_stays_readonly_public_args(tmp_path: Path) -> None:
 
 
 def test_private_home_does_not_touch_user_codex_config_and_cap_is_0600(
-    tmp_path: Path,
+    tmp_path: Path, _provider_provenance: dict[str, Path],
 ) -> None:
     user_cfg = Path.home() / ".codex" / "config.toml"
     before = user_cfg.stat() if user_cfg.exists() else None
@@ -442,11 +485,377 @@ def test_private_home_does_not_touch_user_codex_config_and_cap_is_0600(
     token = json.loads(secret)["token"]
     assert token not in text
     assert FENCE not in text
+    assert 'model_provider = "relay"' in text
+    assert str(_provider_provenance["auth"]) in text
+    assert AUTH_BYTES_SENTINEL not in text
+    assert not (home / "auth.json").exists()
     after = user_cfg.stat() if user_cfg.exists() else None
     if before is None:
         assert after is None
     else:
         assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+
+
+def test_provider_auth_reference_is_validated_without_reading_credential_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _provider_provenance: dict[str, Path],
+) -> None:
+    auth = _provider_provenance["auth"]
+    auth_identity = (auth.stat().st_dev, auth.stat().st_ino)
+    original_read = harness_mod.os.read
+
+    def guarded_read(fd: int, size: int) -> bytes:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == auth_identity:
+            raise AssertionError("credential bytes must not be read")
+        return original_read(fd, size)
+
+    monkeypatch.setattr(harness_mod.os, "read", guarded_read)
+    issued = _harness(tmp_path).issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    text = Path(issued["codex_home"], "config.toml").read_text(encoding="utf-8")
+    assert str(auth) in text
+    assert AUTH_BYTES_SENTINEL not in text
+
+
+@pytest.mark.parametrize("failure", [
+    "missing", "mode", "symlink", "hardlink", "owner", "parent_symlink",
+])
+def test_provider_auth_reference_rejects_unsafe_authority_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _provider_provenance: dict[str, Path], failure: str,
+) -> None:
+    auth = _provider_provenance["auth"]
+    config = _provider_provenance["config"]
+    if failure == "missing":
+        auth.unlink()
+    elif failure == "mode":
+        os.chmod(auth, 0o640)
+    elif failure == "symlink":
+        target = auth.with_name("target.json")
+        auth.replace(target)
+        auth.symlink_to(target)
+    elif failure == "hardlink":
+        os.link(auth, auth.with_name("linked.json"))
+    elif failure == "owner":
+        original_fstat = harness_mod.os.fstat
+        auth_identity = (auth.stat().st_dev, auth.stat().st_ino)
+
+        def wrong_owner(fd: int):
+            info = original_fstat(fd)
+            if (info.st_dev, info.st_ino) != auth_identity:
+                return info
+            values = list(info)
+            values[4] = info.st_uid + 1
+            return os.stat_result(values)
+
+        monkeypatch.setattr(harness_mod.os, "fstat", wrong_owner)
+    else:
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir(mode=0o700)
+        moved = real_parent / "auth.json"
+        auth.replace(moved)
+        linked_parent = tmp_path / "linked-parent"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                str(auth), str(linked_parent / "auth.json"),
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(config, 0o600)
+
+    started: list[dict[str, object]] = []
+    harness, checkout, _calls, _generic, _panes = _attach_harness(tmp_path)
+    harness._start_workspace_codex_home = lambda **kwargs: (
+        started.append(kwargs) or {"available": True}
+    )
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY,
+            generation=1, fence=FENCE,
+        )
+    assert error.value.code == "runtime_unavailable"
+    assert started == []
+
+
+def test_provider_auth_reference_detects_toctou_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _provider_provenance: dict[str, Path],
+) -> None:
+    auth = _provider_provenance["auth"]
+    original_open = harness_mod.os.open
+    swapped = False
+
+    def swapping_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == auth and not swapped:
+            swapped = True
+            replacement = auth.with_name("replacement.json")
+            replacement.write_text("replacement", encoding="utf-8")
+            os.chmod(replacement, 0o600)
+            replacement.replace(auth)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(harness_mod.os, "open", swapping_open)
+    started: list[dict[str, object]] = []
+    harness, checkout, _calls, _generic, _panes = _attach_harness(tmp_path)
+    harness._start_workspace_codex_home = lambda **kwargs: (
+        started.append(kwargs) or {"available": True}
+    )
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY,
+            generation=1, fence=FENCE,
+        )
+    assert error.value.code == "runtime_unavailable"
+    assert started == []
+
+
+def test_provider_metadata_rejects_symlink_ancestor_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _provider_provenance: dict[str, Path],
+) -> None:
+    home = _provider_provenance["home"]
+    real_parent = tmp_path / "real-metadata-parent"
+    real_parent.mkdir(mode=0o700)
+    moved_home = real_parent / home.name
+    home.rename(moved_home)
+    linked_parent = tmp_path / "linked-metadata-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    monkeypatch.setenv("CODEX_HOME", str(linked_parent / home.name))
+    started: list[dict[str, object]] = []
+    harness, checkout, _calls, _generic, _panes = _attach_harness(tmp_path)
+    harness._start_workspace_codex_home = lambda **kwargs: (
+        started.append(kwargs) or {"available": True}
+    )
+
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY,
+            generation=1, fence=FENCE,
+        )
+
+    assert error.value.code == "runtime_unavailable"
+    assert started == []
+
+
+def test_auth_recheck_failure_retires_private_files_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _provider_provenance: dict[str, Path],
+) -> None:
+    auth = _provider_provenance["auth"]
+    auth_identity = (auth.stat().st_dev, auth.stat().st_ino)
+    original_validate = harness_mod._validate_auth_reference
+    calls = 0
+
+    def fail_final_recheck(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise harness_mod.HarnessError("runtime_unavailable")
+        original_validate(path)
+
+    monkeypatch.setattr(
+        harness_mod, "_validate_auth_reference", fail_final_recheck,
+    )
+    started: list[dict[str, object]] = []
+    harness, checkout, _calls, _generic, _panes = _attach_harness(tmp_path)
+    harness._start_workspace_codex_home = lambda **kwargs: (
+        started.append(kwargs) or {"available": True}
+    )
+
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY,
+            generation=1, fence=FENCE,
+        )
+
+    root = tmp_path / "caps"
+    assert error.value.code == "runtime_unavailable"
+    assert started == []
+    assert not (root / f"{ATTACHMENT}.cap").exists()
+    assert not (root / f"{ATTACHMENT}.generation").exists()
+    assert not (root / f"{ATTACHMENT}.fence").exists()
+    assert not (root / f"{ATTACHMENT}.home" / "config.toml").exists()
+    assert auth.is_file()
+    assert (auth.stat().st_dev, auth.stat().st_ino) == auth_identity
+
+
+def test_retire_private_runtime_never_removes_external_auth_authority(
+    tmp_path: Path, _provider_provenance: dict[str, Path],
+) -> None:
+    auth = _provider_provenance["auth"]
+    identity = (auth.stat().st_dev, auth.stat().st_ino)
+    harness = _harness(tmp_path)
+    harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    harness._retire_private_runtime(ATTACHMENT)
+    assert auth.is_file()
+    assert (auth.stat().st_dev, auth.stat().st_ino) == identity
+
+
+_REAL_PROVIDER_HOME = Path(
+    os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),
+)
+
+
+@pytest.mark.skipif(
+    shutil.which("codex") is None
+    or shutil.which("herdr") is None
+    or not (_REAL_PROVIDER_HOME / "relay.config.toml").is_file(),
+    reason="需要真实 herdr/codex 与合法 custom-provider auth provenance",
+)
+def test_real_private_home_attach_and_fixed_wakeup_reaches_working(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl
+    import pty
+    import struct
+    import tempfile
+    import termios
+    import uuid
+
+    isolated = Path(tempfile.mkdtemp(prefix="e3-auth-", dir="/tmp"))
+    isolated.chmod(0o700)
+    session = "e3-auth-" + uuid.uuid4().hex[:8]
+    workdir = isolated / "checkout"
+    workdir.mkdir(mode=0o700)
+    config_dir = isolated / "herdr"
+    config_dir.mkdir(mode=0o700)
+    (config_dir / "config.toml").write_text(
+        "onboarding = false\n[update]\nmanifest_check = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(_REAL_PROVIDER_HOME))
+    real_provider_auth = harness_mod._provider_auth_provenance().authority
+    monkeypatch.setenv("HERDR_CONFIG_PATH", str(config_dir / "config.toml"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated / "xdg-config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(isolated / "xdg-state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(isolated / "xdg-data"))
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(isolated / "launch.json"),
+    )
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    monkeypatch.delenv("HERDR_ENV", raising=False)
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    monkeypatch.setattr(
+        herdr_client.next_profile, "require_session", lambda value: value,
+    )
+    owned = None
+    client = None
+    master_fd = None
+    slave_fd = None
+    pane_id = None
+    log_handle = open(isolated / "herdr.log", "wb")
+    try:
+        owned = subprocess.Popen(
+            [herdr_client.HERDR_BIN, "--session", session, "server"],
+            stdin=subprocess.DEVNULL, stdout=log_handle,
+            stderr=subprocess.STDOUT, close_fds=True, start_new_session=True,
+        )
+        log_handle.close()
+        herdr_client._SESSION_BOOTSTRAP_PROCESSES[session] = owned
+        harness = harness_mod.LocalCodexHarness(
+            capability_root=isolated / "data" / "capabilities",
+        )
+        attached = harness.attach_readonly(
+            session=session, checkout_path=workdir,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY,
+            generation=1, fence=FENCE,
+        )
+        pane_id = attached.pane_id
+        private_home = isolated / "data" / "capabilities" / f"{ATTACHMENT}.home"
+        private_config = private_home / "config.toml"
+        assert private_home.stat().st_mode & 0o777 == 0o700
+        assert private_config.stat().st_mode & 0o777 == 0o600
+        assert str(real_provider_auth) in private_config.read_text(encoding="utf-8")
+        assert not (private_home / "auth.json").exists()
+        master_fd, slave_fd = pty.openpty()
+        fcntl.ioctl(
+            slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0),
+        )
+        client = subprocess.Popen(
+            [herdr_client.HERDR_BIN, "--session", session],
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            close_fds=True, start_new_session=True,
+        )
+        os.close(slave_fd)
+        slave_fd = None
+        time.sleep(1)
+        assert client.poll() is None
+        herdr_client._run(
+            ["--session", session, "agent", "focus", pane_id], timeout=8,
+        )
+        herdr_client._run(
+            ["--session", session, "agent", "send-keys", pane_id, "enter"],
+            timeout=5,
+        )
+        deadline = time.monotonic() + 10
+        before = herdr_client.inspect_agent(session, pane_id)
+        while not before.get("visible_idle") and time.monotonic() < deadline:
+            time.sleep(0.2)
+            before = herdr_client.inspect_agent(session, pane_id)
+        assert before.get("agent_status") == "idle", before
+        assert before.get("visible_idle") is True, before
+        assert type(before.get("state_change_seq")) is int
+        receipt = harness.wakeup(ATTACHMENT)
+        after = herdr_client.inspect_agent(session, pane_id)
+        assert receipt == {
+            "digest": harness_mod.WAKEUP_DIGEST,
+            "text": harness_mod.WAKEUP_TEXT,
+        }
+        assert after.get("agent_status") == "working"
+        assert type(after.get("state_change_seq")) is int
+        assert type(before.get("state_change_seq")) is int
+        assert after["state_change_seq"] > before["state_change_seq"]
+    finally:
+        if client is not None:
+            if client.poll() is None:
+                client.terminate()
+                try:
+                    client.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    client.wait(timeout=5)
+        if master_fd is not None:
+            os.close(master_fd)
+        if slave_fd is not None:
+            os.close(slave_fd)
+        if pane_id is not None:
+            try:
+                herdr_client.close_pane(session, pane_id)
+            except Exception:
+                pass
+        subprocess.run(
+            [herdr_client.HERDR_BIN, "--session", session, "session", "close"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if owned is not None:
+            if owned.poll() is None:
+                owned.terminate()
+                try:
+                    owned.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    owned.kill()
+                    owned.wait(timeout=5)
+        if not log_handle.closed:
+            log_handle.close()
+        herdr_client._SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
+        shutil.rmtree(isolated, ignore_errors=True)
 
 
 def test_wakeup_is_fixed_and_omits_boss_body(tmp_path: Path) -> None:
@@ -847,15 +1256,12 @@ def test_old_generation_and_fence_fail_closed(tmp_path: Path) -> None:
 
 
 def _parse_mcp_config(text: str) -> dict[str, object]:
-    command = re.search(r"^command = \"([^\"]+)\"$", text, re.M)
-    args = re.search(r"^args = (\[.*\])$", text, re.M)
-    env = dict(re.findall(r'^([A-Z_]+) = "([^"]*)"$', text, re.M))
-    env.pop("command", None)
-    assert command is not None and args is not None
+    parsed = tomllib.loads(text)
+    cockpit = parsed["mcp_servers"]["cockpit"]
     return {
-        "command": command.group(1),
-        "args": json.loads(args.group(1)),
-        "env": env,
+        "command": cockpit["command"],
+        "args": cockpit["args"],
+        "env": cockpit["env"],
     }
 
 

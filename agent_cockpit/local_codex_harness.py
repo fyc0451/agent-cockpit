@@ -8,6 +8,7 @@ import re
 import secrets
 import stat
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -31,6 +32,9 @@ WAKEUP_TEXT = (
 )
 WAKEUP_DIGEST = "sha256:" + hashlib.sha256(WAKEUP_TEXT.encode()).hexdigest()
 _ATTACHMENT_ID = re.compile(r"att_[0-9a-f]{32}\Z")
+_PROVIDER_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+_PROVENANCE_FILE = "relay.config.toml"
+_MAX_PROVENANCE_BYTES = 64 * 1024
 
 
 class HarnessError(RuntimeError):
@@ -87,6 +91,19 @@ class AttachmentEvidence:
     provider: str
     harness: str
     identity_verified: bool
+
+
+@dataclass(frozen=True)
+class ProviderAuthReference:
+    model_provider: str
+    name: str
+    base_url: str
+    wire_api: str
+    command: str
+    args: tuple[str, ...]
+    timeout_ms: int
+    refresh_interval_ms: int | None
+    authority: Path
 
 
 class AgentHarnessAdapter(Protocol):
@@ -173,6 +190,7 @@ class LocalCodexHarness:
         attachment_id = attachment_id_text(attachment_id)
         if root is None or generation < 1:
             _fail("invalid_argument")
+        provenance = _provider_auth_provenance()
         _private_dir(root)
         token = secrets.token_hex(32)
         payload = {
@@ -193,7 +211,8 @@ class LocalCodexHarness:
             _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
             _write_private(current, str(generation).encode() + b"\n")
             _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
-            _write_mcp_home_config(home, cap, root)
+            _write_mcp_home_config(home, cap, root, provenance)
+            _validate_auth_reference(provenance.authority)
         except HarnessError as exc:
             if exc.unknown:
                 self._retire_private_runtime(attachment_id)
@@ -239,6 +258,7 @@ class LocalCodexHarness:
         root = self._capability_root
         if root is None or generation < 1:
             _fail("invalid_argument")
+        provenance = _provider_auth_provenance()
         _private_dir(root)
         token = secrets.token_hex(32)
         payload = {
@@ -260,12 +280,16 @@ class LocalCodexHarness:
             _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
             _write_private(root / f"{attachment_id}.generation", str(generation).encode() + b"\n")
             _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
-            _write_mcp_home_config(home, cap, root)
+            _write_mcp_home_config(home, cap, root, provenance)
+            _validate_auth_reference(provenance.authority)
         except HarnessError as exc:
             if exc.unknown:
                 self._retire_private_runtime(attachment_id)
             raise
-        return {"capability_path": cap, "codex_home": home, "generation": generation}
+        return {
+            "capability_path": cap, "codex_home": home, "generation": generation,
+            "_auth_reference": provenance.authority,
+        }
 
     def _bind_private_runtime(
         self, *, attachment_id: str, pane_id: str, instance_id: str,
@@ -408,6 +432,11 @@ class LocalCodexHarness:
             raise
         pane_id: str | None = None
         live_id = instance_id
+        try:
+            _validate_auth_reference(Path(issued["_auth_reference"]))
+        except HarnessError:
+            self._retire_private_runtime(attachment_id)
+            raise
         try:
             self._ensure_session(session=session)
         except Exception:
@@ -680,13 +709,35 @@ def _safe_public_path(path: Path) -> Path:
     return resolved
 
 
-def _write_mcp_home_config(home: Path, cap: Path, capability_root: Path) -> None:
+def _write_mcp_home_config(
+    home: Path, cap: Path, capability_root: Path,
+    provenance: ProviderAuthReference,
+) -> None:
     data_root = _safe_public_path(Path(capability_root).parent)
     interpreter = _safe_public_path(Path(sys.executable))
     module_root = _safe_public_path(Path(__file__).resolve().parent.parent)
     cap = _safe_public_path(cap)
+    auth_args = json.dumps(
+        list(provenance.args), ensure_ascii=True, separators=(",", ":"),
+    )
+    refresh = (
+        ""
+        if provenance.refresh_interval_ms is None
+        else f"refresh_interval_ms = {provenance.refresh_interval_ms}\n"
+    )
     config = (
+        f"model_provider = {_toml_basic(provenance.model_provider)}\n"
+        'network_access = "enabled"\n'
         'sandbox_mode = "read-only"\n'
+        f"[model_providers.{provenance.model_provider}]\n"
+        f"name = {_toml_basic(provenance.name)}\n"
+        f"base_url = {_toml_basic(provenance.base_url)}\n"
+        f"wire_api = {_toml_basic(provenance.wire_api)}\n"
+        f"[model_providers.{provenance.model_provider}.auth]\n"
+        f"command = {_toml_basic(provenance.command)}\n"
+        f"args = {auth_args}\n"
+        f"timeout_ms = {provenance.timeout_ms}\n"
+        f"{refresh}"
         "[mcp_servers.cockpit]\n"
         f"command = {_toml_basic(str(interpreter))}\n"
         'args = ["-P", "-m", "agent_cockpit.workspace_mcp_entry"]\n'
@@ -697,6 +748,199 @@ def _write_mcp_home_config(home: Path, cap: Path, capability_root: Path) -> None
         'PYTHONNOUSERSITE = "1"\n'
     )
     _write_private(home / "config.toml", config.encode())
+
+
+def _verified_metadata(path: Path) -> bytes:
+    try:
+        before = path.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size > _MAX_PROVENANCE_BYTES
+        ):
+            _fail("runtime_unavailable")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(fd)
+            if (
+                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or opened.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_size > _MAX_PROVENANCE_BYTES
+            ):
+                _fail("runtime_unavailable")
+            chunks: list[bytes] = []
+            remaining = opened.st_size
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            if len(payload) != opened.st_size:
+                _fail("runtime_unavailable")
+            return payload
+        finally:
+            os.close(fd)
+    except HarnessError:
+        raise
+    except OSError:
+        _fail("runtime_unavailable")
+    raise AssertionError("unreachable")
+
+
+def _safe_reference_ancestry(path: Path) -> None:
+    if not path.is_absolute() or ".." in path.parts:
+        _fail("runtime_unavailable")
+    current_uid = os.getuid()
+    current_gid = os.getgid()
+    current = Path(path.anchor)
+    directories = list(path.parents)
+    directories.reverse()
+    for current in directories:
+        try:
+            info = current.lstat()
+        except OSError:
+            _fail("runtime_unavailable")
+        mode = stat.S_IMODE(info.st_mode)
+        sticky_root = info.st_uid == 0 and bool(mode & stat.S_ISVTX)
+        owned_group_only = (
+            not mode & 0o002
+            and info.st_uid == current_uid
+            and info.st_gid == current_gid
+        )
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid not in {0, current_uid}
+            or (mode & 0o022 and not sticky_root and not owned_group_only)
+        ):
+            _fail("runtime_unavailable")
+    try:
+        if path.parent.lstat().st_uid != current_uid:
+            _fail("runtime_unavailable")
+    except OSError:
+        _fail("runtime_unavailable")
+
+
+def _validate_auth_reference(path: Path) -> None:
+    _safe_reference_ancestry(path)
+    try:
+        before = path.lstat()
+        flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        _fail("runtime_unavailable")
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        or not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != os.getuid()
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+    ):
+        _fail("runtime_unavailable")
+
+
+def _positive_int(value: object) -> int:
+    if type(value) is not int or value < 1:
+        _fail("runtime_unavailable")
+    return value
+
+
+def _nonnegative_int(value: object) -> int:
+    if type(value) is not int or value < 0:
+        _fail("runtime_unavailable")
+    return value
+
+
+def _provider_auth_provenance() -> ProviderAuthReference:
+    raw_home = os.environ.get("CODEX_HOME")
+    if not isinstance(raw_home, str) or raw_home == "":
+        _fail("runtime_unavailable")
+    home = Path(raw_home)
+    if not home.is_absolute() or ".." in home.parts:
+        _fail("runtime_unavailable")
+    metadata = home / _PROVENANCE_FILE
+    _safe_reference_ancestry(metadata)
+    try:
+        home_info = home.lstat()
+    except OSError:
+        _fail("runtime_unavailable")
+    if (
+        stat.S_ISLNK(home_info.st_mode)
+        or not stat.S_ISDIR(home_info.st_mode)
+        or home_info.st_uid != os.getuid()
+    ):
+        _fail("runtime_unavailable")
+    try:
+        value = tomllib.loads(
+            _verified_metadata(metadata).decode("utf-8"),
+        )
+    except HarnessError:
+        raise
+    except (UnicodeError, tomllib.TOMLDecodeError):
+        _fail("runtime_unavailable")
+    name = value.get("model_provider")
+    providers = value.get("model_providers")
+    if (
+        not isinstance(name, str)
+        or _PROVIDER_NAME.fullmatch(name) is None
+        or not isinstance(providers, dict)
+        or not isinstance(providers.get(name), dict)
+    ):
+        _fail("runtime_unavailable")
+    provider = providers[name]
+    if not {"name", "base_url", "wire_api", "auth"} <= set(provider):
+        _fail("runtime_unavailable")
+    auth = provider["auth"]
+    if not isinstance(auth, dict) or not {"command", "args", "timeout_ms"} <= set(auth):
+        _fail("runtime_unavailable")
+    provider_name = provider["name"]
+    base_url = provider["base_url"]
+    wire_api = provider["wire_api"]
+    command = auth["command"]
+    args = auth["args"]
+    if (
+        not all(isinstance(item, str) and item for item in (
+            provider_name, base_url, wire_api, command,
+        ))
+        or not base_url.startswith("https://")
+        or wire_api != "responses"
+        or command != "/usr/bin/jq"
+        or not isinstance(args, list)
+        or len(args) != 3
+        or args[:2] != ["-r", ".OPENAI_API_KEY"]
+        or not isinstance(args[2], str)
+    ):
+        _fail("runtime_unavailable")
+    authority = Path(args[2])
+    _validate_auth_reference(authority)
+    refresh = auth.get("refresh_interval_ms")
+    if refresh is not None:
+        refresh = _nonnegative_int(refresh)
+    return ProviderAuthReference(
+        model_provider=name,
+        name=provider_name,
+        base_url=base_url,
+        wire_api=wire_api,
+        command=command,
+        args=tuple(args),
+        timeout_ms=_positive_int(auth["timeout_ms"]),
+        refresh_interval_ms=refresh,
+        authority=authority,
+    )
 
 
 def _unlink_owned(path: Path) -> None:
