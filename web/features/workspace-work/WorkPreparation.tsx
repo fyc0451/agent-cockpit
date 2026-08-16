@@ -11,7 +11,9 @@ import {
   type WorkspacePreparation,
 } from '../../api/workspaceExecution'
 import { newIdempotencyKey } from '../../api/idempotency'
+import { stateKindFromError } from '../../api/errorState'
 import { Button } from '../../components/Button'
+import { StatusState } from '../../components/StatusState'
 
 function messageForError(error: unknown): string {
   if (!(error instanceof ApiError)) return '暂时无法完成执行准备。请重试。'
@@ -31,15 +33,6 @@ function messageForError(error: unknown): string {
 
 function canAttach(state: string | undefined): boolean {
   return state === 'prepared' || state === 'detached' || state === 'outcome_unknown'
-}
-
-function isScopeNotFound(error: unknown): boolean {
-  if (!(error instanceof ApiError) || error.status !== 404) return false
-  return (
-    error.code === 'project_not_found' ||
-    error.code === 'workspace_not_found' ||
-    error.code === 'work_item_not_found'
-  )
 }
 
 function useIntentKey(binding: string): [string, () => void] {
@@ -82,7 +75,8 @@ export function WorkPreparation({
 
   const members = membersQuery.data?.data.items ?? []
   const prep = prepQuery.data?.data ?? null
-  const scopeMissing = isScopeNotFound(membersQuery.error) || isScopeNotFound(prepQuery.error)
+  const readPending = membersQuery.isPending || prepQuery.isPending
+  const readError = membersQuery.error ?? prepQuery.error
   const [prepareKey, rotatePrepareKey] = useIntentKey(selectedId ?? '')
   const [attachKey, rotateAttachKey] = useIntentKey(prep ? `a:${prep.revision}` : 'a')
   const [detachKey, rotateDetachKey] = useIntentKey(prep ? `d:${prep.revision}` : 'd')
@@ -161,6 +155,40 @@ export function WorkPreparation({
 
   const state = prep?.state
   const selectedMember = members.find((item) => item.identity_id === selectedId) ?? prep?.identity ?? null
+  const reload = () => {
+    void membersQuery.refetch()
+    void prepQuery.refetch()
+  }
+
+  if (readPending) {
+    return (
+      <section className="work-prep" aria-label="执行准备">
+        <StatusState kind="loading" title="正在加载执行准备…" />
+      </section>
+    )
+  }
+
+  if (readError) {
+    const kind = stateKindFromError(readError)
+    const typed = readError instanceof ApiError
+    const message = typed
+      ? readError.message
+      : readError instanceof Error
+        ? readError.message
+        : '暂时无法读取执行准备。'
+    const code = typed ? readError.code : 'unknown'
+    const requestId = typed ? readError.requestId : null
+    return (
+      <section className="work-prep" aria-label="执行准备">
+        <StatusState kind={kind} description={message} action={{ label: '重试', onClick: reload }}>
+          <p className="state-desc">
+            错误码：{code}
+            {requestId ? ` · request_id: ${requestId}` : ''}
+          </p>
+        </StatusState>
+      </section>
+    )
+  }
 
   return (
     <section className="work-prep" aria-label="执行准备">
@@ -169,11 +197,7 @@ export function WorkPreparation({
         <span>未分配</span>
         <span>尚未领取</span>
       </p>
-      {prepQuery.isError || membersQuery.isError ? (
-        <p className="focus-inline-error" role="alert">无法完整读取执行准备。已保留当前已知状态。</p>
-      ) : null}
-
-      {scopeMissing ? null : !prep ? (
+      {!prep ? (
         <>
           <ul className="work-prep-members">
             {members.map((item) => (

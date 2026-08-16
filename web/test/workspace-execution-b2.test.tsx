@@ -78,9 +78,31 @@ interface RecordedRequest {
   body: string
 }
 
+function writeCalls(calls: RecordedRequest[]) {
+  return calls.filter((call) => (
+    call.method === 'POST'
+    && (call.url === MEMBERS_URL
+      || call.url === PREP_URL
+      || call.url.endsWith('/attach')
+      || call.url.endsWith('/detach'))
+  ))
+}
+
+function expectNoWritablePrep() {
+  expect(screen.queryByRole('button', { name: '新建成员' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '准备执行' })).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('成员名称')).not.toBeInTheDocument()
+  expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '连接只读 Agent' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '断开' })).not.toBeInTheDocument()
+}
+
 function stubB2(opts: {
   members?: unknown[]
   membersError?: { status: number; code: string }
+  membersDisconnect?: boolean
+  hangMembers?: boolean
+  hangPrep?: boolean
   prep?: unknown | null
   prepError?: { status: number; code: string }
   writeError?: { status: number; code: string }
@@ -133,6 +155,8 @@ function stubB2(opts: {
           members = [...members, created]
           return ok(created, 201)
         }
+        if (opts.hangMembers) return new Promise(() => {})
+        if (opts.membersDisconnect) throw new TypeError('Failed to fetch')
         if (opts.membersError) return err(opts.membersError.status, opts.membersError.code)
         return ok({ items: members, next_cursor: null })
       }
@@ -142,6 +166,7 @@ function stubB2(opts: {
           prep = preparation()
           return ok(prep, 201)
         }
+        if (opts.hangPrep) return new Promise(() => {})
         if (opts.prepError) return err(opts.prepError.status, opts.prepError.code)
         if (prep == null) return err(404, 'preparation_not_found')
         return ok(prep)
@@ -412,27 +437,49 @@ describe('Checkpoint B2 执行准备卡', () => {
     first.unmount()
 
     vi.unstubAllGlobals()
-    stubB2({ membersError: { status: 404, code: 'project_not_found' } })
+    const missingProjectCalls = stubB2({ membersError: { status: 404, code: 'project_not_found' } })
     const missingProject = renderApp(`${HOME_ROUTE}?work=wrk_b2`)
-    expect(await screen.findByText(/无法完整读取执行准备/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '新建成员' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '准备执行' })).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('成员名称')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '连接只读 Agent' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '断开' })).not.toBeInTheDocument()
-    expect(screen.getByText('尚未领取')).toBeInTheDocument()
+    expect(await screen.findByText(/错误码：project_not_found/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+    expectNoWritablePrep()
+    expect(writeCalls(missingProjectCalls)).toHaveLength(0)
     missingProject.unmount()
 
     vi.unstubAllGlobals()
-    stubB2({
+    const missingWorkCalls = stubB2({
       members: [memberAtlas],
       prepError: { status: 404, code: 'work_item_not_found' },
     })
     renderApp(`${HOME_ROUTE}?work=wrk_b2`)
-    expect(await screen.findByText(/无法完整读取执行准备/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '新建成员' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '准备执行' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '连接只读 Agent' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '断开' })).not.toBeInTheDocument()
+    expect(await screen.findByText(/错误码：work_item_not_found/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+    expectNoWritablePrep()
+    expect(writeCalls(missingWorkCalls)).toHaveLength(0)
+  })
+
+  it('GET 途中只显示加载，零可写动作与 write request', async () => {
+    const calls = stubB2({ members: [memberAtlas], hangPrep: true })
+    renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    expect(await screen.findByText('正在加载执行准备…')).toBeInTheDocument()
+    expectNoWritablePrep()
+    expect(writeCalls(calls)).toHaveLength(0)
+  })
+
+  it('GET 500/disconnected 只显示 typed 错误和一个恢复动作，零可写与 write request', async () => {
+    const serverCalls = stubB2({ membersError: { status: 500, code: 'server_error' } })
+    const server = renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    expect(await screen.findByText(/错误码：server_error/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+    expectNoWritablePrep()
+    expect(writeCalls(serverCalls)).toHaveLength(0)
+    server.unmount()
+
+    vi.unstubAllGlobals()
+    const downCalls = stubB2({ membersDisconnect: true })
+    renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    expect(await screen.findByRole('button', { name: '重试' }, { timeout: 8000 })).toBeInTheDocument()
+    expect(screen.getByText(/错误码：disconnected/)).toBeInTheDocument()
+    expectNoWritablePrep()
+    expect(writeCalls(downCalls)).toHaveLength(0)
   })
 })
