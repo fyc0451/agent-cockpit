@@ -340,3 +340,105 @@ def test_attach_requires_paired_workspace_authority_and_does_not_invent_format(
     assert started[-1]["project_id"] == forged
     assert started[-1]["workspace_id"] == WORKSPACE
     assert started[-1]["args"] == "--sandbox read-only"
+
+
+ATTACHMENT = "att_" + "c" * 32
+IDENTITY = "idn_" + "d" * 32
+SENTINEL = "BOSS-BODY-SENTINEL-9f3c"
+
+
+def _harness(tmp_path: Path, *, prompts: list[str] | None = None) -> harness_mod.LocalCodexHarness:
+    checkout = tmp_path / "chk"
+    checkout.mkdir(exist_ok=True)
+    sent = prompts if prompts is not None else []
+
+    def prompt(session: str, pane_id: str, text: str) -> dict[str, object]:
+        sent.append(text)
+        return {"available": True, "session": session, "pane_id": pane_id}
+
+    return harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
+        wakeup_prompt=prompt,
+        ensure_session=lambda *, session: None,
+        start_agent=lambda **kwargs: {
+            "available": True, "pane_id": "pane-1",
+            "instance_id": INSTANCE, "cwd": str(checkout),
+        },
+        get_launch_descriptor=lambda *, session, pane_id: {
+            "session": session, "pane_id": pane_id, "instance_id": INSTANCE,
+            "workdir": str(checkout), "kind": "codex", "args": ["--sandbox", "read-only"],
+        },
+        get_launch_descriptor_by_instance=lambda instance_id, **_kw: {
+            "session": "s", "pane_id": "pane-1", "instance_id": instance_id,
+            "workdir": str(checkout), "kind": "codex", "args": ["--sandbox", "read-only"],
+        },
+        snapshot=lambda *, session: {
+            "panes": [{"pane_id": "pane-1", "cwd": str(checkout)}],
+        },
+        close_pane=lambda *, session, pane_id: {"available": True},
+        new_instance_id=lambda: INSTANCE,
+    )
+
+
+def test_launch_spec_stays_readonly_public_args(tmp_path: Path) -> None:
+    checkout = tmp_path / "chk"
+    checkout.mkdir()
+    spec = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
+    ).build_launch_spec(checkout)
+    spec.assert_readonly()
+    assert spec.args == harness_mod.LAUNCH_ARGS == ("--sandbox", "read-only")
+    assert spec.argv_text() == "--sandbox read-only"
+    assert SENTINEL not in spec.argv_text()
+
+
+def test_private_home_does_not_touch_user_codex_config_and_cap_is_0600(
+    tmp_path: Path,
+) -> None:
+    user_cfg = Path.home() / ".codex" / "config.toml"
+    before = user_cfg.stat() if user_cfg.exists() else None
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence="sha256:" + "ab" * 32, session="s", pane_id="pane-1",
+    )
+    assert issued["capability_path"].stat().st_mode & 0o777 == 0o600
+    home = Path(issued["codex_home"])
+    assert home.is_dir()
+    assert home.stat().st_mode & 0o777 == 0o700
+    config = home / "config.toml"
+    assert config.is_file()
+    assert config.stat().st_mode & 0o777 == 0o600
+    text = config.read_text(encoding="utf-8")
+    assert "mcp_servers" in text
+    assert "cockpit" in text
+    assert str(issued["capability_path"]) in text
+    assert SENTINEL not in text
+    secret = issued["capability_path"].read_text(encoding="utf-8")
+    assert "token" in secret
+    after = user_cfg.stat() if user_cfg.exists() else None
+    if before is None:
+        assert after is None
+    else:
+        assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+
+
+def test_wakeup_is_fixed_and_omits_boss_body(tmp_path: Path) -> None:
+    prompts: list[str] = []
+    harness = _harness(tmp_path, prompts=prompts)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence="sha256:" + "ab" * 32, session="s", pane_id="pane-1",
+    )
+    with pytest.raises(harness_mod.HarnessError) as extra:
+        harness.wakeup(ATTACHMENT, body=SENTINEL)
+    assert extra.value.code == "invalid_argument"
+    result = harness.wakeup(ATTACHMENT)
+    assert prompts == [harness_mod.WAKEUP_TEXT]
+    assert result["digest"] == harness_mod.WAKEUP_DIGEST
+    assert SENTINEL not in prompts[0]
+    assert SENTINEL not in issued["capability_path"].read_text(encoding="utf-8")
+    spec = harness.build_launch_spec(tmp_path / "chk")
+    assert SENTINEL not in spec.argv_text()
+    descriptor = harness._get_launch_descriptor(session="s", pane_id="pane-1")
+    assert SENTINEL not in str(descriptor)

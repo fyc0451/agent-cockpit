@@ -1,6 +1,11 @@
-"""Read-only Codex/Herdr attach for Checkpoint B. No prompt or pane I/O."""
+"""Read-only Codex/Herdr attach plus private capability/wakeup seam."""
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import secrets
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -13,6 +18,8 @@ HARNESS = "codex_terminal_managed_v1"
 KIND = "codex"
 SANDBOX = "read-only"
 LAUNCH_ARGS = ("--sandbox", "read-only")
+WAKEUP_TEXT = "COCKPIT_WAKEUP_V1"
+WAKEUP_DIGEST = "sha256:" + hashlib.sha256(WAKEUP_TEXT.encode()).hexdigest()
 
 
 class HarnessError(RuntimeError):
@@ -100,6 +107,8 @@ class LocalCodexHarness:
         snapshot: Callable[..., dict[str, Any]] | None = None,
         close_pane: Callable[..., dict[str, Any]] | None = None,
         new_instance_id: Callable[[], str] | None = None,
+        capability_root: Path | None = None,
+        wakeup_prompt: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self._ensure_session = ensure_session or herdr_client.ensure_session
         self._start_agent = start_agent or herdr_client.start_agent
@@ -115,6 +124,10 @@ class LocalCodexHarness:
         self._new_instance_id = (
             new_instance_id or herdr_client.new_agent_instance_id
         )
+        self._capability_root = (
+            None if capability_root is None else Path(capability_root)
+        )
+        self._wakeup_prompt = wakeup_prompt or _default_wakeup_prompt
         for name in _FORBIDDEN:
             if hasattr(self, name):
                 _fail("invalid_argument")
@@ -128,6 +141,65 @@ class LocalCodexHarness:
         )
         spec.assert_readonly()
         return spec
+
+    def issue_capability(
+        self, *, attachment_id: str, identity_id: str, generation: int,
+        fence: str, session: str, pane_id: str,
+    ) -> dict[str, Any]:
+        root = self._capability_root
+        if root is None or not attachment_id or generation < 1:
+            _fail("invalid_argument")
+        _private_dir(root)
+        token = secrets.token_hex(32)
+        payload = {
+            "attachment_id": attachment_id,
+            "identity_id": identity_id,
+            "generation": generation,
+            "fence": fence,
+            "session": session,
+            "pane_id": pane_id,
+            "token": token,
+        }
+        cap = root / f"{attachment_id}.cap"
+        current = root / f"{attachment_id}.generation"
+        home = root / f"{attachment_id}.home"
+        _private_dir(home)
+        _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
+        _write_private(current, str(generation).encode() + b"\n")
+        config = (
+            'sandbox_mode = "read-only"\n'
+            "[mcp_servers.cockpit]\n"
+            'command = "python"\n'
+            'args = ["-m", "agent_cockpit.private_codex_mcp"]\n'
+            "[mcp_servers.cockpit.env]\n"
+            f'COCKPIT_CAPABILITY_FILE = "{cap}"\n'
+        )
+        _write_private(home / "config.toml", config.encode())
+        return {
+            "capability_path": cap,
+            "codex_home": home,
+            "generation": generation,
+        }
+
+    def wakeup(self, attachment_id: str, **extra: object) -> dict[str, str]:
+        if extra or not attachment_id:
+            _fail("invalid_argument")
+        record = _read_capability(self._require_cap(attachment_id))
+        sent = self._wakeup_prompt(
+            record["session"], record["pane_id"], WAKEUP_TEXT,
+        )
+        if isinstance(sent, dict) and sent.get("available") is False:
+            _fail("runtime_unavailable")
+        return {"digest": WAKEUP_DIGEST, "text": WAKEUP_TEXT}
+
+    def _require_cap(self, attachment_id: str) -> Path:
+        root = self._capability_root
+        if root is None:
+            _fail("invalid_argument")
+        path = root / f"{attachment_id}.cap"
+        if not path.is_file():
+            _fail("invalid_argument")
+        return path
 
     def attach_readonly(
         self, *, session: str, checkout_path: Path,
@@ -310,3 +382,65 @@ def _descriptor_matches(
         if descriptor.get("kind") not in (None, KIND):
             return False
     return True
+
+
+def _default_wakeup_prompt(session: str, pane_id: str, text: str) -> dict[str, Any]:
+    if text != WAKEUP_TEXT:
+        _fail("invalid_argument")
+    return herdr_client.pane_send(session, pane_id, text, mode="prompt")
+
+
+def _private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+    ):
+        _fail("invalid_argument")
+
+
+def _write_private(path: Path, payload: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
+def _read_capability(path: Path) -> dict[str, Any]:
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            _fail("invalid_argument")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _fail("invalid_argument")
+    if not isinstance(value, dict):
+        _fail("invalid_argument")
+    return value
+
+
+def current_generation(capability_path: Path) -> int | None:
+    try:
+        value = json.loads(capability_path.read_text(encoding="utf-8"))
+        name = value.get("attachment_id")
+        if not isinstance(name, str) or not name:
+            return None
+        raw = (capability_path.parent / f"{name}.generation").read_text(
+            encoding="ascii",
+        ).strip()
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not raw.isdigit():
+        return None
+    return int(raw)
