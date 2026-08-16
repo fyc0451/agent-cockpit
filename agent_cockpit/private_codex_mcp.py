@@ -4,15 +4,66 @@ from __future__ import annotations
 import json
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from . import local_codex_harness as harness_mod
 
 
-TOOLS = (
-    "claim_current", "apply_patch", "run", "reply_complete", "fail",
-)
+_TOOL_DEFINITIONS = {
+    "claim_current": {
+        "name": "claim_current",
+        "description": (
+            "Call first after COCKPIT_WAKEUP_V1 with {}. Claims the dispatched work "
+            "and returns root_message.body, claim.revision, and lease.revision."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    "apply_patch": {
+        "name": "apply_patch",
+        "description": (
+            "Call after claim_current to write the managed checkout. Pass "
+            "claim_revision=claim.revision and lease_revision=lease.revision from "
+            "claim_current, plus patch as a unified diff. Returns lease.revision for "
+            "reply_complete."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "claim_revision": {"type": "integer"},
+                "lease_revision": {"type": "integer"},
+                "patch": {"type": "string"},
+            },
+            "required": ["claim_revision", "lease_revision", "patch"],
+            "additionalProperties": False,
+        },
+    },
+    "reply_complete": {
+        "name": "reply_complete",
+        "description": (
+            "Call after apply_patch to finish the work. Pass the same claim_revision, "
+            "lease_revision=lease.revision returned by apply_patch, and body as the "
+            "completion summary."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "claim_revision": {"type": "integer"},
+                "lease_revision": {"type": "integer"},
+                "body": {"type": "string"},
+            },
+            "required": ["claim_revision", "lease_revision", "body"],
+            "additionalProperties": False,
+        },
+    },
+}
+TOOLS = tuple(_TOOL_DEFINITIONS)
 NOT_AVAILABLE = "claim_not_available"
 _PUBLIC_CODES = frozenset({
     "invalid_argument", "runtime_capability_invalid", "work_item_not_found",
@@ -99,12 +150,7 @@ def dispatch(
         return {
             "jsonrpc": "2.0", "id": ident,
             "result": {
-                "tools": [
-                    {"name": name, "description": NOT_AVAILABLE, "inputSchema": {
-                        "type": "object", "properties": {},
-                    }}
-                    for name in names
-                ],
+                "tools": [deepcopy(_TOOL_DEFINITIONS[name]) for name in names],
             },
         }
     if method == "tools/call":

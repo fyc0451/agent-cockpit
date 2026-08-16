@@ -20,7 +20,15 @@ HARNESS = "codex_terminal_managed_v1"
 KIND = "codex"
 SANDBOX = "read-only"
 LAUNCH_ARGS = ("--sandbox", "read-only")
-WAKEUP_TEXT = "COCKPIT_WAKEUP_V1"
+WAKEUP_TEXT = (
+    "COCKPIT_WAKEUP_V1\n"
+    "Start the dispatched-work workflow now. Call claim_current with {} first. "
+    "After it returns, read root_message.body and do that work in the managed "
+    "checkout. Call apply_patch with claim_revision and lease_revision from "
+    "claim_current, plus patch as a unified diff. Then call reply_complete with "
+    "the same claim_revision, lease_revision returned by apply_patch, and body "
+    "as a concise completion summary."
+)
 WAKEUP_DIGEST = "sha256:" + hashlib.sha256(WAKEUP_TEXT.encode()).hexdigest()
 _ATTACHMENT_ID = re.compile(r"att_[0-9a-f]{32}\Z")
 

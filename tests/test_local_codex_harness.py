@@ -450,6 +450,17 @@ def test_private_home_does_not_touch_user_codex_config_and_cap_is_0600(
 
 
 def test_wakeup_is_fixed_and_omits_boss_body(tmp_path: Path) -> None:
+    expected_wakeup = (
+        "COCKPIT_WAKEUP_V1\n"
+        "Start the dispatched-work workflow now. Call claim_current with {} first. "
+        "After it returns, read root_message.body and do that work in the managed "
+        "checkout. Call apply_patch with claim_revision and lease_revision from "
+        "claim_current, plus patch as a unified diff. Then call reply_complete with "
+        "the same claim_revision, lease_revision returned by apply_patch, and body "
+        "as a concise completion summary."
+    )
+    assert harness_mod.WAKEUP_TEXT == expected_wakeup
+    assert harness_mod.WAKEUP_TEXT.count("COCKPIT_WAKEUP_V1") == 1
     prompts: list[str] = []
     harness = _harness(tmp_path, prompts=prompts)
     issued = harness.issue_capability(
@@ -462,7 +473,12 @@ def test_wakeup_is_fixed_and_omits_boss_body(tmp_path: Path) -> None:
     result = harness.wakeup(ATTACHMENT)
     assert prompts == [harness_mod.WAKEUP_TEXT]
     assert result["digest"] == harness_mod.WAKEUP_DIGEST
+    token = json.loads(
+        issued["capability_path"].read_text(encoding="utf-8")
+    )["token"]
     assert SENTINEL not in prompts[0]
+    assert token not in prompts[0]
+    assert FENCE not in prompts[0]
     assert SENTINEL not in issued["capability_path"].read_text(encoding="utf-8")
     spec = harness.build_launch_spec(tmp_path / "chk")
     assert SENTINEL not in spec.argv_text()

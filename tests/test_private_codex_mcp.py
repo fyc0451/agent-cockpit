@@ -10,6 +10,59 @@ from agent_cockpit import private_codex_mcp as mcp
 ATTACHMENT = "att_" + "c" * 32
 IDENTITY = "idn_" + "d" * 32
 FENCE = "sha256:" + "ab" * 32
+SENTINEL = "BOSS-CONTRACT-SENTINEL-9df1"
+EXPECTED_TOOLS = [
+    {
+        "name": "claim_current",
+        "description": (
+            "Call first after COCKPIT_WAKEUP_V1 with {}. Claims the dispatched work "
+            "and returns root_message.body, claim.revision, and lease.revision."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "apply_patch",
+        "description": (
+            "Call after claim_current to write the managed checkout. Pass "
+            "claim_revision=claim.revision and lease_revision=lease.revision from "
+            "claim_current, plus patch as a unified diff. Returns lease.revision for "
+            "reply_complete."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "claim_revision": {"type": "integer"},
+                "lease_revision": {"type": "integer"},
+                "patch": {"type": "string"},
+            },
+            "required": ["claim_revision", "lease_revision", "patch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "reply_complete",
+        "description": (
+            "Call after apply_patch to finish the work. Pass the same claim_revision, "
+            "lease_revision=lease.revision returned by apply_patch, and body as the "
+            "completion summary."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "claim_revision": {"type": "integer"},
+                "lease_revision": {"type": "integer"},
+                "body": {"type": "string"},
+            },
+            "required": ["claim_revision", "lease_revision", "body"],
+            "additionalProperties": False,
+        },
+    },
+]
 
 
 def _cap(tmp_path: Path, *, generation: int = 1) -> Path:
@@ -21,7 +74,7 @@ def _cap(tmp_path: Path, *, generation: int = 1) -> Path:
     return issued["capability_path"]
 
 
-def test_tools_only_return_claim_not_available_without_side_effects(
+def test_tools_publish_exact_contract_and_deny_without_side_effects(
     tmp_path: Path, monkeypatch,
 ) -> None:
     cap = _cap(tmp_path)
@@ -31,16 +84,33 @@ def test_tools_only_return_claim_not_available_without_side_effects(
     listed = mcp.dispatch({
         "jsonrpc": "2.0", "id": 1, "method": "tools/list",
     })
-    names = {tool["name"] for tool in listed["result"]["tools"]}
-    assert names == {
-        "claim_current", "apply_patch", "run", "reply_complete", "fail",
+    assert listed["result"]["tools"] == EXPECTED_TOOLS
+    wired = mcp.dispatch(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        claim_tools=object(), write_tools=object(),
+    )
+    assert wired["result"]["tools"] == EXPECTED_TOOLS
+    metadata = json.dumps(listed["result"]["tools"], sort_keys=True)
+    token = json.loads(cap.read_text(encoding="utf-8"))["token"]
+    for forbidden in (
+        "claim_not_available", "\"run\"", "\"fail\"", SENTINEL, token, FENCE,
+    ):
+        assert forbidden not in metadata
+    arguments = {
+        "claim_current": {},
+        "apply_patch": {
+            "claim_revision": 2, "lease_revision": 2,
+            "patch": "diff --git a/a b/a\n",
+        },
+        "reply_complete": {
+            "claim_revision": 2, "lease_revision": 3, "body": "done",
+        },
     }
-    for index, name in enumerate(names):
+    for index, name in enumerate(arguments):
         reply = mcp.dispatch({
-            "jsonrpc": "2.0", "id": index + 2, "method": "tools/call",
+            "jsonrpc": "2.0", "id": index + 3, "method": "tools/call",
             "params": {
-                "name": name,
-                "arguments": {"path": str(target), "body": "should-not-write"},
+                "name": name, "arguments": arguments[name],
             },
         })
         assert reply["result"]["isError"] is True
