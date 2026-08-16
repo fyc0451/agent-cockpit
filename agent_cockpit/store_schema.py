@@ -251,9 +251,14 @@ _WORKSPACE_WORK_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
     "messages": (
         ("message_id", "TEXT", 1, 1),
         ("thread_id", "TEXT", 1, 0),
+        ("ordinal", "INTEGER", 1, 0),
+        ("message_kind", "TEXT", 1, 0),
         ("author_kind", "TEXT", 1, 0),
         ("author_ref", "TEXT", 0, 0),
+        ("author_generation", "INTEGER", 0, 0),
+        ("reply_to_message_id", "TEXT", 0, 0),
         ("body", "TEXT", 1, 0),
+        ("created_at", "TEXT", 1, 0),
     ),
     "work_items": (
         ("work_item_id", "TEXT", 1, 1),
@@ -261,11 +266,39 @@ _WORKSPACE_WORK_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
         ("status", "TEXT", 1, 0),
         ("acceptance", "TEXT", 0, 0),
         ("constraints", "TEXT", 0, 0),
+        ("revision", "INTEGER", 1, 0),
+        ("updated_at", "TEXT", 1, 0),
+    ),
+    "work_item_claims": (
+        ("claim_id", "TEXT", 1, 1),
+        ("work_item_id", "TEXT", 1, 0),
+        ("identity_id", "TEXT", 1, 0),
+        ("generation", "INTEGER", 1, 0),
+        ("state", "TEXT", 1, 0),
+        ("revision", "INTEGER", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+        ("updated_at", "TEXT", 1, 0),
+    ),
+    "message_receipts": (
+        ("receipt_id", "TEXT", 1, 1),
+        ("project_id", "TEXT", 1, 0),
+        ("workspace_id", "TEXT", 1, 0),
+        ("work_item_id", "TEXT", 1, 0),
+        ("claim_id", "TEXT", 0, 0),
+        ("message_id", "TEXT", 0, 0),
+        ("identity_id", "TEXT", 0, 0),
+        ("generation", "INTEGER", 0, 0),
+        ("kind", "TEXT", 1, 0),
+        ("outcome", "TEXT", 1, 0),
+        ("reason", "TEXT", 0, 0),
+        ("evidence_digest", "TEXT", 0, 0),
+        ("created_at", "TEXT", 1, 0),
     ),
     "idempotency_records": (
         ("project_id", "TEXT", 1, 1),
         ("workspace_id", "TEXT", 1, 2),
-        ("idempotency_key", "TEXT", 1, 3),
+        ("command_scope", "TEXT", 1, 3),
+        ("idempotency_key", "TEXT", 1, 4),
         ("request_digest", "TEXT", 1, 0),
         ("response_json", "TEXT", 1, 0),
     ),
@@ -275,13 +308,21 @@ _WORKSPACE_WORK_DEFAULTS: dict[str, dict[str, str]] = {
     "message_threads": {},
     "messages": {},
     "work_items": {},
+    "work_item_claims": {},
+    "message_receipts": {},
     "idempotency_records": {},
 }
 _WORKSPACE_WORK_INDEXES: dict[str, frozenset[_IndexFingerprint]] = {
     "schema_migrations": frozenset(),
     "message_threads": frozenset(),
-    "messages": frozenset(),
+    "messages": frozenset({
+        ("messages_one_root", 1, 1, ("thread_id",)),
+    }),
     "work_items": frozenset(),
+    "work_item_claims": frozenset({
+        ("work_item_claims_one_current", 1, 1, ("work_item_id",)),
+    }),
+    "message_receipts": frozenset(),
     "idempotency_records": frozenset(),
 }
 _WORKSPACE_WORK_FKS: dict[str, frozenset[_ForeignKeyFingerprint]] = {
@@ -289,9 +330,18 @@ _WORKSPACE_WORK_FKS: dict[str, frozenset[_ForeignKeyFingerprint]] = {
     "message_threads": frozenset(),
     "messages": frozenset({
         (("thread_id", "message_threads", "thread_id"),),
+        (("reply_to_message_id", "messages", "message_id"),),
     }),
     "work_items": frozenset({
         (("source_message_id", "messages", "message_id"),),
+    }),
+    "work_item_claims": frozenset({
+        (("work_item_id", "work_items", "work_item_id"),),
+    }),
+    "message_receipts": frozenset({
+        (("work_item_id", "work_items", "work_item_id"),),
+        (("claim_id", "work_item_claims", "claim_id"),),
+        (("message_id", "messages", "message_id"),),
     }),
     "idempotency_records": frozenset(),
 }
