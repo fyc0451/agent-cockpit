@@ -17,13 +17,24 @@ from . import workspace_work_store as work_store
 
 
 class ExecutionServiceError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(
+        self, code: str, pane_id: str | None = None, instance_id: str | None = None,
+        unknown: bool = False,
+    ):
         self.code = code
+        self.pane_id = pane_id
+        self.instance_id = instance_id
+        self.unknown = unknown
         super().__init__(code)
 
 
-def _fail(code: str) -> None:
-    raise ExecutionServiceError(code)
+def _fail(
+    code: str, pane_id: str | None = None, instance_id: str | None = None,
+    unknown: bool = False,
+) -> None:
+    raise ExecutionServiceError(
+        code, pane_id=pane_id, instance_id=instance_id, unknown=unknown,
+    )
 
 
 def _sha(value: object) -> str:
@@ -178,7 +189,7 @@ class ExecutionService:
             request=request,
         )
         if replay is not None:
-            return replay
+            return self._replay_result(replay)
         current = self.store.get_preparation(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id,
@@ -208,6 +219,37 @@ class ExecutionService:
             return payload
         spec = self.harness.build_launch_spec(Path(checkout.internal_path))
         spec.assert_readonly()
+        if attachment.pane_id:
+            try:
+                self.harness.detach(
+                    session=attachment.session_name or self.session_name,
+                    pane_id=attachment.pane_id,
+                )
+            except harness_mod.HarnessError as exc:
+                if exc.code != "process_exited":
+                    unknown = self.store.mark_unknown(
+                        project_id=project_id, workspace_id=workspace_id,
+                        work_item_id=work_item_id, expected_revision=view.revision,
+                        pane_id=attachment.pane_id,
+                        instance_id=attachment.instance_id,
+                    )
+                    self._remember_error(
+                        project_id, workspace_id, "preparation.attach",
+                        idempotency_key, request, exc.code, unknown,
+                    )
+                    _fail(exc.code, pane_id=attachment.pane_id)
+            except Exception:
+                unknown = self.store.mark_unknown(
+                    project_id=project_id, workspace_id=workspace_id,
+                    work_item_id=work_item_id, expected_revision=view.revision,
+                    pane_id=attachment.pane_id,
+                    instance_id=attachment.instance_id,
+                )
+                self._remember_error(
+                    project_id, workspace_id, "preparation.attach",
+                    idempotency_key, request, "runtime_unavailable", unknown,
+                )
+                _fail("runtime_unavailable", pane_id=attachment.pane_id)
         try:
             evidence = self._saga(
                 kind="runtime.attach",
@@ -223,24 +265,12 @@ class ExecutionService:
                     checkout_path=Path(checkout.internal_path),
                     display_name=view.identity.display_name,
                 ),
-                on_unknown=lambda: self.store.mark_unknown(
-                    project_id=project_id, workspace_id=workspace_id,
-                    work_item_id=work_item_id, expected_revision=view.revision,
-                ),
             )
         except ExecutionServiceError as exc:
-            if exc.code in {
-                "runtime_unavailable", "runtime_identity_unverified", "process_exited",
-            }:
-                latest = self.store.get_preparation(
-                    project_id=project_id, workspace_id=workspace_id,
-                    work_item_id=work_item_id,
-                )
-                if latest is not None and latest.state == "attaching":
-                    self.store.fail_attach(
-                        project_id=project_id, workspace_id=workspace_id,
-                        work_item_id=work_item_id, expected_revision=latest.revision,
-                    )
+            self._recover_attach(
+                project_id, workspace_id, work_item_id, view.revision,
+                idempotency_key, request, exc,
+            )
             raise
         if evidence.identity_verified is not True:
             self.store.fail_attach(
@@ -282,26 +312,56 @@ class ExecutionService:
             request=request,
         )
         if replay is not None:
-            return replay
+            return self._replay_result(replay)
+        current = self.store.get_preparation(
+            project_id=project_id, workspace_id=workspace_id,
+            work_item_id=work_item_id,
+        )
+        if current is not None and current.state == "outcome_unknown":
+            if current.revision != expected_revision:
+                _fail("stale_revision")
+            self._remember_error(
+                project_id, workspace_id, "preparation.detach",
+                idempotency_key, request, "runtime_unavailable", current,
+            )
+            _fail("runtime_unavailable")
         view, attachment, checkout = self.store.begin_detach(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id, expected_revision=expected_revision,
         )
-        self._saga(
-            kind="runtime.detach",
-            subject_type="attachment",
-            subject_id=attachment.attachment_id,
-            project_id=project_id,
-            workspace_id=workspace_id,
-            request=request,
-            provider_kind="herdr",
-            step_id="close-pane",
-            action=lambda: self._close(attachment, checkout),
-            on_unknown=lambda: self.store.mark_unknown(
+        try:
+            self._saga(
+                kind="runtime.detach",
+                subject_type="attachment",
+                subject_id=attachment.attachment_id,
+                project_id=project_id,
+                workspace_id=workspace_id,
+                request=request,
+                provider_kind="herdr",
+                step_id="close-pane",
+                action=lambda: self._close(attachment, checkout),
+            )
+        except ExecutionServiceError as exc:
+            if exc.unknown:
+                unknown = self.store.mark_unknown(
+                    project_id=project_id, workspace_id=workspace_id,
+                    work_item_id=work_item_id, expected_revision=view.revision,
+                    pane_id=attachment.pane_id, instance_id=attachment.instance_id,
+                )
+                self._remember_error(
+                    project_id, workspace_id, "preparation.detach",
+                    idempotency_key, request, "runtime_unavailable", unknown,
+                )
+                _fail("runtime_unavailable", unknown=True)
+            restored = self.store.restore_connected(
                 project_id=project_id, workspace_id=workspace_id,
                 work_item_id=work_item_id, expected_revision=view.revision,
-            ),
-        )
+            )
+            self._remember_error(
+                project_id, workspace_id, "preparation.detach",
+                idempotency_key, request, exc.code, restored,
+            )
+            _fail(exc.code)
         finished = self.store.finish_detach(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id, expected_revision=view.revision,
@@ -313,6 +373,55 @@ class ExecutionService:
             request=request, response=payload,
         )
         return payload
+
+    def _replay_result(self, replay: object):
+        if isinstance(replay, dict) and replay.get("ok") is False:
+            code = replay.get("code")
+            if not isinstance(code, str):
+                _fail("store_read_failed")
+            _fail(code)
+        return replay
+
+    def _remember_error(
+        self, project_id: str, workspace_id: str, scope: str,
+        idempotency_key: object, request: object, code: str, item,
+    ) -> None:
+        self.store.remember(
+            project_id=project_id, workspace_id=workspace_id, scope=scope,
+            idempotency_key=idempotency_key, request=request,
+            response={"ok": False, "code": code, "item": item.public_dict()},
+        )
+
+    def _recover_attach(
+        self, project_id: str, workspace_id: str, work_item_id: str,
+        expected_revision: int, idempotency_key: object, request: object,
+        exc: ExecutionServiceError,
+    ) -> None:
+        latest = self.store.get_preparation(
+            project_id=project_id, workspace_id=workspace_id,
+            work_item_id=work_item_id,
+        )
+        if latest is None or latest.state != "attaching":
+            return
+        if exc.pane_id or exc.unknown:
+            unknown = self.store.mark_unknown(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=expected_revision,
+                pane_id=exc.pane_id, instance_id=exc.instance_id,
+            )
+            self._remember_error(
+                project_id, workspace_id, "preparation.attach",
+                idempotency_key, request, exc.code, unknown,
+            )
+            return
+        prepared = self.store.fail_attach(
+            project_id=project_id, workspace_id=workspace_id,
+            work_item_id=work_item_id, expected_revision=expected_revision,
+        )
+        self._remember_error(
+            project_id, workspace_id, "preparation.attach",
+            idempotency_key, request, exc.code, prepared,
+        )
 
     def _await_prepared(
         self, project_id: str, workspace_id: str, work_item_id: str,
@@ -448,7 +557,11 @@ class ExecutionService:
                 operation_id, prepared.step_execution_id, revision + 3, 2,
                 failed=True, code=code,
             )
-            _fail(code)
+            _fail(
+                code,
+                pane_id=getattr(exc, "pane_id", None),
+                instance_id=getattr(exc, "instance_id", None),
+            )
         except Exception:
             self._record_outcome(
                 operation_id, prepared.step_execution_id, revision + 3, 2,
@@ -456,7 +569,7 @@ class ExecutionService:
             )
             if on_unknown is not None:
                 on_unknown()
-            _fail("runtime_unavailable")
+            _fail("runtime_unavailable", unknown=True)
         self._record_outcome(
             operation_id, prepared.step_execution_id, revision + 3, 2,
         )

@@ -16,8 +16,12 @@ LAUNCH_ARGS = ("--sandbox", "read-only")
 
 
 class HarnessError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(
+        self, code: str, pane_id: str | None = None, instance_id: str | None = None,
+    ):
         self.code = code
+        self.pane_id = pane_id
+        self.instance_id = instance_id
         super().__init__(code)
 
 
@@ -157,10 +161,27 @@ class LocalCodexHarness:
         live_id = started.get("instance_id") or instance_id
         if not isinstance(pane_id, str) or not pane_id:
             _fail("runtime_unavailable")
-        return self.observe(
-            session=session, instance_id=str(live_id), pane_id=pane_id,
-            checkout_path=checkout_path,
-        )
+        try:
+            return self.observe(
+                session=session, instance_id=str(live_id), pane_id=pane_id,
+                checkout_path=checkout_path,
+            )
+        except HarnessError as exc:
+            if exc.code in {"runtime_identity_unverified", "process_exited"}:
+                try:
+                    self.detach(session=session, pane_id=pane_id)
+                except HarnessError:
+                    raise HarnessError(
+                        "runtime_unavailable", pane_id=pane_id, instance_id=str(live_id),
+                    ) from None
+                raise HarnessError(exc.code, pane_id=None, instance_id=str(live_id)) from None
+            raise HarnessError(
+                exc.code, pane_id=pane_id, instance_id=str(live_id),
+            ) from None
+        except Exception:
+            raise HarnessError(
+                "runtime_unavailable", pane_id=pane_id, instance_id=str(live_id),
+            ) from None
 
     def observe(
         self, *, session: str, instance_id: str, pane_id: str, checkout_path: Path,

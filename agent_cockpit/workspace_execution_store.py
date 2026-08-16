@@ -990,11 +990,22 @@ class WorkspaceExecutionStore:
 
     def mark_unknown(
         self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_revision: int, pane_id: str | None = None,
+        instance_id: str | None = None,
+    ) -> PreparationView:
+        return self._complete_runtime(
+            project_id, workspace_id, work_item_id, expected_revision,
+            status="outcome_unknown", pane_id=pane_id, instance_id=instance_id,
+            native_receipt=None,
+        )
+
+    def restore_connected(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
         expected_revision: int,
     ) -> PreparationView:
         return self._complete_runtime(
             project_id, workspace_id, work_item_id, expected_revision,
-            status="outcome_unknown", pane_id=None, instance_id=None,
+            status="connected_readonly", pane_id=None, instance_id=None,
             native_receipt=None,
         )
 
@@ -1116,6 +1127,55 @@ class WorkspaceExecutionStore:
                             checkout["source_head"], checkout["source_tree"],
                         ),
                     )
+                if prep["state"] == "outcome_unknown":
+                    generation = int(prep["generation"])
+                    if prep["lease_id"]:
+                        lease = connection.execute(
+                            "SELECT * FROM writer_leases WHERE lease_id=?",
+                            (prep["lease_id"],),
+                        ).fetchone()
+                        if lease is None or lease["status"] != "reserved":
+                            _fail("lease_conflict")
+                    attachment = connection.execute(
+                        "SELECT * FROM runtime_attachments WHERE attachment_id=?",
+                        (prep["attachment_id"],),
+                    ).fetchone()
+                    if attachment is None:
+                        _fail("lease_conflict")
+                    if int(attachment["generation"]) != generation:
+                        _fail("lease_conflict")
+                    if connection.execute(
+                        "UPDATE runtime_attachments SET status='attaching', "
+                        "revision=revision+1, updated_at=? WHERE attachment_id=?",
+                        (now, attachment["attachment_id"]),
+                    ).rowcount != 1:
+                        _fail("store_write_failed")
+                    if connection.execute(
+                        "UPDATE work_item_preparations SET state='attaching', "
+                        "revision=?, updated_at=? WHERE preparation_id=? AND revision=?",
+                        (
+                            new_revision, now, prep["preparation_id"],
+                            expected_revision,
+                        ),
+                    ).rowcount != 1:
+                        _fail("stale_revision")
+                    view = _load_preparation(
+                        connection, project_id, workspace_id, work_item_id,
+                    )
+                    assert view is not None
+                    connection.execute("COMMIT")
+                    return (
+                        view,
+                        AttachmentInternal(
+                            attachment["attachment_id"], attachment["pane_id"],
+                            attachment["instance_id"], attachment["session_name"],
+                            generation, "attaching",
+                        ),
+                        CheckoutInternal(
+                            checkout["checkout_id"], checkout["internal_path"],
+                            checkout["source_head"], checkout["source_tree"],
+                        ),
+                    )
                 generation = int(prep["generation"]) + (
                     0 if prep["state"] == "prepared" else 1
                 )
@@ -1184,13 +1244,6 @@ class WorkspaceExecutionStore:
                     (now, attachment["attachment_id"]),
                 ).rowcount != 1:
                     _fail("store_write_failed")
-                if prep["lease_id"]:
-                    if connection.execute(
-                        "UPDATE writer_leases SET status='revoked', "
-                        "revision=revision+1 WHERE lease_id=? AND status='reserved'",
-                        (prep["lease_id"],),
-                    ).rowcount != 1:
-                        _fail("lease_conflict")
                 if connection.execute(
                     "UPDATE work_item_preparations SET state='detaching', "
                     "revision=?, updated_at=? WHERE preparation_id=? AND revision=?",
@@ -1257,15 +1310,28 @@ class WorkspaceExecutionStore:
                 else "outcome_unknown"
             )
             if prep["attachment_id"]:
+                attachment_status = (
+                    "detached" if status == "detached"
+                    else "connected_readonly" if status == "connected_readonly"
+                    else "outcome_unknown" if status == "outcome_unknown"
+                    else status
+                )
                 connection.execute(
                     "UPDATE runtime_attachments SET status=?, pane_id=COALESCE(?, pane_id), "
                     "instance_id=COALESCE(?, instance_id), native_receipt=COALESCE(?, native_receipt), "
                     "revision=revision+1, updated_at=? WHERE attachment_id=?",
                     (
-                        status, pane_id, instance_id, native_receipt, now,
+                        attachment_status, pane_id, instance_id, native_receipt, now,
                         prep["attachment_id"],
                     ),
                 )
+            if status == "detached" and prep["lease_id"]:
+                if connection.execute(
+                    "UPDATE writer_leases SET status='revoked', "
+                    "revision=revision+1 WHERE lease_id=? AND status='reserved'",
+                    (prep["lease_id"],),
+                ).rowcount != 1:
+                    _fail("lease_conflict")
             if connection.execute(
                 "UPDATE work_item_preparations SET state=?, revision=?, updated_at=? "
                 "WHERE preparation_id=? AND revision=?",
