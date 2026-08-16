@@ -520,6 +520,20 @@ def test_private_home_does_not_touch_user_codex_config_and_cap_is_0600(
         assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
 
 
+def test_private_home_approves_only_cockpit_mcp_tools(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+
+    config = tomllib.loads(
+        (Path(issued["codex_home"]) / "config.toml").read_text(encoding="utf-8")
+    )
+
+    assert config["mcp_servers"]["cockpit"]["default_tools_approval_mode"] == "approve"
+
+
 def test_provider_auth_reference_is_validated_without_reading_credential_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     _provider_provenance: dict[str, Path],

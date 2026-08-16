@@ -829,6 +829,7 @@ def _write_mcp_home_config(
         "[mcp_servers.cockpit]\n"
         f"command = {_toml_basic(str(interpreter))}\n"
         'args = ["-P", "-m", "agent_cockpit.workspace_mcp_entry"]\n'
+        'default_tools_approval_mode = "approve"\n'
         "[mcp_servers.cockpit.env]\n"
         f"COCKPIT_CAPABILITY_FILE = {_toml_basic(str(cap))}\n"
         f"COCKPIT_DATA_DIR = {_toml_basic(str(data_root))}\n"

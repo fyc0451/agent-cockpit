@@ -164,7 +164,13 @@ def dispatch(
                 "result": _denied("runtime_capability_invalid"),
             }
         params = message.get("params")
-        if not isinstance(params, dict) or set(params) != {"name", "arguments"}:
+        if (
+            not isinstance(params, dict)
+            or not {"name", "arguments"} <= set(params) <= {
+                "name", "arguments", "_meta",
+            }
+            or ("_meta" in params and not isinstance(params["_meta"], dict))
+        ):
             return {
                 "jsonrpc": "2.0", "id": ident,
                 "result": _denied("invalid_argument"),

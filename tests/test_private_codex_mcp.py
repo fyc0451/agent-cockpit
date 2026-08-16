@@ -137,3 +137,45 @@ def test_old_capability_generation_is_rejected_without_writes(
         "params": {"name": "apply_patch", "arguments": {"patch": "--- a\n+++ b\n"}},
     }, capability_file=tmp_path / "gone.cap")
     assert missing["result"]["structuredContent"]["code"] == "claim_not_available"
+
+
+def test_tools_call_accepts_only_optional_object_meta(tmp_path: Path) -> None:
+    cap = _cap(tmp_path)
+
+    class ClaimTools:
+        def __init__(self) -> None:
+            self.calls: list[Path] = []
+
+        def claim_current(self, capability_file: Path) -> dict[str, str]:
+            self.calls.append(capability_file)
+            return {"outcome": "claimed"}
+
+    tools = ClaimTools()
+    accepted = mcp.dispatch({
+        "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        "params": {
+            "name": "claim_current", "arguments": {},
+            "_meta": {
+                "progressToken": 7,
+                "x-codex-turn-metadata": {"turn_id": "turn-1"},
+            },
+        },
+    }, capability_file=cap, claim_tools=tools)
+    assert accepted["result"]["isError"] is False
+    assert accepted["result"]["structuredContent"] == {"outcome": "claimed"}
+    assert tools.calls == [cap]
+
+    invalid_params = (
+        {"name": "claim_current", "arguments": {}, "_meta": {}, "extra": True},
+        {"name": "claim_current", "arguments": {}, "_meta": "not-an-object"},
+        {"name": 1, "arguments": {}, "_meta": {}},
+        {"name": "claim_current", "arguments": [], "_meta": {}},
+    )
+    for index, params in enumerate(invalid_params, start=10):
+        denied = mcp.dispatch({
+            "jsonrpc": "2.0", "id": index, "method": "tools/call",
+            "params": params,
+        }, capability_file=cap, claim_tools=tools)
+        assert denied["result"]["isError"] is True
+        assert denied["result"]["structuredContent"]["code"] == "invalid_argument"
+    assert tools.calls == [cap]
