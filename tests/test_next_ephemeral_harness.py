@@ -325,7 +325,7 @@ def _assert_authorized_socket_catalog(runtime_root: Path) -> None:
     _plant_unix_socket(session_dir / "herdr-client.sock")
     log = session_dir / "herdr-server.log"
     log.write_bytes(b"boot\n")
-    os.chmod(log, 0o600)
+    os.chmod(log, 0o644)
     next_profile.finalize_ephemeral_runtime_root(environment)
     next_profile.prepare_ephemeral_runtime_root(runtime_root)
     catalog = json.loads((runtime_root / next_profile.EPHEMERAL_CATALOG).read_text())
@@ -343,6 +343,20 @@ def _assert_authorized_socket_catalog(runtime_root: Path) -> None:
     assert (session_dir / "herdr.sock").exists()
     assert (session_dir / "herdr-client.sock").exists()
     assert (session_dir / "herdr-server.log").exists()
+
+
+def test_authorized_herdr_log_rejects_group_or_other_write() -> None:
+    runtime_root = _short_runtime_root()
+    try:
+        environment, session = _bound_ephemeral_root(runtime_root)
+        log = runtime_root / "config" / "herdr" / "sessions" / session / "herdr-server.log"
+        log.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        log.write_bytes(b"boot\n")
+        os.chmod(log, 0o666)
+        with pytest.raises(next_profile.NextProfileError, match="ephemeral_catalog_invalid"):
+            next_profile.finalize_ephemeral_runtime_root(environment)
+    finally:
+        shutil.rmtree(runtime_root, ignore_errors=True)
 
 
 def test_foreign_herdr_session_socket_is_rejected() -> None:
@@ -377,6 +391,7 @@ def _snapshot_panes(herdr: Path, session: str, env: dict[str, str]) -> list[obje
 
 
 def test_real_herdr_session_survives_graceful_shutdown_and_restart() -> None:
+    previous = os.umask(0o022)
     herdr = Path.home() / ".local" / "bin" / "herdr"
     assert herdr.is_file()
     runtime_root = _short_runtime_root()
@@ -460,6 +475,7 @@ def test_real_herdr_session_survives_graceful_shutdown_and_restart() -> None:
                 pass
             herdr_proc.wait(timeout=5)
         shutil.rmtree(runtime_root, ignore_errors=True)
+        os.umask(previous)
 
 
 def test_cleanup_kills_only_a_stubborn_owned_process_group() -> None:

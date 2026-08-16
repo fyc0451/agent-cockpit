@@ -491,8 +491,9 @@ def _catalog_entries(root: Path) -> list[dict[str, object]]:
             if _is_authorized_log(relative, root_id):
                 if (
                     not stat.S_ISREG(info.st_mode)
-                    or mode != 0o600
                     or info.st_nlink != 1
+                    or (mode & 0o400) == 0
+                    or (mode & 0o022) != 0
                 ):
                     raise _ephemeral_error("invalid")
                 continue
