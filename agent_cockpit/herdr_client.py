@@ -1067,6 +1067,67 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
         return {"available": True, "error": str(e)}
 
 
+AGENT_PROMPT_EXECUTE_TIMEOUT_MS = 5000
+_EXECUTING_STATES = ("working", "blocked")
+
+
+def submit_agent_prompt_until_working(
+    session: str, target: str, text: str,
+) -> dict[str, Any]:
+    """Submit a prompt and require the agent to enter working/blocked.
+
+    Uses native `agent prompt --wait --until working|blocked`. If the agent
+    stays idle, send Enter once on the agent surface and wait again. Does not
+    read transcript or treat a bare submit receipt as success.
+    """
+    if not is_available():
+        return {"available": False}
+    if not isinstance(target, str) or target == "":
+        return {"available": True, "submitted": False, "executing": False,
+                "error": "invalid_argument"}
+    if not isinstance(text, str) or text == "":
+        return {"available": True, "submitted": False, "executing": False,
+                "error": "invalid_argument"}
+    prompt_argv = [
+        "--session", session, "agent", "prompt", target, text,
+        "--wait",
+        "--until", "working", "--until", "blocked",
+        "--timeout", str(AGENT_PROMPT_EXECUTE_TIMEOUT_MS),
+    ]
+    first_error = "agent_prompt_stalled"
+    try:
+        _run(prompt_argv, timeout=AGENT_PROMPT_EXECUTE_TIMEOUT_MS / 1000.0 + 5)
+        return {
+            "available": True, "submitted": True, "executing": True,
+            "status": "working", "target": target,
+        }
+    except RuntimeError as exc:
+        first_error = str(exc)
+    try:
+        _run(
+            ["--session", session, "agent", "send-keys", target, "enter"],
+            timeout=5,
+        )
+    except RuntimeError as exc:
+        return {
+            "available": True, "submitted": False, "executing": False,
+            "error": str(exc) or first_error, "target": target,
+        }
+    waited = agent_wait(
+        session, target, until=list(_EXECUTING_STATES),
+        timeout_ms=AGENT_PROMPT_EXECUTE_TIMEOUT_MS,
+    )
+    if waited.get("matched") is True:
+        return {
+            "available": True, "submitted": True, "executing": True,
+            "retried": True, "status": "working", "target": target,
+        }
+    return {
+        "available": True, "submitted": False, "executing": False,
+        "error": waited.get("error") or first_error, "target": target,
+    }
+
+
 def grok_theme_slash(mode: str) -> str:
     """Web light/dark → Grok /theme 目标（见 grok user-guide 06-theming）。
 

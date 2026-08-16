@@ -211,7 +211,9 @@ class LocalCodexHarness:
         sent = self._wakeup_prompt(
             record["session"], record["pane_id"], WAKEUP_TEXT,
         )
-        if isinstance(sent, dict) and sent.get("available") is False:
+        if not isinstance(sent, dict) or sent.get("available") is False:
+            _fail("runtime_unavailable")
+        if sent.get("error") or sent.get("executing") is False:
             _fail("runtime_unavailable")
         return {"digest": WAKEUP_DIGEST, "text": WAKEUP_TEXT}
 
@@ -611,7 +613,7 @@ def _descriptor_matches(
 def _default_wakeup_prompt(session: str, pane_id: str, text: str) -> dict[str, Any]:
     if text != WAKEUP_TEXT:
         _fail("invalid_argument")
-    return herdr_client.pane_send(session, pane_id, text, mode="prompt")
+    return herdr_client.submit_agent_prompt_until_working(session, pane_id, text)
 
 
 def _assert_private_ancestry(path: Path) -> Path:

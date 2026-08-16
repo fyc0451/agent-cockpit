@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_cockpit import local_codex_harness as harness_mod
 from agent_cockpit import operation_store
 from agent_cockpit import workspace_dispatch_service as dispatch_mod
 from agent_cockpit import workspace_execution_store
@@ -145,6 +146,30 @@ def test_response_lost_is_stable_unknown_and_never_rewakes(tmp_path: Path) -> No
     assert [item["outcome"] for item in detail["receipts"]] == [
         "intent", "outcome_unknown",
     ]
+
+
+def test_unproven_wakeup_does_not_record_delivery_succeeded(
+    tmp_path: Path,
+) -> None:
+    class Stall:
+        def wakeup(self, *args: object, **kwargs: object) -> dict[str, str]:
+            raise harness_mod.HarnessError("runtime_unavailable")
+
+    service, work, _operations, _wakeup, work_id, prep_revision = _world(tmp_path)
+    service.harness = Stall()
+    with pytest.raises(dispatch_mod.DispatchError) as error:
+        service.dispatch(
+            PROJECT, WORKSPACE, work_id, expected_work_revision=1,
+            expected_preparation_revision=prep_revision,
+            idempotency_key="dispatch-stalled",
+        )
+    assert error.value.code == "runtime_unavailable"
+    detail = work.get_work_item_detail(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=work_id,
+    )
+    assert detail is not None
+    assert [item["outcome"] for item in detail["receipts"]] == ["intent"]
+    assert SENTINEL not in json.dumps(detail["receipts"])
 
 
 def test_concurrent_same_key_dispatch_wakes_once(tmp_path: Path) -> None:

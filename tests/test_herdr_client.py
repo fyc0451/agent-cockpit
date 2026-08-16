@@ -536,6 +536,94 @@ def test_agent_wait_uses_native_agent_wait_primitive(monkeypatch):
     ]
 
 
+def test_submit_agent_prompt_waits_for_working_and_is_the_receipt(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
+    )
+
+    result = herdr_client.submit_agent_prompt_until_working(
+        "demo", "i-abcdefghijklmnopqrstuvwxyz", "COCKPIT_WAKEUP_V1\nStart",
+    )
+
+    assert result["available"] is True
+    assert result["submitted"] is True
+    assert result["executing"] is True
+    assert result.get("error") is None
+    assert calls == [
+        call([
+            "--session", "demo", "agent", "prompt",
+            "i-abcdefghijklmnopqrstuvwxyz", "COCKPIT_WAKEUP_V1\nStart",
+            "--wait", "--until", "working", "--until", "blocked",
+            "--timeout", "5000",
+        ], timeout=10),
+    ]
+    assert not any(
+        "send-text" in c.args[0] or "pane" in c.args[0] for c in calls
+    )
+    assert "read" not in calls[0].args[0]
+
+
+def test_submit_agent_prompt_retries_enter_then_fails_closed(monkeypatch) -> None:
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if args[2:4] == ["agent", "prompt"]:
+            raise RuntimeError("agent prompt 失败: agent_prompt_stalled")
+        if args[2:4] == ["agent", "wait"]:
+            raise RuntimeError("agent wait 失败: timeout")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.submit_agent_prompt_until_working(
+        "demo", "w1:p2", "COCKPIT_WAKEUP_V1\nStart",
+    )
+
+    assert result["available"] is True
+    assert result["submitted"] is False
+    assert result["executing"] is False
+    assert result["error"]
+    argv_groups = [c.args[0] for c in calls]
+    assert argv_groups[0][2:6] == ["agent", "prompt", "w1:p2", "COCKPIT_WAKEUP_V1\nStart"]
+    assert "--wait" in argv_groups[0]
+    assert argv_groups[1] == [
+        "--session", "demo", "agent", "send-keys", "w1:p2", "enter",
+    ]
+    assert argv_groups[2][2:5] == ["agent", "wait", "w1:p2"]
+    assert not any("send-text" in args or "pane" in args for args in argv_groups)
+    assert not any("read" in args for args in argv_groups)
+
+
+def test_submit_agent_prompt_enter_retry_can_prove_working(monkeypatch) -> None:
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if args[2:4] == ["agent", "prompt"]:
+            raise RuntimeError("agent prompt 失败: agent_prompt_stalled")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.submit_agent_prompt_until_working(
+        "demo", "w1:p2", "COCKPIT_WAKEUP_V1\nStart",
+    )
+
+    assert result == {
+        "available": True, "submitted": True, "executing": True,
+        "retried": True, "status": "working", "target": "w1:p2",
+    }
+    assert [c.args[0][3] for c in calls] == ["prompt", "send-keys", "wait"]
+
+
 def test_agent_wait_reports_timeout_without_keyboard_fallback(monkeypatch):
     """agent wait 超时返回 matched=False 的结构化错误，不回退键盘。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
@@ -3506,5 +3594,102 @@ def test_codex_home_real_live_managed_start(
             owned.wait(timeout=5)
         except Exception:
             pass
+        herdr_client._SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
+        shutil.rmtree(isolated, ignore_errors=True)
+
+
+@pytest.mark.skipif(
+    shutil.which("codex") is None or shutil.which("herdr") is None,
+    reason="需要真实 codex 与 herdr 二进制",
+)
+def test_real_wakeup_prompt_receipt_requires_executing_or_typed_failure(
+    monkeypatch,
+) -> None:
+    """唯一临时 session：wakeup 要么进入 working/blocked，要么 typed fail。"""
+    import tempfile
+    import uuid
+
+    from agent_cockpit import local_codex_harness as harness_mod
+
+    herdr_client._LIST_SESSIONS_FAILED.value = False
+    isolated = Path(tempfile.mkdtemp(prefix="e3w-", dir="/tmp"))
+    isolated.chmod(0o700)
+    session = "e3w-" + uuid.uuid4().hex[:6]
+    monkeypatch.setenv("HERDR_CONFIG_PATH", str(isolated / "h" / "config.toml"))
+    (isolated / "h").mkdir(mode=0o700)
+    (isolated / "h" / "config.toml").write_text(
+        "onboarding = false\n", encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated / "x"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(isolated / "s"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(isolated / "d"))
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(isolated / "launch.json"),
+    )
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    monkeypatch.delenv("HERDR_ENV", raising=False)
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    monkeypatch.setattr(
+        herdr_client.next_profile, "require_session", lambda value: value,
+    )
+    workdir = isolated / "repo"
+    workdir.mkdir(mode=0o700)
+    home = isolated / "codex-home"
+    home.mkdir(mode=0o700)
+    owned = None
+    try:
+        server_log = isolated / "server.log"
+        log_handle = open(server_log, "wb")
+        owned = subprocess.Popen(
+            [herdr_client.HERDR_BIN, "--session", session, "server"],
+            stdin=subprocess.DEVNULL, stdout=log_handle,
+            stderr=subprocess.STDOUT, close_fds=True, start_new_session=True,
+        )
+        herdr_client._SESSION_BOOTSTRAP_PROCESSES[session] = owned
+        ensured = herdr_client.ensure_session(session=session)
+        assert ensured.get("available") is True, ensured
+        started = herdr_client.start_workspace_codex_home(
+            session=session, workdir=str(workdir),
+            instance_id="i-" + "b" * 26,
+            project_id=_CODEXHOME_PROJECT, workspace_id=_CODEXHOME_WORKSPACE,
+            codex_home=str(home), label="codex",
+        )
+        assert started.get("available") is True, started
+        pane_id = started["pane_id"]
+        receipt = herdr_client.submit_agent_prompt_until_working(
+            session, pane_id, harness_mod.WAKEUP_TEXT,
+        )
+        (isolated / "wakeup-receipt.json").write_text(
+            json.dumps({
+                "available": receipt.get("available"),
+                "submitted": receipt.get("submitted"),
+                "executing": receipt.get("executing"),
+                "has_error": bool(receipt.get("error")),
+                "status": receipt.get("status"),
+            }, sort_keys=True),
+            encoding="utf-8",
+        )
+        assert receipt.get("available") is True
+        if receipt.get("executing") is True:
+            assert receipt.get("submitted") is True
+            assert not receipt.get("error")
+        else:
+            assert receipt.get("executing") is False
+            assert receipt.get("error")
+            assert receipt.get("submitted") is not True
+        assert "BOSS" not in json.dumps(receipt)
+        assert "root_message" not in json.dumps(receipt)
+        herdr_client.close_pane(session, pane_id)
+        subprocess.run(
+            ["herdr", "--session", session, "session", "close"],
+            capture_output=True, text=True, timeout=15,
+        )
+    finally:
+        if owned is not None:
+            try:
+                owned.terminate()
+                owned.wait(timeout=5)
+            except Exception:
+                pass
         herdr_client._SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
         shutil.rmtree(isolated, ignore_errors=True)

@@ -486,6 +486,103 @@ def test_wakeup_is_fixed_and_omits_boss_body(tmp_path: Path) -> None:
     assert SENTINEL not in str(descriptor)
 
 
+def test_wakeup_treats_prompt_error_as_failure_not_success(
+    tmp_path: Path,
+) -> None:
+    issued_prompts: list[str] = []
+
+    def prompt(session: str, pane_id: str, text: str) -> dict[str, object]:
+        issued_prompts.append(text)
+        return {"available": True, "error": "agent_prompt_stalled", "sent": text}
+
+    harness = _harness(tmp_path)
+    harness._wakeup_prompt = prompt
+    harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.wakeup(ATTACHMENT)
+    assert error.value.code == "runtime_unavailable"
+    assert error.value.unknown is False
+    assert issued_prompts == [harness_mod.WAKEUP_TEXT]
+    assert SENTINEL not in issued_prompts[0]
+
+
+def test_wakeup_requires_executing_receipt_from_default_submit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def submit(session: str, target: str, text: str) -> dict[str, object]:
+        calls.append((session, target, text))
+        return {
+            "available": True, "submitted": True, "executing": True,
+            "status": "working", "target": target,
+        }
+
+    monkeypatch.setattr(
+        harness_mod.herdr_client, "submit_agent_prompt_until_working", submit,
+    )
+    harness = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
+        ensure_session=lambda *, session: None,
+        start_agent=lambda **kwargs: {"available": True},
+        get_launch_descriptor=lambda **kwargs: {
+            "session": "s", "pane_id": "pane-1", "instance_id": INSTANCE,
+            "workdir": str(tmp_path / "chk"), "kind": "codex",
+        },
+        get_launch_descriptor_by_instance=lambda instance_id, **_kw: {
+            "session": "s", "pane_id": "pane-1", "instance_id": instance_id,
+            "workdir": str(tmp_path / "chk"), "kind": "codex",
+        },
+        snapshot=lambda *, session: {
+            "panes": [{"pane_id": "pane-1", "cwd": str(tmp_path / "chk")}],
+        },
+        close_pane=lambda *, session, pane_id: {"available": True},
+        new_instance_id=lambda: INSTANCE,
+    )
+    (tmp_path / "chk").mkdir()
+    harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    result = harness.wakeup(ATTACHMENT)
+    assert result["digest"] == harness_mod.WAKEUP_DIGEST
+    assert calls == [("s", "pane-1", harness_mod.WAKEUP_TEXT)]
+    assert SENTINEL not in calls[0][2]
+
+
+def test_wakeup_idle_after_submit_is_typed_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        harness_mod.herdr_client, "submit_agent_prompt_until_working",
+        lambda session, target, text: {
+            "available": True, "submitted": False, "executing": False,
+            "error": "agent_prompt_stalled",
+        },
+    )
+    harness = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
+        ensure_session=lambda *, session: None,
+        start_agent=lambda **kwargs: {"available": True},
+        get_launch_descriptor=lambda **kwargs: None,
+        get_launch_descriptor_by_instance=lambda instance_id, **_kw: None,
+        snapshot=lambda *, session: {"panes": []},
+        close_pane=lambda *, session, pane_id: {"available": True},
+        new_instance_id=lambda: INSTANCE,
+    )
+    harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.wakeup(ATTACHMENT)
+    assert error.value.code == "runtime_unavailable"
+    assert error.value.unknown is False
+
+
 def test_attachment_id_and_private_leaf_paths_fail_closed(tmp_path: Path) -> None:
     outside = tmp_path / "ESCAPED-att.cap"
     outside.write_bytes(SENTINEL.encode())
@@ -635,6 +732,9 @@ def _attach_harness(tmp_path: Path, *, start=None, descriptors: bool = True, clo
         snapshot=snapshot,
         close_pane=close_pane,
         new_instance_id=lambda: INSTANCE,
+        wakeup_prompt=lambda session, pane_id, text: {
+            "available": True, "session": session, "pane_id": pane_id,
+        },
     )
     return harness, checkout, started, generic, panes
 
