@@ -20,8 +20,10 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from agent_cockpit import auth_token
 from agent_cockpit import local_codex_harness as harness_mod
 from agent_cockpit import next_profile
+from scripts import next_ephemeral_server as launcher_mod
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +35,7 @@ REAL_PROVIDER_CONFIG = Path.home() / ".codex" / "relay.config.toml"
 
 def _spawn(
     runtime_root: Path, *, provider_config: Path | None = None,
+    token_file: Path | None = None,
 ) -> subprocess.Popen[str]:
     argv = [
         sys.executable,
@@ -44,6 +47,8 @@ def _spawn(
     ]
     if provider_config is not None:
         argv.extend(["--codex-provider-config", str(provider_config)])
+    if token_file is not None:
+        argv.extend(["--token-file", str(token_file)])
     return subprocess.Popen(
         argv,
         cwd=ROOT,
@@ -95,8 +100,11 @@ def _live(descriptor: dict[str, object]) -> dict[str, object]:
 
 def _launch(
     runtime_root: Path, *, provider_config: Path | None = None,
+    token_file: Path | None = None,
 ) -> tuple[subprocess.Popen[str], dict[str, object], dict[str, object]]:
-    process = _spawn(runtime_root, provider_config=provider_config)
+    process = _spawn(
+        runtime_root, provider_config=provider_config, token_file=token_file,
+    )
     try:
         assert process.stdout is not None
         readable, _, _ = select.select([process.stdout], [], [], 15)
@@ -195,6 +203,165 @@ def _provider_config(tmp_path: Path) -> tuple[Path, Path]:
     return config, authority
 
 
+def _cockpit_token_file(tmp_path: Path, token: str = "t" * 64) -> Path:
+    authority = tmp_path / "cockpit-authority"
+    authority.mkdir(mode=0o700)
+    path = authority / auth_token.TOKEN_FILE_NAME
+    path.write_text(token + "\n", encoding="ascii")
+    path.chmod(0o600)
+    return path
+
+
+def _remote_request(
+    descriptor: dict[str, object], path: str, *, method: str = "GET",
+    body: dict[str, object] | None = None, cookie: str | None = None,
+) -> tuple[int, dict[str, object], object]:
+    base_url = descriptor["base_url"]
+    assert isinstance(base_url, str)
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = {"Host": "alpha.tailnet:43901"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if cookie is not None:
+        headers["Cookie"] = cookie
+    request = Request(
+        base_url + path, data=data, headers=headers, method=method,
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read())
+            return response.status, payload, response.headers
+    except HTTPError as exc:
+        payload = json.loads(exc.read())
+        return exc.code, payload, exc.headers
+
+
+def test_token_file_enables_existing_remote_auth_without_leaking_token(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    token = "T" * 64
+    token_file = _cockpit_token_file(tmp_path, token)
+    process, descriptor, _ready_result = _launch(
+        runtime_root, token_file=token_file,
+    )
+    try:
+        status, auth_status, _headers = _remote_request(
+            descriptor, "/api/auth/status",
+        )
+        assert status == 200
+        assert auth_status == {
+            "required": True, "authenticated": False, "local_only": False,
+        }
+        status, _payload, _headers = _remote_request(
+            descriptor, "/health/ephemeral",
+        )
+        assert status == 403
+        status, _payload, _headers = _remote_request(
+            descriptor, "/api/project-registry/projects",
+        )
+        assert status == 401
+        status, _payload, _headers = _remote_request(
+            descriptor, "/api/auth/login", method="POST",
+            body={"token": "wrong-token"},
+        )
+        assert status == 401
+        status, payload, headers = _remote_request(
+            descriptor, "/api/auth/login", method="POST",
+            body={"token": token},
+        )
+        assert status == 200 and payload == {"ok": True, "required": True}
+        cookie = headers.get("Set-Cookie")
+        assert isinstance(cookie, str)
+        assert "HttpOnly" in cookie and "SameSite=strict" in cookie
+        assert token not in cookie
+        session_cookie = cookie.split(";", 1)[0]
+        status, payload, _headers = _remote_request(
+            descriptor, "/api/project-registry/projects", cookie=session_cookie,
+        )
+        assert status == 200 and payload["data"]["items"] == []
+        status, _payload, _headers = _remote_request(
+            descriptor, "/health/ephemeral", cookie=session_cookie,
+        )
+        assert status == 403
+
+        descriptor_bytes = json.dumps(descriptor).encode("utf-8")
+        argv_bytes = Path(f"/proc/{process.pid}/cmdline").read_bytes()
+        environment = _process_env(process.pid)
+        assert environment.pop("COCKPIT_TOKEN") == token
+        assert token.encode() not in descriptor_bytes
+        assert token.encode() not in argv_bytes
+        assert token not in json.dumps(environment, sort_keys=True)
+    finally:
+        process_group = _owned_process_group(process)
+        assert process_group is not None
+        os.killpg(process_group, signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=5)
+        assert token not in stdout
+        assert token not in stderr
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "mode", "symlink", "empty", "oversize", "malformed"],
+)
+def test_token_file_invalid_inputs_fail_closed_without_leaking(
+    tmp_path: Path, failure: str,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    token = "S" * 64
+    token_file = _cockpit_token_file(tmp_path, token)
+    if failure == "missing":
+        token_file.unlink()
+    elif failure == "mode":
+        token_file.chmod(0o640)
+    elif failure == "symlink":
+        target = token_file.with_name("target.token")
+        token_file.replace(target)
+        token_file.symlink_to(target)
+    elif failure == "empty":
+        token_file.write_bytes(b"")
+    elif failure == "oversize":
+        token_file.write_bytes(b"S" * (auth_token.MAX_TOKEN_BYTES + 2))
+    else:
+        token_file.write_text("!" * 64 + "\n", encoding="ascii")
+
+    process = _spawn(runtime_root, token_file=token_file)
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode == 2
+    assert stdout == ""
+    assert stderr.strip() == "token_file_invalid"
+    assert token not in stderr
+
+
+def test_token_file_wrong_owner_and_future_errors_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = _cockpit_token_file(tmp_path)
+    current_uid = os.getuid()
+    monkeypatch.setattr(auth_token.os, "getuid", lambda: current_uid + 1)
+    with pytest.raises(launcher_mod.EphemeralError) as owner_error:
+        launcher_mod._load_cockpit_token(token_file)
+    assert owner_error.value.code == "token_file_invalid"
+
+    monkeypatch.setattr(auth_token.os, "getuid", lambda: current_uid)
+    monkeypatch.setattr(
+        auth_token, "load_cockpit_token",
+        lambda _values: (_ for _ in ()).throw(RuntimeError("future detail")),
+    )
+    with pytest.raises(launcher_mod.EphemeralError) as future_error:
+        launcher_mod._load_cockpit_token(token_file)
+    assert future_error.value.code == "token_file_invalid"
+
+    monkeypatch.setattr(auth_token, "load_cockpit_token", lambda _values: "")
+    with pytest.raises(launcher_mod.EphemeralError) as invalid_return:
+        launcher_mod._load_cockpit_token(token_file)
+    assert invalid_return.value.code == "token_file_invalid"
+
+
 def test_launcher_ignores_inherited_provider_reference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -204,11 +371,13 @@ def test_launcher_ignores_inherited_provider_reference(
         "COCKPIT_CODEX_PROVIDER_CONFIG_PATH", "/inherited/not/authorized.toml",
     )
     monkeypatch.setenv("CODEX_HOME", "/inherited/not/authorized-home")
+    monkeypatch.setenv("COCKPIT_TOKEN", "inherited-token-must-not-survive")
     process, _descriptor, _ready_result = _launch(runtime_root)
     try:
         environment = _process_env(process.pid)
         assert "COCKPIT_CODEX_PROVIDER_CONFIG_PATH" not in environment
         assert "CODEX_HOME" not in environment
+        assert "COCKPIT_TOKEN" not in environment
     finally:
         assert _stop(process) == ""
 
@@ -512,6 +681,10 @@ def test_ephemeral_launcher_runs_real_lifespan_and_reuses_known_root(
             "pid": descriptor["pid"],
             "port": _port(descriptor),
         }
+        remote_status, _payload, _headers = _remote_request(
+            descriptor, "/api/auth/status",
+        )
+        assert remote_status == 403
         live = _live(descriptor)
         assert live["status"] == "live"
         identity = live["identity"]

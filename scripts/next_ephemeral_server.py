@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent_cockpit import auth_token
 from agent_cockpit.instance_lock import LOCK_FD_ENV, InstanceLock, LockError
 from agent_cockpit import next_profile
 from agent_cockpit.local_codex_harness import (
@@ -42,6 +43,32 @@ def _source_sha(raw: str | None) -> str:
     if SOURCE_SHA_RE.fullmatch(raw) is None:
         raise EphemeralError("source_sha_malformed")
     return raw
+
+
+def _load_cockpit_token(
+    path: Path, *, forbidden_root: Path | None = None,
+) -> str:
+    try:
+        resolved = path.resolve(strict=True)
+        if (
+            not path.is_absolute()
+            or path.name != auth_token.TOKEN_FILE_NAME
+            or (
+                forbidden_root is not None
+                and resolved.is_relative_to(forbidden_root.resolve(strict=True))
+            )
+        ):
+            raise EphemeralError("token_file_invalid")
+        token = auth_token.load_cockpit_token({
+            "COCKPIT_CONFIG_DIR": str(path.parent),
+        })
+    except EphemeralError:
+        raise
+    except Exception:
+        raise EphemeralError("token_file_invalid") from None
+    if token is None or auth_token.TOKEN_RE.fullmatch(token) is None:
+        raise EphemeralError("token_file_invalid")
+    return token
 
 
 def _runtime_root(raw: str) -> Path:
@@ -115,6 +142,7 @@ def _listen() -> socket.socket:
 def _environment(
     root: Path, port: int, token: str, *, source_sha: str,
     provider_config: Path | None = None,
+    cockpit_token: str | None = None,
 ) -> dict[str, str]:
     clean = {
         name: value
@@ -163,6 +191,8 @@ def _environment(
     })
     if provider_config is not None:
         clean[PROVIDER_CONFIG_ENV] = str(provider_config)
+    if cockpit_token is not None:
+        clean["COCKPIT_TOKEN"] = cockpit_token
     return clean
 
 
@@ -200,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-root", required=True)
     parser.add_argument("--source-sha")
     parser.add_argument("--codex-provider-config")
+    parser.add_argument("--token-file")
     args = parser.parse_args(argv)
     listener: socket.socket | None = None
     lock: InstanceLock | None = None
@@ -208,6 +239,10 @@ def main(argv: list[str] | None = None) -> int:
         source_sha = _source_sha(args.source_sha)
         os.setsid()
         root = _runtime_root(args.runtime_root)
+        cockpit_token = (
+            _load_cockpit_token(Path(args.token_file), forbidden_root=root)
+            if args.token_file is not None else None
+        )
         provider_config = None
         if args.codex_provider_config is not None:
             try:
@@ -223,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         environment = _environment(
             root, port, token, source_sha=source_sha,
             provider_config=provider_config,
+            cockpit_token=cockpit_token,
         )
         lock = InstanceLock(environment).acquire()
         _prepare_layout(root, fresh=fresh)

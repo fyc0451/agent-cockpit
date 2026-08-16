@@ -1681,15 +1681,18 @@ def _agent_mail_requirement() -> dict[str, Any] | None:
 
 @app.middleware("http")
 async def protect_api(request: Request, call_next):
+    path = str(request.scope.get("path") or "")
+    if path == "/health/ephemeral" and not _no_token_scope_trusted(
+        request.scope, require_origin=False,
+    ):
+        return JSONResponse({"detail": LOCAL_ONLY_AUTH_DETAIL}, status_code=403)
     if not COCKPIT_TOKEN and (
         not _request_authenticated(request)
         or not _no_token_scope_trusted(request.scope, require_origin=False)
     ):
-        path = str(request.scope.get("path") or "")
         if _scoped_g3_path(path):
             return project_registry_api.bridge_http_exception(request, 403, LOCAL_ONLY_AUTH_DETAIL)
         return JSONResponse({"detail": LOCAL_ONLY_AUTH_DETAIL}, status_code=403)
-    path = str(request.scope.get("path") or "")
     if next_profile.enabled() and _AGENT_PROMPT_PATH_RE.fullmatch(path):
         return project_registry_api.g3_error(
             request,

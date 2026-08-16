@@ -277,6 +277,33 @@ def test_token_mode_keeps_public_health_and_static_entries(monkeypatch):
         assert client.get(path).status_code != 403, path
 
 
+def test_ephemeral_ready_token_is_loopback_only_even_in_token_mode(monkeypatch):
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(server.next_profile, "is_ephemeral", lambda: True)
+    monkeypatch.setattr(
+        server.next_profile, "ephemeral_runtime",
+        lambda **_kwargs: {"ready_token": "r" * 32, "port": 43901},
+    )
+    monkeypatch.setattr(server, "_ephemeral_ready", True)
+
+    local = TestClient(
+        server.app,
+        client=("127.0.0.1", 50000),
+        headers={"host": "127.0.0.1:43901"},
+    )
+    assert local.get("/health/ephemeral").status_code != 403
+
+    remote = TestClient(
+        server.app,
+        client=("127.0.0.1", 50000),
+        headers={"host": "alpha.tailnet:43901"},
+    )
+    remote.cookies.set(server.AUTH_COOKIE, "anything")
+    response = remote.get("/health/ephemeral")
+    assert response.status_code == 403
+    assert "ready_token" not in response.text
+
+
 @pytest.mark.parametrize(("token", "proxy_headers"), [("", False), ("secret", True)])
 def test_server_main_configures_proxy_headers_by_auth_mode(
     monkeypatch, token, proxy_headers,
