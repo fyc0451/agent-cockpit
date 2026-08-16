@@ -47,7 +47,7 @@ class _FakeHarness:
 
     def attach_readonly(
         self, *, session, checkout_path, project_id, workspace_id,
-        instance_id=None, display_name="codex",
+        instance_id=None, display_name="codex", **_kwargs,
     ):
         self.calls.append("attach")
         self.authority = (project_id, workspace_id)
@@ -262,16 +262,16 @@ class _WiredHerdr:
         self.closed = 0
         self.seq = 0
 
-    def start_agent(
-        self, session: str, workdir: str, agent: str = "codex",
-        model: str | None = None, layout: str = "tab", label: str | None = None,
-        args: str = "", instance_id: str | None = None,
-        project_id: str | None = None, workspace_id: str | None = None,
+    def start_workspace_codex_home(
+        self, *, session: str, workdir: str, instance_id: str,
+        project_id: str, workspace_id: str, codex_home: str,
+        label: str | None = None, display_name: str | None = None,
     ) -> dict[str, object]:
         self.seq += 1
         pane_id = f"pane-{self.seq}"
         self.started += 1
         self.panes[pane_id] = workdir
+        self.last_home = codex_home
         return {
             "available": True, "pane_id": pane_id, "instance_id": instance_id,
             "cwd": workdir,
@@ -326,8 +326,9 @@ class _WiredHerdr:
 def _wired_world(tmp_path: Path, herdr: _WiredHerdr):
     service, project, workspace, item, source, _fake, operations = _world(tmp_path)
     harness = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
         ensure_session=herdr.ensure_session,
-        start_agent=herdr.start_agent,
+        start_workspace_codex_home=herdr.start_workspace_codex_home,
         get_launch_descriptor=herdr.get_launch_descriptor,
         get_launch_descriptor_by_instance=herdr.get_launch_descriptor_by_instance,
         snapshot=herdr.session_snapshot,
@@ -375,13 +376,13 @@ def test_known_unverified_attach_closes_pane_then_prepared(tmp_path: Path) -> No
 def test_attach_passes_current_workspace_authority_to_harness(tmp_path: Path) -> None:
     herdr = _WiredHerdr()
     seen: list[tuple[object, object]] = []
-    original = herdr.start_agent
+    original = herdr.start_workspace_codex_home
 
-    def start_agent(*args, **kwargs):
+    def start_workspace_codex_home(*args, **kwargs):
         seen.append((kwargs.get("project_id"), kwargs.get("workspace_id")))
         return original(*args, **kwargs)
 
-    herdr.start_agent = start_agent  # type: ignore[method-assign]
+    herdr.start_workspace_codex_home = start_workspace_codex_home  # type: ignore[method-assign]
     service, project, workspace, item, herdr = _wired_world(tmp_path, herdr)
     member = service.create_member(
         project.project_id, workspace.workspace_id, display_name="Atlas",

@@ -45,7 +45,7 @@ class _FakeHarness:
 
     def attach_readonly(
         self, *, session, checkout_path, project_id, workspace_id,
-        instance_id=None, display_name="codex",
+        instance_id=None, display_name="codex", **_kwargs,
     ):
         self.authority = (project_id, workspace_id)
         self.panes["pane-live"] = str(checkout_path)

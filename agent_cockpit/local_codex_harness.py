@@ -87,6 +87,8 @@ class AgentHarnessAdapter(Protocol):
         self, *, session: str, checkout_path: Path,
         project_id: str, workspace_id: str,
         instance_id: str | None = None, display_name: str = "codex",
+        attachment_id: str | None = None, identity_id: str | None = None,
+        generation: int | None = None, fence: str | None = None,
     ) -> AttachmentEvidence: ...
 
     def observe(
@@ -108,6 +110,7 @@ class LocalCodexHarness:
         *,
         ensure_session: Callable[..., Any] | None = None,
         start_agent: Callable[..., dict[str, Any]] | None = None,
+        start_workspace_codex_home: Callable[..., dict[str, Any]] | None = None,
         get_launch_descriptor: Callable[..., dict[str, Any] | None] | None = None,
         get_launch_descriptor_by_instance: (
             Callable[..., dict[str, Any] | None] | None
@@ -120,6 +123,9 @@ class LocalCodexHarness:
     ) -> None:
         self._ensure_session = ensure_session or herdr_client.ensure_session
         self._start_agent = start_agent or herdr_client.start_agent
+        self._start_workspace_codex_home = (
+            start_workspace_codex_home or herdr_client.start_workspace_codex_home
+        )
         self._get_launch_descriptor = (
             get_launch_descriptor or herdr_client.get_launch_descriptor
         )
@@ -175,6 +181,7 @@ class LocalCodexHarness:
         _private_dir(home)
         _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
         _write_private(current, str(generation).encode() + b"\n")
+        _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
         config = (
             'sandbox_mode = "read-only"\n'
             "[mcp_servers.cockpit]\n"
@@ -193,7 +200,7 @@ class LocalCodexHarness:
     def wakeup(self, attachment_id: str, **extra: object) -> dict[str, str]:
         if extra:
             _fail("invalid_argument")
-        record = _read_capability(self._require_cap(attachment_id))
+        record = self._bound_capability(attachment_id)
         sent = self._wakeup_prompt(
             record["session"], record["pane_id"], WAKEUP_TEXT,
         )
@@ -216,47 +223,191 @@ class LocalCodexHarness:
             _fail("invalid_argument")
         return path
 
+    def _prepare_private_runtime(
+        self, *, attachment_id: str, identity_id: str, generation: int,
+        fence: str, session: str, checkout: str,
+    ) -> dict[str, Any]:
+        root = self._capability_root
+        if root is None or generation < 1:
+            _fail("invalid_argument")
+        _private_dir(root)
+        token = secrets.token_hex(32)
+        payload = {
+            "attachment_id": attachment_id,
+            "identity_id": identity_id,
+            "generation": generation,
+            "fence": fence,
+            "session": session,
+            "pane_id": None,
+            "instance_id": None,
+            "checkout": checkout,
+            "token": token,
+        }
+        cap = root / f"{attachment_id}.cap"
+        home = root / f"{attachment_id}.home"
+        _private_dir(home)
+        _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
+        _write_private(root / f"{attachment_id}.generation", str(generation).encode() + b"\n")
+        _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
+        config = (
+            'sandbox_mode = "read-only"\n'
+            "[mcp_servers.cockpit]\n"
+            'command = "python"\n'
+            'args = ["-m", "agent_cockpit.private_codex_mcp"]\n'
+            "[mcp_servers.cockpit.env]\n"
+            f'COCKPIT_CAPABILITY_FILE = "{cap}"\n'
+        )
+        _write_private(home / "config.toml", config.encode())
+        return {"capability_path": cap, "codex_home": home, "generation": generation}
+
+    def _bind_private_runtime(
+        self, *, attachment_id: str, pane_id: str, instance_id: str,
+    ) -> None:
+        record = self._require_capability_record(attachment_id)
+        if record.get("pane_id") not in {None, ""}:
+            if record.get("pane_id") != pane_id or record.get("instance_id") != instance_id:
+                _fail("invalid_argument")
+            return
+        record["pane_id"] = pane_id
+        record["instance_id"] = instance_id
+        _write_private(
+            self._require_cap(attachment_id),
+            json.dumps(record, separators=(",", ":")).encode(),
+        )
+
+    def _bound_capability(self, attachment_id: str) -> dict[str, Any]:
+        record = self._require_capability_record(attachment_id)
+        pane_id = record.get("pane_id")
+        if not isinstance(pane_id, str) or pane_id == "":
+            _fail("invalid_argument")
+        if not isinstance(record.get("session"), str) or record["session"] == "":
+            _fail("invalid_argument")
+        return record
+
+    def _require_capability_record(self, attachment_id: str) -> dict[str, Any]:
+        path = self._require_cap(attachment_id)
+        record = _read_capability(path)
+        if current_generation(path) != record.get("generation"):
+            _fail("stale_generation")
+        fence = record.get("fence")
+        if not isinstance(fence, str) or fence == "":
+            _fail("invalid_argument")
+        sidecar = path.parent / f"{attachment_id_text(record.get('attachment_id'))}.fence"
+        try:
+            info = sidecar.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_uid != os.getuid()
+            ):
+                _fail("invalid_argument")
+            raw = sidecar.read_bytes().decode("ascii").strip()
+        except (OSError, UnicodeError):
+            _fail("invalid_argument")
+        if raw != fence:
+            _fail("invalid_argument")
+        return record
+
+    def _retire_private_runtime(self, attachment_id: str) -> None:
+        root = self._capability_root
+        if root is None:
+            return
+        for name in (
+            f"{attachment_id}.cap", f"{attachment_id}.generation",
+            f"{attachment_id}.fence",
+        ):
+            try:
+                (root / name).unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+        try:
+            (root / f"{attachment_id}.home" / "config.toml").unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
     def attach_readonly(
         self, *, session: str, checkout_path: Path,
         project_id: str, workspace_id: str,
         instance_id: str | None = None, display_name: str = "codex",
+        attachment_id: str | None = None, identity_id: str | None = None,
+        generation: int | None = None, fence: str | None = None,
     ) -> AttachmentEvidence:
         spec = self.build_launch_spec(checkout_path)
         if instance_id is None:
             instance_id = self._new_instance_id()
         if project_id is None or workspace_id is None:
             _fail("invalid_argument")
+        if (
+            self._capability_root is None
+            or not isinstance(identity_id, str) or identity_id == ""
+            or type(generation) is not int
+            or not isinstance(fence, str) or fence == ""
+        ):
+            _fail("invalid_argument")
+        attachment_id = attachment_id_text(attachment_id)
+        issued = self._prepare_private_runtime(
+            attachment_id=attachment_id, identity_id=identity_id,
+            generation=generation, fence=fence, session=session,
+            checkout=spec.cwd,
+        )
+        pane_id: str | None = None
+        live_id = instance_id
         try:
             self._ensure_session(session=session)
         except Exception:
+            self._retire_private_runtime(attachment_id)
             _fail("runtime_unavailable")
         try:
-            started = self._start_agent(
+            started = self._start_workspace_codex_home(
                 session=session,
                 workdir=spec.cwd,
-                agent=KIND,
-                args=spec.argv_text(),
                 instance_id=instance_id,
-                label=display_name,
                 project_id=project_id,
                 workspace_id=workspace_id,
+                codex_home=str(issued["codex_home"]),
+                label=display_name,
+                display_name=display_name,
             )
         except Exception:
+            self._retire_private_runtime(attachment_id)
             _fail("runtime_unavailable")
         if not isinstance(started, dict) or started.get("available") is False:
+            self._retire_private_runtime(attachment_id)
             _fail("runtime_unavailable")
         if started.get("error") or started.get("error_code"):
+            pane_id = started.get("pane_id")
+            if isinstance(pane_id, str) and pane_id:
+                try:
+                    self.detach(session=session, pane_id=pane_id)
+                except HarnessError:
+                    self._retire_private_runtime(attachment_id)
+                    raise HarnessError(
+                        "runtime_unavailable", pane_id=pane_id, instance_id=str(live_id),
+                    ) from None
+            self._retire_private_runtime(attachment_id)
             _fail("runtime_unavailable")
         pane_id = started.get("pane_id")
         live_id = started.get("instance_id") or instance_id
         if not isinstance(pane_id, str) or not pane_id:
+            self._retire_private_runtime(attachment_id)
             _fail("runtime_unavailable")
         try:
-            return self.observe(
+            evidence = self.observe(
                 session=session, instance_id=str(live_id), pane_id=pane_id,
                 checkout_path=checkout_path,
             )
+            self._bind_private_runtime(
+                attachment_id=attachment_id, pane_id=pane_id,
+                instance_id=str(live_id),
+            )
+            return evidence
         except HarnessError as exc:
+            self._retire_private_runtime(attachment_id)
             if exc.code in {"runtime_identity_unverified", "process_exited"}:
                 try:
                     self.detach(session=session, pane_id=pane_id)
@@ -270,6 +421,7 @@ class LocalCodexHarness:
                 unknown=exc.unknown,
             ) from None
         except Exception:
+            self._retire_private_runtime(attachment_id)
             raise HarnessError(
                 "runtime_unavailable", pane_id=pane_id, instance_id=str(live_id),
                 unknown=True,

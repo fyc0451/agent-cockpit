@@ -282,6 +282,13 @@ class ExecutionService:
                     display_name=view.identity.display_name,
                     project_id=project_id,
                     workspace_id=workspace_id,
+                    attachment_id=attachment.attachment_id,
+                    identity_id=view.identity.identity_id,
+                    generation=attachment.generation,
+                    fence=self.store.current_lease_fence(
+                        project_id=project_id, workspace_id=workspace_id,
+                        work_item_id=work_item_id,
+                    ),
                 ),
             )
         except ExecutionServiceError as exc:

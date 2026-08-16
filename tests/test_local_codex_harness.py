@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 from pathlib import Path
 
@@ -12,11 +13,16 @@ from agent_cockpit import local_codex_harness as harness_mod
 INSTANCE = "i-abcdefghijklmnopqrstuvwxyz"
 PROJECT = "prj_" + "a" * 32
 WORKSPACE = "ws_" + "b" * 32
+ATTACHMENT = "att_" + "c" * 32
+IDENTITY = "idn_" + "d" * 32
+SENTINEL = "BOSS-BODY-SENTINEL-9f3c"
+FENCE = "sha256:" + "ab" * 32
 
 
 def test_reference_defaults_bind_real_herdr_signatures() -> None:
     harness = harness_mod.LocalCodexHarness()
     assert harness._start_agent is herdr_client.start_agent
+    assert harness._start_workspace_codex_home is herdr_client.start_workspace_codex_home
     assert harness._get_launch_descriptor is herdr_client.get_launch_descriptor
     assert (
         harness._get_launch_descriptor_by_instance
@@ -29,6 +35,11 @@ def test_reference_defaults_bind_real_herdr_signatures() -> None:
     assert list(start.parameters) == [
         "session", "workdir", "agent", "model", "layout", "label", "args",
         "instance_id", "project_id", "workspace_id",
+    ]
+    home_start = inspect.signature(herdr_client.start_workspace_codex_home)
+    assert list(home_start.parameters) == [
+        "session", "workdir", "instance_id", "project_id", "workspace_id",
+        "codex_home", "label", "display_name",
     ]
     by_pane = inspect.signature(herdr_client.get_launch_descriptor)
     assert list(by_pane.parameters) == ["session", "pane_id"]
@@ -43,21 +54,19 @@ def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
     checkout.mkdir()
     calls: list[tuple[str, dict[str, object]]] = []
     panes = {"pane-1": str(checkout)}
-    start_sig = inspect.signature(herdr_client.start_agent)
+    start_sig = inspect.signature(herdr_client.start_workspace_codex_home)
     desc_sig = inspect.signature(herdr_client.get_launch_descriptor)
     inst_sig = inspect.signature(herdr_client.get_launch_descriptor_by_instance)
 
-    def start_agent(*args, **kwargs):
+    def start_workspace_codex_home(*args, **kwargs):
         bound = start_sig.bind(*args, **kwargs)
         bound.apply_defaults()
         calls.append(("start", dict(bound.arguments)))
-        assert bound.arguments["model"] is None
-        assert bound.arguments["layout"] == "tab"
-        assert bound.arguments["args"] == "--sandbox read-only"
-        assert bound.arguments["agent"] == "codex"
+        assert "args" not in bound.arguments
         assert Path(bound.arguments["workdir"]) == checkout
         assert bound.arguments["project_id"] == PROJECT
         assert bound.arguments["workspace_id"] == WORKSPACE
+        assert Path(bound.arguments["codex_home"]).is_dir()
         panes["pane-1"] = bound.arguments["workdir"]
         return {
             "available": True, "pane_id": "pane-1",
@@ -101,8 +110,9 @@ def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
         return {"available": True, "closed": pane_id}
 
     harness = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
         ensure_session=lambda *, session: calls.append(("ensure", {"session": session})),
-        start_agent=start_agent,
+        start_workspace_codex_home=start_workspace_codex_home,
         get_launch_descriptor=get_launch_descriptor,
         get_launch_descriptor_by_instance=get_launch_descriptor_by_instance,
         snapshot=snapshot,
@@ -112,14 +122,16 @@ def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
     attached = harness.attach_readonly(
         session="s", checkout_path=checkout,
         project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence="sha256:" + "ab" * 32,
     )
     assert attached.identity_verified is True
     assert attached.cwd == str(checkout)
     start_call = next(item for item in calls if item[0] == "start")[1]
-    assert start_call["args"] == "--sandbox read-only"
-    assert start_call["model"] is None
+    assert "args" not in start_call
     assert start_call["project_id"] == PROJECT
     assert start_call["workspace_id"] == WORKSPACE
+    assert Path(start_call["codex_home"]).is_dir()
     assert next(item for item in calls if item[0] == "desc_pane")[1] == {
         "session": "s", "pane_id": "pane-1",
     }
@@ -131,8 +143,9 @@ def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
     assert all(name != "pane_send" for name, _payload in calls)
 
     missing = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps-missing",
         ensure_session=lambda *, session: None,
-        start_agent=start_agent,
+        start_workspace_codex_home=start_workspace_codex_home,
         get_launch_descriptor=lambda *, session, pane_id: None,
         get_launch_descriptor_by_instance=lambda instance_id, **_kw: None,
         snapshot=lambda *, session: {
@@ -147,6 +160,8 @@ def test_start_agent_uses_real_keywords_and_requires_verified_descriptor(
         missing.attach_readonly(
             session="s", checkout_path=checkout,
             project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+            fence=FENCE,
         )
     assert unverified.value.code == "runtime_identity_unverified"
 
@@ -168,16 +183,16 @@ class _CountingHerdr:
         self.closed = 0
         self.seq = 0
 
-    def start_agent(
-        self, session: str, workdir: str, agent: str = "codex",
-        model: str | None = None, layout: str = "tab", label: str | None = None,
-        args: str = "", instance_id: str | None = None,
-        project_id: str | None = None, workspace_id: str | None = None,
+    def start_workspace_codex_home(
+        self, *, session: str, workdir: str, instance_id: str,
+        project_id: str, workspace_id: str, codex_home: str,
+        label: str | None = None, display_name: str | None = None,
     ) -> dict[str, object]:
         self.seq += 1
         pane_id = f"pane-{self.seq}"
         self.started += 1
         self.panes[pane_id] = workdir
+        self.last_home = codex_home
         return {
             "available": True, "pane_id": pane_id, "instance_id": instance_id,
             "cwd": workdir,
@@ -227,8 +242,9 @@ def test_known_identity_failure_closes_live_pane(tmp_path: Path) -> None:
     checkout.mkdir()
     herdr = _CountingHerdr(checkout, descriptors=False, close="ok")
     harness = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
         ensure_session=herdr.ensure_session,
-        start_agent=herdr.start_agent,
+        start_workspace_codex_home=herdr.start_workspace_codex_home,
         get_launch_descriptor=herdr.get_launch_descriptor,
         get_launch_descriptor_by_instance=herdr.get_launch_descriptor_by_instance,
         snapshot=herdr.session_snapshot,
@@ -239,6 +255,7 @@ def test_known_identity_failure_closes_live_pane(tmp_path: Path) -> None:
         harness.attach_readonly(
             session="s", checkout_path=checkout,
             project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
         )
     assert error.value.code == "runtime_identity_unverified"
     assert herdr.started == 1
@@ -252,8 +269,9 @@ def test_known_identity_failure_unknown_close_does_not_pretend(tmp_path: Path) -
     checkout.mkdir()
     herdr = _CountingHerdr(checkout, descriptors=False, close="raise")
     harness = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
         ensure_session=herdr.ensure_session,
-        start_agent=herdr.start_agent,
+        start_workspace_codex_home=herdr.start_workspace_codex_home,
         get_launch_descriptor=herdr.get_launch_descriptor,
         get_launch_descriptor_by_instance=herdr.get_launch_descriptor_by_instance,
         snapshot=herdr.session_snapshot,
@@ -264,6 +282,7 @@ def test_known_identity_failure_unknown_close_does_not_pretend(tmp_path: Path) -
         harness.attach_readonly(
             session="s", checkout_path=checkout,
             project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
         )
     assert error.value.code == "runtime_unavailable"
     assert herdr.started == 1
@@ -279,7 +298,7 @@ def test_detach_close_transport_loss_is_unknown(tmp_path: Path) -> None:
     herdr.panes["pane-1"] = str(checkout)
     harness = harness_mod.LocalCodexHarness(
         ensure_session=herdr.ensure_session,
-        start_agent=herdr.start_agent,
+        start_workspace_codex_home=herdr.start_workspace_codex_home,
         get_launch_descriptor=herdr.get_launch_descriptor,
         get_launch_descriptor_by_instance=herdr.get_launch_descriptor_by_instance,
         snapshot=herdr.session_snapshot,
@@ -300,7 +319,7 @@ def test_attach_requires_paired_workspace_authority_and_does_not_invent_format(
     checkout.mkdir()
     started: list[dict[str, object]] = []
 
-    def start_agent(**kwargs):
+    def start_workspace_codex_home(**kwargs):
         started.append(kwargs)
         return {
             "available": True, "pane_id": "pane-1",
@@ -308,8 +327,9 @@ def test_attach_requires_paired_workspace_authority_and_does_not_invent_format(
         }
 
     harness = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
         ensure_session=lambda *, session: None,
-        start_agent=start_agent,
+        start_workspace_codex_home=start_workspace_codex_home,
         get_launch_descriptor=lambda *, session, pane_id: {
             "session": session, "pane_id": pane_id, "instance_id": INSTANCE,
             "workdir": str(checkout), "kind": "codex",
@@ -336,16 +356,12 @@ def test_attach_requires_paired_workspace_authority_and_does_not_invent_format(
     attached = harness.attach_readonly(
         session="s", checkout_path=checkout,
         project_id=forged, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
     )
     assert attached.identity_verified is True
     assert started[-1]["project_id"] == forged
     assert started[-1]["workspace_id"] == WORKSPACE
-    assert started[-1]["args"] == "--sandbox read-only"
-
-
-ATTACHMENT = "att_" + "c" * 32
-IDENTITY = "idn_" + "d" * 32
-SENTINEL = "BOSS-BODY-SENTINEL-9f3c"
+    assert "args" not in started[-1]
 
 
 def _harness(tmp_path: Path, *, prompts: list[str] | None = None) -> harness_mod.LocalCodexHarness:
@@ -533,3 +549,173 @@ def test_attachment_id_and_private_leaf_paths_fail_closed(tmp_path: Path) -> Non
         harness_mod.current_generation(restored["capability_path"])
     assert missing.value.code == "stale_generation"
     assert str(missing.value) == "stale_generation"
+
+
+def _attach_harness(tmp_path: Path, *, start=None, descriptors: bool = True, close: str = "ok"):
+    checkout = tmp_path / "chk"
+    checkout.mkdir(exist_ok=True)
+    started: list[dict[str, object]] = []
+    generic: list[dict[str, object]] = []
+    panes: dict[str, str] = {}
+
+    def start_workspace_codex_home(**kwargs):
+        started.append(kwargs)
+        if start is not None:
+            return start(kwargs, panes)
+        panes["pane-1"] = kwargs["workdir"]
+        return {
+            "available": True, "pane_id": "pane-1",
+            "instance_id": kwargs["instance_id"], "cwd": kwargs["workdir"],
+        }
+
+    def start_agent(**kwargs):
+        generic.append(kwargs)
+        raise AssertionError("generic start_agent must not be used")
+
+    def get_launch_descriptor(*, session: str, pane_id: str):
+        if not descriptors or pane_id not in panes:
+            return None
+        return {
+            "session": session, "pane_id": pane_id, "instance_id": INSTANCE,
+            "workdir": str(checkout), "kind": "codex",
+            "args": ["--sandbox", "read-only"], "codex_home": str(tmp_path / "caps" / f"{ATTACHMENT}.home"),
+        }
+
+    def get_launch_descriptor_by_instance(instance_id: str, **_kw):
+        if not descriptors or not panes:
+            return None
+        pane_id = next(iter(panes))
+        return {
+            "session": "s", "pane_id": pane_id, "instance_id": instance_id,
+            "workdir": str(checkout), "kind": "codex",
+            "args": ["--sandbox", "read-only"],
+        }
+
+    def snapshot(*, session: str):
+        return {"panes": [{"pane_id": pane, "cwd": cwd} for pane, cwd in panes.items()]}
+
+    def close_pane(*, session: str, pane_id: str):
+        if close == "raise":
+            raise RuntimeError("close lost")
+        panes.pop(pane_id, None)
+        return {"available": True}
+
+    harness = harness_mod.LocalCodexHarness(
+        capability_root=tmp_path / "caps",
+        ensure_session=lambda *, session: None,
+        start_agent=start_agent,
+        start_workspace_codex_home=start_workspace_codex_home,
+        get_launch_descriptor=get_launch_descriptor,
+        get_launch_descriptor_by_instance=get_launch_descriptor_by_instance,
+        snapshot=snapshot,
+        close_pane=close_pane,
+        new_instance_id=lambda: INSTANCE,
+    )
+    return harness, checkout, started, generic, panes
+
+
+def test_attach_issues_private_home_and_never_calls_start_agent(tmp_path: Path) -> None:
+    user_cfg = Path.home() / ".codex" / "config.toml"
+    before = user_cfg.stat() if user_cfg.exists() else None
+    harness, checkout, started, generic, panes = _attach_harness(tmp_path)
+    with pytest.raises(harness_mod.HarnessError):
+        harness.wakeup(ATTACHMENT)
+    attached = harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+    )
+    assert generic == []
+    assert len(started) == 1
+    assert "args" not in started[0]
+    home = Path(started[0]["codex_home"])
+    assert home == tmp_path / "caps" / f"{ATTACHMENT}.home"
+    assert home.is_dir()
+    assert home.stat().st_mode & 0o777 == 0o700
+    cap = tmp_path / "caps" / f"{ATTACHMENT}.cap"
+    assert cap.is_file()
+    assert cap.stat().st_mode & 0o777 == 0o600
+    config = home / "config.toml"
+    assert config.is_file()
+    assert config.stat().st_mode & 0o777 == 0o600
+    record = json.loads(cap.read_text(encoding="utf-8"))
+    assert record["attachment_id"] == ATTACHMENT
+    assert record["identity_id"] == IDENTITY
+    assert record["generation"] == 1
+    assert record["fence"] == FENCE
+    assert record["checkout"] == str(checkout)
+    assert record["pane_id"] == attached.pane_id == "pane-1"
+    assert record["instance_id"] == attached.instance_id == INSTANCE
+    assert "token" not in str(started[0])
+    assert "token" not in str(harness._get_launch_descriptor(session="s", pane_id="pane-1"))
+    assert SENTINEL not in config.read_text(encoding="utf-8")
+    woken = harness.wakeup(ATTACHMENT)
+    assert woken["text"] == harness_mod.WAKEUP_TEXT
+    after = user_cfg.stat() if user_cfg.exists() else None
+    if before is None:
+        assert after is None
+    else:
+        assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+    harness.detach(session="s", pane_id=attached.pane_id)
+    assert panes == {}
+    assert home.is_dir()
+    assert cap.is_file()
+
+
+def test_attach_start_failure_leaves_no_usable_cap_or_pane(tmp_path: Path) -> None:
+    def fail(kwargs, panes):
+        return {"available": True, "error_code": "runtime_unavailable", "error": "no"}
+
+    harness, checkout, started, generic, panes = _attach_harness(tmp_path, start=fail)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+        )
+    assert error.value.code == "runtime_unavailable"
+    assert generic == []
+    assert started
+    assert panes == {}
+    assert not (tmp_path / "caps" / f"{ATTACHMENT}.cap").exists()
+    with pytest.raises(harness_mod.HarnessError) as wakeup:
+        harness.wakeup(ATTACHMENT)
+    assert wakeup.value.code == "invalid_argument"
+
+
+def test_attach_observe_failure_closes_pane_and_retires_cap(tmp_path: Path) -> None:
+    harness, checkout, _started, generic, panes = _attach_harness(
+        tmp_path, descriptors=False,
+    )
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+        )
+    assert error.value.code == "runtime_identity_unverified"
+    assert generic == []
+    assert panes == {}
+    assert not (tmp_path / "caps" / f"{ATTACHMENT}.cap").exists()
+
+
+def test_old_generation_and_fence_fail_closed(tmp_path: Path) -> None:
+    harness, checkout, _started, _generic, _panes = _attach_harness(tmp_path)
+    harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+    )
+    (tmp_path / "caps" / f"{ATTACHMENT}.generation").write_bytes(b"2\n")
+    with pytest.raises(harness_mod.HarnessError) as stale:
+        harness.wakeup(ATTACHMENT)
+    assert stale.value.code in {"stale_generation", "invalid_argument"}
+    (tmp_path / "caps" / f"{ATTACHMENT}.generation").write_bytes(b"1\n")
+    cap = tmp_path / "caps" / f"{ATTACHMENT}.cap"
+    record = json.loads(cap.read_text(encoding="utf-8"))
+    record["fence"] = "sha256:" + "cd" * 32
+    cap.write_bytes(json.dumps(record).encode())
+    os.chmod(cap, 0o600)
+    with pytest.raises(harness_mod.HarnessError) as fence:
+        harness.wakeup(ATTACHMENT)
+    assert fence.value.code == "invalid_argument"

@@ -857,6 +857,37 @@ class WorkspaceExecutionStore:
         finally:
             connection.close()
 
+    def current_lease_fence(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+    ) -> str:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        connection = _connect(self.path, write=False)
+        try:
+            _require_current_schema(connection)
+            prep = connection.execute(
+                "SELECT lease_id FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is None or not prep["lease_id"]:
+                _fail("lease_conflict")
+            lease = connection.execute(
+                "SELECT fence_digest FROM writer_leases WHERE lease_id=?",
+                (prep["lease_id"],),
+            ).fetchone()
+            if lease is None or not isinstance(lease["fence_digest"], str):
+                _fail("lease_conflict")
+            return str(lease["fence_digest"])
+        except WorkspaceExecutionError:
+            raise
+        except sqlite3.Error as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
     def replay(
         self, *, project_id: str, workspace_id: str, scope: str,
         idempotency_key: object, request: object,
