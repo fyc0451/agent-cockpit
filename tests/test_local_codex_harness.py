@@ -896,6 +896,7 @@ def test_private_file_replace_keeps_old_bytes_on_fault(tmp_path: Path, monkeypat
     assert config.read_bytes() == before_config
     assert cap.stat().st_size > 0
     assert list((tmp_path / "caps").glob(".*.tmp")) == []
+    assert list((tmp_path / "caps").glob(".*.bak")) == []
 
 
 def _authority_snapshot(tmp_path: Path, issued: dict[str, object]) -> dict[str, bytes]:
@@ -918,7 +919,9 @@ def _assert_authority_unchanged(
     assert (home / "config.toml").read_bytes() == before["config"]
     assert issued["capability_path"].stat().st_size > 0
     assert list((tmp_path / "caps").glob(".*.tmp")) == []
+    assert list((tmp_path / "caps").glob(".*.bak")) == []
     assert list(home.glob(".*.tmp")) == []
+    assert list(home.glob(".*.bak")) == []
 
 
 def test_write_zero_progress_keeps_old_authority_bytes(
@@ -965,6 +968,7 @@ def test_write_partial_then_complete_publishes_full_payload(
     assert record["generation"] == 2
     assert record["fence"] == "sha256:" + "cd" * 32
     assert list((tmp_path / "caps").glob(".*.tmp")) == []
+    assert list((tmp_path / "caps").glob(".*.bak")) == []
 
 
 def test_write_multiple_partials_then_complete(
@@ -991,6 +995,7 @@ def test_write_multiple_partials_then_complete(
     record = json.loads(updated["capability_path"].read_bytes().decode("utf-8"))
     assert record["generation"] == 3
     assert list((tmp_path / "caps").glob(".*.tmp")) == []
+    assert list((tmp_path / "caps").glob(".*.bak")) == []
 
 
 def test_write_partial_then_exception_keeps_old_bytes(
@@ -1020,6 +1025,128 @@ def test_write_partial_then_exception_keeps_old_bytes(
         )
     assert error.value.code == "invalid_argument"
     _assert_authority_unchanged(tmp_path, issued, before)
+
+
+def _fail_fsync_on(
+    monkeypatch: pytest.MonkeyPatch, *fail_at: int,
+) -> dict[str, int]:
+    real = os.fsync
+    state = {"n": 0}
+    failed = set(fail_at)
+
+    def flaky(fd: int) -> None:
+        state["n"] += 1
+        if state["n"] in failed:
+            raise OSError(f"fsync #{state['n']} lost")
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", flaky)
+    return state
+
+
+def _assert_no_write_sidecars(folder: Path) -> None:
+    leftover = [
+        path.name
+        for path in folder.iterdir()
+        if path.name.startswith(".")
+        and (path.name.endswith(".tmp") or path.name.endswith(".bak"))
+    ]
+    assert leftover == []
+
+
+def test_second_fsync_failure_restores_old_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    old = b"old-authority-bytes"
+    new = b"new-private-authority-payload"
+    harness_mod._write_private(target, old)
+    _fail_fsync_on(monkeypatch, 2)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod._write_private(target, new)
+    assert error.value.code == "invalid_argument"
+    assert target.read_bytes() == old
+    assert target.read_bytes() != new
+    _assert_no_write_sidecars(parent)
+
+
+def test_second_fsync_failure_without_old_target_leaves_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    new = b"new-private-authority-payload"
+    assert not target.exists()
+    _fail_fsync_on(monkeypatch, 2)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod._write_private(target, new)
+    assert error.value.code == "invalid_argument"
+    with pytest.raises(FileNotFoundError):
+        target.lstat()
+    _assert_no_write_sidecars(parent)
+
+
+def test_restore_fsync_failure_keeps_old_not_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    old = b"old-authority-bytes"
+    new = b"new-private-authority-payload"
+    harness_mod._write_private(target, old)
+    _fail_fsync_on(monkeypatch, 2, 3)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod._write_private(target, new)
+    assert error.value.code == "invalid_argument"
+    try:
+        body = target.read_bytes()
+    except FileNotFoundError:
+        body = None
+    assert body != new
+    if body is not None:
+        assert body == old
+    _assert_no_write_sidecars(parent)
+
+
+def test_restore_fsync_failure_without_old_target_leaves_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    new = b"new-private-authority-payload"
+    _fail_fsync_on(monkeypatch, 2, 3)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod._write_private(target, new)
+    assert error.value.code == "invalid_argument"
+    with pytest.raises(FileNotFoundError):
+        target.lstat()
+    _assert_no_write_sidecars(parent)
+
+
+def test_issue_capability_second_fsync_keeps_old_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    before = _authority_snapshot(tmp_path, issued)
+    _fail_fsync_on(monkeypatch, 2)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.issue_capability(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=2,
+            fence="sha256:" + "cd" * 32, session="s", pane_id="pane-1",
+        )
+    assert error.value.code == "invalid_argument"
+    _assert_authority_unchanged(tmp_path, issued, before)
+    record = json.loads(issued["capability_path"].read_bytes().decode("utf-8"))
+    assert record["generation"] == 1
 
 
 def test_start_unproven_rollback_without_pane_is_unknown(tmp_path: Path) -> None:

@@ -633,10 +633,126 @@ def _write_mcp_home_config(home: Path, cap: Path, capability_root: Path) -> None
     _write_private(home / "config.toml", config.encode())
 
 
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _fsync_dir(parent: Path) -> None:
+    dirfd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
+
+
+def _read_private_regular(path: Path) -> bytes:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.getuid()
+        ):
+            raise OSError("unsafe private file")
+        chunks: list[bytes] = []
+        remaining = info.st_size
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if chunk == b"":
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _write_exclusive_file(path: Path, payload: bytes, *, durable: bool) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        view = memoryview(payload)
+        offset = 0
+        while offset < len(view):
+            wrote = os.write(fd, view[offset:])
+            if wrote <= 0:
+                raise OSError("short write")
+            offset += wrote
+        if durable:
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    staged = path.lstat()
+    if (
+        stat.S_ISLNK(staged.st_mode)
+        or not stat.S_ISREG(staged.st_mode)
+        or staged.st_nlink != 1
+        or staged.st_uid != os.getuid()
+        or stat.S_IMODE(staged.st_mode) != 0o600
+    ):
+        _fail("invalid_argument")
+    if _read_private_regular(path) != payload:
+        _fail("invalid_argument")
+
+
+def _restore_published(
+    path: Path,
+    parent: Path,
+    backup: Path | None,
+    previous: bytes | None,
+) -> bool:
+    try:
+        if previous is None:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            _fsync_dir(parent)
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                return True
+            return False
+        if backup is None:
+            return False
+        os.replace(backup, path)
+        _fsync_dir(parent)
+        return _read_private_regular(path) == previous
+    except OSError:
+        try:
+            if previous is None:
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    return True
+                return False
+            return _read_private_regular(path) == previous
+        except (FileNotFoundError, OSError):
+            return False
+
+
+def _retire_published_target(path: Path, parent: Path) -> None:
+    _unlink_quiet(path)
+    try:
+        _fsync_dir(parent)
+    except OSError:
+        return
+
+
 def _write_private(path: Path, payload: bytes) -> None:
     _assert_private_ancestry(path)
     parent = path.parent
     tmp: Path | None = None
+    backup: Path | None = None
+    previous: bytes | None = None
+    published = False
     try:
         try:
             info = path.lstat()
@@ -656,37 +772,18 @@ def _write_private(path: Path, payload: bytes) -> None:
             or parent_info.st_uid != os.getuid()
         ):
             _fail("invalid_argument")
+        if info is not None:
+            previous = _read_private_regular(path)
+            backup = parent / f".{path.name}.{secrets.token_hex(8)}.bak"
+            # Read-back verifies old bytes; skip os.fsync so call #2 stays the
+            # post-replace directory fsync.
+            _write_exclusive_file(backup, previous, durable=False)
         tmp = parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(tmp, flags, 0o600)
-        try:
-            view = memoryview(payload)
-            offset = 0
-            while offset < len(view):
-                wrote = os.write(fd, view[offset:])
-                if wrote <= 0:
-                    raise OSError("short write")
-                offset += wrote
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.chmod(tmp, 0o600)
-        staged = tmp.lstat()
-        if (
-            stat.S_ISLNK(staged.st_mode)
-            or not stat.S_ISREG(staged.st_mode)
-            or staged.st_nlink != 1
-            or staged.st_uid != os.getuid()
-            or stat.S_IMODE(staged.st_mode) != 0o600
-        ):
-            _fail("invalid_argument")
+        _write_exclusive_file(tmp, payload, durable=True)
         os.replace(tmp, path)
+        published = True
         tmp = None
-        dirfd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(dirfd)
-        finally:
-            os.close(dirfd)
+        _fsync_dir(parent)
         written = path.lstat()
         if (
             stat.S_ISLNK(written.st_mode)
@@ -696,19 +793,25 @@ def _write_private(path: Path, payload: bytes) -> None:
             or stat.S_IMODE(written.st_mode) != 0o600
         ):
             _fail("invalid_argument")
-    except HarnessError:
+        if backup is not None:
+            _unlink_quiet(backup)
+            backup = None
+    except (HarnessError, OSError) as exc:
         if tmp is not None:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        raise
-    except OSError:
-        if tmp is not None:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
+            _unlink_quiet(tmp)
+            tmp = None
+        if published:
+            proven = _restore_published(path, parent, backup, previous)
+            if backup is not None:
+                _unlink_quiet(backup)
+                backup = None
+            if not proven:
+                _retire_published_target(path, parent)
+        elif backup is not None:
+            _unlink_quiet(backup)
+            backup = None
+        if isinstance(exc, HarnessError):
+            raise
         _fail("invalid_argument")
 
 
