@@ -1,6 +1,7 @@
 import { fireEvent, screen } from '@testing-library/react'
 import { defaultFetchMap, metaOk, REG_P1 } from '../fixtures/api'
 import { renderApp } from './helpers'
+import { ProtocolError } from '../api/client'
 import {
   assertWorkspaceExecutionMember,
   assertWorkspacePreparation,
@@ -110,11 +111,13 @@ function stubB2(opts: {
   writeError?: { status: number; code: string }
   dropFirstWrite?: string
   prepareResponse?: unknown
+  recoveryFailure?: 'server' | 'disconnected' | 'malformed'
 } = {}) {
   let items = [workAggregate()]
   let members = [...(opts.members ?? [])]
   let prep: unknown | null = opts.prep === undefined ? null : opts.prep
   let droppedFirstWrite = false
+  let prepareWritten = false
   const calls: RecordedRequest[] = []
   const defaults = defaultFetchMap()
   vi.stubGlobal(
@@ -167,7 +170,17 @@ function stubB2(opts: {
         if (method === 'POST') {
           if (opts.writeError) return err(opts.writeError.status, opts.writeError.code)
           prep = preparation()
+          prepareWritten = true
           return ok(opts.prepareResponse ?? prep, 201)
+        }
+        if (prepareWritten && opts.recoveryFailure === 'server') {
+          return err(500, 'server_error')
+        }
+        if (prepareWritten && opts.recoveryFailure === 'disconnected') {
+          throw new TypeError('Failed to fetch')
+        }
+        if (prepareWritten && opts.recoveryFailure === 'malformed') {
+          return ok({ ...preparation(), lease: { lease_id: 'les_b2' } })
         }
         if (opts.hangPrep) return new Promise(() => {})
         if (opts.prepError) return err(opts.prepError.status, opts.prepError.code)
@@ -232,17 +245,25 @@ describe('Checkpoint B2 公共 DTO', () => {
     expect(assertWorkspaceExecutionMember(memberAtlas)).toMatchObject(memberAtlas)
     const prepared = preparation()
     expect(assertWorkspacePreparation(prepared).work_item_status).toBe('unassigned')
-    expect(() => assertWorkspaceExecutionMember({ ...memberAtlas, identity_id: '' })).toThrow()
+    expect(() => assertWorkspaceExecutionMember({ ...memberAtlas, identity_id: '' }))
+      .toThrowError(ProtocolError)
     expect(() =>
       assertWorkspacePreparation({ ...prepared, checkout: { ...(prepared.checkout as object), path: '/tmp' } }),
-    ).toThrow()
+    ).toThrowError(/checkout 键集/)
     const lease = prepared.lease as Record<string, unknown>
     const { claim_id: _missingClaimId, ...leaseWithoutClaimId } = lease
-    expect(() => assertWorkspacePreparation({ ...prepared, lease: leaseWithoutClaimId })).toThrow()
+    expect(() => assertWorkspacePreparation({ ...prepared, lease: leaseWithoutClaimId }))
+      .toThrowError(ProtocolError)
+    expect(() => assertWorkspacePreparation({ ...prepared, lease: leaseWithoutClaimId }))
+      .toThrowError(/lease 键集/)
     expect(() => assertWorkspacePreparation({
       ...prepared,
       lease: { ...lease, claim_id: 7 },
-    })).toThrow()
+    })).toThrowError(/lease\.claim_id/)
+    expect(() => assertWorkspacePreparation({
+      ...prepared,
+      lease: { ...lease, fence_digest: 'internal' },
+    })).toThrowError(/lease 键集/)
     expect(assertWorkspacePreparation({
       ...prepared,
       lease: { ...lease, status: 'active', claim_id: 'clm_b2' },
@@ -385,10 +406,38 @@ describe('Checkpoint B2 执行准备卡', () => {
 
     expect(await screen.findByText(/已准备/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '连接只读 Agent' })).toBeEnabled()
-    expect(calls.filter((call) => call.url === PREP_URL && call.method === 'POST')).toHaveLength(1)
-    expect(calls.filter((call) => call.url === PREP_URL && call.method === 'GET').length)
-      .toBeGreaterThanOrEqual(2)
+    const prepCalls = calls.filter((call) => call.url === PREP_URL)
+    expect(prepCalls.map((call) => call.method)).toEqual(['GET', 'POST', 'GET'])
+    expect(prepCalls.filter((call) => call.method === 'POST')).toHaveLength(1)
   })
+
+  it.each([
+    ['server', /服务暂时无法确认执行准备状态/],
+    ['disconnected', /当前无法连接服务/],
+    ['malformed', /服务返回了无法识别的执行准备状态/],
+  ] as const)(
+    'prepare ProtocolError 后 recovery GET %s 必须表面化且不重发 write',
+    async (recoveryFailure, message) => {
+      const malformed = preparation()
+      const { claim_id: _missingClaimId, ...leaseWithoutClaimId } = (
+        malformed.lease as Record<string, unknown>
+      )
+      const calls = stubB2({
+        members: [memberAtlas],
+        prepareResponse: { ...malformed, lease: leaseWithoutClaimId },
+        recoveryFailure,
+      })
+      renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+      fireEvent.click(await screen.findByRole('radio', { name: 'Atlas' }))
+      fireEvent.click(screen.getByRole('button', { name: '准备执行' }))
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(message)
+      expect(screen.queryByText(/已准备/)).not.toBeInTheDocument()
+      const prepCalls = calls.filter((call) => call.url === PREP_URL)
+      expect(prepCalls.map((call) => call.method)).toEqual(['GET', 'POST', 'GET'])
+      expect(prepCalls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    },
+  )
 
   it('prepare 首响应丢失后再次点击复用同 endpoint/body/key', async () => {
     const calls = stubB2({ members: [memberAtlas], dropFirstWrite: PREP_URL })

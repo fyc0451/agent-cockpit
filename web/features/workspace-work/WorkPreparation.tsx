@@ -31,6 +31,8 @@ function messageForError(error: unknown): string {
   if (error.code === 'runtime_identity_unverified') return '无法核验成员身份。当前状态已保留。'
   if (error.code === 'process_exited') return '只读连接已退出。当前状态已保留。'
   if (error.code === 'idempotency_conflict') return '请求冲突。当前状态已保留。'
+  if (error.code === 'protocol_error') return '服务返回了无法识别的执行准备状态。当前状态已保留。'
+  if (error.status && error.status >= 500) return '服务暂时无法确认执行准备状态。当前状态已保留。'
   if (error.status === 409) return '准备未完成。当前状态已保留。'
   return '暂时无法完成执行准备。当前状态已保留。'
 }
@@ -170,8 +172,9 @@ export function WorkPreparation({
             queryClient.setQueryData(prepKey, recovered)
             return
           }
-        } catch {
-          // Keep the original protocol error when durable state cannot be verified.
+        } catch (recoveryError) {
+          setActionError(recoveryError)
+          return
         }
       }
       setActionError(error)
