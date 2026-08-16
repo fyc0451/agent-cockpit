@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Request, type Route } from '@playwright/test'
+import { writeFile } from 'node:fs/promises'
 
 declare const process: { env: Record<string, string | undefined> }
 
@@ -7,13 +8,67 @@ const SOURCES = {
   recovery: process.env.LOCAL_WEB_GATE_RECOVERY_SOURCE,
   malformed: process.env.LOCAL_WEB_GATE_MALFORMED_SOURCE,
 }
+const RECEIPTS_PATH = process.env.LOCAL_WEB_GATE_RECEIPTS
 
 for (const [name, value] of Object.entries(SOURCES)) {
   if (!value) throw new Error(`LOCAL_WEB_GATE_${name.toUpperCase()}_SOURCE is required`)
 }
+if (!RECEIPTS_PATH) throw new Error('LOCAL_WEB_GATE_RECEIPTS is required')
+
+type PreparationReceipt = {
+  preparation_work_item_id: string
+  checkout_id: string
+  lease_id: string
+  identity_id: string
+  generation: number
+  source_head: string
+  source_tree: string
+}
 
 type Journey = {
+  slug: string
   preparationPosts: Request[]
+}
+
+const createdBySlug: Record<string, PreparationReceipt> = {}
+let recoveredPreparation: PreparationReceipt | null = null
+
+function record(value: unknown, field: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`invalid preparation receipt: ${field}`)
+  }
+  return value as Record<string, unknown>
+}
+
+function stringValue(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`invalid preparation receipt: ${field}`)
+  }
+  return value
+}
+
+function preparationReceipt(payload: unknown): PreparationReceipt {
+  const envelope = record(payload, 'envelope')
+  const data = record(envelope.data, 'data')
+  const checkout = record(data.checkout, 'checkout')
+  const lease = record(data.lease, 'lease')
+  const principal = record(data.principal, 'principal')
+  if (typeof principal.generation !== 'number' || !Number.isInteger(principal.generation)) {
+    throw new Error('invalid preparation receipt: generation')
+  }
+  return {
+    preparation_work_item_id: stringValue(data.work_item_id, 'work_item_id'),
+    checkout_id: stringValue(checkout.checkout_id, 'checkout_id'),
+    lease_id: stringValue(lease.lease_id, 'lease_id'),
+    identity_id: stringValue(principal.identity_id, 'identity_id'),
+    generation: principal.generation,
+    source_head: stringValue(checkout.source_head, 'source_head'),
+    source_tree: stringValue(checkout.source_tree, 'source_tree'),
+  }
+}
+
+async function capturePreparation(response: { json(): Promise<unknown> }): Promise<PreparationReceipt> {
+  return preparationReceipt(await response.json())
 }
 
 async function createProjectWorkspaceTask(
@@ -70,7 +125,7 @@ async function createProjectWorkspaceTask(
   await page.getByRole('button', { name: '新建成员' }).click()
   await expect(page.getByRole('radio', { name: `member-${slug}` })).toBeChecked()
 
-  return { preparationPosts }
+  return { slug, preparationPosts }
 }
 
 async function expectPreparationFailClosed(page: Page) {
@@ -82,6 +137,17 @@ async function expectPreparationFailClosed(page: Page) {
 }
 
 test.describe.serial('Local Web release gate', () => {
+  test.afterAll(async () => {
+    expect(Object.keys(createdBySlug).sort()).toEqual([
+      'release-gate-happy', 'release-gate-malformed', 'release-gate-recovery',
+    ])
+    expect(recoveredPreparation).not.toBeNull()
+    await writeFile(RECEIPTS_PATH!, JSON.stringify({
+      created_by_slug: createdBySlug,
+      recovered_preparation: recoveredPreparation,
+    }), { encoding: 'utf-8', mode: 0o600 })
+  })
+
   test('真实 UI 到真实 Codex claim/patch/reply/completed', async ({ page }) => {
     test.setTimeout(420_000)
     const journey = await createProjectWorkspaceTask(
@@ -94,7 +160,13 @@ test.describe.serial('Local Web release gate', () => {
 
     const prepare = page.getByRole('button', { name: '准备执行' })
     await expect(prepare).toBeEnabled()
+    const created = page.waitForResponse((response) => (
+      response.request().method() === 'POST' && /\/preparation$/.test(response.url())
+    ))
     await prepare.click()
+    const createdResponse = await created
+    expect(createdResponse.status()).toBe(201)
+    createdBySlug[journey.slug] = await capturePreparation(createdResponse)
     await expect(page.getByText(/已准备（独立 Checkout/)).toBeVisible({ timeout: 30_000 })
     expect(journey.preparationPosts).toHaveLength(1)
 
@@ -133,6 +205,7 @@ test.describe.serial('Local Web release gate', () => {
       if (route.request().method() !== 'POST') return route.fallback()
       const response = await route.fetch()
       expect(response.status()).toBe(201)
+      createdBySlug[journey.slug] = await capturePreparation(response)
       committed += 1
       await route.abort('failed')
     }
@@ -148,7 +221,14 @@ test.describe.serial('Local Web release gate', () => {
     expect(journey.preparationPosts, '同步双击必须只有一个 POST').toHaveLength(1)
 
     await page.unroute(preparationPattern, dropCommittedResponse)
+    const recovered = page.waitForResponse((response) => (
+      response.request().method() === 'GET' && /\/preparation$/.test(response.url())
+    ))
     await page.reload()
+    const recoveredResponse = await recovered
+    expect(recoveredResponse.status()).toBe(200)
+    recoveredPreparation = await capturePreparation(recoveredResponse)
+    expect(recoveredPreparation).toEqual(createdBySlug[journey.slug])
     await expect(page.getByText(/已准备（独立 Checkout/)).toBeVisible({ timeout: 30_000 })
     await expect(page.getByRole('button', { name: '连接只读 Agent' })).toBeEnabled()
     expect(journey.preparationPosts, 'authoritative GET 恢复不得重发 POST').toHaveLength(1)
@@ -165,7 +245,9 @@ test.describe.serial('Local Web release gate', () => {
       response.request().method() === 'POST' && /\/preparation$/.test(response.url())
     ))
     await page.getByRole('button', { name: '准备执行' }).click()
-    expect((await created).status()).toBe(201)
+    const createdResponse = await created
+    expect(createdResponse.status()).toBe(201)
+    createdBySlug[journey.slug] = await capturePreparation(createdResponse)
     await expect(page.getByText(/已准备（独立 Checkout/)).toBeVisible({ timeout: 30_000 })
     expect(journey.preparationPosts).toHaveLength(1)
 
