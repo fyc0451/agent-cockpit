@@ -457,6 +457,13 @@ def _initialize_workspace_execution_store() -> None:
     )
 
 
+def _workspace_execution_session_name() -> str:
+    scoped = next_profile.session()
+    if scoped is None:
+        raise next_profile.NextProfileError("next_session_forbidden")
+    return next_profile.require_session(scoped)
+
+
 def _require_workspace_execution_service():
     global _workspace_execution_service
     global workspace_execution_service, git_checkout_provider, local_codex_harness
@@ -489,6 +496,7 @@ def _require_workspace_execution_service():
         checkout=checkout_module.GitCheckoutProvider(),
         harness=harness_module.LocalCodexHarness(),
         worktrees_root=runtime_paths.validate_store("worktrees"),
+        session_name=_workspace_execution_session_name(),
     )
     _workspace_execution_service = service
     return service

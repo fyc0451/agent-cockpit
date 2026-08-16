@@ -473,6 +473,8 @@ os.environ['COCKPIT_STATE_DIR'] = str(root / 'state')
 os.environ['COCKPIT_UPLOADS_DIR'] = str(root / 'uploads')
 os.environ['COCKPIT_TOKEN'] = ''
 os.environ['COCKPIT_EDITION'] = 'source'
+os.environ['COCKPIT_NEXT_PROFILE'] = next_profile.FIXED_PROFILE
+os.environ['HERDR_SESSION'] = next_profile.SESSION
 os.environ.pop('COCKPIT_COORDINATION_DB', None)
 runtime_paths.reset_cache()
 next_profile.enabled = lambda *args, **kwargs: True
@@ -568,3 +570,73 @@ print(json.dumps({
     assert "pane_send" not in result["text"]
     assert result["legacy_pane_send"] is True
     assert result["legacy_tasks"] is True
+
+
+def _isolate_execution_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from agent_cockpit import runtime_paths
+
+    for name in ("data", "config", "state", "uploads"):
+        (tmp_path / name).mkdir()
+    monkeypatch.setenv("COCKPIT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("COCKPIT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("COCKPIT_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("COCKPIT_UPLOADS_DIR", str(tmp_path / "uploads"))
+    monkeypatch.delenv("COCKPIT_COORDINATION_DB", raising=False)
+    runtime_paths.reset_cache()
+
+
+def test_execution_service_injects_fixed_and_ephemeral_herdr_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from agent_cockpit import next_profile
+
+    _isolate_execution_roots(monkeypatch, tmp_path)
+    server._initialize_workspace_execution_store()
+    monkeypatch.setattr(server, "_operation_journal_provider", lambda: object())
+
+    monkeypatch.setenv(next_profile.PROFILE_ENV, next_profile.FIXED_PROFILE)
+    monkeypatch.setenv("HERDR_SESSION", next_profile.SESSION)
+    server._workspace_execution_service = None
+    fixed = server._require_workspace_execution_service()
+    assert fixed.session_name == next_profile.SESSION
+    assert next_profile.require_session(fixed.session_name) == next_profile.SESSION
+    with pytest.raises(next_profile.NextProfileError) as forbidden:
+        next_profile.require_session("cockpit-b-readonly")
+    assert forbidden.value.args[0] == "next_session_forbidden"
+
+    token = "75b93b24959cf098c5c6a0f11ebbaff5"
+    ephemeral = f"ephemeral-{token}"
+    monkeypatch.setenv(next_profile.PROFILE_ENV, next_profile.EPHEMERAL_PROFILE)
+    monkeypatch.setenv(next_profile.EPHEMERAL_READY_TOKEN_ENV, token)
+    monkeypatch.setenv("HERDR_SESSION", ephemeral)
+    server._workspace_execution_service = None
+    live = server._require_workspace_execution_service()
+    assert live.session_name == ephemeral
+    assert next_profile.require_session(live.session_name) == ephemeral
+    with pytest.raises(next_profile.NextProfileError) as wrong_fixed:
+        next_profile.require_session(next_profile.SESSION)
+    assert wrong_fixed.value.args[0] == "next_session_forbidden"
+
+
+def test_execution_session_fail_closed_off_profile_and_wrong_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_cockpit import next_profile
+
+    monkeypatch.delenv(next_profile.PROFILE_ENV, raising=False)
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    with pytest.raises(next_profile.NextProfileError) as off:
+        server._workspace_execution_session_name()
+    assert off.value.args[0] == "next_session_forbidden"
+
+    monkeypatch.setenv(next_profile.PROFILE_ENV, next_profile.FIXED_PROFILE)
+    monkeypatch.setenv("HERDR_SESSION", "cockpit-b-readonly")
+    with pytest.raises(next_profile.NextProfileError) as invalid:
+        server._workspace_execution_session_name()
+    assert invalid.value.args[0] == "next_profile_invalid:HERDR_SESSION"
+    monkeypatch.setenv("HERDR_SESSION", next_profile.SESSION)
+    with pytest.raises(next_profile.NextProfileError) as rejected:
+        next_profile.require_session("cockpit-b-readonly")
+    assert rejected.value.args[0] == "next_session_forbidden"
