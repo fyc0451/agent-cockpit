@@ -143,7 +143,7 @@ def _environment(
         "COCKPIT_EDITION": "source",
         "COCKPIT_SOURCE_SHA": source_sha,
         "XDG_DATA_HOME": str(root / "data"),
-        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_CONFIG_HOME": str(next_profile.ephemeral_herdr_config_home(root)),
         "XDG_STATE_HOME": str(root / "state"),
         "HERDR_CONFIG_PATH": str(root / "herdr/config.toml"),
         "TEAM_HUB_URL": "http://127.0.0.1:9",
@@ -191,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     listener: socket.socket | None = None
     lock: InstanceLock | None = None
+    herdr_home: Path | None = None
     try:
         source_sha = _source_sha(args.source_sha)
         os.setsid()
@@ -202,6 +203,10 @@ def main(argv: list[str] | None = None) -> int:
         environment = _environment(root, port, token, source_sha=source_sha)
         lock = InstanceLock(environment).acquire()
         _prepare_layout(root, fresh=fresh)
+        try:
+            herdr_home = next_profile.prepare_ephemeral_herdr_config_home(root)
+        except next_profile.NextProfileError as exc:
+            raise EphemeralError(str(exc)) from exc
         try:
             next_profile.activate_ephemeral_runtime_root(root)
         except next_profile.NextProfileError as exc:
@@ -235,6 +240,11 @@ def main(argv: list[str] | None = None) -> int:
         print("ephemeral_start_failed", file=sys.stderr)
         return 2
     finally:
+        if herdr_home is not None:
+            try:
+                next_profile.release_ephemeral_herdr_config_home(root)
+            except next_profile.NextProfileError as exc:
+                print(str(exc), file=sys.stderr)
         if lock is not None:
             lock.release()
         if listener is not None:

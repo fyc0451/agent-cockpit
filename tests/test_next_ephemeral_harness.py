@@ -6,11 +6,13 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
 from urllib.request import urlopen
@@ -269,6 +271,15 @@ def _short_runtime_root() -> Path:
     return root
 
 
+def _long_runtime_root() -> Path:
+    root = Path(tempfile.mkdtemp(
+        prefix="agent-cockpit-e3-socket-" + "x" * 48 + ".",
+        dir="/tmp",
+    ))
+    os.chmod(root, 0o700)
+    return root
+
+
 def _bound_ephemeral_root(runtime_root: Path) -> tuple[dict[str, str], str]:
     runtime_root.mkdir(mode=0o700, exist_ok=True)
     assert next_profile.initialize_empty_ephemeral_runtime_root(runtime_root)
@@ -281,6 +292,123 @@ def _bound_ephemeral_root(runtime_root: Path) -> tuple[dict[str, str], str]:
     }
     next_profile.activate_ephemeral_runtime_root(runtime_root)
     return environment, session
+
+
+def test_long_runtime_root_gets_private_bounded_herdr_socket_path() -> None:
+    runtime_root = _long_runtime_root()
+    alias: Path | None = None
+    listener: socket.socket | None = None
+    try:
+        _environment, session = _bound_ephemeral_root(runtime_root)
+        alias = next_profile.prepare_ephemeral_herdr_config_home(runtime_root)
+        assert alias == next_profile.ephemeral_herdr_config_home(runtime_root)
+        info = alias.lstat()
+        assert stat.S_ISDIR(info.st_mode)
+        assert not stat.S_ISLNK(info.st_mode)
+        assert info.st_uid == os.getuid()
+        assert stat.S_IMODE(info.st_mode) == 0o700
+        longest = alias / "herdr" / "sessions" / session / "herdr-client.sock"
+        assert len(os.fsencode(longest)) <= 107
+        longest.parent.mkdir(parents=True, mode=0o700)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(longest))
+        assert longest.is_socket()
+        assert longest.resolve().is_relative_to(runtime_root / "config" / "herdr")
+    finally:
+        if listener is not None:
+            listener.close()
+        if alias is not None:
+            target = alias / "herdr" / "sessions"
+            if target.exists():
+                shutil.rmtree(target)
+            next_profile.release_ephemeral_herdr_config_home(runtime_root)
+            assert not alias.exists()
+        shutil.rmtree(runtime_root, ignore_errors=True)
+
+
+def test_two_long_runtime_roots_prepare_distinct_herdr_sessions_concurrently() -> None:
+    roots = [_long_runtime_root(), _long_runtime_root()]
+    aliases: list[Path] = []
+    listeners: list[socket.socket] = []
+    try:
+        sessions = [_bound_ephemeral_root(root)[1] for root in roots]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            aliases = list(pool.map(
+                next_profile.prepare_ephemeral_herdr_config_home,
+                roots,
+            ))
+        assert len(set(aliases)) == 2
+        assert len(set(sessions)) == 2
+        for alias, session in zip(aliases, sessions, strict=True):
+            path = alias / "herdr" / "sessions" / session / "herdr.sock"
+            assert len(os.fsencode(path)) <= 107
+            path.parent.mkdir(parents=True, mode=0o700)
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(path))
+            listeners.append(listener)
+        assert all(
+            (alias / "herdr" / "sessions" / session / "herdr.sock").is_socket()
+            for alias, session in zip(aliases, sessions, strict=True)
+        )
+    finally:
+        for listener in listeners:
+            listener.close()
+        for root, alias in zip(roots, aliases, strict=False):
+            target = alias / "herdr" / "sessions"
+            if target.exists():
+                shutil.rmtree(target)
+            next_profile.release_ephemeral_herdr_config_home(root)
+        for root in roots:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def test_short_herdr_home_prefix_collision_is_rejected_without_borrowing() -> None:
+    first = _long_runtime_root()
+    second = _long_runtime_root()
+    first_alias: Path | None = None
+    try:
+        _bound_ephemeral_root(first)
+        _bound_ephemeral_root(second)
+        first_marker = json.loads(
+            (first / next_profile.EPHEMERAL_MARKER).read_text()
+        )
+        second_marker_path = second / next_profile.EPHEMERAL_MARKER
+        second_marker = json.loads(second_marker_path.read_text())
+        second_marker["root_id"] = (
+            first_marker["root_id"][:20] + second_marker["root_id"][20:]
+        )
+        assert second_marker["root_id"] != first_marker["root_id"]
+        second_marker_path.write_text(
+            json.dumps(second_marker, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="ascii",
+        )
+        second_marker_path.chmod(0o600)
+        first_alias = next_profile.prepare_ephemeral_herdr_config_home(first)
+        before = {
+            path.name: (
+                path.lstat().st_mode,
+                os.readlink(path) if path.is_symlink() else path.read_bytes(),
+            )
+            for path in first_alias.iterdir()
+        }
+        with pytest.raises(
+            next_profile.NextProfileError,
+            match="ephemeral_herdr_home_collision",
+        ):
+            next_profile.prepare_ephemeral_herdr_config_home(second)
+        after = {
+            path.name: (
+                path.lstat().st_mode,
+                os.readlink(path) if path.is_symlink() else path.read_bytes(),
+            )
+            for path in first_alias.iterdir()
+        }
+        assert after == before
+    finally:
+        if first_alias is not None:
+            next_profile.release_ephemeral_herdr_config_home(first)
+        shutil.rmtree(first, ignore_errors=True)
+        shutil.rmtree(second, ignore_errors=True)
 
 
 def test_same_root_keeps_herdr_session_when_ready_token_rotates() -> None:
@@ -394,19 +522,23 @@ def test_real_herdr_session_survives_graceful_shutdown_and_restart() -> None:
     previous = os.umask(0o022)
     herdr = Path.home() / ".local" / "bin" / "herdr"
     assert herdr.is_file()
-    runtime_root = _short_runtime_root()
+    runtime_root = _long_runtime_root()
     herdr_proc: subprocess.Popen[str] | None = None
     first: subprocess.Popen[str] | None = None
     second: subprocess.Popen[str] | None = None
     session = ""
     isolated: dict[str, str] = {}
+    alias: Path | None = None
     try:
         first, _, _ = _launch(runtime_root)
-        session = _process_env(first.pid)["HERDR_SESSION"]
+        first_environment = _process_env(first.pid)
+        session = first_environment["HERDR_SESSION"]
+        alias = Path(first_environment["XDG_CONFIG_HOME"])
+        assert alias == next_profile.ephemeral_herdr_config_home(runtime_root)
         isolated = {
             **os.environ,
             "HERDR_CONFIG_PATH": str(runtime_root / "herdr" / "config.toml"),
-            "XDG_CONFIG_HOME": str(runtime_root / "config"),
+            "XDG_CONFIG_HOME": str(alias),
             "XDG_DATA_HOME": str(runtime_root / "data"),
             "XDG_STATE_HOME": str(runtime_root / "state"),
             "HOME": str(runtime_root / "home"),
@@ -421,7 +553,11 @@ def test_real_herdr_session_survives_graceful_shutdown_and_restart() -> None:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        session_dir = runtime_root / "config" / "herdr" / "sessions" / session
+        session_dir = alias / "herdr" / "sessions" / session
+        target_session_dir = (
+            runtime_root / "config" / "herdr" / "sessions" / session
+        )
+        assert len(os.fsencode(session_dir / "herdr-client.sock")) <= 107
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if (session_dir / "herdr.sock").exists() and (
@@ -443,31 +579,42 @@ def test_real_herdr_session_survives_graceful_shutdown_and_restart() -> None:
 
         marker = json.loads((runtime_root / ".cockpit-ephemeral-root.json").read_text())
         assert marker["state"] == "ready"
-        assert (session_dir / "herdr.sock").exists()
+        assert not alias.exists()
+        assert (target_session_dir / "herdr.sock").exists()
 
         second, _, _ = _launch(runtime_root)
-        assert _process_env(second.pid)["HERDR_SESSION"] == session
+        second_environment = _process_env(second.pid)
+        assert second_environment["HERDR_SESSION"] == session
+        assert Path(second_environment["XDG_CONFIG_HOME"]) == alias
+        assert alias.exists()
         assert _snapshot_panes(herdr, session, isolated) == panes
     finally:
         if first is not None:
-            _stop(first)
+            assert _stop(first) == ""
         if second is not None:
-            _stop(second)
-        if session:
-            subprocess.run(
+            assert _stop(second) == ""
+            assert alias is not None
+            assert not alias.exists()
+        if session and runtime_root.exists():
+            alias = next_profile.prepare_ephemeral_herdr_config_home(runtime_root)
+            stopped = subprocess.run(
                 [str(herdr), "session", "stop", session],
                 env=isolated or None,
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            subprocess.run(
+            assert stopped.returncode == 0
+            deleted = subprocess.run(
                 [str(herdr), "session", "delete", session],
                 env=isolated or None,
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            assert deleted.returncode == 0
+            next_profile.release_ephemeral_herdr_config_home(runtime_root)
+            assert not alias.exists()
         if herdr_proc is not None and herdr_proc.poll() is None:
             try:
                 os.killpg(herdr_proc.pid, signal.SIGTERM)

@@ -440,6 +440,7 @@ def test_ephemeral_config_failure_invalidates_ready_evidence_first(
         assert not (root / next_profile.EPHEMERAL_CATALOG).exists()
     else:
         assert (root / next_profile.EPHEMERAL_CATALOG).read_bytes() == old_catalog
+    assert not next_profile.ephemeral_herdr_config_home(root).exists()
 
 
 def test_runtime_symlink_is_rejected(tmp_path: Path) -> None:
@@ -607,6 +608,15 @@ def test_ephemeral_environment_remains_loopback_only(
     assert environment["COCKPIT_HOST"] == "127.0.0.1"
     assert environment["COCKPIT_SOURCE_SHA"] == "a" * 40
     assert "COCKPIT_TOKEN" not in environment
+    assert environment["XDG_CONFIG_HOME"] == str(
+        next_profile.ephemeral_herdr_config_home(tmp_path)
+    )
+    assert len(os.fsencode(
+        Path(environment["XDG_CONFIG_HOME"])
+        / "herdr" / "sessions"
+        / next_profile.ephemeral_session_for_root(tmp_path)
+        / "herdr-client.sock"
+    )) <= 107
 
 
 def test_next_token_file_rejects_unsafe_metadata_and_content(tmp_path: Path) -> None:

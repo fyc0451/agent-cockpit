@@ -31,6 +31,10 @@ _AUTHORIZED_SOCKET_NAMES = frozenset({"herdr.sock", "herdr-client.sock"})
 _AUTHORIZED_LOG_NAMES = frozenset({"herdr-server.log"})
 _EPHEMERAL_SCHEMA_VERSION = 1
 _MAX_EPHEMERAL_CATALOG_BYTES = 1024 * 1024
+_EPHEMERAL_HERDR_HOME_ROOT = Path("/tmp")
+_EPHEMERAL_HERDR_HOME_PREFIX = "e-"
+_EPHEMERAL_HERDR_HOME_BINDING = ".cockpit-root.json"
+_AF_UNIX_PATH_MAX = 107
 EPHEMERAL_LAYOUT = {
     "COCKPIT_DATA_DIR": "data",
     "COCKPIT_CONFIG_DIR": "config",
@@ -433,6 +437,184 @@ def ephemeral_session_for_root(root: Path) -> str:
     return ephemeral_session_name(str(marker["root_id"]))
 
 
+def _ephemeral_herdr_home_error(code: str) -> NextProfileError:
+    return NextProfileError(f"ephemeral_herdr_home_{code}")
+
+
+def ephemeral_herdr_config_home(root: Path) -> Path:
+    marker = _root_marker(root, require_ready=False)
+    root_id = str(marker["root_id"])
+    home = _EPHEMERAL_HERDR_HOME_ROOT / (
+        _EPHEMERAL_HERDR_HOME_PREFIX + root_id[:20]
+    )
+    session = ephemeral_session_name(root_id)
+    for name in _AUTHORIZED_SOCKET_NAMES:
+        path = home / "herdr" / "sessions" / session / name
+        if len(os.fsencode(path)) > _AF_UNIX_PATH_MAX:
+            raise _ephemeral_herdr_home_error("path_too_long")
+    return home
+
+
+def _private_owned_directory(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise _ephemeral_herdr_home_error("invalid") from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise _ephemeral_herdr_home_error("invalid")
+
+
+def _herdr_home_binding(root: Path) -> dict[str, object]:
+    marker = _root_marker(root, require_ready=False)
+    return {
+        "schema_version": 1,
+        "root_id": marker["root_id"],
+        "runtime_root": str(root),
+    }
+
+
+def _read_herdr_home_binding(path: Path) -> dict[str, object]:
+    try:
+        payload = _private_file(path)
+        assert payload is not None
+        value = _strict_json(payload, "invalid")
+    except NextProfileError as exc:
+        raise _ephemeral_herdr_home_error("invalid") from exc
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "root_id", "runtime_root",
+    }:
+        raise _ephemeral_herdr_home_error("invalid")
+    return value
+
+
+def _validate_ephemeral_herdr_config_home(root: Path, home: Path) -> Path:
+    expected = ephemeral_herdr_config_home(root)
+    if home != expected:
+        raise _ephemeral_herdr_home_error("invalid")
+    _private_owned_directory(home)
+    binding = _read_herdr_home_binding(home / _EPHEMERAL_HERDR_HOME_BINDING)
+    if binding != _herdr_home_binding(root):
+        if (
+            binding.get("schema_version") == 1
+            and isinstance(binding.get("root_id"), str)
+            and isinstance(binding.get("runtime_root"), str)
+        ):
+            raise _ephemeral_herdr_home_error("collision")
+        raise _ephemeral_herdr_home_error("invalid")
+    link = home / "herdr"
+    target = root / "config" / "herdr"
+    try:
+        info = link.lstat()
+        linked = os.readlink(link)
+        names = {entry.name for entry in home.iterdir()}
+    except OSError as exc:
+        raise _ephemeral_herdr_home_error("invalid") from exc
+    if (
+        not stat.S_ISLNK(info.st_mode)
+        or linked != str(target)
+        or names != {_EPHEMERAL_HERDR_HOME_BINDING, "herdr"}
+    ):
+        raise _ephemeral_herdr_home_error("invalid")
+    _private_owned_directory(target)
+    return home
+
+
+def prepare_ephemeral_herdr_config_home(root: Path) -> Path:
+    runtime_root = _ephemeral_root({EPHEMERAL_ROOT_ENV: str(root)})
+    home = ephemeral_herdr_config_home(runtime_root)
+    base = home.parent
+    try:
+        base_info = base.lstat()
+    except OSError as exc:
+        raise _ephemeral_herdr_home_error("invalid") from exc
+    if (
+        not stat.S_ISDIR(base_info.st_mode)
+        or stat.S_ISLNK(base_info.st_mode)
+        or (base_info.st_mode & stat.S_ISVTX) == 0
+    ):
+        raise _ephemeral_herdr_home_error("invalid")
+
+    config = runtime_root / "config"
+    _private_owned_directory(config)
+    target = config / "herdr"
+    created_target = False
+    created_home = False
+    completed = False
+    try:
+        try:
+            target.mkdir(mode=0o700)
+            created_target = True
+        except FileExistsError:
+            pass
+        _private_owned_directory(target)
+        try:
+            home.mkdir(mode=0o700)
+            created_home = True
+        except FileExistsError:
+            result = _validate_ephemeral_herdr_config_home(runtime_root, home)
+            completed = True
+            return result
+        _write_private_json(
+            home / _EPHEMERAL_HERDR_HOME_BINDING,
+            _herdr_home_binding(runtime_root),
+        )
+        os.symlink(str(target), home / "herdr")
+        directory = os.open(home, _directory_flags())
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        result = _validate_ephemeral_herdr_config_home(runtime_root, home)
+        completed = True
+        return result
+    except NextProfileError:
+        raise
+    except OSError as exc:
+        raise _ephemeral_herdr_home_error("write_failed") from exc
+    finally:
+        if created_home and not completed:
+            try:
+                (home / "herdr").unlink()
+            except OSError:
+                pass
+            try:
+                (home / _EPHEMERAL_HERDR_HOME_BINDING).unlink()
+            except OSError:
+                pass
+            try:
+                home.rmdir()
+            except OSError:
+                pass
+        if created_target and not completed:
+            try:
+                target.rmdir()
+            except OSError:
+                pass
+
+
+def release_ephemeral_herdr_config_home(root: Path) -> None:
+    runtime_root = _ephemeral_root({EPHEMERAL_ROOT_ENV: str(root)})
+    home = ephemeral_herdr_config_home(runtime_root)
+    try:
+        home.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise _ephemeral_herdr_home_error("cleanup_failed") from exc
+    _validate_ephemeral_herdr_config_home(runtime_root, home)
+    try:
+        (home / "herdr").unlink()
+        (home / _EPHEMERAL_HERDR_HOME_BINDING).unlink()
+        home.rmdir()
+    except OSError as exc:
+        raise _ephemeral_herdr_home_error("cleanup_failed") from exc
+
+
 def _authorized_session_prefix(root_id: str) -> str:
     return f"config/herdr/sessions/{ephemeral_session_name(root_id)}"
 
@@ -642,6 +824,7 @@ def finalize_ephemeral_runtime_root(
         "entries": entries,
     }
     payload = _write_private_json(root / EPHEMERAL_CATALOG, catalog)
+    release_ephemeral_herdr_config_home(root)
     marker["state"] = "ready"
     marker["catalog_sha256"] = hashlib.sha256(payload).hexdigest()
     _write_private_json(root / EPHEMERAL_MARKER, marker)
@@ -977,7 +1160,7 @@ def validate_ephemeral_environment(
         "COCKPIT_HERDR_STATE_MODE": "off",
         "COCKPIT_EDITION": "source",
         "XDG_DATA_HOME": str(runtime_root / "data"),
-        "XDG_CONFIG_HOME": str(runtime_root / "config"),
+        "XDG_CONFIG_HOME": str(ephemeral_herdr_config_home(runtime_root)),
         "XDG_STATE_HOME": str(runtime_root / "state"),
         "TEAM_HUB_URL": "http://127.0.0.1:9",
         "HUMAN_AUTH_URL": "http://127.0.0.1:9",
@@ -985,6 +1168,9 @@ def validate_ephemeral_environment(
     for name, value in expected.items():
         if _required(name, env) != value:
             raise NextProfileError(f"ephemeral_value_invalid:{name}")
+    _validate_ephemeral_herdr_config_home(
+        runtime_root, Path(_required("XDG_CONFIG_HOME", env)),
+    )
     ephemeral_runtime(env)
     project(env)
     session(env)
