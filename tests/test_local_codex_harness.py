@@ -898,6 +898,130 @@ def test_private_file_replace_keeps_old_bytes_on_fault(tmp_path: Path, monkeypat
     assert list((tmp_path / "caps").glob(".*.tmp")) == []
 
 
+def _authority_snapshot(tmp_path: Path, issued: dict[str, object]) -> dict[str, bytes]:
+    home = Path(issued["codex_home"])
+    return {
+        "cap": issued["capability_path"].read_bytes(),
+        "generation": (tmp_path / "caps" / f"{ATTACHMENT}.generation").read_bytes(),
+        "fence": (tmp_path / "caps" / f"{ATTACHMENT}.fence").read_bytes(),
+        "config": (home / "config.toml").read_bytes(),
+    }
+
+
+def _assert_authority_unchanged(
+    tmp_path: Path, issued: dict[str, object], before: dict[str, bytes],
+) -> None:
+    home = Path(issued["codex_home"])
+    assert issued["capability_path"].read_bytes() == before["cap"]
+    assert (tmp_path / "caps" / f"{ATTACHMENT}.generation").read_bytes() == before["generation"]
+    assert (tmp_path / "caps" / f"{ATTACHMENT}.fence").read_bytes() == before["fence"]
+    assert (home / "config.toml").read_bytes() == before["config"]
+    assert issued["capability_path"].stat().st_size > 0
+    assert list((tmp_path / "caps").glob(".*.tmp")) == []
+    assert list(home.glob(".*.tmp")) == []
+
+
+def test_write_zero_progress_keeps_old_authority_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    before = _authority_snapshot(tmp_path, issued)
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.issue_capability(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=2,
+            fence="sha256:" + "cd" * 32, session="s", pane_id="pane-1",
+        )
+    assert error.value.code == "invalid_argument"
+    _assert_authority_unchanged(tmp_path, issued, before)
+
+
+def test_write_partial_then_complete_publishes_full_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    real_write = os.write
+
+    def half(fd: int, data: object) -> int:
+        view = memoryview(data)  # type: ignore[arg-type]
+        if len(view) <= 1:
+            return real_write(fd, view)
+        return real_write(fd, view[: max(1, len(view) // 2)])
+
+    monkeypatch.setattr(os, "write", half)
+    updated = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=2,
+        fence="sha256:" + "cd" * 32, session="s", pane_id="pane-1",
+    )
+    record = json.loads(updated["capability_path"].read_bytes().decode("utf-8"))
+    assert record["generation"] == 2
+    assert record["fence"] == "sha256:" + "cd" * 32
+    assert list((tmp_path / "caps").glob(".*.tmp")) == []
+
+
+def test_write_multiple_partials_then_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(tmp_path)
+    harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    real_write = os.write
+
+    def one_byte(fd: int, data: object) -> int:
+        view = memoryview(data)  # type: ignore[arg-type]
+        if len(view) == 0:
+            return 0
+        return real_write(fd, view[:1])
+
+    monkeypatch.setattr(os, "write", one_byte)
+    updated = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=3,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    record = json.loads(updated["capability_path"].read_bytes().decode("utf-8"))
+    assert record["generation"] == 3
+    assert list((tmp_path / "caps").glob(".*.tmp")) == []
+
+
+def test_write_partial_then_exception_keeps_old_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    before = _authority_snapshot(tmp_path, issued)
+    real_write = os.write
+    state = {"n": 0}
+
+    def flaky(fd: int, data: object) -> int:
+        state["n"] += 1
+        view = memoryview(data)  # type: ignore[arg-type]
+        if state["n"] == 1 and len(view) > 1:
+            return real_write(fd, view[:1])
+        raise OSError("write lost after partial")
+
+    monkeypatch.setattr(os, "write", flaky)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.issue_capability(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=4,
+            fence="sha256:" + "ef" * 32, session="s", pane_id="pane-1",
+        )
+    assert error.value.code == "invalid_argument"
+    _assert_authority_unchanged(tmp_path, issued, before)
+
+
 def test_start_unproven_rollback_without_pane_is_unknown(tmp_path: Path) -> None:
     def fail(_kwargs, _panes):
         return {

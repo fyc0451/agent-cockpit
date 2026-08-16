@@ -660,7 +660,13 @@ def _write_private(path: Path, payload: bytes) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(tmp, flags, 0o600)
         try:
-            os.write(fd, payload)
+            view = memoryview(payload)
+            offset = 0
+            while offset < len(view):
+                wrote = os.write(fd, view[offset:])
+                if wrote <= 0:
+                    raise OSError("short write")
+                offset += wrote
             os.fsync(fd)
         finally:
             os.close(fd)
