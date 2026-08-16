@@ -1782,10 +1782,14 @@ def _validate_workspace_codex_home(value: object) -> str:
 def _codex_home_env_command(
     *, codex_home: str, agent_bin: str, public_args: list[str],
 ) -> str:
-    """原子 pane.run 命令行：env 只注入唯一 CODEX_HOME，其余一律拒绝。"""
+    """原子 pane.run 命令行：env 只注入唯一 CODEX_HOME，其余一律拒绝。
+
+    私有 CODEX_HOME 启动合同固定 exact `codex --sandbox read-only`：
+    空args或其他参数组合一律拒绝（不允许无 sandbox 的私有启动）。
+    """
     if _AGENT_BIN_RE.fullmatch(agent_bin) is None or not agent_bin.startswith("/"):
         raise ValueError("workspace codex launcher invalid")
-    if public_args not in ([], ["--sandbox", "read-only"]):
+    if public_args != ["--sandbox", "read-only"]:
         raise ValueError("workspace codex args invalid")
     parts = ["/usr/bin/env", f"CODEX_HOME={codex_home}", agent_bin, *public_args]
     return " ".join(parts)
@@ -2768,10 +2772,11 @@ def start_agent(
 def start_workspace_codex_home(
     *, session: str, workdir: str, instance_id: str, project_id: str,
     workspace_id: str, codex_home: str,
-    args: str = "--sandbox read-only", label: str | None = None,
-    display_name: str | None = None,
+    label: str | None = None, display_name: str | None = None,
 ) -> dict[str, Any]:
-    """以唯一私有 CODEX_HOME 启动 workspace managed Codex（只读白名单 args）。
+    """以唯一私有 CODEX_HOME 启动 workspace managed Codex。
+
+    启动合同固定 exact `codex --sandbox read-only`，不接受任何 args 参数。
 
     与 start_agent 共用同一条 managed 管线（workspace bootstrap、pane 创建、
     descriptor reserve/bind/activate、失败 retire/close typed）；唯一差异是
@@ -2782,7 +2787,7 @@ def start_workspace_codex_home(
     """
     return _start_agent_internal(
         session, workdir, agent="codex", model=None, layout="tab",
-        label=label, args=args, instance_id=instance_id,
+        label=label, args="--sandbox read-only", instance_id=instance_id,
         project_id=project_id, workspace_id=workspace_id,
         codex_home=codex_home, display_name=display_name,
     )
@@ -2960,6 +2965,15 @@ def _start_agent_internal(
             "error_code": "workspace_codex_home_forbidden",
             "error": "codex home is only for workspace managed codex",
         }
+    if (
+        validated_codex_home is not None
+        and agent_args != _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS
+    ):
+        return {
+            "available": True,
+            "error_code": "workspace_codex_home_invalid",
+            "error": "codex home requires exact readonly sandbox args",
+        }
     if workspace_managed:
         assert instance_id is not None
         assert project_id is not None and workspace_id is not None
@@ -3127,8 +3141,38 @@ def _start_agent_internal(
         if validated_codex_home is not None:
             # Managed Codex 私有 CODEX_HOME：agent start 不支持 env 注入，改为
             # 一次原子 pane.run；readiness 复用 snapshot 的 agent detection。
-            # 只注入唯一 CODEX_HOME，命令/args 均来自白名单，不携带 trust
+            # 只注入唯一 CODEX_HOME，命令固定 exact `codex --sandbox
+            # read-only`（Fix：空 args 不允许），不携带 trust
             # override/正文/token（shell 行不接受任何引号/元字符内容）。
+            # 任一失败点都按 verified cleanup 结果返回：回收确认失败必须
+            # descriptor_cleanup_incomplete，绝不静默宣称已回滚。
+            def _retire_after_failed_launch(
+                *, error_code: str, message: str,
+            ) -> dict[str, Any]:
+                cleaned = _close_created_pane_verified(
+                    session, new_pid, instance_id,
+                )
+                if cleaned:
+                    try:
+                        discard_pending_workspace_launch_descriptor(instance_id)
+                    except (OSError, ValueError):
+                        pass
+                else:
+                    return {
+                        "available": True,
+                        "error_code": "descriptor_cleanup_incomplete",
+                        "error": "workspace launch cleanup incomplete",
+                        "pane_id": new_pid,
+                        "instance_id": instance_id,
+                        "rolled_back": False,
+                    }
+                return {
+                    "available": True,
+                    "error_code": error_code,
+                    "error": message,
+                    "rolled_back": True,
+                }
+
             try:
                 env_command = _codex_home_env_command(
                     codex_home=validated_codex_home,
@@ -3136,59 +3180,25 @@ def _start_agent_internal(
                     public_args=list(agent_args),
                 )
             except ValueError:
-                cleaned = _close_created_pane_verified(
-                    session, new_pid, instance_id,
+                return _retire_after_failed_launch(
+                    error_code="workspace_codex_home_invalid",
+                    message="workspace codex home invalid",
                 )
-                if cleaned:
-                    try:
-                        discard_pending_workspace_launch_descriptor(instance_id)
-                    except (OSError, ValueError):
-                        pass
-                return {
-                    "available": True,
-                    "error_code": "workspace_codex_home_invalid",
-                    "error": "workspace codex home invalid",
-                    "rolled_back": cleaned,
-                }
             try:
                 _run(
                     ["--session", session, "pane", "run", new_pid, env_command],
                     timeout=8,
                 )
             except RuntimeError:
-                cleaned = _close_created_pane_verified(
-                    session, new_pid, instance_id,
+                return _retire_after_failed_launch(
+                    error_code="workspace_agent_readiness_failed",
+                    message="workspace managed codex launch failed",
                 )
-                if cleaned:
-                    try:
-                        discard_pending_workspace_launch_descriptor(instance_id)
-                    except (OSError, ValueError):
-                        pass
-                return {
-                    "available": True,
-                    "error_code": "workspace_agent_readiness_failed",
-                    "error": "workspace managed codex launch failed",
-                    "rolled_back": cleaned,
-                }
             if not _await_agent_detection(session, new_pid, canonical_kind):
-                cleaned = _close_created_pane_verified(
-                    session, new_pid, instance_id,
+                return _retire_after_failed_launch(
+                    error_code="workspace_agent_readiness_failed",
+                    message="workspace managed codex detection failed",
                 )
-                if cleaned:
-                    try:
-                        discard_pending_workspace_launch_descriptor(instance_id)
-                    except (OSError, ValueError):
-                        pass
-                return {
-                    "available": True,
-                    "error_code": (
-                        "workspace_agent_readiness_failed"
-                        if cleaned else "descriptor_cleanup_incomplete"
-                    ),
-                    "error": "workspace managed codex detection failed",
-                    "pane_id": new_pid,
-                    "rolled_back": cleaned,
-                }
         else:
             start_timeout = _agent_start_timeout(agent)
             # 全部受支持 agent 统一用原生 agent start：Herdr 按 --kind 解析 canonical
@@ -3710,6 +3720,35 @@ def restart_pane(
             internal_agent_args = _workspace_descriptor_internal_args(descriptor)
         except ValueError as exc:
             return _restart_error("restart_identity_invalid", str(exc), pane_id)
+        # 私有 CODEX_HOME descriptor：在任何中断/退出键（mutation）之前完成
+        # home/args/launcher 的全部校验；失效即零副作用 fail closed。
+        restart_codex_home = descriptor.get("codex_home")
+        if restart_codex_home is not None:
+            if kind != "codex" or resume:
+                return _restart_error(
+                    "restart_identity_invalid",
+                    "codex home descriptor 仅支持非 resume 的 codex 重启",
+                    pane_id,
+                )
+            if launch_args != _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS:
+                return _restart_error(
+                    "restart_identity_invalid",
+                    "codex home descriptor args 必须精确 read-only", pane_id,
+                )
+            try:
+                restart_codex_home = _validate_workspace_codex_home(
+                    restart_codex_home,
+                )
+                restart_env_command = _codex_home_env_command(
+                    codex_home=restart_codex_home,
+                    agent_bin=_find_agent_bin(product_agent),
+                    public_args=list(launch_args),
+                )
+            except ValueError:
+                return _restart_error(
+                    "restart_identity_invalid",
+                    "managed codex home invalid", pane_id,
+                )
         live = [
             item for item in snap.get("agents", [])
             if isinstance(item, dict) and item.get("pane_id") == pane_id
@@ -3721,7 +3760,14 @@ def restart_pane(
             )
         except ValueError:
             live_kind = None
-        if len(live) != 1 or live[0].get("name") != name or live_kind != kind:
+        # pane.run 私有启动的 Codex 没有 agent name（detection 管理）；
+        # 其身份权威 = pane + descriptor（session/pane/kind/codex_home 一致，
+        # live agent 为同 pane 唯一同 kind，name 为空或恰为 instance id）。
+        if restart_codex_home is not None:
+            live_name_ok = len(live) == 1 and live[0].get("name") in (None, name)
+        else:
+            live_name_ok = len(live) == 1 and live[0].get("name") == name
+        if len(live) != 1 or not live_name_ok or live_kind != kind:
             return _restart_error(
                 "restart_identity_mismatch",
                 f"pane {pane_id} 的 live identity 与 launch descriptor 不一致",
@@ -3742,6 +3788,7 @@ def restart_pane(
                 "restart_resume_unsupported", "resume 仅支持 Codex", pane_id,
             )
 
+        pane_scoped = kind == "grok" or restart_codex_home is not None
         try:
             if kind == "grok":
                 _run(
@@ -3754,6 +3801,16 @@ def restart_pane(
                 )
                 _run(
                     ["--session", session, "pane", "send-keys", pane_id, "Enter"],
+                    timeout=3,
+                )
+            elif restart_codex_home is not None:
+                # detection 管理的私有 Codex 无 agent name，中断必须 pane 级。
+                _run(
+                    ["--session", session, "pane", "send-keys", pane_id, "esc"],
+                    timeout=3,
+                )
+                _run(
+                    ["--session", session, "pane", "send-keys", pane_id, "ctrl+c"],
                     timeout=3,
                 )
             else:
@@ -3789,10 +3846,13 @@ def restart_pane(
                 return _restart_error(
                     "restart_pane_lost", f"重启期间 pane {pane_id} 消失", pane_id,
                 )
-            old_live = any(
-                isinstance(item, dict) and item.get("name") == name
-                for item in current.get("agents", [])
-            )
+            if pane_scoped:
+                old_live = bool(current_pane.get("agent"))
+            else:
+                old_live = any(
+                    isinstance(item, dict) and item.get("name") == name
+                    for item in current.get("agents", [])
+                )
             if not old_live and not current_pane.get("agent"):
                 try:
                     shell_ready = _pane_at_available_shell(session, pane_id)
@@ -3803,7 +3863,7 @@ def restart_pane(
                 if shell_ready:
                     break
             elif (
-                kind != "grok"
+                not pane_scoped
                 and not second_interrupt_sent
                 and time.monotonic() >= second_interrupt_at
             ):
@@ -3817,6 +3877,20 @@ def restart_pane(
                     # process-info 才是是否回到 shell 的权威判定。
                     pass
                 second_interrupt_sent = True
+            elif (
+                pane_scoped
+                and kind != "grok"
+                and not second_interrupt_sent
+                and time.monotonic() >= second_interrupt_at
+            ):
+                try:
+                    _run(
+                        ["--session", session, "pane", "send-keys", pane_id, "ctrl+c"],
+                        timeout=3,
+                    )
+                except RuntimeError:
+                    pass
+                second_interrupt_sent = True
             time.sleep(AGENT_POLL_INTERVAL)
         if not shell_ready:
             return _restart_error(
@@ -3828,33 +3902,15 @@ def restart_pane(
         public_args = list(launch_args)
         if resume:
             public_args += ["resume", "--last"]
-        restart_codex_home = descriptor.get("codex_home")
         if restart_codex_home is not None:
-            # 私有 CODEX_HOME 的 managed Codex：restart 必须沿用同一 home。
-            # home 已失效（目录被删/权限漂移）时 fail closed，绝不回退
-            # agent start（那会让 Codex 落回用户全局 home）。
-            if kind != "codex" or resume:
-                return _restart_error(
-                    "restart_identity_invalid",
-                    "managed codex home restart 语义无效", pane_id,
-                )
-            try:
-                restart_codex_home = _validate_workspace_codex_home(
-                    restart_codex_home,
-                )
-                env_command = _codex_home_env_command(
-                    codex_home=restart_codex_home,
-                    agent_bin=_find_agent_bin(product_agent),
-                    public_args=public_args,
-                )
-            except ValueError:
-                return _restart_error(
-                    "restart_identity_invalid",
-                    "managed codex home invalid", pane_id,
-                )
+            # 私有 CODEX_HOME 的 managed Codex：restart 必须沿用同一 home
+            # （home/args/launcher 已在 mutation 前完成全部校验，此处直接
+            # 使用校验过的 restart_env_command；绝不回退 agent start——那会
+            # 让 Codex 落回用户全局 home）。
             try:
                 _run(
-                    ["--session", session, "pane", "run", pane_id, env_command],
+                    ["--session", session, "pane", "run", pane_id,
+                     restart_env_command],
                     timeout=8,
                 )
             except RuntimeError as exc:

@@ -3007,7 +3007,7 @@ def _codexhome_start_kwargs(home: str, **extra):
         session=_CODEXHOME_SESSION, workdir=_CODEXHOME_WORKDIR,
         instance_id=_CODEXHOME_INSTANCE, project_id=_CODEXHOME_PROJECT,
         workspace_id=_CODEXHOME_WORKSPACE, codex_home=home,
-        args="--sandbox read-only", label="codex",
+        label="codex",
     )
     payload.update(extra)
     return payload
@@ -3078,11 +3078,11 @@ def test_codex_home_entry_is_managed_codex_only(tmp_path) -> None:
             _CODEXHOME_SESSION, _CODEXHOME_WORKDIR, "codex",
             codex_home=str(home),
         )
-    # 专用入口之外没有注入面：任意/附加 args 仍被白名单拒绝
-    non_whitelisted = herdr_client.start_workspace_codex_home(
-        **_codexhome_start_kwargs(str(home), args="-c prompt=evil")
-    )
-    assert non_whitelisted["error_code"] == "workspace_agent_args_forbidden"
+    # 专用入口没有 args 参数：合同固定 exact --sandbox read-only
+    with pytest.raises(TypeError):
+        herdr_client.start_workspace_codex_home(
+            **_codexhome_start_kwargs(str(home), args="")
+        )
 
 
 def test_codex_home_invalid_fails_before_any_herdr_call(tmp_path) -> None:
@@ -3113,8 +3113,8 @@ def test_codex_home_env_command_rejects_injection() -> None:
                 public_args=["--sandbox", "read-only"],
             )
     for bad_args in (
-        ["-c", "prompt=rm"], ["--sandbox", "read-only", "BODY"],
-        ["--sandbox", "read-only", "tok=secret"], ["-"],
+        [], ["-c", "prompt=rm"], ["--sandbox", "read-only", "BODY"],
+        ["--sandbox", "read-only", "tok=secret"], ["-"], ["read-only"],
     ):
         with pytest.raises(ValueError):
             herdr_client._codex_home_env_command(
@@ -3207,6 +3207,26 @@ def test_codex_home_detection_failure_retires_and_closes(
         _CODEXHOME_INSTANCE,
     ) is None
 
+    # 回收无法确认 → 必须 descriptor_cleanup_incomplete，绝不静默宣称回滚
+    monkeypatch.undo()
+    calls2, _ = _codexhome_harness(
+        monkeypatch, tmp_path,
+        snapshots=[empty, empty, empty, with_pane],
+    )
+    monkeypatch.setattr(herdr_client, "_await_agent_detection",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(
+        herdr_client, "_close_created_pane_verified",
+        lambda *a, **k: False,
+    )
+    second = herdr_client.start_workspace_codex_home(
+        **_codexhome_start_kwargs(str(home)),
+    )
+    assert second["error_code"] == "descriptor_cleanup_incomplete"
+    assert second["rolled_back"] is False
+    assert second["pane_id"]
+    monkeypatch.undo()
+
 
 def test_restart_with_codex_home_reuses_env_and_fails_closed(
     monkeypatch, tmp_path,
@@ -3223,15 +3243,15 @@ def test_restart_with_codex_home_reuses_env_and_fails_closed(
         display_name="codex", project_id=_CODEXHOME_PROJECT,
         workspace_id=_CODEXHOME_WORKSPACE, codex_home=str(home),
     )
-    live_named = {
+    # pane.run 私有启动的 Codex 由 detection 管理：live agent 没有 name。
+    live_unnamed = {
         "session": _CODEXHOME_SESSION,
         "panes": [{
             "pane_id": "w1:p2", "agent": "codex", "cwd": _CODEXHOME_WORKDIR,
         }],
-        "agents": [{"name": _CODEXHOME_INSTANCE, "agent": "codex",
-                    "pane_id": "w1:p2"}],
+        "agents": [{"name": None, "agent": "codex", "pane_id": "w1:p2"}],
     }
-    codex_back = live_named
+    codex_back = live_unnamed
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     monkeypatch.setattr(
         herdr_client, "require_herdr_capabilities", lambda: {},
@@ -3250,13 +3270,13 @@ def test_restart_with_codex_home_reuses_env_and_fails_closed(
                 }],
                 "agents": [],
             }
-        return live_named
+        return live_unnamed
 
     calls: list[list[str]] = []
 
     def run(args, timeout=10):
         calls.append(list(args))
-        if args[2:4] == ["agent", "send-keys"]:
+        if args[2:4] == ["pane", "send-keys"]:
             state["interrupted"] = True
         return ""
 
@@ -3279,7 +3299,7 @@ def test_restart_with_codex_home_reuses_env_and_fails_closed(
     ]]
     assert not [c for c in calls if c[2:4] == ["agent", "start"]]
 
-    # home 失效（被删）→ fail closed，绝不回退 agent start/全局 home
+    # home 失效（被删）→ 在任何中断键之前 fail closed，零副作用
     shutil.rmtree(home)
     calls.clear()
     state["interrupted"] = False
@@ -3288,6 +3308,27 @@ def test_restart_with_codex_home_reuses_env_and_fails_closed(
     failed = herdr_client.restart_pane(_CODEXHOME_SESSION, "w1:p2")
     assert failed.get("error_code") == "restart_identity_invalid"
     assert not [c for c in calls if c[2:4] == ["agent", "start"]]
+    assert not [c for c in calls if c[2:4] == ["pane", "send-keys"]]
+    assert not [c for c in calls if c[2:4] == ["agent", "send-keys"]]
+
+    # descriptor codex_home + 空 args → 同样 mutation 前拒绝
+    home2 = tmp_path / "home2"
+    home2.mkdir(mode=0o700)
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "launch2.json"),
+    )
+    herdr_client.save_launch_descriptor(
+        session=_CODEXHOME_SESSION, pane_id="w1:p2",
+        name=_CODEXHOME_INSTANCE, kind="codex",
+        args=[], agent="codex",
+        workdir=_CODEXHOME_WORKDIR, instance_id=_CODEXHOME_INSTANCE,
+        display_name="codex", project_id=_CODEXHOME_PROJECT,
+        workspace_id=_CODEXHOME_WORKSPACE, codex_home=str(home2),
+    )
+    calls.clear()
+    empty_args = herdr_client.restart_pane(_CODEXHOME_SESSION, "w1:p2")
+    assert empty_args.get("error_code") == "restart_identity_invalid"
+    assert not [c for c in calls if c[2:4] == ["pane", "send-keys"]]
 
 
 @pytest.mark.skipif(
@@ -3356,7 +3397,7 @@ def test_codex_home_real_live_managed_start(
             session=session, workdir=str(workdir),
             instance_id=_CODEXHOME_INSTANCE,
             project_id=_CODEXHOME_PROJECT, workspace_id=_CODEXHOME_WORKSPACE,
-            codex_home=str(home), args="--sandbox read-only", label="codex",
+            codex_home=str(home), label="codex",
         )
         assert result.get("available") is True, result
         assert result.get("instance_id") == _CODEXHOME_INSTANCE
@@ -3403,6 +3444,42 @@ def test_codex_home_real_live_managed_start(
         assert descriptor["codex_home"] == str(home)
         assert descriptor["state"] == "active"
 
+        # ---- 真实 restart：同一私有 home 原位重建（detection agent 无 name）----
+        restarted = herdr_client.restart_pane(session, pane_id)
+        assert restarted.get("restarted") is True, restarted
+        assert restarted.get("pane_id") == pane_id
+        argv_after = None
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = [
+                    part for part in
+                    (entry / "cmdline").read_bytes().decode().split(nul)
+                    if part
+                ]
+                environ = (entry / "environ").read_bytes().decode(
+                    errors="replace",
+                ).split(nul)
+            except OSError:
+                continue
+            if not raw:
+                continue
+            head = Path(raw[0]).name
+            if head == "node" and len(raw) > 1 and "codex" in raw[1]:
+                tail = raw[2:]
+            elif "codex" in head and head != "node":
+                tail = raw[1:]
+            else:
+                continue
+            if tail == ["--sandbox", "read-only"] and (
+                f"CODEX_HOME={home}" in environ
+            ):
+                argv_after = raw
+                break
+        assert argv_after is not None, "restart 后未找到私有 CODEX_HOME 的 codex"
+        assert "CODEX_HOME" not in argv_after
+
         closed = herdr_client.close_pane(session, pane_id)
         assert closed.get("available") is True
         deadline = time.monotonic() + 10
@@ -3422,4 +3499,12 @@ def test_codex_home_real_live_managed_start(
             capture_output=True, text=True, timeout=15,
         )
     finally:
+        # 终止本测试自起的 herdr server，避免遗留进程干扰同进程内其他
+        # 真实 herdr 用例（session close CLI 不保证回收 server 进程）。
+        try:
+            owned.terminate()
+            owned.wait(timeout=5)
+        except Exception:
+            pass
+        herdr_client._SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
         shutil.rmtree(isolated, ignore_errors=True)
