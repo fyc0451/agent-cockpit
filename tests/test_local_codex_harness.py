@@ -1179,6 +1179,8 @@ def test_attach_issues_private_home_and_never_calls_start_agent(
         str(checkout.resolve()): {"trust_level": "trusted"},
     }
     assert not (home / "auth.json").exists()
+    auth = _provider_provenance["auth"]
+    auth_identity = (auth.stat().st_dev, auth.stat().st_ino)
     woken = harness.wakeup(ATTACHMENT)
     assert woken["text"] == harness_mod.WAKEUP_TEXT
     after = user_cfg.stat() if user_cfg.exists() else None
@@ -1188,8 +1190,87 @@ def test_attach_issues_private_home_and_never_calls_start_agent(
         assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
     harness.detach(session="s", pane_id=attached.pane_id)
     assert panes == {}
-    assert home.is_dir()
-    assert cap.is_file()
+    assert not home.exists()
+    assert not cap.exists()
+    assert not (cap.parent / f"{ATTACHMENT}.generation").exists()
+    assert not (cap.parent / f"{ATTACHMENT}.fence").exists()
+    assert auth.is_file()
+    assert (auth.stat().st_dev, auth.stat().st_ino) == auth_identity
+
+
+def test_detach_unlinks_nested_symlink_without_touching_external_target(
+    tmp_path: Path, _provider_provenance: dict[str, Path],
+) -> None:
+    harness, checkout, _started, _generic, _panes = _attach_harness(tmp_path)
+    attached = harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY,
+        generation=1, fence=FENCE,
+    )
+    home = tmp_path / "caps" / f"{ATTACHMENT}.home"
+    nested = home / "cache"
+    nested.mkdir(mode=0o700)
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    payload = external / "keep.txt"
+    payload.write_bytes(b"external stays\n")
+    identity = (payload.stat().st_dev, payload.stat().st_ino)
+    (nested / "external").symlink_to(external, target_is_directory=True)
+
+    harness.detach(session="s", pane_id=attached.pane_id)
+
+    assert not home.exists()
+    assert payload.read_bytes() == b"external stays\n"
+    assert (payload.stat().st_dev, payload.stat().st_ino) == identity
+
+
+def test_detach_symlink_swap_fails_unknown_and_invalidates_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _provider_provenance: dict[str, Path],
+) -> None:
+    harness, checkout, _started, _generic, _panes = _attach_harness(tmp_path)
+    attached = harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY,
+        generation=1, fence=FENCE,
+    )
+    root = tmp_path / "caps"
+    home = root / f"{ATTACHMENT}.home"
+    nested = home / "cache"
+    nested.mkdir(mode=0o700)
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    payload = external / "keep.txt"
+    payload.write_bytes(b"external stays\n")
+    original_open = harness_mod.os.open
+    swapped = False
+
+    def swap_before_directory_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if (
+            path == "cache"
+            and kwargs.get("dir_fd") is not None
+            and flags & getattr(os, "O_DIRECTORY", 0)
+            and not swapped
+        ):
+            nested.rename(home / "cache-owned")
+            nested.symlink_to(external, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(harness_mod.os, "open", swap_before_directory_open)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.detach(session="s", pane_id=attached.pane_id)
+
+    assert swapped is True
+    assert error.value.code == "runtime_unavailable"
+    assert error.value.unknown is True
+    assert payload.read_bytes() == b"external stays\n"
+    assert not (root / f"{ATTACHMENT}.cap").exists()
+    assert not (root / f"{ATTACHMENT}.generation").exists()
+    assert not (root / f"{ATTACHMENT}.fence").exists()
 
 
 def test_attach_start_failure_leaves_no_usable_cap_or_pane(tmp_path: Path) -> None:

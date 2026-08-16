@@ -35,6 +35,7 @@ WAKEUP_DIGEST = "sha256:" + hashlib.sha256(WAKEUP_TEXT.encode()).hexdigest()
 _ATTACHMENT_ID = re.compile(r"att_[0-9a-f]{32}\Z")
 _PROVIDER_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _MAX_PROVENANCE_BYTES = 64 * 1024
+_MAX_CAPABILITY_BYTES = 64 * 1024
 PROVIDER_CONFIG_ENV = "COCKPIT_CODEX_PROVIDER_CONFIG_PATH"
 
 
@@ -402,25 +403,25 @@ class LocalCodexHarness:
         root = self._capability_root
         if root is None:
             return
+        try:
+            attachment_id = attachment_id_text(attachment_id)
+            root_fd = _open_private_capability_root(root)
+        except (HarnessError, OSError):
+            return
+        try:
+            try:
+                _retire_attachment_at(root_fd, attachment_id)
+            except (OSError, TypeError):
+                try:
+                    _invalidate_attachment_at(root_fd, attachment_id)
+                except (OSError, TypeError):
+                    pass
+        finally:
+            os.close(root_fd)
         names = (
             f"{attachment_id}.generation", f"{attachment_id}.fence",
             f"{attachment_id}.cap",
         )
-        for name in names:
-            path = root / name
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                continue
-            except OSError:
-                continue
-        config = root / f"{attachment_id}.home" / "config.toml"
-        try:
-            os.unlink(config)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
         for name in names:
             _invalidate_private_mode(root / name)
 
@@ -490,7 +491,10 @@ class LocalCodexHarness:
             pane_id = started.get("pane_id")
             if isinstance(pane_id, str) and pane_id:
                 try:
-                    self.detach(session=session, pane_id=pane_id)
+                    self._detach(
+                        session=session, pane_id=pane_id,
+                        attachment_id=attachment_id,
+                    )
                 except HarnessError:
                     self._retire_private_runtime(attachment_id)
                     raise HarnessError(
@@ -522,15 +526,19 @@ class LocalCodexHarness:
             )
             return evidence
         except HarnessError as exc:
-            self._retire_private_runtime(attachment_id)
             if exc.code in {"runtime_identity_unverified", "process_exited"}:
                 try:
-                    self.detach(session=session, pane_id=pane_id)
+                    self._detach(
+                        session=session, pane_id=pane_id,
+                        attachment_id=attachment_id,
+                    )
                 except HarnessError:
+                    self._retire_private_runtime(attachment_id)
                     raise HarnessError(
                         "runtime_unavailable", pane_id=pane_id, instance_id=str(live_id),
                     ) from None
                 raise HarnessError(exc.code, pane_id=None, instance_id=str(live_id)) from None
+            self._retire_private_runtime(attachment_id)
             raise HarnessError(
                 exc.code, pane_id=pane_id, instance_id=str(live_id),
                 unknown=exc.unknown,
@@ -594,21 +602,56 @@ class LocalCodexHarness:
         return by_pane, by_instance
 
     def detach(self, *, session: str, pane_id: str) -> None:
+        self._detach(session=session, pane_id=pane_id, attachment_id=None)
+
+    def _detach(
+        self, *, session: str, pane_id: str, attachment_id: str | None,
+    ) -> None:
+        root_fd: int | None = None
+        matched_attachment: str | None = None
         try:
-            closed = self._close_pane(session=session, pane_id=pane_id)
-        except Exception:
-            _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
-        if isinstance(closed, dict) and closed.get("available") is False:
-            _fail("runtime_unavailable", pane_id=pane_id)
-        try:
-            snap = self._snapshot(session=session)
-        except Exception:
-            _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
-        panes = snap.get("panes") if isinstance(snap, dict) else None
-        if not isinstance(panes, list):
-            _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
-        if any(isinstance(pane, dict) and pane.get("pane_id") == pane_id for pane in panes):
-            _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+            if self._capability_root is not None:
+                try:
+                    root_fd = _open_private_capability_root(self._capability_root)
+                    matched_attachment = (
+                        _explicit_attachment_at(
+                            root_fd, attachment_id=attachment_id,
+                            session=session, pane_id=pane_id,
+                        )
+                        if attachment_id is not None
+                        else _attachment_for_pane_at(
+                            root_fd, session=session, pane_id=pane_id,
+                        )
+                    )
+                except (HarnessError, OSError):
+                    _fail("runtime_unavailable", pane_id=pane_id)
+            try:
+                closed = self._close_pane(session=session, pane_id=pane_id)
+            except Exception:
+                _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+            if isinstance(closed, dict) and closed.get("available") is False:
+                _fail("runtime_unavailable", pane_id=pane_id)
+            try:
+                snap = self._snapshot(session=session)
+            except Exception:
+                _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+            panes = snap.get("panes") if isinstance(snap, dict) else None
+            if not isinstance(panes, list):
+                _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+            if any(
+                isinstance(pane, dict) and pane.get("pane_id") == pane_id
+                for pane in panes
+            ):
+                _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+            if root_fd is not None and matched_attachment is not None:
+                try:
+                    _retire_attachment_at(root_fd, matched_attachment)
+                except OSError:
+                    _invalidate_attachment_at(root_fd, matched_attachment)
+                    _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
 
     def confirm_absent(
         self, *, session: str, pane_id: str, instance_id: str | None,
@@ -1026,6 +1069,205 @@ def _unlink_owned(path: Path) -> None:
         return
     except OSError:
         return
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _open_private_capability_root(path: Path) -> int:
+    path = Path(path)
+    if not path.is_absolute() or ".." in path.parts:
+        raise OSError("unsafe capability root")
+    flags = _directory_open_flags()
+    current = os.open(path.anchor, flags)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        info = os.fstat(current)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise OSError("unsafe capability root")
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _read_capability_at(directory_fd: int, name: str) -> dict[str, Any]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size > _MAX_CAPABILITY_BYTES
+        ):
+            raise OSError("unsafe capability")
+        remaining = info.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                raise OSError("short capability read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        value = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise OSError("invalid capability") from exc
+    finally:
+        os.close(fd)
+    if not isinstance(value, dict):
+        raise OSError("invalid capability")
+    return value
+
+
+def _attachment_for_pane_at(
+    directory_fd: int, *, session: str, pane_id: str,
+) -> str | None:
+    matches: list[str] = []
+    invalid = False
+    for name in os.listdir(directory_fd):
+        if not name.endswith(".cap"):
+            continue
+        attachment_id = name[:-4]
+        if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+            continue
+        try:
+            record = _read_capability_at(directory_fd, name)
+        except OSError:
+            invalid = True
+            continue
+        if (
+            record.get("attachment_id") == attachment_id
+            and record.get("session") == session
+            and record.get("pane_id") == pane_id
+        ):
+            matches.append(attachment_id)
+    if len(matches) > 1 or invalid:
+        raise OSError("attachment binding unavailable")
+    return matches[0] if matches else None
+
+
+def _explicit_attachment_at(
+    directory_fd: int, *, attachment_id: str, session: str, pane_id: str,
+) -> str:
+    if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+        raise OSError("invalid attachment id")
+    record = _read_capability_at(directory_fd, attachment_id + ".cap")
+    if (
+        record.get("attachment_id") != attachment_id
+        or record.get("session") != session
+        or record.get("pane_id") not in {None, "", pane_id}
+    ):
+        raise OSError("attachment binding unavailable")
+    return attachment_id
+
+
+def _clear_private_directory(directory_fd: int, *, device: int) -> None:
+    for name in os.listdir(directory_fd):
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(before.st_mode):
+            child = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or opened.st_uid != os.getuid()
+                    or opened.st_dev != device
+                    or (opened.st_dev, opened.st_ino)
+                    != (before.st_dev, before.st_ino)
+                ):
+                    raise OSError("unsafe private directory")
+                _clear_private_directory(child, device=device)
+                os.fsync(child)
+            finally:
+                os.close(child)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino)
+                != (before.st_dev, before.st_ino)
+            ):
+                raise OSError("private directory changed")
+            os.rmdir(name, dir_fd=directory_fd)
+            continue
+        if not stat.S_ISLNK(before.st_mode) and before.st_uid != os.getuid():
+            raise OSError("unsafe private entry")
+        os.unlink(name, dir_fd=directory_fd)
+
+
+def _retire_private_home_at(directory_fd: int, name: str) -> None:
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid():
+        raise OSError("unsafe private home")
+    home_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+    try:
+        opened = os.fstat(home_fd)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise OSError("unsafe private home")
+        _clear_private_directory(home_fd, device=opened.st_dev)
+        os.fsync(home_fd)
+    finally:
+        os.close(home_fd)
+    current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+    ):
+        raise OSError("private home changed")
+    os.rmdir(name, dir_fd=directory_fd)
+
+
+def _invalidate_attachment_at(directory_fd: int, attachment_id: str) -> None:
+    for suffix in (".generation", ".fence", ".cap"):
+        try:
+            os.unlink(attachment_id + suffix, dir_fd=directory_fd)
+        except OSError:
+            continue
+    try:
+        os.fsync(directory_fd)
+    except OSError:
+        return
+
+
+def _retire_attachment_at(directory_fd: int, attachment_id: str) -> None:
+    if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+        raise OSError("invalid attachment id")
+    _retire_private_home_at(directory_fd, attachment_id + ".home")
+    for suffix in (".generation", ".fence", ".cap"):
+        try:
+            info = os.stat(
+                attachment_id + suffix,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            raise OSError("unsafe attachment sidecar")
+        os.unlink(attachment_id + suffix, dir_fd=directory_fd)
+    os.fsync(directory_fd)
 
 
 def _fsync_dir(parent: Path) -> None:

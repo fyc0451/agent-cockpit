@@ -434,6 +434,8 @@ def test_real_http_attach_dispatch_proves_working_without_prompt_bypass(
         )
         assert status == 200
         assert detached["data"]["state"] == "detached"
+        capability_root = runtime_root / "data/workspace-capabilities"
+        assert list(capability_root.iterdir()) == []
         prep_url = None
         status, stopped = _request_json(
             descriptor, f"/api/herdr/session/{session}/stop", method="POST",
@@ -443,6 +445,31 @@ def test_real_http_attach_dispatch_proves_working_without_prompt_bypass(
             descriptor, f"/api/herdr/session/{session}", method="DELETE",
         )
         assert status == 200 and deleted.get("deleted") == session
+        assert _stop(process) == ""
+        process = None
+
+        marker_path = runtime_root / next_profile.EPHEMERAL_MARKER
+        catalog_path = runtime_root / next_profile.EPHEMERAL_CATALOG
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        catalog_bytes = catalog_path.read_bytes()
+        catalog = json.loads(catalog_bytes)
+        assert marker["state"] == "ready"
+        assert marker["catalog_sha256"] == sha256(catalog_bytes).hexdigest()
+        assert not any(
+            entry["path"].startswith("data/workspace-capabilities/att_")
+            for entry in catalog["entries"]
+        )
+
+        restarted, restarted_descriptor, restarted_ready = _launch(
+            runtime_root, provider_config=REAL_PROVIDER_CONFIG,
+        )
+        try:
+            assert restarted_ready["ready_token"] == (
+                restarted_descriptor["ready_token"]
+            )
+            assert _live(restarted_descriptor)["status"] == "live"
+        finally:
+            assert _stop(restarted) == ""
     finally:
         if prep_url is not None:
             try:
@@ -460,7 +487,8 @@ def test_real_http_attach_dispatch_proves_working_without_prompt_bypass(
             )
         except Exception:
             pass
-        assert _stop(process) == ""
+        if process is not None:
+            assert _stop(process) == ""
 
 
 def test_ephemeral_launcher_runs_real_lifespan_and_reuses_known_root(
