@@ -19,7 +19,14 @@ _STATUS = {
     "project_not_found": 404,
     "workspace_not_found": 404,
     "workspace_not_active": 409,
+    "work_item_not_found": 404,
     "idempotency_conflict": 409,
+    "stale_revision": 409,
+    "stale_generation": 409,
+    "claim_conflict": 409,
+    "claim_not_active": 409,
+    "reply_conflict": 409,
+    "execution_terminal": 409,
     "workspace_work_schema_missing": 503,
     "migration_required": 503,
     "future_schema": 503,
@@ -32,6 +39,7 @@ _STATUS = {
 _RETRYABLE = frozenset({"store_read_failed", "store_write_failed"})
 _BODY_FIELDS = frozenset({"body", "acceptance", "constraints"})
 _ROUTE = "/api/projects/{project_id}/workspaces/{workspace_id}/work-items"
+_ITEM_ROUTE = _ROUTE + "/{work_item_id}"
 
 
 class RegistryLookup(Protocol):
@@ -87,6 +95,23 @@ def install(app: FastAPI, service: ApiService) -> None:
                 "items": [item.public_dict() for item in items],
                 "next_cursor": None,
             })
+        return _run(operation, request)
+
+    @app.get(_ITEM_ROUTE)
+    def get_work_item_detail(
+        project_id: str, workspace_id: str, work_item_id: str, request: Request,
+    ):
+        def operation():
+            if request.query_params:
+                raise ApiError("invalid_argument")
+            _require_scope(service, project_id, workspace_id, write=False)
+            detail = service.store_provider().get_work_item_detail(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id,
+            )
+            if detail is None:
+                raise ApiError("work_item_not_found")
+            return _success(request, detail)
         return _run(operation, request)
 
 
