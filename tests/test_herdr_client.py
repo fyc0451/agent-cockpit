@@ -1,4 +1,5 @@
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -536,36 +537,95 @@ def test_agent_wait_uses_native_agent_wait_primitive(monkeypatch):
     ]
 
 
+def _idle_get() -> str:
+    return json.dumps({
+        "id": "cli:agent:get",
+        "result": {
+            "agent": "codex", "agent_status": "idle",
+            "state_change_seq": 1, "pane_id": "w1:p2",
+        },
+    })
+
+
+def _working_get() -> str:
+    return json.dumps({
+        "id": "cli:agent:get",
+        "result": {
+            "agent": "codex", "agent_status": "working",
+            "state_change_seq": 2, "pane_id": "w1:p2",
+        },
+    })
+
+
+def _idle_explain() -> str:
+    return json.dumps({
+        "visible_idle": True, "visible_blocker": False, "state": "idle",
+        "matched_rule": {"id": "osc_title_idle"},
+    })
+
+
 def test_submit_agent_prompt_waits_for_working_and_is_the_receipt(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
-    monkeypatch.setattr(
-        herdr_client, "_run",
-        lambda args, timeout=10: calls.append(call(args, timeout=timeout)) or "",
-    )
+    prompted = {"n": 0}
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if args[2:4] == ["agent", "explain"]:
+            return _idle_explain()
+        if args[2:4] == ["agent", "get"]:
+            return _working_get() if prompted["n"] else _idle_get()
+        if args[2:4] == ["agent", "prompt"]:
+            prompted["n"] += 1
+            return ""
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
 
     result = herdr_client.submit_agent_prompt_until_working(
-        "demo", "i-abcdefghijklmnopqrstuvwxyz", "COCKPIT_WAKEUP_V1\nStart",
+        "demo", "w1:p2", "COCKPIT_WAKEUP_V1\nStart",
     )
 
     assert result["available"] is True
     assert result["submitted"] is True
     assert result["executing"] is True
     assert result.get("error") is None
-    assert calls == [
-        call([
-            "--session", "demo", "agent", "prompt",
-            "i-abcdefghijklmnopqrstuvwxyz", "COCKPIT_WAKEUP_V1\nStart",
-            "--wait", "--until", "working", "--until", "blocked",
-            "--timeout", "5000",
-        ], timeout=10),
-    ]
-    assert not any(
-        "send-text" in c.args[0] or "pane" in c.args[0] for c in calls
+    assert result["state_change_seq"] == 2
+    assert result["status"] == "working"
+    verbs = [c.args[0][3] for c in calls if c.args[0][2] == "agent"]
+    assert "explain" in verbs
+    assert "focus" in verbs
+    assert "prompt" in verbs
+    prompt = next(c.args[0] for c in calls if c.args[0][2:4] == ["agent", "prompt"])
+    assert prompt[4:6] == ["w1:p2", "COCKPIT_WAKEUP_V1\nStart"]
+    assert "--wait" in prompt
+    assert prompt[prompt.index("--timeout") + 1] == "15000"
+    assert not any("send-text" in c.args[0] or "read" in c.args[0] for c in calls)
+
+
+def test_submit_agent_prompt_auth_wall_is_typed_failure(monkeypatch) -> None:
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if args[2:4] == ["agent", "explain"]:
+            return json.dumps({
+                "visible_idle": False, "visible_blocker": True,
+                "state": "blocked", "matched_rule": {"id": "login_wall"},
+            })
+        return _idle_get()
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    result = herdr_client.submit_agent_prompt_until_working(
+        "demo", "w1:p2", "COCKPIT_WAKEUP_V1\nStart",
     )
-    assert "read" not in calls[0].args[0]
+    assert result["executing"] is False
+    assert result["submitted"] is False
+    assert result["error"] == "auth_wall"
+    assert not any(c.args[0][2:4] == ["agent", "prompt"] for c in calls)
 
 
 def test_submit_agent_prompt_retries_enter_then_fails_closed(monkeypatch) -> None:
@@ -574,8 +634,12 @@ def test_submit_agent_prompt_retries_enter_then_fails_closed(monkeypatch) -> Non
 
     def fake_run(args, timeout=10):
         calls.append(call(args, timeout=timeout))
+        if args[2:4] == ["agent", "explain"]:
+            return _idle_explain()
+        if args[2:4] == ["agent", "get"]:
+            return _idle_get()
         if args[2:4] == ["agent", "prompt"]:
-            raise RuntimeError("agent prompt 失败: agent_prompt_stalled")
+            raise RuntimeError("agent prompt 失败: timeout")
         if args[2:4] == ["agent", "wait"]:
             raise RuntimeError("agent wait 失败: timeout")
         return ""
@@ -590,25 +654,30 @@ def test_submit_agent_prompt_retries_enter_then_fails_closed(monkeypatch) -> Non
     assert result["submitted"] is False
     assert result["executing"] is False
     assert result["error"]
-    argv_groups = [c.args[0] for c in calls]
-    assert argv_groups[0][2:6] == ["agent", "prompt", "w1:p2", "COCKPIT_WAKEUP_V1\nStart"]
-    assert "--wait" in argv_groups[0]
-    assert argv_groups[1] == [
-        "--session", "demo", "agent", "send-keys", "w1:p2", "enter",
-    ]
-    assert argv_groups[2][2:5] == ["agent", "wait", "w1:p2"]
-    assert not any("send-text" in args or "pane" in args for args in argv_groups)
-    assert not any("read" in args for args in argv_groups)
+    verbs = [c.args[0][3] for c in calls if c.args[0][2] == "agent"]
+    assert "focus" in verbs
+    assert "prompt" in verbs
+    assert "send-keys" in verbs
+    assert "wait" in verbs
+    assert not any("send-text" in c.args[0] or "read" in c.args[0] for c in calls)
 
 
 def test_submit_agent_prompt_enter_retry_can_prove_working(monkeypatch) -> None:
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
+    working = {"n": False}
 
     def fake_run(args, timeout=10):
         calls.append(call(args, timeout=timeout))
+        if args[2:4] == ["agent", "explain"]:
+            return _idle_explain()
+        if args[2:4] == ["agent", "get"]:
+            return _working_get() if working["n"] else _idle_get()
         if args[2:4] == ["agent", "prompt"]:
-            raise RuntimeError("agent prompt 失败: agent_prompt_stalled")
+            raise RuntimeError("agent prompt 失败: timeout")
+        if args[2:4] == ["agent", "send-keys"]:
+            working["n"] = True
+            return ""
         return ""
 
     monkeypatch.setattr(herdr_client, "_run", fake_run)
@@ -617,11 +686,13 @@ def test_submit_agent_prompt_enter_retry_can_prove_working(monkeypatch) -> None:
         "demo", "w1:p2", "COCKPIT_WAKEUP_V1\nStart",
     )
 
-    assert result == {
-        "available": True, "submitted": True, "executing": True,
-        "retried": True, "status": "working", "target": "w1:p2",
-    }
-    assert [c.args[0][3] for c in calls] == ["prompt", "send-keys", "wait"]
+    assert result["submitted"] is True
+    assert result["executing"] is True
+    assert result.get("retried") is True
+    assert result["state_change_seq"] == 2
+    assert [c.args[0][3] for c in calls if c.args[0][2:4] == ["agent", "send-keys"]] == [
+        "send-keys",
+    ]
 
 
 def test_agent_wait_reports_timeout_without_keyboard_fallback(monkeypatch):
@@ -3598,23 +3669,28 @@ def test_codex_home_real_live_managed_start(
         shutil.rmtree(isolated, ignore_errors=True)
 
 
+_CODEX_RELAY_AUTH = Path("/home/fyc/.codex-cli/auth.json")
+
+
 @pytest.mark.skipif(
-    shutil.which("codex") is None or shutil.which("herdr") is None,
-    reason="需要真实 codex 与 herdr 二进制",
+    shutil.which("codex") is None
+    or shutil.which("herdr") is None
+    or not _CODEX_RELAY_AUTH.is_file(),
+    reason="需要真实 herdr/codex 与已登录 relay auth",
 )
-def test_real_wakeup_prompt_receipt_requires_executing_or_typed_failure(
+def test_real_wakeup_prompt_receipt_requires_working(
     monkeypatch,
 ) -> None:
-    """唯一临时 session：wakeup 要么进入 working/blocked，要么 typed fail。"""
+    """已登录 Codex：fixed wakeup 必须进入 working 且 seq 前进，失败不算绿。"""
     import tempfile
     import uuid
 
     from agent_cockpit import local_codex_harness as harness_mod
 
     herdr_client._LIST_SESSIONS_FAILED.value = False
-    isolated = Path(tempfile.mkdtemp(prefix="e3w-", dir="/tmp"))
+    isolated = Path(tempfile.mkdtemp(prefix="e3w2-", dir="/tmp"))
     isolated.chmod(0o700)
-    session = "e3w-" + uuid.uuid4().hex[:6]
+    session = "e3w2-" + uuid.uuid4().hex[:6]
     monkeypatch.setenv("HERDR_CONFIG_PATH", str(isolated / "h" / "config.toml"))
     (isolated / "h").mkdir(mode=0o700)
     (isolated / "h" / "config.toml").write_text(
@@ -3636,6 +3712,28 @@ def test_real_wakeup_prompt_receipt_requires_executing_or_typed_failure(
     workdir.mkdir(mode=0o700)
     home = isolated / "codex-home"
     home.mkdir(mode=0o700)
+    (home / "config.toml").write_text(
+        "\n".join([
+            'model_provider = "relay"',
+            'network_access = "enabled"',
+            "",
+            "[model_providers.relay]",
+            'name = "OpenAI Relay"',
+            'base_url = "https://ts.818.work"',
+            'wire_api = "responses"',
+            "",
+            "[model_providers.relay.auth]",
+            'command = "/usr/bin/jq"',
+            'args = ["-r", ".OPENAI_API_KEY", "/home/fyc/.codex-cli/auth.json"]',
+            "timeout_ms = 5000",
+            "",
+            f'[projects."{workdir}"]',
+            'trust_level = "trusted"',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    os.chmod(home / "config.toml", 0o600)
     owned = None
     try:
         server_log = isolated / "server.log"
@@ -3656,29 +3754,33 @@ def test_real_wakeup_prompt_receipt_requires_executing_or_typed_failure(
         )
         assert started.get("available") is True, started
         pane_id = started["pane_id"]
+        before = herdr_client.inspect_agent(session, pane_id)
         receipt = herdr_client.submit_agent_prompt_until_working(
             session, pane_id, harness_mod.WAKEUP_TEXT,
         )
+        after = herdr_client.inspect_agent(session, pane_id)
         (isolated / "wakeup-receipt.json").write_text(
             json.dumps({
                 "available": receipt.get("available"),
                 "submitted": receipt.get("submitted"),
                 "executing": receipt.get("executing"),
-                "has_error": bool(receipt.get("error")),
                 "status": receipt.get("status"),
+                "state_change_seq": receipt.get("state_change_seq"),
             }, sort_keys=True),
             encoding="utf-8",
         )
-        assert receipt.get("available") is True
-        if receipt.get("executing") is True:
-            assert receipt.get("submitted") is True
-            assert not receipt.get("error")
-        else:
-            assert receipt.get("executing") is False
-            assert receipt.get("error")
-            assert receipt.get("submitted") is not True
+        assert receipt.get("available") is True, receipt
+        assert receipt.get("submitted") is True, receipt
+        assert receipt.get("executing") is True, receipt
+        assert receipt.get("status") in {"working", "blocked"}
+        assert type(receipt.get("state_change_seq")) is int
+        if type(before.get("state_change_seq")) is int:
+            assert receipt["state_change_seq"] > before["state_change_seq"]
+        assert after.get("agent_status") in {"working", "blocked"}
         assert "BOSS" not in json.dumps(receipt)
         assert "root_message" not in json.dumps(receipt)
+        assert "token" not in json.dumps(receipt)
+        assert "OPENAI_API_KEY" not in json.dumps(receipt)
         herdr_client.close_pane(session, pane_id)
         subprocess.run(
             ["herdr", "--session", session, "session", "close"],

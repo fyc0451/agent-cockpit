@@ -1067,18 +1067,116 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
         return {"available": True, "error": str(e)}
 
 
-AGENT_PROMPT_EXECUTE_TIMEOUT_MS = 5000
+AGENT_PROMPT_EXECUTE_TIMEOUT_MS = 15000
+AGENT_PROMPT_READY_TIMEOUT_S = 30.0
 _EXECUTING_STATES = ("working", "blocked")
+
+
+def _decode_cli_json(text: str) -> dict[str, Any]:
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            break
+        else:
+            return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return parsed
+
+
+def _unwrap_agent_payload(parsed: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(parsed.get("error"), dict):
+        return parsed
+    result = parsed.get("result")
+    if isinstance(result, dict):
+        agent = result.get("agent")
+        if isinstance(agent, dict) and (
+            "agent_status" in agent or "state_change_seq" in agent
+        ):
+            return agent
+        return result
+    return parsed
+
+
+def inspect_agent(session: str, target: str) -> dict[str, Any]:
+    """Structured agent get + explain. Does not read transcript."""
+    if not is_available():
+        return {"available": False}
+    try:
+        raw_get = _run(["--session", session, "agent", "get", target], timeout=8)
+        raw_explain = _run(
+            ["--session", session, "agent", "explain", target, "--json"],
+            timeout=8,
+        )
+    except RuntimeError as exc:
+        return {"available": True, "error": str(exc)}
+    got = _unwrap_agent_payload(_decode_cli_json(raw_get))
+    explained = _unwrap_agent_payload(_decode_cli_json(raw_explain))
+    matched = explained.get("matched_rule")
+    rule_id = matched.get("id") if isinstance(matched, dict) else None
+    seq = got.get("state_change_seq")
+    try:
+        seq_n = int(seq) if seq is not None and type(seq) is not bool else None
+    except (TypeError, ValueError):
+        seq_n = None
+    return {
+        "available": True,
+        "agent_status": got.get("agent_status") or explained.get("state"),
+        "state_change_seq": seq_n,
+        "pane_id": got.get("pane_id"),
+        "name": got.get("name"),
+        "visible_idle": bool(explained.get("visible_idle")),
+        "visible_blocker": bool(explained.get("visible_blocker")),
+        "rule_id": rule_id,
+    }
+
+
+def _wait_prompt_ready(session: str, target: str) -> dict[str, Any]:
+    deadline = time.monotonic() + AGENT_PROMPT_READY_TIMEOUT_S
+    last: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        last = inspect_agent(session, target)
+        if last.get("available") is False:
+            return {**last, "ready": False, "error": "runtime_unavailable"}
+        if last.get("visible_blocker"):
+            return {**last, "ready": False, "error": "auth_wall"}
+        if last.get("visible_idle") and last.get("agent_status") == "idle":
+            return {**last, "ready": True}
+        time.sleep(0.4)
+    error = last.get("error") or "agent_not_ready"
+    return {**last, "ready": False, "error": error}
+
+
+def _execution_proven(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    before_seq = before.get("state_change_seq")
+    after_seq = after.get("state_change_seq")
+    if after.get("agent_status") not in _EXECUTING_STATES:
+        return False
+    if type(before_seq) is int and type(after_seq) is int:
+        return after_seq > before_seq
+    return False
 
 
 def submit_agent_prompt_until_working(
     session: str, target: str, text: str,
 ) -> dict[str, Any]:
-    """Submit a prompt and require the agent to enter working/blocked.
+    """Submit a prompt only after the pane is idle-ready, then prove working.
 
-    Uses native `agent prompt --wait --until working|blocked`. If the agent
-    stays idle, send Enter once on the agent surface and wait again. Does not
-    read transcript or treat a bare submit receipt as success.
+    Detection can mark Codex idle while it is still booting. Wait for
+    structured `visible_idle` without a blocker, focus the pane target, then
+    `agent prompt --wait --until working|blocked`. Success requires
+    agent_status in working/blocked and an increased state_change_seq.
     """
     if not is_available():
         return {"available": False}
@@ -1088,6 +1186,18 @@ def submit_agent_prompt_until_working(
     if not isinstance(text, str) or text == "":
         return {"available": True, "submitted": False, "executing": False,
                 "error": "invalid_argument"}
+    ready = _wait_prompt_ready(session, target)
+    if ready.get("ready") is not True:
+        return {
+            "available": True, "submitted": False, "executing": False,
+            "error": str(ready.get("error") or "agent_not_ready"),
+            "target": target,
+        }
+    before_seq = ready.get("state_change_seq")
+    try:
+        _run(["--session", session, "agent", "focus", target], timeout=8)
+    except RuntimeError:
+        pass
     prompt_argv = [
         "--session", session, "agent", "prompt", target, text,
         "--wait",
@@ -1097,12 +1207,16 @@ def submit_agent_prompt_until_working(
     first_error = "agent_prompt_stalled"
     try:
         _run(prompt_argv, timeout=AGENT_PROMPT_EXECUTE_TIMEOUT_MS / 1000.0 + 5)
-        return {
-            "available": True, "submitted": True, "executing": True,
-            "status": "working", "target": target,
-        }
     except RuntimeError as exc:
         first_error = str(exc)
+    after = inspect_agent(session, target)
+    if _execution_proven(ready, after):
+        return {
+            "available": True, "submitted": True, "executing": True,
+            "status": after.get("agent_status"),
+            "state_change_seq": after.get("state_change_seq"),
+            "target": target,
+        }
     try:
         _run(
             ["--session", session, "agent", "send-keys", target, "enter"],
@@ -1117,14 +1231,19 @@ def submit_agent_prompt_until_working(
         session, target, until=list(_EXECUTING_STATES),
         timeout_ms=AGENT_PROMPT_EXECUTE_TIMEOUT_MS,
     )
-    if waited.get("matched") is True:
+    after = inspect_agent(session, target)
+    if waited.get("matched") is True and _execution_proven(ready, after):
         return {
             "available": True, "submitted": True, "executing": True,
-            "retried": True, "status": "working", "target": target,
+            "retried": True, "status": after.get("agent_status"),
+            "state_change_seq": after.get("state_change_seq"),
+            "target": target,
         }
     return {
         "available": True, "submitted": False, "executing": False,
-        "error": waited.get("error") or first_error, "target": target,
+        "error": after.get("error") or waited.get("error") or first_error,
+        "target": target,
+        "state_change_seq": after.get("state_change_seq") or before_seq,
     }
 
 
