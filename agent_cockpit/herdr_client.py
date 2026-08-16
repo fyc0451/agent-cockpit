@@ -1725,6 +1725,12 @@ def _workspace_launch_label(instance_id: str) -> str:
 _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS = ["--sandbox", "read-only"]
 
 
+def _workspace_managed_public_args_allowed(kind: object, args: object) -> bool:
+    return args == [] or (
+        kind == "codex" and args == _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS
+    )
+
+
 def _workspace_codex_trust_args(canonical_path: str) -> list[str]:
     """Build one invocation-only Codex project trust override."""
     if (
@@ -1768,11 +1774,7 @@ def _workspace_descriptor_internal_args(record: dict[str, Any]) -> list[str]:
         or re.fullmatch(r"ws_[0-9a-f]{32}", record["workspace_id"]) is None
         or not isinstance(workdir, str)
         or not Path(workdir).is_absolute()
-        or record.get("args") not in ([], _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS)
-        or (
-            record.get("args") == _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS
-            and kind != "codex"
-        )
+        or not _workspace_managed_public_args_allowed(kind, record.get("args"))
         or record.get("agent") != kind
         or record.get("state") != "active"
     ):
@@ -1940,8 +1942,7 @@ def reserve_workspace_launch_descriptor(
         or not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id)
         or not isinstance(workdir, str)
         or not workdir
-        or public_args not in ([], _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS)
-        or (public_args and kind != "codex")
+        or not _workspace_managed_public_args_allowed(kind, public_args)
     ):
         raise ValueError("project/workspace authority 格式无效")
     record = {
@@ -2111,7 +2112,9 @@ def list_workspace_launch_descriptors(
             and bool(record.get("workdir"))
             and isinstance(record.get("kind"), str)
             and record.get("agent") == record.get("kind")
-            and record.get("args") == []
+            and _workspace_managed_public_args_allowed(
+                record.get("kind"), record.get("args"),
+            )
             and record.get("state") in {
                 "active", "pending", "retired", "retirement_pending",
             }

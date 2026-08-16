@@ -1344,6 +1344,83 @@ def test_workspace_descriptor_rejects_arbitrary_public_args(tmp_path: Path) -> N
     )
 
 
+def test_list_workspace_descriptors_accepts_readonly_and_lifecycle_states(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    path = tmp_path / "descriptors.json"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(path))
+    herdr_client.save_launch_descriptor(
+        session=SESSION, pane_id="pane-ro", name=AGENT_A, kind="codex",
+        args=["--sandbox", "read-only"], agent="codex", workdir=PATH,
+        instance_id=AGENT_A, display_name="codex",
+        project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+    herdr_client.reserve_workspace_launch_descriptor(
+        session=SESSION, name=AGENT_B, kind="codex", agent="codex",
+        workdir=PATH, instance_id=AGENT_B, display_name="codex",
+        project_id=PROJECT, workspace_id=WORKSPACE_A,
+        args=["--sandbox", "read-only"],
+    )
+    retired_id = "i-" + "c" * 26
+    herdr_client.save_launch_descriptor(
+        session=SESSION, pane_id="pane-retired", name=retired_id, kind="codex",
+        args=[], agent="codex", workdir=PATH, instance_id=retired_id,
+        display_name="codex", project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+    data = herdr_client._load_launch_descriptors_strict()
+    data["descriptors"][f"instance|{retired_id}"]["state"] = "retired"
+    herdr_client._save_launch_descriptors(data)
+
+    listed = herdr_client.list_workspace_launch_descriptors(
+        SESSION, PROJECT, WORKSPACE_A,
+    )
+    assert [item["instance_id"] for item in listed] == [AGENT_A]
+    assert listed[0]["args"] == ["--sandbox", "read-only"]
+    assert listed[0]["state"] == "active"
+    pending = herdr_client.get_launch_descriptor_by_instance(
+        AGENT_B, include_retired=True,
+    )
+    assert pending is not None and pending["state"] == "pending"
+    retired = herdr_client.get_launch_descriptor_by_instance(
+        retired_id, include_retired=True,
+    )
+    assert retired is not None and retired["state"] == "retired"
+
+
+@pytest.mark.parametrize(
+    "kind,args",
+    [
+        ("codex", ["--sandbox", "workspace-write"]),
+        ("codex", ["read-only", "--sandbox"]),
+        ("codex", ["--sandbox", "read-only", "extra"]),
+        ("codex", ["--sandbox", "--sandbox", "read-only"]),
+        ("claude", ["--sandbox", "read-only"]),
+        ("codex", ["--approval", "never"]),
+    ],
+)
+def test_list_workspace_descriptors_rejects_corrupt_managed_args(
+    monkeypatch, tmp_path: Path, kind: str, args: list[str],
+) -> None:
+    path = tmp_path / "descriptors.json"
+    monkeypatch.setenv("COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(path))
+    herdr_client.save_launch_descriptor(
+        session=SESSION, pane_id="pane-bad", name=AGENT_A, kind="codex",
+        args=[], agent="codex", workdir=PATH, instance_id=AGENT_A,
+        display_name="codex", project_id=PROJECT, workspace_id=WORKSPACE_A,
+    )
+    data = herdr_client._load_launch_descriptors_strict()
+    record = data["descriptors"][f"instance|{AGENT_A}"]
+    record["kind"] = kind
+    record["agent"] = kind
+    record["args"] = args
+    herdr_client._save_launch_descriptors(data)
+    with pytest.raises(ValueError, match="workspace launch descriptor 损坏"):
+        herdr_client.list_workspace_launch_descriptors(
+            SESSION, PROJECT, WORKSPACE_A,
+        )
+    assert not herdr_client._workspace_managed_public_args_allowed(kind, args)
+
+
 @pytest.mark.parametrize(
     "canonical_path",
     [
