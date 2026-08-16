@@ -12,6 +12,10 @@ import {
 } from '../../api/workspaceExecution'
 import { newIdempotencyKey } from '../../api/idempotency'
 import { stateKindFromError } from '../../api/errorState'
+import {
+  dispatchWorkspaceWork,
+  getWorkspaceDispatchWorkRevision,
+} from '../../api/workspaceDispatch'
 import { Button } from '../../components/Button'
 import { StatusState } from '../../components/StatusState'
 
@@ -29,6 +33,38 @@ function messageForError(error: unknown): string {
   if (error.code === 'idempotency_conflict') return '请求冲突。当前状态已保留。'
   if (error.status === 409) return '准备未完成。当前状态已保留。'
   return '暂时无法完成执行准备。当前状态已保留。'
+}
+
+function messageForDispatchError(error: unknown): string {
+  if (!(error instanceof ApiError)) return '暂时无法派遣。派遣意图已保留，可安全重试。'
+  if (error.code === 'wakeup_outcome_unknown') return '派遣结果未知，可安全重试。'
+  if (error.code === 'disconnected') return '当前无法连接服务。派遣意图已保留，可安全重试。'
+  if (error.code === 'stale_revision' || error.code === 'stale_generation') {
+    return '任务或准备状态已变化，请刷新后重试。'
+  }
+  if (error.code === 'delivery_conflict') return '任务已有其他派遣记录，请刷新查看最新状态。'
+  if (error.code === 'claim_conflict' || error.code === 'claim_not_active') {
+    return '任务领取状态已变化，请刷新查看最新状态。'
+  }
+  if (error.code === 'execution_terminal') return '任务已经结束，不能再次派遣。'
+  if (error.code === 'runtime_capability_invalid') return '只读 Agent 能力校验失败，无法派遣。'
+  if (error.code === 'runtime_unavailable') return '只读 Agent 暂时不可用，可安全重试派遣。'
+  if (error.code === 'idempotency_conflict') return '派遣意图发生冲突，请刷新后重试。'
+  if (
+    error.code === 'operation_journal_unavailable'
+    || error.code === 'schema_missing'
+    || error.code === 'workspace_work_schema_missing'
+    || error.code === 'migration_required'
+    || error.code === 'future_schema'
+    || error.code === 'schema_fingerprint_mismatch'
+    || error.code === 'store_unsafe'
+    || error.code === 'store_corrupt'
+    || error.code === 'store_read_failed'
+    || error.code === 'store_write_failed'
+  ) {
+    return '派遣服务暂时不可用。派遣意图已保留，可安全重试。'
+  }
+  return '暂时无法派遣。派遣意图已保留，可安全重试。'
 }
 
 function canAttach(state: string | undefined): boolean {
@@ -72,6 +108,15 @@ export function WorkPreparation({
   const [actionError, setActionError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const inFlight = useRef(false)
+  const [dispatchError, setDispatchError] = useState<unknown>(null)
+  const [dispatchBusy, setDispatchBusy] = useState(false)
+  const [dispatchSubmitted, setDispatchSubmitted] = useState(false)
+  const dispatchInFlight = useRef(false)
+  const dispatchIntent = useRef({
+    binding: '',
+    key: newIdempotencyKey(),
+    workRevision: null as number | null,
+  })
 
   const members = membersQuery.data?.data.items ?? []
   const prep = prepQuery.data?.data ?? null
@@ -80,10 +125,24 @@ export function WorkPreparation({
   const [prepareKey, rotatePrepareKey] = useIntentKey(selectedId ?? '')
   const [attachKey, rotateAttachKey] = useIntentKey(prep ? `a:${prep.revision}` : 'a')
   const [detachKey, rotateDetachKey] = useIntentKey(prep ? `d:${prep.revision}` : 'd')
+  const dispatchBinding = prep?.state === 'connected_readonly'
+    ? `${workItemId}:${prep.revision}`
+    : ''
 
   useEffect(() => {
     if (prep?.identity.identity_id) setSelectedId(prep.identity.identity_id)
   }, [prep?.identity.identity_id])
+
+  useEffect(() => {
+    if (dispatchIntent.current.binding === dispatchBinding) return
+    dispatchIntent.current = {
+      binding: dispatchBinding,
+      key: newIdempotencyKey(),
+      workRevision: null,
+    }
+    setDispatchError(null)
+    setDispatchSubmitted(false)
+  }, [dispatchBinding])
 
   const changeName = (value: string) => {
     setDisplayName(value)
@@ -151,6 +210,51 @@ export function WorkPreparation({
       rotateDetachKey()
       return result.data
     })
+  }
+
+  const dispatch = async () => {
+    if (!prep || prep.state !== 'connected_readonly' || dispatchInFlight.current) return
+    if (dispatchIntent.current.binding !== dispatchBinding) {
+      dispatchIntent.current = {
+        binding: dispatchBinding,
+        key: newIdempotencyKey(),
+        workRevision: null,
+      }
+    }
+    dispatchInFlight.current = true
+    setDispatchBusy(true)
+    setDispatchError(null)
+    try {
+      const intent = dispatchIntent.current
+      const workRevision = intent.workRevision ?? await getWorkspaceDispatchWorkRevision(
+        projectId, workspaceId, workItemId,
+      )
+      intent.workRevision = workRevision
+      await dispatchWorkspaceWork(
+        projectId,
+        workspaceId,
+        workItemId,
+        {
+          expected_work_revision: workRevision,
+          expected_preparation_revision: prep.revision,
+        },
+        intent.key,
+      )
+      dispatchIntent.current = {
+        binding: dispatchBinding,
+        key: newIdempotencyKey(),
+        workRevision: null,
+      }
+      setDispatchSubmitted(true)
+      void queryClient.invalidateQueries({
+        queryKey: ['workspace-work-detail', projectId, workspaceId, workItemId],
+      })
+    } catch (error) {
+      setDispatchError(error)
+    } finally {
+      dispatchInFlight.current = false
+      setDispatchBusy(false)
+    }
   }
 
   const state = prep?.state
@@ -242,7 +346,23 @@ export function WorkPreparation({
             <p className="work-prep-phase">已准备（独立 Checkout，尚未领取）</p>
           )}
           {state === 'connected_readonly' ? (
-            <Button variant="primary" type="button" disabled={busy} onClick={detach}>断开</Button>
+            <>
+              <Button
+                variant="primary"
+                type="button"
+                disabled={busy || dispatchBusy || dispatchSubmitted}
+                onClick={() => { void dispatch() }}
+              >
+                {dispatchSubmitted
+                  ? '派遣已提交'
+                  : dispatchBusy
+                    ? '正在派遣'
+                    : dispatchError
+                      ? '重试派遣'
+                      : '派遣任务'}
+              </Button>
+              <Button type="button" disabled={busy || dispatchBusy} onClick={detach}>断开</Button>
+            </>
           ) : (
             <Button
               variant="primary"
@@ -265,6 +385,10 @@ export function WorkPreparation({
         </>
       )}
       {actionError ? <p className="focus-inline-error" role="alert">{messageForError(actionError)}</p> : null}
+      {dispatchSubmitted ? <p className="work-prep-phase" role="status">派遣已提交，等待最新状态。</p> : null}
+      {dispatchError ? (
+        <p className="focus-inline-error" role="alert">{messageForDispatchError(dispatchError)}</p>
+      ) : null}
     </section>
   )
 }
