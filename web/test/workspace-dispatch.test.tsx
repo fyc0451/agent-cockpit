@@ -85,7 +85,18 @@ function detail() {
       workspace_id: 'w1',
       revision: 1,
       created_at: '2026-08-16T00:00:00+00:00',
-      messages: [],
+      messages: [{
+        message_id: 'msg_dispatch',
+        thread_id: 'thr_dispatch',
+        ordinal: 1,
+        message_kind: 'root',
+        author_kind: 'boss',
+        author_ref: null,
+        author_generation: null,
+        reply_to_message_id: null,
+        body: '完成派遣闭环',
+        created_at: '2026-08-16T00:00:00+00:00',
+      }],
     },
     work_item: {
       work_item_id: 'wrk_dispatch',
@@ -240,6 +251,14 @@ describe('D-W2 派遣动作', () => {
     renderApp(HOME_ROUTE)
     fireEvent.click(await screen.findByRole('button', { name: '派遣任务' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('派遣结果未知，可安全重试。')
+    expect(dispatchPosts(stub.calls)).toHaveLength(1)
+    expect(screen.queryByText(/working|工作中/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '执行时间线' })).not.toBeInTheDocument()
+    const detailGetsBeforeRetry = stub.calls.filter(
+      (call) => call.url === DETAIL_URL && call.method === 'GET',
+    ).length
+    expect(detailGetsBeforeRetry).toBeGreaterThanOrEqual(1)
+
     fireEvent.click(screen.getByRole('button', { name: '重试派遣' }))
     await screen.findByText('派遣已提交，等待最新状态。')
 
@@ -247,7 +266,13 @@ describe('D-W2 派遣动作', () => {
     expect(posts).toHaveLength(2)
     expect(posts[1].idempotencyKey).toBe(posts[0].idempotencyKey)
     expect(posts[1].body).toBe(posts[0].body)
-    expect(stub.calls.filter((call) => call.url === DETAIL_URL && call.method === 'GET')).toHaveLength(1)
+    await waitFor(() => {
+      expect(stub.calls.filter(
+        (call) => call.url === DETAIL_URL && call.method === 'GET',
+      ).length).toBeGreaterThan(detailGetsBeforeRetry)
+    })
+    expect(screen.queryByText(/working|工作中/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '执行时间线' })).not.toBeInTheDocument()
   })
 
   it('typed failure 保留派遣意图，不显示 working', async () => {
