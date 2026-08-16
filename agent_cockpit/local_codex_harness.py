@@ -180,10 +180,16 @@ class LocalCodexHarness:
         current = root / f"{attachment_id}.generation"
         home = root / f"{attachment_id}.home"
         _private_dir(home)
-        _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
-        _write_private(current, str(generation).encode() + b"\n")
-        _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
-        _write_mcp_home_config(home, cap, root)
+        self._reject_unusable_existing_authority(attachment_id)
+        try:
+            _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
+            _write_private(current, str(generation).encode() + b"\n")
+            _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
+            _write_mcp_home_config(home, cap, root)
+        except HarnessError as exc:
+            if exc.unknown:
+                self._retire_private_runtime(attachment_id)
+            raise
         return {
             "capability_path": cap,
             "codex_home": home,
@@ -239,10 +245,16 @@ class LocalCodexHarness:
         cap = root / f"{attachment_id}.cap"
         home = root / f"{attachment_id}.home"
         _private_dir(home)
-        _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
-        _write_private(root / f"{attachment_id}.generation", str(generation).encode() + b"\n")
-        _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
-        _write_mcp_home_config(home, cap, root)
+        self._reject_unusable_existing_authority(attachment_id)
+        try:
+            _write_private(cap, json.dumps(payload, separators=(",", ":")).encode())
+            _write_private(root / f"{attachment_id}.generation", str(generation).encode() + b"\n")
+            _write_private(root / f"{attachment_id}.fence", fence.encode() + b"\n")
+            _write_mcp_home_config(home, cap, root)
+        except HarnessError as exc:
+            if exc.unknown:
+                self._retire_private_runtime(attachment_id)
+            raise
         return {"capability_path": cap, "codex_home": home, "generation": generation}
 
     def _bind_private_runtime(
@@ -255,10 +267,15 @@ class LocalCodexHarness:
             return
         record["pane_id"] = pane_id
         record["instance_id"] = instance_id
-        _write_private(
-            self._require_cap(attachment_id),
-            json.dumps(record, separators=(",", ":")).encode(),
-        )
+        try:
+            _write_private(
+                self._require_cap(attachment_id),
+                json.dumps(record, separators=(",", ":")).encode(),
+            )
+        except HarnessError as exc:
+            if exc.unknown:
+                self._retire_private_runtime(attachment_id)
+            raise
 
     def _bound_capability(self, attachment_id: str) -> dict[str, Any]:
         record = self._require_capability_record(attachment_id)
@@ -294,26 +311,59 @@ class LocalCodexHarness:
             _fail("invalid_argument")
         return record
 
+    def _reject_unusable_existing_authority(self, attachment_id: str) -> None:
+        root = self._capability_root
+        if root is None:
+            return
+        cap = root / f"{attachment_id}.cap"
+        try:
+            info = cap.lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            _fail("invalid_argument", unknown=True)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.getuid()
+        ):
+            _fail("invalid_argument")
+        try:
+            self._require_capability_record(attachment_id)
+        except HarnessError:
+            self._retire_private_runtime(attachment_id)
+            try:
+                cap.lstat()
+            except FileNotFoundError:
+                return
+            _fail("invalid_argument", unknown=True)
+
     def _retire_private_runtime(self, attachment_id: str) -> None:
         root = self._capability_root
         if root is None:
             return
-        for name in (
-            f"{attachment_id}.cap", f"{attachment_id}.generation",
-            f"{attachment_id}.fence",
-        ):
+        names = (
+            f"{attachment_id}.generation", f"{attachment_id}.fence",
+            f"{attachment_id}.cap",
+        )
+        for name in names:
+            path = root / name
             try:
-                (root / name).unlink()
+                os.unlink(path)
             except FileNotFoundError:
                 continue
             except OSError:
                 continue
+        config = root / f"{attachment_id}.home" / "config.toml"
         try:
-            (root / f"{attachment_id}.home" / "config.toml").unlink()
+            os.unlink(config)
         except FileNotFoundError:
             pass
         except OSError:
             pass
+        for name in names:
+            _invalidate_private_mode(root / name)
 
     def attach_readonly(
         self, *, session: str, checkout_path: Path,
@@ -335,11 +385,17 @@ class LocalCodexHarness:
         ):
             _fail("invalid_argument")
         attachment_id = attachment_id_text(attachment_id)
-        issued = self._prepare_private_runtime(
-            attachment_id=attachment_id, identity_id=identity_id,
-            generation=generation, fence=fence, session=session,
-            checkout=spec.cwd,
-        )
+        try:
+            issued = self._prepare_private_runtime(
+                attachment_id=attachment_id, identity_id=identity_id,
+                generation=generation, fence=fence, session=session,
+                checkout=spec.cwd,
+            )
+        except HarnessError as exc:
+            if exc.unknown:
+                self._retire_private_runtime(attachment_id)
+                raise HarnessError("runtime_unavailable", unknown=True) from None
+            raise
         pane_id: str | None = None
         live_id = instance_id
         try:
@@ -633,9 +689,9 @@ def _write_mcp_home_config(home: Path, cap: Path, capability_root: Path) -> None
     _write_private(home / "config.toml", config.encode())
 
 
-def _unlink_quiet(path: Path) -> None:
+def _unlink_owned(path: Path) -> None:
     try:
-        path.unlink()
+        os.unlink(path)
     except FileNotFoundError:
         return
     except OSError:
@@ -648,6 +704,37 @@ def _fsync_dir(parent: Path) -> None:
         os.fsync(dirfd)
     finally:
         os.close(dirfd)
+
+
+def _usable_private_regular(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(info.st_mode)
+        and stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1
+        and info.st_uid == os.getuid()
+        and stat.S_IMODE(info.st_mode) == 0o600
+    )
+
+
+def _invalidate_private_mode(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        return
+    try:
+        os.chmod(path, 0o000)
+    except OSError:
+        return
 
 
 def _read_private_regular(path: Path) -> bytes:
@@ -673,10 +760,33 @@ def _read_private_regular(path: Path) -> bytes:
         os.close(fd)
 
 
+def _end_state_is_previous(path: Path, previous: bytes | None) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return previous is None
+    if previous is None:
+        return False
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.getuid()
+    ):
+        return False
+    try:
+        return _read_private_regular(path) == previous
+    except OSError:
+        return False
+
+
 def _write_exclusive_file(path: Path, payload: bytes, *, durable: bool) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
+    created = False
+    fd = -1
     try:
+        fd = os.open(path, flags, 0o600)
+        created = True
         view = memoryview(payload)
         offset = 0
         while offset < len(view):
@@ -686,20 +796,38 @@ def _write_exclusive_file(path: Path, payload: bytes, *, durable: bool) -> None:
             offset += wrote
         if durable:
             os.fsync(fd)
-    finally:
+    except (HarnessError, OSError):
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            fd = -1
+        if created:
+            _unlink_owned(path)
+        raise
+    try:
         os.close(fd)
-    os.chmod(path, 0o600)
-    staged = path.lstat()
-    if (
-        stat.S_ISLNK(staged.st_mode)
-        or not stat.S_ISREG(staged.st_mode)
-        or staged.st_nlink != 1
-        or staged.st_uid != os.getuid()
-        or stat.S_IMODE(staged.st_mode) != 0o600
-    ):
-        _fail("invalid_argument")
-    if _read_private_regular(path) != payload:
-        _fail("invalid_argument")
+    except OSError:
+        _unlink_owned(path)
+        raise
+    fd = -1
+    try:
+        os.chmod(path, 0o600)
+        staged = path.lstat()
+        if (
+            stat.S_ISLNK(staged.st_mode)
+            or not stat.S_ISREG(staged.st_mode)
+            or staged.st_nlink != 1
+            or staged.st_uid != os.getuid()
+            or stat.S_IMODE(staged.st_mode) != 0o600
+        ):
+            _fail("invalid_argument")
+        if _read_private_regular(path) != payload:
+            _fail("invalid_argument")
+    except (HarnessError, OSError):
+        _unlink_owned(path)
+        raise
 
 
 def _restore_published(
@@ -715,35 +843,29 @@ def _restore_published(
             except FileNotFoundError:
                 pass
             _fsync_dir(parent)
-            try:
-                path.lstat()
-            except FileNotFoundError:
-                return True
-            return False
+            return _end_state_is_previous(path, None)
         if backup is None:
             return False
         os.replace(backup, path)
         _fsync_dir(parent)
-        return _read_private_regular(path) == previous
+        return _end_state_is_previous(path, previous)
     except OSError:
-        try:
-            if previous is None:
-                try:
-                    path.lstat()
-                except FileNotFoundError:
-                    return True
-                return False
-            return _read_private_regular(path) == previous
-        except (FileNotFoundError, OSError):
-            return False
+        return _end_state_is_previous(path, previous)
 
 
-def _retire_published_target(path: Path, parent: Path) -> None:
-    _unlink_quiet(path)
+def _retire_published_target(path: Path, parent: Path) -> bool:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        _invalidate_private_mode(path)
+        return False
     try:
         _fsync_dir(parent)
     except OSError:
-        return
+        return _end_state_is_previous(path, None)
+    return _end_state_is_previous(path, None)
 
 
 def _write_private(path: Path, payload: bytes) -> None:
@@ -774,12 +896,14 @@ def _write_private(path: Path, payload: bytes) -> None:
             _fail("invalid_argument")
         if info is not None:
             previous = _read_private_regular(path)
-            backup = parent / f".{path.name}.{secrets.token_hex(8)}.bak"
+            staged_backup = parent / f".{path.name}.{secrets.token_hex(8)}.bak"
             # Read-back verifies old bytes; skip os.fsync so call #2 stays the
             # post-replace directory fsync.
-            _write_exclusive_file(backup, previous, durable=False)
-        tmp = parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
-        _write_exclusive_file(tmp, payload, durable=True)
+            _write_exclusive_file(staged_backup, previous, durable=False)
+            backup = staged_backup
+        staged_tmp = parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
+        _write_exclusive_file(staged_tmp, payload, durable=True)
+        tmp = staged_tmp
         os.replace(tmp, path)
         published = True
         tmp = None
@@ -794,21 +918,24 @@ def _write_private(path: Path, payload: bytes) -> None:
         ):
             _fail("invalid_argument")
         if backup is not None:
-            _unlink_quiet(backup)
+            _unlink_owned(backup)
             backup = None
     except (HarnessError, OSError) as exc:
         if tmp is not None:
-            _unlink_quiet(tmp)
+            _unlink_owned(tmp)
             tmp = None
         if published:
             proven = _restore_published(path, parent, backup, previous)
             if backup is not None:
-                _unlink_quiet(backup)
+                _unlink_owned(backup)
                 backup = None
             if not proven:
                 _retire_published_target(path, parent)
+            if not _end_state_is_previous(path, previous):
+                _invalidate_private_mode(path)
+                _fail("invalid_argument", unknown=True)
         elif backup is not None:
-            _unlink_quiet(backup)
+            _unlink_owned(backup)
             backup = None
         if isinstance(exc, HarnessError):
             raise

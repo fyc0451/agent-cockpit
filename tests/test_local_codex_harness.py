@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import secrets
+import stat
 import re
 import subprocess
 import sys
@@ -1147,6 +1149,261 @@ def test_issue_capability_second_fsync_keeps_old_authority(
     _assert_authority_unchanged(tmp_path, issued, before)
     record = json.loads(issued["capability_path"].read_bytes().decode("utf-8"))
     assert record["generation"] == 1
+
+
+def _install_restore_and_unlink_faults(
+    monkeypatch: pytest.MonkeyPatch, *, old_exists: bool,
+) -> None:
+    _fail_fsync_on(monkeypatch, 2)
+    real_replace = os.replace
+    seen = {"replace": 0}
+
+    def flaky_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        seen["replace"] += 1
+        if old_exists and seen["replace"] >= 2:
+            raise OSError("restore replace lost")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    def boom_unlink(path: str | os.PathLike[str]) -> None:
+        raise OSError("unlink lost")
+
+    monkeypatch.setattr(os, "unlink", boom_unlink)
+
+    def boom_path_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        raise OSError("unlink lost")
+
+    monkeypatch.setattr(Path, "unlink", boom_path_unlink)
+
+
+def _write_sidecars(folder: Path) -> tuple[list[Path], list[Path]]:
+    tmps = [path for path in folder.glob(".*.tmp") if path.is_file() or path.is_symlink()]
+    baks = [path for path in folder.glob(".*.bak") if path.is_file() or path.is_symlink()]
+    return tmps, baks
+
+
+def _assert_not_usable_authority(path: Path, new: bytes) -> None:
+    if not path.exists():
+        return
+    info = path.lstat()
+    usable = (
+        stat.S_ISREG(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and info.st_nlink == 1
+        and stat.S_IMODE(info.st_mode) == 0o600
+    )
+    if not usable:
+        return
+    assert path.read_bytes() != new
+
+
+def test_triple_fault_old_target_raises_unknown_and_classifies_leftovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    old = b"old-authority-bytes"
+    new = b"new-private-authority-payload"
+    harness_mod._write_private(target, old)
+    _install_restore_and_unlink_faults(monkeypatch, old_exists=True)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod._write_private(target, new)
+    assert error.value.code == "invalid_argument"
+    assert error.value.unknown is True
+    tmps, baks = _write_sidecars(parent)
+    assert tmps == []
+    assert baks != []
+    _assert_not_usable_authority(target, new)
+
+
+def test_triple_fault_without_old_target_raises_unknown_and_classifies_leftovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    new = b"new-private-authority-payload"
+    _install_restore_and_unlink_faults(monkeypatch, old_exists=False)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod._write_private(target, new)
+    assert error.value.code == "invalid_argument"
+    assert error.value.unknown is True
+    tmps, baks = _write_sidecars(parent)
+    assert tmps == []
+    assert baks == []
+    _assert_not_usable_authority(target, new)
+
+
+def test_triple_fault_issue_capability_rejects_validate_old_and_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(tmp_path)
+    issued = harness.issue_capability(
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1,
+        fence=FENCE, session="s", pane_id="pane-1",
+    )
+    _install_restore_and_unlink_faults(monkeypatch, old_exists=True)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.issue_capability(
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=2,
+            fence="sha256:" + "cd" * 32, session="s", pane_id="pane-1",
+        )
+    assert error.value.unknown is True
+    cap = issued["capability_path"]
+    tmps, baks = _write_sidecars(tmp_path / "caps")
+    assert tmps == []
+    assert baks != []
+    with pytest.raises(harness_mod.HarnessError):
+        harness._require_capability_record(ATTACHMENT)
+    with pytest.raises(harness_mod.HarnessError):
+        harness.wakeup(ATTACHMENT)
+    if harness_mod._usable_private_regular(cap):
+        record = json.loads(cap.read_bytes().decode("utf-8"))
+        assert record.get("generation") != 2
+
+
+def test_triple_fault_first_issue_then_attach_rejects_without_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, checkout, started, generic, panes = _attach_harness(tmp_path)
+    _install_restore_and_unlink_faults(monkeypatch, old_exists=False)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+        )
+    assert error.value.code == "runtime_unavailable"
+    assert error.value.unknown is True
+    assert started == []
+    assert generic == []
+    assert panes == {}
+    with pytest.raises(harness_mod.HarnessError):
+        harness.wakeup(ATTACHMENT)
+    with pytest.raises(harness_mod.HarnessError) as again:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+        )
+    assert again.value.unknown is True
+    assert started == []
+    assert panes == {}
+    tmps, _baks = _write_sidecars(tmp_path / "caps")
+    assert tmps == []
+
+
+def test_triple_fault_after_live_attach_does_not_start_second_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, checkout, started, generic, panes = _attach_harness(tmp_path)
+    harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+    )
+    assert list(panes) == ["pane-1"]
+    assert len(started) == 1
+    _install_restore_and_unlink_faults(monkeypatch, old_exists=True)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.attach_readonly(
+            session="s", checkout_path=checkout,
+            project_id=PROJECT, workspace_id=WORKSPACE,
+            attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=2,
+            fence="sha256:" + "cd" * 32,
+        )
+    assert error.value.unknown is True
+    assert list(panes) == ["pane-1"]
+    assert len(started) == 1
+    assert generic == []
+    with pytest.raises(harness_mod.HarnessError):
+        harness.wakeup(ATTACHMENT)
+    with pytest.raises(harness_mod.HarnessError):
+        harness._require_capability_record(ATTACHMENT)
+
+
+def test_backup_name_collision_keeps_preexisting_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    old = b"old-authority-bytes"
+    harness_mod._write_private(target, old)
+    real = secrets.token_hex
+
+    def fixed(nbytes: int = 32) -> str:
+        if nbytes == 8:
+            return "ab" * 8
+        return real(nbytes)
+
+    monkeypatch.setattr(secrets, "token_hex", fixed)
+    preexisting = parent / ".authority.abababababababab.bak"
+    preexisting.write_bytes(b"preexisting-backup")
+    os.chmod(preexisting, 0o600)
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness_mod._write_private(target, b"new-private-authority-payload")
+    assert error.value.code == "invalid_argument"
+    assert error.value.unknown is False
+    assert preexisting.read_bytes() == b"preexisting-backup"
+    assert target.read_bytes() == old
+
+
+def test_backup_name_collision_keeps_preexisting_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    old = b"old-authority-bytes"
+    harness_mod._write_private(target, old)
+    real = secrets.token_hex
+
+    def fixed(nbytes: int = 32) -> str:
+        if nbytes == 8:
+            return "cd" * 8
+        return real(nbytes)
+
+    monkeypatch.setattr(secrets, "token_hex", fixed)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"link-target-bytes")
+    preexisting = parent / ".authority.cdcdcdcdcdcdcdcd.bak"
+    preexisting.symlink_to(outside)
+    with pytest.raises(harness_mod.HarnessError):
+        harness_mod._write_private(target, b"new-private-authority-payload")
+    assert preexisting.is_symlink()
+    assert outside.read_bytes() == b"link-target-bytes"
+    assert target.read_bytes() == old
+
+
+def test_backup_name_collision_keeps_preexisting_hardlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "priv"
+    parent.mkdir(mode=0o700)
+    target = parent / "authority"
+    old = b"old-authority-bytes"
+    harness_mod._write_private(target, old)
+    real = secrets.token_hex
+
+    def fixed(nbytes: int = 32) -> str:
+        if nbytes == 8:
+            return "ef" * 8
+        return real(nbytes)
+
+    monkeypatch.setattr(secrets, "token_hex", fixed)
+    other = parent / "other"
+    other.write_bytes(b"hardlink-bytes")
+    os.chmod(other, 0o600)
+    preexisting = parent / ".authority.efefefefefefefef.bak"
+    os.link(other, preexisting)
+    with pytest.raises(harness_mod.HarnessError):
+        harness_mod._write_private(target, b"new-private-authority-payload")
+    assert other.read_bytes() == b"hardlink-bytes"
+    assert preexisting.stat().st_nlink == 2
+    assert target.read_bytes() == old
 
 
 def test_start_unproven_rollback_without_pane_is_unknown(tmp_path: Path) -> None:
