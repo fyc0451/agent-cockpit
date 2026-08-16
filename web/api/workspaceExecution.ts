@@ -39,6 +39,7 @@ export interface WorkspaceExecutionLease {
   status: string
   generation: number
   revision: number
+  claim_id: string | null
 }
 
 export interface WorkspaceExecutionAttachment {
@@ -129,12 +130,13 @@ function assertCheckout(raw: unknown): WorkspaceExecutionCheckout {
 
 function assertLease(raw: unknown): WorkspaceExecutionLease {
   const value = object(raw, 'lease')
-  exactKeys(value, ['lease_id', 'status', 'generation', 'revision'], 'lease 键集')
+  exactKeys(value, ['lease_id', 'status', 'generation', 'revision', 'claim_id'], 'lease 键集')
   return {
     lease_id: requiredId(value.lease_id, 'lease.lease_id'),
     status: requiredId(value.status, 'lease.status'),
     generation: requiredInt(value.generation, 'lease.generation'),
     revision: requiredInt(value.revision, 'lease.revision'),
+    claim_id: value.claim_id === null ? null : requiredId(value.claim_id, 'lease.claim_id'),
   }
 }
 

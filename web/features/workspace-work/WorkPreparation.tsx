@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ApiError } from '../../api/client'
+import { ApiError, ProtocolError } from '../../api/client'
 import {
   attachWorkspacePreparation,
   createWorkspaceMember,
@@ -150,7 +150,10 @@ export function WorkPreparation({
     setActionError(null)
   }
 
-  const run = async (action: () => Promise<WorkspacePreparation | void>) => {
+  const run = async (
+    action: () => Promise<WorkspacePreparation | void>,
+    recoverPreparation = false,
+  ) => {
     if (inFlight.current) return
     inFlight.current = true
     setBusy(true)
@@ -160,6 +163,17 @@ export function WorkPreparation({
       if (next) queryClient.setQueryData(prepKey, { data: next, meta: null })
       await queryClient.invalidateQueries({ queryKey: membersKey })
     } catch (error) {
+      if (recoverPreparation && error instanceof ProtocolError) {
+        try {
+          const recovered = await getWorkspacePreparation(projectId, workspaceId, workItemId)
+          if (recovered.data) {
+            queryClient.setQueryData(prepKey, recovered)
+            return
+          }
+        } catch {
+          // Keep the original protocol error when durable state cannot be verified.
+        }
+      }
       setActionError(error)
     } finally {
       inFlight.current = false
@@ -187,7 +201,7 @@ export function WorkPreparation({
       )
       rotatePrepareKey()
       return result.data
-    })
+    }, true)
   }
 
   const attach = () => {
@@ -198,7 +212,7 @@ export function WorkPreparation({
       )
       rotateAttachKey()
       return result.data
-    })
+    }, true)
   }
 
   const detach = () => {
@@ -209,7 +223,7 @@ export function WorkPreparation({
       )
       rotateDetachKey()
       return result.data
-    })
+    }, true)
   }
 
   const dispatch = async () => {

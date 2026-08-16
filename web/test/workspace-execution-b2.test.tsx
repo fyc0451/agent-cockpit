@@ -65,7 +65,9 @@ function preparation(over: Record<string, unknown> = {}) {
       ref_kind: 'detached',
       revision: 1,
     },
-    lease: { lease_id: 'les_b2', status: 'reserved', generation: 1, revision: 1 },
+    lease: {
+      lease_id: 'les_b2', status: 'reserved', generation: 1, revision: 1, claim_id: null,
+    },
     attachment: null,
     ...over,
   }
@@ -107,6 +109,7 @@ function stubB2(opts: {
   prepError?: { status: number; code: string }
   writeError?: { status: number; code: string }
   dropFirstWrite?: string
+  prepareResponse?: unknown
 } = {}) {
   let items = [workAggregate()]
   let members = [...(opts.members ?? [])]
@@ -164,7 +167,7 @@ function stubB2(opts: {
         if (method === 'POST') {
           if (opts.writeError) return err(opts.writeError.status, opts.writeError.code)
           prep = preparation()
-          return ok(prep, 201)
+          return ok(opts.prepareResponse ?? prep, 201)
         }
         if (opts.hangPrep) return new Promise(() => {})
         if (opts.prepError) return err(opts.prepError.status, opts.prepError.code)
@@ -233,6 +236,17 @@ describe('Checkpoint B2 公共 DTO', () => {
     expect(() =>
       assertWorkspacePreparation({ ...prepared, checkout: { ...(prepared.checkout as object), path: '/tmp' } }),
     ).toThrow()
+    const lease = prepared.lease as Record<string, unknown>
+    const { claim_id: _missingClaimId, ...leaseWithoutClaimId } = lease
+    expect(() => assertWorkspacePreparation({ ...prepared, lease: leaseWithoutClaimId })).toThrow()
+    expect(() => assertWorkspacePreparation({
+      ...prepared,
+      lease: { ...lease, claim_id: 7 },
+    })).toThrow()
+    expect(assertWorkspacePreparation({
+      ...prepared,
+      lease: { ...lease, status: 'active', claim_id: 'clm_b2' },
+    }).lease?.claim_id).toBe('clm_b2')
     const detached = assertWorkspacePreparation(preparation({
       state: 'detached',
       attachment: {
@@ -352,7 +366,28 @@ describe('Checkpoint B2 执行准备卡', () => {
     expect(screen.getByText(/已准备/)).toBeInTheDocument()
     expect(screen.getByText('尚未领取')).toBeInTheDocument()
     expect(first.some((call) => call.url === PREP_URL && call.method === 'GET')).toBe(true)
+    expect(first.filter((call) => call.url === PREP_URL && call.method === 'POST')).toHaveLength(0)
     expect(second.some((call) => call.url.endsWith('/attach'))).toBe(true)
+  })
+
+  it('prepare 的 malformed 2xx fail-closed 后从 durable GET 恢复且不重复 Checkout', async () => {
+    const malformed = preparation()
+    const { claim_id: _missingClaimId, ...leaseWithoutClaimId } = (
+      malformed.lease as Record<string, unknown>
+    )
+    const calls = stubB2({
+      members: [memberAtlas],
+      prepareResponse: { ...malformed, lease: leaseWithoutClaimId },
+    })
+    renderApp(`${HOME_ROUTE}?work=wrk_b2`)
+    fireEvent.click(await screen.findByRole('radio', { name: 'Atlas' }))
+    fireEvent.click(screen.getByRole('button', { name: '准备执行' }))
+
+    expect(await screen.findByText(/已准备/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '连接只读 Agent' })).toBeEnabled()
+    expect(calls.filter((call) => call.url === PREP_URL && call.method === 'POST')).toHaveLength(1)
+    expect(calls.filter((call) => call.url === PREP_URL && call.method === 'GET').length)
+      .toBeGreaterThanOrEqual(2)
   })
 
   it('prepare 首响应丢失后再次点击复用同 endpoint/body/key', async () => {

@@ -62,7 +62,9 @@ function preparation(state: 'prepared' | 'connected_readonly' = 'connected_reado
       ref_kind: 'detached',
       revision: 1,
     },
-    lease: { lease_id: 'les_dispatch', status: 'reserved', generation: 2, revision: 1 },
+    lease: {
+      lease_id: 'les_dispatch', status: 'reserved', generation: 2, revision: 1, claim_id: null,
+    },
     attachment: state === 'connected_readonly'
       ? {
           attachment_id: 'att_dispatch',
