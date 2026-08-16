@@ -27,7 +27,11 @@ function scope(id: string) {
   return { projectId: REG_P1, workspaceId: 'w1', workItemId: id }
 }
 
-function aggregate(id: string, body: string) {
+function aggregate(
+  id: string,
+  body: string,
+  status: 'unassigned' | 'working' | 'completed' | 'failed' = 'unassigned',
+) {
   return {
     thread: {
       thread_id: `thr_${id}`, project_id: REG_P1, workspace_id: 'w1',
@@ -39,7 +43,7 @@ function aggregate(id: string, body: string) {
     },
     work_item: {
       work_item_id: id, source_message_id: `msg_root_${id}`,
-      status: 'unassigned', acceptance: null, constraints: null,
+      status, acceptance: null, constraints: null,
     },
   }
 }
@@ -598,13 +602,15 @@ describe('Focus 页执行时间线行为', () => {
         generation: 1, state: 'closed', revision: 2,
       },
     }).data
-    stubWorld({ wrk_done: done }, [aggregate('wrk_done', '已完成任务')])
+    stubWorld({ wrk_done: done }, [aggregate('wrk_done', '已完成任务', 'completed')])
     const first = renderApp(`${HOME}?work=wrk_done`)
     const timeline = await screen.findByRole('region', { name: '执行时间线' })
     await waitFor(() => {
       expect(within(timeline).getByRole('status')).toHaveTextContent('已完成')
     })
     expect(await within(timeline).findByText('成员回复正文')).toBeVisible()
+    expect(within(timeline).getByText('已领取')).toBeVisible()
+    expect(within(timeline).getByText('已回复')).toBeVisible()
     first.unmount()
 
     const second = renderApp(`${HOME}?work=wrk_done`)

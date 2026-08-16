@@ -12,6 +12,8 @@ export interface CreateWorkspaceWorkRequest {
   constraints: string | null
 }
 
+export type WorkspaceWorkStatus = 'unassigned' | 'working' | 'completed' | 'failed'
+
 export interface WorkspaceWorkAggregate {
   thread: Record<string, unknown> & {
     thread_id: string
@@ -29,7 +31,7 @@ export interface WorkspaceWorkAggregate {
     source_message_id: string
     acceptance: string | null
     constraints: string | null
-    status: 'unassigned'
+    status: WorkspaceWorkStatus
   }
 }
 
@@ -66,6 +68,23 @@ function requiredId(value: unknown, field: string): string {
   return value
 }
 
+const WORK_ITEM_STATUSES: readonly WorkspaceWorkStatus[] = [
+  'unassigned',
+  'working',
+  'completed',
+  'failed',
+]
+
+function workItemStatus(value: unknown): WorkspaceWorkStatus {
+  if (
+    typeof value !== 'string'
+    || !WORK_ITEM_STATUSES.includes(value as WorkspaceWorkStatus)
+  ) {
+    fail('item.work_item.status')
+  }
+  return value as WorkspaceWorkStatus
+}
+
 export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggregate {
   const aggregate = object(raw, 'item')
   exactKeys(aggregate, ['thread', 'root_message', 'work_item'], 'item 键集')
@@ -86,7 +105,7 @@ export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggrega
   const workItemId = requiredId(workItem.work_item_id, 'item.work_item.work_item_id')
   const sourceMessageId = requiredId(workItem.source_message_id, 'item.work_item.source_message_id')
   if (sourceMessageId !== messageId) fail('item.work_item.source_message_id')
-  if (workItem.status !== 'unassigned') fail('item.work_item.status')
+  const status = workItemStatus(workItem.status)
 
   return {
     thread: { ...thread, thread_id: threadId, created_at: createdAt },
@@ -104,7 +123,7 @@ export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggrega
       source_message_id: sourceMessageId,
       acceptance: nullableString(workItem.acceptance, 'item.work_item.acceptance'),
       constraints: nullableString(workItem.constraints, 'item.work_item.constraints'),
-      status: 'unassigned',
+      status,
     },
   }
 }

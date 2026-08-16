@@ -258,6 +258,25 @@ describe('agents API 守卫与请求形状', () => {
     expect(() => assertWorkspaceWorkAggregate(badSource)).toThrow(/source_message_id/)
   })
 
+  it('workspace work 聚合仅接受后端冻结的四种 status', () => {
+    for (const status of ['unassigned', 'working', 'completed', 'failed'] as const) {
+      const value = workAggregate()
+      ;(value.work_item as { status: unknown }).status = status
+      expect(assertWorkspaceWorkAggregate(value).work_item.status).toBe(status)
+    }
+
+    for (const status of ['unknown', '', null, 1, true]) {
+      const value = workAggregate()
+      ;(value.work_item as { status: unknown }).status = status
+      expect(() => assertWorkspaceWorkAggregate(value)).toThrow(/item\.work_item\.status/)
+    }
+
+    const missing = workAggregate()
+    delete (missing.work_item as { status?: unknown }).status
+    expect(() => assertWorkspaceWorkAggregate(missing)).toThrow(/item\.work_item\.status/)
+    expect(() => assertWorkspaceWorkAggregate({ ...workAggregate(), internal: true })).toThrow(/键集/)
+  })
+
   it('workspace work 聚合 fail-closed：2xx 仍拒绝缺失/空 work_item_id 与缺失/空/非法 created_at', () => {
     expect(assertWorkspaceWorkAggregate(workAggregate())).toBeTruthy()
 
