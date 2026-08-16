@@ -21,6 +21,7 @@ CREATE_SCOPE = "workspace-work.create.v1"
 RESERVE_SCOPE = "workspace-work.claim.reserve.v1"
 ACTIVATE_SCOPE = "workspace-work.claim.activate.v1"
 REPLY_SCOPE = "workspace-work.reply.complete.v1"
+DELIVERY_SCOPE = "workspace-work.delivery.v1"
 BODY_MAX = 32768
 NOTE_MAX = 8192
 AUTHOR_KIND = "boss"
@@ -287,6 +288,17 @@ def _generation(value: object) -> int:
 
 def _revision(value: object) -> int:
     if type(value) is not int or value < 1:
+        _fail("invalid_argument")
+    return value
+
+
+def _sha256(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("sha256:")
+        or len(value) != 71
+        or any(char not in "0123456789abcdef" for char in value[7:])
+    ):
         _fail("invalid_argument")
     return value
 
@@ -933,6 +945,79 @@ class WorkspaceWorkStore:
             _remember(
                 connection, project_id=project_id, workspace_id=workspace_id,
                 scope=RESERVE_SCOPE, key=idempotency_key, digest=request_digest,
+                payload=payload,
+            )
+            return payload
+
+        result = _write(self.path, operate)
+        assert isinstance(result, dict)
+        return result
+
+    def record_delivery(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_revision: object, outcome: object, evidence_digest: object,
+        idempotency_key: object,
+    ) -> dict[str, object]:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        expected_revision = _revision(expected_revision)
+        if outcome not in {"intent", "succeeded", "outcome_unknown"}:
+            _fail("invalid_argument")
+        assert isinstance(outcome, str)
+        evidence_digest = _sha256(evidence_digest)
+        idempotency_key = _idempotency_key(idempotency_key)
+        scope = f"{DELIVERY_SCOPE}.{outcome}"
+        request_digest = _digest({
+            "evidence_digest": evidence_digest,
+            "expected_revision": expected_revision,
+            "outcome": outcome,
+            "work_item_id": work_item_id,
+        })
+
+        def operate(connection: sqlite3.Connection) -> dict[str, object]:
+            replay = _idempotency_row(
+                connection, project_id=project_id, workspace_id=workspace_id,
+                scope=scope, key=idempotency_key, digest=request_digest,
+            )
+            if replay is not None:
+                return replay
+            work = _load_work(
+                connection, project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id,
+            )
+            if work is None:
+                _fail("work_item_not_found")
+            if work["status"] != "unassigned":
+                _fail("delivery_conflict")
+            if int(work["work_revision"]) != expected_revision:
+                _fail("stale_revision")
+            revision = expected_revision + 1
+            now = _now()
+            if connection.execute(
+                "UPDATE work_items SET revision=?,updated_at=? "
+                "WHERE work_item_id=? AND revision=? AND status='unassigned'",
+                (revision, now, work_item_id, expected_revision),
+            ).rowcount != 1:
+                _fail("stale_revision")
+            connection.execute(
+                "INSERT INTO message_receipts VALUES (?,?,?,?,NULL,NULL,NULL,NULL,"
+                "'delivery',?,NULL,?,?)",
+                (
+                    _new_id("rct_"), project_id, workspace_id, work_item_id,
+                    outcome, evidence_digest, now,
+                ),
+            )
+            payload = {
+                "work_item_id": work_item_id,
+                "status": "unassigned",
+                "revision": revision,
+                "outcome": outcome,
+                "evidence_digest": evidence_digest,
+            }
+            _remember(
+                connection, project_id=project_id, workspace_id=workspace_id,
+                scope=scope, key=idempotency_key, digest=request_digest,
                 payload=payload,
             )
             return payload

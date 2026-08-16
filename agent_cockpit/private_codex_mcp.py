@@ -1,4 +1,4 @@
-"""Private stdio MCP stub. C2 tools only return claim_not_available."""
+"""Private stdio MCP router with capability-bound workspace tools."""
 from __future__ import annotations
 
 import json
@@ -14,13 +14,37 @@ TOOLS = (
     "claim_current", "apply_patch", "run", "reply_complete", "fail",
 )
 NOT_AVAILABLE = "claim_not_available"
+_PUBLIC_CODES = frozenset({
+    "invalid_argument", "runtime_capability_invalid", "work_item_not_found",
+    "preparation_not_found", "idempotency_conflict", "stale_revision",
+    "stale_generation", "delivery_conflict", "claim_conflict",
+    "claim_not_active", "execution_terminal", "runtime_unavailable",
+    "operation_journal_unavailable", "wakeup_outcome_unknown",
+    "schema_missing", "workspace_work_schema_missing", "migration_required",
+    "future_schema", "schema_fingerprint_mismatch", "store_unsafe",
+    "store_corrupt", "store_read_failed", "store_write_failed",
+    "patch_invalid", "lease_not_active", "fence_rejected",
+    "checkout_untrusted", "reply_conflict", "reconcile_required",
+    "patch_outcome_unknown",
+})
 
 
-def _denied() -> dict[str, Any]:
+def _denied(code: str = NOT_AVAILABLE) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": NOT_AVAILABLE}],
+        "content": [{"type": "text", "text": code}],
         "isError": True,
-        "structuredContent": {"code": NOT_AVAILABLE},
+        "structuredContent": {"code": code},
+    }
+
+
+def _success(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "content": [{
+            "type": "text",
+            "text": json.dumps(value, separators=(",", ":"), ensure_ascii=True),
+        }],
+        "isError": False,
+        "structuredContent": value,
     }
 
 
@@ -49,6 +73,7 @@ def _capability_ok(path: Path | None) -> bool:
 
 def dispatch(
     message: dict[str, Any], *, capability_file: Path | None = None,
+    claim_tools: Any | None = None, write_tools: Any | None = None,
 ) -> dict[str, Any] | None:
     method = message.get("method")
     ident = message.get("id")
@@ -64,6 +89,13 @@ def dispatch(
             },
         }
     if method == "tools/list":
+        if claim_tools is None and write_tools is None:
+            names = TOOLS
+        else:
+            names = (
+                *(("claim_current",) if claim_tools is not None else ()),
+                *(("apply_patch", "reply_complete") if write_tools is not None else ()),
+            )
         return {
             "jsonrpc": "2.0", "id": ident,
             "result": {
@@ -71,14 +103,61 @@ def dispatch(
                     {"name": name, "description": NOT_AVAILABLE, "inputSchema": {
                         "type": "object", "properties": {},
                     }}
-                    for name in TOOLS
+                    for name in names
                 ],
             },
         }
     if method == "tools/call":
-        if not _capability_ok(capability_file):
+        if claim_tools is None and write_tools is None:
+            if not _capability_ok(capability_file):
+                return {"jsonrpc": "2.0", "id": ident, "result": _denied()}
             return {"jsonrpc": "2.0", "id": ident, "result": _denied()}
-        return {"jsonrpc": "2.0", "id": ident, "result": _denied()}
+        if not _capability_ok(capability_file):
+            return {
+                "jsonrpc": "2.0", "id": ident,
+                "result": _denied("runtime_capability_invalid"),
+            }
+        params = message.get("params")
+        if not isinstance(params, dict) or set(params) != {"name", "arguments"}:
+            return {
+                "jsonrpc": "2.0", "id": ident,
+                "result": _denied("invalid_argument"),
+            }
+        name = params.get("name")
+        arguments = params.get("arguments")
+        if name == "claim_current":
+            valid_call = claim_tools is not None and arguments == {}
+        elif name in {"apply_patch", "reply_complete"}:
+            valid_call = write_tools is not None and isinstance(arguments, dict)
+        else:
+            valid_call = False
+        if not valid_call:
+            return {
+                "jsonrpc": "2.0", "id": ident,
+                "result": _denied("invalid_argument"),
+            }
+        path = capability_file
+        if path is None:
+            raw = os.environ.get("COCKPIT_CAPABILITY_FILE")
+            path = None if not raw else Path(raw)
+        if path is None:
+            return {
+                "jsonrpc": "2.0", "id": ident,
+                "result": _denied("runtime_capability_invalid"),
+            }
+        try:
+            if name == "claim_current":
+                value = claim_tools.claim_current(path)
+            elif name == "apply_patch":
+                value = write_tools.apply_patch(path, arguments)
+            else:
+                value = write_tools.reply_complete(path, arguments)
+            return {"jsonrpc": "2.0", "id": ident, "result": _success(value)}
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code not in _PUBLIC_CODES:
+                code = "internal_error"
+            return {"jsonrpc": "2.0", "id": ident, "result": _denied(code)}
     return {
         "jsonrpc": "2.0", "id": ident,
         "error": {"code": -32601, "message": NOT_AVAILABLE},
