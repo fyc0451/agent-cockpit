@@ -88,7 +88,7 @@ def _inventory_entry(name: str) -> dict:
     }
 
 
-def _inventory(*, schema_version: int = 4) -> dict:
+def _inventory(*, schema_version: int = 5) -> dict:
     names = release_readiness._INVENTORY_CATALOGS[schema_version]
     entries = [
         _inventory_entry(name)
@@ -271,16 +271,20 @@ def test_project_registry_is_a_readiness_sqlite_store() -> None:
     assert "project_registry" in release_readiness._EXPECTED_INVENTORY_NAMES
     assert "workspace_work" in release_readiness._SQLITE_STORES
     assert "workspace_work" in release_readiness._EXPECTED_INVENTORY_NAMES
+    assert "workspace_execution" in release_readiness._SQLITE_STORES
+    assert "workspace_execution" in release_readiness._EXPECTED_INVENTORY_NAMES
     assert (
         release_readiness._EXPECTED_INVENTORY_NAMES
-        == release_readiness._V4_INVENTORY_NAMES
+        == release_readiness._V5_INVENTORY_NAMES
     )
     assert "workspace_work" not in release_readiness._V3_INVENTORY_NAMES
+    assert "workspace_execution" not in release_readiness._V4_INVENTORY_NAMES
     assert len(release_readiness._V1_INVENTORY_NAMES) == 15
     assert len(release_readiness._V2_INVENTORY_NAMES) == 16
     assert len(release_readiness._V3_INVENTORY_NAMES) == 21
     assert len(release_readiness._V4_INVENTORY_NAMES) == 22
-    assert len(release_readiness._SQLITE_STORES) == 12
+    assert len(release_readiness._V5_INVENTORY_NAMES) == 23
+    assert len(release_readiness._SQLITE_STORES) == 13
 
 
 def test_legacy_v1_inventory_accepts_exact_fifteen_entry_catalog(tmp_path):
@@ -324,6 +328,11 @@ def test_legacy_v2_inventory_accepts_exact_sixteen_entry_catalog(tmp_path):
     )
     assert work["state"] == "absent"
     assert work["reason"] == store_schema.REASON_MISSING_CREATABLE
+    execution = next(
+        row for row in evidence["stores"] if row["name"] == "workspace_execution"
+    )
+    assert execution["state"] == "absent"
+    assert execution["reason"] == store_schema.REASON_MISSING_CREATABLE
 
 
 @pytest.mark.parametrize("damage", ["missing", "extra", "duplicate"])
@@ -366,6 +375,25 @@ def test_legacy_v3_inventory_accepts_exact_twenty_one_entry_catalog(tmp_path):
     )
     assert work["state"] == "absent"
     assert work["reason"] == store_schema.REASON_MISSING_CREATABLE
+
+
+def test_legacy_v4_inventory_accepts_exact_twenty_two_entry_catalog(tmp_path):
+    snapshot = _make_snapshot(tmp_path)
+    inventory = _inventory(schema_version=4)
+    assert inventory["entry_count"] == 22
+    assert "workspace_execution" not in {
+        entry["name"] for entry in inventory["entries"]
+    }
+    path, digest = _write_inventory(snapshot, inventory)
+    evidence = _build_with_inventory(tmp_path, snapshot, path, digest)
+    assert [item["name"] for item in evidence["stores"]] == list(
+        store_schema._APP_OWNED_STORES,
+    )
+    execution = next(
+        item for item in evidence["stores"] if item["name"] == "workspace_execution"
+    )
+    assert execution["state"] == "absent"
+    assert execution["reason"] == store_schema.REASON_MISSING_CREATABLE
 
 
 def test_inventory_rejects_unknown_fields_and_bool_counts(tmp_path):

@@ -295,6 +295,111 @@ _WORKSPACE_WORK_FKS: dict[str, frozenset[_ForeignKeyFingerprint]] = {
     }),
     "idempotency_records": frozenset(),
 }
+_WORKSPACE_EXECUTION_TABLES: dict[str, tuple[tuple[str, str, int, int], ...]] = {
+    "schema_migrations": (
+        ("migration_id", "TEXT", 1, 1),
+        ("schema_version", "INTEGER", 1, 0),
+        ("schema_digest", "TEXT", 1, 0),
+        ("applied_at", "TEXT", 1, 0),
+    ),
+    "agent_identities": (
+        ("identity_id", "TEXT", 1, 1),
+        ("project_id", "TEXT", 1, 0),
+        ("workspace_id", "TEXT", 1, 0),
+        ("display_name", "TEXT", 1, 0),
+        ("role", "TEXT", 1, 0),
+        ("lifecycle", "TEXT", 1, 0),
+        ("revision", "INTEGER", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+        ("updated_at", "TEXT", 1, 0),
+    ),
+    "work_item_preparations": (
+        ("preparation_id", "TEXT", 1, 1),
+        ("project_id", "TEXT", 1, 0),
+        ("workspace_id", "TEXT", 1, 0),
+        ("work_item_id", "TEXT", 1, 0),
+        ("identity_id", "TEXT", 1, 0),
+        ("generation", "INTEGER", 1, 0),
+        ("checkout_id", "TEXT", 0, 0),
+        ("lease_id", "TEXT", 0, 0),
+        ("attachment_id", "TEXT", 0, 0),
+        ("state", "TEXT", 1, 0),
+        ("revision", "INTEGER", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+        ("updated_at", "TEXT", 1, 0),
+    ),
+    "managed_checkouts": (
+        ("checkout_id", "TEXT", 1, 1),
+        ("preparation_id", "TEXT", 1, 0),
+        ("source_head", "TEXT", 1, 0),
+        ("source_tree", "TEXT", 1, 0),
+        ("internal_path", "TEXT", 1, 0),
+        ("ref_name", "TEXT", 0, 0),
+        ("preflight", "TEXT", 1, 0),
+        ("status", "TEXT", 1, 0),
+        ("revision", "INTEGER", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+    ),
+    "writer_leases": (
+        ("lease_id", "TEXT", 1, 1),
+        ("checkout_id", "TEXT", 1, 0),
+        ("identity_id", "TEXT", 1, 0),
+        ("generation", "INTEGER", 1, 0),
+        ("status", "TEXT", 1, 0),
+        ("fence_digest", "TEXT", 1, 0),
+        ("revision", "INTEGER", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+    ),
+    "runtime_attachments": (
+        ("attachment_id", "TEXT", 1, 1),
+        ("identity_id", "TEXT", 1, 0),
+        ("generation", "INTEGER", 1, 0),
+        ("checkout_id", "TEXT", 1, 0),
+        ("provider", "TEXT", 1, 0),
+        ("harness", "TEXT", 1, 0),
+        ("pane_id", "TEXT", 0, 0),
+        ("instance_id", "TEXT", 0, 0),
+        ("session_name", "TEXT", 0, 0),
+        ("native_receipt", "TEXT", 0, 0),
+        ("status", "TEXT", 1, 0),
+        ("revision", "INTEGER", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+        ("updated_at", "TEXT", 1, 0),
+    ),
+    "idempotency_records": (
+        ("project_id", "TEXT", 1, 1),
+        ("workspace_id", "TEXT", 1, 2),
+        ("scope", "TEXT", 1, 3),
+        ("idempotency_key", "TEXT", 1, 4),
+        ("request_digest", "TEXT", 1, 0),
+        ("response_json", "TEXT", 1, 0),
+    ),
+}
+_WORKSPACE_EXECUTION_DEFAULTS: dict[str, dict[str, str]] = {
+    name: {} for name in _WORKSPACE_EXECUTION_TABLES
+}
+_WORKSPACE_EXECUTION_INDEXES: dict[str, frozenset[_IndexFingerprint]] = {
+    name: frozenset() for name in _WORKSPACE_EXECUTION_TABLES
+}
+_WORKSPACE_EXECUTION_FKS: dict[str, frozenset[_ForeignKeyFingerprint]] = {
+    "schema_migrations": frozenset(),
+    "agent_identities": frozenset(),
+    "work_item_preparations": frozenset({
+        (("identity_id", "agent_identities", "identity_id"),),
+    }),
+    "managed_checkouts": frozenset({
+        (("preparation_id", "work_item_preparations", "preparation_id"),),
+    }),
+    "writer_leases": frozenset({
+        (("identity_id", "agent_identities", "identity_id"),),
+        (("checkout_id", "managed_checkouts", "checkout_id"),),
+    }),
+    "runtime_attachments": frozenset({
+        (("identity_id", "agent_identities", "identity_id"),),
+        (("checkout_id", "managed_checkouts", "checkout_id"),),
+    }),
+    "idempotency_records": frozenset(),
+}
 
 # Known previous user_version values (recognized but not ready).
 _PREVIOUS_USER_VERSIONS: frozenset[int] = frozenset()
@@ -313,7 +418,7 @@ _JSON_VERSIONED: dict[str, int] = {
 # upgrade/ is V1 diagnostic — excluded from ready inventory.
 _APP_OWNED_STORES = (
     "tasks", "push", "coordination", "delivery_outbox", "leader_binding",
-    "project_registry", "workspace_work",
+    "project_registry", "workspace_work", "workspace_execution",
     "runtime_provider", "event_journal", "operation_journal",
     "project_memory", "terminal_ticket",
     "settings", "mail_projects", "team_sessions", "inbox_route", "typing",
@@ -1482,6 +1587,34 @@ def probe_manifest(
     }
 
 
+def _workspace_execution_sqlite_spec() -> tuple[
+    str,
+    dict[str, tuple[tuple[str, str, int, int], ...]],
+    dict[str, dict[str, str]],
+    dict[str, frozenset[_IndexFingerprint]],
+    dict[str, frozenset[_ForeignKeyFingerprint]],
+    int,
+    tuple[str, ...] | None,
+    tuple[str, int, str] | None,
+]:
+    from . import workspace_execution_store as exec_store
+
+    return (
+        "workspace_execution",
+        _WORKSPACE_EXECUTION_TABLES,
+        _WORKSPACE_EXECUTION_DEFAULTS,
+        _WORKSPACE_EXECUTION_INDEXES,
+        _WORKSPACE_EXECUTION_FKS,
+        exec_store.SCHEMA_VERSION,
+        exec_store._SCHEMA,
+        (
+            exec_store.MIGRATION_ID,
+            exec_store.SCHEMA_VERSION,
+            exec_store.SCHEMA_DIGEST,
+        ),
+    )
+
+
 def _workspace_work_sqlite_spec() -> tuple[
     str,
     dict[str, tuple[tuple[str, str, int, int], ...]],
@@ -1566,6 +1699,7 @@ def _sqlite_probe_specs(
             project_registry_contracts.PROJECT_REGISTRY_MIGRATION_RECEIPT,
         ),
         _workspace_work_sqlite_spec(),
+        _workspace_execution_sqlite_spec(),
     ]
     if include_leader_binding:
         specs.append((

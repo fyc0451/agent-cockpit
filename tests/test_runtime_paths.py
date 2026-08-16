@@ -315,6 +315,7 @@ class TestDefaultCompat:
             "tasks": "dashboard-data/tasks.sqlite3",
             "project_registry": "dashboard-data/project-registry.sqlite3",
             "workspace_work": "dashboard-data/workspace-work.sqlite3",
+            "workspace_execution": "dashboard-data/workspace-execution.sqlite3",
             "runtime_provider": "dashboard-data/runtime-provider.sqlite3",
             "event_journal": "dashboard-data/event-journal.sqlite3",
             "operation_journal": "dashboard-data/operation-journal.sqlite3",
@@ -335,9 +336,12 @@ class TestDefaultCompat:
         }
         for name, rel in expect.items():
             assert runtime_paths.store(name) == fake_home / rel, name
-        assert len(runtime_paths.STORES) == 21
+        assert len(runtime_paths.STORES) == 22
         assert runtime_paths.STORES["workspace_work"] == (
             "data", "workspace-work.sqlite3", "file", "server", 0o600,
+        )
+        assert runtime_paths.STORES["workspace_execution"] == (
+            "data", "workspace-execution.sqlite3", "file", "server", 0o600,
         )
         for name in (
             "runtime_provider", "event_journal", "operation_journal",
@@ -345,6 +349,10 @@ class TestDefaultCompat:
         ):
             assert runtime_paths.STORES[name][2:] == ("file", "server", 0o600)
         assert "workspace_work" not in {
+            "runtime_provider", "event_journal", "operation_journal",
+            "project_memory", "terminal_ticket",
+        }
+        assert "workspace_execution" not in {
             "runtime_provider", "event_journal", "operation_journal",
             "project_memory", "terminal_ticket",
         }

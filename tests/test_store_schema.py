@@ -37,6 +37,7 @@ def test_missing_stores_are_creatable_no_writes(isolated_roots, tmp_path):
     assert results["tasks"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["project_registry"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["workspace_work"]["reason"] == store_schema.REASON_MISSING_CREATABLE
+    assert results["workspace_execution"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["coordination"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     assert results["delivery_outbox"]["reason"] == store_schema.REASON_MISSING_CREATABLE
     for name in store_schema._ACCEPTED_SQLITE_STORES:
@@ -79,9 +80,11 @@ def test_accepted_sqlite_stores_use_lazy_read_only_openers(
         ) == before
         assert not Path(f"{runtime_paths.store(name)}-wal").exists()
         assert not Path(f"{runtime_paths.store(name)}-shm").exists()
-    assert len(store_schema._APP_OWNED_STORES) == 19
+    assert len(store_schema._APP_OWNED_STORES) == 20
     assert "workspace_work" in store_schema._APP_OWNED_STORES
     assert "workspace_work" not in store_schema._ACCEPTED_SQLITE_STORES
+    assert "workspace_execution" in store_schema._APP_OWNED_STORES
+    assert "workspace_execution" not in store_schema._ACCEPTED_SQLITE_STORES
 
 
 def test_accepted_sqlite_sidecar_blocks_before_lazy_import(
@@ -288,6 +291,68 @@ def test_workspace_work_future_and_corrupt_are_pure_read_fail_closed(isolated_ro
     os.chmod(path, 0o600)
     damaged = path.read_bytes()
     corrupt = _workspace_work_check()
+    assert corrupt["reason"] in {
+        store_schema.REASON_CORRUPT, store_schema.REASON_UNREADABLE,
+    }
+    assert path.read_bytes() == damaged
+
+
+def _workspace_execution_check(**kwargs):
+    from agent_cockpit import workspace_execution_store
+
+    return store_schema._check_sqlite(
+        "workspace_execution",
+        store_schema._WORKSPACE_EXECUTION_TABLES,
+        expected_defaults=store_schema._WORKSPACE_EXECUTION_DEFAULTS,
+        expected_indexes=store_schema._WORKSPACE_EXECUTION_INDEXES,
+        expected_fks=store_schema._WORKSPACE_EXECUTION_FKS,
+        expected_user_version=workspace_execution_store.SCHEMA_VERSION,
+        expected_schema_statements=workspace_execution_store._SCHEMA,
+        expected_migration=(
+            workspace_execution_store.MIGRATION_ID,
+            workspace_execution_store.SCHEMA_VERSION,
+            workspace_execution_store.SCHEMA_DIGEST,
+        ),
+        **kwargs,
+    )
+
+
+def test_workspace_execution_current_store_fingerprint_compatible(isolated_roots):
+    from agent_cockpit import workspace_execution_store
+
+    path = runtime_paths.store("workspace_execution")
+    workspace_execution_store.initialize(path).close()
+    assert _workspace_execution_check()["reason"] == store_schema.REASON_COMPATIBLE
+    assert {
+        row["name"]: row for row in store_schema.probe_all_stores()
+    }["workspace_execution"]["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_workspace_execution_future_and_corrupt_are_pure_read_fail_closed(
+    isolated_roots,
+):
+    path = runtime_paths.store("workspace_execution")
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE future_only (value TEXT)")
+    connection.execute("PRAGMA user_version=999")
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+    before = path.read_bytes()
+
+    future = {
+        row["name"]: row for row in store_schema.probe_all_stores()
+    }["workspace_execution"]
+    assert future["state"] == "future"
+    assert future["reason"] == store_schema.REASON_FUTURE_SCHEMA
+    assert path.read_bytes() == before
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
+
+    path.write_text("not-a-database", encoding="utf-8")
+    os.chmod(path, 0o600)
+    damaged = path.read_bytes()
+    corrupt = _workspace_execution_check()
     assert corrupt["reason"] in {
         store_schema.REASON_CORRUPT, store_schema.REASON_UNREADABLE,
     }

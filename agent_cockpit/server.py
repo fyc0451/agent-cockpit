@@ -86,6 +86,11 @@ workspace_agent_api = None
 workspace_agent_controller = None
 workspace_work_api = None
 workspace_work_store = None
+workspace_execution_api = None
+workspace_execution_service = None
+workspace_execution_store = None
+git_checkout_provider = None
+local_codex_harness = None
 if next_profile.enabled():
     try:
         _next_instance_lock_owner = instance_lock.require_registered_owner()
@@ -98,6 +103,9 @@ if next_profile.enabled():
     from . import terminal_ticket_api, terminal_ticket_store, workspace_terminal
     from . import workspace_agent, workspace_agent_api
     from . import workspace_work_api, workspace_work_store
+    from . import workspace_execution_api, workspace_execution_service
+    from . import workspace_execution_store
+    from . import git_checkout_provider, local_codex_harness
 
 
 H0_STATE_MODE_ENV = "COCKPIT_HERDR_STATE_MODE"
@@ -413,6 +421,84 @@ def _workspace_work_provider():
     raise module.WorkspaceWorkError("workspace_work_schema_missing")
 
 
+_workspace_execution_store = None
+_workspace_execution_service = None
+_WORKSPACE_EXECUTION_PATH_RE = re.compile(
+    r"^/api/projects/[^/]+/workspaces/[^/]+"
+    r"(?:/members|/work-items/[^/]+/preparation(?:/(?:attach|detach))?)$"
+)
+_AGENT_PROMPT_PATH_RE = re.compile(
+    r"^/api/projects/[^/]+/workspaces/[^/]+/agents/[^/]+/prompts$",
+)
+
+
+def _close_workspace_execution_store() -> None:
+    global _workspace_execution_store, _workspace_execution_service
+    store = _workspace_execution_store
+    _workspace_execution_store = None
+    _workspace_execution_service = None
+    if store is None:
+        return
+    try:
+        store.close()
+    except Exception:
+        logger.error("workspace execution store close failed")
+
+
+def _initialize_workspace_execution_store() -> None:
+    global _workspace_execution_store, workspace_execution_store
+    _close_workspace_execution_store()
+    store_module = workspace_execution_store
+    if store_module is None:
+        from . import workspace_execution_store as store_module
+        workspace_execution_store = store_module
+    _workspace_execution_store = store_module.initialize(
+        runtime_paths.validate_store("workspace_execution"),
+    )
+
+
+def _require_workspace_execution_service():
+    global _workspace_execution_service
+    global workspace_execution_service, git_checkout_provider, local_codex_harness
+    service = _workspace_execution_service
+    if service is not None:
+        return service
+    store = _workspace_execution_store
+    if store is None:
+        module = workspace_execution_store
+        if module is None:
+            from . import workspace_execution_store as module
+        raise module.WorkspaceExecutionError("workspace_execution_schema_missing")
+    service_module = workspace_execution_service
+    if service_module is None:
+        from . import workspace_execution_service as service_module
+        workspace_execution_service = service_module
+    checkout_module = git_checkout_provider
+    if checkout_module is None:
+        from . import git_checkout_provider as checkout_module
+        git_checkout_provider = checkout_module
+    harness_module = local_codex_harness
+    if harness_module is None:
+        from . import local_codex_harness as harness_module
+        local_codex_harness = harness_module
+    service = service_module.ExecutionService(
+        registry_provider=_project_registry,
+        work_provider=_workspace_work_provider,
+        store=store,
+        operations=_operation_journal_provider(),
+        checkout=checkout_module.GitCheckoutProvider(),
+        harness=harness_module.LocalCodexHarness(),
+        worktrees_root=runtime_paths.validate_store("worktrees"),
+    )
+    _workspace_execution_service = service
+    return service
+
+
+class _DeferredExecutionService:
+    def __getattr__(self, name: str):
+        return getattr(_require_workspace_execution_service(), name)
+
+
 def _local_terminal_capability(workspace, location):
     controller = workspace_terminal_controller
     if controller is None:
@@ -433,6 +519,7 @@ async def lifespan(_: FastAPI):
         if foundation_enabled:
             _initialize_foundation_stores()
             _initialize_workspace_work_store()
+            _initialize_workspace_execution_store()
             terminal_module = workspace_terminal
             if terminal_module is None:
                 from . import workspace_terminal as terminal_module
@@ -541,6 +628,7 @@ async def lifespan(_: FastAPI):
                 logger.exception("workspace terminal controller failed during shutdown")
             finally:
                 workspace_terminal_controller = None
+        _close_workspace_execution_store()
         _close_workspace_work_store()
         if foundation_enabled:
             _close_foundation_stores()
@@ -656,13 +744,18 @@ if next_profile.enabled():
             store_provider=_workspace_work_provider,
         ),
     )
+    assert workspace_execution_api is not None
+    workspace_execution_api.install(app, _DeferredExecutionService())
 
 
 def _scoped_g3_path(path: str) -> bool:
     return project_registry_api.is_scoped_registry_path(path) or (
         workspace_agent_api is not None
         and workspace_agent_api.is_scoped_agent_path(path)
-    ) or _WORKSPACE_WORK_PATH_RE.fullmatch(path) is not None
+    ) or _WORKSPACE_WORK_PATH_RE.fullmatch(path) is not None or (
+        _WORKSPACE_EXECUTION_PATH_RE.fullmatch(path) is not None
+        or _AGENT_PROMPT_PATH_RE.fullmatch(path) is not None
+    )
 
 
 def _scoped_registry_request(request: Request) -> bool:
@@ -1534,6 +1627,13 @@ async def protect_api(request: Request, call_next):
             return project_registry_api.bridge_http_exception(request, 403, LOCAL_ONLY_AUTH_DETAIL)
         return JSONResponse({"detail": LOCAL_ONLY_AUTH_DETAIL}, status_code=403)
     path = str(request.scope.get("path") or "")
+    if next_profile.enabled() and _AGENT_PROMPT_PATH_RE.fullmatch(path):
+        return project_registry_api.g3_error(
+            request,
+            status=404,
+            code="capability_unavailable",
+            message="capability unavailable",
+        )
     protected = path.startswith("/api/") or path in {
         "/docs", "/redoc", "/openapi.json", "/health.poll",
     }
