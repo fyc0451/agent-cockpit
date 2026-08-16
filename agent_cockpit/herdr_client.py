@@ -1069,7 +1069,7 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
 
 AGENT_PROMPT_EXECUTE_TIMEOUT_MS = 15000
 AGENT_PROMPT_READY_TIMEOUT_S = 30.0
-_EXECUTING_STATES = ("working", "blocked")
+_WAIT_CLASSIFY_STATES = ("working", "blocked")
 
 
 def _decode_cli_json(text: str) -> dict[str, Any]:
@@ -1161,11 +1161,20 @@ def _wait_prompt_ready(session: str, target: str) -> dict[str, Any]:
 def _execution_proven(before: dict[str, Any], after: dict[str, Any]) -> bool:
     before_seq = before.get("state_change_seq")
     after_seq = after.get("state_change_seq")
-    if after.get("agent_status") not in _EXECUTING_STATES:
+    if after.get("agent_status") != "working":
         return False
     if type(before_seq) is int and type(after_seq) is int:
         return after_seq > before_seq
     return False
+
+
+def _typed_status_failure(after: dict[str, Any]) -> str | None:
+    status = after.get("agent_status")
+    if after.get("visible_blocker") or status == "blocked":
+        return "blocked"
+    if status in {"idle", "unknown"}:
+        return str(status)
+    return None
 
 
 def submit_agent_prompt_until_working(
@@ -1175,8 +1184,9 @@ def submit_agent_prompt_until_working(
 
     Detection can mark Codex idle while it is still booting. Wait for
     structured `visible_idle` without a blocker, focus the pane target, then
-    `agent prompt --wait --until working|blocked`. Success requires
-    agent_status in working/blocked and an increased state_change_seq.
+    `agent prompt --wait --until working|blocked`. Success requires status
+    exactly working and an increased state_change_seq. blocked/idle/unknown
+    are typed failures. Focus is a hard gate: failure stops before prompt.
     """
     if not is_available():
         return {"available": False}
@@ -1196,8 +1206,11 @@ def submit_agent_prompt_until_working(
     before_seq = ready.get("state_change_seq")
     try:
         _run(["--session", session, "agent", "focus", target], timeout=8)
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:
+        return {
+            "available": True, "submitted": False, "executing": False,
+            "error": str(exc) or "agent_focus_failed", "target": target,
+        }
     prompt_argv = [
         "--session", session, "agent", "prompt", target, text,
         "--wait",
@@ -1217,6 +1230,14 @@ def submit_agent_prompt_until_working(
             "state_change_seq": after.get("state_change_seq"),
             "target": target,
         }
+    blocked = _typed_status_failure(after)
+    if blocked is not None and blocked != "idle":
+        return {
+            "available": True, "submitted": False, "executing": False,
+            "error": blocked, "target": target,
+            "status": after.get("agent_status"),
+            "state_change_seq": after.get("state_change_seq") or before_seq,
+        }
     try:
         _run(
             ["--session", session, "agent", "send-keys", target, "enter"],
@@ -1228,7 +1249,7 @@ def submit_agent_prompt_until_working(
             "error": str(exc) or first_error, "target": target,
         }
     waited = agent_wait(
-        session, target, until=list(_EXECUTING_STATES),
+        session, target, until=list(_WAIT_CLASSIFY_STATES),
         timeout_ms=AGENT_PROMPT_EXECUTE_TIMEOUT_MS,
     )
     after = inspect_agent(session, target)
@@ -1241,8 +1262,14 @@ def submit_agent_prompt_until_working(
         }
     return {
         "available": True, "submitted": False, "executing": False,
-        "error": after.get("error") or waited.get("error") or first_error,
+        "error": (
+            _typed_status_failure(after)
+            or after.get("error")
+            or waited.get("error")
+            or first_error
+        ),
         "target": target,
+        "status": after.get("agent_status"),
         "state_change_seq": after.get("state_change_seq") or before_seq,
     }
 

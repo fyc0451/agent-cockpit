@@ -605,6 +605,87 @@ def test_submit_agent_prompt_waits_for_working_and_is_the_receipt(
     assert not any("send-text" in c.args[0] or "read" in c.args[0] for c in calls)
 
 
+def test_execution_proven_rejects_blocked_even_when_seq_advances() -> None:
+    assert herdr_client._execution_proven(
+        {"state_change_seq": 1},
+        {"agent_status": "blocked", "state_change_seq": 2},
+    ) is False
+    assert herdr_client._execution_proven(
+        {"state_change_seq": 1},
+        {"agent_status": "idle", "state_change_seq": 2},
+    ) is False
+    assert herdr_client._execution_proven(
+        {"state_change_seq": 1},
+        {"agent_status": "unknown", "state_change_seq": 2},
+    ) is False
+    assert herdr_client._execution_proven(
+        {"state_change_seq": 1},
+        {"agent_status": "working", "state_change_seq": 2},
+    ) is True
+
+
+def test_submit_agent_prompt_blocked_after_seq_is_typed_failure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+    prompted = {"n": 0}
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if args[2:4] == ["agent", "explain"]:
+            return _idle_explain()
+        if args[2:4] == ["agent", "get"]:
+            if prompted["n"]:
+                return json.dumps({
+                    "id": "cli:agent:get",
+                    "result": {
+                        "agent": "codex", "agent_status": "blocked",
+                        "state_change_seq": 2, "pane_id": "w1:p2",
+                    },
+                })
+            return _idle_get()
+        if args[2:4] == ["agent", "prompt"]:
+            prompted["n"] += 1
+            return ""
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    result = herdr_client.submit_agent_prompt_until_working(
+        "demo", "w1:p2", "COCKPIT_WAKEUP_V1\nStart",
+    )
+    assert result["executing"] is False
+    assert result["submitted"] is False
+    assert result["error"] == "blocked"
+    assert result.get("status") == "blocked"
+    assert not any(c.args[0][2:4] == ["agent", "send-keys"] for c in calls)
+
+
+def test_submit_agent_prompt_focus_failure_does_not_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if args[2:4] == ["agent", "explain"]:
+            return _idle_explain()
+        if args[2:4] == ["agent", "get"]:
+            return _idle_get()
+        if args[2:4] == ["agent", "focus"]:
+            raise RuntimeError("agent focus 失败: pane_not_found")
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    result = herdr_client.submit_agent_prompt_until_working(
+        "demo", "w1:p2", "COCKPIT_WAKEUP_V1\nStart",
+    )
+    assert result["executing"] is False
+    assert result["submitted"] is False
+    assert "focus" in result["error"]
+    assert not any(c.args[0][2:4] == ["agent", "prompt"] for c in calls)
+    assert not any(c.args[0][2:4] == ["agent", "send-keys"] for c in calls)
+
+
 def test_submit_agent_prompt_auth_wall_is_typed_failure(monkeypatch) -> None:
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
@@ -3772,11 +3853,11 @@ def test_real_wakeup_prompt_receipt_requires_working(
         assert receipt.get("available") is True, receipt
         assert receipt.get("submitted") is True, receipt
         assert receipt.get("executing") is True, receipt
-        assert receipt.get("status") in {"working", "blocked"}
+        assert receipt.get("status") == "working"
         assert type(receipt.get("state_change_seq")) is int
         if type(before.get("state_change_seq")) is int:
             assert receipt["state_change_seq"] > before["state_change_seq"]
-        assert after.get("agent_status") in {"working", "blocked"}
+        assert after.get("agent_status") == "working"
         assert "BOSS" not in json.dumps(receipt)
         assert "root_message" not in json.dumps(receipt)
         assert "token" not in json.dumps(receipt)
