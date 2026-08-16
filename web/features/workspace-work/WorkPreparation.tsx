@@ -18,6 +18,10 @@ import {
 } from '../../api/workspaceDispatch'
 import { Button } from '../../components/Button'
 import { StatusState } from '../../components/StatusState'
+import {
+  workspaceWorkStatusLabel,
+  type WorkspaceWorkStatus,
+} from '../../api/workspaceWork'
 
 function messageForError(error: unknown): string {
   if (!(error instanceof ApiError)) return '暂时无法完成执行准备。请重试。'
@@ -85,23 +89,28 @@ export function WorkPreparation({
   projectId,
   workspaceId,
   workItemId,
+  workStatus,
 }: {
   projectId: string
   workspaceId: string
   workItemId: string
+  workStatus: WorkspaceWorkStatus
 }) {
   const queryClient = useQueryClient()
+  const writable = workStatus === 'unassigned'
   const membersKey = ['workspace-execution-members', projectId, workspaceId] as const
   const prepKey = ['workspace-execution-prep', projectId, workspaceId, workItemId] as const
   const membersQuery = useQuery({
     queryKey: membersKey,
     queryFn: () => listWorkspaceMembers(projectId, workspaceId),
     retry: (count, error) => error instanceof ApiError && error.retryable && count < 2,
+    enabled: writable,
   })
   const prepQuery = useQuery({
     queryKey: prepKey,
     queryFn: () => getWorkspacePreparation(projectId, workspaceId, workItemId),
     retry: (count, error) => error instanceof ApiError && error.retryable && count < 2,
+    enabled: writable,
   })
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -146,6 +155,17 @@ export function WorkPreparation({
     setDispatchSubmitted(false)
   }, [dispatchBinding])
 
+  if (!writable) {
+    return (
+      <section className="work-prep" aria-label="执行准备">
+        <h3 className="work-prep-title">执行准备</h3>
+        <p className="work-prep-status">
+          <span>{workspaceWorkStatusLabel(workStatus)}</span>
+        </p>
+      </section>
+    )
+  }
+
   const changeName = (value: string) => {
     setDisplayName(value)
     setNameKey(newIdempotencyKey())
@@ -156,7 +176,7 @@ export function WorkPreparation({
     action: () => Promise<WorkspacePreparation | void>,
     recoverPreparation = false,
   ) => {
-    if (inFlight.current) return
+    if (!writable || inFlight.current) return
     inFlight.current = true
     setBusy(true)
     setActionError(null)
@@ -230,7 +250,7 @@ export function WorkPreparation({
   }
 
   const dispatch = async () => {
-    if (!prep || prep.state !== 'connected_readonly' || dispatchInFlight.current) return
+    if (!writable || !prep || prep.state !== 'connected_readonly' || dispatchInFlight.current) return
     if (dispatchIntent.current.binding !== dispatchBinding) {
       dispatchIntent.current = {
         binding: dispatchBinding,
@@ -315,7 +335,7 @@ export function WorkPreparation({
     <section className="work-prep" aria-label="执行准备">
       <h3 className="work-prep-title">执行准备</h3>
       <p className="work-prep-status">
-        <span>未分配</span>
+        <span>{workspaceWorkStatusLabel(workStatus)}</span>
         <span>尚未领取</span>
       </p>
       {!prep ? (

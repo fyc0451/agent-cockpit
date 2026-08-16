@@ -6,7 +6,12 @@ import {
   sendAgentPrompt,
   type AgentView,
 } from '../api/agents'
-import { assertWorkspaceWorkAggregate } from '../api/workspaceWork'
+import {
+  assertCreatedWorkspaceWorkAggregate,
+  assertWorkspaceWorkAggregate,
+  createWorkspaceWork,
+} from '../api/workspaceWork'
+import { ProtocolError } from '../api/client'
 import { agentMailStatus, defaultFetchMap, metaOk, REG_P1 } from '../fixtures/api'
 import { renderApp } from './helpers'
 
@@ -265,7 +270,9 @@ describe('agents API 守卫与请求形状', () => {
       expect(assertWorkspaceWorkAggregate(value).work_item.status).toBe(status)
     }
 
-    for (const status of ['unknown', '', null, 1, true]) {
+    for (const status of [
+      'unknown', 'UNASSIGNED', 'done', 'success', 'complete', '', null, 1, true,
+    ]) {
       const value = workAggregate()
       ;(value.work_item as { status: unknown }).status = status
       expect(() => assertWorkspaceWorkAggregate(value)).toThrow(/item\.work_item\.status/)
@@ -275,6 +282,40 @@ describe('agents API 守卫与请求形状', () => {
     delete (missing.work_item as { status?: unknown }).status
     expect(() => assertWorkspaceWorkAggregate(missing)).toThrow(/item\.work_item\.status/)
     expect(() => assertWorkspaceWorkAggregate({ ...workAggregate(), internal: true })).toThrow(/键集/)
+  })
+
+  it('create 201 聚合严格仅接受 unassigned，拒绝终态、别名与 malformed', async () => {
+    expect(assertCreatedWorkspaceWorkAggregate(workAggregate()).work_item.status).toBe('unassigned')
+
+    for (const status of [
+      'working', 'completed', 'failed', 'UNASSIGNED', 'done', 'success',
+      'complete', 'unknown', null,
+    ]) {
+      const value = workAggregate()
+      ;(value.work_item as { status: unknown }).status = status
+      expect(() => assertCreatedWorkspaceWorkAggregate(value)).toThrowError(ProtocolError)
+      expect(() => assertCreatedWorkspaceWorkAggregate(value)).toThrow(/item\.work_item\.status/)
+    }
+
+    const missing = workAggregate()
+    delete (missing.work_item as { status?: unknown }).status
+    expect(() => assertCreatedWorkspaceWorkAggregate(missing)).toThrowError(ProtocolError)
+    expect(() => assertCreatedWorkspaceWorkAggregate({ ...workAggregate(), internal: true }))
+      .toThrowError(ProtocolError)
+
+    const completed = workAggregate()
+    ;(completed.work_item as { status: unknown }).status = 'completed'
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 201,
+      json: async () => ({ data: completed, meta: metaOk }),
+    })))
+    await expect(createWorkspaceWork(
+      REG_P1,
+      'w1',
+      { body: '任务', acceptance: null, constraints: null },
+      'idem-create-status',
+    )).rejects.toBeInstanceOf(ProtocolError)
   })
 
   it('workspace work 聚合 fail-closed：2xx 仍拒绝缺失/空 work_item_id 与缺失/空/非法 created_at', () => {

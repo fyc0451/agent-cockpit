@@ -14,6 +14,17 @@ export interface CreateWorkspaceWorkRequest {
 
 export type WorkspaceWorkStatus = 'unassigned' | 'working' | 'completed' | 'failed'
 
+const WORKSPACE_WORK_STATUS_LABELS: Record<WorkspaceWorkStatus, string> = {
+  unassigned: '未分配',
+  working: '工作中',
+  completed: '已完成',
+  failed: '失败',
+}
+
+export function workspaceWorkStatusLabel(status: WorkspaceWorkStatus): string {
+  return WORKSPACE_WORK_STATUS_LABELS[status]
+}
+
 export interface WorkspaceWorkAggregate {
   thread: Record<string, unknown> & {
     thread_id: string
@@ -75,7 +86,7 @@ const WORK_ITEM_STATUSES: readonly WorkspaceWorkStatus[] = [
   'failed',
 ]
 
-function workItemStatus(value: unknown): WorkspaceWorkStatus {
+function listedWorkItemStatus(value: unknown): WorkspaceWorkStatus {
   if (
     typeof value !== 'string'
     || !WORK_ITEM_STATUSES.includes(value as WorkspaceWorkStatus)
@@ -85,7 +96,15 @@ function workItemStatus(value: unknown): WorkspaceWorkStatus {
   return value as WorkspaceWorkStatus
 }
 
-export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggregate {
+function createdWorkItemStatus(value: unknown): WorkspaceWorkStatus {
+  if (value !== 'unassigned') fail('item.work_item.status')
+  return 'unassigned'
+}
+
+function parseWorkspaceWorkAggregate(
+  raw: unknown,
+  parseStatus: (value: unknown) => WorkspaceWorkStatus,
+): WorkspaceWorkAggregate {
   const aggregate = object(raw, 'item')
   exactKeys(aggregate, ['thread', 'root_message', 'work_item'], 'item 键集')
 
@@ -105,7 +124,7 @@ export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggrega
   const workItemId = requiredId(workItem.work_item_id, 'item.work_item.work_item_id')
   const sourceMessageId = requiredId(workItem.source_message_id, 'item.work_item.source_message_id')
   if (sourceMessageId !== messageId) fail('item.work_item.source_message_id')
-  const status = workItemStatus(workItem.status)
+  const status = parseStatus(workItem.status)
 
   return {
     thread: { ...thread, thread_id: threadId, created_at: createdAt },
@@ -126,6 +145,14 @@ export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggrega
       status,
     },
   }
+}
+
+export function assertWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggregate {
+  return parseWorkspaceWorkAggregate(raw, listedWorkItemStatus)
+}
+
+export function assertCreatedWorkspaceWorkAggregate(raw: unknown): WorkspaceWorkAggregate {
+  return parseWorkspaceWorkAggregate(raw, createdWorkItemStatus)
 }
 
 export function assertWorkspaceWorkListData(raw: unknown): WorkspaceWorkListData {
@@ -160,5 +187,5 @@ export async function createWorkspaceWork(
     request,
     { idempotencyKey },
   )
-  return { ...result, data: assertWorkspaceWorkAggregate(result.data) }
+  return { ...result, data: assertCreatedWorkspaceWorkAggregate(result.data) }
 }

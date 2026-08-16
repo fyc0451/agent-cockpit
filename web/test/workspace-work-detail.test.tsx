@@ -545,6 +545,31 @@ describe('Focus 页执行时间线行为', () => {
     })
   }
 
+  it.each([
+    ['unassigned', '未分配'],
+    ['working', '工作中'],
+    ['completed', '已完成'],
+    ['failed', '失败'],
+  ] as const)('列表与选中任务按 %s 显示冻结标签 %s', async (status, label) => {
+    window.localStorage.clear()
+    const id = `wrk_${status}`
+    const body = `状态任务-${status}`
+    stubWorld({}, [aggregate(id, body, status)])
+    renderApp(`${HOME}?work=${id}`)
+
+    const task = await screen.findByTitle(body)
+    expect(task).toHaveTextContent(label)
+    const savedMeta = document.querySelector('.focus-task-meta')
+    expect(savedMeta).toHaveTextContent(label)
+    if (status !== 'unassigned') {
+      const preparation = await screen.findByRole('region', { name: '执行准备' })
+      expect(within(preparation).getByText(label)).toBeVisible()
+      expect(within(preparation).queryAllByRole('button')).toHaveLength(0)
+      expect(within(preparation).queryByRole('textbox')).not.toBeInTheDocument()
+      expect(within(preparation).queryByRole('radio')).not.toBeInTheDocument()
+    }
+  })
+
   it('已派遣任务显示等待领取时间线；切换任务与 ?work 保持；无执行任务不渲染', async () => {
     window.localStorage.clear()
     const list = [
@@ -602,7 +627,7 @@ describe('Focus 页执行时间线行为', () => {
         generation: 1, state: 'closed', revision: 2,
       },
     }).data
-    stubWorld({ wrk_done: done }, [aggregate('wrk_done', '已完成任务', 'completed')])
+    stubWorld({ wrk_done: done }, [aggregate('wrk_done', '结果任务', 'completed')])
     const first = renderApp(`${HOME}?work=wrk_done`)
     const timeline = await screen.findByRole('region', { name: '执行时间线' })
     await waitFor(() => {
@@ -611,6 +636,10 @@ describe('Focus 页执行时间线行为', () => {
     expect(await within(timeline).findByText('成员回复正文')).toBeVisible()
     expect(within(timeline).getByText('已领取')).toBeVisible()
     expect(within(timeline).getByText('已回复')).toBeVisible()
+    expect(screen.getByTitle('结果任务')).toHaveTextContent('已完成')
+    expect(document.querySelector('.focus-task-meta')).toHaveTextContent('已完成')
+    expect(within(screen.getByRole('region', { name: '执行准备' })).queryAllByRole('button'))
+      .toHaveLength(0)
     first.unmount()
 
     const second = renderApp(`${HOME}?work=wrk_done`)
@@ -619,6 +648,10 @@ describe('Focus 页执行时间线行为', () => {
       expect(within(timeline2).getByRole('status')).toHaveTextContent('已完成')
     })
     expect(await within(timeline2).findByText('成员回复正文')).toBeVisible()
+    expect(screen.getByTitle('结果任务')).toHaveTextContent('已完成')
+    expect(document.querySelector('.focus-task-meta')).toHaveTextContent('已完成')
+    expect(within(screen.getByRole('region', { name: '执行准备' })).queryAllByRole('button'))
+      .toHaveLength(0)
     second.unmount()
   })
 

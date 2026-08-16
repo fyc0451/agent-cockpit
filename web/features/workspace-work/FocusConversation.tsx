@@ -8,6 +8,7 @@ import {
   type CreateWorkspaceWorkRequest,
   type WorkspaceWorkAggregate,
   type WorkspaceWorkListData,
+  workspaceWorkStatusLabel,
 } from '../../api/workspaceWork'
 import type { ApiResult } from '../../api/client'
 import { routes } from '../../app/routes'
@@ -76,11 +77,12 @@ function SavedWork({
   terminalTo?: string
 }) {
   const created = formatCreatedAt(item.thread.created_at)
+  const statusLabel = workspaceWorkStatusLabel(item.work_item.status)
   return (
     <article className="focus-message">
       <p className="focus-message-author">你</p>
       <p className="focus-task-meta">
-        <span>未分配</span>
+        <span>{statusLabel}</span>
         {created ? <span>{created}</span> : null}
       </p>
       <p className="focus-message-body">{item.root_message.body}</p>
@@ -313,6 +315,7 @@ export function FocusConversation({
             {items.map((item) => {
               const id = workItemId(item)
               const created = formatCreatedAt(item.thread.created_at)
+              const statusLabel = workspaceWorkStatusLabel(item.work_item.status)
               const current = id === selectedId && !composing
               return (
                 <li key={id}>
@@ -324,7 +327,7 @@ export function FocusConversation({
                     onClick={() => selectWork(id)}
                   >
                     <span className="focus-task-row-body ellipsis">
-                      {`${item.root_message.body} · 未分配${created ? ` · ${created}` : ''}`}
+                      {`${item.root_message.body} · ${statusLabel}${created ? ` · ${created}` : ''}`}
                     </span>
                   </button>
                 </li>
@@ -350,6 +353,7 @@ export function FocusConversation({
             projectId={projectId}
             workspaceId={workspaceId}
             workItemId={workItemId(selected)}
+            workStatus={selected.work_item.status}
           />
           <ExecutionTimeline
             key={workItemId(selected)}
