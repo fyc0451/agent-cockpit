@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import inspect
 import os
 import select
 import shutil
@@ -12,10 +11,13 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+import pytest
 
 from agent_cockpit import next_profile
 
@@ -39,53 +41,6 @@ GATE_FILES = {
     "tests/test_local_web_release_gate.py",
     "web/e2e-live/local-web-release-gate.spec.ts",
 }
-
-
-def test_local_web_release_gate_static_contract() -> None:
-    module = sys.modules[__name__]
-    expected = "eefc4fbedb4bb7d289a0f6ba0191989ed6e6f784"
-    assert getattr(module, "ACCEPTED_PRODUCT_EXACT", None) == expected
-
-    spawn_source = inspect.getsource(module._spawn)
-    assert "ACCEPTED_PRODUCT_EXACT" in spawn_source
-    assert '"0" * 40' not in spawn_source
-
-    stop_source = inspect.getsource(module._stop)
-    assert stop_source.index("os.killpg") < stop_source.index("sent_term = True")
-
-    outer_source = inspect.getsource(module.test_local_web_release_gate)
-    for required in (
-        "_assert_product_identity",
-        "_herdr_sessions",
-        "_cleanup_herdr_session",
-        "prepare_ephemeral_runtime_root",
-        "_assert_ephemeral_catalog",
-    ):
-        assert required in outer_source
-    cleanup_block = (
-        "finally:\n"
-        "        try:\n"
-        "            if process.poll() is None:\n"
-        "                _cleanup_herdr_session(base_url, session)"
-    )
-    assert cleanup_block in outer_source
-    assert outer_source.index("_assert_product_identity") < outer_source.index("_launch")
-
-    spec = (WEB / "e2e-live" / "local-web-release-gate.spec.ts").read_text(
-        encoding="utf-8",
-    )
-    for required in (
-        "type PreparationReceipt",
-        "createdBySlug",
-        "recoveredPreparation",
-        "LOCAL_WEB_GATE_RECEIPTS",
-        "preparation_work_item_id",
-        "checkout_id",
-        "lease_id",
-        "identity_id",
-        "generation",
-    ):
-        assert required in spec
 
 
 def _safe_environment() -> dict[str, str]:
@@ -120,26 +75,131 @@ def _git(path: Path, *args: str) -> str:
     ).strip()
 
 
-def _assert_product_identity() -> None:
+def _archive_ignored(relative: Path) -> bool:
+    parts = relative.parts
+    return (
+        relative.as_posix() in GATE_FILES
+        or ".git" in parts
+        or "__pycache__" in parts
+        or ".pytest_cache" in parts
+        or parts[:2] in {("web", "node_modules"), ("web", "dist")}
+    )
+
+
+def _archive_product_entries(root: Path) -> list[tuple[bytes, int, bytes]]:
+    entries: list[tuple[bytes, int, bytes]] = []
+    for current, directories, filenames in os.walk(
+        root, topdown=True, followlinks=False,
+    ):
+        current_path = Path(current)
+        retained: list[str] = []
+        link_names: list[str] = []
+        for name in sorted(directories):
+            path = current_path / name
+            relative = path.relative_to(root)
+            if _archive_ignored(relative):
+                continue
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                link_names.append(name)
+                continue
+            assert stat.S_ISDIR(info.st_mode), f"archive_product_special:{relative}"
+            retained.append(name)
+        directories[:] = retained
+
+        for name in sorted([*filenames, *link_names]):
+            path = current_path / name
+            relative = path.relative_to(root)
+            if _archive_ignored(relative):
+                continue
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                mode = 0o120000
+                payload = os.fsencode(os.readlink(path))
+            else:
+                assert stat.S_ISREG(info.st_mode), f"archive_product_special:{relative}"
+                actual_mode = stat.S_IMODE(info.st_mode)
+                assert actual_mode in {0o600, 0o644, 0o700, 0o755}, (
+                    f"archive_product_file_mode:{relative}"
+                )
+                mode = 0o100755 if actual_mode & 0o111 else 0o100644
+                payload = path.read_bytes()
+            entries.append((os.fsencode(relative.as_posix()), mode, payload))
+    return sorted(entries, key=lambda entry: entry[0])
+
+
+def _archive_product_tree(root: Path) -> str:
+    temporary = tempfile.mkdtemp(prefix="local-web-product-tree-")
+    os.chmod(temporary, 0o700)
+    try:
+        git_dir = Path(temporary) / "objects.git"
+        index = Path(temporary) / "index"
+        environment = {
+            key: value for key, value in _safe_environment().items()
+            if not key.startswith("GIT_")
+        }
+        subprocess.run(
+            [
+                "git", "init", "--bare", "--quiet", "--object-format=sha1",
+                "--template=", str(git_dir),
+            ],
+            check=True,
+            env=environment,
+        )
+        index_payload = bytearray()
+        for path, mode, payload in _archive_product_entries(root):
+            header = f"blob {len(payload)}\0".encode("ascii")
+            blob = hashlib.sha1(
+                header + payload, usedforsecurity=False,
+            ).hexdigest()
+            index_payload.extend(f"{mode:o} {blob}\t".encode("ascii"))
+            index_payload.extend(path)
+            index_payload.append(0)
+        index_environment = {
+            **environment,
+            "GIT_INDEX_FILE": str(index),
+        }
+        subprocess.run(
+            [
+                "git", "--git-dir", str(git_dir), "update-index",
+                "--info-only", "-z", "--index-info",
+            ],
+            input=bytes(index_payload),
+            check=True,
+            env=index_environment,
+        )
+        result = subprocess.run(
+            [
+                "git", "--git-dir", str(git_dir), "write-tree", "--missing-ok",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            env=index_environment,
+        ).stdout.decode("ascii").strip()
+        assert len(result) == 40 and all(character in "0123456789abcdef" for character in result)
+        return result
+    finally:
+        shutil.rmtree(temporary)
+
+
+def _assert_product_identity(root: Path = ROOT) -> None:
     assert len(ACCEPTED_PRODUCT_EXACT) == 40
     assert len(ACCEPTED_PRODUCT_TREE) == 40
-    if not (ROOT / ".git").exists():
-        assert (ROOT / ".agent-memory-project").read_text(
-            encoding="ascii",
-        ) == "agent-cockpit-next\n"
+    if not (root / ".git").exists():
+        assert _archive_product_tree(root) == ACCEPTED_PRODUCT_TREE
         return
 
-    assert _git(ROOT, "cat-file", "-t", ACCEPTED_PRODUCT_EXACT) == "commit"
-    assert _git(ROOT, "rev-parse", f"{ACCEPTED_PRODUCT_EXACT}^{{tree}}") == (
+    assert _git(root, "cat-file", "-t", ACCEPTED_PRODUCT_EXACT) == "commit"
+    assert _git(root, "rev-parse", f"{ACCEPTED_PRODUCT_EXACT}^{{tree}}") == (
         ACCEPTED_PRODUCT_TREE
     )
     changed = set(filter(None, _git(
-        ROOT, "diff", "--name-only", ACCEPTED_PRODUCT_EXACT, "--",
+        root, "diff", "--name-only", ACCEPTED_PRODUCT_EXACT, "--",
     ).splitlines()))
     assert changed == GATE_FILES
     status_paths = {
         line.split(maxsplit=1)[1] for line in _git(
-            ROOT, "status", "--porcelain", "--untracked-files=all",
+            root, "status", "--porcelain", "--untracked-files=all",
         ).splitlines()
     }
     assert status_paths <= GATE_FILES
@@ -273,12 +333,16 @@ def _cleanup_herdr_session(base_url: str, session: str) -> None:
     assert all(item.get("name") != session for item in _herdr_sessions(base_url))
 
 
-def _stop(process: subprocess.Popen[str]) -> None:
-    sent_term = False
+def _send_termination(process: subprocess.Popen[str]) -> bool:
     if process.poll() is None:
         assert os.getpgid(process.pid) == process.pid
         os.killpg(process.pid, signal.SIGTERM)
-        sent_term = True
+        return True
+    return False
+
+
+def _stop(process: subprocess.Popen[str]) -> None:
+    sent_term = _send_termination(process)
     try:
         process.communicate(timeout=15)
     except subprocess.TimeoutExpired:
@@ -288,6 +352,33 @@ def _stop(process: subprocess.Popen[str]) -> None:
     assert process.returncode == 0 or (
         sent_term and process.returncode == -signal.SIGTERM
     )
+
+
+def _execute_playwright_with_cleanup(
+    process: subprocess.Popen[str],
+    base_url: str,
+    session: str,
+    invoke,
+    *,
+    stop_server=None,
+) -> subprocess.CompletedProcess[str]:
+    stop_server = _stop if stop_server is None else stop_server
+    try:
+        completed = invoke()
+        if completed.stdout:
+            print(completed.stdout)
+        assert completed.returncode == 0, completed.stdout
+        sessions = _herdr_sessions(base_url)
+        assert len(sessions) == 1
+        assert sessions[0]["name"] == session
+        assert sessions[0]["status"] == "running"
+        return completed
+    finally:
+        try:
+            if process.poll() is None:
+                _cleanup_herdr_session(base_url, session)
+        finally:
+            stop_server(process)
 
 
 def _rows(path: Path, query: str, parameters: tuple[object, ...] = ()) -> list[sqlite3.Row]:
@@ -349,6 +440,11 @@ def _assert_ephemeral_catalog(runtime: Path) -> None:
     assert isinstance(catalog["entries"], list) and catalog["entries"]
     paths = [entry["path"] for entry in catalog["entries"]]
     assert paths == sorted(paths) and len(paths) == len(set(paths))
+
+
+def _verify_finalized_runtime(runtime: Path) -> None:
+    next_profile.prepare_ephemeral_runtime_root(runtime)
+    _assert_ephemeral_catalog(runtime)
 
 
 def _assert_durable_gate(
@@ -511,6 +607,222 @@ def _assert_durable_gate(
         _assert_source_unchanged(snapshot)
 
 
+def _copy_archive_product(source: Path, destination: Path) -> None:
+    destination.mkdir(mode=0o700)
+    for relative_bytes, mode, payload in _archive_product_entries(source):
+        relative = Path(os.fsdecode(relative_bytes))
+        target = destination / relative
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        if mode == 0o120000:
+            target.symlink_to(os.fsdecode(payload))
+        else:
+            target.write_bytes(payload)
+            target.chmod(0o700 if mode == 0o100755 else 0o600)
+
+
+def test_archive_product_tree_behavior(tmp_path: Path, monkeypatch) -> None:
+    assert _archive_product_tree(ROOT) == ACCEPTED_PRODUCT_TREE
+    archive = tmp_path / "archive"
+    _copy_archive_product(ROOT, archive)
+    _assert_product_identity(archive)
+
+    target = archive / "README.md"
+    original = target.read_bytes()
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+
+    target.write_bytes(original + b"tampered\n")
+    with pytest.raises(AssertionError):
+        _assert_product_identity(archive)
+    target.write_bytes(original)
+
+    target.chmod(0o700 if original_mode in {0o600, 0o644} else 0o600)
+    with pytest.raises(AssertionError):
+        _assert_product_identity(archive)
+    target.chmod(original_mode)
+
+    extra = archive / "UNEXPECTED_PRODUCT_FILE"
+    extra.write_bytes(b"unexpected\n")
+    extra.chmod(0o644)
+    with pytest.raises(AssertionError):
+        _assert_product_identity(archive)
+    extra.unlink()
+
+    target.unlink()
+    with pytest.raises(AssertionError):
+        _assert_product_identity(archive)
+    target.write_bytes(original)
+    target.chmod(original_mode)
+
+    target.unlink()
+    target.symlink_to(".agent-memory-project")
+    with pytest.raises(AssertionError):
+        _assert_product_identity(archive)
+    target.unlink()
+    target.write_bytes(original)
+    target.chmod(original_mode)
+
+    monkeypatch.setattr(sys.modules[__name__], "ACCEPTED_PRODUCT_TREE", "0" * 40)
+    with pytest.raises(AssertionError):
+        _assert_product_identity(archive)
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "timeout"])
+def test_playwright_failure_cleanup_behavior(monkeypatch, failure: str) -> None:
+    session = "ephemeral-behavior-gate"
+    sessions = [{"name": session, "status": "running"}]
+    events: list[str] = []
+
+    def fake_request_json(
+        _base_url: str, path: str, method: str,
+    ) -> tuple[int, object]:
+        events.append(f"{method} {path}")
+        if path == "/api/herdr/sessions" and method == "GET":
+            return 200, {"sessions": [dict(item) for item in sessions]}
+        if path.endswith("/stop") and method == "POST":
+            assert sessions == [{"name": session, "status": "running"}]
+            sessions[0]["status"] = "stopped"
+            return 200, {"data": {}}
+        if path == f"/api/herdr/session/{session}" and method == "DELETE":
+            assert sessions == [{"name": session, "status": "stopped"}]
+            sessions.clear()
+            return 200, {"data": {}}
+        raise AssertionError(f"unexpected fake API request: {method} {path}")
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    def stop_server(_process) -> None:
+        assert sessions == []
+        events.append("server stop")
+
+    def invoke() -> subprocess.CompletedProcess[str]:
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(["playwright"], 600)
+        return subprocess.CompletedProcess(
+            ["playwright"], returncode=1, stdout="expected browser failure",
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_request_json", fake_request_json)
+    expected = subprocess.TimeoutExpired if failure == "timeout" else AssertionError
+    with pytest.raises(expected):
+        _execute_playwright_with_cleanup(
+            FakeProcess(), "http://127.0.0.1:1", session, invoke,
+            stop_server=stop_server,
+        )
+    assert sessions == []
+    assert events == [
+        "GET /api/herdr/sessions",
+        f"POST /api/herdr/session/{session}/stop",
+        "GET /api/herdr/sessions",
+        f"DELETE /api/herdr/session/{session}",
+        "GET /api/herdr/sessions",
+        "server stop",
+    ]
+
+
+def test_stop_signal_behavior(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def __init__(self, returncode=None):
+            self.returncode = returncode
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout: int):
+            events.append(f"communicate {timeout}")
+            if self.returncode is None:
+                self.returncode = -signal.SIGTERM
+            return "", ""
+
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+
+    process = FakeProcess()
+
+    def successful_killpg(pid: int, sent_signal: int) -> None:
+        assert pid == process.pid and sent_signal == signal.SIGTERM
+        events.append("killpg success")
+
+    monkeypatch.setattr(os, "killpg", successful_killpg)
+    _stop(process)
+    assert events == ["killpg success", "communicate 15"]
+
+    events.clear()
+    process = FakeProcess()
+
+    def failed_killpg(pid: int, sent_signal: int) -> None:
+        process.returncode = -signal.SIGTERM
+        events.append("killpg failed")
+        raise PermissionError("expected killpg failure")
+
+    monkeypatch.setattr(os, "killpg", failed_killpg)
+    with pytest.raises(PermissionError, match="expected killpg failure"):
+        _stop(process)
+    assert events == ["killpg failed"]
+
+    events.clear()
+    process = FakeProcess(returncode=-signal.SIGTERM)
+    with pytest.raises(AssertionError):
+        _stop(process)
+    assert events == ["communicate 15"]
+
+
+def _finalized_probe_runtime(path: Path) -> None:
+    path.mkdir(mode=0o700)
+    assert next_profile.initialize_empty_ephemeral_runtime_root(path) is True
+    next_profile.activate_ephemeral_runtime_root(path)
+    probe = path / "probe"
+    probe.write_bytes(b"catalog probe\n")
+    probe.chmod(0o600)
+    next_profile.finalize_ephemeral_runtime_root({
+        next_profile.PROFILE_ENV: next_profile.EPHEMERAL_PROFILE,
+        next_profile.EPHEMERAL_ROOT_ENV: str(path),
+    })
+
+
+def test_finalized_runtime_verifier_is_called(tmp_path: Path, monkeypatch) -> None:
+    runtime = tmp_path / "runtime"
+    _finalized_probe_runtime(runtime)
+    calls: list[str] = []
+    original_prepare = next_profile.prepare_ephemeral_runtime_root
+    original_catalog = _assert_ephemeral_catalog
+
+    def prepare(path: Path) -> None:
+        calls.append("prepare")
+        original_prepare(path)
+
+    def catalog(path: Path) -> None:
+        calls.append("catalog")
+        original_catalog(path)
+
+    monkeypatch.setattr(next_profile, "prepare_ephemeral_runtime_root", prepare)
+    monkeypatch.setattr(sys.modules[__name__], "_assert_ephemeral_catalog", catalog)
+    _verify_finalized_runtime(runtime)
+    assert calls == ["prepare", "catalog"]
+
+
+@pytest.mark.parametrize("corruption", ["bytes", "extra", "symlink"])
+def test_finalized_runtime_verifier_rejects_corruption(
+    tmp_path: Path, corruption: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    _finalized_probe_runtime(runtime)
+    if corruption == "bytes":
+        (runtime / "probe").write_bytes(b"changed\n")
+    elif corruption == "extra":
+        extra = runtime / "extra"
+        extra.write_bytes(b"extra\n")
+        extra.chmod(0o600)
+    else:
+        (runtime / "unexpected-link").symlink_to("probe")
+    with pytest.raises(next_profile.NextProfileError):
+        _verify_finalized_runtime(runtime)
+
+
 def test_local_web_release_gate(tmp_path: Path) -> None:
     _assert_product_identity()
     _codex, _herdr, npm, playwright = _require_prerequisites()
@@ -526,7 +838,8 @@ def test_local_web_release_gate(tmp_path: Path) -> None:
     session = next_profile.ephemeral_session_for_root(runtime)
     snapshots: dict[str, dict[str, object]] = {}
     assert _herdr_sessions(base_url) == []
-    try:
+
+    def invoke_playwright() -> subprocess.CompletedProcess[str]:
         for slug, source_name in SOURCES.items():
             snapshots[slug] = _seed_source(runtime / "uploads" / source_name)
 
@@ -551,21 +864,11 @@ def test_local_web_release_gate(tmp_path: Path) -> None:
             stderr=subprocess.STDOUT,
             timeout=600,
         )
-        if completed.stdout:
-            print(completed.stdout)
-        assert completed.returncode == 0, completed.stdout
-        sessions = _herdr_sessions(base_url)
-        assert len(sessions) == 1
-        assert sessions[0]["name"] == session
-        assert sessions[0]["status"] == "running"
-    finally:
-        try:
-            if process.poll() is None:
-                _cleanup_herdr_session(base_url, session)
-        finally:
-            _stop(process)
+        return completed
 
-    next_profile.prepare_ephemeral_runtime_root(runtime)
-    _assert_ephemeral_catalog(runtime)
+    _execute_playwright_with_cleanup(
+        process, base_url, session, invoke_playwright,
+    )
+    _verify_finalized_runtime(runtime)
     receipts = _load_receipts(receipts_path)
     _assert_durable_gate(runtime, snapshots, receipts)
