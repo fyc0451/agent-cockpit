@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Publish version 0.3.5 as an operator-preview build of the current Local Web
+  2.0 implementation; managed worktree lifecycle governance remains follow-up work.
+
 - Publish version 0.3.4 with the versioned delivery framework and the native
   consecutive-upgrade evidence fix.
 - Publish version 0.3.3 without runtime or frontend changes so the signed native
