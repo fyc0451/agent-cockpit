@@ -145,6 +145,7 @@ class LocalCodexHarness:
         ) = None,
         snapshot: Callable[..., dict[str, Any]] | None = None,
         close_pane: Callable[..., dict[str, Any]] | None = None,
+        recycle_private_session: Callable[..., dict[str, Any]] | None = None,
         new_instance_id: Callable[[], str] | None = None,
         capability_root: Path | None = None,
         wakeup_prompt: Callable[..., dict[str, Any]] | None = None,
@@ -170,6 +171,9 @@ class LocalCodexHarness:
         )
         self._snapshot = snapshot or herdr_client.session_snapshot
         self._close_pane = close_pane or herdr_client.close_pane
+        self._recycle_private_session = (
+            recycle_private_session or herdr_client.recycle_private_session
+        )
         self._new_instance_id = (
             new_instance_id or herdr_client.new_agent_instance_id
         )
@@ -648,6 +652,15 @@ class LocalCodexHarness:
                     _retire_attachment_at(root_fd, matched_attachment)
                 except OSError:
                     _invalidate_attachment_at(root_fd, matched_attachment)
+                    _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+            if herdr_client.is_private_ephemeral_session(session):
+                try:
+                    recycled = self._recycle_private_session(session)
+                except Exception:
+                    _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
+                if not isinstance(recycled, dict) or recycled.get("available") is False:
+                    _fail("runtime_unavailable", pane_id=pane_id)
+                if recycled.get("error"):
                     _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
         finally:
             if root_fd is not None:

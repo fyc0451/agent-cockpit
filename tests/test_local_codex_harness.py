@@ -80,6 +80,7 @@ def test_reference_defaults_bind_real_herdr_signatures() -> None:
     assert harness._ensure_session is herdr_client.ensure_session
     assert harness._snapshot is herdr_client.session_snapshot
     assert harness._close_pane is herdr_client.close_pane
+    assert harness._recycle_private_session is herdr_client.recycle_private_session
     start = inspect.signature(herdr_client.start_agent)
     assert list(start.parameters) == [
         "session", "workdir", "agent", "model", "layout", "label", "args",
@@ -2045,3 +2046,90 @@ def test_start_unproven_rollback_without_pane_is_unknown(tmp_path: Path) -> None
     with pytest.raises(harness_mod.HarnessError) as wakeup:
         harness.wakeup(ATTACHMENT)
     assert wakeup.value.code == "invalid_argument"
+
+
+PRIVATE_SESSION = "ephemeral-testdeadbeef0123456789abcdef"
+
+
+def _private_session_harness(tmp_path: Path, *, recycle, session: str = PRIVATE_SESSION):
+    harness, checkout, _started, _generic, panes = _attach_harness(tmp_path)
+    harness._recycle_private_session = recycle
+    original = harness._get_launch_descriptor_by_instance
+
+    def by_instance(instance_id: str, **kwargs):
+        record = original(instance_id, **kwargs)
+        if record is None:
+            return None
+        return {**record, "session": session}
+
+    harness._get_launch_descriptor_by_instance = by_instance
+    return harness, checkout, panes
+
+
+def test_detach_private_ephemeral_session_must_stop_and_delete_session(
+    tmp_path: Path, _provider_provenance: dict[str, Path],
+) -> None:
+    recycled: list[str] = []
+    leftover = tmp_path / "herdr" / "sessions" / PRIVATE_SESSION
+    leftover.mkdir(parents=True)
+    (leftover / "session.json").write_text("{}", encoding="utf-8")
+    (leftover / "herdr.sock").write_bytes(b"sock")
+    (leftover / "herdr-client.sock").write_bytes(b"client")
+
+    def recycle(session: str) -> dict[str, object]:
+        recycled.append(session)
+        for name in ("session.json", "herdr.sock", "herdr-client.sock"):
+            (leftover / name).unlink()
+        leftover.rmdir()
+        return {"available": True, "stopped": session, "deleted": session}
+
+    harness, checkout, panes = _private_session_harness(tmp_path, recycle=recycle)
+    attached = harness.attach_readonly(
+        session=PRIVATE_SESSION, checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+    )
+    harness.detach(session=PRIVATE_SESSION, pane_id=attached.pane_id)
+    assert recycled == [PRIVATE_SESSION]
+    assert panes == {}
+    assert not leftover.exists()
+    assert not (tmp_path / "caps" / f"{ATTACHMENT}.home").exists()
+
+
+def test_detach_shared_session_does_not_recycle_private_server(
+    tmp_path: Path, _provider_provenance: dict[str, Path],
+) -> None:
+    recycled: list[str] = []
+
+    def recycle(session: str) -> dict[str, object]:
+        recycled.append(session)
+        return {"available": True, "stopped": session, "deleted": session}
+
+    harness, checkout, _panes = _private_session_harness(
+        tmp_path, recycle=recycle, session="s",
+    )
+    attached = harness.attach_readonly(
+        session="s", checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+    )
+    harness.detach(session="s", pane_id=attached.pane_id)
+    assert recycled == []
+
+
+def test_detach_private_session_recycle_failure_is_unknown(
+    tmp_path: Path, _provider_provenance: dict[str, Path],
+) -> None:
+    def recycle(session: str) -> dict[str, object]:
+        return {"available": True, "error": "session still running"}
+
+    harness, checkout, _panes = _private_session_harness(tmp_path, recycle=recycle)
+    attached = harness.attach_readonly(
+        session=PRIVATE_SESSION, checkout_path=checkout,
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
+    )
+    with pytest.raises(harness_mod.HarnessError) as error:
+        harness.detach(session=PRIVATE_SESSION, pane_id=attached.pane_id)
+    assert error.value.code == "runtime_unavailable"
+    assert error.value.unknown is True

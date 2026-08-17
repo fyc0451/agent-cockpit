@@ -4188,3 +4188,73 @@ def delete_session(session: str) -> dict[str, Any]:
         if cleanup.get("instance_ids"):
             result["retirement_pending"] = cleanup["instance_ids"]
     return result
+
+
+def is_private_ephemeral_session(session: str) -> bool:
+    """True for this runtime's private Herdr session, never a shared named session."""
+    if not isinstance(session, str) or session == "":
+        return False
+    scoped = os.environ.get("HERDR_SESSION")
+    if isinstance(scoped, str) and scoped != "" and session == scoped:
+        return True
+    return session.startswith("ephemeral-")
+
+
+def _private_session_leftovers(session: str) -> list[str]:
+    leftovers: list[str] = []
+    try:
+        root = _herdr_sessions_root() / session
+    except ValueError:
+        return leftovers
+    for name in ("session.json", "herdr.sock", "herdr-client.sock"):
+        if (root / name).exists():
+            leftovers.append(name)
+    with _SESSION_BOOTSTRAP_LOCK:
+        owned = _SESSION_BOOTSTRAP_PROCESSES.get(session)
+    if owned is not None and owned.poll() is None:
+        leftovers.append("bootstrap_process")
+    return leftovers
+
+
+def recycle_private_session(session: str) -> dict[str, Any]:
+    """Stop and delete a private ephemeral Herdr session after detach.
+
+    close-pane succeeding only removes the agent pane. The session server,
+    leftover shell, session.json and sockets are a separate lifecycle and
+    must be recycled here or detach has not finished.
+    """
+    if not is_private_ephemeral_session(session):
+        return {"available": True, "skipped": True}
+    try:
+        next_profile.require_session(session)
+    except next_profile.NextProfileError as exc:
+        return {"available": True, "error": str(exc)}
+    stopped = stop_session(session)
+    if stopped.get("available") is False:
+        return {
+            "available": False,
+            "error": str(stopped.get("error") or "session stop unavailable"),
+        }
+    deleted = delete_session(session)
+    if deleted.get("available") is False:
+        return {
+            "available": False,
+            "error": str(deleted.get("error") or "session delete unavailable"),
+        }
+    with _SESSION_BOOTSTRAP_LOCK:
+        owned = _SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
+    if owned is not None and not _terminate_bootstrap_process(owned):
+        return {"available": True, "error": "session server still running"}
+    leftovers = _private_session_leftovers(session)
+    if leftovers:
+        return {
+            "available": True,
+            "error": "session leftovers remain: " + ",".join(leftovers),
+        }
+    if stopped.get("error") and deleted.get("error"):
+        return {"available": True, "error": str(deleted.get("error"))}
+    return {
+        "available": True,
+        "stopped": session,
+        "deleted": session,
+    }

@@ -3881,3 +3881,61 @@ def test_real_wakeup_prompt_receipt_requires_working(
                 pass
         herdr_client._SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
         shutil.rmtree(isolated, ignore_errors=True)
+
+
+def test_recycle_private_session_skips_shared_name() -> None:
+    assert herdr_client.is_private_ephemeral_session("s") is False
+    assert herdr_client.recycle_private_session("s") == {
+        "available": True, "skipped": True,
+    }
+
+
+def test_recycle_private_session_fail_closed_on_leftovers(tmp_path, monkeypatch) -> None:
+    session = "ephemeral-recycleleftover0123456789ab"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    root = tmp_path / "herdr" / "sessions" / session
+    root.mkdir(parents=True)
+    (root / "session.json").write_text("{}", encoding="utf-8")
+    (root / "herdr.sock").write_bytes(b"s")
+    (root / "herdr-client.sock").write_bytes(b"c")
+    monkeypatch.setattr(
+        herdr_client, "stop_session",
+        lambda name: {"available": True, "stopped": name},
+    )
+    monkeypatch.setattr(
+        herdr_client, "delete_session",
+        lambda name: {"available": True, "deleted": name},
+    )
+    result = herdr_client.recycle_private_session(session)
+    assert result["available"] is True
+    assert "session leftovers remain" in result["error"]
+    assert "session.json" in result["error"]
+
+
+def test_recycle_private_session_succeeds_when_stop_delete_clear_files(
+    tmp_path, monkeypatch,
+) -> None:
+    session = "ephemeral-recyclecleared0123456789abc"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    root = tmp_path / "herdr" / "sessions" / session
+    root.mkdir(parents=True)
+    (root / "session.json").write_text("{}", encoding="utf-8")
+
+    def delete(name: str) -> dict[str, object]:
+        for child in root.iterdir():
+            child.unlink()
+        root.rmdir()
+        return {"available": True, "deleted": name}
+
+    monkeypatch.setattr(
+        herdr_client, "stop_session",
+        lambda name: {"available": True, "stopped": name},
+    )
+    monkeypatch.setattr(herdr_client, "delete_session", delete)
+    result = herdr_client.recycle_private_session(session)
+    assert result == {
+        "available": True, "stopped": session, "deleted": session,
+    }
+    assert not root.exists()
