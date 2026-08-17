@@ -9,6 +9,7 @@ from threading import Barrier
 import pytest
 
 from agent_cockpit import git_checkout_provider as checkout_mod
+from agent_cockpit import herdr_client
 from agent_cockpit import local_codex_harness as harness_mod
 from agent_cockpit import operation_store as operation_mod
 from agent_cockpit import project_registry_store as registry_store
@@ -517,6 +518,8 @@ class _WiredHerdr:
         self.close = close
         self.explode = explode
         self.panes: dict[str, str] = {}
+        self.instances: dict[str, str] = {}
+        self.pane_instances: dict[str, str] = {}
         self.started = 0
         self.closed = 0
         self.seq = 0
@@ -530,6 +533,8 @@ class _WiredHerdr:
         pane_id = f"pane-{self.seq}"
         self.started += 1
         self.panes[pane_id] = workdir
+        self.instances[instance_id] = pane_id
+        self.pane_instances[pane_id] = instance_id
         self.last_home = codex_home
         return {
             "available": True, "pane_id": pane_id, "instance_id": instance_id,
@@ -541,16 +546,22 @@ class _WiredHerdr:
             return None
         return {
             "session": session, "pane_id": pane_id,
-            "instance_id": "i-abcdefghijklmnopqrstuvwxyz",
+            "instance_id": self.pane_instances.get(
+                pane_id, "i-abcdefghijklmnopqrstuvwxyz",
+            ),
             "workdir": self.panes.get(pane_id), "kind": "codex",
         }
 
     def get_launch_descriptor_by_instance(
         self, instance_id: str, *, include_retired: bool = False,
     ) -> dict[str, object] | None:
-        if not self.descriptors or not self.panes:
+        if not self.descriptors:
             return None
-        pane_id = next(iter(self.panes))
+        pane_id = self.instances.get(instance_id)
+        if pane_id is None or pane_id not in self.panes:
+            if not self.panes:
+                return None
+            pane_id = next(iter(self.panes))
         return {
             "session": "cockpit-b-readonly", "pane_id": pane_id,
             "instance_id": instance_id, "workdir": self.panes.get(pane_id),
@@ -847,6 +858,159 @@ def _member_prepared(service, project, workspace, item):
         identity_id=member.item.identity_id, idempotency_key="prep",
     )
     return prepared
+
+
+def test_first_of_two_private_attachments_does_not_recycle_session(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    herdr = _WiredHerdr()
+    service, project, workspace, item_a, herdr = _wired_world(tmp_path, herdr)
+    seq = {"n": 0}
+
+    def next_instance() -> str:
+        seq["n"] += 1
+        return herdr_client.new_agent_instance_id()
+
+    service.harness._new_instance_id = next_instance
+    item_b = service.work_provider().create_work_item(
+        project_id=project.project_id, workspace_id=workspace.workspace_id,
+        body="Second attachment", acceptance=None, constraints=None,
+        idempotency_key="work-2",
+    ).item
+    member = service.create_member(
+        project.project_id, workspace.workspace_id, display_name="Atlas",
+        idempotency_key="member-two",
+    )
+    prepared_a = service.prepare(
+        project.project_id, workspace.workspace_id, item_a.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="prep-a",
+    )
+    prepared_b = service.prepare(
+        project.project_id, workspace.workspace_id, item_b.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="prep-b",
+    )
+    attached_a = service.attach(
+        project.project_id, workspace.workspace_id, item_a.work_item["work_item_id"],
+        expected_revision=prepared_a["revision"], idempotency_key="att-a",
+    )
+    attached_b = service.attach(
+        project.project_id, workspace.workspace_id, item_b.work_item["work_item_id"],
+        expected_revision=prepared_b["revision"], idempotency_key="att-b",
+    )
+    recycled: list[str] = []
+    service.harness._recycle_private_session = lambda session: recycled.append(session) or {
+        "available": True, "stopped": session, "deleted": session,
+    }
+    monkeypatch.setattr(herdr_client, "is_private_ephemeral_session", lambda _s: True)
+    detached_a = service.detach(
+        project.project_id, workspace.workspace_id, item_a.work_item["work_item_id"],
+        expected_revision=attached_a["revision"], idempotency_key="det-a",
+    )
+    assert detached_a["state"] == "detached"
+    still_b = service.get_preparation(
+        project.project_id, workspace.workspace_id, item_b.work_item["work_item_id"],
+    )
+    assert still_b.state == "connected_readonly"
+    assert recycled == []
+    assert herdr.closed == 1
+    assert len(herdr.panes) == 1
+
+
+def test_last_private_attachment_recycles_once(tmp_path: Path, monkeypatch) -> None:
+    herdr = _WiredHerdr()
+    service, project, workspace, item_a, herdr = _wired_world(tmp_path, herdr)
+    seq = {"n": 0}
+
+    def next_instance() -> str:
+        seq["n"] += 1
+        return herdr_client.new_agent_instance_id()
+
+    service.harness._new_instance_id = next_instance
+    item_b = service.work_provider().create_work_item(
+        project_id=project.project_id, workspace_id=workspace.workspace_id,
+        body="Second attachment", acceptance=None, constraints=None,
+        idempotency_key="work-2b",
+    ).item
+    member = service.create_member(
+        project.project_id, workspace.workspace_id, display_name="Atlas",
+        idempotency_key="member-last",
+    )
+    prepared_a = service.prepare(
+        project.project_id, workspace.workspace_id, item_a.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="prep-a",
+    )
+    prepared_b = service.prepare(
+        project.project_id, workspace.workspace_id, item_b.work_item["work_item_id"],
+        identity_id=member.item.identity_id, idempotency_key="prep-b",
+    )
+    attached_a = service.attach(
+        project.project_id, workspace.workspace_id, item_a.work_item["work_item_id"],
+        expected_revision=prepared_a["revision"], idempotency_key="att-a",
+    )
+    attached_b = service.attach(
+        project.project_id, workspace.workspace_id, item_b.work_item["work_item_id"],
+        expected_revision=prepared_b["revision"], idempotency_key="att-b",
+    )
+    recycled: list[str] = []
+    service.harness._recycle_private_session = lambda session: recycled.append(session) or {
+        "available": True, "stopped": session, "deleted": session,
+    }
+    monkeypatch.setattr(herdr_client, "is_private_ephemeral_session", lambda _s: True)
+    service.detach(
+        project.project_id, workspace.workspace_id, item_a.work_item["work_item_id"],
+        expected_revision=attached_a["revision"], idempotency_key="det-a",
+    )
+    assert recycled == []
+    detached_b = service.detach(
+        project.project_id, workspace.workspace_id, item_b.work_item["work_item_id"],
+        expected_revision=attached_b["revision"], idempotency_key="det-b",
+    )
+    assert detached_b["state"] == "detached"
+    assert recycled == ["cockpit-b-readonly"]
+
+
+def test_recycle_unknown_retries_from_authoritative_phase_without_reclosing(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    herdr = _WiredHerdr(descriptors=True, close="ok")
+    service, project, workspace, item, herdr = _wired_world(tmp_path, herdr)
+    prepared = _member_prepared(service, project, workspace, item)
+    attached = service.attach(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+        expected_revision=prepared["revision"], idempotency_key="review-attach",
+    )
+    calls: list[str] = []
+
+    def first_recycle(session: str) -> dict[str, object]:
+        calls.append(session)
+        return {"available": True, "error": "stop response lost"}
+
+    monkeypatch.setattr(herdr_client, "is_private_ephemeral_session", lambda _s: True)
+    service.harness._recycle_private_session = first_recycle
+    with pytest.raises(service_mod.ExecutionServiceError):
+        service.detach(
+            project.project_id, workspace.workspace_id,
+            item.work_item["work_item_id"],
+            expected_revision=attached["revision"],
+            idempotency_key="review-detach-lost",
+        )
+    unknown = service.get_preparation(
+        project.project_id, workspace.workspace_id, item.work_item["work_item_id"],
+    )
+    assert unknown.state == "outcome_unknown"
+    assert herdr.closed == 1
+    service.harness._recycle_private_session = lambda session: {
+        "available": True, "stopped": session, "deleted": session,
+    }
+    recovered = service.detach(
+        project.project_id, workspace.workspace_id,
+        item.work_item["work_item_id"],
+        expected_revision=unknown.revision,
+        idempotency_key="review-detach-reconcile",
+    )
+    assert recovered["state"] == "detached"
+    assert herdr.closed == 1
+    assert calls == ["cockpit-b-readonly"]
 
 
 def test_unknown_retry_zombie_close_does_not_start_second_pane(tmp_path: Path) -> None:

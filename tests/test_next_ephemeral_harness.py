@@ -606,14 +606,13 @@ def test_real_http_attach_dispatch_proves_working_without_prompt_bypass(
         capability_root = runtime_root / "data/workspace-capabilities"
         assert list(capability_root.iterdir()) == []
         prep_url = None
-        status, stopped = _request_json(
-            descriptor, f"/api/herdr/session/{session}/stop", method="POST",
-        )
-        assert status == 200 and not stopped.get("error")
-        status, deleted = _request_json(
-            descriptor, f"/api/herdr/session/{session}", method="DELETE",
-        )
-        assert status == 200 and deleted.get("deleted") == session
+        status, listed = _request_json(descriptor, "/api/herdr/sessions")
+        assert status == 200
+        names = [
+            item.get("name") for item in listed.get("sessions", [])
+            if isinstance(item, dict)
+        ]
+        assert session not in names
         assert _stop(process) == ""
         process = None
 
@@ -650,12 +649,6 @@ def test_real_http_attach_dispatch_proves_working_without_prompt_bypass(
                 )
             except Exception:
                 pass
-        try:
-            _request_json(
-                descriptor, f"/api/herdr/session/{session}/stop", method="POST",
-            )
-        except Exception:
-            pass
         if process is not None:
             assert _stop(process) == ""
 

@@ -3893,7 +3893,13 @@ def test_recycle_private_session_skips_shared_name() -> None:
 def test_recycle_private_session_fail_closed_on_leftovers(tmp_path, monkeypatch) -> None:
     session = "ephemeral-recycleleftover0123456789ab"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    monkeypatch.setenv("COCKPIT_NEXT_PROFILE", "ephemeral")
+    monkeypatch.setenv("COCKPIT_EPHEMERAL_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        herdr_client.next_profile, "ephemeral_session_for_root", lambda _root: session,
+    )
+    monkeypatch.setenv("HERDR_SESSION", session)
+    monkeypatch.setattr(herdr_client.next_profile, "require_session", lambda value: value)
     root = tmp_path / "herdr" / "sessions" / session
     root.mkdir(parents=True)
     (root / "session.json").write_text("{}", encoding="utf-8")
@@ -3918,7 +3924,13 @@ def test_recycle_private_session_succeeds_when_stop_delete_clear_files(
 ) -> None:
     session = "ephemeral-recyclecleared0123456789abc"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    monkeypatch.setenv("COCKPIT_NEXT_PROFILE", "ephemeral")
+    monkeypatch.setenv("COCKPIT_EPHEMERAL_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        herdr_client.next_profile, "ephemeral_session_for_root", lambda _root: session,
+    )
+    monkeypatch.setenv("HERDR_SESSION", session)
+    monkeypatch.setattr(herdr_client.next_profile, "require_session", lambda value: value)
     root = tmp_path / "herdr" / "sessions" / session
     root.mkdir(parents=True)
     (root / "session.json").write_text("{}", encoding="utf-8")
@@ -3939,3 +3951,57 @@ def test_recycle_private_session_succeeds_when_stop_delete_clear_files(
         "available": True, "stopped": session, "deleted": session,
     }
     assert not root.exists()
+
+
+def test_fixed_scoped_session_is_not_private_ephemeral(monkeypatch) -> None:
+    monkeypatch.setenv("HERDR_SESSION", "agent-cockpit-next")
+    monkeypatch.delenv("COCKPIT_NEXT_PROFILE", raising=False)
+    assert herdr_client.is_private_ephemeral_session("agent-cockpit-next") is False
+
+
+def test_stop_known_error_is_surface_and_delete_is_not_called(monkeypatch) -> None:
+    deleted: list[str] = []
+    session = "ephemeral-" + "a" * 32
+    monkeypatch.setenv("COCKPIT_NEXT_PROFILE", "ephemeral")
+    monkeypatch.setenv("COCKPIT_EPHEMERAL_ROOT", "/tmp/ephemeral-test-root")
+    monkeypatch.setattr(
+        herdr_client.next_profile, "ephemeral_session_for_root", lambda _root: session,
+    )
+    monkeypatch.setattr(herdr_client.next_profile, "require_session", lambda value: value)
+    monkeypatch.setattr(
+        herdr_client,
+        "stop_session",
+        lambda name: {"available": True, "error": "stop failed"},
+    )
+
+    def delete(name: str) -> dict[str, object]:
+        deleted.append(name)
+        return {"available": True, "deleted": name}
+
+    monkeypatch.setattr(herdr_client, "delete_session", delete)
+    result = herdr_client.recycle_private_session(session)
+    assert result.get("error") == "stop failed"
+    assert deleted == []
+
+
+def test_delete_known_error_is_not_reported_as_success(monkeypatch) -> None:
+    session = "ephemeral-" + "a" * 32
+    monkeypatch.setenv("COCKPIT_NEXT_PROFILE", "ephemeral")
+    monkeypatch.setenv("COCKPIT_EPHEMERAL_ROOT", "/tmp/ephemeral-test-root")
+    monkeypatch.setattr(
+        herdr_client.next_profile, "ephemeral_session_for_root", lambda _root: session,
+    )
+    monkeypatch.setattr(herdr_client.next_profile, "require_session", lambda value: value)
+    monkeypatch.setattr(
+        herdr_client,
+        "stop_session",
+        lambda name: {"available": True, "stopped": name},
+    )
+    monkeypatch.setattr(
+        herdr_client,
+        "delete_session",
+        lambda _name: {"available": True, "error": "delete failed"},
+    )
+    result = herdr_client.recycle_private_session(session)
+    assert result.get("error") == "delete failed"
+    assert "deleted" not in result

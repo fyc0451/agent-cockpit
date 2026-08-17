@@ -605,11 +605,17 @@ class LocalCodexHarness:
             _fail("runtime_identity_unverified")
         return by_pane, by_instance
 
-    def detach(self, *, session: str, pane_id: str) -> None:
-        self._detach(session=session, pane_id=pane_id, attachment_id=None)
+    def detach(
+        self, *, session: str, pane_id: str, recycle_session: bool | None = None,
+    ) -> None:
+        self._detach(
+            session=session, pane_id=pane_id, attachment_id=None,
+            recycle_session=recycle_session,
+        )
 
     def _detach(
         self, *, session: str, pane_id: str, attachment_id: str | None,
+        recycle_session: bool | None = None,
     ) -> None:
         root_fd: int | None = None
         matched_attachment: str | None = None
@@ -653,7 +659,17 @@ class LocalCodexHarness:
                 except OSError:
                     _invalidate_attachment_at(root_fd, matched_attachment)
                     _fail("runtime_unavailable", pane_id=pane_id, unknown=True)
-            if herdr_client.is_private_ephemeral_session(session):
+            should_recycle = recycle_session
+            if should_recycle is None:
+                remaining = (
+                    _session_capability_ids(root_fd, session)
+                    if root_fd is not None else []
+                )
+                should_recycle = (
+                    herdr_client.is_private_ephemeral_session(session)
+                    and remaining == []
+                )
+            if should_recycle:
                 try:
                     recycled = self._recycle_private_session(session)
                 except Exception:
@@ -1147,6 +1163,23 @@ def _read_capability_at(directory_fd: int, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise OSError("invalid capability")
     return value
+
+
+def _session_capability_ids(directory_fd: int, session: str) -> list[str]:
+    found: list[str] = []
+    for name in os.listdir(directory_fd):
+        if not name.endswith(".cap"):
+            continue
+        attachment_id = name[:-4]
+        if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+            continue
+        try:
+            record = _read_capability_at(directory_fd, name)
+        except OSError:
+            continue
+        if record.get("session") == session:
+            found.append(attachment_id)
+    return found
 
 
 def _attachment_for_pane_at(

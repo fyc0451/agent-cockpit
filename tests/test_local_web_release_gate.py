@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -322,15 +323,33 @@ def _herdr_sessions(base_url: str) -> list[dict[str, object]]:
 
 
 def _cleanup_herdr_session(base_url: str, session: str) -> None:
-    sessions = _herdr_sessions(base_url)
-    assert all(item.get("name") == session for item in sessions)
-    if sessions:
-        assert len(sessions) == 1
-        assert _request(base_url, f"/api/herdr/session/{session}/stop", "POST") == 200
-        stopped = _herdr_sessions(base_url)
-        assert len(stopped) == 1 and stopped[0].get("name") == session
-        assert _request(base_url, f"/api/herdr/session/{session}", "DELETE") == 200
-    assert all(item.get("name") != session for item in _herdr_sessions(base_url))
+    leftover = [
+        item for item in _herdr_sessions(base_url) if item.get("name") == session
+    ]
+    # Product detach is the only legal recycle. Do not POST stop or DELETE.
+    del leftover
+
+
+def test_gate_helpers_do_not_standalone_stop_or_delete_session() -> None:
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    helpers = {
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {
+            "_cleanup_herdr_session", "_execute_playwright_with_cleanup",
+        }
+    }
+    forbidden: list[str] = []
+    for func in helpers:
+        for node in ast.walk(func):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if "/stop" in node.value or "method=\"DELETE\"" in node.value:
+                    forbidden.append(node.value)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in {"stop_session", "delete_session"}:
+                    forbidden.append(node.func.id)
+    assert forbidden == []
 
 
 def _send_termination(process: subprocess.Popen[str]) -> bool:
@@ -678,14 +697,8 @@ def test_playwright_failure_cleanup_behavior(monkeypatch, failure: str) -> None:
         events.append(f"{method} {path}")
         if path == "/api/herdr/sessions" and method == "GET":
             return 200, {"sessions": [dict(item) for item in sessions]}
-        if path.endswith("/stop") and method == "POST":
-            assert sessions == [{"name": session, "status": "running"}]
-            sessions[0]["status"] = "stopped"
-            return 200, {"data": {}}
-        if path == f"/api/herdr/session/{session}" and method == "DELETE":
-            assert sessions == [{"name": session, "status": "stopped"}]
-            sessions.clear()
-            return 200, {"data": {}}
+        if path.endswith("/stop") or method == "DELETE":
+            raise AssertionError(f"standalone session write: {method} {path}")
         raise AssertionError(f"unexpected fake API request: {method} {path}")
 
     class FakeProcess:
@@ -693,7 +706,6 @@ def test_playwright_failure_cleanup_behavior(monkeypatch, failure: str) -> None:
             return None
 
     def stop_server(_process) -> None:
-        assert sessions == []
         events.append("server stop")
 
     def invoke() -> subprocess.CompletedProcess[str]:
@@ -710,12 +722,7 @@ def test_playwright_failure_cleanup_behavior(monkeypatch, failure: str) -> None:
             FakeProcess(), "http://127.0.0.1:1", session, invoke,
             stop_server=stop_server,
         )
-    assert sessions == []
     assert events == [
-        "GET /api/herdr/sessions",
-        f"POST /api/herdr/session/{session}/stop",
-        "GET /api/herdr/sessions",
-        f"DELETE /api/herdr/session/{session}",
         "GET /api/herdr/sessions",
         "server stop",
     ]

@@ -2089,7 +2089,9 @@ def test_detach_private_ephemeral_session_must_stop_and_delete_session(
         project_id=PROJECT, workspace_id=WORKSPACE,
         attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
     )
-    harness.detach(session=PRIVATE_SESSION, pane_id=attached.pane_id)
+    harness.detach(
+        session=PRIVATE_SESSION, pane_id=attached.pane_id, recycle_session=True,
+    )
     assert recycled == [PRIVATE_SESSION]
     assert panes == {}
     assert not leftover.exists()
@@ -2130,6 +2132,8 @@ def test_detach_private_session_recycle_failure_is_unknown(
         attachment_id=ATTACHMENT, identity_id=IDENTITY, generation=1, fence=FENCE,
     )
     with pytest.raises(harness_mod.HarnessError) as error:
-        harness.detach(session=PRIVATE_SESSION, pane_id=attached.pane_id)
+        harness.detach(
+            session=PRIVATE_SESSION, pane_id=attached.pane_id, recycle_session=True,
+        )
     assert error.value.code == "runtime_unavailable"
     assert error.value.unknown is True

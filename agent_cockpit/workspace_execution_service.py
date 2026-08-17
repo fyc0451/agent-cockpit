@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import git_checkout_provider as checkout_mod
+from . import herdr_client
 from . import local_codex_harness as harness_mod
 from . import operation_store as operation_mod
 from . import workspace_execution_store as exec_store
@@ -376,62 +377,25 @@ class ExecutionService:
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id,
         )
-        if current is not None and current.state == "outcome_unknown":
+        if current is not None and current.state in {"detaching", "outcome_unknown"}:
             if current.revision != expected_revision:
                 _fail("stale_revision")
-            self._remember_error(
-                project_id, workspace_id, "preparation.detach",
-                idempotency_key, request, "runtime_unavailable", current,
+            view, attachment, checkout, phase = self.store.load_detach_runtime(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=expected_revision,
             )
-            _fail("runtime_unavailable")
+            return self._finish_detach_lifecycle(
+                project_id, workspace_id, work_item_id, idempotency_key,
+                request, view, attachment, checkout, phase,
+            )
         view, attachment, checkout = self.store.begin_detach(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id, expected_revision=expected_revision,
         )
-        try:
-            self._saga(
-                kind="runtime.detach",
-                subject_type="attachment",
-                subject_id=attachment.attachment_id,
-                project_id=project_id,
-                workspace_id=workspace_id,
-                request=request,
-                provider_kind="herdr",
-                step_id="close-pane",
-                action=lambda: self._close(attachment, checkout),
-            )
-        except ExecutionServiceError as exc:
-            if exc.unknown:
-                unknown = self.store.mark_unknown(
-                    project_id=project_id, workspace_id=workspace_id,
-                    work_item_id=work_item_id, expected_revision=view.revision,
-                    pane_id=attachment.pane_id, instance_id=attachment.instance_id,
-                )
-                self._remember_error(
-                    project_id, workspace_id, "preparation.detach",
-                    idempotency_key, request, "runtime_unavailable", unknown,
-                )
-                _fail("runtime_unavailable", unknown=True)
-            restored = self.store.restore_connected(
-                project_id=project_id, workspace_id=workspace_id,
-                work_item_id=work_item_id, expected_revision=view.revision,
-            )
-            self._remember_error(
-                project_id, workspace_id, "preparation.detach",
-                idempotency_key, request, exc.code, restored,
-            )
-            _fail(exc.code)
-        finished = self.store.finish_detach(
-            project_id=project_id, workspace_id=workspace_id,
-            work_item_id=work_item_id, expected_revision=view.revision,
+        return self._finish_detach_lifecycle(
+            project_id, workspace_id, work_item_id, idempotency_key,
+            request, view, attachment, checkout, "close",
         )
-        payload = finished.public_dict()
-        self.store.remember(
-            project_id=project_id, workspace_id=workspace_id,
-            scope="preparation.detach", idempotency_key=idempotency_key,
-            request=request, response=payload,
-        )
-        return payload
 
     def _replay_result(self, replay: object):
         if isinstance(replay, dict) and replay.get("ok") is False:
@@ -555,10 +519,157 @@ class ExecutionService:
     def _close(self, attachment, checkout) -> dict[str, object]:
         if not attachment.pane_id or not attachment.session_name:
             _fail("runtime_unavailable")
-        self.harness.detach(
-            session=attachment.session_name, pane_id=attachment.pane_id,
-        )
+        detach = self.harness.detach
+        try:
+            detach(
+                session=attachment.session_name, pane_id=attachment.pane_id,
+                recycle_session=False,
+            )
+        except TypeError:
+            detach(session=attachment.session_name, pane_id=attachment.pane_id)
         return {"closed": True, "checkout_id": checkout.checkout_id}
+
+    def _pane_gone(self, attachment) -> bool:
+        if not attachment.pane_id:
+            return False
+        confirm = getattr(self.harness, "confirm_absent", None)
+        if confirm is None:
+            return False
+        try:
+            return bool(confirm(
+                session=attachment.session_name or self.session_name,
+                pane_id=attachment.pane_id,
+                instance_id=attachment.instance_id,
+            ))
+        except Exception:
+            return False
+
+    def _recycle_private(self, session: str) -> dict[str, object]:
+        recycle = getattr(self.harness, "_recycle_private_session", None)
+        if recycle is None:
+            return {"available": True, "skipped": True}
+        result = recycle(session)
+        if not isinstance(result, dict):
+            return {"available": True, "error": "malformed provider result"}
+        return result
+
+    def _fail_detach(
+        self, project_id, workspace_id, work_item_id, idempotency_key,
+        request, view, attachment, *, code: str, unknown: bool,
+        phase: str | None, pane_gone: bool,
+    ) -> None:
+        if pane_gone:
+            persisted = self.store.persist_detach_progress(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=view.revision,
+                phase=phase or "close_confirmed", status="outcome_unknown",
+            )
+            self._remember_error(
+                project_id, workspace_id, "preparation.detach",
+                idempotency_key, request, code, persisted,
+            )
+            _fail(code, unknown=True)
+        if unknown:
+            unknown_view = self.store.mark_unknown(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=view.revision,
+                pane_id=attachment.pane_id, instance_id=attachment.instance_id,
+            )
+            self._remember_error(
+                project_id, workspace_id, "preparation.detach",
+                idempotency_key, request, code, unknown_view,
+            )
+            _fail(code, unknown=True)
+        restored = self.store.restore_connected(
+            project_id=project_id, workspace_id=workspace_id,
+            work_item_id=work_item_id, expected_revision=view.revision,
+        )
+        self._remember_error(
+            project_id, workspace_id, "preparation.detach",
+            idempotency_key, request, code, restored,
+        )
+        _fail(code)
+
+    def _finish_detach_lifecycle(
+        self, project_id, workspace_id, work_item_id, idempotency_key,
+        request, view, attachment, checkout, phase: str,
+    ):
+        session = attachment.session_name or self.session_name
+        if phase == "close":
+            try:
+                self._saga(
+                    kind="runtime.detach",
+                    subject_type="attachment",
+                    subject_id=attachment.attachment_id,
+                    project_id=project_id,
+                    workspace_id=workspace_id,
+                    request=request,
+                    provider_kind="herdr",
+                    step_id="close-pane",
+                    action=lambda: self._close(attachment, checkout),
+                )
+            except ExecutionServiceError as exc:
+                pane_gone = self._pane_gone(attachment)
+                self._fail_detach(
+                    project_id, workspace_id, work_item_id, idempotency_key,
+                    request, view, attachment, code=exc.code,
+                    unknown=bool(exc.unknown),
+                    phase="close_confirmed" if pane_gone else None,
+                    pane_gone=pane_gone,
+                )
+            view = self.store.persist_detach_progress(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, expected_revision=view.revision,
+                phase="close_confirmed",
+            )
+            phase = "close_confirmed"
+        if phase in {"close_confirmed", "stop_confirmed"}:
+            private = herdr_client.is_private_ephemeral_session(session)
+            recycle = getattr(self.harness, "_recycle_private_session", None)
+            if private and recycle is not None:
+                claimed, view = self.store.claim_session_retirement(
+                    project_id=project_id, workspace_id=workspace_id,
+                    work_item_id=work_item_id, expected_revision=view.revision,
+                    session_name=session,
+                )
+                if claimed:
+                    try:
+                        recycled = self._recycle_private(session)
+                    except Exception:
+                        self._fail_detach(
+                            project_id, workspace_id, work_item_id,
+                            idempotency_key, request, view, attachment,
+                            code="runtime_unavailable", unknown=True,
+                            phase=phase, pane_gone=True,
+                        )
+                    fault = herdr_client._provider_fault(recycled)
+                    if recycled.get("skipped") is True:
+                        pass
+                    elif fault:
+                        self._fail_detach(
+                            project_id, workspace_id, work_item_id,
+                            idempotency_key, request, view, attachment,
+                            code="runtime_unavailable", unknown=True,
+                            phase=phase, pane_gone=True,
+                        )
+                    else:
+                        view = self.store.persist_detach_progress(
+                            project_id=project_id, workspace_id=workspace_id,
+                            work_item_id=work_item_id,
+                            expected_revision=view.revision,
+                            phase="delete_confirmed", retire=True,
+                        )
+        finished = self.store.finish_detach(
+            project_id=project_id, workspace_id=workspace_id,
+            work_item_id=work_item_id, expected_revision=view.revision,
+        )
+        payload = finished.public_dict()
+        self.store.remember(
+            project_id=project_id, workspace_id=workspace_id,
+            scope="preparation.detach", idempotency_key=idempotency_key,
+            request=request, response=payload,
+        )
+        return payload
 
     def _require_scope(self, project_id: str, workspace_id: str, *, write: bool) -> Any:
         registry = self.registry_provider()

@@ -4191,13 +4191,30 @@ def delete_session(session: str) -> dict[str, Any]:
 
 
 def is_private_ephemeral_session(session: str) -> bool:
-    """True for this runtime's private Herdr session, never a shared named session."""
+    """True only for this runtime's exact ephemeral session, never a fixed name."""
     if not isinstance(session, str) or session == "":
         return False
-    scoped = os.environ.get("HERDR_SESSION")
-    if isinstance(scoped, str) and scoped != "" and session == scoped:
-        return True
-    return session.startswith("ephemeral-")
+    if not next_profile.is_ephemeral():
+        return False
+    raw = os.environ.get(next_profile.EPHEMERAL_ROOT_ENV)
+    if not isinstance(raw, str) or raw == "":
+        return False
+    try:
+        expected = next_profile.ephemeral_session_for_root(Path(raw))
+    except (next_profile.NextProfileError, OSError, ValueError, KeyError):
+        return False
+    return session == expected
+
+
+def _provider_fault(result: object) -> str | None:
+    if not isinstance(result, dict):
+        return "malformed provider result"
+    if result.get("available") is False:
+        return str(result.get("error") or "unavailable")
+    error = result.get("error")
+    if error:
+        return str(error)
+    return None
 
 
 def _private_session_leftovers(session: str) -> list[str]:
@@ -4216,6 +4233,48 @@ def _private_session_leftovers(session: str) -> list[str]:
     return leftovers
 
 
+def confirm_session_stopped(session: str) -> dict[str, Any]:
+    """Authoritative stop probe: stopped, still running, absent, or unknown."""
+    try:
+        next_profile.require_session(session)
+    except next_profile.NextProfileError as exc:
+        return {"available": True, "error": str(exc)}
+    rows = list_sessions()
+    if not isinstance(rows, list):
+        return {"available": True, "error": "session list malformed"}
+    matched = [
+        item for item in rows
+        if isinstance(item, dict) and item.get("name") == session
+    ]
+    if not matched:
+        leftovers = _private_session_leftovers(session)
+        if leftovers:
+            return {
+                "available": True,
+                "error": "session leftovers remain: " + ",".join(leftovers),
+            }
+        return {"available": True, "absent": True}
+    if len(matched) != 1:
+        return {"available": True, "error": "session list malformed"}
+    status = matched[0].get("status")
+    if status == "stopped":
+        return {"available": True, "stopped": session}
+    if status == "running":
+        return {"available": True, "running": True}
+    return {"available": True, "error": "session status malformed"}
+
+
+def confirm_session_absent(session: str) -> dict[str, Any]:
+    """Authoritative delete probe: absent, still present, or unknown."""
+    stopped = confirm_session_stopped(session)
+    fault = _provider_fault(stopped)
+    if fault:
+        return {"available": True, "error": fault}
+    if stopped.get("absent") is True:
+        return {"available": True, "absent": True}
+    return {"available": True, "present": True, "status": stopped.get("status")}
+
+
 def recycle_private_session(session: str) -> dict[str, Any]:
     """Stop and delete a private ephemeral Herdr session after detach.
 
@@ -4230,17 +4289,13 @@ def recycle_private_session(session: str) -> dict[str, Any]:
     except next_profile.NextProfileError as exc:
         return {"available": True, "error": str(exc)}
     stopped = stop_session(session)
-    if stopped.get("available") is False:
-        return {
-            "available": False,
-            "error": str(stopped.get("error") or "session stop unavailable"),
-        }
+    stop_fault = _provider_fault(stopped)
+    if stop_fault:
+        return {"available": True, "error": stop_fault}
     deleted = delete_session(session)
-    if deleted.get("available") is False:
-        return {
-            "available": False,
-            "error": str(deleted.get("error") or "session delete unavailable"),
-        }
+    delete_fault = _provider_fault(deleted)
+    if delete_fault:
+        return {"available": True, "error": delete_fault}
     with _SESSION_BOOTSTRAP_LOCK:
         owned = _SESSION_BOOTSTRAP_PROCESSES.pop(session, None)
     if owned is not None and not _terminate_bootstrap_process(owned):
@@ -4251,8 +4306,6 @@ def recycle_private_session(session: str) -> dict[str, Any]:
             "available": True,
             "error": "session leftovers remain: " + ",".join(leftovers),
         }
-    if stopped.get("error") and deleted.get("error"):
-        return {"available": True, "error": str(deleted.get("error"))}
     return {
         "available": True,
         "stopped": session,

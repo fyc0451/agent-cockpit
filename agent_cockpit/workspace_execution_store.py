@@ -652,6 +652,62 @@ def _insert_reserved_lease(
     )
 
 
+def _receipt_payload(raw: object) -> dict[str, object]:
+    if not isinstance(raw, str) or not raw.startswith("{"):
+        return {}
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _detach_phase(raw: object) -> str:
+    phase = _receipt_payload(raw).get("detach_phase")
+    if phase in {"close", "close_confirmed", "stop_confirmed", "delete_confirmed"}:
+        return str(phase)
+    return "close"
+
+
+def _live_session_consumers(
+    connection: sqlite3.Connection, session_name: str, *, exclude: str,
+) -> int:
+    rows = connection.execute(
+        "SELECT attachment_id, status, native_receipt FROM runtime_attachments "
+        "WHERE session_name=?",
+        (session_name,),
+    ).fetchall()
+    count = 0
+    for row in rows:
+        if row["attachment_id"] == exclude:
+            continue
+        if row["status"] in {
+            "attaching", "connected_readonly", "detaching", "outcome_unknown",
+        }:
+            count += 1
+    return count
+
+
+def _session_retirement_blocked(
+    connection: sqlite3.Connection, session_name: str | None,
+) -> bool:
+    if not session_name:
+        return False
+    rows = connection.execute(
+        "SELECT status, native_receipt FROM runtime_attachments "
+        "WHERE session_name=?",
+        (session_name,),
+    ).fetchall()
+    for row in rows:
+        receipt = _receipt_payload(row["native_receipt"])
+        if (
+            receipt.get("session_retirement") is True
+            and row["status"] in {"detaching", "outcome_unknown"}
+        ):
+            return True
+    return False
+
+
 def _attachment_verified(row: sqlite3.Row) -> bool:
     raw = row["native_receipt"]
     if not isinstance(raw, str) or not raw.startswith("{"):
@@ -1240,6 +1296,214 @@ class WorkspaceExecutionStore:
             native_receipt=None,
         )
 
+    def load_detach_runtime(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_revision: int,
+    ) -> tuple[PreparationView, AttachmentInternal, CheckoutInternal, str]:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        expected_revision = _revision(expected_revision)
+        connection = _connect(self.path, write=False)
+        try:
+            _require_current_schema(connection)
+            prep = connection.execute(
+                "SELECT * FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is None:
+                _fail("preparation_not_found")
+            if int(prep["revision"]) != expected_revision:
+                _fail("stale_revision")
+            if prep["state"] not in {"detaching", "outcome_unknown"}:
+                _fail("lease_conflict")
+            if not prep["attachment_id"] or not prep["checkout_id"]:
+                _fail("lease_conflict")
+            attachment = connection.execute(
+                "SELECT * FROM runtime_attachments WHERE attachment_id=?",
+                (prep["attachment_id"],),
+            ).fetchone()
+            checkout = connection.execute(
+                "SELECT * FROM managed_checkouts WHERE checkout_id=?",
+                (prep["checkout_id"],),
+            ).fetchone()
+            if attachment is None or checkout is None:
+                _fail("lease_conflict")
+            view = _load_preparation(connection, project_id, workspace_id, work_item_id)
+            assert view is not None
+            return (
+                view,
+                AttachmentInternal(
+                    attachment["attachment_id"], attachment["pane_id"],
+                    attachment["instance_id"], attachment["session_name"],
+                    int(attachment["generation"]), attachment["status"],
+                ),
+                CheckoutInternal(
+                    checkout["checkout_id"], checkout["internal_path"],
+                    checkout["source_head"], checkout["source_tree"],
+                ),
+                _detach_phase(attachment["native_receipt"]),
+            )
+        finally:
+            connection.close()
+
+    def persist_detach_progress(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_revision: int, phase: str, retire: bool = False,
+        status: str | None = None,
+    ) -> PreparationView:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        expected_revision = _revision(expected_revision)
+        if phase not in {
+            "close", "close_confirmed", "stop_confirmed", "delete_confirmed",
+        }:
+            _fail("invalid_argument")
+        if status is not None and status not in {"detaching", "outcome_unknown"}:
+            _fail("invalid_argument")
+        connection = _write_txn(self.path)
+        try:
+            prep = connection.execute(
+                "SELECT * FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is None:
+                _fail("preparation_not_found")
+            if int(prep["revision"]) != expected_revision:
+                _fail("stale_revision")
+            if prep["state"] not in {"detaching", "outcome_unknown"}:
+                _fail("lease_conflict")
+            if not prep["attachment_id"]:
+                _fail("lease_conflict")
+            attachment = connection.execute(
+                "SELECT * FROM runtime_attachments WHERE attachment_id=?",
+                (prep["attachment_id"],),
+            ).fetchone()
+            if attachment is None:
+                _fail("lease_conflict")
+            receipt = _receipt_payload(attachment["native_receipt"])
+            receipt["detach_phase"] = phase
+            if retire:
+                receipt["session_retirement"] = True
+            now = _now()
+            new_revision = expected_revision + 1
+            prep_state = status or prep["state"]
+            attachment_status = status or attachment["status"]
+            if connection.execute(
+                "UPDATE runtime_attachments SET native_receipt=?, status=?, "
+                "revision=revision+1, updated_at=? WHERE attachment_id=?",
+                (
+                    _canonical(receipt), attachment_status, now,
+                    attachment["attachment_id"],
+                ),
+            ).rowcount != 1:
+                _fail("store_write_failed")
+            if connection.execute(
+                "UPDATE work_item_preparations SET state=?, revision=?, "
+                "updated_at=? WHERE preparation_id=? AND revision=?",
+                (
+                    prep_state, new_revision, now, prep["preparation_id"],
+                    expected_revision,
+                ),
+            ).rowcount != 1:
+                _fail("stale_revision")
+            view = _load_preparation(connection, project_id, workspace_id, work_item_id)
+            assert view is not None
+            connection.execute("COMMIT")
+            return view
+        except WorkspaceExecutionError:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection.in_transaction:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            _fail("store_write_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
+    def claim_session_retirement(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+        expected_revision: int, session_name: str,
+    ) -> tuple[bool, PreparationView]:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        expected_revision = _revision(expected_revision)
+        if not isinstance(session_name, str) or session_name == "":
+            _fail("invalid_argument")
+        connection = _write_txn(self.path)
+        try:
+            prep = connection.execute(
+                "SELECT * FROM work_item_preparations WHERE project_id=? "
+                "AND workspace_id=? AND work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if prep is None:
+                _fail("preparation_not_found")
+            if int(prep["revision"]) != expected_revision:
+                _fail("stale_revision")
+            if prep["state"] not in {"detaching", "outcome_unknown"}:
+                _fail("lease_conflict")
+            if not prep["attachment_id"]:
+                _fail("lease_conflict")
+            attachment = connection.execute(
+                "SELECT * FROM runtime_attachments WHERE attachment_id=?",
+                (prep["attachment_id"],),
+            ).fetchone()
+            if attachment is None:
+                _fail("lease_conflict")
+            others = _live_session_consumers(
+                connection, session_name, exclude=attachment["attachment_id"],
+            )
+            receipt = _receipt_payload(attachment["native_receipt"])
+            claimed = others == 0
+            if claimed:
+                receipt["session_retirement"] = True
+            if "detach_phase" not in receipt:
+                receipt["detach_phase"] = "close_confirmed"
+            now = _now()
+            new_revision = expected_revision + 1
+            if connection.execute(
+                "UPDATE runtime_attachments SET native_receipt=?, "
+                "revision=revision+1, updated_at=? WHERE attachment_id=?",
+                (_canonical(receipt), now, attachment["attachment_id"]),
+            ).rowcount != 1:
+                _fail("store_write_failed")
+            if connection.execute(
+                "UPDATE work_item_preparations SET revision=?, updated_at=? "
+                "WHERE preparation_id=? AND revision=?",
+                (
+                    new_revision, now, prep["preparation_id"], expected_revision,
+                ),
+            ).rowcount != 1:
+                _fail("stale_revision")
+            view = _load_preparation(connection, project_id, workspace_id, work_item_id)
+            assert view is not None
+            connection.execute("COMMIT")
+            return claimed, view
+        except WorkspaceExecutionError:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection.in_transaction:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            _fail("store_write_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
+
     def fail_attach(
         self, *, project_id: str, workspace_id: str, work_item_id: str,
         expected_revision: int,
@@ -1439,6 +1703,8 @@ class WorkspaceExecutionStore:
                     )
                 else:
                     lease_id = prep["lease_id"]
+                if _session_retirement_blocked(connection, session_name):
+                    _fail("lease_conflict")
                 attachment_id = _new_id("att_")
                 connection.execute(
                     "INSERT INTO runtime_attachments VALUES "
