@@ -10,6 +10,7 @@ import {
   assertCreatedWorkspaceWorkAggregate,
   assertWorkspaceWorkAggregate,
   createWorkspaceWork,
+  listWorkspaceWork,
 } from '../api/workspaceWork'
 import { ProtocolError } from '../api/client'
 import { agentMailStatus, defaultFetchMap, metaOk, REG_P1 } from '../fixtures/api'
@@ -263,29 +264,58 @@ describe('agents API 守卫与请求形状', () => {
     expect(() => assertWorkspaceWorkAggregate(badSource)).toThrow(/source_message_id/)
   })
 
-  it('workspace work 聚合仅接受后端冻结的四种 status', () => {
+  it('production list 仅接受后端冻结的四种 status', async () => {
+    const stubList = (item: unknown) => {
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: { items: [item], next_cursor: null },
+          meta: metaOk,
+        }),
+      })))
+    }
+
     for (const status of ['unassigned', 'working', 'completed', 'failed'] as const) {
       const value = workAggregate()
       ;(value.work_item as { status: unknown }).status = status
-      expect(assertWorkspaceWorkAggregate(value).work_item.status).toBe(status)
+      stubList(value)
+      const result = await listWorkspaceWork(REG_P1, 'w1')
+      expect(result.data.items[0].work_item.status).toBe(status)
     }
 
     for (const status of [
-      'unknown', 'UNASSIGNED', 'done', 'success', 'complete', '', null, 1, true,
+      'UNASSIGNED', 'done', 'success', 'complete', 'cancelled', 'unknown', '', null, 1, true,
     ]) {
       const value = workAggregate()
       ;(value.work_item as { status: unknown }).status = status
-      expect(() => assertWorkspaceWorkAggregate(value)).toThrow(/item\.work_item\.status/)
+      stubList(value)
+      await expect(listWorkspaceWork(REG_P1, 'w1')).rejects.toBeInstanceOf(ProtocolError)
     }
 
     const missing = workAggregate()
     delete (missing.work_item as { status?: unknown }).status
-    expect(() => assertWorkspaceWorkAggregate(missing)).toThrow(/item\.work_item\.status/)
-    expect(() => assertWorkspaceWorkAggregate({ ...workAggregate(), internal: true })).toThrow(/键集/)
+    stubList(missing)
+    await expect(listWorkspaceWork(REG_P1, 'w1')).rejects.toBeInstanceOf(ProtocolError)
+
+    stubList({ ...workAggregate(), internal: true })
+    await expect(listWorkspaceWork(REG_P1, 'w1')).rejects.toBeInstanceOf(ProtocolError)
   })
 
   it('create 201 聚合严格仅接受 unassigned，拒绝终态、别名与 malformed', async () => {
     expect(assertCreatedWorkspaceWorkAggregate(workAggregate()).work_item.status).toBe('unassigned')
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 201,
+      json: async () => ({ data: workAggregate(), meta: metaOk }),
+    })))
+    await expect(createWorkspaceWork(
+      REG_P1,
+      'w1',
+      { body: '任务', acceptance: null, constraints: null },
+      'idem-create-unassigned',
+    )).resolves.toMatchObject({ data: { work_item: { status: 'unassigned' } } })
 
     for (const status of [
       'working', 'completed', 'failed', 'UNASSIGNED', 'done', 'success',

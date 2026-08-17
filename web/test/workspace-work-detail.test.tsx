@@ -20,8 +20,16 @@ import {
 
 const LIST_URL = `/api/projects/${REG_P1}/workspaces/w1/work-items`
 const HOME = '/projects/p1/workspaces/w1'
+const STATUS_LABELS = ['未分配', '工作中', '已完成', '失败'] as const
 
 const meta = metaOk
+
+function expectExclusiveStatus(scope: Element, expected: string) {
+  const text = scope.textContent ?? ''
+  for (const label of STATUS_LABELS) {
+    expect(text.split(label).length - 1).toBe(label === expected ? 1 : 0)
+  }
+}
 
 function scope(id: string) {
   return { projectId: REG_P1, workspaceId: 'w1', workItemId: id }
@@ -533,6 +541,7 @@ describe('Focus 页执行时间线行为', () => {
   function stubWorld(
     details: Record<string, Versioned<unknown>>,
     list: Versioned<unknown[]>,
+    executionReads = false,
   ) {
     let listGets = 0
     const detailGets: Record<string, number> = {}
@@ -549,6 +558,20 @@ describe('Focus 页执行时间线行为', () => {
         listGets += 1
         const items = typeof list === 'function' ? list(listGets) : list
         return { body: { data: { items, next_cursor: null }, meta } }
+      }
+      if (executionReads && url === `/api/projects/${REG_P1}/workspaces/w1/members`) {
+        return { body: { data: { items: [], next_cursor: null }, meta } }
+      }
+      if (executionReads && url.match(/\/work-items\/wrk_[a-z0-9]+\/preparation$/)) {
+        return {
+          status: 404,
+          body: {
+            error: {
+              code: 'preparation_not_found', message: 'preparation not found',
+              retryable: false, request_id: 'req_status_labels', details: {},
+            },
+          },
+        }
       }
       const key = Object.keys(defaultFetchMap())
         .filter((k) => url === k || url.startsWith(`${k}?`))
@@ -617,6 +640,7 @@ describe('Focus 页执行时间线行为', () => {
     ['failed', '失败'],
   ] as const)('列表与选中任务按 %s 显示冻结标签 %s', async (status, label) => {
     window.localStorage.clear()
+    const otherLabels = STATUS_LABELS.filter((item) => item !== label)
     const id = `wrk_${status}`
     const body = `状态任务-${status}`
     const statusDetail = status === 'working'
@@ -624,16 +648,31 @@ describe('Focus 页执行时间线行为', () => {
       : status === 'failed'
         ? failedDetail(id)
         : detail(id).data
-    const world = stubWorld({ [id]: statusDetail }, [aggregate(id, body, status)])
+    const world = stubWorld({ [id]: statusDetail }, [aggregate(id, body, status)], true)
     renderApp(`${HOME}?work=${id}`)
 
     const task = await screen.findByTitle(body)
     expect(task).toHaveTextContent(label)
-    const savedMeta = document.querySelector('.focus-task-meta')
-    expect(savedMeta).toHaveTextContent(label)
+    expectExclusiveStatus(task, label)
+    for (const otherLabel of otherLabels) {
+      expect(within(task).queryByText(otherLabel, { exact: true })).not.toBeInTheDocument()
+    }
+
+    const savedMeta = document.querySelector<HTMLElement>('.focus-task-meta')
+    expect(savedMeta).not.toBeNull()
+    expect(within(savedMeta!).getByText(label, { exact: true })).toBeVisible()
+    expectExclusiveStatus(savedMeta!, label)
+    for (const otherLabel of otherLabels) {
+      expect(within(savedMeta!).queryByText(otherLabel, { exact: true })).not.toBeInTheDocument()
+    }
+
+    const preparation = await screen.findByRole('region', { name: '执行准备' })
+    expect(within(preparation).getByText(label, { exact: true })).toBeVisible()
+    expectExclusiveStatus(preparation, label)
+    for (const otherLabel of otherLabels) {
+      expect(within(preparation).queryByText(otherLabel, { exact: true })).not.toBeInTheDocument()
+    }
     if (status !== 'unassigned') {
-      const preparation = await screen.findByRole('region', { name: '执行准备' })
-      expect(within(preparation).getByText(label)).toBeVisible()
       expect(within(preparation).queryAllByRole('button')).toHaveLength(0)
       expect(within(preparation).queryByRole('textbox')).not.toBeInTheDocument()
       expect(within(preparation).queryByRole('radio')).not.toBeInTheDocument()
