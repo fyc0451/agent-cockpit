@@ -6,14 +6,17 @@ import { fetchChatSkills, type ChatSkill } from '../../api/chatSession'
 import {
   agentEmoji,
   clipboardImageFile,
-  COMPOSER_SKILLS,
+  composerSkills,
+  composerPreviewLabel,
   mentionQueryAt,
+  messageNeedsFold,
   parseMentionTargets,
   shouldSendOnEnter,
   type ChatMember,
 } from './model'
 
 interface ComposerProps {
+  session?: string
   members: ChatMember[]
   leader: ChatMember | null
   value: string
@@ -26,6 +29,7 @@ interface ComposerProps {
 }
 
 export function Composer({
+  session = '',
   members,
   leader,
   value,
@@ -47,8 +51,9 @@ export function Composer({
   const [activeIdx, setActiveIdx] = useState(0)
   const [menuOpen, setMenuOpen] = useState(false)
   const [fileAccept, setFileAccept] = useState('*/*')
-  const [skills, setSkills] = useState<ChatSkill[]>([...COMPOSER_SKILLS])
+  const [skills, setSkills] = useState<ChatSkill[]>(() => composerSkills(session))
   const [open, setOpen] = useState(false)
+  const [tall, setTall] = useState(false)
   const composingRef = useRef(false)
 
   const expand = () => {
@@ -60,17 +65,26 @@ export function Composer({
     setMenuOpen(false)
     setMention(null)
     setOpen(false)
+    setTall(false)
   }
+  const longInput = messageNeedsFold(value)
+
   useEffect(() => {
-    if (value.trim()) setOpen(true)
+    if (value.trim() && !messageNeedsFold(value)) setOpen(true)
   }, [value])
+
+  useEffect(() => {
+    setSkills(composerSkills(session))
+  }, [session])
 
   useEffect(() => {
     let alive = true
     fetchChatSkills()
       .then((rows) => {
         if (!alive || rows.length === 0) return
-        setSkills(rows)
+        const builtins = composerSkills(session)
+        const extra = rows.filter((row) => !builtins.some((item) => item.id === row.id))
+        setSkills([...builtins, ...extra])
       })
       .catch(() => {
         /* 扫不到就用内置 herdr/mail */
@@ -78,7 +92,7 @@ export function Composer({
     return () => {
       alive = false
     }
-  }, [])
+  }, [session])
 
   const candidates = useMemo(() => {
     if (!mention) return []
@@ -231,7 +245,7 @@ export function Composer({
         <textarea
           id="gc-composer-input"
           ref={textareaRef}
-          rows={open ? 3 : 1}
+          rows={open ? (tall ? 12 : 3) : 1}
           value={value}
           disabled={disabled}
           aria-hidden={!open}
@@ -303,12 +317,12 @@ export function Composer({
           {!open && (
             <button
               type="button"
-              className="gc-composer-open"
+              className={`gc-composer-open${longInput ? ' is-long' : ''}`}
               data-testid="gc-composer-preview"
               disabled={disabled}
               onClick={() => expand()}
             >
-              {disabled ? '先选择或创建一个会话…' : value.trim() ? value : '写消息'}
+              {disabled ? '先选择或创建一个会话…' : composerPreviewLabel(value)}
             </button>
           )}
           {open && (
@@ -327,6 +341,18 @@ export function Composer({
                 '暂无成员'
               )}
             </span>
+          )}
+          {open && value.trim() !== '' && (
+            <button
+              type="button"
+              className="gc-composer-toggle gc-composer-toggle--grow"
+              aria-pressed={tall}
+              aria-label={tall ? '收起输入全文' : '展开输入全文'}
+              title={tall ? '收起输入全文' : '展开输入全文'}
+              onClick={() => setTall((current) => !current)}
+            >
+              {tall ? '收起全文' : '展开全文'}
+            </button>
           )}
           <button
             type="button"

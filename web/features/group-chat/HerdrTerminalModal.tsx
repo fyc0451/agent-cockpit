@@ -494,7 +494,7 @@ export function HerdrTerminalModal({ session, onClose }: HerdrTerminalModalProps
         onClick={(event) => event.stopPropagation()}
       >
         <div className="gc-herdr-terminal-head">
-          <div>
+          <div className="gc-herdr-terminal-head-copy">
             <h3 className="gc-modal-title">Herdr 终端</h3>
             <p className="gc-modal-sub">{session}</p>
           </div>
@@ -591,16 +591,16 @@ export function HerdrTerminalModal({ session, onClose }: HerdrTerminalModalProps
             >
               <span aria-hidden>⛶</span>
             </button>
-            <button
-              type="button"
-              className="gc-terminal-head-button gc-terminal-close"
-              onClick={onClose}
-              aria-label="关闭终端"
-              title="关闭终端"
-            >
-              <span aria-hidden>×</span>
-            </button>
           </div>
+          <button
+            type="button"
+            className="gc-terminal-head-button gc-terminal-close"
+            onClick={onClose}
+            aria-label="关闭终端"
+            title="关闭终端"
+          >
+            <span aria-hidden>×</span>
+          </button>
         </div>
         {keysOpen && (
           <div className="gc-term-keys" role="toolbar" aria-label="手机电脑键盘">

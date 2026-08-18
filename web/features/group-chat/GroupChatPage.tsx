@@ -732,7 +732,7 @@ export function GroupChatPage() {
               {
                 id: `e${++entrySeq.current}`,
                 kind: 'error',
-                text: `会话已打开，但成员 Agent Mail 未登记：${result.agent_mail.reason || '未知原因'}`,
+                text: `会话已打开，但成员 Agent Mail 未登记：${result.agent_mail.reason || result.agent_mail.error || '未知原因'}`,
                 ts: Date.now(),
               },
             ])
@@ -954,6 +954,7 @@ export function GroupChatPage() {
             </div>
           )}
           <Composer
+            session={activeSession || ''}
             members={members}
             leader={leader}
             value={composer}

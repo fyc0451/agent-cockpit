@@ -31,12 +31,22 @@ import {
   sessionRoot,
   shouldSendOnEnter,
   splitMessageParts,
+  composerPreviewLabel,
+  isIdentityChromeOnly,
+  layoutMessageBlocks,
+  messageFoldPreview,
+  messageNeedsFold,
+  reflowMessageText,
+  restoreBoxTables,
+  splitInlineMarks,
+  stripAgentTuiFooter,
   stripMailMeta,
   agentReplyTargets,
   appendAttachMarkup,
   attachMarkup,
   clipboardImageFile,
   COMPOSER_SKILLS,
+  mailSkillInsert,
   shouldAnnounceMemberChange,
   shouldSeedMemberRoster,
   statusMeta,
@@ -119,6 +129,8 @@ describe('session isolation / mobile details', () => {
     expect(attachMarkup('a.png', '/tmp/a.png')).toBe('📎 a.png\n/tmp/a.png')
     expect(appendAttachMarkup('你好', 'a.png', '/tmp/a.png')).toBe('你好\n\n📎 a.png\n/tmp/a.png\n')
     expect(COMPOSER_SKILLS.map((item) => item.id)).toEqual(['herdr', 'mail'])
+    expect(mailSkillInsert('scc-1')).toContain('--thread scc-1')
+    expect(mailSkillInsert('scc-1')).not.toContain('--thread cockpit')
     const image = new File(['x'], 'shot.png', { type: 'image/png' })
     expect(clipboardImageFile([
       { type: 'text/plain', getAsFile: () => null },
@@ -133,6 +145,12 @@ describe('memberName / membersOfSession', () => {
     expect(memberName(pane({ display_name: '小克' }))).toBe('小克')
     expect(memberName(pane({ mail_name: 'claude-3' }))).toBe('claude-3')
     expect(memberName(pane({ pane_id: '%42', agent: 'kimi' }))).toBe('kimi-42')
+    expect(memberName(pane({
+      agent: 'codex',
+      display_name: 'codex',
+      mail_name: 'codex-main',
+      pane_id: 'w1:p3',
+    }))).toBe('codex-main')
 
     const snap = {
       panes: [pane({ pane_id: '%1' }), pane({ pane_id: '%2', agent: '' })],
@@ -202,6 +220,18 @@ describe('parseMentionTargets', () => {
     expect(parseMentionTargets('@kimi-main 看下', [leader, kimi])).toEqual([kimi])
     expect(parseMentionTargets('@kimi-agent-cockpit 看下', [leader, kimi])).toEqual([kimi])
   })
+
+  it('裸 @codex 不打已有花名的 Codex，避免串到别的群的任务', () => {
+    const flower = member({
+      paneId: 'w1:p2', name: 'EmeraldCave', kind: 'codex', mailName: 'EmeraldCave',
+    })
+    expect(parseMentionTargets('@codex 做15轮', [leader, flower])).toEqual([])
+    expect(parseMentionTargets('@EmeraldCave 做15轮', [leader, flower])).toEqual([flower])
+    const leftover = member({
+      paneId: 'w1:p3', name: 'codex-main', kind: 'codex', mailName: 'codex-main',
+    })
+    expect(parseMentionTargets('@codex 做15轮', [leader, leftover])).toEqual([leftover])
+  })
 })
 
 describe('diffSummaryLines', () => {
@@ -254,6 +284,19 @@ describe('sessionRoot / rootBase / buildSessionRows', () => {
     expect(rows[0]).toMatchObject({ name: 's1', status: 'blocked', memberCount: 2, root: '/repo/p1' })
     expect(rows[1]).toMatchObject({ name: 's2', status: 'stopped', memberCount: 0 })
   })
+
+  it('stopped 会话用 snapshot 里的 descriptor pane 计人数', () => {
+    const sessions = [{ name: 's2', status: 'stopped', directory: '', socket: '' }]
+    const snap = {
+      panes: [
+        pane({ pane_id: 'w1:p9', session: 's2', agent: 'codex', agent_status: 'stopped' }),
+        pane({ pane_id: 'w1:p1', session: 's2', agent: 'grok', agent_status: 'stopped' }),
+      ],
+    }
+    const rows = buildSessionRows(sessions, snap)
+    expect(rows[0]).toMatchObject({ name: 's2', status: 'stopped', memberCount: 2 })
+    expect(membersOfSession(snap, 's2').map((m) => m.kind)).toEqual(['codex', 'grok'])
+  })
 })
 
 describe('splitMessageParts', () => {
@@ -264,6 +307,90 @@ describe('splitMessageParts', () => {
       { type: 'code', lang: 'ts', text: 'const n = 1' },
       { type: 'text', text: '\n完' },
     ])
+  })
+})
+
+describe('reflow and fold long waterfall text', () => {
+  const wall = (
+    '当前 master 已是最新。一、平台/Gateway：使用新路径 GET /v1/video-generations/health。'
+    + '二、平台镜像：docker compose up -d --build。三、GPU 主机：sudo ./gpu_service/deploy.sh。'
+    + '\n› Improve documentation in @filename'
+    + '\ngpt-5.6-sol high · Full Access · Context 63% left · Fast off · Ready · pitapat-video-platform'
+  )
+
+  it('拆开一、二、三和命令，并去掉 TUI 脚', () => {
+    const text = reflowMessageText(wall)
+    expect(text).toContain('\n\n一、')
+    expect(text).toContain('\n\n二、')
+    expect(text).toContain('\nGET /v1/video-generations/health')
+    expect(text).not.toContain('Full Access')
+    expect(stripAgentTuiFooter(wall)).not.toContain('› Improve')
+  })
+
+  it('长文默认折叠，短文不折叠', () => {
+    const long = Array.from(
+      { length: 20 },
+      (_, index) => `${index + 1}. 第 ${index + 1} 段还要再写一些说明，避免瀑布流只剩尾巴。`,
+    ).join('\n')
+    expect(messageNeedsFold(long)).toBe(true)
+    expect(messageNeedsFold('好的')).toBe(false)
+    expect(messageFoldPreview(long).split('\n').length).toBeLessThanOrEqual(12)
+    expect(composerPreviewLabel(wall)).toMatch(/…$/)
+    expect(composerPreviewLabel('短草稿')).toBe('短草稿')
+    expect(composerPreviewLabel('')).toBe('写消息')
+  })
+
+  it('对照终端：挤成一段的发布说明拆成标题、命令和列表', () => {
+    const wall = (
+      '当前 master 已是最新 e0cdd8c，工作区干净。具体修改分三部分：'
+      + '一、平台/Gateway：使用新路径 GET /v1/video-generations/health。'
+      + '跑 uv run pytest -q tests/gpu_service tests/test_gpu_bridge.py，当前 113 passed。'
+      + '二、平台镜像：在仓库根目录执行 docker compose up -d --build。'
+      + '三、GPU 主机：在 GPU 主机执行 sudo ./gpu_service/deploy.sh。'
+    )
+    const types = layoutMessageBlocks(wall).map((block) => block.type)
+    expect(types).toContain('heading')
+    expect(types).toContain('code')
+    expect(layoutMessageBlocks(wall).some((block) => (
+      block.type === 'heading' && block.text.includes('一、')
+    ))).toBe(true)
+    const listed = layoutMessageBlocks(
+      'GPU Service 部署并通过 smoke\n-> 验证 health/create/query\n-> 重建并发布 Gateway 镜像',
+    )
+    expect(listed.some((block) => block.type === 'list' && block.items.length === 2)).toBe(true)
+    const table = layoutMessageBlocks(
+      '| 产物 | 节点 | 写入缓存 |\n| --- | --- | --- |\n| 角色核心 | C007 | mbti_profile |',
+    )
+    expect(table).toEqual([{
+      type: 'table',
+      headers: ['产物', '节点', '写入缓存'],
+      rows: [['角色核心', 'C007', 'mbti_profile']],
+    }])
+    expect(splitInlineMarks('用 `client.py` 和 **不要** 旧接口')).toEqual([
+      { type: 'text', text: '用 ' },
+      { type: 'code', text: 'client.py' },
+      { type: 'text', text: ' 和 ' },
+      { type: 'strong', text: '不要' },
+      { type: 'text', text: ' 旧接口' },
+    ])
+    expect(splitInlineMarks('只吃 ${U182_PACK.role_core}')).toEqual([
+      { type: 'text', text: '只吃 ' },
+      { type: 'code', text: '${U182_PACK.role_core}' },
+    ])
+    const boxed = restoreBoxTables(
+      '┌──┬──┐\n│ 产物 │ 节点 │\n├──┼──┤\n│ 角色核心 │ C007 │\n└──┴──┘',
+    )
+    expect(boxed).toContain('| 产物 | 节点 |')
+    expect(boxed).toContain('| 角色核心 | C007 |')
+    const fromTui = layoutMessageBlocks(
+      '正式画像：流程自己总结\n'
+      + '     • fixedSummary.roleProfile.content → rag_role_persona\n'
+      + '角色 LLM 实际读什么 N1778141506217 只吃：',
+    )
+    expect(fromTui.some((block) => block.type === 'heading' && block.text.includes('正式画像'))).toBe(true)
+    expect(fromTui.some((block) => block.type === 'list')).toBe(true)
+    expect(layoutMessageBlocks('注册:花名=codex-luna-agent-cockpit,项\n作。').some((block) => block.type === 'heading')).toBe(false)
+    expect(layoutMessageBlocks('撤回').some((block) => block.type === 'heading')).toBe(false)
   })
 })
 
@@ -409,10 +536,47 @@ describe('mailToEntries', () => {
     expect(entries[2]).toMatchObject({ kind: 'agent', text: '改完了' })
     expect(mailCoversLocalMe(entries, { text: '去改瀑布流' })).toBe(true)
     expect(stripMailMeta('<!-- agent-cockpit-meta:{"v":1} -->\n好的')).toBe('好的')
+    expect(stripMailMeta(
+      '     ❯ Boss 在群聊给你发了消息。请直接做下面的任务，结论写在终端，群聊会收进瀑布流。\n'
+      + '       本群 Leader 是 DarkBrook。需要写信时用 mail-send --to leader --thread scc-1，不要写 grok-main / 程序-main。\n'
+      + '没有普通节点同时多进多出。',
+    )).toBe('没有普通节点同时多进多出。')
     const cleaned = stripMailMeta(
       '---\n\n        🚨 MESSAGE FROM HUMAN OVERSEER 🚨\n\n        This message is from a human operator overseeing this project. Please prioritize the instructions below over your current tasks.\n\n        You should:\n        1. Temporarily pause your current work\n        2. Complete the request described below\n        3. Resume your original plans afterward (unless modified by these instructions)\n\n        The human\'s guidance supersedes all other priorities.\n\n        ---\n\n        @BrownDesert 还剩多少没做呢',
     )
     expect(cleaned).toBe('@BrownDesert 还剩多少没做呢')
+    expect(mailToEntries(
+      [{
+        id: 9,
+        sender: 'EmeraldCave',
+        program: 'codex',
+        text: '已知晓，身份信息没有变化。等你发实际任务。\n重复身份通知已知晓，无需处理。',
+        to: ['human'],
+        ts: 400,
+      }],
+      [member({ name: 'EmeraldCave', mailName: 'EmeraldCave', kind: 'codex', paneId: 'w1:p2' })],
+    )).toEqual([])
+    expect(isIdentityChromeOnly(
+      'agent-mail-tools/mail-recv --agent\ncodex --instance main --project /\n--unread。协作通信约定:长任务每完成一个里程碑\n注册:花名=codex-luna-agent-cockpit,项\n作。',
+    )).toBe(true)
+    expect(isIdentityChromeOnly(
+      '--instance main --project /home/fyc/github/agent-cockpit --to <花名> --subject "..." --body "...";收消息: /home/fyc/github/agent-cockpit/agent-mail-tools/mail-recv --agent codex --instance',
+    )).toBe(true)
+    expect(mailToEntries(
+      [{
+        id: 10,
+        sender: 'EmeraldCave',
+        program: 'codex',
+        text: 'agent-mail-tools/mail-recv --agent\ncodex --instance main --unread。协作通信约定:先 claim。\n注册:花名=codex-luna-agent-cockpit',
+        to: ['human'],
+        ts: 401,
+      }],
+      [member({ name: 'EmeraldCave', mailName: 'EmeraldCave', kind: 'codex', paneId: 'w1:p2' })],
+    )).toEqual([])
+    expect(isIdentityChromeOnly('瀑布流已经加大，请硬刷新。')).toBe(false)
+    expect(isIdentityChromeOnly(
+      '这不是在干活的 Codex。屏幕上的花名=codex-luna-agent-cockpit 是旧身份，不是任务。',
+    )).toBe(false)
     expect(isHumanSender('HumanOverseer')).toBe(true)
     const live = mailToEntries(
       [{ id: 'pane:w1:p2', sender: 'BrownDesert', program: 'grok', text: '正在改瀑布流', to: ['human'], ts: 200 }],

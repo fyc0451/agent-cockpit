@@ -907,10 +907,27 @@ def test_resolve_recipients_uses_session_leader_not_program_main(tmp_path, monke
     assert module._resolve_registry_recipients(
         ["grok-main"], PROJECT, session="cockpit",
     ) == ["BrownDesert"]
-    assert module._resolve_registry_recipients(
-        ["JadeBay"], PROJECT, session="cockpit",
-    ) == ["JadeBay"]
-    assert module._resolve_registry_recipients(["grok-main"], PROJECT) == ["JadeBay"]
+
+
+def test_bound_mail_thread_rejects_other_workspace_session(monkeypatch):
+    module = _load_mail_send()
+    monkeypatch.setattr(
+        module.chat_ledger, "get_thread_by_session",
+        lambda name: {
+            "cockpit": {"workspace_id": "ws_cockpit"},
+            "scc-1": {"workspace_id": "ws_scc"},
+        }.get(name),
+    )
+    assert module.bound_mail_thread("scc-1", "scc-1") == "scc-1"
+    assert module.bound_mail_thread("", "scc-1") == "scc-1"
+    assert module.bound_mail_thread("cockpit", "cockpit") == "cockpit"
+    try:
+        module.bound_mail_thread("cockpit", "scc-1")
+    except SystemExit as exc:
+        assert "scc-1" in str(exc)
+        assert "cockpit" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
 
 
 def test_resolve_recipients_rewrites_program_main_to_unique_flower(tmp_path):

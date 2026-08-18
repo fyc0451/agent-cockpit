@@ -279,6 +279,7 @@ def test_board_snapshot_adds_identity_from_session_binding(monkeypatch):
         ],
     }
     monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.herdr_client, "list_active_launch_descriptors", lambda: [])
     monkeypatch.setattr(
         server.mail_projects,
         "get",
@@ -305,7 +306,9 @@ def test_board_snapshot_omits_identity_without_binding(monkeypatch):
         "panes": [{"session": "demo", "pane_id": "w1:p1", "agent": "codex"}],
     }
     monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.herdr_client, "list_active_launch_descriptors", lambda: [])
     monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
+    monkeypatch.setattr(server, "_chat_workspace_root", lambda *_: None)
     monkeypatch.setattr(
         server,
         "_identity_name",
@@ -313,6 +316,142 @@ def test_board_snapshot_omits_identity_without_binding(monkeypatch):
     )
 
     assert "mail_name" not in server._board_snapshot()["panes"][0]
+
+
+def test_board_snapshot_uses_chat_workspace_when_unbound(monkeypatch, tmp_path):
+    workspace = tmp_path / "scc"
+    workspace.mkdir()
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    snapshot = {
+        "sessions": [{"session": "scc-1", "directory": "/sessions/scc-1"}],
+        "panes": [{"session": "scc-1", "pane_id": "w1:p2", "agent": "grok"}],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.herdr_client, "list_active_launch_descriptors", lambda: [])
+    monkeypatch.setattr(server.herdr_client, "get_launch_descriptor", lambda *_: None)
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
+    monkeypatch.setattr(
+        server, "_chat_workspace_root",
+        lambda name: workspace if name == "scc-1" else None,
+    )
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda project, agent, instance=None: (
+            seen.append((str(project), agent)) or "DarkBrook"
+        ),
+    )
+
+    result = server._board_snapshot()
+
+    assert result["panes"][0]["mail_name"] == "DarkBrook"
+    assert seen == [(str(workspace), "grok")]
+
+
+def test_board_snapshot_fills_flower_for_stub_descriptor(monkeypatch, tmp_path):
+    workspace = tmp_path / "scc"
+    workspace.mkdir()
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    snapshot = {
+        "sessions": [{"session": "scc-1", "directory": "/sessions/scc-1"}],
+        "panes": [{"session": "scc-1", "pane_id": "w1:p2", "agent": "grok"}],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.herdr_client, "list_active_launch_descriptors", lambda: [])
+    monkeypatch.setattr(
+        server.herdr_client, "get_launch_descriptor",
+        lambda *_: {"session": "scc-1", "pane_id": "w1:p2", "agent": "grok", "name": "grok-1"},
+    )
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
+    monkeypatch.setattr(
+        server, "_chat_workspace_root",
+        lambda name: workspace if name == "scc-1" else None,
+    )
+    monkeypatch.setattr(server, "_identity_name", lambda *_a, **_k: "DarkBrook")
+
+    result = server._board_snapshot()
+
+    assert result["panes"][0]["mail_name"] == "DarkBrook"
+
+
+def test_board_snapshot_ignores_leftover_session_leader(monkeypatch, tmp_path):
+    from agent_cockpit import chat_roster
+
+    workspace = tmp_path / "scc"
+    workspace.mkdir()
+    instance_id = "i-2amw527jf3zreyzsuceags3mc4"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    monkeypatch.setattr(chat_roster, "LEADERS_DIR", tmp_path / "leaders")
+    chat_roster.set_session_leader("scc-1", "codex", "codex")
+    server.herdr_client.save_launch_descriptor(
+        session="scc-1", pane_id="w1:p3", name=instance_id, kind="codex",
+        args=[], agent="codex", instance_id=instance_id, display_name="codex",
+    )
+    snapshot = {
+        "sessions": [{"session": "scc-1", "directory": "/sessions/scc-1"}],
+        "panes": [
+            {"session": "scc-1", "pane_id": "w1:p2", "agent": "grok"},
+            {"session": "scc-1", "pane_id": "w1:p3", "agent": "codex"},
+        ],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.herdr_client, "list_active_launch_descriptors", lambda: [])
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
+    monkeypatch.setattr(
+        server, "_chat_workspace_root",
+        lambda name: workspace if name == "scc-1" else None,
+    )
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda project, agent, instance=None: (
+            None if instance else ("DarkBrook" if agent == "grok" else "codex-main")
+        ),
+    )
+
+    result = server._board_snapshot()
+    names = {pane["pane_id"]: pane.get("mail_name") for pane in result["panes"]}
+    assert names["w1:p2"] == "DarkBrook"
+    assert names["w1:p3"] == "codex-main"
+
+
+def test_board_snapshot_unique_instance_uses_project_mailbox(monkeypatch, tmp_path):
+    workspace = tmp_path / "scc"
+    workspace.mkdir()
+    instance_id = "i-2amw527jf3zreyzsuceags3mc4"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="scc-1", pane_id="w1:p3", name=instance_id, kind="codex",
+        args=[], agent="codex", instance_id=instance_id, display_name="codex",
+    )
+    snapshot = {
+        "sessions": [{"session": "scc-1", "directory": "/sessions/scc-1"}],
+        "panes": [{"session": "scc-1", "pane_id": "w1:p3", "agent": "codex"}],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.herdr_client, "list_active_launch_descriptors", lambda: [])
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_: None)
+    monkeypatch.setattr(
+        server, "_chat_workspace_root",
+        lambda name: workspace if name == "scc-1" else None,
+    )
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda project, agent, instance=None: (
+            None if instance else "codex-main"
+        ),
+    )
+
+    result = server._board_snapshot()
+
+    assert result["panes"][0]["mail_name"] == "codex-main"
 
 
 def test_board_snapshot_keeps_same_kind_managed_instances_separate(monkeypatch, tmp_path):

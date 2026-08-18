@@ -127,6 +127,7 @@ export interface ChatBindCandidate {
 export interface ChatAgentMail {
   ok: boolean
   reason?: string
+  error?: string
 }
 
 export interface ChatOpenResult {
@@ -205,6 +206,7 @@ export async function openChatWorkspace(workspaceId: string): Promise<ChatOpenRe
       ? {
           ok: mail.ok === true,
           reason: typeof mail.reason === 'string' ? mail.reason : undefined,
+          error: typeof mail.error === 'string' ? mail.error : undefined,
         }
       : undefined,
   }

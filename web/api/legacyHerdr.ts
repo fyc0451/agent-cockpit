@@ -373,6 +373,15 @@ export function herdrTerminalWebSocketUrl(termId: string): string {
   return `${scheme}//${window.location.host}/api/term/${encodeURIComponent(termId)}?replay=1`
 }
 
+export function paneLiveWebSocketUrl(session: string, paneId: string): string {
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return (
+    `${scheme}//${window.location.host}` +
+    `/api/chat/sessions/${encodeURIComponent(session)}` +
+    `/panes/${encodeURIComponent(paneId)}/live`
+  )
+}
+
 export function composeSessionLayout(
   session: string,
   paneIds: string[],

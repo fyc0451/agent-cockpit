@@ -1314,6 +1314,9 @@ def _validate_dev_server_environment(
     if host not in FIXED_HOSTS:
         raise NextProfileError("next_profile_invalid:COCKPIT_HOST")
     for name, wanted in expected.items():
+        # 与 session() 一致：dev 允许多 herdr session，不锁死 github-agent-cockpit-next。
+        if name == "HERDR_SESSION":
+            continue
         if env.get(name) != wanted:
             raise NextProfileError(f"next_profile_invalid:{name}")
     if host == "0.0.0.0":

@@ -494,6 +494,48 @@ def test_chat_repair_agent_mail_failure_returns_reason(
     assert result["reason"] == "mail registration failed"
 
 
+def test_chat_repair_skips_descriptor_only_missing_mail(isolated_ledger, monkeypatch):
+    workspace = {"id": "ws_000000000001", "path": str(isolated_ledger)}
+    monkeypatch.setattr(
+        server.herdr_client, "list_sessions",
+        lambda: [{"name": "platform-1", "status": "running", "directory": str(isolated_ledger)}],
+    )
+    monkeypatch.setattr(
+        server, "_board_snapshot",
+        lambda: {
+            "sessions": [],
+            "panes": [
+                {
+                    "session": "platform-1", "pane_id": "w1:p2", "agent": "codex",
+                    "mail_name": "DarkGlacier", "cwd": str(isolated_ledger),
+                },
+                {
+                    "session": "platform-1", "pane_id": "w1:p9", "agent": "grok",
+                    "from_descriptor": True, "cwd": str(isolated_ledger),
+                },
+            ],
+        },
+    )
+    _patch_repair_mail_project(monkeypatch, isolated_ledger)
+    monkeypatch.setattr(
+        server, "api_herdr_session_init_mail",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("descriptor stub 不应去登记")),
+    )
+
+    result = server._chat_repair_agent_mail(workspace, "platform-1")
+
+    assert result == {"ok": True, "project": str(isolated_ledger), "attempted": False}
+
+
+def test_mail_repair_result_maps_error_to_reason():
+    mapped = server._mail_repair_result({
+        "ok": False, "error": "请选择该 session 使用的 Agent Mail 通信项目",
+        "code": "mail_project_required",
+    })
+    assert mapped["reason"] == "请选择该 session 使用的 Agent Mail 通信项目"
+    assert server._mail_repair_result({"ok": False})["reason"] == "init-mail 未完成"
+
+
 def test_start_session_uses_herdr_flag_and_detaches(monkeypatch):
     from agent_cockpit import herdr_client
     from agent_cockpit import terminal
@@ -740,6 +782,104 @@ def test_resolve_chat_mail_only_uses_current_session(
     ) == [current_flower]
 
 
+def test_resolve_bare_codex_does_not_hijack_unique_flower(monkeypatch):
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "cockpit", "pane_id": "w1:p2", "agent": "codex",
+            "mail_name": "EmeraldCave", "display_name": "EmeraldCave",
+        }]},
+    )
+    monkeypatch.setattr(server, "_flower_for_agent", lambda *_: "EmeraldCave")
+    assert server._resolve_chat_mail_recipients("cockpit", ["codex"]) == ["codex"]
+    assert server._resolve_chat_mail_recipients("cockpit", ["codex-p2"]) == ["EmeraldCave"]
+
+
+def test_resolve_codex_uses_hub_leftover_mailbox(isolated_ledger, monkeypatch):
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "scc-1", "pane_id": "w1:p3", "agent": "codex",
+            "mail_name": "codex", "display_name": "codex",
+        }]},
+    )
+    monkeypatch.setattr(server, "_chat_workspace_root", lambda _s: isolated_ledger)
+    monkeypatch.setattr(server, "_identity_name", lambda *_a, **_k: "codex-main")
+    assert server._resolve_chat_mail_recipients("scc-1", ["codex"]) == ["codex-main"]
+    assert server._resolve_chat_mail_recipients("scc-1", ["codex-p3"]) == ["codex-main"]
+
+
+def test_resolve_grok_p2_uses_workspace_registry_flower(isolated_ledger, monkeypatch):
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "scc-1", "pane_id": "w1:p2", "agent": "grok",
+            "mail_name": "", "display_name": "",
+        }]},
+    )
+    monkeypatch.setattr(server, "_chat_workspace_root", lambda _s: isolated_ledger)
+    monkeypatch.setattr(server, "_identity_name", lambda *_a, **_k: "DarkBrook")
+    assert server._resolve_chat_mail_recipients("scc-1", ["grok-p2"]) == ["DarkBrook"]
+
+
+def test_notify_wakes_pane_when_mail_name_empty_but_flower_matches(isolated_ledger, monkeypatch):
+    sent: list[tuple] = []
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "scc-1", "pane_id": "w1:p2", "agent": "grok",
+            "mail_name": "", "display_name": "",
+        }, {
+            "session": "cockpit", "pane_id": "w1:p1", "agent": "grok",
+            "mail_name": "BrownDesert", "display_name": "BrownDesert",
+        }]},
+    )
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {"leader_mail_name": "DarkBrook"})
+    monkeypatch.setattr(server, "_flower_for_agent", lambda session, agent: (
+        "DarkBrook" if session == "scc-1" and agent == "grok" else None
+    ))
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    server._notify_chat_recipients("scc-1", ["DarkBrook"], "分析下97号流程的草稿")
+    assert len(sent) == 1
+    assert sent[0][0] == "scc-1"
+    assert sent[0][1] == "w1:p2"
+    assert sent[0][3] == "prompt"
+    assert "分析下97号流程的草稿" in sent[0][2]
+    assert "结论写在终端" in sent[0][2]
+    assert "瀑布流" in sent[0][2]
+    assert "mail-recv" not in sent[0][2]
+
+
+def test_notify_does_not_wake_ambiguous_same_kind_panes(isolated_ledger, monkeypatch):
+    sent: list[tuple] = []
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "scc-1", "pane_id": "w1:p2", "agent": "grok",
+            "mail_name": "", "display_name": "",
+        }, {
+            "session": "scc-1", "pane_id": "w1:p4", "agent": "grok",
+            "mail_name": "", "display_name": "",
+        }]},
+    )
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {})
+    monkeypatch.setattr(server, "_flower_for_agent", lambda *_: "DarkBrook")
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    server._notify_chat_recipients("scc-1", ["DarkBrook"], "不要乱叫")
+    assert sent == []
+
+
 def test_harvest_status_survives_reload(isolated_ledger, monkeypatch):
     path = isolated_ledger / "state" / "chat-harvest.json"
     monkeypatch.setenv("COCKPIT_STATE_DIR", str(isolated_ledger / "state"))
@@ -982,6 +1122,11 @@ def test_send_chat_mail_uses_overseer_and_notifies(isolated_ledger, monkeypatch)
         lambda **kwargs: sent.append(kwargs) or {"ok": True},
     )
     monkeypatch.setattr(server, "_notify_chat_recipients", lambda *a: notified.append(a))
+    bound = []
+    monkeypatch.setattr(
+        server, "_bind_mail_project",
+        lambda session, path: bound.append((session, path)) or (path, "/sessions/ping-1"),
+    )
     response = client.post(
         f"/api/chat/sessions/{thread['herdr_session']}/mail",
         headers=_headers(),
@@ -992,6 +1137,44 @@ def test_send_chat_mail_uses_overseer_and_notifies(isolated_ledger, monkeypatch)
     assert sent and sent[0]["recipients"] == ["BrownDesert"]
     assert sent[0]["thread_id"] == "ping-1"
     assert notified == [("ping-1", ["BrownDesert"], "@BrownDesert 在吗")]
+    assert bound and bound[0][0] == "ping-1"
+
+
+def test_send_chat_mail_notifies_when_hub_rejects_recipient(isolated_ledger, monkeypatch):
+    client = _client()
+    workspace, thread = _workspace_with_thread(client, isolated_ledger / "scc", "scc-1")
+    notified = []
+    monkeypatch.setattr(
+        server.next_profile, "require_project",
+        lambda path: str(Path(path).expanduser().resolve()),
+    )
+    monkeypatch.setattr(
+        server, "_agent_mail_status",
+        lambda: {"write_available": True, "available": True},
+    )
+    monkeypatch.setattr(
+        server.db, "project_by_canonical_key",
+        lambda key: {"id": 5, "slug": "home-fyc-badge-all-system-service-scc", "human_key": key},
+    )
+    monkeypatch.setattr(
+        server, "_resolve_chat_mail_recipients",
+        lambda _s, dest: dest,
+    )
+    monkeypatch.setattr(
+        server.hub_client, "overseer_send",
+        lambda **_k: (_ for _ in ()).throw(RuntimeError("Overseer 发信失败: recipients")),
+    )
+    monkeypatch.setattr(server, "_notify_chat_recipients", lambda *a: notified.append(a))
+    monkeypatch.setattr(server, "_bind_mail_project", lambda *_a, **_k: ("/scc", "/sessions/scc-1"))
+    monkeypatch.setattr(server, "_chat_repair_agent_mail", lambda *_: {"ok": True})
+    response = client.post(
+        f"/api/chat/sessions/{thread['herdr_session']}/mail",
+        headers=_headers(),
+        json={"text": "@codex 做15轮", "to": ["codex"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["mail_error"]
+    assert notified == [("scc-1", ["codex"], "@codex 做15轮")]
 
 
 def test_send_chat_mail_registers_missing_hub_project(isolated_ledger, monkeypatch):
@@ -1068,6 +1251,69 @@ def test_open_stopped_restores_descriptor_members(isolated_ledger, monkeypatch):
     assert response.status_code == 200
     assert response.json()["started"] is True
     assert launched == [("stop-1", "codex", "resume --last")]
+
+
+def test_snapshot_merges_descriptor_members_for_stopped_session(monkeypatch):
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": []})
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_active_launch_descriptors",
+        lambda: [
+            {
+                "session": "stop-1",
+                "name": "codex-1",
+                "kind": "codex",
+                "agent": "codex",
+                "pane_id": "w1:p2",
+                "workdir": "/repo",
+                "display_name": "CalmMarsh",
+                "state": "active",
+            },
+            {
+                "session": "stop-1",
+                "name": "grok-1",
+                "kind": "grok",
+                "agent": "grok",
+                "pane_id": "w1:p1",
+                "workdir": "/repo",
+                "display_name": "BrownDesert",
+                "state": "active",
+            },
+        ],
+    )
+    snap = server._merge_descriptor_roster({"panes": []})
+    members = [
+        pane for pane in snap["panes"]
+        if pane.get("session") == "stop-1" and pane.get("from_descriptor")
+    ]
+    assert {pane["agent"] for pane in members} == {"codex", "grok"}
+    assert all(pane["agent_status"] == "stopped" for pane in members)
+
+
+def test_restore_session_members_starts_each_descriptor_not_one_kind(monkeypatch):
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": []})
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_session_launch_descriptors",
+        lambda _s: [
+            {"name": "codex-1", "agent": "codex", "kind": "codex", "pane_id": "w1:p2", "args": []},
+            {"name": "codex-2", "agent": "codex", "kind": "codex", "pane_id": "w1:p3", "args": []},
+        ],
+    )
+    launched = []
+    monkeypatch.setattr(
+        server.herdr_client,
+        "start_agent",
+        lambda session, workdir, agent, **kwargs: launched.append(
+            (session, agent, kwargs.get("label"), kwargs.get("args")),
+        ) or {"available": True, "pane_id": f"new-{len(launched)}"},
+    )
+    restored = server._restore_session_members("stop-1", "/repo")
+    assert [row["name"] for row in restored] == ["codex-1", "codex-2"]
+    assert launched == [
+        ("stop-1", "codex", "codex-1", "resume --last"),
+        ("stop-1", "codex", "codex-2", "resume --last"),
+    ]
 
 
 def test_files_and_mail_use_workspace_path(isolated_ledger, monkeypatch):
@@ -1250,6 +1496,55 @@ def test_ensure_session_leader_records_first_named_agent(isolated_ledger, monkey
     assert chat_roster.get_session_leader("cockpit")["leader_mail_name"] == "BrownDesert"
 
 
+def test_mail_list_strips_stored_tui_chrome_without_rewriting_ledger(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "tui-clean", "chat-1")
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    monkeypatch.setattr(server, "_harvest_settled_replies", lambda *_a, **_k: None)
+    chrome = (
+        "┃  ◆ Thought for 0.1s\n"
+        "真回复还在。                    12:28 PM\n"
+        "     Worked for 1m15s                    stop  [hooks: 1]\n"
+    )
+    kept = chat_ledger.append_message(
+        "chat-1", kind="agent", sender="BrownDesert", text=chrome, to=["human"],
+    )
+    chat_ledger.append_message(
+        "chat-1", kind="me", sender="human",
+        text="正文会讨论 Worked for / Thought for / ┃ 过滤规则，这句必须保留。",
+    )
+    chat_ledger.append_message(
+        "chat-1", kind="agent", sender="BrownDesert",
+        text="     Worked for 2m57s                    stop  [hooks: 1]\n",
+        to=["human"],
+    )
+    response = client.get("/api/chat/sessions/chat-1/mail", headers=_headers())
+    assert response.status_code == 200
+    texts = [row["text"] for row in response.json()["messages"]]
+    assert texts == [
+        "真回复还在。",
+        "正文会讨论 Worked for / Thought for / ┃ 过滤规则，这句必须保留。",
+    ]
+    stored = {row["id"]: row["text"] for row in chat_ledger.list_messages("chat-1")}
+    assert stored[kept["id"]] == chrome.strip()
+    assert "Worked for" in stored[kept["id"]]
+
+
+def test_extract_harvest_text_keeps_structured_sections():
+    text = server._extract_harvest_text(
+        "1. Gateway / Driver 修改\n\n"
+        "GET /v1/video-generations/health\n"
+        "POST /v1/video-generations/create\n\n"
+        "2. 平台镜像修改\n\n"
+        "docker compose up -d --build\n\n"
+        "3. GPU 主机修改\n\n"
+        "sudo ./gpu_service/deploy.sh\n"
+    )
+    assert "1. Gateway / Driver 修改" in text
+    assert "2. 平台镜像修改" in text
+    assert "sudo ./gpu_service/deploy.sh" in text
+
+
 def test_extract_harvest_text_strips_overseer_shell():
     text = server._extract_harvest_text(
         "Boss 在群聊给你发了消息，请用 mail-recv --unread 领取并回复。\n"
@@ -1257,6 +1552,283 @@ def test_extract_harvest_text_strips_overseer_shell():
     )
     assert text == "好，瀑布流继续走消息，不把整屏 pane 塞回去。"
     assert server._extract_harvest_text("Boss 在群聊给你发了消息") == ""
+
+
+def test_hub_message_rejects_foreign_session_sender():
+    assert server._hub_message_in_chat(
+        {"text": "15轮", "thread": "cockpit", "sender": "BrownDesert"},
+        allowed_threads={"cockpit"},
+        allowed_senders={"human", "browndesert"},
+    )
+    assert not server._hub_message_in_chat(
+        {"text": "15轮", "thread": "cockpit", "sender": "codex-main"},
+        allowed_threads={"cockpit"},
+        allowed_senders={"human", "browndesert"},
+    )
+
+
+def test_same_chat_reply_detects_hub_and_harvest_duplicates():
+    harvest = (
+        "当前没有独立的 status=0 草稿行。画布草稿是：\n"
+        "三份 graph sha256 一致：f337cdb5ac2230c4784b1d772c15d469efcd9f417380b2ebcd8da6d248eb1ecc。\n"
+        "没有普通节点同时多进多出。\n"
+        "全图唯一同时多进多出的是合法汇合节点 N1784001000002「初始化数据汇聚」。\n"
+        "U182_DIRECTOR_CONTEXT_PACK code 入 4 出 1。\n"
+        "N1782967000001 空操作-日程false汇聚 code 入 2 出 1。\n"
+        "N17797766474350 Canonical成品直通 code 出 3。\n"
+    )
+    hub = (
+        "Boss / Leader：\n"
+        "已 dump 并分析 app97 当前草稿。\n"
+        "三份 graph sha256 一致：f337cdb5ac2230c4784b1d772c15d469efcd9f417380b2ebcd8da6d248eb1ecc。\n"
+        "**没有普通节点同时多进多出。**\n"
+        "全图只有 1 个节点同时多进多出，但是合法的 variable-aggregator：N1784001000002。\n"
+        "U182_DIRECTOR_CONTEXT_PACK code 入 4 / 出 1。\n"
+        "N1782967000001 空操作-日程false汇聚 code 入 2 / 出 1。\n"
+        "N17797766474350 Canonical成品直通 code 出 3。\n"
+    )
+    assert server._same_chat_reply(harvest, hub)
+    assert not server._same_chat_reply("收到", "好的，我去改")
+    old = "地数据库、运行目录、模型或密钥；release 使用 ECS 既有受限权限环境文件。成 `pitapat-video-platform:e0cdd8c-taskcenter-r1`。"
+    new = "后台 Key 在 Gateway 容器的环境变量 ADMIN_API_KEY 中，不在 /app/api/admin_key.txt。"
+    assert not server._same_harvest_copy(old, new)
+
+
+def test_merge_chat_timeline_collapses_local_retries_and_hub_copy():
+    text = "@grok-p2  分析下97号流程的草稿，是否有普通节点，多进多出的情况"
+    merged = server._merge_chat_timeline(
+        [
+            {"id": "msg_a", "sender": "human", "text": text, "ts": 1},
+            {"id": "msg_b", "sender": "human", "text": text, "ts": 2},
+        ],
+        [{"id": "3920", "sender": "human", "text": text, "ts": 3}],
+    )
+    assert len(merged) == 1
+    assert merged[0]["text"] == text
+
+
+def test_merge_chat_timeline_keeps_longer_duplicate():
+    local = [{
+        "id": "msg_harvest", "sender": "DarkBrook",
+        "text": "没有普通节点同时多进多出。N1784001000002 初始化数据汇聚。U182_DIRECTOR_CONTEXT_PACK 入4。",
+        "ts": 1,
+    }]
+    hub = [{
+        "id": "3925", "sender": "DarkBrook",
+        "text": (
+            "已 dump 并分析 app97。没有普通节点同时多进多出。"
+            "N1784001000002 初始化数据汇聚 入7出3。"
+            "U182_DIRECTOR_CONTEXT_PACK 入4出1。"
+            "N1782967000001 入2出1。详细报告在 ANALYSIS.md。"
+        ),
+        "ts": 2,
+    }]
+    merged = server._merge_chat_timeline(local, hub)
+    assert len(merged) == 1
+    assert merged[0]["id"] == "3925"
+
+
+def test_merge_chat_timeline_keeps_later_distinct_claude_reply():
+    old = (
+        "agent_cockpit/ 下有 17 个 Python 测试文件，但没有 requirements.txt。"
+        "前端测试全绿，后端测试跑不起来。量化对比 deepseek-harness vs agent-cockpit。"
+        "已经好了 87%。剩下的 98 处硬编码 + 死代码清理。"
+    )
+    new = (
+        "核心发现：1 个致命 bug，herdr_client 的 agent 字段永远是 null，20 分钟可修。"
+        "2 个架构决策待定：单页还是多页、死代码清不清理。"
+        "5 类技术债：样式硬编码、后端测试、文档过时、安全配置、性能未验证。"
+        "系统完成度约 80%，卡点在后端协议适配那一个 join。"
+    )
+    assert not server._same_chat_reply(old, new)
+    merged = server._merge_chat_timeline(
+        [
+            {"id": "msg_old", "sender": "GrayFalcon", "text": old, "ts": 1},
+            {"id": "msg_new", "sender": "GrayFalcon", "text": new, "ts": 2},
+        ],
+        [],
+    )
+    assert [row["id"] for row in merged] == ["msg_old", "msg_new"]
+
+
+def test_same_chat_reply_treats_wrap_variants_as_one_harvest():
+    a = (
+        "agent_cockpit/ 下有 17 个 Python 测试文件，但没有 requirements.txt。"
+        "前端测试全绿。已经好了 87%。剩下的 98 处硬编码 + 死代码清理。"
+        "量化对比 deepseek-harness vs agent-cockpit，令牌纯度 54%。"
+    )
+    b = (
+        "量化对比 deepseek-harness vs agent-cockpit，令牌纯度 54%。"
+        "agent_cockpit/ 下有 17 个 Python 测试文件，但没有 requirements.txt。"
+        "前端测试全绿。已经好了 87%。剩下的 98 处硬编码 + 死代码清理。"
+    )
+    assert server._same_chat_reply(a, b)
+
+
+def test_extract_harvest_text_unwraps_narrow_terminal_wrap():
+    text = server._extract_harvest_text(
+        "  ¥0.00000000\n"
+        "  当前 WS 能收到 tts\n"
+        "  start，但没有回复正\n"
+        "  文，也未创建 Workflow\n"
+        "  Run。因此这是生成链路\n"
+        "  阻断。\n"
+        "  - 有效完成：0/15\n"
+        "  - Provider 调用：0\n"
+        "  1. WS 连接正常，能收到\n"
+        "  hello、ready_new 和\n"
+        "  角色信息。\n"
+    )
+    assert "¥0.00000000" in text
+    assert not text.startswith("¥0.00000000当前")
+    assert "当前 WS 能收到 tts start，但没有回复正文，也未创建 Workflow Run。因此这是生成链路阻断。" in text
+    assert "- 有效完成：0/15" in text
+    assert "- Provider 调用：0" in text
+    assert "1. WS 连接正常，能收到 hello、ready_new 和角色信息。" in text
+
+
+def test_extract_harvest_text_strips_hash_and_memory_recap():
+    text = server._extract_harvest_text(
+        "58d539ed3e4d42f6b00653046c5f43204a2d632d6c308ba0d`。\n"
+        "        attempt 计为有效轮次。\n"
+        "• 共享记忆 doctor 报了 1 个新记录格式错误。\n"
+        "• 已将结论打印到终端，群聊瀑布流可直接收取。\n"
+        "卡在 WS 网关接受消息之后、工作流真正启动之前。\n"
+        "Provider 调用为 0。\n"
+    )
+    assert "卡在 WS 网关" in text
+    assert "Provider 调用为 0" in text
+    assert "58d539ed" not in text
+    assert "共享记忆 doctor" not in text
+    assert "已将结论打印" not in text
+
+
+def test_extract_harvest_text_strips_codex_recap_diff():
+    text = server._extract_harvest_text(
+        "32 +- 当前草稿与最新发布图一致。\n"
+        "    33\n"
+        "       ⋮\n"
+        "    36 +- 尚未制作修复 Candidate。\n"
+        "• Edited tools/m2her-verify/handoffs/report.md (+2 -0)\n"
+        "    19 +静态校验实际输出：BLOCKED\n"
+        "    21  ## 预期断言\n"
+        "     8  duration: 约 15 分钟\n"
+        "✔ 查询 app97 最新草稿版本并冻结只读 Graph 身份\n"
+        "• Ran python3 tools/agent-memory-doctor.py\n"
+        "  └ ERROR session-outcome\n"
+        "• Updated Plan\n"
+        "› Run /review on my current changes\n"
+        "普通节点多进：2 个\n"
+        "同一个普通节点同时多进多出：0 个\n"
+    )
+    assert "普通节点多进：2 个" in text
+    assert "同时多进多出：0" in text
+    assert "Edited tools" not in text
+    assert "Updated Plan" not in text
+    assert "32 +-" not in text
+    assert "Run /review" not in text
+    assert "预期断言" not in text
+    assert "duration:" not in text
+    assert "冻结只读" not in text
+    assert "Full Access" not in text
+
+
+def test_extract_harvest_text_strips_prompt_and_git_chrome():
+    text = server._extract_harvest_text(
+        "   master ~/badge/all_system/service/scc                          142K / 500K\n"
+        "     ❯ Boss 在群聊给你发了消息。请直接做下面的任务，结论写在终端，群聊会收进瀑布流。\n"
+        "       本群 Leader 是 DarkBrook。需要写信时用 mail-send --to leader --thread scc-1，不要写 grok-main / 程序-main。\n"
+        "没有普通节点同时多进多出。\n"
+        "全图唯一多进多出是 aggregator 初始化数据汇聚。\n"
+    )
+    assert "没有普通节点同时多进多出" in text
+    assert "初始化数据汇聚" in text
+    assert "Boss 在群聊" not in text
+    assert "" not in text
+    assert "142K" not in text
+    assert "mail-send" not in text
+
+
+def test_extract_harvest_text_restores_box_table():
+    text = server._extract_harvest_text(
+        "正式画像：流程自己总结\n"
+        "┌──────────┬──────────┬────────────┐\n"
+        "│ 产物     │ 节点     │ 写入缓存   │\n"
+        "├──────────┼──────────┼────────────┤\n"
+        "│ 角色核心（四节） │ 自动生成精简角色核心 → C007 去动作种子 │ mbti_profile │\n"
+        "│ 用户核心 + 组合差异 │ 自动生成用户核心与组合差异 │ behavior_contract │\n"
+        "└──────────┴──────────┴────────────┘\n"
+        "hash 没变就不重跑。\n"
+    )
+    assert "| 产物 | 节点 | 写入缓存 |" in text
+    assert "| 角色核心（四节） | 自动生成精简角色核心 → C007 去动作种子 | mbti_profile |" in text
+    assert "behavior_contract" in text
+    assert "┌" not in text
+    assert "…▲" not in text
+    served = server._ledger_chat_mail({
+        "id": "msg_table", "session": "scc-1", "kind": "agent",
+        "sender": "DarkBrook", "text": text, "to": ["human"], "ts": 1,
+    })
+    assert served is not None
+    assert "| 产物 | 节点 | 写入缓存 |" in served["text"]
+    assert "| --- | --- | --- |" in served["text"]
+    assert "| 产物 | 节点 | 写入缓存 || ---" not in served["text"]
+
+
+def test_extract_harvest_text_drops_leftover_identity_inject():
+    dumped = (
+        "agent-mail-tools/mail-recv --agent\n"
+        "  codex --instance main --project /\n"
+        "  home/fyc/github/agent-cockpit\n"
+        "  --unread。协作通信约定:长任务每完成一个里程碑检查一次未读消息；\n"
+        "  注册:花名=codex-luna-agent-cockpit,项\n"
+        "  目=/home/fyc/github/agent-cockpit。发\n"
+        "作。\n"
+    )
+    assert server._extract_harvest_text(dumped) == ""
+    served = server._ledger_chat_mail({
+        "id": "msg_id", "session": "cockpit", "kind": "agent",
+        "sender": "EmeraldCave", "text": dumped, "to": ["human"], "ts": 1,
+    })
+    assert served is None
+    kept = server._extract_harvest_text(
+        "瀑布流已经加大。请硬刷新 8790。\n"
+        "下一步再看终端滑动。\n"
+    )
+    assert "瀑布流已经加大" in kept
+    wrapped = (
+        '--instance main --project /home/fyc/github/agent-cockpit --to <花名> '
+        '--subject "..." --body "...";收消息: /home/fyc/github/agent-cockpit/'
+        'agent-mail-tools/mail-recv --agent codex --instance\n'
+        '  main --project /home/fyc/github/agent-cockpit --unread。'
+        '协作通信约定:长任务每完成一个里程碑检查一次未读消息；\n'
+    )
+    assert server._extract_harvest_text(wrapped) == ""
+    assert server._ledger_chat_mail({
+        "id": "msg_wrap", "session": "cockpit", "kind": "agent",
+        "sender": "EmeraldCave", "text": wrapped, "to": ["human"], "ts": 2,
+    }) is None
+
+
+def test_extract_harvest_text_keeps_diagnosis_about_leftover_identity():
+    text = server._extract_harvest_text(
+        "…\n"
+        "这不是在干活的 Codex。这是 leftover 壳在空转。\n"
+        "屏幕上的花名=codex-luna-agent-cockpit 和 --instance main 是旧身份，不是任务结论。\n"
+        "UserPromptSubmit hook 失败是因为缺环境变量。瀑布流空是因为这些壳被藏掉了。\n"
+        "• UserPromptSubmit hook (failed)\n"
+        "error: hook exited with code 1\n"
+        "❯\n"
+        "post_tool_use\n"
+    )
+    assert "这不是在干活的 Codex" in text
+    assert "旧身份" in text
+    assert "瀑布流空" in text
+    assert "hook (failed)" not in text
+    assert "hook exited" not in text
+    assert "post_tool_use" not in text
+    assert "❯" not in text
+    assert not text.lstrip().startswith("…")
 
 
 def test_extract_harvest_text_strips_grok_tui_chrome():
@@ -1320,7 +1892,13 @@ def test_harvest_settled_reply_is_one_message_not_live_pane(isolated_ledger, mon
     first = client.get("/api/chat/sessions/chat-1/mail", headers=_headers())
     assert first.status_code == 200
     assert first.json()["messages"] == []
+    server._harvest_settled_replies("chat-1")
+    mid = client.get("/api/chat/sessions/chat-1/mail", headers=_headers())
+    assert [row["text"] for row in mid.json()["messages"]] == [
+        "好，瀑布流继续走消息，不把整屏 pane 塞回去。",
+    ]
     panes[0]["agent_status"] = "idle"
+    server._harvest_settled_replies("chat-1")
     second = client.get("/api/chat/sessions/chat-1/mail", headers=_headers())
     messages = second.json()["messages"]
     assert [row["text"] for row in messages] == ["好，瀑布流继续走消息，不把整屏 pane 塞回去。"]
@@ -1330,3 +1908,67 @@ def test_harvest_settled_reply_is_one_message_not_live_pane(isolated_ledger, mon
     assert [row["text"] for row in third.json()["messages"]] == [
         "好，瀑布流继续走消息，不把整屏 pane 塞回去。",
     ]
+
+
+def test_harvest_idle_reply_without_working_edge(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-idle", "plat-1")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._HARVEST_STATUS_LOADED = True
+    server._PANE_LAST_STATUS[("plat-1", "w1:p2")] = "idle"
+    panes = [{
+        "session": "plat-1",
+        "pane_id": "w1:p2",
+        "agent": "codex",
+        "agent_status": "idle",
+        "mail_name": "DarkGlacier",
+        "display_name": "codex-1",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": "后台 Key 在 Gateway 容器的环境变量 ADMIN_API_KEY 中。"},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("plat-1")
+    first = client.get("/api/chat/sessions/plat-1/mail", headers=_headers())
+    assert [row["text"] for row in first.json()["messages"]] == [
+        "后台 Key 在 Gateway 容器的环境变量 ADMIN_API_KEY 中。",
+    ]
+    second = client.get("/api/chat/sessions/plat-1/mail", headers=_headers())
+    assert len(second.json()["messages"]) == 1
+
+
+def test_harvest_working_updates_same_message(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-live", "chat-2")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._HARVEST_STATUS_LOADED = True
+    panes = [{
+        "session": "chat-2",
+        "pane_id": "w1:p1",
+        "agent": "grok",
+        "agent_status": "working",
+        "mail_name": "BrownDesert",
+        "display_name": "BrownDesert",
+    }]
+    drafts = iter((
+        {"summary": "这是第一稿，结论还没写完。"},
+        {"summary": "这是第一稿，结论还没写完。后面补上完整结论，瀑布流应更新同一条。"},
+    ))
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server.herdr_client, "pane_summary", lambda *_a, **_k: next(drafts))
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-2")
+    first = client.get("/api/chat/sessions/chat-2/mail", headers=_headers()).json()["messages"]
+    assert [row["text"] for row in first] == ["这是第一稿，结论还没写完。"]
+    server._harvest_settled_replies("chat-2")
+    second = client.get("/api/chat/sessions/chat-2/mail", headers=_headers()).json()["messages"]
+    assert len(second) == 1
+    assert second[0]["id"] == first[0]["id"]
+    assert "完整结论" in second[0]["text"]

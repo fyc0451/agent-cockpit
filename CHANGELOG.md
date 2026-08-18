@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Harvest a pane reply while it is still `working`, and replace the same
+  ledger bubble when a later extract is longer, so group chat no longer
+  waits for idle before the waterfall shows a terminal conclusion.
+
 - Publish version 0.3.5 as the first operator-preview of Cockpit 3.0 group
   chat on the :8790 source server. A workspace is a directory, each session
   is a 1:1 Herdr binding, Agent Mail stays durable, and Herdr is runtime
@@ -20,6 +24,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Skip leftover Codex/Claude identity inject when a pane hook has no
+  next-profile environment, and treat leftover names (`codex-luna`,
+  `codex-main`, `*-agent-*`) as no identity so `mail-hook-check` exits 0
+  instead of looping identity chrome into the TUI.
+- Keep diagnosis lines that mention leftover keywords, and still drop
+  wrap leftover inject so the waterfall does not hide a short Chinese
+  diagnosis or replay hook chrome.
 - Treat already-stopped or missing Herdr sessions as a successful delete,
   and clear a deleted session from the URL so the page does not refresh in
   a loop.

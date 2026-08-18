@@ -2,21 +2,104 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { AgentIcon } from './AgentIcon'
-import { avatarColor, canRecallEntry, isLiveEntryId, splitMessageParts } from './model'
+import {
+  avatarColor,
+  canRecallEntry,
+  isLiveEntryId,
+  layoutMessageBlocks,
+  messageFoldPreview,
+  messageNeedsFold,
+  reflowMessageText,
+  splitInlineMarks,
+  splitMessageParts,
+} from './model'
+
+function InlineText({ text }: { text: string }) {
+  return (
+    <>
+      {splitInlineMarks(text).map((part, index) => {
+        if (part.type === 'code') return <code key={index} className="gc-msg-inline">{part.text}</code>
+        if (part.type === 'strong') return <strong key={index}>{part.text}</strong>
+        return <span key={index}>{part.text}</span>
+      })}
+    </>
+  )
+}
+
+function LayoutBlocks({ text }: { text: string }) {
+  return layoutMessageBlocks(text).map((block, index) => {
+    if (block.type === 'heading') {
+      return <div key={index} className="gc-msg-h"><InlineText text={block.text} /></div>
+    }
+    if (block.type === 'list') {
+      return (
+        <ul key={index} className="gc-msg-list">
+          {block.items.map((item, itemIndex) => (
+            <li key={itemIndex}><InlineText text={item} /></li>
+          ))}
+        </ul>
+      )
+    }
+    if (block.type === 'table') {
+      return (
+        <div key={index} className="gc-msg-table-wrap">
+          <table className="gc-msg-table">
+            <thead>
+              <tr>
+                {block.headers.map((cell, cellIndex) => (
+                  <th key={cellIndex}><InlineText text={cell} /></th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={cellIndex}><InlineText text={cell} /></td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+    if (block.type === 'code') {
+      return (
+        <pre key={index} className="gc-msg-code">
+          <code>{block.text}</code>
+        </pre>
+      )
+    }
+    return <div key={index} className="gc-msg-text"><InlineText text={block.text} /></div>
+  })
+}
 
 function MessageBody({ text }: { text: string }) {
-  const parts = splitMessageParts(text)
+  const [open, setOpen] = useState(false)
+  const fold = messageNeedsFold(text)
+  const shown = fold && !open ? messageFoldPreview(text) : reflowMessageText(text)
+  const parts = splitMessageParts(shown)
   if (parts.length === 0) return <div className="gc-msg-body" />
   return (
-    <div className="gc-msg-body">
+    <div className={`gc-msg-body${fold && !open ? ' is-folded' : ''}`}>
       {parts.map((part, index) =>
         part.type === 'code' ? (
           <pre key={index} className="gc-msg-code" data-lang={part.lang || undefined}>
             <code>{part.text}</code>
           </pre>
         ) : (
-          <div key={index} className="gc-msg-text">{part.text}</div>
+          <LayoutBlocks key={index} text={part.text} />
         ),
+      )}
+      {fold && (
+        <button
+          type="button"
+          className="gc-msg-fold"
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? '收起' : '展开全文'}
+        </button>
       )}
     </div>
   )

@@ -40,6 +40,17 @@ describe('installH5TouchRecorder H5 真机事件记录仪', () => {
     uninstall()
   })
 
+  it('HashRouter 的 /#/?debug=1 与 /#/chat?debug=1 同样打开 overlay', () => {
+    window.history.replaceState({}, '', '/#/?debug=1')
+    const first = installH5TouchRecorder()
+    expect(overlay()).not.toBeNull()
+    first()
+    window.history.replaceState({}, '', '/#/chat?debug=1')
+    installH5TouchRecorder()
+    expect(overlay()).not.toBeNull()
+    expect(typeof window.__h5dbg).toBe('function')
+  })
+
   it('?debug=1 时创建底部 overlay 并暴露 window.__h5dbg', () => {
     window.history.replaceState({}, '', '/?debug=1')
     installH5TouchRecorder()

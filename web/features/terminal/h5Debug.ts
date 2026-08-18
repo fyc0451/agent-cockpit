@@ -29,12 +29,19 @@ const EVENT_TYPES = [
 const TERMINAL_SELECTOR = '.gc-herdr-terminal-surface, .terminal-surface'
 const MAX_LINES = 120
 
+/** HashRouter 下 `/?debug=1` 和 `/#/?debug=1`、`/#/chat?debug=1` 都算打开。 */
+export function h5DebugEnabled(): boolean {
+  return /(?:[?&#])debug=1(?:&|$)/.test(
+    `${window.location.search}${window.location.hash}`,
+  )
+}
+
 /**
- * 挂载真机事件记录仪。仅当 location.search 含 ?debug=1 时生效，否则零副作用。
+ * 挂载真机事件记录仪。仅当 URL 含 debug=1 时生效，否则零副作用。
  * 返回卸载函数（移除 overlay、监听与 window.__h5dbg）。
  */
 export function installH5TouchRecorder(): () => void {
-  if (!/[?&]debug=1/.test(window.location.search)) return () => {}
+  if (!h5DebugEnabled()) return () => {}
 
   const box = document.createElement('div')
   box.dataset.testid = 'h5-debug-overlay'

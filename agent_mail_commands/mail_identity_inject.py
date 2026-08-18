@@ -17,11 +17,15 @@ from agent_cockpit import next_profile
 from .common import REGISTRY_DIR, helper_command, slugify
 
 
-next_profile.require_helper_environment((
-    "COCKPIT_DATA_DIR",
-    "COCKPIT_STATE_DIR",
-    "COCKPIT_LAUNCH_DESCRIPTORS_PATH",
-))
+try:
+    next_profile.require_helper_environment((
+        "COCKPIT_DATA_DIR",
+        "COCKPIT_STATE_DIR",
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH",
+    ))
+except next_profile.NextProfileError:
+    # Codex/Claude hook 跑在 pane 里，没有 8790 那套 next_profile。缺环境就当没身份，别 exit 1。
+    pass
 
 _COCKPIT_DATA_DIR = Path(
     os.environ.get("COCKPIT_DATA_DIR", str(Path.home() / "dashboard-data"))
@@ -353,6 +357,20 @@ def legacy_selector(
     return agent, instance
 
 
+def leftover_mail_name(name: str, agent: str) -> bool:
+    """程序名/程序-main/程序-luna-agent-* 这类 leftover，不是花名。"""
+    lowered = (name or "").strip().lower()
+    kind = (agent or "").strip().lower()
+    if not kind or not lowered:
+        return False
+    if lowered in {kind, f"{kind}-main"}:
+        return True
+    if not lowered.startswith(f"{kind}-"):
+        return False
+    rest = lowered[len(kind) + 1:]
+    return "agent-" in rest or rest in {"luna", "terra"}
+
+
 def resolve_legacy_identity(agent: str, instance: str) -> ManagedIdentity | None:
     try:
         next_profile.require_session(os.environ.get("HERDR_SESSION", ""))
@@ -373,6 +391,7 @@ def resolve_legacy_identity(agent: str, instance: str) -> ManagedIdentity | None
         or not identity["name"]
         or identity.get("status") == "retired"
         or bool(identity.get("retired_at"))
+        or leftover_mail_name(str(identity.get("name") or ""), agent)
     ):
         return None
     return ManagedIdentity(project, agent, instance, identity)
@@ -395,17 +414,22 @@ def main(argv: list[str] | None = None) -> None:
     if args and args[0] in {"-h", "--help"}:
         print("usage: mail-identity-inject [<agent>|--print-identity]")
         return
-    resolved = resolve_managed_identity()
-    if resolved is None:
-        selector = (
-            legacy_selector(args, default_instance=True)
-            if args != ["--print-identity"] and not _has_managed_descriptor_candidate()
-            else None
-        )
-        if selector:
-            resolved = resolve_legacy_identity(*selector)
+    try:
+        resolved = resolve_managed_identity()
+        if resolved is None:
+            selector = (
+                legacy_selector(args, default_instance=True)
+                if args != ["--print-identity"] and not _has_managed_descriptor_candidate()
+                else None
+            )
+            if selector:
+                resolved = resolve_legacy_identity(*selector)
         if resolved is None:
             return
+        if leftover_mail_name(str(resolved.identity.get("name") or ""), resolved.agent):
+            return
+    except next_profile.NextProfileError:
+        return
     if args == ["--print-identity"]:
         print(f"{resolved.agent}\t{resolved.instance_id}")
         return

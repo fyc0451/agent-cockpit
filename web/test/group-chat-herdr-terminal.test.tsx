@@ -210,6 +210,16 @@ describe('HerdrTerminalModal 全屏', () => {
     expect(modal).toHaveClass('is-fullscreen')
   })
 
+  it('关闭钮钉在顶栏右侧，不被工具按钮挤出', () => {
+    render(<HerdrTerminalModal session="demo-1" onClose={vi.fn()} />)
+    const close = screen.getByRole('button', { name: '关闭终端' })
+    const head = close.closest('.gc-herdr-terminal-head')
+    const actions = head?.querySelector('.gc-terminal-actions')
+    expect(head).not.toBeNull()
+    expect(actions?.contains(close)).toBe(false)
+    expect(head?.lastElementChild).toBe(close)
+  })
+
   it('replay_complete 后仍挡输入，队列空并安静后才揭开', async () => {
     render(<HerdrTerminalModal session="demo-1" onClose={vi.fn()} />)
 

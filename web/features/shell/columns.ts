@@ -34,7 +34,7 @@ export const DETAILS_MIN = 300
 /** details 拖拽上限。 */
 export const DETAILS_MAX = 520
 /** 未拖拽时的 details 宽度。 */
-export const DETAILS_DEFAULT = 360
+export const DETAILS_DEFAULT = 300
 
 /** 把面板宽度夹进契约区间。 */
 export function clampWidth(px: number, min: number, max: number): number {

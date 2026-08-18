@@ -24,7 +24,7 @@ TOOLS_DIR = os.path.join(INSTALL_ROOT, "agent-mail-tools")
 from .common import (
     REGISTRY_DIR, helper_command, load_identity, mcp_call, mcp_tool, slugify,
 )
-from agent_cockpit import chat_roster, coordination, next_profile  # noqa: E402
+from agent_cockpit import chat_ledger, chat_roster, coordination, next_profile  # noqa: E402
 
 
 next_profile.require_helper_environment((
@@ -203,6 +203,27 @@ def _registry_identities(project_key: str) -> list[dict]:
         ):
             identities.append(identity)
     return identities
+
+
+def bound_mail_thread(thread: str, herdr_session: str) -> str:
+    """群聊 thread 必须跟当前 herdr session 同工作区，禁止 SCC 写 cockpit。"""
+    here = (herdr_session or "").strip()
+    dest = (thread or "").strip()
+    if not dest and here and chat_ledger.get_thread_by_session(here):
+        dest = here
+    if dest and here and dest != here:
+        other = chat_ledger.get_thread_by_session(dest)
+        mine = chat_ledger.get_thread_by_session(here)
+        if (
+            other is not None
+            and mine is not None
+            and other.get("workspace_id") != mine.get("workspace_id")
+        ):
+            raise SystemExit(
+                f"error: 当前 session 是 {here}，不能写 --thread {dest}。"
+                f"本群请用 --thread {here}"
+            )
+    return dest
 
 
 def _leftover_mail_name(name: str, agent: str) -> bool:
@@ -937,6 +958,9 @@ def main(argv: list[str] | None = None) -> None:
                 human_recipients.append(handle)
         else:
             agent_recipients.append(recipient)
+    args.thread = bound_mail_thread(
+        args.thread, os.environ.get("HERDR_SESSION") or "",
+    )
     session_hint = (args.thread or os.environ.get("HERDR_SESSION") or "").strip()
     agent_recipients = _resolve_registry_recipients(
         agent_recipients, identity["project_key"], session=session_hint,

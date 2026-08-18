@@ -462,6 +462,39 @@ def test_tell_identity_uses_exact_managed_instance(monkeypatch, tmp_path):
     assert f"--instance {instance_id}" in sent[0][2]
 
 
+def test_tell_identity_skips_leftover_mailbox(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "demo", "pane_id": "w1:p2", "cwd": str(project),
+            "agent": "codex",
+        }]},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda _name: {"bound": True, "project": str(project)},
+    )
+    monkeypatch.setattr(server.herdr_client, "get_launch_descriptor", lambda *_: None)
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda *_a, **_k: "codex-luna-agent-cockpit",
+    )
+    sent = []
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+
+    result = server.api_herdr_pane_tell_identity("demo", "w1:p2")
+
+    assert result["ok"] is True
+    assert result["skipped"] == "leftover_identity"
+    assert sent == []
+
+
 def test_tell_identity_uses_zcode_descriptor_product(monkeypatch, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -595,7 +628,7 @@ def test_init_mail_explicitly_binds_and_passes_project_argument(monkeypatch, tmp
     assert init_call[0] == [str(init_script), "--project", str(project)]
     assert init_call[1]["cwd"] == str(project)
     assert mail_projects.get("demo", str(session_dir)) == str(project)
-    assert str(project) in sent[0][2]
+    assert sent == []
 
 
 def test_init_mail_registers_managed_pane_by_exact_instance(monkeypatch, tmp_path):

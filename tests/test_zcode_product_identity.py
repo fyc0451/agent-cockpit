@@ -242,6 +242,21 @@ def test_legacy_hook_argument_accepts_mixed_schema2_legacy_descriptor(
     assert "--agent codex --instance main" in context
 
 
+def test_leftover_luna_identity_is_not_injected(monkeypatch, tmp_path, capsys):
+    _legacy_identity_fixture(monkeypatch, tmp_path, instance="luna")
+    registry = tmp_path / "home" / ".agent-mail" / "registry"
+    project = tmp_path / "project"
+    slug = mail_identity_inject.slugify(str(project))
+    path = registry / slug / "codex--luna.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["name"] = "codex-luna-agent-cockpit"
+    _secure_json(path, data)
+
+    mail_identity_inject.main(["codex"])
+    assert capsys.readouterr().out == ""
+    assert mail_hook_check.main(["codex", "luna"]) == 0
+
+
 def test_legacy_hook_argument_accepts_schema1_descriptor(
     monkeypatch, tmp_path, capsys,
 ):

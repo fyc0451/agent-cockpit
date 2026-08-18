@@ -351,6 +351,28 @@ def append_message(
     return dict(row)
 
 
+def replace_message_text(message_id: str, text: str) -> dict[str, Any] | None:
+    """同一条 agent 结论变长时原地改正文，不另开气泡。"""
+    if not isinstance(message_id, str) or not re.fullmatch(r"msg_[0-9a-f]{12}", message_id):
+        raise ValueError("群聊消息 ID 无效")
+    body = text.strip() if isinstance(text, str) else ""
+    if not body:
+        raise ValueError("群聊消息正文无效")
+    if len(body) > 16_384:
+        body = body[:16_384]
+    with _lock:
+        data = _load_messages()
+        for index, row in enumerate(data["messages"]):
+            if row["id"] != message_id:
+                continue
+            updated = dict(row)
+            updated["text"] = body
+            data["messages"][index] = _validate_message(updated)
+            _write("chat_messages", data)
+            return dict(data["messages"][index])
+    return None
+
+
 def list_messages(session: str, limit: int = 200) -> list[dict[str, Any]]:
     if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
         raise ValueError("herdr_session 无效")
@@ -363,27 +385,3 @@ def list_messages(session: str, limit: int = 200) -> list[dict[str, Any]]:
         ]
     rows.sort(key=lambda item: (item["ts"], item["id"]))
     return rows[-cap:]
-
-
-def rewrite_messages(rewriter: Any) -> dict[str, int]:
-    """原子改写既有消息正文；返回 None 仅删除被明确判定为垃圾的记录。"""
-    if not callable(rewriter):
-        raise ValueError("消息改写器无效")
-    updated = 0
-    deleted = 0
-    with _lock:
-        data = _load_messages()
-        rows: list[dict[str, Any]] = []
-        for row in data["messages"]:
-            replacement = rewriter(dict(row))
-            if replacement is None:
-                deleted += 1
-                continue
-            checked = _validate_message(replacement)
-            if checked != row:
-                updated += 1
-            rows.append(checked)
-        if updated or deleted:
-            data["messages"] = rows
-            _write("chat_messages", data)
-    return {"updated": updated, "deleted": deleted}

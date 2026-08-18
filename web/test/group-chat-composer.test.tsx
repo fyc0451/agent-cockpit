@@ -136,5 +136,37 @@ describe('Composer 附件与 Skill 菜单', () => {
       )
     })
     expect(screen.getByRole('textbox')).toHaveValue('已输入的草稿')
+    expect(screen.getByRole('button', { name: '展开输入全文' })).toBeInTheDocument()
+  })
+
+  it('长草稿默认折叠，预览截断，点展开再收起', async () => {
+    const long = '一、'.repeat(80) + 'GET /v1/video-generations/health 后面还有很多发布说明。'
+    await act(async () => {
+      render(
+        <Composer
+          members={[]}
+          leader={null}
+          value={long}
+          onChange={vi.fn()}
+          onSend={vi.fn()}
+          onAttach={vi.fn()}
+          disabled={false}
+        />,
+      )
+    })
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    const preview = screen.getByTestId('gc-composer-preview')
+    expect(preview.textContent || '').toMatch(/…$/)
+    expect((preview.textContent || '').length).toBeLessThan(long.length)
+    fireEvent.click(screen.getByRole('button', { name: '展开输入框' }))
+    expect(screen.getByRole('textbox')).toHaveValue(long)
+    expect(screen.getByRole('button', { name: '展开输入全文' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '展开输入全文' }))
+    expect(screen.getByRole('textbox')).toHaveAttribute('rows', '12')
+    fireEvent.click(screen.getByRole('button', { name: '收起输入全文' }))
+    expect(screen.getByRole('textbox')).toHaveAttribute('rows', '3')
+    fireEvent.click(screen.getByRole('button', { name: '收起输入框' }))
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '展开输入框' })).toBeInTheDocument()
   })
 })

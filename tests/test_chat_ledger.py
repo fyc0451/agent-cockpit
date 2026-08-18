@@ -57,22 +57,15 @@ def test_append_and_list_messages_by_session(isolated_ledger):
     assert rows[1]["kind"] == "agent"
 
 
-def test_rewrite_messages_updates_selected_and_preserves_ids(isolated_ledger):
-    first = chat_ledger.append_message(
-        "demo-1", kind="agent", sender="A", text="reply\nWorked for 1s",
+def test_replace_message_text_updates_same_id(isolated_ledger):
+    row = chat_ledger.append_message(
+        "demo-1", kind="agent", sender="BrownDesert", text="草稿", to=["human"],
     )
-    second = chat_ledger.append_message(
-        "demo-1", kind="me", sender="human", text="Worked for is real text",
-    )
-
-    result = chat_ledger.rewrite_messages(
-        lambda row: {**row, "text": "reply"} if row["kind"] == "agent" else row,
-    )
-
-    assert result == {"updated": 1, "deleted": 0}
-    assert chat_ledger.list_messages("demo-1") == [
-        {**first, "text": "reply"}, second,
-    ]
+    updated = chat_ledger.replace_message_text(row["id"], "完整结论")
+    assert updated is not None
+    assert updated["id"] == row["id"]
+    assert updated["text"] == "完整结论"
+    assert [item["text"] for item in chat_ledger.list_messages("demo-1")] == ["完整结论"]
 
 
 def test_create_workspace_idempotent_by_path(isolated_ledger):

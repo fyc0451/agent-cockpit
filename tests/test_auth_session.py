@@ -74,13 +74,30 @@ def test_malformed_inputs_never_validate_or_revoke():
 
 
 def test_restart_semantics_via_fresh_registry():
-    """进程内注册表：新实例（等价重启）不认旧会话 token。"""
+    """无持久化路径时：新实例（等价重启）不认旧会话 token。"""
     clock = FakeClock()
     old = SessionRegistry(clock=clock)
     token, _ = old.issue()
     new = SessionRegistry(clock=clock)
     assert old.validate(token) is True
     assert new.validate(token) is False  # 跨实例/重启隔离
+
+
+def test_persisted_registry_survives_new_instance(tmp_path):
+    clock = FakeClock()
+    path = tmp_path / "auth-sessions.json"
+    old = SessionRegistry(clock=clock, path=path)
+    token, expiry = old.issue()
+    assert path.is_file()
+    assert path.stat().st_mode & 0o777 == 0o600
+    new = SessionRegistry(clock=clock, path=path)
+    assert new.validate(token) is True
+    assert len(new) == 1
+    clock.advance(expiry - clock.now + 1)
+    assert new.validate(token) is False
+    reloaded = SessionRegistry(clock=clock, path=path)
+    assert reloaded.validate(token) is False
+    assert len(reloaded) == 0
 
 
 def test_constructor_rejects_invalid_config():

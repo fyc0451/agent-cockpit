@@ -26,11 +26,18 @@ export function leftoverMemberName(name: string, agent: string): boolean {
   return n === a || n === `${a}-main` || n.startsWith(`${a}-`)
 }
 
-/** @kimi-main / @kimi-agent-* → 该类型唯一在场成员。多人同 kind 不猜。 */
+function memberHasLeftoverName(member: ChatMember): boolean {
+  const kind = member.kind.trim()
+  return leftoverMemberName(member.name, kind) || leftoverMemberName(member.mailName, kind)
+}
+
+/** @kimi-main / @kimi-agent-* → 该类型唯一在场成员。多人同 kind 不猜。裸 @codex 只打 leftover 名，不打花名。 */
 export function mentionMatchesLeftoverAlias(token: string, member: ChatMember, members: ChatMember[]): boolean {
   const kind = member.kind.trim().toLowerCase()
   if (!kind || !leftoverMemberName(token, kind)) return false
-  return members.filter((item) => item.kind.toLowerCase() === kind).length === 1
+  if (members.filter((item) => item.kind.toLowerCase() === kind).length !== 1) return false
+  if (token === kind) return memberHasLeftoverName(member)
+  return true
 }
 
 /** pane → 群内显示名：花名优先，避开 program-main */
@@ -136,7 +143,6 @@ export function parseMentionTargets(text: string, members: ChatMember[]): ChatMe
       if (
         m.name.toLowerCase() === token ||
         m.mailName.toLowerCase() === token ||
-        m.kind.toLowerCase() === token ||
         (token === 'leader' && m.isLeader) ||
         mentionMatchesLeftoverAlias(token, m, members)
       ) {
@@ -200,6 +206,279 @@ export function splitMessageParts(raw: string): MessagePart[] {
   }
   if (last < raw.length) parts.push({ type: 'text', text: raw.slice(last) })
   return parts.filter((part) => part.type === 'code' || part.text.length > 0)
+}
+
+const FOLD_LINES = 16
+const FOLD_CHARS = 900
+const PREVIEW_LINES = 12
+
+export function stripAgentTuiFooter(raw: string): string {
+  const lines = raw.replace(/\r\n/g, '\n').split('\n')
+  while (lines.length) {
+    const last = lines[lines.length - 1].trim()
+    if (
+      last.startsWith('›')
+      || last.startsWith('> Improve ')
+      || / · Full Access · /.test(last)
+      || /Context \d+% left/.test(last)
+    ) {
+      lines.pop()
+      continue
+    }
+    break
+  }
+  return lines.join('\n').trim()
+}
+
+const BOX_RULE = /^[\s┌┐└┘├┤┬┴┼╭╮╯╰━─┃│╔╗╚╝╠╣╦╩╬═]+$/
+const BOX_RULE_MARK = /[┌┐└┘├┤┬┴┼╭╮╯╰━─╔╗╚╝╠╣╦╩╬═]/
+
+function isBoxTableRow(line: string): boolean {
+  const stripped = line.trim()
+  const bars = (stripped.match(/[│┃]/g) || []).length
+  return (stripped.startsWith('│') || stripped.startsWith('┃')) && bars >= 2
+}
+
+function isBoxTableRule(line: string): boolean {
+  const stripped = line.trim()
+  return stripped.length > 0 && BOX_RULE.test(stripped) && BOX_RULE_MARK.test(stripped)
+}
+
+function boxTableCells(line: string): string[] {
+  return line.trim().replace(/^[│┃]/, '').replace(/[│┃]$/, '').replace(/┃/g, '│').split('│').map((cell) => cell.trim())
+}
+
+/** TUI 框线表 → Markdown 表，给瀑布流表格渲染用。 */
+export function restoreBoxTables(raw: string): string {
+  const lines = raw.split('\n')
+  const out: string[] = []
+  let index = 0
+  while (index < lines.length) {
+    if (isBoxTableRow(lines[index]) || isBoxTableRule(lines[index])) {
+      const chunk: string[] = []
+      while (index < lines.length) {
+        const item = lines[index]
+        if (!item.trim()) {
+          if (chunk.length) {
+            index += 1
+            break
+          }
+          index += 1
+          continue
+        }
+        if (isBoxTableRow(item) || isBoxTableRule(item)) {
+          chunk.push(item)
+          index += 1
+          continue
+        }
+        break
+      }
+      const rows = chunk.filter(isBoxTableRow).map(boxTableCells)
+      const width = rows[0]?.length ?? 0
+      if (width >= 2 && rows.length >= 2 && rows.every((row) => row.length === width)) {
+        out.push(`| ${rows[0].join(' | ')} |`)
+        out.push(`| ${rows[0].map(() => '---').join(' | ')} |`)
+        for (const row of rows.slice(1)) out.push(`| ${row.join(' | ')} |`)
+        out.push('')
+        continue
+      }
+      for (const item of chunk) {
+        if (isBoxTableRow(item)) out.push(boxTableCells(item).join(' | '))
+      }
+      continue
+    }
+    out.push(lines[index])
+    index += 1
+  }
+  return out.join('\n')
+}
+
+/** 收获/粘贴挤成一行时，按分节和命令拆开，贴近终端排版。 */
+export function reflowMessageText(raw: string): string {
+  let text = stripAgentTuiFooter(raw.replace(/\r\n/g, '\n').trim())
+  text = restoreBoxTables(text)
+  text = text.replace(/^ {4,}/gm, '')
+  text = text.replace(/^([^\n]{1,16}?)\s+(N\d{8,}\b.*)$/gm, '$1\n$2')
+  const jammed = (text.match(/\n/g) || []).length < 2
+  if (jammed) {
+    text = text.replace(/([。；])\s*(一、|二、|三、|四、|五、|\d+\.\s)/g, '$1\n\n$2')
+    text = text.replace(/([^\n])(一、|二、|三、|四、|五、)/g, '$1\n\n$2')
+  }
+  text = text.replace(/\s+(GET |POST |PUT |DELETE |uv run |docker |sudo )/g, '\n$1')
+  return text.replace(/\n{3,}/g, '\n\n').trim()
+}
+
+export function isCommandLine(line: string): boolean {
+  const trimmed = line.trim()
+  return (
+    /^(GET|POST|PUT|DELETE)\s+\//.test(trimmed)
+    || /^(uv run |docker |sudo |herdr )/.test(trimmed)
+    || /^\/(v1|healthz|api)\b/.test(trimmed)
+    || /^\.\/[\w./-]+/.test(trimmed)
+  )
+}
+
+export function isListLine(line: string): boolean {
+  return /^(?:[-*•]|->|→)\s+\S/.test(line.trim())
+}
+
+export function splitSectionHeading(line: string): { title: string; rest: string } | null {
+  const trimmed = line.trim()
+  const hash = trimmed.match(/^(#{1,3})\s+(\S.*)$/)
+  if (hash) return { title: hash[2], rest: '' }
+  const numbered = trimmed.match(/^(\d+\.\s+[^\n：:]{1,40})$/)
+  if (numbered) return { title: numbered[1], rest: '' }
+  const labeled = trimmed.match(/^((?:\d+\.\s+|[一二三四五]、)[^\n：:]{1,40})[：:](.*)$/)
+  if (labeled) return { title: labeled[1].trim(), rest: labeled[2].trim() }
+  const tui = trimmed.match(/^([\u4e00-\u9fffA-Za-z0-9 ]{2,12})[：:](.+)$/)
+  if (
+    tui
+    && trimmed.length <= 36
+    && !/[=/]|--|花名|http/.test(trimmed)
+    && !/[。！？.!?]$/.test(trimmed)
+  ) {
+    return { title: trimmed, rest: '' }
+  }
+  return null
+}
+
+export function splitInlineMarks(
+  text: string,
+): Array<{ type: 'text' | 'code' | 'strong'; text: string }> {
+  const parts: Array<{ type: 'text' | 'code' | 'strong'; text: string }> = []
+  const mark = /(\*\*[^*]+\*\*|`[^`]+`|\$\{[^}\n]+\})/g
+  let last = 0
+  let match: RegExpExecArray | null
+  while ((match = mark.exec(text))) {
+    if (match.index > last) {
+      parts.push({ type: 'text', text: text.slice(last, match.index) })
+    }
+    if (match[0].startsWith('**')) {
+      parts.push({ type: 'strong', text: match[0].slice(2, -2) })
+    } else if (match[0].startsWith('${')) {
+      parts.push({ type: 'code', text: match[0] })
+    } else {
+      parts.push({ type: 'code', text: match[0].slice(1, -1) })
+    }
+    last = match.index + match[0].length
+  }
+  if (last < text.length) parts.push({ type: 'text', text: text.slice(last) })
+  return parts.filter((part) => part.text.length > 0)
+}
+
+export type LayoutBlock =
+  | { type: 'heading'; text: string }
+  | { type: 'text'; text: string }
+  | { type: 'list'; items: string[] }
+  | { type: 'code'; text: string }
+  | { type: 'table'; headers: string[]; rows: string[][] }
+
+function isTableSep(line: string): boolean {
+  const trimmed = line.trim()
+  if (/^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$/.test(trimmed)) return true
+  const cells = tableCells(trimmed)
+  return cells.length >= 2 && cells.every((cell) => /^:?-{2,}:?$/.test(cell))
+}
+
+function isTableRow(line: string): boolean {
+  const trimmed = line.trim()
+  if (!trimmed.includes('|')) return false
+  return trimmed.startsWith('|') || trimmed.split('|').length >= 3
+}
+
+function tableCells(line: string): string[] {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim())
+}
+
+function listItemText(line: string): string {
+  return line.trim().replace(/^(?:[-*•]|->|→)\s+/, '')
+}
+
+/** 把已 reflow 的正文拆成终端式标题 / 列表 / 命令块。 */
+export function layoutMessageBlocks(raw: string): LayoutBlock[] {
+  const lines = reflowMessageText(raw).split('\n')
+  const blocks: LayoutBlock[] = []
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index]
+    if (!line.trim()) {
+      index += 1
+      continue
+    }
+    if (isTableRow(line) || isTableSep(line)) {
+      const chunk: string[] = []
+      while (index < lines.length && (isTableRow(lines[index]) || isTableSep(lines[index]))) {
+        chunk.push(lines[index])
+        index += 1
+      }
+      const body = chunk.filter((item) => !isTableSep(item)).map(tableCells)
+        .filter((cells) => cells.some((cell) => !/^:?-{2,}:?$/.test(cell)))
+      if (body.length >= 2) {
+        blocks.push({ type: 'table', headers: body[0], rows: body.slice(1) })
+        continue
+      }
+      if (body.length === 1) {
+        blocks.push({ type: 'text', text: chunk.join('\n') })
+        continue
+      }
+    }
+    const heading = splitSectionHeading(line)
+    if (heading) {
+      blocks.push({ type: 'heading', text: heading.title })
+      if (heading.rest) lines.splice(index + 1, 0, heading.rest)
+      index += 1
+      continue
+    }
+    if (isListLine(line)) {
+      const items: string[] = []
+      while (index < lines.length && isListLine(lines[index])) {
+        items.push(listItemText(lines[index]))
+        index += 1
+      }
+      blocks.push({ type: 'list', items })
+      continue
+    }
+    if (isCommandLine(line)) {
+      const chunk: string[] = []
+      while (index < lines.length && isCommandLine(lines[index])) {
+        chunk.push(lines[index].trim())
+        index += 1
+      }
+      blocks.push({ type: 'code', text: chunk.join('\n') })
+      continue
+    }
+    const para: string[] = []
+    while (
+      index < lines.length
+      && lines[index].trim()
+      && !splitSectionHeading(lines[index])
+      && !isListLine(lines[index])
+      && !isCommandLine(lines[index])
+    ) {
+      para.push(lines[index].replace(/\s+$/, ''))
+      index += 1
+    }
+    blocks.push({ type: 'text', text: para.join('\n') })
+  }
+  return blocks
+}
+
+export function messageNeedsFold(text: string): boolean {
+  const body = reflowMessageText(text)
+  return body.split('\n').length > FOLD_LINES || body.length > FOLD_CHARS
+}
+
+export function messageFoldPreview(text: string, lines = PREVIEW_LINES): string {
+  return reflowMessageText(text).split('\n').slice(0, lines).join('\n')
+}
+
+export function composerPreviewLabel(value: string, empty = '写消息'): string {
+  const text = value.replace(/\s+/g, ' ').trim()
+  if (!text) return empty
+  if (!messageNeedsFold(value) && text.length <= 80) return text
+  const first = messageFoldPreview(value, 1).replace(/\s+/g, ' ').trim()
+  const clipped = first.slice(0, 80)
+  return clipped === text ? text : `${clipped}…`
 }
 
 export function rootBase(root: string): string {
@@ -295,10 +574,24 @@ export function canRecallEntry(ts: number, now = Date.now(), windowMs = 10 * 60 
   return now - ts >= 0 && now - ts <= windowMs
 }
 
+export function mailSkillInsert(session: string): string {
+  const thread = session.trim() || 'cockpit'
+  return (
+    `结论写在终端，群聊会收进瀑布流。需要写信时用 mail-send --to leader --thread ${thread}，不要写 grok-main。`
+  )
+}
+
 export const COMPOSER_SKILLS = [
   { id: 'herdr', label: 'herdr', insert: '请按 herdr skill 操作终端 / pane。' },
-  { id: 'mail', label: 'Agent Mail', insert: '请用 mail-recv --unread 领取；给 Leader 写信用 --to leader --thread cockpit。' },
+  { id: 'mail', label: 'Agent Mail', insert: mailSkillInsert('cockpit') },
 ] as const
+
+export function composerSkills(session: string): Array<{ id: string; label: string; insert: string }> {
+  return [
+    COMPOSER_SKILLS[0],
+    { id: 'mail', label: 'Agent Mail', insert: mailSkillInsert(session) },
+  ]
+}
 
 export function attachMarkup(filename: string, path: string): string {
   const name = filename.trim() || '附件'
@@ -408,7 +701,7 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
   const out: MailEntry[] = []
   for (const message of messages) {
     const text = stripMailMeta(message.text)
-    if (!text) continue
+    if (!text || isIdentityChromeOnly(text)) continue
     const ts = mailTimestamp(message.ts)
     const rawId = String(message.id)
     const id = rawId.startsWith('pane:') || rawId.startsWith('mail:') ? rawId : `mail:${rawId}`
@@ -450,9 +743,26 @@ export function mailCoversLocalMe(
 }
 
 const OVERSEER_PREAMBLE = /---\s*\n\s*🚨\s*MESSAGE FROM HUMAN OVERSEER 🚨[\s\S]*?The human's guidance supersedes all other priorities\.\s*\n\s*---\s*/giu
-const BOSS_HINT = /^Boss 在群聊给你发了消息[^\n]*(?:\n+)(?:请用 mail-recv[^\n]*\n+)*/u
+const BOSS_HINT = /^[ \t❯]*Boss 在群聊给你发了消息[^\n]*(?:\n+[ \t]*(?:请直接做|请用 mail-recv|结论写在终端|本群 Leader 是|给 Leader 写信|需要写信时|不要写 grok-main)[^\n]*)*/mu
 const META_COMMENT = /<!--\s*agent-cockpit-meta:[\s\S]*?-->\s*/gu
 const COPIED_OVERSEER_CHROME = /(?:^|\n)@\S+\s*\nHumanOverseer\s*\nWebUI\s*\n\d{1,2}:\d{2}\s*\n---\s*\n/u
+
+const IDENTITY_CHROME = /协作通信约定|mail-recv|mail-send|--instance\s*main|codex-luna-agent-cockpit|注册:花名|\[agent-mail 身份|普通打断保存|停止\/转向不恢复|先 claim|complete\/ack|agent-mail-tools|--unread|--subject|--body|花名=|目=\/home\/|^home\/fyc\/|^codex --instance|^花名>|已知晓，身份|重复身份通知|通知已忽略|无新任务|hook exited|UserPromptS|--agent\s*codex|--instan|--projec|fyc\/github\/agent-cockpit/
+const IDENTITY_DIAGNOSIS = /这不是|空转|瀑布流|旧身份|残稿|挖空|不是任务|没有任务结论|身份壳|leftover 壳/
+
+function isIdentityChromeLine(line: string): boolean {
+  if (IDENTITY_DIAGNOSIS.test(line)) return false
+  return IDENTITY_CHROME.test(line)
+}
+
+export function isIdentityChromeOnly(text: string): boolean {
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean)
+  if (lines.length === 0) return false
+  const leftover = lines.filter((line) => !isIdentityChromeLine(line))
+  if (leftover.length === 0) return true
+  if (leftover.length === lines.length) return false
+  return leftover.join(' ').length < 24
+}
 
 export function stripMailMeta(text: string): string {
   let out = text.replace(META_COMMENT, '')

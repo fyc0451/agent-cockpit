@@ -44,16 +44,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args and args[0] == "--verify-install":
         return _verify_install(args[1:])
-    resolved = mail_identity_inject.resolve_managed_identity()
-    if resolved is None:
-        if mail_identity_inject._has_managed_descriptor_candidate():
-            return 0
-        selector = mail_identity_inject.legacy_selector(args)
-        if selector is None:
-            return 2
-        resolved = mail_identity_inject.resolve_legacy_identity(*selector)
+    try:
+        resolved = mail_identity_inject.resolve_managed_identity()
         if resolved is None:
+            if mail_identity_inject._has_managed_descriptor_candidate():
+                return 0
+            selector = mail_identity_inject.legacy_selector(args)
+            if selector is None:
+                return 2
+            resolved = mail_identity_inject.resolve_legacy_identity(*selector)
+            if resolved is None:
+                return 0
+        if mail_identity_inject.leftover_mail_name(
+            str(resolved.identity.get("name") or ""), resolved.agent,
+        ):
             return 0
+    except Exception:
+        return 0
     output = io.StringIO()
     try:
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):

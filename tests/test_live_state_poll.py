@@ -100,7 +100,8 @@ def test_record_metrics_p50_p95():
 # ── _poll_delay:自适应间隔(失败优先于 idle)──────────────────
 
 def test_poll_delay_normal():
-    assert server._poll_delay(3) == server.POLL_INTERVAL
+    assert server._poll_delay(3) == server.POLL_IDLE_INTERVAL
+    assert server._poll_delay(3, busy=True) == server.POLL_INTERVAL
 
 
 def test_poll_delay_idle_no_sessions():
@@ -139,7 +140,8 @@ def test_poll_delay_resets_after_success():
     server._POLL_METRICS["consecutive_failures"] = 5
     assert server._poll_delay(1) > server.POLL_INTERVAL  # 退避中
     server._record_poll_metrics(0.1, 1, success=True)  # 成功 → 重置
-    assert server._poll_delay(1) == server.POLL_INTERVAL
+    assert server._poll_delay(1) == server.POLL_IDLE_INTERVAL
+    assert server._poll_delay(1, busy=True) == server.POLL_INTERVAL
     assert server._poll_delay(0) == server.POLL_IDLE_INTERVAL
 
 

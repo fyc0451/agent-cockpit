@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
-import { fetchPaneOutput, sendPane } from '../../api/legacyHerdr'
+import { paneLiveWebSocketUrl, sendPane } from '../../api/legacyHerdr'
 import { agentEmoji, type ChatMember } from './model'
 
 interface AgentInteractModalProps {
@@ -13,16 +13,6 @@ interface AgentInteractModalProps {
 }
 
 const PANE_OUTPUT_LIMIT = 64 * 1024
-const PANE_WATCH_BUSY_MS = 400
-const PANE_WATCH_IDLE_MS = 2000
-
-export function paneWatchInterval(status: string): number {
-  return status === 'working' || status === 'blocked' ? PANE_WATCH_BUSY_MS : PANE_WATCH_IDLE_MS
-}
-
-export function paneWatchLines(status: string): number {
-  return status === 'working' || status === 'blocked' ? 200 : 80
-}
 
 function tailOutput(text: string, limit: number): string {
   if (text.length <= limit) return text
@@ -72,26 +62,32 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
   const screenRef = useRef<HTMLPreElement>(null)
   const followTailRef = useRef(true)
 
-  const refresh = async () => {
-    try {
-      const result = await fetchPaneOutput(session, member.paneId, paneWatchLines(member.status))
-      const text = result.output || result.error || '（终端暂无输出）'
-      setOutput((current) => mergePaneOutput(current, text))
-      setError(result.error)
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e))
-    }
-  }
-
   useEffect(() => {
     setOutput('')
     setError(null)
     followTailRef.current = true
-    void refresh()
-    const timer = window.setInterval(() => { void refresh() }, paneWatchInterval(member.status))
-    return () => window.clearInterval(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, member.paneId, member.status])
+    const socket = new WebSocket(paneLiveWebSocketUrl(session, member.paneId))
+    socket.onmessage = (event) => {
+      let payload: { type?: string; output?: string; error?: string | null } = {}
+      try {
+        payload = JSON.parse(String(event.data || '')) as typeof payload
+      } catch {
+        return
+      }
+      if (payload.type !== 'snapshot') return
+      const text = payload.output || payload.error || '（终端暂无输出）'
+      setOutput((current) => mergePaneOutput(current, text))
+      setError(payload.error || null)
+    }
+    socket.onerror = () => {
+      setError('现场流断开')
+    }
+    return () => {
+      socket.onmessage = null
+      socket.onerror = null
+      socket.close()
+    }
+  }, [session, member.paneId])
 
   useLayoutEffect(() => {
     const screen = screenRef.current
@@ -110,7 +106,6 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
     setError(null)
     try {
       await sendPane(session, member.paneId, text, mode)
-      window.setTimeout(() => { void refresh() }, 250)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e))
     } finally {
@@ -125,17 +120,32 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
     void send(text, text.startsWith('/') ? 'slash' : 'prompt')
   }
 
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   return (
-    <div className="gc-modal-bg" onClick={busy ? undefined : onClose}>
-      <div className="gc-modal gc-modal--wide" onClick={(e) => e.stopPropagation()}>
-        <h3 className="gc-modal-title">
-          {agentEmoji(member.kind)} {member.name}
-          {member.isLeader ? ' · Leader' : ''}
-        </h3>
-        <p className="gc-modal-sub">
-          {member.kind}
-          {member.status === 'blocked' ? ' · 正在等你确认（信任目录 / 权限 / 提问）' : ' · 直接操作这个 Agent 的终端'}
-        </p>
+    <div className="gc-modal-bg" onClick={onClose}>
+      <div className="gc-modal gc-modal--wide gc-modal--live" onClick={(e) => e.stopPropagation()}>
+        <div className="gc-live-head">
+          <div className="gc-live-head-copy">
+            <h3 className="gc-modal-title">
+              {agentEmoji(member.kind)} {member.name}
+              {member.isLeader ? ' · Leader' : ''}
+            </h3>
+            <p className="gc-modal-sub">
+              {member.kind}
+              {member.status === 'blocked' ? ' · 正在等你确认（信任目录 / 权限 / 提问）' : ' · 直接操作这个 Agent 的终端'}
+            </p>
+          </div>
+          <button type="button" className="gc-pill-btn gc-live-close" onClick={onClose} aria-label="关闭现场">
+            关闭
+          </button>
+        </div>
         <pre
           ref={screenRef}
           className="gc-pane-screen"
@@ -183,7 +193,7 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
           切模型用 <code>/model</code>。Kimi 信任目录点「确认 Y」。权限提示同样用确认/拒绝。
         </p>
         <div className="gc-modal-actions">
-          <button type="button" className="gc-pill-btn" onClick={onClose} disabled={busy}>
+          <button type="button" className="gc-pill-btn" onClick={onClose}>
             关闭
           </button>
           <button

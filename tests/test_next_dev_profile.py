@@ -50,6 +50,9 @@ def test_dev_profile_accepts_this_checkout_on_8790(tmp_path: Path, monkeypatch: 
             next_profile.require_retirement_project(str(forbidden), env)
     with pytest.raises(next_profile.NextProfileError, match="next_project_forbidden"):
         next_profile.require_project(str(tmp_path / "outside"), env)
+    env["HERDR_SESSION"] = "cockpit"
+    next_profile.validate_server_environment(repo, env)
+    assert next_profile.require_session("cockpit", env) == "cockpit"
 
 
 def test_dev_profile_rejects_sandbox_home_and_wrong_port(

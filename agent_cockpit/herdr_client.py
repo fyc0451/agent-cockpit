@@ -936,6 +936,21 @@ def pane_read(session: str, pane_id: str, lines: int = 100, is_agent: bool = Fal
         return {"available": True, "error": str(e), "output": ""}
 
 
+_BOX_RULE_CHARS = set("┌┐└┘├┤┬┴┼╭╮╯╰━─┃│╔╗╚╝╠╣╦╩╬═")
+
+
+def _is_box_table_row(stripped: str) -> bool:
+    bars = stripped.count("│") + stripped.count("┃")
+    return stripped.startswith(("│", "┃")) and bars >= 2
+
+
+def _is_box_table_rule(stripped: str) -> bool:
+    compact = stripped.replace(" ", "")
+    return bool(compact) and set(compact) <= _BOX_RULE_CHARS and any(
+        char in compact for char in "┌┐└┘├┤┬┴┼╭╮╯╰━─╔╗╚╝╠╣╦╩╬═"
+    )
+
+
 def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, Any]:
     """取 agent 最近会话的摘要(@ 引用会话用)。
 
@@ -948,21 +963,25 @@ def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, A
         out = _run(["--session", session, "agent", "read", pane_id], timeout=8)
     except RuntimeError as e:
         return {"available": True, "error": str(e), "summary": ""}
-    # 过滤 TUI 噪声:边框字符、纯空行、状态栏、超长装饰线
+    # 过滤 TUI 噪声。框线表的 │ 行必须留着，后面才能还原成 Markdown 表。
     noise_prefixes = (
-        "─", "═", "│", "╭", "╰", "╮", "╯", "•  └",  # 边框
-        "  gpt-", "  context:", "  yolo", "  K3",   # 状态栏
-        "Token usage", "Tip:", "Use /",             # 启动提示
+        "─", "═", "╭", "╰", "╮", "╯", "•  └",
+        "  gpt-", "  context:", "  yolo", "  K3",
+        "Token usage", "Tip:", "Use /",
     )
     kept = []
     for line in out.splitlines():
         s = line.strip()
         if not s:
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+        if _is_box_table_row(s) or _is_box_table_rule(s):
+            kept.append(line.rstrip())
             continue
         if any(s.startswith(p) for p in noise_prefixes):
             continue
-        # 跳过纯装饰长横线
-        if set(s) <= {"─", "═", " ", "│"} and len(s) > 20:
+        if set(s) <= {"─", "═", " "} and len(s) > 20:
             continue
         kept.append(line.rstrip())
     # 取尾部
@@ -2400,16 +2419,21 @@ def discard_pending_workspace_launch_descriptor(instance_id: str) -> bool:
 
 def list_session_launch_descriptors(session: str) -> list[dict[str, Any]]:
     """该 herdr session 下仍有效的 launch descriptor。"""
+    return [
+        record for record in list_active_launch_descriptors()
+        if record.get("session") == session
+    ]
+
+
+def list_active_launch_descriptors() -> list[dict[str, Any]]:
+    """全部仍有效的 launch descriptor，一次读盘。"""
     with _LAUNCH_DESCRIPTOR_LOCK:
         data = _load_launch_descriptors()
-    out: list[dict[str, Any]] = []
-    for record in data.get("descriptors", {}).values():
-        if not isinstance(record, dict) or not _launch_descriptor_is_active(record):
-            continue
-        if record.get("session") != session:
-            continue
-        out.append(dict(record))
-    return out
+    return [
+        dict(record)
+        for record in data.get("descriptors", {}).values()
+        if isinstance(record, dict) and _launch_descriptor_is_active(record)
+    ]
 
 
 def recorded_session_workdirs(session: str) -> list[str]:
