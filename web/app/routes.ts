@@ -15,6 +15,7 @@ const WORKSPACE_BASE_PATTERN = `${PROJECT_BASE_PATTERN}/workspaces/:${WORKSPACE_
 
 /** 所有 <Route path> 的模式字符串；App.tsx 与 selection 解析只消费这里 */
 export const routePatterns = {
+  chat: '/chat',
   overview: '/overview',
   welcome: '/welcome',
   projects: '/projects',
@@ -62,6 +63,8 @@ function withQuery(path: string, params: Record<string, string | undefined>): st
 
 /** Typed builders：query 参数由 builder 拼接，调用方只传 typed 选项 */
 export const routes = {
+  chat: (opts: { session?: string } = {}): string =>
+    withQuery(routePatterns.chat, { session: opts.session }),
   overview: (): string => routePatterns.overview,
   welcome: (): string => routePatterns.welcome,
   projects: (opts: { wizard?: boolean } = {}): string =>

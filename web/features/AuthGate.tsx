@@ -1,37 +1,9 @@
 import { FormEvent, useEffect, useState, type ReactNode } from 'react'
+import { fetchAuthStatus, subscribeUnauthorized } from '../api/auth'
 import { Button } from '../components/Button'
 import { StatusState } from '../components/StatusState'
 
-interface AuthStatus {
-  required: boolean
-  authenticated: boolean
-  local_only: boolean
-}
-
 type Phase = 'checking' | 'login' | 'ready' | 'error'
-
-function isAuthStatus(value: unknown): value is AuthStatus {
-  if (typeof value !== 'object' || value === null) return false
-  const status = value as Record<string, unknown>
-  return (
-    typeof status.required === 'boolean' &&
-    typeof status.authenticated === 'boolean' &&
-    typeof status.local_only === 'boolean'
-  )
-}
-
-async function fetchAuthStatus(signal?: AbortSignal): Promise<AuthStatus> {
-  const response = await fetch('/api/auth/status', {
-    credentials: 'same-origin',
-    headers: { Accept: 'application/json' },
-    cache: 'no-store',
-    signal,
-  })
-  if (!response.ok) throw new Error(`认证状态请求失败（HTTP ${response.status}）`)
-  const body: unknown = await response.json()
-  if (!isAuthStatus(body)) throw new Error('认证状态响应无效')
-  return body
-}
 
 function messageFromLoginFailure(status: number): string {
   if (status === 401) return '访问令牌无效'
@@ -45,6 +17,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [retry, setRetry] = useState(0)
+  const [keepApp, setKeepApp] = useState(false)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -59,6 +32,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
       })
     return () => controller.abort()
   }, [retry])
+
+  useEffect(() => subscribeUnauthorized(() => {
+    setKeepApp(true)
+    setPhase('login')
+    setError('登录已失效。输入还在下面，登录后不用重打。')
+    setToken('')
+  }), [])
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -82,6 +62,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         return
       }
       setToken('')
+      setKeepApp(false)
       setPhase('ready')
     } catch {
       setError('无法连接认证服务')
@@ -90,7 +71,50 @@ export function AuthGate({ children }: { children: ReactNode }) {
     }
   }
 
+  const loginForm = (
+    <section className="auth-panel" aria-labelledby="auth-title">
+      <div className="auth-brand" aria-hidden="true">AC</div>
+      <div className="auth-heading">
+        <h1 id="auth-title">Agent Cockpit</h1>
+        <p>此实例需要访问令牌</p>
+        <p className="auth-hint">
+          这不是账号密码：令牌由运行 Cockpit 的电脑管理员提供；本机操作者可在该电脑的
+          ~/.config/agent-cockpit/cockpit.token 查看（8790）。请勿把令牌发到聊天或项目文件中。
+        </p>
+      </div>
+      <form onSubmit={submit}>
+        <label className="auth-label" htmlFor="cockpit-token">访问令牌</label>
+        <input
+          id="cockpit-token"
+          className="input auth-input"
+          type="password"
+          value={token}
+          onChange={(event) => setToken(event.target.value)}
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          autoFocus
+        />
+        {error ? <p className="auth-error" role="alert">{error}</p> : null}
+        <Button className="auth-submit" variant="primary" type="submit" disabled={!token || submitting}>
+          {submitting ? '登录中…' : '登录'}
+        </Button>
+      </form>
+    </section>
+  )
+
   if (phase === 'ready') return children
+
+  if (keepApp) {
+    return (
+      <>
+        {children}
+        <div className="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+          {loginForm}
+        </div>
+      </>
+    )
+  }
 
   if (phase === 'checking') {
     return (
@@ -121,35 +145,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   return (
     <main className="auth-screen">
-      <section className="auth-panel" aria-labelledby="auth-title">
-        <div className="auth-brand" aria-hidden="true">AC</div>
-        <div className="auth-heading">
-          <h1 id="auth-title">Agent Cockpit</h1>
-          <p>此实例需要访问令牌</p>
-          <p className="auth-hint">
-            这不是账号密码：令牌由运行 Cockpit 的电脑管理员提供；本机操作者可在该电脑的
-            ~/.config/agent-cockpit-next/cockpit.token 查看。请勿把令牌发到聊天或项目文件中。
-          </p>
-        </div>
-        <form onSubmit={submit}>
-          <label className="auth-label" htmlFor="cockpit-token">访问令牌</label>
-          <input
-            id="cockpit-token"
-            className="input auth-input"
-            type="password"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-            autoComplete="off"
-            autoCapitalize="none"
-            spellCheck={false}
-            autoFocus
-          />
-          {error ? <p className="auth-error" role="alert">{error}</p> : null}
-          <Button className="auth-submit" variant="primary" type="submit" disabled={!token || submitting}>
-            {submitting ? '登录中…' : '登录'}
-          </Button>
-        </form>
-      </section>
+      {loginForm}
     </main>
   )
 }

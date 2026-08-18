@@ -22,6 +22,18 @@ import {
 import { Button } from '../components/Button'
 import { PageHeader } from '../components/PageHeader'
 import { StatusState } from '../components/StatusState'
+import { attachWebgl, concatTail, createLoadGate, createTermWriter, REPLAY_TAIL, type TermWriter } from '../features/terminal/termRender'
+import { enableTermKeyboardGuard, enableTermTouchScroll, isTouchTerminal } from '../features/terminal/touchScroll'
+import {
+  EMPTY_MODIFIERS,
+  encodeTermKey,
+  isTermFocusReport,
+  TERM_KEYS,
+  type TermModifiers,
+} from '../features/terminal/termKeys'
+import { decodeOsc52, writeBrowserClipboard } from '../features/terminal/termClipboard'
+import { loadTermFontSize, saveTermFontSize } from '../features/terminal/termFont'
+import { TermFontControls } from '../features/terminal/TermFontControls'
 import { ProjectScope } from '../features/ProjectScope'
 import { WorkspaceScope } from '../features/WorkspaceScope'
 import { capability, useCapability, workspaceScope } from '../state/capabilities'
@@ -37,6 +49,35 @@ const XTERM_THEME = {
 }
 
 const FALLBACK_DIMS = { cols: 80, rows: 24 }
+const MAX_WORKSPACE_DIMS = { cols: 500, rows: 300 }
+
+export function clampWorkspaceDimensions(dims: { cols: number; rows: number }) {
+  return {
+    cols: Math.min(MAX_WORKSPACE_DIMS.cols, dims.cols),
+    rows: Math.min(MAX_WORKSPACE_DIMS.rows, dims.rows),
+  }
+}
+
+/**
+ * 🧱 前端分屏配对（纯函数）：selected tab + 另一个 open tab。
+ * 优先保留当前 splitWith（仍 open 且不是 selected），否则取 open 列表里 selected 的下一个（环形）。
+ */
+export function pickSplitPartner(
+  openIds: string[],
+  selected: string | null,
+  current: string | null,
+): string | null {
+  if (!selected) return null
+  const others = openIds.filter((id) => id !== selected)
+  if (others.length === 0) return null
+  if (current && current !== selected && openIds.includes(current)) return current
+  const start = Math.max(openIds.indexOf(selected), 0)
+  for (let step = 1; step <= openIds.length; step++) {
+    const candidate = openIds[(start + step) % openIds.length]
+    if (candidate !== selected) return candidate
+  }
+  return others[0]
+}
 
 /** 冻结 WS 状态词（合同审计 §6） */
 type StreamPhase =
@@ -61,6 +102,7 @@ interface TabSession {
 interface TerminalHandle {
   term: Terminal
   fit: FitAddon
+  writer: TermWriter
 }
 
 /** 运行状态/连接阶段 → 用户语言（不直出 runtime/generation/revision 等内部值） */
@@ -94,7 +136,7 @@ function UnavailableBody({ project, workspace }: { project: Project; workspace: 
   useEffect(() => {
     if (!containerRef.current) return
     const term = new Terminal({
-      fontSize: 11,
+      fontSize: loadTermFontSize(),
       fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace',
       cursorBlink: false,
       disableStdin: true,
@@ -151,30 +193,49 @@ function TabSurface({
   visible,
   onMount,
   onInput,
+  onClipboard,
 }: {
   ticketId: string
   visible: boolean
   onMount: (ticketId: string, handle: TerminalHandle | null) => void
   onInput: (ticketId: string, value: string) => void
+  onClipboard: (ticketId: string, text: string) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!containerRef.current) return
     const term = new Terminal({
-      fontSize: 11,
+      fontSize: loadTermFontSize(),
       fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace',
       cursorBlink: true,
-      disableStdin: false,
+      disableStdin: true,
       theme: XTERM_THEME,
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(containerRef.current)
     fit.fit()
-    onMount(ticketId, { term, fit })
+    const osc52 = term.parser?.registerOscHandler?.(52, (data) => {
+      const text = decodeOsc52(data)
+      if (text) onClipboard(ticketId, text)
+      return true
+    }) ?? { dispose() {} }
+    const detachWebgl = attachWebgl(term)
+    // H5 触屏：同 HerdrTerminalModal，挂 1.0 同款的触摸滚动桥与软键盘拦截。
+    const detachTouchScroll = enableTermTouchScroll(containerRef.current, term)
+    const detachKeyboardGuard = enableTermKeyboardGuard(containerRef.current)
+    const writer = createTermWriter((data, done) => {
+      term.write(data, done)
+    })
+    onMount(ticketId, { term, fit, writer })
     const sub = term.onData((value) => onInput(ticketId, value))
     return () => {
+      writer.dispose()
+      detachTouchScroll()
+      detachKeyboardGuard()
+      detachWebgl()
+      osc52.dispose()
       sub.dispose()
       onMount(ticketId, null)
       term.dispose()
@@ -204,16 +265,32 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
   const [createPending, setCreatePending] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [inputOpen, setInputOpen] = useState(false)
+  const [keysOpen, setKeysOpen] = useState(false)
+  const [mods, setMods] = useState<TermModifiers>(EMPTY_MODIFIERS)
+  const [terminalClipboardNote, setTerminalClipboardNote] = useState<string | null>(null)
+  const [splitWith, setSplitWith] = useState<string | null>(null)
+  const [splitDir, setSplitDir] = useState<'horizontal' | 'vertical'>('horizontal')
+  const [splitMenuOpen, setSplitMenuOpen] = useState(false)
+  const [fontSize, setFontSize] = useState(loadTermFontSize)
+  const touch = isTouchTerminal()
 
   const tabsRef = useRef<Record<string, TabSession>>({})
   interface StreamEntry {
     stream: TerminalStream
     fence: { revision: number; generation: number; cursor: number }
+    replaying: boolean
+    replayBuf: Uint8Array
+    replaySeen: number
+    gate?: { dispose: () => void }
   }
   const streamsRef = useRef(new Map<string, StreamEntry>())
   const termsRef = useRef(new Map<string, TerminalHandle>())
+  const clipboardsRef = useRef(new Map<string, string>())
   const intentKeysRef = useRef<Record<string, { key: string; body: Record<string, unknown> }>>({})
   const selectedRef = useRef<string | null>(null)
+  const splitWithRef = useRef<string | null>(null)
 
   const projectId = project.project_id ?? ''
   const workspaceId = workspace.workspace_id ?? workspace.id ?? ''
@@ -235,6 +312,25 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
   const syncSelected = useCallback((next: string | null) => {
     selectedRef.current = next
     setSelected(next)
+    setTerminalClipboardNote(null)
+  }, [])
+
+  const onSurfaceClipboard = useCallback((ticketId: string, text: string) => {
+    clipboardsRef.current.set(ticketId, text)
+    if (selectedRef.current !== ticketId) return
+    setTerminalClipboardNote('文字已暂存，点击复制按钮即可使用')
+    if (window.isSecureContext && typeof navigator.clipboard?.writeText === 'function') {
+      void navigator.clipboard.writeText(text).then(
+        () => {
+          if (selectedRef.current === ticketId) setTerminalClipboardNote('已复制到剪贴板')
+        },
+        () => {
+          if (selectedRef.current === ticketId) {
+            setTerminalClipboardNote('文字已暂存，点击复制按钮即可使用')
+          }
+        },
+      )
+    }
   }, [])
 
   const dims = useCallback(() => {
@@ -242,7 +338,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
     const handle = id ? termsRef.current.get(id) : undefined
     const proposed = handle?.fit.proposeDimensions()
     if (proposed && proposed.cols > 0 && proposed.rows > 0) {
-      return { cols: proposed.cols, rows: proposed.rows }
+      return clampWorkspaceDimensions(proposed)
     }
     return FALLBACK_DIMS
   }, [])
@@ -262,7 +358,10 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
   }, [])
 
   const closeStream = useCallback((ticketId: string) => {
-    streamsRef.current.get(ticketId)?.stream.close()
+    const entry = streamsRef.current.get(ticketId)
+    entry?.gate?.dispose()
+    termsRef.current.get(ticketId)?.writer.setOnIdle(undefined)
+    entry?.stream.close()
     streamsRef.current.delete(ticketId)
   }, [])
 
@@ -277,8 +376,12 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
         generation: view.ticket.engine_generation,
         cursor: view.ticket.reconnect_cursor,
       }
-      const entry = {} as StreamEntry
-      entry.fence = fence
+      const entry = {
+        fence,
+        replaying: false,
+        replayBuf: new Uint8Array(0),
+        replaySeen: 0,
+      } as StreamEntry
       streamsRef.current.set(ticketId, entry)
       // P1-2：该 entry 的全部回调共用同一 guard；换 fence/关闭后旧 entry 一律静默
       const isCurrent = () => streamsRef.current.get(ticketId) === entry
@@ -288,16 +391,41 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
         {
           onReplayStart: () => {
             if (!isCurrent()) return
+            clipboardsRef.current.delete(ticketId)
+            if (selectedRef.current === ticketId) setTerminalClipboardNote(null)
+            handle.writer.clear()
             handle.term.reset()
+            entry.replaying = true
+            entry.replayBuf = new Uint8Array(0)
+            entry.replaySeen = 0
             patchTab(ticketId, { phase: 'replaying' })
           },
           onData: (data) => {
             if (!isCurrent()) return
-            handle.term.write(data)
+            if (entry.replaying) {
+              entry.replaySeen += data.byteLength
+              entry.replayBuf = concatTail(entry.replayBuf, data)
+              return
+            }
+            handle.writer.queue(data)
           },
           onReplayComplete: (truncated) => {
             if (!isCurrent()) return
-            patchTab(ticketId, { phase: 'live', truncated })
+            if (entry.replayBuf.byteLength) handle.writer.queue(entry.replayBuf)
+            entry.replaying = false
+            entry.replayBuf = new Uint8Array(0)
+            const clipped = truncated || entry.replaySeen > REPLAY_TAIL
+            patchTab(ticketId, { truncated: clipped })
+            const gate = createLoadGate({
+              isBusy: () => handle.writer.busy(),
+              onReady: () => {
+                if (!isCurrent()) return
+                patchTab(ticketId, { phase: 'live', truncated: clipped })
+              },
+            })
+            entry.gate = gate
+            handle.writer.setOnIdle(() => gate.noteIdle())
+            gate.noteReplayComplete()
           },
           onExit: () => {
             if (!isCurrent()) return
@@ -441,8 +569,34 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
   const onSurfaceInput = useCallback((ticketId: string, value: string) => {
     const tab = tabsRef.current[ticketId]
     if (!tab || tab.phase !== 'live') return // replay 完成前禁止 stdin 副作用
+    // 1.0：DECSET 1004 焦点报告不转发 PTY，否则切 tab 会整屏重绘
+    if (isTermFocusReport(value)) return
     fenceCurrent(ticketId)?.stream.sendInput(value)
   }, [])
+
+  /** H5 触屏输入条（HerdrTerminalModal sendInline 同款）：发送=提交，补回车，发完清空 */
+  const sendInline = useCallback(() => {
+    const id = selectedRef.current
+    const text = draft.trim()
+    if (!id || !text) return
+    onSurfaceInput(id, `${text}\r`)
+    setDraft('')
+  }, [draft, onSurfaceInput])
+
+  /** H5 触屏键盘栏（HerdrTerminalModal sendKey 同款）：修饰键只切状态，普通键编码后发送并采用返回的 mods */
+  const sendKey = useCallback(
+    (name: string) => {
+      const id = selectedRef.current
+      if (!id) return
+      const tab = tabsRef.current[id]
+      if (!tab || tab.phase !== 'live') return
+      const encoded = encodeTermKey(name, mods)
+      if (!encoded) return
+      onSurfaceInput(id, encoded.seq)
+      setMods(encoded.mods)
+    },
+    [mods, onSurfaceInput],
+  )
 
   /** 关闭视图 tab：只断开本页 WS，零 POST，不杀 PTY */
   const onCloseViewTab = useCallback(
@@ -453,6 +607,7 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
       }
       const next = { ...tabsRef.current }
       delete next[ticketId]
+      clipboardsRef.current.delete(ticketId)
       syncTabs(next)
       if (selectedRef.current === ticketId) {
         const remaining = Object.keys(next)
@@ -608,6 +763,20 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
     }
   }
 
+  const onCopyTerminalClipboard = async () => {
+    const ticketId = selectedRef.current
+    if (!ticketId) return
+    const text = clipboardsRef.current.get(ticketId)
+    if (!text) {
+      setTerminalClipboardNote('还没有可复制的文字，请先在终端里复制')
+      return
+    }
+    const copied = await writeBrowserClipboard(text)
+    if (selectedRef.current === ticketId) {
+      setTerminalClipboardNote(copied ? '已复制到剪贴板' : '浏览器无法写入剪贴板')
+    }
+  }
+
   const fitSelected = useCallback(() => {
     requestAnimationFrame(() => {
       const id = selectedRef.current
@@ -615,6 +784,21 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
       handle?.fit.fit()
     })
   }, [])
+
+  const applyFontSize = (size: number) => {
+    const next = saveTermFontSize(size)
+    setFontSize(next)
+    termsRef.current.forEach((handle, id) => {
+      handle.term.options.fontSize = next
+      handle.fit.fit()
+      const tab = tabsRef.current[id]
+      if (tab?.phase !== 'live') return
+      const proposed = handle.fit.proposeDimensions()
+      if (!proposed || proposed.cols <= 0 || proposed.rows <= 0) return
+      const bounded = clampWorkspaceDimensions(proposed)
+      fenceCurrent(id)?.stream.sendResize(bounded.cols, bounded.rows)
+    })
+  }
 
   const onFullscreen = () => {
     setFullscreen((prev) => !prev)
@@ -648,10 +832,14 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
       const handle = id ? termsRef.current.get(id) : undefined
       if (!handle) return
       handle.fit.fit()
+      // 分屏时另一个可见 terminal 一并 fit
+      const peerId = splitWithRef.current
+      if (peerId && peerId !== id) termsRef.current.get(peerId)?.fit.fit()
       const next = handle.fit.proposeDimensions()
       const tab = id ? tabsRef.current[id] : undefined
       if (next && next.cols > 0 && next.rows > 0 && tab?.phase === 'live' && id) {
-        fenceCurrent(id)?.stream.sendResize(next.cols, next.rows)
+        const bounded = clampWorkspaceDimensions(next)
+        fenceCurrent(id)?.stream.sendResize(bounded.cols, bounded.rows)
       }
     }
     window.addEventListener('resize', onResize)
@@ -670,6 +858,59 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
 
   /** 活动 tab 列表：已明确关闭（desired_state=stopped）的会话不展示；exited/process_unknown 等保留 */
   const activeTickets = tickets.filter((item) => item.ticket.desired_state !== 'stopped')
+
+  /** 打开中的 tab（展示顺序）：分屏配对候选 */
+  const openIds = activeTickets
+    .filter((item) => tabs[item.ticket.ticket_id]?.open)
+    .map((item) => item.ticket.ticket_id)
+  const canSplit = selected != null && openIds.length >= 2
+
+  const startSplit = (dir: 'horizontal' | 'vertical') => {
+    setSplitDir(dir)
+    setSplitWith((prev) => pickSplitPartner(openIds, selected, prev))
+    setSplitMenuOpen(false)
+  }
+
+  const stopSplit = () => {
+    setSplitWith(null)
+    setSplitMenuOpen(false)
+  }
+
+  // splitWith 失效（配对 tab 被关闭，或 selected 变成配对 tab）时按规则重新配对/清除
+  const openKey = openIds.join(',')
+  useEffect(() => {
+    setSplitWith((prev) => {
+      if (!prev) return null
+      if (prev !== selected && openIds.includes(prev)) return prev
+      return pickSplitPartner(openIds, selected, null)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, openKey])
+
+  useEffect(() => {
+    splitWithRef.current = splitWith
+  }, [splitWith])
+
+  // 分屏配对/方向变化后，两个可见 terminal 都补一次 fit（隐藏期间尺寸不可读，同 selected 切换）
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      if (selected) termsRef.current.get(selected)?.fit.fit()
+      if (splitWith) termsRef.current.get(splitWith)?.fit.fit()
+    })
+  }, [selected, splitWith, splitDir])
+
+  const surfaces = Object.values(tabs)
+    .filter((tab) => tab.open)
+    .map((tab) => (
+      <TabSurface
+        key={tab.view.ticket.ticket_id}
+        ticketId={tab.view.ticket.ticket_id}
+        visible={selected === tab.view.ticket.ticket_id || splitWith === tab.view.ticket.ticket_id}
+        onMount={onSurfaceMount}
+        onInput={onSurfaceInput}
+        onClipboard={onSurfaceClipboard}
+      />
+    ))
 
   if (listPhase === 'loading') {
     return (
@@ -713,8 +954,17 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
             <Button variant="danger" disabled={!canRestart} title={canRestart ? '结束当前进程并重新启动' : '无可重启的终端'} onClick={onRestart}>
               重启
             </Button>
+            <TermFontControls value={fontSize} onChange={applyFontSize} />
             <Button variant="secondary" disabled={!selectedTab} title="切换全屏" onClick={onFullscreen}>
               全屏
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={!selectedTab}
+              title="把刚才在当前终端里复制的文字放进系统剪贴板"
+              onClick={() => void onCopyTerminalClipboard()}
+            >
+              复制到剪贴板
             </Button>
             <Button variant="secondary" disabled={!selectedTab} title="复制该终端的公开标识（项目/工作区/会话 ID）" onClick={onCopyIdentity}>
               {copied ? '已复制' : '复制标识'}
@@ -799,10 +1049,89 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
                 </div>
               )
             })}
+            {selectedTab?.open && (
+              <button
+                type="button"
+                className={`terminal-keys-toggle${keysOpen ? ' is-active' : ''}`}
+                onClick={() => setKeysOpen((value) => !value)}
+                aria-label={keysOpen ? '收起按键' : '展开按键'}
+                aria-expanded={keysOpen}
+                title={keysOpen ? '收起按键' : '展开按键'}
+              >
+                <span aria-hidden>⌨</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className={`terminal-keys-toggle terminal-split-toggle${splitMenuOpen ? ' is-active' : ''}`}
+              disabled={!canSplit}
+              onClick={() => setSplitMenuOpen((value) => !value)}
+              aria-label={splitMenuOpen ? '收起分屏布局' : '展开分屏布局'}
+              aria-expanded={splitMenuOpen}
+              title={canSplit ? '分屏布局：并排显示两个终端' : '需要至少两个打开的终端标签页才能分屏'}
+              data-testid="terminal-split-toggle"
+            >
+              <span aria-hidden>🧱</span>
+            </button>
+            {touch && selectedTab?.open && (
+              <button
+                type="button"
+                className={`terminal-keys-toggle terminal-input-toggle${inputOpen ? ' is-active' : ''}`}
+                onClick={() => setInputOpen((value) => !value)}
+                aria-label={inputOpen ? '收起输入条' : '展开输入条'}
+                aria-expanded={inputOpen}
+                title={inputOpen ? '收起输入条' : '展开输入条（点才弹键盘）'}
+                data-testid="terminal-input-toggle"
+              >
+                <span aria-hidden>✎</span>
+              </button>
+            )}
           </div>
+          {splitMenuOpen && (
+            <div className="terminal-split-actions" role="toolbar" aria-label="分屏布局" data-testid="terminal-split-actions">
+              <button type="button" disabled={!canSplit} title="左右分屏" onClick={() => startSplit('horizontal')}>
+                ⬌ 左右
+              </button>
+              <button type="button" disabled={!canSplit} title="上下分屏" onClick={() => startSplit('vertical')}>
+                ⬍ 上下
+              </button>
+              <button type="button" disabled={!splitWith} title="恢复单终端视图" onClick={stopSplit}>
+                取消分屏
+              </button>
+            </div>
+          )}
+          {keysOpen && selectedTab?.open && (
+            <div className="terminal-keys" role="toolbar" aria-label="手机电脑键盘" data-testid="terminal-keys">
+              {TERM_KEYS.map((key) => (
+                <button
+                  key={key.name}
+                  type="button"
+                  className={`${key.extra ? 'terminal-key-extra' : ''}${
+                    key.modifier && mods[key.modifier] ? ' is-active' : ''
+                  }`.trim()}
+                  title={key.title || key.label}
+                  disabled={selectedTab.phase !== 'live'}
+                  onClick={() => {
+                    if (key.modifier) {
+                      setMods((current) => ({ ...current, [key.modifier!]: !current[key.modifier!] }))
+                      return
+                    }
+                    sendKey(key.name)
+                  }}
+                >
+                  {key.label}
+                </button>
+              ))}
+            </div>
+          )}
           {selectedTab && (
             <div className="terminal-runtime-state" data-testid="terminal-runtime-state">
               状态：{RUNTIME_STATE_LABEL[selectedTab.view.runtime.state] ?? '状态未知'} · 连接：{PHASE_LABEL[selectedTab.phase] ?? selectedTab.phase}
+            </div>
+          )}
+          {terminalClipboardNote && (
+            <div className="terminal-runtime-state" role="status">
+              {terminalClipboardNote}
             </div>
           )}
           {selectedTab?.phase === 'attaching' && (
@@ -841,23 +1170,53 @@ function LiveBody({ project, workspace }: { project: Project; workspace: Workspa
           <div className={fullscreen ? 'terminal-fullscreen' : undefined}>
             {fullscreen && (
               <div className="terminal-fullscreen-bar">
+                <TermFontControls value={fontSize} onChange={applyFontSize} />
                 <Button variant="secondary" title="退出全屏（或按 Escape）" onClick={exitFullscreen}>
                   退出全屏
                 </Button>
               </div>
             )}
-            {Object.values(tabs)
-              .filter((tab) => tab.open)
-              .map((tab) => (
-                <TabSurface
-                  key={tab.view.ticket.ticket_id}
-                  ticketId={tab.view.ticket.ticket_id}
-                  visible={selected === tab.view.ticket.ticket_id}
-                  onMount={onSurfaceMount}
-                  onInput={onSurfaceInput}
-                />
-              ))}
+            {splitWith ? (
+              <div
+                className={`terminal-split-view ${splitDir === 'horizontal' ? 'is-split-h' : 'is-split-v'}`}
+                data-testid="terminal-split-view"
+              >
+                {surfaces}
+              </div>
+            ) : (
+              surfaces
+            )}
           </div>
+          {touch && inputOpen && selectedTab?.open && (
+            <form
+              className="terminal-inline-input"
+              onSubmit={(event) => {
+                event.preventDefault()
+                sendInline()
+              }}
+            >
+              <input
+                type="text"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return
+                  if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
+                  event.preventDefault()
+                  sendInline()
+                }}
+                placeholder="输入发给终端的文字…"
+                enterKeyHint="send"
+                autoComplete="off"
+                disabled={selectedTab.phase !== 'live'}
+                aria-label="终端文字输入"
+                data-testid="terminal-inline-input"
+              />
+              <button type="submit" disabled={selectedTab.phase !== 'live' || !draft.trim()}>
+                发送
+              </button>
+            </form>
+          )}
         </>
       )}
     </>

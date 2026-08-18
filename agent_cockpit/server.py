@@ -52,6 +52,9 @@ from . import uploads
 from . import files
 from . import instance_lock
 from . import mail_projects
+from . import chat_ledger
+from . import chat_roster
+from . import persist_work
 from . import next_profile
 from . import team_sessions
 from . import terminal
@@ -570,7 +573,7 @@ def _local_terminal_capability(workspace, location):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
-    global _identity_retirement_task, workspace_terminal_controller
+    global _identity_retirement_task, _persist_work_task, workspace_terminal_controller
     global workspace_agent_controller, _ephemeral_ready
     _require_next_instance_lock()
     project_registry_api_service().prepare()
@@ -618,6 +621,7 @@ async def lifespan(_: FastAPI):
             _message_poller_task = asyncio.create_task(_poll_message_state())
             _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
             _identity_retirement_task = asyncio.create_task(_identity_retirement_loop())
+            _persist_work_task = asyncio.create_task(_persist_work_loop())
             try:
                 recovery = await asyncio.to_thread(tasks.recover_pending_tasks)
                 if recovery.get("retryable"):
@@ -643,7 +647,7 @@ async def lifespan(_: FastAPI):
             if not ephemeral:
                 background_tasks = (
                     _poller_task, _message_poller_task, _worktree_cleanup_task,
-                    _identity_retirement_task,
+                    _identity_retirement_task, _persist_work_task,
                 )
                 for task in background_tasks:
                     if task is not None:
@@ -674,6 +678,7 @@ async def lifespan(_: FastAPI):
                     _message_poller_task = None
                     _worktree_cleanup_task = None
                     _identity_retirement_task = None
+                    _persist_work_task = None
     finally:
         if workspace_agent_controller is not None:
             try:
@@ -892,7 +897,7 @@ VALID_LAYOUTS = {"right", "horizontal", "down", "vertical", "tab"}
 VALID_COLLAB_MODES = {"quick", "develop_review", "parallel", "custom"}
 VALID_WORKSPACE_ROLES = {"lead", "developer", "reviewer", "researcher"}
 VALID_WORKSPACE_STRATEGIES = {"auto", "shared", "isolated"}
-VALID_PANE_SEND_MODES = {"send", "prompt", "keys"}
+VALID_PANE_SEND_MODES = {"send", "prompt", "keys", "slash"}
 MAIL_AGENT_NAMES = {
     "codex-cli": "codex",
     "kimi-work": "kimi",
@@ -1034,6 +1039,7 @@ _ZOOM_LEASES: dict[str, dict[str, Any]] = {}
 _ZOOM_LEASES_LOCK = threading.RLock()
 TERM_WS_TAKEN_OVER_CODE = 4001
 TERM_WS_INVALID_CODE = 4004
+TERM_REPLAY_SEND_MAX = 8 * 1024
 _TERM_WS_CONNECTIONS: dict[str, dict[str, Any]] = {}
 _TERM_INPUT_NOTE_TASKS: dict[str, asyncio.Task[None]] = {}
 _TERM_INPUT_NOTE_PENDING: set[str] = set()
@@ -1512,8 +1518,6 @@ def _registry_identity_for_instance(
         identity.get("project_key") != project
         or identity.get("agent") != mail_agent
         or identity.get("instance") != opaque_id
-        or identity.get("status") not in (None, "active")
-        or identity.get("retired_at")
     ):
         return None
     return identity
@@ -1529,8 +1533,17 @@ def _identity_record(
             identity = _registry_identity_for_instance(cwd, agent_type, instance_id)
             if not identity:
                 return None
-            return db.identity_by_cwd(cwd, agent_type, identity["name"])
-        return db.identity_by_cwd(cwd, agent_type)
+            hub = db.identity_by_cwd(cwd, agent_type, identity["name"])
+            if hub:
+                return hub
+            # Hub 可能误标 retired，本机 registry 仍是这个 instance 的花名。
+            return {
+                "name": identity["name"],
+                "program": identity.get("program") or agent_type,
+                "model": identity.get("model") or "",
+                "human_key": cwd,
+            }
+        return db.identity_for_chat_pane(cwd, agent_type)
     except Exception:
         return None
 
@@ -1553,6 +1566,8 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
     identities: dict[tuple[str, str, str], str | None] = {}
     descriptors: dict[tuple[str, str], dict[str, Any] | None] = {}
     legacy_counts: dict[tuple[str, str], int] = {}
+    session_leaders: dict[str, dict[str, str]] = {}
+    claimed_leaders: set[str] = set()
     for pane in snapshot.get("panes", []):
         session = str(pane.get("session") or "")
         pane_id = str(pane.get("pane_id") or "")
@@ -1585,20 +1600,63 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
         if session not in projects:
             try:
                 projects[session] = mail_projects.get(session, session_dir)
-            except (OSError, ValueError):
+            except (OSError, ValueError, next_profile.NextProfileError):
                 projects[session] = None
         project = projects[session]
         if not project:
+            _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
             continue
-        key = (project, mail_agent, instance_id)
-        if key not in identities:
-            identities[key] = (
-                _identity_name(project, mail_agent, instance_id)
-                if instance_id else _identity_name(project, mail_agent)
-            )
-        if identities[key]:
-            pane["mail_name"] = identities[key]
+        if instance_id:
+            key = (project, mail_agent, instance_id)
+            if key not in identities:
+                identities[key] = _identity_name(project, mail_agent, instance_id)
+            if identities[key]:
+                pane["mail_name"] = identities[key]
+                _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
+                continue
+        if session not in session_leaders:
+            session_leaders[session] = chat_roster.get_session_leader(session)
+        leader = session_leaders[session]
+        leader_name = str(leader.get("leader_mail_name") or "").strip()
+        leader_agent = str(leader.get("leader_agent") or "").strip().lower()
+        if (
+            leader_name
+            and session not in claimed_leaders
+            and (not leader_agent or leader_agent == mail_agent.lower())
+        ):
+            pane["mail_name"] = leader_name
+            claimed_leaders.add(session)
+            _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
+            continue
+        if instance_id:
+            _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
+            continue
+        legacy_key = (project, mail_agent, "")
+        if legacy_key not in identities:
+            identities[legacy_key] = _identity_name(project, mail_agent)
+        if identities[legacy_key]:
+            pane["mail_name"] = identities[legacy_key]
+        _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
     return snapshot
+
+
+def _leftover_mail_name(name: str, agent: str) -> bool:
+    lowered = name.lower()
+    kind = agent.lower()
+    return lowered in {kind, f"{kind}-main"} or lowered.startswith(f"{kind}-")
+
+
+def _apply_remembered_pane_name(
+    pane: dict[str, Any], session: str, pane_id: str, mail_agent: str,
+) -> None:
+    remembered = chat_roster.get_pane_mail_name(session, pane_id)
+    current_name = str(pane.get("mail_name") or "").strip()
+    leftover = _leftover_mail_name(current_name, mail_agent)
+    if remembered and (not current_name or leftover):
+        pane["mail_name"] = remembered
+        return
+    if current_name and not leftover:
+        chat_roster.set_pane_mail_name(session, pane_id, current_name)
 
 
 def _board_snapshot() -> dict[str, Any]:
@@ -1889,6 +1947,29 @@ class InspectWorkspaceReq(BaseModel):
 class MailProjectReq(BaseModel):
     project: str | None = None
     replace: bool = False
+
+
+class ChatMailReq(BaseModel):
+    text: str
+    to: list[str] = []
+    ledger_only: bool = False
+
+
+class ChatWorkspaceCreateReq(BaseModel):
+    path: str
+    title: str | None = None
+
+
+class ChatThreadCreateReq(BaseModel):
+    herdr_session: str
+    title: str | None = None
+
+
+class ChatSessionCreateReq(BaseModel):
+    agent: str = "codex"
+    title: str | None = None
+    model: str | None = None
+    args: str = Field(default="", max_length=herdr_client.MAX_AGENT_ARGS_LENGTH)
 
 
 class LoginReq(BaseModel):
@@ -4231,7 +4312,20 @@ def api_env_check():
 # ── 文件浏览/编辑路由 ──────────────────────────────────────────
 
 def _visible_root_groups(groups: dict) -> dict:
-    """展示用根目录:隐藏 /tmp 临时残留和 cockpit 内部 worktree(访问权限不变)。"""
+    """展示用根目录:隐藏 /tmp 临时残留、cockpit 内部 worktree 和内部存储根(访问权限不变)。
+
+    内部存储根(uploads/data/agent-mail-tools)是应用自己的运行目录,不该作为「工作区」
+    出现在群聊侧栏和目录树里;项目仓库根(_PROJECT_DIR)保留。
+    """
+    internal_storage = {
+        str(p.resolve(strict=False))
+        for p in (
+            runtime_paths.uploads_root(),
+            runtime_paths.data_root(),
+            Path.home() / "agent-mail-tools",
+        )
+    }
+
     def hidden(p: str) -> bool:
         normalized = p.rstrip("/") or "/"
         return (
@@ -4240,6 +4334,7 @@ def _visible_root_groups(groups: dict) -> dict:
                 for root in ("/tmp", "/var/tmp", "/private/tmp")
             )
             or "-cockpit-worktrees/" in normalized + "/"
+            or normalized in internal_storage
         )
     return {k: [p for p in paths if not hidden(p)] for k, paths in groups.items()}
 
@@ -4271,6 +4366,1101 @@ def api_file_root_remove(path: str):
         return {**result, "roots": [p for roots in groups.values() for p in roots], "groups": groups}
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+def _chat_session_workdir(name: str) -> Path | None:
+    """会话项目目录：mail 绑定 → launch descriptor workdir → agent pane cwd。
+
+    不用 herdr session.directory：那是 ~/.config/herdr/sessions/<name> 状态目录。
+    """
+    rec = next((s for s in herdr_client.list_sessions() if s.get("name") == name), None)
+    if rec:
+        session_dir = str(rec.get("directory") or "")
+        if session_dir:
+            try:
+                bound = mail_projects.get(name, session_dir)
+            except (OSError, ValueError, next_profile.NextProfileError):
+                bound = None
+            if bound:
+                path = Path(bound)
+                if path.is_dir():
+                    return path.resolve(strict=False)
+    try:
+        recorded = herdr_client.recorded_session_workdirs(name)
+    except Exception:
+        recorded = []
+    for raw in recorded:
+        path = Path(str(raw)).expanduser()
+        if path.is_dir():
+            return path.resolve(strict=False)
+    snap = _herdr_runtime_snapshot()
+    for pane in snap.get("panes", []):
+        if pane.get("session") != name or not pane.get("agent"):
+            continue
+        raw = str(pane.get("cwd") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            return path.resolve(strict=False)
+    return None
+
+
+def _chat_workspace_root(name: str) -> Path | None:
+    """群聊文件/发信根：账本工作区 path。没有所属工作区则没有目录。"""
+    thread = chat_ledger.get_thread_by_session(name)
+    if thread is None:
+        return None
+    workspace = chat_ledger.get_workspace(thread["workspace_id"])
+    if workspace is None:
+        return None
+    path = Path(workspace["path"])
+    if not path.is_dir():
+        return None
+    return path.resolve(strict=False)
+
+
+def _session_matches_workspace(session_name: str, workspace_path: str) -> bool:
+    workdir = _chat_session_workdir(session_name)
+    if workdir is None:
+        return False
+    base = str(workdir)
+    target = str(Path(workspace_path))
+    return base == target or base.startswith(target + "/")
+
+
+def _bind_matching_sessions(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    """把该目录上已有、尚未入账的 herdr session 写成 thread，侧栏立刻能看见。"""
+    bound: list[dict[str, Any]] = []
+    for rec in herdr_client.list_sessions():
+        name = str(rec.get("name") or "")
+        if not name:
+            continue
+        existing = chat_ledger.get_thread_by_session(name)
+        if existing is not None:
+            continue
+        if not _session_matches_workspace(name, workspace["path"]):
+            continue
+        try:
+            bound.append(chat_ledger.create_thread(workspace["id"], name))
+        except ValueError:
+            continue
+    return bound
+
+
+@app.get("/api/files/browse")
+def api_files_browse(path: str = ""):
+    """添加工作区挑选器：列一层目录。空路径从 Home 开始，不走访问白名单。"""
+    try:
+        return files.browse_picker_dir(path or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+def _list_chat_skills() -> list[dict[str, str]]:
+    roots = (
+        Path.home() / ".agents" / "skills",
+        Path.home() / ".grok" / "bundled" / "skills",
+    )
+    seen: set[str] = set()
+    out: list[dict[str, str]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for skill_md in sorted(root.glob("*/SKILL.md")):
+            ident = skill_md.parent.name.strip()
+            if not ident or ident in seen:
+                continue
+            seen.add(ident)
+            out.append({
+                "id": ident,
+                "label": ident,
+                "insert": f"请按 {ident} skill 处理。",
+            })
+            if len(out) >= 40:
+                return out
+    return out
+
+
+@app.get("/api/chat/skills")
+def api_chat_skills():
+    """对话框 + 菜单用的本机 skill 清单。"""
+    return {"skills": _list_chat_skills()}
+
+
+@app.post("/api/chat/sessions/{name}/files/upload")
+async def api_chat_session_upload(name: str, file: UploadFile):
+    """群聊附件落到当前工作区 cockpit-inbox/，不进 next 隔离 uploads。"""
+    _validate_session_name(name)
+    root = _chat_workspace_root(name)
+    if root is None:
+        raise HTTPException(404, "会话没有所属工作区目录")
+    dest_dir = (root / "cockpit-inbox").resolve()
+    try:
+        dest_dir.relative_to(root.resolve())
+    except ValueError as exc:
+        raise HTTPException(400, "工作区附件目录无效") from exc
+    try:
+        saved = await uploads.save_upload_file(file.filename or "upload.bin", file, dest_dir=dest_dir)
+    except uploads.UploadTooLarge as exc:
+        raise HTTPException(413, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    saved["rel"] = str(Path(saved["path"]).resolve().relative_to(root.resolve()))
+    return saved
+
+
+@app.get("/api/chat/sessions/{name}/files")
+def api_chat_session_files(name: str, path: str = ""):
+    """列所属工作区目录内的一层。没有工作区 → 404。"""
+    _validate_session_name(name)
+    root = _chat_workspace_root(name)
+    if root is None:
+        raise HTTPException(404, "会话没有所属工作区目录")
+    try:
+        return files.list_under_root(root, path or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/chat/sessions/{name}/terminal")
+def api_chat_session_terminal(name: str, cols: int = 120, rows: int = 36):
+    """打开当前群聊的 Herdr TUI；浏览器不能提交 cwd 或任意命令。"""
+    _validate_session_name(name)
+    record = next(
+        (item for item in herdr_client.list_sessions() if item.get("name") == name),
+        None,
+    )
+    if record is None:
+        raise HTTPException(404, f"session 不存在: {name}")
+    workdir = _chat_session_workdir(name)
+    try:
+        return terminal.replace_labeled_term(
+            str(workdir) if workdir else None,
+            cols=cols,
+            rows=rows,
+            label=f"herdr:{name}",
+            command=[herdr_client.HERDR_BIN, "--session", name],
+            env=herdr_client._herdr_tui_env(),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(503, f"Herdr 终端打开失败: {exc}") from exc
+
+
+@app.get("/api/chat/sessions/{name}/files/read")
+def api_chat_session_file_read(name: str, path: str):
+    """读所属工作区目录内的文件。"""
+    _validate_session_name(name)
+    root = _chat_workspace_root(name)
+    if root is None:
+        raise HTTPException(404, "会话没有所属工作区目录")
+    try:
+        return files.read_under_root(root, path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/chat/sessions/{name}/files/search")
+def api_chat_session_file_search(name: str, q: str, limit: int = 100):
+    """在所属工作区目录内按文件名搜索。"""
+    _validate_session_name(name)
+    root = _chat_workspace_root(name)
+    if root is None:
+        raise HTTPException(404, "会话没有所属工作区目录")
+    try:
+        return files.search_under_root(root, q, limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+def _chat_mail_project_key(name: str) -> str | None:
+    root = _chat_workspace_root(name) or _chat_session_workdir(name)
+    if root is None:
+        return None
+    try:
+        return next_profile.require_project(str(root))
+    except next_profile.NextProfileError:
+        return None
+
+
+def _mail_ts_ms(value: object) -> int:
+    if isinstance(value, (int, float)):
+        stamp = int(value)
+        return stamp if stamp >= 1_000_000_000_000 else stamp * 1000
+    if not isinstance(value, str) or not value.strip():
+        return 0
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return 0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.timestamp() * 1000)
+
+
+_OVERSEER_PREAMBLE_RE = re.compile(
+    r"---\s*\n\s*🚨\s*MESSAGE FROM HUMAN OVERSEER 🚨[\s\S]*?"
+    r"The human's guidance supersedes all other priorities\.\s*\n\s*---\s*",
+    re.IGNORECASE,
+)
+_BOSS_HINT_RE = re.compile(
+    r"^Boss 在群聊给你发了消息[^\n]*(?:\n+)(?:请用 mail-recv[^\n]*\n+)*",
+)
+_META_COMMENT_RE = re.compile(r"<!--\s*agent-cockpit-meta:[\s\S]*?-->\s*")
+
+
+def _clean_chat_body(text: str) -> str:
+    out = _META_COMMENT_RE.sub("", text)
+    out = _OVERSEER_PREAMBLE_RE.sub("\n", out)
+    out = _BOSS_HINT_RE.sub("", out)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+def _public_chat_mail(row: dict[str, Any]) -> dict[str, Any]:
+    text = _clean_chat_body(
+        str(row.get("body_md") or "").strip() or str(row.get("subject") or "").strip()
+    )
+    sender = str(row.get("sender_name") or "")
+    if sender.lower() in {"humanoverseer", "overseer", "human"}:
+        sender = "human"
+    recipients = [
+        str(item.get("name"))
+        for item in (row.get("recipients") or [])
+        if isinstance(item, dict) and item.get("name")
+    ]
+    return {
+        "id": str(row["id"]),
+        "sender": sender,
+        "program": "" if sender == "human" else str(row.get("sender_program") or ""),
+        "text": text,
+        "to": recipients,
+        "thread": str(row.get("thread_id") or ""),
+        "ts": _mail_ts_ms(row.get("created_ts")),
+    }
+
+
+def _ledger_chat_mail(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "sender": str(row.get("sender") or "human"),
+        "program": "",
+        "text": str(row.get("text") or ""),
+        "to": [str(item) for item in (row.get("to") or []) if item],
+        "thread": str(row.get("session") or ""),
+        "ts": int(row.get("ts") or 0),
+    }
+
+
+def _pane_preview_text(raw: dict[str, Any]) -> str:
+    output = raw.get("output") or ""
+    if isinstance(output, str) and output.strip().startswith("{"):
+        try:
+            parsed = json.loads(output)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            result = parsed.get("result") if isinstance(parsed.get("result"), dict) else parsed
+            for key in ("text", "output", "content"):
+                value = result.get(key) if isinstance(result, dict) else None
+                if isinstance(value, str) and value.strip():
+                    output = value
+                    break
+    return _clean_chat_body(str(output or raw.get("error") or ""))
+
+
+_PANE_LAST_STATUS: dict[tuple[str, str], str] = {}
+_HARVEST_STATUS_LOADED = False
+
+
+def _harvest_status_path() -> Path:
+    root = Path(os.environ.get(
+        "COCKPIT_STATE_DIR", str(Path.home() / ".local/state/agent-cockpit"),
+    )).expanduser()
+    return root / "chat-harvest.json"
+
+
+def _load_harvest_status() -> None:
+    global _HARVEST_STATUS_LOADED
+    if _HARVEST_STATUS_LOADED:
+        return
+    _HARVEST_STATUS_LOADED = True
+    path = _harvest_status_path()
+    loaded_file = False
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        rows = raw.get("panes") if isinstance(raw, dict) else None
+        if isinstance(rows, dict):
+            loaded_file = True
+            for key, status in rows.items():
+                if not isinstance(key, str) or "|" not in key:
+                    continue
+                session, pane_id = key.split("|", 1)
+                if session and pane_id and isinstance(status, str):
+                    _PANE_LAST_STATUS[(session, pane_id)] = status
+    except (OSError, UnicodeError, ValueError, TypeError):
+        pass
+    if loaded_file:
+        return
+    try:
+        snap = _herdr_runtime_snapshot()
+    except Exception:
+        return
+    for pane in snap.get("panes") or []:
+        if not isinstance(pane, dict) or not pane.get("session") or not pane.get("pane_id"):
+            continue
+        _PANE_LAST_STATUS[(str(pane["session"]), str(pane["pane_id"]))] = str(
+            pane.get("agent_status") or "unknown"
+        )
+    if _PANE_LAST_STATUS:
+        _save_harvest_status()
+
+
+def _save_harvest_status() -> None:
+    path = _harvest_status_path()
+    payload = {
+        "panes": {
+            f"{session}|{pane_id}": status
+            for (session, pane_id), status in _PANE_LAST_STATUS.items()
+        },
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        return
+
+
+_HARVEST_SKIP_PREFIXES = (
+    "Boss 在群聊",
+    "请用 mail-recv",
+    "🚨",
+    "MESSAGE FROM HUMAN",
+    "This message is from a human",
+    "You should:",
+    "The human's guidance",
+)
+_HARVEST_TUI_LINE_RE = re.compile(
+    r"^(?:"
+    r"┃(?:\s|$)|"
+    r"◆\s+(?:Run\b|Thought for\s+\d|Task completed in\b|Recap\b)|"
+    r"Worked for\s+\d|"
+    r"stop\s+\[hooks:|"
+    r"Thought for\s+\d|"
+    r"Context compacted:|"
+    r"Shift\+Tab:|"
+    r"Space:prompt|"
+    r"Ctrl\+[xX]:|"
+    r"pre_tool_use\b|"
+    r"Task completed in\b|"
+    r"Ran /|"
+    r"[└┌┐┘─┼┤├│╭╮╯╰━┃┴┬]+$|"
+    r"[└┌╭╰][└┌┐┘─┼┤├│╭╮╯╰━┃┴┬]+[┐┘╮╯]$|"
+    r"✓\s+\S+:\S+|"
+    r"\d{1,2}:\d{2}\s*(?:AM|PM)?$"
+    r")"
+)
+
+
+def _harvest_skip_line(stripped: str) -> bool:
+    if stripped in {"---", "HumanOverseer", "WebUI", "█", "▼"}:
+        return True
+    if any(stripped.startswith(prefix) for prefix in _HARVEST_SKIP_PREFIXES):
+        return True
+    if _HARVEST_TUI_LINE_RE.match(stripped):
+        return True
+    if "stop  [hooks:" in stripped:
+        return True
+    return False
+
+
+def _strip_harvest_tui_chrome(summary: str) -> str:
+    """无损剥离旧 harvest 气泡里的 TUI 壳，保留真实回复的全部段落。"""
+    kept: list[str] = []
+    for line in _clean_chat_body(summary).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+        if _harvest_skip_line(stripped):
+            continue
+        cleaned = re.sub(r"\s+Worked for\s+\d.*$", "", stripped)
+        cleaned = re.sub(r"\s+stop\s+\[hooks:.*$", "", cleaned)
+        cleaned = re.sub(
+            r"\s+\d{1,2}:\d{2}(?:\s*[AP]M)?(?:\s+[█▼])?\s*$", "", cleaned,
+        )
+        cleaned = cleaned.rstrip(" █▼")
+        if _harvest_skip_line(cleaned) or not cleaned:
+            continue
+        kept.append(cleaned)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
+def _extract_harvest_text(summary: str) -> str:
+    """从 pane 摘要里抽出一条可进瀑布流的回复，丢掉 Overseer/唤醒壳和 TUI 装饰。"""
+    text = _strip_harvest_tui_chrome(summary)
+    paragraphs = [part.strip() for part in text.split("\n\n") if part.strip()]
+    if len(paragraphs) > 1:
+        text = paragraphs[-1]
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) > 8:
+        text = "\n".join(lines[-8:])
+    if len(text) < 12 or text.startswith("Boss 在群聊"):
+        return ""
+    if len(text) > 2000:
+        return text[-2000:]
+    return text
+
+
+def _harvest_settled_replies(session: str) -> None:
+    """working/blocked → idle/done 时收一条清理过的回复进账本，不把整屏 TUI 塞进瀑布流。"""
+    _load_harvest_status()
+    try:
+        snap = _enrich_board_identities(_herdr_runtime_snapshot())
+    except Exception:
+        return
+    recent: list[dict[str, Any]] = []
+    try:
+        recent = chat_ledger.list_messages(session, 40)
+    except ValueError:
+        recent = []
+    for pane in snap.get("panes") or []:
+        if not isinstance(pane, dict) or pane.get("session") != session or not pane.get("agent"):
+            continue
+        pane_id = str(pane.get("pane_id") or "")
+        if not pane_id:
+            continue
+        key = (session, pane_id)
+        current = str(pane.get("agent_status") or "unknown")
+        previous = _PANE_LAST_STATUS.get(key)
+        if previous != current:
+            _PANE_LAST_STATUS[key] = current
+            _save_harvest_status()
+        if previous not in {"working", "blocked"} or current not in {"idle", "done"}:
+            continue
+        try:
+            summary = herdr_client.pane_summary(session, pane_id, 40)
+        except Exception:
+            continue
+        text = _extract_harvest_text(str((summary or {}).get("summary") or ""))
+        if not text:
+            continue
+        sender = str(
+            pane.get("mail_name") or pane.get("display_name") or pane.get("agent") or "agent"
+        )
+        if any(row.get("sender") == sender and row.get("text") == text for row in recent):
+            continue
+        try:
+            chat_ledger.append_message(
+                session, kind="agent", sender=sender, text=text, to=["human"],
+            )
+        except ValueError:
+            continue
+
+
+def _hub_message_in_chat(
+    item: dict[str, Any],
+    *,
+    allowed_threads: set[str],
+) -> bool:
+    """只收本群 thread；空 thread 无法证明归属，必须 fail-closed。"""
+    if not item.get("text"):
+        return False
+    thread = str(item.get("thread") or "")
+    return bool(thread) and thread in allowed_threads
+
+
+@app.get("/api/chat/sessions/{name}/mail")
+def api_chat_session_mail_list(name: str, limit: int = Query(80, ge=1, le=200)):
+    """群聊时间线：先读 Cockpit 账本，再补本 session 的 Agent Mail。"""
+    _validate_session_name(name)
+    _ensure_session_leader(name)
+    _harvest_settled_replies(name)
+    try:
+        local = [_ledger_chat_mail(row) for row in chat_ledger.list_messages(name, limit)]
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    hub_messages: list[dict[str, Any]] = []
+    project_key = _chat_mail_project_key(name)
+    thread = chat_ledger.get_thread_by_session(name)
+    mail_status = db.status()
+    # 未入账的 herdr 会话没有群聊 thread，禁止去扫 Hub 项目，否则会串到别的群。
+    if thread and project_key and mail_status.get("available"):
+        proj = db.project_by_canonical_key(project_key)
+        if proj:
+            allowed_threads = {name, str(thread["id"])}
+            hub_messages = [
+                item
+                for item in (
+                    _public_chat_mail(row)
+                    for row in db.messages_for_canonical_project(int(proj["id"]), max(limit, 120))
+                )
+                if _hub_message_in_chat(
+                    item, allowed_threads=allowed_threads,
+                )
+            ]
+    seen = {item["id"] for item in local}
+    seen_text = {
+        (str(item.get("sender") or "").lower(), str(item.get("text") or ""))
+        for item in local
+    }
+    merged = list(local)
+    for item in hub_messages:
+        if item["id"] in seen:
+            continue
+        text_key = (str(item.get("sender") or "").lower(), str(item.get("text") or ""))
+        if text_key in seen_text:
+            continue
+        seen.add(item["id"])
+        seen_text.add(text_key)
+        merged.append(item)
+    merged.sort(key=lambda item: (int(item.get("ts") or 0), str(item.get("id") or "")))
+    return {
+        "messages": merged[-limit:],
+        "project": project_key if thread else None,
+        "thread": name,
+        "ungrouped": thread is None,
+    }
+
+
+def _ensure_session_leader(session: str) -> dict[str, str]:
+    """把当前群第一个有花名的 agent 记为 Leader，供 mail-send --to leader 解析。"""
+    found = chat_roster.get_session_leader(session)
+    if found.get("leader_mail_name"):
+        return found
+    try:
+        snap = _enrich_board_identities(_herdr_runtime_snapshot())
+    except Exception:
+        return found
+    for pane in snap.get("panes") or []:
+        if not isinstance(pane, dict) or pane.get("session") != session or not pane.get("agent"):
+            continue
+        name = str(pane.get("mail_name") or pane.get("display_name") or "").strip()
+        if not name:
+            continue
+        try:
+            return chat_roster.set_session_leader(session, name, str(pane.get("agent") or ""))
+        except ValueError:
+            return found
+    return found
+
+
+def _resolve_chat_mail_recipients(session: str, recipients: list[str]) -> list[str]:
+    """把界面花名 / pane 兜底名改成 Agent Mail 花名。"""
+    try:
+        snap = _enrich_board_identities(_herdr_runtime_snapshot())
+    except Exception:
+        snap = {}
+    panes = [
+        pane
+        for pane in (snap.get("panes") or [])
+        if isinstance(pane, dict) and pane.get("session") == session and pane.get("agent")
+    ]
+    resolved: list[str] = []
+    for dest in recipients:
+        match = dest
+        lowered = dest.lower()
+        for pane in panes:
+            mail = str(pane.get("mail_name") or "")
+            display = str(pane.get("display_name") or "")
+            agent = str(pane.get("agent") or "")
+            tail = str(pane.get("pane_id") or "").replace("%", "")[-2:]
+            aliases = {mail, display, f"{agent}-{tail}" if agent and tail else ""}
+            leftover = agent and (
+                lowered == agent.lower()
+                or lowered == f"{agent.lower()}-main"
+                or lowered.startswith(f"{agent.lower()}-")
+            )
+            same = [
+                item for item in panes
+                if str(item.get("agent") or "").lower() == agent.lower()
+            ]
+            if dest in aliases or lowered in {item.lower() for item in aliases if item}:
+                match = mail or display or dest
+                break
+            if leftover and len(same) == 1 and mail:
+                match = mail
+                break
+        resolved.append(match)
+    return resolved
+
+
+def _notify_chat_recipients(session: str, recipients: list[str], text: str) -> None:
+    """叫醒对应 pane：Mail 是账本，这里只推一句领取提示 + 摘要。"""
+    names = {item for item in recipients if item}
+    if not names:
+        return
+    try:
+        snap = _enrich_board_identities(_herdr_runtime_snapshot())
+    except Exception:
+        return
+    leader = _ensure_session_leader(session)
+    leader_name = leader.get("leader_mail_name") or ""
+    leader_line = (
+        f"本群 Leader 是 {leader_name}。给 Leader 写信请 mail-send --to leader --thread {session}，"
+        f"不要写 grok-main / 程序-main。\n\n"
+        if leader_name
+        else "\n"
+    )
+    hint = (
+        "Boss 在群聊给你发了消息，请用 mail-recv --unread 领取并回复。\n"
+        + leader_line
+        + text[:500]
+    )
+    for pane in snap.get("panes") or []:
+        if not isinstance(pane, dict) or pane.get("session") != session:
+            continue
+        mail = str(pane.get("mail_name") or "")
+        if mail not in names:
+            continue
+        pane_id = pane.get("pane_id")
+        if not pane_id:
+            continue
+        try:
+            herdr_client.pane_send(session, str(pane_id), hint, "prompt")
+        except Exception:
+            continue
+
+
+@app.post("/api/chat/sessions/{name}/mail")
+def api_chat_session_mail(name: str, req: ChatMailReq):
+    """群聊发送：先写入 Cockpit 账本，再尽力转发 Agent Mail。"""
+    _validate_session_name(name)
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "正文为空")
+    recipients = [item.strip() for item in req.to if isinstance(item, str) and item.strip()]
+    if req.ledger_only:
+        if not recipients:
+            recipients = ["终端"]
+        try:
+            saved = chat_ledger.append_message(
+                name, kind="me", sender="human", text=text, to=recipients,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {
+            "ok": True,
+            "project": None,
+            "to": recipients,
+            "sender": "human",
+            "message": _ledger_chat_mail(saved),
+            "mail_error": None,
+            "result": None,
+        }
+    if not recipients:
+        raise HTTPException(400, "没有收件人")
+    try:
+        saved = chat_ledger.append_message(
+            name, kind="me", sender="human", text=text, to=recipients,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    mail_error = None
+    result = None
+    project = None
+    root = _chat_workspace_root(name) or _chat_session_workdir(name)
+    if root is None:
+        mail_error = "会话没有工作区目录，无法转发 Agent Mail"
+    else:
+        try:
+            project = next_profile.require_project(str(root))
+        except next_profile.NextProfileError:
+            mail_error = "工作区目录不在可通信项目范围内"
+    if project is not None and mail_error is None:
+        mail_status = _agent_mail_status()
+        if not mail_status.get("write_available"):
+            mail_error = mail_status.get("write_reason") or "Agent Mail 不可写"
+        else:
+            try:
+                thread = chat_ledger.get_thread_by_session(name)
+                workspace = (
+                    chat_ledger.get_workspace(str(thread["workspace_id"]))
+                    if thread else None
+                )
+                if workspace:
+                    _chat_repair_agent_mail(workspace, name)
+                proj = db.project_by_canonical_key(project)
+                if not proj:
+                    hub_client.ensure_project(project)
+                    proj = db.project_by_canonical_key(project)
+                overseer_project = str(proj["slug"]) if proj and proj.get("slug") else ""
+                if not overseer_project:
+                    raise RuntimeError("工作区还没有 Agent Mail 项目")
+                dest = _resolve_chat_mail_recipients(name, recipients)
+                result = hub_client.overseer_send(
+                    project=overseer_project,
+                    recipients=dest,
+                    subject=text.splitlines()[0][:80],
+                    body_md=text,
+                    thread_id=name,
+                )
+                _notify_chat_recipients(name, dest, text)
+            except Exception as exc:
+                mail_error = str(exc)
+    return {
+        "ok": True,
+        "project": project,
+        "to": recipients,
+        "sender": "human",
+        "message": _ledger_chat_mail(saved),
+        "mail_error": mail_error,
+        "result": result,
+    }
+
+
+def _chat_bind_candidates(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    """同目录、尚未入账的 herdr session，供打开工作区时绑定。"""
+    bound = {row["herdr_session"] for row in chat_ledger.list_threads()}
+    target = workspace["path"]
+    out: list[dict[str, Any]] = []
+    for rec in herdr_client.list_sessions():
+        name = str(rec.get("name") or "")
+        if not name or name in bound:
+            continue
+        if not _session_matches_workspace(name, target):
+            continue
+        out.append({
+            "name": name,
+            "status": rec.get("status") or "unknown",
+            "directory": rec.get("directory") or "",
+        })
+    return out
+
+
+@app.get("/api/chat/workspaces")
+def api_chat_workspaces():
+    """侧栏数据源：工作区登记 + 群聊账本。只读，不在 GET 里写账本。"""
+    try:
+        workspaces = chat_ledger.list_workspaces()
+        threads = chat_ledger.list_threads()
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    by_ws: dict[str, list[dict[str, Any]]] = {}
+    for row in threads:
+        by_ws.setdefault(row["workspace_id"], []).append(row)
+    return {
+        "workspaces": [
+            {**row, "threads": by_ws.get(row["id"], [])} for row in workspaces
+        ],
+        "threads": threads,
+    }
+
+
+@app.post("/api/chat/workspaces")
+def api_chat_workspace_create(req: ChatWorkspaceCreateReq):
+    """登记工作区。同路径幂等。不建 herdr、不改磁盘。已有同目录 session 写入账本。"""
+    try:
+        workspace = chat_ledger.create_workspace(req.path, req.title)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    threads = _bind_matching_sessions(workspace)
+    return {**workspace, "threads": threads}
+
+
+@app.get("/api/chat/workspaces/{workspace_id}")
+def api_chat_workspace_get(workspace_id: str):
+    row = chat_ledger.get_workspace(workspace_id)
+    if row is None:
+        raise HTTPException(404, "工作区不存在")
+    return {
+        **row,
+        "threads": chat_ledger.list_threads(workspace_id),
+        "candidates": _chat_bind_candidates(row),
+    }
+
+
+@app.delete("/api/chat/workspaces/{workspace_id}")
+def api_chat_workspace_delete(workspace_id: str):
+    """摘登记。不删目录、不杀 herdr、不删 thread（原群聊进未分组）。"""
+    if not chat_ledger.delete_workspace(workspace_id):
+        raise HTTPException(404, "工作区不存在")
+    return {"ok": True}
+
+
+@app.get("/api/chat/workspaces/{workspace_id}/threads")
+def api_chat_workspace_threads(workspace_id: str):
+    if chat_ledger.get_workspace(workspace_id) is None:
+        raise HTTPException(404, "工作区不存在")
+    return {"threads": chat_ledger.list_threads(workspace_id)}
+
+
+@app.post("/api/chat/workspaces/{workspace_id}/threads")
+def api_chat_thread_create(workspace_id: str, req: ChatThreadCreateReq):
+    """绑定一条群聊到 herdr session。同 session 名幂等。"""
+    try:
+        return chat_ledger.create_thread(workspace_id, req.herdr_session, req.title)
+    except ValueError as exc:
+        status = 404 if str(exc) == "workspace_id 不存在" else 400
+        raise HTTPException(status, str(exc)) from exc
+
+
+def _snapshot_session_matches_workspace(
+    snapshot: dict[str, Any], herdr_session: str, workspace_path: str,
+) -> bool:
+    """活 session 的 pane cwd 对不上工作区时，禁止把别的目录登记成它的 Mail 项目。"""
+    panes = [
+        pane for pane in snapshot.get("panes") or []
+        if isinstance(pane, dict) and pane.get("session") == herdr_session and pane.get("agent")
+    ]
+    session_row = next(
+        (
+            row for row in snapshot.get("sessions") or []
+            if isinstance(row, dict) and (
+                row.get("session") == herdr_session or row.get("name") == herdr_session
+            )
+        ),
+        None,
+    )
+    if session_row and session_row.get("panes"):
+        panes = [
+            pane for pane in session_row["panes"]
+            if isinstance(pane, dict) and pane.get("agent")
+        ]
+    cwds: list[Path] = []
+    for pane in panes:
+        raw = pane.get("cwd")
+        if not raw:
+            continue
+        try:
+            cwds.append(Path(str(raw)).expanduser().resolve())
+        except OSError:
+            continue
+    if not cwds:
+        return True
+    try:
+        workspace = Path(workspace_path).expanduser().resolve()
+    except OSError:
+        return False
+    for cwd in cwds:
+        if cwd == workspace:
+            return True
+        try:
+            cwd.relative_to(workspace)
+            return True
+        except ValueError:
+            pass
+        try:
+            workspace.relative_to(cwd)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
+def _chat_repair_agent_mail(
+    workspace: dict[str, Any], herdr_session: str,
+) -> dict[str, Any]:
+    """缺 mail_name 的 pane 复用 init-mail；失败只回 reason，不把人踢出群。"""
+    record = next(
+        (row for row in herdr_client.list_sessions() if row.get("name") == herdr_session),
+        None,
+    )
+    if record is None:
+        return {"ok": False, "reason": "session_not_found"}
+    if record.get("status") != "running":
+        return {"ok": False, "reason": "session_not_running"}
+    try:
+        snapshot = _board_snapshot()
+        if not _snapshot_session_matches_workspace(
+            snapshot, herdr_session, str(workspace["path"]),
+        ):
+            return {"ok": False, "reason": "workspace_not_this_session"}
+        project, _ = _bind_mail_project(herdr_session, str(workspace["path"]))
+        if not db.project_by_canonical_key(project):
+            hub_client.ensure_project(project)
+        session_row = next(
+            (
+                row for row in snapshot.get("sessions", [])
+                if row.get("session") == herdr_session
+            ),
+            None,
+        )
+        panes = session_row.get("panes", []) if session_row else [
+            pane for pane in snapshot.get("panes", [])
+            if pane.get("session") == herdr_session
+        ]
+        missing = [
+            str(pane.get("pane_id") or "")
+            for pane in panes
+            if pane.get("agent") and pane.get("pane_id") and not pane.get("mail_name")
+        ]
+        if not missing:
+            return {"ok": True, "project": project, "attempted": False}
+        result = api_herdr_session_init_mail(herdr_session)
+        if isinstance(result, dict):
+            return {**result, "attempted": True, "missing_before": missing}
+        return {"ok": True, "attempted": True, "missing_before": missing}
+    except HTTPException as exc:
+        return {"ok": False, "reason": str(exc.detail)}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+
+
+def _chat_workspace(workspace_id: str) -> dict[str, Any]:
+    workspace = chat_ledger.get_workspace(workspace_id)
+    if workspace is None:
+        raise HTTPException(404, "工作区不存在")
+    return workspace
+
+
+@app.post("/api/chat/workspaces/{workspace_id}/bind")
+def api_chat_workspace_bind(workspace_id: str, req: ChatThreadCreateReq):
+    """显式绑定已有 herdr，不创建、不启动。"""
+    workspace = _chat_workspace(workspace_id)
+    try:
+        thread = chat_ledger.create_thread(workspace_id, req.herdr_session, req.title)
+    except ValueError as exc:
+        status = 404 if str(exc) == "workspace_id 不存在" else 400
+        raise HTTPException(status, str(exc)) from exc
+    return {
+        "thread": thread,
+        "agent_mail": _chat_repair_agent_mail(workspace, req.herdr_session),
+    }
+
+
+@app.post("/api/chat/workspaces/{workspace_id}/open")
+def api_chat_workspace_open(workspace_id: str):
+    """打开最近群聊。同目录未入账的 herdr 先自动绑定；running 直接进；stopped 只 start 那一条。"""
+    workspace = _chat_workspace(workspace_id)
+    bound = _bind_matching_sessions(workspace)
+    threads = sorted(
+        chat_ledger.list_threads(workspace_id),
+        key=lambda row: row["created_at"],
+        reverse=True,
+    )
+    if not threads:
+        candidates = _chat_bind_candidates(workspace)
+        if candidates:
+            return {"needs_bind": True, "candidates": candidates, "bound": bound}
+        return {"empty": True, "bound": bound}
+
+    thread = threads[0]
+    session_name = str(thread["herdr_session"])
+    record = next(
+        (row for row in herdr_client.list_sessions() if row.get("name") == session_name),
+        None,
+    )
+    if record is None:
+        raise HTTPException(409, f"账本对应的 session 不存在: {session_name}")
+    status = str(record.get("status") or "unknown")
+    started = False
+    if status == "stopped":
+        result = herdr_client.start_session(session_name)
+        if result.get("available") is False or result.get("error"):
+            raise HTTPException(503, str(result.get("error") or "Herdr 不可用"))
+        status = "running"
+        started = not bool(result.get("reused"))
+    elif status != "running":
+        raise HTTPException(409, f"session 状态不可打开: {status}")
+    restored = _restore_session_members(session_name, workspace["path"])
+    return {
+        "thread": thread,
+        "status": status,
+        "started": started,
+        "restored": restored,
+        "bound": bound,
+        "agent_mail": _chat_repair_agent_mail(workspace, session_name),
+    }
+
+
+def _next_herdr_session_name(workspace: dict[str, Any]) -> str:
+    base = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "-",
+        (workspace.get("title") or Path(workspace["path"]).name or "chat"),
+    ).strip("-") or "chat"
+    taken = {str(row.get("name") or "") for row in herdr_client.list_sessions()}
+    taken.update(row["herdr_session"] for row in chat_ledger.list_threads())
+    for index in range(1, 100):
+        candidate = f"{base}-{index}"
+        if candidate not in taken:
+            return candidate
+    raise HTTPException(400, "无法分配 session 名")
+
+
+def _restore_session_members(session: str, workdir: str) -> list[dict[str, Any]]:
+    """stopped 拉起后按 launch descriptor 补成员。Codex 走 resume --last。"""
+    snap = _herdr_runtime_snapshot()
+    live_names = {
+        str(pane.get("agent") or "")
+        for pane in snap.get("panes", [])
+        if pane.get("session") == session and pane.get("agent")
+    }
+    live_ids = {
+        str(pane.get("pane_id") or "")
+        for pane in snap.get("panes", [])
+        if pane.get("session") == session
+    }
+    out: list[dict[str, Any]] = []
+    try:
+        descriptors = herdr_client.list_session_launch_descriptors(session)
+    except Exception:
+        return out
+    for desc in descriptors:
+        name = str(desc.get("name") or "")
+        kind = str(desc.get("agent") or desc.get("kind") or "")
+        if not kind:
+            continue
+        if name and name in live_ids:
+            continue
+        if kind in live_names:
+            continue
+        args = [str(item) for item in desc.get("args") or [] if isinstance(item, str)]
+        if kind == "codex" and "resume" not in args:
+            args = ["resume", "--last", *args]
+        result = herdr_client.start_agent(
+            session, workdir, kind,
+            args=" ".join(args),
+            label=name or None,
+        )
+        out.append({"name": name or kind, "kind": kind, "start": result})
+        if not result.get("error"):
+            live_names.add(kind)
+    return out
+
+
+@app.post("/api/chat/workspaces/{workspace_id}/sessions")
+def api_chat_session_create(workspace_id: str, req: ChatSessionCreateReq):
+    """群聊新会话：拉起 herdr + Leader，不走沉重的 setup-workspace 简报/协调。"""
+    workspace = _chat_workspace(workspace_id)
+    agent = (req.agent or "codex").strip().lower()
+    if agent not in {"codex", "claude", "kimi", "opencode", "grok"}:
+        raise HTTPException(400, "不支持的 Leader Agent")
+    session_name = _next_herdr_session_name(workspace)
+    boot = herdr_client.start_session(session_name, workdir=workspace["path"])
+    if boot.get("available") is False or boot.get("error"):
+        raise HTTPException(503, str(boot.get("error") or "无法启动 herdr session"))
+    try:
+        session_args = herdr_client.normalize_agent_args(req.args)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    started = herdr_client.start_agent(
+        session_name, workspace["path"], agent,
+        model=req.model, layout="tab", args=session_args,
+    )
+    if started.get("available") is False or started.get("error"):
+        raise HTTPException(
+            400,
+            str(started.get("error") or f"{agent} 启动失败"),
+        )
+    try:
+        thread = chat_ledger.create_thread(
+            workspace_id, session_name, req.title or session_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "thread": thread,
+        "session": session_name,
+        "started": started,
+        "agent_mail": _chat_repair_agent_mail(workspace, session_name),
+    }
 
 
 @app.get("/api/files")
@@ -4629,7 +5819,16 @@ def _release_all_zoom_leases() -> None:
 
 @app.get("/api/herdr/status")
 def api_herdr_status():
-    return {"available": herdr_client.is_available(), "binary": herdr_client.HERDR_BIN}
+    # next profile 单会话作用域：非 None 时前端只能用这个会话名（否则 404 session 不存在）
+    try:
+        scoped_session = next_profile.session()
+    except next_profile.NextProfileError:
+        scoped_session = None
+    return {
+        "available": herdr_client.is_available(),
+        "binary": herdr_client.HERDR_BIN,
+        "scoped_session": scoped_session,
+    }
 
 
 @app.get("/api/herdr/sessions")
@@ -5150,6 +6349,13 @@ def api_herdr_session_delete(name: str):
         _attach_identity_retirement(result, project_hint=project_hint)
         coordination.close_session(name, "deleted")
         mail_projects.unbind(name)
+        try:
+            thread = chat_ledger.get_thread_by_session(name)
+            if thread is not None:
+                chat_ledger.delete_thread(thread["id"])
+                result["thread_removed"] = thread["id"]
+        except ValueError:
+            pass
     return result
 
 
@@ -5289,6 +6495,8 @@ def _worktree_source(project_dir: Path) -> tuple[Path | None, Path | None]:
 def _canonical_mail_project(workdir: Path) -> str:
     """同一 clone 的 linked worktree 统一映射到主 worktree root。"""
     resolved = workdir.expanduser().resolve()
+    if next_profile.is_dev():
+        return str(resolved)
     scoped = next_profile.project()
     if scoped is not None:
         scope_path = Path(scoped)
@@ -6554,7 +7762,8 @@ async def api_term_ws(websocket: WebSocket, term_id: str):
             if not _term_websocket_is_current(term_id, connection):
                 return
             if history:
-                await websocket.send_bytes(history)
+                # 群聊弹窗没有 scrollback：只发尾部，避免 1 MiB 灌进主线程。
+                await websocket.send_bytes(history[-TERM_REPLAY_SEND_MAX:])
             await websocket.send_json({"type": "replay_complete"})
         # 输出转发任务:PTY → WebSocket
         async def pump_out():
@@ -7462,6 +8671,8 @@ _poller_task: asyncio.Task | None = None
 _message_poller_task: asyncio.Task | None = None
 _worktree_cleanup_task: asyncio.Task | None = None
 _identity_retirement_task: asyncio.Task | None = None
+_persist_work_task: asyncio.Task | None = None
+PERSIST_WORK_INTERVAL_S = 60.0
 # 过期 task worktree 后台清理：启动后立即跑一轮，之后每 6 小时一轮。
 WORKTREE_CLEANUP_INTERVAL_S = 6 * 3600
 WORKTREE_CLEANUP_MAX_AGE_HOURS = 48.0
@@ -7609,6 +8820,59 @@ async def _poll_live_state() -> None:
         duration = time.monotonic() - poll_start
         _record_poll_metrics(duration, session_count, success)
         await asyncio.sleep(_poll_delay(session_count))
+
+
+def _persist_work_state_path() -> Path:
+    root = Path(os.environ.get(
+        "COCKPIT_STATE_DIR", str(Path.home() / ".local/state/agent-cockpit"),
+    )).expanduser()
+    return root / "persist-work.json"
+
+
+def _tick_persist_work() -> None:
+    path = persist_work.DEFAULT_HANDOFF
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    snap = _enrich_board_identities(_herdr_runtime_snapshot())
+    project = os.environ.get("AGENT_MEMORY_PROJECT") or persist_work.DEFAULT_PROJECT
+    bound = persist_work.bound_sessions_for_project(
+        workspaces=chat_ledger.list_workspaces(),
+        threads=chat_ledger.list_threads(),
+        project=project,
+        extra_paths={Path(__file__).resolve().parents[1]},
+    )
+    leaders = {
+        name: str(chat_roster.get_session_leader(name).get("leader_mail_name") or "")
+        for name in bound
+    }
+    sent = persist_work.tick(
+        now=time.time(),
+        panes=list(snap.get("panes") or []),
+        bound_sessions=bound,
+        leaders=leaders,
+        handoff_text=text,
+        send=herdr_client.pane_send,
+        state_path=_persist_work_state_path(),
+    )
+    if sent:
+        logger.info(
+            "persist work woke %s",
+            [(w.session, w.pane_id, w.mail_name, w.next_item) for w in sent],
+        )
+
+
+async def _persist_work_loop() -> None:
+    """空闲 Leader 还有交接单下一步时叫醒，不靠 Boss 再 @。"""
+    while True:
+        try:
+            await asyncio.to_thread(_tick_persist_work)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("persist work tick failed")
+        await asyncio.sleep(PERSIST_WORK_INTERVAL_S)
 
 
 async def _poll_message_state() -> None:

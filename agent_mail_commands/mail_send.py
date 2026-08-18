@@ -24,7 +24,7 @@ TOOLS_DIR = os.path.join(INSTALL_ROOT, "agent-mail-tools")
 from .common import (
     REGISTRY_DIR, helper_command, load_identity, mcp_call, mcp_tool, slugify,
 )
-from agent_cockpit import coordination, next_profile  # noqa: E402
+from agent_cockpit import chat_roster, coordination, next_profile  # noqa: E402
 
 
 next_profile.require_helper_environment((
@@ -205,12 +205,58 @@ def _registry_identities(project_key: str) -> list[dict]:
     return identities
 
 
-def _resolve_registry_recipients(recipients: list[str], project_key: str) -> list[str]:
+def _leftover_mail_name(name: str, agent: str) -> bool:
+    lowered = str(name or "").strip().lower()
+    kind = str(agent or "").strip().lower()
+    if not lowered or not kind:
+        return False
+    return lowered == kind or lowered == f"{kind}-main" or lowered.startswith(f"{kind}-")
+
+
+def _unique_flower_for_leftover(recipient: str, identities: list[dict]) -> str:
+    """kimi-main / kimi 在同时有花名时改写为唯一非 leftover 花名。"""
+    key = str(recipient or "").strip()
+    if not key:
+        return ""
+    agents = {
+        str(item.get("agent") or "").strip().lower()
+        for item in identities
+        if item.get("agent")
+    }
+    kind = ""
+    lowered = key.lower()
+    if lowered in agents:
+        kind = lowered
+    elif lowered.endswith("-main") and lowered[:-5] in agents:
+        kind = lowered[:-5]
+    elif any(lowered.startswith(f"{item}-") for item in agents):
+        kind = next(item for item in agents if lowered.startswith(f"{item}-"))
+    if not kind:
+        for item in identities:
+            if str(item.get("name") or "") == key and _leftover_mail_name(key, str(item.get("agent") or "")):
+                kind = str(item.get("agent") or "").strip().lower()
+                break
+    if not kind:
+        return ""
+    flowers = [
+        str(item.get("name") or "")
+        for item in identities
+        if str(item.get("agent") or "").strip().lower() == kind
+        and item.get("name")
+        and not _leftover_mail_name(str(item.get("name")), kind)
+    ]
+    return flowers[0] if len(flowers) == 1 else ""
+
+
+def _resolve_registry_recipients(
+    recipients: list[str], project_key: str, session: str = "",
+) -> list[str]:
     """把 agent 类型/类型-实例别名改写为本项目唯一注册的 registry 花名。
 
     Hub 收件人只接受注册花名；直接写 agent 类型（如 qodercn）会被 Hub
     的收件人启发式校验拒绝。本函数在发送前做本地防呆：
     - 已是注册花名：原样保留；
+    - 当前群 session 的 leader / 程序-main：改写为本群 Leader 花名；
     - 类型或 类型-实例 别名且本项目 registry 唯一命中：改写为花名；
     - 别名命中多个身份：报错并列出候选花名；
     - 无命中：原样透传，交给 Hub 校验。
@@ -218,16 +264,40 @@ def _resolve_registry_recipients(recipients: list[str], project_key: str) -> lis
     会原样透传给 Hub。
     """
     identities = _registry_identities(project_key)
-    if not identities:
-        return recipients
     registered = {
         str(identity.get("name"))
         for identity in identities
         if identity.get("name")
     }
+    record = chat_roster.get_session_leader(session) if session else {}
     resolved: list[str] = []
     for recipient in recipients:
+        session_name = chat_roster.resolve_session_alias(recipient, record)
+        if session_name:
+            if session_name != recipient:
+                print(
+                    f"note: 收件人 '{recipient}' 改写为本群 Leader '{session_name}'",
+                    file=sys.stderr,
+                )
+            resolved.append(session_name)
+            continue
+        flower = _unique_flower_for_leftover(recipient, identities)
+        if flower:
+            if flower != recipient:
+                print(
+                    f"note: 收件人 '{recipient}' 改写为注册花名 '{flower}'",
+                    file=sys.stderr,
+                )
+            resolved.append(flower)
+            continue
         if recipient in registered:
+            resolved.append(recipient)
+            continue
+        if recipient.lower() == "leader":
+            raise SystemExit(
+                "error: 本群还没有登记 Leader。请改用花名，不要写 grok-main"
+            )
+        if not identities:
             resolved.append(recipient)
             continue
         matches = [
@@ -243,6 +313,14 @@ def _resolve_registry_recipients(recipients: list[str], project_key: str) -> lis
             )
         ]
         if len(matches) > 1:
+            flower = _unique_flower_for_leftover(recipient, matches)
+            if flower:
+                print(
+                    f"note: 收件人 '{recipient}' 改写为注册花名 '{flower}'",
+                    file=sys.stderr,
+                )
+                resolved.append(flower)
+                continue
             options = ", ".join(
                 str(identity.get("name")) for identity in matches
             )
@@ -859,8 +937,9 @@ def main(argv: list[str] | None = None) -> None:
                 human_recipients.append(handle)
         else:
             agent_recipients.append(recipient)
+    session_hint = (args.thread or os.environ.get("HERDR_SESSION") or "").strip()
     agent_recipients = _resolve_registry_recipients(
-        agent_recipients, identity["project_key"],
+        agent_recipients, identity["project_key"], session=session_hint,
     )
     recipients = [*agent_recipients, *(f"@{item}" for item in human_recipients)]
     if not recipients:

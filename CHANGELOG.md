@@ -8,8 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Publish version 0.3.5 as an operator-preview build of the current Local Web
-  2.0 implementation; managed worktree lifecycle governance remains follow-up work.
+- Publish version 0.3.5 as the first operator-preview of Cockpit 3.0 group
+  chat on the :8790 source server. A workspace is a directory, each session
+  is a 1:1 Herdr binding, Agent Mail stays durable, and Herdr is runtime
+  only. Managed worktree lifecycle governance remains follow-up work.
 
 - Publish version 0.3.4 with the versioned delivery framework and the native
   consecutive-upgrade evidence fix.
@@ -18,6 +20,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Treat already-stopped or missing Herdr sessions as a successful delete,
+  and clear a deleted session from the URL so the page does not refresh in
+  a loop.
+- Skip persist-work wakes when every remaining handoff item is watch/wait,
+  and allow identity retirement to finish when the project directory is
+  already gone.
 - Publish draft GitHub Releases through their validated numeric API endpoint so
   the local signed release lane can complete without manual reconciliation.
 - Rebind previous-generation evidence after a completed maintenance request so a
@@ -47,6 +55,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Durable chat ledger for workspaces, threads, and waterfall messages, plus
+  an in-process persist-work harness that wakes an idle Leader when handoff
+  still has real next steps and skips watch-only or "wait for Boss" items.
+- Group-chat web shell with 2–4 pane compose, overlay login that keeps
+  composer drafts, terminal font controls, and harvest text that strips TUI
+  chrome.
 - A strict versioned delivery contract and read-only gate with stable validation
   codes, dependency readiness reporting, release checks, and adversarial fixtures.
 - A compact historical task-statistics strip in the workbench, backed by an

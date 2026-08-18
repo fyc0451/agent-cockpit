@@ -9,6 +9,7 @@ herdr 以多个 session 运行,每个 session 有独立 socket。本模块遍历
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -35,11 +36,11 @@ HERDR_BIN = _HERDR_ENV or shutil.which("herdr") or str(Path.home() / ".local" / 
 # herdr 所在的额外 PATH(供子进程找到它)
 _HERDR_DIR = str(Path(HERDR_BIN).parent) if HERDR_BIN else ""
 PANE_CREATE_TIMEOUT = 3.0
-AGENT_START_TIMEOUT = 10.0
+AGENT_START_TIMEOUT = 60.0
 QODER_AGENT_START_TIMEOUT = 60.0
 QODER_AGENTS = frozenset({"qoder", "qodercli", "qodercn"})
-# 其他冷启动慢的 agent 的识别窗口(二进制大/启动自检耗时,如 grok 约 160MB)
-SLOW_AGENT_START_TIMEOUTS = {"grok": 60.0}
+# 冷启动慢的 agent：二进制大 / 登录 / 自检。10s 不够 codex 就绪。
+SLOW_AGENT_START_TIMEOUTS = {"grok": 60.0, "codex": 60.0, "claude": 60.0, "kimi": 60.0, "opencode": 60.0}
 AGENT_POLL_INTERVAL = 0.2
 # agent wait 未显式给 timeout 时的子进程上限：herdr 默认无限等待，Cockpit 不能
 # 让子进程永久阻塞，故给一个有限上界；调用方需要更长的真实等待应显式传 timeout_ms。
@@ -224,7 +225,7 @@ def _submit_snapshot(
 
 
 def _agent_start_timeout(agent: str) -> float:
-    """QoderCLI/grok 等冷启动较慢,其余 Agent 继续使用默认识别窗口。"""
+    """QoderCLI/grok/codex 等冷启动较慢，默认也给 60s 识别窗口。"""
     if agent in QODER_AGENTS:
         return QODER_AGENT_START_TIMEOUT
     return SLOW_AGENT_START_TIMEOUTS.get(agent, AGENT_START_TIMEOUT)
@@ -484,6 +485,35 @@ def set_theme_for_web_mode(
     return {"path": path, "name": name, "changed": True}
 
 
+def _herdr_subprocess_env() -> dict[str, str]:
+    """herdr 子进程环境。dev 配置必须用用户本机 herdr，不能跟 cockpit-next 隔离树。"""
+    extra_path = _HERDR_DIR + (":" + os.environ.get("PATH", "") if os.environ.get("PATH") else "")
+    env = {**os.environ, "PATH": extra_path or os.environ.get("PATH", "/usr/bin:/bin")}
+    if next_profile.is_dev():
+        home = Path.home()
+        env.pop("HERDR_CONFIG_PATH", None)
+        env.pop("HERDR_SESSION", None)
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+        env["XDG_STATE_HOME"] = str(home / ".local" / "state")
+        env["XDG_DATA_HOME"] = str(home / ".local" / "share")
+    return env
+
+
+def _herdr_tui_env() -> dict[str, str]:
+    """显式 `--session` TUI 环境：保留配置域，但不继承调用 pane 的现场。"""
+    env = _herdr_subprocess_env()
+    for key in (
+        "HERDR_ENV",
+        "HERDR_SESSION",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_PANE_ID",
+        "HERDR_TERMINAL_ID",
+    ):
+        env.pop(key, None)
+    return env
+
+
 def _run(args: list[str], timeout: float = 10) -> str:
     """跑 herdr 子命令,注入 PATH,返回 stdout。失败抛 RuntimeError。"""
     if "--session" in args:
@@ -494,8 +524,7 @@ def _run(args: list[str], timeout: float = 10) -> str:
             next_profile.require_session(args[index + 1])
         except next_profile.NextProfileError as exc:
             raise RuntimeError(str(exc)) from exc
-    extra_path = _HERDR_DIR + (":" + os.environ.get("PATH", "") if os.environ.get("PATH") else "")
-    env = {**os.environ, "PATH": extra_path or os.environ.get("PATH", "/usr/bin:/bin")}
+    env = _herdr_subprocess_env()
     try:
         r = subprocess.run(
             [HERDR_BIN] + args, capture_output=True, text=True,
@@ -506,7 +535,8 @@ def _run(args: list[str], timeout: float = 10) -> str:
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"herdr {' '.join(args)} 超时(>{timeout}s)") from e
     if r.returncode != 0:
-        raise RuntimeError(f"herdr {' '.join(args)} 失败: {r.stderr.strip()[:200]}")
+        detail = (r.stderr or r.stdout or "").strip()[:200]
+        raise RuntimeError(f"herdr {' '.join(args)} 失败: {detail}")
     return r.stdout
 
 
@@ -1033,6 +1063,13 @@ def pane_zoom(
     }
 
 
+def _is_throwaway_identity_prompt(text: str) -> bool:
+    """pytest /tmp 身份告知不得打进活 pane。"""
+    if "[agent-mail 身份告知]" not in (text or ""):
+        return False
+    return "pytest-of-" in text or "/tmp/pytest" in text
+
+
 def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> dict[str, Any]:
     """往 pane 发送。
 
@@ -1043,6 +1080,8 @@ def pane_send(session: str, pane_id: str, text: str, mode: str = "prompt") -> di
       slash     → agent TUI 斜杠命令：send-text + Enter（不走 agent prompt，避免当聊天提交）
     正确语法统一为 `herdr --session <s> <subcmd> <pane_id> ...`(session 全局前置)。
     """
+    if mode == "prompt" and _is_throwaway_identity_prompt(text):
+        return {"available": True, "skipped": "throwaway_identity"}
     if not is_available():
         return {"available": False}
     try:
@@ -2033,6 +2072,63 @@ def _workspace_codex_trust_args(canonical_path: str) -> list[str]:
     return ["-c", override]
 
 
+_KIMI_WS_SLUG_RE = re.compile(r"[A-Za-z0-9._-]")
+_LAUNCH_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,80}$")
+
+
+def _kimi_config_home() -> Path:
+    override = os.environ.get("KIMI_CONFIG_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".kimi-code"
+
+
+def _kimi_workspace_slug(name: str) -> str:
+    out: list[str] = []
+    prev_dash = False
+    for char in name:
+        if _KIMI_WS_SLUG_RE.fullmatch(char):
+            out.append(char)
+            prev_dash = False
+        elif not prev_dash:
+            out.append("-")
+            prev_dash = True
+    slug = "".join(out).strip("-._") or "workspace"
+    return slug[:64]
+
+
+def _kimi_workspace_id(canonical_path: str) -> str:
+    if (
+        not isinstance(canonical_path, str)
+        or not canonical_path
+        or not Path(canonical_path).is_absolute()
+        or "\x00" in canonical_path
+    ):
+        raise ValueError("kimi workspace path invalid")
+    digest = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()[:12]
+    return f"wd_{_kimi_workspace_slug(Path(canonical_path).name)}_{digest}"
+
+
+def _ensure_kimi_workspace_trusted(canonical_path: str) -> str:
+    """预写 kimi workspace-trust，避免启动卡在「Trust this folder」。"""
+    workspace_id = _kimi_workspace_id(canonical_path)
+    trust_dir = _kimi_config_home() / "workspace-trust"
+    trust_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = trust_dir / workspace_id
+    if path.is_file():
+        return workspace_id
+    payload = json.dumps(
+        {"root": canonical_path, "trustedAt": int(time.time() * 1000)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    tmp = path.with_name(f".{workspace_id}.{os.getpid()}.tmp")
+    tmp.write_text(payload + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+    return workspace_id
+
+
 def _workspace_descriptor_internal_args(record: dict[str, Any]) -> list[str]:
     has_authority = "project_id" in record or "workspace_id" in record
     if not has_authority:
@@ -2300,6 +2396,39 @@ def discard_pending_workspace_launch_descriptor(instance_id: str) -> bool:
         del data["descriptors"][key]
         _save_launch_descriptors(data)
         return True
+
+
+def list_session_launch_descriptors(session: str) -> list[dict[str, Any]]:
+    """该 herdr session 下仍有效的 launch descriptor。"""
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+    out: list[dict[str, Any]] = []
+    for record in data.get("descriptors", {}).values():
+        if not isinstance(record, dict) or not _launch_descriptor_is_active(record):
+            continue
+        if record.get("session") != session:
+            continue
+        out.append(dict(record))
+    return out
+
+
+def recorded_session_workdirs(session: str) -> list[str]:
+    """该 herdr session 在 launch descriptor 里记过的工作目录（不是 herdr 状态目录）。"""
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+    out: list[str] = []
+    seen: set[str] = set()
+    for record in data.get("descriptors", {}).values():
+        if not isinstance(record, dict) or not _launch_descriptor_is_active(record):
+            continue
+        if record.get("session") != session:
+            continue
+        raw = record.get("workdir")
+        if not isinstance(raw, str) or not raw or raw in seen:
+            continue
+        seen.add(raw)
+        out.append(raw)
+    return out
 
 
 def get_launch_descriptor(session: str, pane_id: str) -> dict[str, Any] | None:
@@ -2682,6 +2811,42 @@ def _terminate_bootstrap_process(process: subprocess.Popen[bytes]) -> bool:
     return process.poll() is not None
 
 
+def rebind_live_launch_descriptor(
+    *,
+    instance_id: str,
+    session: str,
+    pane_id: str,
+    workdir: str,
+    mail_name: str | None = None,
+) -> dict[str, Any]:
+    """把仍在跑、但 descriptor 被误标 retired 的 instance 绑回当前 pane。
+
+    不新建 instance，也不碰 Hub。退休 tombstone 只清 descriptor 上的 state。
+    """
+    opaque_id = validate_agent_instance_id(instance_id)
+    if not session or not pane_id:
+        raise ValueError("session/pane 无效")
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        record = data["descriptors"].get(f"instance|{opaque_id}")
+        if not isinstance(record, dict):
+            raise ValueError("launch descriptor 不存在")
+        record["session"] = str(session)
+        record["pane_id"] = str(pane_id)
+        record["workdir"] = str(workdir)
+        record["state"] = "active"
+        for key in (
+            "retired_at", "retirement_pending_at", "retirement_error",
+            "retirement_attempts",
+        ):
+            record.pop(key, None)
+        if mail_name:
+            record["mail_name"] = str(mail_name)
+            record["mail_instance"] = opaque_id
+        _save_launch_descriptors(data)
+        return dict(record)
+
+
 def update_launch_descriptor_by_instance(
     instance_id: str, **changes: Any,
 ) -> dict[str, Any] | None:
@@ -3038,6 +3203,16 @@ def _start_agent_internal(
         return {"available": True, "error_code": "invalid_agent_identity", "error": str(exc)}
     normalized_args = normalize_agent_args(args)
     agent_args = shlex.split(normalized_args) if normalized_args else []
+    if model:
+        token = str(model).strip()
+        if _LAUNCH_MODEL_RE.fullmatch(token) is None:
+            return {
+                "available": True,
+                "error_code": "invalid_agent_identity",
+                "error": "model 无效",
+            }
+        if "-m" not in agent_args and "--model" not in agent_args:
+            agent_args = ["-m", token, *agent_args]
     # Grok 自绘 TUI 默认暗色；Web 浅色时启动加 --light（运行中切主题走 /theme slash）
     if agent == "grok" and not workspace_managed:
         for flag in grok_launch_theme_args(current_web_theme_mode()):
@@ -3385,6 +3560,15 @@ def _start_agent_internal(
                     message="workspace managed codex detection failed",
                 )
         else:
+            if canonical_kind == "kimi":
+                try:
+                    _ensure_kimi_workspace_trusted(str(target_dir))
+                except (OSError, ValueError):
+                    return {
+                        "available": True,
+                        "error_code": "workspace_agent_trust_unavailable",
+                        "error": "kimi 工作区信任目录无法写入，无法跳过确认",
+                    }
             start_timeout = _agent_start_timeout(agent)
             # 全部受支持 agent 统一用原生 agent start：Herdr 按 --kind 解析 canonical
             # 可执行文件、在 pane 的交互 shell 内启动，并在 --timeout 内等待 readiness。
@@ -3478,6 +3662,12 @@ def _start_agent_internal(
         return result
     except RuntimeError as e:
         rolled_back = False
+        raw_error = str(e)
+        if "timed out waiting for agent startup" in raw_error:
+            raw_error = (
+                f"{agent} 启动超时（{int(_agent_start_timeout(agent))} 秒内没就绪）。"
+                "请再试一次。"
+            )
         if new_pid:
             if workspace_managed:
                 rolled_back = _close_created_pane_verified(
@@ -3509,7 +3699,7 @@ def _start_agent_internal(
                 }
         return {
             "available": True,
-            "error": str(e),
+            "error": raw_error,
             "pane_id": new_pid,
             "rolled_back": rolled_back,
         }
@@ -4149,8 +4339,31 @@ def restart_pane(
             _RESTARTING_PANES.discard(key)
 
 
+def _already_stopped_error(message: str) -> bool:
+    """herdr session stop：进程已死 / socket 不可达视为已经停了。"""
+    text = (message or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if "is not running or cannot be reached" in lowered:
+        return True
+    parsed = _decode_cli_json(text)
+    error = parsed.get("error")
+    if not isinstance(error, dict):
+        # `herdr … 失败: {json}` 时整段不是纯 JSON
+        start = text.find("{")
+        if start >= 0:
+            parsed = _decode_cli_json(text[start:])
+            error = parsed.get("error")
+    if not isinstance(error, dict):
+        return False
+    code = str(error.get("code") or "")
+    detail = str(error.get("message") or "").lower()
+    return code == "session_stop_failed" and "not running" in detail
+
+
 def stop_session(session: str) -> dict[str, Any]:
-    """停止一个 herdr session。"""
+    """停止一个 herdr session。已停或 socket 不可达视为成功。"""
     try:
         next_profile.require_session(session)
     except next_profile.NextProfileError as exc:
@@ -4158,14 +4371,88 @@ def stop_session(session: str) -> dict[str, Any]:
     if not is_available():
         return {"available": False}
     try:
-        _run(["session", "stop", session], timeout=10)
-        return {"available": True, "stopped": session}
+        out = _run(["session", "stop", session], timeout=10)
     except RuntimeError as e:
+        if _already_stopped_error(str(e)):
+            return {"available": True, "stopped": session, "already_stopped": True}
         return {"available": True, "error": str(e)}
+    if _already_stopped_error(out):
+        return {"available": True, "stopped": session, "already_stopped": True}
+    return {"available": True, "stopped": session}
+
+
+SESSION_START_TIMEOUT = 20.0
+
+
+def start_session(session: str, *, workdir: str | None = None) -> dict[str, Any]:
+    """恢复 stopped 的 herdr session：PTY 跑 `herdr --session NAME`，起来后 Ctrl-b d 脱离。
+
+    当前 herdr CLI 没有 `session start`。
+    """
+    try:
+        next_profile.require_session(session)
+    except next_profile.NextProfileError as exc:
+        return {"available": True, "error": str(exc)}
+    if not is_available():
+        return {"available": False}
+    record = next((row for row in list_sessions() if row.get("name") == session), None)
+    if record is not None and record.get("status") == "running":
+        return {"available": True, "started": session, "reused": True}
+    if record is not None and record.get("status") not in {None, "stopped"}:
+        return {"available": True, "error": "session 状态不可恢复"}
+    if record is None and not workdir:
+        return {"available": True, "error": "新建 session 需要工作目录"}
+    cwd = workdir or str((record or {}).get("directory") or Path.home())
+    from . import terminal
+    term = None
+    try:
+        term = terminal.create_term(
+            cwd, cols=120, rows=32, command=[HERDR_BIN, "--session", session],
+            env=_herdr_tui_env(),
+        )
+        deadline = time.monotonic() + SESSION_START_TIMEOUT
+        while time.monotonic() < deadline:
+            current = next(
+                (
+                    row for row in list_sessions()
+                    if row.get("name") == session and row.get("status") == "running"
+                ),
+                None,
+            )
+            if current is not None:
+                terminal.write_term(term["id"], "\x02d")
+                time.sleep(0.4)
+                return {"available": True, "started": session, "reused": False}
+            time.sleep(0.25)
+        if term is not None:
+            terminal.kill_term(term["id"])
+        return {"available": True, "error": "启动 session 超时"}
+    except Exception as exc:
+        if term is not None:
+            try:
+                terminal.kill_term(term["id"])
+            except Exception:
+                pass
+        return {"available": True, "error": str(exc)}
+
+
+def _already_absent_error(message: str) -> bool:
+    """herdr session delete：目录/名字已经没了视为删成功。"""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "not found",
+        "does not exist",
+        "no such file",
+        "unknown session",
+        "session not found",
+    )
+    return any(marker in text for marker in markers)
 
 
 def delete_session(session: str) -> dict[str, Any]:
-    """删除一个已停止的 session。"""
+    """删除一个已停止的 session。herdr 侧已不存在时仍清本地账本。"""
     try:
         next_profile.require_session(session)
     except next_profile.NextProfileError as exc:
@@ -4175,7 +4462,8 @@ def delete_session(session: str) -> dict[str, Any]:
     try:
         _run(["session", "delete", session], timeout=10)
     except RuntimeError as e:
-        return {"available": True, "error": str(e)}
+        if not _already_absent_error(str(e)):
+            return {"available": True, "error": str(e)}
     # session 已删除：清理该 session 的 launch descriptor，避免同名 session 重建后
     # 把上一代 args 误当当前权威契约（workspace/pane/name ID 会被 Herdr 重新分配）。
     # 清理失败不复活 session，但必须结构化暴露，不静默宣告 descriptor 已安全。

@@ -1,0 +1,189 @@
+/* 三栏外壳样式，取自 @deepseek-ai/dsh-client-ui-layout 的
+   AppFrame.module.css (MIT License)。 */
+
+.frame {
+  position: relative; /* 锚定跨越列边的拖拽 handle */
+  display: grid;
+  grid-template-rows: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-base);
+  /* 收起/展开沿 deepsuite 缓动曲线动画轨道（--ds-ease-in-out，
+     ui-theme base.css）。 */
+  transition: grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+/* 拖拽以指针节奏写宽度；缓动会让列边脱离手柄。 */
+.frame[data-dragging] {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .frame {
+    transition: none;
+  }
+}
+
+.sidebarCol {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--dsw-specific-sidebar-fill);
+  border-right: 1px solid var(--dsw-alias-border-l1);
+}
+
+.sidebarFab {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.sidebarFab:hover {
+  background: var(--dsw-alias-bg-page, var(--dsw-specific-sidebar-nav-item-hover));
+}
+
+.sidebarBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  border: 0;
+  padding: 0;
+  background: color-mix(in srgb, #000 36%, transparent);
+}
+
+.sidebarOverlay {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 6;
+  width: min(320px, 86vw);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--dsw-specific-sidebar-fill);
+  border-right: 1px solid var(--dsw-alias-border-l1);
+}
+
+.sidebarOverlay > * {
+  flex: 1;
+  min-height: 0;
+}
+
+.frame[data-sidebar-collapsed] {
+  --gc-toolbar-left-extra: 44px;
+}
+
+.centerCol {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.detailsCol {
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* details 子树在零宽下保持挂载，边框不能画出台阶缝；
+   收起的侧栏则保留带边框的紧凑 rail。 */
+.frame[data-details-collapsed] .detailsCol {
+  border-left: none;
+}
+
+.detailsBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  border: 0;
+  padding: 0;
+  background: color-mix(in srgb, #000 36%, transparent);
+}
+
+.detailsOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-base);
+}
+
+.detailsOverlay > * {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 拖拽 handle 是 frame 的子元素（各列裁剪溢出）：8px 命中条以内联
+   left 居中在列边、盖在列内容之上。details 侧在垂直中心加一枚可见的
+   12x32 胶囊；侧栏只保留命中条。 */
+.handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  margin-left: -4px;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+  /* 与轨道同曲线，收展时胶囊贴着移动的列边；拖拽时暂停。 */
+  transition: left var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.frame[data-dragging] .handle {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .handle {
+    transition: none;
+  }
+}
+
+.handle[data-side='details']::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 32px;
+  border-radius: 10px;
+  box-sizing: border-box;
+  background: var(--dsw-alias-button-floating-fill);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
+  /* 悬停示能：胶囊在指针进入其列、命中条本身或拖拽前隐藏。 */
+  opacity: 0;
+  transition:
+    opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    background var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.detailsCol:hover ~ .handle[data-side='details']::after,
+.handle[data-side='details']:hover::after,
+.handle[data-side='details'][data-dragging='true']::after {
+  opacity: 1;
+}
+
+.handle[data-side='details']:hover::after,
+.handle[data-side='details'][data-dragging='true']::after {
+  background: var(--dsw-alias-button-floating-hover);
+  border-color: var(--dsw-alias-border-l3);
+}

@@ -890,6 +890,39 @@ def test_resolve_recipients_maps_type_instance_alias(tmp_path):
     assert module._resolve_registry_recipients(["qodercn-main"], PROJECT) == ["qodercn-main"]
 
 
+def test_resolve_recipients_uses_session_leader_not_program_main(tmp_path, monkeypatch):
+    from agent_cockpit import chat_roster
+
+    module = _load_mail_send()
+    monkeypatch.setattr(chat_roster, "LEADERS_DIR", tmp_path / "leaders")
+    chat_roster.set_session_leader("cockpit", "BrownDesert", "grok")
+    _write_registry(tmp_path, module, [
+        {"name": "JadeBay", "agent": "grok", "instance": "main"},
+        {"name": "BrownDesert", "agent": "grok", "instance": "i-yzh33bkopbhev3ae654tc7tila"},
+        {"name": "codex-main", "agent": "codex", "instance": "main"},
+    ])
+    assert module._resolve_registry_recipients(
+        ["leader"], PROJECT, session="cockpit",
+    ) == ["BrownDesert"]
+    assert module._resolve_registry_recipients(
+        ["grok-main"], PROJECT, session="cockpit",
+    ) == ["BrownDesert"]
+    assert module._resolve_registry_recipients(
+        ["JadeBay"], PROJECT, session="cockpit",
+    ) == ["JadeBay"]
+    assert module._resolve_registry_recipients(["grok-main"], PROJECT) == ["JadeBay"]
+
+
+def test_resolve_recipients_rewrites_program_main_to_unique_flower(tmp_path):
+    module = _load_mail_send()
+    _write_registry(tmp_path, module, [
+        {"name": "kimi-main", "agent": "kimi", "instance": "main"},
+        {"name": "FoggyBasin", "agent": "kimi", "instance": "i-5plnoam2zkgklftfrwrel7qc44", "status": "active"},
+    ])
+    assert module._resolve_registry_recipients(["kimi-main"], PROJECT) == ["FoggyBasin"]
+    assert module._resolve_registry_recipients(["kimi"], PROJECT) == ["FoggyBasin"]
+
+
 def test_resolve_recipients_passes_known_flower_name_through(tmp_path):
     module = _load_mail_send()
     _write_registry(tmp_path, module, [

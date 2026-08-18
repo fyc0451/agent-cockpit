@@ -48,7 +48,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const resolved = resolveTheme(pref)
 
   useEffect(() => {
-    document.documentElement.dataset.theme = resolveTheme(pref)
+    const resolved = resolveTheme(pref)
+    document.documentElement.dataset.theme = resolved
+    // dsw 令牌体系（features/shell/dsw.css）挂在 body[data-ds-dark-theme] 上，
+    // 与 html[data-theme] 同步驱动，native 控件跟随 color-scheme。
+    document.body.toggleAttribute('data-ds-dark-theme', resolved === 'dark')
+    document.documentElement.style.colorScheme = resolved
     try {
       localStorage.setItem(THEME_STORAGE_KEY, pref)
     } catch {
@@ -57,7 +62,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (pref !== 'system' || typeof window.matchMedia !== 'function') return
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const onChange = () => {
-      document.documentElement.dataset.theme = mq.matches ? 'dark' : 'light'
+      const next = mq.matches ? 'dark' : 'light'
+      document.documentElement.dataset.theme = next
+      document.body.toggleAttribute('data-ds-dark-theme', next === 'dark')
+      document.documentElement.style.colorScheme = next
     }
     mq.addEventListener?.('change', onChange)
     return () => mq.removeEventListener?.('change', onChange)

@@ -84,6 +84,16 @@ body {
   background: var(--bg);
 }
 
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(15 23 42 / 48%);
+}
+
 .auth-panel {
   width: min(100%, 360px);
   padding: 24px;
@@ -227,6 +237,23 @@ pre {
   height: 100vh;
 }
 
+/* Glassmorphism 过渡：所有交互元素默认启用平滑过渡 */
+.btn,
+.tab,
+.card,
+.rail-item,
+.drawer-item,
+.palette-item,
+.list-link,
+a {
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.15s ease;
+}
+
 .main {
   display: flex;
   flex-direction: column;
@@ -260,6 +287,11 @@ pre {
   min-height: 0;
   background: var(--nav);
   color: var(--nav-text);
+  /* Glassmorphism: 毛玻璃导航栏 */
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  background: color-mix(in srgb, var(--nav) 82%, transparent);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .rail-brand {
@@ -470,8 +502,11 @@ button.rail-item {
   height: 64px;
   flex: none;
   padding: 0 16px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  /* Glassmorphism: 毛玻璃顶栏 */
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  backdrop-filter: blur(12px) saturate(1.3);
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
 }
 
 .topbar-spacer {
@@ -675,6 +710,8 @@ button.rail-item {
 
 .card:hover {
   border-color: var(--accent-3);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
 }
 
 .card--disabled {
@@ -1334,6 +1371,16 @@ button.rail-item {
   background: var(--panel-3);
 }
 
+.btn--primary:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.btn--secondary:hover {
+  border-color: var(--accent-3);
+  background: var(--panel-2);
+}
+
 .btn--icon {
   width: 34px;
   padding: 0;
@@ -1725,6 +1772,156 @@ button.rail-item {
   height: 100%;
 }
 
+/* 触摸滚动桥接管时禁用浏览器手势（1.0 static/index.html .term-touch-scroll 同款） */
+.terminal-surface .xterm.term-touch-scroll {
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+
+/* H5：点终端画面不弹键盘，文字走这条输入框（群聊 .gc-term-inline-input 同款视觉） */
+.terminal-inline-input {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 0 0;
+  border-top: 1px solid rgb(255 255 255 / 10%);
+}
+
+.terminal-inline-input input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 6px;
+  background: #1a1e24;
+  color: #e8eaed;
+  font-size: 16px;
+}
+
+.terminal-inline-input input:focus {
+  outline: none;
+  border-color: rgb(60 130 246 / 70%);
+}
+
+.terminal-inline-input button {
+  flex: none;
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: #3c82f6;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.terminal-inline-input button:disabled,
+.terminal-inline-input input:disabled {
+  opacity: 0.45;
+}
+
+/* H5 触屏键盘栏（群聊 .gc-term-keys / 1.0 .term-keys 同款视觉） */
+
+.term-font-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.term-font-button {
+  flex: none;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 4px;
+  background: #1a1e24;
+  color: #e8eaed;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.term-font-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.term-font-size {
+  min-width: 20px;
+  padding: 0 4px;
+  color: #9aa0a6;
+  font-size: 12px;
+  text-align: center;
+}
+
+.terminal-keys-toggle {
+  flex: none;
+  align-self: center;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.terminal-keys-toggle:hover,
+.terminal-keys-toggle.is-active {
+  background: var(--line);
+  color: inherit;
+}
+
+.terminal-keys {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 6px 0;
+  margin-bottom: 8px;
+  max-height: 46dvh;
+  overflow-y: auto;
+}
+
+.terminal-keys button {
+  flex: 0 0 auto;
+  min-width: 38px;
+  padding: 5px 8px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 4px;
+  background: #1a1e24;
+  color: #e8eaed;
+  font-family: SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 1.0 的 extra 键分两级展开；这里点开即全部展开，extra 键始终可见 */
+.terminal-keys .terminal-key-extra {
+  display: block;
+}
+
+.terminal-keys button.is-active {
+  background: #3c82f6;
+  border-color: #3c82f6;
+  color: #fff;
+}
+
+.terminal-keys button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* TERM-003：tabs / toolbar / runtime 状态 / fullscreen / 390 */
 
 .terminal-tabs {
@@ -1815,6 +2012,67 @@ button.rail-item {
   min-height: 0;
 }
 
+/* 🧱 前端分屏：selected + 配对 tab 两个 surface 同时可见（is-split-h 左右 / is-split-v 上下）。
+   仅在分屏时渲染该包裹层，非分屏 DOM/布局零变化。 */
+.terminal-split-view {
+  display: flex;
+  gap: 1px; /* 1px 分隔线：容器底色从 gap 透出 */
+  background: var(--line);
+  border-radius: var(--radius);
+}
+
+.terminal-split-view.is-split-h {
+  flex-direction: row;
+  height: 420px; /* 与单 surface 默认高度一致 */
+}
+
+.terminal-split-view.is-split-v {
+  flex-direction: column;
+  height: 640px;
+}
+
+/* 全屏 overlay 内分屏：吃掉退出条之外的剩余空间 */
+.terminal-fullscreen .terminal-split-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+.terminal-split-view > .terminal-surface {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+}
+
+.terminal-split-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.terminal-split-actions button {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.terminal-split-actions button:hover:not(:disabled) {
+  background: var(--line);
+}
+
+.terminal-split-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 @media (max-width: 420px) {
   .terminal-surface {
     height: 300px;
@@ -1848,6 +2106,22 @@ button.rail-item {
     flex: 1 1 100%;
     margin-left: 0;
     flex-wrap: wrap;
+  }
+}
+
+/* ---------- prefers-reduced-motion 无障碍 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .card:hover {
+    transform: none;
   }
 }
 

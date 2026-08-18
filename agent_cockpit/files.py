@@ -64,6 +64,8 @@ PREVIEW_EXT = {
 # 目录打包下载的保护上限
 MAX_ZIP_FILES = 5000
 MAX_ZIP_SIZE = 500 * 1024 * 1024  # 500MB(打包前原始大小)
+# 「添加工作区」挑选器一层最多返回这么多子目录（对齐 3080 browse maxEntries）
+BROWSE_MAX_ENTRIES = 1000
 
 # 访问根白名单的构成:本项目目录 + home 下固定子目录 + DB 注册项目
 _HOME = Path.home().resolve()
@@ -332,6 +334,69 @@ def remove_custom_root(rel: str) -> dict[str, Any]:
 def reset_roots() -> None:
     """重置根缓存(根列表现由 _load_roots 实时计算,空操作,保留接口兼容)。"""
     pass
+
+
+def _ancestry_crumbs(path: Path) -> list[dict[str, str]]:
+    crumbs: list[dict[str, str]] = []
+    current = path
+    while True:
+        crumbs.append({"name": current.name or str(current), "path": str(current)})
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    crumbs.reverse()
+    return crumbs
+
+
+def browse_picker_dir(rel: str | None = None) -> dict[str, Any]:
+    """列一层目录供添加工作区挑选。不走访问白名单；空路径 = Home。
+
+    只返回目录。可以浏览 / 和 Home（与 3080 一致），敏感目录拒绝。
+    真正「添加」仍走 add_custom_root，不能把 / 或整个 Home 加成工作区。
+    """
+    if not rel or not str(rel).strip():
+        path = _HOME
+    else:
+        raw = str(rel).strip()
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = _HOME / raw
+        try:
+            path = path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"目录不存在或无法解析: {path}") from exc
+    if _custom_root_policy(path) is CustomRootsReason.SENSITIVE_ROOT:
+        raise ValueError(f"敏感或系统运行目录不能浏览: {path}")
+    if not path.exists() or not path.is_dir():
+        raise ValueError(f"不是目录: {path}")
+    entries: list[dict[str, Any]] = []
+    truncated = False
+    try:
+        children = sorted(path.iterdir(), key=lambda item: item.name.lower())
+    except PermissionError:
+        raise ValueError(f"无权限: {path}") from None
+    for child in children:
+        if len(entries) >= BROWSE_MAX_ENTRIES:
+            truncated = True
+            break
+        try:
+            if not child.is_dir():
+                continue
+        except OSError:
+            continue
+        entries.append({
+            "name": child.name,
+            "path": str(child),
+            "hidden": child.name.startswith("."),
+        })
+    return {
+        "path": str(path),
+        "home": str(_HOME),
+        "crumbs": _ancestry_crumbs(path),
+        "entries": entries,
+        "truncated": truncated,
+    }
 
 
 def _resolve(rel: str) -> Path:
@@ -814,6 +879,40 @@ def _info_file(path: Path) -> dict[str, Any]:
             "ext": path.suffix.lower().lstrip("."),
         }],
     }
+
+
+def confine_to_root(root: Path, rel: str | None) -> Path:
+    """把请求路径限制在会话/项目目录内，不走全局白名单。"""
+    base = root.resolve(strict=False)
+    if not base.is_dir():
+        raise ValueError("会话目录不存在")
+    raw = (rel or "").strip()
+    if not raw or raw.rstrip("/") == str(base).rstrip("/"):
+        return base
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = base / raw
+    try:
+        target = path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"路径无法解析: {path}") from exc
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise ValueError("路径不在会话目录内") from exc
+    return target
+
+
+def list_under_root(root: Path, rel: str | None = None) -> dict[str, Any]:
+    return _list_dir_path(confine_to_root(root, rel))
+
+
+def read_under_root(root: Path, rel: str) -> dict[str, Any]:
+    return _read_file_path(confine_to_root(root, rel))
+
+
+def search_under_root(root: Path, query: str, limit: int = 100) -> dict[str, Any]:
+    return _search_files_path(confine_to_root(root, None), query, limit)
 
 
 def read_file(rel: str) -> dict[str, Any]:

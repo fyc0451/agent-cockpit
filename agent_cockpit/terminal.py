@@ -135,16 +135,15 @@ def _term_cfg(key: str, default: float) -> float:
 
 
 def _valid_dims(cols: Any, rows: Any) -> tuple[int, int]:
-    """校验窗口尺寸,非法抛 ValueError。"""
+    """校验窗口尺寸。非整数抛错；超范围夹到上限，避免大屏打不开终端。"""
     try:
         c, r = int(cols), int(rows)
     except (TypeError, ValueError):
         raise ValueError(f"cols/rows 必须是整数: {cols!r}/{rows!r}")
-    if not (MIN_COLS <= c <= MAX_COLS and MIN_ROWS <= r <= MAX_ROWS):
-        raise ValueError(
-            f"cols/rows 超出范围({MIN_COLS}-{MAX_COLS}/{MIN_ROWS}-{MAX_ROWS}): {c}/{r}"
-        )
-    return c, r
+    return (
+        max(MIN_COLS, min(MAX_COLS, c)),
+        max(MIN_ROWS, min(MAX_ROWS, r)),
+    )
 
 
 def _valid_label(label: Any) -> str | None:
@@ -188,6 +187,7 @@ def create_term(
     rows: int = 24,
     label: str | None = None,
     command: list[str] | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """创建一个新终端会话。返回 {id, pid, label}。
 
@@ -203,6 +203,7 @@ def create_term(
         label=label,
         command=command,
         owner_kind="legacy",
+        env=env,
     )
 
 
@@ -233,6 +234,7 @@ def create_bound_term(
         label=None,
         command=None,
         owner_kind="workspace",
+        env=None,
     )
 
 
@@ -286,6 +288,7 @@ def _create_term(
     label: str | None,
     command: list[str] | None,
     owner_kind: str,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     cols, rows = _valid_dims(cols, rows)
     label = _valid_label(label)
@@ -333,9 +336,13 @@ def _create_term(
                     os.execve(argv[0], list(argv), _workspace_shell_env(argv[0]))
                 else:
                     _legacy_chdir(workdir)
-                    os.environ["TERM"] = "xterm-256color"
                     argv = command or [SHELL, "-l"]
-                    os.execv(argv[0], argv)
+                    if env is not None:
+                        child_env = {**env, "TERM": "xterm-256color"}
+                        os.execve(argv[0], argv, child_env)
+                    else:
+                        os.environ["TERM"] = "xterm-256color"
+                        os.execv(argv[0], argv)
             except BaseException:
                 _child_failed(status_write)
             _child_failed(status_write)
@@ -417,8 +424,10 @@ def replace_labeled_term(
     cols: int = 80,
     rows: int = 24,
     label: str | None = None,
+    command: list[str] | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """串行替换同 label 的 PTY，供 Herdr session 显式接管使用。"""
+    """串行替换同 label 的 PTY，供服务端固定命令显式接管使用。"""
     normalized = _valid_label(label)
     if normalized is None:
         raise ValueError("替换终端必须提供名称")
@@ -431,7 +440,9 @@ def replace_labeled_term(
             ]
         for term_id in victims:
             kill_term(term_id, superseded=True)
-        return create_term(cwd, cols, rows, normalized)
+        if command is None:
+            return create_term(cwd, cols, rows, normalized)
+        return create_term(cwd, cols, rows, normalized, command=command, env=env)
 
 
 def _kill_child(pid: int, master_fd: int) -> None:

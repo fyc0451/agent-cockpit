@@ -40,12 +40,13 @@ def _safe_name(filename: str) -> str:
     return name
 
 
-async def save_upload_file(filename: str, source: Any) -> dict:
+async def save_upload_file(filename: str, source: Any, dest_dir: Path | None = None) -> dict:
     """分块保存上传文件,返回 {id, path, filename, size}。"""
     safe_name = _safe_name(filename)
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    folder = dest_dir if dest_dir is not None else UPLOAD_DIR
+    folder.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time() * 1000)
-    dest = UPLOAD_DIR / f"{stamp}-{secrets.token_hex(4)}-{safe_name}"
+    dest = folder / f"{stamp}-{secrets.token_hex(4)}-{safe_name}"
     size = 0
     limit = _max_size()
     try:

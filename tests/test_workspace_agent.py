@@ -1132,7 +1132,7 @@ def test_workspace_managed_start_bootstraps_empty_session_before_descriptor(
     trust_args = herdr_client._workspace_codex_trust_args(PATH)
     assert [
         "--session", SESSION, "agent", "start", AGENT_A,
-        "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000",
+        "--kind", "codex", "--pane", "w1:p2", "--timeout", "60000",
         "--", *trust_args,
     ] in calls
     descriptor = herdr_client.get_launch_descriptor_by_instance(AGENT_A)
@@ -1216,7 +1216,7 @@ def test_workspace_managed_codex_allows_exact_readonly_public_args(
     trust_args = herdr_client._workspace_codex_trust_args(PATH)
     assert [
         "--session", SESSION, "agent", "start", AGENT_A,
-        "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000",
+        "--kind", "codex", "--pane", "w1:p2", "--timeout", "60000",
         "--", "--sandbox", "read-only", *trust_args,
     ] in calls
     descriptor = herdr_client.get_launch_descriptor_by_instance(AGENT_A)
@@ -1598,7 +1598,7 @@ def test_workspace_managed_start_uses_existing_workspace_without_bootstrap(
     )
     assert [
         "--session", SESSION, "agent", "start", AGENT_A,
-        "--kind", "claude", "--pane", "w7:p2", "--timeout", "10000",
+        "--kind", "claude", "--pane", "w7:p2", "--timeout", "60000",
     ] in calls
 
 

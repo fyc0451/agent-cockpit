@@ -327,6 +327,47 @@ def test_invalid_persisted_roots_reader_is_byte_for_byte_read_only(tmp_path):
     )
 
 
+def test_browse_picker_starts_at_home_lists_dirs_only(tmp_path):
+    (tmp_path / "github").mkdir()
+    (tmp_path / "readme.txt").write_text("x", encoding="ascii")
+    (tmp_path / ".cache").mkdir()
+
+    listing = files.browse_picker_dir(None)
+    assert listing["path"] == str(tmp_path.resolve())
+    assert listing["home"] == str(tmp_path.resolve())
+    names = {row["name"]: row for row in listing["entries"]}
+    assert "github" in names
+    assert "readme.txt" not in names
+    assert names[".cache"]["hidden"] is True
+    assert names["github"]["hidden"] is False
+    assert listing["crumbs"][-1]["path"] == str(tmp_path.resolve())
+
+
+def test_confine_to_root_lists_and_rejects_escape(tmp_path):
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("x", encoding="ascii")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("nope", encoding="ascii")
+
+    listed = files.list_under_root(root, None)
+    names = {row["name"] for row in listed["entries"]}
+    assert "src" in names
+
+    with pytest.raises(ValueError, match="不在会话目录"):
+        files.list_under_root(root, str(outside))
+    with pytest.raises(ValueError, match="不在会话目录"):
+        files.read_under_root(root, str(outside))
+
+
+def test_browse_picker_rejects_sensitive_but_allows_root():
+    with pytest.raises(ValueError, match="敏感"):
+        files.browse_picker_dir("/proc")
+    root = files.browse_picker_dir("/")
+    assert root["path"] == "/"
+    assert any(row["path"] == "/" for row in root["crumbs"])
+
+
 def test_custom_root_rejects_broad_or_missing_directories(tmp_path):
     with pytest.raises(ValueError, match="具体目录"):
         files.add_custom_root("/")

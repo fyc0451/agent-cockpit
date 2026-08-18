@@ -15,11 +15,49 @@ PROFILE_ENV = "COCKPIT_NEXT_PROFILE"
 PROJECT_ROOT_ENV = "COCKPIT_PROJECT_ROOT"
 FIXED_PROFILE = "1"
 EPHEMERAL_PROFILE = "ephemeral"
+DEV_PROFILE = "dev"
 PROJECT_MARKER = "agent-cockpit-next"
 SESSION = "github-agent-cockpit-next"
 HOST = "127.0.0.1"
 FIXED_HOSTS = frozenset({HOST, "0.0.0.0"})
 PORT = "18790"
+DEV_PORT = "8790"
+DEV_UNIT = "agent-cockpit-dev.service"
+
+
+def dev_layout(home: Path, repo: Path) -> dict[str, str]:
+    """8790 正式根：与 dashboard-data / .config/agent-cockpit 同一套，不再用 *-next*。"""
+    home = home.resolve()
+    repo = repo.resolve()
+    data = home / "dashboard-data"
+    config = home / ".config" / "agent-cockpit"
+    state = home / ".local" / "state" / "agent-cockpit"
+    uploads = home / "dashboard-uploads"
+    return {
+        "COCKPIT_NEXT_WORKTREE": str(repo),
+        "COCKPIT_PORT": DEV_PORT,
+        "COCKPIT_DATA_DIR": str(data),
+        "COCKPIT_CONFIG_DIR": str(config),
+        "COCKPIT_STATE_DIR": str(state),
+        "COCKPIT_UPLOADS_DIR": str(uploads),
+        "COCKPIT_COORDINATION_DB": str(data / "coordination.sqlite3"),
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH": str(data / "launch-descriptors.json"),
+        "AGENT_COCKPIT_RELEASE_STATE_DIR": str(state / "release-lane"),
+        "COCKPIT_SYSTEMD_UNIT": DEV_UNIT,
+        "COCKPIT_UPGRADE_V2_ENABLED": "0",
+        "COCKPIT_B0_MODE": "off",
+        "COCKPIT_HERDR_STATE_MODE": "off",
+        "COCKPIT_EDITION": "source",
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+        "HERDR_CONFIG_PATH": str(home / ".config" / "herdr" / "config.toml"),
+        "AGENT_MAIL_DB_PATH": str(home / "mcp_agent_mail" / "storage.sqlite3"),
+        "AGENT_MAIL_PROJECT": str(repo),
+        "HERDR_SESSION": SESSION,
+        "TEAM_HUB_URL": "http://127.0.0.1:8765",
+        "HUMAN_AUTH_URL": "http://127.0.0.1:8766",
+    }
 EPHEMERAL_ROOT_ENV = "COCKPIT_EPHEMERAL_ROOT"
 EPHEMERAL_LISTEN_FD_ENV = "COCKPIT_EPHEMERAL_LISTEN_FD"
 EPHEMERAL_READY_TOKEN_ENV = "COCKPIT_EPHEMERAL_READY_TOKEN"
@@ -261,7 +299,7 @@ def ensure_private_herdr_config(environment: Mapping[str, str]) -> Path:
     """Create the exact product-owned Herdr config before Herdr can start."""
     try:
         profile = environment.get(PROFILE_ENV)
-        if profile == FIXED_PROFILE:
+        if profile in {FIXED_PROFILE, DEV_PROFILE}:
             authority = Path(_required("COCKPIT_CONFIG_DIR", environment))
         elif profile == EPHEMERAL_PROFILE:
             authority = _ephemeral_root(environment)
@@ -832,12 +870,17 @@ def finalize_ephemeral_runtime_root(
 
 def enabled(environment: Mapping[str, str] | None = None) -> bool:
     env = os.environ if environment is None else environment
-    return env.get(PROFILE_ENV) in {FIXED_PROFILE, EPHEMERAL_PROFILE}
+    return env.get(PROFILE_ENV) in {FIXED_PROFILE, EPHEMERAL_PROFILE, DEV_PROFILE}
 
 
 def is_ephemeral(environment: Mapping[str, str] | None = None) -> bool:
     env = os.environ if environment is None else environment
     return env.get(PROFILE_ENV) == EPHEMERAL_PROFILE
+
+
+def is_dev(environment: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if environment is None else environment
+    return env.get(PROFILE_ENV) == DEV_PROFILE
 
 
 def is_next_source(root: Path) -> bool:
@@ -913,7 +956,7 @@ def configured_project_root(
 def project(environment: Mapping[str, str] | None = None) -> str | None:
     if not enabled(environment):
         return None
-    if is_ephemeral(environment):
+    if is_ephemeral(environment) or is_dev(environment):
         env = os.environ if environment is None else environment
         project = _required("AGENT_MAIL_PROJECT", env)
         worktree = _required("COCKPIT_NEXT_WORKTREE", env)
@@ -938,6 +981,34 @@ def project(environment: Mapping[str, str] | None = None) -> str | None:
 def require_project(
     value: str, environment: Mapping[str, str] | None = None,
 ) -> str:
+    if is_dev(environment):
+        lexical = Path(value).expanduser()
+        if not lexical.is_absolute():
+            raise NextProfileError("next_project_forbidden")
+        try:
+            resolved = lexical.resolve(strict=True)
+        except OSError as exc:
+            raise NextProfileError("next_project_forbidden") from exc
+        if not resolved.is_dir():
+            raise NextProfileError("next_project_forbidden")
+        home_root = Path.home().resolve()
+        try:
+            resolved.relative_to(home_root)
+        except ValueError as exc:
+            raise NextProfileError("next_project_forbidden") from exc
+        blocked = (
+            home_root / ".ssh",
+            home_root / ".gnupg",
+            home_root / ".agent-mail",
+            home_root / ".config",
+        )
+        for root in blocked:
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                continue
+            raise NextProfileError("next_project_forbidden")
+        return str(resolved)
     scoped = project(environment)
     resolved = str(Path(value).expanduser().resolve(strict=False))
     if scoped is not None and resolved != scoped:
@@ -945,10 +1016,52 @@ def require_project(
     return resolved
 
 
+def require_retirement_project(
+    value: str, environment: Mapping[str, str] | None = None,
+) -> str:
+    """校验身份退休目标项目。
+
+    8790 删除工作区后，目录可能已不存在，但退休仍可依据本地
+    registry 中精确的 ``project_key`` 收敛。此入口只放宽目录存在性；
+    绝对路径、Home 范围和敏感目录边界保持与 ``require_project`` 一致。
+    调用方必须继续做精确 registry 身份匹配，不能把它当通用项目路径。
+    """
+    if not is_dev(environment):
+        return require_project(value, environment)
+    lexical = Path(value).expanduser()
+    if not lexical.is_absolute():
+        raise NextProfileError("next_project_forbidden")
+    try:
+        resolved = lexical.resolve(strict=False)
+    except OSError as exc:
+        raise NextProfileError("next_project_forbidden") from exc
+    home_root = Path.home().resolve()
+    try:
+        resolved.relative_to(home_root)
+    except ValueError as exc:
+        raise NextProfileError("next_project_forbidden") from exc
+    blocked = (
+        home_root / ".ssh",
+        home_root / ".gnupg",
+        home_root / ".agent-mail",
+        home_root / ".config",
+    )
+    for root in blocked:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        raise NextProfileError("next_project_forbidden")
+    return str(resolved)
+
+
 def session(environment: Mapping[str, str] | None = None) -> str | None:
     if not enabled(environment):
         return None
     value = _required("HERDR_SESSION", environment)
+    if is_dev(environment):
+        # dev 允许多会话；HERDR_SESSION 只作 profile 必填项，不锁死唯一 session 名。
+        return None
     if is_ephemeral(environment):
         env = os.environ if environment is None else environment
         if (
@@ -1176,10 +1289,54 @@ def validate_ephemeral_environment(
     session(env)
 
 
+def _validate_dev_server_environment(
+    root: Path, environment: Mapping[str, str] | None = None,
+) -> None:
+    """Real-HOME source checkout on :8790. Not the isolated next/ephemeral profiles."""
+    env = os.environ if environment is None else environment
+    if not is_dev(env) or not is_next_source(root):
+        raise NextProfileError("next_profile_wrong_source")
+    home_env = env.get("HOME")
+    if home_env:
+        try:
+            if Path(home_env).expanduser().resolve() != Path.home().resolve():
+                raise NextProfileError("next_profile_invalid:HOME")
+        except OSError as exc:
+            raise NextProfileError("next_profile_invalid:HOME") from exc
+    if env.get(EPHEMERAL_ROOT_ENV):
+        raise NextProfileError("next_profile_invalid:COCKPIT_EPHEMERAL_ROOT")
+    home = Path.home().resolve()
+    worktree = Path(_required("COCKPIT_NEXT_WORKTREE", env))
+    expected = dev_layout(home, root.resolve())
+    if not worktree.is_absolute() or worktree.resolve(strict=False) != root.resolve():
+        raise NextProfileError("next_profile_invalid:COCKPIT_NEXT_WORKTREE")
+    host = env.get("COCKPIT_HOST")
+    if host not in FIXED_HOSTS:
+        raise NextProfileError("next_profile_invalid:COCKPIT_HOST")
+    for name, wanted in expected.items():
+        if env.get(name) != wanted:
+            raise NextProfileError(f"next_profile_invalid:{name}")
+    if host == "0.0.0.0":
+        try:
+            token = auth_token.load_cockpit_token(env)
+        except auth_token.TokenFileError as exc:
+            raise NextProfileError(exc.code) from exc
+        if token is None:
+            raise NextProfileError("next_profile_invalid:LAN_HOST_TOKEN_REQUIRED")
+        if env.get("COCKPIT_TOKEN") != token:
+            raise NextProfileError("next_profile_invalid:LAN_HOST_TOKEN_MISMATCH")
+    configured_project_root(env)
+    project(env)
+    session(env)
+
+
 def validate_server_environment(
     root: Path, environment: Mapping[str, str] | None = None,
 ) -> None:
     if is_ephemeral(environment):
         validate_ephemeral_environment(root, environment)
+        return
+    if is_dev(environment):
+        _validate_dev_server_environment(root, environment)
         return
     _validate_fixed_server_environment(root, environment)

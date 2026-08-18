@@ -151,7 +151,7 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         next_profile.require_helper_environment(())
-        project_key = next_profile.require_project(args.project)
+        project_key = next_profile.require_retirement_project(args.project)
     except next_profile.NextProfileError as exc:
         raise SystemExit(str(exc)) from exc
     agent = _validate_component(args.agent, "agent")

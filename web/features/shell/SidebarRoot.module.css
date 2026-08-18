@@ -1,0 +1,275 @@
+/* 侧栏列样式，取自 @deepseek-ai/dsh-client-ui-sidebar 的
+   SidebarRoot.module.css (MIT License)。折叠 = 滑动 + 交叉淡出，不是
+   变形：内容保持冻结的展开布局（组件设置的内联宽度）原地淡出
+   （.fading），滑动的列（AppFrame grid 轨道）裁剪它；rail 布局
+   （.collapsed）在淡出落定后才生效，中途不重排。 */
+
+.root {
+  --dsh-sidebar-inline-padding: 12px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 6px var(--dsh-sidebar-inline-padding);
+  box-sizing: border-box;
+  background: var(--dsw-specific-sidebar-fill);
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  /* 侧栏高于会话面：显示的滚动条用 l2 对。 */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+/* rail 几何：56px rail 内居中的 36x36 控件盒（两侧 10px padding）。 */
+.root.collapsed {
+  padding: 18px 10px 6px;
+}
+
+/* 列内滚动条是指针示能：指针不在列内时重绑为透明，嵌套滚动区不画
+   滚动条；用 transparent 而非隐藏滚动条本体，保留
+   scrollbar-gutter 的占位，显现时不重排行。 */
+.root.quietBars {
+  --dsh-scrollbar-thumb: transparent;
+  --dsh-scrollbar-thumb-hover: transparent;
+}
+
+/* 折叠阶段一：整列冻结宽度的内容 150ms 原地淡出；落定后子元素
+   卸载/切换到 rail 布局。 */
+.fading > * {
+  opacity: 0;
+  transition: opacity 150ms var(--ds-ease-in-out);
+}
+
+/* 展开重挂的宽内容淡入。 */
+.wide {
+  animation: wide-in 200ms var(--ds-ease-in-out);
+}
+
+@keyframes wide-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* rail 落定（150ms）时上部控件从原 rail 右缘进入，共用 AppFrame 轨道
+   过渡剩余的 150ms。底部固定的设置行只做淡入。只有真实折叠才有
+   .railIn；冷启动直接 rail 态保持静态。 */
+.railIn .iconButton,
+.railIn .newSession,
+.railIn .regionArea {
+  animation: rail-in 150ms var(--ds-ease-in-out) backwards;
+}
+
+.railIn .footArea {
+  animation: rail-fade-in 150ms var(--ds-ease-in-out) backwards;
+}
+
+@keyframes rail-in {
+  from {
+    opacity: 0;
+    transform: translateX(49px);
+  }
+}
+
+@keyframes rail-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* logo 行：展开态折叠钮靠右；rail 态控件左对齐共享同一基锚。 */
+.logoRow {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  height: 60px;
+  padding: 8px 0 8px 4px;
+  margin-bottom: 8px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.collapsed .logoRow {
+  height: 36px;
+  padding: 0;
+  margin-bottom: 12px;
+  justify-content: flex-start;
+}
+
+/* 品牌（文字版 wordmark）：行为上是按钮（新会话快捷方式），指针光标
+   是唯一示能——品牌上没有 hover 外观。 */
+.brand {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.iconButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.collapsed .iconButton {
+  width: 36px;
+  height: 36px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 新会话：38px 高、12px 圆角、l2 边框 + 升起填充；折叠后是 rail 的
+   素图标控件。 */
+.newSession {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 38px;
+  padding: 8px 16px;
+  margin: 0 2px 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-button-elevated-fill);
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.newSession:hover {
+  background: var(--dsw-alias-button-floating-hover);
+}
+
+.collapsed .newSession {
+  align-self: flex-start;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin: 0 0 12px;
+  gap: 0;
+  border-color: transparent;
+  background: transparent;
+}
+
+.collapsed .newSession:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.newSessionLabel {
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.collapsed .newSessionLabel {
+  max-width: 0;
+}
+
+/* 浏览区座位：始终挂载，foot 不移动。尾部负 margin 抵消外壳内缩，
+   让嵌套滚动条贴侧栏边缘；浏览器在自己的行内恢复内缩。 */
+.regionArea {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-left: -4px;
+  margin-right: calc(-1 * var(--dsh-sidebar-inline-padding));
+  padding-left: 4px;
+  overflow: hidden;
+}
+
+.collapsed .regionArea {
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: 0;
+}
+
+/* foot：设置入口行；展开为图标+文字行，rail 为 36x36 图标钮。 */
+.footArea {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  margin: 0 2px;
+  box-sizing: border-box;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.settings:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.settingsLabel {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.collapsed .footArea {
+  align-items: center;
+}
+
+.collapsed .settings {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin: 0;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--dsw-alias-label-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wide,
+  .fading > *,
+  .railIn .iconButton,
+  .railIn .newSession,
+  .railIn .footArea,
+  .railIn .regionArea {
+    transition: none;
+    animation: none;
+  }
+}

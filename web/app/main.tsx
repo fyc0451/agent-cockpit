@@ -8,6 +8,7 @@ import { CapabilitiesProvider } from '../state/capabilities'
 import { SelectionProvider } from '../state/selection'
 import { ThemeProvider } from '../state/theme'
 import '../styles/global.css'
+import '../features/shell/dsw.css'
 
 const queryClient = new QueryClient()
 

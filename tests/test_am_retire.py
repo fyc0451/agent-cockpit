@@ -127,6 +127,84 @@ def test_retire_hub_success_writes_tombstone_keeps_file(tmp_path, monkeypatch, c
     assert "registration-token" not in out
 
 
+def test_retire_deleted_dev_project_uses_exact_registry_without_touching_sibling(
+    tmp_path, monkeypatch,
+):
+    module = _load_am_retire()
+    home = tmp_path / "home"
+    target = home / "github" / "deleted-project"
+    sibling = home / "github" / "other-project"
+    target.mkdir(parents=True)
+    sibling.mkdir()
+    target_key = str(target.resolve())
+    sibling_key = str(sibling.resolve())
+    registry_root = tmp_path / "registry"
+    module.REGISTRY_DIR = registry_root
+    instance = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    def write_identity(project_key, name):
+        directory = registry_root / module.slugify(project_key)
+        directory.mkdir(parents=True)
+        path = directory / f"codex--{instance}.json"
+        path.write_text(json.dumps({
+            "project_key": project_key,
+            "project_slug": module.slugify(project_key),
+            "agent": "codex",
+            "instance": instance,
+            "name": name,
+            "registration_token": f"token-{name}",
+            "program": "codex",
+            "model": "unknown",
+            "hub": "http://hub",
+        }), encoding="utf-8")
+        path.chmod(0o600)
+        return path
+
+    target_registry = write_identity(target_key, "TargetMailbox")
+    sibling_registry = write_identity(sibling_key, "SiblingMailbox")
+    sibling_before = sibling_registry.read_bytes()
+    target.rmdir()
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("COCKPIT_NEXT_PROFILE", module.next_profile.DEV_PROFILE)
+    monkeypatch.setenv("COCKPIT_HOST", "127.0.0.1")
+    monkeypatch.setenv("COCKPIT_PROJECT_ROOT", str(home / "github"))
+    repo = home / "github" / "agent-cockpit-next"
+    repo.mkdir()
+    (repo / ".agent-memory-project").write_text(
+        "agent-cockpit-next\n", encoding="ascii",
+    )
+    monkeypatch.setenv("COCKPIT_NEXT_WORKTREE", str(repo))
+    for key, value in module.next_profile.dev_layout(home, repo).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(module, "load_client_config", lambda: ("http://hub", "tok"))
+    monkeypatch.setattr(module, "mcp_call", lambda *_a, **_k: {})
+    calls = []
+
+    def tool(_hub, _token, name, args):
+        calls.append((name, args))
+        if name == "retire_agent":
+            return {"status": "retired"}
+        if name == "whois":
+            return {"name": "TargetMailbox", "retired_at": "2026-08-18T00:00:00Z"}
+        raise AssertionError(name)
+
+    monkeypatch.setattr(module, "mcp_tool", tool)
+    module.main([
+        "--agent", "codex", "--instance", instance,
+        "--project", target_key,
+    ])
+
+    assert calls[0] == ("retire_agent", {
+        "project_key": target_key,
+        "agent_name": "TargetMailbox",
+        "registration_token": "token-TargetMailbox",
+    })
+    assert json.loads(target_registry.read_text(encoding="utf-8"))["status"] == "retired"
+    assert sibling_registry.read_bytes() == sibling_before
+
+
 def test_retire_idempotent_when_already_retired_locally(tmp_path, monkeypatch, capsys):
     module = _load_am_retire()
     module.REGISTRY_DIR = tmp_path

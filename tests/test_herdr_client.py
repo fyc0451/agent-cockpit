@@ -51,6 +51,43 @@ def _isolated_launch_descriptors(monkeypatch, tmp_path):
     )
 
 
+def test_dev_profile_herdr_cli_uses_user_herdr_not_isolated_tree(monkeypatch):
+    monkeypatch.setenv("COCKPIT_NEXT_PROFILE", "dev")
+    monkeypatch.setenv("HERDR_CONFIG_PATH", "/tmp/isolated/herdr/config.toml")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/isolated")
+    monkeypatch.setenv("XDG_STATE_HOME", "/tmp/isolated-state")
+    monkeypatch.setenv("XDG_DATA_HOME", "/tmp/isolated-data")
+    monkeypatch.setenv("HERDR_SESSION", "github-agent-cockpit-next")
+    env = herdr_client._herdr_subprocess_env()
+    assert "HERDR_CONFIG_PATH" not in env
+    assert "HERDR_SESSION" not in env
+    assert env["XDG_CONFIG_HOME"] == str(Path.home() / ".config")
+
+
+def test_herdr_tui_env_drops_inherited_pane_context(monkeypatch):
+    monkeypatch.setattr(
+        herdr_client,
+        "_herdr_subprocess_env",
+        lambda: {
+            "PATH": "/usr/bin",
+            "HERDR_CONFIG_PATH": "/profile/herdr.toml",
+            "HERDR_ENV": "1",
+            "HERDR_SESSION": "caller",
+            "HERDR_WORKSPACE_ID": "w1",
+            "HERDR_TAB_ID": "w1:t1",
+            "HERDR_PANE_ID": "w1:p1",
+            "HERDR_TERMINAL_ID": "term-1",
+        },
+    )
+
+    env = herdr_client._herdr_tui_env()
+
+    assert env == {
+        "PATH": "/usr/bin",
+        "HERDR_CONFIG_PATH": "/profile/herdr.toml",
+    }
+
+
 def _herdr_schema(*, protocol=19, schema_version=1, methods=None):
     method_names = REQUIRED_H0_METHODS if methods is None else set(methods)
     return json.dumps({
@@ -473,8 +510,58 @@ def test_start_agent_unifies_every_supported_kind_on_native_start(monkeypatch, a
     assert not any("send-text" in a or "send-keys" in a for a in flat)
 
 
+def test_kimi_workspace_id_matches_known_paths():
+    assert herdr_client._kimi_workspace_id("/home/fyc/github/agent-cockpit") == (
+        "wd_agent-cockpit_ba85402d38b8"
+    )
+    assert herdr_client._kimi_workspace_id(
+        "/home/fyc/pitapat/tts/146个训练文件_音色配置全覆盖_20260729"
+    ) == "wd_146-_-_20260729_d3cffa88f1bc"
+
+
+def test_ensure_kimi_workspace_trusted_writes_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(herdr_client, "_kimi_config_home", lambda: tmp_path / ".kimi-code")
+    workdir = "/tmp/kimi-trust-demo"
+    first = herdr_client._ensure_kimi_workspace_trusted(workdir)
+    path = tmp_path / ".kimi-code" / "workspace-trust" / first
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["root"] == workdir
+    assert isinstance(payload["trustedAt"], int)
+    before = path.read_text(encoding="utf-8")
+    again = herdr_client._ensure_kimi_workspace_trusted(workdir)
+    assert again == first
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_start_agent_kimi_prewrites_workspace_trust(monkeypatch, tmp_path):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    monkeypatch.setattr(herdr_client, "_kimi_config_home", lambda: tmp_path / ".kimi-code")
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1"}]},
+    ])
+    monkeypatch.setattr(herdr_client, "_snapshot_session", lambda session: next(snapshots))
+    monkeypatch.setattr(herdr_client, "_run", lambda args, timeout=10: (
+        'data: {"result":{"tab":{"focused_pane_id":"w1:p1"}}}'
+        if "create" in args else ""
+    ))
+
+    result = herdr_client.start_agent(
+        "demo", "/tmp/project", "kimi", model="kimi-code/k3", layout="tab",
+    )
+    assert result.get("error") is None
+    workspace_id = herdr_client._kimi_workspace_id("/tmp/project")
+    trust = tmp_path / ".kimi-code" / "workspace-trust" / workspace_id
+    assert trust.is_file()
+    assert json.loads(trust.read_text(encoding="utf-8"))["root"] == "/tmp/project"
+
+
 def test_pane_send_send_mode_uses_atomic_pane_run(monkeypatch):
     """普通命令用原子 pane run，不再拆成 send-text + send-keys 两次。"""
+    from chat_harness import restore_real_pane_send
+    restore_real_pane_send(monkeypatch)
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
     monkeypatch.setattr(
@@ -495,6 +582,8 @@ def test_pane_send_send_mode_uses_atomic_pane_run(monkeypatch):
 
 def test_pane_send_prompt_mode_uses_agent_prompt(monkeypatch):
     """prompt 模式必须用 agent prompt，而非键盘 send-text/send-keys。"""
+    from chat_harness import restore_real_pane_send
+    restore_real_pane_send(monkeypatch)
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
     monkeypatch.setattr(
@@ -512,6 +601,8 @@ def test_pane_send_prompt_mode_uses_agent_prompt(monkeypatch):
 
 def test_pane_send_prompt_failure_does_not_fall_back_to_keyboard(monkeypatch):
     """agent prompt 失败时返回结构化错误，绝不回退键盘模拟。"""
+    from chat_harness import restore_real_pane_send
+    restore_real_pane_send(monkeypatch)
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     calls = []
 
@@ -896,9 +987,9 @@ def test_start_agent_uses_snapshot_delta_before_native_start(monkeypatch):
     assert call(
         [
             "--session", "demo", "agent", "start", "codex-1",
-            "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000",
+            "--kind", "codex", "--pane", "w1:p2", "--timeout", "60000",
         ],
-        timeout=15,
+        timeout=65,
     ) in calls
     assert not any(
         c.args[0][:4] == ["--session", "demo", "pane", "run"] for c in calls
@@ -945,8 +1036,8 @@ def test_start_agent_renames_workspace_tab_and_pane(monkeypatch):
     assert result["name"] == "codex-1"
     assert call(
         ["--session", "demo", "agent", "start", "codex-1",
-         "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000"],
-        timeout=15,
+         "--kind", "codex", "--pane", "w1:p2", "--timeout", "60000"],
+        timeout=65,
     ) in calls
     assert call(["--session", "demo", "pane", "rename", "w1:p2", "codex-1"], timeout=5) in calls
     assert call(["--session", "demo", "tab", "rename", "w1:t2", "codex-1"], timeout=5) in calls
@@ -988,6 +1079,11 @@ def test_start_agent_forces_opencode_to_tab_and_rolls_back_on_start_failure(monk
     assert call(
         ["--session", "demo", "pane", "close", "w1:p2"], timeout=5
     ) in calls
+
+
+def test_agent_start_timeout_gives_codex_a_minute():
+    assert herdr_client._agent_start_timeout("codex") == 60.0
+    assert herdr_client._agent_start_timeout("claude") == 60.0
 
 
 def test_start_agent_qodercli_passes_slow_timeout_to_native_start(monkeypatch):
@@ -1211,8 +1307,8 @@ def test_qoder_aliases_get_longer_start_timeout_only():
     assert herdr_client._agent_start_timeout("qodercli") == 60.0
     assert herdr_client._agent_start_timeout("qodercn") == 60.0
     assert herdr_client._agent_start_timeout("grok") == 60.0
-    assert herdr_client._agent_start_timeout("codex") == 10.0
-    assert herdr_client._agent_start_timeout("opencode") == 10.0
+    assert herdr_client._agent_start_timeout("codex") == 60.0
+    assert herdr_client._agent_start_timeout("opencode") == 60.0
 
 
 def test_start_agent_reuses_only_matching_workdir(monkeypatch):
@@ -1269,9 +1365,9 @@ def test_start_agent_uses_label_to_create_second_same_type_instance(monkeypatch)
     assert call(
         [
             "--session", "demo", "agent", "start", "codex-2",
-            "--kind", "codex", "--pane", "w1:p3", "--timeout", "10000",
+            "--kind", "codex", "--pane", "w1:p3", "--timeout", "60000",
         ],
-        timeout=15,
+        timeout=65,
     ) in calls
     assert call(
         ["--session", "demo", "pane", "rename", "w1:p3", "codex-2"],
@@ -1312,8 +1408,8 @@ def test_start_agent_assigns_unique_runtime_name_for_same_kind_second_instance(m
     assert result.get("reused") is not True
     assert call(
         ["--session", "demo", "agent", "start", "codex-2",
-         "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000"],
-        timeout=15,
+         "--kind", "codex", "--pane", "w1:p2", "--timeout", "60000"],
+        timeout=65,
     ) in calls
     assert not any(
         c.args[0][:6] == ["--session", "demo", "agent", "start", "codex", "--kind"]
@@ -1351,6 +1447,35 @@ def test_start_agent_persists_launch_descriptor_retrievable_by_pane_and_name(mon
         "args": ["--model", "gpt 5", ";", "echo", "hi"],
         "agent": "codex", "pane_id": "w1:p2", "workdir": "/tmp/project",
     }
+
+
+def test_rebind_live_launch_descriptor_reactivates_retired_instance():
+    instance = "i-yzh33bkopbhev3ae654tc7tila"
+    herdr_client.save_launch_descriptor(
+        session="old-session", pane_id="w1:p3", name=instance, kind="grok",
+        args=[], agent="grok", workdir="/old/worktree", instance_id=instance,
+        display_name="grok-cockpit",
+    )
+    herdr_client.update_launch_descriptor_by_instance(instance, pane_id="w1:p3")
+    data = herdr_client._load_launch_descriptors()
+    data["descriptors"][f"instance|{instance}"]["state"] = "retired"
+    herdr_client._save_launch_descriptors(data)
+    assert herdr_client.get_launch_descriptor("cockpit", "w1:p1") is None
+
+    rebound = herdr_client.rebind_live_launch_descriptor(
+        instance_id=instance,
+        session="cockpit",
+        pane_id="w1:p1",
+        workdir="/home/fyc/github/agent-cockpit",
+        mail_name="BrownDesert",
+    )
+    assert rebound["state"] == "active"
+    assert rebound["session"] == "cockpit"
+    assert rebound["pane_id"] == "w1:p1"
+    found = herdr_client.get_launch_descriptor("cockpit", "w1:p1")
+    assert found is not None
+    assert found["instance_id"] == instance
+    assert found["mail_name"] == "BrownDesert"
 
 
 def test_start_agent_descriptor_uses_canonical_kind_for_aliases(monkeypatch):
@@ -1461,8 +1586,8 @@ def test_managed_start_allows_duplicate_display_names_but_uses_opaque_runtime_id
     assert result["display_name"] == "同名"
     assert call(
         ["--session", "demo", "agent", "start", instance_id,
-         "--kind", "codex", "--pane", "w1:p2", "--timeout", "10000"],
-        timeout=15,
+         "--kind", "codex", "--pane", "w1:p2", "--timeout", "60000"],
+        timeout=65,
     ) in calls
     descriptor = herdr_client.get_launch_descriptor("demo", "w1:p2")
     assert descriptor["instance_id"] == instance_id
@@ -1536,6 +1661,52 @@ def test_clear_launch_descriptors_removes_only_target_session():
     assert herdr_client.clear_launch_descriptors("demo") == {"cleared": 0}  # 幂等
     assert herdr_client.get_launch_descriptor_by_name("demo", "a-1") is None
     assert herdr_client.get_launch_descriptor_by_name("other", "a-1") is not None
+
+
+def test_stop_session_treats_dead_socket_as_already_stopped(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    payload = (
+        'herdr session stop demo 失败: {"error":{"code":"session_stop_failed",'
+        '"message":"session demo is not running or cannot be reached at '
+        '/home/fyc/.config/herdr/sessions/demo/herdr.sock"}}'
+    )
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: (_ for _ in ()).throw(RuntimeError(payload)),
+    )
+    result = herdr_client.stop_session("demo")
+    assert result["stopped"] == "demo"
+    assert result.get("already_stopped") is True
+    assert "error" not in result
+
+
+def test_stop_session_still_surfaces_real_stop_failure(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: (_ for _ in ()).throw(RuntimeError("herdr session stop demo 失败: busy")),
+    )
+    result = herdr_client.stop_session("demo")
+    assert result.get("error") == "herdr session stop demo 失败: busy"
+    assert "stopped" not in result
+
+
+def test_delete_session_treats_already_absent_as_success(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda args, timeout=10: (_ for _ in ()).throw(
+            RuntimeError("herdr session delete demo 失败: session not found")
+        ),
+    )
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p1", name="codex-1", kind="codex",
+        args=["--old"], agent="codex",
+    )
+    result = herdr_client.delete_session("demo")
+    assert result["deleted"] == "demo"
+    assert "error" not in result
+    assert herdr_client.get_launch_descriptor("demo", "w1:p1") is None
 
 
 def test_delete_session_clears_descriptors_only_on_success(monkeypatch):
@@ -1793,8 +1964,8 @@ def test_restart_pane_rebuilds_original_managed_identity_on_same_pane(monkeypatc
     ) in calls
     assert call(
         ["--session", "demo", "agent", "start", "opencode-1", "--kind", "opencode",
-         "--pane", "w1:p5", "--timeout", "10000", "--", "--model", "gpt 5", ";"],
-        timeout=15,
+         "--pane", "w1:p5", "--timeout", "60000", "--", "--model", "gpt 5", ";"],
+        timeout=65,
     ) in calls
     assert not any(c.args[0][2:4] == ["pane", "run"] for c in calls)
     assert not any("/quit" in c.args[0] for c in calls)
@@ -1964,8 +2135,8 @@ def test_restart_pane_preserves_opaque_instance_id(monkeypatch):
     assert result["display_name"] == "夜班"
     assert call(
         ["--session", "demo", "agent", "start", instance_id,
-         "--kind", "opencode", "--pane", "w1:p5", "--timeout", "10000"],
-        timeout=15,
+         "--kind", "opencode", "--pane", "w1:p5", "--timeout", "60000"],
+        timeout=65,
     ) in calls
 
 
@@ -2262,9 +2433,9 @@ def test_restart_pane_codex_resume_keeps_original_args(monkeypatch):
     assert result["args"] == ["--model", "gpt-5", "resume", "--last"]
     assert call(
         ["--session", "demo", "agent", "start", "codex-1", "--kind", "codex",
-         "--pane", "w1:p5", "--timeout", "10000", "--",
+         "--pane", "w1:p5", "--timeout", "60000", "--",
          "--model", "gpt-5", "resume", "--last"],
-        timeout=15,
+        timeout=65,
     ) in calls
 
 
@@ -2304,9 +2475,9 @@ def test_restart_workspace_codex_rederives_trust_without_persisting_or_exposing_
     assert "trust_level" not in repr(result)
     assert call(
         ["--session", "demo", "agent", "start", instance_id,
-         "--kind", "codex", "--pane", "w1:p5", "--timeout", "10000",
+         "--kind", "codex", "--pane", "w1:p5", "--timeout", "60000",
          "--", *trust_args],
-        timeout=15,
+        timeout=65,
     ) in calls
     descriptor = herdr_client.get_launch_descriptor_by_instance(instance_id)
     assert descriptor is not None

@@ -28,6 +28,7 @@
     "state",
     "fixtures",
     "test",
+    "types",
     "e2e",
     "vite.config.ts",
     "playwright.config.ts"

@@ -271,6 +271,19 @@ def test_boot_loss_is_process_unknown_and_does_not_fork():
     assert rejected.value.code == "terminal_process_unknown"
 
 
+def test_public_ticket_json_never_exposes_herdr_identity():
+    controller, _engine = _controller(ticket=_ticket())
+    view = controller.get_ticket(PROJECT, WORKSPACE, TICKET)
+    forbidden = {"herdr_session", "pane_id"}
+
+    assert set(view) == {"ticket", "runtime"}
+    assert forbidden.isdisjoint(view["ticket"])
+    assert forbidden.isdisjoint(view["runtime"])
+    assert set(view["runtime"]) == {
+        "state", "replay_available", "replay_truncated",
+    }
+
+
 class ControlTickets:
     def __init__(self, value):
         self.value = value

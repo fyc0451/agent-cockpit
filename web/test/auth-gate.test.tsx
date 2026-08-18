@@ -1,5 +1,6 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { reportUnauthorized } from '../api/authEvents'
 import { AuthGate } from '../features/AuthGate'
 
 function response(status: number, body: unknown): Response {
@@ -45,6 +46,7 @@ describe('AuthGate', () => {
     // 零知识 LAN 用户可行动说明：非账号密码、管理员提供、本机获取路径、禁止外发
     expect(screen.getByText(/这不是账号密码/)).toBeInTheDocument()
     expect(screen.getByText(/管理员提供/)).toBeInTheDocument()
+    expect(screen.getByText(/\.config\/agent-cockpit\/cockpit\.token/)).toBeInTheDocument()
     expect(screen.getByText(/cockpit\.token/)).toBeInTheDocument()
     expect(screen.getByText(/请勿把令牌发到聊天或项目文件中/)).toBeInTheDocument()
     await user.type(input, 'test-token-value')
@@ -95,5 +97,22 @@ describe('AuthGate', () => {
     await user.click(screen.getByRole('button', { name: '重试' }))
 
     await waitFor(() => expect(screen.getByText('应用已加载')).toBeInTheDocument())
+  })
+
+  it('会话失效时浮层登录，底下应用和草稿还在', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, {
+      required: true,
+      authenticated: true,
+      local_only: false,
+    })))
+    render(<AuthGate><div>应用已加载</div></AuthGate>)
+    expect(await screen.findByText('应用已加载')).toBeInTheDocument()
+
+    act(() => {
+      reportUnauthorized()
+    })
+    expect(screen.getByText('应用已加载')).toBeInTheDocument()
+    expect(screen.getByLabelText('访问令牌')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('登录已失效。输入还在下面，登录后不用重打。')
   })
 })

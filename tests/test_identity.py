@@ -136,7 +136,7 @@ def test_identity_accepts_claude_code_program(identity_db):
 def test_server_identity_name_uses_registered_identity(monkeypatch):
     monkeypatch.setattr(
         server.db,
-        "identity_by_cwd",
+        "identity_for_chat_pane",
         lambda cwd, program: {"name": "GentleCompass"},
     )
 
@@ -247,7 +247,7 @@ def test_server_identity_does_not_guess_a_main_worktree(monkeypatch):
     seen = []
     monkeypatch.setattr(
         server.db,
-        "identity_by_cwd",
+        "identity_for_chat_pane",
         lambda cwd, program: seen.append(cwd) or (
             {"name": "codex-main", "program": program, "human_key": cwd}
             if cwd == "/project" else None
@@ -261,7 +261,7 @@ def test_server_identity_uses_only_the_given_canonical_key(monkeypatch):
     seen = []
     monkeypatch.setattr(
         server.db,
-        "identity_by_cwd",
+        "identity_for_chat_pane",
         lambda cwd, program: seen.append(cwd) or (
             {"name": "codex-main"} if cwd == "/project/apps/api" else None
         ),
@@ -409,6 +409,91 @@ def test_board_snapshot_omits_ambiguous_legacy_main_for_same_type(monkeypatch, t
     result = server._enrich_board_identities(snapshot)
 
     assert all("mail_name" not in pane for pane in result["panes"])
+
+
+def test_board_snapshot_prefers_session_leader_over_newest_identity(
+    monkeypatch, tmp_path,
+):
+    from agent_cockpit import chat_roster
+
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    monkeypatch.setattr(chat_roster, "LEADERS_DIR", tmp_path / "leaders")
+    chat_roster.set_session_leader("cockpit", "BrownDesert", "grok")
+    snapshot = {
+        "sessions": [{"session": "cockpit", "directory": "/sessions/cockpit"}],
+        "panes": [
+            {"session": "cockpit", "pane_id": "w1:p1", "agent": "grok"},
+            {"session": "cockpit", "pane_id": "w1:p2", "agent": "codex"},
+        ],
+    }
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_args: "/project")
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda project, agent, instance=None: (
+            "grok-agent-cockpit" if agent == "grok" else "codex-main"
+        ),
+    )
+
+    result = server._enrich_board_identities(snapshot)
+
+    assert result["panes"][0]["mail_name"] == "BrownDesert"
+    assert result["panes"][1]["mail_name"] == "codex-main"
+
+
+def test_identity_record_uses_registry_name_when_hub_retired(monkeypatch, tmp_path):
+    from agent_cockpit import server
+
+    instance = "i-yzh33bkopbhev3ae654tc7tila"
+    cwd = "/home/fyc/github/agent-cockpit"
+    monkeypatch.setattr(server.next_profile, "require_project", lambda path: path)
+    monkeypatch.setattr(
+        server,
+        "_registry_identity_for_instance",
+        lambda *_a, **_k: {
+            "name": "BrownDesert",
+            "program": "grok",
+            "model": "unknown",
+            "project_key": cwd,
+            "agent": "grok",
+            "instance": instance,
+            "status": "retired",
+        },
+    )
+    monkeypatch.setattr(server.db, "identity_by_cwd", lambda *_a, **_k: None)
+    record = server._identity_record(cwd, "grok", instance)
+    assert record is not None
+    assert record["name"] == "BrownDesert"
+
+
+def test_identity_for_chat_pane_skips_program_main(monkeypatch):
+    from agent_cockpit import db
+
+    monkeypatch.setattr(db.next_profile, "require_project", lambda path: path)
+    monkeypatch.setattr(
+        db, "_rows",
+        lambda *_a, **_k: [
+            {"name": "kimi-main", "program": "kimi", "model": "", "human_key": "/repo"},
+            {"name": "FoggyBasin", "program": "kimi", "model": "", "human_key": "/repo"},
+        ],
+    )
+    picked = db.identity_for_chat_pane("/repo", "kimi")
+    assert picked is not None
+    assert picked["name"] == "FoggyBasin"
+
+
+def test_throwaway_identity_prompt_skips_pytest_tmp():
+    from agent_cockpit import herdr_client
+
+    assert herdr_client._is_throwaway_identity_prompt(
+        "[agent-mail 身份告知] 花名=FuchsiaPond,"
+        "项目=/tmp/pytest-of-fyc/pytest-2826/test_list_chat_mail_does_not_l0/same-proj"
+    )
+    assert not herdr_client._is_throwaway_identity_prompt(
+        "[agent-mail 身份告知] 花名=BrownDesert,项目=/home/fyc/github/agent-cockpit"
+    )
+    assert not herdr_client._is_throwaway_identity_prompt("普通提示")
 
 
 def test_agent_mail_db_prefers_new_xdg_install_path(monkeypatch, tmp_path):

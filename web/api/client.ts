@@ -1,3 +1,4 @@
+import { noteAuthFailure } from './authEvents'
 import type { ResponseMeta } from './types'
 
 export interface ApiErrorInit {
@@ -75,7 +76,7 @@ function isObject(v: unknown): v is Record<string, unknown> {
 export async function apiGet<T>(path: string): Promise<ApiResult<T>> {
   let res: Response
   try {
-    res = await fetch(path, { headers: { Accept: 'application/json' } })
+    res = await fetch(path, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
   } catch {
     throw new ApiError({
       code: 'disconnected',
@@ -94,7 +95,7 @@ export async function apiGet<T>(path: string): Promise<ApiResult<T>> {
 
   if (isObject(body) && 'error' in body && (body as ErrorEnvelope).error) {
     const e = (body as ErrorEnvelope).error!
-    throw new ApiError({
+    const error = new ApiError({
       code: e.code ?? codeForStatus(res.status),
       message: e.message ?? `请求失败（HTTP ${res.status}）`,
       retryable: e.retryable ?? res.status >= 500,
@@ -102,15 +103,19 @@ export async function apiGet<T>(path: string): Promise<ApiResult<T>> {
       status: res.status,
       details: e.details,
     })
+    noteAuthFailure(error)
+    throw error
   }
 
   if (!res.ok) {
-    throw new ApiError({
-      code: codeForStatus(res.status),
-      message: `请求失败（HTTP ${res.status}）`,
+    const error = new ApiError({
+      code: res.status === 401 ? 'unauthenticated' : codeForStatus(res.status),
+      message: res.status === 401 ? '未认证' : `请求失败（HTTP ${res.status}）`,
       retryable: res.status >= 500,
       status: res.status,
     })
+    noteAuthFailure(error)
+    throw error
   }
 
   // G3 严格校验（无 legacy allowlist）：2xx 必须是完整 { data, meta } envelope

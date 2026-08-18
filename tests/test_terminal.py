@@ -99,10 +99,15 @@ def _wait_file_size(path, size: int, timeout: float = 10.0) -> None:
 # ── 参数校验与上限 ──────────────────────────────────────────────
 
 def test_create_rejects_invalid_dims():
-    for cols, rows in [(0, 24), (80, 0), (-1, 24), (80, 10 ** 6),
-                       (10 ** 6, 24), ("abc", 24), (None, 24)]:
+    for cols, rows in [("abc", 24), (None, 24)]:
         with pytest.raises(ValueError):
             terminal.create_term(cols=cols, rows=rows)
+
+
+def test_create_clamps_oversized_dims():
+    assert terminal._valid_dims(516, 84) == (500, 84)
+    assert terminal._valid_dims(0, 0) == (1, 1)
+    assert terminal._valid_dims(80, 10 ** 6) == (80, 300)
 
 
 def test_create_stores_safe_display_label():
@@ -373,6 +378,31 @@ def test_replace_labeled_term_removes_all_previous_instances():
     assert terminal.is_alive(second) is False
     assert terminal.was_superseded(first) is True
     assert terminal.was_superseded(second) is True
+
+
+def test_replace_labeled_term_forwards_fixed_command(monkeypatch):
+    calls = []
+
+    def fake_create(cwd, cols, rows, label, command=None, env=None):
+        calls.append((cwd, cols, rows, label, command, env))
+        return {"id": "term-herdr", "pid": 123, "label": label}
+
+    monkeypatch.setattr(terminal, "create_term", fake_create)
+
+    result = terminal.replace_labeled_term(
+        "/repo", cols=132, rows=40, label="herdr:demo",
+        command=["/usr/bin/herdr", "--session", "demo"],
+        env={"PATH": "/usr/bin"},
+    )
+
+    assert result["id"] == "term-herdr"
+    assert calls == [
+        (
+            "/repo", 132, 40, "herdr:demo",
+            ["/usr/bin/herdr", "--session", "demo"],
+            {"PATH": "/usr/bin"},
+        ),
+    ]
 
 
 def test_concurrent_labeled_replacements_are_serialized(monkeypatch):

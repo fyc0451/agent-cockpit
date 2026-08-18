@@ -1,0 +1,676 @@
+/* 工作区浏览区样式，取自 @deepseek-ai/dsh-client-ui-workspace 的
+   WorkspaceBrowser.module.css + rows/Rows.module.css (MIT License)。
+   填充侧栏外壳的浏览区：段头（标题 + 搜索胶囊 + ＋动作）、滚动的
+   工作区分组树。rail 态只渲染两个 36x36 图标控件。未搬：拖拽排序、
+   重命名、hover 卡、远程搜索。 */
+
+.root {
+  --dsh-session-list-edge-inset: var(--dsh-sidebar-inline-padding);
+  --dsh-session-list-scrollbar-width: 8px;
+  --dsh-session-list-scrollbar-offset: 2px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding-right: var(--dsh-session-list-edge-inset);
+}
+
+.root.rail {
+  padding-right: 0;
+}
+
+.iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.iconButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* 段头：标题、内联搜索、尾部动作。搜索展开时动作簇收起让位。 */
+.sectionHeader {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  height: 36px;
+  padding-left: 4px;
+  margin-bottom: 4px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.root:not(.rail) .sectionHeader {
+  margin-top: 2px;
+  margin-right: -4px;
+}
+
+.sectionLabel {
+  flex: none;
+  max-width: 45%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  line-height: 20px;
+  opacity: 1;
+  visibility: visible;
+  transition:
+    max-width 180ms var(--ds-ease-in-out),
+    margin-right 180ms var(--ds-ease-in-out),
+    opacity 120ms var(--ds-ease-in-out),
+    transform 180ms var(--ds-ease-in-out),
+    visibility 0s linear;
+}
+
+.sectionLabelHidden {
+  max-width: 0;
+  margin-right: -4px;
+  opacity: 0;
+  transform: translateX(-4px);
+  visibility: hidden;
+  transition-delay: 0s, 0s, 0s, 0s, 180ms;
+}
+
+.searchSlot {
+  flex: 1;
+  max-width: 28px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 0;
+  box-sizing: border-box;
+  transition:
+    max-width 180ms var(--ds-ease-in-out),
+    padding-left 180ms var(--ds-ease-in-out);
+}
+
+.searchSlotExpanded {
+  max-width: 100%;
+  padding-left: 0;
+}
+
+.headerActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 60px;
+  opacity: 1;
+  overflow: hidden;
+  visibility: visible;
+  transition:
+    max-width 180ms var(--ds-ease-in-out),
+    opacity 120ms var(--ds-ease-in-out),
+    transform 180ms var(--ds-ease-in-out),
+    visibility 0s linear;
+}
+
+.headerActionsHidden {
+  max-width: 0;
+  opacity: 0;
+  transform: translateX(4px);
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s, 0s, 0s, 180ms;
+}
+
+/* 内联搜索始终填充标题与尾部动作之间的空间；动作簇收起时向右长。 */
+.search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  cursor: text;
+  color: var(--dsw-alias-label-secondary);
+  overflow: hidden;
+  transition:
+    width 180ms var(--ds-ease-in-out),
+    padding 180ms var(--ds-ease-in-out),
+    border-color 180ms var(--ds-ease-in-out),
+    background-color 180ms var(--ds-ease-in-out);
+}
+
+.searchExpanded {
+  width: calc(100% + 4px);
+  height: 30px;
+  margin-inline: -2px;
+  padding: 0 4px 0 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-caption);
+}
+
+.searchButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+}
+
+.searchExpanded .searchButton {
+  width: 28px;
+  height: 30px;
+}
+
+.searchButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.searchExpanded .searchButton:hover {
+  background: transparent;
+}
+
+.searchInput {
+  flex: 1;
+  width: 0;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  transition: opacity 120ms var(--ds-ease-in-out);
+}
+
+.searchExpanded .searchInput {
+  margin-left: -2px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.searchInput::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.clearButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.clearButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* rail 变体（wide 属主 prop 派生的自有 .rail 类——浏览区不读外壳的
+   类名）：两个图标控件以 36x36 圆钮排列，匹配外壳 rail 节奏；
+   共用 rail 的基锚，让外壳整体平移本区。 */
+.rail .sectionHeader {
+  gap: 0;
+  padding-left: 0;
+  margin-bottom: 12px;
+  justify-content: flex-start;
+}
+
+.rail .headerActions {
+  max-width: none;
+}
+
+.rail .iconButton {
+  width: 36px;
+  height: 36px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.rail .search {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin: 0 0 12px;
+  gap: 0;
+  border-color: transparent;
+  background: transparent;
+}
+
+.rail .searchButton {
+  width: 36px;
+  height: 36px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.rail .searchButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* 列表座位：始终挂载，外壳 foot 不移动。 */
+.listArea {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-left: -4px;
+  margin-right: calc(-1 * var(--dsh-session-list-edge-inset));
+  padding-left: 4px;
+  overflow: visible;
+}
+
+.rail .listArea {
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: 0;
+}
+
+/* 底部渐隐的相对锚。 */
+.treeBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* 底部渐隐：钉在可视底部的紧凑遮罩，透明 → 侧栏填充（跟随主题）。 */
+.fade {
+  position: absolute;
+  left: 0;
+  right: var(--dsh-session-list-edge-inset);
+  bottom: 0;
+  height: 24px;
+  background: linear-gradient(to bottom, transparent, var(--dsw-specific-sidebar-fill));
+  pointer-events: none;
+}
+
+/* 展开重挂的宽内容淡入（镜像外壳）。 */
+.wide {
+  animation: wide-in 200ms var(--ds-ease-in-out);
+}
+
+@keyframes wide-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* 列表：唯一滚动区。2px 边缘偏移、稳定的 8px 主题滚动条与剩余
+   padding 之和等于外壳右内缩——滚动条出现与否都不移动行。 */
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-left: -4px;
+  margin-right: var(--dsh-session-list-scrollbar-offset);
+  padding-left: 4px;
+  padding-right: calc(
+    var(--dsh-session-list-edge-inset)
+    - var(--dsh-session-list-scrollbar-width)
+    - var(--dsh-session-list-scrollbar-offset)
+  );
+  /* 避开底部渐隐：滚动到底时最后一行在渐变之上。 */
+  padding-bottom: 16px;
+  scrollbar-gutter: stable;
+}
+
+.groupSection > * + *,
+.searchTree > * + * {
+  margin-top: 2px;
+}
+
+.searchStatus {
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 一个工作区分组：头行 + 紧凑的会话序列。 */
+.groupSection {
+  position: relative;
+}
+
+.groupSection + .groupSection {
+  margin-top: 4px;
+}
+
+.sessionOverflowButton {
+  width: 100%;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  padding: 0 12px 0 28px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.groupSection > .sessionOverflowButton {
+  margin-top: 0;
+}
+
+.sessionOverflowButton:hover {
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.empty {
+  padding: 16px 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* ---------- 树行（Rows.module.css 精选）：工作区 34px、会话 32px、
+   radius 8。hover 交换是纯 CSS：工作区 folder → chevron + 动作钮。 */
+
+.projectRow,
+.sessionRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 0 8px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--dsw-alias-label-primary);
+}
+
+.projectRow:hover,
+.sessionRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.sessionRow.selected {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.projectRow {
+  width: 100%;
+  height: 34px;
+  box-sizing: border-box;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+}
+
+.projectRow .rowActions {
+  height: 20px;
+}
+
+/* 会话单元：pad 8、16px 状态槽、4px 标题距。挂载淡入：行因展开分组
+   （或树挂载）出现；稳定 key 让已见行不重放动画。 */
+.sessionRow {
+  width: 100%;
+  height: 32px;
+  gap: 0;
+  box-sizing: border-box;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  animation: row-in 150ms var(--ds-ease-in-out);
+}
+
+.sessionRow .title {
+  margin: 0 6px 0 4px;
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.slot {
+  flex: none;
+  width: 16px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 工作区前导槽：默认 folder，行 hover 换展开箭头。 */
+.projectRow .arrow {
+  display: none;
+}
+
+.projectRow:hover .arrow {
+  display: inline-flex;
+}
+
+.projectRow:hover .folder {
+  display: none;
+}
+
+/* 展开箭头（实心三角）：闭合朝右，展开旋转 90° 朝下。 */
+.arrow {
+  transition: transform 150ms var(--ds-ease-in-out);
+}
+
+.arrowOpen {
+  transform: rotate(90deg);
+}
+
+.projectText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.sessionRow .title {
+  flex: 1;
+}
+
+.meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 会话状态点：16px 槽内 8px 圆点，颜色按聚合状态。 */
+.statusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-dimmed);
+}
+
+.statusDot[data-status='working'] {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.statusDot[data-status='blocked'] {
+  background: var(--dsw-alias-state-error-primary);
+}
+
+.statusDot[data-status='done'] {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+/* 尾部动作钮仅 hover 时出现：裸 16px 图标、gap 12、三级灰。 */
+.rowActions {
+  flex: none;
+  display: none;
+  align-items: center;
+  gap: 12px;
+}
+
+.projectRow:hover .rowActions,
+.sessionRow:hover .rowActions {
+  display: inline-flex;
+}
+
+.sessionMain {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.statusDot[data-status='stopped'] {
+  background: var(--dsw-alias-label-dimmed);
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-label-tertiary);
+}
+
+.rowActions .iconButton {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.rowActions .iconButton:hover {
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+
+.rowActions .iconDanger:hover {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* ---------- 搜索结果行 ---------- */
+
+.searchResultRow {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  min-height: 48px;
+  box-sizing: border-box;
+  border: none;
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--dsw-alias-label-primary);
+}
+
+.searchResultRow:hover,
+.searchResultRow.selected {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.searchResultHeading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.searchResultTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.searchResultMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: 22px;
+}
+
+.searchResultWorkspace,
+.searchResultSnippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.searchResultWorkspace {
+  flex: none;
+  max-width: 40%;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.searchResultSnippet {
+  flex: 1;
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wide {
+    animation: none;
+  }
+
+  .search,
+  .sectionLabel,
+  .searchSlot,
+  .searchInput,
+  .headerActions,
+  .sessionRow,
+  .arrow {
+    transition: none;
+    animation: none;
+  }
+}

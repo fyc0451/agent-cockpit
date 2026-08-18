@@ -24,3 +24,14 @@ def _isolate_settings(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
     monkeypatch.setattr(files, "_custom_roots_file", lambda: tmp_path / "file-roots.json")
+    from agent_cockpit import chat_roster
+    from agent_cockpit import herdr_client
+    monkeypatch.setattr(
+        herdr_client, "_kimi_config_home", lambda: tmp_path / ".kimi-code",
+    )
+    monkeypatch.setattr(
+        herdr_client, "pane_send",
+        lambda *a, **k: {"available": True, "blocked_by_test": True},
+    )
+    monkeypatch.setattr(chat_roster, "LEADERS_DIR", tmp_path / "session-leaders")
+    monkeypatch.setattr(chat_roster, "PANES_DIR", tmp_path / "session-panes")

@@ -309,6 +309,62 @@ def recent_messages(project_id: int, limit: int = 50) -> list[dict[str, Any]]:
     return msgs
 
 
+def project_by_canonical_key(human_key: str) -> dict[str, Any] | None:
+    """按已授权的 human_key 精确查项目。不套 next profile 单项目 scope。"""
+    if not isinstance(human_key, str) or not human_key:
+        return None
+    keys = [human_key]
+    try:
+        resolved = str(Path(human_key).expanduser().resolve())
+    except OSError:
+        resolved = human_key
+    if resolved not in keys:
+        keys.append(resolved)
+    placeholders = ",".join("?" for _ in keys)
+    return _one(
+        "SELECT * FROM projects WHERE archived_at IS NULL "
+        f"AND human_key IN ({placeholders}) ORDER BY id DESC LIMIT 1",
+        tuple(keys),
+    )
+
+
+def messages_for_canonical_project(project_id: int, limit: int = 80) -> list[dict[str, Any]]:
+    """项目时间线：最近 limit 条，按时间正序。调用方须先授权该项目。"""
+    if not isinstance(project_id, int) or project_id < 1:
+        return []
+    cap = max(1, min(int(limit), 200))
+    msgs = _rows(
+        "SELECT m.id, m.thread_id, m.topic, m.subject, m.body_md, "
+        "  m.importance, m.ack_required, m.created_ts, m.reply_to, "
+        "  sa.name AS sender_name, sa.program AS sender_program "
+        "FROM messages m "
+        "LEFT JOIN agents sa ON sa.id = m.sender_id "
+        "WHERE m.project_id = ? "
+        "ORDER BY m.created_ts DESC, m.id DESC LIMIT ?",
+        (project_id, cap),
+    )
+    msgs.reverse()
+    if not msgs:
+        return msgs
+    message_ids = [m["id"] for m in msgs]
+    placeholders = ",".join("?" for _ in message_ids)
+    recipients = _rows(
+        "SELECT mr.message_id, a.name, mr.kind, mr.read_ts, mr.ack_ts "
+        "FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id "
+        f"WHERE mr.message_id IN ({placeholders})",
+        tuple(message_ids),
+    )
+    recipients_by_message: dict[int, list[dict[str, Any]]] = {
+        message_id: [] for message_id in message_ids
+    }
+    for recipient in recipients:
+        message_id = recipient.pop("message_id")
+        recipients_by_message[message_id].append(recipient)
+    for message in msgs:
+        message["recipients"] = recipients_by_message[message["id"]]
+    return msgs
+
+
 def agent_by_name(project_id: int, name: str) -> dict[str, Any] | None:
     """按花名查 agent(含 registration_token,供写操作用)。"""
     scoped = _scope()
@@ -367,3 +423,33 @@ def identity_by_cwd(
         "a.inception_ts DESC LIMIT 1",
         params,
     )
+
+
+def identity_for_chat_pane(cwd: str, program: str) -> dict[str, Any] | None:
+    """群聊展示：避开 program-main / program-agent-* 这类遗留信箱。"""
+    try:
+        cwd = next_profile.require_project(cwd)
+    except next_profile.NextProfileError:
+        return None
+    normalized = program.strip().lower()
+    candidates = _PROGRAM_ALIASES.get(normalized, (normalized,))
+    placeholders = ", ".join("?" for _ in candidates)
+    rows = _rows(
+        "SELECT a.name, a.program, a.model, p.human_key "
+        "FROM agents a JOIN projects p ON p.id = a.project_id "
+        f"WHERE p.human_key = ? AND a.program IN ({placeholders}) "
+        "AND a.retired_at IS NULL "
+        "ORDER BY a.inception_ts DESC",
+        (cwd, *candidates),
+    )
+    if not rows:
+        return None
+
+    def _score(row: dict[str, Any]) -> tuple[int, int]:
+        name = str(row.get("name") or "").lower()
+        leftover = name in {normalized, f"{normalized}-main"} or name.startswith(
+            f"{normalized}-"
+        )
+        return (1 if leftover else 0, 0)
+
+    return min(rows, key=_score)

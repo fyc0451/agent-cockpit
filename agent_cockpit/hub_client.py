@@ -458,6 +458,21 @@ def _ensure_init() -> None:
         _initialized = True
 
 
+def _hub_tool_error(result: Any) -> str | None:
+    if isinstance(result, str):
+        text = result.strip()
+        if text.lower().startswith("error") or "not found" in text.lower():
+            return text
+        return None
+    if isinstance(result, dict):
+        err = result.get("error")
+        if isinstance(err, str) and err.strip():
+            return err.strip()
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])
+    return None
+
+
 def send_message(
     *,
     project_key: str,
@@ -472,7 +487,7 @@ def send_message(
 ) -> Any:
     next_profile.require_project(project_key)
     _ensure_init()
-    return _tool("send_message", {
+    result = _tool("send_message", {
         "project_key": project_key,
         "sender_name": sender_name,
         "sender_token": sender_token,
@@ -484,6 +499,58 @@ def send_message(
         "ack_required": ack_required,
         "auto_contact_if_blocked": True,
     })
+    error = _hub_tool_error(result)
+    if error:
+        raise RuntimeError(error)
+    return result
+
+
+def ensure_project(human_key: str) -> Any:
+    """在 Hub 登记 canonical 项目路径，得到 slug，供 Overseer 发信。"""
+    next_profile.require_project(human_key)
+    if not TOKEN:
+        raise RuntimeError("Agent Mail token 未配置")
+    _ensure_init()
+    result = _tool("ensure_project", {"human_key": human_key})
+    error = _hub_tool_error(result)
+    if error:
+        raise RuntimeError(error)
+    return result
+
+
+def overseer_send(
+    *,
+    project: str,
+    recipients: list[str],
+    subject: str,
+    body_md: str,
+    thread_id: str | None = None,
+) -> Any:
+    """Human Overseer 发信：不需要 adjective+noun 的 human agent。"""
+    if not TOKEN:
+        raise RuntimeError("Agent Mail token 未配置")
+    if not project or not recipients or not subject or not body_md:
+        raise RuntimeError("Overseer 发信参数不完整")
+    payload: dict[str, Any] = {
+        "recipients": recipients,
+        "subject": subject,
+        "body_md": body_md,
+    }
+    if thread_id:
+        payload["thread_id"] = thread_id
+    ident = quote(project, safe="")
+    headers = {**_headers, "Authorization": f"Bearer {TOKEN}"}
+    with httpx.Client(timeout=30) as client:
+        resp = client.post(f"{HUB}/mail/{ident}/overseer/send", json=payload, headers=headers)
+        if resp.status_code >= 400:
+            detail = resp.text.strip()[:300] or f"HTTP {resp.status_code}"
+            raise RuntimeError(f"Overseer 发信失败: {detail}")
+    if not resp.content:
+        return {"ok": True}
+    try:
+        return resp.json()
+    except ValueError:
+        return {"ok": True, "raw": resp.text[:200]}
 
 
 def acknowledge_message(
