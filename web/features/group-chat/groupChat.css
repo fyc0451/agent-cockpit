@@ -610,6 +610,12 @@
   word-break: break-word;
 }
 
+.gc-pane-screen.gc-pane-screen--tui {
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
 .gc-modal.gc-modal--live .gc-pane-screen {
   flex: 1;
   min-height: 0;

@@ -65,6 +65,24 @@ describe('AgentInteractModal 只读现场流', () => {
     expect(bounded).toMatch(/fresh-two$/)
   })
 
+  it('Grok TUI 整屏替换，不把每一帧追加成流水', () => {
+    const frame1 = [
+      '     ▾ Tasks 1',
+      '  ╭──────────────────────────────────────╮',
+      '  │ ❯ Build anything                     │',
+      '  ╰─── grok-4.6 (high) · always-approve ─╯',
+    ].join('\n')
+    const frame2 = [
+      '     ▾ Tasks 1',
+      '     ◆ Creating session.md',
+      '  ╭──────────────────────────────────────╮',
+      '  │ ❯ Build anything                     │',
+      '  ╰─── grok-4.6 (high) · always-approve ─╯',
+    ].join('\n')
+    expect(mergePaneOutput(frame1, frame2)).toBe(frame2)
+    expect(mergePaneOutput(frame1, frame2, 64 * 1024, 'tui')).toBe(frame2)
+  })
+
   it('用 WebSocket 快照追加成可聚焦的只读 log，不按 400ms 轮询', async () => {
     render(
       <AgentInteractModal member={member} session="cockpit" onClose={vi.fn()} />,
@@ -132,6 +150,30 @@ describe('AgentInteractModal 只读现场流', () => {
     const log = screen.getByRole('log', { name: '只读终端现场' })
     expect(log).toHaveTextContent('剩余节点也继续稳定下载，已到约 1.5 MB。')
     expect(log.className).toContain('gc-pane-screen')
+    expect(log.className).not.toContain('gc-pane-screen--tui')
+  })
+
+  it('Grok TUI 按原行列换帧，不拆成一句', async () => {
+    const frame = [
+      '     ▾ Tasks 1',
+      '     ❯ Boss 在群聊给你发了消     7:18 PM',
+      '       息。请直接做下面的任',
+      '  ╭──────────────────────────────────────╮',
+      '  │ ❯ Build anything                     │',
+      '  ╰─── grok-4.6 (high) · always-approve ─╯',
+    ].join('\n')
+    render(
+      <AgentInteractModal member={member} session="cockpit" onClose={vi.fn()} />,
+    )
+    await act(async () => {
+      FakeWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({ type: 'snapshot', output: frame, error: null, layout: 'tui' }),
+      })
+    })
+    const log = screen.getByRole('log', { name: '只读终端现场' })
+    expect(log.textContent).toContain('Boss 在群聊给你发了消     7:18 PM')
+    expect(log.textContent).toContain('\n       息。请直接做下面的任\n')
+    expect(log.className).toContain('gc-pane-screen--tui')
   })
 
   it('现场窗更大，Esc 和关闭都能关掉', () => {

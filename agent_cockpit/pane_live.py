@@ -23,6 +23,24 @@ ClosedFn = Callable[[], bool]
 _LIST_OR_HEADING_RE = re.compile(r"^(?:[-*•●□]|\d+[、)]|\d+\.(?:\s|$)|#{1,6}\s|\|)")
 _CURRENCY_ONLY_RE = re.compile(r"[¥$€]\d[\d.,]*")
 _NARROW_WRAP_MAX = 56
+_TUI_FOOTER_RE = re.compile(
+    r"always-approve|Shift\+Tab:mode|Enter:open|Ctrl\+e:|Build anything"
+    r"|command still running|Waiting fo"
+)
+_TUI_BOX_RE = re.compile(r"[╭╮╰╯┌┐└┘]")
+
+
+def looks_like_tui_screen(text: str) -> bool:
+    """Grok / Claude 整屏 TUI：有框和底栏，不能当日志拆行。"""
+    if not text or not _TUI_BOX_RE.search(text):
+        return False
+    if _TUI_FOOTER_RE.search(text):
+        return True
+    return "▾ Tasks" in text or "Tasks 1" in text
+
+
+def live_layout(text: str) -> str:
+    return "tui" if looks_like_tui_screen(text) else "log"
 
 
 def display_width(text: str) -> int:
@@ -176,20 +194,27 @@ def extract_pane_text(raw: dict[str, Any] | None) -> str:
                     break
     text = str(output or "")
     if text.strip():
+        if looks_like_tui_screen(text):
+            return text.rstrip("\n")
         return unwrap_terminal_wrap(text, short_limit=0)
     error = raw.get("error")
     return str(error) if isinstance(error, str) else ""
+
+
+def _live_snapshot(output: str, error: str | None) -> dict[str, Any]:
+    return {
+        "type": "snapshot",
+        "output": output,
+        "error": error,
+        "layout": live_layout(output),
+    }
 
 
 def snapshot_from_read(raw: dict[str, Any] | None) -> dict[str, Any]:
     error = None
     if isinstance(raw, dict) and isinstance(raw.get("error"), str) and raw["error"]:
         error = raw["error"]
-    return {
-        "type": "snapshot",
-        "output": extract_pane_text(raw),
-        "error": error,
-    }
+    return _live_snapshot(extract_pane_text(raw), error)
 
 
 def snapshot_from_envelope(envelope: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -204,7 +229,10 @@ def snapshot_from_envelope(envelope: dict[str, Any] | None) -> dict[str, Any] | 
     text = read.get("text")
     if not isinstance(text, str) or not text:
         return None
-    return {"type": "snapshot", "output": unwrap_terminal_wrap(text, short_limit=0), "error": None}
+    output = text.rstrip("\n") if looks_like_tui_screen(text) else unwrap_terminal_wrap(
+        text, short_limit=0,
+    )
+    return _live_snapshot(output, None)
 
 
 def read_snapshot(session: str, pane_id: str, lines: int = LIVE_LINES) -> dict[str, Any]:

@@ -2760,6 +2760,40 @@ def test_harvest_idle_reply_without_working_edge(isolated_ledger, monkeypatch):
     assert len(second.json()["messages"]) == 1
 
 
+def test_harvest_working_publishes_finished_conclusion(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-live-done", "chat-live")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._HARVEST_STATUS_LOADED = True
+    panes = [{
+        "session": "chat-live",
+        "pane_id": "w1:p1",
+        "agent": "grok",
+        "agent_status": "working",
+        "mail_name": "BrownDesert",
+        "display_name": "BrownDesert",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": (
+            "结论：本地 commit 27cf373 已落下，没有 tag、没有 push。"
+            "界面 Leader 与 mail-send --to leader 读同一份登记。"
+        )},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-live")
+    rows = client.get("/api/chat/sessions/chat-live/mail", headers=_headers()).json()["messages"]
+    assert len(rows) == 1
+    assert "27cf373" in rows[0]["text"]
+    assert rows[0]["sender"] == "BrownDesert"
+
+
 def test_harvest_working_does_not_publish_drafts(isolated_ledger, monkeypatch):
     client = _client()
     _workspace_with_thread(client, isolated_ledger / "harvest-live", "chat-2")

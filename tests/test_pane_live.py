@@ -17,6 +17,25 @@ def test_extract_pane_text_unwraps_json_output():
     assert pane_live.extract_pane_text({"output": "", "error": "gone"}) == "gone"
 
 
+def test_looks_like_tui_screen_keeps_grok_layout():
+    screen = (
+        "   fyc ~/hr-ready       ⸬ 1 │ 174K / 256K\n"
+        "\n"
+        "     ▾ Tasks 1\n"
+        "     ❯ Boss 在群聊给你发了消     7:18 PM\n"
+        "       息。请直接做下面的任\n"
+        "  ╭──────────────────────────────────────╮\n"
+        "  │ ❯ Build anything                     │\n"
+        "  ╰─── grok-4.6 (high) · always-approve ─╯\n"
+        "  →:expand  │  Enter:open  │  Ctrl+e:\n"
+    )
+    assert pane_live.looks_like_tui_screen(screen)
+    kept = pane_live.extract_pane_text({"output": screen})
+    assert kept == screen.rstrip("\n")
+    assert kept.splitlines()[4].startswith("       息。")
+    assert pane_live.snapshot_from_read({"output": screen})["layout"] == "tui"
+
+
 def test_unwrap_terminal_wrap_joins_split_pane_lines():
     text = pane_live.unwrap_terminal_wrap(
         "• 剩余节点也继续稳定下\n"
@@ -73,7 +92,9 @@ def test_snapshot_from_envelope_uses_matched_read():
             "read": {"text": "two\nthree\nfour"},
         },
     })
-    assert snap == {"type": "snapshot", "output": "two\nthree\nfour", "error": None}
+    assert snap == {
+        "type": "snapshot", "output": "two\nthree\nfour", "error": None, "layout": "log",
+    }
     assert pane_live.snapshot_from_envelope({"event": "pane.scroll_changed", "data": {}}) is None
 
 
@@ -143,11 +164,13 @@ def test_pane_live_websocket_pushes_snapshot(monkeypatch):
     monkeypatch.setattr(server, "_websocket_trusted", lambda _ws: True)
     monkeypatch.setattr(
         server.pane_live, "read_snapshot",
-        lambda _s, _p: {"type": "snapshot", "output": "hello from live", "error": None},
+        lambda _s, _p: {
+            "type": "snapshot", "output": "hello from live", "error": None, "layout": "log",
+        },
     )
     monkeypatch.setattr(server.pane_live, "HerdrLiveWaiter", _GateWaiter)
     client = TestClient(server.app)
     with client.websocket_connect("/api/chat/sessions/cockpit/panes/w1:p2/live") as ws:
         assert ws.receive_json() == {
-            "type": "snapshot", "output": "hello from live", "error": None,
+            "type": "snapshot", "output": "hello from live", "error": None, "layout": "log",
         }

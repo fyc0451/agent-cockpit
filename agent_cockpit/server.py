@@ -5322,7 +5322,15 @@ def _is_identity_chrome_line(stripped: str) -> bool:
     """命中身份壳关键词的整行丢掉；讲 leftover / 瀑布流的诊断句留下。"""
     if _IDENTITY_DIAGNOSIS_RE.search(stripped):
         return False
-    return bool(_IDENTITY_CHROME_RE.search(stripped))
+    if not _IDENTITY_CHROME_RE.search(stripped):
+        return False
+    if re.search(r"协作通信约定|注册:花名|agent-mail-tools|--instance\s*main", stripped):
+        return True
+    if re.match(r"^(?:mail-send|mail-recv)\b", stripped):
+        return True
+    if len(re.findall(r"[\u4e00-\u9fff]", stripped)) >= 16:
+        return False
+    return True
 
 
 def _identity_chrome_only(text: str) -> bool:
@@ -5489,7 +5497,8 @@ _PROCESS_NOTE_RE = re.compile(
 _USER_FACING_RE = re.compile(
     r"已经改了|已经重载|已经通了|原因[是：]|刷新.{0,12}再|"
     r"不要把密码|手机用|登录现在是|不是给人记|不是 leftover|"
-    r"空 shell|局域网"
+    r"空 shell|局域网|本地 commit|没有 tag|没有 push|"
+    r"按你拍的|徽章已经对上|界面 Leader"
 )
 
 
@@ -5777,14 +5786,13 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
                 _PANE_TURN_STARTED[key] = int(datetime.now(UTC).timestamp() * 1000)
                 _save_harvest_status()
             _mark_busy_chat_mail_read(session, pane)
-        # 只收停下后的结论。working 是过程，不进瀑布流。
-        if current not in {"idle", "done"}:
-            continue
-        _PANE_ACTIVITY.pop(key, None)
-        _PANE_ACTIVITY_AT.pop(key, None)
+        settled = current in {"idle", "done"}
+        if settled:
+            _PANE_ACTIVITY.pop(key, None)
+            _PANE_ACTIVITY_AT.pop(key, None)
         # 空闲且已收过，不要反复 agent read，否则终端会一直刷新。
         if (
-            current in {"idle", "done"}
+            settled
             and previous in {None, "idle", "done"}
             and key in _PANE_LAST_HARVEST
         ):
@@ -5798,7 +5806,7 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
             continue
         text = _extract_harvest_text(str((summary or {}).get("summary") or ""))
         if not text:
-            if current in {"idle", "done"} and key in _PANE_TURN_STARTED:
+            if settled and key in _PANE_TURN_STARTED:
                 _PANE_TURN_STARTED.pop(key, None)
                 _save_harvest_status()
             continue
@@ -5806,6 +5814,9 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
         if conclusion:
             text = conclusion
         elif _is_process_narration(text):
+            continue
+        elif not settled:
+            # working 只收已经成型的结论，草稿等停下再收。
             continue
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
         if _PANE_LAST_HARVEST.get(key) == digest:

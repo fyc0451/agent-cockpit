@@ -14,6 +14,8 @@ interface AgentInteractModalProps {
 
 const PANE_OUTPUT_LIMIT = 64 * 1024
 
+export type LiveLayout = 'log' | 'tui'
+
 function tailOutput(text: string, limit: number): string {
   if (text.length <= limit) return text
   const start = text.length - limit
@@ -23,18 +25,28 @@ function tailOutput(text: string, limit: number): string {
     : text.slice(start)
 }
 
+/** Grok / Claude 整屏 TUI：有框和底栏，不能当日志追加。 */
+export function looksLikeTuiScreen(text: string): boolean {
+  if (!text || !/[╭╮╰╯┌┐└┘]/.test(text)) return false
+  return /always-approve|Shift\+Tab:mode|Enter:open|Ctrl\+e:|Build anything|command still running|Waiting fo|▾ Tasks|Tasks 1/.test(
+    text,
+  )
+}
+
 /**
- * herdr pane 接口返回滚动尾窗口；轮询时合并重叠行，而不是用新窗口覆盖旧历史。
- * 无重叠时视为一次全屏重绘，追加为新块；总量有界，避免长时间打开占用无限内存。
+ * herdr pane 接口返回滚动尾窗口。
+ * TUI 整屏替换；日志才合并重叠行。无重叠时视为一次全屏重绘，追加为新块。
  */
 export function mergePaneOutput(
   previous: string,
   snapshot: string,
   limit = PANE_OUTPUT_LIMIT,
+  layout: LiveLayout = 'log',
 ): string {
   const before = previous.replace(/\r\n/g, '\n')
   const next = snapshot.replace(/\r\n/g, '\n')
   if (!next) return before
+  if (layout === 'tui' || looksLikeTuiScreen(next)) return next
   if (!before) return tailOutput(next, limit)
   if (before === next || before.endsWith(next)) return tailOutput(before, limit)
   if (next.startsWith(before)) return tailOutput(next, limit)
@@ -56,6 +68,7 @@ export function mergePaneOutput(
 
 export function AgentInteractModal({ member, session, onClose }: AgentInteractModalProps) {
   const [output, setOutput] = useState('')
+  const [layout, setLayout] = useState<LiveLayout>('log')
   const [error, setError] = useState<string | null>(null)
   const [command, setCommand] = useState('')
   const [busy, setBusy] = useState(false)
@@ -64,11 +77,17 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
 
   useEffect(() => {
     setOutput('')
+    setLayout('log')
     setError(null)
     followTailRef.current = true
     const socket = new WebSocket(paneLiveWebSocketUrl(session, member.paneId))
     socket.onmessage = (event) => {
-      let payload: { type?: string; output?: string; error?: string | null } = {}
+      let payload: {
+        type?: string
+        output?: string
+        error?: string | null
+        layout?: LiveLayout
+      } = {}
       try {
         payload = JSON.parse(String(event.data || '')) as typeof payload
       } catch {
@@ -76,7 +95,10 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
       }
       if (payload.type !== 'snapshot') return
       const text = payload.output || payload.error || '（终端暂无输出）'
-      setOutput((current) => mergePaneOutput(current, text))
+      const nextLayout: LiveLayout =
+        payload.layout === 'tui' || looksLikeTuiScreen(text) ? 'tui' : 'log'
+      setLayout(nextLayout)
+      setOutput((current) => mergePaneOutput(current, text, PANE_OUTPUT_LIMIT, nextLayout))
       setError(payload.error || null)
     }
     socket.onerror = () => {
@@ -151,7 +173,7 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
         </div>
         <pre
           ref={screenRef}
-          className="gc-pane-screen"
+          className={`gc-pane-screen${layout === 'tui' ? ' gc-pane-screen--tui' : ''}`}
           role="log"
           aria-label="只读终端现场"
           aria-live="off"
