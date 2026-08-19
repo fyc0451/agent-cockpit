@@ -925,6 +925,20 @@ def read_under_root(root: Path, rel: str) -> dict[str, Any]:
     return _read_file_path(confine_to_root(root, rel))
 
 
+def download_under_root(root: Path, rel: str) -> Path:
+    path = confine_to_root(root, rel)
+    if not path.is_file():
+        raise ValueError(f"不是文件: {path}")
+    return path
+
+
+def preview_under_root(root: Path, rel: str) -> Path:
+    path = download_under_root(root, rel)
+    if path.suffix.lower() not in PREVIEW_EXT:
+        raise ValueError("该文件类型不支持内联预览，请下载查看")
+    return path
+
+
 def search_under_root(root: Path, query: str, limit: int = 100) -> dict[str, Any]:
     return _search_files_path(confine_to_root(root, None), query, limit)
 

@@ -66,20 +66,50 @@ describe('MemberPanel Herdr 终端入口', () => {
     expect(screen.getByRole('button', { name: '打开 Herdr 终端' })).toBeDisabled()
   })
 
+  it('添加成员可选 qodercli', () => {
+    render(
+      <MemberPanel
+        {...baseProps}
+        session="demo-1"
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '＋' }))
+    expect(screen.getByRole('radio', { name: /qodercli/ })).toBeInTheDocument()
+  })
+
   it('群成员显示各自 Agent 的矢量图标', () => {
     render(
       <MemberPanel
         {...baseProps}
-        members={['codex', 'claude', 'kimi', 'opencode', 'grok'].map(member)}
+        members={['codex', 'claude', 'kimi', 'opencode', 'grok', 'qodercli'].map(member)}
         session="demo-1"
         onOpenTerminal={vi.fn()}
       />,
     )
 
-    for (const kind of ['codex', 'claude', 'kimi', 'opencode', 'grok']) {
+    for (const kind of ['codex', 'claude', 'kimi', 'opencode', 'grok', 'qodercli']) {
       expect(document.querySelector(`[data-agent-icon="${kind}"]`)).toBeInTheDocument()
     }
     expect(screen.queryByText('🤖')).not.toBeInTheDocument()
+  })
+
+  it('blocked 成员状态写成等你输入，操作是处理', () => {
+    const onInteract = vi.fn()
+    const onOpenTerminal = vi.fn()
+    render(
+      <MemberPanel
+        {...baseProps}
+        members={[{ ...member('codex'), status: 'blocked' }]}
+        session="demo-1"
+        onOpenTerminal={onOpenTerminal}
+        onInteract={onInteract}
+      />,
+    )
+    expect(screen.getByText(/等你输入/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '处理' }))
+    expect(onInteract).toHaveBeenCalledOnce()
+    expect(onOpenTerminal).not.toHaveBeenCalled()
   })
 
   it('空闲成员的终端按钮打开 Herdr 终端，不走文本 dump', () => {

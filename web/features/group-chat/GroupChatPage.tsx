@@ -4,9 +4,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { routes } from '../../app/routes'
+import { routePatterns, routes } from '../../app/routes'
+import { SettingsPage } from '../../pages/SettingsPage'
 import {
   deleteHerdrSession,
   fetchHerdrSessions,
@@ -23,9 +24,11 @@ import {
   type ChatBindCandidate,
 } from '../../api/chatLedger'
 import {
+  applyMailStreamEvent,
   fetchSessionMail,
   preferLedgerMail,
   sendSessionMail,
+  sessionMailStreamUrl,
   uploadChatFile,
   type SessionMailMessage,
 } from '../../api/chatSession'
@@ -175,6 +178,8 @@ function DetailsTabButton(props: {
 export function GroupChatPage() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const location = useLocation()
+  const isSettings = location.pathname === routePatterns.settings
   const [searchParams, setSearchParams] = useSearchParams()
   const urlSession = searchParams.get('session')
 
@@ -248,7 +253,7 @@ export function GroupChatPage() {
 
   // 当前会话消失（被停止/删除）→ 切到第一个可用会话，并改掉 URL，避免和 ?session= 互踢
   useEffect(() => {
-    if (!didInitRef.current || sessionsQ.isPending) return
+    if (isSettings || !didInitRef.current || sessionsQ.isPending) return
     if (sessionsQ.isFetching && rows.length === 0) return
     if (activeSession && !rows.some((r) => r.name === activeSession)) {
       const next = rows[0]?.name ?? null
@@ -262,7 +267,7 @@ export function GroupChatPage() {
         setSearchParams({}, { replace: true })
       }
     }
-  }, [activeSession, rows, sessionsQ.isPending, sessionsQ.isFetching, setSearchParams])
+  }, [isSettings, activeSession, rows, sessionsQ.isPending, sessionsQ.isFetching, setSearchParams])
 
   // ---------- 瀑布流状态机（ref 必须在 selectSession 之前） ----------
   const [entries, setEntries] = useState<ChatEntry[]>(() =>
@@ -297,13 +302,18 @@ export function GroupChatPage() {
       resetSessionLocal(name)
       setActiveSession(name)
       saveActiveSession(name)
-      setSearchParams({ session: name }, { replace: true })
+      if (location.pathname === routePatterns.settings) {
+        navigate(routes.chat({ session: name }), { replace: true })
+      } else {
+        setSearchParams({ session: name }, { replace: true })
+      }
       queryClient.removeQueries({ queryKey: ['gc-mail'], type: 'inactive' })
     },
-    [resetSessionLocal, setSearchParams, queryClient],
+    [resetSessionLocal, location.pathname, navigate, setSearchParams, queryClient],
   )
 
   useEffect(() => {
+    if (isSettings) return
     const names = rows.map((row) => row.name)
     if (!shouldAdoptUrlSession(urlSession, activeSession, names, didInitRef.current)) {
       if (
@@ -320,7 +330,7 @@ export function GroupChatPage() {
     if (!urlSession) return
     resetSessionLocal(urlSession)
     setActiveSession(urlSession)
-  }, [urlSession, activeSession, rows, resetSessionLocal, setSearchParams])
+  }, [isSettings, urlSession, activeSession, rows, resetSessionLocal, setSearchParams])
 
   // 当前会话的项目根目录（新成员 workdir / 目录树默认根）
   const activeRoot = useMemo(
@@ -347,6 +357,30 @@ export function GroupChatPage() {
   }, [busyMembers.length])
 
   const mailPrimedRef = useRef<string | null>(null)
+  const [mailStreamLive, setMailStreamLive] = useState(false)
+  useEffect(() => {
+    if (!activeSession) {
+      setMailStreamLive(false)
+      return
+    }
+    const session = activeSession
+    const source = new EventSource(sessionMailStreamUrl(session), { withCredentials: true })
+    const apply = (event: string) => (ev: MessageEvent<string>) => {
+      setMailStreamLive(true)
+      queryClient.setQueryData<SessionMailMessage[]>(['gc-mail', session], (current) =>
+        applyMailStreamEvent(current, event, ev.data, session),
+      )
+    }
+    source.addEventListener('snapshot', apply('snapshot'))
+    source.addEventListener('message', apply('message'))
+    source.addEventListener('replace', apply('replace'))
+    source.addEventListener('receipt', apply('receipt'))
+    source.onerror = () => setMailStreamLive(false)
+    return () => {
+      source.close()
+      setMailStreamLive(false)
+    }
+  }, [activeSession, queryClient])
   const mailQ = useQuery({
     queryKey: ['gc-mail', activeSession],
     queryFn: async ({ queryKey }) => {
@@ -374,7 +408,7 @@ export function GroupChatPage() {
     },
     enabled: !!activeSession,
     staleTime: 4_000,
-    refetchInterval: busyMembers.length > 0 ? 2_000 : POLL_MS,
+    refetchInterval: mailStreamLive ? POLL_MS : busyMembers.length > 0 ? 2_000 : POLL_MS,
     refetchOnWindowFocus: false,
   })
   // 文件树挂工作区目录；未分组/无目录不展示
@@ -735,7 +769,9 @@ export function GroupChatPage() {
           resetSessionLocal(null)
           setActiveSession(null)
           clearActiveSession()
-          setSearchParams({}, { replace: true })
+          if (location.pathname !== routePatterns.settings) {
+            setSearchParams({}, { replace: true })
+          }
         }
       }
       setSessionAction(null)
@@ -752,7 +788,7 @@ export function GroupChatPage() {
     } finally {
       setSessionActionBusy(false)
     }
-  }, [sessionAction, sessionActionBusy, rows, activeSession, refreshSessions, pushEntries, selectSession, resetSessionLocal, setSearchParams])
+  }, [sessionAction, sessionActionBusy, rows, activeSession, refreshSessions, pushEntries, selectSession, resetSessionLocal, setSearchParams, location.pathname])
 
   const onOpenWorkspace = useCallback(
     async (id: string) => {
@@ -872,7 +908,7 @@ export function GroupChatPage() {
   return (
     <div className="gc-shell">
       <AppFrame
-        detailsAvailable={!!activeSession}
+        detailsAvailable={!isSettings && !!activeSession}
         sidebar={
           <SidebarRoot
             onStartSession={startSession}
@@ -919,9 +955,9 @@ export function GroupChatPage() {
       >
         <section className="gc-main">
           <div className="gc-toolbar">
-            <span className="gc-toolbar-title">{activeSession ?? '群聊'}</span>
-            {activeRoot && <span className="gc-toolbar-sub">{rootBase(activeRoot)}</span>}
-            {onlyMember && (
+            <span className="gc-toolbar-title">{isSettings ? '设置' : (activeSession ?? '群聊')}</span>
+            {!isSettings && activeRoot && <span className="gc-toolbar-sub">{rootBase(activeRoot)}</span>}
+            {!isSettings && onlyMember && (
               <button
                 type="button"
                 className="gc-only-chip"
@@ -931,19 +967,25 @@ export function GroupChatPage() {
                 只看 {onlyMember.name} ✕
               </button>
             )}
-            <div className="gc-toolbar-actions">
-              <DetailsTabButton tab="members" current={detailsTab} onSelect={setDetailsTab}>
-                成员
-              </DetailsTabButton>
-              {fileRoot && (
-                <DetailsTabButton tab="files" current={detailsTab} onSelect={setDetailsTab}>
-                  文件
+            {!isSettings && (
+              <div className="gc-toolbar-actions">
+                <DetailsTabButton tab="members" current={detailsTab} onSelect={setDetailsTab}>
+                  成员
                 </DetailsTabButton>
-              )}
-            </div>
+                {fileRoot && (
+                  <DetailsTabButton tab="files" current={detailsTab} onSelect={setDetailsTab}>
+                    文件
+                  </DetailsTabButton>
+                )}
+              </div>
+            )}
           </div>
 
-          {previewFile && activeSession ? (
+          {isSettings ? (
+            <div className="gc-settings">
+              <SettingsPage />
+            </div>
+          ) : previewFile && activeSession ? (
             <FilePreview
               session={activeSession}
               path={previewFile}
@@ -975,14 +1017,14 @@ export function GroupChatPage() {
             </>
           )}
 
-          {busyMembers.length > 0 && (
-            <div className="gc-busy-icons" role="status" aria-label="正在回复">
+          {!isSettings && busyMembers.length > 0 && (
+            <div className="gc-busy-icons" role="status" aria-label="工作中或等你输入">
               {busyMembers.map((m) => {
                 const unread = m.unread && m.unread > 0
                   ? (m.unread > 99 ? '99+' : String(m.unread))
                   : ''
                 const label = m.status === 'blocked'
-                  ? `${m.name} 需要你确认`
+                  ? `${m.name} 等你输入`
                   : `${m.name} 正在回复`
                 const full = unread ? `${label}，${m.unread} 条未读` : label
                 return (
@@ -1007,18 +1049,20 @@ export function GroupChatPage() {
               })}
             </div>
           )}
-          <Composer
-            session={activeSession || ''}
-            members={members}
-            leader={leader}
-            value={composer}
-            onChange={setComposer}
-            onSend={onSend}
-            onAttach={(file) => { void onAttach(file) }}
-            attaching={attaching}
-            disabled={!activeSession || sending}
-            inputRef={inputRef}
-          />
+          {!isSettings && (
+            <Composer
+              session={activeSession || ''}
+              members={members}
+              leader={leader}
+              value={composer}
+              onChange={setComposer}
+              onSend={onSend}
+              onAttach={(file) => { void onAttach(file) }}
+              attaching={attaching}
+              disabled={!activeSession || sending}
+              inputRef={inputRef}
+            />
+          )}
         </section>
       </AppFrame>
 

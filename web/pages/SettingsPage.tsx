@@ -1,16 +1,12 @@
 import { useSearchParams } from 'react-router-dom'
-import { useSettings } from '../api/hooks'
 import { useLegacyEnvCheck } from '../api/localSlice'
-import { PageHeader } from '../components/PageHeader'
 import { QueryErrorState } from '../components/QueryErrorState'
 import { StatusState } from '../components/StatusState'
 import { Tabs, tabId, tabPanelId } from '../components/Tabs'
 import { Tag } from '../components/Tag'
-import { useCapability } from '../state/capabilities'
 import { useTheme, type ThemePref } from '../state/theme'
 
 const TABS = [
-  { key: 'harness', label: 'Harness / Runtime 与节点' },
   { key: 'appearance', label: '外观' },
   { key: 'doctor', label: '环境自检' },
 ] as const
@@ -18,34 +14,7 @@ const TABS = [
 type TabKey = (typeof TABS)[number]['key']
 
 function normalizeView(view: string | null): TabKey {
-  if (view === 'doctor' || view === 'appearance' || view === 'harness') return view
-  return 'harness'
-}
-
-function HarnessTab() {
-  const q = useSettings()
-  const catalogCap = useCapability('harnessCatalog')
-  return (
-    <section className="panel">
-      <h2 className="panel-title">Harness / Runtime 与节点</h2>
-      <p className="list-sub">设置当前只能查看，不能在此保存修改。</p>
-      {!catalogCap.available ? (
-        <StatusState kind="degraded" banner title="Harness 目录不可用" description={catalogCap.reason ?? undefined} />
-      ) : null}
-      {q.isPending ? (
-        <StatusState kind="loading" />
-      ) : q.isError ? (
-        <QueryErrorState error={q.error} onRetry={() => q.refetch()} />
-      ) : (
-        <details>
-          <summary>高级详情</summary>
-          <pre className="raw-json" tabIndex={0}>
-            {JSON.stringify(q.data?.data ?? {}, null, 2)}
-          </pre>
-        </details>
-      )}
-    </section>
-  )
+  return view === 'doctor' ? 'doctor' : 'appearance'
 }
 
 function AppearanceTab() {
@@ -72,7 +41,7 @@ function AppearanceTab() {
           </label>
         ))}
       </div>
-      <p className="list-sub">当前生效：{theme.resolved === 'dark' ? '暗色' : '亮色'}</p>
+      <p className="list-sub">当前生效：{theme.resolved === 'dark' ? '暗色' : '亮色'}。只影响本机浏览器。</p>
     </section>
   )
 }
@@ -136,15 +105,14 @@ export function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="设置" sub="当前为只读：修改将在后续版本开放" />
       <Tabs
         tabs={TABS}
         active={tab}
         ariaLabel="设置"
-        onChange={(key) => setSearchParams(key === 'harness' ? {} : { view: key })}
+        onChange={(key) => setSearchParams(key === 'appearance' ? {} : { view: key })}
       />
       <div role="tabpanel" id={tabPanelId(tab)} aria-labelledby={tabId(tab)}>
-        {tab === 'harness' ? <HarnessTab /> : tab === 'appearance' ? <AppearanceTab /> : <DoctorTab />}
+        {tab === 'appearance' ? <AppearanceTab /> : <DoctorTab />}
       </div>
     </>
   )

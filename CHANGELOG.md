@@ -6,16 +6,33 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-08-20
+
 ### Changed
 
-- Harvest a pane reply while it is still `working`, and replace the same
-  ledger bubble when a later extract is longer, so group chat no longer
-  waits for idle before the waterfall shows a terminal conclusion.
+- Keep group-chat harvest on idle/done only. Do not `agent read` a
+  working pane. Store the cleaned full reply in the ledger, and let the
+  waterfall show the conclusion first with process folded away.
 
-- Publish version 0.3.5 as the first operator-preview of Cockpit 3.0 group
-  chat on the :8790 source server. A workspace is a directory, each session
-  is a 1:1 Herdr binding, Agent Mail stays durable, and Herdr is runtime
-  only. Managed worktree lifecycle governance remains follow-up work.
+- Rename Herdr `blocked` in the group chat to 等你输入: live bubble,
+  member status, busy-strip, activity line, and interact modal. The
+  underlying status stays `blocked`.
+
+- Push ledger append/replace/receipt over
+  `/api/chat/sessions/{name}/mail/stream`. The waterfall follows that
+  stream and stops the 2s empty poll while the socket is live.
+
+- Show workspace git on the Files tab: current branch, dirty file
+  count, expandable stat and diff. Harvest no longer attaches the
+  whole-tree status to a reply bubble.
+
+- Publish version 0.3.6 as the signed operator package for the Cockpit
+  3.0 group chat already served on :8790. A workspace is a directory,
+  each session is a 1:1 Herdr binding, Agent Mail stays durable, and
+  Herdr is runtime only. Managed worktree lifecycle governance remains
+  follow-up work.
+- Record version 0.3.5 as the earlier source-tree operator preview of
+  that same group-chat reconstruction.
 
 - Publish version 0.3.4 with the versioned delivery framework and the native
   consecutive-upgrade evidence fix.
@@ -23,6 +40,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   release and GUI upgrade flow can be exercised end to end by the operator.
 
 ### Fixed
+
+- Detect ledger SSE inserts by message id, not window length, and keep
+  a 10s waterfall poll as backup so a live socket cannot hide new
+  bubbles until refresh.
 
 - Skip leftover Codex/Claude identity inject when a pane hook has no
   next-profile environment, and treat leftover names (`codex-luna`,

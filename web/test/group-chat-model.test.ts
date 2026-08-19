@@ -1,7 +1,7 @@
 // 群聊工作台纯逻辑单测：leader 持久化、@ 解析（含 @leader 别名）、摘要 diff、会话归属。
 
 import { vi } from 'vitest'
-import { fetchSessionMail, mailBelongsToSession, preferLedgerMail } from '../api/chatSession'
+import { applyMailStreamEvent, fetchSessionMail, mailBelongsToSession, preferLedgerMail } from '../api/chatSession'
 import { isAlreadyStoppedError } from '../api/legacyHerdr'
 import { ApiError } from '../api/client'
 import { computeColumns, shouldOverlayDetails } from '../features/shell/columns'
@@ -46,6 +46,7 @@ import {
   layoutMessageBlocks,
   messageFoldPreview,
   messageNeedsFold,
+  splitReplyPresentation,
   reflowMessageText,
   restoreBoxTables,
   splitInlineMarks,
@@ -111,6 +112,7 @@ describe('session isolation / mobile details', () => {
     expect(leftoverMemberName('kimi-main', 'kimi')).toBe(true)
     expect(leftoverMemberName('FoggyBasin', 'kimi')).toBe(false)
     expect(statusMeta('done').label).toBe('空闲')
+    expect(statusMeta('blocked').label).toBe('等你输入')
     expect(membersOfSession({
       panes: [pane({ session: 's1', pane_id: 'w1:p5', agent: 'kimi', agent_status: 'done' })],
     }, 's1')[0].status).toBe('idle')
@@ -400,6 +402,22 @@ describe('reflow and fold long waterfall text', () => {
     expect(composerPreviewLabel('')).toBe('写消息')
   })
 
+  it('有结论标题时先露结论，过程另折', () => {
+    const mixed = (
+      '先对照设置页和 3.0 外壳。\n'
+      + '结论\n'
+      + '截图圈的「← 返回群聊」已去掉。设置不再是离开群聊的白页。'
+    )
+    expect(splitReplyPresentation(mixed)).toEqual({
+      lead: '结论\n截图圈的「← 返回群聊」已去掉。设置不再是离开群聊的白页。',
+      rest: '先对照设置页和 3.0 外壳。',
+    })
+    expect(splitReplyPresentation('短回复没有过程')).toEqual({
+      lead: '短回复没有过程',
+      rest: '',
+    })
+  })
+
   it('对照终端：挤成一段的发布说明拆成标题、命令和列表', () => {
     const wall = (
       '当前 master 已是最新 e0cdd8c，工作区干净。具体修改分三部分：'
@@ -575,8 +593,8 @@ describe('删除会话后的选中回落', () => {
 })
 
 describe('AGENT_KINDS 规格冻结', () => {
-  it('只有 codex / claude / kimi / opencode / grok', () => {
-    expect([...AGENT_KINDS]).toEqual(['codex', 'claude', 'kimi', 'opencode', 'grok'])
+  it('含 qodercli', () => {
+    expect([...AGENT_KINDS]).toEqual(['codex', 'claude', 'kimi', 'opencode', 'grok', 'qodercli'])
   })
 })
 
@@ -768,6 +786,40 @@ describe('mailToEntries', () => {
     spy.mockRestore()
   })
 
+  it('账本 SSE 只合并 snapshot / message / replace / receipt', () => {
+    const first = applyMailStreamEvent(undefined, 'snapshot', JSON.stringify({
+      messages: [{
+        id: 'msg_1', sender: 'BrownDesert', program: 'grok',
+        text: '先出账本', to: ['human'], thread: 'cockpit', ts: 1,
+      }],
+    }), 'cockpit')
+    expect(first).toHaveLength(1)
+    const added = applyMailStreamEvent(first, 'message', JSON.stringify({
+      id: 'msg_2', sender: 'human', text: '继续', to: ['BrownDesert'], thread: 'cockpit', ts: 2,
+    }), 'cockpit')
+    expect(added.map((row) => row.id)).toEqual(['msg_1', 'msg_2'])
+    const replaced = applyMailStreamEvent(added, 'replace', JSON.stringify({
+      id: 'msg_1', text: '先出账本，并补了一句。', thread: 'cockpit',
+    }), 'cockpit')
+    expect(replaced[0]?.text).toBe('先出账本，并补了一句。')
+    const receipt = applyMailStreamEvent(replaced, 'receipt', JSON.stringify({
+      id: 'msg_2', read_by: ['BrownDesert'], thread: 'cockpit',
+    }), 'cockpit')
+    expect(receipt[1]?.read_by).toEqual(['BrownDesert'])
+    expect(applyMailStreamEvent(receipt, 'noop', '{}', 'cockpit')).toBe(receipt)
+  })
+
+  it('账本 SSE 窗口满了仍能靠 id 补进新消息', () => {
+    const prev = [
+      { id: 'msg_old', sender: 'human', program: '', text: '旧', to: ['BrownDesert'], thread: 'cockpit', ts: 1 },
+      { id: 'msg_2', sender: 'human', program: '', text: '还在窗口', to: ['BrownDesert'], thread: 'cockpit', ts: 2 },
+    ]
+    const next = applyMailStreamEvent(prev, 'message', JSON.stringify({
+      id: 'msg_3', sender: 'human', text: '新', to: ['BrownDesert'], thread: 'cockpit', ts: 3,
+    }), 'cockpit')
+    expect(next.map((row) => row.id)).toEqual(['msg_old', 'msg_2', 'msg_3'])
+  })
+
   it('preferLedgerMail 保住账本气泡，不被缺 thread 的第二次 /mail 擦掉', () => {
     const ledger = [{
       id: 'msg_keep', sender: 'BrownDesert', program: 'grok',
@@ -806,9 +858,11 @@ describe('mailToEntries', () => {
     })
     expect(rows[1]).toMatchObject({
       id: 'typing:w1:p4',
-      text: '等你确认 · 已 10秒',
+      text: '等你输入 · 已 10秒',
+      waiting: true,
     })
     expect(liveTurnLine(member({ status: 'working' }))).toBe('正在回复')
+    expect(liveTurnLine(member({ status: 'blocked' }))).toBe('等你输入')
     expect(membersOfSession({
       panes: [pane({
         session: 's1', pane_id: 'w1:p5', agent: 'grok', agent_status: 'working',

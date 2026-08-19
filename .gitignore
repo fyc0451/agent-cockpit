@@ -26,3 +26,11 @@ client.env
 .idea/
 *.swp
 .DS_Store
+
+# 根层误装与本地验证稿，不进发版树
+/node_modules/
+design-system/
+docs/screenshots/verify-*.png
+docs/screenshots/ui-*.png
+docs/screenshots/*-fail.png
+tests/test_chat_ledger_sse.py

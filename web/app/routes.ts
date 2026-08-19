@@ -38,7 +38,7 @@ export const routePatterns = {
 } as const
 
 export type InboxView = 'needs-action'
-export type SettingsView = 'doctor'
+export type SettingsView = 'doctor' | 'appearance'
 
 function seg(id: string): string {
   return encodeURIComponent(id)
@@ -72,7 +72,9 @@ export const routes = {
   inbox: (opts: { view?: InboxView } = {}): string =>
     withQuery(routePatterns.inbox, { view: opts.view }),
   settings: (opts: { view?: SettingsView } = {}): string =>
-    withQuery(routePatterns.settings, { view: opts.view }),
+    withQuery(routePatterns.settings, {
+      view: opts.view && opts.view !== 'appearance' ? opts.view : undefined,
+    }),
   project: {
     workbench: (project: string, opts: { createWorkspace?: boolean } = {}): string =>
       withQuery(`${projectBasePath(project)}/workbench`, {

@@ -54,6 +54,7 @@ from . import instance_lock
 from . import mail_projects
 from . import chat_ledger
 from . import chat_roster
+from . import git_card
 from . import persist_work
 from . import pane_live
 from . import next_profile
@@ -4891,6 +4892,40 @@ def api_chat_session_file_read(name: str, path: str):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/chat/sessions/{name}/files/download")
+def api_chat_session_file_download(name: str, path: str):
+    """下载所属工作区目录内的文件。"""
+    _validate_session_name(name)
+    root = _chat_workspace_root(name)
+    if root is None:
+        raise HTTPException(404, "会话没有所属工作区目录")
+    try:
+        target = files.download_under_root(root, path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return FileResponse(target, filename=target.name)
+
+
+@app.get("/api/chat/sessions/{name}/files/raw")
+def api_chat_session_file_raw(name: str, path: str):
+    """内联预览工作区媒体文件，限 PREVIEW_EXT。"""
+    _validate_session_name(name)
+    root = _chat_workspace_root(name)
+    if root is None:
+        raise HTTPException(404, "会话没有所属工作区目录")
+    try:
+        target = files.preview_under_root(root, path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return FileResponse(
+        target,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @app.get("/api/chat/sessions/{name}/files/search")
 def api_chat_session_file_search(name: str, q: str, limit: int = 100):
     """在所属工作区目录内按文件名或相对路径搜索。"""
@@ -4902,6 +4937,16 @@ def api_chat_session_file_search(name: str, q: str, limit: int = 100):
         return files.search_under_root(root, q, limit)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/chat/sessions/{name}/git")
+def api_chat_session_git(name: str, diff: bool = False):
+    """工作区级 git 摘要：当前分支 + 未提交文件数 + stat；diff=1 再带补丁。"""
+    _validate_session_name(name)
+    root = _chat_workspace_root(name)
+    if root is None:
+        raise HTTPException(404, "会话没有所属工作区目录")
+    return git_card.collect_workspace_git(str(root), include_diff=diff)
 
 
 def _chat_mail_project_key(name: str) -> str | None:
@@ -4990,9 +5035,7 @@ def _ledger_chat_mail(row: dict[str, Any]) -> dict[str, Any] | None:
         ):
             return None
         conclusion = _extract_harvest_conclusion(text)
-        if conclusion:
-            text = conclusion
-        elif _is_process_narration(text):
+        if not conclusion and _is_process_narration(text):
             return None
     out = {
         "id": str(row["id"]),
@@ -5013,6 +5056,8 @@ def _ledger_chat_mail(row: dict[str, Any]) -> dict[str, Any] | None:
         out["read_by"] = [str(item) for item in (row.get("read_by") or []) if item]
     if type(row.get("duration_ms")) is int:
         out["duration_ms"] = row["duration_ms"]
+    if isinstance(row.get("git"), dict):
+        out["git"] = row["git"]
     return out
 
 
@@ -5163,6 +5208,8 @@ _HARVEST_TUI_LINE_RE = re.compile(
     r"▾\s+Tasks\b|"
     r"⸬\s+Task\b|"
     r"Worked for\s+\d|"
+    r"•\s+Working\b|"
+    r"Working\s*\(\d+s|"
     r"stop\s+\[hooks:|"
     r"Thought for\s+\d|"
     r"Context compacted:|"
@@ -5388,6 +5435,8 @@ def _harvest_skip_line(stripped: str) -> bool:
         return True
     if re.search(r"Context \d+% left|Full Access|Ready ·", stripped):
         return True
+    if re.search(r"Working\s*\(\d+s", stripped) or stripped in {"• Working", "Working"}:
+        return True
     if re.match(r"^[a-z`]+=\d+", stripped):
         return True
     if re.match(r"^[a-f0-9]{8,}`?", stripped):
@@ -5515,7 +5564,8 @@ def _is_process_narration(text: str) -> bool:
 
 
 _CONCLUSION_HEAD_RE = re.compile(
-    r"^(?:===== .+ =====|对，你的判断|核心结论|结论如下|结论：|"
+    r"^(?:===== .+ =====|对，你的判断|核心结论|结论如下|"
+    r"结论(?:[:：\s].*)?$|"
     r"• 已查清|已查清，结论|处理方案[:：])"
 )
 _TOOL_JUNK_RE = re.compile(
@@ -5530,7 +5580,7 @@ def _extract_harvest_conclusion(text: str) -> str:
     start = None
     for index, line in enumerate(lines):
         stripped = line.strip()
-        if _TOOL_JUNK_RE.match(stripped):
+        if _TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped):
             continue
         if _CONCLUSION_HEAD_RE.match(stripped) or "真正的回归" in stripped:
             start = index
@@ -5540,9 +5590,9 @@ def _extract_harvest_conclusion(text: str) -> str:
     kept: list[str] = []
     for line in lines[start:]:
         stripped = line.strip()
-        if kept and _TOOL_JUNK_RE.match(stripped):
+        if kept and (_TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped)):
             break
-        if _TOOL_JUNK_RE.match(stripped):
+        if _TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped):
             continue
         kept.append(line)
     cleaned = "\n".join(kept).strip()
@@ -5670,38 +5720,13 @@ def _trim_chat_mail(
     )
 
 
-def _refresh_codex_progress(session: str, pane: dict[str, Any]) -> None:
-    """Codex 干活时抽最新一条非工具 • 句，只更新处理中气泡。"""
-    if str(pane.get("agent") or "").strip().lower() != "codex":
-        return
-    pane_id = str(pane.get("pane_id") or "")
-    if not pane_id:
-        return
-    key = (session, pane_id)
-    now = time.monotonic()
-    if now - _PANE_ACTIVITY_AT.get(key, 0.0) < 3.0:
-        return
-    _PANE_ACTIVITY_AT[key] = now
-    try:
-        summary = herdr_client.pane_summary(session, pane_id, 80)
-    except Exception:
-        return
-    progress = pane_live.extract_live_progress(
-        str((summary or {}).get("summary") or ""), "codex",
-    )
-    if progress:
-        _PANE_ACTIVITY[key] = progress
-
-
 def _pane_activity_line(pane: dict[str, Any]) -> str:
     """干活时给瀑布流一行现在在干什么，不读整屏终端。"""
     status = str(pane.get("agent_status") or "")
     if status == "blocked":
-        return "等你确认"
+        return "等你输入"
     session = str(pane.get("session") or "")
     pane_id = str(pane.get("pane_id") or "")
-    if str(pane.get("agent") or "").strip().lower() == "codex":
-        _refresh_codex_progress(session, pane)
     cached = _PANE_ACTIVITY.get((session, pane_id), "").strip()
     if cached:
         return cached
@@ -5800,6 +5825,9 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
                 _PANE_TURN_STARTED.pop(key, None)
                 _save_harvest_status()
             continue
+        # working 时也不读终端：Codex `agent read` 会冲刷画面，瀑布流只等停下再收。
+        if not settled:
+            continue
         try:
             summary = herdr_client.pane_summary(session, pane_id, 120)
         except Exception:
@@ -5811,12 +5839,7 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
                 _save_harvest_status()
             continue
         conclusion = _extract_harvest_conclusion(text)
-        if conclusion:
-            text = conclusion
-        elif _is_process_narration(text):
-            continue
-        elif not settled:
-            # working 只收已经成型的结论，草稿等停下再收。
+        if not conclusion and _is_process_narration(text):
             continue
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
         if _PANE_LAST_HARVEST.get(key) == digest:
@@ -5962,6 +5985,20 @@ async def api_chat_pane_live(websocket: WebSocket, name: str, pane_id: str):
         waiter.close()
 
 
+def _ledger_sse_unseen(
+    current: list[dict[str, Any]], known_ids: set[str],
+) -> list[dict[str, Any]]:
+    """窗口满了条数不变，只能靠 id 认新行。认过的 id 写回 known_ids。"""
+    unseen: list[dict[str, Any]] = []
+    for row in current:
+        msg_id = str(row.get("id") or "")
+        if not msg_id or msg_id in known_ids:
+            continue
+        known_ids.add(msg_id)
+        unseen.append(row)
+    return unseen
+
+
 def _session_ledger_mail(name: str, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """只读本群账本，不扫 Hub / herdr。进会话首屏用这条。"""
     local = [
@@ -6051,6 +6088,125 @@ def api_chat_session_mail_list(
         "ungrouped": thread is None,
         "source": "all" if want_hub else "ledger",
     }
+
+
+@app.get("/api/chat/sessions/{name}/mail/stream")
+async def api_chat_session_mail_stream(name: str, request: Request):
+    """SSE 推送账本新消息、正文替换、回执更新。
+
+    事件类型:
+    - snapshot: 初始完整消息列表
+    - message: 新消息 (id, sender, text, ts, ...)
+    - replace: 替换正文 (id, text)
+    - receipt: 回执更新 (id, notified_to?, read_by?)
+    """
+    _validate_session_name(name)
+
+    # 初始快照：返回当前账本全部消息
+    try:
+        local, thread = _session_ledger_mail(name, 200)
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+    known_ids = {str(row["id"]) for row in local if row.get("id")}
+    known_texts: dict[str, str] = {row["id"]: row.get("text", "") for row in local}
+    known_receipts: dict[str, tuple[list[str] | None, list[str] | None]] = {
+        row["id"]: (
+            row.get("notified_to"),
+            row.get("read_by"),
+        )
+        for row in local
+    }
+
+    async def event_stream():
+        nonlocal known_ids, known_texts, known_receipts
+
+        # 首次推送完整列表
+        yield {
+            "event": "snapshot",
+            "data": json.dumps({
+                "messages": [
+                    {
+                        "id": row["id"],
+                        "sender": row.get("sender", ""),
+                        "program": row.get("program", ""),
+                        "text": row.get("text", ""),
+                        "to": row.get("to"),
+                        "thread": name,
+                        "ts": row.get("ts", 0),
+                        "delivery": row.get("delivery"),
+                        "notified_to": row.get("notified_to"),
+                        "read_by": row.get("read_by"),
+                        "duration_ms": row.get("duration_ms"),
+                        "git": row.get("git"),
+                    }
+                    for row in local
+                ],
+            }, ensure_ascii=False),
+        }
+
+        while not await request.is_disconnected():
+            try:
+                current, _ = _session_ledger_mail(name, 200)
+            except ValueError:
+                await asyncio.sleep(2)
+                continue
+
+            for row in _ledger_sse_unseen(current, known_ids):
+                msg_id = str(row.get("id") or "")
+                known_texts[msg_id] = row.get("text", "")
+                known_receipts[msg_id] = (row.get("notified_to"), row.get("read_by"))
+                yield {
+                    "event": "message",
+                    "data": json.dumps({
+                        "id": msg_id,
+                        "sender": row.get("sender", ""),
+                        "program": row.get("program", ""),
+                        "text": row.get("text", ""),
+                        "to": row.get("to"),
+                        "thread": name,
+                        "ts": row.get("ts", 0),
+                        "delivery": row.get("delivery"),
+                        "notified_to": row.get("notified_to"),
+                        "read_by": row.get("read_by"),
+                        "duration_ms": row.get("duration_ms"),
+                        "git": row.get("git"),
+                    }, ensure_ascii=False),
+                }
+
+            # 检测正文替换（流式输出场景）
+            for row in current:
+                msg_id = row["id"]
+                current_text = row.get("text", "")
+                if msg_id in known_texts and known_texts[msg_id] != current_text:
+                    known_texts[msg_id] = current_text
+                    yield {
+                        "event": "replace",
+                        "data": json.dumps({"id": msg_id, "text": current_text}, ensure_ascii=False),
+                    }
+
+            # 检测回执更新
+            for row in current:
+                msg_id = row["id"]
+                current_notified = row.get("notified_to")
+                current_read = row.get("read_by")
+                if msg_id in known_receipts:
+                    old_notified, old_read = known_receipts[msg_id]
+                    if current_notified != old_notified or current_read != old_read:
+                        known_receipts[msg_id] = (current_notified, current_read)
+                        receipt_data: dict[str, Any] = {"id": msg_id}
+                        if current_notified is not None:
+                            receipt_data["notified_to"] = current_notified
+                        if current_read is not None:
+                            receipt_data["read_by"] = current_read
+                        yield {
+                            "event": "receipt",
+                            "data": json.dumps(receipt_data, ensure_ascii=False),
+                        }
+
+            await asyncio.sleep(2)
+
+    return _SseCappedEventSourceResponse(event_stream())
 
 
 def _ensure_session_leader(
@@ -6768,7 +6924,7 @@ def api_chat_session_create(workspace_id: str, req: ChatSessionCreateReq):
     """群聊新会话：拉起 herdr + Leader，不走沉重的 setup-workspace 简报/协调。"""
     workspace = _chat_workspace(workspace_id)
     agent = (req.agent or "codex").strip().lower()
-    if agent not in {"codex", "claude", "kimi", "opencode", "grok"}:
+    if agent not in {"codex", "claude", "kimi", "opencode", "grok", "qodercli"}:
         raise HTTPException(400, "不支持的 Leader Agent")
     session_name = _next_herdr_session_name(workspace)
     boot = herdr_client.start_session(session_name, workdir=workspace["path"])

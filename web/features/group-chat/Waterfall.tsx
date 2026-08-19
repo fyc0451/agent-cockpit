@@ -16,6 +16,7 @@ import {
   reflowMessageText,
   splitInlineMarks,
   splitMessageParts,
+  splitReplyPresentation,
   unreadCountLabel,
   type ChatDelivery,
   type ChatReceipt,
@@ -108,21 +109,16 @@ function LayoutBlocks({
   })
 }
 
-function MessageBody({
+function RenderParts({
   text,
   onOpenPath,
 }: {
   text: string
   onOpenPath?: (path: string) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const fold = messageNeedsFold(text)
-  const shown = fold && !open ? messageFoldPreview(text) : reflowMessageText(text)
-  const parts = splitMessageParts(shown)
-  if (parts.length === 0) return <div className="gc-msg-body" />
   return (
-    <div className={`gc-msg-body${fold && !open ? ' is-folded' : ''}`}>
-      {parts.map((part, index) =>
+    <>
+      {splitMessageParts(text).map((part, index) =>
         part.type === 'code' ? (
           <pre key={index} className="gc-msg-code" data-lang={part.lang || undefined}>
             <code><InlineText text={part.text} onOpenPath={onOpenPath} /></code>
@@ -131,13 +127,42 @@ function MessageBody({
           <LayoutBlocks key={index} text={part.text} onOpenPath={onOpenPath} />
         ),
       )}
+    </>
+  )
+}
+
+function MessageBody({
+  text,
+  preferConclusion,
+  onOpenPath,
+}: {
+  text: string
+  preferConclusion?: boolean
+  onOpenPath?: (path: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const split = preferConclusion ? splitReplyPresentation(text) : { lead: text, rest: '' }
+  const leadNeedsFold = messageNeedsFold(split.lead)
+  const shownLead = leadNeedsFold && !open
+    ? messageFoldPreview(split.lead)
+    : reflowMessageText(split.lead)
+  const hideProcess = Boolean(split.rest) && !open
+  const fold = leadNeedsFold || Boolean(split.rest)
+  if (!shownLead && !split.rest) return <div className="gc-msg-body" />
+  return (
+    <div className={`gc-msg-body${leadNeedsFold && !open ? ' is-folded' : ''}`}>
+      <RenderParts text={shownLead} onOpenPath={onOpenPath} />
+      {hideProcess && (
+        <div className="gc-msg-process">过程已收起</div>
+      )}
+      {!hideProcess && split.rest ? <RenderParts text={split.rest} onOpenPath={onOpenPath} /> : null}
       {fold && (
         <button
           type="button"
           className="gc-msg-fold"
           onClick={() => setOpen((value) => !value)}
         >
-          {open ? '收起' : '展开全文'}
+          {open ? '收起' : split.rest ? '展开过程' : '展开全文'}
         </button>
       )}
     </div>
@@ -168,6 +193,8 @@ export type ChatEntry =
       ts: number
       durationMs?: number
       unread?: number
+      waiting?: boolean
+      git?: { files: number; stat: string }
     }
   | { id: string; kind: 'event'; text: string; ts: number }
   | { id: string; kind: 'error'; text: string; ts: number }
@@ -258,8 +285,8 @@ function EntryRow({
           {toPeer && <span className="gc-peer-badge">回成员</span>}
           {toMe && !toPeer && <span className="gc-peer-badge">回我</span>}
           {live && (
-            <span className="gc-live-badge">
-              {entry.id.startsWith('typing:') ? '处理中' : '现场'}
+            <span className={`gc-live-badge${entry.waiting ? ' is-waiting' : ''}`}>
+              {entry.waiting ? '等你输入' : entry.id.startsWith('typing:') ? '处理中' : '现场'}
             </span>
           )}
           {!live && entry.durationMs != null && formatChatDuration(entry.durationMs) && (
@@ -267,7 +294,7 @@ function EntryRow({
           )}
           <time className="gc-msg-time">{live ? '现在' : fmtTime(entry.ts)}</time>
         </div>
-        <MessageBody text={entry.text} onOpenPath={onOpenPath} />
+        <MessageBody text={entry.text} preferConclusion onOpenPath={onOpenPath} />
         {live && onOpenAgent && (
           <div className="gc-msg-actions">
             <button

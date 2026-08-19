@@ -164,7 +164,7 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
             </h3>
             <p className="gc-modal-sub">
               {member.kind}
-              {member.status === 'blocked' ? ' · 正在等你确认（信任目录 / 权限 / 提问）' : ' · 直接操作这个 Agent 的终端'}
+              {member.status === 'blocked' ? ' · 等你输入（信任目录 / 权限 / 提问）' : ' · 直接操作这个 Agent 的终端'}
             </p>
           </div>
           <button type="button" className="gc-pill-btn gc-live-close" onClick={onClose} aria-label="关闭现场">

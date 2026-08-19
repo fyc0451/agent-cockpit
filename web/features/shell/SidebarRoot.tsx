@@ -31,7 +31,7 @@ export interface SidebarRootProps {
 
 /** 渲染侧栏列外壳（见模块注释）。 */
 export function SidebarRoot({ onStartSession, onOpenSettings, children }: SidebarRootProps) {
-  const { sidebarCollapsed: collapsed, sidebarWidth: width, toggleSidebar } = useAppFrame()
+  const { sidebarCollapsed: collapsed, sidebarWidth: width, toggleSidebar, narrow } = useAppFrame()
 
   // 折叠动画期间宽内容保持挂载（.fading 原地淡出），落定后卸载；
   // 展开立即重挂。
@@ -131,7 +131,10 @@ export function SidebarRoot({ onStartSession, onOpenSettings, children }: Sideba
         <button
           type="button"
           className={css.settings}
-          onClick={() => { onOpenSettings() }}
+          onClick={() => {
+            onOpenSettings()
+            if (narrow && !collapsed) toggleSidebar()
+          }}
           title={wide ? undefined : '设置'}
         >
           <IconSettingsOutline16 size={wide ? 16 : 18} />

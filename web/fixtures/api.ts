@@ -301,6 +301,9 @@ export function defaultFetchMap(): Record<string, unknown> {
     '/api/env-check': legacyEnvCheckPayload,
     '/api/settings': settingsPayload,
     '/api/herdr/status': herdrStatusPayload,
+    '/api/herdr/sessions': { sessions: [] },
+    '/api/herdr/snapshot': { panes: [] },
+    '/api/chat/workspaces': { workspaces: [], threads: [] },
     '/api/tasks': tasksPayload,
     // legacy workbench 裸形状（SLICE-001 窄 adapter）
     '/api/projects/p1/workbench': legacyWorkbenchPayload,

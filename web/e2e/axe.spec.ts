@@ -18,7 +18,7 @@ function violationDetails(violations: AxeResults['violations']): string[] {
 const PAGES: [name: string, hash: string, ready: string][] = [
   ['overview', '/#/overview', '需要你处理'],
   ['workbench', '/#/projects/p1/workbench', 'Project One'],
-  ['settings', '/#/settings', 'Harness / Runtime 与节点'],
+  ['settings', '/#/settings', '外观'],
   ['files(forbidden)', '/#/projects/p1/workspaces/w1/files', '文件浏览暂不可用'],
   ['terminal', '/#/projects/p1/workspaces/w1/terminal', '终端未接通'],
 ]
@@ -32,8 +32,10 @@ for (const theme of ['light', 'dark'] as const) {
       await page.goto(hash)
       await expect(page.getByText(ready).first()).toBeVisible()
       if (name === 'settings') {
-        await expect(page.locator('.raw-json')).toBeVisible()
-        expect(g.apiRequests).toContain('/api/settings')
+        await expect(page.getByRole('tab', { name: '外观' })).toBeVisible()
+        await expect(page.getByRole('radio', { name: '跟随系统' })).toBeVisible()
+        await expect(page.getByText('返回群聊')).toHaveCount(0)
+        await expect(page.getByText('Harness / Runtime 与节点')).toHaveCount(0)
       }
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
       const results = await new AxeBuilder({ page }).analyze()

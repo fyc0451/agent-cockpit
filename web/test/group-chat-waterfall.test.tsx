@@ -135,6 +135,41 @@ describe('Waterfall 长文本', () => {
     expect(screen.getByText('2')).toBeInTheDocument()
   })
 
+  it('blocked 现场气泡标成等你输入', () => {
+    render(
+      <Waterfall
+        entries={[{
+          ...entry,
+          id: 'typing:w1:p4',
+          text: '等你输入 · 已 10秒',
+          waiting: true,
+        }]}
+        hasSession
+        onOpenAgent={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('等你输入')).toBeInTheDocument()
+    expect(document.querySelector('.gc-live-badge.is-waiting')).not.toBeNull()
+  })
+
+  it('有结论时先露结论，过程默认收起', () => {
+    render(
+      <Waterfall
+        entries={[{
+          ...entry,
+          id: 'msg_split',
+          text: '先对照设置页和 3.0 外壳。\n结论\n截图圈的「← 返回群聊」已去掉。',
+        }]}
+        hasSession
+      />,
+    )
+    expect(screen.getByText(/返回群聊/)).toBeInTheDocument()
+    expect(screen.queryByText(/先对照设置页/)).not.toBeInTheDocument()
+    expect(screen.getByText('过程已收起')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '展开过程' }))
+    expect(screen.getByText(/先对照设置页/)).toBeInTheDocument()
+  })
+
   it('展开后按终端结构显示标题和命令块', () => {
     render(<Waterfall entries={[entry]} hasSession />)
     fireEvent.click(screen.getByRole('button', { name: '展开全文' }))
@@ -174,5 +209,28 @@ describe('Waterfall 长文本', () => {
     expect(onOpenPath).toHaveBeenCalledWith(
       'tools/m2her-verify/handoffs/2026-08-19-app97-case-cf037f65d2704122b195295073564a1a-1022/REPORT.md',
     )
+  })
+
+  it('气泡不再渲染工作区 git 卡片，即使账本还带着旧字段', () => {
+    render(
+      <Waterfall
+        entries={[{
+          id: 'msg_git',
+          kind: 'agent',
+          paneId: 'w1:p2',
+          name: 'BrownDesert',
+          agentKind: 'grok',
+          isLeader: false,
+          text: '改完了',
+          to: ['我'],
+          ts: 1,
+          git: { files: 2, stat: ' a.txt | 2 +-\n b.txt | 1 +' },
+        }]}
+        hasSession
+      />,
+    )
+    expect(screen.queryByText(/改了 .* 个文件/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '查看 stat' })).not.toBeInTheDocument()
+    expect(document.querySelector('.gc-git-card')).toBeNull()
   })
 })

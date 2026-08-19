@@ -3,8 +3,8 @@
 
 import type { HerdrPane, HerdrSession, HerdrSnapshot } from '../../api/legacyHerdr'
 
-/** 可选的 agent 类型（规格冻结：codex / claude / kimi / opencode / grok） */
-export const AGENT_KINDS = ['codex', 'claude', 'kimi', 'opencode', 'grok'] as const
+/** 可选的 agent 类型（codex / claude / kimi / opencode / grok / qodercli） */
+export const AGENT_KINDS = ['codex', 'claude', 'kimi', 'opencode', 'grok', 'qodercli'] as const
 
 // ---------- 成员模型 ----------
 
@@ -551,6 +551,28 @@ export function messageFoldPreview(text: string, lines = PREVIEW_LINES): string 
   return reflowMessageText(text).split('\n').slice(0, lines).join('\n')
 }
 
+const CONCLUSION_HEAD = /^(?:===== .+ =====|对，你的判断|核心结论|结论如下|结论(?:[:：\s].*)?$|• 已查清|已查清，结论|处理方案[:：])/
+
+/** 结论先露、过程另折。没有结论标题时 lead 是全文。 */
+export function splitReplyPresentation(raw: string): { lead: string; rest: string } {
+  const text = reflowMessageText(raw)
+  if (!text) return { lead: '', rest: '' }
+  const lines = text.split('\n')
+  let start = -1
+  for (let index = 0; index < lines.length; index += 1) {
+    const stripped = lines[index].trim()
+    if (CONCLUSION_HEAD.test(stripped) || stripped.includes('真正的回归')) {
+      start = index
+      break
+    }
+  }
+  if (start < 0) return { lead: text, rest: '' }
+  const before = lines.slice(0, start).join('\n').trim()
+  const after = lines.slice(start).join('\n').trim()
+  if (!before) return { lead: after, rest: '' }
+  return { lead: after, rest: before }
+}
+
 export function composerPreviewLabel(value: string, empty = '写消息'): string {
   const text = value.replace(/\s+/g, ' ').trim()
   if (!text) return empty
@@ -608,7 +630,7 @@ export function avatarColor(name: string): string {
 
 export const STATUS_META: Record<string, { dot: string; label: string }> = {
   working: { dot: 'gc-dot--working', label: '工作中' },
-  blocked: { dot: 'gc-dot--blocked', label: '待处理' },
+  blocked: { dot: 'gc-dot--blocked', label: '等你输入' },
   idle: { dot: 'gc-dot--idle', label: '空闲' },
   done: { dot: 'gc-dot--idle', label: '空闲' },
   stopped: { dot: 'gc-dot--idle', label: '已停止' },
@@ -750,7 +772,7 @@ export function liveTurnLine(member: ChatMember, now = Date.now()): string {
     ? formatChatDuration(now - member.turnStartedMs)
     : ''
   if (member.status === 'blocked') {
-    return elapsed ? `等你确认 · 已 ${elapsed}` : '等你确认'
+    return elapsed ? `等你输入 · 已 ${elapsed}` : '等你输入'
   }
   const activity = (member.activity || '').trim() || '正在回复'
   return elapsed ? `${activity} · ${elapsed}` : activity
@@ -773,6 +795,7 @@ export interface MailMessage {
   notified_to?: string[]
   read_by?: string[]
   duration_ms?: number
+  git?: { files: number; stat: string }
 }
 
 export function mailTimestamp(ts: number): number {
@@ -865,6 +888,7 @@ export type MailEntry =
       ts: number
       durationMs?: number
       unread?: number
+      git?: { files: number; stat: string }
     }
 
 /** Agent Mail 一封邮 → 瀑布流一条气泡。 */
@@ -909,6 +933,11 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
       ts,
       durationMs: typeof message.duration_ms === 'number' ? message.duration_ms : undefined,
       unread: member?.unread,
+      git: message.git
+        && typeof message.git.files === 'number'
+        && typeof message.git.stat === 'string'
+        ? { files: message.git.files, stat: message.git.stat }
+        : undefined,
     })
   }
   return out
@@ -1037,6 +1066,7 @@ export function typingEntries(
     to: [],
     ts: now,
     unread: member.unread,
+    waiting: member.status === 'blocked',
   }))
 }
 

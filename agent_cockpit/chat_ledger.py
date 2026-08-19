@@ -22,7 +22,7 @@ _WORKSPACE_FIELDS = frozenset({"id", "path", "title", "created_at", "order"})
 _THREAD_FIELDS = frozenset({"id", "workspace_id", "herdr_session", "title", "created_at"})
 _MESSAGE_FIELDS = frozenset({"id", "session", "kind", "sender", "text", "to", "ts"})
 _OPTIONAL_MESSAGE_FIELDS = frozenset({
-    "delivery", "notified_to", "read_by", "duration_ms",
+    "delivery", "notified_to", "read_by", "duration_ms", "git",
 })
 _MESSAGE_KINDS = frozenset({"me", "agent", "event", "error"})
 _MESSAGE_DELIVERIES = frozenset({"interrupt", "queue"})
@@ -321,7 +321,22 @@ def _validate_message(row: Any) -> dict[str, Any]:
         if type(duration) is not int or duration < 0:
             raise ValueError("群聊消息耗时无效")
         out["duration_ms"] = duration
+    if "git" in row:
+        out["git"] = normalize_git_card(row["git"])
     return out
+
+
+def normalize_git_card(value: Any) -> dict[str, Any]:
+    """git 变更卡片：files 为改动文件数，stat 为截断后的 diff --stat 概要。"""
+    if not isinstance(value, dict):
+        raise ValueError("群聊消息 git 卡片无效")
+    files = value.get("files")
+    stat = value.get("stat")
+    if type(files) is not int or files < 0:
+        raise ValueError("群聊消息 git 卡片无效")
+    if not isinstance(stat, str) or len(stat) > 4096:
+        raise ValueError("群聊消息 git 卡片无效")
+    return {"files": files, "stat": stat}
 
 
 def _load_messages() -> dict[str, Any]:
@@ -363,6 +378,7 @@ def append_message(
     notified_to: list[str] | None = None,
     read_by: list[str] | None = None,
     duration_ms: int | None = None,
+    git: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
         raise ValueError("herdr_session 无效")
@@ -394,6 +410,8 @@ def append_message(
         ]
     if duration_ms is not None:
         row["duration_ms"] = duration_ms
+    if git is not None:
+        row["git"] = normalize_git_card(git)
     row = _validate_message(row)
     with _lock:
         data = _load_messages()
@@ -499,6 +517,27 @@ def set_message_duration(message_id: str, duration_ms: int) -> dict[str, Any] | 
                 continue
             updated = dict(row)
             updated["duration_ms"] = duration_ms
+            data["messages"][index] = _validate_message(updated)
+            _write("chat_messages", data)
+            return dict(data["messages"][index])
+    return None
+
+
+def set_message_git(message_id: str, git: dict[str, Any] | None) -> dict[str, Any] | None:
+    """结论原地更新时刷新 git 变更卡片；None 表示清掉旧卡片。"""
+    if not isinstance(message_id, str) or not re.fullmatch(r"msg_[0-9a-f]{12}", message_id):
+        raise ValueError("群聊消息 ID 无效")
+    card = normalize_git_card(git) if git is not None else None
+    with _lock:
+        data = _load_messages()
+        for index, row in enumerate(data["messages"]):
+            if row["id"] != message_id:
+                continue
+            updated = dict(row)
+            if card is None:
+                updated.pop("git", None)
+            else:
+                updated["git"] = card
             data["messages"][index] = _validate_message(updated)
             _write("chat_messages", data)
             return dict(data["messages"][index])
