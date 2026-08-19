@@ -6,7 +6,7 @@ import { StatusState } from '../components/StatusState'
 type Phase = 'checking' | 'login' | 'ready' | 'error'
 
 function messageFromLoginFailure(status: number): string {
-  if (status === 401) return '访问令牌无效'
+  if (status === 401) return '密码不对'
   if (status === 403) return '当前地址不允许登录'
   return `登录失败（HTTP ${status}）`
 }
@@ -76,14 +76,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
       <div className="auth-brand" aria-hidden="true">AC</div>
       <div className="auth-heading">
         <h1 id="auth-title">Agent Cockpit</h1>
-        <p>此实例需要访问令牌</p>
+        <p>输入本机登录密码</p>
         <p className="auth-hint">
-          这不是账号密码：令牌由运行 Cockpit 的电脑管理员提供；本机操作者可在该电脑的
-          ~/.config/agent-cockpit/cockpit.token 查看（8790）。请勿把令牌发到聊天或项目文件中。
+          自己定的短密码，写在这台电脑的 ~/.config/agent-cockpit/cockpit.token（8790）。
+          4–64 位字母数字即可，不用记一长串。不要发到聊天或项目文件里。
         </p>
       </div>
       <form onSubmit={submit}>
-        <label className="auth-label" htmlFor="cockpit-token">访问令牌</label>
+        <label className="auth-label" htmlFor="cockpit-token">密码</label>
         <input
           id="cockpit-token"
           className="input auth-input"

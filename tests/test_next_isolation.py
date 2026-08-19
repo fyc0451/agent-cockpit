@@ -631,11 +631,14 @@ def test_next_token_file_rejects_unsafe_metadata_and_content(tmp_path: Path) -> 
         gate.load_cockpit_token(values)
 
     path.chmod(0o600)
-    path.write_text("short\n", encoding="ascii")
+    path.write_text("ab\n", encoding="ascii")
     with pytest.raises(gate.IsolationError, match="token_file_unsafe"):
         gate.load_cockpit_token(values)
 
-    path.write_text("a" * 31 + "!\n", encoding="ascii")
+    path.write_text("okpw\n", encoding="ascii")
+    assert gate.load_cockpit_token(values) == "okpw"
+
+    path.write_text("bad!\n", encoding="ascii")
     with pytest.raises(gate.IsolationError, match="token_file_invalid"):
         gate.load_cockpit_token(values)
 

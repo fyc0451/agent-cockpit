@@ -897,9 +897,12 @@ def pane_read(session: str, pane_id: str, lines: int = 100, is_agent: bool = Fal
         return {"available": False}
     try:
         if is_agent:
-            # agent read:位置参数 pane_id,--session 全局前置
+            # 空闲优先 recent-unwrapped：分屏 27 列硬折行会把看现场折成窄条。
             out = _run(
-                ["--session", session, "agent", "read", pane_id, "--lines", str(lines)],
+                [
+                    "--session", session, "agent", "read", pane_id,
+                    "--source", "recent-unwrapped", "--lines", str(lines),
+                ],
                 timeout=8,
             )
         else:
@@ -960,7 +963,24 @@ def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, A
     if not is_available():
         return {"available": False}
     try:
-        out = _run(["--session", session, "agent", "read", pane_id], timeout=8)
+        # 先 unwrapped 再 visible：harvest 不要把分屏硬折行原样收下。
+        out = ""
+        last_error: RuntimeError | None = None
+        for source in ("recent-unwrapped", "visible"):
+            try:
+                out = _run(
+                    [
+                        "--session", session, "agent", "read", pane_id,
+                        "--source", source, "--lines", str(max(max_lines, 40)),
+                    ],
+                    timeout=8,
+                )
+                last_error = None
+                break
+            except RuntimeError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
     except RuntimeError as e:
         return {"available": True, "error": str(e), "summary": ""}
     # 过滤 TUI 噪声。框线表的 │ 行必须留着，后面才能还原成 Markdown 表。
@@ -4159,13 +4179,10 @@ def restart_pane(
             )
         except ValueError:
             live_kind = None
-        # pane.run 私有启动的 Codex 没有 agent name（detection 管理）；
-        # 其身份权威 = pane + descriptor（session/pane/kind/codex_home 一致，
-        # live agent 为同 pane 唯一同 kind，name 为空或恰为 instance id）。
-        if restart_codex_home is not None:
-            live_name_ok = len(live) == 1 and live[0].get("name") in (None, name)
-        else:
-            live_name_ok = len(live) == 1 and live[0].get("name") == name
+        live_name = live[0].get("name") if len(live) == 1 else None
+        # Herdr 对 claude/grok 常常不报 agent name，只报 pane+kind。
+        # 身份权威 = 同 pane 唯一同 kind，name 为空或恰为 descriptor name。
+        live_name_ok = live_name in (None, "", name)
         if len(live) != 1 or not live_name_ok or live_kind != kind:
             return _restart_error(
                 "restart_identity_mismatch",
@@ -4187,7 +4204,11 @@ def restart_pane(
                 "restart_resume_unsupported", "resume 仅支持 Codex", pane_id,
             )
 
-        pane_scoped = kind == "grok" or restart_codex_home is not None
+        pane_scoped = (
+            kind == "grok"
+            or restart_codex_home is not None
+            or not live_name
+        )
         try:
             if kind == "grok":
                 _run(
@@ -4202,8 +4223,8 @@ def restart_pane(
                     ["--session", session, "pane", "send-keys", pane_id, "Enter"],
                     timeout=3,
                 )
-            elif restart_codex_home is not None:
-                # detection 管理的私有 Codex 无 agent name，中断必须 pane 级。
+            elif pane_scoped:
+                # live 没有 agent name：中断只能打到 pane，不能 agent send-keys。
                 _run(
                     ["--session", session, "pane", "send-keys", pane_id, "esc"],
                     timeout=3,

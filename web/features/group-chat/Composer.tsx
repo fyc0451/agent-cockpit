@@ -12,6 +12,7 @@ import {
   messageNeedsFold,
   parseMentionTargets,
   shouldSendOnEnter,
+  type ChatDelivery,
   type ChatMember,
 } from './model'
 
@@ -21,7 +22,7 @@ interface ComposerProps {
   leader: ChatMember | null
   value: string
   onChange: (v: string) => void
-  onSend: () => void
+  onSend: (delivery: ChatDelivery) => void
   onAttach: (file: File) => void
   attaching?: boolean
   disabled: boolean
@@ -54,6 +55,7 @@ export function Composer({
   const [skills, setSkills] = useState<ChatSkill[]>(() => composerSkills(session))
   const [open, setOpen] = useState(false)
   const [tall, setTall] = useState(false)
+  const [delivery, setDelivery] = useState<ChatDelivery>('interrupt')
   const composingRef = useRef(false)
 
   const expand = () => {
@@ -188,7 +190,7 @@ export function Composer({
       })
     ) {
       e.preventDefault()
-      onSend()
+      onSend(delivery)
     }
   }
 
@@ -342,6 +344,30 @@ export function Composer({
               )}
             </span>
           )}
+          {open && (
+            <div className="gc-delivery" role="radiogroup" aria-label="消息类型">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={delivery === 'interrupt'}
+                className={`gc-delivery-opt${delivery === 'interrupt' ? ' is-active' : ''}`}
+                title="立刻打断正在做的事"
+                onClick={() => setDelivery('interrupt')}
+              >
+                打断
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={delivery === 'queue'}
+                className={`gc-delivery-opt${delivery === 'queue' ? ' is-active' : ''}`}
+                title="等对方空闲再处理"
+                onClick={() => setDelivery('queue')}
+              >
+                排队
+              </button>
+            </div>
+          )}
           {open && value.trim() !== '' && (
             <button
               type="button"
@@ -371,9 +397,9 @@ export function Composer({
           <button
             type="button"
             className="gc-send"
-            title="发送（Enter）"
+            title={delivery === 'queue' ? '排队发送（Enter）' : '立刻打断发送（Enter）'}
             disabled={disabled || attaching || value.trim() === ''}
-            onClick={onSend}
+            onClick={() => onSend(delivery)}
           >
             <IconSendOutline16 />
           </button>

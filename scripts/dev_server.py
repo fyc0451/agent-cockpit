@@ -28,11 +28,13 @@ def _load_next_dev():
     return module
 
 
-def dev_values(repo: Path, home: Path) -> dict[str, str]:
+def dev_values(repo: Path, home: Path, host: str = "127.0.0.1") -> dict[str, str]:
+    if host not in next_profile.FIXED_HOSTS:
+        raise next_profile.NextProfileError("next_profile_invalid:COCKPIT_HOST")
     values = {
         "COCKPIT_NEXT_PROFILE": next_profile.DEV_PROFILE,
         "COCKPIT_PROJECT_ROOT": str(home.resolve() / "github"),
-        "COCKPIT_HOST": "127.0.0.1",
+        "COCKPIT_HOST": host,
     }
     values.update(next_profile.dev_layout(home, repo))
     return values
@@ -42,19 +44,25 @@ def main() -> int:
     next_dev = _load_next_dev()
     repo = ROOT
     home = Path.home().resolve()
-    values = dev_values(repo, home)
+    host = os.environ.get("COCKPIT_HOST", "127.0.0.1")
+    values = dev_values(repo, home, host)
     python = repo / ".venv" / "bin" / "python"
     if not python.is_file():
         print("venv_missing", file=sys.stderr)
         return 1
     try:
+        token = next_dev.load_cockpit_token(values)
+        if token is not None:
+            values["COCKPIT_TOKEN"] = token
+        if values["COCKPIT_HOST"] == "0.0.0.0" and token is None:
+            print("lan_host_token_required", file=sys.stderr)
+            return 1
         next_profile.validate_server_environment(repo, values)
         next_dev._validate_web_build(repo)
         if not next_dev._port_available(values["COCKPIT_HOST"], int(values["COCKPIT_PORT"])):
             print("dev_port_in_use", file=sys.stderr)
             return 1
         next_dev.ensure_runtime_roots(values)
-        token = next_dev.load_cockpit_token(values)
         environment = next_dev.sanitized_environment(values)
         if token is not None:
             environment["COCKPIT_TOKEN"] = token
@@ -65,7 +73,10 @@ def main() -> int:
             next_dev._prepare_exec_fds(lock.fd)
             environment[LOCK_FD_ENV] = str(lock.fd)
             os.chdir(repo)
-            print(f"OK http://127.0.0.1:{values['COCKPIT_PORT']}", flush=True)
+            if values["COCKPIT_HOST"] == "0.0.0.0":
+                print(f"OK http://0.0.0.0:{values['COCKPIT_PORT']}", flush=True)
+            else:
+                print(f"OK http://127.0.0.1:{values['COCKPIT_PORT']}", flush=True)
             os.execve(str(python), [str(python), str(repo / "server.py")], environment)
     except next_profile.NextProfileError as exc:
         print(str(exc), file=sys.stderr)

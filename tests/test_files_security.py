@@ -551,6 +551,16 @@ def test_search_files_recursively_by_name(tmp_path):
         ("alpha-dir", "dir"),
         ("nested/my-alpha.py", "file"),
     }
+    by_dir = files.search_files(str(root), "nested/my-alpha")
+    assert {(r["relative"], r["type"]) for r in by_dir["results"]} == {
+        ("nested/my-alpha.py", "file"),
+    }
+    by_folder = files.search_files(str(root), "nested/")
+    assert {r["relative"] for r in by_folder["results"]} == {
+        "nested",
+        "nested/my-alpha.py",
+        "nested/other.txt",
+    }
 
 
 def test_search_files_respects_limits_and_skips_internal_dirs(tmp_path):

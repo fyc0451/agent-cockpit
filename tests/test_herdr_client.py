@@ -396,7 +396,10 @@ def test_pane_read_forwards_line_limit_to_agent_and_plain_panes(monkeypatch):
     assert plain["output"] == "output"
     assert calls == [
         call(
-            ["--session", "demo", "agent", "read", "w1:p2", "--lines", "300"],
+            [
+                "--session", "demo", "agent", "read", "w1:p2",
+                "--source", "recent-unwrapped", "--lines", "300",
+            ],
             timeout=8,
         ),
         call(
@@ -412,7 +415,7 @@ def test_pane_read_falls_back_to_visible_when_agent_is_working(monkeypatch):
 
     def fake_run(args, timeout=10):
         calls.append(call(args, timeout=timeout))
-        if "--source" not in args:
+        if "--source" not in args or "recent-unwrapped" in args:
             raise RuntimeError(
                 'herdr failed: {"error":{"code":"agent_not_idle"}}'
             )
@@ -433,7 +436,10 @@ def test_pane_read_falls_back_to_visible_when_agent_is_working(monkeypatch):
     }
     assert calls == [
         call(
-            ["--session", "demo", "agent", "read", "w1:p4", "--lines", "300"],
+            [
+                "--session", "demo", "agent", "read", "w1:p4",
+                "--source", "recent-unwrapped", "--lines", "300",
+            ],
             timeout=8,
         ),
         call(
@@ -2194,6 +2200,55 @@ def test_restart_pane_rejects_descriptor_live_identity_mismatch(monkeypatch):
 
     assert result["error_code"] == "restart_identity_mismatch"
     assert result["preserved"] is True
+
+
+def test_restart_pane_accepts_unnamed_live_claude_on_same_pane(monkeypatch):
+    instance_id = "i-kww5gslmiqhdzbgoh7m5ca5bu4"
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p6", name=instance_id, kind="claude",
+        args=[], agent="claude", instance_id=instance_id, display_name="GrayFalcon",
+    )
+    snapshots = iter([
+        {
+            "panes": [{"pane_id": "w1:p6", "agent": "claude", "cwd": "/repo"}],
+            "agents": [{"pane_id": "w1:p6", "agent": "claude"}],
+        },
+        {
+            "panes": [{"pane_id": "w1:p6", "agent": None, "cwd": "/repo"}],
+            "agents": [],
+        },
+    ])
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
+    )
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        return _shell_process_info("w1:p6") if "process-info" in args else ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p6")
+
+    assert result["restarted"] is True
+    assert result["name"] == instance_id
+    assert result["kind"] == "claude"
+    assert call(
+        ["--session", "demo", "pane", "send-keys", "w1:p6", "esc"],
+        timeout=3,
+    ) in calls
+    assert call(
+        ["--session", "demo", "pane", "send-keys", "w1:p6", "ctrl+c"],
+        timeout=3,
+    ) in calls
+    assert not any(c.args[0][2:4] == ["agent", "send-keys"] for c in calls)
+    assert call(
+        ["--session", "demo", "agent", "start", instance_id,
+         "--kind", "claude", "--pane", "w1:p6", "--timeout", "60000"],
+        timeout=65,
+    ) in calls
 
 
 def test_restart_pane_rejects_unknown_live_kind_without_raising(monkeypatch):

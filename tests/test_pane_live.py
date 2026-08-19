@@ -17,6 +17,53 @@ def test_extract_pane_text_unwraps_json_output():
     assert pane_live.extract_pane_text({"output": "", "error": "gone"}) == "gone"
 
 
+def test_unwrap_terminal_wrap_joins_split_pane_lines():
+    text = pane_live.unwrap_terminal_wrap(
+        "• 剩余节点也继续稳定下\n"
+        "载，已到约 1.5 MB。发\n"
+        "布脚本使用固定 commit\n"
+        "和失败关闭策略，不会因\n"
+        "为网络慢而跳过依赖；因\n"
+        "此关机后得到的 GPU 服\n"
+        "务与仓库代码能严格对\n"
+        "应。\n"
+        "\n"
+        "• Waiting for background…\n"
+        "  ssh badge-dev 'bash…\n",
+        short_limit=0,
+    )
+    assert "剩余节点也继续稳定下载，已到约 1.5 MB。" in text
+    assert "不会因为网络慢而跳过依赖" in text
+    assert "服务与仓库代码能严格对应。" in text
+    assert "\n载，" not in text
+
+
+def test_extract_live_progress_keeps_codex_status_not_tool_chrome():
+    screen = (
+        "• Waited for background terminal · ssh badge-dev\n"
+        "  docker run --rm\n"
+        "• 固定源码包已下载到约 5.7 MB，连接稳定但带宽偏低。"
+        "发布过程没有切换 current。\n"
+        "• Ran ssh badge-dev 'bash -s'\n"
+        "• 下载已到约 7.6 MB，仍是持续增长且无超时。"
+        "继续当前幂等部署是成本和风险更低的路径。\n"
+        "• Explored\n"
+        "  Search source.tar.gz\n"
+        "• Waiting for background terminal\n"
+    )
+    assert pane_live.extract_live_progress(screen, "codex") == (
+        "下载已到约 7.6 MB，仍是持续增长且无超时。"
+        "继续当前幂等部署是成本和风险更低的路径。"
+    )
+    assert pane_live.extract_live_progress(screen, "grok") == ""
+    wrapped = (
+        "• 固定源码包已下载到约\n"
+        " 5.7 MB，连接稳定但带\n"
+        "宽偏低。\n"
+    )
+    assert "5.7 MB" in pane_live.extract_live_progress(wrapped, "codex")
+
+
 def test_snapshot_from_envelope_uses_matched_read():
     snap = pane_live.snapshot_from_envelope({
         "event": "pane.output_matched",

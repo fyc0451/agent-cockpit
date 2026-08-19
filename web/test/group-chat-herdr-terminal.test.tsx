@@ -94,6 +94,7 @@ const fileMocks = vi.hoisted(() => ({
   list: vi.fn(),
   read: vi.fn(),
   upload: vi.fn(),
+  recordLine: vi.fn(async (_session: string, _text: string, _to: string) => {}),
 }))
 
 vi.mock('../api/legacyHerdr', () => ({
@@ -115,7 +116,8 @@ vi.mock('../api/chatSession', () => ({
   fetchSessionDirList: fileMocks.list,
   fetchSessionFileContent: fileMocks.read,
   uploadChatFile: fileMocks.upload,
-  recordTerminalLine: vi.fn(async () => {}),
+  recordTerminalLine: (session: string, text: string, to: string) =>
+    fileMocks.recordLine(session, text, to),
 }))
 
 class FakeResizeObserver {
@@ -162,10 +164,39 @@ describe('HerdrTerminalModal 全屏', () => {
     herdrMocks.detach.mockReset()
     herdrMocks.untile.mockReset()
     herdrMocks.split.mockReset()
-    herdrMocks.snapshot.mockClear()
+    herdrMocks.snapshot.mockReset()
+    herdrMocks.snapshot.mockResolvedValue({
+      panes: [
+        {
+          pane_id: 'w1:p1',
+          session: 'demo-1',
+          agent: 'grok',
+          agent_status: 'idle',
+          cwd: '',
+          cwd_name: '',
+          display_name: 'BrownDesert',
+          mail_name: 'BrownDesert',
+          tab_id: 't1',
+          focused: true,
+        },
+        {
+          pane_id: 'w1:p2',
+          session: 'demo-1',
+          agent: 'codex',
+          agent_status: 'idle',
+          cwd: '',
+          cwd_name: '',
+          display_name: 'Codex',
+          mail_name: 'Codex',
+          tab_id: 't1',
+          focused: false,
+        },
+      ],
+    })
     fileMocks.list.mockReset()
     fileMocks.read.mockReset()
     fileMocks.upload.mockReset()
+    fileMocks.recordLine.mockReset()
     fileMocks.list.mockImplementation(async (_session: string, path: string) => ({
       path,
       type: null,
@@ -319,6 +350,45 @@ describe('HerdrTerminalModal 全屏', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     expect(FakeWebSocket.instance?.sent).toContain('hello\r')
     expect(field).toHaveValue('')
+    await vi.waitFor(() => {
+      expect(fileMocks.recordLine).toHaveBeenCalledWith('demo-1', 'hello', 'BrownDesert')
+    })
+  })
+
+  it('焦点在空 shell 时终端输入不进瀑布流', async () => {
+    herdrMocks.snapshot.mockResolvedValue({
+      panes: [
+        {
+          pane_id: 'w1:p3',
+          session: 'demo-1',
+          agent: '',
+          agent_status: 'unknown',
+          cwd: '',
+          cwd_name: '',
+          display_name: '',
+          mail_name: '',
+          tab_id: 't3',
+          focused: true,
+        },
+      ],
+    })
+    mocks.isTouch = true
+    render(<HerdrTerminalModal session="demo-1" onClose={vi.fn()} />)
+    fireEvent.click(screen.getByTestId('herdr-terminal-input-toggle'))
+    const field = await screen.findByTestId('herdr-terminal-inline-input')
+    act(() => {
+      FakeWebSocket.instance?.onmessage?.({ data: JSON.stringify({ type: 'replay_complete' }) })
+    })
+    await vi.waitFor(() => {
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    })
+    fireEvent.change(field, { target: { value: 'vim' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(FakeWebSocket.instance?.sent).toContain('vim\r')
+    await vi.waitFor(() => {
+      expect(herdrMocks.snapshot).toHaveBeenCalled()
+    })
+    expect(fileMocks.recordLine).not.toHaveBeenCalled()
   })
 
   it('揭开后屏幕键盘发送 Ctrl-C，布局左右组合两个 Agent', async () => {
@@ -433,7 +503,7 @@ describe('HerdrTerminalModal 全屏', () => {
   })
 
   it('桌面端从当前 pane 工作目录打开文件侧栏并浏览文件', async () => {
-    herdrMocks.snapshot.mockResolvedValueOnce({
+    herdrMocks.snapshot.mockResolvedValue({
       panes: [
         {
           pane_id: 'w1:p1',

@@ -1590,6 +1590,7 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
     legacy_counts: dict[tuple[str, str], int] = {}
     session_leaders: dict[str, dict[str, str]] = {}
     claimed_leaders: set[str] = set()
+    claimed_names: dict[str, set[str]] = {}
     for pane in snapshot.get("panes", []):
         session = str(pane.get("session") or "")
         pane_id = str(pane.get("pane_id") or "")
@@ -1636,7 +1637,6 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
                 projects[session] = str(root) if root is not None else None
         project = projects[session]
         if not project:
-            _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
             continue
         if instance_id:
             key = (project, mail_agent, instance_id)
@@ -1644,7 +1644,10 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
                 identities[key] = _identity_name(project, mail_agent, instance_id)
             if identities[key]:
                 pane["mail_name"] = identities[key]
-                _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
+                continue
+            stored = str((descriptor or {}).get("mail_name") or "").strip()
+            if stored and not _leftover_mail_name(stored, mail_agent):
+                pane["mail_name"] = stored
                 continue
         if session not in session_leaders:
             session_leaders[session] = chat_roster.get_session_leader(session)
@@ -1659,7 +1662,6 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
         ):
             pane["mail_name"] = leader_name
             claimed_leaders.add(session)
-            _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
             continue
         if instance_id:
             same_kind = sum(
@@ -1669,14 +1671,38 @@ def _enrich_board_identities(snapshot: dict[str, Any]) -> dict[str, Any]:
                 and str(item.get("agent") or "").lower() == agent.lower()
             )
             if same_kind != 1:
-                _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
                 continue
         legacy_key = (project, mail_agent, "")
         if legacy_key not in identities:
             identities[legacy_key] = _identity_name(project, mail_agent)
         if identities[legacy_key]:
             pane["mail_name"] = identities[legacy_key]
-        _apply_remembered_pane_name(pane, session, pane_id, mail_agent)
+    for pane in snapshot.get("panes", []):
+        if not isinstance(pane, dict):
+            continue
+        session = str(pane.get("session") or "")
+        agent = str(pane.get("agent") or "")
+        pane_id = str(pane.get("pane_id") or "")
+        if not session or not agent or not pane_id:
+            continue
+        descriptor = descriptors.get((session, pane_id))
+        mail_agent = str((descriptor or {}).get("agent") or "") or agent
+        used = claimed_names.setdefault(session, set())
+        name = str(pane.get("mail_name") or "").strip()
+        if name and not _leftover_mail_name(name, mail_agent):
+            used.add(name)
+    for pane in snapshot.get("panes", []):
+        if not isinstance(pane, dict):
+            continue
+        session = str(pane.get("session") or "")
+        agent = str(pane.get("agent") or "")
+        pane_id = str(pane.get("pane_id") or "")
+        if not session or not agent or not pane_id:
+            continue
+        descriptor = descriptors.get((session, pane_id))
+        mail_agent = str((descriptor or {}).get("agent") or "") or agent
+        used = claimed_names.setdefault(session, set())
+        _apply_remembered_pane_name(pane, session, pane_id, mail_agent, used)
     return snapshot
 
 
@@ -1688,22 +1714,219 @@ def _leftover_mail_name(name: str, agent: str) -> bool:
 
 def _apply_remembered_pane_name(
     pane: dict[str, Any], session: str, pane_id: str, mail_agent: str,
+    claimed: set[str] | None = None,
 ) -> None:
     remembered = chat_roster.get_pane_mail_name(session, pane_id)
     current_name = str(pane.get("mail_name") or "").strip()
     leftover = _leftover_mail_name(current_name, mail_agent)
     remembered_leftover = bool(remembered) and _leftover_mail_name(remembered, mail_agent)
+    owners: dict[str, str] = {}
+    for other_id, name in chat_roster.list_pane_mail_names(session).items():
+        if name and name not in owners:
+            owners[name] = other_id
     if remembered and not remembered_leftover and (not current_name or leftover):
+        owner = owners.get(remembered)
+        if (claimed is not None and remembered in claimed) or (
+            owner and owner != pane_id
+        ):
+            chat_roster.clear_pane_mail_name(session, pane_id)
+            return
         pane["mail_name"] = remembered
-        return
+        current_name = remembered
     if current_name and not leftover:
         chat_roster.set_pane_mail_name(session, pane_id, current_name)
+    if claimed is not None and current_name and not leftover:
+        claimed.add(current_name)
+
+
+def _forget_harvest_pane(session: str, pane_id: str) -> bool:
+    _load_harvest_status()
+    key = (session, pane_id)
+    changed = False
+    for store in (
+        _PANE_LAST_STATUS, _PANE_LAST_HARVEST, _PANE_LAST_MESSAGE,
+        _PANE_TURN_STARTED, _PANE_ACTIVITY, _PANE_ACTIVITY_AT,
+    ):
+        if key in store:
+            store.pop(key, None)
+            changed = True
+    if changed:
+        _save_harvest_status()
+    return changed
+
+
+def _prune_harvest_for_snapshot(snapshot: dict[str, Any]) -> None:
+    """运行中 session 里已经没了的 pane，丢掉 harvest 指针，避免 ID 复用串台。"""
+    live = _live_panes_by_session(snapshot)
+    if not live:
+        return
+    _load_harvest_status()
+    changed = False
+    for store in (
+        _PANE_LAST_STATUS, _PANE_LAST_HARVEST, _PANE_LAST_MESSAGE,
+        _PANE_TURN_STARTED, _PANE_ACTIVITY, _PANE_ACTIVITY_AT,
+    ):
+        for session, pane_id in list(store):
+            if session in live and pane_id not in live[session]:
+                store.pop((session, pane_id), None)
+                changed = True
+    if changed:
+        _save_harvest_status()
+
+
+def _forget_closed_pane(session: str, pane_id: str) -> None:
+    """Herdr pane 已不在时，清掉花名缓存和 harvest 指针，避免 ID 复用串台。"""
+    chat_roster.clear_pane_mail_name(session, pane_id)
+    _forget_harvest_pane(session, pane_id)
+
+
+def _running_session_names(snapshot: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for item in snapshot.get("sessions") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("session") or item.get("name") or "").strip()
+        if not name or str(item.get("status") or "running") == "stopped":
+            continue
+        names.add(name)
+    return names
+
+
+def _live_panes_by_session(snapshot: dict[str, Any]) -> dict[str, set[str]]:
+    running = _running_session_names(snapshot)
+    live: dict[str, set[str]] = {name: set() for name in running}
+    for pane in snapshot.get("panes") or []:
+        if not isinstance(pane, dict):
+            continue
+        session = str(pane.get("session") or "")
+        pane_id = str(pane.get("pane_id") or "")
+        if session in live and pane_id:
+            live[session].add(pane_id)
+    return live
+
+
+def _reconcile_absent_panes(snapshot: dict[str, Any]) -> None:
+    """TUI 直接关 pane 不会打 DELETE；运行中的 session 要对账清残留。"""
+    live = _live_panes_by_session(snapshot)
+    if not live:
+        return
+    stale: set[tuple[str, str]] = set()
+    for session, panes in live.items():
+        for pane_id in chat_roster.list_pane_mail_names(session):
+            if pane_id not in panes:
+                stale.add((session, pane_id))
+    # 完整 herdr 快照才动 descriptor；测试注入的残缺 snapshot 不能误退休现场身份。
+    if snapshot.get("available") is True:
+        try:
+            descriptors = herdr_client.list_active_launch_descriptors()
+        except Exception:
+            descriptors = []
+        for desc in descriptors:
+            if not isinstance(desc, dict):
+                continue
+            session = str(desc.get("session") or "")
+            pane_id = str(desc.get("pane_id") or "")
+            if session in live and pane_id and pane_id not in live[session]:
+                stale.add((session, pane_id))
+                try:
+                    herdr_client.mark_launch_descriptor_retirement_pending(session, pane_id)
+                except Exception:
+                    pass
+    for session, pane_id in stale:
+        _forget_closed_pane(session, pane_id)
+
+
+def _chat_dest_names(pane: dict[str, Any]) -> set[str]:
+    return {
+        name for name in (
+            str(pane.get("mail_name") or "").strip(),
+            str(pane.get("display_name") or "").strip(),
+            str(pane.get("agent") or "").strip(),
+        ) if name
+    }
+
+
+def _chat_unread_count(session: str, pane: dict[str, Any]) -> int:
+    """未读 = 已经叫醒对方、但对方还没开始处理。排队未投、投递失败都不挂角标。"""
+    names = _chat_dest_names(pane)
+    if not names:
+        return 0
+    try:
+        rows = chat_ledger.list_messages(session, 80)
+    except ValueError:
+        return 0
+    count = 0
+    for row in rows:
+        if str(row.get("kind") or "") != "me":
+            continue
+        targets = {str(item) for item in (row.get("to") or []) if item}
+        if not names & targets:
+            continue
+        notified = {str(item) for item in (row.get("notified_to") or []) if item}
+        if not names & notified:
+            continue
+        read = {str(item) for item in (row.get("read_by") or []) if item}
+        if names & read:
+            continue
+        count += 1
+    return count
+
+
+def _attach_chat_turn_state(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """给忙碌 pane 补开工时间和一行活动，给成员补未读条数。"""
+    _load_harvest_status()
+    now = int(datetime.now(UTC).timestamp() * 1000)
+    dirty = False
+    for pane in snapshot.get("panes") or []:
+        if not isinstance(pane, dict) or not pane.get("agent"):
+            continue
+        session = str(pane.get("session") or "")
+        pane_id = str(pane.get("pane_id") or "")
+        if not session or not pane_id:
+            continue
+        key = (session, pane_id)
+        status = str(pane.get("agent_status") or "")
+        if status in _BUSY_CHAT_STATUSES:
+            started = _PANE_TURN_STARTED.get(key)
+            if started is None:
+                started = now
+                _PANE_TURN_STARTED[key] = started
+                dirty = True
+            pane["turn_started_ms"] = started
+            pane["activity"] = _pane_activity_line(pane)
+        pane["unread"] = _chat_unread_count(session, pane)
+    if dirty:
+        _save_harvest_status()
+    return snapshot
+
+
+def _attach_session_leaders(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """快照带上登记 Leader，界面徽章跟 mail-send --to leader 用同一份。"""
+    names = {
+        str(pane.get("session") or "")
+        for pane in (snapshot.get("panes") or [])
+        if isinstance(pane, dict) and pane.get("session") and pane.get("agent")
+    }
+    leaders: dict[str, dict[str, str]] = {}
+    for name in names:
+        row = _ensure_session_leader(name, snapshot)
+        mail = str(row.get("leader_mail_name") or "").strip()
+        if mail and not _leftover_mail_name(mail, str(row.get("leader_agent") or mail)):
+            leaders[name] = {
+                "mail_name": mail,
+                "agent": str(row.get("leader_agent") or "").strip(),
+            }
+    snapshot["session_leaders"] = leaders
+    return snapshot
 
 
 def _board_snapshot() -> dict[str, Any]:
-    return _enrich_board_identities(
-        _merge_descriptor_roster(_herdr_runtime_snapshot()),
-    )
+    runtime = _herdr_runtime_snapshot()
+    _reconcile_absent_panes(runtime)
+    _prune_harvest_for_snapshot(runtime)
+    return _attach_session_leaders(_attach_chat_turn_state(
+        _enrich_board_identities(_merge_descriptor_roster(runtime))
+    ))
 
 
 def _descriptor_roster_pane(desc: dict[str, Any]) -> dict[str, Any]:
@@ -2058,6 +2281,7 @@ class ChatMailReq(BaseModel):
     text: str
     to: list[str] = []
     ledger_only: bool = False
+    delivery: str = "interrupt"
 
 
 class ChatWorkspaceCreateReq(BaseModel):
@@ -4669,7 +4893,7 @@ def api_chat_session_file_read(name: str, path: str):
 
 @app.get("/api/chat/sessions/{name}/files/search")
 def api_chat_session_file_search(name: str, q: str, limit: int = 100):
-    """在所属工作区目录内按文件名搜索。"""
+    """在所属工作区目录内按文件名或相对路径搜索。"""
     _validate_session_name(name)
     root = _chat_workspace_root(name)
     if root is None:
@@ -4752,20 +4976,44 @@ def _public_chat_mail(row: dict[str, Any]) -> dict[str, Any]:
 
 def _ledger_chat_mail(row: dict[str, Any]) -> dict[str, Any] | None:
     text = str(row.get("text") or "")
+    recipients = [str(item) for item in (row.get("to") or []) if item]
+    if str(row.get("kind") or "") == "me" and recipients == ["终端"]:
+        return None
     if str(row.get("kind") or "") == "agent":
         raw = text
-        text = _strip_harvest_tui_chrome(raw)
-        if not text or _identity_chrome_only(raw) or _identity_chrome_only(text):
+        text = _drop_harvest_prompt_echo(_strip_harvest_tui_chrome(raw))
+        if (
+            not text
+            or _identity_chrome_only(raw)
+            or _identity_chrome_only(text)
+            or _harvest_noise_only(text)
+        ):
             return None
-    return {
+        conclusion = _extract_harvest_conclusion(text)
+        if conclusion:
+            text = conclusion
+        elif _is_process_narration(text):
+            return None
+    out = {
         "id": str(row["id"]),
         "sender": str(row.get("sender") or "human"),
         "program": "",
         "text": text,
-        "to": [str(item) for item in (row.get("to") or []) if item],
+        "to": recipients,
         "thread": str(row.get("session") or ""),
         "ts": int(row.get("ts") or 0),
     }
+    if "delivery" in row:
+        out["delivery"] = chat_ledger.normalize_delivery(row.get("delivery"))
+    if "notified_to" in row:
+        out["notified_to"] = [
+            str(item) for item in (row.get("notified_to") or []) if item
+        ]
+    if "read_by" in row:
+        out["read_by"] = [str(item) for item in (row.get("read_by") or []) if item]
+    if type(row.get("duration_ms")) is int:
+        out["duration_ms"] = row["duration_ms"]
+    return out
 
 
 def _pane_preview_text(raw: dict[str, Any]) -> str:
@@ -4787,6 +5035,10 @@ def _pane_preview_text(raw: dict[str, Any]) -> str:
 
 _PANE_LAST_STATUS: dict[tuple[str, str], str] = {}
 _PANE_LAST_HARVEST: dict[tuple[str, str], str] = {}
+_PANE_LAST_MESSAGE: dict[tuple[str, str], str] = {}
+_PANE_TURN_STARTED: dict[tuple[str, str], int] = {}
+_PANE_ACTIVITY: dict[tuple[str, str], str] = {}
+_PANE_ACTIVITY_AT: dict[tuple[str, str], float] = {}
 _HARVEST_STATUS_LOADED = False
 
 
@@ -4823,6 +5075,22 @@ def _load_harvest_status() -> None:
                 session, pane_id = key.split("|", 1)
                 if session and pane_id:
                     _PANE_LAST_HARVEST[(session, pane_id)] = digest
+        ids = raw.get("messages") if isinstance(raw, dict) else None
+        if isinstance(ids, dict):
+            for key, message_id in ids.items():
+                if not isinstance(key, str) or "|" not in key or not isinstance(message_id, str):
+                    continue
+                session, pane_id = key.split("|", 1)
+                if session and pane_id and message_id.startswith("msg_"):
+                    _PANE_LAST_MESSAGE[(session, pane_id)] = message_id
+        started = raw.get("started") if isinstance(raw, dict) else None
+        if isinstance(started, dict):
+            for key, stamp in started.items():
+                if not isinstance(key, str) or "|" not in key or type(stamp) is not int or stamp <= 0:
+                    continue
+                session, pane_id = key.split("|", 1)
+                if session and pane_id:
+                    _PANE_TURN_STARTED[(session, pane_id)] = stamp
     except (OSError, UnicodeError, ValueError, TypeError):
         pass
     if loaded_file:
@@ -4852,6 +5120,14 @@ def _save_harvest_status() -> None:
             f"{session}|{pane_id}": digest
             for (session, pane_id), digest in _PANE_LAST_HARVEST.items()
         },
+        "messages": {
+            f"{session}|{pane_id}": message_id
+            for (session, pane_id), message_id in _PANE_LAST_MESSAGE.items()
+        },
+        "started": {
+            f"{session}|{pane_id}": stamp
+            for (session, pane_id), stamp in _PANE_TURN_STARTED.items()
+        },
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -4866,7 +5142,10 @@ _HARVEST_SKIP_PREFIXES = (
     "Boss 在群聊",
     "请用 mail-recv",
     "请直接做下面的任务",
+    "请做完手头事后再处理",
     "结论写在终端",
+    "论写在终端",
+    "群聊会收进瀑布流",
     "本群 Leader 是",
     "给 Leader 写信",
     "需要写信时用 mail-send",
@@ -4879,11 +5158,20 @@ _HARVEST_SKIP_PREFIXES = (
 _HARVEST_TUI_LINE_RE = re.compile(
     r"^(?:"
     r"┃(?:\s|$)|"
-    r"◆\s+(?:Run\b|Thought for\s+\d|Task completed in\b|Recap\b)|"
+    r"◆\s+(?:Run\b|Thought for\s+\d|Task completed in\b|Recap\b|Edit\b|Other\b|user_prompt_submit\b|session_end\b|session_start\b|stop\b)|"
+    r"❙|"
+    r"▾\s+Tasks\b|"
+    r"⸬\s+Task\b|"
     r"Worked for\s+\d|"
     r"stop\s+\[hooks:|"
     r"Thought for\s+\d|"
     r"Context compacted:|"
+    r"Context \d+% full|"
+    r"Waiting for response|"
+    r"Compacting|"
+    r"Jump to bottom|"
+    r"new task\?|"
+    r"bypass permissions|"
     r"Shift\+Tab:|"
     r"Space:prompt|"
     r"Ctrl\+[xX]:|"
@@ -4891,8 +5179,22 @@ _HARVEST_TUI_LINE_RE = re.compile(
     r"post_tool_use\b|"
     r"user_prompt_submit\b|"
     r"Task completed in\b|"
+    r"Ran \d+ shell command|"
     r"Ran /|"
-    r"•\s+(?:Edited|Ran|Updated Plan)\b|"
+    r"Read \d+ files?|"
+    r"•\s+(?:Edited|Ran|Updated Plan|Explored|Planning|<thinking>|Fixing)\b|"
+    r"●\s+(?:\d+ background|收到通知)\b|"
+    r"※\s*recap:|"
+    r"✻\s|"
+    r"Task ids:|"
+    r"__orphan_summary|"
+    r"Monitor timeout|"
+    r"process exited|"
+    r"have been marked stopped|"
+    r"internal scan markers|"
+    r"Enter:send|"
+    r"Esc:cancel|"
+    r"Ctrl\+[;b]:|"
     r"└\s+|"
     r"›\s+|"
     r"✔\s+|"
@@ -4907,6 +5209,9 @@ _HARVEST_TUI_LINE_RE = re.compile(
     r"[└┌┐┘─┼┤├│╭╮╯╰━┃┴┬]+$|"
     r"[└┌╭╰][└┌┐┘─┼┤├│╭╮╯╰━┃┴┬]+[┐┘╮╯]$|"
     r"✓\s+\S+:\S+|"
+    r"➜\s|"
+    r"ctx\s+●|"
+    r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓]\s|"
     r"\d{1,2}:\d{2}\s*(?:AM|PM)?$|"
     r"\d+$"
     r")"
@@ -5038,17 +5343,34 @@ def _harvest_skip_line(stripped: str) -> bool:
         "…", "...", "❯", "post_tool_use", "user_prompt_submit",
     }:
         return True
+    if stripped.startswith("❯"):
+        return True
     if _is_identity_chrome_line(stripped):
         return True
     if any(stripped.startswith(prefix) for prefix in _HARVEST_SKIP_PREFIXES):
         return True
     if "Boss 在群聊" in stripped:
         return True
+    if any(token in stripped for token in (
+        "Jump to bottom", "Waiting for response", "bypass permissions",
+        "Enter:send", "Esc:cancel", "__orphan_summary",
+    )):
+        return True
     if "" in stripped or re.search(r"\d+K\s*/\s*\d+K", stripped):
         return True
     if _HARVEST_TUI_LINE_RE.match(stripped):
         return True
-    if "stop  [hooks:" in stripped:
+    if "stop  [hooks:" in stripped or "[hooks:" in stripped:
+        return True
+    if re.search(r"need this terminal|Copies need this", stripped, re.I):
+        return True
+    if re.fullmatch(r"copies need this(?: terminal)?\.?", stripped, re.I):
+        return True
+    if stripped.startswith("│") and any(
+        token in stripped for token in ("const fs=", "printf '", "… +", "+ lines")
+    ):
+        return True
+    if stripped.startswith(("◦ ", "• <thinking>")):
         return True
     if re.fullmatch(r"[\w./-]+\.(md|json|txt)", stripped):
         return True
@@ -5074,11 +5396,19 @@ def _harvest_skip_line(stripped: str) -> bool:
 def _strip_harvest_tui_chrome(summary: str) -> str:
     """无损剥离旧 harvest 气泡里的 TUI 壳，保留真实回复的全部段落和缩进。"""
     kept: list[str] = []
+    skipping_recap = False
     for line in _restore_box_tables(_clean_chat_body(summary)).splitlines():
         stripped = line.strip()
         if not stripped:
+            skipping_recap = False
             if kept and kept[-1] != "":
                 kept.append("")
+            continue
+        if skipping_recap and line[:1].isspace():
+            continue
+        skipping_recap = False
+        if re.match(r"※\s*recap:|^recap:", stripped, re.I):
+            skipping_recap = True
             continue
         if _harvest_skip_line(stripped):
             continue
@@ -5094,73 +5424,30 @@ def _strip_harvest_tui_chrome(summary: str) -> str:
     return _unwrap_harvest_wrap(re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip())
 
 
-def _unwrap_glue(left: str, right: str) -> str:
-    if not left or not right:
-        return f"{left}{right}"
-    prev, nxt = left[-1], right[0]
-    if prev in "-/_" and nxt.isalnum():
-        return f"{left}{right}"
-    if (prev.isascii() and prev.isalnum()) or (nxt.isascii() and nxt.isalnum()):
-        return f"{left} {right}"
-    return f"{left}{right}"
-
-
 def _unwrap_harvest_wrap(text: str) -> str:
     """把窄屏 TUI 折成的碎行拼回句子，不碰列表和标题。"""
-    if not text:
-        return text
-    out: list[str] = []
-    buf = ""
+    return pane_live.unwrap_terminal_wrap(text)
 
-    def flush() -> None:
-        nonlocal buf
-        if buf:
-            out.append(buf)
-            buf = ""
 
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            flush()
-            if out and out[-1] != "":
-                out.append("")
-            continue
-        if re.match(r"^(?:error:|\(failed\)|gpt-)", stripped, re.I):
-            flush()
-            continue
-        if re.match(r"^(?:[-*•□]|\d+[\.、)]|#{1,6}\s|\|)", stripped):
-            flush()
-            out.append(raw.rstrip())
-            continue
-        if _is_box_table_row(stripped) or _is_box_table_rule(stripped):
-            flush()
-            out.append(raw.rstrip())
-            continue
-        short = len(stripped) <= 20
-        if short and out and re.match(r"^\s*(?:[-*•□]|\d+[\.、)])", out[-1]):
-            out[-1] = _unwrap_glue(out[-1].rstrip(), stripped)
-            continue
-        if buf and short:
-            if re.fullmatch(r"[¥$€]\d[\d.,]*", buf):
-                flush()
-            else:
-                buf = _unwrap_glue(buf, stripped)
-                if stripped.endswith(("。", "！", "？", ".", "!", "?")):
-                    flush()
-                continue
-        flush()
-        if short:
-            buf = stripped
-        else:
-            out.append(raw.rstrip())
-    flush()
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+def _drop_harvest_prompt_echo(text: str) -> str:
+    """TUI 里回放的 @花名 提示不是结论，只在抽取时丢掉。"""
+    kept = [
+        line
+        for line in text.splitlines()
+        if not re.match(r"^@[A-Za-z][\w-]*\b", line.strip())
+    ]
+    return "\n".join(kept).strip()
 
 
 def _extract_harvest_text(summary: str) -> str:
     """从 pane 摘要抽出回复：去掉 TUI/Overseer 壳，保留分段和列表，不再只留最后几行。"""
-    text = _strip_harvest_tui_chrome(summary)
-    if len(text) < 12 or text.startswith("Boss 在群聊") or _identity_chrome_only(text):
+    text = _drop_harvest_prompt_echo(_strip_harvest_tui_chrome(summary))
+    if (
+        len(text) < 12
+        or text.startswith("Boss 在群聊")
+        or _identity_chrome_only(text)
+        or _harvest_noise_only(text)
+    ):
         return ""
     if len(text) > 8000:
         text = text[-8000:]
@@ -5168,6 +5455,89 @@ def _extract_harvest_text(summary: str) -> str:
         if 0 <= cut < 200:
             text = text[cut + 1:]
     return text
+
+
+def _harvest_noise_only(text: str) -> bool:
+    """剥离后只剩状态行/回放提示，不算结论。"""
+    leftover = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not _harvest_skip_line(line.strip())
+    ]
+    if not leftover:
+        return True
+    joined = " ".join(leftover)
+    return bool(re.fullmatch(
+        r"(?:Waiting for response|Compacting|Context \d+% full\.?|user_prompt_submit|"
+        r"Read \d+ files?|Ran \d+ shell command[s.]*|"
+        r"Copies need this(?: terminal)?\.?)(?:\s.*)?",
+        joined,
+        re.I,
+    ))
+
+
+_PROCESS_OPENER_RE = re.compile(
+    r"^(?:接着|先看|先查|先读|先核对|先写|继续补|继续改|准备收紧|测试过了|测试已通过)"
+)
+_PROCESS_NOTE_RE = re.compile(
+    r"并把测试补上|再(?:跑|重跑)测试|再核对现场|准备收紧规则|"
+    r"补上回归测试|改成只匹配|应落在同一条|"
+    r"收紧判断条件|对照账本和展示规则|"
+    r"接着(?:改|跑|核对|读|补|写)|独立重载 8790|"
+    r"写 session|stay_idle|_harvest_|digest 一直变"
+)
+_USER_FACING_RE = re.compile(
+    r"已经改了|已经重载|已经通了|原因[是：]|刷新.{0,12}再|"
+    r"不要把密码|手机用|登录现在是|不是给人记|不是 leftover|"
+    r"空 shell|局域网"
+)
+
+
+def _is_process_narration(text: str) -> bool:
+    """干活时的逐步自言自语，不是给 Boss 看的结论。"""
+    body = _normalized_chat_reply(text)
+    if not body:
+        return True
+    if _USER_FACING_RE.search(body):
+        return False
+    if _PROCESS_OPENER_RE.search(body):
+        return True
+    return bool(_PROCESS_NOTE_RE.search(body))
+
+
+_CONCLUSION_HEAD_RE = re.compile(
+    r"^(?:===== .+ =====|对，你的判断|核心结论|结论如下|结论：|"
+    r"• 已查清|已查清，结论|处理方案[:：])"
+)
+_TOOL_JUNK_RE = re.compile(
+    r"^(?:•\s+(?:<thinking>|Explored|Planning|Ran |Fixing|Edited)|"
+    r"│|const fs=|printf '|unfilled:)"
+)
+
+
+def _extract_harvest_conclusion(text: str) -> str:
+    """从混着工具残片的屏幕里抽出给 Boss 的结论段。"""
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if _TOOL_JUNK_RE.match(stripped):
+            continue
+        if _CONCLUSION_HEAD_RE.match(stripped) or "真正的回归" in stripped:
+            start = index
+            break
+    if start is None:
+        return ""
+    kept: list[str] = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        if kept and _TOOL_JUNK_RE.match(stripped):
+            break
+        if _TOOL_JUNK_RE.match(stripped):
+            continue
+        kept.append(line)
+    cleaned = "\n".join(kept).strip()
+    return cleaned if len(_normalized_chat_reply(cleaned)) >= 24 else ""
 
 
 def _normalized_chat_reply(text: str) -> str:
@@ -5245,26 +5615,131 @@ def _merge_chat_timeline(
             later_only = later_feats - prev_feats
             prev_only = prev_feats - later_feats
             shared = prev_feats & later_feats
+            # 账本里两条气泡不要靠词重叠合并。Hub 补漏才用模糊去重。
             collapse = (
                 index >= local_n
                 or _same_harvest_copy(current, text)
-                or not (
-                    len(later_only) >= 8
-                    and len(prev_only) >= 8
-                    and len(shared) < 16
-                )
             )
             if collapse:
                 if len(_normalized_chat_reply(text)) > len(_normalized_chat_reply(current)):
-                    seen.discard(str(merged[overlap].get("id") or ""))
-                    merged[overlap] = item
-                    if item_id:
-                        seen.add(item_id)
+                    prev = merged[overlap]
+                    seen.discard(str(prev.get("id") or ""))
+                    kept = dict(item)
+                    # Hub 补漏只换更长正文，id/thread 仍用账本，避免前端按会话名过滤时整条丢掉。
+                    if index >= local_n and overlap < local_n:
+                        if prev.get("id"):
+                            kept["id"] = prev["id"]
+                        if prev.get("thread"):
+                            kept["thread"] = prev["thread"]
+                    merged[overlap] = kept
+                    kept_id = str(kept.get("id") or "")
+                    if kept_id:
+                        seen.add(kept_id)
                 continue
         if item_id:
             seen.add(item_id)
         merged.append(item)
     return merged
+
+
+def _trim_chat_mail(
+    merged: list[dict[str, Any]], local: list[dict[str, Any]], limit: int,
+) -> list[dict[str, Any]]:
+    """裁窗口时账本气泡优先留下，Hub 再多也不能把本群账本挤出最后一屏。"""
+    merged = sorted(
+        merged, key=lambda item: (int(item.get("ts") or 0), str(item.get("id") or "")),
+    )
+    if len(merged) <= limit:
+        return merged
+    local_ids = {str(item.get("id") or "") for item in local if item.get("id")}
+    locals_kept = [item for item in merged if str(item.get("id") or "") in local_ids]
+    extras = [item for item in merged if str(item.get("id") or "") not in local_ids]
+    room = max(0, limit - len(locals_kept))
+    return sorted(
+        [*locals_kept, *extras[-room:]],
+        key=lambda item: (int(item.get("ts") or 0), str(item.get("id") or "")),
+    )
+
+
+def _refresh_codex_progress(session: str, pane: dict[str, Any]) -> None:
+    """Codex 干活时抽最新一条非工具 • 句，只更新处理中气泡。"""
+    if str(pane.get("agent") or "").strip().lower() != "codex":
+        return
+    pane_id = str(pane.get("pane_id") or "")
+    if not pane_id:
+        return
+    key = (session, pane_id)
+    now = time.monotonic()
+    if now - _PANE_ACTIVITY_AT.get(key, 0.0) < 3.0:
+        return
+    _PANE_ACTIVITY_AT[key] = now
+    try:
+        summary = herdr_client.pane_summary(session, pane_id, 80)
+    except Exception:
+        return
+    progress = pane_live.extract_live_progress(
+        str((summary or {}).get("summary") or ""), "codex",
+    )
+    if progress:
+        _PANE_ACTIVITY[key] = progress
+
+
+def _pane_activity_line(pane: dict[str, Any]) -> str:
+    """干活时给瀑布流一行现在在干什么，不读整屏终端。"""
+    status = str(pane.get("agent_status") or "")
+    if status == "blocked":
+        return "等你确认"
+    session = str(pane.get("session") or "")
+    pane_id = str(pane.get("pane_id") or "")
+    if str(pane.get("agent") or "").strip().lower() == "codex":
+        _refresh_codex_progress(session, pane)
+    cached = _PANE_ACTIVITY.get((session, pane_id), "").strip()
+    if cached:
+        return cached
+    title = str(
+        pane.get("terminal_title")
+        or pane.get("label")
+        or pane.get("display_name")
+        or ""
+    ).strip()
+    title = re.sub(r"\s+", " ", title)
+    if title and title.lower() not in {
+        str(pane.get("agent") or "").lower(),
+        str(pane.get("mail_name") or "").lower(),
+        "agent",
+    }:
+        if len(title) > 48:
+            title = title[:47] + "…"
+        return title
+    return "正在回复"
+
+
+def _mark_busy_chat_mail_read(session: str, pane: dict[str, Any]) -> None:
+    names = {
+        str(pane.get("mail_name") or "").strip(),
+        str(pane.get("display_name") or "").strip(),
+        str(pane.get("agent") or "").strip(),
+    }
+    for name in names:
+        if name:
+            try:
+                chat_ledger.mark_messages_read(session, name)
+            except ValueError:
+                continue
+
+
+def _finish_chat_turn(session: str, pane_id: str, message_id: str) -> None:
+    started = _PANE_TURN_STARTED.pop((session, pane_id), None)
+    if started is None:
+        return
+    elapsed = int(datetime.now(UTC).timestamp() * 1000) - started
+    if elapsed < 0:
+        elapsed = 0
+    try:
+        chat_ledger.set_message_duration(message_id, elapsed)
+    except ValueError:
+        return
+    _save_harvest_status()
 
 
 def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -> None:
@@ -5275,6 +5750,7 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
             snap = _enrich_board_identities(_herdr_runtime_snapshot())
         except Exception:
             return
+    _prune_harvest_for_snapshot(snap)
     recent: list[dict[str, Any]] = []
     try:
         recent = chat_ledger.list_messages(session, 40)
@@ -5291,9 +5767,30 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
         previous = _PANE_LAST_STATUS.get(key)
         if previous != current:
             _PANE_LAST_STATUS[key] = current
+            if current in _BUSY_CHAT_STATUSES and previous not in _BUSY_CHAT_STATUSES:
+                if key not in _PANE_TURN_STARTED:
+                    _PANE_TURN_STARTED[key] = int(datetime.now(UTC).timestamp() * 1000)
+                _mark_busy_chat_mail_read(session, pane)
             _save_harvest_status()
-        # working 也收：边写边更新同一条气泡。idle/done 仍收最终稿。
-        if current not in {"idle", "done", "working"}:
+        elif current in _BUSY_CHAT_STATUSES:
+            if key not in _PANE_TURN_STARTED:
+                _PANE_TURN_STARTED[key] = int(datetime.now(UTC).timestamp() * 1000)
+                _save_harvest_status()
+            _mark_busy_chat_mail_read(session, pane)
+        # 只收停下后的结论。working 是过程，不进瀑布流。
+        if current not in {"idle", "done"}:
+            continue
+        _PANE_ACTIVITY.pop(key, None)
+        _PANE_ACTIVITY_AT.pop(key, None)
+        # 空闲且已收过，不要反复 agent read，否则终端会一直刷新。
+        if (
+            current in {"idle", "done"}
+            and previous in {None, "idle", "done"}
+            and key in _PANE_LAST_HARVEST
+        ):
+            if key in _PANE_TURN_STARTED:
+                _PANE_TURN_STARTED.pop(key, None)
+                _save_harvest_status()
             continue
         try:
             summary = herdr_client.pane_summary(session, pane_id, 120)
@@ -5301,6 +5798,14 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
             continue
         text = _extract_harvest_text(str((summary or {}).get("summary") or ""))
         if not text:
+            if current in {"idle", "done"} and key in _PANE_TURN_STARTED:
+                _PANE_TURN_STARTED.pop(key, None)
+                _save_harvest_status()
+            continue
+        conclusion = _extract_harvest_conclusion(text)
+        if conclusion:
+            text = conclusion
+        elif _is_process_narration(text):
             continue
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
         if _PANE_LAST_HARVEST.get(key) == digest:
@@ -5308,37 +5813,64 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
         sender = str(
             pane.get("mail_name") or pane.get("display_name") or pane.get("agent") or "agent"
         )
+        live_id = _PANE_LAST_MESSAGE.get(key)
         match = next(
             (
                 row for row in reversed(recent)
-                if str(row.get("sender") or "") == sender
-                and (
-                    _same_harvest_copy(str(row.get("text") or ""), text)
-                    or _same_chat_reply(str(row.get("text") or ""), text)
-                )
+                if str(row.get("id") or "") == live_id
+                and str(row.get("sender") or "") == sender
             ),
             None,
-        )
+        ) if live_id else None
+        if match is None:
+            match = next(
+                (
+                    row for row in reversed(recent)
+                    if str(row.get("sender") or "") == sender
+                    and _same_harvest_copy(str(row.get("text") or ""), text)
+                ),
+                None,
+            )
         if match:
             old = str(match.get("text") or "")
-            if len(_normalized_chat_reply(text)) > len(_normalized_chat_reply(old)):
+            # 只改同一条结论的折行/变长。上一轮旧气泡不得被今早新结论覆盖，否则时间还是昨晚。
+            if text != old and _same_harvest_copy(old, text):
                 try:
-                    chat_ledger.replace_message_text(str(match["id"]), text)
+                    updated = chat_ledger.replace_message_text(str(match["id"]), text)
                 except ValueError:
                     continue
-                match["text"] = text
-            _PANE_LAST_HARVEST[key] = digest
-            _save_harvest_status()
-            continue
+                if updated:
+                    match["text"] = text
+                    _PANE_LAST_MESSAGE[key] = str(updated["id"])
+                    _finish_chat_turn(session, pane_id, str(updated["id"]))
+                _PANE_LAST_HARVEST[key] = digest
+                _save_harvest_status()
+                continue
+            if text == old or _same_harvest_copy(old, text):
+                _PANE_LAST_HARVEST[key] = digest
+                _finish_chat_turn(session, pane_id, str(match["id"]))
+                _save_harvest_status()
+                continue
+        duration_ms = None
+        started = _PANE_TURN_STARTED.pop(key, None)
+        if started is not None:
+            duration_ms = int(datetime.now(UTC).timestamp() * 1000) - started
+            if duration_ms < 0:
+                duration_ms = 0
         try:
-            chat_ledger.append_message(
+            saved = chat_ledger.append_message(
                 session, kind="agent", sender=sender, text=text, to=["human"],
+                duration_ms=duration_ms,
             )
         except ValueError:
+            if started is not None:
+                _PANE_TURN_STARTED[key] = started
             continue
         _PANE_LAST_HARVEST[key] = digest
+        _PANE_LAST_MESSAGE[key] = str(saved["id"])
         _save_harvest_status()
-        recent.append({"sender": sender, "text": text})
+        recent.append(saved)
+    _flush_queued_chat_mail(session, snap)
 
 
 def _harvest_all_settled(snap: dict[str, Any]) -> None:
@@ -5419,69 +5951,112 @@ async def api_chat_pane_live(websocket: WebSocket, name: str, pane_id: str):
         waiter.close()
 
 
-@app.get("/api/chat/sessions/{name}/mail")
-def api_chat_session_mail_list(name: str, limit: int = Query(80, ge=1, le=200)):
-    """群聊时间线：先读 Cockpit 账本，再补本 session 的 Agent Mail。"""
-    _validate_session_name(name)
-    _ensure_session_leader(name)
+def _session_ledger_mail(name: str, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """只读本群账本，不扫 Hub / herdr。进会话首屏用这条。"""
+    local = [
+        item
+        for item in (_ledger_chat_mail(row) for row in chat_ledger.list_messages(name, limit))
+        if item is not None
+    ]
+    thread = chat_ledger.get_thread_by_session(name)
+    return local, thread
+
+
+def _session_hub_mail(
+    name: str, local: list[dict[str, Any]], thread: dict[str, Any] | None, limit: int,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """补 Agent Mail。失败就只留账本，不挡首屏。"""
+    project_key = _chat_mail_project_key(name)
+    if not thread or not project_key:
+        return [], project_key if thread else None
     try:
-        local = [
+        mail_status = db.status()
+    except Exception:
+        return [], project_key
+    if not mail_status.get("available"):
+        return [], project_key
+    try:
+        proj = db.project_by_canonical_key(project_key)
+    except Exception:
+        return [], project_key
+    if not proj:
+        return [], project_key
+    allowed_threads = {name, str(thread["id"])}
+    allowed_senders = _session_allowed_senders(name)
+    if allowed_senders <= {"human", "humanoverseer", "overseer"}:
+        allowed_senders = None
+    else:
+        for item in local:
+            sender = str(item.get("sender") or "").strip().lower()
+            if sender:
+                allowed_senders.add(sender)
+    try:
+        hub_messages = [
             item
-            for item in (_ledger_chat_mail(row) for row in chat_ledger.list_messages(name, limit))
-            if item is not None
+            for item in (
+                _public_chat_mail(row)
+                for row in db.messages_for_canonical_project(int(proj["id"]), max(limit, 120))
+            )
+            if _hub_message_in_chat(
+                item,
+                allowed_threads=allowed_threads,
+                allowed_senders=allowed_senders,
+            )
         ]
+    except Exception:
+        return [], project_key
+    return hub_messages, project_key
+
+
+@app.get("/api/chat/sessions/{name}/mail")
+def api_chat_session_mail_list(
+    name: str,
+    limit: int = Query(80, ge=1, le=200),
+    source: str = Query("all"),
+):
+    """群聊时间线：默认先出账本；source=all 再补本 session 的 Agent Mail。"""
+    _validate_session_name(name)
+    try:
+        local, thread = _session_ledger_mail(name, limit)
     except ValueError as exc:
         raise HTTPException(500, str(exc)) from exc
+    want_hub = source != "ledger"
     hub_messages: list[dict[str, Any]] = []
-    project_key = _chat_mail_project_key(name)
-    thread = chat_ledger.get_thread_by_session(name)
-    mail_status = db.status()
-    # 未入账的 herdr 会话没有群聊 thread，禁止去扫 Hub 项目，否则会串到别的群。
-    if thread and project_key and mail_status.get("available"):
-        proj = db.project_by_canonical_key(project_key)
-        if proj:
-            allowed_threads = {name, str(thread["id"])}
-            allowed_senders = _session_allowed_senders(name)
-            if allowed_senders <= {"human", "humanoverseer", "overseer"}:
-                allowed_senders = None
-            else:
-                for item in local:
-                    sender = str(item.get("sender") or "").strip().lower()
-                    if sender:
-                        allowed_senders.add(sender)
-            hub_messages = [
-                item
-                for item in (
-                    _public_chat_mail(row)
-                    for row in db.messages_for_canonical_project(int(proj["id"]), max(limit, 120))
-                )
-                if _hub_message_in_chat(
-                    item,
-                    allowed_threads=allowed_threads,
-                    allowed_senders=allowed_senders,
-                )
-            ]
-    merged = _merge_chat_timeline(local, hub_messages)
-    merged.sort(key=lambda item: (int(item.get("ts") or 0), str(item.get("id") or "")))
+    project_key: str | None = None
+    if want_hub:
+        hub_messages, project_key = _session_hub_mail(name, local, thread, limit)
+    merged = _merge_chat_timeline(local, hub_messages) if hub_messages else local
+    merged = _trim_chat_mail(merged, local, limit)
+    # 对外一律用 herdr 会话名。Hub 里可能是 th_* / 空 thread，前端按会话过滤会整条丢掉。
+    messages = []
+    for item in merged:
+        row = dict(item)
+        row["thread"] = name
+        messages.append(row)
     return {
-        "messages": merged[-limit:],
+        "messages": messages,
         "project": project_key if thread else None,
         "thread": name,
         "ungrouped": thread is None,
+        "source": "all" if want_hub else "ledger",
     }
 
 
-def _ensure_session_leader(session: str) -> dict[str, str]:
+def _ensure_session_leader(
+    session: str, snapshot: dict[str, Any] | None = None,
+) -> dict[str, str]:
     """把当前群第一个有花名的 agent 记为 Leader，供 mail-send --to leader 解析。"""
     found = chat_roster.get_session_leader(session)
     stored = str(found.get("leader_mail_name") or "").strip()
     stored_agent = str(found.get("leader_agent") or "").strip()
     if stored and not _leftover_mail_name(stored, stored_agent or stored):
         return found
-    try:
-        snap = _enrich_board_identities(_herdr_runtime_snapshot())
-    except Exception:
-        return found
+    snap = snapshot
+    if snap is None:
+        try:
+            snap = _enrich_board_identities(_herdr_runtime_snapshot())
+        except Exception:
+            return found
     for pane in snap.get("panes") or []:
         if not isinstance(pane, dict) or pane.get("session") != session or not pane.get("agent"):
             continue
@@ -5520,15 +6095,22 @@ def _pane_mail_aliases(
     display = str(pane.get("display_name") or "").strip()
     agent = str(pane.get("agent") or "").strip()
     tail = str(pane.get("pane_id") or "").replace("%", "")[-2:]
-    names = {mail, display}
-    if agent and tail:
-        names.add(f"{agent}-{tail}")
-    flower = _flower_for_agent(session, agent) if agent else None
     same = [
         item for item in panes
         if str(item.get("agent") or "").lower() == agent.lower()
     ]
-    if flower and (mail == flower or len(same) == 1):
+    unique = len(same) == 1
+    names: set[str] = set()
+    for item in (mail, display):
+        if not item:
+            continue
+        if agent and _leftover_mail_name(item, agent) and not unique:
+            continue
+        names.add(item)
+    if agent and tail:
+        names.add(f"{agent}-{tail}")
+    flower = _flower_for_agent(session, agent) if agent else None
+    if flower and (mail == flower or unique):
         names.add(flower)
     return {item for item in names if item}
 
@@ -5555,7 +6137,10 @@ def _match_chat_mail_dest(
     if dest in aliases or lowered in {item.lower() for item in aliases}:
         match = mail or display or dest
         if agent and _leftover_mail_name(match, agent):
-            match = flower or match
+            if flower and (mail == flower or len(same) == 1):
+                match = flower
+            else:
+                match = dest
         return match
     if leftover and len(same) == 1:
         if mail and not _leftover_mail_name(mail, agent):
@@ -5585,16 +6170,21 @@ def _resolve_chat_mail_recipients(session: str, recipients: list[str]) -> list[s
     return resolved
 
 
-def _notify_chat_recipients(session: str, recipients: list[str], text: str) -> None:
-    """叫醒对应 pane：Mail 是账本，这里只推一句领取提示 + 摘要。"""
-    names = {item for item in recipients if item}
-    if not names:
-        return
+_BUSY_CHAT_STATUSES = frozenset({"working", "blocked"})
+
+
+def _chat_delivery_mode(value: Any) -> str:
     try:
-        snap = _enrich_board_identities(_herdr_runtime_snapshot())
-    except Exception:
-        return
-    panes = _session_agent_panes(snap, session)
+        return chat_ledger.normalize_delivery(value)
+    except ValueError:
+        return "interrupt"
+
+
+def _pane_is_busy(pane: dict[str, Any]) -> bool:
+    return str(pane.get("agent_status") or "") in _BUSY_CHAT_STATUSES
+
+
+def _chat_notify_hint(session: str, text: str, delivery: str) -> str:
     leader = _ensure_session_leader(session)
     leader_name = leader.get("leader_mail_name") or ""
     leader_line = (
@@ -5603,13 +6193,48 @@ def _notify_chat_recipients(session: str, recipients: list[str], text: str) -> N
         if leader_name
         else "\n"
     )
-    hint = (
-        "Boss 在群聊给你发了消息。请直接做下面的任务，结论写在终端，群聊会收进瀑布流。\n"
-        + leader_line
-        + text[:500]
-    )
+    if delivery == "queue":
+        opener = (
+            "Boss 在群聊给你排了一条消息。请做完手头事后再处理下面这条，"
+            "结论写在终端，群聊会收进瀑布流。\n"
+        )
+    else:
+        opener = (
+            "Boss 在群聊给你发了消息。请直接做下面的任务，结论写在终端，群聊会收进瀑布流。\n"
+        )
+    return opener + leader_line + text[:500]
+
+
+def _notify_chat_recipients(
+    session: str,
+    recipients: list[str],
+    text: str,
+    delivery: str = "interrupt",
+) -> list[str]:
+    """叫醒对应 pane。打断立刻投；排队只叫醒空闲成员，忙的等 harvest 再投。"""
+    names = {item for item in recipients if item}
+    if not names:
+        return []
+    try:
+        snap = _enrich_board_identities(_herdr_runtime_snapshot())
+    except Exception:
+        return []
+    panes = _session_agent_panes(snap, session)
+    mode = _chat_delivery_mode(delivery)
+    hint = _chat_notify_hint(session, text, mode)
+    notified: list[str] = []
     for pane in panes:
-        if not any(_match_chat_mail_dest(dest, pane, panes, session) for dest in names):
+        dest = next(
+            (
+                hit
+                for item in names
+                if (hit := _match_chat_mail_dest(item, pane, panes, session))
+            ),
+            None,
+        )
+        if not dest:
+            continue
+        if mode == "queue" and _pane_is_busy(pane):
             continue
         pane_id = pane.get("pane_id")
         if not pane_id:
@@ -5618,6 +6243,63 @@ def _notify_chat_recipients(session: str, recipients: list[str], text: str) -> N
             herdr_client.pane_send(session, str(pane_id), hint, "prompt")
         except Exception:
             continue
+        notified.append(dest)
+    return notified
+
+
+def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
+    """成员从忙碌回到空闲后，把还没叫醒的排队消息投进去。"""
+    try:
+        rows = chat_ledger.list_messages(session, 80)
+    except ValueError:
+        return
+    panes = _session_agent_panes(snap, session)
+    if not panes:
+        return
+    pending = [
+        row for row in rows
+        if str(row.get("kind") or "") == "me"
+        and _chat_delivery_mode(row.get("delivery")) == "queue"
+        and str(row.get("text") or "").strip()
+    ]
+    if not pending:
+        return
+    for pane in panes:
+        if _pane_is_busy(pane):
+            continue
+        pane_id = str(pane.get("pane_id") or "")
+        if not pane_id:
+            continue
+        for row in pending:
+            recipients = [str(item) for item in (row.get("to") or []) if item]
+            dest = next(
+                (
+                    hit
+                    for item in recipients
+                    if (hit := _match_chat_mail_dest(item, pane, panes, session))
+                ),
+                None,
+            )
+            if not dest:
+                continue
+            already = {
+                str(item)
+                for item in (row.get("notified_to") or [])
+                if isinstance(item, str)
+            }
+            if dest in already:
+                continue
+            hint = _chat_notify_hint(session, str(row.get("text") or ""), "queue")
+            try:
+                herdr_client.pane_send(session, pane_id, hint, "prompt")
+            except Exception:
+                continue
+            try:
+                updated = chat_ledger.mark_message_notified(str(row["id"]), [dest])
+            except ValueError:
+                continue
+            if updated:
+                row["notified_to"] = list(updated.get("notified_to") or [])
 
 
 @app.post("/api/chat/sessions/{name}/mail")
@@ -5627,6 +6309,10 @@ def api_chat_session_mail(name: str, req: ChatMailReq):
     text = req.text.strip()
     if not text:
         raise HTTPException(400, "正文为空")
+    try:
+        delivery = chat_ledger.normalize_delivery(req.delivery)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     recipients = [item.strip() for item in req.to if isinstance(item, str) and item.strip()]
     if req.ledger_only:
         if not recipients:
@@ -5634,6 +6320,7 @@ def api_chat_session_mail(name: str, req: ChatMailReq):
         try:
             saved = chat_ledger.append_message(
                 name, kind="me", sender="human", text=text, to=recipients,
+                delivery=delivery,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -5651,6 +6338,7 @@ def api_chat_session_mail(name: str, req: ChatMailReq):
     try:
         saved = chat_ledger.append_message(
             name, kind="me", sender="human", text=text, to=recipients,
+            delivery=delivery,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -5701,7 +6389,14 @@ def api_chat_session_mail(name: str, req: ChatMailReq):
                             pass
                 except Exception as exc:
                     mail_error = str(exc)
-                _notify_chat_recipients(name, dest, text)
+                notified = _notify_chat_recipients(name, dest, text, delivery)
+                if notified:
+                    try:
+                        marked = chat_ledger.mark_message_notified(str(saved["id"]), notified)
+                    except ValueError:
+                        marked = None
+                    if marked:
+                        saved = marked
             except Exception as exc:
                 mail_error = str(exc)
     return {
@@ -6106,7 +6801,7 @@ def api_files_list(path: str = ""):
 
 @app.get("/api/files/search")
 def api_files_search(path: str, q: str, limit: int = 100):
-    """在指定白名单目录及其子目录中按文件名搜索。"""
+    """在指定白名单目录及其子目录中按文件名或相对路径搜索。"""
     try:
         return files.search_files(path, q, limit)
     except ValueError as e:
@@ -6949,6 +7644,7 @@ def api_herdr_pane_delete(session: str, pane_id: str):
     _validate_pane_id(pane_id)
     result = herdr_client.close_pane(session, pane_id)
     if result.get("closed"):
+        _forget_closed_pane(session, pane_id)
         project_hint = None
         try:
             state = _mail_project_state(session)

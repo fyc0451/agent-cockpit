@@ -30,10 +30,19 @@ export interface HerdrPane {
   mail_name: string
   tab_id: string
   focused: boolean
+  turn_started_ms?: number
+  activity?: string
+  unread?: number
+}
+
+export interface SessionLeader {
+  mail_name: string
+  agent?: string
 }
 
 export interface HerdrSnapshot {
   panes: HerdrPane[]
+  session_leaders?: Record<string, SessionLeader>
 }
 
 export interface PaneSummary {
@@ -115,8 +124,13 @@ function reqStr(v: unknown, field: string): string {
   return v
 }
 
+function optNonNegInt(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined
+}
+
 function assertPane(raw: unknown, ctx: string): HerdrPane {
   if (!isObj(raw)) fail(ctx)
+  const activity = optStr(raw.activity)
   return {
     pane_id: reqStr(raw.pane_id, `${ctx}.pane_id`),
     session: optStr(raw.session),
@@ -128,13 +142,30 @@ function assertPane(raw: unknown, ctx: string): HerdrPane {
     mail_name: optStr(raw.mail_name),
     tab_id: optStr(raw.tab_id),
     focused: raw.focused === true,
+    turn_started_ms: optNonNegInt(raw.turn_started_ms),
+    activity: activity || undefined,
+    unread: optNonNegInt(raw.unread),
   }
+}
+
+function assertSessionLeaders(raw: unknown): Record<string, SessionLeader> | undefined {
+  if (!isObj(raw)) return undefined
+  const out: Record<string, SessionLeader> = {}
+  for (const [session, row] of Object.entries(raw)) {
+    if (!session || !isObj(row)) continue
+    const mail = optStr(row.mail_name).trim()
+    if (!mail) continue
+    const agent = optStr(row.agent).trim()
+    out[session] = agent ? { mail_name: mail, agent } : { mail_name: mail }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 function assertSnapshot(raw: unknown): HerdrSnapshot {
   if (!isObj(raw) || !Array.isArray(raw.panes)) fail('snapshot.panes')
   return {
     panes: raw.panes.map((p, i) => assertPane(p, `panes[${i}]`)),
+    session_leaders: assertSessionLeaders(raw.session_leaders),
   }
 }
 
@@ -345,6 +376,25 @@ export async function deleteHerdrSession(name: string): Promise<unknown> {
 /** 会话内添加成员 = session 内新开 tab 启动一个 agent */
 export function startAgent(req: StartAgentRequest): Promise<StartAgentResult> {
   return legacyPost('/api/herdr/start', req)
+}
+
+/** 关闭群成员 pane；成功后花名/身份一并清掉。 */
+export async function closePane(session: string, paneId: string): Promise<unknown> {
+  const raw = await legacyDelete(
+    `/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}`,
+  )
+  assertHerdrMutation(raw, '关闭成员')
+  return raw
+}
+
+/** 原位重启群成员；不清花名，只打断当前任务再拉起来。 */
+export async function restartPane(session: string, paneId: string): Promise<unknown> {
+  const raw = await legacyPost(
+    `/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/restart`,
+    {},
+  )
+  assertHerdrMutation(raw, '重启成员')
+  return raw
 }
 
 /** 打开指定群聊的 Herdr TUI；命令和工作目录均由后端固定。 */

@@ -84,6 +84,7 @@ export async function searchSessionFiles(session: string, q: string): Promise<Se
         path: p,
         name: typeof r.name === 'string' ? r.name : p.split('/').pop() || p,
         type: typeof r.type === 'string' ? r.type : 'file',
+        relative: typeof r.relative === 'string' && r.relative ? r.relative : undefined,
       },
     ]
   })
@@ -137,15 +138,22 @@ export async function uploadChatFile(
   }
 }
 
+export type ChatDelivery = 'interrupt' | 'queue'
+
 export async function sendSessionMail(
   session: string,
   text: string,
   to: string[],
-  options?: { ledgerOnly?: boolean },
+  options?: { ledgerOnly?: boolean; delivery?: ChatDelivery },
 ): Promise<{ mail_error: string | null }> {
   const raw = await legacyPost(
     `/api/chat/sessions/${encodeURIComponent(session)}/mail`,
-    { text, to, ledger_only: options?.ledgerOnly === true },
+    {
+      text,
+      to,
+      ledger_only: options?.ledgerOnly === true,
+      delivery: options?.delivery === 'queue' ? 'queue' : 'interrupt',
+    },
   )
   if (!isObj(raw)) return { mail_error: null }
   return {
@@ -153,11 +161,16 @@ export async function sendSessionMail(
   }
 }
 
-/** 终端提交进瀑布流：只写账本，不转发 Hub、不叫醒 pane。 */
-export async function recordTerminalLine(session: string, text: string): Promise<void> {
+/** 群成员 agent pane 上的终端输入进瀑布流；空 to 不写。只写账本，不转发 Hub。 */
+export async function recordTerminalLine(
+  session: string,
+  text: string,
+  to: string,
+): Promise<void> {
   const body = text.trim()
-  if (!body) return
-  await sendSessionMail(session, body, ['终端'], { ledgerOnly: true })
+  const dest = to.trim()
+  if (!body || !dest || dest === '终端') return
+  await sendSessionMail(session, body, [dest], { ledgerOnly: true })
 }
 
 export interface SessionMailMessage {
@@ -168,14 +181,37 @@ export interface SessionMailMessage {
   to: string[]
   thread: string
   ts: number
+  delivery?: ChatDelivery
+  notified_to?: string[]
+  read_by?: string[]
+  duration_ms?: number
 }
 
 export function mailBelongsToSession(thread: string, session: string): boolean {
   return Boolean(session && thread && thread === session)
 }
 
-export async function fetchSessionMail(session: string): Promise<SessionMailMessage[]> {
-  const raw = await legacyGet(`/api/chat/sessions/${encodeURIComponent(session)}/mail`)
+/** 第二次 /mail 或缺 thread 的 Hub 信不得把账本里已有的 msg_* 擦掉。 */
+export function preferLedgerMail(
+  current: SessionMailMessage[] | undefined,
+  incoming: SessionMailMessage[],
+): SessionMailMessage[] {
+  if (!current?.length) return incoming
+  const incomingIds = new Set(incoming.map((row) => row.id))
+  const kept = current.filter((row) => row.id.startsWith('msg_') && !incomingIds.has(row.id))
+  if (kept.length === 0) return incoming
+  return [...incoming, ...kept].sort((a, b) => {
+    if (a.ts !== b.ts) return a.ts - b.ts
+    return a.id.localeCompare(b.id)
+  })
+}
+
+export async function fetchSessionMail(
+  session: string,
+  source: 'ledger' | 'all' = 'all',
+): Promise<SessionMailMessage[]> {
+  const query = source === 'ledger' ? '?source=ledger' : ''
+  const raw = await legacyGet(`/api/chat/sessions/${encodeURIComponent(session)}/mail${query}`)
   if (!isObj(raw)) fail('mail')
   const rows = Array.isArray(raw.messages) ? raw.messages : []
   return rows.flatMap((row) => {
@@ -187,16 +223,31 @@ export async function fetchSessionMail(session: string): Promise<SessionMailMess
       : []
     const thread = typeof row.thread === 'string' ? row.thread : ''
     if (!mailBelongsToSession(thread, session)) return []
-    return [
-      {
-        id,
-        sender: typeof row.sender === 'string' ? row.sender : '',
-        program: typeof row.program === 'string' ? row.program : '',
-        text: typeof row.text === 'string' ? row.text : '',
-        to,
-        thread,
-        ts: typeof row.ts === 'number' && Number.isFinite(row.ts) ? row.ts : 0,
-      },
-    ]
+    const names = (value: unknown): string[] | undefined => {
+      if (!Array.isArray(value)) return undefined
+      const items = value.filter((item): item is string => typeof item === 'string' && item !== '')
+      return items.length > 0 ? items : undefined
+    }
+    const duration = row.duration_ms
+    const notified = names(row.notified_to)
+    const read = names(row.read_by)
+    const message: SessionMailMessage = {
+      id,
+      sender: typeof row.sender === 'string' ? row.sender : '',
+      program: typeof row.program === 'string' ? row.program : '',
+      text: typeof row.text === 'string' ? row.text : '',
+      to,
+      thread,
+      ts: typeof row.ts === 'number' && Number.isFinite(row.ts) ? row.ts : 0,
+    }
+    if (row.delivery === 'queue' || row.delivery === 'interrupt') {
+      message.delivery = row.delivery
+    }
+    if (notified) message.notified_to = notified
+    if (read) message.read_by = read
+    if (typeof duration === 'number' && Number.isFinite(duration) && duration >= 0) {
+      message.duration_ms = duration
+    }
+    return [message]
   })
 }

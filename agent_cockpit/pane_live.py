@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+import unicodedata
 from typing import Any, Awaitable, Callable
 
 from . import herdr_client
@@ -18,6 +20,142 @@ EVENT_WAIT_S = 2.0
 LIVE_LINES = 200
 JsonSender = Callable[[dict[str, Any]], Awaitable[None]]
 ClosedFn = Callable[[], bool]
+_LIST_OR_HEADING_RE = re.compile(r"^(?:[-*•●□]|\d+[、)]|\d+\.(?:\s|$)|#{1,6}\s|\|)")
+_CURRENCY_ONLY_RE = re.compile(r"[¥$€]\d[\d.,]*")
+_NARROW_WRAP_MAX = 56
+
+
+def display_width(text: str) -> int:
+    width = 0
+    for char in text:
+        if unicodedata.east_asian_width(char) in {"W", "F"}:
+            width += 2
+        elif char == "\t":
+            width += 8
+        else:
+            width += 1
+    return width
+
+
+def _unwrap_glue(left: str, right: str) -> str:
+    if not left or not right:
+        return f"{left}{right}"
+    prev, nxt = left[-1], right[0]
+    if prev in "-/_" and nxt.isalnum():
+        return f"{left}{right}"
+    if (prev.isascii() and prev.isalnum()) or (nxt.isascii() and nxt.isalnum()):
+        return f"{left} {right}"
+    return f"{left}{right}"
+
+
+def _typical_wrap_col(widths: list[int]) -> int:
+    clustered = [width for width in widths if 16 <= width <= _NARROW_WRAP_MAX]
+    if len(clustered) < 3:
+        return 0
+    peak = max(clustered)
+    near = [width for width in clustered if peak - 4 <= width <= peak]
+    return peak if len(near) >= 3 else 0
+
+
+def unwrap_terminal_wrap(text: str, *, short_limit: int = 20) -> str:
+    """把分屏硬折行拼回句子，不碰列表、标题和空行。"""
+    if not text:
+        return text
+    raw_lines = text.splitlines()
+    wrap_col = _typical_wrap_col([
+        display_width(line.strip())
+        for line in raw_lines
+        if line.strip() and not _LIST_OR_HEADING_RE.match(line.strip())
+        and not herdr_client._is_box_table_row(line.strip())
+        and not herdr_client._is_box_table_rule(line.strip())
+    ])
+
+    def is_short(stripped: str) -> bool:
+        if short_limit and len(stripped) <= short_limit:
+            return True
+        return bool(wrap_col) and display_width(stripped) <= wrap_col
+
+    out: list[str] = []
+    buf = ""
+
+    def flush() -> None:
+        nonlocal buf
+        if buf:
+            out.append(buf)
+            buf = ""
+
+    for raw in raw_lines:
+        stripped = raw.strip()
+        if not stripped:
+            flush()
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        if re.match(r"^(?:error:|\(failed\)|gpt-)", stripped, re.I):
+            flush()
+            continue
+        if _LIST_OR_HEADING_RE.match(stripped):
+            flush()
+            out.append(raw.rstrip())
+            continue
+        if herdr_client._is_box_table_row(stripped) or herdr_client._is_box_table_rule(stripped):
+            flush()
+            out.append(raw.rstrip())
+            continue
+        short = is_short(stripped)
+        if short and out and re.match(r"^\s*(?:[-*•●□]|\d+[、)]|\d+\.(?:\s|$))", out[-1]):
+            out[-1] = _unwrap_glue(out[-1].rstrip(), stripped)
+            continue
+        if buf and short:
+            if _CURRENCY_ONLY_RE.fullmatch(buf):
+                flush()
+            else:
+                buf = _unwrap_glue(buf, stripped)
+                if stripped.endswith(("。", "！", "？", ".", "!", "?")):
+                    flush()
+                continue
+        flush()
+        if short:
+            buf = stripped
+        else:
+            out.append(raw.rstrip())
+    flush()
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+_CODEX_TOOL_PREFIXES = (
+    "Waited for",
+    "Waiting for",
+    "Ran ",
+    "Explored",
+    "Planning",
+    "Edited",
+    "Updated Plan",
+    "Working",
+    "Fixing",
+    "<thinking>",
+)
+
+
+def extract_live_progress(text: str, agent_kind: str = "") -> str:
+    """按 agent 抽一条给人看的进度。Codex 只留非工具 • 句，不进账本。"""
+    if (agent_kind or "").strip().lower() != "codex":
+        return ""
+    last = ""
+    for raw in unwrap_terminal_wrap(text).splitlines():
+        stripped = raw.strip()
+        if not stripped.startswith("•"):
+            continue
+        body = stripped[1:].lstrip()
+        if not body or any(body.startswith(prefix) for prefix in _CODEX_TOOL_PREFIXES):
+            continue
+        last = body
+    last = re.sub(r"\s+", " ", last).strip()
+    if len(last) < 12:
+        return ""
+    if len(last) > 160:
+        return last[:159] + "…"
+    return last
 
 
 def extract_pane_text(raw: dict[str, Any] | None) -> str:
@@ -38,7 +176,7 @@ def extract_pane_text(raw: dict[str, Any] | None) -> str:
                     break
     text = str(output or "")
     if text.strip():
-        return text
+        return unwrap_terminal_wrap(text, short_limit=0)
     error = raw.get("error")
     return str(error) if isinstance(error, str) else ""
 
@@ -66,7 +204,7 @@ def snapshot_from_envelope(envelope: dict[str, Any] | None) -> dict[str, Any] | 
     text = read.get("text")
     if not isinstance(text, str) or not text:
         return None
-    return {"type": "snapshot", "output": text, "error": None}
+    return {"type": "snapshot", "output": unwrap_terminal_wrap(text, short_limit=0), "error": None}
 
 
 def read_snapshot(session: str, pane_id: str, lines: int = LIVE_LINES) -> dict[str, Any]:

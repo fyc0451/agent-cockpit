@@ -110,26 +110,31 @@ def get_pane_mail_name(session: str, pane_id: str) -> str:
     return name
 
 
-def set_pane_mail_name(session: str, pane_id: str, mail_name: str) -> None:
+def list_pane_mail_names(session: str) -> dict[str, str]:
     path = _pane_names_path(session)
-    if path is None or not isinstance(pane_id, str) or not pane_id:
-        return
-    name = mail_name.strip()
-    if not name:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if path is None:
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            data = {}
     except (OSError, UnicodeError, ValueError):
-        data = {}
-    panes = data.get("panes")
-    if not isinstance(panes, dict):
-        panes = {}
-    if panes.get(pane_id) == name:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    names = data.get("panes")
+    if not isinstance(names, dict):
+        return {}
+    return {
+        str(pane_id): str(name).strip()
+        for pane_id, name in names.items()
+        if isinstance(pane_id, str) and pane_id and str(name).strip()
+    }
+
+
+def _write_pane_mail_names(session: str, panes: dict[str, Any]) -> None:
+    path = _pane_names_path(session)
+    if path is None:
         return
-    panes[pane_id] = name
+    path.parent.mkdir(parents=True, exist_ok=True)
     row = {"version": 1, "session": session, "panes": panes}
     fd, tmp = tempfile.mkstemp(prefix=".panes.", suffix=".tmp", dir=str(path.parent))
     try:
@@ -147,3 +152,46 @@ def set_pane_mail_name(session: str, pane_id: str, mail_name: str) -> None:
         except OSError:
             pass
         raise
+
+
+def set_pane_mail_name(session: str, pane_id: str, mail_name: str) -> None:
+    path = _pane_names_path(session)
+    if path is None or not isinstance(pane_id, str) or not pane_id:
+        return
+    name = mail_name.strip()
+    if not name:
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, UnicodeError, ValueError):
+        data = {}
+    panes = data.get("panes")
+    if not isinstance(panes, dict):
+        panes = {}
+    if panes.get(pane_id) == name:
+        return
+    for other_id, existing in panes.items():
+        if other_id != pane_id and str(existing).strip() == name:
+            return
+    panes[pane_id] = name
+    _write_pane_mail_names(session, panes)
+
+
+def clear_pane_mail_name(session: str, pane_id: str) -> bool:
+    path = _pane_names_path(session)
+    if path is None or not isinstance(pane_id, str) or not pane_id:
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+    except (OSError, UnicodeError, FileNotFoundError, ValueError):
+        return False
+    panes = data.get("panes")
+    if not isinstance(panes, dict) or pane_id not in panes:
+        return False
+    panes.pop(pane_id, None)
+    _write_pane_mail_names(session, panes)
+    return True

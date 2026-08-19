@@ -1,6 +1,7 @@
 // 群聊工作台纯逻辑单测：leader 持久化、@ 解析（含 @leader 别名）、摘要 diff、会话归属。
 
-import { mailBelongsToSession } from '../api/chatSession'
+import { vi } from 'vitest'
+import { fetchSessionMail, mailBelongsToSession, preferLedgerMail } from '../api/chatSession'
 import { isAlreadyStoppedError } from '../api/legacyHerdr'
 import { ApiError } from '../api/client'
 import { computeColumns, shouldOverlayDetails } from '../features/shell/columns'
@@ -13,11 +14,20 @@ import {
   isHumanSender,
   isMemberRosterEvent,
   mailCoversLocalMe,
+  formatChatClock,
   mailTimestamp,
   mailToEntries,
+  chatDeliveryLabel,
+  chatReceiptLabel,
+  chatReceiptOf,
+  formatChatDuration,
+  liveTurnLine,
+  normalizeChatDelivery,
+  unreadCountLabel,
   diffSummaryLines,
   groupByLedger,
   leftoverMemberName,
+  focusedMemberRecipient,
   loadComposerDraft,
   saveComposerDraft,
   nextSessionAfterRemoval,
@@ -39,6 +49,8 @@ import {
   reflowMessageText,
   restoreBoxTables,
   splitInlineMarks,
+  splitFilePaths,
+  joinBrokenFilePaths,
   stripAgentTuiFooter,
   stripMailMeta,
   agentReplyTargets,
@@ -170,6 +182,25 @@ describe('memberName / membersOfSession', () => {
     const names = membersOfSession(snap, 's1').map((m) => m.name)
     expect(names).toEqual(['小克', '小克·'])
   })
+
+  it('只有焦点正好落在本群 agent pane 才记终端输入', () => {
+    const memberPane = pane({
+      pane_id: 'w1:p1',
+      agent: 'grok',
+      mail_name: 'BrownDesert',
+      focused: true,
+    })
+    expect(focusedMemberRecipient({ panes: [memberPane] }, 's1')).toBe('BrownDesert')
+    expect(focusedMemberRecipient({
+      panes: [pane({ pane_id: 'w1:p3', agent: '', focused: true })],
+    }, 's1')).toBeNull()
+    expect(focusedMemberRecipient({
+      panes: [pane({ ...memberPane, focused: false })],
+    }, 's1')).toBeNull()
+    expect(focusedMemberRecipient({
+      panes: [memberPane, pane({ pane_id: 'w1:p2', session: 'other', agent: 'claude', focused: true })],
+    }, 's1')).toBe('BrownDesert')
+  })
 })
 
 describe('withLeader', () => {
@@ -184,6 +215,23 @@ describe('withLeader', () => {
     // leader pane 离开 → 重算为现存第一个
     const third = withLeader('sA', [b])
     expect(third.find((m) => m.isLeader)?.paneId).toBe('%2')
+  })
+
+  it('登记花名压过 localStorage 里的第一个成员', () => {
+    const first = member({
+      paneId: 'w1:p3', name: 'TurquoiseBay', mailName: 'TurquoiseBay', kind: 'grok',
+    })
+    const registered = member({
+      paneId: 'w1:p2', name: 'DarkGlacier', mailName: 'DarkGlacier', kind: 'codex',
+    })
+    withLeader('pitapat-video-platform-1', [first, registered])
+    const next = withLeader(
+      'pitapat-video-platform-1',
+      [first, registered],
+      { mail_name: 'DarkGlacier' },
+    )
+    expect(next.find((m) => m.isLeader)?.paneId).toBe('w1:p2')
+    expect(next.find((m) => m.name === 'TurquoiseBay')?.isLeader).toBe(false)
   })
 })
 
@@ -231,6 +279,18 @@ describe('parseMentionTargets', () => {
       paneId: 'w1:p3', name: 'codex-main', kind: 'codex', mailName: 'codex-main',
     })
     expect(parseMentionTargets('@codex 做15轮', [leader, leftover])).toEqual([leftover])
+  })
+
+  it('同群两个 grok 时 @grok-p4 只打新 pane，不打老花名', () => {
+    const oldGrok = member({
+      paneId: 'w1:p3', name: 'TurquoiseBay', kind: 'grok', mailName: 'TurquoiseBay',
+    })
+    const newGrok = member({
+      paneId: 'w1:p4', name: 'grok-p4', kind: 'grok', mailName: '',
+    })
+    expect(parseMentionTargets('@grok-p4 看下', [oldGrok, newGrok])).toEqual([newGrok])
+    expect(parseMentionTargets('@TurquoiseBay 看下', [oldGrok, newGrok])).toEqual([oldGrok])
+    expect(parseMentionTargets('@grok 看下', [oldGrok, newGrok])).toEqual([])
   })
 })
 
@@ -377,6 +437,36 @@ describe('reflow and fold long waterfall text', () => {
       { type: 'text', text: '只吃 ' },
       { type: 'code', text: '${U182_PACK.role_core}' },
     ])
+    expect(joinBrokenFilePaths(
+      '完整报告见 tools/m2her-verify/handoffs/2026-08-19-app97-\n'
+      + '  case-cf037f65d2704122b195295073564a1a-1022/REPORT.md。',
+    )).toBe(
+      '完整报告见 tools/m2her-verify/handoffs/2026-08-19-app97-case-cf037f65d2704122b195295073564a1a-1022/REPORT.md。',
+    )
+    expect(joinBrokenFilePaths(
+      'agent-mail-tools/mail-recv --agent\n  codex --instance main',
+    )).toBe('agent-mail-tools/mail-recv --agent\n  codex --instance main')
+    expect(splitFilePaths(
+      '完整报告见 tools/m2her-verify/handoffs/2026-08-19-app97-case-cf037f65d2704122b195295073564a1a-1022/REPORT.md。',
+    )).toEqual([
+      { type: 'text', text: '完整报告见 ' },
+      { type: 'path', text: 'tools/m2her-verify/handoffs/2026-08-19-app97-case-cf037f65d2704122b195295073564a1a-1022/REPORT.md' },
+      { type: 'text', text: '。' },
+    ])
+    expect(splitInlineMarks(
+      '完整报告见 tools/m2her-verify/handoffs/foo/REPORT.md。',
+    )).toEqual([
+      { type: 'text', text: '完整报告见 ' },
+      { type: 'path', text: 'tools/m2her-verify/handoffs/foo/REPORT.md' },
+      { type: 'text', text: '。' },
+    ])
+    expect(splitFilePaths('GET /v1/video-generations/health')).toEqual([
+      { type: 'text', text: 'GET /v1/video-generations/health' },
+    ])
+    expect(reflowMessageText(
+      '结论已打印到终端，完整报告见 tools/m2her-verify/handoffs/2026-08-19-app97-\n'
+      + '  case-cf037f65d2704122b195295073564a1a-1022/REPORT.md。',
+    )).toContain('tools/m2her-verify/handoffs/2026-08-19-app97-case-cf037f65d2704122b195295073564a1a-1022/REPORT.md')
     const boxed = restoreBoxTables(
       '┌──┬──┐\n│ 产物 │ 节点 │\n├──┼──┤\n│ 角色核心 │ C007 │\n└──┴──┘',
     )
@@ -521,6 +611,8 @@ describe('launch / recall helpers', () => {
 describe('mailToEntries', () => {
   it('human 是我，agent 各成一条，不合并成一条 pane 记录', () => {
     expect(mailTimestamp(1_700_000_000)).toBe(1_700_000_000_000)
+    expect(formatChatClock(Date.parse('2026-08-19T02:10:00+08:00'), Date.parse('2026-08-19T11:00:00+08:00'))).toBe('02:10')
+    expect(formatChatClock(Date.parse('2026-08-19T02:10:00+08:00'), Date.parse('2026-08-20T09:00:00+08:00'))).toBe('08/19 02:10')
     expect(isHumanSender('human')).toBe(true)
     const entries = mailToEntries(
       [
@@ -531,7 +623,51 @@ describe('mailToEntries', () => {
       [member({ name: 'kimi', mailName: 'kimi', kind: 'kimi', paneId: '%2', isLeader: true })],
     )
     expect(entries).toHaveLength(3)
-    expect(entries[0]).toMatchObject({ kind: 'me', text: '去改瀑布流' })
+    expect(entries[0]).toMatchObject({ kind: 'me', text: '去改瀑布流', delivery: undefined })
+    expect(chatDeliveryLabel(undefined)).toBeNull()
+    expect(normalizeChatDelivery('queue')).toBe('queue')
+    expect(mailToEntries(
+      [{ id: 11, sender: 'human', program: '', text: '先停下来', to: ['kimi'], ts: 105, delivery: 'interrupt' }],
+      [member({ name: 'kimi', mailName: 'kimi', kind: 'kimi', paneId: '%2', isLeader: true })],
+    )[0]).toMatchObject({ kind: 'me', delivery: 'interrupt' })
+    expect(mailToEntries(
+      [{ id: 12, sender: 'human', program: '', text: '忙完再看', to: ['kimi'], ts: 106, delivery: 'queue' }],
+      [member({ name: 'kimi', mailName: 'kimi', kind: 'kimi', paneId: '%2', isLeader: true })],
+    )[0]).toMatchObject({ kind: 'me', delivery: 'queue', receipt: 'queued' })
+    expect(chatReceiptOf(['kimi'])).toBeUndefined()
+    expect(chatReceiptOf(['kimi'], undefined, undefined, 'queue')).toBe('queued')
+    expect(chatReceiptOf(['kimi'], ['kimi'])).toBe('sent')
+    expect(chatReceiptOf(['kimi'], ['kimi'], ['kimi'])).toBe('read')
+    expect(chatReceiptLabel('read')).toBe('已读')
+    expect(formatChatDuration(12_500)).toBe('13秒')
+    expect(formatChatDuration(125_000)).toBe('2分5秒')
+    expect(unreadCountLabel(3)).toBe('3')
+    expect(unreadCountLabel(0)).toBeNull()
+    expect(mailToEntries(
+      [{
+        id: 13, sender: 'human', program: '', text: '已叫醒',
+        to: ['kimi'], ts: 107, notified_to: ['kimi'],
+      }],
+      [member({ name: 'kimi', mailName: 'kimi', kind: 'kimi', paneId: '%2' })],
+    )[0]).toMatchObject({ receipt: 'sent' })
+    expect(mailToEntries(
+      [{
+        id: 14, sender: 'human', program: '', text: '已读这条',
+        to: ['kimi'], ts: 108, notified_to: ['kimi'], read_by: ['kimi'],
+      }],
+      [member({ name: 'kimi', mailName: 'kimi', kind: 'kimi', paneId: '%2' })],
+    )[0]).toMatchObject({ receipt: 'read' })
+    expect(mailToEntries(
+      [{
+        id: 15, sender: 'kimi', program: 'kimi', text: '改完了',
+        to: ['human'], ts: 109, duration_ms: 12500,
+      }],
+      [member({ name: 'kimi', mailName: 'kimi', kind: 'kimi', paneId: '%2', unread: 2 })],
+    )[0]).toMatchObject({ durationMs: 12500, unread: 2 })
+    expect(stripMailMeta(
+      '     ❯ Boss 在群聊给你排了一条消息。请做完手头事后再处理下面这条，结论写在终端，群聊会收进瀑布流。\n'
+      + '忙完再改输入框。',
+    )).toBe('忙完再改输入框。')
     expect(entries[1]).toMatchObject({ kind: 'agent', name: 'kimi', text: '好', paneId: '%2' })
     expect(entries[2]).toMatchObject({ kind: 'agent', text: '改完了' })
     expect(mailCoversLocalMe(entries, { text: '去改瀑布流' })).toBe(true)
@@ -608,23 +744,80 @@ describe('mailToEntries', () => {
     )
     expect(mapped[0]).toMatchObject({ kind: 'me', to: ['FoggyBasin'] })
     expect(mapped[1]).toMatchObject({ kind: 'agent', to: ['我'] })
+    expect(mailToEntries(
+      [{ id: 8, sender: 'human', program: '', text: 'vim', to: ['终端'], ts: 304 }],
+      members,
+    )).toEqual([])
+  })
+
+  it('fetchSessionMail ledger 走 source=ledger', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({
+        messages: [{
+          id: 'msg_1', sender: 'human', program: '', text: '先出账本',
+          to: ['BrownDesert'], thread: 'cockpit', ts: 1,
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+    const rows = await fetchSessionMail('cockpit', 'ledger')
+    expect(rows).toEqual([{
+      id: 'msg_1', sender: 'human', program: '', text: '先出账本',
+      to: ['BrownDesert'], thread: 'cockpit', ts: 1,
+    }])
+    expect(String(spy.mock.calls[0]?.[0])).toContain('/mail?source=ledger')
+    spy.mockRestore()
+  })
+
+  it('preferLedgerMail 保住账本气泡，不被缺 thread 的第二次 /mail 擦掉', () => {
+    const ledger = [{
+      id: 'msg_keep', sender: 'BrownDesert', program: 'grok',
+      text: '刷新后先出账本', to: ['human'], thread: 'cockpit', ts: 1,
+    }]
+    const wiped = [{
+      id: '88', sender: 'human', program: '',
+      text: '你的返回怎么又没了', to: ['BrownDesert'], thread: 'cockpit', ts: 2,
+    }]
+    expect(preferLedgerMail(ledger, wiped)).toEqual([
+      ledger[0],
+      wiped[0],
+    ])
+    expect(preferLedgerMail(ledger, [
+      { ...ledger[0], text: '刷新后先出账本，并补了一句。' },
+    ])).toEqual([
+      { ...ledger[0], text: '刷新后先出账本，并补了一句。' },
+    ])
   })
 
   it('工作中只占一条状态气泡，不是整屏 pane', () => {
     const rows = typingEntries([
-      member({ name: 'BrownDesert', paneId: 'w1:p2', status: 'working' }),
+      member({
+        name: 'BrownDesert', paneId: 'w1:p2', status: 'working',
+        activity: '改瀑布流', turnStartedMs: 1_000, unread: 2,
+      }),
       member({ name: 'kimi', paneId: 'w1:p3', status: 'idle' }),
-      member({ name: 'SwiftFox', paneId: 'w1:p4', status: 'blocked' }),
-    ], 9)
+      member({ name: 'SwiftFox', paneId: 'w1:p4', status: 'blocked', turnStartedMs: 4_000 }),
+    ], 13_500)
     expect(rows).toHaveLength(2)
     expect(rows[0]).toMatchObject({
       id: 'typing:w1:p2',
       name: 'BrownDesert',
-      text: '正在回复…',
+      text: '改瀑布流 · 13秒',
+      unread: 2,
     })
     expect(rows[1]).toMatchObject({
       id: 'typing:w1:p4',
-      text: '需要你确认，点「看现场」处理',
+      text: '等你确认 · 已 10秒',
+    })
+    expect(liveTurnLine(member({ status: 'working' }))).toBe('正在回复')
+    expect(membersOfSession({
+      panes: [pane({
+        session: 's1', pane_id: 'w1:p5', agent: 'grok', agent_status: 'working',
+        mail_name: 'BrownDesert', turn_started_ms: 9, activity: '改未读', unread: 3,
+      })],
+    }, 's1')[0]).toMatchObject({
+      turnStartedMs: 9,
+      activity: '改未读',
+      unread: 3,
     })
   })
 })

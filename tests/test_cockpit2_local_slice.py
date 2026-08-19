@@ -463,6 +463,15 @@ def test_trusted_root_file_operations_stay_on_descriptor_helpers(
     assert [(item["relative"], item["type"]) for item in searched["results"]] == [
         ("docs/guide.txt", "file"),
     ]
+    by_dir = files.search_files_from_trusted_root(root, "", "docs/guide", 10)
+    assert [(item["relative"], item["type"]) for item in by_dir["results"]] == [
+        ("docs/guide.txt", "file"),
+    ]
+    under_docs = files.search_files_from_trusted_root(root, "", "docs/", 10)
+    assert [(item["relative"], item["type"]) for item in under_docs["results"]] == [
+        ("docs", "dir"),
+        ("docs/guide.txt", "file"),
+    ]
 
 
 def test_trusted_root_descriptor_errors_use_stable_codes(tmp_path: Path):

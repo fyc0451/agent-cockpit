@@ -22,7 +22,13 @@ import {
   openChatWorkspace,
   type ChatBindCandidate,
 } from '../../api/chatLedger'
-import { fetchSessionMail, sendSessionMail, uploadChatFile } from '../../api/chatSession'
+import {
+  fetchSessionMail,
+  preferLedgerMail,
+  sendSessionMail,
+  uploadChatFile,
+  type SessionMailMessage,
+} from '../../api/chatSession'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { AppFrame, useAppFrame } from '../shell/AppFrame'
@@ -56,12 +62,14 @@ import {
   mailToEntries,
   membersOfSession,
   parseMentionTargets,
+  typingEntries,
   recallNotice,
   rootBase,
   saveActiveSession,
   saveLocalEntries,
   shouldSeedMemberRoster,
   withLeader,
+  type ChatDelivery,
   type ChatMember,
 } from './model'
 import './groupChat.css'
@@ -86,6 +94,7 @@ function restoreLocalEntries(session: string): ChatEntry[] {
           : [],
         ts,
         recalled: raw.recalled === true,
+        delivery: raw.delivery === 'queue' || raw.delivery === 'interrupt' ? raw.delivery : undefined,
       })
       continue
     }
@@ -322,18 +331,49 @@ export function GroupChatPage() {
   // ---------- 成员 + leader ----------
   const members = useMemo(() => {
     if (!activeSession) return []
-    return withLeader(activeSession, membersOfSession(snapshotQ.data ?? null, activeSession))
+    return withLeader(
+      activeSession,
+      membersOfSession(snapshotQ.data ?? null, activeSession),
+      snapshotQ.data?.session_leaders?.[activeSession],
+    )
   }, [activeSession, snapshotQ.data])
   const leader = members.find((m) => m.isLeader) ?? null
   const busyMembers = members.filter(isBusyMember)
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  useEffect(() => {
+    if (busyMembers.length === 0) return
+    const timer = window.setInterval(() => setNowTick(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [busyMembers.length])
 
+  const mailPrimedRef = useRef<string | null>(null)
   const mailQ = useQuery({
     queryKey: ['gc-mail', activeSession],
-    queryFn: ({ queryKey }) => {
+    queryFn: async ({ queryKey }) => {
       const name = queryKey[1]
-      return typeof name === 'string' && name ? fetchSessionMail(name) : []
+      if (typeof name !== 'string' || !name) return []
+      if (mailPrimedRef.current === name) {
+        const next = await fetchSessionMail(name, 'all')
+        return preferLedgerMail(
+          queryClient.getQueryData<SessionMailMessage[]>(['gc-mail', name]),
+          next,
+        )
+      }
+      const first = await fetchSessionMail(name, 'ledger')
+      mailPrimedRef.current = name
+      void fetchSessionMail(name, 'all')
+        .then((full) => {
+          queryClient.setQueryData<SessionMailMessage[]>(['gc-mail', name], (current) =>
+            preferLedgerMail(current, full),
+          )
+        })
+        .catch(() => {
+          /* 账本已出，Hub 补漏失败不挡首屏 */
+        })
+      return first
     },
     enabled: !!activeSession,
+    staleTime: 4_000,
     refetchInterval: busyMembers.length > 0 ? 2_000 : POLL_MS,
     refetchOnWindowFocus: false,
   })
@@ -445,7 +485,7 @@ export function GroupChatPage() {
     }
   }, [activeSession, attaching, pushEntries])
 
-  const onSend = useCallback(async () => {
+  const onSend = useCallback(async (delivery: ChatDelivery = 'interrupt') => {
     const text = composer.trim()
     if (!text || !activeSession || sending) return
     const targets = parseMentionTargets(text, membersRef.current)
@@ -465,7 +505,7 @@ export function GroupChatPage() {
     }
     setSending(true)
     try {
-      const sent = await sendSessionMail(activeSession, text, mailTo)
+      const sent = await sendSessionMail(activeSession, text, mailTo, { delivery })
       setComposer('')
       saveComposerDraft(activeSession, '')
       pushEntries([
@@ -476,6 +516,8 @@ export function GroupChatPage() {
           to: dest.map((m) => m.name),
           mailTo,
           ts: Date.now(),
+          delivery,
+          receipt: 'queued',
         },
       ])
       void queryClient.invalidateQueries({ queryKey: ['gc-mail', activeSession] })
@@ -576,7 +618,7 @@ export function GroupChatPage() {
   }, [])
 
   const mailEntries = useMemo(() => {
-    if (!activeSession || mailQ.isPending) return []
+    if (!activeSession) return []
     const mapped = mailToEntries(mailQ.data ?? [], members)
     return mapped.map((entry) =>
       entry.kind === 'me' && (recalledIds.has(entry.id) || recalledIds.has(`text:${entry.text}`))
@@ -591,14 +633,16 @@ export function GroupChatPage() {
       if (entry.kind === 'me') return !mailCoversLocalMe(mailEntries, entry)
       return entry.kind === 'event' || entry.kind === 'error'
     })
-    const merged = [...mailEntries, ...extras].sort((a, b) => {
+    const historical = [...mailEntries, ...extras].sort((a, b) => {
       if (a.ts !== b.ts) return a.ts - b.ts
       return a.id.localeCompare(b.id)
     })
+    const live = typingEntries(members, nowTick)
+    const keepAgent = (entry: ChatEntry) => entry.kind !== 'agent' || entry.paneId === onlyPane
     return onlyPane
-      ? merged.filter((entry) => entry.kind !== 'agent' || entry.paneId === onlyPane)
-      : merged
-  }, [activeSession, entries, mailEntries, members, onlyPane])
+      ? [...historical.filter(keepAgent), ...live.filter(keepAgent)]
+      : [...historical, ...live]
+  }, [activeSession, entries, mailEntries, members, nowTick, onlyPane])
   const onlyMember = onlyPane ? members.find((m) => m.paneId === onlyPane) ?? null : null
 
   // ---------- 工作区与新会话 ----------
@@ -924,6 +968,9 @@ export function GroupChatPage() {
                   const member = members.find((item) => item.paneId === entry.paneId)
                   if (member) setInteractMember(member)
                 }}
+                onOpenPath={(path) => {
+                  setPreviewFile(path)
+                }}
               />
             </>
           )}
@@ -931,14 +978,20 @@ export function GroupChatPage() {
           {busyMembers.length > 0 && (
             <div className="gc-busy-icons" role="status" aria-label="正在回复">
               {busyMembers.map((m) => {
-                const label = m.status === 'blocked' ? `${m.name} 需要你确认` : `${m.name} 正在回复`
+                const unread = m.unread && m.unread > 0
+                  ? (m.unread > 99 ? '99+' : String(m.unread))
+                  : ''
+                const label = m.status === 'blocked'
+                  ? `${m.name} 需要你确认`
+                  : `${m.name} 正在回复`
+                const full = unread ? `${label}，${m.unread} 条未读` : label
                 return (
                   <button
                     key={m.paneId}
                     type="button"
                     className={`gc-busy-icon${m.status === 'blocked' ? ' is-blocked' : ' is-working'}`}
-                    title={label}
-                    aria-label={label}
+                    title={full}
+                    aria-label={full}
                     onClick={() => setInteractMember(m)}
                   >
                     <span
@@ -948,6 +1001,7 @@ export function GroupChatPage() {
                     >
                       <AgentIcon kind={m.kind} size={16} />
                     </span>
+                    {unread && <span className="gc-unread-badge gc-unread-badge--icon">{unread}</span>}
                   </button>
                 )
               })}

@@ -719,6 +719,155 @@ def test_remembered_pane_name_beats_program_main(isolated_ledger, monkeypatch, t
     assert result["panes"][0]["mail_name"] == "FoggyBasin"
 
 
+def test_remembered_name_not_reused_by_another_live_pane(
+    isolated_ledger, monkeypatch, tmp_path,
+):
+    from agent_cockpit import chat_roster
+
+    monkeypatch.setattr(chat_roster, "PANES_DIR", tmp_path / "panes")
+    chat_roster.set_pane_mail_name("cockpit", "w1:p2", "BlueElk")
+    snapshot = {
+        "sessions": [{"session": "cockpit", "directory": "/home/fyc/github/agent-cockpit"}],
+        "panes": [
+            {
+                "session": "cockpit", "pane_id": "w1:p2", "agent": "codex",
+                "mail_name": "BlueElk",
+            },
+            {
+                "session": "cockpit", "pane_id": "w1:p7", "agent": "codex",
+            },
+        ],
+    }
+    monkeypatch.setattr(server.mail_projects, "get", lambda *_: "/home/fyc/github/agent-cockpit")
+    monkeypatch.setattr(server, "_identity_name", lambda *_a, **_k: "codex-main")
+    monkeypatch.setattr(chat_roster, "get_session_leader", lambda *_: {})
+    result = server._enrich_board_identities(snapshot)
+    assert result["panes"][0]["mail_name"] == "BlueElk"
+    assert result["panes"][1].get("mail_name") != "BlueElk"
+
+
+def test_remembered_duplicate_flower_is_cleared_for_second_same_kind_pane(
+    isolated_ledger, monkeypatch, tmp_path,
+):
+    from agent_cockpit import chat_roster
+
+    monkeypatch.setattr(chat_roster, "PANES_DIR", tmp_path / "panes")
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    chat_roster.set_pane_mail_name("pitapat-video-platform-1", "w1:p3", "TurquoiseBay")
+    chat_roster.set_pane_mail_name("pitapat-video-platform-1", "w1:p4", "TurquoiseBay")
+    snapshot = {
+        "sessions": [{
+            "session": "pitapat-video-platform-1",
+            "directory": "/home/fyc/pitapat/pitapat-video-platform",
+        }],
+        "panes": [
+            {
+                "session": "pitapat-video-platform-1", "pane_id": "w1:p4",
+                "agent": "grok",
+            },
+            {
+                "session": "pitapat-video-platform-1", "pane_id": "w1:p3",
+                "agent": "grok", "mail_name": "TurquoiseBay",
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        server.mail_projects, "get",
+        lambda *_: "/home/fyc/pitapat/pitapat-video-platform",
+    )
+    monkeypatch.setattr(
+        server, "_identity_name",
+        lambda project, agent, instance=None: (
+            None if instance else "TurquoiseBay"
+        ),
+    )
+    monkeypatch.setattr(chat_roster, "get_session_leader", lambda *_: {
+        "leader_mail_name": "DarkGlacier", "leader_agent": "codex",
+    })
+    result = server._enrich_board_identities(snapshot)
+    names = {pane["pane_id"]: pane.get("mail_name") for pane in result["panes"]}
+    assert names["w1:p3"] == "TurquoiseBay"
+    assert names.get("w1:p4") != "TurquoiseBay"
+    assert chat_roster.get_pane_mail_name("pitapat-video-platform-1", "w1:p4") == ""
+
+
+def test_set_pane_mail_name_refuses_duplicate_flower(tmp_path, monkeypatch):
+    from agent_cockpit import chat_roster
+
+    monkeypatch.setattr(chat_roster, "PANES_DIR", tmp_path / "panes")
+    chat_roster.set_pane_mail_name("pitapat-video-platform-1", "w1:p3", "TurquoiseBay")
+    chat_roster.set_pane_mail_name("pitapat-video-platform-1", "w1:p4", "TurquoiseBay")
+    assert chat_roster.get_pane_mail_name("pitapat-video-platform-1", "w1:p3") == "TurquoiseBay"
+    assert chat_roster.get_pane_mail_name("pitapat-video-platform-1", "w1:p4") == ""
+
+
+def test_reconcile_absent_panes_clears_closed_roster_and_harvest(
+    isolated_ledger, monkeypatch, tmp_path,
+):
+    from agent_cockpit import chat_roster
+
+    monkeypatch.setattr(chat_roster, "PANES_DIR", tmp_path / "panes")
+    chat_roster.set_pane_mail_name("cockpit", "w1:p2", "BlueElk")
+    chat_roster.set_pane_mail_name("cockpit", "w1:p7", "QuietCedar")
+    server._HARVEST_STATUS_LOADED = True
+    server._PANE_LAST_STATUS[("cockpit", "w1:p2")] = "idle"
+    server._PANE_LAST_HARVEST[("cockpit", "w1:p2")] = "old"
+    server._PANE_LAST_MESSAGE[("cockpit", "w1:p2")] = "msg_old"
+    pending = []
+    monkeypatch.setattr(
+        server.herdr_client, "list_active_launch_descriptors",
+        lambda: [{
+            "session": "cockpit", "pane_id": "w1:p2",
+            "instance_id": "i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "state": "active",
+        }],
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "mark_launch_descriptor_retirement_pending",
+        lambda session, pane_id: pending.append((session, pane_id)) or {"cleared": 1},
+    )
+    server._reconcile_absent_panes({
+        "available": True,
+        "sessions": [{"session": "cockpit", "status": "running"}],
+        "panes": [
+            {"session": "cockpit", "pane_id": "w1:p1", "agent": "grok"},
+            {"session": "cockpit", "pane_id": "w1:p7", "agent": "codex"},
+        ],
+    })
+    server._prune_harvest_for_snapshot({
+        "sessions": [{"session": "cockpit", "status": "running"}],
+        "panes": [
+            {"session": "cockpit", "pane_id": "w1:p1", "agent": "grok"},
+            {"session": "cockpit", "pane_id": "w1:p7", "agent": "codex"},
+        ],
+    })
+    assert chat_roster.get_pane_mail_name("cockpit", "w1:p2") == ""
+    assert chat_roster.get_pane_mail_name("cockpit", "w1:p7") == "QuietCedar"
+    assert ("cockpit", "w1:p2") not in server._PANE_LAST_HARVEST
+    assert pending == [("cockpit", "w1:p2")]
+
+
+def test_delete_pane_forgets_roster_and_harvest(isolated_ledger, monkeypatch, tmp_path):
+    from agent_cockpit import chat_roster
+
+    monkeypatch.setattr(chat_roster, "PANES_DIR", tmp_path / "panes")
+    chat_roster.set_pane_mail_name("demo", "w1:p2", "BlueElk")
+    server._HARVEST_STATUS_LOADED = True
+    server._PANE_LAST_HARVEST[("demo", "w1:p2")] = "old"
+    monkeypatch.setattr(
+        server.herdr_client, "close_pane",
+        lambda session, pane_id: {"available": True, "closed": pane_id},
+    )
+    monkeypatch.setattr(server, "_mail_project_state", lambda *_: {})
+    monkeypatch.setattr(server, "_attach_identity_retirement", lambda result, **_k: result)
+    result = server.api_herdr_pane_delete("demo", "w1:p2")
+    assert result["closed"] == "w1:p2"
+    assert chat_roster.get_pane_mail_name("demo", "w1:p2") == ""
+    assert ("demo", "w1:p2") not in server._PANE_LAST_HARVEST
+
+
 def test_resolve_chat_mail_rewrites_kimi_main_to_unique_flower(monkeypatch):
     monkeypatch.setattr(
         server, "_enrich_board_identities",
@@ -880,18 +1029,125 @@ def test_notify_does_not_wake_ambiguous_same_kind_panes(isolated_ledger, monkeyp
     assert sent == []
 
 
+def test_resolve_and_notify_new_grok_pane_does_not_wake_old_flower(monkeypatch):
+    sent: list[tuple] = []
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server,
+        "_herdr_runtime_snapshot",
+        lambda: {"panes": [
+            {
+                "session": "pitapat-video-platform-1", "pane_id": "w1:p3",
+                "agent": "grok", "mail_name": "TurquoiseBay",
+                "display_name": "grok",
+            },
+            {
+                "session": "pitapat-video-platform-1", "pane_id": "w1:p4",
+                "agent": "grok", "mail_name": "", "display_name": "grok",
+            },
+        ]},
+    )
+    monkeypatch.setattr(server, "_flower_for_agent", lambda *_: "TurquoiseBay")
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {
+        "leader_mail_name": "DarkGlacier",
+    })
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    assert server._resolve_chat_mail_recipients(
+        "pitapat-video-platform-1", ["grok-p4"],
+    ) == ["grok-p4"]
+    assert server._resolve_chat_mail_recipients(
+        "pitapat-video-platform-1", ["TurquoiseBay"],
+    ) == ["TurquoiseBay"]
+    server._notify_chat_recipients(
+        "pitapat-video-platform-1", ["grok-p4"], "只给新 grok",
+    )
+    assert [item[1] for item in sent] == ["w1:p4"]
+    sent.clear()
+    server._notify_chat_recipients(
+        "pitapat-video-platform-1", ["TurquoiseBay"], "只给老 grok",
+    )
+    assert [item[1] for item in sent] == ["w1:p3"]
+
+
+def test_notify_queue_skips_busy_pane_then_flush_when_idle(isolated_ledger, monkeypatch):
+    sent: list[tuple] = []
+    pane = {
+        "session": "cockpit", "pane_id": "w1:p1", "agent": "grok",
+        "mail_name": "BrownDesert", "display_name": "BrownDesert",
+        "agent_status": "working",
+    }
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": [pane]})
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {"leader_mail_name": "BrownDesert"})
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    queued = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="忙完再改输入框",
+        to=["BrownDesert"], delivery="queue",
+    )
+    assert server._notify_chat_recipients(
+        "cockpit", ["BrownDesert"], queued["text"], "queue",
+    ) == []
+    assert sent == []
+    pane["agent_status"] = "idle"
+    server._flush_queued_chat_mail("cockpit", {"panes": [pane]})
+    assert len(sent) == 1
+    assert sent[0][1] == "w1:p1"
+    assert "排了一条消息" in sent[0][2]
+    assert "忙完再改输入框" in sent[0][2]
+    stored = chat_ledger.list_messages("cockpit")[0]
+    assert stored["notified_to"] == ["BrownDesert"]
+    sent.clear()
+    server._flush_queued_chat_mail("cockpit", {"panes": [pane]})
+    assert sent == []
+
+
+def test_notify_interrupt_wakes_busy_pane(isolated_ledger, monkeypatch):
+    sent: list[tuple] = []
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [{
+            "session": "cockpit", "pane_id": "w1:p6", "agent": "claude",
+            "mail_name": "GrayFalcon", "display_name": "GrayFalcon",
+            "agent_status": "working",
+        }]},
+    )
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {"leader_mail_name": "BrownDesert"})
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    notified = server._notify_chat_recipients(
+        "cockpit", ["GrayFalcon"], "先停下来看这条", "interrupt",
+    )
+    assert notified == ["GrayFalcon"]
+    assert len(sent) == 1
+    assert "请直接做下面的任务" in sent[0][2]
+
+
 def test_harvest_status_survives_reload(isolated_ledger, monkeypatch):
     path = isolated_ledger / "state" / "chat-harvest.json"
     monkeypatch.setenv("COCKPIT_STATE_DIR", str(isolated_ledger / "state"))
     server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
     server._HARVEST_STATUS_LOADED = False
     server._PANE_LAST_STATUS[("cockpit", "w1:p1")] = "working"
+    server._PANE_LAST_MESSAGE[("cockpit", "w1:p1")] = "msg_aaaaaaaaaaaa"
     server._save_harvest_status()
     assert path.is_file()
     server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_MESSAGE.clear()
     server._HARVEST_STATUS_LOADED = False
     server._load_harvest_status()
     assert server._PANE_LAST_STATUS[("cockpit", "w1:p1")] == "working"
+    assert server._PANE_LAST_MESSAGE[("cockpit", "w1:p1")] == "msg_aaaaaaaaaaaa"
 
 
 def test_list_chat_skills_reads_skill_dirs(isolated_ledger, monkeypatch, tmp_path):
@@ -902,6 +1158,27 @@ def test_list_chat_skills_reads_skill_dirs(isolated_ledger, monkeypatch, tmp_pat
     monkeypatch.setattr(server.Path, "home", staticmethod(lambda: home))
     rows = server._list_chat_skills()
     assert any(item["id"] == "lark-im" for item in rows)
+
+
+def test_session_mail_ledger_source_skips_hub(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "fast-mail", "chat-1")
+    chat_ledger.append_message(
+        "chat-1", kind="me", sender="human", text="先出账本", to=["BrownDesert"],
+    )
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {})
+    monkeypatch.setattr(server, "_harvest_settled_replies", lambda *_: None)
+    monkeypatch.setattr(
+        server, "_session_hub_mail",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("首屏不得扫 Hub")),
+    )
+    response = client.get(
+        "/api/chat/sessions/chat-1/mail?source=ledger", headers=_headers(),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "ledger"
+    assert [row["text"] for row in body["messages"]] == ["先出账本"]
 
 
 def test_ungrouped_session_mail_skips_hub(isolated_ledger, monkeypatch):
@@ -1040,15 +1317,15 @@ def test_ledger_only_terminal_line_skips_hub(isolated_ledger, monkeypatch):
     )
     assert sent.status_code == 200
     body = sent.json()
-    assert body["message"]["text"] == "终端里打的"
-    assert body["message"]["to"] == ["终端"]
+    assert body["message"] is None
+    assert body["to"] == ["终端"]
     assert body["mail_error"] is None
     assert called == []
     listed = client.get(
         f"/api/chat/sessions/{thread['herdr_session']}/mail",
         headers=_headers(),
     )
-    assert [row["text"] for row in listed.json()["messages"]] == ["终端里打的"]
+    assert [row["text"] for row in listed.json()["messages"]] == []
 
 
 def test_send_chat_mail_persists_neighbor_and_resolves_hub_recipient(
@@ -1136,8 +1413,47 @@ def test_send_chat_mail_uses_overseer_and_notifies(isolated_ledger, monkeypatch)
     assert response.json()["mail_error"] is None
     assert sent and sent[0]["recipients"] == ["BrownDesert"]
     assert sent[0]["thread_id"] == "ping-1"
-    assert notified == [("ping-1", ["BrownDesert"], "@BrownDesert 在吗")]
+    assert notified == [("ping-1", ["BrownDesert"], "@BrownDesert 在吗", "interrupt")]
     assert bound and bound[0][0] == "ping-1"
+    stored = chat_ledger.list_messages(thread["herdr_session"])
+    assert stored and stored[0]["delivery"] == "interrupt"
+
+
+def test_send_chat_mail_queue_is_stored_and_notified(isolated_ledger, monkeypatch):
+    client = _client()
+    workspace, thread = _workspace_with_thread(client, isolated_ledger / "queue", "queue-1")
+    notified = []
+    monkeypatch.setattr(
+        server.next_profile, "require_project",
+        lambda path: str(Path(path).expanduser().resolve()),
+    )
+    monkeypatch.setattr(
+        server, "_agent_mail_status",
+        lambda: {"write_available": True, "available": True},
+    )
+    monkeypatch.setattr(
+        server.db, "project_by_canonical_key",
+        lambda key: {"id": 7, "slug": "home-fyc-github-agent-cockpit", "human_key": key},
+    )
+    monkeypatch.setattr(server.hub_client, "overseer_send", lambda **_k: {"ok": True})
+    monkeypatch.setattr(server, "_notify_chat_recipients", lambda *a: notified.append(a) or [])
+    monkeypatch.setattr(server, "_bind_mail_project", lambda *_a, **_k: ("/queue", "/sessions/queue-1"))
+    response = client.post(
+        f"/api/chat/sessions/{thread['herdr_session']}/mail",
+        headers=_headers(),
+        json={"text": "忙完再看", "to": ["BrownDesert"], "delivery": "queue"},
+    )
+    assert response.status_code == 200
+    assert response.json()["message"]["delivery"] == "queue"
+    assert notified == [("queue-1", ["BrownDesert"], "忙完再看", "queue")]
+    stored = chat_ledger.list_messages(thread["herdr_session"])
+    assert stored[0]["delivery"] == "queue"
+    bad = client.post(
+        f"/api/chat/sessions/{thread['herdr_session']}/mail",
+        headers=_headers(),
+        json={"text": "坏类型", "to": ["BrownDesert"], "delivery": "urgent"},
+    )
+    assert bad.status_code == 400
 
 
 def test_send_chat_mail_notifies_when_hub_rejects_recipient(isolated_ledger, monkeypatch):
@@ -1174,7 +1490,7 @@ def test_send_chat_mail_notifies_when_hub_rejects_recipient(isolated_ledger, mon
     )
     assert response.status_code == 200
     assert response.json()["mail_error"]
-    assert notified == [("scc-1", ["codex"], "@codex 做15轮")]
+    assert notified == [("scc-1", ["codex"], "@codex 做15轮", "interrupt")]
 
 
 def test_send_chat_mail_registers_missing_hub_project(isolated_ledger, monkeypatch):
@@ -1366,6 +1682,37 @@ def test_files_and_mail_use_workspace_path(isolated_ledger, monkeypatch):
     assert sent["thread_id"] == "app-1"
 
 
+def test_chat_file_search_matches_relative_directory(isolated_ledger):
+    client = _client()
+    proj = isolated_ledger / "search-ws"
+    _workspace_with_thread(client, proj, "search-1")
+    nested = proj / "web"
+    nested.mkdir()
+    (nested / "package.json").write_text("{}\n", encoding="utf-8")
+    (proj / "README.md").write_text("root\n", encoding="utf-8")
+
+    by_path = client.get(
+        "/api/chat/sessions/search-1/files/search",
+        headers=_headers(),
+        params={"q": "web/package"},
+    )
+    assert by_path.status_code == 200
+    assert {(row["relative"], row["type"]) for row in by_path.json()["results"]} == {
+        ("web/package.json", "file"),
+    }
+
+    by_dir = client.get(
+        "/api/chat/sessions/search-1/files/search",
+        headers=_headers(),
+        params={"q": "web/"},
+    )
+    assert by_dir.status_code == 200
+    assert {row["relative"] for row in by_dir.json()["results"]} == {
+        "web",
+        "web/package.json",
+    }
+
+
 def test_chat_upload_lands_in_workspace_inbox(isolated_ledger):
     client = _client()
     proj = isolated_ledger / "inbox-ws"
@@ -1494,6 +1841,41 @@ def test_ensure_session_leader_records_first_named_agent(isolated_ledger, monkey
     assert row["leader_mail_name"] == "BrownDesert"
     assert row["leader_agent"] == "grok"
     assert chat_roster.get_session_leader("cockpit")["leader_mail_name"] == "BrownDesert"
+
+
+def test_board_snapshot_exposes_registered_session_leader(isolated_ledger, monkeypatch, tmp_path):
+    from agent_cockpit import chat_roster
+
+    monkeypatch.setattr(chat_roster, "LEADERS_DIR", tmp_path / "leaders")
+    chat_roster.set_session_leader("pitapat-video-platform-1", "DarkGlacier", "codex")
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {
+            "sessions": [{
+                "session": "pitapat-video-platform-1", "status": "running",
+            }],
+            "panes": [{
+                "session": "pitapat-video-platform-1",
+                "pane_id": "w1:p3",
+                "agent": "grok",
+                "mail_name": "TurquoiseBay",
+                "display_name": "grok",
+            }, {
+                "session": "pitapat-video-platform-1",
+                "pane_id": "w1:p2",
+                "agent": "codex",
+                "mail_name": "DarkGlacier",
+                "display_name": "codex",
+            }],
+        },
+    )
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server, "_merge_descriptor_roster", lambda snap: snap)
+    monkeypatch.setattr(server, "_reconcile_absent_panes", lambda *_: None)
+    monkeypatch.setattr(server, "_prune_harvest_for_snapshot", lambda *_: None)
+    snap = server._board_snapshot()
+    assert snap["session_leaders"]["pitapat-video-platform-1"]["mail_name"] == "DarkGlacier"
+    assert snap["session_leaders"]["pitapat-video-platform-1"]["agent"] == "codex"
 
 
 def test_mail_list_strips_stored_tui_chrome_without_rewriting_ledger(isolated_ledger, monkeypatch):
@@ -1625,7 +2007,195 @@ def test_merge_chat_timeline_keeps_longer_duplicate():
     }]
     merged = server._merge_chat_timeline(local, hub)
     assert len(merged) == 1
-    assert merged[0]["id"] == "3925"
+    assert merged[0]["id"] == "msg_harvest"
+    assert "ANALYSIS.md" in merged[0]["text"]
+    assert merged[0].get("thread") == local[0].get("thread")
+
+
+def test_merge_chat_timeline_keeps_ledger_id_when_hub_copy_is_longer():
+    local = [{
+        "id": "msg_keep", "sender": "BrownDesert", "thread": "cockpit",
+        "text": "刷新后先出账本。原因是第二次 /mail 把气泡换成了 Hub 那封。",
+        "ts": 1,
+    }]
+    hub = [{
+        "id": "3929", "sender": "BrownDesert", "thread": "th_deadbeef0001",
+        "text": (
+            "刷新后先出账本。原因是第二次 /mail 把气泡换成了 Hub 那封。"
+            "Hub 的 thread 不是会话名，前端按会话过滤会整条丢掉。"
+        ),
+        "ts": 2,
+    }]
+    merged = server._merge_chat_timeline(local, hub)
+    assert len(merged) == 1
+    assert merged[0]["id"] == "msg_keep"
+    assert merged[0]["thread"] == "cockpit"
+    assert "前端按会话过滤会整条丢掉" in merged[0]["text"]
+
+
+def test_session_mail_rewrites_hub_thread_to_session(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "thread-norm", "cockpit")
+    thread = chat_ledger.get_thread_by_session("cockpit")
+    assert thread is not None
+    saved = chat_ledger.append_message(
+        "cockpit", kind="agent", sender="BrownDesert",
+        text="刷新后先出账本，这条应留下。", to=["human"],
+    )
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {})
+    monkeypatch.setattr(server, "_harvest_settled_replies", lambda *_: None)
+    monkeypatch.setattr(server.db, "status", lambda: {"available": True, "reason": None})
+    monkeypatch.setattr(
+        server, "_chat_mail_project_key",
+        lambda _name: "/home/fyc/github/agent-cockpit",
+    )
+    monkeypatch.setattr(
+        server.db, "project_by_canonical_key",
+        lambda _key: {"id": 7, "human_key": _key},
+    )
+    monkeypatch.setattr(
+        server.db,
+        "messages_for_canonical_project",
+        lambda *_a, **_k: [{
+            "id": 88, "sender_name": "BrownDesert", "sender_program": "grok",
+            "body_md": "刷新后先出账本，这条应留下。Hub 补了一句说明。",
+            "subject": "ok", "created_ts": 1_700_000_000,
+            "thread_id": thread["id"],
+            "recipients": [{"name": "human"}],
+        }],
+    )
+    response = client.get("/api/chat/sessions/cockpit/mail", headers=_headers())
+    assert response.status_code == 200
+    rows = response.json()["messages"]
+    assert len(rows) == 1
+    assert rows[0]["id"] == saved["id"]
+    assert rows[0]["thread"] == "cockpit"
+    assert "这条应留下" in rows[0]["text"]
+
+
+def test_merge_chat_timeline_keeps_two_similar_ledger_replies():
+    first = (
+        "还有这些没处理，按优先级：\n\n"
+        "1. 3.0 之后的修还没 commit\n"
+        "空 shell、短密码、局域网、Claude 回放、过程稿、进会话首屏、SCC 终端刷新、刷新后回复消失。"
+        "都在工作区，没 commit、没 tag、没 push。3.0 本体是 8b12968。\n\n"
+        "2. SCC Codex 最终结论没完整进瀑布流\n"
+        "人已经停下。账本停在中间稿。后面两问没有新气泡。空闲已收过就不再读屏，所以终稿没收上来。\n\n"
+        "3. 接力单过时\n"
+        "Claude 还在本群 w1:p6，没覆盖 handoff。"
+    )
+    second = (
+        "还有这些没处理，按优先级：\n\n"
+        "1. 3.0 之后的修还没 commit\n"
+        "空 shell、短密码、局域网、Claude 回放、过程稿、进会话首屏、SCC 终端刷新、刷新后回复消失。"
+        "都在工作区，没 commit、没 tag、没 push。3.0 本体是 8b12968。\n\n"
+        "2. 是 SCC 那边 Codex 已经停了，终稿没被收进群聊。\n"
+        "3. 是给下一个 agent 看的接力单还停在昨天，不是群聊气泡。"
+    )
+    assert server._same_chat_reply(first, second)
+    assert not server._same_harvest_copy(first, second)
+    merged = server._merge_chat_timeline(
+        [
+            {"id": "msg_old", "sender": "BrownDesert", "text": first, "ts": 1},
+            {"id": "msg_new", "sender": "BrownDesert", "text": second, "ts": 2},
+        ],
+        [],
+    )
+    assert [row["id"] for row in merged] == ["msg_old", "msg_new"]
+
+
+def test_trim_chat_mail_keeps_ledger_when_hub_floods():
+    local = [
+        {"id": "msg_old", "sender": "BrownDesert", "text": "旧结论", "ts": 1},
+        {"id": "msg_new", "sender": "BrownDesert", "text": "新结论", "ts": 100},
+    ]
+    hub = [
+        {"id": str(index), "sender": "GrayFalcon", "text": f"hub-{index}", "ts": 10 + index}
+        for index in range(20)
+    ]
+    merged = server._merge_chat_timeline(local, hub)
+    trimmed = server._trim_chat_mail(merged, local, 8)
+    ids = [row["id"] for row in trimmed]
+    assert "msg_old" in ids
+    assert "msg_new" in ids
+    assert ids[-1] == "msg_new"
+
+
+def test_harvest_does_not_overwrite_older_distinct_reply(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-no-fuzzy", "chat-5")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    old = chat_ledger.append_message(
+        "chat-5", kind="agent", sender="BrownDesert",
+        text=(
+            "还有这些没处理，按优先级：1. 3.0 之后的修还没 commit。"
+            "2. SCC Codex 最终结论没完整进瀑布流。3. 接力单过时。"
+        ),
+        to=["human"],
+    )
+    panes = [{
+        "session": "chat-5",
+        "pane_id": "w1:p1",
+        "agent": "grok",
+        "agent_status": "idle",
+        "mail_name": "BrownDesert",
+        "display_name": "BrownDesert",
+    }]
+    later = (
+        "2 是 SCC 那边 Codex 已经停了，终稿没被收进群聊。"
+        "3 是给下一个 agent 看的接力单还停在昨天，不是群聊气泡。"
+    )
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary", lambda *_a, **_k: {"summary": later},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-5")
+    rows = chat_ledger.list_messages("chat-5", 10)
+    assert any(row["id"] == old["id"] and "SCC Codex 最终结论" in row["text"] for row in rows)
+    assert any(row["id"] != old["id"] and "接力单还停在昨天" in row["text"] for row in rows)
+
+
+def test_harvest_does_not_overwrite_pinned_old_bubble(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-keep-old-ts", "chat-6")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    old = chat_ledger.append_message(
+        "chat-6", kind="agent", sender="BrownDesert",
+        text="昨晚的结论：空 shell 命令不再进瀑布流。",
+        to=["human"],
+        ts=1_700_000_000_000,
+    )
+    server._PANE_LAST_STATUS[("chat-6", "w1:p1")] = "working"
+    server._PANE_LAST_MESSAGE[("chat-6", "w1:p1")] = old["id"]
+    later = "2 和 3 用人话讲：SCC 终稿没进群聊，接力单还停在昨天。"
+    panes = [{
+        "session": "chat-6",
+        "pane_id": "w1:p1",
+        "agent": "grok",
+        "agent_status": "idle",
+        "mail_name": "BrownDesert",
+        "display_name": "BrownDesert",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary", lambda *_a, **_k: {"summary": later},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-6")
+    rows = chat_ledger.list_messages("chat-6", 10)
+    kept = next(row for row in rows if row["id"] == old["id"])
+    assert kept["text"] == "昨晚的结论：空 shell 命令不再进瀑布流。"
+    assert kept["ts"] == 1_700_000_000_000
+    assert any(row["id"] != old["id"] and "接力单还停在昨天" in row["text"] for row in rows)
 
 
 def test_merge_chat_timeline_keeps_later_distinct_claude_reply():
@@ -1845,6 +2415,79 @@ def test_extract_harvest_text_strips_grok_tui_chrome():
     assert "┃" not in text
 
 
+def test_extract_harvest_text_drops_terminal_shell_copies():
+    assert server._extract_harvest_text("Copies need this terminal") == ""
+    assert server._extract_harvest_text("Copies need this terminal\n") == ""
+    assert server._harvest_skip_line("Copies need this terminal") is True
+
+
+def test_harvest_idle_without_conclusion_clears_stale_turn_clock(isolated_ledger, monkeypatch):
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._HARVEST_STATUS_LOADED = True
+    server._PANE_TURN_STARTED[("chat-1", "w1:p2")] = 1
+    panes = [{
+        "session": "chat-1",
+        "pane_id": "w1:p2",
+        "agent": "grok",
+        "agent_status": "idle",
+        "mail_name": "BrownDesert",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary",
+        lambda *_a, **_k: {"summary": "Copies need this terminal"},
+    )
+    server._harvest_settled_replies("chat-1")
+    assert ("chat-1", "w1:p2") not in server._PANE_TURN_STARTED
+
+
+def test_extract_harvest_text_drops_live_grok_status():
+    assert server._extract_harvest_text(
+        "◆ user_prompt_submit  [hooks: 1]\n"
+        "    ⠴ Waiting for response… 3.3s\n"
+    ) == ""
+    assert server._extract_harvest_text(
+        "❙  ◈ Searched 1 pattern, Read 1 file  [hooks: 3]\n"
+        "     Context 81% full. Compacting…\n"
+    ) == ""
+    served = server._ledger_chat_mail({
+        "id": "msg_wait", "session": "cockpit", "kind": "agent",
+        "sender": "BrownDesert",
+        "text": "◆ user_prompt_submit  [hooks: 1]\n    ⠴ Waiting for response… 3.3s",
+        "to": ["human"], "ts": 1,
+    })
+    assert served is None
+
+
+def test_extract_harvest_text_strips_claude_idle_recap():
+    text = server._extract_harvest_text(
+        "❯ 分析下最新的3.0，还有什么问题\n"
+        "  真正的问题是缺少对照标准。\n"
+        "✻ Baked for 9m 31s\n"
+        "※ recap: 分析完 agent-cockpit 3.0：TypeScript 和 166 个测试全通过。\n"
+        "● 2 background shell command task(s) from the previous session have no completion record.\n"
+        "● 收到通知，两个后台任务已停止（测试运行）。\n"
+        "  @GrayFalcon 分析目前系统还缺少的内容\n"
+        "● 收到，开始全面分析系统缺失内容。\n"
+        "                    Jump to bottom (ctrl+End) ↓\n"
+        "  ➜  agent-cockpit git:(main✗)  [Opus 5 (1M context)]\n"
+    )
+    assert "真正的问题是缺少对照标准" in text
+    assert "收到，开始全面分析系统缺失内容" in text
+    assert "分析下最新的3.0" not in text
+    assert "recap:" not in text
+    assert "TypeScript 和 166" not in text
+    assert "Jump to bottom" not in text
+    assert "background shell" not in text
+    assert "@GrayFalcon" not in text
+    assert "bypass permissions" not in text
+    assert "Task ids" not in text
+
+
 def test_strip_harvest_tui_chrome_preserves_real_reply_verbatim():
     text = server._strip_harvest_tui_chrome(
         "第一段是真回复。\n\n"
@@ -1873,6 +2516,9 @@ def test_harvest_settled_reply_is_one_message_not_live_pane(isolated_ledger, mon
     client = _client()
     _workspace_with_thread(client, isolated_ledger / "harvest", "chat-1")
     server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
     panes = [{
         "session": "chat-1",
         "pane_id": "w1:p2",
@@ -1894,9 +2540,7 @@ def test_harvest_settled_reply_is_one_message_not_live_pane(isolated_ledger, mon
     assert first.json()["messages"] == []
     server._harvest_settled_replies("chat-1")
     mid = client.get("/api/chat/sessions/chat-1/mail", headers=_headers())
-    assert [row["text"] for row in mid.json()["messages"]] == [
-        "好，瀑布流继续走消息，不把整屏 pane 塞回去。",
-    ]
+    assert mid.json()["messages"] == []
     panes[0]["agent_status"] = "idle"
     server._harvest_settled_replies("chat-1")
     second = client.get("/api/chat/sessions/chat-1/mail", headers=_headers())
@@ -1908,6 +2552,179 @@ def test_harvest_settled_reply_is_one_message_not_live_pane(isolated_ledger, mon
     assert [row["text"] for row in third.json()["messages"]] == [
         "好，瀑布流继续走消息，不把整屏 pane 塞回去。",
     ]
+    assert type(messages[0].get("duration_ms")) is int
+
+
+def test_harvest_persists_turn_duration_and_marks_read(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "turn-read", "chat-turn")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._HARVEST_STATUS_LOADED = True
+    sent = chat_ledger.append_message(
+        "chat-turn", kind="me", sender="human", text="看这条",
+        to=["BrownDesert"], delivery="interrupt",
+    )
+    chat_ledger.mark_message_notified(sent["id"], ["BrownDesert"])
+    panes = [{
+        "session": "chat-turn",
+        "pane_id": "w1:p2",
+        "agent": "grok",
+        "agent_status": "working",
+        "mail_name": "BrownDesert",
+        "display_name": "BrownDesert",
+        "terminal_title": "改瀑布流",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": "这条已经读完，并记下这一轮用了多久。"},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-turn")
+    boss = chat_ledger.list_messages("chat-turn")[0]
+    assert boss["read_by"] == ["BrownDesert"]
+    assert ("chat-turn", "w1:p2") in server._PANE_TURN_STARTED
+    started = server._PANE_TURN_STARTED[("chat-turn", "w1:p2")]
+    server._PANE_TURN_STARTED[("chat-turn", "w1:p2")] = started - 12_500
+    panes[0]["agent_status"] = "idle"
+    server._harvest_settled_replies("chat-turn")
+    reply = chat_ledger.list_messages("chat-turn")[-1]
+    assert reply["kind"] == "agent"
+    assert reply["duration_ms"] >= 12_500
+    assert ("chat-turn", "w1:p2") not in server._PANE_TURN_STARTED
+
+
+def test_board_snapshot_exposes_turn_and_unread(isolated_ledger, monkeypatch):
+    sent = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="还没读",
+        to=["BrownDesert"], delivery="interrupt",
+    )
+    queued = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="也没读",
+        to=["BrownDesert"], delivery="queue",
+    )
+    chat_ledger.mark_message_notified(sent["id"], ["BrownDesert"])
+    chat_ledger.mark_message_notified(queued["id"], ["BrownDesert"])
+    chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="旧消息不算未读",
+        to=["BrownDesert"],
+    )
+    chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="未投递不算未读",
+        to=["BrownDesert"], delivery="interrupt",
+    )
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._PANE_ACTIVITY.clear()
+    server._HARVEST_STATUS_LOADED = True
+    runtime = {
+        "available": False,
+        "sessions": [],
+        "panes": [{
+            "session": "cockpit",
+            "pane_id": "w1:p1",
+            "agent": "grok",
+            "agent_status": "working",
+            "mail_name": "BrownDesert",
+            "display_name": "BrownDesert",
+            "terminal_title": "改未读角标",
+        }],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: runtime)
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server, "_merge_descriptor_roster", lambda snap: snap)
+    monkeypatch.setattr(server, "_reconcile_absent_panes", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_prune_harvest_for_snapshot", lambda *_a, **_k: None)
+    snap = server._board_snapshot()
+    pane = snap["panes"][0]
+    assert pane["unread"] == 2
+    assert pane["activity"] == "改未读角标"
+    assert type(pane["turn_started_ms"]) is int
+    assert pane["turn_started_ms"] > 0
+
+
+def test_board_snapshot_uses_codex_progress_not_tool_chrome(isolated_ledger, monkeypatch):
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._PANE_ACTIVITY.clear()
+    server._HARVEST_STATUS_LOADED = True
+    runtime = {
+        "available": False,
+        "sessions": [],
+        "panes": [{
+            "session": "chat-codex",
+            "pane_id": "w1:p2",
+            "agent": "codex",
+            "agent_status": "working",
+            "mail_name": "DarkGlacier",
+            "display_name": "codex-1",
+            "terminal_title": "codex",
+        }],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: runtime)
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server, "_merge_descriptor_roster", lambda snap: snap)
+    monkeypatch.setattr(server, "_reconcile_absent_panes", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_prune_harvest_for_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": (
+            "• Waited for background terminal · ssh badge-dev\n"
+            "• 固定源码包已下载到约 5.7 MB，连接稳定但带宽偏低。"
+            "发布过程没有切换 current。\n"
+            "• Ran ssh badge-dev\n"
+        )},
+    )
+    snap = server._board_snapshot()
+    assert "5.7 MB" in snap["panes"][0]["activity"]
+    assert "Waited" not in snap["panes"][0]["activity"]
+    assert "Ran ssh" not in snap["panes"][0]["activity"]
+    server._harvest_settled_replies("chat-codex", runtime)
+    assert chat_ledger.list_messages("chat-codex") == []
+
+
+def test_unread_ignores_undelivered_and_read_mail(isolated_ledger, monkeypatch):
+    leftover = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="验证打断类型，可忽略。",
+        to=["GrayFalcon"], delivery="interrupt",
+    )
+    delivered = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="已经叫醒",
+        to=["GrayFalcon"], delivery="queue",
+    )
+    chat_ledger.mark_message_notified(delivered["id"], ["GrayFalcon"])
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._HARVEST_STATUS_LOADED = True
+    runtime = {
+        "available": False,
+        "sessions": [],
+        "panes": [{
+            "session": "cockpit",
+            "pane_id": "w1:p6",
+            "agent": "claude",
+            "agent_status": "idle",
+            "mail_name": "GrayFalcon",
+            "display_name": "GrayFalcon",
+        }],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: runtime)
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server, "_merge_descriptor_roster", lambda snap: snap)
+    monkeypatch.setattr(server, "_reconcile_absent_panes", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_prune_harvest_for_snapshot", lambda *_a, **_k: None)
+    snap = server._board_snapshot()
+    assert leftover.get("notified_to") in (None, [])
+    assert snap["panes"][0]["unread"] == 1
+    chat_ledger.mark_messages_read("cockpit", "GrayFalcon")
+    snap = server._board_snapshot()
+    assert snap["panes"][0]["unread"] == 0
 
 
 def test_harvest_idle_reply_without_working_edge(isolated_ledger, monkeypatch):
@@ -1915,6 +2732,7 @@ def test_harvest_idle_reply_without_working_edge(isolated_ledger, monkeypatch):
     _workspace_with_thread(client, isolated_ledger / "harvest-idle", "plat-1")
     server._PANE_LAST_STATUS.clear()
     server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
     server._HARVEST_STATUS_LOADED = True
     server._PANE_LAST_STATUS[("plat-1", "w1:p2")] = "idle"
     panes = [{
@@ -1942,11 +2760,12 @@ def test_harvest_idle_reply_without_working_edge(isolated_ledger, monkeypatch):
     assert len(second.json()["messages"]) == 1
 
 
-def test_harvest_working_updates_same_message(isolated_ledger, monkeypatch):
+def test_harvest_working_does_not_publish_drafts(isolated_ledger, monkeypatch):
     client = _client()
     _workspace_with_thread(client, isolated_ledger / "harvest-live", "chat-2")
     server._PANE_LAST_STATUS.clear()
     server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
     server._HARVEST_STATUS_LOADED = True
     panes = [{
         "session": "chat-2",
@@ -1956,19 +2775,200 @@ def test_harvest_working_updates_same_message(isolated_ledger, monkeypatch):
         "mail_name": "BrownDesert",
         "display_name": "BrownDesert",
     }]
-    drafts = iter((
-        {"summary": "这是第一稿，结论还没写完。"},
-        {"summary": "这是第一稿，结论还没写完。后面补上完整结论，瀑布流应更新同一条。"},
-    ))
     monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
     monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
-    monkeypatch.setattr(server.herdr_client, "pane_summary", lambda *_a, **_k: next(drafts))
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": "这是第一稿，结论还没写完。后面补上完整结论。"},
+    )
     monkeypatch.setattr(server.db, "status", lambda: {"available": False})
     server._harvest_settled_replies("chat-2")
     first = client.get("/api/chat/sessions/chat-2/mail", headers=_headers()).json()["messages"]
-    assert [row["text"] for row in first] == ["这是第一稿，结论还没写完。"]
+    assert first == []
+    panes[0]["agent_status"] = "idle"
     server._harvest_settled_replies("chat-2")
     second = client.get("/api/chat/sessions/chat-2/mail", headers=_headers()).json()["messages"]
-    assert len(second) == 1
-    assert second[0]["id"] == first[0]["id"]
-    assert "完整结论" in second[0]["text"]
+    assert [row["text"] for row in second] == ["这是第一稿，结论还没写完。后面补上完整结论。"]
+
+
+def test_harvest_idle_recap_does_not_append_again(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-idle-recap", "chat-3")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    server._PANE_LAST_STATUS[("chat-3", "w1:p6")] = "idle"
+    server._PANE_LAST_HARVEST[("chat-3", "w1:p6")] = "old"
+    panes = [{
+        "session": "chat-3",
+        "pane_id": "w1:p6",
+        "agent": "claude",
+        "agent_status": "idle",
+        "mail_name": "GrayFalcon",
+        "display_name": "claude",
+    }]
+    chat_ledger.append_message(
+        "chat-3", kind="agent", sender="GrayFalcon",
+        text="真正的问题是缺少对照标准。需要你决定下一步。",
+        to=["human"],
+    )
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": (
+            "❯ 分析下最新的3.0，还有什么问题\n"
+            "真正的问题是缺少对照标准。需要你决定下一步。\n"
+            "※ recap: 分析完 agent-cockpit 3.0。\n"
+            "Jump to bottom (ctrl+End) ↓\n"
+            "➜  agent-cockpit git:(main✗)  ⏱ 25h51m\n"
+        )},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-3")
+    rows = client.get("/api/chat/sessions/chat-3/mail", headers=_headers()).json()["messages"]
+    assert len(rows) == 1
+    assert "真正的问题是缺少对照标准" in rows[0]["text"]
+    assert "分析下最新的3.0" not in rows[0]["text"]
+    assert "Jump to bottom" not in rows[0]["text"]
+
+
+def test_process_narration_is_hidden_from_mail():
+    assert server._is_process_narration(
+        "先看瀑布流里我自己发出去的内容，对照账本和展示规则，再改乱的那一层。"
+    )
+    assert server._is_process_narration("接着改 harvest：idle 停留不再追加，并把测试补上。")
+    assert server._is_process_narration(
+        "stay_idle 会把 Claude 空闲时写出的新结论也挡掉。回放的根因是页脚/计时器让 digest 一直变，剥干净就够了。"
+    )
+    assert server._is_process_narration("测试过了。接着核对现场展示，并独立重载 8790。")
+    assert not server._is_process_narration(
+        "对，那串不是给人记的。已经改了。登录现在是自己定的短密码，不是 32 位随机令牌。"
+    )
+    served = server._ledger_chat_mail({
+        "id": "msg_proc", "session": "cockpit", "kind": "agent",
+        "sender": "BrownDesert",
+        "text": "working 转 idle 时应落在同一条气泡上，避免又开一条。接着改这一点，并再核对现场抽取。",
+        "to": ["human"], "ts": 1,
+    })
+    assert served is None
+
+
+def test_harvest_working_does_not_keep_process_bubbles(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-one-bubble", "chat-4")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    panes = [{
+        "session": "chat-4",
+        "pane_id": "w1:p1",
+        "agent": "grok",
+        "agent_status": "working",
+        "mail_name": "BrownDesert",
+        "display_name": "BrownDesert",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": "先核对共享记忆和现场账本。"},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-4")
+    first = client.get("/api/chat/sessions/chat-4/mail", headers=_headers()).json()["messages"]
+    assert first == []
+    panes[0]["agent_status"] = "idle"
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": "结论：Claude 空闲回放已挡住，瀑布流只留这一条。"},
+    )
+    server._harvest_settled_replies("chat-4")
+    third = client.get("/api/chat/sessions/chat-4/mail", headers=_headers()).json()["messages"]
+    assert len(third) == 1
+    assert "空闲回放已挡住" in third[0]["text"]
+
+
+def test_harvest_idle_already_collected_does_not_reread(isolated_ledger, monkeypatch):
+    _workspace_with_thread(_client(), isolated_ledger / "harvest-skip-reread", "scc-1")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    server._PANE_LAST_STATUS[("scc-1", "w1:p2")] = "idle"
+    server._PANE_LAST_HARVEST[("scc-1", "w1:p2")] = "already"
+    panes = [{
+        "session": "scc-1",
+        "pane_id": "w1:p2",
+        "agent": "grok",
+        "agent_status": "idle",
+        "mail_name": "DarkBrook",
+        "display_name": "grok-1",
+    }]
+    called = {"n": 0}
+
+    def boom(*_a, **_k):
+        called["n"] += 1
+        raise AssertionError("idle 已收过不得再读终端")
+
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server.herdr_client, "pane_summary", boom)
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("scc-1")
+    assert called["n"] == 0
+
+
+def test_extract_harvest_conclusion_keeps_codex_answer():
+    text = (
+        "• Planning terminal conclusion and session update\n"
+        "• 我已完成报告修正：接下来做记忆库治理校验。\n"
+        "对，你的判断是对的：并行后的聚合模式本身不是这次故障原因。\n"
+        "这次真正的回归是版本 1787067812389 把原先已经验证过的拓扑回退了。\n"
+        "• Explored\n"
+        "│ const fs=require('fs');\n"
+    )
+    conclusion = server._extract_harvest_conclusion(text)
+    assert "并行后的聚合模式本身不是这次故障原因" in conclusion
+    assert "真正的回归" in conclusion
+    assert "Explored" not in conclusion
+    assert "const fs=" not in conclusion
+    mixed = (
+        "• Planning terminal conclusion and session update\n"
+        "        4a1a-3148/REPORT.md`。\n"
+        "===== app97 处理方案 =====\n"
+        "本轮未改线上 JSON、未导入、未发布。\n"
+        "1) 先修 Director 汇聚：新增 variable-aggregator 屏障。\n"
+        "• Explored\n"
+    )
+    plan = server._extract_harvest_conclusion(mixed)
+    assert "===== app97 处理方案 =====" in plan
+    assert "先修 Director 汇聚" in plan
+    assert "Explored" not in plan
+    live = server._extract_harvest_text(
+        "• Planning node extraction with jq\n"
+        "  │ const fs=require('fs');\n"
+        "4. 空 IF 删除\n"
+        "删除节点：\n"
+        "  N1782982672631「各种缓存处理」\n"
+        "验收标准：\n"
+        "  - U182_DIRECTOR_CONTEXT_PACK 只有 1 条入边\n"
+        "• Explored\n"
+    )
+    assert "空 IF 删除" in live
+    assert "U182_DIRECTOR_CONTEXT_PACK" in live
+    assert "const fs=" not in live
+    assert "Explored" not in live
+    served = server._ledger_chat_mail({
+        "id": "msg_scc", "session": "scc-1", "kind": "agent",
+        "sender": "codex-main", "text": text, "to": ["human"], "ts": 1,
+    })
+    assert served is not None
+    assert "并行后的聚合模式本身不是这次故障原因" in served["text"]
+    assert "const fs=" not in served["text"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,16 @@ import pytest
 from agent_cockpit import next_profile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _dev_server():
+    spec = importlib.util.spec_from_file_location(
+        "agent_cockpit_dev_server", ROOT / "scripts" / "dev_server.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _dev_env(home: Path, repo: Path) -> dict[str, str]:
@@ -53,6 +64,11 @@ def test_dev_profile_accepts_this_checkout_on_8790(tmp_path: Path, monkeypatch: 
     env["HERDR_SESSION"] = "cockpit"
     next_profile.validate_server_environment(repo, env)
     assert next_profile.require_session("cockpit", env) == "cockpit"
+    launcher = _dev_server()
+    lan = launcher.dev_values(repo, home, "0.0.0.0")
+    assert lan["COCKPIT_HOST"] == "0.0.0.0"
+    with pytest.raises(next_profile.NextProfileError, match="next_profile_invalid:COCKPIT_HOST"):
+        launcher.dev_values(repo, home, "192.168.1.5")
 
 
 def test_dev_profile_rejects_sandbox_home_and_wrong_port(

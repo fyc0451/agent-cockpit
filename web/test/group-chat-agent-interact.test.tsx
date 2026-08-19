@@ -116,6 +116,24 @@ describe('AgentInteractModal 只读现场流', () => {
     expect(log).toHaveTextContent('four')
   })
 
+  it('窄屏折行在宽现场里按句子回放，不占半列', async () => {
+    render(
+      <AgentInteractModal member={member} session="cockpit" onClose={vi.fn()} />,
+    )
+    await act(async () => {
+      FakeWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: 'snapshot',
+          output: '剩余节点也继续稳定下载，已到约 1.5 MB。发布脚本使用固定 commit。',
+          error: null,
+        }),
+      })
+    })
+    const log = screen.getByRole('log', { name: '只读终端现场' })
+    expect(log).toHaveTextContent('剩余节点也继续稳定下载，已到约 1.5 MB。')
+    expect(log.className).toContain('gc-pane-screen')
+  })
+
   it('现场窗更大，Esc 和关闭都能关掉', () => {
     const onClose = vi.fn()
     render(<AgentInteractModal member={member} session="cockpit" onClose={onClose} />)

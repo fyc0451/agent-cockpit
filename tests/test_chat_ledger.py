@@ -54,7 +54,54 @@ def test_append_and_list_messages_by_session(isolated_ledger):
     rows = chat_ledger.list_messages("demo-1")
     assert [row["id"] for row in rows] == [first["id"], second["id"]]
     assert rows[0]["text"] == "hello"
+    assert rows[0].get("delivery") is None
     assert rows[1]["kind"] == "agent"
+
+
+def test_append_queue_message_and_mark_notified(isolated_ledger):
+    row = chat_ledger.append_message(
+        "demo-1", kind="me", sender="human", text="等你忙完再看",
+        to=["BrownDesert"], delivery="queue",
+    )
+    assert row["delivery"] == "queue"
+    assert "notified_to" not in row
+    marked = chat_ledger.mark_message_notified(row["id"], ["BrownDesert"])
+    assert marked is not None
+    assert marked["notified_to"] == ["BrownDesert"]
+    again = chat_ledger.mark_message_notified(row["id"], ["BrownDesert", "GrayFalcon"])
+    assert again is not None
+    assert again["notified_to"] == ["BrownDesert", "GrayFalcon"]
+    listed = chat_ledger.list_messages("demo-1")
+    assert listed[0]["delivery"] == "queue"
+    assert listed[0]["notified_to"] == ["BrownDesert", "GrayFalcon"]
+    with pytest.raises(ValueError, match="投递类型"):
+        chat_ledger.append_message(
+            "demo-1", kind="me", sender="human", text="坏类型",
+            to=["BrownDesert"], delivery="urgent",
+        )
+
+
+def test_mark_messages_read_and_set_duration(isolated_ledger):
+    row = chat_ledger.append_message(
+        "demo-1", kind="me", sender="human", text="看这条",
+        to=["BrownDesert"], delivery="interrupt",
+    )
+    chat_ledger.mark_message_notified(row["id"], ["BrownDesert"])
+    changed = chat_ledger.mark_messages_read("demo-1", "BrownDesert")
+    assert [item["id"] for item in changed] == [row["id"]]
+    listed = chat_ledger.list_messages("demo-1")[0]
+    assert listed["read_by"] == ["BrownDesert"]
+    again = chat_ledger.mark_messages_read("demo-1", "BrownDesert")
+    assert again == []
+    reply = chat_ledger.append_message(
+        "demo-1", kind="agent", sender="BrownDesert", text="收到", to=["human"],
+    )
+    updated = chat_ledger.set_message_duration(reply["id"], 12500)
+    assert updated is not None
+    assert updated["duration_ms"] == 12500
+    assert chat_ledger.list_messages("demo-1")[1]["duration_ms"] == 12500
+    with pytest.raises(ValueError, match="耗时"):
+        chat_ledger.set_message_duration(reply["id"], -1)
 
 
 def test_replace_message_text_updates_same_id(isolated_ledger):

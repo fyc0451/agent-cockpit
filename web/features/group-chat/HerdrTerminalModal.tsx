@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { recordTerminalLine, uploadChatFile } from '../../api/chatSession'
+import { focusedMemberRecipient } from './model'
 import {
   closeHerdrTerminal,
   composeSessionLayout,
@@ -85,10 +86,30 @@ export function HerdrTerminalModal({ session, onClose }: HerdrTerminalModalProps
   const [uploadNote, setUploadNote] = useState<string | null>(null)
   const [fontSize, setFontSize] = useState(loadTermFontSize)
   const applyFontRef = useRef<(size: number) => void>(() => {})
+  const ledgerToRef = useRef<string | null>(null)
   const touch = isTouchTerminal()
 
   // H5 真机触控事件记录仪（?debug=1 门控，无参数时零副作用）。
   useEffect(() => installH5TouchRecorder(), [])
+
+  useEffect(() => {
+    let disposed = false
+    const refresh = async () => {
+      try {
+        const snap = await fetchHerdrSnapshot()
+        if (disposed) return
+        ledgerToRef.current = focusedMemberRecipient(snap, session)
+      } catch {
+        if (!disposed) ledgerToRef.current = null
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => { void refresh() }, 2000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [session])
 
   useEffect(() => {
     if (!fullscreen) return
@@ -190,7 +211,8 @@ export function HerdrTerminalModal({ session, onClose }: HerdrTerminalModalProps
       if (socket?.readyState === WebSocket.OPEN) socket.send(value)
       const next = feedTermLedger(lineBufRef.current, value)
       lineBufRef.current = next.buffer
-      if (next.line) void recordTerminalLine(session, next.line)
+      const dest = ledgerToRef.current
+      if (next.line && dest) void recordTerminalLine(session, next.line, dest)
     })
 
     const connect = async () => {
@@ -276,7 +298,8 @@ export function HerdrTerminalModal({ session, onClose }: HerdrTerminalModalProps
     socket.send(data)
     const next = feedTermLedger(lineBufRef.current, data)
     lineBufRef.current = next.buffer
-    if (next.line) void recordTerminalLine(session, next.line)
+    const dest = ledgerToRef.current
+    if (next.line && dest) void recordTerminalLine(session, next.line, dest)
     return true
   }
 

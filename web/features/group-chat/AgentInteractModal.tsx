@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { paneLiveWebSocketUrl, sendPane } from '../../api/legacyHerdr'
-import { agentEmoji, type ChatMember } from './model'
+import { agentEmoji, unreadCountLabel, type ChatMember } from './model'
 
 interface AgentInteractModalProps {
   member: ChatMember
@@ -136,6 +136,9 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
             <h3 className="gc-modal-title">
               {agentEmoji(member.kind)} {member.name}
               {member.isLeader ? ' · Leader' : ''}
+              {unreadCountLabel(member.unread) && (
+                <span className="gc-unread-badge">{unreadCountLabel(member.unread)} 未读</span>
+              )}
             </h3>
             <p className="gc-modal-sub">
               {member.kind}

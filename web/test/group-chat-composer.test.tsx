@@ -169,4 +169,26 @@ describe('Composer 附件与 Skill 菜单', () => {
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '展开输入框' })).toBeInTheDocument()
   })
+
+  it('可切换打断和排队，发送时带上当前类型', async () => {
+    const onSend = vi.fn()
+    await act(async () => {
+      render(
+        <Composer
+          members={[]}
+          leader={null}
+          value="先记下"
+          onChange={vi.fn()}
+          onSend={onSend}
+          onAttach={vi.fn()}
+          disabled={false}
+        />,
+      )
+    })
+    expect(screen.getByRole('radio', { name: '打断' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByRole('radio', { name: '排队' }))
+    expect(screen.getByRole('radio', { name: '排队' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByTitle('排队发送（Enter）'))
+    expect(onSend).toHaveBeenCalledWith('queue')
+  })
 })

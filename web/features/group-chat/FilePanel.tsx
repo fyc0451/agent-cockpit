@@ -172,7 +172,7 @@ export function FilePanel({ session, root, open, embedded, onPreview, onClose }:
 
       <input
         className="gc-files-search"
-        placeholder="搜索文件名…"
+        placeholder="搜索文件名或目录…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
@@ -190,7 +190,7 @@ export function FilePanel({ session, root, open, embedded, onPreview, onClose }:
             >
               <span className="gc-tree-caret" aria-hidden />
               <span aria-hidden>{r.type === 'dir' ? '📁' : '📄'}</span>
-              <span className="gc-tree-name">{r.name}</span>
+              <span className="gc-tree-name">{r.relative || r.name}</span>
             </button>
           ))}
         </div>

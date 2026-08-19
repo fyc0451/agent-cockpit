@@ -1,6 +1,18 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { vi } from 'vitest'
 import { MemberPanel } from '../features/group-chat/MemberPanel'
+
+vi.mock('../api/legacyHerdr', async () => {
+  const actual = await vi.importActual<typeof import('../api/legacyHerdr')>('../api/legacyHerdr')
+  return {
+    ...actual,
+    closePane: vi.fn(),
+    restartPane: vi.fn(),
+    startAgent: vi.fn(),
+  }
+})
+
+import { closePane, restartPane } from '../api/legacyHerdr'
 
 const baseProps = {
   members: [],
@@ -86,5 +98,77 @@ describe('MemberPanel Herdr 终端入口', () => {
     fireEvent.click(screen.getByRole('button', { name: '终端' }))
     expect(onOpenTerminal).toHaveBeenCalledOnce()
     expect(onInteract).not.toHaveBeenCalled()
+  })
+
+  it('成员关闭走 DELETE pane，成功后刷新成员', async () => {
+    const onChanged = vi.fn()
+    vi.mocked(closePane).mockResolvedValue({ closed: '%codex' })
+    window.confirm = vi.fn(() => true)
+    render(
+      <MemberPanel
+        {...baseProps}
+        members={[member('codex')]}
+        session="demo-1"
+        onOpenTerminal={vi.fn()}
+        onChanged={onChanged}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭 codex-member' }))
+    expect(window.confirm).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(closePane).toHaveBeenCalledWith('demo-1', '%codex')
+      expect(onChanged).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('成员重启走 POST restart，成功后刷新成员', async () => {
+    const onChanged = vi.fn()
+    vi.mocked(restartPane).mockResolvedValue({ pane_id: '%codex' })
+    window.confirm = vi.fn(() => true)
+    render(
+      <MemberPanel
+        {...baseProps}
+        members={[member('codex')]}
+        session="demo-1"
+        onOpenTerminal={vi.fn()}
+        onChanged={onChanged}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '重启 codex-member' }))
+    expect(window.confirm).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(restartPane).toHaveBeenCalledWith('demo-1', '%codex')
+      expect(onChanged).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('重启和关闭按钮都在成员操作区，桌面靠悬停露出', () => {
+    const { container } = render(
+      <MemberPanel
+        {...baseProps}
+        members={[member('codex')]}
+        session="demo-1"
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole('button', { name: '重启 codex-member' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '关闭 codex-member' })).toBeInTheDocument()
+    expect(container.querySelector('.gc-member-ops')).not.toBeNull()
+    expect(container.querySelector('.gc-member-op--extra')).toBeNull()
+  })
+
+  it('成员有未读时露出条数', () => {
+    render(
+      <MemberPanel
+        {...baseProps}
+        members={[{ ...member('grok'), unread: 2 }]}
+        session="demo-1"
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+    expect(screen.getByTitle('@grok-member · 空闲 · 2 条未读')).toBeInTheDocument()
+    expect(document.querySelector('.gc-unread-badge')?.textContent).toBe('2')
   })
 })

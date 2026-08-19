@@ -17,6 +17,9 @@ export interface ChatMember {
   status: string // idle | working | blocked | done | unknown
   cwd: string
   isLeader: boolean
+  turnStartedMs?: number
+  activity?: string
+  unread?: number
 }
 
 export function leftoverMemberName(name: string, agent: string): boolean {
@@ -70,8 +73,24 @@ export function membersOfSession(snapshot: HerdrSnapshot | null, session: string
       status: p.agent_status === 'done' ? 'idle' : p.agent_status || 'unknown',
       cwd: p.cwd,
       isLeader: false,
+      turnStartedMs: p.turn_started_ms,
+      activity: p.activity,
+      unread: p.unread,
     }
   })
+}
+
+/** 焦点必须正好落在本群一个 agent pane 上，才把终端输入记进瀑布流。空 shell 不记。 */
+export function focusedMemberRecipient(
+  snapshot: HerdrSnapshot | null,
+  session: string,
+): string | null {
+  if (!snapshot || !session) return null
+  const focused = snapshot.panes.filter((pane) => pane.session === session && pane.focused)
+  if (focused.length !== 1 || !focused[0].agent) return null
+  const member = membersOfSession(snapshot, session).find((item) => item.paneId === focused[0].pane_id)
+  if (!member) return null
+  return member.mailName || member.name || null
 }
 
 // ---------- leader：第一个加入的 agent；localStorage 持久化，pane 消失后重算 ----------
@@ -94,14 +113,29 @@ export function saveLeaderPaneId(session: string, paneId: string): void {
   }
 }
 
-/** 标记 leader：已存且仍在群中 → 用之；否则取第一个成员并落盘 */
-export function withLeader(session: string, members: ChatMember[]): ChatMember[] {
+function leaderNameOf(member: ChatMember): string {
+  return (member.mailName || member.name || '').trim()
+}
+
+/** 标记 leader：登记花名优先；没有才退回 localStorage / 第一个成员 */
+export function withLeader(
+  session: string,
+  members: ChatMember[],
+  registered?: { mail_name?: string } | null,
+): ChatMember[] {
   if (members.length === 0) return members
+  const registeredName = (registered?.mail_name || '').trim()
+  const registeredHit = registeredName
+    ? members.find((m) => {
+        const name = leaderNameOf(m)
+        return name.toLowerCase() === registeredName.toLowerCase()
+      })
+    : undefined
   const stored = loadLeaderPaneId(session)
-  const hit = stored ? members.find((m) => m.paneId === stored) : undefined
-  const leaderId = hit ? hit.paneId : members[0].paneId
-  if (leaderId !== stored) saveLeaderPaneId(session, leaderId)
-  return members.map((m) => ({ ...m, isLeader: m.paneId === leaderId }))
+  const storedHit = stored ? members.find((m) => m.paneId === stored) : undefined
+  const leader = registeredHit || storedHit || members[0]
+  if (leader.paneId !== stored) saveLeaderPaneId(session, leader.paneId)
+  return members.map((m) => ({ ...m, isLeader: m.paneId === leader.paneId }))
 }
 
 // ---------- @ 解析 ----------
@@ -293,10 +327,55 @@ export function restoreBoxTables(raw: string): string {
   return out.join('\n')
 }
 
+/** 终端把长路径从连字符或斜杠处折开时，拼回可点的一条。 */
+export function joinBrokenFilePaths(raw: string): string {
+  const lines = raw.split('\n')
+  const out: string[] = []
+  for (const line of lines) {
+    const prev = out[out.length - 1]
+    const lastToken = prev?.trimEnd().split(/\s+/).pop() || ''
+    const cont = line.match(/^\s+([\w./\\-]+)(.*)$/)
+    if (
+      prev
+      && cont
+      && /[\/\\]/.test(lastToken)
+      && /[-/\\]$/.test(lastToken)
+      && !/https?:\/\//.test(lastToken)
+      && /[\w./\\-]{2,}/.test(cont[1])
+    ) {
+      out[out.length - 1] = `${prev.replace(/\s+$/, '')}${cont[1]}${cont[2]}`
+      continue
+    }
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
+const FILE_PATH = /(?:~\/|\.\/|\/(?:home|mnt|Users|opt|var|tmp|usr|etc)\/|(?:[A-Za-z]:\\)|(?:[\w.-]+\/)+)[\w./\\-]*[\w.-]+\.[A-Za-z0-9]{1,12}/g
+
+export function splitFilePaths(
+  text: string,
+): Array<{ type: 'text' | 'path'; text: string }> {
+  const parts: Array<{ type: 'text' | 'path'; text: string }> = []
+  const mark = new RegExp(FILE_PATH.source, 'g')
+  let last = 0
+  let match: RegExpExecArray | null
+  while ((match = mark.exec(text))) {
+    if (match.index > last) {
+      parts.push({ type: 'text', text: text.slice(last, match.index) })
+    }
+    parts.push({ type: 'path', text: match[0] })
+    last = match.index + match[0].length
+  }
+  if (last < text.length) parts.push({ type: 'text', text: text.slice(last) })
+  return parts.filter((part) => part.text.length > 0)
+}
+
 /** 收获/粘贴挤成一行时，按分节和命令拆开，贴近终端排版。 */
 export function reflowMessageText(raw: string): string {
   let text = stripAgentTuiFooter(raw.replace(/\r\n/g, '\n').trim())
   text = restoreBoxTables(text)
+  text = joinBrokenFilePaths(text)
   text = text.replace(/^ {4,}/gm, '')
   text = text.replace(/^([^\n]{1,16}?)\s+(N\d{8,}\b.*)$/gm, '$1\n$2')
   const jammed = (text.match(/\n/g) || []).length < 2
@@ -344,14 +423,14 @@ export function splitSectionHeading(line: string): { title: string; rest: string
 
 export function splitInlineMarks(
   text: string,
-): Array<{ type: 'text' | 'code' | 'strong'; text: string }> {
-  const parts: Array<{ type: 'text' | 'code' | 'strong'; text: string }> = []
+): Array<{ type: 'text' | 'code' | 'strong' | 'path'; text: string }> {
+  const parts: Array<{ type: 'text' | 'code' | 'strong' | 'path'; text: string }> = []
   const mark = /(\*\*[^*]+\*\*|`[^`]+`|\$\{[^}\n]+\})/g
   let last = 0
   let match: RegExpExecArray | null
   while ((match = mark.exec(text))) {
     if (match.index > last) {
-      parts.push({ type: 'text', text: text.slice(last, match.index) })
+      parts.push(...splitFilePaths(text.slice(last, match.index)))
     }
     if (match[0].startsWith('**')) {
       parts.push({ type: 'strong', text: match[0].slice(2, -2) })
@@ -362,7 +441,7 @@ export function splitInlineMarks(
     }
     last = match.index + match[0].length
   }
-  if (last < text.length) parts.push({ type: 'text', text: text.slice(last) })
+  if (last < text.length) parts.push(...splitFilePaths(text.slice(last)))
   return parts.filter((part) => part.text.length > 0)
 }
 
@@ -617,6 +696,71 @@ export function clipboardImageFile(
   return null
 }
 
+export type ChatDelivery = 'interrupt' | 'queue'
+
+export function normalizeChatDelivery(value: unknown): ChatDelivery | undefined {
+  return value === 'queue' || value === 'interrupt' ? value : undefined
+}
+
+export function chatDeliveryLabel(delivery: ChatDelivery | undefined): string | null {
+  if (delivery === 'interrupt') return '打断'
+  if (delivery === 'queue') return '排队'
+  return null
+}
+
+export type ChatReceipt = 'queued' | 'sent' | 'read'
+
+export function chatReceiptOf(
+  mailTo: string[],
+  notifiedTo?: string[],
+  readBy?: string[],
+  delivery?: ChatDelivery,
+): ChatReceipt | undefined {
+  const dests = mailTo.filter(Boolean)
+  if (dests.length === 0) return undefined
+  const notified = new Set(notifiedTo || [])
+  const read = new Set(readBy || [])
+  if (dests.every((name) => read.has(name))) return 'read'
+  if (dests.some((name) => notified.has(name))) return 'sent'
+  if (delivery === 'queue' || delivery === 'interrupt') return 'queued'
+  return undefined
+}
+
+export function chatReceiptLabel(receipt: ChatReceipt | undefined): string | null {
+  if (receipt === 'queued') return '排队中'
+  if (receipt === 'sent') return '已送达'
+  if (receipt === 'read') return '已读'
+  return null
+}
+
+export function formatChatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  const total = Math.max(0, Math.round(ms / 1000))
+  if (total < 60) return `${total}秒`
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  if (minutes < 60) return seconds > 0 ? `${minutes}分${seconds}秒` : `${minutes}分`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest > 0 ? `${hours}小时${rest}分` : `${hours}小时`
+}
+
+export function liveTurnLine(member: ChatMember, now = Date.now()): string {
+  const elapsed = member.turnStartedMs
+    ? formatChatDuration(now - member.turnStartedMs)
+    : ''
+  if (member.status === 'blocked') {
+    return elapsed ? `等你确认 · 已 ${elapsed}` : '等你确认'
+  }
+  const activity = (member.activity || '').trim() || '正在回复'
+  return elapsed ? `${activity} · ${elapsed}` : activity
+}
+
+export function unreadCountLabel(count: number | undefined): string | null {
+  if (!count || count <= 0) return null
+  return count > 99 ? '99+' : String(count)
+}
+
 export interface MailMessage {
   id: string | number
   sender: string
@@ -625,11 +769,34 @@ export interface MailMessage {
   to: string[]
   thread?: string
   ts: number
+  delivery?: ChatDelivery
+  notified_to?: string[]
+  read_by?: string[]
+  duration_ms?: number
 }
 
 export function mailTimestamp(ts: number): number {
   if (!Number.isFinite(ts) || ts <= 0) return 0
   return ts < 1_000_000_000_000 ? ts * 1000 : ts
+}
+
+/** 当天只显示时分；隔日带月日，避免昨晚的气泡看起来像今早刚发。 */
+export function formatChatClock(ts: number, now = Date.now()): string {
+  const stamp = mailTimestamp(ts)
+  if (!stamp) return ''
+  const date = new Date(stamp)
+  const current = new Date(now)
+  const time = date.toLocaleTimeString('zh-CN', {
+    hour12: false, hour: '2-digit', minute: '2-digit',
+  })
+  const sameDay = (
+    date.getFullYear() === current.getFullYear()
+    && date.getMonth() === current.getMonth()
+    && date.getDate() === current.getDate()
+  )
+  if (sameDay) return time
+  const day = date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+  return `${day} ${time}`
 }
 
 export function isHumanSender(sender: string): boolean {
@@ -683,6 +850,8 @@ export type MailEntry =
       to: string[]
       mailTo: string[]
       ts: number
+      delivery?: ChatDelivery
+      receipt?: ChatReceipt
     }
   | {
       id: string
@@ -694,6 +863,8 @@ export type MailEntry =
       text: string
       to: string[]
       ts: number
+      durationMs?: number
+      unread?: number
     }
 
 /** Agent Mail 一封邮 → 瀑布流一条气泡。 */
@@ -707,6 +878,7 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
     const id = rawId.startsWith('pane:') || rawId.startsWith('mail:') ? rawId : `mail:${rawId}`
     const targets = displayReplyTargets(message.to, members)
     if (isHumanSender(message.sender)) {
+      if (message.to.length === 1 && message.to[0] === '终端') continue
       out.push({
         id,
         kind: 'me',
@@ -714,6 +886,11 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
         to: targets,
         mailTo: message.to,
         ts,
+        delivery: normalizeChatDelivery(message.delivery),
+        receipt: chatReceiptOf(
+          message.to, message.notified_to, message.read_by,
+          normalizeChatDelivery(message.delivery),
+        ),
       })
       continue
     }
@@ -730,6 +907,8 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
       text,
       to: targets,
       ts,
+      durationMs: typeof message.duration_ms === 'number' ? message.duration_ms : undefined,
+      unread: member?.unread,
     })
   }
   return out
@@ -743,7 +922,7 @@ export function mailCoversLocalMe(
 }
 
 const OVERSEER_PREAMBLE = /---\s*\n\s*🚨\s*MESSAGE FROM HUMAN OVERSEER 🚨[\s\S]*?The human's guidance supersedes all other priorities\.\s*\n\s*---\s*/giu
-const BOSS_HINT = /^[ \t❯]*Boss 在群聊给你发了消息[^\n]*(?:\n+[ \t]*(?:请直接做|请用 mail-recv|结论写在终端|本群 Leader 是|给 Leader 写信|需要写信时|不要写 grok-main)[^\n]*)*/mu
+const BOSS_HINT = /^[ \t❯]*Boss 在群聊给你(?:发了|排了一条)消息[^\n]*(?:\n+[ \t]*(?:请直接做|请做完手头事|请用 mail-recv|结论写在终端|本群 Leader 是|给 Leader 写信|需要写信时|不要写 grok-main)[^\n]*)*/mu
 const META_COMMENT = /<!--\s*agent-cockpit-meta:[\s\S]*?-->\s*/gu
 const COPIED_OVERSEER_CHROME = /(?:^|\n)@\S+\s*\nHumanOverseer\s*\nWebUI\s*\n\d{1,2}:\d{2}\s*\n---\s*\n/u
 
@@ -845,6 +1024,7 @@ export function typingEntries(
   text: string
   to: string[]
   ts: number
+  unread?: number
 }> {
   return members.filter(isBusyMember).map((member) => ({
     id: `typing:${member.paneId}`,
@@ -853,9 +1033,10 @@ export function typingEntries(
     name: member.name,
     agentKind: member.kind,
     isLeader: member.isLeader,
-    text: member.status === 'blocked' ? '需要你确认，点「看现场」处理' : '正在回复…',
+    text: liveTurnLine(member, now),
     to: [],
     ts: now,
+    unread: member.unread,
   }))
 }
 

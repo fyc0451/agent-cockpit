@@ -711,8 +711,20 @@ def _list_dir_path(path: Path) -> dict[str, Any]:
     return {"path": str(path), "entries": entries}
 
 
+def _normalize_search_query(query: str) -> tuple[str, bool]:
+    raw = query.replace("\\", "/").strip()
+    return raw.strip("/").casefold(), raw.endswith("/")
+
+
+def _search_name_or_path(name: str, relative: str, needle: str, prefix: bool) -> bool:
+    rel = relative.replace("\\", "/").casefold()
+    if prefix:
+        return rel == needle or rel.startswith(f"{needle}/")
+    return needle in name.casefold() or needle in rel
+
+
 def search_files(rel: str, query: str, limit: int = 100) -> dict[str, Any]:
-    """在白名单目录内递归按名称搜索文件和目录。"""
+    """在白名单目录内递归按文件名或相对路径搜索文件和目录。"""
     return _search_files_path(_resolve(rel), query, limit)
 
 
@@ -729,7 +741,7 @@ def search_files_from_trusted_root(
         start_fd = _open_from_bound_root(root_fd, parts, directory=True)
         _close_trusted_fd(start_fd)
         path = root_path.joinpath(*parts)
-        needle = query.casefold()
+        needle, prefix = _normalize_search_query(query)
         results: list[dict[str, Any]] = []
         scanned = 0
         truncated = False
@@ -747,12 +759,13 @@ def search_files_from_trusted_root(
                         truncated = True
                         break
                     item_parts = (*current_parts, name)
-                    if needle in name.casefold():
-                        relative_parts = item_parts[len(parts):]
+                    relative_parts = item_parts[len(parts):]
+                    relative = "/".join(relative_parts)
+                    if _search_name_or_path(name, relative, needle, prefix):
                         results.append({
                             "name": name,
                             "path": str(root_path.joinpath(*item_parts)),
-                            "relative": "/".join(relative_parts),
+                            "relative": relative,
                             "type": kind,
                             "size": st.st_size if kind == "file" else 0,
                             "modifiable": (
@@ -798,7 +811,7 @@ def _search_files_path(root: Path, query: str, limit: int = 100) -> dict[str, An
     if not root.is_dir():
         raise ValueError(f"搜索范围不是目录: {root}")
 
-    needle = query.casefold()
+    needle, prefix = _normalize_search_query(query)
     results: list[dict[str, Any]] = []
     scanned = 0
     truncated = False
@@ -827,7 +840,8 @@ def _search_files_path(root: Path, query: str, limit: int = 100) -> dict[str, An
                 truncated = True
                 stop = True
                 break
-            if needle not in name.casefold():
+            relative = str(item.relative_to(root)).replace("\\", "/")
+            if not _search_name_or_path(name, relative, needle, prefix):
                 continue
             try:
                 if kind == "dir":
@@ -846,7 +860,7 @@ def _search_files_path(root: Path, query: str, limit: int = 100) -> dict[str, An
             results.append({
                 "name": name,
                 "path": str(item),
-                "relative": str(item.relative_to(root)),
+                "relative": relative,
                 "type": kind,
                 "size": size,
                 "modifiable": modifiable,

@@ -22,7 +22,7 @@ describe('AuthGate', () => {
     render(<AuthGate><div>应用已加载</div></AuthGate>)
 
     expect(await screen.findByText('应用已加载')).toBeInTheDocument()
-    expect(screen.queryByLabelText('访问令牌')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('密码')).not.toBeInTheDocument()
   })
 
   it('需要 token 时登录成功后进入应用，且不持久化 token', async () => {
@@ -42,13 +42,11 @@ describe('AuthGate', () => {
     const user = userEvent.setup()
 
     render(<AuthGate><div>应用已加载</div></AuthGate>)
-    const input = await screen.findByLabelText('访问令牌')
-    // 零知识 LAN 用户可行动说明：非账号密码、管理员提供、本机获取路径、禁止外发
-    expect(screen.getByText(/这不是账号密码/)).toBeInTheDocument()
-    expect(screen.getByText(/管理员提供/)).toBeInTheDocument()
+    const input = await screen.findByLabelText('密码')
+    expect(screen.getByText(/自己定的短密码/)).toBeInTheDocument()
     expect(screen.getByText(/\.config\/agent-cockpit\/cockpit\.token/)).toBeInTheDocument()
     expect(screen.getByText(/cockpit\.token/)).toBeInTheDocument()
-    expect(screen.getByText(/请勿把令牌发到聊天或项目文件中/)).toBeInTheDocument()
+    expect(screen.getByText(/不要发到聊天或项目文件里/)).toBeInTheDocument()
     await user.type(input, 'test-token-value')
     await user.click(screen.getByRole('button', { name: '登录' }))
 
@@ -74,10 +72,10 @@ describe('AuthGate', () => {
     const user = userEvent.setup()
 
     render(<AuthGate><div>应用已加载</div></AuthGate>)
-    await user.type(await screen.findByLabelText('访问令牌'), 'wrong-token')
+    await user.type(await screen.findByLabelText('密码'), 'wrong-token')
     await user.click(screen.getByRole('button', { name: '登录' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('访问令牌无效')
+    expect(await screen.findByRole('alert')).toHaveTextContent('密码不对')
     expect(screen.queryByText('应用已加载')).not.toBeInTheDocument()
   })
 
@@ -112,7 +110,7 @@ describe('AuthGate', () => {
       reportUnauthorized()
     })
     expect(screen.getByText('应用已加载')).toBeInTheDocument()
-    expect(screen.getByLabelText('访问令牌')).toBeInTheDocument()
+    expect(screen.getByLabelText('密码')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('登录已失效。输入还在下面，登录后不用重打。')
   })
 })

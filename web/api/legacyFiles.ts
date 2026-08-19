@@ -33,6 +33,7 @@ export interface SearchResult {
   path: string
   name: string
   type: string
+  relative?: string
 }
 
 function fail(field: string): never {
@@ -107,7 +108,12 @@ export async function searchFiles(path: string, q: string): Promise<SearchResult
     if (!isObj(r)) return []
     const p = optStr(r.path)
     if (!p) return []
-    return [{ path: p, name: optStr(r.name) || p.split('/').pop() || p, type: optStr(r.type) || 'file' }]
+    return [{
+      path: p,
+      name: optStr(r.name) || p.split('/').pop() || p,
+      type: optStr(r.type) || 'file',
+      relative: optStr(r.relative) || undefined,
+    }]
   })
 }
 

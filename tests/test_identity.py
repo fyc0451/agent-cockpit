@@ -497,6 +497,53 @@ def test_board_snapshot_keeps_same_kind_managed_instances_separate(monkeypatch, 
     assert seen == [("/project", "codex", first), ("/project", "codex", second)]
 
 
+def test_board_snapshot_uses_descriptor_mail_name_when_registry_misses(
+    monkeypatch, tmp_path,
+):
+    instance_id = "i-7h657f4kbfpr3uujhfpe3wikha"
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
+    server.herdr_client.save_launch_descriptor(
+        session="pitapat-video-platform-1", pane_id="w1:p4",
+        name=instance_id, kind="grok", args=[], agent="grok",
+        instance_id=instance_id, display_name="grok",
+    )
+    server.herdr_client.update_launch_descriptor_by_instance(
+        instance_id, mail_agent="grok", mail_instance=instance_id,
+        mail_name="RusticEagle",
+        mail_project="/home/fyc/pitapat/pitapat-video-platform",
+    )
+    snapshot = {
+        "sessions": [{
+            "session": "pitapat-video-platform-1",
+            "directory": "/sessions/pitapat",
+        }],
+        "panes": [
+            {
+                "session": "pitapat-video-platform-1", "pane_id": "w1:p3",
+                "agent": "grok", "mail_name": "TurquoiseBay",
+            },
+            {
+                "session": "pitapat-video-platform-1", "pane_id": "w1:p4",
+                "agent": "grok",
+            },
+        ],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: snapshot)
+    monkeypatch.setattr(server.herdr_client, "list_active_launch_descriptors", lambda: [])
+    monkeypatch.setattr(
+        server.mail_projects, "get",
+        lambda *_: "/home/fyc/pitapat/pitapat-video-platform",
+    )
+    monkeypatch.setattr(server, "_identity_name", lambda *_a, **_k: None)
+
+    result = server._enrich_board_identities(snapshot)
+    names = {pane["pane_id"]: pane.get("mail_name") for pane in result["panes"]}
+    assert names["w1:p3"] == "TurquoiseBay"
+    assert names["w1:p4"] == "RusticEagle"
+
+
 def test_board_snapshot_uses_descriptor_product_for_zcode_registry(monkeypatch, tmp_path):
     instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
     monkeypatch.setenv(

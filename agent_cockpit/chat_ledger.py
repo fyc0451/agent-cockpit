@@ -21,7 +21,11 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _WORKSPACE_FIELDS = frozenset({"id", "path", "title", "created_at", "order"})
 _THREAD_FIELDS = frozenset({"id", "workspace_id", "herdr_session", "title", "created_at"})
 _MESSAGE_FIELDS = frozenset({"id", "session", "kind", "sender", "text", "to", "ts"})
+_OPTIONAL_MESSAGE_FIELDS = frozenset({
+    "delivery", "notified_to", "read_by", "duration_ms",
+})
 _MESSAGE_KINDS = frozenset({"me", "agent", "event", "error"})
+_MESSAGE_DELIVERIES = frozenset({"interrupt", "queue"})
 _MAX_MESSAGES = 500
 
 
@@ -259,8 +263,19 @@ def get_thread_by_session(herdr_session: str) -> dict[str, Any] | None:
     return None
 
 
+def normalize_delivery(value: Any) -> str:
+    if value in _MESSAGE_DELIVERIES:
+        return str(value)
+    if value in (None, ""):
+        return "interrupt"
+    raise ValueError("群聊消息投递类型无效")
+
+
 def _validate_message(row: Any) -> dict[str, Any]:
-    if not isinstance(row, dict) or set(row) != _MESSAGE_FIELDS:
+    if not isinstance(row, dict):
+        raise ValueError("群聊消息字段无效")
+    keys = set(row)
+    if not _MESSAGE_FIELDS <= keys or not keys <= (_MESSAGE_FIELDS | _OPTIONAL_MESSAGE_FIELDS):
         raise ValueError("群聊消息字段无效")
     if not isinstance(row["id"], str) or not re.fullmatch(r"msg_[0-9a-f]{12}", row["id"]):
         raise ValueError("群聊消息 ID 无效")
@@ -276,7 +291,7 @@ def _validate_message(row: Any) -> dict[str, Any]:
         raise ValueError("群聊消息收件人无效")
     if type(row["ts"]) is not int or row["ts"] < 0:
         raise ValueError("群聊消息时间无效")
-    return {
+    out: dict[str, Any] = {
         "id": row["id"],
         "session": row["session"],
         "kind": row["kind"],
@@ -285,6 +300,28 @@ def _validate_message(row: Any) -> dict[str, Any]:
         "to": list(row["to"]),
         "ts": row["ts"],
     }
+    if "delivery" in row:
+        out["delivery"] = normalize_delivery(row["delivery"])
+    if "notified_to" in row:
+        dests = row["notified_to"]
+        if not isinstance(dests, list) or any(
+            not isinstance(item, str) or not item.strip() for item in dests
+        ):
+            raise ValueError("群聊消息投递记录无效")
+        out["notified_to"] = [item.strip() for item in dests]
+    if "read_by" in row:
+        dests = row["read_by"]
+        if not isinstance(dests, list) or any(
+            not isinstance(item, str) or not item.strip() for item in dests
+        ):
+            raise ValueError("群聊消息已读记录无效")
+        out["read_by"] = [item.strip() for item in dests]
+    if "duration_ms" in row:
+        duration = row["duration_ms"]
+        if type(duration) is not int or duration < 0:
+            raise ValueError("群聊消息耗时无效")
+        out["duration_ms"] = duration
+    return out
 
 
 def _load_messages() -> dict[str, Any]:
@@ -322,6 +359,10 @@ def append_message(
     text: str,
     to: list[str] | None = None,
     ts: int | None = None,
+    delivery: str | None = None,
+    notified_to: list[str] | None = None,
+    read_by: list[str] | None = None,
+    duration_ms: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
         raise ValueError("herdr_session 无效")
@@ -332,7 +373,7 @@ def append_message(
         body = body[:16_384]
     recipients = [item.strip() for item in (to or []) if isinstance(item, str) and item.strip()]
     stamp = int(ts) if isinstance(ts, int) and ts >= 0 else int(datetime.now(timezone.utc).timestamp() * 1000)
-    row = {
+    row: dict[str, Any] = {
         "id": _new_id("msg_"),
         "session": session,
         "kind": kind,
@@ -341,6 +382,18 @@ def append_message(
         "to": recipients,
         "ts": stamp,
     }
+    if delivery is not None:
+        row["delivery"] = normalize_delivery(delivery)
+    if notified_to:
+        row["notified_to"] = [
+            item.strip() for item in notified_to if isinstance(item, str) and item.strip()
+        ]
+    if read_by:
+        row["read_by"] = [
+            item.strip() for item in read_by if isinstance(item, str) and item.strip()
+        ]
+    if duration_ms is not None:
+        row["duration_ms"] = duration_ms
     row = _validate_message(row)
     with _lock:
         data = _load_messages()
@@ -367,6 +420,85 @@ def replace_message_text(message_id: str, text: str) -> dict[str, Any] | None:
                 continue
             updated = dict(row)
             updated["text"] = body
+            data["messages"][index] = _validate_message(updated)
+            _write("chat_messages", data)
+            return dict(data["messages"][index])
+    return None
+
+
+def mark_message_notified(message_id: str, recipients: list[str]) -> dict[str, Any] | None:
+    """排队消息投递后记下已叫醒的收件人，避免空闲后再推一次。"""
+    if not isinstance(message_id, str) or not re.fullmatch(r"msg_[0-9a-f]{12}", message_id):
+        raise ValueError("群聊消息 ID 无效")
+    extra = [item.strip() for item in recipients if isinstance(item, str) and item.strip()]
+    if not extra:
+        return None
+    with _lock:
+        data = _load_messages()
+        for index, row in enumerate(data["messages"]):
+            if row["id"] != message_id:
+                continue
+            updated = dict(row)
+            seen = {item for item in (updated.get("notified_to") or []) if isinstance(item, str)}
+            for item in extra:
+                seen.add(item)
+            updated["notified_to"] = sorted(seen)
+            data["messages"][index] = _validate_message(updated)
+            _write("chat_messages", data)
+            return dict(data["messages"][index])
+    return None
+
+
+def mark_messages_read(session: str, recipient: str) -> list[dict[str, Any]]:
+    """对方已开始处理后，把已投递给他的 Boss 消息标成已读。"""
+    if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
+        raise ValueError("herdr_session 无效")
+    dest = recipient.strip() if isinstance(recipient, str) else ""
+    if not dest:
+        return []
+    changed: list[dict[str, Any]] = []
+    with _lock:
+        data = _load_messages()
+        dirty = False
+        for index, row in enumerate(data["messages"]):
+            if row.get("session") != session or row.get("kind") != "me":
+                continue
+            targets = [item for item in (row.get("to") or []) if isinstance(item, str)]
+            if dest not in targets:
+                continue
+            notified = {
+                item for item in (row.get("notified_to") or []) if isinstance(item, str)
+            }
+            if dest not in notified:
+                continue
+            seen = {
+                item for item in (row.get("read_by") or []) if isinstance(item, str)
+            }
+            if dest in seen:
+                continue
+            updated = dict(row)
+            updated["read_by"] = sorted(seen | {dest})
+            data["messages"][index] = _validate_message(updated)
+            changed.append(dict(data["messages"][index]))
+            dirty = True
+        if dirty:
+            _write("chat_messages", data)
+    return changed
+
+
+def set_message_duration(message_id: str, duration_ms: int) -> dict[str, Any] | None:
+    """结论收进账本时记下这一轮用了多久。"""
+    if not isinstance(message_id, str) or not re.fullmatch(r"msg_[0-9a-f]{12}", message_id):
+        raise ValueError("群聊消息 ID 无效")
+    if type(duration_ms) is not int or duration_ms < 0:
+        raise ValueError("群聊消息耗时无效")
+    with _lock:
+        data = _load_messages()
+        for index, row in enumerate(data["messages"]):
+            if row["id"] != message_id:
+                continue
+            updated = dict(row)
+            updated["duration_ms"] = duration_ms
             data["messages"][index] = _validate_message(updated)
             _write("chat_messages", data)
             return dict(data["messages"][index])

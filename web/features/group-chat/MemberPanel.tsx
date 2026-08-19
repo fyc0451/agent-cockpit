@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
-import { startAgent } from '../../api/legacyHerdr'
+import { closePane, restartPane, startAgent } from '../../api/legacyHerdr'
 import { AgentIcon } from './AgentIcon'
 import {
   AGENT_KINDS,
@@ -11,6 +11,7 @@ import {
   avatarColor,
   buildLaunchArgs,
   statusMeta,
+  unreadCountLabel,
   type ChatMember,
   type PermissionMode,
 } from './model'
@@ -181,6 +182,8 @@ export function MemberPanel({
   externalAddSignal,
 }: MemberPanelProps) {
   const [adding, setAdding] = useState(false)
+  const [busy, setBusy] = useState<{ paneId: string; kind: 'close' | 'restart' } | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
   const lastSignalRef = useRef(externalAddSignal)
   useEffect(() => {
     if (externalAddSignal !== undefined && externalAddSignal !== lastSignalRef.current) {
@@ -195,12 +198,13 @@ export function MemberPanel({
 
   const renderAgent = (m: (typeof members)[number]) => {
     const meta = statusMeta(m.status)
+    const unread = unreadCountLabel(m.unread)
     return (
       <div key={m.paneId} className="gc-member-row">
         <button
           type="button"
           className="gc-member"
-          title={`@${m.name} · ${meta.label}`}
+          title={unread ? `@${m.name} · ${meta.label} · ${m.unread} 条未读` : `@${m.name} · ${meta.label}`}
           onClick={() => onMention(m)}
         >
           <span
@@ -209,6 +213,7 @@ export function MemberPanel({
             aria-hidden
           >
             <AgentIcon kind={m.kind} />
+            {unread && <span className="gc-unread-badge gc-unread-badge--avatar">{unread}</span>}
           </span>
           <span className="gc-member-main">
             <span className="gc-member-name">
@@ -218,13 +223,14 @@ export function MemberPanel({
             <span className="gc-member-sub">
               <span className={`gc-dot ${meta.dot}`} aria-hidden />
               {m.kind} · {meta.label}
+              {unread && ` · ${unread} 未读`}
             </span>
           </span>
         </button>
         <span className="gc-member-ops">
           <button
             type="button"
-            className="gc-member-filter"
+            className="gc-member-op"
             title={m.status === 'blocked' ? `处理 ${m.name}` : `打开 ${m.name} 的终端`}
             onClick={() => {
               if (m.status === 'blocked') onInteract(m)
@@ -235,11 +241,65 @@ export function MemberPanel({
           </button>
           <button
             type="button"
-            className="gc-member-filter"
+            className="gc-member-op"
             title={`只看 ${m.name}`}
             onClick={() => onFilter(m)}
           >
             只看TA
+          </button>
+          <button
+            type="button"
+            className="gc-member-op"
+            title={`重启 ${m.name}`}
+            aria-label={`重启 ${m.name}`}
+            disabled={!session || busy !== null}
+            onClick={() => {
+              if (!session || busy) return
+              if (!window.confirm(`重启成员 ${m.name}？当前任务会被打断。`)) return
+              setBusy({ paneId: m.paneId, kind: 'restart' })
+              setActionError(null)
+              void restartPane(session, m.paneId)
+                .then(() => {
+                  onChanged()
+                })
+                .catch((e) => {
+                  setActionError(e instanceof ApiError ? e.message : String(e))
+                })
+                .finally(() => {
+                  setBusy((current) => (
+                    current?.paneId === m.paneId && current.kind === 'restart' ? null : current
+                  ))
+                })
+            }}
+          >
+            {busy?.paneId === m.paneId && busy.kind === 'restart' ? '重启中' : '重启'}
+          </button>
+          <button
+            type="button"
+            className="gc-member-op gc-member-op--danger"
+            title={`关闭 ${m.name}`}
+            aria-label={`关闭 ${m.name}`}
+            disabled={!session || busy !== null}
+            onClick={() => {
+              if (!session || busy) return
+              if (!window.confirm(`关闭成员 ${m.name}？终端会一起关掉。`)) return
+              setBusy({ paneId: m.paneId, kind: 'close' })
+              setActionError(null)
+              void closePane(session, m.paneId)
+                .then(() => {
+                  onChanged()
+                })
+                .catch((e) => {
+                  setActionError(e instanceof ApiError ? e.message : String(e))
+                })
+                .finally(() => {
+                  setBusy((current) => (
+                    current?.paneId === m.paneId && current.kind === 'close' ? null : current
+                  ))
+                })
+            }}
+          >
+            {busy?.paneId === m.paneId && busy.kind === 'close' ? '关闭中' : '关闭'}
           </button>
         </span>
       </div>
@@ -286,6 +346,7 @@ export function MemberPanel({
           </span>
         </div>
         {restAgents.map(renderAgent)}
+        {actionError && <div className="gc-modal-error">{actionError}</div>}
       </div>
       {adding && session && (
         <AddMemberModal

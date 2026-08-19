@@ -9,8 +9,10 @@ from typing import Mapping
 
 
 TOKEN_FILE_NAME = "cockpit.token"
-MAX_TOKEN_BYTES = 256
-TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
+MIN_TOKEN_BYTES = 4
+MAX_TOKEN_BYTES = 64
+# 给人记的短密码：4–64 位字母数字或 _-
+TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{4,64}\Z")
 
 
 class TokenFileError(RuntimeError):
@@ -43,7 +45,7 @@ def load_cockpit_token(values: Mapping[str, str]) -> str | None:
         or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) != 0o600
         or before.st_nlink != 1
-        or before.st_size < 32
+        or before.st_size < MIN_TOKEN_BYTES
         or before.st_size > MAX_TOKEN_BYTES + 1
     ):
         raise TokenFileError("token_file_unsafe")

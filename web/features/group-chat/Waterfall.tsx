@@ -5,6 +5,10 @@ import { AgentIcon } from './AgentIcon'
 import {
   avatarColor,
   canRecallEntry,
+  chatDeliveryLabel,
+  chatReceiptLabel,
+  formatChatClock,
+  formatChatDuration,
   isLiveEntryId,
   layoutMessageBlocks,
   messageFoldPreview,
@@ -12,30 +16,59 @@ import {
   reflowMessageText,
   splitInlineMarks,
   splitMessageParts,
+  unreadCountLabel,
+  type ChatDelivery,
+  type ChatReceipt,
 } from './model'
 
-function InlineText({ text }: { text: string }) {
+function InlineText({
+  text,
+  onOpenPath,
+}: {
+  text: string
+  onOpenPath?: (path: string) => void
+}) {
   return (
     <>
       {splitInlineMarks(text).map((part, index) => {
         if (part.type === 'code') return <code key={index} className="gc-msg-inline">{part.text}</code>
         if (part.type === 'strong') return <strong key={index}>{part.text}</strong>
+        if (part.type === 'path') {
+          if (!onOpenPath) return <span key={index} className="gc-msg-path">{part.text}</span>
+          return (
+            <button
+              key={index}
+              type="button"
+              className="gc-msg-path"
+              title={`打开 ${part.text}`}
+              onClick={() => onOpenPath(part.text)}
+            >
+              {part.text}
+            </button>
+          )
+        }
         return <span key={index}>{part.text}</span>
       })}
     </>
   )
 }
 
-function LayoutBlocks({ text }: { text: string }) {
+function LayoutBlocks({
+  text,
+  onOpenPath,
+}: {
+  text: string
+  onOpenPath?: (path: string) => void
+}) {
   return layoutMessageBlocks(text).map((block, index) => {
     if (block.type === 'heading') {
-      return <div key={index} className="gc-msg-h"><InlineText text={block.text} /></div>
+      return <div key={index} className="gc-msg-h"><InlineText text={block.text} onOpenPath={onOpenPath} /></div>
     }
     if (block.type === 'list') {
       return (
         <ul key={index} className="gc-msg-list">
           {block.items.map((item, itemIndex) => (
-            <li key={itemIndex}><InlineText text={item} /></li>
+            <li key={itemIndex}><InlineText text={item} onOpenPath={onOpenPath} /></li>
           ))}
         </ul>
       )
@@ -47,7 +80,7 @@ function LayoutBlocks({ text }: { text: string }) {
             <thead>
               <tr>
                 {block.headers.map((cell, cellIndex) => (
-                  <th key={cellIndex}><InlineText text={cell} /></th>
+                  <th key={cellIndex}><InlineText text={cell} onOpenPath={onOpenPath} /></th>
                 ))}
               </tr>
             </thead>
@@ -55,7 +88,7 @@ function LayoutBlocks({ text }: { text: string }) {
               {block.rows.map((row, rowIndex) => (
                 <tr key={rowIndex}>
                   {row.map((cell, cellIndex) => (
-                    <td key={cellIndex}><InlineText text={cell} /></td>
+                    <td key={cellIndex}><InlineText text={cell} onOpenPath={onOpenPath} /></td>
                   ))}
                 </tr>
               ))}
@@ -67,15 +100,21 @@ function LayoutBlocks({ text }: { text: string }) {
     if (block.type === 'code') {
       return (
         <pre key={index} className="gc-msg-code">
-          <code>{block.text}</code>
+          <code><InlineText text={block.text} onOpenPath={onOpenPath} /></code>
         </pre>
       )
     }
-    return <div key={index} className="gc-msg-text"><InlineText text={block.text} /></div>
+    return <div key={index} className="gc-msg-text"><InlineText text={block.text} onOpenPath={onOpenPath} /></div>
   })
 }
 
-function MessageBody({ text }: { text: string }) {
+function MessageBody({
+  text,
+  onOpenPath,
+}: {
+  text: string
+  onOpenPath?: (path: string) => void
+}) {
   const [open, setOpen] = useState(false)
   const fold = messageNeedsFold(text)
   const shown = fold && !open ? messageFoldPreview(text) : reflowMessageText(text)
@@ -86,10 +125,10 @@ function MessageBody({ text }: { text: string }) {
       {parts.map((part, index) =>
         part.type === 'code' ? (
           <pre key={index} className="gc-msg-code" data-lang={part.lang || undefined}>
-            <code>{part.text}</code>
+            <code><InlineText text={part.text} onOpenPath={onOpenPath} /></code>
           </pre>
         ) : (
-          <LayoutBlocks key={index} text={part.text} />
+          <LayoutBlocks key={index} text={part.text} onOpenPath={onOpenPath} />
         ),
       )}
       {fold && (
@@ -114,6 +153,8 @@ export type ChatEntry =
       mailTo: string[]
       ts: number
       recalled?: boolean
+      delivery?: ChatDelivery
+      receipt?: ChatReceipt
     }
   | {
       id: string
@@ -125,13 +166,14 @@ export type ChatEntry =
       text: string
       to: string[]
       ts: number
+      durationMs?: number
+      unread?: number
     }
   | { id: string; kind: 'event'; text: string; ts: number }
   | { id: string; kind: 'error'; text: string; ts: number }
 
 function fmtTime(ts: number): string {
-  const d = new Date(ts)
-  return d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  return formatChatClock(ts)
 }
 
 function EntryRow({
@@ -139,11 +181,13 @@ function EntryRow({
   onRecall,
   onEdit,
   onOpenAgent,
+  onOpenPath,
 }: {
   entry: ChatEntry
   onRecall?: (entry: Extract<ChatEntry, { kind: 'me' }>) => void
   onEdit?: (entry: Extract<ChatEntry, { kind: 'me' }>) => void
   onOpenAgent?: (entry: Extract<ChatEntry, { kind: 'agent' }>) => void
+  onOpenPath?: (path: string) => void
 }) {
   if (entry.kind === 'event') {
     return <div className="gc-event">{entry.text}</div>
@@ -152,7 +196,7 @@ function EntryRow({
     return (
       <div className="gc-msg gc-msg--error">
         <div className="gc-msg-main">
-          <MessageBody text={entry.text} />
+          <MessageBody text={entry.text} onOpenPath={onOpenPath} />
         </div>
       </div>
     )
@@ -167,9 +211,19 @@ function EntryRow({
             {entry.to.length > 0 && (
               <span className="gc-msg-kind">→ {entry.to.join('、')}</span>
             )}
+            {chatDeliveryLabel(entry.delivery) && (
+              <span className={`gc-delivery-badge gc-delivery-badge--${entry.delivery}`}>
+                {chatDeliveryLabel(entry.delivery)}
+              </span>
+            )}
+            {chatReceiptLabel(entry.receipt) && (
+              <span className={`gc-receipt-badge gc-receipt-badge--${entry.receipt}`}>
+                {chatReceiptLabel(entry.receipt)}
+              </span>
+            )}
             <time className="gc-msg-time">{fmtTime(entry.ts)}</time>
           </div>
-          <MessageBody text={entry.recalled ? '已撤回' : entry.text} />
+          <MessageBody text={entry.recalled ? '已撤回' : entry.text} onOpenPath={onOpenPath} />
           {!entry.recalled && canRecallEntry(entry.ts) && onRecall && onEdit && (
             <div className="gc-msg-actions">
               <button type="button" onClick={() => onRecall(entry)}>撤回</button>
@@ -208,12 +262,28 @@ function EntryRow({
               {entry.id.startsWith('typing:') ? '处理中' : '现场'}
             </span>
           )}
+          {!live && entry.durationMs != null && formatChatDuration(entry.durationMs) && (
+            <span className="gc-duration">用时 {formatChatDuration(entry.durationMs)}</span>
+          )}
           <time className="gc-msg-time">{live ? '现在' : fmtTime(entry.ts)}</time>
         </div>
-        <MessageBody text={entry.text} />
+        <MessageBody text={entry.text} onOpenPath={onOpenPath} />
         {live && onOpenAgent && (
           <div className="gc-msg-actions">
-            <button type="button" onClick={() => onOpenAgent(entry)}>看现场</button>
+            <button
+              type="button"
+              aria-label={
+                unreadCountLabel(entry.unread)
+                  ? `看现场，${entry.unread} 条未读`
+                  : '看现场'
+              }
+              onClick={() => onOpenAgent(entry)}
+            >
+              看现场
+              {unreadCountLabel(entry.unread) && (
+                <span className="gc-unread-badge">{unreadCountLabel(entry.unread)}</span>
+              )}
+            </button>
           </div>
         )}
       </div>
@@ -228,10 +298,11 @@ interface WaterfallProps {
   onRecall?: (entry: Extract<ChatEntry, { kind: 'me' }>) => void
   onEdit?: (entry: Extract<ChatEntry, { kind: 'me' }>) => void
   onOpenAgent?: (entry: Extract<ChatEntry, { kind: 'agent' }>) => void
+  onOpenPath?: (path: string) => void
 }
 
 export function Waterfall({
-  entries, hasSession, ungrouped, onRecall, onEdit, onOpenAgent,
+  entries, hasSession, ungrouped, onRecall, onEdit, onOpenAgent, onOpenPath,
 }: WaterfallProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
@@ -245,14 +316,20 @@ export function Waterfall({
     if (near) setHasNew(false)
   }
 
+  const historyKey = entries.filter((item) => !isLiveEntryId(item.id)).map((item) => item.id).join('|')
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     if (nearBottomRef.current) {
       el.scrollTop = el.scrollHeight
-    } else if (entries.length > 0) {
+    } else if (historyKey) {
       setHasNew(true)
     }
+  }, [historyKey])
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || !nearBottomRef.current) return
+    el.scrollTop = el.scrollHeight
   }, [entries])
 
   const jumpToBottom = () => {
@@ -280,7 +357,14 @@ export function Waterfall({
         </div>
       ) : (
         entries.map((e) => (
-          <EntryRow key={e.id} entry={e} onRecall={onRecall} onEdit={onEdit} onOpenAgent={onOpenAgent} />
+          <EntryRow
+            key={e.id}
+            entry={e}
+            onRecall={onRecall}
+            onEdit={onEdit}
+            onOpenAgent={onOpenAgent}
+            onOpenPath={onOpenPath}
+          />
         ))
       )}
       {hasNew && (
