@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { useLegacyEnvCheck } from '../api/localSlice'
+import { fetchTeamConfig, saveTeamConfig, type TeamConfig } from '../api/teamConfig'
 import {
   fetchUpgradeStatus,
   fetchVersionInfo,
@@ -21,12 +22,13 @@ const TABS = [
   { key: 'appearance', label: '外观' },
   { key: 'upgrade', label: '升级' },
   { key: 'doctor', label: '环境自检' },
+  { key: 'team', label: '团队' },
 ] as const
 
 type TabKey = (typeof TABS)[number]['key']
 
 function normalizeView(view: string | null): TabKey {
-  if (view === 'doctor' || view === 'upgrade') return view
+  if (view === 'doctor' || view === 'upgrade' || view === 'team') return view
   return 'appearance'
 }
 
@@ -227,6 +229,92 @@ function UpgradeTab() {
   )
 }
 
+function TeamTab() {
+  const [config, setConfig] = useState<TeamConfig | null>(null)
+  const [teamHub, setTeamHub] = useState('')
+  const [humanAuth, setHumanAuth] = useState('')
+  const [loadError, setLoadError] = useState<unknown>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const load = async () => {
+    setLoadError(null)
+    try {
+      const next = await fetchTeamConfig()
+      setConfig(next)
+      setTeamHub(next.team_hub)
+      setHumanAuth(next.human_auth)
+    } catch (error) {
+      setLoadError(error)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [])
+
+  const onSave = async () => {
+    if (!config || saving) return
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const next = await saveTeamConfig({
+        hub: config.hub,
+        team_hub: teamHub.trim(),
+        human_auth: humanAuth.trim(),
+      })
+      setConfig(next)
+      setTeamHub(next.team_hub)
+      setHumanAuth(next.human_auth)
+    } catch (error) {
+      setSaveError(error instanceof ApiError ? error.message : String(error))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="panel">
+      <h2 className="panel-title">团队</h2>
+      {loadError ? (
+        <QueryErrorState error={loadError} onRetry={() => { void load() }} />
+      ) : !config ? (
+        <StatusState kind="loading" title="正在读取团队配置…" />
+      ) : (
+        <>
+          <p className="list-sub">配置 Team Hub 和 Human issuer 后，群聊侧栏会显示团队区。两个地址都留空即可关闭团队模式。</p>
+          <label className="settings-field">
+            <span className="list-title">Team Hub URL</span>
+            <input
+              aria-label="Team Hub URL"
+              type="url"
+              value={teamHub}
+              onChange={(event) => setTeamHub(event.target.value)}
+              placeholder="https://team.example"
+            />
+          </label>
+          <label className="settings-field">
+            <span className="list-title">Human issuer</span>
+            <input
+              aria-label="Human issuer"
+              type="url"
+              value={humanAuth}
+              onChange={(event) => setHumanAuth(event.target.value)}
+              placeholder="https://human.example"
+            />
+          </label>
+          {saveError ? <p className="list-sub">{saveError}</p> : null}
+          <div className="theme-options">
+            <Button variant="primary" disabled={saving} onClick={() => { void onSave() }}>
+              {saving ? '保存中…' : '保存团队配置'}
+            </Button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 export function SettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const tab = normalizeView(searchParams.get('view'))
@@ -243,6 +331,7 @@ export function SettingsPage() {
         {tab === 'appearance' ? <AppearanceTab /> : null}
         {tab === 'upgrade' ? <UpgradeTab /> : null}
         {tab === 'doctor' ? <DoctorTab /> : null}
+        {tab === 'team' ? <TeamTab /> : null}
       </div>
     </>
   )

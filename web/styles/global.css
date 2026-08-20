@@ -1757,6 +1757,24 @@ button.rail-item {
   cursor: pointer;
 }
 
+.settings-field {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0;
+  max-width: 620px;
+}
+
+.settings-field input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  padding: 8px 10px;
+}
+
 /* ---------- 终端（亮暗主题下始终深色） ---------- */
 
 .terminal-surface {

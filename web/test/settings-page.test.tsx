@@ -1,6 +1,6 @@
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderApp, stubDefaultFetch } from './helpers'
+import { renderApp, stubDefaultFetch, stubFetch } from './helpers'
 
 const versionPayload = {
   current: { version: '0.3.6' },
@@ -61,5 +61,54 @@ describe('设置挂在 3.0 外壳', () => {
     expect(await screen.findByText(/当前 0.3.6/)).toBeInTheDocument()
     expect(screen.getByText(/发现 0.3.7/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '一键升级' })).not.toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('未配置团队时，原有设置页行为不变且团队只提供配置入口', async () => {
+    stubDefaultFetch({
+      '/api/agent-mail/config': {
+        hub: 'http://local-hub:8765',
+        team_hub: '',
+        human_auth: '',
+        status: { available: false, reason: null },
+      },
+    })
+    renderApp('/settings?view=team')
+    expect(await screen.findByRole('tab', { name: '团队' })).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByLabelText('Team Hub URL')).toHaveValue('')
+    expect(screen.getByLabelText('Human issuer')).toHaveValue('')
+    expect(screen.getByText(/两个地址都留空即可关闭团队模式/)).toBeInTheDocument()
+  })
+
+  it('团队页读取并保存两个端点，空值会关闭团队模式', async () => {
+    const user = userEvent.setup()
+    const fetchMock = stubFetch((url) => {
+      if (url === '/api/agent-mail/config') {
+        return {
+          body: {
+            hub: 'http://local-hub:8765',
+            team_hub: 'https://team.example',
+            human_auth: 'https://human.example',
+            status: { available: true, reason: null },
+          },
+        }
+      }
+      return undefined
+    })
+    renderApp('/settings?view=team')
+    const hub = await screen.findByLabelText('Team Hub URL')
+    const auth = screen.getByLabelText('Human issuer')
+    expect(hub).toHaveValue('https://team.example')
+    expect(auth).toHaveValue('https://human.example')
+    await user.clear(hub)
+    await user.clear(auth)
+    await user.click(screen.getByRole('button', { name: '保存团队配置' }))
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/agent-mail/config', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({
+        hub: 'http://local-hub:8765',
+        team_hub: '',
+        human_auth: '',
+      }),
+    }))
   })
 })
