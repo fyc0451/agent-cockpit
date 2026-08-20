@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""herdr-doctor - 诊断 Herdr session 中 Agent Mail 连接问题。
+
+检查所有 agent pane 是否具备写入账本的完整配置。
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def check_herdr_sessions():
+    """扫描所有 herdr session，检查 agent pane 配置。"""
+    config_root = Path.home() / ".config" / "herdr" / "sessions"
+    if not config_root.exists():
+        print(f"❌ Herdr sessions 目录不存在: {config_root}")
+        return 1
+
+    issues = []
+    sessions_checked = 0
+    panes_checked = 0
+    panes_ok = 0
+
+    for session_dir in config_root.iterdir():
+        if not session_dir.is_dir():
+            continue
+        session_file = session_dir / "session.json"
+        if not session_file.exists():
+            continue
+
+        sessions_checked += 1
+        session_name = session_dir.name
+
+        try:
+            with open(session_file) as f:
+                session = json.load(f)
+        except Exception as e:
+            issues.append(f"❌ {session_name}: 无法读取 session.json - {e}")
+            continue
+
+        panes = session.get("panes", [])
+        for pane in panes:
+            pane_id = pane.get("pane_id")
+            label = pane.get("label", "")
+
+            # 只检查看起来是 agent 的 pane（排除终端、tmux）
+            if not label or label in ["term", "tmux", "shell", "bash", "zsh"]:
+                continue
+
+            panes_checked += 1
+            agent_session = pane.get("agent_session")
+
+            if not agent_session:
+                issues.append(
+                    f"⚠️  {session_name}/pane-{pane_id} ({label}): "
+                    f"缺少 agent_session 配置"
+                )
+            elif not isinstance(agent_session, dict):
+                issues.append(
+                    f"❌ {session_name}/pane-{pane_id} ({label}): "
+                    f"agent_session 格式错误（应为 dict）"
+                )
+            elif not agent_session.get("uuid"):
+                issues.append(
+                    f"❌ {session_name}/pane-{pane_id} ({label}): "
+                    f"agent_session 缺少 uuid"
+                )
+            else:
+                panes_ok += 1
+
+    print(f"✓ 扫描完成: {sessions_checked} 个 session, {panes_checked} 个 agent pane")
+    print(f"✓ 配置正常: {panes_ok}/{panes_checked} 个 pane")
+    print()
+
+    if issues:
+        print(f"发现 {len(issues)} 个问题:\n")
+        for issue in issues:
+            print(f"  {issue}")
+        print()
+        print("修复建议:")
+        print("  1. 手动编辑对应的 session.json")
+        print("  2. 为缺少 agent_session 的 pane 添加:")
+        print('     "agent_session": {')
+        print('       "uuid": "<生成的 UUID>"')
+        print('     }')
+        print("  3. 重启 herdr attach")
+        return 1
+
+    print("✓ 所有 agent pane 配置正常")
+    return 0
+
+
+def main():
+    print("Herdr Agent Mail 连接诊断工具")
+    print("=" * 60)
+    print()
+
+    # 检查环境变量
+    mail_name = os.environ.get("AGENT_MAIL_NAME")
+    config_path = os.environ.get("HERDR_CONFIG_PATH")
+
+    print("环境变量检查:")
+    if mail_name:
+        print(f"  ✓ AGENT_MAIL_NAME = {mail_name}")
+    else:
+        print("  ⚠️  AGENT_MAIL_NAME 未设置")
+
+    if config_path:
+        print(f"  ✓ HERDR_CONFIG_PATH = {config_path}")
+    else:
+        print("  ⚠️  HERDR_CONFIG_PATH 未设置")
+    print()
+
+    # 检查 session 配置
+    return check_herdr_sessions()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

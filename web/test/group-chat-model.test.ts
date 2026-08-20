@@ -416,6 +416,23 @@ describe('reflow and fold long waterfall text', () => {
       lead: '短回复没有过程',
       rest: '',
     })
+    const kimi = (
+      '先查 worktree。\n'
+      + '● 结论：当前版本 agent 启动不再创建 worktree。'
+    )
+    expect(splitReplyPresentation(kimi)).toEqual({
+      lead: '● 结论：当前版本 agent 启动不再创建 worktree。',
+      rest: '先查 worktree。',
+    })
+    const claude = (
+      '● Write(TEAM_ZONE_IMPLEMENTATION.md)\n'
+      + '实现完成总结 ✅\n'
+      + '已成功为 Agent Cockpit 4.0 实现团队协作功能。'
+    )
+    expect(splitReplyPresentation(claude)).toEqual({
+      lead: '实现完成总结 ✅\n已成功为 Agent Cockpit 4.0 实现团队协作功能。',
+      rest: '● Write(TEAM_ZONE_IMPLEMENTATION.md)',
+    })
   })
 
   it('对照终端：挤成一段的发布说明拆成标题、命令和列表', () => {

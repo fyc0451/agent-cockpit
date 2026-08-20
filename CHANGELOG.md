@@ -19,11 +19,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Group-chat send defaults to queue. Interrupt stays available for
   the cases that need to stop current work.
 
+### Added
+
+- Group chat warns when a pane cannot send Agent Mail, so a
+  disconnected agent is not mistaken for a silent harvest.
+
 ### Fixed
 
 - Harvest no longer pastes the next conclusion into the previous
   bubble when the terminal still shows the old one. A later 结论
   heading is a new message, not a longer copy of the last.
+
+- Harvest recognizes Kimi/TUI `● 结论` / `• 结论` headings. A later
+  conclusion is scraped on its own; the previous turn in scrollback
+  is not treated as a longer copy of the last bubble.
+
+- Harvest drops Claude/Kimi Write/Update file dumps, keeps the last
+  conclusion (`结论` / `实现完成总结` / `总结`), and does not stop the
+  bubble at a mid-screen `❯` prompt. The live scrape window is 240
+  lines so a long reply is not cut at a numbered dump line.
 
 ## [0.3.7] - 2026-08-20
 

@@ -551,7 +551,7 @@ export function messageFoldPreview(text: string, lines = PREVIEW_LINES): string 
   return reflowMessageText(text).split('\n').slice(0, lines).join('\n')
 }
 
-const CONCLUSION_HEAD = /^(?:===== .+ =====|对，你的判断|核心结论|结论如下|结论(?:[:：\s].*)?$|• 已查清|已查清，结论|处理方案[:：])/
+const CONCLUSION_HEAD = /^(?:[●•]\s+)?(?:===== .+ =====|对，你的判断|核心结论|结论如下|实现完成总结.*$|完成总结(?:[:：\s].*)?$|总结(?:[:：\s].*)?$|结论(?:[:：\s].*)?$|• 已查清|已查清，结论|处理方案[:：])/
 
 /** 结论先露、过程另折。没有结论标题时 lead 是全文。 */
 export function splitReplyPresentation(raw: string): { lead: string; rest: string } {

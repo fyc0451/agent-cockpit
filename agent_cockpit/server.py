@@ -5416,6 +5416,13 @@ def _identity_chrome_only(text: str) -> bool:
     return len(" ".join(leftover)) < 24
 
 
+def _is_tool_dump_line(stripped: str) -> bool:
+    """Write/Update 工具头，不是给 Boss 的回复。编号行只在 dump 块里丢。"""
+    return bool(
+        _TOOL_DUMP_HEAD_RE.match(stripped) or _TOOL_DUMP_META_RE.match(stripped)
+    )
+
+
 def _harvest_skip_line(stripped: str) -> bool:
     if stripped in {
         "---", "HumanOverseer", "WebUI", "█", "▼", "▲", "…▲", "…▼", "...▲",
@@ -5423,6 +5430,8 @@ def _harvest_skip_line(stripped: str) -> bool:
     }:
         return True
     if stripped.startswith("❯"):
+        return True
+    if _is_tool_dump_line(stripped):
         return True
     if _is_identity_chrome_line(stripped):
         return True
@@ -5478,6 +5487,7 @@ def _strip_harvest_tui_chrome(summary: str) -> str:
     """无损剥离旧 harvest 气泡里的 TUI 壳，保留真实回复的全部段落和缩进。"""
     kept: list[str] = []
     skipping_recap = False
+    skipping_dump = False
     for line in _restore_box_tables(_clean_chat_body(summary)).splitlines():
         stripped = line.strip()
         if not stripped:
@@ -5490,6 +5500,20 @@ def _strip_harvest_tui_chrome(summary: str) -> str:
         skipping_recap = False
         if re.match(r"※\s*recap:|^recap:", stripped, re.I):
             skipping_recap = True
+            continue
+        if _is_tool_dump_line(stripped):
+            skipping_dump = True
+            continue
+        if skipping_dump:
+            if (
+                _TOOL_DUMP_BODY_RE.match(stripped)
+                or re.match(r"…\s*\+\d+\s+lines", stripped)
+                or stripped.startswith("## ")
+                or stripped.startswith("# ")
+            ):
+                continue
+            skipping_dump = False
+        if not kept and _ORPHAN_DUMP_LINE_RE.match(stripped):
             continue
         if _harvest_skip_line(stripped):
             continue
@@ -5531,10 +5555,12 @@ def _extract_harvest_text(summary: str) -> str:
     ):
         return ""
     if len(text) > 8000:
-        text = text[-8000:]
-        cut = text.find("\n")
+        tail = text[-8000:]
+        cut = tail.find("\n")
         if 0 <= cut < 200:
-            text = text[cut + 1:]
+            tail = tail[cut + 1:]
+        conclusion = _extract_harvest_conclusion(tail) or _extract_harvest_conclusion(text)
+        text = conclusion or tail
     return text
 
 
@@ -5589,9 +5615,20 @@ def _is_process_narration(text: str) -> bool:
 
 _CONCLUSION_HEAD_RE = re.compile(
     r"^(?:===== .+ =====|对，你的判断|核心结论|结论如下|"
+    r"实现完成总结.*$|完成总结(?:[:：\s].*)?$|"
+    r"总结(?:[:：\s].*)?$|"
     r"结论(?:[:：\s].*)?$|"
     r"• 已查清|已查清，结论|处理方案[:：])"
 )
+_CONCLUSION_BULLET_RE = re.compile(r"^[●•]\s+")
+_TOOL_DUMP_HEAD_RE = re.compile(
+    r"^(?:●|•)\s+(?:Write|Update|Read|Edited)\b"
+)
+_TOOL_DUMP_META_RE = re.compile(
+    r"^(?:⎿|Wrote \d+ lines|Added \d+ line)"
+)
+_TOOL_DUMP_BODY_RE = re.compile(r"^\d+\s+\S")
+_ORPHAN_DUMP_LINE_RE = re.compile(r"^\d+\s+(?:为 |# |## )")
 _TOOL_JUNK_RE = re.compile(
     r"^(?:•\s+(?:<thinking>|Explored|Planning|Ran |Fixing|Edited)|"
     r"│|const fs=|printf '|unfilled:)"
@@ -5599,7 +5636,14 @@ _TOOL_JUNK_RE = re.compile(
 
 
 def _is_conclusion_heading(stripped: str) -> bool:
-    return bool(_CONCLUSION_HEAD_RE.match(stripped))
+    if _CONCLUSION_HEAD_RE.match(stripped):
+        return True
+    core = _CONCLUSION_BULLET_RE.sub("", stripped, count=1)
+    return core != stripped and bool(_CONCLUSION_HEAD_RE.match(core))
+
+
+def _conclusion_heading_core(stripped: str) -> str:
+    return _CONCLUSION_BULLET_RE.sub("", stripped, count=1)
 
 
 def _conclusion_heading_count(text: str) -> int:
@@ -5620,7 +5664,7 @@ def _last_conclusion_head(text: str) -> str:
         if _TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped):
             continue
         if _is_conclusion_heading(stripped):
-            head = _normalized_chat_reply(stripped)
+            head = _normalized_chat_reply(_conclusion_heading_core(stripped))
     return head
 
 
@@ -5639,9 +5683,11 @@ def _extract_harvest_conclusion(text: str) -> str:
     kept: list[str] = []
     for line in lines[start:]:
         stripped = line.strip()
-        if kept and (_TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped)):
-            break
-        if _TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped):
+        if _TOOL_JUNK_RE.match(stripped):
+            if kept:
+                break
+            continue
+        if _harvest_skip_line(stripped):
             continue
         kept.append(line)
     cleaned = "\n".join(kept).strip()
@@ -5649,9 +5695,9 @@ def _extract_harvest_conclusion(text: str) -> str:
 
 
 def _latest_harvest_reply(text: str) -> str:
-    """终端滚动区可能还留着上一条结论。只把最后一段结论写入气泡。"""
+    """终端滚动区可能还留着上一条或工具 dump。认出结论标题就只收下最后一段。"""
     conclusion = _extract_harvest_conclusion(text)
-    if conclusion and _conclusion_heading_count(text) >= 2:
+    if conclusion:
         return conclusion
     return text
 
@@ -5671,7 +5717,7 @@ def _same_harvest_copy(left: str, right: str) -> bool:
         return True
     head_left = _last_conclusion_head(left)
     head_right = _last_conclusion_head(right)
-    if head_left and head_right:
+    if head_left or head_right:
         if head_left != head_right:
             return False
         short, long = (a, b) if len(a) <= len(b) else (b, a)
@@ -5895,7 +5941,7 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
         if not settled:
             continue
         try:
-            summary = herdr_client.pane_summary(session, pane_id, 120)
+            summary = herdr_client.pane_summary(session, pane_id, 240)
         except Exception:
             continue
         raw = _extract_harvest_text(str((summary or {}).get("summary") or ""))
@@ -7440,6 +7486,14 @@ def api_herdr_pane_summary(
     _validate_session_name(session)
     _validate_pane_id(pane_id)
     return herdr_client.pane_summary(session, pane_id, max_lines)
+
+
+@app.get("/api/herdr/pane/{session}/{pane_id}/mail-status")
+def api_herdr_pane_mail_status(session: str, pane_id: str):
+    """检查 pane 的 Agent Mail 连接状态。"""
+    _validate_session_name(session)
+    _validate_pane_id(pane_id)
+    return pane_live.check_agent_mail_connectivity(pane_id)
 
 
 @app.get("/api/herdr/pane/{session}/{pane_id}/identity")

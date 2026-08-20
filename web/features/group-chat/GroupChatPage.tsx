@@ -39,6 +39,7 @@ import { SidebarRoot } from '../shell/SidebarRoot'
 import { WorkspaceBrowser } from '../shell/WorkspaceBrowser'
 import { AddWorkspaceModal } from './AddWorkspaceModal'
 import { AgentInteractModal } from './AgentInteractModal'
+import { AgentMailStatusBar } from './AgentMailStatusBar'
 import { Composer } from './Composer'
 import { DetailsPanel, type DetailsTab } from './DetailsPanel'
 import { AgentIcon } from './AgentIcon'
@@ -993,6 +994,9 @@ export function GroupChatPage() {
             />
           ) : (
             <>
+              {!isSettings && activeSession && (
+                <AgentMailStatusBar session={activeSession} members={members} />
+              )}
               {mailQ.isError && (
                 <div className="gc-event">
                   邮件历史读失败：

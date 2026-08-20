@@ -3088,6 +3088,167 @@ def test_same_harvest_copy_does_not_glue_two_conclusions():
     assert server._extract_harvest_conclusion(mixed).startswith("结论：4.0")
 
 
+def test_kimi_bullet_conclusion_is_not_previous_turn():
+    old = (
+        "结论：git 变更卡片已落地，测试全绿，未 commit。\n"
+        "后端：新建 agent_cockpit/git_card.py，仅 idle/done 落账本。\n"
+    )
+    mixed = (
+        old
+        + "\n● Coder Agent Completed (实现瀑布流 git 变更卡片)\n"
+        + "\n● 结论：当前版本（0.3.7，Cockpit 3.0）agent 启动不再创建 worktree，"
+        "产品层面已经不需要管理 worktree。\n"
+        "现在 agent 启动 cwd = 工作区目录本身，不建 worktree。\n"
+    )
+    bullet = (
+        "● 结论：当前版本（0.3.7，Cockpit 3.0）agent 启动不再创建 worktree，"
+        "产品层面已经不需要管理 worktree。"
+    )
+    dotted = "• 结论：git 变更卡片已落地，测试全绿，未 commit。"
+    assert server._is_conclusion_heading(bullet)
+    assert server._is_conclusion_heading(dotted)
+    assert not server._is_conclusion_heading("● Ran a command")
+    assert not server._is_conclusion_heading("这次真正的回归是版本回退了。")
+    latest = server._latest_harvest_reply(mixed)
+    assert latest.startswith("● 结论：当前版本")
+    assert "不再创建 worktree" in latest
+    assert "git 变更卡片" not in latest
+    assert not server._same_harvest_copy(old, latest)
+    assert not server._same_harvest_copy(old, mixed)
+
+
+def test_harvest_idle_kimi_bullet_opens_new_bubble(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-kimi-bullet", "chat-kimi")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._HARVEST_STATUS_LOADED = True
+    old = (
+        "结论：git 变更卡片已落地，测试全绿，未 commit。\n"
+        "后端：新建 agent_cockpit/git_card.py。"
+    )
+    saved = chat_ledger.append_message(
+        "chat-kimi", kind="agent", sender="EmeraldBeacon", text=old, to=["human"],
+    )
+    server._PANE_LAST_STATUS[("chat-kimi", "w1:p9")] = "working"
+    server._PANE_LAST_MESSAGE[("chat-kimi", "w1:p9")] = saved["id"]
+    mixed = (
+        old
+        + "\n\n● 结论：当前版本（0.3.7，Cockpit 3.0）agent 启动不再创建 worktree，"
+        "产品层面已经不需要管理 worktree。\n"
+        "现在 agent 启动 cwd = 工作区目录本身，不建 worktree。"
+    )
+    panes = [{
+        "session": "chat-kimi",
+        "pane_id": "w1:p9",
+        "agent": "kimi",
+        "agent_status": "idle",
+        "mail_name": "EmeraldBeacon",
+        "display_name": "EmeraldBeacon",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary", lambda *_a, **_k: {"summary": mixed},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-kimi")
+    rows = chat_ledger.list_messages("chat-kimi", 10)
+    kept = next(row for row in rows if row["id"] == saved["id"])
+    assert kept["text"] == old
+    added = next(row for row in rows if row["id"] != saved["id"])
+    assert "不再创建 worktree" in added["text"]
+    assert "git 变更卡片" not in added["text"]
+    assert added["sender"] == "EmeraldBeacon"
+
+
+def test_claude_write_dump_does_not_cut_summary():
+    dump = (
+        "● Write(~/github/agent-cockpit-worktrees/cockpit-4.0/TEAM_ZONE_IMPLEMENTATION.md)\n"
+        "  ⎿  Wrote 200 lines to TEAM_ZONE_IMPLEMENTATION.md\n"
+        "       1 # Cockpit 4.0 团队区域实现总结\n"
+        "       3 ## 概述\n"
+        "       5 为 Agent Cockpit 4.0 实现了团队协作功能，在侧栏工作区浏览器中添加了"
+        "\"团队区域\"，允许用户登录团队账号。\n"
+        "       7 ## 实现的功能\n"
+        "       9 ### 1. 团队认证 API (`web/api/teamAuth.ts`)\n"
+        "     … +190 lines\n"
+        "● 完美！所有文件都已创建。现在生成最终的实现总结：\n"
+        "\n"
+        "  实现完成总结 ✅\n"
+        "\n"
+        "  已成功为 Agent Cockpit 4.0 实现团队协作功能的前端集成。以下是完整的实现清单：\n"
+        "\n"
+        "  📦 新增文件（5个）\n"
+        "  1. web/api/teamAuth.ts (4.6KB)\n"
+        "    - 6个 API 函数：配置查询、认证状态、登录、退出、绑定查询、会话绑定\n"
+        "  3. web/features/group-chat/SessionSidebar.tsx\n"
+        "❯ 你是 GrayFalcon（Claude）。Leader BrownDesert 分配 Cockpit 4.0 第一刀。立刻开工，不要改主仓。\n"
+        "    - 传递团队相关 props（如有修改）\n"
+        "  4. web/features/group-chat/groupChat.css\n"
+        "    - 团队区域样式（如有修改）\n"
+        "\n"
+        "  状态：✅ 前端实现完成，等待后端 API 支持\n"
+    )
+    assert server._is_tool_dump_line(
+        "● Write(~/github/agent-cockpit-worktrees/cockpit-4.0/TEAM_ZONE_IMPLEMENTATION.md)"
+    )
+    assert not server._is_tool_dump_line("1. web/api/teamAuth.ts (4.6KB)")
+    assert not server._is_tool_dump_line("2 和 3 用人话讲：SCC 终稿没进群聊。")
+    assert bool(server._TOOL_DUMP_BODY_RE.match("5 为 Agent Cockpit 4.0 实现了团队协作功能"))
+    latest = server._latest_harvest_reply(dump)
+    assert latest.startswith("实现完成总结")
+    assert "已成功为 Agent Cockpit 4.0" in latest
+    assert "前端实现完成，等待后端 API 支持" in latest
+    assert "传递团队相关 props" in latest
+    assert "团队区域样式" in latest
+    assert "5 为 Agent Cockpit 4.0" not in latest
+    assert "Write(~/" not in latest
+    assert "GrayFalcon（Claude）" not in latest
+
+
+def test_harvest_idle_claude_summary_is_not_write_dump(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-claude-dump", "chat-claude")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._HARVEST_STATUS_LOADED = True
+    dump = (
+        "● Write(TEAM_ZONE_IMPLEMENTATION.md)\n"
+        "       5 为 Agent Cockpit 4.0 实现了团队协作功能，在侧栏工作区浏览器中添加了"
+        "\"团队区域\"。\n"
+        "       7 ## 实现的功能\n"
+        "  实现完成总结 ✅\n"
+        "  已成功为 Agent Cockpit 4.0 实现团队协作功能的前端集成。\n"
+        "  状态：✅ 前端实现完成，等待后端 API 支持\n"
+    )
+    panes = [{
+        "session": "chat-claude",
+        "pane_id": "w1:p6",
+        "agent": "claude",
+        "agent_status": "idle",
+        "mail_name": "GrayFalcon",
+        "display_name": "GrayFalcon",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary", lambda *_a, **_k: {"summary": dump},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-claude")
+    rows = chat_ledger.list_messages("chat-claude", 10)
+    assert len(rows) == 1
+    assert rows[0]["text"].startswith("实现完成总结")
+    assert "前端实现完成" in rows[0]["text"]
+    assert "5 为 Agent Cockpit 4.0" not in rows[0]["text"]
+    assert rows[0]["sender"] == "GrayFalcon"
+
+
 def test_harvest_working_does_not_publish_finished_conclusion(isolated_ledger, monkeypatch):
     client = _client()
     _workspace_with_thread(client, isolated_ledger / "harvest-live-done", "chat-live")

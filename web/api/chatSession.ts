@@ -23,6 +23,47 @@ export interface ChatSkill {
   insert: string
 }
 
+export interface AgentMailStatus {
+  connected: boolean
+  pane_id: string
+  details: {
+    has_mail_name: boolean
+    has_config_path: boolean
+    has_agent_session: boolean
+    can_send_mail: boolean
+  }
+  error?: string
+}
+
+export async function fetchAgentMailStatus(
+  session: string,
+  paneId: string,
+): Promise<AgentMailStatus> {
+  const raw = await legacyGet(
+    `/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/mail-status`,
+  )
+  if (!isObj(raw)) fail('mail-status')
+  return {
+    connected: typeof raw.connected === 'boolean' ? raw.connected : false,
+    pane_id: typeof raw.pane_id === 'string' ? raw.pane_id : paneId,
+    details: isObj(raw.details)
+      ? {
+          has_mail_name: typeof raw.details.has_mail_name === 'boolean' ? raw.details.has_mail_name : false,
+          has_config_path: typeof raw.details.has_config_path === 'boolean' ? raw.details.has_config_path : false,
+          has_agent_session: typeof raw.details.has_agent_session === 'boolean' ? raw.details.has_agent_session : false,
+          can_send_mail: typeof raw.details.can_send_mail === 'boolean' ? raw.details.can_send_mail : false,
+        }
+      : {
+          has_mail_name: false,
+          has_config_path: false,
+          has_agent_session: false,
+          can_send_mail: false,
+        },
+    error: typeof raw.error === 'string' ? raw.error : undefined,
+  }
+}
+
+
 export async function fetchChatSkills(): Promise<ChatSkill[]> {
   const raw = await legacyGet('/api/chat/skills')
   if (!isObj(raw) || !Array.isArray(raw.skills)) return []

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 import unicodedata
@@ -342,3 +343,41 @@ async def pump_pane_live(
             await push(event_snap)
             continue
         await push(read(session, pane_id))
+
+
+def check_agent_mail_connectivity(pane_id: str) -> dict[str, Any]:
+    """检查 agent 是否能连接到 Agent Mail Hub。"""
+    try:
+        has_mail_name = bool(os.environ.get("AGENT_MAIL_NAME"))
+        has_config_path = bool(os.environ.get("HERDR_CONFIG_PATH"))
+
+        snapshot = herdr_client.snapshot()
+        pane = next((p for p in snapshot.get("panes", []) if p.get("pane_id") == pane_id), None)
+        has_agent_session = bool(
+            pane
+            and "agent_session" in pane
+            and pane["agent_session"] is not None
+        )
+
+        can_send_mail = False
+        try:
+            from agent_mail_commands import mail_send  # noqa: F401
+            can_send_mail = True
+        except Exception:
+            pass
+
+        connected = has_mail_name and has_config_path and has_agent_session and can_send_mail
+
+        return {
+            "connected": connected,
+            "details": {
+                "has_mail_name": has_mail_name,
+                "has_config_path": has_config_path,
+                "has_agent_session": has_agent_session,
+                "can_send_mail": can_send_mail,
+            },
+            "pane_id": pane_id,
+        }
+    except Exception as e:
+        return {"connected": False, "error": str(e), "pane_id": pane_id}
+
