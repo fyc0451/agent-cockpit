@@ -13,6 +13,7 @@ def _isolate_settings(tmp_path, monkeypatch):
     from agent_cockpit import team_sessions
     from agent_cockpit import upgrade_service
     monkeypatch.delenv(upgrade_service.ENABLE_ENV, raising=False)
+    monkeypatch.delenv("COCKPIT_NEXT_PROFILE", raising=False)
     monkeypatch.setattr(settings, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
     monkeypatch.setattr(settings, "_cache", None)

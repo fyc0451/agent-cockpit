@@ -38,7 +38,7 @@ export const routePatterns = {
 } as const
 
 export type InboxView = 'needs-action'
-export type SettingsView = 'doctor' | 'appearance'
+export type SettingsView = 'doctor' | 'appearance' | 'upgrade'
 
 function seg(id: string): string {
   return encodeURIComponent(id)

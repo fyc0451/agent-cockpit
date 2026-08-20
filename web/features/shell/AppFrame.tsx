@@ -233,8 +233,15 @@ export function AppFrame({ sidebar, children, details, detailsAvailable = true }
     narrow,
   }), [sidebarCollapsed, sidebarOverlay, overlaySidebarWidth, cols.sidebar, detailsOpen, toggleSidebar, toggleDetails, narrow])
 
+  const focusMain = useCallback(() => {
+    document.getElementById('main-content')?.focus()
+  }, [])
+
   return (
     <FrameContext.Provider value={frameState}>
+      <button type="button" className="skip-link" onClick={focusMain}>
+        跳到主内容
+      </button>
       <div
         ref={frameRef}
         className={css.frame}
@@ -251,7 +258,7 @@ export function AppFrame({ sidebar, children, details, detailsAvailable = true }
         {!sidebarCollapsed && !sidebarOverlay && (
           <div className={css.sidebarCol}>{sidebar}</div>
         )}
-        <div className={css.centerCol}>
+        <div className={css.centerCol} id="main-content" tabIndex={-1}>
           {sidebarCollapsed && (
             <button
               type="button"

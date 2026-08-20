@@ -16,11 +16,9 @@ function violationDetails(violations: AxeResults['violations']): string[] {
 }
 
 const PAGES: [name: string, hash: string, ready: string][] = [
-  ['overview', '/#/overview', '需要你处理'],
-  ['workbench', '/#/projects/p1/workbench', 'Project One'],
+  ['chat', '/#/chat', '设置'],
   ['settings', '/#/settings', '外观'],
-  ['files(forbidden)', '/#/projects/p1/workspaces/w1/files', '文件浏览暂不可用'],
-  ['terminal', '/#/projects/p1/workspaces/w1/terminal', '终端未接通'],
+  ['upgrade', '/#/settings?view=upgrade', '一键升级'],
 ]
 
 for (const theme of ['light', 'dark'] as const) {
@@ -37,6 +35,10 @@ for (const theme of ['light', 'dark'] as const) {
         await expect(page.getByText('返回群聊')).toHaveCount(0)
         await expect(page.getByText('Harness / Runtime 与节点')).toHaveCount(0)
       }
+      if (name === 'upgrade') {
+        await expect(page.getByRole('tab', { name: '升级' })).toBeVisible()
+        await expect(page.getByRole('button', { name: '一键升级' })).toBeVisible()
+      }
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
       const results = await new AxeBuilder({ page }).analyze()
       expect(violationDetails(results.violations)).toEqual([])
@@ -44,33 +46,13 @@ for (const theme of ['light', 'dark'] as const) {
     })
   }
 
-  test(`axe：${theme} degraded 状态页无 serious/critical`, async ({ page }) => {
-    const g = attachGates(page, [
-      { url: '/api/attention', status: 500 },
-      { url: '/api/attention', status: 500 },
-      { url: '/api/attention', status: 500 },
-    ])
-    await page.emulateMedia({ colorScheme: theme })
-    await stubApi(page, {
-      '/api/attention': {
-        __status: 500,
-        __payload: { detail: '服务器内部错误，请稍后重试' },
-      },
-    })
-    await page.goto('/#/overview')
-    await expect(page.locator('[data-state="degraded"]').first()).toBeVisible({ timeout: 10_000 })
-    const results = await new AxeBuilder({ page }).analyze()
-    expect(violationDetails(results.violations)).toEqual([])
-    expectGatesClean(g)
-  })
-
-  test(`axe：${theme} 390px overview 无 serious/critical（P1-7）`, async ({ page }) => {
+  test(`axe：${theme} 390px settings 无 serious/critical`, async ({ page }) => {
     const g = attachGates(page)
     await page.emulateMedia({ colorScheme: theme })
     await stubApi(page)
     await page.setViewportSize({ width: 390, height: 800 })
-    await page.goto('/#/overview')
-    await expect(page.locator('.page-title')).toHaveText('需要你处理')
+    await page.goto('/#/settings')
+    await expect(page.getByRole('tab', { name: '外观' })).toBeVisible()
     const results = await new AxeBuilder({ page }).analyze()
     expect(violationDetails(results.violations)).toEqual([])
     expectGatesClean(g)

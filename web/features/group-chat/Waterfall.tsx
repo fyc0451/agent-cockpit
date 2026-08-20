@@ -1,6 +1,6 @@
 // 主区瀑布流：谁说的（头像+花名+Leader 徽章）、我的消息右对齐、系统事件行、新消息 pill。
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AgentIcon } from './AgentIcon'
 import {
   avatarColor,
@@ -328,72 +328,109 @@ interface WaterfallProps {
   onOpenPath?: (path: string) => void
 }
 
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+
 export function Waterfall({
   entries, hasSession, ungrouped, onRecall, onEdit, onOpenAgent, onOpenPath,
 }: WaterfallProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
   const [hasNew, setHasNew] = useState(false)
+
+  const pinToBottom = () => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }
 
   const onScroll = () => {
     const el = scrollRef.current
     if (!el) return
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    const near = isNearBottom(el)
     nearBottomRef.current = near
     if (near) setHasNew(false)
   }
 
   const historyKey = entries.filter((item) => !isLiveEntryId(item.id)).map((item) => item.id).join('|')
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    if (nearBottomRef.current) {
-      el.scrollTop = el.scrollHeight
-    } else if (historyKey) {
-      setHasNew(true)
-    }
+
+  // 进页 / 换会话（父级 key 会拆掉本组件）：首屏前就钉在底部，不要先画出顶部再补滚。
+  useLayoutEffect(() => {
+    nearBottomRef.current = true
+    setHasNew(false)
+    pinToBottom()
+  }, [])
+
+  useLayoutEffect(() => {
+    if (nearBottomRef.current) pinToBottom()
+    else if (historyKey) setHasNew(true)
   }, [historyKey])
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el || !nearBottomRef.current) return
-    el.scrollTop = el.scrollHeight
+
+  useLayoutEffect(() => {
+    if (nearBottomRef.current) pinToBottom()
   }, [entries])
 
+  // 气泡撑开、字体/图片把高度拉长后继续钉。容器自己的尺寸变了不算内容变高，所以观察内层。
+  useEffect(() => {
+    const root = scrollRef.current
+    const inner = contentRef.current
+    if (!root) return
+    const follow = () => {
+      if (nearBottomRef.current) pinToBottom()
+    }
+    let raf = requestAnimationFrame(follow)
+    if (typeof ResizeObserver === 'undefined') {
+      return () => cancelAnimationFrame(raf)
+    }
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(follow)
+    })
+    ro.observe(inner ?? root)
+    return () => {
+      ro.disconnect()
+      cancelAnimationFrame(raf)
+    }
+  }, [])
+
   const jumpToBottom = () => {
-    const el = scrollRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-    setHasNew(false)
     nearBottomRef.current = true
+    setHasNew(false)
+    pinToBottom()
   }
 
+  const empty = entries.length === 0
   return (
     <div className="gc-flow" ref={scrollRef} onScroll={onScroll} aria-live="polite">
-      {entries.length === 0 ? (
-        <div className="gc-empty">
-          <div className="gc-empty-title">
-            {!hasSession ? '选择一个会话' : ungrouped ? '未绑定工作区' : '开始群聊'}
+      <div className={`gc-flow-inner${empty ? ' is-empty' : ''}`} ref={contentRef}>
+        {empty ? (
+          <div className="gc-empty">
+            <div className="gc-empty-title">
+              {!hasSession ? '选择一个会话' : ungrouped ? '未绑定工作区' : '开始群聊'}
+            </div>
+            <div className="gc-empty-hint">
+              {!hasSession
+                ? '从左侧选择会话，或点「新会话」创建'
+                : ungrouped
+                  ? '这个 herdr 会话还没有群聊账本，不会显示其他群的消息。把它加进工作区后再聊。'
+                  : '还没有这个群的邮件记录。发出去的话会留在本机；刷新不应再丢。'}
+            </div>
           </div>
-          <div className="gc-empty-hint">
-            {!hasSession
-              ? '从左侧选择会话，或点「新会话」创建'
-              : ungrouped
-                ? '这个 herdr 会话还没有群聊账本，不会显示其他群的消息。把它加进工作区后再聊。'
-                : '还没有这个群的邮件记录。发出去的话会留在本机；刷新不应再丢。'}
-          </div>
-        </div>
-      ) : (
-        entries.map((e) => (
-          <EntryRow
-            key={e.id}
-            entry={e}
-            onRecall={onRecall}
-            onEdit={onEdit}
-            onOpenAgent={onOpenAgent}
-            onOpenPath={onOpenPath}
-          />
-        ))
-      )}
+        ) : (
+          entries.map((e) => (
+            <EntryRow
+              key={e.id}
+              entry={e}
+              onRecall={onRecall}
+              onEdit={onEdit}
+              onOpenAgent={onOpenAgent}
+              onOpenPath={onOpenPath}
+            />
+          ))
+        )}
+      </div>
       {hasNew && (
         <button type="button" className="gc-newmsg" onClick={jumpToBottom}>
           ↓ 有新消息

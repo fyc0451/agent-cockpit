@@ -224,12 +224,16 @@ async function legacySend<TRes>(path: string, method: 'POST' | 'DELETE', body?: 
     parsed = null
   }
   if (!res.ok) {
+    const detailObj = isObj(parsed) && isObj(parsed.detail) ? parsed.detail : null
+    const detailCode = detailObj && typeof detailObj.error_code === 'string' ? detailObj.error_code : null
     const detail = isObj(parsed) && typeof parsed.detail === 'string' ? parsed.detail : null
     const error = new ApiError({
       code: res.status === 401
         ? 'unauthenticated'
-        : res.status === 409 ? 'conflict' : res.status >= 500 ? 'server_error' : 'http_error',
-      message: detail ?? `请求失败（HTTP ${res.status}）`,
+        : detailCode
+          ? detailCode
+          : res.status === 409 ? 'conflict' : res.status >= 500 ? 'server_error' : 'http_error',
+      message: detail ?? (detailCode ? detailCode : `请求失败（HTTP ${res.status}）`),
       retryable: res.status >= 500,
       status: res.status,
     })

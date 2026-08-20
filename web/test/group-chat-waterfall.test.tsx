@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { vi } from 'vitest'
 import { Waterfall, type ChatEntry } from '../features/group-chat/Waterfall'
 
@@ -232,5 +232,104 @@ describe('Waterfall 长文本', () => {
     expect(screen.queryByText(/改了 .* 个文件/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '查看 stat' })).not.toBeInTheDocument()
     expect(document.querySelector('.gc-git-card')).toBeNull()
+  })
+})
+
+const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
+const originalClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+
+function stubFlowMetrics(scrollHeight: { current: number }, clientHeight = 400) {
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.classList.contains('gc-flow') ? scrollHeight.current : 0
+    },
+  })
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.classList.contains('gc-flow') ? clientHeight : 0
+    },
+  })
+}
+
+describe('Waterfall 进页沉底', () => {
+  const many: ChatEntry[] = Array.from({ length: 12 }, (_, index) => ({
+    id: `msg_${index}`,
+    kind: 'agent' as const,
+    paneId: 'w1:p2',
+    name: 'BrownDesert',
+    agentKind: 'grok',
+    isLeader: true,
+    text: `第 ${index + 1} 条`,
+    to: ['我'],
+    ts: index + 1,
+  }))
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    if (originalScrollHeight) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', originalScrollHeight)
+    if (originalClientHeight) Object.defineProperty(HTMLElement.prototype, 'clientHeight', originalClientHeight)
+  })
+
+  it('首屏就把滚动条钉在底部', () => {
+    const height = { current: 2400 }
+    stubFlowMetrics(height)
+    const { container } = render(<Waterfall entries={many} hasSession />)
+    const flow = container.querySelector('.gc-flow') as HTMLElement
+    expect(flow.scrollTop).toBe(2400)
+  })
+
+  it('内容事后撑开仍跟着钉底', async () => {
+    const height = { current: 800 }
+    stubFlowMetrics(height)
+    class FakeRO {
+      static cb: ResizeObserverCallback | null = null
+      constructor(cb: ResizeObserverCallback) {
+        FakeRO.cb = cb
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeRO)
+    const { container } = render(<Waterfall entries={many} hasSession />)
+    const flow = container.querySelector('.gc-flow') as HTMLElement
+    expect(flow.scrollTop).toBe(800)
+    height.current = 3600
+    await act(async () => {
+      FakeRO.cb?.([], {} as ResizeObserver)
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve())
+      })
+    })
+    expect(flow.scrollTop).toBe(3600)
+  })
+
+  it('用户上翻看历史时，新消息不抢回底部', () => {
+    const height = { current: 2400 }
+    stubFlowMetrics(height)
+    const { container, rerender } = render(<Waterfall entries={many} hasSession />)
+    const flow = container.querySelector('.gc-flow') as HTMLElement
+    flow.scrollTop = 120
+    fireEvent.scroll(flow)
+    rerender(
+      <Waterfall
+        entries={[...many, {
+          id: 'msg_new',
+          kind: 'agent',
+          paneId: 'w1:p2',
+          name: 'BrownDesert',
+          agentKind: 'grok',
+          isLeader: true,
+          text: '新结论',
+          to: ['我'],
+          ts: 99,
+        }]}
+        hasSession
+      />,
+    )
+    expect(flow.scrollTop).toBe(120)
+    expect(screen.getByRole('button', { name: '↓ 有新消息' })).toBeInTheDocument()
   })
 })

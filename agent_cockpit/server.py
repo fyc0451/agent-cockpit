@@ -61,6 +61,7 @@ from . import next_profile
 from . import team_sessions
 from . import terminal
 from . import version
+from . import source_upgrade
 from . import upgrade_core
 from . import upgrade_service
 from . import web_push
@@ -3429,38 +3430,61 @@ def api_version(refresh: bool = Query(False)):
 
 @app.get("/api/upgrade/status")
 def api_upgrade_status():
-    """Pure-read V2 status when explicitly enabled; otherwise retain V1 retirement."""
-    if not upgrade_service.is_enabled():
-        return upgrade_core.retired_status()
-    try:
-        return upgrade_service.get_status()
-    except Exception:
-        raise HTTPException(503, {"error_code": "status_unavailable"})
+    """Source-tree status on 8790; signed V2 only when explicitly enabled."""
+    if upgrade_service.is_enabled():
+        try:
+            return upgrade_service.get_status()
+        except Exception:
+            raise HTTPException(503, {"error_code": "status_unavailable"})
+    if source_upgrade.is_source_runtime():
+        try:
+            return source_upgrade.get_status()
+        except Exception:
+            raise HTTPException(503, {"error_code": "status_unavailable"})
+    return upgrade_core.retired_status()
 
 
 _UPGRADE_ERROR_STATUS = {
     "upgrade_busy": 409,
+    "upgrade_in_progress": 409,
     "already_current": 409,
+    "precheck_dirty": 409,
     "request_invalid": 400,
     "controller_unavailable": 503,
     "trust_unavailable": 503,
     "release_unavailable": 503,
     "platform_unsupported": 503,
+    "edition_unsupported": 409,
+    "native_layout_required": 409,
+    "precheck_git": 409,
+    "precheck_venv": 409,
+    "precheck_disk": 409,
+    "precheck_supervisor": 503,
+    "lock_failed": 409,
+    "spawn_failed": 503,
 }
 
 
 @app.post("/api/upgrade")
 def api_upgrade_start():
-    """Prepare and detach the signed V2 controller when explicitly enabled."""
-    if not upgrade_service.is_enabled():
-        return upgrade_core.retired_start_response()
-    try:
-        receipt = upgrade_service.start_latest()
-    except upgrade_service.UpgradeServiceError as exc:
-        status_code = _UPGRADE_ERROR_STATUS.get(exc.code, 500)
-        code = exc.code if status_code != 500 else "upgrade_failed"
-        raise HTTPException(status_code, {"error_code": code})
-    return JSONResponse(status_code=202, content=receipt)
+    """Start signed V2 when enabled; otherwise source-tree upgrade on 8790."""
+    if upgrade_service.is_enabled():
+        try:
+            receipt = upgrade_service.start_latest()
+        except upgrade_service.UpgradeServiceError as exc:
+            status_code = _UPGRADE_ERROR_STATUS.get(exc.code, 500)
+            code = exc.code if status_code != 500 else "upgrade_failed"
+            raise HTTPException(status_code, {"error_code": code})
+        return JSONResponse(status_code=202, content=receipt)
+    if source_upgrade.is_source_runtime():
+        try:
+            receipt = source_upgrade.start_latest()
+        except source_upgrade.SourceUpgradeError as exc:
+            status_code = _UPGRADE_ERROR_STATUS.get(exc.code, 500)
+            code = exc.code if status_code != 500 else "upgrade_failed"
+            raise HTTPException(status_code, {"error_code": code})
+        return JSONResponse(status_code=202, content=receipt)
+    return upgrade_core.retired_start_response()
 
 
 # ── 设置路由 ────────────────────────────────────────────────────

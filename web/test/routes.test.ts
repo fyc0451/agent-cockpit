@@ -29,6 +29,7 @@ describe('routes 单一权威模块', () => {
 
   it('query 参数由 builder 拼接', () => {
     expect(routes.settings({ view: 'doctor' })).toBe('/settings?view=doctor')
+    expect(routes.settings({ view: 'upgrade' })).toBe('/settings?view=upgrade')
     expect(routes.settings({ view: 'appearance' })).toBe('/settings')
     expect(routes.settings()).toBe('/settings')
     expect(routes.inbox({ view: 'needs-action' })).toBe('/inbox?view=needs-action')

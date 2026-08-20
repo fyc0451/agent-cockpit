@@ -6,6 +6,33 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-08-20
+
+### Removed
+
+- Drop unmounted 2.0 pages (Overview / Projects / Inbox / Files /
+  Terminal / workbench) from the 3.0 web tree. HashRouter still only
+  serves `/chat` and `/settings`; leftover deep links land in group chat.
+
+### Added
+
+- Settings now has a one-click upgrade tab for the source 8790
+  checkout. It pulls the official GitHub tag, rebuilds `web/dist`, and
+  restarts `agent-cockpit-source-8790`. Native V2 stays off so this
+  process is not replaced by the packaged unit.
+
+### Fixed
+
+- Opening group chat now lands on the latest bubble. The waterfall pins
+  after layout and keeps following while the user is already at the
+  bottom, so later height (folded replies, fonts) does not leave the
+  view at the top.
+
+### Changed
+
+- Publish version 0.3.7 as the signed operator package for the source
+  8790 checkout already serving that upgrade tab and waterfall pin.
+
 ## [0.3.6] - 2026-08-20
 
 ### Changed

@@ -182,6 +182,7 @@
 .gc-flow {
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: none;
   min-height: 0;
   width: 100%;
   max-width: none;
@@ -189,7 +190,20 @@
   padding: 8px 16px 12px;
   display: flex;
   flex-direction: column;
+}
+
+.gc-flow-inner {
+  display: flex;
+  flex-direction: column;
   gap: 14px;
+  width: 100%;
+  flex: 1 0 auto;
+  justify-content: flex-end;
+}
+
+.gc-flow-inner.is-empty {
+  flex: 1;
+  justify-content: center;
 }
 
 .gc-empty {
