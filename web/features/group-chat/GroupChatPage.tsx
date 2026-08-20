@@ -519,7 +519,7 @@ export function GroupChatPage() {
     }
   }, [activeSession, attaching, pushEntries])
 
-  const onSend = useCallback(async (delivery: ChatDelivery = 'interrupt') => {
+  const onSend = useCallback(async (delivery: ChatDelivery = 'queue') => {
     const text = composer.trim()
     if (!text || !activeSession || sending) return
     const targets = parseMentionTargets(text, membersRef.current)

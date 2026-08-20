@@ -189,7 +189,7 @@ export async function sendSessionMail(
       text,
       to,
       ledger_only: options?.ledgerOnly === true,
-      delivery: options?.delivery === 'queue' ? 'queue' : 'interrupt',
+      delivery: options?.delivery === 'interrupt' ? 'interrupt' : 'queue',
     },
   )
   if (!isObj(raw)) return { mail_error: null }

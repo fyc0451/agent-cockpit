@@ -2283,7 +2283,7 @@ class ChatMailReq(BaseModel):
     text: str
     to: list[str] = []
     ledger_only: bool = False
-    delivery: str = "interrupt"
+    delivery: str = "queue"
 
 
 class ChatWorkspaceCreateReq(BaseModel):
@@ -5598,17 +5598,42 @@ _TOOL_JUNK_RE = re.compile(
 )
 
 
+def _is_conclusion_heading(stripped: str) -> bool:
+    return bool(_CONCLUSION_HEAD_RE.match(stripped))
+
+
+def _conclusion_heading_count(text: str) -> int:
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped):
+            continue
+        if _is_conclusion_heading(stripped):
+            count += 1
+    return count
+
+
+def _last_conclusion_head(text: str) -> str:
+    head = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped):
+            continue
+        if _is_conclusion_heading(stripped):
+            head = _normalized_chat_reply(stripped)
+    return head
+
+
 def _extract_harvest_conclusion(text: str) -> str:
-    """从混着工具残片的屏幕里抽出给 Boss 的结论段。"""
+    """从混着工具残片的屏幕里抽出给 Boss 的最后一段结论。"""
     lines = text.splitlines()
     start = None
     for index, line in enumerate(lines):
         stripped = line.strip()
         if _TOOL_JUNK_RE.match(stripped) or _harvest_skip_line(stripped):
             continue
-        if _CONCLUSION_HEAD_RE.match(stripped) or "真正的回归" in stripped:
+        if _is_conclusion_heading(stripped):
             start = index
-            break
     if start is None:
         return ""
     kept: list[str] = []
@@ -5623,21 +5648,38 @@ def _extract_harvest_conclusion(text: str) -> str:
     return cleaned if len(_normalized_chat_reply(cleaned)) >= 24 else ""
 
 
+def _latest_harvest_reply(text: str) -> str:
+    """终端滚动区可能还留着上一条结论。只把最后一段结论写入气泡。"""
+    conclusion = _extract_harvest_conclusion(text)
+    if conclusion and _conclusion_heading_count(text) >= 2:
+        return conclusion
+    return text
+
+
 def _normalized_chat_reply(text: str) -> str:
     cleaned = _strip_harvest_tui_chrome(text)
     return re.sub(r"\s+", " ", cleaned).strip().lower()
 
 
 def _same_harvest_copy(left: str, right: str) -> bool:
-    """harvest 去重只认同一段原文/包含关系，不因同项目词重复漏收下一条。"""
+    """同一条结论的折行/变长才算一份。滚动区里下一条新结论不是变长。"""
     a = _normalized_chat_reply(left)
     b = _normalized_chat_reply(right)
     if not a or not b:
         return False
     if a == b:
         return True
+    head_left = _last_conclusion_head(left)
+    head_right = _last_conclusion_head(right)
+    if head_left and head_right:
+        if head_left != head_right:
+            return False
+        short, long = (a, b) if len(a) <= len(b) else (b, a)
+        return len(short) >= 24 and (short in long or short[:72] in long)
     short, long = (a, b) if len(a) <= len(b) else (b, a)
-    return len(short) >= 48 and short in long
+    if len(short) < 48 or short not in long:
+        return False
+    return len(long) <= max(int(len(short) * 1.8), len(short) + 240)
 
 
 def _same_chat_reply(left: str, right: str) -> bool:
@@ -5856,16 +5898,17 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
             summary = herdr_client.pane_summary(session, pane_id, 120)
         except Exception:
             continue
-        text = _extract_harvest_text(str((summary or {}).get("summary") or ""))
-        if not text:
+        raw = _extract_harvest_text(str((summary or {}).get("summary") or ""))
+        if not raw:
             if settled and key in _PANE_TURN_STARTED:
                 _PANE_TURN_STARTED.pop(key, None)
                 _save_harvest_status()
             continue
-        conclusion = _extract_harvest_conclusion(text)
-        if not conclusion and _is_process_narration(text):
+        conclusion = _extract_harvest_conclusion(raw)
+        if not conclusion and _is_process_narration(raw):
             continue
-        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+        text = _latest_harvest_reply(raw)
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
         if _PANE_LAST_HARVEST.get(key) == digest:
             continue
         sender = str(
@@ -6368,7 +6411,7 @@ def _chat_delivery_mode(value: Any) -> str:
     try:
         return chat_ledger.normalize_delivery(value)
     except ValueError:
-        return "interrupt"
+        return "queue"
 
 
 def _pane_is_busy(pane: dict[str, Any]) -> bool:
@@ -6400,7 +6443,7 @@ def _notify_chat_recipients(
     session: str,
     recipients: list[str],
     text: str,
-    delivery: str = "interrupt",
+    delivery: str = "queue",
 ) -> list[str]:
     """叫醒对应 pane。打断立刻投；排队只叫醒空闲成员，忙的等 harvest 再投。"""
     names = {item for item in recipients if item}

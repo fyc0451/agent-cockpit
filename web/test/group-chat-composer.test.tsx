@@ -61,6 +61,7 @@ describe('Composer 附件与 Skill 菜单', () => {
     await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)) })
     fireEvent.keyDown(input, { key: 'Enter', keyCode: 13 })
     expect(onSend).toHaveBeenCalledOnce()
+    expect(onSend).toHaveBeenCalledWith('queue')
   })
 
   it('粘贴图片交给附件上传，普通文本粘贴不触发上传', async () => {
@@ -170,7 +171,7 @@ describe('Composer 附件与 Skill 菜单', () => {
     expect(screen.getByRole('button', { name: '展开输入框' })).toBeInTheDocument()
   })
 
-  it('可切换打断和排队，发送时带上当前类型', async () => {
+  it('默认为排队，点打断才立刻投', async () => {
     const onSend = vi.fn()
     await act(async () => {
       render(
@@ -185,10 +186,13 @@ describe('Composer 附件与 Skill 菜单', () => {
         />,
       )
     })
-    expect(screen.getByRole('radio', { name: '打断' })).toHaveAttribute('aria-checked', 'true')
-    fireEvent.click(screen.getByRole('radio', { name: '排队' }))
     expect(screen.getByRole('radio', { name: '排队' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('radio', { name: '打断' })).toHaveAttribute('aria-checked', 'false')
     fireEvent.click(screen.getByTitle('排队发送（Enter）'))
     expect(onSend).toHaveBeenCalledWith('queue')
+    fireEvent.click(screen.getByRole('radio', { name: '打断' }))
+    expect(screen.getByRole('radio', { name: '打断' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByTitle('立刻打断发送（Enter）'))
+    expect(onSend).toHaveBeenCalledWith('interrupt')
   })
 })

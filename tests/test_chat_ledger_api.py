@@ -1454,10 +1454,10 @@ def test_send_chat_mail_uses_overseer_and_notifies(isolated_ledger, monkeypatch)
     assert response.json()["mail_error"] is None
     assert sent and sent[0]["recipients"] == ["BrownDesert"]
     assert sent[0]["thread_id"] == "ping-1"
-    assert notified == [("ping-1", ["BrownDesert"], "@BrownDesert 在吗", "interrupt")]
+    assert notified == [("ping-1", ["BrownDesert"], "@BrownDesert 在吗", "queue")]
     assert bound and bound[0][0] == "ping-1"
     stored = chat_ledger.list_messages(thread["herdr_session"])
-    assert stored and stored[0]["delivery"] == "interrupt"
+    assert stored and stored[0]["delivery"] == "queue"
 
 
 def test_send_chat_mail_queue_is_stored_and_notified(isolated_ledger, monkeypatch):
@@ -1531,7 +1531,7 @@ def test_send_chat_mail_notifies_when_hub_rejects_recipient(isolated_ledger, mon
     )
     assert response.status_code == 200
     assert response.json()["mail_error"]
-    assert notified == [("scc-1", ["codex"], "@codex 做15轮", "interrupt")]
+    assert notified == [("scc-1", ["codex"], "@codex 做15轮", "queue")]
 
 
 def test_send_chat_mail_registers_missing_hub_project(isolated_ledger, monkeypatch):
@@ -2265,6 +2265,50 @@ def test_harvest_does_not_overwrite_pinned_old_bubble(isolated_ledger, monkeypat
     assert kept["text"] == "昨晚的结论：空 shell 命令不再进瀑布流。"
     assert kept["ts"] == 1_700_000_000_000
     assert any(row["id"] != old["id"] and "接力单还停在昨天" in row["text"] for row in rows)
+
+
+def test_harvest_does_not_glue_next_conclusion_into_old_bubble(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-no-glue", "chat-glue")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    queue = (
+        "结论：默认改成排队了。Enter 不再立刻打断。\n"
+        "要停手头工作才点「打断」。后端缺省 delivery 也是 queue。"
+    )
+    old = chat_ledger.append_message(
+        "chat-glue", kind="agent", sender="BrownDesert", text=queue, to=["human"],
+    )
+    server._PANE_LAST_MESSAGE[("chat-glue", "w1:p1")] = old["id"]
+    mixed = (
+        queue
+        + "\n\n口径没变。结论打到终端。\n"
+        "结论：4.0 整体规划没变。它是远程团队区，不是再做一套本机群。\n"
+        "产品线只有 3.0 和 4.0，没有 3.5。现在只分析，未授权写代码。"
+    )
+    panes = [{
+        "session": "chat-glue",
+        "pane_id": "w1:p1",
+        "agent": "grok",
+        "agent_status": "idle",
+        "mail_name": "BrownDesert",
+        "display_name": "BrownDesert",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary", lambda *_a, **_k: {"summary": mixed},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-glue")
+    rows = chat_ledger.list_messages("chat-glue", 10)
+    kept = next(row for row in rows if row["id"] == old["id"])
+    assert kept["text"] == queue
+    added = next(row for row in rows if row["id"] != old["id"])
+    assert "4.0 整体规划没变" in added["text"]
+    assert "默认改成排队" not in added["text"]
 
 
 def test_merge_chat_timeline_keeps_later_distinct_claude_reply():
@@ -3024,6 +3068,24 @@ def test_extract_harvest_conclusion_accepts_heading_without_colon():
     assert "三条生产主链" in first
     assert "Working" not in first
     assert server._same_harvest_copy(first, second)
+
+
+def test_same_harvest_copy_does_not_glue_two_conclusions():
+    queue = (
+        "结论：默认改成排队了。Enter 不再立刻打断。\n"
+        "要停手头工作才点「打断」。后端缺省 delivery 也是 queue。"
+    )
+    mixed = (
+        queue
+        + "\n\n口径没变。结论打到终端。\n"
+        "结论：4.0 整体规划没变。它是远程团队区，不是再做一套本机群。\n"
+        "产品线只有 3.0 和 4.0，没有 3.5。现在只分析，未授权写代码。"
+    )
+    assert not server._same_harvest_copy(queue, mixed)
+    latest = server._latest_harvest_reply(mixed)
+    assert latest.startswith("结论：4.0")
+    assert "默认改成排队" not in latest
+    assert server._extract_harvest_conclusion(mixed).startswith("结论：4.0")
 
 
 def test_harvest_working_does_not_publish_finished_conclusion(isolated_ledger, monkeypatch):

@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Group-chat send defaults to queue. Interrupt stays available for
+  the cases that need to stop current work.
+
+### Fixed
+
+- Harvest no longer pastes the next conclusion into the previous
+  bubble when the terminal still shows the old one. A later 结论
+  heading is a new message, not a longer copy of the last.
+
 ## [0.3.7] - 2026-08-20
 
 ### Removed
