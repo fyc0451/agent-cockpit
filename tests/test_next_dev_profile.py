@@ -64,11 +64,47 @@ def test_dev_profile_accepts_this_checkout_on_8790(tmp_path: Path, monkeypatch: 
     env["HERDR_SESSION"] = "cockpit"
     next_profile.validate_server_environment(repo, env)
     assert next_profile.require_session("cockpit", env) == "cockpit"
+    monkeypatch.delenv("COCKPIT_PROJECT_ROOT", raising=False)
     launcher = _dev_server()
     lan = launcher.dev_values(repo, home, "0.0.0.0")
     assert lan["COCKPIT_HOST"] == "0.0.0.0"
+    assert lan["COCKPIT_PROJECT_ROOT"] == str(repo.parent.resolve())
     with pytest.raises(next_profile.NextProfileError, match="next_profile_invalid:COCKPIT_HOST"):
         launcher.dev_values(repo, home, "192.168.1.5")
+
+
+def test_dev_values_does_not_require_home_github(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    repo = home / "agent-cockpit"
+    home.mkdir()
+    repo.mkdir()
+    (repo / ".agent-memory-project").write_text("agent-cockpit-next\n", encoding="ascii")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("COCKPIT_PROJECT_ROOT", raising=False)
+    launcher = _dev_server()
+    values = launcher.dev_values(repo, home)
+    assert values["COCKPIT_PROJECT_ROOT"] == str(repo.resolve())
+    assert not (home / "github").exists()
+    next_profile.validate_server_environment(repo, values)
+
+
+def test_dev_values_honors_project_root_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    repo = home / "src" / "agent-cockpit"
+    projects = home / "work"
+    home.mkdir()
+    repo.mkdir(parents=True)
+    projects.mkdir()
+    (repo / ".agent-memory-project").write_text("agent-cockpit-next\n", encoding="ascii")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("COCKPIT_PROJECT_ROOT", str(projects))
+    launcher = _dev_server()
+    values = launcher.dev_values(repo, home)
+    assert values["COCKPIT_PROJECT_ROOT"] == str(projects)
 
 
 def test_dev_profile_rejects_sandbox_home_and_wrong_port(

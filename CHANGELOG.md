@@ -8,6 +8,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `install.sh` now installs Cockpit 3.0: it builds `web/dist` and
+  starts `scripts/dev_server.py` via systemd / LaunchAgent. The old
+  board is no longer the one-command result.
+
+- Source 8790 no longer requires `$HOME/github`. The discovery root
+  is the checkout parent (or the checkout itself), overridable with
+  `COCKPIT_PROJECT_ROOT`.
+
 - Group-chat send defaults to queue. Interrupt stays available for
   the cases that need to stop current work.
 

@@ -10,27 +10,23 @@
 
 [中文](README.md) | [日本語](README.ja.md)
 
-<p align="center">
-  <img src="docs/screenshots/board-desktop.png" alt="Board (desktop)" width="74%">
-  <img src="docs/screenshots/board-mobile.png" alt="Board (phone)" width="22%">
-</p>
+## Current product: Cockpit 3.0
 
-Inspired by [Orca](https://onorca.dev)'s Agent Dashboard, but built as a lightweight
-web app that plugs into your existing Herdr sessions.
-[Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) integration is optional.
+Cockpit 3.0 is a group chat at `http://127.0.0.1:8790/#/chat`.
+The UI is a waterfall, a member list, and a composer — not the old kanban board.
+Product lines are 3.0 and a planned 4.0. There is no 2.0 / 3.5 install path.
+
+The current entry is `install.sh`: it builds `web/dist` and starts
+`scripts/dev_server.py`. The old board is no longer the install result.
 
 ## What it does
 
-- **Kanban board** — every CLI agent (codex / kimi / claude / qoder / grok / opencode) across all herdr sessions, sorted into *Needs You / Working / Done / Idle* columns, updating in real time.
-- **Live terminal** — click any agent card to open its terminal output; send prompts, run shell commands, or send special keys via xterm.js.
-- **Screenshot → agent** — upload an image, it auto-inserts as `@/path` so the agent picks it up (`Viewed Image`).
-- **Attention Inbox** — blocked agents, failed background tasks, pending diffs, and optional Agent Mail unread in one actionable queue.
-- **Web Push** — opt in from the Inbox and jump from a notification straight to the pane, task, or message that needs you.
-- **Agent messaging** — built on Agent Mail: send/read messages between agents, ack unread. Without Agent Mail the message views hide themselves and everything else keeps working.
-- **File browser + editor** — browse, edit, download, and upload project files inside a sandboxed whitelist.
-- **codex tasks** — kick off background `codex exec` jobs, watch output stream, review diffs, apply/stash changes.
-- **Mobile-friendly** — responsive single-file frontend, camera upload, touch-friendly, installable as a PWA.
-- **Dark / light theme** — toggle in the header, remembered across sessions. In light mode, explicit dark colors painted by TUIs (e.g. opencode's black background) are automatically inverted to a readable palette.
+- **Group-chat waterfall** — CLI agents under herdr show up as members; conclusions land in bubbles, process folds away.
+- **Queue by default** — Enter queues until the pane is idle; use Interrupt only to stop current work.
+- **Harvest** — conclusions are collected on pane `idle` / `done` only.
+- **Files and attachments** — browse the repo and copy paths from chat; attachments stay collapsed by default.
+- **Settings** — appearance, source one-click upgrade, environment check.
+- **Mobile** — same Hash-routed chat in a phone browser.
 
 ## How it works
 
@@ -45,90 +41,102 @@ Agent Cockpit (FastAPI, same host as herdr + hub)
     └── pushes state and diffs to the browser over SSE
 ```
 
-It deploys **on the same machine as herdr**, reading everything locally for zero-latency
-access. Your Mac and phone are just browser clients. If Agent Mail is absent, only the
-message views are hidden; if its Hub is temporarily down, existing messages remain
-readable while send/ack becomes read-only. The board, terminals, files, tasks, Inbox,
-and push notifications continue to work in either case.
+It deploys **on the same machine as herdr**. Your laptop and phone are just browsers.
+Agent Mail is required to create workspaces and add agents. If the hub is down,
+existing chat bubbles stay readable.
 
-## Install
+## Install 3.0
 
-### Prerequisites
+Run this on the same host as herdr.
 
 | Dependency | Why |
 | --- | --- |
-| [herdr](https://herdr.dev) | The agent sessions this cockpit visualizes and controls |
-| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub (`:8765`) (optional) | Adds cross-agent messages to the Inbox and message view |
-| `codex` CLI (authenticated) | For background `codex exec` tasks |
-| Python 3.12+ | Runtime |
+| [herdr](https://herdr.dev) | Terminal sessions that hold the agents |
+| Git, Python 3.12+, Node.js 20+ (with npm) | Clone, run the server, build `web/dist` |
+| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub (`:8765`) | Identity and chat delivery |
+| At least one signed-in Agent CLI | Codex / Claude / Kimi / OpenCode / Grok / Qoder CLI CN |
 
-### One-command install
+Clone the repo anywhere. You do not need `$HOME/github`. The discovery root
+defaults to the parent of the checkout, or the checkout itself when that parent
+would be Home. Set `COCKPIT_PROJECT_ROOT` only if you want a different existing
+directory of repositories (not Home itself).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.sh | bash
 ```
 
-The installer clones to `~/agent-cockpit`, creates a virtual environment, installs
-dependencies, and registers `agent-cockpit.service` on Linux or a LaunchAgent on
-macOS. Bundled Agent Mail helpers are safely linked into `~/.local/bin`; existing
-regular files and custom symlinks are preserved. Run `~/agent-cockpit/doctor.sh` if
-startup fails.
+The installer clones to `~/agent-cockpit` (or installs in place), creates a
+venv, installs Agent Mail, builds `web/dist`, and registers
+`agent-cockpit.service` (LaunchAgent on macOS). Open
+`http://127.0.0.1:8790/#/chat`.
 
-### Manual install
+If a Hub is already reachable it is reused and a hand-maintained
+`~/.agent-mail/client.env` is not overwritten. Set `AGENT_MAIL_SKIP_HUB=1` to
+skip the local Hub. If 8790 is busy, stop that process; do not change the port.
+Run `./doctor.sh` if startup fails.
+
+Do **not** run `.venv/bin/python server.py` by itself: without
+`COCKPIT_NEXT_PROFILE=dev` the homepage is not 3.0. The service unit already
+starts `scripts/dev_server.py`.
+
+Manual install without systemd:
 
 ```bash
 git clone https://github.com/fyc0451/agent-cockpit.git
 cd agent-cockpit
-python -m venv .venv
+python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python server.py
-# → http://localhost:8790
+./install-agent-mail-tools.sh .
+./install-agent-mail-hub.sh
+npm ci --prefix web
+npm run --prefix web build
+.venv/bin/python scripts/dev_server.py
+# → http://127.0.0.1:8790/#/chat
 ```
 
-To access the cockpit from another LAN/VPN device, copy `.env.example` to `.env`,
-set `COCKPIT_HOST=0.0.0.0`, and set `COCKPIT_TOKEN` to a random value. The server
-refuses a non-loopback bind without a token.
+### LAN (optional)
+
+```bash
+install -d -m 700 "$HOME/.config/agent-cockpit"
+(umask 077; set -o noclobber; openssl rand -hex 32 > \
+  "$HOME/.config/agent-cockpit/cockpit.token")
+COCKPIT_HOST=0.0.0.0 .venv/bin/python scripts/dev_server.py
+```
+
+Open `http://<LAN-IP>:8790` and paste `~/.config/agent-cockpit/cockpit.token`.
+Do not put the token in `.env`, chat, or logs.
 
 > **Security warning:** use HTTPS or Tailscale Serve for remote access. Plain HTTP
 > exposes the login session cookie to anyone able to observe the local network.
 > Do not expose Agent Cockpit directly to the public Internet.
 
-### Deploy as a systemd service
+### Do not use these as the 3.0 install
 
-```bash
-loginctl enable-linger "$USER"   # keep the user service running after logout
-cp agent-cockpit.service ~/.config/systemd/user/agent-cockpit.service
-# Edit paths to match your setup, then:
-systemctl --user daemon-reload
-systemctl --user enable --now agent-cockpit
-```
+| Entry | What you actually get |
+| --- | --- |
+| `scripts/next_dev.py` / `:18790` | Frozen Next 2.0 preview, not 3.0 |
+| `./upgrade.sh` | Retired (fail-closed) |
+| Native V2 from GitHub Latest | Replaces source 8790 with the packaged unit |
 
-`KillMode=process` preserves independent Herdr sessions when the cockpit is restarted;
-browser-created PTYs may still disconnect and should not be treated as persistent jobs.
+After source 8790 is running, Settings has a one-click upgrade that pulls the
+official tag, rebuilds `web/dist`, and restarts the source unit. Leave
+`COCKPIT_UPGRADE_V2_ENABLED` off.
 
-For a manual launch, load `.env` first:
+## First run
 
-```bash
-set -a; source .env; set +a
-.venv/bin/python server.py
-```
+1. Confirm herdr is running with at least one signed-in agent pane.
+2. Open `http://127.0.0.1:8790/#/chat`.
+3. Pick a workspace / herdr session on the left; members appear on the right.
+4. The composer defaults to **queue**. `@` a member and press Enter; they run
+   when idle. Use **interrupt** only to stop current work.
+5. Replies land in the waterfall. Long process text folds under 「展开过程」.
+6. Settings covers appearance, doctor, and source upgrade.
 
-## First run (5-minute quickstart)
+Hash routes: chat `/#/chat`, settings `/#/settings`. Unknown paths fall back
+to chat. The old board remains as `static/index.html` in the tree; the install
+entry no longer starts it. See [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
 
-1. Open `http://localhost:8790` in a browser.
-2. An empty board is normal — click **🚀 Create your first workspace** in the empty
-   state (or **+ Quick workspace** on the Sessions page), fill in a session name, the
-   project directory, and the agents to start (e.g. `codex,kimi`), then launch. The
-   session is created automatically if it doesn't exist.
-3. Back on the **Board**, agents sort themselves into columns by status; click a card
-   to see its output, click the 🖥 on a card to take over its TUI.
-4. The **Inbox** collects blocked/failed agents in one place — enable browser
-   notifications there.
-5. If anything misbehaves, check **Settings → Environment check**: herdr, each agent's
-   executable, and Agent Mail readiness at a glance. On the command line, `./doctor.sh`
-   does the same.
-
-## Usage
+## Usage (old board, install.sh only)
 
 ### Board
 
@@ -241,16 +249,18 @@ Run the test suite with `.venv/bin/pip install -r requirements-dev.txt` followed
 
 ```
 agent-cockpit/
-├── server.py              Compatibility server entry point
+├── scripts/dev_server.py  3.0 source-8790 launcher (current install)
+├── server.py              Compatibility entry (old board without NEXT_PROFILE)
 ├── source_native_migrate.py / release_lane.py  Managed release entry points
-├── agent_cockpit/         Application implementation (server, terminal, mail, upgrade)
+├── agent_cockpit/         Application implementation (server, chat ledger, mail, upgrade)
+├── web/                   3.0 group-chat frontend (build output: web/dist)
 ├── agent_mail_commands/    Agent Mail command implementation
-├── static/index.html      Single-file frontend (kanban + Inbox + terminal + tabs)
-├── static/sw.js           Web Push service worker and deep-link handler
-├── static/manifest.webmanifest  Root-scope installable Web App metadata
+├── static/index.html      Old board leftover (install no longer starts it)
 ├── tests/                 Regression and security tests
-├── install.sh / upgrade.sh (retired) / doctor.sh / uninstall.sh
-├── agent-cockpit.service  systemd user unit template
+├── install.sh             3.0 one-command install (web/dist + dev_server)
+├── upgrade.sh             Retired
+├── doctor.sh / uninstall.sh
+├── agent-cockpit.service  3.0 systemd unit (ExecStart=dev_server.py)
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```
 

@@ -29,7 +29,14 @@ def test_fresh_install_docs_order_next_before_legacy() -> None:
     next_doc = (ROOT / "docs" / "NEXT-DEVELOPMENT.md").read_text(
         encoding="utf-8"
     )
-    commands = (
+    assert "Cockpit 3.0" in readme
+    assert "install.sh" in readme
+    assert "curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.sh | bash" in readme
+    assert "http://127.0.0.1:8790/#/chat" in readme
+    assert "scripts/dev_server.py" in readme
+    assert "不要直接 `.venv/bin/python server.py`" in readme
+
+    frozen = (
         'cd "$HOME/github/agent-cockpit-next"',
         "python3 -m venv .venv",
         "npm ci --prefix web",
@@ -38,53 +45,32 @@ def test_fresh_install_docs_order_next_before_legacy() -> None:
         "scripts/next_dev.py start",
         "http://127.0.0.1:18790",
     )
-
-    for document in (readme, next_doc):
-        positions = [document.index(marker) for marker in commands]
-        assert positions == sorted(positions)
-        for label in (
-            "选择代码目录",
-            "检查并继续",
-            "确认添加",
-            "继续创建工作空间",
-            "创建并打开",
-            "开始任务",
-            "继续输入下一条任务",
-        ):
-            assert label in document
-
-    assert readme.index("Cockpit Next 2.0") < readme.index("Legacy 0.3.x")
-    assert "~/.config/agent-cockpit-next/cockpit.token" in readme
-    assert "不要使用下文旧版的 `COCKPIT_TOKEN`" in readme
-    next_section = readme.split("## Legacy 0.3.x", 1)[0]
-    legacy_section = readme.split("## Legacy 0.3.x", 1)[1]
-    assert "openssl rand -hex 32" in next_section
-    assert "COCKPIT_HOST=0.0.0.0" in next_section
-    assert "<本机局域网IP>" in next_section
-    assert "不要对 Next 执行 `install.sh`" in next_section
-    assert "pip install -r requirements.txt" in next_section
-    assert "openssl rand -hex 32" not in legacy_section
-    assert "`COCKPIT_TOKEN`" in legacy_section
-    assert "install.sh" in legacy_section
-    for document in (readme, next_doc):
-        assert "origin/next" in document
-        assert "reviewed" in document
-        assert document.index("scripts/next_dev.py start") < document.index(
-            "git clone --branch next"
-        )
-        assert document.index("openssl rand -hex 32") < document.index(
-            "git clone --branch next"
-        )
+    frozen_positions = [next_doc.index(marker) for marker in frozen]
+    assert frozen_positions == sorted(frozen_positions)
+    for label in (
+        "选择代码目录",
+        "检查并继续",
+        "确认添加",
+        "继续创建工作空间",
+        "创建并打开",
+        "开始任务",
+        "继续输入下一条任务",
+    ):
+        assert label in next_doc
+    assert "origin/next" in next_doc
+    assert "reviewed" in next_doc
+    assert next_doc.index("scripts/next_dev.py start") < next_doc.index(
+        "git clone --branch next"
+    )
 
 
 def test_user_guide_declares_legacy_and_points_to_next() -> None:
     guide = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
     head = guide[:800]
-    assert "Legacy 0.3.x" in head
-    assert "8790" in head
-    assert "Cockpit Next 2.0" in head
+    assert "旧看板" in head
+    assert "Cockpit 3.0" in head
     assert "README.md" in head
-    assert "NEXT-DEVELOPMENT.md" in head
+    assert "install.sh" in head
 
 
 def _assert_text_error(captured: pytest.CaptureFixture[str], code: str) -> None:

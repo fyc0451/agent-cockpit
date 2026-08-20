@@ -10,92 +10,94 @@
 
 [English](README.en.md) | [日本語](README.ja.md)
 
-## Cockpit Next 2.0（当前本地预览入口）
+## 当前版本：Cockpit 3.0
 
-Next 2.0 是当前体验入口，但目前只作为本地 `next` 预览提供。不要对 Next 执行 `install.sh`、
-`upgrade.sh` 或 `launchd.sh`；那些只属于下文 Legacy 0.3.x。
+当前产品是 **3.0 群聊**，跑在本机 `http://127.0.0.1:8790/#/chat`。
+界面是瀑布流 + 成员栏 + 输入框，不是旧看板。产品线只有 3.0 和规划中的 4.0，
+没有单独的 2.0 / 3.5 安装入口。
 
-启动需要 Git、Python 3.12+、Node.js 20+（含 npm）、正在运行的 Herdr，以及至少一个
-已经安装并完成登录的 Agent CLI（Codex、Claude、Kimi、OpenCode 或 Grok）。
-checkout 必须在 `$HOME/github/agent-cockpit-next`，当前分支必须是 `next`。
+当前入口就是 `install.sh`：编译 `web/dist`，用 `scripts/dev_server.py` 起
+3.0 群聊。旧看板不再作为安装结果。
+
+## 安装 3.0
+
+和 herdr 装在同一台机器上。需要：
+
+| 依赖 | 用途 |
+| --- | --- |
+| [herdr](https://herdr.dev) | agent 所在的终端会话 |
+| Git、Python 3.12+、Node.js 20+（含 npm） | 拉代码、跑服务、编译 `web/dist` |
+| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) Hub（`:8765`） | 身份和群聊投递；没有 Hub 不能建工作区 |
+| 至少一个已登录的 Agent CLI | Codex / Claude / Kimi / OpenCode / Grok / Qoder CLI CN |
+
+仓库可以 clone 到任意路径。不必建 `$HOME/github`。发现根默认是仓库的上一级
+目录；clone 就在 Home 下一层时，用仓库自己。要扫别的代码目录时再设
+`COCKPIT_PROJECT_ROOT`（必须是已存在的真实目录，不能是 Home 本身）。
 
 ```bash
-cd "$HOME/github/agent-cockpit-next"
+curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.sh | bash
+```
 
+安装器会克隆到 `~/agent-cockpit`（已有 checkout 就在原地装）、建 venv、装
+Agent Mail、编译 `web/dist`，并注册 `agent-cockpit.service`（macOS 为
+LaunchAgent）。启动后打开 `http://127.0.0.1:8790/#/chat`。
+
+已经有可用的 Agent Mail Hub 时会复用，不会覆盖手工/远程的
+`~/.agent-mail/client.env`。跳过本机 Hub 时设 `AGENT_MAIL_SKIP_HUB=1`。
+启动失败先跑 `./doctor.sh`。8790 被占用时先停掉占用该口的进程，不要改端口。
+
+不要直接 `.venv/bin/python server.py`：没有 `COCKPIT_NEXT_PROFILE=dev` 时
+首页不是 3.0。服务单元已经走 `scripts/dev_server.py`。
+
+手动安装（不注册 systemd 时）同样要编译前端并用启动器：
+
+```bash
+git clone https://github.com/fyc0451/agent-cockpit.git
+cd agent-cockpit
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+./install-agent-mail-tools.sh .
+./install-agent-mail-hub.sh
 npm ci --prefix web
 npm run --prefix web build
-
-cp .env.next.example .env.next
-# 按需编辑 COCKPIT_PROJECT_ROOT：它必须是现存的代码仓库容器目录，不能是整个 Home。
-.venv/bin/python scripts/next_dev.py check --env-file .env.next
-.venv/bin/python scripts/next_dev.py start --env-file .env.next
+.venv/bin/python scripts/dev_server.py
+# → http://127.0.0.1:8790/#/chat
 ```
 
-`start` 在前台运行。保持该终端打开，在浏览器访问 `http://127.0.0.1:18790`。
-本机默认无需登录。空首页选择 **选择代码目录**，选中带 `.git` 的目录后
-**检查并继续** → **确认添加** → **继续创建工作空间** → **创建并打开**，
-再打开 **Agent**，写下任务并点 **开始任务**。同一页查看回复，
-**继续输入下一条任务** 即可延续会话。
-
-**文件** / **终端** 不是启动 Agent 的前置步骤。
-
-局域网（可选，仍用上面的 check/start，不要改端口）：
+### 局域网（可选）
 
 ```bash
-install -d -m 700 "$HOME/.config/agent-cockpit-next"
+install -d -m 700 "$HOME/.config/agent-cockpit"
 (umask 077; set -o noclobber; openssl rand -hex 32 > \
-  "$HOME/.config/agent-cockpit-next/cockpit.token")
+  "$HOME/.config/agent-cockpit/cockpit.token")
+COCKPIT_HOST=0.0.0.0 .venv/bin/python scripts/dev_server.py
 ```
 
-把 `.env.next` 改成 `COCKPIT_HOST=0.0.0.0` 后重新 `start`。浏览器打开
-`http://<本机局域网IP>:18790`，登录时粘贴 `~/.config/agent-cockpit-next/cockpit.token`
-的内容。不要把令牌写入 `.env.next`，也不要使用下文旧版的 `COCKPIT_TOKEN` 配置。
+浏览器打开 `http://<本机局域网IP>:8790`，登录时粘贴
+`~/.config/agent-cockpit/cockpit.token` 的内容。不要把令牌写进 `.env`、聊天或日志。
 
-完整的 Next profile 与开发说明见
-[Cockpit Next development runtime](docs/NEXT-DEVELOPMENT.md)。
+> **安全警告:** 远程访问请用 HTTPS 或 Tailscale Serve。裸 HTTP 会让登录
+> cookie 暴露给同网段的任何人。不要把 Agent Cockpit 直接暴露到公网。
 
-### 公共发布阻塞
+### 不要用这些入口
 
-当前 reviewed 2.0 exact 尚未发布到公共 `origin/next`。下面的 clone
-命令**现在不能作为安装入口**；只有在 reviewed `next` 分支正式发布，并验证
-远端确实包含 reviewed exact 后才可使用：
+| 入口 | 实际结果 |
+| --- | --- |
+| `scripts/next_dev.py` / `:18790` | 已冻结的 Next 2.0 隔离预览，不是当前 3.0 |
+| `./upgrade.sh` | 已退役（fail-closed） |
+| 打开 GitHub Latest 的 native V2 | 会把源码 8790 换成打包单元 |
 
-```bash
-mkdir -p "$HOME/github"
-git clone --branch next https://github.com/fyc0451/agent-cockpit.git \
-  "$HOME/github/agent-cockpit-next"
-```
-
-## Legacy 0.3.x（旧版）
-
-以下功能、安装和使用说明属于旧版 `0.3.x`，入口为 `8790`。它不是 Next
-2.0 的默认安装路径；不要用旧版 `install.sh` 启动上面的 Next checkout。
-
-📖 **[旧版 0.3.x 用户手册](docs/USER-GUIDE.md)**
-
-<p align="center">
-  <img src="docs/screenshots/board-desktop.png" alt="看板(桌面端)" width="74%">
-  <img src="docs/screenshots/board-mobile.png" alt="看板(手机端)" width="22%">
-</p>
-
-灵感来自 [Orca](https://onorca.dev) 的 Agent Dashboard,但做成轻量 Web 应用,
-直接插进你现有的 herdr 会话。[Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail)
-是必需的协作与身份基础设施；创建工作区和添加 Agent 前必须就绪。
+源码 8790 装好之后，设置页有「一键升级」：拉官方 tag、重建 `web/dist`、重启
+源码单元。不要打开 `COCKPIT_UPGRADE_V2_ENABLED`。
 
 ## 功能一览
 
-- **看板** — 所有 herdr session 里的 coding agent(codex / kimi / claude / qoder / grok / opencode)按 *需要你 / 工作中 / 已完成 / 空闲* 实时分列。
-- **真终端** — 点开任意 agent 卡片即可接管它的 TUI(xterm.js),发指令、跑命令、发特殊按键。
-- **截图 → agent** — 上传图片自动转成 `@/path` 插入,让 agent 直接"看到"截图。
-- **待办 Inbox** — 被卡住的 agent、失败的后台任务、待审 diff、Agent Mail 未读,汇成一条可操作的队列。
-- **浏览器推送** — 在待办页开启 Web Push,点通知直达对应的 pane / 任务 / 消息。
-- **agent 间消息** — 基于 Agent Mail:注册身份、收发消息、已读确认和可靠协作交接。
-- **文件浏览 + 编辑** — 白名单沙箱内浏览、编辑、下载、上传项目文件。
-- **codex 后台任务** — 发起 `codex exec` 后台任务,流式看输出,审 diff,应用或stash 改动。
-- **移动端友好** — 单文件前端自适应,支持拍照上传、触屏操作、PWA 加到主屏。
-- **深色 / 浅色主题** — 头部一键切换并记住选择;浅色模式下终端里的显式深色(如 opencode 自带黑底)会自动反转成可读配色。
+- **群聊瀑布流** — herdr 里的 CLI agent 作为成员出现；结论进气泡，过程可展开。
+- **排队发送（默认）** — Enter 排队，等对方空闲再投；要停手头工作才点「打断」。
+- **Harvest** — 只在 pane `idle` / `done` 时收结论；busy 时不改上一条气泡。
+- **文件与附件** — 群聊里看仓库、复制路径；附件默认折叠。
+- **设置** — 外观、源码一键升级、环境自检。
+- **移动端** — Hash 路由，手机浏览器可打开同一群聊。
 
 ## 工作原理
 
@@ -114,144 +116,22 @@ Agent Cockpit(FastAPI,与 herdr 同机)
 可以部署在同机，也可以使用团队共享的远程服务；远程模式没有本机 SQLite 时，
 本地消息列表会降级，但注册身份、创建工作区和添加 Agent 仍可正常使用。
 Agent Mail 是新建工作区和添加 Agent 的前置条件；hub 暂时挂掉时禁止新增，已有消息只读，
-现有看板、终端、文件、任务、待办和推送仍可查看与操作。
+群聊里已有气泡和 herdr pane 仍可查看。
 
-## Legacy 0.3.x 安装（旧版）
+## 首次使用
 
-### 依赖
+1. 确认 herdr 已在跑，并且至少有一个已登录的 agent pane。
+2. 浏览器打开 `http://127.0.0.1:8790/#/chat`。
+3. 左侧选工作区 / herdr session；右侧成员栏能看到花名。
+4. 输入框默认是 **排队**。`@` 成员后回车，对方空闲才会开始做。
+   只有要停手头工作时才点 **打断**。
+5. 回复先进瀑布流。长过程折在「展开过程」里，结论在气泡里。
+6. 设置页可改外观、跑环境自检、给源码 8790 做一键升级。
 
-| 依赖 | 用途 |
-| --- | --- |
-| [herdr](https://herdr.dev) | 本驾驶舱可视化/控制的 agent 会话 |
-| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub(`:8765`,必需) | Agent 身份、协作交接与跨 agent 消息 |
-| `codex` CLI(已登录) | 后台 `codex exec` 任务 |
-| Python 3.12+ | 运行时 |
+Hash 路由：群聊 `/#/chat`，设置 `/#/settings`。旧路径会落到群聊。
 
-### 一键安装
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.sh | bash
-```
-
-安装器会克隆到 `~/agent-cockpit`、建虚拟环境、装依赖，并在 Linux 注册
-`agent-cockpit.service`，在 macOS 注册 LaunchAgent。启动失败先跑
-`~/agent-cockpit/doctor.sh`。仓库内附带的 Agent Mail 辅助命令会安全链接到
-`~/.local/bin`；已有普通文件或用户自定义软链不会被覆盖。
-
-### 手动安装
-
-```bash
-git clone https://github.com/fyc0451/agent-cockpit.git
-cd agent-cockpit
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python server.py
-# → http://localhost:8790
-```
-
-要从局域网/VPN 的其他设备访问:复制 `.env.example` 为 `.env`,设
-`COCKPIT_HOST=0.0.0.0` 和一个随机的 `COCKPIT_TOKEN`。没有 token 时服务端拒绝
-绑定非回环地址；`10.x`、`172.16–31.x`、`192.168.x` 等私网地址也不会被当作
-免认证的“本机”。
-
-> **安全警告:** 远程访问请用 HTTPS 或 Tailscale Serve。裸 HTTP 会让登录
-> cookie 暴露给同网段的任何人。不要把 Agent Cockpit 直接暴露到公网。
-
-### systemd 服务
-
-```bash
-loginctl enable-linger "$USER"   # 注销后保持 user service 运行
-cp agent-cockpit.service ~/.config/systemd/user/agent-cockpit.service
-# 按你的环境改路径,然后:
-systemctl --user daemon-reload
-systemctl --user enable --now agent-cockpit
-```
-
-`KillMode=process` 保证重启驾驶舱不影响独立的 herdr 会话;但浏览器里新建的
-PTY 终端会随重启断开,不要把它当持久任务用。
-
-手动启动时记得先加载 `.env`:
-
-```bash
-set -a; source .env; set +a
-.venv/bin/python server.py
-```
-
-## Legacy 0.3.x 首次使用（旧版）
-
-1. 浏览器打开 `http://localhost:8790`。
-2. 看板是空的很正常——点空态里的 **🚀 创建第一个工作区**(或「会话」页的
-   **+ 一键工作区**),填 session 名、项目目录、要启动的 agent(如 `codex,kimi`),
-   点启动。session 不存在会自动创建。
-3. 回到「看板」,agent 按状态自动分列;点卡片看输出,点卡片上的 🖥 接管 TUI。
-4. 「待办」页集中处理卡住 / 失败的 agent,可在此开启浏览器通知。
-5. 遇到问题先看「设置 → 环境自检」:herdr、各 agent 可执行文件、Agent Mail
-   哪个没就绪一目了然;命令行下也可以跑 `./doctor.sh`。
-
-## 使用说明
-
-### 看板
-
-- 四列实时分列:**⚠ 需要你 / ⚡ 工作中 / ✓ 已完成 / ○ 空闲**。
-- 点卡片进入该 pane 的「流」视图;点卡片右上角 **🖥** 直接接管 TUI。
-- **终端**页工具栏的 **＋ 添加 Agent**:按需打开表单，选已有 session + agent 类型 + 工作目录,点 **+ 新建 agent**
-  往 session 里加 agent;没有任何 session 时会自动引导你去建工作区。
-
-### 待办
-
-- 统一队列:被卡住等待输入的 agent、失败的后台任务、待审 diff、Agent Mail 未读。
-- 点条目直达处理现场;点 **开启浏览器通知** 订阅 Web Push。
-- 推送需要安全上下文:`https://`(如 Tailscale Serve)或 `http://localhost`。
-  iPhone/iPad 必须先在 Safari 里 **分享 → 添加到主屏幕**,从主屏图标打开后再开通知
-  (iOS 不允许普通 Safari 标签页订阅 Web Push)。
-
-### 终端
-
-- **+ 新终端** 开一个浏览器 PTY(随服务重启断开,勿存持久任务)。
-- 工具栏:📎 上传(图片/文件自动插 `@/path`)、@协作(插入可联系的协作者信息)、
-  🖥 herdr(attach 到 herdr session 分屏操作)、📜 返回流视图、📋 复制到剪贴板。
-- herdr 分屏快捷键:`Ctrl-b` 切 pane / `d` 脱离 / `?` 全部快捷键。
-- 手机上点 **⌨ 电脑键盘** 展开方向键 / Ctrl 组合键和可见输入框。
-
-### 流(herdrflow)
-
-- 每个 agent pane 一块:可滚屏、可复制的输出 + 底部输入框快速发指令。
-- `prompt` 模式走 agent 的提示接口,`send` 模式直接模拟按键。
-- 📋 把刚才在 Herdr TUI 里复制的文字填进输入框;⛶ 全屏专注单个工作区。
-
-### 会话
-
-- 列出所有 herdr session:干净重启 / resume 重启 pane、停止、删除已停止会话。
-- **+ 一键工作区**:自动 建 session → 分屏 → 启动 agents → 注册 Agent Mail 身份并通知；
-  Agent Mail 不可用时会在创建前阻止操作。另有 **📧 初始化通信** 可修复旧 session 身份。
-- 每个 session 会持久化唯一的 Agent Mail 通信项目。同一 Git clone 的独立 worktree
-  自动归到主 worktree；旧 session 只有一个已注册候选时自动迁移，零个或多个候选
-  会在初始化通信时要求选择，不再用第一个 pane 的 cwd 猜测。
-
-### 消息
-
-- 按项目/agent 浏览 Agent Mail 消息,可发消息、已读确认。
-- Agent Mail hub 离线时已有消息只读，同时禁止创建工作区和添加 Agent，避免无身份运行。
-
-### 文件
-
-- 顶部的「可访问位置」是白名单根目录:系统目录 + 已注册项目 + 自定义目录。
-  **＋ 添加目录** 可把任意目录加进白名单(只授权浏览,不移动数据)。
-- 点目录下钻、点文件查看;文本文件可直接编辑保存,其他文件点 ⬇️ 下载。
-- 搜索按文件名在当前目录及子目录递归匹配。
-- **🚀 当前目录建工作区**:用文件列表当前目录预填一键工作区。
-
-### 设置
-
-- **界面语言**:中文 / English / 日本語;**外观配色**:深色 / 浅色(浅色模式下
-  终端里 agent 自带的显式深色背景会自动做明度反转,opencode 黑底也能读)。
-- **终端字体大小**:10–24,只影响本设备,立即生效。
-- **每目录默认 agent**:「添加 Agent」表单填工作目录时自动预选对应 agent。
-- **启用的 agent**:启动菜单只列勾选的类型。
-- **团队 Hub 连接**:直接填写 Team Hub API 与 Human issuer，保存后持久化并立即生效；
-  不需要修改 `.env`。公司 RFC1918 私网地址可直接使用 HTTP，公网地址必须使用 HTTPS。
-- **运行参数**:上传上限、最大终端数、空闲终端回收时间、终端写超时。
-- **环境自检**:herdr / 各 agent 可执行文件 / Agent Mail 的就绪状态,❌ 即未安装。
+旧看板只作为仓库里的 `static/index.html` 残留；3.0 安装入口不再启动它。
+那份界面的手册见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
 
 ## 配置
 
@@ -289,16 +169,18 @@ localStorage。session 的 Agent Mail 通信项目绑定存在
 
 ```
 agent-cockpit/
-├── server.py              兼容启动入口
+├── scripts/dev_server.py  3.0 源码 8790 启动器（当前安装入口）
+├── server.py              兼容启动入口（无 NEXT_PROFILE 时仍出旧看板）
 ├── source_native_migrate.py / release_lane.py  受管发布入口
-├── agent_cockpit/         应用实现(服务、终端、通信、升级)
+├── agent_cockpit/         应用实现(服务、群聊账本、通信、升级)
+├── web/                   3.0 群聊前端（build 后是 web/dist）
 ├── agent_mail_commands/    Agent Mail 命令实现
-├── static/index.html      单文件前端(看板 + 待办 + 终端 + 各标签页)
-├── static/sw.js           Web Push service worker 与深链跳转
-├── static/manifest.webmanifest  PWA 元数据
+├── static/index.html      旧看板残留（安装入口不再启动）
 ├── tests/                 回归与安全测试
-├── install.sh / upgrade.sh(已退役) / doctor.sh / uninstall.sh
-├── agent-cockpit.service  systemd user 单元模板
+├── install.sh             3.0 一键安装（build web/dist + dev_server）
+├── upgrade.sh             已退役
+├── doctor.sh / uninstall.sh
+├── agent-cockpit.service  3.0 systemd 单元（ExecStart=dev_server.py）
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```
 

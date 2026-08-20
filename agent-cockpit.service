@@ -1,5 +1,5 @@
 [Unit]
-Description=Agent Cockpit (FastAPI :8790)
+Description=Agent Cockpit 3.0 group chat (:8790)
 After=network.target agent-mail.service
 
 [Service]
@@ -7,7 +7,7 @@ Type=simple
 # Cockpit 会启动独立的 Herdr server/agent；发布时只替换主进程，保留 Herdr session。
 KillMode=process
 WorkingDirectory=__INSTALL_DIR__
-ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/.venv/bin/python" server.py
+ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/.venv/bin/python" scripts/dev_server.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1

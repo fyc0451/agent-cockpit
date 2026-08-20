@@ -10,27 +10,23 @@
 
 [中文](README.md) | [English](README.en.md)
 
-<p align="center">
-  <img src="docs/screenshots/board-desktop.png" alt="ボード(PC)" width="74%">
-  <img src="docs/screenshots/board-mobile.png" alt="ボード(スマホ)" width="22%">
-</p>
+## 現在の製品: Cockpit 3.0
 
-[Orca](https://onorca.dev) の Agent Dashboard に着想を得た、既存の Herdr セッションに
-そのまま接続できる軽量 Web アプリです。
-[Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) 連携は任意です。
+Cockpit 3.0 は `http://127.0.0.1:8790/#/chat` のグループチャットです。
+UI は瀑布流・メンバー欄・入力欄で、旧ボードではありません。製品ラインは 3.0 と
+計画中の 4.0 だけです。2.0 / 3.5 のインストール入口はありません。
+
+現在の入口は `install.sh` です。`web/dist` をビルドし、
+`scripts/dev_server.py` で 3.0 を起動します。旧ボードはインストール結果ではありません。
 
 ## 機能一覧
 
-- **ボード** — すべての herdr セッションの coding agent(codex / kimi / claude / qoder / grok / opencode)を *対応必要 / 実行中 / 完了 / 待機* の列にリアルタイム表示。
-- **ライブ端末** — agent カードをクリックして端末出力を表示。xterm.js でプロンプト送信、コマンド実行、特殊キー送信が可能。
-- **スクリーンショット → agent** — 画像をアップロードすると `@/path` として自動挿入され、agent がその画像を「見て」作業できます。
-- **対応 Inbox** — 停止中の agent、失敗したバックグラウンドタスク、レビュー待ち diff、Agent Mail 未読を 1 つのキューに集約。
-- **Web Push** — Inbox で有効化すると、通知から該当する pane / タスク / メッセージへ直接ジャンプ。
-- **agent 間メッセージ** — Agent Mail ベース:メッセージの送受信と既読確認。Agent Mail がなくてもメッセージ画面が隠れるだけで、他の機能は動作します。
-- **ファイルブラウザ + エディタ** — サンドボックス化されたホワイトリスト内でプロジェクトファイルの閲覧・編集・ダウンロード・アップロード。
-- **codex バックグラウンドタスク** — `codex exec` ジョブの起動、出力のストリーミング、diff レビュー、変更の適用/stash。
-- **モバイル対応** — レスポンシブな単一ファイルフロントエンド。カメラアップロード、タッチ操作、PWA としてホーム画面に追加可能。
-- **ダーク / ライトテーマ** — ヘッダーで切り替え、セッションをまたいで記憶。ライトモードでは TUI が描く明示的な暗色(opencode の黒背景など)を自動で反転し、読みやすい配色にします。
+- **グループチャット瀑布流** — herdr 上の CLI agent がメンバーとして出る。結論は吹き出し、過程は折りたたみ。
+- **既定はキュー** — Enter は空き待ち。手元の作業を止めるときだけ「打断」。
+- **Harvest** — pane が `idle` / `done` のときだけ結論を取る。
+- **ファイルと添付** — チャットからリポジトリを見てパスをコピー。添付は既定で折りたたみ。
+- **設定** — 外観、ソース一括アップグレード、環境チェック。
+- **モバイル** — 同じ Hash ルートのチャットをスマホブラウザで開ける。
 
 ## 仕組み
 
@@ -45,90 +41,102 @@ Agent Cockpit(FastAPI、herdr + hub と同じホスト)
     └── SSE でブラウザに状態と diff をプッシュ
 ```
 
-**herdr と同じマシン**にデプロイし、すべてローカルで読み取るため遅延ゼロ。
-PC とスマホはブラウザクライアントに過ぎません。Agent Mail がない場合は
-メッセージ関連ビューのみ非表示。hub が一時的に落ちていても既存メッセージは
-読み取り専用で表示され、ボード、端末、ファイル、タスク、Inbox、プッシュ通知は
-引き続き動作します。
+**herdr と同じマシン**にデプロイします。PC とスマホはブラウザだけです。
+ワークスペース作成と Agent 追加には Agent Mail が必要です。hub が落ちていても
+既存のチャット吹き出しは読めます。
 
-## インストール
+## 3.0 のインストール
 
-### 前提条件
+herdr と同じホストで実行します。
 
 | 依存 | 用途 |
 | --- | --- |
-| [herdr](https://herdr.dev) | このコクピットが可視化・操作する agent セッション |
-| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub(`:8765`、任意) | Inbox とメッセージビューに agent 間メッセージを追加 |
-| `codex` CLI(認証済み) | バックグラウンド `codex exec` タスク用 |
-| Python 3.12+ | ランタイム |
+| [herdr](https://herdr.dev) | agent が入っている端末セッション |
+| Git、Python 3.12+、Node.js 20+（npm 含む） | clone、サーバ起動、`web/dist` のビルド |
+| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) hub（`:8765`） | 身分とチャット配送 |
+| ログイン済みの Agent CLI が 1 つ以上 | Codex / Claude / Kimi / OpenCode / Grok / Qoder CLI CN |
 
-### ワンコマンドインストール
+clone 先は任意です。`$HOME/github` を作る必要はありません。発見ルートの既定は
+リポジトリの親ディレクトリです。親が Home になるときはリポジトリ自身を使います。
+別のコード置き場を見るときだけ `COCKPIT_PROJECT_ROOT` を設定してください
+（実在するディレクトリ。Home そのものは不可）。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.sh | bash
 ```
 
-インストーラは `~/agent-cockpit` にクローンし、仮想環境の作成と依存の
-インストールを行い、Linux では `agent-cockpit.service`、macOS では
-LaunchAgent を登録します。起動に失敗したら `~/agent-cockpit/doctor.sh` を
-実行してください。同梱の Agent Mail 補助コマンドは `~/.local/bin` に安全に
-リンクされ、既存の通常ファイルやユーザー独自のシンボリックリンクは上書きしません。
+インストーラは `~/agent-cockpit` に clone（既存 checkout ならその場で）し、
+venv、Agent Mail、`web/dist` のビルド、`agent-cockpit.service`
+（macOS は LaunchAgent）までやります。起動後は
+`http://127.0.0.1:8790/#/chat` を開きます。
 
-### 手動インストール
+すでに使える Hub がある場合は再利用し、手作業の
+`~/.agent-mail/client.env` は上書きしません。ローカル Hub を飛ばすときは
+`AGENT_MAIL_SKIP_HUB=1`。8790 が使用中ならそのプロセスを止めてください。
+ポートは変えないでください。起動に失敗したら `./doctor.sh`。
+
+`.venv/bin/python server.py` を直接起動しないでください。
+`COCKPIT_NEXT_PROFILE=dev` が無いと 3.0 になりません。サービス unit は
+すでに `scripts/dev_server.py` を使います。
+
+systemd なしの手動インストール:
 
 ```bash
 git clone https://github.com/fyc0451/agent-cockpit.git
 cd agent-cockpit
-python -m venv .venv
+python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python server.py
-# → http://localhost:8790
+./install-agent-mail-tools.sh .
+./install-agent-mail-hub.sh
+npm ci --prefix web
+npm run --prefix web build
+.venv/bin/python scripts/dev_server.py
+# → http://127.0.0.1:8790/#/chat
 ```
 
-LAN/VPN の他のデバイスからアクセスするには、`.env.example` を `.env` にコピーし、
-`COCKPIT_HOST=0.0.0.0` とランダムな `COCKPIT_TOKEN` を設定します。token が
-ない場合、サーバは非ループバックアドレスへのバインドを拒否します。
+### LAN（任意）
+
+```bash
+install -d -m 700 "$HOME/.config/agent-cockpit"
+(umask 077; set -o noclobber; openssl rand -hex 32 > \
+  "$HOME/.config/agent-cockpit/cockpit.token")
+COCKPIT_HOST=0.0.0.0 .venv/bin/python scripts/dev_server.py
+```
+
+`http://<LAN-IP>:8790` を開き、`~/.config/agent-cockpit/cockpit.token` を
+貼ります。トークンを `.env`、チャット、ログに書かないでください。
 
 > **セキュリティ警告:** リモートアクセスには HTTPS か Tailscale Serve を使って
 > ください。平文 HTTP ではログイン cookie が同一ネットワークの第三者に見える
 > 可能性があります。Agent Cockpit を直接公衆インターネットに公開しないでください。
 
-### systemd サービスとしてデプロイ
+### 3.0 の入口にしないもの
 
-```bash
-loginctl enable-linger "$USER"   # ログアウト後も user service を維持
-cp agent-cockpit.service ~/.config/systemd/user/agent-cockpit.service
-# 環境に合わせてパスを編集してから:
-systemctl --user daemon-reload
-systemctl --user enable --now agent-cockpit
-```
+| 入口 | 実際に入るもの |
+| --- | --- |
+| `scripts/next_dev.py` / `:18790` | 凍結された Next 2.0 プレビュー。3.0 ではない |
+| `./upgrade.sh` | 退役（fail-closed） |
+| GitHub Latest の native V2 | ソース 8790 をパッケージ unit に置き換える |
 
-`KillMode=process` により、コクピットを再起動しても独立した Herdr セッションは
-維持されます。ただしブラウザから作成した PTY は切断されることがあるため、
-永続ジョブとして扱わないでください。
+ソース 8790 が動いたあと、設定の一括アップグレードは公式 tag を引き、
+`web/dist` を再ビルドし、ソース unit を再起動します。
+`COCKPIT_UPGRADE_V2_ENABLED` はオフのままにしてください。
 
-手動起動時は先に `.env` を読み込みます:
+## 初回利用
 
-```bash
-set -a; source .env; set +a
-.venv/bin/python server.py
-```
+1. herdr が動いていて、ログイン済みの agent pane が 1 つ以上あることを確認。
+2. `http://127.0.0.1:8790/#/chat` を開く。
+3. 左でワークスペース / herdr session を選び、右にメンバーが出る。
+4. 入力は既定で **排队**。`@` して Enter。空きになってから動く。
+   手元を止めるときだけ **打断**。
+5. 返信は瀑布流へ。長い過程は「展開過程」に折る。
+6. 設定で外観、doctor、ソースアップグレード。
 
-## 初回利用(5 分クイックスタート)
+Hash ルート: チャット `/#/chat`、設定 `/#/settings`。不明なパスはチャットへ。
+旧ボードはツリー内の `static/index.html` に残っていますが、インストール入口は
+もう起動しません。[docs/USER-GUIDE.md](docs/USER-GUIDE.md) を見てください。
 
-1. ブラウザで `http://localhost:8790` を開きます。
-2. ボードが空なのは正常です。空状態の **🚀 最初のワークスペースを作成**
-   (または「セッション」ページの **+ ワンクリックワークスペース**)をクリックし、
-   セッション名、プロジェクトディレクトリ、起動する agent(例:`codex,kimi`)を
-   入力して起動します。セッションが存在しなければ自動作成されます。
-3. **ボード**に戻ると、agent が状態別の列に自動で並びます。カードをクリックで
-   出力を表示、カードの 🖥 で TUI を接管できます。
-4. **対応(Inbox)**ページでは停止/失敗した agent をまとめて処理でき、
-   ブラウザ通知を有効化できます。
-5. 問題が起きたら「設定 → 環境チェック」へ:herdr、各 agent の実行ファイル、
-   Agent Mail の準備状況が一目で分かります。CLI では `./doctor.sh` が同じ役割です。
-
-## 使い方
+## 使い方（旧ボード、install.sh のみ）
 
 ### ボード
 
@@ -248,16 +256,18 @@ token は含みません。
 
 ```
 agent-cockpit/
-├── server.py              互換サーバーエントリポイント
+├── scripts/dev_server.py  3.0 ソース 8790 ランチャー（現在のインストール入口）
+├── server.py              互換エントリ（NEXT_PROFILE なしだと旧ボード）
 ├── source_native_migrate.py / release_lane.py  管理リリースエントリポイント
-├── agent_cockpit/         アプリ実装(サーバー、端末、通信、更新)
+├── agent_cockpit/         アプリ実装(サーバー、チャット台帳、通信、更新)
+├── web/                   3.0 グループチャットフロント（build 先は web/dist）
 ├── agent_mail_commands/    Agent Mail コマンド実装
-├── static/index.html      単一ファイルフロントエンド(ボード + Inbox + 端末 + タブ)
-├── static/sw.js           Web Push service worker とディープリンク
-├── static/manifest.webmanifest  PWA メタデータ
+├── static/index.html      旧ボード残留（インストール入口は起動しない）
 ├── tests/                 リグレッション/セキュリティテスト
-├── install.sh / upgrade.sh（退役） / doctor.sh / uninstall.sh
-├── agent-cockpit.service  systemd user ユニットテンプレート
+├── install.sh             3.0 ワンコマンド（web/dist + dev_server）
+├── upgrade.sh             退役
+├── doctor.sh / uninstall.sh
+├── agent-cockpit.service  3.0 systemd unit（ExecStart=dev_server.py）
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
 ```
 

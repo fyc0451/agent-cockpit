@@ -55,6 +55,24 @@ def test_hosted_test_matrix_is_manual_only():
     assert "pull_request:" not in trigger
 
 
+def test_install_sh_builds_and_starts_cockpit_3():
+    install = (ROOT / "install.sh").read_text()
+    launchd = (ROOT / "launchd.sh").read_text()
+    doctor = (ROOT / "doctor.sh").read_text()
+    service = (ROOT / "agent-cockpit.service").read_text()
+
+    assert "Node.js 20+" in install
+    assert 'npm ci --prefix "$INSTALL_DIR/web"' in install
+    assert 'npm run --prefix "$INSTALL_DIR/web" build' in install
+    assert "web/dist/index.html" in install
+    assert "scripts/dev_server.py" in install
+    assert 'python $INSTALL_DIR/server.py' not in install
+    assert "scripts/dev_server.py" in launchd
+    assert "scripts/dev_server.py" in service
+    assert "web/dist/index.html" in doctor
+    assert "/#/chat" in install
+
+
 def test_installers_migrate_legacy_service_name():
     # install.sh 承担全新安装与服务迁移
     install = (ROOT / "install.sh").read_text()
@@ -89,7 +107,7 @@ def test_installers_manage_macos_launch_agent():
     assert 'launchctl bootstrap "$DOMAIN" "$PLIST_PATH"' in launchd
     assert 'launchctl kickstart -k "$SERVICE"' in launchd
     assert '"$cwd" != "$INSTALL_DIR"' in launchd
-    assert '"$command" != *server.py*' in launchd
+    assert "*dev_server.py*" in launchd
     assert "Agent Cockpit LaunchAgent 正在运行" in (ROOT / "doctor.sh").read_text()
     # upgrade.sh 已退役：不再管理 launchd 重启
     assert "upgrade_engine_retired" in upgrader
@@ -588,7 +606,7 @@ def test_installers_allow_spaces_and_unicode_in_install_path():
     assert "ac_client_env_loopback_hub" in helpers
     service = (ROOT / "agent-cockpit.service").read_text()
     assert "WorkingDirectory=__INSTALL_DIR__" in service
-    assert 'ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/.venv/bin/python" server.py' in service
+    assert 'ExecStart=/usr/bin/env "__INSTALL_EXEC_DIR__/.venv/bin/python" scripts/dev_server.py' in service
     # 本地 Hub 服务不硬编码端口/凭据：端口与 token 从 client.env 严格解析。
     mail_service = (ROOT / "agent-mail.service").read_text()
     assert "8765" not in mail_service
@@ -635,7 +653,7 @@ sed "s|__INSTALL_DIR__|$(ac_escape_sed_replacement "$plist_dir")|g" "$3"
     systemd_dir = tricky.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
     systemd_exec_dir = systemd_dir.replace("$", "$$")
     assert f"WorkingDirectory={systemd_dir}" in unit
-    assert f'ExecStart=/usr/bin/env "{systemd_exec_dir}/.venv/bin/python" server.py' in unit
+    assert f'ExecStart=/usr/bin/env "{systemd_exec_dir}/.venv/bin/python" scripts/dev_server.py' in unit
 
     plist = ET.fromstring(plist_xml)
     values = [node.text for node in plist.findall(".//string")]

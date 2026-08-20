@@ -25,6 +25,21 @@ DEV_PORT = "8790"
 DEV_UNIT = "agent-cockpit-dev.service"
 
 
+def default_dev_project_root(repo: Path, home: Path | None = None) -> Path:
+    """Discovery root for source 8790. Never Home, never a forced ~/github."""
+    home_root = (Path.home() if home is None else home).resolve()
+    repo = repo.resolve()
+    blocked = {Path("/"), home_root, home_root.parent.resolve()}
+    for candidate in (repo.parent, repo):
+        try:
+            if candidate in blocked or not candidate.is_dir() or candidate.is_symlink():
+                continue
+        except OSError:
+            continue
+        return candidate
+    raise NextProfileError("project_root_missing")
+
+
 def dev_layout(home: Path, repo: Path) -> dict[str, str]:
     """8790 正式根：与 dashboard-data / .config/agent-cockpit 同一套，不再用 *-next*。"""
     home = home.resolve()

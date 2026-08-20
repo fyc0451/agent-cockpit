@@ -44,6 +44,19 @@ fi
 
 command -v git >/dev/null 2>&1 && ok "git 可用" || fail "未找到 git"
 
+if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
+  && node -e 'process.exit(Number.parseInt(process.versions.node, 10) >= 20 ? 0 : 1)'; then
+  ok "Node.js 20+ / npm 可用"
+else
+  fail "3.0 需要 Node.js 20+ 和 npm"
+fi
+
+if [[ -f "$INSTALL_DIR/web/dist/index.html" ]]; then
+  ok "3.0 前端 web/dist 已编译"
+else
+  fail "缺少 web/dist/index.html；运行 ./install.sh 或 npm run --prefix web build"
+fi
+
 if [[ -x "$INSTALL_DIR/.venv/bin/python" ]] && \
    "$INSTALL_DIR/.venv/bin/python" -c 'import fastapi, httpx, pywebpush, sse_starlette, uvicorn' >/dev/null 2>&1; then
   ok "Python 虚拟环境和运行依赖可用"

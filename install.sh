@@ -37,6 +37,15 @@ if sys.version_info < (3, 12):
     raise SystemExit("Agent Cockpit requires Python 3.12+")
 PY
 
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  echo "Agent Cockpit 3.0 需要 Node.js 20+ 和 npm" >&2
+  exit 1
+fi
+if ! node -e 'process.exit(Number.parseInt(process.versions.node, 10) >= 20 ? 0 : 1)'; then
+  echo "Agent Cockpit 3.0 需要 Node.js 20+（当前: $(node -v)）" >&2
+  exit 1
+fi
+
 "$PYTHON_BIN" -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
 "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
@@ -44,6 +53,17 @@ PY
 # 本地 Agent Mail Hub 是前置件：先检查已有 Hub（含远程指向），缺失才安装。
 # 远程 Hub/手工部署场景设 AGENT_MAIL_SKIP_HUB=1 跳过。
 "$INSTALL_DIR/install-agent-mail-hub.sh"
+
+if [[ ! -f "$INSTALL_DIR/web/package-lock.json" ]]; then
+  echo "缺少 $INSTALL_DIR/web/package-lock.json，无法编译 3.0 前端" >&2
+  exit 1
+fi
+npm ci --prefix "$INSTALL_DIR/web"
+npm run --prefix "$INSTALL_DIR/web" build
+if [[ ! -f "$INSTALL_DIR/web/dist/index.html" ]]; then
+  echo "web/dist/index.html 未生成，3.0 前端编译失败" >&2
+  exit 1
+fi
 
 if [[ ! -f "$INSTALL_DIR/.env" ]]; then
   if [[ ! -f "$INSTALL_DIR/.env.example" ]]; then
@@ -73,13 +93,13 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload; then
   systemctl --user daemon-reload
   systemctl --user disable --now agent-mail-dashboard.service >/dev/null 2>&1 || true
   systemctl --user enable --now agent-cockpit.service
-  echo "Agent Cockpit 已启动: http://127.0.0.1:8790"
+  echo "Agent Cockpit 3.0 已启动: http://127.0.0.1:8790/#/chat"
 elif [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
   "$INSTALL_DIR/launchd.sh" install
-  echo "Agent Cockpit 已作为 macOS LaunchAgent 启动: http://127.0.0.1:8790"
+  echo "Agent Cockpit 3.0 已作为 macOS LaunchAgent 启动: http://127.0.0.1:8790/#/chat"
 else
   echo "安装完成，但当前环境没有可用的 systemd 或 launchd user service。" >&2
-  echo "请运行: $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/server.py" >&2
+  echo "请运行: $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/scripts/dev_server.py" >&2
 fi
 
 echo "配置文件: $INSTALL_DIR/.env"

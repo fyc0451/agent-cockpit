@@ -31,9 +31,13 @@ def _load_next_dev():
 def dev_values(repo: Path, home: Path, host: str = "127.0.0.1") -> dict[str, str]:
     if host not in next_profile.FIXED_HOSTS:
         raise next_profile.NextProfileError("next_profile_invalid:COCKPIT_HOST")
+    override = os.environ.get(next_profile.PROJECT_ROOT_ENV, "").strip()
+    project_root = (
+        Path(override) if override else next_profile.default_dev_project_root(repo, home)
+    )
     values = {
         "COCKPIT_NEXT_PROFILE": next_profile.DEV_PROFILE,
-        "COCKPIT_PROJECT_ROOT": str(home.resolve() / "github"),
+        "COCKPIT_PROJECT_ROOT": str(project_root),
         "COCKPIT_HOST": host,
     }
     values.update(next_profile.dev_layout(home, repo))

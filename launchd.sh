@@ -35,7 +35,7 @@ stop_legacy_listener() {
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
     cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true)"
     command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    if [[ "$cwd" != "$INSTALL_DIR" || "$command" != *server.py* ]]; then
+    if [[ "$cwd" != "$INSTALL_DIR" || ( "$command" != *server.py* && "$command" != *dev_server.py* ) ]]; then
       echo "端口 $COCKPIT_PORT 已被其他进程占用(pid=$pid)，未自动终止。" >&2
       exit 1
     fi
@@ -133,7 +133,7 @@ case "${1:-}" in
     prepare_logs
     export PYTHONUNBUFFERED=1
     export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$HOME/.kimi-code/bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
-    exec "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/server.py"
+    exec "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/dev_server.py"
     ;;
   install|restart)
     prepare_logs
