@@ -104,6 +104,7 @@ STORES: dict[str, tuple[str, str, str, str, int | None]] = {
     "chat_workspaces": ("data", "chat-workspaces.json", "file", "server", 0o600),
     "chat_threads": ("data", "chat-threads.json", "file", "server", 0o600),
     "chat_messages": ("data", "chat-messages.json", "file", "server", 0o600),
+    "team_messages": ("data", "team-messages.json", "file", "server", 0o600),
     "team_sessions": ("data", "team-sessions.json", "file", "server", 0o600),
     "inbox_route": ("data", "team-inbox-route.json", "file", "server", 0o600),
     "upgrade": ("data", "upgrade", "dir", "server", None),

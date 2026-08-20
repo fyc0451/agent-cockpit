@@ -80,7 +80,7 @@ def test_accepted_sqlite_stores_use_lazy_read_only_openers(
         ) == before
         assert not Path(f"{runtime_paths.store(name)}-wal").exists()
         assert not Path(f"{runtime_paths.store(name)}-shm").exists()
-    assert len(store_schema._APP_OWNED_STORES) == 20
+    assert len(store_schema._APP_OWNED_STORES) == 21
     assert "workspace_work" in store_schema._APP_OWNED_STORES
     assert "workspace_work" not in store_schema._ACCEPTED_SQLITE_STORES
     assert "workspace_execution" in store_schema._APP_OWNED_STORES

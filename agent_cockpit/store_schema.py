@@ -467,6 +467,7 @@ _JSON_VERSIONED: dict[str, int] = {
     "chat_workspaces": 1,
     "chat_threads": 1,
     "chat_messages": 1,
+    "team_messages": 1,
     "team_sessions": 1,
     "inbox_route": 2,
     "typing": 1,
@@ -479,7 +480,7 @@ _APP_OWNED_STORES = (
     "runtime_provider", "event_journal", "operation_journal",
     "project_memory", "terminal_ticket",
     "settings", "mail_projects", "chat_workspaces", "chat_threads",
-    "chat_messages",
+    "chat_messages", "team_messages",
     "team_sessions", "inbox_route", "typing",
     "file_roots", "vapid",
 )
@@ -1057,6 +1058,7 @@ _JSON_SHAPES: dict[str, frozenset[str]] = {
     "chat_workspaces": frozenset({"version", "workspaces"}),
     "chat_threads": frozenset({"version", "threads"}),
     "chat_messages": frozenset({"version", "messages"}),
+    "team_messages": frozenset({"version", "messages"}),
     "team_sessions": frozenset({"version", "bindings"}),
     "inbox_route": frozenset({"version", "routes"}),
 }
@@ -1177,6 +1179,45 @@ def _check_versioned_json(
                 or type(entry["ts"]) is not int
                 or entry["ts"] < 0
             ):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+    elif name == "team_messages":
+        rows = data.get("messages")
+        if not isinstance(rows, list):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        required = frozenset({
+            "id", "topic", "hub", "kind", "sender", "text", "to", "ts",
+        })
+        optional = frozenset({"handed_to_leader"})
+        for entry in rows:
+            if not isinstance(entry, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            keys = set(entry)
+            if not required <= keys:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            extra = keys - required - optional
+            if extra:
+                return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+            if (
+                not isinstance(entry["id"], str)
+                or re.fullmatch(r"tmsg_[0-9a-f]{12}", entry["id"]) is None
+                or not isinstance(entry["topic"], str)
+                or re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", entry["topic"],
+                ) is None
+                or not isinstance(entry["hub"], str)
+                or not entry["hub"]
+                or entry["kind"] not in {"me", "agent", "event", "error"}
+                or not isinstance(entry["sender"], str)
+                or not entry["sender"]
+                or not isinstance(entry["text"], str)
+                or not entry["text"]
+                or not isinstance(entry["to"], list)
+                or any(not isinstance(item, str) or not item for item in entry["to"])
+                or type(entry["ts"]) is not int
+                or entry["ts"] < 0
+            ):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "handed_to_leader" in entry and type(entry["handed_to_leader"]) is not bool:
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     elif name == "team_sessions":
         bindings = data.get("bindings")
@@ -2034,7 +2075,7 @@ def probe_all_stores() -> list[dict[str, Any]]:
     gated("settings", _check_settings)
     for jname in (
         "mail_projects", "chat_workspaces", "chat_threads",
-        "chat_messages",
+        "chat_messages", "team_messages",
         "team_sessions", "inbox_route",
     ):
         gated(jname, lambda n=jname: _check_versioned_json(n))

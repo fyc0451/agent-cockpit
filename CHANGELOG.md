@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Cockpit 4.0 first slice on `feature/cockpit-4.0-team-zone`:
+  isolated team ledger `team-messages.json`. Team Hub history
+  never writes `chat-messages.json`.
+
 ### Changed
 
 - `install.sh` now installs Cockpit 3.0: it builds `web/dist` and
