@@ -40,6 +40,7 @@ import {
   teamSessionBindings,
   teamBindSession,
 } from '../../api/teamAuth'
+import { TeamTimeline } from '../team/TeamTimeline'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { AppFrame, useAppFrame } from '../shell/AppFrame'
@@ -284,7 +285,6 @@ export function GroupChatPage() {
 
   const handleTeamSelectTopic = useCallback((projectSlug: string) => {
     setTeamActiveTopic(projectSlug)
-    // TODO: 打开团队时间线容器
   }, [])
 
   const liveRows = useMemo(
@@ -365,6 +365,7 @@ export function GroupChatPage() {
 
   const selectSession = useCallback(
     (name: string) => {
+      setTeamActiveTopic(null)
       resetSessionLocal(name)
       setActiveSession(name)
       saveActiveSession(name)
@@ -1031,7 +1032,7 @@ export function GroupChatPage() {
       >
         <section className="gc-main">
           <div className="gc-toolbar">
-            <span className="gc-toolbar-title">{isSettings ? '设置' : (activeSession ?? '群聊')}</span>
+            <span className="gc-toolbar-title">{isSettings ? '设置' : (teamActiveTopic ? (teamBindingsQ.data?.topics.find((t) => t.slug === teamActiveTopic)?.name ?? teamActiveTopic) : (activeSession ?? '群聊'))}</span>
             {!isSettings && activeRoot && <span className="gc-toolbar-sub">{rootBase(activeRoot)}</span>}
             {!isSettings && onlyMember && (
               <button
@@ -1061,6 +1062,14 @@ export function GroupChatPage() {
             <div className="gc-settings">
               <SettingsPage />
             </div>
+          ) : teamActiveTopic ? (
+            <TeamTimeline
+              topic={teamActiveTopic}
+              topicName={
+                teamBindingsQ.data?.topics.find((t) => t.slug === teamActiveTopic)?.name
+                ?? teamActiveTopic
+              }
+            />
           ) : previewFile && activeSession ? (
             <FilePreview
               session={activeSession}
@@ -1096,7 +1105,7 @@ export function GroupChatPage() {
             </>
           )}
 
-          {!isSettings && busyMembers.length > 0 && (
+          {!isSettings && !teamActiveTopic && busyMembers.length > 0 && (
             <div className="gc-busy-icons" role="status" aria-label="工作中或等你输入">
               {busyMembers.map((m) => {
                 const unread = m.unread && m.unread > 0
@@ -1128,7 +1137,7 @@ export function GroupChatPage() {
               })}
             </div>
           )}
-          {!isSettings && (
+          {!isSettings && !teamActiveTopic && (
             <Composer
               session={activeSession || ''}
               members={members}

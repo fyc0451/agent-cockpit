@@ -12,7 +12,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   isolated team ledger `team-messages.json`. Team Hub history
   never writes `chat-messages.json`. Team send / receive /
   hand-to-leader stay on `/api/team/ledger*` and never call
-  `chat_ledger.append_message` or `pane_send`.
+  `chat_ledger.append_message` or `pane_send`. Selecting a
+  team topic opens the team timeline (send one, see one);
+  local waterfall and composer stay unused.
 
 ### Changed
 
