@@ -119,6 +119,36 @@ describe('AgentMailStatusBar', () => {
     })
   })
 
+  it('换会话成员人数变了也不卸页', async () => {
+    const first: ChatMember[] = [
+      member({ name: 'GrayFalcon', paneId: 'w1:p6' }),
+    ]
+    const second: ChatMember[] = [
+      member({ name: 'GrayFalcon', paneId: 'w1:p6' }),
+      member({ name: 'BrownDesert', paneId: 'w1:p1' }),
+      member({ name: 'BlueElk', paneId: 'w1:p7' }),
+    ]
+    vi.mocked(chatSessionApi.fetchAgentMailStatus).mockResolvedValue({
+      connected: true,
+      pane_id: 'w1:p6',
+      details: {
+        has_mail_name: true,
+        has_config_path: true,
+        has_agent_session: true,
+        can_send_mail: true,
+      },
+    })
+
+    const { rerender } = render(
+      <AgentMailStatusBar session="cockpit" members={first} />,
+      { wrapper: createWrapper() },
+    )
+    expect(() => {
+      rerender(<AgentMailStatusBar session="other" members={second} />)
+      rerender(<AgentMailStatusBar session="other" members={[]} />)
+    }).not.toThrow()
+  })
+
   it('排除 human 和没有 paneId 的成员', async () => {
     const members: ChatMember[] = [
       member({ name: 'human', paneId: 'w1:p0' }),

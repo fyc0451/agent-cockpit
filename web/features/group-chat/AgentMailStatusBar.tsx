@@ -1,6 +1,6 @@
 // Agent Mail 连接状态栏：显示 agent 是否能发送消息到瀑布流
 
-import { useQuery } from '@tanstack/react-query'
+import { useQueries } from '@tanstack/react-query'
 import { fetchAgentMailStatus } from '../../api/chatSession'
 import type { ChatMember } from './model'
 
@@ -13,16 +13,15 @@ export function AgentMailStatusBar({ session, members }: AgentMailStatusBarProps
   // 只检查有 paneId 的 agent 成员
   const agentMembers = members.filter((m) => m.paneId && m.name !== 'human')
 
-  // 轮询每个 agent 的连接状态
-  const statusQueries = agentMembers.map((member) =>
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useQuery({
+  // 人数随会话变；不能在 map 里调 useQuery，否则点侧栏会白屏。
+  const statusQueries = useQueries({
+    queries: agentMembers.map((member) => ({
       queryKey: ['agent-mail-status', session, member.paneId],
-      queryFn: () => fetchAgentMailStatus(session, member.paneId!),
-      refetchInterval: 15_000, // 每 15 秒检查一次
+      queryFn: () => fetchAgentMailStatus(session, member.paneId),
+      refetchInterval: 15_000,
       enabled: !!member.paneId,
-    }),
-  )
+    })),
+  })
 
   // 找出所有未连接的 agent
   const disconnected = agentMembers.filter((_, i) => {
