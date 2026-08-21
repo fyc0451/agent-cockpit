@@ -54,6 +54,18 @@ describe('MemberPanel Herdr 终端入口', () => {
     expect(onOpenTerminal).toHaveBeenCalledOnce()
   })
 
+  it('快照还没到时显示成员加载中，不装成没人', () => {
+    render(
+      <MemberPanel
+        {...baseProps}
+        session="demo-1"
+        loading
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('成员加载中…')).toBeInTheDocument()
+  })
+
   it('没有当前会话时禁用终端入口', () => {
     render(
       <MemberPanel

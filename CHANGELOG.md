@@ -41,6 +41,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Opening a group chat refetches the Herdr snapshot immediately, so
+  the member list does not wait up to 10s for the idle poll.
+
 - Clicking a workspace or session in the sidebar no longer blanks
   the main pane until a refresh. Session clicks keep the new
   selection while the URL catches up; workspace titles open without

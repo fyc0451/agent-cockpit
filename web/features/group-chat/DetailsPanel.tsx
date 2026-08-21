@@ -17,6 +17,7 @@ interface DetailsPanelProps {
   onTabChange: (tab: DetailsTab) => void
   // 成员面板
   members: ChatMember[]
+  membersLoading?: boolean
   session: string | null
   workdir: string | null
   onMention: (m: ChatMember) => void
@@ -34,6 +35,7 @@ export function DetailsPanel({
   tab,
   onTabChange,
   members,
+  membersLoading = false,
   session,
   workdir,
   onMention,
@@ -93,6 +95,7 @@ export function DetailsPanel({
         ) : (
           <MemberPanel
             members={members}
+            loading={membersLoading}
             session={session}
             workdir={workdir}
             open

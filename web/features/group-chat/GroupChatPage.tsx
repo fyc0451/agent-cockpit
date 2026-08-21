@@ -71,6 +71,7 @@ import {
   saveComposerDraft,
   nextSessionAfterRemoval,
   shouldFollowUrlSession,
+  shouldRefreshMembersOnSelect,
   mailCoversLocalMe,
   isBusyMember,
   isMemberRosterEvent,
@@ -222,6 +223,7 @@ export function GroupChatPage() {
   const snapshotQ = useQuery({
     queryKey: ['gc-snapshot'],
     queryFn: fetchHerdrSnapshot,
+    staleTime: 2_000,
     refetchInterval: (query) => {
       const panes = query.state.data?.panes ?? []
       const busy = panes.some(
@@ -417,8 +419,11 @@ export function GroupChatPage() {
         setSearchParams({ session: name }, { replace: true })
       }
       queryClient.removeQueries({ queryKey: ['gc-mail'], type: 'inactive' })
+      if (shouldRefreshMembersOnSelect(activeSession, name)) {
+        void queryClient.invalidateQueries({ queryKey: ['gc-snapshot'] })
+      }
     },
-    [resetSessionLocal, location.pathname, navigate, setSearchParams, queryClient],
+    [activeSession, resetSessionLocal, location.pathname, navigate, setSearchParams, queryClient],
   )
 
   useEffect(() => {
@@ -1063,6 +1068,7 @@ export function GroupChatPage() {
             tab={detailsTab}
             onTabChange={setDetailsTab}
             members={members}
+            membersLoading={snapshotQ.isPending || snapshotQ.isFetching}
             session={activeSession}
             workdir={activeRoot ?? leader?.cwd ?? null}
             onMention={insertMention}

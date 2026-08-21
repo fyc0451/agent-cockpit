@@ -33,6 +33,7 @@ import {
   nextSessionAfterRemoval,
   shouldAdoptUrlSession,
   shouldFollowUrlSession,
+  shouldRefreshMembersOnSelect,
   memberName,
   membersOfSession,
   mentionQueryAt,
@@ -614,6 +615,13 @@ describe('删除会话后的选中回落', () => {
     expect(shouldFollowUrlSession('new', 'old', ['old', 'new'], true, true)).toBe(true)
     expect(shouldFollowUrlSession('keep', null, ['keep'], true, true)).toBe(true)
     expect(shouldFollowUrlSession('gone', 'keep', ['keep'], true, true)).toBe(false)
+  })
+
+  it('换会话才立刻拉成员快照，同会话再点不打', () => {
+    expect(shouldRefreshMembersOnSelect(null, 'cockpit')).toBe(true)
+    expect(shouldRefreshMembersOnSelect('old', 'cockpit')).toBe(true)
+    expect(shouldRefreshMembersOnSelect('cockpit', 'cockpit')).toBe(false)
+    expect(shouldRefreshMembersOnSelect('cockpit', '')).toBe(false)
   })
 })
 

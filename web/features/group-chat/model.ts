@@ -1182,6 +1182,14 @@ export function shouldFollowUrlSession(
   return true
 }
 
+/** 点开会话时立刻拉成员快照，不要干等到空闲 10s 轮询。 */
+export function shouldRefreshMembersOnSelect(
+  previousSession: string | null,
+  nextSession: string,
+): boolean {
+  return !!nextSession && nextSession !== previousSession
+}
+
 // ---------- 会话列表行模型 ----------
 
 export interface SessionRow {

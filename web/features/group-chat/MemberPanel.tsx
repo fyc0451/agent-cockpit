@@ -18,6 +18,7 @@ import {
 
 interface MemberPanelProps {
   members: ChatMember[]
+  loading?: boolean
   session: string | null
   workdir: string | null // 新成员的工作目录（leader 的 cwd 优先）
   open: boolean // 窄屏抽屉态
@@ -171,6 +172,7 @@ function AddMemberModal({
 
 export function MemberPanel({
   members,
+  loading = false,
   session,
   workdir,
   open,
@@ -332,6 +334,9 @@ export function MemberPanel({
         </button>
       </div>
       <div className="gc-member-list">
+        {loading && members.length === 0 && (
+          <div className="gc-member-sub" style={{ padding: '8px 12px' }}>成员加载中…</div>
+        )}
         {leaderAgents.map(renderAgent)}
         {/* 我（Boss）：不是 pane，只作身份展示；点击不插 @，不可发送给自己 */}
         <div className="gc-member gc-member--me" title="Boss：下任务、看回复、加人">
