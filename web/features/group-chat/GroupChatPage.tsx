@@ -483,7 +483,17 @@ export function GroupChatPage() {
       return
     }
     const session = activeSession
-    const source = new EventSource(sessionMailStreamUrl(session), { withCredentials: true })
+    if (typeof EventSource !== 'function') {
+      setMailStreamLive(false)
+      return
+    }
+    let source: EventSource
+    try {
+      source = new EventSource(sessionMailStreamUrl(session), { withCredentials: true })
+    } catch {
+      setMailStreamLive(false)
+      return
+    }
     const apply = (event: string) => (ev: MessageEvent<string>) => {
       setMailStreamLive(true)
       queryClient.setQueryData<SessionMailMessage[]>(['gc-mail', session], (current) =>

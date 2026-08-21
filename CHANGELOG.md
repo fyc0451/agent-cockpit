@@ -46,7 +46,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Switching sessions no longer whites out the main pane. The mail
   status bar used one hook per member; a different roster crashed
-  React until a refresh. It now uses a fixed query list.
+  React until a refresh. It now uses a fixed query list, and a
+  failure there no longer unmounts the waterfall. Opening a
+  session also no longer lets a broken mail EventSource unload
+  the whole chat page.
 
 - Clicking a workspace or session in the sidebar no longer blanks
   the main pane until a refresh. Session clicks keep the new

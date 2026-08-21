@@ -1,15 +1,41 @@
 // Agent Mail 连接状态栏：显示 agent 是否能发送消息到瀑布流
 
+import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { useQueries } from '@tanstack/react-query'
 import { fetchAgentMailStatus } from '../../api/chatSession'
 import type { ChatMember } from './model'
+
+class MailStatusBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error('AgentMailStatusBar failed', error, info.componentStack)
+  }
+
+  render(): ReactNode {
+    if (this.state.failed) return null
+    return this.props.children
+  }
+}
 
 interface AgentMailStatusBarProps {
   session: string
   members: ChatMember[]
 }
 
-export function AgentMailStatusBar({ session, members }: AgentMailStatusBarProps) {
+export function AgentMailStatusBar(props: AgentMailStatusBarProps) {
+  return (
+    <MailStatusBoundary>
+      <AgentMailStatusBarInner {...props} />
+    </MailStatusBoundary>
+  )
+}
+
+function AgentMailStatusBarInner({ session, members }: AgentMailStatusBarProps) {
   // 只检查有 paneId 的 agent 成员
   const agentMembers = members.filter((m) => m.paneId && m.name !== 'human')
 
