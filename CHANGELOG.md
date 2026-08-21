@@ -30,6 +30,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bubble when the terminal still shows the old one. A later 结论
   heading is a new message, not a longer copy of the last.
 
+- Harvest reads the current Claude/Grok screen when `recent-unwrapped`
+  is an empty prompt box or leftover scrollback. `检查结果` /
+  `原因分析` count as conclusion headings.
+
+- Queued group-chat mail waits until the pane has been idle for a
+  couple of seconds, and skips a queue prompt when that pane already
+  answered later in the terminal.
+
 - Harvest recognizes Kimi/TUI `● 结论` / `• 结论` headings. A later
   conclusion is scraped on its own; the previous turn in scrollback
   is not treated as a longer copy of the last bubble.

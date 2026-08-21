@@ -472,6 +472,42 @@ def test_pane_read_does_not_hide_unrelated_agent_errors(monkeypatch):
     assert len(calls) == 1
 
 
+def test_pane_summary_uses_visible_when_unwrapped_is_prompt_chrome(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+
+    def fake_run(args, timeout=10):
+        source = args[args.index("--source") + 1]
+        if source == "recent-unwrapped":
+            return "❯\n\n  ➜  agent-cockpit git:(main)\n"
+        return (
+            "● 检查结果\n\n"
+            "Grok 对话未回复的原因分析：终端已经写完，瀑布流还钉着旧气泡。\n"
+        )
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    result = herdr_client.pane_summary("cockpit", "w1:p6", 80)
+    assert result["source"] == "visible"
+    assert "检查结果" in result["summary"]
+    assert "瀑布流还钉着旧气泡" in result["summary"]
+
+
+def test_pane_summary_appends_visible_when_unwrapped_is_old_scrollback(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+
+    def fake_run(args, timeout=10):
+        source = args[args.index("--source") + 1]
+        if source == "recent-unwrapped":
+            return "实现完成总结 ✅\n已成功为 Agent Cockpit 4.0 实现团队协作功能。\n"
+        return "● 检查结果\n\nGrok 对话未回复的原因分析：漏刮，不是没回。\n"
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+    result = herdr_client.pane_summary("cockpit", "w1:p6", 80)
+    assert result["source"] == "visible"
+    assert "实现完成总结" in result["summary"]
+    assert "检查结果" in result["summary"]
+    assert "漏刮，不是没回" in result["summary"]
+
+
 @pytest.mark.parametrize(
     ("agent", "kind"),
     [

@@ -954,42 +954,14 @@ def _is_box_table_rule(stripped: str) -> bool:
     )
 
 
-def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, Any]:
-    """取 agent 最近会话的摘要(@ 引用会话用)。
-
-    读 agent read 输出,过滤掉 TUI 装饰行(边框/状态栏/空行),
-    只保留对话内容(用户消息 ›、agent 回复 •、普通输出行),截取尾部 max_lines 行。
-    """
-    if not is_available():
-        return {"available": False}
-    try:
-        # 先 unwrapped 再 visible：harvest 不要把分屏硬折行原样收下。
-        out = ""
-        last_error: RuntimeError | None = None
-        for source in ("recent-unwrapped", "visible"):
-            try:
-                out = _run(
-                    [
-                        "--session", session, "agent", "read", pane_id,
-                        "--source", source, "--lines", str(max(max_lines, 40)),
-                    ],
-                    timeout=8,
-                )
-                last_error = None
-                break
-            except RuntimeError as exc:
-                last_error = exc
-        if last_error is not None:
-            raise last_error
-    except RuntimeError as e:
-        return {"available": True, "error": str(e), "summary": ""}
-    # 过滤 TUI 噪声。框线表的 │ 行必须留着，后面才能还原成 Markdown 表。
+def _filter_pane_summary_lines(out: str, max_lines: int) -> list[str]:
+    """过滤 TUI 噪声。框线表的 │ 行必须留着，后面才能还原成 Markdown 表。"""
     noise_prefixes = (
         "─", "═", "╭", "╰", "╮", "╯", "•  └",
         "  gpt-", "  context:", "  yolo", "  K3",
         "Token usage", "Tip:", "Use /",
     )
-    kept = []
+    kept: list[str] = []
     for line in out.splitlines():
         s = line.strip()
         if not s:
@@ -1004,14 +976,77 @@ def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, A
         if set(s) <= {"─", "═", " "} and len(s) > 20:
             continue
         kept.append(line.rstrip())
-    # 取尾部
-    summary_lines = kept[-max_lines:] if len(kept) > max_lines else kept
+    return kept[-max_lines:] if len(kept) > max_lines else kept
+
+
+def _compact_summary_text(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")
+
+
+def _combine_pane_summaries(unwrapped: str, visible: str, max_lines: int) -> tuple[str, str]:
+    """Claude 交替屏上 unwrapped 常是空壳或旧滚动；当前画面才有新结论。
+
+    unwrapped 仍优先（窄屏折行已拼好）。visible 有一份 unwrapped 里没有的
+    正文时接在后面，harvest 取最后一段结论。
+    """
+    unwrapped_lines = _filter_pane_summary_lines(unwrapped, max_lines)
+    visible_lines = _filter_pane_summary_lines(visible, max_lines)
+    unwrapped_text = "\n".join(unwrapped_lines).strip()
+    visible_text = "\n".join(visible_lines).strip()
+    if not visible_text:
+        return unwrapped_text, "recent-unwrapped" if unwrapped_text else "visible"
+    if not unwrapped_text:
+        return visible_text, "visible"
+    visible_core = _compact_summary_text(visible_text)
+    if len(visible_core) >= 24 and visible_core not in _compact_summary_text(unwrapped_text):
+        merged = unwrapped_text + "\n\n" + visible_text
+        merged_lines = merged.splitlines()
+        if len(merged_lines) > max_lines:
+            merged = "\n".join(merged_lines[-max_lines:])
+        return merged, "visible"
+    return unwrapped_text, "recent-unwrapped"
+
+
+def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, Any]:
+    """取 agent 最近会话的摘要(@ 引用会话用)。
+
+    读 agent read 输出,过滤掉 TUI 装饰行(边框/状态栏/空行),
+    只保留对话内容(用户消息 ›、agent 回复 •、普通输出行),截取尾部 max_lines 行。
+    """
+    if not is_available():
+        return {"available": False}
+    sources: dict[str, str] = {}
+    last_error: RuntimeError | None = None
+    read_lines = str(max(max_lines, 40))
+    for source in ("recent-unwrapped", "visible"):
+        try:
+            sources[source] = _run(
+                [
+                    "--session", session, "agent", "read", pane_id,
+                    "--source", source, "--lines", read_lines,
+                ],
+                timeout=8,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+    if not sources:
+        return {
+            "available": True,
+            "error": str(last_error) if last_error else "agent read failed",
+            "summary": "",
+        }
+    summary, source = _combine_pane_summaries(
+        sources.get("recent-unwrapped", ""),
+        sources.get("visible", ""),
+        max_lines,
+    )
     return {
         "available": True,
         "session": session,
         "pane_id": pane_id,
-        "summary": "\n".join(summary_lines),
-        "line_count": len(summary_lines),
+        "summary": summary,
+        "source": source,
+        "line_count": len(summary.splitlines()) if summary else 0,
     }
 
 

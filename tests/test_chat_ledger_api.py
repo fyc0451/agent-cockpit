@@ -1148,6 +1148,72 @@ def test_notify_queue_skips_busy_pane_then_flush_when_idle(isolated_ledger, monk
     assert sent == []
 
 
+def test_notify_queue_waits_when_idle_pane_is_still_changing(isolated_ledger, monkeypatch):
+    sent: list[tuple] = []
+    pane = {
+        "session": "cockpit", "pane_id": "w1:p1", "agent": "grok",
+        "mail_name": "BrownDesert", "display_name": "BrownDesert",
+        "agent_status": "idle", "revision": 10,
+    }
+    now = {"t": 100.0}
+    monkeypatch.setattr(server.time, "monotonic", lambda: now["t"])
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": [pane]})
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {"leader_mail_name": "BrownDesert"})
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    server._PANE_IDLE_SINCE.clear()
+    server._PANE_LAST_REVISION.clear()
+    server._PANE_LAST_REVISION[("cockpit", "w1:p1")] = 9
+    queued = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="终端里已经在说了",
+        to=["BrownDesert"], delivery="queue",
+    )
+    assert server._notify_chat_recipients(
+        "cockpit", ["BrownDesert"], queued["text"], "queue",
+    ) == []
+    assert sent == []
+    now["t"] = 101.5
+    server._flush_queued_chat_mail("cockpit", {"panes": [pane]})
+    assert sent == []
+    now["t"] = 103.0
+    server._flush_queued_chat_mail("cockpit", {"panes": [pane]})
+    assert len(sent) == 1
+    assert "终端里已经在说了" in sent[0][2]
+
+
+def test_flush_skips_queued_mail_already_answered_in_terminal(isolated_ledger, monkeypatch):
+    sent: list[tuple] = []
+    pane = {
+        "session": "cockpit", "pane_id": "w1:p1", "agent": "grok",
+        "mail_name": "BrownDesert", "display_name": "BrownDesert",
+        "agent_status": "idle", "revision": 3,
+    }
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": [pane]})
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {"leader_mail_name": "BrownDesert"})
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    server._PANE_IDLE_SINCE.clear()
+    server._PANE_LAST_REVISION.clear()
+    queued = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="终端里已经在处理",
+        to=["BrownDesert"], delivery="queue", ts=1000,
+    )
+    chat_ledger.append_message(
+        "cockpit", kind="agent", sender="BrownDesert",
+        text="结论：终端里做完了。", to=["human"], ts=2000,
+    )
+    server._flush_queued_chat_mail("cockpit", {"panes": [pane]})
+    assert sent == []
+    stored = next(row for row in chat_ledger.list_messages("cockpit") if row["id"] == queued["id"])
+    assert stored["notified_to"] == ["BrownDesert"]
+
+
 def test_notify_interrupt_wakes_busy_pane(isolated_ledger, monkeypatch):
     sent: list[tuple] = []
     monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
@@ -3286,6 +3352,43 @@ def test_harvest_idle_claude_summary_is_not_write_dump(isolated_ledger, monkeypa
     assert rows[0]["text"].startswith("实现完成总结")
     assert "前端实现完成" in rows[0]["text"]
     assert "5 为 Agent Cockpit 4.0" not in rows[0]["text"]
+    assert rows[0]["sender"] == "GrayFalcon"
+
+
+def test_harvest_check_result_heading_is_a_new_bubble(isolated_ledger, monkeypatch):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-check-result", "chat-check")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._HARVEST_STATUS_LOADED = True
+    panes = [{
+        "session": "chat-check",
+        "pane_id": "w1:p6",
+        "agent": "claude",
+        "agent_status": "idle",
+        "mail_name": "GrayFalcon",
+        "display_name": "GrayFalcon",
+    }]
+    mixed = (
+        "实现完成总结 ✅\n"
+        "已成功为 Agent Cockpit 4.0 实现团队协作功能。\n\n"
+        "● 检查结果\n\n"
+        "Grok 对话未回复的原因分析：终端已经写完，瀑布流还钉着旧气泡。\n"
+    )
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary", lambda *_a, **_k: {"summary": mixed},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+    server._harvest_settled_replies("chat-check")
+    rows = chat_ledger.list_messages("chat-check", 10)
+    assert len(rows) == 1
+    assert rows[0]["text"].lstrip("●• ").startswith("检查结果")
+    assert "瀑布流还钉着旧气泡" in rows[0]["text"]
+    assert "实现完成总结" not in rows[0]["text"]
     assert rows[0]["sender"] == "GrayFalcon"
 
 

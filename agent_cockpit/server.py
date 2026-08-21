@@ -1748,6 +1748,7 @@ def _forget_harvest_pane(session: str, pane_id: str) -> bool:
     for store in (
         _PANE_LAST_STATUS, _PANE_LAST_HARVEST, _PANE_LAST_MESSAGE,
         _PANE_TURN_STARTED, _PANE_ACTIVITY, _PANE_ACTIVITY_AT,
+        _PANE_IDLE_SINCE, _PANE_LAST_REVISION,
     ):
         if key in store:
             store.pop(key, None)
@@ -1767,6 +1768,7 @@ def _prune_harvest_for_snapshot(snapshot: dict[str, Any]) -> None:
     for store in (
         _PANE_LAST_STATUS, _PANE_LAST_HARVEST, _PANE_LAST_MESSAGE,
         _PANE_TURN_STARTED, _PANE_ACTIVITY, _PANE_ACTIVITY_AT,
+        _PANE_IDLE_SINCE, _PANE_LAST_REVISION,
     ):
         for session, pane_id in list(store):
             if session in live and pane_id not in live[session]:
@@ -5108,6 +5110,9 @@ _PANE_LAST_MESSAGE: dict[tuple[str, str], str] = {}
 _PANE_TURN_STARTED: dict[tuple[str, str], int] = {}
 _PANE_ACTIVITY: dict[tuple[str, str], str] = {}
 _PANE_ACTIVITY_AT: dict[tuple[str, str], float] = {}
+_PANE_IDLE_SINCE: dict[tuple[str, str], float] = {}
+_PANE_LAST_REVISION: dict[tuple[str, str], int] = {}
+_QUEUE_IDLE_SETTLE_S = 2.0
 _HARVEST_STATUS_LOADED = False
 
 
@@ -5630,6 +5635,8 @@ _CONCLUSION_HEAD_RE = re.compile(
     r"实现完成总结.*$|完成总结(?:[:：\s].*)?$|"
     r"总结(?:[:：\s].*)?$|"
     r"结论(?:[:：\s].*)?$|"
+    r"检查结果(?:[:：\s].*)?$|"
+    r"原因分析(?:[:：\s].*)?$|"
     r"• 已查清|已查清，结论|处理方案[:：])"
 )
 _CONCLUSION_BULLET_RE = re.compile(r"^[●•]\s+")
@@ -5948,6 +5955,8 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
         if settled:
             _PANE_ACTIVITY.pop(key, None)
             _PANE_ACTIVITY_AT.pop(key, None)
+            if previous in _BUSY_CHAT_STATUSES:
+                _PANE_IDLE_SINCE[key] = time.monotonic()
         # 空闲且已收过，不要反复 agent read，否则终端会一直刷新。
         if (
             settled
@@ -6485,6 +6494,30 @@ def _pane_is_busy(pane: dict[str, Any]) -> bool:
     return str(pane.get("agent_status") or "") in _BUSY_CHAT_STATUSES
 
 
+def _pane_queue_ready(pane: dict[str, Any]) -> bool:
+    """排队只投给已经空闲一会儿的 pane。终端里刚打的字，Herdr 还显示 idle 时不要插队。"""
+    if _pane_is_busy(pane):
+        return False
+    session = str(pane.get("session") or "")
+    pane_id = str(pane.get("pane_id") or "")
+    if not session or not pane_id:
+        return False
+    key = (session, pane_id)
+    now = time.monotonic()
+    try:
+        revision = int(pane.get("revision") or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    last_revision = _PANE_LAST_REVISION.get(key)
+    if last_revision is not None and revision != last_revision:
+        _PANE_IDLE_SINCE[key] = now
+    _PANE_LAST_REVISION[key] = revision
+    since = _PANE_IDLE_SINCE.get(key)
+    if since is None:
+        return True
+    return (now - since) >= _QUEUE_IDLE_SETTLE_S
+
+
 def _chat_notify_hint(session: str, text: str, delivery: str) -> str:
     leader = _ensure_session_leader(session)
     leader_name = leader.get("leader_mail_name") or ""
@@ -6535,7 +6568,7 @@ def _notify_chat_recipients(
         )
         if not dest:
             continue
-        if mode == "queue" and _pane_is_busy(pane):
+        if mode == "queue" and not _pane_queue_ready(pane):
             continue
         pane_id = pane.get("pane_id")
         if not pane_id:
@@ -6546,6 +6579,21 @@ def _notify_chat_recipients(
             continue
         notified.append(dest)
     return notified
+
+
+def _queued_mail_already_answered(
+    row: dict[str, Any], rows: list[dict[str, Any]], dest: str,
+) -> bool:
+    """终端里已经回过这条排队：后面有同花名的 agent 气泡，就不要再 pane_send。"""
+    stamp = int(row.get("ts") or 0)
+    for later in rows:
+        if int(later.get("ts") or 0) <= stamp:
+            continue
+        if str(later.get("kind") or "") != "agent":
+            continue
+        if str(later.get("sender") or "") == dest:
+            return True
+    return False
 
 
 def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
@@ -6566,7 +6614,7 @@ def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
     if not pending:
         return
     for pane in panes:
-        if _pane_is_busy(pane):
+        if not _pane_queue_ready(pane):
             continue
         pane_id = str(pane.get("pane_id") or "")
         if not pane_id:
@@ -6589,6 +6637,14 @@ def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
                 if isinstance(item, str)
             }
             if dest in already:
+                continue
+            if _queued_mail_already_answered(row, rows, dest):
+                try:
+                    updated = chat_ledger.mark_message_notified(str(row["id"]), [dest])
+                except ValueError:
+                    continue
+                if updated:
+                    row["notified_to"] = list(updated.get("notified_to") or [])
                 continue
             hint = _chat_notify_hint(session, str(row.get("text") or ""), "queue")
             try:
