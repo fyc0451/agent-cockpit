@@ -41,6 +41,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Group-chat Agent Mail warning reads the pane flower name and live
+  agent, not Cockpit's process environment. A running 8790 without
+  `AGENT_MAIL_NAME` no longer paints the whole room disconnected.
+
 - Harvest no longer pastes the next conclusion into the previous
   bubble when the terminal still shows the old one. A later 结论
   heading is a new message, not a longer copy of the last.

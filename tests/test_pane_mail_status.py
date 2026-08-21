@@ -1,86 +1,81 @@
 """测试 pane Agent Mail 连接状态检测。"""
 from __future__ import annotations
 
-import os
 from unittest import mock
 
 from agent_cockpit import pane_live
 
 
+def _snap(panes: list[dict]) -> dict:
+    return {"available": True, "panes": panes}
+
+
 def test_check_mail_connectivity_all_ok():
-    """所有条件满足时 connected=True（需要 agent_mail_commands 可导入）。"""
+    """花名和活着的 agent 都在时 connected=True。"""
     with (
-        mock.patch.dict(os.environ, {
-            "AGENT_MAIL_NAME": "test-agent",
-            "HERDR_CONFIG_PATH": "/path/to/config",
-        }),
         mock.patch("agent_cockpit.herdr_client.snapshot") as mock_snap,
+        mock.patch("agent_cockpit.chat_roster.get_pane_mail_name", return_value="BrownDesert"),
     ):
-        mock_snap.return_value = {
-            "panes": [
-                {
-                    "pane_id": "5",
-                    "agent_session": {"uuid": "01a02001-e0b4-4c0a-8e12-d15188506504"},
-                },
-            ],
-        }
-        result = pane_live.check_agent_mail_connectivity("5")
-        # can_send_mail 取决于 agent_mail_commands 是否可导入
-        # 在测试环境可能为 False，只验证基本检测逻辑
-        assert result["pane_id"] == "5"
+        mock_snap.return_value = _snap([
+            {"session": "cockpit", "pane_id": "w1:p1", "agent": "grok"},
+        ])
+        result = pane_live.check_agent_mail_connectivity("cockpit", "w1:p1")
+        assert result["pane_id"] == "w1:p1"
         assert result["details"]["has_mail_name"] is True
         assert result["details"]["has_config_path"] is True
         assert result["details"]["has_agent_session"] is True
-        # connected = all conditions，包括 can_send_mail
-        assert isinstance(result["connected"], bool)
+        assert result["connected"] is result["details"]["can_send_mail"]
 
 
-def test_check_mail_connectivity_missing_env():
-    """环境变量缺失时 connected=False。"""
+def test_check_mail_connectivity_ignores_cockpit_process_env():
+    """8790 进程没有 AGENT_MAIL_NAME 时，不得把整群标成未连接。"""
     with (
-        mock.patch.dict(os.environ, {}, clear=True),
         mock.patch("agent_cockpit.herdr_client.snapshot") as mock_snap,
+        mock.patch("agent_cockpit.chat_roster.get_pane_mail_name", return_value="GrayFalcon"),
     ):
-        mock_snap.return_value = {
-            "panes": [
-                {"pane_id": "5", "agent_session": {"uuid": "test-uuid"}},
-            ],
-        }
-        result = pane_live.check_agent_mail_connectivity("5")
+        mock_snap.return_value = _snap([
+            {"session": "cockpit", "pane_id": "w1:p6", "agent": "codex"},
+        ])
+        result = pane_live.check_agent_mail_connectivity("cockpit", "w1:p6")
+        assert result["details"]["has_mail_name"] is True
+        assert result["details"]["has_agent_session"] is True
+
+
+def test_check_mail_connectivity_missing_mail_name():
+    """花名不在花名册、快照也没有时 connected=False。"""
+    with (
+        mock.patch("agent_cockpit.herdr_client.snapshot") as mock_snap,
+        mock.patch("agent_cockpit.chat_roster.get_pane_mail_name", return_value=""),
+    ):
+        mock_snap.return_value = _snap([
+            {"session": "cockpit", "pane_id": "w1:p1", "agent": "grok"},
+        ])
+        result = pane_live.check_agent_mail_connectivity("cockpit", "w1:p1")
         assert result["connected"] is False
         assert result["details"]["has_mail_name"] is False
-        assert result["details"]["has_config_path"] is False
 
 
-def test_check_mail_connectivity_missing_agent_session():
-    """pane 没有 agent_session 时 connected=False。"""
+def test_check_mail_connectivity_missing_live_agent():
+    """pane 还在但里面没有 agent 时 connected=False。"""
     with (
-        mock.patch.dict(os.environ, {
-            "AGENT_MAIL_NAME": "test-agent",
-            "HERDR_CONFIG_PATH": "/path/to/config",
-        }),
         mock.patch("agent_cockpit.herdr_client.snapshot") as mock_snap,
+        mock.patch("agent_cockpit.chat_roster.get_pane_mail_name", return_value="BrownDesert"),
     ):
-        mock_snap.return_value = {
-            "panes": [
-                {"pane_id": "5"},  # 没有 agent_session
-            ],
-        }
-        result = pane_live.check_agent_mail_connectivity("5")
+        mock_snap.return_value = _snap([
+            {"session": "cockpit", "pane_id": "w1:p1"},
+        ])
+        result = pane_live.check_agent_mail_connectivity("cockpit", "w1:p1")
         assert result["connected"] is False
         assert result["details"]["has_agent_session"] is False
 
 
 def test_check_mail_connectivity_pane_not_found():
-    """pane 不存在时 connected=False。"""
+    """pane 不在快照里时 connected=False。"""
     with (
-        mock.patch.dict(os.environ, {
-            "AGENT_MAIL_NAME": "test-agent",
-            "HERDR_CONFIG_PATH": "/path/to/config",
-        }),
         mock.patch("agent_cockpit.herdr_client.snapshot") as mock_snap,
+        mock.patch("agent_cockpit.chat_roster.get_pane_mail_name", return_value="BrownDesert"),
     ):
-        mock_snap.return_value = {"panes": []}
-        result = pane_live.check_agent_mail_connectivity("999")
+        mock_snap.return_value = _snap([])
+        result = pane_live.check_agent_mail_connectivity("cockpit", "w1:p1")
         assert result["connected"] is False
         assert result["details"]["has_agent_session"] is False

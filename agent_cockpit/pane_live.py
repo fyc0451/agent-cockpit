@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 import unicodedata
@@ -345,19 +344,30 @@ async def pump_pane_live(
         await push(read(session, pane_id))
 
 
-def check_agent_mail_connectivity(pane_id: str) -> dict[str, Any]:
-    """检查 agent 是否能连接到 Agent Mail Hub。"""
+def check_agent_mail_connectivity(session: str, pane_id: str) -> dict[str, Any]:
+    """检查这个 pane 有没有花名、是不是还活着。
+
+    不能读 Cockpit 进程的 AGENT_MAIL_NAME / HERDR_CONFIG_PATH：8790
+    自己不是 agent，用它的环境会把整群标成未连接。
+    """
     try:
-        has_mail_name = bool(os.environ.get("AGENT_MAIL_NAME"))
-        has_config_path = bool(os.environ.get("HERDR_CONFIG_PATH"))
+        from . import chat_roster
 
         snapshot = herdr_client.snapshot()
-        pane = next((p for p in snapshot.get("panes", []) if p.get("pane_id") == pane_id), None)
-        has_agent_session = bool(
-            pane
-            and "agent_session" in pane
-            and pane["agent_session"] is not None
+        herdr_up = snapshot.get("available") is not False
+        pane = next(
+            (
+                row for row in (snapshot.get("panes") or [])
+                if isinstance(row, dict)
+                and str(row.get("pane_id") or "") == pane_id
+                and (not session or str(row.get("session") or "") == session)
+            ),
+            None,
         )
+        has_live_agent = bool(pane and pane.get("agent"))
+        roster_name = chat_roster.get_pane_mail_name(session, pane_id) if session else ""
+        pane_name = str((pane or {}).get("mail_name") or "").strip()
+        has_mail_name = bool(roster_name or pane_name)
 
         can_send_mail = False
         try:
@@ -366,14 +376,13 @@ def check_agent_mail_connectivity(pane_id: str) -> dict[str, Any]:
         except Exception:
             pass
 
-        connected = has_mail_name and has_config_path and has_agent_session and can_send_mail
-
+        connected = has_mail_name and herdr_up and has_live_agent and can_send_mail
         return {
             "connected": connected,
             "details": {
                 "has_mail_name": has_mail_name,
-                "has_config_path": has_config_path,
-                "has_agent_session": has_agent_session,
+                "has_config_path": herdr_up,
+                "has_agent_session": has_live_agent,
                 "can_send_mail": can_send_mail,
             },
             "pane_id": pane_id,

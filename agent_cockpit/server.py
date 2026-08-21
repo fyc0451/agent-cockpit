@@ -7677,7 +7677,7 @@ def api_herdr_pane_mail_status(session: str, pane_id: str):
     """检查 pane 的 Agent Mail 连接状态。"""
     _validate_session_name(session)
     _validate_pane_id(pane_id)
-    return pane_live.check_agent_mail_connectivity(pane_id)
+    return pane_live.check_agent_mail_connectivity(session, pane_id)
 
 
 @app.get("/api/herdr/pane/{session}/{pane_id}/identity")
