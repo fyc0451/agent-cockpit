@@ -39,6 +39,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bubble at a mid-screen `❯` prompt. The live scrape window is 240
   lines so a long reply is not cut at a numbered dump line.
 
+- Harvest no longer leads a bubble with Codex git cards, Read/Search
+  dumps, or JSON fragments. The visible head is the reply, not the
+  tool transcript still on screen.
+
 ## [0.3.7] - 2026-08-20
 
 ### Removed

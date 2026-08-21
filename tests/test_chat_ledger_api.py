@@ -3209,6 +3209,46 @@ def test_claude_write_dump_does_not_cut_summary():
     assert "GrayFalcon（Claude）" not in latest
 
 
+def test_codex_tool_dump_does_not_lead_bubble():
+    dump = (
+        "d819601 feat(fleet): isolate CG and emotion capacity pools\n"
+        "     create mode 100644 pitapat_video_platform/core/pools.py\n"
+        "Read database.py, test_migrations.py, pools.py, controller.py\n"
+        '{"recovery": {"phase": "starting", "reasons": {"722ca0f130": "ssh"}}\n'
+        "'price_estimates', 'replica_num', 'reuse_container'\n"
+        '        用容器、CUDA、CPU、价格范围仍不合格，修正前禁止接入。\n'
+        '  │ 存、28.8 元/小时、北京B区；平台状态 READY。\n'
+        '"code": "Success",\n'
+        "\n"
+        "• 当前这台旧实例本身是合格的：RTX 5090、25 CPU、120GB 内存、约 28.8 元/小时，"
+        "数据库状态 READY。问题在 deployment 的未来调度模板仍很宽。\n"
+        "\n"
+        "• 下一步先修两个 AutoDL 模板，暂不发布。\n"
+        "\n"
+        "  AUTODL_EMOTION_MAX_REPLICAS=2\n"
+        "  AUTODL_CG_MAX_REPLICAS=5\n"
+        "\n"
+        "  1 background terminal running · /ps to view · /stop to close\n"
+    )
+    text = server._extract_harvest_text(dump)
+    assert text.startswith("• 当前这台旧实例本身是合格的")
+    assert "下一步先修两个 AutoDL 模板" in text
+    assert "AUTODL_CG_MAX_REPLICAS=5" in text
+    assert "d819601" not in text
+    assert "create mode" not in text
+    assert "Read database.py" not in text
+    assert '"code": "Success"' not in text
+    assert "price_estimates" not in text
+    assert "background terminal running" not in text
+    served = server._ledger_chat_mail({
+        "id": "msg_codex_dump", "session": "pitapat-video-platform-1",
+        "kind": "agent", "sender": "DarkGlacier", "text": dump,
+        "to": ["human"], "ts": 1,
+    })
+    assert served is not None
+    assert served["text"].startswith("• 当前这台旧实例本身是合格的")
+
+
 def test_harvest_idle_claude_summary_is_not_write_dump(isolated_ledger, monkeypatch):
     client = _client()
     _workspace_with_thread(client, isolated_ledger / "harvest-claude-dump", "chat-claude")

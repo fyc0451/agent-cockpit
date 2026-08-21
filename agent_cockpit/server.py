@@ -5417,10 +5417,14 @@ def _identity_chrome_only(text: str) -> bool:
 
 
 def _is_tool_dump_line(stripped: str) -> bool:
-    """Write/Update 工具头，不是给 Boss 的回复。编号行只在 dump 块里丢。"""
-    return bool(
-        _TOOL_DUMP_HEAD_RE.match(stripped) or _TOOL_DUMP_META_RE.match(stripped)
-    )
+    """Write/Update/Read/git/JSON 工具头，不是给 Boss 的回复。编号行只在 dump 块里丢。"""
+    if _TOOL_DUMP_HEAD_RE.match(stripped) or _TOOL_DUMP_META_RE.match(stripped):
+        return True
+    if _CODEX_GIT_CARD_RE.match(stripped) or _CODEX_JSON_DUMP_RE.match(stripped):
+        return True
+    if stripped.startswith("1 background terminal running"):
+        return True
+    return False
 
 
 def _harvest_skip_line(stripped: str) -> bool:
@@ -5472,7 +5476,7 @@ def _harvest_skip_line(stripped: str) -> bool:
         return True
     if re.match(r"^[a-z`]+=\d+", stripped):
         return True
-    if re.match(r"^[a-f0-9]{8,}`?", stripped):
+    if _CODEX_GIT_CARD_RE.match(stripped) or re.match(r"^[a-f0-9]{8,}`?", stripped):
         return True
     if stripped.startswith((
         "• 共享记忆", "• 已将结论打印", "• UserPromptSubmit", "• 收口记录",
@@ -5501,6 +5505,11 @@ def _strip_harvest_tui_chrome(summary: str) -> str:
         if re.match(r"※\s*recap:|^recap:", stripped, re.I):
             skipping_recap = True
             continue
+        indent = len(line) - len(line.lstrip(" "))
+        if stripped.startswith("│") or re.match(r"^-?\d+\)$", stripped):
+            continue
+        if indent >= 8 and not stripped.startswith(("•", "●", "-", "*")):
+            continue
         if _is_tool_dump_line(stripped):
             skipping_dump = True
             continue
@@ -5510,6 +5519,9 @@ def _strip_harvest_tui_chrome(summary: str) -> str:
                 or re.match(r"…\s*\+\d+\s+lines", stripped)
                 or stripped.startswith("## ")
                 or stripped.startswith("# ")
+                or stripped.startswith("│")
+                or _CODEX_JSON_DUMP_RE.match(stripped)
+                or indent >= 8
             ):
                 continue
             skipping_dump = False
@@ -5622,13 +5634,22 @@ _CONCLUSION_HEAD_RE = re.compile(
 )
 _CONCLUSION_BULLET_RE = re.compile(r"^[●•]\s+")
 _TOOL_DUMP_HEAD_RE = re.compile(
-    r"^(?:●|•)\s+(?:Write|Update|Read|Edited)\b"
+    r"^(?:(?:●|•)\s+)?(?:Write|Update|Read|Edited|Ran|Explored|Planning|Fixing|Search)\b"
 )
 _TOOL_DUMP_META_RE = re.compile(
-    r"^(?:⎿|Wrote \d+ lines|Added \d+ line)"
+    r"^(?:⎿|Wrote \d+ lines|Added \d+ line|"
+    r"create mode \d+|delete mode \d+|rewrite \d+|rename )"
 )
 _TOOL_DUMP_BODY_RE = re.compile(r"^\d+\s+\S")
 _ORPHAN_DUMP_LINE_RE = re.compile(r"^\d+\s+(?:为 |# |## )")
+_CODEX_GIT_CARD_RE = re.compile(
+    r"^[a-f0-9]{7,40}(?:`|\s+(?:feat|fix|docs|chore|test|refactor|"
+    r"release|build|ci|style|perf)\b|\s*$)"
+)
+_CODEX_JSON_DUMP_RE = re.compile(
+    r"^(?:\{|\[|\"(?:code|uuid|recovery|old_|deployment_|price_)|"
+    r"'(?:code|uuid|recovery|old_|deployment_|price_|gpu_|image_|memory_|region_|replica_|reuse_|running_|service_|starting_))"
+)
 _TOOL_JUNK_RE = re.compile(
     r"^(?:•\s+(?:<thinking>|Explored|Planning|Ran |Fixing|Edited)|"
     r"│|const fs=|printf '|unfilled:)"
