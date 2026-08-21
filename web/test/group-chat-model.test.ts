@@ -32,6 +32,7 @@ import {
   saveComposerDraft,
   nextSessionAfterRemoval,
   shouldAdoptUrlSession,
+  shouldFollowUrlSession,
   memberName,
   membersOfSession,
   mentionQueryAt,
@@ -606,6 +607,13 @@ describe('删除会话后的选中回落', () => {
     expect(shouldAdoptUrlSession('gone', null, [], true)).toBe(false)
     expect(shouldAdoptUrlSession('keep', null, ['keep'], true)).toBe(true)
     expect(shouldAdoptUrlSession('maybe', null, [], false)).toBe(true)
+  })
+
+  it('侧栏已点新会话、URL 还没跟上时不要踢回旧 query', () => {
+    expect(shouldFollowUrlSession('old', 'new', ['old', 'new'], true, false)).toBe(false)
+    expect(shouldFollowUrlSession('new', 'old', ['old', 'new'], true, true)).toBe(true)
+    expect(shouldFollowUrlSession('keep', null, ['keep'], true, true)).toBe(true)
+    expect(shouldFollowUrlSession('gone', 'keep', ['keep'], true, true)).toBe(false)
   })
 })
 

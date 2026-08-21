@@ -70,7 +70,7 @@ import {
   loadLocalEntries,
   saveComposerDraft,
   nextSessionAfterRemoval,
-  shouldAdoptUrlSession,
+  shouldFollowUrlSession,
   mailCoversLocalMe,
   isBusyMember,
   isMemberRosterEvent,
@@ -404,6 +404,7 @@ export function GroupChatPage() {
     setComposer(name ? loadComposerDraft(name) : '')
   }, [])
 
+  const urlSessionRef = useRef(urlSession)
   const selectSession = useCallback(
     (name: string) => {
       setTeamActiveTopic(null)
@@ -422,10 +423,15 @@ export function GroupChatPage() {
 
   useEffect(() => {
     if (isSettings) return
+    const urlChanged = urlSessionRef.current !== urlSession
+    urlSessionRef.current = urlSession
     const names = rows.map((row) => row.name)
-    if (!shouldAdoptUrlSession(urlSession, activeSession, names, didInitRef.current)) {
+    if (!shouldFollowUrlSession(
+      urlSession, activeSession, names, didInitRef.current, urlChanged,
+    )) {
       if (
         didInitRef.current
+        && urlChanged
         && urlSession
         && urlSession !== activeSession
         && !names.includes(urlSession)
@@ -494,12 +500,10 @@ export function GroupChatPage() {
     queryFn: async ({ queryKey }) => {
       const name = queryKey[1]
       if (typeof name !== 'string' || !name) return []
-      if (mailPrimedRef.current === name) {
+      const cached = queryClient.getQueryData<SessionMailMessage[]>(['gc-mail', name])
+      if (mailPrimedRef.current === name && cached && cached.length > 0) {
         const next = await fetchSessionMail(name, 'all')
-        return preferLedgerMail(
-          queryClient.getQueryData<SessionMailMessage[]>(['gc-mail', name]),
-          next,
-        )
+        return preferLedgerMail(cached, next)
       }
       const first = await fetchSessionMail(name, 'ledger')
       mailPrimedRef.current = name

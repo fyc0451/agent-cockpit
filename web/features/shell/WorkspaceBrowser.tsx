@@ -80,13 +80,11 @@ function ProjectRow(props: {
       aria-expanded={props.open}
       title={`${props.root}（点击打开）`}
       onClick={() => {
-        props.onToggle()
         props.onOpen()
       }}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
-          props.onToggle()
           props.onOpen()
         }
       }}

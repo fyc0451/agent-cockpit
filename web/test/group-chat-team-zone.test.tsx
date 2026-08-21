@@ -110,3 +110,38 @@ describe('WorkspaceBrowser 团队区域', () => {
     expect(onCreate).toHaveBeenCalledWith('销售跟进')
   })
 })
+
+describe('WorkspaceBrowser 工作区导航', () => {
+  it('点工作区标题只打开，不把会话列表收起', async () => {
+    const onOpen = vi.fn()
+    const onSelect = vi.fn()
+    renderWithAppFrame(
+      <WorkspaceBrowser
+        groups={[{
+          id: 'ws-1',
+          root: '/repo',
+          label: 'agent-cockpit',
+          removable: true,
+          rows: [{ name: 'cockpit', status: 'idle', memberCount: 2, root: '/repo' }],
+        }]}
+        ungrouped={[]}
+        activeSession="cockpit"
+        loading={false}
+        wide={true}
+        onSelect={onSelect}
+        onAddWorkspace={vi.fn()}
+        onNewSession={vi.fn()}
+        onRemoveWorkspace={vi.fn()}
+        onStopSession={vi.fn()}
+        onDeleteSession={vi.fn()}
+        onOpenWorkspace={onOpen}
+      />,
+    )
+    expect(screen.getByText('cockpit')).toBeInTheDocument()
+    await userEvent.setup().click(screen.getByText('agent-cockpit'))
+    expect(onOpen).toHaveBeenCalledWith('ws-1')
+    expect(screen.getByText('cockpit')).toBeInTheDocument()
+    await userEvent.setup().click(screen.getByText('cockpit'))
+    expect(onSelect).toHaveBeenCalledWith('cockpit')
+  })
+})

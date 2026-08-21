@@ -41,6 +41,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Clicking a workspace or session in the sidebar no longer blanks
+  the main pane until a refresh. Session clicks keep the new
+  selection while the URL catches up; workspace titles open without
+  collapsing the session list.
+
 - Group-chat Agent Mail warning reads the pane flower name and live
   agent, not Cockpit's process environment. A running 8790 without
   `AGENT_MAIL_NAME` no longer paints the whole room disconnected.

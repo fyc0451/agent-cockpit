@@ -1164,6 +1164,24 @@ export function shouldAdoptUrlSession(
   return true
 }
 
+/**
+ * 侧栏点了会话会先改 activeSession，URL 下一拍才跟上。
+ * URL 没变时不要把刚点的会话踢回旧 query，否则主栏空白，刷新才出内容。
+ */
+export function shouldFollowUrlSession(
+  urlSession: string | null,
+  activeSession: string | null,
+  knownNames: string[],
+  initialized: boolean,
+  urlChanged: boolean,
+): boolean {
+  if (!shouldAdoptUrlSession(urlSession, activeSession, knownNames, initialized)) {
+    return false
+  }
+  if (!urlChanged && urlSession !== activeSession) return false
+  return true
+}
+
 // ---------- 会话列表行模型 ----------
 
 export interface SessionRow {
