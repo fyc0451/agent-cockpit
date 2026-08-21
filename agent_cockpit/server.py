@@ -53,6 +53,7 @@ from . import files
 from . import instance_lock
 from . import mail_projects
 from . import chat_ledger
+from . import team_ledger
 from . import chat_roster
 from . import git_card
 from . import persist_work
@@ -2331,6 +2332,23 @@ class TeamSessionBindReq(BaseModel):
     replace: bool = False
 
 
+class TeamLedgerSendReq(BaseModel):
+    topic: str
+    text: str
+    to: list[str] = []
+    kind: str = "me"
+    sender: str = "human"
+
+
+class TeamLedgerReceiveReq(BaseModel):
+    topic: str
+    text: str
+    sender: str
+    to: list[str] = []
+    kind: str = "agent"
+    ts: int | None = None
+
+
 class _AssignmentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3670,6 +3688,95 @@ def api_agent_mail_config_put(req: AgentMailConfigReq):
         **hub_client.public_team_config(),
         "status": hub_client.status(),
     }
+
+
+def _configured_team_hub() -> str:
+    """未配 Team Hub 时团队账本 API 不存在；保持 3.0 路径。"""
+    raw = settings.get().get("team_hub_url")
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(404, "未配置 Team Hub")
+    hub = hub_client.public_team_config().get("team_hub")
+    if not isinstance(hub, str) or not hub.strip():
+        raise HTTPException(404, "未配置 Team Hub")
+    return hub.strip()
+
+
+def _append_team_ledger_message(
+    *,
+    topic: str,
+    hub: str,
+    kind: str,
+    sender: str,
+    text: str,
+    to: list[str] | None = None,
+    ts: int | None = None,
+) -> dict[str, Any]:
+    """团队收发只写 team_ledger。禁止 chat_ledger / pane_send。"""
+    try:
+        return team_ledger.append_message(
+            topic, hub=hub, kind=kind, sender=sender, text=text, to=to, ts=ts,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/team/ledger/messages")
+def api_team_ledger_list(request: Request, topic: str = Query(...)):
+    """团队时间线：只读 team-messages.json，不碰本机群。"""
+    hub = _configured_team_hub()
+    _team_human_authorization(request)
+    try:
+        rows = team_ledger.list_messages(topic, hub=hub)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"messages": rows, "topic": topic, "hub": hub}
+
+
+@app.post("/api/team/ledger/messages")
+def api_team_ledger_send(req: TeamLedgerSendReq, request: Request):
+    """团队区发消息：只进团队账本，不写 chat-messages.json，不 pane_send。"""
+    hub = _configured_team_hub()
+    _team_human_authorization(request)
+    row = _append_team_ledger_message(
+        topic=req.topic,
+        hub=hub,
+        kind=req.kind,
+        sender=req.sender,
+        text=req.text,
+        to=req.to,
+    )
+    return {"ok": True, "message": row}
+
+
+@app.post("/api/team/ledger/receive")
+def api_team_ledger_receive(req: TeamLedgerReceiveReq, request: Request):
+    """团队区收消息 / 摄入 Hub 历史：只进团队账本，禁止抄进本机群。"""
+    hub = _configured_team_hub()
+    _team_human_authorization(request)
+    row = _append_team_ledger_message(
+        topic=req.topic,
+        hub=hub,
+        kind=req.kind,
+        sender=req.sender,
+        text=req.text,
+        to=req.to,
+        ts=req.ts,
+    )
+    return {"ok": True, "message": row}
+
+
+@app.post("/api/team/ledger/messages/{message_id}/hand-to-leader")
+def api_team_ledger_hand_to_leader(message_id: str, request: Request):
+    """交给 leader：只在团队账本打标。默认不 pane_send，不写本机群。"""
+    _configured_team_hub()
+    _team_human_authorization(request)
+    try:
+        marked = team_ledger.mark_handed_to_leader(message_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if marked is None:
+        raise HTTPException(404, "团队消息不存在")
+    return {"ok": True, "message": marked}
 
 
 @app.api_route(

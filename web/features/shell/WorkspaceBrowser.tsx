@@ -4,6 +4,7 @@
 // 滚动的工作区分组树（工作区 34px 行 / 会话 32px 行，hover 交换纯 CSS）。
 // 数据接 cockpit 的 file roots + herdr 会话（经 GroupChatPage 组装）；
 // 未搬：拖拽排序、重命名、hover 卡、远程搜索（改为本地过滤）。
+// Cockpit 4.0: 添加团队区（仅当配置 Team Hub 时显示）。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionRow } from '../group-chat/model'
 import { useAppFrame } from './AppFrame'
@@ -44,6 +45,17 @@ export interface WorkspaceBrowserProps {
   onStopSession: (session: string) => void
   onDeleteSession: (session: string) => void
   onOpenWorkspace: (id: string) => void
+  // Cockpit 4.0: 团队区
+  teamEnabled?: boolean
+  teamLoggedIn?: boolean
+  teamUsername?: string | null
+  teamTopics?: Array<{ slug: string; name: string; id: number }>
+  teamBindings?: Array<{ project_slug: string; session: string }>
+  teamActiveTopic?: string | null
+  onTeamLogin?: (username: string, password: string) => Promise<void>
+  onTeamLogout?: () => Promise<void>
+  onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
+  onTeamSelectTopic?: (projectSlug: string) => void
 }
 
 /** 工作区分组头行：folder 图标 hover 换展开箭头，尾部动作钮 hover 出现。 */
@@ -131,6 +143,16 @@ export function WorkspaceBrowser({
   onStopSession,
   onDeleteSession,
   onOpenWorkspace,
+  teamEnabled = false,
+  teamLoggedIn = false,
+  teamUsername = null,
+  teamTopics = [],
+  teamBindings = [],
+  teamActiveTopic = null,
+  onTeamLogin,
+  onTeamLogout,
+  onTeamBindSession,
+  onTeamSelectTopic,
 }: WorkspaceBrowserProps) {
   const { toggleSidebar } = useAppFrame()
   const [searchOpen, setSearchOpen] = useState(false)
@@ -384,12 +406,347 @@ export function WorkspaceBrowser({
                 )}
                 {groups.map((g) => renderGroup(g.id || g.root, g.label, g.rows, { id: g.id, root: g.root, canCreate: true, removable: g.removable }))}
                 {ungrouped.length > 0 && renderGroup('', '未分组', ungrouped, { canCreate: false, removable: false })}
+
+                {/* Cockpit 4.0: 团队区（仅当配置 Team Hub 时显示） */}
+                {teamEnabled && (
+                  <TeamZoneSection
+                    loggedIn={teamLoggedIn}
+                    username={teamUsername}
+                    topics={teamTopics}
+                    bindings={teamBindings}
+                    localSessions={[...groups.flatMap((g) => g.rows), ...ungrouped]}
+                    activeTopic={teamActiveTopic}
+                    onLogin={onTeamLogin || (async () => {})}
+                    onLogout={onTeamLogout || (async () => {})}
+                    onBindSession={onTeamBindSession || (async () => {})}
+                    onSelectTopic={onTeamSelectTopic || (() => {})}
+                  />
+                )}
               </>
             )}
           </div>
           <div className={css.fade} />
         </div>
       </div>
+    </div>
+  )
+}
+
+// Cockpit 4.0: 团队区组件
+function TeamZoneSection({
+  loggedIn,
+  username,
+  topics,
+  bindings,
+  localSessions,
+  activeTopic,
+  onLogin,
+  onLogout,
+  onBindSession,
+  onSelectTopic,
+}: {
+  loggedIn: boolean
+  username: string | null
+  topics: Array<{ slug: string; name: string; id: number }>
+  bindings: Array<{ project_slug: string; session: string }>
+  localSessions: SessionRow[]
+  activeTopic: string | null
+  onLogin: (username: string, password: string) => Promise<void>
+  onLogout: () => Promise<void>
+  onBindSession: (projectSlug: string, sessionName: string) => Promise<void>
+  onSelectTopic: (projectSlug: string) => void
+}) {
+  const [showLogin, setShowLogin] = useState(false)
+  const [loginUsername, setLoginUsername] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginLoading, setLoginLoading] = useState(false)
+  const [loginError, setLoginError] = useState<string | null>(null)
+  const [bindingTopic, setBindingTopic] = useState<string | null>(null)
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!loginUsername.trim() || !loginPassword) return
+
+    setLoginLoading(true)
+    setLoginError(null)
+    try {
+      await onLogin(loginUsername.trim(), loginPassword)
+      setShowLogin(false)
+      setLoginUsername('')
+      setLoginPassword('')
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoginLoading(false)
+    }
+  }
+
+  const handleBind = async (projectSlug: string, sessionName: string) => {
+    try {
+      await onBindSession(projectSlug, sessionName)
+      setBindingTopic(null)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  if (!loggedIn) {
+    if (!showLogin) {
+      return (
+        <div className={css.groupSection} style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
+          <div style={{ padding: '0 12px', marginBottom: '8px', fontSize: '12px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' }}>
+            团队
+          </div>
+          <button
+            type="button"
+            style={{
+              width: 'calc(100% - 16px)',
+              margin: '0 8px',
+              padding: '8px 12px',
+              background: 'var(--dsw-alias-bg-l2)',
+              border: '1px solid var(--dsw-alias-border-l1)',
+              borderRadius: '6px',
+              color: 'var(--dsw-alias-label-primary)',
+              cursor: 'pointer',
+              fontSize: '13px',
+            }}
+            onClick={() => setShowLogin(true)}
+          >
+            登录团队账号
+          </button>
+        </div>
+      )
+    }
+
+    return (
+      <div className={css.groupSection} style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
+        <div style={{ padding: '0 12px', marginBottom: '8px', fontSize: '12px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' }}>
+          团队登录
+        </div>
+        <form
+          style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 8px' }}
+          onSubmit={handleLogin}
+        >
+          <input
+            type="text"
+            placeholder="用户名"
+            value={loginUsername}
+            onChange={(e) => setLoginUsername(e.target.value)}
+            disabled={loginLoading}
+            autoComplete="username"
+            style={{
+              padding: '8px 10px',
+              background: 'var(--dsw-alias-bg-base)',
+              border: '1px solid var(--dsw-alias-border-l1)',
+              borderRadius: '6px',
+              color: 'var(--dsw-alias-label-primary)',
+              fontSize: '13px',
+            }}
+          />
+          <input
+            type="password"
+            placeholder="密码"
+            value={loginPassword}
+            onChange={(e) => setLoginPassword(e.target.value)}
+            disabled={loginLoading}
+            autoComplete="current-password"
+            style={{
+              padding: '8px 10px',
+              background: 'var(--dsw-alias-bg-base)',
+              border: '1px solid var(--dsw-alias-border-l1)',
+              borderRadius: '6px',
+              color: 'var(--dsw-alias-label-primary)',
+              fontSize: '13px',
+            }}
+          />
+          {loginError && (
+            <div style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px', padding: '4px' }}>
+              {loginError}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button
+              type="submit"
+              disabled={loginLoading}
+              style={{
+                flex: 1,
+                padding: '8px',
+                background: 'var(--dsw-alias-bg-l2)',
+                border: '1px solid var(--dsw-alias-border-l1)',
+                borderRadius: '6px',
+                color: 'var(--dsw-alias-label-primary)',
+                cursor: loginLoading ? 'not-allowed' : 'pointer',
+                fontSize: '13px',
+                opacity: loginLoading ? 0.5 : 1,
+              }}
+            >
+              {loginLoading ? '登录中…' : '登录'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowLogin(false)
+                setLoginError(null)
+              }}
+              disabled={loginLoading}
+              style={{
+                flex: 1,
+                padding: '8px',
+                background: 'var(--dsw-alias-bg-l2)',
+                border: '1px solid var(--dsw-alias-border-l1)',
+                borderRadius: '6px',
+                color: 'var(--dsw-alias-label-primary)',
+                cursor: loginLoading ? 'not-allowed' : 'pointer',
+                fontSize: '13px',
+                opacity: loginLoading ? 0.5 : 1,
+              }}
+            >
+              取消
+            </button>
+          </div>
+        </form>
+      </div>
+    )
+  }
+
+  return (
+    <div className={css.groupSection} style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
+      <div style={{ padding: '0 12px', marginBottom: '8px', fontSize: '12px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>团队 ({username})</span>
+        <button
+          type="button"
+          onClick={() => void onLogout()}
+          title="退出登录"
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--dsw-alias-label-tertiary)',
+            cursor: 'pointer',
+            fontSize: '14px',
+            padding: '0 4px',
+          }}
+        >
+          ⎋
+        </button>
+      </div>
+
+      {topics.length === 0 && (
+        <div style={{ padding: '8px 12px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', textAlign: 'center' }}>
+          还没有加入任何 topic
+        </div>
+      )}
+
+      {topics.map((topic) => {
+        const binding = bindings.find((b) => b.project_slug === topic.slug)
+        const isBound = !!binding
+        const isBinding = bindingTopic === topic.slug
+
+        return (
+          <div key={topic.slug} style={{ position: 'relative', marginBottom: '2px' }}>
+            <button
+              type="button"
+              className={cx(css.sessionRow, activeTopic === topic.slug && css.selected)}
+              onClick={() => isBound && onSelectTopic(topic.slug)}
+              disabled={!isBound}
+              title={
+                isBound
+                  ? `打开 ${topic.name}（绑定到 ${binding.session}）`
+                  : `${topic.name}（需要先绑定本机 Session）`
+              }
+              style={{
+                opacity: isBound ? 1 : 0.6,
+                cursor: isBound ? 'pointer' : 'not-allowed',
+              }}
+            >
+              <span className={css.slot}>
+                <span className={css.statusDot} data-status={isBound ? 'active' : 'stopped'} />
+              </span>
+              <span className={css.title}>{topic.name}</span>
+              <span className={css.meta}>
+                {isBound ? `→ ${binding.session}` : '未绑定'}
+              </span>
+            </button>
+
+            {!isBound && !isBinding && (
+              <button
+                type="button"
+                onClick={() => setBindingTopic(topic.slug)}
+                title="绑定本机 Session"
+                style={{
+                  position: 'absolute',
+                  right: '8px',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  background: 'var(--dsw-alias-state-business-primary)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '4px 10px',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                  fontWeight: 500,
+                }}
+              >
+                绑定
+              </button>
+            )}
+
+            {isBinding && (
+              <div style={{
+                background: 'var(--dsw-alias-bg-base)',
+                border: '1px solid var(--dsw-alias-border-l1)',
+                borderRadius: '6px',
+                padding: '8px',
+                margin: '4px 8px 8px',
+              }}>
+                <div style={{ fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' }}>
+                  选择本机 Session：
+                </div>
+                {localSessions.map((sess) => (
+                  <button
+                    key={sess.name}
+                    type="button"
+                    onClick={() => handleBind(topic.slug, sess.name)}
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      padding: '6px 10px',
+                      background: 'var(--dsw-alias-bg-l2)',
+                      border: '1px solid var(--dsw-alias-border-l1)',
+                      borderRadius: '4px',
+                      color: 'var(--dsw-alias-label-primary)',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      textAlign: 'left',
+                      marginBottom: '4px',
+                    }}
+                  >
+                    {sess.name}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setBindingTopic(null)}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    padding: '6px 10px',
+                    background: 'var(--dsw-alias-bg-base)',
+                    border: '1px solid var(--dsw-alias-border-l1)',
+                    borderRadius: '4px',
+                    color: 'var(--dsw-alias-label-tertiary)',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    marginTop: '4px',
+                  }}
+                >
+                  取消
+                </button>
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

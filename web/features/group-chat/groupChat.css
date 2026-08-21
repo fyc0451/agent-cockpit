@@ -2499,3 +2499,170 @@
 .gc-addpath-row .gc-input {
   flex: 1;
 }
+
+/* ============ Cockpit 4.0: 团队区 ============ */
+
+.gc-team-zone {
+  border-top: 1px solid var(--gc-line);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+.gc-team-login-btn {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--gc-side);
+  border: 1px solid var(--gc-line);
+  border-radius: 6px;
+  color: var(--gc-text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.gc-team-login-btn:hover {
+  background: var(--gc-hover);
+}
+
+.gc-team-login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.gc-team-login-form input {
+  padding: 8px 10px;
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-line);
+  border-radius: 6px;
+  color: var(--gc-text);
+  font-size: 13px;
+}
+
+.gc-team-login-form input:focus {
+  outline: none;
+  border-color: var(--gc-accent);
+}
+
+.gc-team-error {
+  color: var(--gc-red);
+  font-size: 12px;
+  padding: 4px;
+}
+
+.gc-team-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.gc-team-actions button {
+  flex: 1;
+  padding: 8px;
+  background: var(--gc-side);
+  border: 1px solid var(--gc-line);
+  border-radius: 6px;
+  color: var(--gc-text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.gc-team-actions button:hover:not(:disabled) {
+  background: var(--gc-hover);
+}
+
+.gc-team-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gc-team-logout {
+  background: none;
+  border: none;
+  color: var(--gc-text3);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  margin-left: 4px;
+}
+
+.gc-team-logout:hover {
+  color: var(--gc-text);
+}
+
+.gc-team-topic {
+  position: relative;
+}
+
+.gc-team-topic .gc-session.is-unbound {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.gc-team-bind-trigger {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--gc-accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.gc-team-bind-trigger:hover {
+  opacity: 0.9;
+}
+
+.gc-team-bind-picker {
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-line);
+  border-radius: 6px;
+  padding: 8px;
+  margin: 4px 8px 8px;
+}
+
+.gc-team-bind-label {
+  font-size: 12px;
+  color: var(--gc-text2);
+  margin-bottom: 6px;
+}
+
+.gc-team-bind-session {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--gc-side);
+  border: 1px solid var(--gc-line);
+  border-radius: 4px;
+  color: var(--gc-text);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+  margin-bottom: 4px;
+}
+
+.gc-team-bind-session:hover {
+  background: var(--gc-hover);
+}
+
+.gc-team-bind-cancel {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--gc-bg);
+  border: 1px solid var(--gc-line);
+  border-radius: 4px;
+  color: var(--gc-text3);
+  cursor: pointer;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.gc-team-bind-cancel:hover {
+  background: var(--gc-hover);
+  color: var(--gc-text);
+}

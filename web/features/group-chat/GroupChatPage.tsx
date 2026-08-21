@@ -32,6 +32,14 @@ import {
   uploadChatFile,
   type SessionMailMessage,
 } from '../../api/chatSession'
+import { fetchTeamConfig } from '../../api/teamConfig'
+import {
+  teamAuthStatus,
+  teamLogin,
+  teamLogout,
+  teamSessionBindings,
+  teamBindSession,
+} from '../../api/teamAuth'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { AppFrame, useAppFrame } from '../shell/AppFrame'
@@ -130,6 +138,16 @@ function NarrowAwareBrowser(props: {
   onStopSession: (session: string) => void
   onDeleteSession: (session: string) => void
   onOpenWorkspace: (id: string) => void
+  teamEnabled?: boolean
+  teamLoggedIn?: boolean
+  teamUsername?: string | null
+  teamTopics?: Array<{ slug: string; name: string; id: number }>
+  teamBindings?: Array<{ project_slug: string; session: string }>
+  teamActiveTopic?: string | null
+  onTeamLogin?: (username: string, password: string) => Promise<void>
+  onTeamLogout?: () => Promise<void>
+  onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
+  onTeamSelectTopic?: (projectSlug: string) => void
 }) {
   const { narrow, sidebarCollapsed, toggleSidebar } = useAppFrame()
   const closeRail = () => {
@@ -221,6 +239,53 @@ export function GroupChatPage() {
     () => ledgerWorkspaces.map((ws) => ws.path),
     [ledgerWorkspaces],
   )
+
+  // Cockpit 4.0: 团队区查询
+  const teamConfigQ = useQuery({
+    queryKey: ['team-config'],
+    queryFn: fetchTeamConfig,
+    staleTime: 60_000,
+  })
+  const teamEnabled = !!(teamConfigQ.data?.team_hub && teamConfigQ.data?.human_auth)
+
+  const teamAuthQ = useQuery({
+    queryKey: ['team-auth-status'],
+    queryFn: teamAuthStatus,
+    enabled: teamEnabled,
+    staleTime: 30_000,
+  })
+
+  const teamBindingsQ = useQuery({
+    queryKey: ['team-bindings'],
+    queryFn: teamSessionBindings,
+    enabled: teamEnabled && teamAuthQ.data?.logged_in === true,
+    staleTime: 30_000,
+  })
+
+  const [teamActiveTopic, setTeamActiveTopic] = useState<string | null>(null)
+
+  const handleTeamLogin = useCallback(async (username: string, password: string) => {
+    await teamLogin(username, password)
+    queryClient.invalidateQueries({ queryKey: ['team-auth-status'] })
+    queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
+  }, [queryClient])
+
+  const handleTeamLogout = useCallback(async () => {
+    await teamLogout()
+    queryClient.invalidateQueries({ queryKey: ['team-auth-status'] })
+    queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
+    setTeamActiveTopic(null)
+  }, [queryClient])
+
+  const handleTeamBindSession = useCallback(async (projectSlug: string, sessionName: string) => {
+    await teamBindSession(projectSlug, sessionName, false)
+    queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
+  }, [queryClient])
+
+  const handleTeamSelectTopic = useCallback((projectSlug: string) => {
+    setTeamActiveTopic(projectSlug)
+    // TODO: 打开团队时间线容器
+  }, [])
 
   const liveRows = useMemo(
     () => buildSessionRows(sessionsQ.data ?? [], snapshotQ.data ?? null),
@@ -932,6 +997,16 @@ export function GroupChatPage() {
                 onStopSession={(name) => { setSessionAction({ kind: 'stop', name }) }}
                 onDeleteSession={(name) => { setSessionAction({ kind: 'delete', name }) }}
                 onOpenWorkspace={(id) => { void onOpenWorkspace(id) }}
+                teamEnabled={teamEnabled}
+                teamLoggedIn={teamAuthQ.data?.logged_in ?? false}
+                teamUsername={teamAuthQ.data?.username ?? null}
+                teamTopics={teamBindingsQ.data?.topics ?? []}
+                teamBindings={teamBindingsQ.data?.bindings ?? []}
+                teamActiveTopic={teamActiveTopic}
+                onTeamLogin={handleTeamLogin}
+                onTeamLogout={handleTeamLogout}
+                onTeamBindSession={handleTeamBindSession}
+                onTeamSelectTopic={handleTeamSelectTopic}
               />
             )}
           </SidebarRoot>

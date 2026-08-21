@@ -10,7 +10,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Cockpit 4.0 first slice on `feature/cockpit-4.0-team-zone`:
   isolated team ledger `team-messages.json`. Team Hub history
-  never writes `chat-messages.json`.
+  never writes `chat-messages.json`. Team send / receive /
+  hand-to-leader stay on `/api/team/ledger*` and never call
+  `chat_ledger.append_message` or `pane_send`.
 
 ### Changed
 
