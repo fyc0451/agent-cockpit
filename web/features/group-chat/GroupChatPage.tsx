@@ -40,6 +40,7 @@ import {
   teamSessionBindings,
   teamBindSession,
   listTeamProjects,
+  createTeamProject,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
 import { requireAuthenticated } from '../../api/auth'
@@ -150,6 +151,7 @@ function NarrowAwareBrowser(props: {
   onTeamLogout?: () => Promise<void>
   onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
+  onTeamCreateTopic?: (name: string) => Promise<void>
 }) {
   const { narrow, sidebarCollapsed, toggleSidebar } = useAppFrame()
   const closeRail = () => {
@@ -317,6 +319,14 @@ export function GroupChatPage() {
   const handleTeamSelectTopic = useCallback((projectSlug: string) => {
     setTeamActiveTopic(projectSlug)
   }, [])
+
+  const handleTeamCreateTopic = useCallback(async (name: string) => {
+    const username = teamAuthQ.data?.username
+    if (!username) throw new Error('未登录团队账号')
+    const topic = await createTeamProject(name, username)
+    await queryClient.invalidateQueries({ queryKey: ['team-projects'] })
+    setTeamActiveTopic(topic.slug)
+  }, [queryClient, teamAuthQ.data?.username])
 
   const liveRows = useMemo(
     () => buildSessionRows(sessionsQ.data ?? [], snapshotQ.data ?? null),
@@ -1039,6 +1049,7 @@ export function GroupChatPage() {
                 onTeamLogout={handleTeamLogout}
                 onTeamBindSession={handleTeamBindSession}
                 onTeamSelectTopic={handleTeamSelectTopic}
+                onTeamCreateTopic={handleTeamCreateTopic}
               />
             )}
           </SidebarRoot>

@@ -18,7 +18,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a team-timeline action (optional default on send) and never
   copies into the local waterfall. Sidebar topics come from
   Hub `/api/team/projects`; bind conflict 409 can replace after
-  confirm.
+  confirm. Logged-in admins can create a topic from the sidebar
+  (name only, no local directory) via POST `/api/team/projects`.
 
 ### Changed
 

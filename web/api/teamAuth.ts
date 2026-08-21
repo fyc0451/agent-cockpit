@@ -192,6 +192,72 @@ export async function listTeamProjects(): Promise<TeamTopic[]> {
   return topics
 }
 
+function slugFromName(name: string): string {
+  const base = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+  const suffix = Date.now().toString(36)
+  return (base ? `${base}-${suffix}` : `topic-${suffix}`).slice(0, 128)
+}
+
+function handleFromUsername(username: string): string {
+  const handle = username
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 128)
+  return handle || 'human'
+}
+
+export async function createTeamProject(
+  name: string,
+  username: string,
+): Promise<TeamTopic> {
+  const trimmed = name.trim()
+  if (!trimmed) {
+    throw new ApiError({
+      code: 'invalid_name',
+      message: 'topic 名字不能为空',
+      retryable: false,
+    })
+  }
+  const response = await fetch('/api/team/projects', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: trimmed,
+      slug: slugFromName(trimmed),
+      mention_handle: handleFromUsername(username),
+    }),
+  })
+  if (!response.ok) {
+    throw new ApiError({
+      code: response.status === 403 ? 'forbidden' : 'create_failed',
+      message:
+        response.status === 403
+          ? '只有管理员可以创建 topic'
+          : await response.text() || '创建 topic 失败',
+      retryable: false,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  const topic = parseTopic(data)
+  if (!topic) {
+    throw new ApiError({
+      code: 'protocol_error',
+      message: '创建 topic 响应格式错误',
+      retryable: false,
+    })
+  }
+  return topic
+}
+
 export async function teamBindSession(
   projectSlug: string,
   sessionName: string,

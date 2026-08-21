@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { WorkspaceBrowser } from '../features/shell/WorkspaceBrowser'
 import { AppFrame } from '../features/shell/AppFrame'
 
@@ -82,5 +83,30 @@ describe('WorkspaceBrowser 团队区域', () => {
       />,
     )
     expect(screen.getByText(/local-session-1/)).toBeInTheDocument()
+  })
+
+  it('登录后可以新建 topic，不选本机目录', async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined)
+    renderWithAppFrame(
+      <WorkspaceBrowser
+        {...baseProps}
+        teamEnabled={true}
+        teamLoggedIn={true}
+        teamUsername="fyc"
+        teamTopics={[]}
+        teamBindings={[]}
+        onTeamLogout={vi.fn()}
+        onTeamCreateTopic={onCreate}
+      />,
+    )
+    const user = userEvent.setup()
+    expect(screen.getByText('新建 topic')).toBeInTheDocument()
+    await user.click(screen.getByText('新建 topic'))
+    expect(screen.getByLabelText('topic 名称')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('topic 名称，不选本机目录')).toBeInTheDocument()
+    expect(screen.queryByLabelText('选择目录')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('topic 名称'), '销售跟进')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    expect(onCreate).toHaveBeenCalledWith('销售跟进')
   })
 })

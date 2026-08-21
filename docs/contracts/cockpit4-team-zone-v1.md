@@ -46,3 +46,4 @@
 - 「交给 leader」不在本机群多出气泡，也不默认 `pane_send`。
 - 侧栏 topic 来自 Hub `/api/team/projects`（已加入），不是只从本机绑定抠。
 - 绑定冲突 HTTP 409；确认后 `replace=true` 改绑。
+- 已登录管理员可在侧栏「新建 topic」：只填名字，POST `/api/team/projects`，不选本机目录。
