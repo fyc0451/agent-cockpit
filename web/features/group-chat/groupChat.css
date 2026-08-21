@@ -2753,3 +2753,33 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.gc-team-hand {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--gc-line);
+  border-radius: 6px;
+  background: var(--gc-bg);
+  color: var(--gc-text2);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.gc-team-hand:hover:not(:disabled) {
+  background: var(--gc-hover);
+  color: var(--gc-text);
+}
+
+.gc-team-hand:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gc-team-auto-hand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--gc-text3);
+  white-space: nowrap;
+}

@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '../../api/client'
-import { listTeamLedger, sendTeamLedger } from '../../api/teamLedger'
+import { handTeamLedgerToLeader, listTeamLedger, sendTeamLedger } from '../../api/teamLedger'
 
 export function TeamTimeline({
   topic,
@@ -20,7 +20,9 @@ export function TeamTimeline({
   })
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
+  const [handingId, setHandingId] = useState<string | null>(null)
   const [sendError, setSendError] = useState<string | null>(null)
+  const [autoHand, setAutoHand] = useState(false)
 
   const onSend = async () => {
     const text = draft.trim()
@@ -28,13 +30,30 @@ export function TeamTimeline({
     setSending(true)
     setSendError(null)
     try {
-      await sendTeamLedger(topic, text)
+      const row = await sendTeamLedger(topic, text)
+      if (autoHand && !row.handed_to_leader) {
+        await handTeamLedgerToLeader(row.id)
+      }
       setDraft('')
       await queryClient.invalidateQueries({ queryKey: ['team-ledger', topic] })
     } catch (err) {
       setSendError(err instanceof ApiError ? err.message : String(err))
     } finally {
       setSending(false)
+    }
+  }
+
+  const onHand = async (messageId: string) => {
+    if (handingId) return
+    setHandingId(messageId)
+    setSendError(null)
+    try {
+      await handTeamLedgerToLeader(messageId)
+      await queryClient.invalidateQueries({ queryKey: ['team-ledger', topic] })
+    } catch (err) {
+      setSendError(err instanceof ApiError ? err.message : String(err))
+    } finally {
+      setHandingId(null)
     }
   }
 
@@ -65,8 +84,20 @@ export function TeamTimeline({
           >
             <div className="gc-team-msg-meta">
               {row.kind === 'me' ? '我' : row.sender}
+              {row.handed_to_leader ? ' · 已交给 leader' : ''}
             </div>
             <div className="gc-team-msg-body">{row.text}</div>
+            {!row.handed_to_leader && (
+              <button
+                type="button"
+                className="gc-team-hand"
+                data-testid={`team-hand-${row.id}`}
+                disabled={handingId === row.id}
+                onClick={() => void onHand(row.id)}
+              >
+                {handingId === row.id ? '提交中…' : '交给 leader'}
+              </button>
+            )}
           </div>
         ))}
       </div>
@@ -87,6 +118,14 @@ export function TeamTimeline({
         <button type="submit" disabled={sending || !draft.trim()}>
           {sending ? '发送中…' : '发送'}
         </button>
+        <label className="gc-team-auto-hand">
+          <input
+            type="checkbox"
+            checked={autoHand}
+            onChange={(event) => setAutoHand(event.target.checked)}
+          />
+          发送后交给 leader
+        </label>
       </form>
       {sendError && <div className="gc-team-error">{sendError}</div>}
     </div>

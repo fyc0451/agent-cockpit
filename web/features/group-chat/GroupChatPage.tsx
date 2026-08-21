@@ -39,6 +39,7 @@ import {
   teamLogout,
   teamSessionBindings,
   teamBindSession,
+  listTeamProjects,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
 import { requireAuthenticated } from '../../api/auth'
@@ -263,23 +264,53 @@ export function GroupChatPage() {
     staleTime: 30_000,
   })
 
+  const teamProjectsQ = useQuery({
+    queryKey: ['team-projects'],
+    queryFn: listTeamProjects,
+    enabled: teamEnabled && teamAuthQ.data?.logged_in === true,
+    staleTime: 30_000,
+  })
+
+  const teamTopics = useMemo(() => {
+    const bySlug = new Map<string, { slug: string; name: string; id: number }>()
+    for (const topic of teamProjectsQ.data ?? []) bySlug.set(topic.slug, topic)
+    for (const topic of teamBindingsQ.data?.topics ?? []) {
+      if (!bySlug.has(topic.slug)) bySlug.set(topic.slug, topic)
+    }
+    return [...bySlug.values()]
+  }, [teamProjectsQ.data, teamBindingsQ.data])
+
   const [teamActiveTopic, setTeamActiveTopic] = useState<string | null>(null)
 
   const handleTeamLogin = useCallback(async (username: string, password: string) => {
     await teamLogin(username, password)
     queryClient.invalidateQueries({ queryKey: ['team-auth-status'] })
     queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
+    queryClient.invalidateQueries({ queryKey: ['team-projects'] })
   }, [queryClient])
 
   const handleTeamLogout = useCallback(async () => {
     await teamLogout()
     queryClient.invalidateQueries({ queryKey: ['team-auth-status'] })
     queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
+    queryClient.invalidateQueries({ queryKey: ['team-projects'] })
     setTeamActiveTopic(null)
   }, [queryClient])
 
   const handleTeamBindSession = useCallback(async (projectSlug: string, sessionName: string) => {
-    await teamBindSession(projectSlug, sessionName, false)
+    try {
+      await teamBindSession(projectSlug, sessionName, false)
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'conflict') {
+        if (window.confirm('该 Session 或话题已有绑定。改绑会踢掉前一台，继续？')) {
+          await teamBindSession(projectSlug, sessionName, true)
+        } else {
+          return
+        }
+      } else {
+        throw err
+      }
+    }
     queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
   }, [queryClient])
 
@@ -1001,7 +1032,7 @@ export function GroupChatPage() {
                 teamEnabled={teamEnabled}
                 teamLoggedIn={teamAuthQ.data?.logged_in ?? false}
                 teamUsername={teamAuthQ.data?.username ?? null}
-                teamTopics={teamBindingsQ.data?.topics ?? []}
+                teamTopics={teamTopics}
                 teamBindings={teamBindingsQ.data?.bindings ?? []}
                 teamActiveTopic={teamActiveTopic}
                 onTeamLogin={handleTeamLogin}
@@ -1032,7 +1063,7 @@ export function GroupChatPage() {
       >
         <section className="gc-main">
           <div className="gc-toolbar">
-            <span className="gc-toolbar-title">{isSettings ? '设置' : (teamActiveTopic ? (teamBindingsQ.data?.topics.find((t) => t.slug === teamActiveTopic)?.name ?? teamActiveTopic) : (activeSession ?? '群聊'))}</span>
+            <span className="gc-toolbar-title">{isSettings ? '设置' : (teamActiveTopic ? (teamTopics.find((t) => t.slug === teamActiveTopic)?.name ?? teamActiveTopic) : (activeSession ?? '群聊'))}</span>
             {!isSettings && activeRoot && <span className="gc-toolbar-sub">{rootBase(activeRoot)}</span>}
             {!isSettings && onlyMember && (
               <button
@@ -1066,7 +1097,7 @@ export function GroupChatPage() {
             <TeamTimeline
               topic={teamActiveTopic}
               topicName={
-                teamBindingsQ.data?.topics.find((t) => t.slug === teamActiveTopic)?.name
+                teamTopics.find((t) => t.slug === teamActiveTopic)?.name
                 ?? teamActiveTopic
               }
             />

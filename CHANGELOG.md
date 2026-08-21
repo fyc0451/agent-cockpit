@@ -14,7 +14,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hand-to-leader stay on `/api/team/ledger*` and never call
   `chat_ledger.append_message` or `pane_send`. Selecting a
   team topic opens the team timeline (send one, see one);
-  local waterfall and composer stay unused.
+  local waterfall and composer stay unused. Hand-to-leader is
+  a team-timeline action (optional default on send) and never
+  copies into the local waterfall. Sidebar topics come from
+  Hub `/api/team/projects`; bind conflict 409 can replace after
+  confirm.
 
 ### Changed
 

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TeamTimeline } from '../features/team/TeamTimeline'
@@ -77,6 +77,54 @@ describe('TeamTimeline', () => {
     }))
     expect(urls.every((call) => call.url.includes('/api/team/ledger'))).toBe(true)
     expect(urls.some((call) => call.url.includes('/api/chat') || call.url.includes('pane'))).toBe(false)
+  })
+
+  it('交给 leader 只打团队账本，不进本机群', async () => {
+    const listed: Array<Record<string, unknown>> = [{
+      id: 'tmsg_peer',
+      topic: 'proj-a',
+      hub: '',
+      kind: 'agent',
+      sender: 'peer-lead',
+      text: '请看这条',
+      to: ['human'],
+      ts: 1,
+    }]
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = (init as RequestInit | undefined)?.method ?? 'GET'
+      if (url.includes('/api/team/ledger/messages') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ messages: listed }),
+        } as Response
+      }
+      if (url.endsWith('/hand-to-leader') && method === 'POST') {
+        listed[0] = { ...listed[0], handed_to_leader: true }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, message: listed[0] }),
+        } as Response
+      }
+      throw new Error(`unexpected fetch ${url} ${method}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, {
+      wrapper: createWrapper(),
+    })
+
+    expect(await screen.findByText('请看这条')).toBeInTheDocument()
+    await user.click(screen.getByTestId('team-hand-tmsg_peer'))
+    expect(await screen.findByText(/已交给 leader/)).toBeInTheDocument()
+    expect(screen.queryByTestId('team-hand-tmsg_peer')).not.toBeInTheDocument()
+
+    const urls = fetchMock.mock.calls.map(([input]) => String(input))
+    expect(urls.every((url) => url.includes('/api/team/ledger'))).toBe(true)
+    expect(urls.some((url) => url.includes('/api/chat') || url.includes('pane'))).toBe(false)
   })
 
   it('源码不碰本机群发送路径', () => {

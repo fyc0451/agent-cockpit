@@ -139,6 +139,59 @@ export async function teamSessionBindings(): Promise<{
   return { sessions, bindings, topics }
 }
 
+function parseTopic(raw: unknown): TeamTopic | null {
+  if (!isObj(raw)) return null
+  const nested = isObj(raw.project) ? raw.project : raw
+  const slug =
+    typeof nested.slug === 'string'
+      ? nested.slug
+      : typeof nested.project_slug === 'string'
+        ? nested.project_slug
+        : ''
+  if (!slug) return null
+  const name =
+    typeof nested.name === 'string'
+      ? nested.name
+      : typeof nested.project_name === 'string'
+        ? nested.project_name
+        : slug
+  const id =
+    typeof nested.id === 'number'
+      ? nested.id
+      : typeof nested.project_id === 'number'
+        ? nested.project_id
+        : 0
+  return { slug, name, id }
+}
+
+export async function listTeamProjects(): Promise<TeamTopic[]> {
+  const response = await fetch('/api/team/projects', { credentials: 'include' })
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'projects_failed',
+      message: '读取团队话题失败',
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  const rows = Array.isArray(data)
+    ? data
+    : isObj(data) && Array.isArray(data.projects)
+      ? data.projects
+      : isObj(data) && Array.isArray(data.items)
+        ? data.items
+        : []
+  const topics: TeamTopic[] = []
+  for (const item of rows) {
+    const topic = parseTopic(item)
+    if (topic && !topics.find((row) => row.slug === topic.slug)) {
+      topics.push(topic)
+    }
+  }
+  return topics
+}
+
 export async function teamBindSession(
   projectSlug: string,
   sessionName: string,

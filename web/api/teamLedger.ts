@@ -96,3 +96,30 @@ export async function sendTeamLedger(
   }
   return row
 }
+
+export async function handTeamLedgerToLeader(
+  messageId: string,
+): Promise<TeamLedgerMessage> {
+  const response = await fetch(
+    `/api/team/ledger/messages/${encodeURIComponent(messageId)}/hand-to-leader`,
+    { method: 'POST', credentials: 'include' },
+  )
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'team_ledger_hand_failed',
+      message: await readError(response, '交给 leader 失败'),
+      retryable: false,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  const row = parseMessage(isObj(data) ? data.message : null)
+  if (!row) {
+    throw new ApiError({
+      code: 'protocol_error',
+      message: '交给 leader 响应格式错误',
+      retryable: false,
+    })
+  }
+  return row
+}

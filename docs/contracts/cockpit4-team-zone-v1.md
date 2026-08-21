@@ -44,3 +44,5 @@
 - 配了 Hub：侧栏出现团队区；绑定本机 Session 成功后可在团队区发一条、看见一条。
 - 团队消息文件是 `~/dashboard-data/team-messages.json`；`chat-messages.json` 字节不因团队收发而增加。
 - 「交给 leader」不在本机群多出气泡，也不默认 `pane_send`。
+- 侧栏 topic 来自 Hub `/api/team/projects`（已加入），不是只从本机绑定抠。
+- 绑定冲突 HTTP 409；确认后 `replace=true` 改绑。
