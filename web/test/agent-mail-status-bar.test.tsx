@@ -21,11 +21,23 @@ const createWrapper = () => {
   )
 }
 
+function member(partial: Partial<ChatMember> & Pick<ChatMember, 'name' | 'paneId'>): ChatMember {
+  return {
+    session: 'cockpit',
+    kind: 'codex',
+    mailName: partial.name,
+    cwd: '/tmp',
+    isLeader: false,
+    status: 'idle',
+    ...partial,
+  }
+}
+
 describe('AgentMailStatusBar', () => {
   it('不显示任何内容当所有 agent 都已连接', async () => {
     const members: ChatMember[] = [
-      { name: 'human', role: 'human', status: 'idle', paneId: null },
-      { name: 'GrayFalcon', role: 'agent', status: 'idle', paneId: 'w1:p6' },
+      member({ name: 'human', paneId: 'w1:p0' }),
+      member({ name: 'GrayFalcon', paneId: 'w1:p6' }),
     ]
 
     vi.mocked(chatSessionApi.fetchAgentMailStatus).mockResolvedValue({
@@ -51,8 +63,8 @@ describe('AgentMailStatusBar', () => {
 
   it('显示警告当 agent 未连接', async () => {
     const members: ChatMember[] = [
-      { name: 'human', role: 'human', status: 'idle', paneId: null },
-      { name: 'GrayFalcon', role: 'agent', status: 'idle', paneId: 'w1:p6' },
+      member({ name: 'human', paneId: 'w1:p0' }),
+      member({ name: 'GrayFalcon', paneId: 'w1:p6' }),
     ]
 
     vi.mocked(chatSessionApi.fetchAgentMailStatus).mockResolvedValue({
@@ -80,12 +92,12 @@ describe('AgentMailStatusBar', () => {
 
   it('显示多个未连接的 agent', async () => {
     const members: ChatMember[] = [
-      { name: 'GrayFalcon', role: 'agent', status: 'idle', paneId: 'w1:p5' },
-      { name: 'BrownDesert', role: 'agent', status: 'idle', paneId: 'w1:p8' },
+      member({ name: 'GrayFalcon', paneId: 'w1:p5' }),
+      member({ name: 'BrownDesert', paneId: 'w1:p8' }),
     ]
 
     vi.mocked(chatSessionApi.fetchAgentMailStatus).mockImplementation(
-      async (session: string, paneId: string) => ({
+      async (_session: string, paneId: string) => ({
         connected: false,
         pane_id: paneId,
         details: {
@@ -109,8 +121,8 @@ describe('AgentMailStatusBar', () => {
 
   it('排除 human 和没有 paneId 的成员', async () => {
     const members: ChatMember[] = [
-      { name: 'human', role: 'human', status: 'idle', paneId: null },
-      { name: 'GrayFalcon', role: 'agent', status: 'idle', paneId: null }, // 没有 paneId
+      member({ name: 'human', paneId: 'w1:p0' }),
+      member({ name: 'GrayFalcon', paneId: '' }),
     ]
 
     // 清除之前测试的调用记录

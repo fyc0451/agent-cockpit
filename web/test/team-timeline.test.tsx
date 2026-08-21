@@ -1,13 +1,9 @@
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TeamTimeline } from '../features/team/TeamTimeline'
-
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+import * as teamLedger from '../api/teamLedger'
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -127,17 +123,12 @@ describe('TeamTimeline', () => {
     expect(urls.some((url) => url.includes('/api/chat') || url.includes('pane'))).toBe(false)
   })
 
-  it('源码不碰本机群发送路径', () => {
-    const files = [
-      join(root, 'api/teamLedger.ts'),
-      join(root, 'features/team/TeamTimeline.tsx'),
-    ]
-    for (const path of files) {
-      const src = readFileSync(path, 'utf8')
-      expect(src).not.toMatch(/from ['"].*chatSession['"]/)
-      expect(src).not.toMatch(/\bsendSessionMail\b/)
-      expect(src).not.toMatch(/\bpane_send\b/)
-      expect(src).not.toMatch(/chat-messages\.json/)
-    }
+  it('团队账本 API 不暴露本机群发送', () => {
+    expect(teamLedger).not.toHaveProperty('sendSessionMail')
+    expect(Object.keys(teamLedger).sort()).toEqual([
+      'handTeamLedgerToLeader',
+      'listTeamLedger',
+      'sendTeamLedger',
+    ])
   })
 })

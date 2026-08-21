@@ -5,7 +5,7 @@ import { AppFrame } from '../features/shell/AppFrame'
 
 function renderWithAppFrame(ui: React.ReactElement) {
   return render(
-    <AppFrame>
+    <AppFrame sidebar={null}>
       {ui}
     </AppFrame>
   )

@@ -1,7 +1,7 @@
 // Agent Mail 连接状态栏：显示 agent 是否能发送消息到瀑布流
 
 import { useQuery } from '@tanstack/react-query'
-import { fetchAgentMailStatus, type AgentMailStatus } from '../../api/chatSession'
+import { fetchAgentMailStatus } from '../../api/chatSession'
 import type { ChatMember } from './model'
 
 interface AgentMailStatusBarProps {
@@ -25,7 +25,7 @@ export function AgentMailStatusBar({ session, members }: AgentMailStatusBarProps
   )
 
   // 找出所有未连接的 agent
-  const disconnected = agentMembers.filter((member, i) => {
+  const disconnected = agentMembers.filter((_, i) => {
     const status = statusQueries[i]?.data
     return status && !status.connected
   })
@@ -51,7 +51,7 @@ export function AgentMailStatusBar({ session, members }: AgentMailStatusBarProps
       <details className="gc-agent-mail-status-details">
         <summary>详情</summary>
         <ul>
-          {disconnected.map((member, i) => {
+          {disconnected.map((member) => {
             const idx = agentMembers.indexOf(member)
             const status = statusQueries[idx]?.data
             const missing = status
