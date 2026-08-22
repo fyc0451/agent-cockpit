@@ -18,6 +18,7 @@ DEFAULT_PROJECT = os.environ.get("AGENT_MEMORY_PROJECT", "agent-cockpit-next")
 # 只挡 pane_send 后状态还没翻成 working 的连发；做完变空闲应尽快再叫。
 DEFAULT_MIN_GAP = 90.0
 _BUSY = frozenset({"working", "blocked"})
+_PAUSED_HANDOFF_STATUSES = frozenset({"blocked", "paused", "阻塞", "暂停"})
 
 
 def project_key_of(path: str) -> str | None:
@@ -90,6 +91,21 @@ def parse_next_steps(text: str) -> list[str]:
     return items
 
 
+def handoff_is_paused(text: str) -> bool:
+    """阻塞/暂停的交接单由外部解除，不应继续叫醒 Agent。"""
+    lines = (text or "").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        match = re.match(r"^status\s*:\s*(.*?)\s*$", line, re.IGNORECASE)
+        if match:
+            status = match.group(1).strip().strip("'\"").casefold()
+            return status in _PAUSED_HANDOFF_STATUSES
+    return False
+
+
 def wake_prompt(
     session: str,
     next_item: str,
@@ -137,11 +153,13 @@ def is_external_wait_item(item: str) -> bool:
     """只能由 Boss/外部状态解除的等待项，绝不用于唤醒 Agent。"""
     text = item or ""
     return (
-        "等 Boss" in text
+        "暂停自动续办" in text
+        or "等 Boss" in text
         or "等待 Boss" in text
         or "待 Boss" in text
         or "拍板" in text
         or re.search(r"Boss.{0,24}(?:确认|授权|回复)", text) is not None
+        or re.search(r"Human.{0,24}(?:确认|回复|操作)", text, re.IGNORECASE) is not None
     )
 
 
@@ -270,6 +288,8 @@ def tick(
     state_path: Path,
     min_gap: float = DEFAULT_MIN_GAP,
 ) -> list[Wake]:
+    if handoff_is_paused(handoff_text):
+        return []
     items = parse_next_steps(handoff_text)
     if not items:
         return []

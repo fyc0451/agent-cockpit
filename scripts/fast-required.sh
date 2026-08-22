@@ -36,6 +36,7 @@ unset COCKPIT_NEXT_PROFILE
   tests/test_hub_client.py \
   tests/test_team_ledger.py \
   tests/test_team_inbox_router.py \
+  tests/test_persist_work.py \
   tests/test_workspace_write_gate.py
 
 printf '%s\n' 'fast-required: web unit tests'

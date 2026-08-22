@@ -14,10 +14,26 @@ HANDOFF = """## 下一步
 2. Codex 花名。
 """
 
+BLOCKED_HANDOFF = """---
+status: 阻塞
+---
+
+## 下一步
+
+1. 暂停自动续办；收到 Human 明确回复“已改绑”后继续验收。
+"""
+
 
 def test_parse_next_steps_reads_numbered_section():
     assert persist_work.parse_next_steps(HANDOFF) == ["瀑布流对谁说。", "Codex 花名。"]
     assert persist_work.parse_next_steps("## 当前状态\n- 无") == []
+
+
+def test_handoff_blocked_or_paused_status_stops_wakes():
+    assert persist_work.handoff_is_paused(BLOCKED_HANDOFF)
+    assert persist_work.handoff_is_paused("---\nstatus: blocked\n---\n")
+    assert persist_work.handoff_is_paused("---\nstatus: 'paused'\n---\n")
+    assert not persist_work.handoff_is_paused(HANDOFF)
 
 
 def test_wake_prompt_never_hardcodes_human_and_leader_does_not_mail_self():
@@ -126,6 +142,28 @@ def test_waiting_for_boss_is_watch_and_does_not_wake_alone():
         last_wake={},
         min_gap=90.0,
     ) == []
+
+
+def test_waiting_for_human_or_paused_work_never_wakes():
+    assert persist_work.is_external_wait_item(
+        "暂停自动续办；收到 Human 明确回复“已改绑”后继续验收。",
+    )
+    panes = [{
+        "session": "cockpit", "pane_id": "w1:p1", "agent": "codex",
+        "mail_name": "TopazOwl", "agent_status": "idle",
+    }]
+    sent: list[tuple] = []
+    wakes = persist_work.tick(
+        now=1_000.0,
+        panes=panes,
+        bound_sessions={"cockpit"},
+        leaders={"cockpit": "TopazOwl"},
+        handoff_text=BLOCKED_HANDOFF,
+        send=lambda *args: sent.append(args) or {"available": True},
+        state_path=Path("unused.json"),
+    )
+    assert wakes == []
+    assert sent == []
 
 
 def test_waiting_for_boss_never_wakes_when_actionable_item_also_exists():
