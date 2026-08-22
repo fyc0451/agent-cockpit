@@ -33,4 +33,3 @@ design-system/
 docs/screenshots/verify-*.png
 docs/screenshots/ui-*.png
 docs/screenshots/*-fail.png
-tests/test_chat_ledger_sse.py
