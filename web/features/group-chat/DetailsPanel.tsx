@@ -5,6 +5,7 @@
 import { useAppFrame } from '../shell/AppFrame'
 import { cx } from '../shell/cx'
 import { IconCloseFill14 } from '../shell/icons'
+import type { TeamMember } from '../team/model'
 import type { ChatMember } from './model'
 import { FilePanel } from './FilePanel'
 import { MemberPanel } from './MemberPanel'
@@ -26,6 +27,11 @@ interface DetailsPanelProps {
   onOpenTerminal: () => void
   onMembersChanged: () => void
   externalAddSignal?: number
+  // 团队话题成员：与本机会话 Agent roster 严格分开。
+  teamTopic?: string | null
+  teamMembers?: TeamMember[]
+  teamMembersLoading?: boolean
+  teamMembersError?: string | null
   // 文件面板：会话/项目目录；没有目录时不展示文件 tab
   fileRoot: string | null
   onPreview: (path: string) => void
@@ -44,10 +50,16 @@ export function DetailsPanel({
   onOpenTerminal,
   onMembersChanged,
   externalAddSignal,
+  teamTopic = null,
+  teamMembers = [],
+  teamMembersLoading = false,
+  teamMembersError = null,
   fileRoot,
   onPreview,
 }: DetailsPanelProps) {
   const { toggleDetails } = useAppFrame()
+  const teamMode = !!teamTopic
+  const activeTeamMembers = teamMembers.filter((member) => member.status === 'active')
 
   return (
     <div className={css.root}>
@@ -55,13 +67,13 @@ export function DetailsPanel({
         <button
           type="button"
           role="tab"
-          aria-selected={tab === 'members'}
-          className={cx(css.tab, tab === 'members' && css.tabActive)}
+          aria-selected={teamMode || tab === 'members'}
+          className={cx(css.tab, (teamMode || tab === 'members') && css.tabActive)}
           onClick={() => { onTabChange('members') }}
         >
           成员
         </button>
-        {fileRoot && (
+        {!teamMode && fileRoot && (
           <button
             type="button"
             role="tab"
@@ -83,7 +95,47 @@ export function DetailsPanel({
         </button>
       </div>
       <div className={css.body}>
-        {tab === 'files' && fileRoot && session ? (
+        {teamMode ? (
+          <aside className="gc-members is-open" aria-label="团队成员">
+            <div className="gc-members-head">
+              <span>团队成员</span>
+              <span className="gc-members-count">· {activeTeamMembers.length}</span>
+            </div>
+            <div className="gc-member-list">
+              {teamMembersLoading && (
+                <div className="gc-member-sub" style={{ padding: '8px 12px' }}>
+                  成员加载中…
+                </div>
+              )}
+              {teamMembersError && <div className="gc-modal-error">{teamMembersError}</div>}
+              {!teamMembersLoading && !teamMembersError && activeTeamMembers.length === 0 && (
+                <div className="gc-member-sub" style={{ padding: '8px 12px' }}>
+                  该话题暂无成员
+                </div>
+              )}
+              {activeTeamMembers.map((member) => {
+                const name = member.display_name || `@${member.mention_handle}`
+                const role = member.role === 'admin' ? '管理员' : '成员'
+                return (
+                  <div key={member.human_id} className="gc-member gc-member--me">
+                    <span className="gc-member-avatar gc-member-avatar--human" aria-hidden>
+                      {name.slice(0, 1).toUpperCase()}
+                    </span>
+                    <span className="gc-member-main">
+                      <span className="gc-member-name">
+                        {name}
+                        {member.role === 'admin' && (
+                          <span className="gc-leader-badge">管理员</span>
+                        )}
+                      </span>
+                      <span className="gc-member-sub">@{member.mention_handle} · {role}</span>
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </aside>
+        ) : tab === 'files' && fileRoot && session ? (
           <FilePanel
             session={session}
             root={fileRoot}

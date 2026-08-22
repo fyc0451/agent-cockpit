@@ -41,6 +41,7 @@ import {
   teamSessionBindings,
   teamBindSession,
   listTeamProjects,
+  listTeamMembers,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
 import { requireAuthenticated } from '../../api/auth'
@@ -289,6 +290,12 @@ export function GroupChatPage() {
   }, [teamProjectsQ.data, teamBindingsQ.data])
 
   const [teamActiveTopic, setTeamActiveTopic] = useState<string | null>(null)
+  const teamMembersQ = useQuery({
+    queryKey: ['team-members', teamActiveTopic],
+    queryFn: () => listTeamMembers(teamActiveTopic!),
+    enabled: teamEnabled && teamAuthQ.data?.logged_in === true && !!teamActiveTopic,
+    staleTime: 30_000,
+  })
 
   const handleTeamLogin = useCallback(async (username: string, password: string) => {
     await teamLogin(username, password)
@@ -1062,7 +1069,7 @@ export function GroupChatPage() {
   return (
     <div className="gc-shell">
       <AppFrame
-        detailsAvailable={!isSettings && !isTeamAdmin && !!activeSession}
+        detailsAvailable={!isSettings && !isTeamAdmin && (!!activeSession || !!teamActiveTopic)}
         sidebar={
           <SidebarRoot
             onStartSession={startSession}
@@ -1115,6 +1122,16 @@ export function GroupChatPage() {
             onOpenTerminal={() => { if (activeSession) setTerminalSession(activeSession) }}
             onMembersChanged={() => { queryClient.invalidateQueries({ queryKey: ['gc-snapshot'] }) }}
             externalAddSignal={addMemberKey}
+            teamTopic={teamActiveTopic}
+            teamMembers={teamMembersQ.data ?? []}
+            teamMembersLoading={teamMembersQ.isPending && !!teamActiveTopic}
+            teamMembersError={
+              teamActiveTopic && teamMembersQ.isError
+                ? teamMembersQ.error instanceof Error
+                  ? teamMembersQ.error.message
+                  : '读取团队成员失败'
+                : null
+            }
             fileRoot={fileRoot}
             onPreview={setPreviewFile}
           />

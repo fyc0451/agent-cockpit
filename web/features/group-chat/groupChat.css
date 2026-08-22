@@ -295,6 +295,12 @@
   background: var(--gc-text);
 }
 
+.gc-member-avatar--human {
+  background: var(--gc-accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .gc-msg-kind {
   font-size: 11px;
   color: var(--gc-text3);
