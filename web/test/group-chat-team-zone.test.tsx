@@ -115,7 +115,7 @@ describe('WorkspaceBrowser 团队区域', () => {
     expect(screen.getByText('项目 B')).toBeInTheDocument()
   })
 
-  it('话题已绑定本机 Session 时显示绑定状态', () => {
+  it('话题已绑定已停止的 Session 时显示失效状态和改绑入口', () => {
     renderWithAppFrame(
       <WorkspaceBrowser
         {...baseProps}
@@ -129,7 +129,8 @@ describe('WorkspaceBrowser 团队区域', () => {
         onTeamSelectTopic={vi.fn()}
       />,
     )
-    expect(screen.getByText(/local-session-1/)).toBeInTheDocument()
+    expect(screen.getByText(/local-session-1（已停止）/)).toBeInTheDocument()
+    expect(screen.getByTitle('更换本机 Session')).toHaveTextContent('改绑')
   })
 
   it('未加入可申请，invited 等待审批，active 审批刷新后可绑定', async () => {

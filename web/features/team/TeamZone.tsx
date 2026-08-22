@@ -141,6 +141,7 @@ export function TeamZone({
       {topics.map((topic) => {
         const binding = bindings.find((b) => b.project_slug === topic.slug)
         const isBound = !!binding
+        const bindingIsLive = !!binding && localSessions.some((sess) => sess.name === binding.session)
         const isBinding = bindingTopic === topic.slug
 
         return (
@@ -154,24 +155,26 @@ export function TeamZone({
               disabled={!isBound}
               title={
                 isBound
-                  ? `打开 ${topic.name}（绑定到 ${binding.session}）`
+                  ? `打开 ${topic.name}（绑定到 ${binding.session}${bindingIsLive ? '' : '，已停止'}）`
                   : `${topic.name}（需要先绑定本机 Session）`
               }
             >
               <span className="gc-team-topic-name">{topic.name}</span>
               {isBound && (
-                <span className="gc-team-topic-session">{binding.session}</span>
+                <span className="gc-team-topic-session">
+                  {binding.session}{bindingIsLive ? '' : '（已停止）'}
+                </span>
               )}
             </button>
 
-            {!isBound && !isBinding && (
+            {!isBinding && (
               <button
                 type="button"
                 className="gc-team-bind-trigger"
                 onClick={() => setBindingTopic(topic.slug)}
-                title="绑定本机 Session"
+                title={isBound ? '更换本机 Session' : '绑定本机 Session'}
               >
-                绑定
+                {isBound ? '改绑' : '绑定'}
               </button>
             )}
 

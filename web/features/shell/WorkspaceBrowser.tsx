@@ -828,6 +828,7 @@ function TeamZoneSection({
         const isInvited = membershipStatus === 'invited'
         const canRequestJoin = !membershipStatus || membershipStatus === 'removed'
         const isBound = isActive && !!binding
+        const bindingIsLive = !!binding && localSessions.some((sess) => sess.name === binding.session)
         const isBinding = bindingTopic === topic.slug
         const isJoining = joiningTopic === topic.slug
 
@@ -840,7 +841,7 @@ function TeamZoneSection({
               disabled={!isBound}
               title={
                 isBound
-                  ? `打开 ${topic.name}（绑定到 ${binding.session}）`
+                  ? `打开 ${topic.name}（绑定到 ${binding.session}${bindingIsLive ? '' : '，已停止'}）`
                   : isActive
                     ? `${topic.name}（需要先绑定本机 Session）`
                     : isInvited
@@ -857,15 +858,17 @@ function TeamZoneSection({
               </span>
               <span className={css.title}>{topic.name}</span>
               <span className={css.meta}>
-                {isBound ? `→ ${binding.session}` : isActive ? '未绑定' : isInvited ? '等待审批' : '未加入'}
+                {isBound
+                  ? `→ ${binding.session}${bindingIsLive ? '' : '（已停止）'}`
+                  : isActive ? '未绑定' : isInvited ? '等待审批' : '未加入'}
               </span>
             </button>
 
-            {isActive && !isBound && !isBinding && (
+            {isActive && !isBinding && (
               <button
                 type="button"
                 onClick={() => setBindingTopic(topic.slug)}
-                title="绑定本机 Session"
+                title={isBound ? '更换本机 Session' : '绑定本机 Session'}
                 style={{
                   position: 'absolute',
                   right: '8px',
@@ -881,7 +884,7 @@ function TeamZoneSection({
                   fontWeight: 500,
                 }}
               >
-                绑定
+                {isBound ? '改绑' : '绑定'}
               </button>
             )}
 
