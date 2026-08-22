@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { TeamTimeline } from '../features/team/TeamTimeline'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as teamLedger from '../api/teamLedger'
+import { TeamTimeline } from '../features/team/TeamTimeline'
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -14,121 +14,74 @@ function createWrapper() {
   )
 }
 
-describe('TeamTimeline', () => {
-  beforeEach(() => {
-    vi.unstubAllGlobals()
-  })
+function message(id: number, body_md: string) {
+  return {
+    id,
+    subject: '群聊消息',
+    body_md,
+    mention_handles: [],
+    importance: 'normal',
+    created_ts: '2026-08-22 12:00:00',
+    sender_name: '付彦超',
+    sender_human_id: 1,
+    sender_kind: 'session_lead',
+    sender_agent: 'codex-main',
+  }
+}
 
-  it('发一条看见一条，只打 /api/team/ledger*', async () => {
+describe('TeamTimeline', () => {
+  beforeEach(() => vi.unstubAllGlobals())
+  afterEach(() => vi.useRealTimers())
+
+  it('发送和历史只走远端 Team Hub，不写本机群账本', async () => {
     const listed: Array<Record<string, unknown>> = []
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.includes('/api/team/ledger/messages') && (!init || init.method === 'GET' || !init.method)) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ messages: listed }),
-        } as Response
+      const method = init?.method ?? 'GET'
+      if (url === '/api/team/projects/proj-a/chat/messages' && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ messages: listed }) } as Response
       }
-      if (url === '/api/team/ledger/messages' && init?.method === 'POST') {
-        const body = JSON.parse(String(init.body))
-        const row = {
-          id: 'tmsg_1',
-          topic: body.topic,
-          hub: '',
-          kind: 'me',
-          sender: 'human',
-          text: body.text,
-          to: [],
-          ts: 1,
-        }
-        listed.push(row)
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true, message: row }),
-        } as Response
-      }
-      throw new Error(`unexpected fetch ${url} ${init?.method ?? 'GET'}`)
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const user = userEvent.setup()
-    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, {
-      wrapper: createWrapper(),
-    })
-
-    expect(await screen.findByText(/还没有团队消息/)).toBeInTheDocument()
-    expect(screen.getByText(/消息只待团队账本，不进本机群/)).toBeInTheDocument()
-
-    await user.type(screen.getByLabelText('团队消息'), 'hello team')
-    await user.click(screen.getByRole('button', { name: '发送' }))
-
-    expect(await screen.findByText('hello team')).toBeInTheDocument()
-    expect(screen.getByTestId('team-msg-tmsg_1')).toBeInTheDocument()
-
-    const urls = fetchMock.mock.calls.map(([input, init]) => ({
-      url: String(input),
-      method: (init as RequestInit | undefined)?.method ?? 'GET',
-    }))
-    expect(urls.every((call) => call.url.includes('/api/team/ledger'))).toBe(true)
-    expect(urls.some((call) => call.url.includes('/api/chat') || call.url.includes('pane'))).toBe(false)
-  })
-
-  it('交给 leader 只打团队账本，不进本机群', async () => {
-    const listed: Array<Record<string, unknown>> = [{
-      id: 'tmsg_peer',
-      topic: 'proj-a',
-      hub: '',
-      kind: 'agent',
-      sender: 'peer-lead',
-      text: '请看这条',
-      to: ['human'],
-      ts: 1,
-    }]
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
-      const method = (init as RequestInit | undefined)?.method ?? 'GET'
-      if (url.includes('/api/team/ledger/messages') && method === 'GET') {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ messages: listed }),
-        } as Response
-      }
-      if (url.endsWith('/hand-to-leader') && method === 'POST') {
-        listed[0] = { ...listed[0], handed_to_leader: true }
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true, message: listed[0] }),
-        } as Response
+      if (url === '/api/team/projects/proj-a/support-requests' && method === 'POST') {
+        const body = JSON.parse(String(init?.body))
+        listed.push(message(1, body.body_md))
+        return { ok: true, status: 201, json: async () => ({ status: 'delivered' }) } as Response
       }
       throw new Error(`unexpected fetch ${url} ${method}`)
     })
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
-    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, {
-      wrapper: createWrapper(),
-    })
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
 
-    expect(await screen.findByText('请看这条')).toBeInTheDocument()
-    await user.click(screen.getByTestId('team-hand-tmsg_peer'))
-    expect(await screen.findByText(/已交给 leader/)).toBeInTheDocument()
-    expect(screen.queryByTestId('team-hand-tmsg_peer')).not.toBeInTheDocument()
+    expect(await screen.findByText(/还没有团队消息/)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('团队消息'), 'hello team')
+    await user.click(screen.getByRole('button', { name: '发送' }))
 
+    expect(await screen.findByText('hello team')).toBeInTheDocument()
+    expect(screen.getByText(/付彦超 · via codex-main/)).toBeInTheDocument()
     const urls = fetchMock.mock.calls.map(([input]) => String(input))
-    expect(urls.every((url) => url.includes('/api/team/ledger'))).toBe(true)
-    expect(urls.some((url) => url.includes('/api/chat') || url.includes('pane'))).toBe(false)
+    expect(urls).toContain('/api/team/projects/proj-a/chat/messages')
+    expect(urls).toContain('/api/team/projects/proj-a/support-requests')
+    expect(urls.some((url) => url.includes('/api/team/ledger') || url.includes('/api/chat'))).toBe(false)
   })
 
-  it('团队账本 API 不暴露本机群发送', () => {
-    expect(teamLedger).not.toHaveProperty('sendSessionMail')
-    expect(Object.keys(teamLedger).sort()).toEqual([
-      'handTeamLedgerToLeader',
-      'listTeamLedger',
-      'sendTeamLedger',
-    ])
+  it('每两秒自动拉取新团队回复', async () => {
+    vi.useFakeTimers()
+    let poll = 0
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ messages: poll++ === 0 ? [] : [message(2, '自动出现的回复')] }),
+    } as Response)))
+
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText(/还没有团队消息/)).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+    expect(screen.getByText('自动出现的回复')).toBeInTheDocument()
+  })
+
+  it('API 只暴露 Team Hub 群聊读写', () => {
+    expect(Object.keys(teamLedger).sort()).toEqual(['listTeamMessages', 'sendTeamMessage'])
   })
 })

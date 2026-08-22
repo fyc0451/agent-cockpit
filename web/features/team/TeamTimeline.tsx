@@ -1,28 +1,23 @@
-// 团队时间线：只读写 /api/team/ledger*，不进本机群聊瀑布流。
+// 团队时间线：只读写远端 Team Hub，不进入本机群聊瀑布流。
 
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '../../api/client'
-import { handTeamLedgerToLeader, listTeamLedger, sendTeamLedger } from '../../api/teamLedger'
+import { listTeamMessages, sendTeamMessage } from '../../api/teamLedger'
 
-export function TeamTimeline({
-  topic,
-  topicName,
-}: {
-  topic: string
-  topicName: string
-}) {
+export function TeamTimeline({ topic, topicName }: { topic: string; topicName: string }) {
   const queryClient = useQueryClient()
   const messagesQ = useQuery({
-    queryKey: ['team-ledger', topic],
-    queryFn: () => listTeamLedger(topic),
+    queryKey: ['team-chat', topic],
+    queryFn: () => listTeamMessages(topic),
     enabled: topic.length > 0,
+    refetchInterval: 2_000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
   })
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
-  const [handingId, setHandingId] = useState<string | null>(null)
   const [sendError, setSendError] = useState<string | null>(null)
-  const [autoHand, setAutoHand] = useState(false)
 
   const onSend = async () => {
     const text = draft.trim()
@@ -30,30 +25,13 @@ export function TeamTimeline({
     setSending(true)
     setSendError(null)
     try {
-      const row = await sendTeamLedger(topic, text)
-      if (autoHand && !row.handed_to_leader) {
-        await handTeamLedgerToLeader(row.id)
-      }
+      await sendTeamMessage(topic, text)
       setDraft('')
-      await queryClient.invalidateQueries({ queryKey: ['team-ledger', topic] })
+      await queryClient.invalidateQueries({ queryKey: ['team-chat', topic] })
     } catch (err) {
       setSendError(err instanceof ApiError ? err.message : String(err))
     } finally {
       setSending(false)
-    }
-  }
-
-  const onHand = async (messageId: string) => {
-    if (handingId) return
-    setHandingId(messageId)
-    setSendError(null)
-    try {
-      await handTeamLedgerToLeader(messageId)
-      await queryClient.invalidateQueries({ queryKey: ['team-ledger', topic] })
-    } catch (err) {
-      setSendError(err instanceof ApiError ? err.message : String(err))
-    } finally {
-      setHandingId(null)
     }
   }
 
@@ -62,14 +40,12 @@ export function TeamTimeline({
   return (
     <div className="gc-team-timeline" data-testid="team-timeline">
       <div className="gc-team-timeline-hint">
-        团队话题 {topicName}。消息只待团队账本，不进本机群。
+        团队话题 {topicName}。消息同步到 Team Hub，不进本机群。
       </div>
       {messagesQ.isError && (
         <div className="gc-event">
           团队时间线读失败：
-          {messagesQ.error instanceof ApiError
-            ? messagesQ.error.message
-            : String(messagesQ.error)}
+          {messagesQ.error instanceof ApiError ? messagesQ.error.message : String(messagesQ.error)}
         </div>
       )}
       <div className="gc-team-timeline-list">
@@ -77,27 +53,16 @@ export function TeamTimeline({
           <div className="gc-event">还没有团队消息。发一条试试。</div>
         )}
         {rows.map((row) => (
-          <div
-            key={row.id}
-            className={`gc-team-msg${row.kind === 'me' ? ' is-me' : ''}`}
-            data-testid={`team-msg-${row.id}`}
-          >
+          <div key={row.id} className="gc-team-msg" data-testid={`team-msg-${row.id}`}>
             <div className="gc-team-msg-meta">
-              {row.kind === 'me' ? '我' : row.sender}
-              {row.handed_to_leader ? ' · 已交给 leader' : ''}
+              {row.sender_name}
+              {row.sender_agent ? ` · via ${row.sender_agent}` : ''}
+              {row.mention_handles.map((handle) => ` · @${handle}`).join('')}
             </div>
-            <div className="gc-team-msg-body">{row.text}</div>
-            {!row.handed_to_leader && (
-              <button
-                type="button"
-                className="gc-team-hand"
-                data-testid={`team-hand-${row.id}`}
-                disabled={handingId === row.id}
-                onClick={() => void onHand(row.id)}
-              >
-                {handingId === row.id ? '提交中…' : '交给 leader'}
-              </button>
+            {row.subject && row.subject !== '群聊消息' && (
+              <div className="gc-team-msg-meta">{row.subject}</div>
             )}
+            <div className="gc-team-msg-body">{row.body_md}</div>
           </div>
         ))}
       </div>
@@ -118,14 +83,6 @@ export function TeamTimeline({
         <button type="submit" disabled={sending || !draft.trim()}>
           {sending ? '发送中…' : '发送'}
         </button>
-        <label className="gc-team-auto-hand">
-          <input
-            type="checkbox"
-            checked={autoHand}
-            onChange={(event) => setAutoHand(event.target.checked)}
-          />
-          发送后交给 leader
-        </label>
       </form>
       {sendError && <div className="gc-team-error">{sendError}</div>}
     </div>
