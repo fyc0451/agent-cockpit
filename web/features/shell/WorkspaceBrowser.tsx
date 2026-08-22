@@ -7,7 +7,7 @@
 // Cockpit 4.0: 添加团队区（仅当配置 Team Hub 时显示）。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionRow } from '../group-chat/model'
-import type { TeamTopic } from '../team/model'
+import type { TeamBinding, TeamSessionCandidate, TeamTopic } from '../team/model'
 import { useAppFrame } from './AppFrame'
 import { cx } from './cx'
 import {
@@ -52,7 +52,8 @@ export interface WorkspaceBrowserProps {
   teamUsername?: string | null
   teamIsAdmin?: boolean
   teamTopics?: TeamTopic[]
-  teamBindings?: Array<{ project_slug: string; session: string }>
+  teamBindings?: TeamBinding[]
+  teamSessions?: TeamSessionCandidate[]
   teamActiveTopic?: string | null
   onTeamLogin?: (username: string, password: string) => Promise<void>
   onTeamRegister?: (input: {
@@ -157,6 +158,7 @@ export function WorkspaceBrowser({
   teamIsAdmin = false,
   teamTopics = [],
   teamBindings = [],
+  teamSessions = [],
   teamActiveTopic = null,
   onTeamLogin,
   onTeamRegister,
@@ -427,7 +429,7 @@ export function WorkspaceBrowser({
                     isAdmin={teamIsAdmin}
                     topics={teamTopics}
                     bindings={teamBindings}
-                    localSessions={[...groups.flatMap((g) => g.rows), ...ungrouped]}
+                    sessionCandidates={teamSessions}
                     activeTopic={teamActiveTopic}
                     onLogin={onTeamLogin || (async () => {})}
                     onRegister={onTeamRegister || (async () => {})}
@@ -455,7 +457,7 @@ function TeamZoneSection({
   isAdmin,
   topics,
   bindings,
-  localSessions,
+  sessionCandidates,
   activeTopic,
   onLogin,
   onRegister,
@@ -469,8 +471,8 @@ function TeamZoneSection({
   username: string | null
   isAdmin: boolean
   topics: TeamTopic[]
-  bindings: Array<{ project_slug: string; session: string }>
-  localSessions: SessionRow[]
+  bindings: TeamBinding[]
+  sessionCandidates: TeamSessionCandidate[]
   activeTopic: string | null
   onLogin: (username: string, password: string) => Promise<void>
   onRegister: (input: {
@@ -828,7 +830,7 @@ function TeamZoneSection({
         const isInvited = membershipStatus === 'invited'
         const canRequestJoin = !membershipStatus || membershipStatus === 'removed'
         const isBound = isActive && !!binding
-        const bindingIsLive = !!binding && localSessions.some((sess) => sess.name === binding.session)
+        const bindingIsLive = !!binding && binding.active !== false
         const isBinding = bindingTopic === topic.slug
         const isJoining = joiningTopic === topic.slug
 
@@ -937,10 +939,17 @@ function TeamZoneSection({
                 <div style={{ fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' }}>
                   选择本机 Session：
                 </div>
-                {localSessions.map((sess) => (
+                {sessionCandidates.length === 0 && (
+                  <div style={{ padding: '6px 2px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' }}>
+                    没有可绑定的本机 Session
+                  </div>
+                )}
+                {sessionCandidates.map((sess) => (
                   <button
                     key={sess.name}
                     type="button"
+                    disabled={!sess.ready}
+                    title={sess.reason ?? sess.label}
                     onClick={() => handleBind(topic.slug, sess.name)}
                     style={{
                       display: 'block',
@@ -950,13 +959,14 @@ function TeamZoneSection({
                       border: '1px solid var(--dsw-alias-border-l1)',
                       borderRadius: '4px',
                       color: 'var(--dsw-alias-label-primary)',
-                      cursor: 'pointer',
+                      cursor: sess.ready ? 'pointer' : 'not-allowed',
+                      opacity: sess.ready ? 1 : 0.55,
                       fontSize: '12px',
                       textAlign: 'left',
                       marginBottom: '4px',
                     }}
                   >
-                    {sess.name}
+                    {sess.label}
                   </button>
                 ))}
                 <button

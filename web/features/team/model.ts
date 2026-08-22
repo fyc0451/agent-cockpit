@@ -14,12 +14,19 @@ export interface TeamTopic {
 export interface TeamBinding {
   project_slug: string
   session: string // 本机 Session 名
+  active?: boolean
+  ready?: boolean
+  reason?: string | null
 }
 
 export interface TeamSessionCandidate {
   name: string // Session 名
   label: string // 显示标签
-  generation: number
+  status: string
+  agentCount: number
+  ready: boolean
+  reason: string | null
+  leadName: string | null
 }
 
 export interface TeamUser {

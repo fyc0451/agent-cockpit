@@ -123,7 +123,7 @@ describe('WorkspaceBrowser 团队区域', () => {
         teamLoggedIn={true}
         teamUsername="test-user"
         teamTopics={[{ slug: 'proj-a', name: '项目 A', id: 1 }]}
-        teamBindings={[{ project_slug: 'proj-a', session: 'local-session-1' }]}
+        teamBindings={[{ project_slug: 'proj-a', session: 'local-session-1', active: false }]}
         onTeamLogout={vi.fn()}
         onTeamBindSession={vi.fn()}
         onTeamSelectTopic={vi.fn()}
@@ -131,6 +131,39 @@ describe('WorkspaceBrowser 团队区域', () => {
     )
     expect(screen.getByText(/local-session-1（已停止）/)).toBeInTheDocument()
     expect(screen.getByTitle('更换本机 Session')).toHaveTextContent('改绑')
+  })
+
+  it('改绑候选使用 Team 后端列表，不依赖工作区树分组', async () => {
+    const onTeamBindSession = vi.fn().mockResolvedValue(undefined)
+    renderWithAppFrame(
+      <WorkspaceBrowser
+        {...baseProps}
+        teamEnabled={true}
+        teamLoggedIn={true}
+        teamUsername="test-user"
+        teamTopics={[{ slug: 'ready', name: 'hr-ready', id: 1 }]}
+        teamBindings={[{ project_slug: 'ready', session: 'hr-ready', active: false }]}
+        teamSessions={[
+          {
+            name: 'hr-ready-team',
+            label: 'hr-ready-team · Lead GoldRiver',
+            status: 'idle',
+            agentCount: 1,
+            ready: true,
+            reason: null,
+            leadName: 'GoldRiver',
+          },
+        ]}
+        onTeamLogout={vi.fn()}
+        onTeamBindSession={onTeamBindSession}
+        onTeamSelectTopic={vi.fn()}
+      />,
+    )
+
+    const user = userEvent.setup()
+    await user.click(screen.getByTitle('更换本机 Session'))
+    await user.click(screen.getByText('hr-ready-team · Lead GoldRiver'))
+    await waitFor(() => expect(onTeamBindSession).toHaveBeenCalledWith('ready', 'hr-ready-team'))
   })
 
   it('未加入可申请，invited 等待审批，active 审批刷新后可绑定', async () => {

@@ -152,11 +152,18 @@ export async function teamSessionBindings(): Promise<{
   if (Array.isArray(data.sessions)) {
     for (const item of data.sessions) {
       if (!isObj(item)) continue
-      const name = typeof item.name === 'string' ? item.name : ''
-      const label = typeof item.label === 'string' ? item.label : name
-      const generation = typeof item.generation === 'number' ? item.generation : 0
+      const name = typeof item.session === 'string' ? item.session : ''
+      const lead = isObj(item.lead) ? item.lead : null
+      const leadName = lead && typeof lead.mail_name === 'string' ? lead.mail_name : null
+      const status = typeof item.status === 'string' ? item.status : ''
+      const agentCount = typeof item.agent_count === 'number' ? item.agent_count : 0
+      const ready = item.ready === true
+      const reason = typeof item.reason === 'string' ? item.reason : null
+      const label = [name, leadName ? `Lead ${leadName}` : null, ready ? null : reason ?? '不可绑定']
+        .filter(Boolean)
+        .join(' · ')
       if (name) {
-        sessions.push({ name, label, generation })
+        sessions.push({ name, label, status, agentCount, ready, reason, leadName })
       }
     }
   }
@@ -168,7 +175,13 @@ export async function teamSessionBindings(): Promise<{
       const project_slug = typeof item.project_slug === 'string' ? item.project_slug : ''
       const session = typeof item.session === 'string' ? item.session : ''
       if (project_slug && session) {
-        bindings.push({ project_slug, session })
+        bindings.push({
+          project_slug,
+          session,
+          active: typeof item.active === 'boolean' ? item.active : undefined,
+          ready: typeof item.ready === 'boolean' ? item.ready : undefined,
+          reason: typeof item.reason === 'string' ? item.reason : null,
+        })
       }
     }
   }

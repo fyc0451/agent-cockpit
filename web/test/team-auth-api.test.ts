@@ -5,6 +5,7 @@ import {
   listTeamProjects,
   requestTeamJoin,
   teamRegister,
+  teamSessionBindings,
 } from '../api/teamAuth'
 
 afterEach(() => {
@@ -106,6 +107,69 @@ describe('团队普通成员 API', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/team-auth/users/alice/approve-team', {
       method: 'POST',
       credentials: 'include',
+    })
+  })
+
+  it('按后端真实契约解析可绑定 Session 及 Lead', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        sessions: [
+          {
+            session: 'hr-ready-team',
+            status: 'idle',
+            agent_count: 1,
+            lead: { agent: 'codex', mail_name: 'GoldRiver', status: 'idle' },
+            ready: true,
+            reason: null,
+          },
+          {
+            session: 'hr-ready-3',
+            status: 'idle',
+            agent_count: 1,
+            lead: null,
+            ready: false,
+            reason: '工作目录不匹配',
+          },
+        ],
+        bindings: [
+          {
+            project_slug: 'ready',
+            project_name: 'hr-ready',
+            project_id: 7,
+            session: 'hr-ready',
+            active: false,
+            ready: false,
+            reason: 'Session 已停止',
+          },
+        ],
+      }),
+    }))
+
+    await expect(teamSessionBindings()).resolves.toMatchObject({
+      sessions: [
+        {
+          name: 'hr-ready-team',
+          label: 'hr-ready-team · Lead GoldRiver',
+          ready: true,
+          leadName: 'GoldRiver',
+        },
+        {
+          name: 'hr-ready-3',
+          label: 'hr-ready-3 · 工作目录不匹配',
+          ready: false,
+        },
+      ],
+      bindings: [
+        {
+          project_slug: 'ready',
+          session: 'hr-ready',
+          active: false,
+          ready: false,
+          reason: 'Session 已停止',
+        },
+      ],
     })
   })
 })

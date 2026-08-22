@@ -46,7 +46,7 @@ import {
   requestTeamJoin,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
-import type { TeamTopic } from '../team/model'
+import type { TeamBinding, TeamSessionCandidate, TeamTopic } from '../team/model'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { AppFrame, useAppFrame } from '../shell/AppFrame'
@@ -153,7 +153,8 @@ function NarrowAwareBrowser(props: {
   teamUsername?: string | null
   teamIsAdmin?: boolean
   teamTopics?: TeamTopic[]
-  teamBindings?: Array<{ project_slug: string; session: string }>
+  teamBindings?: TeamBinding[]
+  teamSessions?: TeamSessionCandidate[]
   teamActiveTopic?: string | null
   onTeamLogin?: (username: string, password: string) => Promise<void>
   onTeamRegister?: (input: {
@@ -1123,6 +1124,7 @@ export function GroupChatPage() {
                 teamIsAdmin={(teamAuthQ.data?.roles ?? []).includes('admin')}
                 teamTopics={teamTopics}
                 teamBindings={teamBindingsQ.data?.bindings ?? []}
+                teamSessions={teamBindingsQ.data?.sessions ?? []}
                 teamActiveTopic={teamActiveTopic}
                 onTeamLogin={handleTeamLogin}
                 onTeamRegister={handleTeamRegister}
