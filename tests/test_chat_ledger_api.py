@@ -2617,6 +2617,57 @@ def test_harvest_does_not_glue_next_conclusion_into_old_bubble(isolated_ledger, 
     assert "默认改成排队" not in added["text"]
 
 
+def test_harvest_fast_next_turn_creates_new_bubble_without_conclusion_heading(
+    isolated_ledger, monkeypatch,
+):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-fast-turn", "chat-fast-turn")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._PANE_IDLE_SINCE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    monkeypatch.setattr(server, "_HARVEST_SETTLE_S", 0.0)
+    old = chat_ledger.append_message(
+        "chat-fast-turn", kind="agent", sender="TopazOwl",
+        text="旧回复：代码已经部署。", to=["human"], ts=1_700_000_000_000,
+    )
+    key = ("chat-fast-turn", "w1:p2")
+    server._PANE_LAST_MESSAGE[key] = old["id"]
+    server._PANE_TURN_STARTED[key] = 1_800_000_000_000
+    screen = (
+        "• 旧回复：代码已经部署。\n\n"
+        "接下来做什么？\n\n"
+        "• 当前没有必须继续做的优化。\n\n"
+        "  - 消息接收正常\n"
+        "  - 瀑布流回写正常\n"
+    )
+    panes = [{
+        "session": "chat-fast-turn", "pane_id": "w1:p2", "agent": "codex",
+        "agent_status": "idle", "mail_name": "TopazOwl", "display_name": "TopazOwl",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary", lambda *_a, **_k: {"summary": screen},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+
+    server._harvest_settled_replies("chat-fast-turn")
+
+    rows = chat_ledger.list_messages("chat-fast-turn", 10)
+    assert len(rows) == 2
+    assert rows[0]["id"] == old["id"]
+    assert rows[0]["text"] == "旧回复：代码已经部署。"
+    assert rows[1]["id"] != old["id"]
+    assert rows[1]["text"] == (
+        "当前没有必须继续做的优化。\n\n"
+        "  - 消息接收正常\n"
+        "  - 瀑布流回写正常"
+    )
+
+
 def test_merge_chat_timeline_keeps_later_distinct_claude_reply():
     old = (
         "agent_cockpit/ 下有 17 个 Python 测试文件，但没有 requirements.txt。"

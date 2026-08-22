@@ -5927,6 +5927,14 @@ def _latest_harvest_reply(text: str) -> str:
     conclusion = _extract_harvest_conclusion(text)
     if conclusion:
         return conclusion
+    # Codex TUI 用顶格 `• ` 标记每段 assistant 输出。连续快速提问时，pane summary
+    # 可能同时带着上一轮结论和本轮最终答复；没有“结论：”标题时也必须只取最后一段，
+    # 否则整屏历史会被当成上一条气泡的“变长版本”。工具步骤在清洗阶段已被过滤。
+    codex_replies = list(re.finditer(r"(?m)^• (?=\S)", text))
+    if codex_replies:
+        latest = text[codex_replies[-1].end():].strip()
+        if latest:
+            return latest
     return text
 
 
@@ -6211,6 +6219,13 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
                 ),
                 None,
             )
+        turn_started = _PANE_TURN_STARTED.get(key)
+        if match is not None and turn_started is not None:
+            # `_PANE_LAST_MESSAGE` 指向的是 pane 上一轮气泡。新一轮即使读屏残留了旧
+            # 正文，也绝不能回写旧时间戳的消息；只允许合并本轮开始后产生的副本。
+            match_ts = match.get("ts")
+            if type(match_ts) is not int or match_ts < turn_started:
+                match = None
         if match:
             old = str(match.get("text") or "")
             # 只改同一条结论的折行/变长。上一轮旧气泡不得被今早新结论覆盖，否则时间还是昨晚。
