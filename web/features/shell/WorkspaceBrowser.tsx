@@ -7,6 +7,7 @@
 // Cockpit 4.0: 添加团队区（仅当配置 Team Hub 时显示）。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionRow } from '../group-chat/model'
+import type { TeamTopic } from '../team/model'
 import { useAppFrame } from './AppFrame'
 import { cx } from './cx'
 import {
@@ -50,11 +51,18 @@ export interface WorkspaceBrowserProps {
   teamLoggedIn?: boolean
   teamUsername?: string | null
   teamIsAdmin?: boolean
-  teamTopics?: Array<{ slug: string; name: string; id: number }>
+  teamTopics?: TeamTopic[]
   teamBindings?: Array<{ project_slug: string; session: string }>
   teamActiveTopic?: string | null
   onTeamLogin?: (username: string, password: string) => Promise<void>
+  onTeamRegister?: (input: {
+    username: string
+    displayName: string
+    password: string
+    inviteCode: string
+  }) => Promise<void>
   onTeamLogout?: () => Promise<void>
+  onTeamJoin?: (projectSlug: string, mentionHandle: string) => Promise<void>
   onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
   onOpenTeamAdmin?: () => void
@@ -151,7 +159,9 @@ export function WorkspaceBrowser({
   teamBindings = [],
   teamActiveTopic = null,
   onTeamLogin,
+  onTeamRegister,
   onTeamLogout,
+  onTeamJoin,
   onTeamBindSession,
   onTeamSelectTopic,
   onOpenTeamAdmin,
@@ -420,7 +430,9 @@ export function WorkspaceBrowser({
                     localSessions={[...groups.flatMap((g) => g.rows), ...ungrouped]}
                     activeTopic={teamActiveTopic}
                     onLogin={onTeamLogin || (async () => {})}
+                    onRegister={onTeamRegister || (async () => {})}
                     onLogout={onTeamLogout || (async () => {})}
+                    onJoin={onTeamJoin || (async () => {})}
                     onBindSession={onTeamBindSession || (async () => {})}
                     onSelectTopic={onTeamSelectTopic || (() => {})}
                     onOpenTeamAdmin={onOpenTeamAdmin || (() => {})}
@@ -446,7 +458,9 @@ function TeamZoneSection({
   localSessions,
   activeTopic,
   onLogin,
+  onRegister,
   onLogout,
+  onJoin,
   onBindSession,
   onSelectTopic,
   onOpenTeamAdmin,
@@ -454,22 +468,41 @@ function TeamZoneSection({
   loggedIn: boolean
   username: string | null
   isAdmin: boolean
-  topics: Array<{ slug: string; name: string; id: number }>
+  topics: TeamTopic[]
   bindings: Array<{ project_slug: string; session: string }>
   localSessions: SessionRow[]
   activeTopic: string | null
   onLogin: (username: string, password: string) => Promise<void>
+  onRegister: (input: {
+    username: string
+    displayName: string
+    password: string
+    inviteCode: string
+  }) => Promise<void>
   onLogout: () => Promise<void>
+  onJoin: (projectSlug: string, mentionHandle: string) => Promise<void>
   onBindSession: (projectSlug: string, sessionName: string) => Promise<void>
   onSelectTopic: (projectSlug: string) => void
   onOpenTeamAdmin: () => void
 }) {
-  const [showLogin, setShowLogin] = useState(false)
+  const [authMode, setAuthMode] = useState<'idle' | 'login' | 'register'>('idle')
   const [loginUsername, setLoginUsername] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
   const [loginLoading, setLoginLoading] = useState(false)
   const [loginError, setLoginError] = useState<string | null>(null)
+  const [registerUsername, setRegisterUsername] = useState('')
+  const [registerDisplayName, setRegisterDisplayName] = useState('')
+  const [registerInvite, setRegisterInvite] = useState('')
+  const [registerPassword, setRegisterPassword] = useState('')
+  const [registerConfirm, setRegisterConfirm] = useState('')
+  const [registerLoading, setRegisterLoading] = useState(false)
+  const [registerError, setRegisterError] = useState<string | null>(null)
+  const [registrationNotice, setRegistrationNotice] = useState<string | null>(null)
   const [bindingTopic, setBindingTopic] = useState<string | null>(null)
+  const [joiningTopic, setJoiningTopic] = useState<string | null>(null)
+  const [joinHandle, setJoinHandle] = useState('')
+  const [joinLoading, setJoinLoading] = useState(false)
+  const [joinError, setJoinError] = useState<string | null>(null)
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -479,13 +512,84 @@ function TeamZoneSection({
     setLoginError(null)
     try {
       await onLogin(loginUsername.trim(), loginPassword)
-      setShowLogin(false)
+      setAuthMode('idle')
       setLoginUsername('')
       setLoginPassword('')
     } catch (err) {
       setLoginError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoginLoading(false)
+    }
+  }
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const username = registerUsername.trim()
+    const displayName = registerDisplayName.trim()
+    const inviteCode = registerInvite.trim()
+    if (!inviteCode) {
+      setRegisterError('请填写邀请码')
+      return
+    }
+    if (!username || !displayName || !registerPassword) {
+      setRegisterError('请完整填写账号、显示名和密码')
+      return
+    }
+    if (registerPassword !== registerConfirm) {
+      setRegisterError('两次输入的密码不一致')
+      return
+    }
+    const passwordBytes = new TextEncoder().encode(registerPassword).length
+    if (passwordBytes < 12 || passwordBytes > 256) {
+      setRegisterError('密码必须是 12–256 个 UTF-8 字节')
+      return
+    }
+    setRegisterLoading(true)
+    setRegisterError(null)
+    try {
+      await onRegister({ username, displayName, password: registerPassword, inviteCode })
+      setRegistrationNotice(`账号 ${username} 已提交，当前为待批准；管理员批准后即可登录。`)
+      setRegisterUsername('')
+      setRegisterDisplayName('')
+      setRegisterInvite('')
+      setRegisterPassword('')
+      setRegisterConfirm('')
+      setAuthMode('idle')
+    } catch (err) {
+      setRegisterError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRegisterLoading(false)
+    }
+  }
+
+  const startJoin = (projectSlug: string) => {
+    const suggested = (username ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 128)
+    setJoiningTopic(projectSlug)
+    setJoinHandle(suggested || 'human')
+    setJoinError(null)
+  }
+
+  const handleJoin = async (projectSlug: string) => {
+    const mentionHandle = joinHandle.trim()
+    if (!mentionHandle) {
+      setJoinError('请填写项目内 @花名')
+      return
+    }
+    setJoinLoading(true)
+    setJoinError(null)
+    try {
+      await onJoin(projectSlug, mentionHandle)
+      setJoiningTopic(null)
+      setJoinHandle('')
+    } catch (err) {
+      setJoinError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setJoinLoading(false)
     }
   }
 
@@ -498,30 +602,80 @@ function TeamZoneSection({
     }
   }
 
+  const compactInputStyle = {
+    width: '100%',
+    boxSizing: 'border-box',
+    padding: '8px 10px',
+    background: 'var(--dsw-alias-bg-base)',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '6px',
+    color: 'var(--dsw-alias-label-primary)',
+    fontSize: '13px',
+  } as const
+  const compactButtonStyle = {
+    padding: '8px',
+    background: 'var(--dsw-alias-bg-l2)',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '6px',
+    color: 'var(--dsw-alias-label-primary)',
+    cursor: 'pointer',
+    fontSize: '13px',
+  } as const
+
   if (!loggedIn) {
-    if (!showLogin) {
+    if (authMode === 'idle') {
       return (
         <div className={css.groupSection} style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
           <div style={{ padding: '0 12px', marginBottom: '8px', fontSize: '12px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' }}>
             团队
           </div>
-          <button
-            type="button"
-            style={{
-              width: 'calc(100% - 16px)',
-              margin: '0 8px',
-              padding: '8px 12px',
-              background: 'var(--dsw-alias-bg-l2)',
-              border: '1px solid var(--dsw-alias-border-l1)',
-              borderRadius: '6px',
-              color: 'var(--dsw-alias-label-primary)',
-              cursor: 'pointer',
-              fontSize: '13px',
-            }}
-            onClick={() => setShowLogin(true)}
-          >
-            登录团队账号
-          </button>
+          {registrationNotice && (
+            <div style={{ margin: '0 8px 8px', color: 'var(--dsw-alias-state-success-primary)', fontSize: '12px' }}>
+              {registrationNotice}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '6px', padding: '0 8px' }}>
+            <button
+              type="button"
+              style={{ flex: 1, padding: '8px', background: 'var(--dsw-alias-bg-l2)', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '6px', color: 'var(--dsw-alias-label-primary)', cursor: 'pointer', fontSize: '13px' }}
+              onClick={() => setAuthMode('login')}
+            >
+              登录团队账号
+            </button>
+            <button
+              type="button"
+              style={{ flex: 1, padding: '8px', background: 'var(--dsw-alias-bg-l2)', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '6px', color: 'var(--dsw-alias-label-primary)', cursor: 'pointer', fontSize: '13px' }}
+              onClick={() => setAuthMode('register')}
+            >
+              邀请码注册
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    if (authMode === 'register') {
+      return (
+        <div className={css.groupSection} style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
+          <div style={{ padding: '0 12px', marginBottom: '8px', fontSize: '12px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' }}>
+            注册团队账号
+          </div>
+          <form style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 8px' }} onSubmit={handleRegister}>
+            <input aria-label="注册用户名" placeholder="用户名" value={registerUsername} onChange={(e) => setRegisterUsername(e.target.value)} disabled={registerLoading} autoComplete="username" style={compactInputStyle} />
+            <input aria-label="注册显示名" placeholder="显示名" value={registerDisplayName} onChange={(e) => setRegisterDisplayName(e.target.value)} disabled={registerLoading} autoComplete="name" style={compactInputStyle} />
+            <input aria-label="团队邀请码" placeholder="一次性邀请码" value={registerInvite} onChange={(e) => setRegisterInvite(e.target.value)} disabled={registerLoading} autoComplete="off" style={compactInputStyle} />
+            <input aria-label="注册密码" type="password" placeholder="密码（至少 12 字节）" value={registerPassword} onChange={(e) => setRegisterPassword(e.target.value)} disabled={registerLoading} autoComplete="new-password" style={compactInputStyle} />
+            <input aria-label="确认注册密码" type="password" placeholder="确认密码" value={registerConfirm} onChange={(e) => setRegisterConfirm(e.target.value)} disabled={registerLoading} autoComplete="new-password" style={compactInputStyle} />
+            {registerError && <div style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px' }}>{registerError}</div>}
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button type="submit" disabled={registerLoading} style={{ ...compactButtonStyle, flex: 1 }}>
+                {registerLoading ? '提交中…' : '提交注册申请'}
+              </button>
+              <button type="button" disabled={registerLoading} onClick={() => { setAuthMode('idle'); setRegisterError(null) }} style={{ ...compactButtonStyle, flex: 1 }}>
+                取消
+              </button>
+            </div>
+          </form>
         </div>
       )
     }
@@ -593,7 +747,7 @@ function TeamZoneSection({
             <button
               type="button"
               onClick={() => {
-                setShowLogin(false)
+                setAuthMode('idle')
                 setLoginError(null)
               }}
               disabled={loginLoading}
@@ -646,8 +800,15 @@ function TeamZoneSection({
 
       {topics.map((topic) => {
         const binding = bindings.find((b) => b.project_slug === topic.slug)
-        const isBound = !!binding
+        const membershipStatus = topic.membership === undefined
+          ? 'active'
+          : topic.membership?.status ?? ''
+        const isActive = membershipStatus === 'active'
+        const isInvited = membershipStatus === 'invited'
+        const canRequestJoin = !membershipStatus || membershipStatus === 'removed'
+        const isBound = isActive && !!binding
         const isBinding = bindingTopic === topic.slug
+        const isJoining = joiningTopic === topic.slug
 
         return (
           <div key={topic.slug} style={{ position: 'relative', marginBottom: '2px' }}>
@@ -659,7 +820,11 @@ function TeamZoneSection({
               title={
                 isBound
                   ? `打开 ${topic.name}（绑定到 ${binding.session}）`
-                  : `${topic.name}（需要先绑定本机 Session）`
+                  : isActive
+                    ? `${topic.name}（需要先绑定本机 Session）`
+                    : isInvited
+                      ? `${topic.name}（加入申请等待审批）`
+                      : `${topic.name}（尚未加入）`
               }
               style={{
                 opacity: isBound ? 1 : 0.6,
@@ -671,11 +836,11 @@ function TeamZoneSection({
               </span>
               <span className={css.title}>{topic.name}</span>
               <span className={css.meta}>
-                {isBound ? `→ ${binding.session}` : '未绑定'}
+                {isBound ? `→ ${binding.session}` : isActive ? '未绑定' : isInvited ? '等待审批' : '未加入'}
               </span>
             </button>
 
-            {!isBound && !isBinding && (
+            {isActive && !isBound && !isBinding && (
               <button
                 type="button"
                 onClick={() => setBindingTopic(topic.slug)}
@@ -697,6 +862,44 @@ function TeamZoneSection({
               >
                 绑定
               </button>
+            )}
+
+            {canRequestJoin && !isJoining && (
+              <button
+                type="button"
+                onClick={() => startJoin(topic.slug)}
+                title={`申请加入 ${topic.name}`}
+                style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'var(--dsw-alias-state-business-primary)', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 500 }}
+              >
+                申请加入
+              </button>
+            )}
+
+            {isJoining && (
+              <form
+                style={{ background: 'var(--dsw-alias-bg-base)', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '6px', padding: '8px', margin: '4px 8px 8px' }}
+                onSubmit={(e) => { e.preventDefault(); void handleJoin(topic.slug) }}
+              >
+                <div style={{ fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' }}>
+                  项目内 @花名
+                </div>
+                <input
+                  aria-label={`${topic.name} @花名`}
+                  value={joinHandle}
+                  onChange={(e) => setJoinHandle(e.target.value)}
+                  disabled={joinLoading}
+                  style={{ ...compactInputStyle, marginBottom: '6px' }}
+                />
+                {joinError && <div style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px', marginBottom: '6px' }}>{joinError}</div>}
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button type="submit" disabled={joinLoading} style={{ ...compactButtonStyle, flex: 1 }}>
+                    {joinLoading ? '提交中…' : '提交申请'}
+                  </button>
+                  <button type="button" disabled={joinLoading} onClick={() => { setJoiningTopic(null); setJoinError(null) }} style={{ ...compactButtonStyle, flex: 1 }}>
+                    取消
+                  </button>
+                </div>
+              </form>
             )}
 
             {isBinding && (

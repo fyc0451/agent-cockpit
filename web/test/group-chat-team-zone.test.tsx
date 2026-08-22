@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { WorkspaceBrowser } from '../features/shell/WorkspaceBrowser'
 import { AppFrame } from '../features/shell/AppFrame'
@@ -44,6 +44,38 @@ describe('WorkspaceBrowser 团队区域', () => {
     )
     expect(screen.getByText('团队')).toBeInTheDocument()
     expect(screen.getByText('登录团队账号')).toBeInTheDocument()
+    expect(screen.getByText('邀请码注册')).toBeInTheDocument()
+  })
+
+  it('邀请码注册覆盖缺失邀请码与 pending 提示', async () => {
+    const onTeamRegister = vi.fn().mockResolvedValue(undefined)
+    renderWithAppFrame(
+      <WorkspaceBrowser
+        {...baseProps}
+        teamEnabled={true}
+        teamLoggedIn={false}
+        onTeamRegister={onTeamRegister}
+      />,
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByText('邀请码注册'))
+    await user.type(screen.getByLabelText('注册用户名'), 'alice')
+    await user.type(screen.getByLabelText('注册显示名'), 'Alice Chen')
+    await user.type(screen.getByLabelText('注册密码'), 'password-1234')
+    await user.type(screen.getByLabelText('确认注册密码'), 'password-1234')
+    await user.click(screen.getByText('提交注册申请'))
+    expect(screen.getByText('请填写邀请码')).toBeInTheDocument()
+    expect(onTeamRegister).not.toHaveBeenCalled()
+
+    await user.type(screen.getByLabelText('团队邀请码'), 'INVITE-123')
+    await user.click(screen.getByText('提交注册申请'))
+    await waitFor(() => expect(onTeamRegister).toHaveBeenCalledWith({
+      username: 'alice',
+      displayName: 'Alice Chen',
+      password: 'password-1234',
+      inviteCode: 'INVITE-123',
+    }))
+    expect(screen.getByText(/账号 alice 已提交，当前为待批准/)).toBeInTheDocument()
   })
 
   it('登录后显示用户名和话题列表', () => {
@@ -83,6 +115,50 @@ describe('WorkspaceBrowser 团队区域', () => {
       />,
     )
     expect(screen.getByText(/local-session-1/)).toBeInTheDocument()
+  })
+
+  it('未加入可申请，invited 等待审批，active 审批刷新后可绑定', async () => {
+    const onTeamJoin = vi.fn().mockResolvedValue(undefined)
+    const props = {
+      ...baseProps,
+      teamEnabled: true,
+      teamLoggedIn: true,
+      teamUsername: 'test-user',
+      teamBindings: [],
+      onTeamLogout: vi.fn(),
+      onTeamJoin,
+      onTeamBindSession: vi.fn(),
+      onTeamSelectTopic: vi.fn(),
+    }
+    const { rerender } = renderWithAppFrame(
+      <WorkspaceBrowser
+        {...props}
+        teamTopics={[
+          { slug: 'proj-a', name: '项目 A', id: 1, membership: null },
+          { slug: 'proj-b', name: '项目 B', id: 2, membership: { role: 'member', status: 'invited', mention_handle: 'waiting' } },
+        ]}
+      />,
+    )
+    const user = userEvent.setup()
+    expect(screen.getByTitle('项目 B（加入申请等待审批）')).toBeInTheDocument()
+    await user.click(screen.getByTitle('申请加入 项目 A'))
+    expect(screen.getByLabelText('项目 A @花名')).toHaveValue('test-user')
+    await user.click(screen.getByText('提交申请'))
+    await waitFor(() => expect(onTeamJoin).toHaveBeenCalledWith('proj-a', 'test-user'))
+
+    rerender(
+      <AppFrame sidebar={null}>
+        <WorkspaceBrowser
+          {...props}
+          teamTopics={[
+            { slug: 'proj-a', name: '项目 A', id: 1, membership: { role: 'member', status: 'active', mention_handle: 'test-user' } },
+            { slug: 'proj-b', name: '项目 B', id: 2, membership: { role: 'member', status: 'invited', mention_handle: 'waiting' } },
+          ]}
+        />
+      </AppFrame>,
+    )
+    expect(screen.getByTitle('项目 A（需要先绑定本机 Session）')).toBeInTheDocument()
+    expect(screen.queryByTitle('申请加入 项目 A')).not.toBeInTheDocument()
   })
 
   it('新建 topic 已移到团队管理页，侧栏只保留消息相关功能', () => {

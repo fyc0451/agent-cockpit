@@ -25,6 +25,35 @@ export async function teamLogin(username: string, password: string): Promise<voi
   }
 }
 
+export async function teamRegister(input: {
+  username: string
+  displayName: string
+  password: string
+  inviteCode: string
+}): Promise<void> {
+  const response = await fetch('/api/team-auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: input.username,
+      display_name: input.displayName,
+      password: input.password,
+      invite_code: input.inviteCode,
+    }),
+    credentials: 'include',
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: 'registration_failed',
+      message: text || '注册失败，请检查邀请码和账号信息',
+      retryable: false,
+      status: response.status,
+    })
+  }
+}
+
 export async function teamLogout(): Promise<void> {
   const response = await fetch('/api/team-auth/logout', {
     method: 'POST',
@@ -183,7 +212,22 @@ function parseTopic(raw: unknown): TeamTopic | null {
       : typeof nested.project_id === 'number'
         ? nested.project_id
         : 0
-  return { slug, name, id }
+  const membershipOwner = 'membership' in nested
+    ? nested
+    : 'membership' in raw
+      ? raw
+      : null
+  if (membershipOwner === null) return { slug, name, id }
+  const membershipRaw = isObj(membershipOwner.membership) ? membershipOwner.membership : null
+  const membership = membershipRaw
+    ? {
+        role: typeof membershipRaw.role === 'string' ? membershipRaw.role : 'member',
+        status: typeof membershipRaw.status === 'string' ? membershipRaw.status : '',
+        mention_handle:
+          typeof membershipRaw.mention_handle === 'string' ? membershipRaw.mention_handle : '',
+      }
+    : null
+  return { slug, name, id, membership }
 }
 
 export async function listTeamProjects(): Promise<TeamTopic[]> {
@@ -212,6 +256,30 @@ export async function listTeamProjects(): Promise<TeamTopic[]> {
     }
   }
   return topics
+}
+
+export async function requestTeamJoin(
+  projectSlug: string,
+  mentionHandle: string,
+): Promise<void> {
+  const response = await fetch(
+    `/api/team/projects/${encodeURIComponent(projectSlug)}/join-requests`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mention_handle: mentionHandle }),
+    },
+  )
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: response.status === 409 ? 'join_conflict' : 'join_failed',
+      message: text || (response.status === 409 ? '该 @花名已被使用或申请状态冲突' : '申请加入失败'),
+      retryable: false,
+      status: response.status,
+    })
+  }
 }
 
 function slugFromName(name: string): string {

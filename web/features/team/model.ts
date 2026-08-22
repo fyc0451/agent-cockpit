@@ -4,6 +4,11 @@ export interface TeamTopic {
   slug: string // project_slug
   name: string // 显示名
   id: number // project_id
+  membership?: {
+    role: string // admin | member
+    status: string // invited | active | removed
+    mention_handle: string
+  } | null
 }
 
 export interface TeamBinding {

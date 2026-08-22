@@ -36,7 +36,11 @@ function memberStatusLabel(status: string): string {
 /** 系统账号：一次性邀请码 + 审批 / 停用 / 恢复 */
 function AccountSection({ currentUsername }: { currentUsername: string }) {
   const queryClient = useQueryClient()
-  const usersQ = useQuery({ queryKey: ['team-admin-users'], queryFn: listTeamUsers })
+  const usersQ = useQuery({
+    queryKey: ['team-admin-users'],
+    queryFn: listTeamUsers,
+    refetchInterval: 5_000,
+  })
   const [inviteCode, setInviteCode] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -138,6 +142,7 @@ function TopicMemberRows({ slug }: { slug: string }) {
   const membersQ = useQuery({
     queryKey: ['team-members', slug],
     queryFn: () => listTeamMembers(slug),
+    refetchInterval: 5_000,
   })
   const [error, setError] = useState<string | null>(null)
   const patchM = useMutation({
@@ -230,7 +235,11 @@ function TopicMemberRows({ slug }: { slug: string }) {
 /** topic 管理：新建 + 各 topic 的成员审批 */
 function TopicSection({ username }: { username: string }) {
   const queryClient = useQueryClient()
-  const topicsQ = useQuery({ queryKey: ['team-projects'], queryFn: listTeamProjects })
+  const topicsQ = useQuery({
+    queryKey: ['team-projects'],
+    queryFn: listTeamProjects,
+    refetchInterval: 5_000,
+  })
   const [expanded, setExpanded] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [error, setError] = useState<string | null>(null)

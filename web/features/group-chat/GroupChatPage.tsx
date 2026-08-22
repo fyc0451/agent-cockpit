@@ -37,13 +37,16 @@ import { fetchTeamConfig } from '../../api/teamConfig'
 import {
   teamAuthStatus,
   teamLogin,
+  teamRegister,
   teamLogout,
   teamSessionBindings,
   teamBindSession,
   listTeamProjects,
   listTeamMembers,
+  requestTeamJoin,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
+import type { TeamTopic } from '../team/model'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { AppFrame, useAppFrame } from '../shell/AppFrame'
@@ -149,11 +152,18 @@ function NarrowAwareBrowser(props: {
   teamLoggedIn?: boolean
   teamUsername?: string | null
   teamIsAdmin?: boolean
-  teamTopics?: Array<{ slug: string; name: string; id: number }>
+  teamTopics?: TeamTopic[]
   teamBindings?: Array<{ project_slug: string; session: string }>
   teamActiveTopic?: string | null
   onTeamLogin?: (username: string, password: string) => Promise<void>
+  onTeamRegister?: (input: {
+    username: string
+    displayName: string
+    password: string
+    inviteCode: string
+  }) => Promise<void>
   onTeamLogout?: () => Promise<void>
+  onTeamJoin?: (projectSlug: string, mentionHandle: string) => Promise<void>
   onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
   onOpenTeamAdmin?: () => void
@@ -278,10 +288,11 @@ export function GroupChatPage() {
     queryFn: listTeamProjects,
     enabled: teamEnabled && teamAuthQ.data?.logged_in === true,
     staleTime: 30_000,
+    refetchInterval: teamEnabled && teamAuthQ.data?.logged_in === true ? 5_000 : false,
   })
 
   const teamTopics = useMemo(() => {
-    const bySlug = new Map<string, { slug: string; name: string; id: number }>()
+    const bySlug = new Map<string, TeamTopic>()
     for (const topic of teamProjectsQ.data ?? []) bySlug.set(topic.slug, topic)
     for (const topic of teamBindingsQ.data?.topics ?? []) {
       if (!bySlug.has(topic.slug)) bySlug.set(topic.slug, topic)
@@ -304,12 +315,26 @@ export function GroupChatPage() {
     queryClient.invalidateQueries({ queryKey: ['team-projects'] })
   }, [queryClient])
 
+  const handleTeamRegister = useCallback(async (input: {
+    username: string
+    displayName: string
+    password: string
+    inviteCode: string
+  }) => {
+    await teamRegister(input)
+  }, [])
+
   const handleTeamLogout = useCallback(async () => {
     await teamLogout()
     queryClient.invalidateQueries({ queryKey: ['team-auth-status'] })
     queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
     queryClient.invalidateQueries({ queryKey: ['team-projects'] })
     setTeamActiveTopic(null)
+  }, [queryClient])
+
+  const handleTeamJoin = useCallback(async (projectSlug: string, mentionHandle: string) => {
+    await requestTeamJoin(projectSlug, mentionHandle)
+    await queryClient.invalidateQueries({ queryKey: ['team-projects'] })
   }, [queryClient])
 
   const handleTeamBindSession = useCallback(async (projectSlug: string, sessionName: string) => {
@@ -1100,7 +1125,9 @@ export function GroupChatPage() {
                 teamBindings={teamBindingsQ.data?.bindings ?? []}
                 teamActiveTopic={teamActiveTopic}
                 onTeamLogin={handleTeamLogin}
+                onTeamRegister={handleTeamRegister}
                 onTeamLogout={handleTeamLogout}
+                onTeamJoin={handleTeamJoin}
                 onTeamBindSession={handleTeamBindSession}
                 onTeamSelectTopic={handleTeamSelectTopic}
                 onOpenTeamAdmin={() => navigate(routes.team())}
