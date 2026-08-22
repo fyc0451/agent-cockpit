@@ -97,6 +97,7 @@ import {
 import './groupChat.css'
 
 const POLL_MS = 10_000
+export const TEAM_BINDINGS_REFRESH_MS = 5_000
 const MAX_ENTRIES = 300
 
 function restoreLocalEntries(session: string): ChatEntry[] {
@@ -282,6 +283,9 @@ export function GroupChatPage() {
     queryFn: teamSessionBindings,
     enabled: teamEnabled && teamAuthQ.data?.logged_in === true,
     staleTime: 30_000,
+    refetchInterval: teamEnabled && teamAuthQ.data?.logged_in === true
+      ? TEAM_BINDINGS_REFRESH_MS
+      : false,
   })
 
   const teamProjectsQ = useQuery({

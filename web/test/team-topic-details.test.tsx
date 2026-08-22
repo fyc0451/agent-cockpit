@@ -2,6 +2,7 @@ import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { vi } from 'vitest'
 import { DetailsPanel } from '../features/group-chat/DetailsPanel'
+import { TEAM_BINDINGS_REFRESH_MS } from '../features/group-chat/GroupChatPage'
 import { AppFrame } from '../features/shell/AppFrame'
 import { renderApp, stubDefaultFetch } from './helpers'
 
@@ -37,6 +38,10 @@ function renderTeamDetails({
 }
 
 describe('团队话题成员详情', () => {
+  it('登录后每 5 秒刷新 Session 绑定候选', () => {
+    expect(TEAM_BINDINGS_REFRESH_MS).toBe(5_000)
+  })
+
   it('只显示 Team Hub 已加入的同事，不显示本机 Agent 或 Boss', () => {
     render(
       <AppFrame sidebar={null}>
