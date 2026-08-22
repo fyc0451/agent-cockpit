@@ -90,11 +90,30 @@ def parse_next_steps(text: str) -> list[str]:
     return items
 
 
-def wake_prompt(session: str, next_item: str) -> str:
+def wake_prompt(
+    session: str,
+    next_item: str,
+    *,
+    wake_mail_name: str = "",
+    leader_mail_name: str = "",
+) -> str:
+    wake_name = wake_mail_name.strip()
+    leader_name = leader_mail_name.strip()
+    if leader_name and wake_name.casefold() == leader_name.casefold():
+        report = (
+            f"你就是本群 Leader（{leader_name}），不要给自己发 Agent Mail；"
+            "完成后直接在终端写结论并更新交接单。"
+        )
+    elif leader_name:
+        report = (
+            f"完成后给 Leader 回信：mail-send --to leader --thread {session}。"
+        )
+    else:
+        report = "本群尚未登记 Leader，不要猜收件人；完成后在终端写结论。"
     return (
         "【持续工作】不要等 Boss 再 @。交接单下一步还没做完。\n"
         f"请立刻做：{next_item}\n"
-        f"给 Leader 回信用 mail-send --to HumanOverseer --thread {session}。"
+        f"{report}"
         "有持久事实写 session。"
     )
 
@@ -111,7 +130,10 @@ def is_watch_item(item: str) -> bool:
         "盯交付" in text
         or "空闲就分下一刀" in text
         or "等 Boss" in text
+        or "等待 Boss" in text
+        or "待 Boss" in text
         or "拍板" in text
+        or re.search(r"Boss.{0,24}(?:确认|授权|回复)", text) is not None
     )
 
 
@@ -253,8 +275,17 @@ def tick(
     )
     sent: list[Wake] = []
     for wake in planned:
+        leader_name = str(leaders.get(wake.session) or "").strip()
         result = send(
-            wake.session, wake.pane_id, wake_prompt(wake.session, wake.next_item), "prompt",
+            wake.session,
+            wake.pane_id,
+            wake_prompt(
+                wake.session,
+                wake.next_item,
+                wake_mail_name=wake.mail_name,
+                leader_mail_name=leader_name,
+            ),
+            "prompt",
         )
         if not isinstance(result, dict) or result.get("error") or result.get("skipped"):
             continue

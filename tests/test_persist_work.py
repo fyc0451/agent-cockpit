@@ -20,6 +20,23 @@ def test_parse_next_steps_reads_numbered_section():
     assert persist_work.parse_next_steps("## 当前状态\n- 无") == []
 
 
+def test_wake_prompt_never_hardcodes_human_and_leader_does_not_mail_self():
+    leader = persist_work.wake_prompt(
+        "cockpit-1", "继续收口。",
+        wake_mail_name="TopazOwl", leader_mail_name="TopazOwl",
+    )
+    assert "HumanOverseer" not in leader
+    assert "不要给自己发 Agent Mail" in leader
+    assert "mail-send" not in leader
+
+    contributor = persist_work.wake_prompt(
+        "cockpit-1", "继续收口。",
+        wake_mail_name="SilverPine", leader_mail_name="TopazOwl",
+    )
+    assert "HumanOverseer" not in contributor
+    assert "mail-send --to leader --thread cockpit-1" in contributor
+
+
 def test_plan_wakes_only_idle_leader_in_bound_session():
     panes = [
         {"session": "cockpit", "pane_id": "w1:p1", "agent": "grok",
@@ -91,6 +108,8 @@ def test_plan_wakes_named_members_not_only_leader():
 
 def test_waiting_for_boss_is_watch_and_does_not_wake_alone():
     assert persist_work.is_watch_item("等 Boss 拍板：发版，或指定下一刀")
+    assert persist_work.is_watch_item("等待 Boss 单独确认是否允许 push 20e1a2c")
+    assert persist_work.is_watch_item("Boss 明确授权后再 push")
     panes = [{
         "session": "cockpit", "pane_id": "w1:p1", "agent": "grok",
         "mail_name": "BrownDesert", "agent_status": "idle",
@@ -184,6 +203,8 @@ def test_tick_sends_once_and_persists(tmp_path: Path):
     assert len(wakes) == 1
     assert sent[0][0] == "cockpit"
     assert "瀑布流对谁说" in sent[0][2]
+    assert "不要给自己发 Agent Mail" in sent[0][2]
+    assert "HumanOverseer" not in sent[0][2]
     again = persist_work.tick(
         now=12.0,
         panes=panes,
