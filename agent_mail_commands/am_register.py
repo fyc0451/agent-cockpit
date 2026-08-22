@@ -320,6 +320,11 @@ def main(argv: list[str] | None = None) -> None:
     except next_profile.NextProfileError as exc:
         raise SystemExit(str(exc)) from exc
     agent = _validate_component(args.agent, "agent")
+    if agent != agent.lower():
+        raise SystemExit(
+            f"--agent 是产品侧 agent 类型（全小写，如 kimi/claude/codex），"
+            f"不是花名: {agent!r}。花名由 Hub 分配，混用会注册出幽灵身份。"
+        )
     instance = _validate_component(args.instance, "instance")
     registry_file = REGISTRY_DIR / slugify(project_key) / f"{agent}--{instance}.json"
 

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { closePane, restartPane, startAgent } from '../../api/legacyHerdr'
+import { setSessionLeader } from '../../api/chatSession'
 import { AgentIcon } from './AgentIcon'
 import {
   AGENT_KINDS,
@@ -184,7 +185,7 @@ export function MemberPanel({
   externalAddSignal,
 }: MemberPanelProps) {
   const [adding, setAdding] = useState(false)
-  const [busy, setBusy] = useState<{ paneId: string; kind: 'close' | 'restart' } | null>(null)
+  const [busy, setBusy] = useState<{ paneId: string; kind: 'close' | 'restart' | 'leader' } | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const lastSignalRef = useRef(externalAddSignal)
   useEffect(() => {
@@ -230,6 +231,44 @@ export function MemberPanel({
           </span>
         </button>
         <span className="gc-member-ops">
+          {!m.isLeader && (
+            <button
+              type="button"
+              className="gc-member-op"
+              title={`把 ${m.name} 设为 Leader`}
+              aria-label={`把 ${m.name} 设为 Leader`}
+              disabled={!session || busy !== null}
+              onClick={() => {
+                if (!session || busy) return
+                if (!window.confirm(`把 Leader 换成 ${m.name}？全员会收到切换通知。`)) return
+                setBusy({ paneId: m.paneId, kind: 'leader' })
+                setActionError(null)
+                void setSessionLeader(session, m.mailName || m.name)
+                  .then(() => {
+                    onChanged()
+                  })
+                  .catch((e) => {
+                    setActionError(e instanceof ApiError ? e.message : String(e))
+                  })
+                  .finally(() => {
+                    setBusy((current) => (
+                      current?.paneId === m.paneId && current.kind === 'leader' ? null : current
+                    ))
+                  })
+              }}
+            >
+              {busy?.paneId === m.paneId && busy.kind === 'leader' ? '切换中' : '设Leader'}
+            </button>
+          )}
+          <button
+            type="button"
+            className="gc-member-op"
+            aria-label={`私聊 ${m.name}`}
+            title={`私聊 ${m.name}（直发终端，不进入群聊）`}
+            onClick={() => onInteract(m)}
+          >
+            私聊
+          </button>
           <button
             type="button"
             className="gc-member-op"

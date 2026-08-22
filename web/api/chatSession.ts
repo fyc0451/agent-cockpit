@@ -222,7 +222,7 @@ export async function sendSessionMail(
   session: string,
   text: string,
   to: string[],
-  options?: { ledgerOnly?: boolean; delivery?: ChatDelivery },
+  options?: { ledgerOnly?: boolean; delivery?: ChatDelivery; direct?: boolean; source?: string },
 ): Promise<{ mail_error: string | null }> {
   const raw = await legacyPost(
     `/api/chat/sessions/${encodeURIComponent(session)}/mail`,
@@ -231,12 +231,22 @@ export async function sendSessionMail(
       to,
       ledger_only: options?.ledgerOnly === true,
       delivery: options?.delivery === 'interrupt' ? 'interrupt' : 'queue',
+      ...(options?.direct === true ? { direct: true } : {}),
+      ...(options?.source ? { source: options.source } : {}),
     },
   )
   if (!isObj(raw)) return { mail_error: null }
   return {
     mail_error: typeof raw.mail_error === 'string' && raw.mail_error ? raw.mail_error : null,
   }
+}
+
+/** Boss 换群 Leader：后端改记录、账本记事件、叫醒全员宣告。 */
+export async function setSessionLeader(session: string, mailName: string): Promise<unknown> {
+  return legacyPost(
+    `/api/chat/sessions/${encodeURIComponent(session)}/leader`,
+    { mail_name: mailName },
+  )
 }
 
 /** 群成员 agent pane 上的终端输入进瀑布流；空 to 不写。只写账本，不转发 Hub。 */
@@ -264,6 +274,8 @@ export interface SessionMailMessage {
   read_by?: string[]
   duration_ms?: number
   git?: { files: number; stat: string }
+  source?: string
+  direct?: boolean
 }
 
 export function mailBelongsToSession(thread: string, session: string): boolean {
@@ -313,6 +325,10 @@ export function parseSessionMailRow(
   if (typeof duration === 'number' && Number.isFinite(duration) && duration >= 0) {
     message.duration_ms = duration
   }
+  if (typeof row.source === 'string' && row.source.trim()) {
+    message.source = row.source.trim()
+  }
+  if (row.direct === true) message.direct = true
   const git = row.git
   if (
     isObj(git)

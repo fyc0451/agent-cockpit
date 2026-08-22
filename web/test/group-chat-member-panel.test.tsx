@@ -142,6 +142,23 @@ describe('MemberPanel Herdr 终端入口', () => {
     expect(onInteract).not.toHaveBeenCalled()
   })
 
+  it('成员私聊按钮打开现有交互弹窗入口', () => {
+    const onInteract = vi.fn()
+    const target = member('codex')
+    render(
+      <MemberPanel
+        {...baseProps}
+        members={[target]}
+        session="demo-1"
+        onOpenTerminal={vi.fn()}
+        onInteract={onInteract}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '私聊 codex-member' }))
+    expect(onInteract).toHaveBeenCalledWith(target)
+  })
+
   it('成员关闭走 DELETE pane，成功后刷新成员', async () => {
     const onChanged = vi.fn()
     vi.mocked(closePane).mockResolvedValue({ closed: '%codex' })
@@ -212,5 +229,47 @@ describe('MemberPanel Herdr 终端入口', () => {
     )
     expect(screen.getByTitle('@grok-member · 空闲 · 2 条未读')).toBeInTheDocument()
     expect(document.querySelector('.gc-unread-badge')?.textContent).toBe('2')
+  })
+})
+
+vi.mock('../api/chatSession', async () => {
+  const actual = await vi.importActual<typeof import('../api/chatSession')>('../api/chatSession')
+  return {
+    ...actual,
+    setSessionLeader: vi.fn(),
+  }
+})
+
+import { setSessionLeader } from '../api/chatSession'
+
+describe('MemberPanel 设 Leader', () => {
+  it('非 Leader 成员有「设Leader」按钮，点击确认后调切换接口并刷新', async () => {
+    vi.mocked(setSessionLeader).mockResolvedValue({})
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const onChanged = vi.fn()
+    const members = [
+      { ...member('grok'), isLeader: true },
+      member('codex'),
+    ]
+    render(
+      <MemberPanel
+        {...baseProps}
+        session="demo-1"
+        members={members}
+        onChanged={onChanged}
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+
+    // 现任 Leader 不显示切换按钮
+    expect(screen.queryByRole('button', { name: '把 grok-member 设为 Leader' })).toBeNull()
+    const button = screen.getByRole('button', { name: '把 codex-member 设为 Leader' })
+    fireEvent.click(button)
+    expect(confirmSpy).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(setSessionLeader).toHaveBeenCalledWith('demo-1', 'codex-member')
+      expect(onChanged).toHaveBeenCalled()
+    })
+    confirmSpy.mockRestore()
   })
 })

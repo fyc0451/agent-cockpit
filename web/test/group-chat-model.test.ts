@@ -12,6 +12,8 @@ import {
   buildSessionRows,
   canRecallEntry,
   isHumanSender,
+  hasBroadcastMention,
+  isDirectMessageVisible,
   isMemberRosterEvent,
   mailCoversLocalMe,
   formatChatClock,
@@ -258,6 +260,14 @@ describe('parseMentionTargets', () => {
     expect(parseMentionTargets('@小克 @小克', [leader, dev])).toEqual([leader])
   })
 
+  it('@all/@所有人/@everyone 识别为广播并命中全员', () => {
+    expect(hasBroadcastMention('@ALL 开会')).toBe(true)
+    expect(hasBroadcastMention('@所有人 开会')).toBe(true)
+    expect(hasBroadcastMention('@everyone sync')).toBe(true)
+    expect(hasBroadcastMention('@alligator 不是广播')).toBe(false)
+    expect(parseMentionTargets('@all 开会', [leader, dev])).toEqual([leader, dev])
+  })
+
   it('@leader 别名 → 带徽章的成员（大小写不敏感）', () => {
     expect(parseMentionTargets('@leader 分派任务', [leader, dev])).toEqual([leader])
     expect(parseMentionTargets('@Leader 分派任务', [leader, dev])).toEqual([leader])
@@ -295,6 +305,30 @@ describe('parseMentionTargets', () => {
     expect(parseMentionTargets('@grok-p4 看下', [oldGrok, newGrok])).toEqual([newGrok])
     expect(parseMentionTargets('@TurquoiseBay 看下', [oldGrok, newGrok])).toEqual([oldGrok])
     expect(parseMentionTargets('@grok 看下', [oldGrok, newGrok])).toEqual([])
+  })
+})
+
+describe('isDirectMessageVisible', () => {
+  const target = member({
+    paneId: '%2', name: 'BlueElk', mailName: 'BlueElk', kind: 'codex',
+  })
+  const other = member({
+    paneId: '%3', name: 'FoggyBasin', mailName: 'FoggyBasin', kind: 'kimi',
+  })
+  const direct = {
+    id: 'mail:1', kind: 'me' as const, text: '定向', to: ['BlueElk'],
+    mailTo: ['blueelk'], ts: 1, direct: true,
+  }
+
+  it('只对 Boss 和收件成员可见，身份不明时 fail-closed', () => {
+    expect(isDirectMessageVisible(direct, null, [target, other])).toBe(true)
+    expect(isDirectMessageVisible(direct, '%2', [target, other])).toBe(true)
+    expect(isDirectMessageVisible(direct, '%3', [target, other])).toBe(false)
+    expect(isDirectMessageVisible(direct, '%missing', [target, other])).toBe(false)
+  })
+
+  it('非定向消息在身份未加载时仍可见', () => {
+    expect(isDirectMessageVisible({ ...direct, direct: false }, '%missing', [])).toBe(true)
   })
 })
 
@@ -807,6 +841,7 @@ describe('mailToEntries', () => {
         messages: [{
           id: 'msg_1', sender: 'human', program: '', text: '先出账本',
           to: ['BrownDesert'], thread: 'cockpit', ts: 1,
+          source: ' composer ', direct: true,
         }],
       }), { status: 200, headers: { 'content-type': 'application/json' } }),
     )
@@ -814,6 +849,7 @@ describe('mailToEntries', () => {
     expect(rows).toEqual([{
       id: 'msg_1', sender: 'human', program: '', text: '先出账本',
       to: ['BrownDesert'], thread: 'cockpit', ts: 1,
+      source: 'composer', direct: true,
     }])
     expect(String(spy.mock.calls[0]?.[0])).toContain('/mail?source=ledger')
     spy.mockRestore()

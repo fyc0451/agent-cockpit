@@ -214,10 +214,10 @@ def bound_mail_thread(thread: str, herdr_session: str) -> str:
     if dest and here and dest != here:
         other = chat_ledger.get_thread_by_session(dest)
         mine = chat_ledger.get_thread_by_session(here)
-        if (
-            other is not None
-            and mine is not None
-            and other.get("workspace_id") != mine.get("workspace_id")
+        # fail-closed：dest 是已注册群 thread 时，必须证明同工作区；
+        # 本 session 未登记（mine=None）视为无法证明，禁止跨群写入（platform 误写 cockpit 的洞）。
+        if other is not None and (
+            mine is None or other.get("workspace_id") != mine.get("workspace_id")
         ):
             raise SystemExit(
                 f"error: 当前 session 是 {here}，不能写 --thread {dest}。"

@@ -323,6 +323,24 @@
   padding: 1px 6px;
 }
 
+.gc-src-badge,
+.gc-direct-badge {
+  font-size: 10.5px;
+  font-weight: 650;
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+.gc-src-badge {
+  color: var(--gc-text2);
+  background: var(--dsw-specific-selector);
+}
+
+.gc-direct-badge {
+  color: var(--gc-accent-text);
+  background: var(--gc-accent-soft);
+}
+
 .gc-msg--peer .gc-msg-body {
   border: 1px dashed color-mix(in srgb, var(--gc-text) 18%, transparent);
 }

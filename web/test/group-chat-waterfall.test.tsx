@@ -82,6 +82,45 @@ describe('Waterfall 长文本', () => {
     expect(document.querySelectorAll('.gc-delivery-badge')).toHaveLength(2)
   })
 
+  it('agent 和我的气泡显示来源与私聊徽章，旧消息不补徽章', () => {
+    render(
+      <Waterfall
+        entries={[{
+          id: 'me_direct',
+          kind: 'me',
+          text: '发给指定成员',
+          to: ['BrownDesert'],
+          mailTo: ['BrownDesert'],
+          ts: 1,
+          source: 'composer',
+          direct: true,
+        }, {
+          ...entry,
+          id: 'agent_h5',
+          text: '从手机回复',
+          source: 'h5',
+          direct: true,
+        }, {
+          ...entry,
+          id: 'agent_api',
+          text: '从接口回复',
+          source: 'api',
+        }, {
+          ...entry,
+          id: 'agent_legacy',
+          text: '旧消息',
+        }]}
+        hasSession
+      />,
+    )
+    expect(document.querySelectorAll('.gc-src-badge')).toHaveLength(3)
+    expect(screen.getByText('composer')).toHaveClass('gc-src-badge')
+    expect(screen.getByText('h5')).toHaveClass('gc-src-badge')
+    expect(screen.getByText('api')).toHaveClass('gc-src-badge')
+    expect(document.querySelectorAll('.gc-direct-badge')).toHaveLength(2)
+    expect(screen.getAllByText('定向')).toHaveLength(2)
+  })
+
   it('我的气泡露出排队中/已送达/已读，结论带用时，看现场带未读数', () => {
     render(
       <Waterfall

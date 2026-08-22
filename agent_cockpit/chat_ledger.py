@@ -22,7 +22,7 @@ _WORKSPACE_FIELDS = frozenset({"id", "path", "title", "created_at", "order"})
 _THREAD_FIELDS = frozenset({"id", "workspace_id", "herdr_session", "title", "created_at"})
 _MESSAGE_FIELDS = frozenset({"id", "session", "kind", "sender", "text", "to", "ts"})
 _OPTIONAL_MESSAGE_FIELDS = frozenset({
-    "delivery", "notified_to", "read_by", "duration_ms", "git",
+    "delivery", "notified_to", "read_by", "duration_ms", "git", "source", "direct",
 })
 _MESSAGE_KINDS = frozenset({"me", "agent", "event", "error"})
 _MESSAGE_DELIVERIES = frozenset({"interrupt", "queue"})
@@ -323,6 +323,15 @@ def _validate_message(row: Any) -> dict[str, Any]:
         out["duration_ms"] = duration
     if "git" in row:
         out["git"] = normalize_git_card(row["git"])
+    if "source" in row:
+        source = row["source"].strip() if isinstance(row["source"], str) else ""
+        if not source or len(source) > 32:
+            raise ValueError("群聊消息来源标记无效")
+        out["source"] = source
+    if "direct" in row:
+        if type(row["direct"]) is not bool:
+            raise ValueError("群聊消息定向标记无效")
+        out["direct"] = row["direct"]
     return out
 
 
@@ -379,6 +388,8 @@ def append_message(
     read_by: list[str] | None = None,
     duration_ms: int | None = None,
     git: dict[str, Any] | None = None,
+    source: str | None = None,
+    direct: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
         raise ValueError("herdr_session 无效")
@@ -412,6 +423,12 @@ def append_message(
         row["duration_ms"] = duration_ms
     if git is not None:
         row["git"] = normalize_git_card(git)
+    if source is not None:
+        row["source"] = source
+    if type(direct) is not bool:
+        raise ValueError("群聊消息定向标记无效")
+    if direct:
+        row["direct"] = True
     row = _validate_message(row)
     with _lock:
         data = _load_messages()

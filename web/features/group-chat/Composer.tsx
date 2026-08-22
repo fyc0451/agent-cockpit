@@ -107,6 +107,11 @@ export function Composer({
         (m.isLeader && 'leader'.startsWith(q)),
     )
   }, [mention, members])
+  const showBroadcast = useMemo(() => {
+    if (!mention) return false
+    const q = mention.query.toLowerCase()
+    return ['all', '所有人', 'everyone'].some((token) => token.startsWith(q))
+  }, [mention])
 
   const targets = useMemo(() => parseMentionTargets(value, members), [value, members])
 
@@ -120,6 +125,23 @@ export function Composer({
     requestAnimationFrame(() => {
       if (el) {
         const pos = mention.start + m.name.length + 2
+        el.focus()
+        el.setSelectionRange(pos, pos)
+      }
+    })
+  }
+
+  const pickAll = () => {
+    const el = innerRef.current
+    const caret = el?.selectionStart ?? value.length
+    if (!mention) return
+    const inserted = '@all '
+    const next = `${value.slice(0, mention.start)}${inserted}${value.slice(caret)}`
+    onChange(next)
+    setMention(null)
+    requestAnimationFrame(() => {
+      if (el) {
+        const pos = mention.start + inserted.length
         el.focus()
         el.setSelectionRange(pos, pos)
       }
@@ -151,15 +173,16 @@ export function Composer({
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (mention && candidates.length > 0) {
+    const optionCount = candidates.length + Number(showBroadcast)
+    if (mention && optionCount > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
-        setActiveIdx((i) => (i + 1) % candidates.length)
+        setActiveIdx((i) => (i + 1) % optionCount)
         return
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault()
-        setActiveIdx((i) => (i - 1 + candidates.length) % candidates.length)
+        setActiveIdx((i) => (i - 1 + optionCount) % optionCount)
         return
       }
       if ((e.key === 'Enter' && shouldSendOnEnter({
@@ -169,7 +192,8 @@ export function Composer({
         keyCode: e.keyCode,
       })) || e.key === 'Tab') {
         e.preventDefault()
-        pick(candidates[activeIdx])
+        if (showBroadcast && activeIdx === 0) pickAll()
+        else pick(candidates[activeIdx - Number(showBroadcast)])
         return
       }
       if (e.key === 'Escape') {
@@ -222,26 +246,45 @@ export function Composer({
   return (
     <div className={`gc-composer-wrap${open ? '' : ' is-collapsed'}`}>
       <div className={`gc-composer${open ? '' : ' is-collapsed'}`}>
-        {mention && candidates.length > 0 && (
+        {mention && (showBroadcast || candidates.length > 0) && (
           <div className="gc-mention" role="listbox">
-            {candidates.map((m, i) => (
+            {showBroadcast && (
               <button
-                key={m.paneId}
                 type="button"
                 role="option"
-                aria-selected={i === activeIdx}
-                className={`gc-mention-item${i === activeIdx ? ' is-active' : ''}`}
+                aria-selected={activeIdx === 0}
+                className={`gc-mention-item${activeIdx === 0 ? ' is-active' : ''}`}
                 onMouseDown={(e) => {
                   e.preventDefault()
-                  pick(m)
+                  pickAll()
                 }}
               >
-                <span aria-hidden>{agentEmoji(m.kind)}</span>
-                <span>{m.name}</span>
-                {m.isLeader && <span className="gc-leader-badge">Leader</span>}
-                <span className="gc-mention-kind">{m.kind}</span>
+                <span aria-hidden>📢</span>
+                <span>所有人</span>
+                <span className="gc-mention-kind">@all 广播</span>
               </button>
-            ))}
+            )}
+            {candidates.map((m, i) => {
+              const optionIdx = i + Number(showBroadcast)
+              return (
+                <button
+                  key={m.paneId}
+                  type="button"
+                  role="option"
+                  aria-selected={optionIdx === activeIdx}
+                  className={`gc-mention-item${optionIdx === activeIdx ? ' is-active' : ''}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    pick(m)
+                  }}
+                >
+                  <span aria-hidden>{agentEmoji(m.kind)}</span>
+                  <span>{m.name}</span>
+                  {m.isLeader && <span className="gc-leader-badge">Leader</span>}
+                  <span className="gc-mention-kind">{m.kind}</span>
+                </button>
+              )
+            })}
           </div>
         )}
         <textarea

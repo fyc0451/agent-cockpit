@@ -195,4 +195,38 @@ describe('Composer 附件与 Skill 菜单', () => {
     fireEvent.click(screen.getByTitle('立刻打断发送（Enter）'))
     expect(onSend).toHaveBeenCalledWith('interrupt')
   })
+
+  it('@all 候选可用键盘选中，广播前缀不会让无关成员命中', async () => {
+    const onChange = vi.fn()
+    await act(async () => {
+      render(
+        <Composer
+          members={[
+            {
+              paneId: '%1', session: 's1', kind: 'codex', name: 'Evelyn', mailName: 'Evelyn',
+              status: 'idle', cwd: '/repo', isLeader: true,
+            },
+            {
+              paneId: '%2', session: 's1', kind: 'kimi', name: 'Bob', mailName: 'Bob',
+              status: 'idle', cwd: '/repo', isLeader: false,
+            },
+          ]}
+          leader={null}
+          value=""
+          onChange={onChange}
+          onSend={vi.fn()}
+          onAttach={vi.fn()}
+          disabled={false}
+        />,
+      )
+    })
+    fireEvent.click(screen.getByRole('button', { name: '展开输入框' }))
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '@ev', selectionStart: 3 } })
+    expect(screen.getByRole('option', { name: /所有人/ })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('option', { name: /Evelyn/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /Bob/ })).not.toBeInTheDocument()
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13 })
+    expect(onChange).toHaveBeenLastCalledWith('@all ')
+  })
 })

@@ -75,6 +75,8 @@ import {
   mailCoversLocalMe,
   isBusyMember,
   isMemberRosterEvent,
+  hasBroadcastMention,
+  isDirectMessageVisible,
   mailToEntries,
   membersOfSession,
   parseMentionTargets,
@@ -614,6 +616,7 @@ export function GroupChatPage() {
 
   const onAttach = useCallback(async (file: File) => {
     if (!activeSession || attaching) return
+    const sessionAtAttach = activeSession
     try {
       await requireAuthenticated()
     } catch (e) {
@@ -630,17 +633,21 @@ export function GroupChatPage() {
     setAttaching(true)
     try {
       const saved = await uploadChatFile(activeSession, file)
-      setComposer((prev) => appendAttachMarkup(prev, saved.filename, saved.path))
-      requestAnimationFrame(() => inputRef.current?.focus())
+      if (entriesSessionRef.current === sessionAtAttach) {
+        setComposer((prev) => appendAttachMarkup(prev, saved.filename, saved.path))
+        requestAnimationFrame(() => inputRef.current?.focus())
+      }
     } catch (e) {
-      pushEntries([
-        {
-          id: `e${++entrySeq.current}`,
-          kind: 'error',
-          text: `附件上传失败：${e instanceof ApiError ? e.message : String(e)}`,
-          ts: Date.now(),
-        },
-      ])
+      if (entriesSessionRef.current === sessionAtAttach) {
+        pushEntries([
+          {
+            id: `e${++entrySeq.current}`,
+            kind: 'error',
+            text: `附件上传失败：${e instanceof ApiError ? e.message : String(e)}`,
+            ts: Date.now(),
+          },
+        ])
+      }
     } finally {
       setAttaching(false)
     }
@@ -649,6 +656,7 @@ export function GroupChatPage() {
   const onSend = useCallback(async (delivery: ChatDelivery = 'queue') => {
     const text = composer.trim()
     if (!text || !activeSession || sending) return
+    const sessionAtSend = activeSession
     const targets = parseMentionTargets(text, membersRef.current)
     const dest = targets.length > 0 ? targets : leader ? [leader] : []
     if (dest.length === 0) {
@@ -657,7 +665,11 @@ export function GroupChatPage() {
       ])
       return
     }
-    const mailTo = dest.map((m) => m.mailName || m.name).filter(Boolean)
+    const broadcast = hasBroadcastMention(text)
+    // @all 广播：账本存 all 标记，后端投递时展开全员；@一人/@多人即定向：只投递被 @ 者、不进 Hub、小圈可见。
+    const mailTo = broadcast
+      ? ['all']
+      : dest.map((m) => m.mailName || m.name).filter(Boolean)
     if (mailTo.length === 0) {
       pushEntries([
         { id: `e${++entrySeq.current}`, kind: 'error', text: '成员还没有 Agent Mail 花名，无法发信。', ts: Date.now() },
@@ -665,24 +677,29 @@ export function GroupChatPage() {
       return
     }
     setSending(true)
+    const direct = !broadcast
     try {
-      const sent = await sendSessionMail(activeSession, text, mailTo, { delivery })
-      setComposer('')
-      saveComposerDraft(activeSession, '')
-      pushEntries([
-        {
-          id: `e${++entrySeq.current}`,
-          kind: 'me',
-          text,
-          to: dest.map((m) => m.name),
-          mailTo,
-          ts: Date.now(),
-          delivery,
-          receipt: 'queued',
-        },
-      ])
+      const sent = await sendSessionMail(activeSession, text, mailTo, { delivery, direct, source: 'composer' })
+      saveComposerDraft(sessionAtSend, '')
+      if (entriesSessionRef.current === sessionAtSend) {
+        setComposer('')
+        pushEntries([
+          {
+            id: `e${++entrySeq.current}`,
+            kind: 'me',
+            text,
+            to: broadcast ? ['all'] : dest.map((m) => m.name),
+            mailTo,
+            ts: Date.now(),
+            delivery,
+            direct,
+            source: 'composer',
+            receipt: 'queued',
+          },
+        ])
+      }
       void queryClient.invalidateQueries({ queryKey: ['gc-mail', activeSession] })
-      if (sent.mail_error) {
+      if (sent.mail_error && entriesSessionRef.current === sessionAtSend) {
         pushEntries([
           {
             id: `e${++entrySeq.current}`,
@@ -693,14 +710,16 @@ export function GroupChatPage() {
         ])
       }
     } catch (e) {
-      pushEntries([
-        {
-          id: `e${++entrySeq.current}`,
-          kind: 'error',
-          text: `发送失败：${e instanceof ApiError ? e.message : String(e)}。字还在输入框，登录后不用重打。`,
-          ts: Date.now(),
-        },
-      ])
+      if (entriesSessionRef.current === sessionAtSend) {
+        pushEntries([
+          {
+            id: `e${++entrySeq.current}`,
+            kind: 'error',
+            text: `发送失败：${e instanceof ApiError ? e.message : String(e)}。字还在输入框，登录后不用重打。`,
+            ts: Date.now(),
+          },
+        ])
+      }
     } finally {
       setSending(false)
     }
@@ -734,7 +753,10 @@ export function GroupChatPage() {
         ),
       )
       try {
-        await sendSessionMail(activeSession, recallNotice(entry.text), entry.mailTo)
+        await sendSessionMail(activeSession, recallNotice(entry.text), entry.mailTo, {
+          direct: entry.direct,
+          source: 'composer',
+        })
         void queryClient.invalidateQueries({ queryKey: ['gc-mail', activeSession] })
       } catch (e) {
         setRecalledIds((prev) => {
@@ -800,9 +822,14 @@ export function GroupChatPage() {
     })
     const live = typingEntries(members, nowTick)
     const keepAgent = (entry: ChatEntry) => entry.kind !== 'agent' || entry.paneId === onlyPane
-    return onlyPane
-      ? [...historical.filter(keepAgent), ...live.filter(keepAgent)]
-      : [...historical, ...live]
+    const keepDirect = (entry: ChatEntry) => {
+      if (entry.kind !== 'agent' && entry.kind !== 'me') return true
+      return isDirectMessageVisible(entry, onlyPane, members)
+    }
+    const filtered = onlyPane
+      ? [...historical.filter(keepAgent).filter(keepDirect), ...live.filter(keepAgent)]
+      : [...historical.filter(keepDirect), ...live]
+    return filtered
   }, [activeSession, entries, mailEntries, members, nowTick, onlyPane])
   const onlyMember = onlyPane ? members.find((m) => m.paneId === onlyPane) ?? null : null
 

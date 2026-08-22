@@ -536,6 +536,19 @@ def test_register_accepts_safe_component():
     assert module._validate_component("qoder-cn.2", "instance") == "qoder-cn.2"
 
 
+def test_register_rejects_flower_name_as_agent(tmp_path, monkeypatch):
+    """花名(CamelCase)不能当 --agent：否则注册出 agent=花名 的幽灵身份。"""
+    module = _load_am_register()
+    module.REGISTRY_DIR = tmp_path
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setattr(module.sys, "argv", [
+        "am-register", "--agent", "LilacMountain", "--project", str(project),
+    ])
+    with pytest.raises(SystemExit, match="不是花名"):
+        module.main()
+
+
 def test_register_atomic_write_0600(tmp_path):
     """身份文件必须原子写且权限 0600,中间态不得暴露 token。"""
     module = _load_am_register()
@@ -928,6 +941,24 @@ def test_bound_mail_thread_rejects_other_workspace_session(monkeypatch):
         assert "cockpit" in str(exc)
     else:
         raise AssertionError("expected SystemExit")
+
+
+def test_bound_mail_thread_fail_closed_when_own_session_unregistered(monkeypatch):
+    module = _load_mail_send()
+    # platform 的 session 不在账本里（mine=None），写已注册的 cockpit thread 必须拒绝。
+    monkeypatch.setattr(
+        module.chat_ledger, "get_thread_by_session",
+        lambda name: {"cockpit": {"workspace_id": "ws_cockpit"}}.get(name),
+    )
+    try:
+        module.bound_mail_thread("cockpit", "pitapat-video-platform-1")
+    except SystemExit as exc:
+        assert "pitapat-video-platform-1" in str(exc)
+        assert "cockpit" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+    # dest 不是已注册 thread 时保持放行（自定义 thread 名）。
+    assert module.bound_mail_thread("scratch", "pitapat-video-platform-1") == "scratch"
 
 
 def test_resolve_recipients_rewrites_program_main_to_unique_flower(tmp_path):

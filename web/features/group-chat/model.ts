@@ -164,7 +164,16 @@ export function mentionQueryAt(value: string, caret: number): { start: number; q
   return { start: atIdx, query }
 }
 
-/** 从文本解析 @目标：@花名 精确（大小写不敏感），@agent类型 命中该类型全部成员；去重 */
+const BROADCAST_MENTION_TOKENS = new Set(['all', '所有人', 'everyone'])
+
+/** 是否含 @all/@所有人/@everyone 广播标记；广播不是定向消息。 */
+export function hasBroadcastMention(text: string): boolean {
+  return (text.match(/@([^\s@]+)/g) ?? []).some((raw) =>
+    BROADCAST_MENTION_TOKENS.has(raw.slice(1).toLowerCase()),
+  )
+}
+
+/** 从文本解析 @目标：@花名 精确（大小写不敏感），@agent类型 命中该类型全部成员；@all/@所有人/@everyone 命中全部；去重 */
 export function parseMentionTargets(text: string, members: ChatMember[]): ChatMember[] {
   const tokens = text.match(/@([^\s@]+)/g)
   if (!tokens) return []
@@ -172,6 +181,16 @@ export function parseMentionTargets(text: string, members: ChatMember[]): ChatMe
   const seen = new Set<string>()
   for (const raw of tokens) {
     const token = raw.slice(1).toLowerCase()
+    // @all / @所有人：返回全部成员
+    if (BROADCAST_MENTION_TOKENS.has(token)) {
+      for (const m of members) {
+        if (!seen.has(m.paneId)) {
+          seen.add(m.paneId)
+          out.push(m)
+        }
+      }
+      continue
+    }
     for (const m of members) {
       if (seen.has(m.paneId)) continue
       if (
@@ -796,6 +815,8 @@ export interface MailMessage {
   read_by?: string[]
   duration_ms?: number
   git?: { files: number; stat: string }
+  source?: string
+  direct?: boolean
 }
 
 export function mailTimestamp(ts: number): number {
@@ -875,6 +896,8 @@ export type MailEntry =
       ts: number
       delivery?: ChatDelivery
       receipt?: ChatReceipt
+      source?: string
+      direct?: boolean
     }
   | {
       id: string
@@ -889,6 +912,8 @@ export type MailEntry =
       durationMs?: number
       unread?: number
       git?: { files: number; stat: string }
+      source?: string
+      direct?: boolean
     }
 
 /** Agent Mail 一封邮 → 瀑布流一条气泡。 */
@@ -915,6 +940,8 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
           message.to, message.notified_to, message.read_by,
           normalizeChatDelivery(message.delivery),
         ),
+        source: message.source,
+        direct: message.direct,
       })
       continue
     }
@@ -938,6 +965,8 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
         && typeof message.git.stat === 'string'
         ? { files: message.git.files, stat: message.git.stat }
         : undefined,
+      source: message.source,
+      direct: message.direct,
     })
   }
   return out
@@ -949,6 +978,40 @@ export function mailCoversLocalMe(
 ): boolean {
   return mail.some((item) => item.kind === 'me' && item.text === local.text)
 }
+
+/**
+ * 判断定向消息是否对当前视角可见。
+ * 规则：direct=true 的消息只对 Boss（发送方）和被 @ 的成员可见。
+ * @param entry 消息条目
+ * @param onlyPane 当前 pane 视角（如果是单 pane 模式）；null 表示 Boss 全局视角
+ * @param members 所有成员列表
+ */
+export function isDirectMessageVisible(
+  entry: MailEntry,
+  onlyPane: string | null,
+  members: ChatMember[],
+): boolean {
+  // 非定向消息：所有人可见
+  if (!entry.direct) return true
+
+  // Boss 全局视角（onlyPane === null）：所有消息可见
+  if (onlyPane === null) return true
+
+  // Agent 单 pane 视角：只能看到 @自己 的定向消息
+  const currentMember = members.find((m) => m.paneId === onlyPane)
+  if (!currentMember) return false // 身份不明时 fail-closed，避免泄露定向消息
+
+  // mailTo 保留实际收件名，to 则是前端展示名；任一匹配即可见。
+  const mentionedNames = [
+    ...(entry.to || []),
+    ...(entry.kind === 'me' ? entry.mailTo : []),
+  ].map((name) => name.trim().toLowerCase())
+  return [currentMember.name, currentMember.mailName]
+    .map((name) => name.trim().toLowerCase())
+    .filter(Boolean)
+    .some((name) => mentionedNames.includes(name))
+}
+
 
 const OVERSEER_PREAMBLE = /---\s*\n\s*🚨\s*MESSAGE FROM HUMAN OVERSEER 🚨[\s\S]*?The human's guidance supersedes all other priorities\.\s*\n\s*---\s*/giu
 const BOSS_HINT = /^[ \t❯]*Boss 在群聊给你(?:发了|排了一条)消息[^\n]*(?:\n+[ \t]*(?:请直接做|请做完手头事|请用 mail-recv|结论写在终端|本群 Leader 是|给 Leader 写信|需要写信时|不要写 grok-main)[^\n]*)*/mu

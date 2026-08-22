@@ -180,6 +180,8 @@ export type ChatEntry =
       recalled?: boolean
       delivery?: ChatDelivery
       receipt?: ChatReceipt
+      source?: string
+      direct?: boolean
     }
   | {
       id: string
@@ -195,6 +197,8 @@ export type ChatEntry =
       unread?: number
       waiting?: boolean
       git?: { files: number; stat: string }
+      source?: string
+      direct?: boolean
     }
   | { id: string; kind: 'event'; text: string; ts: number }
   | { id: string; kind: 'error'; text: string; ts: number }
@@ -238,6 +242,8 @@ function EntryRow({
             {entry.to.length > 0 && (
               <span className="gc-msg-kind">→ {entry.to.join('、')}</span>
             )}
+            {entry.source && <span className="gc-src-badge">{entry.source}</span>}
+            {entry.direct && <span className="gc-direct-badge">定向</span>}
             {chatDeliveryLabel(entry.delivery) && (
               <span className={`gc-delivery-badge gc-delivery-badge--${entry.delivery}`}>
                 {chatDeliveryLabel(entry.delivery)}
@@ -282,6 +288,8 @@ function EntryRow({
           {entry.to.length > 0 && (
             <span className="gc-msg-kind">→ {entry.to.join('、')}</span>
           )}
+          {entry.source && <span className="gc-src-badge">{entry.source}</span>}
+          {entry.direct && <span className="gc-direct-badge">定向</span>}
           {toPeer && <span className="gc-peer-badge">回成员</span>}
           {toMe && !toPeer && <span className="gc-peer-badge">回我</span>}
           {live && (
