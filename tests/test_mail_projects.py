@@ -112,7 +112,7 @@ def test_nested_independent_clone_is_not_merged_with_parent_clone(tmp_path):
     assert server._same_mail_project_family(str(outer), str(inner)) is False
 
 
-def test_old_session_with_multiple_registered_candidates_requires_selection(
+def test_old_session_with_multiple_family_candidates_prefers_exact_pane_project(
     monkeypatch, tmp_path,
 ):
     session_dir = tmp_path / "session"
@@ -146,8 +146,10 @@ def test_old_session_with_multiple_registered_candidates_requires_selection(
 
     state = server._mail_project_state("demo")
 
-    assert state["bound"] is False
-    assert state["needs_selection"] is True
+    assert state["bound"] is True
+    assert state["needs_selection"] is False
+    assert state["project"] == str(subdir)
+    assert state["migrated"] is True
     assert [item["human_key"] for item in state["candidates"]] == [
         str(session_dir), str(subdir)
     ]

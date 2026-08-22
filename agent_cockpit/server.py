@@ -8816,11 +8816,22 @@ def _mail_project_state(name: str) -> dict[str, Any]:
         }
     pane_paths = _session_pane_paths(name)
     candidates = _mail_project_candidates(name, session_dir, pane_paths)
-    if len(candidates) == 1:
+    suggested_project = _mail_project_suggestion(pane_paths)
+    exact_candidates = [
+        item for item in candidates
+        if suggested_project and Path(item["human_key"]).expanduser().resolve()
+        == Path(suggested_project).expanduser().resolve()
+    ]
+    selected_candidate = (
+        exact_candidates[0] if len(exact_candidates) == 1
+        else candidates[0] if len(candidates) == 1
+        else None
+    )
+    if selected_candidate is not None:
         migrated = True
         try:
             project = mail_projects.bind(
-                name, session_dir, candidates[0]["human_key"]
+                name, session_dir, selected_candidate["human_key"]
             )
         except ValueError:
             project = mail_projects.get(name, session_dir)
@@ -8845,7 +8856,7 @@ def _mail_project_state(name: str) -> dict[str, Any]:
         "project": None,
         "candidates": candidates,
         "needs_selection": True,
-        "suggested_project": _mail_project_suggestion(pane_paths) if not candidates else "",
+        "suggested_project": suggested_project if not candidates else "",
         "migrated": False,
         "binding_invalidated": binding_invalidated,
     }
