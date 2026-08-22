@@ -7,12 +7,15 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
+import sqlite3
+import stat
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from . import runtime_paths
 
@@ -26,11 +29,74 @@ _OPTIONAL_MESSAGE_FIELDS = frozenset({
 })
 _MESSAGE_KINDS = frozenset({"me", "agent", "event", "error"})
 _MESSAGE_DELIVERIES = frozenset({"interrupt", "queue"})
-_MAX_MESSAGES = 500
+_LEGACY_FILES = {
+    "workspaces": "chat-workspaces.json",
+    "threads": "chat-threads.json",
+    "messages": "chat-messages.json",
+}
+_SCHEMA_VERSION = 1
+_SCHEMA_STATEMENTS = (
+    """CREATE TABLE metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )""",
+    """CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY,
+        path TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        sort_order INTEGER NOT NULL CHECK (sort_order >= 0)
+    )""",
+    """CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        herdr_session TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE messages (
+        id TEXT PRIMARY KEY,
+        session TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        text TEXT NOT NULL,
+        recipients TEXT NOT NULL,
+        ts INTEGER NOT NULL CHECK (ts >= 0),
+        delivery TEXT,
+        notified_to TEXT,
+        read_by TEXT,
+        duration_ms INTEGER,
+        git TEXT,
+        source TEXT,
+        direct INTEGER
+    )""",
+    "CREATE INDEX workspaces_order_idx ON workspaces(sort_order, created_at, id)",
+    "CREATE INDEX threads_workspace_idx ON threads(workspace_id, created_at, id)",
+    "CREATE INDEX messages_session_idx ON messages(session, ts, id)",
+)
+_EXPECTED_COLUMNS = {
+    "metadata": ("key", "value"),
+    "workspaces": ("id", "path", "title", "created_at", "sort_order"),
+    "threads": ("id", "workspace_id", "herdr_session", "title", "created_at"),
+    "messages": (
+        "id", "session", "kind", "sender", "text", "recipients", "ts",
+        "delivery", "notified_to", "read_by", "duration_ms", "git", "source",
+        "direct",
+    ),
+}
 
 
-def _path(name: str) -> Path:
-    return runtime_paths.store(name)
+class ChatLedgerError(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _legacy_path(kind: str) -> Path:
+    path = runtime_paths.data_root() / _LEGACY_FILES[kind]
+    if Path(os.path.realpath(path)) != path:
+        raise ValueError("旧群聊账本路径不安全")
+    return path
 
 
 def _now() -> str:
@@ -69,8 +135,10 @@ def _validate_row(row: Any, fields: frozenset[str], *, thread: bool = False) -> 
     return dict(row)
 
 
-def _load(name: str, kind: str, fields: frozenset[str], *, thread: bool = False) -> dict[str, Any]:
-    path = _path(name)
+def _load_legacy(
+    kind: str, fields: frozenset[str], *, thread: bool = False,
+) -> dict[str, Any]:
+    path = _legacy_path(kind)
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -100,33 +168,220 @@ def _load(name: str, kind: str, fields: frozenset[str], *, thread: bool = False)
     return {"version": 1, kind: rows}
 
 
-def _write(name: str, data: dict[str, Any]) -> None:
-    path = runtime_paths.validate_store(name)
+def _secure_database_path(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
+        fd = os.open(path, flags, 0o600)
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
-        os.chmod(path, 0o600)
-        try:
-            dir_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
+        os.close(fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise ChatLedgerError("store_create_failed") from exc
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise ChatLedgerError("store_unreadable") from exc
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or (info.st_uid != os.getuid() and os.getuid() != 0)
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise ChatLedgerError("store_unsafe")
+
+
+def _open_connection(
+    path: Path, *, readonly: bool = False, wal: bool = False,
+) -> sqlite3.Connection:
+    try:
+        if readonly:
+            uri = f"file:{quote(str(path), safe='/')}?mode=ro"
+            connection = sqlite3.connect(uri, uri=True, timeout=5.0)
+        else:
+            connection = sqlite3.connect(path, timeout=5.0)
+            if wal:
+                connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = FULL")
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
+    except sqlite3.Error as exc:
+        raise ChatLedgerError("store_unreadable") from exc
+
+
+def _validate_schema(connection: sqlite3.Connection) -> None:
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if version < _SCHEMA_VERSION:
+        raise ChatLedgerError("migration_required")
+    if version > _SCHEMA_VERSION:
+        raise ChatLedgerError("future_schema")
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    if tables != set(_EXPECTED_COLUMNS):
+        raise ChatLedgerError("schema_fingerprint_mismatch")
+    for table, expected in _EXPECTED_COLUMNS.items():
+        columns = tuple(
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+        )
+        if columns != expected:
+            raise ChatLedgerError("schema_fingerprint_mismatch")
+
+
+def _create_schema(connection: sqlite3.Connection) -> None:
+    for statement in _SCHEMA_STATEMENTS:
+        connection.execute(statement)
+    connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+
+def _load_legacy_messages() -> dict[str, Any]:
+    path = _legacy_path("messages")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"version": 1, "messages": []}
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("群聊消息账本不可读") from exc
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("群聊消息账本已损坏") from exc
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"version", "messages"}
+        or type(data["version"]) is not int
+        or data["version"] != 1
+        or not isinstance(data["messages"], list)
+    ):
+        raise ValueError("群聊消息账本格式无效")
+    rows = [_validate_message(row) for row in data["messages"]]
+    ids = [row["id"] for row in rows]
+    if len(ids) != len(set(ids)):
+        raise ValueError("群聊消息账本包含重复 ID")
+    return {"version": 1, "messages": rows}
+
+
+def _legacy_snapshot() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "workspaces": _load_legacy(
+            "workspaces", _WORKSPACE_FIELDS,
+        )["workspaces"],
+        "threads": _load_legacy(
+            "threads", _THREAD_FIELDS, thread=True,
+        )["threads"],
+        "messages": _load_legacy_messages()["messages"],
+    }
+
+
+def _json_value(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _insert_message(connection: sqlite3.Connection, row: dict[str, Any]) -> None:
+    connection.execute(
+        """INSERT INTO messages (
+            id, session, kind, sender, text, recipients, ts, delivery,
+            notified_to, read_by, duration_ms, git, source, direct
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            row["id"], row["session"], row["kind"], row["sender"], row["text"],
+            _json_value(row["to"]), row["ts"], row.get("delivery"),
+            _json_value(row["notified_to"]) if "notified_to" in row else None,
+            _json_value(row["read_by"]) if "read_by" in row else None,
+            row.get("duration_ms"),
+            _json_value(row["git"]) if "git" in row else None,
+            row.get("source"),
+            (1 if row["direct"] else 0) if "direct" in row else None,
+        ),
+    )
+
+
+def _migrate_snapshot(
+    connection: sqlite3.Connection, snapshot: dict[str, list[dict[str, Any]]],
+) -> None:
+    for row in snapshot["workspaces"]:
+        connection.execute(
+            "INSERT INTO workspaces (id, path, title, created_at, sort_order) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (row["id"], row["path"], row["title"], row["created_at"], row["order"]),
+        )
+    for row in snapshot["threads"]:
+        connection.execute(
+            "INSERT INTO threads (id, workspace_id, herdr_session, title, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                row["id"], row["workspace_id"], row["herdr_session"],
+                row["title"], row["created_at"],
+            ),
+        )
+    for row in snapshot["messages"]:
+        _insert_message(connection, row)
+    connection.execute(
+        "INSERT INTO metadata (key, value) VALUES ('legacy_migration', 'complete')"
+    )
+    connection.execute(
+        "INSERT INTO metadata (key, value) VALUES ('legacy_migrated_at', ?)",
+        (_now(),),
+    )
+
+
+def _ensure_database(path: Path | None = None) -> Path:
+    database = path if path is not None else runtime_paths.validate_store("chat_ledger")
+    _secure_database_path(database)
+    connection = _open_connection(database)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version == 0:
+            snapshot = _legacy_snapshot() if path is None else {
+                "workspaces": [], "threads": [], "messages": [],
+            }
+            _create_schema(connection)
+            _migrate_snapshot(connection, snapshot)
+        _validate_schema(connection)
+        connection.commit()
     except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
+        connection.rollback()
         raise
+    finally:
+        connection.close()
+    return database
+
+
+def initialize(path: Path) -> sqlite3.Connection:
+    database = _ensure_database(Path(path))
+    return open_existing(database)
+
+
+def open_existing(path: Path) -> sqlite3.Connection:
+    connection = _open_connection(Path(path), readonly=True)
+    try:
+        _validate_schema(connection)
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+@contextmanager
+def _database():
+    path = _ensure_database()
+    connection = _open_connection(path, wal=True)
+    try:
+        yield connection
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _workspace_path(value: str) -> Path:
@@ -159,31 +414,40 @@ def _title(value: str | None, default: str) -> str:
 def create_workspace(path: str, title: str | None = None) -> dict[str, Any]:
     canonical = _workspace_path(path)
     with _lock:
-        data = _load("chat_workspaces", "workspaces", _WORKSPACE_FIELDS)
-        for row in data["workspaces"]:
-            if row["path"] == str(canonical):
-                return dict(row)
-        row = {
-            "id": _new_id("ws_"),
-            "path": str(canonical),
-            "title": _title(title, canonical.name),
-            "created_at": _now(),
-            "order": max((item["order"] for item in data["workspaces"]), default=-1) + 1,
-        }
-        data["workspaces"].append(row)
-        _write("chat_workspaces", data)
-        return dict(row)
+        with _database() as connection:
+            existing = connection.execute(
+                "SELECT id, path, title, created_at, sort_order FROM workspaces "
+                "WHERE path = ?",
+                (str(canonical),),
+            ).fetchone()
+            if existing is not None:
+                return _workspace_from_record(existing)
+            next_order = int(connection.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspaces"
+            ).fetchone()[0])
+            row = {
+                "id": _new_id("ws_"),
+                "path": str(canonical),
+                "title": _title(title, canonical.name),
+                "created_at": _now(),
+                "order": next_order,
+            }
+            connection.execute(
+                "INSERT INTO workspaces (id, path, title, created_at, sort_order) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    row["id"], row["path"], row["title"], row["created_at"],
+                    row["order"],
+                ),
+            )
+            return dict(row)
 
 
 def delete_workspace(workspace_id: str) -> bool:
     with _lock:
-        data = _load("chat_workspaces", "workspaces", _WORKSPACE_FIELDS)
-        kept = [row for row in data["workspaces"] if row["id"] != workspace_id]
-        if len(kept) == len(data["workspaces"]):
-            return False
-        data["workspaces"] = kept
-        _write("chat_workspaces", data)
-        return True
+        with _database() as connection:
+            cursor = connection.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
+            return cursor.rowcount > 0
 
 
 def create_thread(workspace_id: str, herdr_session: str, title: str | None = None) -> dict[str, Any]:
@@ -192,75 +456,122 @@ def create_thread(workspace_id: str, herdr_session: str, title: str | None = Non
     if not isinstance(herdr_session, str) or not _SESSION_RE.fullmatch(herdr_session):
         raise ValueError("herdr_session 无效")
     with _lock:
-        data = _load("chat_threads", "threads", _THREAD_FIELDS, thread=True)
-        for row in data["threads"]:
-            if row["herdr_session"] == herdr_session:
-                return dict(row)
-        workspaces = _load("chat_workspaces", "workspaces", _WORKSPACE_FIELDS)
-        if not any(row["id"] == workspace_id for row in workspaces["workspaces"]):
-            raise ValueError("workspace_id 不存在")
-        row = {
-            "id": _new_id("th_"),
-            "workspace_id": workspace_id,
-            "herdr_session": herdr_session,
-            "title": _title(title, herdr_session),
-            "created_at": _now(),
-        }
-        data["threads"].append(row)
-        _write("chat_threads", data)
-        return dict(row)
+        with _database() as connection:
+            existing = connection.execute(
+                "SELECT id, workspace_id, herdr_session, title, created_at "
+                "FROM threads WHERE herdr_session = ?",
+                (herdr_session,),
+            ).fetchone()
+            if existing is not None:
+                return _thread_from_record(existing)
+            workspace = connection.execute(
+                "SELECT 1 FROM workspaces WHERE id = ?", (workspace_id,),
+            ).fetchone()
+            if workspace is None:
+                raise ValueError("workspace_id 不存在")
+            row = {
+                "id": _new_id("th_"),
+                "workspace_id": workspace_id,
+                "herdr_session": herdr_session,
+                "title": _title(title, herdr_session),
+                "created_at": _now(),
+            }
+            connection.execute(
+                "INSERT INTO threads (id, workspace_id, herdr_session, title, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    row["id"], row["workspace_id"], row["herdr_session"],
+                    row["title"], row["created_at"],
+                ),
+            )
+            return dict(row)
 
 
 def delete_thread(thread_id: str) -> bool:
     with _lock:
-        data = _load("chat_threads", "threads", _THREAD_FIELDS, thread=True)
-        kept = [row for row in data["threads"] if row["id"] != thread_id]
-        if len(kept) == len(data["threads"]):
-            return False
-        data["threads"] = kept
-        _write("chat_threads", data)
-        return True
+        with _database() as connection:
+            cursor = connection.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
+            return cursor.rowcount > 0
+
+
+def _workspace_from_record(record: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": str(record["id"]),
+        "path": str(record["path"]),
+        "title": str(record["title"]),
+        "created_at": str(record["created_at"]),
+        "order": int(record["sort_order"]),
+    }
+
+
+def _thread_from_record(record: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": str(record["id"]),
+        "workspace_id": str(record["workspace_id"]),
+        "herdr_session": str(record["herdr_session"]),
+        "title": str(record["title"]),
+        "created_at": str(record["created_at"]),
+    }
 
 
 def list_workspaces() -> list[dict[str, Any]]:
     with _lock:
-        rows = [dict(row) for row in _load("chat_workspaces", "workspaces", _WORKSPACE_FIELDS)["workspaces"]]
-    rows.sort(key=lambda item: (item["order"], item["created_at"], item["id"]))
-    return rows
+        with _database() as connection:
+            rows = connection.execute(
+                "SELECT id, path, title, created_at, sort_order FROM workspaces "
+                "ORDER BY sort_order, created_at, id"
+            ).fetchall()
+    return [_workspace_from_record(row) for row in rows]
 
 
 def list_threads(workspace_id: str | None = None) -> list[dict[str, Any]]:
     with _lock:
-        rows = _load("chat_threads", "threads", _THREAD_FIELDS, thread=True)["threads"]
-        if workspace_id is not None:
-            rows = [row for row in rows if row["workspace_id"] == workspace_id]
-        out = [dict(row) for row in rows]
-    out.sort(key=lambda item: (item["created_at"], item["id"]))
-    return out
+        with _database() as connection:
+            if workspace_id is None:
+                rows = connection.execute(
+                    "SELECT id, workspace_id, herdr_session, title, created_at "
+                    "FROM threads ORDER BY created_at, id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id, workspace_id, herdr_session, title, created_at "
+                    "FROM threads WHERE workspace_id = ? ORDER BY created_at, id",
+                    (workspace_id,),
+                ).fetchall()
+    return [_thread_from_record(row) for row in rows]
 
 
 def get_workspace(workspace_id: str) -> dict[str, Any] | None:
     with _lock:
-        for row in _load("chat_workspaces", "workspaces", _WORKSPACE_FIELDS)["workspaces"]:
-            if row["id"] == workspace_id:
-                return dict(row)
-    return None
+        with _database() as connection:
+            row = connection.execute(
+                "SELECT id, path, title, created_at, sort_order FROM workspaces "
+                "WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+    return _workspace_from_record(row) if row is not None else None
 
 
 def get_thread(thread_id: str) -> dict[str, Any] | None:
     with _lock:
-        for row in _load("chat_threads", "threads", _THREAD_FIELDS, thread=True)["threads"]:
-            if row["id"] == thread_id:
-                return dict(row)
-    return None
+        with _database() as connection:
+            row = connection.execute(
+                "SELECT id, workspace_id, herdr_session, title, created_at "
+                "FROM threads WHERE id = ?",
+                (thread_id,),
+            ).fetchone()
+    return _thread_from_record(row) if row is not None else None
 
 
 def get_thread_by_session(herdr_session: str) -> dict[str, Any] | None:
     with _lock:
-        for row in _load("chat_threads", "threads", _THREAD_FIELDS, thread=True)["threads"]:
-            if row["herdr_session"] == herdr_session:
-                return dict(row)
-    return None
+        with _database() as connection:
+            row = connection.execute(
+                "SELECT id, workspace_id, herdr_session, title, created_at "
+                "FROM threads WHERE herdr_session = ?",
+                (herdr_session,),
+            ).fetchone()
+    return _thread_from_record(row) if row is not None else None
 
 
 def normalize_delivery(value: Any) -> str:
@@ -348,31 +659,54 @@ def normalize_git_card(value: Any) -> dict[str, Any]:
     return {"files": files, "stat": stat}
 
 
-def _load_messages() -> dict[str, Any]:
-    path = runtime_paths.store("chat_messages")
+def _decode_json(value: Any, expected: type) -> Any:
+    if not isinstance(value, str):
+        raise ChatLedgerError("row_corrupt")
     try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {"version": 1, "messages": []}
-    except (OSError, UnicodeError) as exc:
-        raise ValueError("群聊消息账本不可读") from exc
-    try:
-        data = json.loads(raw)
+        decoded = json.loads(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError("群聊消息账本已损坏") from exc
-    if (
-        not isinstance(data, dict)
-        or set(data) != {"version", "messages"}
-        or type(data["version"]) is not int
-        or data["version"] != 1
-        or not isinstance(data["messages"], list)
-    ):
-        raise ValueError("群聊消息账本格式无效")
-    rows = [_validate_message(row) for row in data["messages"]]
-    ids = [row["id"] for row in rows]
-    if len(ids) != len(set(ids)):
-        raise ValueError("群聊消息账本包含重复 ID")
-    return {"version": 1, "messages": rows}
+        raise ChatLedgerError("row_corrupt") from exc
+    if not isinstance(decoded, expected):
+        raise ChatLedgerError("row_corrupt")
+    return decoded
+
+
+def _message_from_record(record: sqlite3.Row) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "id": str(record["id"]),
+        "session": str(record["session"]),
+        "kind": str(record["kind"]),
+        "sender": str(record["sender"]),
+        "text": str(record["text"]),
+        "to": _decode_json(record["recipients"], list),
+        "ts": int(record["ts"]),
+    }
+    for name in ("delivery", "duration_ms", "source"):
+        if record[name] is not None:
+            row[name] = record[name]
+    for name in ("notified_to", "read_by"):
+        if record[name] is not None:
+            row[name] = _decode_json(record[name], list)
+    if record["git"] is not None:
+        row["git"] = _decode_json(record["git"], dict)
+    if record["direct"] is not None:
+        row["direct"] = bool(record["direct"])
+    return _validate_message(row)
+
+
+_MESSAGE_SELECT = (
+    "SELECT id, session, kind, sender, text, recipients, ts, delivery, "
+    "notified_to, read_by, duration_ms, git, source, direct FROM messages"
+)
+
+
+def _find_message(
+    connection: sqlite3.Connection, message_id: str,
+) -> dict[str, Any] | None:
+    record = connection.execute(
+        f"{_MESSAGE_SELECT} WHERE id = ?", (message_id,),
+    ).fetchone()
+    return _message_from_record(record) if record is not None else None
 
 
 def append_message(
@@ -431,11 +765,8 @@ def append_message(
         row["direct"] = True
     row = _validate_message(row)
     with _lock:
-        data = _load_messages()
-        data["messages"].append(row)
-        if len(data["messages"]) > _MAX_MESSAGES:
-            data["messages"] = data["messages"][-_MAX_MESSAGES:]
-        _write("chat_messages", data)
+        with _database() as connection:
+            _insert_message(connection, row)
     return dict(row)
 
 
@@ -449,15 +780,16 @@ def replace_message_text(message_id: str, text: str) -> dict[str, Any] | None:
     if len(body) > 16_384:
         body = body[:16_384]
     with _lock:
-        data = _load_messages()
-        for index, row in enumerate(data["messages"]):
-            if row["id"] != message_id:
-                continue
-            updated = dict(row)
-            updated["text"] = body
-            data["messages"][index] = _validate_message(updated)
-            _write("chat_messages", data)
-            return dict(data["messages"][index])
+        with _database() as connection:
+            row = _find_message(connection, message_id)
+            if row is not None:
+                updated = dict(row)
+                updated["text"] = body
+                updated = _validate_message(updated)
+                connection.execute(
+                    "UPDATE messages SET text = ? WHERE id = ?", (body, message_id),
+                )
+                return updated
     return None
 
 
@@ -469,18 +801,22 @@ def mark_message_notified(message_id: str, recipients: list[str]) -> dict[str, A
     if not extra:
         return None
     with _lock:
-        data = _load_messages()
-        for index, row in enumerate(data["messages"]):
-            if row["id"] != message_id:
-                continue
-            updated = dict(row)
-            seen = {item for item in (updated.get("notified_to") or []) if isinstance(item, str)}
-            for item in extra:
-                seen.add(item)
-            updated["notified_to"] = sorted(seen)
-            data["messages"][index] = _validate_message(updated)
-            _write("chat_messages", data)
-            return dict(data["messages"][index])
+        with _database() as connection:
+            row = _find_message(connection, message_id)
+            if row is not None:
+                updated = dict(row)
+                seen = {
+                    item for item in (updated.get("notified_to") or [])
+                    if isinstance(item, str)
+                }
+                seen.update(extra)
+                updated["notified_to"] = sorted(seen)
+                updated = _validate_message(updated)
+                connection.execute(
+                    "UPDATE messages SET notified_to = ? WHERE id = ?",
+                    (_json_value(updated["notified_to"]), message_id),
+                )
+                return updated
     return None
 
 
@@ -493,31 +829,34 @@ def mark_messages_read(session: str, recipient: str) -> list[dict[str, Any]]:
         return []
     changed: list[dict[str, Any]] = []
     with _lock:
-        data = _load_messages()
-        dirty = False
-        for index, row in enumerate(data["messages"]):
-            if row.get("session") != session or row.get("kind") != "me":
-                continue
-            targets = [item for item in (row.get("to") or []) if isinstance(item, str)]
-            if dest not in targets:
-                continue
-            notified = {
-                item for item in (row.get("notified_to") or []) if isinstance(item, str)
-            }
-            if dest not in notified:
-                continue
-            seen = {
-                item for item in (row.get("read_by") or []) if isinstance(item, str)
-            }
-            if dest in seen:
-                continue
-            updated = dict(row)
-            updated["read_by"] = sorted(seen | {dest})
-            data["messages"][index] = _validate_message(updated)
-            changed.append(dict(data["messages"][index]))
-            dirty = True
-        if dirty:
-            _write("chat_messages", data)
+        with _database() as connection:
+            records = connection.execute(
+                f"{_MESSAGE_SELECT} WHERE session = ? AND kind = 'me' ORDER BY ts, id",
+                (session,),
+            ).fetchall()
+            for record in records:
+                row = _message_from_record(record)
+                targets = [item for item in (row.get("to") or []) if isinstance(item, str)]
+                if dest not in targets:
+                    continue
+                notified = {
+                    item for item in (row.get("notified_to") or []) if isinstance(item, str)
+                }
+                if dest not in notified:
+                    continue
+                seen = {
+                    item for item in (row.get("read_by") or []) if isinstance(item, str)
+                }
+                if dest in seen:
+                    continue
+                updated = dict(row)
+                updated["read_by"] = sorted(seen | {dest})
+                updated = _validate_message(updated)
+                connection.execute(
+                    "UPDATE messages SET read_by = ? WHERE id = ?",
+                    (_json_value(updated["read_by"]), updated["id"]),
+                )
+                changed.append(updated)
     return changed
 
 
@@ -528,15 +867,17 @@ def set_message_duration(message_id: str, duration_ms: int) -> dict[str, Any] | 
     if type(duration_ms) is not int or duration_ms < 0:
         raise ValueError("群聊消息耗时无效")
     with _lock:
-        data = _load_messages()
-        for index, row in enumerate(data["messages"]):
-            if row["id"] != message_id:
-                continue
-            updated = dict(row)
-            updated["duration_ms"] = duration_ms
-            data["messages"][index] = _validate_message(updated)
-            _write("chat_messages", data)
-            return dict(data["messages"][index])
+        with _database() as connection:
+            row = _find_message(connection, message_id)
+            if row is not None:
+                updated = dict(row)
+                updated["duration_ms"] = duration_ms
+                updated = _validate_message(updated)
+                connection.execute(
+                    "UPDATE messages SET duration_ms = ? WHERE id = ?",
+                    (duration_ms, message_id),
+                )
+                return updated
     return None
 
 
@@ -546,18 +887,20 @@ def set_message_git(message_id: str, git: dict[str, Any] | None) -> dict[str, An
         raise ValueError("群聊消息 ID 无效")
     card = normalize_git_card(git) if git is not None else None
     with _lock:
-        data = _load_messages()
-        for index, row in enumerate(data["messages"]):
-            if row["id"] != message_id:
-                continue
-            updated = dict(row)
-            if card is None:
-                updated.pop("git", None)
-            else:
-                updated["git"] = card
-            data["messages"][index] = _validate_message(updated)
-            _write("chat_messages", data)
-            return dict(data["messages"][index])
+        with _database() as connection:
+            row = _find_message(connection, message_id)
+            if row is not None:
+                updated = dict(row)
+                if card is None:
+                    updated.pop("git", None)
+                else:
+                    updated["git"] = card
+                updated = _validate_message(updated)
+                connection.execute(
+                    "UPDATE messages SET git = ? WHERE id = ?",
+                    (_json_value(card) if card is not None else None, message_id),
+                )
+                return updated
     return None
 
 
@@ -566,10 +909,10 @@ def list_messages(session: str, limit: int = 200) -> list[dict[str, Any]]:
         raise ValueError("herdr_session 无效")
     cap = max(1, min(int(limit), 200))
     with _lock:
-        rows = [
-            dict(row)
-            for row in _load_messages()["messages"]
-            if row["session"] == session
-        ]
-    rows.sort(key=lambda item: (item["ts"], item["id"]))
-    return rows[-cap:]
+        with _database() as connection:
+            records = connection.execute(
+                f"{_MESSAGE_SELECT} WHERE session = ? "
+                "ORDER BY ts DESC, id DESC LIMIT ?",
+                (session, cap),
+            ).fetchall()
+    return [_message_from_record(record) for record in reversed(records)]

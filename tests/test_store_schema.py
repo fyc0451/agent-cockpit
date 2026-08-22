@@ -56,6 +56,7 @@ def test_accepted_sqlite_stores_use_lazy_read_only_openers(
     from agent_cockpit import operation_store
     from agent_cockpit import runtime_provider_store
     from agent_cockpit import terminal_ticket_store
+    from agent_cockpit import chat_ledger
 
     initializers = {
         "runtime_provider": lambda path: runtime_provider_store.initialize(
@@ -65,6 +66,7 @@ def test_accepted_sqlite_stores_use_lazy_read_only_openers(
         "operation_journal": operation_store.initialize,
         "project_memory": memory_store.initialize,
         "terminal_ticket": terminal_ticket_store.initialize,
+        "chat_ledger": chat_ledger.initialize,
     }
     for name, initialize in initializers.items():
         initialize(runtime_paths.store(name)).close()
@@ -80,7 +82,7 @@ def test_accepted_sqlite_stores_use_lazy_read_only_openers(
         ) == before
         assert not Path(f"{runtime_paths.store(name)}-wal").exists()
         assert not Path(f"{runtime_paths.store(name)}-shm").exists()
-    assert len(store_schema._APP_OWNED_STORES) == 21
+    assert len(store_schema._APP_OWNED_STORES) == 22
     assert "workspace_work" in store_schema._APP_OWNED_STORES
     assert "workspace_work" not in store_schema._ACCEPTED_SQLITE_STORES
     assert "workspace_execution" in store_schema._APP_OWNED_STORES

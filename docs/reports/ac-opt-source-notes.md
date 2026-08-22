@@ -23,7 +23,7 @@
 - 本地 required backend lane：`483 passed in 9.37s`。
 - Web：`26 files / 220 tests passed`；production build 通过。
 - 推送后的 `Fast required` workflow 被触发，但 GitHub 标注账户近期付款失败或 spending limit 不足，job 未启动；这不是测试失败，也不是成功运行。
-- `agent_cockpit/chat_ledger.py` 仍设置 `_MAX_MESSAGES = 500` 并截断 JSON 历史。
+- 聊天账本已迁到 `chat-ledger.sqlite3`：SQLite 是唯一写入与就绪检查权威，旧三份 JSON 仅在首次初始化时作为只读迁移输入。
 - `agent_cockpit/scheduler_projection.py` 仍返回 `readonly_projection_only`。
 - `agent_cockpit/workspace_dispatch_service.py` 仍传 `approval_required=False`。
 - `web/features/group-chat/AgentInteractModal.tsx` 仍有 `send('y Enter', 'keys')`。
@@ -70,9 +70,9 @@ worktree 能提供良好隔离，但日常群聊 Agent 仍共享目录，全面�
 
 如果继续维持 private 仓库且不升级套餐，仓库内提供一条统一 fast 命令，并把“必须本地执行并附结果”写入合并清单；如果修复 GitHub payment/spending limit，则等 `Fast required / Python + web` 首次真实绿灯。验收标准是开发者和 Agent 都能用一个入口重跑相同的 backend/Web/build 基线。
 
-### M2 · 聊天 ledger 单一权威
+### M2 · 已完成：聊天 ledger 单一权威
 
-单独把 JSON 截断账本迁到 SQLite，保持现有 HTTP/SSE 契约与 read-model 不变。验收覆盖：重启恢复、超过 500 条消息不丢历史、迁移幂等、迁移失败可回滚、旧数据校验一致。未知来源的工作区根层 `cockpit.db` 不删除、不复用，先确认 owner 和用途。
+本批单独把 JSON 截断账本迁到 SQLite，保持现有 HTTP/SSE 契约与 read-model 不变。SQLite 不再截断 500 条以上历史；首次访问在单一事务中导入旧 workspace/thread/message JSON，成功后不再重读，失败则回滚 SQLite 且不改旧文件，可安全重试。未知来源的工作区根层 `cockpit.db` 未删除、未复用。
 
 ### M3 · 一个 managed worktree 纵切
 

@@ -1,7 +1,7 @@
 """4.0 团队 topic 账本。与本机群 chat_ledger 彻底隔离。
 
 团队消息只写入 store ``team_messages``（``team-messages.json``）。
-本模块不得 import ``chat_ledger``，也不得改 ``chat-messages.json``。
+本模块不得 import ``chat_ledger``，也不得改 ``chat-ledger.sqlite3``。
 """
 from __future__ import annotations
 

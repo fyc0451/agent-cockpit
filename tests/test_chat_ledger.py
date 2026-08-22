@@ -1,7 +1,10 @@
 """Cockpit 3.0 工作区 / 群聊账本：只改登记，不删盘。"""
 from __future__ import annotations
 
+import importlib
 import json
+import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -56,6 +59,32 @@ def test_append_and_list_messages_by_session(isolated_ledger):
     assert rows[0]["text"] == "hello"
     assert rows[0].get("delivery") is None
     assert rows[1]["kind"] == "agent"
+
+
+def test_messages_survive_module_reload(isolated_ledger):
+    saved = chat_ledger.append_message(
+        "restart-1", kind="agent", sender="TopazOwl", text="持久结论",
+        to=["human"], ts=1000,
+    )
+    reloaded = importlib.reload(chat_ledger)
+    assert reloaded.list_messages("restart-1") == [saved]
+
+
+def test_more_than_500_messages_are_retained(isolated_ledger):
+    for index in range(550):
+        chat_ledger.append_message(
+            "long-1", kind="agent", sender="worker", text=f"message-{index}",
+            to=["human"], ts=index,
+        )
+    database = isolated_ledger["data"] / "chat-ledger.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM messages WHERE session = 'long-1'"
+        ).fetchone()[0] == 550
+    visible = chat_ledger.list_messages("long-1", 200)
+    assert len(visible) == 200
+    assert visible[0]["text"] == "message-350"
+    assert visible[-1]["text"] == "message-549"
 
 
 def test_append_queue_message_and_mark_notified(isolated_ledger):
@@ -203,17 +232,125 @@ def test_corrupt_json_fail_closed(isolated_ledger):
         chat_ledger.list_workspaces()
 
 
-def test_store_files_are_versioned_json(isolated_ledger):
+def test_sqlite_is_sole_authority_for_new_writes(isolated_ledger):
     proj = _project(isolated_ledger)
     ws = chat_ledger.create_workspace(str(proj))
     chat_ledger.create_thread(ws["id"], "sess-1")
-    workspaces = json.loads(
-        (isolated_ledger["data"] / "chat-workspaces.json").read_text(encoding="utf-8")
+    chat_ledger.append_message(
+        "sess-1", kind="me", sender="human", text="hello", to=["agent"],
     )
-    threads = json.loads(
-        (isolated_ledger["data"] / "chat-threads.json").read_text(encoding="utf-8")
+    database = isolated_ledger["data"] / "chat-ledger.sqlite3"
+    assert stat.S_IMODE(database.stat().st_mode) == 0o600
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("SELECT id FROM workspaces").fetchone()[0] == ws["id"]
+        assert connection.execute("SELECT herdr_session FROM threads").fetchone()[0] == "sess-1"
+        assert connection.execute("SELECT text FROM messages").fetchone()[0] == "hello"
+    assert not (isolated_ledger["data"] / "chat-workspaces.json").exists()
+    assert not (isolated_ledger["data"] / "chat-threads.json").exists()
+    assert not (isolated_ledger["data"] / "chat-messages.json").exists()
+
+
+def _write_legacy_ledger(isolated_ledger) -> tuple[dict, dict, dict]:
+    proj = _project(isolated_ledger)
+    workspace = {
+        "id": "ws_111111111111",
+        "path": str(proj.resolve()),
+        "title": "legacy",
+        "created_at": "2026-08-22T00:00:00+00:00",
+        "order": 0,
+    }
+    thread = {
+        "id": "th_222222222222",
+        "workspace_id": workspace["id"],
+        "herdr_session": "legacy-1",
+        "title": "legacy-1",
+        "created_at": "2026-08-22T00:00:01+00:00",
+    }
+    message = {
+        "id": "msg_333333333333",
+        "session": "legacy-1",
+        "kind": "agent",
+        "sender": "TopazOwl",
+        "text": "legacy message",
+        "to": ["human"],
+        "ts": 1000,
+        "delivery": "queue",
+        "notified_to": ["human"],
+        "read_by": ["human"],
+        "duration_ms": 25,
+        "git": {"files": 2, "stat": "2 files changed"},
+        "source": "agent-mail",
+        "direct": False,
+    }
+    stores = (
+        ("chat-workspaces.json", {"version": 1, "workspaces": [workspace]}),
+        ("chat-threads.json", {"version": 1, "threads": [thread]}),
+        ("chat-messages.json", {"version": 1, "messages": [message]}),
     )
-    assert workspaces["version"] == 1
-    assert threads["version"] == 1
-    assert workspaces["workspaces"][0]["id"] == ws["id"]
-    assert threads["threads"][0]["herdr_session"] == "sess-1"
+    for name, body in stores:
+        (isolated_ledger["data"] / name).write_text(
+            json.dumps(body, ensure_ascii=False), encoding="utf-8",
+        )
+    return workspace, thread, message
+
+
+def test_legacy_json_migration_is_idempotent(isolated_ledger):
+    workspace, thread, message = _write_legacy_ledger(isolated_ledger)
+    assert chat_ledger.list_workspaces() == [workspace]
+    assert chat_ledger.list_threads() == [thread]
+    assert chat_ledger.list_messages("legacy-1") == [message]
+
+    legacy_messages = isolated_ledger["data"] / "chat-messages.json"
+    changed = json.loads(legacy_messages.read_text(encoding="utf-8"))
+    changed["messages"].append({
+        **message, "id": "msg_444444444444", "text": "must not reimport", "ts": 2000,
+    })
+    legacy_messages.write_text(json.dumps(changed), encoding="utf-8")
+
+    reloaded = importlib.reload(chat_ledger)
+    assert reloaded.list_messages("legacy-1") == [message]
+    with sqlite3.connect(isolated_ledger["data"] / "chat-ledger.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key = 'legacy_migration'"
+        ).fetchone()[0] == "complete"
+
+
+def test_migration_failure_rolls_back_and_can_retry(isolated_ledger, monkeypatch):
+    workspace, thread, message = _write_legacy_ledger(isolated_ledger)
+    legacy_paths = [
+        isolated_ledger["data"] / "chat-workspaces.json",
+        isolated_ledger["data"] / "chat-threads.json",
+        isolated_ledger["data"] / "chat-messages.json",
+    ]
+    before = {path: path.read_bytes() for path in legacy_paths}
+    real_migrate = chat_ledger._migrate_snapshot
+
+    def fail_after_first_insert(connection, snapshot):
+        connection.execute(
+            "INSERT INTO workspaces (id, path, title, created_at, sort_order) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                workspace["id"], workspace["path"], workspace["title"],
+                workspace["created_at"], workspace["order"],
+            ),
+        )
+        raise RuntimeError("injected migration failure")
+
+    monkeypatch.setattr(chat_ledger, "_migrate_snapshot", fail_after_first_insert)
+    with pytest.raises(RuntimeError, match="injected migration failure"):
+        chat_ledger.list_workspaces()
+
+    database = isolated_ledger["data"] / "chat-ledger.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall() == []
+    assert {path: path.read_bytes() for path in legacy_paths} == before
+
+    monkeypatch.setattr(chat_ledger, "_migrate_snapshot", real_migrate)
+    assert chat_ledger.list_workspaces() == [workspace]
+    assert chat_ledger.list_threads() == [thread]
+    assert chat_ledger.list_messages("legacy-1") == [message]

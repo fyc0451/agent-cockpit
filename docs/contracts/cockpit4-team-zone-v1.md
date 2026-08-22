@@ -8,7 +8,7 @@
 ## 已拍板
 
 - 多 topic：一个 TeamProject 可以有多个 topic。第一刀 UI 先列出已加入的 topic，不让成员自建无限 topic。
-- 「交给 leader」：只发生在团队区；点选，也可设默认。走团队通道，**不写**本机 `chat-messages.json`。
+- 「交给 leader」：只发生在团队区；点选，也可设默认。走团队通道，**不写**本机 `chat-ledger.sqlite3`。
 - 一人多机：同一 Human + Hub + topic 同时只允许一个 active Session；后上线踢前一台。第一刀至少把冲突打成 409，踢人可跟绑定 API。
 - **两本账彻底隔离（A）**：团队消息只待在团队区。没有「抄进本机群」。远程 `@` ≠ 执行，默认不 `pane_send`。
 
@@ -18,7 +18,7 @@
 
 1. 设置增加「团队」页：填 Team Hub + Human issuer（已有 `/api/agent-mail/config`）。不配就不出现团队区。
 2. 侧栏工作区下面加「团队」区：登录团队账号 → 列出已加入 topic → 绑定**已有**本机 Session（唯一 leader 对外）。Hub 不收本机路径。
-3. 团队时间线走独立账本 `team-messages.json`（store `team_messages`）。禁止把 Hub 历史写入 `chat-messages.json`。
+3. 团队时间线走独立账本 `team-messages.json`（store `team_messages`）。禁止把 Hub 历史写入 `chat-ledger.sqlite3`。
 4. 团队区发消息 / 「交给 leader」只走 `/api/team*` 与团队账本。本机瀑布流、未读、打断/排队继续不动。
 
 ## 明确不做
@@ -42,7 +42,7 @@
 
 - 未配 Hub：设置没有团队区入口以外的副作用；群聊侧栏只有工作区。
 - 配了 Hub：侧栏出现团队区；绑定本机 Session 成功后可在团队区发一条、看见一条。
-- 团队消息文件是 `~/dashboard-data/team-messages.json`；`chat-messages.json` 字节不因团队收发而增加。
+- 团队消息文件是 `~/dashboard-data/team-messages.json`；`chat-ledger.sqlite3` 字节不因团队收发而增加。
 - 「交给 leader」不在本机群多出气泡，也不默认 `pane_send`。
 - 侧栏 topic 来自 Hub `/api/team/projects`（已加入），不是只从本机绑定抠。
 - 绑定冲突 HTTP 409；确认后 `replace=true` 改绑。

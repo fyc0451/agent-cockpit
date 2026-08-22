@@ -328,9 +328,7 @@ class TestDefaultCompat:
             "push": "dashboard-data/push.sqlite3",
             "vapid": "dashboard-data/vapid-private.pem",
             "mail_projects": "dashboard-data/mail-projects.json",
-            "chat_workspaces": "dashboard-data/chat-workspaces.json",
-            "chat_threads": "dashboard-data/chat-threads.json",
-            "chat_messages": "dashboard-data/chat-messages.json",
+            "chat_ledger": "dashboard-data/chat-ledger.sqlite3",
             "team_messages": "dashboard-data/team-messages.json",
             "team_sessions": "dashboard-data/team-sessions.json",
             "inbox_route": "dashboard-data/team-inbox-route.json",
@@ -340,7 +338,7 @@ class TestDefaultCompat:
         }
         for name, rel in expect.items():
             assert runtime_paths.store(name) == fake_home / rel, name
-        assert len(runtime_paths.STORES) == 26
+        assert len(runtime_paths.STORES) == 24
         assert runtime_paths.STORES["workspace_work"] == (
             "data", "workspace-work.sqlite3", "file", "server", 0o600,
         )

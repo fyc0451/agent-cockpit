@@ -464,9 +464,6 @@ _SETTINGS_KEYS = frozenset({
 })
 _JSON_VERSIONED: dict[str, int] = {
     "mail_projects": 1,
-    "chat_workspaces": 1,
-    "chat_threads": 1,
-    "chat_messages": 1,
     "team_messages": 1,
     "team_sessions": 1,
     "inbox_route": 2,
@@ -479,14 +476,13 @@ _APP_OWNED_STORES = (
     "project_registry", "workspace_work", "workspace_execution",
     "runtime_provider", "event_journal", "operation_journal",
     "project_memory", "terminal_ticket",
-    "settings", "mail_projects", "chat_workspaces", "chat_threads",
-    "chat_messages", "team_messages",
+    "settings", "mail_projects", "chat_ledger", "team_messages",
     "team_sessions", "inbox_route", "typing",
     "file_roots", "vapid",
 )
 _ACCEPTED_SQLITE_STORES = (
     "runtime_provider", "event_journal", "operation_journal",
-    "project_memory", "terminal_ticket",
+    "project_memory", "terminal_ticket", "chat_ledger",
 )
 
 
@@ -835,6 +831,9 @@ def _accepted_sqlite_opener(name: str):
     if name == "terminal_ticket":
         from . import terminal_ticket_store as module
         return module.open_existing, module.TerminalTicketError
+    if name == "chat_ledger":
+        from . import chat_ledger as module
+        return module.open_existing, module.ChatLedgerError
     raise KeyError(name)
 
 
@@ -1055,9 +1054,6 @@ def _check_settings(path: Path | None = None) -> dict[str, Any]:
 # Exact top-level shapes for versioned JSON (0.3.x).
 _JSON_SHAPES: dict[str, frozenset[str]] = {
     "mail_projects": frozenset({"version", "sessions"}),
-    "chat_workspaces": frozenset({"version", "workspaces"}),
-    "chat_threads": frozenset({"version", "threads"}),
-    "chat_messages": frozenset({"version", "messages"}),
     "team_messages": frozenset({"version", "messages"}),
     "team_sessions": frozenset({"version", "bindings"}),
     "inbox_route": frozenset({"version", "routes"}),
@@ -1113,72 +1109,6 @@ def _check_versioned_json(
             if not isinstance(entry.get("project"), str):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
             if not isinstance(entry.get("session_dir"), str):
-                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    elif name == "chat_workspaces":
-        rows = data.get("workspaces")
-        if not isinstance(rows, list):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        entry_keys = frozenset({"id", "path", "title", "created_at", "order"})
-        for entry in rows:
-            if not isinstance(entry, dict) or set(entry) != entry_keys:
-                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            if (
-                not isinstance(entry["id"], str)
-                or re.fullmatch(r"ws_[0-9a-f]{12}", entry["id"]) is None
-                or not isinstance(entry["path"], str)
-                or not Path(entry["path"]).is_absolute()
-                or not isinstance(entry["title"], str)
-                or not entry["title"]
-                or not isinstance(entry["created_at"], str)
-                or not entry["created_at"]
-                or type(entry["order"]) is not int
-                or entry["order"] < 0
-            ):
-                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    elif name == "chat_threads":
-        rows = data.get("threads")
-        if not isinstance(rows, list):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        entry_keys = frozenset({"id", "workspace_id", "herdr_session", "title", "created_at"})
-        for entry in rows:
-            if not isinstance(entry, dict) or set(entry) != entry_keys:
-                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            if (
-                not isinstance(entry["id"], str)
-                or re.fullmatch(r"th_[0-9a-f]{12}", entry["id"]) is None
-                or not isinstance(entry["workspace_id"], str)
-                or re.fullmatch(r"ws_[0-9a-f]{12}", entry["workspace_id"]) is None
-                or not isinstance(entry["herdr_session"], str)
-                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", entry["herdr_session"]) is None
-                or not isinstance(entry["title"], str)
-                or not entry["title"]
-                or not isinstance(entry["created_at"], str)
-                or not entry["created_at"]
-            ):
-                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    elif name == "chat_messages":
-        rows = data.get("messages")
-        if not isinstance(rows, list):
-            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        entry_keys = frozenset({"id", "session", "kind", "sender", "text", "to", "ts"})
-        for entry in rows:
-            if not isinstance(entry, dict) or set(entry) != entry_keys:
-                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            if (
-                not isinstance(entry["id"], str)
-                or re.fullmatch(r"msg_[0-9a-f]{12}", entry["id"]) is None
-                or not isinstance(entry["session"], str)
-                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", entry["session"]) is None
-                or entry["kind"] not in {"me", "agent", "event", "error"}
-                or not isinstance(entry["sender"], str)
-                or not entry["sender"]
-                or not isinstance(entry["text"], str)
-                or not entry["text"]
-                or not isinstance(entry["to"], list)
-                or any(not isinstance(item, str) or not item for item in entry["to"])
-                or type(entry["ts"]) is not int
-                or entry["ts"] < 0
-            ):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     elif name == "team_messages":
         rows = data.get("messages")
@@ -2074,8 +2004,7 @@ def probe_all_stores() -> list[dict[str, Any]]:
 
     gated("settings", _check_settings)
     for jname in (
-        "mail_projects", "chat_workspaces", "chat_threads",
-        "chat_messages", "team_messages",
+        "mail_projects", "team_messages",
         "team_sessions", "inbox_route",
     ):
         gated(jname, lambda n=jname: _check_versioned_json(n))

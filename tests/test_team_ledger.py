@@ -32,8 +32,8 @@ def isolated_ledger(tmp_path, monkeypatch):
     runtime_paths.reset_cache()
 
 
-def test_append_stays_off_chat_messages(isolated_ledger):
-    chat = runtime_paths.store("chat_messages")
+def test_append_stays_off_chat_ledger(isolated_ledger):
+    chat = runtime_paths.store("chat_ledger")
     team = runtime_paths.store("team_messages")
     assert chat != team
     assert team.name == "team-messages.json"
@@ -65,7 +65,7 @@ def test_hand_to_leader_does_not_copy_local(isolated_ledger):
     marked = team_ledger.mark_handed_to_leader(row["id"])
     assert marked is not None
     assert marked["handed_to_leader"] is True
-    assert not runtime_paths.store("chat_messages").exists()
+    assert not runtime_paths.store("chat_ledger").exists()
     assert chat_ledger.list_messages("cockpit") == []
 
 
@@ -101,7 +101,7 @@ def _forbidden(calls, name):
 
 
 def _chat_bytes():
-    path = runtime_paths.store("chat_messages")
+    path = runtime_paths.store("chat_ledger")
     if not path.exists():
         return None
     return path.read_bytes()
@@ -148,7 +148,7 @@ def team_http(isolated_ledger, monkeypatch):
     }
 
 
-def test_http_send_stays_off_chat_messages(team_http):
+def test_http_send_stays_off_chat_ledger(team_http):
     before = _chat_bytes()
     response = team_http["client"].post(
         "/api/team/ledger/messages",
@@ -162,7 +162,7 @@ def test_http_send_stays_off_chat_messages(team_http):
     assert body["message"]["id"].startswith("tmsg_")
     assert team_http["calls"] == []
     assert _chat_bytes() == before
-    assert not runtime_paths.store("chat_messages").exists()
+    assert not runtime_paths.store("chat_ledger").exists()
     saved = json.loads(runtime_paths.store("team_messages").read_text(encoding="utf-8"))
     assert saved["messages"][0]["text"] == "hello team"
     assert chat_ledger.list_messages("cockpit") == []
@@ -186,7 +186,7 @@ def test_http_receive_hub_history_does_not_copy_local(team_http):
     assert response.json()["message"]["text"] == "hub history line"
     assert team_http["calls"] == []
     assert _chat_bytes() == before
-    assert not runtime_paths.store("chat_messages").exists()
+    assert not runtime_paths.store("chat_ledger").exists()
     listed = team_http["client"].get(
         "/api/team/ledger/messages",
         headers=team_http["headers"],
@@ -216,7 +216,7 @@ def test_http_hand_to_leader_marks_team_ledger_without_pane_send(team_http):
     assert marked["handed_to_leader"] is True
     assert team_http["calls"] == []
     assert _chat_bytes() == before
-    assert not runtime_paths.store("chat_messages").exists()
+    assert not runtime_paths.store("chat_ledger").exists()
     assert chat_ledger.list_messages("cockpit") == []
 
 
@@ -229,8 +229,8 @@ def test_hub_chat_history_proxy_does_not_write_local_chat(team_http, monkeypatch
         "human_api",
         lambda method, path, authorization, payload=None: hub_payload,
     )
-    sentinel = runtime_paths.store("chat_messages")
-    sentinel.write_text('{"version":1,"messages":[]}\n', encoding="utf-8")
+    sentinel = runtime_paths.store("chat_ledger")
+    chat_ledger.initialize(sentinel).close()
     before = sentinel.read_bytes()
     team_before = (
         runtime_paths.store("team_messages").read_bytes()
@@ -291,5 +291,5 @@ def test_unconfigured_hub_keeps_team_ledger_http_absent(isolated_ledger, monkeyp
     )
     assert send.status_code == receive.status_code == hand.status_code == listed.status_code == 404
     assert calls == []
-    assert not runtime_paths.store("chat_messages").exists()
+    assert not runtime_paths.store("chat_ledger").exists()
     assert not runtime_paths.store("team_messages").exists()
