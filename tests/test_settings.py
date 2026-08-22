@@ -572,8 +572,8 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
     monkeypatch.setattr(
         server.hub_client,
         "human_create_invitation",
-        lambda authorization, expires_in: calls.append(
-            ("invite", authorization, expires_in)
+        lambda authorization, expires_in, project_slug=None: calls.append(
+            ("invite", authorization, expires_in, project_slug)
         ) or {"invite_code": "one-time-code", "expires_at": 123},
     )
     monkeypatch.setattr(
@@ -623,10 +623,108 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
     assert calls == [
         ("register", "alice", "Alice", "alice-password-123", "one-time-code"),
         ("profile", "Bearer human.jwt"),
-        ("invite", "Bearer human.jwt", 3600),
+        ("invite", "Bearer human.jwt", 3600, None),
         ("users", "Bearer human.jwt"),
         ("status", "Bearer human.jwt", "alice", "active"),
     ]
+
+
+def test_team_auth_single_approval_provisions_member_before_activating_account(monkeypatch):
+    from fastapi.testclient import TestClient
+    import server
+
+    calls = []
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_list_users",
+        lambda authorization: {
+            "users": [{
+                "subject": "human:alice",
+                "username": "alice",
+                "display_name": "Alice",
+                "roles": ["writer"],
+                "status": "pending",
+                "requested_project_slug": "core",
+            }]
+        },
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_api",
+        lambda method, path, authorization, payload=None: calls.append(
+            ("member", method, path, authorization, payload)
+        ) or {"id": 9, "status": "active"},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_set_user_status",
+        lambda authorization, username, status: calls.append(
+            ("account", authorization, username, status)
+        ) or {"user": {"username": username, "status": status}},
+    )
+    client = TestClient(server.app)
+    client.cookies.set(server.TEAM_AUTH_COOKIE, "human.jwt", path="/api")
+    response = client.post(
+        "/api/team-auth/users/alice/approve-team",
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        (
+            "member", "POST", "/hub/api/projects/core/members", "Bearer human.jwt",
+            {
+                "subject": "human:alice",
+                "display_name": "Alice",
+                "mention_handle": "alice",
+            },
+        ),
+        ("account", "Bearer human.jwt", "alice", "active"),
+    ]
+
+
+def test_team_auth_single_approval_keeps_account_pending_when_hub_fails(monkeypatch):
+    from fastapi.testclient import TestClient
+    import server
+
+    activations = []
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_list_users",
+        lambda _authorization: {
+            "users": [{
+                "subject": "human:alice",
+                "username": "alice",
+                "display_name": "Alice",
+                "status": "pending",
+                "requested_project_slug": "core",
+            }]
+        },
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_api",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            server.hub_client.HumanAPIError(409, "Membership conflict")
+        ),
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_set_user_status",
+        lambda *_args: activations.append(True),
+    )
+    client = TestClient(server.app)
+    client.cookies.set(server.TEAM_AUTH_COOKIE, "human.jwt", path="/api")
+
+    response = client.post(
+        "/api/team-auth/users/alice/approve-team",
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 409
+    assert activations == []
 
 
 # ── M3e: 本地注册身份选择与安全认领 ────────────────────────────

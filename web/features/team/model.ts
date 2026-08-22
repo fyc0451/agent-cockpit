@@ -23,10 +23,12 @@ export interface TeamSessionCandidate {
 }
 
 export interface TeamUser {
+  subject?: string
   username: string
   display_name: string
   roles: string[] // 含 admin 即系统管理员
   status: string // pending | active | disabled
+  requested_project_slug?: string | null
 }
 
 export interface TeamMember {

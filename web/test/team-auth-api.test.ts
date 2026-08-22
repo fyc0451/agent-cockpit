@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { listTeamProjects, requestTeamJoin, teamRegister } from '../api/teamAuth'
+import {
+  approveTeamUser,
+  createTeamInvitation,
+  listTeamProjects,
+  requestTeamJoin,
+  teamRegister,
+} from '../api/teamAuth'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -67,6 +73,39 @@ describe('团队普通成员 API', () => {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mention_handle: 'alice' }),
+    })
+  })
+
+  it('项目邀请绑定目标 topic，一次批准走组合端点', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          invite_code: 'INVITE-CORE',
+          project_slug: 'core',
+          expires_at: 123,
+        }),
+      } as Response)
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ok: true }) } as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(createTeamInvitation('core')).resolves.toEqual({
+      inviteCode: 'INVITE-CORE',
+      projectSlug: 'core',
+      expiresAt: 123,
+    })
+    await approveTeamUser('alice')
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/team-auth/invitations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expires_in: 86400, project_slug: 'core' }),
+      credentials: 'include',
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/team-auth/users/alice/approve-team', {
+      method: 'POST',
+      credentials: 'include',
     })
   })
 })

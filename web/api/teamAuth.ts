@@ -384,12 +384,15 @@ function parseTeamUser(raw: unknown): TeamUser | null {
   const username = typeof raw.username === 'string' ? raw.username : ''
   if (!username) return null
   return {
+    subject: typeof raw.subject === 'string' ? raw.subject : undefined,
     username,
     display_name: typeof raw.display_name === 'string' ? raw.display_name : username,
     roles: Array.isArray(raw.roles)
       ? raw.roles.filter((r): r is string => typeof r === 'string')
       : [],
     status: typeof raw.status === 'string' ? raw.status : 'pending',
+    requested_project_slug:
+      typeof raw.requested_project_slug === 'string' ? raw.requested_project_slug : null,
   }
 }
 
@@ -433,12 +436,33 @@ export async function setTeamUserStatus(username: string, status: string): Promi
   }
 }
 
-/** 生成一次性邀请码（24h 有效，仅全局 admin），返回邀请码明文 */
-export async function createTeamInvitation(): Promise<string> {
+/** 一次批准：先幂等创建团队成员，再激活 Human Auth 账号。 */
+export async function approveTeamUser(username: string): Promise<void> {
+  const response = await fetch(
+    `/api/team-auth/users/${encodeURIComponent(username)}/approve-team`,
+    { method: 'POST', credentials: 'include' },
+  )
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: 'team_approval_failed',
+      message: text || '批准团队成员失败',
+      retryable: false,
+      status: response.status,
+    })
+  }
+}
+
+/** 生成绑定目标 topic 的一次性邀请（24h 有效，仅全局 admin）。 */
+export async function createTeamInvitation(projectSlug: string): Promise<{
+  inviteCode: string
+  projectSlug: string
+  expiresAt: number
+}> {
   const response = await fetch('/api/team-auth/invitations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ expires_in: 86400 }),
+    body: JSON.stringify({ expires_in: 86400, project_slug: projectSlug }),
     credentials: 'include',
   })
   if (!response.ok) {
@@ -450,10 +474,20 @@ export async function createTeamInvitation(): Promise<string> {
     })
   }
   const data = await response.json()
-  if (!isObj(data) || typeof data.invite_code !== 'string' || !data.invite_code) {
+  if (
+    !isObj(data)
+    || typeof data.invite_code !== 'string'
+    || !data.invite_code
+    || typeof data.project_slug !== 'string'
+    || !data.project_slug
+  ) {
     throw new ApiError({ code: 'protocol_error', message: '邀请码响应格式错误', retryable: false })
   }
-  return data.invite_code
+  return {
+    inviteCode: data.invite_code,
+    projectSlug: data.project_slug,
+    expiresAt: typeof data.expires_at === 'number' ? data.expires_at : 0,
+  }
 }
 
 function parseTeamMember(raw: unknown): TeamMember | null {

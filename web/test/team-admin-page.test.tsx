@@ -68,34 +68,38 @@ describe('TeamAdminPage 团队管理页', () => {
       '/api/team-auth/users': {
         users: [
           { username: 'fyc', display_name: '付彦超', roles: ['writer', 'admin'], status: 'active' },
-          { username: 'xieyumin', display_name: '谢玉敏', roles: ['writer'], status: 'pending' },
+          {
+            username: 'xieyumin', display_name: '谢玉敏', roles: ['writer'], status: 'pending',
+            requested_project_slug: 'ready',
+          },
         ],
       },
     })
     expect(await screen.findByText('账号管理')).toBeInTheDocument()
     expect(await screen.findByText(/谢玉敏/)).toBeInTheDocument()
-    await userEvent.setup().click(screen.getByText('批准'))
+    await userEvent.setup().click(screen.getByText('批准加入'))
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
         ([input, init]) =>
-          String(input).includes('/api/team-auth/users/xieyumin') &&
-          (init as RequestInit | undefined)?.method === 'PATCH',
+          String(input).includes('/api/team-auth/users/xieyumin/approve-team') &&
+          (init as RequestInit | undefined)?.method === 'POST',
       )
       expect(call).toBeTruthy()
-      expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({ status: 'active' })
     })
   })
 
-  it('管理员可生成一次性邀请码', async () => {
+  it('管理员可为 topic 生成邀请链接', async () => {
     renderPage({
       '/api/team-auth/status': ADMIN_STATUS,
-      '/api/team/projects': { projects: [] },
+      '/api/team/projects': { projects: [{ slug: 'ready', name: 'hr-ready', id: 1 }] },
       '/api/team-auth/users': { users: [] },
-      '/api/team-auth/invitations': { invite_code: 'INVITE-XYZ' },
+      '/api/team-auth/invitations': {
+        invite_code: 'INVITE-XYZ', project_slug: 'ready', expires_at: 123,
+      },
     })
     await screen.findByText('账号管理')
-    await userEvent.setup().click(screen.getByText('生成一次性邀请码'))
-    expect(await screen.findByText(/INVITE-XYZ/)).toBeInTheDocument()
+    await userEvent.setup().click(screen.getByText('生成团队邀请链接'))
+    expect(await screen.findByText(/team_invite=INVITE-XYZ/)).toBeInTheDocument()
   })
 
   it('管理员可新建 topic，重名错误直接展示', async () => {

@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import {
+  approveTeamUser,
   createTeamInvitation,
   createTeamProject,
   listTeamMembers,
@@ -41,13 +42,21 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
     queryFn: listTeamUsers,
     refetchInterval: 5_000,
   })
-  const [inviteCode, setInviteCode] = useState('')
+  const topicsQ = useQuery({
+    queryKey: ['team-projects'],
+    queryFn: listTeamProjects,
+    refetchInterval: 5_000,
+  })
+  const [selectedProject, setSelectedProject] = useState('')
+  const [inviteUrl, setInviteUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const projectSlug = selectedProject || topicsQ.data?.[0]?.slug || ''
 
   const inviteM = useMutation({
     mutationFn: createTeamInvitation,
-    onSuccess: (code) => {
-      setInviteCode(code)
+    onSuccess: (invitation) => {
+      const base = `${window.location.origin}${window.location.pathname}`
+      setInviteUrl(`${base}#${routes.teamInvite(invitation.inviteCode, invitation.projectSlug)}`)
       setError(null)
     },
     onError: (e) => setError(e instanceof Error ? e.message : String(e)),
@@ -61,20 +70,45 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
     },
     onError: (e) => setError(e instanceof Error ? e.message : String(e)),
   })
-  const busy = inviteM.isPending || statusM.isPending
+  const approveM = useMutation({
+    mutationFn: approveTeamUser,
+    onSuccess: () => {
+      setError(null)
+      void queryClient.invalidateQueries({ queryKey: ['team-admin-users'] })
+      void queryClient.invalidateQueries({ queryKey: ['team-projects'] })
+      void queryClient.invalidateQueries({ queryKey: ['team-members'] })
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  })
+  const busy = inviteM.isPending || statusM.isPending || approveM.isPending
 
   return (
     <section className="panel">
       <h2 className="panel-title">账号管理</h2>
-      <p className="list-sub">新成员用一次性邀请码注册后处于待批准；批准账号不会自动加入任何 topic。</p>
+      <p className="list-sub">发送团队邀请链接；成员注册后一次批准即可激活账号并加入目标 topic。</p>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '12px 0' }}>
-        <Button variant="primary" disabled={busy} onClick={() => inviteM.mutate()}>
-          {inviteM.isPending ? '生成中…' : '生成一次性邀请码'}
+        <select
+          aria-label="邀请加入 topic"
+          className="input"
+          value={projectSlug}
+          onChange={(e) => setSelectedProject(e.target.value)}
+          disabled={busy || !topicsQ.data?.length}
+        >
+          {(topicsQ.data ?? []).map((topic) => (
+            <option key={topic.slug} value={topic.slug}>{topic.name}</option>
+          ))}
+        </select>
+        <Button
+          variant="primary"
+          disabled={busy || !projectSlug}
+          onClick={() => inviteM.mutate(projectSlug)}
+        >
+          {inviteM.isPending ? '生成中…' : '生成团队邀请链接'}
         </Button>
-        {inviteCode && (
+        {inviteUrl && (
           <span>
-            <code>{inviteCode}</code>{' '}
-            <Button onClick={() => void navigator.clipboard?.writeText(inviteCode)}>复制</Button>{' '}
+            <code style={{ wordBreak: 'break-all' }}>{inviteUrl}</code>{' '}
+            <Button onClick={() => void navigator.clipboard?.writeText(inviteUrl)}>复制链接</Button>{' '}
             <span className="list-sub">24 小时内有效，仅显示本次</span>
           </span>
         )}
@@ -89,6 +123,9 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
               <tr key={user.username} style={{ borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
                 <td style={{ padding: '8px 4px' }}>
                   {user.display_name} <span className="list-sub">（{user.username}）</span>
+                  {user.requested_project_slug && (
+                    <span className="list-sub"> · 申请加入 {user.requested_project_slug}</span>
+                  )}
                 </td>
                 <td style={{ padding: '8px 4px' }}>
                   {user.roles.includes('admin') && <Tag tone="accent">管理员</Tag>}{' '}
@@ -96,13 +133,25 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
                 </td>
                 <td style={{ padding: '8px 4px', textAlign: 'right' }}>
                   {!isSelfAdmin && user.status === 'pending' && (
-                    <Button
-                      variant="primary"
-                      disabled={busy}
-                      onClick={() => statusM.mutate({ username: user.username, status: 'active' })}
-                    >
-                      批准
-                    </Button>
+                    user.requested_project_slug
+                      ? (
+                        <Button
+                          variant="primary"
+                          disabled={busy}
+                          onClick={() => approveM.mutate(user.username)}
+                        >
+                          批准加入
+                        </Button>
+                      )
+                      : (
+                        <Button
+                          variant="primary"
+                          disabled={busy}
+                          onClick={() => statusM.mutate({ username: user.username, status: 'active' })}
+                        >
+                          批准账号
+                        </Button>
+                      )
                   )}
                   {!isSelfAdmin && user.status === 'active' && (
                     <Button

@@ -421,12 +421,19 @@ def human_register(
     )
 
 
-def human_create_invitation(authorization: str, expires_in: int) -> dict[str, Any]:
+def human_create_invitation(
+    authorization: str,
+    expires_in: int,
+    project_slug: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"expires_in": expires_in}
+    if project_slug is not None:
+        payload["project_slug"] = project_slug
     return _human_auth_api(
         "POST",
         "/admin/invitations",
         authorization=authorization,
-        payload={"expires_in": expires_in},
+        payload=payload,
     )
 
 

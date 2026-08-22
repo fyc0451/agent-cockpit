@@ -934,7 +934,7 @@ TEAM_API_ROUTES = (
     (re.compile(r"^projects/[A-Za-z0-9_-]+/membership$"), {"GET", "PATCH"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/chat/messages$"), {"GET"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/support-requests$"), {"POST"}),
-    (re.compile(r"^projects/[A-Za-z0-9_-]+/members$"), {"GET"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/members$"), {"GET", "POST"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/members/[0-9]+$"), {"PATCH"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agents$"), {"GET"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agents/[0-9]+$"), {"PATCH"}),
@@ -2219,6 +2219,7 @@ class HumanRegistrationReq(BaseModel):
 
 class HumanInvitationReq(BaseModel):
     expires_in: int = Field(default=24 * 60 * 60, ge=300, le=7 * 24 * 60 * 60)
+    project_slug: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class HumanUserStatusReq(BaseModel):
@@ -4791,7 +4792,7 @@ def api_team_auth_register(req: HumanRegistrationReq):
 def api_team_auth_create_invitation(req: HumanInvitationReq, request: Request):
     try:
         return hub_client.human_create_invitation(
-            _team_human_authorization(request), req.expires_in
+            _team_human_authorization(request), req.expires_in, req.project_slug
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -4821,6 +4822,62 @@ def api_team_auth_update_user(
         raise HTTPException(400, str(exc)) from exc
     except hub_client.HumanAuthError as exc:
         _raise_human_auth_error(exc)
+
+
+@app.post("/api/team-auth/users/{username}/approve-team")
+def api_team_auth_approve_user_and_team(username: str, request: Request):
+    """Provision the invited membership before activating the account.
+
+    Both writes are idempotent. The ordering is fail-closed: if Hub
+    provisioning fails, the Human Auth account remains pending.
+    """
+    authorization = _team_human_authorization(request)
+    try:
+        rows = hub_client.human_list_users(authorization).get("users")
+        if not isinstance(rows, list):
+            raise HTTPException(502, "Human issuer 返回了无效响应")
+        target = next(
+            (
+                row for row in rows
+                if isinstance(row, dict) and row.get("username") == username
+            ),
+            None,
+        )
+        if target is None:
+            raise HTTPException(404, "团队账号不存在")
+        subject = target.get("subject")
+        display_name = target.get("display_name")
+        project_slug = target.get("requested_project_slug")
+        if (
+            not isinstance(subject, str)
+            or not subject.strip()
+            or not isinstance(display_name, str)
+            or not display_name.strip()
+            or not isinstance(project_slug, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project_slug)
+        ):
+            raise HTTPException(409, "该账号不是由团队邀请链接创建，需使用普通账号审批")
+        mention_handle = username.strip().lower()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", mention_handle):
+            raise HTTPException(409, "用户名不能作为团队 @花名")
+        membership = hub_client.human_api(
+            "POST",
+            f"/hub/api/projects/{project_slug}/members",
+            authorization,
+            {
+                "subject": subject,
+                "display_name": display_name,
+                "mention_handle": mention_handle,
+            },
+        )
+        account = hub_client.human_set_user_status(
+            authorization, username, "active"
+        )
+        return {"account": account.get("user", account), "membership": membership}
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
 
 
 @app.get("/api/env-check")

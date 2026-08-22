@@ -78,6 +78,21 @@ describe('WorkspaceBrowser 团队区域', () => {
     expect(screen.getByText(/账号 alice 已提交，当前为待批准/)).toBeInTheDocument()
   })
 
+  it('邀请链接自动打开注册并填入邀请码，不要求成员手抄', async () => {
+    window.location.hash = '#/chat?team_invite=INVITE-LINK&team_project=ready'
+    renderWithAppFrame(
+      <WorkspaceBrowser
+        {...baseProps}
+        teamEnabled={true}
+        teamLoggedIn={false}
+        onTeamRegister={vi.fn()}
+      />,
+    )
+    expect(await screen.findByText('受邀加入 ready')).toBeInTheDocument()
+    expect(screen.getByLabelText('团队邀请码')).toHaveValue('INVITE-LINK')
+    window.location.hash = ''
+  })
+
   it('登录后显示用户名和话题列表', () => {
     renderWithAppFrame(
       <WorkspaceBrowser

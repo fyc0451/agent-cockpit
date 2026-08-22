@@ -66,6 +66,11 @@ function withQuery(path: string, params: Record<string, string | undefined>): st
 export const routes = {
   chat: (opts: { session?: string } = {}): string =>
     withQuery(routePatterns.chat, { session: opts.session }),
+  teamInvite: (inviteCode: string, projectSlug: string): string =>
+    withQuery(routePatterns.chat, {
+      team_invite: inviteCode,
+      team_project: projectSlug,
+    }),
   overview: (): string => routePatterns.overview,
   welcome: (): string => routePatterns.welcome,
   projects: (opts: { wizard?: boolean } = {}): string =>
