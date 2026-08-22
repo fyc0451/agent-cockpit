@@ -3810,6 +3810,17 @@ async def api_team_proxy(route: str, request: Request):
         # Re-check the issuer on every Human API request so a disabled account
         # loses Cockpit access immediately instead of waiting for JWT expiry.
         hub_client.human_profile(authorization)
+        if method == "POST" and normalized == "projects":
+            # topic 名称全局唯一（不区分大小写）；重名 topic 在团队列表里无法区分
+            name = str((payload or {}).get("name") or "").strip()
+            existing = hub_client.human_api("GET", "/hub/api/projects", authorization, None)
+            taken = {
+                str(p.get("name") or "").strip().lower()
+                for p in existing.get("projects", [])
+                if isinstance(p, dict)
+            }
+            if name.lower() in taken:
+                raise HTTPException(409, f"已存在同名 topic「{name}」，请换一个名字")
         return hub_client.human_api(
             method,
             f"/hub/api/{normalized}",

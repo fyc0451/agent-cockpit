@@ -16,3 +16,18 @@ export interface TeamSessionCandidate {
   label: string // 显示标签
   generation: number
 }
+
+export interface TeamUser {
+  username: string
+  display_name: string
+  roles: string[] // 含 admin 即系统管理员
+  status: string // pending | active | disabled
+}
+
+export interface TeamMember {
+  human_id: number
+  display_name: string
+  mention_handle: string
+  role: string // admin | member
+  status: string // invited | active | removed
+}

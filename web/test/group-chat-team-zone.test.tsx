@@ -85,8 +85,7 @@ describe('WorkspaceBrowser 团队区域', () => {
     expect(screen.getByText(/local-session-1/)).toBeInTheDocument()
   })
 
-  it('登录后可以新建 topic，不选本机目录', async () => {
-    const onCreate = vi.fn().mockResolvedValue(undefined)
+  it('新建 topic 已移到团队管理页，侧栏只保留消息相关功能', () => {
     renderWithAppFrame(
       <WorkspaceBrowser
         {...baseProps}
@@ -96,18 +95,10 @@ describe('WorkspaceBrowser 团队区域', () => {
         teamTopics={[]}
         teamBindings={[]}
         onTeamLogout={vi.fn()}
-        onTeamCreateTopic={onCreate}
       />,
     )
-    const user = userEvent.setup()
-    expect(screen.getByText('新建 topic')).toBeInTheDocument()
-    await user.click(screen.getByText('新建 topic'))
-    expect(screen.getByLabelText('topic 名称')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('topic 名称，不选本机目录')).toBeInTheDocument()
-    expect(screen.queryByLabelText('选择目录')).not.toBeInTheDocument()
-    await user.type(screen.getByLabelText('topic 名称'), '销售跟进')
-    await user.click(screen.getByRole('button', { name: '创建' }))
-    expect(onCreate).toHaveBeenCalledWith('销售跟进')
+    expect(screen.queryByText('新建 topic')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('topic 名称')).not.toBeInTheDocument()
   })
 })
 
@@ -143,5 +134,49 @@ describe('WorkspaceBrowser 工作区导航', () => {
     expect(screen.getByText('cockpit')).toBeInTheDocument()
     await userEvent.setup().click(screen.getByText('cockpit'))
     expect(onSelect).toHaveBeenCalledWith('cockpit')
+  })
+})
+
+
+describe('WorkspaceBrowser 团队区管理入口', () => {
+  const entryProps = {
+    groups: [],
+    ungrouped: [],
+    activeSession: null,
+    loading: false,
+    wide: true,
+    onSelect: vi.fn(),
+    onAddWorkspace: vi.fn(),
+    onNewSession: vi.fn(),
+    onRemoveWorkspace: vi.fn(),
+    onStopSession: vi.fn(),
+    onDeleteSession: vi.fn(),
+    onOpenWorkspace: vi.fn(),
+    teamEnabled: true,
+    teamLoggedIn: true,
+    teamUsername: 'fyc',
+    teamTopics: [{ slug: 'proj-a', name: '项目 A', id: 1 }],
+    teamBindings: [],
+    onTeamLogout: vi.fn(),
+    onTeamBindSession: vi.fn(),
+    onTeamSelectTopic: vi.fn(),
+  }
+
+  it('管理员看到团队管理入口，点击跳转；审批功能不在侧栏', async () => {
+    const onOpenTeamAdmin = vi.fn()
+    renderWithAppFrame(
+      <WorkspaceBrowser {...entryProps} teamIsAdmin={true} onOpenTeamAdmin={onOpenTeamAdmin} />,
+    )
+    // 审批/账号管理不在侧栏
+    expect(screen.queryByText('账号管理（管理员）')).not.toBeInTheDocument()
+    expect(screen.queryByText('成员管理 ▾')).not.toBeInTheDocument()
+    const entry = screen.getByText('团队管理（账号 / 成员审批）→')
+    await userEvent.setup().click(entry)
+    expect(onOpenTeamAdmin).toHaveBeenCalled()
+  })
+
+  it('非管理员看不到团队管理入口', () => {
+    renderWithAppFrame(<WorkspaceBrowser {...entryProps} teamIsAdmin={false} />)
+    expect(screen.queryByText('团队管理（账号 / 成员审批）→')).not.toBeInTheDocument()
   })
 })

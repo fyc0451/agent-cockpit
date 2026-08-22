@@ -11,6 +11,7 @@ export default function App() {
     <Routes>
       <Route path={routePatterns.chat} element={<GroupChatPage />} />
       <Route path={routePatterns.settings} element={<GroupChatPage />} />
+      <Route path={routePatterns.team} element={<GroupChatPage />} />
       <Route path="*" element={<Navigate to={routes.chat()} replace />} />
     </Routes>
   )

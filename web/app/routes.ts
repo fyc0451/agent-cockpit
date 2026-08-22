@@ -21,6 +21,7 @@ export const routePatterns = {
   projects: '/projects',
   inbox: '/inbox',
   settings: '/settings',
+  team: '/team',
   projectBase: PROJECT_BASE_PATTERN,
   projectWorkbench: `${PROJECT_BASE_PATTERN}/workbench`,
   projectMemory: `${PROJECT_BASE_PATTERN}/memory`,
@@ -75,6 +76,7 @@ export const routes = {
     withQuery(routePatterns.settings, {
       view: opts.view && opts.view !== 'appearance' ? opts.view : undefined,
     }),
+  team: (): string => routePatterns.team,
   project: {
     workbench: (project: string, opts: { createWorkspace?: boolean } = {}): string =>
       withQuery(`${projectBasePath(project)}/workbench`, {
@@ -115,6 +117,7 @@ export const NAV_ROUTES: readonly NavRouteMeta[] = [
   { name: '项目列表', keywords: 'projects switch', to: routes.projects },
   { name: 'Inbox · 提问与回复', keywords: 'inbox questions', to: () => routes.inbox() },
   { name: '设置', keywords: 'settings preferences', to: () => routes.settings() },
+  { name: '团队管理', keywords: 'team admin members invite approvals', to: routes.team },
   {
     name: '环境自检 Doctor',
     keywords: 'doctor env check diagnostics',

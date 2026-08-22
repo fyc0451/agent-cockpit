@@ -1,7 +1,7 @@
 // 团队区 API 客户端
 
 import { ApiError } from './client'
-import type { TeamTopic, TeamBinding, TeamSessionCandidate } from '../features/team/model'
+import type { TeamTopic, TeamBinding, TeamSessionCandidate, TeamUser, TeamMember } from '../features/team/model'
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -43,11 +43,18 @@ export async function teamLogout(): Promise<void> {
 export async function teamAuthStatus(): Promise<{
   logged_in: boolean
   username: string | null
+  roles: string[]
 }> {
   const response = await fetch('/api/team-auth/status', {
     credentials: 'include',
   })
 
+  // 401 在此处的语义是「未登录」，不是故障：必须作为正常数据返回，
+  // 否则 react-query 会把查询打入 error 重试，登录后的 invalidate
+  // 与在途重试竞争，界面表现为「登录成功却又弹回登录框」。
+  if (response.status === 401) {
+    return { logged_in: false, username: null, roles: [] }
+  }
   if (!response.ok) {
     throw new ApiError({
       code: 'status_failed',
@@ -65,9 +72,24 @@ export async function teamAuthStatus(): Promise<{
     })
   }
 
+  // 后端契约是 authenticated + profile{username,...}；logged_in/顶层 username
+  // 是早期前端假设的字段，兼容两种形态。
+  const profile = isObj(data.profile) ? data.profile : null
+  const username =
+    typeof data.username === 'string'
+      ? data.username
+      : profile && typeof profile.username === 'string'
+        ? profile.username
+        : null
+  const rawRoles = Array.isArray(data.roles)
+    ? data.roles
+    : profile && Array.isArray(profile.roles)
+      ? profile.roles
+      : []
   return {
-    logged_in: data.logged_in === true,
-    username: typeof data.username === 'string' ? data.username : null,
+    logged_in: data.logged_in === true || data.authenticated === true,
+    username,
+    roles: rawRoles.filter((r): r is string => typeof r === 'string'),
   }
 }
 
@@ -283,6 +305,148 @@ export async function teamBindSession(
       code: 'bind_failed',
       message: text || '绑定失败',
       retryable: false,
+    })
+  }
+}
+
+// ---------- 管理员：账号与成员管理 ----------
+
+function parseTeamUser(raw: unknown): TeamUser | null {
+  if (!isObj(raw)) return null
+  const username = typeof raw.username === 'string' ? raw.username : ''
+  if (!username) return null
+  return {
+    username,
+    display_name: typeof raw.display_name === 'string' ? raw.display_name : username,
+    roles: Array.isArray(raw.roles)
+      ? raw.roles.filter((r): r is string => typeof r === 'string')
+      : [],
+    status: typeof raw.status === 'string' ? raw.status : 'pending',
+  }
+}
+
+/** 系统账号列表（仅全局 admin 可用） */
+export async function listTeamUsers(): Promise<TeamUser[]> {
+  const response = await fetch('/api/team-auth/users', { credentials: 'include' })
+  if (!response.ok) {
+    throw new ApiError({
+      code: response.status === 403 ? 'forbidden' : 'users_failed',
+      message: response.status === 403 ? '只有系统管理员可以查看账号' : '读取账号列表失败',
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  const rows = isObj(data) && Array.isArray(data.users) ? data.users : []
+  const users: TeamUser[] = []
+  for (const row of rows) {
+    const user = parseTeamUser(row)
+    if (user) users.push(user)
+  }
+  return users
+}
+
+/** 批准 / 停用 / 恢复系统账号（仅全局 admin） */
+export async function setTeamUserStatus(username: string, status: string): Promise<void> {
+  const response = await fetch(`/api/team-auth/users/${encodeURIComponent(username)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+    credentials: 'include',
+  })
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: 'user_status_failed',
+      message: text || '更新账号状态失败',
+      retryable: false,
+      status: response.status,
+    })
+  }
+}
+
+/** 生成一次性邀请码（24h 有效，仅全局 admin），返回邀请码明文 */
+export async function createTeamInvitation(): Promise<string> {
+  const response = await fetch('/api/team-auth/invitations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expires_in: 86400 }),
+    credentials: 'include',
+  })
+  if (!response.ok) {
+    throw new ApiError({
+      code: response.status === 403 ? 'forbidden' : 'invite_failed',
+      message: response.status === 403 ? '只有系统管理员可以生成邀请码' : '生成邀请码失败',
+      retryable: false,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  if (!isObj(data) || typeof data.invite_code !== 'string' || !data.invite_code) {
+    throw new ApiError({ code: 'protocol_error', message: '邀请码响应格式错误', retryable: false })
+  }
+  return data.invite_code
+}
+
+function parseTeamMember(raw: unknown): TeamMember | null {
+  if (!isObj(raw)) return null
+  const humanId = typeof raw.human_id === 'number' ? raw.human_id : 0
+  if (!humanId) return null
+  return {
+    human_id: humanId,
+    display_name: typeof raw.display_name === 'string' ? raw.display_name : '',
+    mention_handle: typeof raw.mention_handle === 'string' ? raw.mention_handle : '',
+    role: typeof raw.role === 'string' ? raw.role : 'member',
+    status: typeof raw.status === 'string' ? raw.status : '',
+  }
+}
+
+/** topic 成员列表（含待审批的加入申请） */
+export async function listTeamMembers(projectSlug: string): Promise<TeamMember[]> {
+  const response = await fetch(
+    `/api/team/projects/${encodeURIComponent(projectSlug)}/members`,
+    { credentials: 'include' },
+  )
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'members_failed',
+      message: '读取成员列表失败',
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  const rows = isObj(data) && Array.isArray(data.members) ? data.members : []
+  const members: TeamMember[] = []
+  for (const row of rows) {
+    const member = parseTeamMember(row)
+    if (member) members.push(member)
+  }
+  return members
+}
+
+/** 审批加入申请 / 移除 / 恢复成员或调整角色（topic 管理员） */
+export async function patchTeamMember(
+  projectSlug: string,
+  humanId: number,
+  patch: { status?: string; role?: string },
+): Promise<void> {
+  const response = await fetch(
+    `/api/team/projects/${encodeURIComponent(projectSlug)}/members/${humanId}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+      credentials: 'include',
+    },
+  )
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: 'member_patch_failed',
+      message: text || '更新成员失败',
+      retryable: false,
+      status: response.status,
     })
   }
 }

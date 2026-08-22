@@ -130,6 +130,7 @@ describe('routes 单一权威模块', () => {
         routePatterns.inbox,
         routePatterns.settings,
         routePatterns.welcome,
+        routePatterns.team,
       ]
       expect(known).toContain(pathname)
     }

@@ -444,6 +444,48 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
     assert client.get("/api/team/projects", headers=headers).status_code == 401
 
 
+def test_team_proxy_rejects_duplicate_topic_name(monkeypatch):
+    from fastapi.testclient import TestClient
+    import server
+
+    calls = []
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+
+    def fake_human_api(method, path, authorization, payload=None):
+        calls.append((method, path, payload))
+        if method == "GET" and path == "/hub/api/projects":
+            return {"projects": [{"slug": "ready", "name": "hr-ready"}]}
+        return {"ok": True}
+
+    monkeypatch.setattr(server.hub_client, "human_api", fake_human_api)
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_profile",
+        lambda authorization: {"profile": {"username": "fyc"}},
+    )
+    client = TestClient(server.app)
+    client.cookies.set(server.TEAM_AUTH_COOKIE, "human.jwt", path="/api")
+    headers = {"authorization": "Bearer secret"}
+
+    # 同名（忽略大小写与首尾空格）→ 409，且不向 Hub 转发创建请求
+    dup = client.post(
+        "/api/team/projects",
+        headers=headers,
+        json={"name": " HR-Ready ", "slug": "hr-ready-x", "mention_handle": "fyc"},
+    )
+    assert dup.status_code == 409
+    assert "同名" in dup.text
+    assert ("POST", "/hub/api/projects", {"name": " HR-Ready ", "slug": "hr-ready-x", "mention_handle": "fyc"}) not in calls
+
+    # 不同名 → 正常转发
+    ok = client.post(
+        "/api/team/projects",
+        headers=headers,
+        json={"name": "销售跟进", "slug": "sales-x", "mention_handle": "fyc"},
+    )
+    assert ok.status_code == 200
+
+
 def test_team_auth_login_only_proxies_credentials_to_independent_issuer(monkeypatch):
     from fastapi.testclient import TestClient
     import server

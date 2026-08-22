@@ -49,6 +49,7 @@ export interface WorkspaceBrowserProps {
   teamEnabled?: boolean
   teamLoggedIn?: boolean
   teamUsername?: string | null
+  teamIsAdmin?: boolean
   teamTopics?: Array<{ slug: string; name: string; id: number }>
   teamBindings?: Array<{ project_slug: string; session: string }>
   teamActiveTopic?: string | null
@@ -56,7 +57,7 @@ export interface WorkspaceBrowserProps {
   onTeamLogout?: () => Promise<void>
   onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
-  onTeamCreateTopic?: (name: string) => Promise<void>
+  onOpenTeamAdmin?: () => void
 }
 
 /** 工作区分组头行：folder 图标 hover 换展开箭头，尾部动作钮 hover 出现。 */
@@ -145,6 +146,7 @@ export function WorkspaceBrowser({
   teamEnabled = false,
   teamLoggedIn = false,
   teamUsername = null,
+  teamIsAdmin = false,
   teamTopics = [],
   teamBindings = [],
   teamActiveTopic = null,
@@ -152,7 +154,7 @@ export function WorkspaceBrowser({
   onTeamLogout,
   onTeamBindSession,
   onTeamSelectTopic,
-  onTeamCreateTopic,
+  onOpenTeamAdmin,
 }: WorkspaceBrowserProps) {
   const { toggleSidebar } = useAppFrame()
   const [searchOpen, setSearchOpen] = useState(false)
@@ -412,6 +414,7 @@ export function WorkspaceBrowser({
                   <TeamZoneSection
                     loggedIn={teamLoggedIn}
                     username={teamUsername}
+                    isAdmin={teamIsAdmin}
                     topics={teamTopics}
                     bindings={teamBindings}
                     localSessions={[...groups.flatMap((g) => g.rows), ...ungrouped]}
@@ -420,7 +423,7 @@ export function WorkspaceBrowser({
                     onLogout={onTeamLogout || (async () => {})}
                     onBindSession={onTeamBindSession || (async () => {})}
                     onSelectTopic={onTeamSelectTopic || (() => {})}
-                    onCreateTopic={onTeamCreateTopic || (async () => {})}
+                    onOpenTeamAdmin={onOpenTeamAdmin || (() => {})}
                   />
                 )}
               </>
@@ -437,6 +440,7 @@ export function WorkspaceBrowser({
 function TeamZoneSection({
   loggedIn,
   username,
+  isAdmin,
   topics,
   bindings,
   localSessions,
@@ -445,10 +449,11 @@ function TeamZoneSection({
   onLogout,
   onBindSession,
   onSelectTopic,
-  onCreateTopic,
+  onOpenTeamAdmin,
 }: {
   loggedIn: boolean
   username: string | null
+  isAdmin: boolean
   topics: Array<{ slug: string; name: string; id: number }>
   bindings: Array<{ project_slug: string; session: string }>
   localSessions: SessionRow[]
@@ -457,7 +462,7 @@ function TeamZoneSection({
   onLogout: () => Promise<void>
   onBindSession: (projectSlug: string, sessionName: string) => Promise<void>
   onSelectTopic: (projectSlug: string) => void
-  onCreateTopic: (name: string) => Promise<void>
+  onOpenTeamAdmin: () => void
 }) {
   const [showLogin, setShowLogin] = useState(false)
   const [loginUsername, setLoginUsername] = useState('')
@@ -465,10 +470,6 @@ function TeamZoneSection({
   const [loginLoading, setLoginLoading] = useState(false)
   const [loginError, setLoginError] = useState<string | null>(null)
   const [bindingTopic, setBindingTopic] = useState<string | null>(null)
-  const [showCreate, setShowCreate] = useState(false)
-  const [createName, setCreateName] = useState('')
-  const [createLoading, setCreateLoading] = useState(false)
-  const [createError, setCreateError] = useState<string | null>(null)
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -494,22 +495,6 @@ function TeamZoneSection({
       setBindingTopic(null)
     } catch (err) {
       alert(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!createName.trim() || createLoading) return
-    setCreateLoading(true)
-    setCreateError(null)
-    try {
-      await onCreateTopic(createName.trim())
-      setCreateName('')
-      setShowCreate(false)
-    } catch (err) {
-      setCreateError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setCreateLoading(false)
     }
   }
 
@@ -653,95 +638,10 @@ function TeamZoneSection({
         </button>
       </div>
 
-      {topics.length === 0 && !showCreate && (
+      {topics.length === 0 && (
         <div style={{ padding: '8px 12px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', textAlign: 'center' }}>
-          还没有 topic。管理员可以新建一个。
+          还没有 topic。{isAdmin ? '到团队管理页新建。' : '请管理员在团队管理页新建。'}
         </div>
-      )}
-
-      {showCreate ? (
-        <form
-          onSubmit={handleCreate}
-          style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 8px 8px' }}
-        >
-          <input
-            aria-label="topic 名称"
-            type="text"
-            placeholder="topic 名称，不选本机目录"
-            value={createName}
-            onChange={(event) => setCreateName(event.target.value)}
-            disabled={createLoading}
-            style={{
-              padding: '8px 10px',
-              background: 'var(--dsw-alias-bg-base)',
-              border: '1px solid var(--dsw-alias-border-l1)',
-              borderRadius: '6px',
-              color: 'var(--dsw-alias-label-primary)',
-              fontSize: '13px',
-            }}
-          />
-          {createError && (
-            <div style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px', padding: '4px' }}>
-              {createError}
-            </div>
-          )}
-          <div style={{ display: 'flex', gap: '6px' }}>
-            <button
-              type="submit"
-              disabled={createLoading || !createName.trim()}
-              style={{
-                flex: 1,
-                padding: '8px',
-                background: 'var(--dsw-alias-bg-l2)',
-                border: '1px solid var(--dsw-alias-border-l1)',
-                borderRadius: '6px',
-                color: 'var(--dsw-alias-label-primary)',
-                cursor: createLoading ? 'not-allowed' : 'pointer',
-                fontSize: '13px',
-              }}
-            >
-              {createLoading ? '创建中…' : '创建'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setShowCreate(false)
-                setCreateError(null)
-              }}
-              disabled={createLoading}
-              style={{
-                flex: 1,
-                padding: '8px',
-                background: 'var(--dsw-alias-bg-l2)',
-                border: '1px solid var(--dsw-alias-border-l1)',
-                borderRadius: '6px',
-                color: 'var(--dsw-alias-label-primary)',
-                cursor: createLoading ? 'not-allowed' : 'pointer',
-                fontSize: '13px',
-              }}
-            >
-              取消
-            </button>
-          </div>
-        </form>
-      ) : (
-        <button
-          type="button"
-          onClick={() => setShowCreate(true)}
-          style={{
-            width: 'calc(100% - 16px)',
-            margin: '0 8px 8px',
-            padding: '8px 12px',
-            background: 'var(--dsw-alias-bg-l2)',
-            border: '1px solid var(--dsw-alias-border-l1)',
-            borderRadius: '6px',
-            color: 'var(--dsw-alias-label-primary)',
-            cursor: 'pointer',
-            fontSize: '13px',
-          }}
-        >
-          新建 topic
-        </button>
       )}
 
       {topics.map((topic) => {
@@ -855,6 +755,28 @@ function TeamZoneSection({
           </div>
         )
       })}
+
+      {isAdmin && (
+        <button
+          type="button"
+          onClick={() => onOpenTeamAdmin()}
+          style={{
+            display: 'block',
+            width: 'calc(100% - 16px)',
+            margin: '8px 8px 0',
+            padding: '6px 10px',
+            background: 'none',
+            border: 'none',
+            borderTop: '1px solid var(--dsw-alias-border-l1)',
+            color: 'var(--dsw-alias-label-tertiary)',
+            cursor: 'pointer',
+            fontSize: '12px',
+            textAlign: 'left',
+          }}
+        >
+          团队管理（账号 / 成员审批）→
+        </button>
+      )}
     </div>
   )
 }

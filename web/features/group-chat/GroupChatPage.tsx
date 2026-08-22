@@ -8,6 +8,7 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { routePatterns, routes } from '../../app/routes'
 import { SettingsPage } from '../../pages/SettingsPage'
+import { TeamAdminPage } from '../../pages/TeamAdminPage'
 import {
   deleteHerdrSession,
   fetchHerdrSessions,
@@ -40,7 +41,6 @@ import {
   teamSessionBindings,
   teamBindSession,
   listTeamProjects,
-  createTeamProject,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
 import { requireAuthenticated } from '../../api/auth'
@@ -147,6 +147,7 @@ function NarrowAwareBrowser(props: {
   teamEnabled?: boolean
   teamLoggedIn?: boolean
   teamUsername?: string | null
+  teamIsAdmin?: boolean
   teamTopics?: Array<{ slug: string; name: string; id: number }>
   teamBindings?: Array<{ project_slug: string; session: string }>
   teamActiveTopic?: string | null
@@ -154,7 +155,7 @@ function NarrowAwareBrowser(props: {
   onTeamLogout?: () => Promise<void>
   onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
-  onTeamCreateTopic?: (name: string) => Promise<void>
+  onOpenTeamAdmin?: () => void
 }) {
   const { narrow, sidebarCollapsed, toggleSidebar } = useAppFrame()
   const closeRail = () => {
@@ -206,6 +207,7 @@ export function GroupChatPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const isSettings = location.pathname === routePatterns.settings
+  const isTeamAdmin = location.pathname === routePatterns.team
   const [searchParams, setSearchParams] = useSearchParams()
   const urlSession = searchParams.get('session')
 
@@ -324,14 +326,6 @@ export function GroupChatPage() {
     setTeamActiveTopic(projectSlug)
   }, [])
 
-  const handleTeamCreateTopic = useCallback(async (name: string) => {
-    const username = teamAuthQ.data?.username
-    if (!username) throw new Error('未登录团队账号')
-    const topic = await createTeamProject(name, username)
-    await queryClient.invalidateQueries({ queryKey: ['team-projects'] })
-    setTeamActiveTopic(topic.slug)
-  }, [queryClient, teamAuthQ.data?.username])
-
   const liveRows = useMemo(
     () => buildSessionRows(sessionsQ.data ?? [], snapshotQ.data ?? null),
     [sessionsQ.data, snapshotQ.data],
@@ -364,7 +358,7 @@ export function GroupChatPage() {
 
   // 当前会话消失（被停止/删除）→ 切到第一个可用会话，并改掉 URL，避免和 ?session= 互踢
   useEffect(() => {
-    if (isSettings || !didInitRef.current || sessionsQ.isPending) return
+    if (isSettings || isTeamAdmin || !didInitRef.current || sessionsQ.isPending) return
     if (sessionsQ.isFetching && rows.length === 0) return
     if (activeSession && !rows.some((r) => r.name === activeSession)) {
       const next = rows[0]?.name ?? null
@@ -429,7 +423,7 @@ export function GroupChatPage() {
   )
 
   useEffect(() => {
-    if (isSettings) return
+    if (isSettings || isTeamAdmin) return
     const urlChanged = urlSessionRef.current !== urlSession
     urlSessionRef.current = urlSession
     const names = rows.map((row) => row.name)
@@ -1062,7 +1056,7 @@ export function GroupChatPage() {
   return (
     <div className="gc-shell">
       <AppFrame
-        detailsAvailable={!isSettings && !!activeSession}
+        detailsAvailable={!isSettings && !isTeamAdmin && !!activeSession}
         sidebar={
           <SidebarRoot
             onStartSession={startSession}
@@ -1088,6 +1082,7 @@ export function GroupChatPage() {
                 teamEnabled={teamEnabled}
                 teamLoggedIn={teamAuthQ.data?.logged_in ?? false}
                 teamUsername={teamAuthQ.data?.username ?? null}
+                teamIsAdmin={(teamAuthQ.data?.roles ?? []).includes('admin')}
                 teamTopics={teamTopics}
                 teamBindings={teamBindingsQ.data?.bindings ?? []}
                 teamActiveTopic={teamActiveTopic}
@@ -1095,7 +1090,7 @@ export function GroupChatPage() {
                 onTeamLogout={handleTeamLogout}
                 onTeamBindSession={handleTeamBindSession}
                 onTeamSelectTopic={handleTeamSelectTopic}
-                onTeamCreateTopic={handleTeamCreateTopic}
+                onOpenTeamAdmin={() => navigate(routes.team())}
               />
             )}
           </SidebarRoot>
@@ -1121,7 +1116,7 @@ export function GroupChatPage() {
       >
         <section className="gc-main">
           <div className="gc-toolbar">
-            <span className="gc-toolbar-title">{isSettings ? '设置' : (teamActiveTopic ? (teamTopics.find((t) => t.slug === teamActiveTopic)?.name ?? teamActiveTopic) : (activeSession ?? '群聊'))}</span>
+            <span className="gc-toolbar-title">{isSettings ? '设置' : isTeamAdmin ? '团队管理' : (teamActiveTopic ? (teamTopics.find((t) => t.slug === teamActiveTopic)?.name ?? teamActiveTopic) : (activeSession ?? '群聊'))}</span>
             {!isSettings && activeRoot && <span className="gc-toolbar-sub">{rootBase(activeRoot)}</span>}
             {!isSettings && onlyMember && (
               <button
@@ -1150,6 +1145,10 @@ export function GroupChatPage() {
           {isSettings ? (
             <div className="gc-settings">
               <SettingsPage />
+            </div>
+          ) : isTeamAdmin ? (
+            <div className="gc-settings">
+              <TeamAdminPage />
             </div>
           ) : teamActiveTopic ? (
             <TeamTimeline
