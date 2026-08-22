@@ -1,0 +1,128 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Agent Cockpit 最终优化方案（2026-08-22）",
+    "description": "两份优化分析与 main@5101599 的交叉核对结论；详细证据与里程碑见同目录核对说明。",
+    "generatedAt": "2026-08-22T09:37:38Z",
+    "charts": [
+      {
+        "id": "module_size_chart",
+        "title": "核心模块代码规模",
+        "subtitle": "行数表示变更半径，不直接决定重构优先级",
+        "type": "bar",
+        "dataset": "module_size",
+        "sourceId": "module_size_source",
+        "valueFormat": "number",
+        "layout": "full",
+        "encodings": {
+          "x": { "field": "module", "type": "nominal", "label": "模块" },
+          "y": { "field": "lines", "type": "quantitative", "label": "代码行数", "format": "number" },
+          "tooltip": [
+            { "field": "area", "type": "text", "label": "领域" },
+            { "field": "recommended_action", "type": "text", "label": "建议" }
+          ]
+        }
+      }
+    ],
+    "sources": [
+      {
+        "id": "current_repo",
+        "label": "Agent Cockpit main@5101599",
+        "href": "https://github.com/fyc0451/agent-cockpit/commit/5101599"
+      },
+      {
+        "id": "module_size_source",
+        "label": "main@5101599 核心模块行数",
+        "path": "docs/reports/ac-opt-size.csv",
+        "query": {
+          "engine": "duckdb",
+          "sql": "SELECT module, CAST(lines AS INTEGER) AS lines, area, recommended_action FROM read_csv_auto('docs/reports/ac-opt-size.csv', header=true)",
+          "description": "读取 main@5101599 核心模块行数核对表。",
+          "executed_at": "2026-08-22T09:37:38Z",
+          "language": "sql",
+          "tables_used": ["docs/reports/ac-opt-size.csv"]
+        }
+      },
+      {
+        "id": "fast_required_run",
+        "label": "Fast required run 32565271153",
+        "href": "https://github.com/fyc0451/agent-cockpit/actions/runs/32565271153"
+      },
+      {
+        "id": "cross_check_evidence",
+        "label": "完整核对说明与实施路线",
+        "path": "docs/reports/ac-opt-source-notes.md"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "sourceId": "cross_check_evidence",
+        "body": "**最终结论：** `42176d2`、`5101599` 已推送；A（共享目录 + 单写者）为默认，B（隔离 worktree + review/apply）按需启用。路线是：恢复真实门禁 → SQLite 聊天唯一权威 → 一个 managed worktree 纵切 → 增量治理。完整证据、验收标准与非目标见随附核对说明。"
+      },
+      {
+        "id": "module_size",
+        "type": "chart",
+        "chartId": "module_size_chart"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-22T09:37:38Z",
+    "status": "ready",
+    "datasets": {
+      "module_size": [
+        { "module": "server.py", "lines": 11247, "area": "FastAPI 路由与多域编排", "recommended_action": "随稳定纵切逐域提取" },
+        { "module": "herdr_client.py", "lines": 4681, "area": "Agent/PTY/Herdr 客户端", "recommended_action": "Provider 收敛阶段增量拆" },
+        { "module": "GroupChatPage.tsx", "lines": 1362, "area": "群聊页面编排", "recommended_action": "先守 read-model 不变式" },
+        { "module": "model.ts", "lines": 1342, "area": "群聊纯逻辑与 read-model", "recommended_action": "按状态切片小步提取" }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "current_repo",
+      "label": "Agent Cockpit main@5101599",
+      "href": "https://github.com/fyc0451/agent-cockpit/commit/5101599"
+    },
+    {
+      "id": "module_size_source",
+      "label": "main@5101599 核心模块行数",
+      "path": "docs/reports/ac-opt-size.csv",
+      "query": {
+        "engine": "duckdb",
+        "sql": "SELECT module, CAST(lines AS INTEGER) AS lines, area, recommended_action FROM read_csv_auto('docs/reports/ac-opt-size.csv', header=true)",
+        "description": "读取 main@5101599 核心模块行数核对表。",
+        "executed_at": "2026-08-22T09:37:38Z",
+        "language": "sql",
+        "tables_used": ["docs/reports/ac-opt-size.csv"]
+      }
+    },
+    {
+      "id": "fast_required_run",
+      "label": "Fast required run 32565271153",
+      "href": "https://github.com/fyc0451/agent-cockpit/actions/runs/32565271153",
+      "query": {
+        "engine": "github-actions",
+        "id": "32565271153",
+        "url": "https://github.com/fyc0451/agent-cockpit/actions/runs/32565271153",
+        "description": "Push 后 workflow 被触发，但 job 因账户支付失败或 spending limit 未启动。",
+        "executed_at": "2026-08-22T09:35:00Z",
+        "language": "github-actions"
+      }
+    },
+    {
+      "id": "cross_check_evidence",
+      "label": "完整核对说明与实施路线",
+      "path": "docs/reports/ac-opt-source-notes.md"
+    }
+  ],
+  "package_info": {
+    "originUrl": "artifact://agent-cockpit-final-optimization-plan-20260822",
+    "controls": { "edit": false, "refresh": false }
+  }
+}

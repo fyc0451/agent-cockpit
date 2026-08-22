@@ -1,0 +1,5 @@
+module,lines,area,recommended_action
+server.py,11247,FastAPI 路由与多域编排,随稳定纵切逐域提取
+herdr_client.py,4681,Agent/PTY/Herdr 客户端,Provider 收敛阶段增量拆
+GroupChatPage.tsx,1362,群聊页面编排,先守 read-model 不变式
+model.ts,1342,群聊纯逻辑与 read-model,按状态切片小步提取

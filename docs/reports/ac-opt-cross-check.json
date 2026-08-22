@@ -1,0 +1,8 @@
+[
+  {"order":1,"topic":"1 · CI 与回归门禁","report_consensus":"两份报告都认为 CI 缺口应优先止血。","current_fact":"workflow 已随 5101599 推送；本地 483/220/build 通过，但远端 job 因支付/额度未启动。","final_decision":"不能标完成。先建立可执行的本地合并门禁，或修复 Actions 额度后拿到首个真实绿灯。"},
+  {"order":2,"topic":"2 · 聊天 read-model","report_consensus":"稳定性报告主张消息单一写主；核对报告确认群聊仍以 session 为中心。","current_fact":"mail-status/Hub/SSE/会话迟到/滚动不变式已覆盖并推送。","final_decision":"保留不变式，按故障证据做小拆分；不以 model.ts 行数为理由立即重写。"},
+  {"order":3,"topic":"3 · 群聊写入模型","report_consensus":"两份报告都确认 worktree plane 很强，但日常群聊仍非受控交付。","current_fact":"普通 herdr pane 仍共享目录；managed worktree 只覆盖窄入口。","final_decision":"3.0 默认 A：共享目录单写者；高风险/并行任务按需 B：独立 worktree + review/apply。"},
+  {"order":4,"topic":"4 · Task / Handoff / Review","report_consensus":"两份报告都把统一任务骨架与结构化交付列为核心缺口。","current_fact":"仍有 tasks/work_items/assignments 三套概念；apply 能力存在，结构化证据未成环。","final_decision":"先 ADR 和 allowed_paths，再做一个 managed Codex 纵切；不先造完整任务 UI。"},
+  {"order":5,"topic":"5 · 聊天持久化","report_consensus":"稳定性报告建议 JSON 迁 SQLite；核对报告指出控制面事实源缺失。","current_fact":"chat_ledger 仍保留 500 条 JSON；read API/SSE 已形成可守住的外部契约。","final_decision":"作为独立里程碑迁为 SQLite 唯一权威；保持 API/SSE 不变，不与 Task/UI/router 混批。"},
+  {"order":6,"topic":"6 · router / approval / event / provider","report_consensus":"两份报告都认为这些能力需收敛，但对优先级不同。","current_fact":"server.py 仍约 11.2k 行；审批/event/provider 仍休眠或分散，但当前主路可运行。","final_decision":"整体后置；只随真实纵切增量提取和接线，不做行为不变的大爆炸重构。"}
+]

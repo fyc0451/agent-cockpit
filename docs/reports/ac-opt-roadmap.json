@@ -1,0 +1,7 @@
+[
+  {"order":0,"milestone":"M0 已完成：3.0 收口","scope":"定向消息栈、Leader/harvest/identity、read-model 不变式、fast workflow。","acceptance":"42176d2 与 5101599 已推送；本地 483/220/build 通过。","exclude":"不混入 SQLite ledger、Task/UI、router 大拆。"},
+  {"order":1,"milestone":"M1 真实质量信号 + 单写者","scope":"恢复可执行 fast gate；确认并实现工作区 writer 占用、派发冲突拒绝与 UI 明示。","acceptance":"远端首次真实绿灯或统一本地 fast 命令通过；两个写任务不能由系统同时派到同一共享目录。","exclude":"不迁所有 Agent 到 worktree；不拆 router。"},
+  {"order":2,"milestone":"M2 持久事实","scope":"聊天 ledger SQLite 唯一权威；单独完成迁移、恢复、保留历史与 SSE 兼容。","acceptance":"重启不丢、500+ 不截断、迁移幂等、故障可回滚、前端无需改读契约。","exclude":"不同时统一 Task 表、不改 UI。"},
+  {"order":3,"milestone":"M3 最小隔离交付纵切","scope":"Task/Attempt ADR、allowed_paths；一个 managed Codex 从 work_item 到 Handoff/Review/apply。","acceptance":"commit/base/files/tests 由服务端校验；人只做 review 与 apply；共享源仓库不被 worker 直接写。","exclude":"不全自动调度、不建第二套 Mission Board。"},
+  {"order":4,"milestone":"M4 增量收敛","scope":"真实危险操作接审批；按需要接 event/provider；在边界成熟后逐域提取 router。","acceptance":"每项有单独契约测试和迁移计划；无平行事实源。","exclude":"不做一揽子重写或按行数拆文件。"}
+]
