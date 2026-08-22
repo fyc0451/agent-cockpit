@@ -71,6 +71,10 @@ class _WriteTools:
         self.calls.append(("reply_complete", path, arguments))
         return {"outcome": "completed"}
 
+    def submit_handoff(self, path: Path, arguments: dict[str, object]):
+        self.calls.append(("submit_handoff", path, arguments))
+        return {"outcome": "submitted"}
+
 
 def _world(tmp_path: Path, *, pending: bool = False):
     tmp_path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -374,7 +378,7 @@ def test_explicit_router_lists_only_installed_tools(tmp_path: Path) -> None:
         claim_tools=claim_tools, write_tools=write_tools,
     )
     assert [item["name"] for item in listed["result"]["tools"]] == [
-        "claim_current", "apply_patch", "reply_complete",
+        "claim_current", "apply_patch", "reply_complete", "submit_handoff",
     ]
     applied = private_codex_mcp.dispatch({
         "jsonrpc": "2.0", "id": 21, "method": "tools/call",

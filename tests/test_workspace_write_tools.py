@@ -43,7 +43,7 @@ def _repo(path: Path) -> Path:
     return path
 
 
-def _world(tmp_path: Path):
+def _world(tmp_path: Path, *, allowed_paths=None):
     execution = exec_mod.initialize(tmp_path / "workspace-execution.sqlite3")
     work = work_mod.initialize(tmp_path / "workspace-work.sqlite3")
     operations = operation_mod.initialize(tmp_path / "operation.sqlite3")
@@ -54,6 +54,7 @@ def _world(tmp_path: Path):
     created = work.create_work_item(
         project_id=PROJECT, workspace_id=WORKSPACE, body="SECRET-SENTINEL",
         acceptance="done", constraints="local", idempotency_key="create",
+        allowed_paths=allowed_paths,
     )
     work_item_id = created.item.work_item["work_item_id"]
     dest = _repo(tmp_path / "checkout")
@@ -158,6 +159,46 @@ def test_apply_patch_writes_checkout_only(tmp_path: Path) -> None:
             idempotency_key="patch-ren",
         )
     assert rename.value.code == "patch_invalid"
+    world["execution"].close()
+    world["work"].close()
+    world["operations"].close()
+
+
+def test_apply_patch_enforces_isolated_allowed_paths(tmp_path: Path) -> None:
+    world = _world(tmp_path, allowed_paths=["src/"])
+    with pytest.raises(tools_mod.WriteToolError) as outside:
+        world["tools"].apply_patch(
+            capability_path=world["issued"]["capability_path"],
+            claim_revision=world["activated"]["claim"]["revision"],
+            lease_revision=world["activated"]["lease"]["revision"],
+            patch=PATCH, idempotency_key="patch-outside",
+        )
+    assert outside.value.code == "path_outside_allowed_scope"
+    assert (world["dest"] / "README").read_text(encoding="utf-8") == "hello\n"
+    world["execution"].close()
+    world["work"].close()
+    world["operations"].close()
+
+
+def test_isolated_work_item_cannot_bypass_review_with_reply_complete(
+    tmp_path: Path,
+) -> None:
+    world = _world(tmp_path, allowed_paths=["README"])
+    with pytest.raises(tools_mod.WriteToolError) as blocked:
+        world["tools"].reply_complete(
+            capability_path=world["issued"]["capability_path"],
+            claim_revision=world["activated"]["claim"]["revision"],
+            lease_revision=world["activated"]["lease"]["revision"],
+            body="skip review", idempotency_key="reply-blocked",
+        )
+    assert blocked.value.code == "review_authority_required"
+    detail = world["work"].get_work_item_detail(
+        project_id=PROJECT, workspace_id=WORKSPACE,
+        work_item_id=world["work_item_id"],
+    )
+    assert detail is not None
+    assert detail["claim"]["state"] == "active"
+    assert detail["work_item"]["delivery_status"] == "working"
     world["execution"].close()
     world["work"].close()
     world["operations"].close()

@@ -11,7 +11,7 @@ MCP 服务。三处冻结接缝在此适配，不改 A/B 文件：
   key，意图变化换 key，token 轮换自动失效）；
 - main() 以真实 tools 注入 dispatch；库缺失/不可读时 fail-closed 为
   deny-all（不创建新库、不假装可用），故障态 tools/list 仍精确
-  claim_current/apply_patch/reply_complete 三项，不回退旧五项占位。
+  claim_current/apply_patch/reply_complete/submit_handoff 四项。
 
 子进程只持有 capability 文件路径（COCKPIT_CAPABILITY_FILE）；库路径经
 runtime_paths（尊重 COCKPIT_*_DIR env 根）或显式参数解析，token/fence/
@@ -33,6 +33,8 @@ from . import runtime_paths
 from . import workspace_claim_activation as activation_mod
 from . import workspace_claim_tools as claim_mod
 from . import workspace_execution_store as execution_mod
+from . import workspace_delivery_service as delivery_service_mod
+from . import workspace_delivery_store as delivery_store_mod
 from . import workspace_work_store as work_mod
 from . import workspace_write_tools as write_mod
 
@@ -137,6 +139,25 @@ class _WriteToolsAdapter:
             ),
         )
 
+    def submit_handoff(
+        self, capability_file: Path, arguments: dict[str, object],
+    ) -> dict[str, object]:
+        args = _arguments(
+            arguments,
+            frozenset({
+                "claim_revision", "lease_revision", "summary", "test_evidence",
+            }),
+        )
+        return self._inner.submit_handoff(
+            capability_path=Path(capability_file),
+            claim_revision=args["claim_revision"],
+            lease_revision=args["lease_revision"], summary=args["summary"],
+            test_evidence=args["test_evidence"],
+            idempotency_key=_derived_idempotency_key(
+                Path(capability_file), "submit_handoff", args,
+            ),
+        )
+
 
 @dataclass
 class McpTools:
@@ -146,7 +167,7 @@ class McpTools:
 
 
 class _DeniedTools:
-    """建库失败的 fail-closed 占位：tools/list 精确三项，调用全部拒绝。"""
+    """建库失败的 fail-closed 占位：tools/list 精确四项，调用全部拒绝。"""
 
     def __init__(self, code: str) -> None:
         self._code = code
@@ -160,6 +181,11 @@ class _DeniedTools:
         _fail(self._code)
 
     def reply_complete(
+        self, capability_file: Path, arguments: dict[str, object],
+    ) -> dict[str, object]:
+        _fail(self._code)
+
+    def submit_handoff(
         self, capability_file: Path, arguments: dict[str, object],
     ) -> dict[str, object]:
         _fail(self._code)
@@ -206,6 +232,13 @@ def build_tools(
     write_tools = _WriteToolsAdapter(
         write_mod.WorkspaceWriteTools(
             execution=execution, work=work, operations=operations,
+            delivery_service=delivery_service_mod.WorkspaceDeliveryService(
+                execution=execution,
+                delivery=delivery_store_mod.WorkspaceDeliveryStore.from_work_store(
+                    work
+                ),
+                source_path_provider=lambda _project, _workspace: Path("/"),
+            ),
         )
     )
 
@@ -223,7 +256,7 @@ def serve(
     tools: McpTools | None, *, stdin: TextIO | None = None,
     stdout: TextIO | None = None, failure_code: str = "runtime_unavailable",
 ) -> int:
-    """stdio JSON-RPC 循环；tools=None 时三项冻结工具面全部 fail-closed。"""
+    """stdio JSON-RPC 循环；tools=None 时四项冻结工具面全部 fail-closed。"""
     source = sys.stdin if stdin is None else stdin
     sink = sys.stdout if stdout is None else stdout
     if tools is None:

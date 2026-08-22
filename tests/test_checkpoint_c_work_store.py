@@ -92,12 +92,48 @@ def _write_v1(path: Path, *, body: str = "legacy boss body") -> dict[str, str]:
     }
 
 
+def _write_v2(path: Path) -> str:
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    os.chmod(path, 0o600)
+    work_item_id = "wrk_" + "f" * 32
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        for statement in store_module.V2_SCHEMA:
+            connection.execute(statement)
+        connection.execute("PRAGMA user_version=2")
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?,?,?,?)",
+            (
+                store_module.V2_MIGRATION_ID, store_module.V2_SCHEMA_VERSION,
+                store_module.V2_SCHEMA_DIGEST, STAMP,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message_threads VALUES (?,?,?,1,?)",
+            ("thr_" + "d" * 32, PROJECT, WORKSPACE, STAMP),
+        )
+        connection.execute(
+            "INSERT INTO messages VALUES (?,?,1,'root','boss',NULL,NULL,NULL,?,?)",
+            ("msg_" + "e" * 32, "thr_" + "d" * 32, "v2 body", STAMP),
+        )
+        connection.execute(
+            "INSERT INTO work_items VALUES (?,?,'unassigned',NULL,NULL,1,?)",
+            (work_item_id, "msg_" + "e" * 32, STAMP),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return work_item_id
+
+
 def test_v1_migrates_lossless_ids_and_keeps_create_list(tmp_path: Path) -> None:
     path = tmp_path / "workspace-work.sqlite3"
     legacy = _write_v1(path)
     assert _user_version(path) == 1
     store = store_module.open_existing(path)
-    assert _user_version(path) == 2
+    assert _user_version(path) == store_module.SCHEMA_VERSION
     listed = store.list_work_items(project_id=PROJECT, workspace_id=WORKSPACE)
     assert len(listed) == 1
     item = listed[0].public_dict()
@@ -143,6 +179,7 @@ def test_v1_migrates_lossless_ids_and_keeps_create_list(tmp_path: Path) -> None:
             )
         ]
         assert store_module.V1_MIGRATION_ID in migrations
+        assert store_module.V2_MIGRATION_ID in migrations
         assert store_module.MIGRATION_ID in migrations
     created = _create(store, idempotency_key="after-migrate")
     assert created.status_code == 201
@@ -183,11 +220,52 @@ def test_v1_migration_faults_leave_complete_v1_or_v2(tmp_path: Path, monkeypatch
             assert "message_receipts" not in names
         monkeypatch.undo()
         store = store_module.open_existing(path)
-        assert _user_version(path) == 2
+        assert _user_version(path) == store_module.SCHEMA_VERSION
         listed = store.list_work_items(project_id=PROJECT, workspace_id=WORKSPACE)
         assert listed[0].root_message["body"] == f"keep-{name}"
         assert listed[0].work_item["work_item_id"] == legacy["work_item_id"]
         store.close()
+
+
+def test_v2_migrates_to_v3_without_inventing_isolated_scope(tmp_path: Path) -> None:
+    path = tmp_path / "v2.sqlite3"
+    work_item_id = _write_v2(path)
+    store = store_module.open_existing(path)
+    assert _user_version(path) == store_module.SCHEMA_VERSION
+    item = store.get_work_item(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=work_item_id,
+    )
+    assert item is not None
+    assert item.root_message["body"] == "v2 body"
+    assert "allowed_paths" not in item.work_item
+    assert store.get_allowed_paths(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=work_item_id,
+    ) is None
+    store.close()
+
+
+def test_v2_to_v3_fault_rolls_back_schema_and_version(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    path = tmp_path / "v2-fault.sqlite3"
+    _write_v2(path)
+    monkeypatch.setattr(
+        store_module, "_after_v3_schema",
+        lambda _connection: (_ for _ in ()).throw(
+            store_module.WorkspaceWorkError("store_write_failed")
+        ),
+    )
+    with pytest.raises(store_module.WorkspaceWorkError) as error:
+        store_module.open_existing(path)
+    assert error.value.code == "store_write_failed"
+    assert _user_version(path) == store_module.V2_SCHEMA_VERSION
+    with sqlite3.connect(path) as connection:
+        names = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "work_item_deliveries" not in names
 
 
 def test_drifted_v1_stops_without_rebuild(tmp_path: Path) -> None:

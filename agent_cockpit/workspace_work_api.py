@@ -38,6 +38,7 @@ _STATUS = {
 }
 _RETRYABLE = frozenset({"store_read_failed", "store_write_failed"})
 _BODY_FIELDS = frozenset({"body", "acceptance", "constraints"})
+_ISOLATED_BODY_FIELDS = _BODY_FIELDS | {"allowed_paths"}
 _ROUTE = "/api/projects/{project_id}/workspaces/{workspace_id}/work-items"
 _ITEM_ROUTE = _ROUTE + "/{work_item_id}"
 
@@ -77,6 +78,7 @@ def install(app: FastAPI, service: ApiService) -> None:
                 body=payload["body"],
                 acceptance=payload["acceptance"],
                 constraints=payload["constraints"],
+                allowed_paths=payload.get("allowed_paths"),
                 idempotency_key=key,
             )
             return _success(request, created.item.public_dict(), status=201)
@@ -132,14 +134,21 @@ async def _body(request: Request) -> dict[str, Any]:
         )
     except (UnicodeError, ValueError, json.JSONDecodeError):
         raise ApiError("invalid_argument") from None
-    if not isinstance(value, dict) or set(value) != _BODY_FIELDS:
+    if not isinstance(value, dict) or set(value) not in {
+        _BODY_FIELDS, _ISOLATED_BODY_FIELDS,
+    }:
         raise ApiError("invalid_argument")
     try:
-        return {
+        payload = {
             "body": work_store.body_text(value["body"]),
             "acceptance": work_store.note_text(value["acceptance"]),
             "constraints": work_store.note_text(value["constraints"]),
         }
+        if "allowed_paths" in value:
+            payload["allowed_paths"] = list(
+                work_store.normalize_allowed_paths(value["allowed_paths"])
+            )
+        return payload
     except work_store.WorkspaceWorkError as exc:
         if exc.code == "invalid_argument":
             raise ApiError("invalid_argument") from None

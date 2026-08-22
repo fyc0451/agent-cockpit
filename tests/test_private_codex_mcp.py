@@ -62,6 +62,27 @@ EXPECTED_TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "submit_handoff",
+        "description": (
+            "For isolated review work, publish the exact managed-checkout result "
+            "instead of reply_complete. Pass current claim/lease revisions, a "
+            "summary, and structured test_evidence. This closes writer authority."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "claim_revision": {"type": "integer"},
+                "lease_revision": {"type": "integer"},
+                "summary": {"type": "string"},
+                "test_evidence": {"type": "object"},
+            },
+            "required": [
+                "claim_revision", "lease_revision", "summary", "test_evidence",
+            ],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -104,6 +125,10 @@ def test_tools_publish_exact_contract_and_deny_without_side_effects(
         },
         "reply_complete": {
             "claim_revision": 2, "lease_revision": 3, "body": "done",
+        },
+        "submit_handoff": {
+            "claim_revision": 2, "lease_revision": 3, "summary": "done",
+            "test_evidence": {},
         },
     }
     for index, name in enumerate(arguments):

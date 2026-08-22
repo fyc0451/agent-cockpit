@@ -13,17 +13,23 @@ from pathlib import Path
 from typing import Callable
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 V1_SCHEMA_VERSION = 1
+V2_SCHEMA_VERSION = 2
 V1_MIGRATION_ID = "workspace-work-v1"
-MIGRATION_ID = "workspace-work-v2"
+V2_MIGRATION_ID = "workspace-work-v2"
+MIGRATION_ID = "workspace-work-v3"
 CREATE_SCOPE = "workspace-work.create.v1"
 RESERVE_SCOPE = "workspace-work.claim.reserve.v1"
 ACTIVATE_SCOPE = "workspace-work.claim.activate.v1"
 REPLY_SCOPE = "workspace-work.reply.complete.v1"
 DELIVERY_SCOPE = "workspace-work.delivery.v1"
+HANDOFF_SCOPE = "workspace-work.handoff.publish.v1"
+REVIEW_SCOPE = "workspace-work.review.v1"
+APPLY_SCOPE = "workspace-work.apply.v1"
 BODY_MAX = 32768
 NOTE_MAX = 8192
+ALLOWED_PATHS_MAX = 64
 AUTHOR_KIND = "boss"
 STATUS = "unassigned"
 
@@ -77,7 +83,7 @@ V1_SCHEMA = (
         BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
 )
 
-_SCHEMA = (
+V2_SCHEMA = (
     """CREATE TABLE schema_migrations (
         migration_id TEXT PRIMARY KEY,
         schema_version INTEGER NOT NULL,
@@ -180,6 +186,88 @@ _SCHEMA = (
         BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
 )
 
+_M3_SCHEMA = (
+    """CREATE TABLE work_item_deliveries (
+        work_item_id TEXT PRIMARY KEY REFERENCES work_items(work_item_id),
+        allowed_paths_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN (
+            'unassigned','working','review','completed','failed','outcome_unknown'
+        )),
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TRIGGER work_item_deliveries_scope_immutable
+        BEFORE UPDATE OF allowed_paths_json ON work_item_deliveries
+        BEGIN SELECT RAISE(ABORT, 'allowed_paths_immutable'); END""",
+    """CREATE TRIGGER work_item_deliveries_no_delete
+        BEFORE DELETE ON work_item_deliveries
+        BEGIN SELECT RAISE(ABORT, 'delivery_delete_forbidden'); END""",
+    """CREATE TABLE work_item_handoffs (
+        handoff_id TEXT PRIMARY KEY,
+        work_item_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_item_id),
+        claim_id TEXT NOT NULL REFERENCES work_item_claims(claim_id),
+        author_identity_id TEXT NOT NULL,
+        author_generation INTEGER NOT NULL CHECK(author_generation >= 1),
+        checkout_id TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
+        diff_digest TEXT NOT NULL,
+        changed_paths_json TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        test_evidence_json TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK(revision = 1),
+        created_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TRIGGER work_item_handoffs_no_update
+        BEFORE UPDATE ON work_item_handoffs
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+    """CREATE TRIGGER work_item_handoffs_no_delete
+        BEFORE DELETE ON work_item_handoffs
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+    """CREATE TABLE work_item_reviews (
+        review_id TEXT PRIMARY KEY,
+        handoff_id TEXT NOT NULL UNIQUE REFERENCES work_item_handoffs(handoff_id),
+        reviewer_identity_id TEXT NOT NULL,
+        reviewer_generation INTEGER NOT NULL CHECK(reviewer_generation >= 1),
+        handoff_revision INTEGER NOT NULL CHECK(handoff_revision = 1),
+        head_sha TEXT NOT NULL,
+        diff_digest TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK(decision IN ('accept','reject')),
+        summary TEXT NOT NULL,
+        test_evidence_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TRIGGER work_item_reviews_no_update
+        BEFORE UPDATE ON work_item_reviews
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+    """CREATE TRIGGER work_item_reviews_no_delete
+        BEFORE DELETE ON work_item_reviews
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+    """CREATE TABLE work_item_apply_receipts (
+        apply_id TEXT PRIMARY KEY,
+        handoff_id TEXT NOT NULL UNIQUE REFERENCES work_item_handoffs(handoff_id),
+        review_id TEXT NOT NULL UNIQUE REFERENCES work_item_reviews(review_id),
+        outcome TEXT NOT NULL CHECK(outcome IN (
+            'succeeded','no_change','failed','outcome_unknown'
+        )),
+        source_before_sha TEXT NOT NULL,
+        source_after_sha TEXT,
+        applied_commit_sha TEXT,
+        reason TEXT,
+        evidence_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TRIGGER work_item_apply_receipts_no_update
+        BEFORE UPDATE ON work_item_apply_receipts
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+    """CREATE TRIGGER work_item_apply_receipts_no_delete
+        BEFORE DELETE ON work_item_apply_receipts
+        BEGIN SELECT RAISE(ABORT, 'append_only'); END""",
+)
+
+_SCHEMA = V2_SCHEMA + _M3_SCHEMA
+
 
 def _canonical_sql(value: str | None) -> str:
     return " ".join((value or "").split()).lower()
@@ -213,8 +301,10 @@ def _digest_objects(objects: tuple[tuple[str, ...], ...]) -> str:
 
 
 _V1_EXPECTED = _schema_objects_for(V1_SCHEMA)
+_V2_EXPECTED = _schema_objects_for(V2_SCHEMA)
 _EXPECTED = _schema_objects_for(_SCHEMA)
 V1_SCHEMA_DIGEST = _digest_objects(_V1_EXPECTED)
+V2_SCHEMA_DIGEST = _digest_objects(_V2_EXPECTED)
 SCHEMA_DIGEST = _digest_objects(_EXPECTED)
 
 
@@ -326,6 +416,100 @@ def note_text(value: object) -> str | None:
     if _has_illegal_control(value):
         _fail("invalid_argument")
     return value
+
+
+def normalize_allowed_paths(value: object) -> tuple[str, ...]:
+    if (
+        not isinstance(value, (list, tuple))
+        or not value
+        or len(value) > ALLOWED_PATHS_MAX
+    ):
+        _fail("invalid_argument")
+    normalized: list[str] = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item) > 4096
+            or "\\" in item
+            or item.startswith("/")
+            or _has_illegal_control(item)
+        ):
+            _fail("invalid_argument")
+        directory = item.endswith("/")
+        raw = item[:-1] if directory else item
+        parts = raw.split("/")
+        if not raw or any(part in {"", ".", ".."} for part in parts):
+            _fail("invalid_argument")
+        candidate = raw + ("/" if directory else "")
+        if candidate not in normalized:
+            normalized.append(candidate)
+    compact: list[str] = []
+    for candidate in normalized:
+        if any(
+            candidate == current
+            or (current.endswith("/") and candidate.startswith(current))
+            for current in compact
+        ):
+            continue
+        compact = [
+            current for current in compact
+            if not (candidate.endswith("/") and current.startswith(candidate))
+        ]
+        compact.append(candidate)
+    return tuple(compact)
+
+
+def path_is_valid(path: object) -> bool:
+    if not isinstance(path, str) or not path or path.startswith("/"):
+        return False
+    if (
+        "\\" in path
+        or _has_illegal_control(path)
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        return False
+    return True
+
+
+def path_is_allowed(path: object, scope: tuple[str, ...]) -> bool:
+    if not path_is_valid(path):
+        return False
+    assert isinstance(path, str)
+    return any(
+        path == entry or (entry.endswith("/") and path.startswith(entry))
+        for entry in scope
+    )
+
+
+def _git_sha(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) not in {40, 64}
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        _fail("invalid_argument")
+    return value
+
+
+def _changed_paths(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        _fail("invalid_argument")
+    if not value:
+        return ()
+    result = normalize_allowed_paths(value)
+    if any(path.endswith("/") for path in result):
+        _fail("invalid_argument")
+    return tuple(sorted(result))
+
+
+def _evidence(value: object) -> str:
+    if not isinstance(value, (dict, list)):
+        _fail("invalid_argument")
+    encoded = _canonical(value)
+    if len(encoded) > NOTE_MAX:
+        _fail("invalid_argument")
+    return encoded
 
 
 def _path(path: Path) -> Path:
@@ -455,6 +639,28 @@ def _validate_v1(connection: sqlite3.Connection) -> None:
         _fail("store_read_failed", exc)
 
 
+def _validate_v2(connection: sqlite3.Connection) -> None:
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        rows = connection.execute(
+            "SELECT migration_id, schema_version, schema_digest "
+            "FROM schema_migrations"
+        ).fetchall()
+        if (
+            version != V2_SCHEMA_VERSION
+            or (V2_MIGRATION_ID, V2_SCHEMA_VERSION, V2_SCHEMA_DIGEST)
+            not in [tuple(row) for row in rows]
+            or _schema_objects(connection) != _V2_EXPECTED
+        ):
+            _fail("schema_fingerprint_mismatch")
+    except WorkspaceWorkError:
+        raise
+    except sqlite3.DatabaseError as exc:
+        _fail("store_corrupt", exc)
+    except sqlite3.Error as exc:
+        _fail("store_read_failed", exc)
+
+
 def _after_thread_insert(_connection: sqlite3.Connection) -> None:
     return None
 
@@ -483,6 +689,10 @@ def _after_migration_receipt(_connection: sqlite3.Connection) -> None:
     return None
 
 
+def _after_v3_schema(_connection: sqlite3.Connection) -> None:
+    return None
+
+
 def _after_claim_activate(_connection: sqlite3.Connection) -> None:
     return None
 
@@ -497,7 +707,7 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE messages RENAME TO messages_v1")
     connection.execute("ALTER TABLE work_items RENAME TO work_items_v1")
     connection.execute("ALTER TABLE idempotency_records RENAME TO idempotency_records_v1")
-    for statement in _SCHEMA:
+    for statement in V2_SCHEMA:
         if "CREATE TABLE schema_migrations" in statement:
             continue
         if "CREATE TRIGGER schema_migrations_" in statement:
@@ -532,10 +742,21 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     _after_migration_swap(connection)
     connection.execute(
         "INSERT INTO schema_migrations VALUES (?,?,?,?)",
+        (V2_MIGRATION_ID, V2_SCHEMA_VERSION, V2_SCHEMA_DIGEST, _now()),
+    )
+    connection.execute(f"PRAGMA user_version={V2_SCHEMA_VERSION}")
+    _after_migration_receipt(connection)
+
+
+def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+    for statement in _M3_SCHEMA:
+        connection.execute(statement)
+    _after_v3_schema(connection)
+    connection.execute(
+        "INSERT INTO schema_migrations VALUES (?,?,?,?)",
         (MIGRATION_ID, SCHEMA_VERSION, SCHEMA_DIGEST, _now()),
     )
     connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-    _after_migration_receipt(connection)
 
 
 @dataclass(frozen=True)
@@ -559,6 +780,15 @@ class CommandResult:
 
 
 def _row_to_aggregate(row: sqlite3.Row) -> WorkItemAggregate:
+    work_item = {
+        "work_item_id": row["work_item_id"],
+        "source_message_id": row["source_message_id"],
+        "status": row["status"],
+        "acceptance": row["acceptance"],
+        "constraints": row["constraints"],
+    }
+    if row["allowed_paths_json"] is not None:
+        work_item["allowed_paths"] = json.loads(row["allowed_paths_json"])
     return WorkItemAggregate(
         {
             "thread_id": row["thread_id"],
@@ -574,13 +804,7 @@ def _row_to_aggregate(row: sqlite3.Row) -> WorkItemAggregate:
             "author_ref": row["author_ref"],
             "body": row["body"],
         },
-        {
-            "work_item_id": row["work_item_id"],
-            "source_message_id": row["source_message_id"],
-            "status": row["status"],
-            "acceptance": row["acceptance"],
-            "constraints": row["constraints"],
-        },
+        work_item,
     )
 
 
@@ -600,10 +824,12 @@ SELECT
     w.source_message_id AS source_message_id,
     w.status AS status,
     w.acceptance AS acceptance,
-    w.constraints AS constraints
+    w.constraints AS constraints,
+    d.allowed_paths_json AS allowed_paths_json
 FROM work_items w
 JOIN messages m ON m.message_id = w.source_message_id
 JOIN message_threads t ON t.thread_id = m.thread_id
+LEFT JOIN work_item_deliveries d ON d.work_item_id = w.work_item_id
 WHERE t.project_id = ? AND t.workspace_id = ?
 ORDER BY t.created_at, t.thread_id
 """
@@ -647,11 +873,14 @@ def _load_work(
     return connection.execute(
         "SELECT w.work_item_id, w.source_message_id, w.status, w.acceptance, "
         "w.constraints, w.revision AS work_revision, w.updated_at, "
+        "d.allowed_paths_json, d.status AS delivery_status, "
+        "d.revision AS delivery_revision, "
         "t.thread_id, t.revision AS thread_revision, t.created_at, "
         "m.message_id, m.body, m.author_kind, m.author_ref "
         "FROM work_items w "
         "JOIN messages m ON m.message_id = w.source_message_id "
         "JOIN message_threads t ON t.thread_id = m.thread_id "
+        "LEFT JOIN work_item_deliveries d ON d.work_item_id=w.work_item_id "
         "WHERE t.project_id=? AND t.workspace_id=? AND w.work_item_id=?",
         (project_id, workspace_id, work_item_id),
     ).fetchone()
@@ -729,20 +958,27 @@ class WorkspaceWorkStore:
     def create_work_item(
         self, *, project_id: str, workspace_id: str, body: object,
         acceptance: object, constraints: object, idempotency_key: object,
+        allowed_paths: object = None,
     ) -> CommandResult:
         project_id = _opaque(project_id, "prj_")
         workspace_id = _opaque(workspace_id, "ws_")
         body = body_text(body)
         acceptance = note_text(acceptance)
         constraints = note_text(constraints)
+        normalized_paths = (
+            None if allowed_paths is None else normalize_allowed_paths(allowed_paths)
+        )
         idempotency_key = _idempotency_key(idempotency_key)
-        request_digest = _digest({
+        request = {
             "acceptance": acceptance,
             "body": body,
             "constraints": constraints,
             "project_id": project_id,
             "workspace_id": workspace_id,
-        })
+        }
+        if normalized_paths is not None:
+            request["allowed_paths"] = list(normalized_paths)
+        request_digest = _digest(request)
         connection: sqlite3.Connection | None = None
         try:
             connection = _connect(self.path, write=True)
@@ -785,6 +1021,23 @@ class WorkspaceWorkStore:
                 ),
             )
             _after_work_item_insert(connection)
+            if normalized_paths is not None:
+                connection.execute(
+                    "INSERT INTO work_item_deliveries VALUES (?,?, 'unassigned',1,?,?)",
+                    (
+                        work_item_id, _canonical(list(normalized_paths)),
+                        created_at, created_at,
+                    ),
+                )
+            work_public = {
+                "work_item_id": work_item_id,
+                "source_message_id": message_id,
+                "status": STATUS,
+                "acceptance": acceptance,
+                "constraints": constraints,
+            }
+            if normalized_paths is not None:
+                work_public["allowed_paths"] = list(normalized_paths)
             item = WorkItemAggregate(
                 {
                     "thread_id": thread_id,
@@ -800,13 +1053,7 @@ class WorkspaceWorkStore:
                     "author_ref": None,
                     "body": body,
                 },
-                {
-                    "work_item_id": work_item_id,
-                    "source_message_id": message_id,
-                    "status": STATUS,
-                    "acceptance": acceptance,
-                    "constraints": constraints,
-                },
+                work_public,
             )
             _remember(
                 connection, project_id=project_id, workspace_id=workspace_id,
@@ -1092,6 +1339,12 @@ class WorkspaceWorkStore:
                 "updated_at=? WHERE work_item_id=?",
                 (int(work["work_revision"]) + 1, now, work_item_id),
             )
+            if work["allowed_paths_json"] is not None:
+                connection.execute(
+                    "UPDATE work_item_deliveries SET status='working', "
+                    "revision=revision+1, updated_at=? WHERE work_item_id=?",
+                    (now, work_item_id),
+                )
             _insert_receipt(
                 connection, project_id=project_id, workspace_id=workspace_id,
                 work_item_id=work_item_id, claim_id=claim_id,
@@ -1124,6 +1377,10 @@ class WorkspaceWorkStore:
                     "body": work["body"],
                 },
             }
+            if work["allowed_paths_json"] is not None:
+                payload["work_item"]["allowed_paths"] = json.loads(
+                    work["allowed_paths_json"]
+                )
             _remember(
                 connection, project_id=project_id, workspace_id=workspace_id,
                 scope=ACTIVATE_SCOPE, key=idempotency_key, digest=request_digest,
@@ -1174,6 +1431,8 @@ class WorkspaceWorkStore:
             )
             if work is None:
                 _fail("work_item_not_found")
+            if work["allowed_paths_json"] is not None:
+                _fail("review_authority_required")
             claim = connection.execute(
                 "SELECT * FROM work_item_claims WHERE claim_id=? "
                 "AND work_item_id=?",
@@ -1335,6 +1594,19 @@ class WorkspaceWorkStore:
                     (work_item_id,),
                 )
             ]
+            work_public = {
+                "work_item_id": work["work_item_id"],
+                "source_message_id": work["source_message_id"],
+                "status": work["status"],
+                "acceptance": work["acceptance"],
+                "constraints": work["constraints"],
+                "revision": int(work["work_revision"]),
+                "updated_at": work["updated_at"],
+            }
+            if work["allowed_paths_json"] is not None:
+                work_public["allowed_paths"] = json.loads(work["allowed_paths_json"])
+                work_public["delivery_status"] = work["delivery_status"]
+                work_public["delivery_revision"] = int(work["delivery_revision"])
             return {
                 "thread": {
                     "thread_id": work["thread_id"],
@@ -1344,15 +1616,7 @@ class WorkspaceWorkStore:
                     "created_at": work["created_at"],
                     "messages": messages,
                 },
-                "work_item": {
-                    "work_item_id": work["work_item_id"],
-                    "source_message_id": work["source_message_id"],
-                    "status": work["status"],
-                    "acceptance": work["acceptance"],
-                    "constraints": work["constraints"],
-                    "revision": int(work["work_revision"]),
-                    "updated_at": work["updated_at"],
-                },
+                "work_item": work_public,
                 "claim": None if claim_row is None else _claim_public(claim_row),
                 "receipts": receipts,
             }
@@ -1363,6 +1627,37 @@ class WorkspaceWorkStore:
         finally:
             if connection is not None:
                 connection.close()
+
+    def get_allowed_paths(
+        self, *, project_id: str, workspace_id: str, work_item_id: str,
+    ) -> tuple[str, ...] | None:
+        project_id = _opaque(project_id, "prj_")
+        workspace_id = _opaque(workspace_id, "ws_")
+        work_item_id = _opaque(work_item_id, "wrk_")
+        connection = _connect(self.path, write=False)
+        try:
+            _require_current_schema(connection)
+            row = connection.execute(
+                "SELECT d.allowed_paths_json FROM work_items w "
+                "JOIN messages m ON m.message_id=w.source_message_id "
+                "JOIN message_threads t ON t.thread_id=m.thread_id "
+                "LEFT JOIN work_item_deliveries d ON d.work_item_id=w.work_item_id "
+                "WHERE t.project_id=? AND t.workspace_id=? AND w.work_item_id=?",
+                (project_id, workspace_id, work_item_id),
+            ).fetchone()
+            if row is None:
+                _fail("work_item_not_found")
+            if row["allowed_paths_json"] is None:
+                return None
+            value = json.loads(row["allowed_paths_json"])
+            return normalize_allowed_paths(value)
+        except WorkspaceWorkError:
+            raise
+        except (json.JSONDecodeError, sqlite3.Error) as exc:
+            _fail("store_read_failed", exc)
+        finally:
+            connection.close()
+        raise AssertionError("unreachable")
 
 
 def initialize(path: Path) -> WorkspaceWorkStore:
@@ -1421,10 +1716,14 @@ def _migrate_existing(path: Path) -> WorkspaceWorkStore:
             connection.execute("COMMIT")
             _validate_schema(connection)
             return WorkspaceWorkStore(path)
-        if version != V1_SCHEMA_VERSION:
+        if version not in {V1_SCHEMA_VERSION, V2_SCHEMA_VERSION}:
             _fail("migration_required")
-        _validate_v1(connection)
-        _migrate_v1_to_v2(connection)
+        if version == V1_SCHEMA_VERSION:
+            _validate_v1(connection)
+            _migrate_v1_to_v2(connection)
+        else:
+            _validate_v2(connection)
+        _migrate_v2_to_v3(connection)
         connection.execute("COMMIT")
         _validate_schema(connection)
         return WorkspaceWorkStore(path)
@@ -1466,7 +1765,7 @@ def open_existing(path: Path) -> WorkspaceWorkStore:
         if version == SCHEMA_VERSION:
             _validate_schema(connection)
             return WorkspaceWorkStore(path)
-        if version != V1_SCHEMA_VERSION:
+        if version not in {V1_SCHEMA_VERSION, V2_SCHEMA_VERSION}:
             _fail("migration_required")
     except sqlite3.DatabaseError as exc:
         _fail("store_corrupt", exc)

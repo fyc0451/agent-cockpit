@@ -138,6 +138,22 @@ def test_post_then_get_returns_g3_aggregate_not_item_wrapper(tmp_path: Path) -> 
     reopened.close()
 
 
+def test_post_isolated_work_item_persists_allowed_paths(tmp_path: Path) -> None:
+    http, _registry, store = _client(tmp_path)
+    response = http.post(
+        _path(PROJECT, WORKSPACE),
+        json=_body(allowed_paths=["agent_cockpit/", "agent_cockpit/server.py"]),
+        headers={"Idempotency-Key": "isolated"},
+    )
+    item = _assert_g3(response, 201)["data"]
+    assert item["work_item"]["allowed_paths"] == ["agent_cockpit/"]
+    work_id = item["work_item"]["work_item_id"]
+    assert store.get_allowed_paths(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=work_id,
+    ) == ("agent_cockpit/",)
+    store.close()
+
+
 def test_idempotency_replay_and_conflict(tmp_path: Path) -> None:
     http, _registry, store = _client(tmp_path)
     url = _path(PROJECT, WORKSPACE)

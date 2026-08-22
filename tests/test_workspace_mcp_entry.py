@@ -253,7 +253,7 @@ def test_apply_patch_and_reply_end_to_end_via_adapter(tmp_path: Path) -> None:
         tools.close()
 
 
-def test_serve_lists_exactly_three_tools_and_claims(
+def test_serve_lists_exactly_four_tools_and_claims(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     world = _world(tmp_path)
@@ -280,7 +280,9 @@ def test_serve_lists_exactly_three_tools_and_claims(
     replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
     by_id = {reply["id"]: reply for reply in replies}
     names = [tool["name"] for tool in by_id[2]["result"]["tools"]]
-    assert sorted(names) == ["apply_patch", "claim_current", "reply_complete"]
+    assert sorted(names) == [
+        "apply_patch", "claim_current", "reply_complete", "submit_handoff",
+    ]
     claimed = by_id[3]["result"]["structuredContent"]
     assert claimed["root_message"]["body"] == SENTINEL
     assert by_id[4]["result"]["isError"] is True
@@ -311,12 +313,12 @@ def test_main_honors_non_default_roots_and_fails_closed(
     replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
     tools = replies[0]["result"]["tools"]
     assert sorted(tool["name"] for tool in tools) == [
-        "apply_patch", "claim_current", "reply_complete",
+        "apply_patch", "claim_current", "reply_complete", "submit_handoff",
     ]
     assert replies[1]["result"]["structuredContent"]["root_message"]["body"] == SENTINEL
 
     # 库不存在 → fail-closed deny-all，不创建新库、不假装可用；
-    # 故障态 tools/list 仍精确三项、无 run/fail
+    # 故障态 tools/list 仍精确四项、无 run/fail
     missing = tmp_path / "empty"
     missing.mkdir()
     monkeypatch.setattr(
@@ -333,7 +335,9 @@ def test_main_honors_non_default_roots_and_fails_closed(
     assert entry_mod.main() == 0
     replies2 = [json.loads(line) for line in stdout2.getvalue().splitlines()]
     names2 = [tool["name"] for tool in replies2[0]["result"]["tools"]]
-    assert sorted(names2) == ["apply_patch", "claim_current", "reply_complete"]
+    assert sorted(names2) == [
+        "apply_patch", "claim_current", "reply_complete", "submit_handoff",
+    ]
     denied = replies2[1]
     assert denied["result"]["isError"] is True
     assert denied["result"]["structuredContent"]["code"] == (
@@ -343,7 +347,7 @@ def test_main_honors_non_default_roots_and_fails_closed(
 
 
 def test_main_empty_roots_subprocess_fail_closed(tmp_path: Path) -> None:
-    """非默认空 roots 真实子进程：零建库、tools/list 精确三项、调用全拒。"""
+    """非默认空 roots 真实子进程：零建库、tools/list 精确四项、调用全拒。"""
     roots = tmp_path / "roots"
     for name in ("data", "config", "state", "uploads"):
         (roots / name).mkdir(parents=True)
@@ -361,6 +365,7 @@ def test_main_empty_roots_subprocess_fail_closed(tmp_path: Path) -> None:
     ]
     for ident, tool in (
         (3, "claim_current"), (4, "apply_patch"), (5, "reply_complete"),
+        (6, "submit_handoff"),
     ):
         lines.append({
             "jsonrpc": "2.0", "id": ident, "method": "tools/call",
@@ -375,7 +380,9 @@ def test_main_empty_roots_subprocess_fail_closed(tmp_path: Path) -> None:
     replies = [json.loads(line) for line in result.stdout.splitlines()]
     by_id = {reply["id"]: reply for reply in replies}
     names = [tool["name"] for tool in by_id[2]["result"]["tools"]]
-    assert sorted(names) == ["apply_patch", "claim_current", "reply_complete"]
+    assert sorted(names) == [
+        "apply_patch", "claim_current", "reply_complete", "submit_handoff",
+    ]
     assert "run" not in names and "fail" not in names
     for ident in (3, 4, 5):
         denied = by_id[ident]["result"]

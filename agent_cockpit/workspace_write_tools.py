@@ -1,4 +1,4 @@
-"""MCP write tools: apply_patch and reply_complete. IDs come from capability."""
+"""MCP checkout writes and Handoff publication. IDs come from capability."""
 from __future__ import annotations
 
 import hashlib
@@ -12,6 +12,7 @@ from pathlib import Path
 from . import local_codex_harness as harness_mod
 from . import operation_store as operation_mod
 from . import workspace_execution_store as exec_mod
+from . import workspace_delivery_service as delivery_service_mod
 from . import workspace_work_store as work_mod
 from .workspace_write_gate import WorkspaceWriteGate, WriteGateError
 
@@ -55,6 +56,12 @@ def _map(exc: BaseException) -> str:
         "reply_conflict", "execution_terminal", "reconcile_required",
         "operation_journal_unavailable", "patch_outcome_unknown",
         "claim_conflict",
+        "path_outside_allowed_scope",
+        "review_authority_unavailable", "handoff_conflict",
+        "review_authority_required",
+        "checkout_changed", "handoff_digest_mismatch",
+        "handoff_outcome_unknown",
+        "invalid_changed_path", "git_unavailable", "git_command_failed",
     }:
         return code
     if isinstance(code, str) and (
@@ -72,7 +79,7 @@ def _capability(path: Path) -> dict[str, object]:
     raise AssertionError("unreachable")
 
 
-def _validate_patch(patch: object) -> bytes:
+def _validate_patch(patch: object) -> tuple[bytes, tuple[str, ...]]:
     if not isinstance(patch, str):
         _fail("patch_invalid")
     if "\x00" in patch:
@@ -103,7 +110,7 @@ def _validate_patch(patch: object) -> bytes:
             unique.append(path)
     if not unique or len(unique) > MAX_PATCH_FILES:
         _fail("patch_invalid")
-    return raw
+    return raw, tuple(unique)
 
 
 def _git_apply(checkout: Path, patch: bytes, *, check: bool) -> None:
@@ -127,18 +134,21 @@ def _git_apply(checkout: Path, patch: bytes, *, check: bool) -> None:
 
 
 class WorkspaceWriteTools:
-    def __init__(self, *, execution, work, operations, gate=None) -> None:
+    def __init__(
+        self, *, execution, work, operations, gate=None, delivery_service=None,
+    ) -> None:
         self.execution = execution
         self.work = work
         self.operations = operations
         self.gate = gate if gate is not None else WorkspaceWriteGate()
+        self.delivery_service = delivery_service
 
     def apply_patch(
         self, *, capability_path: Path, claim_revision: object,
         lease_revision: object, patch: object, idempotency_key: str,
     ) -> dict[str, object]:
         record = _capability(capability_path)
-        raw = _validate_patch(patch)
+        raw, changed_paths = _validate_patch(patch)
         if type(claim_revision) is not int or type(lease_revision) is not int:
             _fail("invalid_argument")
         attachment_id = str(record["attachment_id"])
@@ -162,6 +172,17 @@ class WorkspaceWriteTools:
             project_id=connection_ids[0], workspace_id=connection_ids[1],
             work_item_id=work_item_id,
         ))
+        try:
+            allowed = self.work.get_allowed_paths(
+                project_id=connection_ids[0], workspace_id=connection_ids[1],
+                work_item_id=work_item_id,
+            )
+        except work_mod.WorkspaceWorkError as exc:
+            _fail(_map(exc))
+        if allowed is not None and any(
+            not work_mod.path_is_allowed(path, allowed) for path in changed_paths
+        ):
+            _fail("path_outside_allowed_scope")
         try:
             self.gate.authorize(
                 attachment_id=attachment_id, identity_id=identity_id,
@@ -330,6 +351,14 @@ class WorkspaceWriteTools:
             )
         except exec_mod.WorkspaceExecutionError as exc:
             _fail(_map(exc))
+        try:
+            if self.work.get_allowed_paths(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id,
+            ) is not None:
+                _fail("review_authority_required")
+        except work_mod.WorkspaceWorkError as exc:
+            _fail(_map(exc))
         checkout = Path(self.execution.checkout_internal_path(
             project_id=project_id, workspace_id=workspace_id,
             work_item_id=work_item_id,
@@ -424,6 +453,71 @@ class WorkspaceWriteTools:
                 )
             },
         }
+
+    def submit_handoff(
+        self, *, capability_path: Path, claim_revision: object,
+        lease_revision: object, summary: object, test_evidence: object,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        if self.delivery_service is None:
+            _fail("review_authority_unavailable")
+        record = _capability(capability_path)
+        if type(claim_revision) is not int or type(lease_revision) is not int:
+            _fail("invalid_argument")
+        attachment_id = str(record["attachment_id"])
+        identity_id = str(record["identity_id"])
+        generation = int(record["generation"])
+        fence = str(record["fence"])
+        prep = self.execution.find_preparation_for_attachment(
+            attachment_id=attachment_id,
+        )
+        if prep is None or prep.lease is None or prep.lease.claim_id is None:
+            _fail("lease_not_active")
+        try:
+            project_id, workspace_id, work_item_id = (
+                self.execution.lookup_attachment_scope(attachment_id=attachment_id)
+            )
+            if prep.lease.status == "revoked":
+                return self.delivery_service.publish_handoff(
+                    project_id=project_id, workspace_id=workspace_id,
+                    work_item_id=work_item_id, attachment_id=attachment_id,
+                    identity_id=identity_id, generation=generation,
+                    expected_claim_revision=claim_revision,
+                    expected_work_revision=self._work_revision(
+                        project_id, workspace_id, work_item_id,
+                    ),
+                    expected_lease_revision=lease_revision, summary=summary,
+                    test_evidence=test_evidence, idempotency_key=idempotency_key,
+                )
+            checkout = Path(self.execution.checkout_internal_path(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id,
+            ))
+            self.gate.authorize(
+                attachment_id=attachment_id, identity_id=identity_id,
+                generation=generation, fence=fence,
+                capability_path=capability_path, checkout_path=checkout,
+                execution=self.execution, project_id=project_id,
+                workspace_id=workspace_id, work_item_id=work_item_id,
+                expected_lease_revision=lease_revision,
+                claim_id=prep.lease.claim_id,
+            )
+            return self.delivery_service.publish_handoff(
+                project_id=project_id, workspace_id=workspace_id,
+                work_item_id=work_item_id, attachment_id=attachment_id,
+                identity_id=identity_id, generation=generation,
+                expected_claim_revision=claim_revision,
+                expected_work_revision=self._work_revision(
+                    project_id, workspace_id, work_item_id,
+                ),
+                expected_lease_revision=lease_revision, summary=summary,
+                test_evidence=test_evidence, idempotency_key=idempotency_key,
+            )
+        except WriteGateError as exc:
+            _fail(_map(exc))
+        except (exec_mod.WorkspaceExecutionError, delivery_service_mod.WorkspaceDeliveryServiceError) as exc:
+            _fail(_map(exc))
+        raise AssertionError("unreachable")
 
     def _work_revision(
         self, project_id: str, workspace_id: str, work_item_id: str,

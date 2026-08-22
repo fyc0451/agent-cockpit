@@ -223,6 +223,52 @@ def test_store_rejects_blank_control_and_overlong_fields(store, path: Path) -> N
     }
 
 
+def test_isolated_work_item_normalizes_and_persists_allowed_paths(store) -> None:
+    created = _create(
+        store,
+        allowed_paths=["agent_cockpit/", "agent_cockpit/server.py", "README.md"],
+    )
+    work = created.item.work_item
+    assert work["allowed_paths"] == ["agent_cockpit/", "README.md"]
+    work_item_id = work["work_item_id"]
+    assert store.get_allowed_paths(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=work_item_id,
+    ) == ("agent_cockpit/", "README.md")
+    detail = store.get_work_item_detail(
+        project_id=PROJECT, workspace_id=WORKSPACE, work_item_id=work_item_id,
+    )
+    assert detail is not None
+    assert detail["work_item"]["delivery_status"] == "unassigned"
+    assert detail["work_item"]["allowed_paths"] == ["agent_cockpit/", "README.md"]
+    with sqlite3.connect(store.path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE work_item_deliveries SET allowed_paths_json='[]' "
+                "WHERE work_item_id=?", (work_item_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "DELETE FROM work_item_deliveries WHERE work_item_id=?",
+                (work_item_id,),
+            )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [[], ["/etc/passwd"], ["../README"], ["a\\b"], ["a//b"], ["./README"]],
+)
+def test_isolated_work_item_rejects_invalid_allowed_paths(store, scope) -> None:
+    with pytest.raises(store_module.WorkspaceWorkError) as error:
+        _create(store, allowed_paths=scope)
+    assert error.value.code == "invalid_argument"
+
+
+def test_isolated_work_item_caps_allowed_path_count(store) -> None:
+    with pytest.raises(store_module.WorkspaceWorkError) as error:
+        _create(store, allowed_paths=[f"file-{index}" for index in range(65)])
+    assert error.value.code == "invalid_argument"
+
+
 def test_busy_corrupt_and_fingerprint_are_sanitized(store, path: Path, monkeypatch) -> None:
     def fail_write(_path, *, write):
         if write:

@@ -98,6 +98,9 @@ workspace_execution_service = None
 workspace_execution_store = None
 workspace_runtime_api = None
 workspace_dispatch_service = None
+workspace_delivery_api = None
+workspace_delivery_service = None
+workspace_delivery_store = None
 git_checkout_provider = None
 local_codex_harness = None
 if next_profile.enabled():
@@ -115,6 +118,8 @@ if next_profile.enabled():
     from . import workspace_execution_api, workspace_execution_service
     from . import workspace_execution_store
     from . import workspace_runtime_api, workspace_dispatch_service
+    from . import workspace_delivery_api, workspace_delivery_service
+    from . import workspace_delivery_store
     from . import git_checkout_provider, local_codex_harness
 
 
@@ -438,6 +443,10 @@ _WORKSPACE_EXECUTION_PATH_RE = re.compile(
     r"(?:/members|/work-items/[^/]+/preparation(?:/(?:attach|detach))?"
     r"|/work-items/[^/]+/dispatch)$"
 )
+_WORKSPACE_DELIVERY_PATH_RE = re.compile(
+    r"^/api/projects/[^/]+/workspaces/[^/]+/work-items/[^/]+"
+    r"/(?:delivery|reviews|apply)$"
+)
 _AGENT_PROMPT_PATH_RE = re.compile(
     r"^/api/projects/[^/]+/workspaces/[^/]+/agents/[^/]+/prompts$",
 )
@@ -524,6 +533,36 @@ def _require_workspace_execution_service():
 class _DeferredExecutionService:
     def __getattr__(self, name: str):
         return getattr(_require_workspace_execution_service(), name)
+
+
+def _workspace_delivery_store_provider():
+    module = workspace_delivery_store
+    if module is None:
+        from . import workspace_delivery_store as module
+    return module.WorkspaceDeliveryStore.from_work_store(_workspace_work_provider())
+
+
+def _require_workspace_delivery_service():
+    service_module = workspace_delivery_service
+    if service_module is None:
+        from . import workspace_delivery_service as service_module
+    execution_service = _require_workspace_execution_service()
+    return service_module.WorkspaceDeliveryService(
+        execution=_workspace_execution_store,
+        delivery=_workspace_delivery_store_provider(),
+        source_path_provider=execution_service._source_path,
+    )
+
+
+def _workspace_delivery_identity(
+    project_id: str, workspace_id: str, identity_id: str,
+):
+    if _workspace_execution_store is None:
+        return None
+    return _workspace_execution_store.get_identity(
+        project_id=project_id, workspace_id=workspace_id,
+        identity_id=identity_id,
+    )
 
 
 _workspace_dispatch_service = None
@@ -818,6 +857,12 @@ if next_profile.enabled():
     workspace_execution_api.install(app, _DeferredExecutionService())
     assert workspace_runtime_api is not None
     workspace_runtime_api.install(app, _DeferredDispatchService())
+    assert workspace_delivery_api is not None
+    workspace_delivery_api.install(
+        app, service_provider=_require_workspace_delivery_service,
+        store_provider=_workspace_delivery_store_provider,
+        identity_provider=_workspace_delivery_identity,
+    )
 
 
 def _scoped_g3_path(path: str) -> bool:
@@ -826,6 +871,7 @@ def _scoped_g3_path(path: str) -> bool:
         and workspace_agent_api.is_scoped_agent_path(path)
     ) or _WORKSPACE_WORK_PATH_RE.fullmatch(path) is not None or (
         _WORKSPACE_EXECUTION_PATH_RE.fullmatch(path) is not None
+        or _WORKSPACE_DELIVERY_PATH_RE.fullmatch(path) is not None
         or _AGENT_PROMPT_PATH_RE.fullmatch(path) is not None
     )
 

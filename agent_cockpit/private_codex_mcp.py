@@ -62,6 +62,27 @@ _TOOL_DEFINITIONS = {
             "additionalProperties": False,
         },
     },
+    "submit_handoff": {
+        "name": "submit_handoff",
+        "description": (
+            "For isolated review work, publish the exact managed-checkout result "
+            "instead of reply_complete. Pass current claim/lease revisions, a "
+            "summary, and structured test_evidence. This closes writer authority."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "claim_revision": {"type": "integer"},
+                "lease_revision": {"type": "integer"},
+                "summary": {"type": "string"},
+                "test_evidence": {"type": "object"},
+            },
+            "required": [
+                "claim_revision", "lease_revision", "summary", "test_evidence",
+            ],
+            "additionalProperties": False,
+        },
+    },
 }
 TOOLS = tuple(_TOOL_DEFINITIONS)
 NOT_AVAILABLE = "claim_not_available"
@@ -77,6 +98,11 @@ _PUBLIC_CODES = frozenset({
     "patch_invalid", "lease_not_active", "fence_rejected",
     "checkout_untrusted", "reply_conflict", "reconcile_required",
     "patch_outcome_unknown",
+    "path_outside_allowed_scope", "review_authority_unavailable",
+    "review_authority_required", "handoff_conflict", "checkout_changed",
+    "handoff_digest_mismatch", "handoff_outcome_unknown",
+    "invalid_changed_path", "git_unavailable",
+    "git_command_failed",
 })
 
 
@@ -145,7 +171,8 @@ def dispatch(
         else:
             names = (
                 *(("claim_current",) if claim_tools is not None else ()),
-                *(("apply_patch", "reply_complete") if write_tools is not None else ()),
+                *(("apply_patch", "reply_complete", "submit_handoff")
+                  if write_tools is not None else ()),
             )
         return {
             "jsonrpc": "2.0", "id": ident,
@@ -179,7 +206,7 @@ def dispatch(
         arguments = params.get("arguments")
         if name == "claim_current":
             valid_call = claim_tools is not None and arguments == {}
-        elif name in {"apply_patch", "reply_complete"}:
+        elif name in {"apply_patch", "reply_complete", "submit_handoff"}:
             valid_call = write_tools is not None and isinstance(arguments, dict)
         else:
             valid_call = False
@@ -202,8 +229,10 @@ def dispatch(
                 value = claim_tools.claim_current(path)
             elif name == "apply_patch":
                 value = write_tools.apply_patch(path, arguments)
-            else:
+            elif name == "reply_complete":
                 value = write_tools.reply_complete(path, arguments)
+            else:
+                value = write_tools.submit_handoff(path, arguments)
             return {"jsonrpc": "2.0", "id": ident, "result": _success(value)}
         except Exception as exc:
             code = getattr(exc, "code", None)
