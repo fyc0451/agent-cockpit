@@ -128,6 +128,23 @@ def test_waiting_for_boss_is_watch_and_does_not_wake_alone():
     ) == []
 
 
+def test_waiting_for_boss_never_wakes_when_actionable_item_also_exists():
+    panes = [{
+        "session": "cockpit", "pane_id": "w1:p1", "agent": "codex",
+        "mail_name": "TopazOwl", "agent_status": "idle",
+    }]
+    wakes = persist_work.plan_wakes(
+        panes=panes, bound_sessions={"cockpit"},
+        leaders={"cockpit": "TopazOwl"},
+        next_items=[
+            "等 Boss 单独确认是否允许 push eb52583。",
+            "修复一个明确问题。",
+        ],
+        now=1_000.0, last_wake={}, min_gap=90.0,
+    )
+    assert [wake.next_item for wake in wakes] == ["修复一个明确问题。"]
+
+
 def test_plan_wakes_skips_when_only_watch_items():
     panes = [{
         "session": "cockpit", "pane_id": "w1:p1", "agent": "grok",

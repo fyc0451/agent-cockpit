@@ -129,7 +129,15 @@ def is_watch_item(item: str) -> bool:
     return (
         "盯交付" in text
         or "空闲就分下一刀" in text
-        or "等 Boss" in text
+        or is_external_wait_item(text)
+    )
+
+
+def is_external_wait_item(item: str) -> bool:
+    """只能由 Boss/外部状态解除的等待项，绝不用于唤醒 Agent。"""
+    text = item or ""
+    return (
+        "等 Boss" in text
         or "等待 Boss" in text
         or "待 Boss" in text
         or "拍板" in text
@@ -208,6 +216,8 @@ def plan_wakes(
                 others_busy = True
                 break
         for item in items:
+            if is_external_wait_item(item):
+                continue
             pane = match_assignee(item, panes, session=session, leader=leader)
             if not pane or not _pane_idle(pane):
                 continue
