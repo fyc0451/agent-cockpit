@@ -2668,6 +2668,53 @@ def test_harvest_fast_next_turn_creates_new_bubble_without_conclusion_heading(
     )
 
 
+def test_harvest_codex_uses_structured_final_instead_of_stale_screen(
+    isolated_ledger, monkeypatch,
+):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-codex-final", "chat-codex")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._PANE_IDLE_SINCE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    monkeypatch.setattr(server, "_HARVEST_SETTLE_S", 0.0)
+    key = ("chat-codex", "w1:p2")
+    server._PANE_TURN_STARTED[key] = 1_800_000_000_000
+    panes = [{
+        "session": "chat-codex",
+        "pane_id": "w1:p2",
+        "agent": "codex",
+        "agent_status": "idle",
+        "mail_name": "TopazOwl",
+        "agent_session": {
+            "agent": "codex",
+            "kind": "id",
+            "value": "01a02877-ca29-73a1-87c2-3bd629ba288f",
+        },
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "latest_codex_final_reply",
+        lambda *_a, **_k: {"available": True, "text": "收到了，这是本轮准确回复。"},
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: pytest.fail("structured Codex final must avoid stale screen"),
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+
+    server._harvest_settled_replies("chat-codex")
+
+    rows = chat_ledger.list_messages("chat-codex", 10)
+    assert len(rows) == 1
+    assert rows[0]["text"] == "收到了，这是本轮准确回复。"
+
+
 def test_merge_chat_timeline_keeps_later_distinct_claude_reply():
     old = (
         "agent_cockpit/ 下有 17 个 Python 测试文件，但没有 requirements.txt。"

@@ -24,6 +24,7 @@ import time
 import tomllib
 import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -737,7 +738,7 @@ def _snapshot_session(session: str) -> dict[str, Any]:
         if not isinstance(p, dict):
             continue
         cwd = p.get("cwd") or p.get("foreground_cwd") or ""
-        slim.append({
+        slim_pane = {
             "pane_id": p.get("pane_id"),
             "session": session,
             "workspace_id": p.get("workspace_id"),
@@ -750,7 +751,10 @@ def _snapshot_session(session: str) -> dict[str, Any]:
             "terminal_title": p.get("terminal_title_stripped") or p.get("terminal_title"),
             "focused": p.get("focused", False),
             "revision": p.get("revision", 0),
-        })
+        }
+        if isinstance(p.get("agent_session"), dict):
+            slim_pane["agent_session"] = p["agent_session"]
+        slim.append(slim_pane)
     return {
         "session": session,
         "status": "running",
@@ -1048,6 +1052,86 @@ def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, A
         "source": source,
         "line_count": len(summary.splitlines()) if summary else 0,
     }
+
+
+_CODEX_SESSION_ID_RE = re.compile(r"[0-9a-fA-F-]{36}")
+_CODEX_ROLLOUT_CACHE: dict[tuple[str, str], Path] = {}
+
+
+def latest_codex_final_reply(
+    agent_session: object,
+    *,
+    since_ms: int,
+    codex_home: object = None,
+) -> dict[str, Any]:
+    """Read the latest structured Codex final answer for the current turn.
+
+    Terminal scrollback is only a presentation surface and may retain older
+    replies. Codex rollout JSONL records the message phase, so harvesting can
+    ignore commentary, tool output, and final answers from earlier turns.
+    """
+    if not isinstance(agent_session, dict):
+        return {"available": False, "text": ""}
+    if agent_session.get("agent") != "codex" or agent_session.get("kind") != "id":
+        return {"available": False, "text": ""}
+    session_id = str(agent_session.get("value") or "")
+    if _CODEX_SESSION_ID_RE.fullmatch(session_id) is None:
+        return {"available": False, "text": ""}
+    try:
+        home = (
+            Path(_validate_workspace_codex_home(codex_home))
+            if codex_home is not None
+            else _user_default_codex_home()
+        )
+    except (OSError, ValueError):
+        return {"available": False, "text": ""}
+    cache_key = (str(home), session_id)
+    path = _CODEX_ROLLOUT_CACHE.get(cache_key)
+    if path is None or not path.is_file():
+        matches = list(home.glob(f"sessions/*/*/*/*{session_id}.jsonl"))
+        matches.extend(home.glob(f"archived_sessions/*{session_id}.jsonl"))
+        if not matches:
+            return {"available": False, "text": ""}
+        path = max(matches, key=lambda item: item.stat().st_mtime_ns)
+        _CODEX_ROLLOUT_CACHE[cache_key] = path
+    try:
+        with path.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - 8 * 1024 * 1024))
+            if stream.tell() > 0:
+                stream.readline()
+            lines = stream.read().splitlines()
+    except OSError:
+        return {"available": False, "text": ""}
+    for raw_line in reversed(lines):
+        try:
+            row = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        payload = row.get("payload") if isinstance(row, dict) else None
+        if not isinstance(payload, dict) or row.get("type") != "response_item":
+            continue
+        if payload.get("role") != "assistant" or payload.get("phase") != "final_answer":
+            continue
+        timestamp = row.get("timestamp")
+        try:
+            created_ms = int(
+                datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).timestamp()
+                * 1000
+            )
+        except (TypeError, ValueError):
+            continue
+        if created_ms < since_ms:
+            continue
+        content = payload.get("content")
+        text = "".join(
+            str(item.get("text") or "")
+            for item in (content if isinstance(content, list) else [])
+            if isinstance(item, dict) and item.get("type") == "output_text"
+        ).strip()
+        if text:
+            return {"available": True, "text": text, "created_ms": created_ms}
+    return {"available": True, "text": ""}
 
 
 def _parse_data_json(out: str) -> dict[str, Any] | None:

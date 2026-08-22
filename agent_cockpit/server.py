@@ -2034,6 +2034,15 @@ def _merge_descriptor_roster(snapshot: dict[str, Any]) -> dict[str, Any]:
             (session, f"name:{desc.get('name')}") if desc.get("name") else None,
         ]
         if any(key in live for key in keys if key):
+            codex_home = desc.get("codex_home")
+            if codex_home is not None:
+                for pane in panes:
+                    if (
+                        str(pane.get("session") or "") == session
+                        and str(pane.get("pane_id") or "") == str(desc.get("pane_id") or "")
+                    ):
+                        pane["codex_home"] = codex_home
+                        break
             continue
         extra.append(_descriptor_roster_pane(desc))
     if extra:
@@ -6178,18 +6187,36 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
         if idle_for < _HARVEST_SETTLE_S:
             # 刚停下，终端可能还在画最后一帧，等稳定窗过了再收。
             continue
-        try:
-            summary = herdr_client.pane_summary(session, pane_id, 240)
-        except Exception:
-            continue
-        raw = _extract_harvest_text(str((summary or {}).get("summary") or ""))
-        if not raw or (not _extract_harvest_conclusion(raw) and _is_process_narration(raw)):
+        turn_started = _PANE_TURN_STARTED.get(key)
+        structured = (
+            herdr_client.latest_codex_final_reply(
+                pane.get("agent_session"),
+                since_ms=turn_started,
+                codex_home=pane.get("codex_home"),
+            )
+            if pane.get("agent") == "codex" and turn_started is not None
+            else {"available": False, "text": ""}
+        )
+        if structured.get("available"):
+            raw = str(structured.get("text") or "").strip()
+            text = raw
+        else:
+            try:
+                summary = herdr_client.pane_summary(session, pane_id, 240)
+            except Exception:
+                continue
+            raw = _extract_harvest_text(str((summary or {}).get("summary") or ""))
+            text = _latest_harvest_reply(raw) if raw else ""
+        if not raw or (
+            not structured.get("available")
+            and not _extract_harvest_conclusion(raw)
+            and _is_process_narration(raw)
+        ):
             # 一次读屏失败/末帧未画完不得丢回复：留着待收标记下轮重试，超过上限才收口。
             if idle_for > _HARVEST_GIVE_UP_S and key in _PANE_TURN_STARTED:
                 _PANE_TURN_STARTED.pop(key, None)
                 _save_harvest_status()
             continue
-        text = _latest_harvest_reply(raw)
         # digest 对提取后的结论算：屏幕噪音不该骗过去重，同一份结论才算已收。
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
         if _PANE_LAST_HARVEST.get(key) == digest:
@@ -6219,7 +6246,6 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
                 ),
                 None,
             )
-        turn_started = _PANE_TURN_STARTED.get(key)
         if match is not None and turn_started is not None:
             # `_PANE_LAST_MESSAGE` 指向的是 pane 上一轮气泡。新一轮即使读屏残留了旧
             # 正文，也绝不能回写旧时间戳的消息；只允许合并本轮开始后产生的副本。

@@ -508,6 +508,45 @@ def test_pane_summary_appends_visible_when_unwrapped_is_old_scrollback(monkeypat
     assert "漏刮，不是没回" in result["summary"]
 
 
+def test_latest_codex_final_reply_uses_current_turn_structured_message(tmp_path):
+    home = tmp_path / "private-codex"
+    home.mkdir(mode=0o700)
+    session_id = "01a02877-ca29-73a1-87c2-3bd629ba288f"
+    rollout = home / "sessions" / "2026" / "08" / "22" / f"rollout-{session_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+
+    def row(phase, text, created):
+        return json.dumps({
+            "timestamp": f"1970-01-01T00:00:{created:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "role": "assistant",
+                "phase": phase,
+                "content": [{"type": "output_text", "text": text}],
+                "internal_chat_message_metadata_passthrough": {"create_time": created},
+            },
+        })
+
+    rollout.write_text("\n".join([
+        row("final_answer", "上一轮旧回复", 10),
+        row("commentary", "本轮过程更新", 20),
+        row("final_answer", "本轮准确最终回复", 21),
+    ]) + "\n", encoding="utf-8")
+    herdr_client._CODEX_ROLLOUT_CACHE.clear()
+
+    result = herdr_client.latest_codex_final_reply(
+        {"agent": "codex", "kind": "id", "value": session_id},
+        since_ms=15_000,
+        codex_home=str(home),
+    )
+
+    assert result == {
+        "available": True,
+        "text": "本轮准确最终回复",
+        "created_ms": 21_000,
+    }
+
+
 @pytest.mark.parametrize(
     ("agent", "kind"),
     [
