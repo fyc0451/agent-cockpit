@@ -20,6 +20,7 @@ import { routes } from '../app/routes'
 import { Button } from '../components/Button'
 import { StatusState } from '../components/StatusState'
 import { Tag } from '../components/Tag'
+import { writeBrowserClipboard } from '../features/terminal/termClipboard'
 import type { TeamMember, TeamUser } from '../features/team/model'
 
 function userStatusLabel(status: string): string {
@@ -49,6 +50,7 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
   })
   const [selectedProject, setSelectedProject] = useState('')
   const [inviteUrl, setInviteUrl] = useState('')
+  const [copyNote, setCopyNote] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const projectSlug = selectedProject || topicsQ.data?.[0]?.slug || ''
 
@@ -57,6 +59,7 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
     onSuccess: (invitation) => {
       const base = `${window.location.origin}${window.location.pathname}`
       setInviteUrl(`${base}#${routes.teamInvite(invitation.inviteCode, invitation.projectSlug)}`)
+      setCopyNote(null)
       setError(null)
     },
     onError: (e) => setError(e instanceof Error ? e.message : String(e)),
@@ -82,6 +85,15 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
   })
   const busy = inviteM.isPending || statusM.isPending || approveM.isPending
 
+  const copyInvitation = async () => {
+    const copied = await writeBrowserClipboard(inviteUrl)
+    setCopyNote(
+      copied
+        ? '已复制到剪贴板'
+        : '自动复制失败，请选中上方链接手动复制',
+    )
+  }
+
   return (
     <section className="panel">
       <h2 className="panel-title">账号管理</h2>
@@ -105,14 +117,27 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
         >
           {inviteM.isPending ? '生成中…' : '生成团队邀请链接'}
         </Button>
-        {inviteUrl && (
-          <span>
-            <code style={{ wordBreak: 'break-all' }}>{inviteUrl}</code>{' '}
-            <Button onClick={() => void navigator.clipboard?.writeText(inviteUrl)}>复制链接</Button>{' '}
-            <span className="list-sub">24 小时内有效，仅显示本次</span>
-          </span>
-        )}
       </div>
+      {inviteUrl && (
+        <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+          <label className="list-sub" htmlFor="team-invitation-url">已生成的团队邀请链接</label>
+          <textarea
+            id="team-invitation-url"
+            aria-label="团队邀请链接"
+            className="input"
+            readOnly
+            rows={3}
+            value={inviteUrl}
+            onFocus={(event) => event.currentTarget.select()}
+            style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace' }}
+          />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Button onClick={() => void copyInvitation()}>复制链接</Button>
+            <span className="list-sub">24 小时内有效，仅显示本次</span>
+            {copyNote && <span role="status" className="list-sub">{copyNote}</span>}
+          </div>
+        </div>
+      )}
       {error && <p style={{ color: 'var(--dsw-alias-state-error-primary)' }}>{error}</p>}
       {usersQ.isPending && <StatusState kind="loading" title="正在读取账号…" />}
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>

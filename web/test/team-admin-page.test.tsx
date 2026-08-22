@@ -1,10 +1,15 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { TeamAdminPage } from '../pages/TeamAdminPage'
 import { stubFetch } from './helpers'
+
+const writeClipboard = vi.fn()
+vi.mock('../features/terminal/termClipboard', () => ({
+  writeBrowserClipboard: (...args: unknown[]) => writeClipboard(...args),
+}))
 
 const ADMIN_STATUS = {
   authenticated: true,
@@ -31,6 +36,11 @@ function renderPage(fetchMap: Record<string, unknown>) {
 }
 
 describe('TeamAdminPage 团队管理页', () => {
+  beforeEach(() => {
+    writeClipboard.mockReset()
+    writeClipboard.mockResolvedValue(true)
+  })
+
   it('未登录时提示去群聊页登录', async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -99,7 +109,13 @@ describe('TeamAdminPage 团队管理页', () => {
     })
     await screen.findByText('账号管理')
     await userEvent.setup().click(screen.getByText('生成团队邀请链接'))
-    expect(await screen.findByText(/team_invite=INVITE-XYZ/)).toBeInTheDocument()
+    const invitation = await screen.findByRole('textbox', { name: '团队邀请链接' })
+    expect((invitation as HTMLTextAreaElement).value).toContain('team_invite=INVITE-XYZ')
+    await userEvent.setup().click(screen.getByRole('button', { name: '复制链接' }))
+    await waitFor(() => {
+      expect(writeClipboard).toHaveBeenCalledWith(expect.stringContaining('team_invite=INVITE-XYZ'))
+    })
+    expect(screen.getByRole('status')).toHaveTextContent('已复制到剪贴板')
   })
 
   it('管理员可新建 topic，重名错误直接展示', async () => {
