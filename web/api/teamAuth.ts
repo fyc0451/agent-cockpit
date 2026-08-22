@@ -159,11 +159,12 @@ export async function teamSessionBindings(): Promise<{
       const agentCount = typeof item.agent_count === 'number' ? item.agent_count : 0
       const ready = item.ready === true
       const reason = typeof item.reason === 'string' ? item.reason : null
+      const projectRef = typeof item.project_ref === 'string' ? item.project_ref : null
       const label = [name, leadName ? `Lead ${leadName}` : null, ready ? null : reason ?? '不可绑定']
         .filter(Boolean)
         .join(' · ')
       if (name) {
-        sessions.push({ name, label, status, agentCount, ready, reason, leadName })
+        sessions.push({ name, label, status, agentCount, ready, reason, leadName, projectRef })
       }
     }
   }
@@ -181,6 +182,7 @@ export async function teamSessionBindings(): Promise<{
           active: typeof item.active === 'boolean' ? item.active : undefined,
           ready: typeof item.ready === 'boolean' ? item.ready : undefined,
           reason: typeof item.reason === 'string' ? item.reason : null,
+          projectRef: typeof item.project_ref === 'string' ? item.project_ref : null,
         })
       }
     }

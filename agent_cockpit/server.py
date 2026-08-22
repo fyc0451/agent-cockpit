@@ -2698,7 +2698,13 @@ def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         row = sessions.setdefault(
             session, {"session": session, "directory": "", "panes": []}
         )
-        if pane not in row["panes"]:
+        pane_id = str(pane.get("pane_id") or "")
+        duplicate = pane_id and any(
+            str(existing.get("pane_id") or "") == pane_id
+            for existing in row["panes"]
+            if isinstance(existing, dict)
+        )
+        if not duplicate and pane not in row["panes"]:
             row["panes"].append(pane)
 
     result: list[dict[str, Any]] = []
@@ -4279,7 +4285,15 @@ def _public_team_session_candidate(row: dict[str, Any]) -> dict[str, Any]:
         } if lead else None),
         "ready": bool(row.get("ready")),
         "reason": row.get("reason"),
+        "project_ref": _team_project_ref(row.get("mail_project")),
     }
+
+
+def _team_project_ref(value: Any) -> str | None:
+    """同项目候选匹配用匿名引用；不向浏览器暴露本机绝对路径。"""
+    if not isinstance(value, str) or not value:
+        return None
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _public_team_session_binding(
@@ -4321,6 +4335,7 @@ def _public_team_session_binding(
             and has_reply_capability
         ),
         "reason": reason,
+        "project_ref": _team_project_ref(row.get("mail_project")),
         "updated_ts": row.get("updated_ts"),
     }
 

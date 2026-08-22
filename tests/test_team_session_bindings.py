@@ -128,10 +128,45 @@ def test_session_candidates_only_accept_one_lead_and_hide_registry_details(monke
         "agent": "codex", "mail_name": "codex-main", "status": "working",
     }
     assert candidate["ready"] is True
+    assert isinstance(candidate["project_ref"], str)
+    assert len(candidate["project_ref"]) == 64
+    assert PROJECT_KEY not in response.text
+    assert "mail_project" not in response.text
     assert "identity_id" not in response.text
     assert "registration-secret" not in response.text
     assert "pane_id" not in response.text
     assert "participant_id" not in response.text
+
+
+def test_session_candidate_deduplicates_same_pane_from_snapshot_views(monkeypatch):
+    participants = [{
+        "participant_id": "lead",
+        "agent_type": "codex",
+        "mail_name": "codex-main",
+        "pane_id": "w1:p2",
+        "role": "lead",
+        "state": "working",
+    }]
+    client, headers = _prepare(monkeypatch, participants=participants)
+    nested = {
+        "pane_id": "w1:p2", "session": "demo", "agent": "codex",
+        "agent_status": "working", "cwd": PROJECT_KEY,
+    }
+    top_level = {**nested, "mail_name": "codex-main"}
+    monkeypatch.setattr(server, "_board_snapshot", lambda: {
+        "sessions": [{
+            "session": "demo", "directory": PROJECT_KEY, "panes": [nested],
+        }],
+        "panes": [top_level],
+    })
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+
+    response = client.get("/api/team-auth/session-bindings", headers=headers)
+
+    assert response.status_code == 200
+    candidate = response.json()["sessions"][0]
+    assert candidate["ready"] is True
+    assert candidate["lead"]["mail_name"] == "codex-main"
 
 
 def test_session_candidate_explains_missing_and_multiple_lead(monkeypatch):

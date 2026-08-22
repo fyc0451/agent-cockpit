@@ -123,6 +123,7 @@ describe('团队普通成员 API', () => {
             lead: { agent: 'codex', mail_name: 'GoldRiver', status: 'idle' },
             ready: true,
             reason: null,
+            project_ref: 'project-ready',
           },
           {
             session: 'hr-ready-3',
@@ -154,6 +155,7 @@ describe('团队普通成员 API', () => {
           label: 'hr-ready-team · Lead GoldRiver',
           ready: true,
           leadName: 'GoldRiver',
+          projectRef: 'project-ready',
         },
         {
           name: 'hr-ready-3',
@@ -168,6 +170,7 @@ describe('团队普通成员 API', () => {
           active: false,
           ready: false,
           reason: 'Session 已停止',
+          projectRef: null,
         },
       ],
     })

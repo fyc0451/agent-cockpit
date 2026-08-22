@@ -142,7 +142,7 @@ describe('WorkspaceBrowser 团队区域', () => {
         teamLoggedIn={true}
         teamUsername="test-user"
         teamTopics={[{ slug: 'ready', name: 'hr-ready', id: 1 }]}
-        teamBindings={[{ project_slug: 'ready', session: 'hr-ready', active: false }]}
+        teamBindings={[{ project_slug: 'ready', session: 'hr-ready', active: false, projectRef: 'project-ready' }]}
         teamSessions={[
           {
             name: 'hr-ready-team',
@@ -152,6 +152,17 @@ describe('WorkspaceBrowser 团队区域', () => {
             ready: true,
             reason: null,
             leadName: 'GoldRiver',
+            projectRef: 'project-ready',
+          },
+          {
+            name: 'agent-cockpit-1',
+            label: 'agent-cockpit-1 · Lead TopazOwl',
+            status: 'idle',
+            agentCount: 1,
+            ready: true,
+            reason: null,
+            leadName: 'TopazOwl',
+            projectRef: 'project-cockpit',
           },
         ]}
         onTeamLogout={vi.fn()}
@@ -162,6 +173,7 @@ describe('WorkspaceBrowser 团队区域', () => {
 
     const user = userEvent.setup()
     await user.click(screen.getByTitle('更换本机 Session'))
+    expect(screen.queryByText('agent-cockpit-1 · Lead TopazOwl')).not.toBeInTheDocument()
     await user.click(screen.getByText('hr-ready-team · Lead GoldRiver'))
     await waitFor(() => expect(onTeamBindSession).toHaveBeenCalledWith('ready', 'hr-ready-team'))
   })

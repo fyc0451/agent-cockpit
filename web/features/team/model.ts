@@ -17,6 +17,7 @@ export interface TeamBinding {
   active?: boolean
   ready?: boolean
   reason?: string | null
+  projectRef?: string | null
 }
 
 export interface TeamSessionCandidate {
@@ -27,6 +28,7 @@ export interface TeamSessionCandidate {
   ready: boolean
   reason: string | null
   leadName: string | null
+  projectRef: string | null
 }
 
 export interface TeamUser {

@@ -307,6 +307,7 @@ export function GroupChatPage() {
     queryFn: () => listTeamMembers(teamActiveTopic!),
     enabled: teamEnabled && teamAuthQ.data?.logged_in === true && !!teamActiveTopic,
     staleTime: 30_000,
+    refetchInterval: teamEnabled && teamAuthQ.data?.logged_in === true ? 5_000 : false,
   })
 
   const handleTeamLogin = useCallback(async (username: string, password: string) => {

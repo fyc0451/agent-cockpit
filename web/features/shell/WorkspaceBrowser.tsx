@@ -823,6 +823,10 @@ function TeamZoneSection({
 
       {topics.map((topic) => {
         const binding = bindings.find((b) => b.project_slug === topic.slug)
+        const selectableCandidates = sessionCandidates.filter((candidate) => (
+          candidate.ready
+          && (!binding?.projectRef || candidate.projectRef === binding.projectRef)
+        ))
         const membershipStatus = topic.membership === undefined
           ? 'active'
           : topic.membership?.status ?? ''
@@ -939,16 +943,15 @@ function TeamZoneSection({
                 <div style={{ fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' }}>
                   选择本机 Session：
                 </div>
-                {sessionCandidates.length === 0 && (
+                {selectableCandidates.length === 0 && (
                   <div style={{ padding: '6px 2px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' }}>
-                    没有可绑定的本机 Session
+                    没有与该项目匹配且负责人可用的 Session
                   </div>
                 )}
-                {sessionCandidates.map((sess) => (
+                {selectableCandidates.map((sess) => (
                   <button
                     key={sess.name}
                     type="button"
-                    disabled={!sess.ready}
                     title={sess.reason ?? sess.label}
                     onClick={() => handleBind(topic.slug, sess.name)}
                     style={{
@@ -959,8 +962,7 @@ function TeamZoneSection({
                       border: '1px solid var(--dsw-alias-border-l1)',
                       borderRadius: '4px',
                       color: 'var(--dsw-alias-label-primary)',
-                      cursor: sess.ready ? 'pointer' : 'not-allowed',
-                      opacity: sess.ready ? 1 : 0.55,
+                      cursor: 'pointer',
                       fontSize: '12px',
                       textAlign: 'left',
                       marginBottom: '4px',
