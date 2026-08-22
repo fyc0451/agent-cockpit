@@ -75,6 +75,21 @@ describe('点左侧工作区会话', () => {
     expect(screen.queryByText('Minified React error')).not.toBeInTheDocument()
   })
 
+  it('从团队管理页点左侧会话会返回群聊主栏', async () => {
+    const user = userEvent.setup()
+    renderApp('/team?session=cockpit')
+    expect(await screen.findByText('团队管理', { selector: '.gc-toolbar-title' }))
+      .toBeInTheDocument()
+
+    await user.click(await screen.findByText('platform'))
+
+    await waitFor(() => {
+      expect(screen.getByText('platform', { selector: '.gc-toolbar-title' }))
+        .toBeInTheDocument()
+    })
+    expect(screen.getByText('开始群聊')).toBeInTheDocument()
+  })
+
   it('发送中切换会话，气泡不落到新会话（修复 onSend 竞态）', async () => {
     const user = userEvent.setup()
     window.sessionStorage.setItem('gc:draft:cockpit', 'cockpit draft')

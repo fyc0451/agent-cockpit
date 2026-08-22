@@ -324,7 +324,10 @@ export function GroupChatPage() {
 
   const handleTeamSelectTopic = useCallback((projectSlug: string) => {
     setTeamActiveTopic(projectSlug)
-  }, [])
+    if (location.pathname !== routePatterns.chat) {
+      navigate(routes.chat(), { replace: true })
+    }
+  }, [location.pathname, navigate])
 
   const liveRows = useMemo(
     () => buildSessionRows(sessionsQ.data ?? [], snapshotQ.data ?? null),
@@ -409,7 +412,10 @@ export function GroupChatPage() {
       resetSessionLocal(name)
       setActiveSession(name)
       saveActiveSession(name)
-      if (location.pathname === routePatterns.settings) {
+      if (
+        location.pathname === routePatterns.settings
+        || location.pathname === routePatterns.team
+      ) {
         navigate(routes.chat({ session: name }), { replace: true })
       } else {
         setSearchParams({ session: name }, { replace: true })
