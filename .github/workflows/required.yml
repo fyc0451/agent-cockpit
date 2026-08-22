@@ -37,33 +37,9 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Fast backend contract tests
-        run: |
-          set -euo pipefail
-          umask 077
-          mkdir -p /tmp/agent-cockpit-pytest
-          pytest -q --basetemp=/tmp/agent-cockpit-pytest \
-            tests/test_auth_session.py \
-            tests/test_security.py \
-            tests/test_exception_handlers.py \
-            tests/test_files_security.py \
-            tests/test_chat_ledger.py \
-            tests/test_chat_ledger_api.py \
-            tests/test_chat_ledger_sse.py \
-            tests/test_agent_mail_tools.py \
-            tests/test_hub_client.py \
-            tests/test_team_ledger.py \
-            tests/test_team_inbox_router.py \
-            tests/test_workspace_write_gate.py
-
       - name: Install web dependencies
         working-directory: web
         run: npm ci
 
-      - name: Web unit tests
-        working-directory: web
-        run: npm test -- --run
-
-      - name: Web typecheck and production build
-        working-directory: web
-        run: npm run build
+      - name: Fast required gate
+        run: ./scripts/fast-required.sh

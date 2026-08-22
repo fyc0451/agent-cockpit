@@ -10,6 +10,19 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 ```
 
+Install the web dependencies once, then run the same fast merge gate used by
+GitHub Actions before every pull request or merge:
+
+```bash
+npm --prefix web ci
+./scripts/fast-required.sh
+```
+
+The command fails on the first broken lane and covers the required backend
+contracts, all Web unit tests, TypeScript checking, and the production build.
+When hosted Actions cannot start, attach the complete local command result to
+the review instead of treating the missing remote run as a pass.
+
 Before submitting a pull request, run the full tests, validate Python syntax, and
 check the inline frontend script:
 
