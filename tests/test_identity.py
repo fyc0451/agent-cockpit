@@ -180,6 +180,24 @@ def test_managed_identity_lookup_is_exact_by_opaque_instance(monkeypatch, tmp_pa
     assert seen == [(str(project), "codex", "FreshMailbox")]
 
 
+def test_dev_registry_scope_includes_all_workspaces(monkeypatch):
+    monkeypatch.setattr(server.next_profile, "is_dev", lambda: True)
+    monkeypatch.setattr(
+        server.next_profile,
+        "project",
+        lambda: (_ for _ in ()).throw(AssertionError("dev registry must be global")),
+    )
+
+    assert server._registry_project_scope() is None
+
+
+def test_isolated_registry_scope_stays_single_project(monkeypatch):
+    monkeypatch.setattr(server.next_profile, "is_dev", lambda: False)
+    monkeypatch.setattr(server.next_profile, "project", lambda: "/isolated/project")
+
+    assert server._registry_project_scope() == "/isolated/project"
+
+
 def test_managed_identity_lookup_separates_two_instances_and_rejects_mismatch(
     monkeypatch, tmp_path,
 ):

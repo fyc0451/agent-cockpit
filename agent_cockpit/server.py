@@ -3956,6 +3956,13 @@ def _registry_identity_id(project_dir_name: str, filename: str) -> str:
     return f"{project_dir_name}/{filename}"
 
 
+def _registry_project_scope() -> str | None:
+    """8790 可读多工作区身份；固定/ephemeral Next 仍单项目隔离。"""
+    if next_profile.is_dev():
+        return None
+    return next_profile.project()
+
+
 def _registry_scan() -> list[dict[str, Any]]:
     """安全扫描 registry，返回每条（安全摘要 + identity_id + 完整 identity）。
 
@@ -4030,7 +4037,7 @@ def _read_registry_entry(entry: Path, resolved_root: Path) -> dict[str, Any] | N
         data = json.loads(resolved.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return None
-        scoped_project = next_profile.project()
+        scoped_project = _registry_project_scope()
         if scoped_project is not None and data.get("project_key") != scoped_project:
             return None
         hub = data.get("hub")
