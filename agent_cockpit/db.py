@@ -14,6 +14,11 @@ from . import next_profile
 
 
 def _scope() -> str | None:
+    # Source 8790 is the multi-workspace product: its Agent Mail read model must
+    # discover every registered local project. The fixed/ephemeral Next preview
+    # remains pinned to its single isolated AGENT_MAIL_PROJECT.
+    if next_profile.is_dev():
+        return None
     return next_profile.project()
 
 def _resolve_db_path() -> Path:

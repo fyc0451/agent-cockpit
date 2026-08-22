@@ -5,9 +5,31 @@ from pathlib import Path
 
 import pytest
 
-from agent_cockpit import next_profile
+from agent_cockpit import db, next_profile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_dev_profile_db_scope_includes_all_registered_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db.next_profile, "is_dev", lambda: True)
+    monkeypatch.setattr(
+        db.next_profile,
+        "project",
+        lambda: (_ for _ in ()).throw(AssertionError("dev scope must be global")),
+    )
+
+    assert db._scope() is None
+
+
+def test_isolated_profile_db_scope_stays_single_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db.next_profile, "is_dev", lambda: False)
+    monkeypatch.setattr(db.next_profile, "project", lambda: "/isolated/project")
+
+    assert db._scope() == "/isolated/project"
 
 
 def _dev_server():
