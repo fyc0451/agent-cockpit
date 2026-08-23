@@ -4141,8 +4141,12 @@ def api_team_local_identities(request: Request):
 def _team_session_candidates() -> list[dict[str, Any]]:
     """只把运行中 Session 的唯一负责人作为 Team 绑定候选。"""
     identities = _registry_scan()
+    snapshot = _board_snapshot()
+    running_sessions = _running_session_names(snapshot)
     result: list[dict[str, Any]] = []
-    for session in _build_session_progress(_board_snapshot()):
+    for session in _build_session_progress(snapshot):
+        if str(session.get("session") or "") not in running_sessions:
+            continue
         leads = [agent for agent in session["agents"] if agent.get("role") == "lead"]
         if not leads:
             remembered = chat_roster.get_session_leader(str(session["session"]))
