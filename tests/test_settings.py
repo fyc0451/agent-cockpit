@@ -588,6 +588,13 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
             ("status", authorization, username, status)
         ) or {"user": {"username": username, "status": status}},
     )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_change_password",
+        lambda authorization, new_password: calls.append(
+            ("password", authorization, new_password)
+        ) or {"ok": True},
+    )
     client = TestClient(server.app)
     headers = {"authorization": "Bearer secret"}
 
@@ -617,6 +624,13 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
         headers=headers,
         json={"status": "active"},
     ).status_code == 200
+    changed = client.patch(
+        "/api/team-auth/password",
+        headers=headers,
+        json={"new_password": "new-password-1234"},
+    )
+    assert changed.status_code == 200
+    assert changed.json() == {"ok": True}
     logged_out = client.post("/api/team-auth/logout", headers=headers)
     assert logged_out.status_code == 200
     assert "cockpit_team_human_session=" in logged_out.headers["set-cookie"]
@@ -626,6 +640,7 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
         ("invite", "Bearer human.jwt", 3600, None),
         ("users", "Bearer human.jwt"),
         ("status", "Bearer human.jwt", "alice", "active"),
+        ("password", "Bearer human.jwt", "new-password-1234"),
     ]
 
 

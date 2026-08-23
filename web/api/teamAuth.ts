@@ -69,6 +69,25 @@ export async function teamLogout(): Promise<void> {
   }
 }
 
+export async function teamChangePassword(newPassword: string): Promise<void> {
+  const response = await fetch('/api/team-auth/password', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_password: newPassword }),
+    credentials: 'include',
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: 'password_change_failed',
+      message: text || '修改密码失败',
+      retryable: false,
+      status: response.status,
+    })
+  }
+}
+
 export async function teamAuthStatus(): Promise<{
   logged_in: boolean
   username: string | null

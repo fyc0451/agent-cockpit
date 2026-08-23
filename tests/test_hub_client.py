@@ -532,10 +532,14 @@ def test_human_account_lifecycle_calls_fixed_remote_issuer_routes(monkeypatch):
     registered = hub_client.human_register(
         "alice", "Alice", "alice-password-123", "one-time"
     )
+    changed = hub_client.human_change_password(
+        "Bearer human.jwt", "new-password-1234"
+    )
     invitation = hub_client.human_create_invitation("Bearer human.jwt", 3600)
     users = hub_client.human_list_users("Bearer human.jwt")
 
     assert registered["account"]["status"] == "pending"
+    assert changed == {"users": []}
     assert invitation["invite_code"] == "one-time"
     assert users == {"users": []}
     assert calls[1] == (
@@ -550,8 +554,14 @@ def test_human_account_lifecycle_calls_fixed_remote_issuer_routes(monkeypatch):
         {"Accept": "application/json"},
     )
     assert calls[3][0:3] == (
+        "PATCH",
+        "https://team.example/human-auth/me/password",
+        {"new_password": "new-password-1234"},
+    )
+    assert calls[3][3]["Authorization"] == "Bearer human.jwt"
+    assert calls[5][0:3] == (
         "POST",
         "https://team.example/human-auth/admin/invitations",
         {"expires_in": 3600},
     )
-    assert calls[3][3]["Authorization"] == "Bearer human.jwt"
+    assert calls[5][3]["Authorization"] == "Bearer human.jwt"

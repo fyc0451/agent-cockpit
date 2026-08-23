@@ -403,6 +403,17 @@ def human_profile(authorization: str) -> dict[str, Any]:
     return _human_auth_api("GET", "/me", authorization=authorization)
 
 
+def human_change_password(authorization: str, new_password: str) -> dict[str, Any]:
+    if not 1 <= len(new_password) <= 256:
+        raise ValueError("新密码长度无效")
+    return _human_auth_api(
+        "PATCH",
+        "/me/password",
+        authorization=authorization,
+        payload={"new_password": new_password},
+    )
+
+
 def human_register(
     username: str,
     display_name: str,
