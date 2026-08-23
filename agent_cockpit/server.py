@@ -4799,8 +4799,8 @@ def _active_team_lead_bindings() -> list[tuple[dict[str, Any], dict[str, Any]]]:
         lead = candidate.get("lead") if isinstance(candidate.get("lead"), dict) else {}
         if (
             candidate.get("ready") is not True
-            or candidate.get("status") not in {"working", "idle", "blocked"}
-            or lead.get("status") not in {"working", "idle", "blocked"}
+            or candidate.get("status") not in {"working", "idle", "blocked", "done"}
+            or lead.get("status") not in {"working", "idle", "blocked", "done"}
             or not isinstance(candidate.get("mail_project"), str)
             or not isinstance(lead.get("mail_name"), str)
         ):

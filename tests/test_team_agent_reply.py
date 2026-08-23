@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from agent_cockpit import hub_client
@@ -9,7 +10,9 @@ HUB = "http://team.example"
 PROJECT = "/work/demo"
 
 
-def _prepare(monkeypatch, *, ready=True, client_host="127.0.0.1"):
+def _prepare(
+    monkeypatch, *, ready=True, client_host="127.0.0.1", reply_mode="confirm",
+):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "cockpit-secret")
     monkeypatch.setattr(
         server.hub_client,
@@ -40,6 +43,7 @@ def _prepare(monkeypatch, *, ready=True, client_host="127.0.0.1"):
         client_session_id="client-1",
         agent_id=41,
         reply_token="reply-secret",
+        reply_mode=reply_mode,
     )
     return TestClient(server.app, client=(client_host, 50000))
 
@@ -222,26 +226,17 @@ def test_team_work_respond_uses_persisted_mode_and_hides_secrets(monkeypatch):
     assert "registration-secret" not in response.text
 
 
-def test_worker_tick_only_uses_current_active_lead_pane(monkeypatch):
-    _prepare(monkeypatch)
-    monkeypatch.setattr(server, "_team_session_candidates", lambda: [
-        {
-            "session": "demo", "generation": "run-1", "mail_project": PROJECT,
-            "ready": True, "status": "working",
-            "lead": {
-                "mail_name": "codex-main", "pane_id": "active-pane",
-                "status": "idle",
-            },
+@pytest.mark.parametrize("reply_mode", ["confirm", "auto"])
+def test_worker_tick_wakes_running_done_lead(monkeypatch, reply_mode):
+    _prepare(monkeypatch, reply_mode=reply_mode)
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [{
+        "session": "demo", "generation": "run-1", "mail_project": PROJECT,
+        "ready": True, "status": "done",
+        "lead": {
+            "agent": "codex", "mail_name": "codex-main",
+            "pane_id": "done-pane", "status": "done",
         },
-        {
-            "session": "done", "generation": "run-2", "mail_project": PROJECT,
-            "ready": True, "status": "done",
-            "lead": {
-                "mail_name": "codex-main", "pane_id": "stale-pane",
-                "status": "done",
-            },
-        },
-    ])
+    }])
     calls = []
     monkeypatch.setattr(
         server.team_lead_worker, "poll_binding",
@@ -251,4 +246,54 @@ def test_worker_tick_only_uses_current_active_lead_pane(monkeypatch):
     server._team_lead_worker_tick()
 
     assert len(calls) == 1
-    assert calls[0][1]["lead"]["pane_id"] == "active-pane"
+    assert calls[0][0]["reply_mode"] == reply_mode
+    assert calls[0][1]["lead"]["pane_id"] == "done-pane"
+
+
+@pytest.mark.parametrize("status", ["stopped", "unknown"])
+def test_worker_tick_rejects_non_running_lead(monkeypatch, status):
+    _prepare(monkeypatch)
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [{
+        "session": "demo", "generation": "run-1", "mail_project": PROJECT,
+        "ready": True, "status": status,
+        "lead": {
+            "agent": "codex", "mail_name": "codex-main",
+            "pane_id": "inactive-pane", "status": status,
+        },
+    }])
+    calls = []
+    monkeypatch.setattr(
+        server.team_lead_worker, "poll_binding",
+        lambda binding, candidate, **_kwargs: calls.append((binding, candidate)),
+    )
+
+    server._team_lead_worker_tick()
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("generation", "mail_name"),
+    [("run-2", "codex-main"), ("run-1", "other-lead")],
+)
+def test_worker_tick_rejects_generation_or_identity_mismatch(
+    monkeypatch, generation, mail_name,
+):
+    _prepare(monkeypatch)
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [{
+        "session": "demo", "generation": generation, "mail_project": PROJECT,
+        "ready": True, "status": "done",
+        "lead": {
+            "agent": "codex", "mail_name": mail_name,
+            "pane_id": "mismatched-pane", "status": "done",
+        },
+    }])
+    calls = []
+    monkeypatch.setattr(
+        server.team_lead_worker, "poll_binding",
+        lambda binding, candidate, **_kwargs: calls.append((binding, candidate)),
+    )
+
+    server._team_lead_worker_tick()
+
+    assert calls == []
