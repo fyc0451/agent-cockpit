@@ -9,8 +9,41 @@ import {
   rejectTeamReplyRequest,
 } from '../../api/teamAuth'
 import { listTeamMessages, sendTeamMessage } from '../../api/teamLedger'
+import type { TeamMessage } from '../../api/teamLedger'
 import type { TeamBinding } from './model'
 import { TeamReplyPanel } from './TeamReplyPanel'
+
+const REPLY_SUBJECT_PREFIX = 'Re: '
+const QUESTION_PREVIEW_LENGTH = 20
+
+function questionPreview(text: string): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) return '（提问内容为空）'
+  const chars = Array.from(normalized)
+  return chars.length > QUESTION_PREVIEW_LENGTH
+    ? `${chars.slice(0, QUESTION_PREVIEW_LENGTH).join('')}…`
+    : normalized
+}
+
+function matchReplyQuestions(rows: TeamMessage[]): Map<number, TeamMessage> {
+  const questionsBySubject = new Map<string, TeamMessage[]>()
+  const matches = new Map<number, TeamMessage>()
+
+  for (const row of [...rows].sort((left, right) => left.id - right.id)) {
+    if (row.subject.startsWith(REPLY_SUBJECT_PREFIX)) {
+      const subject = row.subject.slice(REPLY_SUBJECT_PREFIX.length)
+      const candidates = questionsBySubject.get(subject)
+      const question = candidates?.pop()
+      if (question) matches.set(row.id, question)
+    }
+
+    const candidates = questionsBySubject.get(row.subject) ?? []
+    candidates.push(row)
+    questionsBySubject.set(row.subject, candidates)
+  }
+
+  return matches
+}
 
 export function TeamTimeline({
   topic,
@@ -75,6 +108,7 @@ export function TeamTimeline({
   }
 
   const rows = messagesQ.data ?? []
+  const replyQuestions = matchReplyQuestions(rows)
   const replyRequests = new Map(
     (requestsQ.data ?? []).map((request) => [request.messageId, request]),
   )
@@ -108,6 +142,7 @@ export function TeamTimeline({
         )}
         {rows.map((row) => {
           const request = replyRequests.get(row.id)
+          const question = replyQuestions.get(row.id)
           return (
           <div key={row.id} className="gc-team-msg" data-testid={`team-msg-${row.id}`}>
             <div className="gc-team-msg-meta">
@@ -118,7 +153,21 @@ export function TeamTimeline({
             {row.subject && row.subject !== '群聊消息' && (
               <div className="gc-team-msg-meta">{row.subject}</div>
             )}
-            <div className="gc-team-msg-body">{row.body_md}</div>
+            {question ? (
+              <details className="gc-team-reply-detail">
+                <summary>{questionPreview(question.body_md)}</summary>
+                <div className="gc-team-reply-detail-section">
+                  <strong>完整提问</strong>
+                  <div>{question.body_md}</div>
+                </div>
+                <div className="gc-team-reply-detail-section">
+                  <strong>回复详情</strong>
+                  <div>{row.body_md}</div>
+                </div>
+              </details>
+            ) : (
+              <div className="gc-team-msg-body">{row.body_md}</div>
+            )}
             {request && (
               <div className="gc-team-reply-request" data-testid={`reply-request-${row.id}`}>
                 {request.status === 'awaiting_confirmation'

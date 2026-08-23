@@ -2818,6 +2818,32 @@
   word-break: break-word;
 }
 
+.gc-team-reply-detail {
+  font-size: 14px;
+  color: var(--gc-text);
+}
+
+.gc-team-reply-detail summary {
+  cursor: pointer;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gc-team-reply-detail-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--gc-line);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gc-team-reply-detail-section strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--gc-text3);
+}
+
 .gc-team-composer {
   display: flex;
   gap: 8px;

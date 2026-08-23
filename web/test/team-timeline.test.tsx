@@ -14,10 +14,10 @@ function createWrapper() {
   )
 }
 
-function message(id: number, body_md: string) {
+function message(id: number, body_md: string, subject = '群聊消息') {
   return {
     id,
-    subject: '群聊消息',
+    subject,
     body_md,
     mention_handles: [],
     importance: 'normal',
@@ -185,6 +185,51 @@ describe('TeamTimeline', () => {
     expect(await screen.findByText('自动回复已启用，等待 Lead 处理…')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '让 Lead 回复' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '不回复' })).not.toBeInTheDocument()
+  })
+
+  it('回复默认显示原问题前 20 个字，展开后显示完整问答', async () => {
+    const question = '数据库连接失败后应该如何排查连接池、网络配置和服务状态？'
+    const preview = `${Array.from(question).slice(0, 20).join('')}…`
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        messages: [
+          message(50, question, '数据库连接失败'),
+          message(51, '已确认收到。稍后给出排查步骤。', 'Re: 数据库连接失败'),
+        ],
+      }),
+    } as Response)))
+
+    const user = userEvent.setup()
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
+
+    const summary = await screen.findByText(preview)
+    const details = summary.closest('details')
+    expect(details).not.toHaveAttribute('open')
+    expect(summary).not.toHaveTextContent('已确认收到')
+
+    await user.click(summary)
+    expect(details).toHaveAttribute('open')
+    expect(screen.getByText('完整提问')).toBeInTheDocument()
+    expect(screen.getAllByText(question)).toHaveLength(2)
+    expect(screen.getByText('回复详情')).toBeInTheDocument()
+    expect(screen.getByText('已确认收到。稍后给出排查步骤。')).toBeInTheDocument()
+  })
+
+  it('找不到原问题时保留回复正文', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        messages: [message(60, '没有匹配原问题的回复', 'Re: 已过期问题')],
+      }),
+    } as Response)))
+
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
+
+    const reply = await screen.findByText('没有匹配原问题的回复')
+    expect(reply.closest('details')).toBeNull()
   })
 
   it('API 只暴露 Team Hub 群聊读写', () => {
