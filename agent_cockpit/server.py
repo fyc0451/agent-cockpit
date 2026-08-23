@@ -2725,12 +2725,19 @@ def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             session, {"session": session, "directory": "", "panes": []}
         )
         pane_id = str(pane.get("pane_id") or "")
-        duplicate = pane_id and any(
-            str(existing.get("pane_id") or "") == pane_id
-            for existing in row["panes"]
-            if isinstance(existing, dict)
+        existing = next(
+            (
+                item
+                for item in row["panes"]
+                if isinstance(item, dict)
+                and pane_id
+                and str(item.get("pane_id") or "") == pane_id
+            ),
+            None,
         )
-        if not duplicate and pane not in row["panes"]:
+        if existing is not None:
+            existing.update(pane)
+        elif pane not in row["panes"]:
             row["panes"].append(pane)
 
     result: list[dict[str, Any]] = []

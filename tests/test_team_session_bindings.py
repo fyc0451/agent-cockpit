@@ -224,11 +224,17 @@ def test_managed_restart_identity_change_degrades_binding_and_stops_worker(monke
                 "agent": "codex",
                 "agent_status": "working",
                 "cwd": PROJECT_KEY,
-                "mail_name": "FreshLead",
-                "instance_id": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
             }],
         }],
-        "panes": [],
+        "panes": [{
+            "session": "demo",
+            "pane_id": "w1:p2",
+            "agent": "codex",
+            "agent_status": "working",
+            "cwd": PROJECT_KEY,
+            "mail_name": "FreshLead",
+            "instance_id": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
+        }],
     })
     monkeypatch.setattr(server.hub_client, "human_api", _human_api())
     team_sessions.bind(
@@ -276,11 +282,17 @@ def test_managed_restart_rebind_requires_confirmation_and_rotates_capability(mon
                 "agent": "codex",
                 "agent_status": "working",
                 "cwd": PROJECT_KEY,
-                "mail_name": "FreshLead",
-                "instance_id": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
             }],
         }],
-        "panes": [],
+        "panes": [{
+            "session": "demo",
+            "pane_id": "w1:p2",
+            "agent": "codex",
+            "agent_status": "working",
+            "cwd": PROJECT_KEY,
+            "mail_name": "FreshLead",
+            "instance_id": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
+        }],
     })
     monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
     team_sessions.bind(
