@@ -210,7 +210,7 @@ def test_status_pipe_falls_back_when_pipe2_is_unavailable(monkeypatch):
         called.append(True)
         return original_pipe()
 
-    monkeypatch.delattr(terminal.os, "pipe2")
+    monkeypatch.delattr(terminal.os, "pipe2", raising=False)
     monkeypatch.setattr(terminal.os, "pipe", pipe)
     read_fd, write_fd = terminal._status_pipe()
     try:
