@@ -181,15 +181,15 @@ def test_parent_status_pipe_failure_reaps_and_closes_pty(monkeypatch, failure):
 
 
 def test_status_pipe_inheritable_failure_closes_both_descriptors(monkeypatch):
-    original_pipe2 = terminal.os.pipe2
+    original_status_pipe = terminal._status_pipe
     descriptors = []
 
-    def pipe2(flags):
-        pair = original_pipe2(flags)
+    def status_pipe():
+        pair = original_status_pipe()
         descriptors.extend(pair)
         return pair
 
-    monkeypatch.setattr(terminal.os, "pipe2", pipe2)
+    monkeypatch.setattr(terminal, "_status_pipe", status_pipe)
     monkeypatch.setattr(
         terminal.os,
         "set_inheritable",
@@ -200,6 +200,24 @@ def test_status_pipe_inheritable_failure_closes_both_descriptors(monkeypatch):
     for fd in descriptors:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+def test_status_pipe_falls_back_when_pipe2_is_unavailable(monkeypatch):
+    original_pipe = terminal.os.pipe
+    called = []
+
+    def pipe():
+        called.append(True)
+        return original_pipe()
+
+    monkeypatch.delattr(terminal.os, "pipe2")
+    monkeypatch.setattr(terminal.os, "pipe", pipe)
+    read_fd, write_fd = terminal._status_pipe()
+    try:
+        assert called == [True]
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def test_zero_byte_workspace_write_fails_without_retaining_write_lock(monkeypatch):

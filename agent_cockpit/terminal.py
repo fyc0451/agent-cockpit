@@ -279,6 +279,13 @@ def _legacy_chdir(workdir: str) -> None:
         os.chdir(HOME)
 
 
+def _status_pipe() -> tuple[int, int]:
+    pipe2 = getattr(os, "pipe2", None)
+    if pipe2 is not None:
+        return pipe2(getattr(os, "O_CLOEXEC", 0))
+    return os.pipe()
+
+
 def _create_term(
     *,
     cwd: str | None,
@@ -307,7 +314,7 @@ def _create_term(
     if _active_count() >= max_terms:
         raise RuntimeError(f"活跃终端数已达上限 {max_terms}")
 
-    status_read, status_write = os.pipe2(getattr(os, "O_CLOEXEC", 0))
+    status_read, status_write = _status_pipe()
     try:
         os.set_inheritable(status_read, False)
         os.set_inheritable(status_write, False)
