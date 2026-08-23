@@ -90,7 +90,7 @@ def test_team_work_cli_submits_explicit_reply(monkeypatch, capsys):
     monkeypatch.setattr(
         module, "_post",
         lambda path, payload: calls.append((path, payload)) or {
-            "status": "draft_pending", "draft_id": 8,
+            "status": "replied", "message_id": 8,
         },
     )
 
@@ -103,7 +103,7 @@ def test_team_work_cli_submits_explicit_reply(monkeypatch, capsys):
     assert calls[0][0] == f"/api/agent/team-work/{'a' * 32}/respond"
     assert calls[0][1]["mention_handles"] == ["alice"]
     output = capsys.readouterr().out
-    assert "draft_pending" in output
+    assert "replied" in output
     assert "registration-secret" not in output
 
 

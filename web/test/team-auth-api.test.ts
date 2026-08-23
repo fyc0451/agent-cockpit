@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   approveTeamUser,
-  approveTeamReplyDraft,
+  approveTeamReplyRequest,
   createTeamInvitation,
-  listTeamReplyDrafts,
+  listTeamReplyRequests,
   listTeamProjects,
-  rejectTeamReplyDraft,
+  rejectTeamReplyRequest,
   requestTeamJoin,
   setTeamReplyMode,
   teamChangePassword,
@@ -197,24 +197,18 @@ describe('团队普通成员 API', () => {
     })
   })
 
-  it('回复模式切换与草稿决策只调用受限 Cockpit 路由', async () => {
+  it('回复模式切换与消息级预授权只调用受限 Cockpit 路由', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, status: 200 } as Response)
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
         json: async () => ({
-          drafts: [{
-            id: 12,
+          requests: [{
             inbox_item_id: 31,
-            subject: '回复',
-            body_md: '已处理',
-            importance: 'normal',
-            mention_handles: ['alice'],
-            status: 'pending',
-            message_id: null,
-            created_at: '2026-08-23 10:00:00',
-            updated_at: '2026-08-23 10:00:00',
+            message_id: 12,
+            status: 'awaiting_confirmation',
+            decision: null,
             decided_at: null,
           }],
         }),
@@ -224,11 +218,11 @@ describe('团队普通成员 API', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await setTeamReplyMode('ready', 'auto')
-    await expect(listTeamReplyDrafts('ready')).resolves.toMatchObject([
-      { id: 12, body: '已处理', mentionHandles: ['alice'], status: 'pending' },
+    await expect(listTeamReplyRequests('ready')).resolves.toMatchObject([
+      { inboxItemId: 31, messageId: 12, status: 'awaiting_confirmation' },
     ])
-    await approveTeamReplyDraft('ready', 12)
-    await rejectTeamReplyDraft('ready', 13)
+    await approveTeamReplyRequest('ready', 31)
+    await rejectTeamReplyRequest('ready', 32)
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -240,10 +234,10 @@ describe('团队普通成员 API', () => {
     )
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      '/api/team/projects/ready/reply-drafts',
+      '/api/team/projects/ready/reply-requests',
       { credentials: 'include' },
     )
-    expect(String(fetchMock.mock.calls[2][0])).toContain('/reply-drafts/12/approve')
-    expect(String(fetchMock.mock.calls[3][0])).toContain('/reply-drafts/13/reject')
+    expect(String(fetchMock.mock.calls[2][0])).toContain('/reply-requests/31/approve')
+    expect(String(fetchMock.mock.calls[3][0])).toContain('/reply-requests/32/reject')
   })
 })

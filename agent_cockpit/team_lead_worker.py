@@ -18,7 +18,7 @@ from typing import Any
 from . import runtime_paths
 
 STATE_PATH = runtime_paths.store("inbox_route")
-STATE_VERSION = 3
+STATE_VERSION = 4
 _lock = threading.RLock()
 
 
@@ -36,8 +36,11 @@ def _load() -> dict[str, Any]:
         raise OSError("Team Lead 工作队列不可读") from exc
     if (
         isinstance(data, dict)
-        and data.get("version") == 2
-        and isinstance(data.get("routes"), dict)
+        and data.get("version") in {2, 3}
+        and (
+            isinstance(data.get("routes"), dict)
+            or isinstance(data.get("work_items"), list)
+        )
     ):
         return _empty()
     if (
@@ -167,7 +170,7 @@ def reset_notifications() -> None:
             try:
                 legacy = json.loads(STATE_PATH.read_text(encoding="utf-8")).get(
                     "version"
-                ) == 2
+                ) in {2, 3}
             except (OSError, UnicodeError, ValueError, AttributeError):
                 pass
         data = _load()
@@ -295,11 +298,10 @@ def respond(
     binding: dict[str, Any],
     response: dict[str, Any],
     *,
-    create_draft: Callable[[str, dict[str, Any]], dict[str, Any]],
     direct_reply: Callable[[str, dict[str, Any]], dict[str, Any]],
     complete: Callable[[str, int, dict[str, Any]], dict[str, Any]],
 ) -> dict[str, Any]:
-    """幂等提交草稿或直回，Hub 确认后才 complete 并删除本地正文。"""
+    """幂等直回已获授权的消息，Hub 确认后 complete 并删除本地正文。"""
     with _lock:
         data = _load()
         item = next((
@@ -323,21 +325,14 @@ def respond(
         "importance": response["importance"],
         "mention_handles": response["mention_handles"],
         "idempotency_key": f"cockpit-work-{work_id}",
+        "inbox_item_id": int(snapshot["inbox_item_id"]),
+        "claim_token": snapshot["claim_token"],
     }
     project_slug = str(binding["project_slug"])
     inbox_item_id = int(snapshot["inbox_item_id"])
-    if snapshot["reply_mode"] == "confirm":
-        submitted = create_draft(project_slug, {
-            **base,
-            "inbox_item_id": inbox_item_id,
-            "claim_token": snapshot["claim_token"],
-        })
-        outcome = "draft_pending"
-    elif snapshot["reply_mode"] == "auto":
-        submitted = direct_reply(project_slug, base)
-        outcome = "replied"
-    else:
+    if snapshot["reply_mode"] not in {"confirm", "auto"}:
         raise ValueError("Team Lead 回复模式无效")
+    submitted = direct_reply(project_slug, base)
     complete(project_slug, inbox_item_id, {
         "client_session_id": str(binding["client_session_id"]),
         "reply_token": str(binding["reply_token"]),
@@ -349,9 +344,4 @@ def respond(
             row for row in data["work_items"] if row.get("work_id") != work_id
         ]
         _write(data)
-    safe = {"status": outcome}
-    if outcome == "draft_pending" and isinstance(submitted.get("draft"), dict):
-        safe["draft_id"] = submitted["draft"].get("id")
-    elif outcome == "replied":
-        safe["message_id"] = submitted.get("message_id")
-    return safe
+    return {"status": "replied", "message_id": submitted.get("message_id")}

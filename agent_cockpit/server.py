@@ -950,8 +950,8 @@ TEAM_API_ROUTES = (
     (re.compile(r"^agents$"), {"GET"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agent-bindings$"), {"GET", "POST"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agent-bindings/[0-9]+$"), {"DELETE"}),
-    (re.compile(r"^projects/[A-Za-z0-9_-]+/reply-drafts$"), {"GET"}),
-    (re.compile(r"^projects/[A-Za-z0-9_-]+/reply-drafts/[0-9]+/(?:approve|reject)$"), {"POST"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/reply-requests$"), {"GET"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/reply-requests/[0-9]+/(?:approve|reject)$"), {"POST"}),
 )
 VALID_AGENTS = {"codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode"}
 VALID_LAYOUTS = {"right", "horizontal", "down", "vertical", "tab"}
@@ -4893,7 +4893,6 @@ async def api_team_agent_work_respond(work_id: str, request: Request):
                     "importance": importance,
                     "mention_handles": clean_handles,
                 },
-                create_draft=hub_client.session_lead_reply_draft,
                 direct_reply=hub_client.session_lead_reply,
                 complete=hub_client.session_lead_complete,
             )

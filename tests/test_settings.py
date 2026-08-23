@@ -371,16 +371,16 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         headers=headers,
     ).status_code == 200
     assert client.get(
-        "/api/team/projects/demo/reply-drafts?status_filter=pending",
+        "/api/team/projects/demo/reply-requests",
         headers=headers,
     ).status_code == 200
     assert client.post(
-        "/api/team/projects/demo/reply-drafts/12/approve",
+        "/api/team/projects/demo/reply-requests/12/approve",
         headers=headers,
         json={},
     ).status_code == 200
     assert client.post(
-        "/api/team/projects/demo/reply-drafts/13/reject",
+        "/api/team/projects/demo/reply-requests/13/reject",
         headers=headers,
         json={},
     ).status_code == 200
@@ -413,19 +413,19 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         ),
         (
             "GET",
-            "/hub/api/projects/demo/reply-drafts",
+            "/hub/api/projects/demo/reply-requests",
             "Bearer human.jwt",
             None,
         ),
         (
             "POST",
-            "/hub/api/projects/demo/reply-drafts/12/approve",
+            "/hub/api/projects/demo/reply-requests/12/approve",
             "Bearer human.jwt",
             {},
         ),
         (
             "POST",
-            "/hub/api/projects/demo/reply-drafts/13/reject",
+            "/hub/api/projects/demo/reply-requests/13/reject",
             "Bearer human.jwt",
             {},
         ),

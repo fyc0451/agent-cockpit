@@ -21,17 +21,11 @@ export interface TeamBinding {
   replyMode?: 'confirm' | 'auto'
 }
 
-export interface TeamReplyDraft {
-  id: number
+export interface TeamReplyRequest {
   inboxItemId: number
-  subject: string
-  body: string
-  importance: string
-  mentionHandles: string[]
-  status: 'pending' | 'approved' | 'rejected'
-  messageId: number | null
-  createdAt: string
-  updatedAt: string
+  messageId: number
+  status: 'awaiting_confirmation' | 'queued' | 'processing' | 'replied' | 'ignored'
+  decision: 'approved' | 'auto' | 'ignored' | null
   decidedAt: string | null
 }
 
