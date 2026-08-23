@@ -30,6 +30,41 @@ def profile(tmp_path: Path, name: str = "one") -> dict[str, str]:
     return {"COCKPIT_DATA_DIR": str(data), "COCKPIT_CONFIG_DIR": str(config)}
 
 
+def test_darwin_process_starttime_is_stable_and_opaque(monkeypatch):
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout="Sun Aug 23 14:30:00 2026\n", stderr="",
+        )
+
+    monkeypatch.setattr(instance_lock.sys, "platform", "darwin")
+    monkeypatch.setattr(instance_lock.subprocess, "run", fake_run)
+
+    first = instance_lock._process_starttime()
+    second = instance_lock._process_starttime()
+
+    assert first == second
+    assert first.isdecimal() and int(first) > 0
+    assert calls[0][0][0][0] == "/bin/ps"
+    assert calls[0][1]["env"] == {"LC_ALL": "C", "PATH": "/usr/bin:/bin"}
+
+
+def test_darwin_process_starttime_fails_closed(monkeypatch):
+    monkeypatch.setattr(instance_lock.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        instance_lock.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 1, stdout="", stderr="failed",
+        ),
+    )
+
+    with pytest.raises(instance_lock.LockError, match="process_identity_unavailable"):
+        instance_lock._process_starttime()
+
+
 def run_helper(
     values: dict[str, str], action: str, *, pass_fds: tuple[int, ...] = (),
 ) -> subprocess.Popen[str]:

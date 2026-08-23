@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Mapping
 
@@ -47,7 +49,33 @@ def profile_id(values: Mapping[str, str]) -> str:
     return f"sha256:{digest}"
 
 
+def _darwin_process_starttime() -> str:
+    """Return an opaque, exec-stable process birth identity on macOS."""
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(os.getpid()), "-o", "lstart="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        )
+        value = result.stdout.strip()
+        if result.returncode or not value:
+            raise ValueError("process start time missing")
+        opaque = int.from_bytes(
+            hashlib.sha256(value.encode("ascii")).digest()[:8], "big",
+        )
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
+        raise LockError("process_identity_unavailable") from exc
+    if opaque <= 0:
+        raise LockError("process_identity_unavailable")
+    return str(opaque)
+
+
 def _process_starttime() -> str:
+    if sys.platform == "darwin":
+        return _darwin_process_starttime()
     try:
         content = Path("/proc/self/stat").read_text(encoding="ascii")
         value = content[content.rindex(") ") + 2 :].split()[19]
