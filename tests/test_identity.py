@@ -671,6 +671,36 @@ def test_identity_record_uses_registry_name_when_hub_retired(monkeypatch, tmp_pa
     assert record["name"] == "BrownDesert"
 
 
+def test_identity_record_uses_registry_when_agent_mail_db_is_unavailable(monkeypatch):
+    instance = "i-yzh33bkopbhev3ae654tc7tila"
+    cwd = "/home/fyc/github/agent-cockpit"
+    monkeypatch.setattr(server.next_profile, "require_project", lambda path: path)
+    monkeypatch.setattr(
+        server,
+        "_registry_identity_for_instance",
+        lambda *_a, **_k: {
+            "name": "BrownDesert",
+            "program": "grok",
+            "model": "unknown",
+            "project_key": cwd,
+            "agent": "grok",
+            "instance": instance,
+        },
+    )
+    monkeypatch.setattr(
+        server.db,
+        "identity_by_cwd",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            FileNotFoundError("Agent Mail database missing")
+        ),
+    )
+
+    record = server._identity_record(cwd, "grok", instance)
+
+    assert record is not None
+    assert record["name"] == "BrownDesert"
+
+
 def test_identity_for_chat_pane_skips_program_main(monkeypatch):
     from agent_cockpit import db
 

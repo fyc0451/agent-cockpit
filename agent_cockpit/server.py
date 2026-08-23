@@ -1601,7 +1601,10 @@ def _identity_record(
             identity = _registry_identity_for_instance(cwd, agent_type, instance_id)
             if not identity:
                 return None
-            hub = db.identity_by_cwd(cwd, agent_type, identity["name"])
+            try:
+                hub = db.identity_by_cwd(cwd, agent_type, identity["name"])
+            except Exception:
+                hub = None
             if hub:
                 return hub
             # Hub 可能误标 retired，本机 registry 仍是这个 instance 的花名。
