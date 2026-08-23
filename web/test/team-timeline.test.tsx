@@ -139,6 +139,54 @@ describe('TeamTimeline', () => {
     ))).toBe(true)
   })
 
+  it('自动回复模式不显示旧的逐条确认按钮', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/chat/messages')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ messages: [message(43, '自动处理这条问题')] }),
+        } as Response
+      }
+      if (url.endsWith('/reply-requests')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            requests: [{
+              inbox_item_id: 32,
+              message_id: 43,
+              status: 'awaiting_confirmation',
+              decision: null,
+              decided_at: null,
+            }],
+          }),
+        } as Response
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }))
+
+    render(
+      <TeamTimeline
+        topic="proj-a"
+        topicName="项目 A"
+        binding={{
+          project_slug: 'proj-a',
+          session: 'demo',
+          ready: true,
+          replyMode: 'auto',
+        }}
+      />,
+      { wrapper: createWrapper() },
+    )
+
+    expect(await screen.findByText('自动处理这条问题')).toBeInTheDocument()
+    expect(await screen.findByText('自动回复已启用，等待 Lead 处理…')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '让 Lead 回复' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '不回复' })).not.toBeInTheDocument()
+  })
+
   it('API 只暴露 Team Hub 群聊读写', () => {
     expect(Object.keys(teamLedger).sort()).toEqual(['listTeamMessages', 'sendTeamMessage'])
   })

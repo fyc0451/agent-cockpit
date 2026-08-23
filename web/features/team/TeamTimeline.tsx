@@ -80,6 +80,9 @@ export function TeamTimeline({
   )
 
   const replyStatusText = (status: string) => {
+    if (status === 'awaiting_confirmation' && binding?.replyMode === 'auto') {
+      return '自动回复已启用，等待 Lead 处理…'
+    }
     if (status === 'queued') return '已允许回复，等待 Lead 处理…'
     if (status === 'processing') return 'Lead 正在生成回复…'
     if (status === 'replied') return 'Lead 已回复'
@@ -118,7 +121,8 @@ export function TeamTimeline({
             <div className="gc-team-msg-body">{row.body_md}</div>
             {request && (
               <div className="gc-team-reply-request" data-testid={`reply-request-${row.id}`}>
-                {request.status === 'awaiting_confirmation' ? (
+                {request.status === 'awaiting_confirmation'
+                  && binding?.replyMode !== 'auto' ? (
                   <>
                     <span>是否让 Lead 回复这条消息？确认前不会生成答案。</span>
                     <div className="gc-team-reply-actions">
