@@ -169,6 +169,52 @@ def test_session_candidate_deduplicates_same_pane_from_snapshot_views(monkeypatc
     assert candidate["lead"]["mail_name"] == "codex-main"
 
 
+def test_descriptor_only_session_stays_on_board_but_not_team_candidate(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    snapshot = server._board_snapshot()
+    snapshot["panes"].append({
+        "session": "stopped-demo",
+        "pane_id": "w1:p9",
+        "agent": "codex",
+        "agent_status": "stopped",
+        "cwd": PROJECT_KEY,
+        "from_descriptor": True,
+    })
+    monkeypatch.setattr(server, "_board_snapshot", lambda: snapshot)
+    live_run = server.coordination.run_by_session("demo")
+    monkeypatch.setattr(
+        server.coordination,
+        "run_by_session",
+        lambda session: live_run if session == "demo" else {
+            "run_id": "run-stopped",
+            "participants": [{
+                "participant_id": "ghost-lead",
+                "agent_type": "codex",
+                "mail_name": "ghost-main",
+                "pane_id": "w1:p9",
+                "role": "lead",
+                "state": "done",
+            }],
+        },
+    )
+    mail_project_reads = []
+
+    def mail_project_state(session):
+        mail_project_reads.append(session)
+        return {"bound": True, "project": PROJECT_KEY}
+
+    monkeypatch.setattr(server, "_mail_project_state", mail_project_state)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+
+    progress = server._build_session_progress(snapshot)
+    response = client.get("/api/team-auth/session-bindings", headers=headers)
+
+    assert {row["session"] for row in progress} == {"demo", "stopped-demo"}
+    assert response.status_code == 200
+    assert [row["session"] for row in response.json()["sessions"]] == ["demo"]
+    assert mail_project_reads == ["demo"]
+
+
 def test_lightweight_session_uses_registered_leader_instance_as_generation(monkeypatch):
     client, headers = _prepare(monkeypatch)
     instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
