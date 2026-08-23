@@ -277,7 +277,7 @@ def test_identity_endpoint_uses_bound_project_not_pane_cwd(monkeypatch, tmp_path
     seen = []
     monkeypatch.setattr(
         server.db,
-        "identity_by_cwd",
+        "identity_for_chat_pane",
         lambda cwd, agent: seen.append((cwd, agent)) or {
             "name": "SilverPine", "program": "codex", "model": "gpt", "human_key": cwd,
         },
