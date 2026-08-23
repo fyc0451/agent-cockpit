@@ -169,6 +169,42 @@ def test_session_candidate_deduplicates_same_pane_from_snapshot_views(monkeypatc
     assert candidate["lead"]["mail_name"] == "codex-main"
 
 
+def test_lightweight_session_uses_registered_leader_instance_as_generation(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    monkeypatch.setattr(server.coordination, "run_by_session", lambda _session: None)
+    monkeypatch.setattr(server.chat_roster, "get_session_leader", lambda _session: {
+        "leader_mail_name": "codex-main",
+        "leader_agent": "codex",
+    })
+    monkeypatch.setattr(server, "_board_snapshot", lambda: {
+        "sessions": [{
+            "session": "demo",
+            "directory": PROJECT_KEY,
+            "panes": [{
+                "session": "demo",
+                "pane_id": "w1:p2",
+                "agent": "codex",
+                "agent_status": "working",
+                "cwd": PROJECT_KEY,
+                "mail_name": "codex-main",
+                "instance_id": instance_id,
+            }],
+        }],
+        "panes": [],
+    })
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+
+    response = client.get("/api/team-auth/session-bindings", headers=headers)
+
+    assert response.status_code == 200
+    candidate = response.json()["sessions"][0]
+    assert candidate["ready"] is True
+    assert candidate["lead"]["mail_name"] == "codex-main"
+    internal = server._team_session_candidates()[0]
+    assert internal["generation"] == instance_id
+
+
 def test_session_candidate_explains_missing_and_multiple_lead(monkeypatch):
     cases = [
         ([], [], "负责人未配置"),

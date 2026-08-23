@@ -2750,6 +2750,7 @@ def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 status = "unknown"
             agents.append({
                 "agent": agent_type,
+                "instance_id": str(pane.get("instance_id") or "") or None,
                 "mail_name": (
                     (participant or {}).get("mail_name") or pane.get("mail_name")
                 ),
@@ -4113,6 +4114,18 @@ def _team_session_candidates() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for session in _build_session_progress(_board_snapshot()):
         leads = [agent for agent in session["agents"] if agent.get("role") == "lead"]
+        if not leads:
+            remembered = chat_roster.get_session_leader(str(session["session"]))
+            remembered_name = str(remembered.get("leader_mail_name") or "")
+            remembered_agent = str(remembered.get("leader_agent") or "").lower()
+            leads = [
+                agent for agent in session["agents"]
+                if agent.get("mail_name") == remembered_name
+                and (
+                    not remembered_agent
+                    or str(agent.get("agent") or "").lower() == remembered_agent
+                )
+            ]
         item: dict[str, Any] = {
             "session": session["session"],
             "generation": session["generation"],
@@ -4127,6 +4140,8 @@ def _team_session_candidates() -> list[dict[str, Any]]:
             item["reason"] = "负责人未配置" if not leads else "存在多个负责人"
             result.append(item)
             continue
+        if not item["generation"]:
+            item["generation"] = str(leads[0].get("instance_id") or "")
         if not item["generation"]:
             item["reason"] = "Session 尚未建立协作运行"
             result.append(item)
