@@ -227,7 +227,7 @@ def _session_lead_capability_post(
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project_slug):
         raise ValueError("project_slug 无效")
     if path not in {
-        "inbox/claim", "reply", "reply-drafts",
+        "inbox/claim", "reply",
     } and not re.fullmatch(r"inbox/[1-9][0-9]*/complete", path):
         raise ValueError("Session lead capability 路径无效")
     if not isinstance(payload, dict):
@@ -281,19 +281,10 @@ def session_lead_complete(
     )
 
 
-def session_lead_reply_draft(
-    project_slug: str, payload: dict[str, Any],
-) -> dict[str, Any]:
-    """以 confirm binding capability 创建待 Human 审批的回复草稿。"""
-    return _session_lead_capability_post(
-        project_slug, "reply-drafts", payload, action="回复草稿",
-    )
-
-
 def session_lead_reply(
     project_slug: str, payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """以 auto binding capability 直接回复 Team Topic。"""
+    """回复一条已获消息级授权的 Team Topic 工作。"""
     return _session_lead_capability_post(
         project_slug, "reply", payload, action="回复",
     )

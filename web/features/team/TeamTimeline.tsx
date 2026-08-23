@@ -1,8 +1,13 @@
 // 团队时间线：只读写远端 Team Hub，不进入本机群聊瀑布流。
 
 import { useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '../../api/client'
+import {
+  approveTeamReplyRequest,
+  listTeamReplyRequests,
+  rejectTeamReplyRequest,
+} from '../../api/teamAuth'
 import { listTeamMessages, sendTeamMessage } from '../../api/teamLedger'
 import type { TeamBinding } from './model'
 import { TeamReplyPanel } from './TeamReplyPanel'
@@ -25,6 +30,30 @@ export function TeamTimeline({
     refetchIntervalInBackground: true,
     refetchOnWindowFocus: false,
   })
+  const requestsQ = useQuery({
+    queryKey: ['team-reply-requests', topic],
+    queryFn: () => listTeamReplyRequests(topic),
+    enabled: topic.length > 0 && binding != null,
+    refetchInterval: 2_000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
+  })
+  const decisionM = useMutation({
+    mutationFn: ({ inboxItemId, decision }: {
+      inboxItemId: number
+      decision: 'approve' | 'reject'
+    }) => (
+      decision === 'approve'
+        ? approveTeamReplyRequest(topic, inboxItemId)
+        : rejectTeamReplyRequest(topic, inboxItemId)
+    ),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['team-reply-requests', topic] }),
+        queryClient.invalidateQueries({ queryKey: ['team-chat', topic] }),
+      ])
+    },
+  })
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -46,6 +75,17 @@ export function TeamTimeline({
   }
 
   const rows = messagesQ.data ?? []
+  const replyRequests = new Map(
+    (requestsQ.data ?? []).map((request) => [request.messageId, request]),
+  )
+
+  const replyStatusText = (status: string) => {
+    if (status === 'queued') return '已允许回复，等待 Lead 处理…'
+    if (status === 'processing') return 'Lead 正在生成回复…'
+    if (status === 'replied') return 'Lead 已回复'
+    if (status === 'ignored') return '已选择不回复'
+    return ''
+  }
 
   return (
     <div className="gc-team-timeline" data-testid="team-timeline">
@@ -63,7 +103,9 @@ export function TeamTimeline({
         {rows.length === 0 && !messagesQ.isPending && (
           <div className="gc-event">还没有团队消息。发一条试试。</div>
         )}
-        {rows.map((row) => (
+        {rows.map((row) => {
+          const request = replyRequests.get(row.id)
+          return (
           <div key={row.id} className="gc-team-msg" data-testid={`team-msg-${row.id}`}>
             <div className="gc-team-msg-meta">
               {row.sender_name}
@@ -74,8 +116,43 @@ export function TeamTimeline({
               <div className="gc-team-msg-meta">{row.subject}</div>
             )}
             <div className="gc-team-msg-body">{row.body_md}</div>
+            {request && (
+              <div className="gc-team-reply-request" data-testid={`reply-request-${row.id}`}>
+                {request.status === 'awaiting_confirmation' ? (
+                  <>
+                    <span>是否让 Lead 回复这条消息？确认前不会生成答案。</span>
+                    <div className="gc-team-reply-actions">
+                      <button
+                        type="button"
+                        disabled={decisionM.isPending}
+                        onClick={() => decisionM.mutate({
+                          inboxItemId: request.inboxItemId,
+                          decision: 'reject',
+                        })}
+                      >
+                        不回复
+                      </button>
+                      <button
+                        type="button"
+                        className="is-primary"
+                        disabled={decisionM.isPending}
+                        onClick={() => decisionM.mutate({
+                          inboxItemId: request.inboxItemId,
+                          decision: 'approve',
+                        })}
+                      >
+                        让 Lead 回复
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <span>{replyStatusText(request.status)}</span>
+                )}
+              </div>
+            )}
           </div>
-        ))}
+          )
+        })}
       </div>
       <form
         className="gc-team-composer"
@@ -96,6 +173,16 @@ export function TeamTimeline({
         </button>
       </form>
       {sendError && <div className="gc-team-error">{sendError}</div>}
+      {requestsQ.isError && (
+        <div className="gc-team-error">
+          {requestsQ.error instanceof ApiError ? requestsQ.error.message : String(requestsQ.error)}
+        </div>
+      )}
+      {decisionM.isError && (
+        <div className="gc-team-error">
+          {decisionM.error instanceof ApiError ? decisionM.error.message : String(decisionM.error)}
+        </div>
+      )}
     </div>
   )
 }

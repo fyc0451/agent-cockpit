@@ -81,6 +81,64 @@ describe('TeamTimeline', () => {
     expect(screen.getByText('自动出现的回复')).toBeInTheDocument()
   })
 
+  it('在对应消息下先确认，授权后才进入 Lead 处理', async () => {
+    let approved = false
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (url.endsWith('/chat/messages') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ messages: [message(42, '请处理这条问题')] }),
+        } as Response
+      }
+      if (url.endsWith('/reply-requests') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            requests: [{
+              inbox_item_id: 31,
+              message_id: 42,
+              status: approved ? 'queued' : 'awaiting_confirmation',
+              decision: approved ? 'approved' : null,
+              decided_at: approved ? '2026-08-23 12:01:00' : null,
+            }],
+          }),
+        } as Response
+      }
+      if (url.endsWith('/reply-requests/31/approve') && method === 'POST') {
+        approved = true
+        return { ok: true, status: 201 } as Response
+      }
+      throw new Error(`unexpected fetch ${url} ${method}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <TeamTimeline
+        topic="proj-a"
+        topicName="项目 A"
+        binding={{
+          project_slug: 'proj-a',
+          session: 'demo',
+          ready: true,
+          replyMode: 'confirm',
+        }}
+      />,
+      { wrapper: createWrapper() },
+    )
+
+    expect(await screen.findByText('请处理这条问题')).toBeInTheDocument()
+    expect(await screen.findByText('是否让 Lead 回复这条消息？确认前不会生成答案。')).toBeInTheDocument()
+    await userEvent.setup().click(screen.getByRole('button', { name: '让 Lead 回复' }))
+    expect(await screen.findByText('已允许回复，等待 Lead 处理…')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => (
+      String(input).endsWith('/reply-requests/31/approve')
+    ))).toBe(true)
+  })
+
   it('API 只暴露 Team Hub 群聊读写', () => {
     expect(Object.keys(teamLedger).sort()).toEqual(['listTeamMessages', 'sendTeamMessage'])
   })

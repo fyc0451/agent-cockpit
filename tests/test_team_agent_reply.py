@@ -198,7 +198,7 @@ def test_team_work_respond_uses_persisted_mode_and_hides_secrets(monkeypatch):
 
     def respond(work_id, binding, response, **callbacks):
         calls.append((work_id, binding, response, callbacks))
-        return {"status": "draft_pending", "draft_id": 8}
+        return {"status": "replied", "message_id": 8}
 
     monkeypatch.setattr(server.team_lead_worker, "respond", respond)
     payload = {
@@ -214,9 +214,10 @@ def test_team_work_respond_uses_persisted_mode_and_hides_secrets(monkeypatch):
     response = client.post(f"/api/agent/team-work/{'a' * 32}/respond", json=payload)
 
     assert response.status_code == 200
-    assert response.json() == {"status": "draft_pending", "draft_id": 8}
+    assert response.json() == {"status": "replied", "message_id": 8}
     assert calls[0][0] == "a" * 32
     assert "reply_mode" not in calls[0][2]
+    assert set(calls[0][3]) == {"direct_reply", "complete"}
     assert "reply-secret" not in response.text
     assert "registration-secret" not in response.text
 

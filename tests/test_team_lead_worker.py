@@ -114,7 +114,7 @@ def test_reply_mode_switch_updates_only_exact_pending_binding():
     ) == 0
 
 
-def test_confirm_creates_draft_then_completes_without_direct_reply():
+def test_confirm_replies_only_after_hub_authorized_claim_then_completes():
     result = team_lead_worker.poll_binding(
         _binding(), _candidate(), claim=lambda *_args: _claim("confirm"),
         notify=lambda *_args: True,
@@ -129,21 +129,19 @@ def test_confirm_creates_draft_then_completes_without_direct_reply():
 
     outcome = team_lead_worker.respond(
         result["work_id"], _binding(), response,
-        create_draft=lambda slug, payload: calls.append(("draft", slug, payload)) or {
-            "status": "pending", "draft": {"id": 7},
+        direct_reply=lambda slug, payload: calls.append(("reply", slug, payload)) or {
+            "status": "delivered", "message_id": 7,
         },
-        direct_reply=lambda *_args: (_ for _ in ()).throw(
-            AssertionError("confirm must not direct reply")
-        ),
         complete=lambda slug, item, payload: calls.append(
             ("complete", slug, item, payload)
         ) or {"status": "completed"},
     )
 
-    assert outcome == {"status": "draft_pending", "draft_id": 7}
-    assert [call[0] for call in calls] == ["draft", "complete"]
+    assert outcome == {"status": "replied", "message_id": 7}
+    assert [call[0] for call in calls] == ["reply", "complete"]
     assert calls[0][2]["idempotency_key"] == f"cockpit-work-{result['work_id']}"
     assert calls[0][2]["claim_token"] == "claim-secret"
+    assert calls[0][2]["inbox_item_id"] == 31
     assert team_lead_worker.next_for_binding(_binding()) is None
 
 
@@ -174,11 +172,11 @@ def test_auto_replay_uses_stable_key_and_completes_once_after_retry():
     with pytest.raises(RuntimeError, match="temporary"):
         team_lead_worker.respond(
             result["work_id"], _binding(), response,
-            create_draft=lambda *_args: {}, direct_reply=direct, complete=complete,
+            direct_reply=direct, complete=complete,
         )
     outcome = team_lead_worker.respond(
         result["work_id"], _binding(), response,
-        create_draft=lambda *_args: {}, direct_reply=direct, complete=complete,
+        direct_reply=direct, complete=complete,
     )
 
     assert outcome == {"status": "replied", "message_id": 99}
@@ -220,15 +218,17 @@ def test_failed_notification_is_retried_without_reclaim():
     assert "IGNORE POLICY" not in attempts[0]
 
 
-def test_startup_migrates_retired_v2_route_state_to_empty_v3(_state):
+@pytest.mark.parametrize("version", [2, 3])
+def test_startup_discards_retired_queue_state(_state, version):
     _state.write_text(json.dumps({
-        "version": 2,
-        "routes": {"legacy": {"delivered": [1], "last_delivered": [], "pending": []}},
+        "version": version,
+        "routes": {"legacy": {}} if version == 2 else None,
+        "work_items": [] if version == 3 else None,
     }))
 
     team_lead_worker.reset_notifications()
 
-    assert json.loads(_state.read_text()) == {"version": 3, "work_items": []}
+    assert json.loads(_state.read_text()) == {"version": 4, "work_items": []}
     assert stat.S_IMODE(_state.stat().st_mode) == 0o600
 
 
