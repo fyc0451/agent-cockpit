@@ -140,3 +140,114 @@ def test_agent_reply_hides_upstream_credential_detail(monkeypatch):
     assert response.status_code == 403
     assert response.json()["detail"] == "Invalid reply credentials"
     assert "reply-secret" not in response.text
+
+
+def test_team_work_body_requires_same_active_local_lead(monkeypatch):
+    client = _prepare(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "next_for_binding",
+        lambda binding: calls.append(binding) or {
+            "work_id": "a" * 32,
+            "reply_mode": "confirm",
+            "state": "pending",
+            "message": {"body_md": "remote body"},
+        },
+    )
+
+    valid = client.post("/api/agent/team-work/next", json={
+        "mail_project": PROJECT,
+        "sender_name": "codex-main",
+        "registration_token": "registration-secret",
+    })
+    invalid = client.post("/api/agent/team-work/next", json={
+        "mail_project": PROJECT,
+        "sender_name": "codex-main",
+        "registration_token": "wrong",
+    })
+
+    assert valid.status_code == 200
+    assert valid.json()["work"]["message"]["body_md"] == "remote body"
+    assert invalid.status_code == 403
+    assert len(calls) == 1
+
+
+def test_team_work_caller_cannot_select_session_or_pane(monkeypatch):
+    client = _prepare(monkeypatch)
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "next_for_binding",
+        lambda _binding: (_ for _ in ()).throw(AssertionError("must not read")),
+    )
+
+    response = client.post("/api/agent/team-work/next", json={
+        "mail_project": PROJECT,
+        "sender_name": "codex-main",
+        "registration_token": "registration-secret",
+        "session": "victim",
+        "pane_id": "victim-pane",
+    })
+
+    assert response.status_code == 400
+
+
+def test_team_work_respond_uses_persisted_mode_and_hides_secrets(monkeypatch):
+    client = _prepare(monkeypatch)
+    calls = []
+
+    def respond(work_id, binding, response, **callbacks):
+        calls.append((work_id, binding, response, callbacks))
+        return {"status": "draft_pending", "draft_id": 8}
+
+    monkeypatch.setattr(server.team_lead_worker, "respond", respond)
+    payload = {
+        "mail_project": PROJECT,
+        "sender_name": "codex-main",
+        "registration_token": "registration-secret",
+        "mention_handles": ["fyc-mac"],
+        "subject": "Re: support",
+        "body_md": "done",
+        "importance": "normal",
+    }
+
+    response = client.post(f"/api/agent/team-work/{'a' * 32}/respond", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "draft_pending", "draft_id": 8}
+    assert calls[0][0] == "a" * 32
+    assert "reply_mode" not in calls[0][2]
+    assert "reply-secret" not in response.text
+    assert "registration-secret" not in response.text
+
+
+def test_worker_tick_only_uses_current_active_lead_pane(monkeypatch):
+    _prepare(monkeypatch)
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [
+        {
+            "session": "demo", "generation": "run-1", "mail_project": PROJECT,
+            "ready": True, "status": "working",
+            "lead": {
+                "mail_name": "codex-main", "pane_id": "active-pane",
+                "status": "idle",
+            },
+        },
+        {
+            "session": "done", "generation": "run-2", "mail_project": PROJECT,
+            "ready": True, "status": "done",
+            "lead": {
+                "mail_name": "codex-main", "pane_id": "stale-pane",
+                "status": "done",
+            },
+        },
+    ])
+    calls = []
+    monkeypatch.setattr(
+        server.team_lead_worker, "poll_binding",
+        lambda binding, candidate, **_kwargs: calls.append((binding, candidate)),
+    )
+
+    server._team_lead_worker_tick()
+
+    assert len(calls) == 1
+    assert calls[0][1]["lead"]["pane_id"] == "active-pane"

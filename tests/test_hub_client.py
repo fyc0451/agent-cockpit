@@ -449,6 +449,49 @@ def test_session_lead_reply_hides_remote_credential_detail(monkeypatch):
     assert "reply-secret" not in str(caught.value)
 
 
+def test_session_lead_capability_helpers_use_only_fixed_paths(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"status": "ok"}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url, json, headers):
+            calls.append((url, json, headers))
+            return Response()
+
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "https://team.example")
+    monkeypatch.setattr(hub_client.settings, "get", lambda: {})
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+
+    hub_client.session_lead_claim("core", {"reply_token": "secret"})
+    hub_client.session_lead_reply_draft("core", {"reply_token": "secret"})
+    hub_client.session_lead_complete("core", 31, {"claim_token": "claim"})
+    hub_client.session_lead_reply("core", {"reply_token": "secret"})
+
+    assert [call[0] for call in calls] == [
+        "https://team.example/hub/api/projects/core/session-lead/inbox/claim",
+        "https://team.example/hub/api/projects/core/session-lead/reply-drafts",
+        "https://team.example/hub/api/projects/core/session-lead/inbox/31/complete",
+        "https://team.example/hub/api/projects/core/session-lead/reply",
+    ]
+    assert all("Authorization" not in headers for _, _, headers in calls)
+
+
 def test_human_login_uses_loopback_issuer_and_validates_response(monkeypatch):
     calls = []
 
