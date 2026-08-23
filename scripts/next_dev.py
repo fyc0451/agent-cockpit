@@ -391,10 +391,15 @@ def _unit_not_installed() -> bool:
 def _prepare_exec_fds(lock_fd: int | None) -> None:
     if lock_fd is None:
         raise IsolationError("lock_fd_missing")
-    try:
-        entries = os.listdir("/proc/self/fd")
-    except OSError as exc:
-        raise IsolationError("fd_inventory_unavailable") from exc
+    inventory_error: OSError | None = None
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            entries = os.listdir(directory)
+            break
+        except OSError as exc:
+            inventory_error = exc
+    else:
+        raise IsolationError("fd_inventory_unavailable") from inventory_error
     for entry in entries:
         if not entry.isdecimal():
             continue

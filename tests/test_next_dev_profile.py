@@ -52,6 +52,38 @@ def _dev_env(home: Path, repo: Path) -> dict[str, str]:
     return values
 
 
+def test_dev_fd_inventory_falls_back_to_dev_fd(monkeypatch):
+    gate = _dev_server()._load_next_dev()
+    listed = []
+    changed = []
+
+    def fake_listdir(path):
+        listed.append(path)
+        if path == "/proc/self/fd":
+            raise FileNotFoundError(path)
+        return ["0", "1", "2", "42", "43", "not-a-fd"]
+
+    monkeypatch.setattr(gate.os, "listdir", fake_listdir)
+    monkeypatch.setattr(
+        gate.os, "set_inheritable", lambda fd, value: changed.append((fd, value)),
+    )
+
+    gate._prepare_exec_fds(42)
+
+    assert listed == ["/proc/self/fd", "/dev/fd"]
+    assert changed == [(43, False)]
+
+
+def test_dev_fd_inventory_fails_closed_without_supported_directory(monkeypatch):
+    gate = _dev_server()._load_next_dev()
+    monkeypatch.setattr(
+        gate.os, "listdir", lambda path: (_ for _ in ()).throw(FileNotFoundError(path)),
+    )
+
+    with pytest.raises(gate.IsolationError, match="fd_inventory_unavailable"):
+        gate._prepare_exec_fds(42)
+
+
 def test_dev_profile_accepts_this_checkout_on_8790(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     repo = tmp_path / "code" / "agent-cockpit"
