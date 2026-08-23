@@ -55,6 +55,25 @@ def test_reply_token_is_private_and_preserved_on_idempotent_bind(
     assert state.stat().st_mode & 0o777 == 0o600
 
 
+def test_reply_mode_defaults_confirm_and_capability_update_is_atomic(tmp_path, monkeypatch):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    saved = _bind(reply_token="old-secret")
+
+    updated = team_sessions.update_reply_capability(
+        hub="http://team.example",
+        human_id=7,
+        project_slug="alpha",
+        client_session_id="client-run-a",
+        reply_token="new-secret",
+        reply_mode="auto",
+    )
+
+    assert saved["reply_mode"] == "confirm"
+    assert updated["reply_mode"] == "auto"
+    assert updated["reply_token"] == "new-secret"
+    assert _bind()["reply_mode"] == "auto"
+
+
 def test_update_and_resolve_reply_token_by_exact_local_lead(tmp_path, monkeypatch):
     monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
     _bind(reply_token="old-secret")

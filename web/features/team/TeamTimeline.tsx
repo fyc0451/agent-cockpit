@@ -4,8 +4,18 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '../../api/client'
 import { listTeamMessages, sendTeamMessage } from '../../api/teamLedger'
+import type { TeamBinding } from './model'
+import { TeamReplyPanel } from './TeamReplyPanel'
 
-export function TeamTimeline({ topic, topicName }: { topic: string; topicName: string }) {
+export function TeamTimeline({
+  topic,
+  topicName,
+  binding,
+}: {
+  topic: string
+  topicName: string
+  binding?: TeamBinding | null
+}) {
   const queryClient = useQueryClient()
   const messagesQ = useQuery({
     queryKey: ['team-chat', topic],
@@ -42,6 +52,7 @@ export function TeamTimeline({ topic, topicName }: { topic: string; topicName: s
       <div className="gc-team-timeline-hint">
         团队话题 {topicName}。消息同步到 Team Hub，不进本机群。
       </div>
+      {binding && <TeamReplyPanel topic={topic} binding={binding} />}
       {messagesQ.isError && (
         <div className="gc-event">
           团队时间线读失败：

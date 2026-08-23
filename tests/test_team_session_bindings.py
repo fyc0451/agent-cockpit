@@ -311,7 +311,123 @@ def test_bind_creates_managed_lead_and_saves_local_mapping(monkeypatch):
     assert saved[0]["client_session_id"] == put[3]["client_session_id"]
     assert saved[0]["lead"]["participant_id"] == "lead"
     assert saved[0]["reply_token"] == "reply-secret"
+    assert saved[0]["reply_mode"] == "confirm"
+    assert response.json()["binding"]["reply_mode"] == "confirm"
     assert "reply-secret" not in response.text
+
+
+def test_reply_mode_switch_rotates_capability_and_updates_pending_work(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    calls = []
+    regular = _human_api(calls=calls)
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+        reply_token="old-secret",
+        reply_mode="confirm",
+    )
+
+    def switch(method, path, authorization, payload=None):
+        if method == "PUT" and path.endswith("/session-lead"):
+            calls.append((method, path, authorization, payload))
+            return {
+                "active": True,
+                "agent": {"id": 41},
+                "reply_token": "rotated-secret",
+                "binding": {"reply_mode": payload["reply_mode"]},
+            }
+        return regular(method, path, authorization, payload)
+
+    updated_work = []
+    monkeypatch.setattr(server.hub_client, "human_api", switch)
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "update_binding_reply_mode",
+        lambda **kwargs: updated_work.append(kwargs) or 1,
+    )
+
+    response = client.patch(
+        "/api/team-auth/session-bindings/demo/reply-mode",
+        headers=headers,
+        json={"reply_mode": "auto"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["binding"]["reply_mode"] == "auto"
+    put = next(call for call in calls if call[0] == "PUT")
+    assert put[3]["reply_mode"] == "auto"
+    saved = team_sessions.list_bindings(HUB, 7)[0]
+    assert saved["reply_mode"] == "auto"
+    assert saved["reply_token"] == "rotated-secret"
+    assert updated_work == [{
+        "hub": HUB,
+        "project_slug": "demo",
+        "client_session_id": saved["client_session_id"],
+        "reply_mode": "auto",
+    }]
+    assert "rotated-secret" not in response.text
+
+
+def test_reply_mode_switch_rejects_invalid_mode_before_hub(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    calls = []
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
+
+    response = client.patch(
+        "/api/team-auth/session-bindings/demo/reply-mode",
+        headers=headers,
+        json={"reply_mode": "sometimes"},
+    )
+
+    assert response.status_code == 422
+    assert calls == []
+
+
+def test_reply_mode_idempotent_retry_preserves_existing_capability(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+        reply_token="existing-secret",
+        reply_mode="confirm",
+    )
+    regular = _human_api()
+
+    def same_mode(method, path, authorization, payload=None):
+        if method == "PUT" and path.endswith("/session-lead"):
+            return {
+                "active": True,
+                "agent": {"id": 41},
+                "binding": {"reply_mode": "confirm"},
+            }
+        return regular(method, path, authorization, payload)
+
+    monkeypatch.setattr(server.hub_client, "human_api", same_mode)
+
+    response = client.patch(
+        "/api/team-auth/session-bindings/demo/reply-mode",
+        headers=headers,
+        json={"reply_mode": "confirm"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert team_sessions.list_bindings(HUB, 7)[0]["reply_token"] == "existing-secret"
 
 
 def test_reusing_binding_preserves_one_time_reply_token(monkeypatch):
