@@ -370,6 +370,20 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         "/api/team/projects/demo/chat/messages",
         headers=headers,
     ).status_code == 200
+    assert client.get(
+        "/api/team/projects/demo/reply-drafts?status_filter=pending",
+        headers=headers,
+    ).status_code == 200
+    assert client.post(
+        "/api/team/projects/demo/reply-drafts/12/approve",
+        headers=headers,
+        json={},
+    ).status_code == 200
+    assert client.post(
+        "/api/team/projects/demo/reply-drafts/13/reject",
+        headers=headers,
+        json={},
+    ).status_code == 200
     assert calls == [
         ("GET", "/hub/api/projects", "Bearer human.jwt", None),
         (
@@ -396,6 +410,24 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
             "/hub/api/projects/demo/chat/messages",
             "Bearer human.jwt",
             None,
+        ),
+        (
+            "GET",
+            "/hub/api/projects/demo/reply-drafts",
+            "Bearer human.jwt",
+            None,
+        ),
+        (
+            "POST",
+            "/hub/api/projects/demo/reply-drafts/12/approve",
+            "Bearer human.jwt",
+            {},
+        ),
+        (
+            "POST",
+            "/hub/api/projects/demo/reply-drafts/13/reject",
+            "Bearer human.jwt",
+            {},
         ),
     ]
 
@@ -430,6 +462,11 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
     assert client.delete(
         "/api/team/projects/demo/agent-bindings",
         headers=headers,
+    ).status_code == 404
+    assert client.put(
+        "/api/team/projects/demo/session-lead",
+        headers=headers,
+        json={"reply_mode": "auto"},
     ).status_code == 404
     assert client.get(
         "/api/team/projects/demo/../../env-check",

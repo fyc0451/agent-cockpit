@@ -266,6 +266,30 @@ def next_for_binding(binding: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def update_binding_reply_mode(
+    *, hub: str, project_slug: str, client_session_id: str, reply_mode: str,
+) -> int:
+    """将当前 binding 已 claim 的本地工作切到 Hub 已确认的新模式。"""
+    if reply_mode not in {"confirm", "auto"}:
+        raise ValueError("invalid_reply_mode")
+    updated = 0
+    with _lock:
+        data = _load()
+        for item in data["work_items"]:
+            if (
+                item.get("hub") == hub
+                and item.get("project_slug") == project_slug
+                and item.get("client_session_id") == client_session_id
+                and item.get("state") == "pending"
+                and item.get("reply_mode") != reply_mode
+            ):
+                item["reply_mode"] = reply_mode
+                updated += 1
+        if updated:
+            _write(data)
+    return updated
+
+
 def respond(
     work_id: str,
     binding: dict[str, Any],

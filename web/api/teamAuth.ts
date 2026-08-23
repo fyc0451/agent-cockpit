@@ -1,7 +1,14 @@
 // 团队区 API 客户端
 
 import { ApiError } from './client'
-import type { TeamTopic, TeamBinding, TeamSessionCandidate, TeamUser, TeamMember } from '../features/team/model'
+import type {
+  TeamTopic,
+  TeamBinding,
+  TeamSessionCandidate,
+  TeamUser,
+  TeamMember,
+  TeamReplyDraft,
+} from '../features/team/model'
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -202,6 +209,7 @@ export async function teamSessionBindings(): Promise<{
           ready: typeof item.ready === 'boolean' ? item.ready : undefined,
           reason: typeof item.reason === 'string' ? item.reason : null,
           projectRef: typeof item.project_ref === 'string' ? item.project_ref : null,
+          replyMode: item.reply_mode === 'auto' ? 'auto' : 'confirm',
         })
       }
     }
@@ -409,6 +417,97 @@ export async function teamBindSession(
       retryable: false,
     })
   }
+}
+
+export async function setTeamReplyMode(
+  projectSlug: string,
+  replyMode: 'confirm' | 'auto',
+): Promise<void> {
+  const response = await fetch(
+    `/api/team-auth/session-bindings/${encodeURIComponent(projectSlug)}/reply-mode`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reply_mode: replyMode }),
+      credentials: 'include',
+    },
+  )
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: 'reply_mode_failed',
+      message: text || '切换回复模式失败',
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+}
+
+function parseReplyDraft(raw: unknown): TeamReplyDraft | null {
+  if (!isObj(raw) || typeof raw.id !== 'number' || raw.id <= 0) return null
+  const status = raw.status
+  if (status !== 'pending' && status !== 'approved' && status !== 'rejected') return null
+  return {
+    id: raw.id,
+    inboxItemId: typeof raw.inbox_item_id === 'number' ? raw.inbox_item_id : 0,
+    subject: typeof raw.subject === 'string' ? raw.subject : '',
+    body: typeof raw.body_md === 'string' ? raw.body_md : '',
+    importance: typeof raw.importance === 'string' ? raw.importance : 'normal',
+    mentionHandles: Array.isArray(raw.mention_handles)
+      ? raw.mention_handles.filter((item): item is string => typeof item === 'string')
+      : [],
+    status,
+    messageId: typeof raw.message_id === 'number' ? raw.message_id : null,
+    createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
+    updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
+    decidedAt: typeof raw.decided_at === 'string' ? raw.decided_at : null,
+  }
+}
+
+export async function listTeamReplyDrafts(projectSlug: string): Promise<TeamReplyDraft[]> {
+  const response = await fetch(
+    `/api/team/projects/${encodeURIComponent(projectSlug)}/reply-drafts`,
+    { credentials: 'include' },
+  )
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'reply_drafts_failed',
+      message: '读取待确认回复失败',
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  const rows = isObj(data) && Array.isArray(data.drafts) ? data.drafts : []
+  return rows.map(parseReplyDraft).filter((item): item is TeamReplyDraft => item !== null)
+}
+
+async function decideTeamReplyDraft(
+  projectSlug: string,
+  draftId: number,
+  decision: 'approve' | 'reject',
+): Promise<void> {
+  const response = await fetch(
+    `/api/team/projects/${encodeURIComponent(projectSlug)}/reply-drafts/${draftId}/${decision}`,
+    { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+  )
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: `reply_draft_${decision}_failed`,
+      message: text || (decision === 'approve' ? '发送草稿失败' : '拒绝草稿失败'),
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+}
+
+export function approveTeamReplyDraft(projectSlug: string, draftId: number): Promise<void> {
+  return decideTeamReplyDraft(projectSlug, draftId, 'approve')
+}
+
+export function rejectTeamReplyDraft(projectSlug: string, draftId: number): Promise<void> {
+  return decideTeamReplyDraft(projectSlug, draftId, 'reject')
 }
 
 // ---------- 管理员：账号与成员管理 ----------

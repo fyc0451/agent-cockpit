@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   approveTeamUser,
+  approveTeamReplyDraft,
   createTeamInvitation,
+  listTeamReplyDrafts,
   listTeamProjects,
+  rejectTeamReplyDraft,
   requestTeamJoin,
+  setTeamReplyMode,
   teamChangePassword,
   teamRegister,
   teamSessionBindings,
@@ -158,6 +162,7 @@ describe('团队普通成员 API', () => {
             active: false,
             ready: false,
             reason: 'Session 已停止',
+            reply_mode: 'auto',
           },
         ],
       }),
@@ -186,8 +191,59 @@ describe('团队普通成员 API', () => {
           ready: false,
           reason: 'Session 已停止',
           projectRef: null,
+          replyMode: 'auto',
         },
       ],
     })
+  })
+
+  it('回复模式切换与草稿决策只调用受限 Cockpit 路由', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200 } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          drafts: [{
+            id: 12,
+            inbox_item_id: 31,
+            subject: '回复',
+            body_md: '已处理',
+            importance: 'normal',
+            mention_handles: ['alice'],
+            status: 'pending',
+            message_id: null,
+            created_at: '2026-08-23 10:00:00',
+            updated_at: '2026-08-23 10:00:00',
+            decided_at: null,
+          }],
+        }),
+      } as Response)
+      .mockResolvedValueOnce({ ok: true, status: 201 } as Response)
+      .mockResolvedValueOnce({ ok: true, status: 200 } as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await setTeamReplyMode('ready', 'auto')
+    await expect(listTeamReplyDrafts('ready')).resolves.toMatchObject([
+      { id: 12, body: '已处理', mentionHandles: ['alice'], status: 'pending' },
+    ])
+    await approveTeamReplyDraft('ready', 12)
+    await rejectTeamReplyDraft('ready', 13)
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/team-auth/session-bindings/ready/reply-mode',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ reply_mode: 'auto' }),
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/team/projects/ready/reply-drafts',
+      { credentials: 'include' },
+    )
+    expect(String(fetchMock.mock.calls[2][0])).toContain('/reply-drafts/12/approve')
+    expect(String(fetchMock.mock.calls[3][0])).toContain('/reply-drafts/13/reject')
   })
 })

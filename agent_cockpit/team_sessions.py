@@ -108,6 +108,7 @@ def bind(
     client_session_id: str,
     agent_id: int,
     reply_token: str | None = None,
+    reply_mode: str | None = None,
     replace: bool = False,
 ) -> dict[str, Any]:
     """同一用户/Hub 下保持 Session↔TeamProject 一对一；改绑需显式确认。"""
@@ -123,6 +124,8 @@ def bind(
         or len(reply_token) > 128
     ):
         raise ValueError("Team Session 回复凭据无效")
+    if reply_mode is not None and reply_mode not in {"confirm", "auto"}:
+        raise ValueError("Team Session 回复模式无效")
     entry = {
         "hub": hub,
         "human_id": int(human_id),
@@ -176,6 +179,12 @@ def bind(
                 effective_reply_token = saved_token
         if effective_reply_token is not None:
             entry["reply_token"] = effective_reply_token
+        effective_reply_mode = reply_mode
+        if effective_reply_mode is None and existing is not None:
+            saved_mode = existing.get("reply_mode")
+            if saved_mode in {"confirm", "auto"}:
+                effective_reply_mode = saved_mode
+        entry["reply_mode"] = effective_reply_mode or "confirm"
         data["bindings"] = [
             row for row in data["bindings"]
             if not (
@@ -201,8 +210,29 @@ def update_reply_token(
     reply_token: str,
 ) -> dict[str, Any]:
     """更新远端重建/轮换后的单 binding 回复凭据。"""
+    return update_reply_capability(
+        hub=hub,
+        human_id=human_id,
+        project_slug=project_slug,
+        client_session_id=client_session_id,
+        reply_token=reply_token,
+    )
+
+
+def update_reply_capability(
+    *,
+    hub: str,
+    human_id: int,
+    project_slug: str,
+    client_session_id: str,
+    reply_token: str,
+    reply_mode: str | None = None,
+) -> dict[str, Any]:
+    """原子更新单 binding 的轮换凭据及可选回复模式。"""
     if not isinstance(reply_token, str) or not reply_token or len(reply_token) > 128:
         raise ValueError("Team Session 回复凭据无效")
+    if reply_mode is not None and reply_mode not in {"confirm", "auto"}:
+        raise ValueError("Team Session 回复模式无效")
     with _lock:
         data = _load()
         matches = [
@@ -215,6 +245,8 @@ def update_reply_token(
         if len(matches) != 1:
             raise ValueError("Team Session 绑定缺失或不唯一")
         matches[0]["reply_token"] = reply_token
+        if reply_mode is not None:
+            matches[0]["reply_mode"] = reply_mode
         matches[0]["updated_ts"] = time.time()
         _write(data)
         return dict(matches[0])

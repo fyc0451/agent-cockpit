@@ -950,6 +950,8 @@ TEAM_API_ROUTES = (
     (re.compile(r"^agents$"), {"GET"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agent-bindings$"), {"GET", "POST"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agent-bindings/[0-9]+$"), {"DELETE"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/reply-drafts$"), {"GET"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/reply-drafts/[0-9]+/(?:approve|reject)$"), {"POST"}),
 )
 VALID_AGENTS = {"codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode"}
 VALID_LAYOUTS = {"right", "horizontal", "down", "vertical", "tab"}
@@ -2408,6 +2410,10 @@ class AgentMailConfigReq(BaseModel):
 class TeamSessionBindReq(BaseModel):
     session: str = Field(..., min_length=1, max_length=64)
     replace: bool = False
+
+
+class TeamReplyModeReq(BaseModel):
+    reply_mode: str = Field(..., pattern=r"^(confirm|auto)$")
 
 
 class TeamLedgerSendReq(BaseModel):
@@ -4222,6 +4228,11 @@ def _team_session_lead_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
     if row.get("rotate_reply_token") is True:
         payload["rotate_reply_token"] = True
+    reply_mode = row.get("reply_mode")
+    if reply_mode is not None:
+        if reply_mode not in {"confirm", "auto"}:
+            raise HTTPException(500, "本机 Session 回复模式无效")
+        payload["reply_mode"] = reply_mode
     return payload
 
 
@@ -4263,6 +4274,16 @@ def _team_remote_reply_token(remote: dict[str, Any]) -> str | None:
     if not isinstance(token, str) or not token or len(token) > 128:
         raise HTTPException(502, "Team Hub 返回了无效回复凭据")
     return token
+
+
+def _team_remote_reply_mode(remote: dict[str, Any], fallback: str = "confirm") -> str:
+    binding = remote.get("binding") if isinstance(remote.get("binding"), dict) else {}
+    mode = binding.get("reply_mode")
+    if mode in {"confirm", "auto"}:
+        return str(mode)
+    if fallback in {"confirm", "auto"}:
+        return fallback
+    raise HTTPException(502, "Team Hub 返回了无效回复模式")
 
 
 def _team_restore_session_routes(
@@ -4377,6 +4398,11 @@ def _public_team_session_binding(
             and has_reply_capability
         ),
         "reason": reason,
+        "reply_mode": (
+            row.get("reply_mode")
+            if row.get("reply_mode") in {"confirm", "auto"}
+            else "confirm"
+        ),
         "project_ref": _team_project_ref(row.get("mail_project")),
         "updated_ts": row.get("updated_ts"),
     }
@@ -4527,6 +4553,10 @@ def api_team_session_bind(
                 client_session_id=client_session_id,
                 agent_id=agent_id,
                 reply_token=reply_token,
+                reply_mode=_team_remote_reply_mode(
+                    remote,
+                    str((current or {}).get("reply_mode") or "confirm"),
+                ),
                 replace=req.replace,
             )
         except (ValueError, OSError) as exc:
@@ -4540,6 +4570,74 @@ def api_team_session_bind(
             if isinstance(exc, ValueError):
                 raise HTTPException(409, str(exc)) from exc
             raise HTTPException(500, "本机 Session 绑定保存失败") from exc
+    return {
+        "ok": True,
+        "binding": _public_team_session_binding(binding, [candidate]),
+    }
+
+
+@app.patch("/api/team-auth/session-bindings/{project_slug}/reply-mode")
+def api_team_session_reply_mode(
+    project_slug: str, req: TeamReplyModeReq, request: Request,
+):
+    """切换当前 binding 回复模式，并同步 Hub 轮换后的本机 capability。"""
+    slug = _team_project_slug(project_slug)
+    authorization, human = _team_human_context(request)
+    hub = hub_client.public_team_config()["team_hub"]
+    with _TEAM_SESSION_BIND_LOCK:
+        current = next((
+            row for row in _team_session_bindings_for(hub, int(human["id"]))
+            if row.get("project_slug") == slug
+        ), None)
+        if current is None:
+            raise HTTPException(404, "团队项目尚未绑定本机 Session")
+        candidate = next((
+            row for row in _team_session_candidates()
+            if row.get("session") == current.get("session")
+            and str(row.get("generation")) == str(current.get("session_generation"))
+        ), None)
+        if candidate is None or not candidate.get("ready"):
+            raise HTTPException(409, "绑定的 Session 负责人当前不可用")
+        remote = _team_remote_session_lead(
+            authorization,
+            slug,
+            {
+                **candidate,
+                "client_session_id": current["client_session_id"],
+                "reply_mode": req.reply_mode,
+            },
+        )
+        remote_mode = _team_remote_reply_mode(remote, "")
+        if remote_mode != req.reply_mode:
+            raise HTTPException(502, "Team Hub 未确认回复模式切换")
+        reply_token = _team_remote_reply_token(remote)
+        if reply_token is None:
+            current_mode = (
+                current.get("reply_mode")
+                if current.get("reply_mode") in {"confirm", "auto"}
+                else "confirm"
+            )
+            if current_mode != req.reply_mode:
+                raise HTTPException(502, "Team Hub 未签发轮换后的回复凭据")
+            reply_token = str(current.get("reply_token") or "")
+        try:
+            binding = team_sessions.update_reply_capability(
+                hub=hub,
+                human_id=int(human["id"]),
+                project_slug=slug,
+                client_session_id=str(current["client_session_id"]),
+                reply_token=reply_token,
+                reply_mode=req.reply_mode,
+            )
+            team_lead_worker.update_binding_reply_mode(
+                hub=hub,
+                project_slug=slug,
+                client_session_id=str(current["client_session_id"]),
+                reply_mode=req.reply_mode,
+            )
+        except (OSError, ValueError) as exc:
+            logger.exception("Team Session 回复模式本机同步失败")
+            raise HTTPException(500, "本机回复模式保存失败，请重试") from exc
     return {
         "ok": True,
         "binding": _public_team_session_binding(binding, [candidate]),
@@ -4671,19 +4769,20 @@ def _active_team_lead_bindings() -> list[tuple[dict[str, Any], dict[str, Any]]]:
 
 
 def _team_lead_worker_tick() -> None:
-    for binding, candidate in _active_team_lead_bindings():
-        try:
-            team_lead_worker.poll_binding(
-                binding,
-                candidate,
-                claim=hub_client.session_lead_claim,
-                notify=_notify_team_lead_work,
-            )
-        except hub_client.HumanAPIError as exc:
-            if exc.status_code not in {403, 409}:
-                logger.warning("Team Lead 收件暂时失败: HTTP %s", exc.status_code)
-        except Exception:
-            logger.exception("Team Lead 本地 worker tick 失败")
+    with _TEAM_SESSION_BIND_LOCK:
+        for binding, candidate in _active_team_lead_bindings():
+            try:
+                team_lead_worker.poll_binding(
+                    binding,
+                    candidate,
+                    claim=hub_client.session_lead_claim,
+                    notify=_notify_team_lead_work,
+                )
+            except hub_client.HumanAPIError as exc:
+                if exc.status_code not in {403, 409}:
+                    logger.warning("Team Lead 收件暂时失败: HTTP %s", exc.status_code)
+            except Exception:
+                logger.exception("Team Lead 本地 worker tick 失败")
 
 
 def _notify_team_lead_work(session: str, pane_id: str, prompt: str) -> bool:
@@ -4757,7 +4856,6 @@ async def api_team_agent_work_respond(work_id: str, request: Request):
     }
     if set(body) - allowed:
         raise HTTPException(400, "团队工作回复包含未支持字段")
-    binding = _team_work_auth(body, request)
     handles = body.get("mention_handles")
     subject = body.get("subject")
     body_md = body.get("body_md")
@@ -4784,19 +4882,21 @@ async def api_team_agent_work_respond(work_id: str, request: Request):
     ):
         raise HTTPException(400, "团队回复内容无效")
     try:
-        return team_lead_worker.respond(
-            work_id,
-            binding,
-            {
-                "subject": subject.strip(),
-                "body_md": body_md,
-                "importance": importance,
-                "mention_handles": clean_handles,
-            },
-            create_draft=hub_client.session_lead_reply_draft,
-            direct_reply=hub_client.session_lead_reply,
-            complete=hub_client.session_lead_complete,
-        )
+        with _TEAM_SESSION_BIND_LOCK:
+            binding = _team_work_auth(body, request)
+            return team_lead_worker.respond(
+                work_id,
+                binding,
+                {
+                    "subject": subject.strip(),
+                    "body_md": body_md,
+                    "importance": importance,
+                    "mention_handles": clean_handles,
+                },
+                create_draft=hub_client.session_lead_reply_draft,
+                direct_reply=hub_client.session_lead_reply,
+                complete=hub_client.session_lead_complete,
+            )
     except KeyError as exc:
         raise HTTPException(404, "团队工作不存在") from exc
     except ValueError as exc:

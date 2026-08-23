@@ -91,6 +91,29 @@ def test_active_lead_explicitly_reads_without_capability_secrets():
     ) is None
 
 
+def test_reply_mode_switch_updates_only_exact_pending_binding():
+    team_lead_worker.poll_binding(
+        _binding(), _candidate(), claim=lambda *_args: _claim("confirm"),
+        notify=lambda *_args: True,
+    )
+
+    updated = team_lead_worker.update_binding_reply_mode(
+        hub="https://team.example",
+        project_slug="core",
+        client_session_id="client-1",
+        reply_mode="auto",
+    )
+
+    assert updated == 1
+    assert team_lead_worker.next_for_binding(_binding())["reply_mode"] == "auto"
+    assert team_lead_worker.update_binding_reply_mode(
+        hub="https://team.example",
+        project_slug="other",
+        client_session_id="client-1",
+        reply_mode="confirm",
+    ) == 0
+
+
 def test_confirm_creates_draft_then_completes_without_direct_reply():
     result = team_lead_worker.poll_binding(
         _binding(), _candidate(), claim=lambda *_args: _claim("confirm"),

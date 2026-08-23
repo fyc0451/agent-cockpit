@@ -18,6 +18,21 @@ export interface TeamBinding {
   ready?: boolean
   reason?: string | null
   projectRef?: string | null
+  replyMode?: 'confirm' | 'auto'
+}
+
+export interface TeamReplyDraft {
+  id: number
+  inboxItemId: number
+  subject: string
+  body: string
+  importance: string
+  mentionHandles: string[]
+  status: 'pending' | 'approved' | 'rejected'
+  messageId: number | null
+  createdAt: string
+  updatedAt: string
+  decidedAt: string | null
 }
 
 export interface TeamSessionCandidate {

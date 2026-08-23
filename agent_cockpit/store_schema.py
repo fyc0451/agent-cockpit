@@ -1158,7 +1158,7 @@ def _check_versioned_json(
             "session_dir", "mail_project", "lead", "client_session_id",
             "agent_id", "updated_ts",
         })
-        optional_b = frozenset({"reply_token"})
+        optional_b = frozenset({"reply_token", "reply_mode"})
         lead_keys = frozenset({"pane_id", "agent", "mail_name", "participant_id"})
         for item in bindings:
             if not isinstance(item, dict):
@@ -1195,6 +1195,8 @@ def _check_versioned_json(
                 rt = item["reply_token"]
                 if not isinstance(rt, str) or not rt or len(rt) > 128:
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "reply_mode" in item and item["reply_mode"] not in {"confirm", "auto"}:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     elif name == "inbox_route":
         work_items = data.get("work_items")
         if not isinstance(work_items, list):

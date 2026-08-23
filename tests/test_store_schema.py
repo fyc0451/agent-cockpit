@@ -729,10 +729,32 @@ def test_team_sessions_real_binding_shape(isolated_roots):
             "agent_id": 2,
             "updated_ts": 1.0,
             "reply_token": "tok",
+            "reply_mode": "confirm",
         }],
     }), encoding="utf-8")
     r = store_schema._check_versioned_json("team_sessions")
     assert r["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_team_sessions_rejects_invalid_reply_mode(isolated_roots):
+    path = runtime_paths.store("team_sessions")
+    path.write_text(json.dumps({
+        "version": 1,
+        "bindings": [{
+            "hub": "http://h", "human_id": 1, "project_slug": "p",
+            "session": "s", "session_generation": "g", "session_dir": "/tmp/s",
+            "mail_project": "/tmp/p", "lead": {
+                "pane_id": "w1:p1", "agent": "codex",
+                "mail_name": "codex-main", "participant_id": "a1",
+            },
+            "client_session_id": "c1", "agent_id": 2, "updated_ts": 1.0,
+            "reply_token": "tok", "reply_mode": "unsafe",
+        }],
+    }), encoding="utf-8")
+
+    assert store_schema._check_versioned_json("team_sessions")["reason"] == (
+        store_schema.REASON_FINGERPRINT_MISMATCH
+    )
 
 
 def test_inbox_route_v2_requires_worker_migration(isolated_roots):

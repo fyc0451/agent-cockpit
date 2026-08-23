@@ -1221,6 +1221,11 @@ export function GroupChatPage() {
                 teamTopics.find((t) => t.slug === teamActiveTopic)?.name
                 ?? teamActiveTopic
               }
+              binding={
+                teamBindingsQ.data?.bindings.find(
+                  (binding) => binding.project_slug === teamActiveTopic,
+                ) ?? null
+              }
             />
           ) : previewFile && activeSession ? (
             <FilePreview
