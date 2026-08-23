@@ -466,7 +466,7 @@ _JSON_VERSIONED: dict[str, int] = {
     "mail_projects": 1,
     "team_messages": 1,
     "team_sessions": 1,
-    "inbox_route": 2,
+    "inbox_route": 3,
     "typing": 1,
 }
 
@@ -1056,7 +1056,7 @@ _JSON_SHAPES: dict[str, frozenset[str]] = {
     "mail_projects": frozenset({"version", "sessions"}),
     "team_messages": frozenset({"version", "messages"}),
     "team_sessions": frozenset({"version", "bindings"}),
-    "inbox_route": frozenset({"version", "routes"}),
+    "inbox_route": frozenset({"version", "work_items"}),
 }
 
 
@@ -1196,84 +1196,70 @@ def _check_versioned_json(
                 if not isinstance(rt, str) or not rt or len(rt) > 128:
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     elif name == "inbox_route":
-        routes = data.get("routes")
-        if not isinstance(routes, dict):
+        work_items = data.get("work_items")
+        if not isinstance(work_items, list):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        route_keys = frozenset({"delivered", "last_delivered", "pending"})
-        last_keys = frozenset({
-            "id", "message_id", "project_slug", "session",
-            "sender_name", "subject", "delivered_ts",
+        required = frozenset({
+            "work_id", "hub", "project_slug", "client_session_id", "session",
+            "session_generation", "mail_project", "lead_mail_name", "pane_id",
+            "reply_mode", "inbox_item_id", "claim_token", "claim_expires_at",
+            "message", "state", "notified", "created_ts",
         })
-        pending_required = frozenset({
-            "id", "message_id", "project_slug", "session",
-            "sender_name", "subject", "created_ts", "queued_ts",
+        optional = frozenset({"response"})
+        message_keys = frozenset({
+            "message_id", "subject", "body_md", "importance", "sender_name",
+            "sender_handle", "created_ts",
         })
-        pending_optional = frozenset({"deliver_error"})
-        for key, route in routes.items():
-            if not isinstance(key, str) or not isinstance(route, dict):
+        response_keys = frozenset({
+            "subject", "body_md", "importance", "mention_handles",
+        })
+        for item in work_items:
+            if not isinstance(item, dict):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            rk = set(route)
-            if not route_keys.issubset(rk):
+            keys = set(item)
+            if not required.issubset(keys):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            if rk - route_keys:
+            if keys - required - optional:
                 return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-            delivered = route.get("delivered")
-            if not isinstance(delivered, list):
+            for key in (
+                "work_id", "hub", "project_slug", "client_session_id", "session",
+                "session_generation", "mail_project", "lead_mail_name", "pane_id",
+                "claim_token", "claim_expires_at",
+            ):
+                if not isinstance(item.get(key), str) or not item.get(key):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if item.get("reply_mode") not in {"confirm", "auto"}:
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            for item in delivered:
-                # writer: int|str, not bool
-                if type(item) is bool or not isinstance(item, (int, str)):
-                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            last_delivered = route.get("last_delivered")
-            if not isinstance(last_delivered, list):
+            if item.get("state") not in {"pending", "responding"}:
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            for item in last_delivered:
-                if not isinstance(item, dict):
-                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                ik = set(item)
-                if not last_keys.issubset(ik):
-                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                if ik - last_keys:
-                    return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-                if type(item.get("id")) is bool or not isinstance(item.get("id"), (int, str)):
-                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                for sk in ("project_slug", "session", "sender_name", "subject"):
-                    if not isinstance(item.get(sk), str) and item.get(sk) is not None:
-                        # writer may put None from item.get — accept str or None
-                        if item.get(sk) is not None:
-                            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                if item.get("message_id") is not None and type(item.get("message_id")) is bool:
-                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                if item.get("message_id") is not None and not isinstance(item.get("message_id"), (int, str)):
-                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                dts = item.get("delivered_ts")
-                if dts is not None and (type(dts) is bool or not isinstance(dts, (int, float)) or not math.isfinite(float(dts))):
-                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            pending = route.get("pending")
-            if not isinstance(pending, list):
+            if type(item.get("inbox_item_id")) is not int or item["inbox_item_id"] < 1:
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            for item in pending:
-                if not isinstance(item, dict):
+            if type(item.get("notified")) is not bool:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            created = item.get("created_ts")
+            if (
+                type(created) is bool or not isinstance(created, (int, float))
+                or not math.isfinite(float(created))
+            ):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            message = item.get("message")
+            if not isinstance(message, dict) or set(message) != message_keys:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            for key in ("subject", "body_md", "importance", "sender_name", "created_ts"):
+                if not isinstance(message.get(key), str):
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                ik = set(item)
-                if not pending_required.issubset(ik):
+            if message.get("sender_handle") is not None and not isinstance(message["sender_handle"], str):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if type(message.get("message_id")) is not int:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            response = item.get("response")
+            if response is not None:
+                if not isinstance(response, dict) or set(response) != response_keys:
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                if ik - pending_required - pending_optional:
-                    return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
-                if type(item.get("id")) is bool or not isinstance(item.get("id"), (int, str)):
+                if any(not isinstance(response.get(key), str) for key in ("subject", "body_md", "importance")):
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                for sk in ("project_slug", "session", "sender_name", "subject"):
-                    val = item.get(sk)
-                    if val is not None and not isinstance(val, str):
-                        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                for tk in ("created_ts", "queued_ts"):
-                    tv = item.get(tk)
-                    if tv is not None and (
-                        type(tv) is bool or not isinstance(tv, (int, float))
-                        or not math.isfinite(float(tv))
-                    ):
-                        return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-                if "deliver_error" in item and not isinstance(item["deliver_error"], str):
+                handles = response.get("mention_handles")
+                if not isinstance(handles, list) or any(not isinstance(value, str) for value in handles):
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 

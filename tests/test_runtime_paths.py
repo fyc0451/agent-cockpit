@@ -26,6 +26,7 @@ MODULES = [
     "agent_cockpit.tasks", "agent_cockpit.coordination",
     "agent_cockpit.web_push", "agent_cockpit.mail_projects",
     "agent_cockpit.team_sessions", "agent_cockpit.team_inbox_router",
+    "agent_cockpit.team_lead_worker",
     "agent_cockpit.terminal", "agent_cockpit.uploads", "agent_cockpit.files",
     "agent_cockpit.db", "agent_cockpit.delivery_outbox",
     "agent_cockpit.server",

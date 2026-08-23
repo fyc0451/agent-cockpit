@@ -735,47 +735,51 @@ def test_team_sessions_real_binding_shape(isolated_roots):
     assert r["reason"] == store_schema.REASON_COMPATIBLE
 
 
-def test_inbox_route_exact_value_shape(isolated_roots):
+def test_inbox_route_v2_requires_worker_migration(isolated_roots):
+    path = runtime_paths.store("inbox_route")
+    path.write_text(json.dumps({"version": 2, "routes": {}}), encoding="utf-8")
+
+    result = store_schema._check_versioned_json("inbox_route")
+
+    assert result["reason"] == store_schema.REASON_MIGRATION_REQUIRED
+
+
+def test_inbox_route_v3_work_queue_exact_value_shape(isolated_roots):
     path = runtime_paths.store("inbox_route")
     path.write_text(json.dumps({
-        "version": 2,
-        "routes": {
-            "h:1": {"delivered": [], "last_delivered": [], "pending": []},
-        },
+        "version": 3,
+        "work_items": [{
+            "work_id": "a" * 32,
+            "hub": "https://team.example",
+            "project_slug": "core",
+            "client_session_id": "client-1",
+            "session": "demo",
+            "session_generation": "run-1",
+            "mail_project": "/work/demo",
+            "lead_mail_name": "codex-main",
+            "pane_id": "pane-1",
+            "reply_mode": "confirm",
+            "inbox_item_id": 31,
+            "claim_token": "claim-secret",
+            "claim_expires_at": "2026-08-23 12:00:00",
+            "message": {
+                "message_id": 41,
+                "subject": "subject",
+                "body_md": "body",
+                "importance": "normal",
+                "sender_name": "Alice",
+                "sender_handle": "alice",
+                "created_ts": "2026-08-23 11:00:00",
+            },
+            "state": "pending",
+            "notified": False,
+            "created_ts": 1.0,
+        }],
     }), encoding="utf-8")
+
     assert store_schema._check_versioned_json("inbox_route")["reason"] == (
         store_schema.REASON_COMPATIBLE
     )
-    path.write_text(json.dumps({
-        "version": 2,
-        "routes": {"h:1": {"delivered": [], "opaque": 1}},
-    }), encoding="utf-8")
-    r = store_schema._check_versioned_json("inbox_route")
-    assert r["reason"] in {
-        store_schema.REASON_FINGERPRINT_MISMATCH,
-        store_schema.REASON_UNKNOWN_FIELDS,
-    }
-
-
-def test_inbox_route_nested_entries_fail_closed(isolated_roots):
-    """Lead R4 counter-example (1): garbage nested entries not compatible."""
-    path = runtime_paths.store("inbox_route")
-    path.write_text(json.dumps({
-        "version": 2,
-        "routes": {
-            "h:1": {
-                "delivered": [True],
-                "last_delivered": [{"future": 1}],
-                "pending": ["garbage"],
-            },
-        },
-    }), encoding="utf-8")
-    r = store_schema._check_versioned_json("inbox_route")
-    assert r["state"] != "compatible"
-    assert r["reason"] in {
-        store_schema.REASON_FINGERPRINT_MISMATCH,
-        store_schema.REASON_UNKNOWN_FIELDS,
-    }
 
 
 def test_settings_invalid_payloads_never_raise(isolated_roots):

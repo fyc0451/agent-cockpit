@@ -26,6 +26,10 @@ def _load_task_report():
     return importlib.reload(importlib.import_module("agent_mail_commands.task_report"))
 
 
+def _load_team_work():
+    return importlib.reload(importlib.import_module("agent_mail_commands.team_work"))
+
+
 def _load_tool(name, module_name):
     del module_name
     package_name = name.replace("-", "_").removesuffix(".py")
@@ -48,6 +52,59 @@ def test_bound_session_routes_to_unique_pane_even_when_cwd_differs():
     assert module._select_notify_targets(candidates, PROJECT) == [
         ("bound", "w1:p2", "/worktree", False)
     ]
+
+
+def test_team_work_cli_reads_with_local_identity_only(monkeypatch, capsys):
+    module = _load_team_work()
+    monkeypatch.setattr(module, "load_identity", lambda *_args: ({
+        "project_key": PROJECT,
+        "name": "codex-main",
+        "registration_token": "registration-secret",
+    }, "http://hub", "hub-secret"))
+    calls = []
+    monkeypatch.setattr(
+        module, "_post",
+        lambda path, payload: calls.append((path, payload)) or {"status": "empty"},
+    )
+
+    module.main(["--agent", "codex", "--instance", "main", "--project", PROJECT])
+
+    assert calls == [("/api/agent/team-work/next", {
+        "mail_project": PROJECT,
+        "sender_name": "codex-main",
+        "registration_token": "registration-secret",
+    })]
+    output = capsys.readouterr().out
+    assert "empty" in output
+    assert "registration-secret" not in output
+
+
+def test_team_work_cli_submits_explicit_reply(monkeypatch, capsys):
+    module = _load_team_work()
+    monkeypatch.setattr(module, "load_identity", lambda *_args: ({
+        "project_key": PROJECT,
+        "name": "codex-main",
+        "registration_token": "registration-secret",
+    }, "http://hub", "hub-secret"))
+    calls = []
+    monkeypatch.setattr(
+        module, "_post",
+        lambda path, payload: calls.append((path, payload)) or {
+            "status": "draft_pending", "draft_id": 8,
+        },
+    )
+
+    module.main([
+        "--agent", "codex", "--instance", "main", "--project", PROJECT,
+        "--work-id", "a" * 32, "--to", "alice", "--subject", "Re",
+        "--body", "done",
+    ])
+
+    assert calls[0][0] == f"/api/agent/team-work/{'a' * 32}/respond"
+    assert calls[0][1]["mention_handles"] == ["alice"]
+    output = capsys.readouterr().out
+    assert "draft_pending" in output
+    assert "registration-secret" not in output
 
 
 def test_multiple_panes_bound_to_same_mailbox_are_not_all_woken():

@@ -10,6 +10,7 @@ def _isolate_settings(tmp_path, monkeypatch):
     from agent_cockpit import mail_projects
     from agent_cockpit import settings
     from agent_cockpit import team_inbox_router
+    from agent_cockpit import team_lead_worker
     from agent_cockpit import team_sessions
     from agent_cockpit import upgrade_service
     monkeypatch.delenv(upgrade_service.ENABLE_ENV, raising=False)
@@ -22,6 +23,9 @@ def _isolate_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "team-sessions.json")
     monkeypatch.setattr(
         team_inbox_router, "ROUTE_STATE", tmp_path / "team-inbox-route.json",
+    )
+    monkeypatch.setattr(
+        team_lead_worker, "STATE_PATH", tmp_path / "team-inbox-route.json",
     )
     monkeypatch.setattr(coordination, "DB_PATH", tmp_path / "coordination.sqlite3")
     monkeypatch.setattr(files, "_custom_roots_file", lambda: tmp_path / "file-roots.json")

@@ -60,6 +60,7 @@ from . import persist_work
 from . import pane_live
 from . import next_profile
 from . import team_sessions
+from . import team_lead_worker
 from . import terminal
 from . import version
 from . import source_upgrade
@@ -616,7 +617,8 @@ def _local_terminal_capability(workspace, location):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _poller_task, _message_poller_task, _worktree_cleanup_task
-    global _identity_retirement_task, _persist_work_task, workspace_terminal_controller
+    global _identity_retirement_task, _persist_work_task, _team_lead_worker_task
+    global workspace_terminal_controller
     global workspace_agent_controller, _ephemeral_ready
     _require_next_instance_lock()
     project_registry_api_service().prepare()
@@ -662,6 +664,11 @@ async def lifespan(_: FastAPI):
                 b0_wiring.uninstall_claim_gate()
             _poller_task = asyncio.create_task(_poll_live_state())
             _message_poller_task = asyncio.create_task(_poll_message_state())
+            try:
+                await asyncio.to_thread(team_lead_worker.reset_notifications)
+            except OSError:
+                logger.exception("Team Lead 工作队列恢复失败；worker 将保持 fail-closed")
+            _team_lead_worker_task = asyncio.create_task(_poll_team_lead_work())
             _worktree_cleanup_task = asyncio.create_task(_worktree_cleanup_loop())
             _identity_retirement_task = asyncio.create_task(_identity_retirement_loop())
             _persist_work_task = asyncio.create_task(_persist_work_loop())
@@ -691,6 +698,7 @@ async def lifespan(_: FastAPI):
                 background_tasks = (
                     _poller_task, _message_poller_task, _worktree_cleanup_task,
                     _identity_retirement_task, _persist_work_task,
+                    _team_lead_worker_task,
                 )
                 for task in background_tasks:
                     if task is not None:
@@ -722,6 +730,7 @@ async def lifespan(_: FastAPI):
                     _worktree_cleanup_task = None
                     _identity_retirement_task = None
                     _persist_work_task = None
+                    _team_lead_worker_task = None
     finally:
         if workspace_agent_controller is not None:
             try:
@@ -2162,7 +2171,11 @@ async def protect_api(request: Request, call_next):
         and _b0_valid_grant_for(request, parts[3], parts[4])
     ):
         return await call_next(request)
-    if not protected or path in PUBLIC_PATHS:
+    if (
+        not protected
+        or path in PUBLIC_PATHS
+        or path.startswith("/api/agent/team-work/")
+    ):
         return await call_next(request)
     if not _request_authenticated(request):
         status = 401 if COCKPIT_TOKEN else 403
@@ -4624,6 +4637,178 @@ def _team_agent_reply_binding(
     if len(candidates) != 1:
         raise _team_agent_reply_forbidden()
     return binding
+
+
+def _active_team_lead_bindings() -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """解析当前仍运行的唯一 Lead；远端或调用方不能选择 session/pane。"""
+    hub = hub_client.public_team_config()["team_hub"]
+    result: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for candidate in _team_session_candidates():
+        lead = candidate.get("lead") if isinstance(candidate.get("lead"), dict) else {}
+        if (
+            candidate.get("ready") is not True
+            or candidate.get("status") not in {"working", "idle", "blocked"}
+            or lead.get("status") not in {"working", "idle", "blocked"}
+            or not isinstance(candidate.get("mail_project"), str)
+            or not isinstance(lead.get("mail_name"), str)
+        ):
+            continue
+        try:
+            bindings = team_sessions.reply_bindings_for_lead(
+                candidate["mail_project"], lead["mail_name"],
+            )
+        except (OSError, ValueError):
+            continue
+        matches = [
+            binding for binding in bindings
+            if binding.get("hub") == hub
+            and binding.get("session") == candidate.get("session")
+            and binding.get("session_generation") == candidate.get("generation")
+        ]
+        if len(matches) == 1:
+            result.append((matches[0], candidate))
+    return result
+
+
+def _team_lead_worker_tick() -> None:
+    for binding, candidate in _active_team_lead_bindings():
+        try:
+            team_lead_worker.poll_binding(
+                binding,
+                candidate,
+                claim=hub_client.session_lead_claim,
+                notify=_notify_team_lead_work,
+            )
+        except hub_client.HumanAPIError as exc:
+            if exc.status_code not in {403, 409}:
+                logger.warning("Team Lead 收件暂时失败: HTTP %s", exc.status_code)
+        except Exception:
+            logger.exception("Team Lead 本地 worker tick 失败")
+
+
+def _notify_team_lead_work(session: str, pane_id: str, prompt: str) -> bool:
+    result = herdr_client.pane_send(session, pane_id, prompt, "prompt")
+    return bool(
+        isinstance(result, dict)
+        and result.get("available") is True
+        and not result.get("error")
+    )
+
+
+def _team_work_auth(body: dict[str, Any], request: Request) -> dict[str, Any]:
+    if not _is_loopback(request.client.host if request.client else None):
+        raise _team_agent_reply_forbidden()
+    required = {"mail_project", "sender_name", "registration_token"}
+    if any(key not in body for key in required):
+        raise _team_agent_reply_forbidden()
+    mail_project = body["mail_project"]
+    sender_name = body["sender_name"]
+    registration_token = body["registration_token"]
+    if (
+        not isinstance(mail_project, str)
+        or not mail_project
+        or len(mail_project) > 4096
+        or not Path(mail_project).is_absolute()
+        or not isinstance(sender_name, str)
+        or not _REGISTRY_NAME_RE.fullmatch(sender_name)
+        or not isinstance(registration_token, str)
+        or not registration_token
+        or len(registration_token) > 4096
+    ):
+        raise _team_agent_reply_forbidden()
+    return _team_agent_reply_binding(
+        mail_project, sender_name, registration_token,
+    )
+
+
+@app.post("/api/agent/team-work/next")
+async def api_team_agent_work_next(request: Request):
+    """当前 active Lead 主动读取一条已领取正文，不接受 session/pane 参数。"""
+    try:
+        body = await request.json()
+    except (UnicodeError, ValueError):
+        raise HTTPException(400, "团队工作请求无效")
+    if not isinstance(body, dict) or set(body) - {
+        "mail_project", "sender_name", "registration_token",
+    }:
+        raise HTTPException(400, "团队工作请求包含未支持字段")
+    binding = _team_work_auth(body, request)
+    try:
+        work = team_lead_worker.next_for_binding(binding)
+    except OSError as exc:
+        raise HTTPException(503, "团队工作队列暂时不可用") from exc
+    return {"status": "pending" if work is not None else "empty", "work": work}
+
+
+@app.post("/api/agent/team-work/{work_id}/respond")
+async def api_team_agent_work_respond(work_id: str, request: Request):
+    """由当前 active Lead 提交；模式由领取结果决定，调用方不能覆盖。"""
+    if not re.fullmatch(r"[0-9a-f]{32}", work_id):
+        raise HTTPException(404, "团队工作不存在")
+    try:
+        body = await request.json()
+    except (UnicodeError, ValueError):
+        raise HTTPException(400, "团队工作回复无效")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "团队工作回复无效")
+    allowed = {
+        "mail_project", "sender_name", "registration_token",
+        "mention_handles", "subject", "body_md", "importance",
+    }
+    if set(body) - allowed:
+        raise HTTPException(400, "团队工作回复包含未支持字段")
+    binding = _team_work_auth(body, request)
+    handles = body.get("mention_handles")
+    subject = body.get("subject")
+    body_md = body.get("body_md")
+    importance = body.get("importance", "normal")
+    if not isinstance(handles, list) or not 1 <= len(handles) <= 50:
+        raise HTTPException(400, "至少需要一个团队成员")
+    clean_handles: list[str] = []
+    for value in handles:
+        if (
+            not isinstance(value, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value)
+        ):
+            raise HTTPException(400, "团队成员花名无效")
+        if value.lower() not in {item.lower() for item in clean_handles}:
+            clean_handles.append(value)
+    if (
+        not isinstance(subject, str)
+        or not subject.strip()
+        or len(subject.strip()) > 512
+        or not isinstance(body_md, str)
+        or not body_md.strip()
+        or len(body_md) > 50_000
+        or importance not in {"low", "normal", "high", "urgent"}
+    ):
+        raise HTTPException(400, "团队回复内容无效")
+    try:
+        return team_lead_worker.respond(
+            work_id,
+            binding,
+            {
+                "subject": subject.strip(),
+                "body_md": body_md,
+                "importance": importance,
+                "mention_handles": clean_handles,
+            },
+            create_draft=hub_client.session_lead_reply_draft,
+            direct_reply=hub_client.session_lead_reply,
+            complete=hub_client.session_lead_complete,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, "团队工作不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except hub_client.HumanAPIError as exc:
+        if exc.status_code == 403:
+            raise _team_agent_reply_forbidden() from exc
+        if exc.status_code == 404:
+            raise HTTPException(404, "团队成员不存在或已退出项目") from exc
+        if exc.status_code == 409:
+            raise HTTPException(409, "团队工作状态已变化，请稍后重试") from exc
+        raise HTTPException(502, "团队工作提交暂时失败") from exc
 
 
 @app.post("/api/agent/team-reply")
@@ -10897,6 +11082,7 @@ _live_state: dict[str, Any] = {
 }
 _poller_task: asyncio.Task | None = None
 _message_poller_task: asyncio.Task | None = None
+_team_lead_worker_task: asyncio.Task | None = None
 _worktree_cleanup_task: asyncio.Task | None = None
 _identity_retirement_task: asyncio.Task | None = None
 _persist_work_task: asyncio.Task | None = None
@@ -11119,6 +11305,18 @@ async def _poll_message_state() -> None:
         except Exception:
             logger.exception("message revision poll failed")
         await asyncio.sleep(1)
+
+
+async def _poll_team_lead_work() -> None:
+    """独立轮询受限 Team Inbox；错误不会影响普通消息状态轮询。"""
+    while True:
+        try:
+            await asyncio.to_thread(_team_lead_worker_tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Team Lead worker failed")
+        await asyncio.sleep(2)
 
 
 class _SseCappedEventSourceResponse(EventSourceResponse):

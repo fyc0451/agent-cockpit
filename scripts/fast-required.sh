@@ -36,6 +36,8 @@ unset COCKPIT_NEXT_PROFILE
   tests/test_hub_client.py \
   tests/test_team_ledger.py \
   tests/test_team_inbox_router.py \
+  tests/test_team_lead_worker.py \
+  tests/test_team_agent_reply.py \
   tests/test_persist_work.py \
   tests/test_next_dev_profile.py \
   tests/test_workspace_write_gate.py
