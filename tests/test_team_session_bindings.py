@@ -205,6 +205,121 @@ def test_lightweight_session_uses_registered_leader_instance_as_generation(monke
     assert internal["generation"] == instance_id
 
 
+def test_managed_restart_identity_change_degrades_binding_and_stops_worker(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    new_identity = {
+        **_identity(),
+        "identity_id": "work-demo/codex--new.json",
+        "instance": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "name": "FreshLead",
+    }
+    monkeypatch.setattr(server, "_registry_scan", lambda: [_identity(), new_identity])
+    monkeypatch.setattr(server, "_board_snapshot", lambda: {
+        "sessions": [{
+            "session": "demo",
+            "directory": PROJECT_KEY,
+            "panes": [{
+                "session": "demo",
+                "pane_id": "w1:p2",
+                "agent": "codex",
+                "agent_status": "working",
+                "cwd": PROJECT_KEY,
+                "mail_name": "FreshLead",
+                "instance_id": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }],
+        }],
+        "panes": [],
+    })
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+        reply_token="old-secret",
+    )
+
+    response = client.get("/api/team-auth/session-bindings", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["sessions"][0]["lead"]["mail_name"] == "FreshLead"
+    binding = response.json()["bindings"][0]
+    assert binding["active"] is True
+    assert binding["ready"] is False
+    assert binding["reason"] == "Session 负责人身份已变化，需要重新绑定"
+    assert server._active_team_lead_bindings() == []
+
+
+def test_managed_restart_rebind_requires_confirmation_and_rotates_capability(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    calls = []
+    new_identity = {
+        **_identity(),
+        "identity_id": "work-demo/codex--new.json",
+        "instance": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "name": "FreshLead",
+    }
+    monkeypatch.setattr(server, "_registry_scan", lambda: [_identity(), new_identity])
+    monkeypatch.setattr(server, "_board_snapshot", lambda: {
+        "sessions": [{
+            "session": "demo",
+            "directory": PROJECT_KEY,
+            "panes": [{
+                "session": "demo",
+                "pane_id": "w1:p2",
+                "agent": "codex",
+                "agent_status": "working",
+                "cwd": PROJECT_KEY,
+                "mail_name": "FreshLead",
+                "instance_id": "i-bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }],
+        }],
+        "panes": [],
+    })
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+        reply_token="old-secret",
+    )
+
+    rejected = client.put(
+        "/api/team-auth/session-bindings/demo",
+        headers=headers,
+        json={"session": "demo"},
+    )
+    rebound = client.put(
+        "/api/team-auth/session-bindings/demo",
+        headers=headers,
+        json={"session": "demo", "replace": True},
+    )
+
+    assert rejected.status_code == 409
+    assert "身份已变化" in rejected.json()["detail"]
+    assert rebound.status_code == 200
+    puts = [call for call in calls if call[0] == "PUT"]
+    assert len(puts) == 1
+    assert puts[0][3]["lead_label"] == "FreshLead"
+    assert puts[0][3]["rotate_reply_token"] is True
+    saved = team_sessions.list_bindings(HUB, 7)[0]
+    assert saved["lead"]["mail_name"] == "FreshLead"
+    assert rebound.json()["binding"]["ready"] is True
+
+
 def test_session_candidate_explains_missing_and_multiple_lead(monkeypatch):
     cases = [
         ([], [], "负责人未配置"),
@@ -389,6 +504,43 @@ def test_reply_mode_switch_rejects_invalid_mode_before_hub(monkeypatch):
 
     assert response.status_code == 422
     assert calls == []
+
+
+def test_reply_mode_switch_rejects_changed_lead_identity(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    calls = []
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+        reply_token="old-secret",
+        reply_mode="confirm",
+    )
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [{
+        "session": "demo",
+        "generation": "run-1",
+        "mail_project": PROJECT_KEY,
+        "ready": True,
+        "lead": {"agent": "codex", "mail_name": "FreshLead"},
+    }])
+
+    response = client.patch(
+        "/api/team-auth/session-bindings/demo/reply-mode",
+        headers=headers,
+        json={"reply_mode": "auto"},
+    )
+
+    assert response.status_code == 409
+    assert "身份已变化" in response.json()["detail"]
+    assert not any(call[0] == "PUT" for call in calls)
 
 
 def test_reply_mode_idempotent_retry_preserves_existing_capability(monkeypatch):

@@ -887,7 +887,8 @@ function TeamZoneSection({
         const isInvited = membershipStatus === 'invited'
         const canRequestJoin = !membershipStatus || membershipStatus === 'removed'
         const isBound = isActive && !!binding
-        const bindingIsLive = !!binding && binding.active !== false
+        const bindingIsLive = !!binding && binding.active !== false && binding.ready !== false
+        const bindingProblem = binding?.reason || '已停止'
         const isBinding = bindingTopic === topic.slug
         const isJoining = joiningTopic === topic.slug
 
@@ -900,7 +901,7 @@ function TeamZoneSection({
               disabled={!isBound}
               title={
                 isBound
-                  ? `打开 ${topic.name}（绑定到 ${binding.session}${bindingIsLive ? '' : '，已停止'}）`
+                  ? `打开 ${topic.name}（绑定到 ${binding.session}${bindingIsLive ? '' : `，${bindingProblem}`}）`
                   : isActive
                     ? `${topic.name}（需要先绑定本机 Session）`
                     : isInvited
@@ -918,7 +919,7 @@ function TeamZoneSection({
               <span className={css.title}>{topic.name}</span>
               <span className={css.meta}>
                 {isBound
-                  ? `→ ${binding.session}${bindingIsLive ? '' : '（已停止）'}`
+                  ? `→ ${binding.session}${bindingIsLive ? '' : `（${bindingProblem}）`}`
                   : isActive ? '未绑定' : isInvited ? '等待审批' : '未加入'}
               </span>
             </button>

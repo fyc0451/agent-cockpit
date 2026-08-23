@@ -158,6 +158,41 @@ describe('WorkspaceBrowser 团队区域', () => {
     expect(screen.getByTitle('更换本机 Session')).toHaveTextContent('改绑')
   })
 
+  it('Lead 身份变化时明确提示需要改绑', () => {
+    renderWithAppFrame(
+      <WorkspaceBrowser
+        {...baseProps}
+        teamEnabled={true}
+        teamLoggedIn={true}
+        teamUsername="test-user"
+        teamTopics={[{ slug: 'proj-a', name: '项目 A', id: 1 }]}
+        teamBindings={[{
+          project_slug: 'proj-a',
+          session: 'local-session-1',
+          active: true,
+          ready: false,
+          reason: 'Session 负责人身份已变化，需要重新绑定',
+        }]}
+        teamSessions={[{
+          name: 'local-session-1',
+          label: 'local-session-1 · Lead FreshLead',
+          status: 'working',
+          agentCount: 1,
+          ready: true,
+          reason: null,
+          leadName: 'FreshLead',
+          projectRef: null,
+        }]}
+        onTeamLogout={vi.fn()}
+        onTeamBindSession={vi.fn()}
+        onTeamSelectTopic={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText(/local-session-1（Session 负责人身份已变化，需要重新绑定）/)).toBeInTheDocument()
+    expect(screen.getByTitle('更换本机 Session')).toHaveTextContent('改绑')
+  })
+
   it('改绑候选使用 Team 后端列表，不依赖工作区树分组', async () => {
     const onTeamBindSession = vi.fn().mockResolvedValue(undefined)
     renderWithAppFrame(
