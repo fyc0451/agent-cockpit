@@ -2775,7 +2775,7 @@ def _build_session_progress(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 "agent": agent_type,
                 "instance_id": str(pane.get("instance_id") or "") or None,
                 "mail_name": (
-                    (participant or {}).get("mail_name") or pane.get("mail_name")
+                    pane.get("mail_name") or (participant or {}).get("mail_name")
                 ),
                 "participant_id": (participant or {}).get("participant_id"),
                 "role": (participant or {}).get("role"),
@@ -4371,12 +4371,21 @@ def _public_team_session_binding(
         item for item in candidates if item.get("session") == row.get("session")
     ), None)
     lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
+    current_lead = (
+        candidate.get("lead")
+        if candidate is not None and isinstance(candidate.get("lead"), dict)
+        else {}
+    )
     active = candidate is not None
+    lead_identity_visible = bool(current_lead.get("mail_name"))
+    lead_identity_matches = _team_binding_lead_matches_candidate(row, candidate)
     has_reply_capability = bool(
         isinstance(row.get("reply_token"), str) and row.get("reply_token")
     )
     reason = None
-    if candidate is not None and not candidate.get("ready"):
+    if candidate is not None and lead_identity_visible and not lead_identity_matches:
+        reason = "Session 负责人身份已变化，需要重新绑定"
+    elif candidate is not None and not candidate.get("ready"):
         reason = candidate.get("reason")
     elif candidate is not None and not has_reply_capability:
         reason = "负责人通信凭据需要重新同步"
@@ -4395,7 +4404,7 @@ def _public_team_session_binding(
         "active": active,
         "ready": bool(
             active and candidate and candidate.get("ready")
-            and has_reply_capability
+            and lead_identity_matches and has_reply_capability
         ),
         "reason": reason,
         "reply_mode": (
@@ -4406,6 +4415,31 @@ def _public_team_session_binding(
         "project_ref": _team_project_ref(row.get("mail_project")),
         "updated_ts": row.get("updated_ts"),
     }
+
+
+def _team_binding_lead_matches_candidate(
+    binding: dict[str, Any], candidate: dict[str, Any] | None,
+) -> bool:
+    """旧 binding 只能由同一实时 Lead 身份继续使用。"""
+    if candidate is None:
+        return False
+    saved = binding.get("lead") if isinstance(binding.get("lead"), dict) else {}
+    current = (
+        candidate.get("lead")
+        if isinstance(candidate.get("lead"), dict)
+        else {}
+    )
+    saved_name = str(saved.get("mail_name") or "")
+    current_name = str(current.get("mail_name") or "")
+    if not saved_name or not current_name or saved_name != current_name:
+        return False
+    saved_agent = MAIL_AGENT_NAMES.get(
+        str(saved.get("agent") or ""), str(saved.get("agent") or ""),
+    )
+    current_agent = MAIL_AGENT_NAMES.get(
+        str(current.get("agent") or ""), str(current.get("agent") or ""),
+    )
+    return not (saved_agent and current_agent and saved_agent != current_agent)
 
 
 def _team_session_bindings_for(hub: str, human_id: int) -> list[dict[str, Any]]:
@@ -4471,6 +4505,12 @@ def api_team_session_bind(
             and row.get("session") == req.session
             and row.get("session_generation") == str(candidate["generation"])
         ), None)
+        identity_changed = bool(
+            current is not None
+            and not _team_binding_lead_matches_candidate(current, candidate)
+        )
+        if identity_changed and not req.replace:
+            raise HTTPException(409, "Session 负责人身份已变化，重新绑定需要显式确认")
         try:
             conflicts = team_sessions.conflicts_for(
                 hub=hub,
@@ -4503,7 +4543,7 @@ def api_team_session_bind(
                 {
                     **candidate,
                     "client_session_id": client_session_id,
-                    "rotate_reply_token": not bool(
+                    "rotate_reply_token": identity_changed or not bool(
                         isinstance((current or {}).get("reply_token"), str)
                         and (current or {}).get("reply_token")
                     ),
@@ -4598,6 +4638,8 @@ def api_team_session_reply_mode(
         ), None)
         if candidate is None or not candidate.get("ready"):
             raise HTTPException(409, "绑定的 Session 负责人当前不可用")
+        if not _team_binding_lead_matches_candidate(current, candidate):
+            raise HTTPException(409, "Session 负责人身份已变化，需要重新绑定")
         remote = _team_remote_session_lead(
             authorization,
             slug,
@@ -4731,6 +4773,7 @@ def _team_agent_reply_binding(
         and candidate.get("ready") is True
         and isinstance(candidate.get("lead"), dict)
         and candidate["lead"].get("mail_name") == sender_name
+        and _team_binding_lead_matches_candidate(binding, candidate)
     ]
     if len(candidates) != 1:
         raise _team_agent_reply_forbidden()
@@ -4762,6 +4805,7 @@ def _active_team_lead_bindings() -> list[tuple[dict[str, Any], dict[str, Any]]]:
             if binding.get("hub") == hub
             and binding.get("session") == candidate.get("session")
             and binding.get("session_generation") == candidate.get("generation")
+            and _team_binding_lead_matches_candidate(binding, candidate)
         ]
         if len(matches) == 1:
             result.append((matches[0], candidate))

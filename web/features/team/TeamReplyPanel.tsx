@@ -66,7 +66,9 @@ export function TeamReplyPanel({
           : '收到消息后，请在该消息下方决定是否让 Lead 回复；确认前不会生成答案。'}
       </div>
       {binding.ready !== true && (
-        <div className="gc-team-reply-note">绑定的 Lead 当前不可用，暂不能切换模式。</div>
+        <div className="gc-team-reply-note">
+          绑定的 Lead 当前不可用：{binding.reason ?? '请检查 Session 后重新绑定'}。
+        </div>
       )}
       {modeM.isError && <div className="gc-team-error">{errorText(modeM.error)}</div>}
     </section>
