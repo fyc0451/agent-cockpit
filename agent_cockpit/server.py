@@ -2229,6 +2229,10 @@ class HumanUserStatusReq(BaseModel):
     status: str = Field(min_length=1, max_length=16)
 
 
+class HumanPasswordChangeReq(BaseModel):
+    new_password: str = Field(min_length=1, max_length=256)
+
+
 class AckReq(BaseModel):
     project_id: int
     agent_name: str
@@ -4792,6 +4796,18 @@ def api_team_auth_logout():
     response = JSONResponse({"ok": True})
     response.delete_cookie(TEAM_AUTH_COOKIE, path="/api")
     return response
+
+
+@app.patch("/api/team-auth/password")
+def api_team_auth_change_password(req: HumanPasswordChangeReq, request: Request):
+    try:
+        return hub_client.human_change_password(
+            _team_human_authorization(request), req.new_password
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
 
 
 @app.get("/api/team-auth/inbox-route/status")

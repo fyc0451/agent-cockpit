@@ -63,6 +63,7 @@ export interface WorkspaceBrowserProps {
     inviteCode: string
   }) => Promise<void>
   onTeamLogout?: () => Promise<void>
+  onTeamChangePassword?: (newPassword: string) => Promise<void>
   onTeamJoin?: (projectSlug: string, mentionHandle: string) => Promise<void>
   onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
@@ -163,6 +164,7 @@ export function WorkspaceBrowser({
   onTeamLogin,
   onTeamRegister,
   onTeamLogout,
+  onTeamChangePassword,
   onTeamJoin,
   onTeamBindSession,
   onTeamSelectTopic,
@@ -434,6 +436,7 @@ export function WorkspaceBrowser({
                     onLogin={onTeamLogin || (async () => {})}
                     onRegister={onTeamRegister || (async () => {})}
                     onLogout={onTeamLogout || (async () => {})}
+                    onChangePassword={onTeamChangePassword || (async () => {})}
                     onJoin={onTeamJoin || (async () => {})}
                     onBindSession={onTeamBindSession || (async () => {})}
                     onSelectTopic={onTeamSelectTopic || (() => {})}
@@ -462,6 +465,7 @@ function TeamZoneSection({
   onLogin,
   onRegister,
   onLogout,
+  onChangePassword,
   onJoin,
   onBindSession,
   onSelectTopic,
@@ -482,6 +486,7 @@ function TeamZoneSection({
     inviteCode: string
   }) => Promise<void>
   onLogout: () => Promise<void>
+  onChangePassword: (newPassword: string) => Promise<void>
   onJoin: (projectSlug: string, mentionHandle: string) => Promise<void>
   onBindSession: (projectSlug: string, sessionName: string) => Promise<void>
   onSelectTopic: (projectSlug: string) => void
@@ -513,6 +518,12 @@ function TeamZoneSection({
   const [registerError, setRegisterError] = useState<string | null>(null)
   const [registrationNotice, setRegistrationNotice] = useState<string | null>(null)
   const [bindingTopic, setBindingTopic] = useState<string | null>(null)
+  const [changingPassword, setChangingPassword] = useState(false)
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [passwordLoading, setPasswordLoading] = useState(false)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [passwordNotice, setPasswordNotice] = useState<string | null>(null)
   const [joiningTopic, setJoiningTopic] = useState<string | null>(null)
   const [joinHandle, setJoinHandle] = useState('')
   const [joinLoading, setJoinLoading] = useState(false)
@@ -617,6 +628,33 @@ function TeamZoneSection({
       setBindingTopic(null)
     } catch (err) {
       alert(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const handlePasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (newPassword !== confirmPassword) {
+      setPasswordError('两次输入的密码不一致')
+      return
+    }
+    const passwordBytes = new TextEncoder().encode(newPassword).length
+    if (passwordBytes < 12 || passwordBytes > 256) {
+      setPasswordError('密码必须是 12–256 个 UTF-8 字节')
+      return
+    }
+    setPasswordLoading(true)
+    setPasswordError(null)
+    setPasswordNotice(null)
+    try {
+      await onChangePassword(newPassword)
+      setNewPassword('')
+      setConfirmPassword('')
+      setChangingPassword(false)
+      setPasswordNotice('密码已修改；现有登录保持有效。')
+    } catch (err) {
+      setPasswordError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPasswordLoading(false)
     }
   }
 
@@ -798,22 +836,38 @@ function TeamZoneSection({
     <div className={css.groupSection} style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
       <div style={{ padding: '0 12px', marginBottom: '8px', fontSize: '12px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span>团队 ({username})</span>
-        <button
-          type="button"
-          onClick={() => void onLogout()}
-          title="退出登录"
-          style={{
-            background: 'none',
-            border: 'none',
-            color: 'var(--dsw-alias-label-tertiary)',
-            cursor: 'pointer',
-            fontSize: '14px',
-            padding: '0 4px',
-          }}
-        >
-          ⎋
-        </button>
+        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+          <button
+            type="button"
+            onClick={() => { setChangingPassword((value) => !value); setPasswordError(null); setPasswordNotice(null) }}
+            title="修改团队登录密码"
+            style={{ background: 'none', border: 'none', color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer', fontSize: '12px', padding: '0 4px' }}
+          >
+            改密
+          </button>
+          <button
+            type="button"
+            onClick={() => void onLogout()}
+            title="退出登录"
+            style={{ background: 'none', border: 'none', color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer', fontSize: '14px', padding: '0 4px' }}
+          >
+            ⎋
+          </button>
+        </span>
       </div>
+
+      {changingPassword && (
+        <form style={{ display: 'flex', flexDirection: 'column', gap: '6px', margin: '0 8px 8px' }} onSubmit={handlePasswordChange}>
+          <input aria-label="新团队密码" type="password" placeholder="新密码（至少 12 字节）" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} disabled={passwordLoading} autoComplete="new-password" style={compactInputStyle} />
+          <input aria-label="确认新团队密码" type="password" placeholder="再次输入新密码" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} disabled={passwordLoading} autoComplete="new-password" style={compactInputStyle} />
+          {passwordError && <div style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px' }}>{passwordError}</div>}
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button type="submit" disabled={passwordLoading} style={{ ...compactButtonStyle, flex: 1 }}>{passwordLoading ? '修改中…' : '保存新密码'}</button>
+            <button type="button" disabled={passwordLoading} onClick={() => { setChangingPassword(false); setPasswordError(null); setNewPassword(''); setConfirmPassword('') }} style={{ ...compactButtonStyle, flex: 1 }}>取消</button>
+          </div>
+        </form>
+      )}
+      {passwordNotice && <div style={{ margin: '0 8px 8px', color: 'var(--dsw-alias-state-success-primary)', fontSize: '12px' }}>{passwordNotice}</div>}
 
       {topics.length === 0 && (
         <div style={{ padding: '8px 12px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', textAlign: 'center' }}>

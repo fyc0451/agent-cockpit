@@ -115,6 +115,31 @@ describe('WorkspaceBrowser 团队区域', () => {
     expect(screen.getByText('项目 B')).toBeInTheDocument()
   })
 
+  it('登录用户可直接修改密码且保持当前登录', async () => {
+    const onTeamChangePassword = vi.fn().mockResolvedValue(undefined)
+    renderWithAppFrame(
+      <WorkspaceBrowser
+        {...baseProps}
+        teamEnabled={true}
+        teamLoggedIn={true}
+        teamUsername="test-user"
+        teamTopics={[]}
+        teamBindings={[]}
+        onTeamLogout={vi.fn()}
+        onTeamChangePassword={onTeamChangePassword}
+        onTeamBindSession={vi.fn()}
+        onTeamSelectTopic={vi.fn()}
+      />,
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByTitle('修改团队登录密码'))
+    await user.type(screen.getByLabelText('新团队密码'), 'new-password-1234')
+    await user.type(screen.getByLabelText('确认新团队密码'), 'new-password-1234')
+    await user.click(screen.getByText('保存新密码'))
+    await waitFor(() => expect(onTeamChangePassword).toHaveBeenCalledWith('new-password-1234'))
+    expect(screen.getByText('密码已修改；现有登录保持有效。')).toBeInTheDocument()
+  })
+
   it('话题已绑定已停止的 Session 时显示失效状态和改绑入口', () => {
     renderWithAppFrame(
       <WorkspaceBrowser

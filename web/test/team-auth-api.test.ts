@@ -4,6 +4,7 @@ import {
   createTeamInvitation,
   listTeamProjects,
   requestTeamJoin,
+  teamChangePassword,
   teamRegister,
   teamSessionBindings,
 } from '../api/teamAuth'
@@ -13,6 +14,20 @@ afterEach(() => {
 })
 
 describe('团队普通成员 API', () => {
+  it('修改密码使用现有 Human 登录态且不请求退出', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await teamChangePassword('new-password-1234')
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/team-auth/password', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_password: 'new-password-1234' }),
+      credentials: 'include',
+    })
+  })
+
   it('注册请求发送邀请码并保留 pending 后续审批语义', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 201 })
     vi.stubGlobal('fetch', fetchMock)

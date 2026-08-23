@@ -36,6 +36,7 @@ import {
 import { fetchTeamConfig } from '../../api/teamConfig'
 import {
   teamAuthStatus,
+  teamChangePassword,
   teamLogin,
   teamRegister,
   teamLogout,
@@ -165,6 +166,7 @@ function NarrowAwareBrowser(props: {
     inviteCode: string
   }) => Promise<void>
   onTeamLogout?: () => Promise<void>
+  onTeamChangePassword?: (newPassword: string) => Promise<void>
   onTeamJoin?: (projectSlug: string, mentionHandle: string) => Promise<void>
   onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
@@ -337,6 +339,10 @@ export function GroupChatPage() {
     queryClient.invalidateQueries({ queryKey: ['team-projects'] })
     setTeamActiveTopic(null)
   }, [queryClient])
+
+  const handleTeamChangePassword = useCallback(async (newPassword: string) => {
+    await teamChangePassword(newPassword)
+  }, [])
 
   const handleTeamJoin = useCallback(async (projectSlug: string, mentionHandle: string) => {
     await requestTeamJoin(projectSlug, mentionHandle)
@@ -1134,6 +1140,7 @@ export function GroupChatPage() {
                 onTeamLogin={handleTeamLogin}
                 onTeamRegister={handleTeamRegister}
                 onTeamLogout={handleTeamLogout}
+                onTeamChangePassword={handleTeamChangePassword}
                 onTeamJoin={handleTeamJoin}
                 onTeamBindSession={handleTeamBindSession}
                 onTeamSelectTopic={handleTeamSelectTopic}
