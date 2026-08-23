@@ -836,25 +836,24 @@ function TeamZoneSection({
     <div className={css.groupSection} style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
       <div style={{ padding: '0 12px', marginBottom: '8px', fontSize: '12px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span>团队 ({username})</span>
-        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <button
-            type="button"
-            onClick={() => { setChangingPassword((value) => !value); setPasswordError(null); setPasswordNotice(null) }}
-            title="修改团队登录密码"
-            style={{ background: 'none', border: 'none', color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer', fontSize: '12px', padding: '0 4px' }}
-          >
-            改密
-          </button>
-          <button
-            type="button"
-            onClick={() => void onLogout()}
-            title="退出登录"
-            style={{ background: 'none', border: 'none', color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer', fontSize: '14px', padding: '0 4px' }}
-          >
-            ⎋
-          </button>
-        </span>
+        <button
+          type="button"
+          onClick={() => void onLogout()}
+          title="退出登录"
+          style={{ background: 'none', border: 'none', color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer', fontSize: '14px', padding: '0 4px' }}
+        >
+          ⎋
+        </button>
       </div>
+
+      <button
+        type="button"
+        onClick={() => { setChangingPassword((value) => !value); setPasswordError(null); setPasswordNotice(null) }}
+        title="修改团队登录密码"
+        style={{ ...compactButtonStyle, display: 'block', width: 'calc(100% - 16px)', margin: '0 8px 8px' }}
+      >
+        {changingPassword ? '收起修改密码' : '修改登录密码'}
+      </button>
 
       {changingPassword && (
         <form style={{ display: 'flex', flexDirection: 'column', gap: '6px', margin: '0 8px 8px' }} onSubmit={handlePasswordChange}>

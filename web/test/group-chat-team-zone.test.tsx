@@ -132,7 +132,7 @@ describe('WorkspaceBrowser 团队区域', () => {
       />,
     )
     const user = userEvent.setup()
-    await user.click(screen.getByTitle('修改团队登录密码'))
+    await user.click(screen.getByRole('button', { name: '修改登录密码' }))
     await user.type(screen.getByLabelText('新团队密码'), 'new-password-1234')
     await user.type(screen.getByLabelText('确认新团队密码'), 'new-password-1234')
     await user.click(screen.getByText('保存新密码'))
