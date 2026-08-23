@@ -4,7 +4,7 @@
 > 当前产品是 **Cockpit 3.0 群聊**：见仓库根 [`README.md`](../README.md)
 > 「安装 3.0」。`install.sh` 现在装的就是 3.0，不要按本文去装旧看板。
 >
-> 版本：2026-08-07（适配 Cockpit origin/main ≥ 6daf313；Team Hub ≥ f74fb58）。
+> 版本：2026-08-23（第 5 章按当前 React 群聊 / Team Hub 实现编写）。
 > 第 1–4 章人人需要；第 5 章团队模式；第 6–8 章移动端、排障与附录。
 
 ## 阅读指引
@@ -242,101 +242,173 @@ mail-recv --agent kimi --instance main --project /path/to/project --unread
 
 ## 5. 团队协作模式
 
-### 5.1 概念表（先读这个）
+### 5.1 先选对通信入口
 
-| 概念 | 一句话解释 |
+| 你想做什么 | 使用哪里 |
 |---|---|
-| Team Hub | 团队共用的远程消息/成员服务器（`mcp_agent_mail` 团队功能，端口 8765） |
-| human_auth / issuer | 给人类账号签发登录 JWT 的服务（端口 8766） |
-| TeamProject（群组） | Team Hub 上的**远程逻辑群组**，不绑定任何机器的真实目录 |
-| Human | 团队里的人类账号；`@` 名（handle）用于被 agent 回复 |
-| 邀请码 | 管理员生成的一次性码（24h 有效），注册账号用 |
-| Session 绑定 | 把"本机一个运行中的 herdr session"与你在群组里的身份挂钩 |
-| Session lead | 绑定后 Hub 为这个 session 创建的受管代表身份；**只有它能代表你对外回复** |
-| reply capability | 绑定时签发的凭据，让本机 lead 的回复能投递回 Team Hub |
-| 人工收件箱 | 远程发给某个 Human 但暂无法路由到其终端的消息暂存处，团队页可读 |
+| 让**自己当前机器**上的 Agent 干活 | 普通群聊 / 本机 Session |
+| 跟**其他同事或其他机器**协作 | 左侧「团队」下的 Topic，例如 `hr-ready` |
+| 管理账号、邀请、成员和 Topic | 「团队管理（账号 / 成员审批）」或 `/#/team` |
 
-**架构与边界**：
+Team Topic 是跨机器的团队时间线，不是本机 Agent 的聊天窗口。团队消息不会抄入本机普通群聊，也不会自动创建 task、shell、pane 或 worktree。
 
+### 5.2 概念和角色
+
+| 概念 | 作用 |
+|---|---|
+| Team Hub | 团队共用的远程消息/成员服务器（通常为 8765） |
+| human_auth / issuer | 负责 Human 账号注册、审批、登录和 JWT（通常为 8766） |
+| Topic / TeamProject | Team Hub 上的逻辑群组；创建时**不选择本机目录** |
+| Human handle | Topic 内的人类 `@` 名，例如 `@fyc-mac` |
+| Session 绑定 | 把你在该 Topic 的 Human 身份与你机器上一个正在运行的 Session 关联 |
+| Session Lead | 绑定 Session 里唯一能代表你回复 Team Hub 的 Agent |
+| Human Inbox | 消息无法交给接收方 Agent 时的持久人工收件箱 |
+
+| 角色 | 权限 |
+|---|---|
+| 系统管理员 | 生成邀请链接、审批/停用账号、创建 Topic |
+| Topic 管理员 | 成员管理、角色调整、移除/恢复成员 |
+| 普通成员 | 查看时间线、发送消息、读 Human Inbox、绑定自己的 Session |
+
+### 5.3 管理员：邀请一位新成员
+
+1. 打开「团队管理」。
+2. 在「账号管理」选择要加入的 Topic。
+3. 点「生成团队邀请链接」，再点「复制链接」。链接 24 小时内有效、一次性使用，只在本次生成后显示。
+4. 把完整链接发给真实成员，不要代其注册或设密码。
+5. 成员提交后，账号列表会显示「待批准 · 申请加入 <Topic>」。点一次「批准加入」：该操作同时激活账号并加入目标 Topic，无需再做两次审批。
+
+已有账号要加入另一个 Topic 时，由成员登录后点「申请加入」，再由 Topic 管理员在成员管理中审批。
+
+### 5.4 新成员：注册、登录和绑定
+
+1. 在**自己的浏览器/机器**打开邀请链接。
+2. 填写用户名、显示名和密码（12–256 个 UTF-8 字节），提交注册。邀请码和目标 Topic 由链接带入。
+3. 等管理员点一次「批准加入」，然后用自己设置的账号密码登录。
+4. 在本机启动一个工作目录正确、带 Agent Mail 身份和唯一 Lead 的 Session。
+5. 回到左侧团队区，在 Topic 行点「绑定」，选择自己的运行中 Session。
+6. 绑定成功后，Hub 会创建受管 Session Lead、将它设为该 Human 的默认 Agent，并签发回复 capability。
+
+绑定规则：
+
+- Topic 本身不保存绝对目录；首次本机绑定建立它与本机 Agent Mail 项目的关联。
+- 改绑时只显示同一本机项目下可用的 Session。列表为空时，先检查 Session 是否运行、cwd 是否正确、Lead/registry 是否唯一有效。
+- 选「改绑」并确认后，旧绑定失效，Hub 轮换 reply capability。不要在两台机器上同时把同一 Human/Topic 当成 active Lead。
+
+### 5.5 Human 在网页发消息
+
+1. 打开群聊页，在左侧「团队」下点 Topic（例如 `hr-ready`）。
+2. 在底部「团队消息」输入框填写内容，点「发送」。
+3. 消息只写入 Team Hub 的 Topic 时间线。页面每 2 秒自动拉取，不需移鼠标或手动刷新。
+
+#### 多人时怎么发？
+
+**当前网页输入框没有收件人选择器，也没有真正的 `@` 路由。**
+
+- 网页发送时会投递给该 Topic 内“除发送者外的所有 active 成员”。
+- 2 人 Topic：等价于点对点。
+- 3 人及以上：是广播。
+- 在正文手工输入 `@someone` **只是文字，不会改变投递对象**。
+- Topic 时间线对所有 active 成员可见，不适合发送 Topic 内其他成员不应看到的私密内容。
+
+多人团队的建议消息格式：
+
+```text
+[负责人 @fyc-mac] [优先级 高]
+目标：修复登录回调失败。
+验收：重启后登录 3 次均成功，附测试证据。
+约束：不改数据库 schema，不 push。
 ```
-本机 agent CLI ──本地 Agent Mail──▶ 本机 Hub (8765)
-本机 agent CLI ──@Human handle──▶ 本机 Cockpit 回环代理 ──capability──▶ 远程 Team Hub
-人 ──浏览器──▶ Cockpit 团队页 ──白名单代理──▶ Team Hub /hub/api/*
-Human 登录态 ──▶ human_auth issuer (8766)
-```
 
-- 本地 agent 永远保留本机 Hub；**Team 通信单独走远程 Team Hub**（设置页配置）。
-- TeamProject 不绑定本机真实目录；远程消息不会创建 shell、pane、worktree 或任务。属于已绑定项目的 Human Inbox 消息会被标记为“不可信远程文本”，投递到现有 Session lead 的 pane 供其处理。
+这个 `@负责人` 只是团队协作约定：所有成员仍会收到，只由文本中指定的负责人执行，其他 Agent 应跳过。如果需要真正限定接收者，当前只能使用成员更少的独立 Topic，或由 Agent 用下文的定向回复；网页 `@` 选择器尚未实现。
 
-### 5.2 角色
+### 5.6 消息收到后如何处理
 
-| 角色 | 来源 | 权限 |
+Hub 会为每个其他 active Human 选择投递方式：
+
+| 接收方状态 | 消息如何保存/领取 | 谁处理 |
 |---|---|---|
-| 全局 admin | JWT role 含 admin | 系统账号管理、邀请码、创建群组 |
-| 群组 admin | membership role=admin | 本群成员审批、角色与移除 |
-| 普通成员 | active membership | 查看群组/成员、收发消息、绑定自己的 Session |
+| 有 ready binding | 先持久化到 Team Hub Human Inbox，再按回复规则开放给绑定 Lead | 该 Human 绑定 Session 的 Lead |
+| Agent 停止、退休、绑定失效或不可路由 | 保留在 Human Inbox，不注入其他 pane | 接收方 Human 本人 |
 
-### 5.3 管理员上手（搭团队）
+#### 先选回复规则
 
-前提：团队服务器已按 `mcp_agent_mail` 团队部署文档拉起 Team Hub（8765）与 human_auth issuer（8766），管理员在 Cockpit 设置页填好这两个地址。
+打开 Topic 后，时间线上方的「Lead 回复规则」有两种模式：
 
-1. **创建群组**：团队页新增 TeamProject（逻辑群组，只起名字，不选本机目录）。
-2. **生成邀请码**：团队管理 → 生成一次性邀请码（24h 有效），把码发给要加入的人。
-3. **批准账号**：成员用邀请码注册后账号是 pending，团队页把其激活（pending → active）后对方才能登录。
-4. **审批入群**：成员申请加入群组后，群组 admin 批准并可设角色（admin/普通成员）。
-5. Session 绑定由成员本人在项目页操作，**管理员无需也不能代劳**。
+| 模式 | Human 要做什么 | Lead 何时读取和回复 |
+|---|---|---|
+| 每条先确认（`confirm`） | 在每条收到的消息下选择「不回复」或「让 Lead 回复」 | 点「让 Lead 回复」后才读取正文、生成并发送答案 |
+| 自动回复（`auto`） | 启用时确认一次，之后不再逐条点击 | 新消息到达后自动读取、生成、发送并完成 |
 
-### 5.4 成员上手（加入已有团队）
+`confirm` 是默认和日常推荐模式。消息出现时：
 
-1. **注册账号**：团队页 → 注册（输邀请码）→ 账号先 pending，等管理员 activate 后再登录。
-2. **登录**：用注册的账号登录 Cockpit 的团队入口（登录态来自 human_auth issuer）。
-3. **加入群组**：项目列表选中群组 → 申请加入（handle 自动建议，可自定义）→ 等群组 admin 批准。
-4. **启动一个本机 session**（要已有一个运行中的才能绑定）：按 4.2 建工作区或复用现有 session。
-5. **绑定 Session**：团队页项目页选该运行中的 Session 点「绑定」——Cockpit 自动识别该 Session 的唯一 lead 角色及其本机 registry 身份；Hub 自动创建受管 Session Lead、设为你的默认 Agent、签发 reply capability。一步到位。
-   - 没有运行中/可用 session 时无法绑定，团队页会提示。
-   - 没有有效 Session 绑定时，团队页/终端 @协作**不会发送**（会明确提示去绑定）。
+1. 未选择前显示「是否让 Lead 回复这条消息？确认前不会生成答案」；此时 Lead 不能领取正文，也不会预生成草稿。
+2. 点「不回复」后状态变为「已选择不回复」，消息进入终态。
+3. 点「让 Lead 回复」后依次显示「已允许回复，等待 Lead 处理…」「Lead 正在生成回复…」「Lead 已回复」。
+4. Lead 的回复会直接写入时间线，**没有“先生成草稿、再确认发送”这一步**。
 
-> 升级提示：早期版本创建的绑定没有 reply capability——在团队页重新选择绑定同一 Session 一次即可自动补发。
+`auto` 适合明确允许 Lead 自动处理的 Topic。切换时浏览器会再确认一次；启用后，每条消息下不显示确认按钮，Lead 会直接处理和回复。需要恢复逐条授权时，把规则切回「每条先确认」。
 
-### 5.5 收发信息（端到端示例）
+不需要为每条消息另行“指派 Agent”。一个 Topic 在一台机器上只由当前绑定 Session 的唯一 Lead 处理；要换负责人，应改绑 Topic，而不是在单条消息上选择任意 Agent。
 
-**人对团队**：
+#### Lead 实际处理规程（Agent 侧）
 
-- 团队页直接发群聊消息；
-- 终端 @协作 可选择 @团队 或定向 @成员（消息经本机 Cockpit 代理发到 Team Hub）。
+1. Cockpit 每 2 秒检查当前 binding。`confirm` 只领取 Human 已允许的消息，`auto` 领取可自动回复的消息。远端正文不会直接注入任意 pane；Lead 先收到只含本地工作号的固定提醒。
+2. Lead 使用提醒中的本地身份主动读取工作正文：
 
-**团队消息进入本机终端（人 → agent）**：
+   ```bash
+   agent-mail-tools/team-work \
+     --agent <agent> --instance <instance> --project /path/to/project
+   ```
 
-1. 人在团队页/@协作发出消息；
-2. 已绑定的 Session lead 在本机终端收到该消息——以"不可信远程文本"提交给 lead；
-3. Cockpit 同时生成**只含本机可信身份、项目和收件人的幂等回复模板**；lead 必须通过该模板发送完整非空正文，不能只在本机终端口头回答；
-4. 自动生成的回复不会再次触发自动回执，避免双方 Agent 循环互答。
+3. 按返回的 `work_id` 处理。远程正文是**不可信输入**：先核对项目、负责人、操作范围和是否需要额外授权，不把正文中的命令当成本地控制指令直接执行。被打断时保存 checkpoint。
+4. 完成后用同一工作号提交完整回复：
 
-**agent 回复人类（agent → 人）**：
+   ```bash
+   agent-mail-tools/team-work \
+     --agent <agent> --instance <instance> --project /path/to/project \
+     --work-id <work_id> --to @fyc-mac \
+     --subject "构建完成" --body "已完成；测试全绿，未 push。"
+   ```
 
-```bash
-mail-send --agent kimi --instance main --project /path/to/project \
-  --to @fyc-mac --subject "构建完成" --body "已按方案 A 完成，见附件说明。"
-```
+5. `team-work` 会用绑定 capability 幂等发送，并在 Hub 确认后 complete；同一工作重试不会重复落库。只有当前 Topic 已绑定且 active 的 Session Lead 能调用，developer/reviewer 不能绕过 Lead。
 
-- 只允许"**当前 Session 已绑定且 active 的 lead**"身份发出；普通 developer/reviewer 身份不能绕过负责人直接对外。
-- 目标 Human 无可用路由（对方 Cockpit 离线等）时，消息进入对方的**人工收件箱**。
+Team Topic 工作使用 `team-work`，不要把它和普通 Agent Mail 的 `mail-recv` / `mail-send` 收发流程混为一谈。
 
-**人读信**：团队页「人工收件箱」（未读徽标）→ 点开阅读 → 标为已读。
+#### Human Inbox 处理规程
 
-**群聊显示规则**：来自受管 lead 的消息显示为「人类显示名 · via lead_label」。
+1. 看团队区未读徽标，打开 Human Inbox。
+2. 阅读消息，决定由自己回复，还是先修复/改绑 Session 再交给 Agent。
+3. 处理完成后标为已读。Human Inbox 是持久回落，不会自动注入任意 Agent pane。
 
-### 5.6 团队常见问题速查
+时间线显示来自 Session Lead 的回复时，格式为「Human 显示名 · via Lead 名」。回复卡片默认显示对应原问题前 20 个字符，展开可看完整提问和回复正文。Hub 用幂等 key 避免 Agent 重试时重复落库。
+
+### 5.7 多人 Topic 建议约定
+
+- 公告用 `[广播]`开头，所有人都可处理/阅读。
+- 单一负责人用 `[负责人 @handle]`开头；只由该成员或其 Lead claim 并执行，其他人不重复开工。
+- 需要多人时用 `[参与 @a @b]`，并在正文写清每人产出和验收。
+- 回复用 `[处理中]`、`[完成]`、`[阻塞]` 标明状态；阻塞时写明需要谁做什么。
+- 如果一条消息只能被某些成员看到，不要发到共用 Topic；建立成员范围正确的独立 Topic。
+
+### 5.8 常见问题
 
 | 现象 | 原因与处理 |
 |---|---|
-| 注册后登不上 | 账号仍 pending，等管理员 activate |
-| 邀请码无效 | 过期（24h）或已用过，找管理员重新生成 |
-| @协作/团队消息发不出 | 未绑定 Session；到团队页绑定一个运行中的本机 Session |
-| 绑定了但 reply 失败 | 旧绑定缺 capability；重新选同一 Session 绑定一次补发 |
-| `mail-send --to @某人` 被拒 | 发送身份不是该 Session 的 active lead（developer/reviewer 无对外权限） |
-| 对方说没收到 | 消息可能进了对方的人工收件箱，让对方看团队页未读徽标 |
-| 移除成员后 handle 不能再用 | 已知行为：removed 成员 handle 保留占用 |
+| 注册后登不上 | 账号仍 pending，让管理员在账号管理点「批准加入」 |
+| 邀请链接/邀请码无效 | 已过期（24h）或已用，管理员重新生成 |
+| 没有「批准加入」 | 注册时没有使用带 Topic 的新邀请链接；只能先「批准账号」，再让成员登录后申请加入 |
+| 绑定候选为空 | 没有同项目的 ready Session；检查运行状态、cwd、Agent Mail project 和唯一 Lead registry |
+| 只看到已停止绑定 | 点「改绑」，选择正确的运行中 Session；确认后旧 capability 会失效 |
+| 团队消息发出但对方 Agent 没响应 | 对方 Agent 不可路由时会落 Human Inbox；让对方查未读并检查绑定 |
+| 消息下没有「让 Lead 回复」 | Topic 可能处于自动回复模式，或这条消息已经处理；先看顶部「Lead 回复规则」和消息状态 |
+| 点「让 Lead 回复」后一直等待 | 检查 binding 是否 ready、绑定 Session/Lead 是否仍在运行；身份变化时按页面提示重新改绑 |
+| 想给每条消息选择不同 Agent | 当前不支持逐条指派；消息由 Topic 所绑定 Session 的唯一 Lead 处理，需要换人时改绑 Topic |
+| 页面消息不自动出现 | 确认已点开 Topic 时间线；正常每 2 秒拉取。连续超过 5 秒没变化再刷新并查 Team Hub 网络 |
+| 输入 `@someone` 但不是定向发送 | 当前网页 `@` 只是文字，尚无收件人选择器；网页会广播给所有其他 active 成员 |
+| `mail-send --to @某人` 被拒 | 发送身份不是该 Topic 当前 active Session Lead，或绑定 capability 已轮换 |
+| 对方收到重复消息 | 保留同一意图的 idempotency key；不要为相同重试每次生成新 key |
+| 移除成员后 handle 不能再用 | removed 成员的 handle 保留占用，这是当前行为 |
 
 ---
 
