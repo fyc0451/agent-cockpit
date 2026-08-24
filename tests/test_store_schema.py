@@ -730,6 +730,7 @@ def test_team_sessions_real_binding_shape(isolated_roots):
             "updated_ts": 1.0,
             "reply_token": "tok",
             "reply_mode": "confirm",
+            "auth_expires_at": 2.0,
         }],
     }), encoding="utf-8")
     r = store_schema._check_versioned_json("team_sessions")

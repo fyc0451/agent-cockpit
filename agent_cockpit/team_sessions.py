@@ -109,6 +109,7 @@ def bind(
     agent_id: int,
     reply_token: str | None = None,
     reply_mode: str | None = None,
+    auth_expires_at: float | None = None,
     replace: bool = False,
 ) -> dict[str, Any]:
     """同一用户/Hub 下保持 Session↔TeamProject 一对一；改绑需显式确认。"""
@@ -126,6 +127,12 @@ def bind(
         raise ValueError("Team Session 回复凭据无效")
     if reply_mode is not None and reply_mode not in {"confirm", "auto"}:
         raise ValueError("Team Session 回复模式无效")
+    if auth_expires_at is not None and (
+        isinstance(auth_expires_at, bool)
+        or not isinstance(auth_expires_at, (int, float))
+        or auth_expires_at <= 0
+    ):
+        raise ValueError("Team Human 登录租约无效")
     entry = {
         "hub": hub,
         "human_id": int(human_id),
@@ -185,6 +192,15 @@ def bind(
             if saved_mode in {"confirm", "auto"}:
                 effective_reply_mode = saved_mode
         entry["reply_mode"] = effective_reply_mode or "confirm"
+        effective_auth_expiry = auth_expires_at
+        if effective_auth_expiry is None and existing is not None:
+            saved_expiry = existing.get("auth_expires_at")
+            if isinstance(saved_expiry, (int, float)) and not isinstance(
+                saved_expiry, bool
+            ):
+                effective_auth_expiry = float(saved_expiry)
+        if effective_auth_expiry is not None:
+            entry["auth_expires_at"] = float(effective_auth_expiry)
         data["bindings"] = [
             row for row in data["bindings"]
             if not (
@@ -199,6 +215,73 @@ def bind(
         data["bindings"].append(entry)
         _write(data)
     return dict(entry)
+
+
+def authorize_human(
+    *, hub: str, human_id: int, auth_expires_at: float,
+) -> int:
+    """刷新已由 Hub 验证的 Human 对本机 binding 的使用租约。"""
+    if (
+        isinstance(auth_expires_at, bool)
+        or not isinstance(auth_expires_at, (int, float))
+        or auth_expires_at <= 0
+    ):
+        raise ValueError("Team Human 登录租约无效")
+    updated = 0
+    with _lock:
+        data = _load()
+        for row in data["bindings"]:
+            if row.get("hub") != hub or row.get("human_id") != human_id:
+                continue
+            if row.get("auth_expires_at") != float(auth_expires_at):
+                row["auth_expires_at"] = float(auth_expires_at)
+                updated += 1
+        if updated:
+            _write(data)
+    return updated
+
+
+def binding_auth_active(row: dict[str, Any], now: float | None = None) -> bool:
+    """旧 binding 无登录租约时 fail closed；过期后 worker 立即停领。"""
+    expires_at = row.get("auth_expires_at")
+    return bool(
+        isinstance(expires_at, (int, float))
+        and not isinstance(expires_at, bool)
+        and float(expires_at) > (time.time() if now is None else now)
+    )
+
+
+def suspend_human(
+    *, hub: str, human_id: int, revoke_capability: bool,
+) -> list[dict[str, Any]]:
+    """暂停 Human 的全部本机 binding；可同时销毁本地 reply capability。"""
+    suspended: list[dict[str, Any]] = []
+    with _lock:
+        data = _load()
+        for row in data["bindings"]:
+            if row.get("hub") != hub or row.get("human_id") != human_id:
+                continue
+            suspended.append(dict(row))
+            row["auth_expires_at"] = 0.0
+            if revoke_capability:
+                row.pop("reply_token", None)
+        if suspended:
+            _write(data)
+    return suspended
+
+
+def suspend_all(*, revoke_capability: bool) -> list[dict[str, Any]]:
+    """无有效 Human Cookie 的显式注销仍须 fail closed 暂停本机自动化。"""
+    with _lock:
+        data = _load()
+        suspended = [dict(row) for row in data["bindings"]]
+        for row in data["bindings"]:
+            row["auth_expires_at"] = 0.0
+            if revoke_capability:
+                row.pop("reply_token", None)
+        if suspended:
+            _write(data)
+    return suspended
 
 
 def update_reply_token(
@@ -266,6 +349,7 @@ def reply_bindings_for_lead(
         and row["lead"].get("mail_name") == lead_mail_name
         and isinstance(row.get("reply_token"), str)
         and bool(row.get("reply_token"))
+        and binding_auth_active(row)
     ]
 
 

@@ -75,6 +75,9 @@ export function TeamZone({
           >
             登录团队账号
           </button>
+          <div className="gc-team-reply-note">
+            Human 账号：未登录 · Agent 自动回复：已暂停
+          </div>
         </div>
       )
     }

@@ -919,3 +919,64 @@ def test_unbind_only_removes_route_and_deactivates_managed_lead(monkeypatch):
         "Bearer human.jwt", {"client_session_id": "client-run-1"},
     )
     assert team_sessions.list_bindings(HUB, 7) == []
+
+
+def test_logout_suspends_worker_revokes_remote_capability_and_keeps_binding(
+    monkeypatch,
+):
+    client, headers = _prepare(monkeypatch)
+    calls = []
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
+    bound = client.put(
+        "/api/team-auth/session-bindings/demo",
+        headers=headers,
+        json={"session": "demo"},
+    )
+    assert bound.status_code == 200
+    saved = team_sessions.list_bindings(HUB, 7)[0]
+    server.team_lead_worker.poll_binding(
+        saved,
+        {
+            "session": "demo",
+            "generation": "run-1",
+            "lead": {"mail_name": "codex-main", "pane_id": "w1:p2"},
+        },
+        claim=lambda *_args: {
+            "status": "claimed",
+            "claim_token": "claim-secret",
+            "claim_expires_at": "2026-08-25 10:00:00",
+            "reply_mode": "confirm",
+            "message": {
+                "inbox_item_id": 31,
+                "message_id": 41,
+                "subject": "question",
+                "body_md": "body",
+                "importance": "normal",
+                "sender_name": "Alice",
+                "sender_handle": "alice",
+                "created_ts": "2026-08-24 10:00:00",
+            },
+        },
+        notify=lambda *_args: True,
+    )
+
+    response = client.post("/api/team-auth/logout", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "automation_suspended": 1,
+        "revocation_failures": 0,
+    }
+    assert calls[-1] == (
+        "DELETE",
+        "/hub/api/projects/demo/session-lead",
+        "Bearer human.jwt",
+        {"client_session_id": saved["client_session_id"]},
+    )
+    current = team_sessions.list_bindings(HUB, 7)[0]
+    assert current["auth_expires_at"] == 0
+    assert "reply_token" not in current
+    assert current["session"] == "demo"
+    assert server.team_lead_worker.next_for_binding(saved) is None
+    assert server._active_team_lead_bindings() == []

@@ -17,6 +17,7 @@ const binding = {
   active: true,
   ready: true,
   replyMode: 'confirm' as const,
+  automationActive: true,
 }
 
 afterEach(() => {
@@ -31,6 +32,19 @@ describe('TeamReplyPanel', () => {
     expect(screen.getByText('每条消息先问我')).toBeInTheDocument()
     expect(screen.getByText(/确认前不会生成答案/)).toBeInTheDocument()
     expect(screen.queryByText(/草稿/)).not.toBeInTheDocument()
+    expect(screen.getByText('Agent 自动回复：运行中')).toBeInTheDocument()
+  })
+
+  it('Human 未登录时明确显示 Agent 自动回复暂停', () => {
+    render(
+      <TeamReplyPanel
+        topic="ready"
+        binding={{ ...binding, ready: false, automationActive: false, reason: '团队账号未登录或已过期' }}
+      />,
+      { wrapper },
+    )
+
+    expect(screen.getByText('Agent 自动回复：已暂停')).toBeInTheDocument()
   })
 
   it('启用自动回复前明确确认并调用本机模式切换端点', async () => {

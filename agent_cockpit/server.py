@@ -6,6 +6,7 @@ Mac/手机浏览器通过内网访问(默认 :8790)。
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import ipaddress
@@ -4337,7 +4338,31 @@ def _team_human_context(request: Request) -> tuple[str, dict[str, Any]]:
         or not isinstance(human.get("id"), int)
     ):
         raise HTTPException(502, "Team Hub 返回了无效 Human 身份")
+    team_sessions.authorize_human(
+        hub=hub_client.public_team_config()["team_hub"],
+        human_id=int(human["id"]),
+        auth_expires_at=_team_auth_expires_at(request),
+    )
     return authorization, human
+
+
+def _team_auth_expires_at(request: Request) -> float:
+    """读取已由 Hub 验证的 JWT 到期时间；测试/旧 issuer 安全回落 12 小时。"""
+    token = request.cookies.get(TEAM_AUTH_COOKIE, "")
+    try:
+        encoded = token.split(".", 2)[1]
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        expires_at = payload.get("exp") if isinstance(payload, dict) else None
+        if (
+            isinstance(expires_at, (int, float))
+            and not isinstance(expires_at, bool)
+            and float(expires_at) > time.time()
+        ):
+            return min(float(expires_at), time.time() + 7 * 24 * 60 * 60)
+    except (IndexError, UnicodeError, ValueError, TypeError):
+        pass
+    return time.time() + 12 * 60 * 60
 
 
 def _team_project_slug(value: str) -> str:
@@ -4393,11 +4418,14 @@ def _public_team_session_binding(
     has_reply_capability = bool(
         isinstance(row.get("reply_token"), str) and row.get("reply_token")
     )
+    auth_active = team_sessions.binding_auth_active(row)
     reason = None
     if candidate is not None and lead_identity_visible and not lead_identity_matches:
         reason = "Session 负责人身份已变化，需要重新绑定"
     elif candidate is not None and not candidate.get("ready"):
         reason = candidate.get("reason")
+    elif candidate is not None and not auth_active:
+        reason = "团队账号未登录或已过期，Agent 自动回复已暂停"
     elif candidate is not None and not has_reply_capability:
         reason = "负责人通信凭据需要重新同步"
     elif candidate is None and same_name is not None:
@@ -4416,6 +4444,7 @@ def _public_team_session_binding(
         "ready": bool(
             active and candidate and candidate.get("ready")
             and lead_identity_matches and has_reply_capability
+            and auth_active
         ),
         "reason": reason,
         "reply_mode": (
@@ -4423,6 +4452,7 @@ def _public_team_session_binding(
             if row.get("reply_mode") in {"confirm", "auto"}
             else "confirm"
         ),
+        "automation_active": bool(auth_active and has_reply_capability),
         "project_ref": _team_project_ref(row.get("mail_project")),
         "updated_ts": row.get("updated_ts"),
     }
@@ -4608,6 +4638,7 @@ def api_team_session_bind(
                     remote,
                     str((current or {}).get("reply_mode") or "confirm"),
                 ),
+                auth_expires_at=_team_auth_expires_at(request),
                 replace=req.replace,
             )
         except (ValueError, OSError) as exc:
@@ -4817,6 +4848,7 @@ def _active_team_lead_bindings() -> list[tuple[dict[str, Any], dict[str, Any]]]:
             and binding.get("session") == candidate.get("session")
             and binding.get("session_generation") == candidate.get("generation")
             and _team_binding_lead_matches_candidate(binding, candidate)
+            and team_sessions.binding_auth_active(binding)
         ]
         if len(matches) == 1:
             result.append((matches[0], candidate))
@@ -5131,8 +5163,43 @@ def api_team_auth_status(request: Request):
 
 
 @app.post("/api/team-auth/logout")
-def api_team_auth_logout():
-    response = JSONResponse({"ok": True})
+def api_team_auth_logout(request: Request):
+    """退出 Human 登录并 fail closed 暂停、撤销本机自动回复 capability。"""
+    hub = hub_client.public_team_config()["team_hub"]
+    authorization: str | None = None
+    human_id: int | None = None
+    try:
+        authorization, human = _team_human_context(request)
+        human_id = int(human["id"])
+    except (HTTPException, ValueError):
+        pass
+    with _TEAM_SESSION_BIND_LOCK:
+        if human_id is None:
+            suspended = team_sessions.suspend_all(revoke_capability=True)
+        else:
+            suspended = team_sessions.suspend_human(
+                hub=hub,
+                human_id=human_id,
+                revoke_capability=True,
+            )
+        team_lead_worker.discard_bindings(suspended)
+        revocation_failures = 0
+        if authorization is not None:
+            for binding in suspended:
+                try:
+                    _team_remote_session_unbind(
+                        authorization,
+                        str(binding.get("project_slug") or ""),
+                        str(binding.get("client_session_id") or ""),
+                    )
+                except Exception:
+                    revocation_failures += 1
+                    logger.exception("Team 注销时远端 reply capability 撤销失败")
+    response = JSONResponse({
+        "ok": True,
+        "automation_suspended": len(suspended),
+        "revocation_failures": revocation_failures,
+    })
     response.delete_cookie(TEAM_AUTH_COOKIE, path="/api")
     return response
 

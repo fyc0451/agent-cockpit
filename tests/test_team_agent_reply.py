@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -44,6 +46,7 @@ def _prepare(
         agent_id=41,
         reply_token="reply-secret",
         reply_mode=reply_mode,
+        auth_expires_at=time.time() + 3600,
     )
     return TestClient(server.app, client=(client_host, 50000))
 

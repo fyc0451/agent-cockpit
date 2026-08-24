@@ -45,6 +45,7 @@ describe('WorkspaceBrowser 团队区域', () => {
     expect(screen.getByText('团队')).toBeInTheDocument()
     expect(screen.getByText('登录团队账号')).toBeInTheDocument()
     expect(screen.getByText('邀请码注册')).toBeInTheDocument()
+    expect(screen.getByText('Human 账号：未登录 · Agent 自动回复：已暂停')).toBeInTheDocument()
   })
 
   it('邀请码注册覆盖缺失邀请码与 pending 提示', async () => {

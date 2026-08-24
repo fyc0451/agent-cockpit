@@ -114,6 +114,25 @@ def test_reply_mode_switch_updates_only_exact_pending_binding():
     ) == 0
 
 
+def test_logout_discards_only_matching_local_work():
+    first = team_lead_worker.poll_binding(
+        _binding(), _candidate(), claim=lambda *_args: _claim(),
+        notify=lambda *_args: True,
+    )
+    other_binding = _binding(project_slug="other", client_session_id="client-2")
+    other_candidate = _candidate()
+    other = team_lead_worker.poll_binding(
+        other_binding,
+        other_candidate,
+        claim=lambda *_args: _claim(),
+        notify=lambda *_args: True,
+    )
+
+    assert team_lead_worker.discard_bindings([_binding()]) == 1
+    assert team_lead_worker.next_for_binding(_binding()) is None
+    assert team_lead_worker.next_for_binding(other_binding)["work_id"] == other["work_id"]
+
+
 def test_confirm_replies_only_after_hub_authorized_claim_then_completes():
     result = team_lead_worker.poll_binding(
         _binding(), _candidate(), claim=lambda *_args: _claim("confirm"),

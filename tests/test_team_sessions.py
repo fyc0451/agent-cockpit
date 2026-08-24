@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 import pytest
 
@@ -23,6 +24,7 @@ def _bind(**overrides):
         },
         "client_session_id": "client-run-a",
         "agent_id": 11,
+        "auth_expires_at": time.time() + 3600,
     }
     values.update(overrides)
     return team_sessions.bind(**values)
@@ -91,6 +93,33 @@ def test_update_and_resolve_reply_token_by_exact_local_lead(tmp_path, monkeypatc
     assert len(matches) == 1
     assert matches[0]["reply_token"] == "new-secret"
     assert team_sessions.reply_bindings_for_lead("/work/a", "other-main") == []
+
+
+def test_human_auth_lease_fails_closed_and_logout_revokes_capability(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    saved = _bind(auth_expires_at=None, reply_token="reply-secret")
+
+    assert team_sessions.binding_auth_active(saved) is False
+    assert team_sessions.reply_bindings_for_lead("/work/a", "codex-main") == []
+
+    team_sessions.authorize_human(
+        hub="http://team.example",
+        human_id=7,
+        auth_expires_at=time.time() + 3600,
+    )
+    assert len(team_sessions.reply_bindings_for_lead("/work/a", "codex-main")) == 1
+
+    suspended = team_sessions.suspend_human(
+        hub="http://team.example", human_id=7, revoke_capability=True,
+    )
+    current = team_sessions.list_bindings("http://team.example", 7)[0]
+    assert suspended[0]["reply_token"] == "reply-secret"
+    assert current["auth_expires_at"] == 0
+    assert "reply_token" not in current
+    assert current["session"] == "workspace-a"
+    assert team_sessions.reply_bindings_for_lead("/work/a", "codex-main") == []
 
 
 def test_same_session_generation_cannot_change_project_without_replace(

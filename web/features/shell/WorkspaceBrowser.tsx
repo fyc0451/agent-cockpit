@@ -690,6 +690,9 @@ function TeamZoneSection({
               {registrationNotice}
             </div>
           )}
+          <div style={{ margin: '0 8px 8px', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' }}>
+            Human 账号：未登录 · Agent 自动回复：已暂停
+          </div>
           <div style={{ display: 'flex', gap: '6px', padding: '0 8px' }}>
             <button
               type="button"

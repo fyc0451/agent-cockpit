@@ -210,6 +210,8 @@ export async function teamSessionBindings(): Promise<{
           reason: typeof item.reason === 'string' ? item.reason : null,
           projectRef: typeof item.project_ref === 'string' ? item.project_ref : null,
           replyMode: item.reply_mode === 'auto' ? 'auto' : 'confirm',
+          automationActive:
+            typeof item.automation_active === 'boolean' ? item.automation_active : undefined,
         })
       }
     }

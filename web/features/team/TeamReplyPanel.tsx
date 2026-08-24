@@ -40,6 +40,9 @@ export function TeamReplyPanel({
           <span className="gc-team-reply-status">
             {mode === 'auto' ? '收到后自动回复' : '每条消息先问我'}
           </span>
+          <span className="gc-team-reply-status">
+            Agent 自动回复：{binding.automationActive === false ? '已暂停' : '运行中'}
+          </span>
         </div>
         <div className="gc-team-reply-modes" role="group" aria-label="回复模式">
           <button

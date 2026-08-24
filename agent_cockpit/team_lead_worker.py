@@ -183,6 +183,21 @@ def reset_notifications() -> None:
             _write(data)
 
 
+def discard_bindings(bindings: list[dict[str, Any]]) -> int:
+    """注销时清除对应本机受限正文和 claim，不删除 Team 历史消息。"""
+    with _lock:
+        data = _load()
+        kept = [
+            item for item in data["work_items"]
+            if not any(_binding_matches(item, binding) for binding in bindings)
+        ]
+        removed = len(data["work_items"]) - len(kept)
+        if removed:
+            data["work_items"] = kept
+            _write(data)
+    return removed
+
+
 def poll_binding(
     binding: dict[str, Any],
     candidate: dict[str, Any],

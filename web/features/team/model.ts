@@ -19,6 +19,7 @@ export interface TeamBinding {
   reason?: string | null
   projectRef?: string | null
   replyMode?: 'confirm' | 'auto'
+  automationActive?: boolean
 }
 
 export interface TeamReplyRequest {
