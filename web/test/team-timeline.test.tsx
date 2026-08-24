@@ -70,9 +70,9 @@ describe('TeamTimeline', () => {
     )
 
     expect(await screen.findByText(/还没有团队消息/)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('团队消息'), '@bo')
+    await user.click(screen.getByRole('option', { name: /@bob/ }))
     await user.type(screen.getByLabelText('团队消息'), 'hello team')
-    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: '@bob' }))
     await user.click(screen.getByRole('button', { name: '发送' }))
 
     expect(await screen.findByText('hello team')).toBeInTheDocument()
@@ -116,15 +116,14 @@ describe('TeamTimeline', () => {
       { wrapper: createWrapper() },
     )
 
+    await user.type(screen.getByLabelText('团队消息'), '@al')
+    await user.click(screen.getByRole('option', { name: /@all/ }))
     await user.type(screen.getByLabelText('团队消息'), '管理员广播')
-    await user.click(screen.getByRole('button', { name: '@all 全体成员' }))
     await user.click(screen.getByRole('button', { name: '发送' }))
 
     expect(payloads).toHaveLength(1)
     expect(payloads[0]).not.toHaveProperty('mention_handles')
-    expect(screen.getByRole('button', { name: '@all 全体成员' })).toHaveAttribute(
-      'aria-pressed', 'false',
-    )
+    expect(screen.queryByRole('button', { name: '移除 @all' })).not.toBeInTheDocument()
   })
 
   it('普通成员看不到 @all，可一次选择多个具体成员', async () => {
@@ -156,13 +155,46 @@ describe('TeamTimeline', () => {
       { wrapper: createWrapper() },
     )
 
-    expect(screen.queryByRole('button', { name: '@all 全体成员' })).not.toBeInTheDocument()
-    await user.type(screen.getByLabelText('团队消息'), '定向消息')
-    await user.click(screen.getByRole('button', { name: '@bob' }))
-    await user.click(screen.getByRole('button', { name: '@carol' }))
+    const input = screen.getByLabelText('团队消息')
+    await user.type(input, '@')
+    expect(screen.queryByRole('option', { name: /@all/ })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('option', { name: /@bob/ }))
+    await user.type(input, '@ca')
+    await user.click(screen.getByRole('option', { name: /@carol/ }))
+    expect(screen.getByRole('button', { name: '移除 @bob' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '移除 @carol' })).toBeInTheDocument()
+    await user.type(input, '定向消息')
     await user.click(screen.getByRole('button', { name: '发送' }))
 
     expect(payloads[0]).toMatchObject({ mention_handles: ['bob', 'carol'] })
+  })
+
+  it('20 人团队默认不平铺成员，输入 @ 后按名称搜索', async () => {
+    const members = [
+      { human_id: 1, display_name: 'Alice', mention_handle: 'alice', role: 'member', status: 'active' },
+      ...Array.from({ length: 19 }, (_, index) => ({
+        human_id: index + 2,
+        display_name: `Member ${index + 1}`,
+        mention_handle: `member-${index + 1}`,
+        role: 'member',
+        status: 'active',
+      })),
+    ]
+    render(
+      <TeamTimeline
+        topic="proj-a"
+        topicName="项目 A"
+        membership={{ role: 'member', status: 'active', mention_handle: 'alice' }}
+        members={members}
+      />,
+      { wrapper: createWrapper() },
+    )
+
+    expect(screen.queryByRole('option')).not.toBeInTheDocument()
+    expect(screen.queryByText('@member-1', { selector: 'button' })).not.toBeInTheDocument()
+    await userEvent.setup().type(screen.getByLabelText('团队消息'), '@member-19')
+    expect(screen.getByRole('option', { name: /@member-19/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /@member-1$/ })).not.toBeInTheDocument()
   })
 
   it('每两秒自动拉取新团队回复', async () => {

@@ -2897,6 +2897,7 @@
 }
 
 .gc-team-composer {
+  position: relative;
   display: flex;
   gap: 8px;
   flex: none;
@@ -2918,18 +2919,17 @@
 
 .gc-team-recipients button {
   padding: 4px 8px;
-  border: 1px solid var(--gc-line);
+  border: 1px solid var(--gc-accent);
   border-radius: 999px;
-  background: var(--gc-bg);
-  color: var(--gc-text2);
+  background: var(--gc-accent-soft);
+  color: var(--gc-accent-text);
   cursor: pointer;
   font-size: 12px;
 }
 
-.gc-team-recipients button[aria-pressed='true'] {
-  border-color: var(--gc-accent);
-  background: var(--gc-accent-soft);
-  color: var(--gc-accent-text);
+.gc-team-mention {
+  right: auto;
+  min-width: min(320px, 100%);
 }
 
 .gc-team-recipients button:disabled {
@@ -2953,7 +2953,7 @@
   border-color: var(--gc-accent);
 }
 
-.gc-team-composer button {
+.gc-team-composer > button {
   padding: 8px 14px;
   border: 0;
   border-radius: 8px;
@@ -2963,7 +2963,7 @@
   font-size: 13px;
 }
 
-.gc-team-composer button:disabled {
+.gc-team-composer > button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

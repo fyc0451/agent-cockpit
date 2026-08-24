@@ -10,6 +10,7 @@ import {
 } from '../../api/teamAuth'
 import { listTeamMessages, sendTeamMessage } from '../../api/teamLedger'
 import type { TeamMessage } from '../../api/teamLedger'
+import { mentionQueryAt } from '../group-chat/model'
 import type { TeamBinding, TeamMember, TeamTopic } from './model'
 import { TeamReplyPanel } from './TeamReplyPanel'
 
@@ -99,12 +100,14 @@ export function TeamTimeline({
   binding,
   membership,
   members = [],
+  mentionRequest,
 }: {
   topic: string
   topicName: string
   binding?: TeamBinding | null
   membership?: TeamTopic['membership']
   members?: TeamMember[]
+  mentionRequest?: { topic: string; handle: string; nonce: number } | null
 }) {
   const queryClient = useQueryClient()
   const messagesQ = useQuery({
@@ -142,10 +145,14 @@ export function TeamTimeline({
   const [draft, setDraft] = useState('')
   const [selectedHandles, setSelectedHandles] = useState<string[]>([])
   const [broadcast, setBroadcast] = useState(false)
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null)
+  const [activeMentionIndex, setActiveMentionIndex] = useState(0)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const listContentRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const pendingCaretRef = useRef<number | null>(null)
   const nearBottomRef = useRef(true)
   const [hasNew, setHasNew] = useState(false)
   const currentHandle = membership?.mention_handle.toLowerCase() ?? ''
@@ -160,10 +167,25 @@ export function TeamTimeline({
     .sort()
     .join('|')
   const hasRecipients = broadcast || selectedHandles.length > 0
+  const selectedHandleSet = new Set(selectedHandles.map((handle) => handle.toLowerCase()))
+  const mentionQuery = mention?.query.trim().toLowerCase() ?? ''
+  const mentionCandidates = mention
+    ? availableMembers.filter((member) => {
+      if (selectedHandleSet.has(member.mention_handle.toLowerCase())) return false
+      const searchable = `${member.display_name} ${member.mention_handle}`.toLowerCase()
+      return searchable.includes(mentionQuery)
+    })
+    : []
+  const showBroadcastMention = !!mention
+    && canBroadcast
+    && !broadcast
+    && ['all', '所有人', 'everyone'].some((token) => token.startsWith(mentionQuery))
+  const mentionOptionCount = mentionCandidates.length + Number(showBroadcastMention)
 
   useEffect(() => {
     setSelectedHandles([])
     setBroadcast(false)
+    setMention(null)
   }, [topic])
 
   useEffect(() => {
@@ -174,13 +196,54 @@ export function TeamTimeline({
     if (!canBroadcast) setBroadcast(false)
   }, [availableHandleKey, canBroadcast])
 
-  const toggleRecipient = (handle: string) => {
+  useLayoutEffect(() => {
+    const caret = pendingCaretRef.current
+    if (caret === null) return
+    pendingCaretRef.current = null
+    inputRef.current?.focus()
+    inputRef.current?.setSelectionRange(caret, caret)
+  }, [draft])
+
+  useEffect(() => {
+    if (!mentionRequest || mentionRequest.topic !== topic) return
+    const member = availableMembers.find(
+      (candidate) => candidate.mention_handle.toLowerCase() === mentionRequest.handle.toLowerCase(),
+    )
+    if (!member) return
     setBroadcast(false)
     setSelectedHandles((current) => (
-      current.some((item) => item.toLowerCase() === handle.toLowerCase())
-        ? current.filter((item) => item.toLowerCase() !== handle.toLowerCase())
-        : [...current, handle]
+      current.some((item) => item.toLowerCase() === member.mention_handle.toLowerCase())
+        ? current
+        : [...current, member.mention_handle]
     ))
+    inputRef.current?.focus()
+  }, [mentionRequest, topic, availableHandleKey])
+
+  const removeRecipient = (handle: string) => {
+    setSelectedHandles((current) => current.filter(
+      (item) => item.toLowerCase() !== handle.toLowerCase(),
+    ))
+  }
+
+  const chooseMention = (handle: string | null) => {
+    if (!mention) return
+    const input = inputRef.current
+    const caret = input?.selectionStart ?? draft.length
+    const next = `${draft.slice(0, mention.start)}${draft.slice(caret)}`
+    pendingCaretRef.current = mention.start
+    setDraft(next)
+    if (handle === null) {
+      setBroadcast(true)
+      setSelectedHandles([])
+    } else {
+      setBroadcast(false)
+      setSelectedHandles((current) => (
+        current.some((item) => item.toLowerCase() === handle.toLowerCase())
+          ? current
+          : [...current, handle]
+      ))
+    }
+    setMention(null)
   }
 
   const onSend = async () => {
@@ -193,6 +256,7 @@ export function TeamTimeline({
       setDraft('')
       setSelectedHandles([])
       setBroadcast(false)
+      setMention(null)
       await queryClient.invalidateQueries({ queryKey: ['team-chat', topic] })
     } catch (err) {
       setSendError(err instanceof ApiError ? err.message : String(err))
@@ -372,41 +436,32 @@ export function TeamTimeline({
       )}
       <div className="gc-team-recipients" role="group" aria-label="团队消息收件人">
         <span className="gc-team-recipients-label">发送给</span>
-        {canBroadcast && (
+        {broadcast && (
           <button
             type="button"
-            aria-pressed={broadcast}
-            disabled={sending || availableMembers.length === 0}
-            onClick={() => {
-              setBroadcast((current) => !current)
-              setSelectedHandles([])
-            }}
+            aria-label="移除 @all"
+            disabled={sending}
+            onClick={() => setBroadcast(false)}
           >
-            @all 全体成员
+            @all ×
           </button>
         )}
-        {availableMembers.map((member) => {
-          const selected = selectedHandles.some(
-            (handle) => handle.toLowerCase() === member.mention_handle.toLowerCase(),
-          )
-          return (
-            <button
-              key={member.human_id}
-              type="button"
-              aria-pressed={selected}
-              disabled={sending}
-              title={member.display_name || `@${member.mention_handle}`}
-              onClick={() => toggleRecipient(member.mention_handle)}
-            >
-              @{member.mention_handle}
-            </button>
-          )
-        })}
+        {!broadcast && selectedHandles.map((handle) => (
+          <button
+            key={handle.toLowerCase()}
+            type="button"
+            aria-label={`移除 @${handle}`}
+            disabled={sending}
+            onClick={() => removeRecipient(handle)}
+          >
+            @{handle} ×
+          </button>
+        ))}
         {availableMembers.length === 0 && (
           <span className="gc-team-recipients-empty">没有其他活跃成员</span>
         )}
         {!hasRecipients && availableMembers.length > 0 && (
-          <span className="gc-team-recipients-empty">请选择至少一位收件人</span>
+          <span className="gc-team-recipients-empty">输入 @ 搜索，或从右侧成员列表选择</span>
         )}
       </div>
       <form
@@ -416,12 +471,79 @@ export function TeamTimeline({
           void onSend()
         }}
       >
+        {mention && mentionOptionCount > 0 && (
+          <div className="gc-mention gc-team-mention" role="listbox" aria-label="选择团队消息收件人">
+            {showBroadcastMention && (
+              <button
+                type="button"
+                role="option"
+                aria-selected={activeMentionIndex === 0}
+                aria-label="@all"
+                className={`gc-mention-item${activeMentionIndex === 0 ? ' is-active' : ''}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => chooseMention(null)}
+              >
+                <span>@all</span>
+                <span className="gc-mention-kind">全体成员</span>
+              </button>
+            )}
+            {mentionCandidates.map((member, index) => {
+              const optionIndex = index + Number(showBroadcastMention)
+              return (
+                <button
+                  key={member.human_id}
+                  type="button"
+                  role="option"
+                  aria-selected={activeMentionIndex === optionIndex}
+                  aria-label={`@${member.mention_handle}`}
+                  className={`gc-mention-item${activeMentionIndex === optionIndex ? ' is-active' : ''}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => chooseMention(member.mention_handle)}
+                >
+                  <span>@{member.mention_handle}</span>
+                  <span className="gc-mention-kind">{member.display_name}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
         <input
+          ref={inputRef}
           aria-label="团队消息"
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => {
+            const value = event.target.value
+            setDraft(value)
+            const caret = event.currentTarget.selectionStart ?? value.length
+            setMention(mentionQueryAt(value, caret))
+            setActiveMentionIndex(0)
+          }}
+          onKeyDown={(event) => {
+            if (!mention || mentionOptionCount === 0) return
+            if (event.key === 'ArrowDown') {
+              event.preventDefault()
+              setActiveMentionIndex((index) => (index + 1) % mentionOptionCount)
+            } else if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              setActiveMentionIndex((index) => (
+                (index - 1 + mentionOptionCount) % mentionOptionCount
+              ))
+            } else if (event.key === 'Enter' || event.key === 'Tab') {
+              event.preventDefault()
+              if (showBroadcastMention && activeMentionIndex === 0) chooseMention(null)
+              else {
+                const candidate = mentionCandidates[
+                  activeMentionIndex - Number(showBroadcastMention)
+                ]
+                if (candidate) chooseMention(candidate.mention_handle)
+              }
+            } else if (event.key === 'Escape') {
+              event.preventDefault()
+              setMention(null)
+            }
+          }}
           disabled={sending}
-          placeholder="发到团队时间线…"
+          placeholder="输入消息，键入 @ 选择收件人…"
         />
         <button type="submit" disabled={sending || !draft.trim() || !hasRecipients}>
           {sending ? '发送中…' : '发送'}

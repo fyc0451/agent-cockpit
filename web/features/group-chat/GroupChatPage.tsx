@@ -47,7 +47,7 @@ import {
   requestTeamJoin,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
-import type { TeamBinding, TeamSessionCandidate, TeamTopic } from '../team/model'
+import type { TeamBinding, TeamMember, TeamSessionCandidate, TeamTopic } from '../team/model'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { AppFrame, useAppFrame } from '../shell/AppFrame'
@@ -308,6 +308,12 @@ export function GroupChatPage() {
   }, [teamProjectsQ.data, teamBindingsQ.data])
 
   const [teamActiveTopic, setTeamActiveTopic] = useState<string | null>(null)
+  const teamMentionNonce = useRef(0)
+  const [teamMentionRequest, setTeamMentionRequest] = useState<{
+    topic: string
+    handle: string
+    nonce: number
+  } | null>(null)
   const teamMembersQ = useQuery({
     queryKey: ['team-members', teamActiveTopic],
     queryFn: () => listTeamMembers(teamActiveTopic!),
@@ -315,6 +321,16 @@ export function GroupChatPage() {
     staleTime: 30_000,
     refetchInterval: teamEnabled && teamAuthQ.data?.logged_in === true ? 5_000 : false,
   })
+
+  const handleTeamMention = useCallback((member: TeamMember) => {
+    if (!teamActiveTopic) return
+    teamMentionNonce.current += 1
+    setTeamMentionRequest({
+      topic: teamActiveTopic,
+      handle: member.mention_handle,
+      nonce: teamMentionNonce.current,
+    })
+  }, [teamActiveTopic])
 
   const handleTeamLogin = useCallback(async (username: string, password: string) => {
     await teamLogin(username, password)
@@ -1173,6 +1189,11 @@ export function GroupChatPage() {
                   : '读取团队成员失败'
                 : null
             }
+            teamCurrentMentionHandle={
+              teamTopics.find((topic) => topic.slug === teamActiveTopic)?.membership
+                ?.mention_handle ?? null
+            }
+            onTeamMention={handleTeamMention}
             fileRoot={fileRoot}
             onPreview={setPreviewFile}
           />
@@ -1231,6 +1252,7 @@ export function GroupChatPage() {
                 ?? null
               }
               members={teamMembersQ.data ?? []}
+              mentionRequest={teamMentionRequest}
             />
           ) : previewFile && activeSession ? (
             <FilePreview

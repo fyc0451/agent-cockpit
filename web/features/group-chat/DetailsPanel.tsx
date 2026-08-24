@@ -32,6 +32,8 @@ interface DetailsPanelProps {
   teamMembers?: TeamMember[]
   teamMembersLoading?: boolean
   teamMembersError?: string | null
+  teamCurrentMentionHandle?: string | null
+  onTeamMention?: (member: TeamMember) => void
   // 文件面板：会话/项目目录；没有目录时不展示文件 tab
   fileRoot: string | null
   onPreview: (path: string) => void
@@ -54,6 +56,8 @@ export function DetailsPanel({
   teamMembers = [],
   teamMembersLoading = false,
   teamMembersError = null,
+  teamCurrentMentionHandle = null,
+  onTeamMention,
   fileRoot,
   onPreview,
 }: DetailsPanelProps) {
@@ -116,8 +120,10 @@ export function DetailsPanel({
               {activeTeamMembers.map((member) => {
                 const name = member.display_name || `@${member.mention_handle}`
                 const role = member.role === 'admin' ? '管理员' : '成员'
-                return (
-                  <div key={member.human_id} className="gc-member gc-member--me">
+                const isCurrent = member.mention_handle.toLowerCase()
+                  === teamCurrentMentionHandle?.toLowerCase()
+                const content = (
+                  <>
                     <span className="gc-member-avatar gc-member-avatar--human" aria-hidden>
                       {name.slice(0, 1).toUpperCase()}
                     </span>
@@ -130,7 +136,26 @@ export function DetailsPanel({
                       </span>
                       <span className="gc-member-sub">@{member.mention_handle} · {role}</span>
                     </span>
-                  </div>
+                  </>
+                )
+                if (isCurrent || !onTeamMention) {
+                  return (
+                    <div key={member.human_id} className="gc-member gc-member--me">
+                      {content}
+                    </div>
+                  )
+                }
+                return (
+                  <button
+                    key={member.human_id}
+                    type="button"
+                    className="gc-member"
+                    aria-label={`将 @${member.mention_handle} 加入收件人`}
+                    title={`发送给 @${member.mention_handle}`}
+                    onClick={() => onTeamMention(member)}
+                  >
+                    {content}
+                  </button>
                 )
               })}
             </div>

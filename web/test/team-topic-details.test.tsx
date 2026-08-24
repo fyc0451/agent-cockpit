@@ -43,6 +43,7 @@ describe('团队话题成员详情', () => {
   })
 
   it('只显示 Team Hub 已加入的同事，不显示本机 Agent 或 Boss', () => {
+    const onTeamMention = vi.fn()
     render(
       <AppFrame sidebar={null}>
         <DetailsPanel
@@ -75,6 +76,7 @@ describe('团队话题成员详情', () => {
               status: 'invited',
             },
           ]}
+          onTeamMention={onTeamMention}
         />
       </AppFrame>,
     )
@@ -85,6 +87,8 @@ describe('团队话题成员详情', () => {
     expect(within(panel).queryByText('Pending User')).not.toBeInTheDocument()
     expect(within(panel).queryByText('我')).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: '文件' })).not.toBeInTheDocument()
+    within(panel).getByRole('button', { name: '将 @alice 加入收件人' }).click()
+    expect(onTeamMention).toHaveBeenCalledWith(expect.objectContaining({ mention_handle: 'alice' }))
   })
 
   it('打开团队话题时从 Team Hub 成员接口取数', async () => {
@@ -168,6 +172,10 @@ describe('团队话题成员详情', () => {
       '/api/team/projects/hr-ready/members',
       { credentials: 'include' },
     )
+    await userEvent.setup().click(
+      within(panel).getByRole('button', { name: '将 @alice 加入收件人' }),
+    )
+    expect(screen.getByRole('button', { name: '移除 @alice' })).toBeInTheDocument()
   })
 
   it('成员接口加载中显示明确状态', () => {
