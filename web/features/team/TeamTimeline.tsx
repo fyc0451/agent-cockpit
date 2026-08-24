@@ -29,6 +29,50 @@ function questionPreview(text: string): string {
     : normalized
 }
 
+function parseTeamTimestamp(value: string): Date | null {
+  const normalized = value.trim()
+  if (!normalized) return null
+  // Hub 的 SQLite 时间是 UTC naive datetime；带时区的 ISO 值则按自身时区解析。
+  const sqlite = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?$/.exec(normalized)
+  const parsed = sqlite
+    ? new Date(Date.UTC(
+      Number(sqlite[1]),
+      Number(sqlite[2]) - 1,
+      Number(sqlite[3]),
+      Number(sqlite[4]),
+      Number(sqlite[5]),
+      Number(sqlite[6]),
+      Number(`0.${sqlite[7] ?? '0'}`) * 1000,
+    ))
+    : new Date(normalized)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function twoDigits(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+export function formatTeamTimestamp(value: string, now = new Date()): string {
+  const parsed = parseTeamTimestamp(value)
+  if (!parsed) return '时间未知'
+  const time = `${twoDigits(parsed.getHours())}:${twoDigits(parsed.getMinutes())}`
+  const sameDay = parsed.getFullYear() === now.getFullYear()
+    && parsed.getMonth() === now.getMonth()
+    && parsed.getDate() === now.getDate()
+  return sameDay
+    ? time
+    : `${twoDigits(parsed.getMonth() + 1)}-${twoDigits(parsed.getDate())} ${time}`
+}
+
+function fullTeamTimestamp(value: string): string {
+  const parsed = parseTeamTimestamp(value)
+  if (!parsed) return '时间未知'
+  return [
+    `${parsed.getFullYear()}-${twoDigits(parsed.getMonth() + 1)}-${twoDigits(parsed.getDate())}`,
+    `${twoDigits(parsed.getHours())}:${twoDigits(parsed.getMinutes())}:${twoDigits(parsed.getSeconds())}`,
+  ].join(' ')
+}
+
 function matchReplyQuestions(rows: TeamMessage[]): Map<number, TeamMessage> {
   const questionsBySubject = new Map<string, TeamMessage[]>()
   const matches = new Map<number, TeamMessage>()
@@ -206,10 +250,20 @@ export function TeamTimeline({
             const question = replyQuestions.get(row.id)
             return (
             <div key={row.id} className="gc-team-msg" data-testid={`team-msg-${row.id}`}>
-            <div className="gc-team-msg-meta">
-              {row.sender_name}
-              {row.sender_agent ? ` · via ${row.sender_agent}` : ''}
-              {row.mention_handles.map((handle) => ` · @${handle}`).join('')}
+            <div className="gc-team-msg-meta gc-team-msg-header">
+              <span>
+                {row.sender_name}
+                {row.sender_agent ? ` · via ${row.sender_agent}` : ''}
+                {row.mention_handles.map((handle) => ` · @${handle}`).join('')}
+              </span>
+              <time
+                className="gc-team-msg-time"
+                dateTime={row.created_ts}
+                title={fullTeamTimestamp(row.created_ts)}
+                aria-label={`发送时间 ${fullTeamTimestamp(row.created_ts)}`}
+              >
+                {formatTeamTimestamp(row.created_ts)}
+              </time>
             </div>
             {row.subject && row.subject !== '群聊消息' && (
               <div className="gc-team-msg-meta">{row.subject}</div>

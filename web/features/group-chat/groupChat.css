@@ -2850,6 +2850,19 @@
   margin-bottom: 4px;
 }
 
+.gc-team-msg-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gc-team-msg-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .gc-team-msg-body {
   font-size: 14px;
   color: var(--gc-text);

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as teamLedger from '../api/teamLedger'
-import { TeamTimeline } from '../features/team/TeamTimeline'
+import { formatTeamTimestamp, TeamTimeline } from '../features/team/TeamTimeline'
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -14,14 +14,19 @@ function createWrapper() {
   )
 }
 
-function message(id: number, body_md: string, subject = '群聊消息') {
+function message(
+  id: number,
+  body_md: string,
+  subject = '群聊消息',
+  created_ts = '2026-08-22 12:00:00',
+) {
   return {
     id,
     subject,
     body_md,
     mention_handles: [],
     importance: 'normal',
-    created_ts: '2026-08-22 12:00:00',
+    created_ts,
     sender_name: '付彦超',
     sender_human_id: 1,
     sender_kind: 'session_lead',
@@ -79,6 +84,35 @@ describe('TeamTimeline', () => {
     expect(screen.getByText(/还没有团队消息/)).toBeInTheDocument()
     await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
     expect(screen.getByText('自动出现的回复')).toBeInTheDocument()
+  })
+
+  it('每条消息显示本地小时分钟，跨天时同时显示月日', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-22T13:00:00Z'))
+    const sameDayRaw = '2026-08-22 12:34:56'
+    const oldRaw = '2026-08-20 01:02:03'
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        messages: [
+          message(70, '今天的消息', '群聊消息', sameDayRaw),
+          message(71, '较早的消息', '群聊消息', oldRaw),
+        ],
+      }),
+    } as Response)))
+
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    const sameDayTime = screen.getByTestId('team-msg-70').querySelector('time')
+    const oldTime = screen.getByTestId('team-msg-71').querySelector('time')
+    expect(sameDayTime).toHaveTextContent(formatTeamTimestamp(sameDayRaw))
+    expect(sameDayTime?.textContent).toMatch(/^\d{2}:\d{2}$/)
+    expect(sameDayTime).toHaveAttribute('datetime', sameDayRaw)
+    expect(oldTime).toHaveTextContent(formatTeamTimestamp(oldRaw))
+    expect(oldTime?.textContent).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/)
+    expect(oldTime?.getAttribute('title')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
   })
 
   it('首次打开团队话题直接定位到最新消息', async () => {
