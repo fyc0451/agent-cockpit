@@ -56,10 +56,23 @@ describe('TeamTimeline', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
-    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
+    render(
+      <TeamTimeline
+        topic="proj-a"
+        topicName="项目 A"
+        membership={{ role: 'member', status: 'active', mention_handle: 'alice' }}
+        members={[
+          { human_id: 1, display_name: 'Alice', mention_handle: 'alice', role: 'member', status: 'active' },
+          { human_id: 2, display_name: 'Bob', mention_handle: 'bob', role: 'member', status: 'active' },
+        ]}
+      />,
+      { wrapper: createWrapper() },
+    )
 
     expect(await screen.findByText(/还没有团队消息/)).toBeInTheDocument()
     await user.type(screen.getByLabelText('团队消息'), 'hello team')
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: '@bob' }))
     await user.click(screen.getByRole('button', { name: '发送' }))
 
     expect(await screen.findByText('hello team')).toBeInTheDocument()
@@ -68,6 +81,88 @@ describe('TeamTimeline', () => {
     expect(urls).toContain('/api/team/projects/proj-a/chat/messages')
     expect(urls).toContain('/api/team/projects/proj-a/support-requests')
     expect(urls.some((url) => url.includes('/api/team/ledger') || url.includes('/api/chat'))).toBe(false)
+    const sent = fetchMock.mock.calls.find(([input, init]) => (
+      String(input).endsWith('/support-requests') && init?.method === 'POST'
+    ))
+    expect(JSON.parse(String(sent?.[1]?.body))).toMatchObject({ mention_handles: ['bob'] })
+  })
+
+  it('管理员可选择 @all，发送后清空本条收件人', async () => {
+    const payloads: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/chat/messages')) {
+        return { ok: true, status: 200, json: async () => ({ messages: [] }) } as Response
+      }
+      if (url.endsWith('/support-requests') && init?.method === 'POST') {
+        payloads.push(JSON.parse(String(init.body)))
+        return { ok: true, status: 201, json: async () => ({ status: 'delivered' }) } as Response
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }))
+
+    const user = userEvent.setup()
+    render(
+      <TeamTimeline
+        topic="proj-a"
+        topicName="项目 A"
+        membership={{ role: 'admin', status: 'active', mention_handle: 'alice' }}
+        members={[
+          { human_id: 1, display_name: 'Alice', mention_handle: 'alice', role: 'admin', status: 'active' },
+          { human_id: 2, display_name: 'Bob', mention_handle: 'bob', role: 'member', status: 'active' },
+          { human_id: 3, display_name: 'Carol', mention_handle: 'carol', role: 'member', status: 'active' },
+        ]}
+      />,
+      { wrapper: createWrapper() },
+    )
+
+    await user.type(screen.getByLabelText('团队消息'), '管理员广播')
+    await user.click(screen.getByRole('button', { name: '@all 全体成员' }))
+    await user.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(payloads).toHaveLength(1)
+    expect(payloads[0]).not.toHaveProperty('mention_handles')
+    expect(screen.getByRole('button', { name: '@all 全体成员' })).toHaveAttribute(
+      'aria-pressed', 'false',
+    )
+  })
+
+  it('普通成员看不到 @all，可一次选择多个具体成员', async () => {
+    const payloads: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/chat/messages')) {
+        return { ok: true, status: 200, json: async () => ({ messages: [] }) } as Response
+      }
+      if (url.endsWith('/support-requests') && init?.method === 'POST') {
+        payloads.push(JSON.parse(String(init.body)))
+        return { ok: true, status: 201, json: async () => ({ status: 'delivered' }) } as Response
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }))
+
+    const user = userEvent.setup()
+    render(
+      <TeamTimeline
+        topic="proj-a"
+        topicName="项目 A"
+        membership={{ role: 'member', status: 'active', mention_handle: 'alice' }}
+        members={[
+          { human_id: 1, display_name: 'Alice', mention_handle: 'alice', role: 'member', status: 'active' },
+          { human_id: 2, display_name: 'Bob', mention_handle: 'bob', role: 'member', status: 'active' },
+          { human_id: 3, display_name: 'Carol', mention_handle: 'carol', role: 'member', status: 'active' },
+        ]}
+      />,
+      { wrapper: createWrapper() },
+    )
+
+    expect(screen.queryByRole('button', { name: '@all 全体成员' })).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('团队消息'), '定向消息')
+    await user.click(screen.getByRole('button', { name: '@bob' }))
+    await user.click(screen.getByRole('button', { name: '@carol' }))
+    await user.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(payloads[0]).toMatchObject({ mention_handles: ['bob', 'carol'] })
   })
 
   it('每两秒自动拉取新团队回复', async () => {

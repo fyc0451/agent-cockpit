@@ -10,7 +10,7 @@ import {
 } from '../../api/teamAuth'
 import { listTeamMessages, sendTeamMessage } from '../../api/teamLedger'
 import type { TeamMessage } from '../../api/teamLedger'
-import type { TeamBinding } from './model'
+import type { TeamBinding, TeamMember, TeamTopic } from './model'
 import { TeamReplyPanel } from './TeamReplyPanel'
 
 const REPLY_SUBJECT_PREFIX = 'Re: '
@@ -97,10 +97,14 @@ export function TeamTimeline({
   topic,
   topicName,
   binding,
+  membership,
+  members = [],
 }: {
   topic: string
   topicName: string
   binding?: TeamBinding | null
+  membership?: TeamTopic['membership']
+  members?: TeamMember[]
 }) {
   const queryClient = useQueryClient()
   const messagesQ = useQuery({
@@ -136,21 +140,59 @@ export function TeamTimeline({
     },
   })
   const [draft, setDraft] = useState('')
+  const [selectedHandles, setSelectedHandles] = useState<string[]>([])
+  const [broadcast, setBroadcast] = useState(false)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const listContentRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
   const [hasNew, setHasNew] = useState(false)
+  const currentHandle = membership?.mention_handle.toLowerCase() ?? ''
+  const canBroadcast = membership?.role === 'admin'
+  const availableMembers = members.filter((member) => (
+    member.status === 'active'
+    && !!member.mention_handle
+    && member.mention_handle.toLowerCase() !== currentHandle
+  ))
+  const availableHandleKey = availableMembers
+    .map((member) => member.mention_handle.toLowerCase())
+    .sort()
+    .join('|')
+  const hasRecipients = broadcast || selectedHandles.length > 0
+
+  useEffect(() => {
+    setSelectedHandles([])
+    setBroadcast(false)
+  }, [topic])
+
+  useEffect(() => {
+    const available = new Set(availableHandleKey.split('|').filter(Boolean))
+    setSelectedHandles((current) => current.filter(
+      (handle) => available.has(handle.toLowerCase()),
+    ))
+    if (!canBroadcast) setBroadcast(false)
+  }, [availableHandleKey, canBroadcast])
+
+  const toggleRecipient = (handle: string) => {
+    setBroadcast(false)
+    setSelectedHandles((current) => (
+      current.some((item) => item.toLowerCase() === handle.toLowerCase())
+        ? current.filter((item) => item.toLowerCase() !== handle.toLowerCase())
+        : [...current, handle]
+    ))
+  }
 
   const onSend = async () => {
     const text = draft.trim()
-    if (!text || sending) return
+    if (!text || !hasRecipients || sending) return
     setSending(true)
     setSendError(null)
     try {
-      await sendTeamMessage(topic, text)
+      await sendTeamMessage(topic, text, broadcast ? null : selectedHandles)
       setDraft('')
+      setSelectedHandles([])
+      setBroadcast(false)
       await queryClient.invalidateQueries({ queryKey: ['team-chat', topic] })
     } catch (err) {
       setSendError(err instanceof ApiError ? err.message : String(err))
@@ -328,6 +370,45 @@ export function TeamTimeline({
           ↓ 有新消息
         </button>
       )}
+      <div className="gc-team-recipients" role="group" aria-label="团队消息收件人">
+        <span className="gc-team-recipients-label">发送给</span>
+        {canBroadcast && (
+          <button
+            type="button"
+            aria-pressed={broadcast}
+            disabled={sending || availableMembers.length === 0}
+            onClick={() => {
+              setBroadcast((current) => !current)
+              setSelectedHandles([])
+            }}
+          >
+            @all 全体成员
+          </button>
+        )}
+        {availableMembers.map((member) => {
+          const selected = selectedHandles.some(
+            (handle) => handle.toLowerCase() === member.mention_handle.toLowerCase(),
+          )
+          return (
+            <button
+              key={member.human_id}
+              type="button"
+              aria-pressed={selected}
+              disabled={sending}
+              title={member.display_name || `@${member.mention_handle}`}
+              onClick={() => toggleRecipient(member.mention_handle)}
+            >
+              @{member.mention_handle}
+            </button>
+          )
+        })}
+        {availableMembers.length === 0 && (
+          <span className="gc-team-recipients-empty">没有其他活跃成员</span>
+        )}
+        {!hasRecipients && availableMembers.length > 0 && (
+          <span className="gc-team-recipients-empty">请选择至少一位收件人</span>
+        )}
+      </div>
       <form
         className="gc-team-composer"
         onSubmit={(event) => {
@@ -342,7 +423,7 @@ export function TeamTimeline({
           disabled={sending}
           placeholder="发到团队时间线…"
         />
-        <button type="submit" disabled={sending || !draft.trim()}>
+        <button type="submit" disabled={sending || !draft.trim() || !hasRecipients}>
           {sending ? '发送中…' : '发送'}
         </button>
       </form>

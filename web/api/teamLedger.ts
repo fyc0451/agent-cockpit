@@ -67,14 +67,24 @@ export async function listTeamMessages(topic: string): Promise<TeamMessage[]> {
   return rows.map(parseMessage).filter((row): row is TeamMessage => row !== null)
 }
 
-export async function sendTeamMessage(topic: string, text: string): Promise<void> {
+export async function sendTeamMessage(
+  topic: string,
+  text: string,
+  mentionHandles: string[] | null,
+): Promise<void> {
+  const payload: Record<string, unknown> = {
+    subject: '群聊消息',
+    body_md: text,
+    importance: 'normal',
+  }
+  if (mentionHandles !== null) payload.mention_handles = mentionHandles
   const response = await fetch(
     `/api/team/projects/${encodeURIComponent(topic)}/support-requests`,
     {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subject: '群聊消息', body_md: text, importance: 'normal' }),
+      body: JSON.stringify(payload),
     },
   )
   if (!response.ok) {
