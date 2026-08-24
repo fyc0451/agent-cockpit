@@ -385,6 +385,12 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         json={},
     ).status_code == 200
     assert calls == [
+        (
+            "PUT",
+            "/hub/api/humans/me",
+            "Bearer human.jwt",
+            {"display_name": "fyc"},
+        ),
         ("GET", "/hub/api/projects", "Bearer human.jwt", None),
         (
             "PATCH",
@@ -528,6 +534,7 @@ def test_team_auth_login_only_proxies_credentials_to_independent_issuer(monkeypa
     import server
 
     calls = []
+    hub_calls = []
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(
         server.hub_client,
@@ -544,6 +551,13 @@ def test_team_auth_login_only_proxies_credentials_to_independent_issuer(monkeypa
             },
         },
     )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_api",
+        lambda method, path, authorization, payload=None: hub_calls.append(
+            (method, path, authorization, payload)
+        ) or {"id": 7, "display_name": payload["display_name"]},
+    )
     client = TestClient(server.app)
     response = client.post(
         "/api/team-auth/login",
@@ -556,6 +570,14 @@ def test_team_auth_login_only_proxies_credentials_to_independent_issuer(monkeypa
     assert "cockpit_team_human_session=human.jwt" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]
     assert calls == [("fyc", "local-secret")]
+    assert hub_calls == [
+        (
+            "PUT",
+            "/hub/api/humans/me",
+            "Bearer human.jwt",
+            {"display_name": "付彦超"},
+        )
+    ]
 
 
 def test_team_proxy_rechecks_disabled_human_session(monkeypatch):
@@ -606,6 +628,13 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
             "profile": {"username": "fyc", "roles": ["writer", "admin"]}
         },
     )
+    def fake_human_api(method, path, authorization, payload=None):
+        if method == "PUT":
+            calls.append(("hub", method, path, authorization, payload))
+            return {"id": 7, "display_name": payload["display_name"]}
+        raise server.hub_client.HumanAPIError(404, "not materialized in this fixture")
+
+    monkeypatch.setattr(server.hub_client, "human_api", fake_human_api)
     monkeypatch.setattr(
         server.hub_client,
         "human_create_invitation",
@@ -674,6 +703,10 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
     assert calls == [
         ("register", "alice", "Alice", "alice-password-123", "one-time-code"),
         ("profile", "Bearer human.jwt"),
+        (
+            "hub", "PUT", "/hub/api/humans/me", "Bearer human.jwt",
+            {"display_name": "fyc"},
+        ),
         ("invite", "Bearer human.jwt", 3600, None),
         ("users", "Bearer human.jwt"),
         ("status", "Bearer human.jwt", "alice", "active"),

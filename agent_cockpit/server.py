@@ -3878,6 +3878,27 @@ def api_team_ledger_hand_to_leader(message_id: str, request: Request):
     return {"ok": True, "message": marked}
 
 
+def _team_ensure_hub_human(
+    authorization: str,
+    profile_response: dict[str, Any],
+) -> dict[str, Any]:
+    """幂等补建 Human，避免普通激活账号登录后看不到任何 Topic。"""
+    nested = profile_response.get("profile")
+    profile = nested if isinstance(nested, dict) else profile_response
+    display_name = profile.get("display_name") or profile.get("username")
+    if not isinstance(display_name, str) or not display_name.strip():
+        raise HTTPException(502, "Human issuer 返回的账号资料缺少显示名")
+    try:
+        return hub_client.human_api(
+            "PUT",
+            "/hub/api/humans/me",
+            authorization,
+            {"display_name": display_name.strip()},
+        )
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+
 @app.api_route(
     "/api/team/{route:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
@@ -3906,7 +3927,9 @@ async def api_team_proxy(route: str, request: Request):
     try:
         # Re-check the issuer on every Human API request so a disabled account
         # loses Cockpit access immediately instead of waiting for JWT expiry.
-        hub_client.human_profile(authorization)
+        profile = hub_client.human_profile(authorization)
+        if method == "GET" and normalized == "projects":
+            _team_ensure_hub_human(authorization, profile)
         if method == "POST" and normalized == "projects":
             # topic 名称全局唯一（不区分大小写）；重名 topic 在团队列表里无法区分
             name = str((payload or {}).get("name") or "").strip()
@@ -3954,6 +3977,7 @@ def api_team_auth_login(req: HumanLoginReq, request: Request):
         or not 1 <= expires_in <= 7 * 24 * 60 * 60
     ):
         raise HTTPException(502, "Human issuer 返回了无效响应")
+    _team_ensure_hub_human(f"Bearer {token}", profile)
     response = JSONResponse({"authenticated": True, "profile": profile})
     response.set_cookie(
         TEAM_AUTH_COOKIE,
@@ -5152,9 +5176,12 @@ def api_team_local_identity_claim(req: LocalIdentityClaimReq, request: Request):
 @app.get("/api/team-auth/status")
 def api_team_auth_status(request: Request):
     try:
+        authorization = _team_human_authorization(request)
+        profile = hub_client.human_profile(authorization)
+        _team_ensure_hub_human(authorization, profile)
         return {
             "authenticated": True,
-            **hub_client.human_profile(_team_human_authorization(request)),
+            **profile,
         }
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
