@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -79,6 +79,109 @@ describe('TeamTimeline', () => {
     expect(screen.getByText(/还没有团队消息/)).toBeInTheDocument()
     await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
     expect(screen.getByText('自动出现的回复')).toBeInTheDocument()
+  })
+
+  it('首次打开团队话题直接定位到最新消息', async () => {
+    const originalScrollHeight = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype, 'scrollHeight',
+    )
+    const originalClientHeight = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype, 'clientHeight',
+    )
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('gc-team-timeline-list') ? 2400 : 0
+      },
+    })
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('gc-team-timeline-list') ? 400 : 0
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        messages: Array.from({ length: 12 }, (_, index) => message(index + 1, `第 ${index + 1} 条`)),
+      }),
+    } as Response)))
+
+    try {
+      const { container } = render(
+        <TeamTimeline topic="proj-a" topicName="项目 A" />,
+        { wrapper: createWrapper() },
+      )
+      expect(await screen.findByText('第 12 条')).toBeInTheDocument()
+      const list = container.querySelector('.gc-team-timeline-list') as HTMLElement
+      expect(list.scrollTop).toBe(2400)
+    } finally {
+      if (originalScrollHeight) {
+        Object.defineProperty(HTMLElement.prototype, 'scrollHeight', originalScrollHeight)
+      }
+      if (originalClientHeight) {
+        Object.defineProperty(HTMLElement.prototype, 'clientHeight', originalClientHeight)
+      }
+    }
+  })
+
+  it('用户上翻历史后不抢位置，并可一键回到最新消息', async () => {
+    vi.useFakeTimers()
+    const height = { current: 1200 }
+    const originalScrollHeight = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype, 'scrollHeight',
+    )
+    const originalClientHeight = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype, 'clientHeight',
+    )
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('gc-team-timeline-list') ? height.current : 0
+      },
+    })
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('gc-team-timeline-list') ? 400 : 0
+      },
+    })
+    let poll = 0
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        messages: poll++ === 0
+          ? [message(1, '旧消息')]
+          : [message(1, '旧消息'), message(2, '新消息')],
+      }),
+    } as Response)))
+
+    try {
+      const { container } = render(
+        <TeamTimeline topic="proj-a" topicName="项目 A" />,
+        { wrapper: createWrapper() },
+      )
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(screen.getByText('旧消息')).toBeInTheDocument()
+      const list = container.querySelector('.gc-team-timeline-list') as HTMLElement
+      list.scrollTop = 100
+      fireEvent.scroll(list)
+      height.current = 2000
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+      expect(screen.getByText('新消息')).toBeInTheDocument()
+      expect(list.scrollTop).toBe(100)
+      fireEvent.click(screen.getByRole('button', { name: '↓ 有新消息' }))
+      expect(list.scrollTop).toBe(2000)
+    } finally {
+      if (originalScrollHeight) {
+        Object.defineProperty(HTMLElement.prototype, 'scrollHeight', originalScrollHeight)
+      }
+      if (originalClientHeight) {
+        Object.defineProperty(HTMLElement.prototype, 'clientHeight', originalClientHeight)
+      }
+    }
   })
 
   it('在对应消息下先确认，授权后才进入 Lead 处理', async () => {

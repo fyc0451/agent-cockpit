@@ -1,6 +1,6 @@
 // 团队时间线：只读写远端 Team Hub，不进入本机群聊瀑布流。
 
-import { useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '../../api/client'
 import {
@@ -15,6 +15,10 @@ import { TeamReplyPanel } from './TeamReplyPanel'
 
 const REPLY_SUBJECT_PREFIX = 'Re: '
 const QUESTION_PREVIEW_LENGTH = 20
+
+function isNearBottom(element: HTMLElement): boolean {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 80
+}
 
 function questionPreview(text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
@@ -90,6 +94,10 @@ export function TeamTimeline({
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const listContentRef = useRef<HTMLDivElement>(null)
+  const nearBottomRef = useRef(true)
+  const [hasNew, setHasNew] = useState(false)
 
   const onSend = async () => {
     const text = draft.trim()
@@ -108,6 +116,7 @@ export function TeamTimeline({
   }
 
   const rows = messagesQ.data ?? []
+  const historyKey = rows.map((row) => row.id).join('|')
   const replyQuestions = matchReplyQuestions(rows)
   const replyRequests = new Map(
     (requestsQ.data ?? []).map((request) => [request.messageId, request]),
@@ -124,6 +133,57 @@ export function TeamTimeline({
     return ''
   }
 
+  const pinToBottom = () => {
+    const list = listRef.current
+    if (list) list.scrollTop = list.scrollHeight
+  }
+
+  const onScroll = () => {
+    const list = listRef.current
+    if (!list) return
+    const near = isNearBottom(list)
+    nearBottomRef.current = near
+    if (near) setHasNew(false)
+  }
+
+  useLayoutEffect(() => {
+    nearBottomRef.current = true
+    setHasNew(false)
+    pinToBottom()
+  }, [topic])
+
+  useLayoutEffect(() => {
+    if (nearBottomRef.current) pinToBottom()
+    else if (historyKey) setHasNew(true)
+  }, [historyKey])
+
+  useEffect(() => {
+    const content = listContentRef.current
+    if (!content) return
+    const follow = () => {
+      if (nearBottomRef.current) pinToBottom()
+    }
+    let frame = requestAnimationFrame(follow)
+    if (typeof ResizeObserver === 'undefined') {
+      return () => cancelAnimationFrame(frame)
+    }
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(follow)
+    })
+    observer.observe(content)
+    return () => {
+      observer.disconnect()
+      cancelAnimationFrame(frame)
+    }
+  }, [topic])
+
+  const jumpToBottom = () => {
+    nearBottomRef.current = true
+    setHasNew(false)
+    pinToBottom()
+  }
+
   return (
     <div className="gc-team-timeline" data-testid="team-timeline">
       <div className="gc-team-timeline-hint">
@@ -136,15 +196,16 @@ export function TeamTimeline({
           {messagesQ.error instanceof ApiError ? messagesQ.error.message : String(messagesQ.error)}
         </div>
       )}
-      <div className="gc-team-timeline-list">
-        {rows.length === 0 && !messagesQ.isPending && (
-          <div className="gc-event">还没有团队消息。发一条试试。</div>
-        )}
-        {rows.map((row) => {
-          const request = replyRequests.get(row.id)
-          const question = replyQuestions.get(row.id)
-          return (
-          <div key={row.id} className="gc-team-msg" data-testid={`team-msg-${row.id}`}>
+      <div className="gc-team-timeline-list" ref={listRef} onScroll={onScroll}>
+        <div className="gc-team-timeline-list-inner" ref={listContentRef}>
+          {rows.length === 0 && !messagesQ.isPending && (
+            <div className="gc-event">还没有团队消息。发一条试试。</div>
+          )}
+          {rows.map((row) => {
+            const request = replyRequests.get(row.id)
+            const question = replyQuestions.get(row.id)
+            return (
+            <div key={row.id} className="gc-team-msg" data-testid={`team-msg-${row.id}`}>
             <div className="gc-team-msg-meta">
               {row.sender_name}
               {row.sender_agent ? ` · via ${row.sender_agent}` : ''}
@@ -203,10 +264,16 @@ export function TeamTimeline({
                 )}
               </div>
             )}
-          </div>
-          )
-        })}
+            </div>
+            )
+          })}
+        </div>
       </div>
+      {hasNew && (
+        <button type="button" className="gc-team-new-message" onClick={jumpToBottom}>
+          ↓ 有新消息
+        </button>
+      )}
       <form
         className="gc-team-composer"
         onSubmit={(event) => {
