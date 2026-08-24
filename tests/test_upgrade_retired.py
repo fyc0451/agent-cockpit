@@ -247,16 +247,15 @@ class TestEntryPoints:
         assert r.returncode == 1
         assert "upgrade_engine_retired" in r.stderr
 
-    def test_upgrade_sh_refuses(self, tmp_path: Path) -> None:
+    def test_upgrade_sh_is_separate_safe_cli_entry(self, tmp_path: Path) -> None:
         script = Path(__file__).resolve().parent.parent / "upgrade.sh"
-        r = subprocess.run(
-            ["bash", str(script)], capture_output=True, text=True, timeout=30,
-        )
-        assert r.returncode == 1
-        assert "upgrade_engine_retired" in r.stderr
-        # 旧执行旁路已删除：脚本不得再包含实际执行命令
         content = script.read_text(encoding="utf-8")
-        for forbidden in ("git -C", "pip install", "systemctl", "install-agent-mail-hub"):
+        assert "upgrade_engine_retired" not in content
+        assert "merge --ff-only" in content
+        assert 'bash "$INSTALL_DIR/install.sh"' in content
+        assert "reset --hard" in content
+        # CLI 不恢复应用内旧 worker/API，也不复制依赖和 supervisor 逻辑。
+        for forbidden in ("pip install", "systemctl", "install-agent-mail-hub"):
             assert forbidden not in content
 
 
@@ -265,35 +264,23 @@ class TestEntryPoints:
 # ---------------------------------------------------------------------------
 
 class TestDocs:
-    # 旧文案禁止项：任何仍宣称 upgrade.sh 会拉代码/装依赖/重启的表述
-    _FORBIDDEN_PATTERNS = (
-        "升级后自动重启 systemd",
-        "拉代码 + 装依赖",
-        "refuses local tracked changes; restarts",
-        "ローカル変更を拒否し",
-        "restarts systemd/LaunchAgent",
-        "自動再起動",
-    )
-
-    def test_all_readmes_use_retired_boundary(self) -> None:
+    def test_all_readmes_describe_source_cli_upgrade(self) -> None:
         for name in ("README.md", "README.en.md", "README.ja.md"):
             text = Path(name).read_text(encoding="utf-8")
-            for pattern in self._FORBIDDEN_PATTERNS:
-                assert pattern not in text, f"{name} 仍宣称旧一键升级能力: {pattern}"
-        assert "已退役" in Path("README.md").read_text(encoding="utf-8")
-        assert "RETIRED" in Path("README.en.md").read_text(encoding="utf-8")
-        assert "退役" in Path("README.ja.md").read_text(encoding="utf-8")
+            assert "./upgrade.sh" in text
+        assert "自动回滚" in Path("README.md").read_text(encoding="utf-8")
+        assert "automatic rollback" in Path("README.en.md").read_text(encoding="utf-8")
+        assert "自動ロールバック" in Path("README.ja.md").read_text(encoding="utf-8")
 
-    def test_user_guide_no_one_click_upgrade(self) -> None:
+    def test_user_guide_documents_one_command_upgrade(self) -> None:
         text = Path("docs/USER-GUIDE.md").read_text(encoding="utf-8")
-        for pattern in self._FORBIDDEN_PATTERNS:
-            assert pattern not in text
-        assert "已退役" in text
+        assert "bash upgrade.sh" in text
+        assert "自动回滚" in text
 
-    def test_docs_require_managed_release_boundary(self) -> None:
+    def test_docs_keep_web_v1_retired_boundary(self) -> None:
         zh = Path("README.md").read_text(encoding="utf-8")
         en = Path("README.en.md").read_text(encoding="utf-8")
         ja = Path("README.ja.md").read_text(encoding="utf-8")
-        assert "受管人工发布" in zh
-        assert "managed release" in en
-        assert "管理されたリリース" in ja
+        assert "旧 V1 Web 升级 API 仍保持退役" in zh
+        assert "legacy V1 Web upgrade API remains retired" in en
+        assert "旧 V1 Web アップグレード API は引き続き退役" in ja

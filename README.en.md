@@ -110,17 +110,18 @@ Do not put the token in `.env`, chat, or logs.
 > exposes the login session cookie to anyone able to observe the local network.
 > Do not expose Agent Cockpit directly to the public Internet.
 
-### Do not use these as the 3.0 install
+### Entry guide
 
 | Entry | What you actually get |
 | --- | --- |
 | `scripts/next_dev.py` / `:18790` | Frozen Next 2.0 preview, not 3.0 |
-| `./upgrade.sh` | Retired (fail-closed) |
+| `./upgrade.sh` | One-command source upgrade following the current upstream, with rollback |
 | Native V2 from GitHub Latest | Replaces source 8790 with the packaged unit |
 
-After source 8790 is running, Settings has a one-click upgrade that pulls the
-official tag, rebuilds `web/dist`, and restarts the source unit. Leave
-`COCKPIT_UPGRADE_V2_ENABLED` off.
+After source 8790 is running, run `./upgrade.sh` in the install directory. It
+fetches the current branch upstream, reinstalls dependencies, rebuilds `web/dist`,
+restarts the source unit, and checks `/health/live`. The legacy V1 Web upgrade API
+remains retired; leave `COCKPIT_UPGRADE_V2_ENABLED` off.
 
 ## First run
 
@@ -237,10 +238,16 @@ live in `~/dashboard-data/mail-projects.json` and contain no identity tokens.
 ## Upgrade, diagnostics, and uninstall
 
 ```bash
-./upgrade.sh       # RETIRED (fail-closed): one-click updater disabled; managed release only
+./upgrade.sh       # fetch, install, build, restart, health gate; automatic rollback on failure
 ./doctor.sh        # checks Python, dependencies, Herdr, Agent Mail, auth, and service
 ./uninstall.sh     # removes only the user service; code, config, and data are preserved
 ```
+
+The upgrader accepts only a clean tracked worktree and a fast-forward of the
+current branch. It refuses local tracked changes, ahead/diverged commits, and
+concurrent runs. Untracked files are not deleted. This source channel is intended
+for the pre-stable phase; publishing candidates to `origin/main` still uses
+`release_lane.py`, and the legacy V1 Web upgrade API remains retired.
 
 Run the test suite with `.venv/bin/pip install -r requirements-dev.txt` followed by
 `.venv/bin/pytest -q`.
@@ -258,7 +265,7 @@ agent-cockpit/
 ├── static/index.html      Old board leftover (install no longer starts it)
 ├── tests/                 Regression and security tests
 ├── install.sh             3.0 one-command install (web/dist + dev_server)
-├── upgrade.sh             Retired
+├── upgrade.sh             One-command source upgrade with automatic rollback
 ├── doctor.sh / uninstall.sh
 ├── agent-cockpit.service  3.0 systemd unit (ExecStart=dev_server.py)
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent

@@ -110,10 +110,15 @@ COCKPIT_TOKEN=<随机串>      # 监听非本机地址时必须同时设置 toke
 
 ```bash
 bash doctor.sh      # herdr / 各 agent CLI / Agent Mail 数据库与 client.env 就绪检查
-bash upgrade.sh     # 已退役(fail-closed)：一键升级停用，升级走受管人工发布
+bash upgrade.sh     # 一键拉取当前上游、重装依赖、构建、重启并做 health gate
 ```
 
 `doctor.sh` 全绿（0 个错误）才算装好；出现 ✗ 时按提示逐项补齐再重跑。
+
+`upgrade.sh` 要求当前 tracked 工作区没有未提交修改，且当前分支只能快进到上游；
+本地提交领先、分叉或已有另一个升级任务时会直接拒绝。安装或健康检查失败会自动回滚
+到升级前提交并重装旧版。未跟踪文件不会被主动删除。旧 V1 Web 升级 API 仍保持退役，
+本阶段请从安装目录运行脚本。
 
 ### 2.5 服务管理（改配置后看这里）
 

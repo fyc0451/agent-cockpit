@@ -77,10 +77,11 @@ def test_installers_migrate_legacy_service_name():
     # install.sh 承担全新安装与服务迁移
     install = (ROOT / "install.sh").read_text()
     assert "disable --now agent-mail-dashboard.service" in install
-    assert "enable --now agent-cockpit.service" in install
-    # upgrade.sh 已退役（Wiki13 J0 fail-closed）：不再承担任何服务迁移职责
+    assert "enable agent-cockpit.service" in install
+    assert "restart agent-cockpit.service" in install
+    # upgrade.sh 复用 install.sh，服务迁移只有一个实现。
     upgrade = (ROOT / "upgrade.sh").read_text()
-    assert "upgrade_engine_retired" in upgrade
+    assert 'bash "$INSTALL_DIR/install.sh"' in upgrade
     assert "agent-mail-dashboard.service" not in upgrade
 
 
@@ -91,9 +92,9 @@ def test_installers_accept_git_worktrees():
     assert 'git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree' in installer
     assert 'git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree' in installer
     assert '! -d "$INSTALL_DIR/.git"' not in installer
-    # upgrade.sh 已退役：不再检查 git 安装目录
-    assert "upgrade_engine_retired" in upgrader
-    assert 'git -C "$INSTALL_DIR" rev-parse' not in upgrader
+    assert 'git -C "$INSTALL_DIR" rev-parse' in upgrader
+    assert '! -d "$INSTALL_DIR/.git"' not in upgrader
+    assert "merge --ff-only" in upgrader
 
 
 def test_installers_manage_macos_launch_agent():
@@ -109,9 +110,11 @@ def test_installers_manage_macos_launch_agent():
     assert '"$cwd" != "$INSTALL_DIR"' in launchd
     assert "*dev_server.py*" in launchd
     assert "Agent Cockpit LaunchAgent 正在运行" in (ROOT / "doctor.sh").read_text()
-    # upgrade.sh 已退役：不再管理 launchd 重启
-    assert "upgrade_engine_retired" in upgrader
+    # upgrade.sh 复用 install.sh，由安装器选择 systemd 或 launchd。
+    assert 'bash "$INSTALL_DIR/install.sh"' in upgrader
     assert '"$INSTALL_DIR/launchd.sh" restart' not in upgrader
+    assert '"$(uname -s)" == "Darwin"' in upgrader
+    assert "/opt/homebrew/bin" in upgrader
 
 
 def test_agent_mail_launchd_keeps_token_out_of_plist():
@@ -327,9 +330,9 @@ def test_agent_mail_helpers_are_packaged_and_safely_linked():
         assert path.stat().st_mode & 0o111, f"Agent Mail helper is not executable: {name}"
     assert (tools / "am_common.py").is_file()
     assert '"$INSTALL_DIR/install-agent-mail-tools.sh" "$INSTALL_DIR"' in (ROOT / "install.sh").read_text()
-    # upgrade.sh 已退役（Wiki13 J0 fail-closed）：不再安装 Agent Mail 工具
+    # upgrade.sh 只复用 install.sh，不复制一份 Agent Mail 安装逻辑。
     upgrade = (ROOT / "upgrade.sh").read_text()
-    assert "upgrade_engine_retired" in upgrade
+    assert 'bash "$INSTALL_DIR/install.sh"' in upgrade
     assert "install-agent-mail-tools.sh" not in upgrade
     linker = (ROOT / "install-agent-mail-tools.sh").read_text()
     assert '[[ -f "$target" && ! -L "$target" ]]' in linker
@@ -586,13 +589,10 @@ def test_installers_allow_spaces_and_unicode_in_install_path():
     upgrade = (ROOT / "upgrade.sh").read_text()
     launchd = (ROOT / "launchd.sh").read_text()
     helpers = (ROOT / "install-paths.sh").read_text()
-    for name, text in (("install.sh", install), ("launchd.sh", launchd)):
+    for name, text in (("install.sh", install), ("upgrade.sh", upgrade), ("launchd.sh", launchd)):
         assert "[[:alnum:]" not in text, f"{name} 仍限制路径字符集"
         assert "install-paths.sh" in text, f"{name} 未复用路径编码"
-    # upgrade.sh 已退役（Wiki13 J0 fail-closed）：不再承担安装/路径编码职责
-    assert "[[:alnum:]" not in upgrade
-    assert "upgrade_engine_retired" in upgrade
-    assert "ac_validate_install_dir" not in upgrade
+    assert "ac_validate_install_dir" in upgrade
     for name in ("agent-mail-launchd.sh", "install-agent-mail-hub.sh", "agent-mail-run.sh"):
         text = (ROOT / name).read_text()
         assert "[[:alnum:]]" not in text, f"{name} 仍限制路径字符集"
@@ -619,9 +619,9 @@ def test_installers_allow_spaces_and_unicode_in_install_path():
     assert "ac_client_env_loopback_hub" in (ROOT / "agent-mail-run.sh").read_text()
     assert "ac_client_env_loopback_hub" in (ROOT / "agent-mail-launchd.sh").read_text()
     assert "ac_client_env_loopback_hub" in hub_installer
-    # upgrade.sh 已退役：不再解析 venv python（安装职责归 install.sh）
+    # 依赖安装仍归 install.sh；upgrade.sh 只用 venv Python 做 health gate。
     assert 'PYTHON_BIN="${PYTHON_BIN:-$INSTALL_DIR/.venv/bin/python}"' not in upgrade
-    assert "upgrade_engine_retired" in upgrade
+    assert 'python_bin="$INSTALL_DIR/.venv/bin/python"' in upgrade
 
 
 def test_sed_and_plist_escaping_with_special_path(tmp_path):

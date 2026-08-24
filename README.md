@@ -103,16 +103,17 @@ COCKPIT_HOST=0.0.0.0 .venv/bin/python scripts/dev_server.py
 > **安全警告:** 远程访问请用 HTTPS 或 Tailscale Serve。裸 HTTP 会让登录
 > cookie 暴露给同网段的任何人。不要把 Agent Cockpit 直接暴露到公网。
 
-### 不要用这些入口
+### 入口说明
 
 | 入口 | 实际结果 |
 | --- | --- |
 | `scripts/next_dev.py` / `:18790` | 已冻结的 Next 2.0 隔离预览，不是当前 3.0 |
-| `./upgrade.sh` | 已退役（fail-closed） |
+| `./upgrade.sh` | 源码版一键升级：跟踪当前分支上游，失败自动回滚 |
 | 打开 GitHub Latest 的 native V2 | 会把源码 8790 换成打包单元 |
 
-源码 8790 装好之后，设置页有「一键升级」：拉官方 tag、重建 `web/dist`、重启
-源码单元。不要打开 `COCKPIT_UPGRADE_V2_ENABLED`。
+源码 8790 装好之后，在安装目录运行 `./upgrade.sh` 即可拉取当前分支上游、重装
+依赖、重建 `web/dist`、重启源码单元并检查 `/health/live`。旧 V1 Web 升级 API
+仍保持退役，不要打开 `COCKPIT_UPGRADE_V2_ENABLED`。
 
 ## 功能一览
 
@@ -120,7 +121,7 @@ COCKPIT_HOST=0.0.0.0 .venv/bin/python scripts/dev_server.py
 - **排队发送（默认）** — Enter 排队，等对方空闲再投；要停手头工作才点「打断」。
 - **Harvest** — 只在 pane `idle` / `done` 时收结论；busy 时不改上一条气泡。
 - **文件与附件** — 群聊里看仓库、复制路径；附件默认折叠。
-- **设置** — 外观、源码一键升级、环境自检。
+- **设置** — 外观和环境自检；源码一键升级从安装目录执行 `./upgrade.sh`。
 - **移动端** — Hash 路由，手机浏览器可打开同一群聊。
 - **Team Topic** — 邀请注册、成员审批、跨机器时间线、Session 绑定，以及
   `auto` / `confirm` 两种受限 Lead 回复模式。
@@ -223,14 +224,17 @@ localStorage。session 的 Agent Mail 通信项目绑定存在
 
 ```bash
 cd /path/to/agent-cockpit
-git pull --ff-only
-./install.sh       # 重装依赖、重编前端并重启托管服务
+./upgrade.sh       # 拉取当前上游、安装、构建、重启、health gate；失败自动回滚
 ./doctor.sh        # 检查 Python、依赖、herdr、Agent Mail、认证、服务
 ./uninstall.sh     # 只删 user service;代码、配置、数据保留
 ```
 
-工作区有未提交修改或本地提交时，不要直接 `git pull`；先 review/commit，再由维护者
-合并。`upgrade.sh` 已退役（fail-closed），不要使用。
+`upgrade.sh` 只接受干净的 tracked 工作区和可快进的当前分支；本地有未提交修改、
+本地提交领先或分叉时会拒绝升级，不会覆盖用户工作。升级失败会切回原提交、重装
+旧版并重新检查服务。未跟踪文件不会主动删除，但若与上游文件冲突，Git 会安全停止。
+
+该脚本面向版本尚不稳定阶段的源码安装。发布者向 `origin/main` 合并候选仍走
+`release_lane.py`；旧 V1 Web 升级 API 仍保持退役。
 
 常用服务检查：
 
@@ -258,7 +262,7 @@ agent-cockpit/
 ├── static/index.html      旧看板残留（安装入口不再启动）
 ├── tests/                 回归与安全测试
 ├── install.sh             3.0 一键安装（build web/dist + dev_server）
-├── upgrade.sh             已退役
+├── upgrade.sh             源码版一键升级与失败回滚
 ├── doctor.sh / uninstall.sh
 ├── agent-cockpit.service  3.0 systemd 单元（ExecStart=dev_server.py）
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent

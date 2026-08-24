@@ -1,8 +1,13 @@
 # Managed Releases
 
-`upgrade.sh` is retired. A source release is a managed, local operation and must
-run through `release_lane.py`; direct `git push ... main` or service mutation is
-outside the supported release path.
+`upgrade.sh` is the consumer-side, pre-stable source deployment updater. It only
+fast-forwards an installed checkout to its current upstream, delegates dependency,
+build, and supervisor work to `install.sh`, verifies `/health/live`, and rolls back
+the checkout and install on failure.
+
+Publishing a source release is a separate managed operation and must run through
+`release_lane.py`; direct `git push ... main` remains outside the supported release
+path. The legacy V1 Web upgrade API and worker remain retired.
 
 ## Release lane v1
 

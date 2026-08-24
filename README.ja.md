@@ -110,17 +110,18 @@ COCKPIT_HOST=0.0.0.0 .venv/bin/python scripts/dev_server.py
 > ください。平文 HTTP ではログイン cookie が同一ネットワークの第三者に見える
 > 可能性があります。Agent Cockpit を直接公衆インターネットに公開しないでください。
 
-### 3.0 の入口にしないもの
+### エントリ案内
 
 | 入口 | 実際に入るもの |
 | --- | --- |
 | `scripts/next_dev.py` / `:18790` | 凍結された Next 2.0 プレビュー。3.0 ではない |
-| `./upgrade.sh` | 退役（fail-closed） |
+| `./upgrade.sh` | 現在ブランチの upstream を追跡するソース版一括更新（失敗時ロールバック） |
 | GitHub Latest の native V2 | ソース 8790 をパッケージ unit に置き換える |
 
-ソース 8790 が動いたあと、設定の一括アップグレードは公式 tag を引き、
-`web/dist` を再ビルドし、ソース unit を再起動します。
-`COCKPIT_UPGRADE_V2_ENABLED` はオフのままにしてください。
+ソース 8790 が動いたあと、インストール先で `./upgrade.sh` を実行します。現在
+ブランチの upstream を取得し、依存関係と `web/dist` を再構築し、ソース unit を
+再起動して `/health/live` を確認します。旧 V1 Web アップグレード API は引き続き退役
+しているため、`COCKPIT_UPGRADE_V2_ENABLED` はオフのままにしてください。
 
 ## 初回利用
 
@@ -244,10 +245,15 @@ token は含みません。
 ## アップグレード、診断、アンインストール
 
 ```bash
-./upgrade.sh       # 退役(fail-closed)：ワンクリック更新を無効化、管理されたリリース手順のみ
+./upgrade.sh       # fetch・install・build・restart・health gate、失敗時は自動ロールバック
 ./doctor.sh        # Python、依存、herdr、Agent Mail、認証、サービスをチェック
 ./uninstall.sh     # user service のみ削除。コード・設定・データは保持
 ```
+
+upgrader は tracked worktree が clean で、現在ブランチを fast-forward できる場合だけ
+動きます。ローカル変更、ahead/diverged commit、同時実行は拒否し、未追跡ファイルは
+削除しません。このソース経路は pre-stable 期間向けです。`origin/main` への candidate
+公開は引き続き `release_lane.py` を使い、旧 V1 Web アップグレード API は退役のままです。
 
 テストの実行:`.venv/bin/pip install -r requirements-dev.txt` の後に
 `.venv/bin/pytest -q`
@@ -265,7 +271,7 @@ agent-cockpit/
 ├── static/index.html      旧ボード残留（インストール入口は起動しない）
 ├── tests/                 リグレッション/セキュリティテスト
 ├── install.sh             3.0 ワンコマンド（web/dist + dev_server）
-├── upgrade.sh             退役
+├── upgrade.sh             ソース版一括更新と自動ロールバック
 ├── doctor.sh / uninstall.sh
 ├── agent-cockpit.service  3.0 systemd unit（ExecStart=dev_server.py）
 └── launchd.sh / agent-cockpit.plist  macOS LaunchAgent
