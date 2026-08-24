@@ -363,6 +363,25 @@
   flex: none;
 }
 
+.gc-reply-ref {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  margin: 0 0 4px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--gc-accent);
+  border-radius: 4px;
+  color: var(--gc-text2);
+  background: color-mix(in srgb, var(--gc-accent) 7%, var(--gc-side));
+  font-size: 12px;
+}
+
+.gc-reply-ref span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .gc-msg-body {
   background: var(--gc-side);
   border-radius: 4px var(--gc-r-md) var(--gc-r-md) var(--gc-r-md);

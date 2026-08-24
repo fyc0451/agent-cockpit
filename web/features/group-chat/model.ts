@@ -914,11 +914,13 @@ export type MailEntry =
       git?: { files: number; stat: string }
       source?: string
       direct?: boolean
+      replyTo?: { id: string; text: string }
     }
 
 /** Agent Mail 一封邮 → 瀑布流一条气泡。 */
 export function mailToEntries(messages: MailMessage[], members: ChatMember[]): MailEntry[] {
   const out: MailEntry[] = []
+  const pendingByMember = new Map<string, Extract<MailEntry, { kind: 'me' }>[]>()
   for (const message of messages) {
     const text = stripMailMeta(message.text)
     if (!text || isIdentityChromeOnly(text)) continue
@@ -928,7 +930,7 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
     const targets = displayReplyTargets(message.to, members)
     if (isHumanSender(message.sender)) {
       if (message.to.length === 1 && message.to[0] === '终端') continue
-      out.push({
+      const entry: Extract<MailEntry, { kind: 'me' }> = {
         id,
         kind: 'me',
         text,
@@ -942,13 +944,27 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
         ),
         source: message.source,
         direct: message.direct,
-      })
+      }
+      out.push(entry)
+      const recipients = targets.includes('all') || targets.includes('所有人')
+        ? members.map((item) => item.name)
+        : targets
+      for (const recipient of recipients) {
+        const key = recipient.trim().toLowerCase()
+        if (!key || key === '我') continue
+        pendingByMember.set(key, [...(pendingByMember.get(key) ?? []), entry])
+      }
       continue
     }
     const member = members.find(
       (item) => item.mailName === message.sender || item.name === message.sender,
     )
-    out.push({
+    const pendingKey = (member?.name || message.sender).trim().toLowerCase()
+    const pending = pendingByMember.get(pendingKey) ?? []
+    const replyTo = pending.shift()
+    if (pending.length > 0) pendingByMember.set(pendingKey, pending)
+    else pendingByMember.delete(pendingKey)
+    const entry: Extract<MailEntry, { kind: 'agent' }> = {
       id,
       kind: 'agent',
       paneId: member?.paneId || (rawId.startsWith('pane:') ? rawId.slice(5) : `mail:${message.sender}`),
@@ -967,7 +983,9 @@ export function mailToEntries(messages: MailMessage[], members: ChatMember[]): M
         : undefined,
       source: message.source,
       direct: message.direct,
-    })
+    }
+    if (replyTo) entry.replyTo = { id: replyTo.id, text: replyTo.text }
+    out.push(entry)
   }
   return out
 }

@@ -754,6 +754,8 @@ describe('mailToEntries', () => {
       + '忙完再改输入框。',
     )).toBe('忙完再改输入框。')
     expect(entries[1]).toMatchObject({ kind: 'agent', name: 'kimi', text: '好', paneId: '%2' })
+    expect(entries[1]).toMatchObject({ replyTo: { id: 'mail:1', text: '去改瀑布流' } })
+    expect(entries[2]).not.toHaveProperty('replyTo')
     expect(entries[2]).toMatchObject({ kind: 'agent', text: '改完了' })
     expect(mailCoversLocalMe(entries, { text: '去改瀑布流' })).toBe(true)
     expect(stripMailMeta('<!-- agent-cockpit-meta:{"v":1} -->\n好的')).toBe('好的')
@@ -833,6 +835,22 @@ describe('mailToEntries', () => {
       [{ id: 8, sender: 'human', program: '', text: 'vim', to: ['终端'], ts: 304 }],
       members,
     )).toEqual([])
+  })
+
+  it('按成员分别关联尚未处理的定向消息，不把无目标结果挂到问题下', () => {
+    const members = [
+      member({ name: 'OlivePeak', mailName: 'OlivePeak', kind: 'codex', paneId: 'w1:p1' }),
+      member({ name: 'BronzePeak', mailName: 'BronzePeak', kind: 'kimi', paneId: 'w1:p2' }),
+    ]
+    const entries = mailToEntries([
+      { id: 20, sender: 'human', program: '', text: '描述在回复里', to: ['OlivePeak'], ts: 1 },
+      { id: 21, sender: 'BronzePeak', program: 'kimi', text: '我没有收到这条', to: ['human'], ts: 2 },
+      { id: 22, sender: 'OlivePeak', program: 'codex', text: '这是对应回复', to: ['human'], ts: 3 },
+    ], members)
+    expect(entries[1]).not.toHaveProperty('replyTo')
+    expect(entries[2]).toMatchObject({
+      replyTo: { id: 'mail:20', text: '描述在回复里' },
+    })
   })
 
   it('fetchSessionMail ledger 走 source=ledger', async () => {

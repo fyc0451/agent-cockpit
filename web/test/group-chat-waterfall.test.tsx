@@ -121,6 +121,22 @@ describe('Waterfall 长文本', () => {
     expect(screen.getAllByText('定向')).toHaveLength(2)
   })
 
+  it('agent 结果在正文上方显示它回复的原消息', () => {
+    render(
+      <Waterfall
+        entries={[{
+          ...entry,
+          id: 'agent_reply',
+          text: '已将完整描述写入终端。',
+          replyTo: { id: 'mail:20', text: '描述在回复里' },
+        }]}
+        hasSession
+      />,
+    )
+    expect(screen.getByText('回复：')).toBeInTheDocument()
+    expect(screen.getByText('描述在回复里').closest('.gc-reply-ref')).not.toBeNull()
+  })
+
   it('我的气泡露出排队中/已送达/已读，结论带用时，看现场带未读数', () => {
     render(
       <Waterfall

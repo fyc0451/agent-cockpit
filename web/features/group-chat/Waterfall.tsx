@@ -199,6 +199,7 @@ export type ChatEntry =
       git?: { files: number; stat: string }
       source?: string
       direct?: boolean
+      replyTo?: { id: string; text: string }
     }
   | { id: string; kind: 'event'; text: string; ts: number }
   | { id: string; kind: 'error'; text: string; ts: number }
@@ -302,6 +303,12 @@ function EntryRow({
           )}
           <time className="gc-msg-time">{live ? '现在' : fmtTime(entry.ts)}</time>
         </div>
+        {entry.replyTo && (
+          <div className="gc-reply-ref" title={entry.replyTo.text}>
+            <span>回复：</span>
+            <span>{entry.replyTo.text}</span>
+          </div>
+        )}
         <MessageBody text={entry.text} preferConclusion onOpenPath={onOpenPath} />
         {live && onOpenAgent && (
           <div className="gc-msg-actions">
