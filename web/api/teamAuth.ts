@@ -14,6 +14,17 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
+const TEAM_PRESENCE_CLIENT_STORAGE_KEY = 'cockpit-team-presence-client-id'
+
+export function teamPresenceClientId(): string {
+  const existing = window.localStorage.getItem(TEAM_PRESENCE_CLIENT_STORAGE_KEY)
+  if (existing) return existing
+  const generated = globalThis.crypto?.randomUUID?.()
+    ?? `cockpit-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  window.localStorage.setItem(TEAM_PRESENCE_CLIENT_STORAGE_KEY, generated)
+  return generated
+}
+
 export async function teamLogin(username: string, password: string): Promise<void> {
   const response = await fetch('/api/team-auth/login', {
     method: 'POST',
@@ -64,6 +75,8 @@ export async function teamRegister(input: {
 export async function teamLogout(): Promise<void> {
   const response = await fetch('/api/team-auth/logout', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: teamPresenceClientId() }),
     credentials: 'include',
   })
 
@@ -72,6 +85,23 @@ export async function teamLogout(): Promise<void> {
       code: 'logout_failed',
       message: '退出登录失败',
       retryable: false,
+    })
+  }
+}
+
+export async function sendTeamPresence(online: boolean): Promise<void> {
+  const response = await fetch('/api/team/presence', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: teamPresenceClientId(), online }),
+  })
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'presence_failed',
+      message: '更新在线状态失败',
+      retryable: response.status >= 500,
+      status: response.status,
     })
   }
 }
@@ -646,6 +676,8 @@ function parseTeamMember(raw: unknown): TeamMember | null {
     mention_handle: typeof raw.mention_handle === 'string' ? raw.mention_handle : '',
     role: typeof raw.role === 'string' ? raw.role : 'member',
     status: typeof raw.status === 'string' ? raw.status : '',
+    online: raw.online === true,
+    last_seen_at: typeof raw.last_seen_at === 'string' ? raw.last_seen_at : null,
   }
 }
 

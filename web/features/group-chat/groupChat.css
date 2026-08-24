@@ -301,6 +301,19 @@
   font-weight: 700;
 }
 
+.gc-team-presence-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--gc-text3);
+}
+
+.gc-team-presence-dot.is-online {
+  background: var(--gc-green);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--gc-green) 18%, transparent);
+}
+
 .gc-msg-kind {
   font-size: 11px;
   color: var(--gc-text3);

@@ -13,6 +13,19 @@ import css from './DetailsPanel.module.css'
 
 export type DetailsTab = 'members' | 'files'
 
+function teamPresenceLabel(member: TeamMember, now = Date.now()): string {
+  if (member.online === true) return '在线'
+  if (!member.last_seen_at) return '离线'
+  const lastSeen = new Date(member.last_seen_at).getTime()
+  if (!Number.isFinite(lastSeen)) return '离线'
+  const elapsedMinutes = Math.max(0, Math.floor((now - lastSeen) / 60_000))
+  if (elapsedMinutes < 1) return '刚刚在线'
+  if (elapsedMinutes < 60) return `${elapsedMinutes} 分钟前`
+  const elapsedHours = Math.floor(elapsedMinutes / 60)
+  if (elapsedHours < 24) return `${elapsedHours} 小时前`
+  return `${Math.floor(elapsedHours / 24)} 天前`
+}
+
 interface DetailsPanelProps {
   tab: DetailsTab
   onTabChange: (tab: DetailsTab) => void
@@ -120,6 +133,7 @@ export function DetailsPanel({
               {activeTeamMembers.map((member) => {
                 const name = member.display_name || `@${member.mention_handle}`
                 const role = member.role === 'admin' ? '管理员' : '成员'
+                const presence = teamPresenceLabel(member)
                 const isCurrent = member.mention_handle.toLowerCase()
                   === teamCurrentMentionHandle?.toLowerCase()
                 const content = (
@@ -129,12 +143,19 @@ export function DetailsPanel({
                     </span>
                     <span className="gc-member-main">
                       <span className="gc-member-name">
+                        <span
+                          className={`gc-team-presence-dot${member.online ? ' is-online' : ''}`}
+                          aria-hidden
+                          title={presence}
+                        />
                         {name}
                         {member.role === 'admin' && (
                           <span className="gc-leader-badge">管理员</span>
                         )}
                       </span>
-                      <span className="gc-member-sub">@{member.mention_handle} · {role}</span>
+                      <span className="gc-member-sub">
+                        @{member.mention_handle} · {role} · {presence}
+                      </span>
                     </span>
                   </>
                 )

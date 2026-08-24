@@ -56,4 +56,6 @@ export interface TeamMember {
   mention_handle: string
   role: string // admin | member
   status: string // invited | active | removed
+  online?: boolean
+  last_seen_at?: string | null
 }

@@ -3,13 +3,16 @@ import {
   approveTeamUser,
   approveTeamReplyRequest,
   createTeamInvitation,
+  listTeamMembers,
   listTeamReplyRequests,
   listTeamProjects,
   rejectTeamReplyRequest,
   requestTeamJoin,
   setTeamReplyMode,
+  sendTeamPresence,
   teamChangePassword,
   teamRegister,
+  teamPresenceClientId,
   teamSessionBindings,
 } from '../api/teamAuth'
 
@@ -81,6 +84,43 @@ describe('团队普通成员 API', () => {
     const projects = await listTeamProjects()
 
     expect(projects.map((project) => project.membership?.status)).toEqual(['active', 'invited'])
+  })
+
+  it('上报稳定客户心跳并解析成员在线状态', async () => {
+    window.localStorage.clear()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ online: true }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          members: [{
+            human_id: 7,
+            display_name: 'Alice',
+            mention_handle: 'alice',
+            role: 'member',
+            status: 'active',
+            online: true,
+            last_seen_at: '2026-08-24T14:00:00Z',
+          }],
+        }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const clientId = teamPresenceClientId()
+    expect(teamPresenceClientId()).toBe(clientId)
+    await sendTeamPresence(true)
+    await expect(listTeamMembers('ready')).resolves.toMatchObject([{
+      mention_handle: 'alice',
+      online: true,
+      last_seen_at: '2026-08-24T14:00:00Z',
+    }])
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/team/presence', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId, online: true }),
+    })
   })
 
   it('重复加入申请返回幂等 200 时仍视为成功', async () => {

@@ -45,6 +45,7 @@ import {
   listTeamProjects,
   listTeamMembers,
   requestTeamJoin,
+  sendTeamPresence,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
 import type { TeamBinding, TeamMember, TeamSessionCandidate, TeamTopic } from '../team/model'
@@ -99,6 +100,7 @@ import './groupChat.css'
 
 const POLL_MS = 10_000
 export const TEAM_BINDINGS_REFRESH_MS = 5_000
+export const TEAM_PRESENCE_HEARTBEAT_MS = 20_000
 const MAX_ENTRIES = 300
 
 function restoreLocalEntries(session: string): ChatEntry[] {
@@ -279,6 +281,25 @@ export function GroupChatPage() {
     enabled: teamEnabled,
     staleTime: 30_000,
   })
+
+  useEffect(() => {
+    if (!teamEnabled || teamAuthQ.data?.logged_in !== true) return
+    const heartbeat = () => {
+      void sendTeamPresence(true).catch(() => undefined)
+    }
+    heartbeat()
+    const interval = window.setInterval(heartbeat, TEAM_PRESENCE_HEARTBEAT_MS)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') heartbeat()
+    }
+    window.addEventListener('online', heartbeat)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('online', heartbeat)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [teamEnabled, teamAuthQ.data?.logged_in])
 
   const teamBindingsQ = useQuery({
     queryKey: ['team-bindings'],

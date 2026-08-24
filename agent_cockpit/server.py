@@ -937,6 +937,7 @@ async def _custom_roots_exception_handler(request: Request, exc: files.CustomRoo
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 TEAM_API_ROUTES = (
     (re.compile(r"^humans/me$"), {"GET", "PUT"}),
+    (re.compile(r"^presence$"), {"POST"}),
     (re.compile(r"^inbox$"), {"GET"}),
     (re.compile(r"^inbox/mark-read$"), {"POST"}),
     (re.compile(r"^projects$"), {"GET", "POST"}),
@@ -2247,6 +2248,14 @@ class HumanUserStatusReq(BaseModel):
 
 class HumanPasswordChangeReq(BaseModel):
     new_password: str = Field(min_length=1, max_length=256)
+
+
+class HumanPresenceReq(BaseModel):
+    client_id: str = Field(
+        min_length=16,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]+$",
+    )
 
 
 class AckReq(BaseModel):
@@ -5190,7 +5199,7 @@ def api_team_auth_status(request: Request):
 
 
 @app.post("/api/team-auth/logout")
-def api_team_auth_logout(request: Request):
+def api_team_auth_logout(request: Request, req: HumanPresenceReq | None = None):
     """退出 Human 登录并 fail closed 暂停、撤销本机自动回复 capability。"""
     hub = hub_client.public_team_config()["team_hub"]
     authorization: str | None = None
@@ -5200,6 +5209,18 @@ def api_team_auth_logout(request: Request):
         human_id = int(human["id"])
     except (HTTPException, ValueError):
         pass
+    if authorization is not None and req is not None:
+        try:
+            hub_client.human_api(
+                "POST",
+                "/hub/api/presence",
+                authorization,
+                {"client_id": req.client_id, "online": False},
+            )
+        except Exception:
+            # Presence is advisory. Authentication logout and capability
+            # revocation must still complete if the shared Hub is unavailable.
+            logger.exception("Team 注销时 presence 下线上报失败")
     with _TEAM_SESSION_BIND_LOCK:
         if human_id is None:
             suspended = team_sessions.suspend_all(revoke_capability=True)

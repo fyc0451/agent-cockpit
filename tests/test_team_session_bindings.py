@@ -960,7 +960,11 @@ def test_logout_suspends_worker_revokes_remote_capability_and_keeps_binding(
         notify=lambda *_args: True,
     )
 
-    response = client.post("/api/team-auth/logout", headers=headers)
+    response = client.post(
+        "/api/team-auth/logout",
+        headers=headers,
+        json={"client_id": "cockpit-wsl-1234"},
+    )
 
     assert response.status_code == 200
     assert response.json() == {
@@ -968,6 +972,12 @@ def test_logout_suspends_worker_revokes_remote_capability_and_keeps_binding(
         "automation_suspended": 1,
         "revocation_failures": 0,
     }
+    assert calls[-2] == (
+        "POST",
+        "/hub/api/presence",
+        "Bearer human.jwt",
+        {"client_id": "cockpit-wsl-1234", "online": False},
+    )
     assert calls[-1] == (
         "DELETE",
         "/hub/api/projects/demo/session-lead",

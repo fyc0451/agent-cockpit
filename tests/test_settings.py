@@ -344,6 +344,11 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
     response = client.get("/api/team/projects", headers=headers)
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+    assert client.post(
+        "/api/team/presence",
+        headers=headers,
+        json={"client_id": "cockpit-wsl-1234", "online": True},
+    ).status_code == 200
     response = client.patch(
         "/api/team/projects/demo/members/7",
         headers=headers,
@@ -392,6 +397,12 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
             {"display_name": "fyc"},
         ),
         ("GET", "/hub/api/projects", "Bearer human.jwt", None),
+        (
+            "POST",
+            "/hub/api/presence",
+            "Bearer human.jwt",
+            {"client_id": "cockpit-wsl-1234", "online": True},
+        ),
         (
             "PATCH",
             "/hub/api/projects/demo/members/7",
@@ -484,6 +495,11 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         json={},
     ).status_code == 404
     client.cookies.clear()
+    assert client.post(
+        "/api/team/presence",
+        headers=headers,
+        json={"client_id": "cockpit-wsl-1234", "online": True},
+    ).status_code == 401
     assert client.get("/api/team/projects", headers=headers).status_code == 401
 
 

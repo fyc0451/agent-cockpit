@@ -1,8 +1,11 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { vi } from 'vitest'
 import { DetailsPanel } from '../features/group-chat/DetailsPanel'
-import { TEAM_BINDINGS_REFRESH_MS } from '../features/group-chat/GroupChatPage'
+import {
+  TEAM_BINDINGS_REFRESH_MS,
+  TEAM_PRESENCE_HEARTBEAT_MS,
+} from '../features/group-chat/GroupChatPage'
 import { AppFrame } from '../features/shell/AppFrame'
 import { renderApp, stubDefaultFetch } from './helpers'
 
@@ -40,6 +43,7 @@ function renderTeamDetails({
 describe('团队话题成员详情', () => {
   it('登录后每 5 秒刷新 Session 绑定候选', () => {
     expect(TEAM_BINDINGS_REFRESH_MS).toBe(5_000)
+    expect(TEAM_PRESENCE_HEARTBEAT_MS).toBe(20_000)
   })
 
   it('只显示 Team Hub 已加入的同事，不显示本机 Agent 或 Boss', () => {
@@ -67,6 +71,17 @@ describe('团队话题成员详情', () => {
               mention_handle: 'alice',
               role: 'admin',
               status: 'active',
+              online: true,
+              last_seen_at: new Date().toISOString(),
+            },
+            {
+              human_id: 9,
+              display_name: 'Bob Li',
+              mention_handle: 'bob',
+              role: 'member',
+              status: 'active',
+              online: false,
+              last_seen_at: new Date(Date.now() - 5 * 60_000).toISOString(),
             },
             {
               human_id: 8,
@@ -83,7 +98,8 @@ describe('团队话题成员详情', () => {
 
     const panel = screen.getByLabelText('团队成员')
     expect(within(panel).getByText('Alice Chen')).toBeInTheDocument()
-    expect(within(panel).getByText('@alice · 管理员')).toBeInTheDocument()
+    expect(within(panel).getByText('@alice · 管理员 · 在线')).toBeInTheDocument()
+    expect(within(panel).getByText('@bob · 成员 · 5 分钟前')).toBeInTheDocument()
     expect(within(panel).queryByText('Pending User')).not.toBeInTheDocument()
     expect(within(panel).queryByText('我')).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: '文件' })).not.toBeInTheDocument()
@@ -172,6 +188,12 @@ describe('团队话题成员详情', () => {
       '/api/team/projects/hr-ready/members',
       { credentials: 'include' },
     )
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/team/presence',
+        expect.objectContaining({ method: 'POST', credentials: 'include' }),
+      )
+    })
     await userEvent.setup().click(
       within(panel).getByRole('button', { name: '将 @alice 加入收件人' }),
     )

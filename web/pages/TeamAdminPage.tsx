@@ -246,7 +246,12 @@ function TopicMemberRows({ slug }: { slug: string }) {
                 {member.role === 'admin' && <Tag tone="accent">管理员</Tag>}{' '}
                 <Tag tone={member.status === 'invited' ? 'warning' : member.status === 'active' ? 'success' : 'neutral'}>
                   {memberStatusLabel(member.status)}
-                </Tag>
+                </Tag>{' '}
+                {member.status === 'active' && (
+                  <Tag tone={member.online ? 'success' : 'neutral'}>
+                    {member.online ? '在线' : '离线'}
+                  </Tag>
+                )}
               </td>
               <td style={{ padding: '6px 4px', textAlign: 'right' }}>
                 {member.status === 'invited' && (
