@@ -10,16 +10,20 @@
 
 [English](README.en.md) | [日本語](README.ja.md)
 
-## 当前版本：Cockpit 3.0
+## 当前版本：本机群聊 + Team Topic
 
-当前产品是 **3.0 群聊**，跑在本机 `http://127.0.0.1:8790/#/chat`。
-界面是瀑布流 + 成员栏 + 输入框，不是旧看板。产品线只有 3.0 和规划中的 4.0，
-没有单独的 2.0 / 3.5 安装入口。
+当前安装包同时包含两种互不混账的协作方式：
 
-当前入口就是 `install.sh`：编译 `web/dist`，用 `scripts/dev_server.py` 起
-3.0 群聊。旧看板不再作为安装结果。
+- **本机群聊（3.0）**：控制本机 herdr 里的 CLI agent，支持排队、打断、附件、
+  终端接管和 Agent Mail 协作。
+- **Team Topic（4.0）**：让不同机器上的真实成员通过共享 Team Hub 收发消息；
+  每位成员把 Topic 绑定到自己的一个运行中 Session，由唯一 Lead 按 `auto` 或
+  `confirm` 规则回复。
 
-## 安装 3.0
+两者共用一个 Web 入口：`http://127.0.0.1:8790/#/chat`。`install.sh` 会编译
+`web/dist`、安装本机 Agent Mail 工具并注册后台服务；旧看板不再作为安装结果。
+
+## 快速安装
 
 和 herdr 装在同一台机器上。需要：
 
@@ -27,20 +31,38 @@
 | --- | --- |
 | [herdr](https://herdr.dev) | agent 所在的终端会话 |
 | Git、Python 3.12+、Node.js 20+（含 npm） | 拉代码、跑服务、编译 `web/dist` |
-| [Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) Hub（`:8765`） | 身份和群聊投递；没有 Hub 不能建工作区 |
+| [Agent Mail](https://github.com/fyc0451/mcp_agent_mail) Hub（默认 `:8765`） | 身份和本机协作；安装器会检查、复用或安装 |
 | 至少一个已登录的 Agent CLI | Codex / Claude / Kimi / OpenCode / Grok / Qoder CLI CN |
 
 仓库可以 clone 到任意路径。不必建 `$HOME/github`。发现根默认是仓库的上一级
 目录；clone 就在 Home 下一层时，用仓库自己。要扫别的代码目录时再设
 `COCKPIT_PROJECT_ROOT`（必须是已存在的真实目录，不能是 Home 本身）。
 
+### 方式一：clone 后安装（推荐）
+
+私有仓库协作者要先获得仓库权限并配置 GitHub SSH key。也可以运行
+`gh auth login` 后用 `gh repo clone fyc0451/agent-cockpit`。不要下载单个
+`install.sh`：安装器还依赖仓库里的 service、前端和辅助脚本。
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fyc0451/agent-cockpit/main/install.sh | bash
+git clone git@github.com:fyc0451/agent-cockpit.git
+cd agent-cockpit
+./install.sh
+./doctor.sh
 ```
 
-安装器会克隆到 `~/agent-cockpit`（已有 checkout 就在原地装）、建 venv、装
-Agent Mail、编译 `web/dist`，并注册 `agent-cockpit.service`（macOS 为
-LaunchAgent）。启动后打开 `http://127.0.0.1:8790/#/chat`。
+仓库公开时也可以使用 HTTPS：
+
+```bash
+git clone https://github.com/fyc0451/agent-cockpit.git
+cd agent-cockpit
+./install.sh
+./doctor.sh
+```
+
+安装器会在当前 checkout 建 venv、安装 Agent Mail 命令与本机 Hub、编译
+`web/dist`，并注册 `agent-cockpit.service`（macOS 为 LaunchAgent）。启动后打开
+`http://127.0.0.1:8790/#/chat`。重复运行安装器是安全的，可用于修复缺失依赖。
 
 已经有可用的 Agent Mail Hub 时会复用，不会覆盖手工/远程的
 `~/.agent-mail/client.env`。跳过本机 Hub 时设 `AGENT_MAIL_SKIP_HUB=1`。
@@ -49,7 +71,9 @@ LaunchAgent）。启动后打开 `http://127.0.0.1:8790/#/chat`。
 不要直接 `.venv/bin/python server.py`：没有 `COCKPIT_NEXT_PROFILE=dev` 时
 首页不是 3.0。服务单元已经走 `scripts/dev_server.py`。
 
-手动安装（不注册 systemd 时）同样要编译前端并用启动器：
+### 方式二：只在前台运行
+
+不注册 systemd/launchd 时，同样要编译前端并用当前启动器：
 
 ```bash
 git clone https://github.com/fyc0451/agent-cockpit.git
@@ -98,6 +122,8 @@ COCKPIT_HOST=0.0.0.0 .venv/bin/python scripts/dev_server.py
 - **文件与附件** — 群聊里看仓库、复制路径；附件默认折叠。
 - **设置** — 外观、源码一键升级、环境自检。
 - **移动端** — Hash 路由，手机浏览器可打开同一群聊。
+- **Team Topic** — 邀请注册、成员审批、跨机器时间线、Session 绑定，以及
+  `auto` / `confirm` 两种受限 Lead 回复模式。
 
 ## 工作原理
 
@@ -109,6 +135,7 @@ Agent Cockpit(FastAPI,与 herdr 同机)
     ├── 可选只读本机 Agent Mail SQLite(WAL 模式)
     ├── 经本机或远程 Agent Mail hub MCP 写入
     ├── 读 herdr socket(所有 session)(pane 状态 / 输出)
+    ├── 可选连接团队共享 Team Hub + Human issuer
     └── 经 SSE 向浏览器推送状态与 diff
 ```
 
@@ -118,7 +145,7 @@ Agent Cockpit(FastAPI,与 herdr 同机)
 Agent Mail 是新建工作区和添加 Agent 的前置条件；hub 暂时挂掉时禁止新增，已有消息只读，
 群聊里已有气泡和 herdr pane 仍可查看。
 
-## 首次使用
+## 首次使用：本机 Agent
 
 1. 确认 herdr 已在跑，并且至少有一个已登录的 agent pane。
 2. 浏览器打开 `http://127.0.0.1:8790/#/chat`。
@@ -126,12 +153,49 @@ Agent Mail 是新建工作区和添加 Agent 的前置条件；hub 暂时挂掉�
 4. 输入框默认是 **排队**。`@` 成员后回车，对方空闲才会开始做。
    只有要停手头工作时才点 **打断**。
 5. 回复先进瀑布流。长过程折在「展开过程」里，结论在气泡里。
-6. 设置页可改外观、跑环境自检、给源码 8790 做一键升级。
+6. 设置页可改外观、跑环境自检、配置 Team Hub。
 
 Hash 路由：群聊 `/#/chat`，设置 `/#/settings`。旧路径会落到群聊。
 
-旧看板只作为仓库里的 `static/index.html` 残留；3.0 安装入口不再启动它。
-那份界面的手册见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
+旧看板只作为仓库里的 `static/index.html` 残留，当前安装入口不再启动它。
+
+## 首次使用：加入现有团队
+
+普通成员不需要自己部署团队服务器。先向管理员索取三样东西：
+
+1. Team Hub API 地址（通常端口 `8765`）。
+2. Human issuer 地址（通常端口 `8766`）。
+3. 一条仍有效的团队邀请链接。
+
+然后在**自己的机器和浏览器**完成：
+
+1. 按上文安装 Cockpit，并确保本机有一个正在运行、已注册 Agent Mail 身份的
+   herdr Session。
+2. 打开「设置 → 团队 Hub 连接」，填写 Team Hub API 与 Human issuer 并保存。
+   内网明文 HTTP 只适用于受信任网络；跨公网必须使用 HTTPS 或 VPN。
+3. 打开管理员发来的邀请链接，自行设置用户名和密码。管理员批准后登录。
+4. 回到群聊左侧 Team 区域，打开对应 Topic，点击「绑定」，选择本机同项目的
+   ready Session。
+5. 发送消息。`auto` 会由绑定 Session 的唯一 Lead 自动处理并回复；`confirm`
+   会先在每条收到的消息下等待 Human 点「让 Lead 回复」。
+
+Team Topic 不会远控其他成员的机器，也不会把远端正文直接注入任意 pane。找不到
+可绑定 Session 时，先确认 Session 正在运行、工作目录/Agent Mail project 一致，
+且存在唯一 Lead 身份。
+
+## 管理员：最小团队流程
+
+1. 部署一个团队共享的
+   [mcp_agent_mail](https://github.com/fyc0451/mcp_agent_mail) Team Hub 与 Human
+   issuer。Cockpit 的本机 Hub 安装器不等于公网团队服务。
+2. 每位成员在自己的 Cockpit「设置 → 团队 Hub 连接」填写相同的两个地址。
+3. 在 `/#/team` 创建 Topic，生成邀请链接并发给真实成员。
+4. 成员注册后，管理员点一次「批准加入」；成员随后登录并绑定自己的 Session。
+5. 为 Topic 选择 `auto` 或 `confirm` 回复策略。要更换负责人时使用「改绑」，
+   不要在单条消息上任意指定其他 pane。
+
+完整的安装、角色、Agent Mail、Team 收件处理和故障排查见
+[用户手册](docs/USER-GUIDE.md)。
 
 ## 配置
 
@@ -158,9 +222,25 @@ localStorage。session 的 Agent Mail 通信项目绑定存在
 ## 升级、诊断、卸载
 
 ```bash
-./upgrade.sh       # 已退役(fail-closed)：一键升级引擎停用，升级走受管人工发布
+cd /path/to/agent-cockpit
+git pull --ff-only
+./install.sh       # 重装依赖、重编前端并重启托管服务
 ./doctor.sh        # 检查 Python、依赖、herdr、Agent Mail、认证、服务
 ./uninstall.sh     # 只删 user service;代码、配置、数据保留
+```
+
+工作区有未提交修改或本地提交时，不要直接 `git pull`；先 review/commit，再由维护者
+合并。`upgrade.sh` 已退役（fail-closed），不要使用。
+
+常用服务检查：
+
+```bash
+# Linux / WSL
+systemctl --user status agent-cockpit.service
+journalctl --user -u agent-cockpit.service -n 100 --no-pager
+
+# macOS
+launchctl print "gui/$(id -u)/io.github.fyc0451.agent-cockpit"
 ```
 
 跑测试:`.venv/bin/pip install -r requirements-dev.txt && .venv/bin/pytest -q`
@@ -195,8 +275,9 @@ CLI agent(codex、kimi、qoder)各自强大却互相看不见。herdr 把它们�
 
 - **GUI agent(如 ZCode Desktop)无法上看板** — 本驾驶舱驱动的是 herdr 下的
   *终端* CLI agent,GUI 应用没有可编程控制面。
-- **共享 token 认证** — 适合可信的个人局域网/VPN,不是多用户授权体系;
-  请放在防火墙或私有网络之后。
+- **本机共享 token 认证** — 只保护单台 Cockpit 的局域网入口，适合可信的个人
+  局域网/VPN；Team Topic 的 Human 账号由独立 issuer 管理。两者都应放在防火墙、
+  VPN 或 HTTPS 之后。
 - **传输安全** — HTTP 不保护会话 cookie,离开完全可信的网络请上 HTTPS 或
   Tailscale Serve。
 - **Agent Mail 为必需基础设施** — 只读它的 SQLite,写入一律走 hub MCP API；
