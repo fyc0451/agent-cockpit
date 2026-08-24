@@ -1032,7 +1032,7 @@ export function isDirectMessageVisible(
 
 
 const OVERSEER_PREAMBLE = /---\s*\n\s*🚨\s*MESSAGE FROM HUMAN OVERSEER 🚨[\s\S]*?The human's guidance supersedes all other priorities\.\s*\n\s*---\s*/giu
-const BOSS_HINT = /^[ \t❯]*Boss 在群聊给你(?:发了|排了一条)消息[^\n]*(?:\n+[ \t]*(?:请直接做|请做完手头事|请用 mail-recv|结论写在终端|本群 Leader 是|给 Leader 写信|需要写信时|不要写 grok-main)[^\n]*)*/mu
+const BOSS_HINT = /^[ \t❯]*Boss 在群聊给你(?:发了|排了一条)消息[^\n]*(?:\n+[ \t]*(?:请直接做|请做完手头事|请用 mail-recv|结论写在终端|本群 Leader 是|给 Leader 写信|需要写信时|不要写 grok-main|最终答复必须|不要只汇报|若 Boss 要求)[^\n]*)*/mu
 const META_COMMENT = /<!--\s*agent-cockpit-meta:[\s\S]*?-->\s*/gu
 const COPIED_OVERSEER_CHROME = /(?:^|\n)@\S+\s*\nHumanOverseer\s*\nWebUI\s*\n\d{1,2}:\d{2}\s*\n---\s*\n/u
 

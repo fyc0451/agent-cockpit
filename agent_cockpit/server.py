@@ -5636,7 +5636,7 @@ _OVERSEER_PREAMBLE_RE = re.compile(
 _BOSS_HINT_RE = re.compile(
     r"^[ \t❯]*Boss 在群聊给你发了消息[^\n]*"
     r"(?:\n+[ \t]*(?:请直接做|请用 mail-recv|结论写在终端|本群 Leader 是|"
-    r"给 Leader 写信|需要写信时|不要写 grok-main)[^\n]*)*",
+    r"给 Leader 写信|需要写信时|不要写 grok-main|最终答复必须|不要只汇报|若 Boss 要求)[^\n]*)*",
     re.MULTILINE,
 )
 _META_COMMENT_RE = re.compile(r"<!--\s*agent-cockpit-meta:[\s\S]*?-->\s*")
@@ -5855,6 +5855,9 @@ _HARVEST_SKIP_PREFIXES = (
     "结论写在终端",
     "论写在终端",
     "群聊会收进瀑布流",
+    "最终答复必须",
+    "不要只汇报",
+    "若 Boss 要求",
     "本群 Leader 是",
     "给 Leader 写信",
     "需要写信时用 mail-send",
@@ -7261,7 +7264,12 @@ def _chat_notify_hint(session: str, text: str, delivery: str) -> str:
         opener = (
             "Boss 在群聊给你发了消息。请直接做下面的任务，结论写在终端，群聊会收进瀑布流。\n"
         )
-    return opener + leader_line + text[:500]
+    answer_rule = (
+        "最终答复必须直接给出这条消息所需的完整答案；"
+        "不要只汇报“已回复、已写入终端、未发送邮件”等投递状态。"
+        "若 Boss 要求“在回复或群聊里写”，请直接重述所指的完整结果正文。\n\n"
+    )
+    return opener + leader_line + answer_rule + text[:500]
 
 
 def _notify_chat_recipients(

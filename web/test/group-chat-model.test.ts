@@ -762,6 +762,8 @@ describe('mailToEntries', () => {
     expect(stripMailMeta(
       '     ❯ Boss 在群聊给你发了消息。请直接做下面的任务，结论写在终端，群聊会收进瀑布流。\n'
       + '       本群 Leader 是 DarkBrook。需要写信时用 mail-send --to leader --thread scc-1，不要写 grok-main / 程序-main。\n'
+      + '最终答复必须直接给出这条消息所需的完整答案；不要只汇报“已回复、已写入终端、未发送邮件”等投递状态。'
+      + '若 Boss 要求“在回复或群聊里写”，请直接重述所指的完整结果正文。\n'
       + '没有普通节点同时多进多出。',
     )).toBe('没有普通节点同时多进多出。')
     const cleaned = stripMailMeta(

@@ -1201,6 +1201,9 @@ def test_notify_wakes_pane_when_mail_name_empty_but_flower_matches(isolated_ledg
     assert "分析下97号流程的草稿" in sent[0][2]
     assert "结论写在终端" in sent[0][2]
     assert "瀑布流" in sent[0][2]
+    assert "最终答复必须直接给出这条消息所需的完整答案" in sent[0][2]
+    assert "不要只汇报“已回复、已写入终端、未发送邮件”等投递状态" in sent[0][2]
+    assert "请直接重述所指的完整结果正文" in sent[0][2]
     assert "mail-recv" not in sent[0][2]
 
 
@@ -2825,6 +2828,8 @@ def test_extract_harvest_text_strips_prompt_and_git_chrome():
         "   master ~/badge/all_system/service/scc                          142K / 500K\n"
         "     ❯ Boss 在群聊给你发了消息。请直接做下面的任务，结论写在终端，群聊会收进瀑布流。\n"
         "       本群 Leader 是 DarkBrook。需要写信时用 mail-send --to leader --thread scc-1，不要写 grok-main / 程序-main。\n"
+        "最终答复必须直接给出这条消息所需的完整答案；不要只汇报“已回复、已写入终端、未发送邮件”等投递状态。"
+        "若 Boss 要求“在回复或群聊里写”，请直接重述所指的完整结果正文。\n"
         "没有普通节点同时多进多出。\n"
         "全图唯一多进多出是 aggregator 初始化数据汇聚。\n"
     )
@@ -2834,6 +2839,7 @@ def test_extract_harvest_text_strips_prompt_and_git_chrome():
     assert "" not in text
     assert "142K" not in text
     assert "mail-send" not in text
+    assert "投递状态" not in text
 
 
 def test_extract_harvest_text_restores_box_table():
