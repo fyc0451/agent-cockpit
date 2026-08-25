@@ -4297,6 +4297,21 @@ def _team_session_candidates() -> list[dict[str, Any]]:
             item["reason"] = "负责人本机身份缺失或不唯一"
             result.append(item)
             continue
+        try:
+            managed_runtime = team_sessions.is_managed_session(
+                str(item["session"]), str(item["generation"]),
+            )
+        except OSError:
+            item["reason"] = "Team Session 绑定状态不可用"
+            result.append(item)
+            continue
+        if managed_runtime and not herdr_client.readonly_agent_process_verified(
+            str(item["session"]), str(lead.get("pane_id") or ""),
+            str(lead.get("agent") or ""),
+        ):
+            item["reason"] = "Team Agent 真实进程未通过只读栅栏校验"
+            result.append(item)
+            continue
         item["ready"] = True
         item["mail_project"] = project
         result.append(item)
@@ -4961,6 +4976,7 @@ def api_team_session_create_and_bind(
                     args=safe_args,
                 ),
                 session_name=session_name,
+                managed_team=True,
             )
     except HTTPException as exc:
         rollback = (
@@ -8926,6 +8942,7 @@ def _create_chat_session(
     req: ChatSessionCreateReq,
     *,
     session_name: str | None = None,
+    managed_team: bool = False,
 ) -> dict[str, Any]:
     """拉起 herdr + Leader；Team 入口可先指定安全会话名和启动参数。"""
     workspace = _chat_workspace(workspace_id)
@@ -8942,15 +8959,33 @@ def _create_chat_session(
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     instance_id = herdr_client.new_agent_instance_id()
-    started = herdr_client.start_agent(
-        name, workspace["path"], agent,
-        model=req.model, layout="tab", label=agent, args=session_args,
-        instance_id=instance_id,
-    )
+    if managed_team:
+        started = herdr_client.start_team_readonly_agent(
+            session=name,
+            workdir=workspace["path"],
+            agent=agent,
+            model=req.model,
+            label=agent,
+            instance_id=instance_id,
+        )
+    else:
+        started = herdr_client.start_agent(
+            name, workspace["path"], agent,
+            model=req.model, layout="tab", label=agent, args=session_args,
+            instance_id=instance_id,
+        )
     if started.get("available") is False or started.get("error"):
         raise HTTPException(
             400,
             str(started.get("error") or f"{agent} 启动失败"),
+        )
+    pane_id = str(started.get("pane_id") or "")
+    if managed_team and not herdr_client.readonly_agent_process_verified(
+        name, pane_id, agent,
+    ):
+        raise HTTPException(
+            503,
+            "Team Agent 真实进程未通过只读栅栏校验，已拒绝绑定",
         )
     try:
         thread = chat_ledger.create_thread(
@@ -8958,7 +8993,6 @@ def _create_chat_session(
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    pane_id = str(started.get("pane_id") or "")
     agent_mail, leader = _register_created_chat_leader(
         workspace, name, pane_id, agent, instance_id,
     )
@@ -12418,11 +12452,17 @@ def _tick_persist_work() -> None:
         return
     snap = _enrich_board_identities(_herdr_runtime_snapshot())
     project = os.environ.get("AGENT_MEMORY_PROJECT") or persist_work.DEFAULT_PROJECT
+    try:
+        managed_sessions = team_sessions.managed_session_names()
+    except OSError:
+        logger.error("Team Session 绑定状态不可用，persist_work 已安全跳过")
+        return
     bound = persist_work.bound_sessions_for_project(
         workspaces=chat_ledger.list_workspaces(),
         threads=chat_ledger.list_threads(),
         project=project,
         extra_paths={Path(__file__).resolve().parents[1]},
+        excluded_sessions=managed_sessions,
     )
     leaders = {
         name: str(chat_roster.get_session_leader(name).get("leader_mail_name") or "")

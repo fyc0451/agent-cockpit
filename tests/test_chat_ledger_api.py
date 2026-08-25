@@ -617,6 +617,44 @@ def test_create_chat_session_starts_herdr_and_leader(isolated_ledger, monkeypatc
     assert agents[0][:3] == (body["session"], str(proj.resolve()), "codex")
 
 
+def test_managed_team_session_rejects_unsafe_real_process_before_registration(
+    isolated_ledger, monkeypatch,
+):
+    proj = isolated_ledger / "unsafe-team"
+    proj.mkdir()
+    client = _client()
+    workspace = client.post(
+        "/api/chat/workspaces", headers=_headers(), json={"path": str(proj)},
+    ).json()
+    monkeypatch.setattr(
+        server.herdr_client, "start_session",
+        lambda *_args, **_kwargs: {"available": True, "started": "team-demo"},
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "start_team_readonly_agent",
+        lambda **_kwargs: {
+            "available": True, "pane_id": "w1:p2", "agent": "codex",
+        },
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "readonly_agent_process_verified",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(
+        server, "_register_created_chat_leader",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("不安全进程不得注册 Team 身份")
+        ),
+    )
+
+    with pytest.raises(server.HTTPException, match="真实进程未通过只读栅栏"):
+        server._create_chat_session(
+            workspace["id"], server.ChatSessionCreateReq(agent="codex"),
+            session_name="team-demo", managed_team=True,
+        )
+    assert chat_ledger.get_thread_by_session("team-demo") is None
+
+
 def test_create_chat_session_registers_exact_first_agent_as_leader(
     isolated_ledger, monkeypatch,
 ):

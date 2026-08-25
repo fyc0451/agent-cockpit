@@ -39,6 +39,7 @@ def bound_sessions_for_project(
     threads: list[dict[str, Any]],
     project: str,
     extra_paths: set[Path] | None = None,
+    excluded_sessions: set[str] | None = None,
 ) -> set[str]:
     """只叫醒本项目工作区绑定的群，不把交接单灌进别的 session。"""
     extra = set()
@@ -61,10 +62,13 @@ def bound_sessions_for_project(
                 allowed.add(ws_id)
         except OSError:
             continue
+    excluded = {str(item) for item in (excluded_sessions or set()) if item}
     return {
         str(thread["herdr_session"])
         for thread in threads
-        if str(thread.get("workspace_id") or "") in allowed and thread.get("herdr_session")
+        if str(thread.get("workspace_id") or "") in allowed
+        and thread.get("herdr_session")
+        and str(thread["herdr_session"]) not in excluded
     }
 
 

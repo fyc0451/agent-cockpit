@@ -24,7 +24,9 @@ TOOLS_DIR = os.path.join(INSTALL_ROOT, "agent-mail-tools")
 from .common import (
     REGISTRY_DIR, helper_command, load_identity, mcp_call, mcp_tool, slugify,
 )
-from agent_cockpit import chat_ledger, chat_roster, coordination, next_profile  # noqa: E402
+from agent_cockpit import (  # noqa: E402
+    chat_ledger, chat_roster, coordination, next_profile, team_sessions,
+)
 
 
 next_profile.require_helper_environment((
@@ -958,6 +960,23 @@ def main(argv: list[str] | None = None) -> None:
                 human_recipients.append(handle)
         else:
             agent_recipients.append(recipient)
+    try:
+        managed_team_sender = team_sessions.managed_binding_for_sender(
+            str(identity.get("instance") or args.instance),
+            str(identity.get("name") or ""),
+            str(identity.get("project_key") or ""),
+        )
+    except OSError as exc:
+        if _OPAQUE_INSTANCE_RE.fullmatch(str(args.instance or "")):
+            raise SystemExit(
+                "error: 无法验证 managed sender 权限，已拒绝发送"
+            ) from exc
+        managed_team_sender = None
+    if managed_team_sender is not None and (agent_recipients or explicit_target):
+        raise SystemExit(
+            "error: 受控 Team Agent 只能通过 @成员回复当前 Topic，"
+            "禁止发送项目级 Agent Mail 或指定其他 Session/pane"
+        )
     args.thread = bound_mail_thread(
         args.thread, os.environ.get("HERDR_SESSION") or "",
     )

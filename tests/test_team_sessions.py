@@ -80,6 +80,26 @@ def test_managed_binding_lookup_only_returns_current_managed_runtime(
     assert team_sessions.managed_session_names() == set()
 
 
+def test_managed_sender_requires_exact_generation_name_and_project(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    _bind(
+        session_generation="i-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        mail_project=str(tmp_path / "project"),
+    )
+    matched = team_sessions.managed_binding_for_sender(
+        "i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "codex-main", str(tmp_path / "project"),
+    )
+    assert matched is not None and matched["project_slug"] == "alpha"
+    assert team_sessions.managed_binding_for_sender(
+        "i-bbbbbbbbbbbbbbbbbbbbbbbbbb", "codex-main", str(tmp_path / "project"),
+    ) is None
+    assert team_sessions.managed_binding_for_sender(
+        "i-aaaaaaaaaaaaaaaaaaaaaaaaaa", "other", str(tmp_path / "project"),
+    ) is None
+
+
 def test_legacy_local_session_binding_is_not_managed_or_worker_eligible(
     tmp_path, monkeypatch,
 ):

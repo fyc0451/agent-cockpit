@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from unittest.mock import call
+from unittest.mock import ANY, call
 
 from agent_cockpit import herdr_client
 import pytest
@@ -2008,6 +2008,100 @@ def _shell_process_info(pane_id="w1:p5", shell_pid=123):
     })
 
 
+def _agent_process_info(argv, pane_id="w1:p5"):
+    return "data: " + json.dumps({
+        "result": {"type": "pane_process_info", "process_info": {
+            "pane_id": pane_id,
+            "shell_pid": 123,
+            "foreground_process_group_id": 456,
+            "foreground_processes": [{
+                "pid": 456, "name": "codex", "argv": argv,
+            }],
+        }},
+    })
+
+
+def test_readonly_process_verification_checks_real_argv(monkeypatch):
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda *_args, **_kwargs: _agent_process_info([
+            "/opt/codex", "--sandbox", "read-only",
+        ]),
+    )
+    assert herdr_client.readonly_agent_process_verified(
+        "team-demo", "w1:p5", "codex",
+    ) is True
+
+
+def test_readonly_process_verification_rejects_provider_bypass(monkeypatch):
+    monkeypatch.setattr(
+        herdr_client, "_run",
+        lambda *_args, **_kwargs: _agent_process_info([
+            "/opt/codex", "--dangerously-bypass-approvals-and-sandbox",
+            "--sandbox", "read-only",
+        ]),
+    )
+    assert herdr_client.readonly_agent_process_verified(
+        "team-demo", "w1:p5", "codex",
+    ) is False
+
+
+def test_team_readonly_restart_keeps_atomic_launcher(monkeypatch) -> None:
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p5", name=instance_id, kind="codex",
+        args=["--sandbox", "read-only"], agent="codex",
+        workdir="/tmp/project", instance_id=instance_id,
+        display_name="codex", launch_mode="team_readonly",
+    )
+    running = {
+        "panes": [{
+            "pane_id": "w1:p5", "agent": "codex", "cwd": "/tmp/project",
+        }],
+        "agents": [{
+            "pane_id": "w1:p5", "agent": "codex", "name": None,
+            "interactive_ready": True,
+        }],
+    }
+    stopped = {
+        "panes": [{
+            "pane_id": "w1:p5", "agent": None, "cwd": "/tmp/project",
+        }],
+        "agents": [],
+    }
+    snapshots = iter([running, stopped])
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda _session: next(snapshots),
+    )
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda _agent: "/opt/codex")
+    monkeypatch.setattr(herdr_client, "_await_agent_detection", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        herdr_client, "readonly_agent_process_verified", lambda *_a, **_k: True,
+    )
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "process-info" in args:
+            return _shell_process_info()
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.restart_pane("demo", "w1:p5")
+
+    assert result["restarted"] is True
+    assert call(
+        ["--session", "demo", "pane", "run", "w1:p5", ANY],
+        timeout=8,
+    ) in calls
+    assert not [
+        item for item in calls
+        if item.args[0][2:4] == ["agent", "start"]
+    ]
+
+
 def test_restart_pane_rebuilds_original_managed_identity_on_same_pane(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     herdr_client.save_launch_descriptor(
@@ -3771,6 +3865,90 @@ def test_codex_home_managed_start_uses_atomic_pane_run(
     assert descriptor["args"] == ["--sandbox", "read-only"]
     assert descriptor["codex_home"] == str(home)
     assert descriptor["state"] == "active"
+
+
+def test_team_readonly_start_uses_atomic_pane_run_without_provider(
+    monkeypatch, tmp_path,
+) -> None:
+    empty = {
+        "session": _CODEXHOME_SESSION, "panes": [], "agents": [], "tabs": [],
+        "workspaces": [{"workspace_id": "w1", "focused": True}],
+        "focused_workspace_id": "w1",
+    }
+    detected = {
+        "session": _CODEXHOME_SESSION,
+        "panes": [{
+            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+            "cwd": _CODEXHOME_WORKDIR, "agent": "codex",
+        }],
+        "agents": [{"name": None, "agent": "codex", "pane_id": "w1:p2"}],
+        "tabs": [], "workspaces": [{"workspace_id": "w1", "focused": False}],
+        "focused_workspace_id": None,
+    }
+    calls, add_polls = _codexhome_harness(
+        monkeypatch, tmp_path, snapshots=[empty, detected],
+    )
+    add_polls([detected])
+
+    result = herdr_client.start_team_readonly_agent(
+        session=_CODEXHOME_SESSION,
+        workdir=_CODEXHOME_WORKDIR,
+        agent="codex",
+        instance_id=_CODEXHOME_INSTANCE,
+        label="codex",
+    )
+
+    assert result["available"] is True, result
+    assert result["pane_id"] == "w1:p2"
+    run_calls = [call for call in calls if call[2:4] == ["pane", "run"]]
+    assert len(run_calls) == 1
+    command = shlex.split(run_calls[0][-1])
+    assert command[:3] == ["/bin/sh", "--sandbox", "read-only"]
+    assert command[3] == "-c"
+    assert "trust_level=\"trusted\"" in command[4]
+    assert not [call for call in calls if call[2:4] == ["agent", "start"]]
+    descriptor = herdr_client.get_launch_descriptor_by_instance(
+        _CODEXHOME_INSTANCE,
+    )
+    assert descriptor is not None
+    assert descriptor["args"] == ["--sandbox", "read-only"]
+    assert descriptor["launch_mode"] == "team_readonly"
+
+
+def test_team_readonly_entry_does_not_accept_caller_args(tmp_path) -> None:
+    with pytest.raises(TypeError):
+        herdr_client.start_team_readonly_agent(
+            session=_CODEXHOME_SESSION,
+            workdir=_CODEXHOME_WORKDIR,
+            agent="codex",
+            instance_id=_CODEXHOME_INSTANCE,
+            args="--dangerously-bypass-approvals-and-sandbox",
+        )
+
+
+@pytest.mark.parametrize(
+    ("agent", "required"),
+    [
+        ("codex", ["--sandbox", "read-only"]),
+        ("kimi", ["--plan"]),
+        ("claude", ["--permission-mode", "plan"]),
+        ("grok", ["--permission-mode", "plan"]),
+    ],
+)
+def test_team_readonly_command_has_exact_allowlist(agent, required) -> None:
+    command = herdr_client._team_readonly_command(
+        agent_bin=f"/opt/{agent}", agent=agent, workdir="/tmp/project",
+        public_args=required,
+    )
+    tokens = shlex.split(command)
+    assert tokens[:1 + len(required)] == [f"/opt/{agent}", *required]
+    assert not any(token.startswith("--dangerously-") for token in tokens)
+
+    with pytest.raises(ValueError):
+        herdr_client._team_readonly_command(
+            agent_bin=f"/opt/{agent}", agent=agent, workdir="/tmp/project",
+            public_args=[*required, "--dangerously-bypass-hook-trust"],
+        )
 
 
 def test_codex_home_detection_failure_retires_and_closes(

@@ -2059,6 +2059,7 @@ def save_launch_descriptor(
     instance_id: str | None = None, display_name: str | None = None,
     project_id: str | None = None, workspace_id: str | None = None,
     codex_home: str | None = None,
+    launch_mode: str | None = None,
 ) -> dict[str, Any]:
     """原生启动成功后持久化权威 launch 契约；返回写入的规范化记录。
 
@@ -2071,6 +2072,13 @@ def save_launch_descriptor(
         if instance_id is None or kind != "codex":
             raise ValueError("codex home 仅适用于 managed codex descriptor")
         codex_home = _validate_workspace_codex_home(codex_home)
+    if launch_mode is not None:
+        if launch_mode != "team_readonly" or instance_id is None:
+            raise ValueError("launch mode 无效")
+        if project_id is not None or workspace_id is not None or codex_home is not None:
+            raise ValueError("Team readonly 不能复用 workspace launch authority")
+        if not _team_readonly_public_args_allowed(str(kind), list(args)):
+            raise ValueError("Team readonly args 无效")
     record: dict[str, Any] = {
         "session": str(session),
         "name": str(name),
@@ -2082,6 +2090,8 @@ def save_launch_descriptor(
     }
     if codex_home is not None:
         record["codex_home"] = codex_home
+    if launch_mode is not None:
+        record["launch_mode"] = launch_mode
     key = f"{session}|{name}"
     if instance_id is not None:
         opaque_id = validate_agent_instance_id(instance_id)
@@ -2123,11 +2133,45 @@ def _workspace_launch_label(instance_id: str) -> str:
 
 
 _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS = ["--sandbox", "read-only"]
+_TEAM_READONLY_PUBLIC_ARGS = {
+    "codex": ["--sandbox", "read-only"],
+    "kimi": ["--plan"],
+    "claude": ["--permission-mode", "plan"],
+    "grok": ["--permission-mode", "plan"],
+}
 
 # pane.run 是单条交互 shell 行：CODEX_HOME 路径必须限制在免引号/免元字符
 # 字符集内，杜绝把任意 env/command/-c/body/token 拼进命令行的注入面。
 _CODEX_HOME_RE = re.compile(r"/[A-Za-z0-9_./-]+")
 _AGENT_BIN_RE = re.compile(r"/[A-Za-z0-9_./-]+")
+
+
+def _team_readonly_public_args_allowed(kind: str, args: list[str]) -> bool:
+    """只接受固定只读参数，可选一个已校验 model 前缀。"""
+    required = _TEAM_READONLY_PUBLIC_ARGS.get(kind)
+    if required is None:
+        return False
+    if args == required:
+        return True
+    return bool(
+        len(args) == len(required) + 2
+        and args[0] in {"-m", "--model"}
+        and _LAUNCH_MODEL_RE.fullmatch(args[1]) is not None
+        and args[2:] == required
+    )
+
+
+def _team_readonly_command(
+    *, agent_bin: str, agent: str, workdir: str, public_args: list[str],
+) -> str:
+    """构造 Team 专用固定命令；不经过 Herdr provider 的启动模板。"""
+    kind = normalize_agent_kind(agent)
+    if _AGENT_BIN_RE.fullmatch(agent_bin) is None or not agent_bin.startswith("/"):
+        raise ValueError("Team readonly launcher invalid")
+    if not _team_readonly_public_args_allowed(kind, public_args):
+        raise ValueError("Team readonly args invalid")
+    internal = _workspace_codex_trust_args(workdir) if kind == "codex" else []
+    return shlex.join([agent_bin, *public_args, *internal])
 
 
 def _user_default_codex_home() -> Path:
@@ -3330,12 +3374,38 @@ def start_workspace_codex_home(
     )
 
 
+def start_team_readonly_agent(
+    *, session: str, workdir: str, agent: str, instance_id: str,
+    model: str | None = None, label: str | None = None,
+) -> dict[str, Any]:
+    """启动 Topic 专用只读 Agent，绕开可能注入 bypass 的 provider 模板。
+
+    调用者不能提供 args/env/命令；每种 CLI 只允许模块内固定的只读参数。
+    启动使用一次原子 pane.run，之后仍必须以 process-info 的真实 argv 验证。
+    """
+    try:
+        kind = normalize_agent_kind(agent)
+        public_args = _TEAM_READONLY_PUBLIC_ARGS[kind]
+    except (KeyError, ValueError):
+        return {
+            "available": True,
+            "error_code": "team_readonly_agent_unsupported",
+            "error": f"{agent} 暂不支持 Team Session 只读模式",
+        }
+    return _start_agent_internal(
+        session, workdir, agent=agent, model=model, layout="tab", label=label,
+        args=shlex.join(public_args), instance_id=instance_id,
+        direct_readonly=True,
+    )
+
+
 def _start_agent_internal(
     session: str, workdir: str, agent: str = "codex", model: str | None = None,
     layout: str = "tab", label: str | None = None, args: str = "",
     instance_id: str | None = None,
     project_id: str | None = None, workspace_id: str | None = None,
     codex_home: str | None = None, display_name: str | None = None,
+    direct_readonly: bool = False,
 ) -> dict[str, Any]:
     """在指定 session 里启动一个 agent pane(新建 tab/pane 跑 agent)。
 
@@ -3359,6 +3429,12 @@ def _start_agent_internal(
         early = _codex_home_gate(codex_home, agent=agent)
         if isinstance(early, dict):
             return early
+    if direct_readonly and codex_home is not None:
+        return {
+            "available": True,
+            "error_code": "team_readonly_launcher_invalid",
+            "error": "Team readonly 不接受 CODEX_HOME 覆盖",
+        }
     if not is_available():
         return {"available": False}
     managed = instance_id is not None
@@ -3401,7 +3477,7 @@ def _start_agent_internal(
         if "-m" not in agent_args and "--model" not in agent_args:
             agent_args = ["-m", token, *agent_args]
     # Grok 自绘 TUI 默认暗色；Web 浅色时启动加 --light（运行中切主题走 /theme slash）
-    if agent == "grok" and not workspace_managed:
+    if agent == "grok" and not workspace_managed and not direct_readonly:
         for flag in grok_launch_theme_args(current_web_theme_mode()):
             if flag not in agent_args:
                 agent_args = [flag, *agent_args]
@@ -3499,6 +3575,18 @@ def _start_agent_internal(
     except ValueError as exc:
         return {"available": True, "error": str(exc)}
     canonical_kind = normalize_agent_kind(agent)
+    if direct_readonly:
+        if (
+            not managed
+            or workspace_managed
+            or layout != "tab"
+            or not _team_readonly_public_args_allowed(canonical_kind, agent_args)
+        ):
+            return {
+                "available": True,
+                "error_code": "team_readonly_launcher_invalid",
+                "error": "Team readonly launch contract invalid",
+            }
     pending_reserved = False
     workspace_target: str | None = None
     bootstrap_root_pane_id: str | None = None
@@ -3746,6 +3834,56 @@ def _start_agent_internal(
                     error_code="workspace_agent_readiness_failed",
                     message="workspace managed codex detection failed",
                 )
+        elif direct_readonly:
+            assert instance_id is not None
+            try:
+                if canonical_kind == "kimi":
+                    _ensure_kimi_workspace_trusted(str(target_dir))
+                readonly_command = _team_readonly_command(
+                    agent_bin=agent_bin,
+                    agent=agent,
+                    workdir=workdir,
+                    public_args=list(agent_args),
+                )
+                _run(
+                    ["--session", session, "pane", "run", new_pid,
+                     readonly_command],
+                    timeout=8,
+                )
+            except (OSError, RuntimeError, ValueError):
+                cleaned = _close_created_pane_verified(
+                    session, new_pid, instance_id,
+                )
+                return {
+                    "available": True,
+                    "error_code": (
+                        "team_readonly_start_failed"
+                        if cleaned else "descriptor_cleanup_incomplete"
+                    ),
+                    "error": (
+                        "Team readonly Agent 启动失败"
+                        if cleaned else "Team readonly launch cleanup incomplete"
+                    ),
+                    "pane_id": new_pid,
+                    "rolled_back": cleaned,
+                }
+            if not _await_agent_detection(session, new_pid, canonical_kind):
+                cleaned = _close_created_pane_verified(
+                    session, new_pid, instance_id,
+                )
+                return {
+                    "available": True,
+                    "error_code": (
+                        "team_readonly_readiness_failed"
+                        if cleaned else "descriptor_cleanup_incomplete"
+                    ),
+                    "error": (
+                        "Team readonly Agent 未就绪"
+                        if cleaned else "Team readonly launch cleanup incomplete"
+                    ),
+                    "pane_id": new_pid,
+                    "rolled_back": cleaned,
+                }
         else:
             if canonical_kind == "kimi":
                 try:
@@ -3827,9 +3965,28 @@ def _start_agent_internal(
                     kind=canonical_kind, args=agent_args, agent=agent,
                     workdir=workdir, instance_id=instance_id,
                     display_name=display_name,
+                    launch_mode="team_readonly" if direct_readonly else None,
                 )
-            except OSError:
+            except (OSError, ValueError):
                 descriptor_error = True
+                if direct_readonly:
+                    assert instance_id is not None
+                    cleaned = _close_created_pane_verified(
+                        session, new_pid, instance_id,
+                    )
+                    return {
+                        "available": True,
+                        "error_code": (
+                            "team_readonly_descriptor_failed"
+                            if cleaned else "descriptor_cleanup_incomplete"
+                        ),
+                        "error": (
+                            "Team readonly launch descriptor 保存失败"
+                            if cleaned else "Team readonly launch cleanup incomplete"
+                        ),
+                        "pane_id": new_pid,
+                        "rolled_back": cleaned,
+                    }
         result = {
             "available": True,
             "pane_id": new_pid,
@@ -4219,6 +4376,68 @@ def _pane_at_available_shell(session: str, pane_id: str) -> bool:
     )
 
 
+_READ_ONLY_PROCESS_FORBIDDEN = frozenset({
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+    "--yolo", "-y", "--auto", "--yes", "--no-plan",
+})
+
+
+def readonly_agent_process_verified(
+    session: str, pane_id: str, agent: str,
+) -> bool:
+    """校验真实前台 argv；descriptor/请求参数不能替代运行时证据。"""
+    try:
+        kind = normalize_agent_kind(agent)
+        out = _run(
+            ["--session", session, "pane", "process-info", "--pane", pane_id],
+            timeout=5,
+        )
+        data = _parse_data_json(out)
+        result = data.get("result", data) if isinstance(data, dict) else None
+        info = result.get("process_info", result) if isinstance(result, dict) else None
+        processes = info.get("foreground_processes") if isinstance(info, dict) else None
+        if not isinstance(processes, list):
+            return False
+        candidates: list[list[str]] = []
+        for process in processes:
+            argv = process.get("argv") if isinstance(process, dict) else None
+            if not isinstance(argv, list) or any(not isinstance(x, str) for x in argv):
+                continue
+            names = {Path(value).name for value in argv[:2] if value}
+            if kind in names or (kind == "claude" and "claude-code" in names):
+                candidates.append(argv)
+        if not candidates:
+            return False
+        for argv in candidates:
+            if any(token in _READ_ONLY_PROCESS_FORBIDDEN for token in argv):
+                return False
+            if any(token.startswith("--dangerously-") for token in argv):
+                return False
+            if kind == "codex":
+                positions = [i for i, token in enumerate(argv) if token == "--sandbox"]
+                if len(positions) != 1 or positions[0] + 1 >= len(argv):
+                    return False
+                if argv[positions[0] + 1] != "read-only":
+                    return False
+            elif kind == "kimi":
+                if argv.count("--plan") != 1:
+                    return False
+            else:
+                positions = [
+                    i for i, token in enumerate(argv) if token == "--permission-mode"
+                ]
+                if len(positions) != 1 or positions[0] + 1 >= len(argv):
+                    return False
+                if argv[positions[0] + 1] != "plan":
+                    return False
+        return True
+    except (RuntimeError, ValueError):
+        return False
+
+
 def restart_pane(
     session: str, pane_id: str, agent: str | None = None,
     workdir: str | None = None, resume: bool = False,
@@ -4285,6 +4504,39 @@ def restart_pane(
         # 私有 CODEX_HOME descriptor：在任何中断/退出键（mutation）之前完成
         # home/args/launcher 的全部校验；失效即零副作用 fail closed。
         restart_codex_home = descriptor.get("codex_home")
+        restart_launch_mode = descriptor.get("launch_mode")
+        restart_team_command: str | None = None
+        if restart_launch_mode not in {None, "team_readonly"}:
+            return _restart_error(
+                "restart_identity_invalid", "managed launch mode 无效", pane_id,
+            )
+        if restart_launch_mode == "team_readonly":
+            descriptor_workdir = descriptor.get("workdir")
+            if (
+                restart_codex_home is not None
+                or descriptor.get("project_id") is not None
+                or descriptor.get("workspace_id") is not None
+                or resume
+                or not isinstance(descriptor_workdir, str)
+                or not Path(descriptor_workdir).is_absolute()
+                or not _team_readonly_public_args_allowed(kind, launch_args)
+            ):
+                return _restart_error(
+                    "restart_identity_invalid",
+                    "Team readonly descriptor 无效", pane_id,
+                )
+            try:
+                restart_team_command = _team_readonly_command(
+                    agent_bin=_find_agent_bin(product_agent),
+                    agent=product_agent,
+                    workdir=descriptor_workdir,
+                    public_args=list(launch_args),
+                )
+            except ValueError:
+                return _restart_error(
+                    "restart_identity_invalid",
+                    "Team readonly launcher 无效", pane_id,
+                )
         if restart_codex_home is not None:
             if kind != "codex" or resume:
                 return _restart_error(
@@ -4350,6 +4602,7 @@ def restart_pane(
         pane_scoped = (
             kind == "grok"
             or restart_codex_home is not None
+            or restart_team_command is not None
             or not live_name
         )
         try:
@@ -4465,7 +4718,28 @@ def restart_pane(
         public_args = list(launch_args)
         if resume:
             public_args += ["resume", "--last"]
-        if restart_codex_home is not None:
+        if restart_team_command is not None:
+            try:
+                _run(
+                    ["--session", session, "pane", "run", pane_id,
+                     restart_team_command],
+                    timeout=8,
+                )
+            except RuntimeError as exc:
+                return _restart_error(
+                    "restart_start_failed", str(exc), pane_id,
+                )
+            if (
+                not _await_agent_detection(session, pane_id, kind)
+                or not readonly_agent_process_verified(
+                    session, pane_id, product_agent,
+                )
+            ):
+                return _restart_error(
+                    "restart_start_failed",
+                    f"pane {pane_id} 重启后未通过 Team 只读校验", pane_id,
+                )
+        elif restart_codex_home is not None:
             # 私有 CODEX_HOME 的 managed Codex：restart 必须沿用同一 home
             # （home/args/launcher 已在 mutation 前完成全部校验，此处直接
             # 使用校验过的 restart_env_command；绝不回退 agent start——那会

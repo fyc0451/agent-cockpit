@@ -58,6 +58,35 @@ def test_bound_session_routes_to_unique_pane_even_when_cwd_differs():
     ]
 
 
+def test_managed_team_sender_cannot_send_project_agent_mail(monkeypatch):
+    module = _load_mail_send()
+    instance = "i-" + "a" * 26
+    monkeypatch.setattr(module, "load_identity", lambda *_args: ({
+        "project_key": PROJECT,
+        "name": "team-main",
+        "instance": instance,
+        "registration_token": "registration-secret",
+    }, "http://hub", "hub-secret"))
+    monkeypatch.setattr(
+        module.team_sessions,
+        "managed_binding_for_sender",
+        lambda *_args: {"session": "team-demo"},
+    )
+    monkeypatch.setattr(
+        module, "mcp_tool",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("受控 Team sender 不得调用项目 Agent Mail")
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="禁止发送项目级 Agent Mail"):
+        module.main([
+            "--agent", "codex", "--instance", instance,
+            "--project", PROJECT, "--to", "dev-main",
+            "--subject", "越界", "--body", "停止其他 Agent",
+        ])
+
+
 def test_team_work_cli_reads_with_local_identity_only(monkeypatch, capsys):
     module = _load_team_work()
     monkeypatch.setattr(module, "load_identity", lambda *_args: ({

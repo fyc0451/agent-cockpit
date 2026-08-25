@@ -107,6 +107,39 @@ def managed_session_names() -> set[str]:
     }
 
 
+def managed_binding_for_sender(
+    instance_id: str, mail_name: str, mail_project: str,
+) -> dict[str, Any] | None:
+    """精确识别受管 Team sender；不得仅凭可伪造的花名或项目判断。"""
+    instance = str(instance_id).strip()
+    name = str(mail_name).strip()
+    try:
+        project = str(Path(mail_project).expanduser().resolve())
+    except (OSError, ValueError):
+        return None
+    if not instance or not name:
+        return None
+    with _lock:
+        rows = _load()["bindings"]
+    matches = []
+    for row in rows:
+        lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
+        try:
+            row_project = str(
+                Path(str(row.get("mail_project") or "")).expanduser().resolve()
+            )
+        except (OSError, ValueError):
+            continue
+        if (
+            row.get("managed_runtime") is True
+            and row.get("session_generation") == instance
+            and lead.get("mail_name") == name
+            and row_project == project
+        ):
+            matches.append(row)
+    return dict(matches[0]) if len(matches) == 1 else None
+
+
 def conflicts_for(
     *,
     hub: str,

@@ -29,6 +29,21 @@ def test_parse_next_steps_reads_numbered_section():
     assert persist_work.parse_next_steps("## 当前状态\n- 无") == []
 
 
+def test_bound_sessions_excludes_managed_team_sessions(tmp_path: Path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    (workspace / ".agent-memory-project").write_text("demo\n")
+    assert persist_work.bound_sessions_for_project(
+        workspaces=[{"id": "ws", "path": str(workspace)}],
+        threads=[
+            {"workspace_id": "ws", "herdr_session": "local-dev"},
+            {"workspace_id": "ws", "herdr_session": "team-demo-1"},
+        ],
+        project="demo",
+        excluded_sessions={"team-demo-1"},
+    ) == {"local-dev"}
+
+
 def test_handoff_blocked_or_paused_status_stops_wakes():
     assert persist_work.handoff_is_paused(BLOCKED_HANDOFF)
     assert persist_work.handoff_is_paused("---\nstatus: blocked\n---\n")

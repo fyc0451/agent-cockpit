@@ -61,6 +61,10 @@ def _prepare(monkeypatch, participants=None, identities=None):
         lambda _session: {"run_id": "run-1", "participants": participants},
     )
     monkeypatch.setattr(server.coordination, "task_reports", lambda _session: {})
+    monkeypatch.setattr(
+        server.herdr_client, "readonly_agent_process_verified",
+        lambda *_args: True,
+    )
     monkeypatch.setattr(server, "_mail_project_state", lambda _session: {
         "bound": True,
         "project": PROJECT_KEY,
@@ -1195,8 +1199,8 @@ def test_one_click_team_session_starts_read_only_before_binding(monkeypatch):
     created_calls = []
     bind_calls = []
 
-    def create(workspace_id, req, *, session_name=None):
-        created_calls.append((workspace_id, req, session_name))
+    def create(workspace_id, req, *, session_name=None, managed_team=False):
+        created_calls.append((workspace_id, req, session_name, managed_team))
         return {
             "session": session_name,
             "thread": {"id": "th-1"},
@@ -1223,14 +1227,39 @@ def test_one_click_team_session_starts_read_only_before_binding(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["session"] == "team-demo-1"
-    workspace_id, create_req, session_name = created_calls[0]
+    workspace_id, create_req, session_name, managed_team = created_calls[0]
     assert workspace_id == "ws-1"
     assert session_name == "team-demo-1"
+    assert managed_team is True
     assert create_req.args == "--sandbox read-only"
     assert bind_calls[0][0] == "demo"
     assert bind_calls[0][1].session == "team-demo-1"
     assert bind_calls[0][1].reply_mode == "auto"
     assert bind_calls[0][2] is True
+
+
+def test_managed_binding_is_not_ready_when_real_process_fails_fence(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    monkeypatch.setattr(
+        server.herdr_client, "readonly_agent_process_verified",
+        lambda *_args: False,
+    )
+    team_sessions.bind(
+        hub=HUB, human_id=7, project_slug="demo", session="demo",
+        session_generation="run-1", session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id="team-client", agent_id=11, managed_runtime=True,
+        reply_token="reply-secret", auth_expires_at=time.time() + 3600,
+    )
+
+    response = client.get("/api/team-auth/session-bindings", headers=headers)
+
+    assert response.status_code == 200
+    binding = response.json()["bindings"][0]
+    assert binding["ready"] is False
+    assert binding["reason"] == "Team Agent 真实进程未通过只读栅栏校验"
 
 
 def test_one_click_team_session_rolls_back_when_lead_registration_fails(monkeypatch):
