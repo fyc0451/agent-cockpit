@@ -62,6 +62,7 @@ from . import pane_live
 from . import next_profile
 from . import team_sessions
 from . import team_lead_worker
+from . import team_context_pack
 from . import terminal
 from . import version
 from . import source_upgrade
@@ -4504,6 +4505,47 @@ def _resolved_consult_target(
     return None, "咨询目标已停止，需要重新选择"
 
 
+def _context_pack_for_binding(binding: dict[str, Any]) -> dict[str, Any]:
+    """即时生成白名单元数据；采集失败时不回退到任意本机内容。"""
+    try:
+        saved = binding.get("consult_target")
+        candidates = _team_session_candidates()
+        target, _reason = _resolved_consult_target(binding, candidates)
+        lead_summary: dict[str, Any] | None = None
+        if isinstance(saved, dict):
+            same_session = [
+                row for row in candidates
+                if row.get("session") == saved.get("session")
+            ]
+            lead_summary = {
+                "available": False,
+                "reason": (
+                    "target_ambiguous" if len(same_session) > 1
+                    else "target_identity_changed" if same_session
+                    else "target_stopped"
+                ),
+            }
+        if target is not None:
+            lead = (
+                target.get("lead") if isinstance(target.get("lead"), dict) else {}
+            )
+            lead_summary = {
+                "available": True,
+                "status": lead.get("status"),
+            }
+        return team_context_pack.build_context_pack(
+            workspace=str(binding.get("mail_project") or ""),
+            development_lead=lead_summary,
+        )
+    except Exception:
+        logger.warning("Team Context Pack 生成失败")
+        return {
+            "version": team_context_pack.PACK_VERSION,
+            "available": False,
+            "reason": "unavailable",
+        }
+
+
 def _team_project_ref(value: Any) -> str | None:
     """同项目候选匹配用匿名引用；不向浏览器暴露本机绝对路径。"""
     if not isinstance(value, str) or not value:
@@ -5430,6 +5472,8 @@ async def api_team_agent_work_next(request: Request):
         work = team_lead_worker.next_for_binding(binding)
     except OSError as exc:
         raise HTTPException(503, "团队工作队列暂时不可用") from exc
+    if work is not None:
+        work["context_pack"] = _context_pack_for_binding(binding)
     return {"status": "pending" if work is not None else "empty", "work": work}
 
 

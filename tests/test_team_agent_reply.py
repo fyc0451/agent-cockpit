@@ -163,6 +163,15 @@ def test_team_work_body_requires_same_active_local_lead(monkeypatch):
             "message": {"body_md": "remote body"},
         },
     )
+    monkeypatch.setattr(
+        server,
+        "_context_pack_for_binding",
+        lambda _binding: {
+            "version": 1,
+            "project": {"key": "demo"},
+            "fingerprint": "f" * 64,
+        },
+    )
 
     valid = client.post("/api/agent/team-work/next", json={
         "mail_project": PROJECT,
@@ -177,8 +186,89 @@ def test_team_work_body_requires_same_active_local_lead(monkeypatch):
 
     assert valid.status_code == 200
     assert valid.json()["work"]["message"]["body_md"] == "remote body"
+    assert valid.json()["work"]["context_pack"] == {
+        "version": 1,
+        "project": {"key": "demo"},
+        "fingerprint": "f" * 64,
+    }
     assert invalid.status_code == 403
     assert len(calls) == 1
+
+
+def test_team_work_context_pack_failure_is_bounded_and_does_not_hide_work(
+    monkeypatch,
+):
+    client = _prepare(monkeypatch)
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "next_for_binding",
+        lambda _binding: {
+            "work_id": "a" * 32,
+            "reply_mode": "confirm",
+            "state": "pending",
+            "message": {"body_md": "remote body"},
+        },
+    )
+    monkeypatch.setattr(
+        server.team_context_pack,
+        "build_context_pack",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("secret path")),
+    )
+
+    response = client.post("/api/agent/team-work/next", json={
+        "mail_project": PROJECT,
+        "sender_name": "codex-main",
+        "registration_token": "registration-secret",
+    })
+
+    assert response.status_code == 200
+    assert response.json()["work"]["message"]["body_md"] == "remote body"
+    assert response.json()["work"]["context_pack"] == {
+        "version": 1, "available": False, "reason": "unavailable",
+    }
+    assert "secret path" not in response.text
+
+
+def test_context_pack_exposes_only_explicit_development_lead_status(monkeypatch):
+    _prepare(monkeypatch)
+    candidates = [{
+        "session": "dev-demo",
+        "generation": "dev-run-1",
+        "mail_project": PROJECT,
+        "ready": True,
+        "status": "idle",
+        "lead": {
+            "agent": "codex",
+            "mail_name": "dev-main",
+            "participant_id": "dev-lead",
+            "status": "idle",
+        },
+    }]
+    team_sessions.set_consult_target(
+        hub=HUB,
+        human_id=7,
+        project_slug="core",
+        target={
+            "session": "dev-demo",
+            "session_generation": "dev-run-1",
+            "mail_project": PROJECT,
+            "lead": candidates[0]["lead"],
+        },
+    )
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: candidates)
+    captured = {}
+    monkeypatch.setattr(
+        server.team_context_pack,
+        "build_context_pack",
+        lambda **kwargs: captured.update(kwargs) or {"version": 1},
+    )
+
+    binding = team_sessions.list_bindings(HUB, 7)[0]
+    assert server._context_pack_for_binding(binding) == {"version": 1}
+    assert captured == {
+        "workspace": PROJECT,
+        "development_lead": {"available": True, "status": "idle"},
+    }
 
 
 def test_team_work_caller_cannot_select_session_or_pane(monkeypatch):
