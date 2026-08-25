@@ -80,3 +80,59 @@
   display: flex;
   flex-direction: column;
 }
+
+.teamAgentDetails {
+  flex: none;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.teamAgentSummary {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  padding: 10px 32px 10px 12px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.teamAgentSummary::-webkit-details-marker {
+  display: none;
+}
+
+.teamAgentSummary::after {
+  content: '›';
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  color: var(--dsw-alias-label-tertiary);
+  transform: translateY(-50%);
+  transition: transform 120ms ease;
+}
+
+.teamAgentDetails[open] .teamAgentSummary::after {
+  transform: translateY(-50%) rotate(90deg);
+}
+
+.teamAgentSummary:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.teamAgentTitle {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.teamAgentState {
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teamAgentForm {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 10px;
+}

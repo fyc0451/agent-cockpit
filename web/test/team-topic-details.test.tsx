@@ -136,8 +136,12 @@ describe('团队话题成员详情', () => {
     )
 
     const user = userEvent.setup()
+    const details = screen.getByText('我的 Topic Agent').closest('details')
+    expect(details).not.toHaveAttribute('open')
     expect(screen.getByText('尚未为这个 Topic 创建本地 Agent')).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'opencode' })).not.toBeInTheDocument()
+    await user.click(screen.getByText('我的 Topic Agent'))
+    expect(details).toHaveAttribute('open')
     await user.selectOptions(screen.getByLabelText('Topic Agent 回复模式'), 'auto')
     await user.click(screen.getByRole('button', { name: '创建 Topic Agent' }))
 

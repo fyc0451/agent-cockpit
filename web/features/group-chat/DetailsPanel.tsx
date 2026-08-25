@@ -201,21 +201,23 @@ export function DetailsPanel({
       <div className={css.body}>
         {teamMode ? (
           <aside className="gc-members is-open" aria-label="团队成员">
-            <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--dsw-alias-border-l1)' }}>
-              <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '6px' }}>我的 Topic Agent</div>
-              {teamBinding?.managedRuntime ? (
-                <div style={{ fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '8px' }}>
-                  {teamBinding.lead?.mailName || teamBinding.session}
-                  {' · '}{teamBinding.lead?.agent || 'Agent'}
-                  {' · '}{teamAgentStatusLabel(teamBinding.lead?.status)}
-                </div>
-              ) : (
-                <div style={{ fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '8px' }}>
-                  {teamBinding ? '旧绑定待迁移；普通本地会话不会再处理团队消息' : '尚未为这个 Topic 创建本地 Agent'}
-                </div>
-              )}
+            <details key={teamTopic} className={css.teamAgentDetails}>
+              <summary className={css.teamAgentSummary}>
+                <span className={css.teamAgentTitle}>我的 Topic Agent</span>
+                <span className={css.teamAgentState}>
+                  {teamBinding?.managedRuntime ? (
+                    <>
+                      {teamBinding.lead?.mailName || teamBinding.session}
+                      {' · '}{teamBinding.lead?.agent || 'Agent'}
+                      {' · '}{teamAgentStatusLabel(teamBinding.lead?.status)}
+                    </>
+                  ) : (
+                    teamBinding ? '旧绑定待迁移；普通本地会话不会再处理团队消息' : '尚未为这个 Topic 创建本地 Agent'
+                  )}
+                </span>
+              </summary>
               {onTeamCreateSession && (
-                <div style={{ display: 'grid', gap: '6px' }}>
+                <div className={css.teamAgentForm}>
                   <select aria-label="Topic Agent 工作区" value={teamWorkspaceId} onChange={(event) => setTeamWorkspaceId(event.target.value)} disabled={teamAgentLoading}>
                     {teamWorkspaces.length === 0 && <option value="">没有本地工作区</option>}
                     {teamWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.label}</option>)}
@@ -235,7 +237,7 @@ export function DetailsPanel({
                   </button>
                 </div>
               )}
-            </div>
+            </details>
             <div className="gc-members-head">
               <span>团队成员</span>
               <span className="gc-members-count">· {activeTeamMembers.length}</span>
